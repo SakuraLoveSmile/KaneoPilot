@@ -3,7 +3,7 @@
 覆盖契约条款：protocol §5.12（migrate）；state-model §6（旧状态导入映射）。
 
 legacy manifest schema 为测试约定（契约未冻结文件格式）：
-<KANPILOT_LEGACY_ROOT>/{KaneoPlanner,KaneoExecutor,KaneoReviewer}/manifest.json，
+<KANPILOT_LEGACY_ROOT>/{KaneoPlanner,KaneoExecutor,KaneoReviewer}/state/manifest.json，
 均为 {"version":1,"tasks":{<task_id>:{...}}}；锁为 KaneoExecutor/locks/<id>/owner.json。
 集成时若实现对旧格式的读取口径不同，只需改 conftest.legacy_state 夹具。
 """

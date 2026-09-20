@@ -331,6 +331,10 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                     "bad_request", "project needs project_id/project_name"
                 )
             for item in project.get("tasks") or []:
+                if not isinstance(item, dict):
+                    raise util.KanpilotError(
+                        "bad_request", "task entry must be an object"
+                    )
                 task_id = item.get("task_id")
                 if not task_id:
                     raise util.KanpilotError("bad_request", "task needs task_id")
@@ -418,16 +422,16 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                     new_requirements is not None
                     and new_requirements != task["requirements_sha256"]
                 )
+                # Source snapshot fields refresh independently: requirements
+                # drive replanning, the snapshot is the dispatch-time baseline.
+                new_source = item.get("source_sha256")
+                new_path = item.get("source_path")
+                if new_source is not None and new_source != task["source_sha256"]:
+                    updates["source_sha256"] = new_source
+                if new_path is not None and new_path != task["source_path"]:
+                    updates["source_path"] = new_path
                 if requirements_changed:
-                    updates.update(
-                        {
-                            "requirements_sha256": new_requirements,
-                            "source_sha256": item.get("source_sha256")
-                            or task["source_sha256"],
-                            "source_path": item.get("source_path")
-                            or task["source_path"],
-                        }
-                    )
+                    updates["requirements_sha256"] = new_requirements
                     db.update_task(conn, task_id, now, **updates)
                     db.add_event(
                         conn, now, "requirements_changed", task_id=task_id,
@@ -458,7 +462,17 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                     )
                     continue
 
+                meta_keys = [
+                    key for key, value in updates.items()
+                    if key not in ("kaneo_checked_at", "kaneo_status")
+                    and value != task[key]
+                ]
                 db.update_task(conn, task_id, now, **updates)
+                if meta_keys:
+                    db.add_event(
+                        conn, now, "task_updated", task_id=task_id,
+                        actor=executor, detail={"fields": meta_keys},
+                    )
                 if observed in constants.DONE_SLUGS and task["status"] != "done":
                     task = db.require_task(conn, task_id)
                     core.transition_task(

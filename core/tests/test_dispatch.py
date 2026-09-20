@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import bridge  # noqa: E402
+from kanpilot import bridge, util  # noqa: E402
 
 
 class DispatchFlow(KanpilotTestCase):
@@ -242,6 +242,88 @@ class DispatchFlow(KanpilotTestCase):
         view = self.task(task_id)
         self.assertEqual(view["status"], "needs_user")
         self.assertEqual(view["send_state"], "unknown")
+
+    def _setup_review_fix(self, strip_marker=False):
+        """Source task reviewed -> fix task + registered repair plan."""
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        self.set_task_status(task_id, "in_review")
+        report_dir = self.reports_root / task_id
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report = report_dir / "report.md"
+        report.write_text("# review report\n", encoding="utf-8")
+        report_sha = util.sha256_file(report)
+        dedupe = "cd" * 32
+        fix = self.call(
+            "create-review-fix",
+            {"source_task_id": task_id, "title": "fix it",
+             "description": "repair the thing", "priority": "high",
+             "dedupe_key": dedupe},
+        )
+        fix_id = fix["fix_task_id"]
+        fix_remote = self.fake.tasks[fix_id]
+        if strip_marker:
+            # Remove the dedupe marker before fingerprints are taken, so the
+            # §4.5-5 marker check is the actual failure point.
+            fix_remote["description"] = fix_remote["description"].replace(
+                f"<!-- codex-kaneo-review:{dedupe} -->", ""
+            ).strip()
+        source_sha, req_sha, source_path = self.make_source_snapshot(fix_remote)
+        self.sync_task(
+            fix_remote, project_name="Feedback",
+            requirements_sha256=req_sha, source_sha256=source_sha,
+            source_path=source_path,
+        )
+        plan = self.write_plan(
+            "Feedback", fix_remote,
+            {"source_sha256": source_sha,
+             "requirements_sha256": req_sha,
+             "planner_model": "gpt-5.6-sol",
+             "reasoning_effort": "xhigh",
+             "plan_kind": "review_fix",
+             "review_report_path": str(report),
+             "review_report_sha256": report_sha,
+             "review_source_task_id": task_id,
+             "review_key": dedupe},
+        )
+        self.call(
+            "register-review",
+            {"task_id": task_id, "report_path": str(report),
+             "conclusion": "changes_requested",
+             "review_key": dedupe, "fix_task_id": fix_id,
+             "fix_task_source_sha256": source_sha,
+             "repair_plan_path": str(plan)},
+        )
+        self.call(
+            "publish-plan",
+            {"task_id": fix_id, "plan_path": str(plan),
+             "plan_kind": "review_fix",
+             "source_sha256": source_sha,
+             "requirements_sha256": req_sha,
+             "generated_at": "2026-09-20T00:00:00+00:00",
+             "planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+        )
+        return fix_id, plan
+
+    def test_claim_review_fix_dispatch(self):
+        fix_id, _plan = self._setup_review_fix()
+        self.call("enqueue", {"task_id": fix_id, "kind": "dispatch"})
+        claim = self.call(
+            "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
+        )
+        self.assertTrue(claim["claimed"])
+        self.assertEqual(claim["context"]["plan_kind"], "review_fix")
+        self.assertEqual(claim["context"]["task_id"], fix_id)
+
+    def test_claim_review_fix_missing_marker(self):
+        fix_id, _plan = self._setup_review_fix(strip_marker=True)
+        self.call("enqueue", {"task_id": fix_id, "kind": "dispatch"})
+        result = self.call(
+            "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
+        )
+        self.assertFalse(result["claimed"])
+        self.assertIn("marker", result["detail"])
+        self.assertEqual(self.task(fix_id)["status"], "needs_user")
 
     def test_evidence_rejects_wrong_fields(self):
         fixture = self._queue()

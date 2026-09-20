@@ -47,6 +47,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORE_BIN = os.environ.get("KANPILOT_CORE_BIN") or str(REPO_ROOT / "core" / "kanpilot.py")
 
+# 复用核心 bridge 计算指纹（protocol §5.13-1：source_sha256/requirements_sha256
+# 口径与内嵌 bridge 完全一致）。core/kanpilot/ 包优先于同名 kanpilot.py。
+sys.path.insert(0, str(Path(CORE_BIN).resolve().parent))
+from kanpilot import bridge as kbridge  # noqa: E402
+
 WORKSPACE_ID = "ujhqmhAOywzRnoqy0UUH3KaZajQriUI1"
 
 PROJECTS = {
@@ -116,11 +121,9 @@ def canonical_json(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def requirements_sha256_for(title: str, description: str) -> str:
-    """需求指纹约定。契约未冻结算法，集成时若核心口径不同只需改这里。"""
-    return sha256_bytes(
-        canonical_json({"title": title, "description": description}).encode("utf-8")
-    )
+def requirements_sha256_for(source: dict) -> str:
+    """需求指纹 = bridge.requirements_hash(source)（protocol §5.13-1）。"""
+    return kbridge.requirements_hash(source)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +228,7 @@ def tmp_env(tmp_path):
             "KANPILOT_REPOS_ROOT": str(repos_root),
             "KANPILOT_APP_SUPPORT": str(app_support),
             "KANPILOT_LEGACY_ROOT": str(legacy_root),
+            "KANPILOT_REPORTS_ROOT": str(app_support / "KaneoReviewer" / "reports"),
             "KANEO_CREDENTIALS_PATH": str(credentials_path),
         }
     )
@@ -544,6 +548,15 @@ def rewind_finished_at(db_path, request_id, seconds):
     )
 
 
+def make_due(db_path, request_id):
+    """把请求 not_before 推到过去 → 定点领取可立即取（§4.8 冷却期后门）。"""
+    db_exec(
+        db_path,
+        "UPDATE requests SET not_before=? WHERE request_id=?",
+        (iso_past(3600), request_id),
+    )
+
+
 def set_setting(db_path, key, value):
     db_exec(
         db_path,
@@ -600,24 +613,40 @@ def write_plan_file(plan_root, *, task_id, project_id, project_name, repository,
 
 
 def write_source_snapshot(sources_dir, *, task_id, project_id, title, description,
-                          status="to-do"):
-    """以规范化 JSON 落盘来源快照 → source_sha256 = 原始字节哈希 == 规范化哈希。"""
+                          status="to-do", task_obj=None, comments=None,
+                          relations=None, activity=None):
+    """按 bridge task_context 真实形状落盘来源快照。
+
+    快照 = {task, comments, relations, activity}（§5.13-1 口径）；文件另带
+    source_sha256/requirements_sha256 两个哈希字段（与真实快照一致，重算时
+    只取四个内容键，哈希字段不参与）。
+    """
     sources_dir = Path(sources_dir)
     sources_dir.mkdir(parents=True, exist_ok=True)
-    req = requirements_sha256_for(title, description)
-    snapshot = {
+    task_obj = task_obj or {
         "id": task_id,
         "projectId": project_id,
         "title": title,
         "description": description,
         "status": status,
+    }
+    src = {
+        "task": task_obj,
+        "comments": comments or [],
+        "relations": relations or [],
+        "activity": activity or [],
+    }
+    source_sha = kbridge.add_hash(kbridge.stable(src))["source_sha256"]
+    req = kbridge.requirements_hash(src)
+    snapshot = {
+        **kbridge.stable(src),
+        "source_sha256": source_sha,
         "requirements_sha256": req,
-        "fetchedAt": iso_now(),
     }
     path = sources_dir / f"{task_id}.json"
     path.write_text(canonical_json(snapshot), encoding="utf-8")
     return SimpleNamespace(
-        path=path, sha256=sha256_file(path), requirements_sha256=req,
+        path=path, sha256=source_sha, requirements_sha256=req,
         snapshot=snapshot,
     )
 
@@ -675,10 +704,12 @@ class TaskFactory:
                                      status=remote_status)
             task_id = rt["id"]
         else:
+            rt = None
             task_id = _new_task_id()
         snap = write_source_snapshot(
             self.env.sources_dir, task_id=task_id, project_id=project_id,
-            title=title, description=description, status=remote_status)
+            title=title, description=description, status=remote_status,
+            task_obj=rt)
         resp = self.cli("sync-tasks", {
             "executor": EXECUTORS["plan"],
             "projects": [{
@@ -889,10 +920,12 @@ def legacy_state(tmp_env):
             "requirements_sha256": "1" * 64, "source_sha256": "0" * 64,
             "send_state": "not_sent", "sent": False,
             "attempt_history": [
-                {"at": iso_past(7200), "run_id": "old-run-1",
-                 "outcome": "failed", "note": "旧失败一"},
-                {"at": iso_past(3600), "run_id": "old-run-2",
-                 "outcome": "failed", "note": "旧失败二"},
+                {"created_at": iso_past(7200), "failed_at": iso_past(7100),
+                 "run_id": "old-run-1", "status": "execution_failed",
+                 "failure_reason": "旧失败一"},
+                {"created_at": iso_past(3700), "failed_at": iso_past(3600),
+                 "run_id": "old-run-2", "status": "execution_failed",
+                 "failure_reason": "旧失败二"},
             ],
         },
         ids["running"]: {
@@ -904,8 +937,8 @@ def legacy_state(tmp_env):
             "run_id": "old-dispatch-run", "session_marker": f"{ids['running']}/old-dispatch-run",
             "kaneo_status": "in-progress",
             "attempt_history": [
-                {"at": iso_past(9000), "run_id": "old-run-a",
-                 "outcome": "claimed", "note": "旧派发"},
+                {"created_at": iso_past(9000), "run_id": "old-run-a",
+                 "status": "dispatching", "failure_reason": "旧派发"},
             ],
         },
         ids["unknown"]: {
@@ -986,7 +1019,7 @@ def legacy_state(tmp_env):
     }
 
     def dump(app, name, obj):
-        d = tmp_env.legacy_root / app
+        d = tmp_env.legacy_root / app / "state"
         d.mkdir(parents=True, exist_ok=True)
         (d / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2),
                              encoding="utf-8")
@@ -1007,9 +1040,12 @@ def legacy_state(tmp_env):
 
     return SimpleNamespace(
         ids=ids, plans=plans, orphan_plan=orphan,
-        executor_manifest=tmp_env.legacy_root / "KaneoExecutor" / "manifest.json",
-        planner_manifest=tmp_env.legacy_root / "KaneoPlanner" / "manifest.json",
-        reviewer_manifest=tmp_env.legacy_root / "KaneoReviewer" / "manifest.json",
+        executor_manifest=(
+            tmp_env.legacy_root / "KaneoExecutor" / "state" / "manifest.json"),
+        planner_manifest=(
+            tmp_env.legacy_root / "KaneoPlanner" / "state" / "manifest.json"),
+        reviewer_manifest=(
+            tmp_env.legacy_root / "KaneoReviewer" / "state" / "manifest.json"),
         lock_owner=lock_dir / "owner.json",
         reviewer_report=reviewer_report,
     )

@@ -18,7 +18,7 @@ def request_is_lost(request: sqlite3.Row, now) -> bool:
 
 def request_display_status(request: sqlite3.Row, now) -> str:
     if request_is_lost(request, now):
-        return "lost"
+        return "执行端失联"
     return request["status"]
 
 
@@ -120,7 +120,8 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         active_view = {
             "request_id": active["request_id"],
             "kind": active["kind"],
-            "status": request_display_status(active, now),
+            "status": active["status"],
+            "display_status": request_display_status(active, now),
             "priority": active["priority"],
             "claimed_by": active["claimed_by"],
             "heartbeat_at": active["heartbeat_at"],
@@ -212,6 +213,7 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             "sent": task["sent"],
             "run_id": task["run_id"],
             "failure_code": task["failure_code"],
+            "failure_reason": task["failure_reason"],
             "failure_stage": task["failure_stage"],
             "manual_recovery_required": task["manual_recovery_required"],
             "allowed_actions": allowed_actions(conn, task, now),

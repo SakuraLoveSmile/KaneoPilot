@@ -145,6 +145,12 @@ def review_reports_root() -> Path:
     )).expanduser()
 
 
+def sources_dir() -> Path:
+    return Path(os.environ.get(
+        "KANPILOT_SOURCES_DIR", str(app_support() / "sources"),
+    )).expanduser()
+
+
 def core_root() -> Path:
     return Path(__file__).resolve().parent.parent
 

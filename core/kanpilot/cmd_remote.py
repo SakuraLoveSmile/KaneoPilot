@@ -3,6 +3,7 @@ create-review-fix / advance-task / recheck (protocol.md §5.8/§5.9/§5.11)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from . import (
@@ -20,11 +21,12 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
     conn = ctx.conn
     dedupe_key = payload["dedupe_key"]
     util.require(
-        len(dedupe_key) == 64
-        and all(c in "0123456789abcdef" for c in dedupe_key),
-        "dedupe_key must be a 64-char lowercase sha256",
+        isinstance(dedupe_key, str) and dedupe_key.strip()
+        and "-->" not in dedupe_key and "<!--" not in dedupe_key,
+        "dedupe_key must be a non-empty marker-safe string",
         "bad_request",
     )
+    dedupe_key = dedupe_key.strip()
     util.require(
         payload["priority"] in bridge.VALID_PRIORITIES,
         "invalid priority",
@@ -64,6 +66,26 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
             core.release_lifecycle(conn, owner)
 
     fix_task_id = str(result["task"]["id"])
+    # fix task 的派发同样需要 source 快照：把 create_todo 返回的
+    # task_context 以 canonical JSON 落盘（与 source_sha256 对应）。
+    source = bridge.stable(
+        {
+            "task": result.get("task"),
+            "comments": result.get("comments"),
+            "relations": result.get("relations"),
+            "activity": result.get("activity"),
+        }
+    )
+    sources_dir = constants.sources_dir()
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = sources_dir / f"{fix_task_id}.json"
+    snapshot_path.write_text(
+        json.dumps(
+            source, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
     now = ctx.now_iso
     with db.write_txn(conn):
         task = db.get_task(conn, fix_task_id)
@@ -71,16 +93,16 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
             conn.execute(
                 "INSERT INTO tasks(task_id, project_id, project_name, title, "
                 "repository, stage, status, kaneo_status, kaneo_checked_at, "
-                "requirements_sha256, source_sha256, plan_kind, "
+                "requirements_sha256, source_sha256, source_path, plan_kind, "
                 "review_source_task_id, review_key, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     fix_task_id, source_task["project_id"],
                     source_task["project_name"], payload["title"],
                     source_task["repository"], "plan", "needs_plan",
                     result.get("todo_slug"), now,
                     result.get("requirements_sha256"),
-                    result.get("source_sha256"), "review_fix",
+                    result.get("source_sha256"), str(snapshot_path), "review_fix",
                     source_task["task_id"], dedupe_key, now, now,
                 ),
             )

@@ -27,14 +27,9 @@ def _select_candidate(
                 "bad_request",
                 f"request {request_id} is stage {row['stage']}, not {stage}",
             )
-        if row["status"] != "queued":
-            raise util.KanpilotError(
-                "conflict", f"request {request_id} is {row['status']}"
-            )
-        if not util.ts_due(row["not_before"], now):
-            raise util.KanpilotError(
-                "conflict", f"request {request_id} not due before {row['not_before']}"
-            )
+        # 定点领取跳过 not_before：冷却期只约束自动取单（protocol §4.2-4）。
+        # status 判定交给调用方：'claimed' → claimed:false（并发失败），
+        # 其他非 queued → conflict。
         return row
     return conn.execute(
         "SELECT * FROM requests WHERE stage=? AND status='queued' "
@@ -100,12 +95,32 @@ def cmd_claim(ctx, payload: dict) -> dict:
         request = _select_candidate(conn, stage, payload.get("request_id"), now)
         if request is None:
             return {"claimed": False, "reason": "empty"}
+        if request["status"] == "claimed":
+            return {
+                "claimed": False, "reason": "already_claimed",
+                "request_id": request["request_id"],
+            }
+        if request["status"] != "queued":
+            raise util.KanpilotError(
+                "conflict",
+                f"request {request['request_id']} is {request['status']}",
+            )
         task = (
             db.get_task(conn, request["task_id"])
             if request["task_id"]
             else None
         )
         if request["kind"] == "dispatch":
+            if task is None:
+                core.fail_request(
+                    conn, request, util.to_iso(now),
+                    "task missing for dispatch request", actor=executor,
+                )
+                return {
+                    "claimed": False, "reason": "guard_failed",
+                    "request_id": request["request_id"],
+                    "detail": "task missing for dispatch request",
+                }
             dispatch_candidate = (request["request_id"], task["task_id"])
         else:
             reason = core.guard_check(task, request["kind"])
@@ -114,8 +129,7 @@ def cmd_claim(ctx, payload: dict) -> dict:
                                   actor=executor)
                 return {
                     "claimed": False, "reason": "guard_failed",
-                    "request_id": request["request_id"], "error": reason,
-                    "code": "guard_failed",
+                    "request_id": request["request_id"], "detail": reason,
                 }
             run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
             if task is not None and request["kind"] == "plan":
@@ -143,6 +157,21 @@ def cmd_claim(ctx, payload: dict) -> dict:
     request_id, task_id = dispatch_candidate
     request = db.get_request(conn, request_id)
     task = db.require_task(conn, task_id)
+    reason = core.guard_check(task, "dispatch")
+    if reason is not None:
+        # Plain status-guard miss: fail the request only (§4.2-5), the task
+        # itself is not blocked — deterministic validation failures are.
+        with db.write_txn(conn):
+            request = db.get_request(conn, request_id)
+            if request["status"] == "queued":
+                core.fail_request(
+                    conn, request, util.to_iso(now), reason, actor=executor
+                )
+        return {
+            "claimed": False, "reason": "guard_failed",
+            "request_id": request_id, "detail": reason,
+            "code": "guard_failed",
+        }
     try:
         checked = dispatch_validate.validate_dispatch(conn, task, now)
     except util.KanpilotError as exc:
@@ -169,11 +198,10 @@ def cmd_claim(ctx, payload: dict) -> dict:
                               actor=executor)
             return {
                 "claimed": False, "reason": "guard_failed",
-                "request_id": request_id, "error": reason,
+                "request_id": request_id, "detail": reason,
                 "code": "guard_failed",
             }
-        from .util import sha256_file
-        if sha256_file(Path(checked["plan_path"])) != checked["plan_sha256"]:
+        if util.sha256_file(Path(checked["plan_path"])) != checked["plan_sha256"]:
             core.fail_request(
                 conn, request, util.to_iso(now),
                 "plan changed between validation and claim", actor=executor,
@@ -181,7 +209,7 @@ def cmd_claim(ctx, payload: dict) -> dict:
             return {
                 "claimed": False, "reason": "guard_failed",
                 "request_id": request_id,
-                "error": "plan changed between validation and claim",
+                "detail": "plan changed between validation and claim",
                 "code": "validation_failed",
             }
         run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
@@ -328,21 +356,7 @@ def cmd_report(ctx, payload: dict) -> dict:
         # Scheduler follow-ups.
         if request["kind"] == "plan-scan" and outcome == "succeeded":
             db.set_setting(conn, "last_plan_scan_at", now_iso)
-        if (
-            request["kind"] == "monitor"
-            and outcome in ("succeeded", "failed")
-            and task is not None
-            and task["status"] == "running"
-        ):
-            interval = db.get_setting(
-                conn, "monitor_interval_seconds",
-                constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
-            )
-            db.create_request(
-                conn, now_iso, "monitor", f"monitor:{task['task_id']}",
-                task_id=task["task_id"], requested_by="scheduler",
-                not_before=util.plus_seconds(interval, now),
-            )
+        # monitor 的下一周期由 tick 按 monitor_interval_seconds 重建（§4.8）。
         fresh = db.get_request(conn, request["request_id"])
         task_status = task["status"] if task is not None else None
         if outcome == "needs_user" and task is not None:

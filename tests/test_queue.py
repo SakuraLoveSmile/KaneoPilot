@@ -16,12 +16,12 @@ import pytest
 try:
     from conftest import (
         CORE_BIN, EXECUTORS, LEASE_SECONDS_DEFAULT, assert_iso8601, db_exec,
-        expire_lease, iso_now, parse_iso, rewind_finished_at,
+        expire_lease, iso_now, make_due, parse_iso, rewind_finished_at,
     )
 except ImportError:  # unittest discover 包上下文
     from tests.conftest import (
         CORE_BIN, EXECUTORS, LEASE_SECONDS_DEFAULT, assert_iso8601, db_exec,
-        expire_lease, iso_now, parse_iso, rewind_finished_at,
+        expire_lease, iso_now, make_due, parse_iso, rewind_finished_at,
     )
 
 
@@ -31,7 +31,8 @@ except ImportError:  # unittest discover 包上下文
 
 
 class TestInvocation:
-    def test_json_flag_success_envelope(self, cli):
+    def test_json_flag_success_envelope(self, cli, fake_kaneo):
+        # fake_kaneo 负责写 credentials.json，doctor 凭据检查才有对象
         out = cli("doctor", {"online": False})
         assert out["ok"] is True
         names = {c["name"] for c in out["checks"]}
@@ -262,10 +263,14 @@ class TestClaimRace:
         # run_id 唯一
         assert wins[0]["run_id"]
 
-    def test_concurrent_claim_queue_drain(self, factory, cli):
+    def test_concurrent_claim_queue_drain(self, factory, cli, tmp_env):
         """两个 queued monitor 请求 + 并发 claim：两条都被领走或一胜一空，不重复。"""
         r1 = factory.make_running(title="监控A")
         r2 = factory.make_running(project="Music", title="监控B")
+        # dispatch-confirm 建的 monitor 请求带 not_before 冷却，先置到期
+        for r in (r1, r2):
+            mreq = factory.find_request(r.task.task_id, "monitor")
+            make_due(tmp_env.db, mreq["request_id"])
 
         def do_claim(_):
             return cli("claim", {"stage": "monitor",
@@ -465,7 +470,8 @@ class TestTick:
         running = factory.make_running()
         out = cli("tick", {})
         kinds = {c["kind"] for c in out["created"]}
-        assert "plan-scan" in kinds       # 从未扫过 → 距上次完成 ≥ 24h
+        # claim 内的 tick_inline 可能已先建 plan-scan（§4.2-1），
+        # 两种路径都要求最终存在 plan-scan 请求（下方 ps 查找断言）。
         assert "monitor" in kinds or \
             factory.find_request(running.task.task_id, "monitor") is not None
         # plan-scan 幂等键
