@@ -232,8 +232,8 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 ### 5.2 tick / overview / list / get
 
 - `tick {}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`
-- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1}`
-- `list-tasks {stage?, status?, needs_attention?: bool}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, claimed_by, heartbeat_at, lease_expires_at}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at}`
+- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 900, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
+- `list-tasks {stage?, status?, needs_attention?: bool}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at}`
 - `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`
 - `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority, not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
 - `list-events {task_id?, limit?: 200}` → `{"events": [{id, at, task_id, request_id, kind, actor, detail}]}` 倒序。
@@ -311,6 +311,21 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 - 导入三 manifest + 锁证据 → tasks/requests/attempts/events（映射见 state-model.md §6）。已 `running` 的 task 建 monitor 请求；`needs_user` 保持；`dispatching|prepared|submitting` 历史残留 → `needs_user` `interrupted`。
 - 幂等：`settings.migration` 记录 manifest 哈希集合；重跑跳过已导入。
 - → `{"ok": true, "backup_path": "...", "imported": {"tasks": n, "requests": n, "events": n}, "warnings": [...]}`
+
+## 5.13 规范补充裁决（v1.1）
+
+1. **哈希口径**：`source_sha256`/`requirements_sha256` 的「规范化重算」就是内嵌 bridge 的实现：`stable()`（dict/list 递归排序）→ `json.dumps(sort_keys=True, separators=(",",":"), ensure_ascii=False)` → sha256。`source_sha256 = add_hash(stable({task,comments,relations,activity}))`；`requirements_sha256 = requirements_hash(source)`（requirements-v1 schema，字段集见 bridge 实现）。与旧 manifest 既有值必须一致。
+2. **settings 本版只读**：`lease_seconds`/`monitor_interval_seconds`/`plan_scan_interval_hours`/`plan_scan_anchor` 只有默认值，无 set-settings 命令（UI 只读展示）。测试改租约直接改库属测试设施。
+3. **REVIEW_REPORTS_ROOT** = `~/Library/Application Support/Codex/KaneoReviewer/reports`（沿用旧根）。
+4. **claim 空队列**：`{"claimed": false, "reason": "empty"}`（另有 `paused`/`stage_busy`/`guard_failed`）。
+5. **`migrate.plan_root`** = 用户可见 Plan 根（备份对象+计划校验根），`legacy_root` = `~/Library/Application Support/Codex`。
+6. **`advance-task.run_id`**：可选；提供时必须等于该 task 当前 `claimed` 请求的 `run_id`（即调用方本轮领取身份），与历史 dispatch run 无关。
+7. **dispatch-confirm 校验失败**：`evidence_invalid`，task 停留 `submitting`（由 dispatch-fail 显式处置）。
+8. **`list-requests status=active`** = `queued OR claimed`（含失联派生项，`display_status` 标 lost）。
+9. **`sent` API 类型**：JSON `true|false|null`（库内 0/1/NULL 为内部表示）。
+10. **resolve/set-priority 返回**：`{"ok": true, "task": TaskSummary}` / `{"ok": true, "request": Request}`。
+11. **Kaneo 响应形状**以 bridge 解析口径为准（`as_list`/`unwrap_data` 宽容解析）；fake/stub 按真实服务形状对齐。
+12. **`doctor` 凭据**：输出不含 token 值及 `accessToken`/`Bearer` 字样。
 
 ## 6. 常量
 
