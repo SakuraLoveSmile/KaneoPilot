@@ -198,15 +198,17 @@ class TestEnqueueClaim(KanpilotTestCase):
         )
         self.assertTrue(result["claimed"])
         self.assertEqual(result["request_id"], target["request_id"])
-        # targeted claim of a non-queued/wrong-stage request errors out
-        exc = self.call_err(
+        # targeted claim of an already-claimed request loses the race
+        # gracefully (protocol §4.2-4): claimed:false, not an error.
+        result = self.call(
             "claim",
             {
                 "stage": "plan", "executor": "kaneo-plan",
                 "request_id": target["request_id"],
             },
         )
-        self.assertEqual(exc.code, "conflict")
+        self.assertFalse(result["claimed"])
+        self.assertEqual(result["reason"], "already_claimed")
 
     def test_heartbeat_extends_lease_and_stale_run(self):
         self._new_task()
@@ -274,7 +276,7 @@ class TestEnqueueClaim(KanpilotTestCase):
         conn.close()
         lost = self.requests(status="lost")
         self.assertEqual(len(lost), 1)
-        self.assertEqual(lost[0]["display_status"], "lost")
+        self.assertEqual(lost[0]["display_status"], "执行端失联")
         # Still claimed in storage; not auto-requeued or released.
         claimed = self.requests(status="claimed")
         self.assertEqual(len(claimed), 1)

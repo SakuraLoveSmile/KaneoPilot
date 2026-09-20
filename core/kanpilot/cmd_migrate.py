@@ -54,13 +54,23 @@ def _import_executor_entry(conn, now: str, task_id: str, entry: dict, warnings: 
     if entry.get("attempt_history"):
         extra["legacy_attempt_history_count"] = len(entry["attempt_history"])
 
+    # A needs_user task keeps the stage it was blocked in (dispatch-mid etc.).
+    if status == "needs_user":
+        hint = (
+            entry.get("failure_stage") or entry.get("previous_status")
+            or ("running" if entry.get("status") == "execution_failed"
+                else entry.get("status"))
+        )
+        stage = core.stage_for_status(hint, "plan")
+    else:
+        stage = core.stage_for_status(status)
     fields = {
         "task_id": task_id,
         "project_id": entry.get("project_id") or "",
         "project_name": entry.get("project_name") or "",
         "title": entry.get("title"),
         "repository": entry.get("repository") or entry.get("workspace"),
-        "stage": core.stage_for_status(status),
+        "stage": stage,
         "status": status,
         "kaneo_status": entry.get("kaneo_status"),
         "requirements_sha256": entry.get("requirements_sha256"),
@@ -263,6 +273,15 @@ def _merge_reviewer_entry(conn, now: str, task_id: str, entry: dict, warnings: l
             "fix_task_id": task["fix_task_id"] or entry.get("fix_task_id"),
             "kaneo_status": task["kaneo_status"] or entry.get("kaneo_status"),
         }
+        # Reviewer 已结论且 Kaneo 已 done → 归档（state-model §6）。
+        if (
+            entry.get("status") == "completed"
+            and (task["kaneo_status"] or entry.get("kaneo_status"))
+                in constants.DONE_SLUGS
+            and task["status"] != "done"
+        ):
+            updates["status"] = "done"
+            updates["stage"] = core.stage_for_status("done")
         db.update_task(conn, task_id, now, **updates)
         db.add_event(
             conn, now, "migrated", task_id=task_id, actor="migration",

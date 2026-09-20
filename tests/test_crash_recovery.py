@@ -18,9 +18,9 @@ import time
 import pytest
 
 try:
-    from conftest import CORE_BIN, EXECUTORS, expire_lease, ui_evidence
+    from conftest import CORE_BIN, EXECUTORS, expire_lease, make_due, ui_evidence
 except ImportError:  # unittest discover 包上下文
-    from tests.conftest import CORE_BIN, EXECUTORS, expire_lease, ui_evidence
+    from tests.conftest import CORE_BIN, EXECUTORS, expire_lease, make_due, ui_evidence
 
 
 # 驱动进程：claim 一次 → 把结果写文件 → 睡眠（模拟执行端工作中被杀）
@@ -57,6 +57,7 @@ class TestProcessDeathKeepsClaim:
         running = factory.make_running()
         tid = running.task.task_id
         mreq = factory.find_request(tid, "monitor")
+        make_due(tmp_env.db, mreq["request_id"])   # monitor 冷却期后门
         out_path = tmp_path / "claim.json"
         proc, res = _claim_then_sleep(
             tmp_env,

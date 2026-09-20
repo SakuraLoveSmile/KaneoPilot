@@ -101,8 +101,8 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 1. 先执行 `tick` 内联逻辑（见 §5.2）。
 2. 若 stage 或全局暂停 → `{"claimed": false, "reason": "paused"}`。
 3. `dispatch` 阶段额外要求当前无其他 `claimed` dispatch 请求（桌面 UI 单操作者）；有则 `{"claimed": false, "reason": "stage_busy"}`。
-4. 取该 stage 下 `status='queued'` 且 `not_before <= now` 的请求，按 `priority ASC, created_at ASC` 取首条（或按 `request_id` 指定，指定时仍校验 stage/queued）。
-5. 领取守卫（见 §4.4）失败 → 该请求标记 `failed`（attempt 记录原因），返回 `{"claimed": false, "reason": "guard_failed", "request_id": ..., "error": ...}`；调用方可再次 claim 拿下一条。
+4. 取该 stage 下 `status='queued'` 且 `not_before <= now` 的请求，按 `priority ASC, created_at ASC` 取首条（或按 `request_id` 指定，指定时仍校验 stage/queued，但跳过 `not_before`——冷却期只约束自动取单；指定请求已 `claimed`（并发竞争失败）→ `{"claimed": false, "reason": "already_claimed"}`，其他非 queued 状态仍报错）。
+5. 领取守卫（见 §4.4）失败 → 该请求标记 `failed`（attempt 记录原因），返回 `{"claimed": false, "reason": "guard_failed", "request_id": ..., "detail": ...}`；调用方可再次 claim 拿下一条。
 6. 成功：置 `claimed`，写 `run_id`（新 UUID）、`claimed_by`、`claimed_at`、`heartbeat_at`、`lease_expires_at = now + lease_seconds`，attempt+event 落库，提交。
 7. 返回请求及阶段上下文（dispatch 见 §4.5）。
 
@@ -234,8 +234,8 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 - `tick {}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`
 - `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 900, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
 - `list-tasks {stage?, status?, needs_attention?: bool}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at}`
-- `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`
-- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority, not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
+- `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_reason, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`
+- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority,`（`display_status` 用 §2 同一中文显示词汇；`status` 为库内原值，失联派生只在 `display_status` 标 `执行端失联`） not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
 - `list-events {task_id?, limit?: 200}` → `{"events": [{id, at, task_id, request_id, kind, actor, detail}]}` 倒序。
 
 ### 5.3 enqueue / set-priority / set-paused

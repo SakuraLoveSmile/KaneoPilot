@@ -211,35 +211,20 @@ class TestReviewFix:
             "description": "修复描述", "priority": "high",
             "dedupe_key": "RK-200"})
         fix_id = f["fix_task_id"]
+        # create-review-fix 已把远端 task_context 落盘为 source 快照
+        detail = factory.get_task(fix_id)
+        assert detail["source_path"] and detail["source_sha256"]
+        # 先写 repair 计划文件：reviewer 在 register-review 登记
+        # repair_plan_path/sha，dispatch 校验与 fix 计划全匹配（§4.5-5）
         report = write_review_report(factory.env.app_support, task_id=src,
                                      conclusion="changes_requested")
-        cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
-            "report_path": str(report.path),
-            "conclusion": "changes_requested",
-            "fix_task_id": fix_id, "review_key": "RK-200"})
-        cli("report", {"request_id": rv["request_id"], "run_id": rv["run_id"],
-                       "outcome": "succeeded"})
-        # fix task → plan claim → publish review_fix 计划
-        detail = factory.get_task(fix_id)
-        preq = factory.find_request(fix_id, "plan")
-        pc = factory.claim("plan", request_id=preq["request_id"])
-        assert pc["claimed"] is True
-        task_view = type("T", (), {
-            "task_id": fix_id, "project_id": detail["project_id"],
-            "project_name": detail["project_name"],
-            "repository": detail["repository"],
-            "source_sha256": detail["source_sha256"] or "0" * 64,
-            "requirements_sha256": detail["requirements_sha256"] or "1" * 64,
-            "title": "修复问题"})()
-        # review_fix frontmatter：gpt-5.6-sol / xhigh + review_*（§6）
         plan = write_plan_file(
             factory.env.plan_root, task_id=fix_id,
-            project_id=task_view.project_id,
-            project_name=task_view.project_name,
-            repository=task_view.repository,
-            source_sha256=task_view.source_sha256,
-            requirements_sha256=task_view.requirements_sha256,
+            project_id=detail["project_id"],
+            project_name=detail["project_name"],
+            repository=detail["repository"],
+            source_sha256=detail["source_sha256"],
+            requirements_sha256=detail["requirements_sha256"],
             plan_kind="review_fix", title="修复问题",
             extra_frontmatter={
                 "review_report_path": str(report.path),
@@ -247,6 +232,25 @@ class TestReviewFix:
                 "review_source_task_id": src,
                 "review_key": "RK-200",
             })
+        cli("register-review", {
+            "task_id": src, "run_id": rv["run_id"],
+            "report_path": str(report.path),
+            "conclusion": "changes_requested",
+            "fix_task_id": fix_id, "review_key": "RK-200",
+            "repair_plan_path": str(plan.path)})
+        cli("report", {"request_id": rv["request_id"], "run_id": rv["run_id"],
+                       "outcome": "succeeded"})
+        # fix task → plan claim → publish 同一 review_fix 计划文件
+        preq = factory.find_request(fix_id, "plan")
+        pc = factory.claim("plan", request_id=preq["request_id"])
+        assert pc["claimed"] is True
+        task_view = type("T", (), {
+            "task_id": fix_id, "project_id": detail["project_id"],
+            "project_name": detail["project_name"],
+            "repository": detail["repository"],
+            "source_sha256": detail["source_sha256"],
+            "requirements_sha256": detail["requirements_sha256"],
+            "title": "修复问题"})()
         pub = cli("publish-plan", {
             "task_id": fix_id, "plan_path": str(plan.path),
             "plan_kind": "review_fix",

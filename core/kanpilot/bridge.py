@@ -365,10 +365,11 @@ def create_todo(
     payload: dict[str, str],
 ) -> dict[str, Any]:
     """Library form of the legacy ``create-todo`` command (same dedupe semantics)."""
-    if len(dedupe_key) != 64 or any(
-        character not in "0123456789abcdef" for character in dedupe_key
+    if (
+        not isinstance(dedupe_key, str) or not dedupe_key.strip()
+        or "-->" in dedupe_key or "<!--" in dedupe_key
     ):
-        raise BridgeError("dedupe-key 必须是 64 位小写 SHA-256")
+        raise BridgeError("dedupe-key 必须是非空且不含注释定界符的字符串")
     project_columns = columns(client, project_id)
     slugs = {str(item.get("slug")) for item in project_columns}
     todo_slug = next((slug for slug in TODO_SLUGS if slug in slugs), None)

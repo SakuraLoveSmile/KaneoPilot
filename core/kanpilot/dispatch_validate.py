@@ -197,6 +197,6 @@ def handle_dispatch_guard_failure(
         "claimed": False,
         "reason": "guard_failed",
         "request_id": request["request_id"],
-        "error": exc.message,
+        "detail": exc.message,
         "code": exc.code,
     }
