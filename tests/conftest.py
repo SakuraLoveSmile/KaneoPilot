@@ -8,7 +8,9 @@ state-model §1（冻结 schema——仅用于测试后门时间操控，不用�
 - 核心入口：`KANPILOT_CORE_BIN` 环境变量，默认 `<repo>/core/kanpilot.py`。
 - 路径覆盖（契约只规定了 `--db`/`KANPILOT_DB`，其余为本套件约定）：
   `KANPILOT_PLAN_ROOT`、`KANPILOT_REPOS_ROOT`、`KANPILOT_APP_SUPPORT`、
-  `KANPILOT_LEGACY_ROOT`、`KANEO_CREDENTIALS_PATH`。
+  `KANPILOT_LEGACY_ROOT`、`KANEO_CREDENTIALS_PATH`；执行后端接缝（v1.6 pi）
+  `KANPILOT_PI_HOME`/`KANPILOT_PI_BIN`/`KANPILOT_AGENTS_DIR`/
+  `KANPILOT_PI_FAKE`/`KANPILOT_PI_START_WAIT`（tmp_env 内造隔离夹具）。
 - 指纹约定（契约未冻结哈希算法，属集成核对点）：
   - plan_sha256 / report_sha256 / repair_plan_sha256 = sha256(文件原始字节)。
   - source_sha256 = sha256(快照文件原始字节)；快照文件以规范化 JSON 落盘
@@ -71,7 +73,8 @@ DEFAULT_COLUMNS = [
 ]
 
 EXECUTORS = {
-    "plan": "kaneo-plan",
+    # v2 §5.22.3：规划执行端为 Codex 适配器（constants.PLANNER_EXECUTOR_ID）。
+    "plan": "kaneo-planner",
     "dispatch": "kaneo-dispatch",
     "monitor": "kaneo-monitor",
     "review": "kaneo-review",
@@ -219,6 +222,65 @@ def tmp_env(tmp_path):
     credentials_path.parent.mkdir(parents=True)
     db = app_support / "kanpilot.db"
 
+    # v1.6：pi 隔离夹具（protocol §5.17.2 测试约定；HOME 已指向假目录，真实
+    # ~/.pi 与 PATH 上的 pi 均不可达）——伪 PI_HOME（agent/models.json 含
+    # CloseAI/deepseek-flash 全思考等级 + Restricted 受限模型）+ agents
+    # 目录（default.md）+ 伪 pi 可执行（--version/auth check 退出 0，凭据
+    # 检查桩掉，绝不发起网络调用）+ 环境接缝。与 core/tests/helpers.py 的
+    # make_pi_fixture 同构。
+    pi_home = tmp_path / "pi-home"
+    (pi_home / "agent").mkdir(parents=True, exist_ok=True)
+    (pi_home / "agent" / "models.json").write_text(
+        json.dumps({
+            "providers": {
+                "CloseAI": {
+                    "displayName": "CloseAI",
+                    "apiKey": "test-key-placeholder",
+                    "models": [{
+                        "id": "deepseek-flash",
+                        "name": "DeepSeek Flash",
+                        "reasoning": True,
+                        "thinkingLevelMap": {
+                            "low": None, "medium": None,
+                            "high": None, "xhigh": None, "max": None,
+                        },
+                    }],
+                },
+                # 受限模型夹具（思考等级子集校验用）
+                "Restricted": {
+                    "apiKey": "x",
+                    "models": [{
+                        "id": "small", "reasoning": True,
+                        "thinkingLevelMap": {"low": None, "medium": None},
+                    }],
+                },
+            }
+        }),
+        encoding="utf-8",
+    )
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "default.md").write_text("# test agent\n", encoding="utf-8")
+    pi_bin = tmp_path / "pi-bin"
+    pi_bin.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = "--version" ]; then echo "0.0.0-test"; exit 0; fi\n'
+        'if [ "$1" = "auth" ] && [ "$2" = "check" ]; then exit 0; fi\n'
+        'exit 0\n',
+        encoding="utf-8",
+    )
+    pi_bin.chmod(0o755)
+
+    # v2（protocol §5.22.3）：doctor 的 codex_planner 检查需要 codex 可执行
+    # + <codex_home>/auth.json 存在（只查存在性，不读凭据值）。
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    codex_bin = tmp_path / "codex-bin"
+    codex_bin.write_text('#!/bin/sh\nexit 0\n', encoding="utf-8")
+    codex_bin.chmod(0o755)
+
+
     env = dict(os.environ)
     env.update(
         {
@@ -230,6 +292,17 @@ def tmp_env(tmp_path):
             "KANPILOT_LEGACY_ROOT": str(legacy_root),
             "KANPILOT_REPORTS_ROOT": str(app_support / "KaneoReviewer" / "reports"),
             "KANEO_CREDENTIALS_PATH": str(credentials_path),
+            # v1.6 pi 隔离夹具（protocol §5.17.2/§5.17.3 测试约定）。
+            "KANPILOT_PI_HOME": str(pi_home),
+            "KANPILOT_PI_BIN": str(pi_bin),
+            "KANPILOT_AGENTS_DIR": str(agents_dir),
+            "KANPILOT_PI_FAKE": "finished",
+            "KANPILOT_PI_START_WAIT": "5",
+            # 外层可能残留的 PI_HOME 不生效（KANPILOT_PI_HOME 优先）。
+            "PI_HOME": str(pi_home),
+            # v2：codex 规划隔离夹具（doctor codex_planner 检查）。
+            "KANPILOT_CODEX_HOME": str(codex_home),
+            "KANPILOT_CODEX_BIN": str(codex_bin),
         }
     )
     return SimpleNamespace(
@@ -242,6 +315,11 @@ def tmp_env(tmp_path):
         legacy_root=legacy_root,
         credentials_path=credentials_path,
         sources_dir=app_support / "sources",
+        pi_home=pi_home,
+        pi_bin=pi_bin,
+        agents_dir=agents_dir,
+        codex_home=codex_home,
+        codex_bin=codex_bin,
         env=env,
     )
 
@@ -254,6 +332,16 @@ def cli(tmp_env):
 # ---------------------------------------------------------------------------
 # 假 Kaneo 服务（fake_kaneo）
 # ---------------------------------------------------------------------------
+
+
+class _FakeKaneoServer(http.server.ThreadingHTTPServer):
+    """并发竞争用例会同时发起十余个连接：放大监听 backlog，避免连接被拒
+    （默认 request_queue_size=5 在真实多进程竞争下会把请求打回 URLError，
+    那是测试设施限制，不是被测行为）。"""
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
 
 
 def _new_task_id() -> str:
@@ -296,7 +384,7 @@ class FakeKaneo:
         class Handler(self._make_handler()):
             pass
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = _FakeKaneoServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         self.port = self._server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -575,6 +663,39 @@ def set_task_send_state(db_path, task_id, send_state, sent=0):
     )
 
 
+def set_save_state(db_path, task_id, save_state, auto_advance_paused=None):
+    """测试后门：直接置 save_state / auto_advance_paused（v1.3 §5.15.1）。
+
+    只用于**隔离验证 §5.15.3 调度入口排除**（tick/claim/enqueue/sync-tasks）：
+    archive-task 的前置条件拒绝 planning/dispatching/running/in_review 等
+    正处于 tick/claim 可调度范围的状态，纯 CLI 流程无法构造「非 active 且
+    仍会被 tick/claim 选中」的任务。此处只置保存状态两个字段，不伪造任何
+    业务状态；涉及归档/恢复命令自身行为的用例一律经 CLI 流转。
+    """
+    sets, params = ["save_state=?"], [save_state]
+    if auto_advance_paused is not None:
+        sets.append("auto_advance_paused=?")
+        params.append(int(bool(auto_advance_paused)))
+    params.append(task_id)
+    db_exec(db_path, f"UPDATE tasks SET {', '.join(sets)} WHERE task_id=?",
+            params)
+
+
+def set_task_status(db_path, task_id, status):
+    """测试后门：直接把 task.status 置为指定状态。
+
+    仅用于构造「CLI 无法表达的一次状态回退」——典型是评审未通过后修复完成、
+    Kaneo 卡片被拖回 in-progress、任务回到 running 再进新一轮 in-review
+    （protocol §5.9「新一轮评审周期起始清空上一周期结论」）。缺的是
+    sync-tasks 的 in_review→running 回退分支：已知产品缺口（v1.2 既有、
+    非 v1.3 回归，已上报用户决定，本轮不改），`core/tests/test_board.py`
+    的同一构也走后门。契约补齐后本后门可删除。
+    只置 status 一列，不改 failure/send/plan 等业务字段。
+    """
+    db_exec(db_path, "UPDATE tasks SET status=? WHERE task_id=?",
+            (status, task_id))
+
+
 # ---------------------------------------------------------------------------
 # 计划 / 快照 / 评审报告 工件
 # ---------------------------------------------------------------------------
@@ -696,7 +817,7 @@ class TaskFactory:
 
     def sync_task(self, project="StudyTool", title="测试任务", description="需求描述",
                   remote_status="to-do", remote=True, project_id=None):
-        """远端造任务 + 写快照 + sync-tasks → task needs_plan + plan 请求。"""
+        """远端造任务 + 写快照 + sync-tasks → task needs_plan（v2：不自动建 plan 请求）。"""
         project_id = project_id or PROJECTS[project]
         repository = self.env.repos_root / project
         if remote:
@@ -733,8 +854,87 @@ class TaskFactory:
             requirements_sha256=snap.requirements_sha256, sync=resp,
         )
 
-    def publish(self, task, plan_kind="standard", extra_frontmatter=None):
-        plan = write_plan_file(
+    def _task_fields(self, task):
+        """task 可为 sync_task 返回的 SimpleNamespace / dict / task_id 字符串；
+        dict 转 SimpleNamespace，str 经 get-task 拉取详情。"""
+        if isinstance(task, str):
+            return SimpleNamespace(**self.get_task(task))
+        if isinstance(task, dict):
+            return SimpleNamespace(**task)
+        return task
+
+    def request_payload(self, request_id):
+        """get-request 详情里的请求 payload（v2 §5.21.1）。"""
+        return self.cli("get-request", {"request_id": request_id}).get("payload") or {}
+
+    def queue_plan(self, task, expected_requirements_sha256="auto",
+                   expected_plan_sha256=None):
+        """v2 §5.22 手动规划链：prepare-plan-input → start-plans →
+        (request_id, input_id, input_sha256)。任务须为 needs_plan/ready 等
+        可规划状态；已有 queued plan 请求则直接复用（幂等）。
+
+        expected_requirements_sha256="auto" 时取任务当前登记值（远端未变
+        时匹配）；传 None 则不核验（远端需求已被人工改动、本地基线滞后时）。"""
+        task = self._task_fields(task)
+        tid = task.task_id
+        existing = self.find_request(tid, "plan")
+        if existing is not None:
+            payload = self.request_payload(existing["request_id"])
+            assert payload.get("manual_authorized"), (
+                f"既有 plan 请求未授权（应只来自 start-plans）：{payload}")
+            return (existing["request_id"], payload.get("input_id"),
+                    payload.get("planner_input_sha256"))
+        prep_payload = {"task_id": tid, "local_paths": [], "supplement": "",
+                        "excluded_remote_ids": []}
+        expected = (self.get_task(tid).get("requirements_sha256")
+                    if expected_requirements_sha256 == "auto"
+                    else expected_requirements_sha256)
+        if expected is not None:
+            prep_payload["expected_requirements_sha256"] = expected
+        prep = self.cli("prepare-plan-input", prep_payload)
+        assert prep.get("input_id") and prep.get("input_sha256"), prep
+        item = {"input_id": prep["input_id"],
+                "input_sha256": prep["input_sha256"]}
+        if expected_plan_sha256 is not None:
+            item["expected_plan_sha256"] = expected_plan_sha256
+        res = self.cli("start-plans", {"items": [item]})
+        result = res["results"][0]
+        assert result.get("request_id"), f"start-plans 未建请求：{res}"
+        return result["request_id"], prep["input_id"], prep["input_sha256"]
+
+    def enqueue_dispatch(self, task_id, expected_plan_sha256=None):
+        """v2 §5.22.4「安排执行」：dispatch 排队 + confirm_plan 确认闸。
+
+        expected_plan_sha256 缺省取任务当前 plan_sha256；为 None 时省略该
+        字段（spec 要求 str，None 会 bad_request）。"""
+        if expected_plan_sha256 is None:
+            expected_plan_sha256 = self.get_task(task_id).get("plan_sha256")
+        payload = {"task_id": task_id, "kind": "dispatch",
+                   "confirm_plan": True}
+        if expected_plan_sha256 is not None:
+            payload["expected_plan_sha256"] = expected_plan_sha256
+        return self.cli("enqueue", payload)
+
+    def publish(self, task, plan_kind="standard", extra_frontmatter=None,
+                plan_file=None, expected_requirements_sha256="auto"):
+        """v2 §5.6/§5.22.4：queue_plan → claim(plan) → publish-plan 全链。
+
+        任务已有 claimed plan 请求时直接复用其 request_id/run_id（不重复
+        排队）；publish-plan 成功即结束请求（不要再 report）。"""
+        task = self._task_fields(task)
+        claimed = self.find_request(task.task_id, "plan", statuses=("claimed",))
+        if claimed is not None:
+            request_id, run_id = claimed["request_id"], claimed["run_id"]
+            input_sha = self.request_payload(request_id).get(
+                "planner_input_sha256")
+        else:
+            request_id, _input_id, input_sha = self.queue_plan(
+                task, expected_requirements_sha256=expected_requirements_sha256)
+            c = self.claim("plan", request_id=request_id)
+            assert c["claimed"] is True, f"plan claim 失败：{c}"
+            run_id = c["run_id"]
+        assert input_sha, f"plan 请求缺少 planner_input_sha256：{request_id}"
+        plan = plan_file or write_plan_file(
             self.env.plan_root, task_id=task.task_id,
             project_id=task.project_id, project_name=task.project_name,
             repository=task.repository,
@@ -751,8 +951,12 @@ class TaskFactory:
             "generated_at": plan.frontmatter["generated_at"],
             "planner_model": plan.frontmatter["planner_model"],
             "reasoning_effort": plan.frontmatter["reasoning_effort"],
+            "request_id": request_id,
+            "run_id": run_id,
+            "planner_input_sha256": input_sha,
         })
-        return SimpleNamespace(plan=plan, resp=resp)
+        return SimpleNamespace(plan=plan, resp=resp, request_id=request_id,
+                               run_id=run_id, input_sha256=input_sha)
 
     def claim(self, stage, request_id=None):
         payload = {"stage": stage, "executor": EXECUTORS[stage]}
@@ -763,23 +967,17 @@ class TaskFactory:
     # -- 组合状态 -----------------------------------------------------------
 
     def make_ready(self, **kw):
-        """needs_plan → planning → publish → ready。"""
+        """needs_plan → publish（内含 queue_plan+claim+publish-plan）→ ready。"""
         task = self.sync_task(**kw)
-        # 认领该 task 的 plan 请求（可能还有其他请求，按 request_id 精确领取）
-        req = self.active_request(task.task_id, kind="plan")
-        c = self.claim("plan", request_id=req["request_id"])
-        assert c["claimed"] is True, f"plan claim 失败：{c}"
         pub = self.publish(task)
-        self.cli("report", {"request_id": c["request_id"], "run_id": c["run_id"],
-                            "outcome": "succeeded", "note": "plan done"})
         return SimpleNamespace(task=task, plan=pub.plan, publish=pub.resp,
-                               plan_request_id=c["request_id"])
+                               plan_request_id=pub.request_id)
 
     def make_running(self, **kw):
         """ready → dispatch claim → prepare → begin-send → confirm → running。"""
         ready = self.make_ready(**kw)
         task = ready.task
-        self.cli("enqueue", {"task_id": task.task_id})
+        self.enqueue_dispatch(task.task_id)
         req = self.find_request(task.task_id, "dispatch")
         c = self.claim("dispatch", request_id=req["request_id"])
         assert c["claimed"] is True, f"dispatch claim 失败：{c}"
@@ -823,7 +1021,7 @@ class TaskFactory:
         """ready → dispatch claim → dispatch-fail → needs_user。"""
         ready = self.make_ready(**kw)
         task = ready.task
-        self.cli("enqueue", {"task_id": task.task_id})
+        self.enqueue_dispatch(task.task_id)
         req = self.find_request(task.task_id, "dispatch")
         c = self.claim("dispatch", request_id=req["request_id"])
         assert c["claimed"] is True
@@ -839,6 +1037,14 @@ class TaskFactory:
 
     def get_task(self, task_id):
         return self.cli("get-task", {"task_id": task_id})["task"]
+
+    def list_task(self, task_id):
+        """list-tasks 中该任务的 TaskSummary 行（无 → None）。"""
+        return next(
+            (t for t in self.cli("list-tasks", {})["tasks"]
+             if t["task_id"] == task_id),
+            None,
+        )
 
     def active_request(self, task_id, kind=None):
         t = self.get_task(task_id)

@@ -16,7 +16,72 @@ sys.path.insert(0, str(CORE))
 sys.path.insert(0, str(CORE / "_vendor"))
 
 import yaml  # noqa: E402
-from kanpilot import bridge, cli, remote, util  # noqa: E402
+from kanpilot import bridge, cli, constants, db, remote, util  # noqa: E402
+
+
+
+
+def make_pi_fixture(root: Path):
+    """pi 隔离夹具（protocol §5.17.2 测试约定，v1.6）：伪造 PI_HOME
+    （agent/models.json 含 CloseAI/deepseek-flash 思考等级 minimal/low/medium/xhigh）+
+    伪 pi 可执行（--version/auth check 均退出 0）+ agents 目录含
+    default.md + 环境接缝变量。"""
+    pi_home = root / "pi-home"
+    (pi_home / "agent").mkdir(parents=True, exist_ok=True)
+    (pi_home / "agent" / "models.json").write_text(
+        json.dumps({
+            "providers": {
+                "CloseAI": {
+                    "displayName": "CloseAI",
+                    "apiKey": "test-key-placeholder",
+                    "models": [{
+                        "id": "deepseek-flash",
+                        "name": "DeepSeek Flash",
+                        "reasoning": True,
+                        "thinkingLevelMap": {
+                            "minimal": None, "low": None,
+                            "medium": None, "xhigh": None,
+                        },
+                    }],
+                },
+                # 受限模型夹具（思考等级子集校验用）
+                "Restricted": {
+                    "apiKey": "x",
+                    "models": [{
+                        "id": "small", "reasoning": True,
+                        "thinkingLevelMap": {"low": None, "medium": None},
+                    }],
+                },
+            }
+        }),
+        encoding="utf-8",
+    )
+    agents = root / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "default.md").write_text("# test agent\n", encoding="utf-8")
+    pi_bin = root / "pi-bin"
+    pi_bin.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = "--version" ]; then echo "0.0.0-test"; exit 0; fi\n'
+        'if [ "$1" = "auth" ] && [ "$2" = "check" ]; then exit 0; fi\n'
+        'exit 0\n',
+        encoding="utf-8",
+    )
+    pi_bin.chmod(0o755)
+    return {
+        "KANPILOT_PI_HOME": str(pi_home),
+        "KANPILOT_PI_BIN": str(pi_bin),
+        "KANPILOT_AGENTS_DIR": str(agents),
+        "KANPILOT_PI_FAKE": "finished",
+        "KANPILOT_PI_START_WAIT": "5",
+    }
+
+
+def path_qs(path):
+    """解析 url query 段 → {key: [values]}（fake 路由按 status 过滤用）。"""
+    from urllib.parse import parse_qs, urlsplit
+
+    return parse_qs(urlsplit(path).query)
 
 
 class FakeKaneoClient:
@@ -52,6 +117,7 @@ class FakeKaneoClient:
             exc, self.fail_next = self.fail_next, None
             raise exc
         self.requests_log.append((method, path, body))
+        query = path_qs(path)
         path = path.split("?", 1)[0]
         parts = [part for part in path.split("/") if part]
         # /api/task/<id> GET
@@ -73,17 +139,26 @@ class FakeKaneoClient:
                 priority=body.get("priority", "high"),
             )
             return {"data": dict(task)}
-        # /api/task/tasks/<project> GET
+        # /api/task/tasks/<project>?status=<slug>&page=&limit= GET
         if parts[:3] == ["api", "task", "tasks"] and method == "GET":
             project_id = parts[3]
+            status_filter = query.get("status", [None])[0]
             tasks = [
                 dict(task) for task in self.tasks.values()
                 if task["projectId"] == project_id
+                and (status_filter is None
+                     or task.get("status") == status_filter)
             ]
             return {
                 "data": {"columns": [{"tasks": tasks}]},
                 "pagination": {"totalPages": 1},
             }
+        # /api/project?workspaceId= GET（fetch-todos 枚举项目白名单）
+        if parts[:2] == ["api", "project"] and method == "GET":
+            return {"data": [
+                {"id": pid, "name": name}
+                for name, pid in constants.PROJECTS.items()
+            ]}
         # /api/column/<project> GET
         if parts[:2] == ["api", "column"] and method == "GET":
             return {"data": [dict(c) for c in self.columns]}
@@ -121,6 +196,8 @@ class KanpilotTestCase(unittest.TestCase):
             "KANPILOT_APP_SUPPORT": str(self.app_support),
             "KANPILOT_REPORTS_ROOT": str(self.reports_root),
         }
+        # v1.6：pi 隔离夹具（dispatch 可用性门 §5.17.3 依赖）。
+        self._env.update(make_pi_fixture(self.root))
         self._saved = {k: os.environ.get(k) for k in self._env}
         os.environ.update(self._env)
         self.fake = FakeKaneoClient()
@@ -230,27 +307,140 @@ class KanpilotTestCase(unittest.TestCase):
         overrides.update(plan_overrides or {})
         plan_path = self.write_plan(project_name, remote_task, overrides)
         if publish:
-            self.call(
-                "publish-plan",
-                {
-                    "task_id": task_id, "plan_path": str(plan_path),
-                    "plan_kind": overrides.get("plan_kind", "standard"),
-                    "source_sha256": source_sha,
-                    "requirements_sha256": req_sha,
-                    "generated_at": "2026-09-20T00:00:00+00:00",
-                    "planner_model": overrides.get(
-                        "planner_model", "gpt-6-astra"
-                    ),
-                    "reasoning_effort": overrides.get(
-                        "reasoning_effort", "medium"
-                    ),
-                },
+            self.publish(
+                task_id, plan_path,
+                plan_kind=overrides.get("plan_kind", "standard"),
+                source_sha256=source_sha,
+                requirements_sha256=req_sha,
+                planner_model=overrides.get("planner_model", "gpt-6-astra"),
+                reasoning_effort=overrides.get("reasoning_effort", "medium"),
             )
         return {
             "remote": remote_task, "plan_path": plan_path,
             "source_sha256": source_sha, "requirements_sha256": req_sha,
             "source_path": source_path,
         }
+
+    def make_planner_input(self, task_id, source_sha256=None,
+                           requirements_sha256=None, manifest_extra=None):
+        """v2：直接登记一条 planner_inputs 行（绕过远端材料下载）。
+
+        返回 {input_id, input_sha256, manifest}；manifest 与目录外材料
+        （files/）为空——测试只需登记行让请求 payload 携带 input_id/sha。
+        """
+        from kanpilot import planner_inputs
+
+        conn = db.connect(self.db_path)
+        try:
+            input_id = util.new_uuid()
+            manifest = {
+                "input_id": input_id,
+                "task": {"task_id": task_id},
+                "requirements_sha256": requirements_sha256,
+                "source_sha256": source_sha256,
+                "supplement": "",
+                "excluded_remote_ids": [],
+                "files": [],
+                "issues": [],
+                "created_at": util.now_iso(),
+            }
+            manifest.update(manifest_extra or {})
+            input_sha = planner_inputs._manifest_sha(manifest)
+            with db.write_txn(conn):
+                db.insert_planner_input(
+                    conn, input_id, task_id, input_sha,
+                    requirements_sha256, source_sha256, manifest,
+                    util.now_iso(),
+                )
+        finally:
+            conn.close()
+        return {"input_id": input_id, "input_sha256": input_sha,
+                "manifest": manifest}
+
+    def queue_plan(self, task_id, source_sha256=None,
+                   requirements_sha256=None, plan_kind="standard",
+                   planner_model="gpt-6-astra", reasoning_effort="medium"):
+        """v2：登记材料 + 创建已授权 plan 请求（不经 start-plans 的远端
+        重取）。返回 (request_id, input_sha256)。任务须为 needs_plan。"""
+        info = self.make_planner_input(
+            task_id, source_sha256=source_sha256,
+            requirements_sha256=requirements_sha256,
+        )
+        payload = {
+            "manual_authorized": True,
+            "input_id": info["input_id"],
+            "planner_input_sha256": info["input_sha256"],
+            "manifest": info["manifest"],
+            "model_config": {"planner_model": planner_model,
+                             "reasoning_effort": reasoning_effort},
+            "confirmed_at": util.now_iso(),
+        }
+        if plan_kind == "review_fix":
+            task_row = self.task(task_id)
+            payload.update({
+                "plan_kind": "review_fix",
+                "review_key": task_row.get("review_key"),
+                "review_source_task_id": task_row.get(
+                    "review_source_task_id"),
+                "fix_task_id": task_id,
+            })
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                request, _ = db.create_request(
+                    conn, util.now_iso(), "plan", f"plan:{task_id}",
+                    task_id=task_id, payload=payload, requested_by="user",
+                )
+                request_id = request["request_id"]
+        finally:
+            conn.close()
+        return request_id, info["input_sha256"]
+
+    def enqueue_dispatch(self, task_id, expected_plan_sha256=None):
+        """v2：「安排执行」——dispatch 排队 + confirm_plan（hold 任务须带
+        计划哈希）。expected_plan_sha256 缺省时从任务当前登记取。"""
+        if expected_plan_sha256 is None:
+            expected_plan_sha256 = self.task(task_id).get("plan_sha256")
+        return self.call("enqueue", {
+            "task_id": task_id, "kind": "dispatch",
+            "confirm_plan": True,
+            "expected_plan_sha256": expected_plan_sha256,
+        })
+
+    def publish(self, task_id, plan_path, plan_kind="standard",
+                source_sha256="", requirements_sha256="",
+                planner_model="gpt-6-astra", reasoning_effort="medium",
+                generated_at="2026-09-20T00:00:00+00:00"):
+        """v2 发布助手：登记材料 → 授权 plan 请求 → claim → publish-plan。
+
+        publish-plan v2 要求 request_id/run_id/planner_input_sha256 且请求
+        须为本任务当前 claimed 规划请求；本助手走完整真实链路。
+        """
+        request_id, input_sha = self.queue_plan(
+            task_id, source_sha256=source_sha256,
+            requirements_sha256=requirements_sha256, plan_kind=plan_kind,
+            planner_model=planner_model, reasoning_effort=reasoning_effort,
+        )
+        claim = self.call("claim", {
+            "stage": "plan", "executor": "test-planner",
+            "request_id": request_id,
+        })
+        assert claim["claimed"], f"plan claim failed: {claim}"
+        result = self.call(
+            "publish-plan",
+            {
+                "task_id": task_id, "plan_path": str(plan_path),
+                "plan_kind": plan_kind,
+                "source_sha256": source_sha256,
+                "requirements_sha256": requirements_sha256,
+                "generated_at": generated_at,
+                "planner_model": planner_model,
+                "reasoning_effort": reasoning_effort,
+                "request_id": request_id, "run_id": claim["run_id"],
+                "planner_input_sha256": input_sha,
+            },
+        )
+        return result
 
     def valid_evidence(self, task_view, plan_path, **overrides):
         evidence = {

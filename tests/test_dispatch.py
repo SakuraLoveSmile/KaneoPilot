@@ -27,7 +27,8 @@ except ImportError:  # unittest discover 包上下文
 
 
 def _queued_dispatch(factory, cli, ready):
-    cli("enqueue", {"task_id": ready.task.task_id})
+    # v2 §5.22.4：ready+hold 任务需 confirm_plan 放行后才能排队
+    factory.enqueue_dispatch(ready.task.task_id)
     return factory.find_request(ready.task.task_id, "dispatch")
 
 
@@ -194,12 +195,8 @@ class TestClaimValidation:
     def test_standard_plan_rejects_review_marker(self, factory, cli):
         """校验 5：standard 计划要求远端描述不含 codex-kaneo-review 标记。"""
         task = factory.sync_task(description="需求 <!-- codex-kaneo-review:RK1 -->")
-        req = factory.find_request(task.task_id, "plan")
-        c = factory.claim("plan", request_id=req["request_id"])
-        assert c["claimed"] is True
         factory.publish(task)
-        cli("report", {"request_id": c["request_id"], "run_id": c["run_id"],
-                       "outcome": "succeeded"})
+        # publish-plan 已结束 plan 请求，不再 report
         ready = type("R", (), {"task": task})()  # 轻包装
         _queued_dispatch(factory, cli, ready)
         c2 = cli("claim", {"stage": "dispatch",
@@ -217,20 +214,16 @@ class TestClaimValidation:
             "title": "修复任务", "description": "修复描述",
             "priority": "high", "dedupe_key": "RK-nomarker"})
         fix_id = fix["fix_task_id"]
-        # 移除远端标记 → review_fix 校验应失败
-        remote = factory.kaneo.get_task(fix_id)
-        factory.kaneo.set_description(
-            fix_id, (remote["description"] or "").replace(
-                "<!-- codex-kaneo-review:RK-nomarker -->", ""))
         detail = factory.get_task(fix_id)
         assert detail["plan_kind"] == "review_fix"
-        # 造 review_fix 计划并发布
+        # 造 review_fix 计划并发布（v2 §5.22.4：先发布再移除远端标记——
+        # 移除会改需求指纹，publish-plan 的远端复验需要登记值仍匹配）
         task_view = type("T", (), {
             "task_id": fix_id, "project_id": detail["project_id"],
             "project_name": detail["project_name"],
             "repository": detail["repository"],
-            "source_sha256": detail["source_sha256"] or "0" * 64,
-            "requirements_sha256": detail["requirements_sha256"] or "1" * 64,
+            "source_sha256": detail["source_sha256"],
+            "requirements_sha256": detail["requirements_sha256"],
             "title": "修复任务"})()
         report = write_review_report(
             factory.env.app_support, task_id=ir.task.task_id,
@@ -248,15 +241,15 @@ class TestClaimValidation:
             requirements_sha256=task_view.requirements_sha256,
             plan_kind="review_fix", title="修复任务",
             extra_frontmatter=fm)
-        cli("publish-plan", {
-            "task_id": fix_id, "plan_path": str(plan.path),
-            "plan_kind": "review_fix",
-            "source_sha256": task_view.source_sha256,
-            "requirements_sha256": task_view.requirements_sha256,
-            "generated_at": plan.frontmatter["generated_at"],
-            "planner_model": plan.frontmatter["planner_model"],
-            "reasoning_effort": plan.frontmatter["reasoning_effort"]})
-        cli("enqueue", {"task_id": fix_id})
+        pub = factory.publish(task_view, plan_kind="review_fix",
+                              plan_file=plan)
+        assert pub.resp["task_status"] == "ready"
+        # 移除远端标记 → review_fix 校验应失败
+        remote = factory.kaneo.get_task(fix_id)
+        factory.kaneo.set_description(
+            fix_id, (remote["description"] or "").replace(
+                "<!-- codex-kaneo-review:RK-nomarker -->", ""))
+        factory.enqueue_dispatch(fix_id)
         c = cli("claim", {"stage": "dispatch",
                           "executor": EXECUTORS["dispatch"]})
         assert c["claimed"] is False
@@ -490,31 +483,42 @@ class TestDispatchChain:
 
 class TestPublishPlanValidation:
     def _planned_task(self, factory, cli):
+        """v2：sync → queue_plan → claim plan；返回
+        (task, claim_resp, planner_input_sha256)。"""
         task = factory.sync_task()
-        req = factory.find_request(task.task_id, "plan")
-        c = factory.claim("plan", request_id=req["request_id"])
-        return task, c
+        req_id, _i, input_sha = factory.queue_plan(task.task_id)
+        c = factory.claim("plan", request_id=req_id)
+        assert c["claimed"] is True
+        return task, c, input_sha
+
+    def _publish_payload(self, task, plan_path, generated_at, c, input_sha):
+        return {
+            "task_id": task.task_id, "plan_path": str(plan_path),
+            "plan_kind": "standard", "source_sha256": task.source_sha256,
+            "requirements_sha256": task.requirements_sha256,
+            "generated_at": generated_at,
+            "planner_model": "gpt-6-astra", "reasoning_effort": "medium",
+            "request_id": c["request_id"], "run_id": c["run_id"],
+            "planner_input_sha256": input_sha}
 
     def test_plan_outside_root_rejected(self, factory, cli, tmp_env):
-        task, c = self._planned_task(factory, cli)
+        task, c, input_sha = self._planned_task(factory, cli)
         # 写到 Plan 根外
         outside = write_plan_file(
             tmp_env.root / "elsewhere", task_id=task.task_id,
             project_id=task.project_id, project_name=task.project_name,
             repository=task.repository, source_sha256=task.source_sha256,
             requirements_sha256=task.requirements_sha256)
-        out = cli("publish-plan", {
-            "task_id": task.task_id, "plan_path": str(outside.path),
-            "plan_kind": "standard", "source_sha256": task.source_sha256,
-            "requirements_sha256": task.requirements_sha256,
-            "generated_at": outside.frontmatter["generated_at"],
-            "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
-            expect=1)
+        out = cli("publish-plan",
+                  self._publish_payload(task, outside.path,
+                                        outside.frontmatter["generated_at"],
+                                        c, input_sha),
+                  expect=1)
         assert out["code"] in ("bad_request", "validation_failed", "conflict",
                                "not_found")
 
     def test_symlink_plan_rejected(self, factory, cli, tmp_env):
-        task, c = self._planned_task(factory, cli)
+        task, c, input_sha = self._planned_task(factory, cli)
         outside = write_plan_file(
             tmp_env.root / "elsewhere", task_id=task.task_id,
             project_id=task.project_id, project_name=task.project_name,
@@ -523,50 +527,45 @@ class TestPublishPlanValidation:
         link = tmp_env.plan_root / task.project_name / "linked.md"
         link.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(outside.path, link)
-        out = cli("publish-plan", {
-            "task_id": task.task_id, "plan_path": str(link),
-            "plan_kind": "standard", "source_sha256": task.source_sha256,
-            "requirements_sha256": task.requirements_sha256,
-            "generated_at": "2025-01-01T00:00:00+00:00",
-            "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
-            expect=1)
+        out = cli("publish-plan",
+                  self._publish_payload(task, link,
+                                        "2025-01-01T00:00:00+00:00",
+                                        c, input_sha),
+                  expect=1)
         assert out["code"] in ("bad_request", "validation_failed", "conflict")
 
     def test_frontmatter_task_id_mismatch(self, factory, cli):
-        task, c = self._planned_task(factory, cli)
+        task, c, input_sha = self._planned_task(factory, cli)
         plan = write_plan_file(
             factory.env.plan_root, task_id="different-task-id",
             project_id=task.project_id, project_name=task.project_name,
             repository=task.repository, source_sha256=task.source_sha256,
             requirements_sha256=task.requirements_sha256)
-        out = cli("publish-plan", {
-            "task_id": task.task_id, "plan_path": str(plan.path),
-            "plan_kind": "standard", "source_sha256": task.source_sha256,
-            "requirements_sha256": task.requirements_sha256,
-            "generated_at": plan.frontmatter["generated_at"],
-            "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
-            expect=1)
+        out = cli("publish-plan",
+                  self._publish_payload(task, plan.path,
+                                        plan.frontmatter["generated_at"],
+                                        c, input_sha),
+                  expect=1)
         assert out["code"] in ("bad_request", "validation_failed")
 
     def test_frontmatter_implementation_status(self, factory, cli):
-        task, c = self._planned_task(factory, cli)
+        task, c, input_sha = self._planned_task(factory, cli)
         plan = write_plan_file(
             factory.env.plan_root, task_id=task.task_id,
             project_id=task.project_id, project_name=task.project_name,
             repository=task.repository, source_sha256=task.source_sha256,
             requirements_sha256=task.requirements_sha256,
             extra_frontmatter={"implementation_status": "已完成"})
-        out = cli("publish-plan", {
-            "task_id": task.task_id, "plan_path": str(plan.path),
-            "plan_kind": "standard", "source_sha256": task.source_sha256,
-            "requirements_sha256": task.requirements_sha256,
-            "generated_at": plan.frontmatter["generated_at"],
-            "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
-            expect=1)
+        out = cli("publish-plan",
+                  self._publish_payload(task, plan.path,
+                                        plan.frontmatter["generated_at"],
+                                        c, input_sha),
+                  expect=1)
         assert out["code"] in ("bad_request", "validation_failed")
 
     def test_publish_on_dispatching_conflict(self, factory, cli):
-        """task 处于派发中 → publish-plan conflict（§5.6）。"""
+        # task 处于派发中 → publish-plan conflict（§5.6）；v2 顺序：
+        # 远端复验（任务 in-progress → conflict）先于请求/状态检查。
         running = factory.make_running()
         task = running.task
         plan = write_plan_file(
@@ -579,6 +578,22 @@ class TestPublishPlanValidation:
             "plan_kind": "standard", "source_sha256": task.source_sha256,
             "requirements_sha256": task.requirements_sha256,
             "generated_at": plan.frontmatter["generated_at"],
-            "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
+            "planner_model": "gpt-6-astra", "reasoning_effort": "medium",
+            "request_id": "req-bogus", "run_id": "run-bogus",
+            "planner_input_sha256": "0" * 64},
             expect=1)
         assert out["code"] == "conflict"
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

@@ -5,7 +5,7 @@ Kaneo 调度台：本机 macOS 工作台。SwiftUI 桌面 + Python 调度核心 
 ## 边界
 
 - 第一版仅本机；不做云端、多用户、手机端、Kaneo 服务端改造。
-- Codex 继续负责规划/派发/Review，Devin 继续执行；本软件只做确定性的队列与状态管理。
+- 四个执行端（plan/dispatch/monitor/review）由 App 内置调度器拉起 `pi -p`（ExecutorScheduler + kanpilot.executor_runner），任务执行由 `kanpilot.pi_worker` 拉起的 pi 会话完成；本软件只做确定性的队列与状态管理。
 - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
 - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
 

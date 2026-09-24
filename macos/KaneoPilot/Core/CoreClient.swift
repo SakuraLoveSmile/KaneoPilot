@@ -116,6 +116,15 @@ struct CoreClient: Sendable {
             process.executableURL = URL(fileURLWithPath: location.path)
             process.arguments = [command, "--json", payloadJSON]
         }
+        // Finder 启动的 app PATH 极简（/usr/bin:/bin…），`python3` 会落到系统
+        // 3.9.6（无 certifi → 远端 HTTPS 证书校验失败）。前置用户 bin 目录，让
+        // `python3` 解析到带 certifi 的安装（/usr/local 或 ~/.npm-global 等）。
+        var env = ProcessInfo.processInfo.environment
+        let npmBin = (NSHomeDirectory() as NSString)
+            .appendingPathComponent(".npm-global/bin")
+        let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"
+        env["PATH"] = env["PATH"].map { "\(extraPath):\($0)" } ?? extraPath
+        process.environment = env
 
         let outPipe = Pipe()
         let errPipe = Pipe()

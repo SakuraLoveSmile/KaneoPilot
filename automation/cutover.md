@@ -47,3 +47,15 @@
 - **dispatch 排队**：request `48d9750c`（task `yfgrc2fi`，send_state=not_sent，计划已发布）。queued 保持有效，kaneo-dispatch 注册后首个窗口（:04/:19/:34/:49）即会领取——可作为新执行端真实派发验证。
 - 待观察（依赖执行端注册）：dispatch 真实领取与 Devin 发送、monitor（2 条 queued）、review（2 条 queued）、done 归档。
 - 已知数据缺口（不影响切换）：迁移任务的 `source_path` 指向旧扁平 schema 快照、`requirements_sha256` 为空；首个 plan-scan 已把仍存在的 To Do 任务刷新为规范快照。已删远端任务（ey9s9vq8）走 needs_user 人工处理。
+
+---
+
+## v1.6 切换记录（pi 执行端 / App 内置调度）
+
+- 执行后端 `dsh` → `pi`（`pi -p --mode json` + `kanpilot.pi_worker` 事件映射）；Codex automation 四条定时任务 → App 内置 ExecutorScheduler（分钟位不变：0/4/8/12 + 15 偏移）。
+- [ ] **需 App 侧停用**：codex-dev.db 中旧 4 条 automation（kaneo-plan/dispatch/monitor/review）仍可能 ACTIVE——在 Codex App 自动化界面停用或经 `automation_update` 置 DISABLED；文件层导出物已随本目录清理。
+- [x] 执行端 prompt 迁移至 `core/executor_prompts/`（_preamble + plan/dispatch/monitor/review.md），由 `kanpilot.executor_runner` 渲染；`automation/rendered/*.toml` 与 `render_prompts.py` 删除。
+- [x] 旧后端代码移除：`dsh_worker.py`、`dsh_bridge/`（含 node_modules）、`devin_adapter.py`、headless/ATIF 读取层；历史轮次 DB 行保留，`get-session` 返回 `unavailable`「旧后端会话已弃用（仅 pi 可读）」。
+- [x] 新接缝：`KANPILOT_PI_BIN`/`KANPILOT_PI_HOME`/`KANPILOT_AGENTS_DIR`/`KANPILOT_PI_FAKE`/`KANPILOT_PI_START_WAIT`；`KANPILOT_DSH_*`/`KANPILOT_DEVIN_*` 全部移除。
+- [ ] 验证：App「执行端调度」总开关开启 → 各 stage「立即运行」无请求即退；dispatch 全链 prepare→begin-send→start→confirm（首个真实任务）；monitor 读 pi 会话三证据判定。
+- App 不常驻时执行端不运行（与 Codex automation 语义不同）——v1.6 不引入 launchd，需要后台常驻时再议。

@@ -93,9 +93,9 @@ class TestIdempotency:
         """重复点击不重复派发：同 key 已有活动请求 → 返回既有 + deduplicated。"""
         ready = factory.make_ready()
         tid = ready.task.task_id
-        r1 = cli("enqueue", {"task_id": tid})
+        r1 = factory.enqueue_dispatch(tid)
         assert r1["deduplicated"] is False
-        r2 = cli("enqueue", {"task_id": tid})
+        r2 = factory.enqueue_dispatch(tid)
         assert r2["deduplicated"] is True
         assert r2["request"]["request_id"] == r1["request"]["request_id"]
         # 仍只有一个活动请求
@@ -106,7 +106,7 @@ class TestIdempotency:
         """默认 key = '<kind>:<task_id>'。"""
         ready = factory.make_ready()
         tid = ready.task.task_id
-        r = cli("enqueue", {"task_id": tid})
+        r = factory.enqueue_dispatch(tid)
         req = r["request"]
         assert req["kind"] == "dispatch"
         assert req["idempotency_key"] == f"dispatch:{tid}"
@@ -119,12 +119,27 @@ class TestIdempotency:
         assert r["request"]["idempotency_key"] == f"monitor:{tid}"
 
     def test_plan_request_key(self, factory, cli):
-        """sync-tasks 新建任务自动建 plan 请求，key=plan:<task_id>。"""
+        """start-plans 建 plan 请求，key=plan:<task_id>；同材料幂等，
+        不同材料冲突。"""
         task = factory.sync_task()
+        req_id, input_id, input_sha = factory.queue_plan(task.task_id)
         req = factory.find_request(task.task_id, "plan")
         assert req is not None
+        assert req["request_id"] == req_id
         assert req["idempotency_key"] == f"plan:{task.task_id}"
         assert req["stage"] == "plan"
+        # 同 input_sha256 再提交 → deduplicated
+        again = cli("start-plans", {
+            "items": [{"input_id": input_id, "input_sha256": input_sha}]})
+        assert again["results"][0].get("deduplicated") is True
+        assert again["results"][0]["request_id"] == req_id
+        # 新材料（supplement 改变 input 指纹）→ conflict
+        prep2 = cli("prepare-plan-input", {
+            "task_id": task.task_id, "supplement": "补充材料 v2"})
+        other = cli("start-plans", {
+            "items": [{"input_id": prep2["input_id"],
+                       "input_sha256": prep2["input_sha256"]}]})
+        assert other["results"][0]["code"] == "conflict"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +152,8 @@ class TestPriority:
         """priority ASC → created_at ASC：低数值先领。"""
         a = factory.sync_task(title="任务A")
         b = factory.sync_task(title="任务B", project="Music")
+        factory.queue_plan(a.task_id)
+        factory.queue_plan(b.task_id)
         req_a = factory.find_request(a.task_id, "plan")
         req_b = factory.find_request(b.task_id, "plan")
         assert req_a and req_b
@@ -145,13 +162,18 @@ class TestPriority:
         c1 = cli("claim", {"stage": "plan", "executor": EXECUTORS["plan"]})
         assert c1["claimed"] is True
         assert c1["request_id"] == req_b["request_id"]
-        # 第二次拿到 A（priority=100，created_at 早于可能存在的 plan-scan）
+        # v2 §5.22.1：plan 单飞——先收尾 B 的领取才能领 A
+        cli("report", {"request_id": c1["request_id"],
+                       "run_id": c1["run_id"], "outcome": "failed",
+                       "note": "测试收尾，释放 plan stage"})
+        # 第二次拿到 A（priority=100，created_at 早）
         c2 = cli("claim", {"stage": "plan", "executor": EXECUTORS["plan"]})
         assert c2["claimed"] is True
         assert c2["request_id"] == req_a["request_id"]
 
     def test_set_priority_by_task_id(self, factory, cli):
         task = factory.sync_task()
+        factory.queue_plan(task.task_id)
         req = factory.find_request(task.task_id, "plan")
         out = cli("set-priority", {"task_id": task.task_id, "priority": 5})
         reqs = cli("list-requests", {"status": "queued"})["requests"]
@@ -171,7 +193,8 @@ class TestPriority:
 
 class TestPause:
     def test_global_pause_blocks_claim(self, factory, cli):
-        factory.sync_task()
+        task = factory.sync_task()
+        factory.queue_plan(task.task_id)
         cli("set-paused", {"stage": None, "paused": True})
         c = cli("claim", {"stage": "plan", "executor": EXECUTORS["plan"]})
         assert c["claimed"] is False
@@ -186,7 +209,7 @@ class TestPause:
         ready = factory.make_ready()
         running = factory.make_running(project="Music", title="监控目标")
         cli("set-paused", {"stage": "dispatch", "paused": True})
-        cli("enqueue", {"task_id": ready.task.task_id})
+        factory.enqueue_dispatch(ready.task.task_id)
         c = cli("claim", {"stage": "dispatch", "executor": EXECUTORS["dispatch"]})
         assert c["claimed"] is False and c["reason"] == "paused"
         # monitor 不受影响
@@ -231,6 +254,7 @@ class TestClaimBasics:
     def test_claim_returns_run_context(self, factory, cli):
         """非 dispatch claim 返回 run_id 与阶段上下文（§5.5）。"""
         task = factory.sync_task()
+        factory.queue_plan(task.task_id)
         req = factory.find_request(task.task_id, "plan")
         c = cli("claim", {"stage": "plan", "executor": EXECUTORS["plan"],
                           "request_id": req["request_id"]})
@@ -310,6 +334,7 @@ class TestClaimGuard:
     def test_claim_by_request_id_validates_stage(self, factory, cli):
         """指定 request_id 仍校验 stage/queued（§4.2-4）。"""
         task = factory.sync_task()
+        factory.queue_plan(task.task_id)
         req = factory.find_request(task.task_id, "plan")
         c = cli("claim", {"stage": "monitor", "executor": EXECUTORS["monitor"],
                           "request_id": req["request_id"]}, expect=1)
@@ -466,22 +491,21 @@ class TestLostDerivation:
 
 
 class TestTick:
-    def test_tick_creates_plan_scan_and_monitor(self, factory, cli):
+    def test_tick_creates_monitor(self, factory, cli):
+        """v2：tick 只为 running 建 monitor（不再建 plan-scan）。"""
         running = factory.make_running()
         out = cli("tick", {})
         kinds = {c["kind"] for c in out["created"]}
-        # claim 内的 tick_inline 可能已先建 plan-scan（§4.2-1），
-        # 两种路径都要求最终存在 plan-scan 请求（下方 ps 查找断言）。
         assert "monitor" in kinds or \
             factory.find_request(running.task.task_id, "monitor") is not None
-        # plan-scan 幂等键
+        # 无 plan-scan 阶段请求
         reqs = cli("list-requests", {})["requests"]
-        ps = next(r for r in reqs if r["kind"] == "plan-scan")
-        assert ps["idempotency_key"] == "plan-scan:workspace"
-        # 幂等：立即再 tick 不重复建
+        assert not [r for r in reqs if r["kind"] == "plan-scan"]
+        # 幂等：立即再 tick 不重复建 monitor
         out2 = cli("tick", {})
-        new_ps = [c for c in out2["created"] if c["kind"] == "plan-scan"]
-        assert not new_ps
+        assert not [c for c in out2["created"]
+                    if c.get("task_id") == running.task.task_id
+                    and c["kind"] == "monitor"]
 
     def test_tick_review_request_for_in_review(self, factory, cli):
         ir = factory.make_in_review()
@@ -523,8 +547,8 @@ class TestResolve:
         res = cli("resolve", {"task_id": nu.task.task_id, "action": "replan"})
         t = factory.get_task(nu.task.task_id)
         assert t["status"] == "needs_plan"
-        req = factory.find_request(nu.task.task_id, "plan")
-        assert req is not None
+        # v2：replan 回 needs_plan，不自动建 plan 请求（待规划面板提交）
+        assert factory.find_request(nu.task.task_id, "plan") is None
         evs = cli("list-events", {"task_id": nu.task.task_id})["events"]
         assert any(e["kind"] == "resolved" for e in evs)
 
@@ -546,3 +570,17 @@ class TestResolve:
         out = cli("resolve", {"task_id": ready.task.task_id,
                               "action": "restore"}, expect=1)
         assert out["code"] == "bad_request"
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

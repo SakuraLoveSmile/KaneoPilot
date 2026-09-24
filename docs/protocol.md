@@ -1,6 +1,6 @@
 # KaneoPilot 固定命令协议 v1
 
-本文件是桌面端、Codex 执行端与调度核心之间唯一的接口约定。任何改动只能由主 agent 发布新版本；实现者不得自行增删字段或语义。
+本文件是桌面端、pi 执行端与调度核心之间唯一的接口约定。任何改动只能由主 agent 发布新版本；实现者不得自行增删字段或语义。
 
 ## 1. 调用方式
 
@@ -36,7 +36,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `dispatching` | dispatch 请求已领取，UI 准备中 |
 | `prepared` | UI 证据已核验，待触发发送 |
 | `submitting` | Kaneo 已转 in-progress，待确认消息发出 |
-| `running` | 已确认发送，Devin 执行中 |
+| `running` | 已确认发送，pi worker 执行中 |
 | `in_review` | 已进入评审阶段 |
 | `needs_user` | 阻塞，需人工决定 |
 | `done` | 已归档完成 |
@@ -56,35 +56,92 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 - task `needs_user` → `需人工`（附 `failure_reason`/`blocked_summary`）
 - 其余直译
 
+### 看板列（board_column，派生，桌面唯一分列依据）
+
+`board_column` ∈ `needs_plan|todo|in_progress|in_review|done|failed`，由核心在 `list-tasks`/`get-task` 统一计算；桌面不得按中文标签、计划文件或历史失败记录自行归列。每个任务恰出现一次。
+
+非 `needs_user` 状态直映射：
+
+| task.status | board_column |
+|---|---|
+| `needs_plan` `planning` | `needs_plan` |
+| `ready` `dispatching` `prepared` `submitting` | `todo` |
+| `running` | `in_progress` |
+| `in_review` | `in_review` |
+| `done` | `done` |
+
+`needs_user` 按**当前未解决的失败证据**分类（历史失败不覆盖恢复后状态）：
+
+1. `send_state='unknown'`（发送不明）→ 不算失败，按 `failure_stage` 归列并附阻塞摘要；
+2. `failure_code ∈ {validation_failed, dispatch_failed, execution_failed, plan_failed}` → `failed`（有明确证据的规划/派发/执行失败）；
+3. 其余 `needs_user`（含 `remote_unavailable` `remote_conflict` `send_conflict` `send_unknown` `executor_lost` `interrupted_dispatch` `review_blocked` `observation_blocked` `reported` 及未识别码）→ 不算失败，按 `failure_stage` 归列并附阻塞摘要。
+
+> **v1.3 起本节「看板列」以 §5.15.4 为准**：异常（needs_user、评审未通过、失联）统一进第六列 `failed`，由 `lifecycle_column` 保留生命周期位置、`exception` 给出结构化异常信息。v1.2 的 `failure_stage` 归列口径仅用于计算 `lifecycle_column`。
+
+`failure_stage → board_column`：`needs_plan|planning|plan → needs_plan`；`ready|dispatching|prepared|submitting|dispatch → todo`；`running|monitor → in_progress`；`in_review|review → in_review`；`done → done`；缺失或不在表内（如历史 `needs_user` 值）时按 `task.stage` 同口径回退。
+
+**失联不是失败**：任何列内 `claimed` 请求租约过期 → 保留本列，`blocked_reason` 标 `执行端失联`，`display_status` 照旧派生 `执行端失联`。
+
+伴随字段（均在 TaskSummary/TaskDetail）：
+
+- `board_substatus`（中文词表，列内当前子状态）：
+  - `needs_plan`：`待规划`|`规划中`（planning）|`规划受阻`（阻塞归列）
+  - `todo`：`就绪`|`已排队`（有 queued dispatch）|`派发中`（dispatching/prepared/submitting）|`派发受阻`（阻塞归列，含发送不明）
+  - `in_progress`：`执行中`|`执行受阻`（阻塞归列）
+  - `in_review`：`评审中`|`待修复`（当前周期结论 `changes_requested`，关联 `fix_task_id`）|`评审受阻`（阻塞归列）
+  - `done`：`已完成`
+  - `failed`：`规划失败`|`派发失败`|`执行失败`（按 failure_code；兜底 `失败`）
+- `blocked_reason`：任一阻塞（needs_user 或活动请求失联）非空；失联时含失联请求 kind；失败列给具体原因。
+- `last_checked_at`：最近一次执行观测时间 = max（最近 monitor/review 尝试 finished_at、活动请求 heartbeat_at、kaneo_checked_at），无则 null。
+- `review_summary`：null 或 `{conclusion, registered_at, fix_task_id, review_key, report_path}`（当前周期；新一轮 in_review 起始即清空，下同）。
 ## 3. 命令总表
 
 | 命令 | 使用方 | 副作用 |
 |---|---|---|
 | `doctor` | 桌面/运维 | 只读诊断（`--online` 时才访问网络） |
-| `tick` | 执行端/桌面 | 按业务周期补建到期请求 |
+| `tick` | 执行端/桌面 | 按业务周期补建到期请求（v2 起不再建 plan-scan） |
 | `overview` | 桌面 | 只读汇总 |
-| `list-tasks` | 桌面 | 只读 |
-| `get-task` | 桌面 | 只读 |
-| `list-requests` | 桌面 | 只读（含失联派生态） |
-| `list-events` | 桌面 | 只读 |
-| `enqueue` | 桌面 | 建请求（幂等） |
+| `list-tasks` | 桌面 | 只读（默认排除 purged） |
+| `get-task` | 桌面 | 只读（purged 返回只读审计详情） |
+| `list-requests` | 桌面 | 只读（含失联派生态；`include_removed` 默认 false） |
+| `get-request` | 桌面 | 只读：请求详情+attempts+合法动作+attention_state（v2） |
+| `list-events` | 桌面 | 只读：标题/阶段/结果/中文摘要+游标翻页+搜索筛选（v2 扩展） |
+| `enqueue` | 桌面 | 建请求（幂等；dispatch 支持 confirm_plan+expected_plan_sha256） |
 | `set-priority` | 桌面 | 改排队顺序 |
 | `set-paused` | 桌面 | 暂停/恢复领取 |
-| `resolve` | 桌面 | 人工解除阻塞/释放失联 |
+| `resolve` | 桌面 | 人工解除阻塞/释放失联（v2 起不再自动启动规划） |
 | `recheck` | 桌面/执行端 | 重新核验远端+本地指纹 |
-| `sync-tasks` | plan 执行端 | 批量登记远端发现 |
-| `claim` | 执行端 | 事务领取（含 tick） |
+| `sync-tasks` | 桌面（手动获取） | 批量登记远端发现（v2 起不自动建 plan 请求） |
+| `fetch-todos` | 桌面 | 只读：分页枚举远端 To Do+附件与不可选原因（v2） |
+| `prepare-plan-input` | 桌面 | 建不可变规划材料目录（v2；不入队不调模型） |
+| `start-plans` | 桌面 | 逐任务提交手动规划（v2；仅已授权项入队） |
+| `claim` | 执行端 | 事务领取（含 tick；拒绝未授权规划请求） |
 | `heartbeat` | 执行端 | 续租 |
 | `report` | 执行端 | 记录请求结果 |
-| `publish-plan` | plan 执行端 | 登记已落盘计划 |
+| `publish-plan` | 规划 runner | 登记已落盘计划（v2 新协议：request_id/run_id/planner_input_sha256） |
 | `register-review` | review 执行端 | 登记评审结论与交付 |
-| `create-review-fix` | review 执行端 | 受控创建修复任务（远端写） |
+| `create-review-fix` | review 执行端 | 受控创建修复任务（远端写；规划请求不再自动启动） |
 | `advance-task` | monitor/review 执行端 | 受控 Kaneo 状态迁移（远端写） |
 | `dispatch-prepare` | dispatch 执行端 | 核验 UI 证据 → prepared |
 | `dispatch-begin-send` | dispatch 执行端 | 远端核验+转 in-progress → submitting |
 | `dispatch-confirm` | dispatch 执行端 | 核验发送证据 → running |
 | `dispatch-fail` | dispatch 执行端 | 失败记录 → needs_user |
 | `migrate` | 主 agent/运维 | 备份并导入旧状态（幂等） |
+| `archive-task` | 桌面 | 归档（移出活跃看板，可恢复） |
+| `trash-task` | 桌面 | 移入本地回收站（可恢复） |
+| `restore-task` | 桌面 | 从归档/回收站恢复（默认暂停自动推进） |
+| `purge-task` | 桌面 | 仅从回收站永久从列表移除（v2；保留历史与文件） |
+| `list-sessions` | 桌面 | 只读：按任务/执行轮次列出会话（含保存状态筛选） |
+| `get-session` | 桌面 | 只读：会话详情与关联状态 |
+| `session-messages` | 桌面 | 只读：按游标读取会话消息 |
+| `trash-session` | 桌面 | 会话移入调度台回收站（幂等，不停进程不删文件） |
+| `restore-session` | 桌面 | 会话从回收站恢复（幂等） |
+| `purge-session` | 桌面 | 仅从回收站永久从列表移除该轮次（v2） |
+| `get-exec-config` | 桌面 | 只读：PI 执行配置 |
+| `set-exec-config` | 桌面 | 写 settings.exec_config（经能力校验，不改 pi 全局配置） |
+| `exec-capabilities` | 桌面/执行端 | 只读：当前安装 pi 的能力与环境检查 |
+| `dispatch-start` | dispatch 执行端 | 落盘启动意图并拉起该轮 pi worker（幂等） |
+| `executor-status` | 桌面 | 只读：四个执行端 stage 的在途/最近一次运行状态（§5.19） |
 
 ## 4. 通用行为
 
@@ -173,7 +230,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 - `outcome ∈ succeeded|failed|needs_user`。
 - `succeeded`：请求→succeeded；按 kind 更新 task（monitor 带 `progress` 则更新 `last_progress`；`kaneo_status` 为观察值则记录）。
 - `failed`：请求→failed，记录 reason；task 保持原状态（由 `needs_user` 或 resolve 决定后续）。
-- `needs_user`：请求→failed，task→`needs_user`，写 `failure_reason`/`failure_code`（payload 可给）/`blocked_at`。
+- `needs_user`：请求→failed，task→`needs_user`，写 `failure_reason`/`failure_code`（payload 可给）/`blocked_at`。**task 已是 `needs_user` 时**：保留既有 `failure_stage` 与 `failure_code`（除非 payload 显式给了 `failure_code`），只更新 `failure_reason`/`blocked_at`——不让后到的通用 report 抹掉阻塞发生点与分类（v1.2）。
 - 任何 report 都写 attempt（outcome、evidence、note）与 event。
 
 ### 4.8 tick（业务周期调度）
@@ -232,15 +289,16 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 ### 5.2 tick / overview / list / get
 
 - `tick {}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`
-- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 900, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
-- `list-tasks {stage?, status?, needs_attention?: bool}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at}`
-- `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_reason, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`
-- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority,`（`display_status` 用 §2 同一中文显示词汇；`status` 为库内原值，失联派生只在 `display_status` 标 `执行端失联`） not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
+- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "board": {"needs_plan": 1, "todo": 2, "in_progress": 1, "in_review": 0, "done": 5, "failed": 0}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 900, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
+- `list-tasks {stage?, status?, board_column?, needs_attention?: bool, save_state?: active|archived|trashed|all}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, board_column, lifecycle_column, exception, board_substatus, last_checked_at, review_summary, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at, save_state, saved_at, auto_advance_paused, move_out_eligibility: {allowed: bool, reason: string|null}}`。`board_column` 过滤参数按 §2/§5.15.4 归列结果过滤（派生后过滤）；`save_state` 缺省 `active`。
+- `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_reason, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority,`（`display_status` 用 §2 同一中文显示词汇；`status` 为库内原值，失联派生只在 `display_status` 标 `执行端失联`） not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
 - `list-events {task_id?, limit?: 200}` → `{"events": [{id, at, task_id, request_id, kind, actor, detail}]}` 倒序。
 
 ### 5.3 enqueue / set-priority / set-paused
 
-- `enqueue {task_id, kind?, note?}`：kind 缺省按 task.status 推断（`needs_plan`→plan，`ready`→dispatch，`running`→monitor，`in_review`→review）；不允许的推断 → `bad_request`。→ `{"request": Request, "deduplicated": bool}`
+- `enqueue {task_id, kind?, note?, confirm_plan?: bool, expected_plan_sha256?: str}`：kind 缺省按 task.status 推断（`needs_plan`→plan，`ready`→dispatch，`running`→monitor，`in_review`→review）；不允许的推断 → `bad_request`。→ `{"request": Request, "deduplicated": bool}`
+  - **计划确认闸（v2）**：`kind="dispatch"` 且任务 `extra_json.plan_execution_hold` 为真时，必须 `confirm_plan:true` 且 `expected_plan_sha256` 等于任务当前 `plan_sha256`——同一事务内完成「哈希复核 + 建 dispatch 请求 + 解除 hold」；哈希不符或未确认 → `conflict`（不建请求、不解 hold）。`plan_execution_hold` 为假/无且 `confirm_plan` 未给时行为同旧版（直接排队）。自动领取与定点 `claim` 均不绕过 hold：hold 未解除前 dispatch 请求不得被领取。
+  - `kind="plan"` 不再由本命令直接排队（v2 手动门控）：任务 `needs_plan` 时 enqueue 推断为 plan → `bad_request`（原因：规划需在规划面板确认材料后经 `start-plans` 提交）；其余 kind 照旧。
 - `set-priority {request_id? task_id?, priority: int}`：request_id 直接改 queued 请求；task_id 改其活动 queued 请求；无 → `not_found`。
 - `set-paused {stage|null, paused}` → `{"paused": {...}}`
 
@@ -262,12 +320,16 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 ### 5.6 publish-plan
 
-`publish-plan {task_id, plan_path, plan_kind: standard|review_fix, source_sha256, requirements_sha256, generated_at, planner_model, reasoning_effort, run_id?}`
+`publish-plan {task_id, plan_path, plan_kind: standard|review_fix, source_sha256, requirements_sha256, generated_at, planner_model, reasoning_effort, request_id, run_id, planner_input_sha256}`
 
-- 校验：文件在 Plan 根内存在、frontmatter `task_id` 匹配、`implementation_status=未开始`、project 白名单与 repository 一致、重算 `plan_sha256`；`source_sha256`/`requirements_sha256` 与 task 当前指纹一致（task 有基线时）。
-- task 处于 `dispatching|prepared|submitting|running` → `conflict`（不得覆盖派发中输入）。
-- 成功：task→`ready`，写 plan_* 字段，event `plan_published`；若 task 有失败 plan 请求可同 report 闭环（调用方顺序：publish-plan → report succeeded）。
-- → `{"ok": true, "task_status": "ready", "plan_sha256": "..."}`
+v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形态的调用按 `bad_request` 拒绝。
+
+- **事务外核验**（不占写锁）：计划文件在 Plan 根内存在、无符号链接、frontmatter `task_id` 匹配、`implementation_status=未开始`、project 白名单与 repository 一致、重算 `plan_sha256`；`planner_input_sha256` 等于本轮规划输入快照哈希（`planner_inputs` 表 `input_sha256`，与请求 payload 登记一致）；远端 `get-task` 复验任务仍为 To Do 且 `requirements_sha256` 未变——远端不可达 → `remote_unavailable`（保留产物并阻塞发布，不写本地状态）。
+- **事务内复核**（单 `BEGIN IMMEDIATE`）：任务活跃（`save_state='active'` 且非 `purged`）、请求为本任务当前 `claimed` 规划请求且 `run_id` 匹配、租约未过期、`planner_input_sha256` 一致；任一不符 → `conflict`/`stale_run`。
+- **同一事务**：登记计划字段（plan_path/plan_sha256/plan_kind/generated_at/planner_model/reasoning_effort/source_sha256/requirements_sha256/repository），task→`ready`，置 `extra_json.plan_execution_hold=true`（安排执行前的手动确认闸），结束请求为 `succeeded` 并闭合 attempt；写 `plan_published` event。成功路径不再额外调用 `report succeeded`。
+- **幂等**：同 `run_id`、同计划哈希的重复提交返回 `{"ok": true, "deduplicated": true, ...}`；发布事务提交后 runner 崩溃不得回退为失联或失败。
+- **拒绝矩阵**：错误 `run_id`/`request_id`、过期租约、输入哈希不符、远端需求已变、远端不可达均拒绝；task `dispatching|prepared|submitting|running` → `conflict`（不得覆盖派发中输入）。
+- → `{"ok": true, "task_status": "ready", "plan_sha256": "..."}`（或 deduplicated 幂等形）。
 
 ### 5.7 register-review
 
@@ -283,10 +345,12 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 ### 5.9 advance-task
 
-`advance-task {task_id, run_id?, target: "in-review"|"done", expected_current: "in-progress"|"in-review", evidence_note?}`
+`advance-task {task_id, run_id?, target: "in-review"|"done", expected_current: "in-progress"|"in-review"|"done", evidence_note?}`
 
-- 核心经 bridge：`get-task` 验证 projectId/status/requirements → `update-status` → 再 `get-task` 验证目标态与指纹。
-- 成功：`in-review` → task `in_review` + 建 review 请求；`done` → task `done`。event `kaneo_transition`。
+- 允许的状态对：(in-progress→in-review)、(in-review→in-review)、(in-progress→done)、(in-review→done)、(done→done)。
+- 核心经 bridge：`get-task` 验证 projectId/status/requirements → `update-status` → 再 `get-task` 验证目标态与指纹。**`expected==target` 为被动同步对**（`(in-review,in-review)`、`(done,done)`）：远端已在目标态时跳过 `update-status` 写，只做核验——用于 monitor 同步「远端被他人推进」的任务。
+- **Review 前置守卫（v1.2）**：`target=done` 且 `expected_current="in-progress"` 时，要求 task 当前周期已登记 `review_conclusion=pass`；否则 `conflict`（执行完成不得跳过 Review 直接完成）。`expected_current="in-review"|"done"` 不受此限；`resolve mark_done` 人工登记不受此限；`sync-tasks` 观察到远端 `done` 属被动同步亦不受此限。
+- 成功：`in-review` → task `in_review` + 建 review 请求（新一轮评审：清 `review_report_path`/`review_report_sha256` 与上一周期 `review_conclusion`/`review_registered_at`，保留 `fix_task_id`/`review_key` 历史关联）；`done` → task `done`。event `kaneo_transition`。
 - 远端冲突 → `remote_conflict`，task 记 `kaneo_status` 观察值并 `needs_user`（`failure_code=remote_conflict`）。
 - → `{"ok": true, "kaneo_status": "...", "task_status": "..."}`
 
@@ -326,6 +390,429 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 10. **resolve/set-priority 返回**：`{"ok": true, "task": TaskSummary}` / `{"ok": true, "request": Request}`。
 11. **Kaneo 响应形状**以 bridge 解析口径为准（`as_list`/`unwrap_data` 宽容解析）；fake/stub 按真实服务形状对齐。
 12. **`doctor` 凭据**：输出不含 token 值及 `accessToken`/`Bearer` 字样。
+
+## 5.14 看板补充裁决（v1.2）
+
+1. **failure_code 词表**（report `needs_user`/dispatch-fail/migrate 使用，供 §2 归列判定）：
+   - 失败类（→ `failed`）：`plan_failed`（规划明确失败）、`validation_failed`（派发确定性校验）、`dispatch_failed`（派发执行失败且 send_state=not_sent）、`execution_failed`（执行明确失败）。
+   - 阻塞类（按 failure_stage 归列）：`reported`（通用需人工）、`observation_blocked`（暂时无法查看进度/锁屏）、`remote_unavailable`、`remote_conflict`、`send_conflict`、`send_unknown`、`executor_lost`、`interrupted_dispatch`、`review_blocked`（评审受阻）。
+   - 未识别/缺失码一律按阻塞类处理——失败列只认明确证据；`send_state='unknown'` 优先于一切 code 判阻塞。
+2. **`board_column` 一致性**：`list-tasks` 与 `get-task` 同任务同列；`overview.counts` 增加 `board` 键：`{needs_plan,todo,in_progress,in_review,done,failed}` 各列计数（含 needs_user 归列结果）。
+3. **待修复**：`in_review` 且当前周期 `review_conclusion='changes_requested'` → `board_substatus='待修复'`，`review_summary.fix_task_id` 关联修复任务；修复任务自身走 needs_plan→…→done 流程，不占原任务的列。
+4. **恢复即恢复**：resolve 后阻塞字段清除，归列回到生命周期直映射；`extra_json` 中历史 `failure` 记录不影响归列。
+5. **`sync-tasks` 远端 done**：观察到 `done` → task `done`（board_column=done），与 Review 守卫不冲突（被动同步非自动推进）。
+6. **评审受阻**（`register-review blocked` 或 review report needs_user）：`failure_code=review_blocked` → 留 `in_review` 列，`board_substatus='评审受阻'`。
+7. **桌面信任边界**：桌面只按 `board_column` 分列、`board_substatus` 标子状态、`blocked_reason` 显阻塞；不得用 `display_status`/plan_path 存在性/attempts 历史二次推断列归属。
+8. **`list-tasks board_column` 非法值** → `bad_request`（与 §1 未知参数同口径）。
+
+## 5.15 保存状态、异常归列与会话读取补充裁决（v1.3）
+
+### 5.15.1 save_state（任务保存状态，独立于生命周期）
+
+`save_state` 是任务在调度台的**保存状态**，与 `task.status` 生命周期正交，不复用生命周期值：
+
+| save_state | 含义 |
+|---|---|
+| `active` | 活跃，出现在看板（默认） |
+| `archived` | 已归档：移出活跃看板，保留全部详情/会话/计划/报告/执行记录与关联，可恢复 |
+| `trashed` | 已移入本地回收站，可恢复 |
+| `purged` | 永久从列表移除的终态（v2）：不可恢复、不排队、不修改；历史与文件全部保留，仅退出常规列表与统计 |
+
+- 库内列：`tasks.save_state TEXT NOT NULL DEFAULT 'active'`、`tasks.saved_at TEXT`（移出时间）、`tasks.auto_advance_paused INTEGER NOT NULL DEFAULT 0`（恢复后默认暂停自动推进）。
+- 归档/回收站**只影响调度台**：不删除 Kaneo 任务、计划文件、报告或执行端会话； Kaneo 状态不被本地异常分类或归档动作修改。
+- **已完成（board_column=done）与已归档（save_state=archived）是两个概念**：归档不等于标记完成，完成任务不自动归档。
+
+### 5.15.2 archive-task / trash-task / restore-task
+
+| 命令 | payload | 效果 |
+|---|---|---|
+| `archive-task` | `{task_id, expected_save_state?: string}` | save_state→`archived`，写 `saved_at`；同事务取消该任务 `queued` 请求；event `task_archived` |
+| `trash-task` | `{task_id, expected_save_state?: string}` | save_state→`trashed`，写 `saved_at`；同事务取消 `queued` 请求；event `task_trashed` |
+| `restore-task` | `{task_id, resume_auto?: bool=false}` | save_state→`active`、清 `saved_at`；`auto_advance_paused = resume_auto ? 0 : 1`；本地重算计划/来源哈希并尝试远端 `get-task` 观察（远端不可达→warning 不阻断）；按核验后状态重新归列；event `task_restored` |
+
+- **禁用条件**（`conflict` + 中文原因，UI 展示）：`task.status ∈ {planning, dispatching, prepared, submitting, running, in_review}`（正在规划/派发/执行/评审）、存在**未解除失联**请求（`claimed` 且租约过期）、`send_state='unknown'`（发送不明），或存在 `claimed` 请求（已被执行端领取）。其余状态（含 `needs_user` 其他阻塞、`needs_plan`、`ready`、`done`）允许移出。核心统一在任务摘要输出 `move_out_eligibility: {allowed, reason}`。
+- **排队取消与领取竞争**：取消在单个 `BEGIN IMMEDIATE` 事务内对该任务 `status='queued'` 的请求执行 `cancelled`；事务内复核状态，若已被 `claimed`（执行端已领取）→ 中止并返回 `conflict`（原因：任务已被执行端领取，暂不能移出看板），不取消、不改保存状态。
+- **保存状态冲突核验**：`archive-task` 与 `trash-task` 支持可选 `expected_save_state`；已处于目标状态按幂等成功处理；若当前保存状态与 `expected_save_state` 不符（且不是目标状态）则返回 `conflict`。
+- **幂等**：对已处于目标 save_state 的任务返回 `{"ok": true, "deduplicated": true}`，不重复写事件。
+- `restore-task` 对 `active` 任务同样幂等（仍执行状态核验并返回任务）。
+
+### 5.15.3 调度入口排除（归档/回收站/恢复暂停）
+
+- `list-tasks` 默认只返回 `save_state='active'`；新增过滤参数 `save_state` ∈ `active|archived|trashed|all`（非法值 `bad_request`）。`overview.counts` 只统计 active。
+- `tick`：不为 `save_state != 'active'` 或 `auto_advance_paused=1` 的任务建 plan/monitor/review 请求（workspace 级 `plan-scan` 不受影响）。
+- `claim`：候选请求所属任务 `save_state != 'active'` 或 `auto_advance_paused=1` → 跳过（自动取单时视不存在）；按 `request_id` 指定领取 → `{"claimed": false, "reason": "task_archived"|"task_paused"}`。
+- `enqueue`：目标任务 `save_state != 'active'` → `conflict`；`auto_advance_paused=1` → `conflict`（原因：任务已暂停自动推进，请先恢复自动推进）。
+- `sync-tasks`：`save_state != 'active'` 的任务**整体跳过**（不 upsert、不改状态/指纹、不建请求）——后续同步不得把归档/回收站任务重新导入看板。
+
+### 5.15.4 看板归列 v1.3（board_column / lifecycle_column / exception）
+
+读取层统一输出三个字段（TaskSummary/TaskDetail 均有）：
+
+- **`lifecycle_column`**（纯生命周期位置，无异常逻辑）：`needs_plan|planning→needs_plan`；`ready|dispatching|prepared|submitting→todo`；`running→in_progress`；`in_review→in_review`；`done→done`；`needs_user` 按 `failure_stage` 归列（缺失回退 `task.stage`，同 v1.2 口径）。
+- **`board_column`**（六列唯一分列依据；异常一律进第六列，正常列不再混入异常卡片）：
+  1. `status='needs_user'` → `failed`；
+  2. `in_review` 且当前周期 `review_conclusion='changes_requested'` → `failed`（评审未通过·待修复）；
+  3. 存在活动 `claimed` 请求且租约过期（失联）→ `failed`；
+  4. 其余按 status 直映射（同 lifecycle_column 的非 needs_user 部分）。
+- **`exception`**（结构化异常信息；无异常为 `null`）：
+
+```json
+{"kind": "failed|send_unknown|manual_block|executor_lost|review_blocked|observation_blocked|review_rejected",
+ "label": "规划失败|派发失败|执行失败|失败|发送不明|需人工处理|执行端失联|评审受阻|监控异常|评审未通过·待修复",
+ "severity": "failed|blocked",
+ "detail": "<原因文本，同 blocked_reason>",
+ "failure_code": "<原始 failure_code 或 null>",
+ "fix_task_id": "<review_rejected 时关联的修复任务，否则 null>"}
+```
+
+kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（规则 2）→ `review_rejected`；`needs_user` 时 `send_state='unknown'` → `send_unknown`（优先于一切 code），`failure_code=observation_blocked` → `observation_blocked`，`failure_code=review_blocked` → `review_blocked`，`failure_code ∈ {validation_failed, dispatch_failed, execution_failed, plan_failed}` → `failed`，其余 → `manual_block`。`severity`：仅 `failed` 为 `failed`（红），其余为 `blocked`（橙）。
+
+- `board_substatus` 在第六列等于 `exception.label`；前五列维持 v1.2 词表。
+- **历史错误不影响已恢复任务**：resolve 清阻塞字段后归列回 lifecycle 直映射；`extra_json` 历史记录不参与归列。
+- **观测异常自动清除**：`report outcome=succeeded` 且 `kind=monitor` 时，若任务处于 `needs_user` 且 `failure_code='observation_blocked'` → 清阻塞字段、任务回 `running`（监控连接恢复即自动清除对应观测异常）。
+- **不自动解除的异常**：发送不明、人工阻塞、失联租约只经现有恢复流程（resolve `restore`/`accept_duplicate`/`mark_sent`/`retry`/`replan`/`dismiss`/`release_lost`）处理；**收到新会话日志不解除任何异常**。
+- `list-tasks` 的 `board_column` 过滤参数沿用 v1.2 语义（派生后过滤），第六列值为 `failed`。
+
+### 5.15.5 会话适配（本机运行记录）与会话命令
+
+- 数据源为**本机运行记录**（v1.6 起后端为 pi；v2 起规划轮次 backend=codex，见 §5.22.3）：运行记录根目录取 settings `session_runs_root`，缺省 `~/Library/Application Support/KaneoPilot/runs`。按 `<root>/<task_id>/<run_id>/` 定位执行目录：先核验 `job.json` 的 `task_id`/`run_id` 与目录名一致且 `backend` 字段存在；`backend` 不在 `(pi, codex)` 的历史轮次 → `unavailable` + detail「旧后端会话已弃用」，再读取同目录 `events.jsonl`。**不按标题猜测关联。**
+- **路径安全**：task_id/run_id 仅允许 `[A-Za-z0-9._-]`；解析后的执行目录必须仍位于根目录内（拒绝 `..` 与符号链接逃逸）；身份不符或越界 → 读取失败（`state=unavailable` + detail 说明），不得读取他目录。
+- **会话关联**：以 `task_id + run_id` 绑定确切会话（`session_marker = "<task_id>/<run_id>"`）。
+- 会话状态 `state` ∈ `associated|pending|unavailable`：`associated` = 身份核验通过且 `events.jsonl` 成功解析；`pending` = 执行目录与 `job.json` 有效但 `events.jsonl` 尚未导出（UI 显示「等待会话记录」，UI 端继续轮询）；`unavailable` = 执行目录/`job.json` 缺失、身份不符、越界或旧后端弃用（UI 显示原因 + 重试）。连接状态 `connection.state` ∈ `ok|degraded|unavailable`：本机记录无推送订阅 → 恒 `degraded`（UI 按 `session_poll_seconds`，默认 2 秒增量检查导出更新）；根目录不存在等机制性失败 → `unavailable`。读取失败（如 JSON 半写入）时 `connection` 仍 `degraded`，`detail` 携带原因，**保留上一份有效内容，不当作空会话**。
+- **半写入容忍**：`events.jsonl` 正在写入导致解析失败时，本轮返回上一份有效快照（进程内缓存）并在 `connection.detail` 说明；无上一份时按 `pending` 处理，不报「暂无消息」。
+- 消息结构（稳定标识、顺序、类型、内容、修订版本、来源时间）：
+
+```json
+{"id": "<源稳定 id>", "seq": 12, "run_id": "...", "type": "user|assistant|tool_call|tool_result|command_output|system",
+ "content": "<完整文本>", "revision": 3, "source_at": "ISO8601",
+ "tool": {"name": "...", "input": "...", "output": "...", "exit_code": 0}}
+```
+
+`tool` 仅 tool_call/tool_result/command_output 类型出现。读取按 `seq` 排序、按 `id`+`revision` 去重/更新，游标推进不回退。
+
+| 命令 | payload | 返回 |
+|---|---|---|
+| `list-sessions` | `{task_id?}` | `{"sessions": [SessionInfo]}`；缺省返回全部有关联任务的会话（active 任务优先） |
+| `get-session` | `{task_id, run_id}` | `{"session": SessionInfo, "connection": {...}}` |
+| `session-messages` | `{task_id, run_id?, cursor?, limit?}` | `{"session": SessionInfo, "messages": [Message], "next_cursor": "...", "has_more": bool, "connection": {...}}` |
+
+- `run_id` 缺省取该任务当前/最近一个带 `session_marker` 的执行轮次；无会话 → `state=pending`，`messages=[]`。
+- 首次加载（无 cursor）返回完整历史；增量读取传 `next_cursor`；连接中断后重连由**调用方带最后 cursor** 补齐缺失（本地 `session_reads` 记录每会话读取位点，仅作位点记录，服务端**不得**在 payload 无 cursor 时隐式套用已存位点——那会让重开阅读器只拿到增量而丢历史）。半写入保留的上一份有效快照须**跨进程持久**（CLI 每次调用是新进程），持久位在 `session_reads`。
+- **会话输出只作为进度展示**：完成/失败/进入评审仍由受控生命周期命令确认；原有定时监控保留为流程保障。
+- 卡片分别显示「会话更新时间」（`session.updated_at`）与「最近状态检查」（`last_checked_at`），不把心跳时间当作进度更新时间。
+
+### 5.15.6 allowed_actions 新增
+
+`archive`（可归档时）、`trash`（可移入回收站时）、`restore`（`save_state != active` 时）、`resume-auto`（`auto_advance_paused=1` 时）。禁用原因由 `blocked_reason`/命令错误原文提供。
+
+## 5.16 执行轮次索引与会话回收站（v1.5）
+
+### 5.16.1 轮次索引 `execution_rounds`
+
+以 `task_id + run_id` 唯一定位一个执行轮次（= session_marker 的两段），调度台本地表：
+
+| 列 | 语义 |
+|---|---|
+| `task_id`, `run_id` | 复合主键；`session_marker = "<task_id>/<run_id>"` |
+| `backend` | `pi`（历史行可为 `dsh`/`headless`，读取层已弃用为 unavailable） |
+| `session_id`, `session_title` | 会话关联（pi 轮次由 worker 写入 job.json，读取层回填） |
+| `run_status` | `pending\|running\|finished\|failed\|unknown`（最近观察值） |
+| `config_json` | dispatch claim 时固化的 PI 执行配置快照（见 §5.17），此后设置变更不影响该轮 |
+| `worktree_path` | 该轮独立 worktree 绝对路径（见 §5.18.1） |
+| `started_at` | **启动意图落盘时间**（dispatch-start 事务写入；非空即禁止再创建进程） |
+| `pid` | 已启动 worker 进程号（诊断/展示用，不作为存活或重启依据） |
+| `save_state` | `active\|trashed`（会话保存状态，与任务 save_state 正交） |
+| `saved_at`, `created_at`, `updated_at` | ISO 8601 UTC |
+
+- **写入点**：① dispatch claim 时创建（backend/config 快照固化）；② 读取层回填——`list-sessions`/`get-session`/`trash-session`/`restore-session` 按 runs 根目录 `job.json` 身份核验（同 §5.15.5）后补入缺失行。
+- **回填永不改写 `save_state`/`saved_at`**：已存在行只刷新 `backend/session_id/session_title/run_status/worktree_path/updated_at`——重复导入不得复活已删除会话。
+- `run_status` 观察：pi 轮次以 `job.json.status` 为准并在读取时刷新索引；无 job.json/无 status 字段保持已存值（无则 `unknown`）。
+- 删除会话只改本表 `save_state`；不终止进程、不改任务生命周期、不删事件日志/运行记录/工作目录。
+
+### 5.16.2 `trash-session` / `restore-session`
+
+| 命令 | payload | 效果 |
+|---|---|---|
+| `trash-session` | `{task_id, run_id, expected_save_state?}` | `save_state→trashed`、写 `saved_at`；event `session_trashed` |
+| `restore-session` | `{task_id, run_id}` | `save_state→active`、清 `saved_at`；event `session_restored` |
+
+- 返回 `{"ok": true, "deduplicated": bool, "session": SessionInfo}`；已处于目标状态 → `deduplicated: true`，不重复写事件；`expected_save_state` 与当前不符（且非目标态）→ `conflict`。轮次不存在且无法经身份核验回填 → `not_found`。
+- **禁止删除**（`conflict` + 中文原因；`list-sessions` 同轮返回 `blocked_reason` 同文案），任一成立即禁：
+  1. **仍在执行/评审**：索引 `run_status='running'`，或该轮为任务当前轮次（task.session_marker 匹配）且 `task.status ∈ {planning, dispatching, prepared, submitting, running, in_review}`；
+  2. **失联待处理**：存在 `run_id` 匹配且租约过期的 `claimed` dispatch 请求（未经常 `resolve release_lost` 解除）；
+  3. **发送状态不明**：该轮为任务当前轮次且 `task.send_state='unknown'`。
+- 删除**不停止进程**、不修改任务生命周期、不删除任何文件；`restore-session` 无禁止条件。两侧均可重复调用。
+- 历史轮次（非当前轮次、run_status 非 running、无失联）允许删除。
+
+### 5.16.3 `list-sessions` / `get-session` 扩展
+
+- `list-sessions` payload 增加 `save_state ∈ active|trashed|all`，缺省 `active`；非法值 `bad_request`。
+- `SessionInfo` 增加字段（`get-session`/`session-messages` 返回同扩展）：
+
+```json
+{"backend": "pi|dsh|headless", "run_status": "pending|running|finished|failed|unknown",
+ "save_state": "active|trashed", "saved_at": "ISO|null",
+ "allowed_actions": ["trash-session"] | ["restore-session"] | [],
+ "blocked_reason": "<中文原因|null>"}
+```
+
+- `allowed_actions`：active 且非禁止 → `["trash-session"]`；trashed → `["restore-session"]`；active 且禁止 → `[]` + `blocked_reason`。
+
+## 5.17 PI 执行配置与能力查询（v1.6）
+
+### 5.17.1 配置对象
+
+settings 键 `exec_config`（JSON）：
+
+```json
+{"provider": "CloseAI", "model": "deepseek-flash",
+ "reasoning_effort": "xhigh", "agent_preset": "default",
+ "updated_at": "ISO"}
+```
+
+- **初始默认**（未保存时生效值）：`CloseAI / deepseek-flash / xhigh / default`。
+- `agent_preset` 对应 `agents_dir`（缺省 `<app_support>/agents`，`KANPILOT_AGENTS_DIR` 覆盖）下的 `<name>.md` 文件；worker 经 `pi --system-prompt <file>` 注入。
+- 凭据只查就绪态：`pi auth check --provider <p> --model <m>` 的退出码；任何命令、界面、日志、数据库**不得**输出或持久化凭据值，也不读取 `~/.pi` 之外的 pi-desktop 内部库。
+- 调度台改配置只写本库 `settings.exec_config`；不写 `~/.pi/agent/*`、不动 pi 全局配置。
+
+### 5.17.2 命令
+
+- `get-exec-config {}` → `{"config": {...}|null, "defaults": {...}}`；`config=null` 表示从未保存，`defaults` 恒为初始默认。
+- `set-exec-config {provider?, model?, reasoning_effort?, agent_preset?}`（至少一个字段；未知字段 `bad_request`）：
+  - 对照 `exec-capabilities` 校验：`provider`/`model` 必须存在；`reasoning_effort` 必须是**该模型支持值之一**（禁止显示/接受模型不支持的等级）；`agent_preset` 必须在 roster（`<name>.md` 存在）且无 `broken`。
+  - 失败 → `bad_request` + 具体原因，**不静默降级、不自动换模型或 agent**；成功 → 写 `exec_config` 并返回 `{"config": {...}}`。合并更新（只给部分字段时保留其余已存值；从未保存时其余字段取默认）。
+- `exec-capabilities {}` →
+
+```json
+{"ok": true,
+ "pi": {"path": "/path/to/pi|null", "version": "0.85.1|null",
+        "home": "/Users/x/.pi"},
+ "providers": [{"id": "CloseAI", "display_name": "CloseAI",
+   "models": [{"id": "deepseek-flash", "name": "...",
+               "reasoning_efforts": ["minimal","low","medium","xhigh"]}]}],
+ "presets": [{"id": "default", "name": "default",
+              "description": null, "broken": null,
+              "path": "<agents_dir>/default.md"}],
+ "checks": [{"name": "pi_binary", "ok": true, "detail": "..."}]}
+```
+
+  - 数据源：`PI_HOME`（缺省 `~/.pi`，`KANPILOT_PI_HOME` 覆盖）下 `agent/models.json` 的 `providers.<id>.models`；`reasoning_efforts` 由模型 `reasoning` + `thinkingLevelMap` 推导（reasoning=false → 空集）。preset roster = `agents_dir` 下全部 `*.md`（文件名 stem 为 id）。
+  - `pi` 可执行：`KANPILOT_PI_BIN` 覆盖 → PATH 解析 → 回退 `~/.npm-global/bin/pi`（Finder 启动的 app PATH 不含用户 bin 目录）；运行 `<bin> --version` 取首个 `x.y.z` 形态行（超时 10s）。
+  - `checks` 至少含：`pi_binary`、`models`（models.json 可读且含 providers）、`agent_preset`（agents_dir 下存在 *.md）、`credential`（当前配置 provider/model 的 `pi auth check` 退出码；detail 只写就绪/未就绪摘要，不写密钥值）。
+  - 任一关键项失败 → `ok:false`，具体项 `ok:false` + detail（仍返回已解析到的部分）。
+
+### 5.17.3 配置快照与派发阻断
+
+- **快照固化**：dispatch claim 时把当前生效配置复制进该轮 `execution_rounds.config_json`；此后 `set-exec-config` 只影响新轮次。
+- **派发阻断**：dispatch claim 校验链（§4.5）追加第 7 步 `exec-capabilities` 可用性检查（`ok==true`，即 pi 可执行、models.json 可读、当前配置的 provider/model/effort/preset 有效、凭据就绪）。不满足 → 按 §4.5 确定性失败处理（`validation_failed`，task → `needs_user`），**不自动换模型或 agent**；`dispatch-start` 落盘前复核同一条件（失败 → `validation_failed`，不启动进程）。
+- 能力检查反映**当前进程环境**（pi auth 状态即执行端环境）；执行端环境缺凭据即阻止派发。
+
+## 5.18 PI 执行接入（backend=pi，v1.6）
+
+### 5.18.1 后端、进程与 worktree
+
+- **新 dispatch claim 恒 `backend="pi"`**：claim context 增加 `backend` 与 `exec_config` 快照（`{provider, model, reasoning_effort, agent_preset}`）；不再提供其他执行路径。**历史轮次**（rounds.backend ∈ `dsh|headless` 等旧值）：DB 行保留，读取层返回 `unavailable` + detail「旧后端会话已弃用（仅 pi 可读）」，不取消、不重发。
+- 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：`worktree_path = worktrees_root/<task_id>/<run_id>`（settings `worktrees_root`，缺省 `<app_support>/worktrees`），自 `task.repository` 创建；会话删除不删除 worktree。
+- worker 拉起 `pi -p --mode json --session-dir <run_dir>/pi-sessions --model <provider>/<model> --thinking <level> --system-prompt <agent.md>`（`agent.md` 为空则不传该参数），`cwd=spec.cwd`，`start_new_session`，env 透传 + `PI_HOME`（`KANPILOT_PI_HOME` 优先）。stdout 逐行消费 JSONL：OSC 序列与非 JSON 行丢弃。
+- 运行记录目录沿用 `<session_runs_root>/<task_id>/<run_id>/`（缺省 `~/Library/Application Support/KaneoPilot/runs`）：`job.json`（`backend:"pi"|"codex"`、`session_id`/`session_title`、config 快照、pid、`status ∈ running|finished|failed`、起止时间、`exit_code`、`detail`）+ `events.jsonl`。`job.json` 身份核验（task_id/run_id/backend）同 §5.15.5；身份不符 → 读取 `unavailable` + `run_status` 记 `failed`（detail=identity_mismatch），不读他目录。
+
+### 5.18.2 pi 事件流 → events.jsonl（事件契约不变）
+
+worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v":1, "seq":<int 单调递增>, "ts":"ISO", "type":...,...}`；**半写行容忍**（尾行截断丢弃，保留上一份有效内容），**首事件恒为 `session`**，收尾写序恒「job 先、session 补齐、terminal 最后」。pi → events 映射：
+
+| pi 帧 | events `type` | Message.type | 说明 |
+|---|---|---|---|
+| `session`（id/name/cwd） | `session` | `system` | **首事件**，dispatch-confirm 核验凭据 |
+| `message_end`（user） | `user` | `user` | 提示词/指令 |
+| `message_end`（assistant，text+thinking 块拼接） | `assistant_message` | `assistant` | 同 seq 内容更新 → revision 变化 |
+| `tool_execution_start` | `tool_call` | `tool_call` | `tool.name`/`tool.input` |
+| `tool_execution_end` / `toolResult message_end` | `tool_result` 或 `command_output` | 同名 | bash 类工具 → `command_output`，exitCode 入 `tool.exit_code` |
+| `turn_end`/`agent_end` | （驱动 job，不发消息） | — | `agent_end`+exit 0 → finished/completed |
+| 进程终了 | `terminal` | `system` | `outcome`/`reason`，驱动 `run_status` |
+
+- 稳定标识 `id = "round:<seq>"`、`seq` 排序、`id+revision` 去重/更新、`revision` 为内容 sha 派生整数——全部沿用 §5.15.5 口径；`run_id` 由命令层注入。
+- `extension_ui_request` 等 UI 交互帧与 OSC 噪声**不进入** events.jsonl。
+- 覆盖要求：正文、工具调用、命令输出、子 agent 事件均须透出到阅读器消息流。
+
+### 5.18.3 派发状态机（pi 分支）
+
+顺序：`claim(→dispatching, 固化快照)` → `dispatch-prepare` → `dispatch-begin-send`（远端迁移，语义不变）→ `dispatch-start` → `dispatch-confirm`（→running）；失败仍走 `dispatch-fail`。
+
+- **claim context（v1.6）**：context 增加 `backend: "pi"` 与 `exec_config` 快照；`instruction` 为无附件形态——`任务标识：<task_id>/<run_id>。读取并完整执行计划文件 <plan_path>，保留现有改动，按计划使用 subagent 和独立 worktree，完成验证并报告结果。`
+- **`dispatch-prepare` evidence**：`{"session_marker","repository","backend":"pi","config":{provider,model,reasoning_effort,agent_preset}}`。核心校验：marker/repository 等于任务；`backend` 与该轮一致；`config` 全等于该轮 `config_json` 快照；计划哈希自 claim 未变。通过 → `prepared`（存 `ui_evidence`）。
+- **`dispatch-start {task_id, run_id}`**：要求 task `submitting`（即 `dispatch-begin-send` 已完成）、该轮有 claimed dispatch 请求、轮次 `backend=pi`。
+  1. **可用性复核先行**：§5.17.3 门 → 失败 `validation_failed`（不落意图、不启动进程；任务交 dispatch-fail 处置）。
+  2. **意图先落盘**：单事务写入启动意图 `started_at`；已存在启动意图 → 返回 `{"status":"started","deduplicated":true,...}`，**绝不创建第二个进程**（同一轮次只允许一次真实启动，不凭 PID 判断存活去重启）。
+  3. 创建 worktree（已存在同路径则复用；`task.repository` 非 git 仓库时退化为普通目录并在 spec 记 `worktree_mode:"plain"`）→ 写 `spec.json`（含 `pi_home`/`agent_md`/`timeout_seconds` 等）→ 拉起 `kanpilot.pi_worker` 进程（独立会话，stdout/stderr 重定向 `worker.log`）→ 事务内记录 `pid`/`worktree_path` → event `round_started`；拉起失败 → `internal`（意图保留供取证）。
+  4. 轮询 `events.jsonl` 首个 `session` 事件至多 `pi_start_wait_seconds`（默认 30，env `KANPILOT_PI_START_WAIT` 秒可覆盖）。
+  - 返回 `{"status":"starting"|"started", "pid": int|null, "session_id": str|null, "worktree_path": "...", "deduplicated": bool}`；超时未见 session 事件 → `status:"starting"`、`session_id:null`（执行端经 `get-session` 轮询到 `session_id` 后再 confirm）。
+- **`dispatch-confirm` evidence**：`{"session_marker","repository","backend":"pi","session_id":"...","protocol_seen":true,"config":{...}}`。核心校验：该轮启动意图已落盘且 `started_at` 非空；`events.jsonl` 已出现 session 事件且 `session_id` 匹配；`config` 等于快照 → 走既有 running 迁移（sent/send_state/monitor 请求/释放串行位不变）。session 事件缺失 → `evidence_invalid`，task 停留 `submitting`（同 §5.13-7 口径）。
+- **`dispatch-fail` 沿用**；`send_state=unknown` 时保留启动意图（pid/session_id/config）供恢复与取证——发送结果不明不得清空恢复信息。
+
+### 5.18.4 监控、完成判定与异常
+
+- monitor 读取轮次状态与执行证据：`get-session` 返回的 `SessionInfo` 含 `run_status`，并返回 `round_detail`：
+
+```json
+{"round_detail": {"backend":"pi","run_status":"running","worktree_path":"...",
+  "pid": 123, "started_at":"ISO|null","ended_at":"ISO|null","exit_code":0|null,
+  "terminal":{"outcome":"completed|failed","reason":"..."}|null,
+  "config":{...}}}
+```
+
+  执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
+- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（终止前存在退出码 0 的验证类命令输出，或计划验证步骤在最终消息中被引用——由 monitor 执行端核对语义，核心不解析语义）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
+- **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
+- **单独条件不得推动完成**：子 agent 结束、进程正常退出、模型自称完成——任一单独出现都不满足 (a)(b)(c)，任务保持 `running` 或按异常处置。
+
+### 5.18.5 worktree 与评审衔接
+
+- context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
+- Done 后 worktree 与运行记录保留；合并回主仓库由人工完成，本系统不自动 merge/commit/push。
+
+## 5.19 执行端调度（App 内置，v1.6）
+
+- 四个执行端（plan/dispatch/monitor/review）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分，与旧 automation 契约一致）。
+- 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
+- **App 不常驻时不运行**：App 退出后不再触发（设置页明示）；v1.6 不引入 launchd/外部守护。
+- executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
+- runner 自己把运行记录写 `settings.executor_runs[stage]`（`pid/started_at/log/exit_code/finished_at`）——`executor-status` 读取的唯一数据源。
+- `executor-status {}` → `{"stages": {"<stage>": {"running": <entry>|null, "last": <entry>|null}}}`；`running` = entry.pid 存活探测通过。
+- **本地网络/代理**：macOS 本地网络隐私会拦截未授权 app 对 LAN（如模型端 `192.168.0.0/16`）的直连，pi 报 `Connection error`。调度器拉起子进程时探测系统 HTTP 代理（`CFNetworkCopySystemProxySettings`）并注入 `HTTP(S)_PROXY`（`NO_PROXY` 仅 localhost/127.0.0.1/::1），让 pi 经 loopback 代理转发到 LAN；模型在公网/localhost 时同样无害。
+
+## 5.20 保存状态终态与永久从列表移除（v2，T1/T4）
+
+### 5.20.1 `purged` 终态
+
+`save_state` 增加第四个值 `purged`（终态）。语义：**永久从列表移除**——任务/轮次不再出现在任何常规列表与统计中，但数据库实体、requests/attempts/events、计划/报告/会话文件与 worktree **全部保留**，不物理删除、不释放磁盘空间。
+
+- 只能从 `trashed` 发起；活跃或仅归档记录不得直接 purged。
+- purged 任务/轮次不可恢复、不可排队、不可修改、不被 `sync-tasks`/目录回填复活。所有写入口（enqueue/resolve/claim/report/publish-plan/dispatch-*/advance-task/register-review/create-review-fix/trash-*/restore-*/archive-*/set-priority）对 purged 目标一律拒绝（`conflict`），不只隐藏按钮。
+- 明确 ID 的 `get-task`/`get-session`/`get-request` 仍可读取审计详情：返回 `read_only: true`、`allowed_actions: []`、附原因字段；不得报「不存在」。
+- 运行记录（events）仍可打开只读详情；`list-events` 不受 purged 影响（历史照常可翻页查看，标题经 §5.21.3 规则回填）。
+
+### 5.20.2 `purge-task` / `purge-session`
+
+| 命令 | payload | 返回与语义 |
+|---|---|---|
+| `purge-task` | `{task_id, expected_save_state: "trashed"}` | `{ok, deduplicated}`；已 `purged` 为幂等成功。前置：`save_state` 必须为 `trashed`（否则 `conflict` 中文原因），且满足安全条件——无 `queued`/`claimed` 请求、无未解除失联、`send_state != 'unknown'`。同事务复核；条件不满足 → `conflict` 逐项给原因。 |
+| `purge-session` | `{task_id, run_id, expected_save_state: "trashed"}` | 同上，精确到轮次（`execution_rounds.save_state`）。轮次不存在 → `not_found`。 |
+
+- 永久移除任务后：其关联会话（`execution_rounds`）与请求退出常规列表及统计；`list-sessions`/`list-requests`/`list-tasks` 默认排除（`list-requests`/`list-sessions` 支持 `include_removed`/对任务 save_state 的排除由 `save_state='purged'` 天然过滤）。
+- 每项独立事务，不回滚已成功项；「清空当前分类」由界面固定本次确认时的对象集合逐项调用，不把随后新进入回收站的对象一起清理。
+- 确认文案（UI）：「永久从列表移除；保留历史记录与文件，不释放磁盘空间。」
+
+## 5.21 可处理请求详情与可读事件（v2，T2/T3）
+
+### 5.21.1 `get-request`
+
+`get-request {request_id}` →
+
+```json
+{"request": {"request_id","idempotency_key","task_id","stage","kind","status",
+ "display_status","priority","not_before","requested_by","run_id","claimed_by",
+ "claimed_at","heartbeat_at","lease_expires_at","result","attempt_no",
+ "created_at","updated_at"},
+ "task": {TaskSummary}|null,
+ "attempts": [Attempt],
+ "allowed_actions": ["view","set-priority","release_lost","retry","replan","prepare_plan","fetch_todos", ...],
+ "blocked_reason": "<中文原因|null>",
+ "read_only": false,
+ "log_path": "<该请求关联轮次的 events.jsonl 绝对路径|null>",
+ "attention_state": "actionable|historical|informational"}
+```
+
+- `task` 为关联任务摘要（TaskSummary）；无任务（plan-scan）或任务已 purged 时为 `null`（purged 任务仍可经 `read_only:true` 的 `get-task` 查看）。
+- `attempts` 按 `id` 升序；含结构化结果（result_json）、失败说明（note/failure）、`send_state`、`evidence`。
+- `allowed_actions` 由核心按**当前任务状态与失败阶段**派生，UI 只渲染、不自判：
+  - `queued`：`view`、`set-priority`；旧未确认规划（kind=plan 且 payload 无 `manual_authorized`）追加 `prepare_plan`（「准备规划」，打开材料面板）。
+  - `claimed`：`view`（进度/日志）；失联（租约过期）追加 `release_lost`；不显示普通重试。
+  - `failed`：按当前任务状态与失败阶段给合法动作——`retry`（send_state=not_sent/非 dispatch 阻塞）、`replan`（needs_user）、`release_lost`（失联遗留）、`prepare_plan`（规划类失败重试先打开材料面板）；发送结果不明（send_state=unknown）不出现普通重试。
+  - `succeeded`/`cancelled`：`view`（只读）。
+  - 无任务的旧 `plan-scan`：`view`、`fetch_todos`（「重新获取 To Do」进入规划面板；不恢复自动扫描）。
+- `read_only`：purged 关联、或 `succeeded`/`cancelled`/`failed` 终态且无可执行动作时为 `true`。
+- `attention_state`：`actionable`（queued/claimed/lost/当前失败需处理）｜`historical`（旧失败已有后续成功、任务已归档/回收/移除、或终态无待办）｜`informational`（succeeded/心跳等纯记录）。历史失败不冒充当前异常：同一任务的旧 failed 请求在已有更新成功请求或任务已离开该阶段时归入 `historical`/`informational`。
+
+### 5.21.2 `list-events` 扩展
+
+```text
+输入：task_id?、stage?、result?、query?、before_id?、limit?
+输出：{"events": [...], "next_before_id": <id|null>}
+```
+
+- 每页默认 `limit=100`，上限 `200`（>200 按 200 处理，非法值 `bad_request`）；`before_id` 为严格小于该 id 的游标（`id < before_id`），无则取最新页。排序恒 `id DESC`；翻页期间新追加事件（id 更大）不会使已翻页结果重复/错位。
+- 每条事件在原字段（`id/at/task_id/request_id/kind/actor/detail`）上补充：`task_title`、`project_name`、`stage`、`result`、`summary`。
+- **标题回填**：优先取仍保留的任务实体 `title`；任务已 purged/删除则取可读取的来源快照标题（`source_path` 快照 `task.title`）；确无标题 → `task_title="未保留标题 · <短id>"`（短 id 取前 8 位），不编造名称。`project_name` 同口径。
+- **stage/result/summary 由核心统一派生**（`stage` 取事件关联请求/任务的阶段，`result` 取 request 终态或事件语义结论，`summary` 为中文一句话摘要）；未知事件 kind 显示中性摘要+原始类型，不猜成成功。
+- **搜索**：`query` 在核心对**全部历史**执行（匹配 task_title/project_name/task_id/request_id/中文摘要/detail 原文），先过滤再按 `id DESC` 分页——不是只搜当前页。`stage`/`result` 同样先过滤后分页。
+- 详情字段（原始 JSON `detail`、完整 `request_id`/`task_id`、`detail` 内哈希、actor）全部保留，供 UI 展开复制；不因无 task_id 而无法查看。
+
+## 5.22 手动规划链路（v2，T5）
+
+### 5.22.1 获取与准备
+
+| 命令 | payload | 返回与副作用 |
+|---|---|---|
+| `fetch-todos` | `{}` | `{fetched_at, items[]}`；复用 bridge 分页读取每个 To Do 的描述/评论/关系/活动。每项含 `task_id/title/project_id/project_name/requirements_sha256/source_sha256/kaneo_status/repository/local_status/attachments[]/selectable/blocked_reason`。不导入任务、不创建请求。 |
+| `prepare-plan-input` | `{task_id, expected_requirements_sha256, local_paths[], supplement, excluded_remote_ids[]}` | 重新获取该任务（bridge `get-task` 核验需求哈希）→ 建不可变材料目录 → `{input_id, input_sha256, files[], issues[], can_start}`。不入队、不调用模型。 |
+| `start-plans` | `{items: [{input_id, input_sha256, expected_plan_sha256?}]}` | 每任务独立提交 → `{results: [{task_id, request_id?, deduplicated?, code?, error?, waiting_reason?}]}`。只有成功项进入规划队列。 |
+
+规则：
+
+- 沿用现有项目白名单与仓库映射；未映射项目仍展示但 `selectable=false` + `blocked_reason` 说明；不新增项目配置系统。
+- 每个 To Do 独立规划、独立产出；同一时间只领取一个规划任务。
+- 附件：图片 PNG/JPEG/WebP、日志 UTF-8 文本；单文件 ≤20 MiB、每任务材料合计 ≤100 MiB，超限明确报错（`validation_failed`），不静默截断。
+- 识别任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接及 HTML 图片；未知附件结构/格式/失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
+- 下载只向 Kaneo 同源地址发凭据；跨域/重定向不携带 `Authorization`；不输出凭据或带认证参数的 URL。
+- 本地文件与已下载文件复制到应用管理的材料目录 `planner_inputs/<input_id>/`，记录 `name/source/media_type/sha256/size`；不依赖临时剪贴板路径长期存在。
+- `source_sha256`/`requirements_sha256` 保持原口径；补充说明、附件内容、排除项进入独立 `planner_input_sha256`（= `input_sha256`，对 manifest 规范化重算）。
+- 源快照与附件按 `input_id` 存为不可变产物（`planner_inputs` 表 + 目录）；复用请求 `payload_json` 保存 manifest，不新增附件数据库表。
+
+### 5.22.2 排队、去重与手动门控
+
+- `kind=plan`、幂等键 `plan:<task_id>` 不变；`payload_json` 增加 `manual_authorized: true`、`input_id`、`planner_input_sha256`、材料 manifest、`model_config`（planner_model/reasoning_effort）、`confirmed_at`。
+- `tick` 不再生成 `plan-scan`；`sync-tasks`、create-review-fix 登记、resolve retry/release_lost 不再自动创建/启动 plan 请求。需求变化仍更新状态与证据（task→needs_plan），但等待用户经 `prepare-plan-input`+`start-plans` 手动提交。
+- 旧未授权 queued plan 请求（payload 无 `manual_authorized`）保留，UI 显示「等待确认材料」；用户提交时复用该请求（写回已确认输入 payload），不新建。
+- 已授权 queued 且 `input_sha256` 相同 → 幂等返回原请求（`deduplicated:true`）；输入不同 → `conflict`（不偷偷替换材料）。`claimed` 请求不可覆盖。
+- `start-plans` 前置拒绝：存在非规划活动请求、任务不活跃（非 active/purged）、`send_state=unknown`、或 ready 任务 `expected_plan_sha256` 与当前 `plan_sha256` 不符（重新规划需先确认现行计划）→ 逐项 `code`/`error`/`waiting_reason`。
+- 自动领取与指定 `request_id` 的 `claim` 都检查 `manual_authorized`：未授权 plan 请求 → 自动取单跳过、定点 claim 返回 `claimed:false, reason:"unauthorized_plan"`；不增加 attempt、不改状态。
+- 点击「开始规划」后立即唤起规划 runner（见 §5.22.3）；App 运行期间及重启后只继续领取**已确认**的队列，不自动发现新任务。
+- 全局/阶段 `paused` 与任务 `auto_advance_paused` 始终生效，不因手动绕过；已排队但暂停时 UI 显示原因。
+
+### 5.22.3 Codex 规划适配（planner backend）
+
+规划执行从 pi 分流到独立 Codex 适配器（`kanpilot.codex_planner` / `planner_runner`）；dispatch/monitor/review 执行路径保留 pi。
+
+- 调用 `codex exec`：`-s read-only`（只读 sandbox）、无交互审批、`--json`（JSONL 进度流）、`-i <图片>`（图片参数）、`--output-schema <file>`（结构化最终输出）、`-o <file>`（最后消息落盘）。使用本机 ChatGPT 登录（`~/.codex/auth.json`），经 `-c`/`--ignore-user-config`/`--skip-git-repo-check`/`--ephemeral` 提供只读本次配置：不继承第三方执行插件/MCP/用户规则，不修改全局 Codex 设置。
+- 模型：`standard` 计划 `gpt-6-astra / medium`；`review_fix` 计划 `gpt-5.6-sol / xhigh`。不可用即报告，不替换模型。
+- 工作目录 `cwd` 为任务 `repository`（可读）；业务源码不可写（sandbox 只读）；runner 指示模型阅读项目 `AGENTS.md` 及相关入口。任务描述、日志、附件作为材料输入，不覆盖「只规划」约束。
+- **输出契约**（`--output-schema` 强制）：
+
+```json
+{"status": "ready|needs_input",
+ "plan_markdown": "<完整计划 markdown 字符串>",
+ "questions": ["..."],
+ "evidence": ["<引用的材料/文件>"]}
+```
+
+- `ready`：必须有非空 `plan_markdown` 且无未决 `questions`，满足项目计划规范；计划元数据（task_id/plan_sha256/planner_model/input 哈希等）由核心根据本轮真实输入生成，**不**信模型自报的 ID/模型名/哈希。
+- `needs_input`：保存 `questions` 与 `plan_markdown` 草稿，task→`needs_user`、`failure_code=reported`；UI 允许补充说明/附件后重新提交，不发布为可执行计划。
+- 模型退出失败/超时/空输出/不合规输出：保存证据（JSONL 日志+stderr），进入规划失败（`report failed`/`needs_user`），**不自动重试**。超时沿用 `executor_timeout_seconds`（默认 1800s）。
+- runner 心跳间隔 ≤ `min(lease_seconds/3, 60)` 秒；租约失效或所有权丢失（`stale_run`）时终止自己的子进程组，禁止发布。
+- 日志展示结构化进度与 stderr；未知 JSONL 事件保留原始记录；不把进程退出码 0 单独视为成功（须 schema 校验输出）。
+
+### 5.22.4 发布与执行分离
+
+发布（`publish-plan`，§5.6）与「安排执行」（`enqueue` dispatch + `confirm_plan`，§5.3）是两个独立动作：
+
+- `publish-plan` 成功后 task `ready` 且 `plan_execution_hold=true`：计划已登记但**尚未授权派发**；UI 显示「待确认执行」。
+- 「安排执行」= `enqueue {task_id, kind:"dispatch", confirm_plan:true, expected_plan_sha256}`：同事务复核计划哈希 → 建 dispatch 请求 → 解除 `plan_execution_hold`。旧计划哈希/并发修改/其他失败 → `conflict`，hold 保留。
+- `plan_execution_hold` 为真时，dispatch 请求即便存在也不得被 claim（自动与指定 `request_id` 领取都拒绝 `reason:"plan_hold"`）——确认前不派发。
+- 其他任务（无 hold）的既有派发行为不变。
+
+### 5.22.5 review_fix 计划衔接
+
+修复计划继续核验 `review_key`、原报告及关联任务：publish-plan 成功时把修复计划路径/哈希写回**原评审任务**的 `extra_json.repair_plan_path`/`repair_plan_sha256`，保证 §4.5-5 派发校验（fix_task_id/review_key/repair_plan 匹配 + 远端 marker）通过。`plan_kind=review_fix` 的 frontmatter 必填项沿用 §6。
 
 ## 6. 常量
 

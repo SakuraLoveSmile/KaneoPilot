@@ -19,6 +19,11 @@
 		BA5E00000000000000001110 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001010 /* RunsView.swift */; };
 		BA5E00000000000000001111 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001011 /* SettingsView.swift */; };
 		BA5E00000000000000001112 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001012 /* Components.swift */; };
+		BA5E00000000000000001113 /* BoardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001013 /* BoardView.swift */; };
+		BA5E00000000000000001114 /* SessionReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001014 /* SessionReaderView.swift */; };
+		BA5E00000000000000001115 /* SavedTasksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001015 /* SavedTasksView.swift */; };
+		BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* ExecutorScheduler.swift */; };
+		BA5E00000000000000001130 /* PlanningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001030 /* PlanningView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +40,11 @@
 		BA5E00000000000000001010 /* RunsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunsView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001011 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001012 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001013 /* BoardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001014 /* SessionReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001015 /* SavedTasksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedTasksView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001016 /* ExecutorScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutorScheduler.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001030 /* PlanningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanningView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
 		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -85,6 +95,7 @@
 				BA5E00000000000000001002 /* CoreLocator.swift */,
 				BA5E00000000000000001003 /* CoreClient.swift */,
 				BA5E00000000000000001004 /* Models.swift */,
+				BA5E00000000000000001016 /* ExecutorScheduler.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -94,11 +105,15 @@
 			children = (
 				BA5E00000000000000001006 /* RootView.swift */,
 				BA5E00000000000000001007 /* TasksSectionView.swift */,
+				BA5E00000000000000001013 /* BoardView.swift */,
 				BA5E00000000000000001008 /* TaskDetailView.swift */,
 				BA5E00000000000000001009 /* PendingView.swift */,
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
 				BA5E00000000000000001012 /* Components.swift */,
+				BA5E00000000000000001014 /* SessionReaderView.swift */,
+				BA5E00000000000000001015 /* SavedTasksView.swift */,
+				BA5E00000000000000001030 /* PlanningView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -188,11 +203,16 @@
 				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
 				BA5E00000000000000001106 /* RootView.swift in Sources */,
 				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,
+				BA5E00000000000000001113 /* BoardView.swift in Sources */,
 				BA5E00000000000000001108 /* TaskDetailView.swift in Sources */,
 				BA5E00000000000000001109 /* PendingView.swift in Sources */,
 				BA5E00000000000000001110 /* RunsView.swift in Sources */,
 				BA5E00000000000000001111 /* SettingsView.swift in Sources */,
 				BA5E00000000000000001112 /* Components.swift in Sources */,
+				BA5E00000000000000001114 /* SessionReaderView.swift in Sources */,
+				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
+				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
+				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

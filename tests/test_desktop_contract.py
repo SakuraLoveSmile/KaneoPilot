@@ -19,6 +19,9 @@ TASK_SUMMARY_KEYS = {
     "display_status", "last_progress", "blocked_reason", "next_claim_at",
     "active_request", "kaneo_status", "kaneo_checked_at", "priority",
     "plan_path", "updated_at",
+    # v1.3 新增（protocol §5.15.1 / §5.15.4）
+    "board_column", "board_substatus", "lifecycle_column", "exception",
+    "save_state", "saved_at", "auto_advance_paused",
 }
 
 TASK_DETAIL_EXTRA_KEYS = {
@@ -58,7 +61,8 @@ class TestFieldShapes:
         assert isinstance(out["counts"]["tasks"], dict)
         assert isinstance(out["counts"]["requests"], dict)
         assert "last_tick_at" in out
-        assert out["schema_version"] == 1
+        # state-model §1.1：schema v4（save_state 三列 + planner_inputs）
+        assert out["schema_version"] == 4
 
     def test_list_tasks_summary_fields(self, factory, cli):
         task = factory.sync_task(title="形状检查")
@@ -85,6 +89,7 @@ class TestFieldShapes:
 
     def test_list_requests_fields(self, factory, cli):
         task = factory.sync_task()
+        factory.queue_plan(task.task_id)
         reqs = cli("list-requests", {})["requests"]
         r = next(x for x in reqs if x["task_id"] == task.task_id)
         missing = REQUEST_KEYS - set(r)
@@ -117,13 +122,18 @@ class TestDisplayStatus:
 
         t = factory.sync_task(title="待规划任务")
         assert fget(t.task_id) == "待规划"
-        req = factory.find_request(t.task_id, "plan")
-        factory.claim("plan", request_id=req["request_id"])
+        req_id, _i, _s = factory.queue_plan(t.task_id)
+        pc = factory.claim("plan", request_id=req_id)
         assert fget(t.task_id) == "规划中"
+        # v2 §5.22.1：plan 单飞——收尾释放 stage 供后续任务规划
+        cli("report", {"request_id": pc["request_id"],
+                       "run_id": pc["run_id"], "outcome": "failed",
+                       "note": "矩阵测试收尾"})
 
         ready = factory.make_ready(project="Music", title="就绪任务")
-        assert fget(ready.task.task_id) == "就绪"
-        cli("enqueue", {"task_id": ready.task.task_id})
+        # v2 §5.22.4：ready+hold → 待确认执行（确认后入队）
+        assert fget(ready.task.task_id) == "待确认执行"
+        factory.enqueue_dispatch(ready.task.task_id)
         assert fget(ready.task.task_id) == "已排队"
         dreq = factory.find_request(ready.task.task_id, "dispatch")
         d = factory.claim("dispatch", request_id=dreq["request_id"])
@@ -186,17 +196,26 @@ class TestDisplayStatus:
 # §5.3 enqueue kind 推断
 # ---------------------------------------------------------------------------
 
-
 class TestEnqueueInference:
     def test_infer_needs_plan(self, factory, cli):
+        """v2：needs_plan 走规划面板——enqueue 推断不再建 plan 请求，
+        返回 bad_request（提示经 start-plans 手动提交）。"""
         task = factory.sync_task()
-        r = cli("enqueue", {"task_id": task.task_id})
-        assert r["request"]["kind"] == "plan"
-        assert r["request"]["idempotency_key"] == f"plan:{task.task_id}"
+        out = cli("enqueue", {"task_id": task.task_id}, expect=1)
+        assert out["code"] == "bad_request"
+        # 完整链仍可走通：queue_plan → claim → publish → confirm_plan 派发
+        pub = factory.publish(task)
+        assert pub.resp["task_status"] == "ready"
+        r = factory.enqueue_dispatch(task.task_id)
+        assert r["request"]["kind"] == "dispatch"
 
     def test_infer_ready(self, factory, cli):
+        """kind 缺省仍由状态推断为 dispatch（hold 任务走 confirm_plan 门）。"""
         ready = factory.make_ready()
-        r = cli("enqueue", {"task_id": ready.task.task_id})
+        tid = ready.task.task_id
+        r = cli("enqueue", {"task_id": tid, "confirm_plan": True,
+                            "expected_plan_sha256":
+                            factory.get_task(tid)["plan_sha256"]})
         assert r["request"]["kind"] == "dispatch"
 
     def test_infer_running(self, factory, cli):
@@ -226,7 +245,9 @@ class TestAllowedActions:
         ready = factory.make_ready()
         t = factory.get_task(ready.task.task_id)
         actions = set(t["allowed_actions"])
-        assert "enqueue" in actions
+        # v2 §5.22.4：ready+hold → confirm_dispatch 取代 enqueue
+        assert "confirm_dispatch" in actions
+        assert "enqueue" not in actions
         assert "recheck" in actions
         # 无阻塞 → 无 restore/mark_sent/release_lost
         assert "release_lost" not in actions
@@ -234,7 +255,7 @@ class TestAllowedActions:
 
     def test_queued_has_priority_action(self, factory, cli):
         ready = factory.make_ready()
-        cli("enqueue", {"task_id": ready.task.task_id})
+        factory.enqueue_dispatch(ready.task.task_id)
         t = factory.get_task(ready.task.task_id)
         actions = set(t["allowed_actions"])
         assert "set-priority" in actions or "enqueue" in actions
@@ -271,3 +292,17 @@ class TestAllowedActions:
         actions = set(t["allowed_actions"])
         assert "enqueue" not in actions
         assert "retry" not in actions
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

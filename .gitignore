@@ -6,3 +6,5 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+# DSH 桥接的本机链接（指向已安装 DSH，机器本地，不入库；见 core/dsh_bridge）
+core/dsh_bridge/node_modules/

@@ -7,6 +7,9 @@ from typing import Optional
 
 from . import constants, core, db, derive, util
 
+# 非活跃 save_state -> 中文（§5.15.3 冲突原因）。
+_SAVE_STATE_CN = {"archived": "归档", "trashed": "移入回收站", "purged": "永久从列表移除"}
+
 
 def _infer_kind(task) -> str:
     kind = constants.ENQUEUE_INFER.get(task["status"])
@@ -22,9 +25,33 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        # §5.20.1（v2）：purged 终态拒绝一切写入口。
+        if db.task_is_purged(task):
+            raise util.KanpilotError(
+                "conflict", "任务已永久从列表移除，不能再排队"
+            )
+        # §5.15.3：归档/回收站、恢复后暂停自动推进的任务不排队。
+        if not db.task_is_active(task):
+            raise util.KanpilotError(
+                "conflict",
+                f"任务已{_SAVE_STATE_CN.get(db.task_save_state(task))}，"
+                "不在活跃看板，请先恢复后再排队",
+            )
+        if db.task_auto_paused(task):
+            raise util.KanpilotError(
+                "conflict", "任务已暂停自动推进，请先恢复自动推进"
+            )
         kind = payload.get("kind") or _infer_kind(task)
         if kind not in constants.REQUEST_KINDS or kind == "plan-scan":
             raise util.KanpilotError("bad_request", f"invalid kind {kind}")
+        if kind == "plan":
+            # v2 §5.22.2：plan 请求只能经规划面板（prepare-plan-input +
+            # start-plans）手动授权创建；enqueue 不再直接排队规划。
+            raise util.KanpilotError(
+                "bad_request",
+                "规划需在规划面板确认材料后经 start-plans 提交，"
+                "enqueue 不支持 plan",
+            )
         allowed = constants.CLAIM_GUARDS[kind]
         if task["status"] not in allowed:
             raise util.KanpilotError(
@@ -32,12 +59,50 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
                 f"kind {kind} requires task status "
                 f"{'|'.join(sorted(allowed))}, got {task['status']}",
             )
+        extra = db.task_extra(task)
+        hold = bool(extra.get("plan_execution_hold"))
+        confirm_plan = bool(payload.get("confirm_plan"))
+        expected_sha = payload.get("expected_plan_sha256")
+        if kind == "dispatch":
+            if hold:
+                # v2 §5.3 计划确认闸：同事务复核哈希 → 建请求 → 解除 hold。
+                if not confirm_plan:
+                    raise util.KanpilotError(
+                        "conflict",
+                        "计划已发布但尚未确认执行：请先核对计划后再次确认"
+                        "（需要 confirm_plan:true）",
+                    )
+                if expected_sha != task["plan_sha256"]:
+                    raise util.KanpilotError(
+                        "conflict",
+                        "计划哈希与当前登记版本不符，请重新查看计划后"
+                        "再确认执行",
+                    )
+            elif expected_sha is not None and expected_sha != task["plan_sha256"]:
+                raise util.KanpilotError(
+                    "conflict",
+                    "计划哈希与当前登记版本不符，请重新查看计划",
+                )
         key = f"{kind}:{task['task_id']}"
         request_payload = {"note": payload.get("note")} if payload.get("note") else None
         row, created = db.create_request(
             conn, now, kind, key, task_id=task["task_id"],
             payload=request_payload, requested_by="user",
         )
+        if kind == "dispatch" and hold:
+            # 同事务解除 hold：此后 dispatch 请求可被正常领取（§5.22.4）。
+            task = db.require_task(conn, task["task_id"])
+            extra = db.task_extra(task)
+            extra.pop("plan_execution_hold", None)
+            db.update_task(
+                conn, task["task_id"], now, extra_json=extra
+            )
+            db.add_event(
+                conn, now, "resolved", task_id=task["task_id"],
+                request_id=row["request_id"], actor="user",
+                detail={"action": "confirm_plan",
+                        "plan_sha256": task["plan_sha256"]},
+            )
         return {
             "request": derive.request_view(row, ctx.now),
             "deduplicated": not created,
@@ -146,6 +211,18 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        # §5.20.1（v2）：purged 终态拒绝一切写入口。
+        if db.task_is_purged(task):
+            raise util.KanpilotError(
+                "conflict", "任务已永久从列表移除，不能再处理"
+            )
+        # §5.15.3：非活跃（归档/回收站）任务不处理 resolve。
+        if not db.task_is_active(task):
+            raise util.KanpilotError(
+                "conflict",
+                f"任务已{_SAVE_STATE_CN.get(db.task_save_state(task))}，"
+                "不在活跃看板，请先恢复后再处理",
+            )
         status, send_state = task["status"], task["send_state"]
 
         def need(condition: bool, message: str) -> None:
@@ -168,7 +245,12 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 conn, task, target_status, now, "user",
                 detail={"via": "resolve retry"}, **fields,
             )
-            new_request, _ = _new_cycle_request(conn, now, task, kind)
+            if kind == "plan":
+                # v2 §5.22.2：规划改手动门控——只恢复状态，等用户经规划
+                # 面板提交材料；不再自动创建 plan 请求。
+                new_request = None
+            else:
+                new_request, _ = _new_cycle_request(conn, now, task, kind)
 
         elif action == "restore":
             need(
@@ -229,7 +311,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 conn, task, "needs_plan", now, "user",
                 detail={"via": "resolve replan"}, **fields,
             )
-            new_request, _ = _new_cycle_request(conn, now, task, "plan")
+            # v2 §5.22.2：不自动创建 plan 请求（等规划面板手动授权）。
+            new_request = None
 
         elif action == "release_lost":
             lost = derive.lost_request_for_task(conn, task["task_id"], ctx.now)
@@ -272,7 +355,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                                 "restored_to": target},
                         resolution=resolution,
                     )
-                if target in (constants.CLAIM_GUARDS.get(kind) or ()):
+                if kind == "plan":
+                    # v2 §5.22.2：失联释放不自动重建规划请求。
+                    new_request = None
+                elif target in (constants.CLAIM_GUARDS.get(kind) or ()):
                     new_request, _ = _new_cycle_request(
                         conn, now, task, kind
                     )
@@ -372,18 +458,15 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                         conn, now, "task_created", task_id=task_id,
                         actor=executor, detail={"via": "sync-tasks"},
                     )
-                    if initial == "needs_plan":
-                        row, made = db.create_request(
-                            conn, now, "plan", f"plan:{task_id}",
-                            task_id=task_id, requested_by=executor,
-                        )
-                        if made:
-                            created_requests.append(
-                                {"request_id": row["request_id"],
-                                 "kind": "plan", "task_id": task_id}
-                            )
+                    # v2 §5.22.2：不再自动创建 plan 请求——新任务停在
+                    # needs_plan，等待用户在规划面板手动提交。
                     changed.append({"task_id": task_id, "from": None,
                                     "to": initial})
+                    continue
+
+                # §5.15.3：归档/回收站任务整体跳过（不 upsert/不改状态/指纹/
+                # 不建请求），后续同步不得把归档/回收站任务重新导入看板。
+                if not db.task_is_active(task):
                     continue
 
                 upserted += 1
@@ -447,15 +530,8 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                             conn, task, "needs_plan", now, executor,
                             detail={"via": "requirements_changed"},
                         )
-                    row, made = db.create_request(
-                        conn, now, "plan", f"plan:{task_id}", task_id=task_id,
-                        requested_by=executor,
-                    )
-                    if made:
-                        created_requests.append(
-                            {"request_id": row["request_id"], "kind": "plan",
-                             "task_id": task_id}
-                        )
+                    # v2 §5.22.2：需求变化仍更新状态与证据，但不自动建
+                    # plan 请求——等待规划面板手动提交。
                     changed.append(
                         {"task_id": task_id, "from": previous_status,
                          "to": "needs_plan"}
@@ -487,10 +563,16 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                     and task["status"] == "running"
                 ):
                     task = db.require_task(conn, task_id)
+                    # 新一轮评审周期起始（§2 review_summary「下同」）：
+                    # 与 advance-task 同口径清上一周期结论。
+                    extra_json = db.task_extra(task)
+                    for key in ("review_conclusion", "review_registered_at"):
+                        extra_json.pop(key, None)
                     core.transition_task(
                         conn, task, "in_review", now, executor,
                         detail={"via": "kaneo_observed", "kaneo_status": observed},
                         review_report_path=None, review_report_sha256=None,
+                        extra_json=extra_json,
                     )
                     changed.append(
                         {"task_id": task_id, "from": previous_status,

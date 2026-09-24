@@ -27,10 +27,10 @@ class TestSchemaAndCli(KanpilotTestCase):
         }
         self.assertTrue(
             {"schema_meta", "tasks", "requests", "attempts", "events",
-             "settings"} <= tables
+             "settings", "planner_inputs"} <= tables
         )
         version = conn.execute("SELECT version FROM schema_meta").fetchone()[0]
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 4)
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode, "wal")
         conn.close()
@@ -40,7 +40,7 @@ class TestSchemaAndCli(KanpilotTestCase):
             ["overview", "--db", str(self.db_path), "--json", "{}"]
         )
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["schema_version"], 1)
+        self.assertEqual(json.loads(out)["schema_version"], 4)
 
     def test_cli_stdin_fallback(self):
         code, out, _ = self.call_main(
@@ -88,32 +88,24 @@ class TestEnqueueClaim(KanpilotTestCase):
         )
         return task
 
-    def test_sync_creates_needs_plan_and_plan_request(self):
+    def test_sync_creates_needs_plan_without_plan_request(self):
+        # v2 §5.22.2：sync 只导入 needs_plan，不再自动创建 plan 请求——
+        # 规划经规划面板（prepare-plan-input + start-plans）手动提交。
         task = self._new_task()
         view = self.task(task["id"])
         self.assertEqual(view["status"], "needs_plan")
         self.assertEqual(view["display_status"], "待规划")
-        reqs = self.requests(status="queued")
-        plan_reqs = [r for r in reqs if r["kind"] == "plan"]
-        self.assertEqual(len(plan_reqs), 1)
-        self.assertEqual(plan_reqs[0]["idempotency_key"], f"plan:{task['id']}")
+        plan_reqs = [r for r in self.requests(status="queued")
+                     if r["kind"] == "plan"]
+        self.assertEqual(plan_reqs, [])
+        # enqueue kind=plan 同样被拒绝（bad_request）。
+        exc = self.call_err(
+            "enqueue", {"task_id": task["id"], "kind": "plan"})
+        self.assertEqual(exc.code, "bad_request")
 
     def test_enqueue_idempotent_dedup(self):
         task = self._new_task()
-        # sync already queued plan:<id>; enqueue must dedupe, not duplicate.
-        first = self.call("enqueue", {"task_id": task["id"], "kind": "plan"})
-        self.assertTrue(first["deduplicated"])
-        second = self.call("enqueue", {"task_id": task["id"], "kind": "plan"})
-        self.assertTrue(second["deduplicated"])
-        self.assertEqual(
-            first["request"]["request_id"], second["request"]["request_id"]
-        )
-        active = [
-            r for r in self.requests(status="active")
-            if r["task_id"] == task["id"]
-        ]
-        self.assertEqual(len(active), 1)
-        # a genuinely new kind creates with deduplicated False
+        # v2：kind=plan 不经 enqueue；用 monitor 验证幂等键去重。
         self.set_task_status(task["id"], "running")
         fresh = self.call("enqueue", {"task_id": task["id"], "kind": "monitor"})
         self.assertFalse(fresh["deduplicated"])
@@ -122,6 +114,11 @@ class TestEnqueueClaim(KanpilotTestCase):
         self.assertEqual(
             fresh["request"]["request_id"], again["request"]["request_id"]
         )
+        active = [
+            r for r in self.requests(status="active")
+            if r["task_id"] == task["id"]
+        ]
+        self.assertEqual(len(active), 1)
 
     def test_enqueue_kind_inference_and_rejection(self):
         task = self._new_task()
@@ -137,8 +134,10 @@ class TestEnqueueClaim(KanpilotTestCase):
 
     def test_claim_race_single_winner(self):
         task = self._new_task()
+        request_id, _ = self.queue_plan(task["id"])
         request = next(
-            r for r in self.requests(status="queued") if r["kind"] == "plan"
+            r for r in self.requests(status="queued")
+            if r["request_id"] == request_id
         )
         results = []
 
@@ -176,7 +175,8 @@ class TestEnqueueClaim(KanpilotTestCase):
 
     def test_claim_guard_failure_marks_request_failed(self):
         task = self._new_task()
-        # plan request queued, but task moved to ready meanwhile.
+        # authorized plan request queued, but task moved to ready meanwhile.
+        self.queue_plan(task["id"])
         self.set_task_status(task["id"], "ready")
         result = self.call("claim", {"stage": "plan", "executor": "kaneo-plan"})
         self.assertFalse(result["claimed"])
@@ -187,8 +187,9 @@ class TestEnqueueClaim(KanpilotTestCase):
 
     def test_claim_specific_request_and_priority(self):
         task = self._new_task()
+        request_id, _ = self.queue_plan(task["id"])
         queued = self.requests(status="queued")
-        target = next(r for r in queued if r["kind"] == "plan")
+        target = next(r for r in queued if r["request_id"] == request_id)
         result = self.call(
             "claim",
             {
@@ -211,7 +212,8 @@ class TestEnqueueClaim(KanpilotTestCase):
         self.assertEqual(result["reason"], "already_claimed")
 
     def test_heartbeat_extends_lease_and_stale_run(self):
-        self._new_task()
+        task = self._new_task()
+        self.queue_plan(task["id"])
         claim = self.call("claim", {"stage": "plan", "executor": "kaneo-plan"})
         self.assertTrue(claim["claimed"])
         beat = self.call(
@@ -229,7 +231,8 @@ class TestEnqueueClaim(KanpilotTestCase):
         self.assertEqual(exc.code, "stale_run")
 
     def test_report_outcomes(self):
-        self._new_task()
+        task = self._new_task()
+        self.queue_plan(task["id"])
         claim = self.call("claim", {"stage": "plan", "executor": "kaneo-plan"})
         result = self.call(
             "report",
@@ -247,7 +250,8 @@ class TestEnqueueClaim(KanpilotTestCase):
         self.assertEqual(view["display_status"], "需人工")
 
     def test_pause_blocks_new_claim_only(self):
-        self._new_task()
+        task = self._new_task()
+        self.queue_plan(task["id"])
         self.call("set-paused", {"stage": None, "paused": True})
         result = self.call("claim", {"stage": "plan", "executor": "kaneo-plan"})
         self.assertEqual(result, {"claimed": False, "reason": "paused"})
@@ -263,7 +267,8 @@ class TestEnqueueClaim(KanpilotTestCase):
         self.assertTrue(result["claimed"])
 
     def test_lost_derivation_no_auto_release(self):
-        self._new_task()
+        task = self._new_task()
+        self.queue_plan(task["id"])
         claim = self.call("claim", {"stage": "plan", "executor": "kaneo-plan"})
         # Force the lease into the past.
         conn = sqlite3.connect(str(self.db_path))

@@ -103,8 +103,8 @@ class TestDispatchCrashBlocksSerial:
         直到 resolve release_lost（§4.2-3 / state-model §5）。"""
         r1 = factory.make_ready(title="崩溃的派发")
         r2 = factory.make_ready(project="Music", title="排队的派发")
-        cli("enqueue", {"task_id": r1.task.task_id})
-        cli("enqueue", {"task_id": r2.task.task_id})
+        factory.enqueue_dispatch(r1.task.task_id)
+        factory.enqueue_dispatch(r2.task.task_id)
         req1 = factory.find_request(r1.task.task_id, "dispatch")
         out_path = tmp_path / "dclaim.json"
         proc, res = _claim_then_sleep(
@@ -147,7 +147,7 @@ class TestDispatchCrashBlocksSerial:
         retry 后回到 ready 可重派。"""
         ready = factory.make_ready(title="prepared 崩溃")
         tid = ready.task.task_id
-        cli("enqueue", {"task_id": tid})
+        factory.enqueue_dispatch(tid)
         req = factory.find_request(tid, "dispatch")
         out_path = tmp_path / "dclaim2.json"
         proc, res = _claim_then_sleep(
@@ -177,6 +177,9 @@ class TestDispatchCrashBlocksSerial:
         assert factory.get_task(tid)["status"] == "ready"
         req2 = factory.find_request(tid, "dispatch")
         assert req2 is not None
+        # v2：resolve 不清 plan_execution_hold——confirm_plan 入队解除（幂等
+        # 复用 retry 建的请求），此后才可领取
+        factory.enqueue_dispatch(tid)
         c = cli("claim", {"stage": "dispatch",
                           "executor": EXECUTORS["dispatch"],
                           "request_id": req2["request_id"]})
@@ -186,8 +189,10 @@ class TestDispatchCrashBlocksSerial:
 class TestPlanCrash:
     def test_plan_claim_lost_returns_needs_plan(self, factory, cli, tmp_env,
                                                 tmp_path):
-        """plan claim 失联 → release_lost → 回 needs_plan + 新 plan 请求。"""
+        """plan claim 失联 → release_lost → 回 needs_plan；v2 不自动重建
+        plan 请求（§5.22.2），等规划面板手动提交。"""
         task = factory.sync_task(title="规划崩溃")
+        req_id, _i, _s = factory.queue_plan(task.task_id)
         req = factory.find_request(task.task_id, "plan")
         out_path = tmp_path / "pclaim.json"
         proc, res = _claim_then_sleep(
@@ -205,5 +210,19 @@ class TestPlanCrash:
         cli("resolve", {"task_id": task.task_id, "action": "release_lost"})
         t2 = factory.get_task(task.task_id)
         assert t2["status"] == "needs_plan"
-        new_req = factory.find_request(task.task_id, "plan")
-        assert new_req and new_req["request_id"] != req["request_id"]
+        # v2 §5.22.2：失联释放不自动重建规划请求
+        assert factory.find_request(task.task_id, "plan") is None
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

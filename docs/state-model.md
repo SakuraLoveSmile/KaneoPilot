@@ -1,4 +1,4 @@
-# KaneoPilot 状态模型 v1（冻结）
+# KaneoPilot 状态模型 v1.1（冻结）
 
 SQLite 是队列与运行状态的唯一写入来源。所有写经 protocol.md 命令完成；桌面与执行端不得直接改库或文件锁。
 
@@ -45,7 +45,10 @@ CREATE TABLE tasks(
   resolution TEXT,                   -- 最近一次 resolve 记录 JSON
   migrated_from TEXT,                -- 迁移来源标识（审计）
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  extra_json TEXT                    -- 前向兼容杂项（last_observed、recovery_history 等）
+  extra_json TEXT,                   -- 前向兼容杂项（last_observed、recovery_history 等）
+  save_state TEXT NOT NULL DEFAULT 'active',   -- v1.3: active|archived|trashed; v2: +purged（终态，§5.20）
+  saved_at TEXT,                     -- v1.3: 归档/移入回收站时间
+  auto_advance_paused INTEGER NOT NULL DEFAULT 0  -- v1.3: 恢复后暂停自动推进
 );
 
 CREATE TABLE requests(
@@ -88,9 +91,81 @@ CREATE TABLE events(
 CREATE INDEX events_task ON events(task_id, id);
 
 CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- v1.3: 会话读取位点（只读适配层的本地游标，断线补齐用）。
+-- 消息正文以本机运行记录（events.jsonl）为准，本地只记录读取位点，不缓存全文。
+CREATE TABLE IF NOT EXISTS session_reads(
+  session_key TEXT PRIMARY KEY,     -- "<task_id>/<run_id>"（= session_marker）
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  cursor TEXT,                      -- 最后读取游标
+  last_seq INTEGER,                 -- 最后消息序号
+  last_revision INTEGER,            -- 最后消息修订版本
+  state TEXT NOT NULL DEFAULT 'pending',  -- associated|pending|unavailable
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_reads_task ON session_reads(task_id, run_id);
+
+-- v1.5（protocol.md §5.16）：执行轮次索引。task_id+run_id 唯一定位一个执行
+-- 轮次；会话保存状态（save_state）与任务保存状态正交；删除会话只改本表，
+-- 不删文件、不停进程、不改任务生命周期。
+CREATE TABLE IF NOT EXISTS execution_rounds(
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  backend TEXT NOT NULL DEFAULT 'headless',   -- pi（历史行可为 dsh|headless，读取已弃用）
+  session_id TEXT,
+  session_title TEXT,
+  run_status TEXT NOT NULL DEFAULT 'unknown', -- pending|running|finished|failed|unknown
+  config_json TEXT,                           -- claim 时固化的 PI 配置快照
+  worktree_path TEXT,                         -- 该轮独立 worktree 绝对路径
+  started_at TEXT,                            -- 启动意图落盘时间（非空即禁止再创建进程）
+  pid INTEGER,                                -- worker 进程号（诊断用，不作存活依据）
+  save_state TEXT NOT NULL DEFAULT 'active',  -- active|trashed|purged（v2 终态）
+  saved_at TEXT,                              -- 移入回收站时间
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS execution_rounds_save ON execution_rounds(save_state, updated_at);
 ```
 
-settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默认 1200) `monitor_interval_seconds`(默认 900) `plan_scan_interval_hours`(默认 24) `plan_scan_anchor`(默认每日 09:00 Asia/Shanghai) `last_plan_scan_at` `migration`(JSON) `workspace_id` `dispatch_serial`(派发串行位持有者 run_id，空=空闲)。
+settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默认 1200) `monitor_interval_seconds`(默认 900) `plan_scan_interval_hours`(默认 24) `plan_scan_anchor`(默认每日 09:00 Asia/Shanghai) `last_plan_scan_at` `migration`(JSON) `workspace_id` `dispatch_serial`(派发串行位持有者 run_id，空=空闲) `session_poll_seconds`(默认 2，订阅不可用时的增量检查间隔) `planner_inputs_root`（v2：规划材料根目录，缺省 `<app_support>/planner_inputs`） `codex_timeout_seconds`（v2：Codex 规划单轮上限，缺省回退 `executor_timeout_seconds`=1800）。
+
+v1.5 新增键：`exec_config`(JSON，protocol.md §5.17 执行配置；v1.6 缺省=初始默认 `CloseAI/deepseek-flash/xhigh/default`)、`worktrees_root`(独立 worktree 根目录路径字符串；空=未设置，取 `<app_support>/worktrees`)、`dsh_round_timeout_seconds`(默认 14400)。v1.6 新增键：`pi_round_timeout_seconds`(默认 14400，缺省回退读旧键 dsh_round_timeout_seconds)、`executor_timeout_seconds`(默认 1800，执行端单轮上限)、`executor_runs`(JSON，四 stage 最近一次运行记录 pid/started_at/log/exit_code/finished_at)。**不写入任何 pi 全局配置（`~/.pi/agent/*` 等）**；凭据只查 `pi auth check` 退出码，不存值。
+
+## 1.1 升级与备份（v1.3）
+
+- `schema_meta.version` 1 → 2：`ALTER TABLE tasks ADD COLUMN save_state/saved_at/auto_advance_paused` + 新建 `session_reads`。
+- **升级前备份**：复制 DB 文件到 `<app_support>/backups/schema-<ts>-v<from>-to-<to>/`（WAL 场景先 checkpoint）；备份失败 → 中止升级，报 `internal`。
+- 旧数据默认 `save_state='active'`、`auto_advance_paused=0`；升级幂等（已存在列则跳过）。
+
+## 1.2 升级与回填（v1.5，执行轮次索引）
+
+- `schema_meta.version` 2 → 3：新建 `execution_rounds`（CREATE TABLE IF NOT EXISTS，幂等）+ 设置键默认值补种；升级前同样整库备份。
+- **历史回填**：不迁移数据行；由读取层（`list-sessions`/`get-session`/`trash-session`/`restore-session`）按 runs 根目录 `job.json` 身份核验后补入（protocol.md §5.16.1）。回填 upsert **永不改写已存在行的 `save_state`/`saved_at`**——重复导入不得复活已删除会话；`save_state='trashed'` 的行在重复回填后保持 trashed。
+- 已有 `tasks.run_id`/`session_marker` 历史轮次无索引行时按 `job.json` 的 `backend` 回填（旧值保留原样；v1.6 起读取层对非 `pi` 一律返回 unavailable「旧后端会话已弃用」）。
+
+-- v2（protocol.md §5.22）：手动规划输入的不可变材料登记。源快照、补充说明、
+-- 附件 manifest 按 input_id 落盘为 planner_inputs/<input_id>/，本表只登记索引
+-- 与哈希；请求 payload 存 manifest 副本，不新增附件表。
+CREATE TABLE IF NOT EXISTS planner_inputs(
+  input_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  input_sha256 TEXT NOT NULL,          -- 对规范化 manifest 重算的输入指纹
+  requirements_sha256 TEXT,            -- 本轮确认的远端需求基线
+  source_sha256 TEXT,                  -- 本轮来源快照指纹
+  manifest_json TEXT NOT NULL,         -- {files:[{name,source,media_type,sha256,size}],supplement,excluded_remote_ids,task:{...}}
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, created_at);
+```
+
+### 1.3 升级与回填（v2，schema v4）
+
+- `schema_meta.version` 3 → 4：新建 `planner_inputs`（幂等）+ `tasks.save_state`/`execution_rounds.save_state` 词表扩为含 `purged`（无 DDL，仅读取层词表）+ 设置键默认值补种；升级前整库备份（同 §1.1）。
+- 历史数据不迁移、不重写：旧 `queued` plan 请求保持未授权（`payload.manual_authorized` 缺失即未授权，等待确认材料）；purged 不作用于任何既有行。
+- 升级幂等；失败升级不推进版本。旧版核心打开 v4 库：schema 版本检查拒绝（version 4 > 其支持上限）。
+- **版本保护**：schema v4 为语义兼容边界——旧版应用会把 `purged` 当可恢复记录（不识别该值），因此不得与新版同时访问同一库；切换由主 agent 按 automation-contract §4 执行。
 
 ## 2. task.status 转换表
 
@@ -121,6 +196,26 @@ settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默�
 
 非法转换一律 `conflict`/`bad_request`，不静默跳过。每次转换写 `events(kind=status_change, detail={from,to,actor})`。
 
+## 2.1 保存状态转换（save_state，v1.3，与生命周期正交）
+
+| 当前 | 命令 | 目标 |
+|---|---|---|
+| active | archive-task | archived（取消 queued 请求；进行中/评审/规划/派发/失联未解除/发送不明 → `conflict`） |
+| active | trash-task | trashed（同上前置） |
+| archived/trashed | restore-task | active（`auto_advance_paused=1`，除非 `resume_auto=true`） |
+| trashed | purge-task / purge-session | purged（终态；不可恢复，历史与文件保留） |
+| 任意（幂等） | archive/trash/restore 到同一状态 | 原状态（`deduplicated: true`） |
+| purged | purge-task / purge-session | purged（`deduplicated: true`） |
+
+`save_state` 不改写 `status`/`stage`，不产生 `status_change` 事件；每次真实转换写 `task_archived`/`task_trashed`/`task_restored` 事件（actor、原因）。
+
+## 2.2 看板归列（board_column / lifecycle_column / exception，v1.3）
+
+- `board_column` 是读取层派生（同 display_status 同一计算点），不落库、不改转换表。规则见 protocol.md §5.15.4：**异常统一进第六列 `failed`**（needs_user、评审未通过·待修复、失联），正常列只放正常卡片；`lifecycle_column` 保留纯生命周期位置（needs_user 按 `failure_stage` 归列）。
+- `exception` 为结构化异常信息（kind/label/severity/detail/failure_code/fix_task_id），无异常为 null；桌面按 `board_column` 分列、`board_substatus`/`exception.label` 标子状态、`exception.severity` 选红/橙徽标。
+- 观测异常（`observation_blocked`）在监控恢复（monitor report succeeded）时自动清除并回 `running`；发送不明/人工阻塞/失联只经 resolve 流程解除，会话日志不解除异常。
+- 归档/回收站任务不进看板：`list-tasks` 默认 `save_state='active'`；`sync-tasks` 跳过非 active 任务（防重导入）。
+
 ## 3. request 转换
 
 - `enqueue`/tick → `queued`（受 idempotency_key 唯一约束）。
@@ -132,7 +227,7 @@ settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默�
 
 ## 4. 事件 kind（固定枚举）
 
-`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
+`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `exec_config_updated`(执行配置保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
 
 ## 5. 串行位
 
