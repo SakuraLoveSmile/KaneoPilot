@@ -1,133 +1,294 @@
 import SwiftUI
 
-/// 运行记录（§4.3）：events 倒序时间线，可按任务过滤 + 搜索框。
+/// 运行记录（v2 §4.3）：list-events id 倒序时间线；搜索与 stage/result 筛选
+/// 由核心在全部历史上执行（不只当前页），输入防抖后重新查询并清空游标。
 struct RunsView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var search = ""
-    @State private var taskFilter: String?
+    @State private var stageFilter: String?
+    @State private var resultFilter: String?
 
-    private var filtered: [EventItem] {
-        model.events.filter { event in
-            if let taskFilter, event.taskId != taskFilter { return false }
-            if search.isEmpty { return true }
-            let haystacks = [
-                Labels.eventKind(event.kind),
-                model.taskTitle(for: event.taskId),
-                event.detail?.text ?? "",
-                event.actor ?? ""
-            ]
-            return haystacks.contains { $0.localizedCaseInsensitiveContains(search) }
-        }
+    /// 筛选组合：变化 → 防抖 300ms → reloadEvents（重置游标取第一页）。
+    private var filters: EventFilters {
+        EventFilters(query: search, stage: stageFilter, result: resultFilter)
     }
 
-    /// 过滤器候选任务：任务表 + 事件中出现但未在任务表的 id。
-    private var filterTasks: [(id: String, title: String)] {
-        var seen = Set<String>()
-        var list: [(String, String)] = []
-        for task in model.tasks {
-            seen.insert(task.taskId)
-            list.append((task.taskId, task.title ?? task.taskId))
-        }
-        for event in model.events {
-            if let id = event.taskId, !seen.contains(id) {
-                seen.insert(id)
-                list.append((id, id))
-            }
-        }
-        return list.map { (id: $0.0, title: $0.1) }
+    private var hasFilters: Bool {
+        !search.isEmpty || stageFilter != nil || resultFilter != nil
     }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if model.isLoading && model.events.isEmpty {
-                    LoadingView()
-                } else if filtered.isEmpty {
-                    emptyState
-                } else {
-                    List(filtered, id: \.listID) { event in
-                        row(event)
+            VStack(spacing: 0) {
+                Group {
+                    if model.isLoading && model.events.isEmpty {
+                        LoadingView()
+                    } else if model.events.isEmpty {
+                        emptyState
+                    } else {
+                        List(model.events, id: \.listID) { event in
+                            EventRow(event: event)
+                        }
                     }
+                }
+                // §4.3 游标翻页：next_before_id 非空 → 「加载更多」追加下一页。
+                if model.eventsNextBeforeID != nil {
+                    Divider()
+                    loadMoreBar
                 }
             }
             .navigationTitle("运行记录")
-            .searchable(text: $search, placement: .toolbar, prompt: "过滤事件文本")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            taskFilter = nil
-                        } label: {
-                            if taskFilter == nil { Label("全部任务", systemImage: "checkmark") } else { Text("全部任务") }
-                        }
-                        Divider()
-                        ForEach(filterTasks, id: \.id) { item in
-                            Button {
-                                taskFilter = item.id
-                            } label: {
-                                if taskFilter == item.id {
-                                    Label(item.title, systemImage: "checkmark")
-                                } else {
-                                    Text(item.title)
-                                }
-                            }
-                        }
-                    } label: {
-                        Label("按任务过滤", systemImage: "line.3.horizontal.decrease.circle")
-                    }
-                    .labelStyle(.iconOnly)
-                    .help("按任务过滤")
-                    .accessibilityLabel("按任务过滤")
-                }
-            }
+            .searchable(text: $search, placement: .toolbar,
+                        prompt: "搜索事件（全部历史）")
+            .toolbar { toolbar }
             .navigationDestination(for: String.self) { taskID in
                 TaskDetailContainer(taskID: taskID)
             }
         }
+        .task(id: filters) {
+            // 防抖：输入 300ms 内继续变化则由新 task 取代本次查询。
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await model.reloadEvents(query: search.isEmpty ? nil : search,
+                                     stage: stageFilter,
+                                     result: resultFilter)
+        }
+    }
+
+    private var loadMoreBar: some View {
+        HStack {
+            Spacer()
+            if model.eventsLoadingMore {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在加载更多")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    Task { await model.loadMoreEvents() }
+                } label: {
+                    Label("加载更多", systemImage: "chevron.down.circle")
+                }
+                .accessibilityLabel("加载更多历史事件")
+            }
+            Spacer()
+        }
+        .padding(.vertical, Spacing.s)
     }
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label(model.events.isEmpty ? "暂无运行记录" : "无匹配事件",
+            Label(hasFilters ? "无匹配事件" : "暂无运行记录",
                   systemImage: "clock.arrow.circlepath")
         } description: {
-            Text(model.events.isEmpty ? "调度核心还没有产生事件。" : "调整搜索关键词或任务过滤。")
+            Text(hasFilters ? "调整搜索关键词或筛选条件。" : "调度核心还没有产生事件。")
         } actions: {
             Button("刷新") { Task { await model.refreshAll() } }
         }
     }
 
-    @ViewBuilder
-    private func row(_ event: EventItem) -> some View {
-        let content = HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-            Text(TimeFormat.short(event.at))
-                .font(.kpSmall)
-                .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .leading)
-            Text(Labels.eventKind(event.kind))
-                .font(.kpSmall)
-                .frame(width: 76, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(model.taskTitle(for: event.taskId))
-                    .font(.kpBody)
-                    .lineLimit(1)
-                if let detail = event.detail?.text, !detail.isEmpty {
-                    Text(detail)
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button {
+                    stageFilter = nil
+                } label: {
+                    if stageFilter == nil {
+                        Label("全部阶段", systemImage: "checkmark")
+                    } else {
+                        Text("全部阶段")
+                    }
+                }
+                Divider()
+                ForEach(["plan", "dispatch", "monitor", "review"], id: \.self) { stage in
+                    Button {
+                        stageFilter = stage
+                    } label: {
+                        if stageFilter == stage {
+                            Label(Labels.stage(stage), systemImage: "checkmark")
+                        } else {
+                            Text(Labels.stage(stage))
+                        }
+                    }
+                }
+            } label: {
+                Label("按阶段过滤", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .labelStyle(.iconOnly)
+            .help("按阶段过滤")
+            .accessibilityLabel("按阶段过滤")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button {
+                    resultFilter = nil
+                } label: {
+                    if resultFilter == nil {
+                        Label("全部结果", systemImage: "checkmark")
+                    } else {
+                        Text("全部结果")
+                    }
+                }
+                Divider()
+                ForEach(["succeeded", "failed", "needs_user", "cancelled"], id: \.self) { result in
+                    Button {
+                        resultFilter = result
+                    } label: {
+                        if resultFilter == result {
+                            Label(Labels.outcome(result), systemImage: "checkmark")
+                        } else {
+                            Text(Labels.outcome(result))
+                        }
+                    }
+                }
+            } label: {
+                Label("按结果过滤", systemImage: "checkmark.circle.badge.questionmark")
+            }
+            .labelStyle(.iconOnly)
+            .help("按结果过滤")
+            .accessibilityLabel("按结果过滤")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                Task { await model.reloadEvents(query: search.isEmpty ? nil : search,
+                                                stage: stageFilter,
+                                                result: resultFilter) }
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .labelStyle(.iconOnly)
+            .help("重新查询事件")
+            .accessibilityLabel("刷新运行记录")
+        }
+    }
+}
+
+/// 筛选组合（Equatable → .task(id:) 防抖触发）。
+private struct EventFilters: Equatable {
+    let query: String
+    let stage: String?
+    let result: String?
+}
+
+/// §4.3 事件行：时间 / kind（中文）/ task_title / project_name 徽标 /
+/// stage / result / summary（11pt secondary 单行截断）；点击展开详情。
+private struct EventRow: View {
+    let event: EventItem
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .frame(width: 12)
+                    Text(TimeFormat.short(event.at))
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 88, alignment: .leading)
+                    Text(Labels.eventKind(event.kind))
+                        .font(.kpSmall)
+                        .frame(width: 96, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        // task_title/project_name/stage/result/summary 用核心回填值（不猜）。
+                        Text(event.taskTitle ?? event.taskId ?? "—")
+                            .font(.kpBody)
+                            .lineLimit(1)
+                        HStack(spacing: Spacing.s) {
+                            if let project = event.projectName {
+                                Text(project)
+                                    .font(.kpSmall)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.kpControl,
+                                                in: RoundedRectangle(cornerRadius: 4))
+                            }
+                            if let stage = event.stage {
+                                Text(Labels.stage(stage))
+                                    .font(.kpSmall)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let result = event.result {
+                                Text(Labels.outcome(result))
+                                    .font(.kpSmall)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if let summary = event.summary, !summary.isEmpty {
+                            Text(summary)
+                                .font(.kpSmall)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
                 }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
+            .accessibilityLabel("事件 \(Labels.eventKind(event.kind))，"
+                                + "\(event.summary ?? event.taskTitle ?? "")")
+
+            if expanded { detail }
         }
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)
-        .accessibilityElement(children: .combine)
+    }
 
-        if event.taskId != nil {
-            NavigationLink(value: event.taskId!) { content }
-        } else {
-            content
+    /// 展开详情：原始 detail JSON、完整 task_id/request_id、actor（均可复制）。
+    private var detail: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Grid(alignment: .topLeading, horizontalSpacing: Spacing.m,
+                 verticalSpacing: 4) {
+                GridRow {
+                    Text("事件 ID")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                    Text(event.id.map(String.init) ?? "—")
+                        .font(.kpSmall).textSelection(.enabled)
+                }
+                GridRow {
+                    Text("任务 ID")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                    Text(event.taskId ?? "—")
+                        .font(.kpSmall).textSelection(.enabled)
+                }
+                GridRow {
+                    Text("请求 ID")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                    Text(event.requestId ?? "—")
+                        .font(.kpSmall).textSelection(.enabled)
+                }
+                GridRow {
+                    Text("执行者")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                    Text(event.actor ?? "—")
+                        .font(.kpSmall).textSelection(.enabled)
+                }
+            }
+            if let detail = event.detail, !detail.isNull {
+                Text(detail.pretty)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Spacing.s)
+                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 6))
+            }
+            if let taskID = event.taskId {
+                NavigationLink(value: taskID) {
+                    Label("打开任务", systemImage: "arrow.right.circle")
+                        .font(.kpSmall)
+                }
+            }
         }
+        .padding(.leading, 12 + Spacing.m)
+        .padding(.top, 4)
     }
 }

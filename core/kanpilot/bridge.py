@@ -18,7 +18,24 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urljoin, urlparse
+import urllib.request
 from urllib.request import Request, urlopen
+
+import ssl
+def _ssl_context():
+    """HTTPS CA 兜底（v1.6）：优先 certifi（嵌入/Framework Python 常缺系统
+    CA 包），无 certifi 回退系统默认。返回 context 供 urlopen 使用。"""
+    try:
+        import certifi  # type: ignore
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return None
+    except Exception:
+        return None
 
 
 MAX_RESPONSE = 10 * 1024 * 1024
@@ -79,7 +96,8 @@ class Client:
             request.data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             request.add_header("Content-Type", "application/json")
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(request, timeout=self.timeout,
+                         context=_ssl_context()) as response:
                 chunks: list[bytes] = []
                 size = 0
                 while True:
@@ -466,3 +484,92 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ------------------------------------------------------------------ v2 附件下载
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # 交给调用方判定重定向目标是否仍同源
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
+def download_attachment(
+    url: str,
+    dest: "Path",
+    max_bytes: int = 20 * 1024 * 1024,
+    timeout: float = 30.0,
+) -> "Path":
+    """v2 §5.22.1：把 Kaneo 附件下载到材料目录。
+
+    - 只向 **Kaneo 同源地址** 携带 Authorization；重定向逐跳检查，
+      跨域/协议降级 → 拒绝（BridgeError），不泄露凭据。
+    - 超过 max_bytes 拒绝（不落半成品：先写 .part 再原子改名）。
+    - 返回写入路径；文件名消毒由调用方完成（dest 已是安全路径）。
+    """
+    import urllib.request
+
+    base_url, token = load_credentials()
+    base_origin = _origin(base_url)
+    current = url
+    seen = set()
+    for _hop in range(8):
+        if _origin(current) != base_origin:
+            raise BridgeError(
+                f"附件地址跨源，拒绝下载（不携带凭据）：{current}"
+            )
+        request = Request(
+            current,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "*/*",
+            },
+        )
+        opener = urllib.request.build_opener(
+            _NoRedirect(),
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+        )
+        try:
+            response = opener.open(request, timeout=timeout)
+        except HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                target = exc.headers.get("Location")
+                if not target:
+                    raise BridgeError(f"附件重定向缺少目标：HTTP {exc.code}")
+                current = urljoin(current, target)
+                if current in seen:
+                    raise BridgeError("附件重定向循环")
+                seen.add(current)
+                continue
+            raise BridgeError(f"附件下载失败：HTTP {exc.code}") from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise BridgeError(
+                f"附件下载失败：{type(exc).__name__}"
+            ) from exc
+        with response:
+            dest = Path(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(dest.suffix + ".part")
+            size = 0
+            try:
+                with open(tmp, "wb") as out:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise BridgeError(
+                                f"附件超过 {max_bytes // (1024 * 1024)} MiB 上限"
+                            )
+                        out.write(chunk)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+            tmp.replace(dest)
+            return dest
+    raise BridgeError("附件重定向跳数超限")

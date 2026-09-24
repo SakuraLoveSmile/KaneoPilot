@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -48,7 +50,10 @@ CREATE TABLE IF NOT EXISTS tasks(
   resolution TEXT,
   migrated_from TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  extra_json TEXT
+  extra_json TEXT,
+  save_state TEXT NOT NULL DEFAULT 'active',
+  saved_at TEXT,
+  auto_advance_paused INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS requests(
@@ -90,6 +95,56 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE INDEX IF NOT EXISTS events_task ON events(task_id, id);
 
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- v1.3: 会话本地读取位点（断线补齐用；消息正文以执行记录为准，
+-- 本地不缓存全文）。见 protocol.md §5.15.5。
+CREATE TABLE IF NOT EXISTS session_reads(
+  session_key TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  cursor TEXT,
+  last_seq INTEGER,
+  last_revision INTEGER,
+  state TEXT NOT NULL DEFAULT 'pending',
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_reads_task ON session_reads(task_id, run_id);
+
+-- v1.5 (protocol.md §5.16): 执行轮次索引。task_id+run_id 唯一定位一个执行
+-- 轮次；会话保存状态与任务保存状态正交。回填永不改写 save_state/saved_at
+-- （重复导入不得复活已删除会话）。
+CREATE TABLE IF NOT EXISTS execution_rounds(
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  backend TEXT NOT NULL DEFAULT 'headless',
+  session_id TEXT,
+  session_title TEXT,
+  run_status TEXT NOT NULL DEFAULT 'unknown',
+  config_json TEXT,
+  worktree_path TEXT,
+  started_at TEXT,
+  pid INTEGER,
+  save_state TEXT NOT NULL DEFAULT 'active',
+  saved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS execution_rounds_save ON execution_rounds(save_state, updated_at);
+
+-- v2（protocol.md §5.22）：手动规划输入的不可变材料登记。源快照、补充说明、
+-- 附件按 input_id 落盘为 planner_inputs/<input_id>/，本表只登记索引与哈希；
+-- 请求 payload 存 manifest 副本，不新增附件表。
+CREATE TABLE IF NOT EXISTS planner_inputs(
+  input_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  input_sha256 TEXT NOT NULL,
+  requirements_sha256 TEXT,
+  source_sha256 TEXT,
+  manifest_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, created_at);
 """
 
 DEFAULT_SETTINGS = {
@@ -102,6 +157,14 @@ DEFAULT_SETTINGS = {
     "workspace_id": constants.WORKSPACE_ID,
     "dispatch_serial": "",
     "lifecycle_owner": "",
+    "session_poll_seconds": constants.DEFAULT_SESSION_POLL_SECONDS,
+    # v1.6 (protocol.md §5.18): pi 轮次超时秒数（空=未设置时取 constants 默认）。
+    "pi_round_timeout_seconds": constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS,
+    # v2（protocol.md §5.22）：规划材料根目录（空=未设置，取默认
+    # <app_support>/planner_inputs）与 Codex 规划单轮超时（None=回退
+    # executor_timeout_seconds）。
+    "planner_inputs_root": "",
+    "codex_timeout_seconds": None,
 }
 
 
@@ -117,6 +180,148 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _init_settings(conn: sqlite3.Connection) -> None:
+    for key, value in DEFAULT_SETTINGS.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
+            (key, util.jdump(value)),
+        )
+
+
+def _db_file(conn: sqlite3.Connection) -> Optional[Path]:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None:
+        return None
+    try:
+        raw = row["file"]
+    except (IndexError, KeyError):  # pragma: no cover - defensive
+        return None
+    if not raw:
+        return None
+    return Path(raw)
+
+
+def _backup_database(conn: sqlite3.Connection, tag: str) -> Optional[Path]:
+    """Copy the live DB (+wal/shm) before a schema upgrade (state-model §1.1)."""
+    path = _db_file(conn)
+    if path is None or not path.exists():
+        return None
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:  # pragma: no cover - defensive
+        pass
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    target = constants.app_support() / "backups" / f"schema-{stamp}-{tag}"
+    target.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(path) + suffix)
+        if source.exists():
+            shutil.copy2(source, target / source.name)
+    return target
+
+
+# Ordered upgrade steps: (from_version, to_version, apply). Each step runs in
+# its own transaction after the pre-upgrade backup (state-model.md §1.1).
+def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+    }
+    if "save_state" not in columns:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN save_state TEXT NOT NULL DEFAULT 'active'"
+        )
+    if "saved_at" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN saved_at TEXT")
+    if "auto_advance_paused" not in columns:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN auto_advance_paused "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _upgrade_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v1.5 (state-model §1.2): 新建执行轮次索引。历史数据不迁移——由读取层
+    按 job.json 身份核验回填（protocol §5.16.1），回填永不改写 save_state。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS execution_rounds("
+        "  task_id TEXT NOT NULL,"
+        "  run_id TEXT NOT NULL,"
+        "  backend TEXT NOT NULL DEFAULT 'headless',"
+        "  session_id TEXT,"
+        "  session_title TEXT,"
+        "  run_status TEXT NOT NULL DEFAULT 'unknown',"
+        "  config_json TEXT,"
+        "  worktree_path TEXT,"
+        "  started_at TEXT,"
+        "  pid INTEGER,"
+        "  save_state TEXT NOT NULL DEFAULT 'active',"
+        "  saved_at TEXT,"
+        "  created_at TEXT NOT NULL,"
+        "  updated_at TEXT NOT NULL,"
+        "  PRIMARY KEY (task_id, run_id))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS execution_rounds_save "
+        "ON execution_rounds(save_state, updated_at)"
+    )
+
+
+def _upgrade_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """v2（state-model §1.3，schema v4）：新建 planner_inputs 登记表；
+    save_state 词表扩为含 purged 是读取层变化（无 DDL）；设置键默认值由
+    _init_settings 补种（INSERT OR IGNORE）。历史数据不迁移、不重写。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS planner_inputs("
+        "  input_id TEXT PRIMARY KEY,"
+        "  task_id TEXT NOT NULL,"
+        "  input_sha256 TEXT NOT NULL,"
+        "  requirements_sha256 TEXT,"
+        "  source_sha256 TEXT,"
+        "  manifest_json TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS planner_inputs_task "
+        "ON planner_inputs(task_id, created_at)"
+    )
+
+
+_UPGRADES = {
+    (1, 2): _upgrade_v1_to_v2,
+    (2, 3): _upgrade_v2_to_v3,
+    (3, 4): _upgrade_v3_to_v4,
+}
+
+def _upgrade_schema(conn: sqlite3.Connection, version: int) -> None:
+    if version > constants.SCHEMA_VERSION:
+        raise util.KanpilotError(
+            "migration_needed",
+            f"schema version {version} is newer than supported "
+            f"{constants.SCHEMA_VERSION}",
+        )
+    current = version
+    while current < constants.SCHEMA_VERSION:
+        step = _UPGRADES.get((current, current + 1))
+        if step is None:
+            raise util.KanpilotError(
+                "migration_needed",
+                f"no upgrade path from schema version {current}",
+            )
+        _backup_database(conn, f"v{current}-to-v{current + 1}")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            step(conn)
+            conn.execute(
+                "UPDATE schema_meta SET version=?", (current + 1,)
+            )
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+        current += 1
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     row = conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
@@ -124,16 +329,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_meta(version) VALUES (?)", (constants.SCHEMA_VERSION,)
         )
-    elif int(row["version"]) != constants.SCHEMA_VERSION:
-        raise util.KanpilotError(
-            "migration_needed",
-            f"schema version {row['version']} != {constants.SCHEMA_VERSION}",
-        )
-    for key, value in DEFAULT_SETTINGS.items():
-        conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
-            (key, util.jdump(value)),
-        )
+    else:
+        version = int(row["version"])
+        if version != constants.SCHEMA_VERSION:
+            _upgrade_schema(conn, version)
+    _init_settings(conn)
 
 
 @contextmanager
@@ -197,6 +397,64 @@ def task_fields(row: sqlite3.Row) -> dict:
 def task_extra(row: sqlite3.Row) -> dict:
     extra = util.jload(row["extra_json"])
     return extra if isinstance(extra, dict) else {}
+
+
+# ------------------------------------------------------------ save_state
+# v1.3 (protocol.md §5.15.1): save_state is orthogonal to the lifecycle
+# status; only the console moves tasks between active/archived/trashed.
+
+def task_save_state(row: sqlite3.Row) -> str:
+    try:
+        value = row["save_state"]
+    except (IndexError, KeyError):  # pragma: no cover - defensive
+        return "active"
+    return value or "active"
+
+
+def task_is_active(row: sqlite3.Row) -> bool:
+    return task_save_state(row) == "active"
+
+
+def task_auto_paused(row: sqlite3.Row) -> bool:
+    try:
+        return bool(row["auto_advance_paused"])
+    except (IndexError, KeyError):  # pragma: no cover - defensive
+        return False
+
+
+def task_schedulable(row: sqlite3.Row) -> bool:
+    """Scheduling entry points (tick/claim/enqueue) skip anything else."""
+    return task_is_active(row) and not task_auto_paused(row)
+
+
+def cancel_queued_requests(
+    conn: sqlite3.Connection, task_id: str, now: str
+) -> list:
+    """Cancel this task's queued requests inside the caller's write txn.
+
+    Returns cancelled request ids. A request that turned `claimed` before the
+    transaction started is not returned here (the SELECT only sees queued
+    rows), so callers re-check preconditions inside the same transaction to
+    avoid racing the executor (protocol.md §5.15.2).
+    """
+    rows = conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND status='queued'",
+        (task_id,),
+    ).fetchall()
+    cancelled = []
+    for row in rows:
+        update_request(
+            conn, row["request_id"], now,
+            status="cancelled", finished_at=now,
+            result_json={"outcome": "cancelled", "reason": "task_saved"},
+        )
+        add_event(
+            conn, now, "request_cancelled", task_id=task_id,
+            request_id=row["request_id"], actor="user",
+            detail={"reason": "task_saved", "kind": row["kind"]},
+        )
+        cancelled.append(row["request_id"])
+    return cancelled
 
 
 def update_task(conn: sqlite3.Connection, task_id: str, now: str, **fields: Any) -> None:
@@ -377,3 +635,43 @@ def merge_request_payload(
     payload.update(entries)
     update_request(conn, request_id, now, payload_json=payload)
     return payload
+
+
+# ------------------------------------------------------- v2 planner_inputs
+
+def insert_planner_input(
+    conn: sqlite3.Connection,
+    input_id: str,
+    task_id: str,
+    input_sha256: str,
+    requirements_sha256: Optional[str],
+    source_sha256: Optional[str],
+    manifest: dict,
+    now: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO planner_inputs(input_id, task_id, input_sha256, "
+        "requirements_sha256, source_sha256, manifest_json, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (
+            input_id, task_id, input_sha256, requirements_sha256,
+            source_sha256, util.jdump(manifest), now,
+        ),
+    )
+
+
+def get_planner_input(
+    conn: sqlite3.Connection, input_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM planner_inputs WHERE input_id=?", (input_id,)
+    ).fetchone()
+
+
+def planner_input_manifest(row: sqlite3.Row) -> dict:
+    manifest = util.jload(row["manifest_json"])
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def task_is_purged(row: Optional[sqlite3.Row]) -> bool:
+    return row is not None and task_save_state(row) == "purged"

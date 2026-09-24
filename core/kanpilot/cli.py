@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import (
-    cmd_dispatch, cmd_exec, cmd_migrate, cmd_queue, cmd_read, cmd_remote,
-    constants, db, util,
+    cmd_archive, cmd_config, cmd_dispatch, cmd_exec, cmd_migrate, cmd_queue,
+    cmd_read, cmd_remote, cmd_session, constants, db, planner_inputs, util,
 )
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
@@ -27,23 +27,40 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "list-tasks": (
         {
             "stage": (False, "str"), "status": (False, "str"),
-            "needs_attention": (False, "bool"),
+            "board_column": (False, "str"), "needs_attention": (False, "bool"),
+            "save_state": (False, "str"),
         },
         cmd_read.cmd_list_tasks,
     ),
     "get-task": ({"task_id": (True, "str")}, cmd_read.cmd_get_task),
     "list-requests": (
-        {"status": (False, "str"), "limit": (False, "int")},
+        {
+            "status": (False, "str"), "limit": (False, "int"),
+            # v2（§5.21.2）：含已移除（purged）任务的请求回看。
+            "include_removed": (False, "bool"),
+        },
         cmd_read.cmd_list_requests,
     ),
+    # v2（§5.21.1）：单个请求详情（attempts/allowed_actions/attention_state）。
+    "get-request": (
+        {"request_id": (True, "str")}, cmd_read.cmd_get_request,
+    ),
     "list-events": (
-        {"task_id": (False, "str"), "limit": (False, "int")},
+        {
+            "task_id": (False, "str"), "limit": (False, "int"),
+            # v2（§5.21.3）：游标分页 + stage/result/query 筛选。
+            "before_id": (False, "int"), "stage": (False, "str"),
+            "result": (False, "str"), "query": (False, "str"),
+        },
         cmd_read.cmd_list_events,
     ),
     "enqueue": (
         {
             "task_id": (True, "str"), "kind": (False, "str"),
             "note": (False, "str"),
+            # v2（§5.22.4）：确认放行 hold 的 dispatch 排队。
+            "confirm_plan": (False, "bool"),
+            "expected_plan_sha256": (False, "str"),
         },
         cmd_queue.cmd_enqueue,
     ),
@@ -97,13 +114,16 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         },
         cmd_exec.cmd_report,
     ),
+    # v2（§5.6）：须携带规划请求身份与材料指纹；run_id/request_id 必填。
     "publish-plan": (
         {
             "task_id": (True, "str"), "plan_path": (True, "str"),
             "plan_kind": (True, "str"), "source_sha256": (True, "str"),
             "requirements_sha256": (True, "str"),
             "generated_at": (True, "str"), "planner_model": (True, "str"),
-            "reasoning_effort": (True, "str"), "run_id": (False, "str"),
+            "reasoning_effort": (True, "str"),
+            "request_id": (True, "str"), "run_id": (True, "str"),
+            "planner_input_sha256": (True, "str"),
         },
         cmd_exec.cmd_publish_plan,
     ),
@@ -165,6 +185,103 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "backup_root": (False, "str"), "dry_run": (False, "bool"),
         },
         cmd_migrate.cmd_migrate,
+    ),
+    "archive-task": (
+        {"task_id": (True, "str"), "expected_save_state": (False, "str")},
+        cmd_archive.cmd_archive_task,
+    ),
+    "trash-task": (
+        {"task_id": (True, "str"), "expected_save_state": (False, "str")},
+        cmd_archive.cmd_trash_task,
+    ),
+    "restore-task": (
+        {"task_id": (True, "str"), "resume_auto": (False, "bool")},
+        cmd_archive.cmd_restore_task,
+    ),
+    # v2（§5.20.2）：回收站终态移除（历史/文件保留，不复活）。
+    "purge-task": (
+        {"task_id": (True, "str"), "expected_save_state": (False, "str")},
+        cmd_archive.cmd_purge_task,
+    ),
+    "list-sessions": (
+        {
+            "task_id": (False, "str"),
+            # 临时覆盖运行记录根目录（不持久化；空串视为未提供）。
+            "session_runs_root": (False, "str"),
+            # v1.5（protocol §5.16.3）：会话保存状态筛选，缺省 active。
+            "save_state": (False, "str"),
+            # v2（§5.20.2）：save_state=all 时是否含 purged 回看。
+            "include_removed": (False, "bool"),
+        },
+        cmd_session.cmd_list_sessions,
+    ),
+    "get-session": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        cmd_session.cmd_get_session,
+    ),
+    "session-messages": (
+        {
+            "task_id": (True, "str"), "run_id": (False, "str"),
+            "cursor": (False, "str"), "limit": (False, "int"),
+        },
+        cmd_session.cmd_session_messages,
+    ),
+    # v1.5（protocol §5.16.2）：会话回收站。
+    "trash-session": (
+        {
+            "task_id": (True, "str"), "run_id": (True, "str"),
+            "expected_save_state": (False, "str"),
+        },
+        cmd_session.cmd_trash_session,
+    ),
+    "restore-session": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        cmd_session.cmd_restore_session,
+    ),
+    # v2（§5.20.2）：回收站会话终态移除。
+    "purge-session": (
+        {
+            "task_id": (True, "str"), "run_id": (True, "str"),
+            "expected_save_state": (False, "str"),
+        },
+        cmd_session.cmd_purge_session,
+    ),
+    # v1.6（protocol §5.17）：pi 执行配置与能力查询。
+    "get-exec-config": ({}, cmd_config.cmd_get_exec_config),
+    "set-exec-config": (
+        {
+            "provider": (False, "str"), "model": (False, "str"),
+            "reasoning_effort": (False, "str"),
+            "agent_preset": (False, "str"),
+        },
+        cmd_config.cmd_set_exec_config,
+    ),
+    "exec-capabilities": ({}, cmd_config.cmd_exec_capabilities),
+    # v1.6（protocol §5.18.3）：pi 轮次启动。
+    "dispatch-start": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        cmd_dispatch.cmd_dispatch_start,
+    ),
+    # v1.6：执行端状态（App ExecutorScheduler 单飞判断与设置页显示）。
+    "executor-status": ({}, cmd_config.cmd_executor_status),
+    # v2（§5.22）：手动规划链——待办发现 / 材料准备 / 提交规划。
+    "fetch-todos": (
+        {},
+        lambda ctx, _payload: planner_inputs.fetch_todos(ctx.conn),
+    ),
+    "prepare-plan-input": (
+        {
+            "task_id": (True, "str"),
+            "expected_requirements_sha256": (False, "str"),
+            "local_paths": (False, "list"),
+            "supplement": (False, "str"),
+            "excluded_remote_ids": (False, "list"),
+        },
+        planner_inputs.prepare_plan_input,
+    ),
+    "start-plans": (
+        {"items": (True, "list")},
+        planner_inputs.start_plans,
     ),
 }
 

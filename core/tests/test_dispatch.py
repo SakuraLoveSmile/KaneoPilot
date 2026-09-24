@@ -13,7 +13,8 @@ from kanpilot import bridge, util  # noqa: E402
 class DispatchFlow(KanpilotTestCase):
     def _queue(self):
         fixture = self.make_ready_task()
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        # v2 §5.22.4：发布后 plan_execution_hold → 安排执行须 confirm_plan。
+        self.enqueue_dispatch(fixture["remote"]["id"])
         return fixture
 
     def test_full_dispatch_flow(self):
@@ -85,8 +86,11 @@ class DispatchFlow(KanpilotTestCase):
         self.assertTrue(any(r["kind"] == "dispatch" for r in reqs))
 
     def test_claim_validation_remote_not_todo(self):
-        fixture = self.make_ready_task(remote_status="in-progress")
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        # v2 §5.6：publish-plan 也复验远端状态——先在 to-do 发布，再把远端
+        # 拨到 in-progress，验证 claim 校验捕获非 To Do。
+        fixture = self.make_ready_task(remote_status="to-do")
+        self.fake.tasks[fixture["remote"]["id"]]["status"] = "in-progress"
+        self.enqueue_dispatch(fixture["remote"]["id"])
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -97,7 +101,7 @@ class DispatchFlow(KanpilotTestCase):
 
     def test_claim_validation_remote_unavailable_keeps_task(self):
         fixture = self.make_ready_task()
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        self.enqueue_dispatch(fixture["remote"]["id"])
         self.fake.fail_next = bridge.BridgeError("connection refused")
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
@@ -112,7 +116,7 @@ class DispatchFlow(KanpilotTestCase):
         fixture["plan_path"].write_text(
             fixture["plan_path"].read_text() + "\nextra\n", encoding="utf-8"
         )
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        self.enqueue_dispatch(fixture["remote"]["id"])
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -127,7 +131,7 @@ class DispatchFlow(KanpilotTestCase):
         snap = json.loads(Path(fixture["source_path"]).read_text())
         snap["task"]["title"] = "changed"
         Path(fixture["source_path"]).write_text(json.dumps(snap))
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        self.enqueue_dispatch(fixture["remote"]["id"])
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -139,7 +143,7 @@ class DispatchFlow(KanpilotTestCase):
         fixture = self.make_ready_task()
         # remote description change alters requirements hash
         self.fake.tasks[fixture["remote"]["id"]]["description"] = "edited"
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        self.enqueue_dispatch(fixture["remote"]["id"])
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -160,7 +164,7 @@ class DispatchFlow(KanpilotTestCase):
             requirements_sha256=req_sha, source_sha256=source_sha,
             source_path=source_path,
         )
-        self.call("enqueue", {"task_id": fixture["remote"]["id"]})
+        self.enqueue_dispatch(fixture["remote"]["id"])
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -294,20 +298,16 @@ class DispatchFlow(KanpilotTestCase):
              "fix_task_source_sha256": source_sha,
              "repair_plan_path": str(plan)},
         )
-        self.call(
-            "publish-plan",
-            {"task_id": fix_id, "plan_path": str(plan),
-             "plan_kind": "review_fix",
-             "source_sha256": source_sha,
-             "requirements_sha256": req_sha,
-             "generated_at": "2026-09-20T00:00:00+00:00",
-             "planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+        self.publish(
+            fix_id, plan, plan_kind="review_fix",
+            source_sha256=source_sha, requirements_sha256=req_sha,
+            planner_model="gpt-5.6-sol", reasoning_effort="xhigh",
         )
         return fix_id, plan
 
     def test_claim_review_fix_dispatch(self):
         fix_id, _plan = self._setup_review_fix()
-        self.call("enqueue", {"task_id": fix_id, "kind": "dispatch"})
+        self.enqueue_dispatch(fix_id)
         claim = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
@@ -317,7 +317,7 @@ class DispatchFlow(KanpilotTestCase):
 
     def test_claim_review_fix_missing_marker(self):
         fix_id, _plan = self._setup_review_fix(strip_marker=True)
-        self.call("enqueue", {"task_id": fix_id, "kind": "dispatch"})
+        self.enqueue_dispatch(fix_id)
         result = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )

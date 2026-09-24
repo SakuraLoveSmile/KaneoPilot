@@ -38,6 +38,13 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
         (dedupe_key,),
     ).fetchone()
     if existing is not None:
+        # v2 §5.20.1：purged 行不算命中——静默返回已移除任务的 id 会误导
+        # 调用方；报 conflict 由人工确认（不复活）。
+        if db.task_save_state(existing) == "purged":
+            raise util.KanpilotError(
+                "conflict",
+                "已有同名修复任务但已被永久从列表移除，请更换 dedupe_key",
+            )
         return {
             "ok": True, "fix_task_id": existing["task_id"], "created": False,
             "source_sha256": existing["source_sha256"],
@@ -116,17 +123,8 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
             conn, reviewed["task_id"], now, fix_task_id=fix_task_id,
             review_key=dedupe_key,
         )
-        # Plan request carrying the review context (automation-contract §2).
-        db.create_request(
-            conn, now, "plan", f"plan:{fix_task_id}", task_id=fix_task_id,
-            payload={
-                "plan_kind": "review_fix",
-                "review_key": dedupe_key,
-                "review_source_task_id": source_task["task_id"],
-                "fix_task_id": fix_task_id,
-            },
-            requested_by="kaneo-review",
-        )
+        # v2 §5.22.2：不再自动创建 plan 请求——修复任务停在 needs_plan，
+        # 规划材料确认后经 start-plans 提交（review_* 字段已在任务行上）。
         db.add_event(
             conn, now, "fix_task_created", task_id=source_task["task_id"],
             actor="kaneo-review",
@@ -171,6 +169,17 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             if claimed is None:
                 raise util.KanpilotError(
                     "stale_run", "run_id does not match a claimed request"
+                )
+        if target == "done" and expected == "in-progress":
+            # Review 前置守卫（§5.9 v1.2）：执行完成不得跳过 Review
+            # 直接完成——须先在当前周期登记 review_conclusion='pass'。
+            conclusion = db.task_extra(task).get("review_conclusion")
+            if conclusion != "pass":
+                raise util.KanpilotError(
+                    "conflict",
+                    f"task {task['task_id']} needs a registered pass review "
+                    "before advancing in-progress -> done "
+                    f"(review_conclusion={conclusion})",
                 )
         owner = _lifecycle_op(conn, "advance-task")
 
@@ -256,9 +265,15 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         new_status = "in_review" if target == "in-review" else "done"
         extra = {"kaneo_status": target, "kaneo_checked_at": now}
         if new_status == "in_review":
-            # New review cycle: clear any earlier registered conclusion.
+            # New review cycle: clear any earlier registered conclusion —
+            # report columns and the extra_json conclusion keys alike;
+            # fix_task_id/review_key 历史关联保留（§5.9）。
             extra["review_report_path"] = None
             extra["review_report_sha256"] = None
+            extra_json = db.task_extra(task)
+            for key in ("review_conclusion", "review_registered_at"):
+                extra_json.pop(key, None)
+            extra["extra_json"] = extra_json
         core.transition_task(
             conn, task, new_status, now, actor,
             detail={"via": "advance-task", "target": target,

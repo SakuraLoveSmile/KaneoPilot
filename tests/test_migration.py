@@ -180,3 +180,17 @@ class TestMigrateIdempotent:
         # dry_run 不落库（若实现语义为预览）
         tasks = cli("list-tasks", {})["tasks"]
         assert len(tasks) == 0, "dry_run 不应导入任务"
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

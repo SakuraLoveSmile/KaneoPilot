@@ -36,33 +36,35 @@ def _kinds(cli, task_id):
 
 class TestHappyPath:
     def test_full_chain(self, factory, cli):
-        # 1) sync-tasks → needs_plan + plan 请求
+        # 1) sync-tasks → needs_plan（v2 §5.22.2：不再自动建 plan 请求）
         task = factory.sync_task(title="端到端任务", description="做一件完整的事")
         tid = task.task_id
         assert task.sync["upserted"] == 1
-        assert task.sync["created_requests"], "新任务应建 plan 请求"
+        assert task.sync["created_requests"] == [], (
+            "v2 起 sync 不再自动建请求，等规划面板手动提交")
         t = factory.get_task(tid)
         assert t["status"] == "needs_plan"
         assert t["display_status"] == "待规划"
 
-        # 2) claim plan → planning
-        plan_req = factory.find_request(tid, "plan")
-        c = factory.claim("plan", request_id=plan_req["request_id"])
+        # 2) 规划面板链路：queue_plan → claim plan → planning
+        plan_req_id, _input_id, _input_sha = factory.queue_plan(tid)
+        c = factory.claim("plan", request_id=plan_req_id)
         assert c["claimed"] is True
         assert factory.get_task(tid)["status"] == "planning"
         assert factory.get_task(tid)["display_status"] == "规划中"
 
-        # 3) publish-plan → ready；report 闭环 plan 请求
+        # 3) publish-plan → ready + plan_execution_hold（请求随发布闭环，
+        #    不再单独 report）
         pub = factory.publish(task)
         assert pub.resp["ok"] is True
         assert pub.resp["task_status"] == "ready"
         assert len(pub.resp["plan_sha256"]) == 64
-        cli("report", {"request_id": c["request_id"], "run_id": c["run_id"],
-                       "outcome": "succeeded", "note": "计划完成"})
-        assert factory.get_task(tid)["status"] == "ready"
+        t = factory.get_task(tid)
+        assert t["status"] == "ready"
+        assert t["display_status"] == "待确认执行"  # v2 §5.22.4 计划确认闸
 
-        # 4) enqueue → 已排队；claim → dispatching
-        en = cli("enqueue", {"task_id": tid})
+        # 4) 安排执行（confirm_plan 闸）→ 已排队；claim → dispatching
+        en = factory.enqueue_dispatch(tid)
         assert en["request"]["kind"] == "dispatch"
         assert factory.get_task(tid)["display_status"] == "已排队"
         d = factory.claim("dispatch")
@@ -188,8 +190,8 @@ class TestReviewFix:
         assert detail["plan_kind"] == "review_fix"
         assert detail["review_source_task_id"] == src
         assert detail["review_key"] == "RK-100"
-        # 自动排 plan 请求
-        assert factory.find_request(fix_id, "plan") is not None
+        # v2 §5.22.2：修复任务停在 needs_plan，不自动建 plan 请求
+        assert factory.find_request(fix_id, "plan") is None
         # register-review changes_requested 需要 fix_task_id + review_key
         report = write_review_report(factory.env.app_support, task_id=src,
                                      conclusion="changes_requested")
@@ -240,10 +242,8 @@ class TestReviewFix:
             "repair_plan_path": str(plan.path)})
         cli("report", {"request_id": rv["request_id"], "run_id": rv["run_id"],
                        "outcome": "succeeded"})
-        # fix task → plan claim → publish 同一 review_fix 计划文件
-        preq = factory.find_request(fix_id, "plan")
-        pc = factory.claim("plan", request_id=preq["request_id"])
-        assert pc["claimed"] is True
+        # fix task → publish 同一 review_fix 计划文件（内含
+        # queue_plan+claim；publish-plan 成功即结束请求，不再 report）
         task_view = type("T", (), {
             "task_id": fix_id, "project_id": detail["project_id"],
             "project_name": detail["project_name"],
@@ -251,18 +251,12 @@ class TestReviewFix:
             "source_sha256": detail["source_sha256"],
             "requirements_sha256": detail["requirements_sha256"],
             "title": "修复问题"})()
-        pub = cli("publish-plan", {
-            "task_id": fix_id, "plan_path": str(plan.path),
-            "plan_kind": "review_fix",
-            "source_sha256": task_view.source_sha256,
-            "requirements_sha256": task_view.requirements_sha256,
-            "generated_at": plan.frontmatter["generated_at"],
-            "planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh"})
-        assert pub["task_status"] == "ready"
-        cli("report", {"request_id": pc["request_id"], "run_id": pc["run_id"],
-                       "outcome": "succeeded"})
-        # dispatch claim：远端描述含标记（create-review-fix 已写入）→ 通过
-        cli("enqueue", {"task_id": fix_id})
+        pub = factory.publish(task_view, plan_kind="review_fix",
+                              plan_file=plan)
+        assert pub.resp["task_status"] == "ready"
+        # dispatch claim：远端描述含标记（create-review-fix 已写入）→ 通过；
+        # hold 任务需 confirm_plan enqueue
+        factory.enqueue_dispatch(fix_id)
         dreq = factory.find_request(fix_id, "dispatch")
         d = factory.claim("dispatch", request_id=dreq["request_id"])
         assert d["claimed"] is True, f"review_fix 派发应成功：{d}"
@@ -316,25 +310,26 @@ class TestSyncTransitions:
                 }],
             }],
         }
-
-    def test_sync_new_task_creates_plan_request(self, factory, cli):
+    def test_sync_new_task_lands_needs_plan(self, factory, cli):
         task = factory.sync_task()
         assert task.sync["upserted"] == 1
-        assert factory.find_request(task.task_id, "plan") is not None
+        # v2 §5.22：sync 只落 needs_plan，不自动建 plan 请求
+        assert task.sync["created_requests"] == []
+        assert factory.find_request(task.task_id, "plan") is None
+        assert factory.get_task(task.task_id)["status"] == "needs_plan"
         kinds = _kinds(cli, task.task_id)
         assert "task_created" in kinds
 
     def test_sync_resync_no_duplicate(self, factory, cli):
         task = factory.sync_task()
-        # 再 sync 同样内容 → 不重复建请求
-        import types
+        # 再 sync 同样内容 → 不重复建请求（v2：本就无自动请求）
         task.kaneo_status = "to-do"
         out = cli("sync-tasks", self._payload(task))
         assert out["upserted"] >= 1
         reqs = [r for r in cli("list-requests", {})["requests"]
                 if r["task_id"] == task.task_id and r["kind"] == "plan"
                 and r["status"] in ("queued", "claimed")]
-        assert len(reqs) == 1
+        assert len(reqs) == 0
 
     def test_sync_requirements_change_replans(self, factory, cli):
         ready = factory.make_ready()
@@ -344,7 +339,8 @@ class TestSyncTransitions:
         out = cli("sync-tasks", self._payload(task))
         t = factory.get_task(task.task_id)
         assert t["status"] == "needs_plan"
-        assert factory.find_request(task.task_id, "plan") is not None
+        # v2：需求变化只回 needs_plan，不自动建 plan 请求
+        assert factory.find_request(task.task_id, "plan") is None
         assert "requirements_changed" in _kinds(cli, task.task_id)
 
     def test_sync_kaneo_done_closes_task(self, factory, cli):
@@ -365,7 +361,7 @@ class TestSyncTransitions:
         """dispatching/prepared/submitting 不被 sync 覆盖（§5.4）。"""
         ready = factory.make_ready()
         task = ready.task
-        cli("enqueue", {"task_id": task.task_id})
+        factory.enqueue_dispatch(task.task_id)
         c = factory.claim("dispatch")
         assert c["claimed"] is True
         assert factory.get_task(task.task_id)["status"] == "dispatching"
@@ -418,3 +414,17 @@ class TestAdvanceAndRecheck:
         out = cli("recheck", {"task_id": ready.task.task_id})
         assert out["ok"] is False
         assert any(c["ok"] is False for c in out["checks"])
+
+
+# ---------------------------------------------------------------------------
+# unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+
+
+def load_tests(loader, standard_tests, pattern):
+    import sys
+
+    try:
+        import unittest_compat
+    except ImportError:
+        from tests import unittest_compat
+    return unittest_compat.collect_module(sys.modules[__name__])

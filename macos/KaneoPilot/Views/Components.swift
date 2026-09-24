@@ -121,6 +121,64 @@ enum Labels {
         case "rechecked": return "已重新校验"
         case "request_cancelled": return "请求取消"
         case "lost_detected": return "执行端失联"
+        case "task_archived": return "任务归档"
+        case "task_trashed": return "移入回收站"
+        case "task_restored": return "任务恢复"
+        case "session_trashed": return "会话移入回收站"
+        case "session_restored": return "会话恢复"
+        case "round_started": return "执行轮次启动"
+        case "exec_config_updated": return "执行配置已保存"
+        // v2 §5.20/§5.22 新增事件 kind（与核心 _EVENT_KIND_CN 同口径）。
+        case "task_purged": return "任务永久从列表移除"
+        case "session_purged": return "会话永久从列表移除"
+        case "plan_input_prepared": return "规划材料就绪"
+        case "plan_started": return "规划已排队"
+        case "plan_ready": return "规划产出就绪"
+        case "plan_needs_input": return "规划需要补充输入"
+        default: return key ?? "—"
+        }
+    }
+
+    /// §5.15.1 save_state 中文。
+    static func saveState(_ key: String?) -> String {
+        switch key {
+        case "active": return "活跃"
+        case "archived": return "已归档"
+        case "trashed": return "回收站"
+        case "purged": return "已永久移除"
+        default: return key ?? "—"
+        }
+    }
+
+    /// §5.15.5 会话状态中文。
+    static func sessionState(_ key: String?) -> String {
+        switch key {
+        case "associated": return "已关联"
+        case "pending": return "等待会话记录"
+        case "unavailable": return "不可用"
+        default: return key ?? "—"
+        }
+    }
+
+    /// §5.15.5 连接状态中文（ok/degraded/unavailable；中断为本地派生）。
+    static func sessionConnection(_ key: String?) -> String {
+        switch key {
+        case "ok": return "正常"
+        case "degraded": return "每 2 秒增量"
+        case "unavailable": return "会话读取失败"
+        default: return key ?? "—"
+        }
+    }
+
+    /// §5.15.5 消息类型中文。
+    static func messageType(_ key: String?) -> String {
+        switch key {
+        case "user": return "用户"
+        case "assistant": return "助手"
+        case "tool_call": return "工具调用"
+        case "tool_result": return "工具结果"
+        case "command_output": return "命令输出"
+        case "system": return "系统"
         default: return key ?? "—"
         }
     }
@@ -157,6 +215,12 @@ enum DisplayStatus {
             return StatusStyle(icon: "doc.text.magnifyingglass", color: .blue, label: "规划中")
         case "就绪", "ready":
             return StatusStyle(icon: "checkmark.circle", color: .green, label: "就绪")
+        // v2 §5：计划已发布但未授权执行（文字必须为「待确认执行」）。
+        case "待确认执行":
+            return StatusStyle(icon: "checkmark.circle", color: .green, label: "待确认执行")
+        // v2 §5：旧未授权 plan 请求（kind=plan 且无 manual_authorized）。
+        case "等待确认材料":
+            return StatusStyle(icon: "doc.badge.questionmark", color: .orange, label: "等待确认材料")
         case "已排队", "queued":
             return StatusStyle(icon: "clock", color: .blue, label: "已排队")
         case "派发中", "dispatching", "prepared", "submitting":
@@ -386,5 +450,220 @@ enum Workspace {
         guard let text, !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+// MARK: - §5.15.5 会话连接状态徽标（图标 + 文字双编码）
+
+/// 连接展示态：协议 ok/degraded/unavailable + 本地派生「连接中断，重连中」。
+enum SessionConnectionDisplay: String {
+    case ok
+    case degraded
+    case interrupted
+    case unavailable
+
+    init(connection: SessionConnection?, interrupted: Bool) {
+        if interrupted {
+            self = .interrupted
+        } else if connection?.isUnavailable == true {
+            self = .unavailable
+        } else if connection?.isDegraded == true {
+            self = .degraded
+        } else {
+            self = .ok
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .ok, .degraded: return "dot.radiowaves.left.and.right"
+        case .interrupted: return "wifi.slash"
+        case .unavailable: return "exclamationmark.triangle"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ok: return .secondary
+        case .degraded: return .orange
+        case .interrupted, .unavailable: return .red
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .ok: return "正常"
+        case .degraded: return "每 2 秒增量"
+        case .interrupted: return "连接中断，重连中"
+        case .unavailable: return "会话读取失败"
+        }
+    }
+}
+
+/// 连接状态徽标（§5 映射表：图标 + 文字同时出现）。
+struct SessionConnectionBadge: View {
+    let display: SessionConnectionDisplay
+    var detail: String?
+
+    var body: some View {
+        Label(display.label, systemImage: display.icon)
+            .font(.kpSmall)
+            .foregroundStyle(display.color)
+            .help(detail ?? display.label)
+            .accessibilityLabel("连接状态：\(display.label)")
+    }
+}
+
+// MARK: - NSAlert 二次确认（AppKit 互操作，§6 危险操作）
+
+/// 协议要求的 NSAlert 形态确认框（移入回收站 / 恢复带勾选）。
+enum Alerts {
+    /// 通用确认：标题 + 正文 + 确认/取消。
+    @MainActor
+    static func confirm(title: String,
+                        message: String,
+                        confirmLabel: String = "确定",
+                        destructive: Bool = false,
+                        onConfirm: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = destructive ? .critical : .warning
+        alert.addButton(withTitle: confirmLabel)
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            onConfirm()
+        }
+    }
+
+    /// §4.6 移入回收站确认：正文必须写明「移入本地回收站，不影响 Kaneo」。
+    @MainActor
+    static func confirmTrash(title: String, onConfirm: @escaping () -> Void) {
+        confirm(title: title,
+                message: "将任务移入本地回收站，不影响 Kaneo；可随时恢复。"
+                    + "不会删除 Kaneo 任务、计划文件、报告或执行会话。",
+                confirmLabel: "移入回收站",
+                destructive: true,
+                onConfirm: onConfirm)
+    }
+
+    /// §4.5 恢复确认：默认暂停自动推进，勾选「恢复自动推进」→ resume_auto=true。
+    @MainActor
+    static func confirmRestore(title: String, onConfirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = "恢复后默认暂停自动推进，需手动「恢复自动推进」。"
+        alert.alertStyle = .warning
+        let checkbox = NSButton(checkboxWithTitle: "同时恢复自动推进", target: nil, action: nil)
+        checkbox.state = .off
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+        checkbox.frame = NSRect(x: 0, y: 0, width: 320, height: 26)
+        container.addSubview(checkbox)
+        alert.accessoryView = container
+        alert.addButton(withTitle: "恢复")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            onConfirm(checkbox.state == .on)
+        }
+    }
+}
+
+// MARK: - 搜索高亮
+
+extension AttributedString {
+    /// 大小写不敏感命中高亮（会话消息搜索用）。
+    static func highlighted(_ text: String, query: String) -> AttributedString {
+        guard !query.isEmpty else { return AttributedString(text) }
+        let needle = query.lowercased()
+        let haystack = text.lowercased()
+        var result = AttributedString()
+        var cursor = text.startIndex
+        var searchStart = haystack.startIndex
+        while let found = haystack.range(of: needle,
+                                         range: searchStart..<haystack.endIndex) {
+            var head = AttributedString(String(text[cursor..<found.lowerBound]))
+            result.append(head)
+            var hit = AttributedString(String(text[found]))
+            hit.backgroundColor = Color.accentColor.opacity(0.25)
+            result.append(hit)
+            cursor = found.upperBound
+            searchStart = found.upperBound
+        }
+        if cursor < text.endIndex {
+            result.append(AttributedString(String(text[cursor...])))
+        }
+        return result
+    }
+}
+
+// MARK: - v2 §5.21.1 请求关注态徽标（attention_state）
+
+enum AttentionState {
+    /// actionable→需处理 / historical→历史 / informational→记录（图标+文字）。
+    static func style(_ state: String?) -> StatusStyle {
+        switch state {
+        case "actionable":
+            return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "需处理")
+        case "historical":
+            return StatusStyle(icon: "clock", color: .secondary, label: "历史")
+        case "informational":
+            return StatusStyle(icon: "info.circle", color: .secondary, label: "记录")
+        default:
+            return StatusStyle(icon: "questionmark.circle", color: .secondary, label: state ?? "—")
+        }
+    }
+}
+
+// MARK: - v2 §5.20 永久移除确认文案（固定，不得改写）
+
+enum PurgeText {
+    /// confirmationDialog 固定文案（ui-spec §4.5/§4.6/§6）。
+    static let confirmMessage = "永久从列表移除；保留历史记录与文件，不释放磁盘空间。"
+    /// 按钮/动作名。
+    static let actionTitle = "永久从列表移除"
+}
+
+// MARK: - JSONValue 详情展开（运行记录 / 请求详情用）
+
+extension JSONValue {
+    /// 可读多行文本：对象/数组按缩进展开，叶子用单行 text。
+    var pretty: String {
+        var lines: [String] = []
+        Self.render(self, indent: 0, into: &lines)
+        return lines.joined(separator: "\n")
+    }
+
+    private static func render(_ value: JSONValue, indent: Int, into lines: inout [String]) {
+        let pad = String(repeating: "  ", count: indent)
+        switch value {
+        case .object(let dict):
+            if dict.isEmpty { lines.append(pad + "{}"); return }
+            for key in dict.keys.sorted() {
+                let child = dict[key] ?? .null
+                switch child {
+                case .object(let sub) where !sub.isEmpty:
+                    lines.append(pad + key + ":")
+                    render(child, indent: indent + 1, into: &lines)
+                case .array(let items) where !items.isEmpty:
+                    lines.append(pad + key + ":")
+                    render(child, indent: indent + 1, into: &lines)
+                default:
+                    lines.append(pad + key + ": " + child.text)
+                }
+            }
+        case .array(let items):
+            if items.isEmpty { lines.append(pad + "[]"); return }
+            for item in items {
+                switch item {
+                case .object, .array:
+                    lines.append(pad + "-")
+                    render(item, indent: indent + 1, into: &lines)
+                default:
+                    lines.append(pad + "- " + item.text)
+                }
+            }
+        default:
+            lines.append(pad + value.text)
+        }
     }
 }

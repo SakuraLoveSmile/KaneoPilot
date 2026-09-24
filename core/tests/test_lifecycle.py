@@ -18,7 +18,8 @@ class TestPublishPlan(KanpilotTestCase):
         fixture = self.make_ready_task()
         view = self.task(fixture["remote"]["id"])
         self.assertEqual(view["status"], "ready")
-        self.assertEqual(view["display_status"], "就绪")
+        # v2 §5.22.4：发布后 plan_execution_hold → 展示「待确认执行」。
+        self.assertEqual(view["display_status"], "待确认执行")
         self.assertTrue(view["plan_sha256"])
         events = self.call(
             "list-events", {"task_id": fixture["remote"]["id"]}
@@ -41,19 +42,40 @@ class TestPublishPlan(KanpilotTestCase):
             {"source_sha256": source_sha, "requirements_sha256": req_sha,
              "implementation_status": "已完成"},
         )
+        # v2：先建授权规划请求并 claim，再走 publish-plan（validation_failed
+        # 由 frontmatter 校验触发）。
+        request_id, input_sha = self.queue_plan(
+            remote_task["id"], source_sha256=source_sha,
+            requirements_sha256=req_sha)
+        claim = self.call("claim", {
+            "stage": "plan", "executor": "test-planner",
+            "request_id": request_id})
+        self.assertTrue(claim["claimed"])
         exc = self.call_err(
             "publish-plan",
             {"task_id": remote_task["id"], "plan_path": str(bad_plan),
              "plan_kind": "standard", "source_sha256": source_sha,
              "requirements_sha256": req_sha,
              "generated_at": "2026-09-20T00:00:00+00:00",
-             "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
+             "planner_model": "gpt-6-astra", "reasoning_effort": "medium",
+             "request_id": request_id, "run_id": claim["run_id"],
+             "planner_input_sha256": input_sha},
         )
         self.assertEqual(exc.code, "validation_failed")
 
     def test_publish_plan_conflict_during_dispatch(self):
         fixture = self.make_ready_task()
         task_id = fixture["remote"]["id"]
+        # v2：dispatch 中段拒绝覆盖派发输入。任务已 ready（hold），建授权
+        # plan 请求会撞 dispatch guard——改为先建请求再搬状态到 dispatching。
+        self.set_task_status(task_id, "needs_plan")
+        request_id, input_sha = self.queue_plan(
+            task_id, source_sha256=fixture["source_sha256"],
+            requirements_sha256=fixture["requirements_sha256"])
+        claim = self.call("claim", {
+            "stage": "plan", "executor": "test-planner",
+            "request_id": request_id})
+        self.assertTrue(claim["claimed"])
         self.set_task_status(task_id, "dispatching")
         exc = self.call_err(
             "publish-plan",
@@ -62,7 +84,9 @@ class TestPublishPlan(KanpilotTestCase):
              "source_sha256": fixture["source_sha256"],
              "requirements_sha256": fixture["requirements_sha256"],
              "generated_at": "2026-09-20T00:00:00+00:00",
-             "planner_model": "gpt-6-astra", "reasoning_effort": "medium"},
+             "planner_model": "gpt-6-astra", "reasoning_effort": "medium",
+             "request_id": request_id, "run_id": claim["run_id"],
+             "planner_input_sha256": input_sha},
         )
         self.assertEqual(exc.code, "conflict")
 
@@ -181,10 +205,11 @@ class TestReviewAndAdvance(KanpilotTestCase):
         self.assertEqual(view["plan_kind"], "review_fix")
         self.assertEqual(view["review_source_task_id"], task_id)
         self.assertEqual(view["review_key"], dedupe)
-        # plan request with review payload queued
+        # v2 §5.22.2：create-review-fix 不再自动创建 plan 请求（等待规划
+        # 面板手动提交）；任务停在 needs_plan。
         reqs = [r for r in self.requests(status="queued")
                 if r["task_id"] == fix_id and r["kind"] == "plan"]
-        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs, [])
         # repeat -> dedup
         again = self.call(
             "create-review-fix",
@@ -197,14 +222,11 @@ class TestReviewAndAdvance(KanpilotTestCase):
 
 
 class TestTick(KanpilotTestCase):
-    def test_tick_creates_plan_scan_once(self):
+    def test_tick_no_longer_creates_plan_scan(self):
+        # v2 §5.22.2：tick 不再生成 plan-scan（手动规划链取代定时扫描）。
         first = self.call("tick")
         kinds = [c["kind"] for c in first["created"]]
-        self.assertIn("plan-scan", kinds)
-        second = self.call("tick")
-        self.assertFalse(
-            any(c["kind"] == "plan-scan" for c in second["created"])
-        )
+        self.assertNotIn("plan-scan", kinds)
 
     def test_tick_monitor_and_review(self):
         running = self.fake.add_task(
@@ -283,9 +305,10 @@ class TestSyncTasks(KanpilotTestCase):
         )
         view = self.task(task["id"])
         self.assertEqual(view["status"], "needs_plan")
+        # v2 §5.22.2：需求变化更新状态与证据但不自动建 plan 请求。
         reqs = [r for r in self.requests(status="queued")
                 if r["task_id"] == task["id"] and r["kind"] == "plan"]
-        self.assertTrue(reqs)
+        self.assertEqual(reqs, [])
 
     def test_kaneo_done_archives_and_dispatch_untouched(self):
         done_task = self.fake.add_task(
@@ -317,8 +340,9 @@ class TestSyncTasks(KanpilotTestCase):
 
 
 class TestResolve(KanpilotTestCase):
-    def _blocked(self, send_state=None):
-        fixture = self.make_ready_task()
+    def _blocked(self, send_state=None,
+                 task_id="taskready000000000000001"):
+        fixture = self.make_ready_task(task_id=task_id)
         task_id = fixture["remote"]["id"]
         self.set_task_status(
             task_id, "needs_user", send_state=send_state,
@@ -373,9 +397,10 @@ class TestResolve(KanpilotTestCase):
             "resolve", {"task_id": task_id, "action": "replan"}
         )
         self.assertEqual(result["task_status"], "needs_plan")
-        self.assertEqual(result["request"]["kind"], "plan")
+        # v2 §5.22.2：replan 只恢复状态，不自动创建 plan 请求。
+        self.assertIsNone(result["request"])
 
-        fixture = self._blocked()
+        fixture = self._blocked(task_id="taskready000000000000002")
         task_id = fixture["remote"]["id"]
         result = self.call(
             "resolve", {"task_id": task_id, "action": "dismiss"}
@@ -383,7 +408,7 @@ class TestResolve(KanpilotTestCase):
         self.assertEqual(result["task_status"], "ready")
         self.assertIsNone(result["request"])
 
-        fixture = self._blocked()
+        fixture = self._blocked(task_id="taskready000000000000003")
         task_id = fixture["remote"]["id"]
         result = self.call(
             "resolve", {"task_id": task_id, "action": "mark_done"}

@@ -8,9 +8,17 @@ from pathlib import Path
 from typing import Optional
 
 from . import (
-    cmd_read, constants, core, db, derive, dispatch_validate, planfile,
-    remote, util,
+    cmd_read, constants, core, db, derive, dispatch_validate, exec_config,
+    planfile, remote, round_store, util,
 )
+
+
+def planner_input_dir(conn, input_id: str) -> Path:
+    """planner_inputs/<input_id>/ 目录（settings 覆盖 > env > 默认）。"""
+    root = constants.planner_inputs_root(
+        db.get_setting(conn, "planner_inputs_root")
+    )
+    return root / input_id
 
 
 def _select_candidate(
@@ -31,12 +39,35 @@ def _select_candidate(
         # status 判定交给调用方：'claimed' → claimed:false（并发失败），
         # 其他非 queued → conflict。
         return row
-    return conn.execute(
-        "SELECT * FROM requests WHERE stage=? AND status='queued' "
-        "AND (not_before IS NULL OR not_before <= ?) "
-        "ORDER BY priority ASC, created_at ASC LIMIT 1",
+    # §5.15.3：自动取单排除归档/回收站与恢复后暂停任务的请求；
+    # plan-scan 等无任务请求（task_id IS NULL）不受影响。
+    rows = conn.execute(
+        "SELECT r.* FROM requests r "
+        "LEFT JOIN tasks t ON t.task_id = r.task_id "
+        "WHERE r.stage=? AND r.status='queued' "
+        "AND (r.not_before IS NULL OR r.not_before <= ?) "
+        "AND (r.task_id IS NULL OR (t.save_state='active' "
+        "AND t.auto_advance_paused=0)) "
+        "ORDER BY r.priority ASC, r.created_at ASC LIMIT 20",
         (stage, util.to_iso(now)),
-    ).fetchone()
+    ).fetchall()
+    for row in rows:
+        # v2 §5.22.2：未授权（payload 无 manual_authorized）的 plan 请求
+        # 自动取单跳过——等待用户在规划面板确认材料。
+        if row["kind"] == "plan" and not db.request_payload(row).get(
+            "manual_authorized"
+        ):
+            continue
+        task = db.get_task(conn, row["task_id"]) if row["task_id"] else None
+        # v2 §5.22.4：plan_execution_hold 未解除前 dispatch 不可领取。
+        if (
+            row["kind"] == "dispatch"
+            and task is not None
+            and db.task_extra(task).get("plan_execution_hold")
+        ):
+            continue
+        return row
+    return None
 
 
 def _claim_row(
@@ -87,19 +118,21 @@ def cmd_claim(ctx, payload: dict) -> dict:
         cmd_read.tick_inline(conn, now)
         if db.paused(conn, stage):
             return {"claimed": False, "reason": "paused"}
-        if stage == "dispatch" and conn.execute(
-            "SELECT COUNT(*) AS n FROM requests WHERE stage='dispatch' "
-            "AND status='claimed'"
-        ).fetchone()["n"]:
-            return {"claimed": False, "reason": "stage_busy"}
         request = _select_candidate(conn, stage, payload.get("request_id"), now)
-        if request is None:
-            return {"claimed": False, "reason": "empty"}
-        if request["status"] == "claimed":
+        # 定点领取：请求已在途 → already_claimed（先于 stage_busy/empty）。
+        if request is not None and request["status"] == "claimed":
             return {
                 "claimed": False, "reason": "already_claimed",
                 "request_id": request["request_id"],
             }
+        # 单飞（§4.2 + §5.22.1）：dispatch/plan 同 stage 同时只允许一个在途。
+        if stage in ("dispatch", "plan") and conn.execute(
+            "SELECT COUNT(*) AS n FROM requests WHERE stage=? "
+            "AND status='claimed'", (stage,)
+        ).fetchone()["n"]:
+            return {"claimed": False, "reason": "stage_busy"}
+        if request is None:
+            return {"claimed": False, "reason": "empty"}
         if request["status"] != "queued":
             raise util.KanpilotError(
                 "conflict",
@@ -110,6 +143,41 @@ def cmd_claim(ctx, payload: dict) -> dict:
             if request["task_id"]
             else None
         )
+        # §5.15.3：归档/回收站/恢复后暂停的任务不可领取（调度入口排除）。
+        if task is not None and not db.task_schedulable(task):
+            return {
+                "claimed": False,
+                "reason": (
+                    "task_archived"
+                    if not db.task_is_active(task)
+                    else "task_paused"
+                ),
+                "request_id": request["request_id"],
+            }
+        # v2 §5.20.1：purged 任务的请求一律拒绝。
+        if db.task_is_purged(task):
+            return {
+                "claimed": False, "reason": "task_purged",
+                "request_id": request["request_id"],
+            }
+        # v2 §5.22.2：未授权 plan 请求，定点 claim 同样拒绝。
+        if request["kind"] == "plan" and not db.request_payload(request).get(
+            "manual_authorized"
+        ):
+            return {
+                "claimed": False, "reason": "unauthorized_plan",
+                "request_id": request["request_id"],
+            }
+        # v2 §5.22.4：hold 未解除前 dispatch 不得领取（定点也一样）。
+        if (
+            request["kind"] == "dispatch"
+            and task is not None
+            and db.task_extra(task).get("plan_execution_hold")
+        ):
+            return {
+                "claimed": False, "reason": "plan_hold",
+                "request_id": request["request_id"],
+            }
         if request["kind"] == "dispatch":
             if task is None:
                 core.fail_request(
@@ -132,12 +200,6 @@ def cmd_claim(ctx, payload: dict) -> dict:
                     "request_id": request["request_id"], "detail": reason,
                 }
             run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
-            if task is not None and request["kind"] == "plan":
-                core.transition_task(
-                    conn, task, "planning", util.to_iso(now), executor,
-                    detail={"via": "claim"},
-                )
-                task = db.require_task(conn, task["task_id"])
             context = {
                 "kind": request["kind"],
                 "payload": db.request_payload(
@@ -145,6 +207,25 @@ def cmd_claim(ctx, payload: dict) -> dict:
                 ),
                 "lease_seconds": lease_seconds,
             }
+            if task is not None and request["kind"] == "plan":
+                core.transition_task(
+                    conn, task, "planning", util.to_iso(now), executor,
+                    detail={"via": "claim"},
+                )
+                task = db.require_task(conn, task["task_id"])
+                # v2 §5.22.3：规划轮次登记索引（backend=codex，供会话/
+                # 运行记录与日志路径使用），材料目录写入 context。
+                round_store.upsert_on_claim(
+                    conn, task["task_id"], run_id,
+                    {"backend": "codex",
+                     "planner": context["payload"].get("model_config")},
+                    util.to_iso(now), backend="codex",
+                )
+                input_id = context["payload"].get("input_id")
+                context["input_id"] = input_id
+                context["input_dir"] = str(
+                    planner_input_dir(conn, input_id)
+                ) if input_id else None
             if task is not None:
                 context["task_id"] = task["task_id"]
                 context["task"] = derive.task_summary(conn, task, now)
@@ -182,8 +263,18 @@ def cmd_claim(ctx, payload: dict) -> dict:
     with db.write_txn(conn):
         request = db.get_request(conn, request_id)
         task = db.require_task(conn, task_id)
+        # §4.2-4：并发竞争失败（校验期间被他方领取）→ already_claimed；
+        # 其他非 queued 状态（failed/succeeded/cancelled）→ conflict。
+        if request["status"] == "claimed":
+            return {
+                "claimed": False, "reason": "already_claimed",
+                "request_id": request_id,
+            }
         if request["status"] != "queued":
-            return {"claimed": False, "reason": "empty"}
+            raise util.KanpilotError(
+                "conflict",
+                f"request {request_id} is {request['status']}",
+            )
         if db.paused(conn, stage):
             return {"claimed": False, "reason": "paused"}
         if conn.execute(
@@ -201,7 +292,16 @@ def cmd_claim(ctx, payload: dict) -> dict:
                 "request_id": request_id, "detail": reason,
                 "code": "guard_failed",
             }
-        if util.sha256_file(Path(checked["plan_path"])) != checked["plan_sha256"]:
+        # v2 §5.22.4：校验期间若有新 publish，hold 重新置位或哈希变化 →
+        # 拒绝本次 claim（确认闸不被竞态绕过）。
+        if db.task_extra(task).get("plan_execution_hold"):
+            return {
+                "claimed": False, "reason": "plan_hold",
+                "request_id": request_id,
+            }
+        if (checked["plan_sha256"] != task["plan_sha256"]
+                or util.sha256_file(Path(checked["plan_path"]))
+                != checked["plan_sha256"]):
             core.fail_request(
                 conn, request, util.to_iso(now),
                 "plan changed between validation and claim", actor=executor,
@@ -214,6 +314,12 @@ def cmd_claim(ctx, payload: dict) -> dict:
             }
         run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
         session_marker = f"{task_id}/{run_id}"
+        # v1.6（protocol §5.16.1/§5.17.3）：新 claim 恒 pi 后端，创建轮次
+        # 索引行并固化当前执行配置快照（此后 set-exec-config 不影响该轮）。
+        config_snapshot = exec_config.snapshot(conn)
+        round_store.upsert_on_claim(
+            conn, task_id, run_id, config_snapshot, util.to_iso(now)
+        )
         db.update_task(
             conn, task_id, util.to_iso(now),
             status="dispatching", stage="dispatch",
@@ -243,13 +349,16 @@ def cmd_claim(ctx, payload: dict) -> dict:
             "project_id": checked["project_id"],
             "plan_kind": checked["plan_kind"],
             "session_marker": session_marker,
-            "instruction": constants.DISPATCH_INSTRUCTION.format(
-                marker=session_marker
+            # v1.6（§5.18.3）：新 claim 为 pi 后端，指令无附件形态。
+            "instruction": constants.DISPATCH_INSTRUCTION_PI.format(
+                marker=session_marker, plan_path=checked["plan_path"]
             ),
             "original_todo_slug": checked["original_todo_slug"],
             "requirements_sha256": checked["requirements_sha256"],
             "source_sha256": checked["source_sha256"],
             "lease_seconds": lease_seconds,
+            "backend": "pi",
+            "exec_config": config_snapshot,
         }
         return {
             "claimed": True, "request_id": request_id,
@@ -319,6 +428,11 @@ def cmd_report(ctx, payload: dict) -> dict:
             if request["task_id"]
             else None
         )
+        # v2 §5.20.1：purged 任务拒绝写入口（claimed 请求属历史残留）。
+        if db.task_is_purged(task):
+            raise util.KanpilotError(
+                "conflict", "任务已永久从列表移除，不能再汇报"
+            )
         if payload.get("progress") and task is not None:
             db.update_task(
                 conn, task["task_id"], now_iso,
@@ -339,15 +453,65 @@ def cmd_report(ctx, payload: dict) -> dict:
                 conn, task["task_id"], now_iso,
                 send_state=payload["send_state"],
             )
+        if (
+            outcome == "failed"
+            and request["kind"] == "plan"
+            and task is not None
+            and task["status"] == "planning"
+        ):
+            # v2 §5.22.3：规划失败（超时/崩溃/不合规/发布被拒）→ 回 needs_plan，
+            # 等用户在规划面板重新准备材料提交（不自动重试/自动建请求）。
+            core.transition_task(
+                conn, task, "needs_plan", now_iso,
+                request["claimed_by"] or "kaneo-planner",
+                detail={
+                    "via": "plan_report_failed",
+                    "failure_code": payload.get("failure_code"),
+                },
+                failure_code=payload.get("failure_code") or "planner_failed",
+                failure_reason=payload.get("failure_reason")
+                or payload.get("note"),
+            )
+            task = db.get_task(conn, task["task_id"])
         if outcome == "needs_user" and task is not None:
+            # §4.7 (v1.2): an already-blocked task keeps its original
+            # failure_stage/failure_code unless the payload refines the code.
+            already_blocked = task["status"] == "needs_user"
             core.block_task(
                 conn, task, now_iso,
                 payload.get("failure_reason") or payload.get("note")
+                or task["failure_reason"]
                 or "executor reported needs_user",
-                payload.get("failure_code") or "reported",
+                payload.get("failure_code")
+                or (task["failure_code"] if already_blocked else None)
+                or "reported",
                 request["claimed_by"],
+                stage=(
+                    task["failure_stage"] or task["stage"]
+                    if already_blocked else None
+                ),
                 send_state=payload.get("send_state", task["send_state"]),
             )
+        if (
+            outcome == "succeeded"
+            and request["kind"] == "monitor"
+            and task is not None
+            and task["status"] == "needs_user"
+            and task["failure_code"] == "observation_blocked"
+        ):
+            # §5.15.4：监控连接恢复（monitor 观测成功）自动清除观测异常，
+            # 任务回 running；发送不明/人工阻塞/失联不适用此自动解除。
+            core.transition_task(
+                conn, task, "running", now_iso, request["claimed_by"],
+                detail={"via": "monitor_recovered"},
+                **core.clear_block_fields(),
+            )
+            db.add_event(
+                conn, now_iso, "resolved", task_id=task["task_id"],
+                request_id=request["request_id"], actor=request["claimed_by"],
+                detail={"action": "observation_recovered", "via": "monitor"},
+            )
+            task = db.get_task(conn, task["task_id"])
         db.add_event(
             conn, now_iso, "reported", task_id=request["task_id"],
             request_id=request["request_id"], actor=request["claimed_by"],
@@ -369,10 +533,80 @@ def cmd_report(ctx, payload: dict) -> dict:
 
 
 def cmd_publish_plan(ctx, payload: dict) -> dict:
+    """v2（protocol §5.6）：事务内复核 —— 任务活跃、请求为本任务当前
+    claimed 规划请求且 run_id/租约/planner_input_sha256 一致；同一事务登记
+    计划字段 + task→ready + 置 plan_execution_hold + 结束请求 succeeded。"""
     conn, now = ctx.conn, ctx.now
+    now_iso = util.to_iso(now)
+    # §5.6 事务外核验（不占写锁）：远端复验任务仍为 To Do 且需求指纹未变；
+    # 远端不可达 → remote_unavailable（不写本地状态）。
+    try:
+        live = remote.get_task(remote.get_client(), payload["task_id"])
+    except Exception as exc:
+        raise util.KanpilotError(
+            "remote_unavailable", f"远端复验失败：{exc}"
+        )
+    live_task = live.get("task") or {}
+    if live_task.get("status") not in constants.TODO_SLUGS:
+        raise util.KanpilotError(
+            "conflict",
+            f"远端任务已不在 To Do（{live_task.get('status')}），拒绝发布",
+        )
+    live_req = live.get("requirements_sha256")
+    if live_req and live_req != payload["requirements_sha256"]:
+        raise util.KanpilotError(
+            "conflict", "远端需求已变化（requirements_sha256 不符），拒绝发布"
+        )
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
-        if task["status"] in constants.DISPATCH_MID_STATUSES + ("running",):
+        # §5.20.1：purged 终态拒绝写入口。
+        if db.task_is_purged(task):
+            raise util.KanpilotError(
+                "conflict", "任务已永久从列表移除，不能再发布计划"
+            )
+        request = db.get_request(conn, payload["request_id"])
+        if request is None:
+            raise util.KanpilotError(
+                "not_found", f"request not found: {payload['request_id']}"
+            )
+        if request["task_id"] != task["task_id"]:
+            raise util.KanpilotError(
+                "conflict", "请求不属于该任务，不能发布计划"
+            )
+        if request["kind"] != "plan":
+            raise util.KanpilotError(
+                "bad_request", "publish-plan 只接受规划请求"
+            )
+        # §5.6 幂等：同一 run 重复发布同一计划文件 → deduplicated（网络
+        # 重试/重复提交不改状态、不重复写事件）。
+        if request["status"] == "succeeded":
+            prev = util.jload(request["result_json"]) or {}
+            plan_sha_retry = util.sha256_file(Path(payload["plan_path"]))
+            if (request["run_id"] == payload["run_id"]
+                    and prev.get("plan_sha256") == plan_sha_retry):
+                return {
+                    "ok": True, "deduplicated": True,
+                    "task_status": task["status"],
+                    "plan_sha256": plan_sha_retry,
+                    "plan_execution_hold": bool(
+                        db.task_extra(task).get("plan_execution_hold")),
+                }
+        request = _claimed_request(
+            conn, payload["request_id"], payload["run_id"]
+        )
+        if util.lease_lost(request["lease_expires_at"], now):
+            raise util.KanpilotError(
+                "stale_run", "规划请求租约已过期（失联），请先处理失联"
+            )
+        req_payload = db.request_payload(request)
+        expected_input_sha = req_payload.get("planner_input_sha256")
+        supplied_input_sha = payload.get("planner_input_sha256")
+        if expected_input_sha and supplied_input_sha != expected_input_sha:
+            raise util.KanpilotError(
+                "conflict",
+                "规划输入指纹与本请求登记材料不符，拒绝发布",
+            )
+        if task["status"] not in ("planning", "needs_plan", "needs_user"):
             raise util.KanpilotError(
                 "conflict",
                 f"task {task['task_id']} is {task['status']}; "
@@ -446,18 +680,41 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
                 }
             )
         task = db.require_task(conn, task["task_id"])
+        extra = db.task_extra(task)
+        # v2 §5.22.4：发布与执行分离——计划登记后置 hold，等用户确认。
+        extra["plan_execution_hold"] = True
+        fields["extra_json"] = extra
         core.transition_task(
-            conn, task, "ready", ctx.now_iso,
-            actor=payload.get("run_id") or "kaneo-plan",
+            conn, task, "ready", now_iso,
+            actor=request["claimed_by"] or "kaneo-planner",
             detail={"via": "publish-plan"}, **fields,
         )
-        db.add_event(
-            conn, ctx.now_iso, "plan_published", task_id=task["task_id"],
-            actor="kaneo-plan",
-            detail={"plan_path": str(path), "plan_sha256": plan_sha,
-                    "plan_kind": plan_kind},
+        # 成功路径结束请求（同一事务闭合 attempt），不再另调 report。
+        core.finish_request(
+            conn, db.get_request(conn, request["request_id"]), now_iso,
+            "succeeded", "succeeded",
+            result={"outcome": "succeeded", "plan_sha256": plan_sha},
+            note="plan published",
         )
-        return {"ok": True, "task_status": "ready", "plan_sha256": plan_sha}
+        # v2 §5.22.5：review_fix 计划写回原评审任务的 repair_plan_*。
+        if plan_kind == "review_fix":
+            source = db.get_task(conn, meta["review_source_task_id"])
+            if source is not None and not db.task_is_purged(source):
+                db.set_extra(
+                    conn, source, now_iso,
+                    repair_plan_path=str(path),
+                    repair_plan_sha256=plan_sha,
+                )
+        db.add_event(
+            conn, now_iso, "plan_published", task_id=task["task_id"],
+            request_id=request["request_id"],
+            actor=request["claimed_by"] or "kaneo-planner",
+            detail={"plan_path": str(path), "plan_sha256": plan_sha,
+                    "plan_kind": plan_kind,
+                    "planner_input_sha256": supplied_input_sha},
+        )
+        return {"ok": True, "task_status": "ready", "plan_sha256": plan_sha,
+                "plan_execution_hold": True}
 
 
 def cmd_register_review(ctx, payload: dict) -> dict:

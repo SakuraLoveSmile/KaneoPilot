@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 顶层 NavigationSplitView：侧栏固定四节（任务/待处理/运行记录/设置）。
+/// 顶层 NavigationSplitView：侧栏固定七节（任务/执行会话/待处理/归档/回收站/运行记录/设置）。
 struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var section: AppViewModel.Section = .tasks
@@ -34,9 +34,25 @@ struct RootView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: model.toast)
+            // v2 §4.7：规划面板（独立 sheet，不阻塞主窗口操作）。
+            .sheet(isPresented: $model.planningPresented) {
+                PlanningView()
+                    .environmentObject(model)
+                    .frame(minWidth: 760, idealWidth: 760, minHeight: 600)
+            }
         }
         .task { await model.refreshAll() }
+        .task { await model.loadSaved() }
         .task { await pollLoop() }
+        .onChange(of: section) { _, newSection in
+            // 归档/回收站/会话节按需加载（与看板周期刷新解耦）
+            switch newSection {
+            case .archive, .trash, .sessions:
+                Task { await model.loadSaved() }
+            default:
+                break
+            }
+        }
         .alert("操作失败", isPresented: alertPresented) {
             Button("好", role: .cancel) { model.alertMessage = nil }
         } message: {
@@ -49,8 +65,14 @@ struct RootView: View {
         switch section {
         case .tasks:
             TasksSectionView()
+        case .sessions:
+            SessionsListView()
         case .pending:
             PendingView()
+        case .archive:
+            SavedTasksView(mode: .archive)
+        case .trash:
+            SavedTasksView(mode: .trash)
         case .runs:
             RunsView()
         case .settings:

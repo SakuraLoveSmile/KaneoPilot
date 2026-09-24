@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from . import bridge, constants, core, db, planfile, remote, util
+from . import bridge, constants, core, db, exec_config, planfile, remote, util
 
 
 class DispatchCheckFailed(util.KanpilotError):
@@ -154,6 +154,13 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "send_conflict",
     )
 
+    # 7. pi 执行可用性门（protocol §5.17.3，v1.6）：pi 可执行/模型清单/
+    #    当前配置/凭据/agent.md 任一不可用 → 确定性 validation_failed（task 进
+    #    needs_user），**不自动换模型或 agent**。失败信息取自
+    #    exec_config.check_available 的中文原因。
+    available, reason = exec_config.check_available(conn)
+    _require(available, reason or "pi 执行环境不可用")
+
     return {
         "task_id": task_id,
         "plan_path": str(path),
@@ -166,6 +173,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "requirements_sha256": requirements,
         "source_sha256": meta["source_sha256"],
         "kaneo_status": live_task["status"],
+        # v1.6（§5.18.3）：新 claim 恒 pi 后端 + 固化配置快照。
+        "backend": "pi",
+        "exec_config": exec_config.snapshot(conn),
     }
 
 

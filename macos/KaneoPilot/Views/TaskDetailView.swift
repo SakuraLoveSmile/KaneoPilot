@@ -8,6 +8,8 @@ struct TaskDetailView: View {
 
     @EnvironmentObject private var model: AppViewModel
     @State private var confirm: ConfirmableAction?
+    /// v2 §5.20：回收站任务「永久从列表移除」确认。
+    @State private var confirmingPurge = false
 
     /// 需二次确认的动作（§4.1 + §6 危险操作清单）。
     enum ConfirmableAction: Identifiable {
@@ -83,6 +85,44 @@ struct TaskDetailView: View {
         detail.status == "needs_user" || display == "执行端失联" || display == "需人工"
     }
 
+    /// §5.15.2 归档/回收站禁用条件（UI 置灰 + tooltip 原因；与核心同口径）。
+    private var moveOutBlockedReason: String? {
+        if detail.saveState != nil && detail.saveState != "active" {
+            return "任务已移出活跃看板（\(Labels.saveState(detail.saveState))）"
+        }
+        switch detail.status {
+        case "planning": return "正在规划，暂不可移出看板"
+        case "dispatching", "prepared", "submitting": return "正在派发，暂不可移出看板"
+        case "running": return "正在执行，暂不可移出看板"
+        case "in_review": return "正在评审，暂不可移出看板"
+        default: break
+        }
+        if detail.sendState == "unknown" { return "发送不明，需先人工裁决" }
+        if display == "执行端失联" { return "执行端失联未解除，暂不可移出看板" }
+        return nil
+    }
+
+    private var isActive: Bool {
+        (detail.saveState ?? "active") == "active"
+    }
+
+    /// 操作区展示的动作：核心 allowed_actions + 归档/回收站/恢复（禁用态也展示原因）。
+    /// v2 §5.20.1：purged（read_only）只读审计视图 → 动作区为空。
+    private var visibleActions: [String] {
+        if detail.readOnly == true { return [] }
+        var list = actions
+        if isActive {
+            for extra in ["archive", "trash"] where !list.contains(extra) {
+                list.append(extra)
+            }
+        } else {
+            for extra in ["restore", "resume-auto"] where !list.contains(extra) {
+                list.append(extra)
+            }
+        }
+        return list
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.l) {
@@ -113,6 +153,19 @@ struct TaskDetailView: View {
         } message: {
             Text(confirm?.message ?? "")
         }
+        // v2 §5.20：永久从列表移除（固定文案二次确认）。
+        .confirmationDialog(
+            PurgeText.actionTitle,
+            isPresented: $confirmingPurge,
+            titleVisibility: .visible
+        ) {
+            Button(PurgeText.actionTitle, role: .destructive) {
+                Task { await model.purgeTask(taskID: detail.taskId) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(PurgeText.confirmMessage)
+        }
         .sheet(isPresented: Binding(get: { model.recheckResult != nil },
                                     set: { if !$0 { model.recheckResult = nil } })) {
             RecheckResultView(result: model.recheckResult)
@@ -131,6 +184,22 @@ struct TaskDetailView: View {
                 StatusBadge(status: display)
                 Text("阶段：\(Labels.stage(detail.stage))")
                 Text("更新于 \(TimeFormat.short(detail.updatedAt))")
+                if detail.readOnly == true {
+                    // v2 §5.20.1：purged 终态 → 只读审计徽标。
+                    Label("只读", systemImage: "lock.fill")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("只读（任务已永久从列表移除）")
+                }
+                if let saveState = detail.saveState, saveState != "active" {
+                    Label("保存状态：\(Labels.saveState(saveState))", systemImage: "archivebox")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("保存状态：\(Labels.saveState(saveState))")
+                }
+                if detail.autoAdvancePaused == 1 {
+                    Label("自动推进已暂停", systemImage: "pause.circle")
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("自动推进已暂停")
+                }
             }
             .font(.kpSmall)
             .foregroundStyle(.secondary)
@@ -337,7 +406,7 @@ struct TaskDetailView: View {
             Divider()
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: Spacing.m) {
-                    ForEach(actions, id: \.self) { action in
+                    ForEach(visibleActions, id: \.self) { action in
                         actionButton(action)
                     }
                     if model.busy {
@@ -364,8 +433,17 @@ struct TaskDetailView: View {
                 .disabled(model.busy)
                 .help(model.busy ? "正在执行操作" : "确认未发送后重新排队派发")
         case "restore":
-            Button("恢复原任务") { confirm = .restore }
-                .disabled(model.busy)
+            // 活跃任务的发送不明裁决（resolve restore）；非活跃（归档/回收站）
+            // 为 restore-task——同一动作词按保存状态分流。
+            if isActive {
+                Button("恢复原任务") { confirm = .restore }
+                    .disabled(model.busy)
+            } else {
+                Button("恢复") { confirmRestore() }
+                    .disabled(model.busy)
+                    .help("恢复到活跃看板（默认暂停自动推进）")
+                    .accessibilityLabel("恢复任务")
+            }
         case "accept_duplicate":
             Button("接受可能重复，重新派发") { confirm = .acceptDuplicate }
                 .disabled(model.busy)
@@ -395,6 +473,46 @@ struct TaskDetailView: View {
                 Task { await model.toggleGlobalPause() }
             }
             .disabled(model.busy)
+        case "archive":
+            // §4.1：禁用时置灰 + tooltip 写明原因
+            Button("归档") { Task { await model.archiveTask(taskID: detail.taskId) } }
+                .disabled(model.busy || moveOutBlockedReason != nil)
+                .help(moveOutBlockedReason ?? "移出活跃看板，保留详情/会话/计划/报告，可恢复")
+                .accessibilityLabel("归档")
+        case "trash":
+            // §4.6：NSAlert 二次确认，正文写明「移入本地回收站，不影响 Kaneo」
+            Button("移入回收站") { confirmTrash() }
+                .disabled(model.busy || moveOutBlockedReason != nil)
+                .help(moveOutBlockedReason ?? "移入本地回收站，不影响 Kaneo；可恢复")
+                .accessibilityLabel("移入回收站")
+        // v2 §5.20：回收站任务追加「永久从列表移除」（destructive + 固定文案）。
+        case "purge", "purge-task":
+            Button(PurgeText.actionTitle, role: .destructive) { confirmingPurge = true }
+                .disabled(model.busy)
+                .help("永久从列表移除；保留历史记录与文件，不释放磁盘空间")
+                .accessibilityLabel("永久从列表移除")
+        // v2 §5.22.4：待确认执行——enqueue confirm_plan + expected_plan_sha256。
+        case "confirm_dispatch":
+            Button("确认并安排执行") {
+                Task { await model.confirmDispatch(taskID: detail.taskId,
+                                                   planSha256: detail.planSha256) }
+            }
+            .disabled(model.busy)
+            .help("按已发布计划安排派发；哈希由核心同事务复核，失败显示冲突原因")
+            .accessibilityLabel("确认并安排执行")
+        // v2 §5.22.2：准备规划 → 打开规划面板并定位本任务。
+        case "prepare_plan":
+            Button("准备规划") { model.openPlanning(focusTaskID: detail.taskId) }
+                .disabled(model.busy)
+                .help("打开规划面板，为本任务准备材料后排队规划")
+                .accessibilityLabel("准备规划")
+        case "resume-auto":
+            Button("恢复自动推进") {
+                Task { await model.resumeAuto(taskID: detail.taskId) }
+            }
+            .disabled(model.busy)
+            .help("恢复后该任务的自动推进（领取/监控/评审）")
+            .accessibilityLabel("恢复自动推进")
         default:
             // 未知动作：置灰并写明原因
             Button(AppViewModel.actionLabel(action)) {}
@@ -403,8 +521,23 @@ struct TaskDetailView: View {
         }
     }
 
-    private var priorityMenu: some View {
-        let current = detail.priority ?? 100
+    // MARK: 归档 / 回收站 / 恢复确认（NSAlert）
+
+    /// §4.6 移入回收站：NSAlert 二次确认。
+    private func confirmTrash() {
+        Alerts.confirmTrash(title: "移入回收站") {
+            Task { await model.trashTask(taskID: detail.taskId) }
+        }
+    }
+
+    /// §4.1/§4.5 恢复：确认对话框说明默认暂停自动推进，勾选 → resume_auto=true。
+    private func confirmRestore() {
+        Alerts.confirmRestore(title: "恢复任务") { resumeAuto in
+            Task { await model.restoreTask(taskID: detail.taskId, resumeAuto: resumeAuto) }
+        }
+    }
+
+    private var priorityMenu: some View {        let current = detail.priority ?? 100
         return Menu("调整顺序") {
             Button("上移") {
                 Task { await model.setPriority(requestID: detail.activeRequest?.requestId,
