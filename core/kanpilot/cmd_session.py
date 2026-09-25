@@ -385,9 +385,13 @@ def _round_fields(
     blocked_reason。无索引行 → 安全默认（backend null、run_status unknown、
     save_state active、allowed_actions []）。"""
     if row is None:
+        # 无 execution_rounds 索引行（运行记录不可用/未关联）——回收站动作
+        # 无法落库，给原因让 UI 可解释而非静默空菜单。
         return {
             "backend": None, "run_status": "unknown", "save_state": "active",
-            "saved_at": None, "allowed_actions": [], "blocked_reason": None,
+            "saved_at": None, "allowed_actions": [],
+            "blocked_reason": "无执行轮次索引（运行记录不可用），"
+                              "不能移入回收站",
         }
     job = (jobs or {}).get((task_id, run_id))
     save_state = row["save_state"] \
@@ -521,6 +525,9 @@ def cmd_list_sessions(ctx, payload: dict) -> dict:
 
     if task_id:
         task = db.require_task(conn, task_id)
+        # v2 §5.20.2：purged 任务的会话退出常规列表（include_removed 回看）。
+        if db.task_save_state(task) == "purged" and not include_removed:
+            return {"sessions": []}
         # 1) 发现回填（§5.16.1）：身份核验通过才 upsert_discovered；
         # 回填不触碰 save_state（不复活已删除会话）。
         jobs = _discover_rounds(
@@ -562,9 +569,19 @@ def cmd_list_sessions(ctx, payload: dict) -> dict:
         row["task_id"] for row in conn.execute("SELECT task_id FROM tasks")
     }
     sessions = []
+    purged_tasks = set()
+    if not include_removed:
+        purged_tasks = {
+            row_["task_id"] for row_ in conn.execute(
+                "SELECT task_id FROM tasks WHERE save_state='purged'"
+            )
+        }
     for row in all_rows:
         # §5.15.5 缺省语义：只输出有关联任务的会话。
         if row["task_id"] not in known_tasks:
+            continue
+        # v2 §5.20.2：purged 任务的轮次退出常规列表（无论行自身状态）。
+        if row["task_id"] in purged_tasks:
             continue
         if effective_states is not None and \
                 row["save_state"] not in effective_states:
@@ -584,6 +601,10 @@ def cmd_list_sessions(ctx, payload: dict) -> dict:
         "updated_at DESC"
     ).fetchall()
     for task in tasks:
+        # v2 §5.20.2：purged 任务的兼容会话同样排除（否则无法回收的
+        # 「幽灵行」出现在执行会话列表）。
+        if task["task_id"] in purged_tasks:
+            continue
         run_id = _resolve_run_id(task, None)
         if run_id is not None and (task["task_id"], run_id) in covered:
             continue
