@@ -109,6 +109,33 @@ struct SessionRow: View {
             Text(TimeFormat.short(session.updatedAt))
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
+            // §4.5 v2：行尾「…」菜单（与右键菜单同动作），入口可见。
+            Menu {
+                if session.canTrash {
+                    Button {
+                        confirmingTrash = true
+                    } label: {
+                        Label("移入回收站", systemImage: "trash")
+                    }
+                } else {
+                    Button {} label: {
+                        Label(session.blockedReason ?? "当前会话不能移入回收站",
+                              systemImage: "nosign")
+                    }
+                    .disabled(true)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("会话操作")
+            .accessibilityLabel("会话操作菜单")
+            .accessibilityHint(session.canTrash
+                               ? "可移入回收站"
+                               : (session.blockedReason ?? "暂不可用"))
         }
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)
@@ -453,15 +480,31 @@ struct TrashedSessionRow: View {
             .disabled(model.busy)
             .help("恢复会话为可查看")
             .accessibilityLabel("恢复会话")
-            if session.canPurge {
-                Button(role: .destructive) {
-                    onPurge()
+            // §4.5 v2：行尾「…」菜单——恢复 + 永久从列表移除。
+            Menu {
+                Button {
+                    if let taskID = session.taskId, let runID = session.runId {
+                        Task { await model.restoreSession(taskID: taskID, runID: runID) }
+                    }
                 } label: {
-                    Label(PurgeText.actionTitle, systemImage: "trash")
+                    Label("恢复", systemImage: "arrow.uturn.backward")
                 }
-                .help(PurgeText.confirmMessage)
-                .accessibilityLabel("永久移除会话")
+                if session.canPurge {
+                    Button(role: .destructive) {
+                        onPurge()
+                    } label: {
+                        Label(PurgeText.actionTitle, systemImage: "trash")
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(.secondary)
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("会话操作")
+            .accessibilityLabel("会话操作菜单")
         }
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)
