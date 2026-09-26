@@ -256,7 +256,9 @@ struct BoardView: View {
                 .onKeyPress(.rightArrow) { moveColumn(1); return .handled }
                 .onKeyPress(.return) {
                     if detailItem == nil, let id = focusedTaskID {
-                        detailItem = TaskSheetItem(id: id)
+                        let task = model.tasks.first { $0.taskId == id }
+                        detailItem = TaskSheetItem(
+                            id: id, startTab: Self.startTab(for: task))
                     }
                     return .handled
                 }
@@ -430,19 +432,25 @@ struct BoardView: View {
         }
     }
 
+    /// §4.1 T4：待办列卡片直达「计划」分段，其余 → 概览。
+    private static func startTab(for task: TaskSummary?) -> TaskDetailTab {
+        task?.boardColumn == BoardColumn.todo.rawValue ? .plan : .overview
+    }
+
     private func openDetail(_ task: TaskSummary) {
         focusedTaskID = task.taskId
         boardFocused = true
         if detailItem?.id != task.taskId {
-            detailItem = TaskSheetItem(id: task.taskId)
+            detailItem = TaskSheetItem(id: task.taskId,
+                                       startTab: Self.startTab(for: task))
         }
     }
 
-    /// §4.1：进行中卡片「查看实时会话」→ 详情浮层直接打开「执行会话」分段。
+    /// §4.1：进行中卡片「查看实时会话」→ 详情浮层直接打开「执行」分段。
     private func openSession(_ task: TaskSummary) {
         focusedTaskID = task.taskId
         boardFocused = true
-        let item = TaskSheetItem(id: task.taskId, startWithSession: true)
+        let item = TaskSheetItem(id: task.taskId, startTab: .execution)
         if detailItem != item {
             detailItem = item
         }
@@ -1191,23 +1199,17 @@ struct BatchReportSheet: View {
     }
 }
 
-// MARK: - 详情浮层容器（§4.1）
+// MARK: - 详情浮层容器（§4.1 T4 五段式）
 
 struct TaskDetailSheet: View {
     let item: TaskSheetItem
     @EnvironmentObject private var model: AppViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var segment: TaskDetailSegment = .info
+    @State private var tab: TaskDetailTab = .overview
     @State private var detail: TaskDetail?
     @State private var events: [EventItem] = []
     @State private var loading = true
     @State private var error: String?
-
-    enum TaskDetailSegment: String, CaseIterable, Identifiable {
-        case info = "详情"
-        case session = "执行会话"
-        var id: String { rawValue }
-    }
 
     var body: some View {
         NavigationStack {
@@ -1218,9 +1220,14 @@ struct TaskDetailSheet: View {
             }
             .frame(minWidth: 720, idealWidth: 840, minHeight: 520, idealHeight: 640)
             .background(Color.kpWindow)
+            // §4.1：键盘左右键切换分段（焦点与 VoiceOver 读出页名）。
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.leftArrow) { move(-1); return .handled }
+            .onKeyPress(.rightArrow) { move(1); return .handled }
         }
         .task {
-            segment = item.startWithSession ? .session : .info
+            tab = item.startTab
             await load()
         }
         .onChange(of: model.lastRefreshAt) {
@@ -1228,13 +1235,22 @@ struct TaskDetailSheet: View {
         }
     }
 
+    /// ←/→ 循环切换分段（页名经 Picker 标签读出）。
+    private func move(_ delta: Int) {
+        let all = TaskDetailTab.allCases
+        guard let index = all.firstIndex(of: tab) else { return }
+        let next = (index + delta + all.count) % all.count
+        tab = all[next]
+    }
+
     @ViewBuilder
     private var content: some View {
-        switch segment {
-        case .info:
+        switch tab {
+        case .overview:
             Group {
                 if let detail {
-                    TaskDetailView(detail: detail, events: events)
+                    TaskDetailView(detail: detail, events: events,
+                                   showsHistory: false)
                 } else if loading {
                     LoadingView()
                 } else {
@@ -1247,9 +1263,86 @@ struct TaskDetailSheet: View {
                     }
                 }
             }
-        case .session:
-            // §4.4 会话阅读器内嵌：与独立视图同规格
-            SessionReaderView(taskID: item.id, preferredRunID: detail?.runId)
+        case .plan:
+            // §4.8 计划阅读页：get-plan 核验正文（内部自管加载/空态/错误）。
+            PlanReaderView(taskID: item.id, detail: detail)
+        case .execution:
+            // §4.1 执行页：轮次字段 + 会话阅读器（无会话由阅读器显示空态）。
+            VStack(spacing: 0) {
+                if let detail, hasRoundFields(detail) {
+                    roundFields(detail)
+                    Divider()
+                }
+                SessionReaderView(taskID: item.id,
+                                  preferredRunID: detail?.runId)
+            }
+        case .review:
+            if let detail {
+                TaskReviewTabView(detail: detail)
+            } else if loading {
+                LoadingView()
+            } else {
+                ContentUnavailableView {
+                    Label("读取失败", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error ?? "")
+                } actions: {
+                    Button("重试") { Task { await load() } }
+                }
+            }
+        case .log:
+            if let detail {
+                TaskLogTabView(detail: detail, events: events)
+            } else if loading {
+                LoadingView()
+            } else {
+                ContentUnavailableView {
+                    Label("读取失败", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error ?? "")
+                } actions: {
+                    Button("重试") { Task { await load() } }
+                }
+            }
+        }
+    }
+
+    /// §4.1 执行页头部轮次字段（run_id/session_id/session_title/
+    /// session_marker/worktree_path）。
+    private func hasRoundFields(_ detail: TaskDetail) -> Bool {
+        detail.runId != nil || detail.sessionId != nil
+            || detail.sessionTitle != nil || detail.sessionMarker != nil
+            || detail.executionRound?.worktreePath != nil
+    }
+
+    @ViewBuilder
+    private func roundFields(_ detail: TaskDetail) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Spacing.m) {
+                if let runId = detail.runId {
+                    Text("run_id \(runId)")
+                }
+                if let sessionId = detail.sessionId {
+                    Text("session_id \(sessionId)")
+                        .lineLimit(1)
+                }
+                if let title = detail.sessionTitle {
+                    Text(title).lineLimit(1)
+                }
+                if let marker = detail.sessionMarker {
+                    Text(marker).lineLimit(1)
+                }
+                if let worktree = detail.executionRound?.worktreePath {
+                    Text(worktree)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .font(.kpSmall)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s)
         }
     }
 
@@ -1269,13 +1362,14 @@ struct TaskDetailSheet: View {
 
     private var header: some View {
         HStack(spacing: Spacing.m) {
-            Picker("查看", selection: $segment) {
-                ForEach(TaskDetailSegment.allCases) { s in
-                    Text(s.rawValue).tag(s)
+            Picker("查看", selection: $tab) {
+                ForEach(TaskDetailTab.allCases) { t in
+                    Text(t.title).tag(t)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 180)
+            .frame(width: 320)
+            .accessibilityLabel("详情分段：\(tab.title)")
 
             Spacer()
 
@@ -1286,9 +1380,9 @@ struct TaskDetailSheet: View {
     }
 }
 
-/// 看板传入的浮层项（§4.1：可指定初始分段）。
+/// 看板传入的浮层项（§4.1 T4：可指定初始分段——待办 → 计划，
+/// 进行中「查看实时会话」→ 执行，其余 → 概览）。
 struct TaskSheetItem: Identifiable, Equatable {
     let id: String
-    /// 进行中卡片「查看实时会话」→ 浮层直接落在「执行会话」分段。
-    var startWithSession = false
+    var startTab: TaskDetailTab = .overview
 }

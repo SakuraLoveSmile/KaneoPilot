@@ -642,11 +642,12 @@ def cmd_get_session(ctx, payload: dict) -> dict:
         ctx.now, timeout, jobs,
     )
     # round_detail（§5.18.4）：索引行 + job 进程结果 + terminal 事件；
-    # backend==pi 才读 events.jsonl；读不到给安全 None/空（不报错）。
+    # v3：pi/pi_desktop（及 codex 规划轮次）均读 events.jsonl；读不到给安全
+    # None/空（不报错）。
     round_detail = None
     if row is not None:
         events: list = []
-        if directory is not None and row["backend"] == "pi":
+        if directory is not None and row["backend"] in constants.ROUND_BACKENDS:
             events, _event_detail = dsh_events.iter_events(
                 Path(directory) / dsh_events.EVENT_LOG_NAME
             )

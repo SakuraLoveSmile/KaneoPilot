@@ -164,7 +164,9 @@ class ExecConfigCommands(KanpilotTestCase):
         )
         self.assertTrue(claim["claimed"])
         run_id = claim["run_id"]
-        self.assertEqual(claim["context"]["exec_config"], DEFAULTS)
+        # v3（§5.23.3）：快照含 backend 字段。
+        self.assertEqual(claim["context"]["exec_config"],
+                         {"backend": "pi", **DEFAULTS})
         self.assertEqual(claim["context"]["backend"], "pi")
 
         # claim 后改配置（只影响新轮次）。
@@ -179,7 +181,8 @@ class ExecConfigCommands(KanpilotTestCase):
             frozen = util.jload(row["config_json"])
         finally:
             conn.close()
-        self.assertEqual(frozen, DEFAULTS)  # 旧轮次快照仍是旧值
+        # v3（§5.23.3）：pi 分支固化快照含 backend:"pi"。
+        self.assertEqual(frozen, {"backend": "pi", **DEFAULTS})  # 旧轮次快照仍是旧值
         got = self.call("get-exec-config", {})
         self.assertEqual(got["config"]["reasoning_effort"], "low")
 

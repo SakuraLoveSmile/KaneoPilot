@@ -9,8 +9,10 @@ OWNERSHIP: 主 agent（共享骨架，冻结后只读给子代理——B 只写 
 - 映射（Message 形状沿用 protocol §5.15.5）：
   session→system、user→user、assistant_message→assistant、tool_call→tool_call、
   tool_result→tool_result、command_output→command_output、
-  subagent_start/subagent_end→system、terminal→system。
-- 稳定 id ``round:<seq>``；revision 为内容 sha 派生整数（同 headless 口径）；
+  subagent_start/subagent_end→system、system→system（codex 错误帧，§5.22.6）、
+  terminal→system、turn_end→system。
+- Desktop 源消息使用 ``desktop:<source_message_id>:<type>`` 和递增源修订；
+  其他事件稳定 id ``round:<seq>``，revision 为内容 sha 派生整数（同 headless 口径）；
   同 seq 重发行按 id+revision 去重（保留高 revision）。
 - 本模块只服务 backend=pi 的轮次；旧后端（dsh/headless/ATIF）已由
   headless_adapter 路由为 unavailable「旧后端会话已弃用」（v1.6 起 ATIF
@@ -26,7 +28,7 @@ from typing import Optional, Tuple
 
 from . import constants, util
 
-# 事件 type → Message.type（protocol §5.18.2）。
+# 事件 type → Message.type（protocol §5.18.2 + §5.22.6）。
 _EVENT_TO_MESSAGE = {
     "session": "system",
     "user": "user",
@@ -36,6 +38,7 @@ _EVENT_TO_MESSAGE = {
     "command_output": "command_output",
     "subagent_start": "system",
     "subagent_end": "system",
+    "system": "system",
     "terminal": "system",
     "turn_end": "system",
 }
@@ -194,7 +197,7 @@ def to_messages(events: list) -> list:
             }
             revision_parts = ("co", event.get("name"), content, exit_code)
         else:
-            # system/user/assistant/session/terminal/subagent_*
+            # system/user/assistant/session/terminal/subagent_*/turn_end
             content = event.get("content")
             if not isinstance(content, str):
                 payload = {
@@ -208,7 +211,19 @@ def to_messages(events: list) -> list:
                 )
             revision_parts = (etype_origin, content)
         raw["content"] = content
-        raw["revision"] = _revision(*revision_parts)
+        source_id = event.get("source_message_id")
+        source_revision = event.get("source_revision")
+        if (isinstance(source_id, str) and source_id
+                and isinstance(source_revision, int)
+                and not isinstance(source_revision, bool)
+                and source_revision > 0):
+            # Desktop transcript identities are strings, independent of the
+            # append-only event sequence. Keep the latest sequence so an edit
+            # remains visible even outside the reader's revision window.
+            raw["id"] = f"desktop:{source_id}:{etype_origin}"
+            raw["revision"] = source_revision
+        else:
+            raw["revision"] = _revision(*revision_parts)
         key = raw["id"]
         current = best.get(key)
         if current is None or raw["revision"] >= current["revision"]:
@@ -304,4 +319,6 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         "save_state": view.get("save_state"),
         "saved_at": view.get("saved_at"),
         "detail": job.get("detail"),
+        "turn_id": job.get("turn_id"),
+        "send_state": job.get("send_state"),
     }

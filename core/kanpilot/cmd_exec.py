@@ -314,11 +314,13 @@ def cmd_claim(ctx, payload: dict) -> dict:
             }
         run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
         session_marker = f"{task_id}/{run_id}"
-        # v1.6（protocol §5.16.1/§5.17.3）：新 claim 恒 pi 后端，创建轮次
-        # 索引行并固化当前执行配置快照（此后 set-exec-config 不影响该轮）。
-        config_snapshot = exec_config.snapshot(conn)
+        # v3（protocol §5.16.1/§5.23.3）：claim 按 exec_config.backend 固化
+        # 轮次索引行与后端标识（该轮此后不受 set-exec-config 影响）。
+        config_snapshot = checked["exec_config"]
+        backend = checked["backend"]
         round_store.upsert_on_claim(
-            conn, task_id, run_id, config_snapshot, util.to_iso(now)
+            conn, task_id, run_id, config_snapshot, util.to_iso(now),
+            backend=backend,
         )
         db.update_task(
             conn, task_id, util.to_iso(now),
@@ -349,7 +351,8 @@ def cmd_claim(ctx, payload: dict) -> dict:
             "project_id": checked["project_id"],
             "plan_kind": checked["plan_kind"],
             "session_marker": session_marker,
-            # v1.6（§5.18.3）：新 claim 为 pi 后端，指令无附件形态。
+            # v3（§5.23.3）：指令形态按后端分支——pi 读计划文件，pi_desktop
+            # 由 worker 以已核验计划正文自行组装 prompt（见 pi_desktop_worker）。
             "instruction": constants.DISPATCH_INSTRUCTION_PI.format(
                 marker=session_marker, plan_path=checked["plan_path"]
             ),
@@ -357,7 +360,7 @@ def cmd_claim(ctx, payload: dict) -> dict:
             "requirements_sha256": checked["requirements_sha256"],
             "source_sha256": checked["source_sha256"],
             "lease_seconds": lease_seconds,
-            "backend": "pi",
+            "backend": backend,
             "exec_config": config_snapshot,
         }
         return {
@@ -618,7 +621,11 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         meta, raw, path = planfile.load_plan(
             payload["plan_path"], task["task_id"]
         )
-        planfile.check_plan_meta(meta, plan_kind)
+        # §5.22.6：frontmatter 的 planner_model/reasoning_effort 须匹配本
+        # 请求登记的 model_config 快照；缺快照的旧请求回落历史常量规则。
+        planfile.check_plan_meta(
+            meta, plan_kind, expected_model=req_payload.get("model_config")
+        )
         if meta.get("plan_kind") not in (None, plan_kind):
             raise util.KanpilotError(
                 "validation_failed", "plan_kind frontmatter conflicts"

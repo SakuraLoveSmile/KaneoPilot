@@ -21,6 +21,8 @@ final class SessionReaderStore: ObservableObject {
     @Published var selectedRunID: String?
     @Published var session: SessionInfo?
     @Published var connection: SessionConnection?
+    /// §5.18.4/v2.1：get-session 轮次运行时视图（terminal 失败细分 + 配置快照）。
+    @Published var roundDetail: RoundDetail?
     @Published var messages: [SessionMessage] = []
     @Published var loading = false
     /// 读取失败横幅（不清空已加载内容）。
@@ -85,6 +87,7 @@ final class SessionReaderStore: ObservableObject {
         session = nil
         connection = nil
         messages = []
+        roundDetail = nil
         collapsed = []
         error = nil
         interrupted = false
@@ -239,6 +242,7 @@ final class SessionReaderStore: ObservableObject {
         interrupted = false
         hasMore = false
         hasNewContent = false
+        roundDetail = nil
         generation += 1
         let generation = self.generation
         await loadSession(generation: generation)
@@ -273,6 +277,7 @@ final class SessionReaderStore: ObservableObject {
             session = response.session
             connection = response.connection
             interrupted = false
+            roundDetail = response.roundDetail
             error = nil
             restartPolling()
             await loadMessages(generation: generation)
@@ -436,6 +441,12 @@ struct SessionReaderView: View {
             header
             Divider()
             timeRow
+            // §5.22.6 轮次失败细分（terminal.reason 中文 + job detail 原文）；
+            // 复用 SessionBanner，无重试动作。
+            if let failure = store.roundDetail?.failureText {
+                SessionBanner(text: "轮次失败 · \(failure)", stale: false,
+                              retry: false) {}
+            }
             // 已有消息时读取失败：保留内容，列表上方横幅标注原因 + 重试（§6）。
             if !store.messages.isEmpty, let failure = store.readFailure {
                 SessionBanner(text: "会话读取失败：\(failure)",
@@ -647,6 +658,12 @@ struct SessionReaderView: View {
                       systemImage: "arrow.triangle.2.circlepath")
                     .foregroundStyle(Color.secondary)
                     .accessibilityLabel("定期更新，每 \(store.pollIntervalText) 秒检查导出更新")
+            }
+            // 轮次登记配置快照（pi model/effort 或 codex planner_model/effort）。
+            if let configSummary = store.roundDetail?.config?.summaryText {
+                Label("配置 \(configSummary)", systemImage: "cpu")
+                    .foregroundStyle(Color.secondary)
+                    .accessibilityLabel("轮次配置：\(configSummary)")
             }
             Spacer(minLength: 0)
             if store.hasMore {

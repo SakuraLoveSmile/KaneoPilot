@@ -26,7 +26,8 @@ DEFAULTS = {
     "reasoning_effort": "xhigh",
     "agent_preset": "default",
 }
-CONFIG_KEYS = set(DEFAULTS) | {"updated_at"}
+# v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
+CONFIG_KEYS = set(DEFAULTS) | {"updated_at", "backend", "pi_desktop"}
 
 # 夹具凭据占位值：只存在于 models.json 的 apiKey 字段，响应绝不透出。
 CREDENTIAL_VALUE = "test-key-placeholder"
@@ -78,7 +79,8 @@ def test_set_partial_payload_merges_defaults(cli):
 
 def test_exec_capabilities_shape_and_no_internal_fields(cli):
     resp = cli("exec-capabilities", {})
-    assert set(resp) == {"ok", "pi", "providers", "presets", "checks"}
+    assert set(resp) == {"ok", "pi", "pi_desktop", "providers", "presets",
+                         "checks"}
     assert isinstance(resp["ok"], bool)
 
     blob = json.dumps(resp, ensure_ascii=False)
@@ -94,6 +96,12 @@ def test_exec_capabilities_shape_and_no_internal_fields(cli):
         resp["pi"]["version"], str
     )
     assert resp["pi"]["home"] is None or isinstance(resp["pi"]["home"], str)
+    # v3（§5.23.3）：pi_desktop 分支固定四键；未保存 → available False，
+    # 只回脱敏摘要（detail/tools_ok/version），无 token/连接文件全文。
+    assert set(resp["pi_desktop"]) == {
+        "available", "detail", "tools_ok", "version"}
+    assert isinstance(resp["pi_desktop"]["available"], bool)
+
 
     providers = resp["providers"]
     assert providers, "夹具至少一个 provider"
@@ -132,6 +140,17 @@ def test_exec_capabilities_checks_have_four_items(cli):
     assert CREDENTIAL_VALUE not in credential["detail"]
     pi_binary = next(c for c in resp["checks"] if c["name"] == "pi_binary")
     assert pi_binary["ok"] is True
+
+
+def test_pi_desktop_catalog_command_is_registered_and_validates_connection(
+    cli, tmp_path,
+):
+    missing = tmp_path / "missing" / "mcp-control.json"
+    out = cli(
+        "pi-desktop-catalog", {"connection_file": str(missing)}, expect=1
+    )
+    assert out["code"] == "validation_failed"
+    assert "连接文件不存在" in out["error"]
 
 
 # ---------------------------------------------------------------------------

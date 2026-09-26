@@ -428,22 +428,51 @@ struct SessionInfo: Decodable, Identifiable {
     var canPurge: Bool { allowedActions?.contains("purge-session") == true }
 }
 
+/// §5.23.3 pi_desktop 分支配置块（exec_config.pi_desktop 五字段）。
+/// permission_mode 须用户显式保存（核心不自动补 auto）。
+struct ExecPiDesktopConfig: Decodable, Equatable {
+    var connectionFile: String?
+    var providerId: String?
+    var modelId: String?
+    var thinkingLevel: String?
+    var permissionMode: String?
+
+    /// set-exec-config pi_desktop 子块（协议 snake_case 键）。
+    var fields: [String: String] {
+        var dict: [String: String] = [:]
+        if let connectionFile { dict["connection_file"] = connectionFile }
+        if let providerId { dict["provider_id"] = providerId }
+        if let modelId { dict["model_id"] = modelId }
+        if let thinkingLevel { dict["thinking_level"] = thinkingLevel }
+        if let permissionMode { dict["permission_mode"] = permissionMode }
+        return dict
+    }
+}
+
 /// §5.17.1 PI 执行配置对象（四字段 + 可选 updated_at）。
+/// v3（§5.23.3）扩展 backend/pi_desktop；缺省按 backend="pi" 解释。
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
     let reasoningEffort: String?
     let agentPreset: String?
     let updatedAt: String?
+    /// v3：任务执行后端（pi|pi_desktop；缺省 pi）。
+    let backend: String?
+    /// v3：pi_desktop 分支配置块。
+    let piDesktop: ExecPiDesktopConfig?
 
     init(provider: String? = nil, model: String? = nil,
          reasoningEffort: String? = nil, agentPreset: String? = nil,
-         updatedAt: String? = nil) {
+         updatedAt: String? = nil, backend: String? = nil,
+         piDesktop: ExecPiDesktopConfig? = nil) {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
         self.agentPreset = agentPreset
         self.updatedAt = updatedAt
+        self.backend = backend
+        self.piDesktop = piDesktop
     }
 
     /// 四字段字典（与核心 config_json 快照比较/提交用，键为协议 snake_case）。
@@ -455,6 +484,9 @@ struct ExecConfig: Decodable, Equatable {
         if let agentPreset { dict["agent_preset"] = agentPreset }
         return dict
     }
+
+    /// 生效后端（缺省 pi）。
+    var effectiveBackend: String { backend ?? "pi" }
 }
 
 struct GetExecConfigResponse: Decodable {
@@ -490,9 +522,19 @@ struct ExecPiInfo: Decodable {
     let home: String?
 }
 
+/// §5.23.3（v3）：`pi_desktop` 分支就绪态（只读连接文件检测；token 不输出）。
+struct ExecPiDesktopInfo: Decodable {
+    let available: Bool?
+    let reason: String?
+    /// 可选补充明细（版本/工具清单摘要等，核心可缺省）。
+    let detail: String?
+}
+
 struct ExecCapabilitiesResponse: Decodable {
     let ok: Bool?
     let pi: ExecPiInfo?
+    /// v3（§5.23.3）：PI-Desktop 后端就绪态；旧核心不返回 → nil。
+    let piDesktop: ExecPiDesktopInfo?
     let providers: [ExecProvider]?
     let presets: [ExecPreset]?
     let checks: [DoctorCheck]?
@@ -504,6 +546,40 @@ struct ExecCapabilitiesResponse: Decodable {
               let m = spec.models?.first(where: { $0.id == model })
         else { return [] }
         return m.reasoningEfforts ?? []
+    }
+}
+
+/// T3.5 pi-desktop-catalog：Plus 本地只读目录及明确默认值。
+struct PiDesktopCatalogModel: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let thinkingLevels: [String]?
+    let defaultThinkingLevel: String?
+}
+
+struct PiDesktopCatalogProvider: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let enabled: Bool?
+    let defaultModelId: String?
+    let models: [PiDesktopCatalogModel]?
+}
+
+struct PiDesktopCatalogResponse: Decodable {
+    let connectionFile: String
+    let providers: [PiDesktopCatalogProvider]
+    let defaultProviderId: String?
+    let defaultModelId: String?
+    let selectedProviderId: String?
+    let catalogSource: String?
+
+    var selectedProvider: PiDesktopCatalogProvider? {
+        guard let selectedProviderId else { return nil }
+        return providers.first(where: { $0.id == selectedProviderId })
+    }
+
+    var selectedModels: [PiDesktopCatalogModel] {
+        selectedProvider?.models ?? []
     }
 }
 
@@ -528,7 +604,7 @@ struct ExecutorStatusResponse: Decodable {
     let stages: [String: ExecutorStageStatus]?
 }
 
-/// §5.18.4 get-session.round_detail：pi 轮次运行时视图（job + terminal）。
+/// §5.18.4 get-session.round_detail：轮次运行时视图（job + terminal）。
 struct RoundDetail: Decodable {
     let backend: String?
     let runStatus: String?
@@ -538,15 +614,95 @@ struct RoundDetail: Decodable {
     let endedAt: String?
     let exitCode: Int?
     let terminal: RoundTerminal?
-    let config: ExecConfig?
+    /// 轮次登记配置快照：pi 轮次为 exec 四字段，codex 轮次为 model_config
+    /// （planner_model/reasoning_effort）。
+    let config: RoundConfig?
     let saveState: String?
     let savedAt: String?
     let detail: String?
+
+    /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
+    /// 非失败轮次（runStatus 非 failed）→ nil。
+    var failureText: String? {
+        guard runStatus == "failed" else { return nil }
+        let reason = terminal?.reasonLabel
+        var text = reason ?? ""
+        if let detail, !detail.isEmpty, detail != reason, detail != terminal?.reason {
+            text += (text.isEmpty ? "" : "：") + detail
+        }
+        return text.isEmpty ? nil : text
+    }
 }
 
 struct RoundTerminal: Decodable {
     let outcome: String?
     let reason: String?
+
+    /// §5.22.6 失败分类/执行端 reason 键 → 中文；未知值原样展示。
+    var reasonLabel: String? {
+        switch reason {
+        case "model_unavailable": return "模型不可用"
+        case "auth_failed": return "认证失败"
+        case "request_rejected": return "请求被拒绝"
+        case "timeout": return "超时"
+        case "process_exit": return "进程退出"
+        case "crash": return "崩溃"
+        case "launch_failed": return "启动失败"
+        case "stale_run": return "租约失效"
+        case "invalid_output": return "输出不合规"
+        case "plan_write_failed": return "计划写入失败"
+        case "publish_failed": return "发布失败"
+        case "cwd_missing": return "工作目录缺失"
+        case "config_error": return "配置错误"
+        case "needs_input": return "需要补充材料"
+        case "plan_published": return "计划已发布"
+        case "completed": return "已完成"
+        default: return reason
+        }
+    }
+}
+
+/// 轮次登记配置快照：pi（provider/model/reasoning_effort/agent_preset 平铺）
+/// 与 codex 规划（{"planner": {"planner_model","reasoning_effort"}} 嵌套，
+/// 见 cmd_exec claim 的 upsert_on_claim）两种形状共用。
+struct RoundConfig: Decodable {
+    let provider: String?
+    let model: String?
+    let reasoningEffort: String?
+    let agentPreset: String?
+    let plannerModel: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, model, reasoningEffort, agentPreset, plannerModel
+        case planner
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        agentPreset = try c.decodeIfPresent(String.self, forKey: .agentPreset)
+        var effort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        var plannerModel = try c.decodeIfPresent(String.self, forKey: .plannerModel)
+        // codex 规划轮次：config = {"planner": {planner_model, reasoning_effort}}
+        if let nested = try c.decodeIfPresent(PlannerGroupConfig.self,
+                                            forKey: .planner) {
+            plannerModel = plannerModel ?? nested.plannerModel
+            if effort == nil { effort = nested.reasoningEffort }
+        }
+        self.reasoningEffort = effort
+        self.plannerModel = plannerModel
+    }
+
+    /// 「模型 · 思考等级」单行摘要（两键均无 → nil）。
+    var summaryText: String? {
+        let model = model ?? plannerModel
+        guard model != nil || reasoningEffort != nil else { return nil }
+        if let reasoningEffort, !reasoningEffort.isEmpty {
+            return "\(model ?? "—") · \(reasoningEffort)"
+        }
+        return model
+    }
 }
 
 /// §5.16.1 get-task.execution_round：轮次索引行视图。
@@ -1020,4 +1176,271 @@ struct StartPlanResult: Decodable {
 struct StartPlansResponse: Decodable {
     let results: [StartPlanResult]?
     let started: Int?
+}
+
+// MARK: - v2.1 §5.22.6 Codex 规划配置（独立于 pi 的 exec_config）
+
+/// 规划配置单组：{planner_model, reasoning_effort}。
+/// var 字段供设置页 TextField/Picker 草稿绑定；缺字段按空串兜底（核心校验兜底）。
+struct PlannerGroupConfig: Decodable, Equatable {
+    var plannerModel: String
+    var reasoningEffort: String
+
+    init(plannerModel: String = "", reasoningEffort: String = "") {
+        self.plannerModel = plannerModel
+        self.reasoningEffort = reasoningEffort
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        plannerModel = try container.decodeIfPresent(String.self, forKey: .plannerModel) ?? ""
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort) ?? ""
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case plannerModel, reasoningEffort
+    }
+
+    /// set-planner-config 组片段（协议 snake_case 键）。
+    var fields: [String: String] {
+        ["planner_model": plannerModel, "reasoning_effort": reasoningEffort]
+    }
+}
+
+/// v3 §5.23.2：get-planner-config.config 保存值——两组 + default_method。
+/// 旧核心 config 只含 standard/review_fix 两组。
+struct PlannerStoredConfig: Decodable {
+    let standard: PlannerGroupConfig?
+    let reviewFix: PlannerGroupConfig?
+    /// 规划面板默认方式预选（builtin|spec_plan；旧核心缺省 → nil）。
+    let defaultMethod: String?
+
+    init(standard: PlannerGroupConfig? = nil,
+         reviewFix: PlannerGroupConfig? = nil,
+         defaultMethod: String? = nil) {
+        self.standard = standard
+        self.reviewFix = reviewFix
+        self.defaultMethod = defaultMethod
+    }
+}
+
+/// get-planner-config / set-planner-config 响应（后者无 defaults 键）。
+struct GetPlannerConfigResponse: Decodable {
+    /// null = 从未保存（生效值 = defaults + 内置 builtin）。
+    let config: PlannerStoredConfig?
+    let defaults: [String: PlannerGroupConfig]?
+    let updatedAt: String?
+    /// v3 核心 defaults 内的 default_method 标量（非组对象，单独捕获）。
+    let defaultsMethod: String?
+
+    init(config: PlannerStoredConfig?, defaults: [String: PlannerGroupConfig]?,
+         updatedAt: String?, defaultsMethod: String? = nil) {
+        self.config = config
+        self.defaults = defaults
+        self.updatedAt = updatedAt
+        self.defaultsMethod = defaultsMethod
+    }
+
+    /// 兼容形状：v3 核心 default_method 在 config 内；容错顶层同名字段。
+    private enum CodingKeys: String, CodingKey {
+        case config, defaults, updatedAt, defaultMethod
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var cfg = try c.decodeIfPresent(PlannerStoredConfig.self, forKey: .config)
+        if cfg?.defaultMethod == nil,
+           let top = try c.decodeIfPresent(String.self, forKey: .defaultMethod) {
+            cfg = PlannerStoredConfig(standard: cfg?.standard,
+                                      reviewFix: cfg?.reviewFix,
+                                      defaultMethod: top)
+        }
+        config = cfg
+        // defaults 只收 {planner_model, reasoning_effort} 对象项；v3 核心
+        // 在 defaults 内夹带 default_method 标量——单独捕获而非解码失败。
+        var method: String? = nil
+        if let raw = try c.decodeIfPresent([String: JSONValue].self,
+                                           forKey: .defaults) {
+            var groups: [String: PlannerGroupConfig] = [:]
+            for (key, value) in raw {
+                if case .object(let dict) = value {
+                    var plannerModel = ""
+                    var reasoningEffort = ""
+                    if case .string(let v) = dict["planner_model"] { plannerModel = v }
+                    if case .string(let v) = dict["reasoning_effort"] { reasoningEffort = v }
+                    groups[key] = PlannerGroupConfig(plannerModel: plannerModel,
+                                                     reasoningEffort: reasoningEffort)
+                } else if key == "default_method",
+                          case .string(let v) = value {
+                    method = v
+                }
+            }
+            defaults = groups
+        } else {
+            defaults = nil
+        }
+        defaultsMethod = method
+        updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+    }
+
+    /// 某组生效值：已保存优先，回落 defaults。
+    func effective(_ group: String) -> PlannerGroupConfig? {
+        let stored: PlannerGroupConfig?
+        switch group {
+        case "standard": stored = config?.standard
+        case "review_fix": stored = config?.reviewFix
+        default: stored = nil
+        }
+        return stored ?? defaults?[group]
+    }
+
+    /// §5.23.2：默认方式预选（config → defaults → builtin）。
+    var effectiveDefaultMethod: String {
+        config?.defaultMethod ?? defaultsMethod ?? "builtin"
+    }
+
+    /// 核心是否支持 default_method（config 或 defaults 回传该字段即为支持；
+    /// 决定 set-planner-config 是否携带该键——旧核心拒收未知字段）。
+    var supportsDefaultMethod: Bool {
+        config?.defaultMethod != nil || defaultsMethod != nil
+    }
+}
+
+/// planner-capabilities.codex：CLI 探测（version 可能为 null = 探测失败）。
+struct PlannerCodexInfo: Decodable {
+    let path: String?
+    let version: String?
+}
+
+/// planner-capabilities.provider：服务商脱敏摘要（无凭据值；null = 默认认证路径）。
+struct PlannerProviderSummary: Decodable {
+    let providerId: String?
+    let name: String?
+    let baseUrl: String?
+    let wireApi: String?
+    let requiresOpenaiAuth: Bool?
+    let envKey: String?
+    let authReady: Bool?
+    let authDetail: String?
+    let modelCatalogJson: String?
+}
+
+/// planner-capabilities.auth：就绪态 + 中文说明（绝不含凭据值）。
+struct PlannerAuthStatus: Decodable {
+    let ready: Bool?
+    let detail: String?
+}
+
+/// planner-capabilities.models 条目：{id, name, reasoning_efforts[]}。
+struct PlannerModelEntry: Decodable, Identifiable {
+    let id: String?
+    let name: String?
+    let reasoningEfforts: [String]?
+}
+
+/// §5.23.2 planner-capabilities.planner_methods 单项可用性。
+struct PlannerMethodInfo: Decodable {
+    let available: Bool?
+    let reason: String?
+    /// spec_plan：已确认安装的插件标识与版本（codex plugin list 核对）。
+    let pluginId: String?
+    let version: String?
+}
+
+/// §5.23.2 planner-capabilities.planner_methods（builtin/spec_plan 两方式）。
+struct PlannerMethods: Decodable {
+    let builtin: PlannerMethodInfo?
+    let specPlan: PlannerMethodInfo?
+}
+
+struct PlannerCapabilitiesResponse: Decodable {
+    let codex: PlannerCodexInfo?
+    let provider: PlannerProviderSummary?
+    let auth: PlannerAuthStatus?
+    let models: [PlannerModelEntry]?
+    /// model_catalog_json 路径（null = 未配置目录）。
+    let modelsSource: String?
+    /// 目录已解析（false = 能力未验证，思考等级回落文本输入）。
+    let modelsVerified: Bool?
+    /// v3 §5.23.2：规划方式可用性门；旧核心不返回 → nil。
+    let plannerMethods: PlannerMethods?
+
+    /// 某模型已登记的思考等级（未登记/目录缺失 → nil）。
+    func efforts(for modelID: String) -> [String]? {
+        (models ?? []).first(where: { $0.id == modelID })?.reasoningEfforts
+    }
+
+    /// 某模型显示名（未登记 → nil）。
+    func modelName(for modelID: String) -> String? {
+        (models ?? []).first(where: { $0.id == modelID })?.name
+    }
+
+    /// spec_plan 方式可用性（旧核心未上报 → nil，UI 显示「能力未知」）。
+    var specPlanMethod: PlannerMethodInfo? { plannerMethods?.specPlan }
+}
+
+// MARK: - v3 §5.23.1 get-plan（已发布计划正文，T1 计划阅读页）
+
+/// get-plan {task_id, expected_plan_sha256?} → 计划核验正文。
+/// 冻结协议字段：task_id/title/plan_kind/generated_at/plan_sha256/markdown；
+/// 容错可选字段：plan_path/meta.plan_markdown（不同核心版本口径）。
+struct GetPlanResponse: Decodable {
+    let taskId: String?
+    let title: String?
+    let planKind: String?
+    let generatedAt: String?
+    let planSha256: String?
+    /// 计划文件路径（可选；当前核心不返回时由 get-task 的 planPath 兜底）。
+    let planPath: String?
+    /// 规划方法/模型等元数据（可选字段块）。
+    let meta: PlanMeta?
+    /// 正文（协议键 markdown；兼容个别实现的 plan_markdown 键）。
+    let markdown: String?
+    /// purged 任务只读审计标记。
+    let readOnly: Bool?
+
+    struct PlanMeta: Decodable {
+        let plannerModel: String?
+        let reasoningEffort: String?
+        let plannerMethod: String?
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case taskId, title, planKind, generatedAt, planSha256, planPath
+        case meta, markdown, readOnly, planMarkdown
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        taskId = try c.decodeIfPresent(String.self, forKey: .taskId)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        planKind = try c.decodeIfPresent(String.self, forKey: .planKind)
+        generatedAt = try c.decodeIfPresent(String.self, forKey: .generatedAt)
+        planSha256 = try c.decodeIfPresent(String.self, forKey: .planSha256)
+        planPath = try c.decodeIfPresent(String.self, forKey: .planPath)
+        meta = try c.decodeIfPresent(PlanMeta.self, forKey: .meta)
+        markdown = try c.decodeIfPresent(String.self, forKey: .markdown)
+            ?? c.decodeIfPresent(String.self, forKey: .planMarkdown)
+        readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly)
+    }
+}
+
+// MARK: - v3 §5.23.4 Review 环境配置（get/set-review-config，T5）
+
+/// settings.review_config：{mode:"inherit"|"custom", provider?, model?,
+/// reasoning_effort?, updated_at?}。inherit = 继承本机 PI 默认会话配置。
+struct ReviewConfig: Decodable, Equatable {
+    let mode: String?
+    let provider: String?
+    let model: String?
+    let reasoningEffort: String?
+    let updatedAt: String?
+
+    var effectiveMode: String { mode ?? "inherit" }
+}
+
+struct GetReviewConfigResponse: Decodable {
+    /// null = 从未保存（生效值 = defaults.mode:"inherit"）。
+    let config: ReviewConfig?
+    let defaults: ReviewConfig?
 }

@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import (
-    cmd_archive, cmd_config, cmd_dispatch, cmd_exec, cmd_migrate, cmd_queue,
-    cmd_read, cmd_remote, cmd_session, constants, db, planner_inputs, util,
+    cmd_archive, cmd_config, cmd_dispatch, cmd_exec, cmd_migrate, cmd_planner,
+    cmd_queue, cmd_read, cmd_remote, cmd_session, constants, db,
+    planner_inputs, util,
 )
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
@@ -33,6 +34,14 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_read.cmd_list_tasks,
     ),
     "get-task": ({"task_id": (True, "str")}, cmd_read.cmd_get_task),
+    # v3（§5.23.1）：已发布计划正文的核验读取（只读）。
+    "get-plan": (
+        {
+            "task_id": (True, "str"),
+            "expected_plan_sha256": (False, "str"),
+        },
+        cmd_read.cmd_get_plan,
+    ),
     "list-requests": (
         {
             "status": (False, "str"), "limit": (False, "int"),
@@ -253,10 +262,21 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "provider": (False, "str"), "model": (False, "str"),
             "reasoning_effort": (False, "str"),
             "agent_preset": (False, "str"),
+            # v3（§5.23.3）：任务执行后端与 PI-Desktop 分支配置块。
+            "backend": (False, "str"),
+            "pi_desktop": (False, "dict"),
         },
         cmd_config.cmd_set_exec_config,
     ),
     "exec-capabilities": ({}, cmd_config.cmd_exec_capabilities),
+    # v3（§5.23.6）：Pi-Desktop-Plus 本地 provider/model 默认目录（只读）。
+    "pi-desktop-catalog": (
+        {
+            "connection_file": (False, "str"),
+            "provider_id": (False, "str"),
+        },
+        cmd_config.cmd_pi_desktop_catalog,
+    ),
     # v1.6（protocol §5.18.3）：pi 轮次启动。
     "dispatch-start": (
         {"task_id": (True, "str"), "run_id": (True, "str")},
@@ -282,6 +302,26 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "start-plans": (
         {"items": (True, "list")},
         planner_inputs.start_plans,
+    ),
+    # v2（§5.22.6，规划修复 T2）：Codex 规划配置与能力查询。
+    "get-planner-config": ({}, cmd_planner.cmd_get_planner_config),
+    "set-planner-config": (
+        {
+            "standard": (False, "dict"),
+            "review_fix": (False, "dict"),
+            "default_method": (False, "str"),
+        },
+        cmd_planner.cmd_set_planner_config,
+    ),
+    "planner-capabilities": ({}, cmd_planner.cmd_planner_capabilities),
+    "get-review-config": ({}, cmd_config.cmd_get_review_config),
+    "set-review-config": (
+        {
+            "mode": (True, "str"),
+            "provider": (False, "str"), "model": (False, "str"),
+            "reasoning_effort": (False, "str"),
+        },
+        cmd_config.cmd_set_review_config,
     ),
 }
 

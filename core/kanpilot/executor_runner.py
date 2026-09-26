@@ -8,10 +8,12 @@ CLI：``python -m kanpilot.executor_runner --stage <dispatch|monitor|review>``
 职责：
 1. 渲染 ``core/executor_prompts/<stage>.md`` 为本次 prompt（{PREAMBLE}
    展开为 _preamble.md；{KANPILOT}/{BRIDGE}/{CORE_ROOT}/{DOCS}/
-   {APP_SUPPORT} 替换为真实路径）；
 2. 拉起 ``pi -p --mode json --session-dir <app_support>/executor-sessions/
    <stage>/ --no-extensions --no-context-files``，stdin 关闭，stdout 落
-   日志文件（事件流不进本进程 stdout）；
+   日志文件（事件流不进本进程 stdout）；``--stage review`` 且
+   settings ``review_config.mode="custom"`` 时按 §5.23.4 追加
+   ``--model <provider>/<model> --thinking <level>``（本轮固化，
+   脱敏快照记 ``executor_runs.review``）；
 3. 超时（settings ``executor_timeout_seconds``，缺省 1800s）→ 终止进程组；
 4. 单飞由调用方保证（ExecutorScheduler 先 executor-status 查在途 pid）。
 
@@ -29,7 +31,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import constants, db
+from . import constants, db, review_config
 
 # v2（§5.22.3）：plan 改由 codex planner_runner 承担，不再经 pi executor。
 STAGES = ("dispatch", "monitor", "review")
@@ -110,6 +112,14 @@ def run_stage(stage: str) -> int:
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
     log_path = _log_path(stage)
+
+    # v3（§5.23.4/§5.23.5）：review 控制端配置来源 = settings.review_config。
+    # custom 时把 {provider, model, reasoning_effort} 固化为本轮 pi 参数；
+    # inherit/未保存保持现状（继承本机 PI 默认会话配置）。dispatch/monitor
+    # 不读 exec_config/review_config——继续继承 PI 默认。
+    review_snapshot = None
+    if stage == "review":
+        review_snapshot = review_config.snapshot(conn)
     _record_run(
         conn, stage,
         pid=os.getpid(),
@@ -117,6 +127,9 @@ def run_stage(stage: str) -> int:
         log=str(log_path),
         exit_code=None,
         finished_at=None,
+        # 脱敏快照（mode + provider/model/effort；无凭据）写运行记录。
+        **({"review_config": review_snapshot}
+           if review_snapshot is not None else {}),
     )
 
     argv = [
@@ -127,8 +140,18 @@ def run_stage(stage: str) -> int:
         "--no-extensions",
         "--no-skills",
         "--no-context-files",
-        prompt,
     ]
+    if (
+        review_snapshot and review_snapshot.get("mode") == "custom"
+        and all(review_snapshot.get(key) for key in
+                ("provider", "model", "reasoning_effort"))
+    ):
+        argv += [
+            "--model",
+            f"{review_snapshot['provider']}/{review_snapshot['model']}",
+            "--thinking", review_snapshot["reasoning_effort"],
+        ]
+    argv.append(prompt)
     env = dict(os.environ)
     env["PI_HOME"] = str(constants.pi_home())
     env.setdefault("KANPILOT_DB", str(constants.default_db_path()))

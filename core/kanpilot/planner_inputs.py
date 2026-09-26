@@ -9,7 +9,8 @@ start-plans 的实现层。
 - start-plans：逐任务独立提交——材料指纹核验 → 任务导入/状态检查 →
   已授权请求去重/写回 → 建/复用 queued plan 请求（payload 含
   manual_authorized/input_id/planner_input_sha256/manifest/model_config/
-  confirmed_at）。成功项供 planner_runner 领取。
+  confirmed_at + v3 的 planner_method，spec_plan 再固化 plugin_id/
+  plugin_version）。成功项供 planner_runner 领取。
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
-from . import bridge, constants, core, db, remote, util
+from . import (
+    bridge, codex_planner, constants, core, db, planner_config, remote, util,
+)
 
 # --------------------------------------------------------------- 附件识别
 
@@ -520,10 +523,18 @@ def _item_task_id(conn, item: dict):
 
 
 def _submit_one(conn, now: str, item: dict) -> dict:
-    """start-plans 单项提交（§5.22.2）：逐项独立事务语义由调用方保证；
-    返回 {task_id, request_id?, deduplicated?, code?, error?, waiting_reason?}。"""
+    """start-plans 单项提交（§5.22.2/§5.23.2）：逐项独立事务语义由调用方
+    保证；返回 {task_id, request_id?, deduplicated?, code?, error?,
+    waiting_reason?}。"""
     input_id = item.get("input_id")
     supplied_sha = item.get("input_sha256")
+    # §5.23.2：planner_method 缺省 builtin；非法值 → 该项 bad_request。
+    method = item.get("planner_method") or "builtin"
+    if method not in planner_config.DEFAULT_METHODS:
+        return {"task_id": _item_task_id(conn, item),
+                "code": "bad_request",
+                "error": f"planner_method 非法：{item.get('planner_method')!r}"
+                         f"（仅 { '/'.join(planner_config.DEFAULT_METHODS) }）"}
     row = db.get_planner_input(conn, input_id) if input_id else None
     if row is None:
         return {"task_id": None, "code": "not_found",
@@ -593,28 +604,10 @@ def _submit_one(conn, now: str, item: dict) -> dict:
             return {"task_id": task_id, "code": "conflict",
                     "error": f"任务状态 {task['status']} 不能排队规划"}
 
-    # 幂等键 plan:<task_id>：已授权且同材料 → deduplicated；材料不同 →
-    # conflict；未授权旧请求 → 写回已确认输入（复用请求，§5.22.2）。
+    # 幂等键 plan:<task_id>：已授权且同材料+同方式 → deduplicated；
+    # 材料或方式不同 → conflict（不暗换材料/方式）；未授权旧请求 →
+    # 写回已确认输入（复用请求，§5.22.2/§5.23.2）。
     key = f"plan:{task_id}"
-    payload = {
-        "manual_authorized": True,
-        "input_id": input_id,
-        "planner_input_sha256": row["input_sha256"],
-        "manifest": manifest,
-        "model_config": (
-            constants.REVIEW_FIX_PLANNER
-            if task["plan_kind"] == "review_fix"
-            else constants.STANDARD_PLANNER
-        ),
-        "confirmed_at": now,
-    }
-    if task["plan_kind"] == "review_fix":
-        payload.update({
-            "plan_kind": "review_fix",
-            "review_key": task["review_key"],
-            "review_source_task_id": task["review_source_task_id"],
-            "fix_task_id": task_id,
-        })
     existing = db.active_request_for_key(conn, key)
     if existing is not None:
         if existing["status"] == "claimed":
@@ -622,12 +615,56 @@ def _submit_one(conn, now: str, item: dict) -> dict:
                     "error": "规划请求已被领取，正在执行中"}
         old_payload = db.request_payload(existing)
         if old_payload.get("manual_authorized"):
-            if old_payload.get("planner_input_sha256") == row["input_sha256"]:
-                return {"task_id": task_id, "request_id": existing["request_id"],
+            # 缺 planner_method 的旧 payload 按 builtin 解释（§5.23.2）。
+            old_method = old_payload.get("planner_method") or "builtin"
+            same_input = (
+                old_payload.get("planner_input_sha256")
+                == row["input_sha256"])
+            if same_input and old_method == method:
+                return {"task_id": task_id,
+                        "request_id": existing["request_id"],
                         "deduplicated": True}
+            if same_input:
+                return {"task_id": task_id, "code": "conflict",
+                        "error": f"已有同材料但方式不同的规划请求"
+                                 f"（{old_method} → {method}），请先处理"}
             return {"task_id": task_id, "code": "conflict",
                     "error": "已有不同材料的规划请求在队列中，请先处理"}
+
+    # spec_plan：提交时经 codex plugin list 固化插件身份与版本（不可用 →
+    # validation_failed，该项失败、其他项不受影响）。dedup/conflict 已短路，
+    # 此处只对真正创建/复用的请求探测。
+    plugin = None
+    if method == "spec_plan":
+        plugin = codex_planner.probe_spec_plugin()
+        if not plugin.get("available"):
+            return {"task_id": task_id, "code": "validation_failed",
+                    "error": f"spec_plan 不可用：{plugin.get('reason')}"}
+
+    payload = {
+        "manual_authorized": True,
+        "input_id": input_id,
+        "planner_input_sha256": row["input_sha256"],
+        "manifest": manifest,
+        "model_config": planner_config.snapshot(
+            conn, planner_config.group_for(task["plan_kind"])
+        ),
+        "confirmed_at": now,
+        "planner_method": method,
+    }
+    if plugin is not None:
+        payload["plugin_id"] = plugin["plugin_id"]
+        payload["plugin_version"] = plugin["version"]
+    if task["plan_kind"] == "review_fix":
+        payload.update({
+            "plan_kind": "review_fix",
+            "review_key": task["review_key"],
+            "review_source_task_id": task["review_source_task_id"],
+            "fix_task_id": task_id,
+        })
+    if existing is not None:
         # 未授权旧请求 → 写回已确认输入（复用请求，不新建）。
+        old_payload = db.request_payload(existing)
         old_payload.update(payload)
         db.update_request(
             conn, existing["request_id"], now, payload_json=old_payload
@@ -635,7 +672,8 @@ def _submit_one(conn, now: str, item: dict) -> dict:
         db.add_event(
             conn, now, "plan_started", task_id=task_id,
             request_id=existing["request_id"], actor="user",
-            detail={"input_id": input_id, "reused": True},
+            detail={"input_id": input_id, "reused": True,
+                    "planner_method": method},
         )
         return {"task_id": task_id, "request_id": existing["request_id"],
                 "deduplicated": False, "reused": True}
@@ -647,15 +685,17 @@ def _submit_one(conn, now: str, item: dict) -> dict:
     db.add_event(
         conn, now, "plan_started", task_id=task_id,
         request_id=request["request_id"], actor="user",
-        detail={"input_id": input_id, "reused": False},
+        detail={"input_id": input_id, "reused": False,
+                "planner_method": method},
     )
     return {"task_id": task_id, "request_id": request["request_id"],
             "deduplicated": False}
 
 
 def start_plans(ctx, payload: dict) -> dict:
-    """start-plans {items:[{input_id,input_sha256,expected_plan_sha256?}]} →
-    {results:[...]}。每项独立事务，不回滚已成功项（§5.22.2）。"""
+    """start-plans {items:[{input_id,input_sha256,expected_plan_sha256?,
+    planner_method?}]} → {results:[...]}。每项独立事务，不回滚已成功项
+    （§5.22.2/§5.23.2）。"""
     conn, now = ctx.conn, ctx.now_iso
     items = payload.get("items")
     if not isinstance(items, list) or not items:

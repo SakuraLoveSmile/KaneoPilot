@@ -31,13 +31,15 @@
 - 列表行：项目名（11pt 徽标文本）、标题（13pt，单行截断）、当前阶段/状态（文字+图标）、最近进展（11pt secondary 单行）、阻塞原因（有则 11pt 红）、预计领取时间（有 queued 请求则显示 `HH:mm` 或 `约 x 分钟后`）。
 - 排序：需人工/失联置顶 → 已排队（按 priority+创建时间）→ 执行中 → 其余按 updated_at 倒序；项目可分组标题。
 - 过滤：工具栏搜索框（标题/项目匹配）+ 阶段筛选菜单。
-- 详情（选中任务）：标题 18pt + 状态行；分组区块（间隔 16，区块内 8/12）：
-  1. **计划**：plan_path 文件名、plan_kind、生成时间、计划哈希前缀；按钮 `打开计划文件`（NSWorkspace open）、`在 Finder 显示`。
-  2. **执行**：run_id、session_title/session_id（可复制文本）、session_marker；有 session 记录时给 `打开会话`（若记录为本地会话标识则仅展示/复制，不臆造 URL）。
-  3. **Kaneo**：kaneo_status、最后核验时间（kaneo_checked_at）；按钮 `打开 Kaneo 任务`（links.kaneo_task_url，`NSWorkspace` 打开，仅当 URL 存在）。
-  4. **Review**：report 文件名、结论、fix_task_id；按钮 `打开报告`（有 report_path 时）。
-  5. **尝试与时间线**：attempts 表（时间、阶段、结果、note）+ events 时间线（kind/时间/摘要，11pt）。
-  6. **阻塞**：needs_user/失联时显示 failure_code/failure_reason/证据摘要与原尝试关键字段。
+- 详情（选中任务，T4 五段式）：详情容器保持 sheet 尺寸、标题/状态与关闭入口；顶部分段控件 `概览 / 计划 / 执行 / 评审 / 记录` 五段，每页独立滚动、切换不丢当前任务。键盘左右键切换分段，焦点与 VoiceOver 读出页名。
+  1. **概览**：任务状态行、Kaneo 信息（kaneo_status/最后核验时间/`打开 Kaneo 任务`）、阻塞证据（needs_user/失联时 failure_code/failure_reason/证据摘要）与允许操作摘要。
+  2. **计划**：按 §4.8 计划阅读页展示已发布计划。
+  3. **执行**：轮次字段（run_id/session_id/session_title/session_marker/worktree_path）+ 现有 `SessionReaderView`；无会话显示空态。
+  4. **评审**：结论/报告路径/fix_task_id/`打开报告`；无评审数据显示空态。
+  5. **记录**：attempts 表（时间、阶段、结果、note）+ events 时间线（kind/时间/摘要，11pt）。
+  没有对应数据时显示清晰空态文案，不显示空白表。
+- **待办列直达计划页（T1）**：待办（`board_column=todo`）列卡片的主入口直接打开同一详情容器的**计划页**（非概览）；其他列仍默认打开概览。计划页可切回概览/其他页；「准备/重新规划」仍跳转既有规划面板。
+- 计划页头部固定任务标题、`待确认执行` 状态、`plan_kind`、生成时间与 plan_sha256 前 12 位（可复制）。
 - 详情底栏操作区：按钮由 `get-task` 返回的 `allowed_actions` 渲染，映射：
   - `enqueue` → `安排下一步`（task needs_plan/ready/running/in_review 时按核心推断 kind；label 按 kind 变：`安排派发`/`安排规划`/`安排检查`/`安排评审`）
   - `retry` → `重试派发`（仅 send_state=not_sent 等明确未发送）
@@ -87,6 +89,11 @@
   - 保存经 `set-exec-config`，成功 toast「已保存执行配置（仅影响新轮次）」；失败展示核心 `error` 原文并保留原值。
   - 环境检查行：pi 可执行、模型清单（models.json）可读、agent.md 预设可用、凭据（pi auth check 就绪态，**绝不显示值**）；红叉配文字。
   - 说明文案：仅影响新轮次；不修改 pi 全局配置；凭据只查就绪态，不保存密钥值。
+- **Codex 规划配置（v2.1，protocol §5.22.6）**：独立分节（置于 PI 执行配置之后）——
+  - 只读区：服务商（provider_id/名称/base_url/wire_api）、CLI 版本、配置来源（model_catalog_json 或「无」）、认证就绪态；不提供密钥输入或服务商编辑。
+  - 两组独立设置「普通规划」「评审修复规划」：模型文本输入（本地元数据提示）、思考等级已知时用 Picker、未知时允许文本输入并显示「能力未验证」。
+  - `重新读取本机配置` 调 `planner-capabilities`；`保存规划配置` 调 `set-planner-config`（保存期间禁用重复提交；失败保留草稿并显示核心 error 原文；成功 toast「已保存，仅影响新建规划请求」）。
+  - 加载中显示进度；说明文案：仅影响新规划请求；不修改 codex 全局配置；不显示凭据值。
 - **执行端调度（v1.6，protocol §5.19）**：独立分节——启用总开关（App 内置调度器仅在应用运行期间触发，App 退出后执行端不再运行）；四个 stage 各一行显示下次触发时间与最近一次运行状态（executor-status），附「立即运行」按钮。
 
 ### 4.5 会话阅读器（v1.5，protocol §5.16）
@@ -114,9 +121,30 @@
 - 入口：「任务」区工具栏 `规划…`；待处理/请求详情 `prepare_plan`/`fetch_todos` 动作。窗口约 760×600（sheet 或独立 Window）。
 - **第一步 获取 To Do**：`刷新` 调 `fetch-todos`；列表行=标题、项目徽标、`local_status`（未导入/需重新规划/已有计划…）、附件计数、`selectable=false` 时灰显 + `blocked_reason`。仅 `selectable` 行可勾选进入下一步。
 - **第二步 准备材料**：对勾选任务逐条 `prepare-plan-input`（自动或点 `准备`）：展示 `files[]`（名称/大小/来源）、`issues[]`（红图标+文字）、`can_start`；提供补充说明输入框、本地文件选择（`local_paths`）、失效附件排除（`excluded_remote_ids` 勾选）。`issues` 未清零前 `can_start=false`，开始按钮禁用并写明原因。
+- **规划方式选择（T2，protocol §5.23.2）**：第二步增加明确的**两项**选择——`内置规划`（builtin）与 `Spec Planner 插件`（spec_plan）。默认预选取 `get-planner-config` 的 `default_method`（缺省 builtin）。`planner-capabilities.planner_methods.spec_plan.available=false` 时该项禁用并展示 `reason`；选择对本批次选中任务生效（每项 `start-plans` 带 `planner_method`），第三步提交前在汇总区明示所选方式。spec_plan 选项附边界说明：「该方式经 Codex 插件技能执行，可能加载本机用户配置中的其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。」普通规划/评审修复规划仍各自沿用既有模型/思考等级设置。
 - **第三步 开始规划**：`开始规划` 调 `start-plans`（已勾选且 `can_start` 项批量提交）；逐行显示结果——成功 `已排队`、幂等 `已在队列`、失败 `code`+`error` 原文。成功后核心立即唤起规划 runner；面板显示进行中轮次与最近日志摘要。
 - 已授权排队中的任务显示 `已排队等待规划`；旧未授权 plan 请求显示 `等待确认材料`（点行直接进入第二步）。
 - 失败/加载/空态沿用 §6；面板不阻塞主窗口操作。
+
+### 4.8 计划阅读页（T1，protocol §5.23.1）
+
+- 数据源：`get-plan {task_id, expected_plan_sha256}`；进入时携带当前 `get-task` 的 plan_sha256 做预期核验。读取在后台进行，**任务切换/在途响应归属用 request generation 守卫**——旧任务响应不得覆盖新页面。
+- 头部（固定，不随正文滚动）：任务标题（18pt）、`待确认执行` 状态（图标+文字）、`plan_kind`、生成时间、`plan_sha256` 前 12 位（可复制）。
+- **渲染/原文双模式**：默认渲染视图把 Markdown 标题、列表、代码块、表格、链接排为可读原生文本；原文模式逐字显示（含所有字符，不折叠/不重排）。两种模式正文均可选中复制。
+- **安全约束**：渲染**不执行**内嵌 HTML/脚本，不自动加载远端媒体；Markdown 链接以文字+图标显示，点击经 `NSWorkspace` 打开系统默认浏览器。页面内**不允许**修改计划内容。
+- 页面工具区（右上）：`打开计划文件`（NSWorkspace open）、`在 Finder 显示`；有生成时间时显示。`已打开会话` 等不属本页。
+- **核验失败状态**（`get-plan` 返回错误）：保留任务摘要区，显示错误原因（中文）、`重试`、`打开计划文件` 入口；底栏执行确认（`confirm_dispatch` 等写操作）**保持禁用**直到核心重新核验通过——不把不可信正文当作已批准计划展示。
+- `plan_sha256` 与 `expected_plan_sha256` 不符（`conflict`）：展示「计划自发布后已变更」+ `重试`/`在 Finder 显示`；不渲染旧快照。
+
+### 4.9 角色化设置页（T5，protocol §5.23）
+
+- 顶层侧栏仍只有「设置」；设置页内部以 `规划环境 / 执行环境 / Review 环境 / 通用` 四段切换（segmented，**不按** Codex/PI 软件名分节）。沿用 grouped Form、现有控件密度与系统语义色。
+- **规划环境**：Codex 认证/服务商只读区（`planner-capabilities`）、两组模型与思考等级（§5.22.6）、`planner_methods` 可用性与 `default_method` 预选（含 spec_plan 的边界说明文字）。
+- **执行环境**：任务执行者后端切换（`pi` / `pi_desktop`）；pi 分支为四选择器（§4.4 原 PI 执行配置内容），pi_desktop 分支为连接文件路径（`mcp-control.json`）、provider/model/thinking_level/`permission_mode` 选择——**permission_mode 首次须用户显式保存**，不得自动选 `auto`。两分支各自的能力检查列表、dispatch/monitor 调度状态行与说明「dispatch/monitor 控制端仍继承本机 PI 默认设置」。
+- **T3 Plus 执行环境细节（T3.5）**：桌面标签为 `Pi-Desktop-Plus（本机 MCP）`，tag 仍 pi_desktop；path 草稿为空时填入 `~/.pi-desktop-plus/mcp-control.json` 的绝对路径，仍可手改。切入 Plus 时调用只读 `pi-desktop-catalog` 取本地 provider/model 候选与 Plus 默认值；默认组合只填空草稿，不改已有配置；「重新获取」刷新候选，不覆盖非空草稿。provider/model 保留可编辑 ID 和离线保存能力，并以候选弹出列表选择；model 候选有独立搜索词。thinking 依据 Plus 明示的模型/provider级别展示，缺少级别信息时显示全合法枚举并标记支持范围未确认。permission_mode 必须用户显式选择，绝不读取 Plus 会话或自动设为 auto。「检测已保存配置」仍只检查已保存配置；读取/检测各自显示状态，不互相覆盖。加载失败保留草稿，错误详情优先 detail 再 reason 且允许换行；读取期间用户修改或切走后丢弃过期响应。桌面保存只校验五字段，不受 PI CLI 顶层 ok 阻挡；保存 pi 不提交空桌面块，保存桌面不提交无关 CLI 草稿。保留 grouped Form、四段、字号与间距，不变更全局设计。
+- **Review 环境**：`get/set-review-config`——`inherit`（继承本机 PI 默认会话配置）/ `custom`（provider/model/thinking 由 `exec-capabilities` 校验的显式选择）；显示当前生效来源与「仅影响下一次 review 启动」说明。
+- **通用**：doctor、自动推进/暂停、队列参数、路径、迁移信息（把 §4.4 原「环境诊断/自动推进/路径/迁移」归入）。
+- 各页保存失败保留草稿与核心 error 原文；加载失败保留旧内容 + `重试`；标注「默认/已保存」与「仅影响新轮次」。不修改 `~/.pi`、`~/.codex` 或 PI-Desktop 全局配置。
 
 ## 5. 状态图标映射（图标+文字同时出现）
 

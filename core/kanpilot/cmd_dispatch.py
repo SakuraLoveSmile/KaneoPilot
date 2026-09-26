@@ -30,8 +30,10 @@ def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
     with db.write_txn(conn):
         task, _request = _entry(ctx, payload, ("dispatching", "prepared"))
         evidence = payload["evidence"]
-        if isinstance(evidence, dict) and evidence.get("backend") == "pi":
-            # v1.6（§5.18.3）：pi 证据分支（marker/repository/backend/config）。
+        if isinstance(evidence, dict) and \
+                evidence.get("backend") in constants.EXEC_BACKENDS:
+            # v1.6+（§5.18.3/§5.23.3）：执行后端证据分支
+            # （marker/repository/backend/config 快照全等校验）。
             _validate_pi_prepare(conn, task, payload["run_id"], evidence)
         else:
             plan_basename = Path(task["plan_path"]).name
@@ -172,10 +174,13 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             "conflict",
         )
         evidence = payload["evidence"]
-        if isinstance(evidence, dict) and evidence.get("backend") == "pi":
-            # v1.6（§5.18.3）：pi 证据分支（意图 + session 事件 + config）。
+        if isinstance(evidence, dict) and \
+                evidence.get("backend") in constants.EXEC_BACKENDS:
+            # v1.6+（§5.18.3/§5.23.3）：执行后端证据分支
+            # （意图 + session 事件 + config；pi_desktop 另核 turn_id）。
+            backend = evidence["backend"]
             round_row = _require_pi_round(
-                conn, task["task_id"], payload["run_id"]
+                conn, task["task_id"], payload["run_id"], backend
             )
             session = _validate_pi_confirm(
                 conn, task, payload["run_id"], evidence, round_row
@@ -188,7 +193,7 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             # 外层已在 write_txn 内，直接回填轮次会话关联（§5.16.1）。
             round_store.upsert_discovered(
                 conn, task["task_id"], payload["run_id"], now,
-                backend="pi",
+                backend=backend,
                 session_id=evidence.get("session_id"),
                 session_title=evidence.get("session_title"),
             )
@@ -292,10 +297,10 @@ def cmd_dispatch_fail(ctx, payload: dict) -> dict:
 
 # ------------------------------------------------- v1.6 pi 分支（protocol §5.18.3）
 #
-# dispatch-prepare/dispatch-confirm 按证据是否含 backend=="pi" 分支：pi 证据
-# 走 §5.18.3 校验（marker/repository/backend/config 快照/协议会话事件），
-# 缺省证据仍走 core.validate_evidence §4.6 旧分支（历史轮次与既有测试夹具
-# 的兼容形态）。
+# dispatch-prepare/dispatch-confirm 按证据是否含 backend ∈ EXEC_BACKENDS 分支：
+# pi/pi_desktop 证据走 §5.18.3/§5.23.3 校验（marker/repository/backend/
+# config 快照/协议会话事件），缺省证据仍走 core.validate_evidence §4.6
+# 旧分支（历史轮次与既有测试夹具的兼容形态）。
 
 import os
 import subprocess
@@ -305,11 +310,12 @@ import time as _time
 from . import dsh_events, exec_config, headless_adapter as _headless, round_store
 
 
-def _require_pi_round(conn, task_id, run_id):
+def _require_pi_round(conn, task_id, run_id, backend="pi"):
     row = round_store.get_round(conn, task_id, run_id)
-    if row is None or row["backend"] != "pi":
+    if row is None or row["backend"] != backend:
         raise util.KanpilotError(
-            "conflict", "该执行轮次不是 pi 后端，不能使用 pi 派发证据"
+            "conflict",
+            f"该执行轮次不是 {backend} 后端，不能使用 {backend} 派发证据",
         )
     return row
 
@@ -331,12 +337,13 @@ def _validate_pi_prepare(conn, task, run_id, evidence):
         if not condition:
             raise util.KanpilotError("evidence_invalid", message)
 
-    round_row = _require_pi_round(conn, task["task_id"], run_id)
+    backend = evidence.get("backend")
+    check(backend in constants.EXEC_BACKENDS, "backend not verified")
+    round_row = _require_pi_round(conn, task["task_id"], run_id, backend)
     check(evidence.get("session_marker") == task["session_marker"],
           "session_marker not verified")
     check(evidence.get("repository") == task["repository"],
           "repository not verified")
-    check(evidence.get("backend") == "pi", "backend not verified")
     _config_or_fail(evidence, round_row)
     util.require(
         util.sha256_file(Path(task["plan_path"])) == task["plan_sha256"],
@@ -351,12 +358,13 @@ def _validate_pi_confirm(conn, task, run_id, evidence, round_row):
     def check(condition, message):
         if not condition:
             raise util.KanpilotError("evidence_invalid", message)
-
+    backend = evidence.get("backend")
+    check(backend in constants.EXEC_BACKENDS, "backend not verified")
+    check(backend == round_row["backend"], "backend 与轮次固化不符")
     check(evidence.get("session_marker") == task["session_marker"],
           "session_marker not verified")
     check(evidence.get("repository") == task["repository"],
           "repository not verified")
-    check(evidence.get("backend") == "pi", "backend not verified")
     check(evidence.get("protocol_seen") is True,
           "protocol session event not verified")
     _config_or_fail(evidence, round_row)
@@ -375,6 +383,10 @@ def _validate_pi_confirm(conn, task, run_id, evidence, round_row):
         )
     check(session.get("session_id") == evidence.get("session_id"),
           "session_id 与协议会话事件不符")
+    if backend == "pi_desktop":
+        # §5.23.3：dispatch-confirm 另核 turn_id 与协议会话事件一致。
+        check(session.get("turn_id") == evidence.get("turn_id"),
+              "turn_id 与协议会话事件不符")
     util.require(
         util.sha256_file(Path(task["plan_path"])) == task["plan_sha256"],
         "plan changed since dispatch validation", "evidence_invalid",
@@ -382,14 +394,14 @@ def _validate_pi_confirm(conn, task, run_id, evidence, round_row):
     return session
 
 
-def _pi_session_view(conn, task_id, run_id):
+def _pi_session_view(conn, task_id, run_id, backend="pi"):
     """读取 job/session 事件的 best-effort 会话视图（confirm 幂等路径用）。"""
     source = _headless.resolve_source(conn)
     try:
         run_dir = source.run_dir(task_id, run_id)
     except _headless.HeadlessError:
         return None, None
-    job, _err = dsh_events.read_job(run_dir, task_id, run_id, backend="pi")
+    job, _err = dsh_events.read_job(run_dir, task_id, run_id, backend=backend)
     events, _detail = dsh_events.iter_events(
         run_dir / dsh_events.EVENT_LOG_NAME
     )
@@ -406,10 +418,15 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     task, _request = _entry(ctx, payload, ("submitting",))
     task_id, run_id = task["task_id"], payload["run_id"]
-    round_store.require_round(conn, task_id, run_id)
-    if round_store.get_round(conn, task_id, run_id)["backend"] != "pi":
+    round_row = round_store.require_round(conn, task_id, run_id)
+    backend = round_row["backend"]
+    if backend == "pi_desktop":
+        return _dispatch_start_pi_desktop(
+            ctx, task, _request, run_id, round_row
+        )
+    if backend != "pi":
         raise util.KanpilotError(
-            "conflict", "该执行轮次不是 pi 后端，不能 dispatch-start"
+            "conflict", "该执行轮次不是 pi/pi_desktop 后端，不能 dispatch-start"
         )
 
     # 1. 可用性复核先行（失败不落意图、不启动进程）。
@@ -513,6 +530,152 @@ def _agent_md_path(conn, config_snapshot) -> str:
     path = constants.agents_dir() / f"{preset}.md"
     return str(path) if path.is_file() else ""
 
+def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
+    """pi_desktop 分支 dispatch-start（§5.23.3）：连接探测 → 意图落盘 →
+    worktree → 计划哈希复核 → 拉起 kanpilot.pi_desktop_worker。"""
+    conn, now = ctx.conn, ctx.now_iso
+    task_id = task["task_id"]
+
+    # 1. 可用性复核（exec_config 按当前生效后端探测 pi_desktop 控制面：
+    #    连接文件/token/tools/provider/model；失败不落意图、不启动进程）。
+    available, reason = exec_config.check_available(
+        conn,
+        config_snapshot=(round_store.round_view(round_row).get("config") or {}),
+    )
+    if not available:
+        raise util.KanpilotError(
+            "validation_failed",
+            reason or "pi_desktop 执行环境不可用",
+        )
+
+    # 2. 意图先落盘（同一轮次只允许一次真实启动；非空 → 幂等返回）。
+    with db.write_txn(conn):
+        fresh = round_store.require_round(conn, task_id, run_id)
+        if fresh["started_at"]:
+            if not fresh["pid"]:
+                raise util.KanpilotError(
+                    "conflict",
+                    "该 pi_desktop 轮次已有启动意图但未完成拉起，需人工处理，不能重复启动",
+                )
+            session_id, _title = _pi_session_view(
+                conn, task_id, run_id, backend="pi_desktop"
+            )
+            return {
+                "status": "started" if session_id else "starting", "pid": fresh["pid"],
+                "session_id": session_id,
+                "worktree_path": fresh["worktree_path"],
+                "deduplicated": True,
+            }
+        round_store.mark_intent(conn, task_id, run_id, now)
+        config_snapshot = dict(
+            round_store.round_view(round_row)["config"] or {}
+        )
+
+    run_dir = None
+    try:
+        # 3. worktree + 计划哈希复核 + spec + 拉起 worker（事务外进程操作）。
+        source = _headless.resolve_source(conn)
+        try:
+            run_dir = source.run_dir(task_id, run_id)
+        except _headless.HeadlessError as exc:
+            raise util.KanpilotError("validation_failed", exc.detail)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        worktree_path, worktree_mode = _ensure_worktree(
+            task, task_id, run_id, conn, require_isolated=True,
+        )
+        util.require(
+            util.sha256_file(Path(task["plan_path"])) == task["plan_sha256"],
+            "plan changed since dispatch validation", "validation_failed",
+        )
+        spec = {
+            "v": 1,
+            "task_id": task_id,
+            "run_id": run_id,
+            "session_marker": task["session_marker"],
+            "backend": "pi_desktop",
+            "config": config_snapshot,
+            "cwd": str(worktree_path),
+            "worktree_mode": worktree_mode,
+            "repository": task["repository"],
+            "plan_path": task["plan_path"],
+            "plan_sha256": task["plan_sha256"],
+            # 任务标识 + 计划哈希 提示头（§5.23.3）；计划正文由 worker 注入。
+            "instruction": (
+                f"任务标识：{task['session_marker']}。"
+                f"计划哈希：{task['plan_sha256']}。"
+                "完整执行以下已核验的计划正文，保留现有改动，按计划使用 "
+                "subagent 和独立 worktree，完成验证并报告结果。"
+            ),
+            "runs_dir": str(run_dir),
+            "timeout_seconds": round_store.round_timeout_seconds(conn),
+            "request_id": request["request_id"],
+            "db_path": str(ctx.db_path),
+        }
+        spec_path = run_dir / "spec.json"
+        spec_path.write_text(util.jdump(spec), encoding="utf-8")
+        log_path = run_dir / "worker.log"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(constants.core_root())
+        try:
+            with open(log_path, "ab") as log:
+                proc = subprocess.Popen(
+                    [
+                        sys.executable, "-m", "kanpilot.pi_desktop_worker",
+                        "--spec", str(spec_path),
+                    ],
+                    cwd=str(constants.core_root()),
+                    stdout=log, stderr=log,
+                    start_new_session=True, env=env,
+                )
+        except OSError as exc:
+            raise util.KanpilotError("internal", f"worker 拉起失败：{exc}")
+
+    except (util.KanpilotError, OSError, subprocess.SubprocessError) as exc:
+        detail = util.redact(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
+        with db.write_txn(conn):
+            conn.execute(
+                "UPDATE execution_rounds SET run_status='failed', updated_at=? "
+                "WHERE task_id=? AND run_id=?", (now, task_id, run_id),
+            )
+            db.add_event(conn, now, "round_start_failed", task_id=task_id,
+                         request_id=request["request_id"], actor="kaneo-dispatch",
+                         detail={"run_id": run_id, "reason": detail, "send_state": "not_sent"})
+        if run_dir is not None and run_dir.is_dir():
+            (run_dir / dsh_events.JOB_NAME).write_text(util.jdump({
+                "task_id": task_id, "run_id": run_id, "backend": "pi_desktop",
+                "status": "failed", "send_state": "not_sent", "pid": None,
+                "config": config_snapshot, "detail": detail, "exit_code": 1,
+                "started_at": now, "ended_at": now,
+            }), encoding="utf-8")
+        code = exc.code if isinstance(exc, util.KanpilotError) else "internal"
+        raise util.KanpilotError(code, "pi_desktop 启动失败：" + detail) from exc
+
+    # 4. 记 pid/worktree + event（意图已落盘，此处只是补记进程信息）。
+    with db.write_txn(conn):
+        round_store.mark_started(
+            conn, task_id, run_id, now, pid=proc.pid,
+            worktree_path=str(worktree_path),
+        )
+        db.add_event(
+            conn, now, "round_started", task_id=task_id,
+            request_id=request["request_id"], actor="kaneo-dispatch",
+            detail={"run_id": run_id, "pid": proc.pid,
+                    "worktree_path": str(worktree_path),
+                    "worktree_mode": worktree_mode,
+                    "backend": "pi_desktop"},
+        )
+
+    # 5. 等首个 session 事件（启动证明 gated；超时 → starting/null）。
+    session_id = _wait_session_event(run_dir)
+    return {
+        "status": "started" if session_id else "starting",
+        "pid": proc.pid,
+        "session_id": session_id,
+        "worktree_path": str(worktree_path),
+        "deduplicated": False,
+    }
+
+
 
 def _start_wait_seconds() -> float:
     raw = os.environ.get("KANPILOT_PI_START_WAIT")
@@ -537,7 +700,7 @@ def _wait_session_event(run_dir):
         _time.sleep(0.1)
 
 
-def _ensure_worktree(task, task_id, run_id, conn):
+def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
     """protocol §5.18.1：worktrees_root/<task>/<run>；git 仓库 → 独立
     worktree（已存在复用），非 git / git 失败 → 直接用 task.repository 作
     cwd（worktree_mode="plain"，不阻断测试夹具与非 git 目录）。"""
@@ -547,6 +710,20 @@ def _ensure_worktree(task, task_id, run_id, conn):
     path = root / task_id / run_id
     repo = Path(task["repository"]).expanduser()
     if path.exists():
+        if require_isolated:
+            try:
+                def git_path(directory, option):
+                    result = subprocess.run(
+                        ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", option],
+                        capture_output=True, text=True, timeout=10, check=True,
+                    )
+                    return Path(result.stdout.strip()).resolve()
+                valid = (path.resolve() != repo.resolve()
+                         and git_path(path, "--show-toplevel") == path.resolve()
+                         and git_path(path, "--git-common-dir") == git_path(repo, "--git-common-dir"))
+            except (subprocess.SubprocessError, OSError):
+                valid = False
+            util.require(valid, "已有执行目录不是本仓库独立 worktree", "validation_failed")
         return path, "reuse"
     repo_is_git = (repo / ".git").exists()
     if repo_is_git:
@@ -557,7 +734,11 @@ def _ensure_worktree(task, task_id, run_id, conn):
                 capture_output=True, text=True, timeout=60, check=True,
             )
             return path, "git"
-        except (subprocess.SubprocessError, OSError):
-            # git 失败 → 退化 plain（执行主检出）。
+        except (subprocess.SubprocessError, OSError) as exc:
+            if require_isolated:
+                raise util.KanpilotError("validation_failed", "无法创建独立 Git worktree，未启动执行") from exc
+            # Historical pi behavior is unchanged; desktop fails closed.
             return repo, "plain"
+    if require_isolated:
+        raise util.KanpilotError("validation_failed", "Pi-Desktop-Plus 执行要求 Git 仓库与独立 worktree")
     return repo, "plain"
