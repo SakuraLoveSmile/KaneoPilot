@@ -276,6 +276,11 @@ def tmp_env(tmp_path):
     codex_home = home / ".codex"
     codex_home.mkdir(parents=True)
     (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    # v2.1：默认认证路径夹具（无 model_provider → resolve_provider 走默认）。
+    (codex_home / "config.toml").write_text(
+        'model = "gpt-6-astra"\nmodel_reasoning_effort = "medium"\n',
+        encoding="utf-8",
+    )
     codex_bin = tmp_path / "codex-bin"
     codex_bin.write_text('#!/bin/sh\nexit 0\n', encoding="utf-8")
     codex_bin.chmod(0o755)

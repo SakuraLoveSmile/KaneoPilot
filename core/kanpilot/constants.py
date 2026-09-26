@@ -19,10 +19,11 @@ SAVE_STATES = ("active", "archived", "trashed", "purged")
 # 文件保留，不可恢复）。
 SESSION_SAVE_STATES = ("active", "trashed", "purged")
 
-# 执行轮次后端与运行状态（protocol.md §5.16.1 / §5.18）。v1.6 起派发后端为
-# pi（pi CLI 子进程）；v2 起规划轮次由 Codex 适配器执行（backend="codex"）。
+# 执行轮次后端与运行状态（protocol.md §5.16.1 / §5.18 / §5.23.3）。v1.6 起派发
+# 后端为 pi（pi CLI 子进程）；v2 起规划轮次由 Codex 适配器执行（backend="codex"）；
+# v3 起任务执行轮次可为 PI-Desktop 本机 MCP 控制面（backend="pi_desktop"）。
 # 历史行保留旧值，读取层按「已弃用」处理。
-ROUND_BACKENDS = ("pi", "codex")
+ROUND_BACKENDS = ("pi", "codex", "pi_desktop")
 LEGACY_ROUND_BACKENDS = ("dsh", "headless")  # 历史行可能携带；只读展示
 ROUND_RUN_STATUSES = ("pending", "running", "finished", "failed", "unknown")
 
@@ -51,6 +52,25 @@ EXEC_CONFIG_DEFAULTS = {
 EXEC_CONFIG_KEYS = (
     "provider", "model", "reasoning_effort", "agent_preset",
 )
+
+# v3（protocol §5.23.3）：任务执行后端词表与 PI-Desktop 配置块字段名。
+# backend 缺省按 "pi" 解释；pi_desktop 子块五字段须用户显式保存
+# （permission_mode 不自动补 auto）。
+EXEC_BACKENDS = ("pi", "pi_desktop")
+EXEC_PI_DESKTOP_KEYS = (
+    "connection_file", "provider_id", "model_id", "thinking_level",
+    "permission_mode",
+)
+EXEC_PERMISSION_MODES = ("ask", "accept-edits", "auto")
+
+# PI-Desktop 本机 MCP 控制面所需工具清单（protocol §5.23.3 能力门）。
+PI_DESKTOP_REQUIRED_TOOLS = (
+    "pi_turn_get", "pi_session_create", "pi_session_configure",
+    "pi_agent_prompt", "pi_agent_status", "pi_session_get",
+    "pi_agent_stop", "pi_agent_abort", "pi_desktop_invoke",
+)
+# MCP 单请求上限 2 MiB——计划正文超限在发送前明确失败，不截断。
+PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 # 能力/环境查询的进程接缝（protocol.md §5.17.2）：测试经 env 指向隔离夹具。
 DEFAULT_PI_HOME = "~/.pi"

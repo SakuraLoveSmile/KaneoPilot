@@ -1,0 +1,884 @@
+"""pi_desktop 轮次 worker（protocol.md §5.23.3，v3 T3）。
+
+CLI：``python -m kanpilot.pi_desktop_worker --spec <spec.json>``（dispatch-start
+以独立会话拉起，stdout/stderr 重定向到运行目录 worker.log）。
+
+spec.json（v1；connection_file 是路径不是 token）::
+
+    {"v": 1, "task_id", "run_id", "session_marker", "backend": "pi_desktop",
+     "config": {"connection_file", "provider_id", "model_id",
+                "thinking_level", "permission_mode"},
+     "cwd": "<worktree 绝对路径>", "repository", "plan_path", "plan_sha256",
+     "instruction", "runs_dir", "timeout_seconds",
+     "request_id", "db_path"}
+
+worker 职责（写文件 + 经 kanpilot 命令心跳；绝不直写 SQLite）：
+1. 写 ``job.json``（身份三字段 + backend=pi_desktop + config 快照 + pid +
+   status=running + send_state=not_sent）；
+2. 读 plan_path → 重算 sha256 与登记不符 → job failed(detail=plan_mismatch)
+   + terminal(failed)，**不发 prompt**；正文 UTF-8 字节数超
+   ``PI_DESKTOP_MCP_MAX_REQUEST_BYTES`` → job failed(detail=plan_too_large)
+   + terminal(failed)，发送前明确拒绝；
+3. 经连接文件完成 MCP initialize → ``pi_session_create(projectPath=cwd,
+   mode="agent", providerId/modelId/thinkingLevel, title=session_marker)``
+   → 已保存 permission_mode 非 inherit 时 ``pi_session_configure(id,
+   mode="agent", confirm=true, permissionMode=已保存值)``；
+4. ``pi_agent_prompt(sessionId, content=instruction + "\n\n" + 计划正文)``
+   → 返回 ``{turnId}`` 记 ``job.send_state="sent"`` + session_id/turn_id/
+   pi_desktop_pid 写回 job.json；
+5. **启动证明**（§5.23.3）：``pi_turn_get`` 确认同 session/turn=running
+   （或已 completed 的持久 turn 记录）且 ``heartbeat`` 回报核心成功，才写
+   events.jsonl 首个 ``session`` 事件（含 session_id/turn_id）；
+6. 采集：``pi_agent_status`` + 分页 ``pi_session_get``（messageBefore/
+   messageLimit 游标翻页到底），按消息 id + 内容指纹去重映射 events.jsonl
+   （session/user/assistant_message/tool_call/tool_result/command_output/
+   system/terminal）。分页不完整/截断 → 保留证据、job failed
+   （detail=transcript_incomplete）、不写成功 terminal；
+7. 终态：``pi_turn_get`` completed + 记录读全 → job finished(exit_code=0)
+   + terminal(completed)；error/aborted/interrupted → job failed +
+   terminal(failed, reason=errorCode/turn 状态)；超时 → ``pi_agent_stop``
+   → 宽限 → ``pi_agent_abort`` → ``pi_turn_get`` 核实终态；
+8. **绝不自动重复 session_create/agent_prompt**：发送响应丢失/身份不符 →
+   ``job.send_state="unknown"`` + 尽力取证 + job failed；收尾写序恒
+   「job 先写、session 补齐、terminal 最后」。
+
+KANPILOT_PI_DESKTOP_FAKE（隔离测试接缝；未知值按 finished 语义）：
+- ``running``：job(running)+session/user 事件后挂起（测试负责清理）；
+- ``finished``：job(finished,0)+session/user/assistant/terminal(completed)；
+- ``failed``：job(failed,1)+terminal(failed)；
+- ``crash``：job(running)+session 事件后退出码 3，不写 terminal；
+- ``send_unknown``：job(running, send_state="unknown", session_id/turn_id 已
+  知)+session 事件后退出码 1——发送响应丢失但保留身份与证据的现场。
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from . import constants, dsh_events, pi_desktop_backend, util
+from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
+
+# MCP 轮询节奏（worker 进程内部参数，不进 settings）。
+_POLL_SECONDS = 2.0
+_HEARTBEAT_SECONDS = 30.0
+_PROOF_WAIT_SECONDS = 30.0       # 启动证明（pi_turn_get+heartbeat）等待上限
+_STOP_GRACE_SECONDS = 10.0       # pi_agent_stop 后的宽限
+_PAGE_LIMIT = 200                # pi_session_get 单页消息数
+_READ_RECOVERY_SECONDS = 10.0
+_READ_RECOVERY_ATTEMPTS = 3
+_STOP_VERIFY_SECONDS = 30.0
+_MAX_PAGES_PER_POLL = 50         # 单次轮询最多翻页数（防御无界）
+
+# UiMessage.role → events.jsonl 事件类型（§5.15.5/§5.18.2 词汇）。
+_SHELL_TOOL_NAMES = frozenset(
+    {"bash", "shell", "exec", "run_command", "terminal", "command"}
+)
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+class _EventLog:
+    """events.jsonl 追加器（seq 单调递增；每行 flush，供读取层随时消费）。"""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.seq = 0
+        if self.path.is_file():
+            events, _ = dsh_events.iter_events(self.path)
+            if events:
+                self.seq = max(e.get("seq", 0) for e in events)
+
+    def emit(self, etype: str, ts: str, **fields) -> dict:
+        self.seq += 1
+        event = {"v": 1, "seq": self.seq, "ts": ts, "type": etype, **fields}
+        with open(self.path, "a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+            )
+            stream.flush()
+        return event
+
+
+def _base_job(spec: dict) -> dict:
+    return {
+        "task_id": spec["task_id"],
+        "run_id": spec["run_id"],
+        "backend": "pi_desktop",
+        "session_id": None,
+        "session_title": None,
+        "turn_id": None,
+        "send_state": "not_sent",
+        "pi_desktop_pid": None,
+        "config": spec.get("config"),
+        "pid": os.getpid(),
+        "status": "running",
+        "started_at": util.now_iso(),
+        "ended_at": None,
+        "exit_code": None,
+        "detail": None,
+    }
+
+
+def run_fake(spec: dict, mode: str) -> int:
+    """KANPILOT_PI_DESKTOP_FAKE 隔离接缝（语义同 pi_worker fake）。"""
+    run_dir = Path(spec["runs_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_path = run_dir / dsh_events.JOB_NAME
+    job = _base_job(spec)
+    log = _EventLog(run_dir / dsh_events.EVENT_LOG_NAME)
+    now = util.now_iso()
+    session_id = f"fake-pd-session-{spec['run_id'][:8]}"
+    turn_id = f"fake-turn-{spec['run_id'][:8]}"
+    if mode == "running":
+        _write_json(job_path, job)
+        log.emit("session", now, session_id=session_id,
+                 session_title="Fake pi_desktop · 运行中", turn_id=turn_id)
+        log.emit("user", now, content=spec.get("instruction") or "")
+        while True:  # 测试负责终止该进程
+            time.sleep(60)
+    if mode == "crash":
+        _write_json(job_path, job)
+        log.emit("session", now, session_id=session_id,
+                 session_title="Fake pi_desktop · 崩溃", turn_id=turn_id)
+        return 3  # 不写 terminal、不更新 job → 模拟崩溃/截断现场
+    if mode == "send_unknown":
+        # 发送响应丢失但持久身份已知的现场：send_state=unknown + 证据保留，
+        # 不重复 prompt，不写成功 terminal。
+        job.update({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "send_state": "unknown",
+            "detail": "prompt_response_lost",
+        })
+        _write_json(job_path, job)
+        log.emit("session", now, session_id=session_id,
+                 session_title="Fake pi_desktop · 发送不明", turn_id=turn_id)
+        return 1
+    failed = mode == "failed"
+    job.update({
+        "status": "failed" if failed else "finished",
+        "ended_at": util.now_iso(),
+        "exit_code": 1 if failed else 0,
+        "session_id": session_id,
+        "session_title": "Fake pi_desktop · 已完成" if not failed
+        else "Fake pi_desktop · 失败",
+        "turn_id": turn_id,
+        "send_state": "sent",
+        "detail": "fake failure" if failed else None,
+    })
+    _write_json(job_path, job)
+    log.emit("session", now, session_id=session_id,
+             session_title=job["session_title"], turn_id=turn_id)
+    log.emit("user", now, content=spec.get("instruction") or "")
+    if not failed:
+        log.emit("assistant_message", util.now_iso(), content="执行完成。")
+        log.emit("command_output", util.now_iso(), name="exec",
+                 input="{}", output="ok\nExit code: 0", exit_code=0)
+    log.emit("terminal", util.now_iso(),
+             outcome="failed" if failed else "completed",
+             reason="fake failure" if failed else "ok")
+    return 1 if failed else 0
+
+
+# ------------------------------------------------------------ 真实分支
+
+class _Collector:
+    """pi_session_get 分页采集 + UiMessage → events.jsonl 映射。
+
+    每轮拉取最新页，随后沿 ``messageBefore`` 游标向历史翻页直到与已见最大
+    消息序衔接（或 hasMoreBefore=false）；按消息 id + 内容指纹去重，新消息
+    按时间序补发。页链断裂/页数超限 → ``truncated=True``（阻止成功判定，
+    已采证据全部保留）。
+    """
+
+    def __init__(self, client: "pi_desktop_backend.MCPClient",
+                 session_id: str, log: _EventLog, marker: str):
+        self.client = client
+        self.session_id = session_id
+        self.log = log
+        self.marker = marker
+        self.seen: dict = {}          # str(message_id) -> (fingerprint, revision)
+        self._last_page_start = object()
+        self.unrecognized = False
+        self.truncated = False
+        self.read_error = None        # 首个读取错误（保留现场原因）
+        self.gate_open = False        # session 事件落盘后才放出采集事件
+        self._queued: list = []
+
+    def poll(self) -> None:
+        """Read a complete physical page chain; keep partial evidence on error."""
+        try:
+            self._poll_inner()
+            self.read_error = None
+        except util.KanpilotError as exc:
+            self.read_error = exc.message
+
+    def _poll_inner(self) -> None:
+        boundary = None
+        pages = []
+        try:
+            for _ in range(_MAX_PAGES_PER_POLL):
+                result = self.client.session_get(
+                    self.session_id, message_before=boundary,
+                    message_limit=_PAGE_LIMIT,
+                )
+                if result.get("truncated"):
+                    self.truncated = True
+                    break
+                page = result.get("session")
+                if not isinstance(page, dict):
+                    raise util.KanpilotError("not_found", "pi_session_get 未返回 session")
+                if page.get("id") not in (None, self.session_id):
+                    raise util.KanpilotError("conflict", "transcript session 身份不符")
+                messages = page.get("messages")
+                if not isinstance(messages, list):
+                    raise util.KanpilotError("internal", "pi_session_get messages 不是数组")
+                pages.append(messages)
+                start, end = page.get("messageStart"), page.get("messageEnd")
+                more = page.get("hasMoreBefore")
+                if (type(start) is not int or type(end) is not int
+                        or not isinstance(more, bool) or start < 0 or end < start
+                        or (boundary is not None and (end != boundary or start >= boundary))
+                        or (boundary is None and page.get("hasMoreAfter") is True)):
+                    self.truncated = True
+                    break
+                if not more:
+                    if start != 0:
+                        self.truncated = True
+                    break
+                if start == 0:
+                    self.truncated = True
+                    break
+                boundary = start
+            else:
+                self.truncated = True
+        finally:
+            for messages in reversed(pages):
+                for message in messages:
+                    if isinstance(message, dict):
+                        self._emit(message)
+                    else:
+                        self.unrecognized = True
+
+    def _fingerprint(self, message: dict) -> str:
+        payload = json.dumps(
+            [
+                message.get("role"),
+                message.get("content"),
+                message.get("toolName") or message.get("name"),
+                message.get("toolCallId"),
+                message.get("toolStatus"),
+                message.get("toolArgs"),
+                message.get("toolResult"),
+                message.get("toolCompletedAt"),
+                message.get("isError"),
+            ],
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def drain(self) -> None:
+        """开闸：首个 session 事件已写 → 依序放出缓冲的采集事件。"""
+        self.gate_open = True
+        queue, self._queued = self._queued, []
+        for etype, ts, fields in queue:
+            self.log.emit(etype, ts, **fields)
+
+    def preserve_unverified(self, run_dir: Path, token: str) -> None:
+        """Keep pre-proof observations without violating the first-session event rule."""
+        if not self._queued:
+            return
+        with open(Path(run_dir) / "unverified-events.jsonl", "a", encoding="utf-8") as stream:
+            for etype, ts, fields in self._queued:
+                line = json.dumps(
+                    {"type": etype, "ts": ts, **fields},
+                    ensure_ascii=False, sort_keys=True,
+                )
+                stream.write(util.redact(line, secrets=[token]) + "\n")
+        self._queued.clear()
+
+    def _queue(self, etype: str, ts, **fields) -> None:
+        if self.gate_open:
+            self.log.emit(etype, ts, **fields)
+        else:
+            self._queued.append((etype, ts, fields))
+
+    def _emit(self, message: dict) -> None:
+        mid = message.get("id")
+        if not isinstance(mid, str) or not mid:
+            self.unrecognized = True
+            return
+        fingerprint = self._fingerprint(message)
+        previous = self.seen.get(mid)
+        if previous and previous[0] == fingerprint:
+            return
+        revision = (previous[1] + 1) if previous else 1
+        self.seen[mid] = (fingerprint, revision)
+        role = str(message.get("role") or "").lower()
+        source = {"source_message_id": mid, "source_revision": revision}
+        if not role:
+            self.unrecognized = True
+            return
+        content = message.get("content")
+        if isinstance(content, list):
+            # content 分块（text/thinking 等）拍平为文本。
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(block, str):
+                    parts.append(block)
+            content = "\n".join(parts)
+        if not isinstance(content, str):
+            content = "" if content is None else json.dumps(
+                content, ensure_ascii=False, sort_keys=True
+            )
+        ts = message.get("timestamp") or message.get("createdAt") \
+            or util.now_iso()
+        extra = {}
+        if message.get("parentToolCallId"):
+            extra["parent_tool_call_id"] = message["parentToolCallId"]
+        if message.get("agentName"):
+            extra["agent_name"] = message["agentName"]
+        if role == "user":
+            self._queue("user", ts, content=content, **source, **extra)
+        elif role in ("system", "thinking"):
+            self._queue("system", ts, content=content, **source, **extra)
+        elif role in ("assistant", "assistant_message"):
+            self._queue("assistant_message", ts, content=content, **source, **extra)
+        elif role in ("tool", "toolcall", "tool_call", "toolresult", "tool_result"):
+            name = message.get("toolName") or message.get("name") or "tool"
+            status = str(message.get("toolStatus") or message.get("status") or "").lower()
+            arguments = message.get("toolArgs", message.get("arguments"))
+            input_json = arguments if isinstance(arguments, str) else \
+                json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+            output = message.get("toolResult", message.get("output"))
+            raw_output = output
+            if not isinstance(output, str):
+                output = None if output is None else json.dumps(
+                    output, ensure_ascii=False, sort_keys=True
+                )
+            completed_at = message.get("toolCompletedAt")
+            is_error = message.get("isError") is True or status in ("error", "failed", "aborted")
+            finished = role in ("toolresult", "tool_result") or status in (
+                "success", "completed", "done", "finished", "error", "failed", "aborted",
+            ) or completed_at is not None or output is not None
+            tool_extra = dict(source)
+            tool_extra.update(extra)
+            if message.get("toolCallId") is not None:
+                tool_extra["tool_call_id"] = str(message["toolCallId"])
+            if not finished:
+                self._queue("tool_call", ts, name=name,
+                            arguments=input_json, **tool_extra)
+            elif name in _SHELL_TOOL_NAMES:
+                exit_code = message.get("exitCode")
+                if isinstance(raw_output, dict):
+                    exit_code = raw_output.get("exitCode", raw_output.get("exit_code", exit_code))
+                    details = raw_output.get("details")
+                    if exit_code is None and isinstance(details, dict):
+                        exit_code = details.get("exitCode", details.get("exit_code"))
+                self._queue(
+                    "command_output", ts, name=name, input=input_json,
+                    output=output,
+                    exit_code=exit_code if isinstance(exit_code, int) else None,
+                    is_error=is_error, **tool_extra,
+                )
+            else:
+                self._queue("tool_result", ts, name=name,
+                            input=input_json, output=output,
+                            is_error=is_error, **tool_extra)
+        else:
+            # Unknown message shapes are evidence, but must block a success.
+            self.unrecognized = True
+            self._queue("system", ts, content=content,
+                        source_role=role, **source, **extra)
+
+
+def _heartbeat(spec: dict) -> None:
+    """回报核心（request_id/db_path 由 dispatch-start 写入 spec）。"""
+    request_id = spec.get("request_id")
+    db_path = spec.get("db_path")
+    if not request_id or not db_path:
+        raise util.KanpilotError(
+            "internal", "spec 缺少 request_id/db_path，无法回报心跳"
+        )
+    cli.run("heartbeat", {
+        "request_id": request_id,
+        "run_id": spec["run_id"],
+        "progress": "executing",
+    }, Path(db_path))
+
+
+def _turn_status(record: dict) -> str:
+    """pi_turn_get 结果 → 归一状态（running/completed/error/aborted/…）。"""
+    turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+    return str(turn.get("status") or "").lower()
+
+
+def _turn_identity_matches(record: dict, session_id: str, turn_id: str) -> bool:
+    """Every persistent turn response must identify this exact turn."""
+    turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+    return (
+        isinstance(turn, dict)
+        and str(turn.get("sessionId") or turn.get("session_id") or "") == str(session_id)
+        and str(turn.get("turnId") or turn.get("turn_id") or "") == str(turn_id)
+    )
+
+
+class _ReadRecovery:
+    """Reconnect only observation calls; never replay a desktop mutation."""
+
+    def __init__(self, client, connection_file, session_id, turn_id):
+        self.client = client
+        self.connection_file = connection_file
+        self.session_id = session_id
+        self.turn_id = turn_id
+        self.pid = None
+
+    def _checked_turn(self, record):
+        if not _turn_identity_matches(record, self.session_id, self.turn_id):
+            raise util.KanpilotError("conflict", "turn_identity_mismatch: 持久轮次身份不符")
+        if _turn_status(record) not in ("running", "completed", "error", "aborted"):
+            raise util.KanpilotError("conflict", "turn 状态未知，无法归因")
+        return record
+
+    def _read(self, method, *args, **kwargs):
+        deadline = time.monotonic() + _READ_RECOVERY_SECONDS
+        self.client._timeout = min(2.0, _READ_RECOVERY_SECONDS / 5)
+        try:
+            return getattr(self.client, method)(*args, **kwargs)
+        except util.KanpilotError as exc:
+            if exc.code != "remote_unavailable":
+                raise
+            last = exc
+        for _ in range(_READ_RECOVERY_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                record = pi_desktop_backend.load_connection(self.connection_file)
+                candidate = pi_desktop_backend.MCPClient(
+                    record["url"], record["token"], timeout=min(1.0, remaining / 5),
+                )
+                candidate.connect()
+                turn = self._checked_turn(candidate.turn_get(self.session_id, self.turn_id))
+                if _turn_status(turn) == "running":
+                    raise util.KanpilotError("conflict", "服务恢复后 turn 仍 running，需人工核实")
+                self.client, self.pid = candidate, record["pid"]
+                if method == "turn_get":
+                    return turn
+                return getattr(candidate, method)(*args, **kwargs)
+            except util.KanpilotError as exc:
+                if exc.code in ("conflict", "not_found"):
+                    raise
+                last = exc
+        raise util.KanpilotError("remote_unavailable", "只读重连失败，可能仍在运行：" + last.message)
+
+    def turn_get(self, session_id, turn_id):
+        return self._checked_turn(self._read("turn_get", session_id, turn_id))
+
+    def session_get(self, session_id, **kwargs):
+        return self._read("session_get", session_id, **kwargs)
+
+    def agent_status(self, session_id):
+        return self._read("agent_status", session_id)
+
+
+def run_real(spec: dict) -> int:
+    """真实 pi_desktop 轮次（§5.23.3；写序恒 job→session→terminal）。"""
+    run_dir = Path(spec["runs_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_path = run_dir / dsh_events.JOB_NAME
+    if job_path.exists():
+        # A persisted intent/result is not permission to send a second prompt.
+        return 1
+    log = _EventLog(run_dir / dsh_events.EVENT_LOG_NAME)
+    job = _base_job(spec)
+    collector = None              # session 建立后才存在；emit_session 负责开闸
+    proof_ok = {"ok": False}      # 启动证明（turn_get + heartbeat）后才允许写 session
+    session_written = {"done": False}
+
+    def emit_session() -> None:
+        """首事件 session（§5.23.3：启动证明前绝不写；只写一次）。"""
+        if session_written["done"] or not job.get("session_id"):
+            return
+        if not proof_ok["ok"]:
+            return
+        session_written["done"] = True
+        log.emit("session", util.now_iso(),
+                 session_id=job["session_id"],
+                 session_title=job.get("session_title") or "pi_desktop 会话",
+                 turn_id=job.get("turn_id"))
+        if collector is not None:
+            collector.drain()       # 放出证明前缓冲的采集事件（session 恒为 seq=1）
+    def finalize(status: str, exit_code, detail, terminal: bool,
+                 outcome: str = "failed", reason: str = "") -> int:
+        """收尾写序：job 先写 → session 补齐 → terminal 最后。"""
+        job.update({
+            "status": status,
+            "exit_code": exit_code,
+            "ended_at": util.now_iso(),
+            "detail": detail,
+        })
+        _write_json(job_path, job)
+        emit_session()
+        if terminal:
+            log.emit("terminal", util.now_iso(), outcome=outcome,
+                     reason=reason or (detail or status))
+        return 0 if status == "finished" else 1
+
+    # ---- 0. cwd 校验 + job(running) 启动即写（先于任何事件/网络调用）。
+    cwd_value = spec.get("cwd")
+    cwd = Path(cwd_value) if cwd_value else None
+    if cwd is None or not cwd.is_dir():
+        _write_json(job_path, job)
+        return finalize("failed", 1, f"cwd_missing: {cwd_value}",
+                        True, "failed", "cwd_missing")
+    _write_json(job_path, job)
+
+    timeout = float(spec.get("timeout_seconds")
+                    or constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS)
+    if timeout <= 0:
+        timeout = float(constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + timeout
+
+    # ---- 1. 计划核验（先于任何远端副作用：不重发、不留孤儿会话）。
+    plan_body = ""
+    try:
+        raw = Path(spec["plan_path"]).read_bytes()
+        text = raw.decode("utf-8")
+        # 与 util.read_frontmatter/cmd_get_plan 同口径 split("---", 2)。
+        if text.startswith("---\n"):
+            plan_body = text.split("---", 2)[2]
+            if plan_body.startswith("\n"):
+                plan_body = plan_body[1:]
+        else:
+            plan_body = text
+    except (OSError, UnicodeDecodeError) as exc:
+        return finalize("failed", 1, f"plan_unreadable: {exc}",
+                        True, "failed", "plan_unreadable")
+    expected_sha = spec.get("plan_sha256")
+    if expected_sha:
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected_sha:
+            return finalize("failed", 1, "plan_mismatch",
+                            True, "failed", "plan_mismatch")
+    body_bytes = plan_body.encode("utf-8")
+    if len(body_bytes) > constants.PI_DESKTOP_MCP_MAX_REQUEST_BYTES:
+        # 计划正文超限 → 发送前明确失败（不入队、不截断）。
+        return finalize("failed", 1,
+                        f"plan_too_large: {len(body_bytes)} 字节 > 2 MiB",
+                        True, "failed", "plan_too_large")
+
+    # ---- 2. 连接 + 握手 + 工具/型号门（复核本轮快照）。
+    config = spec.get("config") or {}
+    probe = pi_desktop_backend.probe_connection(
+        config.get("connection_file"), provider_id=config.get("provider_id"),
+        model_id=config.get("model_id"), timeout=10,
+    )
+    if not probe["ok"]:
+        return finalize("failed", 1, probe["detail"], True, "failed", "environment_unavailable")
+    try:
+        record = pi_desktop_backend.load_connection(config.get("connection_file"))
+        client = pi_desktop_backend.MCPClient(record["url"], record["token"], timeout=10)
+        client.connect()
+        job["pi_desktop_pid"] = record.get("pid")
+        _write_json(job_path, job)
+        tools = client.tools_list()
+        missing = [
+            name for name in constants.PI_DESKTOP_REQUIRED_TOOLS
+            if name not in tools
+        ]
+        if missing:
+            return finalize(
+                "failed", 1,
+                "PI-Desktop 控制面缺少必需工具：" + "、".join(missing),
+                True, "failed", "unsupported_tools")
+    except util.KanpilotError as exc:
+        return finalize("failed", 1, f"connect_failed: {exc.message}",
+                        True, "failed", "connect_failed")
+
+    # ---- 3. 建会话 + 权限配置（permission_mode 非 inherit 才下发）。
+    permission_mode = config.get("permission_mode")
+    if permission_mode not in constants.EXEC_PERMISSION_MODES:
+        return finalize("failed", 1,
+                        f"permission_mode 非法：{permission_mode}",
+                        True, "failed", "validation_failed")
+    try:
+        created = client.session_create(
+            str(cwd), mode="agent",
+            provider_id=config.get("provider_id"),
+            model_id=config.get("model_id"),
+            thinking_level=config.get("thinking_level"),
+            title=spec.get("session_marker") or spec["task_id"],
+        )
+        session = created.get("session") or {}
+        session_id = session.get("id") or created.get("sessionId") \
+            or created.get("id")
+        if not session_id:
+            raise util.KanpilotError(
+                "internal", "pi_session_create 未返回 session.id"
+            )
+        job["session_id"] = session_id
+        job["session_title"] = session.get("title") or session.get("name")
+        _write_json(job_path, job)
+        if permission_mode and permission_mode != "inherit":
+            client.session_configure(
+                session_id, mode="agent", permission_mode=permission_mode
+            )
+    except util.KanpilotError as exc:
+        return finalize("failed", 1, f"session_setup_failed: {exc.message}",
+                        True, "failed", "session_setup_failed")
+
+    collector = _Collector(client, job["session_id"], log,
+                           spec.get("session_marker") or "")
+
+    # ---- 4. 发送 prompt（instruction + 计划正文；绝不自动重发）。
+    prompt = (spec.get("instruction") or "").rstrip() + "\n\n" + plan_body
+    turn_id = None
+    # A crash during the network call cannot distinguish accepted from unsent.
+    job["send_state"] = "unknown"
+    _write_json(job_path, job)
+    try:
+        result = client.agent_prompt(job["session_id"], prompt)
+        turn_id = result.get("turnId") or result.get("turn_id")
+        if not turn_id:
+            raise util.KanpilotError(
+                "internal", "pi_agent_prompt 未返回 turnId"
+            )
+        job["turn_id"] = turn_id
+        job["send_state"] = "sent"
+        _write_json(job_path, job)
+    except util.KanpilotError as exc:
+        if exc.code == "validation_failed" and "超过 2 MiB" in exc.message:
+            job["send_state"] = "not_sent"
+            return finalize("failed", 1, "plan_too_large: " + exc.message,
+                            True, "failed", "plan_too_large")
+        # 发送响应丢失/未达：可能已受理——读 agent_status 取证，绝不重发。
+        recovered = None
+        try:
+            status_view = client.agent_status(job["session_id"])
+            inner = status_view.get("status") or status_view
+            recovered = inner.get("currentTurnId")
+        except util.KanpilotError:
+            recovered = None
+        collector.poll()  # 尽力保全已产生的证据
+        collector.preserve_unverified(run_dir, record["token"])
+        # currentTurnId is only candidate evidence.  It cannot prove that the
+        # prompt response landed, so preserve unknown and require intervention.
+        job["send_state"] = "unknown"
+        if recovered:
+            job["turn_id"] = recovered
+            job["detail"] = (
+                f"prompt_response_lost: {exc.message}；"
+                f"currentTurnId 仅作候选证据：{recovered}"
+            )
+        else:
+            job["detail"] = f"prompt_response_lost: {exc.message}"
+        _write_json(job_path, job)
+        return finalize("failed", 1, job["detail"],
+                        True, "failed", "send_unknown")
+
+    observer = _ReadRecovery(client, config["connection_file"], job["session_id"], turn_id)
+    collector.client = observer
+
+    def observe_turn():
+        record = observer.turn_get(job["session_id"], turn_id)
+        if observer.pid is not None:
+            job["pi_desktop_pid"] = observer.pid
+        return record
+
+    def unknown(detail, reason="unverifiable"):
+        if not proof_ok["ok"]:
+            collector.poll()
+            collector.preserve_unverified(run_dir, client._token)
+        job["send_state"] = "unknown"
+        return finalize("failed", 1, detail, True, "failed", reason)
+
+    # ---- 5. Persistent failure is not proof of a successful startup.
+    proof_deadline = min(deadline, time.monotonic() + _PROOF_WAIT_SECONDS)
+    while True:
+        try:
+            record = observe_turn()
+            break
+        except util.KanpilotError as exc:
+            # Accepted prompts can briefly precede their durable turn row.
+            if exc.code != "not_found" or time.monotonic() >= proof_deadline:
+                return unknown("startup_unproven: " + exc.message, "startup_unproven")
+            time.sleep(min(0.5, max(0, proof_deadline - time.monotonic())))
+    state = _turn_status(record)
+    turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+    if state in ("error", "aborted"):
+        collector.poll()
+        collector.preserve_unverified(run_dir, client._token)
+        code = turn.get("errorCode") or state
+        return finalize("failed", 1, f"turn {state}: {code}", True, "failed", str(code))
+    try:
+        _heartbeat(spec)
+    except Exception as exc:
+        detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+        return unknown(f"heartbeat_failed: {detail}", "heartbeat_failed")
+    proof_ok["ok"] = True
+    emit_session()
+
+    # ---- 6. Observe until settlement; stop/abort are each attempted once.
+    last_heartbeat = time.monotonic()
+    stop_requested = False
+    stop_at = None
+    abort_attempted = False
+    abort_accepted = False
+    stop_detail = ""
+    while True:
+        now_m = time.monotonic()
+        if now_m >= deadline and not stop_requested:
+            stop_requested, stop_at = True, now_m
+            observer.client._timeout = min(2.0, _STOP_VERIFY_SECONDS / 5)
+            try:
+                observer.client.agent_stop(job["session_id"])
+                stop_detail = "stop 请求已接受"
+            except util.KanpilotError as exc:
+                stop_detail = "stop 响应未证实：" + exc.message
+        try:
+            record = observe_turn()
+            state = _turn_status(record)
+            turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        except util.KanpilotError as exc:
+            return unknown("turn 终态无法核实，可能仍在运行：" + exc.message)
+        if state in ("completed", "error", "aborted"):
+            break
+        if stop_requested:
+            if not abort_attempted and now_m >= stop_at + _STOP_GRACE_SECONDS:
+                abort_attempted = True
+                try:
+                    observer.client.agent_abort(job["session_id"])
+                    abort_accepted = True
+                except util.KanpilotError as exc:
+                    stop_detail += "；abort 响应未证实：" + exc.message
+            if now_m >= stop_at + _STOP_VERIFY_SECONDS:
+                return unknown("停止未证实，可能仍在运行；" + stop_detail, "timeout_unverified")
+        try:
+            status_view = observer.agent_status(job["session_id"])
+            inner = status_view.get("status") or status_view
+            current = inner.get("currentTurnId")
+            if current and current != turn_id:
+                return unknown("turn_mismatch: 会话当前 turn 与本轮不符", "turn_mismatch")
+        except util.KanpilotError as exc:
+            return unknown("会话运行状态无法核实：" + exc.message)
+        collector.poll()
+        if collector.read_error is not None:
+            return unknown("transcript_read_failed: " + collector.read_error)
+        if now_m - last_heartbeat >= _HEARTBEAT_SECONDS:
+            try:
+                _heartbeat(spec)
+            except Exception as exc:
+                detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+                return unknown("heartbeat_failed: " + detail, "heartbeat_failed")
+            last_heartbeat = now_m
+        time.sleep(_POLL_SECONDS)
+
+    # ---- 7. 末轮采集（尽力补全 transcript）+ 终态判定。
+    collector.poll()
+    if stop_requested:
+        reason = "timeout"
+        detail = f"timeout after {timeout:g}s"
+        if abort_accepted:
+            detail += "；abort 请求已接受"
+        detail += "；" + stop_detail
+        if state in ("completed", "error", "aborted"):
+            # stop 期间 turn 自行落终态：以持久终态为准（仍按超时标记）。
+            detail += f"；turn 终态 {state}"
+        return finalize("failed", 1, detail, True, "failed", reason)
+    if collector.truncated or collector.read_error is not None:
+        # 分页不完整/截断：保留全部证据，轮次不得判成功，不写成功 terminal。
+        parts = []
+        if collector.truncated:
+            parts.append("transcript_incomplete: 分页链断裂/超限")
+        if collector.read_error is not None:
+            parts.append(f"transcript_read_failed: {collector.read_error}")
+        return finalize("failed", 1, "；".join(parts), False)
+    if state == "completed" and (collector.unrecognized or not collector.seen):
+        return finalize("failed", 1,
+                        "transcript_incomplete: 空转录或存在无法解析的消息结构",
+                        False)
+    if state == "completed":
+        return finalize("finished", 0, None, True, "completed", "completed")
+    if state in ("error", "aborted"):
+        code = turn.get("errorCode") or turn.get("error_code") or state
+        return finalize("failed", 1, f"turn {state}: {code}",
+                        True, "failed", str(code))
+    # 服务重启/无法核实：持久 turn 非终态且证据已尽 → 明确异常。
+    return finalize("failed", 1,
+                    "turn 终态无法核实（服务重启或控制面不可达）",
+                    True, "failed", "unverifiable")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="kanpilot.pi_desktop_worker")
+    parser.add_argument("--spec", required=True)
+    args = parser.parse_args(argv)
+    spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    if spec.get("v") != 1:
+        print(f"unsupported spec version: {spec.get('v')}", file=sys.stderr)
+        return 2
+    for key in ("task_id", "run_id", "runs_dir"):
+        if not spec.get(key):
+            print(f"spec missing {key}", file=sys.stderr)
+            return 2
+    fake = os.environ.get("KANPILOT_PI_DESKTOP_FAKE")
+    if fake:
+        try:
+            return run_fake(spec, fake)
+        except KeyboardInterrupt:
+            return 130
+    try:
+        return run_real(spec)
+    except KeyboardInterrupt:
+        return 130
+    except util.KanpilotError as exc:
+        # 兜底：任何未归类错误也要落 job，绝不留 running 假象。
+        run_dir = Path(spec["runs_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        job_path = run_dir / dsh_events.JOB_NAME
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8")) \
+                if job_path.is_file() else _base_job(spec)
+        except (OSError, ValueError):
+            job = _base_job(spec)
+        job.update({
+            "status": "failed", "ended_at": util.now_iso(),
+            "exit_code": 1, "detail": f"{exc.code}: {exc.message}",
+        })
+        _write_json(job_path, job)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - 兜底落现场
+        run_dir = Path(spec["runs_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        job_path = run_dir / dsh_events.JOB_NAME
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8")) \
+                if job_path.is_file() else _base_job(spec)
+        except (OSError, ValueError):
+            job = _base_job(spec)
+        job.update({
+            "status": "failed", "ended_at": util.now_iso(),
+            "exit_code": 1, "detail": f"internal: {exc}",
+        })
+        _write_json(job_path, job)
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

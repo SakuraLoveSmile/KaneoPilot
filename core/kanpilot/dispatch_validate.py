@@ -42,7 +42,14 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     except util.KanpilotError as exc:
         raise DispatchCheckFailed(exc.message, exc.code)
     try:
-        planfile.check_plan_meta(meta, plan_kind)
+        # §5.22.6：按任务登记的 planner_model/reasoning_effort 比对；旧任务
+        # 缺登记（planner_model NULL）→ 回落历史常量规则。
+        expected_model = (
+            {"planner_model": task["planner_model"],
+             "reasoning_effort": task["reasoning_effort"]}
+            if task["planner_model"] else None
+        )
+        planfile.check_plan_meta(meta, plan_kind, expected_model=expected_model)
     except util.KanpilotError as exc:
         raise DispatchCheckFailed(exc.message)
     if meta.get("plan_kind") not in (None, plan_kind):
@@ -154,12 +161,16 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "send_conflict",
     )
 
-    # 7. pi 执行可用性门（protocol §5.17.3，v1.6）：pi 可执行/模型清单/
-    #    当前配置/凭据/agent.md 任一不可用 → 确定性 validation_failed（task 进
-    #    needs_user），**不自动换模型或 agent**。失败信息取自
-    #    exec_config.check_available 的中文原因。
+    # 7. 执行后端可用性门（protocol §5.17.3 / §5.23.3）：当前 exec_config.backend
+    #    分支决定检查内容——pi 为 pi 可执行/模型清单/当前配置/凭据/agent.md；
+    #    pi_desktop 为连接文件/token/tools/provider/model。任一不可用 → 确定性
+    #    validation_failed（task 进 needs_user），**不自动换模型、agent 或后端**。
+    #    失败信息取自 exec_config.check_available 的中文原因。
     available, reason = exec_config.check_available(conn)
-    _require(available, reason or "pi 执行环境不可用")
+    _require(available, reason or "执行环境不可用")
+
+    config_snapshot = exec_config.snapshot(conn)
+    backend = config_snapshot.get("backend") or "pi"
 
     return {
         "task_id": task_id,
@@ -173,9 +184,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "requirements_sha256": requirements,
         "source_sha256": meta["source_sha256"],
         "kaneo_status": live_task["status"],
-        # v1.6（§5.18.3）：新 claim 恒 pi 后端 + 固化配置快照。
-        "backend": "pi",
-        "exec_config": exec_config.snapshot(conn),
+        # v3（§5.23.3）：后端按 exec_config.backend 固化（缺省 pi）。
+        "backend": backend,
+        "exec_config": config_snapshot,
     }
 
 

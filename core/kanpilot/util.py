@@ -149,11 +149,42 @@ def read_frontmatter(path: Path) -> tuple[dict, bytes]:
         raise KanpilotError("validation_failed", "plan frontmatter is not a mapping")
     return meta, raw
 
-
 def require(condition: Any, message: str, code: str = "validation_failed") -> Any:
     if not condition:
         raise KanpilotError(code, message)
     return condition
+
+
+# 认证值形态的脱敏模式（日志/事件落盘前调用，保留状态码与错误正文）。
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)(\S+)"),
+    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|bearer[_-]?token|"
+               r"refresh[_-]?token|secret)(\s*[=:]\s*)[\"']?([^\s\"']{8,})"),
+)
+
+
+def redact(text: Any, secrets: Any = None) -> Any:
+    """凭据脱敏（protocol §5.22.3）：返回脱敏后的字符串；非 str 原样返回。
+
+    - ``secrets``：已知凭据值列表（如 provider.env 的值），长度 ≥8 才替换，
+      避免过短值误伤普通文本；替换为 ``«redacted»``。
+    - 同时对常见认证形态（Authorization: Bearer、api_key=/token= 等）的值
+      脱敏。HTTP 状态码、模型名、错误原因不受影响。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    out = text
+    for secret in secrets or ():
+        if isinstance(secret, str) and len(secret) >= 8:
+            out = out.replace(secret, "«redacted»")
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub(
+            lambda m: m.group(1)
+            + (m.group(2) if (m.lastindex or 0) >= 3 else "")
+            + "«redacted»",
+            out,
+        )
+    return out
 
 
 def new_uuid() -> str:

@@ -97,8 +97,9 @@ class TestPiClaimContext:
         # §5.18.3：新 claim 恒 backend=pi + exec_config 快照 + 无附件指令。
         assert ctx["backend"] == "pi"
         assert set(ctx["exec_config"]) == {
-            "provider", "model", "reasoning_effort", "agent_preset",
+            "backend", "provider", "model", "reasoning_effort", "agent_preset",
         }
+        assert ctx["exec_config"]["backend"] == "pi"
         assert ctx["exec_config"]["provider"] == "CloseAI"
         assert ctx["exec_config"]["model"] == "deepseek-flash"
         assert ctx["exec_config"]["reasoning_effort"] == "xhigh"

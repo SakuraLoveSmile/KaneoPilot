@@ -112,11 +112,11 @@ CREATE INDEX IF NOT EXISTS session_reads_task ON session_reads(task_id, run_id);
 CREATE TABLE IF NOT EXISTS execution_rounds(
   task_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
-  backend TEXT NOT NULL DEFAULT 'headless',   -- pi（历史行可为 dsh|headless，读取已弃用）
+  backend TEXT NOT NULL DEFAULT 'headless',   -- pi|codex|pi_desktop（历史行可为 dsh|headless，读取已弃用；v3 起任务执行轮次可为 pi_desktop，protocol §5.23.3）
   session_id TEXT,
   session_title TEXT,
   run_status TEXT NOT NULL DEFAULT 'unknown', -- pending|running|finished|failed|unknown
-  config_json TEXT,                           -- claim 时固化的 PI 配置快照
+  config_json TEXT,                           -- claim 时固化的执行配置快照（pi 四字段或 pi_desktop 五字段，protocol §5.23.3）
   worktree_path TEXT,                         -- 该轮独立 worktree 绝对路径
   started_at TEXT,                            -- 启动意图落盘时间（非空即禁止再创建进程）
   pid INTEGER,                                -- worker 进程号（诊断用，不作存活依据）
@@ -131,7 +131,7 @@ CREATE INDEX IF NOT EXISTS execution_rounds_save ON execution_rounds(save_state,
 
 settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默认 1200) `monitor_interval_seconds`(默认 900) `plan_scan_interval_hours`(默认 24) `plan_scan_anchor`(默认每日 09:00 Asia/Shanghai) `last_plan_scan_at` `migration`(JSON) `workspace_id` `dispatch_serial`(派发串行位持有者 run_id，空=空闲) `session_poll_seconds`(默认 2，订阅不可用时的增量检查间隔) `planner_inputs_root`（v2：规划材料根目录，缺省 `<app_support>/planner_inputs`） `codex_timeout_seconds`（v2：Codex 规划单轮上限，缺省回退 `executor_timeout_seconds`=1800）。
 
-v1.5 新增键：`exec_config`(JSON，protocol.md §5.17 执行配置；v1.6 缺省=初始默认 `CloseAI/deepseek-flash/xhigh/default`)、`worktrees_root`(独立 worktree 根目录路径字符串；空=未设置，取 `<app_support>/worktrees`)、`dsh_round_timeout_seconds`(默认 14400)。v1.6 新增键：`pi_round_timeout_seconds`(默认 14400，缺省回退读旧键 dsh_round_timeout_seconds)、`executor_timeout_seconds`(默认 1800，执行端单轮上限)、`executor_runs`(JSON，四 stage 最近一次运行记录 pid/started_at/log/exit_code/finished_at)。**不写入任何 pi 全局配置（`~/.pi/agent/*` 等）**；凭据只查 `pi auth check` 退出码，不存值。
+v1.5 新增键：`exec_config`(JSON，protocol.md §5.17 执行配置；v1.6 缺省=初始默认 `CloseAI/deepseek-flash/xhigh/default`；v3 起允许 `backend`/`pi_desktop` 扩展字段，protocol §5.23.3——缺 `backend` 按 `pi` 解释)、`worktrees_root`(独立 worktree 根目录路径字符串；空=未设置，取 `<app_support>/worktrees`)、`dsh_round_timeout_seconds`(默认 14400)。v1.6 新增键：`pi_round_timeout_seconds`(默认 14400，缺省回退读旧键 dsh_round_timeout_seconds)、`executor_timeout_seconds`(默认 1800，执行端单轮上限)、`executor_runs`(JSON，四 stage 最近一次运行记录 pid/started_at/log/exit_code/finished_at)、`planner_config`(JSON，v2.1 Codex 规划配置 {standard, review_fix} 各含 planner_model/reasoning_effort + updated_at；v3 起加 `default_method` ∈ builtin|spec_plan，缺省 builtin，protocol §5.23.2；独立于 exec_config，仅影响新规划请求)。v3 新增键：`review_config`(JSON，protocol §5.23.4 Review 环境 {mode:"inherit"|"custom", provider?, model?, reasoning_effort?, updated_at}；未保存/inherit 保持现状=继承本机 PI 默认会话配置)。**不写入任何 pi 全局配置（`~/.pi/agent/*` 等）**；凭据只查 `pi auth check` 退出码或 PI-Desktop 连接文件 token 的内存就绪性，不存值。
 
 ## 1.1 升级与备份（v1.3）
 
@@ -227,7 +227,7 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 
 ## 4. 事件 kind（固定枚举）
 
-`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `exec_config_updated`(执行配置保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
+`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `exec_config_updated`(执行配置保存) `planner_config_updated`(v2.1 规划配置保存) `review_config_updated`(v3 Review 环境保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
 
 ## 5. 串行位
 
@@ -256,3 +256,7 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 - Plan 目录扫描发现的孤儿计划（无 manifest 对应）→ 警告列表，不自动建 task。
 - `settings.migration = {at, manifests_sha256, backup_path}`；重复执行读哈希跳过，幂等。
 - 迁移前先整体备份（manifests + locks + Plan），原文件保留供审计；新旧流程不得同时写两套状态——切换步骤见 automation-contract.md。
+
+### T3 Plus R1 补充（2026-09-26）
+
+本次无表结构或 schema 版本变化。pi_desktop 继续复用现有轮次、快照和 send_state。能力复核使用该轮 config_json；未知发送或停止未证实保留 unknown，不因配置切换重派。Plus 字符串消息 ID/修订仅用于事件与会话投影，不把它当 SQLite 行序或分页坐标。

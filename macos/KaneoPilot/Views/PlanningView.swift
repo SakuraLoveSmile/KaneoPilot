@@ -23,11 +23,15 @@ struct PlanningView: View {
     // ③ start-plans 结果
     @State private var starting = false
     @State private var startResults: [StartPlanResult]?
+    // §4.7 T2：规划方式（builtin/spec_plan），对本批次勾选任务生效。
+    @State private var plannerMethod = "builtin"
+    @State private var methodSeeded = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            plannerConfigSummary
             Group {
                 switch step {
                 case 1: todoStep
@@ -40,7 +44,34 @@ struct PlanningView: View {
             footer
         }
         .frame(minWidth: 720, minHeight: 560)
-        .task { await fetchTodos(auto: true) }
+        .task {
+            // 读规划配置（default_method 预选）+ 能力（planner_methods 可用性）。
+            await model.refreshPlannerConfig()
+            if !methodSeeded {
+                plannerMethod = model.plannerConfig?.effectiveDefaultMethod
+                    ?? "builtin"
+                methodSeeded = true
+            }
+            await fetchTodos(auto: true)
+        }
+    }
+
+    /// v2.1 §5.22.6：当前生效规划配置摘要（standard + review_fix 各一段），
+    /// 11pt secondary；数据用 AppViewModel 缓存的 get-planner-config。
+    @ViewBuilder
+    private var plannerConfigSummary: some View {
+        if let standard = model.plannerEffective("standard"),
+           let fix = model.plannerEffective("review_fix") {
+            Text("模型 \(standard.plannerModel) · 思考 \(standard.reasoningEffort)"
+                 + "　评审修复 \(fix.plannerModel) · \(fix.reasoningEffort)")
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, Spacing.l)
+                .padding(.vertical, Spacing.s)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: 头部：步骤指示 + 关闭
@@ -261,8 +292,44 @@ struct PlanningView: View {
 
     // MARK: - ② 准备材料
 
+    /// §4.7 T2 规划方式：内置规划 / Spec Planner 插件（两项，默认预选
+    /// get-planner-config.default_method）；对本批次勾选任务生效——每项
+    /// start-plans 带 planner_method。
+    @ViewBuilder
+    private var plannerMethodSection: some View {
+        let spec = model.plannerCapabilities?.specPlanMethod
+        Section("规划方式") {
+            Picker("规划方式", selection: $plannerMethod) {
+                Text("内置规划").tag("builtin")
+                Text("Spec Planner 插件").tag("spec_plan")
+                    .disabled(spec?.available == false)
+            }
+            .pickerStyle(.menu)
+            .accessibilityLabel("规划方式")
+            // 能力不可用原因（未选中也展示）；旧核心未上报 → 能力未知说明。
+            if spec?.available == false, let reason = spec?.reason {
+                Text("Spec Planner 插件不可用：\(reason)")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            } else if plannerMethod == "spec_plan" && spec == nil {
+                Text("planner_methods 能力未知（核心未上报）；"
+                     + "排队时将按所选方式提交，核心核验失败会明确报错。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            }
+            // §4.7 冻结边界说明（spec_plan 选中时展示）。
+            if plannerMethod == "spec_plan" {
+                Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
+                     + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
     private var prepareStep: some View {
         List {
+            plannerMethodSection
             ForEach(checkedTasks) { item in
                 PrepareRow(
                     item: item,
@@ -377,6 +444,9 @@ struct PlanningView: View {
     private var startStep: some View {
         List {
             Section(header: Text("待提交").font(.kpSmall)) {
+                // §4.7 T2：提交前在汇总区明示所选规划方式。
+                FieldRow("规划方式", plannerMethod == "spec_plan"
+                         ? "Spec Planner 插件" : "内置规划")
                 ForEach(startableTasks) { item in
                     HStack(spacing: Spacing.m) {
                         Image(systemName: "checkmark.circle")
@@ -491,7 +561,9 @@ struct PlanningView: View {
             guard let response = preparations[item.taskId]?.response,
                   let inputID = response.inputId,
                   let sha = response.inputSha256 else { return nil }
-            return ["input_id": inputID, "input_sha256": sha]
+            // v3 §5.23.2：每项携带本批次所选规划方式（builtin/spec_plan）。
+            return ["input_id": inputID, "input_sha256": sha,
+                    "planner_method": plannerMethod]
         }
         guard !items.isEmpty else { return }
         do {

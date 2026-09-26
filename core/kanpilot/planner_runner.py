@@ -8,7 +8,8 @@ CLI：``python -m kanpilot.planner_runner [--request-id <id>] [--once]``
 1. ``claim`` stage=plan executor=``kaneo-planner``（--request-id 定点领取
    或自动取单；未授权/无任务 → 结束）；
 2. 在 ``<session_runs_root>/<task_id>/<run_id>/`` 写 ``job.json``
-   （backend=codex）+ ``events.jsonl``（session 首事件；codex JSONL
+   （backend=codex + planner_method；spec_plan 附 plugin_id/
+   plugin_version）+ ``events.jsonl``（session 首事件；codex JSONL
    进度经 codex_planner.map_event 翻译）；原始 JSONL 落 ``codex.jsonl``；
 3. 拉起 ``codex exec``（只读 sandbox；prompt 经 stdin；``--output-schema``
    约束最终输出；``-o`` 落最后消息）；心跳 ``heartbeat`` 间隔
@@ -17,7 +18,9 @@ CLI：``python -m kanpilot.planner_runner [--request-id <id>] [--once]``
 4. 终态：schema 校验 ``-o`` 输出——ready → 生成带 frontmatter 的计划文件
    （元数据由本进程按真实输入生成，不信模型自报）→ ``publish-plan``；
    needs_input → 草稿落 ``plan-draft.md`` + ``report needs_user``；
-   超时/崩溃/输出不合规 → ``report failed``（不自动重试）。
+   超时/崩溃/输出不合规 → ``report failed``（不自动重试）；子进程非零
+   退出按 §5.22.6 分类 failure_reason（model_unavailable/auth_failed/
+   request_rejected/process_exit/crash）并只显示一条主要原因。
    publish-plan 自身在同事务结束请求（§5.6），成功路径不再 report。
 
 超时：settings ``codex_timeout_seconds`` > ``executor_timeout_seconds`` >
@@ -36,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import signal
 import subprocess
@@ -61,26 +65,44 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class _EventLog:
-    """events.jsonl 追加器（seq 单调；flush 每行）。"""
+    """events.jsonl 追加器（seq 单调；flush 每行）。
 
-    def __init__(self, path: Path):
+    - 字段值为 ``None`` 的一律省略（§5.22.6：如 system 事件缺 ``code``）。
+    - ``redact``（可选）逐字段清洗字符串（含嵌套 dict/list），凭据值
+      不落盘（provider.env 密钥 / util._SECRET_PATTERNS 形态）。
+    """
+
+    def __init__(self, path: Path, redact=None):
         self.path = Path(path)
+        self._redact = redact
         self.seq = 0
         if self.path.is_file():
             events, _ = dsh_events.iter_events(self.path)
             if events:
                 self.seq = max(e.get("seq", 0) for e in events)
 
+    def _clean(self, value):
+        if isinstance(value, str) and self._redact is not None:
+            return self._redact(value)
+        if isinstance(value, dict):
+            return {k: self._clean(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._clean(v) for v in value]
+        return value
+
     def emit(self, etype: str, ts: str, **fields) -> dict:
         self.seq += 1
-        event = {"v": 1, "seq": self.seq, "ts": ts, "type": etype, **fields}
+        event = {"v": 1, "seq": self.seq, "ts": ts, "type": etype}
+        for key, value in fields.items():
+            if value is None:
+                continue  # None 字段省略（如缺 code 的 system 事件）
+            event[key] = self._clean(value)
         with open(self.path, "a", encoding="utf-8") as stream:
             stream.write(
                 json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
             )
             stream.flush()
         return event
-
 
 # ------------------------------------------------------------ 计划文件生成
 
@@ -340,6 +362,61 @@ def _mark_round_finished(conn, task_id: str, run_id: str, status: str,
     )
     conn.commit()
 
+# ------------------------------------------------------------ 失败分类（§5.22.6）
+_AUTH_RE = re.compile(
+    r"(?i)(?<!\d)(401|403)(?!\d)|unauthorized|forbidden|"
+    r"authentication|认证|未授权|登录态"
+)
+_MODEL_RE = re.compile(
+    r"(?i)model is not supported|not supported|unsupported model|"
+    r"unknown model|model.{0,40}not (supported|available|found)|"
+    r"模型.{0,10}(不支持|不可用|未知)"
+)
+_HTTP4XX_RE = re.compile(
+    r"(?i)(?:http|status(?:es)?|响应|code)[\s_:：=]*4\d{2}\b|"
+    r"\b4\d{2}\b[^。\n]{0,24}(?:error|bad request|rejected|被拒)"
+)
+
+_FAILURE_LABELS = {
+    "auth_failed": "codex 认证失败",
+    "model_unavailable": "规划模型请求被拒绝",
+    "request_rejected": "规划请求被拒绝",
+    "process_exit": "codex 异常退出",
+    "crash": "codex 进程崩溃",
+}
+
+
+def _classify_failure(returncode, errors: list, tail: list,
+                      http_status=None):
+    """非零退出 → (reason, label)。reason 为 §5.22.6 分类词，label 是
+    report note 的中文前缀（``<分类名>：<主要原因>`` 的前半段）。
+
+    判定序：信号/>128 → crash；错误文本命中认证 → auth_failed；模型不被
+    支持 → model_unavailable；HTTP 4xx → request_rejected；其余 →
+    process_exit（注明退出码）。错误文本与 stdout/stderr 尾部共同作据。
+    """
+    haystack = "\n".join(
+        [str(e) for e in errors] + [str(t) for t in tail]
+    )[-8000:]
+    suffix = f"（HTTP {http_status}）" if http_status else ""
+    if isinstance(returncode, int) and (returncode < 0 or returncode > 128):
+        label = _FAILURE_LABELS["crash"] + (
+            f"（信号 {-returncode}）" if returncode < 0
+            else f"（退出码 {returncode}）"
+        )
+        return "crash", label
+    if _AUTH_RE.search(haystack):
+        return "auth_failed", _FAILURE_LABELS["auth_failed"] + suffix
+    if _MODEL_RE.search(haystack):
+        return "model_unavailable", _FAILURE_LABELS["model_unavailable"] + suffix
+    if (isinstance(http_status, int) and 400 <= http_status < 500) \
+            or _HTTP4XX_RE.search(haystack):
+        return "request_rejected", _FAILURE_LABELS["request_rejected"] + suffix
+    label = _FAILURE_LABELS["process_exit"] + (
+        f"（退出码 {returncode}）" if returncode is not None else ""
+    )
+    return "process_exit", label
+
 
 def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     """领取并执行一个规划轮次。返回 True=处理了一个请求（可继续领取）。"""
@@ -380,18 +457,57 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     finally:
         conn.close()
 
+    method = req_payload.get("planner_method") or "builtin"
     job = {
         "task_id": task_id, "run_id": run_id, "backend": "codex",
         "session_id": None, "session_title": None,
         "config": req_payload.get("model_config"),
         "input_id": context.get("input_id"),
         "planner_input_sha256": req_payload.get("planner_input_sha256"),
+        "planner_method": method,
         "pid": os.getpid(), "status": "running",
         "started_at": util.now_iso(), "ended_at": None,
         "exit_code": None, "detail": None,
     }
+    # §5.23.2：spec_plan 记录固化的插件身份/版本（有则）；不写凭据。
+    if method == "spec_plan":
+        if req_payload.get("plugin_id"):
+            job["plugin_id"] = req_payload["plugin_id"]
+        if req_payload.get("plugin_version"):
+            job["plugin_version"] = req_payload["plugin_version"]
+    # §5.22.3/T1：启动前解析 config.toml 的 model_provider——
+    # --ignore-user-config 会跳过服务商定义，必须经 -c 覆写显式传回。
+    # 解析失败（配置损坏/引用缺失/认证缺方式）→ 明确失败，禁止静默回落。
+    provider = None
+    provider_error = None
+    try:
+        provider = codex_planner.codex_provider.resolve_provider(
+            constants.codex_home())
+    except util.KanpilotError as exc:
+        provider_error = exc.message
+    # 运行记录只存脱敏摘要（§7：无凭据值）。
+    if provider is not None and provider.provider_id:
+        job["provider"] = provider.summary
+    else:
+        job["provider"] = {
+            "provider_id": None, "detail": "codex 默认认证路径"}
+    if provider_error:
+        job["detail"] = f"codex 配置错误：{provider_error}"
     _write_json(run_dir / dsh_events.JOB_NAME, job)
-    log = _EventLog(run_dir / dsh_events.EVENT_LOG_NAME)
+    # 脱敏凭据集：provider.env 注入值（内联 token）+ env_key 指向的环境
+    # 变量值（redact 只替换长度 ≥8 的值；HTTP 状态/模型名不受影响）。
+    secrets = [
+        value for value in (provider.env if provider else {}).values()
+        if value
+    ]
+    if provider is not None and provider.env_key:
+        env_secret = os.environ.get(provider.env_key)
+        if env_secret:
+            secrets.append(env_secret)
+    log = _EventLog(
+        run_dir / dsh_events.EVENT_LOG_NAME,
+        redact=lambda text: util.redact(text, secrets),
+    )
     codex_log_path = run_dir / constants.PLANNER_CODEX_LOG_NAME
     manifest = req_payload.get("manifest") or {}
     input_dir = context.get("input_dir")
@@ -416,10 +532,58 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
 
     fake = os.environ.get("KANPILOT_CODEX_FAKE")
     if fake:
+        # fake 下服务商解析失败只记 detail、不阻断（运行记录完整性）；fake
+        # 各分支若再写 detail，把解析错误合并保留。
+        if provider_error:
+            inner_finalize = finalize
+            def finalize(status, exit_code, detail, outcome, reason,
+                         _inner=inner_finalize):
+                merged = (
+                    f"{detail or ''} | codex 配置错误：{provider_error}"
+                    if detail else f"codex 配置错误：{provider_error}"
+                )
+                _inner(status, exit_code, merged, outcome, reason)
         return _run_fake(db_path, run_dir, job, log, context, manifest,
                          req_id, run_id, fake, finalize)
 
     # ---- 真实 codex exec ----
+    if provider_error:
+        # 服务商配置损坏/缺失 → 明确失败（不静默回落官方服务商）。
+        detail = f"codex 配置错误：{provider_error}"
+        finalize("failed", 1, detail, "failed", "config_error")
+        _report(db_path, req_id, run_id, "failed", detail,
+                failure_code="planner_failed",
+                evidence={"codex_log": str(codex_log_path),
+                          "error_category": "config_error"})
+        return True
+
+    if method == "spec_plan":
+        # §5.23.2：领取时复检插件仍启用；被移除/禁用 → 明确失败
+        #（report failed，材料保留），**不静默降级 builtin**。
+        plugin = codex_planner.probe_spec_plugin()
+        if not plugin.get("available"):
+            detail = (f"spec-planner 插件不可用（plugin_unavailable）："
+                      f"{plugin.get('reason')}")
+            finalize("failed", 1, detail, "failed", "plugin_unavailable")
+            _report(db_path, req_id, run_id, "failed", detail,
+                    failure_code="plan_failed",
+                    evidence={"codex_log": str(codex_log_path),
+                              "error_category": "plugin_unavailable"})
+            return True
+        # user config 未被忽略：服务商由 codex 自身解析，但认证就绪
+        # （auth.json / env_key 环境值）仍需在拉起前确认（§5.23.2）。
+        if provider_error or not provider.auth_ready:
+            detail = (
+                f"codex 配置错误：{provider_error}"
+                if provider_error
+                else f"codex 认证未就绪：{provider.auth_detail}")
+            finalize("failed", 1, detail, "failed", "config_error")
+            _report(db_path, req_id, run_id, "failed", detail,
+                    failure_code="planner_failed",
+                    evidence={"codex_log": str(codex_log_path),
+                              "error_category": "auth_not_ready"})
+            return True
+
     schema_path = run_dir / "output-schema.json"
     out_path = run_dir / "last-message.txt"
     _write_json(schema_path, codex_planner.output_schema())
@@ -427,16 +591,18 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         manifest, Path(input_dir) if input_dir else None
     )
     prompt = codex_planner.build_prompt(
-        task, manifest, Path(input_dir) if input_dir else None
+        task, manifest, Path(input_dir) if input_dir else None,
+        method=method,
     )
     job_for_argv = {
         "model_config": req_payload.get("model_config"),
         "repository": task.get("repository")
         or (manifest.get("task") or {}).get("repository"),
+        "planner_method": method,
     }
     argv = codex_planner.launcher_argv(
-        job_for_argv, schema_path, out_path, images)
-    env = codex_planner.child_env()
+        job_for_argv, schema_path, out_path, images, provider=provider)
+    env = codex_planner.child_env(provider)
 
     log.emit("session", util.now_iso(),
              session_id=None, session_title=f"codex plan {task_id}")
@@ -462,21 +628,63 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     except (OSError, BrokenPipeError):
         pass
 
-    state = {"eof": False, "turn_end": False, "stale": False}
+    state = {
+        "eof": False, "turn_end": False, "stale": False,
+        # §5.22.6 错误证据：system/error 帧的可读文本（按内容去重）与
+        # stdout/stderr 尾部（非 JSON 行也算入），供非零退出分类。
+        "errors": [], "errors_set": set(), "tail": [],
+        "emitted": set(),  # system 事件 content 去重（相同错误只显示一次）
+        "http_status": None,
+    }
     buffer = bytearray()
     fd = proc.stdout.fileno()
     raw_log = open(codex_log_path, "ab")
 
+    def _collect_error(text) -> None:
+        """错误帧/系统事件文本 → state['errors']（脱敏 + 按内容去重）。"""
+        text = util.redact(str(text), secrets).strip()
+        if text and text not in state["errors_set"]:
+            state["errors_set"].add(text)
+            state["errors"].append(text)
+
+    def _note_http_status(frame) -> None:
+        """原始 JSONL 帧（顶层 error/turn.failed/item）→ http_status 提取。"""
+        if not isinstance(frame, dict):
+            return
+        for holder in (frame.get("error"), frame):
+            status = codex_planner.http_status_of(holder)
+            if isinstance(status, int) and 400 <= status <= 599:
+                state["http_status"] = status
+                return
+
     def handle_line(raw: bytes) -> None:
-        raw_log.write(raw + b"\n")
+        # codex.jsonl 保留完整行但先脱敏（凭据值不落盘）。
+        text = raw.decode("utf-8", errors="replace")
+        line = util.redact(text, secrets).strip()
+        raw_log.write(line.encode("utf-8") + b"\n")
         raw_log.flush()
-        line = raw.strip()
         if not line:
             return
+        state["tail"].append(line[:500])
+        del state["tail"][:-40]
         try:
-            message = json.loads(line.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            message = json.loads(line)
+        except ValueError:
             return
+        if not isinstance(message, dict):
+            return
+        # 原始 error/turn.failed/item.completed(error) 帧计入错误证据。
+        if message.get("type") in ("error", "turn.failed"):
+            err = message.get("error")
+            _collect_error(
+                codex_planner.error_text(err) if err is not None
+                else codex_planner.error_text(message.get("message")))
+            _note_http_status(message)
+        elif message.get("type") == "item.completed":
+            item = message.get("item") or {}
+            if isinstance(item, dict) and item.get("error") is not None:
+                _collect_error(codex_planner.error_text(item.get("error")))
+            _note_http_status(item)
         parsed = codex_planner.map_event(message)
         if parsed is None:
             return
@@ -484,8 +692,20 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         if etype == "session":
             job["session_id"] = fields.get("session_id")
             job["session_title"] = fields.get("session_title")
-        if etype == "turn_end":
+        elif etype == "turn_end":
             state["turn_end"] = True
+        elif etype == "system":
+            _collect_error(fields.get("content") or "")
+            code = fields.get("code")
+            if (state["http_status"] is None
+                    and isinstance(code, int) and not isinstance(code, bool)
+                    and 400 <= code <= 599):
+                state["http_status"] = code
+            content = fields.get("content")
+            if content is not None:
+                if content in state["emitted"]:
+                    return  # 相同错误已展示，不重复发事件
+                state["emitted"].add(content)
         log.emit(etype, ts or util.now_iso(), **fields)
 
     def drain() -> None:
@@ -554,7 +774,9 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         finalize("failed", proc.returncode, f"timeout after {timeout:g}s",
                  "failed", "timeout")
         _report(db_path, req_id, run_id, "failed",
-                f"规划超时（{timeout:g}s）", failure_code="planner_timeout")
+                f"规划超时（{timeout:g}s）", failure_code="planner_timeout",
+                evidence={"codex_log": str(codex_log_path),
+                          "error_category": "timeout"})
         return True
 
     try:
@@ -568,12 +790,17 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         pass
 
     if returncode not in (0, None):
-        finalize("failed", returncode, f"crash: exit {returncode}",
-                 "failed", "crash")
-        _report(db_path, req_id, run_id, "failed",
-                f"codex 异常退出（{returncode}）",
+        # §5.22.6 失败分类：依据收集的错误帧 + stdout/stderr 尾部归类。
+        reason, label = _classify_failure(
+            returncode, state["errors"], state["tail"],
+            http_status=state["http_status"])
+        primary = state["errors"][0] if state["errors"] else "无错误输出"
+        note = f"{label}：{primary}"[:800]
+        finalize("failed", returncode, note, "failed", reason)
+        _report(db_path, req_id, run_id, "failed", note,
                 failure_code="planner_failed",
-                evidence={"codex_log": str(codex_log_path)})
+                evidence={"codex_log": str(codex_log_path),
+                          "error_category": reason})
         return True
 
     # exit 0 不等于成功：须通过输出契约校验（§5.22.3）。

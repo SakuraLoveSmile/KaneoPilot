@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import sys
 from datetime import timedelta
 from typing import Optional
 
-from . import constants, db, derive, remote, util
+from . import constants, db, derive, planfile, remote, util
 
 
 def tick_inline(conn: sqlite3.Connection, now) -> dict:
@@ -257,6 +258,53 @@ def cmd_get_task(ctx, payload: dict) -> dict:
     task = db.require_task(ctx.conn, payload["task_id"])
     return {"task": derive.task_detail(ctx.conn, task, ctx.now)}
 
+
+def cmd_get_plan(ctx, payload: dict) -> dict:
+    """get-plan（protocol.md §5.23.1，v3 T1）：已发布计划正文的核验读取。
+
+    以任务登记的 plan_path 为唯一入口，经 planfile.load_plan 做 Plan 根边界/
+    无符号链接/frontmatter task_id 身份校验；重算整个文件 SHA-256 与登记值
+    比较。不可信正文不返回；本命令只读（不写状态/事件）。
+    """
+    task = db.require_task(ctx.conn, payload["task_id"])
+    expected = payload.get("expected_plan_sha256")
+    registered = task["plan_sha256"]
+    if not task["plan_path"] or not registered:
+        raise util.KanpilotError(
+            "not_found", f"任务 {task['task_id']} 尚未发布计划"
+        )
+    if expected is not None and expected != registered:
+        raise util.KanpilotError(
+            "conflict",
+            "expected_plan_sha256 与登记计划哈希不符（任务可能已重新规划）",
+        )
+    meta, raw, _path = planfile.load_plan(
+        task["plan_path"], expect_task_id=task["task_id"]
+    )
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != registered:
+        raise util.KanpilotError(
+            "conflict",
+            "计划文件哈希与登记值不符（计划自发布后被修改）",
+        )
+    # markdown = 去除 YAML frontmatter 后的正文（raw 已被 read_frontmatter
+    # UTF-8 解码校验过）。与 util.read_frontmatter 同口径 split("---", 2)。
+    text = raw.decode("utf-8")
+    body = text.split("---", 2)[2] if text.startswith("---\n") else text
+    if body.startswith("\n"):
+        body = body[1:]
+    result = {
+        "task_id": task["task_id"],
+        "title": task["title"],
+        "plan_kind": task["plan_kind"] or meta.get("plan_kind") or "standard",
+        "generated_at": task["plan_generated_at"] or meta.get("generated_at"),
+        "plan_sha256": registered,
+        "markdown": body,
+    }
+    if task["save_state"] == "purged":
+        # §5.20.1：purged 终态仍可只读审计，附只读标记。
+        result["read_only"] = True
+    return result
 
 def cmd_get_request(ctx, payload: dict) -> dict:
     """v2 §5.21.1：请求详情 + attempts + allowed_actions + attention_state。"""

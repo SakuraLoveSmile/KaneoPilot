@@ -29,8 +29,14 @@ def load_plan(plan_path: str, expect_task_id: Optional[str] = None) -> tuple[dic
     return meta, raw, path
 
 
-def check_plan_meta(meta: dict, plan_kind: str) -> None:
-    """Frontmatter completeness + planner/reasoning requirements (§6)."""
+def check_plan_meta(
+    meta: dict, plan_kind: str, expected_model: Optional[dict] = None
+) -> None:
+    """Frontmatter completeness + planner/reasoning requirements (§6).
+
+    ``expected_model``（``{"planner_model":…,"reasoning_effort":…}``）提供时
+    按请求/任务登记的快照比对（v2.1 §5.22.6）；缺省时沿用历史固定常量
+    （旧记录缺登记的兼容路径）。"""
     required = (
         constants.PLAN_META_REQUIRED_REVIEW_FIX
         if plan_kind == "review_fix"
@@ -59,17 +65,25 @@ def check_plan_meta(meta: dict, plan_kind: str) -> None:
         Path(meta["repository"]).is_dir(),
         f"repository missing: {meta['repository']}",
     )
-    expected = (
-        constants.REVIEW_FIX_PLANNER
-        if plan_kind == "review_fix"
-        else constants.STANDARD_PLANNER
-    )
-    util.require(
-        meta.get("planner_model") == expected["planner_model"]
-        and meta.get("reasoning_effort") == expected["reasoning_effort"],
-        f"{plan_kind} plan format mismatch "
-        f"(planner_model/reasoning_effort)",
-    )
+    if expected_model is not None:
+        util.require(
+            meta.get("planner_model") == expected_model.get("planner_model")
+            and meta.get("reasoning_effort")
+            == expected_model.get("reasoning_effort"),
+            "plan planner_model/reasoning_effort 与本请求登记不符",
+        )
+    else:
+        expected = (
+            constants.REVIEW_FIX_PLANNER
+            if plan_kind == "review_fix"
+            else constants.STANDARD_PLANNER
+        )
+        util.require(
+            meta.get("planner_model") == expected["planner_model"]
+            and meta.get("reasoning_effort") == expected["reasoning_effort"],
+            f"{plan_kind} plan format mismatch "
+            f"(planner_model/reasoning_effort)",
+        )
     if plan_kind == "standard" and meta.get("plan_kind") not in (None, "standard"):
         util.require(False, "plan_kind frontmatter conflicts with standard plan")
 

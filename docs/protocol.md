@@ -140,8 +140,12 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `get-exec-config` | 桌面 | 只读：PI 执行配置 |
 | `set-exec-config` | 桌面 | 写 settings.exec_config（经能力校验，不改 pi 全局配置） |
 | `exec-capabilities` | 桌面/执行端 | 只读：当前安装 pi 的能力与环境检查 |
+| `pi-desktop-catalog` | 桌面 | 只读：获取 Plus provider/model 候选与默认值（T3.5，§5.23.6） |
 | `dispatch-start` | dispatch 执行端 | 落盘启动意图并拉起该轮 pi worker（幂等） |
 | `executor-status` | 桌面 | 只读：四个执行端 stage 的在途/最近一次运行状态（§5.19） |
+| `get-plan` | 桌面 | 只读：已发布计划的核验正文（v3，§5.23.1） |
+| `get-review-config` | 桌面 | 只读：Review 环境配置（v3，§5.23.4） |
+| `set-review-config` | 桌面 | 写 settings.review_config（v3，§5.23.4；仅影响新 review 轮次） |
 
 ## 4. 通用行为
 
@@ -475,7 +479,7 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 
 ### 5.15.5 会话适配（本机运行记录）与会话命令
 
-- 数据源为**本机运行记录**（v1.6 起后端为 pi；v2 起规划轮次 backend=codex，见 §5.22.3）：运行记录根目录取 settings `session_runs_root`，缺省 `~/Library/Application Support/KaneoPilot/runs`。按 `<root>/<task_id>/<run_id>/` 定位执行目录：先核验 `job.json` 的 `task_id`/`run_id` 与目录名一致且 `backend` 字段存在；`backend` 不在 `(pi, codex)` 的历史轮次 → `unavailable` + detail「旧后端会话已弃用」，再读取同目录 `events.jsonl`。**不按标题猜测关联。**
+- 数据源为**本机运行记录**（v1.6 起后端为 pi；v2 起规划轮次 backend=codex，见 §5.22.3；v3 起任务执行轮次可为 backend=pi_desktop，见 §5.23.3）：运行记录根目录取 settings `session_runs_root`，缺省 `~/Library/Application Support/KaneoPilot/runs`。按 `<root>/<task_id>/<run_id>/` 定位执行目录：先核验 `job.json` 的 `task_id`/`run_id` 与目录名一致且 `backend` 字段存在；`backend` 不在 `(pi, codex, pi_desktop)` 的历史轮次 → `unavailable` + detail「旧后端会话已弃用」，再读取同目录 `events.jsonl`。**不按标题猜测关联。**
 - **路径安全**：task_id/run_id 仅允许 `[A-Za-z0-9._-]`；解析后的执行目录必须仍位于根目录内（拒绝 `..` 与符号链接逃逸）；身份不符或越界 → 读取失败（`state=unavailable` + detail 说明），不得读取他目录。
 - **会话关联**：以 `task_id + run_id` 绑定确切会话（`session_marker = "<task_id>/<run_id>"`）。
 - 会话状态 `state` ∈ `associated|pending|unavailable`：`associated` = 身份核验通过且 `events.jsonl` 成功解析；`pending` = 执行目录与 `job.json` 有效但 `events.jsonl` 尚未导出（UI 显示「等待会话记录」，UI 端继续轮询）；`unavailable` = 执行目录/`job.json` 缺失、身份不符、越界或旧后端弃用（UI 显示原因 + 重试）。连接状态 `connection.state` ∈ `ok|degraded|unavailable`：本机记录无推送订阅 → 恒 `degraded`（UI 按 `session_poll_seconds`，默认 2 秒增量检查导出更新）；根目录不存在等机制性失败 → `unavailable`。读取失败（如 JSON 半写入）时 `connection` 仍 `degraded`，`detail` 携带原因，**保留上一份有效内容，不当作空会话**。
@@ -524,7 +528,7 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 | `save_state` | `active\|trashed`（会话保存状态，与任务 save_state 正交） |
 | `saved_at`, `created_at`, `updated_at` | ISO 8601 UTC |
 
-- **写入点**：① dispatch claim 时创建（backend/config 快照固化）；② 读取层回填——`list-sessions`/`get-session`/`trash-session`/`restore-session` 按 runs 根目录 `job.json` 身份核验（同 §5.15.5）后补入缺失行。
+- **写入点**：① dispatch claim 时创建（backend/config 快照固化；v3 起 backend ∈ `pi|pi_desktop`，快照形状见 §5.23.3）；② 读取层回填——`list-sessions`/`get-session`/`trash-session`/`restore-session` 按 runs 根目录 `job.json` 身份核验（同 §5.15.5）后补入缺失行。
 - **回填永不改写 `save_state`/`saved_at`**：已存在行只刷新 `backend/session_id/session_title/run_status/worktree_path/updated_at`——重复导入不得复活已删除会话。
 - `run_status` 观察：pi 轮次以 `job.json.status` 为准并在读取时刷新索引；无 job.json/无 status 字段保持已存值（无则 `unknown`）。
 - 删除会话只改本表 `save_state`；不终止进程、不改任务生命周期、不删事件日志/运行记录/工作目录。
@@ -562,7 +566,7 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 
 ### 5.17.1 配置对象
 
-settings 键 `exec_config`（JSON）：
+settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展字段，见 §5.23.3——缺省按 `backend:"pi"` 解释）：
 
 ```json
 {"provider": "CloseAI", "model": "deepseek-flash",
@@ -611,10 +615,10 @@ settings 键 `exec_config`（JSON）：
 
 ### 5.18.1 后端、进程与 worktree
 
-- **新 dispatch claim 恒 `backend="pi"`**：claim context 增加 `backend` 与 `exec_config` 快照（`{provider, model, reasoning_effort, agent_preset}`）；不再提供其他执行路径。**历史轮次**（rounds.backend ∈ `dsh|headless` 等旧值）：DB 行保留，读取层返回 `unavailable` + detail「旧后端会话已弃用（仅 pi 可读）」，不取消、不重发。
+- **新 dispatch claim 按 `exec_config.backend` 固化**：缺省 `backend:"pi"`（claim context 增加 `backend` 与 `exec_config` 快照 `{provider, model, reasoning_effort, agent_preset}`）；v3 起 `backend:"pi_desktop"` 时走 §5.23.3 分支（快照 `{backend:"pi_desktop", connection_file, provider_id, model_id, thinking_level, permission_mode}`）。**历史轮次**（rounds.backend ∈ `dsh|headless` 等旧值）：DB 行保留，读取层返回 `unavailable` + detail「旧后端会话已弃用（仅 pi 可读）」，不取消、不重发。
 - 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：`worktree_path = worktrees_root/<task_id>/<run_id>`（settings `worktrees_root`，缺省 `<app_support>/worktrees`），自 `task.repository` 创建；会话删除不删除 worktree。
 - worker 拉起 `pi -p --mode json --session-dir <run_dir>/pi-sessions --model <provider>/<model> --thinking <level> --system-prompt <agent.md>`（`agent.md` 为空则不传该参数），`cwd=spec.cwd`，`start_new_session`，env 透传 + `PI_HOME`（`KANPILOT_PI_HOME` 优先）。stdout 逐行消费 JSONL：OSC 序列与非 JSON 行丢弃。
-- 运行记录目录沿用 `<session_runs_root>/<task_id>/<run_id>/`（缺省 `~/Library/Application Support/KaneoPilot/runs`）：`job.json`（`backend:"pi"|"codex"`、`session_id`/`session_title`、config 快照、pid、`status ∈ running|finished|failed`、起止时间、`exit_code`、`detail`）+ `events.jsonl`。`job.json` 身份核验（task_id/run_id/backend）同 §5.15.5；身份不符 → 读取 `unavailable` + `run_status` 记 `failed`（detail=identity_mismatch），不读他目录。
+- 运行记录目录沿用 `<session_runs_root>/<task_id>/<run_id>/`（缺省 `~/Library/Application Support/KaneoPilot/runs`）：`job.json`（`backend:"pi"|"codex"|"pi_desktop"`、`session_id`/`session_title`、config 快照、pid、`status ∈ running|finished|failed`、起止时间、`exit_code`、`detail`；pi_desktop 轮次另含 §5.23.3 的 `turn_id`/`send_state`）+ `events.jsonl`。`job.json` 身份核验（task_id/run_id/backend）同 §5.15.5；身份不符 → 读取 `unavailable` + `run_status` 记 `failed`（detail=identity_mismatch），不读他目录。
 
 ### 5.18.2 pi 事件流 → events.jsonl（事件契约不变）
 
@@ -755,7 +759,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 |---|---|---|
 | `fetch-todos` | `{}` | `{fetched_at, items[]}`；复用 bridge 分页读取每个 To Do 的描述/评论/关系/活动。每项含 `task_id/title/project_id/project_name/requirements_sha256/source_sha256/kaneo_status/repository/local_status/attachments[]/selectable/blocked_reason`。不导入任务、不创建请求。 |
 | `prepare-plan-input` | `{task_id, expected_requirements_sha256, local_paths[], supplement, excluded_remote_ids[]}` | 重新获取该任务（bridge `get-task` 核验需求哈希）→ 建不可变材料目录 → `{input_id, input_sha256, files[], issues[], can_start}`。不入队、不调用模型。 |
-| `start-plans` | `{items: [{input_id, input_sha256, expected_plan_sha256?}]}` | 每任务独立提交 → `{results: [{task_id, request_id?, deduplicated?, code?, error?, waiting_reason?}]}`。只有成功项进入规划队列。 |
+| `start-plans` | `{items: [{input_id, input_sha256, expected_plan_sha256?, planner_method?}]}`（v3：`planner_method` ∈ `builtin|spec_plan`，缺省 `builtin`，见 §5.23.2） | 每任务独立提交 → `{results: [{task_id, request_id?, deduplicated?, code?, error?, waiting_reason?}]}`。只有成功项进入规划队列。 |
 
 规则：
 
@@ -783,8 +787,9 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 规划执行从 pi 分流到独立 Codex 适配器（`kanpilot.codex_planner` / `planner_runner`）；dispatch/monitor/review 执行路径保留 pi。
 
-- 调用 `codex exec`：`-s read-only`（只读 sandbox）、无交互审批、`--json`（JSONL 进度流）、`-i <图片>`（图片参数）、`--output-schema <file>`（结构化最终输出）、`-o <file>`（最后消息落盘）。使用本机 ChatGPT 登录（`~/.codex/auth.json`），经 `-c`/`--ignore-user-config`/`--skip-git-repo-check`/`--ephemeral` 提供只读本次配置：不继承第三方执行插件/MCP/用户规则，不修改全局 Codex 设置。
-- 模型：`standard` 计划 `gpt-6-astra / medium`；`review_fix` 计划 `gpt-5.6-sol / xhigh`。不可用即报告，不替换模型。
+- 调用 `codex exec`：`-s read-only`（只读 sandbox）、无交互审批、`--json`（JSONL 进度流）、`-i <图片>`（图片参数）、`--output-schema <file>`（结构化最终输出）、`-o <file>`（最后消息落盘）。经 `--ignore-user-config`/`--skip-git-repo-check`/`--ephemeral` 提供只读本次配置：不继承第三方执行插件/MCP/用户规则，不修改全局 Codex 设置。
+- **服务商解析（v2.1，T1）**：`--ignore-user-config` 会同时跳过 `config.toml` 的服务商定义，因此 runner 启动时必须从 `constants.codex_home()/config.toml` 解析当前 `model_provider`（`kanpilot.codex_provider.resolve_provider`），把服务商必要连接配置以 `-c` 覆写显式传回：`model_provider`、`model_providers.<id>.name`、`.base_url`、`.wire_api`（`responses`）、`.requires_openai_auth`、`.env_key`；顶层 `model_catalog_json` 存在时原样沿用。配置损坏、`model_provider` 指向不存在的服务商、或所需认证缺失 → 明确失败（`validation_failed`），**禁止静默退回官方服务商**；未配置自定义服务商 → 允许 Codex 默认认证路径（`auth.json`）。内联 `experimental_bearer_token` **只在内存读取**，转为子进程专用环境变量并经 `-c model_providers.<id>.env_key` 引用；密钥不得进入 argv、SQLite、任务快照、日志或 UI。运行记录只保存脱敏摘要（provider_id/name/base_url/wire_api/auth 就绪说明/模型目录来源）。
+- 模型：默认 `standard` 计划 `gpt-6-astra / medium`；`review_fix` 计划 `gpt-5.6-sol / xhigh`（可经 §5.22.6 规划配置调整；`start-plans` 把生效快照写入 `payload.model_config`，请求内不再变化）。不可用即报告，不替换模型。
 - 工作目录 `cwd` 为任务 `repository`（可读）；业务源码不可写（sandbox 只读）；runner 指示模型阅读项目 `AGENTS.md` 及相关入口。任务描述、日志、附件作为材料输入，不覆盖「只规划」约束。
 - **输出契约**（`--output-schema` 强制）：
 
@@ -811,9 +816,112 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - 其他任务（无 hold）的既有派发行为不变。
 
 ### 5.22.5 review_fix 计划衔接
-
 修复计划继续核验 `review_key`、原报告及关联任务：publish-plan 成功时把修复计划路径/哈希写回**原评审任务**的 `extra_json.repair_plan_path`/`repair_plan_sha256`，保证 §4.5-5 派发校验（fix_task_id/review_key/repair_plan 匹配 + 远端 marker）通过。`plan_kind=review_fix` 的 frontmatter 必填项沿用 §6。
 
+### 5.22.6 规划配置与失败语义（v2.1）
+
+**规划配置**（`settings.planner_config`，独立于 pi 的 `exec_config`，不加表）：
+
+| 命令 | payload | 返回与副作用 |
+|---|---|---|
+| `get-planner-config` | `{}` | `{config: {"standard","review_fix","default_method"}|null, defaults, updated_at}`；config=null = 从未保存（生效值=defaults，`default_method` 缺省 `builtin`）。v3：`default_method` 见 §5.23.2。 |
+| `set-planner-config` | `{standard?, review_fix?, default_method?}`（每组完整 `{planner_model, reasoning_effort}`；`default_method` ∈ `builtin|spec_plan`） | 逐组校验（模型 ID 去空白/拒空/控制字符；目录已知模型按 `reasoning_efforts` 校验思考等级；目录缺失/模型未登记 → 仅提示「能力未验证」）→ 原子保存 → `{config, updated_at}`；失败 `bad_request`，旧值不变。**只影响之后创建的规划请求**；幂等命中的已排队请求不回写快照。v3：`default_method` 为规划面板的默认方式预选（§5.23.2），不改变既有请求的已固化方式。 |
+| `planner-capabilities` | `{}` | `{codex:{path,version}, provider: 脱敏摘要|null, auth:{ready,detail}, models:[{id,name,reasoning_efforts}], models_source, models_verified, planner_methods:{builtin:{available:bool,reason:str|null}, spec_plan:{available:bool,reason:str|null,plugin_id?,version?}}}`；不发模型请求、不返回凭据。v3：`planner_methods` 见 §5.23.2（`spec_plan` 须经 `codex plugin list --json --marketplace personal` 结构化结果确认插件已安装、启用并核对 manifest/SKILL.md）。「配置就绪」不得表述为「真实服务验证成功」。 |
+
+- `start-plans` 创建请求时把 `planner_config.snapshot(plan_kind)` 写入 `payload.model_config`；`publish-plan`/`dispatch` 校验一律匹配请求快照（§5.6/§4.5），不再用当前默认值重新校验；旧记录缺快照时沿用历史固定规则。
+- **失败原因分类（`failure_reason`/terminal `reason`，不改变看板状态机）**：`model_unavailable`（模型不被账号/服务商支持）、`auth_failed`（认证失败）、`request_rejected`（HTTP 4xx 拒绝，正文保留）、`timeout`、`process_exit`（未知非零退出，注明退出码）、`crash`（信号/系统级终止）。相同错误在会话内只显示一条主要原因，完整脱敏日志保留在 `codex.jsonl`；事件/日志落盘前经 `util.redact` 处理（HTTP 状态、模型名、错误正文保留）。
+- 读取层把 codex JSONL 的顶层 `error`、`turn.failed.error`、`item.completed` 错误项映射为 `system` 事件（`_EVENT_TO_MESSAGE` 含 `system`）；历史轮次同样可见，不重写旧日志。
+
+## 5.23 计划阅读与角色环境（v3，T1–T5）
+
+本节冻结 T1（计划页）、T2（施工规划方式）、T3（PI-Desktop 任务执行后端）、T4（详情分页的协议面）、T5（角色配置/Review 环境）。界面度量与交互细节见 ui-spec.md §4.8/§4.9；执行端编排细节见 automation-contract.md。
+
+### 5.23.1 `get-plan`：已发布计划正文读取（T1）
+
+`get-plan {task_id, expected_plan_sha256?}` →
+
+```json
+{"task_id": "...", "title": "...", "plan_kind": "standard|review_fix",
+ "generated_at": "ISO", "plan_sha256": "...",
+ "markdown": "<去除核心 frontmatter 后的正文>"}
+```
+
+- **定位**：以任务登记的 `plan_path` 为唯一入口，复用 `planfile.load_plan` 的 Plan 根边界/无符号链接/frontmatter `task_id` 身份校验；不接受调用方另传路径。
+- **哈希核验**：重算**整个文件**的 SHA-256 并与 `tasks.plan_sha256` 比较；调用方给的 `expected_plan_sha256`（当前视图快照）不符 → `conflict`。文件哈希与登记值不符（被篡改/重写过）→ `conflict`。
+- **错误矩阵**：任务无 `plan_path`/`plan_sha256` 登记 → `not_found`；文件缺失、越出 Plan 根、符号链接、frontmatter `task_id` 不符 → `validation_failed`；任务为 `purged` 仍允许只读审计（同 get-task 口径，返回 `read_only: true`）。
+- **正文边界**：`markdown` 为去除 YAML frontmatter 后的原始字节解码（UTF-8），核心不做重写/裁剪；不执行 HTML/脚本、不代取远端媒体（渲染约束在 UI 层，见 ui-spec §4.8）。
+- 本命令只读：不改 task/request/事件；失败不伪造正文返回。
+
+### 5.23.2 施工规划方式 `planner_method`（T2）
+
+- **取值**：`builtin`（默认，现有内置规划链路）｜`spec_plan`（Codex `spec-planner@personal` 插件技能）。当前版本仅这两项，不开放任意插件 ID 与市场操作。
+- **入口**：`start-plans.items[].planner_method`（缺省 `builtin`）；`planner_config.default_method`（`builtin|spec_plan`，缺省 `builtin`）为规划面板的默认预选——`default_method` 是 UI 预选初值，**item 未给 `planner_method` 时仍按 `builtin` 解释**，不回写已排队请求。
+- **请求固化**：`payload_json` 在 §5.22.2 字段基础上增加 `planner_method`；`spec_plan` 时额外固化 `plugin_id="spec-planner@personal"` 与 `plugin_version`（`codex plugin list` 的实际版本号）。`model_config` 快照、`planner_input_sha256` 规则不变。
+- **幂等**：`planner_method` 属于请求身份的一部分——已授权 queued 且 `input_sha256` 相同但 `planner_method` 不同 → `conflict`（不暗换方式）；全同 → `deduplicated`。缺字段的旧请求按 `builtin` 解释。
+- **能力门**：`planner-capabilities.planner_methods`（§5.22.6）。`builtin` 可用性 = 现有 codex 检查；`spec_plan` 需 `codex plugin list --json --marketplace personal` 确认 `spec-planner@personal` 已安装且启用，并在其安装源核对 manifest 与 `skills/spec-plan/SKILL.md` 存在；缺失 → `available:false` + `reason`（中文）。排队后插件被移除/禁用 → 该请求**明确失败**（`report failed`，材料保留），**不静默改用 builtin**。
+- **builtin 执行路径**不变（§5.22.3：`--ignore-user-config -s read-only --output-schema` 等）。
+- **spec_plan 执行路径**（用户选中后）：新开 `codex exec` 会话，**不带 `--ignore-user-config`**（该标志会隔离插件），prompt 以 `$spec-plan` 显式引用已安装技能；保留 `-s read-only`、`--ephemeral`、`--json`、`-o`、`--output-schema`、模型快照与超时/心跳；provider 解析沿用 config.toml 用户配置（不做 v2.1 的 `-c` 覆写，因为 user config 未被忽略）；本轮指令明确「本次不写文件，完整 Markdown 放入 `plan_markdown`」。输出仍走 §5.22.3 的 `ready|needs_input`/`questions`/frontmatter/哈希/远端复验/`publish-plan` 契约；模型自述「已用插件」不算启用证据——以 `tools/list`/argv 审计为准。
+- `job.json` 记录 `planner_method` 与 `plugin_version`（有则），不写凭据。
+
+### 5.23.3 PI-Desktop 任务执行后端 `pi_desktop`（T3）
+
+**范围**：只改变任务执行轮次的后端；dispatch/monitor 控制端与 review 控制端仍按各自环境运行（§5.23.5）。
+- **`exec_config` 扩展**（同一 settings JSON，向后兼容）：
+
+```json
+{"provider": "...", "model": "...", "reasoning_effort": "...",
+ "agent_preset": "...", "backend": "pi|pi_desktop",
+ "pi_desktop": {"connection_file": "<abs>",
+                "provider_id": "...", "model_id": "...",
+                "thinking_level": "off|minimal|low|medium|high|xhigh|max",
+                "permission_mode": "ask|accept-edits|auto"},
+ "updated_at": "ISO"}
+```
+
+  - 缺 `backend` 一律按 `pi` 解释（旧数据零迁移）。`pi` 分支沿用四字段；`pi_desktop` 分支五字段中 `permission_mode` **必须经用户显式保存**——`set-exec-config` 不允许后端切换时自动补 `auto`。
+  - `set-exec-config` 对**当前 backend** 的必填组合整体校验、原子保存；切换后端不删除另一组已存字段（`pi` 四字段与 `pi_desktop` 块可共存，`agent_preset` 不映射 PI-Desktop 全局配置）。
+- **轮次快照**：dispatch claim 把所选分支固化进 `execution_rounds.config_json`：pi → `{backend:"pi",provider,model,reasoning_effort,agent_preset}`；pi_desktop → `{backend:"pi_desktop",connection_file,provider_id,model_id,thinking_level,permission_mode}`。旧轮次缺 `backend` 按 `pi` 读。`ROUND_BACKENDS` 扩为 `(pi, codex, pi_desktop)`；`job.json`、`get-session`、dispatch-prepare/confirm 同样接受 `pi_desktop`。
+- **`exec-capabilities` 扩展**：桌面分支为 `{available,detail,tools_ok,version}`，只检测已保存配置。`detail` 为脱敏原因；顶层 `ok/checks` 仍为 PI CLI 分支检查，不能阻止桌面配置保存或冒充控制端模型已验证。连接文件要求 owner-only、active=true、PID 存活、loopback `/mcp`、Bearer 握手；PID 存活不单独证明服务身份。必需工具为 `pi_turn_get/pi_session_create/pi_session_configure/pi_agent_prompt/pi_agent_status/pi_session_get/pi_agent_stop/pi_agent_abort/pi_desktop_invoke`。型号通过通用 `providers/list`（args=[]）确认 provider 存在且未禁用后，再调用 `providers/listModels`（args=[{providerId,source:"cache"}]）精确匹配 modelId；unwrap `{operation,result}`，允许已配置模型的 cache/fallback，禁止 refresh/远端探测。该检查只证明本地配置存在，不证明凭据或远端可用。保存为结构校验，服务离线仍可保存；缺工具/服务/型号阻止派发，不自动切回 pi。token/完整连接文件/Authorization 永不进入 DB、argv、UI、日志。
+- **能力前置（子任务 E）**：`pi_turn_get` 是 PI-Desktop 本机 MCP 控制面的只读增补——Host RPC `session.getTurn {sessionId, turnId}` → Electron Main 只读 `turnGet` IPC → MCP 同名工具，统一返回 `{sessionId, turnId, status:"running"|"completed"|"error"|"aborted", errorCode?, endedAt?}`（ISO8601）。只按本机 `turns` 表**同 session+turn 双键**查询；不存在或跨 session → `not_found`；不返回提示词/转录/凭据。不新增端口/认证/表/写权限。自动完成判定**只认**该持久终态，不得以 `pi_agent_status.isRunning=false` 代替。
+- **派发状态机（pi_desktop 分支）**：claim（backend=pi_desktop 快照）→ `dispatch-prepare` → `dispatch-begin-send`（远端迁移不变）→ `dispatch-start` → `dispatch-confirm`；`dispatch-fail` 不变。
+  - `dispatch-prepare` evidence：`{session_marker, repository, backend:"pi_desktop", config:{...}}`；marker/repository/backend/config 快照全等校验同 pi 分支，计划哈希自 claim 未变。
+  - `dispatch-start`：以该轮 claim 固化快照复核可用性（连接文件/token/tools/provider/model，不能改用当前全局配置）→ 意图落盘（同一轮次只允许一次真实启动，mark_intent 语义不变）→ 创建独立 worktree（同 §5.18.1）→ 重算计划哈希核验 → 拉起 `python3 -m kanpilot.pi_desktop_worker --spec <spec.json>`。worker：经连接文件 token 完成 MCP `initialize`→ `pi_session_create(projectPath=worktree, mode="agent", providerId/modelId/thinkingLevel)` → 必要时 `pi_session_configure(id, confirm:true, permissionMode=已保存值)` → 计划正文超出 MCP 2 MiB 请求限制 → 发送前报验证错误（不入队）→ `pi_agent_prompt(sessionId, content=任务标识+计划哈希+完整已核验计划正文)`，返回 `{turnId}` 记 `job.send_state="sent"`；**不用** `pi_project_open` 全局切换、不把 PI-Desktop 的 Plan/Goal 审批当作 KaneoPilot 计划发布。
+  - 首个 `session` 事件写入 events.jsonl 的条件：`pi_turn_get` 确认同一 session/turn 为 `running` 且 worker 已 `heartbeat` 回报核心；极短任务已为 `completed` 时，以同一持久 turn 记录（status=completed + endedAt）证明实际启动后再写 session 事件、heartbeat 与 confirm。**符合「已排队≠已开始」**。
+  - `dispatch-confirm` evidence：`{session_marker, repository, backend:"pi_desktop", session_id, turn_id, config:{...}}`；核心核验启动意图、events.jsonl session 事件、turn_id 匹配、config 快照 → running 迁移不变（sent/send_state/monitor 请求/释放串行位）。
+- **观察与完成**：Plus `messages[].id` 为字符串身份；分页使用物理 `messageStart/messageEnd`，向前读取至 hasMoreBefore=false，不按 ID 数值比较或消息数组长度推算。工具读取 toolStatus/toolArgs/toolResult/toolCompletedAt/isError，保持 toolCallId；MCP_RESULT_LIMIT、缺页、未知消息结构或最终空转录均不能完成。worker 以 `pi_agent_status` + 分页 `pi_session_get` 采集进度/记录，按消息 ID/修订去重映射到 `events.jsonl`/会话阅读器；分页不完整/截断保留证据并阻止成功判定。`job.json` 保存 `session_id`/`turn_id`/`pi_desktop_pid`/status/脱敏 config（不含 token）。**执行会话标 finished 的条件**：`pi_turn_get.status=completed` 且同轮会话记录已持久读全；任务完成仍依赖现有 monitor 验证与 Review。
+- **异常归因**：`pi_turn_get.status ∈ {error, aborted}` → job `failed`/`needs_user`（存 `errorCode`）。服务重启但持久 turn 已结束 → 按身份恢复读取；仍 `running`、发送响应丢失、身份不符或无法归因 → `send_state=unknown`/失联记录，**绝不自动重复 `pi_session_create` 或 `pi_agent_prompt`**；同一 `run_id` 超时/重启后不得再次发送。停止/超时先 `pi_agent_stop`，必要时 `pi_agent_abort`，并以 `pi_turn_get` 核实终态——「停止请求已接受」不等于已停止。
+- **桌面消息修订投影**：事件可携带 `source_message_id:string` 与递增正整数 `source_revision`，日志 seq 仍单调。会话消息 id 为 `desktop:<source_message_id>:<event_type>`，revision 使用源修订，seq 使用该修订的最新事件序号，以保证游标能收到旧消息更新；相同工具输入/结果按事件类型区分。历史 pi/codex 事件没有这两字段时沿用 `round:<seq>` 与内容哈希修订。
+- **T3 Plus R1 失败约束**：每次持久 turn 响应核对 sessionId/turnId。prompt 响应丢失保持 send_state=unknown，currentTurnId 仅作候选证据，不自动恢复发送。只读连接恢复最多三次且总计不超过 10 秒，重读同一连接文件；不重放任何创建/配置/发送操作。恢复后仍 running 或无法确认身份/终态转人工。stop/abort 接受不等于已停止，未取得持久终态须明确“可能仍在运行”。意图后 worktree/哈希/Popen 失败记录失败证据，只有意图的重复 start 返回 conflict，而非伪 started。
+- **`pi_desktop` worker spec.json 键**：`{backend, task_id, run_id, session_marker, plan_sha256, config_snapshot, connection_file?, worktree_path, worktree_mode, timeout_seconds, request_id, db_path}`——`request_id`/`db_path` 供 worker 经核心命令回报 heartbeat，`plan_sha256` 供 worker 发送前重算核验；不得含 token。
+
+### 5.23.4 Review 环境 `get/set-review-config`（T5）
+
+- settings 键 `review_config`（JSON）：`{mode:"inherit"|"custom", provider?, model?, reasoning_effort?, updated_at}`。
+- `get-review-config {}` → `{"config": {...}|null, "defaults": {"mode":"inherit"}}`；未保存或 `inherit` **保持当前实际行为**（review 控制端继承本机 PI 默认会话配置）。
+- `set-review-config {mode, provider?, model?, reasoning_effort?}`：`custom` 时 provider/model/effort 必填并经 `exec-capabilities` 校验（同 §5.17.2 规则）；校验失败 `bad_request`，旧值不变；成功 → 原子保存 + event `review_config_updated`（detail 脱敏快照）。
+- `custom` 生效点：`executor_runner --stage review` 启动时把 `{provider, model, reasoning_effort}` 固化为 pi 参数（本轮 review 会话专用），记录脱敏快照到运行日志；保存只影响**下一次** review 控制端启动，不改运行中进程。固定提示词仍来自 `core/executor_prompts/review.md`，不复用任务执行的 `agent_preset`。评审修复计划属规划环境，不走 review_config。
+
+### 5.23.5 控制端配置来源（v3 明确）
+
+- `dispatch`/`monitor` 控制端**继续继承 PI 默认会话设置**，不读取 `exec_config`/`review_config`；设置页明示该来源，不得伪称 exec_config 控制这两个进程。
+- `review` 控制端来源 = `review_config.mode`（inherit→PI 默认；custom→固化快照）。
+- 任务执行轮次来源 = `exec_config.backend` 分支（§5.23.3）。三个来源独立展示，互不覆盖。
+
+### 5.23.6 Plus 本地目录读取 `pi-desktop-catalog`（T3.5）
+
+- 命令只读，不写 `settings`、执行配置、Plus 数据库或用户文件：
+
+```json
+pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id":"optional-provider-id"}
+```
+
+  - 两个字段均可省略。`connection_file` 省略时解析核心进程 HOME 下 `~/.pi-desktop-plus/mcp-control.json`；显式传入须为绝对路径。仅使用确定路径，不扫描 `.pi-desktop`、开发 profile、其他 HOME 或 `PI_DESKTOP_DATA_DIR`。
+  - 读取顺序：复用 `load_connection` 校验 owner-only 文件权限、`active`、PID、loopback `/mcp`、Bearer 和兼容协议；MCP `initialize`/`tools/list`；通用 invoke `providers/list`（`args:[]`）；`settings/get`（`args:[]`）；对唯一选中的启用 provider 调 `providers/listModels`（`args:[{providerId,source:"cache"}]`）。禁止 refresh/OAuth、远端 `/models`、session 操作、prompt 或任何写操作。`source` 响应只允许 `cache|fallback`，其他值作为错误拒绝。
+  - 默认选择：有效的 `settings.defaultProviderId` 必须精确匹配启用 provider；仅当该字段缺省且启用 provider 恰好一个时可选唯一 provider。模型优先使用 `settings.defaultModelId`，缺省时使用所选 provider 的 `defaultModelId`；存在的默认 ID 必须精确匹配该 provider 本地目录。只有两个默认都缺省且目录恰好一个模型时才选唯一模型。无默认且多个候选时不得取数组首项。调用方传 `provider_id` 时只为该启用 provider 取目录；返回中的 `default_*` 仍是 Plus 全局默认。
+  - `models[].thinking_levels` 优先取该 provider `providers/list` 中对应配置模型的非空 `thinkingLevels`；其次取目录模型的非空 `supportedThinkingLevels`；再次取 provider 的非空 `supportedThinkingLevels`；缺失则返回 `[]`，由 UI 显示全部合法枚举并标记支持范围未确认。`default_thinking_level` 仅取 provider 配置模型的同名字段。不得从 session/list 的当前活动会话推断全局默认；不得把空数组当成模型不支持思考。
+  - 成功响应形状：`{connection_file,providers:[{id,name,enabled,default_model_id,models:[{id,name,thinking_levels,default_thinking_level}]}],default_provider_id,default_model_id,selected_provider_id,catalog_source}`。只有当前选中 provider 有 `models`，其余 provider 的 `models=[]`；多启用 provider 且无有效默认时 `selected_provider_id=null`、`catalog_source=null`，由用户选择后以 `provider_id` 再查。无 provider/无模型是成功空目录，不能伪装成 MCP 失败。
+  - 连接、工具、设置或目录读取失败使用通用错误信封并携带脱敏原因，UI 保留草稿与上一份目录。完整 `settings/get`、provider baseUrl/凭据标志、manifest 全文、Bearer/token、请求头不得进入命令响应、UI、日志、SQLite、argv 或轮次快照。token 仅在连接和 MCP 客户端内存使用。
+- 设置页仅把结果应用到未保存草稿：默认 path 只在 path 草稿为空时填充；已保存的 `pi_desktop` 配置照常播种并保持原样，只更新候选。没有已保存桌面配置时，仅在各字段仍为空时依上述默认规则填入 provider/model/thinking。`permission_mode` 不从 Plus 获取，不自动补 `auto`。读取及刷新不调用 `set-exec-config`；必须由用户显式保存后才影响新轮次。详见 `docs/ui-spec.md` §4.9 T3.5。
 ## 6. 常量
 
 - `PROJECTS`：`Music→example-project-01`、`Library→example-project-02`、`StudyTool→example-project-03`、`Comic→example-project-04`、`Feedback→example-project-05`；仓库根 `~/Documents/Code/Project/Personal Project/<项目名>`。
@@ -822,5 +930,5 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - `LEGACY_STATE_ROOT = ~/Library/Application Support/Codex`（KaneoPlanner/KaneoExecutor/KaneoReviewer）
 - `APP_SUPPORT = ~/Library/Application Support/KaneoPilot`（DB、备份、报告缓存）
 - `TODO_SLUGS = {to-do, todo}`；`REVIEW_SLUGS = {in-review, review}`；`DONE_SLUGS = {done}`。
-- 计划 frontmatter 必填：`task_id project_id project_name repository source_sha256 requirements_sha256 planner_model reasoning_effort implementation_status generated_at`；standard 要求 `planner_model=gpt-6-astra, reasoning_effort=medium`；review_fix 要求 `planner_model=gpt-5.6-sol, reasoning_effort=xhigh` 且含 `review_report_path review_report_sha256 review_source_task_id review_key`。
+- 计划 frontmatter 必填：`task_id project_id project_name repository source_sha256 requirements_sha256 planner_model reasoning_effort implementation_status generated_at`；planner_model/reasoning_effort 须与该请求的 `model_config` 快照一致（§5.22.6；旧记录缺快照时回落默认 `standard=gpt-6-astra/medium`、`review_fix=gpt-5.6-sol/xhigh`）；review_fix 另含 `review_report_path review_report_sha256 review_source_task_id review_key`。
 - 已知限制：Kaneo 服务端无 CAS，桥接的先读后写有远端并发窗口；本地事务只序列化本地写入，不声称阻止人工远端竞争。

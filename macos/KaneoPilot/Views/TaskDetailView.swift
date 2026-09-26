@@ -5,7 +5,8 @@ import SwiftUI
 struct TaskDetailView: View {
     let detail: TaskDetail
     let events: [EventItem]
-
+    /// §4.1 T4：详情浮层内嵌时关闭「尝试与时间线」块（由「记录」分段承载）。
+    var showsHistory: Bool = true
     @EnvironmentObject private var model: AppViewModel
     @State private var confirm: ConfirmableAction?
     /// v2 §5.20：回收站任务「永久从列表移除」确认。
@@ -131,7 +132,7 @@ struct TaskDetailView: View {
                 if hasExecution { executionSection }
                 if hasKaneo { kaneoSection }
                 if hasReview { reviewSection }
-                historySection
+                if showsHistory { historySection }
                 if isBlocked { blockedSection }
             }
             .padding(Spacing.l)
@@ -309,54 +310,7 @@ struct TaskDetailView: View {
     // MARK: 5. 尝试与时间线
 
     private var historySection: some View {
-        DetailSection(title: "尝试与时间线") {
-            if let attempts = detail.attempts, !attempts.isEmpty {
-                Text("尝试记录")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-                Table(attempts) {
-                    TableColumn("时间") { a in
-                        Text(TimeFormat.short(a.startedAt)).font(.kpSmall)
-                    }
-                    TableColumn("阶段") { a in
-                        Text(Labels.kind(a.kind)).font(.kpSmall)
-                    }
-                    TableColumn("结果") { a in
-                        Text(Labels.outcome(a.outcome)).font(.kpSmall)
-                    }
-                    TableColumn("说明") { a in
-                        Text(a.note ?? "—").font(.kpSmall).lineLimit(1)
-                    }
-                }
-                .frame(minHeight: 40, maxHeight: 160)
-            }
-            if !events.isEmpty {
-                Text("事件时间线")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-                ForEach(events, id: \.listID) { event in
-                    HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-                        Text(TimeFormat.short(event.at))
-                            .font(.kpSmall)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 88, alignment: .leading)
-                        Text(Labels.eventKind(event.kind))
-                            .font(.kpSmall)
-                            .frame(width: 72, alignment: .leading)
-                        Text(event.detail?.text ?? "")
-                            .font(.kpSmall)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Spacer(minLength: 0)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-            } else if detail.attempts?.isEmpty ?? true {
-                Text("暂无尝试与事件记录")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        TaskHistoryView(attempts: detail.attempts, events: events)
     }
 
     // MARK: 6. 阻塞

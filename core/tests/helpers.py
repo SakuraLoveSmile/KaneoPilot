@@ -77,6 +77,57 @@ def make_pi_fixture(root: Path):
     }
 
 
+def make_codex_fixture(root: Path, with_provider: bool = True,
+                       inline_token: bool = True):
+    """codex 隔离夹具（v2.1，protocol §5.22.3 服务商解析测试约定）：
+
+    伪造 CODEX_HOME（config.toml + auth.json）与 codex 可执行 stub。
+    ``with_provider=True`` 时写入 custom/Sub2API 形态的 model_providers 段；
+    ``inline_token=True`` 用 experimental_bearer_token（内联凭据→env 路径），
+    False 用 env_key=KANPILOT_TEST_CODEX_KEY（环境引用路径）。返回 env dict。
+    token 为假值 ``test-bearer-token-000000``；测试断言它不出现在 argv/输出。
+    """
+    codex_home = root / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    lines = [
+        'model = "gpt-6-astra"',
+        'model_reasoning_effort = "medium"',
+    ]
+    if with_provider:
+        lines.append('model_provider = "custom"')
+        lines += [
+            "",
+            "[model_providers.custom]",
+            'name = "Sub2API"',
+            'base_url = "http://127.0.0.1:9/v1"',
+            'wire_api = "responses"',
+            "requires_openai_auth = true",
+        ]
+        if inline_token:
+            lines.append('experimental_bearer_token = "test-bearer-token-000000"')
+        else:
+            lines.append('env_key = "KANPILOT_TEST_CODEX_KEY"')
+    (codex_home / "config.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    codex_bin = root / "codex-bin"
+    codex_bin.write_text(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo "
+        "\"codex-cli 0.157.0\"; fi\nexit 0\n",
+        encoding="utf-8",
+    )
+    codex_bin.chmod(0o755)
+    env = {
+        "KANPILOT_CODEX_HOME": str(codex_home),
+        "KANPILOT_CODEX_BIN": str(codex_bin),
+    }
+    if with_provider and not inline_token:
+        env["KANPILOT_TEST_CODEX_KEY"] = "test-env-key-00000000"
+    return env
+
+
+FAKE_BEARER_TOKEN = "test-bearer-token-000000"
 def path_qs(path):
     """解析 url query 段 → {key: [values]}（fake 路由按 status 过滤用）。"""
     from urllib.parse import parse_qs, urlsplit
@@ -198,6 +249,8 @@ class KanpilotTestCase(unittest.TestCase):
         }
         # v1.6：pi 隔离夹具（dispatch 可用性门 §5.17.3 依赖）。
         self._env.update(make_pi_fixture(self.root))
+        # v2.1：codex 隔离夹具（custom/Sub2API 形态，T1 服务商解析测试）。
+        self._env.update(make_codex_fixture(self.root))
         self._saved = {k: os.environ.get(k) for k in self._env}
         os.environ.update(self._env)
         self.fake = FakeKaneoClient()

@@ -175,7 +175,7 @@ def _to_running(factory, cli, tmp_env, mode="ok") -> SimpleNamespace:
     run_id = claim["run_id"]
     assert ctx["backend"] == "pi"
     assert set(ctx["exec_config"]) == {
-        "provider", "model", "reasoning_effort", "agent_preset",
+        "backend", "provider", "model", "reasoning_effort", "agent_preset",
     }
 
     prep = cli("dispatch-prepare", {

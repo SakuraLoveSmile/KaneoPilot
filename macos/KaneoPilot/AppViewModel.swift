@@ -259,6 +259,17 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// v3 §5.23.1（T1）：get-plan 计划正文核验读取（只读；调用方传当前
+    /// 视图快照 plan_sha256 做预期核验，conflict = 计划自发布后已变更）。
+    func fetchPlan(taskID: String, expectedPlanSha256: String? = nil) async throws -> GetPlanResponse {
+        var payload: [String: Any] = ["task_id": taskID]
+        if let expectedPlanSha256, !expectedPlanSha256.isEmpty {
+            payload["expected_plan_sha256"] = expectedPlanSha256
+        }
+        return try await client.run("get-plan", payload: payload,
+                                    as: GetPlanResponse.self)
+    }
+
     func runDoctor() async {
         let online = doctorOnline
         actionInFlight = "诊断中"
@@ -615,6 +626,92 @@ final class AppViewModel: ObservableObject {
     func openPlanning(focusTaskID: String? = nil) {
         planningFocusTaskID = focusTaskID
         planningPresented = true
+    }
+
+    // MARK: - v2.1 §5.22.6 Codex 规划配置
+
+    /// get-planner-config 缓存（设置页 + 规划面板摘要共用）。
+    @Published var plannerConfig: GetPlannerConfigResponse?
+    /// planner-capabilities 缓存（服务商/认证/模型目录，只读展示）。
+    @Published var plannerCapabilities: PlannerCapabilitiesResponse?
+    @Published var plannerLoading = false
+    @Published var plannerSaving = false
+    /// 读取失败原文（保留已有内容 + 重试，ui-spec §6）。
+    @Published var plannerError: String?
+
+    /// 某组（standard/review_fix）生效值：已保存优先，回落 defaults。
+    func plannerEffective(_ group: String) -> PlannerGroupConfig? {
+        plannerConfig?.effective(group)
+    }
+
+    /// 规划面板摘要：首次进入时读取一次（轻量 best-effort，失败下轮重试）。
+    func loadPlannerConfig() async {
+        guard plannerConfig == nil else { return }
+        if case .success(let response) = await attempt({
+            try await self.client.run("get-planner-config",
+                                      as: GetPlannerConfigResponse.self)
+        }) {
+            plannerConfig = response
+        }
+    }
+
+    /// 设置页「重新读取本机配置」：并发拉取 get-planner-config +
+    /// planner-capabilities；失败保留已有内容并给错误原文。
+    func refreshPlannerConfig() async {
+        guard !plannerLoading else { return }
+        plannerLoading = true
+        defer { plannerLoading = false }
+        async let configResult = attempt {
+            try await self.client.run("get-planner-config",
+                                      as: GetPlannerConfigResponse.self)
+        }
+        async let capsResult = attempt {
+            try await self.client.run("planner-capabilities",
+                                      as: PlannerCapabilitiesResponse.self)
+        }
+        let (c, caps) = await (configResult, capsResult)
+        var error: String? = nil
+        if case .success(let v) = c { plannerConfig = v }
+        else if case .failure(let e) = c { error = e.coreMessage }
+        if case .success(let v) = caps { plannerCapabilities = v }
+        else if case .failure(let e) = caps { error = error ?? e.coreMessage }
+        plannerError = error
+    }
+
+    /// 保存 set-planner-config {standard, review_fix, default_method?}：
+    /// 成功 toast + 更新缓存；失败返回核心 error 原文（调用方红字展示，
+    /// 草稿不动）。default_method 仅在核心回传该字段时携带（v3 §5.23.2；
+    /// 旧核心拒收未知字段，故不带）。
+    @discardableResult
+    func savePlannerConfig(standard: PlannerGroupConfig,
+                           reviewFix: PlannerGroupConfig,
+                           defaultMethod: String? = nil) async -> String? {
+        guard !plannerSaving else { return "正在保存规划配置" }
+        plannerSaving = true
+        defer { plannerSaving = false }
+        do {
+            var payload: [String: Any] = [
+                "standard": standard.fields,
+                "review_fix": reviewFix.fields,
+            ]
+            if let defaultMethod, plannerConfig?.supportsDefaultMethod == true {
+                payload["default_method"] = defaultMethod
+            }
+            let response = try await client.run(
+                "set-planner-config",
+                payload: payload,
+                as: GetPlannerConfigResponse.self)
+            plannerConfig = GetPlannerConfigResponse(
+                config: response.config,
+                defaults: response.defaults ?? plannerConfig?.defaults,
+                updatedAt: response.updatedAt,
+                defaultsMethod: response.defaultsMethod
+                    ?? plannerConfig?.defaultsMethod)
+            showToast("已保存，仅影响新建规划请求")
+            return nil
+        } catch {
+            return error.coreMessage
+        }
     }
 
     // MARK: - v2 §5.22.4 确认并安排执行（confirm_dispatch）
