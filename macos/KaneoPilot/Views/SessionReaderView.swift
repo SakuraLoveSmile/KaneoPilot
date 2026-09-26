@@ -53,6 +53,9 @@ final class SessionReaderStore: ObservableObject {
     private var settlingToBottom = false
     /// 自动滚动批次号：后发起的批次接管标记，旧批次回落时不清除新标记。
     private var autoScrollGeneration = 0
+    /// 用户触发的重排（折叠/展开、搜索过滤）进行中：期间滚动几何不可信。
+    private var layoutChanging = false
+    private var layoutChangeTask: Task<Void, Never>?
 
     private var client: CoreClient?
     private var cursor: String?
@@ -379,6 +382,21 @@ final class SessionReaderStore: ObservableObject {
 
     func toggleCollapsed(_ id: String) {
         if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
+        beginLayoutChange()
+    }
+
+    /// 折叠/展开、搜索过滤都会让 LazyVStack 重排：重排中间态里 document 高度
+    /// 会瞬时短于内容，距底被算成 0（§4.5 判底依据），从而把「上滚离开底部」
+    /// 误判成「贴底」并把视口拉回底部——实测收起长消息即被拉到会话末尾。
+    /// 重排落地前忽略滚动几何，用户的上滚状态与视口位置都保持不变。
+    func beginLayoutChange() {
+        layoutChanging = true
+        layoutChangeTask?.cancel()
+        layoutChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard !Task.isCancelled else { return }
+            self?.layoutChanging = false
+        }
     }
 
     /// 视图回传（内容高度 / 可视高度偏好）：只记高度，不判跟随。
@@ -396,8 +414,10 @@ final class SessionReaderStore: ObservableObject {
     ///
     /// 自动滚到底尚未落地时（settlingToBottom）距离会瞬时变大——那是纠正
     /// 过程中的中间态，不是用户离开底部，改判会产生假「有新内容」并停住跟随。
+    /// 折叠/展开与搜索过滤的重排（layoutChanging）同理会把中间态算成贴底，
+    /// 期间一并忽略。
     func updateDistanceFromBottom(_ distance: CGFloat) {
-        guard !settlingToBottom else { return }
+        guard !settlingToBottom, !layoutChanging else { return }
         if distance < 48 {
             following = true
             hasNewContent = false
@@ -851,7 +871,7 @@ struct SessionReaderView: View {
                                 message: message,
                                 query: store.search,
                                 collapsed: store.collapsed.contains(message.listID),
-                                onToggle: { store.toggleCollapsed(message.listID) }
+                                onToggle: { toggleCollapsed(message, proxy: proxy) }
                             )
                             .id(message.listID)
                         }
@@ -902,6 +922,10 @@ struct SessionReaderView: View {
                 .onChange(of: store.messages.count) { _, _ in
                     if store.following { scrollToBottom(proxy) }
                 }
+                .onChange(of: store.search) { _, _ in
+                    // 过滤后的列表是另一种重排：中间态不得判成「贴底」。
+                    store.beginLayoutChange()
+                }
                 .onChange(of: store.following) { _, following in
                     if following { scrollToBottom(proxy) }
                 }
@@ -923,6 +947,25 @@ struct SessionReaderView: View {
                     if grew, store.following, height > 0 { scrollToBottom(proxy) }
                 }
             }
+        }
+    }
+
+    /// 逐条展开/收起：收起会把内容高度骤减，macOS 滚动视图随即把视口甩到内容
+    /// 末尾（实测视口在顶部、中部时都会发生），应用本身并未发起滚动。用户不在
+    /// 跟随态（上滚翻阅）时按「该条顶部对齐」补一次定位，把视口留在正在看的那条
+    /// 消息上；贴底跟随时不动，仍保持最新。
+    private func toggleCollapsed(_ message: SessionMessage, proxy: ScrollViewProxy) {
+        let collapsing = !store.collapsed.contains(message.listID)
+        let keepPlace = collapsing && !store.following
+        store.toggleCollapsed(message.listID)
+        guard keepPlace else { return }
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(message.listID, anchor: .top)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            proxy.scrollTo(message.listID, anchor: .top)
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            proxy.scrollTo(message.listID, anchor: .top)
         }
     }
 
