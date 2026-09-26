@@ -367,7 +367,9 @@ class PiDesktopCase(KanpilotTestCase):
         plan.write_text(f"---\n{front}---\n{body}", encoding="utf-8")
         return plan
 
-    def seed_claimed_dispatch(self, task_id=TASK_ID, run_id=RUN_ID) -> str:
+    def seed_claimed_dispatch(
+        self, task_id=TASK_ID, run_id=RUN_ID, status="claimed"
+    ) -> str:
         """登记一条 claimed dispatch 请求（worker heartbeat 目标）。
 
         requests.task_id 有 FK——隔离 spec 的单测没有 tasks 行，按
@@ -382,13 +384,78 @@ class PiDesktopCase(KanpilotTestCase):
                     task_id=None, requested_by="test",
                 )
                 conn.execute(
-                    "UPDATE requests SET status='claimed', run_id=? "
+                    "UPDATE requests SET status=?, run_id=? "
                     "WHERE request_id=?",
-                    (run_id, request["request_id"]),
+                    (status, run_id, request["request_id"]),
                 )
             return request["request_id"]
         finally:
             conn.close()
+
+    def write_lost_observer_scene(self, spec, run_dir,
+                                  status="failed", send_state="sent",
+                                  detail=None):
+        """观察者退出后的现场（§5.23.7）：session 事件 + 已确认发送的 job。
+
+        ``detail`` 缺省用真实事故里的 ``heartbeat_failed:`` 前缀（旧版本把
+        心跳被拒误判成轮次失败）；``status=failed`` 时补 terminal(failed)。
+        """
+        run_dir = Path(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        now = util.now_iso()
+        detail = detail or (
+            f"heartbeat_failed: request 8d44b63a status=succeeded run={RUN_ID}"
+        )
+        job = {
+            "task_id": TASK_ID,
+            "run_id": RUN_ID,
+            "backend": "pi_desktop",
+            "session_id": SESSION_ID,
+            "session_title": "PI-Desktop 会话",
+            "turn_id": TURN_ID,
+            "send_state": send_state,
+            "pi_desktop_pid": 999999,
+            "config": spec.get("config"),
+            "pid": 999999,
+            "status": status,
+            "started_at": now,
+            "ended_at": now if status == "failed" else None,
+            "exit_code": 1 if status == "failed" else None,
+            "detail": detail if status == "failed" else None,
+        }
+        (run_dir / dsh_events.JOB_NAME).write_text(
+            json.dumps(job, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        lines = [
+            {"v": 1, "seq": 1, "ts": now, "type": "session",
+             "session_id": SESSION_ID, "session_title": "PI-Desktop 会话",
+             "turn_id": TURN_ID},
+            {"v": 1, "seq": 2, "ts": now, "type": "user", "content": "计划正文"},
+        ]
+        if status == "failed":
+            lines.append({"v": 1, "seq": 3, "ts": now, "type": "terminal",
+                          "outcome": "failed", "reason": detail})
+        (run_dir / dsh_events.EVENT_LOG_NAME).write_text(
+            "".join(
+                json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
+                for line in lines
+            ),
+            encoding="utf-8",
+        )
+        return job
+
+    def kill_process_group(self, pid):
+        """清理子进程（worker 以 start_new_session 独立进程组启动）。"""
+        if not util.pid_alive(pid):
+            return
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
     def make_spec(self, run_dir, cwd, plan_path, **overrides) -> dict:
         run_dir = Path(run_dir)
@@ -1374,6 +1441,366 @@ class TestRunReal(PiDesktopCase):
         events = self.read_events(run_dir)
         self.assertIsNone(dsh_events.session_event(events))
 
+    def test_observe_heartbeat_stale_run_keeps_round_running(self):
+        """dispatch-confirm 后心跳必回 stale_run（正常路径）→ 观察继续、轮次
+        不判失败（§5.23.7；真实事故：会话仍在跑却被写成 heartbeat_failed）。"""
+        # 观察循环要跨过至少一个心跳周期（fast_clock 下 0.05s），才能覆盖
+        # 「confirm 之后心跳被拒」的真实时序。
+        self.server.turn_statuses = ["running", "running", "running",
+                                     "completed"]
+        self.server.messages = self.default_messages()
+        _sync(self.server)
+        spec, run_dir = self._base()
+        calls = {"n": 0}
+        real_heartbeat = pi_desktop_worker._heartbeat
+
+        def heartbeat_after_confirm(spec_arg):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_heartbeat(spec_arg)   # 启动证明心跳时请求仍 claimed
+            raise util.KanpilotError(
+                "stale_run",
+                f"request {spec['request_id']} status=succeeded run={RUN_ID}",
+            )
+
+        with mock.patch.object(
+            pi_desktop_worker, "_heartbeat", heartbeat_after_confirm
+        ):
+            rc = self._run(spec)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(calls["n"], 2, "观察循环应至少再试一次心跳")
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["exit_code"], 0)
+        self.assertEqual(job["send_state"], "sent")
+        self.assertIn("stale_run", job.get("heartbeat_stopped", ""))
+        self.assertNotIn("heartbeat_failed", json.dumps(job, ensure_ascii=False))
+        self.assertEqual(self.server.prompt_count, 1)
+        events = self.read_events(run_dir)
+        self.assertEqual(events[-1]["type"], "terminal")
+        self.assertEqual(events[-1]["outcome"], "completed")
+
+    def test_resume_settles_round_without_re_prompt(self):
+        """--resume 只读续接：不建会话、不重发 prompt、不重复 session 事件，
+        按持久终态收尾并保留上一次收尾现场（§5.23.7）。"""
+        self.server.turn_status = "completed"
+        self.server.messages = self.default_messages()
+        _sync(self.server)
+        spec, run_dir = self._base()
+        before = self.write_lost_observer_scene(spec, run_dir)
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            rc = pi_desktop_worker.run_real(spec, resume=True)
+        self.assertEqual(rc, 0)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["exit_code"], 0)
+        self.assertEqual(job["send_state"], "sent")
+        self.assertIsNotNone(job["observation_resumed_at"])
+        self.assertEqual(job["observe_pid"], os.getpid())
+        self.assertEqual(job["resume_previous"]["status"], "failed")
+        self.assertEqual(job["resume_previous"]["detail"], before["detail"])
+        self.assertIsNone(job["resume_detail"])
+        self.assertEqual(self.server.prompt_count, 0, "绝不重发 prompt")
+        self.assertIsNone(self.server.configured, "绝不重下发 permission_mode")
+        events = self.read_events(run_dir)
+        self.assertEqual(
+            len([e for e in events if e["type"] == "session"]), 1,
+            "session 事件不得重复写",
+        )
+        self.assertEqual(events[-1]["type"], "terminal")
+        self.assertEqual(events[-1]["outcome"], "completed")
+
+    def test_resume_with_unreadable_turn_defers_and_keeps_evidence(self):
+        """续接观察只负责观察：turn 读不到 → 退出码 3 + resume_detail，
+        既有轮次终态、detail 与事件一字不改（§5.23.7）。"""
+        self.server.turn_missing = True
+        _sync(self.server)
+        spec, run_dir = self._base()
+        before = self.write_lost_observer_scene(spec, run_dir)
+        before_events = self.read_events(run_dir)
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            rc = pi_desktop_worker.run_real(spec, resume=True)
+        self.assertEqual(rc, 3)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["detail"], before["detail"])
+        self.assertEqual(job["exit_code"], 1)
+        self.assertIn("startup_unproven", job["resume_detail"])
+        self.assertEqual(job["resume_attempts"], 1)
+        self.assertNotIn("observation_resumed_at", job)
+        self.assertEqual(self.read_events(run_dir), before_events)
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_resume_rejects_foreign_or_unsent_scene(self):
+        """身份不符/未确认发送/已 finished 的现场不得续接，也不得改写。"""
+        spec, run_dir = self._base()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        job = self.write_lost_observer_scene(spec, run_dir)
+        # ① 身份不符：task_id/run_id 与目录不一致。
+        foreign = dict(job, run_id="other-run")
+        (run_dir / dsh_events.JOB_NAME).write_text(
+            json.dumps(foreign, ensure_ascii=False), encoding="utf-8"
+        )
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            self.assertEqual(pi_desktop_worker.run_real(spec, resume=True), 1)
+        # ② 未确认发送（send_state=not_sent，且无 session 事件）。
+        self.write_lost_observer_scene(spec, run_dir, send_state="not_sent")
+        (run_dir / dsh_events.EVENT_LOG_NAME).write_text(
+            "", encoding="utf-8"
+        )
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            self.assertEqual(pi_desktop_worker.run_real(spec, resume=True), 1)
+        # ③ 已按 completed 收尾：幂等返回 0，不连接、不写文件。
+        finished = self.write_lost_observer_scene(spec, run_dir, status="running")
+        finished.update({"status": "finished", "exit_code": 0, "detail": None})
+        (run_dir / dsh_events.JOB_NAME).write_text(
+            json.dumps(finished, ensure_ascii=False), encoding="utf-8"
+        )
+        snapshot = (run_dir / dsh_events.JOB_NAME).read_text(encoding="utf-8")
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            self.assertEqual(pi_desktop_worker.run_real(spec, resume=True), 0)
+        self.assertEqual(
+            (run_dir / dsh_events.JOB_NAME).read_text(encoding="utf-8"),
+            snapshot,
+        )
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertEqual(self.server.init_count, 0)
+
+    def test_resume_accepts_false_failure_scene_and_repairs_send_state(self):
+        """旧版假失败现场（send_state=unknown + session 事件 + turn_id）可续接：
+        session 事件即「已确认发送」硬证据，续接后 send_state 修回 sent、原值
+        留在 resume_previous（§5.23.7 真实事故现场）。"""
+        self.server.turn_status = "completed"
+        self.server.messages = self.default_messages()
+        _sync(self.server)
+        spec, run_dir = self._base()
+        before = self.write_lost_observer_scene(spec, run_dir,
+                                                send_state="unknown")
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            rc = pi_desktop_worker.run_real(spec, resume=True)
+        self.assertEqual(rc, 0)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["send_state"], "sent")
+        self.assertEqual(job["resume_previous"]["send_state"], "unknown")
+        self.assertEqual(job["resume_previous"]["detail"], before["detail"])
+        self.assertEqual(job["resume_previous"]["status"], "failed")
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_resume_without_job_scene_is_rejected(self):
+        """无现场（job.json/session 事件缺失）→ 拒绝续接，绝不新建会话。"""
+        spec, run_dir = self._base()
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            self.assertEqual(pi_desktop_worker.run_real(spec, resume=True), 1)
+        self.assertFalse((run_dir / dsh_events.JOB_NAME).exists())
+        self.assertEqual(self.server.init_count, 0)
+
+    def test_resume_defers_when_round_timeout_elapsed(self):
+        """已超时的轮次不续接、也不停止仍在跑的会话（交人工判定终态）。"""
+        self.server.turn_status = "running"
+        _sync(self.server)
+        spec, run_dir = self._base()
+        job = self.write_lost_observer_scene(spec, run_dir, status="running")
+        job["started_at"] = "2020-01-01T00:00:00+00:00"
+        (run_dir / dsh_events.JOB_NAME).write_text(
+            json.dumps(job, ensure_ascii=False), encoding="utf-8"
+        )
+        before_events = self.read_events(run_dir)
+        with self.env(KANPILOT_PI_DESKTOP_FAKE=None), self.fast_clock():
+            rc = pi_desktop_worker.run_real(spec, resume=True)
+        self.assertEqual(rc, 3)
+        current = self.read_job(run_dir)
+        self.assertEqual(current["status"], "running")
+        self.assertIn("round_timeout_elapsed", current["resume_detail"])
+        self.assertEqual(self.read_events(run_dir), before_events)
+        self.assertEqual(self.server.stop_calls, 0, "不得动手停止会话")
+        self.assertEqual(self.server.abort_calls, 0)
+
+    def test_round_detail_supersedes_stale_terminal_after_resume(self):
+        """读取层：续接接管后（status=running + observation_resumed_at），早于
+        接管时刻的 terminal(failed) 不再作为轮次判定依据（事件行 append-only
+        不改写），原文转 terminal_superseded 供审计；接管后新写的 terminal 才
+        是本轮终态（§5.23.7 真实事故的「界面仍显示轮次失败」）。"""
+        spec, run_dir = self._base()
+        self.write_lost_observer_scene(spec, run_dir)  # 旧版假失败现场
+        events = self.read_events(run_dir)
+        self.assertEqual(
+            dsh_events.terminal_event(events)["outcome"], "failed"
+        )
+
+        row = {
+            "task_id": TASK_ID, "run_id": RUN_ID, "backend": "pi_desktop",
+            "session_id": SESSION_ID, "session_title": "PI-Desktop 会话",
+            "run_status": "running", "config_json": None,
+            "worktree_path": None, "started_at": util.now_iso(),
+            "pid": 999999, "save_state": None, "saved_at": None,
+            "created_at": None, "updated_at": None,
+        }
+        resumed = {}
+        resumed.update(self.read_job(run_dir))
+        resumed.update({
+            "status": "running", "ended_at": None, "exit_code": None,
+            "detail": None, "observe_pid": 999999,
+            "observation_resumed_at": "2099-01-01T00:00:00+00:00",
+        })
+        detail = dsh_events.round_detail(row, resumed, events)
+        self.assertEqual(detail["run_status"], "running")
+        self.assertIsNone(
+            detail["terminal"], "接管前的假失败不再是本轮终态"
+        )
+        self.assertEqual(detail["terminal_superseded"]["outcome"], "failed")
+        self.assertTrue(
+            detail["terminal_superseded"]["reason"].startswith(
+                "heartbeat_failed"
+            ),
+            "旧终态原文保留在审计位",
+        )
+
+        # 接管后新写 terminal(completed) → 恢复为本轮终态；旧终态仍在审计位。
+        events = events + [{
+            "v": 1, "seq": 4, "ts": "2099-01-01T00:00:05+00:00",
+            "type": "terminal", "outcome": "completed",
+        }]
+        detail = dsh_events.round_detail(row, resumed, events)
+        self.assertEqual(detail["terminal"]["outcome"], "completed")
+        self.assertEqual(detail["terminal_superseded"]["outcome"], "failed")
+
+        # 未续接的现场（status=failed，无 observation_resumed_at）不启用作废：
+        # 终态照旧可读，失败判定不被吞掉。
+        failed_job = self.read_job(run_dir)
+        self.assertEqual(failed_job["status"], "failed")
+        detail = dsh_events.round_detail(
+            row, failed_job, self.read_events(run_dir)
+        )
+        self.assertEqual(detail["terminal"]["outcome"], "failed")
+        self.assertIsNone(detail["terminal_superseded"])
+
+
+    # ---------------------------------------------------- 采集器分页（真实事故）
+
+    def _collector(self, client, name="events-collect.jsonl"):
+        log = pi_desktop_worker._EventLog(self.root / name)
+        collector = pi_desktop_worker._Collector(client, SESSION_ID, log, "")
+        collector.gate_open = True        # 测试直接开闸，不依赖启动证明
+        return collector
+
+    def test_result_limit_shrinks_page_until_readable(self):
+        """控制面对大页返回 MCP_RESULT_LIMIT 截断（真实事故：messageLimit=200
+        的页被截断，长会话轮次恒判 transcript_incomplete）→ 采集按半数自适应
+        缩小页大小重试，读通后不得判截断。"""
+        messages = self.default_messages()
+        limits = []
+
+        class Client:
+            def session_get(self, session_id, message_before=None,
+                            message_limit=None):
+                limits.append(message_limit)
+                if (message_limit or 0) > 20:
+                    return {"truncated": True, "reason": "MCP_RESULT_LIMIT"}
+                end = len(messages) if message_before is None                     else int(message_before)
+                pool = messages[:end]
+                page = pool[-message_limit:]
+                start = end - len(page)
+                return {"session": {
+                    "id": SESSION_ID, "messages": page,
+                    "messageStart": start, "messageEnd": end,
+                    "hasMoreBefore": start > 0, "hasMoreAfter": False,
+                }}
+
+        collector = self._collector(Client())
+        collector.poll()
+        self.assertIn(
+            pi_desktop_worker._PAGE_LIMIT, limits, "先按初始页大小请求"
+        )
+        self.assertIn(
+            pi_desktop_worker._PAGE_LIMIT // 2, limits, "超限后减半重试"
+        )
+        self.assertEqual(
+            limits[-1], pi_desktop_worker._PAGE_LIMIT // 2,
+            "降档后的页大小沿用到后续页，不每页重试",
+        )
+        self.assertFalse(collector.truncated, "缩页后应读到完整链")
+        self.assertIsNone(collector.read_error)
+        self.assertEqual(collector.verified_end, len(messages))
+
+    def test_repoll_stops_at_verified_prefix_and_rewrite_falls_back(self):
+        """整段链核验过一次后，后续轮询在「已核验前缀」锚点处收敛，不再重读
+        整段历史（长会话不被页数上限判死）；前缀被改写（锚点指纹变化）→
+        安全回退为整段重读。"""
+        base = self.default_messages()
+        messages = [
+            dict(base[index % len(base)], id=f"msg-{index}")
+            for index in range(len(base) * 20)
+        ]
+        page_size = 2
+        calls = []
+
+        class Client:
+            def session_get(self, session_id, message_before=None,
+                            message_limit=None):
+                limit = min(message_limit or page_size, page_size)
+                end = len(messages) if message_before is None                     else int(message_before)
+                pool = messages[:end]
+                page = pool[-limit:]
+                start = end - len(page)
+                calls.append((message_before, start, end))
+                return {"session": {
+                    "id": SESSION_ID, "messages": page,
+                    "messageStart": start, "messageEnd": end,
+                    "hasMoreBefore": start > 0, "hasMoreAfter": False,
+                }}
+
+        collector = self._collector(Client())
+        collector.poll()
+        self.assertFalse(collector.truncated)
+        self.assertEqual(collector.verified_end, len(messages))
+        full_walk = len(calls)
+        self.assertGreater(full_walk, 2, "首轮必须自 0 起核验整段链")
+
+        calls.clear()
+        collector.poll()
+        self.assertGreater(len(calls), 0)
+        self.assertLessEqual(len(calls), 2, "第二轮回读应在锚点处收敛")
+        self.assertEqual(collector.verified_end, len(messages))
+
+        # 前缀（与新页重叠的段）被改写 → 指纹不符 → 不据旧前缀提前收敛。
+        messages[len(messages) - 1] = dict(
+            messages[-1], content="前缀末端被改写"
+        )
+        calls.clear()
+        collector.poll()
+        self.assertGreater(len(calls), 2, "重叠段指纹失配必须回退整段重读")
+        self.assertEqual(collector.verified_end, len(messages))
+
+    def test_transient_truncation_does_not_poison_round(self):
+        """一次瞬时截断只作废本次轮询：下一轮读通后截断标记清除，轮次仍可判
+        完成（旧实现把截断粘死，长会话轮次永无成功可能）。"""
+        messages = self.default_messages()
+        broken = {"on": True}
+
+        class Client:
+            def session_get(self, session_id, message_before=None,
+                            message_limit=None):
+                if broken["on"]:
+                    return {"truncated": True, "reason": "MCP_RESULT_LIMIT"}
+                end = len(messages) if message_before is None                     else int(message_before)
+                pool = messages[:end]
+                page = pool[-message_limit:]
+                start = end - len(page)
+                return {"session": {
+                    "id": SESSION_ID, "messages": page,
+                    "messageStart": start, "messageEnd": end,
+                    "hasMoreBefore": start > 0, "hasMoreAfter": False,
+                }}
+
+        collector = self._collector(Client())
+        collector.poll()
+        self.assertTrue(collector.truncated, "本轮确实读到截断")
+        broken["on"] = False
+        collector.poll()
+        self.assertFalse(collector.truncated, "下一轮读通 → 截断清除")
+        self.assertEqual(collector.verified_end, len(messages))
+
 
 # ------------------------------------------------------------ dispatch e2e
 
@@ -1547,6 +1974,129 @@ class TestDispatchPiDesktop(PiDesktopCase):
         self.assertEqual(rd.get("backend"), "pi_desktop")
         self.assertEqual(rd.get("turn_id"), turn_id)
         self.assertEqual(rd.get("send_state"), "sent")
+
+    def test_round_observe_reattaches_after_observer_loss(self):
+        """观察者退出后 round-observe 只读续接（不重发 prompt、不新建会话）；
+        观察者仍存活时幂等（deduplicated）——§5.23.7 真实事故回归。"""
+        conn_file = self.write_connection()
+        self._save_pi_desktop_config(conn_file)
+        self.make_ready_task(task_id=TASK_ID)
+        self._init_git_fixture()
+        self.enqueue_dispatch(TASK_ID)
+        claim = self.call(
+            "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
+        )
+        self.assertTrue(claim["claimed"], claim)
+        run_id = claim["run_id"]
+        ctx = claim["context"]
+        evidence = {
+            "session_marker": ctx["session_marker"],
+            "repository": ctx["repository"],
+            "backend": "pi_desktop",
+            "config": ctx["exec_config"],
+        }
+        self.call("dispatch-prepare", {
+            "task_id": TASK_ID, "run_id": run_id, "evidence": evidence,
+        })
+        self.call("dispatch-begin-send", {
+            "task_id": TASK_ID, "run_id": run_id,
+        })
+        # 真 worker 观察一个不落终态的 turn（fake MCP 常驻 running）。
+        self.server.turn_statuses = []
+        self.server.turn_status = "running"
+        self.server.messages = []
+        _sync(self.server)
+        with self.env(KANPILOT_PI_START_WAIT="20"):
+            started = self.call("dispatch-start", {
+                "task_id": TASK_ID, "run_id": run_id,
+            })
+        self.assertEqual(started["status"], "started", started)
+        worker_pid = started["pid"]
+        self.addCleanup(self.kill_process_group, worker_pid)
+        run_dir = self.runs_root / TASK_ID / run_id
+        events, _ = dsh_events.iter_events(
+            run_dir / dsh_events.EVENT_LOG_NAME
+        )
+        turn_id = events[0]["turn_id"]
+        confirmed = self.call("dispatch-confirm", {
+            "task_id": TASK_ID, "run_id": run_id,
+            "evidence": {**evidence, "session_id": started["session_id"],
+                         "turn_id": turn_id, "protocol_seen": True},
+        })
+        self.assertEqual(confirmed["status"], "running")
+
+        # ① 观察进程仍在 → 幂等返回，不拉起第二个观察者。
+        alive = self.call("round-observe", {
+            "task_id": TASK_ID, "run_id": run_id, "executor": "kaneo-monitor",
+        })
+        self.assertEqual(alive["status"], "observing", alive)
+        self.assertTrue(alive["deduplicated"])
+        self.assertEqual(alive["pid"], worker_pid)
+        self.assertEqual(self.server.prompt_count, 1)
+
+        # ② 模拟观察者消失（应用崩溃/被清理），Plus 侧会话仍在跑并随后完成。
+        self.kill_process_group(worker_pid)
+        deadline = time.monotonic() + 20.0
+        while util.pid_alive(worker_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(util.pid_alive(worker_pid))
+        lost = dsh_events.read_job(
+            run_dir, TASK_ID, run_id, backend="pi_desktop"
+        )[0]
+        self.assertEqual(lost["status"], "running")
+        self.assertEqual(lost["send_state"], "sent")
+        self.server.turn_status = "completed"
+        self.server.messages = self.default_messages()
+        _sync(self.server)
+
+        with self.env(KANPILOT_PI_START_WAIT="20"):
+            resumed = self.call("round-observe", {
+                "task_id": TASK_ID, "run_id": run_id,
+                "executor": "kaneo-monitor",
+            })
+        self.assertIn(resumed["status"], ("observing", "settled"), resumed)
+        self.assertNotEqual(resumed["pid"], worker_pid)
+        self.addCleanup(self.kill_process_group, resumed["pid"])
+
+        final = None
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            final = dsh_events.read_job(
+                run_dir, TASK_ID, run_id, backend="pi_desktop"
+            )[0]
+            if final and final.get("status") == "finished":
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(final)
+        self.assertEqual(final["status"], "finished")
+        self.assertEqual(final["exit_code"], 0)
+        self.assertEqual(final["observe_pid"], resumed["pid"])
+        self.assertIsNotNone(final["observation_resumed_at"])
+        self.assertEqual(self.server.prompt_count, 1, "续接绝不重发 prompt")
+
+        events, _ = dsh_events.iter_events(
+            run_dir / dsh_events.EVENT_LOG_NAME
+        )
+        self.assertEqual(
+            len([e for e in events if e["type"] == "session"]), 1,
+            "session 事件不得重复写",
+        )
+        self.assertEqual(events[-1]["type"], "terminal")
+        self.assertEqual(events[-1]["outcome"], "completed")
+
+        # ③ 读取层透出观察进程身份与 run_status（§5.23.7）。
+        detail = self.call("get-session", {
+            "task_id": TASK_ID, "run_id": run_id,
+        })
+        rd = detail["round_detail"]
+        self.assertEqual(rd["observe_pid"], resumed["pid"])
+        self.assertEqual(rd["run_status"], "finished")
+        self.assertEqual(rd["terminal"]["outcome"], "completed")
+        # ④ 轮次已收尾 → 再调 round-observe 幂等返回 finished。
+        done = self.call("round-observe", {
+            "task_id": TASK_ID, "run_id": run_id,
+        })
+        self.assertEqual(done["status"], "finished")
 
     def test_prepare_rejects_wrong_backend_evidence(self):
         """pi_desktop 轮次收 backend=\"pi\" 证据 → conflict（后端不符）。"""

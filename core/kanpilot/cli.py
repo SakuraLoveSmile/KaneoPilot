@@ -282,6 +282,14 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "run_id": (True, "str")},
         cmd_dispatch.cmd_dispatch_start,
     ),
+    # v3（§5.23.7）：pi_desktop 轮次观察进程续接（只读接管，绝不重发）。
+    "round-observe": (
+        {
+            "task_id": (True, "str"), "run_id": (True, "str"),
+            "executor": (False, "str"),
+        },
+        cmd_dispatch.cmd_round_observe,
+    ),
     # v1.6：执行端状态（App ExecutorScheduler 单飞判断与设置页显示）。
     "executor-status": ({}, cmd_config.cmd_executor_status),
     # v2（§5.22）：手动规划链——待办发现 / 材料准备 / 提交规划。

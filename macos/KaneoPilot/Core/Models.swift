@@ -642,6 +642,7 @@ struct RoundTerminal: Decodable {
     var reasonLabel: String? {
         switch reason {
         case "model_unavailable": return "模型不可用"
+        case "EMPTY_MODEL_RESPONSE": return "模型返回空响应（可重试）"
         case "auth_failed": return "认证失败"
         case "request_rejected": return "请求被拒绝"
         case "timeout": return "超时"
