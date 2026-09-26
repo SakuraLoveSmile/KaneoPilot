@@ -50,6 +50,10 @@ final class SessionReaderStore: ObservableObject {
     var visibleHeight: CGFloat = 0
     /// 内容在滚动坐标系中的 minY（贴底判定用）。
     var lastMinY: CGFloat = 0
+    /// 正在自动滚到底（含二次纠正）：期间的偏移抖动不得改判 following。
+    private var settlingToBottom = false
+    /// 自动滚动批次号：后发起的批次接管标记，旧批次回落时不清除新标记。
+    private var autoScrollGeneration = 0
 
     private var client: CoreClient?
     private var cursor: String?
@@ -242,6 +246,8 @@ final class SessionReaderStore: ObservableObject {
         interrupted = false
         hasMore = false
         hasNewContent = false
+        // 切换轮次即重新定位：新会话从最新消息开始跟随（用户随后上滚仍会停下）。
+        following = true
         roundDetail = nil
         generation += 1
         let generation = self.generation
@@ -368,8 +374,15 @@ final class SessionReaderStore: ObservableObject {
     }
 
     /// 视回传：距底 <48pt 视为贴底（恢复跟随）。
-    func updateScroll(minY: CGFloat, visibleHeight: CGFloat) {
+    ///
+    /// 自动滚到底尚未落地时（settlingToBottom）偏移会瞬时变大——那是纠正
+    /// 过程中的中间态，不是用户离开底部，改判会产生假「有新内容」并停住跟随。
+    func updateScroll(minY: CGFloat, visibleHeight: CGFloat,
+                      contentHeight: CGFloat) {
         self.visibleHeight = visibleHeight
+        self.contentHeight = contentHeight
+        lastMinY = minY
+        guard !settlingToBottom else { return }
         let maxOffset = max(0, contentHeight - visibleHeight)
         let offset = min(max(-minY, 0), maxOffset)
         let distance = maxOffset - offset
@@ -379,6 +392,18 @@ final class SessionReaderStore: ObservableObject {
         } else {
             following = false
         }
+    }
+
+    /// 开始一次「滚到底 + 二次纠正」：返回批次号，落地后回传 didAutoScroll。
+    func willAutoScroll() -> Int {
+        settlingToBottom = true
+        autoScrollGeneration += 1
+        return autoScrollGeneration
+    }
+
+    /// 该批次落地（仅最新批次可清除 settling 标记）。
+    func didAutoScroll(_ token: Int) {
+        if token == autoScrollGeneration { settlingToBottom = false }
     }
 
     func jumpToLatest() {
@@ -665,6 +690,13 @@ struct SessionReaderView: View {
                     .foregroundStyle(Color.secondary)
                     .accessibilityLabel("轮次配置：\(configSummary)")
             }
+            // §5.23.8：瞬时模型错误后同一会话自动重开，只读展示接续审计。
+            if let adoptions = store.roundDetail?.turnAdopted, !adoptions.isEmpty {
+                Label("已自动接续 \(adoptions.count) 次", systemImage: "arrow.triangle.branch")
+                    .foregroundStyle(Color.secondary)
+                    .accessibilityLabel("已自动接续 \(adoptions.count) 次，同一会话自动重开，未重发指令")
+                    .help(adoptionHelp(adoptions))
+            }
             Spacer(minLength: 0)
             if store.hasMore {
                 Text("还有更多历史消息")
@@ -677,6 +709,16 @@ struct SessionReaderView: View {
         .padding(.horizontal, Spacing.l)
         .padding(.bottom, Spacing.s)
         .accessibilityElement(children: .combine)
+    }
+
+    /// §5.23.8 接续审计详情（悬停提示；来自 round_detail.turn_adopted，不改判定）。
+    private func adoptionHelp(_ adoptions: [TurnAdoption]) -> String {
+        adoptions.map { item in
+            let from = item.from ?? "?"
+            let to = item.to ?? "?"
+            let code = item.code ?? "未知原因"
+            return "\(from) → \(to)（\(code) 后同一会话自动重开）"
+        }.joined(separator: "\n")
     }
 
     // MARK: 搜索框
@@ -814,6 +856,13 @@ struct SessionReaderView: View {
                                 value: geo.frame(in: .named(Self.scrollSpace)).minY)
                         }
                     )
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: SessionContentHeightKey.self,
+                                value: geo.size.height)
+                        }
+                    )
                 }
                 .coordinateSpace(name: Self.scrollSpace)
                 .background(
@@ -823,16 +872,12 @@ struct SessionReaderView: View {
                             value: geo.size.height)
                     }
                 )
-                .onPreferenceChange(SessionScrollHeightKey.self) { height in
-                    store.updateScroll(minY: store.lastMinY, visibleHeight: height)
-                }
                 .overlay(alignment: .bottom) {
                     if !store.following && store.hasNewContent {
                         Button {
+                            // following=true → onChange(following) 走统一的
+                            // 「滚到底 + 二次纠正」，与自动跟随同一条路径。
                             store.jumpToLatest()
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                            }
                         } label: {
                             Label("有新内容", systemImage: "arrow.down.circle.fill")
                                 .font(.kpSmall)
@@ -847,19 +892,50 @@ struct SessionReaderView: View {
                     }
                 }
                 .onChange(of: store.messages.count) { _, _ in
-                    if store.following {
-                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    }
+                    if store.following { scrollToBottom(proxy) }
                 }
                 .onChange(of: store.following) { _, following in
-                    if following {
-                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    }
+                    if following { scrollToBottom(proxy) }
+                }
+                .onAppear {
+                    // 打开即到底：首屏消息常在一次批量里落地，onChange 可能先于
+                    // 布局；这里按当前状态补一次并靠二次纠正收敛。
+                    if store.following { scrollToBottom(proxy) }
+                }
+                .onPreferenceChange(SessionScrollHeightKey.self) { height in
+                    store.updateScroll(minY: store.lastMinY, visibleHeight: height,
+                                       contentHeight: store.contentHeight)
+                }
+                .onPreferenceChange(SessionContentHeightKey.self) { height in
+                    let grew = height > store.contentHeight + 0.5
+                    store.updateScroll(minY: store.lastMinY,
+                                       visibleHeight: store.visibleHeight,
+                                       contentHeight: height)
+                    // 内容增长（含同一消息的流式更新）且仍在跟随 → 跟到最新；
+                    // 上滚离开底部后 following=false，绝不再拉回。
+                    if grew, store.following, height > 0 { scrollToBottom(proxy) }
                 }
             }
         }
         .onPreferenceChange(SessionScrollOffsetKey.self) { minY in
-            store.updateScroll(minY: minY, visibleHeight: store.visibleHeight)
+            store.updateScroll(minY: minY, visibleHeight: store.visibleHeight,
+                               contentHeight: store.contentHeight)
+        }
+    }
+
+    /// 布局落地后滚到最新：立即 scrollTo 会按 LazyVStack 的估算高度落位（实测
+    /// 停在第一条 prompt），故做两次短延迟纠正；期间 settling 标记避免把纠正
+    /// 过程的偏移误判成「离开底部」。
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        let token = store.willAutoScroll()
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            store.didAutoScroll(token)
         }
     }
 }
@@ -867,6 +943,14 @@ struct SessionReaderView: View {
 // MARK: - 滚动位置偏好
 
 private struct SessionScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// 内容总高度偏好（LazyVStack 布局落地后回传，用于判底与增量跟随）。
+private struct SessionContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()

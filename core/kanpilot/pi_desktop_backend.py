@@ -422,7 +422,8 @@ class MCPClient:
         not_found/validation_failed/internal。"""
         result = self._rpc(
             "tools/call", {"name": name, "arguments": arguments or {}},
-            retry=name in {"pi_turn_get", "pi_agent_status", "pi_session_get"},
+            retry=name in {"pi_turn_get", "pi_agent_status", "pi_session_get",
+                           "pi_plans_pending"},
         )
         if not isinstance(result, dict):
             raise util.KanpilotError(
@@ -509,6 +510,39 @@ class MCPClient:
             args["messageLimit"] = int(message_limit)
         return self.call_tool("pi_session_get", args)
 
+    def plans_pending(self, session_id: str) -> dict:
+        """本会话待审批的 Plan/Goal 契约（§5.23.9 只读；`plans` 数组）。"""
+        return self.call_tool("pi_plans_pending", {"sessionId": session_id})
+
+    def plans_resolve(
+        self, proposal_id: str, session_id: str, turn_id: str,
+        tool_call_id: str, action: str,
+        target_permission_mode: Optional[str] = None,
+        version: Optional[int] = None,
+    ) -> dict:
+        """dangerous 操作：批准/拒绝目标契约，必带 confirm=true。
+
+        批准成功即由宿主在同会话开启执行轮次（新的 turnId）；KaneoPilot 的
+        计划已在本地批准，这里批准的是 PI-Desktop 侧的契约形式（§5.23.9）。
+        """
+        args = {
+            "proposalId": proposal_id, "sessionId": session_id,
+            "turnId": turn_id, "toolCallId": tool_call_id,
+            "action": action, "confirm": True,
+        }
+        if target_permission_mode:
+            args["targetPermissionMode"] = target_permission_mode
+        if isinstance(version, int) and not isinstance(version, bool) and version > 0:
+            args["version"] = version
+        return self.call_tool("pi_plans_resolve", args)
+
+    def session_list(self, query: Optional[str] = None) -> dict:
+        """会话记录列表（只读）：读会话当前 mode/permissionMode 等生效值。"""
+        args = {}
+        if query:
+            args["query"] = query
+        return self.call_tool("pi_session_list", args)
+
     def agent_stop(self, session_id: str) -> dict:
         return self.call_tool("pi_agent_stop", {"sessionId": session_id})
 
@@ -517,7 +551,7 @@ class MCPClient:
 
 
 def probe_connection(connection_file,
-                     required_tools=constants.PI_DESKTOP_REQUIRED_TOOLS,
+                     required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS,
                      *, provider_id=None, model_id=None, timeout=10) -> dict:
     """exec-capabilities/dispatch-start 就绪探测（§5.23.3）。
 

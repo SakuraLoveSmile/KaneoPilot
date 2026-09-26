@@ -356,7 +356,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
     try:
         result = pi_desktop_backend.probe_connection(
             block.get("connection_file") or "",
-            required_tools=constants.PI_DESKTOP_REQUIRED_TOOLS,
+            required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS,
             provider_id=block.get("provider_id") or None,
             model_id=block.get("model_id") or None,
             timeout=timeout,
@@ -368,7 +368,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
     # 模块返回 {ok, detail, tools:set, version} → 本模块归一化形状。
     tools = result.get("tools")
     tools_ok = bool(tools) and all(
-        name in tools for name in constants.PI_DESKTOP_REQUIRED_TOOLS
+        name in tools for name in constants.PI_DESKTOP_DISPATCH_TOOLS
     )
     return {
         "available": bool(
