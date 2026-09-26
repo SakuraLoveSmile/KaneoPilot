@@ -20,15 +20,22 @@ worker 职责（写文件 + 经 kanpilot 命令心跳；绝不直写 SQLite）�
    ``PI_DESKTOP_MCP_MAX_REQUEST_BYTES`` → job failed(detail=plan_too_large)
    + terminal(failed)，发送前明确拒绝；
 3. 经连接文件完成 MCP initialize → ``pi_session_create(projectPath=cwd,
-   mode="agent", providerId/modelId/thinkingLevel, title=session_marker)``
+   mode="goal", providerId/modelId/thinkingLevel, title=session_marker)``
    → 已保存 permission_mode 非 inherit 时 ``pi_session_configure(id,
-   mode="agent", confirm=true, permissionMode=已保存值)``；
+   mode="goal", confirm=true, permissionMode=已保存值)``；工具门要求同时
+   具备基础工具与 ``pi_plans_pending``/``pi_plans_resolve``（§5.23.9）；
 4. ``pi_agent_prompt(sessionId, content=instruction + "\n\n" + 计划正文)``
    → 返回 ``{turnId}`` 记 ``job.send_state="sent"`` + session_id/turn_id/
    pi_desktop_pid 写回 job.json；
 5. **启动证明**（§5.23.3）：``pi_turn_get`` 确认同 session/turn=running
    （或已 completed 的持久 turn 记录）且 ``heartbeat`` 回报核心成功，才写
    events.jsonl 首个 ``session`` 事件（含 session_id/turn_id）；
+5b. **Goal 契约审批门**（§5.23.9）：goal 会话的规划轮以「提交目标契约」收
+   官（``planningState ∈ {planning, awaiting_approval}``）——本机代批
+   （``pi_plans_resolve(approve, targetPermissionMode=该轮 permission_mode,
+   confirm=true)``）→ 等宿主在同一会话开启执行轮次 → 换绑该 turn 继续观察
+   （不新建会话、绝不重发 prompt）；契约缺失/批准失败/执行轮次未开启 →
+   明确失败并留痕（``job.goal_approval`` + ``system`` 事件）；
 6. 采集：``pi_agent_status`` + 分页 ``pi_session_get``（messageBefore/
    messageLimit 游标翻页到底），按消息 id + 内容指纹去重映射 events.jsonl
    （session/user/assistant_message/tool_call/tool_result/command_output/
@@ -90,6 +97,11 @@ _MAX_PAGES_PER_POLL = 200        # 单次轮询最多翻页数（防御无界）
 # 该轮次的执行没有中断——只接续这些错误码，且最多接续 _MAX_TURN_ADOPTIONS 次。
 _TRANSIENT_TURN_ERRORS = frozenset({"EMPTY_MODEL_RESPONSE"})
 _MAX_TURN_ADOPTIONS = 5
+# Goal 契约审批门（§5.23.9）：turn completed 后等契约落库的宽限，以及批准后等
+# 宿主开启执行轮次的宽限。超时一律明确失败，绝不重发 prompt。
+_GOAL_CONTRACT_WAIT_SECONDS = 20.0
+_GOAL_EXECUTION_WAIT_SECONDS = 30.0
+_GOAL_POLL_SECONDS = 1.0
 
 # UiMessage.role → events.jsonl 事件类型（§5.15.5/§5.18.2 词汇）。
 _SHELL_TOOL_NAMES = frozenset(
@@ -785,7 +797,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
             _write_json(job_path, job)
         tools = client.tools_list()
         missing = [
-            name for name in constants.PI_DESKTOP_REQUIRED_TOOLS
+            name for name in constants.PI_DESKTOP_DISPATCH_TOOLS
             if name not in tools
         ]
         if missing:
@@ -816,7 +828,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
                         "validation_failed")
         try:
             created = client.session_create(
-                str(cwd), mode="agent",
+                str(cwd), mode=constants.PI_DESKTOP_EXEC_MODE,
                 provider_id=config.get("provider_id"),
                 model_id=config.get("model_id"),
                 thinking_level=config.get("thinking_level"),
@@ -834,7 +846,8 @@ def run_real(spec: dict, resume: bool = False) -> int:
             _write_json(job_path, job)
             if permission_mode and permission_mode != "inherit":
                 client.session_configure(
-                    session_id, mode="agent", permission_mode=permission_mode
+                    session_id, mode=constants.PI_DESKTOP_EXEC_MODE,
+                    permission_mode=permission_mode,
                 )
         except util.KanpilotError as exc:
             return fail(f"session_setup_failed: {exc.message}",
@@ -939,9 +952,21 @@ def run_real(spec: dict, resume: bool = False) -> int:
             return None
         return str(current)
 
+    def rebind_turn(follow: str) -> None:
+        """换绑到同一会话的新 turn 观察（job 先写；不新建会话、不重发 prompt）。
+
+        调用方负责审计记账与事件留痕（§5.23.8 接续 / §5.23.9 契约批准）。
+        """
+        nonlocal turn_id, observer
+        turn_id = follow
+        job["turn_id"] = follow
+        _write_json(job_path, job)
+        observer = _ReadRecovery(client, config["connection_file"],
+                                 job["session_id"], follow)
+        collector.client = observer
+
     def adopt(follow: str, record: dict) -> None:
         """记账并切换到新 turn 的观察（job 先写、事件留痕；不新建会话）。"""
-        nonlocal turn_id, observer
         turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
         code = str(turn.get("errorCode") or turn.get("error_code") or "")
         history = list(job.get("turn_adopted") or [])
@@ -949,16 +974,148 @@ def run_real(spec: dict, resume: bool = False) -> int:
         history.append({"from": previous, "to": follow, "code": code,
                         "at": util.now_iso()})
         job["turn_adopted"] = history
-        job["turn_id"] = follow
-        turn_id = follow
-        _write_json(job_path, job)
         log.emit("system", util.now_iso(),
                  content=(f"turn_adopted: {previous} → {follow}"
                           f"（{code} 后同一会话自动重开，继续观察；"
                           f"未重发 prompt）"))
-        observer = _ReadRecovery(client, config["connection_file"],
-                                 job["session_id"], follow)
-        collector.client = observer
+        rebind_turn(follow)
+
+    def pending_goal_contract() -> Optional[dict]:
+        """本会话当前待批准的 Goal 契约（只读；非 goal/无契约 → None）。"""
+        view = client.plans_pending(job["session_id"])
+        plans = view.get("plans")
+        if not isinstance(plans, list):
+            return None
+        for proposal in plans:
+            if not isinstance(proposal, dict):
+                continue
+            if str(proposal.get("kind") or "") != "goal":
+                continue
+            if str(proposal.get("status") or "") != "pending":
+                continue
+            owner = str(proposal.get("sessionId") or job["session_id"])
+            if owner != job["session_id"]:
+                continue
+            return proposal
+        return None
+
+    def goal_contract_gate() -> tuple:
+        """Goal 契约审批门（§5.23.9）。返回 ``(outcome, detail, reason)``。
+
+        - ``none``：本会话无待处理契约（非 goal 轮次，或执行轮次自身收尾）；
+        - ``adopted``：契约已由本机代批，宿主已开启执行轮次并换绑观察；
+        - ``failed``：契约未出现/批准失败/执行轮次未开启——明确失败，
+          绝不重发 prompt（reason 供终态细分）。
+        """
+        approval = job.get("goal_approval")
+        if isinstance(approval, dict) and approval.get("status") == "approved":
+            return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
+        # 只有会话仍处 Goal 契约模式（planning / awaiting_approval）才过审批门：
+        # 批准后宿主把会话切回 Agent 模式，执行轮次 completed 即普通收尾；
+        # 模型未提交契约就结束（状态仍 planning）才是异常。
+        try:
+            status_view = client.agent_status(job["session_id"])
+        except util.KanpilotError:
+            return ("none", "", "")
+        inner = status_view.get("status") or status_view
+        planning_state = inner.get("planningState")
+        if planning_state not in ("planning", "awaiting_approval"):
+            return ("none", "", "")
+        planning_turn = turn_id
+        contract_deadline = time.monotonic() + _GOAL_CONTRACT_WAIT_SECONDS
+        while True:
+            try:
+                proposal = pending_goal_contract()
+            except util.KanpilotError as exc:
+                return ("failed", f"goal_contract_unreadable: {exc.message}",
+                        "goal_contract_unreadable")
+            if proposal is not None:
+                break
+            if time.monotonic() >= contract_deadline:
+                return ("failed",
+                        "goal_contract_missing: goal 模式轮次结束但未观察到"
+                        f"待批准的目标契约（planningState={planning_state}；"
+                        "未重发 prompt）",
+                        "goal_contract_missing")
+            time.sleep(_GOAL_POLL_SECONDS)
+        proposal_id = str(proposal.get("id") or "")
+        title = str(proposal.get("title") or "").strip()
+        if permission_mode not in constants.EXEC_PERMISSION_MODES:
+            return ("failed",
+                    f"goal_approval_permission_unknown: 已保存 permission_mode "
+                    f"不可用于契约批准：{permission_mode}",
+                    "goal_approval_permission_unknown")
+        log.emit("system", util.now_iso(),
+                 content=(f"goal_contract: 目标契约待批准（{title or proposal_id}）；"
+                          f"本机代批后同一会话开启执行轮次"))
+        version = proposal.get("version")
+        try:
+            client.plans_resolve(
+                proposal_id, job["session_id"],
+                str(proposal.get("turnId") or planning_turn),
+                str(proposal.get("toolCallId") or ""),
+                "approve",
+                target_permission_mode=permission_mode,
+                version=(version if isinstance(version, int)
+                         and not isinstance(version, bool) else None),
+            )
+        except util.KanpilotError as exc:
+            # 并发代批（另一个观察进程已批）不算失败：以「契约已不再 pending」
+            # 为准继续等执行轮次；仍 pending 才是真失败。
+            try:
+                still_pending = pending_goal_contract()
+            except util.KanpilotError:
+                still_pending = None
+            if still_pending is not None:
+                return ("failed", f"goal_approval_failed: {exc.message}",
+                        "goal_approval_failed")
+        execution_turn = None
+        execution_deadline = time.monotonic() + _GOAL_EXECUTION_WAIT_SECONDS
+        while True:
+            try:
+                status_view = client.agent_status(job["session_id"])
+            except util.KanpilotError:
+                status_view = None
+            if isinstance(status_view, dict):
+                inner = status_view.get("status") or status_view
+                current = inner.get("currentTurnId")
+                if current and str(current) != planning_turn:
+                    candidate = str(current)
+                    try:
+                        record = client.turn_get(job["session_id"], candidate)
+                        if (_turn_identity_matches(record, job["session_id"],
+                                                   candidate)
+                                and _turn_status(record) in
+                                ("running", "completed", "error", "aborted")):
+                            execution_turn = candidate
+                            break
+                    except util.KanpilotError:
+                        pass          # 候选尚未落库：继续等
+            if time.monotonic() >= execution_deadline:
+                break
+            time.sleep(_GOAL_POLL_SECONDS)
+        if not execution_turn:
+            return ("failed",
+                    "goal_execution_unstarted: 目标契约已批准但 "
+                    f"{_GOAL_EXECUTION_WAIT_SECONDS:g}s 内未观察到同会话执行轮次"
+                    "（宿主 dispatcher 未开启；未重发 prompt）",
+                    "goal_execution_unstarted")
+        job["goal_approval"] = {
+            "proposal_id": proposal_id,
+            "title": title,
+            "status": "approved",
+            "planning_turn_id": planning_turn,
+            "execution_turn_id": execution_turn,
+            "target_permission_mode": permission_mode,
+            "approved_at": util.now_iso(),
+            "approved_by": "kaneopilot",
+        }
+        log.emit("system", util.now_iso(),
+                 content=(f"goal_approved: {proposal_id} → 执行轮次 "
+                          f"{execution_turn}（权限 {permission_mode}；本机代批，"
+                          f"未重发 prompt）"))
+        rebind_turn(execution_turn)
+        return ("adopted", "", "")
 
     def unknown(detail, reason="unverifiable"):
         if resume:
@@ -1057,6 +1214,15 @@ def run_real(spec: dict, resume: bool = False) -> int:
                 if follow is not None:
                     adopt(follow, record)
                     continue
+            if state == "completed":
+                # §5.23.9：goal 模式的规划轮次以「提交目标契约」结束——审批门
+                # 通过后继续观察同会话执行轮次；否则按普通 completed 收尾。
+                outcome, detail, reason = goal_contract_gate()
+                if outcome == "adopted":
+                    continue
+                if outcome == "failed":
+                    collector.poll()
+                    return finalize("failed", 1, detail, True, "failed", reason)
             break
         if stop_requested:
             if not abort_attempted and now_m >= stop_at + _STOP_GRACE_SECONDS:

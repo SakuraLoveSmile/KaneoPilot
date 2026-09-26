@@ -69,6 +69,15 @@ PI_DESKTOP_REQUIRED_TOOLS = (
     "pi_agent_prompt", "pi_agent_status", "pi_session_get",
     "pi_agent_stop", "pi_agent_abort", "pi_desktop_invoke",
 )
+# 任务执行轮次固定以 Goal 模式建会话（protocol §5.23.9）：Goal 是契约模式——
+# 首轮协商出「目标契约」，审批后宿主在同会话开启执行轮次。审批经这两个工具
+# 完成；缺其一则派发会在审批门停滞，故启动前即失败（unsupported_tools）。
+PI_DESKTOP_GOAL_TOOLS = ("pi_plans_pending", "pi_plans_resolve")
+PI_DESKTOP_EXEC_MODE = "goal"
+# 派发就绪（exec-capabilities / probe / worker 工具门）要求的完整工具集：
+# 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。
+PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
+                             + PI_DESKTOP_GOAL_TOOLS)
 # MCP 单请求上限 2 MiB——计划正文超限在发送前明确失败，不截断。
 PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 

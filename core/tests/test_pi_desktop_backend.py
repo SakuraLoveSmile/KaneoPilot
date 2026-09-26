@@ -49,7 +49,8 @@ TOKEN = "test-mcp-token-0123456789abcdef"
 SESSION_ID = "pd-sess-1"
 TURN_ID = "turn-1"
 FOLLOW_UP_TURN_ID = "turn-2"
-ALL_TOOLS = tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
+ALL_TOOLS = (tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
+            + tuple(constants.PI_DESKTOP_GOAL_TOOLS))
 
 
 # ------------------------------------------------------------ fake MCP server
@@ -173,6 +174,14 @@ class FakeMCPServer:
         self.prompt_landed = False
         self.prompt_content = None
         self.configured = None
+        self.created = None              # pi_session_create 入参（断言 mode=goal）
+        self.plans: list = []            # pi_plans_pending 的待批准契约
+        self.plans_state = "inactive"
+        self.plans_pending_calls = 0
+        self.plans_resolve_calls: list = []
+        self.plans_resolve_mode = "ok"   # ok | error
+        self.execution_turn = None       # 契约获批后宿主开启的执行轮次
+        self.planning_state = "inactive"  # goal 契约模式投影
         self.stop_calls = 0
         self.abort_calls = 0
         self.stop_aborts = False          # agent_stop → turn 立即 aborted
@@ -235,6 +244,7 @@ class FakeMCPServer:
             return {"structuredContent": {"error": {
                 "code": "NOT_FOUND", "message": operation}}}
         if name == "pi_session_create":
+            self.created = dict(args)
             return {"structuredContent": {
                 "session": {"id": self.session_id,
                             "title": args.get("title")}}}
@@ -253,6 +263,7 @@ class FakeMCPServer:
                 "sessionId": args.get("sessionId"),
                 "isRunning": self.is_running,
                 "currentTurnId": self.current_turn,
+                "planningState": self.planning_state,
                 "pendingToolConfirmations": []}}}
         if name == "pi_session_get":
             if self.session_lost:
@@ -303,6 +314,34 @@ class FakeMCPServer:
                 self.follow_up_turn = None
                 self.turn_error_code = None
             return {"structuredContent": record}
+        if name == "pi_plans_pending":
+            self.plans_pending_calls += 1
+            pending = [dict(item) for item in self.plans
+                       if item.get("status") == "pending"]
+            return {"structuredContent": {
+                "plans": pending,
+                "state": "awaiting_approval" if pending else self.plans_state,
+                "kind": "goal",
+            }}
+        if name == "pi_plans_resolve":
+            self.plans_resolve_calls.append(dict(args))
+            if self.plans_resolve_mode != "ok":
+                return {"structuredContent": {"error": {
+                    "code": "INTERNAL", "message": "resolve failed"}}}
+            if args.get("action") == "approve":
+                for item in self.plans:
+                    if item.get("id") == args.get("proposalId"):
+                        item["status"] = "approved"
+                self.plans_state = "inactive"
+                self.planning_state = "inactive"   # 批准后会话切回 Agent
+                # 宿主批准后在同一会话开启执行轮次（新的 turnId）。
+                if self.execution_turn:
+                    self.current_turn = self.execution_turn
+            return {"structuredContent": {
+                "ok": True, "action": args.get("action"),
+                "targetPermissionMode": args.get("targetPermissionMode"),
+                "execution": {"id": "exec-1", "state": "queued"},
+            }}
         if name in ("pi_agent_stop", "pi_agent_abort"):
             if name == "pi_agent_stop":
                 self.stop_calls += 1
@@ -556,6 +595,9 @@ class PiDesktopCase(KanpilotTestCase):
             ("_HEARTBEAT_SECONDS", 0.05),
             ("_PROOF_WAIT_SECONDS", 0.8),
             ("_STOP_GRACE_SECONDS", 0.2),
+            ("_GOAL_CONTRACT_WAIT_SECONDS", 0.5),
+            ("_GOAL_EXECUTION_WAIT_SECONDS", 0.5),
+            ("_GOAL_POLL_SECONDS", 0.05),
         ):
             saved[name] = getattr(pi_desktop_worker, name)
             setattr(pi_desktop_worker, name, value)
@@ -831,6 +873,18 @@ class TestBackendProbe(PiDesktopCase):
         self.assertIn("pi_turn_get", result["detail"])
         self.assertIn("缺少必需工具", result["detail"])
 
+    def test_missing_goal_tool_unavailable(self):
+        """缺 Goal 契约审批工具 → 派发就绪探测即失败（不做事后卡审批门）。"""
+        self.server.tools = [
+            t for t in ALL_TOOLS if t != "pi_plans_pending"
+        ]
+        _sync(self.server)
+        result = pi_desktop_backend.probe_connection(
+            self.write_connection()
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("pi_plans_pending", result["detail"])
+
     def test_mcp_session_lost_auto_reconnect(self):
         """服务端 404 unknown session → 客户端自动重新 initialize 并重试
         一次（该拒绝发生在分发前，重发安全）。"""
@@ -1040,6 +1094,146 @@ class TestRunReal(PiDesktopCase):
         # Authorization Bearer 已发送。
         authz = [r["authorization"] for r in self.server.requests]
         self.assertIn(f"Bearer {TOKEN}", authz)
+
+    # -------------------------------------------- Goal 契约审批门（§5.23.9）
+
+    def _goal_contract(self, proposal_id="prop-goal-1", status="pending"):
+        """Plus ``plans.pending`` 的 Goal 契约条目（host-core camelCase）。"""
+        return {
+            "id": proposal_id,
+            "sessionId": SESSION_ID,
+            "turnId": TURN_ID,
+            "toolCallId": "tool-goal-1",
+            "kind": "goal",
+            "title": "目标契约：按计划完成",
+            "markdown": "# 目标\n\n- 验收：测试通过\n",
+            "question": "批准执行？",
+            "status": status,
+            "version": 3,
+            "createdAt": util.now_iso(),
+            "updatedAt": util.now_iso(),
+        }
+
+    def test_goal_mode_contract_auto_approved_then_execution_observed(self):
+        """§5.23.9：goal 模式建会话；规划轮以契约收官 → 本机代批（留痕）→
+        换绑同会话执行轮次继续观察，绝不重发 prompt。"""
+        _sync(self.server)
+        self.server.turn_statuses = ["running", "completed"]   # 证明 / 规划轮
+        self.server.turn_status = "completed"                  # 执行轮次终态
+        self.server.plans = [self._goal_contract()]
+        self.server.planning_state = "awaiting_approval"
+        self.server.execution_turn = "turn-goal-exec"
+        self.server.messages = self.default_messages()
+        spec, run_dir = self._base()
+        rc = self._run(spec)
+        self.assertEqual(rc, 0)
+
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["turn_id"], "turn-goal-exec")
+        approval = job["goal_approval"]
+        self.assertEqual(approval["status"], "approved")
+        self.assertEqual(approval["proposal_id"], "prop-goal-1")
+        self.assertEqual(approval["planning_turn_id"], TURN_ID)
+        self.assertEqual(approval["execution_turn_id"], "turn-goal-exec")
+        self.assertEqual(approval["target_permission_mode"], "auto")
+        self.assertEqual(approval["approved_by"], "kaneopilot")
+        self.assertNotIn("turn_adopted", job,
+                         "契约批准不是瞬时错误接续，不得混入 turn_adopted")
+
+        # 建会话与配置都下发 goal；批准必带 confirm + 目标权限模式。
+        self.assertEqual(self.server.created["mode"], "goal")
+        self.assertEqual(self.server.configured["mode"], "goal")
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
+        self.assertEqual(self.server.prompt_count, 1, "批准执行不得重发 prompt")
+        self.assertEqual(len(self.server.plans_resolve_calls), 1)
+        resolve = self.server.plans_resolve_calls[0]
+        self.assertEqual(resolve["action"], "approve")
+        self.assertIs(resolve["confirm"], True)
+        self.assertEqual(resolve["targetPermissionMode"], "auto")
+        self.assertEqual(resolve["proposalId"], "prop-goal-1")
+        self.assertEqual(resolve["turnId"], TURN_ID)
+        self.assertEqual(resolve["version"], 3)
+
+        events = self.read_events(run_dir)
+        self.assertEqual(events[0]["type"], "session")
+        self.assertEqual(events[0]["turn_id"], TURN_ID,
+                         "session 事件证明的是规划轮次启动")
+        system = [e.get("content") or "" for e in events
+                  if e["type"] == "system"]
+        self.assertTrue(any("goal_contract" in c for c in system), system)
+        self.assertTrue(any("goal_approved" in c for c in system), system)
+        self.assertEqual(events[-1]["type"], "terminal")
+        self.assertEqual(events[-1]["outcome"], "completed")
+
+    def test_goal_contract_missing_fails_without_resend(self):
+        """会话仍在 goal 契约模式（planning）但轮次已完成、无契约 → 明确失败。"""
+        _sync(self.server)
+        self.server.turn_statuses = ["running", "completed"]
+        self.server.planning_state = "planning"
+        self.server.messages = self.default_messages()
+        spec, run_dir = self._base()
+        rc = self._run(spec)
+        self.assertEqual(rc, 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("goal_contract_missing", job["detail"])
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertEqual(self.server.plans_resolve_calls, [])
+        events = self.read_events(run_dir)
+        self.assertEqual(events[-1]["type"], "terminal")
+        self.assertEqual(events[-1]["outcome"], "failed")
+        self.assertEqual(events[-1]["reason"], "goal_contract_missing")
+
+    def test_goal_approval_failure_fails_without_resend(self):
+        """契约仍 pending 时代批失败 → goal_approval_failed（不重发）。"""
+        _sync(self.server)
+        self.server.turn_statuses = ["running", "completed"]
+        self.server.plans = [self._goal_contract()]
+        self.server.planning_state = "awaiting_approval"
+        self.server.plans_resolve_mode = "error"
+        self.server.execution_turn = "turn-goal-exec"
+        self.server.messages = self.default_messages()
+        spec, run_dir = self._base()
+        rc = self._run(spec)
+        self.assertEqual(rc, 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("goal_approval_failed", job["detail"])
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertEqual(job["turn_id"], TURN_ID, "未批准不得换绑轮次")
+
+    def test_goal_execution_unstarted_fails_without_resend(self):
+        """契约已批准但宿主未开启执行轮次 → goal_execution_unstarted。"""
+        _sync(self.server)
+        self.server.turn_statuses = ["running", "completed"]
+        self.server.plans = [self._goal_contract()]
+        self.server.planning_state = "awaiting_approval"
+        self.server.execution_turn = None       # dispatcher 未开跑
+        self.server.messages = self.default_messages()
+        spec, run_dir = self._base()
+        rc = self._run(spec)
+        self.assertEqual(rc, 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("goal_execution_unstarted", job["detail"])
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertIsNone(job.get("goal_approval"))
+
+    def test_missing_goal_approval_tool_fails_before_session(self):
+        """控制面缺 pi_plans_* → 发送前 unsupported_tools（不留孤儿会话）。"""
+        self.server.tools = [t for t in ALL_TOOLS if t != "pi_plans_resolve"]
+        _sync(self.server)
+        self.server.turn_statuses = ["running", "completed"]
+        self.server.messages = self.default_messages()
+        spec, run_dir = self._base()
+        rc = self._run(spec)
+        self.assertEqual(rc, 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("pi_plans_resolve", job["detail"])
+        self.assertEqual(self.server.prompt_count, 0, "工具门失败前不得建会话/发 prompt")
+        self.assertIsNone(self.server.created)
 
     def test_turn_error_maps_failed_with_error_code(self):
         self.server.turn_status = "error"

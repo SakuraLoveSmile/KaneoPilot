@@ -505,7 +505,7 @@ class ExecBackendConfig(_ReviewCommandsCase):
             return {
                 "ok": True,
                 "detail": "fake ready",
-                "tools": set(exec_config.constants.PI_DESKTOP_REQUIRED_TOOLS),
+                "tools": set(exec_config.constants.PI_DESKTOP_DISPATCH_TOOLS),
                 "version": "1",
             }
 
@@ -531,7 +531,7 @@ class ExecBackendConfig(_ReviewCommandsCase):
         self.assertEqual(kwargs["timeout"], 7)
         self.assertEqual(
             tuple(kwargs["required_tools"]),
-            exec_config.constants.PI_DESKTOP_REQUIRED_TOOLS,
+            exec_config.constants.PI_DESKTOP_DISPATCH_TOOLS,
         )
 
     def test_check_available_uses_flat_round_snapshot(self):
@@ -548,7 +548,7 @@ class ExecBackendConfig(_ReviewCommandsCase):
             return {
                 "ok": True,
                 "detail": "fake ready",
-                "tools": set(exec_config.constants.PI_DESKTOP_REQUIRED_TOOLS),
+                "tools": set(exec_config.constants.PI_DESKTOP_DISPATCH_TOOLS),
                 "version": "1",
             }
 

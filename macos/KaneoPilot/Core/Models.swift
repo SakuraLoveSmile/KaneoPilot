@@ -620,6 +620,9 @@ struct RoundDetail: Decodable {
     let saveState: String?
     let savedAt: String?
     let detail: String?
+    /// §5.23.8：瞬时模型错误后同一会话自动重开的接续审计（null = 从未接续），
+    /// 只作审计展示，不参与完成/失败判定。
+    let turnAdopted: [TurnAdoption]?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
@@ -632,6 +635,14 @@ struct RoundDetail: Decodable {
         }
         return text.isEmpty ? nil : text
     }
+}
+
+/// §5.23.8 round_detail.turn_adopted 单项：旧 turn → 新 turn 与触发错误码。
+struct TurnAdoption: Decodable {
+    let from: String?
+    let to: String?
+    let code: String?
+    let at: String?
 }
 
 struct RoundTerminal: Decodable {

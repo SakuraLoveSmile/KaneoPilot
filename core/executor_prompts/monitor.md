@@ -40,6 +40,14 @@ kanpilot 会话读取（protocol §5.15.5/§5.18.4），不做桌面 UI 操控�
      `reopened:true` 表示核心已解除这条误报产生的 `execution_failed` 阻塞
      （任务回到 running）——按上面「仍在跑」分支继续判定，不得沿用旧 failure
      文案重复 report needs_user。
+     **Goal 契约审批门（§5.23.9）**：pi_desktop 轮次以 Goal（契约）模式执行，
+     规划轮次先协商「目标契约」并由 worker 本机代批后才开启执行轮次。审批门
+     期间轮次仍是 running（`round_detail.run_status=="running"`）——**不得**把
+     PI-Desktop 里规划轮次的 completed 当成执行完成，也不得因等待而改派/重发
+     prompt；只有 `round_detail.terminal` 出现才是终态依据。若终态
+     `failed` 且 detail 含 `goal_contract_missing`/`goal_approval_failed`/
+     `goal_execution_unstarted`，按 `report needs_user` +
+     `failure_code=execution_failed` 交人工（附 detail 原文，不自动重试）。
    **backend 分支**（round_detail.backend 或 SessionInfo.backend）：
    - **pi 轮次**，完成判定必须**同时满足**（§5.18.4，缺一不可）：
      (a) `round_detail.terminal.outcome == "completed"`（主会话终止事件）；
