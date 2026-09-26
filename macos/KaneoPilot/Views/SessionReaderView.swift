@@ -331,15 +331,24 @@ final class SessionReaderStore: ObservableObject {
         for message in incoming {
             if let index = list.firstIndex(where: { $0.id != nil && $0.id == message.id }) {
                 if (message.revision ?? 0) >= (list[index].revision ?? 0) {
+                    // 折叠状态随消息（id）而不是随 revision：修订替换后沿用
+                    // 原状态（用户展开过就保持展开），listID 变化时迁移。
+                    let previousID = list[index].listID
+                    let wasCollapsed = collapsed.contains(previousID)
                     list[index] = message
+                    if previousID != message.listID {
+                        collapsed.remove(previousID)
+                        if wasCollapsed { collapsed.insert(message.listID) }
+                    }
                 }
             } else {
                 list.append(message)
                 added += 1
-                // 工具调用/结果默认折叠
-                if message.tool != nil {
+                // §4.5：工具调用/结果与过长正文默认折叠（逐条可展开）
+                if message.hasCollapsibleContent {
                     collapsed.insert(message.listID)
-                }            }
+                }
+            }
         }
         list.sort { ($0.seq ?? 0) < ($1.seq ?? 0) }
         messages = list
@@ -1106,12 +1115,15 @@ struct SessionMessageRow: View {
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    if message.tool != nil {
+                    // §4.5：工具调用/结果与过长正文逐条默认折叠，各自可展开。
+                    if message.hasCollapsibleContent {
                         Button(collapsed ? "展开" : "收起", action: onToggle)
                             .font(.kpSmall)
                             .buttonStyle(.borderless)
-                            .help(collapsed ? "展开完整输入输出" : "收起输入输出")
-                            .accessibilityLabel(collapsed ? "展开工具调用详情" : "收起工具调用详情")
+                            .help(collapsed ? "展开本条完整内容" : "收起本条内容")
+                            .accessibilityLabel(collapsed
+                                                ? "展开本条消息完整内容"
+                                                : "收起本条消息")
                     }
                     Button {
                         Workspace.copy(message.content)
@@ -1137,6 +1149,14 @@ struct SessionMessageRow: View {
         .accessibilityLabel("\(Labels.messageType(message.type))，\(message.content ?? "")")
     }
 
+    /// 预览行数：长正文折叠时只显示前 N 行（§4.5）。
+    static let previewLineLimit = 4
+
+    /// 折叠时正文是否截断为预览：搜索中放开，保证命中的行可见。
+    private var truncatesPreview: Bool {
+        collapsed && message.isLongContent && query.isEmpty
+    }
+
     /// 正文 13pt；代码/终端/工具输出等宽 12pt（§4.4）。
     @ViewBuilder
     private var contentText: some View {
@@ -1144,11 +1164,13 @@ struct SessionMessageRow: View {
         if message.isMonospaced {
             Text(AttributedString.highlighted(text, query: query))
                 .font(.system(size: 12, design: .monospaced))
+                .lineLimit(truncatesPreview ? Self.previewLineLimit : nil)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(AttributedString.highlighted(text, query: query))
                 .font(.kpBody)
+                .lineLimit(truncatesPreview ? Self.previewLineLimit : nil)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

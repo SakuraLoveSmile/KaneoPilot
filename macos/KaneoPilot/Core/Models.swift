@@ -791,6 +791,17 @@ struct SessionMessage: Decodable, Identifiable {
         default: return false
         }
     }
+
+    /// §4.5：正文是否过长——超过 4 行或 320 字符（默认折叠成预览）。
+    var isLongContent: Bool {
+        let text = content ?? ""
+        guard !text.isEmpty else { return false }
+        if text.count > 320 { return true }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).count > 4
+    }
+
+    /// §4.5：该条是否需要「展开/收起」开关（工具消息或过长正文）。
+    var hasCollapsibleContent: Bool { tool != nil || isLongContent }
 }
 
 struct SessionTool: Decodable {
