@@ -227,7 +227,10 @@ class _Collector:
         self.seen: dict = {}          # str(message_id) -> (fingerprint, revision)
         self.verified_end = 0         # 已核验的物理前缀长度（[0, verified_end)）
         self._prefix_hashes: list = []  # 该前缀逐条指纹（索引对齐，None=未采到）
-        self.last_user_message = None  # 最新 user 消息原文（接续安全核验）
+        # 会话归属锚点（§5.23.8）：物理下标最小的 user 消息 = 本轮派发的 prompt。
+        # 用户随后在同一会话追加的指令不改变锚点；锚点不符 → 会话不是本轮的。
+        self.first_user_index = None
+        self.first_user_message = None
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -355,10 +358,10 @@ class _Collector:
             else:
                 self.truncated = True
         finally:
-            for _start, _end, messages in reversed(pages):
-                for message in messages:
+            for page_start, _end, messages in reversed(pages):
+                for offset, message in enumerate(messages):
                     if isinstance(message, dict):
-                        self._emit(message)
+                        self._emit(message, page_start + offset)
                     else:
                         self.unrecognized = True
             self._mark_verified(pages, connected)
@@ -406,7 +409,7 @@ class _Collector:
         else:
             self._queued.append((etype, ts, fields))
 
-    def _emit(self, message: dict) -> None:
+    def _emit(self, message: dict, index: Optional[int] = None) -> None:
         mid = message.get("id")
         if not isinstance(mid, str) or not mid:
             self.unrecognized = True
@@ -446,7 +449,10 @@ class _Collector:
         if message.get("agentName"):
             extra["agent_name"] = message["agentName"]
         if role == "user":
-            self.last_user_message = content
+            if index is not None and (self.first_user_index is None
+                                      or index < self.first_user_index):
+                self.first_user_index = index
+                self.first_user_message = content
             self._queue("user", ts, content=content, **source, **extra)
         elif role in ("system", "thinking"):
             self._queue("system", ts, content=content, **source, **extra)
@@ -904,9 +910,10 @@ def run_real(spec: dict, resume: bool = False) -> int:
     def adopt_follow_up(record: dict) -> Optional[str]:
         """可接续的后续 turn_id；任一条安全条件不成立 → None（按失败收尾）。
 
-        条件：①错误码属瞬时（Plus 自动重开）；②转录里最新 user 指令仍是本轮
-        派发的 prompt（用户新发的指令绝不并入本任务）；③同一会话仍在跑另一个
-        turn；④未超接续上限、不重复接续同一 turn。
+        条件：①错误码属瞬时（Plus 自动重开）；②会话归属锚点成立——转录里
+        物理下标最小的 user 消息仍是本轮派发的 prompt（证明该会话由本轮创建；
+        用户随后在同一会话追加的指令不阻止接续，会话被改用则不接续）；
+        ③同一会话仍在跑另一个 turn；④未超接续上限、不重复接续同一 turn。
         """
         history = list(job.get("turn_adopted") or [])
         if len(history) >= _MAX_TURN_ADOPTIONS:
@@ -915,8 +922,8 @@ def run_real(spec: dict, resume: bool = False) -> int:
         code = str(turn.get("errorCode") or turn.get("error_code") or "")
         if code not in _TRANSIENT_TURN_ERRORS:
             return None
-        collector.poll()          # 取最新转录：接续的安全前提是「指令未变」
-        if _normalize(collector.last_user_message) != _normalize(expected_prompt):
+        collector.poll()          # 取转录：接续的安全前提是「会话仍是本轮的」
+        if _normalize(collector.first_user_message) != _normalize(expected_prompt):
             return None
         try:
             status_view = observer.agent_status(job["session_id"])

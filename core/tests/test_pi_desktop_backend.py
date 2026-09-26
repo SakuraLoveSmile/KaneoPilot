@@ -1898,22 +1898,78 @@ class TestRunReal(PiDesktopCase):
             dsh_events.terminal_event(events)["reason"], "AUTH_FAILED"
         )
 
-    def test_follow_up_not_adopted_when_user_sent_new_instruction(self):
-        """转录里最新 user 指令已不是本轮 prompt（用户另发指令）→ 绝不并入
-        本任务：照旧按失败收尾，不做任何接续。"""
+    def test_follow_up_adopted_after_user_appended_instruction(self):
+        """真实事故回归：用户在本任务的 Plus 会话里追加过一句指令（「用中文
+        回复我」），锚点是**第一条** user 消息（本轮 prompt），因此仍照常接续
+        ——不能因为用户随口追加一句就把仍在跑的任务判成失败（§5.23.8）。"""
+        spec, run_dir = self._base()
+        prompt = self.expected_prompt(spec)
+        self.server.turn_statuses = ["error", "completed"]
+        self.server.turn_error_code = "EMPTY_MODEL_RESPONSE"
+        self.server.follow_up_turn = FOLLOW_UP_TURN_ID
+        self.server.messages = [
+            {"id": "msg-1", "role": "user", "content": prompt,
+             "timestamp": "2026-09-20T00:00:00Z"},
+            {"id": "msg-2", "role": "assistant",
+             "content": [{"type": "text", "text": "第一轮完成。"}],
+             "timestamp": "2026-09-20T00:00:01Z"},
+            {"id": "msg-3", "role": "user", "content": "用中文回复我",
+             "timestamp": "2026-09-20T00:00:02Z"},
+        ]
+        _sync(self.server)
+
+        self.assertEqual(self._run(spec), 0)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["turn_id"], FOLLOW_UP_TURN_ID)
+        self.assertEqual(job["turn_adopted"][0]["to"], FOLLOW_UP_TURN_ID)
+        self.assertEqual(self.server.prompt_count, 1, "接续绝不重发 prompt")
+        events = self.read_events(run_dir)
+        self.assertTrue(
+            any(e["type"] == "user" and "用中文回复我" in str(e.get("content"))
+                for e in events),
+            "追加的 user 消息仍照常采集",
+        )
+
+    def test_follow_up_not_adopted_when_session_is_foreign(self):
+        """会话归属锚点不符（第一条 user 消息不是本轮 prompt）→ 该会话不是
+        本轮的，绝不接续：照旧按失败收尾。"""
         spec, run_dir = self._base()
         self.server.turn_statuses = ["error", "completed"]
         self.server.turn_error_code = "EMPTY_MODEL_RESPONSE"
         self.server.follow_up_turn = FOLLOW_UP_TURN_ID
         self.server.messages = [
             {"id": "msg-1", "role": "user",
-             "content": self.expected_prompt(spec),
+             "content": "另一个任务的指令：随便做点别的。",
              "timestamp": "2026-09-20T00:00:00Z"},
             {"id": "msg-2", "role": "assistant",
-             "content": [{"type": "text", "text": "第一轮完成。"}],
+             "content": [{"type": "text", "text": "好的。"}],
              "timestamp": "2026-09-20T00:00:01Z"},
-            {"id": "msg-3", "role": "user", "content": "另一个新指令",
-             "timestamp": "2026-09-20T00:00:02Z"},
+        ]
+        _sync(self.server)
+
+        self.assertEqual(self._run(spec), 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertFalse(job.get("turn_adopted"))
+        self.assertEqual(job["turn_id"], TURN_ID)
+        events = self.read_events(run_dir)
+        self.assertEqual(
+            dsh_events.terminal_event(events)["reason"], "EMPTY_MODEL_RESPONSE"
+        )
+
+    def test_follow_up_not_adopted_when_session_idle(self):
+        """同一会话但已不在跑任何 turn（isRunning=false）→ 无可接续的执行，
+        照旧按失败收尾，绝不自行重开。"""
+        spec, run_dir = self._base()
+        self.server.turn_statuses = ["error", "completed"]
+        self.server.turn_error_code = "EMPTY_MODEL_RESPONSE"
+        self.server.current_turn = FOLLOW_UP_TURN_ID
+        self.server.is_running = False
+        self.server.messages = [
+            {"id": "msg-1", "role": "user",
+             "content": self.expected_prompt(spec),
+             "timestamp": "2026-09-20T00:00:00Z"},
         ]
         _sync(self.server)
 
