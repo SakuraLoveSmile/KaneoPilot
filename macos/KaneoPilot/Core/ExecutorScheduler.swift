@@ -1,5 +1,7 @@
+import AppKit
 import CFNetwork
 import Foundation
+import Network
 
 /// App 内置执行端调度器（protocol §5.19，v1.6）：App 存活期间按错开分钟
 /// 拉起 `python3 -m kanpilot.executor_runner --stage <s>`。
@@ -166,6 +168,164 @@ final class ExecutorScheduler {
         try? process.run()
     }
 
+
+    /// 本机网络（macOS「本地网络」隐私）授权引导。
+    ///
+    /// 模型端在本机网关（如 `http://192.168.0.69:8090/v1`）时，连接由 App 拉起的
+    /// python/pi 子进程发起；系统不为子进程弹授权提示，也不把 KaneoPilot 记进
+    /// 「隐私与安全性 → 本地网络」清单，只把连接静默拒绝，pi 报 `Connection
+    /// error`，派发/观察/评审轮次全部拿不到队列。App 进程自己发起连接才会走
+    /// 提示路径，因此启动时先摸一次已配置的 LAN 端点，被拒时给出可操作提示。
+    enum LocalNetworkGate {
+        /// 本轮探测里失败（被系统拦截或不可达）的端点。
+        struct Outcome {
+            let endpoint: String
+            let ok: Bool
+            let detail: String
+        }
+
+        /// `~/.pi/agent/models.json` 中 baseUrl 指向私网地址的端点。
+        /// 公网/localhost 端点不受本机网络隐私限制，不参与探测。
+        static func configuredLANEndpoints() -> [URL] {
+            let modelsURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".pi/agent/models.json")
+            guard let data = try? Data(contentsOf: modelsURL),
+                  let root = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  let providers = root["providers"] as? [String: Any] else {
+                return []
+            }
+            var endpoints: [URL] = []
+            for value in providers.values {
+                guard let provider = value as? [String: Any],
+                      let base = provider["baseUrl"] as? String,
+                      let url = URL(string: base),
+                      let host = url.host,
+                      isLocalNetworkHost(host),
+                      !endpoints.contains(url) else { continue }
+                endpoints.append(url)
+            }
+            return endpoints
+        }
+
+        /// 私网 IPv4 与 mDNS 域名（`*.local`）算本机网络。
+        static func isLocalNetworkHost(_ host: String) -> Bool {
+            let name = host.lowercased()
+            if name.hasSuffix(".local") || name.hasSuffix(".local.") {
+                return true
+            }
+            let parts = name.split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) })
+            else { return false }
+            switch (parts[0], parts[1]) {
+            case (10, _), (192, 168), (169, 254): return true
+            case (172, let second) where (16...31).contains(second): return true
+            default: return false
+            }
+        }
+
+        /// 启动时调用：让系统为 KaneoPilot 走一次本机网络授权路径
+        /// （首次会弹系统提示），被拒时提示用户去系统设置放行。
+        static func probeAtLaunch() {
+            let endpoints = configuredLANEndpoints()
+            guard !endpoints.isEmpty else { return }
+            DispatchQueue.global(qos: .utility).async {
+                let outcomes = probe(endpoints)
+                guard outcomes.contains(where: { !$0.ok }) else { return }
+                DispatchQueue.main.async { showBlockedAlert(outcomes) }
+            }
+        }
+
+        /// 逐个端点发起一次 TCP 连接；`.ready` 即视为本机网络已放行。
+        /// 用 Network.framework 而非 URLSession：URLSession 受 ATS 限制，
+        /// 明文 `http://` 私网地址会被 ATS 拒掉，摸不到授权路径。
+        static func probe(_ endpoints: [URL]) -> [Outcome] {
+            var outcomes: [Outcome] = []
+            for url in endpoints {
+                let endpoint = url.absoluteString
+                guard let host = url.host, !host.isEmpty else {
+                    outcomes.append(Outcome(endpoint: endpoint, ok: false,
+                                            detail: "无法解析主机"))
+                    continue
+                }
+                let rawPort = url.port ?? (url.scheme == "https" ? 443 : 80)
+                guard let port = NWEndpoint.Port(rawValue: UInt16(rawPort)) else {
+                    outcomes.append(Outcome(endpoint: endpoint, ok: false,
+                                            detail: "无法解析端口"))
+                    continue
+                }
+                let semaphore = DispatchSemaphore(value: 0)
+                var outcome = Outcome(endpoint: endpoint, ok: false, detail: "无响应")
+                var waitingDetail = "无响应"
+                let queue = DispatchQueue(label: "kanpilot.local-network-gate")
+                let connection = NWConnection(host: NWEndpoint.Host(host),
+                                              port: port, using: .tcp)
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        outcome = Outcome(endpoint: endpoint, ok: true,
+                                          detail: "TCP 已连接")
+                        semaphore.signal()
+                    case .failed(let error):
+                        outcome = Outcome(endpoint: endpoint, ok: false,
+                                          detail: "\(error)")
+                        semaphore.signal()
+                    case .waiting(let error):
+                        waitingDetail = "\(error)"
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: queue)
+                if semaphore.wait(timeout: .now() + 10) != .success {
+                    outcome = Outcome(endpoint: endpoint, ok: false,
+                                      detail: waitingDetail)
+                }
+                connection.cancel()
+                outcomes.append(outcome)
+            }
+            return outcomes
+        }
+
+        private static func showBlockedAlert(_ outcomes: [Outcome]) {
+            let blocked = outcomes.filter { !$0.ok }
+            let lines = blocked.prefix(3)
+                .map { "• \($0.endpoint)（\($0.detail)）" }
+                .joined(separator: "\n")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "无法访问本机模型网关"
+            alert.informativeText = """
+            执行端的模型服务在本机网络上，macOS「本地网络」隐私没有放行 KaneoPilot 的连接，派发/观察/评审轮次会以 Connection error 结束，任务只会停在「已排队」。
+
+            \(lines)
+
+            请在「系统设置 → 隐私与安全性 → 本地网络」中允许 KaneoPilot；列表里没有 KaneoPilot 时先点「重新检测」触发系统提示。
+            """
+            alert.addButton(withTitle: "打开系统设置")
+            alert.addButton(withTitle: "重新检测")
+            alert.addButton(withTitle: "稍后")
+            // 非模态：模态提示会阻塞主线程的调度定时器。
+            guard let window = NSApp.windows.first(where: { $0.isVisible })
+                ?? NSApp.windows.first else {
+                return
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            alert.beginSheetModal(for: window) { response in
+                switch response {
+                case .alertFirstButtonReturn:
+                    if let url = URL(string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork") {
+                        NSWorkspace.shared.open(url)
+                    }
+                case .alertSecondButtonReturn:
+                    probeAtLaunch()
+                default:
+                    break
+                }
+            }
+        }
+    }
 
     /// 读取系统 HTTP 代理（scutil proxy 设置），返回 http://host:port；
     /// 未启用返回 nil。仅用于给 pi 子进程穿本地网络限制。

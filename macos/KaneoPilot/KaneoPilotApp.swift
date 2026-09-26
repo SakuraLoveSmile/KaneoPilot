@@ -18,6 +18,7 @@ struct KaneoPilotApp: App {
                 .environmentObject(model)
                 .preferredColorScheme(preferredScheme)
                 .frame(minWidth: 900, idealWidth: 1180, minHeight: 600, idealHeight: 760)
+                .task { ExecutorScheduler.LocalNetworkGate.probeAtLaunch() }
         }
         .defaultSize(width: 1180, height: 760)
         .windowResizability(.contentMinSize)

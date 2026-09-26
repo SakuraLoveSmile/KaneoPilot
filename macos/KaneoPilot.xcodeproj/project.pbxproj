@@ -353,6 +353,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.168.0.69:8090 ）来执行队列中的计划任务。";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -379,6 +380,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.168.0.69:8090 ）来执行队列中的计划任务。";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
