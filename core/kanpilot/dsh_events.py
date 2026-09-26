@@ -353,5 +353,8 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         "saved_at": view.get("saved_at"),
         "detail": job.get("detail"),
         "turn_id": job.get("turn_id"),
+        # §5.23.8：已接续的后续轮次（瞬时模型错误后同一会话自动重开），
+        # 只作审计展示；完成判定仍只认三证据。
+        "turn_adopted": job.get("turn_adopted") or None,
         "send_state": job.get("send_state"),
     }

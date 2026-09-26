@@ -34,6 +34,12 @@ kanpilot 会话读取（protocol §5.15.5/§5.18.4），不做桌面 UI 操控�
      处置（`report failed` + observation_blocked），下轮再来。
      `observer_alive==true` 时**不得**重复拉起（`deduplicated:true` 即已有
      观察进程在跑）。
+     **后续轮次接续（§5.23.8）**：PI-Desktop 在瞬时模型错误（如
+     `EMPTY_MODEL_RESPONSE`）后会在**同一会话**自动重开新 turn，观察进程只读
+     接续（`round_detail.turn_adopted` 记审计），**绝不重发 prompt**；续接返回
+     `reopened:true` 表示核心已解除这条误报产生的 `execution_failed` 阻塞
+     （任务回到 running）——按上面「仍在跑」分支继续判定，不得沿用旧 failure
+     文案重复 report needs_user。
    **backend 分支**（round_detail.backend 或 SessionInfo.backend）：
    - **pi 轮次**，完成判定必须**同时满足**（§5.18.4，缺一不可）：
      (a) `round_detail.terminal.outcome == "completed"`（主会话终止事件）；
