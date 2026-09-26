@@ -64,9 +64,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from . import constants, dsh_events, pi_desktop_backend, util
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
@@ -84,6 +86,10 @@ _STOP_VERIFY_SECONDS = 30.0
 _MAX_PAGES_PER_POLL = 200        # 单次轮询最多翻页数（防御无界）
                                  # 首轮/续接需从 0 起核验整段链；此后每轮
                                  # 只读到「已核验前缀」锚点即收敛（§5.23.3）。
+# 后续轮次接续（§5.23.8）：瞬时模型错误后 Plus 会在同一会话自动重开新 turn，
+# 该轮次的执行没有中断——只接续这些错误码，且最多接续 _MAX_TURN_ADOPTIONS 次。
+_TRANSIENT_TURN_ERRORS = frozenset({"EMPTY_MODEL_RESPONSE"})
+_MAX_TURN_ADOPTIONS = 5
 
 # UiMessage.role → events.jsonl 事件类型（§5.15.5/§5.18.2 词汇）。
 _SHELL_TOOL_NAMES = frozenset(
@@ -221,6 +227,7 @@ class _Collector:
         self.seen: dict = {}          # str(message_id) -> (fingerprint, revision)
         self.verified_end = 0         # 已核验的物理前缀长度（[0, verified_end)）
         self._prefix_hashes: list = []  # 该前缀逐条指纹（索引对齐，None=未采到）
+        self.last_user_message = None  # 最新 user 消息原文（接续安全核验）
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -439,6 +446,7 @@ class _Collector:
         if message.get("agentName"):
             extra["agent_name"] = message["agentName"]
         if role == "user":
+            self.last_user_message = content
             self._queue("user", ts, content=content, **source, **extra)
         elif role in ("system", "thinking"):
             self._queue("system", ts, content=content, **source, **extra)
@@ -886,6 +894,65 @@ def run_real(spec: dict, resume: bool = False) -> int:
             job["pi_desktop_pid"] = observer.pid
         return record
 
+    # ---- 5.23.8 后续轮次接续：瞬时模型错误后 Plus 会在同一会话自动重开新
+    # turn，本轮执行并未中断——接续观察新 turn，绝不重发 prompt。
+    expected_prompt = (spec.get("instruction") or "").rstrip() + "\n\n" + plan_body
+
+    def _normalize(text) -> str:
+        return re.sub(r"\s+", " ", str(text or "")).strip()
+
+    def adopt_follow_up(record: dict) -> Optional[str]:
+        """可接续的后续 turn_id；任一条安全条件不成立 → None（按失败收尾）。
+
+        条件：①错误码属瞬时（Plus 自动重开）；②转录里最新 user 指令仍是本轮
+        派发的 prompt（用户新发的指令绝不并入本任务）；③同一会话仍在跑另一个
+        turn；④未超接续上限、不重复接续同一 turn。
+        """
+        history = list(job.get("turn_adopted") or [])
+        if len(history) >= _MAX_TURN_ADOPTIONS:
+            return None
+        turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        code = str(turn.get("errorCode") or turn.get("error_code") or "")
+        if code not in _TRANSIENT_TURN_ERRORS:
+            return None
+        collector.poll()          # 取最新转录：接续的安全前提是「指令未变」
+        if _normalize(collector.last_user_message) != _normalize(expected_prompt):
+            return None
+        try:
+            status_view = observer.agent_status(job["session_id"])
+        except util.KanpilotError:
+            return None
+        inner = status_view.get("status") or status_view
+        if inner.get("isRunning") is not True:
+            return None
+        current = inner.get("currentTurnId")
+        if not current or current == turn_id:
+            return None
+        if any(item.get("to") == current for item in history):
+            return None
+        return str(current)
+
+    def adopt(follow: str, record: dict) -> None:
+        """记账并切换到新 turn 的观察（job 先写、事件留痕；不新建会话）。"""
+        nonlocal turn_id, observer
+        turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        code = str(turn.get("errorCode") or turn.get("error_code") or "")
+        history = list(job.get("turn_adopted") or [])
+        previous = turn_id
+        history.append({"from": previous, "to": follow, "code": code,
+                        "at": util.now_iso()})
+        job["turn_adopted"] = history
+        job["turn_id"] = follow
+        turn_id = follow
+        _write_json(job_path, job)
+        log.emit("system", util.now_iso(),
+                 content=(f"turn_adopted: {previous} → {follow}"
+                          f"（{code} 后同一会话自动重开，继续观察；"
+                          f"未重发 prompt）"))
+        observer = _ReadRecovery(client, config["connection_file"],
+                                 job["session_id"], follow)
+        collector.client = observer
+
     def unknown(detail, reason="unverifiable"):
         if resume:
             # 续接观察只负责观察：读不到持久轮次时不得改写轮次终态（更不得
@@ -911,10 +978,14 @@ def run_real(spec: dict, resume: bool = False) -> int:
     state = _turn_status(record)
     turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
     if state in ("error", "aborted") and not resume:
-        collector.poll()
-        collector.preserve_unverified(run_dir, client._token)
-        code = turn.get("errorCode") or state
-        return finalize("failed", 1, f"turn {state}: {code}", True, "failed", str(code))
+        follow = adopt_follow_up(record)
+        if follow is None:
+            collector.poll()
+            collector.preserve_unverified(run_dir, client._token)
+            code = turn.get("errorCode") or state
+            return finalize("failed", 1, f"turn {state}: {code}",
+                            True, "failed", str(code))
+        adopt(follow, record)     # 同一会话继续执行 → 观察新 turn（不重发）
     if resume:
         # 续接接管证明：持久 turn 可读 + 身份相符即视为接管成功（启动证明已
         # 由原进程完成，不重复 heartbeat、不重复写 session 事件）。
@@ -974,6 +1045,11 @@ def run_real(spec: dict, resume: bool = False) -> int:
         except util.KanpilotError as exc:
             return unknown("turn 终态无法核实，可能仍在运行：" + exc.message)
         if state in ("completed", "error", "aborted"):
+            if state in ("error", "aborted"):
+                follow = adopt_follow_up(record)
+                if follow is not None:
+                    adopt(follow, record)
+                    continue
             break
         if stop_requested:
             if not abort_attempted and now_m >= stop_at + _STOP_GRACE_SECONDS:

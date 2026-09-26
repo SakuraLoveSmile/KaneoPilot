@@ -932,10 +932,24 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - **幂等**：原 worker 或上一次续接的进程仍存活（轮次行 `pid` 或 `job.observe_pid`）→ 返回 `{"status":"observing","deduplicated":true}`，绝不拉起第二个观察者。
 - **剩余预算**：续接按 `job.started_at + 轮次时限` 计算剩余时间；已超时 → 不续接、也不动手停止仍在跑的会话，返回 `deferred`（`round_timeout_elapsed`），交人工判定终态。
 - **观察环境不成立**（连接不可用/身份不符/turn 读不到/已超时）→ worker 退出码 3，只写 `job.resume_detail`/`resume_deferred_at`/`resume_attempts`，**既有 job 状态与 terminal 事件一字不改**。
-- 返回形状：`{"status": "observing"|"settled"|"finished"|"deferred"|"exited"|"starting", "pid", "detail", "run_id"}`；`observing` = 已接管且在观察，`settled` = 接管即见持久终态（进程已退出），`finished` = 轮次已按 completed 收尾；`deferred|exited|starting` = 本轮未接管成功（监控端按「会话读不到」处置，不改任务状态）。
-- 事件：`round_observe`（detail 含 run_id/pid/status/detail）。命令不写 task 状态、不写远端、不发消息、不重复 agent_prompt。
+- 返回形状：`{"status": "observing"|"settled"|"finished"|"deferred"|"exited"|"starting", "pid", "detail", "run_id", "reopened"}`；`observing` = 已接管且在观察，`settled` = 接管即见持久终态（进程已退出），`finished` = 轮次已按 completed 收尾；`deferred|exited|starting` = 本轮未接管成功（监控端按「会话读不到」处置，不改任务状态）。`reopened` = 本次接管是否顺带解除了误报的执行失败阻塞（§5.23.8），只在 `observing` 时可能为 true。
+- 事件：`round_observe`（detail 含 run_id/pid/status/detail/reopened）。命令不写远端、不发消息、不重复 agent_prompt；**task 状态只在 §5.23.8 的解除误报阻塞一种情形下被改写**（本任务本轮 `needs_user` + `failure_code=execution_failed` → `running`），其余情形一律不改。
 - **`round_detail.observe_pid`/`observer_alive`**：读取层按本机进程存活派生（`observe_pid` 优先 job，其次轮次行 pid），**只**用于判断是否需要续接观察者；完成判定仍只认 §5.18.4 三证据，不得以进程存活/进程消失代替。
 - **旧终态作废（`terminal_superseded`）**：续接接管后（job `status=running` 且已写 `observation_resumed_at`），早于接管时刻的 `terminal` 属上一次观察者收尾留下的旧终态（旧版把心跳被拒写成 `failed`），**不再作为本轮判定依据**：`round_detail.terminal` 只反映接管后新写的终态（无则为 `null`），旧终态原文转 `round_detail.terminal_superseded`（含 `outcome`/`reason`/`ts`）供审计。events.jsonl 行 append-only**一字不改**；未续接的轮次（无 `observation_resumed_at`）行为不变。
+
+### 5.23.8 后续轮次接续与误报阻塞解除 `turn_adopted`（v3 补丁）
+
+**背景**：PI-Desktop 在**瞬时模型错误**（当前集合：`EMPTY_MODEL_RESPONSE`）后会在**同一会话**自动重开新 turn——任务实际没有中断，旧 turn 只留下 `status=error` 的持久记录。观察进程若据此收尾，就会把仍在执行的任务写成执行失败。
+
+- **接续判据（四条缺一不可；任一不成立即按失败收尾，不接续）**：
+  1. 持久 turn `status ∈ {error, aborted}` 且 `errorCode` 属瞬时集合 `{EMPTY_MODEL_RESPONSE}`；
+  2. 转录（`pi_session_get`）里**最新 user 消息仍是本轮派发的 prompt**（normalize 空白后逐字比较）——用户另发指令的会话绝不并入本任务；
+  3. `pi_agent_status` 显示**同一会话仍在跑另一个 turn**（`isRunning=true` 且 `currentTurnId` ≠ 旧 turn）；
+  4. 未超接续上限（每轮最多 5 次）且不重复接续同一 turn。
+- **接续动作只读**：`job.turn_id` 前移为新 turn，`job.turn_adopted` 追加 `{from, to, code, at}` 审计记录，events.jsonl 追加一条 `system` 事件（`turn_adopted: <旧> → <新>（<code> 后同一会话自动重开，继续观察；未重发 prompt）`），观察进程换绑新 turn 继续轮询；**不新建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**，既有 session 事件与 turn 记录一字不改。
+- **适用范围**：启动证明阶段（首个 `pi_turn_get` 已是 error/aborted）与观察循环（轮询中落 error/aborted）走同一判据与同一动作。
+- **`round-observe` 解除误报阻塞**：续接接管成功（`status=observing`）后，若本任务停在 `needs_user` + `failure_code=execution_failed` 且 `task.run_id` 与本轮一致 → 核心清空 block 字段（`clear_block_fields`）并把任务转回 `running`（`status_change` 事件 detail 带 `via=round-observe`、`reopened=true`；`round_observe` 事件与返回形状带 `reopened:true`）。**只**解除本轮的 `execution_failed`——其它阻塞原因（`review_failed`/`observation_blocked`/…）与其它轮次一律原样保留，`deduplicated` 幂等返回不触发解除。
+- **读取层**：`round_detail.turn_adopted` 透出接续历史（`null` = 从未接续），只作审计展示；完成判定仍只认 §5.18.4 三证据 + §5.23.3 的持久 turn 终态。
 
 ## 6. 常量
 

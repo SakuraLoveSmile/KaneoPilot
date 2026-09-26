@@ -48,6 +48,7 @@ RUN_ID = "runpidesktop01"
 TOKEN = "test-mcp-token-0123456789abcdef"
 SESSION_ID = "pd-sess-1"
 TURN_ID = "turn-1"
+FOLLOW_UP_TURN_ID = "turn-2"
 ALL_TOOLS = tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
 
 
@@ -159,6 +160,7 @@ class FakeMCPServer:
         self.turn_status = "running"
         self.turn_statuses: list = []     # 队列优先，耗尽回落 turn_status
         self.turn_error_code = None
+        self.follow_up_turn = None        # 瞬时错误后同一会话自动重开的新 turn
         self.turn_missing = False
         self.current_turn = None
         self.is_running = True
@@ -294,6 +296,12 @@ class FakeMCPServer:
             }
             if self.turn_error_code:
                 record["errorCode"] = self.turn_error_code
+            if status in ("error", "aborted") and self.follow_up_turn:
+                # 瞬时错误：Plus 在同一会话自动重开新 turn（旧 turn 仍是
+                # error，但会话在跑另一个 turn）——currentTurnId 随之前移。
+                self.current_turn = self.follow_up_turn
+                self.follow_up_turn = None
+                self.turn_error_code = None
             return {"structuredContent": record}
         if name in ("pi_agent_stop", "pi_agent_abort"):
             if name == "pi_agent_stop":
@@ -359,6 +367,32 @@ class PiDesktopCase(KanpilotTestCase):
         path.chmod(mode)
         return path
 
+
+    def expected_prompt(self, spec) -> str:
+        """worker 实际发送的 prompt（instruction + 计划正文，§5.23.3）。"""
+        text = Path(spec["plan_path"]).read_text(encoding="utf-8")
+        body = text.split("---", 2)[2] if text.startswith("---\n") else text
+        if body.startswith("\n"):
+            body = body[1:]
+        return (spec.get("instruction") or "").rstrip() + "\n\n" + body
+
+    def mark_needs_user(self, task_id, run_id, failure_code="execution_failed"):
+        """把任务置为 needs_user 阻塞（测试用；模拟监控端 report）。"""
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status='needs_user', failure_code=?, "
+                    "failure_reason=?, updated_at=? WHERE task_id=?",
+                    (failure_code, "测试阻塞原因", util.now_iso(), task_id),
+                )
+                conn.execute(
+                    "UPDATE execution_rounds SET run_status='failed', "
+                    "updated_at=? WHERE task_id=? AND run_id=?",
+                    (util.now_iso(), task_id, run_id),
+                )
+        finally:
+            conn.close()
 
     def write_spec_plan(self, body: str) -> Path:
         plan = self.plan_root / "Feedback" / f"plan-{TASK_ID}.md"
@@ -1802,6 +1836,94 @@ class TestRunReal(PiDesktopCase):
         self.assertEqual(collector.verified_end, len(messages))
 
 
+    def test_transient_turn_error_adopts_follow_up_turn(self):
+        """瞬时模型错误（EMPTY_MODEL_RESPONSE）后 Plus 在同一会话自动重开新
+        turn：只读接续观察新 turn（不重发 prompt、不新建会话、不重复 session
+        事件），轮次随后按新 turn 的真实终态收尾（§5.23.8）。"""
+        spec, run_dir = self._base()
+        prompt = self.expected_prompt(spec)
+        self.server.turn_statuses = ["error", "completed"]
+        self.server.turn_error_code = "EMPTY_MODEL_RESPONSE"
+        self.server.follow_up_turn = FOLLOW_UP_TURN_ID
+        self.server.messages = [
+            {"id": "msg-1", "role": "user", "content": prompt,
+             "timestamp": "2026-09-20T00:00:00Z"},
+            {"id": "msg-2", "role": "assistant",
+             "content": [{"type": "text", "text": "继续执行验证。"}],
+             "timestamp": "2026-09-20T00:00:01Z"},
+        ]
+        _sync(self.server)
+
+        self.assertEqual(self._run(spec), 0)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["turn_id"], FOLLOW_UP_TURN_ID)
+        self.assertEqual(job["turn_adopted"][0]["from"], TURN_ID)
+        self.assertEqual(job["turn_adopted"][0]["to"], FOLLOW_UP_TURN_ID)
+        self.assertEqual(
+            job["turn_adopted"][0]["code"], "EMPTY_MODEL_RESPONSE"
+        )
+        self.assertEqual(self.server.prompt_count, 1, "接续绝不重发 prompt")
+        events = self.read_events(run_dir)
+        self.assertEqual(
+            len([e for e in events if e["type"] == "session"]), 1,
+            "session 事件不得重复写",
+        )
+        self.assertTrue(
+            any("turn_adopted" in str(e.get("content") or "")
+                for e in events),
+            "接续必须留痕（events.jsonl）",
+        )
+
+    def test_non_transient_turn_error_is_not_adopted(self):
+        """非瞬时错误（如认证失败）不接续：照旧 job failed + terminal(failed)。"""
+        spec, run_dir = self._base()
+        self.server.turn_status = "error"
+        self.server.turn_error_code = "AUTH_FAILED"
+        self.server.current_turn = FOLLOW_UP_TURN_ID
+        self.server.messages = [
+            {"id": "msg-1", "role": "user",
+             "content": self.expected_prompt(spec),
+             "timestamp": "2026-09-20T00:00:00Z"},
+        ]
+        _sync(self.server)
+
+        self.assertEqual(self._run(spec), 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("AUTH_FAILED", job["detail"])
+        self.assertFalse(job.get("turn_adopted"))
+        events = self.read_events(run_dir)
+        self.assertEqual(
+            dsh_events.terminal_event(events)["reason"], "AUTH_FAILED"
+        )
+
+    def test_follow_up_not_adopted_when_user_sent_new_instruction(self):
+        """转录里最新 user 指令已不是本轮 prompt（用户另发指令）→ 绝不并入
+        本任务：照旧按失败收尾，不做任何接续。"""
+        spec, run_dir = self._base()
+        self.server.turn_statuses = ["error", "completed"]
+        self.server.turn_error_code = "EMPTY_MODEL_RESPONSE"
+        self.server.follow_up_turn = FOLLOW_UP_TURN_ID
+        self.server.messages = [
+            {"id": "msg-1", "role": "user",
+             "content": self.expected_prompt(spec),
+             "timestamp": "2026-09-20T00:00:00Z"},
+            {"id": "msg-2", "role": "assistant",
+             "content": [{"type": "text", "text": "第一轮完成。"}],
+             "timestamp": "2026-09-20T00:00:01Z"},
+            {"id": "msg-3", "role": "user", "content": "另一个新指令",
+             "timestamp": "2026-09-20T00:00:02Z"},
+        ]
+        _sync(self.server)
+
+        self.assertEqual(self._run(spec), 1)
+        job = self.read_job(run_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertFalse(job.get("turn_adopted"))
+        self.assertEqual(job["turn_id"], TURN_ID)
+
+
 # ------------------------------------------------------------ dispatch e2e
 
 
@@ -2097,6 +2219,117 @@ class TestDispatchPiDesktop(PiDesktopCase):
             "task_id": TASK_ID, "run_id": run_id,
         })
         self.assertEqual(done["status"], "finished")
+
+    def _start_observed_round(self):
+        """派发 + 确认一轮 pi_desktop 观察现场（真 fake worker 子进程）。"""
+        claim = self._submit_round()
+        run_id = claim["run_id"]
+        self.server.turn_statuses = []
+        self.server.turn_status = "running"
+        self.server.messages = []
+        _sync(self.server)
+        with self.env(KANPILOT_PI_START_WAIT="20"):
+            started = self.call("dispatch-start", {
+                "task_id": TASK_ID, "run_id": run_id,
+            })
+        self.assertEqual(started["status"], "started", started)
+        worker_pid = started["pid"]
+        self.addCleanup(self.kill_process_group, worker_pid)
+        run_dir = self.runs_root / TASK_ID / run_id
+        events, _ = dsh_events.iter_events(
+            run_dir / dsh_events.EVENT_LOG_NAME
+        )
+        turn_id = events[0]["turn_id"]
+        ctx = claim["context"]
+        confirmed = self.call("dispatch-confirm", {
+            "task_id": TASK_ID, "run_id": run_id,
+            "evidence": {
+                "session_marker": ctx["session_marker"],
+                "repository": ctx["repository"],
+                "backend": "pi_desktop",
+                "config": ctx["exec_config"],
+                "session_id": started["session_id"],
+                "turn_id": turn_id, "protocol_seen": True,
+            },
+        })
+        self.assertEqual(confirmed["status"], "running")
+        return {"run_id": run_id, "run_dir": run_dir,
+                "worker_pid": worker_pid, "turn_id": turn_id}
+
+    def _lose_observer(self, worker_pid):
+        """模拟观察进程消失（应用重启/被清理）并等到进程确实退出。"""
+        self.kill_process_group(worker_pid)
+        deadline = time.monotonic() + 20.0
+        while util.pid_alive(worker_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(util.pid_alive(worker_pid))
+
+    def test_round_observe_reopens_stale_execution_failure(self):
+        """§5.23.8：瞬时错误留下的「执行失败」阻塞，在只读续接观察成活后自动
+        解除——会话仍在跑时，调度台不得继续把任务摆成失败。"""
+        site = self._start_observed_round()
+        run_id, run_dir = site["run_id"], site["run_dir"]
+        self._lose_observer(site["worker_pid"])
+        self.mark_needs_user(TASK_ID, run_id)          # 监控端旧口径的阻塞
+        self.assertEqual(self.task(TASK_ID)["status"], "needs_user")
+
+        with self.env(KANPILOT_PI_START_WAIT="20"):
+            resumed = self.call("round-observe", {
+                "task_id": TASK_ID, "run_id": run_id,
+                "executor": "kaneo-monitor",
+            })
+        self.assertEqual(resumed["status"], "observing", resumed)
+        self.assertTrue(resumed["reopened"], resumed)
+        self.addCleanup(self.kill_process_group, resumed["pid"])
+
+        view = self.task(TASK_ID)
+        self.assertEqual(view["status"], "running")
+        self.assertEqual(view["run_id"], run_id)
+        self.assertIsNone(view["failure_code"])
+        self.assertIsNone(view["failure_reason"])
+        # 解除阻塞可审计：事件 detail 带 reopened=true。
+        events = [e for e in self.call("list-events", {
+            "task_id": TASK_ID})["events"] if e["kind"] == "round_observe"]
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["detail"]["run_id"], run_id)
+        self.assertTrue(events[0]["detail"]["reopened"])
+
+        # 同一会话随后真实完成 → 轮次按 completed 收尾，全程未重发 prompt。
+        self.server.turn_status = "completed"
+        self.server.messages = self.default_messages()
+        _sync(self.server)
+        final = None
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            final = dsh_events.read_job(
+                run_dir, TASK_ID, run_id, backend="pi_desktop"
+            )[0]
+            if final and final.get("status") == "finished":
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(final)
+        self.assertEqual(final["status"], "finished")
+        self.assertEqual(final["exit_code"], 0)
+        self.assertEqual(self.server.prompt_count, 1, "续接绝不重发 prompt")
+
+    def test_round_observe_keeps_other_blocks(self):
+        """只解除本轮的 execution_failed：其它原因的阻塞原样保留。"""
+        site = self._start_observed_round()
+        run_id = site["run_id"]
+        self._lose_observer(site["worker_pid"])
+        self.mark_needs_user(TASK_ID, run_id, failure_code="review_failed")
+
+        with self.env(KANPILOT_PI_START_WAIT="20"):
+            resumed = self.call("round-observe", {
+                "task_id": TASK_ID, "run_id": run_id,
+                "executor": "kaneo-monitor",
+            })
+        self.assertEqual(resumed["status"], "observing", resumed)
+        self.assertFalse(resumed["reopened"])
+        self.addCleanup(self.kill_process_group, resumed["pid"])
+        view = self.task(TASK_ID)
+        self.assertEqual(view["status"], "needs_user")
+        self.assertEqual(view["failure_code"], "review_failed")
 
     def test_prepare_rejects_wrong_backend_evidence(self):
         """pi_desktop 轮次收 backend=\"pi\" 证据 → conflict（后端不符）。"""

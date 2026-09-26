@@ -797,6 +797,7 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         raise util.KanpilotError("internal", f"观察进程拉起失败：{exc}")
 
     status, detail = _wait_observe_attach(run_dir, proc, job)
+    reopened = False
     with db.write_txn(conn):
         if status == "observing":
             round_store.mark_started(conn, task_id, run_id, now, pid=proc.pid)
@@ -804,15 +805,30 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
                 conn, task_id, run_id, now, backend="pi_desktop",
                 run_status="running",
             )
+            # §5.23.8：本轮已被重新接管观察（例如瞬时模型错误后同一会话自动
+            # 重开的新轮次），任务不得继续停在由此产生的执行失败上。只解除
+            # 本轮的 execution_failed 阻塞；其它 needs_user 原因原样保留。
+            fresh = db.require_task(conn, task_id)
+            if (fresh["status"] == "needs_user"
+                    and fresh["failure_code"] == "execution_failed"
+                    and fresh["run_id"] == run_id):
+                fields = core.clear_block_fields()
+                core.transition_task(
+                    conn, fresh, "running", now,
+                    payload.get("executor") or "kaneo-monitor",
+                    detail={"via": "round-observe", "reopened": True},
+                    **fields,
+                )
+                reopened = True
         db.add_event(
             conn, now, "round_observe", task_id=task_id,
             actor=payload.get("executor") or "kaneo-monitor",
             detail={"run_id": run_id, "pid": proc.pid, "status": status,
-                    "detail": detail},
+                    "detail": detail, "reopened": reopened},
         )
     return {
         "status": status, "pid": proc.pid, "detail": detail,
-        "run_id": run_id,
+        "run_id": run_id, "reopened": reopened,
     }
 
 
