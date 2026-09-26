@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - 会话阅读器状态（§4.4，protocol §5.15.5 本机运行记录）
@@ -45,11 +46,9 @@ final class SessionReaderStore: ObservableObject {
     /// 回收站命令执行中（按钮 disabled + spinner）。
     @Published var acting = false
 
-    // 滚动位置（由视图偏好回传，判定是否贴底）。
+    // 滚动位置（由视图回传：原生滚动几何 + 内容高度偏好）。
     var contentHeight: CGFloat = 0
     var visibleHeight: CGFloat = 0
-    /// 内容在滚动坐标系中的 minY（贴底判定用）。
-    var lastMinY: CGFloat = 0
     /// 正在自动滚到底（含二次纠正）：期间的偏移抖动不得改判 following。
     private var settlingToBottom = false
     /// 自动滚动批次号：后发起的批次接管标记，旧批次回落时不清除新标记。
@@ -373,19 +372,23 @@ final class SessionReaderStore: ObservableObject {
         if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
     }
 
-    /// 视回传：距底 <48pt 视为贴底（恢复跟随）。
-    ///
-    /// 自动滚到底尚未落地时（settlingToBottom）偏移会瞬时变大——那是纠正
-    /// 过程中的中间态，不是用户离开底部，改判会产生假「有新内容」并停住跟随。
-    func updateScroll(minY: CGFloat, visibleHeight: CGFloat,
-                      contentHeight: CGFloat) {
+    /// 视图回传（内容高度 / 可视高度偏好）：只记高度，不判跟随。
+    func updateHeights(visibleHeight: CGFloat, contentHeight: CGFloat) {
         self.visibleHeight = visibleHeight
         self.contentHeight = contentHeight
-        lastMinY = minY
+    }
+
+    /// 视图回传（原生滚动几何实测的距底距离，§4.5）：距底 <48pt 视为贴底。
+    ///
+    /// 滚动位置只能取原生滚动视图的真实几何：SwiftUI 的 GeometryReader 偏好
+    /// 只在内容重新布局时回传，macOS 上用户滚动不触发重新布局 → 拿到的永远是
+    /// 上一次布局的旧值（实测恒为「贴底」），于是上滚后仍被新消息拉回底部，
+    /// 「有新内容」提示永不出现。
+    ///
+    /// 自动滚到底尚未落地时（settlingToBottom）距离会瞬时变大——那是纠正
+    /// 过程中的中间态，不是用户离开底部，改判会产生假「有新内容」并停住跟随。
+    func updateDistanceFromBottom(_ distance: CGFloat) {
         guard !settlingToBottom else { return }
-        let maxOffset = max(0, contentHeight - visibleHeight)
-        let offset = min(max(-minY, 0), maxOffset)
-        let distance = maxOffset - offset
         if distance < 48 {
             following = true
             hasNewContent = false
@@ -423,7 +426,6 @@ private struct SaveSessionResponse: Decodable {
 // MARK: - 会话阅读器（独立视图与详情浮层内嵌同规格）
 
 struct SessionReaderView: View {
-    static let scrollSpace = "session-reader-scroll"
     static let bottomID = "session-reader-bottom"
 
     let taskID: String?
@@ -852,19 +854,16 @@ struct SessionReaderView: View {
                     .background(
                         GeometryReader { geo in
                             Color.clear.preference(
-                                key: SessionScrollOffsetKey.self,
-                                value: geo.frame(in: .named(Self.scrollSpace)).minY)
-                        }
-                    )
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
                                 key: SessionContentHeightKey.self,
                                 value: geo.size.height)
                         }
                     )
+                    .background(
+                        ScrollMetricsObserver { distance in
+                            store.updateDistanceFromBottom(distance)
+                        }
+                    )
                 }
-                .coordinateSpace(name: Self.scrollSpace)
                 .background(
                     GeometryReader { geo in
                         Color.clear.preference(
@@ -903,23 +902,18 @@ struct SessionReaderView: View {
                     if store.following { scrollToBottom(proxy) }
                 }
                 .onPreferenceChange(SessionScrollHeightKey.self) { height in
-                    store.updateScroll(minY: store.lastMinY, visibleHeight: height,
-                                       contentHeight: store.contentHeight)
+                    store.updateHeights(visibleHeight: height,
+                                        contentHeight: store.contentHeight)
                 }
                 .onPreferenceChange(SessionContentHeightKey.self) { height in
                     let grew = height > store.contentHeight + 0.5
-                    store.updateScroll(minY: store.lastMinY,
-                                       visibleHeight: store.visibleHeight,
-                                       contentHeight: height)
+                    store.updateHeights(visibleHeight: store.visibleHeight,
+                                        contentHeight: height)
                     // 内容增长（含同一消息的流式更新）且仍在跟随 → 跟到最新；
                     // 上滚离开底部后 following=false，绝不再拉回。
                     if grew, store.following, height > 0 { scrollToBottom(proxy) }
                 }
             }
-        }
-        .onPreferenceChange(SessionScrollOffsetKey.self) { minY in
-            store.updateScroll(minY: minY, visibleHeight: store.visibleHeight,
-                               contentHeight: store.contentHeight)
         }
     }
 
@@ -942,10 +936,77 @@ struct SessionReaderView: View {
 
 // MARK: - 滚动位置偏好
 
-private struct SessionScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+/// 原生滚动几何观测（§4.5 判底口径）：直接观察外层 NSScrollView 的 clip view
+/// 边界变化，回传真实「距底距离」。SwiftUI 的 GeometryReader 偏好只在内容重新
+/// 布局时回传，macOS 上滚动不触发重新布局，拿不到新位置。
+private struct ScrollMetricsObserver: NSViewRepresentable {
+    /// 距底距离（pt）：0 = 贴底。
+    let onDistance: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.onDistance = onDistance
+        return view
+    }
+
+    func updateNSView(_ nsView: ObserverView, context: Context) {
+        nsView.onDistance = onDistance
+        nsView.ensureAttached()
+    }
+
+    final class ObserverView: NSView {
+        var onDistance: ((CGFloat) -> Void)?
+        private var tokens: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            attach()
+        }
+
+        /// 兜底：`viewDidMoveToWindow` 触发时可能还没挂进 NSScrollView（那时
+        /// 拿不到 enclosingScrollView），插入后的 updateNSView 再补一次。
+        func ensureAttached() {
+            guard tokens.isEmpty else { return }
+            attach()
+        }
+
+        private func attach() {
+            tokens.forEach(NotificationCenter.default.removeObserver)
+            tokens = []
+            guard let scrollView = enclosingScrollView else { return }
+            let clip = scrollView.contentView
+            clip.postsBoundsChangedNotifications = true
+            clip.postsFrameChangedNotifications = true
+            let handler: (Notification) -> Void = { [weak self] _ in
+                self?.report()
+            }
+            tokens.append(NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip,
+                queue: .main, using: handler))
+            tokens.append(NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: clip,
+                queue: .main, using: handler))
+            if let document = scrollView.documentView {
+                tokens.append(NotificationCenter.default.addObserver(
+                    forName: NSView.frameDidChangeNotification, object: document,
+                    queue: .main, using: handler))
+            }
+            report()
+        }
+
+        private func report() {
+            guard let scrollView = enclosingScrollView else { return }
+            let clip = scrollView.contentView
+            let documentHeight = scrollView.documentView?.frame.height ?? 0
+            let visibleHeight = clip.bounds.height
+            let offset = clip.bounds.origin.y
+            let maxOffset = max(0, documentHeight - visibleHeight)
+            onDistance?(max(0, maxOffset - offset))
+        }
+
+        deinit {
+            tokens.forEach(NotificationCenter.default.removeObserver)
+        }
     }
 }
 
