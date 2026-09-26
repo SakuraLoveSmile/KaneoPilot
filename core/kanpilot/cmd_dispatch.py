@@ -677,6 +677,145 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
 
 
 
+def _wait_observe_attach(run_dir, proc, previous_job):
+    """等观察进程的接管证明（job.observation_resumed_at）或明确未接管。
+
+    返回 ``(status, detail)``：``observing``（已接管且在跑）/``settled``（接管
+    即见持久终态，进程已退出）/``deferred``（未接管，原因在
+    ``job.resume_detail``）/``starting``（超时未见接管证明）。
+    """
+    path = Path(run_dir) / dsh_events.JOB_NAME
+    baseline_resumed = (previous_job or {}).get("observation_resumed_at")
+    baseline_deferred = (previous_job or {}).get("resume_deferred_at")
+    deadline = _time.monotonic() + _start_wait_seconds()
+    while True:
+        current = None
+        try:
+            current = util.jload(path.read_text(encoding="utf-8"))
+        except OSError:
+            current = None
+        if isinstance(current, dict):
+            resumed = current.get("observation_resumed_at")
+            deferred = current.get("resume_deferred_at")
+            if resumed and resumed != baseline_resumed:
+                if proc.poll() is None:
+                    return "observing", None
+                return "settled", current.get("detail")
+            if deferred and deferred != baseline_deferred:
+                return "deferred", current.get("resume_detail")
+        if proc.poll() is not None:
+            return ("exited", "观察进程已退出且未给出接管证明")
+        if _time.monotonic() >= deadline:
+            return "starting", "观察进程尚未证明接管"
+        _time.sleep(0.1)
+
+
+def cmd_round_observe(ctx, payload: dict) -> dict:
+    """round-observe（protocol §5.23.7）：pi_desktop 轮次的观察者续接。
+
+    观察进程退出（应用重启/崩溃/被清理）而 PI-Desktop 会话仍在运行时，重新
+    拉起 worker 的 ``--resume`` 分支只读接管观察。**绝不新建会话、绝不重发
+    prompt、绝不清空既有证据**；观察进程仍存活时幂等返回，不重复拉起。
+    """
+    conn, now = ctx.conn, ctx.now_iso
+    task = db.require_task(conn, payload["task_id"])
+    task_id, run_id = task["task_id"], payload["run_id"]
+    if task["run_id"] != run_id:
+        raise util.KanpilotError(
+            "conflict", "只允许续接该任务当前轮次的观察进程"
+        )
+    if task["status"] not in ("running", "in_review", "needs_user"):
+        raise util.KanpilotError(
+            "conflict", f"任务处于 {task['status']}，无需续接观察进程"
+        )
+    row = round_store.require_round(conn, task_id, run_id)
+    if row["backend"] != "pi_desktop":
+        raise util.KanpilotError(
+            "validation_failed", "只有 pi_desktop 轮次需要本机观察进程"
+        )
+    source = _headless.resolve_source(conn)
+    try:
+        run_dir = source.run_dir(task_id, run_id)
+    except _headless.HeadlessError as exc:
+        raise util.KanpilotError("validation_failed", exc.detail)
+    job, error = dsh_events.read_job(
+        run_dir, task_id, run_id, backend="pi_desktop"
+    )
+    if job is None:
+        raise util.KanpilotError(
+            "validation_failed", "运行记录不可读：" + (error or "未知原因")
+        )
+    if job.get("status") == "finished":
+        return {"status": "finished", "pid": None,
+                "detail": "轮次已按 completed 收尾，无需续接"}
+    # 「已确认发送」的硬证据 = events.jsonl 的 session 事件（发送成功 + 启动
+    # 证明共同产生）＋持久会话身份；send_state 只作粗筛（旧版假失败会把它写成
+    # unknown，续接成功后由 worker 修回 sent）。
+    events, _detail = dsh_events.iter_events(
+        run_dir / dsh_events.EVENT_LOG_NAME
+    )
+    if dsh_events.session_event(events) is None:
+        raise util.KanpilotError(
+            "validation_failed",
+            "该轮次没有 session 事件（未确认发送/启动），不能续接观察",
+        )
+    if not job.get("session_id") or not job.get("turn_id"):
+        raise util.KanpilotError(
+            "validation_failed",
+            "该轮次缺少持久会话身份（session_id/turn_id），不能续接观察",
+        )
+    if job.get("send_state") not in ("sent", "unknown"):
+        raise util.KanpilotError(
+            "validation_failed",
+            f"该轮次发送状态不可续接（send_state={job.get('send_state')!r}）",
+        )
+    # 幂等：仍存活的观察进程（原 worker 或上一次续接的进程）不再拉起第二个。
+    alive = row["pid"] if util.pid_alive(row["pid"]) else None
+    if alive is None and util.pid_alive(job.get("observe_pid")):
+        alive = job.get("observe_pid")
+    if alive is not None:
+        return {"status": "observing", "pid": alive, "deduplicated": True}
+    spec_path = run_dir / "spec.json"
+    if not spec_path.is_file():
+        raise util.KanpilotError(
+            "validation_failed", "缺少 spec.json，无法续接观察进程"
+        )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(constants.core_root())
+    try:
+        with open(run_dir / "worker.log", "ab") as log:
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "kanpilot.pi_desktop_worker",
+                    "--spec", str(spec_path), "--resume",
+                ],
+                cwd=str(constants.core_root()),
+                stdout=log, stderr=log,
+                start_new_session=True, env=env,
+            )
+    except OSError as exc:
+        raise util.KanpilotError("internal", f"观察进程拉起失败：{exc}")
+
+    status, detail = _wait_observe_attach(run_dir, proc, job)
+    with db.write_txn(conn):
+        if status == "observing":
+            round_store.mark_started(conn, task_id, run_id, now, pid=proc.pid)
+            round_store.upsert_discovered(
+                conn, task_id, run_id, now, backend="pi_desktop",
+                run_status="running",
+            )
+        db.add_event(
+            conn, now, "round_observe", task_id=task_id,
+            actor=payload.get("executor") or "kaneo-monitor",
+            detail={"run_id": run_id, "pid": proc.pid, "status": status,
+                    "detail": detail},
+        )
+    return {
+        "status": status, "pid": proc.pid, "detail": detail,
+        "run_id": run_id,
+    }
+
+
 def _start_wait_seconds() -> float:
     raw = os.environ.get("KANPILOT_PI_START_WAIT")
     try:

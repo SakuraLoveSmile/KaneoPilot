@@ -118,17 +118,27 @@ def session_event(events: list) -> Optional[dict]:
     return None
 
 
+def terminal_events(events: list) -> list:
+    """全部 terminal 事件（出现顺序）。"""
+    return [
+        event for event in events
+        if isinstance(event, dict) and event.get("type") == "terminal"
+    ]
+
+
 def terminal_event(events: list) -> Optional[dict]:
     """末条 terminal 事件 → {outcome, reason}；无 → None。"""
-    terminal = None
-    for event in events:
-        if event.get("type") == "terminal":
-            terminal = event
-    if terminal is None:
+    terminals = terminal_events(events)
+    if not terminals:
         return None
+    return _terminal_view(terminals[-1])
+
+
+def _terminal_view(event: dict) -> dict:
+    """terminal 事件 → 判定视图（outcome/reason）。"""
     return {
-        "outcome": terminal.get("outcome"),
-        "reason": terminal.get("reason"),
+        "outcome": event.get("outcome"),
+        "reason": event.get("reason"),
     }
 
 
@@ -305,16 +315,39 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
 
     view = round_store.round_view(row) or {}
     job = job if isinstance(job, dict) else {}
+    # §5.23.7：续接观察已接管（status=running + observation_resumed_at）时，
+    # 早于接管时刻的 terminal 属上一次观察者收尾留下的旧终态（心跳被拒的假
+    # 失败等），不再作为本轮判定依据；事件行 append-only 不改写，原文转由
+    # terminal_superseded 透出供审计。接管后新写的 terminal 才是本轮终态。
+    terminal = terminal_event(events)
+    terminal_superseded = None
+    resumed_at = job.get("observation_resumed_at")
+    if job.get("status") == "running" and util.parse_ts(resumed_at) is not None:
+        kept = None
+        for event in terminal_events(events):
+            if util.ts_before(event.get("ts"), resumed_at):
+                terminal_superseded = dict(
+                    _terminal_view(event), ts=event.get("ts")
+                )
+            else:
+                kept = event
+        terminal = _terminal_view(kept) if kept is not None else None
+    # 观察进程（§5.23.7）：续接观察只用它判断「本机是否还有人在看」，不作
+    # 完成/失败判定依据（完成只认 terminal + job.status + 验证证据）。
+    observe_pid = job.get("observe_pid") or job.get("pid") or view.get("pid")
     return {
         "backend": view.get("backend"),
         "run_status": view.get("run_status"),
         "worktree_path": view.get("worktree_path"),
         "pid": job.get("pid") if job.get("pid") is not None
         else view.get("pid"),
+        "observe_pid": observe_pid,
+        "observer_alive": util.pid_alive(observe_pid),
         "started_at": view.get("started_at"),
         "ended_at": job.get("ended_at"),
         "exit_code": job.get("exit_code"),
-        "terminal": terminal_event(events),
+        "terminal": terminal,
+        "terminal_superseded": terminal_superseded,
         "config": view.get("config"),
         "save_state": view.get("save_state"),
         "saved_at": view.get("saved_at"),

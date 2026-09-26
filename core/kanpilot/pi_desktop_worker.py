@@ -42,6 +42,13 @@ worker 职责（写文件 + 经 kanpilot 命令心跳；绝不直写 SQLite）�
    ``job.send_state="unknown"`` + 尽力取证 + job failed；收尾写序恒
    「job 先写、session 补齐、terminal 最后」。
 
+``--resume``（§5.23.7 观察者续接）：观察进程退出后**只读续接观察**同一个
+session/turn——不建会话、不下发权限、绝不重发 prompt；接管时写
+``job.observe_pid``/``resume_started_at``，接管成功写
+``job.observation_resumed_at``。观察环境不成立（job 身份不符/未确认发送/
+已超时/连接不可用）→ 退出码 3 + ``job.resume_detail``，既有轮次终态与证据
+原样保留，交监控端下一轮重试。
+
 KANPILOT_PI_DESKTOP_FAKE（隔离测试接缝；未知值按 finished 语义）：
 - ``running``：job(running)+session/user 事件后挂起（测试负责清理）；
 - ``finished``：job(finished,0)+session/user/assistant/terminal(completed)；
@@ -69,11 +76,14 @@ _POLL_SECONDS = 2.0
 _HEARTBEAT_SECONDS = 30.0
 _PROOF_WAIT_SECONDS = 30.0       # 启动证明（pi_turn_get+heartbeat）等待上限
 _STOP_GRACE_SECONDS = 10.0       # pi_agent_stop 后的宽限
-_PAGE_LIMIT = 200                # pi_session_get 单页消息数
+_PAGE_LIMIT = 40                 # pi_session_get 单页消息数（初始值）
+_PAGE_MIN_LIMIT = 5              # 结果超限时自适应缩小的下限
 _READ_RECOVERY_SECONDS = 10.0
 _READ_RECOVERY_ATTEMPTS = 3
 _STOP_VERIFY_SECONDS = 30.0
-_MAX_PAGES_PER_POLL = 50         # 单次轮询最多翻页数（防御无界）
+_MAX_PAGES_PER_POLL = 200        # 单次轮询最多翻页数（防御无界）
+                                 # 首轮/续接需从 0 起核验整段链；此后每轮
+                                 # 只读到「已核验前缀」锚点即收敛（§5.23.3）。
 
 # UiMessage.role → events.jsonl 事件类型（§5.15.5/§5.18.2 词汇）。
 _SHELL_TOOL_NAMES = frozenset(
@@ -209,6 +219,8 @@ class _Collector:
         self.log = log
         self.marker = marker
         self.seen: dict = {}          # str(message_id) -> (fingerprint, revision)
+        self.verified_end = 0         # 已核验的物理前缀长度（[0, verified_end)）
+        self._prefix_hashes: list = []  # 该前缀逐条指纹（索引对齐，None=未采到）
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -217,23 +229,89 @@ class _Collector:
         self._queued: list = []
 
     def poll(self) -> None:
-        """Read a complete physical page chain; keep partial evidence on error."""
+        """Read a complete physical page chain; keep partial evidence on error.
+
+        截断/读失败是**本次轮询**的观察结果，不是轮次终态：每轮重新派生，一次
+        瞬时截断（或控制面偶发超限）不得把整轮钉死成永远无法完成。
+        """
+        self.truncated = False
         try:
             self._poll_inner()
             self.read_error = None
         except util.KanpilotError as exc:
             self.read_error = exc.message
 
+    def _page(self, boundary, limit: int):
+        """取一页；控制面因结果超出大小上限而截断时，减半缩小消息数重试。
+
+        返回 ``(result, truncated, limit)``；``limit`` 为本次实际生效的页大小，
+        调用方沿用到后续页（一次超限即整轮降档，不每页重试）。最小页仍被截断
+        → ``(None, True, limit)``（调用方按分页链断裂处理，已采证据全部保留）。
+        """
+        while True:
+            result = self.client.session_get(
+                self.session_id, message_before=boundary,
+                message_limit=limit,
+            )
+            if not result.get("truncated"):
+                return result, False, limit
+            if limit <= _PAGE_MIN_LIMIT:
+                return None, True, limit
+            limit = max(_PAGE_MIN_LIMIT, limit // 2)
+
+    def _connects(self, start: int, end: int, messages: list) -> bool:
+        """本页是否已与「已核验前缀」衔接（不必再把整段历史重读一遍）。
+
+        仅当此前完成过至少一次自 0 起的完整链，且本页覆盖该前缀末端、**页内
+        与前缀重叠的整段指纹逐一相符**（历史未被改写）时才成立；否则继续向前
+        翻页（安全回退到整段重读）。
+        """
+        if self.verified_end <= 0:
+            return False
+        if not start < self.verified_end <= end:
+            return False
+        overlap = self.verified_end - start
+        if overlap <= 0 or overlap > len(messages):
+            return False
+        if len(self._prefix_hashes) < self.verified_end:
+            return False
+        for offset in range(overlap):
+            message = messages[offset]
+            recorded = self._prefix_hashes[start + offset]
+            if not isinstance(message, dict) or recorded is None:
+                return False
+            if self._fingerprint(message) != recorded:
+                return False
+        return True
+
+    def _mark_verified(self, pages: list, connected: bool) -> None:
+        """链已接上 → 补齐「已核验前缀」指纹表（下次轮询据此提前收敛）。"""
+        if not connected or not pages:
+            return
+        newest_end = pages[0][1]
+        if newest_end <= self.verified_end:
+            return
+        if len(self._prefix_hashes) != self.verified_end:
+            return                        # 指纹表与前缀长度不符 → 不推进
+        fresh = {}
+        for start, _end, messages in pages:
+            for offset, message in enumerate(messages):
+                index = start + offset
+                if index >= self.verified_end and isinstance(message, dict):
+                    fresh[index] = self._fingerprint(message)
+        for index in range(self.verified_end, newest_end):
+            self._prefix_hashes.append(fresh.get(index))
+        self.verified_end = newest_end
+
     def _poll_inner(self) -> None:
         boundary = None
-        pages = []
+        pages: list = []               # [(start, end, messages)]，新 → 旧
+        connected = False
+        limit = _PAGE_LIMIT
         try:
             for _ in range(_MAX_PAGES_PER_POLL):
-                result = self.client.session_get(
-                    self.session_id, message_before=boundary,
-                    message_limit=_PAGE_LIMIT,
-                )
-                if result.get("truncated"):
+                result, truncated, limit = self._page(boundary, limit)
+                if truncated:
                     self.truncated = True
                     break
                 page = result.get("session")
@@ -244,18 +322,24 @@ class _Collector:
                 messages = page.get("messages")
                 if not isinstance(messages, list):
                     raise util.KanpilotError("internal", "pi_session_get messages 不是数组")
-                pages.append(messages)
                 start, end = page.get("messageStart"), page.get("messageEnd")
                 more = page.get("hasMoreBefore")
                 if (type(start) is not int or type(end) is not int
                         or not isinstance(more, bool) or start < 0 or end < start
                         or (boundary is not None and (end != boundary or start >= boundary))
-                        or (boundary is None and page.get("hasMoreAfter") is True)):
+                        or (boundary is None and page.get("hasMoreAfter") is True)
+                        or (messages and end - start != len(messages))):
                     self.truncated = True
+                    break
+                pages.append((start, end, messages))
+                if self._connects(start, end, messages):
+                    connected = True
                     break
                 if not more:
                     if start != 0:
                         self.truncated = True
+                    else:
+                        connected = True
                     break
                 if start == 0:
                     self.truncated = True
@@ -264,12 +348,13 @@ class _Collector:
             else:
                 self.truncated = True
         finally:
-            for messages in reversed(pages):
+            for _start, _end, messages in reversed(pages):
                 for message in messages:
                     if isinstance(message, dict):
                         self._emit(message)
                     else:
                         self.unrecognized = True
+            self._mark_verified(pages, connected)
 
     def _fingerprint(self, message: dict) -> str:
         payload = json.dumps(
@@ -497,16 +582,77 @@ class _ReadRecovery:
         return self._read("agent_status", session_id)
 
 
-def run_real(spec: dict) -> int:
-    """真实 pi_desktop 轮次（§5.23.3；写序恒 job→session→terminal）。"""
+def _resume_job(job_path: Path, spec: dict):
+    """``--resume`` 前置核验（§5.23.7）：只接受本轮自己的、已确认发送的现场。
+
+    返回 ``(job, error)``；任一不符（不可读/身份不符/未确认发送/缺 session·
+    turn）→ ``(None, 原因)``，调用方不续接且不改既有证据。
+    """
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return None, f"job.json 不可读：{exc}"
+    except ValueError:
+        return None, "job.json 解析失败（半写入或损坏）"
+    if not isinstance(job, dict):
+        return None, "job.json 不是 JSON 对象"
+    if job.get("task_id") != spec["task_id"] \
+            or job.get("run_id") != spec["run_id"]:
+        return None, "job.json 身份与目录不符"
+    if job.get("backend") != "pi_desktop":
+        return None, f"job.json backend 不符（{job.get('backend')!r}）"
+    if not job.get("session_id") or not job.get("turn_id"):
+        return None, "轮次缺少持久会话身份（session_id/turn_id）"
+    # send_state=sent 是常规值；旧版把心跳被拒误判为失败时写下的 unknown 也
+    # 可续接——「已确认发送」的硬证据是 events.jsonl 的 session 事件（由发送
+    # 成功 + 启动证明共同产生），见 run_real 的再次核验。
+    if job.get("send_state") not in ("sent", "unknown"):
+        return None, f"轮次发送状态不可续接（send_state={job.get('send_state')!r}）"
+    return job, None
+
+
+def _round_remaining_seconds(job: dict, timeout: float) -> float:
+    """续接观察的剩余预算（自 job.started_at 起算；不可解析 → 全额时限）。"""
+    started = util.parse_ts(job.get("started_at"))
+    now = util.parse_ts(util.now_iso())
+    if started is None or now is None:
+        return timeout
+    return timeout - max(0.0, now.timestamp() - started.timestamp())
+
+
+def run_real(spec: dict, resume: bool = False) -> int:
+    """真实 pi_desktop 轮次（§5.23.3；写序恒 job→session→terminal）。
+
+    ``resume=True``（§5.23.7）：现场已存在时只读续接观察——不建会话、不下发
+    权限、**绝不重发 prompt**。观察环境不成立 → 退出码 3 且既有轮次终态与
+    证据原样保留（监控端下一轮可再试）。
+    """
     run_dir = Path(spec["runs_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
     job_path = run_dir / dsh_events.JOB_NAME
+    existing = None
     if job_path.exists():
-        # A persisted intent/result is not permission to send a second prompt.
-        return 1
+        if not resume:
+            # A persisted intent/result is not permission to send a second prompt.
+            return 1
+        existing, resume_error = _resume_job(job_path, spec)
+        if existing is None:
+            print(f"resume rejected: {resume_error}", file=sys.stderr)
+            return 1
+        if existing.get("status") == "finished":
+            return 0        # 已按 completed 收尾的轮次无需再观察
     log = _EventLog(run_dir / dsh_events.EVENT_LOG_NAME)
-    job = _base_job(spec)
+    if resume:
+        # 只有已确认启动（events.jsonl 已有 session 事件）的轮次可续接：否则
+        # 该轮从未进入 running，续接会写出与生命周期不符的证据。
+        resume_events, _detail = dsh_events.iter_events(
+            run_dir / dsh_events.EVENT_LOG_NAME
+        )
+        if dsh_events.session_event(resume_events) is None:
+            print("resume rejected: session 事件缺失（该轮未确认发送/启动）",
+                  file=sys.stderr)
+            return 1
+    job = existing if existing is not None else _base_job(spec)
     collector = None              # session 建立后才存在；emit_session 负责开闸
     proof_ok = {"ok": False}      # 启动证明（turn_get + heartbeat）后才允许写 session
     session_written = {"done": False}
@@ -540,14 +686,42 @@ def run_real(spec: dict) -> int:
                      reason=reason or (detail or status))
         return 0 if status == "finished" else 1
 
+    def defer(detail: str) -> int:
+        """续接观察未成立（§5.23.7）：既有轮次终态/证据原样保留，只记本次尝试
+        与原因；退出码 3 与「轮次失败」（1）区分，监控端据此下一轮再试。"""
+        job.update({
+            "resume_detail": detail,
+            "resume_deferred_at": util.now_iso(),
+            "resume_attempts": int(job.get("resume_attempts") or 0) + 1,
+        })
+        _write_json(job_path, job)
+        print(f"resume deferred: {detail}", file=sys.stderr)
+        return 3
+
+    def fail(detail: str, reason: str) -> int:
+        """正常路径 = 轮次失败；--resume = 只记录（不改轮次终态）。"""
+        if resume:
+            return defer(detail)
+        return finalize("failed", 1, detail, True, "failed", reason)
+
+    if resume:
+        # 续接标记先落盘（谁在接管、何时开始）；status/detail 保持原值。
+        session_written["done"] = True      # session 事件已存在于现场
+        job["observe_pid"] = os.getpid()
+        job["resume_started_at"] = util.now_iso()
+        _write_json(job_path, job)
+
     # ---- 0. cwd 校验 + job(running) 启动即写（先于任何事件/网络调用）。
     cwd_value = spec.get("cwd")
     cwd = Path(cwd_value) if cwd_value else None
     if cwd is None or not cwd.is_dir():
+        if resume:
+            return defer(f"cwd_missing: {cwd_value}")
         _write_json(job_path, job)
         return finalize("failed", 1, f"cwd_missing: {cwd_value}",
                         True, "failed", "cwd_missing")
-    _write_json(job_path, job)
+    if not resume:
+        _write_json(job_path, job)
 
     timeout = float(spec.get("timeout_seconds")
                     or constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS)
@@ -568,20 +742,17 @@ def run_real(spec: dict) -> int:
         else:
             plan_body = text
     except (OSError, UnicodeDecodeError) as exc:
-        return finalize("failed", 1, f"plan_unreadable: {exc}",
-                        True, "failed", "plan_unreadable")
+        return fail(f"plan_unreadable: {exc}", "plan_unreadable")
     expected_sha = spec.get("plan_sha256")
     if expected_sha:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha:
-            return finalize("failed", 1, "plan_mismatch",
-                            True, "failed", "plan_mismatch")
+            return fail("plan_mismatch", "plan_mismatch")
     body_bytes = plan_body.encode("utf-8")
     if len(body_bytes) > constants.PI_DESKTOP_MCP_MAX_REQUEST_BYTES:
         # 计划正文超限 → 发送前明确失败（不入队、不截断）。
-        return finalize("failed", 1,
-                        f"plan_too_large: {len(body_bytes)} 字节 > 2 MiB",
-                        True, "failed", "plan_too_large")
+        return fail(f"plan_too_large: {len(body_bytes)} 字节 > 2 MiB",
+                    "plan_too_large")
 
     # ---- 2. 连接 + 握手 + 工具/型号门（复核本轮快照）。
     config = spec.get("config") or {}
@@ -596,104 +767,118 @@ def run_real(spec: dict) -> int:
         client = pi_desktop_backend.MCPClient(record["url"], record["token"], timeout=10)
         client.connect()
         job["pi_desktop_pid"] = record.get("pid")
-        _write_json(job_path, job)
+        if not resume:
+            _write_json(job_path, job)
         tools = client.tools_list()
         missing = [
             name for name in constants.PI_DESKTOP_REQUIRED_TOOLS
             if name not in tools
         ]
         if missing:
-            return finalize(
-                "failed", 1,
+            return fail(
                 "PI-Desktop 控制面缺少必需工具：" + "、".join(missing),
-                True, "failed", "unsupported_tools")
+                "unsupported_tools")
     except util.KanpilotError as exc:
-        return finalize("failed", 1, f"connect_failed: {exc.message}",
-                        True, "failed", "connect_failed")
+        return fail(f"connect_failed: {exc.message}", "connect_failed")
 
-    # ---- 3. 建会话 + 权限配置（permission_mode 非 inherit 才下发）。
     permission_mode = config.get("permission_mode")
-    if permission_mode not in constants.EXEC_PERMISSION_MODES:
-        return finalize("failed", 1,
-                        f"permission_mode 非法：{permission_mode}",
-                        True, "failed", "validation_failed")
-    try:
-        created = client.session_create(
-            str(cwd), mode="agent",
-            provider_id=config.get("provider_id"),
-            model_id=config.get("model_id"),
-            thinking_level=config.get("thinking_level"),
-            title=spec.get("session_marker") or spec["task_id"],
-        )
-        session = created.get("session") or {}
-        session_id = session.get("id") or created.get("sessionId") \
-            or created.get("id")
-        if not session_id:
-            raise util.KanpilotError(
-                "internal", "pi_session_create 未返回 session.id"
-            )
-        job["session_id"] = session_id
-        job["session_title"] = session.get("title") or session.get("name")
-        _write_json(job_path, job)
-        if permission_mode and permission_mode != "inherit":
-            client.session_configure(
-                session_id, mode="agent", permission_mode=permission_mode
-            )
-    except util.KanpilotError as exc:
-        return finalize("failed", 1, f"session_setup_failed: {exc.message}",
-                        True, "failed", "session_setup_failed")
-
-    collector = _Collector(client, job["session_id"], log,
-                           spec.get("session_marker") or "")
-
-    # ---- 4. 发送 prompt（instruction + 计划正文；绝不自动重发）。
-    prompt = (spec.get("instruction") or "").rstrip() + "\n\n" + plan_body
-    turn_id = None
-    # A crash during the network call cannot distinguish accepted from unsent.
-    job["send_state"] = "unknown"
-    _write_json(job_path, job)
-    try:
-        result = client.agent_prompt(job["session_id"], prompt)
-        turn_id = result.get("turnId") or result.get("turn_id")
-        if not turn_id:
-            raise util.KanpilotError(
-                "internal", "pi_agent_prompt 未返回 turnId"
-            )
-        job["turn_id"] = turn_id
-        job["send_state"] = "sent"
-        _write_json(job_path, job)
-    except util.KanpilotError as exc:
-        if exc.code == "validation_failed" and "超过 2 MiB" in exc.message:
-            job["send_state"] = "not_sent"
-            return finalize("failed", 1, "plan_too_large: " + exc.message,
-                            True, "failed", "plan_too_large")
-        # 发送响应丢失/未达：可能已受理——读 agent_status 取证，绝不重发。
-        recovered = None
+    if resume:
+        # ---- 3'-4'. 续接观察（§5.23.7）：只读接管既有 session/turn。
+        remaining = _round_remaining_seconds(job, timeout)
+        if remaining <= 0:
+            # 已超时的轮次只能人工判定终态：续接不得先动手停止仍在跑的会话。
+            return defer("round_timeout_elapsed: 轮次已超出时限，需人工判定终态")
+        deadline = time.monotonic() + remaining
+        turn_id = job["turn_id"]
+        collector = _Collector(client, job["session_id"], log,
+                               spec.get("session_marker") or "")
+        observer = _ReadRecovery(client, config["connection_file"],
+                                 job["session_id"], turn_id)
+        collector.client = observer
+    else:
+        # ---- 3. 建会话 + 权限配置（permission_mode 非 inherit 才下发）。
+        if permission_mode not in constants.EXEC_PERMISSION_MODES:
+            return fail(f"permission_mode 非法：{permission_mode}",
+                        "validation_failed")
         try:
-            status_view = client.agent_status(job["session_id"])
-            inner = status_view.get("status") or status_view
-            recovered = inner.get("currentTurnId")
-        except util.KanpilotError:
-            recovered = None
-        collector.poll()  # 尽力保全已产生的证据
-        collector.preserve_unverified(run_dir, record["token"])
-        # currentTurnId is only candidate evidence.  It cannot prove that the
-        # prompt response landed, so preserve unknown and require intervention.
-        job["send_state"] = "unknown"
-        if recovered:
-            job["turn_id"] = recovered
-            job["detail"] = (
-                f"prompt_response_lost: {exc.message}；"
-                f"currentTurnId 仅作候选证据：{recovered}"
+            created = client.session_create(
+                str(cwd), mode="agent",
+                provider_id=config.get("provider_id"),
+                model_id=config.get("model_id"),
+                thinking_level=config.get("thinking_level"),
+                title=spec.get("session_marker") or spec["task_id"],
             )
-        else:
-            job["detail"] = f"prompt_response_lost: {exc.message}"
-        _write_json(job_path, job)
-        return finalize("failed", 1, job["detail"],
-                        True, "failed", "send_unknown")
+            session = created.get("session") or {}
+            session_id = session.get("id") or created.get("sessionId") \
+                or created.get("id")
+            if not session_id:
+                raise util.KanpilotError(
+                    "internal", "pi_session_create 未返回 session.id"
+                )
+            job["session_id"] = session_id
+            job["session_title"] = session.get("title") or session.get("name")
+            _write_json(job_path, job)
+            if permission_mode and permission_mode != "inherit":
+                client.session_configure(
+                    session_id, mode="agent", permission_mode=permission_mode
+                )
+        except util.KanpilotError as exc:
+            return fail(f"session_setup_failed: {exc.message}",
+                        "session_setup_failed")
 
-    observer = _ReadRecovery(client, config["connection_file"], job["session_id"], turn_id)
-    collector.client = observer
+        collector = _Collector(client, job["session_id"], log,
+                               spec.get("session_marker") or "")
+
+        # ---- 4. 发送 prompt（instruction + 计划正文；绝不自动重发）。
+        prompt = (spec.get("instruction") or "").rstrip() + "\n\n" + plan_body
+        turn_id = None
+        # A crash during the network call cannot distinguish accepted from unsent.
+        job["send_state"] = "unknown"
+        _write_json(job_path, job)
+        try:
+            result = client.agent_prompt(job["session_id"], prompt)
+            turn_id = result.get("turnId") or result.get("turn_id")
+            if not turn_id:
+                raise util.KanpilotError(
+                    "internal", "pi_agent_prompt 未返回 turnId"
+                )
+            job["turn_id"] = turn_id
+            job["send_state"] = "sent"
+            _write_json(job_path, job)
+        except util.KanpilotError as exc:
+            if exc.code == "validation_failed" and "超过 2 MiB" in exc.message:
+                job["send_state"] = "not_sent"
+                return finalize("failed", 1, "plan_too_large: " + exc.message,
+                                True, "failed", "plan_too_large")
+            # 发送响应丢失/未达：可能已受理——读 agent_status 取证，绝不重发。
+            recovered = None
+            try:
+                status_view = client.agent_status(job["session_id"])
+                inner = status_view.get("status") or status_view
+                recovered = inner.get("currentTurnId")
+            except util.KanpilotError:
+                recovered = None
+            collector.poll()  # 尽力保全已产生的证据
+            collector.preserve_unverified(run_dir, record["token"])
+            # currentTurnId is only candidate evidence.  It cannot prove that
+            # the prompt response landed, so preserve unknown and require
+            # intervention.
+            job["send_state"] = "unknown"
+            if recovered:
+                job["turn_id"] = recovered
+                job["detail"] = (
+                    f"prompt_response_lost: {exc.message}；"
+                    f"currentTurnId 仅作候选证据：{recovered}"
+                )
+            else:
+                job["detail"] = f"prompt_response_lost: {exc.message}"
+            _write_json(job_path, job)
+            return finalize("failed", 1, job["detail"],
+                            True, "failed", "send_unknown")
+
+        observer = _ReadRecovery(client, config["connection_file"],
+                                 job["session_id"], turn_id)
+        collector.client = observer
 
     def observe_turn():
         record = observer.turn_get(job["session_id"], turn_id)
@@ -702,6 +887,10 @@ def run_real(spec: dict) -> int:
         return record
 
     def unknown(detail, reason="unverifiable"):
+        if resume:
+            # 续接观察只负责观察：读不到持久轮次时不得改写轮次终态（更不得
+            # 写成发送不明），留给监控端下一轮再续接。
+            return defer(detail)
         if not proof_ok["ok"]:
             collector.poll()
             collector.preserve_unverified(run_dir, client._token)
@@ -721,21 +910,48 @@ def run_real(spec: dict) -> int:
             time.sleep(min(0.5, max(0, proof_deadline - time.monotonic())))
     state = _turn_status(record)
     turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
-    if state in ("error", "aborted"):
+    if state in ("error", "aborted") and not resume:
         collector.poll()
         collector.preserve_unverified(run_dir, client._token)
         code = turn.get("errorCode") or state
         return finalize("failed", 1, f"turn {state}: {code}", True, "failed", str(code))
-    try:
-        _heartbeat(spec)
-    except Exception as exc:
-        detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
-        return unknown(f"heartbeat_failed: {detail}", "heartbeat_failed")
-    proof_ok["ok"] = True
-    emit_session()
+    if resume:
+        # 续接接管证明：持久 turn 可读 + 身份相符即视为接管成功（启动证明已
+        # 由原进程完成，不重复 heartbeat、不重复写 session 事件）。
+        proof_ok["ok"] = True
+        if "resume_previous" not in job:
+            # 首次续接：上一次收尾（观察者退出造成的假失败/崩溃现场）留作
+            # 审计字段后，轮次回到观察态——已重新接管，run_status 不再是 failed。
+            job["resume_previous"] = {
+                "status": job.get("status"),
+                "detail": job.get("detail"),
+                "ended_at": job.get("ended_at"),
+                "exit_code": job.get("exit_code"),
+                "send_state": job.get("send_state"),
+            }
+        job["observation_resumed_at"] = util.now_iso()
+        job["resume_detail"] = None
+        # session 事件即「已确认发送」证据：把旧版假失败留下的 unknown 修回
+        # sent（原值已在 resume_previous 保留），避免轮次继续显示发送不明。
+        job["send_state"] = "sent"
+        job.update({"status": "running", "detail": None,
+                    "ended_at": None, "exit_code": None})
+        _write_json(job_path, job)
+    else:
+        try:
+            _heartbeat(spec)
+        except Exception as exc:
+            detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+            return unknown(f"heartbeat_failed: {detail}", "heartbeat_failed")
+        proof_ok["ok"] = True
+        emit_session()
 
     # ---- 6. Observe until settlement; stop/abort are each attempted once.
     last_heartbeat = time.monotonic()
+    # 派发请求在 dispatch-confirm 后即收尾（succeeded），此后核心对它的
+    # heartbeat 一律回 stale_run/not_found。这是正常路径，不是轮次失败：观察
+    # 只停止续租，绝不中断——轮次由本轮观察 + 监控口径收尾。
+    heartbeating = bool(spec.get("request_id") and spec.get("db_path"))
     stop_requested = False
     stop_at = None
     abort_attempted = False
@@ -780,12 +996,18 @@ def run_real(spec: dict) -> int:
         collector.poll()
         if collector.read_error is not None:
             return unknown("transcript_read_failed: " + collector.read_error)
-        if now_m - last_heartbeat >= _HEARTBEAT_SECONDS:
+        if heartbeating and now_m - last_heartbeat >= _HEARTBEAT_SECONDS:
             try:
                 _heartbeat(spec)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 心跳失败不中断观察
                 detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
-                return unknown("heartbeat_failed: " + detail, "heartbeat_failed")
+                code = exc.code if isinstance(exc, util.KanpilotError) else "internal"
+                if code in ("stale_run", "not_found"):
+                    heartbeating = False
+                    job["heartbeat_stopped"] = f"{code}: {detail}"
+                else:
+                    job["heartbeat_retry"] = f"{code}: {detail}"
+                _write_json(job_path, job)
             last_heartbeat = now_m
         time.sleep(_POLL_SECONDS)
 
@@ -828,6 +1050,10 @@ def run_real(spec: dict) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="kanpilot.pi_desktop_worker")
     parser.add_argument("--spec", required=True)
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="§5.23.7 观察者续接：只读接管既有 session/turn，绝不重发 prompt",
+    )
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     if spec.get("v") != 1:
@@ -838,13 +1064,17 @@ def main(argv=None) -> int:
             print(f"spec missing {key}", file=sys.stderr)
             return 2
     fake = os.environ.get("KANPILOT_PI_DESKTOP_FAKE")
+    if fake and args.resume:
+        # fake 接缝没有真实 session/turn 现场，续接语义只属于真实分支。
+        print("--resume 与 KANPILOT_PI_DESKTOP_FAKE 互斥", file=sys.stderr)
+        return 2
     if fake:
         try:
             return run_fake(spec, fake)
         except KeyboardInterrupt:
             return 130
     try:
-        return run_real(spec)
+        return run_real(spec, resume=args.resume)
     except KeyboardInterrupt:
         return 130
     except util.KanpilotError as exc:
@@ -857,6 +1087,15 @@ def main(argv=None) -> int:
                 if job_path.is_file() else _base_job(spec)
         except (OSError, ValueError):
             job = _base_job(spec)
+        if args.resume:
+            # 续接失败不得把既有轮次改写成 failed（观察环境问题 ≠ 轮次失败）。
+            job.update({
+                "resume_detail": f"{exc.code}: {exc.message}",
+                "resume_deferred_at": util.now_iso(),
+                "resume_attempts": int(job.get("resume_attempts") or 0) + 1,
+            })
+            _write_json(job_path, job)
+            return 3
         job.update({
             "status": "failed", "ended_at": util.now_iso(),
             "exit_code": 1, "detail": f"{exc.code}: {exc.message}",
@@ -872,6 +1111,14 @@ def main(argv=None) -> int:
                 if job_path.is_file() else _base_job(spec)
         except (OSError, ValueError):
             job = _base_job(spec)
+        if args.resume:
+            job.update({
+                "resume_detail": f"internal: {exc}",
+                "resume_deferred_at": util.now_iso(),
+                "resume_attempts": int(job.get("resume_attempts") or 0) + 1,
+            })
+            _write_json(job_path, job)
+            return 3
         job.update({
             "status": "failed", "ended_at": util.now_iso(),
             "exit_code": 1, "detail": f"internal: {exc}",

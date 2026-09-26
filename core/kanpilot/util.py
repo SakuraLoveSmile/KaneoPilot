@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,6 +106,61 @@ def sha256_file(path: Path) -> str:
 
 def jdump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def process_state(pid: Any) -> Optional[str]:
+    """``ps -o stat=`` 的进程状态首字段（R/S/T/Z…）。
+
+    进程不存在、ps 不可用或超时 → None（与「存在但状态未知」区分不了时，
+    调用方按存活处理，见 :func:`pid_alive`）。
+    """
+    ps = shutil.which("ps") or "/bin/ps"
+    try:
+        out = subprocess.run(
+            [ps, "-o", "stat=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = (out.stdout or "").strip().splitlines()
+    return lines[0].strip() if lines else None
+
+
+def pid_alive(pid: Any) -> bool:
+    """本机进程存活探测（``os.kill(pid, 0)`` + 排除僵尸进程）。
+
+    只用于判断**本机观察进程**是否仍在（是否可以续接），**绝不**作为轮次
+    终态依据（protocol §5.18.4 完成判定只认三证据）。``kill 0`` 对未被
+    ``wait`` 回收的僵尸进程同样成功，因此存活结论再经 ``ps`` 状态复核：
+    查询成功但无该进程、或状态为 Z（僵尸）→ 已退出；``ps`` 不可用/超时 →
+    保守视为存活（宁可不重复拉起观察者，也不并发两个写入者）。
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return _ps_alive(pid)
+
+
+def _ps_alive(pid: int) -> bool:
+    ps = shutil.which("ps") or "/bin/ps"
+    try:
+        out = subprocess.run(
+            [ps, "-o", "stat=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True                     # 查不到结论 → 保守视为存活
+    lines = (out.stdout or "").strip().splitlines()
+    if not lines:
+        return False                    # ps 成功但无该 PID → 已退出
+    return lines[0].strip()[:1].upper() != "Z"
 
 
 def jload(text: Any) -> Any:
