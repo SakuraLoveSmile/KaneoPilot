@@ -1,43 +1,46 @@
 {PREAMBLE}
 
-职责（stage=dispatch，executor id `kaneo-dispatch`）：把可领取计划交给
-**pi** 执行——准备凭据、完成远端迁移、启动轮次进程、确认会话建立即结束
-该项。不恢复旧会话、不等待执行完成、不归档。**不做任何桌面 UI 操控
-（无 Computer Use、无截图）。**
+职责（stage=dispatch，executor id `kaneo-dispatch`）：按领取上下文固化的执行后端
+派发计划——准备凭据、完成远端迁移、启动轮次 worker、确认会话建立即结束该项。
+`pi` 后端由 `pi_worker` 执行；`pi_desktop` 后端由已配置的 Pi-Desktop-Plus
+本机 MCP worker 执行。不恢复旧会话、不等待执行完成、不归档。**不做任何桌面
+UI 操控（无 Computer Use、无截图）。**
 
-流程（全部经 kanpilot，契约 protocol.md §5.18.3）：
+流程（全部经 kanpilot，契约 protocol.md §5.18.3/§5.23.3）：
 1. `kanpilot claim --stage dispatch --executor kaneo-dispatch`。
    `claimed:false`（无请求/paused/stage_busy/guard_failed/配置不可用
-   validation_failed）→ 简报结束；guard 报 pi 配置/凭据/agent.md 不可用
-   时原文转述，**不自行换模型或 agent**。context 含 backend="pi"、
-   exec_config 快照、plan_path、repository、session_marker、instruction、
-   original_todo_slug——核心已完成计划哈希、来源快照、远端状态、review
-   交付与 pi 可用性校验，不要重复 check。
-   - 若 context **没有** backend 字段（历史遗留领取）→ 简报说明
-     「非 pi 轮次，交人工」并结束，不猜测流程。
-2. `dispatch-prepare`（pi 证据，全部来自 context，不推测）：
+   validation_failed）→ 简报结束；配置不可用时原文转述，**不自行换后端、模型
+   或 agent**。`context.backend` 必须是 `pi` 或 `pi_desktop`；若缺失或未知，
+   说明后端无法识别并结束，不猜测流程。context 含 `exec_config` 快照、
+   `plan_path`、`repository`、`session_marker`、`instruction`、
+   `original_todo_slug`；核心已完成计划哈希、来源快照、远端状态、review
+   交付与该后端可用性校验，不要重复 check。
+2. `dispatch-prepare`（后端证据全部原样来自 context，不推测）：
    `kanpilot dispatch-prepare --json '{"task_id":..., "run_id":...,
-   "evidence": {"session_marker":..., "repository":..., "backend":"pi",
-   "config":<context.exec_config 原样>}}'`
+   "evidence": {"session_marker":..., "repository":...,
+   "backend":<context.backend>, "config":<context.exec_config 原样>}}'`
    失败 evidence_invalid → 转第 6 步 dispatch-fail。
 3. `kanpilot dispatch-begin-send --json '{"task_id":..., "run_id":...}'`：
    核心完成远端 To Do→In Progress 迁移并复验；返回
    remote_conflict/unavailable → 按错误原文
    `dispatch-fail --send-state unknown`。
-4. `kanpilot dispatch-start --json '{"task_id":..., "run_id":...}'`：
+4. `kanpilot dispatch-start --json '{"task_id":..., "run_id":...}'`：核心根据轮次
+   固化后端启动对应 worker；`pi_desktop` 的计划正文由本机 MCP worker 按已核验
+   哈希读取，控制端不粘贴或改写计划正文。
    - `deduplicated:true` → 该轮已启动，跳到第 5 步
      （**绝不重复启动进程**）。
    - `status:"started"` 且带 session_id → 直接到第 5 步。
    - `status:"starting"`（session 事件未就绪）→ 每 ≤30 秒
      `kanpilot get-session` 轮询 session_id，≤5 分钟仍未就绪 →
      `dispatch-fail --send-state unknown --reason "worker 会话未建立"`。
-   - 错误 `validation_failed`（配置/凭据/agent.md 不可用）→
+   - 错误 `validation_failed`（所选后端配置/连接，或 pi 模型/凭据/agent.md 不可用）→
      `dispatch-fail --send-state not_sent`；`internal`（进程拉起失败）→
      `dispatch-fail --send-state unknown`。
-5. session_id 就绪后 `dispatch-confirm`（pi 证据）：
+5. session_id 就绪后 `dispatch-confirm`（后端证据继续使用同一快照）：
    `kanpilot dispatch-confirm --json '{"task_id":..., "run_id":...,
-   "evidence": {"session_marker":..., "repository":..., "backend":"pi",
-   "session_id":..., "protocol_seen":true, "config":<与 prepare 相同>}}'`
+   "evidence": {"session_marker":..., "repository":...,
+   "backend":<context.backend>, "session_id":..., "protocol_seen":true,
+   "config":<与 prepare 相同>}}'`
    核心会核验 events.jsonl 的 session 初始化事件与 config 快照；
    `evidence_invalid` → 第 6 步。confirm 成功（status=running）即本项
    结束，立即继续下一项，**不等执行完成**。
