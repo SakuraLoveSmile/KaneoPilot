@@ -943,7 +943,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 - **接续判据（四条缺一不可；任一不成立即按失败收尾，不接续）**：
   1. 持久 turn `status ∈ {error, aborted}` 且 `errorCode` 属瞬时集合 `{EMPTY_MODEL_RESPONSE}`；
-  2. 转录（`pi_session_get`）里**最新 user 消息仍是本轮派发的 prompt**（normalize 空白后逐字比较）——用户另发指令的会话绝不并入本任务；
+  2. **会话归属锚点**：转录（`pi_session_get`）里**物理下标最小的 user 消息仍是本轮派发的 prompt**（normalize 空白后逐字比较）——证明该会话确由本轮创建。用户随后在同一会话里追加指令（如「用中文回复我」）不阻止接续；锚点不符（会话被改用）则绝不接续；
   3. `pi_agent_status` 显示**同一会话仍在跑另一个 turn**（`isRunning=true` 且 `currentTurnId` ≠ 旧 turn）；
   4. 未超接续上限（每轮最多 5 次）且不重复接续同一 turn。
 - **接续动作只读**：`job.turn_id` 前移为新 turn，`job.turn_adopted` 追加 `{from, to, code, at}` 审计记录，events.jsonl 追加一条 `system` 事件（`turn_adopted: <旧> → <新>（<code> 后同一会话自动重开，继续观察；未重发 prompt）`），观察进程换绑新 turn 继续轮询；**不新建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**，既有 session 事件与 turn 记录一字不改。
