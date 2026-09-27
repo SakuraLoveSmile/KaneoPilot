@@ -1216,7 +1216,9 @@ struct TaskDetailSheet: View {
             VStack(spacing: 0) {
                 header
                 Divider()
+                // 内容区填满导航以下可用高度；各分段自己只滚动一次。
                 content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(minWidth: 720, idealWidth: 840, minHeight: 520, idealHeight: 640)
             .background(Color.kpWindow)
@@ -1247,21 +1249,13 @@ struct TaskDetailSheet: View {
     private var content: some View {
         switch tab {
         case .overview:
-            Group {
-                if let detail {
-                    TaskDetailView(detail: detail, events: events,
-                                   showsHistory: false)
-                } else if loading {
-                    LoadingView()
-                } else {
-                    ContentUnavailableView {
-                        Label("读取失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text(error ?? "")
-                    } actions: {
-                        Button("重试") { Task { await load() } }
-                    }
-                }
+            if let detail {
+                TaskDetailView(detail: detail, events: events,
+                               showsHistory: false)
+            } else if loading {
+                LoadingView()
+            } else {
+                readFailure
             }
         case .plan:
             // §4.8 计划阅读页：get-plan 核验正文（内部自管加载/空态/错误）。
@@ -1276,19 +1270,14 @@ struct TaskDetailSheet: View {
                 SessionReaderView(taskID: item.id,
                                   preferredRunID: detail?.runId)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .review:
             if let detail {
                 TaskReviewTabView(detail: detail)
             } else if loading {
                 LoadingView()
             } else {
-                ContentUnavailableView {
-                    Label("读取失败", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error ?? "")
-                } actions: {
-                    Button("重试") { Task { await load() } }
-                }
+                readFailure
             }
         case .log:
             if let detail {
@@ -1296,15 +1285,21 @@ struct TaskDetailSheet: View {
             } else if loading {
                 LoadingView()
             } else {
-                ContentUnavailableView {
-                    Label("读取失败", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error ?? "")
-                } actions: {
-                    Button("重试") { Task { await load() } }
-                }
+                readFailure
             }
         }
+    }
+
+    /// 详情读取失败：错误原因 + 重试（§6 不清空旧数据，这里没有旧数据可留）。
+    private var readFailure: some View {
+        ContentUnavailableView {
+            Label("读取失败", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(error ?? "")
+        } actions: {
+            Button("重试") { Task { await load() } }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// §4.1 执行页头部轮次字段（run_id/session_id/session_title/
@@ -1360,6 +1355,8 @@ struct TaskDetailSheet: View {
         }
     }
 
+    /// §4.1：五段导航固定在浮层顶部，宽度自适应（不固定宽度以免窄窗口下挤压），
+    /// 切换分段只替换下方内容区，不改变浮层有效尺寸。
     private var header: some View {
         HStack(spacing: Spacing.m) {
             Picker("查看", selection: $tab) {
@@ -1368,10 +1365,10 @@ struct TaskDetailSheet: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 320)
+            .frame(minWidth: 280, maxWidth: 360)
             .accessibilityLabel("详情分段：\(tab.title)")
 
-            Spacer()
+            Spacer(minLength: Spacing.s)
 
             Button("关闭") { dismiss() }
                 .keyboardShortcut(.cancelAction)

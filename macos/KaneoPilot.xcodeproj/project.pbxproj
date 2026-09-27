@@ -25,6 +25,7 @@
 		BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* ExecutorScheduler.swift */; };
 		BA5E00000000000000001130 /* PlanningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001030 /* PlanningView.swift */; };
 		BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001031 /* TaskDetailTabs.swift */; };
+		BA5E00000000000000001132 /* MarkdownReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001032 /* MarkdownReaderView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		BA5E00000000000000001016 /* ExecutorScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutorScheduler.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001030 /* PlanningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanningView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001031 /* TaskDetailTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailTabs.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001032 /* MarkdownReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownReaderView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
 		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -117,6 +119,7 @@
 				BA5E00000000000000001015 /* SavedTasksView.swift */,
 				BA5E00000000000000001030 /* PlanningView.swift */,
 				BA5E00000000000000001031 /* TaskDetailTabs.swift */,
+				BA5E00000000000000001032 /* MarkdownReaderView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -216,6 +219,7 @@
 				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
 				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,
+				BA5E00000000000000001132 /* MarkdownReaderView.swift in Sources */,
 				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

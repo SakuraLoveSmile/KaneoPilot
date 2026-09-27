@@ -803,3 +803,243 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                 kaneo_checked_at=ctx.now_iso,
             )
         return {"ok": True, "report_sha256": report_sha}
+
+
+# ================================= Goal 完成判定登记（T5，protocol §5.23.10）
+MONITOR_EXECUTOR_ID = "kaneo-monitor"
+GOAL_EVALUATION_EVENT = "goal_report_evaluated"
+GOAL_EVALUATION_DECISIONS = ("complete", "incomplete", "uncertain")
+
+
+def require_monitor_claim(conn, request_id: str, run_id: str,
+                          now) -> sqlite3.Row:
+    """核对 monitor 请求仍由 ``kaneo-monitor`` 领取且租约有效（T5-C 第 1 步）。
+
+    任一不符 → ``stale_run``（不登记、不放行）。
+    """
+    row = _claimed_request(conn, request_id, run_id)
+    if row["kind"] != "monitor" or row["stage"] != "monitor":
+        raise util.KanpilotError(
+            "stale_run",
+            f"request {request_id} 不是 monitor 请求（kind={row['kind']}），"
+            "不能登记 Goal 完成判定",
+        )
+    if row["claimed_by"] != MONITOR_EXECUTOR_ID:
+        raise util.KanpilotError(
+            "stale_run",
+            f"monitor 请求未由 {MONITOR_EXECUTOR_ID} 领取"
+            f"（claimed_by={row['claimed_by']!r}）",
+        )
+    if util.lease_lost(row["lease_expires_at"], now):
+        raise util.KanpilotError(
+            "stale_run", "monitor 请求租约已过期（失联），不能登记完成判定"
+        )
+    return row
+
+
+def goal_evaluation_signature(payload: dict) -> dict:
+    """幂等签名：同一 task/execution_run/plan/report → 复用原判定事件。"""
+    return {
+        "task_id": payload["task_id"],
+        "execution_run_id": payload["execution_run_id"],
+        "plan_sha256": payload["plan_sha256"],
+        "report_sha256": payload["report_sha256"],
+    }
+
+
+def find_goal_evaluation(conn, signature: dict):
+    """按签名查找既有 ``goal_report_evaluated`` 事件（**不重复调用 AI**）。"""
+    for row in conn.execute(
+        "SELECT id, at, task_id, request_id, actor, detail_json FROM events "
+        "WHERE kind=? AND task_id=? ORDER BY id DESC",
+        (GOAL_EVALUATION_EVENT, signature["task_id"]),
+    ).fetchall():
+        detail = util.jload(row["detail_json"])
+        if not isinstance(detail, dict):
+            continue
+        if (
+            detail.get("execution_run_id") == signature["execution_run_id"]
+            and detail.get("plan_sha256") == signature["plan_sha256"]
+            and detail.get("report_sha256") == signature["report_sha256"]
+        ):
+            return {
+                "event_id": row["id"],
+                "at": row["at"],
+                "request_id": row["request_id"],
+                "actor": row["actor"],
+                "detail": detail,
+            }
+    return None
+
+
+def goal_evaluation_event(conn, event_id):
+    """读取一条 ``goal_report_evaluated`` 事件（硬闸按 ID 复核用）。"""
+    row = conn.execute(
+        "SELECT id, at, task_id, request_id, actor, detail_json FROM events "
+        "WHERE id=? AND kind=?",
+        (event_id, GOAL_EVALUATION_EVENT),
+    ).fetchone()
+    if row is None:
+        return None
+    detail = util.jload(row["detail_json"])
+    return {
+        "event_id": row["id"],
+        "at": row["at"],
+        "task_id": row["task_id"],
+        "request_id": row["request_id"],
+        "actor": row["actor"],
+        "detail": detail if isinstance(detail, dict) else {},
+    }
+
+
+def _evaluation_response(event: dict, *, deduplicated: bool) -> dict:
+    detail = event.get("detail") or {}
+    return {
+        "ok": True,
+        "deduplicated": deduplicated,
+        "event_id": event.get("event_id"),
+        "registered_at": event.get("at"),
+        "task_id": detail.get("task_id"),
+        "execution_run_id": detail.get("execution_run_id"),
+        "monitor_run_id": detail.get("monitor_run_id"),
+        "monitor_request_id": detail.get("monitor_request_id"),
+        "plan_sha256": detail.get("plan_sha256"),
+        "report_id": detail.get("report_id"),
+        "report_sha256": detail.get("report_sha256"),
+        "decision": detail.get("decision"),
+        "reason": detail.get("reason"),
+        "criterion_reviews": detail.get("criterion_reviews") or [],
+        "report_state": detail.get("report_state"),
+        "integrity_kind": detail.get("integrity_kind"),
+        "execution_status": detail.get("execution_status"),
+        "verdict": detail.get("verdict"),
+        "report_turn_id": detail.get("report_turn_id"),
+        "report_session_id": detail.get("report_session_id"),
+        # §5.23.10 T5-C：两种轮次身份不可互换。
+        "execution_run_id_is_monitor_run_id": (
+            detail.get("execution_run_id") == detail.get("monitor_run_id")
+        ),
+    }
+
+
+def cmd_record_goal_evaluation(ctx, payload: dict) -> dict:
+    """``record-goal-evaluation``（protocol §5.23.10 T5-C）。
+
+    1. 先核对 monitor 请求仍由 kaneo-monitor 领取且**租约有效**；
+    2. 只读**重新取回同一报告**并核对当前任务/执行轮次/计划/报告 hash；
+    3. ``decision=complete`` 时确定性核对报告底线（status=ready /
+       integrity=structured / execution=completed / verdict=met / 审查项
+       非空且 ID 唯一且全 met / 引用 ID 存在于报告）；
+    4. 通过后写 ``goal_report_evaluated`` 事件（AI 判定、理由、引用 ID +
+       两种轮次身份）。
+
+    幂等：同 ``task_id``/``execution_run_id``/``plan_sha256``/
+    ``report_sha256`` 已有判定 → 返回原事件，不重复调用 AI。新的 monitor
+    请求可引用它，但**必须自己仍是有效 claim**（每次调用都先核对）。
+    """
+    from . import pi_desktop_backend
+
+    conn, now = ctx.conn, ctx.now
+    task_id = payload["task_id"]
+    execution_run_id = payload["execution_run_id"]
+    monitor_request_id = payload["monitor_request_id"]
+    monitor_run_id = payload["monitor_run_id"]
+    plan_sha256 = payload["plan_sha256"]
+    report_sha256 = payload["report_sha256"]
+    report_id = payload.get("report_id")
+    decision = payload["decision"]
+    reason = payload.get("reason")
+    if decision not in GOAL_EVALUATION_DECISIONS:
+        raise util.bad_request(f"decision 非法：{decision}")
+    reviews, referenced = cmd_read.collect_criterion_reviews(
+        payload.get("criterion_reviews")
+    )
+    if decision == "complete" and not (
+        isinstance(reason, str) and reason.strip()
+    ):
+        raise util.bad_request("decision=complete 必须给出 reason")
+
+    with db.write_txn(conn):
+        # 1. monitor claim 与租约（幂等路径同样要求，不能被旧判定绕过）。
+        require_monitor_claim(conn, monitor_request_id, monitor_run_id, now)
+        task = db.require_task(conn, task_id)
+        if task["run_id"] != execution_run_id:
+            raise util.KanpilotError(
+                "conflict",
+                "execution_run_id 不是该任务的当前执行轮次"
+                f"（当前 {task['run_id']}）",
+            )
+        signature = goal_evaluation_signature(payload)
+        existing = find_goal_evaluation(conn, signature)
+        if existing is not None:
+            return _evaluation_response(existing, deduplicated=True)
+
+    # 2. 只读重新取回同一报告并核对当前任务/执行轮次/计划/报告 hash。
+    resolved = cmd_read.read_goal_report(
+        ctx.conn, task_id, execution_run_id
+    )
+    if plan_sha256 != (resolved["identity"]["plan_sha256"] or ""):
+        raise util.KanpilotError(
+            "conflict", "plan_sha256 与任务当前登记计划哈希不符"
+        )
+    if resolved["state"] != "ready":
+        raise util.KanpilotError(
+            "conflict",
+            f"报告当前不可用（state={resolved['state']}）："
+            f"{resolved.get('detail') or '无正文'}",
+        )
+    if resolved["report_sha256"] != report_sha256:
+        # 报告自上次读取后被改写：判定必须绑定**当时的**报告。
+        raise util.KanpilotError(
+            "conflict",
+            "report_sha256 与当前读取的报告不符（报告已变化）",
+        )
+    if report_id and resolved.get("report_id") \
+            and str(report_id) != str(resolved["report_id"]):
+        raise util.KanpilotError(
+            "conflict", "report_id 与当前读取的报告不符"
+        )
+
+    report = resolved["report"]
+    if decision == "complete":
+        cmd_read.verify_goal_completion(report, reviews, referenced)
+
+    detail = {
+        "task_id": task_id,
+        "execution_run_id": execution_run_id,
+        "monitor_run_id": monitor_run_id,
+        "monitor_request_id": monitor_request_id,
+        "plan_sha256": plan_sha256,
+        "report_id": resolved.get("report_id") or report_id,
+        "report_sha256": report_sha256,
+        "decision": decision,
+        "reason": reason,
+        "criterion_reviews": reviews,
+        "evidence_refs": sorted(referenced),
+        "report_state": resolved["state"],
+        "integrity_kind": pi_desktop_backend.report_integrity_kind(report),
+        "execution_status": resolved["execution_status"],
+        "verdict": resolved["verdict"],
+        "report_turn_id": resolved["turn_id"],
+        "report_session_id": resolved["session_id"],
+        "report_proposal_id": resolved["proposal_id"],
+        "critical_bottom_line": decision == "complete",
+    }
+    with db.write_txn(conn):
+        require_monitor_claim(conn, monitor_request_id, monitor_run_id, now)
+        signature = goal_evaluation_signature(payload)
+        existing = find_goal_evaluation(conn, signature)
+        if existing is not None:
+            return _evaluation_response(existing, deduplicated=True)
+        db.add_event(
+            conn, ctx.now_iso, GOAL_EVALUATION_EVENT, task_id=task_id,
+            request_id=monitor_request_id, actor=MONITOR_EXECUTOR_ID,
+            detail=detail,
+        )
+        row = conn.execute(
+            "SELECT id FROM events WHERE kind=? AND task_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (GOAL_EVALUATION_EVENT, task_id),
+        ).fetchone()
+        event = {"event_id": row["id"], "at": ctx.now_iso, "detail": detail}
+    return _evaluation_response(event, deduplicated=False)
