@@ -341,8 +341,10 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
     导入——该模块由子任务 B 实现，缺失不阻塞 pi 分支）按用户保存的
     connection_file 做连接文件校验 + 内存 initialize/tools/list。
 
-    返回 {available, detail, tools_ok, version}；token、连接文件全文、
-    Authorization header 绝不进返回值。
+    返回 {available, detail, tools_ok, version, session_naming}；token、
+    连接文件全文、Authorization header 绝不进返回值。``session_naming``
+    为 T6 兼容门（§5.23.10）：``pi_session_create`` schema 暴露
+    ``projectName`` 时为 True（旧 Plus → False）。
     """
     try:
         from . import pi_desktop_backend
@@ -352,6 +354,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
             "detail": "pi_desktop 后端模块缺失",
             "tools_ok": False,
             "version": None,
+            "session_naming": False,
         }
     try:
         result = pi_desktop_backend.probe_connection(
@@ -365,7 +368,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
         result = {"ok": False, "detail": f"探测失败：{exc}"}
     if not isinstance(result, dict):
         result = {"ok": False, "detail": "探测结果不可用"}
-    # 模块返回 {ok, detail, tools:set, version} → 本模块归一化形状。
+    # 模块返回 {ok, detail, tools:set, version, session_naming} → 归一化形状。
     tools = result.get("tools")
     tools_ok = bool(tools) and all(
         name in tools for name in constants.PI_DESKTOP_DISPATCH_TOOLS
@@ -380,6 +383,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10) -> dict:
             result.get("version")
             if isinstance(result.get("version"), str) else None
         ),
+        "session_naming": bool(result.get("session_naming")),
     }
 
 
@@ -457,6 +461,7 @@ def capabilities(
             "detail": "pi_desktop 配置未保存",
             "tools_ok": False,
             "version": None,
+            "session_naming": False,
         }
 
     return {

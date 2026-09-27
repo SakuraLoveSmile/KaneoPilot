@@ -160,6 +160,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "task_id": (True, "str"), "target": (True, "str"),
             "expected_current": (True, "str"), "run_id": (False, "str"),
             "evidence_note": (False, "str"),
+            # T5-C（§5.23.10）：pi_desktop 轮次进入评审的硬闸材料。
+            "monitor_request_id": (False, "str"),
+            "monitor_run_id": (False, "str"),
+            "evaluation_event_id": (False, "int"),
         },
         cmd_remote.cmd_advance_task,
     ),
@@ -289,6 +293,26 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "executor": (False, "str"),
         },
         cmd_dispatch.cmd_round_observe,
+    ),
+    # v3 T5（§5.23.10）：Goal 报告只读读取与完成判定登记。
+    "get-goal-report": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        cmd_read.cmd_get_goal_report,
+    ),
+    "record-goal-evaluation": (
+        {
+            "task_id": (True, "str"),
+            "execution_run_id": (True, "str"),
+            "monitor_request_id": (True, "str"),
+            "monitor_run_id": (True, "str"),
+            "plan_sha256": (True, "str"),
+            "report_id": (False, "str"),
+            "report_sha256": (True, "str"),
+            "decision": (True, "str"),
+            "criterion_reviews": (True, "list"),
+            "reason": (False, "str"),
+        },
+        cmd_exec.cmd_record_goal_evaluation,
     ),
     # v1.6：执行端状态（App ExecutorScheduler 单飞判断与设置页显示）。
     "executor-status": ({}, cmd_config.cmd_executor_status),

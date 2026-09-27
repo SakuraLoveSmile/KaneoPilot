@@ -227,7 +227,11 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 
 ## 4. 事件 kind（固定枚举）
 
-`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `exec_config_updated`(执行配置保存) `planner_config_updated`(v2.1 规划配置保存) `review_config_updated`(v3 Review 环境保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
+`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `round_start_failed`（轮次启动失败） `round_observe`(v3 观察者续接) `exec_config_updated`(执行配置保存) `planner_config_updated`(v2.1 规划配置保存) `review_config_updated`(v3 Review 环境保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `goal_report_evaluated`(v3 Goal 报告完成判定留痕) `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
+
+本清单必须与 `core/kanpilot/derive.py` 的 `_EVENT_KIND_CN` 以及桌面端
+`Labels.eventKind` 逐项一致；三者不一致时以核心**实际写入**的 kind 为准，并由
+`core/tests/test_event_kind_labels.py` 钉住。
 
 ## 5. 串行位
 
