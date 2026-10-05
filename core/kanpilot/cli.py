@@ -144,6 +144,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "fix_task_source_sha256": (False, "str"),
             "repair_plan_path": (False, "str"),
             "kaneo_status": (False, "str"),
+            # v4（§5.24.5）：新自动链路必传（无身份的旧调用保持兼容）。
+            "request_id": (False, "str"),
+            "expected_execution_run_id": (False, "str"),
         },
         cmd_exec.cmd_register_review,
     ),
@@ -152,6 +155,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "source_task_id": (True, "str"), "title": (True, "str"),
             "description": (True, "str"), "priority": (True, "str"),
             "dedupe_key": (True, "str"),
+            # v4（§5.24.5）：新自动 Review 的 fix 创建身份与评审周期。
+            "request_id": (False, "str"), "run_id": (False, "str"),
+            "expected_execution_run_id": (False, "str"),
         },
         cmd_remote.cmd_create_review_fix,
     ),
@@ -159,6 +165,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {
             "task_id": (True, "str"), "target": (True, "str"),
             "expected_current": (True, "str"), "run_id": (False, "str"),
+            # v4（§5.24.5）：新自动 Review 的登记身份（可选；无身份=旧手动兼容）。
+            "request_id": (False, "str"),
+            "expected_execution_run_id": (False, "str"),
             "evidence_note": (False, "str"),
         },
         cmd_remote.cmd_advance_task,
@@ -265,17 +274,32 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # v3（§5.23.3）：任务执行后端与 PI-Desktop 分支配置块。
             "backend": (False, "str"),
             "pi_desktop": (False, "dict"),
+            # v4（§5.24.1）：dispatch/monitor 控制端后端（缺省 pi）。
+            "controller_backend": (False, "str"),
         },
         cmd_config.cmd_set_exec_config,
     ),
     "exec-capabilities": ({}, cmd_config.cmd_exec_capabilities),
     # v3（§5.23.6）：Pi-Desktop-Plus 本地 provider/model 默认目录（只读）。
+    "pi-desktop-probe": (
+        {"connection_file": (False, "str")},
+        lambda ctx, payload: __import__("kanpilot.harness_plus_adapter", fromlist=["plus_capabilities"]).plus_capabilities(
+            payload.get("connection_file") or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser())
+        ),
+    ),
     "pi-desktop-catalog": (
         {
             "connection_file": (False, "str"),
             "provider_id": (False, "str"),
         },
         cmd_config.cmd_pi_desktop_catalog,
+    ),
+    # v4（§5.24.2）：Review 环境的角色分支能力（只读，不调用模型）。
+    # 惰性委派 cmd_config.cmd_review_capabilities —— 注册不再要求该属性在导入期
+    # 存在（实现落地即生效；缺失时只在真正调用该命令时明确报错）。
+    "review-capabilities": (
+        {},
+        lambda ctx, payload: cmd_config.cmd_review_capabilities(ctx, payload),
     ),
     # v1.6（protocol §5.18.3）：pi 轮次启动。
     "dispatch-start": (
@@ -318,6 +342,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "standard": (False, "dict"),
             "review_fix": (False, "dict"),
             "default_method": (False, "str"),
+            # v4（§5.24.1）：规划后端与 Plus 分支五字段块（缺 backend 按 codex）。
+            "backend": (False, "str"),
+            "pi_desktop": (False, "dict"),
         },
         cmd_planner.cmd_set_planner_config,
     ),
@@ -325,11 +352,37 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "get-review-config": ({}, cmd_config.cmd_get_review_config),
     "set-review-config": (
         {
-            "mode": (True, "str"),
+            # v4（§5.24.1）：mode 仅在 backend=pi 时必需（Plus 分支用五字段）。
+            "mode": (False, "str"),
+            "backend": (False, "str"),
+            "pi_desktop": (False, "dict"),
             "provider": (False, "str"), "model": (False, "str"),
             "reasoning_effort": (False, "str"),
         },
         cmd_config.cmd_set_review_config,
+    ),
+    # v5（protocol §5.25 / T7.7）：双向 MCP 领取（事务内原子写入状态与收据）。
+    "mcp-claim": (
+        {
+            "stage": (False, "str"), "executor": (False, "str"),
+            "request_id": (False, "str"), "scope_id": (True, "str"),
+            "operation_id": (True, "str"), "authorized_task_id": (False, "str"),
+        },
+        cmd_exec.cmd_mcp_claim,
+    ),
+    # T1（§5.26）：项目与本地仓库映射配置。
+    "get-project-mappings": (
+        {"refresh_remote": (False, "bool")},
+        lambda ctx, payload: __import__("kanpilot.project_config", fromlist=["cmd_get_project_mappings"]).cmd_get_project_mappings(ctx, payload),
+    ),
+    "set-project-mapping": (
+        {
+            "project_id": (True, "str"),
+            "repository": (False, "str|null"),
+            "enabled": (True, "bool"),
+            "expected_revision": (True, "int"),
+        },
+        lambda ctx, payload: __import__("kanpilot.project_config", fromlist=["cmd_set_project_mapping"]).cmd_set_project_mapping(ctx, payload),
     ),
 }
 
@@ -372,9 +425,9 @@ def validate_payload(command: str, payload: Any) -> dict:
 
 
 class Context:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, allow_upgrade: bool = False):
         self.db_path = db_path
-        self.conn = db.connect(db_path)
+        self.conn = db.connect(db_path, allow_upgrade=allow_upgrade)
         self.now = util.now_dt()
         self.now_iso = util.to_iso(self.now)
 
@@ -400,11 +453,75 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
     if command not in COMMANDS:
         raise util.KanpilotError("bad_request", f"unknown command {command}")
     payload = validate_payload(command, payload)
-    ctx = Context(db_path)
+    allow_upgrade = (command == "migrate")
+    ctx = Context(db_path, allow_upgrade=allow_upgrade)
     try:
         return COMMANDS[command][1](ctx, payload)
     finally:
         ctx.close()
+
+
+def _handle_mcp_serve(flags: dict, db_path_str: Optional[str]) -> int:
+    import threading
+    import time
+    transport = str(flags.get("transport", "http"))
+    conn_file = Path(flags["connection_file"]).expanduser() if flags.get("connection_file") else None
+    scope_file = Path(flags["scope_file"]).expanduser() if flags.get("scope_file") else None
+    db_path = resolve_db_path(db_path_str or flags.get("db"))
+
+    if transport == "stdio":
+        from . import mcp_stdio
+        return mcp_stdio.run_stdio_bridge(connection_file=conn_file, scope_file=scope_file)
+
+    import os
+    import signal
+    from . import mcp_server
+
+    host = str(flags.get("host", "127.0.0.1"))
+    try:
+        port = int(flags.get("port", 0))
+    except (ValueError, TypeError):
+        port = 0
+
+    srv = mcp_server.MCPServer(
+        db_path=db_path,
+        connection_file=conn_file,
+        host=host,
+        port=port,
+    )
+    srv.start()
+    print(
+        json.dumps({
+            "ok": True,
+            "server_name": "kaneopilot",
+            "url": srv.server_url,
+            "pid": os.getpid(),
+            "epoch": srv.epoch,
+            "active": True,
+        }, ensure_ascii=False)
+    )
+    sys.stdout.flush()
+
+    stop_event = threading.Event()
+
+    def _sig_handler(signum: Any, frame: Any) -> None:
+        stop_event.set()
+
+    try:
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+    except ValueError:
+        # Not in main thread (e.g. testing)
+        pass
+
+    try:
+        while not stop_event.is_set():
+            time.sleep(0.5)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        srv.stop()
+    return 0
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -430,6 +547,12 @@ def main(argv: Optional[list] = None) -> int:
         else:
             index += 1
 
+    if args.command == "mcp-serve":
+        try:
+            return _handle_mcp_serve(flags, args.db_path)
+        except util.KanpilotError as exc:
+            print(util.jdump({"code": exc.code, "error": exc.message}))
+            return 1
     try:
         if args.json_payload is not None:
             try:

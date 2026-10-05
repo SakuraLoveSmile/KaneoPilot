@@ -142,12 +142,20 @@
 
 - 顶层侧栏仍只有「设置」；设置页内部以 `规划环境 / 执行环境 / Review 环境 / 通用` 四段切换（segmented，**不按** Codex/PI 软件名分节）。沿用 grouped Form、现有控件密度与系统语义色。
 - **规划环境**：Codex 认证/服务商只读区（`planner-capabilities`）、两组模型与思考等级（§5.22.6）、`planner_methods` 可用性与 `default_method` 预选（含 spec_plan 的边界说明文字）。
-- **执行环境**：任务执行者后端切换（`pi` / `pi_desktop`）；pi 分支为四选择器（§4.4 原 PI 执行配置内容），pi_desktop 分支为连接文件路径（`mcp-control.json`）、provider/model/thinking_level/`permission_mode` 选择——**permission_mode 首次须用户显式保存**，不得自动选 `auto`。两分支各自的能力检查列表、dispatch/monitor 调度状态行与说明「dispatch/monitor 控制端仍继承本机 PI 默认设置」。
+- **执行环境（v4 扩展）**：任务执行者后端切换（`pi` / `pi_desktop`）；另设「派发与监控运行端」`Pi CLI / Pi-Desktop-Plus`（`exec_config.controller_backend`，缺省 Pi CLI）。pi 分支为四选择器（§4.4 原 PI 执行配置内容），pi_desktop 分支为连接文件路径（`mcp-control.json`）、provider/model/thinking_level/`permission_mode` 选择——**permission_mode 首次须用户显式保存**，不得自动选 `auto`。两分支各自的能力检查列表与 dispatch/monitor 调度状态行；控制器就绪态与任务执行就绪态分开显示。
 - **T3 Plus 执行环境细节（T3.5）**：桌面标签为 `Pi-Desktop-Plus（本机 MCP）`，tag 仍 pi_desktop；path 草稿为空时填入 `~/.pi-desktop-plus/mcp-control.json` 的绝对路径，仍可手改。切入 Plus 时调用只读 `pi-desktop-catalog` 取本地 provider/model 候选与 Plus 默认值；默认组合只填空草稿，不改已有配置；「重新获取」刷新候选，不覆盖非空草稿。provider/model 保留可编辑 ID 和离线保存能力，并以候选弹出列表选择；model 候选有独立搜索词。thinking 依据 Plus 明示的模型/provider级别展示，缺少级别信息时显示全合法枚举并标记支持范围未确认。permission_mode 必须用户显式选择，绝不读取 Plus 会话或自动设为 auto。「检测已保存配置」仍只检查已保存配置；读取/检测各自显示状态，不互相覆盖。加载失败保留草稿，错误详情优先 detail 再 reason 且允许换行；读取期间用户修改或切走后丢弃过期响应。桌面保存只校验五字段，不受 PI CLI 顶层 ok 阻挡；保存 pi 不提交空桌面块，保存桌面不提交无关 CLI 草稿。保留 grouped Form、四段、字号与间距，不变更全局设计。
 - **Review 环境**：`get/set-review-config`——`inherit`（继承本机 PI 默认会话配置）/ `custom`（provider/model/thinking 由 `exec-capabilities` 校验的显式选择）；显示当前生效来源与「仅影响下一次 review 启动」说明。
 - **通用**：doctor、自动推进/暂停、队列参数、路径、迁移信息（把 §4.4 原「环境诊断/自动推进/路径/迁移」归入）。
 - 各页保存失败保留草稿与核心 error 原文；加载失败保留旧内容 + `重试`；标注「默认/已保存」与「仅影响新轮次」。不修改 `~/.pi`、`~/.codex` 或 PI-Desktop 全局配置。
 
+### 4.10 角色后端选择与 Plus 接入显示（T6，protocol §5.24）
+
+- 四段设置与 grouped Form 不变。**规划环境**增加后端选择 `Codex / Pi-Desktop-Plus`；Plus 分支复用已存在的五字段与 `pi-desktop-catalog` 候选控件，权限固定 `Ask` 并说明「工具权限需在 Plus 处理」；选择 Plus 时 `builtin` 可用、`spec_plan` 禁用并显示原因（spec_plan 是 Codex 插件运行方式）。标准/修复两组 Codex 模型块保留在其分支；切到 Plus 不得重载配置覆盖草稿。
+- **执行环境**的两个选择——任务执行者（`exec_config.backend`）与「派发与监控运行端」（`exec_config.controller_backend`）——分别显示当前生效值与各自能力状态；Plus 控制端复用本页已保存的 Plus 型号字段。禁止把一个 Plus 选择表现成「全链路已切换」。
+- **Review 环境**增加独立后端选择；`pi` 分支保留 `inherit/custom`，Plus 分支复用目录候选并固定 `Ask`，不混用任务执行 `agent_preset`。
+- 「获取 Plus 列表」沿已有只读动作；只在目标角色的**空草稿**里填 Plus 明确默认值，不因一次查询改写其他角色。每个角色独立保存，成功/失败沿现有 toast/alert，失败保留草稿；提示「仅影响新请求/新控制轮」，运行记录始终显示快照值。
+- 规划面板第三步提交前显示本次请求的后端、型号与方式；任务详情/记录显示每阶段 backend、会话与 turn，以及权限等待/连接不可用/输出错误等状态。外部查看沿现有路径与会话标识入口；没有已核实的 Plus 深链时只展示 ID，不编造链接。
+- 键盘与 VoiceOver：新增的后端选择器与候选弹层沿用 §7 的焦点顺序与可读名称；错误文案允许换行，不遮挡保存按钮与权限选择。
 ## 5. 状态图标映射（图标+文字同时出现）
 
 | display_status | SF Symbol | 颜色（系统） |
@@ -196,3 +204,31 @@
 - 长中文标题（40+ 字）截断不撑破布局。
 - 主线程无阻塞：所有 core 调用异步；连续点击 `安排下一步` 不重复派发（核心幂等，UI 结果一致）。
 - 关闭窗口再打开：队列/状态从核心重新读取（窗口关闭不取消请求）。
+
+### 本机 MCP 服务状态（§5.25）
+
+通用设置提供本机服务启停和「连接 Plus」只读探测；默认连接文件使用 Plus profile，自定义路径放高级折叠区。服务只有真实 Bearer initialize/initialized/ping 成功才显示运行，启动失败明确显示原因。外部管理的服务不提供停止按钮；关闭/退出不停止 Plus 会话。启用意图按 AppSupport profile 持久保存，正常 App 启动自动恢复自有服务。
+
+Plus 控制面连接与会话 MCP 挂接能力分别显示；控制面可连接但缺 pi_session_attach_mcp 时提示升级依赖，不能显示双向任务闭环已验证。检测不建立模型会话。保留三个角色环境分组、已保存的自定义配置与既有界面度量。
+
+### 4.11 项目与仓库设置（T1，protocol §5.26）
+
+- **设置 → 项目与仓库**：
+  - 顶栏：项目与仓库标题 + `获取 Kaneo 项目` 只读刷新按钮。
+  - 列表展示：项目名（13pt semibold）、完整/截断仓库绝对路径（11pt secondary）、状态徽标与文字（`可用` / `未映射` / `已停用` / `目录不存在` / `不可读取`）。
+  - 编辑区：选中项目后展示目录选择（`NSOpenPanel` 路径选取）、启用新规划勾选开关、保存及解除映射按钮。保存前展示未完成任务数与活动请求数，说明「仅影响之后新建的规划，已有排队/执行请求不受影响」。
+  - 规划面板联动：未映射项目在规划列表中醒目标红展示阻塞原因，并提供 `配置仓库` 快捷入口，点击弹出同一配置视图；保存后返回刷新并保留规划草稿与选中项。
+
+### 4.12 统一五段详情与信息精简（T2）
+
+- **共享详情组件 `TaskDetailContentView`**：
+  - 看板 Sheet、待处理详情、运行记录关联任务与归档共用同一五段结构（概览、计划、执行、评审、记录）。
+  - **固定头部**：仅显示任务标题（18pt semibold）、项目与状态标签、五段分段器。
+  - **概览页**：优先展示阻塞原因、下一步操作、Kaneo 关联信息与直达对应页入口；长路径与技术 ID 收纳至折叠区「技术详情」。
+  - **计划执行确认**：严格受 `get-plan` 返回的计划身份与 verified hash 保护，不绕过计划校验。
+
+### 4.13 看板与紧凑列表切换（T2）
+
+- **看板 / 紧凑列表**：
+  - 工具栏提供 `看板 / 列表` 切换器；可用宽度 <840pt（如 900×600 侧栏展开时）默认切换至紧凑列表，提供免横滚浏览体验。
+  - 紧凑列表按相同六列状态分组，共用搜索、过滤、排序、批量选择与详情打开逻辑；切换不丢失选中项与过滤状态。

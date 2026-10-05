@@ -145,6 +145,24 @@ CREATE TABLE IF NOT EXISTS planner_inputs(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, created_at);
+
+-- v5（protocol.md §5.25 / T7）：MCP 运行时控制/写操作收据表（防止响应丢失后下游重复执行）。
+CREATE TABLE IF NOT EXISTS runtime_operations(
+  scope_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  harness_id TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL,
+  session_id TEXT,
+  turn_id TEXT,
+  proposal_id TEXT,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope_id, operation_id)
+);
+CREATE INDEX IF NOT EXISTS runtime_operations_tool ON runtime_operations(harness_id, tool, status);
 """
 
 DEFAULT_SETTINGS = {
@@ -168,15 +186,24 @@ DEFAULT_SETTINGS = {
 }
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+class Connection(sqlite3.Connection):
+    """Per-call authorization checked after acquiring the SQLite write lock."""
+    authorization_guard = None
+
+
+def connect(db_path: Path, allow_upgrade: bool = False) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None)
+    conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None, factory=Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
-    _init_schema(conn)
+    try:
+        _init_schema(conn, allow_upgrade=allow_upgrade)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -285,11 +312,36 @@ def _upgrade_v3_to_v4(conn: sqlite3.Connection) -> None:
         "ON planner_inputs(task_id, created_at)"
     )
 
+def _upgrade_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v5（protocol §5.25，schema v5）：新建 runtime_operations 操作收据表。
+    保留现有所有任务、轮次、设置与材料数据，不迁移、不重写旧业务数据。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS runtime_operations("
+        "  scope_id TEXT NOT NULL,"
+        "  operation_id TEXT NOT NULL,"
+        "  harness_id TEXT NOT NULL,"
+        "  tool TEXT NOT NULL,"
+        "  request_sha256 TEXT NOT NULL,"
+        "  status TEXT NOT NULL,"
+        "  session_id TEXT,"
+        "  turn_id TEXT,"
+        "  proposal_id TEXT,"
+        "  result_json TEXT,"
+        "  created_at TEXT NOT NULL,"
+        "  updated_at TEXT NOT NULL,"
+        "  PRIMARY KEY (scope_id, operation_id))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS runtime_operations_tool "
+        "ON runtime_operations(harness_id, tool, status)"
+    )
+
 
 _UPGRADES = {
     (1, 2): _upgrade_v1_to_v2,
     (2, 3): _upgrade_v2_to_v3,
     (3, 4): _upgrade_v3_to_v4,
+    (4, 5): _upgrade_v4_to_v5,
 }
 
 def _upgrade_schema(conn: sqlite3.Connection, version: int) -> None:
@@ -322,17 +374,42 @@ def _upgrade_schema(conn: sqlite3.Connection, version: int) -> None:
         current += 1
 
 
-def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+def _init_schema(conn: sqlite3.Connection, allow_upgrade: bool = False) -> None:
+    table_row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()
+    if table_row is None:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone():
+            raise util.KanpilotError("migration_needed", "existing database has no schema version; refusing initialization")
+        conn.executescript(SCHEMA)
+        row = conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO schema_meta(version) VALUES (?)", (constants.SCHEMA_VERSION,)
+            )
+        _init_settings(conn)
+        return
+
     row = conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
     if row is None:
-        conn.execute(
-            "INSERT INTO schema_meta(version) VALUES (?)", (constants.SCHEMA_VERSION,)
+        raise util.KanpilotError("migration_needed", "database schema version is missing")
+
+    version = int(row["version"])
+    if version > constants.SCHEMA_VERSION:
+        raise util.KanpilotError(
+            "migration_needed",
+            f"schema version {version} is newer than supported {constants.SCHEMA_VERSION}",
         )
+    if version < constants.SCHEMA_VERSION:
+        if not allow_upgrade:
+            raise util.KanpilotError(
+                "migration_needed",
+                f"database schema version is {version}, but {constants.SCHEMA_VERSION} is required; run 'kanpilot migrate'",
+            )
+        _upgrade_schema(conn, version)
+        conn.executescript(SCHEMA)
     else:
-        version = int(row["version"])
-        if version != constants.SCHEMA_VERSION:
-            _upgrade_schema(conn, version)
+        conn.executescript(SCHEMA)
     _init_settings(conn)
 
 
@@ -340,6 +417,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def write_txn(conn: sqlite3.Connection) -> Iterator[None]:
     conn.execute("BEGIN IMMEDIATE")
     try:
+        guard = getattr(conn, "authorization_guard", None)
+        if guard is not None:
+            guard(conn)
         yield
     except Exception:
         conn.execute("ROLLBACK")
@@ -675,3 +755,56 @@ def planner_input_manifest(row: sqlite3.Row) -> dict:
 
 def task_is_purged(row: Optional[sqlite3.Row]) -> bool:
     return row is not None and task_save_state(row) == "purged"
+
+# ------------------------------------------------------- v5 runtime_operations
+
+def insert_runtime_operation(
+    conn: sqlite3.Connection,
+    scope_id: str,
+    operation_id: str,
+    harness_id: str,
+    tool: str,
+    request_sha256: str,
+    status: str,
+    now: str,
+    session_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    proposal_id: Optional[str] = None,
+    result_json: Optional[str] = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO runtime_operations(scope_id, operation_id, harness_id, tool, "
+        "request_sha256, status, session_id, turn_id, proposal_id, result_json, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            scope_id, operation_id, harness_id, tool, request_sha256,
+            status, session_id, turn_id, proposal_id, result_json, now, now,
+        ),
+    )
+
+
+def get_runtime_operation(
+    conn: sqlite3.Connection, scope_id: str, operation_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM runtime_operations WHERE scope_id=? AND operation_id=?",
+        (scope_id, operation_id),
+    ).fetchone()
+
+
+def update_runtime_operation(
+    conn: sqlite3.Connection,
+    scope_id: str,
+    operation_id: str,
+    now: str,
+    **fields: Any,
+) -> None:
+    if not fields:
+        return
+    assignments = ", ".join(f"{col}=?" for col in fields)
+    values = list(fields.values()) + [now, scope_id, operation_id]
+    conn.execute(
+        f"UPDATE runtime_operations SET {assignments}, updated_at=? "
+        "WHERE scope_id=? AND operation_id=?",
+        values,
+    )

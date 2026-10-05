@@ -491,7 +491,7 @@ def resolve_source(conn, runs_root: Optional[str] = None) -> HeadlessSource:
 
         root = db.get_setting(conn, "session_runs_root", "")
     if not isinstance(root, str) or root == "":
-        root = constants.DEFAULT_SESSION_RUNS_ROOT
+        root = str(constants.default_session_runs_root())
     return HeadlessSource(root)
 
 

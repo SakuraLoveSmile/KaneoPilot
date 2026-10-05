@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Save states (protocol.md §5.15.1): orthogonal to task.status lifecycle.
 SAVE_STATES = ("active", "archived", "trashed", "purged")
@@ -61,8 +61,21 @@ EXEC_PI_DESKTOP_KEYS = (
     "connection_file", "provider_id", "model_id", "thinking_level",
     "permission_mode",
 )
+EXEC_PI_DESKTOP_ALL_KEYS = (
+    "model_source", "connection_file", "provider_id", "model_id",
+    "thinking_level", "permission_mode",
+)
 EXEC_PERMISSION_MODES = ("ask", "accept-edits", "auto")
+MODEL_SOURCES = ("inherit", "custom")
+DEFAULT_MODEL_SOURCE = "inherit"
+DEFAULT_PI_DESKTOP_CONNECTION_FILE = "~/.pi-desktop-plus/mcp-control.json"
 
+# v5（protocol §5.25 / T7）：KaneoPilot 项目自有标准 MCP 服务契约
+MCP_SERVER_NAME = "kaneopilot"
+MCP_SERVER_VERSION = "1.0.0"
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_COMPATIBLE_VERSIONS = ("2025-06-18", "2025-03-26")
+MCP_TOOL_CONTRACT_VERSION = "kp-mcp-v1"
 # PI-Desktop 本机 MCP 控制面所需工具清单（protocol §5.23.3 能力门）。
 PI_DESKTOP_REQUIRED_TOOLS = (
     "pi_turn_get", "pi_session_create", "pi_session_configure",
@@ -80,6 +93,33 @@ PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
                              + PI_DESKTOP_GOAL_TOOLS)
 # MCP 单请求上限 2 MiB——计划正文超限在发送前明确失败，不截断。
 PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+
+# v4（protocol §5.24.1）：四个模型调用点各自的后端词表与缺省值。缺字段一律
+# 按旧语义解释（codex/pi），旧数据零迁移；切换后端不删除另一分支字段。
+PLANNER_BACKENDS = ("codex", "pi_desktop")
+PLANNER_BACKEND = "codex"
+CONTROLLER_BACKENDS = ("pi", "pi_desktop")
+CONTROLLER_BACKEND = "pi"
+REVIEW_BACKENDS = ("pi", "pi_desktop")
+REVIEW_BACKEND = "pi"
+# exec_config 里控制端后端字段名（与任务执行 backend 并存，互不覆盖）。
+CONTROLLER_BACKEND_KEY = "controller_backend"
+
+# v4 工具门（protocol §5.24.2）：控制端不建 Goal 会话，只需基础工具；
+# 计划/Review 需读并安全关闭产物检点，故要求基础 + 契约审批工具。
+PI_DESKTOP_CONTROLLER_TOOLS = PI_DESKTOP_REQUIRED_TOOLS
+PI_DESKTOP_PLAN_TOOLS = PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS
+# v4 各角色的 Plus 会话模式（protocol §5.24）：计划/Review 为只读倾向的
+# plan + ask；控制端 agent + 用户显式 permission_mode；任务执行 goal。
+PI_DESKTOP_PLAN_MODE = "plan"
+PI_DESKTOP_CONTROLLER_MODE = "agent"
+# v4：Plan/Review 分支只允许该权限模式（防自动 shell 写入；Plan 模式本身
+# 不是 OS 只读沙箱）。
+PI_DESKTOP_READONLY_PERMISSION_MODE = "ask"
+# v4：Review 最终答复的结论与 fix 优先级枚举（后者与 bridge.VALID_PRIORITIES
+# 同源，新增值须两处同步）。
+REVIEW_CONCLUSIONS = ("pass", "changes_requested", "blocked")
+REVIEW_FIX_PRIORITIES = ("no-priority", "low", "medium", "high", "urgent")
 
 # 能力/环境查询的进程接缝（protocol.md §5.17.2）：测试经 env 指向隔离夹具。
 DEFAULT_PI_HOME = "~/.pi"
@@ -252,9 +292,16 @@ def legacy_state_root() -> Path:
 
 
 def review_reports_root() -> Path:
+    """评审报告根（v4 §5.24.5）：默认 ``<APP_SUPPORT>/reports``。
+
+    `register-review`/`dispatch_validate` 用它做 ``util.inside`` 边界校验，因此
+    写入方与校验方必须同一根。v3 的 ``<LEGACY_ROOT>/KaneoReviewer/reports`` 仅作
+    历史路径，不再是默认；``KANPILOT_REPORTS_ROOT`` 覆盖仍然生效（隔离夹具与
+    需要保留旧目录的部署可用）。
+    """
     return Path(os.environ.get(
         "KANPILOT_REPORTS_ROOT",
-        str(legacy_state_root() / "KaneoReviewer" / "reports"),
+        str(app_support() / "reports"),
     )).expanduser()
 
 
@@ -265,9 +312,10 @@ def sources_dir() -> Path:
 
 
 def default_session_runs_root() -> Path:
-    """headless 运行记录默认根目录（protocol.md §5.15.5）。每次调用按当前
-    HOME 解析（~ 展开滞后于环境变化，测试可在 setUp 后安全断言）。"""
-    return Path(DEFAULT_SESSION_RUNS_ROOT).expanduser()
+    """headless 运行记录默认根目录（protocol.md §5.15.5）。动态解析 constants.app_support() / "runs" """
+    if DEFAULT_SESSION_RUNS_ROOT != "~/Library/Application Support/KaneoPilot/runs":
+        return Path(DEFAULT_SESSION_RUNS_ROOT).expanduser()
+    return app_support() / "runs"
 
 
 def core_root() -> Path:

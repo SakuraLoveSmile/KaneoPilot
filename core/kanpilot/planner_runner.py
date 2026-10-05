@@ -1,8 +1,13 @@
-"""Codex 规划 runner（protocol.md §5.22.3，v2/T5）。
+"""规划 runner（protocol.md §5.22.3 v2/T5；v4/T6.2 后端分流）。
 
 CLI：``python -m kanpilot.planner_runner [--request-id <id>] [--once]``
 （App 侧经 ExecutorScheduler 以独立子进程拉起；stdout/stderr 重定向到
 ``<app_support>/executor-logs/planner-<ts>.log``）。
+
+**后端分流（v4 §5.24.3）**：request payload ``planner_backend`` 缺省/``codex``
+→ 本模块的 codex 分支（行为与 v2 一致，一字未改）；``pi_desktop`` → 整轮交
+``pi_desktop_planner``（独立规划 worktree + plan 会话 + plan proposal 读取/关闭）；
+非法值 → 明确失败（``_fail_unknown_backend``），**不**静默改走后端默认值。
 
 职责（手动规划链执行端）：
 1. ``claim`` stage=plan executor=``kaneo-planner``（--request-id 定点领取
@@ -110,9 +115,13 @@ def _yaml_scalar(value) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def _plan_file_path(project_name: Optional[str], title: str) -> Path:
+def _plan_file_path(project_id: Optional[str], title: str) -> Path:
     root = constants.plan_root()
-    directory = root / project_name if project_name else root
+    if project_id and re.fullmatch(r"[A-Za-z0-9_-]+", str(project_id)):
+        directory = root / "projects" / str(project_id)
+    else:
+        directory = root
+    directory = util.inside(directory, root, "plan_directory")
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe = "".join(
@@ -120,9 +129,11 @@ def _plan_file_path(project_name: Optional[str], title: str) -> Path:
         for ch in (title or "plan")
     ).strip()[:80] or "plan"
     path = directory / f"{safe}_{stamp}.md"
+    path = util.inside(path, root, "plan_path")
     counter = 1
     while path.exists():
         path = directory / f"{safe}_{stamp}-{counter}.md"
+        path = util.inside(path, root, "plan_path")
         counter += 1
     return path
 
@@ -137,30 +148,43 @@ def _strip_model_frontmatter(markdown: str) -> str:
     return markdown
 
 
-def write_plan_file(
-    context: dict, manifest: dict, plan_markdown: str, generated_at: str,
-    task_row=None,
-) -> Path:
-    """按本轮真实输入生成 frontmatter + 模型 plan_markdown 正文 → PLAN_ROOT。
+def build_plan_meta(
+    context: dict, manifest: dict, generated_at: str, task_row=None,
+    model_config=None,
+) -> dict:
+    """按本轮真实输入生成计划 frontmatter 元数据（§6）。
 
     ``task_row``：DB 原始任务行（review_fix 必填字段 review_report_* 不在
     claim context 的 TaskSummary 里，由调用方按 task_id 拉取）。
+    ``model_config``：发布用的 ``{planner_model, reasoning_effort}``；``None``
+    时取请求 payload 的 ``model_config`` 快照（codex 调用方行为不变）。Plus
+    分支传入按 §5.24.1 解析出的发布模型对（见 ``pi_desktop_planner``）——
+    模型字段恒由本进程按真实输入写入，不信模型自报。
     """
     task = context.get("task") or {}
     req_payload = context.get("payload") or {}
     manifest_task = manifest.get("task") or {}
+    proj_snap = req_payload.get("project_snapshot") or {}
     task_id = context.get("task_id") or manifest_task.get("task_id")
-    project_name = (
-        task.get("project_name") or manifest_task.get("project_name")
-    )
     project_id = (
-        manifest_task.get("project_id")
-        or constants.PROJECTS.get(project_name or "")
+        proj_snap.get("project_id")
+        or manifest_task.get("project_id")
+        or task.get("project_id")
+        or constants.PROJECTS.get(manifest_task.get("project_name") or task.get("project_name") or "")
+    )
+    project_name = (
+        proj_snap.get("project_name")
+        or manifest_task.get("project_name")
+        or task.get("project_name")
     )
     repository = (
-        task.get("repository") or manifest_task.get("repository") or ""
+        proj_snap.get("repository")
+        or manifest_task.get("repository")
+        or task.get("repository")
+        or ""
     )
-    model_config = context.get("payload", {}).get("model_config") or {}
+    if model_config is None:
+        model_config = req_payload.get("model_config") or {}
     plan_kind = task.get("plan_kind") or manifest_task.get("plan_kind") \
         or "standard"
     meta = {
@@ -204,12 +228,27 @@ def write_plan_file(
                 or req_payload.get("review_key") or ""
             ),
         })
+    return meta
+
+
+def write_plan_file(
+    context: dict, manifest: dict, plan_markdown: str, generated_at: str,
+    task_row=None, model_config=None,
+) -> Path:
+    """``build_plan_meta`` 的 frontmatter + 模型 plan_markdown 正文 → PLAN_ROOT。"""
+    meta = build_plan_meta(
+        context, manifest, generated_at, task_row=task_row,
+        model_config=model_config,
+    )
+    task = context.get("task") or {}
+    manifest_task = manifest.get("task") or {}
+    task_id = context.get("task_id") or manifest_task.get("task_id")
     lines = ["---"]
     for key, value in meta.items():
         lines.append(f"{key}: {_yaml_scalar(value)}")
     lines.append("---")
     body = _strip_model_frontmatter(plan_markdown or "")
-    path = _plan_file_path(project_name, task.get("title") or task_id or "plan")
+    path = _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan")
     path.write_text("\n".join(lines) + "\n\n" + body, encoding="utf-8")
     return path
 
@@ -362,6 +401,33 @@ def _mark_round_finished(conn, task_id: str, run_id: str, status: str,
     )
     conn.commit()
 
+
+def _fail_unknown_backend(db_path: Path, run_dir: Path, request_id: str,
+                          run_id: str, task_id: str, backend) -> None:
+    """非法 ``planner_backend`` → 明确失败（§5.24.1「不暗换后端」）。
+
+    只写本轮的 job/终态事件与一条 failed 汇报，绝不改走后端默认值执行。
+    """
+    detail = (f"planner_backend 非法：{backend!r}"
+              f"（允许值 {constants.PLANNER_BACKENDS}）")
+    _write_json(run_dir / dsh_events.JOB_NAME, {
+        "task_id": task_id, "run_id": run_id, "backend": str(backend),
+        "session_id": None, "turn_id": None, "status": "failed",
+        "pid": os.getpid(), "started_at": util.now_iso(),
+        "ended_at": util.now_iso(), "exit_code": 1, "detail": detail,
+    })
+    log = _EventLog(run_dir / dsh_events.EVENT_LOG_NAME)
+    log.emit("terminal", util.now_iso(), outcome="failed",
+             reason="plan_backend_invalid")
+    conn = db.connect(db_path)
+    try:
+        _mark_round_finished(conn, task_id, run_id, "failed", util.now_iso())
+    finally:
+        conn.close()
+    _report(db_path, request_id, run_id, "failed", detail,
+            failure_code="planner_failed",
+            evidence={"error_category": "plan_backend_invalid"})
+
 # ------------------------------------------------------------ 失败分类（§5.22.6）
 _AUTH_RE = re.compile(
     r"(?i)(?<!\d)(401|403)(?!\d)|unauthorized|forbidden|"
@@ -456,6 +522,24 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         conn.commit()
     finally:
         conn.close()
+
+    # v4 §5.24.3：规划后端分流。payload 缺 planner_backend 一律按 codex 解释
+    #（旧请求语义不变）；以下 codex 分支一字未改，Plus 分支整体交
+    # ``pi_desktop_planner``（独立规划 worktree + plan 会话 + plan proposal 读取）。
+    backend = req_payload.get("planner_backend") or constants.PLANNER_BACKEND
+    if backend == "pi_desktop":
+        from . import pi_desktop_planner
+
+        return pi_desktop_planner.run_one(
+            db_path, req_id, run_id, context=context, task=task,
+            task_id=task_id, run_dir=run_dir, timeout=timeout,
+            heartbeat_every=heartbeat_every,
+        )
+    if backend != constants.PLANNER_BACKEND:
+        # 非法/未知值 → 明确失败，不静默改走 codex（§5.24.1「不暗换后端」）。
+        _fail_unknown_backend(db_path, run_dir, req_id, run_id, task_id,
+                              backend)
+        return True
 
     method = req_payload.get("planner_method") or "builtin"
     job = {

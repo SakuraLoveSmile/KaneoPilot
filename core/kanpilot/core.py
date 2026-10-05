@@ -230,3 +230,52 @@ def fail_request(
         request_id=request["request_id"], actor=actor,
         detail={"outcome": outcome, "via": "claim_guard", "reason": reason},
     )
+
+
+def require_review_identity(conn, payload, task, now) -> Optional[sqlite3.Row]:
+    """v4（protocol §5.24.5）新自动 Review 的登记归属与周期保护。
+
+    仅在调用方给出 ``request_id`` 时生效——无身份的旧手动调用保持兼容，
+    但不作为新自动链路入口。核对 request.stage=review、task_id、
+    status=claimed、run_id（可选）与未过期 lease，以及任务当前执行轮次仍
+    等于 ``expected_execution_run_id``（评审周期未被新 run 接管）。失配抛
+    stale_run/conflict，调用方不写任何登记。
+    """
+    request_id = payload.get("request_id")
+    if not request_id:
+        return None
+    request = db.get_request(conn, request_id)
+    if request is None:
+        raise util.KanpilotError("not_found", f"request not found: {request_id}")
+    if request["stage"] != "review":
+        raise util.KanpilotError(
+            "validation_failed",
+            f"request {request_id} 不是 review 阶段（stage={request['stage']}）",
+        )
+    task_id = payload.get("task_id") or payload.get("source_task_id")
+    if request["task_id"] != task_id:
+        raise util.KanpilotError(
+            "conflict",
+            f"request {request_id} 属于任务 {request['task_id']}，"
+            f"与 {task_id} 不符",
+        )
+    run_id = payload.get("run_id")
+    if request["status"] != "claimed" or (run_id and request["run_id"] != run_id):
+        raise util.KanpilotError(
+            "stale_run",
+            f"request {request_id} status={request['status']} "
+            f"run={request['run_id']}",
+        )
+    if util.lease_lost(request["lease_expires_at"], now):
+        raise util.KanpilotError(
+            "stale_run",
+            f"request {request_id} 租约已过期（{request['lease_expires_at']}）",
+        )
+    expected = payload.get("expected_execution_run_id")
+    if expected and task is not None and task["run_id"] != expected:
+        raise util.KanpilotError(
+            "stale_run",
+            f"任务当前执行轮次 {task['run_id']} 与本次评审对应的 {expected} "
+            f"不符（评审周期已变）",
+        )
+    return request

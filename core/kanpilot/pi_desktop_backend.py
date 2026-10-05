@@ -39,7 +39,9 @@ from . import constants, util
 # MCP 协议版本（PI-Desktop mcp-control.ts 冻结集合）。
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_COMPATIBLE_VERSIONS = frozenset({"2025-06-18", "2025-03-26"})
-
+CANONICAL_THINKING_LEVELS = (
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+)
 # 允许的文件权限（owner-only）。
 _SECURE_MODES = frozenset({0o600, 0o400})
 
@@ -488,10 +490,21 @@ class MCPClient:
             args["permissionMode"] = permission_mode
         return self.call_tool("pi_session_configure", args)
 
-    def agent_prompt(self, session_id: str, content: str) -> dict:
-        return self.call_tool(
-            "pi_agent_prompt", {"sessionId": session_id, "content": content}
-        )
+    def agent_prompt(
+        self, session_id: str, content: str,
+        attachments: Optional[list] = None,
+    ) -> dict:
+        """发送 prompt（§5.24.3）。``attachments`` 为 Plus ``AgentPromptAttachment``
+        的真实形状（``packages/shared/src/types/agent.ts``）：
+        ``{"path": <绝对路径，须落在会话 projectPath/scratch/attachments 根内>,
+        "name": <显示名>, "kind": "image"|"file", "mimeType"?: str, "size"?: int}``。
+        None/空列表时不带该键，保持与旧调用完全一致；不在这里做路径/类型校验
+        （由调用方按 manifest 校验哈希后复制、由 Plus 侧再做根内校验）。
+        """
+        args = {"sessionId": session_id, "content": content}
+        if attachments:
+            args["attachments"] = list(attachments)
+        return self.call_tool("pi_agent_prompt", args)
 
     def agent_status(self, session_id: str) -> dict:
         return self.call_tool("pi_agent_status", {"sessionId": session_id})
@@ -660,3 +673,184 @@ def _strip_secret(text: str, token: Optional[str]) -> str:
     """服务端错误消息经脱敏后返回（token ≥8 字符按值替换 + 常见形态脱敏）。"""
     secrets = [token] if token else None
     return util.redact(text, secrets=secrets)
+
+def nearest_thinking_level(target: str, valid_levels: list) -> str:
+    """Find nearest supported thinking level in canonical order (search upward, then downward)."""
+    if not valid_levels:
+        return "off"
+    if target in valid_levels:
+        return target
+    if target not in CANONICAL_THINKING_LEVELS:
+        return valid_levels[-1]
+    target_idx = CANONICAL_THINKING_LEVELS.index(target)
+    for i in range(target_idx + 1, len(CANONICAL_THINKING_LEVELS)):
+        lvl = CANONICAL_THINKING_LEVELS[i]
+        if lvl in valid_levels:
+            return lvl
+    for i in range(target_idx - 1, -1, -1):
+        lvl = CANONICAL_THINKING_LEVELS[i]
+        if lvl in valid_levels:
+            return lvl
+    return valid_levels[-1]
+
+
+def resolve_default_from_catalog_data(
+    connection_file: str,
+    rows: list,
+    settings: dict,
+    models_fetcher=None,
+) -> Tuple[Optional[dict], Optional[str]]:
+    """Resolve default (provider, model, thinking) from parsed catalog rows and settings."""
+    if not isinstance(rows, list):
+        return None, "PI-Desktop provider 目录格式无效"
+    enabled = [
+        r for r in rows
+        if isinstance(r, dict) and r.get("id") and r.get("enabled") is not False and r.get("disabled") is not True
+    ]
+    if not enabled:
+        return None, "PI-Desktop 没有已启用的 provider"
+
+    settings = settings.get("settings", settings) if isinstance(settings, dict) else {}
+    settings_default_provider = settings.get("defaultProviderId") or settings.get("default_provider_id")
+    settings_default_model = settings.get("defaultModelId") or settings.get("default_model_id")
+
+    # 1. Resolve Provider
+    if settings_default_provider:
+        selected_provider = next((p for p in enabled if p.get("id") == settings_default_provider), None)
+        if selected_provider is None:
+            return None, f"Plus 默认 provider ({settings_default_provider}) 不存在或已禁用"
+    elif len(enabled) == 1:
+        selected_provider = enabled[0]
+    else:
+        return None, f"Plus 存在多个已启用 provider ({len(enabled)} 个)，但未设置默认 provider，无法自动继承"
+
+    # 2. Resolve Model
+    target_model_id = None
+    if selected_provider.get("id") == settings_default_provider and settings_default_model:
+        target_model_id = settings_default_model
+    elif selected_provider.get("defaultModelId") or selected_provider.get("default_model_id"):
+        target_model_id = selected_provider.get("defaultModelId") or selected_provider.get("default_model_id")
+
+    if models_fetcher is None:
+        return None, "缺少模型获取器"
+
+    models_res, fetch_err = models_fetcher(selected_provider["id"])
+    if fetch_err:
+        return None, fetch_err
+    models_res = _unwrap_invoke_result(models_res)
+    source = models_res.get("source")
+    if source not in ("cache", "fallback"):
+        return None, "PI-Desktop model 目录不是允许的本地 cache/fallback 来源"
+    model_rows = models_res.get("models")
+    if not isinstance(model_rows, list) or not model_rows:
+        return None, f"Plus provider '{selected_provider['id']}' 的本地缓存模型列表为空"
+
+    if target_model_id is None:
+        if len(model_rows) == 1:
+            target_model_id = model_rows[0].get("modelId") or model_rows[0].get("id")
+        else:
+            return None, f"Plus provider '{selected_provider['id']}' 包含多个模型 ({len(model_rows)} 个)，但未设置默认模型，无法自动继承"
+
+    matched_row = next(
+        (m for m in model_rows if isinstance(m, dict) and (m.get("modelId") or m.get("id")) == target_model_id),
+        None,
+    )
+    if matched_row is None:
+        return None, f"Plus 默认模型 '{target_model_id}' 未在 provider '{selected_provider['id']}' 的本地缓存目录中找到"
+
+    # 3. Resolve Thinking Level
+    configured = next(
+        (m for m in (selected_provider.get("models") or []) if isinstance(m, dict) and (m.get("modelId") or m.get("id")) == target_model_id),
+        None,
+    )
+    if configured is None and target_model_id == (selected_provider.get("defaultModelId") or selected_provider.get("default_model_id")):
+        configured = selected_provider
+
+    raw_levels = None
+    if configured is not None and ("thinkingLevels" in configured or "thinking_levels" in configured):
+        raw_levels = configured.get("thinkingLevels") if "thinkingLevels" in configured else configured.get("thinking_levels")
+    elif matched_row is not None and ("supportedThinkingLevels" in matched_row or "supported_thinking_levels" in matched_row):
+        raw_levels = matched_row.get("supportedThinkingLevels") if "supportedThinkingLevels" in matched_row else matched_row.get("supported_thinking_levels")
+    elif selected_provider is not None and ("supportedThinkingLevels" in selected_provider or "supported_thinking_levels" in selected_provider):
+        raw_levels = selected_provider.get("supportedThinkingLevels") if "supportedThinkingLevels" in selected_provider else selected_provider.get("supported_thinking_levels")
+
+    raw_default_thinking = None
+    if configured is not None:
+        raw_default_thinking = configured.get("defaultThinkingLevel") or configured.get("default_thinking_level")
+
+    if raw_default_thinking == "omit":
+        return None, "当前 Plus MCP 不支持此默认思考设置（omit）"
+
+    if raw_levels is not None and (not isinstance(raw_levels, list) or any(not isinstance(level, str) or level not in CANONICAL_THINKING_LEVELS for level in raw_levels)):
+        return None, "Plus 思考等级元数据非法，不能继承默认配置"
+
+    if raw_levels is not None and isinstance(raw_levels, list) and len(raw_levels) == 0:
+        resolved_thinking = "off"
+    else:
+        valid_levels = [l for l in (raw_levels or []) if isinstance(l, str) and l in CANONICAL_THINKING_LEVELS]
+        if raw_default_thinking is not None:
+            if raw_default_thinking not in CANONICAL_THINKING_LEVELS:
+                return None, f"Plus 默认思考设置非法：{raw_default_thinking}"
+            if raw_default_thinking in valid_levels:
+                resolved_thinking = raw_default_thinking
+            elif valid_levels:
+                resolved_thinking = nearest_thinking_level(raw_default_thinking, valid_levels)
+            else:
+                resolved_thinking = raw_default_thinking
+        else:
+            if valid_levels:
+                resolved_thinking = max(valid_levels, key=lambda l: CANONICAL_THINKING_LEVELS.index(l))
+            else:
+                return None, f"无法确定模型 '{target_model_id}' 的默认思考设置，请在 Plus 中配置或使用自定义模型"
+
+    return {
+        "connection_file": str(Path(connection_file).expanduser()),
+        "provider_id": selected_provider["id"],
+        "model_id": target_model_id,
+        "thinking_level": resolved_thinking,
+    }, None
+
+
+def resolve_plus_default(connection_file, *, timeout: int = 10) -> Tuple[Optional[dict], Optional[str]]:
+    """Probe Plus MCP server and dynamically resolve current default provider, model, and thinking level."""
+    try:
+        record = load_connection(connection_file)
+    except util.KanpilotError as exc:
+        return None, exc.message
+
+    client = MCPClient(record["url"], record["token"], timeout=timeout)
+    try:
+        client.connect()
+        if client.protocol_version not in MCP_COMPATIBLE_VERSIONS:
+            return None, f"PI-Desktop MCP 协议版本不受支持：{client.protocol_version or '未知'}"
+        tools = client.tools_list()
+        if "pi_desktop_invoke" not in tools:
+            return None, "PI-Desktop 控制面缺少 pi_desktop_invoke 工具"
+
+        providers_res = client.call_tool("pi_desktop_invoke", {"operation": "providers/list", "args": []})
+        providers_res = _unwrap_invoke_result(providers_res)
+        rows = providers_res.get("providers")
+
+        settings_res = client.call_tool("pi_desktop_invoke", {"operation": "settings/get", "args": []})
+        settings_res = _unwrap_invoke_result(settings_res)
+
+        def fetch_models(pid: str):
+            try:
+                res = client.call_tool(
+                    "pi_desktop_invoke",
+                    {"operation": "providers/listModels", "args": [{"providerId": pid, "source": "cache"}]},
+                )
+                return res, None
+            except Exception as e:
+                return None, str(e)
+
+        return resolve_default_from_catalog_data(
+            connection_file,
+            rows or [],
+            settings_res or {},
+            models_fetcher=fetch_models,
+        )
+    except util.KanpilotError as exc:
+        return None, _strip_secret(exc.message, record.get("token"))
+    except Exception as exc:
+        return None, _strip_secret(str(exc), record.get("token") if "record" in locals() else None)

@@ -29,14 +29,48 @@ def load_plan(plan_path: str, expect_task_id: Optional[str] = None) -> tuple[dic
     return meta, raw, path
 
 
+def expected_model_snapshot(req_payload: dict) -> Optional[dict]:
+    """本请求固化的模型快照（§5.22.6 codex / §5.24.3 Plus）——**唯一**解析点。
+
+    `publish-plan` 的 frontmatter 校验与规划 runner 选择写入值必须用同一口径，
+    否则一边写 §6 常量、一边按 Plus 快照校验就会互相拒收（本函数的由来）。
+
+    - codex：``model_config``；
+    - Plus（``planner_backend="pi_desktop"``）：``runtime_config`` 的
+      ``model_id``/``thinking_level``（Plus 没有 codex 的 ``reasoning_effort``）；
+    - 快照缺失/不完整：None（旧记录回落 §6 历史常量，由调用方留痕）。
+    """
+    expected = req_payload.get("model_config")
+    if isinstance(expected, dict) and expected.get("planner_model"):
+        return expected
+    if req_payload.get("planner_backend") != "pi_desktop":
+        return None
+    runtime = req_payload.get("runtime_config")
+    if not isinstance(runtime, dict):
+        return None
+    model_id = runtime.get("model_id")
+    thinking = runtime.get("thinking_level")
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    if not isinstance(thinking, str) or not thinking:
+        return None
+    return {"planner_model": model_id, "reasoning_effort": thinking}
+
+
 def check_plan_meta(
-    meta: dict, plan_kind: str, expected_model: Optional[dict] = None
+    meta: dict,
+    plan_kind: str,
+    expected_model: Optional[dict] = None,
+    expected_project: Optional[dict] = None,
 ) -> None:
     """Frontmatter completeness + planner/reasoning requirements (§6).
 
     ``expected_model``（``{"planner_model":…,"reasoning_effort":…}``）提供时
     按请求/任务登记的快照比对（v2.1 §5.22.6）；缺省时沿用历史固定常量
-    （旧记录缺登记的兼容路径）。"""
+    （旧记录缺登记的兼容路径）。
+    ``expected_project``（``{"project_id":…, "repository":…, "project_name":…}``）
+    提供时按固化的项目快照比对（T1 §5.26）；缺省时沿用历史白名单常量校验。
+    """
     required = (
         constants.PLAN_META_REQUIRED_REVIEW_FIX
         if plan_kind == "review_fix"
@@ -48,19 +82,39 @@ def check_plan_meta(
         meta.get("implementation_status") == "未开始",
         "plan implementation_status is not 未开始",
     )
-    util.require(
-        meta.get("project_name") in constants.PROJECTS,
-        f"unknown project {meta.get('project_name')}",
-    )
-    util.require(
-        meta.get("project_id") == constants.PROJECTS[meta["project_name"]],
-        "plan project_id does not match project_name whitelist",
-    )
-    expected_repo = str(constants.repo_path_for(meta["project_name"]))
-    util.require(
-        meta.get("repository") == expected_repo,
-        f"plan repository {meta.get('repository')} != {expected_repo}",
-    )
+    if expected_project is not None:
+        expected_pid = expected_project.get("project_id")
+        if expected_pid:
+            util.require(
+                meta.get("project_id") == expected_pid,
+                f"plan project_id {meta.get('project_id')} != {expected_pid}",
+            )
+        expected_repo = expected_project.get("repository")
+        if expected_repo:
+            util.require(
+                meta.get("repository") == expected_repo,
+                f"plan repository {meta.get('repository')} != {expected_repo}",
+            )
+        expected_pname = expected_project.get("project_name")
+        if expected_pname:
+            util.require(
+                meta.get("project_name") == expected_pname,
+                f"plan project_name {meta.get('project_name')} != {expected_pname}",
+            )
+    else:
+        util.require(
+            meta.get("project_name") in constants.PROJECTS,
+            f"unknown project {meta.get('project_name')}",
+        )
+        util.require(
+            meta.get("project_id") == constants.PROJECTS[meta["project_name"]],
+            "plan project_id does not match project_name whitelist",
+        )
+        expected_repo = str(constants.repo_path_for(meta["project_name"]))
+        util.require(
+            meta.get("repository") == expected_repo,
+            f"plan repository {meta.get('repository')} != {expected_repo}",
+        )
     util.require(
         Path(meta["repository"]).is_dir(),
         f"repository missing: {meta['repository']}",

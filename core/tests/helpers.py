@@ -140,6 +140,10 @@ class FakeKaneoClient:
 
     def __init__(self):
         self.tasks = {}          # task_id -> task dict
+        self.projects = [
+            {"id": pid, "name": name}
+            for name, pid in constants.PROJECTS.items()
+        ]
         self.columns = [
             {"slug": "to-do"}, {"slug": "in-progress"},
             {"slug": "in-review"}, {"slug": "done"},
@@ -147,6 +151,13 @@ class FakeKaneoClient:
         self._seq = 0
         self.fail_next = None    # set to an exception to fail the next request
         self.requests_log = []
+
+    def add_project(self, project_id: str, name: str):
+        for p in self.projects:
+            if p["id"] == project_id:
+                p["name"] = name
+                return
+        self.projects.append({"id": project_id, "name": name})
 
     def add_task(self, task_id, project_id, status="to-do", **fields):
         task = {
@@ -204,12 +215,9 @@ class FakeKaneoClient:
                 "data": {"columns": [{"tasks": tasks}]},
                 "pagination": {"totalPages": 1},
             }
-        # /api/project?workspaceId= GET（fetch-todos 枚举项目白名单）
+        # /api/project?workspaceId= GET（fetch-todos 枚举项目）
         if parts[:2] == ["api", "project"] and method == "GET":
-            return {"data": [
-                {"id": pid, "name": name}
-                for name, pid in constants.PROJECTS.items()
-            ]}
+            return {"data": [dict(p) for p in self.projects]}
         # /api/column/<project> GET
         if parts[:2] == ["api", "column"] and method == "GET":
             return {"data": [dict(c) for c in self.columns]}
@@ -231,13 +239,16 @@ class KanpilotTestCase(unittest.TestCase):
         self.repos_root = self.root / "repos"
         self.legacy_root = self.root / "legacy"
         self.app_support = self.root / "app_support"
+        self.runs_root = self.app_support / "runs"
+        # v4（§5.24.5）核心默认根已是 <APP_SUPPORT>/reports；这里刻意用
+        # legacy 形状 + 显式覆盖，保留「KANPILOT_REPORTS_ROOT 覆盖」接缝。
         self.reports_root = self.legacy_root / "KaneoReviewer" / "reports"
         self.sources_root = (
             self.legacy_root / "KaneoPlanner" / "state" / "sources"
         )
         for path in (
             self.plan_root, self.repos_root, self.legacy_root,
-            self.app_support, self.reports_root, self.sources_root,
+            self.app_support, self.runs_root, self.reports_root, self.sources_root,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self._env = {

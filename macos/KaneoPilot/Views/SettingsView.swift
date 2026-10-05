@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// §4.9 设置页四段（segmented，不按软件名分节）。
+/// §4.9/§4.11 设置页五段（segmented，不按软件名分节）：项目与仓库 / 规划环境 / 执行环境 / Review 环境 / 通用。
 private enum SettingsSegment: String, CaseIterable, Identifiable {
-    case planner, exec, review, general
+    case projects, planner, exec, review, general
 
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .projects: return "项目与仓库"
         case .planner: return "规划环境"
         case .exec: return "执行环境"
         case .review: return "Review 环境"
@@ -21,6 +22,8 @@ struct SettingsView: View {
 
     private static let stageKeys = ["plan", "dispatch", "monitor", "review"]
 
+
+    @ObservedObject private var mcpManager = MCPServiceManager.shared
 
     @State private var segment: SettingsSegment = .planner
 
@@ -41,6 +44,8 @@ struct SettingsView: View {
     @State private var selPreset = ""
     // v3 §5.23.3：任务执行后端（pi|pi_desktop）与 pi_desktop 分支草稿。
     @State private var selBackend = "pi"
+    @State private var pdModelSource = "custom"
+    @State private var pdAdvancedExpanded = false
     @State private var pdConnectionFile = ""
     @State private var pdProviderId = ""
     @State private var pdModelId = ""
@@ -57,6 +62,11 @@ struct SettingsView: View {
     @State private var modelSearchText = ""
     @State private var modelPopoverPresented = false
     @State private var settingDefaultConnectionFile = false
+    @State private var piDesktopProbeLoading = false
+    @State private var piDesktopProbeControlText: String?
+    @State private var piDesktopProbeAttachmentText: String?
+    @State private var mcpProbeConnectionFile = ExecPiDesktopConfig.defaultConnectionFile
+    @State private var mcpProbeAdvancedExpanded = false
 
     private static let piDesktopThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
@@ -84,6 +94,25 @@ struct SettingsView: View {
     @State private var selReviewModel = ""
     @State private var selReviewEffort = ""
 
+    // MARK: v4 §5.24.1 角色运行端选择（各自独立，互不联动）
+    /// 规划运行端（codex|pi_desktop；缺省 codex）。
+    @State private var plannerBackend = "codex"
+    /// Plus 规划五字段草稿（permission_mode 固定 ask，不提供选择）。
+    @State private var plModelSource = "custom"
+    @State private var plConnectionFile = ""
+    @State private var plProviderId = ""
+    @State private var plModelId = ""
+    @State private var plThinkingLevel = ""
+    /// 派发与监控运行端（controller_backend：pi|pi_desktop；缺省 pi）。
+    @State private var selControllerBackend = "pi"
+    /// Review 运行端（pi|pi_desktop；缺省 pi）与 Plus 五字段草稿。
+    @State private var reviewBackend = "pi"
+    @State private var rvModelSource = "custom"
+    @State private var rvConnectionFile = ""
+    @State private var rvProviderId = ""
+    @State private var rvModelId = ""
+    @State private var rvThinkingLevel = ""
+
 
     // MARK: 执行端调度状态（§5.19，v1.6）
     @AppStorage("executorSchedulingEnabled") private var executorEnabled = true
@@ -101,27 +130,35 @@ struct SettingsView: View {
             .padding(.horizontal, Spacing.l)
             .padding(.vertical, Spacing.m)
             .accessibilityLabel("设置分组：\(segment.title)")
-            Form {
-                switch segment {
-                case .planner:
-                    plannerSection
-                case .exec:
-                    execSection
-                    schedulerSection
-                case .review:
-                    reviewSection
-                case .general:
-                    diagnosticsSection
-                    automationSection
-                    parametersSection
-                    countsSection
-                    pathsSection
-                    if let migration = model.overview?.settings?.migration {
-                        migrationSection(migration)
+            if segment == .projects {
+                ProjectMappingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Form {
+                    switch segment {
+                    case .projects:
+                        EmptyView()
+                    case .planner:
+                        plannerSection
+                    case .exec:
+                        execSection
+                        schedulerSection
+                    case .review:
+                        reviewSection
+                    case .general:
+                        mcpServiceSection
+                        diagnosticsSection
+                        automationSection
+                        parametersSection
+                        countsSection
+                        pathsSection
+                        if let migration = model.overview?.settings?.migration {
+                            migrationSection(migration)
+                        }
                     }
                 }
+                .formStyle(.grouped)
             }
-            .formStyle(.grouped)
         }
         .task {
             if model.doctor == nil { await model.runDoctor() }
@@ -129,21 +166,40 @@ struct SettingsView: View {
             if !plannerLoaded && !model.plannerLoading { await loadPlanner() }
             if !reviewLoaded && !reviewLoading { await loadReview() }
             if executorStatus == nil { await refreshExecutorStatus() }
+            if model.reviewCapabilities == nil {
+                await model.refreshReviewCapabilities()
+            }
         }
-        .onChange(of: selBackend) { _, backend in
-            invalidatePiDesktopCatalog()
+        // §4.10：切运行端**只**刷新只读能力/候选，绝不重载配置覆盖草稿。
+        .onChange(of: plannerBackend) { _, backend in
             guard backend == "pi_desktop" else { return }
+            Task { await model.refreshPlannerConfig() }
+        }
+        .onChange(of: reviewBackend) { _, _ in
+            Task { await model.refreshReviewCapabilities() }
+        }
+        .onChange(of: selBackend) { _, _ in
+            invalidatePiDesktopCatalog()
+            guard plusBlockInPlay else { return }
+            ensurePiDesktopConnectionFile()
+            Task { await refreshPiDesktopCatalog() }
+        }
+        .onChange(of: selControllerBackend) { _, _ in
+            invalidatePiDesktopCatalog()
+            guard plusBlockInPlay else { return }
             ensurePiDesktopConnectionFile()
             Task { await refreshPiDesktopCatalog() }
         }
         .onChange(of: segment) { _, value in
             invalidatePiDesktopCatalog()
-            if value == .exec && selBackend == "pi_desktop" {
+            if value == .exec && plusBlockInPlay {
                 ensurePiDesktopConnectionFile()
                 Task { await refreshPiDesktopCatalog() }
             }
         }
         .onChange(of: pdConnectionFile) { _, _ in
+            piDesktopProbeControlText = nil
+            piDesktopProbeAttachmentText = nil
             if settingDefaultConnectionFile {
                 settingDefaultConnectionFile = false
             } else {
@@ -152,11 +208,96 @@ struct SettingsView: View {
         }
         .onChange(of: pdProviderId) { _, _ in
             invalidatePiDesktopCatalog()
-            guard selBackend == "pi_desktop" else { return }
+            guard plusBlockInPlay else { return }
             Task { await refreshPiDesktopCatalog() }
         }
         .onChange(of: pdModelId) { _, _ in invalidatePiDesktopCatalog(clear: false) }
         .onChange(of: pdThinkingLevel) { _, _ in invalidatePiDesktopCatalog(clear: false) }
+    }
+
+    // MARK: 本机 MCP 服务
+
+    private var mcpServiceSection: some View {
+        Section("本机 MCP 服务") {
+            HStack(spacing: Spacing.m) {
+                Text("服务状态")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 96, alignment: .trailing)
+                Text(mcpManager.status.running
+                     ? (mcpManager.status.owned ? "运行中" : "运行中（外部服务）")
+                     : "已停止")
+                    .font(.kpBody)
+                    .foregroundStyle(mcpManager.status.running ? Color.green : Color.secondary)
+                Spacer(minLength: 0)
+                if mcpManager.status.running && mcpManager.status.owned {
+                    Button("停止服务") {
+                        mcpManager.stop()
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("停止本机 MCP 服务")
+                } else if !mcpManager.status.running {
+                    Button("启动服务") {
+                        mcpManager.start()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("启动本机 MCP 服务")
+                }
+            }
+            if mcpManager.status.running && !mcpManager.status.owned {
+                Text("该服务由其他进程管理；KaneoPilot 只读取状态，不会停止它。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            }
+            if let url = mcpManager.status.url {
+                FieldRow("服务地址", url)
+            }
+            if let pid = mcpManager.status.pid {
+                FieldRow("进程 PID", "\(pid)")
+            }
+            DisclosureGroup(isExpanded: $mcpProbeAdvancedExpanded) {
+                TextField("Plus 连接文件路径", text: $mcpProbeConnectionFile)
+                    .font(.kpBody)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("通用设置 Plus 连接文件路径")
+                    .onChange(of: mcpProbeConnectionFile) { _, _ in
+                        piDesktopProbeControlText = nil
+                        piDesktopProbeAttachmentText = nil
+                    }
+            } label: {
+                Text("Plus 高级设置（连接文件路径）")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: Spacing.m) {
+                Button(piDesktopProbeLoading ? "连接中…" : "连接 Plus") {
+                    Task { await probePiDesktopConnection(connectionFile: mcpProbeConnectionFile) }
+                }
+                .disabled(piDesktopProbeLoading)
+                .accessibilityLabel("连接并探测 Pi-Desktop-Plus")
+                if piDesktopProbeLoading { ProgressView().controlSize(.small) }
+                Spacer(minLength: 0)
+            }
+            FieldRow("Plus 控制面", piDesktopProbeControlText ?? "未探测")
+            FieldRow("会话 MCP 挂接", piDesktopProbeAttachmentText ?? "未探测")
+            if let error = mcpManager.status.error {
+                HStack(spacing: Spacing.s) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.kpSmall)
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button("重试") {
+                        mcpManager.retry()
+                    }
+                    .accessibilityLabel("重试启动 MCP 服务")
+                }
+            }
+            Text("标准 MCP 双向通信服务（kp_runtime_* 控制域与 kp_task_* 任务域）。")
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: 环境诊断
@@ -216,8 +357,10 @@ struct SettingsView: View {
     /// 当前展示基线：存过的配置优先，从未保存时用初始默认（标「默认」）。
     private var execBase: ExecConfig? { execConfig ?? execDefaults }
 
+    /// 执行环境（§4.10）：任务执行后端 + 派发与监控运行端（controller_backend）
+    /// 分别显示实际生效值与各自能力状态；不把一个 Plus 选择表现成「全链路已切换」。
     private var execSection: some View {
-        Section("任务执行后端") {
+        Section("执行环境") {
             if execLoading && !execLoaded {
                 HStack(spacing: Spacing.m) {
                     ProgressView()
@@ -250,27 +393,56 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
             }
             if execLoaded, let caps = execCaps, execBase != nil {
-                // v3 §5.23.3：任务执行轮次后端（dispatch/monitor 控制端仍
-                // 继承本机 PI 默认设置，见下方说明）。
+                // ① 任务执行后端（§5.23.3）：轮次执行的模型来源。
                 Picker("任务执行后端", selection: $selBackend) {
                     Text("pi").tag("pi")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("任务执行后端")
+                Text(taskExecEffectiveText)
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
                 if selBackend == "pi_desktop" {
                     piDesktopBlock(caps)
                 } else {
                     execPickers(caps)
                 }
+                Divider()
+                // ② 派发与监控运行端（controller_backend，§5.24.4）：只控制
+                // dispatch/monitor 控制轮，不改任务 worker。
+                Picker("派发与监控运行端", selection: $selControllerBackend) {
+                    Text("Pi CLI").tag("pi")
+                    Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
+                }
+                .pickerStyle(.menu)
+                .accessibilityLabel("派发与监控运行端")
+                Text(controllerEffectiveText)
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                Text(controllerReadinessText(caps))
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if selControllerBackend == "pi_desktop" && selBackend == "pi" {
+                    Text("Plus 控制端复用本页的 Plus 五字段"
+                         + "（连接文件 / provider / model / thinking / 权限）。")
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    piDesktopBlock(caps)
+                }
                 execSaveRow(caps)
                 execChecksList(caps)
-                Text("仅影响新轮次；不修改 pi 全局配置；凭据只查就绪态，不保存密钥值。")
+                Text("仅影响新轮次 / 新控制轮；不修改 pi 与 Plus 全局配置；"
+                     + "凭据只查就绪态，不保存密钥值。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
-                Text("dispatch/monitor 控制端仍继承本机 PI 默认设置。")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("控制端与任务执行是两个来源：一个选择为 Plus 不代表另一项也已切换。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if !execLoading && execError == nil && !execLoaded {
                 Text("尚未读取执行配置")
                     .font(.kpBody)
@@ -279,94 +451,152 @@ struct SettingsView: View {
         }
     }
 
+    /// §5.24.1：任务执行后端实际生效值（已保存配置，不是草稿）。
+    private var taskExecEffectiveText: String {
+        guard let base = execConfig else {
+            return "当前生效：Pi CLI（缺省，未保存）"
+        }
+        let saved = base.updatedAt == nil
+            ? "默认（未保存）" : "已保存 \(TimeFormat.fullString(base.updatedAt))"
+        return "当前生效：\(RoleBackend.label(base.effectiveBackend))（\(saved)）"
+    }
+
+    /// §5.24.1：派发与监控运行端实际生效值。
+    private var controllerEffectiveText: String {
+        guard let base = execConfig else {
+            return "当前生效：Pi CLI（缺省，未保存）"
+        }
+        return "当前生效：\(RoleBackend.label(base.effectiveControllerBackend))"
+    }
+
+    /// §5.24.2：控制器就绪态与任务执行就绪态分开展示。
+    private func controllerReadinessText(_ caps: ExecCapabilitiesResponse) -> String {
+        guard let controller = caps.controller else {
+            return "核心未上报控制端（controller）就绪态"
+        }
+        let backend = RoleBackend.shortLabel(
+            controller.backend ?? selControllerBackend)
+        guard let text = controller.readinessText else {
+            return "控制端 \(backend)：就绪态未知"
+        }
+        return "控制端 \(backend)：\(text)"
+    }
+
     /// v3 §5.23.3 pi_desktop 分支：连接文件（mcp-control.json）+ provider/
     /// model/thinking_level/permission_mode + 只读「检测」。
     @ViewBuilder
     private func piDesktopBlock(_ caps: ExecCapabilitiesResponse) -> some View {
-        TextField("连接文件路径（默认 ~/.pi-desktop-plus/mcp-control.json）",
-                  text: $pdConnectionFile)
-            .font(.kpBody)
-            .textFieldStyle(.roundedBorder)
-            .accessibilityLabel("PI-Desktop 连接文件路径")
-        Text("默认路径：~/.pi-desktop-plus/mcp-control.json；切换到 Plus 后自动读取，只读且不会写入全局配置")
-            .font(.kpSmall)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-        HStack(spacing: Spacing.s) {
-            TextField("provider_id", text: $pdProviderId)
+        Picker("模型配置方式", selection: $pdModelSource) {
+            Text("跟随 Plus 默认配置").tag("inherit")
+            Text("自定义模型").tag("custom")
+        }
+        .pickerStyle(.segmented)
+        .accessibilityLabel("执行环境 Plus 模型配置方式")
+
+        DisclosureGroup(isExpanded: $pdAdvancedExpanded) {
+            TextField("连接文件路径（默认 ~/.pi-desktop-plus/mcp-control.json）",
+                      text: $pdConnectionFile)
                 .font(.kpBody)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("PI-Desktop provider_id")
-            if !catalogProviders.isEmpty {
-                Menu {
-                    ForEach(filteredCatalogProviders) { provider in
-                        Button(provider.name.map { "\($0)（\(provider.id)）" } ?? provider.id) {
-                            pdProviderId = provider.id
-                        }
-                    }
-                } label: {
-                    Image(systemName: "list.bullet")
-                }
-                .menuIndicator(.hidden)
-                .help("选择 Plus provider")
-            }
-        }
-        HStack(spacing: Spacing.s) {
-            if !catalogModels.isEmpty {
-                Button {
-                    modelSearchText = ""
-                    modelPopoverPresented = true
-                } label: {
-                    Image(systemName: "list.bullet")
-                }
-                .buttonStyle(.borderless)
-                .help("选择 Plus 模型")
-                .popover(isPresented: $modelPopoverPresented) {
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        TextField("搜索模型", text: $modelSearchText)
-                            .textFieldStyle(.roundedBorder)
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(filteredCatalogModels) { model in
-                                    Button {
-                                        pdModelId = model.id
-                                        modelPopoverPresented = false
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(model.name ?? model.id)
-                                            Text(model.id).font(.kpSmall).foregroundStyle(.secondary)
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.vertical, 5)
-                                }
-                            }
-                        }
-                        .frame(width: 320, height: 240)
-                    }
-                    .padding(Spacing.m)
-                }
-            }
-            TextField("model_id", text: $pdModelId)
-                .font(.kpBody)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("PI-Desktop model_id")
-        }
-        Picker("thinking_level", selection: $pdThinkingLevel) {
-            if !pdThinkingLevel.isEmpty && !piDesktopThinkingOptions.contains(pdThinkingLevel) {
-                Text("\(pdThinkingLevel)（当前值）").tag(pdThinkingLevel)
-            }
-            ForEach(piDesktopThinkingOptions, id: \.self) { level in
-                Text(level).tag(level)
-            }
-        }
-        .accessibilityLabel("PI-Desktop thinking_level")
-        if let scopeText = piDesktopThinkingScopeText {
-            Text(scopeText)
+                .accessibilityLabel("PI-Desktop 连接文件路径")
+            Text("默认路径：~/.pi-desktop-plus/mcp-control.json；切换到 Plus 后自动读取，只读且不会写入全局配置")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        } label: {
+            Text("高级设置（连接文件路径）")
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+        }
+
+        if pdModelSource == "inherit" {
+            if let resolved = piDesktopCatalog?.resolvedDefault {
+                FieldRow("Plus 默认模型", "\(resolved.providerId) / \(resolved.modelId) · \(resolved.thinkingLevel)")
+            } else if let detail = piDesktopCatalog?.defaultDetail {
+                Text("默认模型解析提示：\(detail)")
+                    .font(.kpSmall)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                FieldRow("Plus 默认模型", "未解析（切换时自动动态解析）")
+            }
+        } else {
+            HStack(spacing: Spacing.s) {
+                TextField("provider_id", text: $pdProviderId)
+                    .font(.kpBody)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("PI-Desktop provider_id")
+                if !catalogProviders.isEmpty {
+                    Menu {
+                        ForEach(filteredCatalogProviders) { provider in
+                            Button(provider.name.map { "\($0)（\(provider.id)）" } ?? provider.id) {
+                                pdProviderId = provider.id
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .menuIndicator(.hidden)
+                    .help("选择 Plus provider")
+                }
+            }
+            HStack(spacing: Spacing.s) {
+                if !catalogModels.isEmpty {
+                    Button {
+                        modelSearchText = ""
+                        modelPopoverPresented = true
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("选择 Plus 模型")
+                    .popover(isPresented: $modelPopoverPresented) {
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            TextField("搜索模型", text: $modelSearchText)
+                                .textFieldStyle(.roundedBorder)
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(filteredCatalogModels) { model in
+                                        Button {
+                                            pdModelId = model.id
+                                            modelPopoverPresented = false
+                                        } label: {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(model.name ?? model.id)
+                                                Text(model.id).font(.kpSmall).foregroundStyle(.secondary)
+                                            }
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.vertical, 5)
+                                    }
+                                }
+                            }
+                            .frame(width: 320, height: 240)
+                        }
+                        .padding(Spacing.m)
+                    }
+                }
+                TextField("model_id", text: $pdModelId)
+                    .font(.kpBody)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("PI-Desktop model_id")
+            }
+            Picker("thinking_level", selection: $pdThinkingLevel) {
+                if !pdThinkingLevel.isEmpty && !piDesktopThinkingOptions.contains(pdThinkingLevel) {
+                    Text("\(pdThinkingLevel)（当前值）").tag(pdThinkingLevel)
+                }
+                ForEach(piDesktopThinkingOptions, id: \.self) { level in
+                    Text(level).tag(level)
+                }
+            }
+            .accessibilityLabel("PI-Desktop thinking_level")
+            if let scopeText = piDesktopThinkingScopeText {
+                Text(scopeText)
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         // permission_mode 首次须用户显式保存（草稿空 = 未选择，不自动 auto）。
         Picker("permission_mode", selection: $pdPermissionMode) {
@@ -380,6 +610,28 @@ struct SettingsView: View {
             Text("permission_mode 未选择：需显式选择后才能保存")
                 .font(.kpSmall)
                 .foregroundStyle(.orange)
+        }
+        HStack(spacing: Spacing.m) {
+            Button(piDesktopProbeLoading ? "连接中…" : "连接 Plus") {
+                Task { await probePiDesktopConnection(connectionFile: pdConnectionFile) }
+            }
+            .disabled(piDesktopProbeLoading || savingExec)
+            .help("pi-desktop-probe：检查 Plus 控制连接与附件能力，不调用模型")
+            .accessibilityLabel("探测 Pi-Desktop-Plus 连接")
+            if piDesktopProbeLoading { ProgressView().controlSize(.small) }
+            if let piDesktopProbeControlText {
+                Text("控制：\(piDesktopProbeControlText)")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let piDesktopProbeAttachmentText {
+                Text("会话 MCP 挂接：\(piDesktopProbeAttachmentText)")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
         HStack(spacing: Spacing.m) {
             Button("检测已保存配置") { Task { await refreshExecCapabilities() } }
@@ -500,9 +752,14 @@ struct SettingsView: View {
         if clear { piDesktopCatalog = nil }
     }
 
+    /// §4.10/§5.24.1：任务执行或控制端任一为 Plus 时，页面上就存在 Plus 五字段块。
+    private var plusBlockInPlay: Bool {
+        selBackend == "pi_desktop" || selControllerBackend == "pi_desktop"
+    }
+
     /// 读取 Plus 只读目录。响应只允许播种空草稿，且必须属于本次路径/provider 修订。
     private func refreshPiDesktopCatalog() async {
-        guard selBackend == "pi_desktop" else { return }
+        guard plusBlockInPlay else { return }
         ensurePiDesktopConnectionFile()
         let connection = pdConnectionFile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !connection.isEmpty else { return }
@@ -524,13 +781,46 @@ struct SettingsView: View {
             guard generation == piDesktopCatalogGeneration,
                   revision == piDesktopCatalogRevision,
                   segment == .exec,
-                  selBackend == "pi_desktop" else { return }
+                  plusBlockInPlay else { return }
             piDesktopCatalog = catalog
             applyPiDesktopCatalogDefaults(catalog)
             piDesktopCatalogError = nil
         } catch {
             guard generation == piDesktopCatalogGeneration else { return }
             piDesktopCatalogError = error.coreMessage
+        }
+    }
+
+    /// Probes the connection file currently shown in the Plus draft.
+    private func probePiDesktopConnection(connectionFile: String) async {
+        let connection = connectionFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !connection.isEmpty else {
+            piDesktopProbeControlText = "连接文件路径为空"
+            piDesktopProbeAttachmentText = "未探测"
+            return
+        }
+        mcpProbeConnectionFile = connection
+        piDesktopProbeLoading = true
+        defer { piDesktopProbeLoading = false }
+        do {
+            let result = try await model.client.run(
+                "pi-desktop-probe",
+                payload: ["connection_file": connection],
+                timeout: 15,
+                as: PiDesktopProbeResponse.self)
+            let version = result.version.map { "，版本 \($0)" } ?? ""
+            if result.connected {
+                piDesktopProbeControlText = result.available && result.toolsOk
+                ? "已连接且就绪（\(result.detail)\(version)）"
+                    : "已连接但工具不可用（\(result.detail)\(version)）"
+                piDesktopProbeAttachmentText = result.attachmentSupported ? "支持" : "不支持"
+            } else {
+                piDesktopProbeControlText = "连接失败（\(result.detail)\(version)）"
+                piDesktopProbeAttachmentText = "未确认（控制面未连接）"
+            }
+        } catch {
+            piDesktopProbeControlText = "探测失败（\(error.coreMessage)）"
+            piDesktopProbeAttachmentText = "未探测"
         }
     }
 
@@ -585,7 +875,7 @@ struct SettingsView: View {
             } else if requested == nil {
                 piDesktopCatalogNotice = "Plus 未返回 provider「\(provider.id)」的默认模型，请手动选择。"
             } else {
-                piDesktopCatalogNotice = "Plus 默认模型「\(requested)」不在 provider「\(provider.id)」的本地目录中，请手动选择。"
+                piDesktopCatalogNotice = "Plus 默认模型「\(requested ?? "")」不在 provider「\(provider.id)」的本地目录中，请手动选择。"
             }
         }
         guard pdThinkingLevel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -624,7 +914,10 @@ struct SettingsView: View {
                 selEffort = base.reasoningEffort ?? ""
                 selPreset = base.agentPreset ?? ""
                 selBackend = base.effectiveBackend
+                // v4 §5.24.1：派发与监控运行端（旧核心未返回 → pi）。
+                selControllerBackend = base.effectiveControllerBackend
                 // pi_desktop 五字段草稿（旧核心未返回 → 全空）。
+                pdModelSource = base.piDesktop?.effectiveModelSource ?? "custom"
                 pdConnectionFile = base.piDesktop?.connectionFile ?? ""
                 pdProviderId = base.piDesktop?.providerId ?? ""
                 pdModelId = base.piDesktop?.modelId ?? ""
@@ -634,7 +927,7 @@ struct SettingsView: View {
             }
             execError = nil
             execLoaded = true
-            if selBackend == "pi_desktop" {
+            if plusBlockInPlay {
                 ensurePiDesktopConnectionFile()
                 Task { await refreshPiDesktopCatalog() }
             }
@@ -752,7 +1045,8 @@ struct SettingsView: View {
 
     private func execChecksList(_ caps: ExecCapabilitiesResponse) -> some View {
         Group {
-            Text("环境检查")
+            // §4.10：这组检查只针对 PI CLI 分支，不阻挡 Plus 保存/选择。
+            Text("环境检查（PI CLI 分支；不阻挡 Plus 保存）")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
             ForEach(caps.checks ?? []) { check in
@@ -788,25 +1082,22 @@ struct SettingsView: View {
         defer { savingExec = false }
         do {
             var payload: [String: Any]
+            // §5.24.1：两个选择分别提交，互不覆盖。
+            payload = ["backend": selBackend,
+                       "controller_backend": selControllerBackend]
             if selBackend == "pi_desktop" {
                 // 桌面保存只提交桌面五字段；CLI 草稿由核心保留。
-                payload = ["backend": "pi_desktop"]
-                payload["pi_desktop"] = ExecPiDesktopConfig(
-                    connectionFile: emptyToNil(pdConnectionFile),
-                    providerId: emptyToNil(pdProviderId),
-                    modelId: emptyToNil(pdModelId),
-                    thinkingLevel: emptyToNil(pdThinkingLevel),
-                    permissionMode: emptyToNil(pdPermissionMode)
-                ).fields
+                payload["pi_desktop"] = piDesktopDraft.fields
             } else {
                 // CLI 保存不携带空桌面块；核心保留已保存的桌面分支。
-                payload = [
-                    "backend": "pi",
-                    "provider": selProvider,
-                    "model": selModel,
-                    "reasoning_effort": selEffort,
-                    "agent_preset": selPreset,
-                ]
+                payload["provider"] = selProvider
+                payload["model"] = selModel
+                payload["reasoning_effort"] = selEffort
+                payload["agent_preset"] = selPreset
+                // Plus 控制端复用本页 Plus 五字段：控制端为 Plus 时必须一并保存。
+                if selControllerBackend == "pi_desktop" {
+                    payload["pi_desktop"] = piDesktopDraft.fields
+                }
             }
             let response = try await model.client.run(
                 "set-exec-config", payload: payload,
@@ -825,10 +1116,21 @@ struct SettingsView: View {
                 "exec-capabilities", as: ExecCapabilitiesResponse.self) {
                 if capsGeneration == execLoadGeneration { execCaps = refreshed }
             }
-            model.showToast("已保存执行配置（仅影响新轮次）")
+            model.showToast("已保存执行配置（仅影响新轮次 / 新控制轮）")
         } catch {
             model.alertMessage = error.coreMessage  // 保留原值不清空
         }
+    }
+
+    /// 页面上的 Plus 五字段草稿（执行与 Plus 控制端共用同一已保存块）。
+    private var piDesktopDraft: ExecPiDesktopConfig {
+        ExecPiDesktopConfig(
+            modelSource: pdModelSource,
+            connectionFile: emptyToNil(pdConnectionFile),
+            providerId: emptyToNil(pdProviderId),
+            modelId: emptyToNil(pdModelId),
+            thinkingLevel: emptyToNil(pdThinkingLevel),
+            permissionMode: emptyToNil(pdPermissionMode))
     }
 
     // MARK: 能力联动与校验
@@ -866,21 +1168,18 @@ struct SettingsView: View {
         }
     }
 
-    /// 保存禁用判定：能力不可用或所选组合经能力校验不过（不自动降级）。
+    /// 保存禁用判定（§4.10）：两个选择各自校验，不互相推断。
+    /// - Plus 五字段：只要页面上存在 Plus 块（执行或控制端为 Plus）就校验
+    ///   结构与权限显式选择；不受 PI CLI 顶层 ok 阻挡（T3.3）。
+    /// - PI CLI：任务执行仍为 pi 时沿用原环境门（ok + 组合校验）；两个角色里
+    ///   已有 Plus 时，CLI 草稿按原样提交，真实错误由核心返回。
     private func execIssue(_ caps: ExecCapabilitiesResponse?) -> String? {
         guard let caps else { return "执行配置能力未加载" }
-        // 桌面配置只校验自身五字段；PI CLI 检查失败不阻挡其保存。
-        if selBackend == "pi_desktop" {
-            if emptyToNil(pdConnectionFile) == nil {
-                return "连接文件路径不能为空"
-            }
-            if emptyToNil(pdProviderId) == nil { return "provider_id 不能为空" }
-            if emptyToNil(pdModelId) == nil { return "model_id 不能为空" }
-            if emptyToNil(pdThinkingLevel) == nil {
-                return "thinking_level 不能为空"
-            }
-            if pdPermissionMode.isEmpty {
-                return "permission_mode 需显式选择（不会自动设为 auto）"
+        if plusBlockInPlay {
+            if let plusIssue = piDesktopDraftIssue { return plusIssue }
+            if selBackend == "pi", caps.ok != false,
+               let cliIssue = cliCombinationIssue(caps) {
+                return cliIssue
             }
             return nil
         }
@@ -891,6 +1190,11 @@ struct SettingsView: View {
                 ? "PI 执行环境检查未通过"
                 : "PI 执行环境检查未通过：\(failed.joined(separator: "、"))"
         }
+        return cliCombinationIssue(caps)
+    }
+
+    /// PI CLI 四字段组合校验（provider/模型/思考等级/预设，不自动降级）。
+    private func cliCombinationIssue(_ caps: ExecCapabilitiesResponse) -> String? {
         guard let provider = caps.providers?.first(where: { $0.id == selProvider })
         else { return "provider「\(selProvider)」不在当前 PI 能力列表" }
         guard let spec = (provider.models ?? [])
@@ -903,6 +1207,22 @@ struct SettingsView: View {
         else { return "预设「\(selPreset)」不在当前列表" }
         if let broken = preset.broken {
             return "预设「\(preset.name ?? preset.id)」不可用：\(broken)"
+        }
+        return nil
+    }
+
+    /// Plus 五字段结构校验 + permission_mode 显式选择（草稿；不作服务探测）。
+    private var piDesktopDraftIssue: String? {
+        if let path = emptyToNil(pdConnectionFile) {
+            if !path.hasPrefix("/") { return "连接文件必须是绝对路径" }
+        }
+        if pdModelSource == "custom" {
+            if emptyToNil(pdProviderId) == nil { return "provider_id 不能为空" }
+            if emptyToNil(pdModelId) == nil { return "model_id 不能为空" }
+            if emptyToNil(pdThinkingLevel) == nil { return "thinking_level 不能为空" }
+        }
+        if pdPermissionMode.isEmpty {
+            return "permission_mode 需显式选择（不会自动设为 auto）"
         }
         return nil
     }
@@ -967,9 +1287,11 @@ struct SettingsView: View {
 
     // MARK: Codex 规划配置（§4.4 / protocol §5.22.6）
 
-    /// 分节主区：读取进度 → 错误横幅 → 只读环境摘要 + 两组草稿 + 保存行。
+    /// 分节主区（§4.10）：运行端选择 → 读取进度 → 错误横幅 →
+    /// Codex 只读环境 + 两组草稿 / Plus 五字段块 → 方式 → 保存行。
+    /// 切换运行端只刷新只读能力与候选，不重载配置覆盖草稿。
     private var plannerSection: some View {
-        Section("Codex 规划配置") {
+        Section("规划环境") {
             if model.plannerLoading && !plannerLoaded {
                 HStack(spacing: Spacing.m) {
                     ProgressView()
@@ -989,8 +1311,7 @@ struct SettingsView: View {
                     Text(error)
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     if model.plannerLoading {
                         ProgressView().controlSize(.small)
@@ -1003,14 +1324,26 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
             }
             if plannerLoaded {
-                plannerEnvironment(model.plannerCapabilities)
-                plannerGroupEditor(title: "普通规划",
-                                   model: $stdModel, effort: $stdEffort)
-                plannerGroupEditor(title: "评审修复规划",
-                                   model: $fixModel, effort: $fixEffort)
+                // §4.10：规划运行端（Codex / Pi-Desktop-Plus）。
+                Picker("规划运行端", selection: $plannerBackend) {
+                    Text("Codex").tag("codex")
+                    Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
+                }
+                .pickerStyle(.menu)
+                .accessibilityLabel("规划运行端")
+                .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
+                if plannerBackend == "pi_desktop" {
+                    plannerPlusBlock
+                } else {
+                    plannerEnvironment(model.plannerCapabilities)
+                    plannerGroupEditor(title: "普通规划",
+                                       model: $stdModel, effort: $stdEffort)
+                    plannerGroupEditor(title: "评审修复规划",
+                                       model: $fixModel, effort: $fixEffort)
+                }
                 plannerMethodRow
                 plannerSaveRow
-                Text("仅影响新建规划请求；不修改 codex 全局配置；不显示凭据值。")
+                Text("仅影响新建规划请求；不修改 codex / Plus 全局配置；不显示凭据值。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
             } else if !model.plannerLoading && model.plannerError == nil {
@@ -1018,6 +1351,46 @@ struct SettingsView: View {
                     .font(.kpBody)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// §4.10 Plus 规划分支：五字段（权限固定 Ask）+ 只读目录候选 +
+    /// 运行端就绪态。工具权限需在 Plus 处理，调度台不代批。
+    @ViewBuilder
+    private var plannerPlusBlock: some View {
+        let status = model.plannerCapabilities?.plusBackend
+        FieldRow("Plus 就绪态", plannerPlusStatusText(status))
+        if let detail = status?.detail ?? status?.reason,
+           status?.available != true {
+            Text(detail)
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        PlusRoleEditor(roleName: "规划",
+                       hasSavedDesktopConfig: model.plannerPlusConfig != nil,
+                       modelSource: $plModelSource,
+                       connectionFile: $plConnectionFile,
+                       providerId: $plProviderId,
+                       modelId: $plModelId,
+                       thinkingLevel: $plThinkingLevel)
+        Text("权限固定 ask：规划阶段只读协商，工具权限请在你的 Plus 界面处理"
+             + "（调度台不代批、不重发）。")
+            .font(.kpSmall)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        Text("Plus 分支只支持内置规划；Spec Planner 插件是 Codex 插件运行方式。")
+            .font(.kpSmall)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func plannerPlusStatusText(_ status: PlusBackendStatus?) -> String {
+        guard let status else { return "核心未上报 Plus 规划就绪态" }
+        switch status.available {
+        case true: return status.detail ?? "本机配置与协议工具可用"
+        case false: return "不可用：\(status.detail ?? status.reason ?? "原因未知")"
+        default: return "就绪态未知"
         }
     }
 
@@ -1095,29 +1468,49 @@ struct SettingsView: View {
             }
         }
     }
-    /// v3 §5.23.2：默认规划方式预选（default_method）+ planner_methods 可用性。
-    /// spec_plan 不可用时禁用该选项并展示核心 reason；选中时附冻结边界说明。
+    /// v3 §5.23.2 + v4 §5.24.3：默认规划方式预选（default_method）与
+    /// planner_methods 可用性。Plus 运行端只支持内置规划：spec_plan 禁用
+    /// 并写明原因（spec_plan 是 Codex 插件运行方式）。
     @ViewBuilder
     private var plannerMethodRow: some View {
+        let plusSelected = plannerBackend == "pi_desktop"
         let spec = model.plannerCapabilities?.specPlanMethod
+        let specDisabled = plusSelected || spec?.available == false
         Picker("默认规划方式", selection: $selDefaultMethod) {
             Text("内置规划").tag("builtin")
             Text("Spec Planner 插件").tag("spec_plan")
-                .disabled(spec?.available == false)
+                .disabled(specDisabled)
         }
         .pickerStyle(.menu)
         .accessibilityLabel("默认规划方式")
-        .help("规划面板的默认预选；每个规划请求在提交时固化所选方式")
-        if spec?.available == false, let reason = spec?.reason {
+        .help(plusSelected
+              ? "Plus 运行端的规划请求按内置规划提交"
+              : "规划面板的默认预选；每个规划请求在提交时固化所选方式")
+        if plusSelected {
+            Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
+                 + "不会在 Plus 下运行。")
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if selDefaultMethod == "spec_plan" {
+                Text("已保存的默认方式是 Spec Planner（Codex）；Plus 运行端下"
+                     + "规划面板按内置规划提交。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if spec?.available == false, let reason = spec?.reason {
             Text("Spec Planner 插件不可用：\(reason)")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        if selDefaultMethod == "spec_plan" {
+        if !plusSelected && selDefaultMethod == "spec_plan" {
             Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
                  + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
                 .font(.kpSmall)
                 .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
         if model.plannerConfig?.supportsDefaultMethod != true {
             Text("default_method 由核心版本决定是否持久化；"
@@ -1128,9 +1521,22 @@ struct SettingsView: View {
     }
 
 
-    /// 保存/重读行：保存期间禁用重复提交；失败红字展示核心 error 原文。
+    /// 保存/重读行：保存期间禁用重复提交；失败红字展示核心 error 原文
+    /// （草稿保留）。Plus 分支五字段不完整时禁用保存并写明原因。
     private var plannerSaveRow: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
+            if let issue = plannerSaveIssue {
+                HStack(spacing: Spacing.s) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("无法保存")
+                    Text(issue)
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
             HStack(spacing: Spacing.m) {
                 Button("重新读取本机配置") {
                     Task { await loadPlanner() }
@@ -1141,8 +1547,10 @@ struct SettingsView: View {
                 Button(model.plannerSaving ? "保存中…" : "保存规划配置") {
                     Task { await savePlanner() }
                 }
-                .disabled(model.plannerLoading || model.plannerSaving)
-                .help("set-planner-config：两组一起保存（仅影响新建规划请求）")
+                .disabled(model.plannerLoading || model.plannerSaving
+                          || plannerSaveIssue != nil)
+                .help(plannerSaveIssue
+                      ?? "set-planner-config：按所选运行端保存（仅影响新建规划请求）")
                 .accessibilityLabel("保存规划配置")
                 if model.plannerSaving {
                     ProgressView().controlSize(.small)
@@ -1177,6 +1585,9 @@ struct SettingsView: View {
         }
     }
 
+    /// 播种草稿（仅初次读取 / 显式「重新读取本机配置」时调用）：
+    /// Codex 两组 + default_method + 规划运行端 + Plus 五字段。
+    /// 切换运行端**不**调用本方法（§4.10：不重载配置覆盖草稿）。
     private func seedPlannerDrafts() {
         stdModel = model.plannerEffective("standard")?.plannerModel ?? ""
         stdEffort = model.plannerEffective("standard")?.reasoningEffort ?? ""
@@ -1184,17 +1595,57 @@ struct SettingsView: View {
         fixEffort = model.plannerEffective("review_fix")?.reasoningEffort ?? ""
         selDefaultMethod = model.plannerConfig?.effectiveDefaultMethod
             ?? "builtin"
+        plannerBackend = model.plannerConfig?.config?.effectiveBackend ?? "codex"
+        let plus = model.plannerPlusConfig
+        plModelSource = plus?.effectiveModelSource ?? "custom"
+        plConnectionFile = plus?.connectionFile ?? ""
+        plProviderId = plus?.providerId ?? ""
+        plModelId = plus?.modelId ?? ""
+        plThinkingLevel = plus?.thinkingLevel ?? ""
     }
 
-    /// 保存：两组 + default_method 完整提交；失败保留草稿并红字展示核心
-    /// error 原文（default_method 由模型层按核心支持度决定是否携带）。
+    /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 ask）。
+    private var plannerPlusDraft: ExecPiDesktopConfig {
+        ExecPiDesktopConfig(
+            modelSource: plModelSource,
+            connectionFile: emptyToNil(plConnectionFile),
+            providerId: emptyToNil(plProviderId),
+            modelId: emptyToNil(plModelId),
+            thinkingLevel: emptyToNil(plThinkingLevel),
+            permissionMode: ExecPiDesktopConfig.fixedPlanPermission)
+    }
+
+    /// 保存禁用原因：Plus 分支五字段结构 + 核心固定约定
+    /// （connection_file 必须绝对路径；backend=pi_desktop 时 default_method
+    /// 必须是 builtin——核心会拒绝 spec_plan，不静默改写用户选择）。
+    private var plannerSaveIssue: String? {
+        guard plannerBackend == "pi_desktop" else { return nil }
+        if selDefaultMethod == "spec_plan" {
+            return "Plus 计划分支不支持 default_method=spec_plan："
+                + "请先把「默认规划方式」改为内置规划再保存"
+        }
+        if let path = emptyToNil(plConnectionFile) {
+            if !path.hasPrefix("/") { return "Plus 连接文件必须是绝对路径" }
+        }
+        if plModelSource == "custom" {
+            if emptyToNil(plProviderId) == nil { return "Plus provider_id 不能为空" }
+            if emptyToNil(plModelId) == nil { return "Plus model_id 不能为空" }
+            if emptyToNil(plThinkingLevel) == nil { return "Plus thinking_level 不能为空" }
+        }
+        return nil
+    }
+
+    /// 保存：按所选运行端提交（Codex 两组 + default_method / Plus 五字段）；
+    /// 失败保留草稿并红字展示核心 error 原文。
     private func savePlanner() async {
         let error = await model.savePlannerConfig(
+            backend: plannerBackend,
             standard: PlannerGroupConfig(plannerModel: stdModel,
                                          reasoningEffort: stdEffort),
             reviewFix: PlannerGroupConfig(plannerModel: fixModel,
                                           reasoningEffort: fixEffort),
-            defaultMethod: selDefaultMethod)
+            defaultMethod: selDefaultMethod,
+            piDesktop: plannerBackend == "pi_desktop" ? plannerPlusDraft : nil)
         plannerSaveError = error
         if error == nil { seedPlannerDrafts() }
     }
@@ -1261,10 +1712,11 @@ struct SettingsView: View {
         return "已保存 · \(TimeFormat.fullString(updatedAt))"
     }
 
-    // MARK: Review 环境（v3 §5.23.4：get/set-review-config）
+    // MARK: Review 环境（v3 §5.23.4 + v4 §5.24.1：get/set-review-config）
 
-    /// inherit（默认，继承本机 PI 默认会话配置）/ custom（显式三元组，
-    /// 选项由 exec-capabilities 校验）。只影响下一次 review 启动。
+    /// §4.10：Review 运行端（pi|pi_desktop）。
+    /// pi 分支保留 inherit/custom；Plus 分支复用目录候选并固定 `ask`，
+    /// 不混用任务执行的 `agent_preset`。保存只影响下一次 review 启动。
     private var reviewSection: some View {
         Section("Review 环境") {
             if reviewLoading && !reviewLoaded {
@@ -1286,8 +1738,7 @@ struct SettingsView: View {
                     Text(error)
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     if reviewLoading {
                         ProgressView().controlSize(.small)
@@ -1300,23 +1751,63 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
             }
             if reviewLoaded {
-                Picker("Review 配置方式", selection: $selReviewMode) {
-                    Text("继承本机 PI 默认").tag("inherit")
-                    Text("自定义").tag("custom")
+                // §5.24.2：review-capabilities 两分支就绪态（与执行能力分开）。
+                Text(reviewCapabilitiesText)
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("Review 运行端", selection: $reviewBackend) {
+                    Text("Pi CLI").tag("pi")
+                    Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
-                .accessibilityLabel("Review 配置方式")
-                if selReviewMode == "inherit" {
-                    Text("review 控制端继承本机 PI 默认会话配置。")
+                .accessibilityLabel("Review 运行端")
+                .help("Review 控制端的模型来源；保存只影响下一次 review 启动")
+                if reviewBackend == "pi_desktop" {
+                    PlusRoleEditor(
+                        roleName: "Review",
+                        hasSavedDesktopConfig: reviewConfig?.piDesktop != nil,
+                        modelSource: $rvModelSource,
+                        connectionFile: $rvConnectionFile,
+                        providerId: $rvProviderId,
+                        modelId: $rvModelId,
+                        thinkingLevel: $rvThinkingLevel)
+                    Text("权限固定 ask：Review 只读审查并输出结论，"
+                         + "不代批契约；工具权限需在你的 Plus 界面处理。")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    reviewCustomEditors
+                    Picker("Review 配置方式", selection: $selReviewMode) {
+                        Text("继承本机 PI 默认").tag("inherit")
+                        Text("自定义").tag("custom")
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityLabel("Review 配置方式")
+                    if selReviewMode == "inherit" {
+                        Text("review 控制端继承本机 PI 默认会话配置。")
+                            .font(.kpSmall)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        reviewCustomEditors
+                    }
+                }
+                if let issue = reviewIssue {
+                    HStack(spacing: Spacing.s) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("无法保存")
+                        Text(issue)
+                            .font(.kpSmall)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
                 HStack(spacing: Spacing.m) {
                     Button("重新读取") { Task { await loadReview() } }
                         .disabled(reviewLoading || reviewSaving)
-                        .help("重新执行 get-review-config；草稿会被生效值覆盖")
+                        .help("重新执行 get-review-config + review-capabilities；草稿会被生效值覆盖")
                     Button(reviewSaving ? "保存中…" : "保存 Review 配置") {
                         Task { await saveReview() }
                     }
@@ -1339,19 +1830,36 @@ struct SettingsView: View {
                             .font(.kpSmall)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .accessibilityElement(children: .combine)
                 }
-                Text("当前生效：\(reviewEffectiveText)；仅影响下一次 review 启动，"
-                     + "不改运行中进程。")
+                Text("当前生效：\(reviewEffectiveText)；仅影响下一次 review 启动"
+                     + "（新控制轮），不改运行中进程。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if !reviewLoading && reviewError == nil {
                 Text("尚未读取 Review 配置")
                     .font(.kpBody)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// §5.24.2 review-capabilities 两分支摘要。
+    private var reviewCapabilitiesText: String {
+        if let caps = model.reviewCapabilities {
+            let pi = caps.pi?.readinessText ?? "未上报"
+            let plus = caps.piDesktop?.readinessText ?? "未上报"
+            return "Pi CLI：\(pi)；Plus：\(plus)"
+        }
+        if let error = model.reviewCapabilitiesError {
+            return "review-capabilities 读取失败：\(error)"
+        }
+        return model.reviewCapabilitiesLoading
+            ? "正在读取 review-capabilities…"
+            : "核心未上报 review-capabilities"
     }
 
     /// custom 分支草稿编辑：选项取自 exec-capabilities（PI 目录）；
@@ -1402,14 +1910,26 @@ struct SettingsView: View {
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
         }
-        if let issue = reviewIssue {
-            Text(issue)
-                .font(.kpSmall)
-                .foregroundStyle(.orange)
-        }
     }
 
+    /// 保存禁用原因（§5.24.1）：由运行端分支决定校验对象。
+    /// pi → mode 与 custom 三元组；pi_desktop → 五字段（权限固定 ask）。
     private var reviewIssue: String? {
+        if reviewBackend == "pi_desktop" {
+            if let path = emptyToNil(rvConnectionFile) {
+                if !path.hasPrefix("/") {
+                    return "Plus 连接文件必须是绝对路径"
+                }
+            }
+            if rvModelSource == "custom" {
+                if emptyToNil(rvProviderId) == nil { return "Plus provider_id 不能为空" }
+                if emptyToNil(rvModelId) == nil { return "Plus model_id 不能为空" }
+                if emptyToNil(rvThinkingLevel) == nil {
+                    return "Plus thinking_level 不能为空"
+                }
+            }
+            return nil
+        }
         guard selReviewMode == "custom" else { return nil }
         if emptyToNil(selReviewProvider) == nil { return "provider 不能为空" }
         if emptyToNil(selReviewModel) == nil { return "model 不能为空" }
@@ -1419,16 +1939,26 @@ struct SettingsView: View {
         return nil
     }
 
-    /// 当前生效来源：已保存值优先，从未保存 → inherit（PI 默认）。
+    /// 当前生效来源（已保存值优先）：Plus 五字段 / custom 三元组 / inherit。
     private var reviewEffectiveText: String {
         let config = reviewConfig ?? reviewDefaults
+        if config?.effectiveBackend == "pi_desktop" {
+            let src = config?.piDesktop?.effectiveModelSource ?? "custom"
+            if src == "inherit" {
+                return "Pi-Desktop-Plus（跟随 Plus 默认配置，权限 ask）"
+            }
+            let provider = config?.piDesktop?.providerId ?? "?"
+            let modelName = config?.piDesktop?.modelId ?? "?"
+            let level = config?.piDesktop?.thinkingLevel ?? "?"
+            return "Pi-Desktop-Plus（\(provider)/\(modelName)/\(level)，权限 ask）"
+        }
         if config?.effectiveMode == "custom" {
             let provider = config?.provider ?? "?"
             let modelName = config?.model ?? "?"
             let effort = config?.reasoningEffort ?? "?"
-            return "custom（\(provider)/\(modelName)/\(effort)）"
+            return "Pi CLI · custom（\(provider)/\(modelName)/\(effort)）"
         }
-        return "inherit（本机 PI 默认）"
+        return "Pi CLI · inherit（本机 PI 默认）"
     }
 
     private func loadReview() async {
@@ -1444,22 +1974,47 @@ struct SettingsView: View {
             selReviewProvider = config?.provider ?? ""
             selReviewModel = config?.model ?? ""
             selReviewEffort = config?.reasoningEffort ?? ""
+            // §5.24.1：Review 运行端与 Plus 五字段草稿（显式重新读取才覆盖）。
+            reviewBackend = config?.effectiveBackend ?? "pi"
+            rvModelSource = config?.piDesktop?.effectiveModelSource ?? "custom"
+            rvConnectionFile = config?.piDesktop?.connectionFile ?? ""
+            rvProviderId = config?.piDesktop?.providerId ?? ""
+            rvModelId = config?.piDesktop?.modelId ?? ""
+            rvThinkingLevel = config?.piDesktop?.thinkingLevel ?? ""
             reviewError = nil
             reviewLoaded = true
         } catch {
             reviewError = error.coreMessage  // 保留已有内容，不清空
         }
+        Task { await model.refreshReviewCapabilities() }
     }
 
+    /// Review Plus 五字段草稿（§5.24.5：plan 模式 + 固定 ask）。
+    private var reviewPlusDraft: ExecPiDesktopConfig {
+        ExecPiDesktopConfig(
+            modelSource: rvModelSource,
+            connectionFile: emptyToNil(rvConnectionFile),
+            providerId: emptyToNil(rvProviderId),
+            modelId: emptyToNil(rvModelId),
+            thinkingLevel: emptyToNil(rvThinkingLevel),
+            permissionMode: ExecPiDesktopConfig.fixedPlanPermission)
+    }
+
+    /// 保存：按所选运行端提交；失败保留草稿并展示核心 error 原文。
     private func saveReview() async {
         guard reviewIssue == nil else { return }
         reviewSaving = true
         defer { reviewSaving = false }
-        var payload: [String: Any] = ["mode": selReviewMode]
-        if selReviewMode == "custom" {
-            payload["provider"] = emptyToNil(selReviewProvider) ?? ""
-            payload["model"] = emptyToNil(selReviewModel) ?? ""
-            payload["reasoning_effort"] = emptyToNil(selReviewEffort) ?? ""
+        var payload: [String: Any] = ["backend": reviewBackend]
+        if reviewBackend == "pi_desktop" {
+            payload["pi_desktop"] = reviewPlusDraft.fields
+        } else {
+            payload["mode"] = selReviewMode
+            if selReviewMode == "custom" {
+                payload["provider"] = emptyToNil(selReviewProvider) ?? ""
+                payload["model"] = emptyToNil(selReviewModel) ?? ""
+                payload["reasoning_effort"] = emptyToNil(selReviewEffort) ?? ""
+            }
         }
         do {
             let response = try await model.client.run(
@@ -1468,7 +2023,8 @@ struct SettingsView: View {
             reviewConfig = response.config ?? reviewConfig
             reviewDefaults = response.defaults ?? reviewDefaults
             reviewSaveError = nil
-            model.showToast("已保存 Review 配置（仅影响下一次启动）")
+            model.showToast("已保存 Review 配置（仅影响下一次 review 启动）")
+            Task { await model.refreshReviewCapabilities() }
         } catch {
             reviewSaveError = error.coreMessage  // 草稿保留
         }
@@ -1512,10 +2068,10 @@ struct SettingsView: View {
             Toggle("启用执行端调度", isOn: $executorEnabled)
                 .font(.kpBody)
             Text("App 内置调度器仅在应用运行期间触发；App 退出后执行端不再运行。"
-                 + "每个阶段按错开分钟拉起 pi 执行端"
-                 + "（dispatch 4/19/34/49、monitor 8/23/38/53、"
-                 + "review 12/27/42/57 分）；规划由「开始规划」手动触发，"
-                 + "不参与定时调度。")
+                 + "每个阶段按错开分钟（dispatch 4/19/34/49、"
+                 + "monitor 8/23/38/53、review 12/27/42/57 分）拉起该阶段"
+                 + "执行端，运行端由「执行环境 → 派发与监控运行端」决定；"
+                 + "规划由「开始规划」手动触发，不参与定时调度。")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
             ForEach(ExecutorScheduler.stages, id: \.self) { stage in
@@ -1570,16 +2126,31 @@ struct SettingsView: View {
         return parts.joined(separator: " · ")
     }
 
-    /// 单 stage 行：下次触发时间 + 最近一次运行状态 + 「立即运行」。
+    /// 单 stage 行：下次触发时间 + 最近一次运行状态 + 控制轮身份 + 「立即运行」。
+    /// §5.24.4：Plus 控制轮的 backend/会话/turn/控制轮/发送状态逐行可见。
     private func executorStageRow(_ stage: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
             Text(Labels.stage(stage))
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
                 .frame(width: 96, alignment: .trailing)
-            Text(executorStageText(stage))
-                .font(.kpBody)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(executorStageText(stage))
+                    .font(.kpBody)
+                    .textSelection(.enabled)
+                if let identity = executorStageIdentity(stage) {
+                    Text(identity)
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let note = executorStageNote(stage) {
+                    Text(note)
+                        .font(.kpSmall)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Spacer(minLength: 0)
             Button("立即运行") {
                 model.executorScheduler?.runNow(stage)
@@ -1590,9 +2161,29 @@ struct SettingsView: View {
                 }
             }
             .disabled(!model.coreFound)
+            .help(executorStageNote(stage)
+                  ?? "按当前 schedule 立即拉起本阶段执行端（单飞：在途则跳过）")
             .accessibilityLabel("立即运行\(Labels.stage(stage))执行端")
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    /// §5.24.4：控制轮身份（运行端 · 会话 → turn · 控制轮 · 发送状态）。
+    private func executorStageIdentity(_ stage: String) -> String? {
+        let status = executorStatus?.stages?[stage]
+        return (status?.running ?? status?.last)?.identityText
+    }
+
+    /// §5.24.4：持久活跃 / unknown 控制轮的单飞说明（不自动重发）。
+    private func executorStageNote(_ stage: String) -> String? {
+        let status = executorStatus?.stages?[stage]
+        guard let entry = status?.running,
+              entry.backend == "pi_desktop" else { return nil }
+        var text = "持久控制轮在途（单飞）：同一阶段不会重复启动；"
+            + "控制进程消失只触发只读恢复，不代表已完成。"
+        if entry.sendState == "unknown" {
+            text += "发送不明：保留人工阻塞，不会自动重发。"
+        }
+        return text
     }
 
     private func executorStageText(_ stage: String) -> String {
@@ -1751,5 +2342,318 @@ private struct PathRow: View {
                 .help(path == nil ? "无路径" : "在 Finder 中打开")
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - v4 §4.10 角色 Plus 运行端编辑块（规划 / Review 共用）
+
+/// 一个角色（规划 / Review）的 Plus 五字段编辑块：
+/// 连接文件 + provider/model（只读目录候选 + 模型搜索弹层）+ thinking_level；
+/// permission_mode 固定 `ask`（不提供选择；工具权限需在 Plus 处理）。
+/// 候选来自只读 `pi-desktop-catalog`，只在**空草稿**里填 Plus 明确默认值，
+/// 不重载已保存配置、不调用 set-*；响应必须属于本次连接路径/provider 修订。
+private struct PlusRoleEditor: View {
+    /// 角色名（"规划" / "Review"），用于可读名称。
+    let roleName: String
+    /// 该角色已有已保存的桌面块 → 只加载候选并提示不可用，不改草稿。
+    let hasSavedDesktopConfig: Bool
+    @Binding var modelSource: String
+    @Binding var connectionFile: String
+    @Binding var providerId: String
+    @Binding var modelId: String
+    @Binding var thinkingLevel: String
+
+    @EnvironmentObject private var model: AppViewModel
+
+    @State private var catalog: PiDesktopCatalogResponse?
+    @State private var loading = false
+    @State private var errorText: String?
+    @State private var notice: String?
+    @State private var generation = 0
+    @State private var revision = 0
+    @State private var providerSearch = ""
+    @State private var modelSearch = ""
+    @State private var modelPopover = false
+    @State private var settingDefaultPath = false
+    @State private var advancedExpanded = false
+
+    var body: some View {
+        Group {
+            Picker("模型配置方式", selection: $modelSource) {
+                Text("跟随 Plus 默认配置").tag("inherit")
+                Text("自定义模型").tag("custom")
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("\(roleName) Plus 模型配置方式")
+
+            DisclosureGroup(isExpanded: $advancedExpanded) {
+                TextField("连接文件路径（默认 ~/.pi-desktop-plus/mcp-control.json）",
+                          text: $connectionFile)
+                    .font(.kpBody)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("\(roleName) Plus 连接文件路径")
+                    .onChange(of: connectionFile) { _, _ in
+                        if settingDefaultPath {
+                            settingDefaultPath = false
+                        } else {
+                            invalidate()
+                        }
+                    }
+            } label: {
+                Text("高级设置（连接文件路径）")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+            }
+
+            if modelSource == "inherit" {
+                if let resolved = catalog?.resolvedDefault {
+                    FieldRow("Plus 默认模型", "\(resolved.providerId) / \(resolved.modelId) · \(resolved.thinkingLevel)")
+                } else if let detail = catalog?.defaultDetail {
+                    Text("默认模型解析提示：\(detail)")
+                        .font(.kpSmall)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    FieldRow("Plus 默认模型", "未解析（切换时自动动态解析）")
+                }
+            } else {
+                HStack(spacing: Spacing.s) {
+                    TextField("provider_id", text: $providerId)
+                        .font(.kpBody)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("\(roleName) Plus provider_id")
+                        .onChange(of: providerId) { _, _ in
+                            invalidate()
+                            Task { await refresh() }
+                        }
+                    if !providers.isEmpty {
+                        Menu {
+                            ForEach(filteredProviders) { provider in
+                                Button(providerLabel(provider)) {
+                                    providerId = provider.id
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "list.bullet")
+                        }
+                        .menuIndicator(.hidden)
+                        .help("选择 Plus provider 候选")
+                        .accessibilityLabel("\(roleName) Plus provider 候选")
+                    }
+                }
+                HStack(spacing: Spacing.s) {
+                    if !models.isEmpty {
+                        Button {
+                            modelSearch = ""
+                            modelPopover = true
+                        } label: {
+                            Image(systemName: "list.bullet")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("选择 Plus 模型候选（可搜索）")
+                        .accessibilityLabel("\(roleName) Plus 模型候选")
+                        .popover(isPresented: $modelPopover) {
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                TextField("搜索模型", text: $modelSearch)
+                                    .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("搜索 Plus 模型")
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        ForEach(filteredModels) { candidate in
+                                            Button {
+                                                modelId = candidate.id
+                                                modelPopover = false
+                                            } label: {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(candidate.name ?? candidate.id)
+                                                    Text(candidate.id)
+                                                        .font(.kpSmall)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .padding(.vertical, 5)
+                                        }
+                                    }
+                                }
+                                .frame(width: 320, height: 240)
+                            }
+                            .padding(Spacing.m)
+                        }
+                    }
+                    TextField("model_id", text: $modelId)
+                        .font(.kpBody)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("\(roleName) Plus model_id")
+                        .onChange(of: modelId) { _, _ in invalidate(clear: false) }
+                }
+                Picker("thinking_level", selection: $thinkingLevel) {
+                    if !thinkingLevel.isEmpty
+                        && !thinkingOptions.contains(thinkingLevel) {
+                        Text("\(thinkingLevel)（当前值）").tag(thinkingLevel)
+                    }
+                    ForEach(thinkingOptions, id: \.self) { level in
+                        Text(level).tag(level)
+                    }
+                }
+                .accessibilityLabel("\(roleName) Plus thinking_level")
+                .onChange(of: thinkingLevel) { _, _ in invalidate(clear: false) }
+                if let scopeText = thinkingScopeText {
+                    Text(scopeText)
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            // 权限固定 Ask（§5.24.1：plan / Review 不开放 auto/accept-edits）。
+            FieldRow("permission_mode",
+                     "\(ExecPiDesktopConfig.fixedPlanPermission)（固定）")
+            HStack(spacing: Spacing.m) {
+                Button(loading ? "读取中…" : "重新获取 Plus 列表") {
+                    Task { await refresh() }
+                }
+                .disabled(loading)
+                .help("只读 pi-desktop-catalog：读取 provider/模型候选与 Plus 明确默认值；"
+                      + "不写配置、不调用模型")
+                .accessibilityLabel("重新获取 \(roleName) Plus 列表")
+                Text(statusText)
+                    .font(.kpSmall)
+                    .foregroundStyle(notice == nil ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+        .task { await refresh() }
+    }
+
+    // MARK: 候选
+
+    private var providers: [PiDesktopCatalogProvider] {
+        catalog?.providers.filter { $0.enabled != false } ?? []
+    }
+
+    private var filteredProviders: [PiDesktopCatalogProvider] {
+        let query = providerSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return providers }
+        return providers.filter {
+            $0.id.localizedCaseInsensitiveContains(query)
+                || ($0.name ?? "").localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var models: [PiDesktopCatalogModel] {
+        catalog?.selectedModels ?? []
+    }
+
+    private var filteredModels: [PiDesktopCatalogModel] {
+        let query = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return models }
+        return models.filter {
+            $0.id.localizedCaseInsensitiveContains(query)
+                || ($0.name ?? "").localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private func providerLabel(_ provider: PiDesktopCatalogProvider) -> String {
+        guard let name = provider.name, !name.isEmpty else { return provider.id }
+        return "\(name)（\(provider.id)）"
+    }
+
+    /// 该模型的思考等级候选：目录给出明确子集时只用子集，缺失时列合法枚举。
+    private var thinkingOptions: [String] {
+        guard let current = models.first(where: { $0.id == trimmed(modelId) }),
+              let levels = current.thinkingLevels, !levels.isEmpty else {
+            return ExecPiDesktopConfig.thinkingLevels
+        }
+        return levels
+    }
+
+    private var thinkingScopeText: String? {
+        guard let current = models.first(where: { $0.id == trimmed(modelId) }),
+              (current.thinkingLevels ?? []).isEmpty else { return nil }
+        return "支持范围未确认：Plus 目录未提供该模型的思考等级，已列出合法枚举。"
+    }
+
+    private var statusText: String {
+        if let errorText { return errorText }
+        if let notice { return notice }
+        if let catalog {
+            if catalog.selectedProvider == nil {
+                return "Plus 未取得可用 provider"
+            }
+            return "已读取 Plus 目录：\(models.count) 个模型"
+                + (catalog.catalogSource.map { "（来源 \($0)）" } ?? "")
+        }
+        return loading ? "正在读取 Plus 目录…" : "Plus 目录未读取"
+    }
+
+    // MARK: 读取与空草稿播种
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func invalidate(clear: Bool = true) {
+        generation += 1
+        revision += 1
+        loading = false
+        if clear { catalog = nil }
+    }
+
+    private func refresh() async {
+        if trimmed(connectionFile).isEmpty {
+            settingDefaultPath = true
+            connectionFile = ExecPiDesktopConfig.defaultConnectionFile
+        }
+        let connection = trimmed(connectionFile)
+        guard !connection.isEmpty else { return }
+        generation += 1
+        let currentGeneration = generation
+        let currentRevision = revision
+        loading = true
+        errorText = nil
+        notice = nil
+        defer {
+            if currentGeneration == generation { loading = false }
+        }
+        do {
+            var payload: [String: Any] = ["connection_file": connection]
+            let provider = trimmed(providerId)
+            if !provider.isEmpty { payload["provider_id"] = provider }
+            let response = try await model.client.run(
+                "pi-desktop-catalog", payload: payload,
+                as: PiDesktopCatalogResponse.self)
+            guard currentGeneration == generation,
+                  currentRevision == revision else { return }
+            catalog = response
+            applyDefaults(response)
+        } catch {
+            guard currentGeneration == generation else { return }
+            errorText = error.coreMessage
+        }
+    }
+    /// 只在空草稿里填 Plus 明确默认值（§5.23.6 默认规则；共用纯函数
+    /// PlusDraftSeeder，便于用固定夹具核对）。已有已保存桌面块时只提示
+    /// 候选不可用，不改草稿。
+    private func applyDefaults(_ response: PiDesktopCatalogResponse) {
+        let outcome = PlusDraftSeeder.apply(
+            catalog: response,
+            draft: PlusDraftSeeder.Draft(
+                connectionFile: connectionFile,
+                providerId: providerId,
+                modelId: modelId,
+                thinkingLevel: thinkingLevel),
+            hasSavedDesktopConfig: hasSavedDesktopConfig)
+        if outcome.draft.providerId != providerId {
+            providerId = outcome.draft.providerId
+        }
+        if outcome.draft.modelId != modelId {
+            modelId = outcome.draft.modelId
+        }
+        if outcome.draft.thinkingLevel != thinkingLevel {
+            thinkingLevel = outcome.draft.thinkingLevel
+        }
+        notice = outcome.notice
     }
 }

@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from . import bridge, constants, core, db, exec_config, planfile, remote, util
+from . import bridge, constants, core, db, exec_config, planfile, remote, util, mcp_client, harness_plus_adapter
 
 
 class DispatchCheckFailed(util.KanpilotError):
@@ -49,7 +49,16 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
              "reasoning_effort": task["reasoning_effort"]}
             if task["planner_model"] else None
         )
-        planfile.check_plan_meta(meta, plan_kind, expected_model=expected_model)
+        expected_project = {
+            "project_id": task["project_id"],
+            "project_name": task["project_name"],
+            "repository": task["repository"],
+        } if (task["project_id"] or task["repository"]) else None
+        planfile.check_plan_meta(
+            meta, plan_kind,
+            expected_model=expected_model,
+            expected_project=expected_project,
+        )
     except util.KanpilotError as exc:
         raise DispatchCheckFailed(exc.message)
     if meta.get("plan_kind") not in (None, plan_kind):
@@ -166,12 +175,22 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     #    pi_desktop 为连接文件/token/tools/provider/model。任一不可用 → 确定性
     #    validation_failed（task 进 needs_user），**不自动换模型、agent 或后端**。
     #    失败信息取自 exec_config.check_available 的中文原因。
-    available, reason = exec_config.check_available(conn)
-    _require(available, reason or "执行环境不可用")
-
     config_snapshot = exec_config.snapshot(conn)
     backend = config_snapshot.get("backend") or "pi"
-
+    if backend == "pi_desktop":
+        try:
+            service = mcp_client.MCPClient.from_server_file(
+                constants.app_support() / "mcp" / "server.json", timeout=3)
+            initialized = service.initialize()
+            _require(initialized.get("serverInfo", {}).get("name") == "kaneopilot", "本机 MCP 服务身份不符")
+            service.ping()
+        except util.KanpilotError as exc:
+            raise DispatchCheckFailed("本机 MCP 服务未就绪：" + exc.message) from exc
+        attachment = harness_plus_adapter.plus_capabilities(config_snapshot["connection_file"])
+        _require(attachment.get("attachment_supported") is True,
+                 "Plus 缺少 pi_session_attach_mcp；升级支持会话 MCP 的 Plus 后再派发")
+    available, reason = exec_config.check_available(conn, config_snapshot=config_snapshot)
+    _require(available, reason or "执行环境不可用")
     return {
         "task_id": task_id,
         "plan_path": str(path),
