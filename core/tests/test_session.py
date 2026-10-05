@@ -214,23 +214,31 @@ class HeadlessCase(KanpilotTestCase):
 
 class TestRunsRootResolution(HeadlessCase):
     def test_default_root_constant_is_lazy_expanduser(self):
-        # 默认根目录 = ~/Library/Application Support/KaneoPilot/runs（v1.6）。
-        self.assertEqual(
-            str(constants.default_session_runs_root()), os.path.expanduser(
-                "~/Library/Application Support/KaneoPilot/runs"
-            ),
-        )
-        # 懒解析：同一进程内改 HOME 后重新求值（不缓存展开结果）。
-        saved_home = os.environ.get("HOME")
+        saved_app_support = os.environ.pop("KANPILOT_APP_SUPPORT", None)
         try:
-            os.environ["HOME"] = "/fake-home-kanpilot"
+            # 默认根目录 = ~/Library/Application Support/KaneoPilot/runs（v1.6）。
             self.assertEqual(
-                str(constants.default_session_runs_root()),
-                "/fake-home-kanpilot/Library/Application Support"
-                "/KaneoPilot/runs",
+                str(constants.default_session_runs_root()), os.path.expanduser(
+                    "~/Library/Application Support/KaneoPilot/runs"
+                ),
             )
+            # 懒解析：同一进程内改 HOME 后重新求值（不缓存展开结果）。
+            saved_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = "/fake-home-kanpilot"
+                self.assertEqual(
+                    str(constants.default_session_runs_root()),
+                    "/fake-home-kanpilot/Library/Application Support"
+                    "/KaneoPilot/runs",
+                )
+            finally:
+                if saved_home is not None:
+                    os.environ["HOME"] = saved_home
+                else:
+                    os.environ.pop("HOME", None)
         finally:
-            os.environ["HOME"] = saved_home
+            if saved_app_support is not None:
+                os.environ["KANPILOT_APP_SUPPORT"] = saved_app_support
 
     def test_settings_used_when_no_override(self):
         # 清除注入接缝 → resolve_source 走 DB setting（隔离测试不碰真实 root）。

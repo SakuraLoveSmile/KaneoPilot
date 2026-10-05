@@ -18,6 +18,14 @@ CLI：``python -m kanpilot.executor_runner --stage <dispatch|monitor|review>``
 4. 单飞由调用方保证（ExecutorScheduler 先 executor-status 查在途 pid）。
 
 退出码：0=正常结束（无请求立即结束也属正常）；1=拉起失败/超时/异常。
+   v4（§5.24.4/§5.24.5，T6.3）：按该 stage 的**控制端后端**分流——
+   dispatch/monitor 读 ``settings.exec_config.controller_backend``，review 读
+   ``settings.review_config.backend``；``pi``（缺省）分支行为与 v1.6 完全相同
+   （本文件一字不改地继续拉起 pi CLI）；``pi_desktop`` 分支交给
+   ``kanpilot.pi_desktop_controller``（dispatch/monitor）与
+   ``kanpilot.pi_desktop_review``（review），在 Plus 本机 MCP 控制面建独立
+   会话运行同一角色 prompt，**不再**拉起 ``pi -p``。
+
 """
 
 from __future__ import annotations
@@ -102,7 +110,24 @@ def _record_run(conn, stage: str, **fields) -> dict:
     return entry
 
 
-def run_stage(stage: str) -> int:
+def controller_backend(conn, stage: str) -> str:
+    """该 stage 的控制端后端（§5.24.1）。
+
+    dispatch/monitor 读 ``settings.exec_config.controller_backend``，review 读
+    ``settings.review_config.backend``；缺失/非法值一律按 ``pi`` 解释（旧数据
+    零迁移）。``pi_desktop`` 支持模块缺失时同样回落 ``pi``——**不让** Plus
+    控制端模块的存在与否影响 pi 分支。
+    """
+    try:
+        from . import pi_desktop_controller
+    except (ImportError, SyntaxError):
+        return constants.CONTROLLER_BACKEND
+    if stage == "review":
+        return pi_desktop_controller.review_round_config(conn)[0]
+    return pi_desktop_controller.controller_round_config(conn)[0]
+
+
+def run_stage(stage: str, resume: bool = False) -> int:
     if stage not in STAGES:
         print(f"unknown stage: {stage}", file=sys.stderr)
         return 2
@@ -112,6 +137,22 @@ def run_stage(stage: str) -> int:
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
     log_path = _log_path(stage)
+
+    # v4（§5.24.4/§5.24.5）：按该 stage 的控制端后端分流。pi_desktop 分支在
+    # Plus 本机 MCP 控制面建独立会话运行同一角色 prompt，**不**拉起 pi -p；
+    # pi 分支（缺省）以下代码与 v1.6 完全一致。
+    if controller_backend(conn, stage) == "pi_desktop":
+        from . import pi_desktop_controller, pi_desktop_review
+
+        runner = (
+            pi_desktop_review if stage == "review" else pi_desktop_controller
+        )
+        return runner.run_stage(
+            stage, conn=conn, db_path=constants.default_db_path(),
+            prompt=prompt, timeout=timeout, log_path=log_path,
+            record_run=lambda **fields: _record_run(conn, stage, **fields),
+            resume=resume,
+        )
 
     # v3（§5.23.4/§5.23.5）：review 控制端配置来源 = settings.review_config。
     # custom 时把 {provider, model, reasoning_effort} 固化为本轮 pi 参数；
@@ -219,8 +260,10 @@ def _terminate(proc, grace: float = 5.0) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="kanpilot.executor_runner")
     parser.add_argument("--stage", required=True, choices=STAGES)
+    # v4（§5.24.4）：只对 pi_desktop 控制端生效的只读恢复入口；pi 分支忽略。
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
-    return run_stage(args.stage)
+    return run_stage(args.stage, resume=args.resume)
 
 
 if __name__ == "__main__":  # pragma: no cover

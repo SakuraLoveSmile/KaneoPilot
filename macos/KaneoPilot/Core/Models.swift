@@ -75,6 +75,67 @@ enum JSONValue: Decodable {
     }
 }
 
+/// 自由 JSON 的只读取值助手（请求 payload / 尝试证据形状不固定时用）。
+extension JSONValue {
+    /// 对象成员取值（非对象或缺键 → nil）。
+    /// 核心响应统一经 `JSONDecoder.kaneo`（convertFromSnakeCase）解码，
+    /// 自由 JSON 的键也已变成 camelCase；因此先按原样匹配，再按
+    /// 「忽略下划线/大小写」匹配一次（两种写法都能取到）。
+    func member(_ key: String) -> JSONValue? {
+        guard case .object(let dict) = self else { return nil }
+        if let direct = dict[key] { return direct }
+        let target = JSONValue.normalizedKey(key)
+        for (candidate, value) in dict
+        where JSONValue.normalizedKey(candidate) == target {
+            return value
+        }
+        return nil
+    }
+
+    /// 单值文本（字符串原样；数字取整；空白字符串 → nil）。
+    var nonEmptyText: String? {
+        switch self {
+        case .string(let s):
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case .number(let n):
+            return n.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "%.0f", n) : "\(n)"
+        case .bool(let b):
+            return b ? "true" : "false"
+        default:
+            return nil
+        }
+    }
+
+    /// 递归查找首个同名键的非空值（证据嵌套层级不固定时用）。
+    func deepValue(_ key: String) -> JSONValue? {
+        switch self {
+        case .object:
+            if let value = member(key), !value.isNull { return value }
+            for value in objectValues {
+                if let found = value.deepValue(key) { return found }
+            }
+        case .array(let items):
+            for item in items {
+                if let found = item.deepValue(key) { return found }
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    private var objectValues: [JSONValue] {
+        guard case .object(let dict) = self else { return [] }
+        return Array(dict.values)
+    }
+
+    static func normalizedKey(_ key: String) -> String {
+        key.lowercased().replacingOccurrences(of: "_", with: "")
+    }
+}
+
 // MARK: - §5.1 doctor
 
 struct DoctorCheck: Decodable, Identifiable {
@@ -430,16 +491,59 @@ struct SessionInfo: Decodable, Identifiable {
 
 /// §5.23.3 pi_desktop 分支配置块（exec_config.pi_desktop 五字段）。
 /// permission_mode 须用户显式保存（核心不自动补 auto）。
+/// §5.24.1：同一形状被 planner_config.pi_desktop / review_config.pi_desktop
+/// 复用；plan / Review 角色固定 `ask`（工具权限需在 Plus 处理）。
 struct ExecPiDesktopConfig: Decodable, Equatable {
+    var modelSource: String?
     var connectionFile: String?
     var providerId: String?
     var modelId: String?
     var thinkingLevel: String?
     var permissionMode: String?
 
-    /// set-exec-config pi_desktop 子块（协议 snake_case 键）。
+    init(modelSource: String? = nil, connectionFile: String? = nil, providerId: String? = nil,
+         modelId: String? = nil, thinkingLevel: String? = nil,
+         permissionMode: String? = nil) {
+        self.modelSource = modelSource
+        self.connectionFile = connectionFile
+        self.providerId = providerId
+        self.modelId = modelId
+        self.thinkingLevel = thinkingLevel
+        self.permissionMode = permissionMode
+    }
+
+    /// 生效模型来源（inherit | custom，缺省 custom）。
+    var effectiveModelSource: String { modelSource ?? "custom" }
+
+    /// Plus 合法权限枚举（§5.23.3）。
+    static let permissionModes = ["ask", "accept-edits", "auto"]
+    /// Plus 合法思考等级枚举（§5.23.3）；目录未给子集时列全部合法值。
+    static let thinkingLevels = ["off", "minimal", "low", "medium", "high",
+                                 "xhigh", "max"]
+    /// plan / Review 角色固定权限：调度台不代批 Plus 工具权限。
+    static let fixedPlanPermission = "ask"
+    /// Plus 默认连接文件（仅用于空草稿预填；不扫描其他目录）。
+    static let defaultConnectionFile: String = FileManager.default
+        .homeDirectoryForCurrentUser
+        .appendingPathComponent(".pi-desktop-plus/mcp-control.json").path
+
+    /// 五字段结构是否齐备（保存结构校验用；不代表服务可达或型号有效）。
+    var isComplete: Bool {
+        if effectiveModelSource == "inherit" {
+            let conn = (connectionFile ?? Self.defaultConnectionFile).trimmingCharacters(in: .whitespacesAndNewlines)
+            let perm = (permissionMode ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return !conn.isEmpty && !perm.isEmpty
+        }
+        return [connectionFile, providerId, modelId, thinkingLevel, permissionMode]
+            .allSatisfy {
+                !($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+    }
+
+    /// set-*-config pi_desktop 子块（协议 snake_case 键）。
     var fields: [String: String] {
         var dict: [String: String] = [:]
+        if let modelSource { dict["model_source"] = modelSource }
         if let connectionFile { dict["connection_file"] = connectionFile }
         if let providerId { dict["provider_id"] = providerId }
         if let modelId { dict["model_id"] = modelId }
@@ -449,8 +553,88 @@ struct ExecPiDesktopConfig: Decodable, Equatable {
     }
 }
 
+/// §5.24：请求 / 控制轮状态原文 → 中文（未知值原样展示，不隐藏证据）。
+enum RequestStateLabel {
+    static func text(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        switch raw {
+        case "permission_waiting", "permission_pending", "permission_required",
+             "awaiting_permission":
+            return "权限等待（工具权限需在 Plus 处理）"
+        case "pi_desktop_controller_unavailable", "controller_unavailable",
+             "connection_unavailable", "pi_desktop_unavailable":
+            return "连接不可用（Plus 控制面）"
+        case "invalid_output", "plan_proposal_missing", "plan_proposal_ambiguous",
+             "transcript_incomplete", "attachment_unsupported":
+            return "输出/转录不合规（\(raw)）"
+        case "plan_approval_conflict":
+            return "计划审批冲突（\(raw)）"
+        case "plan_reject_failed":
+            return "计划产物关闭失败（\(raw)）"
+        case "review_blocked":
+            return "评审阻塞（\(raw)）"
+        default:
+            return raw
+        }
+    }
+}
+
+/// §5.24 运行端中文显示名（协议 tag 仍是 pi / pi_desktop / codex）。
+enum RoleBackend {
+    /// 设置页选择器用全名。
+    static func label(_ tag: String?) -> String {
+        switch tag {
+        case "pi_desktop": return "Pi-Desktop-Plus（本机 MCP）"
+        case "pi": return "Pi CLI"
+        case "codex": return "Codex"
+        default: return tag ?? "—"
+        }
+    }
+
+    /// 记录/详情单行摘要用短名。
+    static func shortLabel(_ tag: String?) -> String {
+        switch tag {
+        case "pi_desktop": return "Pi-Desktop-Plus"
+        case "pi": return "Pi CLI"
+        case "codex": return "Codex"
+        default: return tag ?? "—"
+        }
+    }
+}
+
+/// §5.24.2 Plus 运行端就绪态通用形状：`planner-capabilities.backends.*`、
+/// `exec-capabilities.controller`、`review-capabilities.{pi,pi_desktop}` 共用。
+/// `available=true` 只代表本机配置与协议工具可用，不证明凭据有效或模型在线。
+struct PlusBackendStatus: Decodable {
+    /// 控制端形状里的生效后端 tag（pi|pi_desktop）；其余场景缺省。
+    let backend: String?
+    let available: Bool?
+    /// 展示错误的首选字段（兼容旧核心的 reason）。
+    let detail: String?
+    let reason: String?
+    let toolsOk: Bool?
+    let version: String?
+    /// backends.codex 沿用 §5.22.6 字段时夹带的方式可用性。
+    let plannerMethods: PlannerMethods?
+
+    /// 中文就绪摘要：detail 优先，兼容旧 reason；未上报 available → nil。
+    var readinessText: String? {
+        guard let available else { return detail ?? reason }
+        if available {
+            var text = detail ?? "本机配置与协议工具可用"
+            if toolsOk == false {
+                text += "（必需工具缺失）"
+            }
+            return text
+        }
+        return detail ?? reason ?? "原因未知"
+    }
+}
+
 /// §5.17.1 PI 执行配置对象（四字段 + 可选 updated_at）。
 /// v3（§5.23.3）扩展 backend/pi_desktop；缺省按 backend="pi" 解释。
+/// v4（§5.24.1）扩展 controller_backend：dispatch/monitor 控制端后端，
+/// 与任务执行后端独立，缺省 pi。
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
@@ -459,13 +643,16 @@ struct ExecConfig: Decodable, Equatable {
     let updatedAt: String?
     /// v3：任务执行后端（pi|pi_desktop；缺省 pi）。
     let backend: String?
-    /// v3：pi_desktop 分支配置块。
+    /// v3：pi_desktop 分支配置块（任务执行与 Plus 控制端共用）。
     let piDesktop: ExecPiDesktopConfig?
+    /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
+    let controllerBackend: String?
 
     init(provider: String? = nil, model: String? = nil,
          reasoningEffort: String? = nil, agentPreset: String? = nil,
          updatedAt: String? = nil, backend: String? = nil,
-         piDesktop: ExecPiDesktopConfig? = nil) {
+         piDesktop: ExecPiDesktopConfig? = nil,
+         controllerBackend: String? = nil) {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -473,6 +660,7 @@ struct ExecConfig: Decodable, Equatable {
         self.updatedAt = updatedAt
         self.backend = backend
         self.piDesktop = piDesktop
+        self.controllerBackend = controllerBackend
     }
 
     /// 四字段字典（与核心 config_json 快照比较/提交用，键为协议 snake_case）。
@@ -487,6 +675,9 @@ struct ExecConfig: Decodable, Equatable {
 
     /// 生效后端（缺省 pi）。
     var effectiveBackend: String { backend ?? "pi" }
+
+    /// 生效控制端后端（缺省 pi）。
+    var effectiveControllerBackend: String { controllerBackend ?? "pi" }
 }
 
 struct GetExecConfigResponse: Decodable {
@@ -535,6 +726,8 @@ struct ExecCapabilitiesResponse: Decodable {
     let pi: ExecPiInfo?
     /// v3（§5.23.3）：PI-Desktop 后端就绪态；旧核心不返回 → nil。
     let piDesktop: ExecPiDesktopInfo?
+    /// §5.24.2：dispatch/monitor 控制端就绪态（与任务执行就绪态分开）。
+    let controller: PlusBackendStatus?
     let providers: [ExecProvider]?
     let presets: [ExecPreset]?
     let checks: [DoctorCheck]?
@@ -565,6 +758,12 @@ struct PiDesktopCatalogProvider: Decodable, Identifiable {
     let models: [PiDesktopCatalogModel]?
 }
 
+struct PiDesktopResolvedDefault: Decodable, Equatable {
+    let providerId: String
+    let modelId: String
+    let thinkingLevel: String
+}
+
 struct PiDesktopCatalogResponse: Decodable {
     let connectionFile: String
     let providers: [PiDesktopCatalogProvider]
@@ -572,6 +771,8 @@ struct PiDesktopCatalogResponse: Decodable {
     let defaultModelId: String?
     let selectedProviderId: String?
     let catalogSource: String?
+    let resolvedDefault: PiDesktopResolvedDefault?
+    let defaultDetail: String?
 
     var selectedProvider: PiDesktopCatalogProvider? {
         guard let selectedProviderId else { return nil }
@@ -583,15 +784,167 @@ struct PiDesktopCatalogResponse: Decodable {
     }
 }
 
+/// `pi-desktop-probe` readiness for the control plane and session MCP attachment.
+/// Decoded with `JSONDecoder.kaneo`, so property names use ordinary camelCase.
+struct PiDesktopProbeResponse: Decodable {
+    let connected: Bool
+    let available: Bool
+    let toolsOk: Bool
+    let detail: String
+    let attachmentSupported: Bool
+    let supportedOperations: [String]
+    let version: String?
+}
+
+/// §5.23.6 / §4.10：Plus 只读目录候选**只播种空草稿**的明确默认值。
+/// 纯函数（不改输入、不写配置），供界面与夹具共用。
+/// 已有已保存桌面块时只提示候选不可用，不改草稿。
+enum PlusDraftSeeder {
+    /// 角色草稿中由目录播种的字段（permission_mode 不在此列：plan/Review
+    /// 固定 ask，任务执行必须用户显式选择）。
+    struct Draft: Equatable {
+        var connectionFile: String
+        var providerId: String
+        var modelId: String
+        var thinkingLevel: String
+
+        init(connectionFile: String = "", providerId: String = "",
+             modelId: String = "", thinkingLevel: String = "") {
+            self.connectionFile = connectionFile
+            self.providerId = providerId
+            self.modelId = modelId
+            self.thinkingLevel = thinkingLevel
+        }
+    }
+
+    struct Outcome: Equatable {
+        var draft: Draft
+        /// 中文提示（默认值缺失/候选不可用/空目录）；nil = 无需提示。
+        var notice: String?
+    }
+
+    static func apply(catalog: PiDesktopCatalogResponse,
+                      draft: Draft,
+                      hasSavedDesktopConfig: Bool) -> Outcome {
+        var result = draft
+        var notice: String? = nil
+        let enabledProviders = catalog.providers.filter { $0.enabled != false }
+        if hasSavedDesktopConfig {
+            let currentProvider = trimmed(draft.providerId)
+            guard let provider = catalog.providers.first(where: {
+                $0.id == currentProvider && $0.enabled != false
+            }) else {
+                return Outcome(draft: result,
+                               notice: "当前 provider「\(currentProvider)」不在 Plus 目录"
+                                   + "或已禁用；保留原值，不静默切换。")
+            }
+            let currentModel = trimmed(draft.modelId)
+            guard let candidate = provider.models?.first(where: {
+                $0.id == currentModel
+            }) else {
+                return Outcome(draft: result,
+                               notice: "当前 model_id「\(currentModel)」不在该 provider"
+                                   + " 的 Plus 本地目录中；保留原值，不静默切换。")
+            }
+            let levels = candidate.thinkingLevels ?? []
+            if !levels.isEmpty && !levels.contains(trimmed(draft.thinkingLevel)) {
+                notice = "当前 thinking_level「\(trimmed(draft.thinkingLevel))」不在"
+                    + " Plus 明示支持范围内，请重新选择。"
+            }
+            return Outcome(draft: result, notice: notice)
+        }
+        // 空草稿：按 §5.23.6 的明确默认规则填空，绝不取数组首项凑数。
+        if trimmed(result.providerId).isEmpty,
+           let selected = catalog.selectedProviderId,
+           catalog.providers.contains(where: {
+               $0.id == selected && $0.enabled != false
+           }) {
+            result.providerId = selected
+        }
+        guard let provider = catalog.providers.first(where: {
+            $0.id == trimmed(result.providerId) && $0.enabled != false
+        }) else {
+            if trimmed(result.providerId).isEmpty {
+                notice = enabledProviders.isEmpty
+                    ? "Plus 没有启用的 provider。"
+                    : "Plus 未返回默认 provider，请手动选择。"
+            }
+            return Outcome(draft: result, notice: notice)
+        }
+        if trimmed(result.modelId).isEmpty {
+            let requested = provider.id == catalog.defaultProviderId
+                ? (catalog.defaultModelId ?? provider.defaultModelId)
+                : provider.defaultModelId
+            if let requested,
+               provider.models?.contains(where: { $0.id == requested }) == true {
+                result.modelId = requested
+            } else if requested == nil, provider.models?.count == 1 {
+                result.modelId = provider.models?.first?.id ?? ""
+            } else if let requested {
+                notice = "Plus 默认模型「\(requested)」不在 provider"
+                    + "「\(provider.id)」的本地目录中，请手动选择。"
+            } else {
+                notice = "Plus 未返回 provider「\(provider.id)」的默认模型，"
+                    + "请手动选择。"
+            }
+        }
+        guard trimmed(result.thinkingLevel).isEmpty,
+              let candidate = provider.models?.first(where: {
+                  $0.id == trimmed(result.modelId)
+              }) else { return Outcome(draft: result, notice: notice) }
+        let levels = candidate.thinkingLevels ?? []
+        if let level = candidate.defaultThinkingLevel,
+           levels.isEmpty || levels.contains(level) {
+            result.thinkingLevel = level
+        } else if levels.count == 1 {
+            result.thinkingLevel = levels[0]
+        }
+        return Outcome(draft: result, notice: notice)
+    }
+
+    private static func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 // MARK: - §5.19 executor-status（App 内置执行端调度状态，v1.6）
 
 /// executor-status 单条运行记录（settings.executor_runs[stage] 快照）。
+/// §5.24.4：Plus 控制轮追加 backend/session_id/turn_id/invocation_id/
+/// config/send_state（旧 pi 记录缺省 → nil），旧字段保留。
 struct ExecutorRunEntry: Decodable {
     let pid: Int?
     let startedAt: String?
     let log: String?
     let exitCode: Int?
     let finishedAt: String?
+    let backend: String?
+    let sessionId: String?
+    let turnId: String?
+    /// 控制轮标识：与任务执行 run_id 不可混用。
+    let invocationId: String?
+    let sendState: String?
+    let config: RoundConfig?
+
+    /// 「运行端 · 会话 → turn」单行摘要（Plus 控制轮才齐备）。
+    var identityText: String? {
+        var parts: [String] = []
+        if let backend { parts.append(RoleBackend.shortLabel(backend)) }
+        if let sessionId, !sessionId.isEmpty {
+            if let turnId, !turnId.isEmpty {
+                parts.append("会话 \(sessionId) → turn \(turnId)")
+            } else {
+                parts.append("会话 \(sessionId)")
+            }
+        }
+        if let invocationId, !invocationId.isEmpty {
+            parts.append("控制轮 \(invocationId)")
+        }
+        if let sendState, !sendState.isEmpty {
+            parts.append(Labels.sendState(sendState))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 }
 
 /// 单 stage：running 非空 = pid 存活探测通过的在途执行端；last = 最近一次记录。
@@ -674,19 +1027,44 @@ struct RoundTerminal: Decodable {
     }
 }
 
-/// 轮次登记配置快照：pi（provider/model/reasoning_effort/agent_preset 平铺）
-/// 与 codex 规划（{"planner": {"planner_model","reasoning_effort"}} 嵌套，
-/// 见 cmd_exec claim 的 upsert_on_claim）两种形状共用。
+/// 轮次登记配置快照（claim 固化的唯一执行配置来源）。
+/// 形状共用：pi（provider/model/reasoning_effort/agent_preset 平铺）、
+/// codex 规划（{"planner": {planner_model, reasoning_effort}} 嵌套）、
+/// §5.23.3 pi_desktop（backend + 五字段，或 §5.24.3 的 runtime_config 嵌套）。
+/// 快照不含 token。
 struct RoundConfig: Decodable {
     let provider: String?
     let model: String?
     let reasoningEffort: String?
     let agentPreset: String?
     let plannerModel: String?
+    /// §5.23.3/§5.24.4：轮次 / 控制轮的固化后端 tag。
+    let backend: String?
+    /// §5.24.3：规划请求固化的后端与方式（Plus 项只允许 builtin）。
+    let plannerBackend: String?
+    let plannerMethod: String?
+    /// Plus 五字段（平铺或 runtime_config 嵌套，两种形状都接受）。
+    let connectionFile: String?
+    let providerId: String?
+    let modelId: String?
+    let thinkingLevel: String?
+    let permissionMode: String?
+    let runtimeConfig: PlusRuntime?
+
+    /// §5.24.3 runtime_config：五字段脱敏快照。
+    struct PlusRuntime: Decodable {
+        let connectionFile: String?
+        let providerId: String?
+        let modelId: String?
+        let thinkingLevel: String?
+        let permissionMode: String?
+    }
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, reasoningEffort, agentPreset, plannerModel
-        case planner
+        case planner, backend, plannerBackend, plannerMethod
+        case connectionFile, providerId, modelId, thinkingLevel, permissionMode
+        case runtimeConfig
     }
 
     init(from decoder: Decoder) throws {
@@ -694,6 +1072,16 @@ struct RoundConfig: Decodable {
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         agentPreset = try c.decodeIfPresent(String.self, forKey: .agentPreset)
+        backend = try c.decodeIfPresent(String.self, forKey: .backend)
+        plannerBackend = try c.decodeIfPresent(String.self, forKey: .plannerBackend)
+        plannerMethod = try c.decodeIfPresent(String.self, forKey: .plannerMethod)
+        connectionFile = try c.decodeIfPresent(String.self, forKey: .connectionFile)
+        providerId = try c.decodeIfPresent(String.self, forKey: .providerId)
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId)
+        thinkingLevel = try c.decodeIfPresent(String.self, forKey: .thinkingLevel)
+        permissionMode = try c.decodeIfPresent(String.self, forKey: .permissionMode)
+        runtimeConfig = try c.decodeIfPresent(PlusRuntime.self,
+                                              forKey: .runtimeConfig)
         var effort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
         var plannerModel = try c.decodeIfPresent(String.self, forKey: .plannerModel)
         // codex 规划轮次：config = {"planner": {planner_model, reasoning_effort}}
@@ -706,18 +1094,32 @@ struct RoundConfig: Decodable {
         self.plannerModel = plannerModel
     }
 
-    /// 「模型 · 思考等级」单行摘要（两键均无 → nil）。
+    /// 生效运行端 tag（backend 优先，其次规划轮次的 planner_backend）。
+    var effectiveBackend: String? { backend ?? plannerBackend }
+
+    var plusProviderId: String? { providerId ?? runtimeConfig?.providerId }
+    var plusModelId: String? { modelId ?? runtimeConfig?.modelId }
+    var plusThinkingLevel: String? {
+        thinkingLevel ?? runtimeConfig?.thinkingLevel
+    }
+
+    /// 「运行端 · 模型 · 思考等级」单行摘要（全无 → nil）。
+    /// 会话阅读器/详情按快照展示，不用当前设置推断。
     var summaryText: String? {
-        let model = model ?? plannerModel
-        guard model != nil || reasoningEffort != nil else { return nil }
-        if let reasoningEffort, !reasoningEffort.isEmpty {
-            return "\(model ?? "—") · \(reasoningEffort)"
-        }
-        return model
+        let model = model ?? plannerModel ?? plusModelId
+        let level = reasoningEffort ?? plusThinkingLevel
+        let backendText = effectiveBackend.map(RoleBackend.shortLabel)
+        guard model != nil || level != nil || backendText != nil else { return nil }
+        var parts: [String] = []
+        if let backendText { parts.append(backendText) }
+        parts.append(model ?? "—")
+        if let level, !level.isEmpty { parts.append(level) }
+        return parts.joined(separator: " · ")
     }
 }
 
 /// §5.16.1 get-task.execution_round：轮次索引行视图。
+/// config 用 RoundConfig：pi / codex / pi_desktop 三种快照形状都能解码。
 struct ExecutionRound: Decodable {
     let taskId: String?
     let runId: String?
@@ -725,7 +1127,7 @@ struct ExecutionRound: Decodable {
     let sessionId: String?
     let sessionTitle: String?
     let runStatus: String?
-    let config: ExecConfig?
+    let config: RoundConfig?
     let worktreePath: String?
     let startedAt: String?
     let pid: Int?
@@ -733,6 +1135,17 @@ struct ExecutionRound: Decodable {
     let savedAt: String?
     let createdAt: String?
     let updatedAt: String?
+    /// §5.23.3：Plus 轮次持久 turn 身份与发送状态（旧 pi 轮次缺省 → nil）。
+    let turnId: String?
+    let sendState: String?
+
+    /// 「运行端 · 模型/思考」一行（记录页/执行页展示快照值）。
+    /// config 快照已带运行端时不重复前缀。
+    var backendSummary: String? {
+        if let configText = config?.summaryText { return configText }
+        guard backend != nil else { return nil }
+        return RoleBackend.shortLabel(backend)
+    }
 }
 
 /// §5.16.2 trash-session / restore-session 响应。
@@ -1097,7 +1510,6 @@ struct TodoAttachment: Decodable {
     let issue: String?
 }
 
-/// fetch-todos 单项（§5.22.1 只读枚举，不导入任务）。
 struct TodoItem: Decodable, Identifiable {
     let taskId: String
     let title: String?
@@ -1107,6 +1519,9 @@ struct TodoItem: Decodable, Identifiable {
     let sourceSha256: String?
     let kaneoStatus: String?
     let repository: String?
+    let mappingState: String?
+    let repositoryKind: String?
+    let mappingProjectId: String?
     /// 本地任务状态（无本地行 → null）。
     let localStatus: String?
     let localSaveState: String?
@@ -1117,15 +1532,18 @@ struct TodoItem: Decodable, Identifiable {
 
     var id: String { taskId }
     var isSelectable: Bool { selectable == true }
+    var isUnmapped: Bool { mappingState == "unmapped" }
     var attachmentCount: Int { attachments?.count ?? 0 }
 
     /// 规划面板「定位任务」兜底：fetch-todos 列表之外的聚焦任务占位行。
     init(taskId: String, title: String? = nil, projectId: String? = nil,
          projectName: String? = nil, requirementsSha256: String? = nil,
          sourceSha256: String? = nil, kaneoStatus: String? = nil,
-         repository: String? = nil, localStatus: String? = nil,
-         localSaveState: String? = nil, attachments: [TodoAttachment]? = nil,
-         selectable: Bool? = nil, blockedReason: String? = nil) {
+         repository: String? = nil, mappingState: String? = nil,
+         repositoryKind: String? = nil, mappingProjectId: String? = nil,
+         localStatus: String? = nil, localSaveState: String? = nil,
+         attachments: [TodoAttachment]? = nil, selectable: Bool? = nil,
+         blockedReason: String? = nil) {
         self.taskId = taskId
         self.title = title
         self.projectId = projectId
@@ -1134,6 +1552,9 @@ struct TodoItem: Decodable, Identifiable {
         self.sourceSha256 = sourceSha256
         self.kaneoStatus = kaneoStatus
         self.repository = repository
+        self.mappingState = mappingState
+        self.repositoryKind = repositoryKind
+        self.mappingProjectId = mappingProjectId
         self.localStatus = localStatus
         self.localSaveState = localSaveState
         self.attachments = attachments
@@ -1231,20 +1652,32 @@ struct PlannerGroupConfig: Decodable, Equatable {
 }
 
 /// v3 §5.23.2：get-planner-config.config 保存值——两组 + default_method。
-/// 旧核心 config 只含 standard/review_fix 两组。
+/// v4 §5.24.1：新增 backend（codex|pi_desktop，缺省 codex）与 pi_desktop
+/// 五字段块；旧核心 config 只含 standard/review_fix 两组。
 struct PlannerStoredConfig: Decodable {
     let standard: PlannerGroupConfig?
     let reviewFix: PlannerGroupConfig?
     /// 规划面板默认方式预选（builtin|spec_plan；旧核心缺省 → nil）。
     let defaultMethod: String?
+    /// §5.24.1：规划运行端；缺省按 codex 解释。
+    let backend: String?
+    /// §5.24.1：Plus 五字段块（脱敏，无 token；permission_mode 固定 ask）。
+    let piDesktop: ExecPiDesktopConfig?
 
     init(standard: PlannerGroupConfig? = nil,
          reviewFix: PlannerGroupConfig? = nil,
-         defaultMethod: String? = nil) {
+         defaultMethod: String? = nil,
+         backend: String? = nil,
+         piDesktop: ExecPiDesktopConfig? = nil) {
         self.standard = standard
         self.reviewFix = reviewFix
         self.defaultMethod = defaultMethod
+        self.backend = backend
+        self.piDesktop = piDesktop
     }
+
+    /// 生效规划运行端（缺 backend → codex）。
+    var effectiveBackend: String { backend ?? "codex" }
 }
 
 /// get-planner-config / set-planner-config 响应（后者无 defaults 键）。
@@ -1276,7 +1709,9 @@ struct GetPlannerConfigResponse: Decodable {
            let top = try c.decodeIfPresent(String.self, forKey: .defaultMethod) {
             cfg = PlannerStoredConfig(standard: cfg?.standard,
                                       reviewFix: cfg?.reviewFix,
-                                      defaultMethod: top)
+                                      defaultMethod: top,
+                                      backend: cfg?.backend,
+                                      piDesktop: cfg?.piDesktop)
         }
         config = cfg
         // defaults 只收 {planner_model, reasoning_effort} 对象项；v3 核心
@@ -1387,6 +1822,8 @@ struct PlannerCapabilitiesResponse: Decodable {
     let modelsVerified: Bool?
     /// v3 §5.23.2：规划方式可用性门；旧核心不返回 → nil。
     let plannerMethods: PlannerMethods?
+    /// v4 §5.24.2：顶层 backends 分支就绪态；旧核心不返回 → nil。
+    let backends: PlannerBackends?
 
     /// 某模型已登记的思考等级（未登记/目录缺失 → nil）。
     func efforts(for modelID: String) -> [String]? {
@@ -1400,6 +1837,31 @@ struct PlannerCapabilitiesResponse: Decodable {
 
     /// spec_plan 方式可用性（旧核心未上报 → nil，UI 显示「能力未知」）。
     var specPlanMethod: PlannerMethodInfo? { plannerMethods?.specPlan }
+
+    /// §5.24.2：Plus 规划分支就绪态（旧核心未上报 → nil）。
+    var plusBackend: PlusBackendStatus? { backends?.piDesktop }
+
+    /// §5.24.2：Codex 分支可用性——backends.codex 未给 available 时回落
+    /// 顶层旧字段（builtin 方式门 / codex 探测结果）。
+    var codexAvailable: Bool? {
+        if let available = backends?.codex?.available { return available }
+        if let builtin = plannerMethods?.builtin?.available { return builtin }
+        guard let codex else { return nil }
+        return codex.version != nil
+    }
+
+    /// §5.24.2：Codex 分支说明（detail 优先，兼容 reason）。
+    var codexDetail: String? {
+        backends?.codex?.detail ?? backends?.codex?.reason
+    }
+}
+
+/// §5.24.2 planner-capabilities.backends：两个规划运行端分支。
+/// codex 子块沿用 §5.22.6 字段（此处只取可用性/方式），pi_desktop 为
+/// {available,detail,tools_ok,version}。
+struct PlannerBackends: Decodable {
+    let codex: PlusBackendStatus?
+    let piDesktop: PlusBackendStatus?
 }
 
 // MARK: - v3 §5.23.1 get-plan（已发布计划正文，T1 计划阅读页）
@@ -1448,22 +1910,80 @@ struct GetPlanResponse: Decodable {
     }
 }
 
-// MARK: - v3 §5.23.4 Review 环境配置（get/set-review-config，T5）
+// MARK: - v3 §5.23.4 / v4 §5.24.1 Review 环境配置（get/set-review-config）
 
 /// settings.review_config：{mode:"inherit"|"custom", provider?, model?,
 /// reasoning_effort?, updated_at?}。inherit = 继承本机 PI 默认会话配置。
+/// v4 §5.24.1：新增 backend（pi|pi_desktop，缺省 pi）与 pi_desktop 五字段块；
+/// `mode` 仅对 backend=pi 生效，Plus 分支必须完整五字段且固定 ask。
 struct ReviewConfig: Decodable, Equatable {
     let mode: String?
     let provider: String?
     let model: String?
     let reasoningEffort: String?
     let updatedAt: String?
+    /// §5.24.1：Review 运行端；缺省按 pi 解释。
+    let backend: String?
+    /// §5.24.1：Plus 五字段块（脱敏，无 token）。
+    let piDesktop: ExecPiDesktopConfig?
 
     var effectiveMode: String { mode ?? "inherit" }
+
+    /// 生效 Review 运行端（缺 backend → pi）。
+    var effectiveBackend: String { backend ?? "pi" }
 }
 
 struct GetReviewConfigResponse: Decodable {
     /// null = 从未保存（生效值 = defaults.mode:"inherit"）。
     let config: ReviewConfig?
     let defaults: ReviewConfig?
+}
+
+/// §5.24.2 review-capabilities {} → 两分支就绪态（旧核心不返回 → nil）。
+/// pi 分支只有 {available,detail}；pi_desktop 分支带 tools_ok/version。
+struct ReviewCapabilitiesResponse: Decodable {
+    let pi: PlusBackendStatus?
+    let piDesktop: PlusBackendStatus?
+}
+
+// MARK: - 项目与仓库映射 (T1, §5.26)
+
+struct ProjectMappingRemote: Decodable {
+    let status: String?
+    let fetchedAt: String?
+    let error: String?
+}
+
+struct ProjectMappingItem: Decodable, Identifiable {
+    let projectId: String
+    let projectName: String?
+    let repository: String?
+    let enabled: Bool?
+    let origin: String?
+    let mappingState: String?
+    let repositoryKind: String?
+    let blockedReason: String?
+    let activeTaskCount: Int?
+    let activeRequestCount: Int?
+    let updatedAt: String?
+
+    var id: String { projectId }
+    var displayName: String { projectName?.isEmpty == false ? projectName! : projectId }
+    var isEnabled: Bool { enabled == true }
+    var isAvailable: Bool { mappingState == "available" }
+    var isGit: Bool { repositoryKind == "git" }
+}
+
+struct ProjectMappingsResponse: Decodable {
+    let version: Int?
+    let revision: Int
+    let workspaceId: String?
+    let items: [ProjectMappingItem]?
+    let remote: ProjectMappingRemote?
+}
+
+struct SetProjectMappingResponse: Decodable {
+    let revision: Int
+    let deduplicated: Bool?
+    let item: ProjectMappingItem?
 }

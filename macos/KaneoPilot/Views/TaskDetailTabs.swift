@@ -435,14 +435,61 @@ struct TaskHistoryView: View {
 }
 
 /// 「记录」分段容器：独立滚动；无数据时仍显示清晰空态文案。
+/// §4.10：记录页展示每阶段实际生效的运行端与身份快照（来自轮次索引，
+/// 不用当前设置推断）。
 struct TaskLogTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
 
     var body: some View {
         ScrollView {
-            TaskHistoryView(attempts: detail.attempts, events: events)
-                .padding(Spacing.l)
+            VStack(alignment: .leading, spacing: Spacing.l) {
+                stageBackendSection
+                TaskHistoryView(attempts: detail.attempts, events: events)
+            }
+            .padding(Spacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    @ViewBuilder
+    private var stageBackendSection: some View {
+        let rows = stageRows
+        if !rows.isEmpty {
+            DetailSection(title: "运行端与身份") {
+                ForEach(rows, id: \.label) { row in
+                    FieldRow(row.label, row.value)
+                }
+            }
+        }
+    }
+
+    /// 任务执行轮次快照 + 当前活动请求（核心未返回的行不显示）。
+    private var stageRows: [(label: String, value: String)] {
+        var rows: [(String, String)] = []
+        if let round = detail.executionRound {
+            rows.append(("任务执行运行端", RoleBackend.label(round.backend)))
+            if let config = round.config?.summaryText {
+                rows.append(("轮次配置", config))
+            }
+            if let session = round.sessionId {
+                rows.append(("会话 ID", session))
+            }
+            if let turn = round.turnId {
+                rows.append(("turn_id", turn))
+            }
+            if let send = round.sendState {
+                rows.append(("发送状态", Labels.sendState(send)))
+            }
+            if let status = round.runStatus {
+                rows.append(("轮次状态", status))
+            }
+        }
+        if let request = detail.activeRequest {
+            let kind = Labels.kind(request.kind)
+            let status = Labels.requestStatus(request.status)
+            rows.append(("当前请求", "\(kind) · \(status)"))
+        }
+        return rows
     }
 }

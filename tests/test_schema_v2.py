@@ -120,6 +120,12 @@ PLANNER_INPUTS_COLUMNS = {
     "input_id", "task_id", "input_sha256", "requirements_sha256",
     "source_sha256", "manifest_json", "created_at",
 }
+# state-model v5（schema v5，protocol §5.25）。
+RUNTIME_OPERATIONS_COLUMNS = {
+    "scope_id", "operation_id", "harness_id", "tool", "request_sha256",
+    "status", "session_id", "turn_id", "proposal_id", "result_json",
+    "created_at", "updated_at",
+}
 
 def _create_v1_db(path):
     """按 v1 冻结结构建库并写一行任务/请求（升级后必须原样保留）。"""
@@ -174,37 +180,43 @@ def _backup_dirs(tmp_env):
 
 class TestUpgradeV1ToV2:
     def test_fresh_db_is_v2(self, cli, tmp_env):
-        """新库直接建为 v4（含 session_reads + execution_rounds +
-        planner_inputs），无升级备份。"""
+        """新库直接建为 v5（含 session_reads + execution_rounds +
+        planner_inputs + runtime_operations），无升级备份。"""
         cli("overview", {})
-        assert _schema_version(tmp_env.db) == 4
+        assert _schema_version(tmp_env.db) == 5
         assert _table_columns(tmp_env.db, "session_reads") == SESSION_READS_COLUMNS
         assert _table_columns(tmp_env.db, "execution_rounds") == EXECUTION_ROUNDS_COLUMNS
         assert _table_columns(tmp_env.db, "planner_inputs") == PLANNER_INPUTS_COLUMNS
+        assert _table_columns(tmp_env.db, "runtime_operations") == RUNTIME_OPERATIONS_COLUMNS
         assert _backup_dirs(tmp_env) == [], "新库不应产生升级备份"
 
-    def test_v1_db_upgraded_on_first_command(self, cli, tmp_env):
-        """v1 库经任意命令触发升级：三列 + session_reads + execution_rounds
-        + planner_inputs + 版本号。"""
+    def test_v1_db_requires_migration_then_upgraded_via_migrate(self, cli, tmp_env):
+        """v1 库经普通命令拒绝并报 migration_needed；经 migrate 命令升级至 v5。"""
         _create_v1_db(tmp_env.db)
         assert _schema_version(tmp_env.db) == 1
         assert "save_state" not in _table_columns(tmp_env.db, "tasks")
 
-        out = cli("overview", {})
-        assert out["schema_version"] == 4
+        # 普通命令拒绝隐式升级
+        out = cli("overview", {}, expect=1)
+        assert out["code"] == "migration_needed"
 
-        assert _schema_version(tmp_env.db) == 4
+        # 显式 migrate 触发升级
+        mig_out = cli("migrate", {})
+        assert mig_out["ok"] is True
+
+        assert _schema_version(tmp_env.db) == 5
         columns = _table_columns(tmp_env.db, "tasks")
         assert {"save_state", "saved_at", "auto_advance_paused"} <= columns
         assert _table_columns(tmp_env.db, "session_reads") == SESSION_READS_COLUMNS
         assert _table_columns(tmp_env.db, "execution_rounds") == EXECUTION_ROUNDS_COLUMNS
         assert _table_columns(tmp_env.db, "planner_inputs") == PLANNER_INPUTS_COLUMNS
+        assert _table_columns(tmp_env.db, "runtime_operations") == RUNTIME_OPERATIONS_COLUMNS
 
     def test_old_rows_get_defaults(self, cli, tmp_env):
         """旧数据默认 save_state='active'、saved_at=NULL、auto_advance_paused=0
         （state-model §1.1）；行业务数据原样保留。"""
         _create_v1_db(tmp_env.db)
-        cli("overview", {})
+        cli("migrate", {})
         rows = db_exec(
             tmp_env.db,
             "SELECT save_state, saved_at, auto_advance_paused, status, title "
@@ -224,24 +236,26 @@ class TestUpgradeV1ToV2:
         """升级后的旧任务经 CLI 读取：save_state=active、auto_advance_paused=0，
         仍出现在默认 list-tasks（§5.15.3 缺省 active）。"""
         _create_v1_db(tmp_env.db)
-        cli("overview", {})
+        cli("migrate", {})
         out = cli("list-tasks", {})
         row = next((t for t in out["tasks"] if t["task_id"] == V1_TASK_ID), None)
         assert row is not None, "升级后的旧任务应出现在默认列表"
         assert row["save_state"] == "active"
         assert row["auto_advance_paused"] in (0, False)
+
     def test_backup_written_before_upgrade(self, cli, tmp_env):
-        """升级前逐级备份 DB（v1-to-v2、v2-to-v3、v3-to-v4，
-        state-model §1.1/§1.2/§1.3）。"""
+        """升级前逐级备份 DB（v1-to-v2、v2-to-v3、v3-to-v4、v4-to-v5，
+        state-model §1.1/§1.2/§1.3/§1.4）。"""
         _create_v1_db(tmp_env.db)
-        cli("overview", {})
+        cli("migrate", {})
         dirs = _backup_dirs(tmp_env)
-        assert len(dirs) == 3, f"应恰好三个逐级升级备份目录：{dirs}"
+        assert len(dirs) == 4, f"应恰好四个逐级升级备份目录：{dirs}"
         names = [d.name for d in dirs]
         assert all(n.startswith("schema-") for n in names), names
         assert any("v1-to-v2" in n for n in names), names
         assert any("v2-to-v3" in n for n in names), names
         assert any("v3-to-v4" in n for n in names), names
+        assert any("v4-to-v5" in n for n in names), names
         # v1→v2 备份内含升级前的 v1 库（版本仍为 1）
         first = next(d for d in dirs if "v1-to-v2" in d.name)
         copied = list(first.iterdir())
@@ -252,38 +266,33 @@ class TestUpgradeV1ToV2:
     def test_upgrade_idempotent(self, cli, tmp_env):
         """重复命令不重复升级、不重复备份（§1.1 幂等）。"""
         _create_v1_db(tmp_env.db)
+        cli("migrate", {})
         cli("overview", {})
         cli("list-tasks", {})
-        assert _schema_version(tmp_env.db) == 4
-        assert len(_backup_dirs(tmp_env)) == 3, "二次命令不应再新增备份"
+        assert _schema_version(tmp_env.db) == 5
+        assert len(_backup_dirs(tmp_env)) == 4, "二次命令不应再新增备份"
         rows = db_exec(tmp_env.db, "SELECT save_state FROM tasks")
         assert [r[0] for r in rows] == ["active"]
-
-
-# ---------------------------------------------------------------------------
-# 版本过新 → migration_needed
-# ---------------------------------------------------------------------------
-
-
 class TestSchemaTooNew:
     def test_newer_version_rejected(self, cli, tmp_env):
         """schema 版本高于核心支持 → migration_needed（§4.11），不改库。"""
         conn = sqlite3.connect(str(tmp_env.db))
         try:
             conn.executescript(V1_SCHEMA)
-            conn.execute("INSERT INTO schema_meta(version) VALUES (5)")
+            conn.execute("INSERT INTO schema_meta(version) VALUES (6)")
             conn.commit()
         finally:
             conn.close()
         out = cli("overview", {}, expect=1)
         assert out["code"] == "migration_needed"
         assert out["error"]
-        # 库未被改写（仍为过新的 5）
-        assert _schema_version(tmp_env.db) == 5
+        # 库未被改写（仍为过新的 6）
+        assert _schema_version(tmp_env.db) == 6
 
 
 # ---------------------------------------------------------------------------
 # unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）
+# ---------------------------------------------------------------------------
 
 
 def load_tests(loader, standard_tests, pattern):

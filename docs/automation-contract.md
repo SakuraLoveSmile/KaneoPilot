@@ -1,8 +1,9 @@
-# KaneoPilot 执行端契约 v3（冻结，pi 执行端 + Codex 规划适配器 / App 内置调度）
+# KaneoPilot 执行端契约 v4（冻结，pi/Codex 执行端 + PI-Desktop-Plus 角色接入 / App 内置调度）
 
 执行端每 15 分钟检查所属阶段，错开起始分钟；无请求立即结束。承载方式自 v1.6 起为 **KaneoPilot App 内置 ExecutorScheduler**（App 存活期间定时拉起 `python3 -m kanpilot.executor_runner --stage <stage>`，runner 渲染 `core/executor_prompts/<stage>.md` 后以 `pi -p --mode json` 执行一轮领取-执行-汇报循环）。业务周期（评审）由核心 settings 单独配置——领取频率不等于反复执行全部任务。
+**v4（T6）起四个模型调用点各自可选后端**（protocol §5.24）：计划生成 `planner_runner`（payload `planner_backend=codex|pi_desktop`）；dispatch/monitor 控制端 `executor_runner --stage dispatch|monitor`（`exec_config.controller_backend`）；review 控制端 `executor_runner --stage review`（`review_config.backend`）；任务执行仍由 `exec_config.backend` 决定 worker。选 `pi_desktop` 时该轮经 Plus 本机 MCP 控制会话（计划/Review 为 `mode=plan`，控制端为 `mode=agent`）运行，**不再**拉起 `codex exec` 或 `pi -p`；队列、租约、审批与状态写入仍全在 KaneoPilot，人工启动规划、确认计划后执行、Review 后完成/修复的流程不变。
 
-**v2 起 plan 阶段分流**：规划请求由独立 **Codex 规划适配器**（`python3 -m kanpilot.planner_runner`，`kanpilot.codex_planner`）执行，不走 pi、不走 15 分钟定时表。规划请求只在用户经规划面板（`fetch-todos`→`prepare-plan-input`→`start-plans`）明确授权后存在；`start-plans` 成功即唤起 runner，App 启动/恢复时 runner 补领**已授权**的排队规划请求。dispatch/monitor/review 仍为 pi + ExecutorScheduler。**v3 起规划请求携带 `planner_method`**：`builtin` 走既有只读隔离链路，`spec_plan` 走插件链路（protocol §5.23.2）——领取时按 payload 快照选择执行路径，不自行改方式。
+**v2 起 plan 阶段分流**：规划请求由独立 **规划适配器**（`python3 -m kanpilot.planner_runner`；`kanpilot.codex_planner`，v4 另加 `kanpilot.pi_desktop_planner`）执行，不走 15 分钟定时表。规划请求只在用户经规划面板（`fetch-todos`→`prepare-plan-input`→`start-plans`）明确授权后存在；`start-plans` 成功即唤起 runner，App 启动/恢复时 runner 补领**已授权**的排队规划请求。dispatch/monitor/review 仍为 ExecutorScheduler 定时表。**v3 起规划请求携带 `planner_method`**（`builtin`/`spec_plan`，protocol §5.23.2）；**v4 起另携带 `planner_backend`**（`codex`/`pi_desktop`，protocol §5.24.3）——领取时按 payload 快照选择执行路径，不自行改方式或后端；Plus 分支只支持 `builtin`。
 
 ## 1. 执行端与调度
 
@@ -15,7 +16,7 @@
 
 - **调度位点**：App 内 DispatchSource 定时器；**App 不常驻时不运行**（v1.6 不引入 launchd）。启用开关在设置页「执行端调度」。
 - **单飞**：触发前先 `executor-status`；该 stage `running` 非空（pid 存活）→ 跳过本轮。
-- **运行记录**：runner 写 `settings.executor_runs[stage]`（pid/started_at/log/exit_code/finished_at）；事件流落 `<app_support>/executor-logs/<stage>-<ts>.log`；pi 会话落 `<app_support>/executor-sessions/<stage>/`。
+- **运行记录**：runner 写 `settings.executor_runs[stage]`（pi 分支 `pid/started_at/log/exit_code/finished_at`；v4 的 `pi_desktop` 控制轮另写 `backend/session_id/turn_id/invocation_id/config/send_state`）；事件流落 `<app_support>/executor-logs/<stage>-<ts>.log`；pi 会话落 `<app_support>/executor-sessions/<stage>/`，Plus 控制轮落 `<app_support>/executor-sessions/<stage>/<invocation_id>/`（脱敏 job/events）；控制 `invocation_id` 与任务执行 `run_id` 不可混用。
 - 每轮开始：`kanpilot claim --stage <stage> --executor <id>`；`claimed:false` → 报告原因并结束。`claimed:true` → 按 kind 流程执行；长操作每 < lease_seconds 调 `heartbeat`；结束调 `report`；然后继续 `claim` 直到无请求。
 - runner 拉起参数：`pi -p --mode json --session-dir … --no-extensions --no-context-files --no-skills`；超时 `settings.executor_timeout_seconds`（缺省 1800s）→ 终止进程组。
 
@@ -25,7 +26,7 @@
 
 - **不再有 `plan-scan`**：不自动枚举看板、不自动建请求。规划请求只来自规划面板手动授权（`payload_json.manual_authorized=true` + `input_id` + `planner_input_sha256`）；未授权请求 claim 一律拒绝（`unauthorized_plan`）。
 - runner 触发：`start-plans` 成功后立即唤起；App 启动/恢复时检查已授权 plan 队列，有则唤起。同一时间只跑一个规划轮次（核心 claim 串行保证）。
-- 每轮：`claim --stage plan --executor kaneo-planner` → `claimed:false` 结束；`claimed:true` → 按 payload `planner_method` 执行：builtin 按 §5.22.3 调 `codex exec`（`-s read-only`、`--json`、`-i <图片>`、`--output-schema`、`--ephemeral`、`--ignore-user-config` 等）；spec_plan 按 §5.23.2（不带 `--ignore-user-config`，`$spec-plan` 引用技能），cwd=任务 repository（只读），材料目录只读挂载；心跳 ≤ `min(lease_seconds/3, 60)`s。
+- 每轮：`claim --stage plan --executor kaneo-planner` → `claimed:false` 结束；`claimed:true` → 按 payload 的 `planner_backend` + `planner_method` 分流：`codex`+`builtin` 按 §5.22.3 调 `codex exec`（`-s read-only`、`--json`、`-i <图片>`、`--output-schema`、`--ephemeral`、`--ignore-user-config` 等）；`codex`+`spec_plan` 按 §5.23.2（不带 `--ignore-user-config`，`$spec-plan` 引用技能）；`pi_desktop` 按 §5.24.3 用本轮固化五字段建 `mode=plan` 会话（发送前落 `send_state=unknown`，读 `kind=plan` proposal 后本机 `reject` 关闭，不发 approve、不生成执行 turn、不调 `pi_project_open`），**不**拉起 `codex exec`/`pi`。cwd=任务 repository（只读）或规划 worktree，材料目录只读挂载；心跳 ≤ `min(lease_seconds/3, 60)`s。
 - 输出契约（schema 强制）：`ready`（非空 `plan_markdown` 且无未决 questions）→ 核心落盘计划文件 + `publish-plan`（request_id/run_id/planner_input_sha256 复核）→ task `ready` + `plan_execution_hold`；`needs_input`（questions 非空/草稿）→ 保存草稿与问题，`report needs_user` + `failure_code=reported`；进程失败/超时/空输出/不合规 → 保存 JSONL+stderr 证据，`report failed`（或 `needs_user`+`plan_failed`），**不自动重试**。
 - 元数据（task_id/plan_sha256/planner_model/输入哈希）由核心按真实输入生成，不信模型自报；`plan_markdown` 经计划规范校验（frontmatter 必填、中文自包含）。
 - review_fix 计划：只处理核心登记的 fix task（payload 含 review_key 等）；模型 `gpt-5.6-sol/xhigh`，其余同 standard；publish 成功时核心把修复计划写回原评审任务 `extra_json.repair_plan_*`。
@@ -33,7 +34,7 @@
 
 ### dispatch（executor id `kaneo-dispatch`）
 
-- **v3 起任务执行后端由 `exec_config.backend` 决定**：`pi`（默认）或 `pi_desktop`（protocol §5.23.3）。dispatch/monitor 控制端**继续继承本机 PI 默认会话设置**，不读 exec_config/review_config。不用 Computer Use、不截图、不核验附件/发送按钮。任务执行配置由调度台设置页管理，claim 时固化进轮次快照。
+- **v3 起任务执行后端由 `exec_config.backend` 决定**：`pi`（默认）或 `pi_desktop`（protocol §5.23.3）。**v4 起 dispatch/monitor 控制端来源 = `exec_config.controller_backend`**（protocol §5.24.4）：`pi`（缺省）继续继承本机 PI 默认会话设置并以 `pi -p --mode json` 运行；`pi_desktop` 用 `exec_config.pi_desktop` 五字段建独立 `mode=agent` 控制会话，宿主环境经 runner 生成的固定包装器**显式**传入（`KANPILOT_DB`/`KANPILOT_APP_SUPPORT`/`KANPILOT_PLAN_ROOT`/`KANPILOT_REPOS_ROOT`/`KANPILOT_LEGACY_ROOT`/`KANEO_CREDENTIALS_PATH` 等），不依赖继承环境。不用 Computer Use、不截图、不核验附件/发送按钮。任务执行配置由调度台设置页管理，claim 时固化进轮次快照。
 - 流程：
   1. `claim --stage dispatch` → context 含 `backend`、`exec_config` 快照、plan_path/repository/session_marker/instruction/original_todo_slug；核心完成计划哈希、来源快照、远端状态、review 交付与**所选后端可用性门**（§5.17.3 pi 分支 / §5.23.3 pi_desktop 分支）校验，失败 `validation_failed` 原文转述、不自行换模型/agent/后端。context 无 backend 字段（历史遗留）→ 简报交人工结束。
   2. `dispatch-prepare`（证据按后端分支：pi 为 session_marker/repository/backend="pi"/config=快照；pi_desktop 为 session_marker/repository/backend="pi_desktop"/config=快照）。
@@ -57,11 +58,12 @@
 
 ### review（executor id `kaneo-review`）
 
-- `kind=review`：评审仓库实现 vs 计划与需求 → 报告写 `KaneoReviewer/reports/<task_id>/<ts>.md` → `register-review` →
-  - `pass`：`advance-task --target done`（expected_current=in-review）→ `report succeeded`。
-  - `changes_requested`：`create-review-fix`（dedupe）→ 核心登记 fix task 并排 plan 请求 → `report succeeded`。
+- `kind=review`：评审仓库实现 vs 计划与需求 → 报告写 `<APP_SUPPORT>/reports/<task_id>/<run_id>.md`（v4；旧 `KaneoReviewer/reports/...` 路径仅历史） → `register-review` →
+  - `pass`：`advance-task --target done`（`expected_current=in-review`）→ `report succeeded`。
+  - `changes_requested`：**先** `create-review-fix`（dedupe）取得 `fix_task_id`/`source_sha256`，**再** `register-review(changes_requested, review_key, fix_task_id, fix_task_source_sha256)` → `report succeeded`；fix 任务停在 `needs_plan`，等用户 `prepare-plan-input`/`start-plans`，**不**自动规划。
   - `blocked`：`register-review blocked` → `report needs_user` + `failure_code=review_blocked`（核心自动记 review_blocked，可省略）。
-- **Review 环境（v3，protocol §5.23.4）**：review 控制端的模型来源由 `review_config` 决定——`inherit`（缺省）继承本机 PI 默认会话设置；`custom` 时 `executor_runner --stage review` 启动把已保存的 `{provider, model, reasoning_effort}` 固化为本轮 pi 参数（脱敏快照记运行日志）。保存只影响**下一次** review 启动，运行中进程不改配置；固定提示词仍来自 `core/executor_prompts/review.md`，不复用任务执行的 `agent_preset`；评审修复计划属规划环境，不走 review_config。
+- **登记身份与周期保护（v4，protocol §5.24.5）**：新自动 Review 调用必须带 `request_id` + `run_id` + `expected_execution_run_id`；核心在事务内核对 stage/task_id/status=claimed/run_id/未过期 lease 与评审周期，失配 → `stale_run`/`conflict`，不写报告登记或 pass。无身份的旧手动调用保留兼容，但不作为新自动链路入口；`create-review-fix`/`advance-task` 同样传身份。部分成功恢复先读 `get-task`/`get-request` 核对已确认检查点，`report` 响应丢失不重放非幂等调用。
+- **Review 环境（v3/v4，protocol §5.23.4/§5.24.5）**：来源 = `review_config.backend`——`pi` 分支按 `review_config.mode`（`inherit` 继承本机 PI 默认会话设置；`custom` 把 `{provider, model, reasoning_effort}` 固化为本轮 pi 参数）；`pi_desktop` 分支用 `review_config.pi_desktop` 五字段建 `mode=plan` + `permissionMode=ask` 控制会话，只在 `completed` + 完整转录后严格解析 `{conclusion, report_markdown, fix}` JSON（`priority` ∈ `no-priority|low|medium|high|urgent`），意外 proposal 只 `reject` 关闭并记 `review_blocked`，不按其 markdown 登记 pass。保存只影响**下一次** review 启动；固定提示词仍来自 `core/executor_prompts/review.md`，不复用任务执行 `agent_preset`；评审修复计划属规划环境。
 
 ## 3. 不变量（执行端必须遵守）
 
@@ -94,3 +96,13 @@
 - 会话回收站：删除/恢复闭环，禁止条件（执行中/失联/发送不明）给出中文原因，重启后状态保持。
 - running 任务迁移后由 monitor 请求接续观察，不靠旧锁。
 - v2 追加：规划面板三步流闭环（fetch-todos 只读 → prepare-plan-input 材料目录 → start-plans 入队 → Codex runner 领取 → publish-plan → `待确认执行` → 确认并安排执行）；未授权 plan 请求不可领取；`purged` 终态（任务/会话仅从回收站永久移除、列表消失、历史与文件保留、不复活）；`get-request`/`list-events` 支撑待处理详情与运行记录翻页搜索。
+- v4 追加：`planner_backend=pi_desktop` 的规划轮在 Plus 侧生成计划正文、由核心 `publish-plan` 置 hold，Plus 侧 proposal 被本机 `reject` 关闭且不产生执行 turn；`controller_backend=pi_desktop` 时 dispatch/monitor 无 `pi -p` 子进程，只在 Plus 控制会话中调用核心命令；`review_config.backend=pi_desktop` 的 Review 三结论各自登记正确、`changes_requested` 先 create 后 register；每一步的实际 backend/session/turn/invocation 在设置页与详情可见；连接缺失/工具缺失/型号不在本地目录时明确阻断，不回退 codex/pi。
+
+### Plus 新控制轮的命名 MCP（protocol §5.25）
+
+Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `monitor_mcp.md`，经会话 task grant 领取、心跳、读取、派发和汇报；不得提示模型调用 shell/CLI 包装器。Pi CLI 保留原角色 prompt；历史控制轮只读恢复不重发。规划/Review/执行各自在新会话发送前挂接对应角色工具，只由宿主核心登记最终结果。项目 MCP 或 Plus 会话挂接接口缺失时，发前明确失败而非降级执行。
+
+### 项目映射与快照固化（T1，protocol §5.26）
+
+- 执行端派发及 runner 取决于请求固化的 `project_snapshot`（包含 `project_id`, `project_name`, `repository`, `project_mapping_revision`），不依赖运行时临时查询当前设置，确保已有排队和执行中任务免受外部映射修改干扰。
+- 新计划文件按 `projects/<project_id>/` 安全目录写入，并在发布和派发前进行一致性快照核验。

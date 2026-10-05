@@ -77,7 +77,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, dsh_events, pi_desktop_backend, util
+from . import constants, dsh_events, runtime_client, util
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
 
 # MCP 轮询节奏（worker 进程内部参数，不进 settings）。
@@ -230,7 +230,7 @@ class _Collector:
     已采证据全部保留）。
     """
 
-    def __init__(self, client: "pi_desktop_backend.MCPClient",
+    def __init__(self, client: "runtime_client.RuntimeClient",
                  session_id: str, log: _EventLog, marker: str):
         self.client = client
         self.session_id = session_id
@@ -402,7 +402,7 @@ class _Collector:
         for etype, ts, fields in queue:
             self.log.emit(etype, ts, **fields)
 
-    def preserve_unverified(self, run_dir: Path, token: str) -> None:
+    def preserve_unverified(self, run_dir: Path, token: Optional[str] = None) -> None:
         """Keep pre-proof observations without violating the first-session event rule."""
         if not self._queued:
             return
@@ -412,7 +412,7 @@ class _Collector:
                     {"type": etype, "ts": ts, **fields},
                     ensure_ascii=False, sort_keys=True,
                 )
-                stream.write(util.redact(line, secrets=[token]) + "\n")
+                stream.write(util.redact(line, secrets=[token] if token else []) + "\n")
         self._queued.clear()
 
     def _queue(self, etype: str, ts, **fields) -> None:
@@ -580,15 +580,17 @@ class _ReadRecovery:
             if remaining <= 0:
                 break
             try:
-                record = pi_desktop_backend.load_connection(self.connection_file)
-                candidate = pi_desktop_backend.MCPClient(
-                    record["url"], record["token"], timeout=min(1.0, remaining / 5),
-                )
-                candidate.connect()
+                reconnect = getattr(self.client, "reconnect", None)
+                if not callable(reconnect):
+                    raise util.KanpilotError(
+                        "remote_unavailable", "runtime MCP client 不支持安全重连")
+                candidate = reconnect()
+                candidate._timeout = min(1.0, remaining / 5)
                 turn = self._checked_turn(candidate.turn_get(self.session_id, self.turn_id))
                 if _turn_status(turn) == "running":
                     raise util.KanpilotError("conflict", "服务恢复后 turn 仍 running，需人工核实")
-                self.client, self.pid = candidate, record["pid"]
+                self.client = candidate
+                self.pid = getattr(candidate, "harness_pid", None)
                 if method == "turn_get":
                     return turn
                 return getattr(candidate, method)(*args, **kwargs)
@@ -780,30 +782,26 @@ def run_real(spec: dict, resume: bool = False) -> int:
         return fail(f"plan_too_large: {len(body_bytes)} 字节 > 2 MiB",
                     "plan_too_large")
 
-    # ---- 2. 连接 + 握手 + 工具/型号门（复核本轮快照）。
+    # ---- 2. 通过 KaneoPilot runtime scope 连接并复核 Plus 工具集。
     config = spec.get("config") or {}
-    probe = pi_desktop_backend.probe_connection(
-        config.get("connection_file"), provider_id=config.get("provider_id"),
-        model_id=config.get("model_id"), timeout=10,
-    )
-    if not probe["ok"]:
-        return finalize("failed", 1, probe["detail"], True, "failed", "environment_unavailable")
     try:
-        record = pi_desktop_backend.load_connection(config.get("connection_file"))
-        client = pi_desktop_backend.MCPClient(record["url"], record["token"], timeout=10)
-        client.connect()
-        job["pi_desktop_pid"] = record.get("pid")
+        if resume and not job.get("scope_id"):
+            client = runtime_client.HistoricalReadClient(
+                config.get("connection_file"), timeout=10)
+            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+        else:
+            client = runtime_client.RuntimeClient(
+                role="execution", connection_file=config.get("connection_file"),
+                project_path=str(cwd), runtime_config=config,
+                invocation_id=None, request_id=None,
+                run_id=spec["run_id"], task_id=spec["task_id"], timeout=10,
+                lease_seconds=timeout, read_only=resume,
+            )
+            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+            job["scope_id"] = client.scope_id
+        job["pi_desktop_pid"] = getattr(client, "harness_pid", None)
         if not resume:
             _write_json(job_path, job)
-        tools = client.tools_list()
-        missing = [
-            name for name in constants.PI_DESKTOP_DISPATCH_TOOLS
-            if name not in tools
-        ]
-        if missing:
-            return fail(
-                "PI-Desktop 控制面缺少必需工具：" + "、".join(missing),
-                "unsupported_tools")
     except util.KanpilotError as exc:
         return fail(f"connect_failed: {exc.message}", "connect_failed")
 
@@ -849,6 +847,10 @@ def run_real(spec: dict, resume: bool = False) -> int:
                     session_id, mode=constants.PI_DESKTOP_EXEC_MODE,
                     permission_mode=permission_mode,
                 )
+            attached = client.attach_mcp(session_id)
+            if attached.get("attached") is not True:
+                raise util.KanpilotError(
+                    "validation_failed", "KaneoPilot task MCP 挂接未确认")
         except util.KanpilotError as exc:
             return fail(f"session_setup_failed: {exc.message}",
                         "session_setup_failed")
@@ -886,7 +888,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
             except util.KanpilotError:
                 recovered = None
             collector.poll()  # 尽力保全已产生的证据
-            collector.preserve_unverified(run_dir, record["token"])
+            collector.preserve_unverified(run_dir)
             # currentTurnId is only candidate evidence.  It cannot prove that
             # the prompt response landed, so preserve unknown and require
             # intervention.
@@ -1124,7 +1126,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
             return defer(detail)
         if not proof_ok["ok"]:
             collector.poll()
-            collector.preserve_unverified(run_dir, client._token)
+            collector.preserve_unverified(run_dir)
         job["send_state"] = "unknown"
         return finalize("failed", 1, detail, True, "failed", reason)
 
@@ -1145,7 +1147,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
         follow = adopt_follow_up(record)
         if follow is None:
             collector.poll()
-            collector.preserve_unverified(run_dir, client._token)
+            collector.preserve_unverified(run_dir)
             code = turn.get("errorCode") or state
             return finalize("failed", 1, f"turn {state}: {code}",
                             True, "failed", str(code))

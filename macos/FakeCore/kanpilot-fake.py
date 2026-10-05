@@ -2354,7 +2354,79 @@ def cmd_start_plans(state, payload):
         results.append({"task_id": tid, "request_id": req["request_id"],
                         "deduplicated": False})
     return {"results": results,
+    return {"results": results,
             "started": len([r for r in results if r.get("request_id")])}
+
+
+def cmd_get_project_mappings(state, payload):
+    mappings = state.get("project_mappings")
+    if not mappings:
+        items = {}
+        for name, pid in PROJECTS.items():
+            items[pid] = {
+                "project_name": name,
+                "repository": os.path.join(REPOS_ROOT, name),
+                "enabled": True,
+                "updated_at": past(days=10),
+            }
+        mappings = {
+            "version": 1,
+            "revision": 0,
+            "workspace_id": "ws-fake-001",
+            "items": items,
+        }
+    items_list = []
+    for pid, item in (mappings.get("items") or {}).items():
+        items_list.append({
+            "project_id": pid,
+            "project_name": item.get("project_name", ""),
+            "repository": item.get("repository", ""),
+            "enabled": item.get("enabled", True),
+            "updated_at": item.get("updated_at", iso(utcnow())),
+            "mapping_state": "ready",
+            "repository_kind": "git",
+            "active_tasks_count": 0,
+            "active_requests_count": 0,
+        })
+    return {
+        "revision": mappings.get("revision", 0),
+        "workspace_id": mappings.get("workspace_id", "ws-fake-001"),
+        "items": items_list,
+        "remote_projects_status": "not_requested",
+    }
+
+
+def cmd_set_project_mapping(state, payload):
+    pid = payload.get("project_id")
+    if not pid:
+        return {"__error__": "缺少 project_id", "__code__": "bad_request"}
+    mappings = state.setdefault("project_mappings", {
+        "version": 1,
+        "revision": 0,
+        "workspace_id": "ws-fake-001",
+        "items": {},
+    })
+    expected_rev = payload.get("expected_revision")
+    if expected_rev is not None and expected_rev != mappings.get("revision", 0):
+        return {"__error__": "revision 冲突", "__code__": "conflict"}
+    items = mappings.setdefault("items", {})
+    if payload.get("unmap"):
+        items.pop(pid, None)
+    else:
+        items[pid] = {
+            "project_name": payload.get("project_name") or PROJECTS.get(pid, pid),
+            "repository": payload.get("repository", ""),
+            "enabled": payload.get("enabled", True),
+            "updated_at": iso(utcnow()),
+        }
+    mappings["revision"] = mappings.get("revision", 0) + 1
+    save_state(state)
+    return {
+        "revision": mappings["revision"],
+        "project_id": pid,
+        "mapping_state": "ready" if not payload.get("unmap") else "unmapped",
+        "deduplicated": False,
+    }
 
 
 COMMANDS = {
@@ -2388,6 +2460,8 @@ COMMANDS = {
     "fetch-todos": lambda s, p: cmd_fetch_todos(s, p),
     "prepare-plan-input": lambda s, p: cmd_prepare_plan_input(s, p),
     "start-plans": lambda s, p: cmd_start_plans(s, p),
+    "get-project-mappings": lambda s, p: cmd_get_project_mappings(s, p),
+    "set-project-mapping": lambda s, p: cmd_set_project_mapping(s, p),
     "migrate": lambda s, p: {"ok": True, "backup_path": "(fake)",
                              "imported": {"tasks": 0, "requests": 0, "events": 0},
                              "warnings": ["fake 核心不执行迁移"]},

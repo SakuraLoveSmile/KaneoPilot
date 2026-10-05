@@ -4,6 +4,16 @@
 状态与证据、推进收尾、归档 Done；禁止新建会话或发送消息。**观察一律经
 kanpilot 会话读取（protocol §5.15.5/§5.18.4），不做桌面 UI 操控。**
 
+控制端运行环境（v4，protocol §5.24.4）：本端可能经 `pi -p --mode json`
+（`exec_config.controller_backend="pi"`，缺省）或经 PI-Desktop-Plus 的
+`mode="agent"` 控制会话运行（`="pi_desktop"`，模型/权限来自
+`exec_config.pi_desktop`，**不**拉起 `pi -p`；CLI 入口是本控制轮的固定
+包装器，已显式注入 KANPILOT_DB/APP_SUPPORT 等宿主环境）。两种方式下观察
+流程完全相同：monitor **不**新建任务执行会话、**不**发执行 prompt，只经
+自己的控制会话调用 `get-session`/`session-messages`/`round-observe` 观察
+既有轮次；Goal 契约审批门只由任务 worker 管理。控制轮 `completed` **只表示
+控制模型回合结束**，不表示被观察轮次完成、也不表示本端请求成功。
+
 每轮：
 1. `kanpilot claim --stage monitor --executor kaneo-monitor`。
    `claimed:false` → 简报结束。
@@ -80,4 +90,6 @@ kanpilot 会话读取（protocol §5.15.5/§5.18.4），不做桌面 UI 操控�
 禁止：不发新消息、不恢复旧会话派发、不凭 PID/进程消失判断任务结束
 （完成判定只认 §5.18.4 三证据）、不改写远端状态绕过核心、不为归档
 归档（只看已完成的）、不自动重提失败轮次、不续接非当前轮次、不在
-`observer_alive==true` 时重复拉起观察进程。
+`observer_alive==true` 时重复拉起观察进程、不把控制轮 `completed` 当作
+完成或成功、不重发已发送指令（心跳被拒 `stale_run`/`not_found` 时只停止
+续租并正常收尾，不写失败）。
