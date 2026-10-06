@@ -132,6 +132,7 @@ struct TaskDetailView: View {
                 if hasExecution { executionSection }
                 if hasKaneo { kaneoSection }
                 if hasReview { reviewSection }
+                TaskAutomationSections(detail: detail)
                 if showsHistory { historySection }
                 if isBlocked { blockedSection }
             }
@@ -316,7 +317,10 @@ struct TaskDetailView: View {
     // MARK: 6. 阻塞
 
     private var blockedSection: some View {
-        DetailSection(title: "阻塞") {
+        DetailSection(title: AutomationPresentation.title(detail.failureCode) ?? "阻塞") {
+            if let text = AutomationPresentation.explanation(detail.failureCode) {
+                Text(text).font(.kpSmall).foregroundStyle(.secondary)
+            }
             FieldRow("失败代码", detail.failureCode)
             FieldRow("失败原因", detail.failureReason ?? detail.blockedReason)
             FieldRow("失败阶段", detail.failureStage.map { Labels.stage($0) })
@@ -413,8 +417,12 @@ struct TaskDetailView: View {
         case "mark_done":
             Button("登记完成") { confirm = .markDone }
                 .disabled(model.busy)
+        case "resume", "accept_verification":
+            Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
+                Task { await model.resolve(taskID: detail.taskId, action: action) }
+            }.disabled(model.busy)
         case "dismiss":
-            Button("清除阻塞标记") { Task { await model.resolve(taskID: detail.taskId, action: "dismiss") } }
+            Button(AutomationPresentation.active(detail.automation) ? "转为人工处理" : "清除阻塞标记") { Task { await model.resolve(taskID: detail.taskId, action: "dismiss") } }
                 .disabled(model.busy)
         case "recheck":
             Button("重新校验") { Task { await model.recheck(taskID: detail.taskId) } }

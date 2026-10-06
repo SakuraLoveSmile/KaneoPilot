@@ -209,7 +209,7 @@
 
 通用设置提供本机服务启停和「连接 Plus」只读探测；默认连接文件使用 Plus profile，自定义路径放高级折叠区。服务只有真实 Bearer initialize/initialized/ping 成功才显示运行，启动失败明确显示原因。外部管理的服务不提供停止按钮；关闭/退出不停止 Plus 会话。启用意图按 AppSupport profile 持久保存，正常 App 启动自动恢复自有服务。
 
-Plus 控制面连接与会话 MCP 挂接能力分别显示；控制面可连接但缺 pi_session_attach_mcp 时提示升级依赖，不能显示双向任务闭环已验证。检测不建立模型会话。保留三个角色环境分组、已保存的自定义配置与既有界面度量。
+Plus 控制面连接与会话 MCP 挂接能力分别显示；attachment_supported 仅展示「本版本不需要会话挂接」，不作为执行门；不能显示未实测的任务闭环已验证。检测不建立模型会话。保留三个角色环境分组、已保存的自定义配置与既有界面度量。
 
 ### 4.11 项目与仓库设置（T1，protocol §5.26）
 
@@ -232,3 +232,15 @@ Plus 控制面连接与会话 MCP 挂接能力分别显示；控制面可连接�
 - **看板 / 紧凑列表**：
   - 工具栏提供 `看板 / 列表` 切换器；可用宽度 <840pt（如 900×600 侧栏展开时）默认切换至紧凑列表，提供免横滚浏览体验。
   - 紧凑列表按相同六列状态分组，共用搜索、过滤、排序、批量选择与详情打开逻辑；切换不丢失选中项与过滤状态。
+
+
+### 4.14 自动处理与菜单栏
+
+沿用现有设置/任务详情组件与冻结度量（13/18/11pt、8/12/16 间距、1180×760/900×600），不换肤。项目与仓库页在每项映射下显示「自动处理」、标签过滤、自动确认、修复轮 0–2、时长 30–1440 分钟、成本 0.5–100 美元或不限、PR 目标分支；保存后显示未就绪原因，关闭只停止新的自动决策。后台运行区提供登录项开关及需要批准时的系统设置提示。规划增加 Claude，Review 增加 Claude/Codex，控制端配置为展示。
+
+菜单栏显示运行中/已暂停、在途/待处理数和上次 intake，提供打开、暂停/恢复、立即检查、退出。关窗切 accessory，重开切 regular。任务详情增加自动处理信息（修复轮、段预算、未计价步数、跳过原因）和交付信息（分支、工作树路径、提交、PR 链接、合并状态）；看板显示「自动」「等待合并」「修复 n/m」。
+
+待处理原因、说明与动作按 protocol §5.27.13。verification_unconfirmed 显示「验证结果待确认」/「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。branch_exists/delivery_base_unknown 为「分支准备受阻」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，永久退出自动流程。其他失败原因与按钮遵照 §5.27.13，禁止 UI 绕过核心 allowed_actions。
+
+
+旧任务兼容：任务详情缺少 automation 或 delivery 字段时，概览沿用现有 DetailSection / FieldRow 度量，分别显示「自动处理／状态：未开启」及「交付／状态：未开启」。不补写数据库字段，不触发迁移或自动化。

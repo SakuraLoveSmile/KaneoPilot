@@ -292,6 +292,7 @@ def tmp_env(tmp_path, monkeypatch):
     env.update(
         {
             "HOME": str(home),  # 绝不触碰真实 home
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
             "KANPILOT_DB": str(db),
             "KANPILOT_PLAN_ROOT": str(plan_root),
             "KANPILOT_REPOS_ROOT": str(repos_root),

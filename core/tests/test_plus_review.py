@@ -58,6 +58,23 @@ class ReviewCase(PlusCase):
     def _restore_reports_env(self):
         os.environ.pop("KANPILOT_REPORTS_ROOT", None)
 
+    def run_stage(self, stage, resume=False):
+        # PlusCase isolates the historical dispatch/monitor controller; Review
+        # has its own runner and must keep testing that path directly.
+        from kanpilot import executor_runner
+        conn = db.connect(self.db_path)
+        try:
+            return pi_desktop_review.run_stage(
+                stage, conn=conn, db_path=self.db_path,
+                prompt=executor_runner.render_prompt(stage),
+                timeout=executor_runner._timeout_seconds(conn),
+                log_path=executor_runner._log_path(stage),
+                record_run=lambda **fields: executor_runner._record_run(conn, stage, **fields),
+                resume=resume,
+            )
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------ 夹具
     def git(self, *args, cwd=None):
         proc = subprocess.run(

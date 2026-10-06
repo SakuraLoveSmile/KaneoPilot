@@ -1,9 +1,9 @@
-"""Plus 控制端（dispatch/monitor）测试（protocol.md §5.24.4，v4 T6.3）。
+"""历史 Plus 控制端及 v5 确定性路由测试（protocol.md §5.24.4 / §5.27）。
 
 覆盖契约条款：
-- 分流：``exec_config.controller_backend`` 缺省仍走 pi（本文件不改 pi 行为），
-  ``pi_desktop`` 时建 ``mode="agent"`` 控制会话运行既有角色 prompt，
-  **零** ``pi -p`` 子进程（Popen spy）。
+- 历史入口：直接调用 Plus 控制器，建 ``mode="agent"`` 控制会话运行既有角色
+  prompt，**零** ``pi -p`` 子进程（Popen spy）。新 dispatch 路由不受旧
+  ``exec_config.controller_backend`` 影响，始终调用确定性流程，不拉起模型。
 - 宿主环境显式传入：固定包装器注入 KANPILOT_DB/APP_SUPPORT/PLAN_ROOT/
   REPOS_ROOT/LEGACY_ROOT/KANEO_CREDENTIALS_PATH + 核心脚本路径；把宿主默认
   环境指向**错误夹具**（decoy DB）后仍命中隔离库；包装器/prompt/产物无 token。
@@ -32,7 +32,7 @@ from unittest import mock
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
-    constants, db, executor_runner, mcp_server, mcp_scopes,
+    auto_dispatch, constants, db, executor_runner, mcp_server, mcp_scopes,
     pi_desktop_backend, pi_desktop_controller,
     util,
 )
@@ -404,7 +404,20 @@ class PlusCase(KanpilotTestCase):
             self.set_setting(key, value)
 
     def run_stage(self, stage, resume=False):
-        return executor_runner.run_stage(stage, resume=resume)
+        """历史控制轮单独验证，不经过 v5 的确定性 dispatch/monitor 路由。"""
+        conn = db.connect(self.db_path)
+        try:
+            return pi_desktop_controller.run_stage(
+                stage, conn=conn, db_path=self.db_path,
+                prompt=executor_runner.render_prompt(stage),
+                timeout=executor_runner._timeout_seconds(conn),
+                log_path=executor_runner._log_path(stage),
+                record_run=lambda **fields: executor_runner._record_run(
+                    conn, stage, **fields),
+                resume=resume,
+            )
+        finally:
+            conn.close()
 
     def executor_run(self, stage):
         runs = self.setting("executor_runs") or {}
@@ -798,31 +811,28 @@ class TestDispatchControlRound(PlusCase):
         self.assertEqual(self.server.prompt_count, 0)
         self.assertIsNone(self.server.created)
 
-    def test_pi_backend_still_uses_pi_cli(self):
-        """缺省 controller_backend=pi：pi 分支行为不变（拉起 pi CLI）。"""
-        self.set_setting("exec_config", {"pi_desktop": dict(PI_DESKTOP_BLOCK)})
-        calls = {}
-
-        class _FakeProc:
-            returncode = 0
-            pid = os.getpid()
-
-            def wait(self, timeout=None):
-                return 0
-
-            def poll(self):
-                return 0
-
-        def fake_popen(argv, **kwargs):
-            calls["argv"] = argv
-            return _FakeProc()
-
-        with mock.patch.object(subprocess, "Popen", fake_popen):
-            rc = self.run_stage("dispatch")
-        self.assertEqual(rc, 0)
-        self.assertIn("-p", calls["argv"])
-        self.assertIn("--mode", calls["argv"])
-        self.assertEqual(calls["argv"][0], constants.pi_bin())
+    def test_dispatch_ignores_controller_backend_and_never_launches_model_cli(self):
+        """缺省、pi、pi_desktop 均走 auto_dispatch，不渲染 prompt 或拉起模型。"""
+        for backend in (None, "pi", "pi_desktop"):
+            with self.subTest(controller_backend=backend):
+                config = {"pi_desktop": dict(PI_DESKTOP_BLOCK)}
+                if backend is not None:
+                    config["controller_backend"] = backend
+                self.set_setting("exec_config", config)
+                with mock.patch.object(auto_dispatch, "run_stage", return_value=0) as dispatch, \
+                        mock.patch.object(pi_desktop_controller, "run_stage") as legacy, \
+                        mock.patch.object(executor_runner, "render_prompt",
+                                          side_effect=AssertionError("新 dispatch 不应渲染模型 prompt")), \
+                        self.no_subprocess_spy():
+                    rc = executor_runner.run_stage("dispatch")
+                self.assertEqual(rc, 0)
+                dispatch.assert_called_once()
+                self.assertEqual(dispatch.call_args.args, ("dispatch",))
+                self.assertEqual(dispatch.call_args.kwargs["db_path"], self.db_path)
+                self.assertFalse(dispatch.call_args.kwargs["resume"])
+                dispatch.call_args.kwargs["conn"].close()
+                legacy.assert_not_called()
+                self.assertEqual(self.server.calls, [])
 
 
 # ------------------------------------------------------------ monitor 控制轮

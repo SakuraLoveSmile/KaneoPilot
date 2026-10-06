@@ -18,8 +18,21 @@ from . import (
     planner_inputs, util,
 )
 
+def _automation_command(module, name):
+    def call(ctx, payload):
+        from importlib import import_module
+        return getattr(import_module("." + module, __package__), name)(ctx, payload)
+    return call
+
+
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "set-project-automation": ({"project_id": (True, "str"), "automation": (True, "dict"), "expected_policy_revision": (False, "int")}, _automation_command("automation_policy", "cmd_set_project_automation")),
+    "set-automation-global": ({"max_active_tasks": (True, "int")}, _automation_command("automation_policy", "cmd_set_automation_global")),
+    "record-cost": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "stage": (True, "str"), "cost_usd": (True, "any"), "source": (True, "str")}, _automation_command("automation_policy", "cmd_record_cost")),
+    "delivery-commit": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (True, "str")}, _automation_command("cmd_delivery", "cmd_delivery_commit")),
+    "delivery-publish": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_publish")),
+    "delivery-sync": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_sync")),
     "doctor": (
         {"online": (False, "bool")}, cmd_read.cmd_doctor,
     ),
@@ -142,6 +155,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "conclusion": (True, "str"), "run_id": (False, "str"),
             "review_key": (False, "str"), "fix_task_id": (False, "str"),
             "fix_task_source_sha256": (False, "str"),
+            "fix_mode": (False, "str"), "fix": (False, "dict"),
             "repair_plan_path": (False, "str"),
             "kaneo_status": (False, "str"),
             # v4（§5.24.5）：新自动链路必传（无身份的旧调用保持兼容）。
@@ -339,7 +353,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_exec.cmd_record_goal_evaluation,
     ),
     # v1.6：执行端状态（App ExecutorScheduler 单飞判断与设置页显示）。
-    "executor-status": ({}, cmd_config.cmd_executor_status),
+    "executor-status": ({"instance_id": (False, "str")}, cmd_config.cmd_executor_status),
+    "executor-instance": ({"instance_id": (True, "str"), "action": (True, "str"),
+                           "task_id": (False, "str"), "run_id": (False, "str"),
+                           "spec_path": (False, "str")},
+                          _automation_command("cmd_config", "cmd_executor_instance")),
     # v2（§5.22）：手动规划链——待办发现 / 材料准备 / 提交规划。
     "fetch-todos": (
         {},
@@ -368,7 +386,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "default_method": (False, "str"),
             # v4（§5.24.1）：规划后端与 Plus 分支五字段块（缺 backend 按 codex）。
             "backend": (False, "str"),
-            "pi_desktop": (False, "dict"),
+            "pi_desktop": (False, "dict"), "claude": (False, "dict"),
         },
         cmd_planner.cmd_set_planner_config,
     ),
@@ -379,7 +397,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # v4（§5.24.1）：mode 仅在 backend=pi 时必需（Plus 分支用五字段）。
             "mode": (False, "str"),
             "backend": (False, "str"),
-            "pi_desktop": (False, "dict"),
+            "pi_desktop": (False, "dict"), "claude": (False, "dict"), "codex": (False, "dict"),
             "provider": (False, "str"), "model": (False, "str"),
             "reasoning_effort": (False, "str"),
         },

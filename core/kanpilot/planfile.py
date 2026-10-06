@@ -35,7 +35,7 @@ def expected_model_snapshot(req_payload: dict) -> Optional[dict]:
     `publish-plan` 的 frontmatter 校验与规划 runner 选择写入值必须用同一口径，
     否则一边写 §6 常量、一边按 Plus 快照校验就会互相拒收（本函数的由来）。
 
-    - codex：``model_config``；
+    - codex / claude：``model_config``；
     - Plus（``planner_backend="pi_desktop"``）：``runtime_config`` 的
       ``model_id``/``thinking_level``（Plus 没有 codex 的 ``reasoning_effort``）；
     - 快照缺失/不完整：None（旧记录回落 §6 历史常量，由调用方留痕）。

@@ -682,6 +682,7 @@ struct PlanningView: View {
 // MARK: - ① To Do 行
 
 private struct TodoRow: View {
+    @EnvironmentObject private var model: AppViewModel
     let item: TodoItem
     let isChecked: Bool
     let onToggle: (TodoItem) -> Void
@@ -690,6 +691,15 @@ private struct TodoRow: View {
     private var isUnmapped: Bool {
         item.mappingState != nil && item.mappingState != "ready"
     }
+
+    private var automaticPlanningLabel: String? {
+        guard let task = model.tasks.first(where: { $0.taskId == item.taskId }),
+              AutomationPresentation.active(task.automation) else { return nil }
+        if task.status == "planning" { return "自动规划中" }
+        if task.status == "needs_plan" || task.automation?.planWanted == true { return "等待自动规划" }
+        return nil
+    }
+
 
     var body: some View {
         HStack(spacing: Spacing.m) {
@@ -718,7 +728,7 @@ private struct TodoRow: View {
                             .background(Color.kpControl,
                                         in: RoundedRectangle(cornerRadius: 4))
                     }
-                    Text(item.localStatus ?? "未导入")
+                    Text(automaticPlanningLabel ?? item.localStatus ?? "未导入")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                     if item.attachmentCount > 0 {

@@ -3,8 +3,8 @@
 
 The output is deliberately deterministic: ``source_sha256`` is computed from
 the canonical JSON representation of the payload without that field.
-Credential loading and the source/requirements hash algorithms are kept
-byte-for-byte identical to the legacy bridge for migration compatibility.
+Credential loading and source hashing retain legacy compatibility. Requirements
+hashing only excludes KaneoPilot's own marker comments from the legacy payload.
 """
 
 from __future__ import annotations
@@ -14,8 +14,9 @@ import hashlib
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 import urllib.request
@@ -171,6 +172,61 @@ def columns(client: Client, project_id: str) -> list[dict[str, Any]]:
     return [item for item in as_list(client.request(f"/api/column/{project}"), "data", "columns") if isinstance(item, dict)]
 
 
+def label_names(labels: Any) -> list[str]:
+    """Convert the fork's label array without fetching individual labels."""
+    if not isinstance(labels, list) or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
+        for label in labels
+    ):
+        raise BridgeError("Kaneo 标签响应格式无效")
+    return [label["name"] for label in labels]
+
+
+def get_task_labels(client: Client, task_id: str) -> list[str]:
+    value = unwrap_data(client.request(f"/api/label/task/{quote(task_id, safe='')}"))
+    return label_names(value)
+
+
+def find_marker_comment(client: Client, task_id: str, marker_prefix: str) -> Optional[dict]:
+    if not isinstance(marker_prefix, str) or not marker_prefix:
+        raise BridgeError("评论标记前缀必须是非空字符串")
+    value = unwrap_data(client.request(f"/api/comment/{quote(task_id, safe='')}"))
+    if not isinstance(value, list):
+        raise BridgeError("Kaneo 评论响应格式无效")
+    matches = []
+    for comment in value:
+        if not isinstance(comment, dict) or not isinstance(comment.get("content"), str):
+            raise BridgeError("Kaneo 评论响应格式无效")
+        if not comment["content"].lstrip().startswith(marker_prefix):
+            continue
+        if not isinstance(comment.get("id"), str) or not comment["id"]:
+            raise BridgeError("Kaneo 评论响应缺少 id")
+        created_at = comment.get("createdAt")
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                raise ValueError("missing timezone")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise BridgeError("Kaneo 评论创建时间格式无效") from exc
+        matches.append((created, comment))
+    if not matches:
+        return None
+    comment = min(matches, key=lambda match: match[0])[1]
+    return {"id": comment["id"], "content": comment["content"],
+            "created_at": comment["createdAt"]}
+
+
+def post_comment(client: Client, task_id: str, content: str) -> dict[str, str]:
+    if not isinstance(content, str) or not content:
+        raise BridgeError("评论内容必须是非空字符串")
+    value = unwrap_data(client.request(
+        f"/api/comment/{quote(task_id, safe='')}", "POST", {"content": content}
+    ))
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not value["id"]:
+        raise BridgeError("Kaneo 新建评论响应缺少 id")
+    return {"id": value["id"]}
+
+
 def task_context(client: Client, task_id: str) -> dict[str, Any]:
     encoded = quote(task_id, safe="")
     detail = unwrap_data(client.request(f"/api/task/{encoded}"))
@@ -193,10 +249,17 @@ def requirements_hash(source: dict[str, Any]) -> str:
     if not isinstance(task, dict) or not task.get("id"):
         raise BridgeError("来源快照缺少 task/id，不能建立需求基线")
     fields = ("id", "projectId", "title", "description", "customFields", "attachments")
+    comments = source.get("comments", [])
+    if isinstance(comments, list):
+        comments = [comment for comment in comments if not (
+            isinstance(comment, dict)
+            and isinstance(comment.get("content"), str)
+            and comment["content"].lstrip().startswith("[kaneopilot:")
+        )]
     payload = stable({
         "schema": "requirements-v1",
         "task": {key: task.get(key) for key in fields},
-        "comments": source.get("comments", []),
+        "comments": comments,
         "relations": source.get("relations", []),
     })
     return add_hash(payload)["source_sha256"]
@@ -279,7 +342,10 @@ def normalize_tasks(
             task_id = str(task.get("id", ""))
             if not task_id:
                 continue
-            normalized_tasks.append(task_context(client, task_id))
+            context = task_context(client, task_id)
+            if "labels" in task:
+                context["labels"] = label_names(task["labels"])
+            normalized_tasks.append(context)
         projects_out.append({"project": project, "columns": project_columns, "tasks": normalized_tasks})
     snapshot = {"workspaceId": workspace_id, "projects": projects_out}
     canonical = json.dumps(stable(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")

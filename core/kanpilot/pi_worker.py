@@ -60,7 +60,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import constants, dsh_events, pi_backend, util
+from . import constants, dsh_events, pi_backend, process_owner, util
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -111,6 +111,10 @@ def _base_job(spec: dict) -> dict:
 
 
 def run_fake(spec: dict, mode: str) -> int:
+    return process_owner.run_owned(spec, lambda owner: _run_fake(spec, mode, owner))
+
+
+def _run_fake(spec: dict, mode: str, owner) -> int:
     """KANPILOT_PI_FAKE 隔离接缝（契约见模块 docstring）。"""
     run_dir = Path(spec["runs_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +129,8 @@ def run_fake(spec: dict, mode: str) -> int:
                  session_title="Fake pi · 运行中")
         log.emit("user", now, content=spec.get("instruction") or "")
         while True:  # 测试负责终止该进程
-            time.sleep(60)
+            owner.check()
+            time.sleep(0.2 if owner.instance_id else 60)
     if mode == "crash":
         _write_json(job_path, job)
         log.emit("session", now, session_id=session_id,
@@ -155,6 +160,10 @@ def run_fake(spec: dict, mode: str) -> int:
 
 
 def run_real(spec: dict) -> int:
+    return process_owner.run_owned(spec, lambda owner: _run_real(spec, owner))
+
+
+def _run_real(spec: dict, owner) -> int:
     """真实 pi 桥接（protocol §5.18，契约见模块 docstring）。
 
     生命周期：job(running) 启动即写 → 拉起 ``pi -p --mode json``
@@ -216,6 +225,7 @@ def run_real(spec: dict) -> int:
     _write_json(job_path, job)
     deadline = time.monotonic() + timeout
     try:
+        owner.check()
         # stdout=PIPE：事件帧只被本进程消费；stderr 继承（dispatch-start 已
         # 重定向到 worker.log，pi 引导噪声不占协议通道）。
         proc = subprocess.Popen(
@@ -269,22 +279,29 @@ def run_real(spec: dict) -> int:
 
     # ---- 4. 泵读至 EOF / 超时。
     timed_out = False
-    while not state["eof"]:
-        if proc.poll() is not None and not _has_data(fd):
-            state["eof"] = True
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            break
-        ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
-        if ready:
-            chunk = os.read(fd, 65536)
-            if not chunk:
+    try:
+        while not state["eof"]:
+            owner.check()
+            if proc.poll() is not None and not _has_data(fd):
                 state["eof"] = True
-                continue
-            buffer.extend(chunk)
-            drain_lines()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
+            if ready:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    state["eof"] = True
+                    continue
+                buffer.extend(chunk)
+                drain_lines()
+    except process_owner.OwnerClosed:
+        # Finish local child cleanup before the App's bounded worker escalation.
+        _terminate(proc, grace=0.5)
+        proc.stdout.close()
+        raise
     # 尾缓冲内可能还有未换行结尾的最后一行。
     if buffer:
         handle_line(bytes(buffer))
@@ -360,6 +377,7 @@ def main(argv=None) -> int:
     parser.add_argument("--spec", required=True)
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    spec["_spec_path"] = str(Path(args.spec).resolve())
     if spec.get("v") != 1:
         print(f"unsupported spec version: {spec.get('v')}", file=sys.stderr)
         return 2

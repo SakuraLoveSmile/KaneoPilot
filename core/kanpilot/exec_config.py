@@ -213,7 +213,6 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     needs_block = (
         "pi_desktop" in fields
         or merged["backend"] == "pi_desktop"
-        or merged[constants.CONTROLLER_BACKEND_KEY] == "pi_desktop"
     )
     if needs_block:
         error = validate_pi_desktop_block(merged.get("pi_desktop"))

@@ -1,4 +1,19 @@
-# KaneoPilot 执行端契约 v4（冻结，pi/Codex 执行端 + PI-Desktop-Plus 角色接入 / App 内置调度）
+# KaneoPilot 执行端契约 v5（全自动反馈流水线）
+
+现行冻结契约以 protocol §5.27 为准。App 每 20 秒读取 tick/status，intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
+
+## v5 现行路由与结算
+
+本节覆盖上文 v1–v4 控制会话描述；完整接口、载荷和失败语义见 protocol §5.27。dispatch/monitor 不再调用模型，不看 controller_backend，经 cli.run 驱动确定性流程；monitor 使用 task.run_id 观察执行，advance-task 不传 request_id，被动同步 in-review/in-review 与 done/done 均允许。验证缺失或最后一次失败进入 verification_unconfirmed。
+
+intake 每 300 秒，只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。Review 统一结算：手动任务保留跨任务修复，自动化任务 changes_requested 在同任务分支最多修复 2 轮并受段预算约束，pass 只登记。delivery 提交后 Review，pass 后推送/开 PR/评论，合并才 done，不自动 merge。Plus 会话 create/configure/prompt，不挂接 task grant；状态全部由 runner 经核心命令完成。
+
+
+---
+
+以下 v4 材料只描述保留的旧控制器入口，**不得用于现行路由、自动化任务修复或完成判定**。
+
+# 历史 v4 角色契约（仅供旧入口兼容与故障回看）
 
 > Goal 报告驱动的完成判定与监控分支见 §6 和 protocol.md §5.23.10。
 
@@ -16,7 +31,7 @@
 | review | review | 12, 27, 42, 57 | `kaneo-review` |
 | plan（v2 起不在定时表） | plan | 手动触发：`start-plans` 成功后立即唤起；App 启动时补领已授权队列 | `kaneo-planner`（Codex 适配器） |
 
-- **调度位点**：App 内 DispatchSource 定时器；**App 不常驻时不运行**（v1.6 不引入 launchd）。启用开关在设置页「执行端调度」。
+- **调度位点**：App 内 DispatchSource 定时器；**常驻菜单栏，关窗继续，退出停止**（可配置登录项）。启用开关在设置页「执行端调度」。
 - **单飞**：触发前先 `executor-status`；该 stage `running` 非空（pid 存活）→ 跳过本轮。
 - **运行记录**：runner 写 `settings.executor_runs[stage]`（pi 分支 `pid/started_at/log/exit_code/finished_at`；v4 的 `pi_desktop` 控制轮另写 `backend/session_id/turn_id/invocation_id/config/send_state`）；事件流落 `<app_support>/executor-logs/<stage>-<ts>.log`；pi 会话落 `<app_support>/executor-sessions/<stage>/`，Plus 控制轮落 `<app_support>/executor-sessions/<stage>/<invocation_id>/`（脱敏 job/events）；控制 `invocation_id` 与任务执行 `run_id` 不可混用。
 - 每轮开始：`kanpilot claim --stage <stage> --executor <id>`；`claimed:false` → 报告原因并结束。`claimed:true` → 按 kind 流程执行；长操作每 < lease_seconds 调 `heartbeat`；结束调 `report`；然后继续 `claim` 直到无请求。
@@ -51,7 +66,7 @@
 - **观察经 kanpilot 会话读取（get-session + session-messages），不做桌面 UI 操控**；被观察轮次恒取 **task 当前执行轮次**（`get-task` → `task.run_id`），**不是**本端 monitor 请求的 run_id。旧后端（dsh/headless/ATIF）轮次不可读——`get-session` 返回 `unavailable` + detail「旧后端会话已弃用」，按读不到处理（report failed / observation_blocked），不报执行失败。
 - `kind=monitor`：
   1. `recheck` 只读核验远端：已 done/in-review → `advance-task` 被动同步对（v1.2）→ `report succeeded`；**不得** in-progress→done 直推（无评审 pass 核心拒绝）。
-  2. 仍 in-progress → 读 `get-session`（`run_id=task.run_id`；round_detail：terminal/exit_code/run_status/observe_pid/observer_alive/detail）+ `session-messages`（消息与工具输出），轮次完成判定三证据**同时满足**（§5.18.4；pi_desktop 轮次的 terminal 由 worker 经 `pi_turn_get` 持久终态+记录完整性写入，§5.23.3）——(a) 终止事件 outcome=completed、(b) exit_code=0 且 run_status=finished、(c) 验证证据（退出码 0 的验证命令输出或最终消息引用验证步骤；子 agent 结束/进程退出/模型自称完成任一单独不算）→ `advance-task --target in-review` → `report succeeded`。仍在跑 → heartbeat + report succeeded（progress 记摘要）。明确异常（failed/非 0 终止/超时/截断/身份不符/send_state=unknown）→ `report needs_user` + `failure_code=execution_failed`（附 terminal/detail），**不自动重新提交、不重建轮次、不重复 agent_prompt**。
+  2. 仍 in-progress → 读 `get-session`（`run_id=task.run_id`；round_detail：terminal/exit_code/run_status/observe_pid/observer_alive/detail）+ `session-messages`（消息与工具输出），轮次完成判定三证据**同时满足**（§5.18.4；pi_desktop 轮次的 terminal 由 worker 经 `pi_turn_get` 持久终态+记录完整性写入，§5.23.3）——(a) 终止事件 outcome=completed、(b) exit_code=0 且 run_status=finished、(c) 验证证据（计划 verify 块每条命令在本轮最后一次工具结果的整数退出码为 0；子 agent 结束/进程退出/模型自称完成任一单独不算）→ `advance-task --target in-review` → `report succeeded`。仍在跑 → heartbeat + report succeeded（progress 记摘要）。明确异常（failed/非 0 终止/超时/截断/身份不符/send_state=unknown）→ `report needs_user` + `failure_code=execution_failed`（附 terminal/detail），**不自动重新提交、不重建轮次、不重复 agent_prompt**。
   2a. **观察者缺席先续接**（§5.23.7；pi_desktop 轮次）：`round_detail.backend=="pi_desktop"` 且（`round_detail.observer_alive==false` 或 `round_detail.detail` 以 `heartbeat_failed:` 开头）→ `round-observe {task_id, run_id=task.run_id, executor:"kaneo-monitor"}` 只读续接观察进程（绝不重发 prompt/新建会话，取证靠 session 事件，不靠 `send_state`），再重新读取；返回 `deferred|exited|starting` 时按第 3 条处置（report failed + observation_blocked），下轮再试。`observer_alive==true` 不得重复拉起。
   2b-2. **Goal 契约审批门（§5.23.9）**：pi_desktop 轮次以 Goal（契约）模式派发——规划轮次先协商目标契约，worker 本机代批（留痕 `job.goal_approval` + `system` 事件）后宿主在同一会话开启执行轮次。审批门期间轮次保持 running：monitor **不得**把 Plus 侧规划轮次的 completed 当作执行完成，也不得重发 prompt/重建会话；终态仅认 `round_detail.terminal`。终态 detail 含 `goal_contract_missing`/`goal_approval_failed`/`goal_execution_unstarted` 时按 `report needs_user` + `failure_code=execution_failed` 交人工，不自动重试。
   2b. **后续轮次接续与解除误报（§5.23.8）**：PI-Desktop 在瞬时模型错误（如 `EMPTY_MODEL_RESPONSE`）后会在**同一会话**自动重开新 turn，观察进程只读接续（`round_detail.turn_adopted` 记审计，**绝不重发 prompt**）；续接返回 `reopened:true` 表示核心已解除由该误报产生的 `execution_failed` 阻塞（任务回 `running`）——此时按第 2 条「仍在跑」分支继续判定，不得沿用旧 failure 文案重复 report needs_user。
@@ -100,9 +115,9 @@
 - v2 追加：规划面板三步流闭环（fetch-todos 只读 → prepare-plan-input 材料目录 → start-plans 入队 → Codex runner 领取 → publish-plan → `待确认执行` → 确认并安排执行）；未授权 plan 请求不可领取；`purged` 终态（任务/会话仅从回收站永久移除、列表消失、历史与文件保留、不复活）；`get-request`/`list-events` 支撑待处理详情与运行记录翻页搜索。
 - v4 追加：`planner_backend=pi_desktop` 的规划轮在 Plus 侧生成计划正文、由核心 `publish-plan` 置 hold，Plus 侧 proposal 被本机 `reject` 关闭且不产生执行 turn；`controller_backend=pi_desktop` 时 dispatch/monitor 无 `pi -p` 子进程，只在 Plus 控制会话中调用核心命令；`review_config.backend=pi_desktop` 的 Review 三结论各自登记正确、`changes_requested` 先 create 后 register；每一步的实际 backend/session/turn/invocation 在设置页与详情可见；连接缺失/工具缺失/型号不在本地目录时明确阻断，不回退 codex/pi。
 
-### Plus 新控制轮的命名 MCP（protocol §5.25）
+### v4 历史控制轮的命名 MCP（protocol §5.25）
 
-Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `monitor_mcp.md`，经会话 task grant 领取、心跳、读取、派发和汇报；不得提示模型调用 shell/CLI 包装器。Pi CLI 保留原角色 prompt；历史控制轮只读恢复不重发。规划/Review/执行各自在新会话发送前挂接对应角色工具，只由宿主核心登记最终结果。项目 MCP 或 Plus 会话挂接接口缺失时，发前明确失败而非降级执行。
+v4 历史 Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `monitor_mcp.md`，经会话 task grant 领取、心跳、读取、派发和汇报；不得提示模型调用 shell/CLI 包装器。Pi CLI 保留原角色 prompt；历史控制轮只读恢复不重发。规划/Review/执行各自在新会话发送前挂接对应角色工具，只由宿主核心登记最终结果。项目 MCP 或 Plus 会话挂接接口缺失时，发前明确失败而非降级执行。
 
 ### 项目映射与快照固化（T1，protocol §5.26）
 
@@ -111,6 +126,8 @@ Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `monitor_mcp.m
 
 
 ## 6. Goal 报告完成判定与派发命名（v3 补丁，T5/T6）
+
+> v5 新 Plus 派发轮次（自动化或手动）固化 `completion_policy=command_verification`，按 protocol §5.27 的有效 monitor claim、终态、计划哈希和 verify 证据/本轮人工接受记录收口，不调用模型判定。以下报告完成判定只适用于旧 `goal_report` 策略或缺省的历史 spec/job，命名约定继续适用；策略随轮次固化，不读取后来改变的项目策略或人工接管设置。
 
 本节是 protocol.md §5.23.10 在执行端视角的落地口径；字段、身份核对与失败语义以 §5.23.10 为准。
 

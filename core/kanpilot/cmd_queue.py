@@ -21,6 +21,22 @@ def _infer_kind(task) -> str:
     return kind
 
 
+def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=None):
+    if not db.task_schedulable(task) or task["status"] != "ready":
+        raise util.KanpilotError("conflict", "任务当前不可确认执行")
+    if expected_plan_sha256 != task["plan_sha256"]:
+        raise util.KanpilotError("conflict", "计划哈希与当前登记版本不符，请重新查看计划")
+    row, created = db.create_request(conn, now, "dispatch", f"dispatch:{task['task_id']}",
+                                    task_id=task["task_id"], payload={"note": note} if note else None,
+                                    requested_by=actor)
+    extra = db.task_extra(db.require_task(conn, task["task_id"]))
+    if extra.pop("plan_execution_hold", None):
+        db.update_task(conn, task["task_id"], now, extra_json=extra)
+        db.add_event(conn, now, "resolved", task_id=task["task_id"], request_id=row["request_id"],
+                     actor=actor, detail={"action": "confirm_plan", "plan_sha256": task["plan_sha256"]})
+    return row, created
+
+
 def cmd_enqueue(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     with db.write_txn(conn):
@@ -64,45 +80,17 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         confirm_plan = bool(payload.get("confirm_plan"))
         expected_sha = payload.get("expected_plan_sha256")
         if kind == "dispatch":
-            if hold:
-                # v2 §5.3 计划确认闸：同事务复核哈希 → 建请求 → 解除 hold。
-                if not confirm_plan:
-                    raise util.KanpilotError(
-                        "conflict",
-                        "计划已发布但尚未确认执行：请先核对计划后再次确认"
-                        "（需要 confirm_plan:true）",
-                    )
-                if expected_sha != task["plan_sha256"]:
-                    raise util.KanpilotError(
-                        "conflict",
-                        "计划哈希与当前登记版本不符，请重新查看计划后"
-                        "再确认执行",
-                    )
-            elif expected_sha is not None and expected_sha != task["plan_sha256"]:
-                raise util.KanpilotError(
-                    "conflict",
-                    "计划哈希与当前登记版本不符，请重新查看计划",
-                )
+            if hold and not confirm_plan:
+                raise util.KanpilotError("conflict", "计划已发布但尚未确认执行（需要 confirm_plan:true）")
+            if hold or expected_sha is not None:
+                row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=expected_sha, actor="user", note=payload.get("note"))
+                return {"request": derive.request_view(row, ctx.now), "deduplicated": not created}
         key = f"{kind}:{task['task_id']}"
         request_payload = {"note": payload.get("note")} if payload.get("note") else None
         row, created = db.create_request(
             conn, now, kind, key, task_id=task["task_id"],
             payload=request_payload, requested_by="user",
         )
-        if kind == "dispatch" and hold:
-            # 同事务解除 hold：此后 dispatch 请求可被正常领取（§5.22.4）。
-            task = db.require_task(conn, task["task_id"])
-            extra = db.task_extra(task)
-            extra.pop("plan_execution_hold", None)
-            db.update_task(
-                conn, task["task_id"], now, extra_json=extra
-            )
-            db.add_event(
-                conn, now, "resolved", task_id=task["task_id"],
-                request_id=row["request_id"], actor="user",
-                detail={"action": "confirm_plan",
-                        "plan_sha256": task["plan_sha256"]},
-            )
         return {
             "request": derive.request_view(row, ctx.now),
             "deduplicated": not created,
@@ -203,12 +191,67 @@ def _retry_target(conn, task) -> tuple[str, str]:
     return "needs_plan", "plan"
 
 
+_AUTO_RESUME_TARGETS = {
+    "delivery_blocked_files": ("running", "monitor"), "delivery_commit_failed": ("running", "monitor"),
+    "branch_exists": ("needs_plan", None), "delivery_base_unknown": ("needs_plan", None),
+    "review_blocked": ("in_review", "review"), "review_backend_unsupported": ("in_review", "review"),
+    "branch_diverged": ("in_review", "delivery"), "gh_unavailable": ("in_review", "delivery"), "pr_closed": ("in_review", "delivery"),
+}
+
+
+def _resolution_snapshot(task):
+    return tuple(task[key] for key in ("status", "run_id", "failure_code", "failure_stage", "project_id", "requirements_sha256", "sent", "send_state", "lock_retained", "extra_json"))
+
+
+def _accept_remote_for_resolution(ctx, payload):
+    task = db.require_task(ctx.conn, payload["task_id"])
+    if not core.is_automation_managed(task) or not (payload["action"] == "replan" or (payload["action"] == "resume" and task["failure_code"] == "remote_conflict")):
+        return None
+    round_snapshot = None
+    if payload["action"] == "replan":
+        if task["send_state"] == "unknown":
+            raise util.KanpilotError("conflict", "发送结果不明，请先处理发送恢复或明确接受重复风险")
+        if task["sent"] or task["send_state"] == "sent":
+            from . import cmd_session, round_store
+            old_round = round_store.get_round(ctx.conn, task["task_id"], task["run_id"]) if task["run_id"] else None
+            if old_round is None:
+                raise util.KanpilotError("conflict", "旧执行轮次尚无可核验终态，请先恢复会话观察，再重新规划")
+            else:
+                view = cmd_session.cmd_get_session(ctx, {"task_id": task["task_id"], "run_id": task["run_id"]})
+                detail = view.get("round_detail") or {}
+                terminal = detail.get("terminal") or {}
+                if (detail.get("run_status") not in ("finished", "failed")
+                        or terminal.get("outcome") not in ("completed", "failed", "error", "aborted", "timeout", "truncated")):
+                    raise util.KanpilotError("conflict", "旧执行轮次尚无可核验终态，请先确认会话结束并恢复观察，再重新规划")
+                refreshed = round_store.get_round(ctx.conn, task["task_id"], task["run_id"])
+                if refreshed is None:
+                    raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
+                round_snapshot = dict(refreshed)
+    from . import remote, bridge
+    stage = task["failure_stage"] or task["stage"]
+    if stage == "dispatch" and payload["action"] == "resume":
+        raise util.KanpilotError("conflict", "派发中途需使用发送恢复动作")
+    try:
+        live = remote.get_task(remote.get_client(), task["task_id"])
+    except bridge.BridgeError as exc:
+        raise util.KanpilotError("remote_unavailable", str(exc)) from exc
+    t = live.get("task") or {}
+    if t.get("projectId") != task["project_id"]:
+        raise util.KanpilotError("remote_conflict", "远端任务项目已变化")
+    if payload["action"] == "resume":
+        required = {"monitor": {"in-progress", "in-review", "done"}, "delivery": {"in-review", "done"}, "review": {"in-review", "done"}}.get(stage)
+        if required and t.get("status") not in required:
+            raise util.KanpilotError("conflict", "请先在 Kaneo 调整到 " + "/".join(sorted(required)) + " 再继续")
+    return {"requirements_sha256": live.get("requirements_sha256"), "kaneo_status": t.get("status"), "stage": stage, "snapshot": _resolution_snapshot(task), "round_snapshot": round_snapshot}
+
+
 def cmd_resolve(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     action = payload["action"]
     note = payload.get("note")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
+    accepted_remote = _accept_remote_for_resolution(ctx, payload)
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
         # §5.20.1（v2）：purged 终态拒绝一切写入口。
@@ -229,10 +272,72 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             if not condition:
                 raise util.KanpilotError("bad_request", message)
 
+        if accepted_remote:
+            if task["status"] != "needs_user" or accepted_remote["snapshot"] != _resolution_snapshot(task):
+                raise util.KanpilotError("conflict", "任务处置状态已变化")
+            if accepted_remote.get("round_snapshot") is not None:
+                from . import round_store
+                old_round = round_store.get_round(conn, task["task_id"], task["run_id"])
+                if old_round is None or dict(old_round) != accepted_remote["round_snapshot"]:
+                    raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
+            db.update_task(conn, task["task_id"], now, requirements_sha256=accepted_remote["requirements_sha256"], kaneo_status=accepted_remote["kaneo_status"], kaneo_checked_at=now)
+            db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor="user")
+            task = db.require_task(conn, task["task_id"])
         resolution = {"action": action, "note": note, "at": now, "actor": "user"}
         new_request = None
 
-        if action == "retry":
+        if action in ("resume", "accept_verification"):
+            if status != "needs_user":
+                raise util.KanpilotError("conflict", "当前状态不可继续")
+            code = task["failure_code"]
+            from . import automation_policy, review_config
+            if action == "accept_verification":
+                if code != "verification_unconfirmed" or not task["run_id"]:
+                    raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
+                db.set_extra(conn, task, now, verification_override={"execution_run_id": task["run_id"], "actor": "user", "at": now, "note": note})
+                target, kind = "running", "monitor"
+            elif code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped"):
+                if not core.is_automation_managed(task) or not (automation_policy.policy_for(conn, task["project_id"]) or {}).get("enabled"):
+                    raise util.KanpilotError("conflict", "请先重新开启项目自动处理")
+                fix = db.task_extra(task).get("fix_request")
+                if not fix or fix.get("state") != "held":
+                    raise util.KanpilotError("conflict", "没有待继续的修复请求")
+                core.start_fix_round_inline(conn, task, now, fix_request=fix, actor="user", new_segment=True)
+                target, kind = "needs_plan", None
+            else:
+                if not core.is_automation_managed(task):
+                    raise util.KanpilotError("conflict", "该任务不受自动化管理")
+                if code == "remote_conflict" and accepted_remote:
+                    kind = accepted_remote["stage"]
+                    target = {"monitor": "running", "delivery": "in_review", "review": "in_review", "plan": "needs_plan"}.get(kind)
+                    kind = None if kind == "plan" else kind
+                    if target is None: raise util.KanpilotError("conflict", "请使用发送恢复动作")
+                elif code in _AUTO_RESUME_TARGETS:
+                    target, kind = _AUTO_RESUME_TARGETS[code]
+                else:
+                    raise util.KanpilotError("conflict", "当前原因不允许继续")
+                if code == "review_backend_unsupported" and review_config.backend(conn) not in constants.AUTOMATION_REVIEW_BACKENDS:
+                    raise util.KanpilotError("conflict", "请先更改 Review 后端为 Plus/Claude/Codex")
+            task = db.require_task(conn, task["task_id"])
+            if core.is_automation_managed(task):
+                a = core.automation_of(task)
+                core.update_automation(conn, task, now, segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0), **({"plan_wanted": True, "plan_attempts": 0} if target == "needs_plan" else {}))
+            task = db.require_task(conn, task["task_id"])
+            fields = core.clear_block_fields()
+            fields["resolution"] = resolution
+            if kind == "review":
+                fields.update(review_report_path=None, review_report_sha256=None, review_key=None)
+                extra = db.task_extra(db.require_task(conn, task["task_id"]))
+                extra.pop("review_conclusion", None)
+                extra.pop("review_registered_at", None)
+                fields["extra_json"] = extra
+            core.transition_task(conn, task, target, now, "user", detail={"via": "resolve " + action}, **fields)
+            if kind == "delivery":
+                core.update_delivery(conn, task, now, next_sync_at=now)
+            if kind:
+                new_request, _ = _new_cycle_request(conn, now, task, kind)
+
+        elif action == "retry":
             need(
                 status == "needs_user" and send_state in (None, "not_sent"),
                 "retry requires needs_user with send_state not_sent "
@@ -311,7 +416,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 conn, task, "needs_plan", now, "user",
                 detail={"via": "resolve replan"}, **fields,
             )
-            # v2 §5.22.2：不自动创建 plan 请求（等规划面板手动授权）。
+            if core.is_automation_managed(task):
+                a = core.automation_of(task)
+                core.update_automation(conn, task, now, plan_wanted=True, plan_attempts=0,
+                                       segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0),
+                                       replan_requested_at=now,
+                                       replan_remote_status=(accepted_remote or {}).get("kaneo_status"),
+                                       replan_worktree_sha256=None)
+                db.update_task(conn, task["task_id"], now, sent=0, send_state=None, sent_at=None, lock_retained=0)
             new_request = None
 
         elif action == "release_lost":
@@ -356,7 +468,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                         resolution=resolution,
                     )
                 if kind == "plan":
-                    # v2 §5.22.2：失联释放不自动重建规划请求。
+                    if core.is_automation_managed(task) and core.automation_of(task).get("plan_attempts", 0) < 2:
+                        core.update_automation(conn, task, now, plan_wanted=True)
+                    # v2 §5.22.2：手动任务不自动重建规划请求。
                     new_request = None
                 elif target in (constants.CLAIM_GUARDS.get(kind) or ()):
                     new_request, _ = _new_cycle_request(
@@ -377,6 +491,11 @@ def cmd_resolve(ctx, payload: dict) -> dict:
 
         elif action == "dismiss":
             need(status == "needs_user", "dismiss requires needs_user")
+            if core.is_automation_managed(task):
+                core.update_automation(conn, task, now, manual_takeover=True, plan_wanted=False)
+                core.update_delivery(conn, task, now, mode="manual")
+                db.add_event(conn, now, "automation_stopped", task_id=task["task_id"], actor="user", detail={"via": "manual_takeover"})
+                task = db.require_task(conn, task["task_id"])
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
             core.transition_task(
@@ -489,7 +608,7 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                         item.get("repository") or project.get("repository")
                     )
 
-                if task["status"] in constants.DISPATCH_MID_STATUSES:
+                if core.is_automation_managed(task) or task["status"] in constants.DISPATCH_MID_STATUSES:
                     # Never overwrite mid-dispatch state/fingerprints.
                     db.update_task(conn, task_id, now, **updates)
                     if observed_changed:

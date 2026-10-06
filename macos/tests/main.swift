@@ -395,7 +395,37 @@ if let cat = decode(PiDesktopCatalogResponse.self, catalogWithDefaultJSON) {
     expect(cat.defaultDetail == nil, "default_detail 应解码为 nil")
 }
 
+// MARK: - v5 automation and delivery contracts
+if let status = decode(ExecutorStatusResponse.self, #"{"stages":{"delivery":{"running":null,"last":null,"claimable":2}},"intake":{"running":null,"last":null},"paused":{"global":false,"stages":["plan"]},"automation":{"enabled_projects":1,"active_tasks":2,"pending_tasks":3,"max_active_tasks":2,"waiting_merge":1,"last_intake":{"started_at":"2026-10-05T00:00:00Z","projects":[{"project_id":"p","ready":false,"preflight":[{"code":"gh_missing","message":"未找到 gh"}],"adopted":[],"skipped":[]}],"errors":[]}}}"#) {
+    expect(status.stages?["delivery"]?.claimable == 2, "delivery claimable 解码")
+    expect(status.paused?.stages == ["plan"], "自动阶段暂停解码")
+    expect(status.automation?.pendingTasks == 3, "待处理数不等于可领取请求数")
+    expect(status.automation?.lastIntake?.projects?.first?.preflight?.first?.message == "未找到 gh", "intake 前置检查解码")
+}
+if let config = decode(PlannerStoredConfig.self, #"{"backend":"claude","claude":{"model":"sonnet","effort":"high"}}"#) {
+    expect(config.effectiveBackend == "claude" && config.claude?.effort == "high", "Claude 规划配置解码")
+}
+if let config = decode(ReviewConfig.self, #"{"backend":"codex","codex":{"model":"gpt-6.1-sol","reasoning_effort":"high"},"claude":{"model":"sonnet","effort":"high"}}"#) {
+    expect(config.codex?.model == "gpt-6.1-sol" && config.codex?.reasoningEffort == "high", "Codex Review 配置解码")
+    expect(config.claude?.model == "sonnet", "Review 后端切换保留另一分组")
+}
+if let task = decode(TaskDetail.self, #"{"task_id":"task1234","status":"in_review","automation":{"fix_round":1,"cost_usd":0.42,"cost_unknown_steps":2},"delivery":{"mode":"pr","branch":"kaneo/task1234","pr_number":7,"pr_url":"https://github.com/owner/repo/pull/7","commits":[{"sha":"abcdef","execution_run_id":"exec1"}]},"review_history":[{"review_key":"key1","conclusion":"pass","execution_run_id":"exec1"}]}"#) {
+    expect(task.automation?.fixRound == 1 && task.automation?.costUnknownSteps == 2, "任务自动处理与未知成本解码")
+    expect(task.delivery?.prNumber == 7 && task.delivery?.commits?.first?.executionRunId == "exec1", "任务交付证据解码")
+    expect(task.reviewHistory?.first?.conclusion == "pass", "Review 历史解码")
+}
+if let old = decode(TaskDetail.self, #"{"task_id":"task1234","status":"ready"}"#) {
+    expect(old.automation == nil && old.delivery == nil, "旧任务缺自动字段零迁移解码")
+}
+
 // MARK: - 结果
+
+if let owner = decode(ExecutorInstanceResponse.self, #"{"instance_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"active","owned_workers":[{"pid":1234,"started_seconds":1791180000,"started_microseconds":123456,"task_id":"task1234","run_id":"run1","spec_path":"/tmp/fixture/spec.json"}]}"#) {
+    expect(owner.ownedWorkers.first?.pid == 1234 && owner.ownedWorkers.first?.startedMicroseconds == 123456, "App worker 进程身份解码")
+}
+if let legacy = decode(ExecutorStatusResponse.self, #"{"stages":{}}"#) {
+    expect(legacy.ownedWorkers == nil, "旧 executor-status 缺 worker 归属兼容")
+}
 
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
