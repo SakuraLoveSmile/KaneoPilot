@@ -1,0 +1,499 @@
+"""Read/diagnostic commands and the tick scheduler (protocol.md §5.1/§5.2/§4.8)."""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+import sys
+from datetime import timedelta
+from typing import Optional
+
+from . import constants, db, derive, planfile, remote, util
+
+
+def tick_inline(conn: sqlite3.Connection, now) -> dict:
+    """Business-cycle request top-up (protocol.md §4.8). Idempotent."""
+    now_iso = util.to_iso(now)
+    created: list = []
+    skipped: list = []
+
+    monitor_interval = db.get_setting(
+        conn, "monitor_interval_seconds",
+        constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
+    )
+
+    # v2（protocol §5.22.2）：tick 不再生成 plan-scan——规划改为手动门控，
+    # 看板枚举由规划面板 fetch-todos 按需只读拉取。
+
+    # --- monitor: every running task keeps a monitor cycle ------------------
+    for task in conn.execute(
+        "SELECT * FROM tasks WHERE status='running' ORDER BY task_id"
+    ).fetchall():
+        # §5.15.3：归档/回收站/恢复后暂停的任务不建监控周期。
+        if not db.task_schedulable(task):
+            skipped.append(
+                {"kind": "monitor", "task_id": task["task_id"],
+                 "reason": "task_saved"}
+            )
+            continue
+        key = f"monitor:{task['task_id']}"
+        if db.active_request_for_key(conn, key) is not None:
+            skipped.append(
+                {"kind": "monitor", "task_id": task["task_id"], "reason": "active"}
+            )
+            continue
+        last = conn.execute(
+            "SELECT finished_at FROM requests WHERE task_id=? AND "
+            "kind='monitor' AND status IN ('succeeded','failed','cancelled') "
+            "AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1",
+            (task["task_id"],),
+        ).fetchone()
+        last_at = util.parse_ts(last["finished_at"]) if last else None
+        if last_at is not None and last_at + timedelta(seconds=monitor_interval) > now:
+            skipped.append(
+                {"kind": "monitor", "task_id": task["task_id"], "reason": "interval"}
+            )
+            continue
+        row, made = db.create_request(
+            conn, now_iso, "monitor", key, task_id=task["task_id"],
+            requested_by="scheduler",
+        )
+        if made:
+            created.append(
+                {"request_id": row["request_id"], "kind": "monitor",
+                 "task_id": task["task_id"]}
+            )
+
+    # --- review: in_review tasks without a pending conclusion --------------
+    for task in conn.execute(
+        "SELECT * FROM tasks WHERE status='in_review' ORDER BY task_id"
+    ).fetchall():
+        # §5.15.3：归档/回收站/恢复后暂停的任务不建评审请求。
+        if not db.task_schedulable(task):
+            skipped.append(
+                {"kind": "review", "task_id": task["task_id"],
+                 "reason": "task_saved"}
+            )
+            continue
+        key = f"review:{task['task_id']}"
+        if db.active_request_for_key(conn, key) is not None:
+            skipped.append(
+                {"kind": "review", "task_id": task["task_id"], "reason": "active"}
+            )
+            continue
+        if task["review_report_path"]:
+            skipped.append(
+                {"kind": "review", "task_id": task["task_id"],
+                 "reason": "conclusion_pending"}
+            )
+            continue
+        row, made = db.create_request(
+            conn, now_iso, "review", key, task_id=task["task_id"],
+            requested_by="scheduler",
+        )
+        if made:
+            created.append(
+                {"request_id": row["request_id"], "kind": "review",
+                 "task_id": task["task_id"]}
+            )
+
+    db.set_setting(conn, "last_tick_at", now_iso)
+    return {"created": created, "skipped": skipped}
+
+
+def cmd_tick(ctx, payload: dict) -> dict:
+    with db.write_txn(ctx.conn):
+        return tick_inline(ctx.conn, ctx.now)
+
+
+def cmd_overview(ctx, payload: dict) -> dict:
+    conn = ctx.conn
+    task_counts = {}
+    for row in conn.execute(
+        "SELECT status, COUNT(*) AS n FROM tasks "
+        "WHERE save_state='active' GROUP BY status"
+    ).fetchall():
+        task_counts[row["status"]] = row["n"]
+    request_counts = {"queued": 0, "claimed": 0, "lost": 0}
+    # v2 §5.20.1：purged 任务的请求退出常规统计。
+    for row in conn.execute(
+        "SELECT r.status, COUNT(*) AS n FROM requests r "
+        "LEFT JOIN tasks t ON t.task_id = r.task_id "
+        "WHERE r.task_id IS NULL OR t.save_state != 'purged' "
+        "GROUP BY r.status"
+    ).fetchall():
+        request_counts[row["status"]] = row["n"]
+    board_counts = {column: 0 for column in constants.BOARD_COLUMNS}
+    # §5.15.3：计数只统计活跃任务（归档/回收站不进看板）。
+    for row in conn.execute(
+        "SELECT * FROM tasks WHERE save_state='active'"
+    ).fetchall():
+        board_counts[derive.task_board_column(row, conn, ctx.now)] += 1
+    lost = 0
+    for row in conn.execute(
+        "SELECT lease_expires_at FROM requests WHERE status='claimed'"
+    ).fetchall():
+        if util.lease_lost(row["lease_expires_at"], ctx.now):
+            lost += 1
+    request_counts["lost"] = lost
+    return {
+        "paused": {
+            "global": db.get_setting(conn, "paused_global", False),
+            "stages": db.get_setting(conn, "paused_stages", []) or [],
+        },
+        "counts": {
+            "tasks": task_counts,
+            "board": board_counts,
+            "requests": request_counts,
+        },
+        "last_tick_at": db.get_setting(conn, "last_tick_at"),
+        "schema_version": constants.SCHEMA_VERSION,
+        "settings": {
+            "lease_seconds": db.get_setting(
+                conn, "lease_seconds", constants.DEFAULT_LEASE_SECONDS
+            ),
+            "monitor_interval_seconds": db.get_setting(
+                conn, "monitor_interval_seconds",
+                constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
+            ),
+            "plan_scan_interval_hours": db.get_setting(
+                conn, "plan_scan_interval_hours",
+                constants.DEFAULT_PLAN_SCAN_INTERVAL_HOURS,
+            ),
+            "plan_scan_anchor": db.get_setting(
+                conn, "plan_scan_anchor", constants.DEFAULT_PLAN_SCAN_ANCHOR
+            ),
+            # v1.3：会话订阅不可用时的增量检查间隔（ui-spec §4.4）。
+            "session_poll_seconds": db.get_setting(
+                conn, "session_poll_seconds",
+                constants.DEFAULT_SESSION_POLL_SECONDS,
+            ),
+            # v1.4：headless 运行记录根目录（空 = 未设置，取默认；Settings 页
+            # 编辑用，protocol.md §5.15.5）。
+            "session_runs_root": db.get_setting(
+                conn, "session_runs_root", ""
+            ) or str(constants.default_session_runs_root()),
+            "migration": db.get_setting(conn, "migration"),
+            # v2 §5.22：规划材料根与 Codex 超时（None=回退 executor 超时）。
+            "planner_inputs_root": db.get_setting(
+                conn, "planner_inputs_root", ""
+            ) or str(constants.planner_inputs_root()),
+            "codex_timeout_seconds": db.get_setting(
+                conn, "codex_timeout_seconds"
+            ),
+        },
+        "paths": {
+            "db": str(ctx.db_path),
+            "plan_root": str(constants.plan_root()),
+            "repos_root": str(constants.repos_root()),
+            "app_support": str(constants.app_support()),
+            "core": str(constants.core_root()),
+            # v1.4：headless 运行记录生效根目录（settings 覆盖 > 默认；
+            # display-only，不参与 doctor ok 判定；protocol.md §5.15.5）。
+            "session_runs_root": str(
+                db.get_setting(
+                    conn, "session_runs_root", ""
+                ) or constants.default_session_runs_root()
+            ),
+            # v2 §5.22：规划材料根生效路径。
+            "planner_inputs_root": str(
+                constants.planner_inputs_root(
+                    db.get_setting(conn, "planner_inputs_root")
+                )
+            ),
+        },
+    }
+
+
+def cmd_list_tasks(ctx, payload: dict) -> dict:
+    board_filter = payload.get("board_column")
+    if board_filter is not None and board_filter not in constants.BOARD_COLUMNS:
+        raise util.KanpilotError(
+            "bad_request", f"invalid board_column {board_filter}"
+        )
+    # §5.15.3：save_state 过滤，缺省只返回 active（归档/回收站不进看板）。
+    # v2 §5.20.1：purged 是终态——常规列表（含 save_state=all）一律排除；
+    # 仅显式 save_state=purged 或按 id get-task 可读审计详情。
+    save_filter = payload.get("save_state") or "active"
+    if save_filter not in ("active", "archived", "trashed", "purged", "all"):
+        raise util.KanpilotError(
+            "bad_request", f"invalid save_state {save_filter}"
+        )
+    clauses, params = [], []
+    if payload.get("stage"):
+        clauses.append("stage=?")
+        params.append(payload["stage"])
+    if payload.get("status"):
+        clauses.append("status=?")
+        params.append(payload["status"])
+    if save_filter == "all":
+        clauses.append("save_state != 'purged'")
+    else:
+        clauses.append("save_state=?")
+        params.append(save_filter)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = ctx.conn.execute(
+        f"SELECT * FROM tasks{where} ORDER BY updated_at DESC", params
+    ).fetchall()
+    tasks = []
+    for row in rows:
+        # board_column 是派生值，只能在派生后过滤（protocol.md §5.2/§5.15.4）；
+        # 失联归列需要 conn/now（§5.15.4 规则 3）。
+        if board_filter is not None and (
+            derive.task_board_column(row, ctx.conn, ctx.now) != board_filter
+        ):
+            continue
+        if payload.get("needs_attention"):
+            attention = row["status"] == "needs_user" or (
+                derive.lost_request_for_task(ctx.conn, row["task_id"], ctx.now)
+                is not None
+            )
+            if not attention:
+                continue
+        tasks.append(derive.task_summary(ctx.conn, row, ctx.now))
+    return {"tasks": tasks}
+
+
+def cmd_get_task(ctx, payload: dict) -> dict:
+    task = db.require_task(ctx.conn, payload["task_id"])
+    return {"task": derive.task_detail(ctx.conn, task, ctx.now)}
+
+
+def cmd_get_plan(ctx, payload: dict) -> dict:
+    """get-plan（protocol.md §5.23.1，v3 T1）：已发布计划正文的核验读取。
+
+    以任务登记的 plan_path 为唯一入口，经 planfile.load_plan 做 Plan 根边界/
+    无符号链接/frontmatter task_id 身份校验；重算整个文件 SHA-256 与登记值
+    比较。不可信正文不返回；本命令只读（不写状态/事件）。
+    """
+    task = db.require_task(ctx.conn, payload["task_id"])
+    expected = payload.get("expected_plan_sha256")
+    registered = task["plan_sha256"]
+    if not task["plan_path"] or not registered:
+        raise util.KanpilotError(
+            "not_found", f"任务 {task['task_id']} 尚未发布计划"
+        )
+    if expected is not None and expected != registered:
+        raise util.KanpilotError(
+            "conflict",
+            "expected_plan_sha256 与登记计划哈希不符（任务可能已重新规划）",
+        )
+    meta, raw, _path = planfile.load_plan(
+        task["plan_path"], expect_task_id=task["task_id"]
+    )
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != registered:
+        raise util.KanpilotError(
+            "conflict",
+            "计划文件哈希与登记值不符（计划自发布后被修改）",
+        )
+    # markdown = 去除 YAML frontmatter 后的正文（raw 已被 read_frontmatter
+    # UTF-8 解码校验过）。与 util.read_frontmatter 同口径 split("---", 2)。
+    text = raw.decode("utf-8")
+    body = text.split("---", 2)[2] if text.startswith("---\n") else text
+    if body.startswith("\n"):
+        body = body[1:]
+    result = {
+        "task_id": task["task_id"],
+        "title": task["title"],
+        "plan_kind": task["plan_kind"] or meta.get("plan_kind") or "standard",
+        "generated_at": task["plan_generated_at"] or meta.get("generated_at"),
+        "plan_sha256": registered,
+        "markdown": body,
+    }
+    if task["save_state"] == "purged":
+        # §5.20.1：purged 终态仍可只读审计，附只读标记。
+        result["read_only"] = True
+    return result
+
+def cmd_get_request(ctx, payload: dict) -> dict:
+    """v2 §5.21.1：请求详情 + attempts + allowed_actions + attention_state。"""
+    request = db.get_request(ctx.conn, payload["request_id"])
+    if request is None:
+        raise util.KanpilotError(
+            "not_found", f"request not found: {payload['request_id']}"
+        )
+    return derive.request_detail(ctx.conn, request, ctx.now)
+
+
+def cmd_list_requests(ctx, payload: dict) -> dict:
+    status = payload.get("status")
+    if status is not None and status not in (
+        "queued", "claimed", "lost", "failed", "succeeded",
+        "cancelled", "active",
+    ):
+        raise util.KanpilotError(
+            "bad_request", f"invalid status filter {status}"
+        )
+    limit = payload.get("limit") or 200
+    # v2 §5.20.2：purged 任务的请求退出常规列表；include_removed 显式回看。
+    include_removed = bool(payload.get("include_removed"))
+    clauses, params = [], []
+    if status and status not in ("active", "lost"):
+        clauses.append("r.status=?")
+        params.append(status)
+    elif status == "active":
+        clauses.append("r.status IN ('queued','claimed')")
+    elif status == "lost":
+        # 失联判定在 SQL 层完成（租约过期），避免 LIMIT 截掉真实失联行。
+        clauses.append(
+            "r.status='claimed' AND r.lease_expires_at < ?")
+        params.append(util.to_iso(ctx.now))
+    if not include_removed:
+        clauses.append("(r.task_id IS NULL OR t.save_state != 'purged')")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = ctx.conn.execute(
+        "SELECT r.* FROM requests r "
+        "LEFT JOIN tasks t ON t.task_id = r.task_id"
+        f"{where} ORDER BY r.created_at DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    views = []
+    for row in rows:
+        views.append(derive.request_view(row, ctx.now))
+    return {"requests": views}
+
+
+_EVENT_RESULT_VALUES = ("succeeded", "failed", "cancelled", "needs_user", "lost")
+
+
+def cmd_list_events(ctx, payload: dict) -> dict:
+    """v2 §5.21.2：id DESC 游标分页 + stage/result/query 全史过滤 + 派生字段。
+
+    before_id 为严格小于该 id 的游标；limit 缺省 100、上限 200（>200 按 200，
+    非法值 bad_request）。搜索/过滤由核心在全部历史上执行（先过滤再分页）。
+    """
+    limit = payload.get("limit")
+    if limit is None:
+        limit = 100
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise util.bad_request("limit must be a positive integer")
+    if limit > 200:
+        limit = 200
+    before_id = payload.get("before_id")
+    if before_id is not None:
+        if not isinstance(before_id, int) or isinstance(before_id, bool)                 or before_id <= 0:
+            raise util.bad_request("before_id must be a positive integer")
+    stage = payload.get("stage")
+    if stage is not None and stage not in (
+        "plan", "dispatch", "monitor", "review", "done",
+    ):
+        raise util.bad_request(f"invalid stage filter {stage}")
+    result_f = payload.get("result")
+    if result_f is not None and result_f not in _EVENT_RESULT_VALUES:
+        raise util.bad_request(f"invalid result filter {result_f}")
+    query = payload.get("query")
+    if query is not None and not isinstance(query, str):
+        raise util.bad_request("query must be a string")
+    query_l = (query or "").strip().lower()
+
+    clauses, params = [], []
+    if payload.get("task_id"):
+        clauses.append("task_id=?")
+        params.append(payload["task_id"])
+    if before_id is not None:
+        clauses.append("id < ?")
+        params.append(before_id)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = ctx.conn.execute(
+        f"SELECT * FROM events{where} ORDER BY id DESC", params
+    ).fetchall()
+
+    task_cache: dict = {}
+    request_cache: dict = {}
+    filtered = []
+    for row in rows:
+        view = derive.event_view(
+            ctx.conn, row, task_cache=task_cache, request_cache=request_cache
+        )
+        if stage is not None and view["stage"] != stage:
+            continue
+        if result_f is not None and view["result"] != result_f:
+            continue
+        if query_l:
+            haystack = "\n".join(
+                str(part)
+                for part in (
+                    view["task_title"], view["project_name"],
+                    view["task_id"], view["request_id"], view["kind"],
+                    view["summary"],
+                    util.jdump(view["detail"]) if view["detail"] else "",
+                )
+                if part
+            ).lower()
+            if query_l not in haystack:
+                continue
+        filtered.append(view)
+
+    page = filtered[:limit]
+    next_before_id = (
+        page[-1]["id"] if len(filtered) > limit and page else None
+    )
+    return {"events": page, "next_before_id": next_before_id}
+
+
+def cmd_doctor(ctx, payload: dict) -> dict:
+    online = bool(payload.get("online"))
+    checks = []
+
+    checks.append({
+        "name": "python",
+        "ok": sys.version_info >= (3, 9),
+        "detail": ".".join(str(part) for part in sys.version_info[:3]),
+    })
+
+    try:
+        ctx.conn.execute("SELECT 1").fetchone()
+        checks.append(
+            {"name": "db_writable", "ok": True, "detail": str(ctx.db_path)}
+        )
+    except sqlite3.Error as exc:
+        checks.append({"name": "db_writable", "ok": False, "detail": str(exc)})
+
+    creds_ok, creds_detail = False, "missing"
+    try:
+        from . import bridge
+
+        base_url, _token = bridge.load_credentials()
+        creds_ok, creds_detail = True, f"present, baseUrl {base_url}"
+    except Exception as exc:
+        creds_detail = str(exc)
+    checks.append({"name": "credentials", "ok": creds_ok, "detail": creds_detail})
+
+    for name, path in (
+        ("plan_root", constants.plan_root()),
+        ("repos_root", constants.repos_root()),
+        ("state_root", constants.app_support()),
+    ):
+        checks.append({"name": name, "ok": path.is_dir(), "detail": str(path)})
+
+    # v2 §5.22.3：Codex 规划环境（可执行 + 登录态就绪；不读凭据值）。
+    try:
+        from . import codex_planner
+
+        codex_ok, codex_detail = codex_planner.check_available()
+    except Exception as exc:  # pragma: no cover - defensive
+        codex_ok, codex_detail = False, str(exc)
+    checks.append(
+        {"name": "codex_planner", "ok": codex_ok, "detail": codex_detail}
+    )
+
+    if online:
+        try:
+            client = remote.get_client()
+            client.request("/api/project?workspaceId=" + constants.WORKSPACE_ID)
+            checks.append(
+                {"name": "kaneo_ping", "ok": True, "detail": "HTTP 200",
+                 "skipped": False}
+            )
+        except Exception as exc:
+            checks.append(
+                {"name": "kaneo_ping", "ok": False, "detail": str(exc),
+                 "skipped": False}
+            )
+    else:
+        checks.append(
+            {"name": "kaneo_ping", "ok": True, "detail": "offline",
+             "skipped": True}
+        )
+    return {"ok": all(item["ok"] for item in checks), "checks": checks}
