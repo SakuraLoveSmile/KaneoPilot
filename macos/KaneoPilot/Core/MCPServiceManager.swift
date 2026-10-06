@@ -117,6 +117,14 @@ final class MCPServiceManager: ObservableObject {
     }
 
     /// Starts the service and waits for its own manifest plus a live HTTP response.
+    /// AppRuntime 生命周期入口：恢复用户已开启的服务，不替用户改变开关。
+    func restoreAtAppLaunch() {
+        checkExistingServer()
+        if status.enabled && status.url == nil && !hasLiveManifestProcess() {
+            start()
+        }
+    }
+
     func start() {
         guard process?.isRunning != true else { return }
         if process == nil, hasLiveManifestProcess() {
@@ -362,6 +370,21 @@ final class MCPServiceManager: ObservableObject {
         if owned.isRunning {
             owned.terminate()
             DispatchQueue.global(qos: .utility).async { owned.waitUntilExit() }
+        }
+    }
+
+    /// terminateLater 入口；等待本实例的服务退出，不改变用户开关或发现的外部服务。
+    func stopOwnedProcessForAppExit(completion: @escaping () -> Void) {
+        guard let owned = process else { completion(); return }
+        process = nil
+        owned.terminationHandler = nil
+        if owned.isRunning { owned.terminate() }
+        DispatchQueue.global(qos: .utility).async {
+            let deadline = Date().addingTimeInterval(2)
+            while owned.isRunning && Date() < deadline { usleep(50_000) }
+            if owned.isRunning { kill(owned.processIdentifier, SIGKILL) }
+            owned.waitUntilExit()
+            DispatchQueue.main.async(execute: completion)
         }
     }
 

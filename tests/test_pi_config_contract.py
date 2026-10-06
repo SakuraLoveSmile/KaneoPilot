@@ -213,11 +213,11 @@ PLUS_BLOCK = {
 
 
 def test_controller_backend_saves_offline_and_coexists(cli):
-    # 缺 Plus 块 → 明确 bad_request，不静默写入、不降级。
-    out = cli("set-exec-config", {"controller_backend": "pi_desktop"}, expect=1)
-    assert out["code"] == "bad_request"
-    assert "pi_desktop 配置未保存" in out["error"]
-    assert cli("get-exec-config", {})["config"] is None
+    # v5 legacy controller choice is display-only; active execution remains pi.
+    out = cli("set-exec-config", {"controller_backend": "pi_desktop"})
+    assert out["config"]["controller_backend"] == "pi_desktop"
+    assert out["config"]["backend"] == "pi"
+    assert cli("set-exec-config", {"backend": "pi_desktop"}, expect=1)["code"] == "bad_request"
 
     # 服务离线也能保存（任务执行 + 控制端两个后端各存各的）。
     saved = cli("set-exec-config", {
@@ -272,10 +272,11 @@ def test_planner_and_review_backend_are_independent(cli):
 
 def test_role_capability_commands_report_each_branch(cli):
     caps = cli("review-capabilities", {})
-    assert set(caps) == {"pi", "pi_desktop"}
+    assert set(caps) == {"pi", "pi_desktop", "claude", "codex"}
     assert set(caps["pi"]) == {"available", "detail"}
     assert set(caps["pi_desktop"]) == {"available", "detail", "tools_ok",
                                        "version"}
+    assert all(isinstance(caps[name]["available"], bool) and "detail" in caps[name] for name in ("claude", "codex"))
     assert isinstance(caps["pi"]["available"], bool)
     assert isinstance(caps["pi_desktop"]["available"], bool)
     # 未保存 Plus 配置 → 不可用且给出中文原因（不伪装成功）。
@@ -283,7 +284,7 @@ def test_role_capability_commands_report_each_branch(cli):
     assert caps["pi_desktop"]["detail"]
 
     planner = cli("planner-capabilities", {})
-    assert set(planner["backends"]) == {"codex", "pi_desktop"}
+    assert set(planner["backends"]) == {"codex", "pi_desktop", "claude"}
     assert planner["backends"]["pi_desktop"]["available"] is False
 
     exec_caps = cli("exec-capabilities", {})

@@ -11,7 +11,9 @@
 - ``backend="pi_desktop"``（v4）：使用 ``review_config.pi_desktop`` 五字段，
   会话为 ``mode=plan`` + ``permission_mode=ask``（只读倾向，防自动 shell 写入），
   ``mode`` 不参与生效（仅属 pi 分支，切换后端不删除）。
-- 两分支共存：切换后端只改 ``backend``，不删除另一分支已存字段；服务离线
+- ``backend="claude"|"codex"``（v5）：分别保存 model/effort 与
+  model/reasoning_effort；只读 CLI 使用本机认证配置，保存时不调用模型。
+- 各分支共存：切换后端只改 ``backend``，不删除其他分支已存字段；服务离线
   也能保存（结构/枚举校验，不探测服务）。
 - snapshot：写入运行记录/事件的脱敏快照——按**生效分支**输出，不含
   updated_at、不含 token/连接文件全文。
@@ -23,9 +25,10 @@
 from __future__ import annotations
 
 import sqlite3
+import shutil
 from typing import Optional
 
-from . import constants, db, exec_config, util
+from . import constants, db, exec_config, util, planner_config
 
 # settings.review_config 形状：{backend, mode, provider?, model?,
 # reasoning_effort?, pi_desktop?, updated_at}。inherit 时忽略三字段；custom 时
@@ -38,6 +41,25 @@ DEFAULT_BACKEND = constants.REVIEW_BACKEND
 # get-review-config 的 defaults 形状冻结为 {"mode": "inherit"}（§5.23.4）；
 # backend 的缺省解释是 pi（§5.24.1），不在此处扩展以免改动冻结响应。
 DEFAULTS = {"mode": "inherit"}
+CLI_DEFAULTS = {"claude": {"model": "sonnet", "effort": "high"},
+                "codex": {"model": constants.REVIEW_FIX_PLANNER["planner_model"],
+                          "reasoning_effort": constants.REVIEW_FIX_PLANNER["reasoning_effort"]}}
+CLI_KEYS = {"claude": ("model", "effort"), "codex": ("model", "reasoning_effort")}
+
+def cli_block(config, backend):
+    stored = (config or {}).get(backend)
+    return {key: (stored.get(key, CLI_DEFAULTS[backend][key]) if isinstance(stored, dict)
+                  else CLI_DEFAULTS[backend][key]) for key in CLI_KEYS[backend]}
+
+
+def _validate_cli(block, backend):
+    if not isinstance(block, dict):
+        return f"{backend} 必须是对象"
+    if backend == "claude":
+        return planner_config.validate_claude_block(block)
+    return planner_config.validate_group(
+        {"planner_model": block.get("model"), "reasoning_effort": block.get("reasoning_effort")}, None)
+
 # Plus Review 分支只允许该权限模式（§5.24：不开放 auto/accept-edits）。
 PI_DESKTOP_PERMISSION_MODE = constants.PI_DESKTOP_READONLY_PERMISSION_MODE
 
@@ -77,6 +99,8 @@ def load(conn: sqlite3.Connection) -> Optional[dict]:
     config["pi_desktop"] = exec_config.merge_pi_desktop_block(
         stored.get("pi_desktop")
     )
+    for name in CLI_KEYS:
+        config[name] = cli_block(stored, name)
     if isinstance(stored.get("updated_at"), str):
         config["updated_at"] = stored["updated_at"]
     return config
@@ -108,6 +132,9 @@ def snapshot(conn: sqlite3.Connection) -> dict:
     未保存 → ``{backend:"pi", mode:"inherit"}``（=继承 PI 默认会话配置）。
     """
     config = load(conn)
+    if config and config.get("backend") in CLI_KEYS:
+        active = config["backend"]
+        return {"backend": active, **cli_block(config, active)}
     if config is not None and config.get("backend") == "pi_desktop":
         resolved, error = resolve_runtime_config(conn)
         if resolved is None:
@@ -159,6 +186,9 @@ def validate(config: dict, caps: dict) -> Optional[str]:
             f"backend 不支持：{resolved}"
             f"（可用：{', '.join(BACKENDS)}）"
         )
+    if _backend(resolved) in CLI_KEYS:
+        active = _backend(resolved)
+        return _validate_cli(cli_block(config, active), active)
     if _backend(resolved) == "pi_desktop":
         return _validate_pi_desktop(
             exec_config.merge_pi_desktop_block(config.get("pi_desktop"))
@@ -224,7 +254,22 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         merged_block.update(block)
         merged["pi_desktop"] = merged_block
 
+    for name in CLI_KEYS:
+        if name in fields:
+            if not isinstance(fields[name], dict):
+                raise util.bad_request(f"{name} 必须是对象")
+            if set(fields[name]) - set(CLI_KEYS[name]):
+                raise util.bad_request(f"{name} 含不支持的字段")
+            block = cli_block(stored, name)
+            block.update(fields[name])
+            error = _validate_cli(block, name)
+            if error:
+                raise util.bad_request(error)
+            merged[name] = block
     candidate = {"backend": resolved}
+    if resolved in CLI_KEYS:
+        candidate[resolved] = cli_block(merged, resolved)
+
     if resolved == "pi_desktop":
         candidate["pi_desktop"] = merged.get("pi_desktop")
     else:
@@ -232,7 +277,7 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         for key in CUSTOM_KEYS:
             if key in merged:
                 candidate[key] = merged[key]
-    error = validate(candidate, exec_config.capabilities(conn))
+    error = validate(candidate, exec_config.capabilities(conn) if resolved == "pi" else {})
     if error is not None:
         raise util.bad_request(f"Review 配置校验失败：{error}")
 
@@ -242,10 +287,12 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     }
     if record["mode"] == "custom":
         # 保留 pi 分支已存的显式模型字段（切回 pi 时可恢复；inherit 时才清）。
-        record.update({key: merged[key] for key in CUSTOM_KEYS})
+        record.update({key: merged[key] for key in CUSTOM_KEYS if key in merged})
     record["pi_desktop"] = exec_config.merge_pi_desktop_block(
         merged.get("pi_desktop")
     )
+    for name in CLI_KEYS:
+        record[name] = cli_block(merged, name)
     record["updated_at"] = now
     db.set_setting(conn, "review_config", record)
     return record
@@ -324,7 +371,13 @@ def capabilities(conn: sqlite3.Connection, timeout: int = 10) -> dict:
                 "version": probe["version"],
             }
 
+    cli_caps = {}
+    for name, executable in (("claude", constants.claude_bin()), ("codex", constants.codex_bin())):
+        error = _validate_cli(cli_block(config, name), name)
+        present = shutil.which(executable) is not None
+        cli_caps[name] = {"available": present and error is None,
+                          "detail": error or (f"{name} CLI 可用（模型/认证尚未验证）" if present else f"{name} CLI 不存在")}
     return {
         "pi": {"available": pi_available, "detail": pi_detail},
-        "pi_desktop": pi_desktop,
+        "pi_desktop": pi_desktop, **cli_caps,
     }

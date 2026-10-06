@@ -204,7 +204,12 @@ def build_plan_meta(
         "planner_input_sha256": context.get("payload", {}).get(
             "planner_input_sha256") or "",
     }
-    if plan_kind == "review_fix":
+    if req_payload.get("fix_mode") == "same_task":
+        meta.update({key: req_payload.get(key) or "" for key in (
+            "review_report_path", "review_report_sha256", "review_key")})
+        meta.update(fix_mode="same_task", fix_round=req_payload.get("fix_round"),
+                    review_source_task_id=task_id)
+    elif plan_kind == "review_fix":
         row = task_row or {}
         meta.update({
             # 优先 DB 任务行（含 review_report_*）；回落请求 payload
@@ -245,7 +250,8 @@ def write_plan_file(
     task_id = context.get("task_id") or manifest_task.get("task_id")
     lines = ["---"]
     for key, value in meta.items():
-        lines.append(f"{key}: {_yaml_scalar(value)}")
+        scalar = str(value) if key == "fix_round" and isinstance(value, int) else _yaml_scalar(value)
+        lines.append(f"{key}: {scalar}")
     lines.append("---")
     body = _strip_model_frontmatter(plan_markdown or "")
     path = _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan")
@@ -428,6 +434,53 @@ def _fail_unknown_backend(db_path: Path, run_dir: Path, request_id: str,
             failure_code="planner_failed",
             evidence={"error_category": "plan_backend_invalid"})
 
+
+def _verify_partial_materials(context: dict) -> None:
+    """Verify frozen partial file copies before any backend or fake dispatch."""
+    from . import planner_inputs
+
+    manifest = (context.get("payload") or {}).get("manifest") or {}
+    if not isinstance(manifest, dict):
+        return
+    files = manifest.get("files") or []
+    if not isinstance(files, list):
+        if manifest.get("execution_worktree") is not None:
+            raise util.KanpilotError("validation_failed", "重新规划材料文件清单不合法")
+        return
+    for entry in files:
+        if not isinstance(entry, dict) or entry.get("source") != "execution_worktree":
+            continue
+        relative = entry.get("path")
+        input_dir = context.get("input_dir")
+        if not isinstance(relative, str) or not relative or not input_dir:
+            raise util.KanpilotError("validation_failed", "重新规划材料路径缺失，请重新准备材料")
+        content, reason = planner_inputs._read_worktree_material(
+            str(input_dir), relative, constants.PLAN_INPUT_FILE_MAX_BYTES)
+        if content is None or util.sha256_bytes(content) != entry.get("sha256"):
+            raise util.KanpilotError(
+                "validation_failed", "重新规划材料已变化或不可读取，请重新准备材料："
+                + relative + "（" + (reason or "sha256_mismatch") + "）")
+
+
+def _fail_planner_input(db_path, run_dir, request_id, run_id, task_id, backend, detail):
+    now = util.now_iso()
+    _write_json(run_dir / dsh_events.JOB_NAME, {
+        "task_id": task_id, "run_id": run_id, "backend": str(backend),
+        "session_id": None, "turn_id": None, "status": "failed",
+        "pid": os.getpid(), "started_at": now, "ended_at": now,
+        "exit_code": 1, "detail": detail,
+    })
+    _EventLog(run_dir / dsh_events.EVENT_LOG_NAME).emit(
+        "terminal", now, outcome="failed", reason="plan_input_mismatch")
+    conn = db.connect(db_path)
+    try:
+        _mark_round_finished(conn, task_id, run_id, "failed", now)
+    finally:
+        conn.close()
+    _report(db_path, request_id, run_id, "failed", detail,
+            failure_code="planner_failed",
+            evidence={"error_category": "plan_input_mismatch"})
+
 # ------------------------------------------------------------ 失败分类（§5.22.6）
 _AUTH_RE = re.compile(
     r"(?i)(?<!\d)(401|403)(?!\d)|unauthorized|forbidden|"
@@ -527,10 +580,22 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     #（旧请求语义不变）；以下 codex 分支一字未改，Plus 分支整体交
     # ``pi_desktop_planner``（独立规划 worktree + plan 会话 + plan proposal 读取）。
     backend = req_payload.get("planner_backend") or constants.PLANNER_BACKEND
+    try:
+        _verify_partial_materials(context)
+    except util.KanpilotError as exc:
+        _fail_planner_input(db_path, run_dir, req_id, run_id, task_id, backend, exc.message)
+        return True
     if backend == "pi_desktop":
         from . import pi_desktop_planner
 
         return pi_desktop_planner.run_one(
+            db_path, req_id, run_id, context=context, task=task,
+            task_id=task_id, run_dir=run_dir, timeout=timeout,
+            heartbeat_every=heartbeat_every,
+        )
+    if backend == "claude":
+        from . import claude_planner
+        return claude_planner.run_one(
             db_path, req_id, run_id, context=context, task=task,
             task_id=task_id, run_dir=run_dir, timeout=timeout,
             heartbeat_every=heartbeat_every,
@@ -675,10 +740,11 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         manifest, Path(input_dir) if input_dir else None
     )
     prompt = codex_planner.build_prompt(
-        task, manifest, Path(input_dir) if input_dir else None,
+        dict(task, fix_mode=req_payload.get("fix_mode")), manifest, Path(input_dir) if input_dir else None,
         method=method,
     )
     job_for_argv = {
+        "plan_cwd": req_payload.get("plan_cwd"),
         "model_config": req_payload.get("model_config"),
         "repository": task.get("repository")
         or (manifest.get("task") or {}).get("repository"),
@@ -1007,7 +1073,7 @@ def _run_fake(db_path: Path, run_dir: Path, job: dict, log: _EventLog,
     else:  # ready（默认）
         output = {
             "status": "ready",
-            "plan_markdown": "# 实施计划\n\n1. 步骤一\n2. 步骤二\n",
+            "plan_markdown": "# 实施计划\n\n1. 步骤一\n2. 步骤二\n\n```verify\npython3 -m unittest\n```\n",
             "questions": [], "evidence": ["manifest.json"],
         }
 

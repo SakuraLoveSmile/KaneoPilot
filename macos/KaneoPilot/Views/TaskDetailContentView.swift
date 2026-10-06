@@ -15,6 +15,7 @@ struct TaskDetailContentView: View {
     @State private var events: [EventItem] = []
     @State private var loading = true
     @State private var error: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +38,9 @@ struct TaskDetailContentView: View {
             Task { await load() }
         }
         .onChange(of: taskID) {
+            loadGeneration += 1
+            detail = nil
+            events = []
             tab = initialTab
             Task { await load() }
         }
@@ -51,6 +55,7 @@ struct TaskDetailContentView: View {
                     if let project = detail?.projectName {
                         Text(project)
                             .font(.kpSmall)
+                            .lineLimit(1)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -59,6 +64,7 @@ struct TaskDetailContentView: View {
                     Text(detail?.title ?? taskID)
                         .font(.kpTitle)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .textSelection(.enabled)
                 }
                 HStack(spacing: Spacing.m) {
@@ -73,6 +79,7 @@ struct TaskDetailContentView: View {
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: Spacing.m)
             Picker("详情分段", selection: $tab) {
                 ForEach(TaskDetailTab.allCases) { t in
@@ -80,7 +87,9 @@ struct TaskDetailContentView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .frame(width: 280)
+            .fixedSize(horizontal: true, vertical: false)
             .accessibilityLabel("详情分段切换")
 
             if let onDismiss {
@@ -152,14 +161,18 @@ struct TaskDetailContentView: View {
     }
 
     private func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
         loading = true
         error = nil
-        defer { loading = false }
+        defer { if generation == loadGeneration { loading = false } }
         do {
             let (task, evs) = try await model.fetchDetail(taskID: taskID)
+            guard generation == loadGeneration else { return }
             detail = task
             events = evs
         } catch {
+            guard generation == loadGeneration else { return }
             self.error = error.coreMessage
         }
     }
@@ -241,7 +254,8 @@ struct TaskOverviewTabView: View {
 
     private var hasReview: Bool {
         detail.reviewReportPath != nil || detail.fixTaskId != nil || detail.reviewKey != nil
-            || detail.reviewConclusion != nil
+            || detail.reviewConclusion != nil || detail.reviewSummary != nil
+            || !(detail.reviewHistory?.isEmpty ?? true)
     }
 
     private var hasKaneo: Bool {
@@ -294,6 +308,8 @@ struct TaskOverviewTabView: View {
                     kaneoSection
                 }
 
+                TaskAutomationSections(detail: detail)
+
                 // 5. 技术详情与长路径（可折叠）
                 technicalDetailsSection
             }
@@ -341,7 +357,7 @@ struct TaskOverviewTabView: View {
             HStack(spacing: Spacing.s) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text("任务当前处于阻塞状态")
+                Text(AutomationPresentation.title(detail.failureCode) ?? "任务当前处于阻塞状态")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.orange)
             }
@@ -350,6 +366,12 @@ struct TaskOverviewTabView: View {
                     .font(.kpSmall)
                     .foregroundStyle(.primary)
                     .textSelection(.enabled)
+            }
+            if let explanation = AutomationPresentation.explanation(detail.failureCode) {
+                Text(explanation)
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Spacing.m)
@@ -474,19 +496,21 @@ struct TaskOverviewTabView: View {
     private var actionBar: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(spacing: Spacing.m) {
-                ForEach(visibleActions, id: \.self) { action in
-                    actionButton(action)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Spacing.m) {
+                    ForEach(visibleActions, id: \.self) { action in
+                        actionButton(action)
+                    }
+                    Spacer(minLength: 0)
+                    if detail.readOnly == true {
+                        Label("只读模式", systemImage: "lock.fill")
+                            .font(.kpSmall)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Spacer(minLength: 0)
-                if detail.readOnly == true {
-                    Label("只读模式", systemImage: "lock.fill")
-                        .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                }
+                .padding(.horizontal, Spacing.l)
+                .padding(.vertical, Spacing.s)
             }
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
         }
         .background(Color.kpWindow)
     }
@@ -494,6 +518,22 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func actionButton(_ action: String) -> some View {
         switch action {
+        case "resume", "accept_verification":
+            Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
+                Task { await model.resolve(taskID: detail.taskId, action: action) }
+            }
+            .disabled(model.busy)
+        case "dismiss":
+            Button(AutomationPresentation.active(detail.automation) ? "转为人工处理" : "清除阻塞标记") {
+                Task { await model.resolve(taskID: detail.taskId, action: action) }
+            }
+            .disabled(model.busy)
+        case "prepare_plan":
+            Button("准备规划") { model.openPlanning(focusTaskID: detail.taskId) }
+                .disabled(model.busy)
+        case "enqueue":
+            Button("安排下一步") { Task { await model.enqueue(taskID: detail.taskId) } }
+                .disabled(model.busy)
         case "plan", "start_plan":
             Button("安排规划") {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }

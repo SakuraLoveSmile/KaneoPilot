@@ -5,7 +5,7 @@ Kaneo 调度台：本机 macOS 工作台。SwiftUI 桌面 + Python 调度核心 
 ## 边界
 
 - 第一版仅本机；不做云端、多用户、手机端、Kaneo 服务端改造。
-- 执行端由 App 内置调度器（ExecutorScheduler + kanpilot.executor_runner）按固化的角色后端拉起。Pi/Codex 分支保留原入口；新 Plus 轮次经本项目 MCP runtime 域控制，并在发送前挂接会话专属 task grant（protocol §5.25）。本软件只做确定性的队列与状态管理。
+- 执行端由 App 常驻调度器按固化后端拉起；dispatch/monitor/delivery 为确定性流程；Plus 轮次经本项目 MCP runtime 域控制，不挂接 task grant。所有状态写入经核心命令。
 - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
 - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
 
@@ -24,6 +24,7 @@ Kaneo 调度台：本机 macOS 工作台。SwiftUI 桌面 + Python 调度核心 
 - 核心隔离测试：`cd core && python3 -m pytest tests -q`（或 unittest，随实现）。
 - 集成测试：`python3 -m pytest tests -q`。
 - 构建 app：`scripts/build_app.sh` → `dist/KaneoPilot.app`。
+- 自动接收：`cd core && python3 -m kanpilot.auto_intake`；只读预览加 `--dry-run`。调度每 20 秒检查，intake 每 300 秒。
 - 诊断：`kanpilot doctor`；迁移：`kanpilot migrate`。
 
 ## 约束
@@ -32,3 +33,7 @@ Kaneo 调度台：本机 macOS 工作台。SwiftUI 桌面 + Python 调度核心 
 - 远端 Kaneo 写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
 - 不输出/不持久化 Kaneo 凭据 token。
 - SwiftUI 遵循 docs/ui-spec.md 的冻结度量（13/18/11pt、8/12/16 间距、1180×760/900×600）。
+
+## 分支合并后的清理
+
+- PR 或来源分支确认已合并后，必须删除已合并的本地、远端来源分支，并清理对应的临时工作树；不得将分支清理留作可选后续步骤。删除前核对目标分支已包含来源提交，保留 `main` 等仍在使用的目标分支。工作树有未提交改动或需要保留的文件时，先将进行中的工作迁移到新的工作分支或建立可核验、可恢复的备份，再清理原来源分支；不得丢弃现有工作或数据。完成后核对本地/远端分支和工作树列表，并报告清理结果。

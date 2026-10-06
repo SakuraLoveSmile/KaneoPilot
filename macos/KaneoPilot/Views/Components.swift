@@ -30,6 +30,8 @@ enum Labels {
         case "dispatch": return "派发"
         case "monitor": return "监控"
         case "review": return "评审"
+        case "delivery": return "交付"
+        case "intake": return "自动接收"
         case "done": return "完成"
         default: return key ?? "—"
         }
@@ -46,6 +48,8 @@ enum Labels {
         case "dispatch": return "派发"
         case "monitor": return "监控"
         case "review": return "评审"
+        case "delivery": return "交付"
+        case "intake": return "自动接收"
         default: return key ?? "—"
         }
     }
@@ -669,5 +673,53 @@ extension JSONValue {
         default:
             lines.append(pad + value.text)
         }
+    }
+}
+
+// 自动化失败的展示词表；可用性始终由核心 allowed_actions 决定。
+enum AutomationPresentation {
+    static func title(_ code: String?) -> String? {
+        switch code {
+        case "verification_unconfirmed": return "验证结果待确认"
+        case "fix_rounds_exhausted": return "修复轮已用完"
+        case "auto_budget_exceeded": return "超出自动处理预算"
+        case "automation_stopped": return "项目自动处理已关闭"
+        case "branch_exists", "delivery_base_unknown": return "分支准备受阻"
+        case "delivery_blocked_files", "delivery_commit_failed": return "提交受阻"
+        case "review_blocked", "review_backend_unsupported": return "Review 受阻"
+        case "branch_diverged", "gh_unavailable", "pr_closed": return "PR 交付受阻"
+        case "no_changes": return "执行未产生改动"
+        case "remote_conflict": return "远端需求或状态已变化"
+        case "execution_failed": return "执行失败"
+        default: return nil
+        }
+    }
+    static func explanation(_ code: String?) -> String? {
+        switch code {
+        case "verification_unconfirmed": return "验证证据尚未确认；查看执行记录后可接受验证结果或重新规划。"
+        case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
+        case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
+        case "automation_stopped": return "请先重新开启项目自动处理，再继续修复。"
+        case "branch_exists", "delivery_base_unknown": return "请检查已有任务分支或 PR 目标分支，再重新准备分支。"
+        case "delivery_blocked_files", "delivery_commit_failed": return "请查看提交失败证据，处理文件或仓库问题后重新提交。"
+        case "review_backend_unsupported": return "请把 Review 后端改为 Plus、Claude 或 Codex 后重试。"
+        case "review_blocked": return "请查看 Review 证据并处理阻塞，再重新 Review。"
+        case "branch_diverged", "gh_unavailable", "pr_closed": return "请检查分支、GitHub CLI 或 PR 状态，处理后继续交付。"
+        case "no_changes": return "执行未产生可提交改动；可重新规划、登记完成或转为人工处理。"
+        case "remote_conflict": return "请查看 Kaneo 当前需求和状态；继续或重新规划即表示接受当前远端内容。"
+        default: return nil
+        }
+    }
+    static func resumeLabel(_ code: String?) -> String {
+        switch code {
+        case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
+        case "branch_exists", "delivery_base_unknown": return "重新准备分支"
+        case "delivery_blocked_files", "delivery_commit_failed": return "重新提交"
+        case "review_blocked", "review_backend_unsupported": return "重新 Review"
+        default: return "继续"
+        }
+    }
+    static func active(_ automation: TaskAutomationView?) -> Bool {
+        automation != nil && automation?.manualTakeover != true
     }
 }

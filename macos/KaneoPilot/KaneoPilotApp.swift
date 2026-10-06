@@ -3,9 +3,33 @@ import AppKit
 
 @MainActor
 private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
-    func applicationWillTerminate(_ notification: Notification) {
-        MCPServiceManager.shared.stopOwnedProcessForAppExit()
+    private var windowCloseObserver: NSObjectProtocol?
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppRuntime.shared.start()
+        windowCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { notification in
+            guard let window = notification.object as? NSWindow, window.canBecomeMain else { return }
+            Task { @MainActor in
+                if !NSApplication.shared.windows.contains(where: { $0 !== window && $0.canBecomeMain && $0.isVisible }) {
+                    AppRuntime.shared.mainWindowDidClose()
+                }
+            }
+        }
     }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AppRuntime.shared.stop { successful in
+            sender.reply(toApplicationShouldTerminate: successful)
+            if !successful {
+                let alert = NSAlert()
+                alert.messageText = "后台进程清理尚未完成"
+                alert.informativeText = "已停止调度并保留现场。请恢复核心连接后重试退出；Plus 会话不会被结束。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            }
+        }
+        return .terminateLater
+    }
+    func applicationWillTerminate(_ notification: Notification) { AppRuntime.shared.stop() }
 }
 
 @main
@@ -22,16 +46,24 @@ struct KaneoPilotApp: App {
         return nil
     }
 
+    // 与外观覆盖一样，仅供隔离验收固定初始视口；正常启动沿用规格默认值。
+    private var initialWindowSize: CGSize {
+        ProcessInfo.processInfo.environment["KANPILOT_WINDOW_SIZE"] == "900x600"
+            ? CGSize(width: 900, height: 600)
+            : CGSize(width: 1180, height: 760)
+    }
+
     var body: some Scene {
         WindowGroup("Kaneo 调度台", id: "main") {
             RootView()
                 .environmentObject(model)
                 .environmentObject(mcpManager)
                 .preferredColorScheme(preferredScheme)
-                .frame(minWidth: 900, idealWidth: 1180, minHeight: 600, idealHeight: 760)
-                .task { ExecutorScheduler.LocalNetworkGate.probeAtLaunch() }
+                .frame(minWidth: 900, idealWidth: 1180, idealHeight: 760)
+                .onAppear { AppRuntime.shared.mainWindowDidOpen() }
         }
-        .defaultSize(width: 1180, height: 760)
-        .windowResizability(.contentMinSize)
+        .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
+        .windowResizability(.automatic)
+        MenuBarExtra("KaneoPilot", systemImage: "arrow.triangle.branch") { MenuBarView() }
     }
 }

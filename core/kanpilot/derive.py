@@ -128,6 +128,7 @@ _REQUEST_KIND_CN = {
     "dispatch": "派发",
     "monitor": "监控",
     "review": "评审",
+    "delivery": "交付",
 }
 
 # 归档/回收站禁用状态 -> 中文（protocol.md §5.15.2）。
@@ -408,7 +409,14 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     board_column = task_board_column(task, conn, now)
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
+    from . import core, automation_policy
+    automation = core.automation_of(task)
+    policy = automation_policy.policy_for(conn, task["project_id"]) or {}
+    automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
     view = {
+        "automation": automation or None,
+        "delivery": core.delivery_of(task) or None,
+        "review_history": db.task_extra(task).get("review_history") or [],
         "task_id": task["task_id"],
         "project_id": task["project_id"],
         "project_name": task["project_name"],
@@ -496,11 +504,20 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if lost_request_for_task(conn, task["task_id"], now) is not None:
             actions.append("release_lost")
         if status == "needs_user":
-            if send_state in (None, "not_sent"):
+            from . import core, cmd_queue
+            code = task["failure_code"]
+            if code == "verification_unconfirmed":
+                actions.append("accept_verification")
+            if core.is_automation_managed(task) and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
+                if code != "remote_conflict" or task["failure_stage"] != "dispatch":
+                    actions.append("resume")
+            if send_state in (None, "not_sent") and code not in constants.AUTOMATION_FAILURE_CODES:
                 actions.append("retry")
             if send_state == "unknown":
                 actions.extend(["restore", "accept_duplicate", "mark_sent"])
-            actions.extend(["replan", "dismiss"])
+            if not (core.is_automation_managed(task) and send_state == "unknown"):
+                actions.append("replan")
+            actions.append("dismiss")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
     if db.task_auto_paused(task):
@@ -515,6 +532,7 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     ).fetchall()
     detail.update(
         {
+            "extra": db.task_extra(task),
             "repository": task["repository"],
             "plan_sha256": task["plan_sha256"],
             "plan_kind": task["plan_kind"],
@@ -584,6 +602,7 @@ _REQUEST_KIND_LABEL = {
     "dispatch": "派发",
     "monitor": "监控",
     "review": "评审",
+    "delivery": "交付",
 }
 
 
@@ -758,6 +777,13 @@ def request_detail(
 # ===================================================== v2 事件视图（§5.21.2）
 
 _EVENT_KIND_CN = {
+    "automation_adopted": "自动接收任务", "auto_confirm_skipped": "跳过自动确认",
+    "fix_round_started": "同任务修复轮开始", "delivery_committed": "分支改动已提交",
+    "delivery_pushed": "交付分支已推送", "pr_opened": "PR 已创建", "kaneo_comment_posted": "PR 链接已回写",
+    "pr_merged": "PR 已合并", "pr_closed": "PR 已关闭", "cost_recorded": "运行成本登记",
+    "requirements_accepted": "已接受远端需求", "automation_stopped": "自动处理已停止",
+    "lost_request_released": "失联观察请求已释放",
+
     "task_created": "任务创建",
     "task_updated": "任务信息更新",
     "requirements_changed": "需求指纹变化",

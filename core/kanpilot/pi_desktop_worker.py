@@ -77,7 +77,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, dsh_events, runtime_client, util
+from . import constants, dsh_events, process_owner, runtime_client, util
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
 
 # MCP 轮询节奏（worker 进程内部参数，不进 settings）。
@@ -159,6 +159,10 @@ def _base_job(spec: dict) -> dict:
 
 
 def run_fake(spec: dict, mode: str) -> int:
+    return process_owner.run_owned(spec, lambda owner: _run_fake(spec, mode, owner))
+
+
+def _run_fake(spec: dict, mode: str, owner) -> int:
     """KANPILOT_PI_DESKTOP_FAKE 隔离接缝（语义同 pi_worker fake）。"""
     run_dir = Path(spec["runs_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -174,7 +178,8 @@ def run_fake(spec: dict, mode: str) -> int:
                  session_title="Fake pi_desktop · 运行中", turn_id=turn_id)
         log.emit("user", now, content=spec.get("instruction") or "")
         while True:  # 测试负责终止该进程
-            time.sleep(60)
+            owner.check()
+            time.sleep(0.2 if owner.instance_id else 60)
     if mode == "crash":
         _write_json(job_path, job)
         log.emit("session", now, session_id=session_id,
@@ -243,6 +248,7 @@ class _Collector:
         # 用户随后在同一会话追加的指令不改变锚点；锚点不符 → 会话不是本轮的。
         self.first_user_index = None
         self.first_user_message = None
+        self.user_messages = {}       # physical index -> user content; recovery forbids appended instructions
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -461,6 +467,8 @@ class _Collector:
         if message.get("agentName"):
             extra["agent_name"] = message["agentName"]
         if role == "user":
+            if index is not None:
+                self.user_messages[index] = content
             if index is not None and (self.first_user_index is None
                                       or index < self.first_user_index):
                 self.first_user_index = index
@@ -494,7 +502,7 @@ class _Collector:
             if not finished:
                 self._queue("tool_call", ts, name=name,
                             arguments=input_json, **tool_extra)
-            elif name in _SHELL_TOOL_NAMES:
+            elif isinstance(name, str) and name.lower() in _SHELL_TOOL_NAMES:
                 exit_code = message.get("exitCode")
                 if isinstance(raw_output, dict):
                     exit_code = raw_output.get("exitCode", raw_output.get("exit_code", exit_code))
@@ -649,6 +657,10 @@ def _round_remaining_seconds(job: dict, timeout: float) -> float:
 
 
 def run_real(spec: dict, resume: bool = False) -> int:
+    return process_owner.run_owned(spec, lambda owner: _run_real(spec, resume, owner))
+
+
+def _run_real(spec: dict, resume: bool, owner) -> int:
     """真实 pi_desktop 轮次（§5.23.3；写序恒 job→session→terminal）。
 
     ``resume=True``（§5.23.7）：现场已存在时只读续接观察——不建会话、不下发
@@ -701,6 +713,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
     def finalize(status: str, exit_code, detail, terminal: bool,
                  outcome: str = "failed", reason: str = "") -> int:
         """收尾写序：job 先写 → session 补齐 → terminal 最后。"""
+        owner.check()
         job.update({
             "status": status,
             "exit_code": exit_code,
@@ -783,6 +796,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
                     "plan_too_large")
 
     # ---- 2. 通过 KaneoPilot runtime scope 连接并复核 Plus 工具集。
+    owner.check()
     config = spec.get("config") or {}
     try:
         if resume and not job.get("scope_id"):
@@ -825,6 +839,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
             return fail(f"permission_mode 非法：{permission_mode}",
                         "validation_failed")
         try:
+            owner.check()
             created = client.session_create(
                 str(cwd), mode=constants.PI_DESKTOP_EXEC_MODE,
                 provider_id=config.get("provider_id"),
@@ -843,14 +858,11 @@ def run_real(spec: dict, resume: bool = False) -> int:
             job["session_title"] = session.get("title") or session.get("name")
             _write_json(job_path, job)
             if permission_mode and permission_mode != "inherit":
+                owner.check()
                 client.session_configure(
                     session_id, mode=constants.PI_DESKTOP_EXEC_MODE,
                     permission_mode=permission_mode,
                 )
-            attached = client.attach_mcp(session_id)
-            if attached.get("attached") is not True:
-                raise util.KanpilotError(
-                    "validation_failed", "KaneoPilot task MCP 挂接未确认")
         except util.KanpilotError as exc:
             return fail(f"session_setup_failed: {exc.message}",
                         "session_setup_failed")
@@ -862,9 +874,11 @@ def run_real(spec: dict, resume: bool = False) -> int:
         prompt = (spec.get("instruction") or "").rstrip() + "\n\n" + plan_body
         turn_id = None
         # A crash during the network call cannot distinguish accepted from unsent.
+        owner.check()
         job["send_state"] = "unknown"
         _write_json(job_path, job)
         try:
+            owner.check()
             result = client.agent_prompt(job["session_id"], prompt)
             turn_id = result.get("turnId") or result.get("turn_id")
             if not turn_id:
@@ -910,6 +924,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
         collector.client = observer
 
     def observe_turn():
+        owner.check()
         record = observer.turn_get(job["session_id"], turn_id)
         if observer.pid is not None:
             job["pi_desktop_pid"] = observer.pid
@@ -1011,21 +1026,90 @@ def run_real(spec: dict, resume: bool = False) -> int:
         """
         approval = job.get("goal_approval")
         if isinstance(approval, dict) and approval.get("status") == "approved":
-            return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
+            if not resume or approval.get("execution_turn_id") == turn_id:
+                return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
+            return ("deferred", "goal_resume_unconfirmed: 执行轮次与既有审批检查点不符", "")
+        owned_origin = bool(spec.get("executor_instance_id") or spec.get("original_executor_instance_id")
+                            or spec.get("requires_goal_identity"))
         # 只有会话仍处 Goal 契约模式（planning / awaiting_approval）才过审批门：
         # 批准后宿主把会话切回 Agent 模式，执行轮次 completed 即普通收尾；
         # 模型未提交契约就结束（状态仍 planning）才是异常。
         try:
             status_view = client.agent_status(job["session_id"])
         except util.KanpilotError:
+            if resume:
+                return ("deferred", "goal_resume_unconfirmed: 无法核验当前会话轮次，保留观察现场", "")
             return ("none", "", "")
         inner = status_view.get("status") or status_view
         planning_state = inner.get("planningState")
+        if resume and planning_state in ("planning", "awaiting_approval"):
+            return ("deferred", "goal_approval_observation_pending: 只读续接不代批目标契约，请在 Plus 完成审批", "")
+        current = inner.get("currentTurnId")
+        if resume and current == turn_id:
+            if owned_origin:
+                return ("deferred", "goal_resume_unconfirmed: App 归属轮次缺少执行检查点且当前仍是原轮次", "")
+            try:
+                history = client.plans_pending(job["session_id"]).get("history") or []
+            except util.KanpilotError:
+                return ("deferred", "goal_resume_unconfirmed: 审批历史不可读，不能确认本轮是否仍是规划轮次", "")
+            if any(isinstance(item, dict) and item.get("kind") == "goal"
+                   and item.get("status") == "approved" and item.get("sessionId") == job["session_id"]
+                   and item.get("turnId") == turn_id for item in history):
+                return ("deferred", "goal_resume_unconfirmed: 契约已批准但尚无不同的执行轮次身份", "")
+        if resume and not current:
+            try:
+                history = client.plans_pending(job["session_id"]).get("history") or []
+            except util.KanpilotError:
+                history = []
+            known_approved_goal = any(isinstance(item, dict) and item.get("kind") == "goal"
+                and item.get("status") == "approved" and item.get("sessionId") == job["session_id"]
+                and item.get("turnId") == turn_id for item in history)
+            if owned_origin or known_approved_goal:
+                return ("deferred", "goal_resume_unconfirmed: 缺少当前执行轮次身份，保留观察现场", "")
+            # Historical manual agent rounds predate Goal ownership and can
+            # have a terminal turn with no current-turn projection.
+            return ("none", "", "")
+        if resume and current != turn_id:
+            # Approval may have reached Plus before the observer persisted it.
+            # A current turn alone is not proof: require the exact approved Goal
+            # history and a complete transcript containing only our initial user.
+            try:
+                owner.check()
+                view = client.plans_pending(job["session_id"])
+                approved = [item for item in (view.get("history") or [])
+                            if isinstance(item, dict) and item.get("kind") == "goal"
+                            and item.get("status") == "approved"
+                            and item.get("sessionId") == job["session_id"]
+                            and item.get("turnId") == turn_id
+                            and isinstance(item.get("id"), str) and item["id"]]
+                if len(approved) != 1 or not isinstance(current, str) or not current:
+                    return ("deferred", "goal_resume_unconfirmed: 缺少旧规划轮次对应的唯一已批准 Goal 或当前执行轮次身份", "")
+                record = client.turn_get(job["session_id"], current)
+                if (not _turn_identity_matches(record, job["session_id"], current)
+                        or _turn_status(record) not in ("running", "completed", "error", "aborted")):
+                    return ("deferred", "goal_resume_unconfirmed: 当前执行轮次身份或状态无法确认", "")
+                collector.poll()
+                if (collector.truncated or collector.read_error or collector.unrecognized
+                        or len(collector.user_messages) != 1
+                        or _normalize(collector.first_user_message) != _normalize(expected_prompt)):
+                    return ("deferred", "goal_resume_unconfirmed: 转录不完整、任务锚点不符或存在追加用户指令", "")
+                proposal = approved[0]
+                planning_turn = turn_id
+                job["goal_approval"] = {"proposal_id": proposal["id"], "status": "approved",
+                    "planning_turn_id": planning_turn, "execution_turn_id": current,
+                    "approved_by": "plus_history", "recovered_at": util.now_iso()}
+                log.emit("system", util.now_iso(), content=(
+                    f"goal_execution_recovered: {planning_turn} → {current}（已批准 Goal 历史与完整转录核验；只读续接）"))
+                rebind_turn(current)
+                return ("adopted", "", "")
+            except util.KanpilotError:
+                return ("deferred", "goal_resume_unconfirmed: 只读审批历史或执行轮次证据不可读，保留观察现场", "")
         if planning_state not in ("planning", "awaiting_approval"):
             return ("none", "", "")
         planning_turn = turn_id
         contract_deadline = time.monotonic() + _GOAL_CONTRACT_WAIT_SECONDS
         while True:
+            owner.check()
             try:
                 proposal = pending_goal_contract()
             except util.KanpilotError as exc:
@@ -1052,6 +1136,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
                           f"本机代批后同一会话开启执行轮次"))
         version = proposal.get("version")
         try:
+            owner.check()
             client.plans_resolve(
                 proposal_id, job["session_id"],
                 str(proposal.get("turnId") or planning_turn),
@@ -1074,6 +1159,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
         execution_turn = None
         execution_deadline = time.monotonic() + _GOAL_EXECUTION_WAIT_SECONDS
         while True:
+            owner.check()
             try:
                 status_view = client.agent_status(job["session_id"])
             except util.KanpilotError:
@@ -1195,11 +1281,13 @@ def run_real(spec: dict, resume: bool = False) -> int:
     abort_accepted = False
     stop_detail = ""
     while True:
+        owner.check()
         now_m = time.monotonic()
         if now_m >= deadline and not stop_requested:
             stop_requested, stop_at = True, now_m
             observer.client._timeout = min(2.0, _STOP_VERIFY_SECONDS / 5)
             try:
+                owner.check()
                 observer.client.agent_stop(job["session_id"])
                 stop_detail = "stop 请求已接受"
             except util.KanpilotError as exc:
@@ -1222,6 +1310,8 @@ def run_real(spec: dict, resume: bool = False) -> int:
                 outcome, detail, reason = goal_contract_gate()
                 if outcome == "adopted":
                     continue
+                if outcome == "deferred":
+                    return defer(detail)
                 if outcome == "failed":
                     collector.poll()
                     return finalize("failed", 1, detail, True, "failed", reason)
@@ -1230,6 +1320,7 @@ def run_real(spec: dict, resume: bool = False) -> int:
             if not abort_attempted and now_m >= stop_at + _STOP_GRACE_SECONDS:
                 abort_attempted = True
                 try:
+                    owner.check()
                     observer.client.agent_abort(job["session_id"])
                     abort_accepted = True
                 except util.KanpilotError as exc:
@@ -1307,6 +1398,7 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    spec["_spec_path"] = str(Path(args.spec).resolve())
     if spec.get("v") != 1:
         print(f"unsupported spec version: {spec.get('v')}", file=sys.stderr)
         return 2

@@ -246,7 +246,7 @@ struct PendingView: View {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
-                Text(task.blockedReason ?? "需人工处理")
+                Text(AutomationPresentation.title(task.exception?.failureCode) ?? task.blockedReason ?? "需人工处理")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -284,6 +284,7 @@ struct RequestDetailView: View {
     @State private var error: String?
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
+    @State private var generation = 0
 
     var body: some View {
         Group {
@@ -302,7 +303,7 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("请求详情")
-        .task { await load() }
+        .task(id: requestID) { await load() }
         .onChange(of: model.lastRefreshAt) {
             Task { await load() }
         }
@@ -337,12 +338,17 @@ struct RequestDetailView: View {
     }
 
     private func load() async {
+        generation += 1
+        let currentGeneration = generation
         if detail == nil { loading = true }
         error = nil
-        defer { loading = false }
+        defer { if currentGeneration == generation { loading = false } }
         do {
-            detail = try await model.fetchRequestDetail(requestID: requestID)
+            let response = try await model.fetchRequestDetail(requestID: requestID)
+            guard currentGeneration == generation else { return }
+            detail = response
         } catch {
+            guard currentGeneration == generation else { return }
             self.error = error.coreMessage
         }
     }
@@ -356,6 +362,13 @@ struct RequestDetailView: View {
                 requestFields(detail)
                 roleSection(detail)
                 taskSection(detail)
+                if let code = detail.task?.exception?.failureCode,
+                   let title = AutomationPresentation.title(code) {
+                    DetailSection(title: title) {
+                        Text(AutomationPresentation.explanation(code) ?? detail.task?.blockedReason ?? "")
+                            .font(.kpBody).foregroundStyle(.secondary)
+                    }
+                }
                 attemptsSection(detail)
                 logSection(detail)
             }
@@ -681,6 +694,13 @@ struct RequestDetailView: View {
         case "release_lost":
             Button("释放失联请求") { confirmRelease = true }
                 .disabled(model.busy || taskID == nil)
+        case "resume", "accept_verification", "dismiss":
+            Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode)
+                   : action == "accept_verification" ? "接受验证结果"
+                   : AutomationPresentation.active(detail.task?.automation) ? "转为人工处理" : "清除阻塞标记") {
+                guard let taskID else { return }
+                Task { await model.resolve(taskID: taskID, action: action) }
+            }.disabled(model.busy || taskID == nil)
         case "retry":
             Button("重试") {
                 guard let taskID else { return }

@@ -96,11 +96,11 @@ PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 # v4（protocol §5.24.1）：四个模型调用点各自的后端词表与缺省值。缺字段一律
 # 按旧语义解释（codex/pi），旧数据零迁移；切换后端不删除另一分支字段。
-PLANNER_BACKENDS = ("codex", "pi_desktop")
+PLANNER_BACKENDS = ("codex", "pi_desktop", "claude")
 PLANNER_BACKEND = "codex"
 CONTROLLER_BACKENDS = ("pi", "pi_desktop")
 CONTROLLER_BACKEND = "pi"
-REVIEW_BACKENDS = ("pi", "pi_desktop")
+REVIEW_BACKENDS = ("pi", "pi_desktop", "claude", "codex")
 REVIEW_BACKEND = "pi"
 # exec_config 里控制端后端字段名（与任务执行 backend 并存，互不覆盖）。
 CONTROLLER_BACKEND_KEY = "controller_backend"
@@ -163,7 +163,7 @@ REVIEW_SLUGS = {"in-review", "review"}
 DONE_SLUGS = {"done"}
 IN_PROGRESS_SLUG = "in-progress"
 
-STAGES = ("plan", "dispatch", "monitor", "review")
+STAGES = ("plan", "dispatch", "monitor", "review", "delivery")
 
 # task.status lifecycle values (protocol.md §2).
 TASK_STATUSES = (
@@ -172,13 +172,14 @@ TASK_STATUSES = (
 )
 DISPATCH_MID_STATUSES = ("dispatching", "prepared", "submitting")
 
-REQUEST_KINDS = ("plan-scan", "plan", "dispatch", "monitor", "review")
+REQUEST_KINDS = ("plan-scan", "plan", "dispatch", "monitor", "review", "delivery")
 KIND_STAGE = {
     "plan-scan": "plan",
     "plan": "plan",
     "dispatch": "dispatch",
     "monitor": "monitor",
     "review": "review",
+    "delivery": "delivery",
 }
 
 # Claim guards (protocol.md §4.4): kind -> allowed task.status set (None = no task).
@@ -187,6 +188,7 @@ CLAIM_GUARDS = {
     "dispatch": {"ready"},
     "monitor": {"running", "in_review"},
     "review": {"in_review"},
+    "delivery": {"in_review"},
     "plan-scan": None,
 }
 
@@ -236,13 +238,13 @@ DISPATCH_INSTRUCTION_PI = (
 )
 
 DEFAULT_LEASE_SECONDS = 1200
-DEFAULT_MONITOR_INTERVAL_SECONDS = 900
+DEFAULT_MONITOR_INTERVAL_SECONDS = 120
 DEFAULT_PLAN_SCAN_INTERVAL_HOURS = 24
 DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification",
 )
 
 ERROR_CODES = (
@@ -408,3 +410,48 @@ def planner_inputs_root(setting_value=None) -> Path:
     if override:
         return Path(override).expanduser()
     return app_support() / "planner_inputs"
+
+# v5 deterministic automation and branch delivery (protocol §5.27).
+DELIVERY_EXECUTOR_ID = "kaneo-delivery"
+DELIVERY_SYNC_FAST_SECONDS = 300
+DELIVERY_SYNC_FAST_WINDOW_SECONDS = 3600
+DELIVERY_SYNC_SLOW_SECONDS = 1800
+INTAKE_INTERVAL_SECONDS = 300
+INTAKE_MAX_ADOPT_PER_PASS = 3
+INTAKE_LABEL_LOOKUPS_PER_PASS = 20
+INTAKE_LABEL_RECHECK_SECONDS = 1800
+AUTOMATION_DEFAULTS = {
+    "enabled": False, "label_filter": [], "auto_confirm_plan": True,
+    "max_fix_rounds": 2, "max_task_minutes": 240, "max_task_cost_usd": 10.0,
+    "delivery_base": None, "policy_revision": 0, "updated_at": None,
+}
+AUTOMATION_GLOBAL_DEFAULTS = {"max_active_tasks": 2}
+KANEO_MARKER_PREFIX = "[kaneopilot:"
+DELIVERY_BRANCH_PREFIX = "kaneo/"
+DELIVERY_BLOCKED_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*")
+DELIVERY_ALLOWED_NAMES = (".env.example",)
+DELIVERY_MAX_FILE_BYTES = 5 * 1024 * 1024
+CLI_PLAN_DEFAULT_BUDGET_USD = 5.0
+CLI_REVIEW_DEFAULT_BUDGET_USD = 5.0
+CLI_MIN_BUDGET_USD = 0.5
+AUTOMATION_REVIEW_BACKENDS = ("pi_desktop", "claude", "codex")
+DISPATCH_INSTRUCTION_BRANCH = (
+    "任务标识：{marker}。当前目录 {worktree} 是本任务专用分支 {branch} 的工作树，直接在这里完整执行{plan_ref}。"
+    "可以按计划使用 subagent，但所有改动必须落在本工作树；不要新建 worktree 或分支，不要 commit、push、reset、stash、rebase 或切换分支；"
+    "提交与推送由调度台完成。按计划的 verify 命令逐条运行验证，最终答复逐条列出命令与退出码。"
+)
+AUTOMATION_FAILURE_STAGES = {
+    "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",
+    "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
+    "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",
+    "no_changes": "delivery", "branch_diverged": "delivery", "gh_unavailable": "delivery", "pr_closed": "delivery",
+}
+AUTOMATION_FAILURE_CODES = frozenset(AUTOMATION_FAILURE_STAGES)
+
+
+def gh_bin() -> str:
+    return os.environ.get("KANPILOT_GH_BIN", "gh")
+
+
+def claude_bin() -> str:
+    return os.environ.get("KANPILOT_CLAUDE_BIN", "claude")

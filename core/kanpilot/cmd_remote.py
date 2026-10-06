@@ -4,6 +4,8 @@ create-review-fix / advance-task / recheck (protocol.md §5.8/§5.9/§5.11)."""
 from __future__ import annotations
 
 import json
+import time
+from datetime import timedelta
 from pathlib import Path
 
 from . import (
@@ -55,6 +57,8 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
         source_task = db.require_task(conn, payload["source_task_id"])
         # v4（§5.24.5）：新自动 Review 的 fix 创建同样核对请求身份与评审周期。
         core.require_review_identity(conn, payload, source_task, ctx.now)
+        if core.is_automation_managed(source_task):
+            raise util.KanpilotError("conflict", "自动化任务在同任务内修复，不创建修复任务")
         owner = _lifecycle_op(conn, "create-review-fix")
     try:
         client = remote.get_client()
@@ -142,10 +146,20 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
 
 def cmd_advance_task(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
+    started_clock = time.monotonic()
+    def identity_check(task):
+        current = ctx.now + timedelta(seconds=max(0, time.monotonic() - started_clock))
+        core.require_stage_identity(conn, payload, task, current, stages=("review", "delivery"))
+        if payload.get("run_id") and not payload.get("request_id"):
+            request = conn.execute("SELECT * FROM requests WHERE task_id=? AND status='claimed' AND run_id=?", (task["task_id"], payload["run_id"])).fetchone()
+            if request is None or util.lease_lost(request["lease_expires_at"], current):
+                raise util.KanpilotError("stale_run", "推进请求已被释放或失联")
+        if task["run_id"] != execution_snapshot or task["project_id"] != project_snapshot or task["requirements_sha256"] != requirements_snapshot:
+            raise util.KanpilotError("stale_run", "推进期间任务执行周期或需求已变化")
     target, expected = payload["target"], payload["expected_current"]
     if target not in ("in-review", "done"):
         raise util.KanpilotError("bad_request", f"invalid target {target}")
-    if expected not in ("in-progress", "in-review"):
+    if expected not in ("in-progress", "in-review", "done"):
         raise util.KanpilotError(
             "bad_request", f"invalid expected_current {expected}"
         )
@@ -153,6 +167,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         ("in-review", "in-progress"),
         ("done", "in-progress"),
         ("done", "in-review"),
+        ("in-review", "in-review"), ("done", "done"),
     ):
         raise util.KanpilotError(
             "bad_request", f"cannot advance {expected} -> {target}"
@@ -164,17 +179,23 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         task = db.require_task(conn, payload["task_id"])
         # v4（§5.24.5）：新自动 Review 的推进同样核对请求身份与评审周期
         #（无身份旧调用保持兼容；已完成恢复场景按只读事实判断，不新推进）。
-        core.require_review_identity(conn, payload, task, ctx.now)
+        stage_request = core.require_stage_identity(conn, payload, task, ctx.now, stages=("review", "delivery"))
+        operation_stage = stage_request["stage"] if stage_request else core.stage_for_status(task["status"], task["stage"])
         if payload.get("run_id"):
             claimed = conn.execute(
                 "SELECT * FROM requests WHERE task_id=? AND status='claimed' "
                 "AND run_id=?",
                 (task["task_id"], payload["run_id"]),
             ).fetchone()
+            if claimed is not None:
+                operation_stage = claimed["stage"]
             if claimed is None:
                 raise util.KanpilotError(
                     "stale_run", "run_id does not match a claimed request"
                 )
+        if target == "done" and expected != "done" and core.is_pr_delivery(task):
+            if not core.delivery_of(task).get("merged_at"):
+                raise util.KanpilotError("conflict", "PR 尚未合并，不能完成任务")
         if target == "done" and expected == "in-progress":
             # Review 前置守卫（§5.9 v1.2）：执行完成不得跳过 Review
             # 直接完成——须先在当前周期登记 review_conclusion='pass'。
@@ -186,6 +207,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                     "before advancing in-progress -> done "
                     f"(review_conclusion={conclusion})",
                 )
+        execution_snapshot, project_snapshot, requirements_snapshot = task["run_id"], task["project_id"], task["requirements_sha256"]
         owner = _lifecycle_op(conn, "advance-task")
 
     wrote_remote = False
@@ -208,6 +230,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         if conflict:
             with db.write_txn(conn):
                 task = db.require_task(conn, task["task_id"])
+                identity_check(task)
                 db.update_task(
                     conn, task["task_id"], now,
                     kaneo_status=live_task.get("status"),
@@ -217,7 +240,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                     conn, task, now,
                     f"remote conflict: expected {expected}, observed "
                     f"{live_task.get('status')}",
-                    "remote_conflict", actor,
+                    "remote_conflict", actor, stage=operation_stage if core.is_automation_managed(task) else None,
                 )
             raise util.KanpilotError(
                 "remote_conflict",
@@ -227,11 +250,11 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         verify_error = None
         verified = False
         try:
-            remote.update_status(
-                client, task["task_id"], task["project_id"],
-                target, expected,
-            )
-            wrote_remote = True
+            if target != expected:
+                remote.update_status(
+                    client, task["task_id"], task["project_id"], target, expected,
+                )
+                wrote_remote = True
             after = remote.get_task(client, task["task_id"])
             after_task = after.get("task") or {}
             verified = (
@@ -257,46 +280,47 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                 code, message = "remote_unavailable", str(verify_error)
             with db.write_txn(conn):
                 task = db.require_task(conn, task["task_id"])
+                identity_check(task)
                 if wrote_remote:
-                    core.block_task(conn, task, now, message, code, actor)
+                    core.block_task(conn, task, now, message, code, actor, stage=operation_stage if core.is_automation_managed(task) else None)
             raise util.KanpilotError(code, message)
+        # Phase 3 (txn): local transition + follow-up request.
+        with db.write_txn(conn):
+            task = db.require_task(conn, task["task_id"])
+            identity_check(task)
+            new_status = "in_review" if target == "in-review" else "done"
+            extra = {"kaneo_status": target, "kaneo_checked_at": now}
+            if new_status == "in_review":
+                # New review cycle: clear any earlier registered conclusion —
+                # report columns and the extra_json conclusion keys alike;
+                # fix_task_id/review_key 历史关联保留（§5.9）。
+                extra["review_report_path"] = None
+                extra["review_report_sha256"] = None
+                extra_json = db.task_extra(task)
+                for key in ("review_conclusion", "review_registered_at"):
+                    extra_json.pop(key, None)
+                extra["extra_json"] = extra_json
+            core.transition_task(
+                conn, task, new_status, now, actor,
+                detail={"via": "advance-task", "target": target,
+                        "evidence_note": payload.get("evidence_note")},
+                **extra,
+            )
+            db.add_event(
+                conn, now, "kaneo_transition", task_id=task["task_id"],
+                actor=actor, detail={"from": expected, "to": target},
+            )
+            if new_status == "in_review":
+                db.create_request(
+                    conn, now, "review", f"review:{task['task_id']}",
+                    task_id=task["task_id"], requested_by="scheduler",
+                )
+            return {
+                "ok": True, "kaneo_status": target, "task_status": new_status,
+            }
     finally:
         with db.write_txn(conn):
             core.release_lifecycle(conn, owner)
-
-    # Phase 3 (txn): local transition + follow-up request.
-    with db.write_txn(conn):
-        task = db.require_task(conn, task["task_id"])
-        new_status = "in_review" if target == "in-review" else "done"
-        extra = {"kaneo_status": target, "kaneo_checked_at": now}
-        if new_status == "in_review":
-            # New review cycle: clear any earlier registered conclusion —
-            # report columns and the extra_json conclusion keys alike;
-            # fix_task_id/review_key 历史关联保留（§5.9）。
-            extra["review_report_path"] = None
-            extra["review_report_sha256"] = None
-            extra_json = db.task_extra(task)
-            for key in ("review_conclusion", "review_registered_at"):
-                extra_json.pop(key, None)
-            extra["extra_json"] = extra_json
-        core.transition_task(
-            conn, task, new_status, now, actor,
-            detail={"via": "advance-task", "target": target,
-                    "evidence_note": payload.get("evidence_note")},
-            **extra,
-        )
-        db.add_event(
-            conn, now, "kaneo_transition", task_id=task["task_id"],
-            actor=actor, detail={"from": expected, "to": target},
-        )
-        if new_status == "in_review":
-            db.create_request(
-                conn, now, "review", f"review:{task['task_id']}",
-                task_id=task["task_id"], requested_by="scheduler",
-            )
-        return {
-            "ok": True, "kaneo_status": target, "task_status": new_status,
-        }
 
 
 def cmd_recheck(ctx, payload: dict) -> dict:

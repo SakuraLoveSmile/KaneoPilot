@@ -865,8 +865,6 @@ def _runtime_guard(conn, scope, tool, args):
             path = Path(attachment["path"])
             if not path.is_absolute() or not path.resolve().is_relative_to(Path(scope.project_path).resolve()):
                 raise util.KanpilotError("forbidden", "attachment is outside the authorized project")
-    if tool == "kp_runtime_prompt" and not runtime_operations.session_attached(conn, scope.scope_id, session_id):
-        raise util.KanpilotError("forbidden", "session MCP must be attached before prompt")
 
 
 def _task_identity(conn, scope):

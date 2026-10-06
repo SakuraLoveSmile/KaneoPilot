@@ -138,6 +138,7 @@ struct PlanReaderView: View {
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: Spacing.s)
             VStack(alignment: .trailing, spacing: Spacing.s) {
                 Picker("查看模式", selection: $mode) {
@@ -146,7 +147,9 @@ struct PlanReaderView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 .frame(width: 110)
+                .fixedSize(horizontal: true, vertical: false)
                 .accessibilityLabel("渲染或原文模式")
                 HStack(spacing: Spacing.m) {
                     Button("打开计划文件") { Workspace.open(planPath) }
@@ -156,6 +159,7 @@ struct PlanReaderView: View {
                 }
                 .font(.kpSmall)
             }
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(Spacing.l)
     }
@@ -491,5 +495,88 @@ struct TaskLogTabView: View {
             rows.append(("当前请求", "\(kind) · \(status)"))
         }
         return rows
+    }
+}
+
+// 自动处理与交付放在既有概览页，保持五段导航不变。
+struct TaskAutomationSections: View {
+    let detail: TaskDetail
+    var body: some View {
+        if let delivery = detail.delivery {
+            DetailSection(title: "交付") {
+                FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
+                FieldRow("分支", delivery.branch)
+                FieldRow("目标分支", delivery.baseBranch)
+                FieldRow("工作树", delivery.worktreePath)
+                FieldRow("PR 状态", delivery.prState)
+                if let url = delivery.prUrl {
+                    Text(url).font(.kpSmall).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("打开 PR") { Workspace.open(url) }
+                }
+                ForEach(delivery.commits ?? []) { commit in
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        FieldRow("提交", commit.sha)
+                        Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
+                            .font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                }
+                if delivery.commits?.isEmpty ?? true {
+                    Text("暂无交付提交").font(.kpSmall).foregroundStyle(.secondary)
+                }
+                FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
+                FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
+                FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
+                FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
+            }
+        } else {
+            DetailSection(title: "交付") {
+                FieldRow("状态", "未开启")
+            }
+        }
+        if let automation = detail.automation {
+            DetailSection(title: "自动处理") {
+                FieldRow("状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
+                FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
+                FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
+                FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
+                FieldRow("时长", elapsed(automation.segmentStartedAt))
+                FieldRow("时长上限", automation.maxTaskMinutes.map { "\($0) 分钟" })
+                FieldRow("累计成本", automation.costUsd.map { String(format: "$%.2f", $0) })
+                FieldRow("成本上限", automation.maxTaskCostUsd.map { String(format: "$%.2f", $0) } ?? "不限")
+                FieldRow("未计价步数", "\(automation.costUnknownSteps ?? 0)")
+                FieldRow("上次跳过原因", automation.lastSkip?.reason)
+                FieldRow("跳过时间", TimeFormat.fullString(automation.lastSkip?.at))
+            }
+            DetailSection(title: "Review 历史") {
+                if let history = detail.reviewHistory, !history.isEmpty {
+                    ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            FieldRow("结论", Labels.reviewConclusion(entry.conclusion))
+                            FieldRow("登记时间", TimeFormat.fullString(entry.registeredAt))
+                            FieldRow("执行轮次", entry.executionRunId)
+                            FieldRow("提交", entry.headSha)
+                            FieldRow("报告", entry.reportPath)
+                            if let path = entry.reportPath {
+                                Button("打开报告") { Workspace.open(path) }
+                            }
+                        }
+                    }
+                } else {
+                    Text("暂无 Review 历史").font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            DetailSection(title: "自动处理") {
+                FieldRow("状态", "未开启")
+            }
+        }
+    }
+    private func elapsed(_ at: String?) -> String? {
+        guard let at else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = formatter.date(from: at) ?? ISO8601DateFormatter().date(from: at)
+        return date.map { "\(max(0, Int(Date().timeIntervalSince($0) / 60))) 分钟" }
     }
 }

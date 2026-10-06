@@ -716,7 +716,7 @@ SUMMARY_KEYS = [
     "plan_path", "created_at", "updated_at",
     "save_state", "saved_at", "auto_advance_paused",
     "plan_execution_hold",
-    "move_out_eligibility",
+    "move_out_eligibility", "automation", "delivery", "review_history",
 ]
 
 # protocol §2「看板列」归列映射（桌面唯一分列依据，这里与真核心同口径派生）。
@@ -874,7 +874,7 @@ def derive_board(task, requests):
 
 
 def merged_tasks(state):
-    tasks = {t["task_id"]: dict(t) for t in base_tasks()}
+    tasks = {t["task_id"]: dict(t) for t in base_tasks() + automation_tasks()}
     for tid, patch in state.get("task_overrides", {}).items():
         if tid in tasks:
             tasks[tid].update(patch)
@@ -961,6 +961,9 @@ def allowed_actions(task, requests):
         if task.get("auto_advance_paused"):
             actions.insert(1, "resume-auto")
         return actions
+    status = task.get("status")
+    if task.get("_automation_allowed") and status == "needs_user":
+        return task["_automation_allowed"]
     if status == "done":
         actions = ["recheck"]
         if move_out_blocked_reason(task, requests) is None:
@@ -1391,7 +1394,14 @@ def cmd_resolve(state, payload):
         clear = ["failure_code", "failure_reason", "failure_stage",
                  "blocked_at", "blocked_reason", "blocked_summary",
                  "manual_recovery_required", "lock_retained"]
-        if action == "retry":
+        if action in ("resume", "accept_verification"):
+            if action not in allowed_actions(task, requests):
+                return fail_action("核心未允许此动作")
+            for k in clear:
+                ov[k] = None
+            ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
+            enqueue_request(s, tid, "monitor")
+        elif action == "retry":
             if task["status"] != "needs_user" or task.get("send_state") == "unknown":
                 return fail_action("当前状态不允许 retry")
             for k in clear:
@@ -1464,6 +1474,9 @@ def cmd_resolve(state, payload):
             for k in clear:
                 ov[k] = None
             ov.update({"status": "ready", "display_status": "就绪"})
+            if task.get("automation"):
+                ov["automation"] = dict(task["automation"], manual_takeover=True)
+                ov["delivery"] = dict(task.get("delivery") or {}, mode="manual")
         else:
             return fail_action("未知动作：%s" % action)
         append_event(s, "resolved", task_id=tid, actor="user",
@@ -2020,9 +2033,37 @@ def cmd_executor_status(state, payload):
                          "log": APP_SUPPORT + "/executor-logs/dispatch-fake.log",
                          "exit_code": 1, "finished_at": past(minutes=35)},
         }
-    return {"stages": {
+    return {"owned_workers": [], "paused": state.get("paused", {"global": False, "stages": []}), "stages": {
         stage: {"running": None, "last": runs.get(stage)}
-        for stage in ("plan", "dispatch", "monitor", "review")}}
+        for stage in ("plan", "dispatch", "monitor", "review", "delivery", "intake")},
+        "automation": {"enabled_projects": 1, "active_tasks": 2,
+                       "max_active_tasks": state.get("automation_global", {}).get("max_active_tasks", 2),
+                       "waiting_merge": 1, "pending_tasks": 16,
+                       "last_intake": {"started_at": past(minutes=5), "finished_at": past(minutes=4),
+                           "projects": [{"project_id": PROJECTS["Music"], "ready": True,
+                                         "adopted": ["auto-waiting-plan"], "preflight": [],
+                           "skipped": [{"task_id": "auto-long-pr", "reason": "active_task_exists"}]}], "errors": []}}}
+
+
+def cmd_executor_instance(state, payload):
+    instance = payload.get("instance_id")
+    try:
+        uuid.UUID(instance)
+    except (ValueError, TypeError, AttributeError):
+        return fail("实例标识必须是 UUID", "bad_request")
+    action = payload.get("action")
+    owners = state.setdefault("executor_instances", {})
+    current = owners.get(instance)
+    if action == "start":
+        if current == "stopped": return fail("实例已停止", "conflict")
+        owners[instance] = "active"
+        save_state(state)
+    elif action == "stop":
+        owners[instance] = "stopped"
+        save_state(state)
+    elif action != "status":
+        return fail("此界面夹具不执行 worker 登记", "bad_request")
+    return {"instance_id": instance, "state": owners.get(instance) or "stopped", "owned_workers": []}
 
 
 # ------------------------------------------------- v2 §5.20 purge / §5.21 get-request / §5.22 规划链路
@@ -2354,7 +2395,6 @@ def cmd_start_plans(state, payload):
         results.append({"task_id": tid, "request_id": req["request_id"],
                         "deduplicated": False})
     return {"results": results,
-    return {"results": results,
             "started": len([r for r in results if r.get("request_id")])}
 
 
@@ -2383,7 +2423,11 @@ def cmd_get_project_mappings(state, payload):
             "repository": item.get("repository", ""),
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
-            "mapping_state": "ready",
+            "automation": item.get("automation") or automation_policy(pid == PROJECTS["Music"]),
+            "automation_preflight": ([{"code": "origin_not_github", "message": "origin 不是 GitHub 仓库"},
+                                      {"code": "review_backend_unsupported", "message": "Review 后端需为 Plus/Claude/Codex"}]
+                                     if pid == PROJECTS["Feedback"] else []),
+            "mapping_state": "available",
             "repository_kind": "git",
             "active_tasks_count": 0,
             "active_requests_count": 0,
@@ -2404,7 +2448,8 @@ def cmd_set_project_mapping(state, payload):
         "version": 1,
         "revision": 0,
         "workspace_id": "ws-fake-001",
-        "items": {},
+        "items": {value: {"project_name": name, "repository": os.path.join(REPOS_ROOT, name), "enabled": True}
+                  for name, value in PROJECTS.items()},
     })
     expected_rev = payload.get("expected_revision")
     if expected_rev is not None and expected_rev != mappings.get("revision", 0):
@@ -2413,8 +2458,10 @@ def cmd_set_project_mapping(state, payload):
     if payload.get("unmap"):
         items.pop(pid, None)
     else:
+        automation = (items.get(pid) or {}).get("automation")
         items[pid] = {
-            "project_name": payload.get("project_name") or PROJECTS.get(pid, pid),
+            "automation": automation,
+            "project_name": payload.get("project_name") or next((name for name, value in PROJECTS.items() if value == pid), pid),
             "repository": payload.get("repository", ""),
             "enabled": payload.get("enabled", True),
             "updated_at": iso(utcnow()),
@@ -2429,7 +2476,115 @@ def cmd_set_project_mapping(state, payload):
     }
 
 
+
+# 自动流水线 UI 全场景夹具；所有写入仍只进入隔离 fake state。
+def automation_policy(enabled=False):
+    return {"enabled": enabled, "label_filter": ["feedback", "bug"], "auto_confirm_plan": True,
+            "max_fix_rounds": 2, "max_task_minutes": 240, "max_task_cost_usd": 10.0,
+            "delivery_base": None, "policy_revision": 0, "updated_at": past(days=1)}
+
+
+def automation_tasks():
+    failures = ["verification_unconfirmed", "execution_failed", "fix_rounds_exhausted",
+                "auto_budget_exceeded", "automation_stopped", "review_blocked", "review_backend_unsupported",
+                "branch_exists", "delivery_base_unknown", "delivery_blocked_files", "delivery_commit_failed",
+                "no_changes", "branch_diverged", "gh_unavailable", "pr_closed", "remote_conflict",
+                "planner_failed", "needs_input", "dispatch_failed"]
+    result = []
+    for i, code in enumerate(failures + [None, None, None]):
+        tid = "auto-" + (code or ["waiting-plan", "planning", "long-pr"][i - len(failures)])
+        status = "needs_user" if code else ["needs_plan", "planning", "in_review"][i - len(failures)]
+        actions = ["resume", "replan", "mark_done", "dismiss", "recheck"]
+        if code == "verification_unconfirmed": actions = ["accept_verification", "replan", "mark_done", "dismiss"]
+        if code in ("no_changes", "execution_failed"): actions.remove("resume")
+        if code in ("planner_failed", "needs_input"): actions = ["replan", "dismiss", "prepare_plan"]
+        if code == "dispatch_failed": actions = ["retry", "replan", "dismiss"]
+        if code in ("branch_exists", "delivery_base_unknown"): actions = ["resume", "dismiss"]
+        if code in ("review_backend_unsupported", "branch_diverged", "gh_unavailable", "pr_closed"): actions = ["resume", "mark_done", "dismiss"]
+        stage = ("plan" if code in ("branch_exists", "delivery_base_unknown", "planner_failed", "needs_input") or status in ("needs_plan", "planning")
+                 else "delivery" if code in ("delivery_blocked_files", "delivery_commit_failed", "no_changes", "branch_diverged", "gh_unavailable", "pr_closed")
+                 else "monitor" if code in ("verification_unconfirmed", "execution_failed") else "review")
+        result.append({"task_id": tid, "title": "自动处理示例 · " + (code or status),
+                       "project_id": PROJECTS["Music"], "project_name": "Music", "status": status,
+                       "stage": stage, "kaneo_status": "to-do" if stage == "plan" else "in-review",
+                       "failure_code": code, "failure_stage": stage if code else None,
+                       "failure_reason": "隔离示例：请检查失败证据后选择操作" if code else None,
+                       "created_at": past(days=1), "updated_at": past(minutes=i),
+                       "requirements_sha256": sha(tid), "_automation_allowed": actions,
+                       "automation": {"adopted_at": past(hours=1), "segment_started_at": past(minutes=35),
+                                      "fix_round": 1, "max_fix_rounds": 2, "max_task_minutes": 240,
+                                      "max_task_cost_usd": 10, "cost_usd": 2.35, "cost_unknown_steps": 1,
+                                      "plan_wanted": status == "needs_plan", "manual_takeover": False,
+                                      "last_skip": {"reason": "active_task_exists", "at": past(minutes=5)}},
+                       "delivery": {"mode": "pr", "branch": "kanpilot/feedback-with-a-long-task-identifier-and-descriptive-branch-name-1234567890",
+                                    "base_branch": "main", "worktree_path": "/tmp/kaneopilot-fake-worktrees/" + tid,
+                                    "pr_url": "https://github.com/example/long-repository-name-for-responsive-ui-validation/pull/12345",
+                                    "pr_state": "open", "pr_number": 12345, "kaneo_comment_at": past(minutes=10),
+                                    "last_sync_at": past(minutes=1), "next_sync_at": future(minutes=4),
+                                    "commits": [{"sha": sha(tid + "commit", 40), "at": past(minutes=15), "fix_round": 1, "files": 3}]},
+                       "review_conclusion": "pass" if not code and status == "in_review" else "changes_requested",
+                       "review_history": [{"review_key": sha(tid, 12), "conclusion": "changes_requested",
+                                           "registered_at": past(minutes=25), "report_path": "/tmp/fake-review.md",
+                                           "head_sha": sha(tid, 40), "execution_run_id": "run-fake-1"}]})
+    return result
+
+
+def cmd_set_project_automation(state, payload):
+    pid = payload.get("project_id")
+    if pid not in PROJECTS.values(): return fail("项目不存在", "not_found")
+    mappings = state.setdefault("project_mappings", {"revision": 0, "items": {value: {
+        "project_name": name, "repository": os.path.join(REPOS_ROOT, name), "enabled": True
+    } for name, value in PROJECTS.items()}})
+    item = mappings.setdefault("items", {}).setdefault(pid, {
+        "project_name": next((name for name, value in PROJECTS.items() if value == pid), pid),
+        "repository": "", "enabled": True})
+    current = item.get("automation") or automation_policy(pid == PROJECTS["Music"])
+    expected = payload.get("expected_policy_revision")
+    if expected is not None and expected != current["policy_revision"]:
+        return fail("策略版本冲突，请重新载入后保存", "conflict")
+    policy = dict(payload.get("automation") or {})
+    policy.update({"policy_revision": current["policy_revision"] + 1, "updated_at": iso(utcnow())})
+    item["automation"] = policy
+    save_state(state)
+    return {"ok": True, "automation": policy}
+
+
+PLANNER_CONFIG = {"backend": "codex", "default_method": "builtin",
+                  "standard": {"planner_model": "gpt-6.1-sol", "reasoning_effort": "high"},
+                  "review_fix": {"planner_model": "gpt-6.1-sol", "reasoning_effort": "high"},
+                  "claude": {"model": "sonnet", "effort": "high"}}
+REVIEW_CONFIG = {"backend": "claude", "mode": "inherit",
+                 "claude": {"model": "sonnet", "effort": "high"},
+                 "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"}}
+
+
+def fake_config(state, payload, role, save=False):
+    defaults = PLANNER_CONFIG if role == "planner" else REVIEW_CONFIG
+    config = dict(defaults, **(state.get(role + "_config") or {}))
+    if save:
+        config.update(payload)
+        state[role + "_config"] = config
+        save_state(state)
+    return {"config": config, "defaults": dict(defaults), "updated_at": past(minutes=1)}
+
+
+def planner_capabilities():
+    ready = {"available": True, "tools_ok": True, "version": "fake", "detail": "隔离 FakeCore 就绪"}
+    return {"codex": {"path": "/tmp/fake-codex", "version": "fake"},
+            "auth": {"ready": True, "detail": "隔离夹具"},
+            "models_verified": True, "models": [{"id": "gpt-6.1-sol", "name": "6.1 Sol", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]}],
+            "planner_methods": {"builtin": ready, "spec_plan": ready},
+            "backends": {"codex": ready, "claude": ready, "pi_desktop": ready}}
+
 COMMANDS = {
+    "get-planner-config": lambda s, p: fake_config(s, p, "planner"),
+    "set-planner-config": lambda s, p: fake_config(s, p, "planner", True),
+    "planner-capabilities": lambda s, p: planner_capabilities(),
+    "get-review-config": lambda s, p: fake_config(s, p, "review"),
+    "set-review-config": lambda s, p: fake_config(s, p, "review", True),
+    "review-capabilities": lambda s, p: {key: {"available": True, "detail": "隔离 FakeCore 就绪"} for key in ("pi", "pi_desktop", "claude", "codex")},
+    "set-project-automation": lambda s, p: cmd_set_project_automation(s, p),
+    "set-automation-global": lambda s, p: mutate(s, lambda state: state.update({"automation_global": p}) or {"ok": True}),
     "doctor": lambda s, p: cmd_doctor(p),
     "tick": lambda s, p: {"created": [], "skipped": [{"reason": "fake 不建请求"}]},
     "overview": lambda s, p: cmd_overview(s),
@@ -2452,6 +2607,7 @@ COMMANDS = {
     "set-exec-config": lambda s, p: cmd_set_exec_config(s, p),
     "exec-capabilities": lambda s, p: cmd_exec_capabilities(s, p),
     "executor-status": lambda s, p: cmd_executor_status(s, p),
+    "executor-instance": lambda s, p: cmd_executor_instance(s, p),
     "purge-task": lambda s, p: cmd_purge_task(s, p),
     "purge-session": lambda s, p: cmd_purge_session(s, p),
     "trash-session": lambda s, p: cmd_trash_session(s, p),

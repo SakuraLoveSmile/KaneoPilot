@@ -95,7 +95,7 @@ EXEC_TURN_ID = "pd-plan-exec-1"
 PROPOSAL_ID = "proposal-plan-1"
 TOOL_CALL_ID = "toolcall-plan-1"
 TASK_ID = "taskplus00000000001"
-PLUS_TOOLS = tuple(constants.PI_DESKTOP_PLAN_TOOLS) + ("pi_session_attach_mcp",)
+PLUS_TOOLS = tuple(constants.PI_DESKTOP_PLAN_TOOLS)
 
 
 # ------------------------------------------------------------ fake MCP 控制面
@@ -902,6 +902,12 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.assertEqual(self.server.configured["mode"], "plan")
         self.assertIs(self.server.configured["confirm"], True)
         self.assertEqual(self.server.configured["id"], SESSION_ID)
+        setup_calls = [name for name in self.server.tool_names()
+                       if name in ("pi_session_create", "pi_session_configure",
+                                   "pi_session_attach_mcp", "pi_agent_prompt")]
+        self.assertEqual(setup_calls, ["pi_session_create", "pi_session_configure",
+                                       "pi_agent_prompt"])
+        self.assertNotIn("kp_task_", self.server.prompt_content)
 
         # 2. reject 关闭生成阶段产物，绝不 approve
         self.assertTrue(self.server.resolve_calls, "未调用 plans_resolve")

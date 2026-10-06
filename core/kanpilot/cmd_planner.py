@@ -57,11 +57,13 @@ def cmd_get_planner_config(ctx, payload: dict) -> dict:
         config["default_method"] = state["default_method"]
         config["backend"] = state["backend"]
         config["pi_desktop"] = state["pi_desktop"]
+        config["claude"] = state["claude"]
     defaults = {g: dict(planner_config.DEFAULTS[g])
                 for g in planner_config.PLANNER_GROUPS}
     defaults["default_method"] = planner_config.DEFAULT_METHOD
     defaults["backend"] = planner_config.DEFAULT_BACKEND
     defaults["pi_desktop"] = None
+    defaults["claude"] = dict(planner_config.CLAUDE_DEFAULT)
     return {
         "config": config,
         "defaults": defaults,
@@ -103,7 +105,9 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     has_backend = new_backend is not None
     new_block = payload.get("pi_desktop")
     has_block = new_block is not None
-    if not groups and new_method is None and not has_backend and not has_block:
+    new_claude = payload.get("claude")
+    if (not groups and new_method is None and not has_backend
+            and not has_block and new_claude is None):
         raise util.bad_request(
             "set-planner-config 至少提供一组（standard / review_fix）、"
             "default_method 或 backend"
@@ -121,6 +125,10 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
         )
     if has_block and not isinstance(new_block, dict):
         raise util.bad_request("pi_desktop 必须是对象")
+    if new_claude is not None:
+        error = planner_config.validate_claude_block(new_claude)
+        if error:
+            raise util.bad_request(error)
 
     # §5.24.3：Plus 分支只支持 builtin。生效后端/方式都要看（用户可能只提交
     # backend，而已存的 default_method 是 spec_plan）。
@@ -134,7 +142,7 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     blocked = planner_config.spec_plan_blocked_reason(effective_backend)
     if blocked is not None and effective_method == "spec_plan":
         raise util.bad_request(
-            f"Plus 计划分支不支持 spec_plan：{blocked}；"
+            f"{effective_backend} 计划分支不支持 spec_plan：{blocked}；"
             f"请先把 default_method 改为 builtin（或切回 codex）"
         )
 
@@ -156,12 +164,15 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
         cleaned["backend"] = new_backend
     if has_block:
         cleaned["pi_desktop"] = new_block
+    if new_claude is not None:
+        cleaned["claude"] = {"model": new_claude["model"], "effort": new_claude["effort"]}
     saved = planner_config.save(ctx.conn, cleaned, ctx.now_iso)
     detail = {g: dict(saved[g]) for g in planner_config.PLANNER_GROUPS}
     detail["default_method"] = saved.get(
         "default_method") or planner_config.DEFAULT_METHOD
     detail["backend"] = saved.get("backend") or planner_config.DEFAULT_BACKEND
     detail["pi_desktop"] = saved.get("pi_desktop")
+    detail["claude"] = saved.get("claude")
     db.add_event(
         ctx.conn, ctx.now_iso, "planner_config_updated", actor="user",
         detail=detail,
@@ -170,6 +181,7 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     config["default_method"] = detail["default_method"]
     config["backend"] = detail["backend"]
     config["pi_desktop"] = detail["pi_desktop"]
+    config["claude"] = detail["claude"]
     return {
         "config": config,
         "updated_at": saved["updated_at"],
@@ -264,5 +276,21 @@ def cmd_planner_capabilities(ctx, payload: dict) -> dict:
     result["backends"] = {
         "codex": codex_branch,
         "pi_desktop": planner_config.capabilities(ctx.conn),
+    }
+    try:
+        probe = subprocess.run([constants.claude_bin(), "--version"],
+                               capture_output=True, text=True, timeout=10)
+        claude_ok = probe.returncode == 0
+        claude_detail = probe.stdout.strip() or probe.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        claude_ok, claude_detail = False, str(exc)
+    result["backends"]["claude"] = {
+        "available": claude_ok, "path": constants.claude_bin(),
+        "version": claude_detail if claude_ok else None,
+        "detail": "CLI 可用，认证与模型尚未验证" if claude_ok else claude_detail,
+        "planner_methods": {
+            "builtin": {"available": claude_ok, "reason": None if claude_ok else claude_detail},
+            "spec_plan": {"available": False, "reason": planner_config.spec_plan_blocked_reason("claude")},
+        },
     }
     return result

@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import (
-    bridge, cli, constants, db, dsh_events, headless_adapter,
+    bridge, cli, codex_planner, constants, core, db, dsh_events, headless_adapter,
     pi_desktop_worker, planfile, planner_runner, round_store, util,
 )
 from . import runtime_client
@@ -683,10 +683,6 @@ class _Round:
             self.client.session_configure(
                 self.job["session_id"], mode=_PLAN_SESSION_MODE,
                 permission_mode=_PLAN_PERMISSION_MODE)
-            attached = self.client.attach_mcp(self.job["session_id"])
-            if attached.get("attached") is not True:
-                raise util.KanpilotError(
-                    "validation_failed", "KaneoPilot task MCP 挂接未确认")
         except util.KanpilotError as exc:
             return self.fail(f"plan_session_setup_failed: {exc.message}",
                              "plan_session_setup_failed",
@@ -859,11 +855,38 @@ class _Round:
         try:
             root = constants.worktrees_root(
                 db.get_setting(conn, "worktrees_root") or None)
+            manual_branch = (self.req_payload.get("delivery_mode") == "manual"
+                             and self.req_payload.get("plan_cwd"))
+            if manual_branch:
+                task = db.require_task(conn, self.task_id)
+                delivery = core.delivery_of(task)
+                if (core.automation_of(task).get("manual_takeover") is not True
+                        or delivery.get("mode") != "manual"
+                        or not delivery.get("worktree_path")
+                        or Path(self.req_payload["plan_cwd"]).resolve()
+                        != Path(delivery["worktree_path"]).resolve()):
+                    raise util.KanpilotError(
+                        "worktree_invalid", "手动接管规划工作树与任务登记不符")
         finally:
             conn.close()
-        worktree = root / self.task_id / self.run_id
-        mode = self._ensure_worktree(repo, worktree)
-        materials_dir = worktree / _MATERIAL_DIR_NAME / self.run_id
+        if manual_branch:
+            from . import git_delivery
+            git_delivery.verify_branch_worktree(
+                dict(delivery, repository=str(repo)),
+                require_clean=False, expected_head=None)
+            worktree = Path(delivery["worktree_path"])
+            mode = "manual"
+        elif self.req_payload.get("delivery_head_sha"):
+            from . import git_delivery
+            worktree = Path(git_delivery.prepare_snapshot_worktree(
+                repo, self.task_id, sha=self.req_payload["delivery_head_sha"],
+                purpose="plan", worktrees_root=root))
+            mode = "git"
+        else:
+            worktree = root / self.task_id / self.run_id
+            mode = self._ensure_worktree(repo, worktree)
+        materials_dir = util.inside(worktree / _MATERIAL_DIR_NAME / self.run_id,
+                                   worktree, "plan_materials")
         try:
             materials_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -871,6 +894,7 @@ class _Round:
                                      f"材料目录创建失败：{exc}") from exc
         files, attachments = self._copy_materials(materials_dir)
         manifest_path = materials_dir / "manifest.json"
+        util.inside(manifest_path, worktree, "plan_manifest")
         try:
             manifest_path.write_text(
                 json.dumps(self.manifest, ensure_ascii=False, sort_keys=True,
@@ -981,6 +1005,7 @@ class _Round:
                 suffix = Path(name).suffix
                 dest = materials_dir / f"{stem}-{counter}{suffix}"
                 counter += 1
+            util.inside(dest, materials_dir, "plan_material")
             try:
                 shutil.copyfile(src_real, dest)
             except OSError as exc:
@@ -993,6 +1018,8 @@ class _Round:
                 "media_type": entry.get("media_type"),
                 "sha256": actual_sha, "size": dest.stat().st_size,
             }
+            if entry.get("repository_path"):
+                record["repository_path"] = entry["repository_path"]
             files.append(record)
             if _is_image(entry.get("media_type"), name):
                 suffix = Path(name).suffix.lower()
@@ -1018,8 +1045,11 @@ class _Round:
                 "plan_prompt_unreadable",
                 f"规划指令模板不可读：{template}（{exc}）") from exc
         manifest_task = self.manifest.get("task") or {}
-        files_block = ("材料文件：" + "、".join(
-            record["name"] for record in materials.files)
+        files_block = ("材料文件：\n" + "\n".join(
+            f"- {record['name']} → {record['path']}"
+            + (f"（工作树路径：{record['repository_path']}）"
+               if record.get("repository_path") else "")
+            for record in materials.files)
             if materials.files else "")
         supplement = (self.manifest.get("supplement") or "").strip()
         supplement_block = ("## 用户补充说明\n\n" + supplement
@@ -1034,12 +1064,20 @@ class _Round:
                       or manifest_task.get("repository") or "."))
                   .replace("{INPUT_DIR}", str(materials.directory))
                   .replace("{FILES_BLOCK}", files_block)
+                  .replace("{EXECUTION_WORKTREE_BLOCK}", codex_planner._execution_worktree_block(self.manifest))
                   .replace("{SUPPLEMENT_BLOCK}", supplement_block))
         attachment_block = "\n".join(
             f"  - {item['name']} → {item['path']}"
             for item in materials.attachments
         ) or "  - （本轮无图片附件）"
-        return prompt + _PLUS_INSTRUCTION.replace(
+        if self.req_payload.get("fix_mode") == "same_task":
+            prompt += "\n## 同任务修复轮\n\n工作树已含前几轮提交，只修 Review 报告列出的问题，verify 要覆盖修复点。\n"
+        instruction = _PLUS_INSTRUCTION
+        if self.req_payload.get("delivery_mode") == "manual" and self.req_payload.get("plan_cwd"):
+            instruction = instruction.replace(
+                "独立规划 worktree**（HEAD 基线，不是用户主工作区）",
+                "已登记的任务分支 worktree**（手动接管后的当前状态，含未提交改动）")
+        return prompt + instruction.replace(
             "{MATERIAL_DIR}", str(materials.directory)
         ).replace(
             "{MANIFEST_PATH}", str(materials.manifest_path)

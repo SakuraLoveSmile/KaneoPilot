@@ -338,7 +338,7 @@ def cmd_set_review_config(ctx, payload: dict) -> dict:
     仅影响下一次 review 控制端启动。"""
     fields = {
         key: payload[key]
-        for key in ("mode", "backend", "pi_desktop") + review_config.CUSTOM_KEYS
+        for key in ("mode", "backend", "pi_desktop", "claude", "codex") + review_config.CUSTOM_KEYS
         if key in payload
     }
     if not fields:
@@ -389,7 +389,7 @@ def cmd_executor_status(ctx, payload: dict) -> dict:
     result = {"stages": {}}
     if not isinstance(runs, dict):
         runs = {}
-    for stage in ("plan", "dispatch", "monitor", "review"):
+    for stage in constants.STAGES:
         entry = runs.get(stage)
         if not isinstance(entry, dict):
             result["stages"][stage] = {"running": None, "last": None}
@@ -408,4 +408,57 @@ def cmd_executor_status(ctx, payload: dict) -> dict:
             "running": entry if alive else None,
             "last": entry,
         }
+    from . import core, cmd_exec, automation_policy, project_config
+    for stage in constants.STAGES:
+        rows = ctx.conn.execute(
+            "SELECT r.* FROM requests r LEFT JOIN tasks t ON t.task_id=r.task_id "
+            "WHERE r.stage=? AND r.status='queued' AND (r.not_before IS NULL OR r.not_before<=?) "
+            "AND (r.task_id IS NULL OR (t.save_state='active' AND t.auto_advance_paused=0))",
+            (stage, ctx.now_iso)).fetchall()
+        eligible = []
+        for row in rows:
+            if row["kind"] == "plan" and not db.request_payload(row).get("manual_authorized"):
+                continue
+            task = db.get_task(ctx.conn, row["task_id"]) if row["task_id"] else None
+            if row["kind"] == "dispatch" and task is not None and db.task_extra(task).get("plan_execution_hold"):
+                continue
+            eligible.append(row)
+        result["stages"][stage]["claimable"] = len(eligible)
+    intake = runs.get("intake") or {}
+    pid = intake.get("pid")
+    alive = False
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            pass
+    result["intake"] = {"running": intake if alive else None, "last": intake or None}
+    result["paused"] = {"global": db.get_setting(ctx.conn, "paused_global", False),
+                        "stages": db.get_setting(ctx.conn, "paused_stages", []) or []}
+    _, _, items, _ = project_config.load_raw_mappings(ctx.conn)
+    managed = [t for t in ctx.conn.execute("SELECT * FROM tasks").fetchall()
+               if core.is_automation_managed(t) and db.task_schedulable(t)]
+    waiting = [t for t in managed if t["status"] == "in_review" and db.task_extra(t).get("review_conclusion") == "pass"]
+    result["automation"] = {
+        "enabled_projects": sum(bool((v.get("automation") or {}).get("enabled")) for v in items.values()),
+        "active_tasks": sum(t["status"] not in ("done", "needs_user") and t not in waiting for t in managed),
+        "max_active_tasks": automation_policy.global_settings(ctx.conn)["max_active_tasks"],
+        "waiting_merge": len(waiting),
+        "pending_tasks": ctx.conn.execute("SELECT COUNT(*) FROM tasks WHERE status='needs_user' AND save_state='active'").fetchone()[0], "last_intake": db.get_setting(ctx.conn, "automation_last_intake"),
+    }
+    if "instance_id" in payload:
+        from . import process_owner
+        result["owned_workers"] = process_owner.owned_workers(ctx.conn, payload["instance_id"])
     return result
+
+
+def cmd_executor_instance(ctx, payload: dict) -> dict:
+    """App-owned detached worker registration, without touching Plus sessions."""
+    from . import process_owner
+    action = payload.get("action")
+    if action == "status":
+        return process_owner.instance_status(ctx.conn, payload.get("instance_id"))
+    if action == "register-worker":
+        return process_owner.register_worker(ctx, payload)
+    return process_owner.set_instance(ctx, payload.get("instance_id"), action)

@@ -190,8 +190,7 @@ class RuntimeClient:
         supported = set(caps.get("supported_operations") or ())
         pid = caps.get("pid")
         self.harness_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
-        attach_tools = set() if self.read_only else {"pi_session_attach_mcp"}
-        missing_plus = (set(required_tools) | attach_tools) - supported
+        missing_plus = set(required_tools) - supported
         if missing_plus:
             raise util.KanpilotError("unsupported_tools", "Plus 控制面缺少必需工具：" + "、".join(sorted(missing_plus)))
 
@@ -285,8 +284,6 @@ class RuntimeClient:
         return result
 
     def agent_prompt(self, session_id: str, content: str, *, attachments=None) -> dict:
-        if session_id not in self._attached_sessions:
-            raise util.KanpilotError("validation_failed", "prompt 前必须完成项目 task MCP 挂接与工具集核验")
         result = self._write("kp_runtime_prompt", "prompt", {
             "session_id": session_id, "content": content,
             **({"attachments": attachments} if attachments else {}),
