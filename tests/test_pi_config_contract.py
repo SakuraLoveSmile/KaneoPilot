@@ -27,7 +27,11 @@ DEFAULTS = {
     "agent_preset": "default",
 }
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
-CONFIG_KEYS = set(DEFAULTS) | {"updated_at", "backend", "pi_desktop"}
+# v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
+# v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
+CONFIG_KEYS = set(DEFAULTS) | {
+    "updated_at", "backend", "pi_desktop", "controller_backend",
+}
 
 # 夹具凭据占位值：只存在于 models.json 的 apiKey 字段，响应绝不透出。
 CREDENTIAL_VALUE = "test-key-placeholder"
@@ -80,7 +84,15 @@ def test_set_partial_payload_merges_defaults(cli):
 def test_exec_capabilities_shape_and_no_internal_fields(cli):
     resp = cli("exec-capabilities", {})
     assert set(resp) == {"ok", "pi", "pi_desktop", "providers", "presets",
-                         "checks"}
+                         "checks", "controller"}
+    # v4（§5.24.2）：控制端就绪态独立展示（backend/available/detail），
+    # 与任务执行分支分开，不用其一推断其二。
+    assert set(resp["controller"]) == {"backend", "available", "detail"}
+    assert resp["controller"]["backend"] in ("pi", "pi_desktop")
+    assert isinstance(resp["controller"]["available"], bool)
+    assert resp["controller"]["detail"] is None or isinstance(
+        resp["controller"]["detail"], str
+    )
     assert isinstance(resp["ok"], bool)
 
     blob = json.dumps(resp, ensure_ascii=False)
@@ -184,6 +196,99 @@ def test_empty_and_unknown_field_rejected(cli):
     assert out["code"] == "bad_request"
     assert "unknown fields" in out["error"]
 
+
+# ---------------------------------------------------------------------------
+# v4（§5.24.1/§5.24.2）：角色后端与 controller_backend
+# ---------------------------------------------------------------------------
+
+# 结构合法的 Plus 五字段块（连接文件不存在——证明保存只做结构校验，
+# 服务离线仍可保存；可用性由 capability 命令单独如实报告）。
+PLUS_BLOCK = {
+    "connection_file": "/tmp/kaneopilot-t6-missing-mcp-control.json",
+    "provider_id": "prov-1",
+    "model_id": "model-1",
+    "thinking_level": "high",
+    "permission_mode": "ask",
+}
+
+
+def test_controller_backend_saves_offline_and_coexists(cli):
+    # 缺 Plus 块 → 明确 bad_request，不静默写入、不降级。
+    out = cli("set-exec-config", {"controller_backend": "pi_desktop"}, expect=1)
+    assert out["code"] == "bad_request"
+    assert "pi_desktop 配置未保存" in out["error"]
+    assert cli("get-exec-config", {})["config"] is None
+
+    # 服务离线也能保存（任务执行 + 控制端两个后端各存各的）。
+    saved = cli("set-exec-config", {
+        "backend": "pi_desktop",
+        "controller_backend": "pi_desktop",
+        "pi_desktop": PLUS_BLOCK,
+    })["config"]
+    assert saved["controller_backend"] == "pi_desktop"
+    assert saved["pi_desktop"]["permission_mode"] == "ask"
+
+    # 未知控制端后端拒绝。
+    out = cli("set-exec-config", {"controller_backend": "dsh"}, expect=1)
+    assert out["code"] == "bad_request"
+    assert "controller_backend" in out["error"]
+
+    # 切回 pi 只改控制端，不删除 Plus 分支已存字段。
+    back = cli("set-exec-config", {"controller_backend": "pi"})["config"]
+    assert back["controller_backend"] == "pi"
+    assert back["backend"] == "pi_desktop"
+    assert back["pi_desktop"]["model_id"] == "model-1"
+
+
+def test_planner_and_review_backend_are_independent(cli):
+    # 规划后端切 Plus 需要五字段块；缺块明确失败。
+    out = cli("set-planner-config", {"backend": "pi_desktop"}, expect=1)
+    assert out["code"] == "bad_request"
+    assert "pi_desktop 配置未保存" in out["error"]
+
+    cfg = cli("set-planner-config", {
+        "backend": "pi_desktop", "pi_desktop": PLUS_BLOCK,
+    })["config"]
+    assert cfg["backend"] == "pi_desktop"
+    assert cfg["default_method"] == "builtin"
+    assert cfg["pi_desktop"]["permission_mode"] == "ask"
+
+    # Plus 计划分支只支持 builtin：spec_plan 是 Codex 插件方式，明确禁用。
+    blocked = cli("set-planner-config", {"default_method": "spec_plan"},
+                  expect=1)
+    assert blocked["code"] == "bad_request"
+    assert "spec_plan" in blocked["error"]
+
+    # Review 后端独立：pi 分支保留 inherit/custom 语义。
+    review = cli("set-review-config",
+                 {"backend": "pi", "mode": "inherit"})["config"]
+    assert review["backend"] == "pi" and review["mode"] == "inherit"
+
+    review_plus = cli("set-review-config", {
+        "backend": "pi_desktop", "pi_desktop": PLUS_BLOCK,
+    })["config"]
+    assert review_plus["backend"] == "pi_desktop"
+
+
+def test_role_capability_commands_report_each_branch(cli):
+    caps = cli("review-capabilities", {})
+    assert set(caps) == {"pi", "pi_desktop"}
+    assert set(caps["pi"]) == {"available", "detail"}
+    assert set(caps["pi_desktop"]) == {"available", "detail", "tools_ok",
+                                       "version"}
+    assert isinstance(caps["pi"]["available"], bool)
+    assert isinstance(caps["pi_desktop"]["available"], bool)
+    # 未保存 Plus 配置 → 不可用且给出中文原因（不伪装成功）。
+    assert caps["pi_desktop"]["available"] is False
+    assert caps["pi_desktop"]["detail"]
+
+    planner = cli("planner-capabilities", {})
+    assert set(planner["backends"]) == {"codex", "pi_desktop"}
+    assert planner["backends"]["pi_desktop"]["available"] is False
+
+    exec_caps = cli("exec-capabilities", {})
+    assert exec_caps["controller"]["backend"] == "pi"
+    assert isinstance(exec_caps["controller"]["available"], bool)
 
 # ---------------------------------------------------------------------------
 # unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）

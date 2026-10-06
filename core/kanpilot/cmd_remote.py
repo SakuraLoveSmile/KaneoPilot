@@ -53,6 +53,8 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
     # Phase 1 (txn): local checks + acquire lifecycle serial atomically.
     with db.write_txn(conn):
         source_task = db.require_task(conn, payload["source_task_id"])
+        # v4（§5.24.5）：新自动 Review 的 fix 创建同样核对请求身份与评审周期。
+        core.require_review_identity(conn, payload, source_task, ctx.now)
         owner = _lifecycle_op(conn, "create-review-fix")
     try:
         client = remote.get_client()
@@ -160,6 +162,9 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
     # Phase 1 (txn): local checks + acquire lifecycle serial.
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        # v4（§5.24.5）：新自动 Review 的推进同样核对请求身份与评审周期
+        #（无身份旧调用保持兼容；已完成恢复场景按只读事实判断，不新推进）。
+        core.require_review_identity(conn, payload, task, ctx.now)
         if payload.get("run_id"):
             claimed = conn.execute(
                 "SELECT * FROM requests WHERE task_id=? AND status='claimed' "

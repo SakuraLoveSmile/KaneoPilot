@@ -264,47 +264,9 @@ struct PendingView: View {
 struct TaskDetailContainer: View {
     let taskID: String
 
-    @EnvironmentObject private var model: AppViewModel
-    @State private var detail: TaskDetail?
-    @State private var events: [EventItem] = []
-    @State private var loading = true
-    @State private var error: String?
-
     var body: some View {
-        Group {
-            if let detail {
-                TaskDetailView(detail: detail, events: events)
-            } else if loading {
-                LoadingView()
-            } else {
-                ContentUnavailableView {
-                    Label("无法加载任务", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error ?? "")
-                } actions: {
-                    Button("重试") { Task { await load() } }
-                }
-            }
-        }
-        .navigationTitle("任务详情")
-        .task { await load() }
-        .onChange(of: model.lastRefreshAt) {
-            // 动作完成后随全局刷新重载，保持详情一致
-            Task { await load() }
-        }
-    }
-
-    private func load() async {
-        loading = true
-        error = nil
-        defer { loading = false }
-        do {
-            let (task, evs) = try await model.fetchDetail(taskID: taskID)
-            detail = task
-            events = evs
-        } catch {
-            self.error = error.coreMessage
-        }
+        TaskDetailContentView(taskID: taskID, showsHeader: true)
+            .navigationTitle("任务详情")
     }
 }
 
@@ -392,6 +354,7 @@ struct RequestDetailView: View {
             VStack(alignment: .leading, spacing: Spacing.l) {
                 header(detail)
                 requestFields(detail)
+                roleSection(detail)
                 taskSection(detail)
                 attemptsSection(detail)
                 logSection(detail)
@@ -399,6 +362,98 @@ struct RequestDetailView: View {
             .padding(Spacing.l)
         }
         .safeAreaInset(edge: .bottom) { actionBar(detail) }
+    }
+
+    // MARK: §4.10 运行端、身份与状态（只展示核心实际返回的字段）
+
+    /// 请求 payload 快照 + 尝试证据里实际返回的运行端 / 型号 / 会话 / turn / 状态。
+    /// 没有已核实深链时只显示 ID，不编造链接。
+    @ViewBuilder
+    private func roleSection(_ detail: GetRequestResponse) -> some View {
+        let rows = roleRows(detail)
+        if !rows.isEmpty {
+            DetailSection(title: "运行端与身份") {
+                ForEach(rows, id: \.label) { row in
+                    FieldRow(row.label, row.value)
+                }
+            }
+        }
+    }
+
+    private func roleRows(_ detail: GetRequestResponse) -> [(label: String, value: String)] {
+        let payload = detail.payload
+        var rows: [(String, String)] = []
+        // 运行端：规划请求 → planner_backend；控制轮 → controller_backend；
+        // 任务执行轮次 → backend。
+        let backend = text(payload, "planner_backend")
+            ?? text(payload, "controller_backend")
+            ?? text(payload, "backend")
+        if let backend { rows.append(("运行端", RoleBackend.label(backend))) }
+        if let method = text(payload, "planner_method") {
+            rows.append(("规划方式",
+                         method == "spec_plan" ? "Spec Planner 插件" : "内置规划"))
+        }
+        // 型号快照：Plus runtime_config 与 codex model_config 形状不同。
+        let runtime = payload?.member("runtime_config")
+        let modelConfig = payload?.member("model_config")
+        if let modelID = runtime?.member("model_id")?.nonEmptyText
+            ?? text(modelConfig?.member("planner"), "planner_model")
+            ?? text(payload, "model") {
+            rows.append(("型号", modelID))
+        }
+        if let level = runtime?.member("thinking_level")?.nonEmptyText
+            ?? text(modelConfig?.member("planner"), "reasoning_effort") {
+            rows.append(("思考等级", level))
+        }
+        if let permission = runtime?.member("permission_mode")?.nonEmptyText {
+            rows.append(("permission_mode", permission))
+        }
+        // 会话与 turn：只在尝试证据里实际写出时展示。
+        let evidences = (detail.attempts ?? []).compactMap { $0.evidence }
+        if let sessionID = lastValue(evidences, "session_id") {
+            rows.append(("会话 ID", sessionID))
+        }
+        if let turnID = lastValue(evidences, "turn_id") {
+            rows.append(("turn_id", turnID))
+        }
+        if let invocation = lastValue(evidences, "invocation_id") {
+            rows.append(("控制轮", invocation))
+        }
+        if let sendState = (detail.attempts ?? [])
+            .last(where: { $0.sendState != nil })?.sendState {
+            rows.append(("发送状态", Labels.sendState(sendState)))
+        }
+        if let state = requestStateText(detail) {
+            rows.append(("状态", state))
+        }
+        return rows
+    }
+
+    /// payload 成员的文本取值（非对象 / 缺键 → nil）。
+    private func text(_ value: JSONValue?, _ key: String) -> String? {
+        value?.member(key)?.nonEmptyText
+    }
+
+    /// 证据里最后一个同名键的文本值（证据层级不固定，用深度查找）。
+    private func lastValue(_ evidences: [JSONValue], _ key: String) -> String? {
+        evidences.compactMap { $0.deepValue(key)?.nonEmptyText }.last
+    }
+
+    /// §4.10：核心实际返回的请求状态（权限等待 / 连接不可用 / 输出错误）。
+    /// 已知键映射为中文；未知原文照常展示，不隐藏失败证据。
+    private func requestStateText(_ detail: GetRequestResponse) -> String? {
+        let candidates: [JSONValue?] = [
+            detail.request?.result,
+            detail.attempts?.last(where: { $0.evidence != nil })?.evidence,
+        ]
+        for candidate in candidates {
+            guard let candidate else { continue }
+            for key in ["failure_code", "error_code", "code", "reason"] {
+                guard let raw = candidate.deepValue(key)?.nonEmptyText else { continue }
+                return RequestStateLabel.text(raw)
+            }
+        }
+        return nil
     }
 
     /// 头部：kind + attention_state 徽标 + 只读徽标。

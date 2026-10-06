@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		BA5E00000000000000001101 /* KaneoPilotApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001001 /* KaneoPilotApp.swift */; };
+		BA5E00000000000000001120 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001020 /* Assets.xcassets */; };
 		BA5E00000000000000001102 /* CoreLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001002 /* CoreLocator.swift */; };
 		BA5E00000000000000001103 /* CoreClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001003 /* CoreClient.swift */; };
 		BA5E00000000000000001104 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001004 /* Models.swift */; };
@@ -25,11 +26,16 @@
 		BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* ExecutorScheduler.swift */; };
 		BA5E00000000000000001130 /* PlanningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001030 /* PlanningView.swift */; };
 		BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001031 /* TaskDetailTabs.swift */; };
+		BA5E00000000000000001132 /* MCPServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001032 /* MCPServiceManager.swift */; };
+		BA5E00000000000000001133 /* ProjectMappingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001033 /* ProjectMappingsView.swift */; };
+		BA5E00000000000000001134 /* TaskDetailContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001034 /* TaskDetailContentView.swift */; };
+		BA5E00000000000000001135 /* TaskCompactListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001035 /* TaskCompactListView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		BA5E000000000000000000E1 /* KaneoPilot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KaneoPilot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA5E00000000000000001001 /* KaneoPilotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KaneoPilotApp.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001020 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BA5E00000000000000001002 /* CoreLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreLocator.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001003 /* CoreClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreClient.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001004 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -47,6 +53,10 @@
 		BA5E00000000000000001016 /* ExecutorScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutorScheduler.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001030 /* PlanningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanningView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001031 /* TaskDetailTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailTabs.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001032 /* MCPServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServiceManager.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001033 /* ProjectMappingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectMappingsView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001034 /* TaskDetailContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailContentView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001035 /* TaskCompactListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCompactListView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
 		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -84,6 +94,7 @@
 			isa = PBXGroup;
 			children = (
 				BA5E00000000000000001001 /* KaneoPilotApp.swift */,
+				BA5E00000000000000001020 /* Assets.xcassets */,
 				BA5E00000000000000001005 /* AppViewModel.swift */,
 				BA5E000000000000000000F4 /* Core */,
 				BA5E000000000000000000F5 /* Views */,
@@ -98,6 +109,7 @@
 				BA5E00000000000000001003 /* CoreClient.swift */,
 				BA5E00000000000000001004 /* Models.swift */,
 				BA5E00000000000000001016 /* ExecutorScheduler.swift */,
+				BA5E00000000000000001032 /* MCPServiceManager.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -117,6 +129,9 @@
 				BA5E00000000000000001015 /* SavedTasksView.swift */,
 				BA5E00000000000000001030 /* PlanningView.swift */,
 				BA5E00000000000000001031 /* TaskDetailTabs.swift */,
+				BA5E00000000000000001033 /* ProjectMappingsView.swift */,
+				BA5E00000000000000001034 /* TaskDetailContentView.swift */,
+				BA5E00000000000000001035 /* TaskCompactListView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -189,6 +204,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BA5E00000000000000001120 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -217,6 +233,10 @@
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
 				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,
 				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
+				BA5E00000000000000001132 /* MCPServiceManager.swift in Sources */,
+				BA5E00000000000000001133 /* ProjectMappingsView.swift in Sources */,
+				BA5E00000000000000001134 /* TaskDetailContentView.swift in Sources */,
+				BA5E00000000000000001135 /* TaskCompactListView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -346,10 +366,11 @@
 		BA5E000000000000000000C4 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20261002;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
@@ -360,7 +381,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = local.kaneopilot;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -373,10 +394,11 @@
 		BA5E000000000000000000C5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20261002;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
@@ -387,7 +409,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = local.kaneopilot;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
