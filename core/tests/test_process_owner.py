@@ -258,7 +258,12 @@ def test_stopped_owner_rejects_plus_resume_without_sending(plus_scene, monkeypat
 
 
 def write_owned_execution_scene(case, spec, path):
+    # 只为已确认执行的 v5 场景固化策略，不改变其余历史 Goal 恢复夹具。
+    spec["completion_policy"] = "command_verification"
+    path.write_text(json.dumps(spec))
     job = case.write_lost_observer_scene(spec, path.parent, status="running")
+    job["completion_policy"] = spec["completion_policy"]
+    job["plan_sha256"] = spec["plan_sha256"]
     job["goal_approval"] = {"status": "approved", "planning_turn_id": "prior-planning-turn",
                             "execution_turn_id": job["turn_id"]}
     (path.parent / "job.json").write_text(json.dumps(job))
