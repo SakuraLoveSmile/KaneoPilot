@@ -151,7 +151,7 @@ def _require_goal_gate(ctx, payload: dict, task) -> None:
 
     - 当前任务的执行轮次；
     - 报告身份/hash + 确定性报告底线；
-    - 事件确由有效 monitor 请求登记；
+    - 事件确由 monitor 请求登记（允许当前有效 claim 复用历史判定）；
     - ``decision=complete``；
     - 执行终态 ``completed + finished/0``。
 
@@ -184,7 +184,7 @@ def _require_goal_gate(ctx, payload: dict, task) -> None:
         evaluation_event_id, int
     ) or evaluation_event_id <= 0:
         raise util.bad_request("evaluation_event_id 必须为正整数")
-    # 事件确由有效 monitor 请求登记（claim + 租约 + 事件归属）。
+    # 当前推进者仍须有效 claim；原判定请求可能已收尾，不要求它重新持有租约。
     cmd_exec.require_monitor_claim(
         ctx.conn, monitor_request_id, monitor_run_id, ctx.now
     )
@@ -194,7 +194,8 @@ def _require_goal_gate(ctx, payload: dict, task) -> None:
             "conflict", "没有找到该 evaluation event（旧判定或未登记）"
         )
     detail = event.get("detail") or {}
-    if event.get("task_id") != task["task_id"]:
+    if event.get("task_id") != task["task_id"] \
+            or detail.get("task_id") != task["task_id"]:
         raise util.KanpilotError(
             "conflict", "evaluation event 不属于该任务"
         )
@@ -202,11 +203,21 @@ def _require_goal_gate(ctx, payload: dict, task) -> None:
         raise util.KanpilotError(
             "conflict", "evaluation event 的 execution_run_id 不是当前轮次"
         )
-    if detail.get("monitor_request_id") != monitor_request_id \
-            or detail.get("monitor_run_id") != monitor_run_id:
+    origin_request_id = detail.get("monitor_request_id")
+    origin_run_id = detail.get("monitor_run_id")
+    origin = db.get_request(ctx.conn, origin_request_id)
+    if (
+        not origin_request_id or not origin_run_id
+        or event.get("request_id") != origin_request_id
+        or event.get("actor") != cmd_exec.MONITOR_EXECUTOR_ID
+        or origin is None
+        or origin["kind"] != "monitor" or origin["stage"] != "monitor"
+        or origin["claimed_by"] != cmd_exec.MONITOR_EXECUTOR_ID
+        or origin["run_id"] != origin_run_id
+    ):
         raise util.KanpilotError(
             "conflict",
-            "evaluation event 不是由本次 monitor claim 登记的（旧判定）",
+            "evaluation event 的 monitor 登记归属无效（旧判定来源不符）",
         )
     if detail.get("decision") != "complete":
         raise util.KanpilotError(
@@ -415,10 +426,20 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             for key in ("review_conclusion", "review_registered_at"):
                 extra_json.pop(key, None)
             extra["extra_json"] = extra_json
+        transition_detail = {
+            "via": "advance-task", "target": target,
+            "evidence_note": payload.get("evidence_note"),
+        }
+        if target == "in-review" and payload.get("evaluation_event_id"):
+            # 原判定保留登记者；推进事件记录本次 claim 对该判定的采用关系。
+            transition_detail.update({
+                "monitor_request_id": payload.get("monitor_request_id"),
+                "monitor_run_id": payload.get("monitor_run_id"),
+                "evaluation_event_id": payload["evaluation_event_id"],
+            })
         core.transition_task(
             conn, task, new_status, now, actor,
-            detail={"via": "advance-task", "target": target,
-                    "evidence_note": payload.get("evidence_note")},
+            detail=transition_detail,
             **extra,
         )
         db.add_event(

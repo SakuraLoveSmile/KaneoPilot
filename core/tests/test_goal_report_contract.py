@@ -854,6 +854,90 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertEqual(result["kaneo_status"], "in-review")
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
 
+    def test_new_monitor_claim_reuses_completed_claim_evaluation_and_advances(self):
+        """M1 收尾后，M2 复用同签名的可信判定仍可进入 Review。"""
+        self.seed_round()
+        self.set_report(goal_report())
+        first_request = self.call("enqueue", {
+            "task_id": TASK_ID, "kind": "monitor",
+        })["request"]["request_id"]
+        first_claim = self.call("claim", {
+            "stage": "monitor", "executor": "kaneo-monitor",
+            "request_id": first_request,
+        })
+        self.assertTrue(first_claim["claimed"])
+        first = self.record(first_request,
+                            monitor_run_id=first_claim["run_id"])
+        self.call("report", {
+            "request_id": first_request, "run_id": first_claim["run_id"],
+            "outcome": "succeeded",
+        })
+        second_request = self.call("enqueue", {
+            "task_id": TASK_ID, "kind": "monitor",
+        })["request"]["request_id"]
+        second_claim = self.call("claim", {
+            "stage": "monitor", "executor": "kaneo-monitor",
+            "request_id": second_request,
+        })
+        self.assertTrue(second_claim["claimed"])
+        self.assertNotEqual(second_request, first_request)
+        self.assertNotEqual(second_claim["run_id"], first_claim["run_id"])
+        second = self.record(second_request,
+                             monitor_run_id=second_claim["run_id"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(second["event_id"], first["event_id"])
+        self.fake.add_task(
+            TASK_ID, "ryryo1reph1xfemqtwkjyiiz", status="in-progress"
+        )
+        result = self.call("advance-task", {
+            "task_id": TASK_ID, "target": "in-review",
+            "expected_current": "in-progress",
+            "monitor_request_id": second_request,
+            "monitor_run_id": second_claim["run_id"],
+            "evaluation_event_id": second["event_id"],
+        })
+        self.assertEqual(result["task_status"], "in_review")
+        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
+        events = self.call("list-events", {"task_id": TASK_ID})["events"]
+        evaluations = [e for e in events
+                       if e["kind"] == cmd_exec.GOAL_EVALUATION_EVENT]
+        self.assertEqual(len(evaluations), 1)
+        self.assertEqual(evaluations[0]["detail"]["monitor_request_id"],
+                         first_request)
+        adoption = [e["detail"] for e in events
+                    if e["detail"].get("evaluation_event_id") == first["event_id"]]
+        self.assertEqual(len(adoption), 1)
+        self.assertEqual(adoption[0]["monitor_request_id"], second_request)
+        self.assertEqual(adoption[0]["monitor_run_id"], second_claim["run_id"])
+
+    def test_event_without_monitor_registration_provenance_is_rejected(self):
+        request_id, event_id = self._register()
+        self.fake.add_task(
+            TASK_ID, "ryryo1reph1xfemqtwkjyiiz", status="in-progress"
+        )
+        for field, value in (("actor", "executor"), ("request_id", None)):
+            with self.subTest(field=field):
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        conn.execute(
+                            f"UPDATE events SET {field}=? WHERE id=?",
+                            (value, event_id),
+                        )
+                    code, message = self._advance(event_id, request_id)
+                    self.assertEqual(code, "conflict")
+                    self.assertIn("登记归属", message)
+                    self.assertEqual(self.fake.requests_log, [])
+                    self.assertEqual(self.fake.tasks[TASK_ID]["status"],
+                                     "in-progress")
+                finally:
+                    with db.write_txn(conn):
+                        conn.execute(
+                            "UPDATE events SET actor='kaneo-monitor', "
+                            "request_id=? WHERE id=?", (request_id, event_id),
+                        )
+                    conn.close()
+
     def test_stale_monitor_claim_is_rejected_before_remote(self):
         request_id, event_id = self._register()
         self.fake.add_task(
@@ -941,7 +1025,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
     def test_event_from_another_monitor_claim_is_rejected(self):
-        """判定事件必须由本次 claim 登记（旧判定的 monitor_run_id 不符）。"""
+        """判定中的原 monitor_run_id 必须匹配历史登记请求。"""
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "ryryo1reph1xfemqtwkjyiiz", status="in-progress"
