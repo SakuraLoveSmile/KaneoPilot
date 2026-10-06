@@ -1391,9 +1391,19 @@ class T6Case(KanpilotTestCase):
 
     def setUp(self):
         super().setUp()
-        from test_pi_desktop_backend import FakeMCPServer
-        self.server = FakeMCPServer().start()
+        import os
+        from kanpilot import mcp_server
+        self.server = _goal_server()
         self.addCleanup(self.server.stop)
+        self._saved_db_env = os.environ.get("KANPILOT_DB")
+        os.environ["KANPILOT_DB"] = str(self.db_path)
+        self.addCleanup(self._restore_db_env)
+        self.project_mcp = mcp_server.MCPServer(
+            db_path=self.db_path, app_support_dir=self.app_support,
+            connection_file=self.app_support / "mcp" / "server.json",
+        )
+        self.project_mcp.start()
+        self.addCleanup(self.project_mcp.stop)
         self.runs_root = self.root / "session_runs"
         self.runs_root.mkdir(parents=True, exist_ok=True)
         conn = db.connect(self.db_path)
@@ -1402,6 +1412,13 @@ class T6Case(KanpilotTestCase):
                 db.set_setting(conn, "session_runs_root", str(self.runs_root))
         finally:
             conn.close()
+
+    def _restore_db_env(self):
+        import os
+        if self._saved_db_env is None:
+            os.environ.pop("KANPILOT_DB", None)
+        else:
+            os.environ["KANPILOT_DB"] = self._saved_db_env
 
     def write_connection(self) -> Path:
         import os
@@ -1416,13 +1433,23 @@ class T6Case(KanpilotTestCase):
         return path
 
     def seed_claimed_dispatch(self, run_id=RUN_ID):
-        """登记一条 claimed dispatch 请求（worker heartbeat 目标）。"""
+        """登记 worker 的任务、执行轮次与 claimed dispatch 请求。"""
+        remote_task = self.fake.add_task(
+            TASK_ID, "ryryo1reph1xfemqtwkjyiiz",
+            title=f"test task {TASK_ID}",
+        )
+        self.sync_task(remote_task, project_name="Feedback")
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
+                round_store.upsert_on_claim(
+                    conn, TASK_ID, run_id, {"backend": "pi_desktop"},
+                    util.now_iso(), backend="pi_desktop",
+                )
                 request, _ = db.create_request(
                     conn, util.now_iso(), "dispatch",
-                    f"dispatch:{run_id}", task_id=None, requested_by="test",
+                    f"dispatch:{TASK_ID}", task_id=TASK_ID,
+                    requested_by="test",
                 )
                 conn.execute(
                     "UPDATE requests SET status='claimed', run_id=?, "
@@ -1601,6 +1628,10 @@ class TestT6WorkspaceNaming(T6Case):
         }]
         self.server.planning_state = "awaiting_approval"
         self.server.execution_turn = "turn-exec"
+        self.server.goal_report = report_payload(goal_report(
+            sessionId=self.server.session_id,
+            executionId="exec-1", turnId=self.server.execution_turn,
+        ))
         conn_file = self.write_connection()
         run_dir = self.root / "runs" / RUN_ID
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1697,6 +1728,7 @@ def _fast_clock():
             ("_POLL_SECONDS", 0.05), ("_HEARTBEAT_SECONDS", 0.05),
             ("_PROOF_WAIT_SECONDS", 0.8), ("_GOAL_CONTRACT_WAIT_SECONDS", 0.5),
             ("_GOAL_EXECUTION_WAIT_SECONDS", 0.5), ("_GOAL_POLL_SECONDS", 0.05),
+            ("_GOAL_REPORT_GRACE_SECONDS", 0.5),
         ):
             saved[name] = getattr(pi_desktop_worker, name)
             setattr(pi_desktop_worker, name, value)
