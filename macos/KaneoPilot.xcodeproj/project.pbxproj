@@ -1,0 +1,424 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BA5E00000000000000001101 /* KaneoPilotApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001001 /* KaneoPilotApp.swift */; };
+		BA5E00000000000000001102 /* CoreLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001002 /* CoreLocator.swift */; };
+		BA5E00000000000000001103 /* CoreClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001003 /* CoreClient.swift */; };
+		BA5E00000000000000001104 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001004 /* Models.swift */; };
+		BA5E00000000000000001105 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001005 /* AppViewModel.swift */; };
+		BA5E00000000000000001106 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001006 /* RootView.swift */; };
+		BA5E00000000000000001107 /* TasksSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001007 /* TasksSectionView.swift */; };
+		BA5E00000000000000001108 /* TaskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001008 /* TaskDetailView.swift */; };
+		BA5E00000000000000001109 /* PendingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001009 /* PendingView.swift */; };
+		BA5E00000000000000001110 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001010 /* RunsView.swift */; };
+		BA5E00000000000000001111 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001011 /* SettingsView.swift */; };
+		BA5E00000000000000001112 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001012 /* Components.swift */; };
+		BA5E00000000000000001113 /* BoardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001013 /* BoardView.swift */; };
+		BA5E00000000000000001114 /* SessionReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001014 /* SessionReaderView.swift */; };
+		BA5E00000000000000001115 /* SavedTasksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001015 /* SavedTasksView.swift */; };
+		BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* ExecutorScheduler.swift */; };
+		BA5E00000000000000001130 /* PlanningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001030 /* PlanningView.swift */; };
+		BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001031 /* TaskDetailTabs.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BA5E000000000000000000E1 /* KaneoPilot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KaneoPilot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BA5E00000000000000001001 /* KaneoPilotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KaneoPilotApp.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001002 /* CoreLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreLocator.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001003 /* CoreClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreClient.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001004 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001005 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001006 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001007 /* TasksSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksSectionView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001008 /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001009 /* PendingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001010 /* RunsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunsView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001011 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001012 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001013 /* BoardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001014 /* SessionReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001015 /* SavedTasksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedTasksView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001016 /* ExecutorScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutorScheduler.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001030 /* PlanningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanningView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001031 /* TaskDetailTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailTabs.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
+		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BA5E000000000000000000D1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		BA5E000000000000000000F1 = {
+			isa = PBXGroup;
+			children = (
+				BA5E000000000000000000F3 /* KaneoPilot */,
+				BA5E000000000000000000F6 /* FakeCore */,
+				BA5E00000000000000001091 /* README.md */,
+				BA5E000000000000000000F2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BA5E000000000000000000F2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BA5E000000000000000000E1 /* KaneoPilot.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		BA5E000000000000000000F3 /* KaneoPilot */ = {
+			isa = PBXGroup;
+			children = (
+				BA5E00000000000000001001 /* KaneoPilotApp.swift */,
+				BA5E00000000000000001005 /* AppViewModel.swift */,
+				BA5E000000000000000000F4 /* Core */,
+				BA5E000000000000000000F5 /* Views */,
+			);
+			path = KaneoPilot;
+			sourceTree = "<group>";
+		};
+		BA5E000000000000000000F4 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				BA5E00000000000000001002 /* CoreLocator.swift */,
+				BA5E00000000000000001003 /* CoreClient.swift */,
+				BA5E00000000000000001004 /* Models.swift */,
+				BA5E00000000000000001016 /* ExecutorScheduler.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		BA5E000000000000000000F5 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				BA5E00000000000000001006 /* RootView.swift */,
+				BA5E00000000000000001007 /* TasksSectionView.swift */,
+				BA5E00000000000000001013 /* BoardView.swift */,
+				BA5E00000000000000001008 /* TaskDetailView.swift */,
+				BA5E00000000000000001009 /* PendingView.swift */,
+				BA5E00000000000000001010 /* RunsView.swift */,
+				BA5E00000000000000001011 /* SettingsView.swift */,
+				BA5E00000000000000001012 /* Components.swift */,
+				BA5E00000000000000001014 /* SessionReaderView.swift */,
+				BA5E00000000000000001015 /* SavedTasksView.swift */,
+				BA5E00000000000000001030 /* PlanningView.swift */,
+				BA5E00000000000000001031 /* TaskDetailTabs.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		BA5E000000000000000000F6 /* FakeCore */ = {
+			isa = PBXGroup;
+			children = (
+				BA5E00000000000000001090 /* kanpilot-fake.py */,
+			);
+			path = FakeCore;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BA5E000000000000000000E0 /* KaneoPilot */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BA5E000000000000000000C1 /* Build configuration list for PBXNativeTarget "KaneoPilot" */;
+			buildPhases = (
+				BA5E000000000000000000D0 /* Sources */,
+				BA5E000000000000000000D1 /* Frameworks */,
+				BA5E000000000000000000D2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = KaneoPilot;
+			productName = KaneoPilot;
+			productReference = BA5E000000000000000000E1 /* KaneoPilot.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BA5E000000000000000000F0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					BA5E000000000000000000E0 = {
+						CreatedOnToolsVersion = 16.0;
+						LastSwiftMigration = 1600;
+					};
+				};
+			};
+			buildConfigurationList = BA5E000000000000000000C0 /* Build configuration list for PBXProject "KaneoPilot" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = BA5E000000000000000000F1;
+			productRefGroup = BA5E000000000000000000F2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BA5E000000000000000000E0 /* KaneoPilot */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BA5E000000000000000000D2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BA5E000000000000000000D0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BA5E00000000000000001101 /* KaneoPilotApp.swift in Sources */,
+				BA5E00000000000000001102 /* CoreLocator.swift in Sources */,
+				BA5E00000000000000001103 /* CoreClient.swift in Sources */,
+				BA5E00000000000000001104 /* Models.swift in Sources */,
+				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
+				BA5E00000000000000001106 /* RootView.swift in Sources */,
+				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,
+				BA5E00000000000000001113 /* BoardView.swift in Sources */,
+				BA5E00000000000000001108 /* TaskDetailView.swift in Sources */,
+				BA5E00000000000000001109 /* PendingView.swift in Sources */,
+				BA5E00000000000000001110 /* RunsView.swift in Sources */,
+				BA5E00000000000000001111 /* SettingsView.swift in Sources */,
+				BA5E00000000000000001112 /* Components.swift in Sources */,
+				BA5E00000000000000001114 /* SessionReaderView.swift in Sources */,
+				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
+				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
+				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,
+				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BA5E000000000000000000C2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		BA5E000000000000000000C3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		BA5E000000000000000000C4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.0.2.10:8090 ）来执行队列中的计划任务。";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = local.kaneopilot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BA5E000000000000000000C5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.0.2.10:8090 ）来执行队列中的计划任务。";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = local.kaneopilot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		BA5E000000000000000000C0 /* Build configuration list for PBXProject "KaneoPilot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BA5E000000000000000000C2 /* Debug */,
+				BA5E000000000000000000C3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BA5E000000000000000000C1 /* Build configuration list for PBXNativeTarget "KaneoPilot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BA5E000000000000000000C4 /* Debug */,
+				BA5E000000000000000000C5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = BA5E000000000000000000F0 /* Project object */;
+}
