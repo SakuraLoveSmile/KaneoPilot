@@ -80,6 +80,12 @@ class TestAutoPipeline(PiDesktopCase):
         os.environ.pop('KANPILOT_PI_DESKTOP_FAKE',None)
         github = mock.patch.object(git_delivery,'origin_github_repo',return_value='owner/repo')
         github.start();self.addCleanup(github.stop)
+        # Only this disposable bare repository stands in for the approved GitHub target.
+        bare_target = git(self.repo, 'remote', 'get-url', '--push', 'origin')
+        real_repo_parser = git_delivery.github_repository
+        push_identity = mock.patch.object(git_delivery, 'github_repository', side_effect=lambda url:
+            'owner/repo' if url == bare_target else real_repo_parser(url))
+        push_identity.start();self.addCleanup(push_identity.stop)
         github_policy=mock.patch.object(automation_policy,'github_repository',return_value='owner/repo')
         github_policy.start();self.addCleanup(github_policy.stop)
         self.call('set-project-mapping', {'project_id':PROJECT,'repository':str(self.repo),'enabled':True,'expected_revision':0})

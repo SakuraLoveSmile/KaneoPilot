@@ -34,6 +34,7 @@
 		BA5E00000000000000001141 /* SchedulerDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001041 /* SchedulerDecision.swift */; };
 		BA5E00000000000000001142 /* LoginItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001042 /* LoginItem.swift */; };
 		BA5E00000000000000001143 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001043 /* MenuBarView.swift */; };
+		BA5E00000000000000001136 /* MarkdownReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001036 /* MarkdownReaderView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -61,6 +62,7 @@
 		BA5E00000000000000001033 /* ProjectMappingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectMappingsView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001034 /* TaskDetailContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailContentView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001035 /* TaskCompactListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCompactListView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001036 /* MarkdownReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownReaderView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
 		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		BA5E00000000000000001040 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntime.swift; sourceTree = "<group>"; };
@@ -144,6 +146,7 @@
 				BA5E00000000000000001033 /* ProjectMappingsView.swift */,
 				BA5E00000000000000001034 /* TaskDetailContentView.swift */,
 				BA5E00000000000000001035 /* TaskCompactListView.swift */,
+				BA5E00000000000000001036 /* MarkdownReaderView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -248,6 +251,7 @@
 				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
 				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,
+				BA5E00000000000000001136 /* MarkdownReaderView.swift in Sources */,
 				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
 				BA5E00000000000000001132 /* MCPServiceManager.swift in Sources */,
 				BA5E00000000000000001133 /* ProjectMappingsView.swift in Sources */,

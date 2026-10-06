@@ -263,3 +263,197 @@ GUI 验证（部分覆盖，环境受限）：
       返回 plan_hold 📷
 - [ ] 会话列表行菜单：正常 `移入回收站`；回收站内 `恢复` + `永久从列表移除`
 - [ ] 设置页执行端调度只剩 dispatch/monitor/review 三个 stage（plan 已移除）
+
+## 9. v3 追加验收：任务详情可读性与执行证据（T1–T6）
+
+依据 `docs/plans/task-detail-readability-and-execution-evidence.md` 与 protocol §5.23.10 / ui-spec §4.1/§4.5/§4.8。
+隔离数据：临时 `KANPILOT_DB`、`KANPILOT_APP_SUPPORT`、独立 Plan 根与 `KANPILOT_FAKE_STATE`；**不得**以正式 DB 作为测试输入。
+参考：用户 2026-09-27 的六张现状截图（执行页长会话卡顿；计划页整篇像无格式文本；评审空态使分段导航落在窗口中下部；记录页尝试表首行被裁、事件文字密集且 `round_observe` 断词；异常卡显示执行失败；Plus 侧栏把 worktree UUID 当工作区名、把任务标识当会话名）。
+
+### 9.1 T1 执行页阅读流畅性 📷
+
+- [ ] 同一合成长会话（固定消息数/长输出字节数）、同一窗口、同一 2s 轮询下，记录改前/改后主线程 Hangs / Time Profiler 与滚动录像
+- [ ] 无新消息轮询**不触发整列发布**、无可观察顿挫；持续滚动与搜索/折叠时无停顿、按钮及时响应
+- [ ] 逐条展开/收起仍正确；长输出可展开且完整原文可复制；搜索命中内容可见
+- [ ] 上滚停止跟随、「有新内容」按钮、回到底部、切轮次重置贴底语义不变
+- [ ] 空增量、同 ID 修订、多轮次切换均不产生错误重排
+
+实测记录（2026-09-27，主 agent 本人运行，可复现）：
+
+方法：把**真实** `SessionReaderView.swift`（改前 = `git show HEAD:`、改后 = 工作区）
+与真实 `Models.swift`/`CoreClient.swift` 一起编成 headless harness，驱动真实
+`SessionReaderStore`；数据用 `macos/FakeCore/kanpilot-fake.py` 的
+`KANPILOT_FAKE_LONG_SESSION=task-music-006` 夹具（400 条消息、每条长输出 4096 字节），
+轮询沿用 `connection.poll_seconds=2`。同一台 Mac、同一构建配置、同一窗口宽度。
+
+| 指标 | 改前（HEAD） | 改后（工作区） |
+|---|---|---|
+| 12s 空闲轮询中的 `messages` 发布次数（3 次运行） | 5 / 5 / 5 | 0 / 0 / 0 |
+| 12s 内应发生的轮询次数 | 6 | 6 |
+| 首屏 400 条加载耗时 | 6.33–6.42s | 6.33–6.43s |
+| 12 行 × 4096B 折叠行的 `AttributedString` 构建（中位数） | 0.249–0.263ms/行 | 0.011ms/行（仅可见预览） |
+
+Instruments `Time Profiler`（`xctrace`）对两个 harness 各录一份 trace：改后主线程在
+`SessionReaderStore.applyMessages` 上的采样权重与改前同量级（约 3–4ms 于 557ms 与
+362ms 总采样中），即「无变化轮询不重排」的收益不是缩短单次重排，而是**不再发布新数组**
+——这与上表「空闲发布 5 → 0」互为印证。
+
+行为回归（同一 harness 的 `T1_MODE=behave`，用可控 stub core 逐场景驱动真实 store）：
+改前/改后均 9/9 通过——空增量不重发、同 ID 修订落地、新消息落地并按 `seq` 排序、
+长正文默认折叠、折叠状态按消息 ID 跨其他消息修订保持。
+
+说明：`rowLayout_*`（整行 SwiftUI 布局）在两次构建间无可分辨差异，不作为 T1 收益证据；
+上文引用的是发布次数、`AttributedString` 构建成本与行为回归。
+
+### 9.2 T2 计划阅读页 📷
+
+用包含多级标题、中文有序/无序列表、代码围栏、表格、链接、图片与原生 HTML 文本的完整计划（`fixtures/plan-sample-t2.md`）。
+
+- [ ] 标题单独占满第一行且最多两行；长标题/长路径下右上控件无裁切、无重叠、无漂浮残字
+- [ ] 元数据区（状态/类型/时间/哈希/可截断路径）与独立操作行（模式分段 + 打开计划文件 + 在 Finder 显示）分区；宽度不足时操作行换行
+- [ ] 渲染模式：标题/列表/代码块/引用/水平线/GFM 表格可读；H1 18pt，其余 13pt 字重与间距区分，代码 12pt 等宽
+- [ ] 超宽单元格/代码行可换行或水平查看，**不撑宽整个 sheet**
+- [ ] 原文模式逐字显示，含所有字符，不折叠/不重排
+- [ ] 两种模式正文均可选中复制；跨块选择保留合理换行及列表/表格内容
+- [ ] 链接仅点击时以 `http/https` 交系统浏览器打开；HTML **不执行**；图片只显示 alt/占位，不自动读取远端媒体
+- [ ] `get-plan` 核验失败/`conflict`：不展示旧正文，且「确认并安排执行」保持禁用
+- [ ] 待办列卡片主入口直达计划页；其他列默认概览
+
+### 9.3 T3 评审页 📷
+
+- [ ] 无数据时空态只在导航以下的内容区居中（保留图标/标题/说明），分段导航不落在窗口中下部
+- [ ] 五段导航固定在浮层顶部，切页不改变浮层有效尺寸
+- [ ] 有数据时保留结论/报告/`fix_task_id`/`打开报告` 原字段
+
+### 9.4 T4 记录页 📷
+
+- [ ] 「尝试记录」「事件时间线」为两个并列区段，不嵌套卡片，单个外层滚动
+- [ ] 尝试行按时间/阶段/结果/说明四列自然撑高（结果 = 图标+文字），行高 ≥40pt，**首行不被裁**
+- [ ] 事件行按时间/类型/摘要三列，行高 ≥40pt；固定列**不折断** `round_observe` 等类型
+- [ ] 默认显示 `EventItem.summary`；点击一行可展开完整 note/evidence 或结构化 detail 并可复制原文
+- [ ] 长 note、未知 kind（保留原值且可完整查看）均可读
+- [ ] 覆盖：无评审、已有评审、1 条及多条 attempts
+- [ ] 页内只称「最近记录」，不冒充全史
+
+### 9.5 T5 Goal 报告完成判定（核心 + 隔离 Plus）
+
+- [ ] `pi` 后端维持 §5.18.4 原三证据口径不变
+- [ ] 旧 `pi` 三证据、Plus 无报告/兜底报告/不完整/完成报告的边界分别验证
+- [ ] fake Plus 提供**真实形状**报告；AI 结果与报告 hash、派发轮次及领取中的 monitor 请求同时绑定
+- [ ] 绕过 monitor 直接调用 `advance-task` 被核心拒绝（`conflict`，不触碰远端）
+- [ ] 同 hash 幂等：不重复调用 AI
+- [ ] 升级时仍 `running` 的旧 Plus 轮次 → 按缺报告规则进入人工，不走旧消息三证据
+- [ ] 已在 Review/Done 的历史轮次不回写、不降级、不改判
+- [ ] `Bash` 退出码保真（大小写归一后 `exit_code` 可见）
+- [ ] 真实模型调用可能产生费用；**未获该调用授权时如实保持「实现中」**，不以 fake AI 冒充真实判断
+- [ ] 非对照：本次历史轮次 `ozb7d8vw1sbp653zs7u0jn2f` / `71de3380-...` 保持 `needs_user`，不补写、不解阻塞
+
+### 9.6 T6 派发命名（隔离 Plus）📷
+
+两个同属 `Music` 的不同 worktree 路径 + 长中文计划名。
+
+- [ ] `PI_DESKTOP_DATA_DIR=<隔离目录>`、`PI_DESKTOP_MCP_CONTROL=1`、未占用 `PI_DESKTOP_MCP_PORT` 启动隔离 Plus
+- [ ] **不发送 prompt** 的创建检查：`projectPath` 是独立 worktree 路径、`projectName=Music`、`title` 等于计划页标题
+- [ ] 重启 Plus 后 `project/list` 仍返回 `Music`；打开会话并激活工作区后 `project/get` 与 Sidebar 都显示 `Music`
+- [ ] 会话显示完整计划名（长标题单行截断但可悬停/复制）；悬停可看真实路径/全标题
+- [ ] 视觉可同名，但项目/会话身份不串、原路径仍是实际执行目录；**不按名称合并**
+- [ ] 创建会话本身不为了命名而全局切换工作区
+- [ ] 旧 Plus 缺能力时设置/派发前明确阻断（「版本缺少工作区命名能力」），不静默派发 UUID 名称
+- [ ] 已有非 legacy 用户项目组或同路径不同自定义名称不被覆盖（`CONFLICT`）
+- [ ] 旧历史轮次仍可阅读，不批量改名
+- [ ] 不以改目录名或只改 KaneoPilot 本地标签冒充 Plus UI 已生效
+
+### 9.7 原生界面构建与核对
+
+- [ ] `APP_OUTPUT_DIR="$PWD/build/task-detail-check" scripts/build_app.sh` 构建独立产物；核对包内核心与源码哈希一致
+- [ ] 以隔离应用支持目录、独立用户偏好、调度器关闭的本机 App 打开
+- [ ] 1180×760 与 900×600、浅/深色对照现状截图检查四个分段；实际滚动、切页、展开、复制、点击安全链接与键盘焦点
+- [ ] 确认计划文件、后台任务与用户正式 App 未被替换
+- [ ] macOS 14 是最低目标；若只在较新 SDK/系统实测，记录「macOS 14 仍待体验」，不把编译通过当成旧系统视觉通过
+
+### 9.8 本轮实测记录（2026-09-27，主 agent 本人运行）
+
+**T5 核心闸门（隔离 fake Plus，无付费模型调用）**
+
+- `~/.pyenv/shims/pytest -p no:cacheprovider core/tests/test_goal_report_contract.py -q`
+  → **68 passed**；`core/tests/test_pi_desktop_backend.py`、`core/tests -q`
+  → **453 passed**；根 `tests -q` → **298 passed**。
+- 覆盖：旧 `pi` 三证据不变；`pending` 宽限与过期；`ready+fallback` 等同无报告；
+  `ready+structured+met` 但 AI 判未完成；`partial/blocked/unknown`；AI `uncertain`；
+  AI 矛盾提交 `complete`（审查项空/非 `met`/重复 ID/虚构引用）；report/hash/plan/
+  `execution_run_id`/`monitor_run_id`/session/turn 不匹配；monitor 租约失效；
+  直接调用 `advance-task` → `conflict` 且不触碰远端；同 hash 幂等；升级时旧 Plus
+  轮次仍 `running`；历史 Review/Done/needs_user 不回写；`Bash` 退出码保真。
+- **非对照（只读复核）**：`ozb7d8vw1sbp653zs7u0jn2f` / `71de3380-...` 在正式
+  `kanpilot.db` 中仍为 `status=needs_user`、`failure_code=execution_failed`、
+  轮次 `run_status=finished`，`job.goal_approval=null`——未补写、未解阻塞。
+- **真实付费端到端：已获用户授权，但被上游依赖阻塞（尚未执行）**。用户已
+  明确授权按最小样例跑一次真实 Goal（规划 + 执行 + 监控三次真实模型调用）。
+  为减少花费，先在不花钱的范围把环境跑通，结果：
+  1. Plus 侧此前**完全无法构建**——主 checkout 的 `packages/voice-runtime`
+     未构建/未链接，且可选依赖（`transcribe-cpp`/`@picovoice/pvrecorder-node`/
+     `@huggingface/hub`）未安装。补齐后 `electron-vite build` 成功，可起真实
+     Plus；补的都是 gitignore 内的 `dist/`、`node_modules/`，未改跟踪文件。
+  2. 以**真实构建的隔离 Plus**（独立 `PI_DESKTOP_DATA_DIR` + 未占用端口）经
+     KaneoPilot `exec-capabilities` 真实探测：`session_naming=true`、
+     `version=2025-06-18`，`tools/list` 含 `pi_goal_report_list`/
+     `pi_goal_report_get` 且 `pi_session_create.projectName` 存在
+     —— **T6 真实兼容门通过**。
+  3. 但 **`tools_ok=false`**：唯一缺的是 `pi_turn_get`。该工具由**另一条
+     未合入 main 的工作流**实现，故本 plan 的 Plus 树（基于 main）没有它：
+
+     | 树 | `pi_turn_get` | goal 报告工具 | `projectName` |
+     |---|---|---|---|
+     | 本 plan 树（`feat/kaneopilot-goal-report-and-naming`） | 无 | 有 | 有 |
+     | `feat/mcp-turn-get` | 有 | 无 | 无 |
+     | 用户当前运行中的 Plus 安装 | 无 | 无 | 无 |
+
+     `pi_turn_get` 已在 KaneoPilot 基线（HEAD）的
+     `PI_DESKTOP_DISPATCH_TOOLS` 中要求，且其实现不在本 plan 的写入范围
+     （plan 明示「不得覆盖现有 `pi_turn_get` 等未提交改动」）。因此
+     **当前没有任何一棵树**能同时满足 `dispatch-start` 的 `tools_ok` 门，
+     真实付费阶段**一次都没跑，未产生任何费用**。
+  4. 用户决定先停下，由用户协调两条工作流合并后再验收。届时需：从当时
+     `main` 建树（同时含 `pi_turn_get` 与本 plan 的 goal 报告/命名改动）→
+     跑一次最小真实 Goal → 核对契约审批、Host `ready/structured` 报告、
+     MCP 读回身份/hash、监控 AI 逐项判断、`record-goal-evaluation` 留痕与
+     `advance-task` 硬闸。在此之前该项**既不是「实现中」也不是「已验收」，
+     而是「阻塞于未合入的上游依赖」**。
+- **同轮发现并修复的真实缺陷（本 plan 代码）**：
+  `packages/agent-runtime/src/goal-report-tool.ts` 的草稿持久化失败分支用了
+  `isError: true`，而 `AgentToolResult`（0.86.1 与 0.87.1 官方类型均）没有该
+  字段——既是类型错误，更是**静默成功**：Agent 会以为报告已登记，Host 实际
+  发 `fallback`。已按该运行时的约定（失败即 `throw`）修正，草稿同时置空并
+  标 invalid 以便干净重试；新增 `goal-report-tool.test.ts` 回归用例覆盖失败
+  路径与恢复（vitest 6/6 通过）。
+
+**T6 隔离 Plus 命名闭环**
+
+以真实 `crates/host-core` 二进制（`target/debug/pi-desktop-host-core`）+ 隔离
+`PI_DESKTOP_DATA_DIR` 驱动真实 NDJSON JSON-RPC，**未发送任何 prompt**、未启动
+agent、未调用付费模型、未触碰 `~/.pi-desktop-plus`：**14/14 通过**——
+`projectName='Music'` 与长中文 `title` 精确透传；`projectPath` 仍是独立 worktree
+绝对路径；同一 `Music` 下两个不同 worktree 会话 ID 与路径均不同（不按名称合并）；
+空白 `projectName` / 缺 `projectPath` → `INVALID_PARAMS`；旧客户端不传
+`projectName` 时新路径回落 basename、已命名路径复用已存名称；
+**重启 host-core 后** `session.list` 与 `projects.list` 仍返回 `Music`。
+
+**原生界面核对**
+
+- `APP_OUTPUT_DIR="$PWD/build/task-detail-check" CONFIG=Debug scripts/build_app.sh`
+  → BUILD SUCCEEDED，且包内核心与源码哈希校验通过。
+- 隔离应用支持目录 + `FakeCore` 启动真实 App（窗口标题「任务」，六列看板齐全），
+  `screencapture -l<windowid>` 取窗口像素、Vision OCR 读回文本；OCR 确认
+  侧栏七节、六列列头、任务卡片与「这个状态还没有任务」空态文案。
+- T2 计划页：把**已发布**的 `MarkdownReaderView` 与 T2 夹具（多级标题、中文
+  有序/无序列表、代码围栏、GFM 表格、超宽代码/单元格、图片、原生 HTML 文本）
+  离屏渲染，OCR 确认标题/列表/代码块/表头与单元格分栏可读、图片只显示占位、
+  `<script>`/`javascript:` 链接按纯文本原样显示（不执行）。
+- T3 评审页空态：OCR 确认「暂无评审数据」+ 说明居中于内容区。
+- T4 记录页：OCR 确认「尝试记录」「事件时间线」两区段、四列/三列布局、
+  `round_observe` 显示为「观察者续接」（修复前为「未识别事件（round_observe）」）、
+  未知 kind 原样保留、长 note 完整显示不截断为单行。
+- 自动点击/切页受 macOS 辅助功能授权限制（`System Events` 返回 -1719），
+  分段切换与键盘焦点未做脚本化点击，仅以离屏渲染 + 窗口截图核对；
+  **macOS 14 仍待体验**（本机为较新 SDK/系统，只证明编译通过）。
+  用户正式 App（`/Applications/KaneoPilot.app`）与正式数据目录未被替换。

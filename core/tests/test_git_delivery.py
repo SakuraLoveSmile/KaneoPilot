@@ -338,7 +338,10 @@ def test_push_and_divergence(repo, tmp_path):
     delivery = branch(repo, tmp_path / "worktrees")
     (Path(delivery["worktree_path"]) / "first").touch()
     delivery["head_sha"] = commit(delivery)["sha"]
-    assert gd.push_branch(delivery) == {"pushed_sha": delivery["head_sha"]}
+    real_parser = gd.github_repository
+    bare = str(repo.parent / "origin.git")
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == bare else real_parser(url)):
+        assert gd.push_branch(delivery, expected_repo="owner/repo") == {"pushed_sha": delivery["head_sha"]}
     other = tmp_path / "other-clone"
     subprocess.run(["git", "clone", str(repo.parent / "origin.git"), str(other)], check=True, capture_output=True)
     git(other, "config", "user.name", "Delivery Test")
@@ -350,8 +353,8 @@ def test_push_and_divergence(repo, tmp_path):
     git(other, "push", "origin", "kaneo/task1234")
     (Path(delivery["worktree_path"]) / "local-change").touch()
     delivery["head_sha"] = commit(delivery, "run2")["sha"]
-    with pytest.raises(gd.GitDeliveryError) as error:
-        gd.push_branch(delivery)
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == bare else real_parser(url)), pytest.raises(gd.GitDeliveryError) as error:
+        gd.push_branch(delivery, expected_repo="owner/repo")
     assert error.value.code == "branch_diverged"
 
 
@@ -362,6 +365,113 @@ def test_github_repo_never_returns_url(repo):
     assert gd.origin_github_repo(str(repo)) == "owner/repo"
     git(repo, "remote", "set-url", "origin", "https://elsewhere.invalid/owner/repo")
     assert gd.origin_github_repo(str(repo)) is None
+
+
+@pytest.mark.parametrize("target", ["wrong-bare", "wrong-host", "wrong-repo", "multiple", "rewrite"])
+def test_push_wrong_effective_target_never_writes_either_bare(repo, tmp_path, target):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wrong = make_repo(tmp_path / "wrong").parent / "origin.git"
+    correct = repo.parent / "origin.git"
+    before = {p: git(p, "show-ref") for p in (correct, wrong)}
+    if target in ("wrong-bare", "rewrite"):
+        if target == "rewrite":
+            git(repo, "config", f"url.{wrong}.pushInsteadOf", str(correct))
+        else:
+            git(repo, "config", "remote.origin.pushurl", str(wrong))
+    elif target == "wrong-host":
+        git(repo, "config", "remote.origin.pushurl", "https://elsewhere.invalid/owner/repo")
+    elif target == "wrong-repo":
+        git(repo, "config", "remote.origin.pushurl", "https://github.com/other/repo")
+    else:
+        git(repo, "config", "--add", "remote.origin.pushurl", str(correct))
+        git(repo, "config", "--add", "remote.origin.pushurl", str(wrong))
+    real_parser = gd.github_repository
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)), pytest.raises(gd.GitDeliveryError) as error:
+        gd.push_branch(delivery, expected_repo="owner/repo")
+    assert error.value.code == "branch_diverged"
+    assert before == {p: git(p, "show-ref") for p in (correct, wrong)}
+
+
+def test_push_uses_checked_target_despite_origin_change_and_keeps_hook(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    correct = repo.parent / "origin.git"
+    wrong = make_repo(tmp_path / "wrong").parent / "origin.git"
+    before = git(wrong, "show-ref")
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\ntouch '" + str(tmp_path / "hook-ran") + "'\n")
+    hook.chmod(0o755)
+    real_git, real_parser = gd._git, gd.github_repository
+    def redirect(args, *a, **kw):
+        if args[0] == "push":
+            git(repo, "config", "remote.origin.pushurl", str(wrong))
+            assert args[1] == str(correct)
+        return real_git(args, *a, **kw)
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)), patch.object(gd, "_git", side_effect=redirect):
+        gd.push_branch(delivery, expected_repo="owner/repo")
+    assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
+    assert git(wrong, "show-ref") == before
+    assert (tmp_path / "hook-ran").is_file()
+
+
+def test_push_refuses_second_rewrite(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wrong = make_repo(tmp_path / "wrong").parent / "origin.git"
+    git(repo, "config", "remote.origin.pushurl", "alias://delivery")
+    git(repo, "config", "url.https://github.com/owner/repo.pushInsteadOf", "alias://delivery")
+    git(repo, "config", f"url.{wrong}.insteadOf", "https://github.com/owner/repo")
+    before = git(wrong, "show-ref")
+    with pytest.raises(gd.GitDeliveryError) as error:
+        gd.push_branch(delivery, expected_repo="owner/repo")
+    assert error.value.code == "branch_diverged"
+    assert git(wrong, "show-ref") == before
+
+
+def test_push_allows_stable_single_rewrite(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    correct = repo.parent / "origin.git"
+    git(repo, "remote", "set-url", "origin", "alias://delivery")
+    git(repo, "config", f"url.{correct}.pushInsteadOf", "alias://delivery")
+    real_parser = gd.github_repository
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)):
+        assert gd.push_branch(delivery, expected_repo="owner/repo")["pushed_sha"] == delivery["head_sha"]
+    assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
+
+
+def test_push_exports_reviewed_sha_if_pre_push_hook_moves_branch(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    correct = repo.parent / "origin.git"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nprintf secret > .env\ngit add .env\ngit commit -qm 'late hook commit'\n")
+    hook.chmod(0o755)
+    real_parser = gd.github_repository
+    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)):
+        gd.push_branch(delivery, expected_repo="owner/repo")
+    assert git(delivery["worktree_path"], "rev-parse", "HEAD") != delivery["head_sha"]
+    assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
+
+
+@pytest.mark.parametrize("name", [".env", "large.bin"])
+@pytest.mark.parametrize("source", ["recovery", "hook"])
+def test_actual_commit_safety_recovery_and_hook(repo, tmp_path, name, source):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    if source == "recovery":
+        (wt / name).write_bytes(b"x" * (6 * 1024 * 1024 if name == "large.bin" else 1))
+        git(wt, "add", name)
+        git(wt, "commit", "-m", "model commit\n\nKaneoPilot-Run: run1")
+    else:
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n" +
+                        ("dd if=/dev/zero of=large.bin bs=1048576 count=6 2>/dev/null\n" if name == "large.bin" else "printf secret > .env\n") +
+                        "git add " + name + "\n")
+        hook.chmod(0o755)
+        (wt / "safe.txt").write_text("safe")
+    before = git(repo.parent / "origin.git", "show-ref")
+    with pytest.raises(gd.GitDeliveryError) as error:
+        commit(delivery)
+    assert error.value.code == "delivery_blocked_files"
+    assert error.value.files == [name]
+    assert git(repo.parent / "origin.git", "show-ref") == before
 
 
 @pytest.mark.parametrize("url,expected", [

@@ -88,6 +88,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "mode": {"type": "string", "enum": ["agent", "plan", "goal"]},
                 "project_path": {"type": "string"},
                 "runtime_config": {"type": "object"},
+                "title": {"type": "string"},
+                "project_name": {"type": "string"},
             },
             "required": ["scope_id", "operation_id", "mode", "project_path"],
             "additionalProperties": False,
@@ -96,6 +98,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "session_id": {"type": "string"},
+                "title": {"type": ["string", "null"]},
+                "project_name": {"type": ["string", "null"]},
             },
             "required": ["session_id"],
         },
@@ -338,6 +342,41 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             },
             "required": ["session_id", "proposals"],
         },
+    },
+    {
+        "name": "kp_runtime_goal_report_list",
+        "description": "Read Goal report candidates for an execution scope's session.",
+        "domain": "runtime",
+        "readOnlyHint": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope_id": {"type": "string"},
+                "session_id": {"type": "string"},
+            },
+            "required": ["scope_id", "session_id"],
+            "additionalProperties": False,
+        },
+        "outputSchema": {"type": "object"},
+    },
+    {
+        "name": "kp_runtime_goal_report_get",
+        "description": "Read one Goal report by execution or report identity, preserving its state and hash.",
+        "domain": "runtime",
+        "readOnlyHint": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "execution_id": {"type": "string"},
+                "report_id": {"type": "string"},
+            },
+            "required": ["scope_id", "session_id"],
+            "anyOf": [{"required": ["execution_id"]}, {"required": ["report_id"]}],
+            "additionalProperties": False,
+        },
+        "outputSchema": {"type": "object"},
     },
     {
         "name": "kp_runtime_proposal_resolve",
@@ -852,6 +891,10 @@ def _runtime_guard(conn, scope, tool, args):
     session_id = args.get("session_id")
     if session_id and not runtime_operations.session_owned(conn, scope.scope_id, session_id):
         raise util.KanpilotError("forbidden", "session does not belong to scope")
+    if tool == "kp_runtime_goal_report_get" and not (
+        args.get("execution_id") or args.get("report_id")
+    ):
+        raise util.bad_request("Goal report get requires execution_id or report_id")
     if tool == "kp_runtime_session_configure":
         permission = (scope.runtime_config or {}).get("permission_mode")
         if scope.role in ("planner", "review"):
@@ -933,6 +976,8 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
                 "kp_runtime_turn_get": lambda: harness_plus_adapter.plus_turn_get(conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"]),
                 "kp_runtime_messages": lambda: harness_plus_adapter.plus_messages(conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
                 "kp_runtime_proposals": lambda: harness_plus_adapter.plus_proposals(conn_file, session_id=arguments["session_id"], turn_id=arguments.get("turn_id")),
+                "kp_runtime_goal_report_list": lambda: harness_plus_adapter.plus_goal_report_list(conn_file, session_id=arguments["session_id"]),
+                "kp_runtime_goal_report_get": lambda: harness_plus_adapter.plus_goal_report_get(conn_file, session_id=arguments["session_id"], execution_id=arguments.get("execution_id"), report_id=arguments.get("report_id")),
             }
             if tool_name in readers:
                 return readers[tool_name]()
@@ -950,7 +995,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         # No SQLite transaction or service-wide lock spans a Plus callback.
         sid = arguments.get("session_id")
         writers = {
-            "kp_runtime_session_create": lambda: harness_plus_adapter.plus_session_create(conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}),
+            "kp_runtime_session_create": lambda: harness_plus_adapter.plus_session_create(conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name")),
             "kp_runtime_session_configure": lambda: harness_plus_adapter.plus_session_configure(conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"]),
             "kp_runtime_attach_mcp": lambda: harness_plus_adapter.plus_attach_mcp(conn_file, session_id=sid, bridge_file=str(grant)),
             "kp_runtime_prompt": lambda: harness_plus_adapter.plus_prompt(conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments")),

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import urllib.error
 import urllib.request
@@ -409,13 +410,37 @@ class MCPClient:
     # ------------------------------------------------------------- 工具
 
     def tools_list(self) -> set:
+        return set(self.tools_manifest())
+
+    def tools_manifest(self) -> dict:
+        """``tools/list`` 原始清单：name → tool entry（T6 能力门读 schema）。"""
         result = self._rpc("tools/list")
-        tools = set()
+        tools: dict = {}
         if isinstance(result, dict):
             for entry in result.get("tools") or []:
                 if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                    tools.add(entry["name"])
+                    tools[entry["name"]] = entry
         return tools
+
+    def tool_input_properties(self, tool_name: str) -> Optional[dict]:
+        """``tools/list`` 中某工具的 ``inputSchema.properties``；不可用 → None。"""
+        entry = self.tools_manifest().get(tool_name)
+        if not isinstance(entry, dict):
+            return None
+        schema = entry.get("inputSchema")
+        if not isinstance(schema, dict):
+            return None
+        properties = schema.get("properties")
+        return properties if isinstance(properties, dict) else None
+
+    def supports_session_naming(self) -> bool:
+        """T6 兼容门（§5.23.10）：`pi_session_create` schema 暴露 `projectName`。"""
+        properties = self.tool_input_properties("pi_session_create")
+        if properties is None:
+            return False
+        return (
+            constants.PI_SESSION_CREATE_PROJECT_NAME_CAPABILITY in properties
+        )
 
     def call_tool(self, name: str, arguments: Optional[dict] = None) -> dict:
         """tools/call；返回 structuredContent（或 content[0].text 的 JSON）。
@@ -470,6 +495,7 @@ class MCPClient:
         self, project_path: str, mode: str = "agent",
         provider_id: Optional[str] = None, model_id: Optional[str] = None,
         thinking_level: Optional[str] = None, title: Optional[str] = None,
+        project_name: Optional[str] = None,
     ) -> dict:
         args = {"projectPath": project_path, "mode": mode}
         if provider_id:
@@ -480,6 +506,9 @@ class MCPClient:
             args["thinkingLevel"] = thinking_level
         if title:
             args["title"] = title
+        if project_name:
+            # T6（§5.23.10）：可选的展示名随同一次 create 调用落库。
+            args["projectName"] = project_name
         return self.call_tool("pi_session_create", args)
 
     def session_configure(self, session_id: str, mode: str = "agent",
@@ -549,6 +578,26 @@ class MCPClient:
             args["version"] = version
         return self.call_tool("pi_plans_resolve", args)
 
+    def goal_report_list(self, session_id: str) -> dict:
+        """只读：本会话的 Goal 报告摘要列表（§5.23.10 T5-A）。"""
+        return self.call_tool(
+            "pi_goal_report_list", {"sessionId": session_id}
+        )
+
+    def goal_report_get(self, session_id: str,
+                        execution_id: Optional[str] = None,
+                        report_id: Optional[str] = None) -> dict:
+        """只读：取回经 Host 完整性核验的完整 Goal 报告（§5.23.10 T5-A）。
+
+        ``pi_goal_report_get {sessionId, executionId}``（``reportId`` 亦可）。
+        """
+        args = {"sessionId": session_id}
+        if execution_id:
+            args["executionId"] = execution_id
+        if report_id:
+            args["reportId"] = report_id
+        return self.call_tool("pi_goal_report_get", args)
+
     def session_list(self, query: Optional[str] = None) -> dict:
         """会话记录列表（只读）：读会话当前 mode/permissionMode 等生效值。"""
         args = {}
@@ -566,13 +615,17 @@ class MCPClient:
 def probe_connection(connection_file,
                      required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS,
                      *, provider_id=None, model_id=None, timeout=10) -> dict:
-    """exec-capabilities/dispatch-start 就绪探测（§5.23.3）。
+    """exec-capabilities/dispatch-start 就绪探测（§5.23.3 + §5.23.10 T6）。
 
-    返回 ``{"ok": bool, "detail": 中文, "tools": set, "version": str|None}``；
-    任何失败 ok=False + 中文原因。token/Authorization/连接文件全文绝不进入
-    返回值。
+    返回 ``{"ok": bool, "detail": 中文, "tools": set, "version": str|None,
+    "session_naming": bool}``；任何失败 ok=False + 中文原因。
+    token/Authorization/连接文件全文绝不进入返回值。
+
+    ``session_naming`` 为 T6 兼容门：``pi_session_create.inputSchema.
+    properties.projectName`` 是否可用（旧 Plus → False）。
     """
-    result = {"ok": False, "detail": None, "tools": set(), "version": None}
+    result = {"ok": False, "detail": None, "tools": set(), "version": None,
+              "session_naming": False}
     try:
         record = load_connection(connection_file)
     except util.KanpilotError as exc:
@@ -590,7 +643,16 @@ def probe_connection(connection_file,
             )
             return result
         result["version"] = client.protocol_version
-        tools = client.tools_list()
+        manifest = client.tools_manifest()
+        tools = set(manifest)
+        # T6 兼容门：schema 里必须暴露 pi_session_create.projectName。
+        naming = manifest.get("pi_session_create")
+        schema = naming.get("inputSchema") if isinstance(naming, dict) else None
+        props = schema.get("properties") if isinstance(schema, dict) else None
+        result["session_naming"] = bool(
+            isinstance(props, dict)
+            and constants.PI_SESSION_CREATE_PROJECT_NAME_CAPABILITY in props
+        )
     except util.KanpilotError as exc:
         result["detail"] = _strip_secret(exc.message, record["token"])
         return result
@@ -854,3 +916,237 @@ def resolve_plus_default(connection_file, *, timeout: int = 10) -> Tuple[Optiona
         return None, _strip_secret(exc.message, record.get("token"))
     except Exception as exc:
         return None, _strip_secret(str(exc), record.get("token") if "record" in locals() else None)
+# ======================================================= Goal 报告（T5，§5.23.10）
+
+# Plus 本机 MCP 只读工具 ``pi_goal_report_get {sessionId, executionId}``
+# （``reportId`` 亦可）返回完整报告 JSON 并附可信 ``report_sha256``。
+# 本模块只负责「取回 + 分态归一化」，放行判断（身份核对与确定性报告底线）
+# 在命令层（cmd_read / cmd_exec）。
+
+# 分态互不混淆：``ready`` / ``pending`` / ``draft`` / ``failed`` /
+# ``not_found`` / ``corrupt`` / ``truncated``。``fallback`` 是**成功返回的
+# 报告**，但其 ``integrity.kind=fallback`` 表示没有完成报告。任何失败态都
+# 不返回伪造正文；``tool_missing``/``unreadable`` 是核心侧额外区分的读取
+# 环境失败——临时读取失败不得伪称「没有报告」。
+GOAL_REPORT_GET_TOOL = "pi_goal_report_get"
+GOAL_REPORT_LIST_TOOL = "pi_goal_report_list"
+GOAL_REPORT_STATES = (
+    "ready", "pending", "draft", "failed", "not_found", "corrupt",
+    "truncated",
+)
+# 核心侧额外分态（不属于报告自身状态）。
+GOAL_REPORT_READ_FAILURES = ("tool_missing", "unreadable")
+_GOAL_REPORT_FAILURE_WORDS = ("pending", "draft", "failed", "not_found",
+                              "corrupt", "truncated")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+def fetch_goal_report(session_id, *, execution_id=None, report_id=None,
+                      connection_file=None, client=None, timeout=30) -> dict:
+    """只读取回并分态归一化一份 Plus Goal 报告（§5.23.10 T5-A）。
+
+    返回 ``{"state", "detail", "report", "report_sha256", "report_id",
+    "raw"}``：``state`` ∈ :data:`GOAL_REPORT_STATES` + 读取环境失败词汇；
+    ``report`` 仅在 ``state="ready"`` 时为完整报告对象，其余一律 ``None``
+    （绝不伪造正文）。调用方负责身份核对与确定性底线；本函数不做语义判断。
+    """
+    failure = {"state": "unreadable", "detail": None, "report": None,
+               "report_sha256": None, "report_id": report_id, "raw": None}
+    owned = False
+    if client is None:
+        if not connection_file:
+            failure["detail"] = "缺少连接文件，无法读取 Goal 报告"
+            return failure
+        try:
+            record = load_connection(connection_file)
+        except util.KanpilotError as exc:
+            failure["detail"] = exc.message
+            return failure
+        client = MCPClient(record["url"], record["token"], timeout=timeout)
+        owned = True
+    try:
+        if owned:
+            client.connect()
+            tools = client.tools_list()
+            if GOAL_REPORT_GET_TOOL not in tools:
+                failure["state"] = "tool_missing"
+                failure["detail"] = (
+                    "PI-Desktop 控制面缺少只读报告工具："
+                    f"{GOAL_REPORT_GET_TOOL}（PI-Desktop-Plus 版本过旧，"
+                    "不支持侧报告读取；不据此伪造完成报告）"
+                )
+                return failure
+        args = {"sessionId": session_id}
+        if execution_id:
+            args["executionId"] = execution_id
+        if report_id:
+            args["reportId"] = report_id
+        payload = client.call_tool(GOAL_REPORT_GET_TOOL, args)
+    except util.KanpilotError as exc:
+        failure["state"] = _classify_report_failure(exc.code, exc.message)
+        failure["detail"] = exc.message
+        return failure
+    return normalize_goal_report(payload, report_id=report_id)
+
+def classify_report_error(code, message) -> str:
+    """错误码/消息 → 报告分态（缺省 ``unreadable`` = 临时读取失败）。
+
+    ``unreadable`` 与 ``not_found`` 必须区分：临时读取失败**不得**伪称
+    「没有报告」（§5.23.10 T5-D）。
+    """
+    text = str(message or "").lower()
+    if "unknown tool" in text or "缺少必需工具" in text:
+        return "tool_missing"
+    for word in _GOAL_REPORT_FAILURE_WORDS:
+        if word in text:
+            return word
+    if code == "not_found":
+        return "not_found"
+    if code == "validation_failed":
+        return "corrupt"
+    return "unreadable"
+
+
+# 兼容旧内部名（同一实现；读取层与 worker 共用）。
+_classify_report_failure = classify_report_error
+
+def normalize_goal_report(payload, *, report_id=None) -> dict:
+    """工具回包 → 统一报告视图（成功态判 schema/身份完整，失败态明确分态）。"""
+    result = {"state": "corrupt", "detail": None, "report": None,
+              "report_sha256": None, "report_id": report_id, "raw": payload}
+    if not isinstance(payload, dict):
+        result["detail"] = "报告读取回包不是 JSON 对象"
+        return result
+    result["report_id"] = (payload.get("reportId")
+                           or payload.get("report_id") or report_id)
+    sha = payload.get("report_sha256") or payload.get("reportSha256")
+    result["report_sha256"] = sha if isinstance(sha, str) and sha else None
+    if payload.get("truncated") is True:
+        result["state"] = "truncated"
+        result["detail"] = "报告超过 256 KiB 上限，已明确截断（不返回截断正文）"
+        return result
+    error = payload.get("error")
+    if isinstance(error, dict):
+        result["state"] = _classify_report_failure(
+            str(error.get("code") or ""), str(error.get("message") or "")
+        )
+        result["detail"] = str(error.get("message") or "报告读取失败")
+        return result
+    if payload.get("isError") is True:
+        result["state"] = _classify_report_failure(None, payload.get("detail"))
+        result["detail"] = str(payload.get("detail") or "报告读取失败")
+        return result
+    report = payload.get("report")
+    if report is None and ("status" in payload or "sessionId" in payload):
+        # Host 直接回传报告对象（并附 report_sha256）的形态。
+        report = payload
+    if not isinstance(report, dict):
+        explicit = payload.get("state")
+        if explicit in GOAL_REPORT_STATES:
+            result["state"] = explicit
+            result["detail"] = str(payload.get("detail") or "")
+            return result
+        result["state"] = "not_found"
+        result["detail"] = "回包中没有报告对象"
+        return result
+    status = str(report.get("status") or "").lower()
+    if status in ("pending", "draft", "failed"):
+        result["state"] = status
+        result["detail"] = str(
+            payload.get("detail") or report.get("detail") or ""
+        )
+        return result
+    if status != "ready":
+        result["state"] = "corrupt"
+        result["detail"] = f"报告 status 非法：{status or '(空)'}"
+        return result
+    if result["report_sha256"] is None:
+        result["state"] = "corrupt"
+        result["detail"] = "报告缺少可信 report_sha256"
+        return result
+    if not _SHA256_RE.match(result["report_sha256"]):
+        result["state"] = "corrupt"
+        result["detail"] = "report_sha256 不是 64 位十六进制"
+        return result
+    if not report.get("sessionId") or not report.get("executionId"):
+        result["state"] = "corrupt"
+        result["detail"] = "报告缺少 sessionId/executionId 身份字段"
+        return result
+    result["state"] = "ready"
+    result["report"] = report
+    return result
+
+def report_identity(report: dict) -> dict:
+    """报告身份字段视图（§5.23.10 T5-B；绝不按名称/标题匹配）。"""
+    report = report if isinstance(report, dict) else {}
+    return {
+        "session_id": report.get("sessionId") or report.get("session_id"),
+        "proposal_id": report.get("proposalId") or report.get("proposal_id"),
+        "execution_id": (
+            report.get("executionId") or report.get("execution_id")
+        ),
+        "turn_id": report.get("turnId") or report.get("turn_id"),
+        # Plus Goal 契约的 artifact 哈希与 KaneoPilot 的 plan_sha256 各管
+        # 各的文件，**不可**直接比较成同一个哈希（§5.23.10 T5-B）。
+        "contract_hash": (
+            report.get("contractHash") or report.get("contract_hash")
+        ),
+    }
+
+def report_integrity_kind(report: dict):
+    """``integrity.kind``（``structured`` / ``fallback``）；缺失 → None。"""
+    integrity = (report or {}).get("integrity")
+    if not isinstance(integrity, dict):
+        return None
+    kind = integrity.get("kind")
+    return str(kind) if isinstance(kind, str) and kind else None
+
+def report_execution_status(report: dict):
+    """Host 侧执行事实 ``execution.status``（§5.23.10 T5-C）。"""
+    execution = (report or {}).get("execution")
+    if not isinstance(execution, dict):
+        return None
+    status = execution.get("status")
+    return str(status).lower() if isinstance(status, str) and status else None
+
+def report_verdict(report: dict):
+    verdict = (report or {}).get("verdict")
+    return str(verdict).lower() if isinstance(verdict, str) and verdict else None
+
+def _id_of(item, *keys):
+    if isinstance(item, str) and item:
+        return item
+    if not isinstance(item, dict):
+        return None
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return None
+
+def report_reference_ids(report: dict) -> dict:
+    """报告中实际存在的 criterion/check/evidence ID 集合（T5-C 引用核对）。"""
+    report = report if isinstance(report, dict) else {}
+    buckets = {}
+    for name, item_keys in (
+        ("criteria", ("id", "criterionId", "criterion_id", "key")),
+        ("checks", ("id", "checkId", "check_id", "key")),
+        ("evidences", ("id", "evidenceId", "evidence_id", "key")),
+    ):
+        ids = set()
+        rows = report.get(name)
+        if isinstance(rows, list):
+            for item in rows:
+                value = _id_of(item, *item_keys)
+                if value:
+                    ids.add(value)
+        elif isinstance(rows, dict):
+            for key, item in rows.items():
+                value = _id_of(item, *item_keys) or (
+                    key if isinstance(key, str) and key else None
+                )
+                if value:
+                    ids.add(value)
+        buckets[name] = ids
+    return buckets

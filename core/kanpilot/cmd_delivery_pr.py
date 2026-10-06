@@ -2,9 +2,10 @@
 
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import bridge, core, db, gh_client, git_delivery, remote, util
+from . import bridge, constants, core, db, gh_client, git_delivery, remote, util
 
 
 def _public_text(value):
@@ -36,12 +37,31 @@ def _identity(ctx, payload):
         util.require(isinstance(payload.get(key), str) and payload[key].strip(),
                      "缺少 " + key, "bad_request")
     task = db.require_task(ctx.conn, payload["task_id"])
-    core.require_stage_identity(ctx.conn, payload, task, ctx.now, stages=("delivery",))
+    core.require_stage_identity(ctx.conn, payload, task, util.now_dt(), stages=("delivery",))
     util.require(task["status"] == "in_review" and core.is_pr_delivery(task),
                  "任务不处于 PR 交付阶段", "conflict")
     util.require(not core.automation_of(task).get("manual_takeover", False),
                  "任务已转为人工处理", "conflict")
+    extra, delivery = db.task_extra(task), core.delivery_of(task)
+    history = extra.get("review_history") or []
+    review = history[-1] if history and isinstance(history[-1], dict) else {}
+    util.require(extra.get("review_conclusion") == "pass" and review.get("conclusion") == "pass"
+                 and review.get("execution_run_id") == task["run_id"]
+                 and review.get("head_sha") == delivery.get("head_sha")
+                 and review.get("fix_round") == core.automation_of(task).get("fix_round", 0)
+                 and review.get("review_key") and review["review_key"] == task["review_key"]
+                 and review.get("report_path") and review["report_path"] == task["review_report_path"]
+                 and review.get("report_sha256") and review["report_sha256"] == task["review_report_sha256"]
+                 and any(c.get("execution_run_id") == task["run_id"]
+                         and c.get("sha") == delivery.get("head_sha") for c in delivery.get("commits") or []),
+                 "PR 交付需要当前执行轮次及提交的 Review pass 登记", "validation_failed")
     return task
+
+
+def _verify_review_report(task):
+    report = util.inside(Path(task["review_report_path"]), constants.review_reports_root(), "report_path")
+    util.require(report.is_file() and util.sha256_file(report) == task["review_report_sha256"],
+                 "Review 报告缺失或已变化", "validation_failed")
 
 
 def _snapshot(ctx, payload, *, publish):
@@ -54,12 +74,14 @@ def _snapshot(ctx, payload, *, publish):
 
 
 def _fresh(ctx, payload, task, delivery):
-    fresh = _identity(ctx, payload)
+    fresh = db.require_task(ctx.conn, payload["task_id"])
     util.require(fresh["run_id"] == task["run_id"] and fresh["repository"] == task["repository"]
                  and fresh["plan_sha256"] == task["plan_sha256"]
+                 and all(fresh[key] == task[key] for key in
+                         ("review_key", "review_report_path", "review_report_sha256"))
                  and core.delivery_of(fresh) == delivery,
                  "交付期间执行轮次或交付登记已变更", "conflict")
-    return fresh
+    return _identity(ctx, payload)
 
 
 def _failure(ctx, payload, task, delivery, failure):
@@ -118,15 +140,34 @@ def _verify_pr_identity(pr, repo, delivery, pushed_sha):
         raise git_delivery.GitDeliveryError("branch_diverged", "PR 身份、分支或提交与交付快照不一致")
 
 
+def _repository(task, delivery):
+    repo = git_delivery.origin_github_repo(task["repository"])
+    if not repo:
+        raise gh_client.GhError("rejected", "origin 不是有效 GitHub 仓库")
+    if delivery.get("pr_url"):
+        url = urlsplit(delivery["pr_url"])
+        expected = "/" + repo + "/pull/" + str(delivery.get("pr_number"))
+        if (url.scheme != "https" or url.netloc != "github.com" or url.query or url.fragment
+                or url.path.lower() != expected.lower()):
+            raise git_delivery.GitDeliveryError("branch_diverged", "origin 与已登记 PR 仓库不一致")
+    return repo
+
+
 def cmd_delivery_publish(ctx, payload) -> dict:
     task, delivery = _snapshot(ctx, payload, publish=True)
+    def boundary():
+        fresh = _fresh(ctx, payload, task, delivery)
+        _verify_review_report(fresh)
+        _fresh(ctx, payload, task, delivery)
     try:
+        boundary()
         git_input = dict(delivery, repository=task["repository"])
-        repo = git_delivery.origin_github_repo(task["repository"])
-        if not repo:
-            raise gh_client.GhError("rejected", "origin 不是有效 GitHub 仓库")
-        pushed = git_delivery.push_branch(git_input)
+        repo = _repository(task, delivery)
+        boundary()
+        pushed = git_delivery.push_branch(git_input, expected_repo=repo, before_push=boundary)
+        boundary()
         prs = gh_client.pr_list(repo, delivery["branch"])
+        boundary()
         if delivery.get("pr_number") is not None:
             pr = next((p for p in prs if p.get("number") == delivery["pr_number"]), None)
             if pr is None:
@@ -140,24 +181,32 @@ def cmd_delivery_publish(ctx, payload) -> dict:
                 sha = item.get("sha", "")
                 util.require(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40,64}", sha),
                              "交付提交 SHA 无效", "validation_failed")
+                boundary()
                 titles[sha] = git_delivery._value(["show", "-s", "--format=%s", sha], delivery["worktree_path"])
             title = _public_text("[Kaneo] " + " ".join(str(task["title"] or "").split()))[:100]
+            boundary()
             pr = gh_client.pr_create(repo, base=delivery["base_branch"], head=delivery["branch"],
                                      title=title, body=build_pr_body(task, delivery, titles))
+        boundary()
         _verify_pr_identity(pr, repo, delivery, pushed["pushed_sha"])
         if pr["state"] == "CLOSED":
             return _closed(ctx, payload, task, delivery, pr)
+        boundary()
         git_delivery.verify_branch_worktree(git_input, require_clean=True, expected_head=delivery["head_sha"])
         with db.write_txn(ctx.conn):
             _fresh(ctx, payload, task, delivery)
+        boundary()
         client = remote.get_client()
         marker = "[kaneopilot:delivery:" + task["task_id"] + "]"
+        boundary()
         if not remote.find_marker_comment(client, task["task_id"], marker):
+            boundary()
             remote.post_comment(client, task["task_id"], marker + " 已创建 PR：" + pr["url"])
     except (git_delivery.GitDeliveryError, gh_client.GhError) as exc:
         return _failure(ctx, payload, task, delivery, exc)
     except bridge.BridgeError as exc:
         return _failure(ctx, payload, task, delivery, gh_client.GhError("transient", str(exc)))
+    boundary()
     with db.write_txn(ctx.conn):
         fresh = _fresh(ctx, payload, task, delivery)
         core.update_delivery(ctx.conn, fresh, ctx.now_iso, pushed_sha=pushed["pushed_sha"],
@@ -179,15 +228,20 @@ def cmd_delivery_publish(ctx, payload) -> dict:
 def cmd_delivery_sync(ctx, payload) -> dict:
     task, delivery = _snapshot(ctx, payload, publish=False)
     try:
-        live = remote.get_task(remote.get_client(), task["task_id"])
+        _verify_review_report(task)
+        _fresh(ctx, payload, task, delivery)
+        client = remote.get_client()
+        _fresh(ctx, payload, task, delivery)
+        live = remote.get_task(client, task["task_id"])
+        _fresh(ctx, payload, task, delivery)
         if (live.get("task") or {}).get("status") == "done":
             with db.write_txn(ctx.conn):
                 _fresh(ctx, payload, task, delivery)
             return {"outcome": "kaneo_done"}
-        repo = git_delivery.origin_github_repo(task["repository"])
-        if not repo:
-            raise gh_client.GhError("rejected", "origin 不是有效 GitHub 仓库")
+        repo = _repository(task, delivery)
+        _fresh(ctx, payload, task, delivery)
         pr = gh_client.pr_view(repo, delivery["pr_number"])
+        _fresh(ctx, payload, task, delivery)
         if not delivery.get("pushed_sha") or delivery["pushed_sha"] != delivery.get("head_sha"):
             raise git_delivery.GitDeliveryError("branch_diverged", "同步交付的提交与已推送快照不一致")
         _verify_pr_identity(pr, repo, delivery, delivery["pushed_sha"])
@@ -197,6 +251,7 @@ def cmd_delivery_sync(ctx, payload) -> dict:
         raise util.KanpilotError("remote_unavailable", gh_client.redact(str(exc))) from exc
     if pr["state"] == "CLOSED":
         return _closed(ctx, payload, task, delivery, pr)
+    _verify_review_report(task)
     with db.write_txn(ctx.conn):
         fresh = _fresh(ctx, payload, task, delivery)
         if pr["state"] == "MERGED":

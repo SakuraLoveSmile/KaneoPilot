@@ -41,15 +41,20 @@ struct OwnerLifecycleFixtures {
         ]
         var stale = identity
         stale["started_microseconds"] = foreignInfo.pbi_start_tvusec + 1
-        let injected: [[String: Any]] = [
+        var injected: [[String: Any]] = [
             ["owner": UUID().uuidString, "entry": identity],
             ["owner": scheduler.instanceID, "entry": stale],
         ]
+        // Keep the local ownership collection truly empty before the failed exit read.
+        if mode == "disabled-maintenance" { injected.removeLast() }
         try JSONSerialization.data(withJSONObject: injected).write(to: URL(fileURLWithPath: root + "/extra-workers.json"))
         if mode == "running" { FileManager.default.createFile(atPath: root + "/running-stage", contents: Data()) }
         let recoversRegistration = mode == "start-recovery" || mode == "start-periodic-recovery"
         if mode == "start-failure" || recoversRegistration { FileManager.default.createFile(atPath: root + "/fail-start", contents: Data()) }
-        if mode == "disabled-maintenance" { UserDefaults.standard.register(defaults: ["executorSchedulingEnabled": false]) }
+        if mode == "disabled-maintenance" {
+            UserDefaults.standard.register(defaults: ["executorSchedulingEnabled": false])
+            FileManager.default.createFile(atPath: root + "/fail-stage-exit-status-once", contents: Data())
+        }
         scheduler.start()
         if mode == "disabled-maintenance" { scheduler.checkNow() }
         let originalID = scheduler.instanceID
@@ -75,7 +80,7 @@ struct OwnerLifecycleFixtures {
                 guard scheduler.instanceID == originalID, scheduler.error == nil else { fatalError("registration recovery must preserve UUID") }
                 guard try String(contentsOfFile: root + "/start-count") == "2" else { fatalError("next check should perform exactly one successful registration") }
             }
-            if mode != "running" {
+            if mode != "running" && mode != "disabled-maintenance" {
                 let stage = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: root + "/stage.json"))) as! [String: Any]
                 let pid = (stage["pid"] as! NSNumber).int32Value
                 for _ in 0..<150 {
@@ -90,6 +95,26 @@ struct OwnerLifecycleFixtures {
             }
         }
         if mode == "disabled-maintenance" {
+            let stage = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: root + "/stage.json"))) as! [String: Any]
+            let stagePID = (stage["pid"] as! NSNumber).int32Value
+            for _ in 0..<150 {
+                if !alive(stagePID) && scheduler.error?.contains("fixture stage-exit status unavailable") == true { break }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            guard !alive(stagePID), scheduler.error?.contains("fixture stage-exit status unavailable") == true,
+                  scheduler.status?.ownedWorkers?.isEmpty == true, scheduler.preventsIdleSleep else {
+                fatalError("failed exit read must retain sleep activity with empty known ownership")
+            }
+            // The one-shot failure has cleared. Only the disabled automatic maintenance
+            // timer can recover ownership; a manual check would mask this regression.
+            for _ in 0..<250 {
+                if scheduler.status?.ownedWorkers?.contains(where: { $0.taskId == "fixture-task" }) == true && scheduler.error == nil { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard scheduler.status?.ownedWorkers?.contains(where: { $0.taskId == "fixture-task" }) == true,
+                  scheduler.error == nil, scheduler.preventsIdleSleep else {
+                fatalError("disabled scheduling must recover uncertain ownership at its next maintenance check")
+            }
             let worker = try JSONDecoder.kaneo.decode(ExecutorOwnedWorkerDTO.self, from: Data(contentsOf: URL(fileURLWithPath: root + "/worker.json")))
             var info = proc_bsdinfo()
             guard proc_pidinfo(worker.pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
@@ -101,7 +126,10 @@ struct OwnerLifecycleFixtures {
                 if !scheduler.preventsIdleSleep { break }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !scheduler.preventsIdleSleep else { fatalError("disabled scheduling still needs 20s ownership maintenance") }
+            guard !scheduler.preventsIdleSleep, scheduler.status?.ownedWorkers?.isEmpty == true,
+                  scheduler.error == nil else {
+                fatalError("disabled maintenance must clear exited workers and release uncertain sleep activity")
+            }
         }
         if mode == "close-failure" { FileManager.default.createFile(atPath: root + "/fail-stop", contents: Data()) }
         if mode == "status-failure" { FileManager.default.createFile(atPath: root + "/fail-status", contents: Data()) }

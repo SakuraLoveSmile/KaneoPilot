@@ -201,6 +201,51 @@ def test_plus_session_dtos_match_plus_api():
         "id": "sess-1", "messageBefore": 8, "messageLimit": 4
     }
 
+def test_plus_session_names_are_forwarded_and_returned_without_request_echo():
+    client = MagicMock()
+    client.call_tool.side_effect = [
+        {"session": {"id": "sess-1", "title": "Host title",
+                     "projectName": "Host workspace"}},
+        {"session": {"id": "sess-2"}},
+    ]
+    with patch("kanpilot.harness_plus_adapter._get_client", return_value=(client, {})):
+        first = harness_plus_adapter.plus_session_create(
+            "/fake", project_path="/project", mode="goal", runtime_config={},
+            title="Requested title", project_name="Requested workspace",
+        )
+        second = harness_plus_adapter.plus_session_create(
+            "/fake", project_path="/project", mode="goal", runtime_config={},
+            title="Requested title", project_name="Requested workspace",
+        )
+    assert client.call_tool.call_args_list[0].args[1]["title"] == "Requested title"
+    assert client.call_tool.call_args_list[0].args[1]["projectName"] == "Requested workspace"
+    assert first == {"session_id": "sess-1", "title": "Host title",
+                     "project_name": "Host workspace"}
+    assert second == {"session_id": "sess-2"}
+
+
+def test_historical_report_reader_preserves_payload_and_cannot_write():
+    from kanpilot.runtime_client import HistoricalReadClient
+    client = MagicMock()
+    listing = {"reports": [{"reportId": "r1", "executionId": "e1"}]}
+    report = {"state": "ready", "report_sha256": "d" * 64,
+              "report": {"status": "ready", "sessionId": "s1",
+                         "executionId": "e1", "integrity": {"kind": "fallback"}}}
+    client.call_tool.side_effect = [listing, report]
+    reader = HistoricalReadClient("/fake")
+    with patch("kanpilot.harness_plus_adapter._get_client", return_value=(client, {})):
+        assert reader.goal_report_list("s1") == listing
+        assert reader.goal_report_get("s1", report_id="r1") == report
+        with pytest.raises(util.KanpilotError, match="requires"):
+            reader.goal_report_get("s1")
+        with pytest.raises(util.KanpilotError) as exc:
+            reader.session_create("/project", mode="goal")
+        assert exc.value.code == "forbidden"
+    assert client.call_tool.call_args_list[0].args == (
+        "pi_goal_report_list", {"sessionId": "s1"})
+    assert client.call_tool.call_args_list[1].args == (
+        "pi_goal_report_get", {"sessionId": "s1", "reportId": "r1"})
+
 
 def test_plus_catalog_provider_override_and_redaction():
     client = MagicMock()
