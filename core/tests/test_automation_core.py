@@ -309,6 +309,66 @@ def test_old_delivery_cannot_finish_new_execution_after_io(state,monkeypatch):
     assert not db.get_setting(state.conn,'lifecycle_serial')
 
 
+@pytest.mark.parametrize('identity', ['delivery', 'monitor', 'legacy_monitor'])
+@pytest.mark.parametrize('change', ['elapsed', 'expired', 'released', 'execution', 'requirements', 'project'])
+def test_remote_read_invalidation_prevents_status_write(state, monkeypatch, identity, change):
+    """远端 get 期间失效的 claim 必须在远端 update 前被拒绝。"""
+    if identity == 'delivery':
+        state.update(status='in_review', stage='delivery')
+        core.update_delivery(state.conn, state.task(), NOW, merged_at=NOW)
+        claim = state.claim('delivery', 'delivery1')
+        payload = dict(claim, target='done', expected_current='in-review')
+        original_status = 'in_review'
+    else:
+        state.update(status='running', stage='monitor')
+        state.live['task']['status'] = 'in-progress'
+        claim = state.claim('monitor', 'monitor1')
+        payload = {'task_id': TASK, 'run_id': claim['run_id'],
+                   'target': 'in-review', 'expected_current': 'in-progress'}
+        if identity == 'legacy_monitor':
+            db.update_request(state.conn, claim['request_id'], NOW, claimed_by='kaneo-monitor')
+            payload.pop('run_id')
+            payload.update(monitor_request_id=claim['request_id'], monitor_run_id=claim['run_id'])
+        original_status = 'running'
+    clock = [0.0]
+    monkeypatch.setattr(cmd_remote.time, 'monotonic', lambda: clock[0])
+    reads, writes = [], []
+
+    def get(*args):
+        assert not state.conn.in_transaction, 'remote get in write transaction'
+        reads.append(args)
+        if change == 'elapsed':
+            clock[0] = 601.0
+        elif change == 'expired':
+            db.update_request(state.conn, claim['request_id'], NOW,
+                              lease_expires_at=util.to_iso(state.ctx.now - timedelta(seconds=1)))
+        elif change == 'released':
+            db.update_request(state.conn, claim['request_id'], NOW, status='cancelled')
+        elif change == 'execution':
+            state.update(run_id='replacement-execution')
+        elif change == 'requirements':
+            state.update(requirements_sha256='replacement-requirements')
+        else:
+            state.update(project_id='replacement-project')
+        return state.live
+
+    def write(*args):
+        assert not state.conn.in_transaction, 'remote update in write transaction'
+        writes.append(args)
+
+    monkeypatch.setattr(remote, 'get_task', get)
+    monkeypatch.setattr(remote, 'update_status', write)
+    with pytest.raises(util.KanpilotError) as err:
+        cmd_remote.cmd_advance_task(state.ctx, payload)
+    assert err.value.code == 'stale_run'
+    assert len(reads) == 1
+    assert writes == []
+    assert state.task()['status'] == original_status
+    assert state.task()['kaneo_status'] is None
+    assert state.conn.execute("SELECT COUNT(*) FROM events WHERE kind='kaneo_transition'").fetchone()[0] == 0
+    assert not db.get_setting(state.conn, 'lifecycle_owner')
+
+
 def test_replan_reads_new_remote_requirements_after_execution_failure(state):
     state.update(status='needs_user',failure_code='execution_failed',failure_stage='monitor')
     state.live['requirements_sha256']='new-demand'

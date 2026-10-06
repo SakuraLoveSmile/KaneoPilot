@@ -9,7 +9,9 @@ from datetime import timedelta
 from pathlib import Path
 
 from . import (
-    bridge, constants, core, db, derive, planfile, remote, util,
+    bridge, cmd_exec, cmd_read, constants, core, db, derive,
+    dsh_events, headless_adapter as _headless, planfile, remote,
+    round_store, util, verify_evidence,
 )
 
 
@@ -144,12 +146,207 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
         }
 
 
+def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_dir) -> None:
+    """新轮次推进前独立重核当前 monitor、终态、计划快照与命令证据。"""
+    monitor_run_id = payload.get("run_id") or payload.get("monitor_run_id")
+    request = ctx.conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND run_id=? AND status='claimed'",
+        (task["task_id"], monitor_run_id),
+    ).fetchone()
+    if request is None:
+        raise util.KanpilotError("stale_run", "推进需要当前有效 monitor claim")
+    cmd_exec.require_monitor_claim(ctx.conn, request["request_id"], monitor_run_id, ctx.now)
+    if payload.get("monitor_request_id") not in (None, request["request_id"]):
+        raise util.KanpilotError("stale_run", "monitor_request_id 与当前 claim 不符")
+    events, error = dsh_events.iter_events(run_dir / dsh_events.EVENT_LOG_NAME)
+    session = dsh_events.session_event(events)
+    if (not session or not job.get("session_id")
+            or session.get("session_id") != job["session_id"]
+            or any(event.get("task_id") not in (None, task["task_id"])
+                   or event.get("run_id") not in (None, task["run_id"])
+                   or event.get("session_id") not in (None, job["session_id"])
+                   for event in events)):
+        raise util.KanpilotError("conflict", "执行证据的任务、轮次或会话身份不符")
+    terminal = dsh_events.terminal_event(events)
+    if (error or job.get("status") != "finished"
+            or type(job.get("exit_code")) is not int or job["exit_code"] != 0
+            or not terminal or terminal.get("outcome") != "completed"):
+        raise util.KanpilotError("conflict", "执行终态或完整证据不可确认，不能进入评审")
+    if not job.get("plan_sha256") or job["plan_sha256"] != task["plan_sha256"]:
+        raise util.KanpilotError("conflict", "执行计划哈希与当前计划不符，不能进入评审")
+    extra = db.task_extra(task)
+    if (extra.get("verification_override") or {}).get("execution_run_id") == task["run_id"]:
+        return
+    declaration = extra.get("plan_verify") or {}
+    if (declaration.get("plan_sha256") != task["plan_sha256"]
+            or not declaration.get("commands")):
+        raise util.KanpilotError("conflict", "计划缺少本轮可信 verify 命令声明")
+    result = verify_evidence.match_verification(
+        declaration["commands"],
+        verify_evidence.extract_command_results(dsh_events.to_messages(events)),
+    )
+    if not result["ok"]:
+        raise util.KanpilotError("conflict", "本轮验证命令缺失或失败，不能进入评审")
+
+
+def _require_goal_gate(ctx, payload: dict, task) -> None:
+    """Plus 轮次的 in-progress → in-review 完成门。
+
+    ``pi`` 后端维持既有口径。当前 Plus job 的 completion_policy 固化为
+    command_verification 时重核命令验证；旧 job 缺字段保持 T5-C Goal 门，
+    要求当前 monitor claim 与 evaluation event ID，在远端更新前复核：
+
+    - 当前任务的执行轮次；
+    - 报告身份/hash + 确定性报告底线；
+    - 事件确由 monitor 请求登记（允许当前有效 claim 复用历史判定）；
+    - ``decision=complete``；
+    - 执行终态 ``completed + finished/0``。
+
+    绕过 monitor 直接调用、旧判定或报告变化 → 一律 ``conflict``，不触碰远端。
+    本函数只读（不发远端请求、不写状态、不占写事务）。
+    """
+    run_id = task["run_id"]
+    if not run_id:
+        # 历史轮次/测试夹具可能没有轮次索引行：无索引即无 pi_desktop 报告
+        # 场景，维持 §5.18.4 旧接口（pi 后端不受影响）。
+        return
+    row = round_store.get_round(ctx.conn, task["task_id"], run_id)
+    if row is None:
+        return
+    if row["backend"] != "pi_desktop":
+        # pi（及历史只读后端）维持 §5.18.4 原接口与三证据口径。
+        return
+    run_dir = run_store_run_dir(ctx.conn, task["task_id"], run_id)
+    job, _error = dsh_events.read_job(run_dir, task["task_id"], run_id, backend="pi_desktop")
+    if isinstance(job, dict) and job.get("completion_policy") == "command_verification":
+        # 只读持久轮次快照；后续自动化/人工接管设置不改变本轮完成标准。
+        _require_command_verification_gate(ctx, payload, task, job, run_dir)
+        return
+    monitor_request_id = payload.get("monitor_request_id")
+    monitor_run_id = payload.get("monitor_run_id")
+    evaluation_event_id = payload.get("evaluation_event_id")
+    if not monitor_request_id or not monitor_run_id \
+            or not evaluation_event_id:
+        raise util.KanpilotError(
+            "conflict",
+            "pi_desktop 轮次进入评审必须携带当前 monitor claim"
+            "（monitor_request_id/monitor_run_id）与 evaluation_event_id；"
+            "绕过 monitor 直接推进被拒绝",
+        )
+    if isinstance(evaluation_event_id, bool) or not isinstance(
+        evaluation_event_id, int
+    ) or evaluation_event_id <= 0:
+        raise util.bad_request("evaluation_event_id 必须为正整数")
+    # 当前推进者仍须有效 claim；原判定请求可能已收尾，不要求它重新持有租约。
+    cmd_exec.require_monitor_claim(
+        ctx.conn, monitor_request_id, monitor_run_id, ctx.now
+    )
+    event = cmd_exec.goal_evaluation_event(ctx.conn, evaluation_event_id)
+    if event is None:
+        raise util.KanpilotError(
+            "conflict", "没有找到该 evaluation event（旧判定或未登记）"
+        )
+    detail = event.get("detail") or {}
+    if event.get("task_id") != task["task_id"] \
+            or detail.get("task_id") != task["task_id"]:
+        raise util.KanpilotError(
+            "conflict", "evaluation event 不属于该任务"
+        )
+    if detail.get("execution_run_id") != run_id:
+        raise util.KanpilotError(
+            "conflict", "evaluation event 的 execution_run_id 不是当前轮次"
+        )
+    origin_request_id = detail.get("monitor_request_id")
+    origin_run_id = detail.get("monitor_run_id")
+    origin = db.get_request(ctx.conn, origin_request_id)
+    if (
+        not origin_request_id or not origin_run_id
+        or event.get("request_id") != origin_request_id
+        or event.get("actor") != cmd_exec.MONITOR_EXECUTOR_ID
+        or origin is None
+        or origin["kind"] != "monitor" or origin["stage"] != "monitor"
+        or origin["claimed_by"] != cmd_exec.MONITOR_EXECUTOR_ID
+        or origin["run_id"] != origin_run_id
+    ):
+        raise util.KanpilotError(
+            "conflict",
+            "evaluation event 的 monitor 登记归属无效（旧判定来源不符）",
+        )
+    if detail.get("decision") != "complete":
+        raise util.KanpilotError(
+            "conflict",
+            "evaluation event 的 decision 不是 complete，不能进入评审",
+        )
+
+    # 执行终态 completed + finished/0（§5.23.10 T5-C）。
+    job, _error = dsh_events.read_job(
+        run_store_run_dir(ctx.conn, task["task_id"], run_id),
+        task["task_id"], run_id, backend="pi_desktop",
+    )
+    events, _detail = dsh_events.iter_events(
+        run_store_run_dir(ctx.conn, task["task_id"], run_id)
+        / dsh_events.EVENT_LOG_NAME
+    )
+    terminal = dsh_events.terminal_event(events)
+    if (
+        not isinstance(job, dict)
+        or job.get("status") != "finished"
+        or job.get("exit_code") != 0
+        or not isinstance(terminal, dict)
+        or terminal.get("outcome") != "completed"
+    ):
+        raise util.KanpilotError(
+            "conflict",
+            "执行终态不是 completed + finished/0，不能进入评审"
+            f"（job.status={None if not isinstance(job, dict) else job.get('status')!r}，"
+            f"terminal={terminal}）",
+        )
+
+    # 只读重新取回同一报告：报告变化/身份不符 → conflict，不触碰远端。
+    resolved = cmd_read.read_goal_report(ctx.conn, task["task_id"], run_id)
+    if resolved["state"] != "ready":
+        raise util.KanpilotError(
+            "conflict",
+            f"报告当前不可用（state={resolved['state']}）："
+            f"{resolved.get('detail') or '无正文'}",
+        )
+    if resolved["report_sha256"] != detail.get("report_sha256"):
+        raise util.KanpilotError(
+            "conflict",
+            "report_sha256 与当前读取的报告不符（报告已变化）",
+        )
+    if detail.get("plan_sha256") != task["plan_sha256"]:
+        raise util.KanpilotError(
+            "conflict", "evaluation event 的 plan_sha256 与任务当前计划不符"
+        )
+    reviews = detail.get("criterion_reviews") or []
+    referenced = set(detail.get("evidence_refs") or [])
+    cmd_read.verify_goal_completion(resolved["report"], reviews, referenced)
+
+
+def run_store_run_dir(conn, task_id: str, run_id: str):
+    """本轮运行记录目录（只读解析；不可用 → 确定性 conflict）。"""
+    source = _headless.resolve_source(conn)
+    try:
+        return source.run_dir(task_id, run_id)
+    except _headless.HeadlessError as exc:
+        raise util.KanpilotError(
+            "conflict", f"运行记录目录不可用：{exc.detail}"
+        )
+
+
 def cmd_advance_task(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     started_clock = time.monotonic()
     def identity_check(task):
         current = ctx.now + timedelta(seconds=max(0, time.monotonic() - started_clock))
         core.require_stage_identity(conn, payload, task, current, stages=("review", "delivery"))
+        if payload.get("monitor_request_id") or payload.get("monitor_run_id"):
+            monitor = cmd_exec.require_monitor_claim(
+                conn, payload.get("monitor_request_id"), payload.get("monitor_run_id"), current,
+            )
+            if monitor["task_id"] != task["task_id"]:
+                raise util.KanpilotError("stale_run", "monitor claim 不属于当前任务")
         if payload.get("run_id") and not payload.get("request_id"):
             request = conn.execute("SELECT * FROM requests WHERE task_id=? AND status='claimed' AND run_id=?", (task["task_id"], payload["run_id"])).fetchone()
             if request is None or util.lease_lost(request["lease_expires_at"], current):
@@ -181,6 +378,11 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         #（无身份旧调用保持兼容；已完成恢复场景按只读事实判断，不新推进）。
         stage_request = core.require_stage_identity(conn, payload, task, ctx.now, stages=("review", "delivery"))
         operation_stage = stage_request["stage"] if stage_request else core.stage_for_status(task["status"], task["stage"])
+        if target == "in-review" and expected == "in-progress":
+            # T5-C（§5.23.10）：pi_desktop 轮次进入评审前的硬闸——必须在
+            # **远端更新前**复核 monitor claim、判定事件、报告底线与执行终态。
+            # 硬闸只读且绝不触碰远端；失败一律 conflict（不写本地、不改远端）。
+            _require_goal_gate(ctx, payload, task)
         if payload.get("run_id"):
             claimed = conn.execute(
                 "SELECT * FROM requests WHERE task_id=? AND status='claimed' "
@@ -251,6 +453,11 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         verified = False
         try:
             if target != expected:
+                # 远端读取可能跨过租约或发生接管；网络写前以短事务重核本地身份。
+                # update_status 本身仍在事务外，避免持有 SQLite 锁等待远端。
+                with db.write_txn(conn):
+                    task = db.require_task(conn, task["task_id"])
+                    identity_check(task)
                 remote.update_status(
                     client, task["task_id"], task["project_id"], target, expected,
                 )
@@ -300,10 +507,20 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                 for key in ("review_conclusion", "review_registered_at"):
                     extra_json.pop(key, None)
                 extra["extra_json"] = extra_json
+            transition_detail = {
+                "via": "advance-task", "target": target,
+                "evidence_note": payload.get("evidence_note"),
+            }
+            if target == "in-review" and payload.get("evaluation_event_id"):
+                # 保留旧手动 Goal 判定的原登记者与当前 claim 采用关系。
+                transition_detail.update({
+                    "monitor_request_id": payload.get("monitor_request_id"),
+                    "monitor_run_id": payload.get("monitor_run_id"),
+                    "evaluation_event_id": payload["evaluation_event_id"],
+                })
             core.transition_task(
                 conn, task, new_status, now, actor,
-                detail={"via": "advance-task", "target": target,
-                        "evidence_note": payload.get("evidence_note")},
+                detail=transition_detail,
                 **extra,
             )
             db.add_event(

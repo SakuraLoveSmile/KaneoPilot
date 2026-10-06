@@ -27,6 +27,8 @@ def identity(pid):
     lib = ctypes.CDLL("/usr/lib/libproc.dylib")
     if lib.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
         return None
+    if info.flags1 == 5:  # Darwin SZOMB: exited workers must not retain ownership.
+        return None
     return {"pid": pid, "started_seconds": info.seconds,
             "started_microseconds": info.microseconds, "task_id": "fixture-task",
             "run_id": "fixture-run", "spec_path": str(ROOT / "fixture-spec.json")}
@@ -43,7 +45,12 @@ def connect():
 
 def owner_response(conn, owner):
     row = conn.execute("SELECT state FROM owners WHERE id=?", (owner,)).fetchone()
-    entries = [json.loads(r[0]) for r in conn.execute("SELECT entry FROM workers WHERE owner=?", (owner,))]
+    entries = []
+    for worker_row in conn.execute("SELECT entry FROM workers WHERE owner=?", (owner,)):
+        entry = json.loads(worker_row[0])
+        current = identity(entry["pid"])
+        if current and all(current[key] == entry[key] for key in ("pid", "started_seconds", "started_microseconds")):
+            entries.append(entry)
     injected = ROOT / "extra-workers.json"
     if injected.exists():
         entries += [x["entry"] for x in json.loads(injected.read_text()) if x["owner"] == owner]
@@ -88,6 +95,8 @@ def stage():
         time.sleep(60)
     else:
         time.sleep(.1)
+        if (ROOT / "fail-stage-exit-status-once").exists():
+            (ROOT / "fail-next-executor-status").touch()
 
 
 def command():
@@ -114,6 +123,12 @@ def command():
             conn.commit()
         print(json.dumps(owner_response(conn, owner)))
     elif command == "executor-status":
+        failure = ROOT / "fail-next-executor-status"
+        if failure.exists():
+            failure.unlink()
+            (ROOT / "stage-exit-status-failed").touch()
+            print(json.dumps({"error": "fixture stage-exit status unavailable", "code": "fixture_failure"}))
+            sys.exit(1)
         response = owner_response(conn, owner)
         claimable = 0 if (ROOT / "stage.json").exists() else 1
         print(json.dumps({"stages": {"dispatch": {"claimable": claimable}},

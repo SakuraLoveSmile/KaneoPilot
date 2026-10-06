@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import bridge, cli, cmd_delivery_pr as commands, core, db, gh_client, git_delivery, remote, util
+from kanpilot import bridge, cli, cmd_delivery_pr as commands, constants, core, db, gh_client, git_delivery, remote, util
 from test_gh_client import pr as gh_pr
 from test_git_delivery import make_repo, branch, commit, git
 
@@ -15,12 +15,20 @@ class DeliveryPR(KanpilotTestCase):
         self.make_ready_task(task_id="task1234")
         self.ctx = cli.Context(self.db_path)
         self.addCleanup(self.ctx.close)
+        self.clock = self.ctx.now
+        clock_patch = patch.object(util, "now_dt", side_effect=lambda: self.clock)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.delivery = branch(self.repo, self.root / "trees")
         (Path(self.delivery["worktree_path"]) / "fix.txt").write_text("fix")
         result = commit(self.delivery, "exec1")
         self.delivery.update(head_sha=result["sha"], commits=[{"sha": result["sha"], "execution_run_id": "exec1"}],
                              mode="pr", publish_failures=0)
         self.delivery.pop("repository")
+        report = constants.review_reports_root() / "task1234" / "review1.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("Review pass")
+        report_sha = util.sha256_file(report)
         with db.write_txn(self.ctx.conn):
             db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, repository=str(self.repo),
                            status="in_review", stage="delivery", run_id="exec1")
@@ -28,7 +36,13 @@ class DeliveryPR(KanpilotTestCase):
             core.update_delivery(self.ctx.conn, task, self.ctx.now_iso, **self.delivery)
             core.update_automation(self.ctx.conn, task, self.ctx.now_iso, fix_round=2)
             db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
-                         review_registered_at=self.ctx.now_iso, plan_verify={"commands": ["python -m pytest tests -q"]})
+                         review_registered_at=self.ctx.now_iso, review_conclusion="pass",
+                         review_history=[{"review_key": "review1", "conclusion": "pass",
+                                          "execution_run_id": "exec1", "head_sha": result["sha"],
+                                          "report_path": str(report), "report_sha256": report_sha, "fix_round": 2}],
+                         plan_verify={"commands": ["python -m pytest tests -q"]})
+            db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, review_key="review1",
+                           review_report_path=str(report), review_report_sha256=report_sha)
             request, _ = db.create_request(self.ctx.conn, self.ctx.now_iso, "delivery", "delivery:test", task_id="task1234")
             db.update_request(self.ctx.conn, request["request_id"], self.ctx.now_iso, status="claimed",
                               run_id="delivery1", lease_expires_at=util.plus_seconds(3600, self.ctx.now))
@@ -43,6 +57,11 @@ class DeliveryPR(KanpilotTestCase):
                 return result(*args, **kw) if callable(result) else result
             return call
         self.outside = outside
+        real_parser = git_delivery.github_repository
+        parser_patch = patch.object(git_delivery, "github_repository", side_effect=lambda url:
+                                   "owner/repo" if url == str(self.repo.parent / "origin.git") else real_parser(url))
+        parser_patch.start()
+        self.addCleanup(parser_patch.stop)
         real_git = git_delivery._git
         for module, name, result in ((git_delivery, "_git", real_git),
             (git_delivery, "origin_github_repo", "owner/repo"), (gh_client, "pr_list", [self.pr()]),
@@ -81,7 +100,7 @@ class DeliveryPR(KanpilotTestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(self.posts[0], "[kaneopilot:delivery:task1234] 已创建 PR：https://github.com/owner/repo/pull/7")
         self.assertLess(self.order.index("find_marker_comment"), self.order.index("post_comment"))
-        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/kaneo/task1234"), self.delivery["head_sha"])
+        self.assertEqual(git(self.repo.parent / "origin.git", "rev-parse", "refs/heads/kaneo/task1234"), self.delivery["head_sha"])
         self.assertTrue(Path(self.delivery["worktree_path"]).is_dir())
         value = core.delivery_of(self.task())
         self.assertNotIn("repository", value)
@@ -314,3 +333,81 @@ class DeliveryPR(KanpilotTestCase):
             self.assertEqual(self.publish_delivery()["outcome"], "retry")
         self.assertNotIn("pr_number", core.delivery_of(self.task()))
         self.assertFalse(self.posts)
+
+    def test_expired_during_io_stops_every_later_boundary_without_registration(self):
+        for name in ("push_branch", "pr_list", "pr_create", "find_marker_comment", "post_comment"):
+            with self.subTest(boundary=name):
+                self.clock = self.ctx.now
+                self.posts.clear()
+                self.comments.clear()
+                self.order.clear()
+                before = core.delivery_of(self.task())
+                module = git_delivery if name == "push_branch" else gh_client if name.startswith("pr_") else remote
+                original = getattr(module, name)
+                def expires(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    self.clock += timedelta(hours=2)
+                    return result
+                list_result = [] if name == "pr_create" else [self.pr()]
+                with patch.object(gh_client, "pr_list", side_effect=self.outside("pr_list", list_result)), patch.object(module, name, side_effect=expires):
+                    with self.assertRaises(util.KanpilotError) as caught:
+                        self.publish_delivery()
+                self.assertEqual(caught.exception.code, "stale_run")
+                self.assertEqual(core.delivery_of(self.task()), before)
+                self.assertEqual(self.ctx.conn.execute("SELECT count(*) FROM events WHERE kind='pr_opened'").fetchone()[0], 0)
+                if name != "post_comment":
+                    self.assertFalse(self.posts)
+                if name == "push_branch":
+                    self.assertNotIn("pr_list", self.order)
+                if name in ("pr_list", "pr_create"):
+                    self.assertNotIn("find_marker_comment", self.order)
+
+    def test_expired_during_sync_io_never_records_result(self):
+        self.update(pr_number=7, pushed_sha=self.delivery["head_sha"])
+        before = core.delivery_of(self.task())
+        def expires(*args):
+            self.clock += timedelta(hours=2)
+            return self.pr("MERGED")
+        with patch.object(gh_client, "pr_view", side_effect=expires), self.assertRaises(util.KanpilotError) as caught:
+            self.sync()
+        self.assertEqual(caught.exception.code, "stale_run")
+        self.assertEqual(core.delivery_of(self.task()), before)
+
+    def test_current_review_pass_required_before_any_io(self):
+        initial = db.task_extra(self.task())
+        cases = [{"review_history": []}, {"review_conclusion": "blocked"}]
+        for changes in ({"execution_run_id": "old-run"}, {"head_sha": "b" * 40},
+                        {"fix_round": 1}, {"conclusion": "blocked"}, {"report_sha256": "b" * 64}):
+            cases.append({"review_history": [dict(initial["review_history"][0], **changes)]})
+        for changes in cases:
+            with self.subTest(changes=changes):
+                with db.write_txn(self.ctx.conn):
+                    db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
+                                 review_history=initial["review_history"], review_conclusion="pass")
+                    db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso, **changes)
+                with self.assertRaises(util.KanpilotError) as caught:
+                    self.publish_delivery()
+                self.assertEqual(caught.exception.code, "validation_failed")
+                self.assertFalse(self.order)
+                self.assertFalse(self.posts)
+
+    def test_changed_review_report_refuses_push(self):
+        Path(self.task()["review_report_path"]).write_text("different report")
+        with self.assertRaises(util.KanpilotError) as caught:
+            self.publish_delivery()
+        self.assertEqual(caught.exception.code, "validation_failed")
+        self.assertFalse(self.order)
+
+    def test_origin_cannot_replace_registered_pr_repository(self):
+        self.update(pr_number=7, pr_url="https://github.com/owner/repo/pull/7",
+                    pushed_sha=self.delivery["head_sha"])
+        with patch.object(git_delivery, "origin_github_repo", return_value="other/repo"), patch.object(
+                git_delivery, "push_branch") as push:
+            self.assertEqual(self.publish_delivery()["failure_code"], "branch_diverged")
+        push.assert_not_called()
+        self.assertFalse(self.posts)
+        self._reset_delivery_stage()
+        with patch.object(git_delivery, "origin_github_repo", return_value="other/repo"), patch.object(
+                gh_client, "pr_view") as view:
+            self.assertEqual(self.sync()["failure_code"], "branch_diverged")
+        view.assert_not_called()

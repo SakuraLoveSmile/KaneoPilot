@@ -482,8 +482,10 @@ class ExecBackendConfig(_ReviewCommandsCase):
         caps = self.call("exec-capabilities", {})
         self.assertIn("pi_desktop", caps)
         branch = caps["pi_desktop"]
+        # v3 T6（protocol §5.23.10）：新增 session_naming 兼容门布尔值。
         self.assertEqual(set(branch),
-                         {"available", "detail", "tools_ok", "version"})
+                         {"available", "detail", "tools_ok", "version",
+                          "session_naming"})
         # 未保存 → available False + 中文原因；不透出内部字段。
         self.assertFalse(branch["available"])
         self.assertIn("未保存", branch["detail"])

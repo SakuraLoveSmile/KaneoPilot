@@ -87,6 +87,30 @@ def origin_github_repo(repo: str) -> Optional[str]:
         return None
 
 
+def _push_target(worktree, expected_repo):
+    targets = _value(["remote", "get-url", "--push", "--all", "origin"], worktree).splitlines()
+    if (len(targets) != 1 or not expected_repo
+            or (github_repository(targets[0]) or "").lower() != expected_repo.lower()):
+        raise GitDeliveryError("branch_diverged", "origin 推送目标必须是已核验的单一 GitHub 仓库")
+    target = targets[0]
+    # A resolved URL passed explicitly to push is subject to rewriting again.
+    # Refuse unstable rewrite chains without removing authentication or hooks.
+    resolved = _value(["ls-remote", "--get-url", target], worktree)
+    push_rewrites = []
+    for entry in _git(["config", "--null", "--list"], worktree, 10).stdout.split(b"\0"):
+        key, _, value = entry.partition(b"\n")
+        name, prefix = os.fsdecode(key), os.fsdecode(value)
+        if name.startswith("url.") and name.endswith(".pushinsteadof") and target.startswith(prefix):
+            push_rewrites.append((prefix, name[4:-len(".pushinsteadof")]))
+    push_resolved = target
+    if push_rewrites:
+        prefix, replacement = max(push_rewrites, key=lambda rule: len(rule[0]))
+        push_resolved = replacement + target[len(prefix):]
+    if resolved != target or push_resolved != target:
+        raise GitDeliveryError("branch_diverged", "推送目标存在重复 URL 改写，未推送")
+    return target
+
+
 def resolve_base(repo: str, preferred: Optional[str]) -> tuple:
     try:
         base = preferred or _value(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)
@@ -322,6 +346,32 @@ def worktree_state_sha256(delivery) -> str:
         raise GitDeliveryError("worktree_invalid", "工作树状态核验失败") from exc
 
 
+def _blocked_files(files):
+    return [x["path"] for x in files
+            if ((Path(x["path"]).name not in constants.DELIVERY_ALLOWED_NAMES
+                 and any(fnmatch.fnmatch(Path(x["path"]).name, pattern)
+                         for pattern in constants.DELIVERY_BLOCKED_PATTERNS))
+                or x["size"] > constants.DELIVERY_MAX_FILE_BYTES)]
+
+
+def _require_safe_files(files):
+    blocked = _blocked_files(files)
+    if blocked:
+        raise GitDeliveryError("delivery_blocked_files", "交付包含敏感文件或超过 5MB 的文件", files=blocked)
+
+
+def _committed_files(path, sha):
+    raw = _git(["diff-tree", "--root", "--no-commit-id", "--raw", "--no-abbrev", "-r",
+                "--no-renames", "-z", sha], path, 10).stdout.split(b"\0")
+    files = []
+    for index in range(0, len(raw) - 1, 2):
+        oid = raw[index].split()[3].decode("ascii")
+        size = 0 if not oid.strip("0") else int(_value(["cat-file", "-s", oid], path))
+        files.append({"path": os.fsdecode(raw[index + 1]), "size": size})
+    _require_safe_files(files)
+    return [x["path"] for x in files]
+
+
 def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300) -> dict:
     _task_id(task_id)
     if not isinstance(execution_run_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", execution_run_id):
@@ -334,19 +384,12 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         trailers = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
         if parents == [expected] and trailers == [execution_run_id]:
             verify_branch_worktree(delivery, require_clean=True, expected_head=head)
-            files = _git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], path, 10).stdout
-            return {"sha": head, "files": [os.fsdecode(x) for x in files.split(b"\0") if x]}
+            return {"sha": head, "files": _committed_files(path, head)}
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
     changes = worktree_changes(path)
     if not changes:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
-    blocked = [x["path"] for x in changes
-               if ((Path(x["path"]).name not in constants.DELIVERY_ALLOWED_NAMES
-                    and any(fnmatch.fnmatch(Path(x["path"]).name, pattern)
-                            for pattern in (*constants.DELIVERY_BLOCKED_PATTERNS, "*.p12")))
-                   or x["size"] > constants.DELIVERY_MAX_FILE_BYTES)]
-    if blocked:
-        raise GitDeliveryError("delivery_blocked_files", "交付包含敏感文件或超过 5MB 的文件", files=blocked)
+    _require_safe_files(changes)
     # Repeat HEAD immediately before changing the index; models may have touched
     # the branch between monitor completion and this command.
     if _value(["rev-parse", "HEAD"], path) != expected:
@@ -361,14 +404,19 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         _git(["commit", "-F", str(message_path)], path, timeout)
     head = _value(["rev-parse", "HEAD"], path)
     verify_branch_worktree(delivery, require_clean=True, expected_head=head)
-    return {"sha": head, "files": [x["path"] for x in changes]}
+    return {"sha": head, "files": _committed_files(path, head)}
 
 
-def push_branch(delivery, *, timeout=120) -> dict:
+def push_branch(delivery, *, expected_repo, before_push=None, timeout=120) -> dict:
     verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
     branch = delivery["branch"]
+    target = _push_target(delivery["worktree_path"], expected_repo)
+    _committed_files(delivery["worktree_path"], delivery["head_sha"])
+    verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    if before_push:
+        before_push()
     try:
-        _git(["push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"], delivery["worktree_path"], timeout)
+        _git(["push", target, f"{delivery['head_sha']}:refs/heads/{branch}"], delivery["worktree_path"], timeout)
     except GitDeliveryError as exc:
         code = "branch_diverged" if any(x in exc.message.lower() for x in ("rejected", "non-fast-forward", "fetch first")) else "push_failed"
         raise _recode(exc, code, "推送任务分支失败") from exc

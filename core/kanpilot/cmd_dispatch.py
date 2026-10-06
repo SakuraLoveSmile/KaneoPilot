@@ -311,7 +311,10 @@ import subprocess
 import sys
 import time as _time
 
-from . import dsh_events, exec_config, headless_adapter as _headless, round_store
+from . import (
+    dsh_events, exec_config, headless_adapter as _headless,
+    pi_desktop_backend, round_store,
+)
 
 
 def _require_pi_round(conn, task_id, run_id, backend="pi"):
@@ -557,6 +560,43 @@ def _agent_md_path(conn, config_snapshot) -> str:
     path = constants.agents_dir() / f"{preset}.md"
     return str(path) if path.is_file() else ""
 
+
+def _has_control_chars(value) -> bool:
+    """名称是否含空白控制字符（T6：含则派发前确定性校验错误）。"""
+    return any(ch.isspace() and ch not in (" ",) for ch in str(value or ""))
+
+
+def _require_session_naming_capability(conn, config_snapshot) -> None:
+    """T6 兼容门（§5.23.10）：`pi_session_create` schema 必须暴露 projectName。
+
+    在**任何 session.create 之前**执行；旧 Plus → 明确「版本缺少工作区命名
+    能力」，绝不静默派发出 UUID 名称。
+    """
+    try:
+        record = pi_desktop_backend.load_connection(
+            (config_snapshot or {}).get("connection_file")
+        )
+        client = pi_desktop_backend.MCPClient(
+            record["url"], record["token"], timeout=10
+        )
+        client.connect()
+        if not client.supports_session_naming():
+            raise util.KanpilotError(
+                "validation_failed",
+                constants.PI_DESKTOP_NAMING_CAPABILITY_MISSING
+                + "：PI-Desktop-Plus 的 pi_session_create 未暴露 "
+                + "projectName，不能派发（不静默使用 UUID 名称，请升级 Plus）",
+            )
+    except util.KanpilotError as exc:
+        if exc.code == "validation_failed" and \
+                constants.PI_DESKTOP_NAMING_CAPABILITY_MISSING in exc.message:
+            raise
+        raise util.KanpilotError(
+            "validation_failed",
+            "无法确认 PI-Desktop-Plus 的工作区命名能力："
+            + util.redact(exc.message),
+        )
+
 def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
     """pi_desktop 分支 dispatch-start（§5.23.3）：连接探测 → 意图落盘 →
     worktree → 计划哈希复核 → 拉起 kanpilot.pi_desktop_worker。"""
@@ -565,14 +605,35 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
 
     # 1. 可用性复核（exec_config 按当前生效后端探测 pi_desktop 控制面：
     #    连接文件/token/tools/provider/model；失败不落意图、不启动进程）。
+    config_snapshot = dict(round_store.round_view(round_row).get("config") or {})
     available, reason = exec_config.check_available(
-        conn,
-        config_snapshot=(round_store.round_view(round_row).get("config") or {}),
+        conn, config_snapshot=config_snapshot,
     )
     if not available:
         raise util.KanpilotError(
             "validation_failed",
             reason or "pi_desktop 执行环境不可用",
+        )
+    # T6 兼容门（§5.23.10）：**任何 session.create 之前**确认 Plus 暴露
+    # `pi_session_create.inputSchema.properties.projectName`；旧 Plus 明确
+    # 阻断（「版本缺少工作区命名能力」），绝不静默派发出 UUID 名称。
+    _require_session_naming_capability(conn, config_snapshot)
+    # T6 展示快照（§5.23.10）：新轮次固化 workspace/session 显示名；两者是
+    # **展示快照**（旧 spec 缺字段仍按旧语义读取/续接，不重新生成 prompt），
+    # 且**不得**用于去重、路径生成、权限判断或完成判定。
+    workspace_display_name = task["project_name"]
+    session_display_name = task["title"]
+    if not workspace_display_name or not session_display_name:
+        raise util.KanpilotError(
+            "validation_failed",
+            "任务登记的 project_name/title 缺失，无法固化派发展示名"
+            "（不回退到 UUID 名称）",
+        )
+    if _has_control_chars(workspace_display_name) \
+            or _has_control_chars(session_display_name):
+        raise util.KanpilotError(
+            "validation_failed",
+            "任务登记的 project_name/title 含空白控制字符，拒绝派发",
         )
 
     # 2. 意图先落盘（同一轮次只允许一次真实启动；非空 → 幂等返回）。
@@ -594,9 +655,6 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
                 "deduplicated": True,
             }
         round_store.mark_intent(conn, task_id, run_id, now)
-        config_snapshot = dict(
-            round_store.round_view(round_row)["config"] or {}
-        )
 
     run_dir = None
     try:
@@ -628,6 +686,12 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
             "plan_sha256": task["plan_sha256"],
             # 任务标识 + 计划哈希 提示头（§5.23.3）；计划正文由 worker 注入。
             "instruction": _execution_instruction(task, worktree_path, desktop=True),
+            # T6（§5.23.10）：展示快照——旧 spec 缺这两字段仍按旧语义读取/
+            # 续接（worker 只在两字段齐备时才在 pi_session_create 携带）。
+            "workspace_display_name": workspace_display_name,
+            "session_display_name": session_display_name,
+            # 所有新轮次使用确定性命令验证；旧 spec 缺字段保持 Goal 报告口径。
+            "completion_policy": "command_verification",
             "runs_dir": str(run_dir),
             "timeout_seconds": round_store.round_timeout_seconds(conn),
             "request_id": request["request_id"],

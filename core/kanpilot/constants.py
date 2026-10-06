@@ -91,6 +91,13 @@ PI_DESKTOP_EXEC_MODE = "goal"
 # 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。
 PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
                              + PI_DESKTOP_GOAL_TOOLS)
+# T5-A（protocol §5.23.10）：Goal 报告只读工具。核心只在读取报告时要求它们；
+# 派发就绪门不要求（旧 Plus 仍可派发，但报告读取会明确失败）。
+PI_DESKTOP_GOAL_REPORT_TOOLS = ("pi_goal_report_list", "pi_goal_report_get")
+# T6（protocol §5.23.10）：`pi_session_create.inputSchema.properties.projectName`
+# 是旧 Plus 与新 Plus 的兼容门；缺字段 → 明确阻断，不静默派发 UUID 名称。
+PI_SESSION_CREATE_PROJECT_NAME_CAPABILITY = "projectName"
+PI_DESKTOP_NAMING_CAPABILITY_MISSING = "版本缺少工作区命名能力"
 # MCP 单请求上限 2 MiB——计划正文超限在发送前明确失败，不截断。
 PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
@@ -120,6 +127,12 @@ PI_DESKTOP_READONLY_PERMISSION_MODE = "ask"
 # 同源，新增值须两处同步）。
 REVIEW_CONCLUSIONS = ("pass", "changes_requested", "blocked")
 REVIEW_FIX_PRIORITIES = ("no-priority", "low", "medium", "high", "urgent")
+# T5-D（protocol §5.23.10）：执行终态落地后给 Host 完成 outbox/报告发布的宽限
+# （期间只读查询，绝不重发 prompt）。
+GOAL_REPORT_GRACE_SECONDS = 60.0
+# 报告不可读/损坏时最多允许的有界重读次数（此后交人工，区分于「已验证失败」）。
+GOAL_REPORT_MAX_REREAD = 1
+
 
 # 能力/环境查询的进程接缝（protocol.md §5.17.2）：测试经 env 指向隔离夹具。
 DEFAULT_PI_HOME = "~/.pi"

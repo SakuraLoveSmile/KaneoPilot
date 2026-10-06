@@ -169,6 +169,8 @@ def plus_session_create(
     project_path: str,
     mode: str,
     runtime_config: dict,
+    title: Optional[str] = None,
+    project_name: Optional[str] = None,
     timeout: int = 10,
 ) -> dict:
     """Create a new session in Plus with authorized runtime config."""
@@ -177,6 +179,10 @@ def plus_session_create(
         "projectPath": str(Path(project_path).expanduser()),
         "mode": mode,
     }
+    if title is not None:
+        params["title"] = title
+    if project_name is not None:
+        params["projectName"] = project_name
     if runtime_config.get("provider_id"):
         params["providerId"] = runtime_config["provider_id"]
     if runtime_config.get("model_id"):
@@ -189,7 +195,16 @@ def plus_session_create(
     session_id = (session.get("id") if isinstance(session, dict) else None) or res.get("sessionId") or res.get("id")
     if not session_id or not isinstance(session_id, str):
         raise util.KanpilotError("internal", f"Plus session_create 未返回有效 sessionId: {res}")
-    return _redact_output({"session_id": session_id}, record.get("token"))
+    result = {"session_id": session_id}
+    # 名称用于 worker 核对 Host 实际创建结果；缺失时绝不回显请求值。
+    returned = session if isinstance(session, dict) else res
+    for target, names in (("title", ("title", "name")),
+                          ("project_name", ("projectName", "project_name"))):
+        for name in names:
+            if name in returned:
+                result[target] = returned[name]
+                break
+    return _redact_output(result, record.get("token"))
 
 
 def plus_session_configure(
@@ -312,6 +327,31 @@ def plus_messages(
         "has_more_before": bool(session_data.get("hasMoreBefore")),
         "has_more_after": bool(session_data.get("hasMoreAfter")),
     }, record.get("token"))
+
+
+def plus_goal_report_list(connection_file: str, *, session_id: str,
+                          timeout: int = 10) -> dict:
+    """Read Plus report candidates without changing report state or identity."""
+    client, record = _get_client(connection_file, timeout=timeout)
+    res = client.call_tool("pi_goal_report_list", {"sessionId": session_id})
+    return _redact_output(res, record.get("token"))
+
+
+def plus_goal_report_get(connection_file: str, *, session_id: str,
+                         execution_id: Optional[str] = None,
+                         report_id: Optional[str] = None,
+                         timeout: int = 10) -> dict:
+    """Read the selected Plus report, preserving its body, state and hash."""
+    if not (execution_id or report_id):
+        raise util.bad_request("Goal report get requires execution_id or report_id")
+    params = {"sessionId": session_id}
+    if execution_id is not None:
+        params["executionId"] = execution_id
+    if report_id is not None:
+        params["reportId"] = report_id
+    client, record = _get_client(connection_file, timeout=timeout)
+    res = client.call_tool("pi_goal_report_get", params)
+    return _redact_output(res, record.get("token"))
 
 
 def plus_stop(connection_file: str, *, session_id: str, timeout: int = 10) -> dict:

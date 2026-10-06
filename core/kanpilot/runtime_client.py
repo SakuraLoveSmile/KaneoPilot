@@ -181,6 +181,10 @@ class RuntimeClient:
                 "kp_runtime_turn_get", "kp_runtime_messages",
                 "kp_runtime_proposals",
             }
+            if self.role == "execution":
+                required_runtime.update({
+                    "kp_runtime_goal_report_list", "kp_runtime_goal_report_get",
+                })
         missing = required_runtime - tools
         if missing:
             raise util.KanpilotError("unsupported_tools", "KaneoPilot MCP 缺少 runtime 工具：" + "、".join(sorted(missing)))
@@ -245,20 +249,30 @@ class RuntimeClient:
         return set(caps.get("supported_operations") or [])
 
     def session_create(self, project_path: str, *, mode: str, provider_id=None,
-                       model_id=None, thinking_level=None, title=None, **_kwargs) -> dict:
+                       model_id=None, thinking_level=None, title=None,
+                       project_name=None, **_kwargs) -> dict:
         config = dict(self.runtime_config)
         for key, value in (("provider_id", provider_id), ("model_id", model_id),
                            ("thinking_level", thinking_level)):
             if value is not None:
                 config[key] = value
-        result = self._write("kp_runtime_session_create", "session_create", {
+        arguments = {
             "mode": mode, "project_path": str(Path(project_path).expanduser()),
             "runtime_config": config,
-        })
+        }
+        if title is not None:
+            arguments["title"] = title
+        if project_name is not None:
+            arguments["project_name"] = project_name
+        result = self._write("kp_runtime_session_create", "session_create", arguments)
         session_id = result.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise util.KanpilotError("protocol_error", "runtime session_create 未返回有效 session_id")
-        return {"session": {"id": session_id, "title": title}}
+        session = {"id": session_id}
+        for source, target in (("title", "title"), ("project_name", "projectName")):
+            if source in result:
+                session[target] = result[source]
+        return {"session": session}
 
     def session_configure(self, session_id: str, *, mode: str,
                           permission_mode: str, **_kwargs) -> dict:
@@ -365,6 +379,17 @@ class RuntimeClient:
     def agent_abort(self, session_id: str) -> dict:
         return self._write("kp_runtime_abort", "abort", {"session_id": session_id})
 
+    def goal_report_list(self, session_id: str) -> dict:
+        return self._call("kp_runtime_goal_report_list", {"session_id": session_id})
+
+    def goal_report_get(self, session_id: str, *, execution_id=None,
+                        report_id=None) -> dict:
+        return self._call("kp_runtime_goal_report_get", {
+            "session_id": session_id,
+            **({"execution_id": execution_id} if execution_id is not None else {}),
+            **({"report_id": report_id} if report_id is not None else {}),
+        })
+
 
 class HistoricalReadClient:
     """Internal-adapter-only reader for pre-scope sessions with durable job identity."""
@@ -446,6 +471,20 @@ class HistoricalReadClient:
         raise util.KanpilotError(
             "forbidden",
             "恢复为只读，待处理 proposal 需人工确认；未重发任务",
+        )
+
+    def goal_report_list(self, session_id: str) -> dict:
+        return harness_plus_adapter.plus_goal_report_list(
+            self.connection_file, session_id=session_id,
+            timeout=max(1, int(self.timeout)),
+        )
+
+    def goal_report_get(self, session_id: str, *, execution_id=None,
+                        report_id=None) -> dict:
+        return harness_plus_adapter.plus_goal_report_get(
+            self.connection_file, session_id=session_id,
+            execution_id=execution_id, report_id=report_id,
+            timeout=max(1, int(self.timeout)),
         )
 
     session_create = _deny_write

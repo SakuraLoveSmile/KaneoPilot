@@ -102,6 +102,8 @@ RUNTIME_ROLE_TOOLS: Dict[str, Set[str]] = {
         "kp_runtime_abort",
         "kp_runtime_proposals",
         "kp_runtime_proposal_resolve",
+        "kp_runtime_goal_report_list",
+        "kp_runtime_goal_report_get",
     },
 }
 

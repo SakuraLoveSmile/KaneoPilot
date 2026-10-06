@@ -112,7 +112,7 @@ final class ExecutorScheduler: ObservableObject {
         guard !stopped, client.location != nil else { return }
         if !Self.isEnabled && !manual {
             // 开发开关只阻止自动推进；已启动 worker 的归属与防休眠仍需收尾。
-            if !ownedWorkers.isEmpty || !children.isEmpty { refreshOwnershipAfterStageExit() }
+            if !ownedWorkers.isEmpty || !children.isEmpty || ownershipUncertain { refreshOwnershipAfterStageExit() }
             return
         }
         pendingForced.formUnion(forced)
