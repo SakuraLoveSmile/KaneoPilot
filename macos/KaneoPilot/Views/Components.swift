@@ -152,6 +152,19 @@ enum Labels {
         case "goal_report_evaluated": return "Goal 报告完成判定"
         // 本地派生（无对应核心事件 kind）与兼容旧值。
         case "lost_detected": return "执行端失联"
+        case "auto_confirm_skipped": return "跳过自动确认"
+        case "automation_adopted": return "自动接收任务"
+        case "automation_stopped": return "自动处理已停止"
+        case "cost_recorded": return "运行成本登记"
+        case "delivery_committed": return "分支改动已提交"
+        case "delivery_pushed": return "交付分支已推送"
+        case "fix_round_started": return "同任务修复轮开始"
+        case "kaneo_comment_posted": return "PR 链接已回写"
+        case "lost_request_released": return "失联观察请求已释放"
+        case "pr_closed": return "PR 已关闭"
+        case "pr_merged": return "PR 已合并"
+        case "pr_opened": return "PR 已创建"
+        case "requirements_accepted": return "已接受远端需求"
         default: return key ?? "—"
         }
     }
