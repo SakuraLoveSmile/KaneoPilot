@@ -6,6 +6,108 @@ import sqlite3
 import pytest
 
 from kanpilot import db, runtime_operations, util, mcp_scopes, mcp_tools
+from test_pi_desktop_backend import PiDesktopCase as _PiDesktopCase
+
+
+class TestRuntimeNamingAndReports(_PiDesktopCase):
+    """真实 RuntimeClient → 本机项目 MCP → HTTP fake Plus 的隔离回归。"""
+
+    def runtime(self, role="execution", *, invocation="runtime_contract", read_only=False):
+        from kanpilot.runtime_client import RuntimeClient
+        for tool in ("pi_goal_report_list", "pi_goal_report_get"):
+            if tool not in self.server.tools:
+                self.server.tools.append(tool)
+        client = RuntimeClient(
+            role=role, connection_file=str(self.connection_file),
+            project_path=str(self.repos_root / "Feedback"),
+            runtime_config={"connection_file": str(self.connection_file),
+                            "provider_id": "test-provider", "model_id": "test-model",
+                            "thinking_level": "low", "permission_mode": "ask"},
+            invocation_id=invocation, read_only=read_only,
+        )
+        client.connect()
+        return client
+
+    def create(self, client):
+        return client.session_create(
+            str(self.repos_root / "Feedback"), mode="goal",
+            title="反馈 · 修复 · R1", project_name="反馈工作区",
+        )["session"]
+
+    def test_session_names_reach_plus_and_actual_names_reach_worker(self):
+        client = self.runtime()
+        self.server.created_response_names = {
+            "title": "Host changed title", "projectName": "Host changed workspace",
+        }
+        session = self.create(client)
+        self.assertEqual(self.server.created["title"], "反馈 · 修复 · R1")
+        self.assertEqual(self.server.created["projectName"], "反馈工作区")
+        self.assertEqual(session["title"], "Host changed title")
+        self.assertEqual(session["projectName"], "Host changed workspace")
+        # receipt 重读也保留 Host 原始结果，不再创建会话或回显请求名称。
+        self.assertEqual(self.create(client), session)
+        self.assertEqual(sum(name == "pi_session_create"
+                             for name, _ in self.server.calls), 1)
+
+    def test_goal_reports_preserve_body_hash_and_pending_state_via_runtime(self):
+        client = self.runtime()
+        session_id = self.create(client)["id"]
+        self.server.goal_reports = [{"reportId": "report-1", "executionId": "exec-1"}]
+        self.server.goal_report = {
+            "report_sha256": "a" * 64,
+            "report": {"status": "ready", "sessionId": session_id,
+                       "executionId": "exec-1", "integrity": {"kind": "fallback"},
+                       "criteria": [{"id": "c1", "result": "missing"}]},
+        }
+        listing = client.goal_report_list(session_id)
+        self.assertEqual(listing, {"reports": self.server.goal_reports})
+        report = client.goal_report_get(session_id, execution_id="exec-1", report_id="report-1")
+        self.assertEqual(report["report"], self.server.goal_report["report"])
+        self.assertEqual(report["report_sha256"], "a" * 64)
+        self.assertEqual(self.server.goal_report_calls[-1], (
+            "pi_goal_report_get", {"sessionId": session_id,
+                                   "executionId": "exec-1", "reportId": "report-1"},
+        ))
+        self.server.goal_report = {"state": "pending", "detail": "outbox publishing"}
+        pending = client.goal_report_get(session_id, report_id="report-1")
+        self.assertEqual(pending["state"], "pending")
+        self.assertNotIn("report", pending)
+
+    def test_report_scope_role_identity_and_revocation_reject_before_plus(self):
+        client = self.runtime()
+        session_id = self.create(client)["id"]
+        for read in (lambda: client.goal_report_list("foreign"),
+                     lambda: client.goal_report_get("foreign", execution_id="exec-1"),
+                     lambda: client.goal_report_get(session_id)):
+            with self.assertRaises(util.KanpilotError):
+                read()
+        other = self.runtime(invocation="other_scope")
+        with self.assertRaises(util.KanpilotError):
+            other.goal_report_list(session_id)
+        monitor = self.runtime(role="monitor", invocation="monitor_scope")
+        with self.assertRaises(util.KanpilotError):
+            monitor.goal_report_list(session_id)
+        self.project_mcp.scope_manager.revoke_scope(client.scope_id)
+        with self.assertRaises(util.KanpilotError):
+            client.goal_report_get(session_id, execution_id="exec-1")
+        self.assertEqual(self.server.goal_report_calls, [])
+
+    def test_read_only_execution_resume_can_read_report_without_writes(self):
+        client = self.runtime()
+        session_id = self.create(client)["id"]
+        reader = self.runtime(read_only=True)
+        self.server.goal_report = {"state": "draft", "detail": "not published"}
+        self.assertEqual(reader.goal_report_get(session_id, execution_id="exec-1")["state"], "draft")
+        with self.assertRaises(util.KanpilotError):
+            self.create(reader)
+
+    def test_report_error_is_not_fabricated_as_success(self):
+        client = self.runtime()
+        session_id = self.create(client)["id"]
+        self.server.goal_report_mode = "error"
+        with self.assertRaises(util.KanpilotError) as caught:
+            client.goal_report_get(session_id, execution_id="exec-1")
+        self.assertEqual(caught.exception.code, "not_found")
 
 
 def test_send_slot_is_unique_and_unknown_is_not_replayed(tmp_path):

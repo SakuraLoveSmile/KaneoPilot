@@ -77,7 +77,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, dsh_events, runtime_client, util
+from . import constants, dsh_events, pi_desktop_backend, runtime_client, util
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
 
 # MCP 轮询节奏（worker 进程内部参数，不进 settings）。
