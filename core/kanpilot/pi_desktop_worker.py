@@ -104,9 +104,19 @@ _GOAL_EXECUTION_WAIT_SECONDS = 30.0
 _GOAL_POLL_SECONDS = 1.0
 
 # UiMessage.role → events.jsonl 事件类型（§5.15.5/§5.18.2 词汇）。
+# shell 类工具名（大小写归一；真实名称是 `Bash`，见 §5.23.10 采集修补）。
 _SHELL_TOOL_NAMES = frozenset(
     {"bash", "shell", "exec", "run_command", "terminal", "command"}
 )
+# T5-D（§5.23.10）：执行终态落地后给 Host 完成 outbox/报告发布的宽限，期间
+# 只读查询，绝不重发 prompt。
+_GOAL_REPORT_GRACE_SECONDS = constants.GOAL_REPORT_GRACE_SECONDS
+_GOAL_REPORT_POLL_SECONDS = 2.0
+
+
+def _is_shell_tool(name) -> bool:
+    """shell 工具判定（大小写归一）：`Bash`/`bash` 等同（§5.23.10）。"""
+    return str(name or "").strip().lower() in _SHELL_TOOL_NAMES
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -494,7 +504,7 @@ class _Collector:
             if not finished:
                 self._queue("tool_call", ts, name=name,
                             arguments=input_json, **tool_extra)
-            elif name in _SHELL_TOOL_NAMES:
+            elif _is_shell_tool(name):
                 exit_code = message.get("exitCode")
                 if isinstance(raw_output, dict):
                     exit_code = raw_output.get("exitCode", raw_output.get("exit_code", exit_code))
@@ -824,17 +834,25 @@ def run_real(spec: dict, resume: bool = False) -> int:
         if permission_mode not in constants.EXEC_PERMISSION_MODES:
             return fail(f"permission_mode 非法：{permission_mode}",
                         "validation_failed")
+        # T6（§5.23.10）：展示快照来自 spec（新轮次）；旧 spec 缺字段 → 按旧
+        # 语义（title=session_marker），不重新生成、不推断。
+        session_display_name = spec.get("session_display_name")
+        workspace_display_name = spec.get("workspace_display_name")
+        create_title = session_display_name or (
+            spec.get("session_marker") or spec["task_id"]
+        )
         try:
             created = client.session_create(
                 str(cwd), mode=constants.PI_DESKTOP_EXEC_MODE,
                 provider_id=config.get("provider_id"),
                 model_id=config.get("model_id"),
                 thinking_level=config.get("thinking_level"),
-                title=spec.get("session_marker") or spec["task_id"],
+                title=create_title,
+                project_name=workspace_display_name,
             )
             session = created.get("session") or {}
-            session_id = session.get("id") or created.get("sessionId") \
-                or created.get("id")
+            session_id = (session.get("id") or created.get("sessionId")
+                          or created.get("id"))
             if not session_id:
                 raise util.KanpilotError(
                     "internal", "pi_session_create 未返回 session.id"
@@ -842,6 +860,40 @@ def run_real(spec: dict, resume: bool = False) -> int:
             job["session_id"] = session_id
             job["session_title"] = session.get("title") or session.get("name")
             _write_json(job_path, job)
+        except util.KanpilotError as exc:
+            return fail(f"session_setup_failed: {exc.message}",
+                        "session_setup_failed")
+
+        # T6（§5.23.10）：Plus 返回的两种显示名与请求不符 → **不下发
+        # agent_prompt**，保留已创建会话 ID 供人工检查，绝不自动再建一次。
+        if session_display_name or workspace_display_name:
+            returned_title = session.get("title") or session.get("name")
+            returned_project = (
+                session.get("projectName") or session.get("project_name")
+            )
+            mismatch = []
+            if session_display_name and returned_title != session_display_name:
+                mismatch.append(
+                    f"title 请求 {session_display_name!r} ≠ 返回 "
+                    f"{returned_title!r}"
+                )
+            if (workspace_display_name
+                    and returned_project != workspace_display_name):
+                mismatch.append(
+                    f"projectName 请求 {workspace_display_name!r} ≠ 返回 "
+                    f"{returned_project!r}"
+                )
+            if mismatch:
+                detail = (
+                    "session_naming_mismatch: PI-Desktop 返回的显示名与请求"
+                    "不符（" + "；".join(mismatch) + "）；已保留会话 "
+                    f"{session_id} 供人工检查，未下发 agent_prompt"
+                )
+                job["session_naming_mismatch"] = mismatch
+                return finalize("failed", 1, detail, True, "failed",
+                                "session_naming_mismatch")
+
+        try:
             if permission_mode and permission_mode != "inherit":
                 client.session_configure(
                     session_id, mode=constants.PI_DESKTOP_EXEC_MODE,
@@ -1287,7 +1339,12 @@ def run_real(spec: dict, resume: bool = False) -> int:
                         "transcript_incomplete: 空转录或存在无法解析的消息结构",
                         False)
     if state == "completed":
-        return finalize("finished", 0, None, True, "completed", "completed")
+        # T5-D（§5.23.10）：执行终态落地后给 Host 最多 60s 完成 outbox/报告
+        # 发布，期间**只读**查询、绝不重发 prompt；随后按报告分态写终态
+        # detail（具体缺口写进 reason，供监控端 report needs_user 引用）。
+        report_note, report_reason = _goal_report_settlement(client, job)
+        return finalize("finished", 0, report_note, True, "completed",
+                        report_reason or "completed")
     if state in ("error", "aborted"):
         code = turn.get("errorCode") or turn.get("error_code") or state
         return finalize("failed", 1, f"turn {state}: {code}",
@@ -1296,6 +1353,176 @@ def run_real(spec: dict, resume: bool = False) -> int:
     return finalize("failed", 1,
                     "turn 终态无法核实（服务重启或控制面不可达）",
                     True, "failed", "unverifiable")
+
+
+def _goal_report_settlement(client, job: dict) -> tuple:
+    """终态落地后的只读报告宽限（§5.23.10 T5-D）。
+
+    - 轮次没有已批准的 Goal 契约（``job.goal_approval`` 缺失）→ 不是需要
+      Canvas 报告的 Goal 执行场景：不追加缺口。
+    - 有已批准契约：最多 ``_GOAL_REPORT_GRACE_SECONDS`` 秒内**只读**轮询
+      ``pi_goal_report_get``；``ready + structured`` → 记录报告身份与
+      ``report_sha256`` 供监控端/核心硬闸复核；其余分态 → 在 job detail
+      写明**具体缺口**，不自动重新派发、不重发 prompt。
+
+    返回 ``(detail, reason)``：``reason`` 可为 ``None``（结构化报告就绪）、
+    ``execution_failed``（缺报告/兜底报告——可归因的执行缺口）或
+    ``report_unreadable``（报告不可读/损坏/工具缺失——区别于「已验证失败」）。
+    """
+    approval = job.get("goal_approval")
+    if not isinstance(approval, dict) or approval.get("status") != "approved":
+        return None, None
+    session_id = job.get("session_id")
+    if not session_id:
+        return None, None
+    execution_id = approval.get("execution_id")
+    proposal_id = approval.get("proposal_id")
+    approved_turns = {str(approval.get("execution_turn_id") or "")}
+    for item in job.get("turn_adopted") or []:
+        if isinstance(item, dict) and item.get("to"):
+            approved_turns.add(str(item["to"]))
+    deadline = time.monotonic() + _GOAL_REPORT_GRACE_SECONDS
+    last_state, last_detail = "not_found", None
+    while True:
+        try:
+            payload = _fetch_report_payload(
+                client, session_id, execution_id, proposal_id, approved_turns,
+            )
+            resolved = payload
+        except util.KanpilotError as exc:
+            resolved = {
+                "state": pi_desktop_backend.classify_report_error(
+                    exc.code, exc.message
+                ),
+                "detail": exc.message,
+            }
+        except Exception as exc:  # noqa: BLE001 - 只读探测不得中断收尾
+            resolved = {"state": "unreadable", "detail": str(exc)}
+        last_state = resolved.get("state")
+        last_detail = resolved.get("detail")
+        if last_state == "ready":
+            job["goal_report"] = {
+                "report_id": resolved.get("report_id"),
+                "report_sha256": resolved.get("report_sha256"),
+                "execution_id": execution_id,
+                "proposal_id": proposal_id,
+                "turn_id": resolved.get("turn_id"),
+                "integrity_kind": resolved.get("integrity_kind"),
+                "execution_status": resolved.get("execution_status"),
+                "verdict": resolved.get("verdict"),
+            }
+            if resolved.get("integrity_kind") == "structured":
+                return None, None
+            # ready + fallback 等同「没有完成报告」（§5.23.10 T5-D）。
+            return (
+                "goal_report_fallback: Plus 生成的是兜底报告"
+                "（integrity=fallback），没有完成报告",
+                "execution_failed",
+            )
+        if last_state in ("corrupt", "truncated"):
+            # 报告不可读/损坏：一次有界重读后交人工，原因区别于「已验证失败」。
+            return (
+                f"goal_report_{last_state}: 报告不可读/损坏"
+                f"（{last_detail or '无正文'}）；交人工处理，"
+                "不作为已验证失败",
+                "report_unreadable",
+            )
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_GOAL_REPORT_POLL_SECONDS)
+    gap = {
+        "not_found": "没有结构化完成报告（Host 未在宽限内发布 Goal 报告）",
+        "pending": "报告仍在 pending（Host 未在宽限内完成 outbox 发布）",
+        "draft": "报告仍是 draft（结构化草稿未提交）",
+        "failed": "报告自身为 failed",
+        "unreadable": "报告读取失败（临时读取失败，不等于没有报告）",
+        "tool_missing": "Plus 缺少只读报告工具（版本过旧）",
+    }.get(last_state, f"报告状态未知（{last_state}）")
+    reason = (
+        "report_unreadable"
+        if last_state in ("unreadable", "tool_missing")
+        else "execution_failed"
+    )
+    return (
+        f"goal_report_missing: {gap}"
+        f"（state={last_state}；{last_detail or ''}）；"
+        "未自动重新派发、未重发 prompt",
+        reason,
+    )
+
+
+def _fetch_report_payload(client, session_id, execution_id, proposal_id,
+                          approved_turns) -> dict:
+    """只读取回本轮报告并归一化 + 身份核对（worker 自持身份，不查 DB）。
+
+    与 ``cmd_read.read_goal_report`` 同口径：优先按已记录的 executionId
+    取；缺记录时经 ``pi_goal_report_list`` 按 proposalId + 已批准 turn 收敛。
+    跨轮/身份不符 → ``KanpilotError``（绝不返回伪造正文）。
+    """
+    candidates = []
+    if execution_id:
+        candidates = [{"executionId": execution_id, "reportId": None}]
+    else:
+        listing = client.goal_report_list(session_id)
+        rows = listing.get("reports") if isinstance(listing, dict) else None
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            proposal = item.get("proposalId") or item.get("proposal_id")
+            turn = item.get("turnId") or item.get("turn_id")
+            if proposal is not None and str(proposal) != str(proposal_id):
+                continue
+            if turn is not None and str(turn) not in approved_turns:
+                continue
+            candidates.append({
+                "executionId": item.get("executionId")
+                or item.get("execution_id"),
+                "reportId": item.get("reportId") or item.get("report_id"),
+            })
+    if not candidates:
+        return {"state": "not_found", "detail": "本会话没有本轮 Goal 报告"}
+    if len(candidates) > 1:
+        raise util.KanpilotError(
+            "conflict", "同轮次存在多份 Goal 报告，身份歧义不猜测"
+        )
+    target = candidates[0]
+    payload = client.goal_report_get(
+        session_id, execution_id=target.get("executionId"),
+        report_id=target.get("reportId"),
+    )
+    resolved = pi_desktop_backend.normalize_goal_report(
+        payload, report_id=target.get("reportId")
+    )
+    if resolved.get("state") != "ready":
+        return resolved
+    report = resolved["report"]
+    fields = pi_desktop_backend.report_identity(report)
+    if str(fields.get("session_id") or "") != str(session_id):
+        raise util.KanpilotError(
+            "conflict", "报告 sessionId 与本轮会话身份不符"
+        )
+    if str(fields.get("proposal_id") or "") != str(proposal_id):
+        raise util.KanpilotError(
+            "conflict", "报告 proposalId 与本轮已批准契约不符"
+        )
+    if execution_id and str(fields.get("execution_id") or "")             != str(execution_id):
+        raise util.KanpilotError(
+            "conflict", "报告 executionId 与本轮记录不符"
+        )
+    turn_id = fields.get("turn_id")
+    if turn_id is not None and str(turn_id) not in approved_turns:
+        raise util.KanpilotError(
+            "conflict", "报告 turnId 不属于本轮已批准的执行轮次"
+        )
+    resolved["turn_id"] = turn_id
+    resolved["integrity_kind"] = pi_desktop_backend.report_integrity_kind(
+        report
+    )
+    resolved["execution_status"] = (
+        pi_desktop_backend.report_execution_status(report)
+    )
+    resolved["verdict"] = pi_desktop_backend.report_verdict(report)
+    return resolved
 
 
 def main(argv=None) -> int:

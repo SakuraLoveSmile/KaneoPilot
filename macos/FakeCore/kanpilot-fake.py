@@ -1531,6 +1531,52 @@ FLAKY_SESSION_TASK = os.environ.get("KANPILOT_FAKE_SESSION_FLAKY")
 
 SESSION_POLL_SECONDS = 2
 
+# T1（docs/plans/task-detail-readability-and-execution-evidence.md 性能门）：
+# `KANPILOT_FAKE_LONG_SESSION=<task_id>` 时把该任务最新轮次的消息换成一条
+# **固定消息数 / 固定长输出字节数**的合成长会话，供执行页阅读流畅性在同一
+# 数据量、同一窗口、同一 2 秒轮询下做改前/改后度量（docs/ui-spec §4.5
+# 「无变化轮询不重排（T1）」）。不设置该变量时夹具行为与既有完全一致。
+LONG_SESSION_TASK = os.environ.get("KANPILOT_FAKE_LONG_SESSION")
+LONG_SESSION_COUNT = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_COUNT") or 400)
+LONG_SESSION_BYTES = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_BYTES") or 4096)
+
+
+def long_session_messages(count=None, output_bytes=None):
+    """T1 合成长会话：count 条消息，部分为固定字节数的长工具输出。
+
+    长输出逐行填充到接近 output_bytes（ASCII，字节数与字符数一致），
+    消息类型循环覆盖 assistant/tool_call/tool_result/command_output，
+    保证折叠、搜索、逐条展开与本项目既有夹具形状一致。
+    """
+    count = count or LONG_SESSION_COUNT
+    output_bytes = output_bytes or LONG_SESSION_BYTES
+    line = "0123456789abcdef tool output chunk payload\n"
+    long_output = line * max(1, output_bytes // len(line))
+    types = ["assistant", "tool_call", "tool_result", "command_output"]
+    messages = []
+    for seq in range(1, count + 1):
+        mtype = "system" if seq == 1 else types[seq % len(types)]
+        tool = None
+        if seq == 1:
+            content = "执行会话已创建（fake long session）"
+        elif mtype == "tool_call":
+            content = "run_command"
+            tool = {"name": "Bash",
+                    "input": "python3 scripts/step_%04d.py" % seq,
+                    "output": None, "exit_code": None}
+        elif mtype in ("tool_result", "command_output"):
+            content = long_output
+            tool = {"name": "Bash",
+                    "input": "python3 scripts/step_%04d.py" % seq,
+                    "output": long_output, "exit_code": 0}
+        else:
+            content = "步骤 %04d：已完成本段处理，继续下一段。" % seq
+        messages.append({"id": "m%05d" % seq, "seq": seq, "type": mtype,
+                         "content": content, "revision": 1,
+                         "source_at": past(minutes=max(0, count - seq)),
+                         "tool": tool})
+    return messages
+
 
 def _msg(seq, mtype, content, tool=None, minutes=3, revision=1):
     return {"id": "m%03d" % seq, "seq": seq, "type": mtype,
@@ -1738,6 +1784,13 @@ def apply_session_save_state(state, session):
     return session
 
 
+def long_session_override(task_id, messages):
+    """T1 度量夹具：`KANPILOT_FAKE_LONG_SESSION` 命中时替换该任务消息。"""
+    if LONG_SESSION_TASK and task_id == LONG_SESSION_TASK:
+        return long_session_messages()
+    return messages
+
+
 def resolve_session(state, task_id, run_id=None):
     """返回 (SessionInfo, connection, messages)；无记录 → pending。"""
     run_id = run_id or task_run_id(state, task_id) or latest_session_run(state, task_id)
@@ -1746,8 +1799,9 @@ def resolve_session(state, task_id, run_id=None):
         return (apply_session_save_state(state, pending_session(task_id, run_id)),
                 {"state": "ok", "detail": None, "poll_seconds": SESSION_POLL_SECONDS},
                 [])
-    return (apply_session_save_state(state, entry["session"]),
-            entry["connection"], entry["messages"])
+    messages = long_session_override(task_id, entry["messages"])
+    session = dict(entry["session"], message_count=len(messages))
+    return (apply_session_save_state(state, session), entry["connection"], messages)
 
 
 def cmd_list_sessions(state, payload):

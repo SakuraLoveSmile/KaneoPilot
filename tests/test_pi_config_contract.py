@@ -110,8 +110,9 @@ def test_exec_capabilities_shape_and_no_internal_fields(cli):
     assert resp["pi"]["home"] is None or isinstance(resp["pi"]["home"], str)
     # v3（§5.23.3）：pi_desktop 分支固定四键；未保存 → available False，
     # 只回脱敏摘要（detail/tools_ok/version），无 token/连接文件全文。
+    # v3 T6（protocol §5.23.10）：session_naming 为工作区命名兼容门。
     assert set(resp["pi_desktop"]) == {
-        "available", "detail", "tools_ok", "version"}
+        "available", "detail", "tools_ok", "version", "session_naming"}
     assert isinstance(resp["pi_desktop"]["available"], bool)
 
 

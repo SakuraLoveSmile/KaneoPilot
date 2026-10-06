@@ -794,6 +794,15 @@ _EVENT_KIND_CN = {
     "plan_started": "规划已排队",
     "plan_ready": "规划产出就绪",
     "plan_needs_input": "规划需要补充输入",
+    # v3 T5（§5.23.10）：Goal 报告完成判定留痕。
+    "goal_report_evaluated": "Goal 报告完成判定",
+    # v3 修复：以下 kind 由核心自身发出（cmd_dispatch/cmd_config/cmd_planner），
+    # 但此前未登记在本表，记录页把它们显示成「未识别事件（…）」。表必须覆盖
+    # 核心实际写入的全部 kind，未知 kind 仍由调用方原样保留（§5.21.2）。
+    "round_observe": "观察者续接",
+    "round_start_failed": "轮次启动失败",
+    "review_config_updated": "评审配置更新",
+    "planner_config_updated": "规划配置更新",
 }
 
 _EVENT_RESULTS = {
@@ -859,6 +868,12 @@ def _event_summary(kind: str, detail) -> str:
         return "规划产出计划，等待确认执行"
     if kind == "plan_needs_input":
         return "规划需要补充输入"
+    if kind == "goal_report_evaluated":
+        decision = detail.get("decision")
+        base = {"complete": "判定完成", "incomplete": "判定未完成",
+                "uncertain": "判定不确定"}.get(decision, "判定")
+        reason = detail.get("reason")
+        return f"Goal 报告{base}：{reason}" if reason else f"Goal 报告{base}"
     reason = detail.get("reason") or detail.get("detail")
     return f"{label}：{reason}" if reason else label
 
