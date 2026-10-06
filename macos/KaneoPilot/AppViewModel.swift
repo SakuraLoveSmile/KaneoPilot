@@ -678,24 +678,36 @@ final class AppViewModel: ObservableObject {
         plannerError = error
     }
 
-    /// 保存 set-planner-config {standard, review_fix, default_method?}：
+    /// 保存 set-planner-config：§5.24.1 形状——
+    /// codex 分支 {backend:"codex", standard, review_fix, default_method?}；
+    /// pi_desktop 分支 {backend:"pi_desktop", pi_desktop:{五字段}}（不提交
+    /// 无关 Codex 组草稿，也不提交 default_method——Plus 只支持 builtin）。
     /// 成功 toast + 更新缓存；失败返回核心 error 原文（调用方红字展示，
-    /// 草稿不动）。default_method 仅在核心回传该字段时携带（v3 §5.23.2；
-    /// 旧核心拒收未知字段，故不带）。
+    /// 草稿不动）。default_method 仅在核心回传该字段时携带（旧核心拒收未知
+    /// 字段，故不带）。
     @discardableResult
-    func savePlannerConfig(standard: PlannerGroupConfig,
+    func savePlannerConfig(backend: String,
+                           standard: PlannerGroupConfig,
                            reviewFix: PlannerGroupConfig,
-                           defaultMethod: String? = nil) async -> String? {
+                           defaultMethod: String? = nil,
+                           piDesktop: ExecPiDesktopConfig? = nil) async -> String? {
         guard !plannerSaving else { return "正在保存规划配置" }
         plannerSaving = true
         defer { plannerSaving = false }
         do {
-            var payload: [String: Any] = [
-                "standard": standard.fields,
-                "review_fix": reviewFix.fields,
-            ]
-            if let defaultMethod, plannerConfig?.supportsDefaultMethod == true {
-                payload["default_method"] = defaultMethod
+            var payload: [String: Any] = ["backend": backend]
+            if backend == "pi_desktop" {
+                guard let piDesktop, piDesktop.isComplete else {
+                    return "Plus 规划配置需要完整的五字段（权限固定 ask）"
+                }
+                payload["pi_desktop"] = piDesktop.fields
+            } else {
+                payload["standard"] = standard.fields
+                payload["review_fix"] = reviewFix.fields
+                if let defaultMethod,
+                   plannerConfig?.supportsDefaultMethod == true {
+                    payload["default_method"] = defaultMethod
+                }
             }
             let response = try await client.run(
                 "set-planner-config",
@@ -707,13 +719,53 @@ final class AppViewModel: ObservableObject {
                 updatedAt: response.updatedAt,
                 defaultsMethod: response.defaultsMethod
                     ?? plannerConfig?.defaultsMethod)
-            showToast("已保存，仅影响新建规划请求")
+            showToast("已保存规划配置（仅影响新规划请求）")
             return nil
         } catch {
             return error.coreMessage
         }
     }
 
+    /// §5.24.1：生效规划运行端（已保存 config 优先；缺省 codex）。
+    var plannerEffectiveBackend: String {
+        plannerConfig?.config?.effectiveBackend ?? "codex"
+    }
+
+    /// §5.24.2：已保存的 Plus 规划五字段（无桌面块 → nil）。
+    var plannerPlusConfig: ExecPiDesktopConfig? {
+        plannerConfig?.config?.piDesktop
+    }
+
+    // MARK: - v4 §5.24.2 Review 能力（review-capabilities）
+
+    /// review-capabilities 缓存：pi / pi_desktop 两分支就绪态（只读）。
+    @Published var reviewCapabilities: ReviewCapabilitiesResponse?
+    @Published var reviewCapabilitiesLoading = false
+    @Published var reviewCapabilitiesError: String?
+    /// 在途响应归属守卫：旧响应不得覆盖新结果。
+    private var reviewCapsGeneration = 0
+
+    /// 读取 review-capabilities（旧核心未注册该命令 → 只记错误，不阻断保存）。
+    func refreshReviewCapabilities() async {
+        reviewCapsGeneration += 1
+        let generation = reviewCapsGeneration
+        reviewCapabilitiesLoading = true
+        defer {
+            if generation == reviewCapsGeneration {
+                reviewCapabilitiesLoading = false
+            }
+        }
+        do {
+            let response = try await client.run(
+                "review-capabilities", as: ReviewCapabilitiesResponse.self)
+            guard generation == reviewCapsGeneration else { return }
+            reviewCapabilities = response
+            reviewCapabilitiesError = nil
+        } catch {
+            guard generation == reviewCapsGeneration else { return }
+            reviewCapabilitiesError = error.coreMessage
+        }
+    }
     // MARK: - v2 §5.22.4 确认并安排执行（confirm_dispatch）
 
     /// enqueue {task_id, kind:"dispatch", confirm_plan:true, expected_plan_sha256}：
@@ -851,7 +903,7 @@ final class AppViewModel: ObservableObject {
         return taskID
     }
 
-    static func actionLabel(_ action: String) -> String {
+    nonisolated static func actionLabel(_ action: String) -> String {
         switch action {
         case "enqueue": return "安排下一步"
         case "retry": return "重试派发"

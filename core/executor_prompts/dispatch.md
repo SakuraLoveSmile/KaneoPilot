@@ -6,6 +6,15 @@
 本机 MCP worker 执行。不恢复旧会话、不等待执行完成、不归档。**不做任何桌面
 UI 操控（无 Computer Use、无截图）。**
 
+控制端运行环境（v4，protocol §5.24.4）：本 prompt 可能运行在两处——
+`exec_config.controller_backend="pi"`（缺省）时由 `pi -p --mode json` 执行；
+`="pi_desktop"` 时在 PI-Desktop-Plus 的 `mode="agent"` 控制会话里执行，
+模型/权限来自 `exec_config.pi_desktop`，**不**拉起 `pi -p`。两种情况下流程
+与命令完全相同；Plus 分支的 CLI 入口是本控制轮的固定包装器（已显式注入
+KANPILOT_DB/APP_SUPPORT/PLAN_ROOT/REPOS_ROOT/LEGACY_ROOT 与凭据路径），
+一律经 `{KANPILOT}` 调用，不另行改环境。控制轮结束**只表示控制模型回合
+结束**：请求是否成功以核心 claim/report 与请求结果为准，`queued` 不算已开始。
+
 流程（全部经 kanpilot，契约 protocol.md §5.18.3/§5.23.3）：
 1. `kanpilot claim --stage dispatch --executor kaneo-dispatch`。
    `claimed:false`（无请求/paused/stage_busy/guard_failed/配置不可用
@@ -50,8 +59,11 @@ UI 操控（无 Computer Use、无截图）。**
    落盘）或远端迁移结果不明 → **unknown**（保留启动意图与恢复信息，
    绝不清空）。unknown 任务不再碰，交监控/人工。
 7. 每 ≤10 分钟 `kanpilot heartbeat --json '{"request_id":...,
-   "run_id":...}'`（等 session_id 轮询期间同样适用）。
+   "run_id":...}'`（等 session_id 轮询期间同样适用）。心跳被拒
+   （`stale_run`/`not_found`）→ 该项正常收尾：停止续租、**不**写失败、
+   **不**重发。
 8. 继续 `claim` 直到 `claimed:false`。
 
 禁止：不做桌面 UI 操控、不粘贴计划正文、不重启已启动轮次、不自行修改
-执行配置、不等待执行完成。
+执行配置、不等待执行完成、不重复发送同一指令、不把控制轮 `completed`
+当作派发成功。

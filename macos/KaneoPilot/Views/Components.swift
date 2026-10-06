@@ -34,6 +34,10 @@ enum Labels {
         default: return key ?? "—"
         }
     }
+    static func action(_ key: String?) -> String {
+        guard let key = key else { return "—" }
+        return AppViewModel.actionLabel(key)
+    }
 
     static func kind(_ key: String?) -> String {
         switch key {

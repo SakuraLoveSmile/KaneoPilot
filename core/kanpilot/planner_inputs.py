@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import (
-    bridge, codex_planner, constants, core, db, planner_config, remote, util,
+    bridge, codex_planner, constants, core, db, planner_config, project_config, remote, util,
 )
 
 # --------------------------------------------------------------- 附件识别
@@ -145,10 +145,11 @@ def _local_status(conn: sqlite3.Connection, task_id: str) -> dict:
     }
 
 
-def _selectable(conn, task_id: str, project_name: Optional[str]) -> tuple:
+def _selectable(conn, task_id: str, mapping: Optional[dict]) -> tuple[bool, Optional[str]]:
     """(selectable, blocked_reason)。只读判定，UI 灰显依据。"""
-    if not project_name or project_name not in constants.PROJECTS:
-        return False, f"项目未映射仓库（{project_name or '未知'}），不能规划"
+    if not mapping or mapping.get("mapping_state") != "available":
+        reason = mapping.get("blocked_reason") if mapping else "项目未映射仓库，不能规划"
+        return False, reason
     task = db.get_task(conn, task_id)
     if task is None:
         return True, None
@@ -177,7 +178,12 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
     items = []
     for project in projects:
         project_id = str(project.get("id", ""))
-        project_name = project.get("name")
+        mapping = project_config.get_effective_mapping(conn, project_id)
+        project_name = (mapping.get("project_name") if mapping and mapping.get("project_name") else None) or project.get("name")
+        mapping_state = mapping.get("mapping_state", "unmapped") if mapping else "unmapped"
+        repository_kind = mapping.get("repository_kind") if mapping else None
+        repository = mapping.get("repository") if mapping else None
+
         cols = bridge.columns(client, project_id)
         todos = bridge.tasks_for_status(
             client, project_id, cols, tuple(constants.TODO_SLUGS)
@@ -194,7 +200,9 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                     "title": todo.get("title") or todo.get("name"),
                     "project_id": project_id, "project_name": project_name,
                     "requirements_sha256": None, "source_sha256": None,
-                    "kaneo_status": todo.get("status"), "repository": None,
+                    "kaneo_status": todo.get("status"), "repository": repository,
+                    "mapping_state": mapping_state, "repository_kind": repository_kind,
+                    "mapping_project_id": project_id,
                     "local_status": None, "local_save_state": None,
                     "attachments": [], "selectable": False,
                     "blocked_reason": f"任务详情读取失败：{exc}",
@@ -202,10 +210,7 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                 continue
             attachments = _attachment_entries(context.get("task") or {})
             local = _local_status(conn, task_id)
-            selectable, blocked = _selectable(conn, task_id, project_name)
-            repository = None
-            if project_name in constants.PROJECTS:
-                repository = str(constants.repo_path_for(project_name))
+            selectable, blocked = _selectable(conn, task_id, mapping)
             # 输出脱敏：附件 url 去 query/fragment（下载经 prepare 重新取
             # 完整地址；列表项只用于展示与排除勾选）。
             attachments = [
@@ -222,6 +227,9 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                 "kaneo_status": (context["task"].get("status")
                                  or todo.get("status")),
                 "repository": repository,
+                "mapping_state": mapping_state,
+                "repository_kind": repository_kind,
+                "mapping_project_id": project_id,
                 "local_status": local["local_status"],
                 "local_save_state": local["local_save_state"],
                 "attachments": attachments,
@@ -292,23 +300,26 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             "conflict",
             "远端需求已变化（requirements_sha256 不符），请重新获取后再准备",
         )
-    task_obj = context.get("task") or {}
-    project_id = task_obj.get("projectId")
-    project_name = next(
-        (name for name, pid in constants.PROJECTS.items() if pid == project_id),
-        None,
-    )
     local_task = db.get_task(conn, task_id)
+    task_obj = context.get("task") or {}
+    project_id = task_obj.get("projectId") or (local_task["project_id"] if local_task else None)
+    mapping = project_config.get_effective_mapping(conn, project_id)
+    project_name = (mapping.get("project_name") if mapping else None) or (local_task["project_name"] if local_task else None)
+    repository = mapping.get("repository") if mapping else (local_task["repository"] if local_task else None)
+    mapping_revision = mapping.get("revision", 0) if mapping else 0
+
+    issues: list = []
+    files: list = []
+    total_bytes = 0
+
+    if not mapping or mapping.get("mapping_state") != "available":
+        issues.append({"issue": f"项目未映射仓库或仓库不可用：{mapping.get('blocked_reason') if mapping else '未配置'}"})
 
     # 2) 材料目录（不可变产物；input_id 即目录名）。
     input_id = util.new_uuid()
     root = _inputs_root(conn) / input_id
     files_dir = root / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
-
-    issues: list = []
-    files: list = []
-    total_bytes = 0
 
     def register(path: Path, source: str, media_type=None) -> dict:
         nonlocal total_bytes
@@ -427,16 +438,9 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             "task_id": task_id,
             "title": task_obj.get("title") or task_obj.get("name"),
             "project_id": project_id,
-            "project_name": project_name
-            or (local_task["project_name"] if local_task else None),
-            "repository": (
-                local_task["repository"] if local_task is not None
-                and local_task["repository"]
-                else (
-                    str(constants.repo_path_for(project_name))
-                    if project_name else None
-                )
-            ),
+            "project_name": project_name,
+            "repository": repository,
+            "project_mapping_revision": mapping_revision,
             "kaneo_status": task_obj.get("status"),
             "plan_kind": (
                 local_task["plan_kind"]
@@ -522,10 +526,15 @@ def _item_task_id(conn, item: dict):
     return row["task_id"] if row is not None else None
 
 
-def _submit_one(conn, now: str, item: dict) -> dict:
-    """start-plans 单项提交（§5.22.2/§5.23.2）：逐项独立事务语义由调用方
-    保证；返回 {task_id, request_id?, deduplicated?, code?, error?,
-    waiting_reason?}。"""
+def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
+    """start-plans 单项提交（§5.22.2/§5.23.2/§5.24.3）：逐项独立事务语义由
+    调用方保证；返回 {task_id, request_id?, deduplicated?, reused?, code?,
+    error?, waiting_reason?}。
+
+    item 可带 ``planner_method``（缺省 builtin）与 ``planner_backend``
+    （缺省 codex）。payload 按后端固化：codex → ``model_config``；
+    pi_desktop → ``runtime_config``（五字段脱敏）+ ``planner_backend``。
+    幂等判定包含材料哈希、方式与后端三者。"""
     input_id = item.get("input_id")
     supplied_sha = item.get("input_sha256")
     # §5.23.2：planner_method 缺省 builtin；非法值 → 该项 bad_request。
@@ -535,6 +544,16 @@ def _submit_one(conn, now: str, item: dict) -> dict:
                 "code": "bad_request",
                 "error": f"planner_method 非法：{item.get('planner_method')!r}"
                          f"（仅 { '/'.join(planner_config.DEFAULT_METHODS) }）"}
+    # §5.24.3：planner_backend 缺省 codex（UI 总是提交明确值）；非法值 →
+    # 该项 bad_request，不改设置、不猜后端。
+    planner_backend = (
+        item.get("planner_backend") or planner_config.DEFAULT_BACKEND
+    )
+    if planner_backend not in planner_config.BACKENDS:
+        return {"task_id": _item_task_id(conn, item),
+                "code": "bad_request",
+                "error": f"planner_backend 非法：{item.get('planner_backend')!r}"
+                         f"（仅 {'/'.join(planner_config.BACKENDS)}）"}
     row = db.get_planner_input(conn, input_id) if input_id else None
     if row is None:
         return {"task_id": None, "code": "not_found",
@@ -546,13 +565,28 @@ def _submit_one(conn, now: str, item: dict) -> dict:
     task_id = row["task_id"]
     task = db.get_task(conn, task_id)
 
-    # 项目白名单（§5.22.1）：未映射项目不可规划（runner cwd 无仓库可用）。
-    manifest_project = (manifest.get("task") or {}).get("project_name")
-    if manifest_project not in constants.PROJECTS:
-        return {"task_id": task_id, "code": "conflict",
-                "error": f"项目未映射仓库（{manifest_project or '未知'}），"
-                         "不能规划"}
-
+    # 项目映射核验（§5.22.1 / §5.26）：未映射或已停用项目不可规划。
+    manifest_task = manifest.get("task") or {}
+    task_keys = task.keys() if task else []
+    manifest_project_id = (
+        manifest_task.get("project_id")
+        or (task["project_id"] if task and "project_id" in task_keys and task["project_id"] else None)
+        or constants.PROJECTS.get(manifest_task.get("project_name") or (task["project_name"] if task and "project_name" in task_keys else None) or "")
+    )
+    effective_mapping = project_config.get_effective_mapping(conn, manifest_project_id)
+    if not effective_mapping or not effective_mapping.get("enabled"):
+        return {
+            "task_id": task_id, "code": "conflict",
+            "error": f"项目未映射仓库或已停用（{manifest_task.get('project_name') or (task['project_name'] if task and 'project_name' in task_keys else None) or '未知'}），不能规划",
+        }
+    if manifest_task.get("repository") and effective_mapping.get("repository"):
+        m_repo = Path(manifest_task.get("repository")).expanduser().resolve()
+        e_repo = Path(effective_mapping.get("repository")).expanduser().resolve()
+        if m_repo != e_repo:
+            return {
+                "task_id": task_id, "code": "conflict",
+                "error": f"项目仓库配置已变更（{m_repo} vs {e_repo}），请重新准备规划材料",
+            }
     if db.task_is_purged(task):
         return {"task_id": task_id, "code": "conflict",
                 "error": "任务已永久从列表移除"}
@@ -604,9 +638,9 @@ def _submit_one(conn, now: str, item: dict) -> dict:
             return {"task_id": task_id, "code": "conflict",
                     "error": f"任务状态 {task['status']} 不能排队规划"}
 
-    # 幂等键 plan:<task_id>：已授权且同材料+同方式 → deduplicated；
-    # 材料或方式不同 → conflict（不暗换材料/方式）；未授权旧请求 →
-    # 写回已确认输入（复用请求，§5.22.2/§5.23.2）。
+    # 幂等键 plan:<task_id>：已授权且同材料 + 同方式 + 同后端 → deduplicated；
+    # 材料/方式/后端任一不同 → conflict（不暗换材料、方式或后端）；未授权旧
+    # 请求 → 写回已确认输入（复用请求，§5.22.2/§5.23.2/§5.24.3）。
     key = f"plan:{task_id}"
     existing = db.active_request_for_key(conn, key)
     if existing is not None:
@@ -615,11 +649,20 @@ def _submit_one(conn, now: str, item: dict) -> dict:
                     "error": "规划请求已被领取，正在执行中"}
         old_payload = db.request_payload(existing)
         if old_payload.get("manual_authorized"):
-            # 缺 planner_method 的旧 payload 按 builtin 解释（§5.23.2）。
+            # 缺 planner_method / planner_backend 的旧 payload 按
+            # builtin/codex 解释（§5.23.2/§5.24.3）。
             old_method = old_payload.get("planner_method") or "builtin"
+            old_backend = (
+                old_payload.get("planner_backend")
+                or planner_config.DEFAULT_BACKEND
+            )
             same_input = (
                 old_payload.get("planner_input_sha256")
                 == row["input_sha256"])
+            if same_input and old_backend != planner_backend:
+                return {"task_id": task_id, "code": "conflict",
+                        "error": f"已有同材料但后端不同的规划请求"
+                                 f"（{old_backend} → {planner_backend}），请先处理"}
             if same_input and old_method == method:
                 return {"task_id": task_id,
                         "request_id": existing["request_id"],
@@ -631,27 +674,63 @@ def _submit_one(conn, now: str, item: dict) -> dict:
             return {"task_id": task_id, "code": "conflict",
                     "error": "已有不同材料的规划请求在队列中，请先处理"}
 
+    # §5.24.3：Plus 分支只支持 builtin——spec_plan 是 Codex 插件运行方式，
+    # 在 Plus 下明确失败并给原因（不把技能文本复制给 Plus、不静默换方式）。
+    # dedup/conflict 已短路，此处只对真正创建/复用的请求判定。
+    if planner_backend == "pi_desktop" and method != "builtin":
+        reason = planner_config.spec_plan_blocked_reason(planner_backend)
+        return {"task_id": task_id, "code": "validation_failed",
+                "error": f"Plus 计划请求不支持 planner_method={method}：{reason}"}
     # spec_plan：提交时经 codex plugin list 固化插件身份与版本（不可用 →
-    # validation_failed，该项失败、其他项不受影响）。dedup/conflict 已短路，
-    # 此处只对真正创建/复用的请求探测。
+    # validation_failed，该项失败、其他项不受影响）。
+    prepared = prepared or {}
+    if prepared.get("config_fingerprint") != util.jdump(planner_config.merged(conn)):
+        return {"task_id": task_id, "code": "conflict", "error": "规划配置在解析期间变化，请重新提交"}
+    if prepared.get("input_sha256") != row["input_sha256"]:
+        return {"task_id": task_id, "code": "conflict", "error": "规划材料在解析期间变化，请重新提交"}
     plugin = None
     if method == "spec_plan":
-        plugin = codex_planner.probe_spec_plugin()
+        plugin = prepared.get("plugin") or {"available": False, "reason": "未解析插件"}
         if not plugin.get("available"):
             return {"task_id": task_id, "code": "validation_failed",
                     "error": f"spec_plan 不可用：{plugin.get('reason')}"}
 
+    # §5.24.3：按后端固化对应运行快照——codex → model_config（codex 模型组）；
+    # pi_desktop → runtime_config（五字段脱敏，无 token）。Plus 分支要求设置里
+    # 已保存完整五字段（结构校验在此复核，避免 hand-edited 库产生半残请求）。
+    runtime_config = None
+    if planner_backend == "pi_desktop":
+        block = planner_config.pi_desktop_block(conn)
+        error = planner_config.validate_pi_desktop_block(block)
+        if error is not None:
+            return {"task_id": task_id, "code": "validation_failed",
+                    "error": f"Plus 计划分支配置无效：{error}"}
+        resolved, resolve_err = prepared.get("runtime_config"), prepared.get("runtime_error")
+        if resolve_err is not None or resolved is None:
+            return {"task_id": task_id, "code": "validation_failed",
+                    "error": f"Plus 计划分支配置无效：{resolve_err}"}
+        runtime_config = resolved
     payload = {
         "manual_authorized": True,
         "input_id": input_id,
         "planner_input_sha256": row["input_sha256"],
         "manifest": manifest,
-        "model_config": planner_config.snapshot(
-            conn, planner_config.group_for(task["plan_kind"])
-        ),
+        "project_snapshot": {
+            "project_id": manifest_project_id,
+            "project_name": manifest_task.get("project_name"),
+            "repository": manifest_task.get("repository"),
+            "project_mapping_revision": manifest_task.get("project_mapping_revision", 0),
+        },
+        "planner_backend": planner_backend,
         "confirmed_at": now,
         "planner_method": method,
     }
+    if runtime_config is not None:
+        payload["runtime_config"] = runtime_config
+    else:
+        payload["model_config"] = planner_config.model_snapshot(
+            conn, planner_config.group_for(task["plan_kind"])
+        )
     if plugin is not None:
         payload["plugin_id"] = plugin["plugin_id"]
         payload["plugin_version"] = plugin["version"]
@@ -673,7 +752,8 @@ def _submit_one(conn, now: str, item: dict) -> dict:
             conn, now, "plan_started", task_id=task_id,
             request_id=existing["request_id"], actor="user",
             detail={"input_id": input_id, "reused": True,
-                    "planner_method": method},
+                    "planner_method": method,
+                    "planner_backend": planner_backend},
         )
         return {"task_id": task_id, "request_id": existing["request_id"],
                 "deduplicated": False, "reused": True}
@@ -686,16 +766,44 @@ def _submit_one(conn, now: str, item: dict) -> dict:
         conn, now, "plan_started", task_id=task_id,
         request_id=request["request_id"], actor="user",
         detail={"input_id": input_id, "reused": False,
-                "planner_method": method},
+                "planner_method": method,
+                "planner_backend": planner_backend},
     )
     return {"task_id": task_id, "request_id": request["request_id"],
             "deduplicated": False}
 
 
+class _SubmissionRejected(Exception):
+    def __init__(self, result):
+        self.result = result
+
+
+def _prepare_submission(conn, item):
+    """Only reads local inputs before resolving network/plugin dependencies."""
+    row = db.get_planner_input(conn, item.get("input_id"))
+    prepared = {"config_fingerprint": util.jdump(planner_config.merged(conn)),
+                "input_sha256": row["input_sha256"] if row else None}
+    method = item.get("planner_method") or "builtin"
+    backend = item.get("planner_backend") or planner_config.DEFAULT_BACKEND
+    if row is None or method not in planner_config.DEFAULT_METHODS or backend not in planner_config.BACKENDS:
+        return prepared
+    if item.get("input_sha256") and item["input_sha256"] != row["input_sha256"]:
+        return prepared
+    existing = db.active_request_for_key(conn, "plan:" + row["task_id"])
+    if existing is not None and (existing["status"] == "claimed" or db.request_payload(existing).get("manual_authorized")):
+        return prepared  # Existing authorization wins, including while offline.
+    if backend == "pi_desktop" and method == "builtin":
+        prepared["runtime_config"], prepared["runtime_error"] = planner_config.resolve_runtime_config(conn)
+    elif backend == "codex" and method == "spec_plan":
+        prepared["plugin"] = codex_planner.probe_spec_plugin()
+    return prepared
+
+
 def start_plans(ctx, payload: dict) -> dict:
     """start-plans {items:[{input_id,input_sha256,expected_plan_sha256?,
-    planner_method?}]} → {results:[...]}。每项独立事务，不回滚已成功项
-    （§5.22.2/§5.23.2）。"""
+    planner_method?, planner_backend?}]} → {results:[...]}。每项独立事务，
+    不回滚已成功项（§5.22.2/§5.23.2/§5.24.3：planner_backend 缺省 codex，
+    非法值→bad_request；Plus 项只支持 builtin 且要求已保存五字段）。"""
     conn, now = ctx.conn, ctx.now_iso
     items = payload.get("items")
     if not isinstance(items, list) or not items:
@@ -708,8 +816,13 @@ def start_plans(ctx, payload: dict) -> dict:
                             "error": "item 必须是对象"})
             continue
         try:
+            prepared = _prepare_submission(conn, item)
             with db.write_txn(conn):
-                result = _submit_one(conn, now, item)
+                result = _submit_one(conn, now, item, prepared)
+                if result.get("error"):
+                    raise _SubmissionRejected(result)
+        except _SubmissionRejected as exc:
+            result = exc.result
         except util.KanpilotError as exc:
             result = {"task_id": _item_task_id(conn, item),
                       "code": exc.code, "error": exc.message}

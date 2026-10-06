@@ -43,7 +43,16 @@ from pathlib import Path
 
 source, bundled = map(Path, sys.argv[1:])
 sys.path[:0] = [str(bundled), str(bundled / "_vendor")]
-modules = ("pi_desktop_backend", "pi_desktop_worker", "exec_config", "cmd_dispatch", "cli")
+# v4（T6）：计划/控制端/Review 三分支都是独立模块——缺任一个都必须让构建
+# 失败，不能靠 `cp ... || true` 把核心打包缺失吞掉。
+modules = (
+    "pi_desktop_backend", "pi_desktop_worker", "pi_desktop_planner",
+    "pi_desktop_controller", "pi_desktop_review",
+    "exec_config", "planner_config", "review_config", "cmd_config", "project_config",
+    "cmd_dispatch", "executor_runner", "planner_runner", "cli",
+    "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
+    "harness_plus_adapter", "runtime_operations", "runtime_client",
+)
 for name in modules:
     relative = Path("kanpilot") / (name + ".py")
     expected = hashlib.sha256((source / relative).read_bytes()).digest()
@@ -55,5 +64,9 @@ for name in modules:
         raise SystemExit("Core imported outside app bundle: " + name)
 print("Desktop backend imports and source hashes verified")
 PY
+
+echo "== sign local application bundle =="
+codesign --force --deep --sign - "$APP_DST"
+codesign --verify --deep --strict "$APP_DST"
 
 echo "== done: $APP_DST =="

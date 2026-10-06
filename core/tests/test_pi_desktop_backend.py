@@ -39,8 +39,8 @@ from pathlib import Path
 
 from helpers import CORE, KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
-    constants, db, dsh_events, pi_desktop_backend, pi_desktop_worker, util,
-    cmd_dispatch,
+    constants, db, dsh_events, mcp_scopes, mcp_server, pi_desktop_backend,
+    pi_desktop_worker, round_store, util, cmd_dispatch,
 )
 
 TASK_ID = "taskpidesktop000000000001"
@@ -50,7 +50,8 @@ SESSION_ID = "pd-sess-1"
 TURN_ID = "turn-1"
 FOLLOW_UP_TURN_ID = "turn-2"
 ALL_TOOLS = (tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
-            + tuple(constants.PI_DESKTOP_GOAL_TOOLS))
+            + tuple(constants.PI_DESKTOP_GOAL_TOOLS)
+            + ("pi_session_attach_mcp",))
 
 
 # ------------------------------------------------------------ fake MCP server
@@ -102,7 +103,7 @@ class _FakeMCPHandler(http.server.BaseHTTPRequestHandler):
                     "protocolVersion": srv.protocol_version,
                     "capabilities": {},
                     "serverInfo": {"name": "fake-pi-desktop",
-                                   "version": "0.1.0"},
+                                   "version": "0.15.6"},
                 },
             }, headers={"Mcp-Session-Id": srv.mcp_session_id})
             return
@@ -191,6 +192,7 @@ class FakeMCPServer:
         self.providers = [{"id": "test-provider", "disabled": False}]
         self.models = [{"id": "test-model", "modelId": "test-model"}]
         self.settings = {}
+        self.attach_calls: list = []
         self.model_source = "cache"
         self.httpd = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), _FakeMCPHandler
@@ -251,6 +253,21 @@ class FakeMCPServer:
         if name == "pi_session_configure":
             self.configured = args
             return {"structuredContent": {"ok": True}}
+        if name == "pi_session_attach_mcp":
+            grant_path = Path(args["bridgeFile"])
+            grant = json.loads(grant_path.read_text(encoding="utf-8"))
+            role = grant.get("role")
+            tool_names = sorted(mcp_scopes.TASK_ROLE_TOOLS[role])
+            self.attach_calls.append({
+                "args": dict(args), "grant": grant,
+                "tool_names": tool_names,
+            })
+            return {"structuredContent": {
+                "sessionId": args.get("sessionId"), "attached": True,
+                "serverName": constants.MCP_SERVER_NAME,
+                "role": role,
+                "toolNames": tool_names,
+            }}
         if name == "pi_agent_prompt":
             self.prompt_count += 1
             self.prompt_landed = True
@@ -372,6 +389,16 @@ class PiDesktopCase(KanpilotTestCase):
         super().setUp()
         self.server = FakeMCPServer().start()
         self.addCleanup(self.server.stop)
+        self._saved_db_env = os.environ.get("KANPILOT_DB")
+        os.environ["KANPILOT_DB"] = str(self.db_path)
+        self.addCleanup(self._restore_db_env)
+        self.connection_file = self.write_connection()
+        self.project_mcp = mcp_server.MCPServer(
+            db_path=self.db_path, app_support_dir=self.app_support,
+            connection_file=self.app_support / "mcp" / "server.json",
+        )
+        self.project_mcp.start()
+        self.addCleanup(self.project_mcp.stop)
         # dispatch-start / get-session 经 headless source 解析
         # <runs_root>/<task_id>/<run_id>——缺省指向真实用户目录，
         # 测试一律钉在隔离根下（写入点与读取点共用同一解析链）。
@@ -386,6 +413,12 @@ class PiDesktopCase(KanpilotTestCase):
         finally:
             conn.close()
         _sync(self.server)
+
+    def _restore_db_env(self):
+        if self._saved_db_env is None:
+            os.environ.pop("KANPILOT_DB", None)
+        else:
+            os.environ["KANPILOT_DB"] = self._saved_db_env
 
     # ---------------------------------------------------------- 构造
 
@@ -443,18 +476,28 @@ class PiDesktopCase(KanpilotTestCase):
     def seed_claimed_dispatch(
         self, task_id=TASK_ID, run_id=RUN_ID, status="claimed"
     ) -> str:
-        """登记一条 claimed dispatch 请求（worker heartbeat 目标）。
-
-        requests.task_id 有 FK——隔离 spec 的单测没有 tasks 行，按
-        task_id=None 登记（heartbeat 的 task 更新对 task_id 为空自动跳过；
-        _claimed_request 只核 status='claimed' + run_id）。
-        """
+        """登记隔离任务、执行轮次与 dispatch 请求，供 runtime grant 使用。"""
+        conn = db.connect(self.db_path)
+        try:
+            task_exists = db.get_task(conn, task_id) is not None
+        finally:
+            conn.close()
+        if not task_exists:
+            remote_task = self.fake.add_task(
+                task_id, "example-project-05",
+                title=f"test task {task_id}",
+            )
+            self.sync_task(remote_task, project_name="Feedback")
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
+                round_store.upsert_on_claim(
+                    conn, task_id, run_id, {"backend": "pi_desktop"},
+                    util.now_iso(), backend="pi_desktop",
+                )
                 request, _ = db.create_request(
                     conn, util.now_iso(), "dispatch", f"dispatch:{task_id}",
-                    task_id=None, requested_by="test",
+                    task_id=task_id, requested_by="test",
                 )
                 conn.execute(
                     "UPDATE requests SET status=?, run_id=? "
@@ -464,6 +507,19 @@ class PiDesktopCase(KanpilotTestCase):
             return request["request_id"]
         finally:
             conn.close()
+
+    def write_connection(self, **overrides) -> Path:
+        mode = overrides.pop("mode", 0o600)
+        data = {
+            "active": True, "url": self.server.url, "token": self.server.token,
+            "pid": os.getpid(), "startedAt": util.now_iso(),
+        }
+        data.update(overrides)
+        path = self.root / "pi-desktop" / "mcp-control.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        path.chmod(mode)
+        return path
 
     def write_lost_observer_scene(self, spec, run_dir,
                                   status="failed", send_state="sent",
@@ -1066,6 +1122,26 @@ class TestRunReal(PiDesktopCase):
         self.assertEqual(job["send_state"], "sent")
         self.assertEqual(job["turn_id"], TURN_ID)
         self.assertEqual(job["session_id"], SESSION_ID)
+        self.assertEqual(len(self.server.attach_calls), 1)
+        attached = self.server.attach_calls[0]
+        self.assertEqual(attached["grant"]["server_name"], constants.MCP_SERVER_NAME)
+        self.assertEqual(attached["grant"]["domain"], "task")
+        self.assertEqual(attached["grant"]["role"], "execution")
+        self.assertEqual(
+            set(attached["tool_names"]), mcp_scopes.TASK_ROLE_TOOLS["execution"],
+        )
+        scope = self.project_mcp.scope_manager.scopes[job["scope_id"]]
+        self.assertEqual(scope.task_id, TASK_ID)
+        self.assertEqual(scope.run_id, RUN_ID)
+        self.assertIsNone(scope.request_id)
+        conn = db.connect(self.db_path)
+        try:
+            request = db.get_request(conn, spec["request_id"])
+            self.assertIsNotNone(request)
+            self.assertEqual(request["task_id"], TASK_ID)
+            self.assertEqual(request["run_id"], RUN_ID)
+        finally:
+            conn.close()
         self.assertEqual(job["pi_desktop_pid"], os.getpid())
         self.assertIsNotNone(job["ended_at"])
 
@@ -1307,13 +1383,15 @@ class TestRunReal(PiDesktopCase):
         self.server.messages = self.default_messages()
         _sync(self.server)
         spec, run_dir = self._base()
-        actual_prompt = pi_desktop_backend.MCPClient.agent_prompt
+        from kanpilot import runtime_client
+
+        actual_prompt = runtime_client.RuntimeClient.agent_prompt
 
         def interrupted(client, session_id, content):
             actual_prompt(client, session_id, content)
             raise KeyboardInterrupt()
 
-        with mock.patch.object(pi_desktop_backend.MCPClient, "agent_prompt", interrupted):
+        with mock.patch.object(runtime_client.RuntimeClient, "agent_prompt", interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 self._run(spec)
         self.assertEqual(self.server.prompt_count, 1)
@@ -1661,8 +1739,14 @@ class TestRunReal(PiDesktopCase):
         """heartbeat 失败 → 不写 session 事件（证明未闭环）。"""
         self.server.turn_status = "completed"
         _sync(self.server)
-        spec, run_dir = self._base(request_id="nonexistent-request")
-        rc = self._run(spec)
+        spec, run_dir = self._base()
+        with mock.patch.object(
+            pi_desktop_worker, "_heartbeat",
+            side_effect=util.KanpilotError(
+                "remote_unavailable", "test heartbeat failure"
+            ),
+        ):
+            rc = self._run(spec)
         self.assertEqual(rc, 1)
         job = self.read_job(run_dir)
         self.assertIn("heartbeat_failed", job["detail"])

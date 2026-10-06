@@ -40,6 +40,26 @@ enum BoardColumn: String, CaseIterable, Identifiable {
     }
 }
 
+/// 视图呈现模式（T2，ui-spec §4.13）：看板 / 紧凑列表。
+enum BoardDisplayMode: String, CaseIterable, Identifiable {
+    case board = "board"
+    case compactList = "list"
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .board: return "看板"
+        case .compactList: return "紧凑列表"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .board: return "square.grid.3x2"
+        case .compactList: return "list.bullet"
+        }
+    }
+}
+
 // MARK: - 看板（§4.1 v2 + 批量整理优化 T1-T3）
 
 /// 任务节：六列等宽整高看板。列宽 ≥160pt，可用宽度 <1044pt 整板横滚；
@@ -53,7 +73,8 @@ struct BoardView: View {
     @State private var search = ""
     @State private var columnFilter: BoardColumn?
     @State private var detailItem: TaskSheetItem?
-
+    @State private var displayMode: BoardDisplayMode = .board
+    @State private var userSelectedMode: Bool = false
     // 批量整理状态 (T2)
     @State private var isBatchMode = false
     @State private var selectedTaskIDs: Set<String> = []
@@ -170,6 +191,21 @@ struct BoardView: View {
                     .accessibilityLabel("规划")
                     .disabled(!model.coreFound)
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Picker("视图模式", selection: Binding(
+                        get: { displayMode },
+                        set: { newMode in
+                            userSelectedMode = true
+                            displayMode = newMode
+                        }
+                    )) {
+                        ForEach(BoardDisplayMode.allCases) { mode in
+                            Label(mode.label, systemImage: mode.icon).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityLabel("视图模式切换")
+                }
 
                 ToolbarItem(placement: .primaryAction) {
                     filterMenu
@@ -219,78 +255,108 @@ struct BoardView: View {
 
     // MARK: 六列整板
 
+    private var tasksByColumnMap: [BoardColumn: [TaskSummary]] {
+        var map: [BoardColumn: [TaskSummary]] = [:]
+        for col in BoardColumn.allCases {
+            map[col] = tasks(in: col)
+        }
+        return map
+    }
+
     private var board: some View {
         GeometryReader { geo in
-            let width = max(Self.columnWidth,
-                            (geo.size.width - 2 * Self.boardMargin
-                             - 5 * Self.columnSpacing) / 6)
-            ScrollView(.horizontal, showsIndicators: true) {
-                HStack(alignment: .top, spacing: Self.columnSpacing) {
-                    ForEach(BoardColumn.allCases) { column in
-                        BoardColumnView(
-                            column: column,
-                            tasks: tasks(in: column),
-                            filtering: filtering,
-                            focused: $focusedTaskID,
-                            isBatchMode: isBatchMode,
-                            selectedTaskIDs: $selectedTaskIDs,
-                            onOpen: openDetail,
-                            onOpenSession: openSession,
-                            onToggleSelect: toggleSelection
-                        )
-                        .frame(width: width,
-                               height: max(0, geo.size.height - 2 * Self.boardMargin))
-                    }
-                }
-                .padding(Self.boardMargin)
-                // 键盘入口放在 ScrollView 内容层：持焦视图自身就是处理者时，
-                // ←/→ 才会先走看板导航而不是被横向 ScrollView 当滚动键吃掉。
-                .focusable()
-                .focused($boardFocused)
-                // 容器获焦只作为键盘导航入口；关闭系统默认高亮（整板蓝框），
-                // 卡片焦点可见性由 2pt 描边承担。
-                .focusEffectDisabled()
-                .onKeyPress(.upArrow) { moveRow(-1); return .handled }
-                .onKeyPress(.downArrow) { moveRow(1); return .handled }
-                .onKeyPress(.leftArrow) { moveColumn(-1); return .handled }
-                .onKeyPress(.rightArrow) { moveColumn(1); return .handled }
-                .onKeyPress(.return) {
-                    if detailItem == nil, let id = focusedTaskID {
-                        let task = model.tasks.first { $0.taskId == id }
-                        detailItem = TaskSheetItem(
-                            id: id, startTab: Self.startTab(for: task))
-                    }
-                    return .handled
-                }
-                .onKeyPress(.space) {
-                    if isBatchMode, let id = focusedTaskID {
-                        toggleSelection(id)
-                        return .handled
-                    }
-                    return .ignored
-                }
-                .onKeyPress(.escape) {
-                    if isBatchMode {
-                        exitBatchMode()
-                        return .handled
-                    }
-                    return .ignored
-                }
-                .onKeyPress { press in
-                    if isBatchMode && press.modifiers.contains(.command) && press.characters == "a" {
-                        selectAllFiltered()
-                        return .handled
-                    }
-                    return .ignored
-                }
+            let effectiveMode: BoardDisplayMode = {
+                if userSelectedMode { return displayMode }
+                return geo.size.width < 840 ? .compactList : displayMode
+            }()
+
+            if effectiveMode == .compactList {
+                TaskCompactListView(
+                    tasksByColumn: tasksByColumnMap,
+                    filtering: filtering,
+                    focused: $focusedTaskID,
+                    isBatchMode: isBatchMode,
+                    selectedTaskIDs: $selectedTaskIDs,
+                    onOpen: openDetail,
+                    onOpenSession: openSession,
+                    onToggleSelect: toggleSelection
+                )
+            } else {
+                boardGrid(geo: geo)
             }
-            .focusEffectDisabled()
         }
         .onTapGesture { boardFocused = true }
         // ScrollView 自身的手势会吃掉普通 tap，补一条并行手势保证点看板也能拿到键入口。
         .simultaneousGesture(TapGesture().onEnded { boardFocused = true })
         // 进入看板即接管键盘入口：无焦点时方向键会落到首卡（seedFocus）。
         .onAppear { boardFocused = true }
+    }
+
+    private func boardGrid(geo: GeometryProxy) -> some View {
+        let width = max(Self.columnWidth,
+                        (geo.size.width - 2 * Self.boardMargin
+                         - 5 * Self.columnSpacing) / 6)
+        return ScrollView(.horizontal, showsIndicators: true) {
+            HStack(alignment: .top, spacing: Self.columnSpacing) {
+                ForEach(BoardColumn.allCases) { column in
+                    BoardColumnView(
+                        column: column,
+                        tasks: tasks(in: column),
+                        filtering: filtering,
+                        focused: $focusedTaskID,
+                        isBatchMode: isBatchMode,
+                        selectedTaskIDs: $selectedTaskIDs,
+                        onOpen: openDetail,
+                        onOpenSession: openSession,
+                        onToggleSelect: toggleSelection
+                    )
+                    .frame(width: width,
+                           height: max(0, geo.size.height - 2 * Self.boardMargin))
+                }
+            }
+            .padding(Self.boardMargin)
+            // 键盘入口放在 ScrollView 内容层：持焦视图自身就是处理者时，
+            // ←/→ 才会先走看板导航而不是被横向 ScrollView 当滚动键吃掉。
+            .focusable()
+            .focused($boardFocused)
+            // 容器获焦只作为键盘导航入口；关闭系统默认高亮（整板蓝框），
+            // 卡片焦点可见性由 2pt 描边承担。
+            .focusEffectDisabled()
+            .onKeyPress(.upArrow) { moveRow(-1); return .handled }
+            .onKeyPress(.downArrow) { moveRow(1); return .handled }
+            .onKeyPress(.leftArrow) { moveColumn(-1); return .handled }
+            .onKeyPress(.rightArrow) { moveColumn(1); return .handled }
+            .onKeyPress(.return) {
+                if detailItem == nil, let id = focusedTaskID {
+                    let task = model.tasks.first { $0.taskId == id }
+                    detailItem = TaskSheetItem(
+                        id: id, startTab: Self.startTab(for: task))
+                }
+                return .handled
+            }
+            .onKeyPress(.space) {
+                if isBatchMode, let id = focusedTaskID {
+                    toggleSelection(id)
+                    return .handled
+                }
+                return .ignored
+            }
+            .onKeyPress(.escape) {
+                if isBatchMode {
+                    exitBatchMode()
+                    return .handled
+                }
+                return .ignored
+            }
+            .onKeyPress { press in
+                if isBatchMode && press.modifiers.contains(.command) && press.characters == "a" {
+                    selectAllFiltered()
+                    return .handled
+                }
+                return .ignored
+            }
+        }
+        .focusEffectDisabled()
     }
 
     // MARK: 阶段筛选菜单（§4.1 过滤）
@@ -1203,180 +1269,18 @@ struct BatchReportSheet: View {
 
 struct TaskDetailSheet: View {
     let item: TaskSheetItem
-    @EnvironmentObject private var model: AppViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var tab: TaskDetailTab = .overview
-    @State private var detail: TaskDetail?
-    @State private var events: [EventItem] = []
-    @State private var loading = true
-    @State private var error: String?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                header
-                Divider()
-                content
-            }
+            TaskDetailContentView(
+                taskID: item.id,
+                initialTab: item.startTab,
+                showsHeader: true,
+                onDismiss: { dismiss() }
+            )
             .frame(minWidth: 720, idealWidth: 840, minHeight: 520, idealHeight: 640)
-            .background(Color.kpWindow)
-            // §4.1：键盘左右键切换分段（焦点与 VoiceOver 读出页名）。
-            .focusable()
-            .focusEffectDisabled()
-            .onKeyPress(.leftArrow) { move(-1); return .handled }
-            .onKeyPress(.rightArrow) { move(1); return .handled }
         }
-        .task {
-            tab = item.startTab
-            await load()
-        }
-        .onChange(of: model.lastRefreshAt) {
-            Task { await load() }
-        }
-    }
-
-    /// ←/→ 循环切换分段（页名经 Picker 标签读出）。
-    private func move(_ delta: Int) {
-        let all = TaskDetailTab.allCases
-        guard let index = all.firstIndex(of: tab) else { return }
-        let next = (index + delta + all.count) % all.count
-        tab = all[next]
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch tab {
-        case .overview:
-            Group {
-                if let detail {
-                    TaskDetailView(detail: detail, events: events,
-                                   showsHistory: false)
-                } else if loading {
-                    LoadingView()
-                } else {
-                    ContentUnavailableView {
-                        Label("读取失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text(error ?? "")
-                    } actions: {
-                        Button("重试") { Task { await load() } }
-                    }
-                }
-            }
-        case .plan:
-            // §4.8 计划阅读页：get-plan 核验正文（内部自管加载/空态/错误）。
-            PlanReaderView(taskID: item.id, detail: detail)
-        case .execution:
-            // §4.1 执行页：轮次字段 + 会话阅读器（无会话由阅读器显示空态）。
-            VStack(spacing: 0) {
-                if let detail, hasRoundFields(detail) {
-                    roundFields(detail)
-                    Divider()
-                }
-                SessionReaderView(taskID: item.id,
-                                  preferredRunID: detail?.runId)
-            }
-        case .review:
-            if let detail {
-                TaskReviewTabView(detail: detail)
-            } else if loading {
-                LoadingView()
-            } else {
-                ContentUnavailableView {
-                    Label("读取失败", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error ?? "")
-                } actions: {
-                    Button("重试") { Task { await load() } }
-                }
-            }
-        case .log:
-            if let detail {
-                TaskLogTabView(detail: detail, events: events)
-            } else if loading {
-                LoadingView()
-            } else {
-                ContentUnavailableView {
-                    Label("读取失败", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error ?? "")
-                } actions: {
-                    Button("重试") { Task { await load() } }
-                }
-            }
-        }
-    }
-
-    /// §4.1 执行页头部轮次字段（run_id/session_id/session_title/
-    /// session_marker/worktree_path）。
-    private func hasRoundFields(_ detail: TaskDetail) -> Bool {
-        detail.runId != nil || detail.sessionId != nil
-            || detail.sessionTitle != nil || detail.sessionMarker != nil
-            || detail.executionRound?.worktreePath != nil
-    }
-
-    @ViewBuilder
-    private func roundFields(_ detail: TaskDetail) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Spacing.m) {
-                if let runId = detail.runId {
-                    Text("run_id \(runId)")
-                }
-                if let sessionId = detail.sessionId {
-                    Text("session_id \(sessionId)")
-                        .lineLimit(1)
-                }
-                if let title = detail.sessionTitle {
-                    Text(title).lineLimit(1)
-                }
-                if let marker = detail.sessionMarker {
-                    Text(marker).lineLimit(1)
-                }
-                if let worktree = detail.executionRound?.worktreePath {
-                    Text(worktree)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .font(.kpSmall)
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
-        }
-    }
-
-    private func load() async {
-        // 已有详情时静默重载，避免动作后闪烁；数据保留（§6 不清空旧数据）。
-        if detail == nil { loading = true }
-        error = nil
-        defer { loading = false }
-        do {
-            let (task, evs) = try await model.fetchDetail(taskID: item.id)
-            detail = task
-            events = evs
-        } catch {
-            self.error = error.coreMessage
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: Spacing.m) {
-            Picker("查看", selection: $tab) {
-                ForEach(TaskDetailTab.allCases) { t in
-                    Text(t.title).tag(t)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 320)
-            .accessibilityLabel("详情分段：\(tab.title)")
-
-            Spacer()
-
-            Button("关闭") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-        }
-        .padding(Spacing.m)
     }
 }
 

@@ -260,3 +260,19 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 ### T3 Plus R1 补充（2026-09-26）
 
 本次无表结构或 schema 版本变化。pi_desktop 继续复用现有轮次、快照和 send_state。能力复核使用该轮 config_json；未知发送或停止未证实保留 unknown，不因配置切换重派。Plus 字符串消息 ID/修订仅用于事件与会话投影，不把它当 SQLite 行序或分页坐标。
+
+### T6 补充（2026-09-30）
+
+T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩展字段——`planner_config` 增 `backend` + `pi_desktop` 块，`exec_config` 增 `controller_backend`，`review_config` 增 `backend` + `pi_desktop` 块。缺字段一律按旧语义解释（`codex`/`pi`），**零迁移**。
+
+- `execution_rounds.config_json.backend` 仍只解释**任务执行**后端；控制端 `pi_desktop` 不得伪装成执行轮次进入轮次索引——控制轮以 `executor_runs[stage].invocation_id` 标识，产物落 `<APP_SUPPORT>/executor-sessions/<stage>/<invocation_id>/`。
+- 规划请求 `payload_json` 增 `planner_backend` 与 `runtime_config`（五字段**脱敏**快照，无 token）；旧请求缺字段按 `codex` 读，不受后来改设置影响。
+- `register-review` 的身份字段 `request_id`/`expected_execution_run_id` 只存在于请求 payload 与校验路径，不改表结构；`review_report_path` 仍由核心重算哈希。
+- 历史轮次、历史请求与既有 settings 一律按原语义读取；禁止为开发夹具重写历史或对正式库做迁移。
+
+### T1/T2 补充（2026-10-02 项目仓库配置与 UI 简化）
+
+本次无表结构或 schema 版本变化（保持 v5）：
+- **settings.project_mappings**：保存项目与本地仓库映射 `{version: 1, revision: <int>, workspace_id: "<id>", items: {<project_id>: {project_name, repository, enabled, updated_at}}}`。
+- **快照固化**：`planner_inputs.manifest.task` 与 `requests.payload_json.project_snapshot` 固化 `project_id`, `project_name`, `repository`, `project_mapping_revision`，保证派发和执行对后续设置修改具备不可变性隔离。
+- **计划与运行记录路径**：新计划文件写入 `<plan_root>/projects/<project_id>/`；默认运行记录根动态解析 `constants.app_support()/"runs"`。

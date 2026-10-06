@@ -9,7 +9,7 @@ from typing import Optional
 
 from . import (
     cmd_read, constants, core, db, derive, dispatch_validate, exec_config,
-    planfile, remote, round_store, util,
+    planfile, remote, round_store, runtime_operations, util,
 )
 
 
@@ -22,7 +22,7 @@ def planner_input_dir(conn, input_id: str) -> Path:
 
 
 def _select_candidate(
-    conn: sqlite3.Connection, stage: str, request_id: Optional[str], now
+    conn: sqlite3.Connection, stage: str, request_id: Optional[str], now, authorized_task_id=None
 ) -> Optional[sqlite3.Row]:
     if request_id:
         row = db.get_request(conn, request_id)
@@ -30,6 +30,8 @@ def _select_candidate(
             raise util.KanpilotError(
                 "not_found", f"request not found: {request_id}"
             )
+        if authorized_task_id and row["task_id"] != authorized_task_id:
+            raise util.KanpilotError("forbidden", "request is outside the authorized task")
         if row["stage"] != stage:
             raise util.KanpilotError(
                 "bad_request",
@@ -46,10 +48,11 @@ def _select_candidate(
         "LEFT JOIN tasks t ON t.task_id = r.task_id "
         "WHERE r.stage=? AND r.status='queued' "
         "AND (r.not_before IS NULL OR r.not_before <= ?) "
+        "AND (? IS NULL OR r.task_id=?) "
         "AND (r.task_id IS NULL OR (t.save_state='active' "
         "AND t.auto_advance_paused=0)) "
         "ORDER BY r.priority ASC, r.created_at ASC LIMIT 20",
-        (stage, util.to_iso(now)),
+        (stage, util.to_iso(now), authorized_task_id, authorized_task_id),
     ).fetchall()
     for row in rows:
         # v2 §5.22.2：未授权（payload 无 manual_authorized）的 plan 请求
@@ -104,8 +107,10 @@ def _claim_row(
     return run_id
 
 
-def cmd_claim(ctx, payload: dict) -> dict:
+def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Optional[str] = None) -> dict:
     conn, now = ctx.conn, ctx.now
+    scope_id = scope_id or payload.get("scope_id")
+    operation_id = operation_id or payload.get("operation_id")
     stage, executor = payload["stage"], payload["executor"]
     if stage not in constants.STAGES:
         raise util.KanpilotError("bad_request", f"invalid stage {stage}")
@@ -115,10 +120,14 @@ def cmd_claim(ctx, payload: dict) -> dict:
 
     dispatch_candidate = None
     with db.write_txn(conn):
+        if scope_id and operation_id:
+            cached = runtime_operations.claim_gate(conn, scope_id, operation_id, payload)
+            if cached is not None:
+                return cached
         cmd_read.tick_inline(conn, now)
         if db.paused(conn, stage):
             return {"claimed": False, "reason": "paused"}
-        request = _select_candidate(conn, stage, payload.get("request_id"), now)
+        request = _select_candidate(conn, stage, payload.get("request_id"), now, payload.get("authorized_task_id"))
         # 定点领取：请求已在途 → already_claimed（先于 stage_busy/empty）。
         if request is not None and request["status"] == "claimed":
             return {
@@ -213,13 +222,25 @@ def cmd_claim(ctx, payload: dict) -> dict:
                     detail={"via": "claim"},
                 )
                 task = db.require_task(conn, task["task_id"])
-                # v2 §5.22.3：规划轮次登记索引（backend=codex，供会话/
-                # 运行记录与日志路径使用），材料目录写入 context。
+                # v2 §5.22.3 + v4 §5.24.3：规划轮次登记索引（供会话/运行记录与
+                # 日志路径使用）。backend 按请求固化的 planner_backend 写（缺省
+                # codex，旧请求零迁移）；快照取该分支真值——codex 为
+                # model_config，Plus 为 runtime_config（脱敏，无 token）。
+                # claim 时即写对，避免 Plus 轮次在 runner 刷新前、或早期失败时
+                # 谎称 codex（轮次元数据是执行证据的一部分）。
+                plan_payload = context["payload"]
+                plan_backend = plan_payload.get("planner_backend")
+                if plan_backend not in constants.PLANNER_BACKENDS:
+                    plan_backend = constants.PLANNER_BACKEND
+                plan_snapshot = (
+                    plan_payload.get("model_config")
+                    if plan_backend == "codex"
+                    else plan_payload.get("runtime_config")
+                )
                 round_store.upsert_on_claim(
                     conn, task["task_id"], run_id,
-                    {"backend": "codex",
-                     "planner": context["payload"].get("model_config")},
-                    util.to_iso(now), backend="codex",
+                    {"backend": plan_backend, "planner": plan_snapshot},
+                    util.to_iso(now), backend=plan_backend,
                 )
                 input_id = context["payload"].get("input_id")
                 context["input_id"] = input_id
@@ -229,11 +250,19 @@ def cmd_claim(ctx, payload: dict) -> dict:
             if task is not None:
                 context["task_id"] = task["task_id"]
                 context["task"] = derive.task_summary(conn, task, now)
-            return {
+            res = {
                 "claimed": True, "request_id": request["request_id"],
                 "run_id": run_id, "context": context,
             }
-
+            if scope_id and operation_id:
+                runtime_operations.complete_operation(
+                    conn,
+                    scope_id=scope_id,
+                    operation_id=operation_id,
+                    status="accepted",
+                    result=res,
+                )
+            return res
     # ---- dispatch: validate outside the write txn, then re-claim ----------
     request_id, task_id = dispatch_candidate
     request = db.get_request(conn, request_id)
@@ -261,6 +290,10 @@ def cmd_claim(ctx, payload: dict) -> dict:
         )
 
     with db.write_txn(conn):
+        if scope_id and operation_id:
+            cached = runtime_operations.claim_gate(conn, scope_id, operation_id, payload)
+            if cached is not None:
+                return cached
         request = db.get_request(conn, request_id)
         task = db.require_task(conn, task_id)
         # §4.2-4：并发竞争失败（校验期间被他方领取）→ already_claimed；
@@ -363,10 +396,44 @@ def cmd_claim(ctx, payload: dict) -> dict:
             "backend": backend,
             "exec_config": config_snapshot,
         }
-        return {
+        res = {
             "claimed": True, "request_id": request_id,
             "run_id": run_id, "context": context,
         }
+        if scope_id and operation_id:
+            runtime_operations.complete_operation(
+                conn,
+                scope_id=scope_id,
+                operation_id=operation_id,
+                status="accepted",
+                result=res,
+            )
+        return res
+
+
+def cmd_mcp_claim(ctx, payload: dict) -> dict:
+    """Atomic claim + runtime receipt write in a single core transaction."""
+    scope_id = payload.get("scope_id")
+    operation_id = payload.get("operation_id")
+    if not scope_id or not operation_id:
+        raise util.bad_request("mcp-claim requires scope_id and operation_id")
+
+    if payload.get("stage") not in ("dispatch", "monitor"):
+        raise util.bad_request("mcp-claim only supports dispatch/monitor")
+    if payload.get("executor") != "kaneo-" + payload["stage"]:
+        raise util.bad_request("executor does not match stage")
+    result = cmd_claim(ctx, payload, scope_id=scope_id, operation_id=operation_id)
+    # Successful claims wrote the receipt with the same transaction.
+    # Store no-work results too, so lost replies never select another request.
+    if not result.get("claimed"):
+        with db.write_txn(ctx.conn):
+            op = runtime_operations.begin_operation(
+                ctx.conn, scope_id, operation_id, "core", "kp_task_claim", payload)
+            if op["status"] == "accepted":
+                return op["result"]
+            runtime_operations.complete_operation(
+                ctx.conn, scope_id, operation_id, result=result)
+    return result
 
 
 def _claimed_request(conn, request_id: str, run_id: str) -> sqlite3.Row:
@@ -535,6 +602,15 @@ def cmd_report(ctx, payload: dict) -> dict:
         }
 
 
+def _publish_expected_model(req_payload: dict) -> Optional[dict]:
+    """publish-plan 的模型快照（§5.22.6 codex / §5.24.3 Plus）。
+
+    实现下沉到 ``planfile.expected_model_snapshot``——规划 runner 写 frontmatter
+    与本处校验必须同一口径，否则 Plus 计划会被两边互相拒收。
+    """
+    return planfile.expected_model_snapshot(req_payload)
+
+
 def cmd_publish_plan(ctx, payload: dict) -> dict:
     """v2（protocol §5.6）：事务内复核 —— 任务活跃、请求为本任务当前
     claimed 规划请求且 run_id/租约/planner_input_sha256 一致；同一事务登记
@@ -621,10 +697,22 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         meta, raw, path = planfile.load_plan(
             payload["plan_path"], task["task_id"]
         )
-        # §5.22.6：frontmatter 的 planner_model/reasoning_effort 须匹配本
-        # 请求登记的 model_config 快照；缺快照的旧请求回落历史常量规则。
+        # §5.22.6 + §5.24.3 + T1：frontmatter 的 planner_model/reasoning_effort 必须
+        # 匹配本请求固化的运行快照；项目与仓库必须匹配固化的 project_snapshot。
+        req_project_snapshot = req_payload.get("project_snapshot")
+        manifest_task = (req_payload.get("manifest") or {}).get("task") or {}
+        task_dict = dict(task)
+        expected_project = req_project_snapshot or (
+            {
+                "project_id": manifest_task.get("project_id") or task_dict.get("project_id"),
+                "project_name": manifest_task.get("project_name") or task_dict.get("project_name"),
+                "repository": manifest_task.get("repository") or task_dict.get("repository"),
+            } if (manifest_task.get("project_id") or task_dict.get("project_id")) else None
+        )
         planfile.check_plan_meta(
-            meta, plan_kind, expected_model=req_payload.get("model_config")
+            meta, plan_kind,
+            expected_model=_publish_expected_model(req_payload),
+            expected_project=expected_project,
         )
         if meta.get("plan_kind") not in (None, plan_kind):
             raise util.KanpilotError(
@@ -738,6 +826,9 @@ def cmd_register_review(ctx, payload: dict) -> dict:
         )
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        # v4（§5.24.5）：新自动链路必须带 request_id/run_id/expected_execution_run_id；
+        # 无身份的旧手动调用保持兼容（guard 直接返回 None）。
+        core.require_review_identity(conn, payload, task, now)
         report = util.inside(
             Path(payload["report_path"]),
             constants.review_reports_root(),

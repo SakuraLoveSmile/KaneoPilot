@@ -26,7 +26,9 @@ struct PlanningView: View {
     // §4.7 T2：规划方式（builtin/spec_plan），对本批次勾选任务生效。
     @State private var plannerMethod = "builtin"
     @State private var methodSeeded = false
-
+    // 映射配置 sheet 状态 (T1)
+    @State private var mappingTargetProjectId: String? = nil
+    @State private var showMappingSheet = false
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -45,33 +47,88 @@ struct PlanningView: View {
         }
         .frame(minWidth: 720, minHeight: 560)
         .task {
-            // 读规划配置（default_method 预选）+ 能力（planner_methods 可用性）。
+            // 读规划配置（运行端 + default_method 预选）+ 能力（planner_methods）。
             await model.refreshPlannerConfig()
             if !methodSeeded {
                 plannerMethod = model.plannerConfig?.effectiveDefaultMethod
                     ?? "builtin"
                 methodSeeded = true
             }
+            clampMethodToBackend()
             await fetchTodos(auto: true)
+        }
+        .onChange(of: batchBackend) { _, _ in clampMethodToBackend() }
+        .sheet(isPresented: $showMappingSheet) {
+            ProjectMappingsView(targetProjectId: mappingTargetProjectId) {
+                showMappingSheet = false
+                Task { await fetchTodos(auto: true) }
+            }
         }
     }
 
-    /// v2.1 §5.22.6：当前生效规划配置摘要（standard + review_fix 各一段），
+    // MARK: §5.24.3 本批次运行端与方式
+
+    /// 本批次规划请求的运行端（已保存 planner_config；缺省 codex）。
+    private var batchBackend: String {
+        model.plannerConfig?.config?.effectiveBackend ?? "codex"
+    }
+
+    private var plusSelected: Bool { batchBackend == "pi_desktop" }
+
+    /// 生效方式：Plus 运行端只支持内置规划（spec_plan 是 Codex 插件运行方式）。
+    private var effectiveMethod: String {
+        plusSelected ? "builtin" : plannerMethod
+    }
+
+    private var methodLabel: String {
+        effectiveMethod == "spec_plan" ? "Spec Planner 插件" : "内置规划"
+    }
+
+    /// 普通规划型号与思考等级（按运行端取对应快照，不用草稿）。
+    private var batchModelSummary: String {
+        if plusSelected {
+            let plus = model.plannerConfig?.config?.piDesktop
+            let provider = plus?.providerId ?? "未保存"
+            let modelID = plus?.modelId ?? "未保存"
+            let level = plus?.thinkingLevel ?? "未保存"
+            return "\(provider)/\(modelID) · thinking \(level)（权限 ask）"
+        }
+        let standard = model.plannerEffective("standard")
+        return "\(standard?.plannerModel ?? "未保存") · 思考 "
+            + "\(standard?.reasoningEffort ?? "未保存")"
+    }
+
+    /// 评审修复规划型号（属 Codex 规划分支）。
+    private var fixModelSummary: String {
+        let fix = model.plannerEffective("review_fix")
+        return "\(fix?.plannerModel ?? "未保存") · 思考 "
+            + "\(fix?.reasoningEffort ?? "未保存")"
+    }
+
+    /// 切到 Plus 后收敛方式选择（配置里的旧 spec_plan 预选不生效）。
+    private func clampMethodToBackend() {
+        if plusSelected && plannerMethod == "spec_plan" {
+            plannerMethod = "builtin"
+        }
+    }
+
+    /// v2.1 §5.22.6 / v4 §5.24.3：当前生效规划配置摘要（运行端 + 方式 + 型号）。
     /// 11pt secondary；数据用 AppViewModel 缓存的 get-planner-config。
     @ViewBuilder
     private var plannerConfigSummary: some View {
-        if let standard = model.plannerEffective("standard"),
-           let fix = model.plannerEffective("review_fix") {
-            Text("模型 \(standard.plannerModel) · 思考 \(standard.reasoningEffort)"
-                 + "　评审修复 \(fix.plannerModel) · \(fix.reasoningEffort)")
-                .font(.kpSmall)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.horizontal, Spacing.l)
-                .padding(.vertical, Spacing.s)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("运行端 \(RoleBackend.shortLabel(batchBackend))　方式 \(methodLabel)")
+            Text(plusSelected
+                 ? "Plus 型号 \(batchModelSummary)"
+                 : "普通规划 \(batchModelSummary)　评审修复 \(fixModelSummary)")
         }
+        .font(.kpSmall)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.s)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: 头部：步骤指示 + 关闭
@@ -186,8 +243,24 @@ struct PlanningView: View {
                 BannerView(banner: .failure(fetchError), stale: !todos.isEmpty) {
                     Task { await fetchTodos(auto: false) }
                 }
+            } else if hasUnmappedTodos {
+                HStack(spacing: Spacing.m) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("存在未关联有效本地仓库的项目，请配置仓库后再进行规划。")
+                        .font(.kpBody)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("配置仓库") {
+                        mappingTargetProjectId = nil
+                        showMappingSheet = true
+                    }
+                }
+                .padding(.horizontal, Spacing.l)
+                .padding(.vertical, Spacing.s)
+                .background(Color.orange.opacity(0.12))
+                .overlay(alignment: .bottom) { Divider() }
             }
-
             List {
                 queuedPlanSection
                 Section(header: Text("Kaneo To Do").font(.kpSmall)) {
@@ -196,9 +269,15 @@ struct PlanningView: View {
                             .font(.kpSmall).foregroundStyle(.secondary)
                     }
                     ForEach(todos) { item in
-                        TodoRow(item: item,
-                                isChecked: checked.contains(item.taskId),
-                                onToggle: { toggle($0) })
+                        TodoRow(
+                            item: item,
+                            isChecked: checked.contains(item.taskId),
+                            onToggle: { toggle($0) },
+                            onConfigureMapping: { pid in
+                                mappingTargetProjectId = pid
+                                showMappingSheet = true
+                            }
+                        )
                     }
                 }
             }
@@ -263,6 +342,9 @@ struct PlanningView: View {
     private var checkedTasks: [TodoItem] {
         todos.filter { checked.contains($0.taskId) }
     }
+    private var hasUnmappedTodos: Bool {
+        todos.contains { $0.mappingState != nil && $0.mappingState != "ready" }
+    }
 
     private func fetchTodos(auto: Bool) async {
         if fetchLoading { return }
@@ -292,37 +374,51 @@ struct PlanningView: View {
 
     // MARK: - ② 准备材料
 
-    /// §4.7 T2 规划方式：内置规划 / Spec Planner 插件（两项，默认预选
-    /// get-planner-config.default_method）；对本批次勾选任务生效——每项
-    /// start-plans 带 planner_method。
+    /// §4.7 T2 / v4 §5.24.3 规划方式与运行端：内置规划 / Spec Planner 插件
+    /// （默认预选 get-planner-config.default_method）；Plus 运行端只支持内置规划。
+    /// 对本批次勾选任务生效——每项 start-plans 带 planner_method + planner_backend。
     @ViewBuilder
     private var plannerMethodSection: some View {
         let spec = model.plannerCapabilities?.specPlanMethod
-        Section("规划方式") {
+        Section("运行端与规划方式") {
+            FieldRow("规划运行端", RoleBackend.label(batchBackend))
+            FieldRow("型号", batchModelSummary)
             Picker("规划方式", selection: $plannerMethod) {
                 Text("内置规划").tag("builtin")
                 Text("Spec Planner 插件").tag("spec_plan")
-                    .disabled(spec?.available == false)
+                    .disabled(plusSelected || spec?.available == false)
             }
             .pickerStyle(.menu)
             .accessibilityLabel("规划方式")
-            // 能力不可用原因（未选中也展示）；旧核心未上报 → 能力未知说明。
-            if spec?.available == false, let reason = spec?.reason {
+            .help(plusSelected
+                  ? "Plus 运行端按内置规划提交"
+                  : "本批次提交时固化所选方式")
+            if plusSelected {
+                Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
+                     + "不会在 Plus 下运行。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if spec?.available == false, let reason = spec?.reason {
+                // 能力不可用原因（未选中也展示）；旧核心未上报 → 能力未知说明。
                 Text("Spec Planner 插件不可用：\(reason)")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if plannerMethod == "spec_plan" && spec == nil {
                 Text("planner_methods 能力未知（核心未上报）；"
                      + "排队时将按所选方式提交，核心核验失败会明确报错。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             // §4.7 冻结边界说明（spec_plan 选中时展示）。
-            if plannerMethod == "spec_plan" {
+            if effectiveMethod == "spec_plan" {
                 Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
                      + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
                     .font(.kpSmall)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -444,9 +540,10 @@ struct PlanningView: View {
     private var startStep: some View {
         List {
             Section(header: Text("待提交").font(.kpSmall)) {
-                // §4.7 T2：提交前在汇总区明示所选规划方式。
-                FieldRow("规划方式", plannerMethod == "spec_plan"
-                         ? "Spec Planner 插件" : "内置规划")
+                // §4.10：提交前明示本次请求的运行端、型号与方式。
+                FieldRow("规划运行端", RoleBackend.label(batchBackend))
+                FieldRow("型号", batchModelSummary)
+                FieldRow("规划方式", methodLabel)
                 ForEach(startableTasks) { item in
                     HStack(spacing: Spacing.m) {
                         Image(systemName: "checkmark.circle")
@@ -561,9 +658,11 @@ struct PlanningView: View {
             guard let response = preparations[item.taskId]?.response,
                   let inputID = response.inputId,
                   let sha = response.inputSha256 else { return nil }
-            // v3 §5.23.2：每项携带本批次所选规划方式（builtin/spec_plan）。
+            // v3 §5.23.2 + v4 §5.24.3：每项总是提交明确的运行端与方式；
+            // Plus 运行端只允许内置规划。
             return ["input_id": inputID, "input_sha256": sha,
-                    "planner_method": plannerMethod]
+                    "planner_method": effectiveMethod,
+                    "planner_backend": batchBackend]
         }
         guard !items.isEmpty else { return }
         do {
@@ -586,6 +685,11 @@ private struct TodoRow: View {
     let item: TodoItem
     let isChecked: Bool
     let onToggle: (TodoItem) -> Void
+    var onConfigureMapping: ((String?) -> Void)? = nil
+
+    private var isUnmapped: Bool {
+        item.mappingState != nil && item.mappingState != "ready"
+    }
 
     var body: some View {
         HStack(spacing: Spacing.m) {
@@ -626,10 +730,18 @@ private struct TodoRow: View {
                 if !item.isSelectable, let reason = item.blockedReason {
                     Text(reason)
                         .font(.kpSmall)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(isUnmapped ? .red : .orange)
                 }
             }
             Spacer(minLength: 0)
+            if isUnmapped || (!item.isSelectable && item.projectId != nil) {
+                Button("配置仓库") {
+                    onConfigureMapping?(item.projectId)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .font(.kpSmall)
+            }
         }
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)

@@ -1,4 +1,4 @@
-"""角色化配置 + Review 环境（protocol §5.23.3/§5.23.4，v3，子任务 C）。
+"""角色化配置 + Review 环境（protocol §5.23.3/§5.23.4 v3 + §5.24.1/§5.24.2 v4）。
 
 覆盖：
 - get/set-review-config：未保存 → config=null/defaults mode=inherit；
@@ -9,9 +9,13 @@
 - exec_config backend 扩展：旧四字段配置 load 得 backend="pi"；
   set backend=pi_desktop 无 pi_desktop 块 → bad_request；permission_mode
   缺省/inherit → bad_request；两分支共存互不清字段；snapshot 双分支
-  形状正确。
+  形状正确；v4 另加 controller_backend（缺省 pi，与任务执行 backend 并存）。
 - check_available：backend=pi_desktop 且 pi_desktop_backend 模块缺失
   → (False, 中文原因)，不回落 pi。
+- v4 Review 后端：旧配置按 backend=pi 读；Plus 分支要求五字段且
+  permission_mode 必须 ask；mode 仅对 pi 生效；两分支共存；服务离线可保存；
+  review-capabilities 只读形状（pi/pi_desktop 两分支，工具门
+  PI_DESKTOP_PLAN_TOOLS）。
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ import unittest.mock
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
-    cli, cmd_config, db, exec_config, executor_runner, review_config, util,
+    cli, cmd_config, constants, db, exec_config, executor_runner,
+    review_config, util,
 )
 
 DEFAULTS = {
@@ -34,25 +39,37 @@ DEFAULTS = {
     "agent_preset": "default",
 }
 PI_DESKTOP_BLOCK = {
+    "model_source": "custom",
     "connection_file": "/tmp/pi-desktop/mcp-control.json",
     "provider_id": "closeai",
     "model_id": "deepseek-flash",
     "thinking_level": "high",
     "permission_mode": "auto",
 }
+PI_DESKTOP_SNAPSHOT = {
+    k: PI_DESKTOP_BLOCK[k] for k in constants.EXEC_PI_DESKTOP_KEYS
+}
 # 与本文件报告给主 agent 的 cli.py 注册条目一致（主 agent 接入后
-# self.call 即走真实命令注册与 payload 校验）。
+# self.call 即走真实命令注册与 payload 校验）。v4 字段（backend/pi_desktop/
+# controller_backend 与 review-capabilities）在 Lead 落地 cli.py 前由本文件
+# 自行补登记（并集，幂等）。
 REVIEW_COMMANDS = {
     "get-review-config": ({}, cmd_config.cmd_get_review_config),
     "set-review-config": (
         {
-            "mode": (True, "str"),
+            "backend": (False, "str"),
+            "mode": (False, "str"),
             "provider": (False, "str"),
             "model": (False, "str"),
             "reasoning_effort": (False, "str"),
+            "pi_desktop": (False, "dict"),
         },
         cmd_config.cmd_set_review_config,
     ),
+    # v4（§5.24.2）：只读角色能力查询。
+    "review-capabilities": ({}, cmd_config.cmd_review_capabilities),
+    # v4（§5.24.1）：exec_config 增加控制器后端字段。
+    "set-exec-config": ({"controller_backend": (False, "str")}, None),
 }
 
 
@@ -61,12 +78,37 @@ class _ReviewCommandsCase(KanpilotTestCase):
 
     def setUp(self):
         super().setUp()
-        cli.COMMANDS.update(REVIEW_COMMANDS)
-        self.addCleanup(self._unregister_review)
+        saved = _install_commands(REVIEW_COMMANDS)
+        self.addCleanup(_restore_commands, saved)
 
-    def _unregister_review(self):
-        for name in REVIEW_COMMANDS:
+
+def _install_commands(entries):
+    """把 v4 新增命令/字段并进 cli.COMMANDS（并集；本文件声明的语义优先）。
+
+    cli.py 尚未注册时补登记，已注册时对字段做并集——两种状态都能跑，
+    Lead 落地后会自然切到真实 schema。返回可恢复的原文。
+    """
+    saved = {}
+    for name, (spec, fn) in entries.items():
+        current = cli.COMMANDS.get(name)
+        if current is None:
+            cli.COMMANDS[name] = (spec, fn)
+            saved[name] = None
+            continue
+        merged = dict(current[0])
+        merged.update(spec)
+        if merged != current[0]:
+            cli.COMMANDS[name] = (merged, current[1] or fn)
+            saved[name] = current
+    return saved
+
+
+def _restore_commands(saved):
+    for name, original in saved.items():
+        if original is None:
             cli.COMMANDS.pop(name, None)
+        else:
+            cli.COMMANDS[name] = original
 
 
 class ReviewConfigCommands(_ReviewCommandsCase):
@@ -150,8 +192,9 @@ class ReviewConfigCommands(_ReviewCommandsCase):
         hits = [e for e in events if e["kind"] == "review_config_updated"]
         self.assertEqual(len(hits), 1)
         detail = hits[0]["detail"]
+        # v4：detail 快照含生效后端（pi 分支 = mode + 三字段）。
         self.assertEqual(detail, {
-            "mode": "custom", "provider": "CloseAI",
+            "backend": "pi", "mode": "custom", "provider": "CloseAI",
             "model": "deepseek-flash", "reasoning_effort": "low",
         })
         blob = json.dumps(hits[0], ensure_ascii=False) + json.dumps(
@@ -207,7 +250,7 @@ class ReviewConfigCommands(_ReviewCommandsCase):
             conn.close()
         review = runs["review"]["review_config"]
         self.assertEqual(review, {
-            "mode": "custom", "provider": "CloseAI",
+            "backend": "pi", "mode": "custom", "provider": "CloseAI",
             "model": "deepseek-flash", "reasoning_effort": "low",
         })
 
@@ -297,7 +340,7 @@ class ExecBackendConfig(_ReviewCommandsCase):
                 self.assertEqual(exc.code, "bad_request")
         # 也覆盖「块给全但 permission_mode 值非法」之外的单独提交：
         exc = self.call_err("set-exec-config", {
-            "pi_desktop": {"connection_file": "/tmp/x.json"},
+            "pi_desktop": {"connection_file": "/tmp/x.json", "permission_mode": "auto", "model_source": "custom"},
         })
         self.assertEqual(exc.code, "bad_request")
         self.assertIn("缺少必填字段", str(exc))
@@ -341,9 +384,30 @@ class ExecBackendConfig(_ReviewCommandsCase):
             snap = exec_config.snapshot(conn)
         finally:
             conn.close()
-        self.assertEqual(snap, {"backend": "pi_desktop", **PI_DESKTOP_BLOCK})
+        self.assertEqual(snap, {"backend": "pi_desktop", **PI_DESKTOP_SNAPSHOT})
         blob = json.dumps(snap, ensure_ascii=False)
         self.assertNotIn("token", blob.lower())
+
+    def test_inherit_snapshot_fails_when_plus_default_cannot_be_resolved(self):
+        block = {
+            "model_source": "inherit",
+            "connection_file": "/tmp/pi-desktop/mcp-control.json",
+            "permission_mode": "auto",
+        }
+        self.call("set-exec-config", {
+            "backend": "pi_desktop", "pi_desktop": block,
+        })
+        conn = db.connect(self.db_path)
+        try:
+            with unittest.mock.patch(
+                "kanpilot.pi_desktop_backend.resolve_plus_default",
+                return_value=(None, "Plus 离线"),
+            ):
+                with self.assertRaises(util.KanpilotError) as raised:
+                    exec_config.snapshot(conn)
+                self.assertIn("Plus 离线", raised.exception.message)
+        finally:
+            conn.close()
 
     def test_claim_freezes_pi_snapshot_with_backend(self):
         fixture = self.make_ready_task()
@@ -488,7 +552,7 @@ class ExecBackendConfig(_ReviewCommandsCase):
         finally:
             conn.close()
         self.assertFalse(available)
-        self.assertIn("pi_desktop", reason)
+        self.assertTrue("pi_desktop" in reason.lower() or "pi-desktop" in reason.lower())
         # 生效 backend 未被改动（不自动切回 pi）。
         conn = db.connect(self.db_path)
         try:
@@ -567,6 +631,367 @@ class ExecBackendConfig(_ReviewCommandsCase):
         self.assertTrue(available)
         self.assertIsNone(reason)
         self.assertEqual(calls[0][1]["provider_id"], "round-provider")
+
+
+
+
+class ExecControllerBackend(_ReviewCommandsCase):
+    """v4（§5.24.1/§5.24.2）：控制器后端与 ``controller`` 就绪态。"""
+
+    def test_legacy_config_defaults_controller_pi_and_no_block(self):
+        self.call("set-exec-config", {"reasoning_effort": "low"})
+        config = self.call("get-exec-config", {})["config"]
+        self.assertEqual(config["controller_backend"], "pi")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(exec_config.controller_backend(conn), "pi")
+            # pi 控制轮不固化模型字段（继承本机 PI 默认会话配置）。
+            self.assertEqual(exec_config.controller_snapshot(conn),
+                             {"backend": "pi"})
+        finally:
+            conn.close()
+
+    def test_controller_and_task_backend_are_independent(self):
+        """两个后端各存一份，互不覆盖；控制轮与执行轮快照互不混用。"""
+        saved = self.call("set-exec-config", {
+            "controller_backend": "pi_desktop", "pi_desktop": PI_DESKTOP_BLOCK,
+        })
+        config = saved["config"]
+        self.assertEqual(config["controller_backend"], "pi_desktop")
+        self.assertEqual(config["backend"], "pi")
+        self.assertEqual(config["pi_desktop"], PI_DESKTOP_BLOCK)
+        conn = db.connect(self.db_path)
+        try:
+            # 执行轮快照仍是 pi 四字段（无 controller 字段）。
+            snap = exec_config.snapshot(conn)
+            self.assertEqual(snap, {"backend": "pi", **DEFAULTS})
+            self.assertNotIn("controller_backend", snap)
+            self.assertEqual(exec_config.controller_snapshot(conn),
+                             {"backend": "pi_desktop", **PI_DESKTOP_SNAPSHOT})
+            blob = json.dumps(exec_config.controller_snapshot(conn),
+                              ensure_ascii=False)
+            self.assertNotIn("token", blob.lower())
+        finally:
+            conn.close()
+
+    def test_controller_pi_desktop_requires_saved_block(self):
+        exc = self.call_err(
+            "set-exec-config", {"controller_backend": "pi_desktop"})
+        self.assertEqual(exc.code, "bad_request")
+        self.assertIn("pi_desktop", str(exc))
+        # 控制端选择 Plus 不影响任务执行后端，也未落库。
+        self.assertIsNone(self.call("get-exec-config", {})["config"])
+
+    def test_controller_inherit_snapshot_fails_when_plus_default_is_unavailable(self):
+        self.call("set-exec-config", {
+            "controller_backend": "pi_desktop",
+            "pi_desktop": {
+                "model_source": "inherit",
+                "connection_file": "/tmp/pi-desktop/mcp-control.json",
+                "permission_mode": "auto",
+            },
+        })
+        conn = db.connect(self.db_path)
+        try:
+            with unittest.mock.patch(
+                "kanpilot.pi_desktop_backend.resolve_plus_default",
+                return_value=(None, "Plus 离线"),
+            ):
+                with self.assertRaises(util.KanpilotError) as raised:
+                    exec_config.controller_snapshot(conn)
+                self.assertIn("Plus 离线", raised.exception.message)
+        finally:
+            conn.close()
+
+    def test_controller_backend_invalid_value_bad_request(self):
+        exc = self.call_err(
+            "set-exec-config", {"controller_backend": "plus"})
+        self.assertEqual(exc.code, "bad_request")
+        self.assertIn("controller_backend", str(exc))
+        self.assertIn("可用", str(exc))
+
+    def test_capabilities_controller_branch_shape(self):
+        caps = self.call("exec-capabilities", {})
+        self.assertEqual(set(caps["controller"]),
+                         {"backend", "available", "detail"})
+        self.assertEqual(caps["controller"]["backend"], "pi")
+        self.assertTrue(caps["controller"]["available"])
+
+    def test_check_controller_uses_controller_tool_gate(self):
+        """控制端不建 Goal 会话：工具门不含契约审批工具。"""
+        self.call("set-exec-config", {
+            "controller_backend": "pi_desktop", "pi_desktop": PI_DESKTOP_BLOCK,
+        })
+        calls = []
+
+        def fake_probe(*args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True, "detail": "fake ready",
+                "tools": set(constants.PI_DESKTOP_CONTROLLER_TOOLS),
+                "version": "1",
+            }
+
+        conn = db.connect(self.db_path)
+        try:
+            with unittest.mock.patch(
+                "kanpilot.pi_desktop_backend.probe_connection",
+                side_effect=fake_probe,
+            ):
+                available, reason = exec_config.check_controller_available(
+                    conn)
+        finally:
+            conn.close()
+        self.assertTrue(available, reason)
+        self.assertEqual(tuple(calls[0]["required_tools"]),
+                         constants.PI_DESKTOP_CONTROLLER_TOOLS)
+        self.assertNotIn("pi_plans_pending",
+                         constants.PI_DESKTOP_CONTROLLER_TOOLS)
+
+    def test_controller_unavailable_never_falls_back(self):
+        self.call("set-exec-config", {
+            "controller_backend": "pi_desktop", "pi_desktop": PI_DESKTOP_BLOCK,
+        })
+
+        def fake_probe(*args, **kwargs):
+            return {"ok": False, "detail": "连接文件不存在",
+                    "tools": set(), "version": None}
+
+        conn = db.connect(self.db_path)
+        try:
+            with unittest.mock.patch(
+                "kanpilot.pi_desktop_backend.probe_connection",
+                side_effect=fake_probe,
+            ):
+                available, reason = exec_config.check_controller_available(
+                    conn)
+            self.assertFalse(available)
+            self.assertIn("连接文件不存在", reason)
+            self.assertEqual(exec_config.controller_backend(conn),
+                             "pi_desktop")
+        finally:
+            conn.close()
+
+
+
+
+class ReviewBackendConfig(_ReviewCommandsCase):
+    """v4（§5.24.1/§5.24.2）：Review 后端分支与 review-capabilities。"""
+
+    REVIEW_BLOCK = dict(PI_DESKTOP_BLOCK, permission_mode="ask")
+
+    def _raw_save_review(self, config):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "review_config", config)
+        finally:
+            conn.close()
+
+    def test_legacy_review_config_reads_backend_pi(self):
+        self._raw_save_review({
+            "mode": "custom", "provider": "CloseAI",
+            "model": "deepseek-flash", "reasoning_effort": "low",
+            "updated_at": "2026-01-01T00:00:00Z",
+        })
+        config = self.call("get-review-config", {})["config"]
+        self.assertEqual(config["backend"], "pi")
+        self.assertIsNone(config["pi_desktop"])
+        self.assertEqual(config["mode"], "custom")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(review_config.backend(conn), "pi")
+            self.assertEqual(review_config.snapshot(conn), {
+                "backend": "pi", "mode": "custom", "provider": "CloseAI",
+                "model": "deepseek-flash", "reasoning_effort": "low",
+            })
+        finally:
+            conn.close()
+
+    def test_two_branches_coexist_across_switches(self):
+        self.call("set-review-config", {
+            "mode": "custom", "provider": "CloseAI",
+            "model": "deepseek-flash", "reasoning_effort": "low",
+        })
+        saved = self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": self.REVIEW_BLOCK,
+        })
+        config = saved["config"]
+        self.assertEqual(config["backend"], "pi_desktop")
+        self.assertEqual(config["pi_desktop"], self.REVIEW_BLOCK)
+        # pi 分支字段保留（切回即可恢复）。
+        self.assertEqual(config["mode"], "custom")
+        self.assertEqual(config["provider"], "CloseAI")
+        self.call("set-review-config", {"backend": "pi"})
+        got = self.call("get-review-config", {})["config"]
+        self.assertEqual(got["backend"], "pi")
+        self.assertEqual(got["mode"], "custom")
+        self.assertEqual(got["pi_desktop"], self.REVIEW_BLOCK)
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(review_config.snapshot(conn)["backend"], "pi")
+        finally:
+            conn.close()
+
+    def test_plus_branch_saves_offline_without_mode(self):
+        """Plus 分支不要求 mode（mode 仅对 pi 生效），且不探测服务。"""
+        saved = self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": self.REVIEW_BLOCK,
+        })
+        config = saved["config"]
+        self.assertEqual(config["backend"], "pi_desktop")
+        self.assertEqual(config["pi_desktop"], self.REVIEW_BLOCK)
+        self.assertIsInstance(config["updated_at"], str)
+        conn = db.connect(self.db_path)
+        try:
+            snap = review_config.snapshot(conn)
+        finally:
+            conn.close()
+        self.assertEqual(snap, {"backend": "pi_desktop", **{k: self.REVIEW_BLOCK[k] for k in constants.EXEC_PI_DESKTOP_KEYS}})
+        self.assertNotIn("mode", snap)
+        self.assertNotIn("token", json.dumps(snap).lower())
+
+    def test_inherit_snapshot_fails_when_plus_default_cannot_be_resolved(self):
+        block = {
+            "model_source": "inherit",
+            "connection_file": "/tmp/pi-desktop/mcp-control.json",
+            "permission_mode": "ask",
+        }
+        self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": block,
+        })
+        conn = db.connect(self.db_path)
+        try:
+            with unittest.mock.patch(
+                "kanpilot.pi_desktop_backend.resolve_plus_default",
+                return_value=(None, "Plus 离线"),
+            ):
+                with self.assertRaises(util.KanpilotError) as raised:
+                    review_config.snapshot(conn)
+                self.assertIn("Plus 离线", raised.exception.message)
+        finally:
+            conn.close()
+
+    def test_plus_branch_mode_is_not_validated(self):
+        """mode/三字段属 pi 分支：Plus 保存不因它们非法而失败。"""
+        saved = self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": self.REVIEW_BLOCK,
+            "mode": "custom", "provider": "ghost", "model": "ghost",
+            "reasoning_effort": "bogus",
+        })
+        self.assertEqual(saved["config"]["backend"], "pi_desktop")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(review_config.snapshot(conn)["backend"],
+                             "pi_desktop")
+        finally:
+            conn.close()
+
+    def test_plus_branch_requires_ask_permission(self):
+        for block in (
+            dict(self.REVIEW_BLOCK, permission_mode="auto"),
+            dict(self.REVIEW_BLOCK, permission_mode="accept-edits"),
+            {k: v for k, v in self.REVIEW_BLOCK.items()
+             if k != "permission_mode"},
+            dict(self.REVIEW_BLOCK, connection_file="relative/mcp.json"),
+            dict(self.REVIEW_BLOCK, thinking_level="ultra"),
+        ):
+            with self.subTest(block=block):
+                exc = self.call_err("set-review-config", {
+                    "backend": "pi_desktop", "pi_desktop": block,
+                })
+                self.assertEqual(exc.code, "bad_request")
+        # 旧值不变（从未保存）。
+        self.assertIsNone(self.call("get-review-config", {})["config"])
+        exc = self.call_err("set-review-config", {
+            "backend": "pi_desktop",
+            "pi_desktop": dict(self.REVIEW_BLOCK, permission_mode="auto"),
+        })
+        self.assertIn("ask", str(exc))
+
+    def test_invalid_review_backend_bad_request(self):
+        exc = self.call_err("set-review-config", {"backend": "plus"})
+        self.assertEqual(exc.code, "bad_request")
+        self.assertIn("backend 不支持", str(exc))
+        self.assertIsNone(self.call("get-review-config", {})["config"])
+
+    # ------------------------------------------------------- capabilities
+
+    def test_review_capabilities_shape_and_unsaved_plus(self):
+        caps = self.call("review-capabilities", {})
+        self.assertEqual(set(caps), {"pi", "pi_desktop"})
+        self.assertEqual(set(caps["pi"]), {"available", "detail"})
+        self.assertEqual(set(caps["pi_desktop"]),
+                         {"available", "detail", "tools_ok", "version"})
+        # pi 分支：夹具 PI 环境完整（模型/预设/凭据检查均通过）。
+        self.assertTrue(caps["pi"]["available"], caps["pi"])
+        self.assertIn("PI", caps["pi"]["detail"])
+        # Plus 分支未保存 → 中文原因，不降级 pi。
+        self.assertFalse(caps["pi_desktop"]["available"])
+        self.assertIn("未保存", caps["pi_desktop"]["detail"])
+        blob = json.dumps(caps, ensure_ascii=False)
+        self.assertNotIn("test-key-placeholder", blob)
+        self.assertNotIn("token", blob.lower())
+
+    def test_review_capabilities_pi_custom_branch(self):
+        self.call("set-review-config", {
+            "mode": "custom", "provider": "CloseAI",
+            "model": "deepseek-flash", "reasoning_effort": "low",
+        })
+        caps = self.call("review-capabilities", {})
+        self.assertTrue(caps["pi"]["available"], caps["pi"])
+        self.assertIn("custom", caps["pi"]["detail"])
+
+    def test_review_capabilities_plus_uses_plan_tool_gate(self):
+        self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": self.REVIEW_BLOCK,
+        })
+        calls = []
+
+        def fake_probe(*args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True, "detail": None,
+                "tools": set(constants.PI_DESKTOP_PLAN_TOOLS),
+                "version": "2025-06-18",
+            }
+
+        with unittest.mock.patch(
+            "kanpilot.pi_desktop_backend.probe_connection",
+            side_effect=fake_probe,
+        ):
+            caps = self.call("review-capabilities", {})
+        # 工具门 = PLAN 工具（基础 + 契约审批）。
+        self.assertEqual(tuple(calls[0]["required_tools"]),
+                         constants.PI_DESKTOP_PLAN_TOOLS)
+        self.assertTrue(caps["pi_desktop"]["available"], caps["pi_desktop"])
+        self.assertTrue(caps["pi_desktop"]["tools_ok"])
+        self.assertEqual(caps["pi_desktop"]["version"], "2025-06-18")
+        # pi 分支照常展示（不因 Plus 分支影响）。
+        self.assertTrue(caps["pi"]["available"])
+
+    def test_review_capabilities_plus_missing_goal_tools(self):
+        """缺 pi_plans_* → tools_ok/available 均为 false（不单方面宣称可用）。"""
+        self.call("set-review-config", {
+            "backend": "pi_desktop", "pi_desktop": self.REVIEW_BLOCK,
+        })
+
+        def fake_probe(*args, **kwargs):
+            return {
+                "ok": True, "version": "2025-06-18",
+                "detail": "PI-Desktop 控制面缺少必需工具：pi_plans_pending",
+                "tools": set(constants.PI_DESKTOP_REQUIRED_TOOLS),
+            }
+
+        with unittest.mock.patch(
+            "kanpilot.pi_desktop_backend.probe_connection",
+            side_effect=fake_probe,
+        ):
+            caps = self.call("review-capabilities", {})
+        branch = caps["pi_desktop"]
+        self.assertFalse(branch["tools_ok"])
+        self.assertFalse(branch["available"])
+        self.assertIn("pi_plans_pending", branch["detail"])
 
 
 if __name__ == "__main__":  # pragma: no cover

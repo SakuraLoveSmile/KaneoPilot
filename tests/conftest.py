@@ -199,13 +199,15 @@ class CLI:
 
 
 @pytest.fixture
-def tmp_env(tmp_path):
+def tmp_env(tmp_path, monkeypatch):
     """完整临时目录树：DB/Plan 根/五个项目仓库/应用支持/旧状态根/凭据路径/伪 HOME。"""
     home = tmp_path / "home"
     home.mkdir()
     app_support = tmp_path / "app_support" / "KaneoPilot"
     app_support.mkdir(parents=True)
-    # reviewer reports 根（约定：<APP_SUPPORT>/KaneoReviewer/reports，见 README）
+    # reviewer reports 根：夹具显式用 KANPILOT_REPORTS_ROOT 覆盖（见下方 env），
+    # 目录名沿用历史形状以继续覆盖「旧目录 + 覆盖生效」这条接缝；
+    # v4（§5.24.5）起核心默认根已改为 <APP_SUPPORT>/reports。
     (app_support / "KaneoReviewer" / "reports").mkdir(parents=True)
     (app_support / "sources").mkdir(parents=True)
     plan_root = tmp_path / "Plan"
@@ -310,6 +312,8 @@ def tmp_env(tmp_path):
             "KANPILOT_CODEX_BIN": str(codex_bin),
         }
     )
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
     return SimpleNamespace(
         root=tmp_path,
         home=home,
@@ -778,7 +782,10 @@ def write_source_snapshot(sources_dir, *, task_id, project_id, title, descriptio
 
 
 def write_review_report(app_support, *, task_id, conclusion="pass", body=None):
-    """评审报告写入 <APP_SUPPORT>/KaneoReviewer/reports/<task_id>/<ts>.md。"""
+    """评审报告写入夹具覆盖根 <APP_SUPPORT>/KaneoReviewer/reports/<task_id>/<ts>.md。
+
+    v4 起核心默认根为 <APP_SUPPORT>/reports；本函数与 tmp_env 的
+    KANPILOT_REPORTS_ROOT 覆盖保持一致，专测「覆盖仍生效」的路径。"""
     report_dir = Path(app_support) / "KaneoReviewer" / "reports" / task_id
     report_dir.mkdir(parents=True, exist_ok=True)
     path = report_dir / f"{int(time.time()*1000)}.md"
@@ -825,6 +832,7 @@ class TaskFactory:
         """远端造任务 + 写快照 + sync-tasks → task needs_plan（v2：不自动建 plan 请求）。"""
         project_id = project_id or PROJECTS[project]
         repository = self.env.repos_root / project
+        repository.mkdir(parents=True, exist_ok=True)
         if remote:
             rt = self.kaneo.add_task(project_id, title, description,
                                      status=remote_status)
