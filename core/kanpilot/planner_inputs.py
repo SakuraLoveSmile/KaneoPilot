@@ -15,7 +15,11 @@ start-plans 的实现层。
 
 from __future__ import annotations
 
+import errno
+import fnmatch
 import json
+import os
+import stat
 import re
 import shutil
 import sqlite3
@@ -23,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import (
-    bridge, codex_planner, constants, core, db, planner_config, project_config, remote, util,
+    automation_policy, bridge, codex_planner, constants, core, db, planner_config, project_config, remote, util,
 )
 
 # --------------------------------------------------------------- 附件识别
@@ -233,6 +237,9 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                 "local_status": local["local_status"],
                 "local_save_state": local["local_save_state"],
                 "attachments": attachments,
+                "created_at": context["task"].get("createdAt") or context["task"].get("created_at") or todo.get("createdAt") or todo.get("created_at"),
+                "number": context["task"].get("number") or todo.get("number"),
+                **({"labels": bridge.label_names(todo["labels"])} if isinstance(todo.get("labels"), list) else {}),
                 "selectable": selectable,
                 "blocked_reason": blocked,
             })
@@ -240,6 +247,98 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
 
 
 # ------------------------------------------------------- prepare-plan-input
+
+
+def _effective_plan_kind(task):
+    if task is None or core.automation_of(task).get("manual_takeover"):
+        return "standard"
+    if core.is_automation_managed(task) and (db.task_extra(task).get("fix_request") or {}).get("state") == "open":
+        return "review_fix"
+    return task["plan_kind"] or "standard"
+
+
+def _fix_report_material(task):
+    """Read the exact registered Review report before any write transaction."""
+    if task is None or not core.is_automation_managed(task):
+        return None
+    fix = db.task_extra(task).get("fix_request") or {}
+    if fix.get("state") != "open":
+        return None
+    raw_path, expected = fix.get("report_path"), fix.get("report_sha256")
+    if not isinstance(raw_path, str) or not raw_path or not isinstance(expected, str):
+        raise util.KanpilotError("validation_failed", "修复请求缺少 Review 报告路径或指纹")
+    report = util.inside(Path(raw_path), constants.review_reports_root(), "review_report_path")
+    try:
+        with report.open("rb") as handle:
+            content = handle.read(constants.PLAN_INPUT_FILE_MAX_BYTES + 1)
+    except OSError as exc:
+        raise util.KanpilotError("validation_failed", "Review 报告不存在或不可读取") from exc
+    if len(content) > constants.PLAN_INPUT_FILE_MAX_BYTES:
+        raise util.KanpilotError("validation_failed", "Review 报告超过 20 MiB 上限")
+    if util.sha256_bytes(content) != expected:
+        raise util.KanpilotError("validation_failed", "Review 报告指纹与修复请求不符")
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise util.KanpilotError("validation_failed", "Review 报告不是 UTF-8 文本") from exc
+    return content
+
+
+def _replan_worktree_state(task):
+    from . import git_delivery
+    delivery = dict(core.delivery_of(task), repository=task["repository"])
+    try:
+        return git_delivery.worktree_state_sha256(delivery)
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("validation_failed", exc.message) from exc
+
+
+def _read_worktree_material(worktree, relative, limit):
+    """Open each component without following symlinks, including racing links."""
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or any(part in ("..", ".git") for part in parts):
+        return None, "unsafe_path"
+    if any(part not in constants.DELIVERY_ALLOWED_NAMES and
+           any(fnmatch.fnmatch(part, pattern) for pattern in (*constants.DELIVERY_BLOCKED_PATTERNS, "*.p12"))
+           for part in parts):
+        return None, "sensitive_file"
+    descriptors = []
+    try:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptors.append(os.open(worktree, directory_flags))
+        for part in parts[:-1]:
+            descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptors[-1])
+        descriptors.append(leaf)
+        meta = os.fstat(leaf)
+        if not stat.S_ISREG(meta.st_mode):
+            return None, "not_regular_file"
+        if meta.st_size > constants.PLAN_INPUT_FILE_MAX_BYTES:
+            return None, "file_too_large"
+        if meta.st_size > limit:
+            return None, "total_size_limit"
+        with os.fdopen(os.dup(leaf), "rb") as handle:
+            content = handle.read(min(limit, constants.PLAN_INPUT_FILE_MAX_BYTES) + 1)
+        if len(content) > constants.PLAN_INPUT_FILE_MAX_BYTES:
+            return None, "file_too_large"
+        if len(content) > limit:
+            return None, "total_size_limit"
+        if Path(relative).suffix.lower() not in constants.PLAN_IMAGE_SUFFIXES:
+            try:
+                content.decode("utf-8")
+            except UnicodeDecodeError:
+                return None, "unsupported_binary"
+        return content, None
+    except FileNotFoundError:
+        return None, "deleted"
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            return None, "symlink"
+        return None, "unreadable"
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
 
 def _inputs_root(conn) -> Path:
     return constants.planner_inputs_root(
@@ -307,6 +406,8 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
     project_name = (mapping.get("project_name") if mapping else None) or (local_task["project_name"] if local_task else None)
     repository = mapping.get("repository") if mapping else (local_task["repository"] if local_task else None)
     mapping_revision = mapping.get("revision", 0) if mapping else 0
+    fix_report = _fix_report_material(local_task)
+    replan_sha = _replan_worktree_state(local_task) if local_task is not None and core.is_user_replan(local_task) and core.delivery_of(local_task).get("branch") else None
 
     issues: list = []
     files: list = []
@@ -354,6 +455,12 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         sup_path = root / "supplement.md"
         sup_path.write_text(supplement, encoding="utf-8")
         register(sup_path, "supplement", "text/markdown")
+
+    # 同任务修复：报告正文进入不可变材料目录，三种规划后端均可读取。
+    if fix_report is not None:
+        report_copy = files_dir / "review-report.md"
+        report_copy.write_bytes(fix_report)
+        register(report_copy, "review_report", "text/markdown")
 
     # 2c) 附件（同源下载；跨源/失效/超限 → issue，can_start=false）。
     for entry in _attachment_entries(task_obj):
@@ -428,6 +535,34 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             continue
         register(dest, "local", None)
 
+    execution_worktree = None
+    if replan_sha is not None:
+        from . import git_delivery
+        delivery = core.delivery_of(local_task)
+        worktree = delivery["worktree_path"]
+        changes = []
+        try:
+            candidates = git_delivery.worktree_changes(worktree)
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("validation_failed", exc.message) from exc
+        for candidate in candidates:
+            relative = candidate["path"]
+            change = {"path": relative, "status": candidate["status"]}
+            content, reason = _read_worktree_material(worktree, relative, max(0, constants.PLAN_INPUT_TOTAL_MAX_BYTES - total_bytes))
+            if content is None:
+                change["reason"] = reason
+            else:
+                dest = _unique_path(files_dir, "execution-" + _safe_name(Path(relative).name))
+                dest.write_bytes(content)
+                media_type = "image/*" if Path(relative).suffix.lower() in constants.PLAN_IMAGE_SUFFIXES else "text/plain"
+                entry = register(dest, "execution_worktree", media_type)
+                entry["repository_path"] = relative
+                change["material_name"] = entry["name"]
+            changes.append(change)
+        if _replan_worktree_state(local_task) != replan_sha:
+            raise util.KanpilotError("conflict", "工作树在准备材料期间变化，请重新准备")
+        execution_worktree = {"head_sha": delivery["head_sha"], "state_sha256": replan_sha, "changes": changes}
+
     if total_bytes > constants.PLAN_INPUT_TOTAL_MAX_BYTES:
         issues.append({"issue": "材料合计超过 100 MiB 上限"})
 
@@ -442,11 +577,7 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             "repository": repository,
             "project_mapping_revision": mapping_revision,
             "kaneo_status": task_obj.get("status"),
-            "plan_kind": (
-                local_task["plan_kind"]
-                if local_task is not None and local_task["plan_kind"]
-                else "standard"
-            ),
+            "plan_kind": _effective_plan_kind(local_task),
         },
         "requirements_sha256": remote_req,
         "source_sha256": source["source_sha256"],
@@ -456,6 +587,8 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         "issues": issues,
         "created_at": now,
     }
+    if execution_worktree is not None:
+        manifest["execution_worktree"] = execution_worktree
     input_sha = _manifest_sha(manifest)
     (root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True,
@@ -485,12 +618,10 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
 
 # -------------------------------------------------------------- start-plans
 
-def _import_task(conn, now: str, manifest: dict):
+def _import_task(conn, now: str, manifest: dict, *, actor="user", source_path=None):
     """本地无任务行时从 manifest 快照导入（needs_plan；幂等键 plan:<id>）。"""
     meta = manifest["task"]
     task_id = meta["task_id"]
-    input_dir = _inputs_root(conn) / manifest["input_id"]
-    source_path = input_dir / "source.json"
     fields = {
         "task_id": task_id,
         "project_id": meta["project_id"],
@@ -501,7 +632,7 @@ def _import_task(conn, now: str, manifest: dict):
         "kaneo_status": meta.get("kaneo_status"), "kaneo_checked_at": now,
         "requirements_sha256": manifest.get("requirements_sha256"),
         "source_sha256": manifest.get("source_sha256"),
-        "source_path": str(source_path) if source_path.is_file() else None,
+        "source_path": source_path,
         "plan_kind": meta.get("plan_kind") or "standard",
         "created_at": now, "updated_at": now,
     }
@@ -512,7 +643,7 @@ def _import_task(conn, now: str, manifest: dict):
         tuple(fields.values()),
     )
     db.add_event(
-        conn, now, "task_created", task_id=task_id, actor="user",
+        conn, now, "task_created", task_id=task_id, actor=actor,
         detail={"via": "start-plans import"},
     )
     return db.require_task(conn, task_id)
@@ -564,6 +695,11 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     manifest = db.planner_input_manifest(row)
     task_id = row["task_id"]
     task = db.get_task(conn, task_id)
+    prepared = prepared or {}
+    authorization = item.get("automation")
+    actor = "automation" if authorization is not None else "user"
+    if authorization is not None and (not isinstance(authorization, dict) or authorization.get("authorized_by") != "automation"):
+        return {"task_id": task_id, "code": "bad_request", "error": "automation 授权载荷非法"}
 
     # 项目映射核验（§5.22.1 / §5.26）：未映射或已停用项目不可规划。
     manifest_task = manifest.get("task") or {}
@@ -573,7 +709,9 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         or (task["project_id"] if task and "project_id" in task_keys and task["project_id"] else None)
         or constants.PROJECTS.get(manifest_task.get("project_name") or (task["project_name"] if task and "project_name" in task_keys else None) or "")
     )
-    effective_mapping = project_config.get_effective_mapping(conn, manifest_project_id)
+    if prepared.get("mapping_fingerprint") != util.jdump(project_config.load_raw_mappings(conn)):
+        return {"task_id": task_id, "code": "conflict", "error": "项目映射在准备期间变化"}
+    effective_mapping = prepared.get("mapping")
     if not effective_mapping or not effective_mapping.get("enabled"):
         return {
             "task_id": task_id, "code": "conflict",
@@ -612,9 +750,21 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                 "waiting_reason": f"等待 {others[0]['kind']} 请求结束",
             }
 
+    if authorization is not None:
+        policy = automation_policy.policy_for(conn, manifest_project_id)
+        if (not policy or not policy.get("enabled") or authorization.get("policy_revision") != policy["policy_revision"]
+                or db.paused(conn, "plan") or (task is not None and (task["auto_advance_paused"] or core.automation_of(task).get("manual_takeover")))):
+            return {"task_id": task_id, "code": "conflict", "error": "自动化策略、暂停或接收身份已变化"}
+        delivery = authorization.get("delivery") or core.delivery_of(task)
+        if not isinstance(delivery, dict) or delivery.get("mode") != "pr" or not all(delivery.get(k) for k in ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")):
+            return {"task_id": task_id, "code": "bad_request", "error": "自动接收须有完整的 PR 分支工作树"}
+        old = db.active_request_for_key(conn, f"plan:{task_id}")
+        if old is not None and not db.request_payload(old).get("manual_authorized"):
+            return {"task_id": task_id, "code": "conflict", "error": "不能将未授权的旧规划请求收养为自动化请求"}
+
     # 任务导入/状态推进。
     if task is None:
-        task = _import_task(conn, now, manifest)
+        task = _import_task(conn, now, manifest, actor=actor, source_path=prepared.get("source_path"))
     elif task["status"] == "ready":
         expected = item.get("expected_plan_sha256")
         if expected and expected != task["plan_sha256"]:
@@ -622,7 +772,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                     "error": "现行计划哈希与预期不符，请先查看后再重新规划"}
         # ready → needs_plan 重新规划（等 claim 时转 planning）。
         core.transition_task(
-            conn, task, "needs_plan", now, "user",
+            conn, task, "needs_plan", now, actor,
             detail={"via": "start-plans replan"},
         )
         task = db.require_task(conn, task_id)
@@ -630,13 +780,28 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         # needs_user 等：允许规划重试（材料已确认）；其余状态由前面拦截。
         if task["status"] == "needs_user":
             core.transition_task(
-                conn, task, "needs_plan", now, "user",
+                conn, task, "needs_plan", now, actor,
                 detail={"via": "start-plans replan"},
             )
             task = db.require_task(conn, task_id)
         else:
             return {"task_id": task_id, "code": "conflict",
                     "error": f"任务状态 {task['status']} 不能排队规划"}
+
+    if core.is_user_replan(task):
+        if prepared.get("replan_requested_at") != core.automation_of(task).get("replan_requested_at") or prepared.get("replan_delivery_fingerprint") != util.jdump(core.delivery_of(task)):
+            return {"task_id": task_id, "code": "conflict", "error": "重新规划授权或分支登记在准备期间变化"}
+        if prepared.get("replan_error"):
+            return {"task_id": task_id, "code": "validation_failed", "error": prepared["replan_error"]}
+        if prepared.get("replan_worktree_sha256") != (manifest.get("execution_worktree") or {}).get("state_sha256"):
+            return {"task_id": task_id, "code": "validation_failed", "error": "重新规划材料没有冻结本轮工作树"}
+
+    fix_request = db.task_extra(task).get("fix_request") or {}
+    if core.is_automation_managed(task) and fix_request.get("state") == "open":
+        if prepared.get("fix_request_fingerprint") != util.jdump(fix_request):
+            return {"task_id": task_id, "code": "conflict", "error": "修复请求在准备期间变化，请重新准备材料"}
+        if prepared.get("fix_report_error"):
+            return {"task_id": task_id, "code": "validation_failed", "error": prepared["fix_report_error"]}
 
     # 幂等键 plan:<task_id>：已授权且同材料 + 同方式 + 同后端 → deduplicated；
     # 材料/方式/后端任一不同 → conflict（不暗换材料、方式或后端）；未授权旧
@@ -710,6 +875,9 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
             return {"task_id": task_id, "code": "validation_failed",
                     "error": f"Plus 计划分支配置无效：{resolve_err}"}
         runtime_config = resolved
+    fix_request = db.task_extra(task).get("fix_request") or {}
+    same_task = core.is_automation_managed(task) and fix_request.get("state") == "open"
+    plan_kind = _effective_plan_kind(task)
     payload = {
         "manual_authorized": True,
         "input_id": input_id,
@@ -728,19 +896,62 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     if runtime_config is not None:
         payload["runtime_config"] = runtime_config
     else:
-        payload["model_config"] = planner_config.model_snapshot(
-            conn, planner_config.group_for(task["plan_kind"])
-        )
+        if planner_backend == "claude":
+            payload["model_config"] = planner_config.model_snapshot(conn, planner_config.group_for(plan_kind), backend="claude")
+        else:
+            payload["model_config"] = planner_config.model_snapshot(conn, planner_config.group_for(plan_kind))
     if plugin is not None:
         payload["plugin_id"] = plugin["plugin_id"]
         payload["plugin_version"] = plugin["version"]
-    if task["plan_kind"] == "review_fix":
+    if same_task:
+        payload.update({"plan_kind": "review_fix", "fix_mode": "same_task",
+                        "review_source_task_id": task_id, "fix_task_id": task_id,
+                        "fix_round": fix_request["fix_round"],
+                        "review_report_path": fix_request["report_path"],
+                        "review_report_sha256": fix_request["report_sha256"],
+                        "review_key": fix_request["review_key"]})
+    elif plan_kind == "review_fix":
         payload.update({
             "plan_kind": "review_fix",
             "review_key": task["review_key"],
             "review_source_task_id": task["review_source_task_id"],
             "fix_task_id": task_id,
         })
+    if authorization is not None:
+        a = core.automation_of(task)
+        first = not a
+        if first:
+            a = {"policy_revision": policy["policy_revision"], "adopted_at": now, "fix_round": 0,
+                 "segment_started_at": now, "segment_cost_base_usd": 0.0,
+                 "manual_takeover": False, "cost_usd": 0.0, "cost_unknown_steps": 0, "cost_log": []}
+        a.update(plan_wanted=False, plan_attempts=int(a.get("plan_attempts", 0)) + 1)
+        core.update_automation(conn, task, now, **a)
+        core.update_delivery(conn, task, now, **delivery)
+        db.update_task(conn, task_id, now, requirements_sha256=manifest.get("requirements_sha256"),
+                       source_sha256=manifest.get("source_sha256"),
+                       source_path=prepared.get("source_path"), plan_kind=plan_kind)
+        if first:
+            db.add_event(conn, now, "automation_adopted", task_id=task_id, actor=actor, detail={"policy_revision": policy["policy_revision"]})
+    if core.is_user_replan(task):
+        core.update_automation(conn, task, now, replan_worktree_sha256=prepared["replan_worktree_sha256"])
+        if authorization is None:
+            db.update_task(conn, task_id, now, requirements_sha256=manifest.get("requirements_sha256"),
+                           source_sha256=manifest.get("source_sha256"), source_path=prepared.get("source_path"),
+                           plan_kind=plan_kind)
+    takeover = bool(core.automation_of(task).get("manual_takeover"))
+    if authorization is None and takeover:
+        # A new explicit manual submission starts a new dispatchable plan.
+        # The unknown-send guard above still prevents any ambiguous resend.
+        db.update_task(conn, task_id, now, plan_kind="standard", sent=0,
+                       send_state=None, sent_at=None, transition_started_at=None,
+                       transition_verified_at=None, dispatch_lease_expires_at=None)
+        payload["plan_kind"] = "standard"
+    delivery = core.delivery_of(db.require_task(conn, task_id))
+    if core.is_automation_managed(db.require_task(conn, task_id)) or (takeover and delivery.get("branch") and delivery.get("worktree_path")):
+        payload.update(plan_cwd=delivery.get("worktree_path"), delivery_mode=delivery.get("mode"),
+                       delivery_head_sha=delivery.get("head_sha"))
+    if authorization is not None:
+        payload["authorized_by"] = "automation"
     if existing is not None:
         # 未授权旧请求 → 写回已确认输入（复用请求，不新建）。
         old_payload = db.request_payload(existing)
@@ -750,7 +961,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         )
         db.add_event(
             conn, now, "plan_started", task_id=task_id,
-            request_id=existing["request_id"], actor="user",
+            request_id=existing["request_id"], actor=actor,
             detail={"input_id": input_id, "reused": True,
                     "planner_method": method,
                     "planner_backend": planner_backend},
@@ -760,11 +971,11 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
 
     request, _created = db.create_request(
         conn, now, "plan", key, task_id=task_id, payload=payload,
-        requested_by="user",
+        requested_by=actor,
     )
     db.add_event(
         conn, now, "plan_started", task_id=task_id,
-        request_id=request["request_id"], actor="user",
+        request_id=request["request_id"], actor=actor,
         detail={"input_id": input_id, "reused": False,
                 "planner_method": method,
                 "planner_backend": planner_backend},
@@ -783,6 +994,44 @@ def _prepare_submission(conn, item):
     row = db.get_planner_input(conn, item.get("input_id"))
     prepared = {"config_fingerprint": util.jdump(planner_config.merged(conn)),
                 "input_sha256": row["input_sha256"] if row else None}
+    if row is not None:
+        manifest = db.planner_input_manifest(row)
+        meta = manifest.get("task") or {}
+        task = db.get_task(conn, row["task_id"])
+        project_id = meta.get("project_id") or (task["project_id"] if task else None) or constants.PROJECTS.get(meta.get("project_name") or (task["project_name"] if task else ""))
+        prepared["mapping"] = project_config.get_effective_mapping(conn, project_id)
+        prepared["mapping_fingerprint"] = util.jdump(project_config.load_raw_mappings(conn))
+        source_path = _inputs_root(conn) / manifest["input_id"] / "source.json"
+        prepared["source_path"] = str(source_path) if source_path.is_file() else None
+        if task is not None and core.is_user_replan(task):
+            prepared["replan_requested_at"] = core.automation_of(task).get("replan_requested_at")
+            prepared["replan_delivery_fingerprint"] = util.jdump(core.delivery_of(task))
+            try:
+                prepared["replan_worktree_sha256"] = _replan_worktree_state(task)
+                frozen = manifest.get("execution_worktree") or {}
+                if frozen.get("head_sha") != core.delivery_of(task).get("head_sha") or frozen.get("state_sha256") != prepared["replan_worktree_sha256"]:
+                    raise util.KanpilotError("validation_failed", "重新规划后工作树已变化，请重新准备材料")
+                for entry in manifest.get("files", []):
+                    if entry.get("source") != "execution_worktree":
+                        continue
+                    content, reason = _read_worktree_material(str(source_path.parent), entry.get("path", ""), constants.PLAN_INPUT_FILE_MAX_BYTES)
+                    if content is None or util.sha256_bytes(content) != entry.get("sha256"):
+                        raise util.KanpilotError("validation_failed", "重新规划的工作树材料已变化或不可读取，请重新准备")
+            except util.KanpilotError as exc:
+                prepared["replan_error"] = exc.message
+        fix = (db.task_extra(task).get("fix_request") or {}) if task is not None else {}
+        if task is not None and core.is_automation_managed(task) and fix.get("state") == "open":
+            prepared["fix_request_fingerprint"] = util.jdump(fix)
+            try:
+                _fix_report_material(task)
+                entries = [entry for entry in manifest.get("files", []) if entry.get("source") == "review_report"]
+                if len(entries) != 1 or entries[0].get("sha256") != fix.get("report_sha256"):
+                    raise util.KanpilotError("validation_failed", "材料缺少本轮 Review 报告，请重新准备规划材料")
+                report_copy = util.inside(source_path.parent / entries[0]["path"], source_path.parent, "review_report_material")
+                if not report_copy.is_file() or util.sha256_file(report_copy) != fix["report_sha256"]:
+                    raise util.KanpilotError("validation_failed", "材料中的 Review 报告指纹不符，请重新准备规划材料")
+            except (util.KanpilotError, OSError, KeyError) as exc:
+                prepared["fix_report_error"] = getattr(exc, "message", "Review 报告材料不可读取")
     method = item.get("planner_method") or "builtin"
     backend = item.get("planner_backend") or planner_config.DEFAULT_BACKEND
     if row is None or method not in planner_config.DEFAULT_METHODS or backend not in planner_config.BACKENDS:

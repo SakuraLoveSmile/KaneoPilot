@@ -252,6 +252,7 @@ class KanpilotTestCase(unittest.TestCase):
         ):
             path.mkdir(parents=True, exist_ok=True)
         self._env = {
+            "CLAUDE_CONFIG_DIR": str(self.root / "claude-config"),
             "KANPILOT_PLAN_ROOT": str(self.plan_root),
             "KANPILOT_REPOS_ROOT": str(self.repos_root),
             "KANPILOT_LEGACY_ROOT": str(self.legacy_root),

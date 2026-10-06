@@ -52,6 +52,10 @@ modules = (
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
     "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
     "harness_plus_adapter", "runtime_operations", "runtime_client",
+    "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
+    "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "delivery_runner",
+    "claude_cli", "claude_planner", "review_settle", "cli_review",
+    "process_owner",
 )
 for name in modules:
     relative = Path("kanpilot") / (name + ".py")
@@ -62,7 +66,10 @@ for name in modules:
     module = importlib.import_module("kanpilot." + name)
     if not Path(module.__file__).resolve().is_relative_to(bundled.resolve()):
         raise SystemExit("Core imported outside app bundle: " + name)
-print("Desktop backend imports and source hashes verified")
+for relative in (Path("executor_prompts/review_cli.md"), Path("executor_prompts/planner_prompt.md")):
+    if hashlib.sha256((source / relative).read_bytes()).digest() != hashlib.sha256((bundled / relative).read_bytes()).digest():
+        raise SystemExit("Bundled prompt differs from source: " + str(relative))
+print("Desktop and automation backend imports and source hashes verified")
 PY
 
 echo "== sign local application bundle =="

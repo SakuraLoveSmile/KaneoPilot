@@ -299,14 +299,10 @@ class ControllerBackendCommands(_V4FieldsCase):
 
     def test_controller_pi_desktop_requires_block_and_coexists(self):
         self.call("set-exec-config", {"reasoning_effort": "low"})
-        exc = self.call_err(
-            "set-exec-config", {"controller_backend": "pi_desktop"})
-        self.assertEqual(exc.code, "bad_request")
-        self.assertIn("pi_desktop", str(exc))
-        # 旧值不变（控制器仍是 pi）。
-        self.assertEqual(
-            self.call("get-exec-config", {})["config"]["controller_backend"],
-            "pi")
+        # v5 controller_backend is retained for display; it no longer gates execution.
+        saved_legacy = self.call("set-exec-config", {"controller_backend": "pi_desktop"})
+        self.assertEqual(saved_legacy["config"]["controller_backend"], "pi_desktop")
+        self.assertEqual(saved_legacy["config"]["backend"], "pi")
 
         saved = self.call("set-exec-config", {
             "controller_backend": "pi_desktop", "pi_desktop": PI_DESKTOP_BLOCK,

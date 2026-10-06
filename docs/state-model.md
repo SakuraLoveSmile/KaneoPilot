@@ -276,3 +276,8 @@ T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩�
 - **settings.project_mappings**：保存项目与本地仓库映射 `{version: 1, revision: <int>, workspace_id: "<id>", items: {<project_id>: {project_name, repository, enabled, updated_at}}}`。
 - **快照固化**：`planner_inputs.manifest.task` 与 `requests.payload_json.project_snapshot` 固化 `project_id`, `project_name`, `repository`, `project_mapping_revision`，保证派发和执行对后续设置修改具备不可变性隔离。
 - **计划与运行记录路径**：新计划文件写入 `<plan_root>/projects/<project_id>/`；默认运行记录根动态解析 `constants.app_support()/"runs"`。
+
+
+## 全自动流水线 v5 增量
+
+以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan，accept_verification 仅回到 running；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。

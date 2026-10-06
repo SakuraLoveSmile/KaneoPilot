@@ -30,6 +30,10 @@
 		BA5E00000000000000001133 /* ProjectMappingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001033 /* ProjectMappingsView.swift */; };
 		BA5E00000000000000001134 /* TaskDetailContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001034 /* TaskDetailContentView.swift */; };
 		BA5E00000000000000001135 /* TaskCompactListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001035 /* TaskCompactListView.swift */; };
+		BA5E00000000000000001140 /* AppRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001040 /* AppRuntime.swift */; };
+		BA5E00000000000000001141 /* SchedulerDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001041 /* SchedulerDecision.swift */; };
+		BA5E00000000000000001142 /* LoginItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001042 /* LoginItem.swift */; };
+		BA5E00000000000000001143 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001043 /* MenuBarView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -59,6 +63,10 @@
 		BA5E00000000000000001035 /* TaskCompactListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCompactListView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001090 /* kanpilot-fake.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "kanpilot-fake.py"; sourceTree = "<group>"; };
 		BA5E00000000000000001091 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		BA5E00000000000000001040 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntime.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001041 /* SchedulerDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerDecision.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001042 /* LoginItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginItem.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001043 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +116,9 @@
 				BA5E00000000000000001002 /* CoreLocator.swift */,
 				BA5E00000000000000001003 /* CoreClient.swift */,
 				BA5E00000000000000001004 /* Models.swift */,
+				BA5E00000000000000001042 /* LoginItem.swift */,
+				BA5E00000000000000001041 /* SchedulerDecision.swift */,
+				BA5E00000000000000001040 /* AppRuntime.swift */,
 				BA5E00000000000000001016 /* ExecutorScheduler.swift */,
 				BA5E00000000000000001032 /* MCPServiceManager.swift */,
 			);
@@ -118,6 +129,7 @@
 			isa = PBXGroup;
 			children = (
 				BA5E00000000000000001006 /* RootView.swift */,
+				BA5E00000000000000001043 /* MenuBarView.swift */,
 				BA5E00000000000000001007 /* TasksSectionView.swift */,
 				BA5E00000000000000001013 /* BoardView.swift */,
 				BA5E00000000000000001008 /* TaskDetailView.swift */,
@@ -219,6 +231,10 @@
 				BA5E00000000000000001102 /* CoreLocator.swift in Sources */,
 				BA5E00000000000000001103 /* CoreClient.swift in Sources */,
 				BA5E00000000000000001104 /* Models.swift in Sources */,
+				BA5E00000000000000001143 /* MenuBarView.swift in Sources */,
+				BA5E00000000000000001142 /* LoginItem.swift in Sources */,
+				BA5E00000000000000001141 /* SchedulerDecision.swift in Sources */,
+				BA5E00000000000000001140 /* AppRuntime.swift in Sources */,
 				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
 				BA5E00000000000000001106 /* RootView.swift in Sources */,
 				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,

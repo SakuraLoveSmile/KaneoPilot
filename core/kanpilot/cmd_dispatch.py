@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import bridge, constants, core, db, remote, util
+from . import bridge, constants, core, db, remote, util, git_delivery
 
 
 def _entry(ctx, payload, allowed):
@@ -53,6 +53,10 @@ def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
 
 def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
+    task, _request = _entry(ctx, payload, ("prepared",))
+    if core.is_pr_delivery(task) or _manual_branch_delivery(task):
+        # Recheck outside the transaction before any remote status mutation.
+        _ensure_worktree(task, task["task_id"], payload["run_id"], conn)
     with db.write_txn(conn):
         task, _request = _entry(ctx, payload, ("prepared",))
         owner = f"begin-send:{payload['run_id']}"
@@ -412,6 +416,27 @@ def _pi_session_view(conn, task_id, run_id, backend="pi"):
     )
 
 
+def _register_started_worker(ctx, spec, proc, spec_path):
+    """Close the detached bootstrap gap using only this newly created child."""
+    if not spec.get("executor_instance_id"):
+        return
+    from . import process_owner
+    try:
+        registered = process_owner.register_spawned_worker(ctx, spec, proc.pid, spec_path=spec_path)
+        if registered is None and proc.poll() is None:
+            raise util.KanpilotError("validation_failed", "无法核验新 worker 进程启动时间")
+    except util.KanpilotError:
+        # The Popen object still owns this child; poll guards natural exit/reap.
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+        raise
+
+
 def cmd_dispatch_start(ctx, payload: dict) -> dict:
     """dispatch-start（protocol §5.18.3）：可用性复核 → 意图落盘 → worktree →
     拉起 worker → 记 pid → 等首个 session 事件。同一轮次只启动一次进程。"""
@@ -469,15 +494,15 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
         "worktree_mode": worktree_mode,
         "repository": task["repository"],
         "plan_path": task["plan_path"],
-        "instruction": constants.DISPATCH_INSTRUCTION_PI.format(
-            marker=task["session_marker"], plan_path=task["plan_path"]
-        ),
+        "instruction": _execution_instruction(task, worktree_path, desktop=False),
         "runs_dir": str(run_dir),
         "pi_home": str(constants.pi_home()),
         "agent_md": _agent_md_path(conn, config_snapshot),
         "timeout_seconds": round_store.round_timeout_seconds(conn),
     }
     spec_path = run_dir / "spec.json"
+    from . import process_owner
+    process_owner.bind_spec(spec, ctx.db_path)
     spec_path.write_text(
         util.jdump(spec), encoding="utf-8"
     )
@@ -497,6 +522,8 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
             )
     except OSError as exc:
         raise util.KanpilotError("internal", f"worker 拉起失败：{exc}")
+
+    _register_started_worker(ctx, spec, proc, spec_path)
 
     # 4. 记 pid/worktree + event（意图已落盘，此处只是补记进程信息）。
     with db.write_txn(conn):
@@ -600,18 +627,15 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
             "plan_path": task["plan_path"],
             "plan_sha256": task["plan_sha256"],
             # 任务标识 + 计划哈希 提示头（§5.23.3）；计划正文由 worker 注入。
-            "instruction": (
-                f"任务标识：{task['session_marker']}。"
-                f"计划哈希：{task['plan_sha256']}。"
-                "完整执行以下已核验的计划正文，保留现有改动，按计划使用 "
-                "subagent 和独立 worktree，完成验证并报告结果。"
-            ),
+            "instruction": _execution_instruction(task, worktree_path, desktop=True),
             "runs_dir": str(run_dir),
             "timeout_seconds": round_store.round_timeout_seconds(conn),
             "request_id": request["request_id"],
             "db_path": str(ctx.db_path),
         }
         spec_path = run_dir / "spec.json"
+        from . import process_owner
+        process_owner.bind_spec(spec, ctx.db_path)
         spec_path.write_text(util.jdump(spec), encoding="utf-8")
         log_path = run_dir / "worker.log"
         env = dict(os.environ)
@@ -630,7 +654,13 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
         except OSError as exc:
             raise util.KanpilotError("internal", f"worker 拉起失败：{exc}")
 
+        _register_started_worker(ctx, spec, proc, spec_path)
+
     except (util.KanpilotError, OSError, subprocess.SubprocessError) as exc:
+        from . import process_owner
+        if isinstance(exc, process_owner.OwnerStoppedError):
+            # Shutdown is local observation loss, not proof of failed execution.
+            raise
         detail = util.redact(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
         with db.write_txn(conn):
             conn.execute(
@@ -697,17 +727,39 @@ def _wait_observe_attach(run_dir, proc, previous_job):
         if isinstance(current, dict):
             resumed = current.get("observation_resumed_at")
             deferred = current.get("resume_deferred_at")
+            if deferred and deferred != baseline_deferred:
+                return "deferred", current.get("resume_detail")
             if resumed and resumed != baseline_resumed:
                 if proc.poll() is None:
                     return "observing", None
                 return "settled", current.get("detail")
-            if deferred and deferred != baseline_deferred:
-                return "deferred", current.get("resume_detail")
         if proc.poll() is not None:
             return ("exited", "观察进程已退出且未给出接管证明")
         if _time.monotonic() >= deadline:
             return "starting", "观察进程尚未证明接管"
         _time.sleep(0.1)
+
+
+def _observer_pid_alive(conn, task_id, run_id, pid, run_dir, job):
+    from . import process_owner
+    registered = process_owner.registered_worker_alive(conn, task_id, run_id, pid)
+    if registered is not None:
+        return registered
+    # Historical owner records may already have been pruned on App restart.
+    # An explicit manual observer copy supersedes the startup App ownership
+    # only for that observer's own PID; its legacy liveness semantics remain.
+    path = Path(run_dir) / "spec.json"
+    observer_path = Path(run_dir) / "observer-spec.json"
+    if pid and pid == job.get("observe_pid") and observer_path.is_file():
+        path = observer_path
+    try:
+        spec = util.jload(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        spec = None
+    if (isinstance(spec, dict) and spec.get("task_id") == task_id
+            and spec.get("run_id") == run_id and spec.get("executor_instance_id")):
+        return False
+    return util.pid_alive(pid)
 
 
 def cmd_round_observe(ctx, payload: dict) -> dict:
@@ -770,8 +822,8 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
             f"该轮次发送状态不可续接（send_state={job.get('send_state')!r}）",
         )
     # 幂等：仍存活的观察进程（原 worker 或上一次续接的进程）不再拉起第二个。
-    alive = row["pid"] if util.pid_alive(row["pid"]) else None
-    if alive is None and util.pid_alive(job.get("observe_pid")):
+    alive = row["pid"] if _observer_pid_alive(conn, task_id, run_id, row["pid"], run_dir, job) else None
+    if alive is None and _observer_pid_alive(conn, task_id, run_id, job.get("observe_pid"), run_dir, job):
         alive = job.get("observe_pid")
     if alive is not None:
         return {"status": "observing", "pid": alive, "deduplicated": True}
@@ -780,6 +832,24 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         raise util.KanpilotError(
             "validation_failed", "缺少 spec.json，无法续接观察进程"
         )
+    # Preserve the immutable startup spec. This explicit, already validated
+    # resume gets its own observer copy, bound to the new App or manual CLI.
+    from . import process_owner
+    try:
+        spec = util.jload(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise util.KanpilotError("validation_failed", "spec.json 不可读，无法登记观察者归属")
+    if not isinstance(spec, dict) or spec.get("task_id") != task_id or spec.get("run_id") != run_id:
+        raise util.KanpilotError("conflict", "spec.json 与当前执行轮次身份不符")
+    if "KANPILOT_EXECUTOR_INSTANCE_ID" in os.environ:
+        process_owner.bind_spec(spec, ctx.db_path)
+    else:
+        if spec.get("executor_instance_id"):
+            spec["original_executor_instance_id"] = spec["executor_instance_id"]
+            spec["requires_goal_identity"] = True
+        spec.pop("executor_instance_id", None)
+    spec_path = run_dir / "observer-spec.json"
+    spec_path.write_text(util.jdump(spec), encoding="utf-8")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(constants.core_root())
     try:
@@ -795,6 +865,8 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
             )
     except OSError as exc:
         raise util.KanpilotError("internal", f"观察进程拉起失败：{exc}")
+
+    _register_started_worker(ctx, spec, proc, spec_path)
 
     status, detail = _wait_observe_attach(run_dir, proc, job)
     reopened = False
@@ -855,10 +927,57 @@ def _wait_session_event(run_dir):
         _time.sleep(0.1)
 
 
+def _manual_branch_delivery(task):
+    delivery = core.delivery_of(task)
+    return (core.automation_of(task).get("manual_takeover") is True
+            and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
+
+
+def _execution_instruction(task, worktree_path, *, desktop):
+    if _manual_branch_delivery(task):
+        plan_ref = "下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}"
+        return (f"任务标识：{task['session_marker']}。当前目录 {worktree_path} 是本任务保留的分支 "
+                f"{core.delivery_of(task)['branch']} 的工作树。直接在此完整执行{plan_ref}，"
+                "保留已有提交和未提交改动；不要另建 worktree 或分支，也不要切换分支。"
+                "按计划使用 subagent，完成验证并报告结果。")
+    if core.is_pr_delivery(task):
+        return constants.DISPATCH_INSTRUCTION_BRANCH.format(
+            marker=task["session_marker"], worktree=str(worktree_path),
+            branch=core.delivery_of(task)["branch"],
+            plan_ref="下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}")
+    if not desktop:
+        return constants.DISPATCH_INSTRUCTION_PI.format(
+            marker=task["session_marker"], plan_path=task["plan_path"])
+    return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
+            "完整执行以下已核验的计划正文，保留现有改动，按计划使用 "
+            "subagent 和独立 worktree，完成验证并报告结果。")
+
+
 def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
     """protocol §5.18.1：worktrees_root/<task>/<run>；git 仓库 → 独立
     worktree（已存在复用），非 git / git 失败 → 直接用 task.repository 作
     cwd（worktree_mode="plain"，不阻断测试夹具与非 git 目录）。"""
+    manual_branch = _manual_branch_delivery(task)
+    if core.is_pr_delivery(task) or manual_branch:
+        delivery = dict(core.delivery_of(task), repository=task["repository"])
+        user_replan = core.is_user_replan(task)
+        state_sha = core.automation_of(task).get("replan_worktree_sha256")
+        if not manual_branch:
+            util.require(bool(delivery.get("head_sha")), "交付 HEAD 登记缺失", "validation_failed")
+        if user_replan:
+            util.require(bool(state_sha), "重新规划缺少工作树状态指纹", "validation_failed")
+            util.require(task["send_state"] not in ("unknown", "sent") and task["sent"] != 1,
+                         "重新规划仍有发送证据冲突，必须先完成发送恢复", "send_conflict")
+        try:
+            git_delivery.verify_branch_worktree(
+                delivery, require_clean=not (manual_branch or user_replan),
+                expected_head=None if manual_branch else delivery.get("head_sha"))
+            if user_replan:
+                util.require(git_delivery.worktree_state_sha256(delivery) == state_sha,
+                             "重新规划后工作树内容已变化，请重新准备规划材料", "validation_failed")
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("validation_failed", exc.message) from exc
+        return Path(delivery["worktree_path"]), "branch"
     root = constants.worktrees_root(
         db.get_setting(conn, "worktrees_root") or None
     )

@@ -8,10 +8,10 @@ import sys
 from datetime import timedelta
 from typing import Optional
 
-from . import constants, db, derive, planfile, remote, util
+from . import constants, core, db, derive, planfile, remote, util
 
 
-def tick_inline(conn: sqlite3.Connection, now) -> dict:
+def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dict:
     """Business-cycle request top-up (protocol.md §4.8). Idempotent."""
     now_iso = util.to_iso(now)
     created: list = []
@@ -97,13 +97,55 @@ def tick_inline(conn: sqlite3.Connection, now) -> dict:
                  "task_id": task["task_id"]}
             )
 
+    from . import automation_policy, cmd_queue
+    for task in conn.execute("SELECT * FROM tasks WHERE status!='done'").fetchall():
+        if not core.is_automation_managed(task) or not db.task_schedulable(task):
+            continue
+        a = core.automation_of(task)
+        # Lost monitor/delivery leases can be released without replaying a send.
+        lost = conn.execute("SELECT * FROM requests WHERE task_id=? AND status='claimed' AND kind IN ('monitor','delivery')", (task["task_id"],)).fetchall()
+        for req in lost:
+            if util.lease_lost(req["lease_expires_at"], now):
+                core.finish_request(conn, req, now_iso, "cancelled", "cancelled", result={"via": "release_lost"}, note="released after executor loss")
+                db.add_event(conn, now_iso, "lost_request_released", task_id=task["task_id"], request_id=req["request_id"], actor="scheduler")
+        extra = db.task_extra(task)
+        if task["status"] == "ready" and extra.get("plan_execution_hold") and preflight_by_project is not None:
+            policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
+            verify = extra.get("plan_verify") or {}
+            reason = None
+            if not policy.get("enabled"): reason = "disabled"
+            elif not policy.get("auto_confirm_plan"): reason = "auto_confirm_off"
+            elif preflight_by_project.get(task["project_id"], ["unchecked"]): reason = "preflight"
+            elif not verify.get("commands"): reason = "verify_missing"
+            elif verify.get("plan_sha256") != task["plan_sha256"]: reason = "verify_mismatch"
+            elif not core.automation_budget(task, policy, now)["ok"]: reason = "budget"
+            elif db.paused(conn, "dispatch"): reason = "paused"
+            if reason:
+                if (a.get("last_skip") or {}).get("reason") != reason:
+                    core.update_automation(conn, task, now_iso, last_skip={"reason": reason, "at": now_iso})
+                    db.add_event(conn, now_iso, "auto_confirm_skipped", task_id=task["task_id"], actor="automation", detail={"reason": reason})
+            else:
+                row, made = cmd_queue.confirm_plan_inline(conn, task, now_iso, expected_plan_sha256=task["plan_sha256"], actor="automation", note="auto")
+                if made: created.append({"request_id": row["request_id"], "kind": "dispatch", "task_id": task["task_id"]})
+        history = extra.get("review_history") or []
+        d = core.delivery_of(task)
+        if (task["status"] == "in_review" and extra.get("review_conclusion") == "pass"
+            and core.is_pr_delivery(task) and history
+            and history[-1].get("execution_run_id") == task["run_id"]
+            and (not d.get("next_sync_at") or util.parse_ts(d["next_sync_at"]) <= now)):
+            row, made = db.create_request(conn, now_iso, "delivery", f"delivery:{task['task_id']}", task_id=task["task_id"], requested_by="scheduler")
+            if made: created.append({"request_id": row["request_id"], "kind": "delivery", "task_id": task["task_id"]})
+
     db.set_setting(conn, "last_tick_at", now_iso)
     return {"created": created, "skipped": skipped}
 
 
 def cmd_tick(ctx, payload: dict) -> dict:
+    from . import automation_policy
+    projects = {t["project_id"] for t in ctx.conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall() if core.is_automation_managed(t)}
+    checks = {pid: automation_policy.automation_preflight(ctx.conn, pid) for pid in projects}
     with db.write_txn(ctx.conn):
-        return tick_inline(ctx.conn, ctx.now)
+        return tick_inline(ctx.conn, ctx.now, checks)
 
 
 def cmd_overview(ctx, payload: dict) -> dict:

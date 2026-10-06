@@ -73,7 +73,7 @@ def block_task(
         {
             "failure_reason": reason,
             "failure_code": code,
-            "failure_stage": stage if stage is not None else task["status"],
+            "failure_stage": stage if stage is not None else constants.AUTOMATION_FAILURE_STAGES.get(code, task["status"]),
             "blocked_at": now,
             "blocked_summary": reason,
         }
@@ -232,7 +232,7 @@ def fail_request(
     )
 
 
-def require_review_identity(conn, payload, task, now) -> Optional[sqlite3.Row]:
+def require_stage_identity(conn, payload, task, now, *, stages) -> Optional[sqlite3.Row]:
     """v4（protocol §5.24.5）新自动 Review 的登记归属与周期保护。
 
     仅在调用方给出 ``request_id`` 时生效——无身份的旧手动调用保持兼容，
@@ -247,10 +247,10 @@ def require_review_identity(conn, payload, task, now) -> Optional[sqlite3.Row]:
     request = db.get_request(conn, request_id)
     if request is None:
         raise util.KanpilotError("not_found", f"request not found: {request_id}")
-    if request["stage"] != "review":
+    if request["stage"] not in stages:
         raise util.KanpilotError(
             "validation_failed",
-            f"request {request_id} 不是 review 阶段（stage={request['stage']}）",
+            f"request {request_id} 阶段不符（stage={request['stage']}，允许={stages}）",
         )
     task_id = payload.get("task_id") or payload.get("source_task_id")
     if request["task_id"] != task_id:
@@ -279,3 +279,89 @@ def require_review_identity(conn, payload, task, now) -> Optional[sqlite3.Row]:
             f"不符（评审周期已变）",
         )
     return request
+
+
+def require_review_identity(conn, payload, task, now):
+    return require_stage_identity(conn, payload, task, now, stages=("review",))
+
+
+def automation_of(task) -> dict:
+    return dict(db.task_extra(task).get("automation") or {})
+
+
+def delivery_of(task) -> dict:
+    return dict(db.task_extra(task).get("delivery") or {})
+
+
+def is_automation_managed(task) -> bool:
+    value = automation_of(task)
+    return bool(value) and not value.get("manual_takeover", False)
+
+
+def is_pr_delivery(task) -> bool:
+    return delivery_of(task).get("mode") == "pr"
+
+
+def update_automation(conn, task, now, **changes):
+    fresh = db.require_task(conn, task["task_id"])
+    value = automation_of(fresh)
+    value.update(changes)
+    db.set_extra(conn, fresh, now, automation=value)
+    return value
+
+
+def update_delivery(conn, task, now, **changes):
+    fresh = db.require_task(conn, task["task_id"])
+    value = delivery_of(fresh)
+    value.update(changes)
+    db.set_extra(conn, fresh, now, delivery=value)
+    return value
+
+
+def is_user_replan(task):
+    return (is_automation_managed(task) and is_pr_delivery(task)
+            and bool(automation_of(task).get("replan_requested_at")))
+
+
+def expected_remote_slugs(task):
+    slugs = set(constants.TODO_SLUGS)
+    if is_pr_delivery(task) and delivery_of(task).get("commits"):
+        slugs.update(constants.REVIEW_SLUGS)
+    if is_user_replan(task):
+        accepted = automation_of(task).get("replan_remote_status")
+        if accepted == constants.IN_PROGRESS_SLUG or accepted in constants.REVIEW_SLUGS:
+            slugs.add(accepted)
+    return slugs
+
+
+def automation_budget(task, policy, now):
+    a = automation_of(task)
+    started = util.parse_ts(a.get("segment_started_at"))
+    current = util.parse_ts(now) if isinstance(now, str) else now
+    minutes = max(0, (current - started).total_seconds() / 60) if started else 0
+    cost = max(0, float(a.get("cost_usd", 0)) - float(a.get("segment_cost_base_usd", 0)))
+    limit = policy.get("max_task_cost_usd")
+    exceeded = minutes >= policy.get("max_task_minutes", 240) or (limit is not None and cost >= limit)
+    return {"ok": not exceeded, "exceeded": exceeded, "minutes": minutes, "cost_usd": cost,
+            "remaining_cost_usd": None if limit is None else max(0, limit - cost)}
+
+
+def start_fix_round_inline(conn, task, now, *, fix_request, actor="kaneo-review", new_segment=False):
+    a = automation_of(task)
+    a.update(fix_round=int(a.get("fix_round", 0)) + 1, plan_wanted=True, plan_attempts=0,
+             replan_requested_at=None, replan_remote_status=None, replan_worktree_sha256=None)
+    if new_segment:
+        a.update(segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0))
+    fix = dict(fix_request, state="open", fix_round=a["fix_round"])
+    extra = db.task_extra(db.require_task(conn, task["task_id"]))
+    extra.update(automation=a, fix_request=fix)
+    for key in ("review_conclusion", "review_registered_at", "verification_override"):
+        extra.pop(key, None)
+    fields = clear_block_fields()
+    fields.update(sent=0, send_state=None, sent_at=None, lock_retained=0,
+                  review_report_path=None, review_report_sha256=None, review_key=None,
+                  extra_json=extra)
+    transition_task(conn, task, "needs_plan", now, actor, detail={"via": "same_task_fix"}, **fields)
+    db.add_event(conn, now, "fix_round_started", task_id=task["task_id"], actor=actor,
+                 detail={"fix_round": a["fix_round"], "review_key": fix.get("review_key")})
+    return fix

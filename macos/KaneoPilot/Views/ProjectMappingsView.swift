@@ -27,6 +27,47 @@ struct ProjectMappingsView: View {
     @State private var successMessage: String? = nil
 
     @State private var showUnmapConfirm = false
+    @State private var automationDrafts: [String: AutomationDraft] = [:]
+    @State private var mappingGeneration = 0
+
+    private struct AutomationDraft {
+        var enabled = false
+        var labels = ""
+        var confirm = true
+        var fixRounds = 2
+        var minutes = 240
+        var cost = "10"
+        var base = ""
+        var revision = 0
+        init(_ value: ProjectAutomationDTO?) {
+            enabled = value?.enabled ?? false
+            labels = (value?.labelFilter ?? []).joined(separator: ", ")
+            confirm = value?.autoConfirmPlan ?? true
+            fixRounds = value?.maxFixRounds ?? 2
+            minutes = value?.maxTaskMinutes ?? 240
+            cost = value == nil ? "10" : value?.maxTaskCostUsd.map { String($0) } ?? ""
+            base = value?.deliveryBase ?? ""
+            revision = value?.policyRevision ?? 0
+        }
+        var fields: [String: Any] {
+            let costValue: Any = Double(cost.trimmingCharacters(in: .whitespacesAndNewlines)).map { $0 as Any } ?? NSNull()
+            return ["enabled": enabled,
+             "label_filter": labels.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+             "auto_confirm_plan": confirm, "max_fix_rounds": fixRounds,
+             "max_task_minutes": minutes,
+             "max_task_cost_usd": costValue,
+             "delivery_base": base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : base.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        var valid: Bool {
+            let trimmed = cost.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty || Double(trimmed).map { (0.5...100).contains($0) } == true
+        }
+    }
+
+    private func draftBinding<Value>(_ id: String, _ key: WritableKeyPath<AutomationDraft, Value>) -> Binding<Value> {
+        Binding(get: { automationDrafts[id, default: AutomationDraft(nil)][keyPath: key] },
+                set: { automationDrafts[id, default: AutomationDraft(nil)][keyPath: key] = $0 })
+    }
 
     private var selectedItem: ProjectMappingItem? {
         items.first { $0.projectId == selectedProjectId }
@@ -272,6 +313,8 @@ struct ProjectMappingsView: View {
                                 .foregroundStyle(.secondary)
                         }
 
+                        automationEditor(item)
+
                         // 活动统计与说明
                         if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
                             VStack(alignment: .leading, spacing: 4) {
@@ -346,6 +389,71 @@ struct ProjectMappingsView: View {
         }
     }
 
+    private func automationEditor(_ item: ProjectMappingItem) -> some View {
+        let id = item.projectId
+        let draft = automationDrafts[id] ?? AutomationDraft(item.automation)
+        return VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("自动处理").font(.kpTitle)
+            Toggle("自动接收并处理此项目", isOn: draftBinding(id, \.enabled)).font(.kpBody)
+            Text("关闭后停止新的自动接收、确认与修复规划；进行中的检查、Review 和交付继续。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            ForEach(item.automationPreflight ?? []) { issue in
+                Label(issue.message, systemImage: "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(.orange)
+            }
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Text("标签过滤（逗号分隔，留空接收全部）")
+                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
+                    .textFieldStyle(.roundedBorder).font(.kpBody)
+                    .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
+            }
+            Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).font(.kpBody)
+            Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
+            Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Text("成本上限（美元，留空不限）")
+                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                TextField("0.5–100", text: draftBinding(id, \.cost))
+                    .textFieldStyle(.roundedBorder).font(.kpBody)
+                    .accessibilityLabel("成本上限，美元，留空不限")
+            }
+            if !draft.valid { Text("成本需为 0.5–100 美元，或留空。 ").font(.kpSmall).foregroundStyle(.red) }
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Text("PR 目标分支（留空使用默认分支）")
+                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                TextField("例如 main", text: draftBinding(id, \.base))
+                    .textFieldStyle(.roundedBorder).font(.kpBody)
+                    .accessibilityLabel("PR 目标分支，留空使用默认分支")
+            }
+            HStack(spacing: Spacing.m) {
+                Button("保存自动处理设置") { Task { await saveAutomation(id) } }
+                    .disabled(isSaving || model.busy || !draft.valid)
+                Button("重新载入策略") {
+                    Task {
+                        await loadMappings(refreshRemote: false, resetAutomationFor: id)
+                    }
+                }.disabled(isSaving || isLoading)
+            }
+            Text("策略版本 r\(draft.revision)；保存冲突时保留草稿，重新载入会替换当前策略草稿。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+        }
+    }
+
+    private func saveAutomation(_ id: String) async {
+        guard let draft = automationDrafts[id], draft.valid else { return }
+        isSaving = true
+        defer { isSaving = false }
+        if await model.setProjectAutomation(projectID: id, automation: draft.fields, expectedPolicyRevision: draft.revision) {
+            automationDrafts.removeValue(forKey: id)
+            await loadMappings(refreshRemote: false)
+            successMessage = "已保存自动处理设置"
+            errorMessage = nil
+        } else {
+            errorMessage = "保存失败，草稿已保留。策略冲突时请重新载入后再保存。\n\(model.alertMessage ?? "")"
+        }
+    }
+
     // MARK: - 状态徽标
 
     @ViewBuilder
@@ -401,6 +509,7 @@ struct ProjectMappingsView: View {
         if let item = items.first(where: { $0.projectId == id }) {
             editRepository = item.repository ?? ""
             editEnabled = item.enabled ?? true
+            if automationDrafts[id] == nil { automationDrafts[id] = AutomationDraft(item.automation) }
         }
     }
 
@@ -421,7 +530,9 @@ struct ProjectMappingsView: View {
         }
     }
 
-    private func loadMappings(refreshRemote: Bool) async {
+    private func loadMappings(refreshRemote: Bool, resetAutomationFor: String? = nil) async {
+        mappingGeneration += 1
+        let generation = mappingGeneration
         if refreshRemote {
             isRefreshingRemote = true
         } else {
@@ -436,9 +547,13 @@ struct ProjectMappingsView: View {
                 payload: ["refresh_remote": refreshRemote],
                 as: ProjectMappingsResponse.self
             )
+            guard generation == mappingGeneration else { return }
             revision = resp.revision
             workspaceId = resp.workspaceId ?? ""
             items = resp.items ?? []
+            if let id = resetAutomationFor, let item = items.first(where: { $0.projectId == id }) {
+                automationDrafts[id] = AutomationDraft(item.automation)
+            }
             if let rem = resp.remote {
                 remoteStatus = rem.status ?? "not_requested"
                 remoteFetchedAt = rem.fetchedAt
@@ -448,13 +563,16 @@ struct ProjectMappingsView: View {
             if let cur = selectedProjectId, let match = items.first(where: { $0.projectId == cur }) {
                 editRepository = match.repository ?? ""
                 editEnabled = match.enabled ?? true
+                if automationDrafts[cur] == nil { automationDrafts[cur] = AutomationDraft(match.automation) }
             } else if let first = items.first {
                 selectProject(first.projectId)
             }
         } catch {
+            guard generation == mappingGeneration else { return }
             errorMessage = "读取项目映射失败：\(error.localizedDescription)"
         }
 
+        guard generation == mappingGeneration else { return }
         isLoading = false
         isRefreshingRemote = false
     }

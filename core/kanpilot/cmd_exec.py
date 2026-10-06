@@ -128,6 +128,17 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
         if db.paused(conn, stage):
             return {"claimed": False, "reason": "paused"}
         request = _select_candidate(conn, stage, payload.get("request_id"), now, payload.get("authorized_task_id"))
+        if stage == "review":
+            from . import review_config
+            while request is not None and request["status"] == "queued":
+                candidate_task = db.get_task(conn, request["task_id"])
+                if candidate_task is None or not db.task_schedulable(candidate_task) or not core.is_automation_managed(candidate_task) or review_config.backend(conn) in constants.AUTOMATION_REVIEW_BACKENDS:
+                    break
+                core.fail_request(conn, request, util.to_iso(now), "自动化 Review 后端需为 Plus/Claude/Codex", actor=executor)
+                core.block_task(conn, candidate_task, util.to_iso(now), "自动化 Review 后端不支持", "review_backend_unsupported", executor, stage="review")
+                if payload.get("request_id"):
+                    return {"claimed": False, "reason": "review_backend_unsupported"}
+                request = _select_candidate(conn, stage, None, now, payload.get("authorized_task_id"))
         # 定点领取：请求已在途 → already_claimed（先于 stage_busy/empty）。
         if request is not None and request["status"] == "claimed":
             return {
@@ -396,6 +407,14 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
             "backend": backend,
             "exec_config": config_snapshot,
         }
+        from . import cmd_dispatch
+        if cmd_dispatch._manual_branch_delivery(task):
+            delivery = core.delivery_of(task)
+            context["worktree_path"] = delivery["worktree_path"]
+            context["instruction"] = cmd_dispatch._execution_instruction(dict(task, session_marker=session_marker), delivery["worktree_path"], desktop=(backend == "pi_desktop"))
+        elif core.is_pr_delivery(task):
+            delivery = core.delivery_of(task)
+            context["instruction"] = constants.DISPATCH_INSTRUCTION_BRANCH.format(marker=session_marker, worktree=delivery["worktree_path"], branch=delivery["branch"], plan_ref="下面已核验的计划正文" if backend == "pi_desktop" else "计划文件 " + checked["plan_path"])
         res = {
             "claimed": True, "request_id": request_id,
             "run_id": run_id, "context": context,
@@ -543,6 +562,13 @@ def cmd_report(ctx, payload: dict) -> dict:
                 or payload.get("note"),
             )
             task = db.get_task(conn, task["task_id"])
+            if core.is_automation_managed(task):
+                attempts = core.automation_of(task).get("plan_attempts", 0)
+                if attempts < 2:
+                    core.update_automation(conn, task, now_iso, plan_wanted=True)
+                else:
+                    core.block_task(conn, task, now_iso, payload.get("note") or "自动规划两次失败", "planner_failed", request["claimed_by"], stage="plan")
+                task = db.get_task(conn, task["task_id"])
         if outcome == "needs_user" and task is not None:
             # §4.7 (v1.2): an already-blocked task keeps its original
             # failure_stage/failure_code unless the payload refines the code.
@@ -626,7 +652,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
             "remote_unavailable", f"远端复验失败：{exc}"
         )
     live_task = live.get("task") or {}
-    if live_task.get("status") not in constants.TODO_SLUGS:
+    if live_task.get("status") not in core.expected_remote_slugs(db.require_task(conn, payload["task_id"])):
         raise util.KanpilotError(
             "conflict",
             f"远端任务已不在 To Do（{live_task.get('status')}），拒绝发布",
@@ -755,7 +781,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
             "requirements_sha256": payload["requirements_sha256"],
             "repository": meta["repository"],
         }
-        if plan_kind == "review_fix":
+        if plan_kind == "review_fix" and meta.get("fix_mode") != "same_task":
             report = util.inside(
                 Path(meta["review_report_path"]),
                 constants.review_reports_root(),
@@ -774,9 +800,20 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
                     "review_source_task_id": meta["review_source_task_id"],
                 }
             )
+        if meta.get("fix_mode") == "same_task":
+            fix = db.task_extra(task).get("fix_request") or {}
+            util.require(core.is_automation_managed(task), "same_task 仅用于自动化任务")
+            util.require(meta.get("review_source_task_id") == task["task_id"] and meta.get("fix_round") == core.automation_of(task).get("fix_round"), "same_task 修复轮身份不符")
+            for key in ("review_report_path", "review_report_sha256", "review_key"):
+                util.require(meta.get(key) == fix.get(key.replace("review_report_", "report_")), "same_task " + key + " 不符")
+            report = util.inside(Path(meta["review_report_path"]), constants.review_reports_root(), "review_report_path")
+            util.require(report.is_file() and util.sha256_file(report) == meta["review_report_sha256"], "修复报告哈希不符")
         task = db.require_task(conn, task["task_id"])
         extra = db.task_extra(task)
         # v2 §5.22.4：发布与执行分离——计划登记后置 hold，等用户确认。
+        from . import verify_evidence
+        verification = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+        extra["plan_verify"] = {"plan_sha256": plan_sha, **({"commands": verification["commands"]} if verification["ok"] else {"error": verification["error"]})}
         extra["plan_execution_hold"] = True
         fields["extra_json"] = extra
         core.transition_task(
@@ -792,7 +829,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
             note="plan published",
         )
         # v2 §5.22.5：review_fix 计划写回原评审任务的 repair_plan_*。
-        if plan_kind == "review_fix":
+        if plan_kind == "review_fix" and meta.get("fix_mode") != "same_task":
             source = db.get_task(conn, meta["review_source_task_id"])
             if source is not None and not db.task_is_purged(source):
                 db.set_extra(
@@ -818,7 +855,7 @@ def cmd_register_review(ctx, payload: dict) -> dict:
     if conclusion not in ("pass", "changes_requested", "blocked"):
         raise util.KanpilotError("bad_request", f"invalid conclusion {conclusion}")
     if conclusion == "changes_requested" and not (
-        payload.get("fix_task_id") and payload.get("review_key")
+        payload.get("review_key") and (payload.get("fix_task_id") or (payload.get("fix_mode") == "same_task" and payload.get("fix")))
     ):
         raise util.KanpilotError(
             "bad_request",
@@ -836,6 +873,45 @@ def cmd_register_review(ctx, payload: dict) -> dict:
         )
         util.require(report.is_file(), f"review report missing: {report}")
         report_sha = util.sha256_file(report)
+        if core.is_automation_managed(task):
+            if payload.get("fix_task_id") or (conclusion == "changes_requested" and payload.get("fix_mode") != "same_task"):
+                raise util.KanpilotError("conflict", "自动化任务必须在同任务内修复")
+            if not all(payload.get(k) for k in ("request_id", "run_id", "expected_execution_run_id", "review_key")):
+                raise util.KanpilotError("bad_request", "自动化 Review 缺少身份或 review_key")
+            extra = db.task_extra(task)
+            history = list(extra.get("review_history") or [])
+            if any(h.get("review_key") == payload["review_key"] for h in history):
+                return {"ok": True, "already_registered": True, "report_sha256": report_sha}
+            fix = payload.get("fix")
+            if conclusion == "changes_requested":
+                if not isinstance(fix, dict) or set(fix) != {"title", "description", "priority"} or not all(isinstance(fix[k], str) and fix[k].strip() for k in fix) or fix["priority"] not in constants.REVIEW_FIX_PRIORITIES:
+                    raise util.KanpilotError("bad_request", "修复请求字段不合法")
+            elif fix is not None:
+                raise util.KanpilotError("bad_request", "非修复结论不能带 fix")
+            entry = {"review_key": payload["review_key"], "conclusion": conclusion,
+                     "report_path": str(report), "report_sha256": report_sha,
+                     "execution_run_id": task["run_id"], "head_sha": core.delivery_of(task).get("head_sha"),
+                     "registered_at": ctx.now_iso, "fix_round": core.automation_of(task).get("fix_round", 0), "fix": fix}
+            history.append(entry)
+            db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
+            task = db.require_task(conn, task["task_id"])
+            if conclusion == "changes_requested":
+                from . import automation_policy
+                policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
+                fix_request = dict(entry, **fix, review_run_id=payload["run_id"], created_at=ctx.now_iso, state="held")
+                a = core.automation_of(task)
+                code = ("automation_stopped" if not policy.get("enabled") else
+                        "fix_rounds_exhausted" if a.get("fix_round", 0) >= policy["max_fix_rounds"] else
+                        "auto_budget_exceeded" if not core.automation_budget(task, policy, now)["ok"] else None)
+                if code:
+                    db.set_extra(conn, task, ctx.now_iso, fix_request=fix_request)
+                    core.block_task(conn, db.require_task(conn, task["task_id"]), ctx.now_iso, code, code, "kaneo-review", stage="review")
+                else:
+                    core.start_fix_round_inline(conn, task, ctx.now_iso, fix_request=fix_request)
+                db.add_event(conn, ctx.now_iso, "review_registered", task_id=task["task_id"], actor="kaneo-review", detail={"conclusion": conclusion, "review_key": payload["review_key"]})
+                return {"ok": True, "report_sha256": report_sha, "task_status": db.require_task(conn, task["task_id"])["status"]}
+            if conclusion == "pass":
+                db.set_extra(conn, task, ctx.now_iso, fix_request=None)
         fields = {
             "review_report_path": str(report),
             "review_report_sha256": report_sha,

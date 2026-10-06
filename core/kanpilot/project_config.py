@@ -215,6 +215,8 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
         if rpid not in all_pids:
             all_pids.append(rpid)
 
+    from . import automation_policy
+
     items_output = []
     for pid in all_pids:
         in_saved = pid in saved_items
@@ -253,6 +255,8 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
             "active_task_count": task_count,
             "active_request_count": req_count,
             "updated_at": updated_at,
+            "automation": automation_policy.policy_for(conn, pid) or dict(constants.AUTOMATION_DEFAULTS),
+            "automation_preflight": automation_policy.automation_preflight(conn, pid),
         })
 
     return {
@@ -403,6 +407,7 @@ def set_project_mapping(
 
         # 更新条目
         items[project_id] = {
+            **(existing_entry or {}),
             "project_name": project_name,
             "repository": canonical_repo,
             "enabled": enabled,

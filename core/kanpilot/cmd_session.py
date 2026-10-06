@@ -652,6 +652,8 @@ def cmd_get_session(ctx, payload: dict) -> dict:
                 Path(directory) / dsh_events.EVENT_LOG_NAME
             )
         round_detail = dsh_events.round_detail(row, job, events)
+        # Dispatch confirms the immutable startup proof, not the Goal follow-up turn.
+        round_detail["startup_turn_id"] = (dsh_events.session_event(events) or {}).get("turn_id")
         # §5.18.4：run_status 与 SessionInfo 同口径（读取层超时派生，不回写
         # 索引/job.json）；超时派生 failed 时按 §5.18.4「明确异常 detail 记原因」
         # 由命令层补充 detail（round_store.derive_run_status 同指示）。

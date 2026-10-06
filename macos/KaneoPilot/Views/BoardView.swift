@@ -742,6 +742,9 @@ struct TaskCardView: View {
                         .padding(.vertical, 2)
                         .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
                         .lineLimit(1)
+                    if AutomationPresentation.active(task.automation) {
+                        Text("自动").font(.kpSmall).foregroundStyle(.blue)
+                    }
                     Spacer(minLength: 0)
                     Text(badgeText)
                         .font(.kpSmall)
@@ -759,6 +762,10 @@ struct TaskCardView: View {
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+                if let automation = task.automation, AutomationPresentation.active(automation),
+                   let round = automation.fixRound, round > 0 {
+                    Text("修复 \(round)/\(automation.maxFixRounds ?? 2)").font(.kpSmall).foregroundStyle(.secondary)
                 }
                 supplement
                 if column == .inProgress {
@@ -819,7 +826,7 @@ struct TaskCardView: View {
                     .lineLimit(1)
             case .inReview:
                 if let conclusion = task.reviewSummary?.conclusion {
-                    Text("本轮结论 \(reviewConclusionText(conclusion))")
+                    Text(conclusion == "pass" && task.delivery?.mode == "pr" && task.delivery?.prState != "merged" ? "等待 PR 合并" : "本轮结论 \(reviewConclusionText(conclusion))")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
