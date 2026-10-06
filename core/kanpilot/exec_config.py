@@ -401,7 +401,10 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
     """PI-Desktop 分支就绪态（§5.23.3 / T7.1）：经 ``pi_desktop_backend``
     做连接文件校验 + 内存 initialize/tools/list 与 provider/model 解析。
 
-    返回 {available, detail, tools_ok, version}；token 绝不进返回值。
+    返回 {available, detail, tools_ok, version, session_naming}；token、
+    连接文件全文、Authorization header 绝不进返回值。``session_naming``
+    为 T6 兼容门（§5.23.10）：``pi_session_create`` schema 暴露
+    ``projectName`` 时为 True（旧 Plus → False）。
     """
     try:
         from . import pi_desktop_backend
@@ -411,6 +414,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
             "detail": "pi_desktop 后端模块缺失",
             "tools_ok": False,
             "version": None,
+            "session_naming": False,
         }
 
     conn_file = block.get("connection_file") or constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
@@ -434,6 +438,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
                 "detail": f"跟随 Plus 默认配置 · {err}",
                 "tools_ok": tools_ok,
                 "version": base_probe.get("version"),
+                "session_naming": bool(base_probe.get("session_naming")),
             }
         provider_id = resolved["provider_id"]
         model_id = resolved["model_id"]
@@ -450,6 +455,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
         result = {"ok": False, "detail": f"探测失败：{exc}"}
     if not isinstance(result, dict):
         result = {"ok": False, "detail": "探测结果不可用"}
+    # 模块返回 {ok, detail, tools:set, version, session_naming} → 归一化形状。
 
     gate = tuple(required_tools or constants.PI_DESKTOP_DISPATCH_TOOLS)
     tools = result.get("tools")
@@ -462,6 +468,7 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
             result.get("version")
             if isinstance(result.get("version"), str) else None
         ),
+        "session_naming": bool(result.get("session_naming")),
     }
 
 def capabilities(
@@ -538,6 +545,7 @@ def capabilities(
             "detail": "pi_desktop 配置未保存",
             "tools_ok": False,
             "version": None,
+            "session_naming": False,
         }
 
     return {

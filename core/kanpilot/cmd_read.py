@@ -497,3 +497,468 @@ def cmd_doctor(ctx, payload: dict) -> dict:
              "skipped": True}
         )
     return {"ok": all(item["ok"] for item in checks), "checks": checks}
+
+
+# ===================================== Goal 报告读取与完成判定（T5，§5.23.10）
+# 本段实现 T5-A/T5-B/T5-C 的核心侧：
+# - ``goal_round_identity``：解析一轮 pi_desktop 轮次的报告身份材料（只读）；
+# - ``read_goal_report``：只读取回报告并做身份核对（跨轮/身份不符 → 确定性
+#   失败，绝不返回伪造正文）；
+# - ``verify_goal_completion``：确定性报告底线（T5-C），供
+#   ``record-goal-evaluation`` 与 ``advance-task`` 硬闸复用；
+# - ``cmd_get_goal_report``：monitor AI 的只读入口。
+
+# 报告身份材料缺失/不符的失败原因（机器可读，供执行端与测试断言）。
+GOAL_REPORT_MISSING_APPROVAL = "goal_approval_missing"
+GOAL_REPORT_NOT_PI_DESKTOP = "round_not_pi_desktop"
+GOAL_REPORT_JOB_UNREADABLE = "job_unreadable"
+GOAL_REPORT_SESSION_MISSING = "job_session_missing"
+GOAL_REPORT_TOOL_MISSING = "goal_report_tool_missing"
+GOAL_REPORT_IDENTITY_MISMATCH = "goal_report_identity_mismatch"
+GOAL_REPORT_UNREADABLE = "goal_report_unreadable"
+
+
+def _goal_fail(code: str, reason: str, detail: str = "") -> None:
+    """确定性失败（中文原因 + 机器可读前缀），绝不返回伪造报告正文。"""
+    message = f"{reason}：{detail}" if detail else reason
+    raise util.KanpilotError(code, message)
+
+
+def goal_round_identity(conn, task_id: str, run_id: str) -> dict:
+    """解析 pi_desktop 轮次的报告身份材料（只读；§5.23.10 T5-B）。
+
+    返回 ``{"task", "round", "job", "events", "run_dir", "session_id",
+    "proposal_id", "execution_id", "approved_turns", "plan_sha256",
+    "connection_file", "goal_approval"}``。
+
+    任一前置不成立（轮次非 pi_desktop、job 身份不符、缺 session_id、
+    缺已批准 ``goal_approval``）→ ``KanpilotError``（确定性失败）。
+    """
+    from . import dsh_events, headless_adapter, round_store
+
+    if not isinstance(task_id, str) or not task_id:
+        raise util.bad_request("task_id 必须为非空字符串")
+    if not isinstance(run_id, str) or not run_id:
+        raise util.bad_request("run_id 必须为非空字符串")
+    task = db.require_task(conn, task_id)
+    row = round_store.get_round(conn, task_id, run_id)
+    if row is None:
+        raise util.KanpilotError(
+            "not_found", f"execution round not found: {task_id}/{run_id}"
+        )
+    if row["backend"] != "pi_desktop":
+        _goal_fail(
+            "validation_failed",
+            f"该轮次不是 pi_desktop 后端（{row['backend']}），没有 Goal 报告",
+            GOAL_REPORT_NOT_PI_DESKTOP,
+        )
+    config = round_store.round_view(row).get("config") or {}
+    source = headless_adapter.resolve_source(conn)
+    try:
+        run_dir = source.run_dir(task_id, run_id)
+    except headless_adapter.HeadlessError as exc:
+        _goal_fail("validation_failed", "运行记录目录不可用", exc.detail)
+    job, error = dsh_events.read_job(
+        run_dir, task_id, run_id, backend="pi_desktop"
+    )
+    if job is None:
+        _goal_fail(
+            "validation_failed", "job.json 不可读或身份不符",
+            f"{GOAL_REPORT_JOB_UNREADABLE}：{error}",
+        )
+    events, _detail = dsh_events.iter_events(
+        run_dir / dsh_events.EVENT_LOG_NAME
+    )
+    session_id = job.get("session_id")
+    if not session_id:
+        _goal_fail(
+            "conflict", "该轮次缺少持久会话身份，无法关联 Goal 报告",
+            GOAL_REPORT_SESSION_MISSING,
+        )
+    approval = job.get("goal_approval")
+    if not isinstance(approval, dict) or approval.get("status") != "approved":
+        # T5-B：无 job.goal_approval（或未批准）→ 不能放行。
+        _goal_fail(
+            "conflict",
+            "本轮没有已批准的 Goal 契约（job.goal_approval 缺失或未批准），"
+            "无法关联完成报告",
+            GOAL_REPORT_MISSING_APPROVAL,
+        )
+    proposal_id = approval.get("proposal_id")
+    execution_turn = approval.get("execution_turn_id")
+    if not proposal_id or not execution_turn:
+        _goal_fail(
+            "conflict",
+            "Goal 契约留痕缺少 proposal_id/execution_turn_id",
+            GOAL_REPORT_MISSING_APPROVAL,
+        )
+    # turnId 允许沿本轮已记录的 turn_adopted 链核对（§5.23.8）——瞬时错误后
+    # 同一会话自动重开的后续 turn 仍属本轮。
+    approved_turns = {str(execution_turn)}
+    for item in job.get("turn_adopted") or []:
+        if isinstance(item, dict) and item.get("to"):
+            approved_turns.add(str(item["to"]))
+    return {
+        "task": task,
+        "round": row,
+        "job": job,
+        "events": events,
+        "run_dir": run_dir,
+        "session_id": str(session_id),
+        "proposal_id": str(proposal_id),
+        "execution_id": (str(approval["execution_id"])
+                         if approval.get("execution_id") else None),
+        "approved_turns": approved_turns,
+        "plan_sha256": task["plan_sha256"],
+        "connection_file": config.get("connection_file"),
+        "goal_approval": approval,
+    }
+
+
+def _report_candidates(identity: dict, client) -> list:
+    """定位本轮的 Goal 报告候选（只读；优先已记录的 execution_id）。
+
+    没有记录 execution_id 的旧轮次（升级时尚在运行的旧 Plus 轮次）：以
+    ``pi_goal_report_list {sessionId}`` 只读列出本会话报告，按
+    ``proposalId`` + 已批准 turn 收敛到唯一一份；0 份 → ``not_found``，
+    多份 → ``conflict``（歧义不得猜测）。
+    """
+    if identity["execution_id"]:
+        return [{"executionId": identity["execution_id"], "reportId": None}]
+    try:
+        listing = client.goal_report_list(identity["session_id"])
+    except util.KanpilotError as exc:
+        return [{"error": exc}]
+    rows = listing.get("reports") if isinstance(listing, dict) else None
+    matches = []
+    for item in rows or []:
+        if not isinstance(item, dict):
+            continue
+        proposal = item.get("proposalId") or item.get("proposal_id")
+        turn = item.get("turnId") or item.get("turn_id")
+        execution = item.get("executionId") or item.get("execution_id")
+        report_id = item.get("reportId") or item.get("report_id")
+        if proposal is not None and str(proposal) != identity["proposal_id"]:
+            continue
+        if turn is not None and str(turn) not in identity["approved_turns"]:
+            continue
+        matches.append({"executionId": execution, "reportId": report_id})
+    return matches
+def read_goal_report(conn, task_id: str, run_id: str, *,
+                     client=None, connection_file=None) -> dict:
+    """只读取回本轮 Goal 报告并完成身份核对（§5.23.10 T5-A/T5-B）。
+
+    返回 ``{"identity", "state", "detail", "report", "report_sha256",
+    "report_id", "session_id", "proposal_id", "execution_id", "turn_id",
+    "ready", "structured", "execution_status", "verdict"}``。
+
+    **绝不**返回跨轮/身份不符的报告正文；``state="ready"`` 且身份全部相符
+    时 ``ready=True``。语义判断（AI 判定）不属于本函数职责。
+    """
+    from . import pi_desktop_backend
+
+    identity = goal_round_identity(conn, task_id, run_id)
+    connection_file = connection_file or identity["connection_file"]
+    if client is None:
+        if not connection_file:
+            _goal_fail(
+                "validation_failed",
+                "该轮次未记录 Plus 连接文件，无法读取 Goal 报告",
+                GOAL_REPORT_UNREADABLE,
+            )
+        record = pi_desktop_backend.load_connection(connection_file)
+        client = pi_desktop_backend.MCPClient(
+            record["url"], record["token"], timeout=30
+        )
+        client.connect()
+        tools = client.tools_list()
+        if pi_desktop_backend.GOAL_REPORT_GET_TOOL not in tools:
+            _goal_fail(
+                "validation_failed",
+                "PI-Desktop 控制面缺少只读报告工具 "
+                f"{pi_desktop_backend.GOAL_REPORT_GET_TOOL}"
+                "（Plus 版本过旧），不能放行",
+                GOAL_REPORT_TOOL_MISSING,
+            )
+    candidates = _report_candidates(identity, client)
+    if candidates and isinstance(candidates[0].get("error"), util.KanpilotError):
+        exc = candidates[0]["error"]
+        _goal_fail(
+            "remote_unavailable",
+            "Goal 报告列表读取失败（临时读取失败，不得当作没有报告）",
+            exc.message,
+        )
+    if not candidates:
+        # 本会话没有本轮的报告：明确「没有报告」，不是伪造的完成报告。
+        return _report_result(identity, {
+            "state": "not_found", "detail": "本会话没有本轮已批准的 Goal 报告",
+            "report": None, "report_sha256": None, "report_id": None,
+        })
+    if len(candidates) > 1:
+        _goal_fail(
+            "conflict",
+            "本会话同轮次存在多份 Goal 报告，身份歧义不猜测",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+    target = candidates[0]
+    try:
+        payload = client.goal_report_get(
+            identity["session_id"],
+            execution_id=target.get("executionId"),
+            report_id=target.get("reportId"),
+        )
+    except util.KanpilotError as exc:
+        # tool 级失败按分态处理：报告自身的 pending/draft/failed/corrupt/
+        # truncated 是**明确分态**；其余（连接/传输/未知）是临时读取失败，
+        # 必须区别于「没有报告」（§5.23.10 T5-A/T5-D）。
+        state = pi_desktop_backend.classify_report_error(
+            exc.code, exc.message
+        )
+        if state in pi_desktop_backend.GOAL_REPORT_STATES:
+            return _report_result(identity, {
+                "state": state, "detail": exc.message, "report": None,
+                "report_sha256": None, "report_id": target.get("reportId"),
+            })
+        _goal_fail(
+            "remote_unavailable",
+            "Goal 报告读取失败（临时读取失败，不得当作没有报告）",
+            exc.message,
+        )
+    resolved = pi_desktop_backend.normalize_goal_report(
+        payload, report_id=target.get("reportId")
+    )
+    if resolved["state"] != "ready":
+        return _report_result(identity, resolved)
+    _verify_report_identity(identity, resolved["report"])
+    return _report_result(identity, resolved)
+def _verify_report_identity(identity: dict, report: dict) -> None:
+    """报告身份核对（§5.23.10 T5-B）；绝不按 session 名称/标题匹配。"""
+    from . import pi_desktop_backend
+
+    fields = pi_desktop_backend.report_identity(report)
+    if str(fields.get("session_id") or "") != identity["session_id"]:
+        _goal_fail(
+            "conflict",
+            "报告 sessionId 与本轮持久会话身份不符（可能是另一会话的报告）",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+    if str(fields.get("proposal_id") or "") != identity["proposal_id"]:
+        _goal_fail(
+            "conflict",
+            "报告 proposalId 与本轮已批准的 Goal 契约不符",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+    execution_id = fields.get("execution_id")
+    if not execution_id:
+        _goal_fail(
+            "conflict", "报告缺少 executionId，身份不完整",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+    recorded = identity.get("execution_id")
+    if recorded and str(execution_id) != str(recorded):
+        _goal_fail(
+            "conflict", "报告 executionId 与本轮记录不符",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+    if recorded is None:
+        # 旧轮次（升级时仍在运行）没有本地 executionId：以生产报告的对象为准。
+        identity["execution_id"] = str(execution_id)
+    turn_id = fields.get("turn_id")
+    if turn_id is not None and str(turn_id) not in identity["approved_turns"]:
+        # turnId 允许沿本轮 turn_adopted 链核对（§5.23.8）。
+        _goal_fail(
+            "conflict",
+            "报告 turnId 不属于本轮已批准的执行轮次（含 turn_adopted 链）",
+            GOAL_REPORT_IDENTITY_MISMATCH,
+        )
+def _report_result(identity: dict, resolved: dict) -> dict:
+    from . import pi_desktop_backend
+
+    report = resolved.get("report")
+    return {
+        "identity": identity,
+        "state": resolved.get("state"),
+        "detail": resolved.get("detail"),
+        "report": report,
+        "report_sha256": resolved.get("report_sha256"),
+        "report_id": resolved.get("report_id"),
+        "session_id": identity["session_id"],
+        "proposal_id": identity["proposal_id"],
+        "execution_id": identity.get("execution_id"),
+        "turn_id": ((report or {}).get("turnId")
+                    or (report or {}).get("turn_id")),
+        "ready": resolved.get("state") == "ready",
+        "structured": (
+            pi_desktop_backend.report_integrity_kind(report) == "structured"
+            if report else False
+        ),
+        "execution_status": (
+            pi_desktop_backend.report_execution_status(report)
+            if report else None
+        ),
+        "verdict": (
+            pi_desktop_backend.report_verdict(report) if report else None
+        ),
+    }
+def _fallback_report_id(report, resolved) -> Optional[str]:
+    """report_id 兜底：报告自带 id > Host 返回的 executionId 组合。
+
+    Plus 的 ``GoalReportSummary`` 身份字段以 ``reportId`` 为准；缺失时用
+    ``executionId`` 作为稳定引用（同一报告同一值），并**不**冒充 AI 判定。
+    """
+    if isinstance(report, dict):
+        for key in ("reportId", "report_id", "id"):
+            value = report.get(key)
+            if isinstance(value, str) and value:
+                return value
+    execution_id = resolved.get("execution_id")
+    return f"execution:{execution_id}" if execution_id else None
+def cmd_get_goal_report(ctx, payload: dict) -> dict:
+    """``get-goal-report {task_id, run_id}``：monitor AI 的只读报告入口。
+
+    返回经身份/完整性校验的报告（T5-A/T5-B）。报告是**不可信数据**：本命令
+    不做语义判断，只透出报告、身份、分态与哈希；失败不伪造正文。
+    """
+    from . import pi_desktop_backend
+
+    task_id = payload["task_id"]
+    run_id = payload["run_id"]
+    resolved = read_goal_report(ctx.conn, task_id, run_id)
+    identity = resolved["identity"]
+    report = resolved["report"]
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "session_id": resolved["session_id"],
+        "proposal_id": resolved["proposal_id"],
+        "execution_id": resolved["execution_id"],
+        "turn_id": resolved["turn_id"],
+        "state": resolved["state"],
+        "detail": resolved["detail"],
+        "report_sha256": resolved["report_sha256"],
+        "report_id": (resolved["report_id"]
+                      or _fallback_report_id(report, resolved)),
+        "integrity_kind": (
+            pi_desktop_backend.report_integrity_kind(report)
+            if report else None
+        ),
+        "execution_status": resolved["execution_status"],
+        "verdict": resolved["verdict"],
+        "report": report,
+        "goal_approval": {
+            "proposal_id": identity["proposal_id"],
+            "planning_turn_id": identity["goal_approval"].get(
+                "planning_turn_id"
+            ),
+            "execution_turn_id": identity["goal_approval"].get(
+                "execution_turn_id"
+            ),
+            "approved_at": identity["goal_approval"].get("approved_at"),
+        },
+        "plan_sha256": identity["plan_sha256"],
+        "read_only": True,
+    }
+def collect_criterion_reviews(criterion_reviews) -> tuple:
+    """校验 AI 审查项形状 → (reviews, referenced_ids)；失败 → bad_request。"""
+    if not isinstance(criterion_reviews, list):
+        raise util.bad_request("criterion_reviews 必须是数组")
+    reviews = []
+    referenced = set()
+    for index, item in enumerate(criterion_reviews):
+        if not isinstance(item, dict):
+            raise util.bad_request(f"criterion_reviews[{index}] 必须是对象")
+        cid = item.get("id")
+        if not isinstance(cid, str) or not cid.strip():
+            raise util.bad_request(f"criterion_reviews[{index}] 缺少 id")
+        outcome = item.get("result")
+        if outcome not in ("met", "missing", "failed", "unknown"):
+            raise util.bad_request(
+                f"criterion_reviews[{index}].result 非法：{outcome!r}"
+            )
+        refs = item.get("evidence_refs")
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list):
+            raise util.bad_request(
+                f"criterion_reviews[{index}].evidence_refs 必须是数组"
+            )
+        clean_refs = []
+        for ref in refs:
+            if not isinstance(ref, str) or not ref.strip():
+                raise util.bad_request(
+                    f"criterion_reviews[{index}].evidence_refs 含非法引用"
+                )
+            clean_refs.append(ref)
+            referenced.add(ref)
+        reviews.append({
+            "id": cid,
+            "result": outcome,
+            "reason": item.get("reason"),
+            "evidence_refs": clean_refs,
+        })
+    return reviews, referenced
+def verify_goal_completion(report: dict, reviews: list,
+                          referenced: set) -> None:
+    """确定性报告底线（§5.23.10 T5-C）；任一不满足 → conflict。
+
+    报告自称 ``verdict=met`` 是**必要但非充分**条件：这里只核对不可绕过的
+    身份与报告底线，语义完备性由独立 monitor AI 判断。
+    """
+    from . import pi_desktop_backend
+
+    if not isinstance(report, dict):
+        raise util.KanpilotError("conflict", "缺少可用于完成判定的结构化报告")
+    if str(report.get("status") or "").lower() != "ready":
+        raise util.KanpilotError(
+            "conflict", f"报告 status 不是 ready：{report.get('status')!r}"
+        )
+    kind = pi_desktop_backend.report_integrity_kind(report)
+    if kind != "structured":
+        raise util.KanpilotError(
+            "conflict",
+            f"报告 integrity.kind 不是 structured（{kind!r}）："
+            "fallback 等同没有完成报告",
+        )
+    execution_status = pi_desktop_backend.report_execution_status(report)
+    if execution_status != "completed":
+        raise util.KanpilotError(
+            "conflict",
+            f"报告 execution.status 不是 completed：{execution_status!r}",
+        )
+    verdict = pi_desktop_backend.report_verdict(report)
+    if verdict != "met":
+        raise util.KanpilotError(
+            "conflict", f"报告 verdict 不是 met：{verdict!r}"
+        )
+    if not reviews:
+        raise util.KanpilotError("conflict", "完成判定的审查项为空")
+    ids = [review["id"] for review in reviews]
+    if len(set(ids)) != len(ids):
+        raise util.KanpilotError("conflict", "完成判定的审查项 ID 重复")
+    not_met = [review["id"] for review in reviews
+               if review["result"] != "met"]
+    if not_met:
+        raise util.KanpilotError(
+            "conflict",
+            "完成判定要求全部审查项为 met，非 met 项：" + "、".join(not_met),
+        )
+    reference_ids = pi_desktop_backend.report_reference_ids(report)
+    known = set()
+    for bucket in reference_ids.values():
+        known |= bucket
+    criteria = reference_ids.get("criteria") or set()
+    if criteria:
+        unknown_criteria = [cid for cid in ids if cid not in criteria]
+        if unknown_criteria:
+            raise util.KanpilotError(
+                "conflict",
+                "完成判定引用了报告中不存在的验收项 ID："
+                + "、".join(unknown_criteria),
+            )
+    unknown_refs = sorted(ref for ref in referenced if ref not in known)
+    if unknown_refs:
+        raise util.KanpilotError(
+            "conflict",
+            "完成判定引用了报告中不存在的 check/evidence ID："
+            + "、".join(unknown_refs),
+        )

@@ -117,7 +117,10 @@ class _FakeMCPHandler(http.server.BaseHTTPRequestHandler):
         if method == "tools/list":
             self._send(200, {
                 "jsonrpc": "2.0", "id": msg.get("id"),
-                "result": {"tools": [{"name": n} for n in srv.tools]},
+                "result": {"tools": [
+                    {"name": name, "inputSchema": srv.tool_schema(name)}
+                    for name in srv.tools
+                ]},
             })
             return
         if method == "tools/call":
@@ -194,6 +197,15 @@ class FakeMCPServer:
         self.settings = {}
         self.attach_calls: list = []
         self.model_source = "cache"
+        # T6（§5.23.10）：pi_session_create 的 inputSchema 是否暴露 projectName。
+        # 旧 Plus → False（兼容门必须明确阻断）。
+        self.session_naming = True
+        # T5：Goal 报告只读工具的行为开关。
+        self.goal_reports: list = []      # list 结果（summary 行）
+        self.goal_report: dict = None     # get 结果（完整报告 + report_sha256）
+        self.goal_report_calls: list = []
+        self.goal_report_mode = "ok"      # ok | error | timeout
+        self.created_response_names = None  # 覆写 create 返回的显示名
         self.httpd = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), _FakeMCPHandler
         )
@@ -226,6 +238,19 @@ class FakeMCPServer:
     def url(self):
         return f"http://127.0.0.1:{self.port}/mcp"
 
+    def tool_schema(self, name):
+        """``tools/list`` 的 inputSchema（T6 兼容门读取 projectName）。"""
+        if name == "pi_session_create":
+            properties = {
+                "projectPath": {"type": "string"},
+                "title": {"type": "string"},
+                "mode": {"type": "string"},
+            }
+            if self.session_naming:
+                properties["projectName"] = {"type": "string"}
+            return {"type": "object", "properties": properties}
+        return {"type": "object", "properties": {}}
+
     def tool_call(self, name, args):
         if name == "pi_desktop_invoke":
             operation = args.get("operation")
@@ -247,9 +272,42 @@ class FakeMCPServer:
                 "code": "NOT_FOUND", "message": operation}}}
         if name == "pi_session_create":
             self.created = dict(args)
+            returned_title = args.get("title")
+            returned_project = args.get("projectName")
+            if self.created_response_names:
+                # T6：模拟 Plus 返回的显示名与请求不符（身份不符场景）。
+                returned_title = self.created_response_names.get(
+                    "title", returned_title
+                )
+                returned_project = self.created_response_names.get(
+                    "projectName", returned_project
+                )
             return {"structuredContent": {
                 "session": {"id": self.session_id,
-                            "title": args.get("title")}}}
+                            "title": returned_title,
+                            "projectPath": args.get("projectPath"),
+                            "projectName": returned_project}}}
+        if name == "pi_goal_report_list":
+            self.goal_report_calls.append((name, dict(args)))
+            if self.goal_report_mode == "list_error":
+                return {"isError": True, "structuredContent": {"error": {
+                    "code": "INTERNAL", "message": "report list unavailable"}}}
+            return {"structuredContent": {"reports": [
+                dict(item) for item in self.goal_reports
+            ]}}
+        if name == "pi_goal_report_get":
+            self.goal_report_calls.append((name, dict(args)))
+            if self.goal_report_mode == "error":
+                return {"isError": True, "structuredContent": {"error": {
+                    "code": "NOT_FOUND", "message": "report not found"}}}
+            if self.goal_report is None:
+                return {"isError": True, "structuredContent": {"error": {
+                    "code": "NOT_FOUND", "message": "report not found"}}}
+            payload = dict(self.goal_report)
+            payload.setdefault("sessionId", args.get("sessionId"))
+            if args.get("executionId"):
+                payload.setdefault("executionId", args["executionId"])
+            return {"structuredContent": payload}
         if name == "pi_session_configure":
             self.configured = args
             return {"structuredContent": {"ok": True}}

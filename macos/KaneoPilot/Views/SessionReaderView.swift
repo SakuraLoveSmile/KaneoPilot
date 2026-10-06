@@ -328,23 +328,50 @@ final class SessionReaderStore: ObservableObject {
     }
 
     /// 按 id + revision 去重/更新，按 seq 排序（protocol §5.15.5）。
+    ///
+    /// T1（ui-spec §4.5「无变化轮询不重排」）：本次既无新消息也无修订（含同 id
+    /// 逐字段等价的重发）时直接返回——不复制、不排序、也不给 `messages` 赋值，
+    /// 因而不会发布新数组、不会触发依赖该数组的自动滚动。
+    /// 有变化时只处理改变的行：一次 O(n) 建索引取代逐条 `firstIndex` 的 O(n·m)，
+    /// 并且只在确有条目变化时才写回 `messages`（一次 `@Published` 发布）；
+    /// 修订替换沿用原折叠状态并迁移 listID，结果仍按 `seq` 排序。
     private func applyMessages(_ incoming: [SessionMessage]) {
+        guard !incoming.isEmpty else { return }
+
+        var positions: [String: Int] = [:]
+        positions.reserveCapacity(messages.count)
+        for (index, message) in messages.enumerated() {
+            if let id = message.id { positions[id] = index }
+        }
+
         var list = messages
         var added = 0
+        var changed = 0
         for message in incoming {
-            if let index = list.firstIndex(where: { $0.id != nil && $0.id == message.id }) {
-                if (message.revision ?? 0) >= (list[index].revision ?? 0) {
-                    // 折叠状态随消息（id）而不是随 revision：修订替换后沿用
-                    // 原状态（用户展开过就保持展开），listID 变化时迁移。
-                    let previousID = list[index].listID
-                    let wasCollapsed = collapsed.contains(previousID)
-                    list[index] = message
-                    if previousID != message.listID {
-                        collapsed.remove(previousID)
-                        if wasCollapsed { collapsed.insert(message.listID) }
-                    }
+            guard let id = message.id else {
+                list.append(message)
+                added += 1
+                if message.hasCollapsibleContent { collapsed.insert(message.listID) }
+                continue
+            }
+            if let index = positions[id] {
+                let existing = list[index]
+                // 低 revision 的重发不落地；逐字段等价的同 id 重发 = 无变化
+                // （§5.15.5 的 revision 由内容派生）→ 不替换、不发布。
+                guard (message.revision ?? 0) >= (existing.revision ?? 0),
+                      !isSameSessionMessage(existing, message) else { continue }
+                // 折叠状态随消息（id）而不是随 revision：修订替换后沿用
+                // 原状态（用户展开过就保持展开），listID 变化时迁移。
+                let previousID = existing.listID
+                let wasCollapsed = collapsed.contains(previousID)
+                list[index] = message
+                if previousID != message.listID {
+                    collapsed.remove(previousID)
+                    if wasCollapsed { collapsed.insert(message.listID) }
                 }
+                changed += 1
             } else {
+                positions[id] = list.count
                 list.append(message)
                 added += 1
                 // §4.5：工具调用/结果与过长正文默认折叠（逐条可展开）
@@ -353,9 +380,16 @@ final class SessionReaderStore: ObservableObject {
                 }
             }
         }
-        list.sort { ($0.seq ?? 0) < ($1.seq ?? 0) }
+
+        // 无变化：`messages` 未被写入 → 不排序、不发布、不安排自动滚动。
+        guard added > 0 || changed > 0 else { return }
+        // 仍按 seq 排序（§5.15.5）；只有新消息可能打乱顺序，追加时才带来
+        // 「暂停跟随时有新内容」标记。
+        if added > 0 {
+            list.sort { ($0.seq ?? 0) < ($1.seq ?? 0) }
+            if !following { hasNewContent = true }
+        }
         messages = list
-        if added > 0, !following { hasNewContent = true }
     }
 
     // MARK: 定期更新轮询
@@ -442,6 +476,31 @@ final class SessionReaderStore: ObservableObject {
         following = true
         hasNewContent = false
     }
+
+// MARK: - T1 无变化判定（ui-spec §4.5「无变化轮询不重排」）
+
+/// 同 `id` 重发的两条消息是否逐字段等价：等价即无变化，不替换、不发布。
+/// 这一层用于抵御 §5.15.5 上游可能出现的「同 id + 同 revision 原样重发」。
+private func isSameSessionMessage(_ lhs: SessionMessage, _ rhs: SessionMessage) -> Bool {
+    lhs.id == rhs.id
+        && lhs.seq == rhs.seq
+        && lhs.runId == rhs.runId
+        && lhs.type == rhs.type
+        && lhs.content == rhs.content
+        && lhs.revision == rhs.revision
+        && lhs.sourceAt == rhs.sourceAt
+        && isSameSessionTool(lhs.tool, rhs.tool)
+}
+
+private func isSameSessionTool(_ lhs: SessionTool?, _ rhs: SessionTool?) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil): return true
+    case (let l?, let r?):
+        return l.name == r.name && l.input == r.input
+            && l.output == r.output && l.exitCode == r.exitCode
+    default: return false
+    }
+}
 }
 
 // MARK: - trash-session / restore-session 响应（protocol §5.16.2）
@@ -1201,9 +1260,14 @@ struct SessionMessageRow: View {
     }
 
     /// 正文 13pt；代码/终端/工具输出等宽 12pt（§4.4）。
+    ///
+    /// T1（ui-spec §4.5「折叠的长正文只排版可见预览」）：折叠且不搜索时只把
+    /// 预览行交给 `Text`——长工具输出不再为整篇原文构建高亮 `AttributedString`
+    /// 再交给 `lineLimit` 裁掉，排版成本与可见内容成正比。完整原文仍可复制：
+    /// 复制按钮取 `message.content`，与行内展示无关。
     @ViewBuilder
     private var contentText: some View {
-        let text = message.content ?? ""
+        let text = truncatesPreview ? previewText : (message.content ?? "")
         if message.isMonospaced {
             Text(AttributedString.highlighted(text, query: query))
                 .font(.system(size: 12, design: .monospaced))
@@ -1217,6 +1281,14 @@ struct SessionMessageRow: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// 预览只取前 `previewLineLimit` 行（每条行尾保留换行以维持既有分行观感）。
+    private var previewText: String {
+        let text = message.content ?? ""
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > Self.previewLineLimit else { return text }
+        return lines.prefix(Self.previewLineLimit).joined(separator: "\n")
     }
 
     private func toolDetail(_ tool: SessionTool) -> some View {

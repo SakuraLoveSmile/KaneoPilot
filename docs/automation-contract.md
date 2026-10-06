@@ -1,5 +1,7 @@
 # KaneoPilot 执行端契约 v4（冻结，pi/Codex 执行端 + PI-Desktop-Plus 角色接入 / App 内置调度）
 
+> Goal 报告驱动的完成判定与监控分支见 §6 和 protocol.md §5.23.10。
+
 执行端每 15 分钟检查所属阶段，错开起始分钟；无请求立即结束。承载方式自 v1.6 起为 **KaneoPilot App 内置 ExecutorScheduler**（App 存活期间定时拉起 `python3 -m kanpilot.executor_runner --stage <stage>`，runner 渲染 `core/executor_prompts/<stage>.md` 后以 `pi -p --mode json` 执行一轮领取-执行-汇报循环）。业务周期（评审）由核心 settings 单独配置——领取频率不等于反复执行全部任务。
 **v4（T6）起四个模型调用点各自可选后端**（protocol §5.24）：计划生成 `planner_runner`（payload `planner_backend=codex|pi_desktop`）；dispatch/monitor 控制端 `executor_runner --stage dispatch|monitor`（`exec_config.controller_backend`）；review 控制端 `executor_runner --stage review`（`review_config.backend`）；任务执行仍由 `exec_config.backend` 决定 worker。选 `pi_desktop` 时该轮经 Plus 本机 MCP 控制会话（计划/Review 为 `mode=plan`，控制端为 `mode=agent`）运行，**不再**拉起 `codex exec` 或 `pi -p`；队列、租约、审批与状态写入仍全在 KaneoPilot，人工启动规划、确认计划后执行、Review 后完成/修复的流程不变。
 
@@ -106,3 +108,33 @@ Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `monitor_mcp.m
 
 - 执行端派发及 runner 取决于请求固化的 `project_snapshot`（包含 `project_id`, `project_name`, `repository`, `project_mapping_revision`），不依赖运行时临时查询当前设置，确保已有排队和执行中任务免受外部映射修改干扰。
 - 新计划文件按 `projects/<project_id>/` 安全目录写入，并在发布和派发前进行一致性快照核验。
+
+
+## 6. Goal 报告完成判定与派发命名（v3 补丁，T5/T6）
+
+本节是 protocol.md §5.23.10 在执行端视角的落地口径；字段、身份核对与失败语义以 §5.23.10 为准。
+
+### 6.1 monitor 分支口径（T5）
+
+- **被观察轮次恒取 `task.run_id`**；`execution_run_id`（被观察轮次）与 `monitor_run_id`（本端 monitor 请求自己的 run_id）不可互换。
+- `round_detail.backend` 分支：
+  - `pi`：维持 §5.18.4 三证据（terminal outcome=completed + exit_code=0/finished + 语义验证证据）不变。
+  - `pi_desktop`：**不再**以「发现一条退出码 0 的命令」或会话最后一句作为放行条件。完成判定以 **Plus Host 结构化 Goal 报告**为主材料：
+    1. 终态 `round_detail.terminal` 出现且执行终态为 `completed`（`finished` + `exit_code=0`）；
+    2. `get-goal-report {task_id, run_id=task.run_id}` 取回经身份/完整性校验的报告；
+    3. 报告须 `status=ready` 且 `integrity.kind=structured`（`ready + fallback` **等同没有完成报告**）；执行终态落地后给 Host **最多 60 秒**完成 outbox/报告发布，期间只读查询、**不重发 prompt**；
+    4. monitor AI 把报告当作**不可信数据**，逐项比对当前已批准 KaneoPilot 计划验收、Plus Goal 契约、报告的 criteria/steps/checks/evidences、limitations 与 nextSteps，输出 `decision ∈ {complete,incomplete,uncertain}` 与 `criterion_reviews`；
+    5. `decision=complete` → `record-goal-evaluation` 登记判定 → `advance-task --target in-review`（带 monitor claim 与 evaluation event ID）→ `report succeeded`。
+- **缺报告/兜底报告/报告不完整** → `report needs_user` + `failure_code=execution_failed`（原因写明：无结构化报告 / `integrity=fallback` / AI 判 `incomplete` / 报告自称 `partial|blocked`），**不自动重新派发、不重发 prompt、不重建会话**。
+- **报告不可读/损坏或 AI `uncertain`** → 不进入 Review；最多**一次有界重读**后同样交人工，原因须区别于「已验证失败」。临时读取失败**不伪称**没有报告。
+- **旧轮次**：升级时仍 `running` 的旧 Plus 轮次若无报告，同样按缺报告规则交人工，**不走旧消息三证据放行**；已在 `in_review`/`done`/`needs_user` 的历史任务不回填、不降级、不改判。
+- `goal_report_evaluated` 幂等：同 `task_id`/`execution_run_id`/`plan_sha256`/`report_sha256` 已有判定 → 复用原事件，不重复调用 AI。
+- **采集修补**：`pi_desktop_worker` 的 shell 工具名集合须同时接受 `Bash`/`bash`（大小写归一），`exitCode` 保真透出；该修补服务于报告证据与 Review 查阅，不单独构成放行条件。
+- 提示词 `core/executor_prompts/monitor.md` 必须同时写明 `pi` 与 `pi_desktop` 两个分支，不得把 `backend != pi` 称作旧后端。
+
+### 6.2 dispatch 命名（T6）
+
+- KaneoPilot 在 `dispatch-start` 前复核 Plus 能力时必须确认 `pi_session_create` 工具 schema 暴露 `projectName`（protocol §5.23.10 T6 兼容门）；旧 Plus → 明确阻断显示「版本缺少工作区命名能力」，**不静默**派发 UUID 名称。
+- 新轮次 `spec.json` 固化展示快照 `workspace_display_name`/`session_display_name`（来自 `task.project_name`/`task.title`）；worker 在 `pi_session_create` 携带 `{projectPath, projectName, title, mode:"goal", …}`。
+- 显示名只用于展示：派发身份仍以 `session_marker`/`task_id`/`run_id`/`session_id`/`turn_id`/计划哈希为准；不得用于去重、路径生成、权限判断或完成判定。
+- PI CLI 后端、已派发的 spec/job/session、Plus 用户手工重命名与历史轮次不受影响。

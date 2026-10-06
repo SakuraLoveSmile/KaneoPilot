@@ -148,6 +148,9 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `set-review-config` | 桌面 | 写 settings.review_config（v3，§5.23.4；仅影响新 review 轮次） |
 | `get-project-mappings` | 桌面 | 只读：项目与本地仓库映射列表及状态（T1，§5.26） |
 | `set-project-mapping` | 桌面 | 写 settings.project_mappings（T1，§5.26；保存/停用/解除仓库映射） |
+| `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
+| `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
+| `record-goal-evaluation` | monitor 执行端 | 登记 AI 完成判定（幂等；校验 monitor claim 与报告底线，§5.23.10） |
 
 ## 4. 通用行为
 
@@ -883,7 +886,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
   - 缺 `backend` 一律按 `pi` 解释（旧数据零迁移）。`pi` 分支沿用四字段；`pi_desktop` 分支五字段中 `permission_mode` **必须经用户显式保存**——`set-exec-config` 不允许后端切换时自动补 `auto`。
   - `set-exec-config` 对**当前 backend** 的必填组合整体校验、原子保存；切换后端不删除另一组已存字段（`pi` 四字段与 `pi_desktop` 块可共存，`agent_preset` 不映射 PI-Desktop 全局配置）。
 - **轮次快照**：dispatch claim 把所选分支固化进 `execution_rounds.config_json`：pi → `{backend:"pi",provider,model,reasoning_effort,agent_preset}`；pi_desktop → `{backend:"pi_desktop",connection_file,provider_id,model_id,thinking_level,permission_mode}`。旧轮次缺 `backend` 按 `pi` 读。`ROUND_BACKENDS` 扩为 `(pi, codex, pi_desktop)`；`job.json`、`get-session`、dispatch-prepare/confirm 同样接受 `pi_desktop`。
-- **`exec-capabilities` 扩展**：桌面分支为 `{available,detail,tools_ok,version}`，只检测已保存配置。`detail` 为脱敏原因；顶层 `ok/checks` 仍为 PI CLI 分支检查，不能阻止桌面配置保存或冒充控制端模型已验证。连接文件要求 owner-only、active=true、PID 存活、loopback `/mcp`、Bearer 握手；PID 存活不单独证明服务身份。必需工具为 `pi_turn_get/pi_session_create/pi_session_configure/pi_agent_prompt/pi_agent_status/pi_session_get/pi_agent_stop/pi_agent_abort/pi_desktop_invoke` + Goal 契约审批的 `pi_plans_pending/pi_plans_resolve`（缺任一即 `tools_ok=false`，阻止派发，见 §5.23.9）。型号通过通用 `providers/list`（args=[]）确认 provider 存在且未禁用后，再调用 `providers/listModels`（args=[{providerId,source:"cache"}]）精确匹配 modelId；unwrap `{operation,result}`，允许已配置模型的 cache/fallback，禁止 refresh/远端探测。该检查只证明本地配置存在，不证明凭据或远端可用。保存为结构校验，服务离线仍可保存；缺工具/服务/型号阻止派发，不自动切回 pi。token/完整连接文件/Authorization 永不进入 DB、argv、UI、日志。
+- **`exec-capabilities` 扩展**：桌面分支为 `{available,detail,tools_ok,version,session_naming}`，只检测已保存配置。`detail` 为脱敏原因；顶层 `ok/checks` 仍为 PI CLI 分支检查，不能阻止桌面配置保存或冒充控制端模型已验证。连接文件要求 owner-only、active=true、PID 存活、loopback `/mcp`、Bearer 握手；PID 存活不单独证明服务身份。必需工具为 `pi_turn_get/pi_session_create/pi_session_configure/pi_agent_prompt/pi_agent_status/pi_session_get/pi_agent_stop/pi_agent_abort/pi_desktop_invoke` + Goal 契约审批的 `pi_plans_pending/pi_plans_resolve`（缺任一即 `tools_ok=false`，阻止派发，见 §5.23.9）。`session_naming` 为 T6 兼容门布尔值：仅当 `pi_session_create.inputSchema.properties.projectName` 存在时为 `true`；旧 Plus 为 `false`（见 §5.23.10），供 `dispatch-start` 在任何 `session.create` 之前判定，不能替代 `tools_ok`。型号通过通用 `providers/list`（args=[]）确认 provider 存在且未禁用后，再调用 `providers/listModels`（args=[{providerId,source:"cache"}]）精确匹配 modelId；unwrap `{operation,result}`，允许已配置模型的 cache/fallback，禁止 refresh/远端探测。该检查只证明本地配置存在，不证明凭据或远端可用。保存为结构校验，服务离线仍可保存；缺工具/服务/型号阻止派发，不自动切回 pi。token/完整连接文件/Authorization 永不进入 DB、argv、UI、日志。
 - **能力前置（子任务 E）**：`pi_turn_get` 是 PI-Desktop 本机 MCP 控制面的只读增补——Host RPC `session.getTurn {sessionId, turnId}` → Electron Main 只读 `turnGet` IPC → MCP 同名工具，统一返回 `{sessionId, turnId, status:"running"|"completed"|"error"|"aborted", errorCode?, endedAt?}`（ISO8601）。只按本机 `turns` 表**同 session+turn 双键**查询；不存在或跨 session → `not_found`；不返回提示词/转录/凭据。不新增端口/认证/表/写权限。自动完成判定**只认**该持久终态，不得以 `pi_agent_status.isRunning=false` 代替。
 - **派发状态机（pi_desktop 分支）**：claim（backend=pi_desktop 快照）→ `dispatch-prepare` → `dispatch-begin-send`（远端迁移不变）→ `dispatch-start` → `dispatch-confirm`；`dispatch-fail` 不变。
   - `dispatch-prepare` evidence：`{session_marker, repository, backend:"pi_desktop", config:{...}}`；marker/repository/backend/config 快照全等校验同 pi 分支，计划哈希自 claim 未变。
@@ -969,6 +972,74 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - **明确失败（均不重发 prompt、不新建会话）**：契约模式轮次已结束但宽限内无待批准契约 → `goal_contract_missing`；批准后契约仍 pending → `goal_approval_failed`；批准后宽限内未观察到执行轮次 → `goal_execution_unstarted`；`pi_plans_pending` 读取失败 → `goal_contract_unreadable`。已保存 `permission_mode` 非法/缺省 → `goal_approval_permission_unknown`（配置校验本应在前拦住）。
 - **续接观察同样适用**：`round-observe`（§5.23.7）接管停在审批门的轮次时走同一审批门（批准属本轮职责，非重复发送）；已批准过（`job.goal_approval.status=="approved"`）则直接按执行轮次收尾。
 - **边界**：Goal 契约的批准权限取自**本轮快照**的 `permission_mode`，不读 Plus 当前设置、不改为 `inherit`；`ask` 语义仍是「Plus 每次工具确认需人工」，KaneoPilot 只代批契约本身，不代批工具权限。
+
+### 5.23.10 Goal 报告完成判定与派发命名（v3 补丁，T5/T6）
+
+本节冻结 KaneoPilot 与 PI-Desktop-Plus 之间的两项共享契约：**Goal 报告驱动的完成判定**（T5）与**新派发轮次的展示命名**（T6）。两仓按本节实现，任何一侧都不能单方面改变字段名、身份核对口径或失败语义。
+
+#### T5-A 报告读取（Plus 侧只读 MCP）
+
+- Plus 本机 MCP 新增两个**只读**具名工具，由既有 Host `goalReports.list/get` 提供，不开放 `submitDraft`/`retry`/`finalize`/`invalidate` 等写操作：
+  - `pi_goal_report_list {sessionId}` → `{reports:[…GoalReportSummary]}`；
+  - `pi_goal_report_get {sessionId, executionId}`（`reportId` 亦可）→ 完整报告 JSON，附 `report_sha256`。
+- Host 对 `status=ready` 的文件**重算** `file_hash`/`file_size` 并校验 schema 与身份，`report_sha256` 即重算值（不得直接回显 DB 旧值）；返回上限沿用既有 256 KiB，超限 → 明确 `truncated`，不返回截断正文。
+- 分态必须互不混淆：`pending` / `draft` / `failed` / `not_found` / `corrupt`(哈希或 schema 不符) / `truncated`。`fallback` 是**成功返回的报告**，但其 `integrity.kind=fallback` 表示**没有完成报告**，不能与 `structured` 混为一谈。
+- 只读工具不得返回提示词、转录或凭据；只按本机 `goal_reports` 表**同 session** 查询，跨 session → `not_found`/拒绝。
+
+#### T5-B 身份与报告底线（KaneoPilot 核心）
+
+- KaneoPilot 核对：`task_id`/`run_id`、`job.session_id`、`job.goal_approval.proposal_id`、已批准的执行 turn 与报告的 `sessionId`/`proposalId`/`executionId`/`turnId`。`turnId` 允许沿本轮已记录的 `turn_adopted` 链核对（§5.23.8）；**不得**只凭同一 session 名称或标题匹配。
+- 计划 `plan_sha256`（KaneoPilot 发布计划文件）与 Plus Goal 契约的 `contractHash`（Plus 侧目标契约 artifact）**各管各的文件，不可直接比较成同一个哈希**。
+- 无 `job.goal_approval`、报告跨轮/身份不符、或 Plus 缺只读报告工具 → **不能放行**。
+
+#### T5-C AI 判定与核心硬闸
+
+- monitor AI 调核心只读 `get-goal-report {task_id, run_id}` 获取经身份/完整性校验的报告，再读当前已批准 KaneoPilot 计划，把报告当作**不可信数据**逐项比对：输出结构化
+
+```json
+{"decision":"complete|incomplete|uncertain","plan_sha256":"…","report_id":"…","report_sha256":"…",
+ "criterion_reviews":[{"id":"…","result":"met|missing|failed|unknown","reason":"…","evidence_refs":["…"]}],
+ "reason":"…"}
+```
+
+  报告自称 `verdict=met` 是**必要但非充分**条件；`partial`/`blocked`/`unknown`、重要验收遗漏、明确失败或无法解释的证据缺口**不可**被 AI 升格为完成。可引用报告中的实际检查/证据 ID 作理由；不机械要求每类任务都有测试命令，但计划明确要求的验证必须在报告中有可审查的结果或明确说明未能验证。
+- 新核心命令 `record-goal-evaluation {task_id, execution_run_id, monitor_request_id, monitor_run_id, plan_sha256, report_id, report_sha256, decision, criterion_reviews, reason}`：
+  1. 先核对该 monitor 请求仍由 `kaneo-monitor` 领取且**租约有效**；
+  2. 只读**重新取回同一报告**并核对当前任务/执行轮次/计划/报告 hash；
+  3. `decision=complete` 时还须**确定性**核对报告 `status=ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；`criterion_reviews` 非空、ID 不重复、结果**全为 `met`**；引用的 criterion/check/evidence ID **确实存在于报告**。任一不满足 → 拒绝记录完成判定。
+  4. 通过后把 AI 判定、理由、引用 ID 与两种轮次身份写入 `goal_report_evaluated` 事件。
+- **幂等**：同一 `task_id`/`execution_run_id`/`plan_sha256`/`report_sha256` 已有判定 → 返回原事件，**不重复调用 AI**；新的 monitor 请求可引用它，但必须自己仍是有效 claim。
+- **`advance-task in-progress -> in-review` 对 `pi_desktop`** 必须带当前 monitor claim 与 evaluation event ID；核心在**远端更新前再次**复核：当前任务的执行轮次、报告身份/hash、上述确定性报告底线、事件确由有效 monitor 请求登记、`decision=complete` 与执行终态 `completed + finished/0`。绕过 monitor 直接调用、旧判定或报告变化 → 一律 `conflict`，**不触碰远端**。
+- `execution_run_id`（`task.run_id`，被观察的派发轮次）与 `monitor_run_id`（monitor 请求自己的 run_id）**不可互换**。
+- `pi` 后端**维持** §5.18.4 原三证据口径与旧接口；核心不把 AI 文案当身份凭据，也不解析 Canvas HTML/截图。
+
+#### T5-D 没有可用 Canvas 报告就没有完成
+
+- 只有 `ready + integrity=structured` 才是可供 AI 分析的报告；Plus 自动生成的 `ready + fallback` **等同「没有完成报告」**。
+- 执行中/报告仍在 `pending|draft` → 继续观察；执行终态落地后给 Host **最多 60 秒**完成 outbox/报告发布，期间只读查询，**不重发 prompt**。
+- 过时仍无结构化报告、报告 `fallback`、AI 判定 `incomplete` 或报告明确 `partial`/`blocked` → `report needs_user` + `failure_code=execution_failed`，原因写明具体缺口，**不自动重新派发**。
+- 报告不可读/损坏或 AI `uncertain` → 不进入 Review，最多**一次有界重读**后同样交人工，并保留**区别于「已验证失败」**的原因；临时读取失败不伪称没有报告。
+- 规则只作用于**后续推进动作**：已在 `in_review`/`done`/`needs_user` 的历史任务不回填、不降级、不改判；升级时仍 `running` 的旧 Plus 轮次若无报告，按缺报告规则进入人工处理，**不走旧消息三证据放行**。
+- **采集修补（同一变更内）**：`Bash` 工具名大小写归一（`pi_desktop_worker` 的 shell 工具集合须同时接受 `Bash`/`bash`）与退出码保真仍须修，供报告证据与 Review 查阅；但「发现一条退出码 0 的命令」**不再**单独作为 Plus 轮次的放行条件。
+- `core/executor_prompts/monitor.md` 必须把 `pi_desktop` 与 `pi` 并列写明各自的分支口径，不得再把 `backend != pi` 称作旧后端。
+
+#### T6 派发命名（仅新建的 `pi_desktop` 轮次）
+
+- **展示快照**：KaneoPilot 在现有计划哈希/任务身份复核后，把 `workspace_display_name = task.project_name`、`session_display_name = task.title` 固化到**新轮次** `spec.json`。两者是**展示快照**——旧 spec 缺字段仍按旧语义读取/续接，**不重新生成原 prompt**。
+- **共享创建契约**：Plus 的 `pi_session_create` / Host `session.create` 增加可选 `projectName`，继续使用已有 `title`：
+
+```json
+{"projectPath":"<真实独立 worktree 绝对路径>","projectName":"Music","title":"<计划页标题>","mode":"goal", …}
+```
+
+  - Host 复用已有 `projects.name` 并在**同一次会话创建调用**里保存名称；返回 `session:{id,title,projectPath,projectName}`；`SessionSummary.projectName` 为可选字段，旧客户端未传时保留 basename 默认。
+  - 工作区 `get`/`set` 对已有 path 从 `projects.name` 读回显示名；Sidebar 优先级：`projectMeta[path].name`（用户手工别名）> Host `session.projectName`/工作区名称 > 目录 basename。**工作区身份始终 keyed by canonical path**——同项目两个轮次可各有一个物理 worktree，主名称同为 `Music`，按路径分别归组，**不按名称合并**。
+  - 名称创建与会话插入在 **Plus Host 同一数据库事务**内完成；失败不留下只改一半的可见会话。不得为更名调用全局 `pi_project_open`，也不得把 `projectPath` 改成原仓库路径。
+  - 名称含空白控制字符、或任务登记标题/项目名缺失 → 在创建会话前给**确定性**校验错误，**不回退到 UUID**。
+  - Plus 创建返回的两种显示名与请求不符 → **不下发 `agent_prompt`**，保留已创建会话 ID 供人工检查，**绝不自动再建一次**。
+- **兼容门**：Plus 的 `tools/list` 必须表明 `pi_session_create.inputSchema.properties.projectName` 可用；KaneoPilot 在 `exec-capabilities` 与 `dispatch-start` 于**任何 `session.create` 之前**检查，旧 Plus 明确显示「版本缺少工作区命名能力」，**不静默**派发出 UUID 名称。
+- **不受影响**：PI CLI 后端、已派发的 spec/job/session、Plus 用户手工重命名、原有项目路径、旧历史轮次（不批量改名）。
+- 显示名**不得**用于去重、路径生成、权限判断或完成判定；`session_marker`、`task_id`/`run_id`、`session_id`/`turn_id`、计划哈希与事件关联仍是机器身份。
 
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
