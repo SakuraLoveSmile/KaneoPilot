@@ -148,6 +148,13 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `set-review-config` | 桌面 | 写 settings.review_config（v3，§5.23.4；仅影响新 review 轮次） |
 | `get-project-mappings` | 桌面 | 只读：项目与本地仓库映射列表及状态（T1，§5.26） |
 | `set-project-mapping` | 桌面 | 写 settings.project_mappings（T1，§5.26；保存/停用/解除仓库映射） |
+| `set-project-automation` | 桌面 | 更新项目自动处理策略与 revision（§5.27） |
+| `set-automation-global` | 桌面 | 更新全局自动任务并发上限（§5.27） |
+| `record-cost` | 角色 runner | 幂等登记该请求/轮次/阶段的成本（§5.27） |
+| `delivery-commit` | monitor | 核验执行轮次并提交任务工作树（§5.27） |
+| `delivery-publish` | delivery runner | 非强制推送、复用或创建 PR、写交付评论（§5.27） |
+| `delivery-sync` | delivery runner | 读取 PR 状态并登记同步结果（§5.27） |
+| `executor-instance` | App 调度器 | 登记/关闭本次 App 进程归属；不取消 Plus 会话或任务（§5.27） |
 | `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
 | `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
 | `record-goal-evaluation` | monitor 执行端 | 登记 AI 完成判定（幂等；校验 monitor claim 与报告底线，§5.23.10） |
@@ -190,6 +197,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `dispatch` | `ready` | §4.5 全量校验（含远端） |
 | `monitor` | `running` `in_review` | — |
 | `review` | `in_review` | — |
+| `delivery` | `in_review` | 受 PR 交付管理；Review 已通过；身份、租约与工作树核验（§5.27） |
 | `plan-scan` | —（无 task） | — |
 
 ### 4.5 dispatch claim 校验与上下文
@@ -199,7 +207,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 1. 计划文件存在、在 Plan 根内、无符号链接；frontmatter 含 `task_id` 匹配、`implementation_status=未开始`、`project_name` 在项目白名单、`repository` 等于注册仓库且目录存在、`source_sha256`；`plan_sha256` 重算等于登记值。
 2. 来源快照（`tasks.source_path`）存在；规范化重算 `source_sha256` 等于计划值；`task.id`/`projectId` 一致。
 3. `requirements_sha256` 由快照重算等于计划值（无快照或不可判 → `needs_user`）。
-4. 远端 `get-task`：`projectId` 一致、`status ∈ {to-do, todo}`、`requirements_sha256` 一致、列含当前状态与 `in-progress`。远端不可达 → `remote_unavailable`（task 保持原状，不算阻塞）。
+4. 远端 `get-task`：`projectId` 一致、普通任务 `status ∈ {to-do, todo}`、`requirements_sha256` 一致、列含当前状态与 `in-progress`。同任务修复轮及用户明确重新规划的自动交付周期按 §5.27 校验已接受的运行/Review 列；不放宽普通任务。远端不可达 → `remote_unavailable`（task 保持原状，不算阻塞）。
 5. `plan_kind=review_fix` 追加：reviewer 登记 `fix_task_id/review_key/repair_plan_path/repair_plan_sha256` 全匹配、远端描述含 `<!-- codex-kaneo-review:KEY -->`；`standard` 要求远端描述**不**含该标记。
 6. 无冲突发送证据（`send_state ∈ {unknown, sent}` 或 `sent=true` → `needs_user`，须走 `resolve`）。
 
@@ -670,20 +678,20 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ```
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
-- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（终止前存在退出码 0 的验证类命令输出，或计划验证步骤在最终消息中被引用——由 monitor 执行端核对语义，核心不解析语义）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
+- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（本轮工具事件中，计划 verify 块的每条命令最后一次匹配的整数退出码为 0；缺失转 verification_unconfirmed，用户可接受验证结果）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
 - **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
 - **单独条件不得推动完成**：子 agent 结束、进程正常退出、模型自称完成——任一单独出现都不满足 (a)(b)(c)，任务保持 `running` 或按异常处置。
 
 ### 5.18.5 worktree 与评审衔接
 
 - context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
-- Done 后 worktree 与运行记录保留；合并回主仓库由人工完成，本系统不自动 merge/commit/push。
+- Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
 
 ## 5.19 执行端调度（App 内置，v1.6）
 
 - 四个执行端（plan/dispatch/monitor/review）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分，与旧 automation 契约一致）。
 - 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
-- **App 不常驻时不运行**：App 退出后不再触发（设置页明示）；v1.6 不引入 launchd/外部守护。
+- **常驻菜单栏**：关窗后继续调度，登录项可启用；退出 App 停止调度与本实例 MCP 服务，但不结束 Plus 会话。详见 §5.27。
 - executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
 - runner 自己把运行记录写 `settings.executor_runs[stage]`（`pid/started_at/log/exit_code/finished_at`）——`executor-status` 读取的唯一数据源。
 - `executor-status {}` → `{"stages": {"<stage>": {"running": <entry>|null, "last": <entry>|null}}}`；`running` = entry.pid 存活探测通过。
@@ -975,6 +983,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 ### 5.23.10 Goal 报告完成判定与派发命名（v3 补丁，T5/T6）
 
+> v5 兼容边界：报告完成判定适用于 `completion_policy=goal_report` 的历史轮次；旧 spec/job 未声明策略时按此解释。所有 v5 新 Plus 派发轮次（包括手动任务）固化 `completion_policy=command_verification`，按 §5.27 的确定性验证门推进，不要求 AI 判定事件；报告仍可只读查阅，派发命名规则继续适用。完成策略随轮次固化，不因项目策略、人工接管或运行时设置变化而改变。
+
 本节冻结 KaneoPilot 与 PI-Desktop-Plus 之间的两项共享契约：**Goal 报告驱动的完成判定**（T5）与**新派发轮次的展示命名**（T6）。两仓按本节实现，任何一侧都不能单方面改变字段名、身份核对口径或失败语义。
 
 #### T5-A 报告读取（Plus 侧只读 MCP）
@@ -1087,6 +1097,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 ### 5.24.4 Plus dispatch / monitor 控制端（v4）
 
+> 本节保留 v4 控制轮历史契约；v5 新的 dispatch/monitor 调度改用 §5.27 的确定性流程，不创建模型控制会话。
+
 - `executor_runner --stage dispatch|monitor` 按 `exec_config.controller_backend` 分流：`pi` 分支行为不变（runner 渲染 prompt 后以 `pi -p --mode json` 执行）；`pi_desktop` 分支创建独立 `mode:"agent"` 控制会话（`pi_session_create` → 必要时 `pi_session_configure(permissionMode=exec_config.pi_desktop.permission_mode, confirm:true)` → `pi_agent_prompt(渲染后的 <stage>.md)`），运行现有相应角色 prompt，模型/权限来自 `exec_config.pi_desktop`；该分支**不再**拉起 `pi -p`。调度器仍只拉 runner。
 - **宿主环境必须显式传入**：Plus 的 shell 工具在宿主进程执行，不继承 runner 环境。控制轮 prompt 必须携带本控制轮固定的 `KANPILOT_DB`、`KANPILOT_APP_SUPPORT`、`KANPILOT_PLAN_ROOT`、`KANPILOT_REPOS_ROOT`、`KANPILOT_LEGACY_ROOT`、`KANEO_CREDENTIALS_PATH` 与核心根/可执行路径，经正确 shell 引号或 runner 生成的**固定本地包装器**调用既有 CLI；包装器只启动现有 CLI 并注入这些环境，不得暴露 token、绕过核心规则或变成替代状态管理脚本。工作目录使用独立控制目录，不更改 Plus 全局当前项目。
 - **产物与检查点**：控制轮以 `invocation_id` 区分，产物落 `<APP_SUPPORT>/executor-sessions/<stage>/<invocation_id>/`（脱敏 job/events）；`settings.executor_runs[stage]` 增加 `backend/session_id/turn_id/invocation_id/config/send_state`，保留旧 `pid/started_at/log/exit_code/finished_at`。控制 `invocation_id` 与任务执行 `run_id` **不可混用**。
@@ -1131,7 +1143,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 项目服务为 `kaneopilot`，HTTP 只绑定 loopback，协商 `2025-06-18` / `2025-03-26`；stdio 是同一服务的逐行 JSON-RPC 桥，不建立第二份任务状态。
 - 每次 HTTP 请求必须验证 Bearer、精确 Host、存在时的 Origin；transport session 绑定同一凭据、scope、协议与来源。撤销、过期、重启后的旧 grant 无效。管理凭据仅用于 `/admin/scopes` 与 initialize/initialized/ping 就绪检查，不可列出或调用模型工具。
 - runtime/task grant 分离。角色 scope 是稳定 invocation 或 task/run 身份、安全文件名、固定项目/五字段运行配置与有效期；文件 owner-only，凭据不进模型、argv、数据库或日志。有效 scope 同 ID 只能复用完整快照，续期不得超出初始观察边界；过期后由本机管理端重新注册相同身份，新 token 替代旧 token。
-- 新 Plus 轮次先检查项目服务及 `pi_session_attach_mcp`，再经 `kp_runtime_session_create → session_configure → attach_mcp → prompt`。规划/Review 固定 `plan/ask`，dispatch/monitor 固定 `agent`，执行固定 `goal`。task grant 只挂接目标会话；缺接口在创建/发送前明确阻断，不退回模型 shell 包装器。历史轮次保留原只读恢复路径。
+- 新 Plus 轮次先检查项目 MCP 服务就绪，再经 `kp_runtime_session_create → session_configure → prompt`。不挂接 task grant，不要求 pi_session_attach_mcp，不向会话注入 kp_task 工具；runner 经核心命令完成状态转移。规划/Review 固定 `plan/ask`，执行固定 `goal/auto`；dispatch/monitor/delivery 为确定性 Python 流程。历史轮次保留原只读恢复路径。
 - `kp_runtime_session_create` 可选接收 `title` / `project_name`，分别透传 Plus `title` / `projectName`；返回 `session_id` 以及 Plus 实际返回的展示名，不以请求值补造成功回显。展示名不是角色配置或授权身份，不改变 scope 的项目路径/模型/模式校验；worker 按 §5.23.10 核对真实回显，不符时不发送 prompt。
 - session 归属由已接受的 create 收据核对；create 的项目和配置必须等于 scope 快照。所有 runtime 写用稳定 operation_id，短事务预留 `prepared→unknown` 后释放锁再调用 Plus；成功保存 accepted 和 session/turn/proposal 身份。同 ID 同参数返回已接受结果，不同工具/参数冲突；unknown 禁止自动重发。调用 Plus 时不持有 SQLite 写锁，允许其同步回调 task 工具。
 - execution runtime role 可使用只读 `kp_runtime_goal_report_list {scope_id, session_id}` 和 `kp_runtime_goal_report_get {scope_id, session_id, execution_id?, report_id?}`（get 至少提供一种报告身份）。请求须校验有效 scope 与其已接受的 session 归属，只使用 scope 固化连接；查询不创建写操作收据、不重发执行。返回 Plus 报告分态、正文与哈希，完成底线仍按 §5.23.10 核验。其他角色读取执行报告走任务核心 `get-goal-report`；无 scope 的历史轮次仅沿已有历史只读 adapter 接缝读取，不开放写入口。
@@ -1155,3 +1167,712 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   - `start-plans` 事务内验证目标映射一致性并固化 `project_snapshot`；已有排队或执行中的请求不受后续映射修改影响。
   - `planfile.check_plan_meta` 与派发校验比对固化快照中的 ID、路径与名称；新规划文件安全写入 `<plan_root>/projects/<project_id>/...md`，校验路径位于 Plan 根内。
   - 默认运行记录根动态解析 `constants.app_support()/"runs"`，确保在隔离沙箱下运行。
+
+
+### 5.27 全自动反馈流水线（v5）
+
+本节为现行增量契约，涉及自动化管理任务时优先于 §4 与 §5.22–5.25 的旧版手动门控、跨任务修复和角色路由描述。普通手动流程保留；验证证据采用本节确定性规则。SQLite schema 仍为 5，新增字段存在 extra/settings，不迁移正式库。
+
+新增命令：set-project-automation、set-automation-global、record-cost、delivery-commit、delivery-publish、delivery-sync。delivery 是可暂停阶段，领取守卫为 in_review；blocked 是成功命令响应中的业务阻塞 outcome，不新增 CLI error code。
+
+#### 5.27.1 dispatch/monitor 改为确定性流程
+
+两个新模块由 `executor_runner` 调用，入口签名与 `pi_desktop_controller.run_stage` 一致，只是去掉了 prompt；`sleep`/`clock` 可注入，便于测试：
+
+```python
+def run_stage(stage, *, conn, db_path, timeout, log_path, record_run,
+              resume=False, sleep=time.sleep, clock=time.monotonic) -> int
+```
+
+实现约束：
+
+- 只通过进程内 `cli.run(command, payload, db_path)`（cli.py:451）调用固定核心命令，捕获 `util.KanpilotError` 后按 `.code` 分支。
+- 不直接读写 SQLite，不用 shell 调 CLI，不调用任何模型。
+- 每一步写一行 JSON 日志到 `log_path`，内容为时间、步骤、task_id、request_id 和结果码；不写计划正文、凭据或完整远端 URL。
+- `record_run` 在开始时记 pid、started_at、log，结束时记 exit_code、finished_at。
+- 剩余时间不足 120 秒时不再领取新请求。
+- 由 `resume` 参数接收旧调用，但不使用它。
+
+**dispatch（执行器 `kaneo-dispatch`）：**
+
+1. `claim {stage:"dispatch", executor:"kaneo-dispatch"}`。
+   - `claimed:false`（含 reason=paused）→ 正常结束。
+   - `context.backend` 不是 pi/pi_desktop → 不调用任何写命令，记日志后结束；lease 到期后按既有丢失流程处理。
+2. `dispatch-prepare {task_id, run_id, evidence:{session_marker, repository, backend, config: context.exec_config}}`。任何失败 → 第 6 步，`not_sent`。
+3. `dispatch-begin-send {task_id, run_id}`。任何失败 → 第 6 步，`unknown`：核心可能已迁移远端或已自行阻塞任务，dispatch-fail 对同一 run 幂等。
+4. `dispatch-start {task_id, run_id}`：
+   - 返回 deduplicated，或 started 且带 session_id → 第 5 步；
+   - 返回 starting → 每 ≤30 秒 `get-session` 一次，最多等 5 分钟；拿到 session_id 就进第 5 步，否则进第 6 步 `unknown`，原因写「worker 会话未建立」；
+   - 返回任何错误 → 第 6 步 `unknown`。
+5. `dispatch-confirm {task_id, run_id, evidence:{session_marker, repository, backend, session_id, protocol_seen:true, config}}`。
+6. `dispatch-fail {task_id, run_id, send_state, reason}`：
+   - 只有在 begin-send 之前失败才用 `not_sent`；
+   - begin-send 之后一律用 `unknown`；
+   - 绝不把 unknown 改回 not_sent。
+7. 整个过程（包括等待期间）每 ≤60 秒 `heartbeat` 一次。heartbeat 或任一命令返回 stale_run/not_found，说明请求已被他人接管：立即停止，不再做任何写操作。
+8. 回到第 1 步继续领取，直到没有请求或剩余时间不足。
+
+**monitor（执行器 `kaneo-monitor`）：**
+
+1. 领取 monitor 请求，然后 `get-task` 取 `task.run_id`。这是被观察的执行轮次，**不是** monitor 请求自己的 run_id。
+2. `recheck {task_id}` 读远端状态：
+   - done → `advance-task {task_id, run_id:<monitor run>, target:"done", expected_current:"done"}`（被动同步对）→ report succeeded；
+   - in-review，且任务不受自动化管理 → `advance-task (in-review, in-review)` 被动同步 → report succeeded；
+   - in-review，且受自动化管理 → 不推进，继续第 3 步；完成时用 `expected_current="in-review"`；
+   - 其他状态 → 继续第 3 步；完成时用 `expected_current="in-progress"`。
+
+   调用 advance-task 时只传 `run_id`，**绝不传 request_id**：传了会触发 stage==review 的身份校验并失败。
+3. `get-session {task_id, run_id:task.run_id}` 读 round_detail；`session-messages` 按 has_more 翻页，读完本轮全部消息，不用 preview。
+4. 观察者缺席：backend=pi_desktop，且 observer_alive=false 或 detail 以 `heartbeat_failed:` 开头 → `round-observe {task_id, run_id:task.run_id, executor:"kaneo-monitor"}`。
+   - 返回 observing/finished/settled → 重新读取；
+   - 返回 deferred/exited/starting → report failed，note=observation_blocked；
+   - 返回 `reopened:true` → 视为仍在运行。
+
+   observer_alive=true 时绝不再拉起观察者。
+新 Plus 派发 spec/job 固化 `completion_policy=command_verification`；历史缺省为 `goal_report`，其报告底线仍按 §5.23.10，缺少可用判定时交人工，不能伪造 AI 结论。确定性推进由核心在远端写入前再次核对当前有效 monitor claim、task/run、终态、计划哈希和验证证据（或只适用本轮的用户接受记录）；不得以策略字段或客户端成功声明绕过验证。
+
+5. 只认 `round_detail.terminal`。Plus Goal 审批期间规划轮次的 completed 不算完成。terminal detail 含 goal_contract_missing、goal_approval_failed 或 goal_execution_unstarted → report needs_user（failure_code=execution_failed）。
+6. 完成判定，以下三条同时满足：
+   - terminal.outcome=completed；
+   - exit_code=0 且 run_status=finished；
+   - 验证通过（规则见第 9 节），或 `extra.verification_override.execution_run_id == task.run_id`。
+
+   验证不通过 → report needs_user（failure_code=verification_unconfirmed），note 逐条列出缺失和失败的命令。
+7. 完成后，受 PR 交付管理的任务先调用 `delivery-commit {task_id, request_id, run_id, expected_execution_run_id: task.run_id}`：
+   - outcome=blocked → report failed，note=`blocked:<failure_code>`（核心已把任务转入待处理）；
+   - committed/already_committed → `advance-task` 推进到 in-review → report succeeded。
+
+   advance-task 返回 remote_conflict（核心已阻塞任务）或 remote_unavailable → report failed，下轮重试；提交是幂等的。最后 `record-cost` 记一条 Plus 执行轮次（cost_usd=null，source=pi_desktop）。
+8. 仍在运行 → heartbeat + report succeeded，progress 记录摘要。`terminal_superseded` 不算失败。
+9. 明确失败（failed、非 0 退出、超时、截断、身份不符、send_state=unknown）→ report needs_user（execution_failed）。不重试、不重建、不重发。
+10. 旧后端（dsh/headless/ATIF）轮次永远读不到 → report needs_user（failure_code=observation_blocked，note「旧后端轮次无法观察，请人工判断」）。其他读不到的情况 → report failed（observation_blocked），下轮再试。
+
+**路由（主控 Step 14）：** `executor_runner.run_stage` 的新分流：
+
+- dispatch → auto_dispatch，monitor → auto_monitor，不再看 controller_backend。
+- review 按 Review 后端：
+  - pi_desktop → pi_desktop_review；
+  - claude/codex → cli_review；
+  - pi → 原 `pi -p` 路径。
+- delivery → delivery_runner。
+
+dispatch.md、monitor.md、pi_desktop_controller.py 及其测试保留，但不再路由；`controller_backend` 只用于展示。
+
+#### 5.27.2 KaneoPilot 侧去掉 attach 前置
+
+- runtime_client：
+  - 193–194：去掉必需工具 `pi_session_attach_mcp`；
+  - 287–288：去掉「未挂接会话拒绝发 prompt」。
+- pi_desktop_planner:686、pi_desktop_worker:850、pi_desktop_review:543：去掉 attach 调用和其后的工具集校验。会话顺序固定为 create → configure → prompt。
+- dispatch_validate：
+  - 去掉 188–191 的 `attachment_supported` 门；
+  - **保留** 176–187 的本机 MCP 就绪门（server.json initialize/ping）和 `exec_config.check_available`。
+- 以下保留但不调用：
+  - harness_plus_adapter 的 `attach_mcp`；
+  - runtime_client 456 的 `_deny_write` 映射；
+  - kp_runtime_attach_mcp 的工具实现。
+
+  `attachment_supported` 只做展示，界面文案为「本版本不需要会话挂接」。
+- Plus 会话不获得任何 kp_task 工具；所有状态转移由 runner 和确定性控制端经核心命令完成。规划、执行、Review 的 Plus prompt 里如有要求模型调用 kp_task_* 的文字，一并删除。
+
+#### 5.27.3 任务分支与工作树
+
+每个任务一条分支 `kaneo/<task_id>`；task_id 必须匹配 `^[a-z0-9]{8,64}$`（Kaneo 任务 id 由 cuid2 生成，为小写字母和数字），否则拒绝。工作树根沿用 `_ensure_worktree`（cmd_dispatch 858）的 `constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)`，可被 `KANPILOT_WORKTREES_ROOT` 覆盖，不另起新根。既有执行目录为 `<root>/<task_id>/<run_id>`，新目录与它并列：
+
+- `<root>/<task_id>/branch`：执行工作树（检出分支）。Codex/Claude 规划器也以它为只读 cwd。
+- `<root>/<task_id>/review-<sha12>`：Review 只读快照（detached HEAD）。
+- `<root>/<task_id>/plan-<sha12>`：Plus 规划只读快照（detached HEAD）。
+
+以上全部保留，不删除分支，也不删除工作树。对用户主检出只允许执行 fetch、worktree add、rev-parse、symbolic-ref、remote get-url，绝不在主检出上 checkout、reset、clean 或 stash。
+
+**建分支工作树（`prepare_branch_worktree`）：**
+
+1. `git -C <repo> fetch --prune origin`：超时 60 秒，环境变量带 `GIT_TERMINAL_PROMPT=0`。失败 → git_transient，intake 下轮重试。
+2. 确定目标分支：
+   - 优先用策略里的 `delivery_base`；
+   - 否则取 `git -C <repo> symbolic-ref --short refs/remotes/origin/HEAD`，去掉 `origin/` 前缀；
+   - 用 `git rev-parse --verify origin/<base>^{commit}` 取 base_sha。
+
+   以上任一步取不到 → delivery_base_unknown。
+3. 本地分支 `refs/heads/kaneo/<id>`、远端 `refs/remotes/origin/kaneo/<id>` 或目标路径，任一已经存在，且不是本任务 delivery 记录中的同一工作树 → branch_exists。不删除、不复用、不改名。
+4. `git -C <repo> worktree add -b kaneo/<id> <path> <base_sha>`，不加 --force。
+5. 返回 `{branch, worktree_path, base_branch, base_sha, head_sha: base_sha}`。
+
+**核验工作树（`verify_branch_worktree`）：** 以下条件不满足时报 worktree_invalid：
+
+- 路径存在且是目录；
+- `git -C <wt> rev-parse --git-common-dir` 解析到主仓库的 common dir；
+- `git -C <wt> symbolic-ref --short HEAD` 等于分支名；
+- 给了 expected_head 时，`git rev-parse HEAD` 必须相等；
+- require_clean 时，`git status --porcelain=v1 -z --untracked-files=all` 必须为空。
+
+**派发指令（主控在 constants 定义 `DISPATCH_INSTRUCTION_BRANCH`）：** 原文照用；其中 `{plan_ref}` 在 pi 后端为「计划文件 {plan_path}」，在 pi_desktop 后端为「下面已核验的计划正文」。
+
+```
+任务标识：{marker}。当前目录 {worktree} 是本任务专用分支 {branch} 的工作树，直接在这里完整执行{plan_ref}。可以按计划使用 subagent，但所有改动必须落在本工作树；不要新建 worktree 或分支，不要 commit、push、reset、stash、rebase 或切换分支；提交与推送由调度台完成。按计划的 verify 命令逐条运行验证，最终答复逐条列出命令与退出码。
+```
+
+注入点：
+
+- cmd_exec:389 的 claim 上下文（主控）；
+- cmd_dispatch:472 的 pi 指令和 603–608 的 pi_desktop 内联指令（包 C）。
+
+非交付任务仍用原 `DISPATCH_INSTRUCTION_PI`。
+
+**各角色的工作目录：**
+
+| 角色 | 工作目录 | 权限 |
+|---|---|---|
+| Codex/Claude 规划 | `<root>/<id>/branch`（请求载荷 `plan_cwd`） | 只读工具 |
+| Plus 规划 | `<root>/<id>/plan-<sha12>`，sha 取载荷 `delivery_head_sha` | plan 模式 + ask |
+| Plus 执行 | `<root>/<id>/branch` | auto |
+| Review（三种后端） | `<root>/<id>/review-<sha12>`，sha 取 `delivery.head_sha` | 只读 |
+
+建 Review 快照之前，先确认执行工作树 HEAD 等于 head_sha 且干净。
+
+#### 5.27.4 项目策略与本机前置检查
+
+策略存在项目映射设置的 `items[project_id].automation` 下，形状如下：
+
+```json
+{"enabled": false, "label_filter": [], "auto_confirm_plan": true,
+ "max_fix_rounds": 2, "max_task_minutes": 240, "max_task_cost_usd": 10.0,
+ "delivery_base": null, "policy_revision": 0, "updated_at": "..."}
+```
+
+字段校验：
+
+- label_filter：≤20 个字符串，每个 ≤50 字符；去掉首尾空白后，按小写去重。
+- max_fix_rounds：0..2。
+- max_task_minutes：30..1440。
+- max_task_cost_usd：null，或 0.5..100。
+- delivery_base：null，或匹配 `^[A-Za-z0-9._/-]{1,100}$` 且不以 `-` 开头。
+
+全局设置存在 settings `automation_global = {max_active_tasks: 2, updated_at}`，max_active_tasks 取值 1..5。
+
+**命令：**
+
+- `set-project-automation {project_id, automation, expected_policy_revision?}`：
+  - 校验后整体替换 automation 对象，policy_revision 加 1；
+  - 带了 expected_policy_revision 但不相等 → conflict。
+- `set-automation-global {max_active_tasks}`。
+- `get-project-mappings` 的每个条目增加 `automation`（合并默认值后的结果）和 `automation_preflight`。
+- `set-project-mapping` 修改其他字段时，必须原样保留 automation。
+
+**前置检查（`automation_preflight(conn, project_id) -> [{"code","message"}]`，空列表表示就绪）：** 只做本机检查，不访问网络，单项目耗时 <200ms。
+
+| code | 检查 | message 示例 |
+|---|---|---|
+| repository_missing | 映射仓库路径存在 | 未配置仓库路径 |
+| not_git_repo | `git -C <repo> rev-parse --git-dir` 成功 | 仓库不是 git 仓库 |
+| origin_not_github | `git remote get-url origin` 仅接受 HTTPS、SSH URL 或 git@github.com:owner/name 的同一解析规则；HTTP/Git 协议在前置检查即拒绝，URL 不输出、不记录 | origin 不是 GitHub 仓库 |
+| gh_missing | `constants.gh_bin()` 可执行 | 未找到 gh |
+| planner_unconfigured | 规划后端已配置且可用（沿用 planner_config 的检查） | 规划后端未配置 |
+| review_backend_unsupported | Review 后端属于 `AUTOMATION_REVIEW_BACKENDS` | Review 后端需为 Plus/Claude/Codex |
+| exec_backend_not_plus | 执行后端为 pi_desktop | 执行端需为 Plus |
+| exec_permission_not_auto | exec_config.pi_desktop.permission_mode 为 auto | Plus 执行权限需为 auto |
+
+**生效规则：**
+
+- 实时策略：intake、自动确认、修复轮上限、成本/时长上限这类新决策，每次都读当前策略。
+- 交付方式：在 intake 接收时冻结进任务的 `delivery.mode`。
+- 关闭开关：
+  - 停止 intake、自动确认和自动修复规划；
+  - 进行中的 monitor、Review、交付照常；
+  - changes_requested 照常登记，但修复请求置为 held，任务进入待处理（原因 `automation_stopped`）。
+
+#### 5.27.5 任务 extra 字段
+
+`db.set_extra` 只合并顶层键，因此嵌套对象必须在同一事务里整体读出、修改、写回。主控在 core 中提供访问函数：
+
+- `automation_of(task)`、`delivery_of(task)`；
+- `update_automation(conn, task, now, **changes)`、`update_delivery(conn, task, now, **changes)`。
+
+任何包都不得自己拼 extra_json。
+
+```json
+{
+  "automation": {
+    "policy_revision": 3, "adopted_at": "...", "fix_round": 0,
+    "segment_started_at": "...", "segment_cost_base_usd": 0.0,
+    "plan_wanted": false, "plan_attempts": 0, "manual_takeover": false,
+    "cost_usd": 0.0, "cost_unknown_steps": 0,
+    "cost_log": [{"request_id": "...", "run_id": "...", "stage": "plan", "cost_usd": 0.42, "source": "claude", "at": "..."}],
+    "last_skip": {"reason": "budget", "at": "..."}
+  },
+  "delivery": {
+    "mode": "pr", "branch": "kaneo/<id>", "worktree_path": "...",
+    "base_branch": "main", "base_sha": "...", "head_sha": "...",
+    "commits": [{"execution_run_id": "...", "sha": "...", "at": "...", "files": 3, "fix_round": 0}],
+    "pushed_sha": null, "pr_number": null, "pr_url": null, "pr_state": null,
+    "publish_failures": 0, "kaneo_comment_at": null, "merged_at": null,
+    "last_sync_at": null, "next_sync_at": null
+  },
+  "fix_request": {
+    "fix_round": 1, "title": "...", "description": "...", "priority": "...",
+    "review_key": "...", "review_run_id": "...", "execution_run_id": "...",
+    "report_path": "...", "report_sha256": "...", "head_sha": "...",
+    "created_at": "...", "state": "open"
+  },
+  "review_history": [{"review_key": "...", "conclusion": "changes_requested", "report_path": "...",
+    "report_sha256": "...", "execution_run_id": "...", "head_sha": "...",
+    "registered_at": "...", "fix_round": 0, "fix": {"title": "...", "priority": "..."}}],
+  "plan_verify": {"plan_sha256": "...", "commands": ["..."], "error": null},
+  "verification_override": {"execution_run_id": "...", "actor": "user", "at": "...", "note": "..."}
+}
+```
+
+字段规则：
+
+- **数量上限：** `cost_log` ≤50 条，`review_history` ≤20 条，超出时丢最旧的。
+- **无人值守段：** `segment_*` 记录当前无人值守段的起点。时长按 `now - segment_started_at` 计，成本按 `cost_usd - segment_cost_base_usd` 计。用户执行 resume、replan 或 accept_verification 时开启新段。
+- **plan_verify：** 每个任务都写，不限自动化任务。
+- **delivery.mode：** 只有 `pr` 或 `manual` 两个值；转为人工处理时改为 `manual`。
+- **术语：**「受自动化管理」= 有 automation 对象且 `manual_takeover=false`；「受 PR 交付管理」= `delivery.mode=="pr"`。
+
+#### 5.27.6 自动接收（intake）
+
+入口：`python3 -m kanpilot.auto_intake [--dry-run]`，由调度器每 300 秒或菜单「立即检查」拉起。
+
+**一轮流程：**
+
+1. **单飞：** `executor_runs["intake"]` 记录的 pid 仍存活 → 直接退出。
+2. **暂停检查：** 全局暂停，或 paused_stages 包含 plan → 写摘要后退出。
+3. **项目筛选：** 逐个读取已开启的项目；前置检查不通过的项目跳过，并记入摘要。
+4. **容量：**
+   - 容量 = `max_active_tasks − 占用数`；
+   - 占用数 = 受自动化管理、且状态不是 done/needs_user、也不在「pass 后等待合并」的任务数。
+5. **先处理 plan_wanted 任务（不受容量限制）：**
+   - 条件：状态为 needs_plan、`plan_wanted=true`、没有活动的 plan 请求、未转人工；
+   - 若还没有 `delivery.branch`，先补建分支工作树；
+   - 然后准备材料并提交规划。
+6. **新候选：**
+   - 来源：`fetch-todos` 的条目。
+   - 条件：本地没有该任务；或本地状态为 needs_plan、从未有过 plan 请求、且没有 automation 对象。另外要求 save_state 为 active，且不是 auto_advance_paused。
+   - 顺序：按远端创建时间升序（字段缺失时按任务号）。
+   - 数量：每轮最多接收 3 个，且不超过容量。
+7. **标签过滤：**
+   - label_filter 为空 → 不过滤。
+   - 列表条目自带 labels（由包 E 确认）→ 直接比较。
+   - 否则逐个调用 `remote.get_task_labels`：每轮最多 20 次；不匹配的结果缓存 30 分钟，存在 settings `automation_intake_state.label_checked`。
+   - 比较方式：大小写不敏感的精确匹配，命中任一标签即可。
+8. **接收单个任务：**
+   1. `cli.run("prepare-plan-input", {task_id, expected_requirements_sha256: <列表里的指纹>, local_paths: []})`。
+   2. `git_delivery.prepare_branch_worktree`。
+   3. `cli.run("start-plans")`，条目带内部字段 `automation`：`{authorized_by:"automation", policy_revision, delivery:{...第 3 节返回值, mode:"pr"}}`。核心在同一事务里完成：
+      - 写入任务的 automation（`plan_attempts=1`，开启第一段）和 delivery；
+      - 建 plan 请求：`requested_by="automation"`，`manual_authorized` 仍为 true，以便既有 claim 过滤放行；
+      - 载荷增加 `authorized_by`、`plan_cwd`、`delivery_mode`、`delivery_head_sha`；
+      - 记录事件 `automation_adopted`。
+9. **plan_wanted 任务的材料准备：**
+   - prepare-plan-input 传任务当前的 `requirements_sha256`；
+   - 远端需求不符 → 任务进入 needs_user（failure_code=remote_conflict，note「远端需求已变化（新增内容未经筛选）」）。
+10. **失败处理：**
+    - 分支失败（branch_exists/delivery_base_unknown）→ 照常导入任务行，写入 automation（`plan_wanted=false`），然后转 needs_user 并带该 failure_code。
+    - 确定性失败（validation_failed、bad_request、conflict）→ 清掉 plan_wanted，在 `last_skip` 记录原因，然后转 needs_user。
+    - 瞬时失败（remote_unavailable、git_transient）→ 下轮重试。
+11. **摘要：** 写入 settings `automation_last_intake`，形状为 `{started_at, finished_at, projects:[{project_id, ready, preflight, adopted, skipped:[{task_id, reason}]}], errors}`。
+12. **dry-run：** 只做 fetch-todos、标签读取和前置检查，输出将会接收的候选；不调用 prepare-plan-input，不写任何东西。
+
+**提交规划时的规则（由包 D 在 `_submit_one` 实现）：**
+
+- **plan_kind 的确定：** `fix_request.state=="open"` 时为 review_fix（same_task），否则为 standard。same_task 分支放在旧 review_fix 分支（约 737 行）和 manifest plan_kind（445–449）之前。
+- **same_task 载荷：** `{plan_kind:"review_fix", fix_mode:"same_task", review_source_task_id:<self>, fix_task_id:<self>, fix_round, review_report_path, review_report_sha256, review_key}`，值取自 fix_request。
+- **手动提交的已收养任务：** 用户在规划面板手动提交受自动化管理的任务时，载荷同样带 `plan_cwd`/`delivery_mode`/`delivery_head_sha`，并且不清除 automation 对象。
+
+#### 5.27.7 计划自动确认
+
+主控在 tick 中实现，每次 tick 扫描一遍。
+
+**确认条件（全部满足）：**
+
+- 任务受自动化管理，状态为 ready，且带 `plan_execution_hold`；
+- 项目已开启自动处理，`auto_confirm_plan=true`，前置检查通过；
+- `plan_verify.plan_sha256 == task.plan_sha256`，且 commands 非空；
+- 预算未超：本段时长 < max_task_minutes；本段成本 < max_task_cost_usd，或该上限为 null；
+- `db.task_schedulable(task)` 成立；
+- 未处于全局暂停，也未暂停 dispatch。
+
+**动作：** `confirm_plan_inline(conn, task, now, expected_plan_sha256=task.plan_sha256, actor="automation", note="auto")`。该函数从 `cmd_enqueue` 24–111 中抽出，行为与 `confirm_plan` 完全相同。
+
+**跳过时：**
+
+- 不阻塞任务，只把 `automation.last_skip` 写为 `{reason, at}`；
+- 原因与上次不同时才记一次 `auto_confirm_skipped` 事件；
+- reason 取值：disabled、auto_confirm_off、preflight、verify_missing、verify_mismatch、budget、paused；
+- 用户仍可手动确认。
+
+needs_input 计划在既有流程中已经进入 needs_user，不在这里处理。
+
+#### 5.27.8 同任务修复轮
+
+**register-review 的 same_task 分支（主控，cmd_exec 815–905）：**
+
+- **适用范围：** 只用于受自动化管理的任务，payload 带 `fix_mode:"same_task"`、`fix:{title, description, priority}`、`review_key` 和既有的 Review 身份字段。对这类任务，旧的 `fix_task_id`/create-review-fix 路径一律返回 conflict。
+- **幂等：** `fix_request.review_key` 或 `review_history[-1].review_key` 已等于本次 key → 返回 `{already_registered:true}`。
+- **未超上限**（`fix_round < max_fix_rounds`、本段时长和成本未超、项目仍开启）：调用 `core.start_fix_round_inline`，在同一事务内完成：
+  1. 本次 Review 归档进 review_history；
+  2. `fix_round += 1`；
+  3. fix_request 写入并置为 open；
+  4. `plan_wanted=true`，`plan_attempts=0`；
+  5. 清空列 review_report_path、review_report_sha256、review_key，删除 extra 的 review_conclusion 和 review_registered_at；
+  6. **重置发送字段**：`sent=0, send_state=NULL, sent_at=NULL, lock_retained=0, manual_recovery_required=0`；以 db.py 的 tasks 列为准，主控逐列核对；
+  7. in_review → needs_plan；
+  8. 记录事件 `fix_round_started`。
+- **超出上限：** fix_request 写入并置为 held，任务进入 needs_user。failure_code 按触发原因取：
+  - 修复轮用完 → fix_rounds_exhausted；
+  - 时长或成本超出 → auto_budget_exceeded；
+  - 项目已关闭 → automation_stopped。
+- **pass 与 blocked：** 自动化任务的 pass 和 blocked 同样追加 review_history；pass 后把 fix_request 置为 null。
+
+**publish-plan 的 same_task 分支（主控，cmd_exec 614–812）：**
+
+- 核验元数据：`fix_mode=="same_task"`、`review_source_task_id==task_id`、`fix_round==automation.fix_round`；review_report_path、review_report_sha256、review_key 三项都与 fix_request 一致。
+- 跳过 758–776 的跨任务检查，不执行 795–802 的修复回写，也不写 Review 列。
+- 629 行的远端状态检查改用 `core.expected_remote_slugs(task)`。
+
+**远端状态口径：** `core.expected_remote_slugs(task)` 的取值：
+
+- 默认为 `TODO_SLUGS`；
+- 受 PR 交付管理且已有提交时，再加上 `REVIEW_SLUGS`（修复轮开始时，远端停在 in-review）。
+
+publish-plan:629 和 dispatch_validate:111 都改用它。begin-send 依靠 claim 时记录的 `original_todo_slug`（即 in-review），无需改动即可把远端从 in-review 迁到 in-progress。
+
+**dispatch_validate 第 5 步（包 C）：** 先判断 `meta.fix_mode=="same_task"`。成立时：
+
+- 报告必须在 `constants.review_reports_root()` 内，sha 与 fix_request 和计划元数据都一致；
+- `review_source_task_id==task_id`；
+- `fix_round==automation.fix_round`；
+- `review_key==fix_request.review_key`；
+- 不做 `REVIEW_MARKER_PREFIX` 标记和修复回写检查。
+
+旧的跨任务 review_fix 检查保持不变。
+
+**计划元数据（包 G）：** same_task 计划的 frontmatter 从请求载荷取 review_report_path/sha256、review_key 和 review_source_task_id（取自身），并增加 `fix_mode: same_task` 和 `fix_round: N`。这些字段由 runner 写入，不由模型生成。
+
+**sync-tasks（主控）：** 受自动化管理的任务只更新元数据、kaneo_status 和事件，不做任何状态转移，也不改 requirements_sha256。这样需求变化会由 advance-task 和 dispatch_validate 的既有指纹校验拦下，停给用户处理。
+
+#### 5.27.9 执行验证证据
+
+**计划格式：**
+
+- 计划正文恰好一个 ```verify 围栏块，含 1–5 条非空命令行。
+- 允许 `#` 注释行。
+- 不允许：行尾续行 `\`、heredoc `<<`；以 `git commit`、`git push`、`git reset`、`git checkout`、`git switch` 开头的命令；以 `gh ` 开头的命令。
+- 解析规则：比较前把连续空白压成一个空格并去掉首尾空白；命令不做任何改写。
+
+**解析与存储：**
+
+- 解析函数：`verify_evidence.parse_verify_block(text)`（包 A）。
+- 存储：publish-plan 发布时（主控 Step 14 接入）把结果写入 `extra.plan_verify`，形状为 `{plan_sha256, commands}` 或 `{plan_sha256, error}`。
+
+**提取命令结果：** `verify_evidence.extract_command_results(messages)` 只认工具调用事件：`raw.tool.input` 中的 JSON 字段 `command`，以及整数 `exit_code`。消息形状以下面三处为准：
+
+- dsh_events.py:196–208；
+- pi_backend.py:142；
+- pi_desktop_worker.py:505。
+
+exit_code 缺失或不是整数时记为 None。
+
+**匹配规则：**
+
+- 每条声明的命令，在本执行轮次的结果里找「规范化后完全相等」或「可证明成功的顶层纯 `&&` 链中某段相等」的调用；
+- 子段匹配必须识别引号和转义，仅允许顶层纯 AND 链；混合 `||`、`;`、管道、换行、注释、子 shell/替换及会终止或改变当前 shell 控制流的前置命令不作子段成功证据。不能确认时要求独立 exact 工具结果；保留普通 `cd <目录> && <验证命令>` 与普通验证命令纯 AND 链。
+- 取最后一次匹配，exit_code 必须为 0；
+- 只统计当前执行轮次（task.run_id）的消息。
+
+**判定：**
+
+- 有任一声明命令缺失、最后一次失败或 exit_code=None → verification_unconfirmed。
+- 用户选 `accept_verification` → 写入 `verification_override{execution_run_id: task.run_id, actor:"user", at, note}`，任务回到 running，并新建 monitor 请求；monitor 仍要核验终态和退出码。
+- 手动任务同样适用此规则；计划里没有 verify 块的旧任务完成后，由用户「接受验证结果」。
+- 不做任何猜测：不从最终消息文字中推断「已验证」。Plus 工具事件如果不带 exit_code，停下汇报（见 Step 4 停止条件和 Step 15-F）。
+
+#### 5.27.10 交付：提交、推送、PR 与合并
+
+**delivery-commit（包 C，`cmd_delivery.py`）：**
+
+- **调用：** `{task_id, request_id, run_id, expected_execution_run_id}`，由 monitor 在完成判定之后调用。
+- **身份：** 用 `core.require_stage_identity(stages=("monitor",))`，并要求 expected_execution_run_id 等于 task.run_id。
+- **三段式：**
+  1. 第一段（事务）：核对身份和任务状态 running。
+  2. 第二段（无事务）：执行 git 操作。
+  3. 第三段（事务）：复核身份并确认 head 未变，然后追加 commits、更新 head_sha，记录事件 `delivery_committed`。
+- **幂等：** commits 中已有该 execution_run_id → 返回 `{outcome:"already_committed", sha}`。
+- **崩溃恢复：** HEAD ≠ head_sha，但 HEAD 的父提交等于 head_sha，且提交信息带有本次 run 的 `KaneoPilot-Run` trailer → 视为已提交，直接补记。其他 HEAD 漂移 → blocked，failure_code 为 delivery_commit_failed，note「分支被执行端或他人改动」。
+- **候选文件：** 来自 `git status --porcelain=v1 -z --untracked-files=all`，需正确处理 rename 的双路径。被 .gitignore 忽略的文件本来就不进入候选。
+- **拦截（delivery_blocked_files）：** 候选中出现以下任一 → 不提交，列出文件名：
+  - `.env` 或 `.env.*`（`.env.example` 除外）；
+  - `*.pem`、`*.key`、`*.p12`、`id_rsa*`；
+  - 单文件 >5MB。
+- **无改动：** 候选为空 → blocked，failure_code 为 no_changes。
+- **提交：**
+  - `git add -A`，然后 `git commit -F <临时消息文件>`；
+  - 照常执行钩子，超时 300 秒，`GIT_TERMINAL_PROMPT=0`；
+  - 不设置提交身份，不加 --no-verify，不加 --no-gpg-sign；
+  - 失败 → blocked（delivery_commit_failed），note 附 stderr 末尾 ≤2KB（先脱敏）。
+- **提交信息：**
+
+```
+kaneo(<task_id>): <标题，截断到 72 字符>
+
+Kaneo-Task: <task_id>
+KaneoPilot-Run: <execution_run_id>
+Fix-Round: <fix_round>
+```
+
+恢复已有本轮提交及新提交后，均按实际提交差异复核敏感文件与文件大小限制；本轮 trailer、单父提交或工作树干净不能替代内容检查，提交钩子新增的文件也不得绕过该门。
+
+- **返回：** `{outcome:"committed"|"already_committed"|"blocked", sha?, files?, failure_code?, message?}`。outcome=blocked 时，核心已在第三段把任务转为 needs_user 并写好 failure_code。只有协议级错误才 raise：bad_request、not_found、stale_run、validation_failed、conflict、internal。`ERROR_CODES` 不增加。
+
+**交付请求的补建（主控，tick）：** 以下条件全部满足时，建 `delivery:<task_id>` 请求（requested_by=scheduler）：
+
+- 任务状态为 in_review，`review_conclusion=="pass"`，且 review_history 最后一条的 execution_run_id 等于 task.run_id；
+- 任务受 PR 交付管理，且未转人工；
+- `merged_at` 为空；
+- 没有活动的 delivery 请求；
+- `now ≥ next_sync_at`，或 next_sync_at 为空；
+- `db.task_schedulable(task)` 成立。
+
+claim 守卫为 `{in_review}`；该阶段可被暂停。
+
+**delivery-publish（包 F，`cmd_delivery_pr.py`）：** 与 advance-task 一样走三段式，网络操作一律不在事务内。
+
+已登记 PR 时，发布和同步在推送前即核对 PR URL/编号所属仓库与当前 origin 一致，不能先向改变后的仓库推送再发现身份失配。发布和同步入口必须核对当前执行轮次的 Review pass 与评审提交快照，不能靠 tick 排队条件代替核心硬闸；无本轮 pass 或仅有旧周期 pass 时，不推送、不创建 PR、不发评论。每个远端副作用前与最终落库事务，重新按当前时间核验 claim、租约及执行周期；慢读/推送期间租约过期或被接管后停止后续副作用，不使用命令启动时的固定时间放行。网络操作不持有 SQLite 写事务。
+
+1. `git_delivery.push_branch`：推送前核验 `git remote get-url --push --all origin` 的真实目标，只允许单一且与交付 PR 仓库一致的 GitHub 地址；fetch 地址一致不能替代 push 地址检查。对会继续改写目标的不稳定 URL rewrite 链明确阻断。使用核验过的固定目标和 `<head_sha>:refs/heads/<branch>` 非强制推送（源 SHA 为已通过本轮 Review 的提交快照），保留已有认证、钩子和签名设置。
+   - 被拒（rejected/non-fast-forward/fetch first）→ blocked，failure_code=branch_diverged；
+   - 其他失败 → `publish_failures += 1`，返回 retry。
+2. 查找已有 PR：`gh pr list --repo <owner/name> --head <branch> --state all --json number,url,state,headRefOid,mergedAt,baseRefName,headRefName,isCrossRepository`。
+   - 仅复用源仓库为当前 origin（非 fork）、head 分支/目标 base 分支均与交付快照相同且 headRefOid 等于本次 pushed_sha 的 OPEN/MERGED PR；已登记 PR 的编号也必须一致。身份/提交不匹配则 branch_diverged，不写评论或登记合并；缺少身份字段不能作为可信交付。
+   - 只有 CLOSED 的 PR → blocked，failure_code=pr_closed。
+3. 没有 PR → `gh pr create --repo <owner/name> --base <base_branch> --head <branch> --title "[Kaneo] <标题，≤100 字符>" --body-file <临时文件>`，再用 `gh pr view` 取 number 和 url。
+   - 正文包括：任务标题、task_id、修复轮数、提交列表（sha12 + 标题）、verify 命令、「由 KaneoPilot 自动创建」；
+   - 正文不含绝对路径、主机名或凭据。
+4. Kaneo 评论：先用 `find_marker_comment(task, "[kaneopilot:delivery:<task_id>]")` 查找，不存在再 `post_comment`，内容为 `[kaneopilot:delivery:<task_id>] 已创建 PR：<url>`。
+5. 第三段（事务）：写入 pushed_sha、pr_number、pr_url、pr_state、kaneo_comment_at，`publish_failures` 清零，`next_sync_at` 设为 now+5 分钟；记录事件 `delivery_pushed`、`pr_opened`、`kaneo_comment_posted`。
+
+连续 3 次 retry → blocked，failure_code=gh_unavailable。gh 的环境变量为 `GH_PROMPT_DISABLED=1`、`GH_NO_UPDATE_NOTIFIER=1`、`NO_COLOR=1`、`GH_PAGER=`，每次调用超时 60 秒。
+
+**delivery-sync（包 F）：**
+
+1. 先读 Kaneo 任务（只读，无事务）：
+   - 远端已 done → 返回 `{outcome:"kaneo_done"}`；
+   - 否则执行 `gh pr view <number> --repo <owner/name> --json number,url,state,mergedAt,headRefOid,baseRefName,headRefName,isCrossRepository`。
+2. 先核对 PR URL 所属 origin 仓库、编号、非 fork、head/base 分支以及 headRefOid=当前 pushed_sha=head_sha；不一致立即 branch_diverged，不登记合并、不推进 done。字段缺失不可作为可信证据。
+3. 按 PR 状态处理：
+   - MERGED → 第三段写入 merged_at 和 pr_state，记事件 `pr_merged`，返回 merged；
+   - OPEN → 写入 last_sync_at 和 next_sync_at，返回 waiting。next_sync_at 的取法：距 review_registered_at 不到 1 小时为 +5 分钟，否则为 +30 分钟；
+   - CLOSED → blocked，failure_code=pr_closed，记事件 `pr_closed`。
+
+**delivery_runner（包 F）：**
+
+1. 领取 delivery 请求。
+2. 没有 PR，或 `pushed_sha≠head_sha` → 先调用 delivery-publish。
+3. 调用 delivery-sync。
+4. 按 sync 结果收尾：
+   - merged → 调用 `advance-task {task_id, request_id, run_id, expected_execution_run_id, target:"done", expected_current:"in-review"}`；
+   - kaneo_done → 同样调用，但 `expected_current:"done"`（被动）。
+5. report：
+   - 成功 → succeeded；
+   - retry 或 waiting → succeeded，并在 progress 中说明；
+   - blocked → failed，核心已转入待处理；
+   - advance-task 返回 remote_conflict 或 remote_unavailable → failed。
+
+**advance-task 的交付身份（主控 Step 3）：**
+
+每次只读远端任务返回后、更新远端状态前，重新核验当前时间下的 claim、租约及任务执行周期；读取期间租约过期或被接管时不得继续远端写。最终本地事务仍再次核验，网络调用不持有 SQLite 写锁。
+
+- 带 request_id 时用 `require_stage_identity(stages=("review","delivery"))`；
+- 受 PR 交付管理的任务，非被动的 `target=done` 要求 `delivery.merged_at` 已记录，否则 conflict；
+- 被动对 `(done,done)` 不受此限。
+
+#### 5.27.11 Claude/Codex 后端与统一 Review 结算
+
+**Claude CLI（包 G，`claude_cli.py`，规划与 Review 共用）：**
+
+```
+claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,Glob
+  --strict-mcp-config --permission-mode dontAsk --no-session-persistence
+  --json-schema '<内联 JSON>' --model <M> --effort <E> --max-budget-usd <X> [--add-dir <输入目录>]
+```
+
+- **调用方式：**
+  - prompt 从 stdin 传入，cwd 为 plan_cwd 或 Review 快照；
+  - 绝不使用 `--bare`；
+  - 施工前用 `claude --help` 逐个确认参数存在。缺参数就停下汇报，不要改用其他参数凑。
+- **事件解析：**
+  - `--tools` 仍仅允许 Read、Grep、Glob；init 事件的 tools 通常为其子集。传入 `--json-schema` 时，允许 CLI 额外暴露宿主内建 `StructuredOutput`（Claude 2.1.251 的真实形状），只用于生成结构化答复；无 schema 时拒绝该工具，Bash/Edit/Write/MCP 等始终拒绝。其他工具出现即终止进程并失败（「Claude 工具集不符合只读要求」）；
+  - result 事件读取 subtype、is_error、structured_output、total_cost_usd、session_id。
+- **费用：**
+  - 每次运行都调用 `record-cost`（source=claude）；
+  - `--max-budget-usd` 取 min(5, 本段剩余预算)，不低于 0.5；上限为 null 时取 5。
+- **路径：** 二进制由 `constants.claude_bin()` 解析，可被 `KANPILOT_CLAUDE_BIN` 覆盖。
+- **受限认证继承：** Claude 2.1.251 的 `--restricted` 会忽略用户设置；普通 CLI 已认证不代表受限调用已认证。仅从用户全局配置目录（`CLAUDE_CONFIG_DIR`，缺省/空白为 `~/.claude`，非空值展开后必须为绝对路径）的 `settings.json.env` 向子进程内存继承认证、服务地址与模型别名白名单；显式进程环境优先。白名单为 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL` 及对应 `*_MODEL_NAME`。不载入仓库配置、hooks、工具、MCP、agent teams 或任意其他 env，不修改全局配置，不把凭据写入 argv、临时文件、DB 或日志。配置不可解析时明确失败，不静默改用另一个服务；未设置认证仍按 CLI 实际错误报告。
+
+**Claude 规划（包 G）：**
+
+- planner_config 新增 `claude {model, effort}` 分组配置。`planner_config.BACKENDS` 直接引用 `constants.PLANNER_BACKENDS`，claude 已由主控在 Step 2 加入，G 不改 constants。
+- `model_snapshot(conn, group, backend="claude")` 返回 publish-plan 期望的 `{planner_model, reasoning_effort}` 形状。
+- planner_runner 529–541 新增 claude 分支，其输出走既有的 `parse_output` 和 publish 流程。
+- Codex 的 `launcher_argv`（codex_planner 297）中，`cwd` 改为 `job.get("plan_cwd") or job.get("repository") or "."`。这个值就是 `-C` 工作根；只读沙箱 `-s read-only` 保持不变。
+- Plus 规划在自动化任务上使用 `plan-<sha12>` 快照（第 3 节）。
+- planner_prompt.md 和 pi_desktop_planner 的内联 prompt 改动：
+  - 要求恰好一个 verify 块；
+  - 不再指示「新建 worktree/分支/提交」；
+  - 补充 same_task 修复指引：工作树已含前几轮提交，只修 Review 报告列出的问题，verify 要覆盖修复点。
+
+**统一 Review 结算（包 H，`review_settle.py`）：**
+
+结果 schema（所有键必填，additionalProperties=false）：
+
+```json
+{"conclusion": "pass|changes_requested|blocked", "report_markdown": "...",
+ "fix": null 或 {"title": "...", "description": "...", "priority": "REVIEW_FIX_PRIORITIES 之一"}}
+```
+
+- **字段规则：** fix 在 changes_requested 时必须非空，其他结论必须为 null。fix 的可空写法先用 `"type":["object","null"]`；两种 CLI 的实际兼容性在 Step 15-F 核对，不兼容时停下汇报，不要把 fix 改成可选字段。
+- **结算流程（`settle`）：**
+  1. 把报告写到 `report_path(task_id, run_id)`，即沿用的 `<APP_SUPPORT>/reports/<task_id>/<run_id>.md`，并计算 sha256。
+  2. 带 Review 身份（request_id、run_id、expected_execution_run_id）调用 register-review。
+  3. 按任务类型分支：
+     - 非自动化任务：保持原行为——pass → advance-task done；changes_requested → 先 create-review-fix，再 register；blocked → register 后 report needs_user。
+     - 自动化任务：pass 只登记，不推进；changes_requested 用 same_task 方式登记；blocked 照常登记。
+  4. 最后 report。
+- **防重复：** `_registered_matches` 负责崩溃后重跑时避免重复登记：fix_request、review_history 或 Review 列中任一处已有同一 review_key，即视为已登记。
+- **兼容：** pi_desktop_review 原有对外函数在 review_settle 中保留 re-export，旧测试照常通过。
+
+**Claude/Codex Review（包 H，`cli_review.py`）：**
+
+- 入口与 `run_stage` 同签名。
+- 复用 claude_cli 和 codex_planner 的 `launcher_argv`/`child_env`/`map_event`；Codex 使用只读沙箱，cwd 为 Review 快照。
+- 两者共用新 prompt `review_cli.md`。
+- Codex 成本记为 null（source=codex），token 数只写日志。
+
+**交付任务的 Review 材料：**
+
+- `git diff --no-color <base_sha> <head_sha>`，以及 `git log --oneline base..head`；
+- 有上一轮 Review 时，加上 `<review_history[-1].head_sha>..<head_sha>` 的增量 diff 和上一轮报告。
+
+diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查看具体文件」。执行工作树 HEAD 与 head_sha 不符或不干净 → report needs_user（review_blocked，note「执行工作树与已提交版本不一致」），绝不审查未提交的内容。
+
+**review_config（包 H）：** 新增 `claude {model, effort}`、`codex {model, reasoning_effort}`，并更新 snapshot 和 capabilities。
+
+**Review 领取守卫（主控）：** claim(review) 领到受自动化管理的任务、但 Review 后端是 pi 时：该请求置为 failed，任务转 needs_user（review_backend_unsupported），然后继续看下一个候选。
+
+**成本记录（包 D 实现 `record-cost`，主控注册命令）：**
+
+- payload：`{task_id, request_id, run_id, stage, cost_usd|null, source}`。
+- 以 (request_id, run_id) 去重；cost_usd 为 null 时 `cost_unknown_steps += 1`；记录事件 `cost_recorded`。
+- 上限只在决策点检查：intake、自动确认、修复轮开始。pass 之后不再检查上限，也不中途打断正在运行的轮次。
+
+#### 5.27.12 常驻调度与菜单栏
+
+**AppRuntime（包 I）：** 单例，App 启动时（AppDelegate `applicationDidFinishLaunching`）创建，持有 `ExecutorScheduler` 和 `MCPServiceManager.shared`。
+
+- 启动时依次执行：
+  1. 恢复 MCP 服务，沿用 MCPServiceManager 现有的检查与启动入口；
+  2. `LocalNetworkGate.probeAtLaunch()`（原先挂在窗口 `.task` 上）；
+  3. 启动调度循环。
+- 退出时沿用 `stopOwnedProcessForAppExit()`。
+
+**调度循环（ExecutorScheduler 重写）：** 每 20 秒执行一轮，系统唤醒通知到达时立即执行一轮：
+
+1. 调用核心 `tick`。
+2. 调用 `executor-status`。
+3. 交给纯函数 `SchedulerDecision.decide` 计算需要拉起的进程：
+   - 对 plan/dispatch/monitor/review/delivery 中的每个阶段：未暂停、无存活进程、`claimable>0` → 拉起该阶段的进程；
+   - intake：有已开启的项目、未处于全局暂停或 plan 暂停、无存活进程，且距上次 ≥300 秒或被强制触发 → 拉起。
+4. 按决策拉起进程：
+   - plan 用 planner_runner；
+   - 其余阶段用 `executor_runner --stage <s>`；
+   - intake 用 `python3 -m kanpilot.auto_intake`。
+
+   子进程的环境变量和路径解析沿用现有实现（CoreLocator/CoreClient）。
+
+**其他约束：**
+
+- 有存活子进程时持有 `ProcessInfo.beginActivity(.idleSystemSleepDisabled)`，全部退出后释放。
+- 保留 `runNow`、`LocalNetworkGate`、开发开关 `executorSchedulingEnabled`；为 SettingsView 保留静态的 `stages` 和 `nextFireDate(for:)` 兼容接口，直到包 J 更新设置页。
+- 暂停和恢复只调用核心 `set-paused {stage:null, paused}`，不在 Swift 里另存状态。
+
+**菜单栏（MenuBarView）：** MenuBarExtra 包含：
+
+- 状态行：运行中/已暂停、在途任务数、待处理数、上次 intake 时间；
+- 「打开 KaneoPilot」「暂停/恢复」「立即检查」「退出」。
+
+关闭主窗口后，激活策略切到 `.accessory`；重新打开窗口时切回 `.regular`。
+
+**登录项（LoginItem）：** 基于 `SMAppService.mainApp` 实现 register/unregister/status。状态为 `.requiresApproval` 时，界面提示用户去「系统设置 → 登录项」批准。
+
+#### 5.27.13 待处理原因、处置与事件
+
+| failure_code | 来源 | 自动化任务可用动作 |
+|---|---|---|
+| verification_unconfirmed | monitor | accept_verification（→ running + monitor）、replan、mark_done、dismiss |
+| execution_failed | monitor | replan、mark_done、dismiss |
+| fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
+| auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
+| automation_stopped | register-review（项目已关闭） | resume（需先重新开启项目，同上）、replan、mark_done、dismiss |
+| review_blocked | review | resume（→ in_review + 新 review 请求）、replan、mark_done、dismiss |
+| review_backend_unsupported | claim(review) | resume（需 Review 后端已改为 Plus/Claude/Codex，→ in_review + review）、mark_done、dismiss |
+| branch_exists、delivery_base_unknown | intake | resume（→ needs_plan + plan_wanted，重新准备分支）、dismiss |
+| delivery_blocked_files、delivery_commit_failed | delivery-commit | resume（→ running + monitor，重新走完成判定与提交）、replan、mark_done、dismiss |
+| no_changes | delivery-commit | replan、mark_done、dismiss |
+| branch_diverged、gh_unavailable、pr_closed | delivery | resume（→ in_review + delivery，next_sync_at=now）、mark_done、dismiss |
+| remote_conflict | advance-task、intake、begin-send | resume（接受远端当前需求和状态，回到被阻塞的步骤；派发中途不可用）、replan、mark_done、dismiss |
+| planner_failed（自动重试一次后）、needs_input | plan | replan、dismiss；也可以在规划面板补充材料后手动提交 |
+| dispatch_failed | dispatch | 沿用 retry/restore/accept_duplicate/mark_sent；另有 replan、dismiss |
+
+**处置规则：**
+
+- **resume / accept_verification：** 新增的 resolve 动作，只对上表列出的原因可用。核心校验 failure_code 后，按表中目标转移。
+- **remote_conflict 的 resume：** 走三段式。
+  1. 读取远端任务（不在事务内）。
+  2. 远端状态必须是下一步所需的值：monitor 需要 in-progress、in-review 或 done；delivery 需要 in-review 或 done；plan 不限。不符 → conflict，提示「请先在 Kaneo 调整到 X 再继续」。
+  3. 在事务内把 requirements_sha256 和 kaneo_status 更新为远端当前值，记录事件 `requirements_accepted`。
+  4. 回到上一个失败请求对应的步骤：monitor → running + monitor；delivery → in_review + delivery；review → in_review + review；plan → needs_plan + plan_wanted；dispatch → 拒绝，改用既有的发送恢复动作。
+- **replan：** 对自动化任务改为 needs_plan + plan_wanted，`plan_attempts=0`，开新段。如果远端需求有变化，用与上面相同的三段式先接受当前需求；用户点「重新规划」即视为已看过新内容。
+- **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。
+- **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
+- **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）。dispatch、plan、review 的丢失请求仍留给用户处理。
+- **plan 失败：** 自动化任务第一次失败时置 plan_wanted，让 intake 自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。
+
+**新事件：** automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
+
+`BOARD_FAILURE_CODES` 不增加，新原因通过 failure_stage 归类。归类如下：
+
+| failure_stage | failure_code |
+|---|---|
+| monitor | verification_unconfirmed |
+| plan | branch_exists、delivery_base_unknown |
+| review | fix_rounds_exhausted、auto_budget_exceeded、automation_stopped、review_backend_unsupported |
+| delivery | delivery_*、no_changes、branch_diverged、gh_unavailable、pr_closed |
+
+
+
+§5.27.1 补充（施工时核对现有 confirm 身份保护）：pi_desktop 在 dispatch-confirm 前，通过 get-session 读取同任务当前执行轮次 round_detail.turn_id 并传 evidence.turn_id。缺失不得猜测，以 unknown 收尾；不降低底层 turn 身份校验。
+
+§5.27 恢复补充：Review resume 在保留 review_history 后清本周期报告列与 conclusion，重新建 Review；交付冲突保留 delivery 阶段。merged_at 已记录但本地仍 in_review 时继续补建 delivery 请求以恢复未完成的 done 推进，不重复合并。规划快照中固定材料目录的复用规则由快照核验实现明确，不放宽执行或 Review 工作树 clean 守卫。
+
+§5.27.1 派发启动身份补充：get-session.round_detail.startup_turn_id 来自同轮首个 session 事件，dispatch-confirm 使用这个不可变启动证明。Goal 执行开始后 round_detail.turn_id 可变为执行轮次，不能用于启动确认。缺字段的旧核心才兼容 turn_id，字段存在但空必须阻塞。
+
+
+§5.27 用户重新规划恢复补充：自动化任务 send_state=unknown 时 replan 必须返回 conflict，保留发送证据，先使用既有发送恢复裁决。已确认发送且已有轮次的任务，重新规划前经 get-session 核验旧执行终态；未结束或不能确认终态时不得自动开启新轮次。用户明确重新规划后，automation 登记 replan_requested_at、replan_remote_status、replan_worktree_sha256；仅本次恢复周期允许已接受的 in-progress/in-review 状态。首次接收仍限 To Do，自动修复轮清除该授权标记。
+
+失败轮次有未提交改动时，准备规划材料保存该工作树状态指纹和改动文件材料；Plus 的基线快照配合材料中的当前改动规划，不能把旧提交冒充当前内容。派发前对原分支 HEAD、归属和状态指纹逐次核验；只有与已确认规划材料完全一致的用户重规划允许保留未提交改动，否则阻塞。验证通过后才提交本轮全部改动。普通自动轮次保持干净工作树守卫。
+
+### 5.27 补充：App 实例与独立 worker 生命周期
+
+实际派发 runner 会先于独立 execution worker 退出，仅按存活 runner 的父子树清理无法覆盖已重父进程的 worker。为满足退出无孤儿与防休眠契约，App 每次启动生成独立 UUID，通过子进程环境 `KANPILOT_EXECUTOR_INSTANCE_ID` 传给 runner/worker；该值不是凭据，不进入模型指令。
+
+- `executor-instance {instance_id, action:"start"|"stop"|"status"|"register-worker", task_id?, run_id?, spec_path?}`：UUID 严格校验。start 幂等登记 active；stop 原子登记 stopped，返回此实例仍存活的进程身份，不发送 Plus stop/abort，不改变任务/请求/轮次状态。已 stopped 的实例不能重新 start，重启 App 使用新 UUID。status 只读；register-worker 要求 task/run/spec 字段，由核心自行取得当前调用进程真实 PID 和启动时间，原子核验实例 active 后登记，重复调用幂等。
+- `executor-status {instance_id?}` 保持原字段，带 UUID 时增加 `owned_workers`，形状为 `[{pid, started_seconds, started_microseconds, task_id, run_id, spec_path}]`；只返回该实例登记且启动时间仍匹配的进程。旧调用缺字段等同旧协议。
+- SQLite settings `executor_instances` 保存实例和 worker 归属，不升 schema；已停止且无存活 worker 的历史实例可在新登记时清除，任务、会话、分支和工作树不因此删除。
+- 独立 worker 与恢复 observer 在任何发送/审批操作前经固定 JSON 命令（同进程 `cli.run`）登记自身真实 PID、进程启动秒/微秒、task/run/spec 身份，不自行写 SQLite；实例不存在或 stopped 时不得继续工作。无该环境值的旧手动 CLI 沿用原流程。
+- App 退出先关闭实例登记，再停止自身 runner 子树，最后读取本实例 worker 身份并作有界 SIGTERM→SIGKILL。每次信号前重新核对 PID 的秒/微秒启动时间，不能扫描并终止所有 round PID、其他 App 实例或 Plus 进程。
+- App 防休眠覆盖存活 runner 与本实例独立 worker；stage 退出后仍读取 worker 登记，不能随 runner 提前释放 activity。实例关闭期间禁止新 worker 注册，避免派发与退出竞态。
+
+恢复 observer 使用单独 `observer-spec.json` 固化新的 App 归属；显式手动 CLI 可在完成原身份核验后使用无 App 归属的 observer 副本，原启动 spec 和发送证据保留。已有 owner 证据的 observer 存活判断须核对登记的 PID 启动时间；登记已清除不能仅凭 PID 被其他进程复用就拒绝恢复。无 owner 证据的历史手动轮次保持原兼容语义。
+
+observer 续接始终只读，不发送 prompt、不批准 Goal。若停在待批准契约，保留非终态现场并提示在 Plus 中处理。若旧 worker 在远端批准成功、写入执行 turn 前退出，不能把已 completed 的规划 turn 当作执行终态；只有原 session/planning turn 对应的已批准 Goal 历史、核验通过的不同执行 turn，以及完整会话仅含本 task/run 的原始 user 锚点时，才能只读接续该执行 turn。证据缺失则 defer，不伪造完成或失败。

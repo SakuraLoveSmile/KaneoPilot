@@ -274,9 +274,8 @@ class ReviewConfigCommands(_ReviewCommandsCase):
         argv_log = self._argv_logging_pi()
         rc = executor_runner.run_stage("monitor")
         self.assertEqual(rc, 0)
-        argv = argv_log.read_text(encoding="utf-8").splitlines()
-        self.assertNotIn("--model", argv)
-        self.assertNotIn("--thinking", argv)
+        # v5 monitor is deterministic and never invokes a model CLI.
+        self.assertFalse(argv_log.exists())
 
 
 class ExecBackendConfig(_ReviewCommandsCase):
@@ -676,13 +675,14 @@ class ExecControllerBackend(_ReviewCommandsCase):
         finally:
             conn.close()
 
-    def test_controller_pi_desktop_requires_saved_block(self):
-        exc = self.call_err(
-            "set-exec-config", {"controller_backend": "pi_desktop"})
+    def test_legacy_controller_does_not_require_saved_block(self):
+        saved = self.call("set-exec-config", {"controller_backend": "pi_desktop"})
+        self.assertEqual(saved["config"]["controller_backend"], "pi_desktop")
+        self.assertEqual(saved["config"]["backend"], "pi")
+        # Active execution fields remain independently validated.
+        exc = self.call_err("set-exec-config", {"backend": "pi_desktop"})
         self.assertEqual(exc.code, "bad_request")
-        self.assertIn("pi_desktop", str(exc))
-        # 控制端选择 Plus 不影响任务执行后端，也未落库。
-        self.assertIsNone(self.call("get-exec-config", {})["config"])
+
 
     def test_controller_inherit_snapshot_fails_when_plus_default_is_unavailable(self):
         self.call("set-exec-config", {
@@ -921,7 +921,7 @@ class ReviewBackendConfig(_ReviewCommandsCase):
 
     def test_review_capabilities_shape_and_unsaved_plus(self):
         caps = self.call("review-capabilities", {})
-        self.assertEqual(set(caps), {"pi", "pi_desktop"})
+        self.assertEqual(set(caps), {"pi", "pi_desktop", "claude", "codex"})
         self.assertEqual(set(caps["pi"]), {"available", "detail"})
         self.assertEqual(set(caps["pi_desktop"]),
                          {"available", "detail", "tools_ok", "version"})

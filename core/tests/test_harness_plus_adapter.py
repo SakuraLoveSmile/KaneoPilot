@@ -10,7 +10,7 @@ if str(_CORE) not in sys.path:
 from unittest.mock import MagicMock, patch
 
 import pytest
-from kanpilot import constants, harness_plus_adapter, mcp_scopes, util
+from kanpilot import constants, harness_plus_adapter, mcp_scopes, runtime_client, util
 
 
 def test_plus_capabilities_offline(tmp_path: Path):
@@ -35,6 +35,69 @@ def test_plus_capabilities_mocked_client(tmp_path: Path):
         assert res["connected"] is True
         assert res["tools_ok"] is True
         assert res["version"] == "0.18.0"
+
+
+def test_runtime_connect_and_prompt_without_session_attachment(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "app_support", lambda: tmp_path)
+    facade = runtime_client.RuntimeClient(
+        role="planner", connection_file=str(tmp_path / "plus.json"),
+        project_path=str(tmp_path), runtime_config={}, invocation_id="no_attach",
+    )
+    client = MagicMock()
+    client.initialize.return_value = {
+        "serverInfo": {"name": constants.MCP_SERVER_NAME},
+    }
+    client.list_tools.return_value = [
+        {"name": name} for name in mcp_scopes.RUNTIME_ROLE_TOOLS["planner"]
+    ]
+    client.call_tool.side_effect = [
+        {"available": True, "tools_ok": True,
+         "supported_operations": list(constants.PI_DESKTOP_PLAN_TOOLS)},
+        {"session_id": "sess-1", "accepted": True, "turn_id": "turn-1"},
+    ]
+    with patch.object(runtime_client, "_read_admin_server", return_value=(
+            {"url": "http://127.0.0.1:8765/mcp"}, "test-admin")), \
+            patch.object(runtime_client, "_admin_register", return_value={
+                "runtime_grant_file": str(tmp_path / "runtime.json")}), \
+            patch.object(runtime_client.mcp_client.MCPClient, "from_grant_file",
+                         return_value=client):
+        facade.connect(required_tools=constants.PI_DESKTOP_PLAN_TOOLS)
+        result = facade.agent_prompt("sess-1", "规划输入")
+    assert result["accepted"] is True
+    assert result["turnId"] == "turn-1"
+    assert [call.args[0] for call in client.call_tool.call_args_list] == [
+        "kp_runtime_capabilities", "kp_runtime_prompt",
+    ]
+
+
+@pytest.mark.parametrize("inactive", [False, True])
+def test_runtime_without_ready_project_mcp_still_blocks(tmp_path, monkeypatch, inactive):
+    monkeypatch.setattr(constants, "app_support", lambda: tmp_path)
+    if inactive:
+        server_file = tmp_path / "mcp" / "server.json"
+        server_file.parent.mkdir()
+        server_file.write_text(json.dumps({"active": False}), encoding="utf-8")
+        server_file.chmod(0o600)
+    facade = runtime_client.RuntimeClient(
+        role="planner", connection_file=str(tmp_path / "plus.json"),
+        project_path=str(tmp_path), runtime_config={}, invocation_id="not_ready",
+    )
+    with patch.object(runtime_client, "_admin_register") as register:
+        with pytest.raises(util.KanpilotError) as exc:
+            facade.connect(required_tools=constants.PI_DESKTOP_PLAN_TOOLS)
+    assert exc.value.code == ("remote_unavailable" if inactive else "not_found")
+    register.assert_not_called()
+
+
+def test_readonly_runtime_prompt_remains_forbidden(tmp_path):
+    facade = runtime_client.RuntimeClient(
+        role="planner", connection_file=str(tmp_path / "plus.json"),
+        project_path=str(tmp_path), runtime_config={}, invocation_id="readonly",
+        read_only=True,
+    )
+    with pytest.raises(util.KanpilotError) as exc:
+        facade.agent_prompt("sess-1", "规划输入")
+    assert exc.value.code == "forbidden"
 
 
 def test_plus_session_attach_mcp_mocked(tmp_path: Path):

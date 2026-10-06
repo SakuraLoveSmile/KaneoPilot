@@ -26,6 +26,18 @@ def get_task(client: Any, task_id: str) -> dict:
     return bridge.command_get_task(client, task_id)
 
 
+def get_task_labels(client: Any, task_id: str) -> list:
+    return bridge.get_task_labels(client, task_id)
+
+
+def find_marker_comment(client: Any, task_id: str, marker_prefix: str) -> Optional[dict]:
+    return bridge.find_marker_comment(client, task_id, marker_prefix)
+
+
+def post_comment(client: Any, task_id: str, content: str) -> dict:
+    return bridge.post_comment(client, task_id, content)
+
+
 def update_status(
     client: Any,
     task_id: str,

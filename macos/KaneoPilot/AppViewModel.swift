@@ -110,9 +110,44 @@ final class AppViewModel: ObservableObject {
     private(set) var executorScheduler: ExecutorScheduler?
 
     init() {
-        let scheduler = ExecutorScheduler(client: client)
-        scheduler.start()
-        executorScheduler = scheduler
+        executorScheduler = AppRuntime.shared.scheduler
+    }
+
+    @Published var loginItemEnabled = LoginItem.isEnabled
+    @Published var loginItemNeedsApproval = LoginItem.needsApproval
+
+    func setLoginItemEnabled(_ on: Bool) {
+        do {
+            try LoginItem.setEnabled(on)
+            loginItemEnabled = LoginItem.isEnabled
+            loginItemNeedsApproval = LoginItem.needsApproval
+        } catch { alertMessage = error.localizedDescription }
+    }
+
+    func runIntakeNow() { AppRuntime.shared.scheduler.checkNow() }
+
+    @discardableResult
+    func setProjectAutomation(projectID: String, automation: [String: Any], expectedPolicyRevision: Int?) async -> Bool {
+        guard actionInFlight == nil else { return false }
+        actionInFlight = "保存自动处理设置"
+        defer { actionInFlight = nil }
+        do {
+            var payload: [String: Any] = ["project_id": projectID, "automation": automation]
+            if let expectedPolicyRevision { payload["expected_policy_revision"] = expectedPolicyRevision }
+            _ = try await client.run("set-project-automation", payload: payload)
+            showToast("已保存自动处理设置")
+            return true
+        } catch {
+            alertMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func setAutomationGlobal(maxActiveTasks: Int) async {
+        await perform("保存自动处理并发上限") {
+            _ = try await self.client.run("set-automation-global", payload: ["max_active_tasks": maxActiveTasks])
+            return "已保存并发上限"
+        }
     }
 
     var coreFound: Bool { client.location != nil }
@@ -690,7 +725,8 @@ final class AppViewModel: ObservableObject {
                            standard: PlannerGroupConfig,
                            reviewFix: PlannerGroupConfig,
                            defaultMethod: String? = nil,
-                           piDesktop: ExecPiDesktopConfig? = nil) async -> String? {
+                           piDesktop: ExecPiDesktopConfig? = nil,
+                           claude: CLIModelConfig? = nil) async -> String? {
         guard !plannerSaving else { return "正在保存规划配置" }
         plannerSaving = true
         defer { plannerSaving = false }
@@ -701,6 +737,13 @@ final class AppViewModel: ObservableObject {
                     return "Plus 规划配置需要完整的五字段（权限固定 ask）"
                 }
                 payload["pi_desktop"] = piDesktop.fields
+            } else if backend == "claude" {
+                guard let model = claude?.model, let effort = claude?.effort,
+                      !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return "请填写 Claude 模型与思考等级"
+                }
+                payload["claude"] = ["model": model, "effort": effort]
+                payload["default_method"] = "builtin"
             } else {
                 payload["standard"] = standard.fields
                 payload["review_fix"] = reviewFix.fields
@@ -911,6 +954,8 @@ final class AppViewModel: ObservableObject {
         case "accept_duplicate": return "接受可能重复，重新派发"
         case "mark_sent": return "登记已发出"
         case "replan": return "重新规划"
+        case "resume": return "继续"
+        case "accept_verification": return "接受验证结果"
         case "release_lost": return "释放失联请求"
         case "mark_done": return "登记完成"
         case "dismiss": return "清除阻塞标记"

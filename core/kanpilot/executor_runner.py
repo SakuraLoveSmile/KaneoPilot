@@ -42,7 +42,7 @@ from pathlib import Path
 from . import constants, db, review_config
 
 # v2（§5.22.3）：plan 改由 codex planner_runner 承担，不再经 pi executor。
-STAGES = ("dispatch", "monitor", "review")
+STAGES = ("dispatch", "monitor", "review", "delivery")
 DEFAULT_TIMEOUT_SECONDS = 1800  # 30min：一轮领取循环上限
 
 
@@ -134,9 +134,18 @@ def run_stage(stage: str, resume: bool = False) -> int:
 
     conn = db.connect(constants.default_db_path())
     timeout = _timeout_seconds(conn)
+    log_path = _log_path(stage)
+    if stage in ("dispatch", "monitor", "delivery"):
+        from importlib import import_module
+        runner = import_module(".auto_" + stage if stage != "delivery" else ".delivery_runner", __package__)
+        return runner.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
+                                log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume)
+    if stage == "review" and review_config.backend(conn) in ("claude", "codex"):
+        from . import cli_review
+        return cli_review.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
+                                    log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume)
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
-    log_path = _log_path(stage)
 
     # v4（§5.24.4/§5.24.5）：按该 stage 的控制端后端分流。pi_desktop 分支在
     # Plus 本机 MCP 控制面建独立会话运行同一角色 prompt，**不**拉起 pi -p；

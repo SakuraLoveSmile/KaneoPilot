@@ -160,6 +160,36 @@ def test_runtime_resource_and_config_scope_guards(tmp_path):
         conn.close()
 
 
+def test_runtime_prompt_uses_session_ownership_without_attachment(tmp_path):
+    conn = db.connect(tmp_path / 'test.db')
+    scope = mcp_scopes.Scope(
+        'scope', 'invocation', 'planner',
+        util.to_iso(util.now_dt() + timedelta(minutes=10)), project_path=str(tmp_path),
+    )
+    try:
+        with db.write_txn(conn):
+            runtime_operations.begin_operation(
+                conn, scope.scope_id, 'create', 'pi_desktop',
+                'kp_runtime_session_create', {},
+            )
+            runtime_operations.complete_operation(
+                conn, scope.scope_id, 'create', session_id='owned-session',
+            )
+        assert not runtime_operations.session_attached(conn, scope.scope_id, 'owned-session')
+        args = {'scope_id': scope.scope_id, 'session_id': 'owned-session', 'content': 'plan'}
+        mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', args)
+        with pytest.raises(util.KanpilotError, match='does not belong'):
+            mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', {
+                **args, 'session_id': 'foreign-session',
+            })
+        with pytest.raises(util.KanpilotError, match='outside the authorized project'):
+            mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', {
+                **args, 'attachments': [{'path': str(tmp_path.parent / 'outside.png')}],
+            })
+    finally:
+        conn.close()
+
+
 def test_authorization_is_checked_under_write_lock(tmp_path):
     conn = db.connect(tmp_path / 'test.db')
     def denied(_):

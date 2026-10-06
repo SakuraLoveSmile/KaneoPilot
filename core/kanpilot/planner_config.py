@@ -48,6 +48,8 @@ DEFAULTS = {
     "standard": dict(constants.STANDARD_PLANNER),
     "review_fix": dict(constants.REVIEW_FIX_PLANNER),
 }
+CLAUDE_DEFAULT = {"model": "sonnet", "effort": "high"}
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -100,6 +102,7 @@ def merged(conn: sqlite3.Connection) -> dict:
     result["pi_desktop"] = exec_config.merge_pi_desktop_block(
         stored.get("pi_desktop")
     )
+    result["claude"] = dict(CLAUDE_DEFAULT, **(stored.get("claude") or {}))
     return result
 
 
@@ -113,10 +116,13 @@ def pi_desktop_block(conn: sqlite3.Connection) -> Optional[dict]:
     return merged(conn)["pi_desktop"]
 
 
-def model_snapshot(conn: sqlite3.Connection, group: str) -> dict:
+def model_snapshot(conn: sqlite3.Connection, group: str, *, backend="codex") -> dict:
     """Codex 分支快照：某配置组的生效 {planner_model, reasoning_effort}。
     default_method 属请求级/UI 预选字段，不进快照（§5.23.2）。"""
     state = merged(conn)
+    if backend == "claude":
+        return {"planner_model": state["claude"]["model"],
+                "reasoning_effort": state["claude"]["effort"]}
     base = state.get(group) or state["standard"]
     return {
         "planner_model": base["planner_model"],
@@ -159,7 +165,7 @@ def snapshot(conn: sqlite3.Connection, group: str) -> dict:
     """
     if backend(conn) == "pi_desktop":
         return runtime_snapshot(conn)
-    return model_snapshot(conn, group)
+    return model_snapshot(conn, group, backend=backend(conn))
 
 
 def default_method(conn: sqlite3.Connection) -> str:
@@ -171,6 +177,8 @@ def spec_plan_blocked_reason(backend_value: Optional[str]) -> Optional[str]:
     """Plus 分支禁 spec_plan 的中文原因（None=允许）。"""
     if backend_value == "pi_desktop":
         return SPEC_PLAN_DISABLED_REASON
+    if backend_value == "claude":
+        return "spec_plan 是 Codex 插件运行方式，Claude 计划分支只支持 builtin"
     return None
 
 
@@ -209,11 +217,16 @@ def save(conn: sqlite3.Connection, groups: dict, now: str) -> dict:
         current_block = dict(current.get("pi_desktop") or {})
         current_block.update(block)
         current["pi_desktop"] = exec_config.merge_pi_desktop_block(current_block)
-    if current["backend"] == "pi_desktop" and (
+    if "claude" in groups:
+        error = validate_claude_block(groups["claude"])
+        if error:
+            raise util.bad_request(error)
+        current["claude"] = dict(groups["claude"])
+    if current["backend"] in ("pi_desktop", "claude") and (
             current["default_method"] == "spec_plan"):
         raise util.bad_request(
-            f"Plus 计划分支不支持 default_method=spec_plan："
-            f"{SPEC_PLAN_DISABLED_REASON}；请先把 default_method 改为 builtin"
+            f"{current['backend']} 计划分支不支持 default_method=spec_plan："
+            f"{spec_plan_blocked_reason(current['backend'])}；请先把 default_method 改为 builtin"
             f"（或切回 codex）"
         )
     if current["backend"] == "pi_desktop":
@@ -224,6 +237,7 @@ def save(conn: sqlite3.Connection, groups: dict, now: str) -> dict:
     stored = {group: dict(current[group]) for group in PLANNER_GROUPS}
     stored["default_method"] = current["default_method"]
     stored["backend"] = current["backend"]
+    stored["claude"] = dict(current["claude"])
     if current.get("pi_desktop") is not None:
         stored["pi_desktop"] = dict(current["pi_desktop"])
     stored["updated_at"] = now
@@ -235,6 +249,14 @@ def validate_method(value) -> Optional[str]:
     """default_method 校验：∈ DEFAULT_METHODS → 原值；否则 None。"""
     if isinstance(value, str) and value in DEFAULT_METHODS:
         return value
+    return None
+
+
+def validate_claude_block(block) -> Optional[str]:
+    if not isinstance(block, dict) or _clean(block.get("model")) is None:
+        return "claude.model 必须是非空模型标识"
+    if block.get("effort") not in CLAUDE_EFFORTS:
+        return "claude.effort 仅支持 low/medium/high/xhigh/max"
     return None
 
 

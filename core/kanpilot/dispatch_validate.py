@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from . import bridge, constants, core, db, exec_config, planfile, remote, util, mcp_client, harness_plus_adapter
+from . import bridge, constants, core, db, exec_config, planfile, remote, util, mcp_client, git_delivery
 
 
 class DispatchCheckFailed(util.KanpilotError):
@@ -108,8 +108,8 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "remote project mismatch",
     )
     _require(
-        live_task.get("status") in constants.TODO_SLUGS,
-        "remote task not To Do",
+        live_task.get("status") in core.expected_remote_slugs(task),
+        "remote task not in expected status",
     )
     _require(
         live.get("requirements_sha256") == requirements,
@@ -127,7 +127,23 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     )
 
     # 5. plan_kind-specific --------------------------------------------------
-    if plan_kind == "review_fix":
+    if meta.get("fix_mode") == "same_task":
+        fix = db.task_extra(task).get("fix_request") or {}
+        _require(core.is_automation_managed(task), "same_task plan requires automation")
+        try:
+            report = util.inside(Path(meta.get("review_report_path") or ""),
+                                 constants.review_reports_root(), "review_report_path")
+        except util.KanpilotError as exc:
+            raise DispatchCheckFailed(exc.message) from exc
+        _require(report.is_file(), "review report missing")
+        _require(str(report) == fix.get("report_path"), "review report path mismatch")
+        _require(util.sha256_file(report) == meta.get("review_report_sha256") == fix.get("report_sha256"),
+                 "review report changed")
+        _require(meta.get("review_source_task_id") == task_id, "same_task source mismatch")
+        _require(meta.get("fix_round") == core.automation_of(task).get("fix_round"), "fix round mismatch")
+        _require(meta.get("review_key") == fix.get("review_key") and bool(fix.get("review_key")),
+                 "review key mismatch")
+    elif plan_kind == "review_fix":
         report = util.inside(
             Path(meta["review_report_path"]),
             constants.review_reports_root(),
@@ -186,11 +202,27 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
             service.ping()
         except util.KanpilotError as exc:
             raise DispatchCheckFailed("本机 MCP 服务未就绪：" + exc.message) from exc
-        attachment = harness_plus_adapter.plus_capabilities(config_snapshot["connection_file"])
-        _require(attachment.get("attachment_supported") is True,
-                 "Plus 缺少 pi_session_attach_mcp；升级支持会话 MCP 的 Plus 后再派发")
     available, reason = exec_config.check_available(conn, config_snapshot=config_snapshot)
     _require(available, reason or "执行环境不可用")
+    delivery = dict(core.delivery_of(task), repository=task["repository"])
+    manual_branch = (core.automation_of(task).get("manual_takeover") is True
+                     and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
+    user_replan = core.is_user_replan(task)
+    state_sha = core.automation_of(task).get("replan_worktree_sha256")
+    if core.is_pr_delivery(task) or manual_branch:
+        if not manual_branch:
+            _require(bool(delivery.get("head_sha")), "delivery head missing")
+        if user_replan:
+            _require(bool(state_sha), "重新规划缺少工作树状态指纹")
+        try:
+            git_delivery.verify_branch_worktree(
+                delivery, require_clean=not (manual_branch or user_replan),
+                expected_head=None if manual_branch else delivery["head_sha"])
+            if user_replan:
+                _require(git_delivery.worktree_state_sha256(delivery) == state_sha,
+                         "重新规划后工作树内容已变化，请重新准备规划材料")
+        except git_delivery.GitDeliveryError as exc:
+            raise DispatchCheckFailed(exc.message) from exc
     return {
         "task_id": task_id,
         "plan_path": str(path),

@@ -251,6 +251,15 @@ def image_files(manifest: dict, input_dir: Optional[Path]) -> list:
     return images
 
 
+def _execution_worktree_block(manifest: dict) -> str:
+    state = manifest.get("execution_worktree")
+    if not isinstance(state, dict):
+        return ""
+    return ("## 用户重新规划：已保留的执行工作树状态\n\n"
+            "以下 execution_worktree 清单来自本轮规划材料；先阅读改动清单和对应文件副本。\n"
+            + json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+
 def build_prompt(task: dict, manifest: dict, input_dir: Optional[Path],
                  method: str = "builtin") -> str:
     """渲染 executor_prompts/planner_prompt.md 为本次规划 prompt。
@@ -288,9 +297,12 @@ def build_prompt(task: dict, manifest: dict, input_dir: Optional[Path],
                 or manifest_task.get("repository") or "."))
             .replace("{INPUT_DIR}", str(input_dir) if input_dir else "")
             .replace("{FILES_BLOCK}", files_block)
+            .replace("{EXECUTION_WORKTREE_BLOCK}", _execution_worktree_block(manifest))
             .replace("{SUPPLEMENT_BLOCK}", supplement_block))
     if method == "spec_plan":
         prompt = SPEC_PROMPT_PREFIX + prompt
+    if task.get("fix_mode") == "same_task":
+        prompt += "\n## 同任务修复轮\n\n工作树已含前几轮提交，只修 Review 报告列出的问题，verify 要覆盖修复点。\n"
     return prompt
 
 
@@ -318,7 +330,7 @@ def launcher_argv(
     model_config = job.get("model_config") or {}
     model = model_config.get("planner_model") or ""
     effort = model_config.get("reasoning_effort") or ""
-    cwd = job.get("repository") or "."
+    cwd = job.get("plan_cwd") or job.get("repository") or "."
     spec_mode = job.get("planner_method") == "spec_plan"
 
     argv = [

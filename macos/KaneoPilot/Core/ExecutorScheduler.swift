@@ -1,173 +1,448 @@
 import AppKit
 import CFNetwork
+import Combine
+import Darwin
 import Foundation
 import Network
 
-/// App 内置执行端调度器（protocol §5.19，v1.6）：App 存活期间按错开分钟
-/// 拉起 `python3 -m kanpilot.executor_runner --stage <s>`。
-/// 不常驻：App 退出后不再触发（设置页已明示；v1.6 不引入 launchd）。
+/// App 常驻调度：核心 tick → 状态 → 纯决策。所有启动只来自核心可领取事实。
 @MainActor
-final class ExecutorScheduler {
-    /// 每 stage 的触发分钟（与旧 automation 契约错开分钟一致）。
-    /// v2（§5.22.3）：规划分流到 planner_runner（Codex），不再是定时 pi stage，
-    /// 由「开始规划」/「立即运行」按需触发。
-    static let stageMinutes: [String: [Int]] = [
-        "dispatch": [4, 19, 34, 49],
-        "monitor": [8, 23, 38, 53],
-        "review": [12, 27, 42, 57],
-    ]
-    /// UI 展示顺序固定（字典无序）。
-    static let stages = ["dispatch", "monitor", "review"]
+final class ExecutorScheduler: ObservableObject {
+    static let stages = SchedulerDecision.stages
+    static let interval: TimeInterval = 20
+    static let intakeInterval: TimeInterval = 300
+
+    @Published private(set) var status: ExecutorStatusDTO?
+    @Published private(set) var error: String?
+    private(set) var instanceID = UUID().uuidString.lowercased()
+    var preventsIdleSleep: Bool { activity != nil }
+    var isSchedulingStopped: Bool { stopped }
+    var isStopping: Bool { stopping }
 
     private let client: CoreClient
+    private let queue = DispatchQueue(label: "kanpilot.scheduler", qos: .utility)
     private var timer: DispatchSourceTimer?
-    private var lastFired: [String: String] = [:]   // stage → "yyyyMMddHHmm" 本分钟键
-    private var starting: Set<String> = []           // stage 拉起在途保护
+    private var wakeObserver: NSObjectProtocol?
+    private var round: Task<Void, Never>?
+    private var pauseUpdate: Task<Void, Never>?
+    private var registration: Task<ExecutorInstanceResponse, Error>?
+    private var ownerRefresh: Task<Void, Never>?
+    private var ownerRefreshPending = false
+    private var ownershipUncertain = false
+    private var ownedWorkers: [ExecutorOwnedWorkerDTO] = []
+    private var registered = false
+    private var stopping = false
+    private var stopCompletions: [(Bool) -> Void] = []
+    private var cleanupComplete = false
+    private var pendingForced: Set<String> = []
+    private var pendingCheck = false
+    private var children: [String: Process] = [:]
+    private var activity: NSObjectProtocol?
+    private var lastIntakeAt: Date?
+    private var generation = 0
+    private var stopped = false
 
-    init(client: CoreClient) {
-        self.client = client
-    }
+    init(client: CoreClient) { self.client = client }
 
-    /// 调度开关（缺省开启；UserDefaults key "executorSchedulingEnabled"）。
     static var isEnabled: Bool {
-        let d = UserDefaults.standard
-        return d.object(forKey: "executorSchedulingEnabled") == nil
-            || d.bool(forKey: "executorSchedulingEnabled")
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: "executorSchedulingEnabled") == nil
+            || defaults.bool(forKey: "executorSchedulingEnabled")
     }
 
-    /// 每 stage 下一次触发的本地时间（供设置页显示）。
+    /// 设置页兼容入口：所有阶段按 20 秒检查，无固定分钟位。
     static func nextFireDate(for stage: String, now: Date = Date()) -> Date? {
-        guard let minutes = stageMinutes[stage], !minutes.isEmpty else { return nil }
-        let calendar = Calendar.current
-        let hour = calendar.component(.hour, from: now)
-        let minute = calendar.component(.minute, from: now)
-        // 今日：本小时取大于当前分钟的首个命中；本小时没有则找后续小时的
-        // 首个命中（触发按每小时计，23 点之后归到明日）。
-        for h in hour...23 {
-            let valid = h == hour ? minutes.filter { $0 > minute } : minutes
-            if let m = valid.first,
-               let candidate = calendar.date(
-                   bySettingHour: h, minute: m, second: 0, of: now),
-               candidate > now {
-                return candidate
-            }
-        }
-        // 今日全部分钟已过 → 明日首个分钟。
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
-        return calendar.date(
-            bySettingHour: 0, minute: minutes.min() ?? 0, second: 0, of: tomorrow)
+        stages.contains(stage) ? now.addingTimeInterval(interval) : nil
     }
 
     func start() {
-        guard timer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + 15, repeating: 20)   // 每 20s 检查一次分钟位
-        t.setEventHandler { [weak self] in self?.tick() }
-        t.resume()
-        timer = t
-    }
-
-    private func tick() {
-        guard Self.isEnabled, client.location != nil else { return }
-        let now = Date()
-        let calendar = Calendar.current
-        let minute = calendar.component(.minute, from: now)
-        let minuteKey = Self.minuteKey(now)
-        for stage in Self.stages {
-            guard Self.stageMinutes[stage]?.contains(minute) == true else { continue }
-            guard lastFired[stage] != minuteKey, !starting.contains(stage) else { continue }
-            lastFired[stage] = minuteKey
-            Task { await self.launch(stage: stage) }
+        guard timer == nil, !stopping, !stopped || cleanupComplete else { return }
+        if stopped {
+            instanceID = UUID().uuidString.lowercased()
+            registration = nil
+            registered = false
+            ownedWorkers = []
+            ownershipUncertain = false
+            cleanupComplete = false
+        }
+        stopped = false
+        beginRegistration()
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now(), repeating: Self.interval)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in self?.requestCheck() }
+        }
+        source.resume()
+        timer = source
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.requestCheck() }
         }
     }
 
-    /// 设置页「立即运行」：跳过分钟判定与开关，直接走拉起路径（单飞判断照旧）。
+    /// 手动检查只跳过开发开关；暂停、单飞与可领取规则仍由核心决定。
     func runNow(_ stage: String) {
-        guard !starting.contains(stage) else { return }
-        Task { await self.launch(stage: stage) }
+        guard Self.stages.contains(stage) || stage == "intake" else { return }
+        requestCheck(forced: [stage], manual: true)
+    }
+    func runPlanner() { runNow("plan") }
+    func checkNow() { requestCheck(forced: ["intake"], manual: true) }
+
+    func setPaused(_ paused: Bool) async {
+        guard !stopped, pauseUpdate == nil else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.client.run("set-paused", payload: ["stage": NSNull(), "paused": paused], timeout: 10)
+                guard !self.stopped else { return }
+                let current = try await self.client.run("executor-status", payload: ["instance_id": self.instanceID], timeout: 10, as: ExecutorStatusDTO.self)
+                guard !self.stopped else { return }
+                self.applyStatus(current)
+                self.error = nil
+                if !paused { self.requestCheck(manual: true) }
+            } catch { self.error = error.localizedDescription }
+        }
+        pauseUpdate = task
+        await task.value
+        pauseUpdate = nil
     }
 
-    /// 单飞：executor-status 该 stage running 非空则跳过；否则 Process 拉起
-    /// executor_runner（运行记录由 runner 写 settings.executor_runs，本类不跟踪）。
-    private func launch(stage: String) async {
-        guard client.location != nil else { return }
-        starting.insert(stage)
-        defer { starting.remove(stage) }
-
-        if let status = try? await client.run(
-            "executor-status", as: ExecutorStatusResponse.self),
-           status.stages?[stage]?.running != nil {
+    private func requestCheck(forced: Set<String> = [], manual: Bool = false) {
+        guard !stopped, client.location != nil else { return }
+        if !Self.isEnabled && !manual {
+            // 开发开关只阻止自动推进；已启动 worker 的归属与防休眠仍需收尾。
+            if !ownedWorkers.isEmpty || !children.isEmpty || ownershipUncertain { refreshOwnershipAfterStageExit() }
             return
         }
-        Self.spawn(module: "kanpilot.executor_runner",
-                   extraArgs: ["--stage", stage],
-                   location: client.location)
-    }
-
-    /// v2 §5.22.2：「开始规划」后立即唤起规划 runner（kanpilot.planner_runner）。
-    /// 无 --once：drain 已授权规划队列后自行退出。单飞经 executor-status
-    /// stages["plan"].running（planner_runner 自己写 executor_runs["plan"] pid）。
-    func runPlanner() {
-        guard !starting.contains("plan") else { return }
-        Task { await launchPlanner() }
-    }
-
-    private func launchPlanner() async {
-        guard client.location != nil else { return }
-        starting.insert("plan")
-        defer { starting.remove("plan") }
-
-        if let status = try? await client.run(
-            "executor-status", as: ExecutorStatusResponse.self),
-           status.stages?["plan"]?.running != nil {
-            return
+        pendingForced.formUnion(forced)
+        guard round == nil else { pendingCheck = true; return }
+        let currentGeneration = generation
+        round = Task { [weak self] in
+            guard let self else { return }
+            repeat {
+                let forced = self.pendingForced
+                self.pendingForced.removeAll()
+                self.pendingCheck = false
+                await self.runRound(forced: forced, generation: currentGeneration)
+            } while !self.stopped && self.pendingCheck && self.generation == currentGeneration
+            self.round = nil
         }
-        Self.spawn(module: "kanpilot.planner_runner", extraArgs: [],
-                   location: client.location)
     }
 
-    /// 拉起 `python3 -m <module> <extraArgs>`：cwd = core 根（kanpilot.py 所在
-    /// 目录），env 前置用户 bin + 系统代理（与核心调用同口径）。stdout/stderr
-    /// 不接管，runner 自行写 executor-logs。
-    private static func spawn(module: String, extraArgs: [String],
-                              location: CoreLocation?) {
-        guard let location else { return }
-        let coreDir =
-            URL(fileURLWithPath: location.path).deletingLastPathComponent()
-        // FakeCore/单文件 shim 旁无 kanpilot 包，`python -m kanpilot.*` 必然
-        // ModuleNotFoundError——目录探测不到包时静默跳过（只影响夹具运行）。
-        guard FileManager.default.fileExists(
-            atPath: coreDir.appendingPathComponent("kanpilot").path
-        ) else { return }
+    private func runRound(forced: Set<String>, generation expected: Int) async {
+        do {
+            beginRegistration()
+            guard let registration else { return }
+            let registeredInstance = try await registration.value
+            guard registeredInstance.instanceId == instanceID, registeredInstance.state == "active" else {
+                throw CoreError.badOutput("执行实例登记未返回当前 active 实例")
+            }
+            guard !stopped, generation == expected else { return }
+            registered = true
+            _ = try await client.run("tick", timeout: 10)
+            guard !stopped, generation == expected else { return }
+            let current = try await client.run("executor-status", payload: ["instance_id": instanceID], timeout: 10, as: ExecutorStatusDTO.self)
+            guard !stopped, generation == expected else { return }
+            let hasExitedStage = children.values.contains(where: { !$0.isRunning })
+            if hasExitedStage { refreshOwnershipAfterStageExit() }
+            applyStatus(current)
+            error = nil
+            children = children.filter { $0.value.isRunning }
+            updateActivity()
+            // 核心上次 intake 在重启后仍可用于 300 秒间隔；本次启动时间避免登记延迟重复。
+            let persisted = SchedulerDecision.intakeDate(current)
+            let last = [persisted, lastIntakeAt].compactMap { $0 }.max()
+            let requests = SchedulerDecision.decide(
+                status: current, now: Date(), lastIntakeAt: last,
+                intakeInterval: Self.intakeInterval, forced: forced)
+            for request in requests where children[request.kind]?.isRunning != true {
+                try spawn(kind: request.kind)
+            }
+        } catch {
+            if !registered, !stopped, generation == expected {
+                // 初次数据库初始化可能短暂失败。留给下一次正常检查幂等登记，
+                // 不在本轮重试，也不更换 UUID 或复活已关闭实例。
+                registration = nil
+                pendingCheck = false
+            }
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func spawn(kind: String) throws {
+        guard registered, !stopped, let location = client.location else { return }
+        let coreDir = URL(fileURLWithPath: location.path).deletingLastPathComponent()
+        // FakeCore 旁没有 runner 包，保持原有夹具隔离行为。
+        guard FileManager.default.fileExists(atPath: coreDir.appendingPathComponent("kanpilot").path) else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-m", module] + extraArgs
-        // cwd = core 根（kanpilot.py 所在目录），使 `import kanpilot` 可解析；
-        // shim 形态（usesPython == false）取 shim 同级目录。
+        switch kind {
+        case "plan": process.arguments = ["python3", "-m", "kanpilot.planner_runner"]
+        case "intake": process.arguments = ["python3", "-m", "kanpilot.auto_intake"]
+        default: process.arguments = ["python3", "-m", "kanpilot.executor_runner", "--stage", kind]
+        }
         process.currentDirectoryURL = coreDir
         var env = ProcessInfo.processInfo.environment
-        let npmBin = (NSHomeDirectory() as NSString)
-            .appendingPathComponent(".npm-global/bin")
+        env["KANPILOT_EXECUTOR_INSTANCE_ID"] = instanceID
+        let npmBin = (NSHomeDirectory() as NSString).appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"
         env["PATH"] = env["PATH"].map { "\(extraPath):\($0)" } ?? extraPath
-        // macOS 本地网络隐私会拦截未授权 app 对 LAN 的直连（模型端在
-        // 192.168.0.0/16 时 Connection error）。探测系统 HTTP 代理并经
-        // HTTP_PROXY 注入子进程，让 pi/codex 经 loopback 代理转发到 LAN；
-        // 模型在公网/localhost 时同样无害。NO_PROXY 只放本机回环，
-        // 不能含私网段，否则代理又会被绕过。
         if let proxy = Self.systemHTTPProxy() {
-            env["HTTP_PROXY"] = proxy
-            env["HTTPS_PROXY"] = proxy
-            env["http_proxy"] = proxy
-            env["https_proxy"] = proxy
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] { env[key] = proxy }
             env["NO_PROXY"] = "localhost,127.0.0.1,::1"
             env["no_proxy"] = "localhost,127.0.0.1,::1"
         }
         process.environment = env
-        // 不接管 stdout/stderr：runner 自行写 executor-logs。
-        try? process.run()
+        process.terminationHandler = { [weak self] child in
+            Task { @MainActor in
+                guard let self, self.children[kind] === child else { return }
+                self.children.removeValue(forKey: kind)
+                if !self.stopped { self.refreshOwnershipAfterStageExit() }
+            }
+        }
+        try process.run()
+        children[kind] = process
+        if kind == "intake" { lastIntakeAt = Date() }
+        updateActivity()
     }
 
+    private func updateActivity() {
+        if children.values.contains(where: { $0.isRunning })
+            || ownedWorkers.contains(where: { Self.workerIsAlive($0) })
+            || ownershipUncertain || ownerRefresh != nil || (stopping && activity != nil) {
+            if activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(
+                    options: .idleSystemSleepDisabled, reason: "KaneoPilot 正在处理任务")
+            }
+        } else if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
+    }
+
+    private func beginRegistration() {
+        guard registration == nil, !stopped, client.location != nil else { return }
+        let id = instanceID
+        let client = client
+        registration = Task {
+            try await client.run("executor-instance", payload: ["instance_id": id, "action": "start"],
+                                 timeout: 10, as: ExecutorInstanceResponse.self)
+        }
+    }
+
+    private func applyStatus(_ current: ExecutorStatusDTO) {
+        status = current
+        // 并发状态读取可能晚到；已经确认仍存活的本实例登记不能被旧快照清掉。
+        var workers = current.ownedWorkers ?? []
+        for previous in ownedWorkers where Self.workerIsAlive(previous) {
+            if !workers.contains(where: {
+                $0.pid == previous.pid && $0.startedSeconds == previous.startedSeconds
+                    && $0.startedMicroseconds == previous.startedMicroseconds
+            }) { workers.append(previous) }
+        }
+        ownedWorkers = workers
+        ownershipUncertain = false
+        updateActivity()
+    }
+
+    /// runner 可能先于 detached worker 退出；读完登记前不能释放防休眠。
+    private func refreshOwnershipAfterStageExit() {
+        ownershipUncertain = true
+        ownerRefreshPending = true
+        guard ownerRefresh == nil else { return }
+        let expected = generation
+        let id = instanceID
+        ownerRefresh = Task { [weak self] in
+            guard let self else { return }
+            repeat {
+                self.ownerRefreshPending = false
+                do {
+                    let current = try await self.client.run("executor-status", payload: ["instance_id": id],
+                                                            timeout: 10, as: ExecutorStatusDTO.self)
+                    guard !self.stopped, self.generation == expected else { break }
+                    self.applyStatus(current)
+                    self.error = nil
+                } catch { self.error = error.localizedDescription }
+            } while !self.stopped && self.ownerRefreshPending
+            self.ownerRefresh = nil
+            self.updateActivity()
+        }
+        updateActivity()
+    }
+
+    /// 关闭 owner、清 stage，再按登记清 detached worker；失败让 App 取消退出并重试。
+    func stop(completion: @escaping (Bool) -> Void = { _ in }) {
+        stopCompletions.append(completion)
+        guard !stopping else { return }
+        if cleanupComplete {
+            let completions = stopCompletions
+            stopCompletions.removeAll()
+            completions.forEach { $0(true) }
+            return
+        }
+        stopping = true
+        stopped = true
+        generation += 1
+        timer?.cancel()
+        timer = nil
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
+        pendingCheck = false
+        pendingForced.removeAll()
+        let pendingRound = round
+        pendingRound?.cancel()
+        let pendingPause = pauseUpdate
+        pendingPause?.cancel()
+        let pendingRegistration = registration
+        let pendingRefresh = ownerRefresh
+        let closingID = instanceID
+        let ownedStages = children
+        children.removeAll()
+        Task {
+            // start CLI 可能还未提交；先等它，避免 stop 之后又登记为 active。
+            _ = try? await pendingRegistration?.value
+            var workers = ownedWorkers
+            var failures: [String] = []
+            var ownerClosed = false
+            var finalRead = false
+            do {
+                let closed = try await client.run("executor-instance", payload: ["instance_id": closingID, "action": "stop"],
+                                                  timeout: 10, as: ExecutorInstanceResponse.self)
+                guard closed.instanceId == closingID, closed.state == "stopped" else {
+                    throw CoreError.badOutput("执行实例关闭未返回当前 stopped 实例")
+                }
+                ownerClosed = true
+                workers = closed.ownedWorkers
+            } catch { failures.append("关闭执行实例失败：\(error.localizedDescription)") }
+            // 即便核心关闭失败，也停止本次 stage，避免继续派发；不猜测未知 worker。
+            let stagesExited = await Task.detached(priority: .utility) {
+                Self.terminateOwnedProcesses(Array(ownedStages.values))
+            }.value
+            await pendingRound?.value
+            await pendingPause?.value
+            await pendingRefresh?.value
+            do {
+                let final = try await client.run("executor-instance", payload: ["instance_id": closingID, "action": "status"],
+                                                 timeout: 10, as: ExecutorInstanceResponse.self)
+                guard final.instanceId == closingID else {
+                    throw CoreError.badOutput("执行实例末次检查返回了不同实例")
+                }
+                workers = final.ownedWorkers
+                guard final.state == "stopped" else {
+                    throw CoreError.badOutput("执行实例末次检查未返回 stopped 实例")
+                }
+                finalRead = true
+            } catch { failures.append("读取执行实例归属失败：\(error.localizedDescription)") }
+            let workersExited = await Task.detached(priority: .utility) {
+                Self.terminateOwnedWorkers(workers)
+            }.value
+            if !stagesExited || !workersExited { failures.append("本次登记进程尚未全部退出") }
+            cleanupComplete = ownerClosed && finalRead && stagesExited && workersExited
+            ownedWorkers = workers.filter { Self.workerIsAlive($0) }
+            children = ownedStages.filter { $0.value.isRunning }
+            ownershipUncertain = !cleanupComplete && !finalRead
+            stopping = false
+            error = cleanupComplete ? nil : "退出清理未完成：" + failures.joined(separator: "；") + "。请再次退出以重试。"
+            updateActivity()
+            let completions = stopCompletions
+            stopCompletions.removeAll()
+            completions.forEach { $0(cleanupComplete) }
+        }
+    }
+
+    private struct ProcessIdentity {
+        let pid: Int32
+        let started: UInt64
+        let microseconds: UInt64
+    }
+
+    nonisolated private static func processInfo(_ pid: Int32) -> proc_bsdinfo? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return info
+    }
+
+    nonisolated private static func terminateOwnedProcesses(_ owned: [Process]) -> Bool {
+        let identities = owned.filter { $0.isRunning }.compactMap { process -> ProcessIdentity? in
+            guard let info = processInfo(process.processIdentifier) else { return nil }
+            return ProcessIdentity(pid: process.processIdentifier, started: info.pbi_start_tvsec,
+                                   microseconds: info.pbi_start_tvusec)
+        }
+        let exited = terminateIdentities(identities)
+        for process in owned where !process.isRunning { process.waitUntilExit() }
+        return exited && owned.allSatisfy { !$0.isRunning }
+    }
+
+    nonisolated private static func workerIsAlive(_ worker: ExecutorOwnedWorkerDTO) -> Bool {
+        identityIsAlive(ProcessIdentity(pid: worker.pid, started: worker.startedSeconds,
+                                        microseconds: worker.startedMicroseconds))
+    }
+
+    nonisolated private static func identityIsAlive(_ identity: ProcessIdentity) -> Bool {
+        guard let info = processInfo(identity.pid), info.pbi_status != UInt32(SZOMB) else { return false }
+        return info.pbi_start_tvsec == identity.started && info.pbi_start_tvusec == identity.microseconds
+    }
+
+    nonisolated private static func isPlusProcess(_ pid: Int32) -> Bool {
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let read = path.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
+        return read > 0 && String(cString: path).contains("Pi-Desktop-Plus.app/")
+    }
+
+    nonisolated private static func terminateOwnedWorkers(_ workers: [ExecutorOwnedWorkerDTO]) -> Bool {
+        terminateIdentities(workers.map {
+            ProcessIdentity(pid: $0.pid, started: $0.startedSeconds, microseconds: $0.startedMicroseconds)
+        })
+    }
+
+    /// 根必须先独立匹配登记的启动时间，才枚举其子树；每次信号再次核身份。
+    nonisolated private static func terminateIdentities(_ expectedRoots: [ProcessIdentity]) -> Bool {
+        var rootRecords: [Int32: ProcessIdentity] = [:]
+        for identity in expectedRoots.filter({
+            identityIsAlive($0) && !isPlusProcess($0.pid)
+        }) { rootRecords[identity.pid] = identity }
+        guard !rootRecords.isEmpty else { return !expectedRoots.contains(where: identityIsAlive) }
+        var pids = [Int32](repeating: 0, count: Int(proc_listallpids(nil, 0)) + 64)
+        let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        var infos: [Int32: proc_bsdinfo] = [:]
+        for pid in pids.prefix(max(0, Int(count))) where pid > 0 {
+            if let info = processInfo(pid) { infos[pid] = info }
+        }
+        // 枚举期间根可能退出且 PID 被复用；根仍须匹配原登记的 birth。
+        let roots = Set(rootRecords.compactMap { pid, expected -> Int32? in
+            guard let info = infos[pid], info.pbi_start_tvsec == expected.started,
+                  info.pbi_start_tvusec == expected.microseconds else { return nil }
+            return pid
+        })
+        var tree = roots
+        var level = roots
+        while !level.isEmpty {
+            let next = Set(infos.compactMap { pid, info -> Int32? in
+                guard level.contains(Int32(info.pbi_ppid)), !tree.contains(pid) else { return nil }
+                // Plus 是外部持久桌面会话，退出调度台不结束它或其子进程。
+                if isPlusProcess(pid) { return nil }
+                return pid
+            })
+            tree.formUnion(next)
+            level = next
+        }
+        let identities = tree.compactMap { pid -> ProcessIdentity? in
+            if let root = rootRecords[pid] { return root }
+            guard let info = infos[pid] else { return nil }
+            return ProcessIdentity(pid: pid, started: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
+        }
+        for identity in identities where identityIsAlive(identity) { kill(identity.pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline && identities.contains(where: identityIsAlive) { usleep(50_000) }
+        for identity in identities where identityIsAlive(identity) { kill(identity.pid, SIGKILL) }
+        let confirmationDeadline = Date().addingTimeInterval(0.5)
+        while Date() < confirmationDeadline && identities.contains(where: identityIsAlive) { usleep(10_000) }
+        return !identities.contains(where: identityIsAlive) && !expectedRoots.contains(where: identityIsAlive)
+    }
 
     /// 本机网络（macOS「本地网络」隐私）授权引导。
     ///
@@ -184,11 +459,18 @@ final class ExecutorScheduler {
             let detail: String
         }
 
-        /// `~/.pi/agent/models.json` 中 baseUrl 指向私网地址的端点。
+        /// 当前 Pi 配置中 baseUrl 指向私网地址的端点；隔离配置优先。
         /// 公网/localhost 端点不受本机网络隐私限制，不参与探测。
         static func configuredLANEndpoints() -> [URL] {
-            let modelsURL = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".pi/agent/models.json")
+            let piHome: URL
+            if let override = ProcessInfo.processInfo.environment["KANPILOT_PI_HOME"],
+               !override.isEmpty {
+                piHome = URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+            } else {
+                piHome = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".pi")
+            }
+            let modelsURL = piHome.appendingPathComponent("agent/models.json")
             guard let data = try? Data(contentsOf: modelsURL),
                   let root = try? JSONSerialization.jsonObject(with: data)
                     as? [String: Any],
@@ -287,7 +569,7 @@ final class ExecutorScheduler {
             return outcomes
         }
 
-        private static func showBlockedAlert(_ outcomes: [Outcome]) {
+        @MainActor private static func showBlockedAlert(_ outcomes: [Outcome]) {
             let blocked = outcomes.filter { !$0.ok }
             let lines = blocked.prefix(3)
                 .map { "• \($0.endpoint)（\($0.detail)）" }
@@ -338,13 +620,5 @@ final class ExecutorScheduler {
         }
         let port = (dict["HTTPPort"] as? NSNumber)?.intValue ?? 0
         return port > 0 ? "http://\(host):\(port)" : "http://\(host)"
-    }
-    /// 本分钟键（yyyyMMddHHmm）：同一分钟内只触发一次。
-    private static func minuteKey(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute], from: date)
-        return String(
-            format: "%04d%02d%02d%02d%02d",
-            c.year ?? 0, c.month ?? 0, c.day ?? 0, c.hour ?? 0, c.minute ?? 0)
     }
 }

@@ -50,8 +50,7 @@ SESSION_ID = "pd-sess-1"
 TURN_ID = "turn-1"
 FOLLOW_UP_TURN_ID = "turn-2"
 ALL_TOOLS = (tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
-            + tuple(constants.PI_DESKTOP_GOAL_TOOLS)
-            + ("pi_session_attach_mcp",))
+            + tuple(constants.PI_DESKTOP_GOAL_TOOLS))
 
 
 # ------------------------------------------------------------ fake MCP server
@@ -1180,14 +1179,12 @@ class TestRunReal(PiDesktopCase):
         self.assertEqual(job["send_state"], "sent")
         self.assertEqual(job["turn_id"], TURN_ID)
         self.assertEqual(job["session_id"], SESSION_ID)
-        self.assertEqual(len(self.server.attach_calls), 1)
-        attached = self.server.attach_calls[0]
-        self.assertEqual(attached["grant"]["server_name"], constants.MCP_SERVER_NAME)
-        self.assertEqual(attached["grant"]["domain"], "task")
-        self.assertEqual(attached["grant"]["role"], "execution")
-        self.assertEqual(
-            set(attached["tool_names"]), mcp_scopes.TASK_ROLE_TOOLS["execution"],
-        )
+        self.assertEqual(self.server.attach_calls, [])
+        setup_calls = [name for name, _args in self.server.calls
+                       if name in ("pi_session_create", "pi_session_configure",
+                                   "pi_session_attach_mcp", "pi_agent_prompt")]
+        self.assertEqual(setup_calls, ["pi_session_create", "pi_session_configure",
+                                       "pi_agent_prompt"])
         scope = self.project_mcp.scope_manager.scopes[job["scope_id"]]
         self.assertEqual(scope.task_id, TASK_ID)
         self.assertEqual(scope.run_id, RUN_ID)

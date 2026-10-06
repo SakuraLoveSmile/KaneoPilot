@@ -819,6 +819,163 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         out = self.record(request_id)
         return request_id, out["event_id"]
 
+    def _automation_task(self, *, manual_takeover=False, managed=True,
+                         completion_policy="command_verification", exit_code=0):
+        run_dir, _ = self.seed_round()
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                db.set_extra(conn, db.require_task(conn, TASK_ID), util.now_iso(),
+                             automation=({"authorized_by": "automation",
+                                          "manual_takeover": manual_takeover} if managed else {}),
+                             plan_verify={"plan_sha256": PLAN_SHA,
+                                          "commands": ["pytest"]})
+        finally:
+            conn.close()
+        if completion_policy is not None:
+            job_path = run_dir / dsh_events.JOB_NAME
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job.update(completion_policy=completion_policy, plan_sha256=PLAN_SHA)
+            job_path.write_text(json.dumps(job), encoding="utf-8")
+        events_path = run_dir / dsh_events.EVENT_LOG_NAME
+        events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        events[-1]["seq"] = 4
+        events.insert(-1, {"v": 1, "seq": 3, "ts": util.now_iso(),
+                          "type": "command_output", "name": "Bash",
+                          "input": {"command": "pytest"}, "exit_code": exit_code,
+                          "output": "validation result"})
+        events_path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        self.fake.add_task(TASK_ID, "example-project-05", status="in-progress")
+        return self.seed_monitor_claim()
+
+    def test_automatic_command_verification_advances_without_goal_evaluation(self):
+        """自动 monitor 核命令后推进，不能被旧手动 Goal 门挡死。"""
+        from kanpilot import auto_monitor
+        request_id = self._automation_task()
+        task = self.call("get-task", {"task_id": TASK_ID})["task"]
+        task["attempts"] = [{"stage": "dispatch", "request_id": "execution-request",
+                             "run_id": RUN_ID}]
+        case = self
+
+        class Controller:
+            claim = {"request_id": request_id, "run_id": MONITOR_RUN_ID}
+
+            def call(self, command, payload):
+                # 成本采样不参与本次命令验证/推进验收，其他路径均走真实核心。
+                return {} if command == "record-cost" else case.call(command, payload)
+
+            def report(self, outcome, **payload):
+                return case.call("report", dict(self.claim, outcome=outcome, **payload))
+
+        auto_monitor._complete(Controller(), task, {"backend": "pi_desktop"},
+                               "in-progress", [{"id": "verify-1", "seq": 1,
+                               "type": "command_output", "tool": {
+                                   "input": {"command": "pytest"}, "exit_code": 0}}])
+        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
+        self.assertEqual(self.server.goal_report_calls, [])
+
+    def test_automatic_failed_command_cannot_advance_without_goal_evaluation(self):
+        from kanpilot import auto_monitor
+        request_id = self._automation_task()
+        task = self.call("get-task", {"task_id": TASK_ID})["task"]
+        case = self
+
+        class Controller:
+            def call(self, command, payload):
+                return case.call(command, payload)
+
+            def report(self, outcome, **payload):
+                return case.call("report", dict(request_id=request_id,
+                    run_id=MONITOR_RUN_ID, outcome=outcome, **payload))
+
+        auto_monitor._complete(Controller(), task, {"backend": "pi_desktop"},
+                               "in-progress", [{"id": "verify-1", "seq": 1,
+                               "type": "command_output", "tool": {
+                                   "input": {"command": "pytest"}, "exit_code": 1}}])
+        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
+        self.assertEqual(self.call("get-task", {"task_id": TASK_ID})["task"]["failure_code"],
+                         "verification_unconfirmed")
+
+    def test_automatic_progress_without_current_monitor_claim_is_rejected(self):
+        self._automation_task()
+        code, _ = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(code, "stale_run")
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_historical_no_policy_keeps_goal_report_gate(self):
+        self._automation_task(manual_takeover=True, completion_policy=None)
+        code, message = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(code, "conflict")
+        self.assertIn("绕过 monitor", message)
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_new_nonmanaged_round_uses_command_gate_without_goal_report(self):
+        self._automation_task(managed=False)
+        result = self.call("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(result["task_status"], "in_review")
+        self.assertEqual(self.server.goal_report_calls, [])
+
+    def test_command_policy_does_not_change_after_manual_takeover(self):
+        self._automation_task(manual_takeover=True)
+        result = self.call("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(result["task_status"], "in_review")
+        self.assertEqual(self.server.goal_report_calls, [])
+
+    def test_core_command_gate_rejects_failed_persisted_verification(self):
+        self._automation_task(managed=False, exit_code=1)
+        code, message = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(code, "conflict")
+        self.assertIn("验证命令", message)
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_core_command_gate_rejects_changed_plan_snapshot(self):
+        self._automation_task(managed=False)
+        job_path = self.runs_root / TASK_ID / RUN_ID / dsh_events.JOB_NAME
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        job["plan_sha256"] = "different-plan"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        code, message = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress",
+        })
+        self.assertEqual(code, "conflict")
+        self.assertIn("计划哈希", message)
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_command_gate_rejects_foreign_session_and_round_evidence(self):
+        self._automation_task(managed=False)
+        path = self.runs_root / TASK_ID / RUN_ID / dsh_events.EVENT_LOG_NAME
+        original = path.read_text(encoding="utf-8")
+        for index, field, value in ((0, "session_id", "foreign-session"),
+                                    (2, "run_id", "foreign-round"),
+                                    (2, "task_id", "foreign-task")):
+            with self.subTest(field=field):
+                events = [json.loads(line) for line in original.splitlines()]
+                events[index][field] = value
+                path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+                code, message = self.call_err_code("advance-task", {
+                    "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+                    "target": "in-review", "expected_current": "in-progress",
+                })
+                self.assertEqual(code, "conflict")
+                self.assertIn("身份不符", message)
+                self.assertEqual(self.fake.requests_log, [])
+        path.write_text(original, encoding="utf-8")
+
     def test_direct_call_without_monitor_material_is_rejected(self):
         self.seed_round()
         self.set_report(goal_report())
@@ -1258,6 +1415,20 @@ class TestWorkerGoalReportSettlement(_GoalReportCase):
 
     def _settle(self, job):
         return pi_desktop_worker._goal_report_settlement(self._client(), job)
+
+    def test_command_verification_policy_skips_goal_report_wait(self):
+        """自动轮次不等待报告；命令证据验证仍由自动 monitor 完成。"""
+        from unittest.mock import Mock
+        client = Mock()
+        detail, reason = pi_desktop_worker._goal_report_settlement(
+            client, self._job(completion_policy="command_verification"))
+        self.assertIsNone(detail)
+        self.assertIsNone(reason)
+        self.assertEqual(client.mock_calls, [])
+
+    def test_old_worker_spec_defaults_to_goal_report_policy(self):
+        job = pi_desktop_worker._base_job({"task_id": TASK_ID, "run_id": RUN_ID})
+        self.assertEqual(job["completion_policy"], "goal_report")
 
     def test_structured_report_settles_with_identity(self):
         self.set_report(goal_report())

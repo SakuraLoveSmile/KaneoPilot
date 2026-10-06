@@ -225,6 +225,9 @@ struct TaskException: Decodable {
 
 /// §5.2 TaskSummary
 struct TaskSummary: Decodable, Identifiable {
+    let automation: TaskAutomationView?
+    let delivery: TaskDeliveryView?
+    let reviewHistory: [ReviewHistoryEntry]?
     let taskId: String
     let projectId: String?
     let projectName: String?
@@ -297,6 +300,9 @@ struct TaskLinks: Decodable {
 
 /// §5.2 TaskDetail = TaskSummary + 明细字段
 struct TaskDetail: Decodable, Identifiable {
+    let automation: TaskAutomationView?
+    let delivery: TaskDeliveryView?
+    let reviewHistory: [ReviewHistoryEntry]?
     // TaskSummary 字段
     let taskId: String
     let projectId: String?
@@ -951,11 +957,33 @@ struct ExecutorRunEntry: Decodable {
 struct ExecutorStageStatus: Decodable {
     let running: ExecutorRunEntry?
     let last: ExecutorRunEntry?
+    let claimable: Int?
+}
+
+/// 核心登记的本 App 实例 worker；发信号前还需独立核验系统启动时间。
+struct ExecutorOwnedWorkerDTO: Decodable, Equatable {
+    let pid: Int32
+    let startedSeconds: UInt64
+    let startedMicroseconds: UInt64
+    let taskId: String
+    let runId: String
+    let specPath: String
+}
+
+struct ExecutorInstanceResponse: Decodable {
+    let instanceId: String
+    let state: String
+    let ownedWorkers: [ExecutorOwnedWorkerDTO]
 }
 
 struct ExecutorStatusResponse: Decodable {
     let stages: [String: ExecutorStageStatus]?
+    let intake: ExecutorStageStatus?
+    let paused: AutomationPausedDTO?
+    let automation: AutomationStatusDTO?
+    let ownedWorkers: [ExecutorOwnedWorkerDTO]?
 }
+typealias ExecutorStatusDTO = ExecutorStatusResponse
 
 /// §5.18.4 get-session.round_detail：轮次运行时视图（job + terminal）。
 struct RoundDetail: Decodable {
@@ -1655,6 +1683,7 @@ struct PlannerGroupConfig: Decodable, Equatable {
 /// v4 §5.24.1：新增 backend（codex|pi_desktop，缺省 codex）与 pi_desktop
 /// 五字段块；旧核心 config 只含 standard/review_fix 两组。
 struct PlannerStoredConfig: Decodable {
+    let claude: CLIModelConfig?
     let standard: PlannerGroupConfig?
     let reviewFix: PlannerGroupConfig?
     /// 规划面板默认方式预选（builtin|spec_plan；旧核心缺省 → nil）。
@@ -1668,7 +1697,8 @@ struct PlannerStoredConfig: Decodable {
          reviewFix: PlannerGroupConfig? = nil,
          defaultMethod: String? = nil,
          backend: String? = nil,
-         piDesktop: ExecPiDesktopConfig? = nil) {
+         piDesktop: ExecPiDesktopConfig? = nil, claude: CLIModelConfig? = nil) {
+        self.claude = claude
         self.standard = standard
         self.reviewFix = reviewFix
         self.defaultMethod = defaultMethod
@@ -1860,6 +1890,7 @@ struct PlannerCapabilitiesResponse: Decodable {
 /// codex 子块沿用 §5.22.6 字段（此处只取可用性/方式），pi_desktop 为
 /// {available,detail,tools_ok,version}。
 struct PlannerBackends: Decodable {
+    let claude: PlusBackendStatus?
     let codex: PlusBackendStatus?
     let piDesktop: PlusBackendStatus?
 }
@@ -1917,6 +1948,8 @@ struct GetPlanResponse: Decodable {
 /// v4 §5.24.1：新增 backend（pi|pi_desktop，缺省 pi）与 pi_desktop 五字段块；
 /// `mode` 仅对 backend=pi 生效，Plus 分支必须完整五字段且固定 ask。
 struct ReviewConfig: Decodable, Equatable {
+    let claude: CLIModelConfig?
+    let codex: CLIModelConfig?
     let mode: String?
     let provider: String?
     let model: String?
@@ -1942,6 +1975,8 @@ struct GetReviewConfigResponse: Decodable {
 /// §5.24.2 review-capabilities {} → 两分支就绪态（旧核心不返回 → nil）。
 /// pi 分支只有 {available,detail}；pi_desktop 分支带 tools_ok/version。
 struct ReviewCapabilitiesResponse: Decodable {
+    let claude: PlusBackendStatus?
+    let codex: PlusBackendStatus?
     let pi: PlusBackendStatus?
     let piDesktop: PlusBackendStatus?
 }
@@ -1955,6 +1990,8 @@ struct ProjectMappingRemote: Decodable {
 }
 
 struct ProjectMappingItem: Decodable, Identifiable {
+    let automation: ProjectAutomationDTO?
+    let automationPreflight: [AutomationPreflightIssue]?
     let projectId: String
     let projectName: String?
     let repository: String?
@@ -1986,4 +2023,55 @@ struct SetProjectMappingResponse: Decodable {
     let revision: Int
     let deduplicated: Bool?
     let item: ProjectMappingItem?
+}
+
+
+struct AutomationPausedDTO: Decodable { let global: Bool?; let stages: [String]? }
+struct AutomationStatusDTO: Decodable {
+    let enabledProjects: Int?; let activeTasks: Int?; let maxActiveTasks: Int?
+    let waitingMerge: Int?; let pendingTasks: Int?; let lastIntake: AutomationIntakeSummary?
+}
+struct AutomationIntakeSummary: Decodable {
+    let startedAt: String?; let finishedAt: String?
+    let projects: [AutomationIntakeProject]?; let errors: [JSONValue]?
+}
+struct AutomationIntakeProject: Decodable {
+    let projectId: String?; let ready: Bool?; let preflight: [AutomationPreflightIssue]?
+    let adopted: [String]?; let skipped: [AutomationIntakeSkipped]?
+}
+struct AutomationIntakeSkipped: Decodable { let taskId: String?; let reason: String? }
+struct CLIModelConfig: Decodable, Equatable {
+    let model: String?; let effort: String?; let plannerModel: String?; let reasoningEffort: String?
+}
+struct AutomationPreflightIssue: Decodable, Identifiable {
+    let code: String; let message: String
+    var id: String { code }
+}
+struct ProjectAutomationDTO: Decodable {
+    let enabled: Bool?; let labelFilter: [String]?; let autoConfirmPlan: Bool?
+    let maxFixRounds: Int?; let maxTaskMinutes: Int?; let maxTaskCostUsd: Double?
+    let deliveryBase: String?; let policyRevision: Int?; let updatedAt: String?
+}
+struct AutomationSkipDTO: Decodable { let reason: String?; let at: String? }
+struct TaskAutomationView: Decodable {
+    let policyRevision: Int?; let adoptedAt: String?; let fixRound: Int?
+    let segmentStartedAt: String?; let segmentCostBaseUsd: Double?
+    let planWanted: Bool?; let planAttempts: Int?; let manualTakeover: Bool?
+    let costUsd: Double?; let costUnknownSteps: Int?; let lastSkip: AutomationSkipDTO?
+    let maxFixRounds: Int?; let maxTaskMinutes: Int?; let maxTaskCostUsd: Double?
+}
+struct DeliveryCommitDTO: Decodable, Identifiable {
+    let executionRunId: String?; let sha: String; let at: String?; let files: Int?; let fixRound: Int?
+    var id: String { sha }
+}
+struct TaskDeliveryView: Decodable {
+    let mode: String?; let branch: String?; let worktreePath: String?
+    let baseBranch: String?; let baseSha: String?; let headSha: String?
+    let commits: [DeliveryCommitDTO]?; let pushedSha: String?; let prNumber: Int?
+    let prUrl: String?; let prState: String?; let publishFailures: Int?
+    let kaneoCommentAt: String?; let mergedAt: String?; let lastSyncAt: String?; let nextSyncAt: String?
+}
+struct ReviewHistoryEntry: Decodable {
+    let reviewKey: String?; let conclusion: String?; let reportPath: String?; let reportSha256: String?
+    let executionRunId: String?; let headSha: String?; let registeredAt: String?; let fixRound: Int?
 }
