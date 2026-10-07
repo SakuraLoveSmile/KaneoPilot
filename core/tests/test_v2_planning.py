@@ -81,6 +81,11 @@ class TestPurge(KanpilotTestCase):
         exc = self.call_err("purge-session", {
             "task_id": task_id, "run_id": run_id})
         self.assertEqual(exc.code, "conflict")
+        exc = self.call_err("trash-session", {"task_id": task_id, "run_id": run_id})
+        self.assertEqual(exc.code, "conflict")
+        # Finish the claimed plan before testing the ended-session lifecycle.
+        self.call("report", {"request_id": request_id, "run_id": run_id,
+                             "outcome": "failed", "note": "isolated fixture ended"})
         self.call("trash-session", {"task_id": task_id, "run_id": run_id})
         result = self.call("purge-session", {
             "task_id": task_id, "run_id": run_id})
