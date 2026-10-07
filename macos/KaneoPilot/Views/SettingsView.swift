@@ -1348,7 +1348,11 @@ struct SettingsView: View {
         guard let saved = execConfig, let savedDesktop = saved.piDesktop else {
             return "检测对象：已保存配置；当前桌面配置尚未保存"
         }
-        let draft = piDesktopDraft
+        var draft = piDesktopDraft
+        if let fallback = draft.fallback,
+           [fallback.providerId, fallback.modelId, fallback.thinkingLevel].allSatisfy({ emptyToNil($0 ?? "") == nil }) {
+            draft.fallback = nil
+        }
         let source = saved.effectiveBackend == "pi_desktop"
             ? "检测对象：已保存配置"
             : "检测对象：已保存桌面配置；当前执行后端为 pi"
