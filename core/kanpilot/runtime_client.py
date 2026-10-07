@@ -433,6 +433,7 @@ class HistoricalReadClient:
         )
         return {"sessionId": result.get("session_id"),
                 "turnId": result.get("turn_id"), "status": result.get("status"),
+                "startedAt": result.get("started_at"),
                 "endedAt": result.get("ended_at"),
                 "errorCode": result.get("error_code")}
 

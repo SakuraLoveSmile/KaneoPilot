@@ -718,3 +718,128 @@ def test_alias_push_target_rewrite_chain_rejected(repo, ssh_aliases):
     git(repo, "config", "url.https://github.com/owner/repo.git.insteadOf", url)
     with pytest.raises(gd.GitDeliveryError, match="重复 URL 改写"):
         gd._push_target(str(repo), "owner/repo")
+
+
+def new_goal(wt, name="goal.md"):
+    goal = Path(wt) / ".pi" / "goal" / name
+    goal.parent.mkdir(parents=True, exist_ok=True)
+    goal.write_text("# Generated goal\n", encoding="utf-8")
+    return goal
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_goal_only_is_clean_and_never_committed(repo, tmp_path, staged):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    goal = new_goal(wt)
+    if staged:
+        git(wt, "add", ".pi/goal/goal.md")
+    before = git(wt, "rev-parse", "HEAD"), git(wt, "ls-files", "--stage"), goal.read_bytes()
+    assert gd.effective_worktree_changes(str(wt)) == []
+    gd.verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    with pytest.raises(gd.GitDeliveryError) as error:
+        commit(delivery)
+    assert error.value.code == "no_changes"
+    assert before == (git(wt, "rev-parse", "HEAD"), git(wt, "ls-files", "--stage"), goal.read_bytes())
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_commit_skips_goal_and_preserves_goal_index(repo, tmp_path, staged):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    goal = new_goal(wt, "goal [literal].md")
+    if staged:
+        git(wt, "add", ".pi/goal/goal [literal].md")
+    index_before = git(wt, "ls-files", "--stage", "--", ".pi/goal")
+    (wt / "tracked.txt").unlink()
+    (wt / "replacement.txt").write_text("base\n")
+    git(wt, "add", "-A", "--", "tracked.txt", "replacement.txt")
+    result = commit(delivery)
+    assert sorted(result["files"]) == ["replacement.txt", "tracked.txt"]
+    assert git(wt, "ls-files", "--stage", "--", ".pi/goal") == index_before
+    assert goal.read_text() == "# Generated goal\n"
+    assert not git(wt, "ls-tree", "-r", "--name-only", "HEAD", "--", ".pi/goal")
+    gd.verify_branch_worktree(delivery, require_clean=True, expected_head=result["sha"])
+    assert commit(delivery) == result
+
+
+def test_tracked_goal_and_other_untracked_are_real_changes(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    goal = new_goal(wt)
+    git(wt, "add", ".pi/goal/goal.md")
+    git(wt, "commit", "-m", "existing goal")
+    delivery["head_sha"] = git(wt, "rev-parse", "HEAD")
+    goal.write_text("repository goal changed")
+    (wt / "other.txt").write_text("other")
+    paths = {c["path"] for c in gd.effective_worktree_changes(str(wt))}
+    assert paths == {".pi/goal/goal.md", "other.txt"}
+    with pytest.raises(gd.GitDeliveryError):
+        gd.verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    assert set(commit(delivery)["files"]) == paths
+
+
+@pytest.mark.parametrize("kind", ["file-link", "goal-link", "pi-link", "nested", "non-md"])
+def test_effective_goal_boundary_is_narrow(repo, tmp_path, kind):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "goal.md").write_text("outside")
+    if kind == "pi-link":
+        (wt / ".pi").symlink_to(outside, target_is_directory=True)
+    elif kind == "goal-link":
+        (wt / ".pi").mkdir()
+        (wt / ".pi" / "goal").symlink_to(outside, target_is_directory=True)
+    elif kind == "file-link":
+        (wt / ".pi" / "goal").mkdir(parents=True)
+        (wt / ".pi" / "goal" / "goal.md").symlink_to(outside / "goal.md")
+    else:
+        new_goal(wt, "nested/goal.md" if kind == "nested" else "goal.txt")
+    assert gd.effective_worktree_changes(str(wt))
+    with pytest.raises(gd.GitDeliveryError):
+        gd.verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    assert not gd._goal_material(str(wt), {"status": "??", "path": ".pi/goal/../goal.md"}, set())
+
+
+def test_execution_activity_recovers_committed_but_unregistered_delivery(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    new_goal(wt)
+    (wt / "implementation.txt").write_text("actual work")
+    result = commit(delivery)
+    before = git(wt, "status", "--porcelain"), git(wt, "rev-parse", "HEAD")
+    assert gd.execution_activity_count(delivery, task_id="task1234", execution_run_id="run1") == 1
+    assert before == (git(wt, "status", "--porcelain"), git(wt, "rev-parse", "HEAD"))
+    assert commit(delivery) == result
+    with pytest.raises(gd.GitDeliveryError):
+        gd.execution_activity_count(delivery, task_id="other-task", execution_run_id="run1")
+    with pytest.raises(gd.GitDeliveryError):
+        gd.execution_activity_count(delivery, task_id="task1234", execution_run_id="other-run")
+
+
+def test_effective_replan_hash_ignores_goals_but_preserves_real_dirty_baseline(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    (wt / "tracked.txt").write_text("partial implementation")
+    before = gd.worktree_state_sha256(delivery)
+    assert gd.worktree_state_sha256(delivery, effective_only=True) == before
+    goal = new_goal(wt)
+    assert gd.worktree_state_sha256(delivery, effective_only=True) == before
+    assert gd.worktree_state_sha256(delivery) != before
+    goal.write_text("new goal contract")
+    assert gd.worktree_state_sha256(delivery, effective_only=True) == before
+    (wt / "tracked.txt").write_text("unapproved implementation drift")
+    assert gd.worktree_state_sha256(delivery, effective_only=True) != before
+
+
+def test_staged_goal_content_and_unstaged_edits_survive_actual_commit(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    goal = new_goal(wt)
+    git(wt, "add", ".pi/goal/goal.md")
+    staged = git(wt, "ls-files", "--stage", "--", ".pi/goal")
+    goal.write_text("unstaged goal revision")
+    (wt / "tracked.txt").write_text("real execution change")
+    assert commit(delivery)["files"] == ["tracked.txt"]
+    assert git(wt, "ls-files", "--stage", "--", ".pi/goal") == staged
+    assert goal.read_text() == "unstaged goal revision"

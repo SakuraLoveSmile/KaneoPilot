@@ -1,0 +1,208 @@
+[
+  {
+    "seq": 1,
+    "type": "session",
+    "ts": "2026-10-07T03:27:03.876311+00:00"
+  },
+  {
+    "seq": 2,
+    "type": "user",
+    "ts": "2026-10-07T03:27:03.848Z"
+  },
+  {
+    "seq": 3,
+    "type": "system",
+    "ts": "2026-10-07T03:27:03.860Z",
+    "content": ""
+  },
+  {
+    "seq": 4,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:07.004Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 5,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:07.199Z",
+    "name": "Glob"
+  },
+  {
+    "seq": 6,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:09.913Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 7,
+    "type": "command_output",
+    "ts": "2026-10-07T03:27:09.998Z",
+    "name": "Bash",
+    "exit_code": 0,
+    "input": "{\"command\": \"fixture-baseline\"}"
+  },
+  {
+    "seq": 8,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:12.705Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 9,
+    "type": "command_output",
+    "ts": "2026-10-07T03:27:13.032Z",
+    "name": "Bash",
+    "exit_code": 0,
+    "input": "{\"command\": \"fixture-baseline\"}"
+  },
+  {
+    "seq": 10,
+    "type": "system",
+    "ts": "2026-10-07T03:27:24.468911+00:00",
+    "content": ""
+  },
+  {
+    "seq": 11,
+    "type": "system",
+    "ts": "2026-10-07T03:27:24.511598+00:00",
+    "content": "goal_approved: fixture"
+  },
+  {
+    "seq": 12,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:20.569Z",
+    "content": ""
+  },
+  {
+    "seq": 13,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:24.274Z",
+    "name": "SubmitGoal"
+  },
+  {
+    "seq": 14,
+    "type": "system",
+    "ts": "2026-10-07T03:27:24.492Z",
+    "content": ""
+  },
+  {
+    "seq": 15,
+    "type": "system",
+    "ts": "2026-10-07T03:27:24.496Z",
+    "content": ""
+  },
+  {
+    "seq": 16,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:27.073Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 17,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:27.860Z",
+    "name": "UpdateGoalProgress"
+  },
+  {
+    "seq": 18,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:30.273Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 19,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:30.338Z",
+    "name": "Glob"
+  },
+  {
+    "seq": 20,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:33.911Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 21,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:33.978Z",
+    "name": "Read"
+  },
+  {
+    "seq": 22,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:38.871Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 23,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:38.923Z",
+    "name": "Read"
+  },
+  {
+    "seq": 24,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:43.693Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 25,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:43.761Z",
+    "name": "Read"
+  },
+  {
+    "seq": 26,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:46.559Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 27,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:46.636Z",
+    "name": "Read"
+  },
+  {
+    "seq": 28,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:52.281Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 29,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:52.570Z",
+    "name": "Read"
+  },
+  {
+    "seq": 30,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:27:56.910Z",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "seq": 31,
+    "type": "tool_result",
+    "ts": "2026-10-07T03:27:57.003Z",
+    "name": "Read"
+  },
+  {
+    "seq": 32,
+    "type": "system",
+    "ts": "2026-10-07T03:28:10.200Z",
+    "content": ""
+  },
+  {
+    "seq": 33,
+    "type": "assistant_message",
+    "ts": "2026-10-07T03:28:13.021Z",
+    "content": "x"
+  },
+  {
+    "seq": 34,
+    "type": "terminal",
+    "ts": "2026-10-07T03:28:14.375566+00:00",
+    "outcome": "completed"
+  }
+]
