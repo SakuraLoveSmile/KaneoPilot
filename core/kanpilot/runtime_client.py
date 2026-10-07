@@ -330,6 +330,8 @@ class RuntimeClient:
             **({"before": kwargs["message_before"]} if kwargs.get("message_before") is not None else {}),
             **({"limit": kwargs["message_limit"]} if kwargs.get("message_limit") is not None else {}),
         })
+        if result.get("truncated"):
+            return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
             "messageStart": result.get("message_start"),
@@ -441,6 +443,8 @@ class HistoricalReadClient:
             limit=kwargs.get("message_limit"),
             timeout=max(1, int(self.timeout)),
         )
+        if result.get("truncated"):
+            return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
             "messageStart": result.get("message_start"),

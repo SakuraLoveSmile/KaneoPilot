@@ -317,6 +317,15 @@ def plus_messages(
         params["messageLimit"] = limit
 
     res = client.call_tool("pi_session_get", params)
+    if res.get("truncated"):
+        # The control plane's preview is incomplete and may contain transcript
+        # content. Preserve only the signal needed for the reader to shrink pages.
+        return _redact_output({
+            "session_id": session_id,
+            "messages": [],
+            "truncated": True,
+            "reason": str(res.get("reason") or "MCP_RESULT_LIMIT"),
+        }, record.get("token"))
     session_data = res.get("session", res)
     messages = session_data.get("messages", [])
     return _redact_output({

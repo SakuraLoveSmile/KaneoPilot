@@ -1,0 +1,80 @@
+{
+  "main_running_samples": 4199,
+  "rows_without_thread_or_backtrace": 2,
+  "relevant_inclusive_samples": [
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      1636
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      1493
+    ],
+    [
+      "protocol witness for View.body.getter in conformance SessionMessageRow",
+      47
+    ],
+    [
+      "SessionMessageRow.body.getter",
+      47
+    ],
+    [
+      "closure #1 in closure #6 in closure #1 in SessionReaderView.selectors.getter",
+      33
+    ],
+    [
+      "SessionReaderView.roundLabel(_:)",
+      33
+    ],
+    [
+      "closure #1 in SessionMessageRow.body.getter",
+      29
+    ],
+    [
+      "closure #1 in closure #1 in SessionMessageRow.body.getter",
+      21
+    ],
+    [
+      "SessionReaderView.body.getter",
+      19
+    ],
+    [
+      "closure #1 in SessionReaderView.body.getter",
+      17
+    ],
+    [
+      "closure #1 in SessionReaderView.timeRow.getter",
+      13
+    ],
+    [
+      "SessionReaderView.timeRow.getter",
+      13
+    ],
+    [
+      "closure #1 in SessionReaderView.metadataSummary.getter",
+      12
+    ],
+    [
+      "closure #1 in closure #1 in closure #1 in SessionReaderView.timeRow.getter",
+      12
+    ],
+    [
+      "closure #1 in closure #1 in SessionReaderView.timeRow.getter",
+      12
+    ],
+    [
+      "SessionMessageRow.toolSections.getter",
+      5
+    ],
+    [
+      "SessionMessageRow.highlighted(_:query:)",
+      5
+    ],
+    [
+      "SessionMessageRow.messageText(_:)",
+      5
+    ]
+  ],
+  "record_export_exit": 0,
+  "limitation": "Action-window Time Profiler, different stage duration; do not compare total samples as normalized CPU"
+}

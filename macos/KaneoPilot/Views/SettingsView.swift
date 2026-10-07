@@ -97,7 +97,7 @@ struct SettingsView: View {
     // MARK: v4 §5.24.1 角色运行端选择（各自独立，互不联动）
     /// 规划运行端（codex|pi_desktop；缺省 codex）。
     @State private var plannerBackend = "codex"
-    /// Plus 规划五字段草稿（permission_mode 固定 ask，不提供选择）。
+    /// Plus 规划五字段草稿（permission_mode 固定 auto，不提供选择）。
     @State private var plModelSource = "custom"
     @State private var plConnectionFile = ""
     @State private var plProviderId = ""
@@ -1363,14 +1363,14 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         PlusRoleEditor(roleName: "规划",
+                       fixedPermission: ExecPiDesktopConfig.fixedPlanPermission,
                        hasSavedDesktopConfig: model.plannerPlusConfig != nil,
                        modelSource: $plModelSource,
                        connectionFile: $plConnectionFile,
                        providerId: $plProviderId,
                        modelId: $plModelId,
                        thinkingLevel: $plThinkingLevel)
-        Text("权限固定 ask：规划阶段只读协商，工具权限请在你的 Plus 界面处理"
-             + "（调度台不代批、不重发）。")
+        Text("新规划权限固定 auto：工具执行无需逐次确认，可运行命令或修改规划工作目录中的文件。已有请求保留原权限快照。")
             .font(.kpSmall)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -1601,7 +1601,7 @@ struct SettingsView: View {
         plThinkingLevel = plus?.thinkingLevel ?? ""
     }
 
-    /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 ask）。
+    /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 auto）。
     private var plannerPlusDraft: ExecPiDesktopConfig {
         ExecPiDesktopConfig(
             modelSource: plModelSource,
@@ -1771,6 +1771,7 @@ struct SettingsView: View {
                 if reviewBackend == "pi_desktop" {
                     PlusRoleEditor(
                         roleName: "Review",
+                        fixedPermission: ExecPiDesktopConfig.fixedReviewPermission,
                         hasSavedDesktopConfig: reviewConfig?.piDesktop != nil,
                         modelSource: $rvModelSource,
                         connectionFile: $rvConnectionFile,
@@ -2024,7 +2025,7 @@ struct SettingsView: View {
             providerId: emptyToNil(rvProviderId),
             modelId: emptyToNil(rvModelId),
             thinkingLevel: emptyToNil(rvThinkingLevel),
-            permissionMode: ExecPiDesktopConfig.fixedPlanPermission)
+            permissionMode: ExecPiDesktopConfig.fixedReviewPermission)
     }
 
     /// 保存：按所选运行端提交；失败保留草稿并展示核心 error 原文。
@@ -2405,12 +2406,13 @@ private struct PathRow: View {
 
 /// 一个角色（规划 / Review）的 Plus 五字段编辑块：
 /// 连接文件 + provider/model（只读目录候选 + 模型搜索弹层）+ thinking_level；
-/// permission_mode 固定 `ask`（不提供选择；工具权限需在 Plus 处理）。
+/// 规划固定 auto，Review 固定 ask（不提供选择）。
 /// 候选来自只读 `pi-desktop-catalog`，只在**空草稿**里填 Plus 明确默认值，
 /// 不重载已保存配置、不调用 set-*；响应必须属于本次连接路径/provider 修订。
 private struct PlusRoleEditor: View {
     /// 角色名（"规划" / "Review"），用于可读名称。
     let roleName: String
+    let fixedPermission: String
     /// 该角色已有已保存的桌面块 → 只加载候选并提示不可用，不改草稿。
     let hasSavedDesktopConfig: Bool
     @Binding var modelSource: String
@@ -2562,9 +2564,9 @@ private struct PlusRoleEditor: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            // 权限固定 Ask（§5.24.1：plan / Review 不开放 auto/accept-edits）。
+            // 两个角色使用各自固定权限，不由模型目录覆盖。
             FieldRow("permission_mode",
-                     "\(ExecPiDesktopConfig.fixedPlanPermission)（固定）")
+                     "\(fixedPermission)（固定）")
             HStack(spacing: Spacing.m) {
                 Button(loading ? "读取中…" : "重新获取 Plus 列表") {
                     Task { await refresh() }

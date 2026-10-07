@@ -478,6 +478,25 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func forcePurgeSession(taskID: String, runID: String, saveState: String) async {
+        await perform("强制删除残留会话", refreshSaved: true) {
+            let response = try await self.client.run(
+                "force-purge-session",
+                payload: ["task_id": taskID, "run_id": runID,
+                          "expected_save_state": saveState], as: OkResponse.self)
+            return response.deduplicated == true ? "会话已不在列表中" : "已删除残留会话"
+        }
+    }
+
+    func cancelPlan(requestID: String, taskID: String) async {
+        await perform("终止排队计划", refreshSaved: true) {
+            _ = try await self.client.run(
+                "cancel-request", payload: ["request_id": requestID, "task_id": taskID],
+                as: OkResponse.self)
+            return "已终止排队计划"
+        }
+    }
+
     /// §5.16.2 会话回收站（列表行菜单用）：trash-session。
     func trashSession(taskID: String, runID: String) async {
         await perform("移入回收站", successToast: "已移入会话回收站",
@@ -969,6 +988,8 @@ final class AppViewModel: ObservableObject {
         case "fetch_todos": return "重新获取 To Do"
         case "view": return "查看关联"
         case "set-priority": return "调整顺序"
+        case "cancel-request": return "终止排队计划"
+        case "force-purge-session": return "强制删除残留会话"
         // v2 §5.20：终态永久移除（回收站内）。purge 为任务级动作词。
         case "purge", "purge-task", "purge-session": return "永久从列表移除"
         default: return action

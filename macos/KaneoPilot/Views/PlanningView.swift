@@ -29,6 +29,8 @@ struct PlanningView: View {
     // 映射配置 sheet 状态 (T1)
     @State private var mappingTargetProjectId: String? = nil
     @State private var showMappingSheet = false
+    @State private var initialFocusApplied = false
+    @State private var focusedTaskAnchor: String?
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -63,6 +65,7 @@ struct PlanningView: View {
                 showMappingSheet = false
                 Task { await fetchTodos(auto: true) }
             }
+            .frame(minWidth: 600, idealWidth: 760, minHeight: 480, idealHeight: 560)
         }
     }
 
@@ -91,7 +94,7 @@ struct PlanningView: View {
             let provider = plus?.providerId ?? "未保存"
             let modelID = plus?.modelId ?? "未保存"
             let level = plus?.thinkingLevel ?? "未保存"
-            return "\(provider)/\(modelID) · thinking \(level)（权限 ask）"
+            return "\(provider)/\(modelID) · thinking \(level)（权限 \(model.plannerConfig?.config?.piDesktop?.permissionMode ?? ExecPiDesktopConfig.fixedPlanPermission)）"
         }
         let standard = model.plannerEffective("standard")
         return "\(standard?.plannerModel ?? "未保存") · 思考 "
@@ -243,7 +246,7 @@ struct PlanningView: View {
                 BannerView(banner: .failure(fetchError), stale: !todos.isEmpty) {
                     Task { await fetchTodos(auto: false) }
                 }
-            } else if hasUnmappedTodos {
+            } else if hasUnavailableMappings {
                 HStack(spacing: Spacing.m) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -261,27 +264,33 @@ struct PlanningView: View {
                 .background(Color.orange.opacity(0.12))
                 .overlay(alignment: .bottom) { Divider() }
             }
-            List {
-                queuedPlanSection
-                Section(header: Text("Kaneo To Do").font(.kpSmall)) {
-                    if todos.isEmpty && !fetchLoading {
-                        Text(fetchError == nil ? "没有可枚举的 To Do" : "—")
-                            .font(.kpSmall).foregroundStyle(.secondary)
-                    }
-                    ForEach(todos) { item in
-                        TodoRow(
-                            item: item,
-                            isChecked: checked.contains(item.taskId),
-                            onToggle: { toggle($0) },
-                            onConfigureMapping: { pid in
-                                mappingTargetProjectId = pid
-                                showMappingSheet = true
-                            }
-                        )
+            ScrollViewReader { proxy in
+                List {
+                    queuedPlanSection
+                    Section(header: Text("Kaneo To Do").font(.kpSmall)) {
+                        if todos.isEmpty && !fetchLoading {
+                            Text(fetchError == nil ? "没有可枚举的 To Do" : "—")
+                                .font(.kpSmall).foregroundStyle(.secondary)
+                        }
+                        ForEach(todos) { item in
+                            TodoRow(
+                                item: item,
+                                isChecked: checked.contains(item.taskId),
+                                onToggle: { toggle($0) },
+                                onConfigureMapping: { pid in
+                                    mappingTargetProjectId = pid
+                                    showMappingSheet = true
+                                }
+                            )
+                            .id(item.taskId)
+                        }
                     }
                 }
+                .listStyle(.inset)
+                .onChange(of: focusedTaskAnchor) { _, taskID in
+                    if let taskID { proxy.scrollTo(taskID, anchor: .center) }
+                }
             }
-            .listStyle(.inset)
         }
     }
 
@@ -342,8 +351,8 @@ struct PlanningView: View {
     private var checkedTasks: [TodoItem] {
         todos.filter { checked.contains($0.taskId) }
     }
-    private var hasUnmappedTodos: Bool {
-        todos.contains { $0.mappingState != nil && $0.mappingState != "ready" }
+    private var hasUnavailableMappings: Bool {
+        todos.contains { $0.needsRepositoryConfiguration }
     }
 
     private func fetchTodos(auto: Bool) async {
@@ -354,16 +363,25 @@ struct PlanningView: View {
         do {
             let response = try await model.fetchTodos()
             var items = response.items ?? []
-            // 「定位任务」兜底：聚焦任务不在列表时注入可选占位行。
-            if let focusID = model.planningFocusTaskID,
-               !items.contains(where: { $0.taskId == focusID }) {
-                items.append(TodoItem(taskId: focusID,
-                                      title: model.taskTitle(for: focusID),
-                                      selectable: true))
-                checked.insert(focusID)
+            let focusID = model.planningFocusTaskID
+            // Keep the existing focused-task fallback on every refresh; select it only once.
+            if let focusID {
+                if !items.contains(where: { $0.taskId == focusID }) {
+                    items.append(TodoItem(taskId: focusID,
+                                          title: model.taskTitle(for: focusID),
+                                          selectable: true))
+                }
+                if !initialFocusApplied,
+                   items.first(where: { $0.taskId == focusID })?.isSelectable == true {
+                    checked.insert(focusID)
+                }
             }
             todos = items
             fetchedAt = response.fetchedAt
+            if !initialFocusApplied {
+                initialFocusApplied = true
+                focusedTaskAnchor = focusID
+            }
             if !auto {
                 model.showToast("已获取 \(items.count) 个 To Do")
             }
@@ -688,10 +706,6 @@ private struct TodoRow: View {
     let onToggle: (TodoItem) -> Void
     var onConfigureMapping: ((String?) -> Void)? = nil
 
-    private var isUnmapped: Bool {
-        item.mappingState != nil && item.mappingState != "ready"
-    }
-
     private var automaticPlanningLabel: String? {
         guard let task = model.tasks.first(where: { $0.taskId == item.taskId }),
               AutomationPresentation.active(task.automation) else { return nil }
@@ -740,11 +754,11 @@ private struct TodoRow: View {
                 if !item.isSelectable, let reason = item.blockedReason {
                     Text(reason)
                         .font(.kpSmall)
-                        .foregroundStyle(isUnmapped ? .red : .orange)
+                        .foregroundStyle(item.needsRepositoryConfiguration ? .red : .orange)
                 }
             }
             Spacer(minLength: 0)
-            if isUnmapped || (!item.isSelectable && item.projectId != nil) {
+            if item.needsRepositoryConfiguration {
                 Button("配置仓库") {
                     onConfigureMapping?(item.projectId)
                 }

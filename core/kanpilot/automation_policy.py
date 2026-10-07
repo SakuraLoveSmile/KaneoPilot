@@ -95,7 +95,7 @@ def automation_preflight(conn, project_id):
             else:
                 origin = subprocess.run(["git", "-C", str(Path(repo).expanduser()), "remote", "get-url", "origin"],
                                         capture_output=True, text=True, timeout=0.07)
-                if origin.returncode or not github_repository(origin.stdout):
+                if origin.returncode or not github_repository(origin.stdout, cwd=str(Path(repo).expanduser())):
                     add("origin_not_github", "origin 不是 GitHub 仓库")
         except (OSError, subprocess.TimeoutExpired):
             add("not_git_repo", "本机 git 检查不可用")

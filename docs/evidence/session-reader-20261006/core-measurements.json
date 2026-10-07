@@ -1,0 +1,44 @@
+[
+  {
+    "messages": 400,
+    "output_bytes": 4096,
+    "events_bytes": 1965364,
+    "current_full_history_seconds": 0.718,
+    "pages": 4,
+    "loaded_poll_5_samples": {
+      "baseline_loaded": {
+        "median_wall_ms": 217.233,
+        "median_child_cpu_ms": 206.981
+      },
+      "current_ack": {
+        "median_wall_ms": 162.82,
+        "median_child_cpu_ms": 154.194
+      },
+      "current_force": {
+        "median_wall_ms": 172.624,
+        "median_child_cpu_ms": 163.823
+      }
+    }
+  },
+  {
+    "messages": 1000,
+    "output_bytes": 8192,
+    "events_bytes": 9389615,
+    "current_full_history_seconds": 2.245,
+    "pages": 10,
+    "loaded_poll_5_samples": {
+      "baseline_loaded": {
+        "median_wall_ms": 269.697,
+        "median_child_cpu_ms": 257.33
+      },
+      "current_ack": {
+        "median_wall_ms": 158.999,
+        "median_child_cpu_ms": 150.473
+      },
+      "current_force": {
+        "median_wall_ms": 212.205,
+        "median_child_cpu_ms": 202.962
+      }
+    }
+  }
+]

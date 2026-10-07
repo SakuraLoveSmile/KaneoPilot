@@ -1,0 +1,47 @@
+Window: "Kaneo 调度台", App: KaneoPilot.
+0 standard window Kaneo 调度台, ID: main-AppWindow-1, Secondary Actions: Raise
+	1 split group main-AppWindow-1, SidebarNavigationSplitView
+		2 scroll area
+			3 list Sidebar
+				4 row (selectable) 任务
+				5 row (selected) 执行会话
+				6 row (selectable) 待处理
+				7 row (selectable) 归档
+				8 row (selectable) 回收站
+				9 row (selectable) 运行记录
+				10 row (selectable) 设置
+		11 splitter (disabled, settable, float) 180
+		12 container
+			13 text Help: 把本地歌单同步到 Kaneo 播放列表, Value: 任务：把本地歌单同步到 Kaneo 播放列表 等待会话记录, Secondary Actions: Cancel
+			14 button Description: 刷新会话, Help: 强制重新核验来源，保留已读正文, ID: arrow.clockwise, Secondary Actions: Cancel
+			15 text Value: 定时读取 · 每 2 秒, Secondary Actions: Cancel
+			16 Description: 会话筛选, 会话保存状态筛选：正常会话或回收站, Secondary Actions: Cancel
+				17 radio button Description: 正常会话, Value: 1
+				18 radio button Description: 回收站, Value: 0
+			19 pop up button Description: 执行轮次, 执行轮次选择器, Help: task-music-006/run-music-006-b2, Value: 10-05 08:04 · 等待权限确认 · run-musi, Secondary Actions: Cancel
+			20 menu button 会话操作，移入回收站暂不可用：仍在执行，不能移入回收站, Help: 仍在执行，不能移入回收站, Secondary Actions: Cancel
+			21 text Value: 内容更新 2026-10-06 23:59:32 fixture-model · medium, Secondary Actions: Cancel
+			22 button Description: 会话详情, Secondary Actions: Cancel
+			23 text Value: Plus · 已连接, Secondary Actions: Cancel
+			24 button Description: 检查 Plus 状态, Secondary Actions: Cancel
+			25 button (disabled) Description: 请求开始, Secondary Actions: Cancel
+			26 text Value: Plus 正在等待权限确认，请在 Plus 中处理 该轮次已有发送记录，不能重复发送, Secondary Actions: Cancel
+			27 text field (settable) Description: 搜索消息内容, Secondary Actions: Cancel
+			28 text Value: 等待会话记录 执行目录有效，正在等待会话事件日志；将每 2 秒定期检查更新。, Secondary Actions: Cancel
+			29 button Description: 立即检查会话记录, Secondary Actions: Cancel
+	30 toolbar
+		31 button Description: Hide Sidebar, Secondary Actions: Increment, Decrement, Delete, Cancel
+		32 button Description: Back, ID: chevron.backward, Secondary Actions: Increment, Decrement, Delete, Cancel, Move previous, Remove from toolbar
+	33 close button
+	34 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	35 minimize button
+	36 text Kaneo 调度台
+37 menu bar
+	38 KaneoPilot
+	39 File
+	40 Edit
+	41 View
+	42 Window
+	43 Help
+
+The focused UI element is 0 standard window Kaneo 调度台, ID: main-AppWindow-1, Secondary Actions: Raise

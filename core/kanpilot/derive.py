@@ -58,6 +58,13 @@ def queued_request_for_task(
     ).fetchone()
 
 
+def queued_plan_request_for_task(conn: sqlite3.Connection, task_id: str):
+    return conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='plan' AND status='queued' "
+        "ORDER BY priority ASC, created_at ASC LIMIT 1", (task_id,),
+    ).fetchone()
+
+
 def task_display_status(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> str:
@@ -390,6 +397,7 @@ def request_view(request: sqlite3.Row, now) -> dict:
 def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     active = active_request_for_task(conn, task["task_id"])
     queued = queued_request_for_task(conn, task["task_id"])
+    queued_plan = queued_plan_request_for_task(conn, task["task_id"])
     next_claim_at = None
     if queued is not None and queued["not_before"] is not None:
         next_claim_at = queued["not_before"]
@@ -418,6 +426,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "delivery": core.delivery_of(task) or None,
         "review_history": db.task_extra(task).get("review_history") or [],
         "task_id": task["task_id"],
+        "queued_plan_request_id": queued_plan["request_id"] if queued_plan is not None else None,
         "project_id": task["project_id"],
         "project_name": task["project_name"],
         "title": task["title"],
@@ -501,6 +510,8 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             actions.append("prepare_plan")
         if queued_request_for_task(conn, task["task_id"]) is not None:
             actions.append("set-priority")
+        if queued_plan_request_for_task(conn, task["task_id"]) is not None:
+            actions.append("cancel-request")
         if lost_request_for_task(conn, task["task_id"], now) is not None:
             actions.append("release_lost")
         if status == "needs_user":
@@ -618,8 +629,10 @@ def request_allowed_actions(
     actions = ["view"]
     if status == "queued":
         actions.append("set-priority")
-        if kind == "plan" and not request_is_authorized_plan(request):
-            actions.append("prepare_plan")
+        if kind == "plan":
+            actions.append("cancel-request")
+            if not request_is_authorized_plan(request):
+                actions.append("prepare_plan")
         return actions
     if status == "claimed":
         if request_is_lost(request, now):

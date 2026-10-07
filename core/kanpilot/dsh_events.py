@@ -83,16 +83,23 @@ def iter_events(path: Path) -> Tuple[list, Optional[str]]:
     返回 (events, detail)：无法解析的**尾行**静默丢弃（detail=None 正常路径，
     文件不存在 → ([], '事件日志尚未生成') 由调用方按 pending 处理）；
     文件存在且有内容但零有效行 → ([], '事件日志解析失败') → read_failed。"""
+    events, detail, _complete = _read_events(path)
+    return events, detail
+
+
+def _read_events(path: Path) -> tuple:
+    """Keep the public tolerant reader while tracking whether a version is complete."""
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return [], "事件日志尚未生成"
+        return [], "事件日志尚未生成", False
     except OSError as exc:
-        return [], f"事件日志读取失败：{exc}"
+        return [], f"事件日志读取失败：{exc}", False
     if not text.strip():
-        return [], "事件日志为空"
+        return [], "事件日志为空", False
     events = []
+    complete = True
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -102,12 +109,13 @@ def iter_events(path: Path) -> Tuple[list, Optional[str]]:
         except ValueError:
             # 半写行：只允许出现在尾部——由于 append-only，解析失败后的后续行
             # 视为同一次截断，全部丢弃。
+            complete = False
             break
         if isinstance(item, dict) and isinstance(item.get("seq"), int):
             events.append(item)
     if not events:
-        return [], "事件日志解析失败（可能半写入）"
-    return events, None
+        return [], "事件日志解析失败（可能半写入）", False
+    return events, None, complete
 
 
 def session_event(events: list) -> Optional[dict]:
@@ -281,7 +289,7 @@ def inspect(
                 "status": "unavailable", "detail": error,
                 "record": None, "messages": None,
             }
-    events, detail = iter_events(Path(run_dir) / EVENT_LOG_NAME)
+    events, detail, complete = _read_events(Path(run_dir) / EVENT_LOG_NAME)
     if events is None:  # pragma: no cover - defensive
         return {
             "status": "unavailable", "detail": detail,
@@ -303,6 +311,7 @@ def inspect(
         "status": "associated", "detail": None,
         "record": _job_record_view(job, events, messages),
         "messages": messages,
+        "_events": events, "_fresh": complete,
     }
 
 

@@ -18,11 +18,12 @@ import json
 import os
 import sqlite3
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
-    constants, headless_adapter as h, session_store, util,
+    constants, cmd_session, dsh_events, headless_adapter as h, session_store, util,
 )
 
 PROJECT_ID = "ryryo1reph1xfemqtwkjyiiz"
@@ -507,10 +508,23 @@ class TestPendingAndMissing(HeadlessCase):
         self.assertEqual(result["messages"], [])
         self.assertEqual(result["connection"]["state"], "degraded")
         self.assertIsNone(result["next_cursor"])
+        self.assertIsNone(result["connection"].get("detail"))
+        summary = self.call("get-session", {"task_id": task_id, "run_id": "run-A"})
+        self.assertEqual(summary["session"]["state"], "pending")
+        self.assertIsNone(summary["connection"].get("detail"))
         # pending 落 session_reads 位点（state=pending，游标保持）。
         row = self.session_reads_row(f"{task_id}/run-A")
         self.assertEqual(row["state"], "pending")
         self.assertIsNone(row["cursor"])
+
+    def test_job_valid_events_empty_is_waiting_not_failure(self):
+        task_id = self.make_task("tasksess-pendempty", run_id="run-A")
+        self.make_run(task_id, "run-A", events=[])
+        result = self.read_all(task_id)
+        self.assertEqual(result["session"]["state"], "pending")
+        self.assertIsNone(result["connection"].get("detail"))
+        self.assertIsNone(result.get("source_version"))
+        self.assertEqual(result["messages"], [])
 
     def test_no_run_id_is_pending(self):
         task_id = self.make_task("tasksess-pend0002", run_id=None)
@@ -1253,7 +1267,7 @@ class TestPiSessionReading(HeadlessCase):
         self.assertEqual(result["session"]["state"], "pending")
         self.assertEqual(result["messages"], [])
         self.assertEqual(result["connection"]["state"], "degraded")
-        self.assertIn("事件日志", result["connection"]["detail"] or "")
+        self.assertIsNone(result["connection"].get("detail"))
 
     def test_pi_read_failure_keeps_last_good_snapshot(self):
         first = self.read_all(self.task_id)
@@ -1335,6 +1349,157 @@ class TestLastCheckedAt(HeadlessCase):
         pending = self.read_all(pend)
         self.assertEqual(pending["session"]["state"], "pending")
         self.assertIsNotNone(pending["session"]["last_checked_at"])
+
+
+class TestSourceVersionAcknowledgement(HeadlessCase):
+    def setUp(self):
+        super().setUp()
+        self.task_id = self.make_task("tasksess-version", run_id="run-A")
+        self.directory = self.make_run(self.task_id, "run-A")
+
+    def acknowledged(self, page, **extra):
+        return self.read_all(self.task_id, cursor=page["next_cursor"],
+                             source_version=page["source_version"], **extra)
+
+    def meta(self):
+        rows = self.db_exec("SELECT value FROM settings WHERE key=?",
+                            ("session_snapshot_meta:" + self.task_id + "/run-A",))
+        return json.loads(rows[0][0])
+
+    def test_fast_path_never_reads_events_snapshot_revisions_or_serializes(self):
+        first = self.read_all(self.task_id)
+        self.assertEqual(len(first["source_version"]), 64)
+        # A fresh source instance models the independent CLI process boundary.
+        h.set_source(h.HeadlessSource(str(self.runs_root)))
+        with patch.object(dsh_events, "iter_events", side_effect=AssertionError("events")), \
+                patch.object(dsh_events, "_read_events", side_effect=AssertionError("events")), \
+                patch.object(dsh_events, "to_messages", side_effect=AssertionError("convert")), \
+                patch.object(h, "slice_messages", side_effect=AssertionError("sort")), \
+                patch.object(cmd_session, "_load_snapshot", side_effect=AssertionError("snapshot")), \
+                patch.object(cmd_session, "_save_snapshot", side_effect=AssertionError("serialize")), \
+                patch.object(session_store, "decode_revisions", side_effect=AssertionError("map")):
+            got = self.acknowledged(first)
+        self.assertEqual(got["messages"], [])
+        self.assertEqual(got["next_cursor"], first["next_cursor"])
+        self.assertEqual(got["source_version"], first["source_version"])
+        self.assertFalse(got["has_more"])
+        self.assertGreater(got["session"]["last_checked_at"], first["session"]["last_checked_at"])
+
+    def test_force_unknown_version_and_reopen_read_without_rewriting_snapshot(self):
+        first = self.read_all(self.task_id)
+        with patch.object(dsh_events, "_read_events", wraps=dsh_events._read_events) as read, \
+                patch.object(cmd_session, "_save_snapshot", side_effect=AssertionError("rewrite")):
+            self.acknowledged(first, force_reload=True)
+            self.read_all(self.task_id, cursor=first["next_cursor"], source_version="unknown")
+            reopened = self.read_all(self.task_id, source_version=first["source_version"])
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(len(reopened["messages"]), len(first["messages"]))
+
+    def test_unfinished_page_does_not_acknowledge_future_history(self):
+        first = self.read_all(self.task_id, limit=2)
+        self.assertTrue(first["has_more"])
+        following = self.acknowledged(first, limit=2)
+        self.assertTrue(following["messages"])
+        self.assertTrue(following["has_more"])
+
+    def test_old_snapshot_cold_upgrade(self):
+        first = self.read_all(self.task_id)
+        self.db_exec("DELETE FROM settings WHERE key LIKE 'session_snapshot_meta:%'")
+        with patch.object(dsh_events, "_read_events", wraps=dsh_events._read_events) as read:
+            got = self.acknowledged(first)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(got["source_version"], first["source_version"])
+        self.assertTrue(self.meta()["full_snapshot_available"])
+
+    def test_oversize_snapshot_still_acknowledges_and_keeps_previous_fallback(self):
+        first = self.read_all(self.task_id)
+        events = default_pi_events() + [pi_event(7, "user", content="x" * 2_100_000)]
+        self.write_events(self.task_id, "run-A", events)
+        big = self.acknowledged(first)
+        self.assertNotEqual(big["source_version"], first["source_version"])
+        self.assertFalse(self.meta()["full_snapshot_available"])
+        with patch.object(dsh_events, "_read_events", side_effect=AssertionError("events")):
+            self.assertEqual(self.acknowledged(big)["messages"], [])
+        reopened = self.read_all(self.task_id)
+        self.assertEqual(len(reopened["messages"][-1]["content"]), 2_100_000)
+        self.write_raw(self.task_id, "run-A", '{"v":')
+        h.set_source(h.HeadlessSource(str(self.runs_root)))
+        failed = self.read_all(self.task_id)
+        self.assertIsNone(failed["source_version"])
+        self.assertEqual(len(failed["messages"]), len(first["messages"]))
+
+    def test_append_same_size_rewrite_replace_and_truncate_invalidate(self):
+        page = self.read_all(self.task_id)
+        path = self.directory / "events.jsonl"
+        events = default_pi_events() + [pi_event(7, "user", content="aaaa")]
+        self.write_events(self.task_id, "run-A", events)
+        appended = self.acknowledged(page)
+        self.assertTrue(appended["messages"])
+        self.assertNotEqual(appended["source_version"], page["source_version"])
+        old_stat = path.stat()
+        text = path.read_text().replace("aaaa", "bbbb")
+        path.write_text(text)
+        os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        changed = self.acknowledged(appended)
+        self.assertNotEqual(changed["source_version"], appended["source_version"])
+        self.assertEqual(changed["messages"][0]["content"], "bbbb")
+        replacement = self.directory / "replacement"
+        replacement.write_text(text)
+        replacement.replace(path)
+        replaced = self.acknowledged(changed)
+        self.assertNotEqual(replaced["source_version"], changed["source_version"])
+        self.write_events(self.task_id, "run-A", default_pi_events())
+        # Existing empty normal pages return None: the client retains its cursor.
+        replaced["next_cursor"] = changed["next_cursor"]
+        truncated = self.acknowledged(replaced)
+        self.assertNotEqual(truncated["source_version"], replaced["source_version"])
+        self.assertEqual(len(self.read_all(self.task_id)["messages"]), 6)
+
+    def test_identity_backend_root_and_failed_sources_never_acknowledge(self):
+        page = self.read_all(self.task_id)
+        for job in (pi_job("OTHER", "run-A"), pi_job(self.task_id, "run-A", backend="dsh")):
+            write_json(self.directory / "job.json", job)
+            h.set_source(h.HeadlessSource(str(self.runs_root)))
+            got = self.acknowledged(page)
+            self.assertIsNone(got["source_version"])
+            self.assertEqual(got["session"]["state"], "unavailable")
+        write_json(self.directory / "job.json", pi_job(self.task_id, "run-A"))
+        alternate = self.root / "alternate"
+        directory = alternate / self.task_id / "run-A"
+        write_json(directory / "job.json", pi_job(self.task_id, "run-A"))
+        write_jsonl(directory / "events.jsonl", default_pi_events())
+        h.set_source(h.HeadlessSource(str(alternate)))
+        different = self.acknowledged(page)
+        self.assertNotEqual(different["source_version"], page["source_version"])
+        (directory / "job.json").write_text("{")
+        h.set_source(h.HeadlessSource(str(alternate)))
+        different["next_cursor"] = page["next_cursor"]
+        self.assertIsNone(self.acknowledged(different)["source_version"])
+
+    def test_half_tail_and_signature_race_are_not_confirmed(self):
+        page = self.read_all(self.task_id)
+        path = self.directory / "events.jsonl"
+        with path.open("a") as stream:
+            stream.write('{"seq":')
+        partial = self.acknowledged(page)
+        self.assertIsNone(partial["source_version"])
+        self.write_events(self.task_id, "run-A", default_pi_events())
+        original = dsh_events._read_events
+        def racing(file):
+            result = original(file)
+            with path.open("a") as stream:
+                stream.write("\n")
+            return result
+        with patch.object(dsh_events, "_read_events", side_effect=racing):
+            self.assertIsNone(self.read_all(self.task_id)["source_version"])
+
+    def test_get_session_reuses_events_and_does_not_leak_them(self):
+        with patch.object(dsh_events, "_read_events", wraps=dsh_events._read_events) as read, \
+                patch.object(dsh_events, "iter_events", side_effect=AssertionError("second read")):
+            result = self.call("get-session", {"task_id": self.task_id, "run_id": "run-A"})
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(result["round_detail"]["terminal"]["outcome"], "completed")
+        self.assertNotIn("_events", json.dumps(result))
 
 
 if __name__ == "__main__":

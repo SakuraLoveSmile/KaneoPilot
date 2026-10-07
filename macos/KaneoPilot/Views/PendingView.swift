@@ -284,6 +284,7 @@ struct RequestDetailView: View {
     @State private var error: String?
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
+    @State private var confirmCancelPlan = false
     @State private var generation = 0
 
     var body: some View {
@@ -303,6 +304,17 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("请求详情")
+        .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
+                            titleVisibility: .visible) {
+            Button("终止计划", role: .destructive) {
+                if let taskID = detail?.request?.taskId {
+                    Task { await model.cancelPlan(requestID: requestID, taskID: taskID) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("撤销尚未领取的规划请求，保留规划材料与历史，等待你手动重新规划。若已被领取，本操作会拒绝终止。")
+        }
         .task(id: requestID) { await load() }
         .onChange(of: model.lastRefreshAt) {
             Task { await load() }
@@ -691,6 +703,9 @@ struct RequestDetailView: View {
             }
             .disabled(model.busy)
             .help("调整排队优先级")
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirmCancelPlan = true }
+                .disabled(model.busy || taskID == nil)
         case "release_lost":
             Button("释放失联请求") { confirmRelease = true }
                 .disabled(model.busy || taskID == nil)

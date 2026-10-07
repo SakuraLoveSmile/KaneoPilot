@@ -1,516 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - 会话阅读器状态（§4.4，protocol §5.15.5 本机运行记录）
-
-/// 会话阅读器 store：list-sessions / get-session / session-messages 驱动。
-/// 读取为主：不发送消息、不启动执行。读取失败保留旧内容并标注「可能已过期」。
-/// 数据源为本机执行记录（conversation.json / pi events.jsonl）：connection 正常
-/// 时恒 degraded，按 poll_seconds（缺省 2）定期增量检查导出更新；pending =
-/// 等待会话记录（继续轮询）。
-/// v1.5（§5.16 / ui-spec §4.5）：唯一写操作是会话回收站 trash-session /
-/// restore-session——只改调度台会话保存状态（删文件/不停进程/不动任务）；
-/// 「正常会话／回收站」筛选驱动 list-sessions save_state；删除/切换后按
-/// generation + 选中存在性双守卫丢弃在途旧响应，已删除会话不得重新出现。
-@MainActor
-final class SessionReaderStore: ObservableObject {
-    let taskID: String?
-    /// 打开阅读器时定位的轮次（详情浮层「查看实时会话」传入）。
-    let preferredRunID: String?
-
-    @Published var sessions: [SessionInfo] = []
-    @Published var selectedRunID: String?
-    @Published var session: SessionInfo?
-    @Published var connection: SessionConnection?
-    /// §5.18.4/v2.1：get-session 轮次运行时视图（terminal 失败细分 + 配置快照）。
-    @Published var roundDetail: RoundDetail?
-    @Published var messages: [SessionMessage] = []
-    @Published var loading = false
-    /// 读取失败横幅（不清空已加载内容）。
-    @Published var error: String?
-    /// 连接中断（本地派生：读取抛出连接类错误）。
-    @Published var interrupted = false
-    @Published var search = ""
-    /// 默认折叠的工具调用/结果消息 listID。
-    @Published var collapsed: Set<String> = []
-    /// 自动跟随底部。
-    @Published var following = true
-    /// 暂停跟随时有新内容。
-    @Published var hasNewContent = false
-    @Published var hasMore = false
-    /// §4.5/§5.16.3：会话保存状态筛选（正常会话 active / 回收站 trashed），
-    /// 驱动 list-sessions 的 save_state 参数。
-    @Published var saveFilter = "active"
-    /// 操作（移入回收站/恢复）失败：核心 error 原文（保留已加载内容）。
-    @Published var actionError: String?
-    /// 回收站命令执行中（按钮 disabled + spinner）。
-    @Published var acting = false
-
-    // 滚动位置（由视图回传：原生滚动几何 + 内容高度偏好）。
-    var contentHeight: CGFloat = 0
-    var visibleHeight: CGFloat = 0
-    /// 正在自动滚到底（含二次纠正）：期间的偏移抖动不得改判 following。
-    private var settlingToBottom = false
-    /// 自动滚动批次号：后发起的批次接管标记，旧批次回落时不清除新标记。
-    private var autoScrollGeneration = 0
-    /// 用户触发的重排（折叠/展开、搜索过滤）进行中：期间滚动几何不可信。
-    private var layoutChanging = false
-    private var layoutChangeTask: Task<Void, Never>?
-
-    private var client: CoreClient?
-    private var cursor: String?
-    private var pollTask: Task<Void, Never>?
-    /// 切换轮次/重载时的代数守卫，避免过期响应覆盖新状态。
-    private var generation = 0
-
-    init(taskID: String?, preferredRunID: String? = nil) {
-        self.taskID = taskID
-        self.preferredRunID = preferredRunID
-    }
-
-    // MARK: 加载
-
-    func start(client: CoreClient) async {
-        self.client = client
-        await loadSessions(preferredRunID: preferredRunID)
-    }
-
-    func stop() {
-        pollTask?.cancel()
-        pollTask = nil
-        generation += 1
-    }
-
-    /// 清空当前选择与消息（删除成功 / 被筛选移除后调用）：停止该会话轮询并
-    /// 推进代数，使一切在途 get-session/session-messages 响应失效——已删除会话
-    /// 不得经旧响应重新出现（§4.5 代数守卫）。
-    private func clearSelection() {
-        pollTask?.cancel()
-        pollTask = nil
-        generation += 1
-        selectedRunID = nil
-        cursor = nil
-        session = nil
-        connection = nil
-        messages = []
-        roundDetail = nil
-        collapsed = []
-        error = nil
-        interrupted = false
-        hasMore = false
-        hasNewContent = false
-        following = true
-    }
-
-    /// 选中会话是否仍在当前列表（未被删除、未被 save_state 筛选移除）。
-    private func sessionsContain(_ runID: String?) -> Bool {
-        guard let runID else { return false }
-        return sessions.contains { $0.runId == runID }
-    }
-
-    /// 读取失败原因（§5.15.5）：本地抛出错误优先；其次 session/connection unavailable
-    /// 或 connection.detail 非空（半写入/瞬时解析失败会保留上一份内容并给出原因）。
-    var readFailure: String? {
-        if let error { return error }
-        if session?.isUnavailable == true {
-            return connection?.detail ?? "执行记录缺失或身份核验未通过"
-        }
-        if connection?.isUnavailable == true {
-            return connection?.detail ?? "会话读取不可用"
-        }
-        if connection?.hasDetail == true { return connection?.detail }
-        return nil
-    }
-
-    /// 是否处于定期更新轮询（pending/degraded 均轮询；unavailable 停止，仅手动重试）。
-    var isPolling: Bool { shouldPoll }
-
-    /// 轮询间隔展示文本（connection.poll_seconds，缺省 2 秒）。
-    var pollIntervalText: String {
-        let interval = connection?.pollInterval ?? 2
-        return interval == interval.rounded()
-            ? String(Int(interval))
-            : String(format: "%.1f", interval)
-    }
-
-    private var shouldPoll: Bool {
-        selectedRunID != nil
-            && connection?.isUnavailable != true
-            && session?.isUnavailable != true
-    }
-
-    private func loadSessions(preferredRunID: String?,
-                              autoPick: Bool = true) async {
-        guard let client else { return }
-        // 代数守卫：过期列表响应（含删除落地前发出的旧响应）一律丢弃。
-        let generation = self.generation
-        loading = true
-        defer { loading = false }
-        do {
-            var payload: [String: Any] = [:]
-            if let taskID { payload["task_id"] = taskID }
-            // §5.16.3：正常会话 / 回收站筛选。
-            payload["save_state"] = saveFilter
-            let response = try await client.run("list-sessions",
-                                                payload: payload,
-                                                as: ListSessionsResponse.self)
-            guard generation == self.generation else { return }
-            let incoming = response.sessions ?? []
-            sessions = incoming
-            if let selected = selectedRunID {
-                if incoming.contains(where: { $0.runId == selected }) {
-                    // 选中仍在当前筛选列表：保留已加载历史，按 cursor 增量刷新。
-                    self.generation += 1
-                    await loadSession(generation: self.generation)
-                } else {
-                    // 已删除或被筛选移除：清空当前选择与消息（旧响应由代数守卫丢弃）。
-                    clearSelection()
-                }
-            } else if autoPick,
-                      let picked = (preferredRunID.flatMap { id in
-                          incoming.first { $0.runId == id }
-                      } ?? incoming.first) {
-                await select(runID: picked.runId)
-            }
-        } catch let underlying {
-            guard generation == self.generation else { return }
-            // 失败保留已有内容（sessions/messages 不动），横幅给重试。
-            self.error = underlying.coreMessage
-            interrupted = (underlying as? CoreError)?.isConnectivity == true
-        }
-    }
-
-    // MARK: 会话回收站（§5.16 / ui-spec §4.5）
-
-    /// 「正常会话／回收站」筛选：驱动 list-sessions save_state；推进代数使在途
-    /// 响应失效，随后按新筛选重新加载（选中不在新列表时清空选择与消息）。
-    func setSaveFilter(_ value: String) async {
-        guard value != saveFilter else { return }
-        saveFilter = value
-        generation += 1
-        await loadSessions(preferredRunID: preferredRunID, autoPick: true)
-    }
-
-    /// 移入当前会话轮次：trash-session（带 expected_save_state CAS）→ 成功后
-    /// 停止轮询、清空当前选择与消息、刷新列表。返回 nil = 成功（调用方 toast）。
-    func trashSelectedSession() async -> String? {
-        await performSaveStateChange(command: "trash-session")
-    }
-
-    /// 从回收站恢复当前会话轮次：restore-session（无禁止条件，幂等）。
-    func restoreSelectedSession() async -> String? {
-        await performSaveStateChange(command: "restore-session")
-    }
-
-    /// v2 §5.20.2：回收站内轮次「永久从列表移除」（purged 终态，只读审计可回看）。
-    /// 返回 nil = 成功（调用方 toast）；失败返回核心 error 原文。
-    func purgeSelectedSession() async -> String? {
-        await performSaveStateChange(command: "purge-session")
-    }
-
-    private func performSaveStateChange(command: String) async -> String? {
-        guard let client, let taskID, let runID = selectedRunID else {
-            return "未选择执行会话"
-        }
-        acting = true
-        defer { acting = false }
-        do {
-            var payload: [String: Any] = ["task_id": taskID, "run_id": runID]
-            // CAS：以阅读器读到的保存状态作期望值，冲突由核心拒绝。
-            // purge-session 要求 expected_save_state="trashed"（当前即 trashed）。
-            if command != "restore-session", let expected = session?.saveState {
-                payload["expected_save_state"] = expected
-            }
-            _ = try await client.run(command, payload: payload,
-                                     as: SaveSessionResponse.self)
-            // 成功：停止该会话轮询 + 清空当前选择与消息 + 刷新列表；
-            // clearSelection 推进代数 → 在途旧响应不得让会话重新出现。
-            clearSelection()
-            await loadSessions(preferredRunID: nil, autoPick: false)
-            actionError = nil
-            return nil
-        } catch let underlying {
-            // 失败：保留已有内容，展示核心 error 原文（alert）。
-            actionError = underlying.coreMessage
-            return underlying.coreMessage
-        }
-    }
-
-    /// 轮次选择器：切换历史执行轮次（清空旧轮次内容后全量读取）。
-    func select(runID: String?) async {
-        selectedRunID = runID
-        cursor = nil
-        session = nil
-        connection = nil
-        messages = []
-        collapsed = []
-        error = nil
-        interrupted = false
-        hasMore = false
-        hasNewContent = false
-        // 切换轮次即重新定位：新会话从最新消息开始跟随（用户随后上滚仍会停下）。
-        following = true
-        roundDetail = nil
-        generation += 1
-        let generation = self.generation
-        await loadSession(generation: generation)
-    }
-
-    /// 手动重试（读取失败 / 连接中断横幅、失败态「重试」按钮）。
-    /// 未选定轮次时重跑 list-sessions；已有消息时不清空，按 cursor 增量补齐。
-    func refresh() async {
-        generation += 1
-        let generation = self.generation
-        if selectedRunID == nil {
-            await loadSessions(preferredRunID: preferredRunID)
-        } else {
-            await loadSession(generation: generation)
-        }
-    }
-
-    private func loadSession(generation: Int) async {
-        guard let client, let taskID, let runID = selectedRunID else { return }
-        if messages.isEmpty { loading = true }
-        defer { loading = false }
-        do {
-            let response = try await client.run(
-                "get-session",
-                payload: ["task_id": taskID, "run_id": runID],
-                as: GetSessionResponse.self)
-            // 代数 + 选中守卫：轮次已切换/清空、或选中会话已不在当前列表
-            // （被删除或被 save_state 筛选移除）→ 丢弃，不让旧响应复活。
-            guard generation == self.generation,
-                  selectedRunID == runID,
-                  sessionsContain(runID) else { return }
-            session = response.session
-            connection = response.connection
-            interrupted = false
-            roundDetail = response.roundDetail
-            error = nil
-            restartPolling()
-            await loadMessages(generation: generation)
-        } catch let underlying {
-            guard generation == self.generation else { return }
-            self.error = underlying.coreMessage
-            interrupted = (underlying as? CoreError)?.isConnectivity == true
-        }
-    }
-
-    private func loadMessages(generation: Int) async {
-        guard let client, let taskID else { return }
-        let requestedRunID = selectedRunID
-        var payload: [String: Any] = ["task_id": taskID]
-        if let runID = requestedRunID { payload["run_id"] = runID }
-        if let cursor { payload["cursor"] = cursor }
-        do {
-            let response = try await client.run("session-messages",
-                                                payload: payload,
-                                                as: SessionMessagesResponse.self)
-            // 代数 + 选中守卫：轮询/刷新响应落地前校验代数，且校验当前选中
-            // 会话仍存在、未被过滤——在途旧响应不得让已删除会话重新出现。
-            guard generation == self.generation,
-                  selectedRunID == requestedRunID,
-                  requestedRunID == nil || sessionsContain(requestedRunID)
-            else { return }
-            if let info = response.session { session = info }
-            if let conn = response.connection { connection = conn }
-            cursor = response.nextCursor ?? cursor
-            hasMore = response.hasMore ?? false
-            interrupted = false
-            error = nil
-            applyMessages(response.messages ?? [])
-        } catch let underlying {
-            guard generation == self.generation else { return }
-            // §6 会话读取失败：保留已加载消息 + 横幅，不清空。
-            self.error = underlying.coreMessage
-            interrupted = (underlying as? CoreError)?.isConnectivity == true
-        }
-    }
-
-    /// 按 id + revision 去重/更新，按 seq 排序（protocol §5.15.5）。
-    ///
-    /// T1（ui-spec §4.5「无变化轮询不重排」）：本次既无新消息也无修订（含同 id
-    /// 逐字段等价的重发）时直接返回——不复制、不排序、也不给 `messages` 赋值，
-    /// 因而不会发布新数组、不会触发依赖该数组的自动滚动。
-    /// 有变化时只处理改变的行：一次 O(n) 建索引取代逐条 `firstIndex` 的 O(n·m)，
-    /// 并且只在确有条目变化时才写回 `messages`（一次 `@Published` 发布）；
-    /// 修订替换沿用原折叠状态并迁移 listID，结果仍按 `seq` 排序。
-    private func applyMessages(_ incoming: [SessionMessage]) {
-        guard !incoming.isEmpty else { return }
-
-        var positions: [String: Int] = [:]
-        positions.reserveCapacity(messages.count)
-        for (index, message) in messages.enumerated() {
-            if let id = message.id { positions[id] = index }
-        }
-
-        var list = messages
-        var added = 0
-        var changed = 0
-        for message in incoming {
-            guard let id = message.id else {
-                list.append(message)
-                added += 1
-                if message.hasCollapsibleContent { collapsed.insert(message.listID) }
-                continue
-            }
-            if let index = positions[id] {
-                let existing = list[index]
-                // 低 revision 的重发不落地；逐字段等价的同 id 重发 = 无变化
-                // （§5.15.5 的 revision 由内容派生）→ 不替换、不发布。
-                guard (message.revision ?? 0) >= (existing.revision ?? 0),
-                      !isSameSessionMessage(existing, message) else { continue }
-                // 折叠状态随消息（id）而不是随 revision：修订替换后沿用
-                // 原状态（用户展开过就保持展开），listID 变化时迁移。
-                let previousID = existing.listID
-                let wasCollapsed = collapsed.contains(previousID)
-                list[index] = message
-                if previousID != message.listID {
-                    collapsed.remove(previousID)
-                    if wasCollapsed { collapsed.insert(message.listID) }
-                }
-                changed += 1
-            } else {
-                positions[id] = list.count
-                list.append(message)
-                added += 1
-                // §4.5：工具调用/结果与过长正文默认折叠（逐条可展开）
-                if message.hasCollapsibleContent {
-                    collapsed.insert(message.listID)
-                }
-            }
-        }
-
-        // 无变化：`messages` 未被写入 → 不排序、不发布、不安排自动滚动。
-        guard added > 0 || changed > 0 else { return }
-        // 仍按 seq 排序（§5.15.5）；只有新消息可能打乱顺序，追加时才带来
-        // 「暂停跟随时有新内容」标记。
-        if added > 0 {
-            list.sort { ($0.seq ?? 0) < ($1.seq ?? 0) }
-            if !following { hasNewContent = true }
-        }
-        messages = list
-    }
-
-    // MARK: 定期更新轮询
-
-    /// 本机运行记录无推送订阅：按 connection.poll_seconds（缺省 2s）增量检查导出更新。
-    /// pending（等待会话记录）与 degraded（含 detail 的瞬时读取失败）都继续轮询；
-    /// unavailable（session 或 connection）停止，仅经手动重试恢复。
-    private func restartPolling() {
-        pollTask?.cancel()
-        pollTask = nil
-        guard shouldPoll else { return }
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self, self.shouldPoll else { return }
-                let interval = self.connection?.pollInterval ?? 2
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                await self.loadMessages(generation: self.generation)
-            }
-        }
-    }
-
-    // MARK: 折叠 / 滚动
-
-    func toggleCollapsed(_ id: String) {
-        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
-        beginLayoutChange()
-    }
-
-    /// 折叠/展开、搜索过滤都会让 LazyVStack 重排：重排中间态里 document 高度
-    /// 会瞬时短于内容，距底被算成 0（§4.5 判底依据），从而把「上滚离开底部」
-    /// 误判成「贴底」并把视口拉回底部——实测收起长消息即被拉到会话末尾。
-    /// 重排落地前忽略滚动几何，用户的上滚状态与视口位置都保持不变。
-    func beginLayoutChange() {
-        layoutChanging = true
-        layoutChangeTask?.cancel()
-        layoutChangeTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 320_000_000)
-            guard !Task.isCancelled else { return }
-            self?.layoutChanging = false
-        }
-    }
-
-    /// 视图回传（内容高度 / 可视高度偏好）：只记高度，不判跟随。
-    func updateHeights(visibleHeight: CGFloat, contentHeight: CGFloat) {
-        self.visibleHeight = visibleHeight
-        self.contentHeight = contentHeight
-    }
-
-    /// 视图回传（原生滚动几何实测的距底距离，§4.5）：距底 <48pt 视为贴底。
-    ///
-    /// 滚动位置只能取原生滚动视图的真实几何：SwiftUI 的 GeometryReader 偏好
-    /// 只在内容重新布局时回传，macOS 上用户滚动不触发重新布局 → 拿到的永远是
-    /// 上一次布局的旧值（实测恒为「贴底」），于是上滚后仍被新消息拉回底部，
-    /// 「有新内容」提示永不出现。
-    ///
-    /// 自动滚到底尚未落地时（settlingToBottom）距离会瞬时变大——那是纠正
-    /// 过程中的中间态，不是用户离开底部，改判会产生假「有新内容」并停住跟随。
-    /// 折叠/展开与搜索过滤的重排（layoutChanging）同理会把中间态算成贴底，
-    /// 期间一并忽略。
-    func updateDistanceFromBottom(_ distance: CGFloat) {
-        guard !settlingToBottom, !layoutChanging else { return }
-        if distance < 48 {
-            following = true
-            hasNewContent = false
-        } else {
-            following = false
-        }
-    }
-
-    /// 开始一次「滚到底 + 二次纠正」：返回批次号，落地后回传 didAutoScroll。
-    func willAutoScroll() -> Int {
-        settlingToBottom = true
-        autoScrollGeneration += 1
-        return autoScrollGeneration
-    }
-
-    /// 该批次落地（仅最新批次可清除 settling 标记）。
-    func didAutoScroll(_ token: Int) {
-        if token == autoScrollGeneration { settlingToBottom = false }
-    }
-
-    func jumpToLatest() {
-        following = true
-        hasNewContent = false
-    }
-
-// MARK: - T1 无变化判定（ui-spec §4.5「无变化轮询不重排」）
-
-/// 同 `id` 重发的两条消息是否逐字段等价：等价即无变化，不替换、不发布。
-/// 这一层用于抵御 §5.15.5 上游可能出现的「同 id + 同 revision 原样重发」。
-private func isSameSessionMessage(_ lhs: SessionMessage, _ rhs: SessionMessage) -> Bool {
-    lhs.id == rhs.id
-        && lhs.seq == rhs.seq
-        && lhs.runId == rhs.runId
-        && lhs.type == rhs.type
-        && lhs.content == rhs.content
-        && lhs.revision == rhs.revision
-        && lhs.sourceAt == rhs.sourceAt
-        && isSameSessionTool(lhs.tool, rhs.tool)
-}
-
-private func isSameSessionTool(_ lhs: SessionTool?, _ rhs: SessionTool?) -> Bool {
-    switch (lhs, rhs) {
-    case (nil, nil): return true
-    case (let l?, let r?):
-        return l.name == r.name && l.input == r.input
-            && l.output == r.output && l.exitCode == r.exitCode
-    default: return false
-    }
-}
-}
-
-// MARK: - trash-session / restore-session 响应（protocol §5.16.2）
-
-private struct SaveSessionResponse: Decodable {
-    let ok: Bool?
-    let deduplicated: Bool?
-    let session: SessionInfo?
-}
-
 // MARK: - 会话阅读器（独立视图与详情浮层内嵌同规格）
 
 struct SessionReaderView: View {
@@ -518,6 +8,8 @@ struct SessionReaderView: View {
 
     let taskID: String?
     let preferredRunID: String?
+    let showsTaskTitle: Bool
+    let fallbackSessionTitle: String?
 
     @EnvironmentObject private var model: AppViewModel
     @StateObject private var store: SessionReaderStore
@@ -525,15 +17,23 @@ struct SessionReaderView: View {
     @State private var confirmingTrash = false
     /// v2 §4.5/§5.20：回收站内轮次「永久从列表移除」二次确认。
     @State private var confirmingPurge = false
-    init(taskID: String?, preferredRunID: String? = nil) {
+    @State private var confirmingForcePurge = false
+    @State private var showDetails = false
+    @State private var startConfirmation: SessionControlStatus?
+    @FocusState private var focusedControl: String?
+    @State private var availableWidth: CGFloat = 900
+    @State private var availableHeight: CGFloat = 600
+    init(taskID: String?, preferredRunID: String? = nil, showsTaskTitle: Bool = true, fallbackSessionTitle: String? = nil) {
         self.taskID = taskID
         self.preferredRunID = preferredRunID
+        self.showsTaskTitle = showsTaskTitle
+        self.fallbackSessionTitle = fallbackSessionTitle
         _store = StateObject(wrappedValue: SessionReaderStore(taskID: taskID,
                                                               preferredRunID: preferredRunID))
     }
 
     private var taskTitle: String {
-        model.taskTitle(for: taskID)
+        model.taskTitle(for: taskID ?? store.session?.taskId)
     }
 
     private var connectionDisplay: SessionConnectionDisplay {
@@ -558,7 +58,7 @@ struct SessionReaderView: View {
             timeRow
             // §5.22.6 轮次失败细分（terminal.reason 中文 + job detail 原文）；
             // 复用 SessionBanner，无重试动作。
-            if let failure = store.roundDetail?.failureText {
+            if let failure = store.roundDetail?.failureText ?? (store.session?.runStatus == "failed" ? "原因未提供" : nil) {
                 SessionBanner(text: "轮次失败 · \(failure)", stale: false,
                               retry: false) {}
             }
@@ -569,11 +69,48 @@ struct SessionReaderView: View {
                     Task { await store.refresh() }
                 }
             }
+            plusControlRow
             searchField
             content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(GeometryReader { geometry in Color.clear.onAppear { availableWidth = geometry.size.width; availableHeight = geometry.size.height }.onChange(of: geometry.size.width) { _, width in availableWidth = width }.onChange(of: geometry.size.height) { _, height in availableHeight = height } })
+        .onAppear { SessionReaderPerformance.shared.record("reader_view_appeared", ["width": availableWidth]) }
         .task { await store.start(client: model.client) }
         .onDisappear { store.stop() }
+        .confirmationDialog("强制删除残留会话？", isPresented: $confirmingForcePurge,
+                            titleVisibility: .visible) {
+            Button("强制删除", role: .destructive) {
+                Task {
+                    if await store.forcePurgeSelectedSession() == nil {
+                        model.showToast("已删除残留会话")
+                        await model.loadSaved()
+                    }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("永久移除没有实际会话记录的列表项，保留任务、历史与文件；操作不可恢复。若已开始运行或出现会话记录，核心会拒绝删除。")
+        }
+        .onChange(of: store.selectedRunID) { _, _ in startConfirmation = nil }
+        .confirmationDialog("向 Plus 请求开始规划？", isPresented: Binding(
+            get: { startConfirmation != nil },
+            set: { if !$0 { startConfirmation = nil } }
+        ), titleVisibility: .visible, presenting: startConfirmation) { expected in
+            Button("请求开始") {
+                Task {
+                    if await store.requestSessionStart(expected: expected) {
+                        model.kickPlanner()
+                        model.showToast("开始请求已排队")
+                        await model.refreshAll()
+                    }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("沿用该请求已确认的材料和模型配置重新排队，由规划器连接 Plus 开始。可能调用模型；不会重复发送已发出的指令。")
+        }
         // §4.5：危险操作二次确认，写明仅移入调度台回收站、不停进程、可恢复。
         .confirmationDialog(
             "将当前执行会话移入回收站？",
@@ -621,83 +158,106 @@ struct SessionReaderView: View {
     // MARK: 头部：标题 + 轮次选择器 + 连接状态徽标
 
     private var header: some View {
-        HStack(spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(taskTitle)
-                    .font(.kpTitle)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .accessibilityLabel("任务：\(taskTitle)")
-                HStack(spacing: Spacing.s) {
-                    Text(sessionStateLabel)
-                        .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                    // §4.5：trashed 轮次可见区分（Labels.saveState 中文标签）。
-                    if store.session?.isTrashed == true {
-                        Label(Labels.saveState("trashed"), systemImage: "trash")
-                            .font(.kpSmall)
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("会话保存状态：回收站")
-                    }
-                    // v2 §5.20：purged 轮次只读审计标记。
-                    if store.session?.readOnly == true {
-                        Label("只读", systemImage: "eye")
-                            .font(.kpSmall)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel("会话保存状态：已永久移除（只读）")
-                    }
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            HStack(alignment: .top, spacing: Spacing.m) {
+                if showsTaskTitle {
+                    Text(taskTitle).font(.kpTitle).lineLimit(2).textSelection(.enabled)
+                        .help(taskTitle).frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("任务：\(taskTitle)")
+                } else {
+                    Text(sessionStateLabel).font(.kpSmall).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }
-            .frame(maxWidth: 220, alignment: .leading)
-            Spacer(minLength: Spacing.s)
-            if store.loading {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("正在读取会话列表")
-            }
-            // 保存状态筛选：正常会话 / 回收站（两段控件，驱动 save_state）。
-            Picker("会话筛选", selection: Binding(
-                get: { store.saveFilter },
-                set: { value in Task { await store.setSaveFilter(value) } }
-            )) {
-                Text("正常会话").tag("active")
-                Text("回收站").tag("trashed")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 170)
-            .help("按会话保存状态筛选：正常会话 / 回收站")
-            .accessibilityLabel("会话保存状态筛选：正常会话或回收站")
-            if store.sessions.count > 1 {
-                Picker("执行轮次", selection: Binding(
-                    get: { store.selectedRunID ?? store.sessions.first?.runId },
-                    set: { runID in Task { await store.select(runID: runID) } }
-                )) {
-                    ForEach(store.sessions, id: \.runId) { session in
-                        Text(session.isTrashed
-                             ? "\(session.markerLabel)（回收站）"
-                             : session.markerLabel).tag(session.runId)
-                    }
+                VStack(alignment: .trailing, spacing: Spacing.s) {
+                    if showsTaskTitle { Text(sessionStateLabel).font(.kpSmall).foregroundStyle(.secondary) }
+                    if store.session?.isTrashed == true { Label("回收站", systemImage: "trash").font(.kpSmall) }
+                    if store.session?.readOnly == true { Label("只读", systemImage: "eye").font(.kpSmall) }
+                    readingStatus
                 }
-                .pickerStyle(.menu)
-                .frame(maxWidth: 260)
-                .help("切换历史执行轮次（task_id/run_id）")
-                .accessibilityLabel("执行轮次选择器")
+                if store.loading { ProgressView().controlSize(.small).accessibilityLabel("正在读取会话历史") }
+                Button { Task { await store.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
+                    .labelStyle(.iconOnly).help("强制重新核验来源，保留已读正文")
+                    .accessibilityLabel("刷新会话").disabled(store.loading)
+                    .focused($focusedControl, equals: "refresh")
+                    .keyboardShortcut(focusedControl == "refresh" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
             }
-            SessionConnectionBadge(display: connectionDisplay, detail: store.connection?.detail)
-            saveActionButton
-            Button {
-                Task { await store.refresh() }
-            } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
+            if availableWidth >= 840 {
+                HStack(spacing: Spacing.m) { selectors; Spacer(minLength: 0); saveActionButton }
+            } else {
+                HStack(spacing: Spacing.s) { selectors; Spacer(minLength: 0) }
+                HStack { Spacer(minLength: 0); saveActionMenu }
             }
-            .labelStyle(.iconOnly)
-            .help("重新读取会话")
-            .accessibilityLabel("刷新会话")
-            .disabled(store.loading)
         }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
+        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+    }
+
+    private var selectors: some View {
+        HStack(spacing: Spacing.m) {
+            Picker("会话筛选", selection: Binding(get: { store.saveFilter }, set: { value in Task { await store.setSaveFilter(value) } })) {
+                Text("正常会话").tag("active"); Text("回收站").tag("trashed")
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 170)
+                .accessibilityLabel("会话保存状态筛选：正常会话或回收站")
+            if !store.sessions.isEmpty {
+                Picker("执行轮次", selection: Binding(get: { store.selectedRunID }, set: { value in Task { await store.select(runID: value) } })) {
+                    ForEach(store.sessions) { session in
+                        Text(roundLabel(session)).tag(session.runId)
+                    }
+                }.pickerStyle(.menu).labelsHidden().frame(maxWidth: 420)
+                    .help(store.session?.markerLabel ?? "切换历史执行轮次")
+                    .accessibilityLabel("执行轮次选择器")
+            }
+        }
+    }
+
+    private func roundLabel(_ listedSession: SessionInfo) -> String {
+        // 已选轮次使用最近读取状态，避免列表快照仍显示旧的“执行中”。
+        let session = store.session.flatMap { $0.runId == listedSession.runId ? $0 : nil } ?? listedSession
+        let state: String
+        let controlState = store.controlStatus.flatMap { $0.runId == session.runId ? $0.state : nil }
+        switch controlState {
+        case "executor_lost": state = "启动中断"
+        case "not_started": state = "等待启动"
+        case "waiting_permission": state = "等待权限确认"
+        default:
+          switch session.runStatus {
+        case "pending": state = "等待开始"
+        case "running": state = "执行中"
+        case "finished": state = "已结束"
+        case "failed": state = "失败"
+        case "unknown": state = "状态未知"
+        default: state = session.runStatus ?? "状态未提供"
+          }
+        }
+        let label = "\(TimeFormat.short(session.startedAt)) · \(state) · \(String((session.runId ?? "—").prefix(8)))"
+        return taskID == nil ? "\(session.sessionTitle ?? model.taskTitle(for: session.taskId)) · \(label)" : label
+    }
+
+    private var readingStatus: some View {
+        let unavailable = store.interrupted || store.connection?.isUnavailable == true || store.session?.isUnavailable == true
+        return Label(store.selectedRunID == nil ? "未选择会话" : unavailable ? "读取不可用" : store.readFailure != nil ? "读取失败" : "定时读取 · 每 \(store.pollIntervalText) 秒",
+                     systemImage: unavailable ? "exclamationmark.circle" : store.readFailure != nil ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
+            .font(.kpSmall).foregroundStyle(unavailable ? Color.red : store.readFailure != nil ? Color.orange : Color.secondary)
+    }
+
+    private var saveActionMenu: some View {
+        Menu("会话操作") {
+            if store.session?.canForcePurge == true {
+                Button("强制删除残留会话", role: .destructive) { confirmingForcePurge = true }
+                    .disabled(store.acting)
+            }
+            if store.session?.isTrashed == true {
+                Button("恢复") { Task { if await store.restoreSelectedSession() == nil { model.showToast("已恢复会话") } } }
+                    .disabled(store.acting || store.session?.canRestore != true)
+                if store.session?.canPurge == true {
+                    Button(PurgeText.actionTitle, role: .destructive) { confirmingPurge = true }.disabled(store.acting)
+                }
+            } else {
+                Button("移入回收站", role: .destructive) { confirmingTrash = true }
+                    .disabled(store.acting || store.session?.canTrash != true)
+                if let reason = store.session?.blockedReason { Text(reason).font(.kpSmall) }
+            }
+        }.help(store.session?.blockedReason ?? "管理当前执行会话")
+            .accessibilityLabel(store.session?.blockedReason.map { "会话操作，移入回收站暂不可用：\($0)" } ?? "会话操作")
     }
 
     // MARK: 头部动作：移入回收站（destructive + 二次确认）/ 恢复 / 永久移除
@@ -762,43 +322,72 @@ struct SessionReaderView: View {
     // MARK: 时间信息分行：会话更新时间 / 最近状态检查 / 定期更新标注
 
     private var timeRow: some View {
-        HStack(spacing: Spacing.l) {
-            Label("会话更新时间 \(TimeFormat.fullString(store.session?.updatedAt))",
-                  systemImage: "clock")
-            Label("最近状态检查 \(TimeFormat.fullString(store.session?.lastCheckedAt))",
-                  systemImage: "stethoscope")
-            if store.isPolling {
-                // 无推送：定期增量检查导出更新（§5.15.5，UI 明确标注）。
-                Label("定期更新 · 每 \(store.pollIntervalText) 秒检查导出更新",
-                      systemImage: "arrow.triangle.2.circlepath")
-                    .foregroundStyle(Color.secondary)
-                    .accessibilityLabel("定期更新，每 \(store.pollIntervalText) 秒检查导出更新")
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Spacing.m) { metadataSummary; detailsButton }
+                VStack(alignment: .leading, spacing: Spacing.s) { metadataSummary; detailsButton }
             }
-            // 轮次登记配置快照（pi model/effort 或 codex planner_model/effort）。
-            if let configSummary = store.roundDetail?.config?.summaryText {
-                Label("配置 \(configSummary)", systemImage: "cpu")
-                    .foregroundStyle(Color.secondary)
-                    .accessibilityLabel("轮次配置：\(configSummary)")
+            if showDetails {
+                ScrollView {
+                  VStack(alignment: .leading, spacing: Spacing.s) {
+                LazyVGrid(columns: availableWidth >= 840 ? [GridItem(.flexible()), GridItem(.flexible())] : [GridItem(.flexible())], alignment: .leading, spacing: Spacing.s) {
+                    technicalField("任务 ID", store.session?.taskId)
+                    technicalField("轮次 ID", store.session?.runId)
+                    technicalField("Marker", store.session?.sessionMarker)
+                    technicalField("会话 ID", store.session?.sessionId)
+                    technicalField("会话标题", store.session?.sessionTitle ?? (store.selectedRunID == preferredRunID ? fallbackSessionTitle : nil))
+                    technicalField("最近状态检查", TimeFormat.fullString(store.session?.lastCheckedAt))
+                    technicalField("工作目录", store.roundDetail?.worktreePath)
+                    technicalField("配置快照", store.roundDetail?.config?.summaryText)
+                    technicalField("执行后端", store.roundDetail?.backend ?? store.session?.backend)
+                    if let config = store.roundDetail?.config {
+                        technicalField("Provider", config.provider ?? config.plusProviderId)
+                        technicalField("模型", config.model ?? config.plannerModel ?? config.plusModelId)
+                        technicalField("思考等级", config.reasoningEffort ?? config.plusThinkingLevel)
+                        technicalField("预设", config.agentPreset)
+                        technicalField("连接文件", config.connectionFile ?? config.runtimeConfig?.connectionFile)
+                        technicalField("工具权限", config.permissionMode ?? config.runtimeConfig?.permissionMode)
+                    }
+                }
+                if let adoptions = store.roundDetail?.turnAdopted, !adoptions.isEmpty {
+                    Text("已自动接续 \(adoptions.count) 次 · 同一会话自动重开，未重发指令").font(.kpSmall)
+                    Text(adoptionHelp(adoptions)).font(.kpSmall).textSelection(.enabled)
+                }
+                  }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: min(200, availableHeight * 0.3))
             }
-            // §5.23.8：瞬时模型错误后同一会话自动重开，只读展示接续审计。
-            if let adoptions = store.roundDetail?.turnAdopted, !adoptions.isEmpty {
-                Label("已自动接续 \(adoptions.count) 次", systemImage: "arrow.triangle.branch")
-                    .foregroundStyle(Color.secondary)
-                    .accessibilityLabel("已自动接续 \(adoptions.count) 次，同一会话自动重开，未重发指令")
-                    .help(adoptionHelp(adoptions))
-            }
-            Spacer(minLength: 0)
-            if store.hasMore {
-                Text("还有更多历史消息")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+            if store.loading || store.hasMore {
+                Text("正在读取会话历史 · 已读取 \(store.loadedCount) 条").font(.kpSmall).foregroundStyle(.secondary)
             }
         }
-        .font(.kpSmall)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, Spacing.l)
-        .padding(.bottom, Spacing.s)
-        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+    }
+
+    private var metadataSummary: some View {
+        HStack(spacing: Spacing.m) {
+            Text("内容更新 \(TimeFormat.fullString(store.session?.updatedAt))")
+            if let config = store.roundDetail?.config?.summaryText { Text(config).lineLimit(1).help(config) }
+        }.font(.kpSmall).foregroundStyle(.secondary)
+    }
+
+    private var detailsButton: some View {
+        Button(showDetails ? "收起会话详情" : "会话详情") { store.beginLayoutChange(); showDetails.toggle() }
+            .font(.kpSmall).buttonStyle(.borderless)
+            .focused($focusedControl, equals: "details")
+                    .keyboardShortcut(focusedControl == "details" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+    }
+
+    private func technicalField(_ label: String, _ value: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            Text(label).font(.kpSmall).foregroundStyle(.secondary).frame(width: 96, alignment: .trailing)
+            Text(value ?? "—").font(.kpBody).lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(value ?? "—")
+            Spacer(minLength: 0)
+            Button { Workspace.copy(value) } label: { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.borderless).accessibilityLabel("复制\(label)").disabled(value == nil)
+                .focused($focusedControl, equals: "copy:\(label)")
+                    .keyboardShortcut(focusedControl == "copy:\(label)" && value != nil ? KeyboardShortcut(.return, modifiers: []) : nil)
+        }
     }
 
     /// §5.23.8 接续审计详情（悬停提示；来自 round_detail.turn_adopted，不改判定）。
@@ -813,23 +402,34 @@ struct SessionReaderView: View {
 
     // MARK: 搜索框
 
-    private var searchField: some View {
-        HStack(spacing: Spacing.s) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            TextField("搜索消息内容", text: $store.search)
-                .textFieldStyle(.roundedBorder)
-                .font(.kpBody)
-                .accessibilityLabel("搜索消息内容")
-            if !store.search.isEmpty {
-                Button("清除") { store.search = "" }
-                    .font(.kpSmall)
-                    .accessibilityLabel("清除搜索")
-            }
+    @ViewBuilder
+    private var plusControlRow: some View {
+        if store.roundDetail?.backend == "pi_desktop" || store.session?.backend == "pi_desktop" {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                HStack(alignment: .top, spacing: Spacing.m) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Plus · \(store.controlStatus?.connected == true ? "已连接" : "尚未确认连接")")
+                            .font(.kpSmall).foregroundStyle(.secondary)
+                        Text(store.controlError ?? store.controlStatus?.detail ?? "正在检查 Plus 与当前轮次状态…")
+                            .font(.kpBody).textSelection(.enabled)
+                            .foregroundStyle(store.controlError == nil ? Color.primary : Color.orange)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    if store.controlLoading || store.requestingStart { ProgressView().controlSize(.small) }
+                    Button("检查 Plus 状态") { Task { await store.checkControlStatus() } }
+                        .disabled(store.controlLoading || store.requestingStart)
+                    Button(store.controlStatus?.startLabel ?? "请求开始") { startConfirmation = store.controlStatus }
+                        .disabled(store.controlStatus?.canStart != true || store.controlLoading || store.requestingStart)
+                }
+                if let reason = store.controlStatus?.blockedReason, store.controlStatus?.canStart != true {
+                    Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+            Divider()
         }
-        .padding(.horizontal, Spacing.l)
-        .padding(.bottom, Spacing.s)
+    }
+
+    private var searchField: some View {
+        SessionSearchField(store: store, inputState: store.searchInputState)
     }
 
     // MARK: 内容（状态互斥：加载 / 列表 / 失败 / 等待会话记录 / 暂无消息）
@@ -839,8 +439,8 @@ struct SessionReaderView: View {
         if !store.messages.isEmpty {
             // 读取失败时保留已加载内容（失败原因经上方横幅展示）。
             messageList
-        } else if store.loading && store.session == nil {
-            LoadingView()
+        } else if store.loading {
+            VStack(spacing: Spacing.m) { ProgressView(); Text("正在读取会话历史").font(.kpBody) }.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let failure = store.readFailure {
             failedState(reason: failure)
         } else if store.session?.isPending == true {
@@ -852,15 +452,18 @@ struct SessionReaderView: View {
         }
     }
 
-    /// pending：执行目录有效但 conversation.json 尚未导出；定期轮询自动跟进。
+    /// pending：执行目录有效但事件日志尚未生成；定期轮询自动跟进。
     private var pendingState: some View {
         ContentUnavailableView {
             Label("等待会话记录", systemImage: "clock.badge.questionmark")
         } description: {
-            Text("执行目录有效，会话导出尚未生成；将每 \(store.pollIntervalText) 秒定期检查更新。")
+            Text("执行目录有效，正在等待会话事件日志；将每 \(store.pollIntervalText) 秒定期检查更新。")
         } actions: {
             Button("立即检查") { Task { await store.refresh() } }
                 .accessibilityLabel("立即检查会话记录")
+                .disabled(store.loading)
+                .focused($focusedControl, equals: "state-retry")
+                .keyboardShortcut(focusedControl == "state-retry" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
         }
     }
 
@@ -874,6 +477,9 @@ struct SessionReaderView: View {
         } actions: {
             Button("重试") { Task { await store.refresh() } }
                 .accessibilityLabel("重试读取会话")
+                .disabled(store.loading)
+                .focused($focusedControl, equals: "state-retry")
+                .keyboardShortcut(focusedControl == "state-retry" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
         }
     }
 
@@ -886,6 +492,9 @@ struct SessionReaderView: View {
         } actions: {
             Button("重试") { Task { await store.refresh() } }
                 .accessibilityLabel("重试读取会话")
+                .disabled(store.loading)
+                .focused($focusedControl, equals: "state-retry")
+                .keyboardShortcut(focusedControl == "state-retry" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
         }
     }
 
@@ -905,144 +514,202 @@ struct SessionReaderView: View {
         } actions: {
             Button("重试") { Task { await store.refresh() } }
                 .accessibilityLabel("重试读取会话")
-        }
-    }
-
-    /// 过滤后的消息（搜索命中过滤；高亮在行内完成）。
-    private var visibleMessages: [SessionMessage] {
-        let query = store.search.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return store.messages }
-        return store.messages.filter { message in
-            (message.content ?? "").localizedCaseInsensitiveContains(query)
-                || (message.tool?.name ?? "").localizedCaseInsensitiveContains(query)
-                || (message.tool?.input ?? "").localizedCaseInsensitiveContains(query)
-                || (message.tool?.output ?? "").localizedCaseInsensitiveContains(query)
+                .disabled(store.loading)
+                .focused($focusedControl, equals: "state-retry")
+                .keyboardShortcut(focusedControl == "state-retry" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
         }
     }
 
     private var messageList: some View {
-        GeometryReader { outer in
-            ScrollViewReader { proxy in
+        SessionMessageList(store: store, state: store.messageState,
+                           query: store.committedQuery, hasMore: store.hasMore,
+                           loading: store.loading, restoreAnchor: store.restoreAnchor,
+                           detailSize: CGSize(width: max(480, min(840, availableWidth)),
+                                              height: max(360, min(560, availableHeight))))
+    }
+}
+
+/// Search keystrokes update this small field without invalidating reader metadata or rows.
+private struct SessionSearchField: View {
+    let store: SessionReaderStore
+    @ObservedObject var inputState: SessionSearchInputState
+    @FocusState private var focusedControl: String?
+    var body: some View {
+        // Capture the applied raw value in the probe closure as well as the native field.
+        let rawInput = inputState.text
+        return
+        HStack(spacing: Spacing.s) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("搜索消息内容", text: Binding(get: { inputState.text }, set: { store.search = $0 }))
+                .textFieldStyle(.roundedBorder)
+                .font(.kpBody)
+                .accessibilityLabel("搜索消息内容")
+                .overlay(alignment: .bottomTrailing) {
+                    if SessionReaderPerformance.shared.enabled {
+                        SessionSearchInputProbe(readerID: store.performanceReaderID, input: rawInput)
+                            .frame(width: 1, height: 1).allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                }
+            if !rawInput.isEmpty {
+                Button("清除") { store.search = "" }
+                    .font(.kpSmall)
+                    .accessibilityLabel("清除搜索")
+                    .focused($focusedControl, equals: "clear")
+                    .keyboardShortcut(focusedControl == "clear" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            }
+        }
+        .padding(.horizontal, Spacing.l)
+        .padding(.bottom, Spacing.s)
+    }
+}
+
+/// 元数据发布只重新检查轻量头部；正文观察自己的稳定消息输入。
+private struct SessionMessageList: View {
+    let store: SessionReaderStore
+    @ObservedObject var state: SessionReaderMessageState
+    let query: String
+    let hasMore: Bool
+    let loading: Bool
+    let restoreAnchor: String?
+    let detailSize: CGSize
+    @FocusState private var focusedControl: String?
+    @StateObject private var detailPresenter = SessionMessageDetailPresenter()
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                if !query.isEmpty {
+                    HStack {
+                        Text("匹配 \(state.rows.count) 条\(hasMore ? " · 仅搜索已加载内容" : "")").font(.kpSmall)
+                        Spacer()
+                        Button("回到最新") { store.jumpToLatest() }.font(.kpSmall)
+                            .focused($focusedControl, equals: "latest-search")
+                    .keyboardShortcut(focusedControl == "latest-search" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                    }.padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
+                }
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Spacing.m) {
-                        ForEach(visibleMessages) { message in
-                            SessionMessageRow(
-                                message: message,
-                                query: store.search,
-                                collapsed: store.collapsed.contains(message.listID),
-                                onToggle: { toggleCollapsed(message, proxy: proxy) }
-                            )
-                            .id(message.listID)
+                    LazyVStack(alignment: .leading, spacing: Spacing.l) {
+                        if !query.isEmpty && state.rows.isEmpty {
+                            Text("没有匹配消息").font(.kpBody)
+                            Button("清除搜索") { store.search = "" }
+                                .focused($focusedControl, equals: "clear-empty")
+                                .keyboardShortcut(focusedControl == "clear-empty" ? KeyboardShortcut(.return, modifiers: []) : nil)
                         }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(Self.bottomID)
+                        ForEach(state.rows) { row in
+                            SessionMessageRow(row: row, query: query,
+                                              collapsed: state.collapsed.contains(row.id),
+                                              onToggle: { toggle(row, proxy: proxy) },
+                                              onDetail: { showDetail(row, raw: false, proxy: proxy) },
+                                              onRaw: { showDetail(row, raw: true, proxy: proxy) })
+                                .id(row.id)
+                                .background(GeometryReader { geometry in
+                                    Color.clear.preference(key: SessionRowFramesKey.self,
+                                                           value: [row.message.id ?? row.id: geometry.frame(in: .named("session-reader-scroll"))])
+                                })
+                            Divider()
+                        }
+                        Color.clear.frame(height: 1).id(SessionReaderView.bottomID)
                     }
-                    .padding(Spacing.m)
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: SessionContentHeightKey.self,
-                                value: geo.size.height)
-                        }
-                    )
-                    .background(
-                        ScrollMetricsObserver { distance in
-                            store.updateDistanceFromBottom(distance)
-                        }
-                    )
+                    .frame(maxWidth: 960, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Spacing.l)
+                    .background(GeometryReader { geo in Color.clear.preference(key: SessionContentHeightKey.self, value: geo.size.height) })
+                    .background(ScrollMetricsObserver(readerID: store.performanceReaderID, onDistance: { store.updateDistanceFromBottom($0) }, onManualScroll: { store.userScrolled() }))
                 }
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(
-                            key: SessionScrollHeightKey.self,
-                            value: geo.size.height)
-                    }
-                )
+                .coordinateSpace(name: "session-reader-scroll")
+                .background(GeometryReader { geo in Color.clear.preference(key: SessionScrollHeightKey.self, value: geo.size.height) })
                 .overlay(alignment: .bottom) {
-                    if !store.following && store.hasNewContent {
-                        Button {
-                            // following=true → onChange(following) 走统一的
-                            // 「滚到底 + 二次纠正」，与自动跟随同一条路径。
-                            store.jumpToLatest()
-                        } label: {
-                            Label("有新内容", systemImage: "arrow.down.circle.fill")
-                                .font(.kpSmall)
-                                .padding(.horizontal, Spacing.m)
-                                .padding(.vertical, Spacing.s)
-                                .background(Color.kpControl, in: Capsule())
-                                .overlay(Capsule().stroke(Color.kpSeparator))
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, Spacing.m)
-                        .accessibilityLabel("有新内容，点击回到底部")
+                    if !state.following && state.hasNewContent {
+                        Button { store.jumpToLatest() } label: {
+                            Label("有新内容", systemImage: "arrow.down.circle.fill").font(.kpSmall)
+                                .padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
+                                .background(Color.kpControl, in: Capsule()).overlay(Capsule().stroke(Color.kpSeparator))
+                        }.buttonStyle(.plain).padding(.bottom, Spacing.m).accessibilityLabel("有新内容，点击回到底部")
+                            .focused($focusedControl, equals: "latest-new")
+                    .keyboardShortcut(focusedControl == "latest-new" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
                     }
                 }
-                .onChange(of: store.messages.count) { _, _ in
-                    if store.following { scrollToBottom(proxy) }
+                .onChange(of: state.rows.map(\.id)) { _, _ in if !restore(proxy), !hasMore && !loading { follow(proxy) } }
+                .onChange(of: hasMore) { _, more in if !more { follow(proxy) } }
+                .onChange(of: loading) { _, value in if !value { follow(proxy) } }
+                .onChange(of: query) { _, value in
+                    if value.isEmpty, !restore(proxy) { follow(proxy) }
                 }
-                .onChange(of: store.search) { _, _ in
-                    // 过滤后的列表是另一种重排：中间态不得判成「贴底」。
-                    store.beginLayoutChange()
-                }
-                .onChange(of: store.following) { _, following in
-                    if following { scrollToBottom(proxy) }
-                }
+                .onChange(of: state.following) { _, following in if following { follow(proxy) } }
                 .onAppear {
-                    // 打开即到底：首屏消息常在一次批量里落地，onChange 可能先于
-                    // 布局；这里按当前状态补一次并靠二次纠正收敛。
-                    if store.following { scrollToBottom(proxy) }
+                    if loading || hasMore { store.beginInitialLayout() }
+                    follow(proxy)
                 }
-                .onPreferenceChange(SessionScrollHeightKey.self) { height in
-                    store.updateHeights(visibleHeight: height,
-                                        contentHeight: store.contentHeight)
+                .onPreferenceChange(SessionRowFramesKey.self) { frames in
+                    if let first = frames.filter({ $0.value.maxY > 0 && $0.value.minY < store.visibleHeight }).min(by: { $0.value.minY < $1.value.minY }) {
+                        store.readingAnchor = first.key
+                    }
                 }
+                .onPreferenceChange(SessionScrollHeightKey.self) { height in store.updateHeights(visibleHeight: height, contentHeight: store.contentHeight) }
                 .onPreferenceChange(SessionContentHeightKey.self) { height in
                     let grew = height > store.contentHeight + 0.5
-                    store.updateHeights(visibleHeight: store.visibleHeight,
-                                        contentHeight: height)
-                    // 内容增长（含同一消息的流式更新）且仍在跟随 → 跟到最新；
-                    // 上滚离开底部后 following=false，绝不再拉回。
-                    if grew, store.following, height > 0 { scrollToBottom(proxy) }
+                    store.updateHeights(visibleHeight: store.visibleHeight, contentHeight: height)
+                    if grew && height > 0 { follow(proxy) }
                 }
+            }
+        }
+        .background {
+            if SessionReaderPerformance.shared.enabled {
+                SessionReaderRenderProbe(readerID: store.performanceReaderID, rowIDs: state.rows.map(\.id),
+                                         collapsed: state.collapsed, query: query)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
+        .background(SessionMessageParentWindow(presenter: detailPresenter).allowsHitTesting(false).accessibilityHidden(true))
+        .onReceive(store.$selectedRunID.removeDuplicates()) { _ in detailPresenter.dismiss(restoring: false) }
+        .onReceive(store.$saveFilter.removeDuplicates()) { _ in detailPresenter.dismiss(restoring: false) }
+        .onDisappear { detailPresenter.dismiss(restoring: false) }
+    }
+
+    private func showDetail(_ row: SessionMessageRowData, raw: Bool, proxy: ScrollViewProxy) {
+        store.cancelPosition()
+        let run = store.selectedRunID, filter = store.saveFilter, query = self.query
+        let anchor = store.readingAnchor
+        let following = state.following
+        detailPresenter.present(row: row, openRaw: raw, size: detailSize) {
+            guard store.selectedRunID == run, store.saveFilter == filter, store.committedQuery == query,
+                  store.search.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            // The modeless parent stays usable. New scrolling/search intent takes precedence;
+            // an untouched parent already retains its exact offset and original message.
+            if following, state.following, query.isEmpty, !store.hasMore, !store.loading {
+                store.position(id: SessionReaderView.bottomID, bottom: true) { id, _ in proxy.scrollTo(id, anchor: .bottom) }
+            } else if store.readingAnchor == nil, let anchor,
+                      let row = state.rows.first(where: { $0.message.id == anchor }) {
+                store.position(id: row.id, bottom: false) { id, _ in proxy.scrollTo(id, anchor: .top) }
             }
         }
     }
 
-    /// 逐条展开/收起：收起会把内容高度骤减，macOS 滚动视图随即把视口甩到内容
-    /// 末尾（实测视口在顶部、中部时都会发生），应用本身并未发起滚动。用户不在
-    /// 跟随态（上滚翻阅）时按「该条顶部对齐」补一次定位，把视口留在正在看的那条
-    /// 消息上；贴底跟随时不动，仍保持最新。
-    private func toggleCollapsed(_ message: SessionMessage, proxy: ScrollViewProxy) {
-        let collapsing = !store.collapsed.contains(message.listID)
-        let keepPlace = collapsing && !store.following
-        store.toggleCollapsed(message.listID)
-        guard keepPlace else { return }
-        Task { @MainActor in
-            await Task.yield()
-            proxy.scrollTo(message.listID, anchor: .top)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-            proxy.scrollTo(message.listID, anchor: .top)
-            try? await Task.sleep(nanoseconds: 220_000_000)
-            proxy.scrollTo(message.listID, anchor: .top)
-        }
+    private func toggle(_ row: SessionMessageRowData, proxy: ScrollViewProxy) {
+        let keepPlace = !state.collapsed.contains(row.id) && !state.following
+        store.toggleCollapsed(row.id)
+        if keepPlace { store.position(id: row.id, bottom: false) { id, _ in proxy.scrollTo(id, anchor: .top) } }
     }
 
-    /// 布局落地后滚到最新：立即 scrollTo 会按 LazyVStack 的估算高度落位（实测
-    /// 停在第一条 prompt），故做两次短延迟纠正；期间 settling 标记避免把纠正
-    /// 过程的偏移误判成「离开底部」。
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        let token = store.willAutoScroll()
-        Task { @MainActor in
-            await Task.yield()
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
-            try? await Task.sleep(nanoseconds: 220_000_000)
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
-            store.didAutoScroll(token)
-        }
+    private func restore(_ proxy: ScrollViewProxy) -> Bool {
+        guard query.isEmpty, let anchor = restoreAnchor else { return false }
+        guard let row = state.rows.first(where: { $0.message.id == anchor }) else { return true }
+        store.position(id: row.id, bottom: false) { id, _ in proxy.scrollTo(id, anchor: .top) }
+        store.consumeRestoreAnchor()
+        return true
     }
+
+    private func follow(_ proxy: ScrollViewProxy) {
+        guard state.following, query.isEmpty, !hasMore, !loading else { return }
+        store.position(id: SessionReaderView.bottomID, bottom: true) { id, _ in proxy.scrollTo(id, anchor: .bottom) }
+    }
+}
+
+private struct SessionRowFramesKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
 }
 
 // MARK: - 滚动位置偏好
@@ -1051,22 +718,34 @@ struct SessionReaderView: View {
 /// 边界变化，回传真实「距底距离」。SwiftUI 的 GeometryReader 偏好只在内容重新
 /// 布局时回传，macOS 上滚动不触发重新布局，拿不到新位置。
 private struct ScrollMetricsObserver: NSViewRepresentable {
+    let readerID: String
     /// 距底距离（pt）：0 = 贴底。
     let onDistance: (CGFloat) -> Void
+    let onManualScroll: () -> Void
 
     func makeNSView(context: Context) -> ObserverView {
         let view = ObserverView()
+        view.readerID = readerID
         view.onDistance = onDistance
+        view.onManualScroll = onManualScroll
         return view
     }
 
     func updateNSView(_ nsView: ObserverView, context: Context) {
+        nsView.readerID = readerID
         nsView.onDistance = onDistance
+        nsView.onManualScroll = onManualScroll
         nsView.ensureAttached()
     }
 
     final class ObserverView: NSView {
+        var readerID = ""
+        private var lastBoundsOrigin: NSPoint?
+        private var diagnosticDrawCount = 0
+        private var diagnosticConfirmedAt: UInt64?
         var onDistance: ((CGFloat) -> Void)?
+        var onManualScroll: (() -> Void)?
+        private var scrollMonitor: Any?
         private var tokens: [NSObjectProtocol] = []
 
         override func viewDidMoveToWindow() {
@@ -1085,11 +764,32 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
             tokens.forEach(NotificationCenter.default.removeObserver)
             tokens = []
             guard let scrollView = enclosingScrollView else { return }
+            if scrollMonitor == nil {
+                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .leftMouseDragged, .keyDown]) { [weak self] event in
+                    guard let self, event.window === self.window, let scroll = self.enclosingScrollView else { return event }
+                    let manual: Bool
+                    switch event.type {
+                    case .scrollWheel:
+                        manual = scroll.bounds.contains(scroll.convert(event.locationInWindow, from: nil))
+                    case .leftMouseDown, .leftMouseDragged:
+                        manual = [scroll.verticalScroller, scroll.horizontalScroller].compactMap { $0 }.contains {
+                            !$0.isHidden && $0.bounds.contains($0.convert(event.locationInWindow, from: nil))
+                        }
+                    case .keyDown:
+                        let readerFocused = (event.window?.firstResponder as? NSView)?.isDescendant(of: scroll) == true
+                        manual = readerFocused && [115, 116, 119, 121, 125, 126].contains(Int(event.keyCode))
+                    default: manual = false
+                    }
+                    if manual { self.onManualScroll?() }
+                    return event
+                }
+            }
             let clip = scrollView.contentView
             clip.postsBoundsChangedNotifications = true
             clip.postsFrameChangedNotifications = true
-            let handler: (Notification) -> Void = { [weak self] _ in
-                self?.report()
+            lastBoundsOrigin = clip.bounds.origin
+            let handler: (Notification) -> Void = { [weak self] notification in
+                self?.report(scrollBoundsChanged: notification.name == NSView.boundsDidChangeNotification)
             }
             tokens.append(NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: clip,
@@ -1105,7 +805,7 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
             report()
         }
 
-        private func report() {
+        private func report(scrollBoundsChanged: Bool = false) {
             guard let scrollView = enclosingScrollView else { return }
             let clip = scrollView.contentView
             let documentHeight = scrollView.documentView?.frame.height ?? 0
@@ -1113,9 +813,52 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
             let offset = clip.bounds.origin.y
             let maxOffset = max(0, documentHeight - visibleHeight)
             onDistance?(max(0, maxOffset - offset))
+            if SessionReaderPerformance.shared.enabled, scrollBoundsChanged {
+                let origin = clip.bounds.origin
+                let changed = lastBoundsOrigin != nil && lastBoundsOrigin != origin
+                lastBoundsOrigin = origin
+                if changed, SessionReaderPerformance.shared.confirmScroll(readerID: readerID) {
+                    if diagnosticConfirmedAt == nil { diagnosticConfirmedAt = DispatchTime.now().uptimeNanoseconds }
+                    recordScrollSurface("scroll_surface_confirm", dirtyRect: nil)
+                    // Only a real native clip change may request the next content draw.
+                    setNeedsDisplay(visibleRect)
+                }
+            }
+        }
+
+        private func recordScrollSurface(_ kind: String, dirtyRect: NSRect?) {
+            guard SessionReaderPerformance.shared.enabled else { return }
+            func coordinates(_ rect: NSRect) -> [CGFloat] { [rect.minX, rect.minY, rect.width, rect.height] }
+            var fields: [String: Any] = [
+                "reader_id": readerID, "observer_class": String(describing: type(of: self)),
+                "observer_frame": coordinates(frame), "observer_visible_rect": coordinates(visibleRect),
+                "window_visible": window?.isVisible ?? false, "has_window": window != nil,
+                "observer_visible": !isHiddenOrHasHiddenAncestor && !visibleRect.isEmpty && window?.isVisible == true,
+                "observer_hidden": isHiddenOrHasHiddenAncestor, "observer_needs_display": needsDisplay,
+                "observer_wants_layer": wantsLayer, "draw_count": diagnosticDrawCount,
+            ]
+            if let clip = enclosingScrollView?.contentView { fields["clip_bounds"] = coordinates(clip.bounds) }
+            if let dirtyRect { fields["dirty_rect"] = coordinates(dirtyRect) }
+            if let diagnosticConfirmedAt {
+                fields["confirm_to_current_ms"] = Double(DispatchTime.now().uptimeNanoseconds - diagnosticConfirmedAt) / 1_000_000
+            }
+            SessionReaderPerformance.shared.record(kind, fields)
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            if SessionReaderPerformance.shared.enabled {
+                diagnosticDrawCount += 1
+                if diagnosticConfirmedAt != nil {
+                    recordScrollSurface("scroll_surface_draw", dirtyRect: dirtyRect)
+                    diagnosticConfirmedAt = nil
+                }
+            }
+            SessionReaderPerformance.shared.didDraw(readerID: readerID, surface: .scroll)
         }
 
         deinit {
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             tokens.forEach(NotificationCenter.default.removeObserver)
         }
     }
@@ -1141,6 +884,7 @@ private struct SessionScrollHeightKey: PreferenceKey {
 /// 会话读取失败横幅（§6）：已有消息时保留内容 + 标注「可能已过期」+ 重试。
 /// 重试为系统 Button（macOS 键位循环可聚焦），带 accessibilityLabel。
 struct SessionBanner: View {
+    @FocusState private var focusedControl: String?
     let text: String
     let stale: Bool
     var retry: Bool = true
@@ -1153,7 +897,8 @@ struct SessionBanner: View {
                 .accessibilityHidden(true)
             Text(text)
                 .font(.kpSmall)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
             if stale {
                 Text("可能已过期")
                     .font(.kpSmall)
@@ -1164,6 +909,8 @@ struct SessionBanner: View {
                 Button("重试", action: onRetry)
                     .font(.kpSmall)
                     .accessibilityLabel("重试读取会话")
+                    .focused($focusedControl, equals: "retry")
+                    .keyboardShortcut(focusedControl == "retry" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
             }
         }
         .padding(.horizontal, Spacing.l)
@@ -1177,153 +924,237 @@ struct SessionBanner: View {
 // MARK: - 单条消息
 
 struct SessionMessageRow: View {
-    let message: SessionMessage
+    @FocusState private var focusedControl: String?
+    let row: SessionMessageRowData
     let query: String
     let collapsed: Bool
     let onToggle: () -> Void
-
-    private var icon: String {
-        switch message.type {
-        case "user": return "person.crop.circle"
-        case "assistant": return "sparkles"
-        case "tool_call": return "wrench.and.screwdriver"
-        case "tool_result": return "square.stack.3d.up"
-        case "command_output": return "terminal"
-        case "system": return "gearshape.circle"
-        default: return "bubble.left.and.bubble.right"
-        }
-    }
-
-    private var color: Color {
-        switch message.type {
-        case "user": return .blue
-        case "assistant": return .green
-        case "tool_call", "tool_result": return .orange
-        case "command_output": return .purple
-        case "system": return .secondary
-        default: return .secondary
-        }
-    }
+    let onDetail: () -> Void
+    let onRaw: () -> Void
+    private var message: SessionMessage { row.message }
+    private var presentation: SessionMessagePresentation { row.presentation }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: Spacing.s) {
-                    Label(Labels.messageType(message.type), systemImage: icon)
-                        .font(.kpSmall)
-                        .foregroundStyle(color)
-                        .accessibilityLabel("消息类型：\(Labels.messageType(message.type))")
-                    Text(TimeFormat.short(message.sourceAt))
-                        .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    // §4.5：工具调用/结果与过长正文逐条默认折叠，各自可展开。
-                    if message.hasCollapsibleContent {
-                        Button(collapsed ? "展开" : "收起", action: onToggle)
-                            .font(.kpSmall)
-                            .buttonStyle(.borderless)
-                            .help(collapsed ? "展开本条完整内容" : "收起本条内容")
-                            .accessibilityLabel(collapsed
-                                                ? "展开本条消息完整内容"
-                                                : "收起本条消息")
-                    }
-                    Button {
-                        Workspace.copy(message.content)
-                    } label: {
-                        Label("复制", systemImage: "doc.on.doc")
-                            .font(.kpSmall)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("复制本条消息")
-                    .accessibilityLabel("复制本条消息")
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.s) {
+                Text(Labels.messageType(message.type)).font(.kpSmall).foregroundStyle(.secondary)
+                Text(TimeFormat.short(message.sourceAt)).font(.kpSmall).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if presentation.requiresDetail {
+                    Button("查看全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                        .focused($focusedControl, equals: "detail")
+                    .keyboardShortcut(focusedControl == "detail" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                } else if presentation.collapsible {
+                    Button(collapsed ? "展开" : "收起", action: onToggle).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                        .accessibilityLabel(collapsed ? "展开本条消息" : "收起本条消息")
+                        .focused($focusedControl, equals: "toggle")
+                    .keyboardShortcut(focusedControl == "toggle" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
                 }
-                contentText
-                if let tool = message.tool, !collapsed {
-                    toolDetail(tool)
+                Button("复制原文") { Workspace.copy(message.content) }.font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                    .accessibilityLabel("复制本条消息原文")
+                    .focused($focusedControl, equals: "copy")
+                    .keyboardShortcut(focusedControl == "copy" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            }
+            if presentation.isTool {
+                Text(presentation.toolName ?? "工具结果").font(.kpBody).fontWeight(.semibold)
+                if let summary = presentation.commandSummary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                }
+                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.secondary : Color.orange } ?? .secondary)
+                if presentation.rawResult {
+                    Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            if let match = row.match {
+                HStack {
+                    Text("\(match.field)命中").font(.kpSmall).foregroundStyle(.secondary)
+                    Button("定位全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                        .focused($focusedControl, equals: "locate")
+                    .keyboardShortcut(focusedControl == "locate" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                }
+                messageText(match.snippet)
+            } else if presentation.isTool && !collapsed && !presentation.requiresDetail {
+                toolSections
+            } else {
+                messageText(collapsed || presentation.requiresDetail ? presentation.preview : presentation.body)
+                    .lineLimit(collapsed || presentation.requiresDetail ? 4 : nil)
+            }
+            if presentation.hasOtherContent {
+                HStack {
+                    Text("另有原始内容").font(.kpSmall).foregroundStyle(.secondary)
+                    Button("查看原文", action: onRaw).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                    .focused($focusedControl, equals: "raw")
+                    .keyboardShortcut(focusedControl == "raw" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                }
+            } else if presentation.isTool || message.type == "system" {
+                Button("查看原文", action: onRaw).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                    .focused($focusedControl, equals: "raw")
+                    .keyboardShortcut(focusedControl == "raw" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            }
         }
-        .padding(.vertical, 4)
-        // 冻结度量（ui-spec §3）：列表行高 ≥40pt（短消息行同样满足下限）。
         .frame(minHeight: 40, alignment: .top)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(Labels.messageType(message.type))，\(message.content ?? "")")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(Labels.messageType(message.type))，\(TimeFormat.short(message.sourceAt))，\(presentation.isTool ? presentation.statusText : "")，\(collapsed ? "已折叠" : "已展开")，\(row.match.map { $0.field + "命中" } ?? "")，\(presentation.accessibilitySummary)")
     }
 
-    /// 预览行数：长正文折叠时只显示前 N 行（§4.5）。
-    static let previewLineLimit = 4
-
-    /// 折叠时正文是否截断为预览：搜索中放开，保证命中的行可见。
-    private var truncatesPreview: Bool {
-        collapsed && message.isLongContent && query.isEmpty
+    private func messageText(_ text: String) -> some View {
+        Text(highlighted(text, query: query))
+            .font(message.isMonospaced ? .system(size: 12, design: .monospaced) : .kpBody)
+            .lineSpacing(3).textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 正文 13pt；代码/终端/工具输出等宽 12pt（§4.4）。
-    ///
-    /// T1（ui-spec §4.5「折叠的长正文只排版可见预览」）：折叠且不搜索时只把
-    /// 预览行交给 `Text`——长工具输出不再为整篇原文构建高亮 `AttributedString`
-    /// 再交给 `lineLimit` 裁掉，排版成本与可见内容成正比。完整原文仍可复制：
-    /// 复制按钮取 `message.content`，与行内展示无关。
-    @ViewBuilder
-    private var contentText: some View {
-        let text = truncatesPreview ? previewText : (message.content ?? "")
-        if message.isMonospaced {
-            Text(AttributedString.highlighted(text, query: query))
-                .font(.system(size: 12, design: .monospaced))
-                .lineLimit(truncatesPreview ? Self.previewLineLimit : nil)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            Text(AttributedString.highlighted(text, query: query))
-                .font(.kpBody)
-                .lineLimit(truncatesPreview ? Self.previewLineLimit : nil)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var toolSections: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if let input = presentation.input, !input.isEmpty { section("输入", input) }
+            if let output = presentation.stdout, !output.isEmpty { section("标准输出", output) }
+            else if presentation.rawResult { section("原始工具结果", presentation.body) }
+            if let error = presentation.stderr, !error.isEmpty { section("标准错误", error) }
         }
     }
 
-    /// 预览只取前 `previewLineLimit` 行（每条行尾保留换行以维持既有分行观感）。
-    private var previewText: String {
-        let text = message.content ?? ""
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.count > Self.previewLineLimit else { return text }
-        return lines.prefix(Self.previewLineLimit).joined(separator: "\n")
+    private func section(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack {
+                Text(title).font(.kpSmall).foregroundStyle(.secondary)
+                Button("复制\(title)") { Workspace.copy(text) }.font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                    .focused($focusedControl, equals: "copy-section:\(title)")
+                    .keyboardShortcut(focusedControl == "copy-section:\(title)" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            }
+            messageText(text)
+        }
     }
 
-    private func toolDetail(_ tool: SessionTool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let name = tool.name {
-                Text("工具：\(name)")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+    /// 在原字符串寻找 range，再转换到同一 AttributedString；不经 lowercase 索引。
+    private func highlighted(_ text: String, query: String) -> AttributedString {
+        var result = AttributedString(text)
+        guard !query.isEmpty else { return result }
+        var start = text.startIndex
+        while start < text.endIndex, let range = text.range(of: query, options: [.caseInsensitive], range: start..<text.endIndex) {
+            guard !range.isEmpty else { break }
+            if let lower = AttributedString.Index(range.lowerBound, within: result), let upper = AttributedString.Index(range.upperBound, within: result) {
+                result[lower..<upper].backgroundColor = .yellow.opacity(0.35)
             }
-            if let input = tool.input, !input.isEmpty {
-                monoBlock("输入", input)
-            }
-            if let output = tool.output, !output.isEmpty {
-                monoBlock("输出", output)
-            }
-            if let code = tool.exitCode {
-                Text("退出码 \(code)")
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+            start = range.upperBound
+        }
+        return result
+    }
+}
+
+/// Local diagnostics follows real applied reader state; it never publishes message state.
+private struct SessionReaderRenderProbe: NSViewRepresentable {
+    let readerID: String
+    let rowIDs: [String]
+    let collapsed: Set<String>
+    let query: String
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ view: Probe, context: Context) {
+        let changed = view.readerID != readerID || view.rowIDs != rowIDs || view.collapsed != collapsed || view.query != query
+        view.readerID = readerID
+        view.rowIDs = rowIDs
+        view.collapsed = collapsed
+        view.query = query
+        if changed, SessionReaderPerformance.shared.confirmList(readerID: readerID, rowIDs: rowIDs, collapsed: collapsed) {
+            view.setNeedsDisplay(view.visibleRect)
+        }
+    }
+    final class Probe: NSView {
+        var readerID = ""
+        var rowIDs: [String] = []
+        var collapsed: Set<String> = []
+        var query = ""
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            SessionReaderPerformance.shared.didDraw(readerID: readerID, surface: .list)
+        }
+    }
+}
+
+/// Measures the search field's own applied input and next draw, independently of the
+/// debounced full-history search. Input text stays in memory and is never logged.
+private struct SessionSearchInputProbe: NSViewRepresentable {
+    let readerID: String
+    let input: String
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ view: Probe, context: Context) { view.apply(readerID: readerID, input: input) }
+    final class Probe: NSView {
+        private var readerID = ""
+        private var input: String?
+        private var generation = 0
+        private weak var field: NSTextField?
+        func apply(readerID: String, input: String) {
+            let changed = self.readerID != readerID || self.input == nil
+                || (self.input! as NSString).compare(input, options: .literal) != .orderedSame
+            guard changed else { return }
+            self.readerID = readerID
+            self.input = input
+            generation += 1
+            confirmAppliedInput()
+        }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); confirmAppliedInput() }
+        override func layout() { super.layout(); confirmAppliedInput() }
+        private func confirmAppliedInput() {
+            guard SessionReaderPerformance.shared.enabled, input != nil else { return }
+            let batch = generation
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == batch, let expected = self.input else { return }
+                guard self.window != nil else { self.recordConfirmationFailure("no_window"); return }
+                if self.field?.window !== self.window { self.field = nil }
+                if self.field == nil { self.field = self.findField() }
+                guard let field = self.field else { self.recordConfirmationFailure("no_text_field"); return }
+                let actual = field.currentEditor()?.string ?? field.stringValue
+                guard (actual as NSString).compare(expected, options: .literal) == .orderedSame else {
+                    self.recordConfirmationFailure("input_not_applied")
+                    return
+                }
+                if SessionReaderPerformance.shared.confirmSearchInput(readerID: self.readerID, input: actual) {
+                    self.setNeedsDisplay(self.visibleRect)
+                } else { self.recordConfirmationFailure("no_matching_pending") }
             }
         }
-        .padding(Spacing.s)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 6))
-    }
+        private func recordConfirmationFailure(_ reason: String) {
+            guard SessionReaderPerformance.shared.enabled else { return }
+            func fields(in view: NSView) -> [NSTextField] {
+                if let field = view as? NSTextField { return [field] }
+                return view.subviews.flatMap { fields(in: $0) }
+            }
+            var ancestor = superview
+            var candidates: [NSTextField] = []
+            while let view = ancestor { candidates = fields(in: view); ancestor = view.superview }
+            let firstResponder = window?.firstResponder
+            SessionReaderPerformance.shared.record("search_input_confirmation_missing", [
+                "reader_id": readerID, "reason": reason,
+                "first_responder_class": firstResponder.map { String(describing: type(of: $0)) } ?? "none",
+                "candidate_count": candidates.count,
+                "candidates": candidates.map { ["class": String(describing: type(of: $0)),
+                                                 "placeholder_matches": $0.placeholderString == "搜索消息内容",
+                                                 "label_matches": $0.accessibilityLabel() == "搜索消息内容"] as [String: Any] },
+                "chosen_field_class": field.map { String(describing: type(of: $0)) } ?? "none",
+                "editor_class": field?.currentEditor().map { String(describing: type(of: $0)) } ?? "none",
+                "has_window": window != nil,
+            ])
+        }
 
-    private func monoBlock(_ label: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.kpSmall)
-                .foregroundStyle(.secondary)
-            Text(text)
-                .font(.system(size: 12, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        private func findField() -> NSTextField? {
+            func fields(in view: NSView) -> [NSTextField] {
+                if let field = view as? NSTextField { return [field] }
+                return view.subviews.flatMap { fields(in: $0) }
+            }
+            var ancestor = superview
+            while let view = ancestor {
+                let candidates = fields(in: view)
+                if let field = candidates.first(where: {
+                    $0.placeholderString == "搜索消息内容" || $0.accessibilityLabel() == "搜索消息内容"
+                }) { return field }
+                if candidates.count == 1 { return candidates[0] }
+                ancestor = view.superview
+            }
+            return nil
+        }
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            SessionReaderPerformance.shared.didDraw(readerID: readerID, surface: .searchInput)
         }
     }
 }

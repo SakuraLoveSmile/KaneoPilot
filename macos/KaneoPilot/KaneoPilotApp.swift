@@ -6,6 +6,19 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
     private var windowCloseObserver: NSObjectProtocol?
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppRuntime.shared.start()
+        // Explicit local acceptance override also defeats restored/ideal window sizes.
+        // Production launch has no override and retains normal macOS restoration.
+        if let size = ProcessInfo.processInfo.environment["KANPILOT_WINDOW_SIZE"],
+           ["900x600", "1180x760", "1440x900"].contains(size) {
+            let dimensions = size.split(separator: "x").compactMap { Double($0) }
+            DispatchQueue.main.async {
+                guard let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain && $0.isVisible }) else { return }
+                var frame = window.frame
+                frame.origin.y += frame.height - dimensions[1]
+                frame.size = NSSize(width: dimensions[0], height: dimensions[1])
+                window.setFrame(frame, display: true)
+            }
+        }
         windowCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { notification in
             guard let window = notification.object as? NSWindow, window.canBecomeMain else { return }
             Task { @MainActor in

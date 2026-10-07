@@ -72,6 +72,7 @@ struct SessionRow: View {
     let session: SessionInfo
     @EnvironmentObject private var model: AppViewModel
     @State private var confirmingTrash = false
+    @State private var confirmingForcePurge = false
 
     private var stateColor: Color {
         switch session.state {
@@ -111,6 +112,12 @@ struct SessionRow: View {
                 .foregroundStyle(.secondary)
             // §4.5 v2：行尾「…」菜单（与右键菜单同动作），入口可见。
             Menu {
+                if session.canForcePurge {
+                    Button("强制删除残留会话", role: .destructive) {
+                        confirmingForcePurge = true
+                    }
+                    .disabled(model.busy)
+                }
                 if session.canTrash {
                     Button {
                         confirmingTrash = true
@@ -143,6 +150,12 @@ struct SessionRow: View {
         .accessibilityLabel("\(model.taskTitle(for: session.taskId))，\(Labels.sessionState(session.state))，"
                             + "更新于 \(TimeFormat.short(session.updatedAt))")
         .contextMenu {
+            if session.canForcePurge {
+                Button("强制删除残留会话", role: .destructive) {
+                    confirmingForcePurge = true
+                }
+                .disabled(model.busy)
+            }
             if session.canTrash {
                 Button {
                     confirmingTrash = true
@@ -167,6 +180,18 @@ struct SessionRow: View {
         } message: {
             Text("仅移入调度台会话回收站：保留任务、执行记录与工作目录，"
                  + "不停止执行进程，可随时恢复。")
+        }
+        .confirmationDialog("强制删除残留会话？", isPresented: $confirmingForcePurge,
+                            titleVisibility: .visible) {
+            Button("强制删除", role: .destructive) {
+                if let taskID = session.taskId, let runID = session.runId {
+                    Task { await model.forcePurgeSession(taskID: taskID, runID: runID,
+                                                       saveState: session.saveState ?? "active") }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此轮次没有实际会话记录。将永久从调度台列表移除，保留任务、历史与文件；操作不可恢复。若已开始运行或出现会话记录，核心会拒绝删除。")
         }
     }
 }

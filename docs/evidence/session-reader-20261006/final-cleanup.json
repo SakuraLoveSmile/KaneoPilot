@@ -1,0 +1,8 @@
+{
+  "owned_preview_processes_stopped": true,
+  "temporary_keyboard_navigation_restored": "off",
+  "task_builds_and_raw_traces_removed": true,
+  "source_changes_and_dist_package_preserved": true,
+  "production_app_and_data_replaced": false,
+  "final_package_sha256_verified": true
+}

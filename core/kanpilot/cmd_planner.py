@@ -92,7 +92,7 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
 
     至少一项；每组必须是含 planner_model/reasoning_effort 的完整对象；
     default_method ∈ DEFAULT_METHODS；backend ∈ PLANNER_BACKENDS；pi_desktop
-    经分支校验（五字段 + permission_mode=ask）。校验失败 → bad_request（中文
+    经分支校验（五字段 + permission_mode=auto）。校验失败 → bad_request（中文
     原因），不改旧值。Plus 分支不接受 spec_plan——生效方式为 spec_plan 时明确
     失败并提示先改 default_method，不静默改写用户选择。
     """

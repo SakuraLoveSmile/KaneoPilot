@@ -139,6 +139,50 @@ def cmd_set_priority(ctx, payload: dict) -> dict:
         }
 
 
+def cmd_cancel_request(ctx, payload: dict) -> dict:
+    """Cancel an unclaimed plan while retaining its frozen inputs and history."""
+    conn, now = ctx.conn, ctx.now_iso
+    with db.write_txn(conn):
+        request = db.get_request(conn, payload["request_id"])
+        if request is None:
+            raise util.KanpilotError("not_found", "规划请求不存在")
+        if request["task_id"] != payload["task_id"]:
+            raise util.KanpilotError("conflict", "规划请求与任务不匹配，请刷新后重试")
+        task = db.require_task(conn, payload["task_id"])
+        if db.task_is_purged(task):
+            raise util.KanpilotError("conflict", "任务已永久从列表移除，不能终止请求")
+        if request["kind"] != "plan":
+            raise util.KanpilotError("conflict", "仅已排队的规划请求允许手动终止")
+        result = util.jload(request["result_json"]) or {}
+        duplicate = (request["status"] == "cancelled"
+                     and isinstance(result, dict)
+                     and result.get("reason") == "user_cancelled")
+        if not duplicate:
+            # Read and write under BEGIN IMMEDIATE, just like claim: whichever
+            # wins owns the state transition. Never stop a claimed executor.
+            if request["status"] != "queued":
+                raise util.KanpilotError(
+                    "conflict", "规划请求已被领取或已结束，不能终止排队；请刷新查看当前状态",
+                )
+            db.update_request(conn, request["request_id"], now,
+                              status="cancelled", finished_at=now,
+                              result_json={"outcome": "cancelled", "reason": "user_cancelled"})
+            if core.automation_of(task):
+                core.update_automation(conn, task, now, plan_wanted=False)
+                task = db.require_task(conn, task["task_id"])
+            if task["status"] == "needs_plan":
+                core.block_task(conn, task, now, "已手动终止排队规划",
+                                "plan_cancelled", "user", stage="plan")
+            db.add_event(conn, now, "request_cancelled", task_id=task["task_id"],
+                         request_id=request["request_id"], actor="user",
+                         detail={"reason": "user_cancelled", "kind": "plan"})
+        return {
+            "ok": True, "cancelled": True, "deduplicated": duplicate,
+            "request": derive.request_view(db.get_request(conn, request["request_id"]), ctx.now),
+            "task": derive.task_summary(conn, db.require_task(conn, task["task_id"]), ctx.now),
+        }
+
+
 def cmd_set_paused(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     stage, paused = payload["stage"], payload["paused"]

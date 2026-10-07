@@ -13,6 +13,9 @@ $KANPILOT_FAKE_STATE（默认 $TMPDIR/kanpilot-fake-state.json），
 删除该文件即复位罐头数据。
 """
 import json
+import hashlib
+import time
+import copy
 import os
 import sys
 import tempfile
@@ -1552,6 +1555,7 @@ SESSION_POLL_SECONDS = 2
 LONG_SESSION_TASK = os.environ.get("KANPILOT_FAKE_LONG_SESSION")
 LONG_SESSION_COUNT = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_COUNT") or 400)
 LONG_SESSION_BYTES = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_BYTES") or 4096)
+LONG_SESSION_SHAPE = os.environ.get("KANPILOT_FAKE_LONG_SESSION_SHAPE", "lines")
 
 
 def long_session_messages(count=None, output_bytes=None):
@@ -1564,7 +1568,7 @@ def long_session_messages(count=None, output_bytes=None):
     count = count or LONG_SESSION_COUNT
     output_bytes = output_bytes or LONG_SESSION_BYTES
     line = "0123456789abcdef tool output chunk payload\n"
-    long_output = line * max(1, output_bytes // len(line))
+    long_output = (line * (output_bytes // len(line) + 1))[:output_bytes]
     types = ["assistant", "tool_call", "tool_result", "command_output"]
     messages = []
     for seq in range(1, count + 1):
@@ -1579,9 +1583,14 @@ def long_session_messages(count=None, output_bytes=None):
                     "output": None, "exit_code": None}
         elif mtype in ("tool_result", "command_output"):
             content = long_output
+            if LONG_SESSION_SHAPE == "wrapped_json":
+                content = json.dumps({"content": [{"type": "text", "text": json.dumps({
+                    "command": "python3 scripts/step_%04d.py" % seq,
+                    "commandShellId": "shell-%04d" % seq,
+                    "stdout": long_output, "stderr": "", "exitCode": 0})}]})
             tool = {"name": "Bash",
                     "input": "python3 scripts/step_%04d.py" % seq,
-                    "output": long_output, "exit_code": 0}
+                    "output": content, "exit_code": 0}
         else:
             content = "步骤 %04d：已完成本段处理，继续下一段。" % seq
         messages.append({"id": "m%05d" % seq, "seq": seq, "type": mtype,
@@ -1732,6 +1741,39 @@ def base_sessions():
     }
 
 
+def seeded_sessions(state):
+    """Freeze source metadata/content once; only explicit scenario mutations change it."""
+    seeded = state.get("session_fixture_seed")
+    shape = [LONG_SESSION_TASK, LONG_SESSION_COUNT, LONG_SESSION_BYTES, LONG_SESSION_SHAPE]
+    if seeded is None or state.get("session_fixture_shape") != shape:
+        seeded = base_sessions()
+        if LONG_SESSION_TASK:
+            marker = LONG_SESSION_TASK + "/run-music-006-b2"
+            if marker in seeded:
+                seeded[marker]["messages"] = long_session_messages()
+                seeded[marker]["session"]["message_count"] = LONG_SESSION_COUNT
+                seeded[marker]["session"]["run_status"] = "running"
+        for marker, entry in seeded.items():
+            for message in entry["messages"]:
+                message["run_id"] = entry["session"]["run_id"]
+            if entry["connection"]["state"] != "unavailable":
+                entry["connection"] = {"state": "degraded", "detail": None,
+                                       "poll_seconds": SESSION_POLL_SECONDS}
+        state["session_fixture_seed"] = seeded
+        state["session_fixture_shape"] = shape
+        save_state(state)
+    return seeded
+
+
+def fixture_scenario(state, marker):
+    return (state.get("session_scenarios") or {}).get(marker) or {}
+
+
+def fixture_version(messages):
+    return hashlib.sha256(json.dumps(messages, ensure_ascii=False,
+                                    sort_keys=True).encode()).hexdigest()
+
+
 def session_read_fails(state, task_id):
     """开发期开关：KANPILOT_FAKE_SESSION_FLAKY 命中时首次读取失败一次。"""
     if not FLAKY_SESSION_TASK or FLAKY_SESSION_TASK != task_id:
@@ -1757,7 +1799,7 @@ def task_run_id(state, task_id):
 
 def latest_session_run(state, task_id):
     prefix = task_id + "/"
-    runs = [k[len(prefix):] for k in base_sessions() if k.startswith(prefix)]
+    runs = [k[len(prefix):] for k in seeded_sessions(state) if k.startswith(prefix)]
     if not runs:
         return None
     return sorted(runs)[-1]
@@ -1794,6 +1836,13 @@ def apply_session_save_state(state, session):
         "purged": [],
     }.get(save_state, ["trash-session"])
     session["read_only"] = save_state == "purged"
+    task = next((t for t in merged_tasks(state) if t["task_id"] == session.get("task_id")), {})
+    current_active = (session.get("run_id") == task_run_id(state, session.get("task_id"))
+                      and (task.get("status") in ("planning", "dispatching", "prepared", "submitting", "running", "in_review")
+                           or task.get("send_state") == "unknown"))
+    if session.get("run_status") == "running" or current_active:
+        session["allowed_actions"] = ["restore-session"] if save_state == "trashed" else []
+        session["blocked_reason"] = "仍在执行，不能移入回收站"
     return session
 
 
@@ -1807,13 +1856,38 @@ def long_session_override(task_id, messages):
 def resolve_session(state, task_id, run_id=None):
     """返回 (SessionInfo, connection, messages)；无记录 → pending。"""
     run_id = run_id or task_run_id(state, task_id) or latest_session_run(state, task_id)
-    entry = base_sessions().get("%s/%s" % (task_id, run_id)) if run_id else None
+    entry = seeded_sessions(state).get("%s/%s" % (task_id, run_id)) if run_id else None
     if entry is None:
         return (apply_session_save_state(state, pending_session(task_id, run_id)),
                 {"state": "ok", "detail": None, "poll_seconds": SESSION_POLL_SECONDS},
                 [])
-    messages = long_session_override(task_id, entry["messages"])
-    session = dict(entry["session"], message_count=len(messages))
+    messages = entry["messages"]
+    marker = "%s/%s" % (task_id, run_id)
+    scenario = fixture_scenario(state, marker)
+    if scenario.get("append") or scenario.get("revisions") or scenario.get("large_unknown"):
+        messages = copy.deepcopy(messages)
+        messages.extend(scenario.get("append") or [])
+        for message in messages:
+            change = (scenario.get("revisions") or {}).get(message["id"])
+            if change:
+                message.update(change)
+        if scenario.get("large_unknown"):
+            messages.append({"id": "unknown-large", "seq": max((m.get("seq", 0) for m in messages), default=0)+1,
+                             "run_id": run_id, "type": "tool_result", "revision": 1,
+                             "source_at": entry["session"]["updated_at"],
+                             "content": json.dumps({"unknown": "x" * (1024*1024)}),
+                             "tool": {"name": "unknown", "input": None,
+                                      "output": None, "exit_code": None}})
+    session = dict(entry["session"], message_count=len(messages), last_checked_at=iso(utcnow()))
+    if scenario.get("backend"):
+        session["backend"] = scenario["backend"]
+    if scenario.get("pending"):
+        session.update(state="pending", message_count=0)
+        messages = []
+    if scenario.get("updated_at"):
+        session["updated_at"] = scenario["updated_at"]
+    if scenario.get("round_status"):
+        session["run_status"] = scenario["round_status"]
     return (apply_session_save_state(state, session), entry["connection"], messages)
 
 
@@ -1836,11 +1910,11 @@ def cmd_list_sessions(state, payload):
         if task_id not in tasks:
             return fail("任务不存在：%s" % task_id, "not_found")
         prefix = task_id + "/"
-        runs = sorted(k[len(prefix):] for k in base_sessions() if k.startswith(prefix))
+        runs = sorted(k[len(prefix):] for k in seeded_sessions(state) if k.startswith(prefix))
         if runs:
             for run in runs:
                 sessions.append(apply_session_save_state(
-                    state, base_sessions()["%s/%s" % (task_id, run)]["session"]))
+                    state, seeded_sessions(state)["%s/%s" % (task_id, run)]["session"]))
         else:
             run = task_run_id(state, task_id)
             if run:
@@ -1849,7 +1923,7 @@ def cmd_list_sessions(state, payload):
         return {"sessions": [s for s in sessions if _match(s)]}
     # 缺省：全部可关联会话，active 任务优先
     rows = []
-    for key, entry in base_sessions().items():
+    for key, entry in seeded_sessions(state).items():
         session = apply_session_save_state(state, entry["session"])
         task_id = session["task_id"]
         task = next((t for t in merged_tasks(state) if t["task_id"] == task_id), None)
@@ -1859,7 +1933,7 @@ def cmd_list_sessions(state, payload):
         if task.get("save_state") != "active":
             continue
         marker = task.get("session_marker")
-        if not marker or marker in base_sessions():
+        if not marker or marker in seeded_sessions(state):
             continue
         rows.append((1, "", apply_session_save_state(
             state, pending_session(task["task_id"], marker.split("/", 1)[1]))))
@@ -1873,10 +1947,28 @@ def cmd_get_session(state, payload):
     if not task_id or not run_id:
         return fail("缺少必填字段 task_id/run_id", "bad_request")
     session, connection, _ = resolve_session(state, task_id, run_id)
-    return {"session": session, "connection": connection}
+    scenario = fixture_scenario(state, "%s/%s" % (task_id, run_id))
+    status = scenario.get("round_status") or session.get("run_status") or "unknown"
+    detail = {"backend": session.get("backend") or "pi", "run_status": status,
+              "worktree_path": os.path.join(os.environ.get("KANPILOT_REPOS_ROOT", "/tmp"), run_id),
+              "started_at": session.get("started_at"), "exit_code": 1 if status == "failed" else None,
+              "terminal": {"outcome": "failed" if status == "failed" else "completed",
+                           "reason": "model_unavailable" if status == "failed" else "completed"},
+              "detail": "隔离模型不可用" if status == "failed" else None,
+              "config": {"provider": "fixture", "model": "fixture-model", "reasoning_effort": "medium",
+                         "agent_preset": "default"}, "save_state": session.get("save_state"),
+              "turn_adopted": [{"from": "turn-old", "to": "turn-current",
+                                "code": "EMPTY_MODEL_RESPONSE", "at": session.get("updated_at")}]}
+    if status == "running":
+        detail["terminal"] = None
+    return {"session": session, "connection": connection, "round_detail": detail}
 
 
 def cmd_session_messages(state, payload):
+    request_log = os.environ.get("KANPILOT_FAKE_REQUEST_LOG")
+    if request_log:
+        with open(request_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
     task_id = payload.get("task_id")
     if not task_id:
         return fail("缺少必填字段 task_id", "bad_request")
@@ -1885,27 +1977,44 @@ def cmd_session_messages(state, payload):
     run_id = payload.get("run_id") or task_run_id(state, task_id) \
         or latest_session_run(state, task_id)
     session, connection, messages = resolve_session(state, task_id, run_id)
+    marker = "%s/%s" % (task_id, run_id)
+    scenario = fixture_scenario(state, marker)
+    delay = scenario.get("delay_ms", 0)
+    if delay:
+        time.sleep(min(float(delay)/1000, 5))
+    if "fallback_messages" in scenario:
+        fallback = scenario["fallback_messages"]
+        return {"session": session, "connection": {"state": "degraded", "detail": "隔离来源读取失败，返回旧快照", "poll_seconds": SESSION_POLL_SECONDS},
+                "messages": fallback, "next_cursor": "seq:4", "has_more": False, "source_version": None}
+    if scenario.get("read_error"):
+        return fail("隔离会话读取失败：" + str(scenario["read_error"]), "remote_unavailable")
     ordered = sorted(messages, key=lambda m: m.get("seq") or 0)
     cursor = payload.get("cursor")
     try:
-        after = int(cursor) if cursor not in (None, "") else 0
+        after = int(str(cursor).removeprefix("seq:")) if cursor not in (None, "") else 0
     except (TypeError, ValueError):
-        return fail("cursor 必须是消息 seq 整数", "bad_request")
-    limit = int(payload.get("limit") or 100)
-    page = [m for m in ordered if (m.get("seq") or 0) > after]
-    incremental = after > 0
-    if incremental and page and page[-1] is ordered[-1]:
-        # 增量读取时把最新消息升版一次：演练 id+revision 去重/更新
-        newest = dict(page[-1])
-        newest["revision"] = (newest.get("revision") or 1) + 1
-        newest["content"] = (newest.get("content") or "") + "（已修订）"
-        page = page[:-1] + [newest]
-    page = page[:limit]
-    has_more = len([m for m in ordered if (m.get("seq") or 0) > after]) > len(page)
-    next_cursor = str((page[-1].get("seq") or 0)) if page else (cursor or None)
+        return fail("cursor 必须是 seq:<n>", "bad_request")
+    limit = max(1, min(int(payload.get("limit") or 100), 1000))
+    version = hashlib.sha256(json.dumps({"messages": ordered, "run_status": session.get("run_status"),
+                                            "updated_at": session.get("updated_at")},
+                                           ensure_ascii=False, sort_keys=True).encode()).hexdigest() if session.get("state") == "associated" and connection.get("state") != "unavailable" and not connection.get("detail") else None
+    maximum = max((m.get("seq") or 0 for m in ordered), default=0)
+    unchanged = (cursor is not None and after >= maximum and version is not None
+                 and payload.get("source_version") == version and not payload.get("force_reload"))
+    if unchanged:
+        page, has_more = [], False
+    else:
+        # Explicit revision scenarios resend revised old IDs once per acknowledged version.
+        candidates = [m for m in ordered if (m.get("seq") or 0) > after]
+        if after and payload.get("source_version") != version:
+            changed = scenario.get("revisions") or {}
+            candidates = [m for m in ordered if m["id"] in changed or (m.get("seq") or 0) > after]
+        page = candidates[:limit]
+        has_more = len(candidates) > len(page)
+    next_cursor = "seq:%d" % max(after, max((m.get("seq") or 0 for m in page), default=0)) if page else cursor
     return {"session": session, "messages": page,
             "next_cursor": next_cursor, "has_more": has_more,
-            "connection": connection}
+            "source_version": version, "connection": connection}
 
 
 # ---------------------------------------------------------------- §5.15.2 save state
@@ -2136,6 +2245,9 @@ def _session_state_change(state, payload, target, event_kind):
     if current == target:
         return {"ok": True, "deduplicated": True, "task_id": tid,
                 "run_id": run_id, "save_state": target, "session": session}
+    action = {"active": "restore-session", "trashed": "trash-session", "purged": "purge-session"}[target]
+    if action not in (session.get("allowed_actions") or []):
+        return fail(session.get("blocked_reason") or "该会话操作不可用", "conflict")
     expected = payload.get("expected_save_state")
     if expected is not None and current != expected:
         return fail("会话保存状态冲突（期望 %s，实际为 %s）" % (expected, current),
@@ -2269,20 +2381,71 @@ def cmd_get_request(state, payload):
             "attention_state": attention, "payload": req.get("payload")}
 
 
+def fake_project_mappings(state):
+    mappings = state.get("project_mappings")
+    if mappings:
+        return mappings
+    return {
+        "version": 1,
+        "revision": 0,
+        "workspace_id": "ws-fake-001",
+        "items": {
+            pid: {
+                "project_name": name,
+                "repository": os.path.join(REPOS_ROOT, name),
+                "enabled": True,
+                "updated_at": past(days=10),
+            }
+            for name, pid in PROJECTS.items()
+        },
+    }
+
+
+def effective_fake_mapping(mappings, project_id):
+    item = (mappings.get("items") or {}).get(project_id)
+    if not item:
+        return {"project_name": "", "repository": None, "enabled": False,
+                "mapping_state": "unmapped", "repository_kind": None,
+                "blocked_reason": "尚未选择仓库"}
+    repository = item.get("repository") or None
+    enabled = bool(item.get("enabled", True))
+    if not repository:
+        state, kind, reason = "unmapped", None, "尚未选择仓库"
+    elif not enabled:
+        state, kind, reason = "disabled", "git", "已停用新规划"
+    else:
+        # FakeCore does not inspect real filesystem paths.
+        state, kind, reason = "available", "git", None
+    return {"project_name": item.get("project_name") or "", "repository": repository,
+            "enabled": enabled, "mapping_state": state,
+            "repository_kind": kind, "blocked_reason": reason}
+
+
 def cmd_fetch_todos(state, payload):
     """§5.22.1：只读枚举 To Do（含一个 selectable=false 与聚焦项）。"""
     items = []
+    mappings = fake_project_mappings(state)
     for t in merged_tasks(state):
         if t.get("kaneo_status") != "to-do" or t.get("save_state") != "active":
             continue
+        mapping = effective_fake_mapping(mappings, t.get("project_id"))
+        selectable = mapping["mapping_state"] == "available" and t["status"] == "needs_plan"
+        if mapping["mapping_state"] != "available":
+            blocked_reason = mapping["blocked_reason"]
+        elif t["status"] == "needs_plan":
+            blocked_reason = None
+        else:
+            blocked_reason = "本地已有任务（状态 %s），如需重新规划请先在任务详情确认" % t["status"]
         items.append({
             "task_id": t["task_id"], "title": t.get("title"),
             "project_id": t.get("project_id"), "project_name": t.get("project_name"),
             "requirements_sha256": t.get("requirements_sha256"),
             "source_sha256": t.get("source_sha256"),
             "kaneo_status": t.get("kaneo_status"),
-            "repository": "~/Documents/Code/Project/Personal Project/%s"
-                % (t.get("project_name") or ""),
+            "repository": mapping["repository"],
+            "mapping_state": mapping["mapping_state"],
+            "repository_kind": mapping["repository_kind"],
+            "mapping_project_id": t.get("project_id"),
             "local_status": {
                 "needs_plan": "待规划", "planning": "规划中", "ready": "已有计划",
             }.get(t["status"], t["status"]),
@@ -2292,18 +2455,24 @@ def cmd_fetch_todos(state, payload):
                  "name": "requirements.txt", "url": "https://kaneo.example.com/a.txt",
                  "media_type": "text/plain", "size": 1280},
             ] if t["task_id"] == "task-music-016" else [],
-            "selectable": t["status"] in ("needs_plan",),
-            "blocked_reason": None if t["status"] == "needs_plan"
-                else "本地已有任务（状态 %s），如需重新规划请先在任务详情确认" % t["status"],
+            "selectable": selectable,
+            "blocked_reason": blocked_reason,
         })
+    unmapped_id = "proj-unmapped"
+    unmapped_mapping = effective_fake_mapping(mappings, unmapped_id)
+    unmapped_available = unmapped_mapping["mapping_state"] == "available"
     items.append({
         "task_id": "todo-unmapped-001", "title": "未映射项目的 To Do（fake）",
-        "project_id": "proj-unmapped", "project_name": "Unmapped",
+        "project_id": unmapped_id,
+        "project_name": unmapped_mapping["project_name"] or "Unmapped",
         "requirements_sha256": sha("req-unmapped"), "source_sha256": sha("src-unmapped"),
-        "kaneo_status": "to-do", "repository": None, "local_status": None,
+        "kaneo_status": "to-do", "repository": unmapped_mapping["repository"],
+        "mapping_state": unmapped_mapping["mapping_state"],
+        "repository_kind": unmapped_mapping["repository_kind"],
+        "mapping_project_id": unmapped_id, "local_status": None,
         "local_save_state": None, "attachments": [],
-        "selectable": False,
-        "blocked_reason": "项目未在白名单/仓库映射中，无法规划",
+        "selectable": unmapped_available,
+        "blocked_reason": unmapped_mapping["blocked_reason"],
     })
     return {"fetched_at": iso(utcnow()), "items": items}
 
@@ -2453,36 +2622,23 @@ def cmd_start_plans(state, payload):
 
 
 def cmd_get_project_mappings(state, payload):
-    mappings = state.get("project_mappings")
-    if not mappings:
-        items = {}
-        for name, pid in PROJECTS.items():
-            items[pid] = {
-                "project_name": name,
-                "repository": os.path.join(REPOS_ROOT, name),
-                "enabled": True,
-                "updated_at": past(days=10),
-            }
-        mappings = {
-            "version": 1,
-            "revision": 0,
-            "workspace_id": "ws-fake-001",
-            "items": items,
-        }
+    mappings = fake_project_mappings(state)
     items_list = []
     for pid, item in (mappings.get("items") or {}).items():
+        effective = effective_fake_mapping(mappings, pid)
         items_list.append({
             "project_id": pid,
             "project_name": item.get("project_name", ""),
-            "repository": item.get("repository", ""),
+            "repository": effective["repository"] or "",
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
             "automation": item.get("automation") or automation_policy(pid == PROJECTS["Music"]),
             "automation_preflight": ([{"code": "origin_not_github", "message": "origin 不是 GitHub 仓库"},
                                       {"code": "review_backend_unsupported", "message": "Review 后端需为 Plus/Claude/Codex"}]
                                      if pid == PROJECTS["Feedback"] else []),
-            "mapping_state": "available",
-            "repository_kind": "git",
+            "mapping_state": effective["mapping_state"],
+            "repository_kind": effective["repository_kind"],
+            "blocked_reason": effective["blocked_reason"],
             "active_tasks_count": 0,
             "active_requests_count": 0,
         })
@@ -2525,7 +2681,9 @@ def cmd_set_project_mapping(state, payload):
     return {
         "revision": mappings["revision"],
         "project_id": pid,
-        "mapping_state": "ready" if not payload.get("unmap") else "unmapped",
+        "mapping_state": "unmapped" if payload.get("unmap") else
+            ("available" if payload.get("repository") and payload.get("enabled", True) else
+             "disabled" if payload.get("repository") else "unmapped"),
         "deduplicated": False,
     }
 
@@ -2630,7 +2788,37 @@ def planner_capabilities():
             "planner_methods": {"builtin": ready, "spec_plan": ready},
             "backends": {"codex": ready, "claude": ready, "pi_desktop": ready}}
 
+def cmd_session_control_status(state, payload):
+    marker = "%s/%s" % (payload.get("task_id"), payload.get("run_id"))
+    scenario = fixture_scenario(state, marker)
+    configured = scenario.get("control") or {}
+    if scenario.get("control_delay_ms"):
+        time.sleep(min(float(scenario["control_delay_ms"]) / 1000, 5))
+    supported = scenario.get("backend") == "pi_desktop"
+    return dict({"task_id": payload.get("task_id"), "run_id": payload.get("run_id"),
+                 "request_id": "fixture-plan-request", "backend": scenario.get("backend") or "pi",
+                 "state": "executor_lost" if supported else "unsupported",
+                 "detail": "规划进程已退出，尚未创建 Plus 会话" if supported else "该轮次不使用 Plus",
+                 "connected": supported, "session_id": None, "turn_id": None,
+                 "can_start": supported, "blocked_reason": None if supported else "非 Plus 轮次",
+                 "start_label": "请求开始"}, **configured)
+
+
+def cmd_session_request_start(state, payload):
+    status = cmd_session_control_status(state, payload)
+    if not status["can_start"] or payload.get("request_id") != status["request_id"]:
+        return fail("该轮次不能请求开始", "conflict")
+    marker = "%s/%s" % (payload.get("task_id"), payload.get("run_id"))
+    scenario = state.setdefault("session_scenarios", {}).setdefault(marker, {})
+    repeated = bool(scenario.get("control", {}).get("queued"))
+    scenario.setdefault("control", {}).update(state="not_started", detail="开始请求已排队，等待规划器领取", queued=True)
+    save_state(state)
+    return {"request_id": status["request_id"], "stage": "plan", "queued": True, "deduplicated": repeated}
+
+
 COMMANDS = {
+    "session-control-status": cmd_session_control_status,
+    "session-request-start": cmd_session_request_start,
     "get-planner-config": lambda s, p: fake_config(s, p, "planner"),
     "set-planner-config": lambda s, p: fake_config(s, p, "planner", True),
     "planner-capabilities": lambda s, p: planner_capabilities(),

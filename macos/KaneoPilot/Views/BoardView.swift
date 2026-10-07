@@ -73,6 +73,7 @@ struct BoardView: View {
     @State private var search = ""
     @State private var columnFilter: BoardColumn?
     @State private var detailItem: TaskSheetItem?
+    @State private var planningAfterDetailDismissal: String?
     @State private var displayMode: BoardDisplayMode = .board
     @State private var userSelectedMode: Bool = false
     // 批量整理状态 (T2)
@@ -212,8 +213,12 @@ struct BoardView: View {
                 }
             }
         }
-        .sheet(item: $detailItem) { item in
-            TaskDetailSheet(item: item)
+        .sheet(item: $detailItem, onDismiss: openPlanningAfterDetailDismissal) { item in
+            TaskDetailSheet(item: item, onPreparePlanning: { taskID in
+                guard planningAfterDetailDismissal == nil else { return }
+                planningAfterDetailDismissal = taskID
+                detailItem = nil
+            })
         }
         .sheet(item: $pendingConfirmAction) { action in
             confirmSheet(for: action)
@@ -251,6 +256,12 @@ struct BoardView: View {
                 focusedTaskID = nil
             }
         }
+    }
+
+    private func openPlanningAfterDetailDismissal() {
+        guard let taskID = planningAfterDetailDismissal else { return }
+        planningAfterDetailDismissal = nil
+        model.openPlanning(focusTaskID: taskID)
     }
 
     // MARK: 六列整板
@@ -1276,6 +1287,7 @@ struct BatchReportSheet: View {
 
 struct TaskDetailSheet: View {
     let item: TaskSheetItem
+    var onPreparePlanning: ((String) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1284,7 +1296,8 @@ struct TaskDetailSheet: View {
                 taskID: item.id,
                 initialTab: item.startTab,
                 showsHeader: true,
-                onDismiss: { dismiss() }
+                onDismiss: { dismiss() },
+                onPreparePlanning: onPreparePlanning
             )
             .frame(minWidth: 720, idealWidth: 840, minHeight: 520, idealHeight: 640)
         }
