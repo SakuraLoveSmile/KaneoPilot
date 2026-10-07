@@ -101,7 +101,8 @@ FakeCore/
 ## 已知取舍 / 契约缺口
 
 - **settings 值与路径无读取命令**：protocol v1 没有暴露 `lease_seconds` 等 settings 值、`settings.migration`、Plan 根/DB 路径的命令。实现：`overview` 响应可选解码 `settings` 对象（FakeCore 提供，真核心 v1 不返回则对应区块隐藏/显示「—」）；路径从 `doctor` 各项 `detail` 字符串提取。
-- **「取消排队」未实现**：协议无 cancel 命令（ui-spec §4.2 明确「没有则不给该按钮」）。
+- **排队规划可手动终止**：任务/请求详情经 `cancel-request` 撤销 queued plan；已领取则拒绝，保留材料和历史，等待手动重新规划。派发排队不在此操作范围。
+- **无记录残留会话可强制删除**：核心允许时，会话菜单提供 `force-purge-session`；仅永久移出列表，保留历史和文件。活跃请求、已有会话及无法核验的记录受保护。
 - **打开会话**：session_id/marker 为本地会话标识，按规格仅展示 + 「复制会话标识」，不臆造 URL。
 - **`resume-auto` 无独立命令**：protocol §5.15.6 只把它列为 allowed_action，未定义命令。实现按 §5.15.2「restore-task 对 active 任务幂等」的语义走 `restore-task {task_id, resume_auto: true}`（置 `auto_advance_paused=0`）。
 - **连接中断态为本地派生**：协议 `connection.state` 只有 ok/degraded/unavailable；读取失败（连接类错误）时 UI 派生「连接中断，重连中」，不清空已加载消息。

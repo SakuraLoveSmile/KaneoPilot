@@ -1,0 +1,51 @@
+{
+  "profile_partial": true,
+  "total_sampled_cpu_ms": 1403.0,
+  "main_sampled_cpu_ms": 337.0,
+  "session_frames_ms": [
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      36.0
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      35.0
+    ],
+    [
+      "SessionReaderView.roundLabel(_:)",
+      14.0
+    ],
+    [
+      "closure #1 in closure #6 in closure #1 in SessionReaderView.selectors.getter",
+      14.0
+    ],
+    [
+      "SessionReaderView.body.getter",
+      13.0
+    ],
+    [
+      "closure #1 in SessionReaderView.body.getter",
+      11.0
+    ],
+    [
+      "SessionReaderStore.loadMessages(generation:forceReload:)",
+      8.0
+    ],
+    [
+      "closure #1 in SessionReaderStore.restartPolling(generation:)",
+      8.0
+    ],
+    [
+      "closure #1 in SessionReaderView.metadataSummary.getter",
+      8.0
+    ],
+    [
+      "closure #1 in closure #1 in closure #1 in SessionReaderView.timeRow.getter",
+      8.0
+    ]
+  ],
+  "native_probe_action_count": 31,
+  "native_probe_action_p95_ms": 75.897541,
+  "native_probe_max_ms": 82.79125,
+  "native_probe_method": "handler to next NSView drawing probe, not tool roundtrip, not compositor presentation"
+}

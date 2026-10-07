@@ -83,8 +83,8 @@ class TestAutoPipeline(PiDesktopCase):
         # Only this disposable bare repository stands in for the approved GitHub target.
         bare_target = git(self.repo, 'remote', 'get-url', '--push', 'origin')
         real_repo_parser = git_delivery.github_repository
-        push_identity = mock.patch.object(git_delivery, 'github_repository', side_effect=lambda url:
-            'owner/repo' if url == bare_target else real_repo_parser(url))
+        push_identity = mock.patch.object(git_delivery, 'github_repository', side_effect=lambda url, **kwargs:
+            'owner/repo' if url == bare_target else real_repo_parser(url, **kwargs))
         push_identity.start();self.addCleanup(push_identity.stop)
         github_policy=mock.patch.object(automation_policy,'github_repository',return_value='owner/repo')
         github_policy.start();self.addCleanup(github_policy.stop)

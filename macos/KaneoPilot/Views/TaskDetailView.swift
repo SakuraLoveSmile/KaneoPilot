@@ -14,7 +14,7 @@ struct TaskDetailView: View {
 
     /// 需二次确认的动作（§4.1 + §6 危险操作清单）。
     enum ConfirmableAction: Identifiable {
-        case restore, acceptDuplicate, markSent, markDone, releaseLost
+        case restore, acceptDuplicate, markSent, markDone, releaseLost, cancelPlan
 
         var id: String {
             switch self {
@@ -23,6 +23,7 @@ struct TaskDetailView: View {
             case .markSent: return "mark_sent"
             case .markDone: return "mark_done"
             case .releaseLost: return "release_lost"
+            case .cancelPlan: return "cancel-request"
             }
         }
         var title: String {
@@ -32,6 +33,7 @@ struct TaskDetailView: View {
             case .markSent: return "登记已发出"
             case .markDone: return "登记完成"
             case .releaseLost: return "释放失联请求"
+            case .cancelPlan: return "终止排队计划"
             }
         }
         var message: String {
@@ -44,13 +46,15 @@ struct TaskDetailView: View {
                 return "人工确认消息已发出：任务转为执行中并建立监控请求。"
             case .markDone:
                 return "将任务归档为完成，不再自动推进。"
+            case .cancelPlan:
+                return "撤销尚未领取的规划请求，保留材料与历史，等待手动重新规划。若已被领取，本操作会拒绝终止。"
             case .releaseLost:
                 return "取消失联请求并把任务恢复到可安全推进的状态。"
             }
         }
         var destructive: Bool {
             switch self {
-            case .acceptDuplicate, .markDone, .releaseLost: return true
+            case .acceptDuplicate, .markDone, .releaseLost, .cancelPlan: return true
             case .restore, .markSent: return false
             }
         }
@@ -148,7 +152,13 @@ struct TaskDetailView: View {
                 Button(confirm.title, role: confirm.destructive ? .destructive : nil) {
                     let action = confirm.id
                     self.confirm = nil
-                    Task { await model.resolve(taskID: detail.taskId, action: action) }
+                    Task {
+                        if action == "cancel-request", let requestID = detail.queuedPlanRequestId {
+                            await model.cancelPlan(requestID: requestID, taskID: detail.taskId)
+                        } else {
+                            await model.resolve(taskID: detail.taskId, action: action)
+                        }
+                    }
                 }
                 Button("取消", role: .cancel) { self.confirm = nil }
             }
@@ -428,6 +438,9 @@ struct TaskDetailView: View {
             Button("重新校验") { Task { await model.recheck(taskID: detail.taskId) } }
                 .disabled(model.busy)
                 .help("重新核验计划/来源哈希与远端状态")
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirm = .cancelPlan }
+                .disabled(model.busy || detail.queuedPlanRequestId == nil)
         case "set-priority":
             priorityMenu
         case "set-paused":

@@ -35,6 +35,9 @@
 		BA5E00000000000000001142 /* LoginItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001042 /* LoginItem.swift */; };
 		BA5E00000000000000001143 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001043 /* MenuBarView.swift */; };
 		BA5E00000000000000001136 /* MarkdownReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001036 /* MarkdownReaderView.swift */; };
+		BA5E00000000000000001160 /* SessionReaderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001060 /* SessionReaderStore.swift */; };
+		BA5E00000000000000001161 /* SessionMessagePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001061 /* SessionMessagePresentation.swift */; };
+		BA5E00000000000000001162 /* SessionMessageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001062 /* SessionMessageDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -69,6 +72,9 @@
 		BA5E00000000000000001041 /* SchedulerDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerDecision.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001042 /* LoginItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginItem.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001043 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001060 /* SessionReaderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderStore.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001061 /* SessionMessagePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessagePresentation.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001062 /* SessionMessageDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessageDetailView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,6 +145,9 @@
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
 				BA5E00000000000000001012 /* Components.swift */,
+				BA5E00000000000000001060 /* SessionReaderStore.swift */,
+				BA5E00000000000000001061 /* SessionMessagePresentation.swift */,
+				BA5E00000000000000001062 /* SessionMessageDetailView.swift */,
 				BA5E00000000000000001014 /* SessionReaderView.swift */,
 				BA5E00000000000000001015 /* SavedTasksView.swift */,
 				BA5E00000000000000001030 /* PlanningView.swift */,
@@ -247,6 +256,9 @@
 				BA5E00000000000000001110 /* RunsView.swift in Sources */,
 				BA5E00000000000000001111 /* SettingsView.swift in Sources */,
 				BA5E00000000000000001112 /* Components.swift in Sources */,
+				BA5E00000000000000001160 /* SessionReaderStore.swift in Sources */,
+				BA5E00000000000000001161 /* SessionMessagePresentation.swift in Sources */,
+				BA5E00000000000000001162 /* SessionMessageDetailView.swift in Sources */,
 				BA5E00000000000000001114 /* SessionReaderView.swift in Sources */,
 				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,

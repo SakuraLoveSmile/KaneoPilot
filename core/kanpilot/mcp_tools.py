@@ -267,6 +267,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "message_end": {"type": ["integer", "null"]},
                 "has_more_before": {"type": "boolean"},
                 "has_more_after": {"type": "boolean"},
+                "truncated": {"type": "boolean"},
+                "reason": {"type": "string"},
             },
             "required": ["session_id", "messages"],
         },
@@ -537,6 +539,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "run_id": {"type": "string"},
                 "cursor": {"type": "string"},
                 "limit": {"type": "integer"},
+                "source_version": {"type": "string"},
+                "force_reload": {"type": "boolean"},
             },
             "required": ["task_id", "run_id"],
             "additionalProperties": False,
@@ -546,6 +550,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "properties": {
                 "messages": {"type": "array"},
                 "next_cursor": {"type": ["string", "null"]},
+                "source_version": {"type": ["string", "null"]},
             },
             "required": ["messages"],
         },
@@ -818,7 +823,9 @@ for _spec in TOOLS_SPEC:
         _spec["inputSchema"]["required"].append("tool_call_id")
     _spec["outputSchema"] = {
         "type": "object", "properties": {
-            "ok": {"type": "boolean"}, "data": {"type": "object"},
+            "ok": {"type": "boolean"},
+            "data": (_spec["outputSchema"] if _spec["name"] == "kp_runtime_messages"
+                     else {"type": "object"}),
             "error": {"type": "object", "properties": {
                 "code": {"type": "string"}, "message": {"type": "string"}},
                 "required": ["code", "message"]},
@@ -897,8 +904,12 @@ def _runtime_guard(conn, scope, tool, args):
         raise util.bad_request("Goal report get requires execution_id or report_id")
     if tool == "kp_runtime_session_configure":
         permission = (scope.runtime_config or {}).get("permission_mode")
-        if scope.role in ("planner", "review"):
-            permission = "ask"
+        if scope.role == "review":
+            permission = constants.PI_DESKTOP_READONLY_PERMISSION_MODE
+        elif scope.role == "planner" and permission not in (
+                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+                constants.PI_DESKTOP_PLANNER_PERMISSION_MODE):
+            raise util.KanpilotError("forbidden", "unsupported planner permission snapshot")
         if args["mode"] != mode or args["permission_mode"] != permission:
             raise util.KanpilotError("forbidden", "configuration exceeds authorized snapshot")
     if args.get("target_permission_mode") is not None and (scope.role != "execution" or args["target_permission_mode"] != (scope.runtime_config or {}).get("permission_mode")):

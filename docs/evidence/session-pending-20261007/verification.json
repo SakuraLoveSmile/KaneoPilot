@@ -1,0 +1,9 @@
+{
+  "version": "0.2",
+  "build": "20261007.1",
+  "bundle_id": "local.kaneopilot",
+  "files_verified": 113,
+  "core_files_verified": 107,
+  "sha256": "32ae547c5a66edbc2429cc1e8fb0ab4e167dbe3793bc03e8e5ee73255978e318",
+  "architecture": "arm64"
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0.2",
+  "build": "20261006.1",
+  "bundle_id": "local.kaneopilot",
+  "source_base": "166ae24e77b50cc1032546e0dd42c2b626706ff7",
+  "planning_view_sha256": "51d47b55743a31f06d531f3fe4da912aa0c5e2217eb9799b765efcd533e9ef61",
+  "core_source_files_verified": 107,
+  "codesign": "local ad-hoc; verify passed",
+  "dmg_verify": "passed",
+  "mounted_package_matches_app": "passed",
+  "sha256": "9e35e5969cfd1441a7bf49e298f30047aebda7edc09d8f3a02370d13661c665a",
+  "bytes": 4028998,
+  "native_validation": "blocked by locked Mac",
+  "installed": false
+}

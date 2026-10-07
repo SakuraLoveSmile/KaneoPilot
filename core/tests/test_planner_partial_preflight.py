@@ -19,7 +19,7 @@ class TestPartialPlannerPreflight(KanpilotTestCase):
         prepared = self.call("prepare-plan-input", {"task_id": task_id})
         block = {"connection_file": str(self.root / "fake-connection.json"),
                  "provider_id": "test", "model_id": "test", "thinking_level": "medium",
-                 "permission_mode": "ask"}
+                 "permission_mode": "auto"}
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):

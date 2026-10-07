@@ -392,7 +392,10 @@ def cmd_list_requests(ctx, payload: dict) -> dict:
     ).fetchall()
     views = []
     for row in rows:
-        views.append(derive.request_view(row, ctx.now))
+        view = derive.request_view(row, ctx.now)
+        task = db.get_task(ctx.conn, row["task_id"]) if row["task_id"] else None
+        view["allowed_actions"] = derive.request_allowed_actions(ctx.conn, row, task, ctx.now)
+        views.append(view)
     return {"requests": views}
 
 

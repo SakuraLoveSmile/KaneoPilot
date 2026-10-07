@@ -1,0 +1,163 @@
+{
+  "waiting": {
+    "session": {
+      "task_id": "task-music-006",
+      "run_id": "run-music-006-b2",
+      "session_marker": "task-music-006/run-music-006-b2",
+      "session_id": null,
+      "session_title": null,
+      "state": "pending",
+      "started_at": null,
+      "last_message_at": null,
+      "message_count": 0,
+      "updated_at": null,
+      "backend": null,
+      "run_status": "unknown",
+      "save_state": "active",
+      "saved_at": null,
+      "allowed_actions": [],
+      "blocked_reason": "无执行轮次索引（运行记录不可用），不能移入回收站",
+      "last_checked_at": "2026-10-06T16:43:58.831405+00:00"
+    },
+    "messages": [],
+    "next_cursor": null,
+    "has_more": false,
+    "connection": {
+      "state": "degraded",
+      "detail": null,
+      "subscription": false,
+      "poll_seconds": 2
+    },
+    "source_version": null
+  },
+  "waiting_summary": {
+    "session": {
+      "task_id": "task-music-006",
+      "run_id": "run-music-006-b2",
+      "session_marker": "task-music-006/run-music-006-b2",
+      "session_id": null,
+      "session_title": null,
+      "state": "pending",
+      "started_at": null,
+      "last_message_at": null,
+      "message_count": 0,
+      "updated_at": null,
+      "backend": "pi",
+      "run_status": "finished",
+      "save_state": "active",
+      "saved_at": null,
+      "allowed_actions": [],
+      "blocked_reason": "该轮次任务正在执行中，暂不能移入会话回收站",
+      "read_only": false,
+      "last_checked_at": "2026-10-06T16:43:58.831405+00:00"
+    },
+    "connection": {
+      "state": "degraded",
+      "detail": null,
+      "subscription": false,
+      "poll_seconds": 2
+    },
+    "round_detail": {
+      "backend": "pi",
+      "run_status": "finished",
+      "worktree_path": null,
+      "pid": 4242,
+      "observe_pid": 4242,
+      "observer_alive": false,
+      "started_at": null,
+      "ended_at": "2026-09-20T12:30:00.000000+00:00",
+      "exit_code": 0,
+      "terminal": null,
+      "terminal_superseded": null,
+      "config": null,
+      "save_state": "active",
+      "saved_at": null,
+      "detail": null,
+      "turn_id": null,
+      "turn_adopted": null,
+      "send_state": null,
+      "startup_turn_id": null
+    }
+  },
+  "failed": {
+    "session": {
+      "task_id": "task-music-006",
+      "run_id": "run-music-006-b2",
+      "session_marker": "task-music-006/run-music-006-b2",
+      "session_id": null,
+      "session_title": null,
+      "state": "pending",
+      "started_at": null,
+      "last_message_at": null,
+      "message_count": 0,
+      "updated_at": null,
+      "backend": "pi",
+      "run_status": "finished",
+      "save_state": "active",
+      "saved_at": null,
+      "allowed_actions": [],
+      "blocked_reason": "该轮次任务正在执行中，暂不能移入会话回收站",
+      "read_only": false,
+      "last_checked_at": "2026-10-06T16:43:58.838795+00:00"
+    },
+    "messages": [],
+    "next_cursor": null,
+    "has_more": false,
+    "connection": {
+      "state": "degraded",
+      "detail": "事件日志解析失败（可能半写入）",
+      "subscription": false,
+      "poll_seconds": 2
+    },
+    "source_version": null
+  },
+  "failed_summary": {
+    "session": {
+      "task_id": "task-music-006",
+      "run_id": "run-music-006-b2",
+      "session_marker": "task-music-006/run-music-006-b2",
+      "session_id": null,
+      "session_title": null,
+      "state": "pending",
+      "started_at": null,
+      "last_message_at": null,
+      "message_count": 0,
+      "updated_at": null,
+      "backend": "pi",
+      "run_status": "finished",
+      "save_state": "active",
+      "saved_at": null,
+      "allowed_actions": [],
+      "blocked_reason": "该轮次任务正在执行中，暂不能移入会话回收站",
+      "read_only": false,
+      "last_checked_at": "2026-10-06T16:43:58.838795+00:00"
+    },
+    "connection": {
+      "state": "degraded",
+      "detail": "事件日志解析失败（可能半写入）",
+      "subscription": false,
+      "poll_seconds": 2
+    },
+    "round_detail": {
+      "backend": "pi",
+      "run_status": "finished",
+      "worktree_path": null,
+      "pid": 4242,
+      "observe_pid": 4242,
+      "observer_alive": false,
+      "started_at": null,
+      "ended_at": "2026-09-20T12:30:00.000000+00:00",
+      "exit_code": 0,
+      "terminal": null,
+      "terminal_superseded": null,
+      "config": null,
+      "save_state": "active",
+      "saved_at": null,
+      "detail": null,
+      "turn_id": null,
+      "turn_adopted": null,
+      "send_state": null,
+      "startup_turn_id": null
+    }
+  }
+}

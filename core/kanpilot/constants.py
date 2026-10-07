@@ -116,12 +116,13 @@ CONTROLLER_BACKEND_KEY = "controller_backend"
 # 计划/Review 需读并安全关闭产物检点，故要求基础 + 契约审批工具。
 PI_DESKTOP_CONTROLLER_TOOLS = PI_DESKTOP_REQUIRED_TOOLS
 PI_DESKTOP_PLAN_TOOLS = PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS
-# v4 各角色的 Plus 会话模式（protocol §5.24）：计划/Review 为只读倾向的
-# plan + ask；控制端 agent + 用户显式 permission_mode；任务执行 goal。
+# 各角色的 Plus 会话模式：规划 plan + auto；Review plan + ask；
+# 控制端 agent + 用户显式 permission_mode；任务执行 goal。
 PI_DESKTOP_PLAN_MODE = "plan"
 PI_DESKTOP_CONTROLLER_MODE = "agent"
-# v4：Plan/Review 分支只允许该权限模式（防自动 shell 写入；Plan 模式本身
-# 不是 OS 只读沙箱）。
+# 规划独立于 Review 权限；新请求使用 auto，既有请求保留其固化快照。
+PI_DESKTOP_PLANNER_PERMISSION_MODE = "auto"
+# Review 仍使用 ask（Plan 模式本身不是 OS 只读沙箱）。
 PI_DESKTOP_READONLY_PERMISSION_MODE = "ask"
 # v4：Review 最终答复的结论与 fix 优先级枚举（后者与 bridge.VALID_PRIORITIES
 # 同源，新增值须两处同步）。

@@ -255,10 +255,19 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "run_id": (True, "str")},
         cmd_session.cmd_get_session,
     ),
+    "session-control-status": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("session_control", "cmd_session_control_status"),
+    ),
+    "session-request-start": (
+        {"task_id": (True, "str"), "run_id": (True, "str"), "request_id": (True, "str")},
+        _automation_command("session_control", "cmd_session_request_start"),
+    ),
     "session-messages": (
         {
             "task_id": (True, "str"), "run_id": (False, "str"),
             "cursor": (False, "str"), "limit": (False, "int"),
+            "source_version": (False, "str"), "force_reload": (False, "bool"),
         },
         cmd_session.cmd_session_messages,
     ),
@@ -281,6 +290,15 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "expected_save_state": (False, "str"),
         },
         cmd_session.cmd_purge_session,
+    ),
+    "force-purge-session": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "expected_save_state": (False, "str")},
+        _automation_command("cmd_session", "cmd_force_purge_session"),
+    ),
+    "cancel-request": (
+        {"request_id": (True, "str"), "task_id": (True, "str")},
+        _automation_command("cmd_queue", "cmd_cancel_request"),
     ),
     # v1.6（protocol §5.17）：pi 执行配置与能力查询。
     "get-exec-config": ({}, cmd_config.cmd_get_exec_config),

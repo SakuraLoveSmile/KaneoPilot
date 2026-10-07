@@ -1,0 +1,9 @@
+{
+  "version": "0.2",
+  "build": "20261007",
+  "bundle_id": "local.kaneopilot",
+  "app_file_comparison": 113,
+  "bundled_source_comparison": 107,
+  "dmg_sha256": "a28e69fd66a3614cb4a36c6547de63ac47b69b40b16f6095ab96be4586467bef",
+  "architecture": "arm64"
+}

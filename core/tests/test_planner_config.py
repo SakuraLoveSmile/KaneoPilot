@@ -8,7 +8,7 @@
   planner_model/reasoning_effort；``dispatch`` claim（§4.5）按任务登记值
   校验；旧记录缺登记（NULL）时回落历史固定常量规则。
 - v4：``backend`` 缺省 codex（旧配置零迁移）；两分支共存、服务离线可保存；
-  Plus 分支要求五字段 + permission_mode=ask，只支持 builtin（spec_plan 明确
+  Plus 分支要求五字段 + permission_mode=auto，只支持 builtin（spec_plan 明确
   禁用并给中文原因）；幂等判定包含 planner_backend（同材料换后端 → conflict）。
 """
 from __future__ import annotations
@@ -291,7 +291,7 @@ PLUS_BLOCK = {
     "provider_id": "closeai",
     "model_id": "deepseek-flash",
     "thinking_level": "high",
-    "permission_mode": "ask",
+    "permission_mode": "auto",
 }
 PLUS_SNAPSHOT = {
     k: PLUS_BLOCK[k] for k in constants.EXEC_PI_DESKTOP_KEYS
@@ -409,7 +409,7 @@ class PlannerBackendConfig(PlannerConfigSnapshot):
         block = {
             "model_source": "inherit",
             "connection_file": "/tmp/pi-desktop/mcp-control.json",
-            "permission_mode": "ask",
+            "permission_mode": "auto",
         }
         self.call("set-planner-config", {
             "backend": "pi_desktop", "pi_desktop": block,
@@ -426,9 +426,9 @@ class PlannerBackendConfig(PlannerConfigSnapshot):
         finally:
             conn.close()
 
-    def test_plus_block_requires_ask_and_absolute_path(self):
+    def test_plus_block_requires_auto_and_absolute_path(self):
         for block in (
-            dict(PLUS_BLOCK, permission_mode="auto"),
+            dict(PLUS_BLOCK, permission_mode="ask"),
             dict(PLUS_BLOCK, permission_mode="accept-edits"),
             {k: v for k, v in PLUS_BLOCK.items() if k != "permission_mode"},
             dict(PLUS_BLOCK, connection_file="relative/mcp.json"),
@@ -442,9 +442,35 @@ class PlannerBackendConfig(PlannerConfigSnapshot):
         self.assertIsNone(self.call("get-planner-config", {})["config"])
         exc = self.call_err("set-planner-config", {
             "backend": "pi_desktop",
-            "pi_desktop": dict(PLUS_BLOCK, permission_mode="auto"),
+            "pi_desktop": dict(PLUS_BLOCK, permission_mode="ask"),
         })
-        self.assertIn("ask", str(exc))
+        self.assertIn("auto", str(exc))
+
+    def test_legacy_ask_settings_use_auto_for_new_request_without_resave(self):
+        conn = db.connect(self.db_path)
+        stored = {"backend": "pi_desktop", "pi_desktop": dict(PLUS_BLOCK, permission_mode="ask")}
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "planner_config", stored)
+        finally:
+            conn.close()
+        effective = self.call("get-planner-config", {})["config"]
+        self.assertEqual(effective["pi_desktop"], PLUS_BLOCK)
+        task = self._new_task("legacyasksettings001")
+        entry = self._start(self._prepare_input(task["id"]), planner_backend="pi_desktop")
+        self.assertEqual(self._request_payload(entry["request_id"])["runtime_config"], PLUS_SNAPSHOT)
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(db.get_setting(conn, "planner_config"), stored)
+        finally:
+            conn.close()
+
+    def test_inactive_plus_block_rejects_explicit_ask(self):
+        error = self.call_err("set-planner-config", {
+            "backend": "codex", "pi_desktop": dict(PLUS_BLOCK, permission_mode="ask"),
+        })
+        self.assertEqual(error.code, "bad_request")
+        self.assertIn("auto", str(error))
 
     def test_plus_spec_plan_rejected_on_save(self):
         # 1) 同一次提交：Plus + spec_plan → bad_request。

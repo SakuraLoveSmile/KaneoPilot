@@ -1,0 +1,17 @@
+The following is a diff from the previous accessibility tree for Window: "" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.
+Removed element IDs: 132, 134, 136, 140, 142, 144, 146, 148, 150, 152, 154, 156
++					165 checkbox Description: 收集崩溃日志并归类用户反馈, Feedback, dispatching, 本地已有任务（状态 dispatching），如需重新规划请先在任务详情确认, Value: 0
++					166 checkbox Description: 把错题本导出为 Anki 牌组, StudyTool, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 把错题本导出为 Anki 牌组
++					167 checkbox Description: 这是一个特别特别长的任务标题用来验证列表在四十个汉字以上的截断效果而不会撑破布局, Feedback, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 这是一个特别特别长的任务标题用来验证列表在四十个汉字以上的截断效果而不会撑破布局
++					168 checkbox Description: 导出播放统计周报并发送到邮箱, Music, needs_user, 附件 1, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 导出播放统计周报并发送到邮箱
++					169 checkbox Description: 修复：错题标签过滤的空值兜底, StudyTool, 待规划, Value: 0, Secondary Actions: 勾选 修复：错题标签过滤的空值兜底
++					170 checkbox Description: 自动处理示例 · branch_exists, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · branch_exists
++					171 checkbox Description: 自动处理示例 · delivery_base_unknown, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · delivery_base_unknown
++					172 checkbox Description: 自动处理示例 · planner_failed, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · planner_failed
++					173 checkbox Description: 自动处理示例 · needs_input, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · needs_input
++					174 checkbox Description: 自动处理示例 · needs_plan, Music, 等待自动规划, Value: 0, Secondary Actions: 勾选 自动处理示例 · needs_plan
++					175 checkbox Description: 自动处理示例 · planning, Music, 自动规划中, 本地已有任务（状态 planning），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · planning
++					176 checkbox Description: 未映射项目的 To Do（fake）, Unmapped, 未导入, 尚未选择仓库, Value: 0, Secondary Actions: 勾选 未映射项目的 To Do（fake）, 配置仓库
+~			157 scroll bar (settable, float) 0.004291845493562232
+~				158 value indicator (settable, float) 0.004291845493562232
+The focused UI element is 118 list

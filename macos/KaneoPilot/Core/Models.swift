@@ -247,6 +247,7 @@ struct TaskSummary: Decodable, Identifiable {
     let blockedReason: String?
     let nextClaimAt: String?
     let activeRequest: ActiveRequest?
+    let queuedPlanRequestId: String?
     let kaneoStatus: String?
     let kaneoCheckedAt: String?
     let priority: Int?
@@ -321,6 +322,7 @@ struct TaskDetail: Decodable, Identifiable {
     let blockedReason: String?
     let nextClaimAt: String?
     let activeRequest: ActiveRequest?
+    let queuedPlanRequestId: String?
     let kaneoStatus: String?
     let kaneoCheckedAt: String?
     let priority: Int?
@@ -489,6 +491,7 @@ struct SessionInfo: Decodable, Identifiable {
     var isTrashed: Bool { saveState == "trashed" }
     /// §5.16.2：可移入回收站。
     var canTrash: Bool { allowedActions?.contains("trash-session") == true }
+    var canForcePurge: Bool { allowedActions?.contains("force-purge-session") == true }
     /// §5.16.2：可恢复。
     var canRestore: Bool { allowedActions?.contains("restore-session") == true }
     /// v2 §5.20.2：可永久从列表移除（仅回收站内）。
@@ -526,8 +529,9 @@ struct ExecPiDesktopConfig: Decodable, Equatable {
     /// Plus 合法思考等级枚举（§5.23.3）；目录未给子集时列全部合法值。
     static let thinkingLevels = ["off", "minimal", "low", "medium", "high",
                                  "xhigh", "max"]
-    /// plan / Review 角色固定权限：调度台不代批 Plus 工具权限。
-    static let fixedPlanPermission = "ask"
+    /// 新规划允许自动工具权限；Review 保持 ask。
+    static let fixedPlanPermission = "auto"
+    static let fixedReviewPermission = "ask"
     /// Plus 默认连接文件（仅用于空草稿预填；不扫描其他目录）。
     static let defaultConnectionFile: String = FileManager.default
         .homeDirectoryForCurrentUser
@@ -807,7 +811,7 @@ struct PiDesktopProbeResponse: Decodable {
 /// 已有已保存桌面块时只提示候选不可用，不改草稿。
 enum PlusDraftSeeder {
     /// 角色草稿中由目录播种的字段（permission_mode 不在此列：plan/Review
-    /// 固定 ask，任务执行必须用户显式选择）。
+    /// 规划固定 auto、Review 固定 ask，任务执行必须用户显式选择）。
     struct Draft: Equatable {
         var connectionFile: String
         var providerId: String
@@ -1211,6 +1215,28 @@ struct SessionConnection: Decodable {
     var hasDetail: Bool { detail?.isEmpty == false }
 }
 
+struct SessionControlStatus: Decodable {
+    let taskId: String
+    let runId: String
+    let requestId: String?
+    let backend: String?
+    let state: String
+    let detail: String
+    let connected: Bool
+    let sessionId: String?
+    let turnId: String?
+    let canStart: Bool
+    let blockedReason: String?
+    let startLabel: String
+}
+
+struct SessionStartResponse: Decodable {
+    let requestId: String
+    let stage: String
+    let queued: Bool
+    let deduplicated: Bool
+}
+
 /// §5.15.5 消息（按 seq 排序，按 id+revision 去重/更新）。
 struct SessionMessage: Decodable, Identifiable {
     let id: String?
@@ -1268,6 +1294,7 @@ struct SessionMessagesResponse: Decodable {
     let messages: [SessionMessage]?
     let nextCursor: String?
     let hasMore: Bool?
+    let sourceVersion: String?
     let connection: SessionConnection?
 }
 
@@ -1561,6 +1588,11 @@ struct TodoItem: Decodable, Identifiable {
     var id: String { taskId }
     var isSelectable: Bool { selectable == true }
     var isUnmapped: Bool { mappingState == "unmapped" }
+    /// Repository readiness is independent of task eligibility (for example, already planning).
+    var needsRepositoryConfiguration: Bool {
+        guard let mappingState else { return false }
+        return mappingState != "available"
+    }
     var attachmentCount: Int { attachments?.count ?? 0 }
 
     /// 规划面板「定位任务」兜底：fetch-todos 列表之外的聚焦任务占位行。
@@ -1690,7 +1722,7 @@ struct PlannerStoredConfig: Decodable {
     let defaultMethod: String?
     /// §5.24.1：规划运行端；缺省按 codex 解释。
     let backend: String?
-    /// §5.24.1：Plus 五字段块（脱敏，无 token；permission_mode 固定 ask）。
+    /// §5.24.1：Plus 规划五字段块（脱敏，无 token；新规划 permission_mode 固定 auto）。
     let piDesktop: ExecPiDesktopConfig?
 
     init(standard: PlannerGroupConfig? = nil,

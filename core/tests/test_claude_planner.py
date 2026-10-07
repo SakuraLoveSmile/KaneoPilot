@@ -292,7 +292,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         snapshots.assert_not_called()
         self.assertEqual(self.server.created["projectPath"], str(branch))
         self.assertEqual(self.server.created["mode"], "plan")
-        self.assertEqual(self.server.configured["permissionMode"], "ask")
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
         self.assertEqual(observed, {"tracked": "# dirty manual changes\n", "untracked": "untracked manual notes",
                                    "committed": "manual checkpoint"})
         self.assertEqual((branch / "AGENTS.md").read_text(), observed["tracked"])

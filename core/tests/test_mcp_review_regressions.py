@@ -160,6 +160,38 @@ def test_runtime_resource_and_config_scope_guards(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("role,snapshot,requested,allowed", [
+    ("planner", "auto", "auto", True),
+    ("planner", "ask", "ask", True),
+    ("planner", "ask", "auto", False),
+    ("planner", "auto", "ask", False),
+    ("planner", "accept-edits", "accept-edits", False),
+    ("review", "ask", "ask", True),
+    ("review", "ask", "auto", False),
+    ("review", "auto", "auto", False),
+    ("execution", "auto", "auto", True),
+    ("execution", "ask", "auto", False),
+])
+def test_runtime_configure_respects_role_and_immutable_permission(tmp_path, role, snapshot, requested, allowed):
+    conn = db.connect(tmp_path / "configure.db")
+    scope = mcp_scopes.Scope(
+        "scope", "invocation", role,
+        util.to_iso(util.now_dt() + timedelta(minutes=10)),
+        project_path=str(tmp_path), runtime_config={"permission_mode": snapshot},
+    )
+    args = {"scope_id": "scope", "mode": "goal" if role == "execution" else "plan",
+            "permission_mode": requested}
+    try:
+        if allowed:
+            mcp_tools._runtime_guard(conn, scope, "kp_runtime_session_configure", args)
+        else:
+            with pytest.raises(util.KanpilotError) as caught:
+                mcp_tools._runtime_guard(conn, scope, "kp_runtime_session_configure", args)
+            assert caught.value.code == "forbidden"
+    finally:
+        conn.close()
+
+
 def test_runtime_prompt_uses_session_ownership_without_attachment(tmp_path):
     conn = db.connect(tmp_path / 'test.db')
     scope = mcp_scopes.Scope(
@@ -260,8 +292,8 @@ def test_plan_resolution_has_no_write_lock_and_existing_authorization_is_offline
     from kanpilot import cli, planner_inputs, planner_config
     task = factory.sync_task(title='snapshot lock boundary')
     prepared = factory.cli('prepare-plan-input', {'task_id':task.task_id})
-    factory.cli('set-planner-config', {'backend':'pi_desktop', 'pi_desktop':{'model_source':'inherit', 'connection_file':str(tmp_env.root/'plus.json'), 'permission_mode':'ask'}})
-    runtime = {'connection_file':str(tmp_env.root/'plus.json'), 'provider_id':'p', 'model_id':'m', 'thinking_level':'off', 'permission_mode':'ask'}
+    factory.cli('set-planner-config', {'backend':'pi_desktop', 'pi_desktop':{'model_source':'inherit', 'connection_file':str(tmp_env.root/'plus.json'), 'permission_mode':'auto'}})
+    runtime = {'connection_file':str(tmp_env.root/'plus.json'), 'provider_id':'p', 'model_id':'m', 'thinking_level':'off', 'permission_mode':'auto'}
     calls = []
     def resolve(conn, block=None, **kwargs):
         assert not conn.in_transaction

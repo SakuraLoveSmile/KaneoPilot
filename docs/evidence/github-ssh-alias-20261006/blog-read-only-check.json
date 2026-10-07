@@ -1,0 +1,22 @@
+{
+  "origin_unchanged": true,
+  "github_repository": "SakuraLoveSmile/Sakura-Blog",
+  "public_get_project_mappings_origin_warning_absent": true,
+  "preflight_mapping_read_ms": [
+    83.44991703052074,
+    62.08641699049622,
+    59.78699994739145,
+    54.00916701182723,
+    58.23033396154642
+  ],
+  "median_ms": 59.78699994739145,
+  "max_ms": 83.44991703052074,
+  "production_db_modified": false,
+  "remote_ssh_connection_or_fetch_push": false,
+  "isolation": "temporary database/roots/credentials; real Blog repository and user SSH config read-only",
+  "other_preflight_codes_in_isolated_defaults": [
+    "review_backend_unsupported",
+    "exec_backend_not_plus",
+    "exec_permission_not_auto"
+  ]
+}
