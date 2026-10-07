@@ -212,6 +212,7 @@ struct TaskOverviewTabView: View {
     @State private var confirm: TaskDetailView.ConfirmableAction?
     @State private var confirmingPurge = false
     @State private var technicalExpanded = false
+    @State private var confirmExecutionRetry = false
 
     private var display: String { DisplayStatus.effective(detail) }
 
@@ -292,6 +293,9 @@ struct TaskOverviewTabView: View {
             .padding(Spacing.l)
         }
         .safeAreaInset(edge: .bottom) { actionBar }
+        .sheet(isPresented: $confirmExecutionRetry) {
+            ExecutionRetryConfirmationSheet(taskID: detail.taskId)
+        }
         .confirmationDialog(
             confirm?.title ?? "",
             isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
@@ -502,7 +506,11 @@ struct TaskOverviewTabView: View {
         switch action {
         case "resume", "accept_verification":
             Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
+                if action == "resume" && detail.failureCode == "execution_noop" {
+                    confirmExecutionRetry = true
+                } else {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
+                }
             }
             .disabled(model.busy)
         case "dismiss":

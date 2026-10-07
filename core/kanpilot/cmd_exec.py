@@ -382,6 +382,10 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
             **core.clear_block_fields(),
         )
         db.set_setting(conn, "dispatch_serial", run_id)
+        db.add_event(conn, util.to_iso(now), "dispatch_configured", task_id=task_id,
+                     request_id=request_id, actor=executor,
+                     detail={"run_id": run_id, "exec_config": config_snapshot,
+                             "exec_model": (core.automation_of(task).get("exec_retry") or {}).get("model", "primary")})
         db.add_event(
             conn, util.to_iso(now), "status_change", task_id=task_id,
             actor=executor,
@@ -588,6 +592,30 @@ def cmd_report(ctx, payload: dict) -> dict:
                 ),
                 send_state=payload.get("send_state", task["send_state"]),
             )
+            task = db.require_task(conn, task["task_id"])
+            if request["kind"] == "monitor" and task["failure_code"] == "execution_noop":
+                evidence = payload.get("evidence")
+                evidence = evidence if isinstance(evidence, dict) else {}
+                activity = {}
+                signals = evidence.get("signals")
+                if isinstance(signals, list):
+                    activity["signals"] = sorted({signal for signal in signals
+                                                  if isinstance(signal, str) and signal in
+                                                  ("no_effective_changes", "short_reply_read_only")})
+                for key, allowed in (
+                    ("evidence_window", ("after_goal_approved", "whole_round")),
+                    ("window_basis", ("sequence_and_source_time", "sequence", "execution_turn", "whole_round", "approval_request", "execution_started_at", "unscoped_goal_window")),
+                ):
+                    if evidence.get(key) in allowed:
+                        activity[key] = evidence[key]
+                for key in ("reply_length", "tool_event_count", "action_tool_event_count", "effective_change_count"):
+                    value = evidence.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        activity[key] = value
+                db.add_event(conn, now_iso, "execution_noop", task_id=task["task_id"],
+                             request_id=request["request_id"], actor=request["claimed_by"], detail=activity)
+                core.start_exec_retry_inline(conn, task, now_iso, automatic=True)
+                task = db.require_task(conn, task["task_id"])
         if (
             outcome == "succeeded"
             and request["kind"] == "monitor"
@@ -619,8 +647,6 @@ def cmd_report(ctx, payload: dict) -> dict:
         # monitor 的下一周期由 tick 按 monitor_interval_seconds 重建（§4.8）。
         fresh = db.get_request(conn, request["request_id"])
         task_status = task["status"] if task is not None else None
-        if outcome == "needs_user" and task is not None:
-            task_status = "needs_user"
         return {
             "ok": True,
             "request_status": fresh["status"],

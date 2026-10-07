@@ -375,8 +375,9 @@ class TestUserReplanMaterial(KanpilotTestCase):
         task_id,item,worktree,sha = self.dirty_replan()
         actual = git_delivery.worktree_state_sha256
         calls = []
-        def state(delivery):
-            result = actual(delivery)
+        def state(delivery, *, effective_only=False):
+            self.assertTrue(effective_only)
+            result = actual(delivery, effective_only=effective_only)
             calls.append(result)
             if len(calls)==1:
                 (worktree/'partial.py').write_text('changed during preparation\n',encoding='utf-8')
@@ -417,9 +418,10 @@ class TestUserReplanMaterial(KanpilotTestCase):
                 active.append(True)
                 try: yield
                 finally: active.pop()
-        def state(delivery):
+        def state(delivery, *, effective_only=False):
             self.assertFalse(active,'Git state hashing cannot hold a write transaction')
-            return actual_state(delivery)
+            self.assertTrue(effective_only)
+            return actual_state(delivery, effective_only=effective_only)
         with patch.object(db,'write_txn',side_effect=write_txn), patch.object(git_delivery,'worktree_state_sha256',side_effect=state):
             prepared = self.call('prepare-plan-input',{'task_id':task_id})
             item.update(input_id=prepared['input_id'],input_sha256=prepared['input_sha256'])

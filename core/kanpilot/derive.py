@@ -519,7 +519,7 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             code = task["failure_code"]
             if code == "verification_unconfirmed":
                 actions.append("accept_verification")
-            if core.is_automation_managed(task) and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
+            if core.is_automation_managed(task) and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("execution_noop", "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
                 if code != "remote_conflict" or task["failure_stage"] != "dispatch":
                     actions.append("resume")
             if send_state in (None, "not_sent") and code not in constants.AUTOMATION_FAILURE_CODES:

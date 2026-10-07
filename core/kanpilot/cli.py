@@ -30,6 +30,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "set-project-automation": ({"project_id": (True, "str"), "automation": (True, "dict"), "expected_policy_revision": (False, "int")}, _automation_command("automation_policy", "cmd_set_project_automation")),
     "set-automation-global": ({"max_active_tasks": (True, "int")}, _automation_command("automation_policy", "cmd_set_automation_global")),
     "record-cost": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "stage": (True, "str"), "cost_usd": (True, "any"), "source": (True, "str")}, _automation_command("automation_policy", "cmd_record_cost")),
+    "execution-activity": ({"task_id": (True, "str"), "run_id": (True, "str")}, _automation_command("cmd_activity", "cmd_execution_activity")),
     "delivery-commit": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (True, "str")}, _automation_command("cmd_delivery", "cmd_delivery_commit")),
     "delivery-publish": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_publish")),
     "delivery-sync": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_sync")),
@@ -100,7 +101,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "resolve": (
         {
             "task_id": (True, "str"), "action": (True, "str"),
-            "note": (False, "str"),
+            "note": (False, "str"), "exec_model": (False, "str"),
         },
         cmd_queue.cmd_resolve,
     ),

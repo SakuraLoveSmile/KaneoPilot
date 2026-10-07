@@ -361,10 +361,11 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func resolve(taskID: String, action: String, note: String? = nil) async {
+    func resolve(taskID: String, action: String, note: String? = nil, execModel: String? = nil) async {
         await perform(Self.actionLabel(action)) {
             var payload: [String: Any] = ["task_id": taskID, "action": action]
             if let note, !note.isEmpty { payload["note"] = note }
+            if let execModel { payload["exec_model"] = execModel }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
             return nil
         }

@@ -10,6 +10,8 @@ from .auto_dispatch import Controller, StaleRun
 
 _OLD_BACKENDS = ("dsh", "headless", "atif", "ATIF")
 _GOAL_FAILURES = ("goal_contract_missing", "goal_approval_failed", "goal_execution_unstarted")
+_READ_ONLY_TOOLS = frozenset(("UpdateGoalProgress", "Glob", "Read"))
+_SHORT_REPLY_CODEPOINTS = 16
 
 
 def _get_task(controller):
@@ -64,19 +66,63 @@ def _observe(controller, task, detail):
                            "run_id": task["run_id"], "executor": "kaneo-monitor"})
 
 
-def _verification(task, messages):
+def _verification(task, messages, window_metadata=None):
+    if window_metadata is None:
+        messages, window_metadata = verify_evidence.execution_window(messages)
     extra = task.get("extra") or {}
     if (extra.get("verification_override") or {}).get("execution_run_id") == task["run_id"]:
-        return {"ok": True}
+        return dict(window_metadata, ok=True)
     declaration = extra.get("plan_verify") or {}
     if declaration.get("plan_sha256") != task.get("plan_sha256") or not declaration.get("commands"):
-        return {"ok": False, "note": declaration.get("error") or "计划缺少可信 verify 命令声明"}
+        return dict(window_metadata, ok=False, note=declaration.get("error") or "计划缺少可信 verify 命令声明")
     result = verify_evidence.match_verification(declaration["commands"],
                                                verify_evidence.extract_command_results(messages))
     result["note"] = "；".join(["缺失：" + command for command in result["missing"]] + [
         "失败：" + item["command"] + "（exit_code=" + str(item["exit_code"]) + "）"
         for item in result["failed"]])
+    result.update(window_metadata)
     return result
+
+
+def _noop_evidence(controller, task, detail, messages, window_metadata):
+    automation = (task.get("extra") or {}).get("automation") or {}
+    backend = detail.get("backend") or (task.get("execution_round") or {}).get("backend")
+    if not automation or automation.get("manual_takeover") or backend != "pi_desktop":
+        return None
+    delivery = ((task.get("extra") or {}).get("delivery") or {})
+    if any(item.get("execution_run_id") == task["run_id"] for item in delivery.get("commits") or []):
+        # A monitor can resume after delivery-commit but before advance-task.
+        # The already registered delivery proves this execution did act.
+        return None
+    tool_names, final_reply = [], ""
+    for message in messages:
+        raw = message.get("raw") or {}
+        kind = message.get("type", message.get("kind", raw.get("type")))
+        if kind in ("tool_call", "tool_result", "command_output"):
+            tool = message.get("tool") or raw.get("tool") or {}
+            tool_names.append(tool.get("name") or message.get("name"))
+        elif kind in ("assistant", "assistant_message"):
+            final_reply = message.get("content") if isinstance(message.get("content"), str) else ""
+    signals = []
+    evidence = dict(window_metadata, tool_event_count=len(tool_names),
+                    action_tool_event_count=sum(name not in _READ_ONLY_TOOLS for name in tool_names),
+                    reply_length=len(final_reply.strip()))
+    if ((task.get("extra") or {}).get("delivery") or {}).get("mode") == "pr":
+        activity = controller.call("execution-activity", {"task_id": task["task_id"], "run_id": task["run_id"]})
+        count = activity.get("effective_change_count")
+        if type(count) is not int or count < 0:
+            raise util.KanpilotError("observation_blocked", "执行改动数不可确认")
+        if activity.get("delivery_recovered") is True:
+            return None
+        evidence["effective_change_count"] = count
+        if count == 0:
+            signals.append("no_effective_changes")
+    if (window_metadata.get("window_basis") != "unscoped_goal_window"
+            and not window_metadata.get("reply_unconfirmed")
+            and evidence["reply_length"] < _SHORT_REPLY_CODEPOINTS
+            and evidence["action_tool_event_count"] == 0):
+        signals.append("short_reply_read_only")
+    return dict(evidence, signals=signals) if signals else None
 
 
 def _commit(controller, task):
@@ -97,9 +143,16 @@ def _record_cost(controller, task, detail):
 
 
 def _complete(controller, task, detail, expected, messages):
-    verification = _verification(task, messages)
+    messages, window_metadata = verify_evidence.execution_window(messages, detail.get("turn_id"))
+    noop = _noop_evidence(controller, task, detail, messages, window_metadata)
+    if noop:
+        controller.report("needs_user", failure_code="execution_noop",
+                          note="执行轮次结束但未产生实际执行活动", evidence=noop)
+        return
+    verification = _verification(task, messages, window_metadata)
     if not verification["ok"]:
-        controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"])
+        controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"],
+                          evidence=window_metadata)
         return
     if ((task.get("extra") or {}).get("delivery") or {}).get("mode") == "pr":
         commit = _commit(controller, task)
@@ -110,7 +163,7 @@ def _complete(controller, task, detail, expected, messages):
             raise util.KanpilotError("observation_blocked", "交付提交结果不可确认")
     _advance(controller, task, "in-review", expected)
     _record_cost(controller, task, detail)
-    controller.report("succeeded", progress="本轮执行完成且验证通过")
+    controller.report("succeeded", progress="本轮执行完成且验证通过", evidence=window_metadata)
 
 
 def _running(controller, progress="本轮仍在运行"):

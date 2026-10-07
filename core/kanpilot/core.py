@@ -323,6 +323,13 @@ def is_user_replan(task):
             and bool(automation_of(task).get("replan_requested_at")))
 
 
+def replan_worktree_matches(delivery, expected_sha):
+    """Accept effective fingerprints and unchanged legacy raw fingerprints."""
+    from . import git_delivery
+    return (git_delivery.worktree_state_sha256(delivery, effective_only=True) == expected_sha
+            or git_delivery.worktree_state_sha256(delivery) == expected_sha)
+
+
 def expected_remote_slugs(task):
     slugs = set(constants.TODO_SLUGS)
     if is_pr_delivery(task) and delivery_of(task).get("commits"):
@@ -331,6 +338,8 @@ def expected_remote_slugs(task):
         accepted = automation_of(task).get("replan_remote_status")
         if accepted == constants.IN_PROGRESS_SLUG or accepted in constants.REVIEW_SLUGS:
             slugs.add(accepted)
+    if is_automation_managed(task) and automation_of(task).get("exec_retry"):
+        slugs.add(constants.IN_PROGRESS_SLUG)
     return slugs
 
 
@@ -349,7 +358,8 @@ def automation_budget(task, policy, now):
 def start_fix_round_inline(conn, task, now, *, fix_request, actor="kaneo-review", new_segment=False):
     a = automation_of(task)
     a.update(fix_round=int(a.get("fix_round", 0)) + 1, plan_wanted=True, plan_attempts=0,
-             replan_requested_at=None, replan_remote_status=None, replan_worktree_sha256=None)
+             replan_requested_at=None, replan_remote_status=None, replan_worktree_sha256=None,
+             exec_retries=0, exec_retry=None)
     if new_segment:
         a.update(segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0))
     fix = dict(fix_request, state="open", fix_round=a["fix_round"])
@@ -365,3 +375,52 @@ def start_fix_round_inline(conn, task, now, *, fix_request, actor="kaneo-review"
     db.add_event(conn, now, "fix_round_started", task_id=task["task_id"], actor=actor,
                  detail={"fix_round": a["fix_round"], "review_key": fix.get("review_key")})
     return fix
+
+
+def start_exec_retry_inline(conn, task, now, *, actor="automation", exec_model=None, automatic=False):
+    """Restart an idle execution with the confirmed plan in the caller's transaction.
+
+    Automatic attempts consume the existing budget; an explicit user attempt
+    starts a new budget segment, as other resolve-resume actions do.
+    """
+    from . import automation_policy, exec_config
+    task = db.require_task(conn, task["task_id"])
+    if (task["status"] != "needs_user" or task["failure_code"] != "execution_noop"
+            or not is_automation_managed(task) or not db.task_schedulable(task)):
+        if automatic:
+            return None
+        raise util.KanpilotError("conflict", "当前任务不可沿用计划重新执行")
+    a = automation_of(task)
+    if automatic:
+        policy = automation_policy.policy_for(conn, task["project_id"]) or {}
+        if (not policy.get("enabled") or int(a.get("exec_retries", 0)) >= 1
+                or not automation_budget(task, policy, now)["ok"]):
+            return None
+    if not task["plan_path"] or not task["plan_sha256"] or db.task_extra(task).get("plan_execution_hold"):
+        if automatic:
+            return None
+        raise util.KanpilotError("conflict", "没有可沿用的已确认计划")
+    config = exec_config.load(conn)
+    fallback = (config.get("pi_desktop") or {}).get("fallback")
+    model = exec_model or ("fallback" if config.get("backend") == "pi_desktop" and fallback else "primary")
+    if model not in ("primary", "fallback"):
+        raise util.bad_request("exec_model 必须是 primary 或 fallback")
+    if model == "fallback" and (config.get("backend") != "pi_desktop" or not fallback):
+        raise util.KanpilotError("conflict", "请先配置执行备用模型")
+    a["exec_retries"] = int(a.get("exec_retries", 0)) + 1
+    marker = {"n": a["exec_retries"], "reason": "execution_noop", "from_run_id": task["run_id"],
+              "model": model, "at": now, "actor": actor}
+    a["exec_retry"] = marker
+    if not automatic:
+        a.update(segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0))
+    extra = db.task_extra(task)
+    extra.update(automation=a)
+    extra.pop("verification_override", None)
+    fields = clear_block_fields()
+    fields.update(sent=0, send_state=None, sent_at=None, lock_retained=0, extra_json=extra)
+    transition_task(conn, task, "ready", now, actor, detail={"via": "execution_retry"}, **fields)
+    request, _ = db.create_request(conn, now, "dispatch", f"dispatch:{task['task_id']}",
+                                  task_id=task["task_id"], requested_by=actor)
+    db.add_event(conn, now, "exec_retry_started", task_id=task["task_id"],
+                 request_id=request["request_id"], actor=actor, detail=marker)
+    return request

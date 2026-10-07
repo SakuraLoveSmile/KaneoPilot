@@ -455,7 +455,7 @@ DISPATCH_INSTRUCTION_BRANCH = (
     "提交与推送由调度台完成。按计划的 verify 命令逐条运行验证，最终答复逐条列出命令与退出码。"
 )
 AUTOMATION_FAILURE_STAGES = {
-    "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",
+    "execution_noop": "monitor", "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",
     "no_changes": "delivery", "branch_diverged": "delivery", "gh_unavailable": "delivery", "pr_closed": "delivery",

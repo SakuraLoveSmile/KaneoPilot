@@ -189,9 +189,10 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     # 7. 执行后端可用性门（protocol §5.17.3 / §5.23.3）：当前 exec_config.backend
     #    分支决定检查内容——pi 为 pi 可执行/模型清单/当前配置/凭据/agent.md；
     #    pi_desktop 为连接文件/token/tools/provider/model。任一不可用 → 确定性
-    #    validation_failed（task 进 needs_user），**不自动换模型、agent 或后端**。
+    #    validation_failed（task 进 needs_user），不静默换模型、agent 或后端；
+    #    唯一例外是空转重试使用用户预先配置的备用模型。
     #    失败信息取自 exec_config.check_available 的中文原因。
-    config_snapshot = exec_config.snapshot(conn)
+    config_snapshot = exec_config.snapshot(conn, config_override=exec_config.retry_config(conn, task))
     backend = config_snapshot.get("backend") or "pi"
     if backend == "pi_desktop":
         try:
@@ -219,7 +220,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
                 delivery, require_clean=not (manual_branch or user_replan),
                 expected_head=None if manual_branch else delivery["head_sha"])
             if user_replan:
-                _require(git_delivery.worktree_state_sha256(delivery) == state_sha,
+                _require(core.replan_worktree_matches(delivery, state_sha),
                          "重新规划后工作树内容已变化，请重新准备规划材料")
         except git_delivery.GitDeliveryError as exc:
             raise DispatchCheckFailed(exc.message) from exc

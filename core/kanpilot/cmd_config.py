@@ -40,7 +40,8 @@ def cmd_set_exec_config(ctx, payload: dict) -> dict:
     """set-exec-config {provider?, model?, reasoning_effort?, agent_preset?,
     backend?, controller_backend?, pi_desktop?}（至少一个字段）。校验/保存经
     ``exec_config.save``——当前生效 backend/controller_backend 的必填组合整体
-    校验，失败 bad_request + 中文原因（不静默降级、不自动换模型/agent/后端）。
+    校验，失败 bad_request + 中文原因（不静默降级；仅空转重试可使用
+    预先配置的 pi_desktop.fallback，不自动更换其他模型/agent/后端）。
     成功写 event exec_config_updated（detail 脱敏：pi 分支四字段 +
     controller_backend；pi_desktop 分支五字段含 connection_file 路径——token
     绝不记）→ {"config": {...}}。"""
@@ -73,6 +74,7 @@ def _exec_config_event_detail(config: dict) -> dict:
             constants.CONTROLLER_BACKEND_KEY: controller,
             **{key: block.get(key)
                for key in constants.EXEC_PI_DESKTOP_KEYS},
+            "fallback": block.get("fallback"),
         }
     return {
         **{key: config[key] for key in constants.EXEC_CONFIG_KEYS},

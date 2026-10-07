@@ -502,6 +502,25 @@ struct SessionInfo: Decodable, Identifiable {
 /// permission_mode 须用户显式保存（核心不自动补 auto）。
 /// §5.24.1：同一形状被 planner_config.pi_desktop / review_config.pi_desktop
 /// 复用；plan / Review 角色固定 `ask`（工具权限需在 Plus 处理）。
+struct ExecFallbackModel: Decodable, Equatable {
+    var providerId: String?
+    var modelId: String?
+    var thinkingLevel: String?
+
+    var isComplete: Bool {
+        [providerId, modelId, thinkingLevel].allSatisfy {
+            !($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+    var fields: [String: String] {
+        ["provider_id": providerId ?? "", "model_id": modelId ?? "",
+         "thinking_level": thinkingLevel ?? ""]
+    }
+    var description: String {
+        "\(providerId ?? "未配置") / \(modelId ?? "未配置") · \(thinkingLevel ?? "未配置")"
+    }
+}
+
 struct ExecPiDesktopConfig: Decodable, Equatable {
     var modelSource: String?
     var connectionFile: String?
@@ -509,16 +528,18 @@ struct ExecPiDesktopConfig: Decodable, Equatable {
     var modelId: String?
     var thinkingLevel: String?
     var permissionMode: String?
+    var fallback: ExecFallbackModel?
 
     init(modelSource: String? = nil, connectionFile: String? = nil, providerId: String? = nil,
          modelId: String? = nil, thinkingLevel: String? = nil,
-         permissionMode: String? = nil) {
+         permissionMode: String? = nil, fallback: ExecFallbackModel? = nil) {
         self.modelSource = modelSource
         self.connectionFile = connectionFile
         self.providerId = providerId
         self.modelId = modelId
         self.thinkingLevel = thinkingLevel
         self.permissionMode = permissionMode
+        self.fallback = fallback
     }
 
     /// 生效模型来源（inherit | custom，缺省 custom）。
@@ -551,14 +572,15 @@ struct ExecPiDesktopConfig: Decodable, Equatable {
     }
 
     /// set-*-config pi_desktop 子块（协议 snake_case 键）。
-    var fields: [String: String] {
-        var dict: [String: String] = [:]
+    var fields: [String: Any] {
+        var dict: [String: Any] = [:]
         if let modelSource { dict["model_source"] = modelSource }
         if let connectionFile { dict["connection_file"] = connectionFile }
         if let providerId { dict["provider_id"] = providerId }
         if let modelId { dict["model_id"] = modelId }
         if let thinkingLevel { dict["thinking_level"] = thinkingLevel }
         if let permissionMode { dict["permission_mode"] = permissionMode }
+        if let fallback { dict["fallback"] = fallback.isComplete ? fallback.fields : [:] }
         return dict
     }
 }

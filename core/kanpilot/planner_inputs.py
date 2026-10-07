@@ -288,7 +288,7 @@ def _replan_worktree_state(task):
     from . import git_delivery
     delivery = dict(core.delivery_of(task), repository=task["repository"])
     try:
-        return git_delivery.worktree_state_sha256(delivery)
+        return git_delivery.worktree_state_sha256(delivery, effective_only=True)
     except git_delivery.GitDeliveryError as exc:
         raise util.KanpilotError("validation_failed", exc.message) from exc
 

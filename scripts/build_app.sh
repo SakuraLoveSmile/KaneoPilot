@@ -52,7 +52,7 @@ modules = (
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
     "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
     "harness_plus_adapter", "runtime_operations", "runtime_client",
-    "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
+    "auto_dispatch", "auto_monitor", "cmd_activity", "verify_evidence", "automation_policy", "auto_intake",
     "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "delivery_runner",
     "claude_cli", "claude_planner", "review_settle", "cli_review",
     "process_owner",

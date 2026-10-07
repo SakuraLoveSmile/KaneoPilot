@@ -702,6 +702,7 @@ extension JSONValue {
 enum AutomationPresentation {
     static func title(_ code: String?) -> String? {
         switch code {
+        case "execution_noop": return "执行空转"
         case "verification_unconfirmed": return "验证结果待确认"
         case "fix_rounds_exhausted": return "修复轮已用完"
         case "auto_budget_exceeded": return "超出自动处理预算"
@@ -718,6 +719,7 @@ enum AutomationPresentation {
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
+        case "execution_noop": return "执行轮次已结束，但没有产生任何实际改动（最终回复为空或极短）。可沿用计划重新执行，也可重新规划。"
         case "verification_unconfirmed": return "验证证据尚未确认；查看执行记录后可接受验证结果或重新规划。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
@@ -734,6 +736,7 @@ enum AutomationPresentation {
     }
     static func resumeLabel(_ code: String?) -> String {
         switch code {
+        case "execution_noop": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"
         case "delivery_blocked_files", "delivery_commit_failed": return "重新提交"
@@ -743,5 +746,106 @@ enum AutomationPresentation {
     }
     static func active(_ automation: TaskAutomationView?) -> Bool {
         automation != nil && automation?.manualTakeover != true
+    }
+}
+
+/// 三个详情入口共用；只读生效配置，确认后才发送 resolve。
+struct ExecutionRetryConfirmationSheet: View {
+    let taskID: String
+    @EnvironmentObject private var model: AppViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var config: ExecConfig?
+    @State private var primaryDescription: String?
+    @State private var selectedModel = "primary"
+    @State private var loading = true
+    @State private var error: String?
+    @State private var submitting = false
+
+    private var hasFallback: Bool {
+        config?.effectiveBackend == "pi_desktop" && config?.piDesktop?.fallback?.isComplete == true
+    }
+    private var modelDescription: String? {
+        selectedModel == "fallback" ? config?.piDesktop?.fallback?.description : primaryDescription
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("重新执行（沿用计划）").font(.kpTitle)
+            Text("保留已确认计划，创建新的执行轮次；计入时间预算。")
+                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+            if loading {
+                ProgressView("读取执行模型…")
+            } else {
+                Picker("执行模型", selection: $selectedModel) {
+                    Text("主模型").tag("primary")
+                    if hasFallback { Text("备用模型").tag("fallback") }
+                }.pickerStyle(.segmented)
+                if let modelDescription {
+                    Text("将使用：\(selectedModel == "fallback" ? "备用模型" : "主模型") · \(modelDescription)")
+                        .font(.kpBody).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !hasFallback {
+                    Text("未配置备用模型，本次使用主模型。可在设置 → 执行环境配置备用模型。")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let error {
+                    Text(error).font(.kpSmall).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack(spacing: Spacing.s) {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(submitting ? "提交中…" : "确认重新执行") {
+                    submitting = true
+                    Task {
+                        await model.resolve(taskID: taskID, action: "resume", execModel: selectedModel)
+                        submitting = false
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(loading || modelDescription == nil || submitting || model.busy)
+            }
+        }
+        .padding(Spacing.l).frame(width: 480)
+        .task { await loadModel() }
+    }
+
+    private func loadModel() async {
+        defer { loading = false }
+        do {
+            let result = try await model.client.run("get-exec-config", as: GetExecConfigResponse.self)
+            guard let current = result.config ?? result.defaults else {
+                error = "核心未返回执行配置，无法确认将使用的模型。"
+                return
+            }
+            config = current
+            selectedModel = hasFallback ? "fallback" : "primary"
+            if current.effectiveBackend == "pi_desktop", let desktop = current.piDesktop {
+                if desktop.effectiveModelSource == "inherit" {
+                    do {
+                        let catalog = try await model.client.run("pi-desktop-catalog",
+                            payload: ["connection_file": desktop.connectionFile ?? ExecPiDesktopConfig.defaultConnectionFile],
+                            as: PiDesktopCatalogResponse.self)
+                        if let resolved = catalog.resolvedDefault {
+                            primaryDescription = "\(resolved.providerId) / \(resolved.modelId) · \(resolved.thinkingLevel)"
+                        } else {
+                            error = catalog.defaultDetail ?? "未能确认 Plus 默认模型；请选择已配置备用模型，或在设置固定主模型。"
+                        }
+                    } catch { self.error = "未能确认主模型：\(error.coreMessage)" }
+                } else if desktop.isComplete {
+                    primaryDescription = "\(desktop.providerId ?? "") / \(desktop.modelId ?? "") · \(desktop.thinkingLevel ?? "")"
+                } else {
+                    error = "主执行模型配置不完整，请先在设置补全。"
+                }
+            } else if let provider = current.provider, let name = current.model {
+                primaryDescription = "\(provider) / \(name) · \(current.reasoningEffort ?? "未配置")"
+            } else {
+                error = "主执行模型配置不完整，请先在设置补全。"
+            }
+        } catch { self.error = error.coreMessage }
     }
 }

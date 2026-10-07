@@ -115,6 +115,21 @@ if let legacy = decode(ExecConfig.self, #"{"provider":"closeai","model":"m"}"#) 
     expect(legacy.piDesktop == nil, "旧配置无桌面块")
 }
 
+// 空转备用配置保留三字段；保存不携带权限/连接。
+if let desktop = decode(ExecPiDesktopConfig.self, #"{"model_source":"inherit","connection_file":"/abs/control.json","permission_mode":"auto","fallback":{"provider_id":"backup","model_id":"backup/model","thinking_level":"high"}}"#) {
+    expect(desktop.fallback?.isComplete == true, "备用模型应完整解码")
+    let fields = desktop.fields["fallback"] as? [String: String]
+    expect(fields?["model_id"] == "backup/model", "保存载荷应保留备用模型")
+    expect(fields?.count == 3, "备用配置仅三字段，不携带连接或权限")
+    expect(desktop.permissionMode == "auto", "备用配置不改主权限")
+}
+let clearedFallback = ExecPiDesktopConfig(fallback: ExecFallbackModel())
+expect((clearedFallback.fields["fallback"] as? [String: String])?.isEmpty == true,
+       "清除备用模型提交空对象")
+if let legacy = decode(ExecPiDesktopConfig.self, #"{"provider_id":"p","model_id":"m","thinking_level":"high"}"#) {
+    expect(legacy.fallback == nil, "旧执行配置无需迁移")
+}
+
 // MARK: - 夹具 3：planner_config / review_config 新增字段（§5.24.1）
 
 let plannerConfigJSON = """
@@ -378,7 +393,7 @@ let inheritDesktopConfigJSON = """
 if let cfg = decode(ExecPiDesktopConfig.self, inheritDesktopConfigJSON) {
     expect(cfg.effectiveModelSource == "inherit", "model_source 应解码为 inherit")
     expect(cfg.isComplete == true, "inherit 模式下仅需 connection_file 与 permission_mode 即视为齐备")
-    expect(cfg.fields["model_source"] == "inherit", "fields 应输出 model_source")
+    expect(cfg.fields["model_source"] as? String == "inherit", "fields 应输出 model_source")
 }
 
 let catalogWithDefaultJSON = """

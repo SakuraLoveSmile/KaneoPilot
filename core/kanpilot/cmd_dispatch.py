@@ -105,10 +105,14 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
             )
         # Remote write + re-verify.
         try:
-            remote.update_status(
-                remote.get_client(), task["task_id"], task["project_id"],
-                constants.IN_PROGRESS_SLUG, task["original_todo_slug"],
-            )
+            retry_in_progress = (core.is_automation_managed(task)
+                                 and bool(core.automation_of(task).get("exec_retry"))
+                                 and live_task.get("status") == constants.IN_PROGRESS_SLUG)
+            if not retry_in_progress:
+                remote.update_status(
+                    remote.get_client(), task["task_id"], task["project_id"],
+                    constants.IN_PROGRESS_SLUG, task["original_todo_slug"],
+                )
             after = remote.get_task(remote.get_client(), task["task_id"])
             after_task = after.get("task") or {}
             verified = (
@@ -148,7 +152,8 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
                 conn, now, "kaneo_transition", task_id=task["task_id"],
                 actor="kaneo-dispatch",
                 detail={"from": task["original_todo_slug"],
-                        "to": constants.IN_PROGRESS_SLUG},
+                        "to": constants.IN_PROGRESS_SLUG,
+                        "write_skipped": retry_in_progress},
             )
         return {
             "status": "submitting",
@@ -220,10 +225,7 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             result={"outcome": "succeeded", "send_state": "sent"},
             send_state="sent", evidence=evidence,
         )
-        interval = db.get_setting(
-            conn, "monitor_interval_seconds",
-            constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
-        )
+        interval = util.monitor_interval(conn)
         db.create_request(
             conn, now, "monitor", f"monitor:{task['task_id']}",
             task_id=task["task_id"], requested_by="scheduler",
@@ -1037,7 +1039,7 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
                 delivery, require_clean=not (manual_branch or user_replan),
                 expected_head=None if manual_branch else delivery.get("head_sha"))
             if user_replan:
-                util.require(git_delivery.worktree_state_sha256(delivery) == state_sha,
+                util.require(core.replan_worktree_matches(delivery, state_sha),
                              "重新规划后工作树内容已变化，请重新准备规划材料", "validation_failed")
         except git_delivery.GitDeliveryError as exc:
             raise util.KanpilotError("validation_failed", exc.message) from exc
