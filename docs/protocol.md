@@ -257,7 +257,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 - `plan-scan`：距上次该请求完成 ≥ `plan_scan_interval_hours`（默认 24）且无活动同 key 请求 → 建 `plan-scan`。
 - `monitor`：每个 `running|in_review`（仅当 review 监控 pending?——in_review 由 review 请求覆盖，monitor 只针对 `running`）且无活动 monitor 请求的 task → 建 `monitor`（key `monitor:<task_id>`）。
 - `review`：每个 `in_review` 且无活动 review 请求、无未消费的 review 结论的 task → 建 `review`（key `review:<task_id>`）。
-- `queued` 请求的 `not_before` 语义：monitor 连续观察由 `not_before = 上次 report + monitor_interval_seconds`（默认 900，对齐 15 分钟周期）控制，避免同一 task 每 tick 重复建。tick 只建 `not_before <= now` 不限制的请求——即 tick 创建时立即生效的是 not_before 已过期的；新 cycle 请求由 report 时写 not_before。实现上 tick 对 running task 建 monitor 请求的条件：无活动 monitor 请求 **且**（无历史 monitor 完成记录 或 最近一次完成时间 + interval <= now）。
+- `queued` 请求的 `not_before` 语义：monitor 连续观察由 `not_before = 上次 report + monitor_interval_seconds`（默认 120 秒；旧库恰为 900 时读取按 120 解释，不改库值）控制，避免同一 task 每 tick 重复建。tick 只建 `not_before <= now` 不限制的请求——即 tick 创建时立即生效的是 not_before 已过期的；新 cycle 请求由 report 时写 not_before。实现上 tick 对 running task 建 monitor 请求的条件：无活动 monitor 请求 **且**（无历史 monitor 完成记录 或 最近一次完成时间 + interval <= now）。
 
 ### 4.9 暂停
 
@@ -306,7 +306,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 ### 5.2 tick / overview / list / get
 
 - `tick {}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`
-- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "board": {"needs_plan": 1, "todo": 2, "in_progress": 1, "in_review": 0, "done": 5, "failed": 0}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 900, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
+- `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "board": {"needs_plan": 1, "todo": 2, "in_progress": 1, "in_review": 0, "done": 5, "failed": 0}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 120, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
 - `list-tasks {stage?, status?, board_column?, needs_attention?: bool, save_state?: active|archived|trashed|all}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, board_column, lifecycle_column, exception, board_substatus, last_checked_at, review_summary, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at, save_state, saved_at, auto_advance_paused, move_out_eligibility: {allowed: bool, reason: string|null}}`。`board_column` 过滤参数按 §2/§5.15.4 归列结果过滤（派生后过滤）；`save_state` 缺省 `active`。
 - `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_reason, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority,`（`display_status` 用 §2 同一中文显示词汇；`status` 为库内原值，失联派生只在 `display_status` 标 `执行端失联`） not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
 - `list-events {task_id?, limit?: 200}` → `{"events": [{id, at, task_id, request_id, kind, actor, detail}]}` 倒序。
@@ -632,7 +632,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 - `get-exec-config {}` → `{"config": {...}|null, "defaults": {...}}`；`config=null` 表示从未保存，`defaults` 恒为初始默认。
 - `set-exec-config {provider?, model?, reasoning_effort?, agent_preset?}`（至少一个字段；未知字段 `bad_request`）：
   - 对照 `exec-capabilities` 校验：`provider`/`model` 必须存在；`reasoning_effort` 必须是**该模型支持值之一**（禁止显示/接受模型不支持的等级）；`agent_preset` 必须在 roster（`<name>.md` 存在）且无 `broken`。
-  - 失败 → `bad_request` + 具体原因，**不静默降级、不自动换模型或 agent**；成功 → 写 `exec_config` 并返回 `{"config": {...}}`。合并更新（只给部分字段时保留其余已存值；从未保存时其余字段取默认）。
+  - 失败 → `bad_request` + 具体原因，**不静默降级、不自动换模型或 agent（仅 §5.27.8 的 execution_noop 重试可使用用户预先配置的备用模型）**；成功 → 写 `exec_config` 并返回 `{"config": {...}}`。合并更新（只给部分字段时保留其余已存值；从未保存时其余字段取默认）。
 - `exec-capabilities {}` →
 
 ```json
@@ -656,7 +656,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 ### 5.17.3 配置快照与派发阻断
 
 - **快照固化**：dispatch claim 时把当前生效配置复制进该轮 `execution_rounds.config_json`；此后 `set-exec-config` 只影响新轮次。
-- **派发阻断**：dispatch claim 校验链（§4.5）追加第 7 步 `exec-capabilities` 可用性检查（`ok==true`，即 pi 可执行、models.json 可读、当前配置的 provider/model/effort/preset 有效、凭据就绪）。不满足 → 按 §4.5 确定性失败处理（`validation_failed`，task → `needs_user`），**不自动换模型或 agent**；`dispatch-start` 落盘前复核同一条件（失败 → `validation_failed`，不启动进程）。
+- **派发阻断**：dispatch claim 校验链（§4.5）追加第 7 步 `exec-capabilities` 可用性检查（`ok==true`，即 pi 可执行、models.json 可读、当前配置的 provider/model/effort/preset 有效、凭据就绪）。不满足 → 按 §4.5 确定性失败处理（`validation_failed`，task → `needs_user`），**不自动换模型或 agent（仅 §5.27.8 的 execution_noop 重试可使用用户预先配置的备用模型）**；`dispatch-start` 落盘前复核同一条件（失败 → `validation_failed`，不启动进程）。
 - 能力检查反映**当前进程环境**（pi auth 状态即执行端环境）；执行端环境缺凭据即阻止派发。
 
 ## 5.18 PI 执行接入（backend=pi，v1.6）
@@ -702,6 +702,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - **`dispatch-fail` 沿用**；`send_state=unknown` 时保留启动意图（pid/session_id/config）供恢复与取证——发送结果不明不得清空恢复信息。
 
 ### 5.18.4 监控、完成判定与异常
+
+自动化管理的 Plus 执行完成须先检查 execution_noop（§5.27.1），再验证执行轮工具证据；目标起草轮的成功命令不能作为执行验证。
 
 - monitor 读取轮次状态与执行证据：`get-session` 返回的 `SessionInfo` 含 `run_status`，并返回 `round_detail`：
 
@@ -1212,6 +1214,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 #### 5.27.1 dispatch/monitor 改为确定性流程
 
+**空转检查（仅自动化管理 Plus 执行）**：completed、exit 0 后、验证前，信号 A 为 PR 交付有效改动集为空；信号 B 为最终回复修剪空白后少于 16 个 Unicode 码点且执行窗口仅有只读白名单工具。任一成立上报 needs_user / execution_noop。未知工具按有动作处理。白名单为核实的 UpdateGoalProgress、Glob、Read 等；不得把未知工具默认为只读。事件只存信号、工具计数、回复长度，不存回复正文、命令或路径。monitor 仅上报，由核心决策是否重试。
+
 两个新模块由 `executor_runner` 调用，入口签名与 `pi_desktop_controller.run_stage` 一致，只是去掉了 prompt；`sleep`/`clock` 可注入，便于测试：
 
 ```python
@@ -1279,7 +1283,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run,
 
    advance-task 返回 remote_conflict（核心已阻塞任务）或 remote_unavailable → report failed，下轮重试；提交是幂等的。最后 `record-cost` 记一条 Plus 执行轮次（cost_usd=null，source=pi_desktop）。
 8. 仍在运行 → heartbeat + report succeeded，progress 记录摘要。`terminal_superseded` 不算失败。
-9. 明确失败（failed、非 0 退出、超时、截断、身份不符、send_state=unknown）→ report needs_user（execution_failed）。不重试、不重建、不重发。
+9. 明确失败（failed、非 0 退出、超时、截断、身份不符、send_state=unknown）→ report needs_user（execution_failed）。不重试、不重建、不重发；execution_noop 不属于这里的明确失败，仅按 §5.27.8 重试。
 10. 旧后端（dsh/headless/ATIF）轮次永远读不到 → report needs_user（failure_code=observation_blocked，note「旧后端轮次无法观察，请人工判断」）。其他读不到的情况 → report failed（observation_blocked），下轮再试。
 
 **路由（主控 Step 14）：** `executor_runner.run_stage` 的新分流：
@@ -1543,6 +1547,13 @@ needs_input 计划在既有流程中已经进入 needs_user，不在这里处理
 
 #### 5.27.8 同任务修复轮
 
+**执行空转重试（冻结 2026-10-07）**：自动化管理、项目策略开启、automation_budget 通过且 extra.automation.exec_retries < 1 时，cmd_report 在同事务阻塞后启动重试：计数加一、清空 sent/send_state/sent_at/lock_retained 和 verification_override，保留已确认 plan_sha256，写 extra.automation.exec_retry={n,reason,from_run_id,model,at,actor}，转 ready 并自行创建 dispatch 请求、写 exec_retry_started。自动最多一次，第二次停在 needs_user / execution_noop；Review 修复轮与用户重新规划清零，独立于 fix_round。手动 resolve resume 可重复，但每次确认且计入时间预算，沿用现有手动预算处置。
+
+执行配置 pi_desktop.fallback={provider_id,model_id,thinking_level} 可为空；连接和权限继承主配置，不存 token。重试默认用配置好的 fallback，无配置用 primary 并留痕；resolve 可带 exec_model=primary|fallback，无 fallback 不允许选择 fallback。claim 取覆盖快照并冻结 model_source=custom，派发事件和轮次记录实际模型。备用不可用 validation_failed，不再切其他模型。本节仅为“不自动重试/换模型”的窄例外，不影响规划、Review 和明确执行失败。
+
+仅有当前 exec_retry 标记的重试接受远端 in-progress；begin_send 已是 in-progress 时只读核验、不做同状态 PUT。不符 remote_conflict，不降低计划哈希/轮次身份与发送不明保护。
+
+
 **register-review 的 same_task 分支（主控，cmd_exec 815–905）：**
 
 - **适用范围：** 只用于受自动化管理的任务，payload 带 `fix_mode:"same_task"`、`fix:{title, description, priority}`、`review_key` 和既有的 Review 身份字段。对这类任务，旧的 `fix_task_id`/create-review-fix 路径一律返回 conflict。
@@ -1589,6 +1600,8 @@ publish-plan:629 和 dispatch_validate:111 都改用它。begin-send 依靠 clai
 
 **sync-tasks（主控）：** 受自动化管理的任务只更新元数据、kaneo_status 和事件，不做任何状态转移，也不改 requirements_sha256。这样需求变化会由 advance-task 和 dispatch_validate 的既有指纹校验拦下，停给用户处理。
 
+执行验证证据窗口：仅认 goal_approved 系统事件之后的工具结果；可与 job.goal_approval.execution_turn_id 核对。标记缺失回退整轮，并记录 evidence_window=whole_round；正常为 after_goal_approved。不得隐匿回退。
+
 #### 5.27.9 执行验证证据
 
 **计划格式：**
@@ -1626,6 +1639,11 @@ exit_code 缺失或不是整数时记为 None。
 - 不做任何猜测：不从最终消息文字中推断「已验证」。Plus 工具事件如果不带 exit_code，停下汇报（见 Step 4 停止条件和 Step 15-F）。
 
 #### 5.27.10 交付：提交、推送、PR 与合并
+
+有效改动集排除且默认不提交 HEAD 未跟踪（即使已暂存）的普通文件 .pi/goal/<name>.md（恰为三段，文件和 .pi/.pi/goal 均非符号链接）；已跟踪改动、其他未跟踪和链接一律保留。干净检查、execution_noop 信号 A 与 no_changes 使用同一有效集。不得写共享 .git/info/exclude。
+
+只读命令 execution-activity {task_id,run_id} 严格核对当前执行身份，只返回 effective_change_count（非负整数），不返回路径或内容；不改变库或工作树。
+
 
 **delivery-commit（包 C，`cmd_delivery.py`）：**
 
@@ -1844,6 +1862,9 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 
 #### 5.27.13 待处理原因、处置与事件
 
+execution_noop：阶段 monitor，标题“执行空转”，动作 resume（重新执行，沿用计划）、replan、mark_done、dismiss；绝不提供 accept_verification 或通用 retry。事件 exec_retry_started 记录执行重试标记；空转证据仅含信号种类、工具计数、回复长度。no_changes 仍属 delivery。
+
+
 | failure_code | 来源 | 自动化任务可用动作 |
 |---|---|---|
 | verification_unconfirmed | monitor | accept_verification（→ running + monitor）、replan、mark_done、dismiss |
@@ -1931,3 +1952,6 @@ observer 续接始终只读，不发送 prompt、不批准 Goal。若停在待�
 ### Plus 转录超限标记传递（2026-10-07）
 
 `kp_runtime_messages` 的结果增加可选 `truncated: boolean`、`reason: string`。Plus `pi_session_get` 返回截断结果时，适配层保留 `session_id`、`messages: []` 和显式 `truncated: true` 及脱敏原因，不传递不可解析的 `preview`，不把超限结果转换为完整空会话。RuntimeClient 和历史只读客户端须在组装正常 session 前透传该顶层标记。采集器沿用既有同游标缩页（40→20→10→5），单页仍超限或分页链断裂时继续拒绝发布/完成；不放宽完整转录、消息身份或分页边界校验。读取修复不重新发送规划指令、不新建会话、不变更已失败请求的状态。
+
+监控间隔读取契约：默认 120 秒，旧播种值恰为 900 按 120 解释，其他合法值原样返回；overview 与首检/后续 monitor 共用读取辅助，不重写 SQLite。
+规划 _fail_unexpected 对 GitDeliveryError 记录 code 与已脱敏 message，其他异常仅类名；不持久化 URL 凭据或连接 token。

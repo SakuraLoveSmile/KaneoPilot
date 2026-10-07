@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS execution_rounds(
 CREATE INDEX IF NOT EXISTS execution_rounds_save ON execution_rounds(save_state, updated_at);
 ```
 
-settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默认 1200) `monitor_interval_seconds`(默认 900) `plan_scan_interval_hours`(默认 24) `plan_scan_anchor`(默认每日 09:00 Asia/Shanghai) `last_plan_scan_at` `migration`(JSON) `workspace_id` `dispatch_serial`(派发串行位持有者 run_id，空=空闲) `session_poll_seconds`(默认 2，订阅不可用时的增量检查间隔) `planner_inputs_root`（v2：规划材料根目录，缺省 `<app_support>/planner_inputs`） `codex_timeout_seconds`（v2：Codex 规划单轮上限，缺省回退 `executor_timeout_seconds`=1800）。
+settings 键：`paused_global` `paused_stages`(JSON 数组) `lease_seconds`(默认 1200) `monitor_interval_seconds`(默认 120；旧值 900 读取按 120 解释) `plan_scan_interval_hours`(默认 24) `plan_scan_anchor`(默认每日 09:00 Asia/Shanghai) `last_plan_scan_at` `migration`(JSON) `workspace_id` `dispatch_serial`(派发串行位持有者 run_id，空=空闲) `session_poll_seconds`(默认 2，订阅不可用时的增量检查间隔) `planner_inputs_root`（v2：规划材料根目录，缺省 `<app_support>/planner_inputs`） `codex_timeout_seconds`（v2：Codex 规划单轮上限，缺省回退 `executor_timeout_seconds`=1800）。
 
 v1.5 新增键：`exec_config`(JSON，protocol.md §5.17 执行配置；v1.6 缺省=初始默认 `CloseAI/deepseek-flash/xhigh/default`；v3 起允许 `backend`/`pi_desktop` 扩展字段，protocol §5.23.3——缺 `backend` 按 `pi` 解释)、`worktrees_root`(独立 worktree 根目录路径字符串；空=未设置，取 `<app_support>/worktrees`)、`dsh_round_timeout_seconds`(默认 14400)。v1.6 新增键：`pi_round_timeout_seconds`(默认 14400，缺省回退读旧键 dsh_round_timeout_seconds)、`executor_timeout_seconds`(默认 1800，执行端单轮上限)、`executor_runs`(JSON，四 stage 最近一次运行记录 pid/started_at/log/exit_code/finished_at)、`planner_config`(JSON，v2.1 Codex 规划配置 {standard, review_fix} 各含 planner_model/reasoning_effort + updated_at；v3 起加 `default_method` ∈ builtin|spec_plan，缺省 builtin，protocol §5.23.2；独立于 exec_config，仅影响新规划请求)。v3 新增键：`review_config`(JSON，protocol §5.23.4 Review 环境 {mode:"inherit"|"custom", provider?, model?, reasoning_effort?, updated_at}；未保存/inherit 保持现状=继承本机 PI 默认会话配置)。**不写入任何 pi 全局配置（`~/.pi/agent/*` 等）**；凭据只查 `pi auth check` 退出码或 PI-Desktop 连接文件 token 的内存就绪性，不存值。
 
@@ -285,3 +285,7 @@ T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩�
 ## 全自动流水线 v5 增量
 
 以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan，accept_verification 仅回到 running；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。
+
+## 执行空转与备用模型（2026-10-07）
+
+`execution_noop` failure_stage=monitor。`task.extra.automation.exec_retries` 非负整数，自动上限 1，用户重新规划和修复轮重置；`exec_retry={n,reason,from_run_id,model,at,actor}` 保留重试身份，model 为 primary/fallback。`exec_config.pi_desktop.fallback={provider_id,model_id,thinking_level}` 可空，继承主连接与权限。无需 schema 升版，同事务整体读改写 extra，规则见 protocol §5.27.8。
