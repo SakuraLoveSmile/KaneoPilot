@@ -348,6 +348,22 @@ def test_nested_plus_output_strings_redact_connection_token_without_losing_field
     assert stopped["detail"]["message"] == "request failed «redacted»"
 
 
+@pytest.mark.parametrize("running, pending", [(True, []), (False, []), (True, [{"id": "permission-1"}])])
+def test_plus_status_unwraps_real_nested_status_and_preserves_raw(running, pending):
+    raw = {"status": {"isRunning": running, "currentTurnId": "turn-1",
+                      "pendingToolConfirmations": pending}, "isRunning": not running}
+    client = MagicMock()
+    client.call_tool.return_value = raw
+    with patch("kanpilot.harness_plus_adapter._get_client", return_value=(client, {})):
+        status = harness_plus_adapter.plus_status("/fake", session_id="session-1")
+    assert status["is_running"] is running
+    assert isinstance(status["is_running"], bool)
+    assert status["current_turn_id"] == "turn-1"
+    assert bool(status["pending_permission"]) is bool(pending)
+    assert status["raw_status"] == raw
+    client.call_tool.assert_called_once_with("pi_agent_status", {"sessionId": "session-1"})
+
+
 def test_runtime_accept_maps_to_plus_approve():
     client = MagicMock()
     client.call_tool.side_effect = [

@@ -94,7 +94,7 @@ struct SessionReaderView: View {
             Text("永久移除没有实际会话记录的列表项，保留任务、历史与文件；操作不可恢复。若已开始运行或出现会话记录，核心会拒绝删除。")
         }
         .onChange(of: store.selectedRunID) { _, _ in startConfirmation = nil }
-        .confirmationDialog("向 Plus 请求开始规划？", isPresented: Binding(
+        .confirmationDialog("向 Plus \(startConfirmation?.startLabel ?? "请求开始")？", isPresented: Binding(
             get: { startConfirmation != nil },
             set: { if !$0 { startConfirmation = nil } }
         ), titleVisibility: .visible, presenting: startConfirmation) { expected in

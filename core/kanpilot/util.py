@@ -252,3 +252,10 @@ def new_uuid() -> str:
     import uuid
 
     return str(uuid.uuid4())
+
+
+def monitor_interval(conn) -> int:
+    """Read the effective interval without rewriting legacy seeded settings."""
+    from . import constants, db
+    interval = db.get_setting(conn, "monitor_interval_seconds", constants.DEFAULT_MONITOR_INTERVAL_SECONDS)
+    return 120 if interval == 900 else interval
