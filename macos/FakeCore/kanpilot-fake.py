@@ -1400,10 +1400,29 @@ def cmd_resolve(state, payload):
         if action in ("resume", "accept_verification"):
             if action not in allowed_actions(task, requests):
                 return fail_action("核心未允许此动作")
-            for k in clear:
-                ov[k] = None
-            ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
-            enqueue_request(s, tid, "monitor")
+            if task.get("failure_code") == "execution_noop":
+                fallback = ((s.get("exec_config") or {}).get("pi_desktop") or {}).get("fallback")
+                selected = payload.get("exec_model") or ("fallback" if fallback else "primary")
+                if selected not in ("primary", "fallback") or (selected == "fallback" and not fallback):
+                    return fail_action("备用模型未配置或模型选择不合法")
+                for k in clear:
+                    ov[k] = None
+                ov.update({"status": "ready", "display_status": "已排队", "stage": "dispatch",
+                           "send_state": "not_sent", "sent": 0,
+                           "_automation_allowed": ["enqueue", "replan", "mark_done", "dismiss"]})
+                automation = dict(task.get("automation") or {})
+                automation["exec_retries"] = automation.get("exec_retries", 0) + 1
+                automation["exec_retry"] = {"n": automation["exec_retries"], "reason": "execution_noop",
+                                            "model": selected, "actor": "user", "at": iso(utcnow())}
+                ov["automation"] = automation
+                enqueue_request(s, tid, "dispatch")
+                append_event(s, "exec_retry_started", task_id=tid, actor="user",
+                             detail=automation["exec_retry"])
+            else:
+                for k in clear:
+                    ov[k] = None
+                ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
+                enqueue_request(s, tid, "monitor")
         elif action == "retry":
             if task["status"] != "needs_user" or task.get("send_state") == "unknown":
                 return fail_action("当前状态不允许 retry")
@@ -2104,6 +2123,7 @@ def cmd_exec_capabilities(state, payload):
     不再有 dsh/permission 字段）。"""
     return {
         "ok": True,
+        "pi_desktop": {"available": True, "detail": "隔离 FakeCore 就绪"},
         "pi": {"path": os.path.expanduser("~/.npm-global/bin/pi"),
                "version": "0.85.1",
                "home": os.path.expanduser("~/.pi")},
@@ -2139,7 +2159,46 @@ def cmd_get_exec_config(state, payload):
             "defaults": dict(EXEC_CONFIG_DEFAULTS)}
 
 
+def cmd_pi_desktop_catalog(state, payload):
+    providers = [{"id": "deepseek", "name": "DeepSeek", "enabled": True,
+                  "default_model_id": "deepseek-v4-flash", "models": [
+                      {"id": "deepseek-v4-flash", "name": "DeepSeek Flash",
+                       "thinking_levels": ["low", "medium", "high"], "default_thinking_level": "high"},
+                      {"id": "deepseek-v4-pro", "name": "DeepSeek Pro",
+                       "thinking_levels": ["medium", "high", "max"], "default_thinking_level": "high"}]},
+                 {"id": "backup", "name": "备用 Provider", "enabled": True,
+                  "default_model_id": "backup-model", "models": [
+                      {"id": "backup-model", "name": "备用模型",
+                       "thinking_levels": ["low", "high"], "default_thinking_level": "high"}]}]
+    return {"connection_file": payload.get("connection_file") or "/tmp/fake-plus-control.json",
+            "providers": providers, "default_provider_id": "deepseek",
+            "default_model_id": "deepseek-v4-flash",
+            "selected_provider_id": payload.get("provider_id") or "deepseek", "catalog_source": "cache",
+            "resolved_default": {"provider_id": "deepseek", "model_id": "deepseek-v4-flash", "thinking_level": "high"}}
+
+
 def cmd_set_exec_config(state, payload):
+    if payload.get("backend") == "pi_desktop" or "pi_desktop" in payload:
+        candidate = copy.deepcopy(state.get("exec_config") or EXEC_CONFIG_DEFAULTS)
+        candidate["backend"] = payload.get("backend", candidate.get("backend", "pi"))
+        desktop = candidate.setdefault("pi_desktop", {})
+        desktop.update(payload.get("pi_desktop") or {})
+        source = desktop.get("model_source", "custom")
+        if source not in ("inherit", "custom"):
+            return fail("模型来源不合法", "bad_request")
+        required = ["permission_mode"] if source == "inherit" else ["provider_id", "model_id", "thinking_level", "permission_mode"]
+        if not all(desktop.get(key) for key in required):
+            return fail("Plus 配置不完整", "bad_request")
+        fallback = desktop.get("fallback")
+        if fallback and not all(fallback.get(k) for k in ("provider_id", "model_id", "thinking_level")):
+            return fail("备用模型需填写全部三字段", "bad_request")
+        if not fallback: desktop["fallback"] = None
+        candidate["updated_at"] = iso(utcnow())
+        def apply(s):
+            s["exec_config"] = candidate
+            append_event(s, "exec_config_updated", detail={"backend": candidate["backend"]})
+        mutate(state, apply)
+        return {"config": candidate, "defaults": dict(EXEC_CONFIG_DEFAULTS)}
     fields = [k for k in EXEC_CONFIG_DEFAULTS if k in payload]
     if not fields:
         return fail("set-exec-config 至少提供一个字段"
@@ -2697,7 +2756,7 @@ def automation_policy(enabled=False):
 
 
 def automation_tasks():
-    failures = ["verification_unconfirmed", "execution_failed", "fix_rounds_exhausted",
+    failures = ["execution_noop", "verification_unconfirmed", "execution_failed", "fix_rounds_exhausted",
                 "auto_budget_exceeded", "automation_stopped", "review_blocked", "review_backend_unsupported",
                 "branch_exists", "delivery_base_unknown", "delivery_blocked_files", "delivery_commit_failed",
                 "no_changes", "branch_diverged", "gh_unavailable", "pr_closed", "remote_conflict",
@@ -2707,6 +2766,7 @@ def automation_tasks():
         tid = "auto-" + (code or ["waiting-plan", "planning", "long-pr"][i - len(failures)])
         status = "needs_user" if code else ["needs_plan", "planning", "in_review"][i - len(failures)]
         actions = ["resume", "replan", "mark_done", "dismiss", "recheck"]
+        if code == "execution_noop": actions = ["resume", "replan", "mark_done", "dismiss"]
         if code == "verification_unconfirmed": actions = ["accept_verification", "replan", "mark_done", "dismiss"]
         if code in ("no_changes", "execution_failed"): actions.remove("resume")
         if code in ("planner_failed", "needs_input"): actions = ["replan", "dismiss", "prepare_plan"]
@@ -2715,7 +2775,7 @@ def automation_tasks():
         if code in ("review_backend_unsupported", "branch_diverged", "gh_unavailable", "pr_closed"): actions = ["resume", "mark_done", "dismiss"]
         stage = ("plan" if code in ("branch_exists", "delivery_base_unknown", "planner_failed", "needs_input") or status in ("needs_plan", "planning")
                  else "delivery" if code in ("delivery_blocked_files", "delivery_commit_failed", "no_changes", "branch_diverged", "gh_unavailable", "pr_closed")
-                 else "monitor" if code in ("verification_unconfirmed", "execution_failed") else "review")
+                 else "monitor" if code in ("execution_noop", "verification_unconfirmed", "execution_failed") else "review")
         result.append({"task_id": tid, "title": "自动处理示例 · " + (code or status),
                        "project_id": PROJECTS["Music"], "project_name": "Music", "status": status,
                        "stage": stage, "kaneo_status": "to-do" if stage == "plan" else "in-review",
@@ -2845,6 +2905,10 @@ COMMANDS = {
     "list-sessions": lambda s, p: cmd_list_sessions(s, p),
     "get-session": lambda s, p: cmd_get_session(s, p),
     "session-messages": lambda s, p: cmd_session_messages(s, p),
+    "pi-desktop-catalog": lambda s, p: cmd_pi_desktop_catalog(s, p),
+    "pi-desktop-probe": lambda s, p: {"connected": True, "available": True, "tools_ok": True,
+                                    "detail": "隔离 FakeCore 就绪", "attachment_supported": False,
+                                    "supported_operations": [], "version": "fake"},
     "get-exec-config": lambda s, p: cmd_get_exec_config(s, p),
     "set-exec-config": lambda s, p: cmd_set_exec_config(s, p),
     "exec-capabilities": lambda s, p: cmd_exec_capabilities(s, p),

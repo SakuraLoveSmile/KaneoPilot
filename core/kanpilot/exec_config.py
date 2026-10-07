@@ -117,6 +117,9 @@ def _merge_pi_desktop(block: Optional[dict]) -> Optional[dict]:
         else:
             model_source = "inherit"
     cleaned["model_source"] = model_source
+    fallback = block.get("fallback")
+    if isinstance(fallback, dict) and fallback:
+        cleaned["fallback"] = {key: fallback[key] for key in ("provider_id", "model_id", "thinking_level") if key in fallback}
     if not cleaned.get("connection_file"):
         cleaned["connection_file"] = constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
     return cleaned
@@ -201,6 +204,10 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         block = fields["pi_desktop"]
         if not isinstance(block, dict):
             raise util.bad_request("pi_desktop 必须是对象")
+        if "fallback" in block:
+            error = validate_fallback(block["fallback"])
+            if error is not None:
+                raise util.bad_request(f"执行配置校验失败：{error}")
         merged_block = dict(stored.get("pi_desktop") or {})
         merged_block.update(block)
         merged_stored["pi_desktop"] = merged_block
@@ -564,6 +571,37 @@ def capabilities(
     }
 
 
+def validate_fallback(fallback) -> Optional[str]:
+    """Optional execution fallback contains only model identifiers, never credentials."""
+    if fallback is None or fallback == {}:
+        return None
+    if not isinstance(fallback, dict):
+        return "pi_desktop.fallback 必须是对象或 null"
+    keys = ("provider_id", "model_id", "thinking_level")
+    if any(not isinstance(fallback.get(key), str) or not fallback[key].strip() for key in keys):
+        return "pi_desktop.fallback 需完整填写 provider_id、model_id、thinking_level"
+    if fallback["thinking_level"] not in PI_DESKTOP_THINKING_LEVELS:
+        return "pi_desktop.fallback.thinking_level 不合法"
+    return None
+
+
+def retry_config(conn: sqlite3.Connection, task) -> dict:
+    """Apply only the explicitly selected retry model before claim freezes it."""
+    from . import core
+    config = load(conn)
+    marker = core.automation_of(task).get("exec_retry") or {}
+    if marker.get("model") != "fallback":
+        return config
+    block = dict(config.get("pi_desktop") or {})
+    fallback = block.get("fallback")
+    if config.get("backend") != "pi_desktop" or not fallback or validate_fallback(fallback):
+        raise util.KanpilotError("validation_failed", "执行备用模型未配置或配置已失效")
+    block.update(fallback)
+    block["model_source"] = "custom"
+    config["pi_desktop"] = block
+    return config
+
+
 def validate_pi_desktop_block(block: Optional[dict]) -> Optional[str]:
     """pi_desktop 分支保存校验（§5.23.3 / T7.1）：
     - model_source 为 inherit 时：允许 provider_id/model_id/thinking_level 缺省，仅要求 connection_file 与 permission_mode；
@@ -573,6 +611,9 @@ def validate_pi_desktop_block(block: Optional[dict]) -> Optional[str]:
     """
     if not isinstance(block, dict) or not block:
         return "pi_desktop 配置未保存（backend=pi_desktop 需先保存完整块）"
+    fallback_error = validate_fallback(block.get("fallback"))
+    if fallback_error is not None:
+        return fallback_error
     model_source = block.get("model_source") or "custom"
     if model_source not in constants.MODEL_SOURCES:
         return f"model_source 不支持：{model_source}（可用：{', '.join(constants.MODEL_SOURCES)}）"

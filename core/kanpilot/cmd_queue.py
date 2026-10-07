@@ -295,6 +295,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     note = payload.get("note")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
+    if "exec_model" in payload and (action != "resume" or payload["exec_model"] not in ("primary", "fallback")):
+        raise util.bad_request("exec_model 仅支持 resume 的 primary 或 fallback")
     accepted_remote = _accept_remote_for_resolution(ctx, payload)
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
@@ -335,6 +337,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("conflict", "当前状态不可继续")
             code = task["failure_code"]
             from . import automation_policy, review_config
+            if "exec_model" in payload and code != "execution_noop":
+                raise util.bad_request("exec_model 仅用于执行空转的重新执行")
+            if action == "resume" and code == "execution_noop":
+                new_request = core.start_exec_retry_inline(conn, task, now, actor="user", exec_model=payload.get("exec_model"))
+                db.update_task(conn, task["task_id"], now, resolution=resolution)
+                db.add_event(conn, now, "resolved", task_id=task["task_id"], actor="user", detail=resolution)
+                return {"ok": True, "task_status": "ready",
+                        "request": derive.request_view(new_request, ctx.now)}
             if action == "accept_verification":
                 if code != "verification_unconfirmed" or not task["run_id"]:
                     raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
@@ -466,7 +476,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                                        segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0),
                                        replan_requested_at=now,
                                        replan_remote_status=(accepted_remote or {}).get("kaneo_status"),
-                                       replan_worktree_sha256=None)
+                                       replan_worktree_sha256=None, exec_retries=0, exec_retry=None)
                 db.update_task(conn, task["task_id"], now, sent=0, send_state=None, sent_at=None, lock_retained=0)
             new_request = None
 

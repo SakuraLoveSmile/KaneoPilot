@@ -284,6 +284,7 @@ struct RequestDetailView: View {
     @State private var error: String?
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
+    @State private var confirmExecutionRetry = false
     @State private var confirmCancelPlan = false
     @State private var generation = 0
 
@@ -304,6 +305,12 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("请求详情")
+        .sheet(isPresented: $confirmExecutionRetry) {
+            if let taskID = detail?.request?.taskId {
+                ExecutionRetryConfirmationSheet(taskID: taskID)
+            }
+        }
+
         .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
                             titleVisibility: .visible) {
             Button("终止计划", role: .destructive) {
@@ -714,7 +721,11 @@ struct RequestDetailView: View {
                    : action == "accept_verification" ? "接受验证结果"
                    : AutomationPresentation.active(detail.task?.automation) ? "转为人工处理" : "清除阻塞标记") {
                 guard let taskID else { return }
+                if action == "resume" && detail.task?.exception?.failureCode == "execution_noop" {
+                    confirmExecutionRetry = true
+                } else {
                 Task { await model.resolve(taskID: taskID, action: action) }
+                }
             }.disabled(model.busy || taskID == nil)
         case "retry":
             Button("重试") {

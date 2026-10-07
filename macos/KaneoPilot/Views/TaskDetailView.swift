@@ -11,6 +11,7 @@ struct TaskDetailView: View {
     @State private var confirm: ConfirmableAction?
     /// v2 §5.20：回收站任务「永久从列表移除」确认。
     @State private var confirmingPurge = false
+    @State private var confirmExecutionRetry = false
 
     /// 需二次确认的动作（§4.1 + §6 危险操作清单）。
     enum ConfirmableAction: Identifiable {
@@ -143,6 +144,9 @@ struct TaskDetailView: View {
             .padding(Spacing.l)
         }
         .safeAreaInset(edge: .bottom) { actionBar }
+        .sheet(isPresented: $confirmExecutionRetry) {
+            ExecutionRetryConfirmationSheet(taskID: detail.taskId)
+        }
         .confirmationDialog(
             confirm?.title ?? "",
             isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
@@ -429,7 +433,11 @@ struct TaskDetailView: View {
                 .disabled(model.busy)
         case "resume", "accept_verification":
             Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
+                if action == "resume" && detail.failureCode == "execution_noop" {
+                    confirmExecutionRetry = true
+                } else {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
+                }
             }.disabled(model.busy)
         case "dismiss":
             Button(AutomationPresentation.active(detail.automation) ? "转为人工处理" : "清除阻塞标记") { Task { await model.resolve(taskID: detail.taskId, action: "dismiss") } }

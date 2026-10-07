@@ -96,16 +96,27 @@ class TestAutoPipeline(PiDesktopCase):
         self.call('set-project-automation', {'project_id':PROJECT,'automation':{'enabled':True}})
         self.round = 0
         self.omit_exit = False
+        self.noop_rounds = 0
         original = self.server.tool_call
         def plus(name,args):
             response = original(name,args)
             if name == 'pi_plans_resolve' and args.get('action')=='approve':
                 worktree = Path(self.server.created['projectPath'])
+                if self.noop_rounds:
+                    self.noop_rounds -= 1
+                    goals = worktree / '.pi' / 'goal'; goals.mkdir(parents=True, exist_ok=True)
+                    (goals / ('fixture-' + str(self.round) + '.md')).write_text('# Generated goal')
+                    self.server.messages = [
+                        {'id':'read-'+str(self.round),'role':'toolResult','toolName':'Read','toolResult':'',
+                         'createdAt':util.now_iso()},
+                        {'id':'reply-'+str(self.round),'role':'assistant','content':'x','createdAt':util.now_iso()},
+                    ]
+                    return response
                 (worktree / 'feedback.txt').write_text('round ' + str(self.round) + '\n')
                 result = subprocess.run([sys.executable,'-m','unittest','discover','-s','tests'],cwd=worktree,capture_output=True,text=True)
                 self.server.messages = [{'id':'verify-'+str(self.round),'role':'toolResult','toolName':'exec',
                     'toolArgs':{'command':VERIFY},'toolResult':{'output':result.stdout+result.stderr,'exit_code':None if self.omit_exit else result.returncode},
-                    'exitCode':None if self.omit_exit else result.returncode,'turnId':self.server.execution_turn}]
+                    'exitCode':None if self.omit_exit else result.returncode,'createdAt':util.now_iso()}]
             return response
         self.server.tool_call = plus
 
@@ -221,6 +232,37 @@ class TestAutoPipeline(PiDesktopCase):
         self._monitor()
         self.assertEqual(self.task(TASK)['status'],'in_review',self.task(TASK))
         self.assertEqual(len(self.task(TASK)['delivery']['commits']),1)
+
+    def test_noop_retries_same_plan_then_delivers_real_changes(self):
+        self._adopt_and_plan(); self.noop_rounds = 1
+        first = self._execute(); plan = self.task(TASK)['plan_sha256']; self._monitor()
+        value = self.task(TASK)
+        self.assertEqual(value['status'], 'ready', value)
+        self.assertEqual(value['automation']['exec_retries'], 1)
+        self.assertEqual(value['plan_sha256'], plan)
+        self.assertEqual(value['automation']['exec_retry']['from_run_id'], first)
+        self.assertFalse(value['delivery'].get('commits'))
+        second = self._execute(); self._monitor()
+        value = self.task(TASK)
+        self.assertEqual(value['status'], 'in_review', value)
+        self.assertEqual(value['plan_sha256'], plan)
+        self.assertEqual([item['execution_run_id'] for item in value['delivery']['commits']], [second])
+        self.assertFalse(git(value['delivery']['worktree_path'], 'ls-tree', '-r', '--name-only', 'HEAD', '--', '.pi/goal'))
+        self.assertEqual(self.server.prompt_count, 2)
+        self.assertEqual(self.primary, (git(self.repo,'rev-parse','HEAD'),git(self.repo,'status','--porcelain')))
+
+    def test_second_noop_stops_after_single_automatic_retry(self):
+        self._adopt_and_plan(); self.noop_rounds = 2
+        self._execute(); self._monitor()
+        self._execute(); self._monitor()
+        value = self.task(TASK)
+        self.assertEqual(value['status'], 'needs_user', value)
+        self.assertEqual(value['failure_code'], 'execution_noop', value)
+        self.assertEqual(value['automation']['exec_retries'], 1)
+        self.assertNotIn('accept_verification', value['allowed_actions'])
+        self.assertIn('resume', value['allowed_actions'])
+        self.assertFalse(value['delivery'].get('commits'))
+        self.assertEqual(self.server.prompt_count, 2)
 
     def test_fix_round_limit_and_manual_takeover(self):
         self.call('set-project-automation',{'project_id':PROJECT,'automation':{'enabled':True,'max_fix_rounds':0}})

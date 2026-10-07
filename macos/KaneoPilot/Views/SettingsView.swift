@@ -52,6 +52,14 @@ struct SettingsView: View {
     @State private var pdThinkingLevel = ""
     /// permission_mode 必须用户显式保存：草稿空 = 未选择（不自动补 auto）。
     @State private var pdPermissionMode = ""
+    @State private var fallbackProvider = ""
+    @State private var fallbackModel = ""
+    @State private var fallbackThinking = ""
+    @State private var fallbackCatalog: PiDesktopCatalogResponse?
+    @State private var fallbackCatalogError: String?
+    @State private var fallbackCatalogGeneration = 0
+    @State private var fixedModelHint = false
+    @AppStorage("executionFixedModelHintShown") private var fixedModelHintShown = false
     @State private var piDesktopCatalog: PiDesktopCatalogResponse?
     @State private var piDesktopCatalogLoading = false
     @State private var piDesktopCatalogError: String?
@@ -204,6 +212,7 @@ struct SettingsView: View {
         }
         .onChange(of: segment) { _, value in
             invalidatePiDesktopCatalog()
+            if value == .exec { Task { await suggestFixedModel() } }
             if value == .exec && plusBlockInPlay {
                 ensurePiDesktopConnectionFile()
                 Task { await refreshPiDesktopCatalog() }
@@ -217,11 +226,21 @@ struct SettingsView: View {
             } else {
                 invalidatePiDesktopCatalog()
             }
+            Task { await refreshFallbackCatalog() }
         }
         .onChange(of: pdProviderId) { _, _ in
             invalidatePiDesktopCatalog()
             guard plusBlockInPlay else { return }
             Task { await refreshPiDesktopCatalog() }
+        }
+        .onChange(of: fallbackProvider) { _, _ in
+            Task { await refreshFallbackCatalog() }
+        }
+        .onChange(of: pdModelSource) { _, _ in Task { await suggestFixedModel() } }
+        .alert("建议固定执行模型", isPresented: $fixedModelHint) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("项目自动处理已开启。建议选择自定义模型，固定主执行模型；空转后会使用你配置的备用模型重试一次。")
         }
         .onChange(of: pdModelId) { _, _ in invalidatePiDesktopCatalog(clear: false) }
         .onChange(of: pdThinkingLevel) { _, _ in invalidatePiDesktopCatalog(clear: false) }
@@ -592,6 +611,7 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        fallbackModelBlock
         // permission_mode 首次须用户显式保存（草稿空 = 未选择，不自动 auto）。
         Picker("permission_mode", selection: $pdPermissionMode) {
             Text("未选择").tag("")
@@ -675,6 +695,76 @@ struct SettingsView: View {
         Text(execStatusText)
             .font(.kpSmall)
             .foregroundStyle(.secondary)
+    }
+
+    private var fallbackModelBlock: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("备用模型（可留空）").font(.kpBody)
+            HStack(spacing: Spacing.s) {
+                TextField("provider_id", text: $fallbackProvider).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("备用模型 provider_id")
+                Menu {
+                    ForEach(catalogProviders) { provider in
+                        Button(provider.name ?? provider.id) { fallbackProvider = provider.id }
+                    }
+                } label: { Image(systemName: "list.bullet") }
+                .menuIndicator(.hidden).help("选择备用 provider")
+            }
+            HStack(spacing: Spacing.s) {
+                TextField("model_id", text: $fallbackModel).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("备用模型 model_id")
+                Menu {
+                    ForEach(fallbackCatalog?.selectedModels ?? []) { item in
+                        Button(item.name ?? item.id) { fallbackModel = item.id }
+                    }
+                } label: { Image(systemName: "list.bullet") }
+                .menuIndicator(.hidden).help("选择备用模型")
+            }
+            Picker("备用 thinking_level", selection: $fallbackThinking) {
+                Text("未配置").tag("")
+                if !fallbackThinking.isEmpty && !fallbackThinkingOptions.contains(fallbackThinking) {
+                    Text("\(fallbackThinking)（当前值）").tag(fallbackThinking)
+                }
+                ForEach(fallbackThinkingOptions, id: \.self) { Text($0).tag($0) }
+            }
+            Text("连接与权限继承主配置。空转自动重试最多一次；未配置备用模型时沿用主模型。")
+                .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let fallbackCatalogError {
+                Text(fallbackCatalogError).font(.kpSmall).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var fallbackThinkingOptions: [String] {
+        let levels = fallbackCatalog?.selectedModels.first(where: { $0.id == fallbackModel })?.thinkingLevels ?? []
+        return levels.isEmpty ? Self.piDesktopThinkingLevels : levels
+    }
+
+    private func refreshFallbackCatalog() async {
+        fallbackCatalogGeneration += 1
+        let generation = fallbackCatalogGeneration
+        fallbackCatalog = nil
+        fallbackCatalogError = nil
+        guard plusBlockInPlay, let provider = emptyToNil(fallbackProvider) else { return }
+        do {
+            let result = try await model.client.run("pi-desktop-catalog",
+                payload: ["connection_file": pdConnectionFile, "provider_id": provider],
+                as: PiDesktopCatalogResponse.self)
+            guard generation == fallbackCatalogGeneration else { return }
+            fallbackCatalog = result
+        } catch {
+            guard generation == fallbackCatalogGeneration else { return }
+            fallbackCatalogError = error.coreMessage
+        }
+    }
+
+    private func suggestFixedModel() async {
+        guard plusBlockInPlay, pdModelSource == "inherit", !fixedModelHintShown else { return }
+        guard let projects = try? await model.client.run("get-project-mappings", as: ProjectMappingsResponse.self),
+              projects.items?.contains(where: { $0.automation?.enabled == true }) == true,
+              plusBlockInPlay, pdModelSource == "inherit", !fixedModelHintShown else { return }
+        fixedModelHintShown = true
+        fixedModelHint = true
     }
 
     /// pi_desktop 就绪态行（旧核心未返回 → 「未上报」）。
@@ -917,13 +1007,16 @@ struct SettingsView: View {
                 pdModelId = base.piDesktop?.modelId ?? ""
                 pdThinkingLevel = base.piDesktop?.thinkingLevel ?? ""
                 pdPermissionMode = base.piDesktop?.permissionMode ?? ""
+                fallbackProvider = base.piDesktop?.fallback?.providerId ?? ""
+                fallbackModel = base.piDesktop?.fallback?.modelId ?? ""
+                fallbackThinking = base.piDesktop?.fallback?.thinkingLevel ?? ""
                 execDraftSeeded = true
             }
             execError = nil
             execLoaded = true
             if plusBlockInPlay {
                 ensurePiDesktopConnectionFile()
-                Task { await refreshPiDesktopCatalog() }
+                Task { await refreshPiDesktopCatalog(); await refreshFallbackCatalog(); await suggestFixedModel() }
             }
         } catch {
             guard generation == execLoadGeneration else { return }
@@ -1119,7 +1212,10 @@ struct SettingsView: View {
             providerId: emptyToNil(pdProviderId),
             modelId: emptyToNil(pdModelId),
             thinkingLevel: emptyToNil(pdThinkingLevel),
-            permissionMode: emptyToNil(pdPermissionMode))
+            permissionMode: emptyToNil(pdPermissionMode),
+            fallback: ExecFallbackModel(providerId: emptyToNil(fallbackProvider),
+                                        modelId: emptyToNil(fallbackModel),
+                                        thinkingLevel: emptyToNil(fallbackThinking)))
     }
 
     // MARK: 能力联动与校验
@@ -1210,6 +1306,15 @@ struct SettingsView: View {
             if emptyToNil(pdModelId) == nil { return "model_id 不能为空" }
             if emptyToNil(pdThinkingLevel) == nil { return "thinking_level 不能为空" }
         }
+        let fallbackValues = [fallbackProvider, fallbackModel, fallbackThinking]
+        if fallbackValues.contains(where: { emptyToNil($0) != nil }) {
+            if !fallbackValues.allSatisfy({ emptyToNil($0) != nil }) {
+                return "备用模型需填写 provider、model 和 thinking，或全部留空"
+            }
+            if !Self.piDesktopThinkingLevels.contains(fallbackThinking) {
+                return "备用模型 thinking_level 不合法"
+            }
+        }
         if pdPermissionMode.isEmpty {
             return "permission_mode 需显式选择（不会自动设为 auto）"
         }
@@ -1243,13 +1348,7 @@ struct SettingsView: View {
         guard let saved = execConfig, let savedDesktop = saved.piDesktop else {
             return "检测对象：已保存配置；当前桌面配置尚未保存"
         }
-        let draft = ExecPiDesktopConfig(
-            connectionFile: emptyToNil(pdConnectionFile),
-            providerId: emptyToNil(pdProviderId),
-            modelId: emptyToNil(pdModelId),
-            thinkingLevel: emptyToNil(pdThinkingLevel),
-            permissionMode: emptyToNil(pdPermissionMode)
-        )
+        let draft = piDesktopDraft
         let source = saved.effectiveBackend == "pi_desktop"
             ? "检测对象：已保存配置"
             : "检测对象：已保存桌面配置；当前执行后端为 pi"
