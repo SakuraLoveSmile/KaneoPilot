@@ -128,6 +128,11 @@ def normalize_message(raw: dict, run_id: Optional[str] = None) -> dict:
         "revision": raw.get("revision") if raw.get("revision") is not None else 0,
         "source_at": raw.get("source_at"),
     }
+    for key in ("turn_id", "execution_turn_id", "approval_requested_at", "execution_started_at"):
+        if isinstance(raw.get(key), str) and raw[key]:
+            message[key] = raw[key]
+    if raw.get("source_timestamp_missing") is True:
+        message["source_timestamp_missing"] = True
     if msg_type in _TOOL_TYPES:
         tool = raw.get("tool") or {}
         message["tool"] = {

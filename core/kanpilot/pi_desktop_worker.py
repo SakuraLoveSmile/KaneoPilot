@@ -408,6 +408,7 @@ class _Collector:
                 message.get("toolResult"),
                 message.get("toolCompletedAt"),
                 message.get("isError"),
+                message.get("turnId") or message.get("turn_id"),
             ],
             ensure_ascii=False, sort_keys=True, default=str,
         )
@@ -452,6 +453,9 @@ class _Collector:
         self.seen[mid] = (fingerprint, revision)
         role = str(message.get("role") or "").lower()
         source = {"source_message_id": mid, "source_revision": revision}
+        turn_id = message.get("turnId") or message.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            source["turn_id"] = turn_id
         if not role:
             self.unrecognized = True
             return
@@ -473,6 +477,8 @@ class _Collector:
             )
         ts = message.get("timestamp") or message.get("createdAt") \
             or util.now_iso()
+        if not util.parse_ts(message.get("timestamp") or message.get("createdAt")):
+            source["source_timestamp_missing"] = True
         extra = {}
         if message.get("parentToolCallId"):
             extra["parent_tool_call_id"] = message["parentToolCallId"]
@@ -1189,8 +1195,10 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                  content=(f"goal_contract: 目标契约待批准（{title or proposal_id}）；"
                           f"本机代批后同一会话开启执行轮次"))
         version = proposal.get("version")
+        approval_requested_at = None
         try:
             owner.check()
+            requested_at = util.now_iso()
             client.plans_resolve(
                 proposal_id, job["session_id"],
                 str(proposal.get("turnId") or planning_turn),
@@ -1200,6 +1208,9 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 version=(version if isinstance(version, int)
                          and not isinstance(version, bool) else None),
             )
+            # This boundary precedes the only successful approval call. The
+            # newly admitted execution cannot have emitted messages before it.
+            approval_requested_at = requested_at
         except util.KanpilotError as exc:
             # 并发代批（另一个观察进程已批）不算失败：以「契约已不再 pending」
             # 为准继续等执行轮次；仍 pending 才是真失败。
@@ -1251,8 +1262,13 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             "target_permission_mode": permission_mode,
             "approved_at": util.now_iso(),
             "approved_by": "kaneopilot",
+            "approval_requested_at": approval_requested_at,
+            "execution_started_at": record.get("startedAt") if util.parse_ts(record.get("startedAt")) else None,
         }
         log.emit("system", util.now_iso(),
+                 execution_turn_id=execution_turn,
+                 approval_requested_at=approval_requested_at,
+                 execution_started_at=job["goal_approval"]["execution_started_at"],
                  content=(f"goal_approved: {proposal_id} → 执行轮次 "
                           f"{execution_turn}（权限 {permission_mode}；本机代批，"
                           f"未重发 prompt）"))

@@ -6,6 +6,8 @@ import json
 import re
 import shlex
 
+from . import util
+
 
 def normalize(command: str) -> str:
     return " ".join(command.split())
@@ -48,12 +50,83 @@ def parse_verify_block(plan_text: str) -> dict:
     return {"ok": True, "commands": commands}
 
 
-def extract_command_results(messages: list) -> list:
-    results = []
+def _ordered(messages):
     # Core messages carry monotonically increasing seq; timestamp breaks ties.
-    ordered = sorted(enumerate(messages), key=lambda pair: (
+    return sorted(enumerate(messages), key=lambda pair: (
         pair[1].get("seq") if isinstance(pair[1].get("seq"), int) else float("inf"),
         str(pair[1].get("source_at") or pair[1].get("timestamp") or pair[1].get("ts") or ""), pair[0]))
+
+
+def _timestamp(message):
+    if message.get("source_timestamp_missing") is True:
+        return None
+    return util.parse_ts(message.get("source_at") or message.get("timestamp") or message.get("ts"))
+
+
+def _after_approval(messages, marker, execution_turn_id=None, started_at=None):
+    ordered = _ordered(messages)
+    marker_position = next((n for n, (_, message) in enumerate(ordered)
+                            if message is marker), None)
+    if marker_position is None:
+        raise ValueError("evidence window marker is not in messages")
+    boundary = util.parse_ts(started_at)
+    result = []
+    for position, (index, message) in enumerate(ordered):
+        raw = message.get("raw") or {}
+        turn_id = message.get("turn_id") or (raw.get("turn_id") if isinstance(raw, dict) else None)
+        if execution_turn_id and turn_id:
+            if turn_id != execution_turn_id:
+                continue
+        elif boundary:
+            timestamp = _timestamp(message)
+            if timestamp is None:
+                if message.get("type") in ("tool_call", "tool_result", "command_output"):
+                    # Unknown ownership counts as activity, never verification.
+                    result.append((index, {"type": "tool_call", "tool": {"name": None}}))
+                continue
+            if timestamp < boundary:
+                continue
+        else:
+            if message.get("type") in ("tool_call", "tool_result", "command_output"):
+                result.append((index, {"type": "tool_call", "tool": {"name": None}}))
+            continue
+        result.append((index, message))
+    return result
+
+
+def execution_window(messages: list, execution_turn_id=None) -> tuple:
+    markers = [message for _, message in _ordered(messages)
+               if message.get("type", message.get("kind")) == "system"
+               and isinstance(message.get("content"), str)
+               and message["content"].startswith(("goal_approved:", "goal_execution_recovered:"))]
+    if not markers:
+        return [message for _, message in _ordered(messages)], {
+            "evidence_window": "whole_round", "window_basis": "whole_round"}
+    marker = markers[-1]
+    execution_turn_id = marker.get("execution_turn_id") or execution_turn_id
+    started_at = marker.get("execution_started_at") or marker.get("approval_requested_at")
+    scoped = execution_turn_id and any(message.get("turn_id") == execution_turn_id
+                                      for _, message in _ordered(messages))
+    if not util.parse_ts(started_at) and not scoped:
+        return [message for _, message in _ordered(messages)], {
+            "evidence_window": "whole_round", "window_basis": "unscoped_goal_window"}
+    selected = _after_approval(messages, marker, execution_turn_id, started_at)
+    basis = "execution_turn" if scoped else ("execution_started_at" if marker.get("execution_started_at")
+                                             else "approval_request")
+    metadata = {"evidence_window": "after_goal_approved", "window_basis": basis}
+    if any(message.get("type") in ("assistant", "assistant_message")
+           and not message.get("turn_id") and _timestamp(message) is None
+           for _, message in _ordered(messages)):
+        metadata["reply_unconfirmed"] = True
+    return [message for _, message in selected], metadata
+
+
+def extract_command_results(messages: list, window_start=None, execution_turn_id=None) -> list:
+    results = []
+    ordered = _after_approval(messages, window_start,
+                              window_start.get("execution_turn_id") or execution_turn_id,
+                              window_start.get("execution_started_at") or window_start.get("approval_requested_at")) \
+        if window_start is not None else _ordered(messages)
     for index, message in ordered:
         raw = message.get("raw") or {}
         tool = message.get("tool") or (raw.get("tool") if isinstance(raw, dict) else None)

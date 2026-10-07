@@ -715,7 +715,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ```
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
-- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（本轮工具事件中，计划 verify 块的每条命令最后一次匹配的整数退出码为 0；缺失转 verification_unconfirmed，用户可接受验证结果）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
+- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（执行窗口工具事件中，计划 verify 块的每条命令最后一次匹配的整数退出码为 0；缺失转 verification_unconfirmed，用户可接受验证结果）；(d) 非 execution_noop，按 §5.27.1 的 A/B 信号判定。条件齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
 - **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
 - **单独条件不得推动完成**：子 agent 结束、进程正常退出、模型自称完成——任一单独出现都不满足 (a)(b)(c)，任务保持 `running` 或按异常处置。
 
@@ -1214,7 +1214,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 #### 5.27.1 dispatch/monitor 改为确定性流程
 
-**空转检查（仅自动化管理 Plus 执行）**：completed、exit 0 后、验证前，信号 A 为 PR 交付有效改动集为空；信号 B 为最终回复修剪空白后少于 16 个 Unicode 码点且执行窗口仅有只读白名单工具。任一成立上报 needs_user / execution_noop。未知工具按有动作处理。白名单为核实的 UpdateGoalProgress、Glob、Read 等；不得把未知工具默认为只读。事件只存信号、工具计数、回复长度，不存回复正文、命令或路径。monitor 仅上报，由核心决策是否重试。
+**空转检查（仅自动化管理 Plus 执行）**：completed、exit 0 后、验证前，信号 A 为 PR 交付有效改动集为空；信号 B 为最终回复修剪空白后少于 16 个 Unicode 码点且执行窗口仅有只读白名单工具。任一成立上报 needs_user / execution_noop。未知工具按有动作处理；缺乏可信执行窗口的旧记录禁用信号 B（见 §5.27.9），仍使用 PR 信号 A。白名单为核实的 UpdateGoalProgress、Glob、Read 等；不得把未知工具默认为只读。事件只存信号、工具计数、回复长度，不存回复正文、命令或路径。monitor 仅上报，由核心决策是否重试。
 
 两个新模块由 `executor_runner` 调用，入口签名与 `pi_desktop_controller.run_stage` 一致，只是去掉了 prompt；`sleep`/`clock` 可注入，便于测试：
 
@@ -1642,7 +1642,7 @@ exit_code 缺失或不是整数时记为 None。
 
 有效改动集排除且默认不提交 HEAD 未跟踪（即使已暂存）的普通文件 .pi/goal/<name>.md（恰为三段，文件和 .pi/.pi/goal 均非符号链接）；已跟踪改动、其他未跟踪和链接一律保留。干净检查、execution_noop 信号 A 与 no_changes 使用同一有效集。不得写共享 .git/info/exclude。
 
-只读命令 execution-activity {task_id,run_id} 严格核对当前执行身份，只返回 effective_change_count（非负整数），不返回路径或内容；不改变库或工作树。
+只读命令 execution-activity {task_id,run_id} 严格核对当前执行身份，只返回 effective_change_count（非负整数）及可选匿名 delivery_recovered 布尔值，不返回路径或内容；不改变库或工作树。
 
 
 **delivery-commit（包 C，`cmd_delivery.py`）：**
@@ -1955,3 +1955,6 @@ observer 续接始终只读，不发送 prompt、不批准 Goal。若停在待�
 
 监控间隔读取契约：默认 120 秒，旧播种值恰为 900 按 120 解释，其他合法值原样返回；overview 与首检/后续 monitor 共用读取辅助，不重写 SQLite。
 规划 _fail_unexpected 对 GitDeliveryError 记录 code 与已脱敏 message，其他异常仅类名；不持久化 URL 凭据或连接 token。
+
+执行空转检查的交付恢复边界：当前 execution_run_id 已登记的提交不重新判空转；Git 已提交但数据库尚未登记时，只读 activity 可按既有 commit_worktree 幂等规则核验单父为登记 HEAD 且 task/run trailer 匹配的提交，统计该提交的有效文件数。其他 HEAD 变化仍阻塞，不放宽提交归属。用户重规划的冻结工作树指纹使用有效改动集，保存与派发复核同口径；允许既有已确认的实质改动，拒绝漂移。兼容旧 raw 指纹仅在当前全量状态完整匹配时接受，不改存量数据、不自动重冻结。非重规划重试仍要求有效干净。
+证据窗口优先执行 turn_id；实际 Plus 当前 UiMessage 无逐条 turn 字段，公开 TurnState 也没有 startedAt。新轮在已核验目标待审批后、plans_resolve 调用之前记录 approval_requested_at；仅审批成功且执行 turn 已核验后作为 goal_approved 窗口的因果下界，以同机 source_at 过滤（可保留本地批准标记发出前已开始的真实执行）。若未来宿主有持久 startedAt 则优先取经 turn 身份核验的该字段。旧轮有批准标记但无可信边界退 whole_round，抑制信号 B 防误判，PR 信号 A 保持；缺源时间且无逐条 turn 身份的助手消息也使 B 不可确认；窗口依据固定枚举（execution_turn、execution_started_at、approval_request、whole_round、unscoped_goal_window），回退可见，不存正文。

@@ -177,6 +177,11 @@ def to_messages(events: list) -> list:
             "type": etype,
             "source_at": ts,
         }
+        for key in ("turn_id", "execution_turn_id", "approval_requested_at", "execution_started_at"):
+            if isinstance(event.get(key), str) and event[key]:
+                raw[key] = event[key]
+        if event.get("source_timestamp_missing") is True:
+            raw["source_timestamp_missing"] = True
         etype_origin = event.get("type")
         if etype == "tool_call":
             arguments = event.get("arguments")
@@ -228,6 +233,12 @@ def to_messages(events: list) -> list:
                     payload, ensure_ascii=False, sort_keys=True
                 )
             revision_parts = (etype_origin, content)
+        if raw.get("turn_id") or raw.get("execution_turn_id"):
+            revision_parts += (raw.get("turn_id"), raw.get("execution_turn_id"))
+        if raw.get("approval_requested_at") or raw.get("execution_started_at"):
+            revision_parts += (raw.get("approval_requested_at"), raw.get("execution_started_at"))
+        if raw.get("source_timestamp_missing"):
+            revision_parts += ("source_timestamp_missing",)
         raw["content"] = content
         source_id = event.get("source_message_id")
         source_revision = event.get("source_revision")

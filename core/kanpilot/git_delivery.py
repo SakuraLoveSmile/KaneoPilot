@@ -250,7 +250,7 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
             raise GitDeliveryError("worktree_invalid", "任务工作树归属或分支不符")
         if expected_head and _value(["rev-parse", "HEAD"], path) != expected_head:
             raise GitDeliveryError("worktree_invalid", "任务工作树 HEAD 与登记不符")
-        if require_clean and _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], path, 10).stdout:
+        if require_clean and effective_worktree_changes(str(path)):
             raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
     except (GitDeliveryError, OSError, IndexError) as exc:
         raise GitDeliveryError("worktree_invalid", "工作树核验失败：" + str(exc)) from exc
@@ -371,6 +371,68 @@ def worktree_changes(worktree: str) -> list:
     return changes
 
 
+def _goal_material(worktree, change, tracked):
+    relative = Path(change["path"])
+    parts = relative.parts
+    # HEAD ownership matters: a newly staged goal is still generated material,
+    # while an existing repository file must always remain a real change.
+    if (change["status"] not in ("??", "A ", "AM", " A")
+            or relative.is_absolute() or len(parts) != 3
+            or parts[:2] != (".pi", "goal") or ".." in parts
+            or relative.suffix != ".md" or change["path"] in tracked):
+        return False
+    path = Path(worktree)
+    try:
+        return (stat.S_ISDIR((path / ".pi").lstat().st_mode)
+                and stat.S_ISDIR((path / ".pi" / "goal").lstat().st_mode)
+                and stat.S_ISREG((path / relative).lstat().st_mode))
+    except OSError:
+        return False
+
+
+def _effective_changes(worktree):
+    changes = worktree_changes(worktree)
+    tracked = {os.fsdecode(name) for name in
+               _git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".pi/goal"],
+                    worktree, 10).stdout.split(b"\0") if name}
+    material = [change for change in changes if _goal_material(worktree, change, tracked)]
+    return [change for change in changes if change not in material], material
+
+
+def effective_worktree_changes(worktree: str) -> list:
+    """Actual delivery candidates, excluding only safe newly generated goals."""
+    return _effective_changes(worktree)[0]
+
+
+def execution_activity(delivery, *, task_id, execution_run_id) -> dict:
+    """Count activity without losing the existing post-commit recovery path."""
+    verify_branch_worktree(delivery, require_clean=False, expected_head=None)
+    path, expected = delivery["worktree_path"], delivery["head_sha"]
+    head = _value(["rev-parse", "HEAD"], path)
+    if head == expected:
+        count = len(effective_worktree_changes(path))
+        verify_branch_worktree(delivery, require_clean=False, expected_head=expected)
+        return {"effective_change_count": count, "delivery_recovered": False}
+    parents = _value(["show", "-s", "--format=%P", "HEAD"], path).split()
+    run = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
+    task = _value(["show", "-s", "--format=%(trailers:key=Kaneo-Task,valueonly)", "HEAD"], path).splitlines()
+    if parents != [expected] or run != [execution_run_id] or task != [task_id]:
+        raise GitDeliveryError("worktree_invalid", "工作树 HEAD 与本轮交付身份不符")
+    verify_branch_worktree(delivery, require_clean=True, expected_head=head)
+    files = _committed_files(path, head)
+    tracked = {os.fsdecode(name) for name in
+               _git(["ls-tree", "-r", "--name-only", "-z", expected, "--", ".pi/goal"],
+                    path, 10).stdout.split(b"\0") if name}
+    count = sum(not _goal_material(path, {"path": name, "status": "A "}, tracked) for name in files)
+    verify_branch_worktree(delivery, require_clean=True, expected_head=head)
+    return {"effective_change_count": count, "delivery_recovered": True}
+
+
+def execution_activity_count(delivery, *, task_id, execution_run_id) -> int:
+    return execution_activity(delivery, task_id=task_id,
+                              execution_run_id=execution_run_id)["effective_change_count"]
+
+
 def _candidate_state(worktree, relative_path):
     """Read a candidate through directory descriptors, never following a link."""
     relative = Path(relative_path)
@@ -423,7 +485,7 @@ def _candidate_state(worktree, relative_path):
         os.close(directory)
 
 
-def worktree_state_sha256(delivery) -> str:
+def worktree_state_sha256(delivery, *, effective_only=False) -> str:
     """Fingerprint HEAD and current candidate contents, with no credential output."""
     if not delivery.get("head_sha"):
         raise GitDeliveryError("worktree_invalid", "交付 HEAD 登记缺失")
@@ -431,13 +493,18 @@ def worktree_state_sha256(delivery) -> str:
         verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
         worktree = str(Path(delivery["worktree_path"]).expanduser())
         raw = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree, 10).stdout
-        candidates = _parse_worktree_status(raw)
+        candidates = (_parse_worktree_status(raw) if not effective_only else
+                      [{"path": change["path"], "status": change["status"]}
+                       for change in effective_worktree_changes(worktree)])
         records = [{**change, **_candidate_state(worktree, change["path"])}
                    for change in sorted(candidates, key=lambda x: (x["path"], x["status"]))]
         # Detect changes to the branch or candidate set during streaming reads.
         verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
         after = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree, 10).stdout
-        if raw != after:
+        after_candidates = (_parse_worktree_status(after) if not effective_only else
+                            [{"path": change["path"], "status": change["status"]}
+                             for change in effective_worktree_changes(worktree)])
+        if (raw != after if not effective_only else candidates != after_candidates):
             raise GitDeliveryError("worktree_invalid", "工作树状态在核验期间发生变化")
         encoded = json.dumps({"v": 1, "head_sha": delivery["head_sha"], "changes": records},
                              ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -486,7 +553,7 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
             verify_branch_worktree(delivery, require_clean=True, expected_head=head)
             return {"sha": head, "files": _committed_files(path, head)}
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
-    changes = worktree_changes(path)
+    changes, material = _effective_changes(path)
     if not changes:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
     _require_safe_files(changes)
@@ -494,17 +561,25 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
     # the branch between monitor completion and this command.
     if _value(["rev-parse", "HEAD"], path) != expected:
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
-    _git(["add", "-A"], path, 60)
+    exclusions = [":(exclude,literal)" + item["path"] for item in material]
+    _git(["add", "-A", "--", ".", *exclusions], path, 60)
     clean_title = " ".join(str(title or "").split())[:72]
     message = (f"kaneo({task_id}): {clean_title}\n\nKaneo-Task: {task_id}\n"
                f"KaneoPilot-Run: {execution_run_id}\nFix-Round: {fix_round}\n")
     with tempfile.TemporaryDirectory(prefix="kanpilot-commit-") as temp:
         message_path = Path(temp) / "message.txt"
         message_path.write_text(message, encoding="utf-8")
-        _git(["commit", "-F", str(message_path)], path, timeout)
+        # --only lets Git build its temporary commit index, leaving any already
+        # staged generated goal intact in the real index and outside the commit.
+        paths = [":(literal)" + item["path"] for item in changes]
+        args = ["commit", "-F", str(message_path)]
+        if material:
+            args += ["--only", "--", *paths]
+        _git(args, path, timeout)
     head = _value(["rev-parse", "HEAD"], path)
+    files = _committed_files(path, head)
     verify_branch_worktree(delivery, require_clean=True, expected_head=head)
-    return {"sha": head, "files": _committed_files(path, head)}
+    return {"sha": head, "files": files}
 
 
 def push_branch(delivery, *, expected_repo, before_push=None, timeout=120) -> dict:
