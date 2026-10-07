@@ -247,7 +247,7 @@ def cmd_session_control_status(ctx, payload):
               "state": "unavailable", "detail": "会话身份或来源不可用",
               "connected": False, "session_id": None, "turn_id": None,
               "can_start": False, "blocked_reason": reason,
-              "start_label": "请求开始规划"}
+              "start_label": "请求开始规划" if request is not None and request["kind"] == "plan" else "请求开始"}
     if not job or not task:
         return result
     if job.get("backend") != "pi_desktop":
@@ -272,7 +272,8 @@ def cmd_session_control_status(ctx, payload):
                 result.update(state="disconnected", detail="Plus 返回的会话身份不匹配")
                 return result
             raw = view.get("raw_status")
-            if not isinstance(raw, dict) or not isinstance(raw.get("isRunning"), bool):
+            inner = raw["status"] if isinstance(raw, dict) and isinstance(raw.get("status"), dict) else raw
+            if not isinstance(inner, dict) or not isinstance(inner.get("isRunning"), bool):
                 result.update(state="unavailable", detail="Plus 返回的运行状态不完整，无法确认当前状态")
                 return result
             permission = view.get("pending_permission")

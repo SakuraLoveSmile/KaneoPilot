@@ -8,7 +8,7 @@ import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from helpers import CORE, KanpilotTestCase
 from kanpilot import constants, db, planner_inputs, session_control, util
@@ -318,6 +318,40 @@ class SessionControlTests(KanpilotTestCase):
             response = self.call("session-control-status", self.status_payload)
         self.assertEqual(response["state"], "unavailable")
         self.assertFalse(response["connected"])
+
+    def test_nested_plus_status_contract_through_adapter(self):
+        self.job["session_id"] = "test-session"
+        self.write_job()
+        before = self.snapshot()
+        for running, pending, state in ((True, [], "running"), (False, [], "idle"),
+                                        (True, [{"body": "SECRET-REQUEST"}], "waiting_permission")):
+            with self.subTest(state=state):
+                client = MagicMock()
+                client.call_tool.return_value = {"status": {
+                    "isRunning": running, "currentTurnId": "test-turn",
+                    "pendingToolConfirmations": pending}, "isRunning": "invalid"}
+                with patch.object(session_control.harness_plus_adapter, "_get_client",
+                                  return_value=(client, {})):
+                    response = self.call("session-control-status", self.status_payload)
+                self.assertEqual(response["state"], state)
+                self.assertTrue(response["connected"])
+                self.assertEqual(response["turn_id"], "test-turn")
+                self.assertFalse(response["can_start"])
+                self.assertNotIn("SECRET", json.dumps(response))
+                client.call_tool.assert_called_once_with("pi_agent_status", {"sessionId": "test-session"})
+        self.assertEqual(before, self.snapshot())
+
+    def test_start_label_matches_round_type_and_keeps_disabled_reason(self):
+        with patch.object(session_control.harness_plus_adapter, "plus_capabilities", return_value={
+                "connected": True, "available": True,
+                "supported_operations": list(constants.PI_DESKTOP_PLAN_TOOLS)}):
+            planning = self.call("session-control-status", self.status_payload)
+            self.assertEqual(planning["start_label"], "请求开始规划")
+            self.change_request(kind="dispatch", stage="dispatch")
+            execution = self.call("session-control-status", self.status_payload)
+        self.assertEqual(execution["start_label"], "请求开始")
+        self.assertFalse(execution["can_start"])
+        self.assertIn("不是当前规划请求", execution["blocked_reason"])
 
     def test_durable_runtime_receipt_without_job_scope_blocks(self):
         conn = db.connect(self.db_path)

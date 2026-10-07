@@ -264,11 +264,12 @@ def plus_status(connection_file: str, *, session_id: str, timeout: int = 10) -> 
     """Get active status of session in Plus."""
     client, record = _get_client(connection_file, timeout=timeout)
     res = client.call_tool("pi_agent_status", {"sessionId": session_id})
+    inner = res["status"] if isinstance(res.get("status"), dict) else res
     return _redact_output({
         "session_id": session_id,
-        "is_running": bool(res.get("isRunning")),
-        "current_turn_id": str(res.get("currentTurnId")) if res.get("currentTurnId") is not None else None,
-        "pending_permission": res.get("pendingPermission"),
+        "is_running": bool(inner.get("isRunning")),
+        "current_turn_id": str(inner.get("currentTurnId")) if inner.get("currentTurnId") is not None else None,
+        "pending_permission": bool(inner.get("pendingToolConfirmations")) or inner.get("pendingPermission"),
         "raw_status": res,
     }, record.get("token"))
 
@@ -295,6 +296,7 @@ def plus_turn_get(
         "session_id": session_id,
         "turn_id": turn_id,
         "status": status,
+        "started_at": res.get("startedAt") or res.get("started_at"),
         "ended_at": res.get("endedAt") or res.get("ended_at"),
         "error_code": res.get("errorCode") or res.get("error_code"),
     }, record.get("token"))
