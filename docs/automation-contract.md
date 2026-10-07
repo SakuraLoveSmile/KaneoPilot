@@ -53,7 +53,7 @@ intake 每 300 秒，只接收开启且就绪项目的 To Do，保留人工筛�
 
 - **v3 起任务执行后端由 `exec_config.backend` 决定**：`pi`（默认）或 `pi_desktop`（protocol §5.23.3）。**v4 起 dispatch/monitor 控制端来源 = `exec_config.controller_backend`**（protocol §5.24.4）：`pi`（缺省）继续继承本机 PI 默认会话设置并以 `pi -p --mode json` 运行；`pi_desktop` 用 `exec_config.pi_desktop` 五字段建独立 `mode=agent` 控制会话，宿主环境经 runner 生成的固定包装器**显式**传入（`KANPILOT_DB`/`KANPILOT_APP_SUPPORT`/`KANPILOT_PLAN_ROOT`/`KANPILOT_REPOS_ROOT`/`KANPILOT_LEGACY_ROOT`/`KANEO_CREDENTIALS_PATH` 等），不依赖继承环境。不用 Computer Use、不截图、不核验附件/发送按钮。任务执行配置由调度台设置页管理，claim 时固化进轮次快照。
 - 流程：
-  1. `claim --stage dispatch` → context 含 `backend`、`exec_config` 快照、plan_path/repository/session_marker/instruction/original_todo_slug；核心完成计划哈希、来源快照、远端状态、review 交付与**所选后端可用性门**（§5.17.3 pi 分支 / §5.23.3 pi_desktop 分支）校验，失败 `validation_failed` 原文转述、不自行换模型/agent/后端。context 无 backend 字段（历史遗留）→ 简报交人工结束。
+  1. `claim --stage dispatch` → context 含 `backend`、`exec_config` 快照、plan_path/repository/session_marker/instruction/original_todo_slug；核心完成计划哈希、来源快照、远端状态、review 交付与**所选后端可用性门**（§5.17.3 pi 分支 / §5.23.3 pi_desktop 分支）校验，失败 `validation_failed` 原文转述、不自行换模型/agent/后端（唯一例外：protocol §5.27.8 空转重试使用已配置备用模型）。context 无 backend 字段（历史遗留）→ 简报交人工结束。
   2. `dispatch-prepare`（证据按后端分支：pi 为 session_marker/repository/backend="pi"/config=快照；pi_desktop 为 session_marker/repository/backend="pi_desktop"/config=快照）。
   3. `dispatch-begin-send`（远端 To Do→In Progress，核心复验；remote_conflict/unavailable → dispatch-fail unknown）。
   4. `dispatch-start`：按轮次固化配置而非当前设置复核可用性 → 启动意图落盘 → worktree → 拉起该轮 worker（backend=pi 拉起 `kanpilot.pi_worker`；backend=pi_desktop 拉起 `kanpilot.pi_desktop_worker`，protocol §5.23.3）→ 等 session 事件。`deduplicated:true` 绝不重复启动；仅有启动意图且无启动证明时为 conflict，交人工处理，不声称已开始；`status:"starting"` 轮询 get-session ≤5 分钟取 session_id。pi_desktop 轮次另需 turn_id（持久终态查询）。
@@ -155,3 +155,5 @@ v4 历史 Plus dispatch/monitor 使用 `executor_prompts/dispatch_mcp.md` / `mon
 - 新轮次 `spec.json` 固化展示快照 `workspace_display_name`/`session_display_name`（来自 `task.project_name`/`task.title`）；worker 在 `pi_session_create` 携带 `{projectPath, projectName, title, mode:"goal", …}`。
 - 显示名只用于展示：派发身份仍以 `session_marker`/`task_id`/`run_id`/`session_id`/`turn_id`/计划哈希为准；不得用于去重、路径生成、权限判断或完成判定。
 - PI CLI 后端、已派发的 spec/job/session、Plus 用户手工重命名与历史轮次不受影响。
+
+自动化 Plus 执行终态先判 execution_noop、再认 goal_approved 之后验证证据；monitor 只上报，核心同事务最多自动重试一次，备用缺省沿用主模型。明确失败仍不重试。详见 protocol §5.27.1/8/9/10/13。
