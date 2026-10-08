@@ -20,6 +20,15 @@ enum CoreLocator {
     static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> CoreLocation? {
         let fm = FileManager.default
 
+        // A standalone acceptance bundle must never fall through to the production core.
+        if ["local.kaneopilot.session-reader-check", "local.kaneopilot.desktop-intake-check"]
+            .contains(Bundle.main.bundleIdentifier ?? "") {
+            let required = ["KANPILOT_CORE", "KANPILOT_APP_SUPPORT", "KANPILOT_DB", "KANPILOT_LEGACY_ROOT", "KANPILOT_PLAN_ROOT", "KANPILOT_REPOS_ROOT", "KANPILOT_REPORTS_ROOT", "KANEO_CREDENTIALS_PATH"]
+            guard required.allSatisfy({ environment[$0]?.isEmpty == false }) else { return nil }
+            guard let core = environment["KANPILOT_CORE"], fm.fileExists(atPath: core) else { return nil }
+            return CoreLocation(path: core, usesPython: needsPython(core))
+        }
+
         if let envPath = environment["KANPILOT_CORE"], !envPath.isEmpty {
             if fm.fileExists(atPath: envPath) {
                 return CoreLocation(path: envPath, usesPython: needsPython(envPath))

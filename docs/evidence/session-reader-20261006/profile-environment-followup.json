@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-06",
+  "xctrace": "27.0 (27A5237l)",
+  "isolated_env_keys": [
+    "HOME",
+    "PATH",
+    "TMPDIR"
+  ],
+  "time_profiler": {
+    "command": "xcrun xctrace record --instrument \"Time Profiler\" --time-limit 3s --output TRACE --attach PID",
+    "record_exit": 0,
+    "toc_exit": 0,
+    "data_exit": 0,
+    "sample_rows": 3014
+  },
+  "activity_monitor": {
+    "command": "xcrun xctrace record --instrument \"Activity Monitor\" --time-limit 3s --output TRACE --attach PID",
+    "record_exit": 0,
+    "toc_exit": 0,
+    "data_exit": 0,
+    "sample_rows": 3,
+    "columns_0_based": {
+      "cpu_percent": 6,
+      "cpu_total_nanoseconds": 7,
+      "physical_footprint_bytes": 10,
+      "real_memory_bytes": 11
+    }
+  },
+  "hangs": {
+    "command": "xcrun xctrace record --instrument \"Time Profiler\" --instrument \"Hangs\" --time-limit 5s --output TRACE --attach PID",
+    "record_exit": 2,
+    "error": "Fatal logging system error: The log archive is corrupt or incomplete and cannot be read",
+    "fixture": "Isolated AppKit main run loop known 700ms busy interval every 1 second",
+    "potential_hangs_rows": 0,
+    "toc_evidence": "profiler-hangs-only-toc.xml:48 os-log com.apple.runtime-issues (priority inversion detection disabled)",
+    "limitation": "CPU and Activity Monitor success does not establish Hangs success. No OS logging/security changes attempted."
+  },
+  "process_cleanup": "Only this probe yes/AppKit targets terminated. No existing App touched."
+}

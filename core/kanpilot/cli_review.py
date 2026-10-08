@@ -120,7 +120,8 @@ def _persisted(conn):
     return (job, directory) if isinstance(job, dict) and job.get("stage") == STAGE else None
 
 
-def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=False):
+def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=False,
+              request_id=None, config_override=None):
     if stage != STAGE:
         return 2
     pending = _persisted(conn)
@@ -143,7 +144,14 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         request = review._request_state(db_path, pending[0].get("request_id"))
         if request and request.get("status") == "claimed" and review._lease_valid(request):
             return 1
-    config = review_config.snapshot(conn)
+    if config_override is None:
+        from . import cmd_exec
+        candidate = cmd_exec._select_candidate(conn, STAGE, request_id, util.now_dt())
+        if candidate is not None:
+            request_id = candidate["request_id"]
+            config_override = review_config.for_request(conn, db.request_payload(candidate))
+    config = (review_config.snapshot(conn, config_override=config_override)
+              if config_override is not None else review_config.snapshot(conn))
     backend = config.get("backend")
     if backend not in ("claude", "codex"):
         return 2
@@ -162,12 +170,18 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         return review._blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
                                        log=log, record_run=record, detail=detail)
     save()
-    claim = review.core_call(db_path, "claim", {"stage": STAGE, "executor": review.EXECUTOR_ID})
+    claim = review.core_call(db_path, "claim", {"stage": STAGE, "executor": review.EXECUTOR_ID,
+                             **({"request_id": request_id} if request_id else {})})
     if not claim.get("claimed"):
         review._close(job=job, job_path=job_path, log=log, record_run=record,
                       status="finished", exit_code=0, detail=claim.get("reason"), reason="no_request")
         return 0
     context = claim.get("context") or {}
+    if isinstance((context.get("payload") or {}).get("review_config"), dict):
+        config = review_config.snapshot(conn, config_override=review_config.for_request(conn, context["payload"]))
+        if config.get("backend") != backend:
+            raise util.KanpilotError("conflict", "Review request backend differs from selected runner")
+        job["config"] = config
     job.update(request_id=claim["request_id"], run_id=claim["run_id"],
                task_id=context.get("task_id") or (context.get("task") or {}).get("task_id"))
     save()

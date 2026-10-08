@@ -1,0 +1,6 @@
+{
+  "repo_identity": "SakuraLoveSmile/Sakura-Blog",
+  "push_target_preserves_original_alias": true,
+  "single_push_target_and_rewrite_guards_passed": true,
+  "operation": "read-only git remote get-url / config / ls-remote --get-url / ssh -G; no push or SSH connection"
+}

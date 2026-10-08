@@ -138,9 +138,8 @@ class TestArchivePreconditions(ArchiveCase):
 class TestArchiveTrashRestore(ArchiveCase):
     def test_archive_cancels_queued_and_emits_event(self):
         task_id = "taskarc2-ready01"
-        self.add_task(task_id)
-        self.set_task_status(task_id, "ready")
-        enq = self.call("enqueue", {"task_id": task_id, "kind": "dispatch"})
+        self.make_ready_task(task_id=task_id)
+        enq = self.enqueue_dispatch(task_id)
         request_id = enq["request"]["request_id"]
         result = self.call("archive-task", {"task_id": task_id})
         self.assertTrue(result["ok"])
@@ -224,9 +223,8 @@ class TestClaimedCompetition(ArchiveCase):
         # 排队取消与「已被领取」竞争：事务内复核，已被 claimed → conflict，
         # 不取消 queued、不改保存状态。
         task_id = "taskarc3-comp01"
-        self.add_task(task_id)
-        self.set_task_status(task_id, "ready")
-        enq = self.call("enqueue", {"task_id": task_id, "kind": "dispatch"})
+        self.make_ready_task(task_id=task_id)
+        enq = self.enqueue_dispatch(task_id)
         queued_id = enq["request"]["request_id"]
         # 执行端已领取另一条请求（租约未过期，非失联）。
         self.insert_claimed_request(task_id, kind="monitor", expired=False)
@@ -433,3 +431,30 @@ class TestBatchEligibilityAndExpectedSaveState(ArchiveCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResumeActiveReview(ArchiveCase):
+    def test_explicit_resume_releases_pause_and_allows_review_tick(self):
+        task_id = "task-resume-review"
+        self.add_task(task_id, remote_status="in-review")
+        self.set_task_status(task_id, "in_review", auto_advance_paused=1)
+        self.call("tick", {})
+        self.assertFalse(any(r["task_id"] == task_id for r in self.requests(status="queued")))
+        result = self.call("restore-task", {"task_id": task_id, "resume_auto": True})
+        self.assertFalse(result["deduplicated"])
+        self.assertEqual(result["task"]["status"], "in_review")
+        self.assertEqual(result["task"]["auto_advance_paused"], 0)
+        self.call("tick", {})
+        queued = [r for r in self.requests(status="queued") if r["task_id"] == task_id]
+        self.assertEqual([r["kind"] for r in queued], ["review"])
+        self.assertTrue(self.call("restore-task", {"task_id": task_id, "resume_auto": True})["deduplicated"])
+
+    def test_ordinary_restore_keeps_active_review_paused(self):
+        task_id = "task-resume-review"
+        self.add_task(task_id, remote_status="in-review")
+        self.set_task_status(task_id, "in_review", auto_advance_paused=1)
+        result = self.call("restore-task", {"task_id": task_id})
+        self.assertTrue(result["deduplicated"])
+        self.assertEqual(result["task"]["auto_advance_paused"], 1)
+        self.call("tick", {})
+        self.assertFalse(any(r["task_id"] == task_id for r in self.requests(status="queued")))

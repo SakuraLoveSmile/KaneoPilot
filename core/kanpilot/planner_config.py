@@ -11,8 +11,7 @@
 - ``backend``（v4）：``codex``（缺省）| ``pi_desktop``；缺字段按 ``codex``
   解释（旧数据零迁移），切换后端不删除另一分支已存字段；
 - ``pi_desktop``（v4）：五字段块（复用 ``exec_config`` 的键与校验），
-  ``permission_mode`` 固定 ``ask``（Plus 计划分支为 ``mode=plan``；Plan 模式
-  不是 OS 只读沙箱，只有 ask 能拦住自动 shell 写入）。
+  ``permission_mode`` 固定 ``auto``（Plus 计划分支仍为 ``mode=plan``）。
 
 ``snapshot`` 按生效 backend 返回对应分支的**脱敏**快照（无 token）：codex →
 ``{planner_model, reasoning_effort}``（写入请求 payload 的 ``model_config``）；
@@ -36,8 +35,8 @@ DEFAULT_METHOD = "builtin"
 # v4 §5.24.1：规划后端词表与缺省值。
 BACKENDS = constants.PLANNER_BACKENDS
 DEFAULT_BACKEND = constants.PLANNER_BACKEND
-# Plus 计划分支只允许该权限模式（§5.24：不开放 auto/accept-edits）。
-PI_DESKTOP_PERMISSION_MODE = constants.PI_DESKTOP_READONLY_PERMISSION_MODE
+# 新规划请求固定 auto；不改既有请求的 runtime_config。
+PI_DESKTOP_PERMISSION_MODE = constants.PI_DESKTOP_PLANNER_PERMISSION_MODE
 # Plus 下 spec_plan 明确禁用的中文原因（保存校验与能力查询共用，避免两处措辞漂移）。
 SPEC_PLAN_DISABLED_REASON = (
     "spec_plan 是 Codex 插件运行方式，Plus 计划分支只支持 builtin"
@@ -50,6 +49,31 @@ DEFAULTS = {
 }
 CLAUDE_DEFAULT = {"model": "sonnet", "effort": "high"}
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DESKTOP_MODEL = {"planner_model": "codex-desktop", "reasoning_effort": "inherit"}
+DESKTOP_RUNTIME = {"model_source": "desktop_session", "permission_source": "desktop_session"}
+DESKTOP_SKILL = "spec-planner:spec-plan"
+
+
+def desktop_queue_ready(conn: sqlite3.Connection) -> bool:
+    """只表示自动领取已配置并启用；不代表 Desktop 在线。"""
+    config = db.get_setting(conn, "desktop_queue_config") or {}
+    return config.get("enabled") is True and config.get("auto_configured") is True
+
+
+def desktop_capabilities(conn: sqlite3.Connection) -> dict:
+    config = db.get_setting(conn, "desktop_queue_config") or {}
+    configured = desktop_queue_ready(conn)
+    detail = ("Desktop 自动领取已配置并启用（在线状态未验证）" if configured
+              else "Desktop 自动领取尚未配置或未启用；可通过原生会话手动领取")
+    return {
+        "available": configured, "enabled": config.get("enabled") is True,
+        "auto_configured": config.get("auto_configured") is True,
+        "detail": detail, "model_source": "desktop_session",
+        "planner_methods": {
+            "builtin": {"available": True, "reason": None},
+            "spec_plan": {"available": True, "reason": "领取会话须实际具备并使用施工规划技能"},
+        },
+    }
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -102,6 +126,10 @@ def merged(conn: sqlite3.Connection) -> dict:
     result["pi_desktop"] = exec_config.merge_pi_desktop_block(
         stored.get("pi_desktop")
     )
+    if result["pi_desktop"] is not None:
+        # 旧 settings 中的 ask 无需重新保存即可用于下一次 auto 规划。
+        # 这里只投影生效配置，不修改已固化的请求或轮次。
+        result["pi_desktop"]["permission_mode"] = PI_DESKTOP_PERMISSION_MODE
     result["claude"] = dict(CLAUDE_DEFAULT, **(stored.get("claude") or {}))
     return result
 
@@ -119,6 +147,8 @@ def pi_desktop_block(conn: sqlite3.Connection) -> Optional[dict]:
 def model_snapshot(conn: sqlite3.Connection, group: str, *, backend="codex") -> dict:
     """Codex 分支快照：某配置组的生效 {planner_model, reasoning_effort}。
     default_method 属请求级/UI 预选字段，不进快照（§5.23.2）。"""
+    if backend == "codex_desktop":
+        return dict(DESKTOP_MODEL)
     state = merged(conn)
     if backend == "claude":
         return {"planner_model": state["claude"]["model"],
@@ -135,7 +165,7 @@ def resolve_runtime_config(
     block: Optional[dict] = None,
     timeout: int = 10,
 ) -> tuple:
-    """解析脱敏的 5 字段 runtime_config 快照（permission_mode 固定 ask）。"""
+    """解析新请求的脱敏 5 字段快照（permission_mode 固定 auto）。"""
     if block is None:
         block = pi_desktop_block(conn)
     if not isinstance(block, dict) or not block:
@@ -147,7 +177,7 @@ def resolve_runtime_config(
 
 def runtime_snapshot(conn: sqlite3.Connection) -> dict:
     """Plus 分支快照：五字段**脱敏**值（无 token/连接文件全文；只有路径）。
-    inherit 模式解析当前 Plus 默认配置，固定 permission_mode=ask。
+    inherit 模式解析当前 Plus 默认配置，固定 permission_mode=auto。
     """
     resolved, error = resolve_runtime_config(conn)
     if resolved is None:
@@ -214,6 +244,11 @@ def save(conn: sqlite3.Connection, groups: dict, now: str) -> dict:
         block = groups["pi_desktop"]
         if not isinstance(block, dict):
             raise util.bad_request("pi_desktop 必须是对象")
+        if ("permission_mode" in block
+                and block["permission_mode"] != PI_DESKTOP_PERMISSION_MODE):
+            raise util.bad_request(
+                f"Plus 计划分支仅允许 permission_mode={PI_DESKTOP_PERMISSION_MODE}"
+            )
         current_block = dict(current.get("pi_desktop") or {})
         current_block.update(block)
         current["pi_desktop"] = exec_config.merge_pi_desktop_block(current_block)
@@ -262,8 +297,8 @@ def validate_claude_block(block) -> Optional[str]:
 
 def validate_pi_desktop_block(block: Optional[dict]) -> Optional[str]:
     """Plus 计划分支五字段校验（§5.24.1 / T7.1）：复用执行环境的键与校验，并额外
-    要求 ``permission_mode=ask``（计划分支固定 ``mode=plan``，不开放
-    auto/accept-edits）。返回中文错误或 None。"""
+    要求 ``permission_mode=auto``（计划分支仍固定 ``mode=plan``）。
+    返回中文错误或 None。"""
     if not isinstance(block, dict) or not block:
         return "pi_desktop 配置未保存（请在规划环境保存五字段）"
     b = dict(block)
@@ -273,8 +308,7 @@ def validate_pi_desktop_block(block: Optional[dict]) -> Optional[str]:
     if b.get("permission_mode") != PI_DESKTOP_PERMISSION_MODE:
         return (
             f"Plus 计划分支仅允许 permission_mode={PI_DESKTOP_PERMISSION_MODE}"
-            f"（当前 {b.get('permission_mode')}）：Plan 模式不是 OS 只读沙箱，"
-            f"仅 ask 能拦住自动 shell 写入"
+            f"（当前 {b.get('permission_mode')}）"
         )
     return None
 

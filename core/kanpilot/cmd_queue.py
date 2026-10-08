@@ -21,9 +21,41 @@ def _infer_kind(task) -> str:
     return kind
 
 
+def _require_current_plan(task):
+    if not task["plan_path"] or not task["plan_sha256"]:
+        raise util.KanpilotError("conflict", "任务没有当前计划，请先完成新规划")
+
+
+def _require_unsent_dispatch(task):
+    if task["sent"] or task["send_state"] not in (None, "not_sent"):
+        raise util.KanpilotError("conflict", "当前执行已发送或发送结果不明，不能重复派发旧计划")
+
+
+def clear_review_result_inline(conn, task, now, actor="user"):
+    """Release a previous Review result only for an explicitly requested new Review.
+
+    The caller owns the transaction and authorization. Keep report files and
+    historical Review entries; audit the old current pointers before clearing.
+    """
+    task = db.require_task(conn, task["task_id"])
+    extra = db.task_extra(task)
+    previous = {key: task[key] for key in ("review_report_path", "review_report_sha256", "review_key")}
+    previous.update({key: extra.get(key) for key in ("review_conclusion", "review_registered_at")})
+    if any(value is not None for value in previous.values()):
+        db.add_event(conn, now, "review_result_cleared", task_id=task["task_id"], actor=actor,
+                     detail={"execution_run_id": task["run_id"], "previous": previous})
+        extra.pop("review_conclusion", None)
+        extra.pop("review_registered_at", None)
+        db.update_task(conn, task["task_id"], now, review_report_path=None,
+                       review_report_sha256=None, review_key=None, extra_json=extra)
+    return db.require_task(conn, task["task_id"])
+
+
 def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=None):
     if not db.task_schedulable(task) or task["status"] != "ready":
         raise util.KanpilotError("conflict", "任务当前不可确认执行")
+    _require_current_plan(task)
+    _require_unsent_dispatch(task)
     if expected_plan_sha256 != task["plan_sha256"]:
         raise util.KanpilotError("conflict", "计划哈希与当前登记版本不符，请重新查看计划")
     row, created = db.create_request(conn, now, "dispatch", f"dispatch:{task['task_id']}",
@@ -80,6 +112,8 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         confirm_plan = bool(payload.get("confirm_plan"))
         expected_sha = payload.get("expected_plan_sha256")
         if kind == "dispatch":
+            _require_current_plan(task)
+            _require_unsent_dispatch(task)
             if hold and not confirm_plan:
                 raise util.KanpilotError("conflict", "计划已发布但尚未确认执行（需要 confirm_plan:true）")
             if hold or expected_sha is not None:
@@ -139,6 +173,50 @@ def cmd_set_priority(ctx, payload: dict) -> dict:
         }
 
 
+def cmd_cancel_request(ctx, payload: dict) -> dict:
+    """Cancel an unclaimed plan while retaining its frozen inputs and history."""
+    conn, now = ctx.conn, ctx.now_iso
+    with db.write_txn(conn):
+        request = db.get_request(conn, payload["request_id"])
+        if request is None:
+            raise util.KanpilotError("not_found", "规划请求不存在")
+        if request["task_id"] != payload["task_id"]:
+            raise util.KanpilotError("conflict", "规划请求与任务不匹配，请刷新后重试")
+        task = db.require_task(conn, payload["task_id"])
+        if db.task_is_purged(task):
+            raise util.KanpilotError("conflict", "任务已永久从列表移除，不能终止请求")
+        if request["kind"] != "plan":
+            raise util.KanpilotError("conflict", "仅已排队的规划请求允许手动终止")
+        result = util.jload(request["result_json"]) or {}
+        duplicate = (request["status"] == "cancelled"
+                     and isinstance(result, dict)
+                     and result.get("reason") == "user_cancelled")
+        if not duplicate:
+            # Read and write under BEGIN IMMEDIATE, just like claim: whichever
+            # wins owns the state transition. Never stop a claimed executor.
+            if request["status"] != "queued":
+                raise util.KanpilotError(
+                    "conflict", "规划请求已被领取或已结束，不能终止排队；请刷新查看当前状态",
+                )
+            db.update_request(conn, request["request_id"], now,
+                              status="cancelled", finished_at=now,
+                              result_json={"outcome": "cancelled", "reason": "user_cancelled"})
+            if core.automation_of(task):
+                core.update_automation(conn, task, now, plan_wanted=False)
+                task = db.require_task(conn, task["task_id"])
+            if task["status"] == "needs_plan":
+                core.block_task(conn, task, now, "已手动终止排队规划",
+                                "plan_cancelled", "user", stage="plan")
+            db.add_event(conn, now, "request_cancelled", task_id=task["task_id"],
+                         request_id=request["request_id"], actor="user",
+                         detail={"reason": "user_cancelled", "kind": "plan"})
+        return {
+            "ok": True, "cancelled": True, "deduplicated": duplicate,
+            "request": derive.request_view(db.get_request(conn, request["request_id"]), ctx.now),
+            "task": derive.task_summary(conn, db.require_task(conn, task["task_id"]), ctx.now),
+        }
+
+
 def cmd_set_paused(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     stage, paused = payload["stage"], payload["paused"]
@@ -182,12 +260,12 @@ def _retry_target(conn, task) -> tuple[str, str]:
         (task["task_id"],),
     ).fetchone()
     kind = last["kind"] if last else None
+    if kind == "review":
+        return "in_review", "review"
     if kind == "dispatch" or task["send_state"] is not None:
         return "ready", "dispatch"
     if kind == "monitor":
         return "running", "monitor"
-    if kind == "review":
-        return "in_review", "review"
     return "needs_plan", "plan"
 
 
@@ -251,6 +329,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     note = payload.get("note")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
+    if action == "recover_review":
+        from . import review_recovery
+        return review_recovery.recover(ctx, payload)
     accepted_remote = _accept_remote_for_resolution(ctx, payload)
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
@@ -326,11 +407,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
             if kind == "review":
-                fields.update(review_report_path=None, review_report_sha256=None, review_key=None)
-                extra = db.task_extra(db.require_task(conn, task["task_id"]))
-                extra.pop("review_conclusion", None)
-                extra.pop("review_registered_at", None)
-                fields["extra_json"] = extra
+                task = clear_review_result_inline(conn, task, now)
             core.transition_task(conn, task, target, now, "user", detail={"via": "resolve " + action}, **fields)
             if kind == "delivery":
                 core.update_delivery(conn, task, now, next_sync_at=now)
@@ -338,14 +415,18 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 new_request, _ = _new_cycle_request(conn, now, task, kind)
 
         elif action == "retry":
+            target_status, kind = _retry_target(conn, task)
             need(
-                status == "needs_user" and send_state in (None, "not_sent"),
+                status == "needs_user" and (send_state in (None, "not_sent")
+                                           or (kind == "review" and send_state == "sent"
+                                               and not core.is_automation_managed(task))),
                 "retry requires needs_user with send_state not_sent "
                 "(or a non-dispatch block)",
             )
-            target_status, kind = _retry_target(conn, task)
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
+            if kind == "review":
+                task = clear_review_result_inline(conn, task, now)
             core.transition_task(
                 conn, task, target_status, now, "user",
                 detail={"via": "resolve retry"}, **fields,
@@ -491,6 +572,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
 
         elif action == "dismiss":
             need(status == "needs_user", "dismiss requires needs_user")
+            review_block = (task["failure_stage"] == "review"
+                            or task["stage"] == "review"
+                            or task["failure_code"] == "review_blocked")
             if core.is_automation_managed(task):
                 core.update_automation(conn, task, now, manual_takeover=True, plan_wanted=False)
                 core.update_delivery(conn, task, now, mode="manual")
@@ -498,8 +582,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 task = db.require_task(conn, task["task_id"])
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
+            if review_block:
+                fields["auto_advance_paused"] = 1
             core.transition_task(
-                conn, task, "ready", now, "user",
+                conn, task, "in_review" if review_block else "ready", now, "user",
                 detail={"via": "resolve dismiss"}, **fields,
             )
 
@@ -707,3 +793,36 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
         "created_requests": created_requests,
         "changed": changed,
     }
+
+
+def cmd_dismiss_failed_requests(ctx, payload: dict) -> dict:
+    """仅隐藏待处理中的历史失败；保留请求、attempts、任务与证据。"""
+    ids = payload.get("request_ids")
+    if (not isinstance(ids, list) or not ids or len(ids) > 200
+            or any(not isinstance(x, str) or not x for x in ids)):
+        raise util.bad_request("request_ids 须为 1 至 200 个非空请求 ID")
+    ids = list(dict.fromkeys(ids))
+    with db.write_txn(ctx.conn):
+        rows = []
+        for rid in ids:
+            row = db.get_request(ctx.conn, rid)
+            if row is None:
+                raise util.KanpilotError("not_found", "失败请求不存在")
+            if row["status"] != "failed":
+                raise util.KanpilotError("conflict", "仅能移除已失败请求，请刷新列表")
+            rows.append(row)
+        stored = db.get_setting(ctx.conn, "dismissed_failed_requests", {})
+        dismissed = dict(stored) if isinstance(stored, dict) else {}
+        changed = []
+        for row in rows:
+            rid = row["request_id"]
+            if rid in dismissed:
+                continue
+            dismissed[rid] = ctx.now_iso
+            changed.append(rid)
+            db.add_event(ctx.conn, ctx.now_iso, "failed_request_dismissed",
+                         task_id=row["task_id"], request_id=rid, actor="user",
+                         detail={"hidden_from": "pending", "history_retained": True})
+        if changed:
+            db.set_setting(ctx.conn, "dismissed_failed_requests", dismissed)
+    return {"ok": True, "dismissed_count": len(changed)}

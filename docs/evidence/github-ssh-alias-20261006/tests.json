@@ -1,0 +1,25 @@
+{
+  "tests": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider core/tests/test_git_delivery.py core/tests/test_automation_policy.py -q",
+      "result": "128 passed",
+      "stage": "initial alias implementation"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider core/tests/test_git_delivery.py core/tests/test_automation_policy.py -k 'ssh or alias or variant' -q",
+      "result": "50 passed, 93 deselected",
+      "stage": "final alias/transport/variant implementation"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider core/tests/test_delivery_pr.py tests/test_auto_pipeline.py -q",
+      "result": "1 failed, 34 passed, 29 subtests passed",
+      "failure": "TestAutoPipeline.test_missing_verification_user_accepts_then_review: terminal completed while run_status running/exit_code None"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_auto_pipeline.py::TestAutoPipeline::test_missing_verification_user_accepts_then_review -q",
+      "result": "1 passed",
+      "stage": "single failed case rerun; no lifecycle/expectation edits"
+    }
+  ],
+  "log_provenance": "actual agent tool outputs in this conversation; no separately saved test log"
+}

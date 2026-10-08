@@ -1,0 +1,9 @@
+{
+  "base_commit": "166ae24e77b50cc1032546e0dd42c2b626706ff7",
+  "configuration": "Release",
+  "bundle_id": "local.kaneopilot.session-reader-check",
+  "executable_sha256": "f08a19c05a1b75fdcfeaa655d98637c8050aef3256a64941d56d3867ce088f2b",
+  "fake_sha256": "8f998d56b9722fd710ef082a64f0e849a4e14e95af8de4a545b060e47318b05a",
+  "tracked_diff_sha256": "9f89b33fcee5d2d1c77d75df82b9b47209266e9189108c7091d61628e5e58b9d",
+  "uncommitted": true
+}

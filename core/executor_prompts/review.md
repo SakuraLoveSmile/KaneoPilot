@@ -6,7 +6,7 @@ blocked 交人工。不派发、不碰 dispatch/monitor。
 
 控制端分支（v4，protocol §5.24.5）：`review_config.backend="pi"`（缺省）
 时按下面「pi 分支」执行；`="pi_desktop"` 时 = 「Plus 分支」——runner 已在
-PI-Desktop-Plus 的 `mode="plan"` + `permissionMode="ask"` 会话外完成
+PI-Desktop-Plus 的 `mode="plan"` + `permissionMode=本轮快照（新轮次 auto，历史 ask 保留）` 会话外完成
 claim、身份核对、专属 Review worktree 与材料准备，并**只要求模型输出下面的
 冻结 JSON**；登记与推进由 runner 完成，模型**不**调用任何 CLI。
 
@@ -50,7 +50,7 @@ runner 已完成：`claim` → 以 `get-task`/`get-request` 核对请求 `run_id
 本轮执行 `run_id` 与 worktree、计划哈希与关联来源 → 建**专属 Review
 worktree** 并用只读 `git status`/`git diff` 生成改动材料（连同计划/（修复
 周期）原评审报告/执行证据复制到该 worktree 的材料目录）→ 建
-`mode="plan"` + `permissionMode="ask"` 会话并把材料清单与本轮身份写进指令。
+`mode="plan"` + `permissionMode=本轮快照（新轮次 auto，历史 ask 保留）` 会话并把材料清单与本轮身份写进指令。
 
 模型的**唯一**工作：只读审查这些材料，然后给出**唯一一个** JSON 对象
 （可整体包一层 ```json 栅栏），键恰好为：

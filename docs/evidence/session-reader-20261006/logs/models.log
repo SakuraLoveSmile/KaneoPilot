@@ -1,0 +1,4 @@
+== 编译真实 Models.swift + Labels 桩 + 夹具断言 ==
+== 运行夹具 ==
+夹具断言：99/99 通过
+RESULT: ALL FIXTURE CHECKS PASSED

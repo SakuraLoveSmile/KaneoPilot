@@ -1,0 +1,27 @@
+{
+  "main_running_samples": 3213,
+  "diagnostic_record_inclusive": 660,
+  "probe_closure_inclusive": 796,
+  "json_writer_inclusive": 252,
+  "dictionary_copy_or_growth_inclusive": 180,
+  "message_row_inclusive": 36,
+  "conclusion": "Move diagnostic encoding to its serial background queue; preserve 10ms frequency and all event endpoints. No evidence for a full-text product hotspot in this action trace.",
+  "limitation": "Search interval also contains native focus-ring, input-method/XPC and SwiftUI layout samples. Diagnostic overhead alone is not proven to explain the two over-100ms samples.",
+  "background_log_followup": {
+    "accurate_search_intervals_s": [
+      [
+        15.516691,
+        15.628762
+      ],
+      [
+        15.690204,
+        15.79248
+      ]
+    ],
+    "alignment_error_ms": "<1",
+    "diagnostic_record_json_samples_in_target_intervals": 0,
+    "evidence": "AttributeGraph and animation/layout flush transactions dominate; parent Reader body, timeRow, selectors, metadata and header sampled before 300ms query commit.",
+    "authorized_fix": "Separate observed search-input state; preserve Store.search, debounce, cancellation, clear and keyboard behavior.",
+    "limitation": "Does not guarantee final 100ms target; input-method samples and endpoint-to-draw limits still reported."
+  }
+}

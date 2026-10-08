@@ -680,6 +680,14 @@ def create_request(
     existing = active_request_for_key(conn, idempotency_key)
     if existing is not None:
         return existing, False
+    if kind == "review":
+        from . import review_config
+        payload = dict(payload or {})
+        snapshot = review_config.queue_snapshot(conn)
+        task = get_task(conn, task_id) if task_id else None
+        payload.update(review_backend=snapshot["backend"], review_config=snapshot,
+                       expected_execution_run_id=task["run_id"] if task else None,
+                       plan_sha256=task["plan_sha256"] if task else None)
     request_id = util.new_uuid()
     conn.execute(
         "INSERT INTO requests(request_id, idempotency_key, task_id, stage, "

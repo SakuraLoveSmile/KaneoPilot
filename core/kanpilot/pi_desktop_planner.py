@@ -4,7 +4,7 @@
 整体交给本模块；缺该字段（旧请求）或为 ``codex`` 时 codex 分支行为完全不变。
 
 职责（只做 Plus 分支）：
-1. 快照门：``runtime_config`` 五字段齐备、``permission_mode`` 必须为 ``ask``
+1. 快照门：``runtime_config`` 五字段齐备、新规划 ``auto``，兼容旧 ``ask``
    （§5.24「v4 会话模式与权限」）、``planner_method`` 必须为 ``builtin``
    （``spec_plan`` 是 Codex 插件方式，Plus 下明确禁用，不复制技能文本冒充）；
 2. 输入门：manifest 规范化指纹与请求登记一致（``planner_input_sha256``）；
@@ -14,7 +14,7 @@
    随 prompt 发送；缺失/哈希不符/越界/无法解析 → 明确失败
    （``attachment_unsupported``），绝不静默省略图片；
 4. 会话：``pi_session_create(mode="plan", projectPath=<worktree>, providerId/
-   modelId/thinkingLevel=快照)`` → ``pi_session_configure(permissionMode="ask",
+   modelId/thinkingLevel=快照)`` → ``pi_session_configure(permissionMode=快照,
    confirm=true)`` → **发送前落** ``send_state="unknown"`` → ``pi_agent_prompt``
    → 以持久 turn（``pi_turn_get`` 身份核验）取得启动证明后才登记 ``sent``；
 5. ``ready`` 的**唯一**来源：本 session/turn 的 ``kind="plan"`` proposal
@@ -58,14 +58,17 @@ from pathlib import Path
 from typing import Optional
 
 from . import (
-    bridge, cli, codex_planner, constants, core, db, dsh_events, headless_adapter,
-    pi_desktop_worker, planfile, planner_runner, round_store, util,
+    bridge, cli, cmd_exec, codex_planner, constants, core, db, dsh_events, headless_adapter,
+    pi_desktop_backend, pi_desktop_worker, planfile, planner_runner, round_store, util,
 )
 from . import runtime_client
 
-# 计划会话固定 mode=plan + permission_mode=ask（§5.24 常量段）。
+# 计划会话固定 mode=plan；权限严格使用请求快照，兼容既有 ask 请求。
 _PLAN_SESSION_MODE = constants.PI_DESKTOP_PLAN_MODE
-_PLAN_PERMISSION_MODE = constants.PI_DESKTOP_READONLY_PERMISSION_MODE
+_PLAN_PERMISSION_MODES = (
+    constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+    constants.PI_DESKTOP_PLANNER_PERMISSION_MODE,
+)
 # 规划 worktree 内材料子目录（projectPath 之内，Plus 附件路径校验要求）。
 _MATERIAL_DIR_NAME = ".kaneopilot-plan-material"
 _POLL_SECONDS = 2.0
@@ -436,6 +439,47 @@ class _Round:
     # ---------------------------------------------------------- 主体
 
     def run(self) -> bool:
+        try:
+            return self._run()
+        except Exception as exc:  # noqa: BLE001 - 本轮意外退出必须收束 claim
+            return self._fail_unexpected(exc)
+
+    def _fail_unexpected(self, exc: Exception) -> bool:
+        # 异常文本可能包含连接凭据或整个请求，故只记录异常类型。
+        reason = "planner_internal_error"
+        detail = (f"{reason}: 规划进程异常退出（{type(exc).__name__}）；"
+                  "本轮已停止，未自动重试")
+        ctx = cli.Context(self.db_path)
+        try:
+            def guard(conn):
+                request = cmd_exec._claimed_request(
+                    conn, self.request_id, self.run_id)
+                if (self._lease_lost
+                        or request["task_id"] != self.task_id
+                        or request["stage"] != "plan"
+                        or request["kind"] != "plan"
+                        or util.lease_lost(request["lease_expires_at"], util.now_dt())):
+                    raise util.KanpilotError("stale_run", "规划轮次归属已失效")
+
+            # 与 report 的写事务共用归属守卫，避免检查后被新 claim 接管。
+            # 先成功汇报再写本 run 的终态，失去归属时不覆盖任何现场。
+            ctx.conn.authorization_guard = guard
+            cmd_exec.cmd_report(ctx, {
+                "request_id": self.request_id, "run_id": self.run_id,
+                "outcome": "failed", "note": detail,
+                "failure_code": "planner_failed", "failure_reason": detail,
+                "evidence": {"error_category": reason, **self._evidence()},
+            })
+        except util.KanpilotError as error:
+            if error.code not in ("stale_run", "conflict", "not_found"):
+                raise
+            return True
+        finally:
+            ctx.close()
+        self.finish("failed", 1, detail, "failed", reason)
+        return True
+
+    def _run(self) -> bool:
         self.write_job()
         # §5.24.3：claim 写的是 codex 轮次行；这里刷新为真实后端 + 脱敏快照，
         # 使「每阶段 backend/型号」与运行记录显示真实值。
@@ -460,8 +504,8 @@ class _Round:
         if missing:
             return (f"pi_desktop 运行快照缺字段：{'、'.join(missing)}",
                     "plan_backend_config_incomplete")
-        if self.runtime.get("permission_mode") != _PLAN_PERMISSION_MODE:
-            return (f"Plus 计划会话权限必须为 {_PLAN_PERMISSION_MODE}"
+        if self.runtime.get("permission_mode") not in _PLAN_PERMISSION_MODES:
+            return (f"Plus 计划会话权限必须为 {' 或 '.join(_PLAN_PERMISSION_MODES)}"
                     f"（快照为 {self.runtime.get('permission_mode')!r}）",
                     "plan_permission_mode_unsupported")
         if self.job["planner_method"] != "builtin":
@@ -554,7 +598,8 @@ class _Round:
                 or not previous_worktree
                 or not isinstance(previous_config, dict)
                 or any(not previous_config.get(key)
-                       for key in constants.EXEC_PI_DESKTOP_KEYS)):
+                       for key in constants.EXEC_PI_DESKTOP_KEYS)
+                or previous_config.get("permission_mode") not in _PLAN_PERMISSION_MODES):
             return self.fail(
                 "plan_round_unverifiable: 上一轮缺少持久 worktree 或五字段配置；"
                 "不读取当前配置重建连接，也不重发 prompt",
@@ -679,10 +724,10 @@ class _Round:
             self.job["session_title"] = (
                 session.get("title") or session.get("name"))
             self.write_job()
-            # 固定 ask（§5.24：只开放 ask，不自动批准工具权限）。
+            # 保留该请求的权限快照；新请求 auto，旧 ask 请求不能被提升。
             self.client.session_configure(
                 self.job["session_id"], mode=_PLAN_SESSION_MODE,
-                permission_mode=_PLAN_PERMISSION_MODE)
+                permission_mode=self.runtime["permission_mode"])
         except util.KanpilotError as exc:
             return self.fail(f"plan_session_setup_failed: {exc.message}",
                              "plan_session_setup_failed",
@@ -869,22 +914,35 @@ class _Round:
                         "worktree_invalid", "手动接管规划工作树与任务登记不符")
         finally:
             conn.close()
-        if manual_branch:
-            from . import git_delivery
-            git_delivery.verify_branch_worktree(
-                dict(delivery, repository=str(repo)),
-                require_clean=False, expected_head=None)
-            worktree = Path(delivery["worktree_path"])
-            mode = "manual"
-        elif self.req_payload.get("delivery_head_sha"):
-            from . import git_delivery
-            worktree = Path(git_delivery.prepare_snapshot_worktree(
-                repo, self.task_id, sha=self.req_payload["delivery_head_sha"],
-                purpose="plan", worktrees_root=root))
-            mode = "git"
-        else:
-            worktree = root / self.task_id / self.run_id
-            mode = self._ensure_worktree(repo, worktree)
+        from . import git_delivery
+        try:
+            if manual_branch:
+                git_delivery.verify_branch_worktree(
+                    dict(delivery, repository=str(repo)),
+                    require_clean=False, expected_head=None)
+                worktree = Path(delivery["worktree_path"])
+                mode = "manual"
+            elif self.req_payload.get("delivery_head_sha"):
+                worktree = Path(git_delivery.prepare_snapshot_worktree(
+                    repo, self.task_id, sha=self.req_payload["delivery_head_sha"],
+                    purpose="plan", worktrees_root=root))
+                mode = "git"
+            else:
+                worktree = root / self.task_id / self.run_id
+                mode = self._ensure_worktree(repo, worktree)
+        except git_delivery.GitDeliveryError as exc:
+            # Git 已脱敏 URL/认证形态；再去掉本轮凭据的裸值。
+            # 准备工作树先于 MCP 连接，读取连接记录只为脱敏，不发请求。
+            secrets = list(self._secrets)
+            try:
+                connection = pi_desktop_backend.load_connection(
+                    (self.runtime or {}).get("connection_file"))
+            except (util.KanpilotError, OSError, ValueError):
+                pass
+            else:
+                secrets.append(connection["token"])
+            raise util.KanpilotError(
+                exc.code, util.redact(exc.message, secrets)) from exc
         materials_dir = util.inside(worktree / _MATERIAL_DIR_NAME / self.run_id,
                                    worktree, "plan_materials")
         try:

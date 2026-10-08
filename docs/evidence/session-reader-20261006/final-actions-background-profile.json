@@ -1,0 +1,63 @@
+{
+  "main_running_samples": 2211,
+  "relevant_inclusive_samples": [
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      160
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      153
+    ],
+    [
+      "protocol witness for View.body.getter in conformance SessionMessageRow",
+      30
+    ],
+    [
+      "SessionMessageRow.body.getter",
+      30
+    ],
+    [
+      "closure #1 in SessionMessageRow.body.getter",
+      18
+    ],
+    [
+      "closure #1 in closure #1 in SessionMessageRow.body.getter",
+      17
+    ],
+    [
+      "destroy for SessionMessageRow",
+      5
+    ],
+    [
+      "initializeWithCopy for SessionMessageRow",
+      3
+    ],
+    [
+      "SessionMessageRowData.id.getter",
+      3
+    ],
+    [
+      "assignWithCopy for SessionMessageRow",
+      2
+    ],
+    [
+      "initializeWithCopy for SessionMessageRowData",
+      2
+    ],
+    [
+      "protocol witness for Identifiable.id.getter in conformance SessionMessageRowData",
+      1
+    ],
+    [
+      "SessionReaderPerformance.didDraw(readerID:surface:)",
+      1
+    ],
+    [
+      "destroy for SessionMessageRowData",
+      1
+    ]
+  ],
+  "record_export_exit": 0,
+  "limitation": "diagnostic encoding moved off main; response p95 still exceeds 100ms"
+}

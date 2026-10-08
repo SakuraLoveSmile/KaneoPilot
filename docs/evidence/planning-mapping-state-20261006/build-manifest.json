@@ -1,0 +1,18 @@
+{
+  "version": "0.2",
+  "build": "20261006.3",
+  "bundle_id": "local.kaneopilot",
+  "architecture": "arm64",
+  "core_source_files_verified": 107,
+  "codesign": "local ad-hoc; verify passed",
+  "dmg_verify": "passed",
+  "mounted_package_matches_app": "passed",
+  "sha256": "887f2755d9ab50b5b27a2ba87a6fac094a1aecf5c945d650b0ffd62a67852d97",
+  "source_sha256": {
+    "macos/KaneoPilot/Core/Models.swift": "5096c2691620f93325b944c48b89a10c03bd3fe2d5437dfc62bc8e5c3957646f",
+    "macos/KaneoPilot/Views/PlanningView.swift": "c34ac3453cad064ab489746becb1857086771c41921355915988bc5cdaccd043",
+    "macos/FakeCore/kanpilot-fake.py": "236421070956191782e065186ed37f26eb0f2c48037fd61239b1fdd56725613c"
+  },
+  "bytes": 4030045,
+  "installed": false
+}

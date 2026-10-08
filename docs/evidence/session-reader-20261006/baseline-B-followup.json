@@ -1,0 +1,105 @@
+{
+  "stage": "baseline-B",
+  "time_profiler_record_exit": 0,
+  "activity_monitor_record_exit": 0,
+  "cpu_samples": 2405,
+  "sampled_cpu_ms": 2405.0,
+  "sampled_main_ms": 1620.0,
+  "main_top_frames": [
+    [
+      "swift_release",
+      74.0
+    ],
+    [
+      "swift_retain",
+      74.0
+    ],
+    [
+      "_GraphemeBreakingState.shouldBreak(between:and:)",
+      71.0
+    ],
+    [
+      "___chkstk_darwin",
+      67.0
+    ],
+    [
+      "<deduplicated_symbol>",
+      58.0
+    ],
+    [
+      "UTF8Span.init(unchecked:isKnownASCII:)",
+      52.0
+    ],
+    [
+      "swift_bridgeObjectRelease",
+      37.0
+    ],
+    [
+      "UTF8Span.CharacterIterator.skipForward()",
+      35.0
+    ],
+    [
+      "type metadata accessor for UTF8Span.CharacterIterator",
+      30.0
+    ],
+    [
+      "String.init(copying:)",
+      29.0
+    ]
+  ],
+  "main_relevant_inclusive_frames": [
+    [
+      "specialized static AttributedString.Guts._characterwiseIsEqual(_:to:)",
+      609.0
+    ],
+    [
+      "specialized static AttributedString.== infix(_:_:)",
+      609.0
+    ],
+    [
+      "protocol witness for View.body.getter in conformance SessionMessageRow",
+      148.0
+    ],
+    [
+      "SessionMessageRow.body.getter",
+      148.0
+    ],
+    [
+      "closure #1 in SessionMessageRow.body.getter",
+      146.0
+    ],
+    [
+      "closure #1 in closure #1 in SessionMessageRow.body.getter",
+      146.0
+    ],
+    [
+      "SessionMessageRow.contentText.getter",
+      97.0
+    ],
+    [
+      "static AttributedString.highlighted(_:query:)",
+      79.0
+    ],
+    [
+      "AttributedString.init(_:attributes:)",
+      79.0
+    ],
+    [
+      "closure #1 in closure #1 in closure #1 in SessionMessageRow.body.getter",
+      48.0
+    ],
+    [
+      "SessionMessageRow.previewText.getter",
+      14.0
+    ],
+    [
+      "thunk for @escaping @callee_guaranteed (@guaranteed [NSAttributedStringKey : Any], @unowned _NSRange, @unowned UnsafeMutablePointer<ObjCBool>) -> ()",
+      13.0
+    ]
+  ],
+  "activity_samples": 26,
+  "memory_physical_footprint_peak_bytes": 131187864.0,
+  "memory_real_peak_bytes": 270811136.0,
+  "cpu_percent_mean": 7.9461186258000005,
+  "method": "Instruments direct instruments; sampled peak within the 30s window, not lifetime maximum"
+}

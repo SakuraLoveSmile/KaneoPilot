@@ -1,0 +1,290 @@
+{
+  "events" : [
+    {
+      "bytes" : 0,
+      "height" : 560,
+      "kind" : "fulltext_request",
+      "width" : 840
+    },
+    {
+      "bytes" : 0,
+      "height" : 0,
+      "kind" : "fulltext_request",
+      "width" : 1
+    },
+    {
+      "bytes" : 1048586,
+      "height" : 0,
+      "kind" : "fulltext_request",
+      "width" : 1
+    },
+    {
+      "draw_milliseconds" : 0.015916,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 48.146124999999998
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 260.38458300000002,
+      "renders_markdown" : false,
+      "utf16_length" : 1048586,
+      "width" : 840
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 17.889624999999999,
+      "utf16_length" : 1048586,
+      "width" : 840
+    },
+    {
+      "draw_milliseconds" : 1.001833,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 21.817041
+    },
+    {
+      "kind" : "fulltext_locate",
+      "milliseconds" : 0.64187499999999997
+    },
+    {
+      "bytes" : 1048586,
+      "height" : 560,
+      "kind" : "fulltext_request",
+      "width" : 840
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 338.77745800000002,
+      "renders_markdown" : false,
+      "utf16_length" : 1048586,
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 7.3972920000000002,
+      "utf16_length" : 1048586,
+      "width" : 600
+    },
+    {
+      "draw_milliseconds" : 1.0035829999999999,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 11.561125000000001
+    },
+    {
+      "bytes" : 1048589,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "bytes" : 1048589,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_stop",
+      "milliseconds" : 0.31483299999999997
+    },
+    {
+      "bytes" : 37,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "bytes" : 37,
+      "height" : 0,
+      "kind" : "fulltext_request",
+      "width" : 1
+    },
+    {
+      "draw_milliseconds" : 7.0349579999999996,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 13.334250000000001
+    },
+    {
+      "bytes" : 385020,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 752.06879200000003,
+      "renders_markdown" : false,
+      "utf16_length" : 175014,
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 13.785917,
+      "utf16_length" : 175014,
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_locate",
+      "milliseconds" : 0.3175
+    },
+    {
+      "draw_milliseconds" : 0.31924999999999998,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 38.763292
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 640.13541699999996,
+      "renders_markdown" : true,
+      "utf16_length" : 1048592,
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 5.2394999999999996,
+      "utf16_length" : 1048592,
+      "width" : 600
+    },
+    {
+      "draw_milliseconds" : 0.54583300000000001,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 6.5303750000000003
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 494.54120799999998,
+      "renders_markdown" : false,
+      "utf16_length" : 1048600,
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 5.6030420000000003,
+      "utf16_length" : 1048600,
+      "width" : 600
+    },
+    {
+      "draw_milliseconds" : 0.56408400000000003,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 7.095834
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "kind" : "fulltext_locate",
+      "milliseconds" : 0.028625000000000001
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 400,
+      "kind" : "fulltext_request",
+      "width" : 600
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 500,
+      "kind" : "fulltext_request",
+      "width" : 720
+    },
+    {
+      "kind" : "fulltext_locate",
+      "milliseconds" : 0.360958
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 311.585916,
+      "renders_markdown" : false,
+      "utf16_length" : 1048600,
+      "width" : 720
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 4.869459,
+      "utf16_length" : 1048600,
+      "width" : 720
+    },
+    {
+      "draw_milliseconds" : 0.55800000000000005,
+      "kind" : "fulltext_first_draw",
+      "milliseconds" : 6.4588749999999999
+    },
+    {
+      "kind" : "fulltext_locate",
+      "milliseconds" : 0.23991599999999999
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 500,
+      "kind" : "fulltext_request",
+      "width" : 720
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 500,
+      "kind" : "fulltext_request",
+      "width" : 720
+    },
+    {
+      "kind" : "fulltext_prepare",
+      "main_thread" : false,
+      "milliseconds" : 323.22820899999999,
+      "renders_markdown" : false,
+      "utf16_length" : 1048600,
+      "width" : 640
+    },
+    {
+      "kind" : "fulltext_attach",
+      "milliseconds" : 6.6932919999999996,
+      "utf16_length" : 1048600,
+      "width" : 640
+    },
+    {
+      "bytes" : 1048608,
+      "height" : 460,
+      "kind" : "fulltext_request",
+      "width" : 640
+    },
+    {
+      "kind" : "fulltext_stop",
+      "milliseconds" : 0.32874999999999999
+    }
+  ],
+  "probe_max_ms" : 153.86779200000001,
+  "probe_p95_ms" : 44.454040999999997,
+  "probe_samples" : 642,
+  "result" : "PASS",
+  "single_utf16" : 1048586,
+  "unicode_utf16" : 175014
+}

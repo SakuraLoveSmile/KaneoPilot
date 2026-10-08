@@ -18,8 +18,148 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
-from . import constants, db, derive, planfile, remote, util
+from . import constants, core, db, derive, planfile, project_config, remote, util
+
+
+_RECONNECT_SAVE_STATES = {"archived", "trashed", "purged"}
+_RECONNECT_TERMINAL_OUTCOMES = {"completed", "failed", "error", "aborted", "timeout", "truncated"}
+
+
+def _stored_execution_detail(conn, task, now) -> dict:
+    """Read existing local evidence only; never refresh a runtime or write an index."""
+    from . import cmd_session, dsh_events, headless_adapter, round_store
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    if row is None:
+        return {}
+    source = headless_adapter.resolve_source(conn)
+    job, directory = cmd_session._identity_job(source, task["task_id"], task["run_id"])
+    if job is None:
+        return {}
+    events, error = dsh_events.iter_events(directory / "events.jsonl")
+    if error:
+        return {}
+    detail = dsh_events.round_detail(row, job, events) or {}
+    detail["run_status"] = round_store.derive_run_status(row, job, now, round_store.round_timeout_seconds(conn))
+    return detail
+
+
+def reconnect_blocked_reason(conn, task, mapping, now, remote_task, execution_detail=None) -> Optional[str]:
+    """Shared read-only eligibility; commands repeat it inside their write txn."""
+    if task is None or db.task_save_state(task) not in _RECONNECT_SAVE_STATES:
+        return "任务已在活跃看板，不能重新接入"
+    if remote_task.get("id") != task["task_id"] or remote_task.get("projectId") != task["project_id"]:
+        return "远端任务或项目身份已变化，请重新获取 To Do"
+    if remote_task.get("status") not in constants.TODO_SLUGS:
+        return "远端任务已不在 To Do，不能重新接入"
+    if not mapping or mapping.get("mapping_state") != "available":
+        return (mapping or {}).get("blocked_reason") or "项目仓库映射不可用，不能重新接入"
+    if derive.lost_request_for_task(conn, task["task_id"], now) is not None:
+        return "存在未解除的执行端失联请求，请先处理失联"
+    if conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') LIMIT 1",
+        (task["task_id"],),
+    ).fetchone() is not None:
+        return "存在排队/领取中的请求，不能重新接入"
+    if task["send_state"] == "unknown":
+        return "发送结果不明，请先确认派发状态"
+    if task["status"] in constants.ARCHIVE_BLOCKED_STATUSES:
+        return "任务仍在规划、派发、执行或评审中，不能重新接入"
+    if task["sent"] or task["send_state"] == "sent":
+        detail = _stored_execution_detail(conn, task, now) if execution_detail is None else execution_detail
+        if (detail.get("run_status") not in ("finished", "failed")
+                or (detail.get("terminal") or {}).get("outcome") not in _RECONNECT_TERMINAL_OUTCOMES):
+            return "旧执行轮次尚无可核验终态，请先确认会话结束并核验旧执行"
+    return None
+
+
+def cmd_reconnect_task(ctx, payload: dict) -> dict:
+    """Explicitly reconnect a removed To Do for a fresh, manually authorized plan."""
+    conn, now = ctx.conn, ctx.now_iso
+    task_id, expected = payload["task_id"], payload["expected_save_state"]
+    if expected not in _RECONNECT_SAVE_STATES:
+        raise util.bad_request("expected_save_state 必须为 archived、trashed 或 purged")
+    task = db.require_task(conn, task_id)
+    task_snapshot = dict(task)
+    mapping = project_config.get_effective_mapping(conn, task["project_id"])
+    execution_detail, round_snapshot = {}, None
+    if task["sent"] or task["send_state"] == "sent":
+        from . import cmd_session, round_store
+        old_round = round_store.get_round(conn, task_id, task["run_id"])
+        if old_round is None:
+            raise util.KanpilotError("conflict", "旧执行轮次尚无可核验终态，请先恢复会话观察")
+        view = cmd_session.cmd_get_session(ctx, {"task_id": task_id, "run_id": task["run_id"]})
+        execution_detail = view.get("round_detail") or {}
+        refreshed = round_store.get_round(conn, task_id, task["run_id"])
+        round_snapshot = dict(refreshed) if refreshed is not None else None
+        if round_snapshot is None:
+            raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
+    try:
+        live = remote.get_task(remote.get_client(), task_id)
+    except Exception as exc:
+        raise util.KanpilotError("remote_unavailable", "远端任务读取失败，请稍后重新获取 To Do") from exc
+    remote_task = live.get("task") or {}
+    with db.write_txn(conn):
+        task = db.require_task(conn, task_id)
+        current = db.task_save_state(task)
+        if current != expected:
+            raise util.KanpilotError("conflict", "任务保存状态已变化，请重新获取 To Do")
+        if dict(task) != task_snapshot:
+            raise util.KanpilotError("conflict", "任务在核验期间已变化，请重新获取 To Do")
+        if round_snapshot is not None:
+            refreshed = round_store.get_round(conn, task_id, task["run_id"])
+            if refreshed is None or dict(refreshed) != round_snapshot:
+                raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
+        fresh_mapping = project_config.get_effective_mapping(conn, task["project_id"])
+        if fresh_mapping != mapping:
+            raise util.KanpilotError("conflict", "项目映射已变化，请重新获取 To Do")
+        reason = reconnect_blocked_reason(conn, task, fresh_mapping, ctx.now, remote_task, execution_detail)
+        if reason:
+            raise util.KanpilotError("conflict", reason)
+        # Snapshot the old live pointers for audit, without changing old requests,
+        # rounds, source snapshots, plans or any files.
+        pointers = dict(core.clear_block_fields())
+        pointers.update(
+            run_id=None, session_marker=None, session_id=None, session_title=None,
+            send_state=None, sent=0, sent_at=None, dispatch_lease_expires_at=None,
+            transition_started_at=None, transition_verified_at=None,
+            ui_evidence=None, send_evidence=None, lock_retained=0,
+            review_report_path=None, review_report_sha256=None, review_key=None,
+            review_source_task_id=None, fix_task_id=None, last_progress=None,
+            resolution=None,
+            plan_path=None, plan_sha256=None, plan_kind=None, plan_generated_at=None,
+            planner_model=None, reasoning_effort=None,
+        )
+        previous = {key: task[key] for key in pointers}
+        previous.update({key: task[key] for key in (
+            "plan_path", "plan_sha256", "source_path", "source_sha256",
+            "requirements_sha256", "repository", "plan_kind",
+        )})
+        previous["delivery"] = core.delivery_of(task)
+        db.update_task(
+            conn, task_id, now, **pointers, save_state="active", saved_at=None,
+            status="needs_plan", stage="plan", auto_advance_paused=1,
+            kaneo_status=remote_task["status"], kaneo_checked_at=now,
+        )
+        db.set_extra(
+            conn, db.require_task(conn, task_id), now,
+            reconnect={"awaiting_plan": True, "reconnected_at": now},
+        )
+        # Manual takeover disables the old automation intent while retaining its
+        # recorded costs. Old delivery identity is preserved in the event only;
+        # a new manual plan uses the current mapped repository.
+        core.update_automation(
+            conn, task, now, manual_takeover=True, plan_wanted=False,
+            replan_requested_at=None, replan_remote_status=None,
+            replan_worktree_sha256=None,
+        )
+        db.set_extra(conn, db.require_task(conn, task_id), now, delivery={"mode": "manual"})
+        db.add_event(
+            conn, now, "task_reconnected", task_id=task_id, actor="user",
+            detail={"from": current, "to": "active", "previous": previous},
+        )
+        return {"ok": True, "task": derive.task_detail(conn, db.require_task(conn, task_id), ctx.now)}
 
 
 def _save_task(ctx, payload: dict, target_state: str, event_kind: str) -> dict:
@@ -138,7 +278,19 @@ def cmd_restore_task(ctx, payload: dict) -> dict:
                 "conflict", "任务已永久从列表移除（终态），不能恢复"
             )
         deduplicated = current == "active"
-        if not deduplicated:
+        if deduplicated and resume_auto and db.task_auto_paused(task):
+            # Explicit resume on an active task must release its task-level pause.
+            # An ordinary idempotent restore does not authorize automatic work.
+            if task["status"] == "in_review":
+                from .cmd_queue import clear_review_result_inline
+                clear_review_result_inline(conn, task, now, actor="user")
+            db.update_task(conn, task_id, now, auto_advance_paused=0)
+            db.add_event(
+                conn, now, "task_restored", task_id=task_id, actor="user",
+                detail={"from": "active", "to": "active", "resume_auto": True},
+            )
+            deduplicated = False
+        elif not deduplicated:
             # save_state→active、清 saved_at；恢复后默认暂停自动推进，
             # resume_auto=true 时不暂停（§5.15.2）。
             db.update_task(

@@ -5,7 +5,7 @@
   关联来源；本周期已有登记报告 → 明确受阻（不覆盖新周期）。
 - 专属 Review worktree（独立于执行会话）+ 只读 git status/diff 材料 + 计划/
   （修复周期）原报告/执行证据复制；材料缺失必须显式记原因，不静默省略。
-- ``mode="plan"`` + ``permissionMode="ask"`` 会话；指令只要求输出冻结 JSON。
+- ``mode="plan"`` + ``permissionMode="auto"`` 新会话；指令只要求输出冻结 JSON。
 - 三结论登记：pass → register→advance→report succeeded；changes_requested →
   **先** create-review-fix **再** register-review（带 review_key/fix_task_id/
   fix_task_source_sha256）→ report succeeded；blocked → register→report needs_user。
@@ -277,12 +277,14 @@ class TestReviewIdentityAndMaterials(ReviewCase):
             for call in self.subprocess_calls
         ))
 
-        # 会话：mode=plan + permissionMode=ask，项目根为专属 Review worktree。
+        # 会话：mode=plan + permissionMode=auto，项目根为专属 Review worktree。
         self.assertEqual(self.server.created["mode"], "plan")
         self.assertEqual(self.server.created["projectPath"], review_root)
         self.assertEqual(self.server.created["providerId"], "test-provider")
         self.assertEqual(self.server.configured["mode"], "plan")
-        self.assertEqual(self.server.configured["permissionMode"], "ask")
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
+        self.assertEqual(job["config"]["permission_mode"], "auto")
+        self.assertEqual(self.review_run()["config"]["permission_mode"], "auto")
         self.assertTrue(self.server.configured["confirm"])
 
         prompt = self.server.prompt_content
@@ -423,6 +425,17 @@ class TestReviewConclusions(ReviewCase):
 
 
 class TestReviewNeverWritesPass(ReviewCase):
+    def test_transcript_failure_has_one_error_prefix_and_never_registers(self):
+        self.make_scene()
+        self.review_result("pass")
+        self.record_core_calls()
+        with mock.patch.object(pi_desktop_controller, "read_transcript", return_value=(
+                [], False, "transcript_incomplete: 单页超过控制面结果上限")):
+            self.assertEqual(self.run_review(), 1)
+        self.assertNotIn("register-review", self.commands())
+        self.assertEqual(self.review_job()["detail"],
+                         "transcript_incomplete: 单页超过控制面结果上限")
+
     def test_unexpected_proposal_is_rejected_and_blocked(self):
         self.make_scene()
         self.review_result("pass", markdown="# 评审\n\n看起来通过")
@@ -546,6 +559,18 @@ class TestReviewNeverWritesPass(ReviewCase):
 
 
 class TestReviewRecovery(ReviewCase):
+    def test_session_configuration_keeps_historical_ask_snapshot(self):
+        client = mock.Mock()
+        client.session_create.return_value = {"sessionId": "historical-review"}
+        snapshot = {"provider_id": "old-provider", "model_id": "old-model",
+                    "thinking_level": "high", "permission_mode": "ask"}
+        session, error = pi_desktop_review._create_plan_session(client, snapshot, self.root)
+        self.assertIsNone(error)
+        self.assertEqual(session, "historical-review")
+        client.session_configure.assert_called_once_with(
+            session, mode="plan", permission_mode="ask")
+        self.assertEqual(snapshot["permission_mode"], "ask")
+
     def _run_with_failing_report(self, failures=2):
         real = pi_desktop_review._report
         state = {"n": 0}

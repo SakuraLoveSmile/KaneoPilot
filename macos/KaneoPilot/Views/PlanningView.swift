@@ -15,6 +15,9 @@ struct PlanningView: View {
     @State private var fetchLoading = false
     @State private var fetchError: String?
     @State private var checked: Set<String> = []
+    @State private var reconnectTarget: TodoItem?
+    @State private var showReconnectConfirmation = false
+    @State private var reconnectingID: String?
     // ② 每个勾选任务的材料准备状态
     @State private var preparations: [String: PlanPreparation] = [:]
     @State private var supplements: [String: String] = [:]
@@ -29,6 +32,8 @@ struct PlanningView: View {
     // 映射配置 sheet 状态 (T1)
     @State private var mappingTargetProjectId: String? = nil
     @State private var showMappingSheet = false
+    @State private var initialFocusApplied = false
+    @State private var focusedTaskAnchor: String?
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -44,6 +49,7 @@ struct PlanningView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             footer
+                .disabled(reconnectingID != nil)
         }
         .frame(minWidth: 720, minHeight: 560)
         .task {
@@ -57,12 +63,22 @@ struct PlanningView: View {
             clampMethodToBackend()
             await fetchTodos(auto: true)
         }
+        .alert("重新接入并规划？", isPresented: $showReconnectConfirmation,
+               presenting: reconnectTarget) { item in
+            Button("取消", role: .cancel) {}
+            Button("重新接入") {
+                Task { await reconnect(item) }
+            }
+        } message: { item in
+            Text("将“\(item.title ?? item.taskId)”重新接入本地待规划列表。保留旧计划、执行记录和文件，旧已移除会话不会恢复，新规划使用当前配置仓库。自动推进保持暂停；接入后请准备材料并确认开始新规划。")
+        }
         .onChange(of: batchBackend) { _, _ in clampMethodToBackend() }
         .sheet(isPresented: $showMappingSheet) {
             ProjectMappingsView(targetProjectId: mappingTargetProjectId) {
                 showMappingSheet = false
                 Task { await fetchTodos(auto: true) }
             }
+            .frame(minWidth: 600, idealWidth: 760, minHeight: 480, idealHeight: 560)
         }
     }
 
@@ -74,6 +90,7 @@ struct PlanningView: View {
     }
 
     private var plusSelected: Bool { batchBackend == "pi_desktop" }
+    private var desktopSelected: Bool { batchBackend == "codex_desktop" }
 
     /// 生效方式：Plus 运行端只支持内置规划（spec_plan 是 Codex 插件运行方式）。
     private var effectiveMethod: String {
@@ -86,12 +103,13 @@ struct PlanningView: View {
 
     /// 普通规划型号与思考等级（按运行端取对应快照，不用草稿）。
     private var batchModelSummary: String {
+        if desktopSelected { return "继承 Desktop 会话/自动任务" }
         if plusSelected {
             let plus = model.plannerConfig?.config?.piDesktop
             let provider = plus?.providerId ?? "未保存"
             let modelID = plus?.modelId ?? "未保存"
             let level = plus?.thinkingLevel ?? "未保存"
-            return "\(provider)/\(modelID) · thinking \(level)（权限 ask）"
+            return "\(provider)/\(modelID) · thinking \(level)（权限 \(model.plannerConfig?.config?.piDesktop?.permissionMode ?? ExecPiDesktopConfig.fixedPlanPermission)）"
         }
         let standard = model.plannerEffective("standard")
         return "\(standard?.plannerModel ?? "未保存") · 思考 "
@@ -100,6 +118,7 @@ struct PlanningView: View {
 
     /// 评审修复规划型号（属 Codex 规划分支）。
     private var fixModelSummary: String {
+        if desktopSelected { return "继承 Desktop 会话/自动任务" }
         let fix = model.plannerEffective("review_fix")
         return "\(fix?.plannerModel ?? "未保存") · 思考 "
             + "\(fix?.reasoningEffort ?? "未保存")"
@@ -118,9 +137,13 @@ struct PlanningView: View {
     private var plannerConfigSummary: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("运行端 \(RoleBackend.shortLabel(batchBackend))　方式 \(methodLabel)")
-            Text(plusSelected
-                 ? "Plus 型号 \(batchModelSummary)"
-                 : "普通规划 \(batchModelSummary)　评审修复 \(fixModelSummary)")
+            if desktopSelected {
+                Text("模型与权限继承 Desktop 会话/自动任务")
+            } else {
+                Text(plusSelected
+                     ? "Plus 型号 \(batchModelSummary)"
+                     : "普通规划 \(batchModelSummary)　评审修复 \(fixModelSummary)")
+            }
         }
         .font(.kpSmall)
         .foregroundStyle(.secondary)
@@ -228,7 +251,7 @@ struct PlanningView: View {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
                 }
-                .disabled(fetchLoading)
+                .disabled(fetchLoading || reconnectingID != nil)
                 .help("fetch-todos：只读枚举 To Do，不导入任务")
                 if let fetchedAt {
                     Text("获取于 \(TimeFormat.short(fetchedAt))")
@@ -243,7 +266,7 @@ struct PlanningView: View {
                 BannerView(banner: .failure(fetchError), stale: !todos.isEmpty) {
                     Task { await fetchTodos(auto: false) }
                 }
-            } else if hasUnmappedTodos {
+            } else if hasUnavailableMappings {
                 HStack(spacing: Spacing.m) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -261,27 +284,39 @@ struct PlanningView: View {
                 .background(Color.orange.opacity(0.12))
                 .overlay(alignment: .bottom) { Divider() }
             }
-            List {
-                queuedPlanSection
-                Section(header: Text("Kaneo To Do").font(.kpSmall)) {
-                    if todos.isEmpty && !fetchLoading {
-                        Text(fetchError == nil ? "没有可枚举的 To Do" : "—")
-                            .font(.kpSmall).foregroundStyle(.secondary)
-                    }
-                    ForEach(todos) { item in
-                        TodoRow(
-                            item: item,
-                            isChecked: checked.contains(item.taskId),
-                            onToggle: { toggle($0) },
-                            onConfigureMapping: { pid in
-                                mappingTargetProjectId = pid
-                                showMappingSheet = true
-                            }
-                        )
+            ScrollViewReader { proxy in
+                List {
+                    queuedPlanSection
+                    Section(header: Text("Kaneo To Do").font(.kpSmall)) {
+                        if todos.isEmpty && !fetchLoading {
+                            Text(fetchError == nil ? "没有可枚举的 To Do" : "—")
+                                .font(.kpSmall).foregroundStyle(.secondary)
+                        }
+                        ForEach(todos) { item in
+                            TodoRow(
+                                item: item,
+                                isChecked: checked.contains(item.taskId),
+                                onToggle: { toggle($0) },
+                                onConfigureMapping: { pid in
+                                    mappingTargetProjectId = pid
+                                    showMappingSheet = true
+                                },
+                                reconnecting: reconnectingID == item.taskId,
+                                onReconnect: { selected in
+                                    reconnectTarget = selected
+                                    showReconnectConfirmation = true
+                                }
+                            )
+                            .disabled(fetchLoading || reconnectingID != nil)
+                            .id(item.taskId)
+                        }
                     }
                 }
+                .listStyle(.inset)
+                .onChange(of: focusedTaskAnchor) { _, taskID in
+                    if let taskID { proxy.scrollTo(taskID, anchor: .center) }
+                }
             }
-            .listStyle(.inset)
         }
     }
 
@@ -293,7 +328,7 @@ struct PlanningView: View {
             Section(header: Text("规划队列").font(.kpSmall)) {
                 ForEach(planRequests) { request in
                     HStack(spacing: Spacing.m) {
-                        StatusBadge(text: request.isUnauthorizedPlan ? "等待确认材料" : "已排队等待规划",
+                        StatusBadge(text: request.isUnauthorizedPlan ? "等待确认材料" : (request.isDesktopWaiting ? "已排队，等待 Desktop 领取" : "已排队等待规划"),
                                     style: request.isUnauthorizedPlan
                                         ? DisplayStatus.style("等待确认材料")
                                         : StatusStyle(icon: "clock", color: .blue, label: "已排队等待规划"))
@@ -342,11 +377,11 @@ struct PlanningView: View {
     private var checkedTasks: [TodoItem] {
         todos.filter { checked.contains($0.taskId) }
     }
-    private var hasUnmappedTodos: Bool {
-        todos.contains { $0.mappingState != nil && $0.mappingState != "ready" }
+    private var hasUnavailableMappings: Bool {
+        todos.contains { $0.needsRepositoryConfiguration }
     }
 
-    private func fetchTodos(auto: Bool) async {
+    private func fetchTodos(auto: Bool, selectingTaskID: String? = nil) async {
         if fetchLoading { return }
         fetchLoading = true
         fetchError = nil
@@ -354,19 +389,50 @@ struct PlanningView: View {
         do {
             let response = try await model.fetchTodos()
             var items = response.items ?? []
-            // 「定位任务」兜底：聚焦任务不在列表时注入可选占位行。
-            if let focusID = model.planningFocusTaskID,
-               !items.contains(where: { $0.taskId == focusID }) {
-                items.append(TodoItem(taskId: focusID,
-                                      title: model.taskTitle(for: focusID),
-                                      selectable: true))
-                checked.insert(focusID)
+            let focusID = model.planningFocusTaskID
+            // Keep the existing focused-task fallback on every refresh; select it only once.
+            if let focusID {
+                if !items.contains(where: { $0.taskId == focusID }) {
+                    items.append(TodoItem(taskId: focusID,
+                                          title: model.taskTitle(for: focusID),
+                                          selectable: true))
+                }
+                if !initialFocusApplied,
+                   items.first(where: { $0.taskId == focusID })?.isSelectable == true {
+                    checked.insert(focusID)
+                }
             }
             todos = items
+            checked.formIntersection(Set(items.filter(\.isSelectable).map(\.taskId)))
+            if let selectingTaskID,
+               items.first(where: { $0.taskId == selectingTaskID })?.isSelectable == true {
+                checked.insert(selectingTaskID)
+            }
             fetchedAt = response.fetchedAt
+            if !initialFocusApplied {
+                initialFocusApplied = true
+                focusedTaskAnchor = focusID
+            }
             if !auto {
                 model.showToast("已获取 \(items.count) 个 To Do")
             }
+        } catch {
+            fetchError = error.coreMessage
+        }
+    }
+
+    private func reconnect(_ item: TodoItem) async {
+        guard reconnectingID == nil, !fetchLoading,
+              item.reconnectable == true, let state = item.localSaveState else { return }
+        reconnectingID = item.taskId
+        defer { reconnectingID = nil }
+        do {
+            try await model.reconnectTask(taskID: item.taskId, expectedSaveState: state)
+            preparations[item.taskId] = nil
+            await fetchTodos(auto: true, selectingTaskID: item.taskId)
+            model.showToast(fetchError == nil
+                ? "已重新接入，请准备材料并开始新规划"
+                : "已重新接入；列表刷新失败，请重试刷新")
         } catch {
             fetchError = error.coreMessage
         }
@@ -386,7 +452,7 @@ struct PlanningView: View {
             Picker("规划方式", selection: $plannerMethod) {
                 Text("内置规划").tag("builtin")
                 Text("Spec Planner 插件").tag("spec_plan")
-                    .disabled(plusSelected || spec?.available == false)
+                    .disabled(plusSelected || (!desktopSelected && spec?.available == false))
             }
             .pickerStyle(.menu)
             .accessibilityLabel("规划方式")
@@ -399,13 +465,13 @@ struct PlanningView: View {
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if spec?.available == false, let reason = spec?.reason {
+            } else if !desktopSelected, spec?.available == false, let reason = spec?.reason {
                 // 能力不可用原因（未选中也展示）；旧核心未上报 → 能力未知说明。
                 Text("Spec Planner 插件不可用：\(reason)")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if plannerMethod == "spec_plan" && spec == nil {
+            } else if !desktopSelected && plannerMethod == "spec_plan" && spec == nil {
                 Text("planner_methods 能力未知（核心未上报）；"
                      + "排队时将按所选方式提交，核心核验失败会明确报错。")
                     .font(.kpSmall)
@@ -413,7 +479,16 @@ struct PlanningView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             // §4.7 冻结边界说明（spec_plan 选中时展示）。
-            if effectiveMethod == "spec_plan" {
+            if desktopSelected {
+                Text("提交后等待 Desktop 领取；模型与权限继承对应会话/自动任务。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if effectiveMethod == "spec_plan" {
+                    Text("Desktop 领取后使用施工规划技能，请确保对应会话/自动任务可使用该技能。")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if effectiveMethod == "spec_plan" {
                 Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
                      + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
                     .font(.kpSmall)
@@ -597,7 +672,7 @@ struct PlanningView: View {
     private func resultBadge(for taskID: String) -> some View {
         if let result = startResults?.first(where: { $0.taskId == taskID }) {
             if result.succeeded {
-                Label(result.deduplicated == true ? "已在队列" : "已排队",
+                Label(desktopSelected ? "已排队，等待 Desktop 领取" : (result.deduplicated == true ? "已在队列" : "已排队"),
                       systemImage: result.deduplicated == true ? "clock" : "checkmark.circle")
                     .font(.kpSmall)
                     .foregroundStyle(result.deduplicated == true ? Color.orange : Color.green)
@@ -666,12 +741,12 @@ struct PlanningView: View {
         }
         guard !items.isEmpty else { return }
         do {
-            // 成功项由 model.startPlans 唤起规划 runner（kickPlanner）。
+            // 含本地后端的成功批次可唤起规划 runner，Desktop 等待领取。
             let response = try await model.startPlans(items: items)
             startResults = response.results ?? []
             let okCount = (response.results ?? []).filter(\.succeeded).count
             if okCount > 0 {
-                model.showToast("已排队 \(okCount) 个规划任务")
+                model.showToast(desktopSelected ? "已排队 \(okCount) 个规划任务，等待 Desktop 领取" : "已排队 \(okCount) 个规划任务")
             }
         } catch {
             model.alertMessage = error.coreMessage
@@ -687,10 +762,8 @@ private struct TodoRow: View {
     let isChecked: Bool
     let onToggle: (TodoItem) -> Void
     var onConfigureMapping: ((String?) -> Void)? = nil
-
-    private var isUnmapped: Bool {
-        item.mappingState != nil && item.mappingState != "ready"
-    }
+    let reconnecting: Bool
+    let onReconnect: (TodoItem) -> Void
 
     private var automaticPlanningLabel: String? {
         guard let task = model.tasks.first(where: { $0.taskId == item.taskId }),
@@ -740,22 +813,30 @@ private struct TodoRow: View {
                 if !item.isSelectable, let reason = item.blockedReason {
                     Text(reason)
                         .font(.kpSmall)
-                        .foregroundStyle(isUnmapped ? .red : .orange)
+                        .foregroundStyle(item.needsRepositoryConfiguration ? .red : .orange)
                 }
             }
             Spacer(minLength: 0)
-            if isUnmapped || (!item.isSelectable && item.projectId != nil) {
+            if item.needsRepositoryConfiguration {
                 Button("配置仓库") {
                     onConfigureMapping?(item.projectId)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .font(.kpSmall)
+            } else if item.reconnectable == true {
+                Button(reconnecting ? "正在重新接入…" : "重新接入并规划") {
+                    onReconnect(item)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.kpSmall)
+                .accessibilityLabel("重新接入并规划 \(item.title ?? item.taskId)")
             }
         }
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

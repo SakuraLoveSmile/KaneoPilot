@@ -355,7 +355,10 @@ def cmd_get_request(ctx, payload: dict) -> dict:
         raise util.KanpilotError(
             "not_found", f"request not found: {payload['request_id']}"
         )
-    return derive.request_detail(ctx.conn, request, ctx.now)
+    from . import cmd_exec
+    result = derive.request_detail(ctx.conn, request, ctx.now)
+    result["request"]["backend"] = cmd_exec.request_backend(ctx.conn, request)
+    return result
 
 
 def cmd_list_requests(ctx, payload: dict) -> dict:
@@ -391,8 +394,16 @@ def cmd_list_requests(ctx, payload: dict) -> dict:
         (*params, limit),
     ).fetchall()
     views = []
+    dismissed = db.get_setting(ctx.conn, "dismissed_failed_requests", {})
+    dismissed = dismissed if isinstance(dismissed, dict) else {}
+    from . import cmd_exec
     for row in rows:
-        views.append(derive.request_view(row, ctx.now))
+        view = derive.request_view(row, ctx.now)
+        view["backend"] = cmd_exec.request_backend(ctx.conn, row)
+        view["failure_dismissed_at"] = dismissed.get(row["request_id"])
+        task = db.get_task(ctx.conn, row["task_id"]) if row["task_id"] else None
+        view["allowed_actions"] = derive.request_allowed_actions(ctx.conn, row, task, ctx.now)
+        views.append(view)
     return {"requests": views}
 
 

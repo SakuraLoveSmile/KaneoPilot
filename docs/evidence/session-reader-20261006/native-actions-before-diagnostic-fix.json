@@ -1,0 +1,18 @@
+{
+  "fixture": "A400 wrapped_json, 1180x760 dark, poll2s, final small native buttons",
+  "performed_actions": "10 Return expand/collapse, 6 keyboard input/delete, 4 wheel scroll",
+  "native_method": "NSEvent.timestamp to corresponding NSView didDraw; excludes CUA round-trip and compositor",
+  "samples": 18,
+  "p95_ms": 106.893667,
+  "max_ms": 109.140041,
+  "by_type": {
+    "search_input": 4,
+    "collapse": 10,
+    "scroll": 4
+  },
+  "queue_probe_interval_ms": 10,
+  "queue_probe_samples": 13923,
+  "queue_probe_max_ms": 131.83575,
+  "queue_probe_ge250": 0,
+  "end_uptime_ns": 713021816538583
+}

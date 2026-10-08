@@ -1,0 +1,34 @@
+macos/KaneoPilot/Views/Components.swift:614:17: warning: variable 'head' was never mutated; consider changing to 'let' constant [#VariableNeverMutated]
+612 |         while let found = haystack.range(of: needle,
+613 |                                          range: searchStart..<haystack.endIndex) {
+614 |             var head = AttributedString(String(text[cursor..<found.lowerBound]))
+    |                 `- warning: variable 'head' was never mutated; consider changing to 'let' constant [#VariableNeverMutated]
+615 |             result.append(head)
+616 |             var hit = AttributedString(String(text[found]))
+
+[#VariableNeverMutated]: <https://docs.swift.org/compiler/documentation/diagnostics/variable-never-mutated>
+macos/KaneoPilot/Core/ExecutorScheduler.swift:548:25: warning: mutation of captured var 'outcome' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+546 |                     switch state {
+547 |                     case .ready:
+548 |                         outcome = Outcome(endpoint: endpoint, ok: true,
+    |                         `- warning: mutation of captured var 'outcome' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+549 |                                           detail: "TCP 已连接")
+550 |                         semaphore.signal()
+
+macos/KaneoPilot/Core/ExecutorScheduler.swift:552:25: warning: mutation of captured var 'outcome' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+550 |                         semaphore.signal()
+551 |                     case .failed(let error):
+552 |                         outcome = Outcome(endpoint: endpoint, ok: false,
+    |                         `- warning: mutation of captured var 'outcome' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+553 |                                           detail: "\(error)")
+554 |                         semaphore.signal()
+
+macos/KaneoPilot/Core/ExecutorScheduler.swift:556:25: warning: mutation of captured var 'waitingDetail' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+554 |                         semaphore.signal()
+555 |                     case .waiting(let error):
+556 |                         waitingDetail = "\(error)"
+    |                         `- warning: mutation of captured var 'waitingDetail' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+557 |                     default:
+558 |                         break
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>

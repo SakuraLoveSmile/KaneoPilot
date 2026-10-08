@@ -86,6 +86,45 @@ def test_preflight_codes_and_local_only(ctx, tmp_path, monkeypatch):
         assert {e['code'] for e in policy.automation_preflight(ctx.conn, pid)} == {'origin_not_github'}
 
 
+def test_preflight_resolves_ssh_alias_in_repository(ctx, tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin',
+                    'git@github-alt:owner/repo.git'], check=True)
+    pid = 'project00001'
+    db.set_setting(ctx.conn, 'project_mappings', {'items': {pid: {'repository': str(repo)}}})
+    monkeypatch.setattr(policy, '_planner_ready', lambda conn: True)
+    monkeypatch.setattr(policy, '_executable', lambda binary: True)
+    monkeypatch.setattr(review_config, 'load', lambda conn: {'backend': 'codex'})
+    monkeypatch.setattr(exec_config, 'load', lambda conn: {'backend': 'pi_desktop',
+                        'pi_desktop': {'permission_mode': 'auto'}})
+    config = tmp_path / 'ssh_config'
+    include = tmp_path / 'account.conf'
+    include.write_text('Host github-alt\n  HostName ssh.github.com\n  Port 443\n')
+    config.write_text(f'Include "{include}"\n')
+    git_config = tmp_path / 'git_config'
+    git_config.touch()
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(git_config))
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    monkeypatch.delenv('GIT_SSH', raising=False)
+    monkeypatch.delenv('GIT_SSH_COMMAND', raising=False)
+    monkeypatch.delenv('GIT_SSH_VARIANT', raising=False)
+    real_run, calls = subprocess.run, []
+    def run(args, **kwargs):
+        if args[0] == 'ssh':
+            assert args[1:3] == ['-G', '-oCanonicalizeHostname=no']
+            assert kwargs['cwd'] == str(repo)
+            calls.append(args)
+            args = [args[0], '-F', str(config), *args[1:]]
+        return real_run(args, **kwargs)
+    monkeypatch.setattr(policy.subprocess, 'run', run)
+    assert policy.automation_preflight(ctx.conn, pid) == []
+    assert len(calls) == 1
+    include.write_text('Host github-alt\n  HostName example.invalid\n  Port 443\n')
+    assert {e['code'] for e in policy.automation_preflight(ctx.conn, pid)} == {'origin_not_github'}
+    assert len(calls) == 2  # No cross-check cache hides an SSH configuration change.
+
+
 def _task_request(ctx):
     ctx.conn.execute("INSERT INTO tasks(task_id,project_id,project_name,status,stage,created_at,updated_at) VALUES('task00001','project0001','P','planning','plan',?,?)", (NOW,NOW))
     task = db.require_task(ctx.conn, 'task00001')

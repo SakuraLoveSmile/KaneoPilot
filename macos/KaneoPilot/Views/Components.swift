@@ -131,9 +131,13 @@ enum Labels {
         case "migrated": return "数据迁移"
         case "rechecked": return "重新校验"
         case "request_cancelled": return "请求取消"
+        case "failed_request_dismissed": return "失败记录已移除"
         case "task_archived": return "任务归档"
         case "task_trashed": return "任务移入回收站"
         case "task_restored": return "任务恢复"
+        case "review_stage_recovered": return "评审阶段已恢复"
+        case "review_result_cleared": return "旧评审结果已留存"
+        case "task_reconnected": return "任务重新接入待规划"
         case "session_trashed": return "会话移入回收站"
         case "session_restored": return "会话恢复"
         case "task_purged": return "任务永久从列表移除"
@@ -257,6 +261,8 @@ enum DisplayStatus {
             return StatusStyle(icon: "paperplane", color: .blue, label: "派发中")
         case "执行中", "running":
             return StatusStyle(icon: "play.circle", color: .blue, label: "执行中")
+        case "待评审":
+            return StatusStyle(icon: "clock", color: .orange, label: "待评审")
         case "评审中", "in_review":
             return StatusStyle(icon: "eye", color: .orange, label: "评审中")
         case "需人工", "needs_user":
@@ -700,6 +706,12 @@ extension JSONValue {
 
 // 自动化失败的展示词表；可用性始终由核心 allowed_actions 决定。
 enum AutomationPresentation {
+    static func dismissLabel(stage: String?, failureCode: String?, automatic: Bool) -> String {
+        let review = stage == "review" || failureCode == "review_blocked" || failureCode == "review_backend_unsupported"
+        return review ? (automatic ? "转为人工评审" : "清除评审阻塞")
+            : (automatic ? "转为人工处理" : "清除阻塞标记")
+    }
+
     static func title(_ code: String?) -> String? {
         switch code {
         case "verification_unconfirmed": return "验证结果待确认"

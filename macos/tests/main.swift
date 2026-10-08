@@ -35,6 +35,21 @@ if let probe = decode(PiDesktopProbeResponse.self, plusProbeJSON) {
     expect(false, "真实 Plus probe JSON 应能用 JSONDecoder.kaneo 解码")
 }
 
+// Desktop 正式队列字段与模型来源：只消费核心快照，不显示 CLI 型号。
+if let status = decode(DesktopQueueStatusResponse.self, #"{"enabled":true,"poll_minutes":10,"auto_configured":true,"planner_thread_id":"plan-thread","review_thread_id":"review-thread","queue":{"plan":2,"review":1},"detail":"已绑定"}"#) {
+    expect(status.enabled && status.autoConfigured, "Desktop 正式领取配置解码")
+    expect(status.pollMinutes == 10 && status.queue.plan == 2 && status.queue.review == 1, "Desktop 周期和队列独立计数")
+    expect(status.plannerThreadId == "plan-thread" && status.reviewThreadId == "review-thread", "Desktop 原生任务聊天绑定")
+}
+if let request = decode(RequestItem.self, #"{"request_id":"desktop-plan","kind":"plan","status":"queued","manual_authorized":true,"backend":"codex_desktop"}"#) {
+    expect(request.isDesktopWaiting, "已排队请求按固化运行端显示等待 Desktop")
+    expect(!request.isUnauthorizedPlan, "Desktop 领取仍要求已授权材料")
+}
+if let round = decode(RoundConfig.self, #"{"backend":"codex_desktop","planner_model":"codex-desktop","reasoning_effort":"inherit"}"#) {
+    expect(round.summaryText == "Codex Desktop · 继承 Desktop 会话/自动任务", "Desktop 不把来源标记显示成实测型号")
+}
+expect(RoleBackend.shortLabel("codex_desktop") == "Codex Desktop", "Desktop 会话运行端中文短名")
+
 // MARK: - 夹具 1：planner-capabilities.backends（§5.24.2）
 
 let plannerCapsJSON = """
@@ -420,12 +435,61 @@ if let old = decode(TaskDetail.self, #"{"task_id":"task1234","status":"ready"}"#
 
 // MARK: - 结果
 
+// MARK: - To Do 仓库映射状态独立于任务可规划状态
+
+func todoItem(_ mappingState: String? = nil, selectable: Bool? = nil,
+              blockedReason: String? = nil, includeMappingState: Bool = true) -> TodoItem? {
+    var fields = ["\"task_id\":\"todo-fixture\"", "\"title\":\"Fixture\""]
+    if includeMappingState, let mappingState {
+        fields.append("\"mapping_state\":\"\(mappingState)\"")
+    }
+    if let selectable { fields.append("\"selectable\":\(selectable)") }
+    if let blockedReason {
+        let escaped = blockedReason.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        fields.append("\"blocked_reason\":\"\(escaped)\"")
+    }
+    return decode(TodoItem.self, "{" + fields.joined(separator: ",") + "}")
+}
+
+if let available = todoItem("available", selectable: true) {
+    expect(available.isSelectable, "available 且可选的 To Do 可规划")
+    expect(!available.needsRepositoryConfiguration, "available 映射不要求配置仓库")
+}
+if let planning = todoItem("available", selectable: false,
+                           blockedReason: "本地任务正在规划中") {
+    expect(!planning.isSelectable, "规划中的任务仍不可选")
+    expect(!planning.needsRepositoryConfiguration,
+           "规划中的任务映射有效，不显示配置仓库入口")
+    expect(planning.blockedReason == "本地任务正在规划中",
+           "任务自身阻断原因保持不变")
+}
+for state in ["unmapped", "disabled", "missing", "unreadable"] {
+    if let item = todoItem(state, selectable: false) {
+        expect(item.needsRepositoryConfiguration, "\(state) 映射需要配置仓库入口")
+    }
+}
+if let legacy = todoItem(includeMappingState: false) {
+    expect(!legacy.needsRepositoryConfiguration,
+           "旧响应缺少 mapping_state 时不误报需要配置")
+}
+if let nullState = decode(TodoItem.self, #"{"task_id":"todo-null","mapping_state":null}"#) {
+    expect(!nullState.needsRepositoryConfiguration,
+           "mapping_state 为 null 时不误报需要配置")
+}
+if let unknown = todoItem("ready", selectable: false) {
+    expect(unknown.needsRepositoryConfiguration,
+           "未知 mapping_state 不当作 available")
+}
+
 if let owner = decode(ExecutorInstanceResponse.self, #"{"instance_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"active","owned_workers":[{"pid":1234,"started_seconds":1791180000,"started_microseconds":123456,"task_id":"task1234","run_id":"run1","spec_path":"/tmp/fixture/spec.json"}]}"#) {
     expect(owner.ownedWorkers.first?.pid == 1234 && owner.ownedWorkers.first?.startedMicroseconds == 123456, "App worker 进程身份解码")
 }
 if let legacy = decode(ExecutorStatusResponse.self, #"{"stages":{}}"#) {
     expect(legacy.ownedWorkers == nil, "旧 executor-status 缺 worker 归属兼容")
 }
+
+expect(ExecPiDesktopConfig.fixedReviewPermission == "auto", "新 Review 权限固定 auto")
 
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
@@ -435,3 +499,4 @@ if failures.isEmpty {
     for failure in failures { print(" - \(failure)") }
     exit(1)
 }
+

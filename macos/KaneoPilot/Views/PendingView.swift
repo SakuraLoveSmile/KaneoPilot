@@ -5,6 +5,7 @@ import SwiftUI
 struct PendingView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var confirmRelease: RequestItem?
+    @State private var confirmDismissIDs: [String] = []
 
     /// 待处理节内导航目标：任务详情与请求详情。
     enum PendingRoute: Hashable {
@@ -36,7 +37,7 @@ struct PendingView: View {
 
     private var recentFailed: [RequestItem] {
         Array(model.requests
-            .filter { $0.status == "failed" }
+            .filter { $0.status == "failed" && $0.failureDismissedAt == nil }
             .sorted { (TimeFormat.parse($0.updatedAt) ?? .distantPast) > (TimeFormat.parse($1.updatedAt) ?? .distantPast) }
             .prefix(10))
     }
@@ -71,9 +72,24 @@ struct PendingView: View {
                             }
                         }
                         if !recentFailed.isEmpty {
-                            Section("最近失败") {
+                            Section {
                                 ForEach(recentFailed) { request in
                                     requestRow(request)
+                                        .contextMenu {
+                                            Button("从待处理移除") { confirmDismissIDs = [request.requestId] }
+                                                .disabled(model.busy)
+                                        }
+                                }
+                            } header: {
+                                HStack {
+                                    Text("最近失败")
+                                    Spacer()
+                                    Button("清空最近失败") {
+                                        confirmDismissIDs = model.requests.filter {
+                                            $0.status == "failed" && $0.failureDismissedAt == nil
+                                        }.map(\.requestId)
+                                    }
+                                    .disabled(model.busy)
                                 }
                             }
                         }
@@ -89,6 +105,19 @@ struct PendingView: View {
                     RequestDetailView(requestID: requestID)
                 }
             }
+        }
+        .confirmationDialog("从待处理移除失败记录",
+                            isPresented: Binding(get: { !confirmDismissIDs.isEmpty },
+                                                 set: { if !$0 { confirmDismissIDs = [] } }),
+                            titleVisibility: .visible) {
+            Button("移除 \(confirmDismissIDs.count) 条失败记录") {
+                let ids = confirmDismissIDs
+                confirmDismissIDs = []
+                Task { await model.dismissFailedRequests(requestIDs: ids) }
+            }
+            Button("取消", role: .cancel) { confirmDismissIDs = [] }
+        } message: {
+            Text("仅从待处理列表隐藏，历史和执行证据保留在运行记录中，不影响当前任务。")
         }
         .confirmationDialog(
             "释放失联请求",
@@ -211,7 +240,11 @@ struct PendingView: View {
 
     @ViewBuilder
     private func actions(_ request: RequestItem) -> some View {
-        if request.isLost, request.taskId != nil {
+        if request.status == "failed" {
+            Button("移除") { confirmDismissIDs = [request.requestId] }
+                .help("仅从待处理隐藏，保留历史和执行证据")
+                .disabled(model.busy)
+        } else if request.isLost, request.taskId != nil {
             Button("释放失联请求") { release(request) }
                 .disabled(model.busy)
         } else if request.status == "queued" {
@@ -284,6 +317,7 @@ struct RequestDetailView: View {
     @State private var error: String?
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
+    @State private var confirmCancelPlan = false
     @State private var generation = 0
 
     var body: some View {
@@ -303,6 +337,17 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("请求详情")
+        .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
+                            titleVisibility: .visible) {
+            Button("终止计划", role: .destructive) {
+                if let taskID = detail?.request?.taskId {
+                    Task { await model.cancelPlan(requestID: requestID, taskID: taskID) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("撤销尚未领取的规划请求，保留规划材料与历史，等待你手动重新规划。若已被领取，本操作会拒绝终止。")
+        }
         .task(id: requestID) { await load() }
         .onChange(of: model.lastRefreshAt) {
             Task { await load() }
@@ -691,13 +736,16 @@ struct RequestDetailView: View {
             }
             .disabled(model.busy)
             .help("调整排队优先级")
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirmCancelPlan = true }
+                .disabled(model.busy || taskID == nil)
         case "release_lost":
             Button("释放失联请求") { confirmRelease = true }
                 .disabled(model.busy || taskID == nil)
         case "resume", "accept_verification", "dismiss":
             Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode)
                    : action == "accept_verification" ? "接受验证结果"
-                   : AutomationPresentation.active(detail.task?.automation) ? "转为人工处理" : "清除阻塞标记") {
+                   : AutomationPresentation.dismissLabel(stage: detail.task?.stage, failureCode: detail.task?.exception?.failureCode, automatic: AutomationPresentation.active(detail.task?.automation))) {
                 guard let taskID else { return }
                 Task { await model.resolve(taskID: taskID, action: action) }
             }.disabled(model.busy || taskID == nil)

@@ -1,0 +1,105 @@
+{
+  "stage": "candidate-stable",
+  "time_profiler_record_exit": 0,
+  "activity_monitor_record_exit": 0,
+  "cpu_samples": 1500,
+  "sampled_cpu_ms": 1500.0,
+  "sampled_main_ms": 465.0,
+  "main_top_frames": [
+    [
+      "AG::Graph::UpdateStack::update()",
+      19.0
+    ],
+    [
+      "<deduplicated_symbol>",
+      16.0
+    ],
+    [
+      "kevent_id",
+      15.0
+    ],
+    [
+      "_xzm_free_tc",
+      12.0
+    ],
+    [
+      "specialized static String._uncheckedFromUTF8(_:isASCII:precalculatedUTF16Count:)",
+      11.0
+    ],
+    [
+      "swift_retain",
+      10.0
+    ],
+    [
+      "swift_release",
+      9.0
+    ],
+    [
+      "objc_retain",
+      8.0
+    ],
+    [
+      "AG::Graph::propagate_dirty(AG::AttributeID)",
+      6.0
+    ],
+    [
+      "bool swift::RefCounts<swift::RefCountBitsT<(swift::RefCountInlinedness)1>>::doDecrementSlow<(swift::PerformDeinit)1>(swift::RefCountBitsT<(swift::RefCountInlinedness)1>, unsigned int)",
+      6.0
+    ]
+  ],
+  "main_relevant_inclusive_frames": [
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      124.0
+    ],
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      124.0
+    ],
+    [
+      "SessionReaderView.body.getter",
+      12.0
+    ],
+    [
+      "closure #1 in SessionReaderView.body.getter",
+      11.0
+    ],
+    [
+      "SessionReaderView.roundLabel(_:)",
+      10.0
+    ],
+    [
+      "closure #1 in closure #6 in closure #1 in SessionReaderView.selectors.getter",
+      10.0
+    ],
+    [
+      "closure #1 in SessionReaderView.header.getter",
+      9.0
+    ],
+    [
+      "SessionReaderView.header.getter",
+      9.0
+    ],
+    [
+      "closure #1 in closure #1 in SessionReaderView.header.getter",
+      5.0
+    ],
+    [
+      "-[NSAttributedString enumerateAttributesInRange:options:usingBlock:]",
+      5.0
+    ],
+    [
+      "thunk for @escaping @callee_guaranteed (@guaranteed [NSAttributedStringKey : Any], @unowned _NSRange, @unowned UnsafeMutablePointer<ObjCBool>) -> ()",
+      5.0
+    ],
+    [
+      "closure #2 in closure #1 in SessionReaderView.header.getter",
+      4.0
+    ]
+  ],
+  "activity_samples": 28,
+  "memory_physical_footprint_peak_bytes": 103203968.0,
+  "memory_real_peak_bytes": 209338368.0,
+  "cpu_percent_mean": 4.81422374259259,
+  "method": "Instruments direct instruments; sampled peak within the 30s window, not lifetime maximum"
+}

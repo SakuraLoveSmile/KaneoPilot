@@ -1,0 +1,70 @@
+{
+  "main_running_samples": 3213,
+  "relevant_inclusive_samples": [
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      796
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      660
+    ],
+    [
+      "+[NSJSONSerialization dataWithJSONObject:options:error:]",
+      278
+    ],
+    [
+      "-[_NSJSONWriter dataWithRootObject:options:]",
+      234
+    ],
+    [
+      "protocol witness for View.body.getter in conformance SessionMessageRow",
+      27
+    ],
+    [
+      "SessionMessageRow.body.getter",
+      27
+    ],
+    [
+      "closure #1 in SessionMessageRow.body.getter",
+      19
+    ],
+    [
+      "closure #1 in closure #1 in SessionMessageRow.body.getter",
+      15
+    ],
+    [
+      "-[_NSJSONWriter init]",
+      15
+    ],
+    [
+      "destroy for SessionMessageRow",
+      4
+    ],
+    [
+      "-[_NSJSONWriter dealloc]",
+      3
+    ],
+    [
+      "initializeWithCopy for SessionMessageRowData",
+      2
+    ],
+    [
+      "SessionMessageRow.messageText(_:)",
+      2
+    ],
+    [
+      "SessionMessageRow.highlighted(_:query:)",
+      2
+    ],
+    [
+      "SessionReaderPerformance.didDraw(readerID:surface:)",
+      2
+    ],
+    [
+      "-[_NSJSONWriter resizeTemporaryBuffer:]",
+      2
+    ]
+  ],
+  "limitation": "diagnostic overhead; not an accepted response benchmark"
+}
