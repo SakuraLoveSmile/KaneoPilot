@@ -3,11 +3,11 @@
 覆盖：
 - codex 分支不受影响（缺 ``planner_backend`` 的旧请求照旧走 codex）；
 - 非法 ``planner_backend`` → 明确失败，不暗换后端；
-- Plus 快照门（五字段 / ``permission_mode=ask``）与 ``planner_method`` 门
+- Plus 快照门（五字段 / 新请求 ``auto``、兼容既有 ``ask``）与 ``planner_method`` 门
   （``spec_plan`` 明确禁用）、输入 manifest 指纹门；
 - 独立规划 worktree（git worktree，HEAD 基线，不写用户主工作区）+ 材料哈希
   校验与复制 + 图片附件（Plus ``AgentPromptAttachment`` 真实形状）；
-- ``pi_session_create(mode="plan")`` / ``pi_session_configure(ask)`` /
+- ``pi_session_create(mode="plan")`` / ``pi_session_configure(快照权限)`` /
   发送前 ``send_state="unknown"`` / 持久 turn 启动证明后 ``sent``；
 - ``ready`` 唯一来源 = 本 session/turn 的 ``kind="plan"`` proposal 严格身份
   匹配；reject 关闭并**确认 rejected**（空 pending 清单不算成功）；
@@ -83,7 +83,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
-    constants, db, dsh_events, mcp_server, mcp_scopes,
+    constants, db, dsh_events, git_delivery, mcp_server, mcp_scopes,
     pi_desktop_backend, pi_desktop_planner, runtime_client,
     planner_config, planner_runner, round_store, util,
 )
@@ -474,7 +474,7 @@ class PlusPlannerCase(KanpilotTestCase):
         block = {
             "connection_file": str(self.connection_file),
             "provider_id": "test-provider", "model_id": "test-model",
-            "thinking_level": "medium", "permission_mode": "ask",
+            "thinking_level": "medium", "permission_mode": "auto",
         }
         block.update(overrides)
         return block
@@ -484,7 +484,7 @@ class PlusPlannerCase(KanpilotTestCase):
 
         注：CLI ``set-planner-config`` 的字段表（cli.py，主 agent 独占）当前尚未
         登记 ``backend``/``pi_desktop``，故测试直接使用同一模块的保存入口（校验
-        语义一致：五字段 + permission_mode=ask）。
+        语义一致：五字段 + permission_mode=auto）。
         """
         conn = db.connect(self.db_path)
         try:
@@ -785,7 +785,7 @@ class TestPlusGates(PlusPlannerCase):
                       self.task("tasknosnapshot00000001")["failure_reason"])
         self.assertEqual(self.server.created, None)
 
-    def test_permission_mode_must_be_ask(self):
+    def test_permission_mode_rejects_accept_edits(self):
         repo = self.git_repo()
         self.new_task("taskperm000000000001", repo=repo)
         info = self.make_input("taskperm000000000001", repo)
@@ -794,7 +794,7 @@ class TestPlusGates(PlusPlannerCase):
         try:
             request = db.get_request(conn, entry["request_id"])
             payload = db.request_payload(request)
-            payload["runtime_config"]["permission_mode"] = "auto"
+            payload["runtime_config"]["permission_mode"] = "accept-edits"
             with db.write_txn(conn):
                 db.update_request(conn, entry["request_id"], util.now_iso(),
                                  payload_json=payload)
@@ -882,13 +882,40 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.server.add_plan_proposal(markdown=markdown)
         return fixture, payload
 
+    def test_legacy_queued_ask_snapshot_is_configured_without_escalation(self):
+        fixture, _ = self._fixture()
+        conn = db.connect(self.db_path)
+        try:
+            request = db.get_request(conn, fixture["request_id"])
+            payload = db.request_payload(request)
+            payload["runtime_config"]["permission_mode"] = "ask"
+            with db.write_txn(conn):
+                db.update_request(conn, fixture["request_id"], util.now_iso(), payload_json=payload)
+        finally:
+            conn.close()
+        # Current settings remain auto, but this already authorized request is ask.
+        self.save_plus_config()
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
+        self.assertEqual(self.server.configured["mode"], "plan")
+        self.assertEqual(self.server.configured["permissionMode"], "ask")
+        _, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["config"]["permission_mode"], "ask")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(db.request_payload(db.get_request(conn, fixture["request_id"]))["runtime_config"],
+                             payload["runtime_config"])
+        finally:
+            conn.close()
+
     def test_ready_publishes_plan_and_rejects_proposal(self):
         fixture, _payload = self._fixture()
         request_id = fixture["request_id"]
         with self.fast():
             self.run_round()
 
-        # 1. 会话与权限：mode=plan、permissionMode=ask、projectPath=规划 worktree
+        # 1. 会话与权限：mode=plan、permissionMode=auto、projectPath=规划 worktree
         created = self.server.created
         self.assertIsNotNone(created)
         self.assertEqual(created["mode"], "plan")
@@ -898,7 +925,7 @@ class TestPlusReadyPath(PlusPlannerCase):
         worktree = Path(created["projectPath"])
         self.assertNotEqual(worktree, fixture["repo"])
         self.assertTrue(str(worktree).startswith(str(self.worktrees_root)))
-        self.assertEqual(self.server.configured["permissionMode"], "ask")
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
         self.assertEqual(self.server.configured["mode"], "plan")
         self.assertIs(self.server.configured["confirm"], True)
         self.assertEqual(self.server.configured["id"], SESSION_ID)
@@ -980,7 +1007,7 @@ class TestPlusReadyPath(PlusPlannerCase):
             conn.close()
         self.assertEqual(round_view["backend"], "pi_desktop")
         self.assertEqual(round_view["config"]["model_id"], "test-model")
-        self.assertEqual(round_view["config"]["permission_mode"], "ask")
+        self.assertEqual(round_view["config"]["permission_mode"], "auto")
         self.assertEqual(round_view["worktree_path"], str(worktree))
 
     def test_materials_verified_and_copied_into_worktree(self):
@@ -1489,6 +1516,262 @@ class TestTranscriptGates(PlusPlannerCase):
 # ------------------------------------------------------------ 恢复不重发
 
 
+class TestPlanSnapshotWorktree(PlusPlannerCase):
+    def snapshot_fixture(self):
+        fixture = self.plus_request()
+        sha = subprocess.run(
+            ["git", "-C", str(fixture["repo"]), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        conn = db.connect(self.db_path)
+        try:
+            payload = db.request_payload(db.get_request(conn, fixture["request_id"]))
+            payload["delivery_head_sha"] = sha
+            with db.write_txn(conn):
+                db.update_request(conn, fixture["request_id"], util.now_iso(),
+                                  payload_json=payload)
+        finally:
+            conn.close()
+        fixture["sha"] = sha
+        fixture["worktree"] = (self.worktrees_root / fixture["task_id"]
+                               / ("plan-" + sha[:12]))
+        return fixture
+
+    def assert_preparation_failed(self, fixture, code, detail):
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["exit_code"], 1)
+        self.assertIn(detail, job["detail"])
+        self.assertEqual(self.terminal_reason(
+            self.events_for(fixture["task_id"], run_id)), code)
+        view = self.task(fixture["task_id"])
+        self.assertEqual(view["status"], "needs_plan")
+        self.assertIn(detail, view["failure_reason"])
+        self.assertEqual(self.request_view(fixture["request_id"])["status"], "failed")
+        self.assertIsNone(self.server.created)
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertEqual(self.server.calls, [], "工作树失败前不得访问 Plus 控制面")
+        self.assertFalse(self.plan_files())
+        self.assertEqual(self.git_status(fixture["repo"]), "")
+
+    def test_worktree_invalid_keeps_reason_and_redacts_runtime_credentials(self):
+        fixture = self.snapshot_fixture()
+        error = git_delivery.GitDeliveryError(
+            "worktree_invalid",
+            f"快照身份不符：{TOKEN} https://user:private@github.com/org/repo")
+        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+                               side_effect=error):
+            self.run_round()
+        self.assert_preparation_failed(fixture, "worktree_invalid", "快照身份不符")
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        persisted = json.dumps({
+            "job": job, "events": self.events_for(fixture["task_id"], run_id),
+            "task": self.task(fixture["task_id"]),
+            "request": self.request_view(fixture["request_id"]),
+        })
+        self.assertNotIn(TOKEN, persisted)
+        self.assertNotIn("user:private", persisted)
+        self.assertIn("redacted", persisted)
+
+    def test_git_transient_keeps_specific_reason(self):
+        fixture = self.snapshot_fixture()
+        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+                               side_effect=git_delivery.GitDeliveryError(
+                                   "git_transient", "Git 操作暂时不可用")):
+            self.run_round()
+        self.assert_preparation_failed(fixture, "git_transient", "Git 操作暂时不可用")
+
+    def test_unavailable_connection_does_not_replace_worktree_error(self):
+        fixture = self.snapshot_fixture()
+        self.write_connection(active=False)
+        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+                               side_effect=git_delivery.GitDeliveryError(
+                                   "worktree_invalid", "快照工作树有源码改动")):
+            self.run_round()
+        self.assert_preparation_failed(fixture, "worktree_invalid", "快照工作树有源码改动")
+
+    def test_manual_branch_validation_keeps_specific_reason(self):
+        fixture = self.snapshot_fixture()
+        branch = self.worktrees_root / fixture["task_id"] / "branch"
+        branch.parent.mkdir(parents=True, exist_ok=True)
+        branch_name = "kaneo/" + fixture["task_id"]
+        subprocess.run(["git", "-C", str(fixture["repo"]), "worktree", "add",
+                        "-b", branch_name, str(branch), fixture["sha"]],
+                       capture_output=True, check=True)
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                db.set_extra(conn, db.require_task(conn, fixture["task_id"]),
+                             util.now_iso(), automation={"manual_takeover": True},
+                             delivery={"mode": "manual", "branch": branch_name,
+                                       "worktree_path": str(branch),
+                                       "head_sha": fixture["sha"]})
+                payload = db.request_payload(db.get_request(conn, fixture["request_id"]))
+                payload.update(delivery_mode="manual", plan_cwd=str(branch))
+                db.update_request(conn, fixture["request_id"], util.now_iso(),
+                                  payload_json=payload)
+        finally:
+            conn.close()
+        with mock.patch.object(git_delivery, "verify_branch_worktree",
+                               side_effect=git_delivery.GitDeliveryError(
+                                   "worktree_invalid", "任务工作树归属或分支不符")):
+            self.run_round()
+        self.assert_preparation_failed(fixture, "worktree_invalid", "任务工作树归属或分支不符")
+
+    def test_foreign_snapshot_identity_blocks_plus_creation(self):
+        fixture = self.snapshot_fixture()
+        foreign = self.git_repo("Other")
+        fixture["worktree"].parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(foreign), "worktree", "add", "--detach",
+                        str(fixture["worktree"]), "HEAD"],
+                       capture_output=True, check=True)
+        self.run_round()
+        self.assert_preparation_failed(fixture, "worktree_invalid", "已有快照工作树与登记不符")
+        self.assertEqual(self.git_status(foreign), "")
+
+    def test_snapshot_tracked_changes_still_block_plus_creation(self):
+        fixture = self.snapshot_fixture()
+        git_delivery.prepare_snapshot_worktree(
+            fixture["repo"], fixture["task_id"], sha=fixture["sha"],
+            purpose="plan", worktrees_root=self.worktrees_root)
+        (fixture["worktree"] / "AGENTS.md").write_text("changed source\n", encoding="utf-8")
+        self.run_round()
+        self.assert_preparation_failed(fixture, "worktree_invalid", "已有快照工作树与登记不符")
+        self.assertEqual((fixture["worktree"] / "AGENTS.md").read_text(), "changed source\n")
+
+    def test_reused_snapshot_keeps_plus_plan_markdown_and_sends_once(self):
+        fixture = self.snapshot_fixture()
+        git_delivery.prepare_snapshot_worktree(
+            fixture["repo"], fixture["task_id"], sha=fixture["sha"],
+            purpose="plan", worktrees_root=self.worktrees_root)
+        artifact = fixture["worktree"] / ".pi" / "plan" / "previous-plan.md"
+        artifact.parent.mkdir(parents=True)
+        original = "# 已有 Plus 计划\n\n保留这份规划证据。\n".encode("utf-8")
+        artifact.write_bytes(original)
+        self.server.add_message("user", "kanpilot plan prompt")
+        self.server.add_message("assistant", "# 新计划\n")
+        self.server.add_plan_proposal(markdown="# 新计划\n")
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
+        self.assertEqual(self.server.created["projectPath"], str(fixture["worktree"]))
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertEqual(artifact.read_bytes(), original)
+        self.assertEqual(self.git_status(fixture["repo"]), "")
+        head = subprocess.run(["git", "-C", str(fixture["repo"]), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(head, fixture["sha"])
+
+
+class TestUnexpectedPlannerExit(PlusPlannerCase):
+    def test_exception_before_session_creation_finishes_claim(self):
+        fixture = self.plus_request()
+        raw_detail = f"token={TOKEN}; raw request payload must not be persisted"
+        with mock.patch.object(pi_desktop_planner._Round, "_prepare_materials",
+                               side_effect=RuntimeError(raw_detail)):
+            self.run_round()
+
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["exit_code"], 1)
+        self.assertTrue(job["ended_at"])
+        self.assertIn("RuntimeError", job["detail"])
+        self.assertNotIn(TOKEN, json.dumps(job))
+        self.assertNotIn("raw request payload", json.dumps(job))
+        events = self.events_for(fixture["task_id"], run_id)
+        self.assertEqual(self.terminal_reason(events), "planner_internal_error")
+        self.assertNotIn(raw_detail, json.dumps(events))
+        request = self.request_view(fixture["request_id"])
+        self.assertEqual(request["status"], "failed")
+        self.assertNotIn(raw_detail, json.dumps(request))
+        self.assertEqual(self.task(fixture["task_id"])["status"], "needs_plan")
+        self.assertIsNone(self.server.created)
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_exception_after_replacement_claim_keeps_new_round(self):
+        fixture = self.plus_request()
+        new_run = "replacement-plan-run"
+        new_dir = self.run_dir(fixture["task_id"], new_run)
+        new_dir.mkdir(parents=True)
+        new_job = new_dir / dsh_events.JOB_NAME
+        sentinel = b'{"run_id":"replacement-plan-run","status":"running"}'
+        new_job.write_bytes(sentinel)
+
+        def replace_then_crash():
+            conn = db.connect(self.db_path)
+            try:
+                with db.write_txn(conn):
+                    db.update_request(conn, fixture["request_id"], util.now_iso(),
+                                      run_id=new_run)
+            finally:
+                conn.close()
+            raise RuntimeError("old process crashed")
+
+        with mock.patch.object(pi_desktop_planner._Round, "_prepare_materials",
+                               side_effect=replace_then_crash):
+            self.run_round()
+
+        old_run, old_job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(old_job["status"], "running")
+        self.assertFalse((self.run_dir(fixture["task_id"], old_run)
+                          / dsh_events.EVENT_LOG_NAME).exists())
+        request = self.request_view(fixture["request_id"])
+        self.assertEqual(request["run_id"], new_run)
+        self.assertEqual(request["status"], "claimed")
+        self.assertEqual(self.task(fixture["task_id"])["status"], "planning")
+        self.assertEqual(new_job.read_bytes(), sentinel)
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_exception_after_lease_expiry_does_not_report(self):
+        fixture = self.plus_request()
+
+        def expire_then_crash():
+            conn = db.connect(self.db_path)
+            try:
+                with db.write_txn(conn):
+                    db.update_request(conn, fixture["request_id"], util.now_iso(),
+                                      lease_expires_at=util.plus_seconds(-1))
+            finally:
+                conn.close()
+            raise RuntimeError("expired process crashed")
+
+        with mock.patch.object(pi_desktop_planner._Round, "_prepare_materials",
+                               side_effect=expire_then_crash):
+            self.run_round()
+
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["status"], "running")
+        self.assertFalse((self.run_dir(fixture["task_id"], run_id)
+                          / dsh_events.EVENT_LOG_NAME).exists())
+        conn = db.connect(self.db_path)
+        try:
+            request = db.get_request(conn, fixture["request_id"])
+            self.assertEqual(request["status"], "claimed")
+            self.assertIsNone(request["result_json"])
+            self.assertEqual(db.get_task(conn, fixture["task_id"])["status"],
+                             "planning")
+        finally:
+            conn.close()
+
+    def test_exception_after_sending_keeps_proof_without_resending(self):
+        fixture = self.plus_request()
+        self.server.add_message("user", "prompt")
+        self.server.add_message("assistant", "# 计划\n")
+        with self.fast(), mock.patch.object(
+                pi_desktop_planner._Round, "_observe_until_settled",
+                side_effect=RuntimeError("observer crashed")):
+            self.run_round()
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["send_state"], "sent")
+        self.assertEqual(job["session_id"], SESSION_ID)
+        self.assertEqual(job["turn_id"], TURN_ID)
+        self.assertEqual(self.terminal_reason(
+            self.events_for(fixture["task_id"], run_id)), "planner_internal_error")
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertFalse(planner_runner.run_one(self.db_path))
+        self.assertEqual(self.server.prompt_count, 1)
+
+
 class TestResumeDoesNotResend(PlusPlannerCase):
     def _previous_job(self, task_id, request_id, *, turn_id=TURN_ID,
                       send_state="sent"):
@@ -1574,6 +1857,48 @@ class TestResumeDoesNotResend(PlusPlannerCase):
                           / dsh_events.JOB_NAME).read_text(encoding="utf-8"))
         self.assertEqual(old["turn_id"], TURN_ID)
         self.assertEqual(old["send_state"], "sent")
+
+    def test_legacy_running_ask_resumes_without_reconfigure(self):
+        fixture, prev_run = self._fixture_with_previous()
+        previous_path = self.run_dir(fixture["task_id"], prev_run) / dsh_events.JOB_NAME
+        previous = json.loads(previous_path.read_text())
+        previous["config"]["permission_mode"] = "ask"
+        previous_path.write_text(json.dumps(previous))
+        original_bytes = previous_path.read_bytes()
+        conn = db.connect(self.db_path)
+        try:
+            payload = db.request_payload(db.get_request(conn, fixture["request_id"]))
+            payload["runtime_config"]["permission_mode"] = "ask"
+            with db.write_txn(conn):
+                db.update_request(conn, fixture["request_id"], util.now_iso(), payload_json=payload)
+        finally:
+            conn.close()
+        with self.fast():
+            self.run_round()
+        self.assertIsNone(self.server.created)
+        self.assertIsNone(self.server.configured)
+        self.assertEqual(self.server.prompt_count, 0)
+        _, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["config"]["permission_mode"], "ask")
+        self.assertEqual(previous_path.read_bytes(), original_bytes)
+
+    def test_unexpected_resume_exit_does_not_resend_existing_turn(self):
+        fixture, prev_run = self._fixture_with_previous()
+        with self.fast(), mock.patch.object(
+                pi_desktop_planner._Round, "_observe_until_settled",
+                side_effect=RuntimeError("resume observer crashed")):
+            self.run_round()
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["resume_from"]["run_id"], prev_run)
+        self.assertEqual(job["send_state"], "sent")
+        self.assertEqual(job["turn_id"], TURN_ID)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(self.terminal_reason(
+            self.events_for(fixture["task_id"], run_id)), "planner_internal_error")
+        self.assertEqual(self.request_view(fixture["request_id"])["status"],
+                         "failed")
+        self.assertIsNone(self.server.created)
+        self.assertEqual(self.server.prompt_count, 0)
 
     def test_resume_without_turn_and_unknown_blocks(self):
         fixture, _prev = self._fixture_with_previous(

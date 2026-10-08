@@ -88,9 +88,9 @@ class TestBoardDirectMapping(BoardCase):
             self.assertEqual(listed[task_id]["board_substatus"], substatus)
 
     def test_ready_with_queued_dispatch_is_queued(self):
-        task_id = self.add_task("taskbmp-queued00001")
-        self.set_task_status(task_id, "ready")
-        self.call("enqueue", {"task_id": task_id, "kind": "dispatch"})
+        task_id = "taskbmp-queued00001"
+        self.make_ready_task(task_id=task_id)
+        self.enqueue_dispatch(task_id)
         view = self.task(task_id)
         self.assertEqual(view["board_column"], "todo")
         self.assertEqual(view["board_substatus"], "已排队")
@@ -559,10 +559,8 @@ class TestBoardCountsAndFilter(BoardCase):
         for task_id, mode, _column in cases:
             self.add_task(task_id)
             if mode == "ready+queue":
-                self.set_task_status(task_id, "ready")
-                self.call(
-                    "enqueue", {"task_id": task_id, "kind": "dispatch"}
-                )
+                self.make_ready_task(task_id=task_id)
+                self.enqueue_dispatch(task_id)
             elif mode == "failed":
                 self.set_task_status(
                     task_id, "needs_user", send_state="sent",

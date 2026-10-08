@@ -238,7 +238,7 @@ def build_plan_meta(
 
 def write_plan_file(
     context: dict, manifest: dict, plan_markdown: str, generated_at: str,
-    task_row=None, model_config=None,
+    task_row=None, model_config=None, target_path=None,
 ) -> Path:
     """``build_plan_meta`` 的 frontmatter + 模型 plan_markdown 正文 → PLAN_ROOT。"""
     meta = build_plan_meta(
@@ -254,7 +254,9 @@ def write_plan_file(
         lines.append(f"{key}: {scalar}")
     lines.append("---")
     body = _strip_model_frontmatter(plan_markdown or "")
-    path = _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan")
+    path = (util.inside(Path(target_path), constants.plan_root(), "plan_path")
+            if target_path is not None else
+            _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan"))
     path.write_text("\n".join(lines) + "\n\n" + body, encoding="utf-8")
     return path
 

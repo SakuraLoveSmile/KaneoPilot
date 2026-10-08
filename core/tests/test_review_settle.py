@@ -134,6 +134,12 @@ def test_identity_lease_failure_never_registers(scene):
 def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusion):
     from types import SimpleNamespace
     from kanpilot import automation_policy, cli, db
+    conn = db.connect(tmp_env.db)
+    try:
+        with db.write_txn(conn):
+            db.set_setting(conn, 'review_config', {'backend': 'codex'})
+    finally:
+        conn.close()
     review_scene = factory.make_in_review()
     task_id = review_scene.task.task_id
     conn = db.connect(tmp_env.db)
@@ -142,7 +148,6 @@ def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusio
             task = db.require_task(conn, task_id)
             db.set_extra(conn, task, util.now_iso(), automation={'fix_round': 0, 'manual_takeover': False},
                          delivery={'mode': 'pr', 'head_sha': 'a' * 40})
-            db.set_setting(conn, 'review_config', {'backend': 'codex'})
         ctx = SimpleNamespace(conn=conn, now=util.now_dt(), now_iso=util.now_iso())
         automation_policy.cmd_set_project_automation(ctx, {'project_id': task['project_id'],
                     'automation': {'enabled': True, 'max_fix_rounds': 2}, 'expected_policy_revision': 0})
@@ -183,6 +188,9 @@ def test_real_dismiss_takeover_restores_manual_pass(factory, tmp_env):
     taken = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
     assert taken['automation']['manual_takeover']
     assert taken['delivery']['mode'] == 'manual'
+    assert taken['status'] == 'in_review'
+    assert taken['stage'] == 'review'
+    assert taken['auto_advance_paused'] == 1
     # Isolated fixture for the next execution's Review cycle; no process/model.
     conn = db.connect(tmp_env.db)
     try:
@@ -192,6 +200,9 @@ def test_real_dismiss_takeover_restores_manual_pass(factory, tmp_env):
             db.create_request(conn, util.now_iso(), 'review', 'takeover-review:' + task_id, task_id=task_id, requested_by='test')
     finally:
         conn.close()
+    # The user explicitly resumes before authorizing another Review cycle.
+    assert not cli.run('claim', {'stage': 'review', 'executor': 'kaneo-review'}, tmp_env.db)['claimed']
+    cli.run('restore-task', {'task_id': task_id, 'resume_auto': True}, tmp_env.db)
     claim = cli.run('claim', {'stage': 'review', 'executor': 'kaneo-review'}, tmp_env.db)
     assert claim['claimed']
     task = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']

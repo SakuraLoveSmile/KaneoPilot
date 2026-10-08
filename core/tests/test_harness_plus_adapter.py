@@ -348,6 +348,91 @@ def test_nested_plus_output_strings_redact_connection_token_without_losing_field
     assert stopped["detail"]["message"] == "request failed «redacted»"
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("running", [False, True])
+def test_plus_status_unwraps_current_and_legacy_formats(nested, running):
+    raw = {"sessionId": "s-1", "isRunning": running, "currentTurnId": "t-1",
+           "pendingToolConfirmations": 0, "planningState": "inactive", "modelId": "test"}
+    client = MagicMock()
+    client.call_tool.return_value = {"status": raw} if nested else raw
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {})):
+        result = harness_plus_adapter.plus_status("/fake", session_id="s-1")
+    assert result == {"session_id": "s-1", "is_running": running,
+                      "current_turn_id": "t-1", "pending_permission": None, "raw_status": raw}
+    client.call_tool.assert_called_once_with("pi_agent_status", {"sessionId": "s-1"})
+
+
+@pytest.mark.parametrize("fields,waiting", [
+    ({"pendingToolConfirmations": 2}, True),
+    ({"pendingToolConfirmations": [{"id": "confirm-1"}]}, True),
+    ({"pendingToolConfirmations": 0}, False),
+    ({"pendingToolConfirmations": []}, False),
+    ({"pendingPermission": {"id": "permission-1"}}, True),
+    ({"pendingPermission": {}}, False),
+    ({"pendingPermission": []}, False),
+    ({"pendingPermission": False, "pendingToolConfirmations": []}, False),
+    ({"pendingPermission": {"id": "permission-1"}, "pendingToolConfirmations": 1}, True),
+    ({"pendingPermission": {"id": "permission-1"}, "pendingToolConfirmations": 0}, True),
+    ({"pendingPermission": False, "pendingToolConfirmations": 1}, True),
+])
+def test_plus_status_normalizes_permission_waiting(fields, waiting):
+    client = MagicMock()
+    client.call_tool.return_value = {"status": dict(fields, isRunning=True)}
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {})):
+        result = harness_plus_adapter.plus_status("/fake", session_id="s-1")
+    assert bool(result["pending_permission"]) is waiting
+
+
+@pytest.mark.parametrize("response", [
+    None, [], {}, {"status": None}, {"status": "idle"},
+    {"isRunning": "false"}, {"isRunning": 0}, {"status": {"isRunning": "true"}},
+    {"isRunning": True, "status": {"isRunning": False}},
+    {"sessionId": "other", "status": {"sessionId": "s-1", "isRunning": False}},
+    {"isRunning": False, "currentTurnId": 123},
+    {"isRunning": False, "sessionId": None},
+    {"isRunning": True, "pendingToolConfirmations": "1"},
+    {"isRunning": True, "pendingToolConfirmations": True},
+    {"isRunning": True, "pendingToolConfirmations": -1},
+    {"isRunning": True, "pendingPermission": "waiting"},
+])
+def test_plus_status_rejects_invalid_or_conflicting_fields(response):
+    client = MagicMock()
+    client.call_tool.return_value = response
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {})):
+        with pytest.raises(util.KanpilotError) as error:
+            harness_plus_adapter.plus_status("/fake", session_id="s-1")
+    assert error.value.code == "validation_failed"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_plus_status_verifies_returned_session_identity(nested):
+    raw = {"sessionId": "other-secret-session", "isRunning": False}
+    client = MagicMock()
+    client.call_tool.return_value = {"status": raw} if nested else raw
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {})):
+        with pytest.raises(util.KanpilotError) as error:
+            harness_plus_adapter.plus_status("/fake", session_id="s-1")
+    assert error.value.code == "conflict"
+    assert "other-secret-session" not in error.value.message
+
+
+def test_plus_status_redacts_nested_sensitive_fields():
+    token = "connection-secret-987654321"
+    client = MagicMock()
+    client.call_tool.return_value = {"status": {
+        "sessionId": "s-1", "isRunning": True, "currentTurnId": "t-1",
+        "token": "other-secret", "apiKey": "api-secret",
+        "pendingToolConfirmations": [{"id": "p-1", "credentials": {"password": "secret"},
+                                      "body": token}],
+    }}
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {"token": token})):
+        result = harness_plus_adapter.plus_status("/fake", session_id="s-1")
+    assert result["session_id"] == "s-1"
+    assert result["current_turn_id"] == "t-1"
+    assert result["raw_status"]["pendingToolConfirmations"] == [{"id": "p-1", "body": "«redacted»"}]
+    assert "secret" not in json.dumps(result)
+
+
 def test_runtime_accept_maps_to_plus_approve():
     client = MagicMock()
     client.call_tool.side_effect = [

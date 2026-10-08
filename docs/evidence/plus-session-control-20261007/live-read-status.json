@@ -1,0 +1,14 @@
+{
+  "backend": "pi_desktop",
+  "blocked_reason": null,
+  "can_start": true,
+  "connected": true,
+  "detail": "规划执行端失联，尚无 Plus 会话记录",
+  "request_id": "57aab483-8051-4a54-8850-f3d69cb698d1",
+  "run_id": "4c090474-ddf5-4c56-8cdf-5fe6aae40985",
+  "session_id": null,
+  "start_label": "请求开始规划",
+  "state": "executor_lost",
+  "task_id": "uedvmrsucbgy8v2e1di4b789",
+  "turn_id": null
+}

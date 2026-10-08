@@ -8,6 +8,7 @@ struct TaskDetailContentView: View {
     var initialTab: TaskDetailTab = .overview
     var showsHeader: Bool = true
     var onDismiss: (() -> Void)? = nil
+    var onPreparePlanning: ((String) -> Void)? = nil
 
     @EnvironmentObject private var model: AppViewModel
     @State private var tab: TaskDetailTab = .overview
@@ -28,6 +29,8 @@ struct TaskDetailContentView: View {
         .background(Color.kpWindow)
         .focusable()
         .focusEffectDisabled()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("任务详情")
         .onKeyPress(.leftArrow) { moveTab(-1); return .handled }
         .onKeyPress(.rightArrow) { moveTab(1); return .handled }
         .task {
@@ -48,59 +51,61 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
+    @ViewBuilder
     private var headerBar: some View {
-        HStack(alignment: .center, spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: Spacing.s) {
-                    if let project = detail?.projectName {
-                        Text(project)
-                            .font(.kpSmall)
-                            .lineLimit(1)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
-                    }
-                    Text(detail?.title ?? taskID)
-                        .font(.kpTitle)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
-                }
-                HStack(spacing: Spacing.m) {
-                    if let detail {
-                        StatusBadge(status: DisplayStatus.effective(detail))
-                        Text("阶段：\(Labels.stage(detail.stage))")
-                        if detail.planExecutionHold == true {
-                            StatusBadge(status: "待确认执行")
-                        }
-                    }
-                }
-                .font(.kpSmall)
-                .foregroundStyle(.secondary)
+        if tab == .execution {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                headerTitle
+                HStack(spacing: Spacing.m) { headerStatus; Spacer(minLength: 0); headerNavigation }
             }
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: Spacing.m)
-            Picker("详情分段", selection: $tab) {
-                ForEach(TaskDetailTab.allCases) { t in
-                    Text(t.title).tag(t)
-                }
+            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        } else {
+            HStack(alignment: .center, spacing: Spacing.m) {
+                VStack(alignment: .leading, spacing: 3) { headerTitle; headerStatus }
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: Spacing.m)
+                headerNavigation
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 280)
-            .fixedSize(horizontal: true, vertical: false)
-            .accessibilityLabel("详情分段切换")
+            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        }
+    }
 
+    private var headerTitle: some View {
+        HStack(spacing: Spacing.s) {
+            if let project = detail?.projectName {
+                Text(project).font(.kpSmall).lineLimit(1).foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
+            }
+            Text(detail?.title ?? taskID).font(.kpTitle)
+                .lineLimit(tab == .execution ? 2 : 1).truncationMode(.tail)
+                .textSelection(.enabled).help(detail?.title ?? taskID)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var headerStatus: some View {
+        HStack(spacing: Spacing.m) {
+            if let detail {
+                StatusBadge(status: DisplayStatus.effective(detail))
+                Text("阶段：\(Labels.stage(detail.stage))")
+                if detail.planExecutionHold == true { StatusBadge(status: "待确认执行") }
+            }
+        }.font(.kpSmall).foregroundStyle(.secondary)
+    }
+
+    private var headerNavigation: some View {
+        HStack(spacing: Spacing.m) {
+            Picker("详情分段", selection: $tab) {
+                ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 280)
+            .fixedSize(horizontal: true, vertical: false).accessibilityLabel("详情分段切换")
             if let onDismiss {
-                Button("关闭") { onDismiss() }
-                    .buttonStyle(.plain)
-                    .font(.kpSmall)
+                Button("关闭") { onDismiss() }.buttonStyle(.plain).font(.kpSmall)
                     .padding(.leading, Spacing.s)
             }
         }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
     }
 
     // MARK: - 分段内容
@@ -113,7 +118,8 @@ struct TaskDetailContentView: View {
                 TaskOverviewTabView(
                     detail: detail,
                     events: events,
-                    onSwitchTab: { tab = $0 }
+                    onSwitchTab: { tab = $0 },
+                    onPreparePlanning: onPreparePlanning
                 )
             } else if loading {
                 LoadingView()
@@ -123,7 +129,7 @@ struct TaskDetailContentView: View {
         case .plan:
             PlanReaderView(taskID: taskID, detail: detail)
         case .execution:
-            TaskExecutionTabView(taskID: taskID, detail: detail)
+            TaskExecutionTabView(taskID: taskID, detail: detail, showsTaskTitle: !showsHeader)
         case .review:
             if let detail {
                 TaskReviewTabView(detail: detail)
@@ -183,46 +189,15 @@ struct TaskDetailContentView: View {
 struct TaskExecutionTabView: View {
     let taskID: String
     let detail: TaskDetail?
-
-    private var hasRoundFields: Bool {
-        guard let detail else { return false }
-        return detail.runId != nil || detail.sessionId != nil
-            || detail.sessionTitle != nil || detail.sessionMarker != nil
-            || detail.executionRound?.worktreePath != nil
-    }
+    var showsTaskTitle = true
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let detail, hasRoundFields {
-                roundFields(detail)
-                Divider()
-            }
-            SessionReaderView(taskID: taskID, preferredRunID: detail?.runId)
-        }
+        SessionReaderView(taskID: taskID, preferredRunID: detail?.runId, showsTaskTitle: showsTaskTitle,
+                          fallbackSessionTitle: detail?.sessionTitle ?? detail?.executionRound?.sessionTitle)
+            // Detail arrives asynchronously; initialize the reader for its actual preferred round.
+            .id("\(taskID)/\(detail?.runId ?? "pending")")
     }
 
-    @ViewBuilder
-    private func roundFields(_ detail: TaskDetail) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Spacing.l) {
-                if let runId = detail.runId {
-                    FieldRow("run_id", String(runId.prefix(12)))
-                }
-                if let sessionTitle = detail.sessionTitle {
-                    FieldRow("会话", sessionTitle)
-                }
-                if let marker = detail.sessionMarker {
-                    FieldRow("标识", marker)
-                }
-                if let worktree = detail.executionRound?.worktreePath {
-                    FieldRow("工作树", (worktree as NSString).lastPathComponent)
-                }
-            }
-            .font(.kpSmall)
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
-        }
-    }
 }
 
 // MARK: - 概览分段视图
@@ -231,6 +206,7 @@ struct TaskOverviewTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
     var onSwitchTab: ((TaskDetailTab) -> Void)? = nil
+    var onPreparePlanning: ((String) -> Void)? = nil
 
     @EnvironmentObject private var model: AppViewModel
     @State private var confirm: TaskDetailView.ConfirmableAction?
@@ -325,7 +301,13 @@ struct TaskOverviewTabView: View {
                 Button(confirm.title, role: confirm.destructive ? .destructive : nil) {
                     let action = confirm.id
                     self.confirm = nil
-                    Task { await model.resolve(taskID: detail.taskId, action: action) }
+                    Task {
+                        if action == "cancel-request", let requestID = detail.queuedPlanRequestId {
+                            await model.cancelPlan(requestID: requestID, taskID: detail.taskId)
+                        } else {
+                            await model.resolve(taskID: detail.taskId, action: action)
+                        }
+                    }
                 }
                 Button("取消", role: .cancel) { self.confirm = nil }
             }
@@ -523,13 +505,25 @@ struct TaskOverviewTabView: View {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
             }
             .disabled(model.busy)
+        case "recover_review":
+            Button("恢复评审阶段") {
+                guard let recovery = detail.reviewRecovery else { return }
+                Task { await model.recoverReview(taskID: detail.taskId, recovery: recovery) }
+            }.disabled(model.busy || detail.reviewRecovery == nil)
+             .help("保留已完成的执行成果，恢复到待评审并暂停自动推进。")
         case "dismiss":
-            Button(AutomationPresentation.active(detail.automation) ? "转为人工处理" : "清除阻塞标记") {
+            Button(AutomationPresentation.dismissLabel(stage: detail.failureStage ?? detail.stage, failureCode: detail.failureCode, automatic: AutomationPresentation.active(detail.automation))) {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
             }
             .disabled(model.busy)
         case "prepare_plan":
-            Button("准备规划") { model.openPlanning(focusTaskID: detail.taskId) }
+            Button("准备规划") {
+                if let onPreparePlanning {
+                    onPreparePlanning(detail.taskId)
+                } else {
+                    model.openPlanning(focusTaskID: detail.taskId)
+                }
+            }
                 .disabled(model.busy)
         case "enqueue":
             Button("安排下一步") { Task { await model.enqueue(taskID: detail.taskId) } }
@@ -544,6 +538,9 @@ struct TaskOverviewTabView: View {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
             }
             .disabled(model.busy)
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirm = .cancelPlan }
+                .disabled(model.busy || detail.queuedPlanRequestId == nil)
         case "confirm_dispatch":
             Button("确认执行") {
                 Task { await model.confirmDispatch(taskID: detail.taskId, planSha256: detail.planSha256) }
@@ -603,10 +600,11 @@ struct TaskOverviewTabView: View {
             .disabled(model.busy || moveOutBlockedReason != nil)
             .help(moveOutBlockedReason ?? "移入回收站")
         case "resume-auto":
-            Button("恢复自动推进") {
+            Button(detail.status == "in_review" ? "开始评审" : "恢复自动推进") {
                 Task { await model.resumeAuto(taskID: detail.taskId) }
             }
             .disabled(model.busy)
+            .help(detail.status == "in_review" ? "允许调度台调用当前配置的模型开始新的评审。" : "恢复该任务的自动推进")
         default:
             Button(Labels.action(action)) {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }

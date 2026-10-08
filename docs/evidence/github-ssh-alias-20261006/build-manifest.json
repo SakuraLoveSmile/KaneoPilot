@@ -1,0 +1,14 @@
+{
+  "version": "0.2",
+  "build": "20261006.2",
+  "bundle_id": "local.kaneopilot",
+  "architecture": "arm64",
+  "core_source_files_verified": 107,
+  "codesign": "local ad-hoc; verify passed",
+  "dmg_verify": "passed",
+  "mounted_package_matches_app": "passed",
+  "bundled_core_blog_identity": "SakuraLoveSmile/Sakura-Blog",
+  "sha256": "e244f4a3ba903f706fdf59b7f552994b395f3e8713cfff5050d5c2bb1ad0bca6",
+  "bytes": 4029962,
+  "installed": false
+}

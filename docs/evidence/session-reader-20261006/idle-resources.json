@@ -1,0 +1,467 @@
+[
+  {
+    "second": 0,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.3,
+        "rss_kib": 204192.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 5.8,
+        "rss_kib": 204592.0
+      }
+    ]
+  },
+  {
+    "second": 1,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 14.2,
+        "rss_kib": 204192.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.2,
+        "rss_kib": 204592.0
+      }
+    ]
+  },
+  {
+    "second": 2,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.3,
+        "rss_kib": 204192.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 9.7,
+        "rss_kib": 204592.0
+      }
+    ]
+  },
+  {
+    "second": 3,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.5,
+        "rss_kib": 204144.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.7,
+        "rss_kib": 204608.0
+      }
+    ]
+  },
+  {
+    "second": 4,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.6,
+        "rss_kib": 204192.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 2.0,
+        "rss_kib": 204608.0
+      }
+    ]
+  },
+  {
+    "second": 5,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 15.0,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.4,
+        "rss_kib": 204608.0
+      }
+    ]
+  },
+  {
+    "second": 6,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 2.4,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 22.6,
+        "rss_kib": 204624.0
+      }
+    ]
+  },
+  {
+    "second": 7,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 1.0,
+        "rss_kib": 204624.0
+      }
+    ]
+  },
+  {
+    "second": 8,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 3.4,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 1.0,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 9,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.9,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 10,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 2.4,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.7,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 11,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 1.4,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 12,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 7.7,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.2,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 13,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.1,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 2.4,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 14,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 9.5,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.3,
+        "rss_kib": 204672.0
+      }
+    ]
+  },
+  {
+    "second": 15,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.1,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 12.6,
+        "rss_kib": 205072.0
+      }
+    ]
+  },
+  {
+    "second": 16,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 9.9,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.5,
+        "rss_kib": 205072.0
+      }
+    ]
+  },
+  {
+    "second": 17,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.2,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 4.9,
+        "rss_kib": 205072.0
+      }
+    ]
+  },
+  {
+    "second": 18,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.8,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.7,
+        "rss_kib": 205072.0
+      }
+    ]
+  },
+  {
+    "second": 19,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.8,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 4.6,
+        "rss_kib": 204896.0
+      }
+    ]
+  },
+  {
+    "second": 20,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204208.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.3,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 21,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.9,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 13.4,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 22,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.5,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 23,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 1.7,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 2.5,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 24,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.3,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 25,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 4.1,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 3.9,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 26,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.0,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.4,
+        "rss_kib": 204848.0
+      }
+    ]
+  },
+  {
+    "second": 27,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 6.3,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.5,
+        "rss_kib": 204864.0
+      }
+    ]
+  },
+  {
+    "second": 28,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.1,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.3,
+        "rss_kib": 204864.0
+      }
+    ]
+  },
+  {
+    "second": 29,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 7.9,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.5,
+        "rss_kib": 204864.0
+      }
+    ]
+  },
+  {
+    "second": 30,
+    "processes": [
+      {
+        "pid": 41944.0,
+        "pcpu": 0.1,
+        "rss_kib": 204240.0
+      },
+      {
+        "pid": 49748.0,
+        "pcpu": 0.3,
+        "rss_kib": 204864.0
+      }
+    ]
+  }
+]

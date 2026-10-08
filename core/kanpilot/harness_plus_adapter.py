@@ -7,8 +7,12 @@ proposals, and session grant attachment.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -264,12 +268,44 @@ def plus_status(connection_file: str, *, session_id: str, timeout: int = 10) -> 
     """Get active status of session in Plus."""
     client, record = _get_client(connection_file, timeout=timeout)
     res = client.call_tool("pi_agent_status", {"sessionId": session_id})
+    if not isinstance(res, dict):
+        raise util.KanpilotError("validation_failed", "Plus 返回的运行状态格式无效")
+    status = res.get("status", res)
+    if not isinstance(status, dict) or not isinstance(status.get("isRunning"), bool):
+        raise util.KanpilotError("validation_failed", "Plus 返回的运行状态不完整，无法确认当前状态")
+    # New hosts wrap the status object; legacy hosts return the same fields flat.
+    # Do not combine conflicting envelopes or coerce missing/string booleans.
+    fields = ("sessionId", "isRunning", "currentTurnId",
+              "pendingPermission", "pendingToolConfirmations", "planningState")
+    if status is not res and any(key in res and (key not in status or
+            type(res[key]) is not type(status[key]) or res[key] != status[key]) for key in fields):
+        raise util.KanpilotError("validation_failed", "Plus 返回的内外层运行状态不一致")
+    status = dict(status)
+    for primary in ("sessionId", "currentTurnId"):
+        if primary in status and (status[primary] is not None or primary == "sessionId"):
+            if not isinstance(status[primary], str) or not status[primary].strip():
+                raise util.KanpilotError("validation_failed", "Plus 返回的会话或轮次身份无效")
+    returned_session = status.get("sessionId", session_id)
+    if returned_session != session_id:
+        raise util.KanpilotError("conflict", "Plus 返回的会话身份不匹配")
+
+    permission = status.get("pendingPermission")
+    if permission is not None and not isinstance(permission, (bool, dict, list)):
+        raise util.KanpilotError("validation_failed", "Plus 返回的权限等待状态格式无效")
+    if "pendingToolConfirmations" in status:
+        confirmations = status["pendingToolConfirmations"]
+        if (isinstance(confirmations, bool) or not isinstance(confirmations, (int, list))
+                or isinstance(confirmations, int) and confirmations < 0):
+            raise util.KanpilotError("validation_failed", "Plus 返回的工具确认状态格式无效")
+        waiting = bool(confirmations)
+        if waiting and not permission:
+            permission = True
     return _redact_output({
-        "session_id": session_id,
-        "is_running": bool(res.get("isRunning")),
-        "current_turn_id": str(res.get("currentTurnId")) if res.get("currentTurnId") is not None else None,
-        "pending_permission": res.get("pendingPermission"),
-        "raw_status": res,
+        "session_id": returned_session,
+        "is_running": status["isRunning"],
+        "current_turn_id": status.get("currentTurnId"),
+        "pending_permission": _redact_catalog(permission) if permission else None,
+        "raw_status": _redact_catalog(status),
     }, record.get("token"))
 
 
@@ -300,6 +336,79 @@ def plus_turn_get(
     }, record.get("token"))
 
 
+_TRANSCRIPT_CHUNK_BYTES = 64 * 1024
+_TRANSCRIPT_PAGE_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _read_transcript_chunks(client, session_id: str, before: Optional[int]) -> dict:
+    """Reassemble one oversized physical message without clipping its content."""
+    body = bytearray()
+    digest = None
+    total = None
+    # The server emits fixed-size chunks; cap requests as well as total memory.
+    for _ in range(_TRANSCRIPT_PAGE_MAX_BYTES // _TRANSCRIPT_CHUNK_BYTES):
+        args = {"id": session_id, "offset": len(body)}
+        if before is not None:
+            args["messageBefore"] = before
+        if digest is not None:
+            args["expectedSha256"] = digest
+        result = client.call_tool("pi_session_get_chunk", args)
+        chunk_digest = result.get("sha256")
+        chunk_total = result.get("totalBytes")
+        if (result.get("sessionId") != session_id
+                or type(result.get("offset")) is not int
+                or result["offset"] != len(body)
+                or result.get("encoding") != "base64"
+                or type(chunk_total) is not int
+                or not 0 < chunk_total <= _TRANSCRIPT_PAGE_MAX_BYTES
+                or not isinstance(chunk_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", chunk_digest) is None):
+            raise util.KanpilotError("protocol_error", "转录分片身份或边界无效")
+        if digest is not None and (digest != chunk_digest or total != chunk_total):
+            raise util.KanpilotError("conflict", "转录在分片读取期间变化，未采用不完整证据")
+        digest, total = chunk_digest, chunk_total
+        encoded = result.get("chunk")
+        if (not isinstance(encoded, str)
+                or len(encoded) > ((_TRANSCRIPT_CHUNK_BYTES + 2) // 3) * 4
+                or "nextOffset" not in result):
+            raise util.KanpilotError("protocol_error", "转录分片大小或终点无效")
+        try:
+            chunk = base64.b64decode(encoded, validate=True)
+        except (TypeError, ValueError, binascii.Error):
+            raise util.KanpilotError("protocol_error", "转录分片编码无效")
+        end = len(body) + len(chunk)
+        next_offset = result.get("nextOffset")
+        if (not 0 < len(chunk) <= _TRANSCRIPT_CHUNK_BYTES or end > total
+                or (end == total and next_offset is not None)
+                or (end < total and (type(next_offset) is not int or next_offset != end))):
+            raise util.KanpilotError("protocol_error", "转录分片链不完整")
+        body.extend(chunk)
+        if end == total:
+            if hashlib.sha256(body).hexdigest() != digest:
+                raise util.KanpilotError("protocol_error", "转录分片完整性校验失败")
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (ValueError, UnicodeError):
+                raise util.KanpilotError("protocol_error", "转录分片不是完整 UTF-8 JSON")
+            page = payload.get("session") if isinstance(payload, dict) else None
+            if not isinstance(page, dict) or page.get("id") != session_id:
+                raise util.KanpilotError("conflict", "转录分片会话身份不符")
+            rows = page.get("messages")
+            start, finish = page.get("messageStart"), page.get("messageEnd")
+            if (not isinstance(rows, list) or len(rows) > 1
+                    or type(start) is not int or type(finish) is not int
+                    or start < 0 or finish - start != len(rows)
+                    or (not rows and (start != 0 or finish != 0))
+                    or (before is not None and finish != before)
+                    or not isinstance(page.get("hasMoreBefore"), bool)
+                    or not isinstance(page.get("hasMoreAfter"), bool)
+                    or page.get("hasMoreBefore") != (start > 0)
+                    or (before is None and page["hasMoreAfter"])):
+                raise util.KanpilotError("protocol_error", "转录分片物理分页不完整")
+            return payload
+    raise util.KanpilotError("protocol_error", "转录分片数量超过上限")
+
+
 def plus_messages(
     connection_file: str,
     *,
@@ -317,7 +426,23 @@ def plus_messages(
         params["messageLimit"] = limit
 
     res = client.call_tool("pi_session_get", params)
+    if (res.get("truncated") and limit == 1
+            and "pi_session_get_chunk" in client.tools_list()):
+        res = _read_transcript_chunks(client, session_id, before)
+    if res.get("truncated"):
+        # The control plane's preview is incomplete and may contain transcript
+        # content. Preserve only the signal needed for the reader to shrink pages.
+        return _redact_output({
+            "session_id": session_id,
+            "messages": [],
+            "truncated": True,
+            "reason": str(res.get("reason") or "MCP_RESULT_LIMIT"),
+        }, record.get("token"))
     session_data = res.get("session", res)
+    if not isinstance(session_data, dict):
+        raise util.KanpilotError("not_found", "Plus 会话已不存在，无法读取完整转录")
+    if session_data.get("id") not in (None, session_id):
+        raise util.KanpilotError("conflict", "Plus 转录会话身份不符")
     messages = session_data.get("messages", [])
     return _redact_output({
         "session_id": session_id,

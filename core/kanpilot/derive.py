@@ -58,6 +58,20 @@ def queued_request_for_task(
     ).fetchone()
 
 
+def queued_plan_request_for_task(conn: sqlite3.Connection, task_id: str):
+    return conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='plan' AND status='queued' "
+        "ORDER BY priority ASC, created_at ASC LIMIT 1", (task_id,),
+    ).fetchone()
+
+
+def _review_waiting_paused(conn, task):
+    return db.task_auto_paused(task) and conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND kind='review' AND status='claimed'",
+        (task["task_id"],),
+    ).fetchone() is None
+
+
 def task_display_status(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> str:
@@ -85,6 +99,8 @@ def task_display_status(
     if status == "running":
         return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else "执行中"
     if status == "in_review":
+        if _review_waiting_paused(conn, task):
+            return "待评审"
         return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else "评审中"
     if status == "done":
         return "已归档"
@@ -313,7 +329,7 @@ def task_board_substatus(
     if column == "in_progress":
         return "执行中"
     if column == "in_review":
-        return "评审中"
+        return "待评审" if _review_waiting_paused(conn, task) else "评审中"
     return "已完成"  # done
 
 
@@ -390,6 +406,7 @@ def request_view(request: sqlite3.Row, now) -> dict:
 def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     active = active_request_for_task(conn, task["task_id"])
     queued = queued_request_for_task(conn, task["task_id"])
+    queued_plan = queued_plan_request_for_task(conn, task["task_id"])
     next_claim_at = None
     if queued is not None and queued["not_before"] is not None:
         next_claim_at = queued["not_before"]
@@ -418,6 +435,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "delivery": core.delivery_of(task) or None,
         "review_history": db.task_extra(task).get("review_history") or [],
         "task_id": task["task_id"],
+        "queued_plan_request_id": queued_plan["request_id"] if queued_plan is not None else None,
         "project_id": task["project_id"],
         "project_name": task["project_name"],
         "title": task["title"],
@@ -491,16 +509,24 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if archive_blocked_reason(conn, task, now) is None:
             actions.extend(["archive", "trash"])
         hold = bool(db.task_extra(task).get("plan_execution_hold"))
-        if status == "ready" and hold:
+        dispatch_sent = bool(task["sent"]) or send_state not in (None, "not_sent")
+        if status == "ready" and hold and not dispatch_sent:
             # v2 §5.22.4：待确认执行——以 confirm_dispatch 替代普通排队。
             actions.append("confirm_dispatch")
-        elif status in constants.ENQUEUE_INFER and status != "needs_plan":
+        elif (status in constants.ENQUEUE_INFER and status != "needs_plan"
+              and not (status == "ready" and dispatch_sent)
+              and not (status == "in_review" and db.task_auto_paused(task))):
             actions.append("enqueue")
+        from . import review_recovery
+        if review_recovery.candidate(conn, task) is not None:
+            actions.append("recover_review")
         if status == "needs_plan":
             # v2 §5.22.2：规划改为手动门控——面板准备材料后经 start-plans。
             actions.append("prepare_plan")
         if queued_request_for_task(conn, task["task_id"]) is not None:
             actions.append("set-priority")
+        if queued_plan_request_for_task(conn, task["task_id"]) is not None:
+            actions.append("cancel-request")
         if lost_request_for_task(conn, task["task_id"], now) is not None:
             actions.append("release_lost")
         if status == "needs_user":
@@ -512,6 +538,8 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 if code != "remote_conflict" or task["failure_stage"] != "dispatch":
                     actions.append("resume")
             if send_state in (None, "not_sent") and code not in constants.AUTOMATION_FAILURE_CODES:
+                actions.append("retry")
+            elif send_state == "sent" and not core.is_automation_managed(task) and cmd_queue._retry_target(conn, task)[1] == "review":
                 actions.append("retry")
             if send_state == "unknown":
                 actions.extend(["restore", "accept_duplicate", "mark_sent"])
@@ -527,6 +555,8 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
 
 def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     detail = task_summary(conn, task, now)
+    from . import review_recovery
+    detail["review_recovery"] = review_recovery.candidate(conn, task)
     attempts = conn.execute(
         "SELECT * FROM attempts WHERE task_id=? ORDER BY id", (task["task_id"],)
     ).fetchall()
@@ -618,8 +648,10 @@ def request_allowed_actions(
     actions = ["view"]
     if status == "queued":
         actions.append("set-priority")
-        if kind == "plan" and not request_is_authorized_plan(request):
-            actions.append("prepare_plan")
+        if kind == "plan":
+            actions.append("cancel-request")
+            if not request_is_authorized_plan(request):
+                actions.append("prepare_plan")
         return actions
     if status == "claimed":
         if request_is_lost(request, now):
@@ -807,9 +839,13 @@ _EVENT_KIND_CN = {
     "migrated": "数据迁移",
     "rechecked": "重新校验",
     "request_cancelled": "请求取消",
+    "failed_request_dismissed": "失败记录已移除",
     "task_archived": "任务归档",
     "task_trashed": "任务移入回收站",
     "task_restored": "任务恢复",
+    "review_stage_recovered": "评审阶段已恢复",
+    "review_result_cleared": "旧评审结果已留存",
+    "task_reconnected": "任务重新接入待规划",
     "session_trashed": "会话移入回收站",
     "session_restored": "会话恢复",
     "round_started": "轮次启动",
@@ -876,6 +912,8 @@ def _event_summary(kind: str, detail) -> str:
         return "需求指纹变化，需重新规划"
     if kind == "fix_task_created":
         return f"创建修复任务 {detail.get('fix_task_id')}"
+    if kind == "failed_request_dismissed":
+        return "已从待处理移除失败记录，历史证据保留"
     if kind == "request_cancelled":
         return f"请求取消（{detail.get('reason') or detail.get('via') or ''}）"
     if kind in ("paused", "unpaused"):

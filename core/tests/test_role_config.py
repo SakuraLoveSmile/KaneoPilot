@@ -13,7 +13,7 @@
 - check_available：backend=pi_desktop 且 pi_desktop_backend 模块缺失
   → (False, 中文原因)，不回落 pi。
 - v4 Review 后端：旧配置按 backend=pi 读；Plus 分支要求五字段且
-  permission_mode 必须 ask；mode 仅对 pi 生效；两分支共存；服务离线可保存；
+  permission_mode 必须 auto；mode 仅对 pi 生效；两分支共存；服务离线可保存；
   review-capabilities 只读形状（pi/pi_desktop 两分支，工具门
   PI_DESKTOP_PLAN_TOOLS）。
 """
@@ -780,7 +780,7 @@ class ExecControllerBackend(_ReviewCommandsCase):
 class ReviewBackendConfig(_ReviewCommandsCase):
     """v4（§5.24.1/§5.24.2）：Review 后端分支与 review-capabilities。"""
 
-    REVIEW_BLOCK = dict(PI_DESKTOP_BLOCK, permission_mode="ask")
+    REVIEW_BLOCK = dict(PI_DESKTOP_BLOCK, permission_mode="auto")
 
     def _raw_save_review(self, config):
         conn = db.connect(self.db_path)
@@ -853,11 +853,29 @@ class ReviewBackendConfig(_ReviewCommandsCase):
         self.assertNotIn("mode", snap)
         self.assertNotIn("token", json.dumps(snap).lower())
 
+    def test_legacy_ask_settings_project_auto_without_rewriting_history(self):
+        legacy = {"backend": "pi_desktop", "mode": "inherit",
+                  "pi_desktop": dict(self.REVIEW_BLOCK, permission_mode="ask")}
+        self._raw_save_review(legacy)
+        got = self.call("get-review-config", {})["config"]
+        self.assertEqual(got["pi_desktop"]["permission_mode"], "auto")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(db.get_setting(conn, "review_config"), legacy,
+                             "读取只投影下一轮权限，不写回旧设置")
+            self.assertEqual(review_config.snapshot(conn)["permission_mode"], "auto")
+            self.assertEqual(db.get_setting(conn, "review_config"), legacy)
+        finally:
+            conn.close()
+        # 部分保存可沿用旧设置中的模型和连接，只将下一轮权限保存为 auto。
+        saved = self.call("set-review-config", {"backend": "pi_desktop"})["config"]
+        self.assertEqual(saved["pi_desktop"], self.REVIEW_BLOCK)
+
     def test_inherit_snapshot_fails_when_plus_default_cannot_be_resolved(self):
         block = {
             "model_source": "inherit",
             "connection_file": "/tmp/pi-desktop/mcp-control.json",
-            "permission_mode": "ask",
+            "permission_mode": "auto",
         }
         self.call("set-review-config", {
             "backend": "pi_desktop", "pi_desktop": block,
@@ -889,9 +907,9 @@ class ReviewBackendConfig(_ReviewCommandsCase):
         finally:
             conn.close()
 
-    def test_plus_branch_requires_ask_permission(self):
+    def test_plus_branch_requires_auto_permission(self):
         for block in (
-            dict(self.REVIEW_BLOCK, permission_mode="auto"),
+            dict(self.REVIEW_BLOCK, permission_mode="ask"),
             dict(self.REVIEW_BLOCK, permission_mode="accept-edits"),
             {k: v for k, v in self.REVIEW_BLOCK.items()
              if k != "permission_mode"},
@@ -907,9 +925,9 @@ class ReviewBackendConfig(_ReviewCommandsCase):
         self.assertIsNone(self.call("get-review-config", {})["config"])
         exc = self.call_err("set-review-config", {
             "backend": "pi_desktop",
-            "pi_desktop": dict(self.REVIEW_BLOCK, permission_mode="auto"),
+            "pi_desktop": dict(self.REVIEW_BLOCK, permission_mode="ask"),
         })
-        self.assertIn("ask", str(exc))
+        self.assertIn("auto", str(exc))
 
     def test_invalid_review_backend_bad_request(self):
         exc = self.call_err("set-review-config", {"backend": "plus"})
@@ -921,7 +939,7 @@ class ReviewBackendConfig(_ReviewCommandsCase):
 
     def test_review_capabilities_shape_and_unsaved_plus(self):
         caps = self.call("review-capabilities", {})
-        self.assertEqual(set(caps), {"pi", "pi_desktop", "claude", "codex"})
+        self.assertEqual(set(caps), {"pi", "pi_desktop", "claude", "codex", "codex_desktop"})
         self.assertEqual(set(caps["pi"]), {"available", "detail"})
         self.assertEqual(set(caps["pi_desktop"]),
                          {"available", "detail", "tools_ok", "version"})

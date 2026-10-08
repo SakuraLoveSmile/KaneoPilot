@@ -95,8 +95,6 @@ def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, fact
     accepted = factory.get_task(tid)
     assert accepted['status'] == 'running'
     assert accepted['extra']['verification_override']['execution_run_id'] == execution_run
-    monitor(auto_monitor, tmp_env)
-    assert factory.get_task(tid)['status'] == 'in_review', factory.get_task(tid)
     codex = tmp_env.root / 'codex-review'
     codex.write_text('#!' + sys.executable + '\nimport json,pathlib,sys\n'
         'if "--version" in sys.argv: print("codex fake"); sys.exit(0)\n'
@@ -109,6 +107,8 @@ def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, fact
     # CLI fixture subprocesses retain their isolated env snapshot.
     cli.env['KANPILOT_CODEX_BIN'] = str(codex)
     cli('set-review-config', {'backend': 'codex', 'codex': {'model':'gpt-6.1-sol', 'reasoning_effort':'medium'}})
+    monitor(auto_monitor, tmp_env)
+    assert factory.get_task(tid)['status'] == 'in_review', factory.get_task(tid)
     stage(cli_review, 'review', tmp_env)
     task = factory.get_task(tid)
     assert task['status'] == 'done', task

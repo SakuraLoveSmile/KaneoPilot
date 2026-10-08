@@ -1,0 +1,102 @@
+{
+  "method": "Actual Release C402, direct Instruments recording covers opening and closing; local main queue probe 100ms",
+  "result": "Window animationBehavior none before visible did not disable AppKit sheet synchronous transitions",
+  "events": [
+    {
+      "bytes": 1048586,
+      "kind": "fulltext_request",
+      "width": 840,
+      "uptime_ns": 710549298584791,
+      "height": 481
+    },
+    {
+      "bytes": 1048586,
+      "kind": "fulltext_request",
+      "width": 1,
+      "uptime_ns": 710549299026708,
+      "height": 0
+    },
+    {
+      "window_class": "SheetPresentationWindow",
+      "animation_behavior_before": 0,
+      "animation_behavior_after": 2,
+      "uptime_ns": 710549301421833,
+      "kind": "fulltext_window_configuration",
+      "is_sheet": false,
+      "is_visible": false,
+      "phase": "viewDidMoveToWindow"
+    },
+    {
+      "width": 840,
+      "uptime_ns": 710549558015000,
+      "kind": "fulltext_prepare",
+      "utf16_length": 1048586,
+      "main_thread": false,
+      "renders_markdown": false,
+      "milliseconds": 255.83825
+    },
+    {
+      "kind": "main_thread_probe",
+      "uptime_ns": 710549666080791,
+      "hang": true,
+      "milliseconds": 298.888625
+    },
+    {
+      "milliseconds": 24.715333,
+      "kind": "fulltext_attach",
+      "width": 840,
+      "uptime_ns": 710549690929041,
+      "utf16_length": 1048586
+    },
+    {
+      "kind": "fulltext_first_draw",
+      "uptime_ns": 710549694117583,
+      "draw_milliseconds": 0.654166,
+      "milliseconds": 27.430334
+    },
+    {
+      "kind": "fulltext_locate",
+      "uptime_ns": 710549726676750,
+      "milliseconds": 0.316334
+    },
+    {
+      "kind": "fulltext_request",
+      "height": 481,
+      "width": 840,
+      "uptime_ns": 710565909667250,
+      "bytes": 1048586
+    },
+    {
+      "milliseconds": 287.749333,
+      "uptime_ns": 710575154763875,
+      "hang": true,
+      "kind": "main_thread_probe"
+    },
+    {
+      "milliseconds": 0.500125,
+      "kind": "fulltext_stop",
+      "uptime_ns": 710575160233041
+    }
+  ],
+  "time_profiler_alignment": {
+    "opening": {
+      "trace_window_seconds": [
+        18.229,
+        18.528
+      ],
+      "main_running_samples": 121,
+      "NSMoveHelper_openSheet_samples": 90,
+      "mask_rebuild_samples": 45
+    },
+    "closing": {
+      "trace_window_seconds": [
+        43.729,
+        44.017
+      ],
+      "main_running_samples": 96,
+      "NSMoveHelper_closeSheet_samples": 89,
+      "mask_rebuild_samples": 33
+    },
+    "source": "Independent read-only analyst resolved actual Time Profiler stack rows from recording covering both actions"
+  }
+}

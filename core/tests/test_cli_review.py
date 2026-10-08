@@ -187,9 +187,9 @@ def test_plus_configures_and_never_attaches(tmp_path):
     client = Mock()
     client.session_create.return_value = {'sessionId': 's1'}
     client.attach_mcp.side_effect = AssertionError('must not attach')
-    assert review._create_plan_session(client, {}, tmp_path) == ('s1', None)
+    assert review._create_plan_session(client, {'permission_mode': 'auto'}, tmp_path) == ('s1', None)
     client.attach_mcp.assert_not_called()
-    assert client.session_configure.call_args.kwargs['permission_mode'] == 'ask'
+    assert client.session_configure.call_args.kwargs['permission_mode'] == 'auto'
 
 
 def test_review_cli_config_save_switch_snapshot_and_invalid(tmp_path, monkeypatch):

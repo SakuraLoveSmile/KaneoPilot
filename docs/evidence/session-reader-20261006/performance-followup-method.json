@@ -1,0 +1,27 @@
+{
+  "baseline_commit": "166ae24e77b50cc1032546e0dd42c2b626706ff7",
+  "candidate": "uncommitted working tree",
+  "build": "same Release configuration, Xcode 27.0 / Swift 6.4, arm64 macOS 27.0",
+  "window": "1180x760, verified 2360x1520 capture",
+  "poll_seconds": 2,
+  "conditions": "frontmost, complete history loaded before recording, fixed cloned seed, wrapped_json shape",
+  "A": {
+    "messages": 400,
+    "output_bytes": 4096,
+    "message_serialized_bytes": 1982634,
+    "content_utf8_bytes": 899733
+  },
+  "B": {
+    "messages": 1000,
+    "output_bytes": 8192,
+    "message_serialized_bytes": 9432835,
+    "content_utf8_bytes": 4392283
+  },
+  "record": "xcrun xctrace record --instrument Time Profiler --instrument Activity Monitor --time-limit 30s --output TRACE --attach PID",
+  "limitations": [
+    "Sampling-window peaks are not lifetime peaks",
+    "Candidate local diagnostic overhead included",
+    "No successful Hangs trace; os-log environment failure independently reproduced",
+    "OS event timestamp to NSView draw is measured separately; Computer Use round-trip is excluded"
+  ]
+}

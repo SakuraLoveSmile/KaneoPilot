@@ -40,6 +40,18 @@ struct SchedulerFixtures {
         check(try decide(status(projects: 0), forced: ["intake"]) == SchedulerDecision.stages, "无项目时强制 intake 仍不可执行")
         check(try decide(status()) == SchedulerDecision.stages + ["intake"], "多个阶段可同时拉起")
         check(try decide(status(), elapsed: -1) == SchedulerDecision.stages, "时钟回退不可提前 intake")
+        let desktopOnly = try JSONDecoder.kaneo.decode(ExecutorStatusDTO.self, from: Data("""
+        {"stages":{"plan":{"claimable":0,"desktop_waiting":2},
+                   "review":{"claimable":0,"desktop_waiting":1}}}
+        """.utf8))
+        check(decide(desktopOnly, forced: ["plan", "review"]).isEmpty,
+              "Desktop 专属队列即使手动触发也不得启动本地 runner")
+        let mixed = try JSONDecoder.kaneo.decode(ExecutorStatusDTO.self, from: Data("""
+        {"stages":{"plan":{"claimable":1,"desktop_waiting":2},
+                   "review":{"claimable":0,"desktop_waiting":1}}}
+        """.utf8))
+        check(decide(mixed, forced: ["plan", "review"]) == ["plan"],
+              "混合队列只拉起有本地可领取请求的阶段")
         let old = try JSONDecoder.kaneo.decode(ExecutorStatusDTO.self, from: Data("{}".utf8))
         check(decide(old).isEmpty, "缺少可领取事实不可猜测启动")
         let stamped = try JSONDecoder.kaneo.decode(ExecutorStatusDTO.self, from: Data("""

@@ -1,0 +1,72 @@
+{
+  "stage": "C4 final TextKit1 non-contiguous",
+  "counts": {
+    "reader_view_appeared": 2,
+    "reader_start": 2,
+    "probe_registration": 3,
+    "main_thread_probe": 510,
+    "message_decode": 27,
+    "message_publication": 5,
+    "history_complete": 23,
+    "position": 2,
+    "position_complete": 1,
+    "native_action_display": 3,
+    "search_complete": 1,
+    "fulltext_apply": 1,
+    "fulltext_locate": 1
+  },
+  "hang_probes": [
+    {
+      "hang": true,
+      "milliseconds": 338.846042,
+      "uptime_ns": 701007572482458,
+      "kind": "main_thread_probe"
+    },
+    {
+      "kind": "main_thread_probe",
+      "uptime_ns": 701037652399333,
+      "milliseconds": 619.338,
+      "hang": true
+    },
+    {
+      "kind": "main_thread_probe",
+      "uptime_ns": 701037652474291,
+      "milliseconds": 518.682041,
+      "hang": true
+    },
+    {
+      "kind": "main_thread_probe",
+      "uptime_ns": 701037652536625,
+      "milliseconds": 418.738417,
+      "hang": true
+    },
+    {
+      "kind": "main_thread_probe",
+      "uptime_ns": 701037652594958,
+      "milliseconds": 318.782708,
+      "hang": true
+    }
+  ],
+  "fulltext": [
+    {
+      "kind": "fulltext_apply",
+      "utf16_length": 1048586,
+      "milliseconds": 21.7175,
+      "uptime_ns": 701037021998416
+    },
+    {
+      "uptime_ns": 701037652071125,
+      "milliseconds": 0.233667,
+      "kind": "fulltext_locate"
+    }
+  ],
+  "large_page_decode": [
+    {
+      "uptime_ns": 701008416603333,
+      "main_thread": false,
+      "serialized_bytes": 2098300,
+      "kind": "message_decode",
+      "milliseconds": 5.945666
+    }
+  ]
+}

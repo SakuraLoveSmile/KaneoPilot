@@ -5,7 +5,7 @@ runner 承担，不经本 prompt）。v1.6：执行轮次由 pi CLI 启动（pro
 派发/观察不依赖桌面 UI。**v4（§5.24.4/§5.24.5）：按控制端后端分流**——
 `exec_config.controller_backend`（dispatch/monitor）或 `review_config.backend`
 （review）为 `pi_desktop` 时，本 prompt 在 PI-Desktop-Plus 的 `mode=agent`
-控制会话（review 为 `mode=plan` + `permissionMode=ask`）里运行，**不**拉起
+控制会话（review 为 `mode=plan` + `permissionMode=本轮快照（新轮次 auto）`）里运行，**不**拉起
 `pi -p`；状态一律经调度核心，不走 manifest/文件锁。
 
 ## 固定助手

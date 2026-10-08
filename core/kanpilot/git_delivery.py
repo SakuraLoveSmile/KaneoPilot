@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -57,32 +58,100 @@ def _recode(exc, code, message):
     return GitDeliveryError(code, message + "：" + exc.message)
 
 
-def github_repository(url: str) -> Optional[str]:
-    """Parse the supported GitHub origin forms without exposing credentials."""
+def _github_ssh_alias(host, port, cwd):
+    """Expand local OpenSSH configuration; never connect or replace the URL."""
+    if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host)
+            or port not in (None, 22, 443)
+            or "GIT_SSH" in os.environ or "GIT_SSH_COMMAND" in os.environ):
+        return False
+    deadline = time.monotonic() + 0.1
+    try:
+        variant = os.environ.get("GIT_SSH_VARIANT")
+        if cwd is not None:
+            transport = subprocess.run(["git", "-C", str(cwd), "config", "--null", "--get-regexp",
+                                        r"^(core\.sshcommand|ssh\.variant)$"],
+                                       capture_output=True, timeout=0.1, env=git_env())
+            if transport.returncode not in (0, 1):
+                return False
+            config_variant = None
+            for entry in transport.stdout.split(b"\0"):
+                key, _, value = entry.partition(b"\n")
+                if key == b"core.sshcommand":
+                    # Do not execute a repository's alternate SSH command.
+                    return False
+                if key == b"ssh.variant":
+                    config_variant = value.decode("utf-8", "replace")
+            if variant is None:
+                variant = config_variant
+        if variant not in (None, "auto", "ssh"):
+            return False
+        args = ["ssh", "-G", "-oCanonicalizeHostname=no", "-l", "git"]
+        if port is not None:
+            args += ["-p", str(port)]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        result = subprocess.run([*args, host], cwd=cwd, capture_output=True,
+                                text=True, errors="replace", timeout=remaining)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode:
+        return False
+    fields = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key in ("hostname", "user", "port"):
+            if key in fields:
+                return False
+            fields[key] = value.strip()
+    return (fields.get("hostname", "").lower() in ("github.com", "ssh.github.com")
+            and fields.get("user") == "git" and fields.get("port") in ("22", "443"))
+
+
+def github_repository(url: str, *, cwd=None) -> Optional[str]:
+    """Parse GitHub origins, resolving SSH host aliases in their repository."""
     if not isinstance(url, str):
         return None
     url = url.strip()
-    scp = re.fullmatch(r"git@github\.com:([^/]+/[^/]+)", url, re.I)
+    scp = re.fullmatch(r"git@([^:]+):([^/]+/[^/]+)", url, re.I)
+    alias_host = None
+    alias_port = None
     if scp:
-        name = scp.group(1)
+        host, name = scp.groups()
+        if host.lower() != "github.com":
+            if not url.startswith("git@"):
+                return None
+            alias_host = host
     else:
         try:
             parts = urlsplit(url)
             hostname = parts.hostname
-            parts.port  # Reject malformed ports before accepting an origin.
+            port = parts.port  # Reject malformed ports before accepting an origin.
         except ValueError:
             return None
-        if (parts.scheme not in ("https", "ssh") or hostname != "github.com"
-                or parts.query or parts.fragment):
+        if parts.scheme not in ("https", "ssh") or parts.query or parts.fragment:
             return None
+        if hostname != "github.com":
+            if parts.scheme != "ssh" or parts.username != "git" or parts.password is not None:
+                return None
+            alias_host, alias_port = hostname, port
+            if not alias_host:
+                return None
         name = parts.path[1:] if parts.path.startswith("/") else parts.path
     name = name[:-4] if name.endswith(".git") else name
-    return name if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) else None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name):
+        return None
+    if alias_host is not None:
+        # urlsplit strips embedded tabs/newlines; validate the original alias
+        # URL as well so normalization cannot hide an invalid SSH address.
+        if re.search(r"\s|[\x00-\x1f\x7f]", url) or not _github_ssh_alias(alias_host, alias_port, cwd):
+            return None
+    return name
 
 
 def origin_github_repo(repo: str) -> Optional[str]:
     try:
-        return github_repository(_value(["remote", "get-url", "origin"], repo))
+        return github_repository(_value(["remote", "get-url", "origin"], repo), cwd=repo)
     except GitDeliveryError:
         return None
 
@@ -90,7 +159,7 @@ def origin_github_repo(repo: str) -> Optional[str]:
 def _push_target(worktree, expected_repo):
     targets = _value(["remote", "get-url", "--push", "--all", "origin"], worktree).splitlines()
     if (len(targets) != 1 or not expected_repo
-            or (github_repository(targets[0]) or "").lower() != expected_repo.lower()):
+            or (github_repository(targets[0], cwd=worktree) or "").lower() != expected_repo.lower()):
         raise GitDeliveryError("branch_diverged", "origin 推送目标必须是已核验的单一 GitHub 仓库")
     target = targets[0]
     # A resolved URL passed explicitly to push is subject to rewriting again.
@@ -217,9 +286,40 @@ def _snapshot_has_disallowed_changes(path, purpose):
     material_name = ".kaneopilot-plan-material"
     for change in worktree_changes(str(path)):
         parts = Path(change["path"]).parts
-        if (change["status"] != "??" or len(parts) < 2
-                or parts[0] != material_name or ".." in parts):
+        material = len(parts) >= 2 and parts[0] == material_name
+        plus_plan = (len(parts) == 3 and parts[:2] == (".pi", "plan")
+                     and Path(parts[2]).suffix == ".md")
+        if (change["status"] != "??" or ".." in parts
+                or not (material or plus_plan)):
             return True
+    # Plus writes SubmitPlan Markdown in this isolated snapshot. Check the
+    # actual tree as well as Git status, including ignored entries; .pi is not
+    # a blanket exemption, and neither parent directory may be a symlink.
+    plus_root = path / ".pi"
+    if os.path.lexists(plus_root):
+        if not stat.S_ISDIR(plus_root.lstat().st_mode):
+            return True
+        tracked = {os.fsdecode(name) for name in
+                   _git(["ls-files", "-z", "--", ".pi"], path, 10).stdout.split(b"\0") if name}
+        pending_plus = [plus_root]
+        while pending_plus:
+            directory = pending_plus.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    relative = Path(entry.path).relative_to(path)
+                    name = relative.as_posix()
+                    parts = relative.parts
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    in_plan = parts[:2] == (".pi", "plan")
+                    if stat.S_ISDIR(mode):
+                        if name != ".pi/plan" and not any(t.startswith(name + "/") for t in tracked):
+                            return True
+                        pending_plus.append(Path(entry.path))
+                    elif stat.S_ISREG(mode):
+                        if name not in tracked and not (len(parts) == 3 and in_plan and relative.suffix == ".md"):
+                            return True
+                    elif not (stat.S_ISLNK(mode) and name in tracked and not in_plan):
+                        return True
     # Inspect the whole material tree, including entries hidden by .gitignore.
     # Never follow symlinks: even an empty symlink directory could redirect the
     # next runner's copies outside this snapshot.

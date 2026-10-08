@@ -333,7 +333,7 @@ def cmd_set_review_config(ctx, payload: dict) -> dict:
     pi_desktop?}（§5.23.4 + §5.24.1）。``backend=pi``（缺省）时 mode=inherit
     忽略其余字段、mode=custom 三字段必填并经 exec-capabilities 校验（同
     §5.17.2）；``backend=pi_desktop`` 时 ``mode`` 不参与，要求五字段完整且
-    permission_mode=ask。失败 bad_request 旧值不变；成功原子保存 + event
+    permission_mode=auto。失败 bad_request 旧值不变；成功原子保存 + event
     review_config_updated（detail 脱敏快照，无 token）→ {"config": {...}}。
     仅影响下一次 review 控制端启动。"""
     fields = {
@@ -416,14 +416,19 @@ def cmd_executor_status(ctx, payload: dict) -> dict:
             "AND (r.task_id IS NULL OR (t.save_state='active' AND t.auto_advance_paused=0))",
             (stage, ctx.now_iso)).fetchall()
         eligible = []
+        desktop_waiting = 0
         for row in rows:
             if row["kind"] == "plan" and not db.request_payload(row).get("manual_authorized"):
                 continue
             task = db.get_task(ctx.conn, row["task_id"]) if row["task_id"] else None
             if row["kind"] == "dispatch" and task is not None and db.task_extra(task).get("plan_execution_hold"):
                 continue
-            eligible.append(row)
+            if cmd_exec.request_backend(ctx.conn, row) == "codex_desktop":
+                desktop_waiting += 1
+            else:
+                eligible.append(row)
         result["stages"][stage]["claimable"] = len(eligible)
+        result["stages"][stage]["desktop_waiting"] = desktop_waiting
     intake = runs.get("intake") or {}
     pid = intake.get("pid")
     alive = False

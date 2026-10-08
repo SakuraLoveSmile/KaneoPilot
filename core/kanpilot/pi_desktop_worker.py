@@ -86,7 +86,7 @@ _HEARTBEAT_SECONDS = 30.0
 _PROOF_WAIT_SECONDS = 30.0       # 启动证明（pi_turn_get+heartbeat）等待上限
 _STOP_GRACE_SECONDS = 10.0       # pi_agent_stop 后的宽限
 _PAGE_LIMIT = 40                 # pi_session_get 单页消息数（初始值）
-_PAGE_MIN_LIMIT = 5              # 结果超限时自适应缩小的下限
+_PAGE_MIN_LIMIT = 1              # 单条仍超限时 runtime 可完整分片读取
 _READ_RECOVERY_SECONDS = 10.0
 _READ_RECOVERY_ATTEMPTS = 3
 _STOP_VERIFY_SECONDS = 30.0
@@ -285,7 +285,8 @@ class _Collector:
         """取一页；控制面因结果超出大小上限而截断时，减半缩小消息数重试。
 
         返回 ``(result, truncated, limit)``；``limit`` 为本次实际生效的页大小，
-        调用方沿用到后续页（一次超限即整轮降档，不每页重试）。最小页仍被截断
+        每个有进展的物理页之后恢复初始页大小，避免局部超大消息耗尽
+        后续普通消息的物理页预算。最小页仍被截断
         → ``(None, True, limit)``（调用方按分页链断裂处理，已采证据全部保留）。
         """
         while True:
@@ -385,6 +386,7 @@ class _Collector:
                     self.truncated = True
                     break
                 boundary = start
+                limit = _PAGE_LIMIT
             else:
                 self.truncated = True
         finally:

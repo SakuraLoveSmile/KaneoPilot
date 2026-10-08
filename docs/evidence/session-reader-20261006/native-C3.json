@@ -1,0 +1,128 @@
+{
+  "stage": "C3",
+  "counts": {
+    "reader_view_appeared": 2,
+    "reader_start": 2,
+    "probe_registration": 3,
+    "main_thread_probe": 2020,
+    "message_decode": 90,
+    "message_publication": 7,
+    "history_complete": 86,
+    "position": 7,
+    "position_complete": 4,
+    "native_action_display": 7,
+    "search_complete": 1
+  },
+  "hang_probes": [
+    {
+      "uptime_ns": 700155625098916,
+      "milliseconds": 356.895625,
+      "kind": "main_thread_probe",
+      "hang": true
+    },
+    {
+      "uptime_ns": 700155625449166,
+      "milliseconds": 257.04825,
+      "kind": "main_thread_probe",
+      "hang": true
+    },
+    {
+      "uptime_ns": 700185969372583,
+      "kind": "main_thread_probe",
+      "hang": true,
+      "milliseconds": 601.100583
+    },
+    {
+      "uptime_ns": 700185969715458,
+      "kind": "main_thread_probe",
+      "hang": true,
+      "milliseconds": 501.448625
+    },
+    {
+      "uptime_ns": 700185969788500,
+      "kind": "main_thread_probe",
+      "hang": true,
+      "milliseconds": 401.532917
+    },
+    {
+      "uptime_ns": 700185969850875,
+      "kind": "main_thread_probe",
+      "hang": true,
+      "milliseconds": 301.571791
+    },
+    {
+      "uptime_ns": 700192670169958,
+      "hang": true,
+      "milliseconds": 301.914917,
+      "kind": "main_thread_probe"
+    }
+  ],
+  "large_page_decode": [
+    {
+      "kind": "message_decode",
+      "uptime_ns": 700156505153166,
+      "main_thread": false,
+      "milliseconds": 6.08875,
+      "serialized_bytes": 2098300
+    },
+    {
+      "serialized_bytes": 1049747,
+      "kind": "message_decode",
+      "uptime_ns": 700230003931916,
+      "milliseconds": 3.442333,
+      "main_thread": false
+    }
+  ],
+  "actions": [
+    {
+      "uptime_ns": 700171393165958,
+      "kind": "native_action_display",
+      "action": "search_input",
+      "milliseconds": 24.256125
+    },
+    {
+      "action": "search_input",
+      "kind": "native_action_display",
+      "uptime_ns": 700171451720291,
+      "milliseconds": 33.301958
+    },
+    {
+      "action": "search_input",
+      "kind": "native_action_display",
+      "uptime_ns": 700171451856625,
+      "milliseconds": 32.733291
+    },
+    {
+      "kind": "native_action_display",
+      "action": "search_input",
+      "milliseconds": 77.535167,
+      "uptime_ns": 700208157739958
+    },
+    {
+      "kind": "native_action_display",
+      "action": "scroll",
+      "uptime_ns": 700218393688750,
+      "milliseconds": 14.864625
+    },
+    {
+      "milliseconds": 47.418833,
+      "kind": "native_action_display",
+      "action": "search_input",
+      "uptime_ns": 700304611857125
+    },
+    {
+      "milliseconds": 16.602458,
+      "kind": "native_action_display",
+      "action": "search_input",
+      "uptime_ns": 700304611960291
+    }
+  ],
+  "functional": [
+    "tail actual selected in full original",
+    "escape restores search",
+    "upper scroll held on append with new-content button",
+    "click new-content returns latest",
+    "failure preserves prior body",
+    "automatic recovery applies same-id revision"
+  ]
+}

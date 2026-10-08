@@ -50,7 +50,7 @@ _PROOF_WAIT_SECONDS = 30.0
 _STOP_GRACE_SECONDS = 10.0
 _STOP_VERIFY_SECONDS = 30.0
 _PAGE_LIMIT = 40                  # pi_session_get 单页消息数（初始值）
-_PAGE_MIN_LIMIT = 5
+_PAGE_MIN_LIMIT = 1               # 单条仍超限时 runtime 可完整分片读取
 _MAX_PAGES_PER_READ = 60          # 单次只读翻页上限（防御无界）
 _MAX_READ_ERRORS = 3              # 连续读不到 turn 的可容忍次数
 _MAX_EVENT_TEXT = 4000            # 事件里正文截断长度（全文进 transcript.json）
@@ -250,12 +250,12 @@ def controller_round_config(conn) -> Tuple[str, Optional[dict]]:
     return backend, block
 
 
-def review_round_config(conn) -> Tuple[str, Optional[dict]]:
+def review_round_config(conn, config_override=None) -> Tuple[str, Optional[dict]]:
     """review 控制端来源：``settings.review_config``（§5.24.1/§5.24.5 / T7.1 / T7.3）。"""
     from . import review_config  # 局部导入：避免与 review_config 的导入顺序耦合
 
-    loaded = review_config.load(conn) or {}
-    raw = stored_setting(conn, "review_config")
+    loaded = config_override if config_override is not None else review_config.load(conn) or {}
+    raw = config_override if config_override is not None else stored_setting(conn, "review_config")
     value = loaded.get("backend")
     if value is None:
         value = raw.get("backend")
@@ -412,7 +412,7 @@ def read_transcript(client, session_id: str,
                 or not isinstance(more, bool)
                 or start < 0 or end < start
                 or (rows and end - start != len(rows))
-                or (boundary is not None and end != boundary)
+                or (boundary is not None and (end != boundary or start >= boundary))
                 or (boundary is None and page.get("hasMoreAfter") is True)
             )
             if broken:
@@ -424,6 +424,9 @@ def read_transcript(client, session_id: str,
                 break
             if not more:
                 return [], False, "transcript_incomplete: 历史前缀不完整"
+            # Every physical page has a fresh size budget. Large messages on
+            # this page must not shrink all older ordinary pages permanently.
+            limit = page_limit
         else:
             return [], False, "transcript_incomplete: 页数超过上限"
     except util.KanpilotError as exc:
@@ -516,8 +519,10 @@ def agent_status(client, session_id: str) -> Optional[dict]:
         return None
     if not isinstance(view, dict):
         return None
-    status = view.get("status")
-    return status if isinstance(status, dict) else None
+    status = view.get("status", view)
+    if not isinstance(status, dict) or not isinstance(status.get("isRunning"), bool):
+        return None
+    return status
 
 
 def prove_started(client, session_id: str, turn_id: str) -> Tuple[bool, Optional[str]]:

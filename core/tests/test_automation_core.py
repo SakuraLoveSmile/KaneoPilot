@@ -145,7 +145,11 @@ def test_auto_confirm_all_skip_reasons_once(state, monkeypatch, reason):
 
 
 def test_auto_confirm_and_delivery_tick_cycle(state):
-    state.extra(plan_execution_hold=True,plan_verify={'plan_sha256':'plan','commands':['test']})
+    plan = Path(state.task()['repository']) / 'current-plan.md'
+    plan.write_text('# Current authorized plan\n')
+    plan_sha = util.sha256_file(plan)
+    state.update(plan_path=str(plan), plan_sha256=plan_sha)
+    state.extra(plan_execution_hold=True,plan_verify={'plan_sha256':plan_sha,'commands':['test']})
     assert cmd_read.cmd_tick(state.ctx,{})['created'][0]['kind']=='dispatch'
     assert not db.task_extra(state.task()).get('plan_execution_hold')
     state.update(status='in_review',stage='review')

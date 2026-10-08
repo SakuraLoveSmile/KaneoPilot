@@ -361,11 +361,31 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func dismissFailedRequests(requestIDs: [String]) async {
+        await perform("移除失败记录") {
+            _ = try await self.client.run("dismiss-failed-requests",
+                                          payload: ["request_ids": requestIDs],
+                                          as: OkResponse.self)
+            return "已从待处理移除，历史保留在运行记录中"
+        }
+    }
+
     func resolve(taskID: String, action: String, note: String? = nil) async {
         await perform(Self.actionLabel(action)) {
             var payload: [String: Any] = ["task_id": taskID, "action": action]
             if let note, !note.isEmpty { payload["note"] = note }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
+            return nil
+        }
+    }
+
+    func recoverReview(taskID: String, recovery: ReviewRecovery) async {
+        await perform("恢复评审阶段", successToast: "已恢复到待评审；评审尚未开始") {
+            _ = try await self.client.run("resolve", payload: [
+                "task_id": taskID, "action": "recover_review",
+                "expected_execution_run_id": recovery.executionRunId,
+                "expected_failed_review_request_id": recovery.failedReviewRequestId,
+            ], as: OkResponse.self)
             return nil
         }
     }
@@ -475,6 +495,25 @@ final class AppViewModel: ObservableObject {
                 as: OkResponse.self)
             return response.deduplicated == true
                 ? "会话已不在列表中" : "已永久从列表移除"
+        }
+    }
+
+    func forcePurgeSession(taskID: String, runID: String, saveState: String) async {
+        await perform("强制删除残留会话", refreshSaved: true) {
+            let response = try await self.client.run(
+                "force-purge-session",
+                payload: ["task_id": taskID, "run_id": runID,
+                          "expected_save_state": saveState], as: OkResponse.self)
+            return response.deduplicated == true ? "会话已不在列表中" : "已删除残留会话"
+        }
+    }
+
+    func cancelPlan(requestID: String, taskID: String) async {
+        await perform("终止排队计划", refreshSaved: true) {
+            _ = try await self.client.run(
+                "cancel-request", payload: ["request_id": requestID, "task_id": taskID],
+                as: OkResponse.self)
+            return "已终止排队计划"
         }
     }
 
@@ -616,6 +655,15 @@ final class AppViewModel: ObservableObject {
                              as: FetchTodosResponse.self)
     }
 
+    /// 用户显式重新接入，仅恢复待规划状态，不运行规划或自动执行。
+    func reconnectTask(taskID: String, expectedSaveState: String) async throws {
+        _ = try await client.run("reconnect-task",
+                                 payload: ["task_id": taskID,
+                                           "expected_save_state": expectedSaveState],
+                                 timeout: 120, as: OkResponse.self)
+        await refreshAll()
+    }
+
     /// prepare-plan-input：重新获取任务核验需求哈希 → 建不可变材料目录。
     func preparePlanInput(taskID: String,
                           expectedRequirementsSha256: String?,
@@ -645,7 +693,10 @@ final class AppViewModel: ObservableObject {
                                             timeout: 120,
                                             as: StartPlansResponse.self)
         if (response.results ?? []).contains(where: { $0.succeeded }) {
-            kickPlanner()
+            // Desktop 请求由原生会话领取，纯 Desktop 批次不拉起本地 CLI。
+            if items.contains(where: { ($0["planner_backend"] as? String) != "codex_desktop" }) {
+                kickPlanner()
+            }
             await refreshAll()
         }
         return response
@@ -732,7 +783,9 @@ final class AppViewModel: ObservableObject {
         defer { plannerSaving = false }
         do {
             var payload: [String: Any] = ["backend": backend]
-            if backend == "pi_desktop" {
+            if backend == "codex_desktop" {
+                payload["default_method"] = defaultMethod ?? "builtin"
+            } else if backend == "pi_desktop" {
                 guard let piDesktop, piDesktop.isComplete else {
                     return "Plus 规划配置需要完整的五字段（权限固定 ask）"
                 }
@@ -777,6 +830,33 @@ final class AppViewModel: ObservableObject {
     /// §5.24.2：已保存的 Plus 规划五字段（无桌面块 → nil）。
     var plannerPlusConfig: ExecPiDesktopConfig? {
         plannerConfig?.config?.piDesktop
+    }
+
+    // MARK: - Desktop 正式队列
+
+    @Published private(set) var desktopQueueInFlight = false
+    @Published private(set) var desktopQueueStatus: DesktopQueueStatusResponse?
+    @Published private(set) var desktopQueueError: String?
+
+    func refreshDesktopQueue() async {
+        await runDesktopQueueCommand("desktop-queue-status", payload: [:])
+    }
+
+    func setDesktopQueueEnabled(_ enabled: Bool) async {
+        await runDesktopQueueCommand("set-desktop-queue-config", payload: ["enabled": enabled])
+    }
+
+    private func runDesktopQueueCommand(_ command: String, payload: [String: Any]) async {
+        guard !desktopQueueInFlight else { return }
+        desktopQueueInFlight = true
+        desktopQueueError = nil
+        defer { desktopQueueInFlight = false }
+        do {
+            desktopQueueStatus = try await client.run(
+                command, payload: payload, as: DesktopQueueStatusResponse.self)
+        } catch {
+            desktopQueueError = error.coreMessage
+        }
     }
 
     // MARK: - v4 §5.24.2 Review 能力（review-capabilities）
@@ -959,6 +1039,7 @@ final class AppViewModel: ObservableObject {
         case "release_lost": return "释放失联请求"
         case "mark_done": return "登记完成"
         case "dismiss": return "清除阻塞标记"
+        case "recover_review": return "恢复评审阶段"
         case "recheck": return "重新校验"
         case "archive": return "归档"
         case "trash": return "移入回收站"
@@ -969,6 +1050,8 @@ final class AppViewModel: ObservableObject {
         case "fetch_todos": return "重新获取 To Do"
         case "view": return "查看关联"
         case "set-priority": return "调整顺序"
+        case "cancel-request": return "终止排队计划"
+        case "force-purge-session": return "强制删除残留会话"
         // v2 §5.20：终态永久移除（回收站内）。purge 为任务级动作词。
         case "purge", "purge-task", "purge-session": return "永久从列表移除"
         default: return action

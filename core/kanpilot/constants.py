@@ -23,7 +23,7 @@ SESSION_SAVE_STATES = ("active", "trashed", "purged")
 # 后端为 pi（pi CLI 子进程）；v2 起规划轮次由 Codex 适配器执行（backend="codex"）；
 # v3 起任务执行轮次可为 PI-Desktop 本机 MCP 控制面（backend="pi_desktop"）。
 # 历史行保留旧值，读取层按「已弃用」处理。
-ROUND_BACKENDS = ("pi", "codex", "pi_desktop")
+ROUND_BACKENDS = ("pi", "codex", "pi_desktop", "codex_desktop")
 LEGACY_ROUND_BACKENDS = ("dsh", "headless")  # 历史行可能携带；只读展示
 ROUND_RUN_STATUSES = ("pending", "running", "finished", "failed", "unknown")
 
@@ -103,11 +103,11 @@ PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 # v4（protocol §5.24.1）：四个模型调用点各自的后端词表与缺省值。缺字段一律
 # 按旧语义解释（codex/pi），旧数据零迁移；切换后端不删除另一分支字段。
-PLANNER_BACKENDS = ("codex", "pi_desktop", "claude")
+PLANNER_BACKENDS = ("codex", "pi_desktop", "claude", "codex_desktop")
 PLANNER_BACKEND = "codex"
 CONTROLLER_BACKENDS = ("pi", "pi_desktop")
 CONTROLLER_BACKEND = "pi"
-REVIEW_BACKENDS = ("pi", "pi_desktop", "claude", "codex")
+REVIEW_BACKENDS = ("pi", "pi_desktop", "claude", "codex", "codex_desktop")
 REVIEW_BACKEND = "pi"
 # exec_config 里控制端后端字段名（与任务执行 backend 并存，互不覆盖）。
 CONTROLLER_BACKEND_KEY = "controller_backend"
@@ -116,12 +116,15 @@ CONTROLLER_BACKEND_KEY = "controller_backend"
 # 计划/Review 需读并安全关闭产物检点，故要求基础 + 契约审批工具。
 PI_DESKTOP_CONTROLLER_TOOLS = PI_DESKTOP_REQUIRED_TOOLS
 PI_DESKTOP_PLAN_TOOLS = PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS
-# v4 各角色的 Plus 会话模式（protocol §5.24）：计划/Review 为只读倾向的
-# plan + ask；控制端 agent + 用户显式 permission_mode；任务执行 goal。
+# 各角色的 Plus 会话模式：规划与 Review plan + auto；
+# 控制端 agent + 用户显式 permission_mode；任务执行 goal。
 PI_DESKTOP_PLAN_MODE = "plan"
 PI_DESKTOP_CONTROLLER_MODE = "agent"
-# v4：Plan/Review 分支只允许该权限模式（防自动 shell 写入；Plan 模式本身
-# 不是 OS 只读沙箱）。
+# 规划独立于 Review 权限；新请求使用 auto，既有请求保留其固化快照。
+PI_DESKTOP_PLANNER_PERMISSION_MODE = "auto"
+# Review 新轮次使用 auto；与规划权限独立，历史快照不改写。
+PI_DESKTOP_REVIEW_PERMISSION_MODE = "auto"
+# 兼容既有 ask 轮次（Plan 模式本身不是 OS 只读沙箱）。
 PI_DESKTOP_READONLY_PERMISSION_MODE = "ask"
 # v4：Review 最终答复的结论与 fix 优先级枚举（后者与 bridge.VALID_PRIORITIES
 # 同源，新增值须两处同步）。
@@ -257,7 +260,7 @@ DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review",
 )
 
 ERROR_CODES = (
@@ -447,7 +450,7 @@ DELIVERY_MAX_FILE_BYTES = 5 * 1024 * 1024
 CLI_PLAN_DEFAULT_BUDGET_USD = 5.0
 CLI_REVIEW_DEFAULT_BUDGET_USD = 5.0
 CLI_MIN_BUDGET_USD = 0.5
-AUTOMATION_REVIEW_BACKENDS = ("pi_desktop", "claude", "codex")
+AUTOMATION_REVIEW_BACKENDS = ("pi_desktop", "claude", "codex", "codex_desktop")
 DISPATCH_INSTRUCTION_BRANCH = (
     "任务标识：{marker}。当前目录 {worktree} 是本任务专用分支 {branch} 的工作树，直接在这里完整执行{plan_ref}。"
     "可以按计划使用 subagent，但所有改动必须落在本工作树；不要新建 worktree 或分支，不要 commit、push、reset、stash、rebase 或切换分支；"

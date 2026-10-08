@@ -95,9 +95,9 @@ struct PlanReaderView: View {
             Text(plan?.title ?? detail?.title ?? taskID)
                 .font(.kpTitle)
                 .lineLimit(2)
+                // 可选中文本保留原生标题名称，避免 AX 标签覆盖与 AppKit 桥接循环。
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("计划标题")
 
             metadata
 

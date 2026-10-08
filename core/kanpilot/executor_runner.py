@@ -135,22 +135,45 @@ def run_stage(stage: str, resume: bool = False) -> int:
     conn = db.connect(constants.default_db_path())
     timeout = _timeout_seconds(conn)
     log_path = _log_path(stage)
+    selected_request_id = None
+    selected_review_config = None
+    selected_review_backend = None
+    if stage == "review":
+        from . import cmd_exec, util
+        if resume:
+            runs = db.get_setting(conn, "executor_runs", {}) or {}
+            saved = runs.get("review") or {}
+            selected_review_backend = saved.get("backend") or controller_backend(conn, stage)
+        else:
+            candidate = cmd_exec._select_candidate(conn, "review", None, util.now_dt())
+            if candidate is None:
+                desktop_queued = any(cmd_exec.request_backend(conn, row) == "codex_desktop"
+                                     for row in conn.execute("SELECT * FROM requests WHERE stage='review' AND status='queued'"))
+                if review_config.backend(conn) == "codex_desktop" or desktop_queued:
+                    return 0
+                selected_review_config = review_config.for_request(conn, {})
+                selected_review_backend = selected_review_config["backend"]
+            else:
+                selected_request_id = candidate["request_id"]
+                selected_review_config = review_config.for_request(conn, db.request_payload(candidate))
+                selected_review_backend = cmd_exec.request_backend(conn, candidate)
     if stage in ("dispatch", "monitor", "delivery"):
         from importlib import import_module
         runner = import_module(".auto_" + stage if stage != "delivery" else ".delivery_runner", __package__)
         return runner.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
                                 log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume)
-    if stage == "review" and review_config.backend(conn) in ("claude", "codex"):
+    if stage == "review" and selected_review_backend in ("claude", "codex"):
         from . import cli_review
         return cli_review.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
-                                    log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume)
+                                    log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume,
+                                    request_id=selected_request_id, config_override=selected_review_config)
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
 
     # v4（§5.24.4/§5.24.5）：按该 stage 的控制端后端分流。pi_desktop 分支在
     # Plus 本机 MCP 控制面建独立会话运行同一角色 prompt，**不**拉起 pi -p；
     # pi 分支（缺省）以下代码与 v1.6 完全一致。
-    if controller_backend(conn, stage) == "pi_desktop":
+    if (selected_review_backend if stage == "review" else controller_backend(conn, stage)) == "pi_desktop":
         from . import pi_desktop_controller, pi_desktop_review
 
         runner = (
@@ -161,6 +184,8 @@ def run_stage(stage: str, resume: bool = False) -> int:
             prompt=prompt, timeout=timeout, log_path=log_path,
             record_run=lambda **fields: _record_run(conn, stage, **fields),
             resume=resume,
+            **({"request_id": selected_request_id, "config_override": selected_review_config}
+               if stage == "review" else {}),
         )
 
     # v3（§5.23.4/§5.23.5）：review 控制端配置来源 = settings.review_config。
@@ -169,7 +194,13 @@ def run_stage(stage: str, resume: bool = False) -> int:
     # 不读 exec_config/review_config——继续继承 PI 默认。
     review_snapshot = None
     if stage == "review":
-        review_snapshot = review_config.snapshot(conn)
+        if selected_review_backend == "codex_desktop":
+            return 0
+        review_snapshot = review_config.snapshot(conn, config_override=selected_review_config)
+        if selected_request_id:
+            prompt += ("\n\n本轮固定请求：只允许 claim --stage review --executor kaneo-review "
+                       "--request-id " + selected_request_id +
+                       "；完成本请求后立即结束，不继续领取其它请求。该请求配置已冻结。")
     _record_run(
         conn, stage,
         pid=os.getpid(),

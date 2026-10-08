@@ -1,0 +1,74 @@
+Window: "", App: KaneoPilot.
+0 sheet Secondary Actions: Raise
+	1 container
+		2 text 规划 第 1 步：获取 To Do
+		3 image Description: Forward, ID: chevron.right
+		4 text 第 2 步：准备材料
+		5 image Description: Forward, ID: chevron.right
+		6 text 第 3 步：开始规划
+		7 button Description: 关闭规划面板, ID: xmark.circle
+		8 text 运行端 Codex　方式 内置规划 普通规划 gpt-6.1-sol · 思考 high　评审修复 gpt-6.1-sol · 思考 high
+		9 button Description: 刷新, Help: fetch-todos：只读枚举 To Do，不导入任务
+		10 text 获取于 23:25
+		11 image Description: Warning, ID: exclamationmark.triangle.fill
+		12 text 存在未关联有效本地仓库的项目，请配置仓库后再进行规划。
+		13 button 配置仓库
+		14 scroll area Secondary Actions: Scroll Up, Scroll Down
+			15 list
+				16 row (selectable) 规划队列
+				17 row (selectable) 状态：已排队等待规划
+修复：错题标签过滤的空值兜底
+				18 row (selectable) Description: 确认材料, Value: 状态：等待确认材料
+整理曲库元数据并补充缺失封面
+				19 row (selectable) Kaneo To Do
+				20 row (selectable) 整理曲库元数据并补充缺失封面, Music, 待规划
+					21 checkbox Description: 整理曲库元数据并补充缺失封面, Music, 待规划, Value: 0, Secondary Actions: 勾选 整理曲库元数据并补充缺失封面
+				22 row (selectable) 重构书库索引以支持多标签检索, Library, 规划中, 本地已有任务（状态 planning），如需重新规划请先在任务详情确认
+					23 checkbox Description: 重构书库索引以支持多标签检索, Library, 规划中, 本地已有任务（状态 planning），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 重构书库索引以支持多标签检索
+				24 row (selectable) 为复习卡片加入间隔重复调度, StudyTool, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认
+					25 checkbox Description: 为复习卡片加入间隔重复调度, StudyTool, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 为复习卡片加入间隔重复调度
+				26 row (selectable) 抓取章节列表并生成离线缓存清单, Comic, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认
+					27 checkbox Description: 抓取章节列表并生成离线缓存清单, Comic, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 抓取章节列表并生成离线缓存清单
+				28 row (selectable) 收集崩溃日志并归类用户反馈, Feedback, dispatching, 本地已有任务（状态 dispatching），如需重新规划请先在任务详情确认
+					29 checkbox Description: 收集崩溃日志并归类用户反馈, Feedback, dispatching, 本地已有任务（状态 dispatching），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 收集崩溃日志并归类用户反馈
+				30 row (selectable) 把错题本导出为 Anki 牌组, StudyTool, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					31 checkbox Description: 把错题本导出为 Anki 牌组, StudyTool, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0
+				32 row (selectable) 这是一个特别特别长的任务标题用来验证列表在四十个汉字以上的截断效果而不会撑破布局, Feedback, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认
+					33 checkbox Description: 这是一个特别特别长的任务标题用来验证列表在四十个汉字以上的截断效果而不会撑破布局, Feedback, 已有计划, 本地已有任务（状态 ready），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 这是一个特别特别长的任务标题用来验证列表在四十个汉字以上的截断效果而不会撑破布局
+				34 row (selectable) 扫描馆藏 PDF 并重建全文检索索引, Library, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					35 checkbox Description: 扫描馆藏 PDF 并重建全文检索索引, Library, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 扫描馆藏 PDF 并重建全文检索索引
+				36 row (selectable) 导出播放统计周报并发送到邮箱, Music, needs_user, 附件 1, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					37 checkbox Description: 导出播放统计周报并发送到邮箱, Music, needs_user, 附件 1, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 导出播放统计周报并发送到邮箱
+				38 row (selectable) 修复：错题标签过滤的空值兜底, StudyTool, 待规划
+					39 checkbox Description: 修复：错题标签过滤的空值兜底, StudyTool, 待规划, Value: 0, Secondary Actions: 勾选 修复：错题标签过滤的空值兜底
+				40 row (selectable) 自动处理示例 · branch_exists, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					41 checkbox Description: 自动处理示例 · branch_exists, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · branch_exists
+				42 row (selectable) 自动处理示例 · delivery_base_unknown, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					43 checkbox Description: 自动处理示例 · delivery_base_unknown, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · delivery_base_unknown
+				44 row (selectable) 自动处理示例 · planner_failed, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					45 checkbox Description: 自动处理示例 · planner_failed, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · planner_failed
+				46 row (selectable) 自动处理示例 · needs_input, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认
+					47 checkbox Description: 自动处理示例 · needs_input, Music, needs_user, 本地已有任务（状态 needs_user），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · needs_input
+				48 row (selectable) 自动处理示例 · needs_plan, Music, 等待自动规划
+					49 checkbox Description: 自动处理示例 · needs_plan, Music, 等待自动规划, Value: 0, Secondary Actions: 勾选 自动处理示例 · needs_plan
+				50 row (selectable) 自动处理示例 · planning, Music, 自动规划中, 本地已有任务（状态 planning），如需重新规划请先在任务详情确认
+					51 checkbox Description: 自动处理示例 · planning, Music, 自动规划中, 本地已有任务（状态 planning），如需重新规划请先在任务详情确认, Value: 0, Secondary Actions: 勾选 自动处理示例 · planning
+				52 row (selectable) 未映射项目的 To Do（fake）, StarTool, 未导入, 尚未选择仓库
+					53 checkbox Description: 未映射项目的 To Do（fake）, StarTool, 未导入, 尚未选择仓库, Value: 0
+			54 scroll bar (settable, float) 0.543694400837258
+				55 value indicator (settable, float) 0.543694400837258
+				56 increment arrow button
+				57 decrement arrow button
+				58 increment page button
+				59 decrement page button
+		60 text 已勾选 0 项；仅可选行可勾选
+		61 button (disabled) Description: 下一步：准备材料, Help: 先勾选可规划的 To Do
+62 menu bar
+	63 KaneoPilot
+	64 File
+	65 Edit
+	66 View
+	67 Window
+	68 Help
+
+The focused UI element is 15 list

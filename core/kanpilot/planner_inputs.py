@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import (
-    automation_policy, bridge, codex_planner, constants, core, db, planner_config, project_config, remote, util,
+    automation_policy, bridge, cmd_archive, codex_planner, constants, core, db, planner_config, project_config, remote, util,
 )
 
 # --------------------------------------------------------------- 附件识别
@@ -160,7 +160,7 @@ def _selectable(conn, task_id: str, mapping: Optional[dict]) -> tuple[bool, Opti
     save_state = db.task_save_state(task)
     if save_state != "active":
         label = {"archived": "归档", "trashed": "回收站",
-                 "purged": "已永久移除"}.get(save_state, save_state)
+                 "purged": "永久移除"}.get(save_state, save_state)
         return False, f"本地任务已{label}，不重复规划"
     if task["send_state"] == "unknown":
         return False, "发送结果不明，请先处理派发状态"
@@ -208,13 +208,20 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                     "mapping_state": mapping_state, "repository_kind": repository_kind,
                     "mapping_project_id": project_id,
                     "local_status": None, "local_save_state": None,
-                    "attachments": [], "selectable": False,
+                    "attachments": [], "selectable": False, "reconnectable": False,
                     "blocked_reason": f"任务详情读取失败：{exc}",
                 })
                 continue
             attachments = _attachment_entries(context.get("task") or {})
             local = _local_status(conn, task_id)
             selectable, blocked = _selectable(conn, task_id, mapping)
+            local_task = db.get_task(conn, task_id)
+            reconnect_blocked = cmd_archive.reconnect_blocked_reason(
+                conn, local_task, mapping, util.now_dt(), context.get("task") or {},
+            )
+            reconnectable = reconnect_blocked is None
+            if local_task is not None and db.task_save_state(local_task) != "active" and not reconnectable:
+                blocked = reconnect_blocked
             # 输出脱敏：附件 url 去 query/fragment（下载经 prepare 重新取
             # 完整地址；列表项只用于展示与排除勾选）。
             attachments = [
@@ -241,6 +248,7 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                 "number": context["task"].get("number") or todo.get("number"),
                 **({"labels": bridge.label_names(todo["labels"])} if isinstance(todo.get("labels"), list) else {}),
                 "selectable": selectable,
+                "reconnectable": reconnectable,
                 "blocked_reason": blocked,
             })
     return {"fetched_at": util.now_iso(), "items": items}
@@ -854,7 +862,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     if prepared.get("input_sha256") != row["input_sha256"]:
         return {"task_id": task_id, "code": "conflict", "error": "规划材料在解析期间变化，请重新提交"}
     plugin = None
-    if method == "spec_plan":
+    if method == "spec_plan" and planner_backend != "codex_desktop":
         plugin = prepared.get("plugin") or {"available": False, "reason": "未解析插件"}
         if not plugin.get("available"):
             return {"task_id": task_id, "code": "validation_failed",
@@ -893,7 +901,13 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         "confirmed_at": now,
         "planner_method": method,
     }
-    if runtime_config is not None:
+    if planner_backend == "codex_desktop":
+        payload["model_config"] = planner_config.model_snapshot(
+            conn, planner_config.group_for(plan_kind), backend="codex_desktop")
+        payload["runtime_config"] = dict(planner_config.DESKTOP_RUNTIME)
+        if method == "spec_plan":
+            payload["planner_skill"] = planner_config.DESKTOP_SKILL
+    elif runtime_config is not None:
         payload["runtime_config"] = runtime_config
     else:
         if planner_backend == "claude":
@@ -966,6 +980,8 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                     "planner_method": method,
                     "planner_backend": planner_backend},
         )
+        if authorization is None:
+            _authorize_reconnected_plan(conn, task_id, now, prepared, manifest)
         return {"task_id": task_id, "request_id": existing["request_id"],
                 "deduplicated": False, "reused": True}
 
@@ -980,8 +996,27 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                 "planner_method": method,
                 "planner_backend": planner_backend},
     )
+    if authorization is None:
+        _authorize_reconnected_plan(conn, task_id, now, prepared, manifest)
     return {"task_id": task_id, "request_id": request["request_id"],
             "deduplicated": False}
+
+
+def _authorize_reconnected_plan(conn, task_id, now, prepared, manifest):
+    task = db.require_task(conn, task_id)
+    reconnect = db.task_extra(task).get("reconnect") or {}
+    if reconnect.get("awaiting_plan"):
+        db.set_extra(conn, task, now, reconnect={**reconnect, "awaiting_plan": False, "plan_authorized_at": now})
+        # Only the newly confirmed material becomes the publish baseline; old
+        # snapshot files and their audit pointers remain intact.
+        project = manifest["task"]
+        db.update_task(
+            conn, task_id, now, auto_advance_paused=0,
+            requirements_sha256=manifest.get("requirements_sha256"),
+            source_sha256=manifest.get("source_sha256"),
+            source_path=prepared.get("source_path"),
+            repository=project.get("repository"), project_name=project.get("project_name"),
+        )
 
 
 class _SubmissionRejected(Exception):

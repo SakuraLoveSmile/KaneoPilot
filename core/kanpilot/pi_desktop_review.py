@@ -11,7 +11,7 @@
    ``git diff`` 生成改动材料，并把计划/（修复周期时的）原评审报告/执行证据复制
    进该 worktree 的材料目录——它是本轮的审查输入。
 3. ``pi_session_create(mode="plan", projectPath=<review worktree>)`` +
-   ``permissionMode="ask"``；指令只要求审查并输出冻结 JSON，不 SubmitPlan、
+   ``permissionMode=<本轮快照，新轮次 auto>``；指令只要求审查并输出冻结 JSON，不 SubmitPlan、
    不 SubmitGoal、不代批任何契约。
 4. ``completed`` + 完整转录后**严格解析** ``{conclusion, report_markdown, fix}``
    （``priority`` ∈ ``constants.REVIEW_FIX_PRIORITIES``）。意外 proposal 只
@@ -505,7 +505,7 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
 
 def _create_plan_session(client, block: dict, directory: Path
                          ) -> Tuple[Optional[str], Optional[str]]:
-    """``mode="plan"`` + ``permissionMode="ask"`` 审查会话（§5.24.5）。"""
+    """按本轮快照配置 plan 审查会话，新轮次 auto、历史 ask 保留。"""
     try:
         created = client.session_create(
             str(directory), mode=constants.PI_DESKTOP_PLAN_MODE,
@@ -528,7 +528,7 @@ def _create_plan_session(client, block: dict, directory: Path
     try:
         client.session_configure(
             session_id, mode=constants.PI_DESKTOP_PLAN_MODE,
-            permission_mode=constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+            permission_mode=block["permission_mode"],
         )
     except util.KanpilotError as exc:
         return session_id, f"pi_session_configure 失败：{exc.message}"
@@ -692,11 +692,12 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
             "rejected": rejected_count,
         }
     if not complete:
+        detail = transcript_detail or "转录不完整"
+        if not detail.startswith("transcript_incomplete:"):
+            detail = f"transcript_incomplete: {detail}"
         return {
             "kind": "blocked",
-            "detail": (
-                f"transcript_incomplete: {transcript_detail or '转录不完整'}"
-            ),
+            "detail": detail,
         }
     result, error = parse_result(messages)
     if result is None:
@@ -911,7 +912,8 @@ def _review_root(conn, task_id: str, run_id: str) -> Path:
 
 
 def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
-              log_path: Path, record_run: Callable, resume: bool = False) -> int:
+              log_path: Path, record_run: Callable, resume: bool = False,
+              request_id=None, config_override=None) -> int:
     """跑一个 Plus Review 控制轮；返回进程退出码（0=本轮已按契约收尾）。"""
     if stage != STAGE:
         print(f"unknown stage: {stage}", file=sys.stderr)
@@ -930,7 +932,13 @@ def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
             timeout=timeout, log_path=log_path, record_run=record_run,
         )
 
-    backend, block = pi_desktop_controller.review_round_config(conn)
+    if config_override is None:
+        from . import cmd_exec, review_config
+        candidate = cmd_exec._select_candidate(conn, STAGE, request_id, util.now_dt())
+        if candidate is not None:
+            request_id = candidate["request_id"]
+            config_override = review_config.for_request(conn, db.request_payload(candidate))
+    backend, block = pi_desktop_controller.review_round_config(conn, config_override)
     if backend != "pi_desktop":
         print(
             f"executor review 控制端后端不是 pi_desktop（{backend}）："
@@ -959,6 +967,7 @@ def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
     return _fresh_round(
         conn=conn, db_path=db_path, block=block, prompt=prompt,
         timeout=timeout, log_path=log_path, record_run=record_run,
+        request_id=request_id,
     )
 
 
@@ -990,7 +999,7 @@ def _new_job(block: dict, invocation_id: str, directory: Path,
 
 
 def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
-                 log_path: Path, record_run: Callable) -> int:
+                 log_path: Path, record_run: Callable, request_id=None) -> int:
     invocation_id = util.new_uuid()
     directory = pi_desktop_controller.invocation_dir(STAGE, invocation_id)
     job_path = directory / "job.json"
@@ -999,7 +1008,8 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
 
-    claim = core_call(db_path, "claim", {"stage": STAGE, "executor": EXECUTOR_ID})
+    claim = core_call(db_path, "claim", {"stage": STAGE, "executor": EXECUTOR_ID,
+                      **({"request_id": request_id} if request_id else {})})
     if not claim.get("claimed"):
         reason = claim.get("reason")
         log.emit("system", util.now_iso(),
