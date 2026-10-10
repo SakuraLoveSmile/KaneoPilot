@@ -41,6 +41,7 @@ COMMIT_DELIVERY = "commit_delivery"     # delivery-commit
 ENQUEUE_REVIEW = "enqueue_review"
 START_FIX_ROUND = "start_fix_round"     # same-branch bounded remediation
 SYNC_DELIVERY = "sync_delivery"         # delivery-sync (poll merge)
+SETTLE_ROUND = "settle_round"           # round exited but terminal state unrecorded
 
 # Forward actions that must yield to the per-task budget gate
 # (automation-contract §计划自动确认 / §同任务修复轮).
@@ -245,6 +246,26 @@ def failure_decision(
     )
 
 
+def round_settled_decision(exit_code: int) -> Decision:
+    """Map a probed round exit code to the settle intent (sandbox §13.2).
+
+    The engine never writes round state itself: it enqueues a monitor request
+    and the deterministic monitor stage finishes the job — ``_complete``
+    (core-owned verification → delivery commit → in-review) for a clean exit,
+    or ``needs_user``/``execution_failed`` (阶梯 4 → attention inbox) for a
+    non-zero one. Both go through :data:`SETTLE_ROUND` so the reconciler and
+    the action log see one mechanism; the exit code travels in ``params``.
+    """
+    if exit_code == 0:
+        return Decision(SETTLE_ROUND, reason="round_exited_zero",
+                        params={"exit_code": 0, "terminal": "completed"})
+    return Decision(
+        SETTLE_ROUND, reason="execution_failed",
+        ladder=ladder.classify("execution_failed"),
+        params={"failure_code": "execution_failed", "exit_code": exit_code,
+                "terminal": "failed"})
+
+
 # Per-action explanation templates for shadow-mode logging (§5.27: 决策差异落日志且有解释).
 _EXPLAIN = {
     NOOP: "无需动作：{reason}",
@@ -262,6 +283,7 @@ _EXPLAIN = {
     ENQUEUE_REVIEW: "进入评审，入队 review",
     START_FIX_ROUND: "评审要求修改，启动同任务修复轮",
     SYNC_DELIVERY: "PR 已开，入队 delivery 轮询合并",
+    SETTLE_ROUND: "轮次已退出但终态未登记，入队 monitor 收尾：{reason}",
 }
 
 

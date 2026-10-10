@@ -168,6 +168,32 @@ class TestFailureDecisionRows(unittest.TestCase):
         self.assertEqual(d.ladder, ladder.LADDER_NEEDS_YOU)
 
 
+class TestRoundSettledDecision(unittest.TestCase):
+    """round_settled_decision: a probed exit code → the settle intent (§13.2)."""
+
+    def test_clean_exit_settles_toward_verdict(self):
+        d = decide.round_settled_decision(0)
+        self.assertEqual(d.action, decide.SETTLE_ROUND)
+        self.assertEqual(d.reason, "round_exited_zero")
+        self.assertEqual(d.params["exit_code"], 0)
+        self.assertEqual(d.params["terminal"], "completed")
+        self.assertEqual(d.ladder, 0)  # success path: no failure ladder
+        self.assertFalse(d.attention)
+
+    def test_nonzero_exit_attributes_execution_failed(self):
+        d = decide.round_settled_decision(1)
+        self.assertEqual(d.action, decide.SETTLE_ROUND)
+        self.assertEqual(d.reason, "execution_failed")
+        self.assertEqual(d.params["failure_code"], "execution_failed")
+        self.assertEqual(d.params["exit_code"], 1)
+        self.assertEqual(d.ladder, ladder.LADDER_NEEDS_YOU)  # 阶梯 4
+
+    def test_negative_exit_code_is_also_a_failure(self):
+        d = decide.round_settled_decision(-2)  # pi_desktop timeout stop
+        self.assertEqual(d.action, decide.SETTLE_ROUND)
+        self.assertEqual(d.reason, "execution_failed")
+        self.assertEqual(d.params["exit_code"], -2)
+
 class TestDecideGuards(unittest.TestCase):
     def test_manual_takeover_is_noop(self):
         d = decide.decide(_snap(status="ready", manual_takeover=True))

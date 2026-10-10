@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from .. import cli, core, db, util
-from . import decide, fallback, health, ladder, steps
+from .. import cli, core, db, derive, util
+from . import decide, fallback, health, ladder, rounds, steps
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
 # Valid per-project engine modes (state-model §strangler).
@@ -38,6 +38,12 @@ ENGINE_MODES = ("legacy", "shadow", "live")
 # extra key where the engine records its same-plan bounded remediation rounds
 # (scenarios.md #5: ≤2 per plan, each armed for one retry execution round).
 FIX_ROUNDS_KEY = "engine_fix_rounds"
+# extra key where the engine records the rounds it settled after a missed
+# terminal-state registration (sandbox §13.2). Bounded per run: a monitor
+# stage that keeps reporting ``succeeded`` without advancing the task must
+# never spin the engine into endless re-enqueues.
+ROUND_SETTLE_KEY = "engine_round_settle"
+MAX_ROUND_SETTLE = 2
 # Stages whose spawned workers perform Kaneo remote writes under the global
 # lifecycle serial (``core.acquire_lifecycle``, state-model §5):
 #   dispatch → ``dispatch-begin-send`` (owner ``begin-send:<run_id>``)
@@ -353,6 +359,79 @@ class Reconciler:
             ladder=ladder.LADDER_QUALITY,
             params=dict(fd.params, probe_detail=plan["probe_detail"]))
 
+    # ------------------------------------------- round terminal fallback
+    @staticmethod
+    def _round_settles(task) -> list:
+        """Rounds the engine already settled for this task (§13.2 receipts)."""
+        value = db.task_extra(task).get(ROUND_SETTLE_KEY)
+        return value if isinstance(value, list) else []
+
+    def _round_settle(self, conn, task, now, snap, pmode):
+        """Pre-decide world probe: settle a round that exited without its
+        terminal state ever being registered (sandbox §13.2).
+
+        ``execution_rounds.run_status`` is a *last observed* value whose only
+        writers are the worker's own收尾 and the read-layer backfill inside
+        ``get-session``. When the monitor's observation window closes before
+        ``job.json`` lands, nobody records the terminal state: the task waits
+        in observe/running and :func:`decide.decide` can only AWAIT. This
+        probe is the read-only兜底 for that shape —
+
+        1. the task is still in observe/running (a task that moved on is not
+           our business);
+        2. no queued/claimed request exists (a worker owns the step — probing
+           would race it, and the enqueue dedups on the active key anyway);
+        3. the round's registered ``run_status`` is not terminal yet (an
+           already-registered outcome is not a registration gap → idempotent);
+        4. the identity-verified ``job.json`` says the process is gone and
+           recorded ``ended_at``/``exit_code`` (otherwise keep waiting — an
+           unproven exit belongs to lease recovery, D3).
+
+        It then enqueues one monitor request per bounded budget
+        (:data:`MAX_ROUND_SETTLE`) and lets the deterministic monitor stage do
+        the completion (exit 0) or the failure-ladder attribution (non-0).
+        The engine itself never writes round state; SQLite stays the single
+        source of truth. Shadow computes and logs the same decision, writes
+        nothing (including the budget receipt).
+        """
+        resolved = decide.phase_condition(
+            snap.get("status"), phase=snap.get("phase"),
+            condition=snap.get("condition"),
+            fix_round=int(snap.get("fix_round") or 0),
+            fix_open=bool(snap.get("fix_open")))
+        if resolved != ("observe", "running"):
+            return None
+        if derive.active_request_for_task(conn, task["task_id"]) is not None:
+            return None
+        run_id = task["run_id"]
+        world = rounds.round_exit(conn, task["task_id"], run_id)
+        if not world.get("exited") or world.get("terminal_recorded"):
+            return None
+        decision = decide.round_settled_decision(world["exit_code"])
+        spent = len([row for row in self._round_settles(task)
+                     if row.get("run_id") == run_id])
+        if spent >= MAX_ROUND_SETTLE:
+            # 自动额度已用尽：不再入队，交人工（引擎不写 needs_user，只把
+            # 「需人工处理」落进行动日志/影子差异，避免无限重入队）。
+            return decide.Decision(
+                decide.BLOCK, reason="round_settle_exhausted",
+                ladder=ladder.classify("execution_failed"), attention=True,
+                params=dict(decision.params, run_id=run_id, spent=spent))
+        if pmode == "live":
+            now_iso = util.to_iso(now)
+            with db.write_txn(conn):
+                fresh = db.require_task(conn, task["task_id"])
+                entries = list(self._round_settles(fresh))
+                entries.append({"run_id": run_id,
+                                "exit_code": world["exit_code"],
+                                "pid": world.get("pid"),
+                                "ended_at": world.get("ended_at"),
+                                "at": now_iso})
+                # 一次 set_extra 写全：分两次调用会用陈旧快照覆盖前一次写入。
+                db.set_extra(conn, fresh, now_iso,
+                             **{ROUND_SETTLE_KEY: entries})
+        return decision
+
     # ------------------------------------------------------------- reconcile
     def reconcile_once(self, now=None) -> dict:
         now = now or util.now_dt()
@@ -373,9 +452,11 @@ class Reconciler:
                 snap = self._snapshot(conn, task, now)
                 decision = (self._transient_retry(conn, task, now)
                             or self._quality_retry(conn, task, now, snap, pmode)
+                            or self._round_settle(conn, task, now, snap, pmode)
                             or decide.decide(snap))
                 base = {"task_id": task["task_id"], "action": decision.action,
                         "reason": decision.reason, "ladder": decision.ladder,
+                        "attention": decision.attention,
                         "engine_mode": pmode, "explain": decide.explain(snap, decision)}
                 calls = steps.commands_for(decision, snap)
                 if pmode == "shadow":
