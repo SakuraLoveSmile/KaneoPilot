@@ -467,7 +467,21 @@ def test_scenario_take_over_then_resume_auto_delivers(pipeline):
     # 这正是场景 16 要的 take_over → resume_auto → 自动交付闭环。
     summary = _reconcile(pipeline)
     mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert any(a.get("command") for a in mine), mine
+    assert mine and any(a.get("command") for a in mine), mine
+
+    # 幂等：第二次 resume_auto 不重复落 automation_resumed 事件
+    pipeline.call("restore-task", {"task_id": TASK, "resume_auto": True})
+    events_again = pipeline.call("list-events",
+                                 {"task_id": TASK, "limit": 80})["events"]
+    assert len([e for e in events_again
+                if e["kind"] == "automation_resumed"]) == 1, events_again
+
+    # 仍能交付：评审 pass → PR → 合并 → done（同分支续走）
+    (pipeline.root / "review-count").write_text("2")
+    pipeline._review()
+    value = _deliver_to_merge(pipeline)
+    assert value["status"] == "done", value
+    assert pipeline.fake.tasks[TASK]["status"] == "done"
 
 
 def load_tests(loader, standard_tests, pattern):
