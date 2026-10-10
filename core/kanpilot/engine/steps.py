@@ -73,12 +73,14 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
             return []
         if kind == "dispatch" and task.get("send_state") in ("sent", "unknown"):
             return []
-        # A14: the reconciler is not the user; every enqueue it issues is
-        # recorded with actor=automation so an unattended run leaves no
-        # ``actor=user`` trail beyond the task creations themselves.
+        # retry_base 随 payload 传递「本阶段已花费的重试次数」：重入队的是**新**
+        # 请求（attempt_no 归零），不传递的话 _transient_retry 每次都只看到 0，
+        # 永远达不到 state-model §8 的 ≤2/阶段 上限（无限退避重试）。
+        # 它同时是 cmd_enqueue 放行 dispatching 状态退避重入队的凭据。
         return [CommandCall("enqueue",
                             {"task_id": task_id, "kind": kind,
-                             "not_before": not_before, "actor": "automation"},
+                             "not_before": not_before, "actor": "automation",
+                             "retry_base": decision.params.get("attempt_no")},
                             kind=kind)]
     # AWAIT / BLOCK / NOOP / ENQUEUE_PLAN / ADVANCE_INTAKE / ADVANCE_DISPATCH /
     # RESUME_OBSERVE: no direct scheduling command here (worker-owned,

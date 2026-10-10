@@ -37,7 +37,7 @@ class TestRetrySteps(unittest.TestCase):
         self.assertEqual(call.command, "enqueue")
         self.assertEqual(call.payload, {"task_id": "t1", "kind": "monitor",
                                         "not_before": "2099-01-01T00:00:00+00:00",
-                                        "actor": "automation"})
+                                        "actor": "automation", "retry_base": 1})
         self.assertEqual(call.kind, "monitor")
 
     def test_dispatch_not_sent_rebuilds(self):
@@ -80,16 +80,17 @@ class TestRetryLoop(KanpilotTestCase):
             conn.close()
         return tid
 
-    def _failed_request(self, task_id, kind, attempt_no, failure_code):
+    def _failed_request(self, task_id, kind, attempt_no, failure_code, payload=None):
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
                 conn.execute(
                     "INSERT INTO requests(request_id, idempotency_key, task_id, stage, "
-                    "kind, status, attempt_no, result_json, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?, 'failed', ?, ?, ?, ?)",
+                    "kind, status, attempt_no, payload_json, result_json, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?, 'failed', ?, ?, ?, ?, ?)",
                     (util.new_uuid(), f"{kind}:{task_id}", task_id, kind, kind,
-                     attempt_no, util.jdump({"failure_code": failure_code}),
+                     attempt_no, util.jdump(payload) if payload else None,
+                     util.jdump({"failure_code": failure_code}),
                      util.now_iso(), util.now_iso()))
         finally:
             conn.close()
@@ -135,9 +136,49 @@ class TestRetryLoop(KanpilotTestCase):
         self.assertTrue(util.ts_before(util.now_iso(), d.params["not_before"]))
 
     def test_transient_retry_exhausted_returns_none(self):
+        """封顶按 payload 的 retry_base 判定，不是失败请求自身的 attempt_no。
+
+        重入队的是**新**请求（attempt_no 归零），所以只有随 payload 传递的累计
+        计数能让上限在实时链路里生效；旧口径用 attempt_no 永远达不到 2。
+        """
         tid = self._running_task("taskretryC000000000001")
-        self._failed_request(tid, "monitor", 2, "remote_unavailable")
+        self._failed_request(tid, "monitor", 2, "remote_unavailable",
+                             payload={"retry_base": 2})
         self.assertIsNone(self._retry_decision(tid))   # escalate, stop
+
+    def test_retry_cap_accumulates_across_requests(self):
+        """同一阶段连续瞬时失败：第 1、2 次退避重试，第 3 次封顶不再重试。"""
+        tid = self._running_task("taskretryF000000000001")
+        rec = loop.Reconciler(self.db_path, mode="live")
+        spent = 0
+        for expected_base in (1, 2):
+            self._failed_request(tid, "monitor", 1, "remote_unavailable",
+                                 payload={"retry_base": spent} if spent else None)
+            decision = self._retry_decision(tid)
+            self.assertIsNotNone(decision, f"第 {expected_base} 次应仍可重试")
+            self.assertEqual(decision.action, decide.RETRY)
+            self.assertEqual(decision.params["retry_base"], expected_base)
+            # 引擎重入队时把新基数写进 payload
+            calls = steps.commands_for(decision, {"task_id": tid,
+                                                  "send_state": None})
+            self.assertEqual(calls[0].payload["retry_base"], expected_base)
+            spent = expected_base
+        # 已花费 2 次 → 封顶，交给 attention
+        self._failed_request(tid, "monitor", 1, "remote_unavailable",
+                             payload={"retry_base": spent})
+        self.assertIsNone(self._retry_decision(tid))
+
+    def test_backoff_grows_with_the_cumulative_count(self):
+        tid = self._running_task("taskretryG000000000001")
+        backoffs = []
+        spent = 0
+        for _ in range(2):
+            self._failed_request(tid, "monitor", 1, "remote_unavailable",
+                                 payload={"retry_base": spent} if spent else None)
+            decision = self._retry_decision(tid)
+            backoffs.append(decision.params["backoff_seconds"])
+            spent = decision.params["retry_base"]
+        self.assertEqual(backoffs, [1.0, 2.0])   # 1s → 2s，随累计次数指数增长
 
     def test_transient_retry_non_transient_returns_none(self):
         tid = self._running_task("taskretryD000000000001")

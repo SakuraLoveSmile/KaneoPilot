@@ -107,11 +107,19 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         if kind == "review":
             core.require_committed_review(task, verify_worktree=False)
         if task["status"] not in allowed:
-            raise util.KanpilotError(
-                "bad_request",
-                f"kind {kind} requires task status "
-                f"{'|'.join(sorted(allowed))}, got {task['status']}",
-            )
+            # 阶梯 1 退避重入队的例外：dispatch 请求在 claim 之后（status=dispatching）
+            # 瞬时失败时，计划早已确认、prompt 也未发送（下面两个 _require 保证），
+            # 重入队是正确恢复。`ready` 门本用于「计划未确认不得派发」，这里由它们兜底。
+            # 凭据是 payload 里的 retry_base——只有引擎的退避重入队会带它。
+            backoff_retry = (kind == "dispatch"
+                             and task["status"] == "dispatching"
+                             and isinstance(payload.get("retry_base"), int))
+            if not backoff_retry:
+                raise util.KanpilotError(
+                    "bad_request",
+                    f"kind {kind} requires task status "
+                    f"{'|'.join(sorted(allowed))}, got {task['status']}",
+                )
         extra = db.task_extra(task)
         hold = bool(extra.get("plan_execution_hold"))
         confirm_plan = bool(payload.get("confirm_plan"))
