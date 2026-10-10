@@ -11,8 +11,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from . import constants, util
@@ -281,8 +280,14 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
             raise GitDeliveryError("worktree_invalid", "任务工作树归属或分支不符")
         if expected_head and _value(["rev-parse", "HEAD"], path) != expected_head:
             raise GitDeliveryError("worktree_invalid", "任务工作树 HEAD 与登记不符")
-        if require_clean and _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], path, 10).stdout:
-            raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
+        if require_clean:
+            # 构建产物不算「未提交改动」：执行器跑 verify 必然生成它们，而
+            # commit_worktree 只提交交付路径，产物留在工作树。若这里不放行，
+            # 每次提交后的干净核验都会把产物误判成残留改动。
+            leftover = [c for c in worktree_changes(str(path))
+                        if not is_build_artifact(c["path"])]
+            if leftover:
+                raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
     except (GitDeliveryError, OSError, IndexError) as exc:
         raise GitDeliveryError("worktree_invalid", "工作树核验失败：" + str(exc)) from exc
 
@@ -400,6 +405,52 @@ def worktree_changes(worktree: str) -> list:
             raise GitDeliveryError("delivery_commit_failed", "无法检查候选文件：" + str(exc)) from exc
         change["size"] = size
     return changes
+
+
+def is_build_artifact(path: str) -> bool:
+    """路径是否为构建产物（``constants.DELIVERY_ARTIFACT_PATTERNS``）。
+
+    目录模式（以 ``/`` 结尾）匹配路径中**任意一段**，因此
+    ``pkg/__pycache__/m.cpython-311.pyc`` 与顶层 ``__pycache__/`` 同样命中，
+    段内仍可用通配符（``*.egg-info/`` 命中 ``pkg.egg-info``）；其余模式按文件名
+    ``fnmatch``。匹配大小写不敏感——``.DS_Store`` 与 ``.ds_store`` 都排除。
+    """
+    parts = [part.lower() for part in PurePosixPath(path.replace("\\", "/")).parts
+             if part not in ("", ".", "..")]
+    name = parts[-1] if parts else ""
+    for pattern in constants.DELIVERY_ARTIFACT_PATTERNS:
+        if pattern.endswith("/"):
+            needle = pattern[:-1].lower()
+            if any(fnmatch.fnmatch(part, needle) for part in parts):
+                return True
+        elif fnmatch.fnmatch(name, pattern.lower()):
+            return True
+    return False
+
+
+def artifact_pathspecs() -> list:
+    """``DELIVERY_ARTIFACT_PATTERNS`` → ``git reset`` 用的 pathspec 列表。
+
+    目录模式（尾 ``/``）展开成 ``:(glob)**/<dir>/**``（任意深度下该目录内的所有
+    文件，含顶层），文件模式展开成 ``:(glob)**/<pattern>``。用 ``:(glob)`` 让
+    ``*`` 不跨目录分隔符，与 :func:`is_build_artifact` 的逐段语义一致。
+    """
+    return [":(glob)**/" + pattern + ("**" if pattern.endswith("/") else "")
+            for pattern in constants.DELIVERY_ARTIFACT_PATTERNS]
+
+
+def deliverable_paths(changes) -> tuple:
+    """把 ``worktree_changes`` 结果拆成 (交付路径, 产物路径)。
+
+    产物不进提交：执行器跑 verify 时必然生成 ``__pycache__/*.pyc`` 之类，
+    提交它们会把本机二进制差异带进分支，多个任务分支间内容不同即 add/add 冲突
+    （沙盒 PR #2/#3 CONFLICTING 的根因）。
+    """
+    deliverable, artifacts = [], []
+    for change in changes:
+        (artifacts if is_build_artifact(change["path"]) else deliverable).append(
+            change["path"])
+    return deliverable, artifacts
 
 
 def _candidate_state(worktree, relative_path):
@@ -537,11 +588,26 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
     if not changes:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
     _require_safe_files(changes)
+    # 只提交交付路径：构建产物（__pycache__/*.pyc 等）留在工作树，不进提交。
+    # 提交它们会把本机二进制差异带进分支，多任务分支间内容不同即 add/add 冲突
+    # （沙盒 PR #2/#3 CONFLICTING 的根因）。
+    deliverable, artifacts = deliverable_paths(changes)
+    if not deliverable:
+        raise GitDeliveryError(
+            "no_changes",
+            "可提交改动只有构建产物（" + "、".join(artifacts[:5]) + " 等），"
+            "没有任务交付物")
     # Repeat HEAD immediately before changing the index; models may have touched
     # the branch between monitor completion and this command.
     if _value(["rev-parse", "HEAD"], path) != expected:
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
+    # 不逐个 add 交付路径：重命名/删除的路径可能已不在索引或工作树里，逐个传给
+    # `git add --` 会报 "pathspec did not match"；也不用 `:(exclude)`——它对「被
+    # .gitignore 忽略的路径」会让 git add 返回 1（即使暂存结果是对的）。改为
+    # add -A 之后按产物 pathspec 撤销暂存：仓库有 .gitignore 时 add -A 本就不会
+    # 暂存它们，reset 是无害空操作。
     _git(["add", "-A"], path, 60)
+    _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60)
     clean_title = " ".join(str(title or "").split())[:72]
     message = (f"kaneo({task_id}): {clean_title}\n\nKaneo-Task: {task_id}\n"
                f"KaneoPilot-Run: {execution_run_id}\nFix-Round: {fix_round}\n")

@@ -447,6 +447,17 @@ DELIVERY_BRANCH_PREFIX = "kaneo/"
 DELIVERY_BLOCKED_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*")
 DELIVERY_ALLOWED_NAMES = (".env.example",)
 DELIVERY_MAX_FILE_BYTES = 5 * 1024 * 1024
+# 构建产物：执行器在工作树跑 verify 时必然产生（Python 的 __pycache__/.pyc、
+# pytest/mypy/ruff 缓存、node_modules、dist/build、.DS_Store 等）。它们不是任务
+# 交付物——提交进去会把本机二进制差异带进分支，多个任务分支间因内容不同而
+# add/add 冲突（沙盒 PR #2/#3 CONFLICTING 的根因）。目录模式以 "/" 结尾，
+# 匹配路径中任意一段；其余按文件名 fnmatch。
+DELIVERY_ARTIFACT_PATTERNS = (
+    "__pycache__/", "*.py[cod]", ".pytest_cache/", ".mypy_cache/",
+    ".ruff_cache/", ".tox/", ".coverage", "htmlcov/", "*.egg-info/",
+    "node_modules/", "dist/", "build/", ".DS_Store", "Thumbs.db",
+    ".venv/", "venv/", "*.so", "*.dylib", "*.class", "*.o", "*.a",
+)
 CLI_PLAN_DEFAULT_BUDGET_USD = 5.0
 CLI_REVIEW_DEFAULT_BUDGET_USD = 5.0
 CLI_MIN_BUDGET_USD = 0.5
