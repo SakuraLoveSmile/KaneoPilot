@@ -129,23 +129,48 @@ class TestDoctorFallbackCheck(KanpilotTestCase):
         self.assertFalse(check["ok"])
         self.assertIn("探测异常", check["detail"])
 
-    def test_no_token_or_connection_file_in_own_output(self):
-        """本检查项自身绝不外泄凭据/连接文件内容。
+    def test_no_credential_in_any_check_output(self):
+        """§5.27.6：doctor 的**全部** check detail 都不得外泄凭据。
 
-        范围仅限 ``plus_fallback_model``：既有的 ``plus`` 检查会原样透传
-        ``probe["detail"]``（真实 ``probe_connection`` 的 detail 由本仓构造且错误
-        路径已过 ``_strip_secret``），那是既有行为，不在本项范围里声称已修。
+        范围是整份输出而不只是 plus_fallback_model：既有的 ``plus`` 检查会原样
+        透传 ``probe["detail"]``，cmd_doctor 现在对所有 detail 统一过 util.redact
+        （protocol §5.22.3），把「靠探针自己构造得正确」变成可执行保证。
         """
         self._map_project()
+        # 凭据值一律不得出现；连接文件**路径**是诊断信息（缺文件时 plus 检查
+        # 会报它），不算凭据——凭据是文件内容里的 url/token。
+        leaky = ("cache 命中 token=ghp_secret "
+                 "Authorization: Bearer ghp_another_secret "
+                 "api_key=sk-1234567890abcdef accessToken=at-9876543210 "
+                 'connection body {"url":"http://127.0.0.1:37123/mcp",'
+                 '"token":"ghp_connsecretvalue"}')
         with mock.patch("kanpilot.pi_desktop_backend.probe_connection",
-                        return_value={"ok": True,
-                                      "detail": "cache 命中 token=ghp_secret"}):
+                        return_value={"ok": True, "detail": leaky}):
             result = self._doctor()
-        check = _check(result["checks"], "plus_fallback_model")
-        blob = repr(check)
-        for secret in ("ghp_secret", "Authorization", "Bearer ",
-                       "mcp-control.json", "connection_file"):
-            self.assertNotIn(secret, blob)
+        blob = repr(result)
+        for secret in ("ghp_secret", "ghp_another_secret", "sk-1234567890abcdef",
+                       "at-9876543210", "Bearer ghp_", "ghp_connsecretvalue"):
+            self.assertNotIn(secret, blob, secret)
+        # 脱敏标记确实出现（不是靠碰巧没有而通过）。
+        self.assertIn("«redacted»", blob)
+        # plus 与 plus_fallback_model 两项都还在，且 ok 未被脱敏改变。
+        for name in ("plus", "plus_fallback_model"):
+            check = _check(result["checks"], name)
+            self.assertIsNotNone(check)
+            self.assertTrue(check["ok"])
+
+    def test_redaction_keeps_useful_diagnostics(self):
+        """脱敏不得吃掉排障所需的信息：状态码/模型名/错误原因要保留。"""
+        self._map_project()
+        with mock.patch("kanpilot.pi_desktop_backend.probe_connection",
+                        return_value={"ok": False,
+                                      "detail": "PI-Desktop model 不存在："
+                                                "google/gemini-3.7-flash"}):
+            result = self._doctor()
+        detail = _check(result["checks"], "plus_fallback_model")["detail"]
+        self.assertIn("google/gemini-3.7-flash", detail)
+        self.assertIn("不存在", detail)
+        self.assertIn("修复", detail)
 
     def test_missing_connection_file_is_informational_skip(self):
         """无连接文件时无法核对目录：skip 而不是失败（与 plus 检查同口径）。"""

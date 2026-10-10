@@ -844,6 +844,12 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     # 引擎未实现时返回「未安装」而非失败。
     checks.append(_doctor_engine_lease(ctx))
     checks.append(_doctor_attention_backlog(ctx))
+    # §5.27.6：doctor 输出绝不泄露凭据。所有 check 的 detail 统一过一道脱敏
+    # （util.redact，protocol §5.22.3），不依赖每个探针自己构造得正确——
+    # 例如 `plus` 检查原样透传 probe["detail"]，此前只靠「detail 由本仓构造」
+    # 兜底；这里把它变成可执行保证。
+    for check in checks:
+        check["detail"] = util.redact(check["detail"])
     return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
 

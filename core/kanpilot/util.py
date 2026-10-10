@@ -219,8 +219,12 @@ def require(condition: Any, message: str, code: str = "validation_failed") -> An
 # 认证值形态的脱敏模式（日志/事件落盘前调用，保留状态码与错误正文）。
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)(\S+)"),
+    # 裸 ``token`` 也要覆盖：``token=<value>`` 是最常见的凭据形态之一，
+    # 但只在 ``=``/``:`` 后跟 ≥8 位非空白值时才替换，避免误伤
+    # "token count: 42" 这类普通文本。
+    # 键名后允许一个可选引号，覆盖连接文件这类 JSON 的 `"token":"value"` 形态。
     re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|bearer[_-]?token|"
-               r"refresh[_-]?token|secret)(\s*[=:]\s*)[\"']?([^\s\"']{8,})"),
+               r"refresh[_-]?token|token|secret)(\s*[\"']?\s*[=:]\s*)[\"']?([^\s\"']{8,})"),
 )
 
 
