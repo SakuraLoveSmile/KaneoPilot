@@ -304,6 +304,21 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     assert [e for e in events if e["kind"] == "model"
             and (e.get("detail") or {}).get("model") == "fallback"], events
 
+    # 备用模型·路径 C（探针失败）：配置的模型不在 Plus cache 目录 →
+    # validation_failed + 不换模型（plan_retry 真实代码 + 假 Plus 目录探针；
+    # live 侧 BLOCK 与「为什么没换模型」审计事件由 0a093bc 落库、core 单测
+    # 覆盖）。
+    from kanpilot.engine import fallback as kfallback
+
+    bad = kfallback.plan_retry(
+        {"provider_id": "no-such-provider", "model_id": "nope"},
+        primary=None, connection_file=str(pipeline.connection_file))
+    assert bad["validation_failed"] is True, bad
+    assert bad["snapshot"] is None, bad
+    assert bad["model"] == "primary", bad
+    assert bad["events"], bad
+    assert bad["events"][0]["detail"]["reason"] == "fallback_probe_failed", bad
+
     # 补救轮用尽后引擎不再自动补救：reconcile 只记录决策、不下命令
     summary = _reconcile(pipeline)
     mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
@@ -313,10 +328,9 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     assert any(i["task_id"] == TASK for i in items), items
     # 全程只发了两次 prompt（两轮执行），无额外自动重发
     assert pipeline.server.prompt_count == 2, pipeline.server.prompt_count
-    # 备用模型选择（engine/fallback.py）已落地：未配置 → model: primary +
-    # model_hint；配置 + 探针通过 → model: fallback 快照覆盖；配置 + 探针失败
-    # → validation_failed（阶梯 2）不静默换模型。执行层三条路径见
-    # test_empty_diff_fallback_model_paths（同文件）。
+    # 备用模型选择（engine/fallback.py）三条路径已在本用例内全覆盖：
+    # 未配置 → model: primary + model_hint；配置 + 探针通过 → model:
+    # fallback + 快照覆盖；配置 + 探针失败 → validation_failed 不换模型。
 
 
 def _reconcile(case, mode="live"):
