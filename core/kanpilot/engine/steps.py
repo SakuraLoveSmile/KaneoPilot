@@ -73,6 +73,10 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
                             {"task_id": task_id, "kind": kind, "not_before": not_before},
                             kind=kind)]
     # AWAIT / BLOCK / NOOP / ENQUEUE_PLAN / ADVANCE_INTAKE / ADVANCE_DISPATCH /
-    # RESUME_OBSERVE / START_FIX_ROUND: no direct scheduling command here
-    # (worker-owned, user-owned, or delegated to intake/planner).
+    # RESUME_OBSERVE: no direct scheduling command here (worker-owned,
+    # user-owned, or delegated to intake/planner). START_FIX_ROUND is decided
+    # and recorded by ``loop._quality_retry`` (model choice + one-shot override);
+    # the re-execution itself is authorized by the existing resolve/replan path,
+    # so there is no enqueue here — an engine-driven re-send would need a
+    # ``ready`` task plus an unsent prompt (``CLAIM_GUARDS`` / dispatch guard).
     return []

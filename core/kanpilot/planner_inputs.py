@@ -420,6 +420,14 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
     if not isinstance(raw_excluded, list):
         raise util.bad_request("excluded_remote_ids must be a list")
     excluded = {str(x) for x in raw_excluded}
+    # Who is preparing the material: the planning panel (user) or the
+    # automation intake path (automation). A14 requires that, on an
+    # unattended run, the only ``actor=user`` events are the task creations
+    # themselves — so the automated caller must be able to say so instead of
+    # inheriting the hard-coded ``user`` below.
+    actor = payload.get("actor", "user")
+    if actor not in ("user", "automation"):
+        raise util.bad_request("actor 必须为 user 或 automation")
 
     # 1) 远端重新获取 + 需求哈希核验。
     try:
@@ -656,7 +664,7 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             source["source_sha256"], manifest, now,
         )
         db.add_event(
-            conn, now, "plan_input_prepared", task_id=task_id, actor="user",
+            conn, now, "plan_input_prepared", task_id=task_id, actor=actor,
             detail={"input_id": input_id, "files": len(files),
                     "issues": len(issues)},
         )

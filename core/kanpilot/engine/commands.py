@@ -361,3 +361,49 @@ def cmd_set_project_verify_env(ctx, payload: dict) -> dict:
                         "workspace_id": workspace, "items": items})
     return {"project_id": project_id, "verify_env": value,
             "revision": revision + 1}
+
+def cmd_set_project_fallback_model(ctx, payload: dict) -> dict:
+    """``set-project-fallback-model {project_id, fallback_model?, expected_revision?}``.
+
+    Persist the project's fallback execution model (``{provider_id, model_id}``)
+    at the mapping **entry level** — same reason as ``engine_mode`` /
+    ``verify_env``: ``validate_automation`` rebuilds the ``automation`` sub-dict
+    from a fixed key whitelist. Omitting ``fallback_model`` (or null) clears it:
+    no fallback configured = never switch models. The engine only *consults*
+    this after probing the model in the Plus cache catalog; a failed probe is a
+    ``validation_failed``, never a silent switch (scenarios.md #5).
+    """
+    from .. import project_config
+    from . import fallback
+
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        raise util.bad_request("project_id 必须为非空字符串")
+    project_id = project_id.strip()
+    value = fallback.normalize(payload.get("fallback_model"))
+    if payload.get("fallback_model") is not None and value is None:
+        raise util.bad_request(
+            "fallback_model 必须是含非空 provider_id/model_id 的对象（缺省不配置）")
+    expected = payload.get("expected_revision")
+    if expected is not None and (isinstance(expected, bool)
+                                 or not isinstance(expected, int) or expected < 0):
+        raise util.bad_request("expected_revision 须为非负整数")
+    with db.write_txn(ctx.conn):
+        revision, workspace, items, _ = project_config.load_raw_mappings(ctx.conn)
+        if project_id not in items:
+            raise util.KanpilotError("not_found", "项目映射不存在")
+        if expected is not None and expected != revision:
+            raise util.KanpilotError("conflict", "project_mappings revision 不符")
+        entry = dict(items[project_id])
+        if value is None:
+            entry.pop(fallback.FALLBACK_MODEL_KEY, None)
+        else:
+            entry[fallback.FALLBACK_MODEL_KEY] = value
+        entry["updated_at"] = ctx.now_iso
+        items[project_id] = entry
+        db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
+                       {"version": project_config.CURRENT_VERSION,
+                        "revision": revision + 1,
+                        "workspace_id": workspace, "items": items})
+    return {"project_id": project_id, "fallback_model": value,
+            "revision": revision + 1}

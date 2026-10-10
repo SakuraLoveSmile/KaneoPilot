@@ -95,7 +95,7 @@ def test_timeout_and_malformed_json():
         raise subprocess.TimeoutExpired(argv, 60)
     with patch.object(gh.subprocess, "run", side_effect=timeout), pytest.raises(gh.GhError) as caught:
         gh.pr_list("owner/repo", "branch")
-    assert caught.value.kind == "transient"
+    assert caught.value.kind == "timeout"   # P1: timeout is ladder-2 environmental, not transient
     with patch.object(gh.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "bad json", "")):
         with pytest.raises(gh.GhError, match="JSON"):
             gh.pr_view("owner/repo", 1)

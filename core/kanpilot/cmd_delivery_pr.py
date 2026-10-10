@@ -94,6 +94,12 @@ def _failure(ctx, payload, task, delivery, failure):
                 code = "branch_diverged"
             elif failure.code != "push_failed":
                 code = "delivery_commit_failed"
+        elif failure.kind == "auth":
+            code = "gh_not_logged_in"   # ladder 2 environmental
+        elif failure.kind == "missing":
+            code = "gh_missing"          # ladder 2 environmental
+        elif failure.kind == "timeout":
+            code = "gh_timeout"          # ladder 2 environmental
         elif failure.kind != "transient":
             code = "gh_unavailable"
         failures = int(delivery.get("publish_failures") or 0)
