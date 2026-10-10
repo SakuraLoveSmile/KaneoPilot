@@ -40,7 +40,7 @@ def _run(command, payload, db_path):
     return cli.run(command, payload or {}, db_path)
 
 
-def configure(db_path, project_id, repository, max_active, mode):
+def configure(db_path, project_id, repository, max_active, engine_mode):
     steps = []
 
     mappings = _run("get-project-mappings", {}, db_path)
@@ -60,6 +60,9 @@ def configure(db_path, project_id, repository, max_active, mode):
     }
     _run("set-project-automation", {"project_id": project_id, "automation": automation}, db_path)
     steps.append(f"automation enabled for {project_id} (auto_confirm_plan=true, fix_rounds<=2)")
+    # A12: per-project engine_mode (legacy|shadow|live; the engine drives only live).
+    _run("set-project-engine-mode", {"project_id": project_id, "engine_mode": engine_mode}, db_path)
+    steps.append(f"engine_mode = {engine_mode} for {project_id}")
     return steps
 
 
@@ -84,7 +87,7 @@ def main(argv=None):
     parser.add_argument("--repository", required=True)
     parser.add_argument("--max-active-tasks", type=int, default=2)
     parser.add_argument("--lease-seconds", type=int, default=1200)
-    parser.add_argument("--mode", choices=("live", "shadow"), default="live")
+    parser.add_argument("--engine-mode", choices=("legacy", "shadow", "live"), default="live")
     parser.add_argument("--configure-only", action="store_true")
     parser.add_argument("--no-spawn", action="store_true")
     args = parser.parse_args(argv)
@@ -93,7 +96,7 @@ def main(argv=None):
 
     print("== configuring ==", file=sys.stderr)
     for line in configure(db_path, args.project_id, args.repository,
-                          args.max_active_tasks, args.mode):
+                          args.max_active_tasks, args.engine_mode):
         print("  " + line, file=sys.stderr)
 
     print("== preflight ==", file=sys.stderr)
@@ -104,7 +107,7 @@ def main(argv=None):
         print("configure-only: not starting the engine loop.", file=sys.stderr)
         return 0
 
-    payload = {"mode": args.mode, "intake": True,
+    payload = {"mode": args.engine_mode, "intake": True,
                "spawn": not args.no_spawn, "lease_seconds": args.lease_seconds}
     argv_run = [sys.executable, str(KANPILOT), "engine", "run",
                 "--db", db_path, "--json", json.dumps(payload)]

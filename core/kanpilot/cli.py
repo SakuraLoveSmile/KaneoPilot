@@ -529,7 +529,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     # 与只读实例状态。同样惰性 import。
     "engine-run": (
         {"stage": (False, "str"), "executor_id": (False, "str"),
-         "lease_seconds": (False, "int"), "mode": (False, "str"), "intake": (False, "bool"), "spawn": (False, "bool")},
+         "lease_seconds": (False, "int"), "mode": (False, "str"), "intake": (False, "bool"), "spawn": (False, "bool"), "force": (False, "bool")},
         _automation_command("engine.commands", "cmd_engine_run"),
     ),
     "engine-status": (
@@ -547,6 +547,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (False, "str"), "run_id": (False, "str"),
          "status_only": (False, "bool")},
         _automation_command("engine.commands", "cmd_session_view"),
+    ),
+    # v6 引擎（A12）：按项目持久化 engine_mode（legacy|shadow|live，缺省 legacy）。
+    "set-project-engine-mode": (
+        {"project_id": (True, "str"), "engine_mode": (False, "str"),
+         "expected_revision": (False, "int")},
+        _automation_command("engine.commands", "cmd_set_project_engine_mode"),
     ),
 }
 

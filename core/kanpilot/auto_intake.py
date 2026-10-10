@@ -132,7 +132,7 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         return {"task_id": task_id, "reason": code}
 
 
-def run_once(db_path, *, dry_run=False, now=None):
+def run_once(db_path, *, dry_run=False, now=None, project_ids=None):
     db_path = Path(db_path)
     stamp = util.to_iso(now) if now is not None and not isinstance(now, str) else now or util.now_iso()
     current = util.parse_ts(stamp)
@@ -160,6 +160,9 @@ def run_once(db_path, *, dry_run=False, now=None):
         _, _, mappings, _ = project_config.load_raw_mappings(conn)
         ready = {}
         for project_id, mapping in mappings.items():
+            # A12: the engine may restrict intake to a subset of (live) projects.
+            if project_ids is not None and project_id not in project_ids:
+                continue
             policy = automation_policy.policy_for(conn, project_id)
             if not policy or not policy.get("enabled"):
                 continue

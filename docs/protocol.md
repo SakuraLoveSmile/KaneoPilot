@@ -717,7 +717,12 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
  - **单独条件不得推动完成**：子 agent 结束、进程正常退出、模型自称完成——任一单独出现都不满足 (a)(b)(c)，任务保持 `running` 或按异常处置。
 
- ### 5.18.6 引擎 verdict（v6，A10 核心亲判）
+### 5.18.5 worktree 与评审衔接
+
+- context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
+- Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
+
+### 5.18.6 引擎 verdict（v6，A10 核心亲判）
 
  新引擎（`engine_mode=live`）的 verdict 由**核心亲判**，不依赖 Plus 转录：
 
@@ -729,11 +734,6 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
  - **`verify_env` 形态**：项目映射 `project_mappings.items[project_id].verify_env`，为字符串→字符串的 dict（缺省 `{}`），在 login shell 内作为环境变量注入；不得包含凭据/token（凭据另走凭据文件，不进入 verify_env）。
  - **证据**：逐命令的退出码 / 是否超时 / 输出尾部由核心落库（`extra.engine_verdict` 与既有 verification 回执并存，不互相覆写）；Plus 转录仅用于 UI 按需展示，**不参与判定、不整段持久化**。
  - **命令面**：`engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}`（幂等，`operation_id` 去重）。
-
- ### 5.18.5 worktree 与评审衔接
-
-- context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
-- Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
 
 ## 5.19 执行端调度（App 内置，v1.6）
 
@@ -1221,7 +1221,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  
  本节覆盖长驻引擎、待处理列表、会话总览与诊断命令。旧版自动化流水线详细契约已移至 `docs/automation-contract.md`；本节仅保留与引擎命令和用户动作相关的接口。
  
- #### 5.27.1 engine run
+#### 5.27.1 engine run
  
  长驻进程：DB 级单实例租约 + 心跳 + 退避重启。
  
@@ -1236,7 +1236,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - **失联判定**：`lease_expires_at < now` 且无心跳 → 派生 `lost`；不自动释放、不自动重启。
  - 环境变量 `KANPILOT_EXECUTOR_INSTANCE_ID` 由 App 启动时生成 UUID 并传入 runner/worker；worker 启动后经 `executor-instance` 的 `register-worker` 登记真实 PID 与启动时间。
  
- #### 5.27.2 engine status
+#### 5.27.2 engine status
  
  只读：返回当前引擎实例与存活 worker。
  
@@ -1251,7 +1251,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 缺 `instance_id` 时返回全部实例。
  - `owned_workers` 仅返回该实例登记且启动时间仍匹配的进程；历史实例可在新登记时清除。
  
- #### 5.27.3 attention-list
+#### 5.27.3 attention-list
  
  只读：聚合当前需要用户关注的任务与请求。
  
@@ -1298,7 +1298,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `alternatives`：其余可选动作数组（`allowed_actions` 去掉 `recommended` 后的有序列表）。
  - `since`：该开放项首次出现的 ISO-8601 时间戳（UTC）。同一任务同一 `reason_code` 复用首次出现时间，不随重复观测刷新；用于「等待多久」展示与排序稳定性。
  
- #### 5.27.4 8 个用户动作
+#### 5.27.4 8 个用户动作
  
  以下动作由 `resolve` 或专用命令实现，核心在事务内校验身份与任务状态，桌面只渲染 `allowed_actions`。
  
@@ -1316,7 +1316,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 所有动作写 `event kind=resolved`（actor、action、note）。
  - 危险操作须二次确认；动作结果写入 `resolution` JSON。
  
- #### 5.27.5 session-view
+#### 5.27.5 session-view
  
  只读：任务/执行轮次的会话状态总览。
  
@@ -1333,7 +1333,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 状态页刷新沿用既有 `session_poll_seconds`（默认 2s）；连接失败保留上一份有效状态并标「可能已过期」。
  - 旧后端（dsh/headless/ATIF）返回 `unavailable` + detail「旧后端会话已弃用」。
  
- #### 5.27.6 doctor --live
+#### 5.27.6 doctor --live
  
  在线诊断：`doctor {online?: bool, live?: bool}`；`--live` 与 `online=true` 等价（CLI 同时接受 `--live` 与 `--online`，任一为真即进入在线模式）。
  
@@ -1365,3 +1365,26 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 超时与真实失败必须区分：超时返回 `{"ok": false, "timeout": true, "detail": "… 超过 Ns"}`；真实失败（非零退出、缺工具、缺凭据）返回 `{"ok": false, "timeout": false, ...}`。二者不得合并为同一个 `ok:false`。
  - 探针失败时 `detail` 必须给出**明确可执行的修复项**（缺什么、去哪装、跑什么命令），不得只写「失败」。
  - 全部检查通过时顶层 `ok: true`；任一必需检查失败时 `ok: false`，且不得因单个可选探针失败而掩盖其余结果。
+
+#### 5.27.7 set-project-engine-mode（A12 按项目三态）
+
+ ```json
+ set-project-engine-mode {project_id, engine_mode?: "legacy"|"shadow"|"live", expected_revision?: int}
+ ```
+
+ - 写入 `project_mappings.items[project_id].automation.engine_mode`，带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。
+ - `engine_mode` 缺省或省略 → `legacy`（strangler 安全默认：旧项目行为不变，引擎不驱动）。
+ - 非法值 → `bad_request`；命令独立于 `set-project-automation`（后者不改动、不校验该键，读侧 `automation_policy.policy_for` 原样透出）。
+ - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
+
+ **按项目解析规则（`engine run` 的 Reconciler）：**
+
+ | 项目 `engine_mode` | 引擎行为 |
+ |---|---|
+ | `legacy` | 该项目的任务候选在 decide 之前被过滤，引擎完全不驱动；由旧调度链路处理 |
+ | `shadow` | 只算决策 + 计划命令 + `explain()`，全部落 `summary.actions` 日志；**零写入**（不下发命令、不 intake、不 spawn） |
+ | `live` | 照常执行前向命令 + intake（只采纳 live 项目）+ spawn（只处理 live 项目的 queued 请求） |
+
+ - 一个 `engine run` 进程可同时服务三种模式的项目；三态并存是 strangler 的核心，不得互相干扰。
+ - `engine run {mode}` 改为**进程默认模式**（缺省 `legacy`）：项目显式配置优先，未配置回落进程默认；`force=true` 时所有项目强制使用进程 `mode`（演练/调试用）。
+ - `engine-mode` 决策与旧调度的差异在 shadow 模式下全部落日志且带 `explain()` 解释（A12）。
