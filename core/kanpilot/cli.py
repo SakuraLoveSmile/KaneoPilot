@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import (
-    cmd_archive, cmd_config, cmd_dispatch, cmd_exec, cmd_migrate, cmd_planner,
+    cmd_abandon, cmd_archive, cmd_config, cmd_dispatch, cmd_exec, cmd_migrate, cmd_planner,
     cmd_queue, cmd_read, cmd_remote, cmd_session, constants, db,
     planner_inputs, util,
 )
@@ -52,7 +52,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "delivery-publish": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_publish")),
     "delivery-sync": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_sync")),
     "doctor": (
-        {"online": (False, "bool")}, cmd_read.cmd_doctor,
+        # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
+        {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,
     ),
     "desktop-queue-status": ({}, _automation_command("desktop_queue", "cmd_desktop_queue_status")),
     "desktop-automation-status": ({}, _automation_command("desktop_automation_control", "cmd_desktop_automation_status")),
@@ -295,6 +296,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "expected_save_state": (False, "str")},
         cmd_archive.cmd_purge_task,
     ),
+    "abandon-task": (
+        {"task_id": (True, "str"), "save_state": (False, "str"), "note": (False, "str"),
+         "allow_purged": (False, "bool")},
+        cmd_abandon.cmd_abandon_task,
+    ),
     "list-sessions": (
         {
             "task_id": (False, "str"),
@@ -513,6 +519,35 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         },
         lambda ctx, payload: __import__("kanpilot.project_config", fromlist=["cmd_set_project_mapping"]).cmd_set_project_mapping(ctx, payload),
     ),
+    # v6 引擎（protocol §5.27）：待处理收件箱（只读聚合）。惰性 import，引擎
+    # 子模块未就绪时只在调用时报错，不影响注册/导入期（rehearsal 引擎门控依赖此点）。
+    "attention-list": (
+        {"save_state": (False, "str"), "include_historical": (False, "bool")},
+        _automation_command("engine.commands", "cmd_attention_list"),
+    ),
+    # v6 引擎（protocol §5.27）：长驻 reconciler（前台进程，SIGTERM/SIGINT 停止）
+    # 与只读实例状态。同样惰性 import。
+    "engine-run": (
+        {"stage": (False, "str"), "executor_id": (False, "str"),
+         "lease_seconds": (False, "int"), "mode": (False, "str"), "intake": (False, "bool"), "spawn": (False, "bool")},
+        _automation_command("engine.commands", "cmd_engine_run"),
+    ),
+    "engine-status": (
+        {"instance_id": (False, "str")},
+        _automation_command("engine.commands", "cmd_engine_status"),
+    ),
+    # v6 引擎 verdict（A10）：核心亲判——有效 diff（排除 .pi/**）+ login-shell verify。
+    "engine-verdict": (
+        {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "operation_id": (False, "str")},
+        _automation_command("engine.commands", "cmd_engine_verdict"),
+    ),
+    # v6 引擎 session-view（§5.27.5）：只读会话状态总览；status_only 不读消息。
+    "session-view": (
+        {"task_id": (False, "str"), "run_id": (False, "str"),
+         "status_only": (False, "bool")},
+        _automation_command("engine.commands", "cmd_session_view"),
+    ),
 }
 
 
@@ -670,6 +705,15 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--json", dest="json_payload")
     parser.add_argument("--db", dest="db_path")
     args, extras = parser.parse_known_args(argv)
+    # §5.27：`engine run` / `engine status` 两词命令 → 归一为 engine-run /
+    # engine-status，再走下方统一 payload 解析与 COMMANDS 分发。
+    if args.command == "engine":
+        if extras and extras[0] in ("run", "status"):
+            args.command = "engine-" + extras[0]
+            extras = extras[1:]
+        else:
+            sys.stderr.write("engine requires a subcommand: run | status\n")
+            return 1
 
     if args.command == "desktop-queue-mcp":
         if not args.db_path or args.json_payload is not None or extras:

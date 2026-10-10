@@ -1,0 +1,65 @@
+{
+  "_captured_at": "2026-10-10",
+  "_provenance": "reconstructed_from_core_parsers",
+  "_note": "按核心解析口径（pi_desktop_worker._turn_status/_turn_identity_matches/prepare_goal_continuation/agent_status 与 pi_desktop_backend.MCPClient.call_tool/_unwrap_invoke_result）重建的脱敏形状样本，非真实 Plus 会话录制；所有 session/turn/message/toolCall ID 为占位符，不含任何真实 token 或 URL。待可用时需从真实 Plus 会话重新录制并更新 _captured_at。",
+  "payload": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"session\":{\"hasMoreAfter\":false,\"hasMoreBefore\":false,\"id\":\"sess-redacted-0001\",\"messageEnd\":3,\"messageStart\":0,\"messages\":[{\"content\":\"<redacted task identifier + plan hash + verified plan body>\",\"id\":\"msg-redacted-0001\",\"role\":\"user\",\"timestamp\":\"2026-10-10T09:14:59.000Z\"},{\"content\":\"<redacted assistant plan/execution text>\",\"id\":\"msg-redacted-0002\",\"role\":\"assistant\",\"timestamp\":\"2026-10-10T09:16:20.000Z\"},{\"id\":\"msg-redacted-0003\",\"role\":\"tool\",\"timestamp\":\"2026-10-10T09:16:39.000Z\",\"toolArgs\":{\"command\":\"<redacted verify command>\"},\"toolCallId\":\"toolcall-redacted-0001\",\"toolCompletedAt\":\"2026-10-10T09:16:40.000Z\",\"toolName\":\"Bash\",\"toolResult\":{\"content\":[{\"text\":\"<redacted stdout>\",\"type\":\"text\"}],\"details\":{\"commandShellId\":\"bash\",\"exitCode\":0,\"stderr\":\"\",\"stdout\":\"<redacted stdout>\",\"truncated\":false},\"isError\":false},\"toolStatus\":\"success\"}]}}"
+      }
+    ],
+    "structuredContent": {
+      "session": {
+        "id": "sess-redacted-0001",
+        "messages": [
+          {
+            "id": "msg-redacted-0001",
+            "role": "user",
+            "content": "<redacted task identifier + plan hash + verified plan body>",
+            "timestamp": "2026-10-10T09:14:59.000Z"
+          },
+          {
+            "id": "msg-redacted-0002",
+            "role": "assistant",
+            "content": "<redacted assistant plan/execution text>",
+            "timestamp": "2026-10-10T09:16:20.000Z"
+          },
+          {
+            "id": "msg-redacted-0003",
+            "role": "tool",
+            "toolName": "Bash",
+            "toolStatus": "success",
+            "toolCallId": "toolcall-redacted-0001",
+            "toolArgs": {
+              "command": "<redacted verify command>"
+            },
+            "toolResult": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<redacted stdout>"
+                }
+              ],
+              "details": {
+                "commandShellId": "bash",
+                "exitCode": 0,
+                "stdout": "<redacted stdout>",
+                "stderr": "",
+                "truncated": false
+              },
+              "isError": false
+            },
+            "toolCompletedAt": "2026-10-10T09:16:40.000Z",
+            "timestamp": "2026-10-10T09:16:39.000Z"
+          }
+        ],
+        "messageStart": 0,
+        "messageEnd": 3,
+        "hasMoreBefore": false,
+        "hasMoreAfter": false
+      }
+    },
+    "isError": false
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "_captured_at": "2026-10-10",
+  "_provenance": "reconstructed_from_core_parsers",
+  "_note": "按核心解析口径（pi_desktop_worker._turn_status/_turn_identity_matches/prepare_goal_continuation/agent_status 与 pi_desktop_backend.MCPClient.call_tool/_unwrap_invoke_result）重建的脱敏形状样本，非真实 Plus 会话录制；所有 session/turn/message/toolCall ID 为占位符，不含任何真实 token 或 URL。待可用时需从真实 Plus 会话重新录制并更新 _captured_at。",
+  "payload": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":{\"currentTurnId\":\"turn-redacted-0001\",\"isRunning\":false,\"modelId\":\"model-redacted-0001\",\"pendingPermission\":null,\"pendingPlanId\":null,\"pendingToolConfirmations\":0,\"planningState\":\"inactive\",\"sessionId\":\"sess-redacted-0001\"}}"
+      }
+    ],
+    "structuredContent": {
+      "status": {
+        "sessionId": "sess-redacted-0001",
+        "currentTurnId": "turn-redacted-0001",
+        "planningState": "inactive",
+        "isRunning": false,
+        "pendingPermission": null,
+        "pendingToolConfirmations": 0,
+        "pendingPlanId": null,
+        "modelId": "model-redacted-0001"
+      }
+    },
+    "isError": false
+  }
+}

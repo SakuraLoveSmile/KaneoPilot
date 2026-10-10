@@ -1,0 +1,51 @@
+{
+ "_captured_at": "2026-10-10",
+ "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
+ "_plus_version": "0.15.7",
+ "_redacted": true,
+ "payload": {
+  "operation": "plans/pending",
+  "result": {
+   "history": [
+    {
+     "action": "approve",
+     "artifact": {
+      "relativePath": ".pi/goal/kaneopilot-编排层重写-phase-0-3-新引擎至沙盒-live-20261010-1555.md",
+      "sha256": "db7db036c6616217062c3489c3b416d396ed955ed365086dea84538585196e98",
+      "sizeBytes": 9045,
+      "workspaceKind": "project"
+     },
+     "createdAt": "2026-10-10T07:55:14.562Z",
+     "executionId": "<redacted-uuid>",
+     "executionKind": "goal",
+     "executionModelId": "step-5-preview",
+     "executionProviderId": "<redacted-uuid>",
+     "executionState": "running",
+     "expiresAt": "2026-10-10T08:25:14.562Z",
+     "id": "<redacted-uuid>",
+     "kind": "goal",
+     "markdown": "<redacted-markdown 5128 chars>",
+     "plan": "# KaneoPilot 自动化编排层重写（Phase 0–3：基线 → 规格 → 演练台 → 新引擎 live）\n\n## Goal\n\n重写 KaneoPilot 调度编排层，消除三个结构性问题——完成判定靠 Plus 转录文本推断、可恢复故障一刀切升级人工、缺少\"需要你\"的单一来源——交付以 `core/kanpilot/engine/` 为核心的新引擎（loop/decide/steps/ladder/attention/health + runners），以 strangler 三态（`engine_mode: legacy|shadow|live`，按项目切换）在沙盒项目实现 live 并连续稳定。黄金路径：Kaneo To Do → intake → plan → confirm → dispatch → observe → verdict → commit → review ⇄ fix(≤2 同分支) → PR → merge-sync → done，正常路径零人工，异常按失败阶梯（transient 退避 / environmental 等待 / quality 有界补救 / needs-you 收件箱）处理。\n\n**本目标范围 = 计划文档 Phase 0–3（含 3a–3e）**。Phase 4（删除与迁移）、Phase 5（UI 重写）、Phase 6（真实生产验收与清理）不在本目标内，后续另立目标；Phase 3 退出时所有旧路径、旧模块原样保留。\n\n**规划、执行、评审三个角色在本目标内均经 pi-desktop-plus（Plus）运行时执行**（用户谈判中对计划 §0 决策 2 的修订）；codex/claude 直连 runner 推迟到链路跑通后的后续目标。verdict 由核心亲判（有效 diff + 核心亲跑 verify 命令），不再以 Plus 转录作为完成依据。\n\n## Acceptance criteria\n\n### A. 基线与清理（Phase 0）\n1. `git tag pre-engine-rewrite` 存在于当前 main HEAD（9d0ecf0）；此后全部重写工作在新开的工作分支上进行，main 在 Phase 3 退出前不直接提交。\n2. core 隔离测试基线失败全部分类：每个失败要么已修复（真回归），要么在 `docs/evidence/` 记录为 HOME 隔离等环境假象；退出时 `cd core && python3 -m pytest tests -q` 的失败数为 0，或每个残留失败都有分类记录。\n3. 6 个卡住/遗留任务（`ozb7d8vw1sbp653zs7u0jn2f`、`krw2in4s1l2257ih6dn90f9u`、`gdpoa1zo0vbozksnjkui45br`、`yfgrc2fikdzbl8c4dd65tp7q`、`uycfqe3hvh454ml6mdq80vic`、`ey9s9vq8q82gkb1mzj1lxchf`）已按 abandon 处置（DB 可查，Kaneo 侧由用户人工收尾）；已 done 的 9 月遗留行保持只读历史不动。\n4. 5 个 spike 有书面结论落 `docs/evidence/`：① Plus agent/goal 模式能否给出可靠 terminal 信号；② Plus 承载规划/评审的结构化输出可行性；③ login shell 下 verify 的环境差异与 `verify_env` 形态；④ fallback 执行模型 id（从 Plus 模型目录探测后确定并记录）；⑤ 原\"MCP 是否有 Plus 之外使用者\"spike 顺延 Phase 4，本目标不执行。\n\n### B. 规格先行（Phase 1，不动代码）\n5. `docs/automation-contract.md` 重写为单一\"现状\"文档（去 v1–v5 分层）；`docs/state-model.md` 增加 phase×condition 状态模型与失败阶梯；`docs/protocol.md` §5.27 重写（`engine run/status`、`attention-list`、8 个用户动作、`session-view`、`doctor --live`）；`docs/ui-spec.md` 4.15 改为总览收据箱首页；AGENTS.md 边界与常用命令同步；`docs/plans/执行空转检测与自动重试_4a949aba.plan.md` 并入 verdict 步骤并在相关旧计划顶部标注 superseded。上述规格经用户审阅通过后才进入实现。\n\n### C. 演练台与 doctor（Phase 2，先于引擎）\n6. `tests/rehearsal/` 存在：假 Kaneo（复用 `tests/conftest.py` 的 fake_kaneo/factory/cli）、假 Plus、临时 git 仓库 + 裸 remote + 假 gh，带故障注入开关；约 25 个场景清单冻结（覆盖：正常路径一遍到 PR 合并；Plus 不可达（启动前/运行中/发送状态未知）→ 等待与对账；空 diff → 备用模型重试 → attention；verify 失败修复轮通过 / 连续失败 exhausted；评审两轮 pass/用尽；退避与换后端；引擎在每个 step 边界被杀 → 重启无重复副作用；每类 step 租约过期自动回收；push 被拒/gh 未登录/PR 被关闭未合并；take_over → resume_auto 仍能交付；预算/时限触顶；并发 `max_active_tasks=2` 下 4 任务不死锁；v5→v6 迁移与 GC；`attention-list` 契约快照），初始全红。\n7. 真实形状契约夹具存在：脱敏录制的 Plus status/turn_get 等真实输出，带采集日期与过期告警。\n8. `kanpilot doctor --live` 实现对真实 Plus/gh/Kaneo 的探针（合理超时，区分超时与真实失败，修掉 70ms git 探针误报），在用户机器执行结果为全绿或给出明确可执行的修复项。\n\n### D. 新引擎（Phase 3，strangler 按子阶段接管）\n9. `core/kanpilot/engine/` 落地：`loop.py`（reconciler：读快照 → decide → 落带租约 request → 启动 worker，崩溃后按租约 + 世界探测恢复）、`decide.py`（纯函数，表驱动）、`steps.py`（intake/plan/confirm/dispatch/observe/verdict/commit/review/fix/pr/sync）、`ladder.py`（四类失败阶梯 + 退避表）、`attention.py`（单一来源，每任务至多一个开放项，条件消失自动关闭）、`health.py`；runners 含 Plus runner 承载规划/执行/评审。\n10. verdict 由核心判定：有效 diff（排除 `.pi/**`）非空 + 核心亲跑 plan 声明的 verify 命令（login shell + 项目 `verify_env`，复用 `verification_checks.py`）；Plus 转录仅用于 UI 按需展示，不参与判定、不整段持久化。\n11. 外部副作用（Plus 发送、git push、PR 创建、Kaneo 写入）一律先写 `runtime_operations` 回执再执行，重启后用世界探测（`plus_status`、`git ls-remote`、`gh pr list`）对账；演练场景证明引擎在每个 step 边界被杀后重启无重复副作用（不重发、不重复 push/PR）。\n12. 引擎按项目三态切换 `legacy|shadow|live`；shadow 只计算不动手，决策与旧调度的差异全部落日志且有解释；引擎为长驻进程 `kanpilot engine run`（本目标内由 CLI/脚本拉起并退避重启，App 侧 EngineSupervisor 属后续目标），DB 级单实例租约 + 心跳。\n13. `python3 -m pytest tests/rehearsal -q` 全绿；`cd core && python3 -m pytest tests -q` 与根目录集成测试相对 A2 基线不引入新失败；`decide.py` 表驱动单测（phase × condition × 失败类别每行一条）通过。\n14. 沙盒项目（授权创建的 Kaneo 测试项目 + 沙盒 GitHub 仓库）映射配置 `engine_mode=live` 后，引擎连续处理 5 个合成任务，全部从 To Do 走到 PR 合并并 sync 至 done，全程 0 次手动 resolve（PR 合并可由沙盒仓库 auto-merge 或用户点击合并完成，合并动作不计入 resolve）；`events` 中 actor=user 的记录仅限任务创建本身。\n15. `attention-list` 命令（并入 board 响应）输出 `{attention_id, task_id, reason_code, title, evidence, recommended, alternatives, since}` 契约，App/菜单栏/通知可经同一命令一致读取（Swift UI 改造不在本目标）。\n\n## Boundaries\n\n- **不做 Phase 4/5/6**：不删除任何现有模块（自带 MCP 服务、Plus 旧链 `pi_desktop_worker/planner/review` 等、Codex Desktop 桥、死代码全部保留）；不做数据删除式迁移（schema v6 的新增列/GC 可实现，但旧数据必须保留、可回退）；不改 Swift UI 结构与 `SettingsView` 拆分；不执行 5 个真实生产任务验收（本目标以沙盒合成任务验收）；不清理已合并分支与临时工作树（Phase 6 事项）。\n- 不改 Kaneo 服务端；不 fork/修改 Plus；不声称本地锁能阻止远端竞争（Kaneo 无 CAS）；不引入第三方依赖（Python 3.9+ 标准库，仅 vendored）；不输出/不持久化 Kaneo token；不修改全局 `~/.codex/config.toml` 与 Codex Desktop automations（用户已预授权备份后修改，留给 Phase 4 目标）。\n- 费用边界：沙盒金丝雀 + 5 个合成任务全程 token 总费用 ≤ $50（以 provider 账单为准）；单任务上限保留 `max_task_cost_usd=10` / `max_task_minutes=240`；预计触限即停并报告，不静默超支。\n- 不重开其余既定决策：确定性控制器、PR 交付且合并后才 done、自动确认计划、≤2 轮同分支修复 + 成本/时限上限、intake 分诊、Plus 权限 auto、空转自动重试一次、保留手动重新执行。\n- 主执行模型 = Plus inherit（deepseek v4.1 flash）；fallback 执行模型 id 由 A4 spike 探测确定。\n\n## 关键前提（已与用户确认）\n\n1. 授权创建沙盒 Kaneo 测试项目与沙盒 GitHub 仓库（经 gh CLI）。\n2. 费用上限 $50；规划/评审暂走 pi-desktop-plus，链路跑通后再评估 codex/claude 直连。\n3. 现存 6 个卡住/遗留任务全部 abandon；基线 tag 直接打在当前 main HEAD（9d0ecf0）。\n4. 重写在新工作分支进行，Phase 3 退出标准达成后经 PR 合并回 main。\n\n## 退出判据\n\nA–D 全部验收标准通过，且系统在 Phase 3 退出时：旧路径对 legacy 项目仍可用、沙盒项目经新引擎 live 稳定、全部测试相对基线无新失败。",
+     "planningModelId": "step-5-preview",
+     "planningProviderId": "<redacted-uuid>",
+     "question": "重写 KaneoPilot 编排层，完成基线 tag、卡住任务 abandon、规格重写、演练台与新引擎（Phase 0–3），沙盒项目切 live 后连续 5 个合成任务到 PR 合并且 0 次手动 resolve；规划/评审暂走 pi-desktop-plus，费用上限 $50，旧代码全部保留。是否批准执行？",
+     "resolvedAt": "2026-10-10T07:55:46.916Z",
+     "revisionIntent": null,
+     "sessionId": "<redacted-uuid>",
+     "status": "approved",
+     "targetPermissionMode": "auto",
+     "title": "KaneoPilot 编排层重写 Phase 0–3：新引擎至沙盒 live",
+     "toolCallId": "chatcmpl-tool-b7c2f2558c7250e9",
+     "turnId": "<redacted-uuid>",
+     "updatedAt": "2026-10-10T07:55:46.918Z",
+     "version": 3
+    }
+   ],
+   "kind": null,
+   "plans": [],
+   "state": "inactive"
+  }
+ },
+ "_note": "真实录制：MCP pi_desktop_invoke {operation:\"plans/pending\"}。规划产物的结构化形状（artifact.sha256/sizeBytes/executionState/action/markdown）。",
+ "_operation": "plans/pending"
+}
