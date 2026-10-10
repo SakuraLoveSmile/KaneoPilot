@@ -1,4 +1,4 @@
-"""Long-lived reconciler (protocol §5.27.1).
+"""Long-lived reconciler (protocol §5.27.1, A12 per-project engine_mode).
 
 Each tick: read a snapshot of automation-managed tasks → :func:`decide.decide`
 → execute the forward intents from :mod:`kanpilot.engine.steps` through
@@ -7,10 +7,17 @@ Crash recovery is by lease + world probe: a lost request is only *derived*
 lost (never auto-released), and external side effects are idempotent via
 ``runtime_operations`` inside the core commands themselves.
 
-``engine_mode`` (strangler):
-- ``live``   — execute the decided forward commands.
-- ``shadow`` — compute decisions + planned commands, log them, write nothing.
-- ``legacy`` — the engine does not run (handled by the caller / project config).
+``engine_mode`` is resolved **per project** (strangler three-state, A12):
+- ``live``   — execute the decided forward commands + intake + spawn.
+- ``shadow`` — compute decisions + planned commands + ``explain()``, log them,
+  write **nothing** (no intake, no spawn, no commands).
+- ``legacy`` — the engine does not drive the task at all (filtered before
+  ``decide``); the legacy scheduler链路 handles it.
+
+A project's effective mode = its ``project_mappings.items[pid].automation.
+engine_mode`` when set, else the process default (``engine run --mode``);
+``force_mode`` makes every project use the process default (drills/debug). One
+process can serve legacy + shadow + live projects simultaneously.
 
 Single-instance lease + heartbeat + exponential backoff live in
 :mod:`kanpilot.engine.health`.
@@ -27,6 +34,8 @@ from . import decide, health, steps
 
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
+# Valid per-project engine modes (state-model §strangler).
+ENGINE_MODES = ("legacy", "shadow", "live")
 
 
 def plan_spawns(queued_stages, live_stages, *, foreign_active: bool):
@@ -42,16 +51,17 @@ def plan_spawns(queued_stages, live_stages, *, foreign_active: bool):
 
 
 class Reconciler:
-    """Decision-driven scheduler over automation-managed tasks."""
+    """Decision-driven scheduler over automation-managed tasks (per-project mode)."""
 
     def __init__(self, db_path, *, mode: str = "live",
                  executor_id: str = "kaneo-engine", log: Optional[Callable] = None,
                  run_command: Optional[Callable] = None,
                  enable_intake: bool = False, intake_interval_seconds: int = 300,
                  enable_spawn: bool = False, instance_id: Optional[str] = None,
-                 spawn: Optional[Callable] = None):
+                 spawn: Optional[Callable] = None, force_mode: bool = False):
         self.db_path = Path(db_path)
-        self.mode = mode
+        self.mode = mode                      # process default engine_mode
+        self.force_mode = force_mode          # True => every project uses self.mode
         self.executor_id = executor_id
         self.log = log or (lambda msg: None)
         self.run_command = run_command or (
@@ -61,12 +71,40 @@ class Reconciler:
         self.enable_intake = enable_intake
         self.intake_interval_seconds = intake_interval_seconds
         self._last_intake = None
-        # Optional worker spawn (live only): the engine launches per-stage
-        # runners for queued requests when no App scheduler already drives them
-        # (avoid double-spawn). `engine run` enables it; tests inject `spawn`.
+        # Optional worker spawn: the engine launches per-stage runners for
+        # queued requests of live projects when no App scheduler drives them.
         self.enable_spawn = enable_spawn
         self.instance_id = instance_id
         self.spawn = spawn  # callable(stage, db_path, instance_id) -> handle|None
+
+    # ------------------------------------------------------------- modes (A12)
+    def _project_modes(self, conn) -> dict:
+        """Effective engine_mode per project (project config > process default)."""
+        from .. import automation_policy, project_config
+        _, _, items, _ = project_config.load_raw_mappings(conn)
+        modes = {}
+        for pid in items:
+            if self.force_mode:
+                modes[pid] = self.mode
+                continue
+            policy = automation_policy.policy_for(conn, pid) or {}
+            modes[pid] = policy.get("engine_mode") or self.mode
+        return modes
+
+    def _live_project_ids(self, conn, modes) -> set:
+        """Live projects that are enabled + preflight-ready (for intake adoption)."""
+        from .. import automation_policy
+        live = set()
+        for pid, mode in modes.items():
+            if mode != "live":
+                continue
+            policy = automation_policy.policy_for(conn, pid)
+            if not policy or not policy.get("enabled"):
+                continue
+            if automation_policy.automation_preflight(conn, pid):
+                continue
+            live.add(pid)
+        return live
 
     # ------------------------------------------------------------- snapshot
     def _snapshot(self, conn, task, now) -> dict:
@@ -128,23 +166,33 @@ class Reconciler:
         conn = db.connect(self.db_path)
         actions = []
         try:
+            modes = self._project_modes(conn)
             for task in self._candidate_tasks(conn):
+                pmode = modes.get(task["project_id"], self.mode)
+                if pmode == "legacy":
+                    # The engine does not drive legacy projects at all.
+                    continue
                 snap = self._snapshot(conn, task, now)
                 decision = decide.decide(snap)
                 base = {"task_id": task["task_id"], "action": decision.action,
                         "reason": decision.reason, "ladder": decision.ladder,
-                        "explain": decide.explain(snap, decision)}
+                        "engine_mode": pmode, "explain": decide.explain(snap, decision)}
                 calls = steps.commands_for(decision, snap)
+                if pmode == "shadow":
+                    # Compute + log only; never write (no commands/intake/spawn).
+                    if calls:
+                        for call in calls:
+                            actions.append(dict(base, command=call.command,
+                                                executed=False, payload=call.payload))
+                    else:
+                        actions.append(dict(base, command=None))
+                    continue
+                # live: execute forward commands.
                 if not calls:
-                    # await / block / noop / retry / delegated intents: record the
-                    # decision (with explanation) so shadow audit sees every task.
                     actions.append(dict(base, command=None))
                     continue
                 for call in calls:
                     record = dict(base, command=call.command)
-                    if self.mode == "shadow":
-                        actions.append(dict(record, executed=False, payload=call.payload))
-                        continue
                     if call.requires_hold and not snap.get("plan_execution_hold"):
                         actions.append(dict(record, skipped="already_confirmed"))
                         continue
@@ -159,27 +207,33 @@ class Reconciler:
                         actions.append(dict(record, error=exc.code))
 
             if self.enable_intake and self._intake_due(now):
-                actions.append(self.intake_step(now))
+                actions.append(self.intake_step(conn, now, modes))
 
-            if self.enable_spawn and self.mode == "live":
-                actions.append(self.spawn_step(conn))
+            if self.enable_spawn:
+                actions.append(self.spawn_step(conn, modes))
         finally:
             conn.close()
-        return {"mode": self.mode, "at": now_iso, "actions": actions}
+        return {"mode": self.mode, "project_modes": modes,
+                "at": now_iso, "actions": actions}
 
     def _intake_due(self, now) -> bool:
         if self._last_intake is None:
             return True
         return (now - self._last_intake).total_seconds() >= self.intake_interval_seconds
 
-    def intake_step(self, now) -> dict:
-        """Adopt Kaneo To Do via auto_intake (live) / preview (shadow). Reused, not rewritten."""
+    def intake_step(self, conn, now, modes) -> dict:
+        """Adopt Kaneo To Do for LIVE projects only (reuses auto_intake; not rewritten)."""
         from .. import auto_intake
-        dry = self.mode == "shadow"
-        summary = auto_intake.run_once(self.db_path, dry_run=dry, now=util.to_iso(now))
+        live_pids = self._live_project_ids(conn, modes)
         self._last_intake = now
+        if not live_pids:
+            return {"action": "intake", "executed": False,
+                    "reason": "no_live_projects", "adopted": 0,
+                    "projects": 0, "errors": []}
+        summary = auto_intake.run_once(self.db_path, dry_run=False,
+                                       now=util.to_iso(now), project_ids=live_pids)
         adopted = sum(len(p.get("adopted") or []) for p in summary.get("projects", []))
-        return {"action": "intake", "executed": not dry, "adopted": adopted,
+        return {"action": "intake", "executed": True, "adopted": adopted,
                 "projects": len(summary.get("projects", [])),
                 "errors": summary.get("errors", [])}
 
@@ -189,10 +243,18 @@ class Reconciler:
         return {stage for stage, run in runs.items()
                 if isinstance(run, dict) and util.pid_alive(run.get("pid"))}
 
-    def _queued_stages(self, conn):
+    def _queued_stages(self, conn, modes):
+        """Queued-request counts per stage, restricted to LIVE projects' tasks."""
+        live = {pid for pid, mode in modes.items() if mode == "live"}
+        if not live:
+            return {}
+        placeholders = ",".join("?" * len(live))
         counts = {}
         for row in conn.execute(
-                "SELECT stage, COUNT(*) AS n FROM requests WHERE status='queued' GROUP BY stage"):
+                "SELECT r.stage AS stage, COUNT(*) AS n FROM requests r "
+                "JOIN tasks t ON t.task_id = r.task_id "
+                f"WHERE r.status='queued' AND t.project_id IN ({placeholders}) "
+                "GROUP BY r.stage", tuple(live)):
             counts[row["stage"]] = row["n"]
         return counts
 
@@ -214,12 +276,12 @@ class Reconciler:
         from . import runners
         return runners.spawn(stage, db_path, instance_id=instance_id)
 
-    def spawn_step(self, conn) -> dict:
-        """Spawn per-stage workers for queued requests (live, only if no App scheduler)."""
+    def spawn_step(self, conn, modes) -> dict:
+        """Spawn per-stage workers for queued requests of live projects (no App scheduler)."""
         if self.foreign_scheduler_active(conn):
             return {"action": "spawn", "executed": False,
                     "reason": "app_scheduler_active", "spawned": []}
-        queued = self._queued_stages(conn)
+        queued = self._queued_stages(conn, modes)
         live = self._live_runner_stages(conn)
         stages = plan_spawns(queued, live, foreign_active=False)
         spawner = self.spawn or self._default_spawn
@@ -233,7 +295,7 @@ class Reconciler:
     # ------------------------------------------------------------- long-lived
     def run(self, *, instance_id=None, stage=None, lease_seconds=None,
             stop_event=None, max_ticks=None, sleeper=None) -> dict:
-        """Long-lived loop: lease → tick+heartbeat → back避 → release (§5.27.1)."""
+        """Long-lived loop: lease → tick+heartbeat → backoff → release (§5.27.1)."""
         instance_id = instance_id or util.new_uuid()
         self.instance_id = instance_id
         pid = os.getpid()

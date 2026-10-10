@@ -197,13 +197,15 @@ class TestIntake(KanpilotTestCase):
         summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
         self.assertEqual([a for a in summary["actions"] if a.get("action") == "intake"], [])
 
-    def test_intake_runs_when_enabled_live(self):
+    def test_intake_no_live_projects_is_noop(self):
         rec = loop.Reconciler(self.db_path, mode="live", enable_intake=True)
         summary = rec.reconcile_once()
         intake = [a for a in summary["actions"] if a.get("action") == "intake"]
         self.assertEqual(len(intake), 1)
-        self.assertTrue(intake[0]["executed"])    # live => real pass
-        self.assertEqual(intake[0]["adopted"], 0)  # no enabled project in this fixture
+        # No enabled+live project in this fixture -> no adoption, no writes (A12).
+        self.assertFalse(intake[0]["executed"])
+        self.assertEqual(intake[0]["reason"], "no_live_projects")
+        self.assertEqual(intake[0]["adopted"], 0)
 
     def test_intake_shadow_is_preview_only(self):
         rec = loop.Reconciler(self.db_path, mode="shadow", enable_intake=True)
@@ -266,7 +268,7 @@ class TestSpawn(KanpilotTestCase):
                               spawn=lambda stage, db_path, iid: spawned.append(stage))
         conn = self._conn()
         try:
-            result = rec.spawn_step(conn)
+            result = rec.spawn_step(conn, {"example-project-05": "live"})
         finally:
             conn.close()
         self.assertTrue(result["executed"])
@@ -287,7 +289,7 @@ class TestSpawn(KanpilotTestCase):
                               spawn=lambda stage, db_path, iid: spawned.append(stage))
         conn = self._conn()
         try:
-            result = rec.spawn_step(conn)
+            result = rec.spawn_step(conn, {"example-project-05": "live"})
         finally:
             conn.close()
         self.assertFalse(result["executed"])

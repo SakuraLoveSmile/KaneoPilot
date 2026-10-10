@@ -104,20 +104,22 @@ def cmd_engine_status(ctx, payload: dict) -> dict:
 
 
 def cmd_engine_run(ctx, payload: dict) -> dict:
-    """``engine run {stage?, executor_id?, lease_seconds?, mode?}`` (§5.27.1).
+    """``engine run {stage?, executor_id?, lease_seconds?, mode?, force?}`` (§5.27.1, A12).
 
     Long-lived foreground process: single-instance lease + heartbeat +
-    exponential backoff until SIGTERM/SIGINT. ``mode`` ∈ {live, shadow}; live
-    executes decided forward commands, shadow only computes + logs them.
+    exponential backoff until SIGTERM/SIGINT. ``mode`` is the **process
+    default** engine_mode (缺省 legacy, the strangler-safe default); a project
+    with an explicit ``engine_mode`` overrides it, and ``force=true`` makes every
+    project use ``mode`` (drills/debug).
     """
     import signal
     import threading
 
     from .loop import Reconciler
 
-    mode = payload.get("mode") or "live"
-    if mode not in ("live", "shadow"):
-        raise util.bad_request("mode 必须为 live 或 shadow")
+    mode = payload.get("mode") or "legacy"
+    if mode not in ("legacy", "shadow", "live"):
+        raise util.bad_request("mode 必须为 legacy|shadow|live")
     stop = threading.Event()
 
     def _stop(signum, frame):
@@ -134,6 +136,7 @@ def cmd_engine_run(ctx, payload: dict) -> dict:
         executor_id=payload.get("executor_id") or "kaneo-engine",
         enable_intake=bool(payload.get("intake", True)),
         enable_spawn=bool(payload.get("spawn", True)),
+        force_mode=bool(payload.get("force", False)),
         log=lambda message: sys.stderr.write(message + "\n"))
     try:
         return reconciler.run(stage=payload.get("stage"),
@@ -248,3 +251,42 @@ def cmd_session_view(ctx, payload: dict) -> dict:
     if not payload.get("status_only") and sread is not None:
         session["cursor"] = sread["last_seq"]
     return {"session": session}
+
+
+def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
+    """``set-project-engine-mode {project_id, engine_mode, expected_revision?}`` (A12).
+
+    Persist a project's ``engine_mode`` (legacy|shadow|live, default legacy) into
+    ``project_mappings.items[pid].automation.engine_mode`` — no new column, no
+    schema bump (reversible; old rows lack the key and fall back to the process
+    default). Implemented here rather than in ``automation_policy`` so that module
+    stays untouched; the reconciler reads it via ``automation_policy.policy_for``.
+    """
+    from .. import project_config
+
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        raise util.bad_request("project_id 必须为非空字符串")
+    project_id = project_id.strip()
+    mode = payload.get("engine_mode", "legacy")
+    if mode not in ("legacy", "shadow", "live"):
+        raise util.bad_request("engine_mode 必须为 legacy|shadow|live")
+    expected = payload.get("expected_revision")
+    if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int) or expected < 0):
+        raise util.bad_request("expected_revision 须为非负整数")
+    with db.write_txn(ctx.conn):
+        revision, workspace, items, _ = project_config.load_raw_mappings(ctx.conn)
+        if project_id not in items:
+            raise util.KanpilotError("not_found", "项目映射不存在")
+        if expected is not None and expected != revision:
+            raise util.KanpilotError("conflict", "project_mappings revision 不符")
+        entry = dict(items[project_id])
+        automation = dict(entry.get("automation") or {})
+        automation["engine_mode"] = mode
+        entry["automation"] = automation
+        entry["updated_at"] = ctx.now_iso
+        items[project_id] = entry
+        db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
+                       {"version": project_config.CURRENT_VERSION, "revision": revision,
+                        "workspace_id": workspace, "items": items})
+    return {"project_id": project_id, "engine_mode": mode, "revision": revision + 1}
