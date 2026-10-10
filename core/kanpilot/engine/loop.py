@@ -1,0 +1,281 @@
+"""Long-lived reconciler (protocol §5.27.1).
+
+Each tick: read a snapshot of automation-managed tasks → :func:`decide.decide`
+→ execute the forward intents from :mod:`kanpilot.engine.steps` through
+``cli.run`` (so every write still goes through the core command surface).
+Crash recovery is by lease + world probe: a lost request is only *derived*
+lost (never auto-released), and external side effects are idempotent via
+``runtime_operations`` inside the core commands themselves.
+
+``engine_mode`` (strangler):
+- ``live``   — execute the decided forward commands.
+- ``shadow`` — compute decisions + planned commands, log them, write nothing.
+- ``legacy`` — the engine does not run (handled by the caller / project config).
+
+Single-instance lease + heartbeat + exponential backoff live in
+:mod:`kanpilot.engine.health`.
+"""
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+from .. import cli, core, db, util
+from . import decide, health, steps
+
+# Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
+STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
+
+
+def plan_spawns(queued_stages, live_stages, *, foreign_active: bool):
+    """Which stages to spawn a worker for (pure).
+
+    Spawn a stage only when it has queued work, no live runner already handles
+    it, and no foreign (App) scheduler is driving workers (avoid double-spawn).
+    """
+    if foreign_active:
+        return []
+    return [s for s in STAGES_WITH_WORKERS
+            if queued_stages.get(s, 0) > 0 and s not in (live_stages or set())]
+
+
+class Reconciler:
+    """Decision-driven scheduler over automation-managed tasks."""
+
+    def __init__(self, db_path, *, mode: str = "live",
+                 executor_id: str = "kaneo-engine", log: Optional[Callable] = None,
+                 run_command: Optional[Callable] = None,
+                 enable_intake: bool = False, intake_interval_seconds: int = 300,
+                 enable_spawn: bool = False, instance_id: Optional[str] = None,
+                 spawn: Optional[Callable] = None):
+        self.db_path = Path(db_path)
+        self.mode = mode
+        self.executor_id = executor_id
+        self.log = log or (lambda msg: None)
+        self.run_command = run_command or (
+            lambda command, payload: cli.run(command, payload, self.db_path))
+        # Intake (adopting Kaneo To Do) is opt-in so scheduling-only tests stay
+        # isolated; `engine run` enables it. Reuses auto_intake.run_once.
+        self.enable_intake = enable_intake
+        self.intake_interval_seconds = intake_interval_seconds
+        self._last_intake = None
+        # Optional worker spawn (live only): the engine launches per-stage
+        # runners for queued requests when no App scheduler already drives them
+        # (avoid double-spawn). `engine run` enables it; tests inject `spawn`.
+        self.enable_spawn = enable_spawn
+        self.instance_id = instance_id
+        self.spawn = spawn  # callable(stage, db_path, instance_id) -> handle|None
+
+    # ------------------------------------------------------------- snapshot
+    def _snapshot(self, conn, task, now) -> dict:
+        from .. import automation_policy
+        extra = db.task_extra(task)
+        delivery = core.delivery_of(task)
+        automation = core.automation_of(task)
+        status = task["status"]
+        phase = condition = None
+        if status == "in_review":
+            # Distinguish review vs delivery sub-phase for PR tasks.
+            reviewing_done = (extra.get("review_conclusion") == "pass"
+                              or delivery.get("pushed_sha"))
+            if delivery.get("mode") == "pr" and (delivery.get("pr_number") or reviewing_done):
+                phase, condition = "delivery", "syncing"
+            else:
+                phase, condition = "review", "reviewing"
+        policy = automation_policy.policy_for(conn, task["project_id"]) or {}
+        budget = core.automation_budget(task, policy, now)
+        paused_global = bool(db.get_setting(conn, "paused_global", False))
+        return {
+            "task_id": task["task_id"],
+            "status": status,
+            "send_state": task["send_state"],
+            "phase": phase, "condition": condition,
+            "fix_round": automation.get("fix_round", 0),
+            "fix_open": bool(extra.get("fix_request")),
+            "automation_managed": core.is_automation_managed(task),
+            "manual_takeover": automation.get("manual_takeover", False),
+            "paused": paused_global,
+            "budget_ok": budget.get("ok", True),
+            # Capacity is enforced at intake adoption + the dispatch claim
+            # serial; an already-adopted task already holds its slot.
+            "capacity_ok": True,
+            "failure_code": task["failure_code"],
+            "failure_stage": task["failure_stage"],
+            "failure_reason": task["failure_reason"],
+            "plan_sha256": task["plan_sha256"],
+            "plan_execution_hold": bool(extra.get("plan_execution_hold")),
+        }
+
+    def _candidate_tasks(self, conn):
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE save_state='active' AND status != 'done' "
+            "ORDER BY updated_at").fetchall()
+        return [r for r in rows if core.is_automation_managed(r)]
+
+    @staticmethod
+    def _has_active_request(conn, task_id, kind) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM requests WHERE task_id=? AND kind=? "
+            "AND status IN ('queued','claimed') LIMIT 1",
+            (task_id, kind)).fetchone() is not None
+
+    # ------------------------------------------------------------- reconcile
+    def reconcile_once(self, now=None) -> dict:
+        now = now or util.now_dt()
+        now_iso = util.to_iso(now)
+        conn = db.connect(self.db_path)
+        actions = []
+        try:
+            for task in self._candidate_tasks(conn):
+                snap = self._snapshot(conn, task, now)
+                decision = decide.decide(snap)
+                base = {"task_id": task["task_id"], "action": decision.action,
+                        "reason": decision.reason, "ladder": decision.ladder,
+                        "explain": decide.explain(snap, decision)}
+                calls = steps.commands_for(decision, snap)
+                if not calls:
+                    # await / block / noop / retry / delegated intents: record the
+                    # decision (with explanation) so shadow audit sees every task.
+                    actions.append(dict(base, command=None))
+                    continue
+                for call in calls:
+                    record = dict(base, command=call.command)
+                    if self.mode == "shadow":
+                        actions.append(dict(record, executed=False, payload=call.payload))
+                        continue
+                    if call.requires_hold and not snap.get("plan_execution_hold"):
+                        actions.append(dict(record, skipped="already_confirmed"))
+                        continue
+                    if call.kind and self._has_active_request(conn, task["task_id"], call.kind):
+                        actions.append(dict(record, skipped="already_scheduled"))
+                        continue
+                    try:
+                        result = self.run_command(call.command, call.payload)
+                        actions.append(dict(record, executed=True,
+                                            deduplicated=bool(result.get("deduplicated"))))
+                    except util.KanpilotError as exc:
+                        actions.append(dict(record, error=exc.code))
+
+            if self.enable_intake and self._intake_due(now):
+                actions.append(self.intake_step(now))
+
+            if self.enable_spawn and self.mode == "live":
+                actions.append(self.spawn_step(conn))
+        finally:
+            conn.close()
+        return {"mode": self.mode, "at": now_iso, "actions": actions}
+
+    def _intake_due(self, now) -> bool:
+        if self._last_intake is None:
+            return True
+        return (now - self._last_intake).total_seconds() >= self.intake_interval_seconds
+
+    def intake_step(self, now) -> dict:
+        """Adopt Kaneo To Do via auto_intake (live) / preview (shadow). Reused, not rewritten."""
+        from .. import auto_intake
+        dry = self.mode == "shadow"
+        summary = auto_intake.run_once(self.db_path, dry_run=dry, now=util.to_iso(now))
+        self._last_intake = now
+        adopted = sum(len(p.get("adopted") or []) for p in summary.get("projects", []))
+        return {"action": "intake", "executed": not dry, "adopted": adopted,
+                "projects": len(summary.get("projects", [])),
+                "errors": summary.get("errors", [])}
+
+    def _live_runner_stages(self, conn):
+        """Stages with a live runner subprocess (executor_runs pids)."""
+        runs = db.get_setting(conn, "executor_runs") or {}
+        return {stage for stage, run in runs.items()
+                if isinstance(run, dict) and util.pid_alive(run.get("pid"))}
+
+    def _queued_stages(self, conn):
+        counts = {}
+        for row in conn.execute(
+                "SELECT stage, COUNT(*) AS n FROM requests WHERE status='queued' GROUP BY stage"):
+            counts[row["stage"]] = row["n"]
+        return counts
+
+    @staticmethod
+    def foreign_scheduler_active(conn) -> bool:
+        """True when an App scheduler (a non-engine executor_instances entry) is active.
+
+        Engine lease entries carry ``lease_expires_at``; the App's registered
+        instance does not. A live App instance means the engine must not also
+        spawn workers (avoid double-drive).
+        """
+        from .. import process_owner
+        instances = db.get_setting(conn, process_owner.SETTING, {}) or {}
+        return any(isinstance(entry, dict) and entry.get("state") == "active"
+                   and "lease_expires_at" not in entry
+                   for entry in instances.values())
+
+    def _default_spawn(self, stage, db_path, instance_id):
+        from . import runners
+        return runners.spawn(stage, db_path, instance_id=instance_id)
+
+    def spawn_step(self, conn) -> dict:
+        """Spawn per-stage workers for queued requests (live, only if no App scheduler)."""
+        if self.foreign_scheduler_active(conn):
+            return {"action": "spawn", "executed": False,
+                    "reason": "app_scheduler_active", "spawned": []}
+        queued = self._queued_stages(conn)
+        live = self._live_runner_stages(conn)
+        stages = plan_spawns(queued, live, foreign_active=False)
+        spawner = self.spawn or self._default_spawn
+        spawned = []
+        for stage in stages:
+            spawner(stage, self.db_path, self.instance_id)
+            spawned.append(stage)
+            self.log("engine spawned worker: " + stage)
+        return {"action": "spawn", "executed": True, "spawned": spawned}
+
+    # ------------------------------------------------------------- long-lived
+    def run(self, *, instance_id=None, stage=None, lease_seconds=None,
+            stop_event=None, max_ticks=None, sleeper=None) -> dict:
+        """Long-lived loop: lease → tick+heartbeat → back避 → release (§5.27.1)."""
+        instance_id = instance_id or util.new_uuid()
+        self.instance_id = instance_id
+        pid = os.getpid()
+        sleeper = sleeper or time.sleep
+        conn = db.connect(self.db_path)
+        try:
+            lease = lease_seconds or health.lease_seconds(conn)
+            health.acquire_or_renew_lease(
+                conn, util.now_iso(), instance_id=instance_id, stage=stage,
+                pid=pid, lease_seconds=lease)
+        finally:
+            conn.close()
+        interval = min(lease / 3.0, 60.0)
+        backoff, failures, ticks = 1.0, 0, 0
+        try:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if max_ticks is not None and ticks >= max_ticks:
+                    break
+                ticks += 1
+                try:
+                    summary = self.reconcile_once()
+                    self.log("engine tick %d: %d action(s)" % (ticks, len(summary["actions"])))
+                    failures, backoff = 0, 1.0
+                    beat = db.connect(self.db_path)
+                    try:
+                        health.renew_lease(beat, util.now_iso(), instance_id=instance_id,
+                                           lease_seconds=lease)
+                    finally:
+                        beat.close()
+                    sleeper(interval)
+                except Exception as exc:  # noqa: BLE001 — backoff on any tick failure
+                    failures += 1
+                    backoff = min(60.0, float(2 ** (failures - 1)))
+                    self.log("engine tick %d failed (#%d): %s; backoff %.0fs"
+                             % (ticks, failures, exc, backoff))
+                    sleeper(backoff)
+        finally:
+            done = db.connect(self.db_path)
+            try:
+                health.release_lease(done, util.now_iso(), instance_id=instance_id)
+            finally:
+                done.close()
+        return {"instance_id": instance_id, "ticks": ticks, "failures": failures}

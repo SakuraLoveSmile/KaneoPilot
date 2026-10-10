@@ -81,6 +81,10 @@ class TestPurge(KanpilotTestCase):
         exc = self.call_err("purge-session", {
             "task_id": task_id, "run_id": run_id})
         self.assertEqual(exc.code, "conflict")
+        # 规划轮次必须先显式结束，否则 _session_trash_reason 的
+        # _plan_round_has_activity 守卫会以 conflict 阻止 trash（§5.16.2）。
+        self.call("report", {"request_id": request_id, "run_id": run_id,
+                             "outcome": "succeeded", "note": "fixture done"})
         self.call("trash-session", {"task_id": task_id, "run_id": run_id})
         result = self.call("purge-session", {
             "task_id": task_id, "run_id": run_id})

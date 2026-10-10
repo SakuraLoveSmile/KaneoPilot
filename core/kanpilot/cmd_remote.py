@@ -396,7 +396,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         # terminal logs. Git/process/file reads must precede the writer lock.
         current = db.require_task(conn, payload["task_id"])
         checks = db.task_extra(current).get("verification_checks") or {}
-        if (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
+        if current["run_id"] and (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
             from . import verification_checks
             receipt_snapshot = receipt_identity(current)
             verified_receipt = verification_checks.valid_receipt(conn, current)

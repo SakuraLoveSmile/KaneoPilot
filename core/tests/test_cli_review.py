@@ -104,6 +104,20 @@ def runner_scene(tmp_path, monkeypatch):
     task = {'task_id': 't1', 'project_id': 'p1', 'run_id': 'exec1', 'status': 'in_review', 'extra': {},
             'plan_path': str(plan), 'plan_sha256': util.sha256_file(plan), 'repository': str(repository),
             'execution_round': {'backend': 'pi_desktop', 'worktree_path': str(worktree)}}
+    # runner_scene 的 conn 指向一个空库；review 材料收集会直连
+    # ``db.require_task(conn, task_id)``（不经 mock 的 core_call），因此必须把
+    # 任务行真实写进该库，否则 _collect_core_verification 报 not_found。
+    now = util.now_iso()
+    conn.execute(
+        "INSERT INTO tasks (task_id, project_id, project_name, title, repository,"
+        " stage, status, plan_path, plan_sha256, run_id, created_at, updated_at,"
+        " extra_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (task["task_id"], task["project_id"], "p1", "isolated review fixture",
+         str(repository), "review", "in_review", task["plan_path"],
+         task["plan_sha256"], task["run_id"], now, now,
+         util.jdump({"execution_round": task["execution_round"]})),
+    )
+    conn.commit()
     request = {'request_id': 'req1', 'run_id': 'review1', 'stage': 'review', 'status': 'claimed',
                'lease_expires_at': util.to_iso(util.now_dt() + timedelta(minutes=10))}
     calls = []
