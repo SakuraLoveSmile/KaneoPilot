@@ -333,3 +333,87 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
 ### 独立验证检查回执（2026-10-10）
 
 `verification_unconfirmed` 的显式检查重跑不产生新模型执行轮次。核心保存操作归属与状态；检查运行时原任务保持阻塞并拒绝竞争写入。失败/未知/中断均不清除阻塞。全部检查独立通过且任务、计划、执行、工作树身份未漂移后，原子登记可信回执，清除阻塞并重新排队 monitor。回执不能跨计划或执行轮次复用，也不能替代原计划原生验收或 Review。
+ 
+ ## 7. phase × condition 状态模型
+ 
+ | phase | condition | 说明 | 典型来源 |
+ |---|---|---|---|
+ | intake | idle | 无自动化任务待接收 | scheduler |
+ | intake | pending | 已触发自动接收，等待 fetch/prepare/plan | auto_intake |
+ | plan | wanted | 需求已变或首次规划，等待材料确认 | sync-tasks / review_fix |
+ | plan | drafting | 规划请求已 claimed，runner 制作计划 | planner_runner |
+ | plan | ready | 计划已发布，等待执行确认 | publish-plan |
+ | dispatch | confirmed | 已确认执行，等待派发 | confirm_dispatch |
+ | dispatch | submitting | 远端已转 in-progress，等待发送确认 | dispatch-begin-send |
+ | observe | running | 已确认发送，worker 执行中 | dispatch-confirm |
+ | observe | observing | 观察者缺席，只读续接中 | round-observe |
+ | verdict | checking | 执行终态已到，等待验证证据 | monitor |
+ | verdict | unconfirmed | 验证缺失或上次失败 | verification_unconfirmed |
+ | commit | committing | PR 交付任务等待提交工作树 | delivery-commit |
+ | review | reviewing | 等待评审结论 | review request |
+ | review | repairing | 同任务修复轮次中（≤2 轮） | register-review changes_requested |
+ | delivery | syncing | PR 已开，等待合并同步 | delivery-sync |
+ | done | merged | PR 已合并或 Kaneo 已 done | merge-sync / advance-task |
+ | needs-you | blocked | 人工阻塞，等待用户动作 | resolve / attention-list |
+ 
+ **phase 与 task.status 的映射关系：**
+ - `needs_plan` → phase=plan, condition=wanted
+ - `planning` → phase=plan, condition=drafting
+ - `ready` → phase=plan, condition=ready
+ - `dispatching/prepared/submitting` → phase=dispatch, condition=submitting/confirmed
+ - `running` → phase=observe, condition=running
+ - `in_review` → phase=review, condition=reviewing/repairing
+ - `needs_user` → phase=needs-you, condition=blocked（按 failure_code 细分）
+ - `done` → phase=done, condition=merged
+ 
+ ## 8. 失败阶梯
+ 
+ | 阶梯 | 类型 | 处置 | 自动重试 | 升级 |
+ |---|---|---|---|---|
+ | 1 | transient（瞬时） | 退避重试一次（指数退避，上限 2 次/阶段） | ✅ 同阶段 | 仍失败 → 阶梯 2 |
+ | 2 | environmental（环境） | 等待人工环境修复，不升级失败 | ❌ 不自动重试 | 用户修复环境后手动 resume |
+ | 3 | quality（质量） | 有界补救，≤2 轮同分支修复 | ✅ 同分支 fix_round+1 | 超出 → 阶梯 4 |
+ | 4 | needs-you（需人工） | 收件箱单一来源，用户决定 | ❌ 不自动 | 用户 resolve 后回到对应 phase |
+ 
+ **阶梯规则：**
+ - 瞬时失败（network timeout、git_transient、remote_unavailable）归入阶梯 1，按退避重试。
+ - 环境失败（repository_missing、not_git_repo、origin_not_github、gh_missing、exec_permission_not_auto）归入阶梯 2，明确原因并等待用户。
+ - 质量失败（verification_unconfirmed、review_blocked、delivery_commit_failed、branch_diverged）归入阶梯 3，受 max_fix_rounds ≤2 约束。
+ - 其余 needs_user 归入阶梯 4，统一进入 attention inbox，由用户单点处置。
+ 
+ ## 9. 黄金路径
+ 
+ Kaneo To Do → intake → plan → confirm → dispatch → observe → verdict → commit → review ⇄ fix(≤2 同分支) → PR → merge-sync → done
+ 
+ 各阶段只向下一阶段推进，或向 needs-you 升级；needs-you 经用户 resolve 后回到对应 phase。
+ 
+ - intake：只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
+ - plan：规划请求只来自规划面板手动授权（prepare-plan-input + start-plans）；publish-plan 成功后进入 plan_execution_hold。
+ - confirm：用户「确认并安排执行」解除 hold，进入 dispatch。
+ - dispatch：派发请求 claimed → dispatch-prepare → dispatch-begin-send → dispatch-start → dispatch-confirm → running。
+ - observe：worker 执行中；观察者缺席时只读续接（round-observe），不重发 prompt。
+ - verdict：monitor 读取终态 + 验证证据；有效 diff 排除 `.pi/**`，核心亲跑 verify 命令。
+ - commit：受 PR 交付管理的任务先 delivery-commit，再进入 review。
+ - review：评审通过 → advance-task done；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮）。
+ - delivery：PR 已开 → delivery-sync 轮询合并状态；合并后 advance-task done。
+ - done：任务归档，保留全部历史与文件。
+ 
+ ## 10. 8 个用户动作清单
+ 
+ 以下 8 个动作是用户可从 attention inbox 或任务详情触发的核心人工干预：
+ 
+ | 动作 | 触发条件 | 效果 | 对应 resolve action |
+ |---|---|---|---|
+ | take_over | 自动化任务出现阶梯 3/4 失败 | 转为人工处理（manual_takeover=true） | dismiss |
+ | resume_auto | 已转人工任务，环境已修复 | 恢复自动推进，继续原 phase | resume |
+ | dismiss | 任意 needs_user | 清除阻塞，回到 ready/needs_plan | dismiss |
+ | retry | dispatch 类未发送/执行失败 | 创建新 dispatch 请求 | retry / resume（执行失败） |
+ | replan | 需求变化或修复轮已用完 | 重新规划 | replan |
+ | resolve | 失联/发送不明/观察异常 | 释放失联/确认发送/恢复观察 | release_lost / mark_sent / restore |
+ | accept_verification | verification_unconfirmed | 人工接受验证结果，回到 running | accept_verification |
+ | review_recovery | review_blocked 历史误退 | 恢复评审阶段，重新排队 review | recover_review |
+ 
+ **动作约束：**
+ - 所有动作经核心 `resolve` 或专用命令校验身份与任务状态，不绕过 allowed_actions。
+ - 危险操作（retry、replan、mark_done）须二次确认。
+ - 动作结果写入 event，桌面即时刷新。

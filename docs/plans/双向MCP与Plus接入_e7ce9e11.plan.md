@@ -1,3 +1,11 @@
+ > **已 superseded**：本计划内容已被 Phase 1 规格重写并入现行文档：
+ > - 双向 MCP 与 Plus 接入 → `docs/protocol.md` §5.23–§5.26、`docs/automation-contract.md`
+ > - 状态模型 → `docs/state-model.md`
+ > - 引擎命令 → `docs/protocol.md` §5.27
+ > - UI 规格 → `docs/ui-spec.md`
+ >
+ > 保留本文件供审计；施工以现行规格为准。
+ 
 # 双向 MCP 与 Plus 接入 实现计划
 
 ## 概要

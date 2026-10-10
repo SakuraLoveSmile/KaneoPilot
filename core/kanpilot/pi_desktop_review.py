@@ -337,6 +337,10 @@ def collect_materials(*, db_path, conn, materials: Path, task: dict,
 def _collect_core_verification(conn, task, execution_run_id, materials):
     """Every Review backend receives the same authenticated independent checks."""
     from . import verification_checks
+    if conn is None:
+        # 无 DB 连接（只读材料收集的调用方未提供 conn）：无从读取核心验证回执，
+        # 视为本轮无核心验证材料，返回空而非崩溃。
+        return {}
     current = db.require_task(conn, task["task_id"])
     record = db.task_extra(current).get("verification_checks") or {}
     if (record.get("binding") or {}).get("execution_run_id") != execution_run_id:
