@@ -166,3 +166,34 @@ status 停在 `in_review`）。
 
 **验证**：`tests/test_resume_auto_takeover.py` 8 passed；`tests/test_review_settle.py` 17 passed；
 `python3 -m pytest tests/rehearsal -q` → 63 passed / 5 skipped / exit 0。
+
+## 10. resume_auto 的 UI 可达性缺口（2026-10-10 晚，engine_builder 实测发现）
+
+§9 落地闭环后，engine_builder 报了一个**可达性**缺口并给出实测依据，我已核实并修复：
+
+**缺口**：`derive.allowed_actions` 原来只在 `db.task_auto_paused(task)` 时追加 `resume-auto`
+（protocol §5.15.6 原条文）。但 `resolve {action:"dismiss"}` **只在 review 阻塞时**才置
+`auto_advance_paused=1`（`cmd_queue.py`：`if review_block: fields["auto_advance_paused"] = 1`）；
+非 review 路径的接管（例如空 diff 补救用尽 → needs_user → dismiss）落在 `ready` 且**不暂停**。
+于是这些任务的 `resume-auto` 从不出现在 `allowed_actions`，桌面端「交回自动化」按钮不露出，
+只能走 CLI/MCP——**逆向入口存在但不可达，D4 的单向门只关了一半**。
+
+**修复**（`core/kanpilot/derive.py`）：`resume-auto` 的露出条件改为
+`db.task_auto_paused(task) or core.automation_of(task).get("manual_takeover")`。
+`restore-task {resume_auto:true}` 命令本身早已支持未暂停的接管任务
+（`cmd_restore_task` 的条件是 `db.task_auto_paused(task) or takeover`），所以只需补露出条件。
+
+**规格同步**：`docs/protocol.md` §5.15.6 改为「`auto_advance_paused=1` **或**
+`automation.manual_takeover` 为真时」，并加了一条说明为何第二个条件不可省。
+
+**测试**（`core/tests/test_resume_auto_takeover.py::TestResumeAutoReachability`，3 例）：
+未暂停的非 review 接管露出 `resume-auto`、暂停的 review 接管露出 `resume-auto`、
+既未接管也未暂停时不露出。该文件共 11 例。
+
+## 11. 两条完成路径的切换点（记录备查）
+
+engine_builder 同时确认了切换点的确切位置，与 §8/§9 的判断一致：
+`review_settle.settle_job` 里 `automated = is_managed(task)`，
+`conclusion == "pass" and not automated` → `advance-task {target:done}`；
+`automated` → 登记后进入 PR 交付周期。因此「交回自动化」**必然**把完成路径从
+「评审通过即 done」切成「PR 合并才 done」——这不是副作用，正是场景 16 想要的行为。

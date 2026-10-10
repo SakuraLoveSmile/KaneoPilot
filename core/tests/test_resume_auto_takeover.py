@@ -168,6 +168,41 @@ class TestResumeAutoClearsTakeover(ResumeAutoCase):
         self.assertEqual(count, 1)
 
 
+class TestResumeAutoReachability(ResumeAutoCase):
+    """``resume-auto`` must be offered for every takeover, not only review ones.
+
+    ``resolve {action:"dismiss"}`` sets ``auto_advance_paused=1`` only for
+    review-block failures; a non-review takeover lands in ``ready`` unpaused.
+    ``derive.allowed_actions`` used to gate ``resume-auto`` on the pause alone,
+    so the desktop button never appeared for those tasks — the reverse entry
+    existed but was unreachable, leaving D4's one-way door half open.
+    """
+
+    def test_resume_auto_offered_for_unpaused_non_review_takeover(self):
+        task_id = "taskresumeauto00009"
+        self._managed(task_id)
+        self._take_over(task_id, paused=False)
+        view = self._view(task_id)
+        self.assertTrue(view["automation"]["manual_takeover"])
+        self.assertFalse(view["paused"])
+        self.assertEqual(view["status"], "ready")
+        actions = self.call("get-task", {"task_id": task_id})["task"]["allowed_actions"]
+        self.assertIn("resume-auto", actions)
+
+    def test_resume_auto_offered_for_paused_review_takeover(self):
+        task_id = "taskresumeauto00010"
+        self._managed(task_id)
+        self._take_over(task_id, paused=True)
+        actions = self.call("get-task", {"task_id": task_id})["task"]["allowed_actions"]
+        self.assertIn("resume-auto", actions)
+
+    def test_resume_auto_absent_without_takeover_or_pause(self):
+        task_id = "taskresumeauto00011"
+        self._managed(task_id)
+        actions = self.call("get-task", {"task_id": task_id})["task"]["allowed_actions"]
+        self.assertNotIn("resume-auto", actions)
+
+
 class TestResumeAutoFromArchive(ResumeAutoCase):
     def test_archived_takeover_resume_restores_active_and_automation(self):
         task_id = "taskresumeauto00005"
