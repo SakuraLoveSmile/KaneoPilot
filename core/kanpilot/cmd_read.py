@@ -651,6 +651,74 @@ def _doctor_plus(ctx, timeout: float) -> dict:
                         timed_out=_probe_timed_out(detail))
 
 
+def _doctor_plus_fallback_model(ctx, timeout: float) -> dict:
+    """plus_fallback_model（spike-fallback-model-id-20261010.md 的失效与刷新）：
+    核对各项目配置的 ``fallback_model`` 仍存在于 Plus 本地 cache 目录。
+
+    只读（``providers/list`` + ``providers/listModels {source:"cache"}``，复用
+    ``probe_connection``），**绝不输出 token、绝不换模型**——目录可能随 Plus
+    升级/账号变更过期，探不到就给出明确修复项（换备选或刷新目录），与引擎侧
+    「探针失败即 validation_failed、不静默换模型」是同一条不变量。
+
+    - 未配置 → informational skip（缺省不配置 = 不换模型，无需核对）；
+    - 无连接文件 → informational skip（与 ``_doctor_plus`` 同口径）；
+    - 配置且存在 → ok；
+    - 配置但不存在 → ok=False + 可执行修复项（换 spike 备选或刷新目录）。
+    """
+    try:
+        from . import exec_config, pi_desktop_backend, project_config
+        from .engine import fallback as engine_fallback
+    except Exception as exc:  # pragma: no cover - defensive
+        return _probe_check("plus_fallback_model", ok=True,
+                            detail=f"fallback 模块缺失，跳过核对：{exc}",
+                            skipped=True)
+    try:
+        _rev, _ws, items, _saved = project_config.load_raw_mappings(ctx.conn)
+    except Exception as exc:
+        return _probe_check("plus_fallback_model", ok=True,
+                            detail=f"项目映射不可读，跳过核对：{exc}",
+                            skipped=True)
+    models = engine_fallback.configured_models(items)
+    if not models:
+        return _probe_check(
+            "plus_fallback_model", ok=True,
+            detail="未配置 fallback_model（缺省不换模型，无需核对）", skipped=True)
+
+    block = (exec_config.load(ctx.conn).get("pi_desktop") or {})
+    conn_file = block.get("connection_file") or constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
+    path = Path(str(conn_file)).expanduser()
+    if not path.is_file():
+        return _probe_check(
+            "plus_fallback_model", ok=True,
+            detail=f"无 Plus 连接文件，无法核对目录：{path}", skipped=True)
+
+    verified, missing = [], []
+    for model in models:
+        try:
+            probe = pi_desktop_backend.probe_connection(
+                path, provider_id=model["provider_id"],
+                model_id=model["model_id"], timeout=timeout)
+        except Exception as exc:  # pragma: no cover - defensive
+            missing.append((model, f"探测异常：{exc}"))
+            continue
+        if probe.get("ok"):
+            verified.append(f"{model['model_id']}@{model['provider_id'][:8]}")
+        else:
+            missing.append((model, str(probe.get("detail") or "模型不在 cache 目录")))
+    if not missing:
+        return _probe_check("plus_fallback_model", ok=True,
+                            detail="已核对存在：" + "、".join(verified))
+    alternates = "、".join(engine_fallback.RECOMMENDED_ALTERNATES)
+    detail = "；".join(
+        f"{model['model_id']}@{model['provider_id'][:8]} 不存在（{reason}）"
+        for model, reason in missing)
+    return _probe_check(
+        "plus_fallback_model", ok=False,
+        detail=(detail + f"。修复：改用同 provider 备选（{alternates}）"
+                "或刷新 Plus 模型目录后重跑 doctor --live；"
+                "引擎不会静默换模型，届时按 validation_failed 阻塞"))
+
+
 def _doctor_engine_lease(ctx) -> dict:
     """engine_lease（§5.27.6）：活跃引擎实例数。引擎未安装 → informational。"""
     try:
@@ -762,6 +830,9 @@ def cmd_doctor(ctx, payload: dict) -> dict:
         checks.append(_doctor_kaneo_ping(timeout))
         checks.append(_doctor_gh(timeout))
         checks.append(_doctor_plus(ctx, timeout))
+        # spike-fallback-model-id-20261010.md「失效与刷新」：核对配置的
+        # fallback 模型仍在 Plus cache 目录；只在 online 有意义。
+        checks.append(_doctor_plus_fallback_model(ctx, timeout))
     else:
         checks.append(_probe_check("kaneo_ping", ok=True, detail="offline",
                                    skipped=True))

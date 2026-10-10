@@ -1368,6 +1368,21 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 探针失败时 `detail` 必须给出**明确可执行的修复项**（缺什么、去哪装、跑什么命令），不得只写「失败」。
  - 全部检查通过时顶层 `ok: true`；任一必需检查失败时 `ok: false`，且不得因单个可选探针失败而掩盖其余结果。
 
+
+ **`plus_fallback_model` 检查项（仅在线模式；spike-fallback-model-id-20261010.md「失效与刷新」）：**
+
+ - 扫各项目映射里配置的 `fallback_model`（条目层 `items[pid].fallback_model`，去重后逐个核对），
+   用与引擎同一只读探针（`providers/list` + `providers/listModels {source:"cache"}`）确认
+   provider 存在且模型在本地 cache 目录中。
+ - 未配置 → `skipped:true` 且 `ok:true`（缺省不配置 = 不换模型，无需核对）；
+   无 Plus 连接文件 → 同样 `skipped:true`（与 `plus` 检查同口径，不伪造失败）。
+ - 配置且存在 → `ok:true`，detail 列出已核对的模型；配置但不存在 → `ok:false`，
+   detail 必须给出**明确可执行的修复项**（改用同 provider 备选或刷新目录后重跑），
+   并声明引擎不会静默换模型（届时按 `validation_failed` 阻塞）。
+ - 该检查**只读**，绝不输出 token / 连接文件全文；detail 中模型 id 可原样出现（非凭据）。
+ - 目录是 `source=cache` 的本地快照，可能随 Plus 升级或账号变更过期，因此需要可复跑；
+   本项就是该复跑入口，不替代引擎侧探针。
+
 #### 5.27.7 set-project-engine-mode（A12 按项目三态）
 
  ```json

@@ -46,6 +46,32 @@ def recommended_default() -> dict:
             "model_id": DEFAULT_FALLBACK_MODEL_ID}
 
 
+# spike-fallback-model-id-20261010.md 的同 provider 备选，按优先级排列。
+# 只用于「配置的 fallback 已不存在」时给出可执行修复项（doctor --live），
+# 不参与任何自动切换。
+RECOMMENDED_ALTERNATES = (
+    "google/gemini-3.7-flash",
+    "stepfun/Step-3.7-Flash",
+    "z-ai/glm-5.3-flash",
+    "Qwen/Qwen3.8-Flash",
+    "deepseek/deepseek-v4.1-flash-fast",
+)
+
+
+def configured_models(items) -> list:
+    """所有项目配置的 fallback 模型（去重，按 (provider_id, model_id) 排序）。
+
+    ``items`` 是 ``project_config.load_raw_mappings`` 返回的映射条目字典。
+    只读；缺省不配置时返回空列表。
+    """
+    found = {}
+    for entry in (items or {}).values():
+        model = configured_model(entry)
+        if model is not None:
+            found[(model["provider_id"], model["model_id"])] = model
+    return [found[key] for key in sorted(found)]
+
+
 def normalize(raw) -> Optional[dict]:
     """``{provider_id, model_id}`` 规范化；缺字段/非字符串 → None（= 未配置）。"""
     if not isinstance(raw, dict):
