@@ -197,3 +197,72 @@ engine_builder 同时确认了切换点的确切位置，与 §8/§9 的判断�
 `conclusion == "pass" and not automated` → `advance-task {target:done}`；
 `automated` → 登记后进入 PR 交付周期。因此「交回自动化」**必然**把完成路径从
 「评审通过即 done」切成「PR 合并才 done」——这不是副作用，正是场景 16 想要的行为。
+
+## 12. B1/B2 修复后的重跑（2026-10-11 凌晨）
+
+A14 的两个阻断缺陷（§4）已修并入库（`2f7996b`）。清理验收库与 Kaneo 侧后重建 5 个干净 To Do
+任务（无 review marker），以 `engine_mode=live` 重跑。
+
+### 12.1 B1/B2 的修复效果（实测通过）
+
+- **B1（lifecycle 串行位）**：任务 1 与任务 2 **并发**完成 dispatch（`send_state=sent`），
+  无一条 `busy:lifecycle serial held by …`。修复前同样的并发必挂（§4.1）。
+- **B2（事件 actor）**：整个沙盒项目 `actor=user` 事件数 = **0**（修复前同一跑法有 7 条：
+  `enqueued`×3、`resolved`×3、`rechecked`×1）。A14 的 actor 约束**首次满足**。
+
+### 12.2 实跑结果
+
+| # | task_id | 最终 phase | PR | 说明 |
+|---|---|---|---|---|
+| 2 | `nmez1pcfgbesk3aqalzk6c7k` | **`done`/`done`，Kaneo `done`** | #1 MERGED | **完整跑通黄金路径**：To Do → intake → plan → confirm → dispatch → observe → verdict → commit → review → PR → merge-sync → done，全程 0 人工 |
+| 3 | `g0ny5ic4b2e1xnliqcairqtc` | `needs_user`/`review` | #2 MERGED | PR 已合并，但 merge-sync 报 `branch_diverged`——**因我手动向该分支推送了清理提交**（见 12.4），交付快照的 `head_sha` 与实际分支头不符，身份核对正确拦截 |
+| 4 | `z8wue1tgzao1iyzjg6vg4u2s` | `needs_user`/`review` | #3 MERGED | 同上，我的手动推送导致 |
+| 1 | `qzgic7y2zotouesl0vh6jnxa` | `needs_user`/`monitor` | — | 计划的 verify 围栏块未被解析（见 12.3） |
+| 5 | `ax2oz6wuptyfy439r0q5xjrg` | `running`/`monitor` | — | 收尾时仍在推进 |
+
+3 个 PR 均已合并；`automation.cost_usd` 合计 0（未触达任何上限）。
+
+### 12.3 新发现：计划 verify 围栏被空 info 围栏吞掉
+
+任务 1 的 monitor 报 `verification_unconfirmed`，原因 `计划必须恰好包含一个 verify 围栏块`
+（`verify_evidence.parse_verify_block`）。该计划的围栏序列是：
+
+```
+```markdown … ```bash … ``` (空) … ``` (空) … ```verify … ``` (空)
+```
+
+`parse_verify_block` 只在「同字符、长度 ≥ 开围栏、**info 串为空**」时视为闭合。于是第一个空
+info 的 ` ``` ` 开了一个新围栏，随后的 ` ```verify ` 因 info 非空被当作正文吞掉，最终识别到
+0 个 verify 块。
+
+**触发条件是我自己的合成任务描述里嵌了 ```bash 代码块**，planner 照抄进计划，形成嵌套。任务 2/3/4/5
+的描述不含围栏，计划各只有一个 ` ```verify ` 块，全部正常。**这是夹具问题，不是引擎缺陷**；
+但也说明 `parse_verify_block` 对「空 info 围栏嵌套 verify 围栏」没有防御——若要更稳，可在解析时
+忽略 info 为空的围栏对，或让 planner prompt 明确禁止嵌套围栏。
+
+### 12.4 新发现：交付会提交执行器产生的编译产物
+
+任务 2/3/4/5 的分支都提交了 `tests/__pycache__/*.pyc`——执行器在工作树里跑 verify 命令时 Python
+自己生成的字节码，被 `git_delivery` 一并提交。沙盒仓库起初没有 `.gitignore`，于是：
+
+- PR diff 里混入二进制 `.pyc`（与「有效 diff 排除 `.pi/**`」的意图相悖——`.pi/**` 只是**判定**时排除，
+  **提交**时并未排除）；
+- 两个分支的 `.pyc` 内容不同 → add/add 二进制冲突，PR #2/#3 均 `CONFLICTING` 无法合并。
+
+**我的处置（属人工干预，如实记录）**：
+1. 直接向沙盒 `master` 提交 `.gitignore`（`__pycache__/`、`*.py[cod]`、`.pytest_cache/`、`.DS_Store`）；
+2. 对任务 3/4 的分支各补一个「移除已提交 .pyc」的提交并普通推送（**未 force-push**），PR 转为可合并后合并。
+
+**后果**：向分支推送核心不知道的提交，使交付快照的 `head_sha` 与实际分支头不符，merge-sync 正确报
+`branch_diverged` 并把任务 3/4 拦在 `needs_user`。即**我的人工干预本身导致了 3/4 无法自动 sync 到
+done**——这个身份核对门是按设计工作的，不是缺陷。
+
+**建议的后续修复（不在本目标范围）**：`git_delivery` 提交前应过滤常见构建产物
+（`__pycache__/`、`*.pyc`、`.pytest_cache/`、`node_modules/`、`dist/`、`.DS_Store`），或至少要求项目
+仓库有 `.gitignore` 并把未忽略产物列入 preflight 警告。
+
+### 12.5 结论
+
+**A14 仍未满足（unmet）**，但比 §2 大幅推进：黄金路径已由真实 Plus 完整走通 1 次（到 Kaneo `done`），
+3 个 PR 已合并，B1/B2 两个阻断缺陷经实测确认修复，`actor=user` 约束首次满足。
+剩余阻碍是 12.3（夹具）与 12.4（交付提交构建产物）两项，其中 12.4 是真实的引擎改进点。
