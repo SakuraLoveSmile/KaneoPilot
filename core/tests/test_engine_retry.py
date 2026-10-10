@@ -243,6 +243,85 @@ class TestRetryLoop(KanpilotTestCase):
                                        "retry_base": 1})
         self.assertTrue(result.get("request", {}).get("request_id"))
 
+    def _fail_latest_active(self, tid):
+        """把该任务最近一条 active 请求标记为瞬时失败（模拟 runner 失败）。"""
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                row = conn.execute(
+                    "SELECT request_id FROM requests WHERE task_id=? "
+                    "AND status IN ('queued','claimed') ORDER BY updated_at DESC LIMIT 1",
+                    (tid,)).fetchone()
+                self.assertIsNotNone(row, "没有可标记失败的活跃请求")
+                conn.execute(
+                    "UPDATE requests SET status='failed', result_json=?, "
+                    "updated_at=? WHERE request_id=?",
+                    (util.jdump({"failure_code": "remote_unavailable"}),
+                     util.now_iso(), row["request_id"]))
+        finally:
+            conn.close()
+
+    def _retry_tick(self, tid):
+        """一个完整 tick：失败 → _transient_retry → commands_for → 真 enqueue 落库。
+
+        返回决策（None = 封顶不再重试）。这是实时链路的真实形状——任何一环
+        用注入代替都会漏掉接线缺口（ca06344→0a093bc 正是这么漏的）。
+        """
+        self._fail_latest_active(tid)
+        conn = db.connect(self.db_path)
+        try:
+            decision = loop.Reconciler(self.db_path, mode="live")._transient_retry(
+                conn, db.require_task(conn, tid), util.now_dt())
+        finally:
+            conn.close()
+        if decision is None:
+            return None
+        calls = steps.commands_for(decision, {"task_id": tid, "send_state": None})
+        self.call("enqueue", calls[0].payload)
+        return decision
+
+    def test_end_to_end_retry_chain_caps_after_two_retries(self):
+        """R1→R2→R3 全链路（真实 enqueue 落库 → 读回）钉住 ≤2/阶段。
+
+        state-model §8：阶梯 1 上限 2 次/阶段，超过升级阶梯 2。序列：
+          R1 失败(无 retry_base) → spent=0 → RETRY backoff 1s，新请求 retry_base=1
+          R2 失败(retry_base=1)  → spent=1 → RETRY backoff 2s，新请求 retry_base=2
+          R3 失败(retry_base=2)  → spent=2 → 封顶，无重试决策
+        """
+        tid = self._running_task("taskretryK000000000001")
+        # 首轮请求由前向路径创建（不带 retry_base）
+        self.call("enqueue", {"task_id": tid, "kind": "monitor"})
+
+        first = self._retry_tick(tid)
+        self.assertEqual(first.params["retry_base"], 1)
+        self.assertEqual(first.params["backoff_seconds"], 1.0)
+
+        second = self._retry_tick(tid)
+        self.assertEqual(second.params["retry_base"], 2)
+        self.assertEqual(second.params["backoff_seconds"], 2.0)
+
+        # 落库值也要对：两条重入队请求的 payload 各带 1 / 2
+        conn = db.connect(self.db_path)
+        try:
+            stored = [util.jload(r["payload_json"]) or {} for r in conn.execute(
+                "SELECT payload_json FROM requests WHERE task_id=? AND kind='monitor' "
+                "ORDER BY created_at", (tid,))]
+        finally:
+            conn.close()
+        self.assertEqual([p.get("retry_base") for p in stored[1:]], [1, 2])
+
+        # 第三次失败：封顶，不再有重试决策、不再产生新请求
+        before = len(stored)
+        self.assertIsNone(self._retry_tick(tid))
+        conn = db.connect(self.db_path)
+        try:
+            after = conn.execute(
+                "SELECT COUNT(*) AS n FROM requests WHERE task_id=? AND kind='monitor'",
+                (tid,)).fetchone()["n"]
+        finally:
+            conn.close()
+        self.assertEqual(after, before)
+
     def test_backoff_grows_with_the_cumulative_count(self):
         tid = self._running_task("taskretryG000000000001")
         backoffs = []
