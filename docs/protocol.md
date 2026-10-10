@@ -1390,3 +1390,21 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 一个 `engine run` 进程可同时服务三种模式的项目；三态并存是 strangler 的核心，不得互相干扰。
  - `engine run {mode}` 改为**进程默认模式**（缺省 `legacy`）：项目显式配置优先，未配置回落进程默认；`force=true` 时所有项目强制使用进程 `mode`（演练/调试用）。
  - `engine-mode` 决策与旧调度的差异在 shadow 模式下全部落日志且带 `explain()` 解释（A12）。
+
+#### 5.27.8 set-project-fallback-model（场景 5 备用执行模型）
+
+ ```json
+ set-project-fallback-model {project_id, fallback_model?: {provider_id, model_id}, expected_revision?: int}
+ ```
+
+ - 写入 `project_mappings.items[project_id].fallback_model`（**映射条目层**，同 `engine_mode`/`verify_env` 的理由：`validate_automation` 的白名单会静默丢弃 `automation` 内的未知键）。
+ - **缺省不配置 = 不换模型**。配置项只是「允许换」的前置条件，不是「一定换」——换不换由探针结果决定。
+ - 触发条件：空 diff（`empty_diff`，阶梯 3 质量失败）进入同计划有界补救轮次时（≤2 轮，按 `plan_sha256` 记账）。
+ - **探针先行**：模型必须存在于 Plus 本地 cache 目录（只读 `providers/list` + `providers/listModels {source:"cache"}`，复用 `pi_desktop_backend.probe_connection`，不返回 token/连接文件全文）。探针失败 → `validation_failed`（阶梯 2 环境类，block + attention），**不静默换模型**。
+ - 探针通过 → 记事件 `model`（`detail.model="fallback"`、`model_source="custom"`、provider/model），并用该模型快照重跑：`model_source="custom"` + `provider_id`/`model_id`，**沿用主模型的 `connection_file`/`thinking_level`/`permission_mode`**（不新增第二套凭据）。未配置 → 记 `model`（`detail.model="primary"`）+ 事件 `model_hint`（「建议配置备用模型」，带推荐值）。
+ - 快照经一次性覆盖 `extra.engine_model_override` 落盘，dispatch claim 冻结轮次快照时应用（`exec_config.snapshot_with_model_override`）：只在计划身份（`plan_sha256`/`plan_generated_at`）一致时应用，**不写回** `settings.exec_config`（设置变更仍只影响新轮次），新执行轮次开始后由引擎清除，不套用到无关轮次。
+ - 重跑的**授权**仍走既有 resolve/replan 路径：`CLAIM_GUARDS["dispatch"] == {"ready"}` 加上「不得重发已发送 prompt」闸门，引擎不能自行重发（那需要伪造用户动作）。引擎负责决策、记录审计事件、武装快照。
+ - 主执行后端不是 `pi_desktop` 时 fallback 不适用：按主模型重试并记 `reason="unsupported_backend"`，不换模型。
+ - 推荐缺省值（**仅建议值，绝不隐式套用**）：`{"provider_id": "707a4c67-4ee0-484d-b635-730372501eaf", "model_id": "google/gemini-3.7-flash"}`，理由见 `docs/evidence/spike-fallback-model-id-20261010.md`（同 provider 复用鉴权、跨厂商 flash 档、目录内确认存在）。
+ - 非法形状（缺 `provider_id`/`model_id`、非字符串、空串）→ `bad_request`；省略 `fallback_model` 或传 null → 清除配置，回到「不换模型」。
+ - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
