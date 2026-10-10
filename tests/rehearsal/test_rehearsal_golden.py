@@ -445,27 +445,34 @@ def test_scenario_take_over_then_resume_auto_delivers(pipeline):
     assert delivery.get("mode") == "manual", delivery
     assert not delivery.get("pr_number"), delivery
 
-    # resume_auto 入口：allowed_actions 暴露 resume-auto；
-    # restore-task{resume_auto:true} 对活跃任务幂等（deduplicated），且只
-    # 负责清除 auto_advance_paused——**不清除 manual_takeover**（缺口见下）。
-    # 完整恢复语义（清暂停/幂等/事件）由 tests/test_save_state.py 覆盖。
+    # resume_auto：restore-task{resume_auto:true} 是 dismiss 的显式逆向入口
+    # （清 manual_takeover、清暂停、in_review 清评审结论、模式回 pr）。
     assert "resume-auto" in value["allowed_actions"], value["allowed_actions"]
     out = pipeline.call("restore-task", {"task_id": TASK, "resume_auto": True})
     assert out.get("ok") is True, out
+    assert out.get("deduplicated") is False, out
     value = pipeline.task(TASK)
+    assert value["automation"]["manual_takeover"] is False, value["automation"]
     assert value["auto_advance_paused"] in (0, False), value
-    # 缺口：manual_takeover 未被复位 → 引擎仍不驱动该任务
-    assert value["automation"]["manual_takeover"] is True, value["automation"]
+    assert value["delivery"]["mode"] == "pr", value["delivery"]
+    events = pipeline.call("list-events", {"task_id": TASK, "limit": 80})["events"]
+    assert any(e["kind"] == "task_restored"
+               and (e.get("detail") or {}).get("resume_auto")
+               for e in events), events
+    assert any(e["kind"] == "automation_resumed" for e in events), events
+
+    # 引擎重新驱动：接管解除后 reconcile 再次为该任务入队（review）
     summary = _reconcile(pipeline)
     mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert all(a.get("command") is None for a in mine), mine
+    assert mine, mine
+    assert any(a.get("command") == "enqueue" for a in mine), mine
 
-    # 缺口记录（引擎缺能力，不伪造绿）：
-    # - manual_takeover 当前无清除路径（dismiss 置位后无命令复位），引擎对
-    #   接管任务恒 noop；delivery-publish 对 manual 模式明确阻断。
-    # 因此"take_over → resume_auto 后仍自动交付到 done"闭环尚未打通；待
-    # engine_builder 提供 resume_auto 复位入口后，本用例应追加：
-    #   resume → 引擎重新驱动 → 执行 → 评审 pass → PR → 合并 → done。
+    # 仍能交付：评审 pass → PR → 合并 → done（同分支续走）
+    (pipeline.root / "review-count").write_text("2")
+    pipeline._review()
+    value = _deliver_to_merge(pipeline)
+    assert value["status"] == "done", value
+    assert pipeline.fake.tasks[TASK]["status"] == "done"
 
 
 def load_tests(loader, standard_tests, pattern):

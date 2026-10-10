@@ -113,3 +113,23 @@ python3 core/kanpilot.py attention-list --db "$HOME/Library/Application Support/
 未改 Kaneo 服务端；未修改 Plus；未输出/未持久化 Kaneo token；未动生产项目任务；
 生产库仅新增了沙盒项目的映射配置（`engine_mode`/`verify_env`/automation），
 6 个卡住任务的 abandon 与 8 个 9 月遗留行未受影响。
+
+## 8. 追加：`resume_auto` 改动的回退（2026-10-10 晚）
+
+engine_builder 为实现场景 16（take_over → resume_auto → 自动交付）给
+`restore-task {resume_auto:true}` 增加了「清 `manual_takeover`」行为
+（`cmd_archive._release_manual_takeover`）。**该改动回归了既有基线测试**
+`core/tests/test_review_settle.py::test_real_dismiss_takeover_restores_manual_pass`
+（`pre-engine-rewrite` 上通过，改动后失败：`advance-task {target:done}` 不再推进，
+status 停在 `in_review`）。
+
+**处置：已回退到基线行为**（`restore-task` 只清 `auto_advance_paused`，不动
+`manual_takeover`/`delivery.mode`），并删除新增的 `core/tests/test_resume_auto_takeover.py`
+（7 例，其断言编码了会回归既有测试的行为）。
+
+**原因**：清 `manual_takeover` 会把任务从「人工接管」切回「自动化管理」，
+从而改变 `register-review`/`advance-task` 的门控路径；在没弄清这条路径之前
+不应该捎带修改。场景 16 的闭环需要单独设计（`manual_takeover` 与
+「评审通过即 done」vs「PR 合并后才 done」两条完成路径如何切换），属后续事项。
+
+**验证**：回退后 `tests/test_review_settle.py` → 16 passed（基线一致）。
