@@ -56,6 +56,12 @@ def parse_verify_block(plan_text: str) -> dict:
     if fence is not None and is_verify:
         return {"ok": False, "error": "verify 围栏块未闭合"}
     if len(blocks) != 1:
+        if not blocks and _has_verify_fence_line(plan_text):
+            # 纯诊断：文本里确有 info 为 verify 的围栏行，却没有一个被识别成
+            # 顶层 verify 块——最常见原因是计划把 verify 围栏嵌进了另一个围栏
+            # （外层 ``` 遇 info 非空不闭合，于是把内层整段吞掉）。不改变判定
+            # 结果（仍然 error），只把定位时间从人工翻计划降到几秒。
+            return {"ok": False, "error": _NESTED_VERIFY_ERROR}
         return {"ok": False, "error": "计划必须恰好包含一个 verify 围栏块"}
     commands = []
     for line in blocks[0]:
@@ -70,6 +76,21 @@ def parse_verify_block(plan_text: str) -> dict:
     if not 1 <= len(commands) <= 5:
         return {"ok": False, "error": "verify 块必须包含 1–5 条非空命令"}
     return {"ok": True, "commands": commands}
+
+
+# info 为 verify 的围栏行（不论是否被解析识别为顶层块）。
+_VERIFY_FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})verify\s*$")
+
+_NESTED_VERIFY_ERROR = (
+    "verify 围栏似被其他围栏嵌套：计划中的 ```verify 块必须位于顶层，"
+    "不得嵌在任何其他代码围栏内（空 info 的 ``` 不会闭合，会把内层整段吞掉）。"
+    "请去掉外层围栏，或把围栏内的示例代码改成缩进代码"
+)
+
+
+def _has_verify_fence_line(plan_text: str) -> bool:
+    """文本里是否存在 info 为 ``verify`` 的围栏行（诊断用，不做意图判断）。"""
+    return any(_VERIFY_FENCE_LINE.match(line) for line in plan_text.splitlines())
 
 
 def extract_command_results(messages: list) -> list:
