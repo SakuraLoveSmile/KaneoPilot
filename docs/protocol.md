@@ -555,7 +555,9 @@ UI **仅在当前来源版本的分页全部读取完成（`has_more=false`）�
 
 ### 5.15.6 allowed_actions 新增
 
-`archive`（可归档时）、`trash`（可移入回收站时）、`restore`（`save_state != active` 时）、`resume-auto`（`auto_advance_paused=1` 时）。禁用原因由 `blocked_reason`/命令错误原文提供。
+`archive`（可归档时）、`trash`（可移入回收站时）、`restore`（`save_state != active` 时）、`resume-auto`（`auto_advance_paused=1` **或** `automation.manual_takeover` 为真时）。禁用原因由 `blocked_reason`/命令错误原文提供。
+
+> `resume-auto` 的第二个条件不可省：`resolve {action:"dismiss"}` 只在 review 阻塞时置 `auto_advance_paused=1`，非 review 路径的接管落在 `ready` 且不暂停——若只按暂停露出，那些任务的「交回自动化」入口在桌面端永不出现，D4 的单向门只关了一半。
 
 ## 5.16 执行轮次索引与会话回收站（v1.5）
 

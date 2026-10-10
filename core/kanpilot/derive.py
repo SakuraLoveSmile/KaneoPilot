@@ -562,7 +562,15 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             actions.append("dismiss")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
-    if db.task_auto_paused(task):
+    from . import core  # noqa: F401  (局部导入，避免与 bridge/db 形成循环)
+    # resume-auto is the reverse entry of ``resolve {action:"dismiss"}``
+    # (plan D4: manual_takeover is a *reversible* pause). It must be offered
+    # whenever the task is under manual takeover, not only when it is also
+    # paused: ``dismiss`` sets ``auto_advance_paused=1`` only for review-block
+    # failures, so a non-review takeover (e.g. empty-diff remediation
+    # exhausted) lands in ``ready`` unpaused and the desktop button would
+    # never appear — leaving the one-way door D4 diagnoses half open.
+    if db.task_auto_paused(task) or core.automation_of(task).get("manual_takeover"):
         actions.append("resume-auto")
     return actions
 
