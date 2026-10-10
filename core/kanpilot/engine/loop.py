@@ -31,7 +31,7 @@ from typing import Callable, Optional
 
 from .. import cli, core, db, util
 from . import decide, health, steps
-
+from . import decide, health, ladder, steps
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
 # Valid per-project engine modes (state-model §strangler).
@@ -79,16 +79,26 @@ class Reconciler:
 
     # ------------------------------------------------------------- modes (A12)
     def _project_modes(self, conn) -> dict:
-        """Effective engine_mode per project (project config > process default)."""
-        from .. import automation_policy, project_config
+        """Effective engine_mode per project (entry-level config > process default).
+
+        ``engine_mode`` lives at the mapping **entry** level
+        (``items[pid].engine_mode``), not inside ``automation``:
+        ``validate_automation`` rebuilds that sub-dict from a fixed key
+        whitelist and would silently drop it.
+        """
+        from .. import project_config
         _, _, items, _ = project_config.load_raw_mappings(conn)
         modes = {}
         for pid in items:
             if self.force_mode:
                 modes[pid] = self.mode
                 continue
-            policy = automation_policy.policy_for(conn, pid) or {}
-            modes[pid] = policy.get("engine_mode") or self.mode
+            entry = items.get(pid) or {}
+            configured = entry.get("engine_mode")
+            if configured not in ("legacy", "shadow", "live"):
+                configured = (entry.get("automation") or {}).get("engine_mode")
+            modes[pid] = (configured if configured in ("legacy", "shadow", "live")
+                          else self.mode)
         return modes
 
     def _live_project_ids(self, conn, modes) -> set:
@@ -159,6 +169,37 @@ class Reconciler:
             "AND status IN ('queued','claimed') LIMIT 1",
             (task_id, kind)).fetchone() is not None
 
+    def _transient_retry(self, conn, task, now):
+        """Ladder-1: build a backoff re-enqueue decision for a transiently-failed
+        request (state-model §8: ≤2/stage, then escalate). Returns None when there
+        is nothing to retry, the failure is not transient, a same-kind request is
+        already active, the retry budget is spent (escalate → the failed request
+        surfaces via attention), or a dispatch prompt was already sent/unknown.
+        """
+        row = conn.execute(
+            "SELECT kind, attempt_no, result_json FROM requests "
+            "WHERE task_id=? AND status='failed' ORDER BY updated_at DESC LIMIT 1",
+            (task["task_id"],)).fetchone()
+        if row is None:
+            return None
+        code = (util.jload(row["result_json"]) or {}).get("failure_code")
+        if ladder.classify(code) != ladder.LADDER_TRANSIENT:
+            return None
+        kind = row["kind"]
+        if kind == "dispatch" and task["send_state"] in ("sent", "unknown"):
+            return None
+        if self._has_active_request(conn, task["task_id"], kind):
+            return None
+        attempt_no = row["attempt_no"] or 0
+        fd = decide.failure_decision(code, attempt_no=attempt_no)
+        if fd.action != decide.RETRY:
+            return None
+        not_before = util.plus_seconds(fd.params["backoff_seconds"], now)
+        return decide.Decision(
+            decide.RETRY, reason=code or "transient", ladder=ladder.LADDER_TRANSIENT,
+            params={"kind": kind, "not_before": not_before,
+                    "attempt_no": fd.params["attempt_no"]})
+
     # ------------------------------------------------------------- reconcile
     def reconcile_once(self, now=None) -> dict:
         now = now or util.now_dt()
@@ -173,7 +214,7 @@ class Reconciler:
                     # The engine does not drive legacy projects at all.
                     continue
                 snap = self._snapshot(conn, task, now)
-                decision = decide.decide(snap)
+                decision = self._transient_retry(conn, task, now) or decide.decide(snap)
                 base = {"task_id": task["task_id"], "action": decision.action,
                         "reason": decision.reason, "ladder": decision.ladder,
                         "engine_mode": pmode, "explain": decide.explain(snap, decision)}

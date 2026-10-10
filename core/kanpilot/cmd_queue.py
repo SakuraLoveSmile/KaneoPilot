@@ -128,7 +128,8 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         request_payload = {"note": payload.get("note")} if payload.get("note") else None
         row, created = db.create_request(
             conn, now, kind, key, task_id=task["task_id"],
-            payload=request_payload, requested_by="user",
+            payload=request_payload, requested_by="engine" if payload.get("not_before") else "user",
+            not_before=payload.get("not_before"),
         )
         return {
             "request": derive.request_view(row, ctx.now),

@@ -58,7 +58,21 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
     if action == decide.ENQUEUE_REVIEW:
         return [CommandCall("enqueue", {"task_id": task_id, "kind": "review"},
                             kind="review")]
-    # AWAIT / BLOCK / NOOP / RETRY / ENQUEUE_PLAN / ADVANCE_INTAKE /
-    # ADVANCE_DISPATCH / RESUME_OBSERVE / START_FIX_ROUND: no direct scheduling
-    # command here (worker-owned, user-owned, or delegated to intake/planner).
+    if action == decide.RETRY:
+        # Ladder-1 transient retry: re-enqueue the same request kind with an
+        # exponential-backoff not_before (≤2/stage; over-limit escalates to
+        # ladder 2 before reaching here, so no re-enqueue). Dispatch is rebuilt
+        # only when not yet sent — a sent/unknown prompt is never re-sent.
+        kind = decision.params.get("kind")
+        not_before = decision.params.get("not_before")
+        if not kind:
+            return []
+        if kind == "dispatch" and task.get("send_state") in ("sent", "unknown"):
+            return []
+        return [CommandCall("enqueue",
+                            {"task_id": task_id, "kind": kind, "not_before": not_before},
+                            kind=kind)]
+    # AWAIT / BLOCK / NOOP / ENQUEUE_PLAN / ADVANCE_INTAKE / ADVANCE_DISPATCH /
+    # RESUME_OBSERVE / START_FIX_ROUND: no direct scheduling command here
+    # (worker-owned, user-owned, or delegated to intake/planner).
     return []

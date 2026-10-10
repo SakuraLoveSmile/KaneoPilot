@@ -103,12 +103,79 @@ class TestEngineModes(KanpilotTestCase):
         rev = self.call("get-project-mappings", {}).get("revision", 0)
         self.call("set-project-engine-mode",
                   {"project_id": pid, "engine_mode": "shadow", "expected_revision": rev})
-        self.assertEqual(self._automation_of(pid).get("engine_mode"), "shadow")
+        self.assertEqual(self._entry_of(pid).get("engine_mode"), "shadow")
         # CAS: stale revision -> conflict.
         exc = self.call_err("set-project-engine-mode",
                             {"project_id": pid, "engine_mode": "live",
                              "expected_revision": 0})
         self.assertEqual(exc.code, "conflict")
+
+    def _entry_of(self, project_id):
+        import json
+        import sqlite3
+        row = sqlite3.connect(str(self.db_path)).execute(
+            "SELECT value FROM settings WHERE key='project_mappings'").fetchone()
+        items = json.loads(row[0])["items"] if row else {}
+        return items.get(project_id) or {}
+
+    def test_engine_mode_survives_set_project_automation(self):
+        """engine_mode must live at the entry level, not inside ``automation``.
+
+        ``validate_automation`` rebuilds the automation sub-dict from a fixed
+        key whitelist, so an engine_mode stored inside it is silently dropped
+        by the next ``set-project-automation``. Regression guard.
+        """
+        pid = "projsurvive000000000a"
+        self._setup(pid, "taskmodesrv000000000001")
+        self.call("set-project-engine-mode",
+                  {"project_id": pid, "engine_mode": "live"})
+        self.assertEqual(self._entry_of(pid).get("engine_mode"), "live")
+        self.call("set-project-automation",
+                  {"project_id": pid, "automation": {"enabled": True}})
+        entry = self._entry_of(pid)
+        self.assertEqual(entry.get("engine_mode"), "live")
+        self.assertNotIn("engine_mode", entry.get("automation") or {})
+        self.assertEqual(loop.Reconciler(self.db_path, mode="legacy")._project_modes(
+            self._conn())[pid], "live")
+
+    def test_set_project_verify_env_persists_and_rejects_credentials(self):
+        pid = "projverifyenv0000000a"
+        self._setup(pid, "taskmodevenv0000000001")
+        self.call("set-project-verify-env",
+                  {"project_id": pid, "verify_env": {"PATH": "/opt/bin", "FOO": "bar"}})
+        self.assertEqual(self._entry_of(pid).get("verify_env"),
+                         {"PATH": "/opt/bin", "FOO": "bar"})
+        # set-project-automation must not drop it (same entry-level reason).
+        self.call("set-project-automation",
+                  {"project_id": pid, "automation": {"enabled": True}})
+        self.assertEqual(self._entry_of(pid).get("verify_env"),
+                         {"PATH": "/opt/bin", "FOO": "bar"})
+        # credential-ish keys are rejected: credentials live in credential files.
+        for key in ("KANEO_TOKEN", "Authorization", "api_key", "SECRET"):
+            exc = self.call_err("set-project-verify-env",
+                                {"project_id": pid, "verify_env": {key: "x"}})
+            self.assertEqual(exc.code, "bad_request", key)
+        # non-string values and non-dict payloads are rejected.
+        self.assertEqual(
+            self.call_err("set-project-verify-env",
+                          {"project_id": pid, "verify_env": {"A": 1}}).code,
+            "bad_request")
+        self.assertEqual(
+            self.call_err("set-project-verify-env",
+                          {"project_id": pid, "verify_env": ["A"]}).code,
+            "bad_request")
+        # unknown project -> not_found.
+        self.assertEqual(
+            self.call_err("set-project-verify-env",
+                          {"project_id": "nope", "verify_env": {}}).code,
+            "not_found")
+        # verdict reads the entry-level value.
+        from kanpilot.engine import verdict
+        self.assertEqual(verdict.project_verify_env(self._conn(), pid),
+                         {"PATH": "/opt/bin", "FOO": "bar"})
+
+    def _conn(self):
+        return db.connect(self.db_path)
 
 
 if __name__ == "__main__":

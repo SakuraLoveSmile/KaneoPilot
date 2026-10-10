@@ -256,11 +256,15 @@ def cmd_session_view(ctx, payload: dict) -> dict:
 def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
     """``set-project-engine-mode {project_id, engine_mode, expected_revision?}`` (A12).
 
-    Persist a project's ``engine_mode`` (legacy|shadow|live, default legacy) into
-    ``project_mappings.items[pid].automation.engine_mode`` — no new column, no
-    schema bump (reversible; old rows lack the key and fall back to the process
-    default). Implemented here rather than in ``automation_policy`` so that module
-    stays untouched; the reconciler reads it via ``automation_policy.policy_for``.
+    Persist a project's ``engine_mode`` (legacy|shadow|live, default legacy) at
+    the **mapping entry level** — ``project_mappings.items[pid].engine_mode`` —
+    *not* inside ``automation``. ``set-project-automation`` rebuilds the
+    ``automation`` sub-dict from a fixed key whitelist (``validate_automation``),
+    so anything stored inside it is silently dropped on the next automation
+    write. Entry-level keys survive both ``set-project-mapping`` (it spreads
+    ``existing_entry``) and ``set-project-automation`` (it only replaces the
+    ``automation`` key). No new column, no schema bump; reversible — old rows
+    lack the key and fall back to the process default.
     """
     from .. import project_config
 
@@ -281,12 +285,79 @@ def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
         if expected is not None and expected != revision:
             raise util.KanpilotError("conflict", "project_mappings revision 不符")
         entry = dict(items[project_id])
-        automation = dict(entry.get("automation") or {})
-        automation["engine_mode"] = mode
-        entry["automation"] = automation
+        entry["engine_mode"] = mode
         entry["updated_at"] = ctx.now_iso
         items[project_id] = entry
         db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
-                       {"version": project_config.CURRENT_VERSION, "revision": revision,
+                       {"version": project_config.CURRENT_VERSION,
+                        "revision": revision + 1,
                         "workspace_id": workspace, "items": items})
-    return {"project_id": project_id, "engine_mode": mode, "revision": revision + 1}
+    return {"project_id": project_id, "engine_mode": mode,
+            "revision": revision + 1}
+
+
+def _validate_verify_env(raw) -> dict:
+    """``verify_env`` must be a flat str→str dict with no credential-ish keys."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise util.bad_request("verify_env 必须为对象（字符串→字符串）")
+    result = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            raise util.bad_request("verify_env 键必须为非空字符串")
+        if not isinstance(value, str):
+            raise util.bad_request(f"verify_env[{key}] 必须为字符串")
+        normalized = key.strip()
+        if normalized.upper() in _VERIFY_ENV_FORBIDDEN:
+            raise util.bad_request(
+                f"verify_env 不得包含凭据类键：{normalized}"
+                "（凭据走凭据文件，不进入 verify_env）")
+        result[normalized] = value
+    if len(result) > 64:
+        raise util.bad_request("verify_env 最多 64 个键")
+    return result
+
+
+_VERIFY_ENV_FORBIDDEN = frozenset({
+    "TOKEN", "ACCESS_TOKEN", "ACCESSTOKEN", "REFRESH_TOKEN", "API_KEY",
+    "APIKEY", "SECRET", "PASSWORD", "CREDENTIALS", "AUTHORIZATION",
+    "KANEO_TOKEN", "KANEO_ACCESS_TOKEN", "PI_DESKTOP_TOKEN",
+})
+
+
+def cmd_set_project_verify_env(ctx, payload: dict) -> dict:
+    """``set-project-verify_env {project_id, verify_env, expected_revision?}``.
+
+    Persist the project ``verify_env`` at the mapping entry level
+    (``project_mappings.items[pid].verify_env``) for the same reason as
+    ``engine_mode``: ``validate_automation`` drops unknown keys inside
+    ``automation``. Read by ``engine.verdict.project_verify_env``.
+    """
+    from .. import project_config
+
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        raise util.bad_request("project_id 必须为非空字符串")
+    project_id = project_id.strip()
+    value = _validate_verify_env(payload.get("verify_env"))
+    expected = payload.get("expected_revision")
+    if expected is not None and (isinstance(expected, bool)
+                                 or not isinstance(expected, int) or expected < 0):
+        raise util.bad_request("expected_revision 须为非负整数")
+    with db.write_txn(ctx.conn):
+        revision, workspace, items, _ = project_config.load_raw_mappings(ctx.conn)
+        if project_id not in items:
+            raise util.KanpilotError("not_found", "项目映射不存在")
+        if expected is not None and expected != revision:
+            raise util.KanpilotError("conflict", "project_mappings revision 不符")
+        entry = dict(items[project_id])
+        entry["verify_env"] = value
+        entry["updated_at"] = ctx.now_iso
+        items[project_id] = entry
+        db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
+                       {"version": project_config.CURRENT_VERSION,
+                        "revision": revision + 1,
+                        "workspace_id": workspace, "items": items})
+    return {"project_id": project_id, "verify_env": value,
+            "revision": revision + 1}

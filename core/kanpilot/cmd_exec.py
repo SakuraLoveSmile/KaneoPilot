@@ -673,6 +673,9 @@ def cmd_report(ctx, payload: dict) -> dict:
             "note": payload.get("note"),
             "send_state": payload.get("send_state"),
             "kaneo_status": payload.get("kaneo_status"),
+            # v6: persisted so the engine's ladder-1 reconciler can detect a
+            # transient failure and re-enqueue with backoff.
+            "failure_code": payload.get("failure_code"),
         }
         core.finish_request(
             conn, request, now_iso, final, outcome, result=result,
