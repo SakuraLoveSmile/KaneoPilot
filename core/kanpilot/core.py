@@ -282,7 +282,18 @@ def require_stage_identity(conn, payload, task, now, *, stages) -> Optional[sqli
 
 
 def require_review_identity(conn, payload, task, now):
-    return require_stage_identity(conn, payload, task, now, stages=("review",))
+    request = require_stage_identity(conn, payload, task, now, stages=("review",))
+    frozen = db.request_payload(request).get("review_branch_snapshot") if request is not None else None
+    if task is not None and (requires_branch_review(task) or frozen is not None):
+        util.require(request is not None, "分支评审必须携带领取身份", "validation_failed")
+        # Already claimed historical PR reviews predate this field. Their
+        # runner verifies the existing committed snapshot/materials on resume.
+        if frozen is not None or delivery_of(task).get("workspace_version") == 1:
+            util.require(requires_branch_review(task) and isinstance(frozen, dict)
+                         and frozen == branch_review_snapshot(task),
+                         "任务分支或固定评审版本已变更", "conflict")
+        require_committed_review(task, verify_worktree=False)
+    return request
 
 
 def automation_of(task) -> dict:
@@ -290,6 +301,8 @@ def automation_of(task) -> dict:
 
 
 def delivery_of(task) -> dict:
+    if isinstance(task, dict) and "extra_json" not in task:
+        return dict(task.get("delivery") or (task.get("extra") or {}).get("delivery") or {})
     return dict(db.task_extra(task).get("delivery") or {})
 
 
@@ -300,6 +313,46 @@ def is_automation_managed(task) -> bool:
 
 def is_pr_delivery(task) -> bool:
     return delivery_of(task).get("mode") == "pr"
+
+
+def requires_branch_review(task) -> bool:
+    delivery = delivery_of(task)
+    return delivery.get("mode") == "pr" or delivery.get("workspace_version") == 1
+
+
+def branch_review_snapshot(task) -> dict:
+    delivery = delivery_of(task)
+    return {**{key: delivery.get(key) for key in (
+        "mode", "workspace_version", "branch", "base_branch", "base_sha", "head_sha", "worktree_path")},
+        "execution_run_id": task["run_id"]}
+
+
+def require_committed_review(task, execution_run_id=None, *, verify_worktree=True) -> None:
+    """Branch Review requires this execution's clean, core-owned local commit.
+
+    Filesystem verification belongs outside SQLite write transactions. Callers
+    repeat the metadata guard inside their transaction with verify_worktree=False.
+    """
+    if not requires_branch_review(task):
+        return
+    delivery = delivery_of(task)
+    run_id = execution_run_id or task["run_id"]
+    util.require(run_id and task["run_id"] == run_id,
+                 "分支评审执行轮次已变更", "stale_run")
+    util.require(all(delivery.get(key) for key in (
+        "branch", "base_branch", "base_sha", "head_sha", "worktree_path")),
+        "分支评审工作区登记不完整", "validation_failed")
+    util.require(any(commit.get("execution_run_id") == run_id
+                     and commit.get("sha") == delivery["head_sha"]
+                     for commit in delivery.get("commits") or []),
+                 "本轮执行尚未完成核心本地提交，不能进入分支评审", "validation_failed")
+    if verify_worktree:
+        from . import git_delivery
+        try:
+            git_delivery.verify_branch_worktree(dict(delivery, repository=task["repository"]),
+                                               require_clean=True, expected_head=delivery["head_sha"])
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("validation_failed", exc.message) from exc
 
 
 def update_automation(conn, task, now, **changes):
@@ -323,8 +376,26 @@ def is_user_replan(task):
             and bool(automation_of(task).get("replan_requested_at")))
 
 
+def execution_retry_of(task):
+    value = db.task_extra(task).get("execution_retry") or {}
+    if (task["status"] in ("ready", "dispatching", "prepared", "submitting")
+            and value.get("plan_sha256") == task["plan_sha256"]
+            and value.get("plan_generated_at") == task["plan_generated_at"]
+            and value.get("source_run_id")):
+        return value
+    return {}
+
+
 def expected_remote_slugs(task):
+    if execution_retry_of(task):
+        return {constants.IN_PROGRESS_SLUG}
     slugs = set(constants.TODO_SLUGS)
+    from . import review_resolution
+    remediation = review_resolution.remediation_of(task)
+    if (remediation and remediation.get("repository") == task["repository"]
+            and remediation.get("requirements_sha256") == task["requirements_sha256"]
+            and remediation.get("project_id") == task["project_id"]):
+        slugs.add(remediation["remote_status"])
     if is_pr_delivery(task) and delivery_of(task).get("commits"):
         slugs.update(constants.REVIEW_SLUGS)
     if is_user_replan(task):

@@ -159,6 +159,13 @@ final class ExecutorScheduler: ObservableObject {
             for request in requests where children[request.kind]?.isRunning != true {
                 try spawn(kind: request.kind)
             }
+            // Goal recovery can read Plus transcripts. Keep its latency outside
+            // the ten-second tick and normal stage dispatch, with one owned child.
+            let pausedStages = Set(current.paused?.stages ?? [])
+            if current.paused?.global != true && !pausedStages.contains("dispatch")
+                && !pausedStages.contains("monitor") && children["goal-recovery"]?.isRunning != true {
+                try spawn(kind: "goal-recovery")
+            }
         } catch {
             if !registered, !stopped, generation == expected {
                 // 初次数据库初始化可能短暂失败。留给下一次正常检查幂等登记，
@@ -180,10 +187,14 @@ final class ExecutorScheduler: ObservableObject {
         switch kind {
         case "plan": process.arguments = ["python3", "-m", "kanpilot.planner_runner"]
         case "intake": process.arguments = ["python3", "-m", "kanpilot.auto_intake"]
+        case "goal-recovery":
+            process.arguments = ["python3", coreDir.appendingPathComponent("kanpilot.py").path,
+                                 "recover-execution-goals", "--json", "{}"]
         default: process.arguments = ["python3", "-m", "kanpilot.executor_runner", "--stage", kind]
         }
         process.currentDirectoryURL = coreDir
         var env = ProcessInfo.processInfo.environment
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["KANPILOT_EXECUTOR_INSTANCE_ID"] = instanceID
         let npmBin = (NSHomeDirectory() as NSString).appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"

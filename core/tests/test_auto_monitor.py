@@ -101,6 +101,52 @@ def test_verification_evidence(monkeypatch, tmp_path, messages, passed):
         assert report(calls)["note"]
 
 
+def test_path_prefixed_checks_advance_with_original_execution_identity(monkeypatch, tmp_path):
+    value = task()
+    commands = ["dart format --output=none --set-exit-if-changed lib/core/providers.dart",
+                "flutter analyze --no-pub lib/core/providers.dart",
+                "flutter test --no-pub test/daily_recommend_shuffle_test.dart"]
+    value["extra"]["plan_verify"]["commands"] = commands
+    messages = [message('export PATH="$PATH:/Users/sakurasep/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n'
+                        + command, seq=seq) for seq, command in zip((235, 237, 239), commands)]
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=list(reversed(messages)))
+    assert report(calls)["outcome"] == "succeeded"
+    assert any(c == "advance-task" for c, _ in calls)
+
+
+@pytest.mark.parametrize("command,code", [
+    ("pytest", None),
+    ('export PATH="$PATH:/bin"\npytest', None),
+    ('export PATH="$PATH:/bin"\npytest', 7),
+    ('export PATH="$PATH:/bin"\npytest\ntrue', 0),
+    ('export PATH="$PATH:/bin"\npytest || true', 0),
+    ('export PATH="$HOME:/bin"\npytest', 0),
+])
+def test_unknown_verification_note_is_not_reported_as_command_failure(monkeypatch, tmp_path, command, code):
+    value = task()
+    value["extra"]["delivery"] = {"mode": "pr"}
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
+                        messages=[message(), message(command, code=code, seq=2)])
+    outcome = report(calls)
+    assert outcome["outcome"] == "needs_user"
+    assert outcome["failure_code"] == "verification_unconfirmed"
+    assert "证据无法确认：pytest" in outcome["note"]
+    assert "exit_code=None" not in outcome["note"] and "失败：" not in outcome["note"]
+    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+
+
+def test_exact_verification_failure_keeps_real_exit_code(monkeypatch, tmp_path):
+    _, calls, _ = invoke(monkeypatch, tmp_path, messages=[message(code=7)])
+    assert "失败：pytest（exit_code=7）" == report(calls)["note"]
+
+
+def test_path_wrapped_evidence_from_other_round_cannot_advance(monkeypatch, tmp_path):
+    _, calls, _ = invoke(monkeypatch, tmp_path, messages=[message(
+        'export PATH="$PATH:/bin"\npytest', run_id="previous-execution")])
+    assert report(calls)["failure_code"] == "execution_failed"
+    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+
+
 @pytest.mark.parametrize("command,verification,previous_pass", [
     (command, verification, previous_pass)
     for command, verification in [
@@ -154,15 +200,29 @@ def test_override_does_not_bypass_exit_code(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("outcome", ["committed", "already_committed", "blocked"])
-def test_delivery_commit(monkeypatch, tmp_path, outcome):
+@pytest.mark.parametrize("delivery", [{"mode": "pr"}, {"mode": "manual", "workspace_version": 1}])
+def test_delivery_commit(monkeypatch, tmp_path, outcome, delivery):
     value = task()
-    value["extra"]["delivery"] = {"mode": "pr"}
+    value["extra"]["delivery"] = delivery
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={"delivery-commit": {
         "outcome": outcome, "failure_code": "delivery_dirty"}})
     commit = next(p for c, p in calls if c == "delivery-commit")
     assert commit["run_id"] == "monitor-run" and commit["expected_execution_run_id"] == "execution"
     assert report(calls)["outcome"] == ("failed" if outcome == "blocked" else "succeeded")
     assert any(c == "advance-task" for c, _ in calls) == (outcome != "blocked")
+    if outcome != "blocked":
+        commands = [command for command, _ in calls]
+        assert commands.index("delivery-commit") < commands.index("advance-task")
+
+
+def test_manual_branch_remote_review_still_verifies_and_commits(monkeypatch, tmp_path):
+    value = task()
+    value["extra"]["delivery"] = {"mode": "manual", "workspace_version": 1}
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
+                        responses={"recheck": {"kaneo_status": "in-review"}})
+    commands = [command for command, _ in calls]
+    assert commands.index("session-messages") < commands.index("delivery-commit") < commands.index("advance-task")
+    assert report(calls)["outcome"] == "succeeded"
 
 
 @pytest.mark.parametrize("code", ["remote_conflict", "remote_unavailable"])
@@ -197,12 +257,21 @@ def test_automated_remote_in_review_waits_then_completes(monkeypatch, tmp_path):
     ("exited", False, "failed"), ("starting", False, "failed"), ("observing", True, "succeeded"),
     ("observing", False, "succeeded"), ("finished", False, "succeeded"), ("settled", False, "succeeded")])
 def test_observer_resume(monkeypatch, tmp_path, status, reopened, outcome):
-    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=dict(detail(), observer_alive=False),
+    value = task()
+    value['extra']['automation'] = {'manual_takeover': False}
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, round_value=dict(detail(), observer_alive=False),
         responses={"round-observe": {"status": status, "reopened": reopened}})
     assert next(p for c, p in calls if c == "round-observe")["run_id"] == "execution"
+    assert next(p for c, p in calls if c == "round-observe")["continue_goal"] is True
     assert report(calls)["outcome"] == outcome
     if reopened:
         assert not any(c == "advance-task" for c, _ in calls)
+
+
+def test_unmanaged_observer_resume_stays_readonly(monkeypatch, tmp_path):
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=dict(detail(), observer_alive=False),
+        responses={"round-observe": {"status": "deferred"}})
+    assert next(p for c, p in calls if c == "round-observe")["continue_goal"] is False
 
 
 def test_alive_observer_not_restarted(monkeypatch, tmp_path):

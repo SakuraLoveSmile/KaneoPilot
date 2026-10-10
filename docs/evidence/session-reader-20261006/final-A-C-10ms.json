@@ -1,0 +1,98 @@
+{
+  "fixture": "A400 wrapped_json followed by explicit C append, 1180x760 dark, 2s polling",
+  "probe_interval_ms": 10,
+  "main_queue_probe_samples": 37296,
+  "main_queue_probe_max_ms": 176.695416,
+  "main_queue_probe_p95_ms": 0.257292,
+  "main_queue_probe_ge250": 0,
+  "native_action_method": "Current NSEvent.timestamp mapped to uptime, through corresponding NSView didDraw; not CUA latency or compositor presentation",
+  "native_action_sample_count": 38,
+  "native_action_p95_ms": 119.462208,
+  "native_action_max_ms": 129.468792,
+  "native_actions_by_type": {
+    "search_input": 28,
+    "scroll": 10
+  },
+  "fulltext_events": [
+    {
+      "height": 481,
+      "width": 840,
+      "bytes": 1048586,
+      "uptime_ns": 712714782564208,
+      "kind": "fulltext_request"
+    },
+    {
+      "height": 0,
+      "uptime_ns": 712714783046208,
+      "kind": "fulltext_request",
+      "width": 1,
+      "bytes": 1048586
+    },
+    {
+      "native_milliseconds": 37.969917,
+      "is_sheet": false,
+      "animation_behavior": 2,
+      "ordering_milliseconds": 17.983584,
+      "kind": "fulltext_panel_open",
+      "milliseconds": 94.068875,
+      "uptime_ns": 712714802174166,
+      "hosting_milliseconds": 38.114958
+    },
+    {
+      "height": 0,
+      "bytes": 1048586,
+      "width": 1,
+      "kind": "fulltext_request",
+      "uptime_ns": 712714838999333
+    },
+    {
+      "kind": "fulltext_prepare",
+      "width": 840,
+      "utf16_length": 1048586,
+      "main_thread": false,
+      "uptime_ns": 712715240716750,
+      "renders_markdown": false,
+      "milliseconds": 399.904042
+    },
+    {
+      "utf16_length": 1048586,
+      "milliseconds": 25.680583,
+      "width": 840,
+      "kind": "fulltext_attach",
+      "uptime_ns": 712715266509708
+    },
+    {
+      "kind": "fulltext_first_draw",
+      "milliseconds": 39.2415,
+      "uptime_ns": 712715280717500,
+      "draw_milliseconds": 0.763375
+    },
+    {
+      "kind": "fulltext_locate",
+      "uptime_ns": 712715294920541,
+      "milliseconds": 0.303083
+    },
+    {
+      "kind": "fulltext_panel_close",
+      "milliseconds": 85.878084,
+      "uptime_ns": 712728410082291,
+      "restoring": true
+    },
+    {
+      "uptime_ns": 712728411634375,
+      "kind": "fulltext_stop",
+      "milliseconds": 0.55175
+    }
+  ],
+  "limitations": "10ms timer is a queue-delay probe, not successful Hangs instrument; button style keyboard followup built separately",
+  "A20_actions": {
+    "actual_actions": "10 keyboard input/delete and 10 scroll actions before explicit C append",
+    "samples": 24,
+    "p95_ms": 78.3565,
+    "max_ms": 112.551584,
+    "types": {
+      "search_input": 14,
+      "scroll": 10
+    }
+  }
+}

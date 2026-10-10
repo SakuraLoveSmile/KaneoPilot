@@ -8,7 +8,31 @@ import shlex
 
 
 def normalize(command: str) -> str:
-    return " ".join(command.split())
+    # Fold only shell word separators. Quoted/escaped whitespace belongs to
+    # an argument, and physical newlines can separate commands rather than
+    # arguments; neither can safely be replaced by a space for matching.
+    normalized, quote, pending_space = [], None, False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is None and char in " \t":
+            pending_space = True
+            index += 1
+            continue
+        if pending_space and normalized and normalized[-1] not in "\r\n":
+            normalized.append(" ")
+        pending_space = False
+        if char == "\\" and quote != "'":
+            normalized.append(command[index:index + 2])
+            index += 2
+            continue
+        normalized.append(char)
+        if char == quote:
+            quote = None
+        elif quote is None and char in ("'", '"'):
+            quote = char
+        index += 1
+    return "".join(normalized)
 
 
 def parse_verify_block(plan_text: str) -> dict:
@@ -90,13 +114,45 @@ _SHELL_CONTROL = frozenset((
 ))
 
 
-def _command_segments(command: str) -> tuple:
+def _path_prefix(command: str):
+    """Recognize only an inert PATH export before the remaining command.
+
+    No shell evaluation is performed. PATH is the only permitted expansion;
+    quotes, substitutions, options, and other environment assignments cannot
+    turn the prefix into shell control flow.
+    """
+    match = re.fullmatch(
+        r'[ \t]*(export[ \t]+PATH=(?:"[^"\r\n]*"|[^ \t\r\n&;|]+))'
+        r'[ \t]*(?:&&|\r?\n)[ \t\n]*(.+)', command, re.DOTALL)
+    if not match:
+        return None
+    prefix, remaining = match.groups()
+    value = prefix.split("=", 1)[1]
+    if value.startswith('"') and value.endswith('"'):
+        value = value[1:-1]
+        literal = r'[\w/.:+ -]'
+    else:
+        literal = r'[\w/.:+-]'
+    if not re.fullmatch(r'(?:\$(?:PATH(?![A-Za-z0-9_])|\{PATH\})|' + literal + r')+', value):
+        return None
+    return normalize(prefix), remaining
+
+
+def _command_segments(command: str, *, allow_single: bool = False) -> tuple:
     """Return top-level segments and whether success proves all AND segments.
 
     Even unsupported chains retain their recognizable top-level segments so a
     newer ambiguous result cannot resurrect older passing verification evidence.
     Quoted/escaped operators are argument data and never segment separators.
     """
+    command = command.strip(" \t\r\n")
+    path_prefix = _path_prefix(command) if not allow_single else None
+    if path_prefix is not None:
+        prefix, remaining = path_prefix
+        # Only this first export may precede a newline. A later newline could
+        # hide failure behind the exit status of another verification command.
+        segments, supported = _command_segments(remaining, allow_single=True)
+        return [prefix] + segments, supported
     segments, operators = [], []
     start, index, quote = 0, 0, None
     supported = True
@@ -153,7 +209,7 @@ def _command_segments(command: str) -> tuple:
     if quote is not None:
         supported = False
     segments.append(normalize(command[start:]))
-    if not operators or any(not segment for segment in segments):
+    if (not operators and not allow_single) or any(not segment for segment in segments):
         supported = False
     for segment in segments:
         try:
@@ -176,12 +232,17 @@ def match_verification(commands: list, results: list) -> dict:
         expected = normalize(command)
         matches = []
         for result in results:
-            if expected == normalize(result["command"]):
+            raw_command = result["command"].strip(" \t\r\n")
+            if not any(char in raw_command for char in "\r\n") and expected == normalize(raw_command):
                 matches.append(result)
                 continue
             segments, supported = _command_segments(result["command"])
             if expected in segments:
-                matches.append(result if supported else dict(result, exit_code=None))
+                # A zero exit proves every segment in a supported AND chain
+                # ran successfully. A nonzero wrapper status cannot identify
+                # which segment failed or which later commands were skipped.
+                proven = supported and type(result.get("exit_code")) is int and result["exit_code"] == 0
+                matches.append(result if proven else dict(result, exit_code=None))
         if not matches:
             missing.append(command)
         else:

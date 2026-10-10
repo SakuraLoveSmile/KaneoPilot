@@ -104,7 +104,7 @@ class RuntimeClient:
                  request_id: Optional[str] = None, run_id: Optional[str] = None,
                  task_id: Optional[str] = None, timeout: float = 30.0,
                  lease_seconds: Optional[float] = None,
-                 read_only: bool = False):
+                 read_only: bool = False, goal_continuation: Optional[dict] = None):
         self.role = role
         if not isinstance(connection_file, str) or not connection_file:
             raise util.KanpilotError("validation_failed", "runtime scope 缺少 connection_file")
@@ -120,6 +120,7 @@ class RuntimeClient:
         self.request_id, self.run_id, self.task_id = request_id, run_id, task_id
         self.timeout = timeout
         self.read_only = bool(read_only)
+        self.goal_continuation = dict(goal_continuation) if goal_continuation else None
         self.lease_seconds = max(float(lease_seconds or timeout), 1.0)
         self.scope_id = stable_scope_id(
             role, invocation_id=invocation_id, task_id=task_id, run_id=run_id,
@@ -206,6 +207,7 @@ class RuntimeClient:
             run_id=self.run_id, task_id=self.task_id, timeout=self.timeout,
             lease_seconds=self.lease_seconds,
             read_only=self.read_only,
+            goal_continuation=self.goal_continuation,
         )
         candidate.connect(required_tools=self._required_tools)
         return candidate
@@ -238,10 +240,20 @@ class RuntimeClient:
 
     def _write(self, name: str, op: str, args: dict) -> dict:
         if self.read_only:
-            raise util.KanpilotError(
-                "forbidden",
-                "恢复为只读，待处理 proposal 需人工确认；未重发任务",
-            )
+            bound = self.goal_continuation or {}
+            permitted = (self.role == "execution" and bound.get("scope_id") == self.scope_id
+                         and self.runtime_config.get("permission_mode") == "auto"
+                         and name == "kp_runtime_proposal_resolve"
+                         and args.get("action") == "accept"
+                         and args.get("target_permission_mode") == "auto"
+                         and all(args.get(key) == bound.get(key) and bound.get(key) is not None
+                                 for key in ("session_id", "turn_id", "proposal_id", "tool_call_id", "version")))
+            if not permitted:
+                raise util.KanpilotError(
+                    "forbidden",
+                    "恢复为只读，待处理 proposal 需人工确认；未重发任务",
+                )
+            args = {**args, "goal_continuation": True}
         return self._call(name, {"operation_id": op, **args})
 
     def tools_list(self) -> set:
@@ -318,8 +330,9 @@ class RuntimeClient:
                     "pendingPermission": result.get("pending_permission")})
         return raw
 
-    def turn_get(self, session_id: str, turn_id: str) -> dict:
-        result = self._call("kp_runtime_turn_get", {"session_id": session_id, "turn_id": turn_id})
+    def turn_get(self, session_id: str, turn_id: str, *, require_identity: bool = False) -> dict:
+        result = self._call("kp_runtime_turn_get", {"session_id": session_id, "turn_id": turn_id,
+                            **({"require_identity": True} if require_identity else {})})
         return {"sessionId": result.get("session_id"), "turnId": result.get("turn_id"),
                 "status": result.get("status"), "endedAt": result.get("ended_at"),
                 "errorCode": result.get("error_code")}
@@ -330,6 +343,8 @@ class RuntimeClient:
             **({"before": kwargs["message_before"]} if kwargs.get("message_before") is not None else {}),
             **({"limit": kwargs["message_limit"]} if kwargs.get("message_limit") is not None else {}),
         })
+        if result.get("truncated"):
+            return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
             "messageStart": result.get("message_start"),
@@ -441,6 +456,8 @@ class HistoricalReadClient:
             limit=kwargs.get("message_limit"),
             timeout=max(1, int(self.timeout)),
         )
+        if result.get("truncated"):
+            return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
             "messageStart": result.get("message_start"),

@@ -1,0 +1,49 @@
+{
+  "duration_seconds": 30,
+  "profile_partial": true,
+  "total_sampled_cpu_ms": 1913.0,
+  "main_sampled_cpu_ms": 1150.0,
+  "main_session_frame_ms": [
+    [
+      "specialized static AttributedString.== infix(_:_:)",
+      334.0
+    ],
+    [
+      "specialized static AttributedString.Guts._characterwiseIsEqual(_:to:)",
+      333.0
+    ],
+    [
+      "SessionMessageRow.body.getter",
+      97.0
+    ],
+    [
+      "protocol witness for View.body.getter in conformance SessionMessageRow",
+      97.0
+    ],
+    [
+      "closure #1 in closure #1 in SessionMessageRow.body.getter",
+      91.0
+    ],
+    [
+      "closure #1 in SessionMessageRow.body.getter",
+      91.0
+    ],
+    [
+      "SessionMessageRow.contentText.getter",
+      50.0
+    ],
+    [
+      "closure #1 in closure #1 in closure #1 in SessionMessageRow.body.getter",
+      41.0
+    ],
+    [
+      "AttributedString.init(_:attributes:)",
+      39.0
+    ],
+    [
+      "static AttributedString.highlighted(_:query:)",
+      39.0
+    ]
+  ],
+  "note": "xctrace exit 2 due corrupt OS log archive; CPU samples exported, Hangs not accepted"
+}

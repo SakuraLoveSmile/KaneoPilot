@@ -8,8 +8,8 @@ def _identity(ctx, payload, *, now=None):
     core.require_stage_identity(ctx.conn, payload, task, now or ctx.now, stages=("monitor",))
     if task["run_id"] != payload["expected_execution_run_id"]:
         raise util.KanpilotError("stale_run", "交付对应的执行轮次已变更")
-    if not core.is_pr_delivery(task):
-        raise util.KanpilotError("conflict", "任务未采用 PR 交付")
+    if not core.requires_branch_review(task):
+        raise util.KanpilotError("conflict", "任务未采用分支工作区")
     return task
 
 
@@ -23,13 +23,15 @@ def cmd_delivery_commit(ctx, payload) -> dict:
     with db.write_txn(conn):
         task = _identity(ctx, payload)
         delivery = core.delivery_of(task)
-        for commit in delivery.get("commits") or []:
-            if commit.get("execution_run_id") == execution_run_id:
-                return {"outcome": "already_committed", "sha": commit["sha"]}
-        util.require(task["status"] == "running", "仅运行中的任务可以登记执行提交", "conflict")
+        existing = next((commit for commit in delivery.get("commits") or []
+                         if commit.get("execution_run_id") == execution_run_id), None)
+        if existing:
+            core.require_committed_review(task, execution_run_id, verify_worktree=False)
+        else:
+            util.require(task["status"] == "running", "仅运行中的任务可以登记执行提交", "conflict")
         util.require(all(delivery.get(k) for k in ("branch", "head_sha", "worktree_path")),
                      "交付工作树登记不完整", "validation_failed")
-        baseline = {k: delivery[k] for k in ("branch", "head_sha", "worktree_path")}
+        baseline = core.branch_review_snapshot(task)
         git_input = dict(delivery, repository=task["repository"])
         title = task["title"]
         fix_round = core.automation_of(task).get("fix_round", 0)
@@ -37,9 +39,12 @@ def cmd_delivery_commit(ctx, payload) -> dict:
     # Phase 2: IO outside BEGIN IMMEDIATE, including the final HEAD check.
     failure, result = None, None
     try:
-        result = git_delivery.commit_worktree(
-            git_input, task_id=payload["task_id"], title=title,
-            execution_run_id=execution_run_id, fix_round=fix_round)
+        if existing:
+            result = {"sha": existing["sha"], "files": []}
+        else:
+            result = git_delivery.commit_worktree(
+                git_input, task_id=payload["task_id"], title=title,
+                execution_run_id=execution_run_id, fix_round=fix_round)
         git_delivery.verify_branch_worktree(
             git_input, require_clean=True, expected_head=result["sha"])
     except git_delivery.GitDeliveryError as exc:
@@ -51,10 +56,16 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         current = core.delivery_of(fresh)
         for commit in current.get("commits") or []:
             if commit.get("execution_run_id") == execution_run_id:
+                if failure:
+                    raise util.KanpilotError("validation_failed", failure.message)
+                util.require(commit.get("sha") == result["sha"]
+                             and core.branch_review_snapshot(fresh) == dict(baseline, head_sha=result["sha"]),
+                             "提交期间交付登记已变更", "conflict")
+                core.require_committed_review(fresh, execution_run_id, verify_worktree=False)
                 return {"outcome": "already_committed", "sha": commit["sha"]}
-        util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
-        util.require(all(current.get(k) == v for k, v in baseline.items()),
+        util.require(core.branch_review_snapshot(fresh) == baseline,
                      "提交期间交付登记已变更", "conflict")
+        util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
         if failure:
             code = failure.code if failure.code in ("delivery_blocked_files", "no_changes") else "delivery_commit_failed"
             core.block_task(conn, fresh, now, failure.message, code,

@@ -13,6 +13,9 @@ $KANPILOT_FAKE_STATE（默认 $TMPDIR/kanpilot-fake-state.json），
 删除该文件即复位罐头数据。
 """
 import json
+import hashlib
+import time
+import copy
 import os
 import sys
 import tempfile
@@ -54,6 +57,10 @@ def future(**kw):
 
 def sha(seed, n=64):
     return (uuid.uuid5(uuid.NAMESPACE_URL, "fake:" + seed).hex * 4)[:n]
+
+
+# 同一阻塞和 failed monitor 的精确时间关联；跨 CLI 调用保持稳定。
+VERIFICATION_FIXTURE_BLOCKED_AT = "2026-10-09T07:56:27.000000+00:00"
 
 
 # ---------------------------------------------------------------- state
@@ -521,6 +528,18 @@ def base_tasks():
 
 def base_requests():
     return [
+        {"request_id": "req-monitor-auto-verification-unconfirmed",
+         "idempotency_key": "monitor:auto-verification_unconfirmed:run-auto-verification-unconfirmed",
+         "task_id": "auto-verification_unconfirmed", "stage": "monitor", "kind": "monitor",
+         "status": "failed", "priority": 100, "requested_by": "scheduler",
+         "run_id": "run-auto-verification-monitor", "claimed_by": "kaneo-monitor",
+         "claimed_at": "2026-10-09T07:55:27.000000+00:00",
+         "finished_at": VERIFICATION_FIXTURE_BLOCKED_AT, "attempt_no": 1,
+         "payload": {"task_status_at_claim": "running"},
+         "result": {"outcome": "needs_user",
+                    "reason": "验证退出码尚未识别，等待重新核验现有记录"},
+         "created_at": "2026-10-09T07:54:27.000000+00:00",
+         "updated_at": VERIFICATION_FIXTURE_BLOCKED_AT},
         {"request_id": "req-plan-002", "idempotency_key": "plan:task-lib-002",
          "task_id": "task-lib-002", "stage": "plan", "kind": "plan",
          "status": "claimed", "priority": 100, "requested_by": "scheduler",
@@ -702,6 +721,13 @@ def base_events():
             "actor": actor,
             "detail": detail,
         })
+    events.append({
+        "id": len(events) + 1, "at": VERIFICATION_FIXTURE_BLOCKED_AT,
+        "task_id": "auto-verification_unconfirmed",
+        "request_id": "req-monitor-auto-verification-unconfirmed",
+        "kind": "reported", "actor": "kaneo-monitor",
+        "detail": {"outcome": "needs_user", "note": "验证证据尚未确认"},
+    })
     return events
 
 
@@ -916,11 +942,11 @@ def merged_tasks(state):
 
 def merged_requests(state):
     requests = {r["request_id"]: dict(r) for r in base_requests()}
+    for req in state.get("extra_requests", []):
+        requests[req["request_id"]] = dict(req)
     for rid, patch in state.get("request_overrides", {}).items():
         if rid in requests:
             requests[rid].update(patch)
-    for req in state.get("extra_requests", []):
-        requests[req["request_id"]] = dict(req)
     # v2 §5.21/§5.22：manual_authorized 由 payload_json.manual_authorized 派生到行级字段。
     for req in requests.values():
         payload = req.get("payload") or {}
@@ -973,8 +999,16 @@ def allowed_actions(task, requests):
     if any(request_is_lost(r) for r in task_reqs):
         return ["release_lost", "recheck"]
     if status == "needs_user":
+        if task.get("plan_clarification"):
+            return ["answer_plan_questions", "replan", "dismiss", "recheck"]
+        if task.get("failure_code") == "verification_unconfirmed":
+            return ["run_verification_checks", "reverify", "accept_verification", "replan", "dismiss", "recheck"]
+        if task.get("review_resolution"):
+            return ["resolve_review_blocker", "retry", "replan", "dismiss", "recheck"]
         if task.get("send_state") == "unknown":
             return ["restore", "accept_duplicate", "mark_sent", "recheck"]
+        if task.get("failure_code") == "execution_failed":
+            return ["resume", "replan", "dismiss", "mark_done", "recheck"]
         return ["retry", "replan", "dismiss", "mark_done", "recheck"]
     if status in ("needs_plan",):
         # v2 §5.22：plan 不再经 enqueue，打开规划面板（prepare_plan）。
@@ -1156,8 +1190,181 @@ def cmd_get_task(state, payload):
         return fail("缺少必填字段 task_id", "bad_request")
     for task in merged_tasks(state):
         if task["task_id"] == tid:
+            scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
+            if scenario.get("task_read_error"):
+                return fail(str(scenario["task_read_error"]), "remote_unavailable")
             return {"task": task_detail(task, merged_requests(state))}
     return fail("任务不存在：%s" % tid, "not_found")
+
+
+def cmd_plan_answers(state, payload, submit=False):
+    """Isolated UI fixture; never contact a model, harness or real Kaneo."""
+    tid = payload.get("task_id")
+    operation = payload.get("operation_id")
+    record = state.get("plan_answer_operations", {}).get(operation) if submit else None
+    if record:
+        if record["payload"] != payload:
+            return fail("同一提交标识的答案已变化", "conflict")
+        return {"ok": True, "request_id": record["request_id"], "deduplicated": True}
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    clarification = (task or {}).get("plan_clarification")
+    if not clarification or clarification["id"] != payload.get("clarification_id"):
+        return fail("待确认问题已变化，请刷新后重新回答", "conflict")
+    failure = state.get("plan_answer_fixture_failure")
+    if failure:
+        return fail(failure, "remote_unavailable")
+    answers = payload.get("answers", [])
+    if submit:
+        by_id = {a["question_id"]: a for a in answers}
+        for q in clarification["questions"]:
+            answer = by_id.get(q["id"], {})
+            valid = bool(answer.get("text", "").strip()) if not q["options"] else (
+                answer.get("option_id") in {o["id"] for o in q["options"]} or
+                q["allow_custom"] and answer.get("option_id") == "custom" and bool(answer.get("text", "").strip()))
+            if q["required"] and not valid:
+                return fail("请完成必答问题", "bad_request")
+        if not operation:
+            return fail("缺少提交标识", "bad_request")
+    def update(s):
+        ov = s.setdefault("task_overrides", {}).setdefault(tid, {})
+        saved = copy.deepcopy(clarification)
+        saved.update(saved_answers=answers, supplement=payload.get("supplement", ""), saved_at=iso(utcnow()))
+        ov["plan_clarification"] = saved
+        if not submit:
+            return {"ok": True}
+        rid = "req-plan-answers-" + uuid.uuid4().hex[:8]
+        s.setdefault("extra_requests", []).append({
+            "request_id": rid, "task_id": tid, "kind": "plan", "stage": "plan", "status": "queued",
+            "priority": 100, "created_at": iso(utcnow()), "updated_at": iso(utcnow()), "requested_by": "user"})
+        ov.update(plan_clarification=None, status="planning", display_status="已排队", blocked_reason=None,
+                  blocked_summary=None, failure_code=None, failure_reason=None, failure_stage=None)
+        s.setdefault("plan_answer_operations", {})[operation] = {"payload": payload, "request_id": rid}
+        decisions = []
+        for question in clarification["questions"]:
+            answer = next((a for a in answers if a["question_id"] == question["id"]), {})
+            label = next((o["label"] for o in question["options"] if o["id"] == answer.get("option_id")), "")
+            decisions.append(question["title"] + "：" + "；".join(v for v in (label, answer.get("text")) if v))
+        append_event(s, "plan_answers_submitted", tid, rid, detail={
+            "questions": clarification["questions"], "answers": answers, "supplement": payload.get("supplement", ""),
+            "note": "；".join(decisions)})
+        return {"ok": True, "request_id": rid, "deduplicated": False}
+    return mutate(state, update)
+
+
+def cmd_verification_checks(state, payload, status_only=False):
+    tid, op = payload.get("task_id"), payload.get("operation_id")
+    previous = state.get("verification_check_operations", {}).get(op)
+    if status_only:
+        if not previous or previous["payload"].get("task_id") != tid:
+            return {"ok": True, "state": "not_found"}
+        return dict(previous["response"], state="completed", deduplicated=True)
+    if previous:
+        if previous["payload"] != payload:
+            return fail("同一操作编号的检查内容已变化", "conflict")
+        if previous["response"].get("recovery_pending") and not state.get("verification_checks_fixture_recovery_pending"):
+            def recover(s):
+                response = s["verification_check_operations"][op]["response"]
+                response.update(recovery_pending=False, detail="检查已通过，已恢复推进")
+                ov = s.setdefault("task_overrides", {}).setdefault(tid, {})
+                ov["verification_checks"].update(recovery_pending=False, detail=response["detail"])
+                ov.update(status="running", stage="monitor", display_status="执行中", failure_code=None,
+                          failure_reason=None, failure_stage=None, blocked_reason=None, blocked_summary=None)
+                enqueue_request(s, tid, "monitor")
+                return dict(response, deduplicated=True)
+            return mutate(state, recover)
+        return dict(previous["response"], deduplicated=True)
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    if not task or task.get("failure_code") != "verification_unconfirmed":
+        return fail("当前任务不允许重新运行验证检查", "conflict")
+    if (payload.get("expected_execution_run_id") != task.get("run_id")
+            or payload.get("expected_plan_sha256") != task.get("plan_sha256")):
+        return fail("执行轮次或计划已变化", "conflict")
+    code = state.get("verification_checks_fixture_exit_code", 0)
+    checks = [{"command": command, "exit_code": code if i == 0 else 0,
+               "timed_out": False, "detail": "隔离模拟检查失败" if code and i == 0 else None,
+               "output_tail": "隔离 FakeCore 输出：" + ("检查失败" if code and i == 0 else "检查通过")}
+              for i, command in enumerate(["dart format --output=none --set-exit-if-changed lib/core/providers.dart",
+                                            "flutter analyze --no-pub lib/core/providers.dart", "flutter test --no-pub test/daily_recommend_shuffle_test.dart"])]
+    pending = code == 0 and state.get("verification_checks_fixture_recovery_pending", False)
+    result = {"ok": True, "verification_ok": code == 0, "recovery_pending": pending, "deduplicated": False, "checks": checks,
+              "detail": "所有检查独立通过，已排队监控" if code == 0 else "检查未通过，原成果与阻塞保留"}
+    if pending:
+        result["detail"] = "检查已通过，恢复推进暂未确认，请复用原回执继续恢复"
+    def update(s):
+        ov = s.setdefault("task_overrides", {}).setdefault(tid, {})
+        ov["verification_checks"] = dict(result, operation_id=op, state="completed",
+                                          execution_run_id=task["run_id"], plan_sha256=task["plan_sha256"])
+        s.setdefault("verification_check_operations", {})[op] = {"payload": payload, "response": result}
+        append_event(s, "verification_checks_started", tid, detail={"operation_id": op})
+        append_event(s, "verification_checks_completed", tid, detail={"operation_id": op, "verification_ok": code == 0})
+        if code == 0 and not pending:
+            ov.update(status="running", stage="monitor", display_status="执行中", failure_code=None,
+                      failure_reason=None, failure_stage=None, blocked_reason=None, blocked_summary=None)
+            enqueue_request(s, tid, "monitor")
+        return result
+    return mutate(state, update)
+
+
+def cmd_review_resolution(state, payload, evidence=False):
+    """Native acceptance fixture, never model/Kaneo/Git operations."""
+    tid = payload.get("task_id")
+    op = payload.get("operation_id")
+    receipt = state.get("review_resolution_operations", {}).get(op) if evidence else None
+    if receipt:
+        if receipt["payload"] != payload:
+            return fail("提交标识的内容已变化", "conflict")
+        return {"ok": True, "request_id": receipt["request_id"], "deduplicated": True}
+    if not evidence and tid in state.get("review_remediations", {}):
+        return {"ok": True, "task_id": tid, "deduplicated": True, "detail": "修复材料已准备"}
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    resolution = (task or {}).get("review_resolution")
+    fields = {"expected_execution_run_id": "execution_run_id", "expected_review_request_id": "review_request_id",
+              "expected_report_sha256": "report_sha256", "expected_plan_sha256": "plan_sha256"}
+    if not resolution or any(payload.get(key) != resolution.get(value) for key, value in fields.items()):
+        return fail("评审版本已变化，请刷新后处理", "conflict")
+    if state.get("review_resolution_fixture_failure"):
+        return fail(state["review_resolution_fixture_failure"], "remote_unavailable")
+    if evidence and not (payload.get("evidence_text", "").strip() or payload.get("local_paths")):
+        return fail("请填写说明或选择证据文件", "bad_request")
+    def update(s):
+        ov = s.setdefault("task_overrides", {}).setdefault(tid, {})
+        ov.update(review_resolution=None, blocked_reason=None, failure_code=None, failure_reason=None,
+                  blocked_summary=None, stage="review" if evidence else "plan")
+        if not evidence:
+            s.setdefault("review_remediations", {})[tid] = dict(resolution)
+            ov.update(status="needs_plan", display_status="待规划")
+            append_event(s, "review_repair_prepared", tid, detail={"note": "原计划、评审报告和执行成果已带入修复材料"})
+            return {"ok": True, "task_id": tid, "deduplicated": False, "detail": "修复材料已准备，请核对后开始规划"}
+        rid = "req-evidence-" + uuid.uuid4().hex[:8]
+        s.setdefault("extra_requests", []).append({"request_id": rid, "task_id": tid, "stage": "review", "kind": "review",
+                                                 "status": "queued", "created_at": iso(utcnow()), "updated_at": iso(utcnow()), "priority": 100})
+        s.setdefault("review_resolution_operations", {})[op] = {"payload": payload, "request_id": rid}
+        ov.update(status="in_review", display_status="已排队")
+        append_event(s, "review_supplemented", tid, rid, detail={"note": "用户补充证据已保存，等待评审核验"})
+        return {"ok": True, "request_id": rid, "deduplicated": False}
+    return mutate(state, update)
+
+
+def cmd_get_plan(state, payload):
+    """Static verified-response fixture; never read a user's real plan files."""
+    task = next((t for t in merged_tasks(state) if t["task_id"] == payload.get("task_id")), None)
+    if not task or not task.get("plan_path"):
+        return fail("该任务尚未生成计划", "not_found")
+    if state.get("plan_read_error"):
+        return fail("隔离演练：计划自发布后已变更", "conflict")
+    expected = payload.get("expected_plan_sha256")
+    if expected and expected != task.get("plan_sha256"):
+        return fail("计划哈希不匹配", "conflict")
+    markdown = ("# " + task["title"] + "\n\n"
+                "> 隔离预览材料，不会调用真实模型或修改真实仓库。\n\n"
+                "## 本次目标\n\n让用户明确当前阶段、需要决定的事项和最终交付结果。\n\n"
+                "## 实施与验证\n\n1. 核对需求和材料。\n2. 在隔离环境执行与验证。\n3. 保留记录并提交评审。\n\n"
+                "| 检查 | 预期 |\n| --- | --- |\n| 正常操作 | 状态清晰 |\n| 失败状态 | 保留原因和恢复入口 |\n")
+    return {"task_id": task["task_id"], "title": task["title"],
+            "plan_kind": task.get("plan_kind", "standard"),
+            "generated_at": task.get("plan_generated_at"),
+            "plan_sha256": task.get("plan_sha256"), "plan_path": task["plan_path"],
+            "markdown": markdown}
 
 
 def cmd_list_requests(state, payload):
@@ -1171,12 +1378,16 @@ def cmd_list_requests(state, payload):
         requests = [r for r in requests if r["status"] == status]
     for r in requests:
         r["display_status"] = "lost" if request_is_lost(r) else r["status"]
+        frozen = r.get("payload") or {}
+        r["backend"] = r.get("backend") or frozen.get("planner_backend") or frozen.get("review_backend")
     requests.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     limit = payload.get("limit", 200)
     return {"requests": requests[: int(limit)]}
 
 
 EVENT_KIND_CN = {
+    "verification_checks_started": "验证检查已开始", "verification_checks_completed": "验证检查已完成",
+    "review_repair_prepared": "评审修复材料已准备", "review_supplemented": "评审证据已补充",
     "task_created": "任务创建", "task_updated": "任务更新",
     "requirements_changed": "需求变更", "kaneo_observed": "远端观察",
     "plan_published": "计划发布", "enqueued": "已入队", "claimed": "已领取",
@@ -1196,6 +1407,7 @@ EVENT_KIND_CN = {
     "session_purged": "会话永久从列表移除",
     "plan_input_prepared": "规划材料就绪", "plan_started": "规划已排队",
     "plan_ready": "规划产出就绪", "plan_needs_input": "规划需要补充输入",
+    "plan_answers_submitted": "规划答案已提交",
 }
 
 
@@ -1217,9 +1429,11 @@ def _event_enrichment(state, event):
         summary = "任务状态：%s → %s" % (detail.get("from"), detail.get("to"))
     elif kind in ("enqueued", "claimed"):
         summary = "%s（%s）" % (cn, detail.get("kind") or (req or {}).get("kind") or "请求")
-    elif kind == "reported":
+    elif kind in ("reported", "plan_answers_submitted"):
         note = detail.get("note") or detail.get("reason") or detail.get("progress")
         summary = "%s：%s" % (cn, note) if note else cn
+        if kind == "plan_answers_submitted":
+            stage, result = "plan", "succeeded"
     return {
         "task_title": (task or {}).get("title")
             or ("未保留标题 · %s" % (event.get("task_id") or "")[:8]
@@ -1385,6 +1599,18 @@ def cmd_resolve(state, payload):
     if not task:
         return fail("任务不存在：%s" % tid, "not_found")
     requests = merged_requests(state)
+    scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
+    if scenario.get("resolve_error"):
+        return fail(str(scenario["resolve_error"]), "conflict")
+    if action == "reverify":
+        if action not in allowed_actions(task, requests) or task.get("failure_code") != "verification_unconfirmed":
+            return fail("当前状态不允许重新核验验证证据", "conflict")
+        if not payload.get("expected_execution_run_id") or payload["expected_execution_run_id"] != task.get("run_id"):
+            return fail("执行轮次已变化，请刷新后重新核验", "conflict")
+        if any(r.get("task_id") == tid and r.get("status") in ("queued", "claimed") for r in requests):
+            return fail("任务仍有活动请求，请刷新后重新核验", "conflict")
+        if scenario.get("verification_passed", task.get("_verification_passed")) is not True:
+            return fail("验证未通过或证据仍无法确认，请查看执行记录", "conflict")
 
     def fail_action(msg):
         return {"__fail__": True, "error": msg, "code": "bad_request"}
@@ -1394,13 +1620,30 @@ def cmd_resolve(state, payload):
         clear = ["failure_code", "failure_reason", "failure_stage",
                  "blocked_at", "blocked_reason", "blocked_summary",
                  "manual_recovery_required", "lock_retained"]
-        if action in ("resume", "accept_verification"):
-            if action not in allowed_actions(task, requests):
-                return fail_action("核心未允许此动作")
+        if action == "reverify":
             for k in clear:
                 ov[k] = None
             ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
             enqueue_request(s, tid, "monitor")
+        elif action in ("resume", "accept_verification"):
+            if action not in allowed_actions(task, requests):
+                return fail_action("核心未允许此动作")
+            failed_execution = action == "resume" and task.get("failure_code") == "execution_failed"
+            if "expected_execution_run_id" in payload and not failed_execution:
+                return fail_action("失败执行状态已变化，请刷新后重新操作")
+            if failed_execution and (not payload.get("expected_execution_run_id") or
+                                     payload["expected_execution_run_id"] != task.get("run_id")):
+                return fail_action("失败执行轮次已变化，请刷新后重新操作")
+            for k in clear:
+                ov[k] = None
+            if failed_execution:
+                ov.update({"status": "ready", "display_status": "已排队", "stage": "dispatch",
+                           "run_id": None, "session_id": None, "session_marker": None,
+                           "send_state": "not_sent", "sent": 0})
+                enqueue_request(s, tid, "dispatch")
+            else:
+                ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
+                enqueue_request(s, tid, "monitor")
         elif action == "retry":
             if task["status"] != "needs_user" or task.get("send_state") == "unknown":
                 return fail_action("当前状态不允许 retry")
@@ -1552,6 +1795,7 @@ SESSION_POLL_SECONDS = 2
 LONG_SESSION_TASK = os.environ.get("KANPILOT_FAKE_LONG_SESSION")
 LONG_SESSION_COUNT = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_COUNT") or 400)
 LONG_SESSION_BYTES = int(os.environ.get("KANPILOT_FAKE_LONG_SESSION_BYTES") or 4096)
+LONG_SESSION_SHAPE = os.environ.get("KANPILOT_FAKE_LONG_SESSION_SHAPE", "lines")
 
 
 def long_session_messages(count=None, output_bytes=None):
@@ -1564,7 +1808,7 @@ def long_session_messages(count=None, output_bytes=None):
     count = count or LONG_SESSION_COUNT
     output_bytes = output_bytes or LONG_SESSION_BYTES
     line = "0123456789abcdef tool output chunk payload\n"
-    long_output = line * max(1, output_bytes // len(line))
+    long_output = (line * (output_bytes // len(line) + 1))[:output_bytes]
     types = ["assistant", "tool_call", "tool_result", "command_output"]
     messages = []
     for seq in range(1, count + 1):
@@ -1579,9 +1823,14 @@ def long_session_messages(count=None, output_bytes=None):
                     "output": None, "exit_code": None}
         elif mtype in ("tool_result", "command_output"):
             content = long_output
+            if LONG_SESSION_SHAPE == "wrapped_json":
+                content = json.dumps({"content": [{"type": "text", "text": json.dumps({
+                    "command": "python3 scripts/step_%04d.py" % seq,
+                    "commandShellId": "shell-%04d" % seq,
+                    "stdout": long_output, "stderr": "", "exitCode": 0})}]})
             tool = {"name": "Bash",
                     "input": "python3 scripts/step_%04d.py" % seq,
-                    "output": long_output, "exit_code": 0}
+                    "output": content, "exit_code": 0}
         else:
             content = "步骤 %04d：已完成本段处理，继续下一段。" % seq
         messages.append({"id": "m%05d" % seq, "seq": seq, "type": mtype,
@@ -1709,7 +1958,7 @@ def base_sessions():
                       "poll_seconds": SESSION_POLL_SECONDS}
         return {"session": session, "connection": connection, "messages": messages}
 
-    return {
+    sessions = {
         "task-music-006/run-music-006-b2": entry(
             "task-music-006", "run-music-006-b2", "associated", "ok", music_current),
         "task-music-006/run-music-006-a1": entry(
@@ -1730,6 +1979,46 @@ def base_sessions():
             "task-fb-020", "run-fb-020-m4", "associated", "degraded", fb_pdf,
             detail="订阅接口不可用，按 2 秒增量读取", save_state="trashed"),
     }
+    failed = entry("auto-execution_failed", "run-auto-execution-failed", "associated", "ok", [])
+    failed["session"].update(backend="pi_desktop", run_status="failed")
+    sessions["auto-execution_failed/run-auto-execution-failed"] = failed
+    previous = entry("auto-execution_failed", "run-auto-execution-previous", "associated", "ok", [])
+    previous["session"].update(backend="pi_desktop", run_status="failed")
+    sessions["auto-execution_failed/run-auto-execution-previous"] = previous
+    return sessions
+
+
+def seeded_sessions(state):
+    """Freeze source metadata/content once; only explicit scenario mutations change it."""
+    seeded = state.get("session_fixture_seed")
+    shape = [LONG_SESSION_TASK, LONG_SESSION_COUNT, LONG_SESSION_BYTES, LONG_SESSION_SHAPE]
+    if seeded is None or state.get("session_fixture_shape") != shape:
+        seeded = base_sessions()
+        if LONG_SESSION_TASK:
+            marker = LONG_SESSION_TASK + "/run-music-006-b2"
+            if marker in seeded:
+                seeded[marker]["messages"] = long_session_messages()
+                seeded[marker]["session"]["message_count"] = LONG_SESSION_COUNT
+                seeded[marker]["session"]["run_status"] = "running"
+        for marker, entry in seeded.items():
+            for message in entry["messages"]:
+                message["run_id"] = entry["session"]["run_id"]
+            if entry["connection"]["state"] != "unavailable":
+                entry["connection"] = {"state": "degraded", "detail": None,
+                                       "poll_seconds": SESSION_POLL_SECONDS}
+        state["session_fixture_seed"] = seeded
+        state["session_fixture_shape"] = shape
+        save_state(state)
+    return seeded
+
+
+def fixture_scenario(state, marker):
+    return (state.get("session_scenarios") or {}).get(marker) or {}
+
+
+def fixture_version(messages):
+    return hashlib.sha256(json.dumps(messages, ensure_ascii=False,
+                                    sort_keys=True).encode()).hexdigest()
 
 
 def session_read_fails(state, task_id):
@@ -1757,7 +2046,7 @@ def task_run_id(state, task_id):
 
 def latest_session_run(state, task_id):
     prefix = task_id + "/"
-    runs = [k[len(prefix):] for k in base_sessions() if k.startswith(prefix)]
+    runs = [k[len(prefix):] for k in seeded_sessions(state) if k.startswith(prefix)]
     if not runs:
         return None
     return sorted(runs)[-1]
@@ -1794,6 +2083,13 @@ def apply_session_save_state(state, session):
         "purged": [],
     }.get(save_state, ["trash-session"])
     session["read_only"] = save_state == "purged"
+    task = next((t for t in merged_tasks(state) if t["task_id"] == session.get("task_id")), {})
+    current_active = (session.get("run_id") == task_run_id(state, session.get("task_id"))
+                      and (task.get("status") in ("planning", "dispatching", "prepared", "submitting", "running", "in_review")
+                           or task.get("send_state") == "unknown"))
+    if session.get("run_status") == "running" or current_active:
+        session["allowed_actions"] = ["restore-session"] if save_state == "trashed" else []
+        session["blocked_reason"] = "仍在执行，不能移入回收站"
     return session
 
 
@@ -1807,13 +2103,40 @@ def long_session_override(task_id, messages):
 def resolve_session(state, task_id, run_id=None):
     """返回 (SessionInfo, connection, messages)；无记录 → pending。"""
     run_id = run_id or task_run_id(state, task_id) or latest_session_run(state, task_id)
-    entry = base_sessions().get("%s/%s" % (task_id, run_id)) if run_id else None
+    entry = seeded_sessions(state).get("%s/%s" % (task_id, run_id)) if run_id else None
     if entry is None:
         return (apply_session_save_state(state, pending_session(task_id, run_id)),
                 {"state": "ok", "detail": None, "poll_seconds": SESSION_POLL_SECONDS},
                 [])
-    messages = long_session_override(task_id, entry["messages"])
-    session = dict(entry["session"], message_count=len(messages))
+    messages = entry["messages"]
+    marker = "%s/%s" % (task_id, run_id)
+    scenario = fixture_scenario(state, marker)
+    if scenario.get("append") or scenario.get("revisions") or scenario.get("large_unknown"):
+        messages = copy.deepcopy(messages)
+        messages.extend(scenario.get("append") or [])
+        for message in messages:
+            change = (scenario.get("revisions") or {}).get(message["id"])
+            if change:
+                message.update(change)
+        if scenario.get("large_unknown"):
+            messages.append({"id": "unknown-large", "seq": max((m.get("seq", 0) for m in messages), default=0)+1,
+                             "run_id": run_id, "type": "tool_result", "revision": 1,
+                             "source_at": entry["session"]["updated_at"],
+                             "content": json.dumps({"unknown": "x" * (1024*1024)}),
+                             "tool": {"name": "unknown", "input": None,
+                                      "output": None, "exit_code": None}})
+    session = dict(entry["session"], message_count=len(messages), last_checked_at=iso(utcnow()))
+    if scenario.get("backend"):
+        session["backend"] = scenario["backend"]
+    if scenario.get("pending"):
+        session.update(state="pending", message_count=0)
+        messages = []
+    if scenario.get("updated_at"):
+        session["updated_at"] = scenario["updated_at"]
+    if scenario.get("round_status"):
+        session["run_status"] = scenario["round_status"]
+    if "session_id" in scenario:
+        session["session_id"] = scenario["session_id"]
     return (apply_session_save_state(state, session), entry["connection"], messages)
 
 
@@ -1836,11 +2159,11 @@ def cmd_list_sessions(state, payload):
         if task_id not in tasks:
             return fail("任务不存在：%s" % task_id, "not_found")
         prefix = task_id + "/"
-        runs = sorted(k[len(prefix):] for k in base_sessions() if k.startswith(prefix))
+        runs = sorted(k[len(prefix):] for k in seeded_sessions(state) if k.startswith(prefix))
         if runs:
             for run in runs:
                 sessions.append(apply_session_save_state(
-                    state, base_sessions()["%s/%s" % (task_id, run)]["session"]))
+                    state, seeded_sessions(state)["%s/%s" % (task_id, run)]["session"]))
         else:
             run = task_run_id(state, task_id)
             if run:
@@ -1849,7 +2172,7 @@ def cmd_list_sessions(state, payload):
         return {"sessions": [s for s in sessions if _match(s)]}
     # 缺省：全部可关联会话，active 任务优先
     rows = []
-    for key, entry in base_sessions().items():
+    for key, entry in seeded_sessions(state).items():
         session = apply_session_save_state(state, entry["session"])
         task_id = session["task_id"]
         task = next((t for t in merged_tasks(state) if t["task_id"] == task_id), None)
@@ -1859,7 +2182,7 @@ def cmd_list_sessions(state, payload):
         if task.get("save_state") != "active":
             continue
         marker = task.get("session_marker")
-        if not marker or marker in base_sessions():
+        if not marker or marker in seeded_sessions(state):
             continue
         rows.append((1, "", apply_session_save_state(
             state, pending_session(task["task_id"], marker.split("/", 1)[1]))))
@@ -1873,10 +2196,33 @@ def cmd_get_session(state, payload):
     if not task_id or not run_id:
         return fail("缺少必填字段 task_id/run_id", "bad_request")
     session, connection, _ = resolve_session(state, task_id, run_id)
-    return {"session": session, "connection": connection}
+    scenario = fixture_scenario(state, "%s/%s" % (task_id, run_id))
+    if scenario.get("status_delay_ms"):
+        time.sleep(float(scenario["status_delay_ms"]) / 1000)
+    if scenario.get("status_read_error"):
+        return fail(str(scenario["status_read_error"]), "remote_unavailable")
+    status = scenario.get("round_status") or session.get("run_status") or "unknown"
+    detail = {"backend": session.get("backend") or "pi", "run_status": status,
+              "worktree_path": os.path.join(os.environ.get("KANPILOT_REPOS_ROOT", "/tmp"), run_id),
+              "started_at": session.get("started_at"), "exit_code": 1 if status == "failed" else None,
+              "terminal": {"outcome": "failed" if status == "failed" else "completed",
+                           "reason": "model_unavailable" if status == "failed" else "completed"},
+              "detail": "隔离模型不可用" if status == "failed" else None,
+              "config": {"provider": "fixture", "model": "fixture-model", "reasoning_effort": "medium",
+                         "agent_preset": "default"}, "save_state": session.get("save_state"),
+              "turn_adopted": [{"from": "turn-old", "to": "turn-current",
+                                "code": "EMPTY_MODEL_RESPONSE", "at": session.get("updated_at")}]}
+    if status == "running":
+        detail["terminal"] = None
+    detail.update(scenario.get("round_detail") or {})
+    return {"session": session, "connection": connection, "round_detail": detail}
 
 
 def cmd_session_messages(state, payload):
+    request_log = os.environ.get("KANPILOT_FAKE_REQUEST_LOG")
+    if request_log:
+        with open(request_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
     task_id = payload.get("task_id")
     if not task_id:
         return fail("缺少必填字段 task_id", "bad_request")
@@ -1885,27 +2231,44 @@ def cmd_session_messages(state, payload):
     run_id = payload.get("run_id") or task_run_id(state, task_id) \
         or latest_session_run(state, task_id)
     session, connection, messages = resolve_session(state, task_id, run_id)
+    marker = "%s/%s" % (task_id, run_id)
+    scenario = fixture_scenario(state, marker)
+    delay = scenario.get("delay_ms", 0)
+    if delay:
+        time.sleep(min(float(delay)/1000, 5))
+    if "fallback_messages" in scenario:
+        fallback = scenario["fallback_messages"]
+        return {"session": session, "connection": {"state": "degraded", "detail": "隔离来源读取失败，返回旧快照", "poll_seconds": SESSION_POLL_SECONDS},
+                "messages": fallback, "next_cursor": "seq:4", "has_more": False, "source_version": None}
+    if scenario.get("read_error"):
+        return fail("隔离会话读取失败：" + str(scenario["read_error"]), "remote_unavailable")
     ordered = sorted(messages, key=lambda m: m.get("seq") or 0)
     cursor = payload.get("cursor")
     try:
-        after = int(cursor) if cursor not in (None, "") else 0
+        after = int(str(cursor).removeprefix("seq:")) if cursor not in (None, "") else 0
     except (TypeError, ValueError):
-        return fail("cursor 必须是消息 seq 整数", "bad_request")
-    limit = int(payload.get("limit") or 100)
-    page = [m for m in ordered if (m.get("seq") or 0) > after]
-    incremental = after > 0
-    if incremental and page and page[-1] is ordered[-1]:
-        # 增量读取时把最新消息升版一次：演练 id+revision 去重/更新
-        newest = dict(page[-1])
-        newest["revision"] = (newest.get("revision") or 1) + 1
-        newest["content"] = (newest.get("content") or "") + "（已修订）"
-        page = page[:-1] + [newest]
-    page = page[:limit]
-    has_more = len([m for m in ordered if (m.get("seq") or 0) > after]) > len(page)
-    next_cursor = str((page[-1].get("seq") or 0)) if page else (cursor or None)
+        return fail("cursor 必须是 seq:<n>", "bad_request")
+    limit = max(1, min(int(payload.get("limit") or 100), 1000))
+    version = hashlib.sha256(json.dumps({"messages": ordered, "run_status": session.get("run_status"),
+                                            "updated_at": session.get("updated_at")},
+                                           ensure_ascii=False, sort_keys=True).encode()).hexdigest() if session.get("state") == "associated" and connection.get("state") != "unavailable" and not connection.get("detail") else None
+    maximum = max((m.get("seq") or 0 for m in ordered), default=0)
+    unchanged = (cursor is not None and after >= maximum and version is not None
+                 and payload.get("source_version") == version and not payload.get("force_reload"))
+    if unchanged:
+        page, has_more = [], False
+    else:
+        # Explicit revision scenarios resend revised old IDs once per acknowledged version.
+        candidates = [m for m in ordered if (m.get("seq") or 0) > after]
+        if after and payload.get("source_version") != version:
+            changed = scenario.get("revisions") or {}
+            candidates = [m for m in ordered if m["id"] in changed or (m.get("seq") or 0) > after]
+        page = candidates[:limit]
+        has_more = len(candidates) > len(page)
+    next_cursor = "seq:%d" % max(after, max((m.get("seq") or 0 for m in page), default=0)) if page else cursor
     return {"session": session, "messages": page,
             "next_cursor": next_cursor, "has_more": has_more,
-            "connection": connection}
+            "source_version": version, "connection": connection}
 
 
 # ---------------------------------------------------------------- §5.15.2 save state
@@ -1978,6 +2341,29 @@ def cmd_restore_task(state, payload):
     return {"ok": True, "task_id": tid, "save_state": "active",
             "auto_advance_paused": 0 if resume_auto else 1,
             "task_status": task["status"], "warnings": warnings}
+
+
+def cmd_reconnect_task(state, payload):
+    tid = payload.get("task_id")
+    expected = payload.get("expected_save_state")
+    if not tid or expected not in ("archived", "trashed", "purged"):
+        return fail("需要 task_id 和有效 expected_save_state", "bad_request")
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    if task is None:
+        return fail("任务不存在", "not_found")
+    candidate = next((t for t in cmd_fetch_todos(state, {})["items"] if t["task_id"] == tid), None)
+    if task.get("save_state") != expected or not candidate or not candidate.get("reconnectable"):
+        return fail("任务状态变化或当前不能重新接入，请刷新后重试", "conflict")
+    def apply(s):
+        s.setdefault("task_overrides", {}).setdefault(tid, {}).update(
+            save_state="active", saved_at=None, status="needs_plan", stage="plan",
+            auto_advance_paused=1, run_id=None, failure_code=None, failure_reason=None,
+            plan_path=None, plan_sha256=None, plan_kind=None, plan_generated_at=None)
+        append_event(s, "task_reconnected", task_id=tid, actor="user",
+                     detail={"from": expected, "to": "active",
+                             "previous": {key: task.get(key) for key in ("plan_path", "plan_sha256", "source_path", "run_id")}})
+    mutate(state, apply)
+    return {"ok": True}
 
 
 # ------------------------------------------------- §5.17/§5.19 exec config + executor（v1.6，pi）
@@ -2136,6 +2522,9 @@ def _session_state_change(state, payload, target, event_kind):
     if current == target:
         return {"ok": True, "deduplicated": True, "task_id": tid,
                 "run_id": run_id, "save_state": target, "session": session}
+    action = {"active": "restore-session", "trashed": "trash-session", "purged": "purge-session"}[target]
+    if action not in (session.get("allowed_actions") or []):
+        return fail(session.get("blocked_reason") or "该会话操作不可用", "conflict")
     expected = payload.get("expected_save_state")
     if expected is not None and current != expected:
         return fail("会话保存状态冲突（期望 %s，实际为 %s）" % (expected, current),
@@ -2228,6 +2617,22 @@ def cmd_get_request(state, payload):
         actions.append("release_lost")
     if status == "failed":
         actions += ["retry", "replan"]
+        task_requests = [r for r in merged_requests(state) if r.get("task_id") == req.get("task_id")]
+        monitors = [r for r in task_requests if r.get("kind") == "monitor"]
+        latest_monitor = max(enumerate(monitors), key=lambda item: (item[1].get("created_at") or "", item[0]))[1] if monitors else None
+        if (task is not None and req.get("kind") == "monitor"
+                and task.get("failure_code") == "verification_unconfirmed"
+                and "reverify" in allowed_actions(task, merged_requests(state))
+                and req.get("finished_at") == task.get("blocked_at")
+                and latest_monitor is not None and latest_monitor["request_id"] == rid
+                and req.get("claimed_at") and task.get("_execution_started_at")
+                and req["claimed_at"] >= task["_execution_started_at"]
+                and any(e.get("kind") == "reported" and e.get("task_id") == task["task_id"]
+                        and e.get("request_id") == rid and e.get("at") == req.get("finished_at")
+                        and (e.get("detail") or {}).get("outcome") == "needs_user"
+                        for e in merged_events(state))
+                and not any(r.get("status") in ("queued", "claimed") for r in task_requests)):
+            actions.insert(0, "reverify")
     if req.get("kind") == "plan-scan" and req.get("task_id") is None:
         actions = ["view", "fetch_todos"]
     if status == "queued" and req.get("kind") == "plan" \
@@ -2269,20 +2674,81 @@ def cmd_get_request(state, payload):
             "attention_state": attention, "payload": req.get("payload")}
 
 
+def fake_project_mappings(state):
+    mappings = state.get("project_mappings")
+    if mappings:
+        return mappings
+    return {
+        "version": 1,
+        "revision": 0,
+        "workspace_id": "ws-fake-001",
+        "items": {
+            pid: {
+                "project_name": name,
+                "repository": os.path.join(REPOS_ROOT, name),
+                "enabled": True,
+                "updated_at": past(days=10),
+            }
+            for name, pid in PROJECTS.items()
+        },
+    }
+
+
+def effective_fake_mapping(mappings, project_id):
+    item = (mappings.get("items") or {}).get(project_id)
+    if not item:
+        return {"project_name": "", "repository": None, "enabled": False,
+                "mapping_state": "unmapped", "repository_kind": None,
+                "blocked_reason": "尚未选择仓库"}
+    repository = item.get("repository") or None
+    enabled = bool(item.get("enabled", True))
+    if not repository:
+        state, kind, reason = "unmapped", None, "尚未选择仓库"
+    elif not enabled:
+        state, kind, reason = "disabled", "git", "已停用新规划"
+    else:
+        # FakeCore does not inspect real filesystem paths.
+        state, kind, reason = "available", "git", None
+    return {"project_name": item.get("project_name") or "", "repository": repository,
+            "enabled": enabled, "mapping_state": state,
+            "repository_kind": kind, "blocked_reason": reason}
+
+
 def cmd_fetch_todos(state, payload):
     """§5.22.1：只读枚举 To Do（含一个 selectable=false 与聚焦项）。"""
     items = []
+    mappings = fake_project_mappings(state)
     for t in merged_tasks(state):
-        if t.get("kaneo_status") != "to-do" or t.get("save_state") != "active":
+        if t.get("kaneo_status") != "to-do" and t["task_id"] not in state.get("review_remediations", {}):
             continue
+        mapping = effective_fake_mapping(mappings, t.get("project_id"))
+        removed = t.get("save_state") in ("archived", "trashed", "purged")
+        reconnectable = (removed and mapping["mapping_state"] == "available"
+                         and t["status"] not in ("planning", "prepared", "dispatching", "submitting", "running", "in_review")
+                         and t.get("send_state") != "unknown"
+                         and not (t.get("sent") or t.get("send_state") == "sent")
+                         and not any(r.get("task_id") == t["task_id"] and r.get("status") in ("queued", "claimed")
+                                     for r in merged_requests(state)))
+        selectable = not removed and mapping["mapping_state"] == "available" and t["status"] == "needs_plan"
+        if mapping["mapping_state"] != "available":
+            blocked_reason = mapping["blocked_reason"]
+        elif removed:
+            label = {"archived": "已归档", "trashed": "已移入回收站", "purged": "已永久移除"}[t["save_state"]]
+            blocked_reason = "本地任务%s，不重复规划" % label
+        elif t["status"] == "needs_plan":
+            blocked_reason = None
+        else:
+            blocked_reason = "本地已有任务（状态 %s），如需重新规划请先在任务详情确认" % t["status"]
         items.append({
             "task_id": t["task_id"], "title": t.get("title"),
             "project_id": t.get("project_id"), "project_name": t.get("project_name"),
             "requirements_sha256": t.get("requirements_sha256"),
             "source_sha256": t.get("source_sha256"),
             "kaneo_status": t.get("kaneo_status"),
-            "repository": "~/Documents/Code/Project/Personal Project/%s"
-                % (t.get("project_name") or ""),
+            "repository": mapping["repository"],
+            "mapping_state": mapping["mapping_state"],
+            "repository_kind": mapping["repository_kind"],
+            "mapping_project_id": t.get("project_id"),
             "local_status": {
                 "needs_plan": "待规划", "planning": "规划中", "ready": "已有计划",
             }.get(t["status"], t["status"]),
@@ -2292,18 +2758,25 @@ def cmd_fetch_todos(state, payload):
                  "name": "requirements.txt", "url": "https://kaneo.example.com/a.txt",
                  "media_type": "text/plain", "size": 1280},
             ] if t["task_id"] == "task-music-016" else [],
-            "selectable": t["status"] in ("needs_plan",),
-            "blocked_reason": None if t["status"] == "needs_plan"
-                else "本地已有任务（状态 %s），如需重新规划请先在任务详情确认" % t["status"],
+            "selectable": selectable,
+            "reconnectable": reconnectable,
+            "blocked_reason": blocked_reason,
         })
+    unmapped_id = "proj-unmapped"
+    unmapped_mapping = effective_fake_mapping(mappings, unmapped_id)
+    unmapped_available = unmapped_mapping["mapping_state"] == "available"
     items.append({
         "task_id": "todo-unmapped-001", "title": "未映射项目的 To Do（fake）",
-        "project_id": "proj-unmapped", "project_name": "Unmapped",
+        "project_id": unmapped_id,
+        "project_name": unmapped_mapping["project_name"] or "Unmapped",
         "requirements_sha256": sha("req-unmapped"), "source_sha256": sha("src-unmapped"),
-        "kaneo_status": "to-do", "repository": None, "local_status": None,
+        "kaneo_status": "to-do", "repository": unmapped_mapping["repository"],
+        "mapping_state": unmapped_mapping["mapping_state"],
+        "repository_kind": unmapped_mapping["repository_kind"],
+        "mapping_project_id": unmapped_id, "local_status": None,
         "local_save_state": None, "attachments": [],
-        "selectable": False,
-        "blocked_reason": "项目未在白名单/仓库映射中，无法规划",
+        "selectable": unmapped_available,
+        "blocked_reason": unmapped_mapping["blocked_reason"],
     })
     return {"fetched_at": iso(utcnow()), "items": items}
 
@@ -2327,12 +2800,21 @@ def cmd_prepare_plan_input(state, payload):
         return fail("需求已变更（requirements_sha256 不符），请重新获取 To Do",
                     "conflict")
     excluded = set(payload.get("excluded_remote_ids") or [])
-    input_id = "pin-" + (tid or "x")
+    input_sha = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    input_id = "pin-" + (tid or "x") + "-" + input_sha[:12]
     files = [{
         "name": "source-snapshot.json", "source": "snapshot",
         "media_type": "application/json",
         "sha256": sha("snap-" + tid), "size": 2048,
     }]
+    remediation = state.get("review_remediations", {}).get(tid)
+    if remediation:
+        files.extend([
+            {"name": "original-plan.md", "source": "review_remediation", "media_type": "text/markdown",
+             "sha256": remediation["plan_sha256"], "size": 1024},
+            {"name": "review-report.md", "source": "review_remediation", "media_type": "text/markdown",
+             "sha256": remediation["report_sha256"], "size": 2048},
+        ])
     for path in payload.get("local_paths") or []:
         files.append({"name": path.split("/")[-1], "source": "local",
                       "media_type": "text/plain",
@@ -2340,7 +2822,7 @@ def cmd_prepare_plan_input(state, payload):
     if payload.get("supplement"):
         files.append({"name": "supplement.md", "source": "supplement",
                       "media_type": "text/markdown",
-                      "sha256": sha("supp-" + tid), "size": 256})
+                      "sha256": hashlib.sha256(payload["supplement"].encode("utf-8")).hexdigest(), "size": 256})
     issues = []
     for att in (todo or {}).get("attachments") or []:
         rid_ = att.get("remote_id") or att.get("url")
@@ -2353,13 +2835,13 @@ def cmd_prepare_plan_input(state, payload):
     def apply(s):
         s.setdefault("plan_inputs", {})[input_id] = {
             "task_id": tid, "files": files,
-            "input_sha256": sha("input-" + tid + str(len(files))),
+            "input_sha256": input_sha,
         }
         append_event(s, "plan_input_prepared", task_id=tid, actor="user",
                      detail={"input_id": input_id, "can_start": can_start})
     mutate(state, apply)
     return {"input_id": input_id,
-            "input_sha256": sha("input-" + tid + str(len(files))),
+            "input_sha256": input_sha,
             "files": files, "issues": issues, "can_start": can_start,
             "requirements_sha256": req_sha,
             "source_sha256": (todo or {}).get("source_sha256")
@@ -2418,7 +2900,9 @@ def cmd_start_plans(state, payload):
                 ov["payload"] = {"manual_authorized": True,
                                  "input_id": entry and input_id,
                                  "planner_input_sha256": entry["input_sha256"],
-                                 "confirmed_at": iso(utcnow())}
+                                 "confirmed_at": iso(utcnow()),
+                                 "planner_backend": item.get("planner_backend", "codex"),
+                                 "planner_method": item.get("planner_method", "builtin")}
                 ov["updated_at"] = iso(utcnow())
                 append_event(s, "plan_started", task_id=tid, request_id=rid,
                              actor="user", detail={"input_id": input_id})
@@ -2435,7 +2919,9 @@ def cmd_start_plans(state, payload):
             "priority": 100, "requested_by": "user", "attempt_no": 0,
             "payload": {"manual_authorized": True, "input_id": input_id,
                         "planner_input_sha256": entry["input_sha256"],
-                        "confirmed_at": iso(utcnow())},
+                        "confirmed_at": iso(utcnow()),
+                                 "planner_backend": item.get("planner_backend", "codex"),
+                                 "planner_method": item.get("planner_method", "builtin")},
             "created_at": iso(utcnow()), "updated_at": iso(utcnow()),
         }
 
@@ -2453,36 +2939,23 @@ def cmd_start_plans(state, payload):
 
 
 def cmd_get_project_mappings(state, payload):
-    mappings = state.get("project_mappings")
-    if not mappings:
-        items = {}
-        for name, pid in PROJECTS.items():
-            items[pid] = {
-                "project_name": name,
-                "repository": os.path.join(REPOS_ROOT, name),
-                "enabled": True,
-                "updated_at": past(days=10),
-            }
-        mappings = {
-            "version": 1,
-            "revision": 0,
-            "workspace_id": "ws-fake-001",
-            "items": items,
-        }
+    mappings = fake_project_mappings(state)
     items_list = []
     for pid, item in (mappings.get("items") or {}).items():
+        effective = effective_fake_mapping(mappings, pid)
         items_list.append({
             "project_id": pid,
             "project_name": item.get("project_name", ""),
-            "repository": item.get("repository", ""),
+            "repository": effective["repository"] or "",
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
             "automation": item.get("automation") or automation_policy(pid == PROJECTS["Music"]),
             "automation_preflight": ([{"code": "origin_not_github", "message": "origin 不是 GitHub 仓库"},
                                       {"code": "review_backend_unsupported", "message": "Review 后端需为 Plus/Claude/Codex"}]
                                      if pid == PROJECTS["Feedback"] else []),
-            "mapping_state": "available",
-            "repository_kind": "git",
+            "mapping_state": effective["mapping_state"],
+            "repository_kind": effective["repository_kind"],
+            "blocked_reason": effective["blocked_reason"],
             "active_tasks_count": 0,
             "active_requests_count": 0,
         })
@@ -2525,7 +2998,9 @@ def cmd_set_project_mapping(state, payload):
     return {
         "revision": mappings["revision"],
         "project_id": pid,
-        "mapping_state": "ready" if not payload.get("unmap") else "unmapped",
+        "mapping_state": "unmapped" if payload.get("unmap") else
+            ("available" if payload.get("repository") and payload.get("enabled", True) else
+             "disabled" if payload.get("repository") else "unmapped"),
         "deduplicated": False,
     }
 
@@ -2549,8 +3024,8 @@ def automation_tasks():
         tid = "auto-" + (code or ["waiting-plan", "planning", "long-pr"][i - len(failures)])
         status = "needs_user" if code else ["needs_plan", "planning", "in_review"][i - len(failures)]
         actions = ["resume", "replan", "mark_done", "dismiss", "recheck"]
-        if code == "verification_unconfirmed": actions = ["accept_verification", "replan", "mark_done", "dismiss"]
-        if code in ("no_changes", "execution_failed"): actions.remove("resume")
+        if code == "verification_unconfirmed": actions = ["run_verification_checks", "reverify", "accept_verification", "replan", "mark_done", "dismiss"]
+        if code == "no_changes": actions.remove("resume")
         if code in ("planner_failed", "needs_input"): actions = ["replan", "dismiss", "prepare_plan"]
         if code == "dispatch_failed": actions = ["retry", "replan", "dismiss"]
         if code in ("branch_exists", "delivery_base_unknown"): actions = ["resume", "dismiss"]
@@ -2580,6 +3055,18 @@ def automation_tasks():
                        "review_history": [{"review_key": sha(tid, 12), "conclusion": "changes_requested",
                                            "registered_at": past(minutes=25), "report_path": "/tmp/fake-review.md",
                                            "head_sha": sha(tid, 40), "execution_run_id": "run-fake-1"}]})
+        if code == "verification_unconfirmed":
+            result[-1].update(run_id="run-auto-verification-unconfirmed", _verification_passed=True,
+                              blocked_at=VERIFICATION_FIXTURE_BLOCKED_AT,
+                              _execution_started_at="2026-10-09T07:53:27.000000+00:00",
+                              failure_reason="隔离示例：验证退出码尚未识别，等待重新核验现有记录",
+                              send_state="sent", sent=1,
+                              session_marker="auto-verification_unconfirmed/run-auto-verification-unconfirmed")
+        if code == "execution_failed":
+            result[-1].update(run_id="run-auto-execution-failed", plan_path="/tmp/fake-confirmed-plan.md",
+                              plan_sha256=sha("confirmed-plan", 64), plan_kind="standard",
+                              send_state="sent", sent=1,
+                              session_marker="auto-execution_failed/run-auto-execution-failed")
     return result
 
 
@@ -2622,15 +3109,99 @@ def fake_config(state, payload, role, save=False):
     return {"config": config, "defaults": dict(defaults), "updated_at": past(minutes=1)}
 
 
+def desktop_queue_status(state, payload, save=False):
+    if save:
+        state["desktop_queue_enabled"] = bool(payload.get("enabled"))
+        save_state(state)
+    config = state.get("desktop_queue_fixture") or {}
+    requests = merged_requests(state)
+    counts = {role: sum(1 for request in requests
+                       if request.get("status") == "queued"
+                       and (request.get("backend") or (request.get("payload") or {}).get("planner_backend" if role == "plan" else "review_backend")) == "codex_desktop"
+                       and request.get("stage", request.get("kind")) == role)
+              for role in ("plan", "review")}
+    return {"enabled": state.get("desktop_queue_enabled", False),
+            "poll_minutes": config.get("poll_minutes", 0),
+            "auto_configured": config.get("auto_configured", False),
+            "planner_thread_id": config.get("planner_thread_id"),
+            "review_thread_id": config.get("review_thread_id"),
+            "queue": config.get("queue", counts),
+            "detail": config.get("detail", "隔离 FakeCore 状态；尚未绑定原生自动任务")}
+
+
+def desktop_automation_status(state, payload, action=None):
+    roles = {}
+    for role in ("plan", "review"):
+        roles[role] = dict({"automation_id": None, "name": "隔离 " + role,
+            "status": "MISSING", "enabled": None, "controllable": False,
+            "detail": "隔离 FakeCore；没有真实自动任务",
+            "rrule": None, "schedule": None, "schedule_summary": "未绑定",
+            "schedule_editable": False, "time_zone": "Asia/Taipei"},
+            **((state.get("desktop_automation_fixture") or {}).get(role) or {}))
+    if action:
+        role = payload.get("role")
+        current = roles.get(role)
+        if not current or not current["controllable"] or current["status"] != payload.get("expected_status"):
+            return fail("隔离自动任务状态已变化，请刷新", "conflict")
+        if action == "enabled":
+            current.update(enabled=bool(payload.get("enabled")),
+                           status="ACTIVE" if payload.get("enabled") else "PAUSED")
+        else:
+            if current["rrule"] != payload.get("expected_rrule"):
+                return fail("隔离时间规则已变化，请刷新", "conflict")
+            schedule = payload.get("schedule") or {}
+            current.update(schedule=schedule, rrule="fixture-rule", schedule_summary="隔离规则已更新")
+        state["desktop_automation_fixture"] = roles
+        save_state(state)
+    return {"supported": True, "detail": "隔离 FakeCore 自动任务状态", "roles": roles}
+
+
 def planner_capabilities():
     ready = {"available": True, "tools_ok": True, "version": "fake", "detail": "隔离 FakeCore 就绪"}
     return {"codex": {"path": "/tmp/fake-codex", "version": "fake"},
             "auth": {"ready": True, "detail": "隔离夹具"},
             "models_verified": True, "models": [{"id": "gpt-6.1-sol", "name": "6.1 Sol", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]}],
             "planner_methods": {"builtin": ready, "spec_plan": ready},
-            "backends": {"codex": ready, "claude": ready, "pi_desktop": ready}}
+            "backends": {"codex": ready, "codex_desktop": ready, "claude": ready, "pi_desktop": ready}}
+
+def cmd_session_control_status(state, payload):
+    marker = "%s/%s" % (payload.get("task_id"), payload.get("run_id"))
+    scenario = fixture_scenario(state, marker)
+    configured = scenario.get("control") or {}
+    if scenario.get("control_delay_ms"):
+        time.sleep(min(float(scenario["control_delay_ms"]) / 1000, 5))
+    if scenario.get("control_error"):
+        return fail(str(scenario["control_error"]), "remote_unavailable")
+    supported = scenario.get("backend") == "pi_desktop"
+    return dict({"task_id": payload.get("task_id"), "run_id": payload.get("run_id"),
+                 "request_id": "fixture-plan-request", "backend": scenario.get("backend") or "pi",
+                 "state": "executor_lost" if supported else "unsupported",
+                 "detail": "规划进程已退出，尚未创建 Plus 会话" if supported else "该轮次不使用 Plus",
+                 "connected": supported, "session_id": None, "turn_id": None,
+                 "can_start": supported, "blocked_reason": None if supported else "非 Plus 轮次",
+                 "start_label": "请求开始"}, **configured)
+
+
+def cmd_session_request_start(state, payload):
+    status = cmd_session_control_status(state, payload)
+    if not status["can_start"] or payload.get("request_id") != status["request_id"]:
+        return fail("该轮次不能请求开始", "conflict")
+    marker = "%s/%s" % (payload.get("task_id"), payload.get("run_id"))
+    scenario = state.setdefault("session_scenarios", {}).setdefault(marker, {})
+    repeated = bool(scenario.get("control", {}).get("queued"))
+    scenario.setdefault("control", {}).update(state="not_started", detail="开始请求已排队，等待规划器领取", queued=True)
+    save_state(state)
+    return {"request_id": status["request_id"], "stage": "plan", "queued": True, "deduplicated": repeated}
+
 
 COMMANDS = {
+    "desktop-queue-status": lambda s, p: desktop_queue_status(s, p),
+    "set-desktop-queue-config": lambda s, p: desktop_queue_status(s, p, True),
+    "desktop-automation-status": lambda s, p: desktop_automation_status(s, p),
+    "set-desktop-automation": lambda s, p: desktop_automation_status(s, p, "enabled"),
+    "set-desktop-automation-schedule": lambda s, p: desktop_automation_status(s, p, "schedule"),
+    "session-control-status": cmd_session_control_status,
+    "session-request-start": cmd_session_request_start,
     "get-planner-config": lambda s, p: fake_config(s, p, "planner"),
     "set-planner-config": lambda s, p: fake_config(s, p, "planner", True),
     "planner-capabilities": lambda s, p: planner_capabilities(),
@@ -2644,6 +3215,13 @@ COMMANDS = {
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
     "get-task": lambda s, p: cmd_get_task(s, p),
+    "save-plan-answers": lambda s, p: cmd_plan_answers(s, p),
+    "submit-plan-answers": lambda s, p: cmd_plan_answers(s, p, submit=True),
+    "prepare-review-repair": lambda s, p: cmd_review_resolution(s, p),
+    "run-verification-checks": lambda s, p: cmd_verification_checks(s, p),
+    "get-verification-check-status": lambda s, p: cmd_verification_checks(s, p, status_only=True),
+    "supplement-review": lambda s, p: cmd_review_resolution(s, p, evidence=True),
+    "get-plan": lambda s, p: cmd_get_plan(s, p),
     "list-requests": lambda s, p: cmd_list_requests(s, p),
     "list-events": lambda s, p: cmd_list_events(s, p),
     "enqueue": lambda s, p: cmd_enqueue(s, p),
@@ -2654,6 +3232,7 @@ COMMANDS = {
     "archive-task": lambda s, p: cmd_archive_task(s, p),
     "trash-task": lambda s, p: cmd_trash_task(s, p),
     "restore-task": lambda s, p: cmd_restore_task(s, p),
+    "reconnect-task": lambda s, p: cmd_reconnect_task(s, p),
     "list-sessions": lambda s, p: cmd_list_sessions(s, p),
     "get-session": lambda s, p: cmd_get_session(s, p),
     "session-messages": lambda s, p: cmd_session_messages(s, p),
@@ -2707,6 +3286,10 @@ def main(argv):
                          ensure_ascii=False))
         return 1
 
+    command_log = os.environ.get("KANPILOT_FAKE_COMMAND_LOG")
+    if command_log:
+        with open(command_log, "a", encoding="utf-8") as log:
+            log.write(json.dumps({"command": command, "payload": payload}) + "\n")
     state = load_state()
     result = handler(state, payload)
     if isinstance(result, dict) and "__error__" in result:

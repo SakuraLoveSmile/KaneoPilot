@@ -95,6 +95,80 @@ def test_plan_snapshot_reuses_two_runs_of_regular_materials(repo, tmp_path):
     assert (repo / ".git" / "info" / "exclude").read_bytes() == original_exclude
 
 
+@pytest.mark.parametrize("ignored", [False, True])
+def test_plan_snapshot_reuses_plus_markdown_without_removing_evidence(repo, tmp_path, ignored):
+    if ignored:
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("\n.pi/\n")
+    root = tmp_path / "worktrees"
+    path = plan_snapshot(repo, root)
+    plan = path / ".pi" / "plan" / "每日总结-20261006.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# 旧规划\n完整产物保持原样\n", encoding="utf-8")
+    original = plan.read_bytes()
+    exclude = (repo / ".git" / "info" / "exclude").read_bytes()
+    assert plan_snapshot(repo, root) == path
+    assert plan.read_bytes() == original
+    assert (repo / ".git" / "info" / "exclude").read_bytes() == exclude
+    assert git(path, "diff", "--name-only") == ""
+    assert git(path, "diff", "--cached", "--name-only") == ""
+
+
+@pytest.mark.parametrize("kind", ["other-pi", "non-md", "nested", "file-link", "plan-link", "pi-link", "fifo", "ignored-link"])
+def test_plan_snapshot_rejects_unsafe_plus_artifacts(repo, tmp_path, kind):
+    if kind == "ignored-link":
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("\n.pi/\n")
+    root = tmp_path / "worktrees"
+    path = plan_snapshot(repo, root)
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "plan.md").write_text("external")
+    if kind == "pi-link":
+        (path / ".pi").symlink_to(external, target_is_directory=True)
+    elif kind == "plan-link":
+        (path / ".pi").mkdir()
+        (path / ".pi" / "plan").symlink_to(external, target_is_directory=True)
+    else:
+        plans = path / ".pi" / "plan"
+        plans.mkdir(parents=True)
+        if kind == "other-pi":
+            (path / ".pi" / "settings.json").write_text("{}")
+        elif kind == "non-md":
+            (plans / "script.py").write_text("print('unsafe')")
+        elif kind == "nested":
+            (plans / "nested").mkdir()
+        elif kind == "fifo":
+            os.mkfifo(plans / "plan.md")
+        else:
+            (plans / "plan.md").symlink_to(external / "plan.md")
+    with pytest.raises(gd.GitDeliveryError) as error:
+        plan_snapshot(repo, root)
+    assert error.value.code == "worktree_invalid"
+
+
+def test_plan_snapshot_preserves_clean_tracked_pi_configuration(tmp_path):
+    repo = make_repo(tmp_path / "source")
+    (repo / ".pi" / "extensions").mkdir(parents=True)
+    (repo / ".pi" / "settings.json").write_text("{}")
+    (repo / ".pi" / "extensions" / "custom.ts").write_text("export {}")
+    (repo / ".gitignore").write_text(".pi/extensions/local/\n")
+    git(repo, "add", ".pi", ".gitignore")
+    git(repo, "commit", "-qm", "existing Plus configuration")
+    root = tmp_path / "worktrees"
+    path = plan_snapshot(repo, root)
+    assert plan_snapshot(repo, root) == path
+    plan = path / ".pi" / "plan" / "result.md"
+    plan.parent.mkdir()
+    plan.write_text("# 规划产物")
+    assert plan_snapshot(repo, root) == path
+    hidden = path / ".pi" / "extensions" / "local"
+    hidden.mkdir()
+    (hidden / "unsafe.json").write_text("{}")
+    with pytest.raises(gd.GitDeliveryError):
+        plan_snapshot(repo, root)
+
+
 @pytest.mark.parametrize("kind", ["tracked", "outside", "file-link", "directory-link", "root-link", "ignored-link", "fifo"])
 def test_plan_snapshot_rejects_other_changes_and_unsafe_materials(repo, tmp_path, kind):
     root = tmp_path / "worktrees"
@@ -127,14 +201,15 @@ def test_plan_snapshot_rejects_other_changes_and_unsafe_materials(repo, tmp_path
     assert error.value.code == "worktree_invalid"
 
 
-def test_review_and_branch_do_not_allow_plan_materials(repo, tmp_path):
+@pytest.mark.parametrize("artifact", ["materials", "plus-plan"])
+def test_review_and_branch_do_not_allow_plan_materials(repo, tmp_path, artifact):
     delivery = branch(repo, tmp_path / "worktrees")
     for purpose in ("branch", "review"):
         path = Path(delivery["worktree_path"]) if purpose == "branch" else Path(gd.prepare_snapshot_worktree(
             str(repo), "task1234", sha=delivery["head_sha"], purpose="review", worktrees_root=tmp_path / "worktrees"))
-        materials = path / ".kaneopilot-plan-material" / "run1"
+        materials = path / (".kaneopilot-plan-material" if artifact == "materials" else ".pi") / ("run1" if artifact == "materials" else "plan")
         materials.mkdir(parents=True)
-        (materials / "manifest.json").write_text("{}")
+        (materials / ("manifest.json" if artifact == "materials" else "plan.md")).write_text("{}")
         with pytest.raises(gd.GitDeliveryError):
             if purpose == "branch":
                 gd.verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
@@ -340,7 +415,7 @@ def test_push_and_divergence(repo, tmp_path):
     delivery["head_sha"] = commit(delivery)["sha"]
     real_parser = gd.github_repository
     bare = str(repo.parent / "origin.git")
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == bare else real_parser(url)):
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == bare else real_parser(url, **kwargs)):
         assert gd.push_branch(delivery, expected_repo="owner/repo") == {"pushed_sha": delivery["head_sha"]}
     other = tmp_path / "other-clone"
     subprocess.run(["git", "clone", str(repo.parent / "origin.git"), str(other)], check=True, capture_output=True)
@@ -353,7 +428,7 @@ def test_push_and_divergence(repo, tmp_path):
     git(other, "push", "origin", "kaneo/task1234")
     (Path(delivery["worktree_path"]) / "local-change").touch()
     delivery["head_sha"] = commit(delivery, "run2")["sha"]
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == bare else real_parser(url)), pytest.raises(gd.GitDeliveryError) as error:
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == bare else real_parser(url, **kwargs)), pytest.raises(gd.GitDeliveryError) as error:
         gd.push_branch(delivery, expected_repo="owner/repo")
     assert error.value.code == "branch_diverged"
 
@@ -386,7 +461,7 @@ def test_push_wrong_effective_target_never_writes_either_bare(repo, tmp_path, ta
         git(repo, "config", "--add", "remote.origin.pushurl", str(correct))
         git(repo, "config", "--add", "remote.origin.pushurl", str(wrong))
     real_parser = gd.github_repository
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)), pytest.raises(gd.GitDeliveryError) as error:
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == str(correct) else real_parser(url, **kwargs)), pytest.raises(gd.GitDeliveryError) as error:
         gd.push_branch(delivery, expected_repo="owner/repo")
     assert error.value.code == "branch_diverged"
     assert before == {p: git(p, "show-ref") for p in (correct, wrong)}
@@ -406,7 +481,7 @@ def test_push_uses_checked_target_despite_origin_change_and_keeps_hook(repo, tmp
             git(repo, "config", "remote.origin.pushurl", str(wrong))
             assert args[1] == str(correct)
         return real_git(args, *a, **kw)
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)), patch.object(gd, "_git", side_effect=redirect):
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == str(correct) else real_parser(url, **kwargs)), patch.object(gd, "_git", side_effect=redirect):
         gd.push_branch(delivery, expected_repo="owner/repo")
     assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
     assert git(wrong, "show-ref") == before
@@ -432,7 +507,7 @@ def test_push_allows_stable_single_rewrite(repo, tmp_path):
     git(repo, "remote", "set-url", "origin", "alias://delivery")
     git(repo, "config", f"url.{correct}.pushInsteadOf", "alias://delivery")
     real_parser = gd.github_repository
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)):
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == str(correct) else real_parser(url, **kwargs)):
         assert gd.push_branch(delivery, expected_repo="owner/repo")["pushed_sha"] == delivery["head_sha"]
     assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
 
@@ -444,7 +519,7 @@ def test_push_exports_reviewed_sha_if_pre_push_hook_moves_branch(repo, tmp_path)
     hook.write_text("#!/bin/sh\nprintf secret > .env\ngit add .env\ngit commit -qm 'late hook commit'\n")
     hook.chmod(0o755)
     real_parser = gd.github_repository
-    with patch.object(gd, "github_repository", side_effect=lambda url: "owner/repo" if url == str(correct) else real_parser(url)):
+    with patch.object(gd, "github_repository", side_effect=lambda url, **kwargs: "owner/repo" if url == str(correct) else real_parser(url, **kwargs)):
         gd.push_branch(delivery, expected_repo="owner/repo")
     assert git(delivery["worktree_path"], "rev-parse", "HEAD") != delivery["head_sha"]
     assert git(correct, "rev-parse", "refs/heads/" + delivery["branch"]) == delivery["head_sha"]
@@ -493,3 +568,153 @@ def test_supported_github_origins_match_preflight(url, expected):
     from kanpilot import automation_policy
     assert automation_policy.github_repository is gd.github_repository
     assert gd.github_repository(url) == expected
+
+
+@pytest.fixture
+def ssh_aliases(tmp_path, monkeypatch):
+    """Run actual OpenSSH expansion using only this disposable configuration."""
+    config = tmp_path / "ssh_config"
+    include = tmp_path / "accounts.conf"
+    include.write_text("Host github-alt github_work\n  HostName ssh.github.com\n  User git\n  Port 443\n")
+    config.write_text(f'Include "{include}"\nHost github-personal\n  HostName github.com\n'
+                      '  User git\n  Port 22\nHost other-server\n  HostName example.invalid\n')
+    git_config = tmp_path / "git_config"
+    git_config.touch()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(git_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_SSH", raising=False)
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+    monkeypatch.delenv("GIT_SSH_VARIANT", raising=False)
+    calls = []
+    real_run = subprocess.run
+    def run(args, **kwargs):
+        if args[0] == "ssh":
+            calls.append((args, kwargs))
+            assert args[1:3] == ["-G", "-oCanonicalizeHostname=no"]
+            assert 0 < kwargs["timeout"] <= 0.1
+            args = [args[0], "-F", str(config), *args[1:]]
+        return real_run(args, **kwargs)
+    monkeypatch.setattr(gd.subprocess, "run", run)
+    return calls
+
+
+@pytest.mark.parametrize("url", [
+    "git@github-personal:owner/repo.git",
+    "git@github-alt:owner/repo",
+    "git@github_work:owner/repo.git",
+    "ssh://git@github-alt/owner/repo.git",
+    "ssh://git@github-alt:443/owner/repo",
+    "ssh://git@github-personal:22/owner/repo",
+])
+def test_real_openssh_host_include_github_alias(repo, ssh_aliases, url):
+    assert gd.github_repository(url, cwd=str(repo)) == "owner/repo"
+    assert ssh_aliases[-1][1]["cwd"] == str(repo)
+
+
+@pytest.mark.parametrize("url", [
+    "git@unknown:owner/repo.git", "git@other-server:owner/repo.git",
+    "ssh://git@other-server/owner/repo.git",
+])
+def test_non_github_and_unknown_ssh_aliases_rejected(repo, ssh_aliases, url):
+    assert gd.github_repository(url, cwd=str(repo)) is None
+    assert len(ssh_aliases) == 1
+
+
+@pytest.mark.parametrize("url", [
+    "https://github-alt/owner/repo", "https://github-personal/owner/repo",
+    "git@-oProxyCommand=bad:owner/repo", "ssh://git@-bad/owner/repo",
+    "git@host with space:owner/repo", "git@host\nname:owner/repo",
+    "git@host%20name:owner/repo", "ssh://git@github-alt:2222/owner/repo",
+    "ssh://other@github-alt/owner/repo", "ssh://git:secret@github-alt/owner/repo",
+    "git@github-alt:owner/repo/extra", "ssh://git@github-alt/owner/repo?secret=yes",
+    "ssh://git@github-\nalt/owner/repo", "ssh://git@github-alt/owner/re\tpo",
+    "GIT@github-alt:owner/repo",
+])
+def test_invalid_aliases_rejected_before_ssh(repo, ssh_aliases, url):
+    assert gd.github_repository(url, cwd=str(repo)) is None
+    assert ssh_aliases == []
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess([], 1, "", "private config details"),
+    subprocess.TimeoutExpired("ssh", .1, stderr="private config details"),
+    OSError("unavailable"),
+    subprocess.CompletedProcess([], 0, "hostname github.com\nuser other\nport 22\n", ""),
+    subprocess.CompletedProcess([], 0, "hostname github.com\nuser git\nport 2222\n", ""),
+    subprocess.CompletedProcess([], 0, "hostname github.com\nuser git\nport 22\nhostname evil\n", ""),
+    subprocess.CompletedProcess([], 0, "hostname github.com\n", ""),
+])
+def test_ssh_expansion_failures_are_bounded_and_private(result, capsys):
+    def run(args, **kwargs):
+        assert args[0] == "ssh" and args[1] == "-G"
+        assert 0 < kwargs["timeout"] <= .1
+        if isinstance(result, Exception):
+            raise result
+        return result
+    with patch.object(gd.subprocess, "run", side_effect=run):
+        assert gd.github_repository("git@github-alt:owner/repo") is None
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("override", ["GIT_SSH", "GIT_SSH_COMMAND", "core.sshCommand"])
+def test_alias_transport_override_not_executed(repo, ssh_aliases, monkeypatch, override):
+    if override == "core.sshCommand":
+        git(repo, "config", override, "arbitrary shell command")
+    else:
+        monkeypatch.setenv(override, "arbitrary shell command")
+    assert gd.github_repository("git@github-alt:owner/repo", cwd=str(repo)) is None
+    assert ssh_aliases == []
+    # Keep the standard legacy branch unchanged.
+    assert gd.github_repository("git@github.com:owner/repo", cwd=str(repo)) == "owner/repo"
+
+
+@pytest.mark.parametrize("source", ["GIT_SSH_VARIANT", "ssh.variant"])
+@pytest.mark.parametrize("variant", ["plink", "simple", "unknown", ""])
+def test_non_openssh_variant_rejected_before_expansion(repo, ssh_aliases, monkeypatch, source, variant):
+    if source == "GIT_SSH_VARIANT":
+        monkeypatch.setenv(source, variant)
+    else:
+        monkeypatch.delenv("GIT_SSH_VARIANT", raising=False)
+        git(repo, "config", source, variant)
+    assert gd.github_repository("git@github-alt:owner/repo", cwd=str(repo)) is None
+    assert ssh_aliases == []
+    assert gd.github_repository("git@github.com:owner/repo", cwd=str(repo)) == "owner/repo"
+
+
+@pytest.mark.parametrize("variant", ["auto", "ssh"])
+def test_openssh_variant_environment_overrides_git_config(repo, ssh_aliases, monkeypatch, variant):
+    git(repo, "config", "ssh.variant", "plink")
+    monkeypatch.setenv("GIT_SSH_VARIANT", variant)
+    assert gd.github_repository("git@github-alt:owner/repo", cwd=str(repo)) == "owner/repo"
+    assert len(ssh_aliases) == 1
+
+
+@pytest.mark.parametrize("variant", ["auto", "ssh"])
+def test_openssh_variant_git_config_accepted(repo, ssh_aliases, monkeypatch, variant):
+    monkeypatch.delenv("GIT_SSH_VARIANT", raising=False)
+    git(repo, "config", "ssh.variant", variant)
+    assert gd.github_repository("git@github-alt:owner/repo", cwd=str(repo)) == "owner/repo"
+    assert len(ssh_aliases) == 1
+
+
+def test_alias_pr_identity_and_push_target_preserve_original_transport(repo, ssh_aliases):
+    url = "git@github-alt:Owner/Repo.git"
+    git(repo, "remote", "set-url", "origin", url)
+    assert gd.origin_github_repo(str(repo)) == "Owner/Repo"
+    assert gd._push_target(str(repo), "owner/repo") == url
+    assert len(ssh_aliases) == 2  # Each check expands fresh configuration.
+    git(repo, "config", "remote.origin.pushurl", "git@github-alt:other/repo.git")
+    with pytest.raises(gd.GitDeliveryError, match="单一 GitHub 仓库"):
+        gd._push_target(str(repo), "owner/repo")
+    git(repo, "config", "--add", "remote.origin.pushurl", url)
+    with pytest.raises(gd.GitDeliveryError, match="单一 GitHub 仓库"):
+        gd._push_target(str(repo), "owner/repo")
+
+
+def test_alias_push_target_rewrite_chain_rejected(repo, ssh_aliases):
+    url = "git@github-alt:owner/repo.git"
+    git(repo, "remote", "set-url", "origin", "alias://delivery")
+    git(repo, "config", f"url.{url}.pushInsteadOf", "alias://delivery")
+    git(repo, "config", "url.https://github.com/owner/repo.git.insteadOf", url)
+    with pytest.raises(gd.GitDeliveryError, match="重复 URL 改写"):
+        gd._push_target(str(repo), "owner/repo")

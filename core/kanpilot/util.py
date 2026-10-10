@@ -139,6 +139,9 @@ def pid_alive(pid: Any) -> bool:
         return False
     try:
         os.kill(pid, 0)
+    except OverflowError:
+        # A malformed stored value outside pid_t cannot identify a local process.
+        return False
     except ProcessLookupError:
         return False
     except PermissionError:

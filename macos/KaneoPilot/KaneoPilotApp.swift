@@ -4,8 +4,22 @@ import AppKit
 @MainActor
 private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
     private var windowCloseObserver: NSObjectProtocol?
+    weak var model: AppViewModel?
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppRuntime.shared.start()
+        // Explicit local acceptance override also defeats restored/ideal window sizes.
+        // Production launch has no override and retains normal macOS restoration.
+        if let size = ProcessInfo.processInfo.environment["KANPILOT_WINDOW_SIZE"],
+           ["900x600", "1180x760", "1440x900"].contains(size) {
+            let dimensions = size.split(separator: "x").compactMap { Double($0) }
+            DispatchQueue.main.async {
+                guard let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain && $0.isVisible }) else { return }
+                var frame = window.frame
+                frame.origin.y += frame.height - dimensions[1]
+                frame.size = NSSize(width: dimensions[0], height: dimensions[1])
+                window.setFrame(frame, display: true)
+            }
+        }
         windowCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { notification in
             guard let window = notification.object as? NSWindow, window.canBecomeMain else { return }
             Task { @MainActor in
@@ -17,14 +31,27 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        AppRuntime.shared.stop { successful in
-            sender.reply(toApplicationShouldTerminate: successful)
-            if !successful {
+        Task { @MainActor in
+            do {
+                try await model?.flushPlanAnswerDrafts()
+            } catch {
+                sender.reply(toApplicationShouldTerminate: false)
                 let alert = NSAlert()
-                alert.messageText = "后台进程清理尚未完成"
-                alert.informativeText = "已停止调度并保留现场。请恢复核心连接后重试退出；Plus 会话不会被结束。"
+                alert.messageText = "回答草稿尚未保存"
+                alert.informativeText = "\(error.coreMessage)\n请恢复核心连接并保存草稿后再退出，避免丢失刚输入的内容。"
                 alert.addButton(withTitle: "好")
                 alert.runModal()
+                return
+            }
+            AppRuntime.shared.stop { successful in
+                sender.reply(toApplicationShouldTerminate: successful)
+                if !successful {
+                    let alert = NSAlert()
+                    alert.messageText = "后台进程清理尚未完成"
+                    alert.informativeText = "已停止调度并保留现场。请恢复核心连接后重试退出；Plus 会话不会被结束。"
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                }
             }
         }
         return .terminateLater
@@ -60,7 +87,10 @@ struct KaneoPilotApp: App {
                 .environmentObject(mcpManager)
                 .preferredColorScheme(preferredScheme)
                 .frame(minWidth: 900, idealWidth: 1180, idealHeight: 760)
-                .onAppear { AppRuntime.shared.mainWindowDidOpen() }
+                .onAppear {
+                    appDelegate.model = model
+                    AppRuntime.shared.mainWindowDidOpen()
+                }
         }
         .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
         .windowResizability(.automatic)

@@ -1,0 +1,75 @@
+Window: "", App: KaneoPilot.
+0 sheet Secondary Actions: Raise
+	1 container
+		2 text 项目与仓库配置 本地映射版本 r3
+		3 button 获取 Kaneo 项目
+		4 scroll area Secondary Actions: Scroll Up, Scroll Down
+			5 list
+				6 row (selected) Music
+可用
+/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/Music
+				7 row (selectable) Library
+可用
+/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/Library
+				8 row (selectable) StudyTool
+可用
+/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/StudyTool
+				9 row (selectable) Comic
+可用
+/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/Comic
+				10 row (selectable) Feedback
+可用
+/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/Feedback
+				11 row (selectable) StarTool
+未映射
+尚未选择本地仓库
+			12 scroll bar (settable, float) 0
+				13 value indicator (settable, float) 0
+				14 increment arrow button
+				15 decrement arrow button
+				16 increment page button
+				17 decrement page button
+		18 scroll area Secondary Actions: Scroll Up, Scroll Down
+			19 text Music 项目 ID：e8magole7hbivl8103wevkss
+			20 button Description: Copy, Help: 复制项目 ID, ID: doc.on.doc
+			21 text 本地仓库目录
+			22 text field (settable) Placeholder: 输入或选择仓库绝对路径…, Value: /var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-planning-mapping-check-v0hrlg9w/repos/Music
+			23 button 选择目录…
+			24 image Description: Divide, ID: arrow.triangle.branch
+			25 text Git 仓库
+			26 checkbox Description: 启用新规划（允许从此项目创建规划请求）, Value: 1
+			27 text 停用仅阻止新建规划；已排队或执行中的任务继续使用原快照。 自动处理
+			28 checkbox Description: 自动接收并处理此项目, Value: 1
+			29 text 关闭后停止新的自动接收、确认与修复规划；进行中的检查、Review 和交付继续。 标签过滤（逗号分隔，留空接收全部）
+			30 text field (settable) Description: 标签过滤，逗号分隔，留空接收全部, Value: feedback, bug, Placeholder: 例如 feedback, bug
+			31 checkbox Description: 自动确认计划, Value: 1
+			32 stepper 最多修复 2 轮, Value: 2, Secondary Actions: Increment, Decrement
+				33 increment arrow button
+				34 decrement arrow button
+			35 stepper 时长上限：240 分钟, Value: 240, Secondary Actions: Increment, Decrement
+				36 increment arrow button
+				37 decrement arrow button
+			38 text 成本上限（美元，留空不限）
+			39 text field (settable) Description: 成本上限，美元，留空不限, Value: 10.0, Placeholder: 0.5–100
+			40 text PR 目标分支（留空使用默认分支）
+			41 text field (settable) Description: PR 目标分支，留空使用默认分支, Placeholder: 例如 main
+			42 button 保存自动处理设置
+			43 button 重新载入策略
+			44 text 策略版本 r0；保存冲突时保留草稿，重新载入会替换当前策略草稿。
+			45 button 保存配置
+			46 button 解除映射…
+			47 scroll bar (settable, float) 0
+				48 value indicator (settable, float) 0
+				49 increment arrow button
+				50 decrement arrow button
+				51 increment page button
+				52 decrement page button
+53 menu bar
+	54 KaneoPilot
+	55 File
+	56 Edit
+	57 View
+	58 Window
+	59 Help
+
+The focused UI element is 0 sheet Secondary Actions: Raise

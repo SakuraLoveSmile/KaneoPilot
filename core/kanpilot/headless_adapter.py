@@ -334,11 +334,45 @@ class HeadlessSource:
 
     # -- 关联 + 读取（含缓存兜底）--
 
+    def source_signature(self, task_id: str, run_id: str) -> Optional[dict]:
+        """Validate the current small job and stat both sources without reading events.
+
+        The job stat brackets its identity read. Missing/unstable/invalid sources
+        cannot acknowledge a cached version. File metadata includes ctime so a
+        same-size rewrite with restored mtime still invalidates it.
+        """
+        from . import dsh_events
+
+        def stamp(path):
+            info = path.stat()
+            return [info.st_dev, info.st_ino, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns]
+
+        try:
+            directory = self.run_dir(task_id, run_id)
+            job_path = directory / dsh_events.JOB_NAME
+            before = stamp(job_path)
+            job, error = dsh_events.read_job(directory, task_id, run_id, backend=None)
+            if error or job.get("backend") not in constants.ROUND_BACKENDS:
+                return None
+            after = stamp(job_path)
+            if before != after:
+                return None
+            signature = {
+                "runs_root": str(self.runs_root.resolve()),
+                "task_id": task_id, "run_id": run_id, "backend": job["backend"],
+                "job": after, "events": stamp(directory / dsh_events.EVENT_LOG_NAME),
+            }
+            return {"signature": signature, "job": job}
+        except (OSError, HeadlessError):
+            return None
+
     def inspect(self, task_id: str, run_id: str) -> dict:
         """核验身份并读取轮次记录。返回 {"status", "detail", "record", "messages"}，
         status ∈ associated|pending|unavailable|read_failed（read_failed 仅在
         有缓存时返回缓存内容；命令层将其映射为 associated + degraded detail）。
         """
+        signature_before = self.source_signature(task_id, run_id)
         try:
             directory = self.run_dir(task_id, run_id)
         except HeadlessError as exc:
@@ -396,6 +430,10 @@ class HeadlessSource:
         )
         status = result.get("status")
         if status == SESSION_ASSOCIATED:
+            signature_after = self.source_signature(task_id, run_id)
+            if (result.get("_fresh") and signature_before and signature_after
+                    and signature_before["signature"] == signature_after["signature"]):
+                result["_source_signature"] = signature_after["signature"]
             # 半写入兜底：成功解析即缓存最近有效内容。
             self._snapshots[_key(task_id, run_id)] = {
                 "messages": result.get("messages") or [],

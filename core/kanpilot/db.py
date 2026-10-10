@@ -540,6 +540,8 @@ def cancel_queued_requests(
 def update_task(conn: sqlite3.Connection, task_id: str, now: str, **fields: Any) -> None:
     if not fields:
         return
+    from . import verification_checks
+    verification_checks.require_not_running(conn, task_id)
     fields["updated_at"] = now
     assignments = ", ".join(f"{key}=?" for key in fields)
     values = [
@@ -562,6 +564,10 @@ def set_extra(
 def update_request(
     conn: sqlite3.Connection, request_id: str, now: str, **fields: Any
 ) -> None:
+    from . import verification_checks
+    request = get_request(conn, request_id)
+    if request is not None and request["task_id"]:
+        verification_checks.require_not_running(conn, request["task_id"])
     fields["updated_at"] = now
     assignments = ", ".join(f"{key}=?" for key in fields)
     values = [
@@ -677,9 +683,20 @@ def create_request(
     emit_event: bool = True,
 ) -> tuple[sqlite3.Row, bool]:
     """Insert a queued request. Returns (row, created); dedup on active key."""
+    if task_id:
+        from . import verification_checks
+        verification_checks.require_not_running(conn, task_id)
     existing = active_request_for_key(conn, idempotency_key)
     if existing is not None:
         return existing, False
+    if kind == "review":
+        from . import review_config
+        payload = dict(payload or {})
+        snapshot = review_config.queue_snapshot(conn)
+        task = get_task(conn, task_id) if task_id else None
+        payload.update(review_backend=snapshot["backend"], review_config=snapshot,
+                       expected_execution_run_id=task["run_id"] if task else None,
+                       plan_sha256=task["plan_sha256"] if task else None)
     request_id = util.new_uuid()
     conn.execute(
         "INSERT INTO requests(request_id, idempotency_key, task_id, stage, "

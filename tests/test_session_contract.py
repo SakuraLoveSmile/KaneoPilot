@@ -217,6 +217,12 @@ def session_read_row(db_path, session_key):
 
 
 class TestPayloadValidation:
+    def test_messages_checks_version_and_force_types(self, cli):
+        for field, value in (("source_version", 3), ("force_reload", "true")):
+            out = cli("session-messages", {"task_id": "none", field: value}, expect=1)
+            assert out["code"] == "bad_request"
+            assert field in out["error"]
+
     def test_messages_requires_task_id(self, cli):
         out = cli("session-messages", {}, expect=1)
         assert out["code"] == "bad_request"
@@ -1174,6 +1180,51 @@ class TestPiRoundContract:
         assert len(still["messages"]) == 7, "删除后仍可读完整历史"
         rs = cli("restore-session", {"task_id": tid, "run_id": run})
         assert rs["session"]["save_state"] == "active"
+
+
+class TestSourceVersionContract:
+    def test_independent_process_pagination_ack_force_reopen_and_revision(
+            self, factory, cli, tmp_env, runs):
+        fixture = factory.make_needs_user(title="版本确认分页")
+        tid, run = fixture.task.task_id, fixture.dispatch_run_id
+        directory = write_pi_run(runs.path, tid, run)
+        use_runs_root(tmp_env, runs.path)
+        request = {"task_id": tid, "run_id": run, "limit": 2}
+        loaded = []
+        while True:
+            page = cli("session-messages", request)
+            assert isinstance(page["source_version"], str)
+            loaded.extend(page["messages"])
+            if not page["has_more"]:
+                break
+            # Even an early acknowledgement cannot skip unread pages.
+            request.update(cursor=page["next_cursor"], source_version=page["source_version"])
+        assert [message["seq"] for message in loaded] == list(range(1, 7))
+        ack_request = dict(task_id=tid, run_id=run, cursor=page["next_cursor"],
+                           source_version=page["source_version"])
+        ack = cli("session-messages", ack_request)
+        assert ack["messages"] == [] and not ack["has_more"]
+        assert ack["next_cursor"] == page["next_cursor"]
+        assert ack["source_version"] == page["source_version"]
+        assert ack["session"]["last_checked_at"] > page["session"]["last_checked_at"]
+        forced = cli("session-messages", dict(ack_request, force_reload=True))
+        assert forced["source_version"] == page["source_version"]
+        reopened = cli("session-messages", {"task_id": tid, "run_id": run,
+                                             "source_version": page["source_version"]})
+        assert len(reopened["messages"]) == 6
+        changed = default_pi_events()
+        changed[2] = dict(changed[2], content="new conclusion")
+        (directory / "events.jsonl").write_text(
+            "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in changed),
+            encoding="utf-8")
+        update = cli("session-messages", ack_request)
+        assert update["source_version"] != page["source_version"]
+        assert any(message["content"] == "new conclusion" for message in update["messages"])
+        (directory / "events.jsonl").write_text('{"seq":')
+        failed = cli("session-messages", ack_request)
+        assert failed["source_version"] is None
+        assert failed["connection"]["detail"]
+        assert failed["session"]["state"] == "associated"
 
 
 class TestLegacyBackendUnavailable:

@@ -55,6 +55,7 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
         }
 
     # Phase 1 (txn): local checks + acquire lifecycle serial atomically.
+    cmd_exec.require_pi_review_materials(ctx, payload, db.require_task(conn, payload["source_task_id"]))
     with db.write_txn(conn):
         source_task = db.require_task(conn, payload["source_task_id"])
         # v4（§5.24.5）：新自动 Review 的 fix 创建同样核对请求身份与评审周期。
@@ -146,8 +147,7 @@ def cmd_create_review_fix(ctx, payload: dict) -> dict:
         }
 
 
-def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_dir) -> None:
-    """新轮次推进前独立重核当前 monitor、终态、计划快照与命令证据。"""
+def _require_command_monitor_claim(ctx, payload, task):
     monitor_run_id = payload.get("run_id") or payload.get("monitor_run_id")
     request = ctx.conn.execute(
         "SELECT * FROM requests WHERE task_id=? AND run_id=? AND status='claimed'",
@@ -158,6 +158,12 @@ def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_
     cmd_exec.require_monitor_claim(ctx.conn, request["request_id"], monitor_run_id, ctx.now)
     if payload.get("monitor_request_id") not in (None, request["request_id"]):
         raise util.KanpilotError("stale_run", "monitor_request_id 与当前 claim 不符")
+
+
+def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_dir,
+                                       verified_receipt=None) -> None:
+    """新轮次推进前独立重核当前 monitor、终态、计划快照与命令证据。"""
+    _require_command_monitor_claim(ctx, payload, task)
     events, error = dsh_events.iter_events(run_dir / dsh_events.EVENT_LOG_NAME)
     session = dsh_events.session_event(events)
     if (not session or not job.get("session_id")
@@ -181,6 +187,11 @@ def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_
     if (declaration.get("plan_sha256") != task["plan_sha256"]
             or not declaration.get("commands")):
         raise util.KanpilotError("conflict", "计划缺少本轮可信 verify 命令声明")
+    checks = extra.get("verification_checks") or {}
+    if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
+        if not verified_receipt or verified_receipt.get("matched") != declaration["commands"]:
+            raise util.KanpilotError("conflict", "本轮核心逐条验证回执未通过核验，不能进入评审")
+        return
     result = verify_evidence.match_verification(
         declaration["commands"],
         verify_evidence.extract_command_results(dsh_events.to_messages(events)),
@@ -189,7 +200,7 @@ def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_
         raise util.KanpilotError("conflict", "本轮验证命令缺失或失败，不能进入评审")
 
 
-def _require_goal_gate(ctx, payload: dict, task) -> None:
+def _require_goal_gate(ctx, payload: dict, task, verified_receipt=None) -> None:
     """Plus 轮次的 in-progress → in-review 完成门。
 
     ``pi`` 后端维持既有口径。当前 Plus job 的 completion_policy 固化为
@@ -220,7 +231,7 @@ def _require_goal_gate(ctx, payload: dict, task) -> None:
     job, _error = dsh_events.read_job(run_dir, task["task_id"], run_id, backend="pi_desktop")
     if isinstance(job, dict) and job.get("completion_policy") == "command_verification":
         # 只读持久轮次快照；后续自动化/人工接管设置不改变本轮完成标准。
-        _require_command_verification_gate(ctx, payload, task, job, run_dir)
+        _require_command_verification_gate(ctx, payload, task, job, run_dir, verified_receipt)
         return
     monitor_request_id = payload.get("monitor_request_id")
     monitor_run_id = payload.get("monitor_run_id")
@@ -338,6 +349,13 @@ def run_store_run_dir(conn, task_id: str, run_id: str):
 def cmd_advance_task(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     started_clock = time.monotonic()
+    verified_receipt, receipt_snapshot = None, None
+    def receipt_identity(task):
+        row = round_store.get_round(conn, task["task_id"], task["run_id"])
+        return (tuple(task[key] for key in (
+            "run_id", "plan_sha256", "project_id", "requirements_sha256", "repository", "session_id", "extra_json")),
+            tuple(row[key] for key in ("backend", "worktree_path", "config_json", "session_id", "save_state", "run_status", "pid"))
+            if row is not None else None)
     def identity_check(task):
         current = ctx.now + timedelta(seconds=max(0, time.monotonic() - started_clock))
         core.require_stage_identity(conn, payload, task, current, stages=("review", "delivery"))
@@ -353,6 +371,8 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("stale_run", "推进请求已被释放或失联")
         if task["run_id"] != execution_snapshot or task["project_id"] != project_snapshot or task["requirements_sha256"] != requirements_snapshot:
             raise util.KanpilotError("stale_run", "推进期间任务执行周期或需求已变化")
+        if receipt_snapshot is not None and receipt_identity(task) != receipt_snapshot:
+            raise util.KanpilotError("conflict", "推进期间验证回执、执行轮次或计划身份已变化")
     target, expected = payload["target"], payload["expected_current"]
     if target not in ("in-review", "done"):
         raise util.KanpilotError("bad_request", f"invalid target {target}")
@@ -371,10 +391,27 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         )
 
     actor = payload.get("run_id") or "executor"
+    if target == "in-review" and expected == "in-progress":
+        # Core rerun receipts bind actual source bytes as well as the original
+        # terminal logs. Git/process/file reads must precede the writer lock.
+        current = db.require_task(conn, payload["task_id"])
+        checks = db.task_extra(current).get("verification_checks") or {}
+        if (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
+            from . import verification_checks
+            receipt_snapshot = receipt_identity(current)
+            verified_receipt = verification_checks.valid_receipt(conn, current)
+            if verified_receipt is None:
+                raise util.KanpilotError("conflict", "本轮核心逐条验证尚未通过，不能进入评审")
+    if target == "in-review":
+        core.require_committed_review(db.require_task(conn, payload["task_id"]))
     # Phase 1 (txn): local checks + acquire lifecycle serial.
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        if receipt_snapshot is not None and receipt_snapshot != receipt_identity(task):
+            raise util.KanpilotError("conflict", "核验期间验证回执、执行轮次或计划身份已变化")
         # v4（§5.24.5）：新自动 Review 的推进同样核对请求身份与评审周期
+        if target == "in-review":
+            core.require_committed_review(task, verify_worktree=False)
         #（无身份旧调用保持兼容；已完成恢复场景按只读事实判断，不新推进）。
         stage_request = core.require_stage_identity(conn, payload, task, ctx.now, stages=("review", "delivery"))
         operation_stage = stage_request["stage"] if stage_request else core.stage_for_status(task["status"], task["stage"])
@@ -382,7 +419,12 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             # T5-C（§5.23.10）：pi_desktop 轮次进入评审前的硬闸——必须在
             # **远端更新前**复核 monitor claim、判定事件、报告底线与执行终态。
             # 硬闸只读且绝不触碰远端；失败一律 conflict（不写本地、不改远端）。
-            _require_goal_gate(ctx, payload, task)
+            if verified_receipt is not None:
+                _require_command_monitor_claim(ctx, payload, task)
+                if verified_receipt.get("matched") != (db.task_extra(task).get("plan_verify") or {}).get("commands"):
+                    raise util.KanpilotError("conflict", "核验后的 verify 声明已变化")
+            else:
+                _require_goal_gate(ctx, payload, task)
         if payload.get("run_id"):
             claimed = conn.execute(
                 "SELECT * FROM requests WHERE task_id=? AND status='claimed' "

@@ -58,8 +58,8 @@ class DeliveryPR(KanpilotTestCase):
             return call
         self.outside = outside
         real_parser = git_delivery.github_repository
-        parser_patch = patch.object(git_delivery, "github_repository", side_effect=lambda url:
-                                   "owner/repo" if url == str(self.repo.parent / "origin.git") else real_parser(url))
+        parser_patch = patch.object(git_delivery, "github_repository", side_effect=lambda url, **kwargs:
+                                   "owner/repo" if url == str(self.repo.parent / "origin.git") else real_parser(url, **kwargs))
         parser_patch.start()
         self.addCleanup(parser_patch.stop)
         real_git = git_delivery._git

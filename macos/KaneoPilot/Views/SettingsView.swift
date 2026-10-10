@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// §4.9/§4.11 设置页五段（segmented，不按软件名分节）：项目与仓库 / 规划环境 / 执行环境 / Review 环境 / 通用。
-private enum SettingsSegment: String, CaseIterable, Identifiable {
+enum SettingsSegment: String, CaseIterable, Identifiable {
     case projects, planner, exec, review, general
 
     var id: String { rawValue }
@@ -16,16 +16,143 @@ private enum SettingsSegment: String, CaseIterable, Identifiable {
     }
 }
 
+private struct DesktopAutomationScheduleDraft {
+    let sourceID: String?
+    let sourceRrule: String?
+    var kind: String
+    var minutesText: String
+    var hour: Int
+    var minute: Int
+
+    init(_ status: DesktopAutomationStatusResponse.RoleStatus,
+         schedule: DesktopAutomationStatusResponse.Schedule) {
+        sourceID = status.automationId
+        sourceRrule = status.rrule
+        kind = schedule.kind
+        minutesText = schedule.minutes.map(String.init) ?? "60"
+        hour = schedule.hour ?? 0
+        minute = schedule.minute ?? 0
+    }
+
+    var schedule: DesktopAutomationStatusResponse.Schedule {
+        DesktopAutomationStatusResponse.Schedule(
+            kind: kind, minutes: kind == "interval" ? Int(minutesText) : nil,
+            hour: kind == "daily" ? hour : nil, minute: kind == "daily" ? minute : nil)
+    }
+}
+
+private struct DesktopAutomationScheduleEditor: View {
+    @EnvironmentObject private var model: AppViewModel
+    let role: DesktopAutomationRole
+    let status: DesktopAutomationStatusResponse.RoleStatus?
+    @Binding var draft: DesktopAutomationScheduleDraft?
+
+    private var editable: Bool {
+        model.desktopAutomationStatus?.supported == true
+            && status?.controllable == true && status?.scheduleEditable == true
+            && status?.schedule?.payload != nil && status?.rrule != nil
+            && ["ACTIVE", "PAUSED"].contains(status?.status ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if let status {
+                FieldRow("当前运行安排", status.scheduleSummary)
+                if !status.timeZone.isEmpty {
+                    Text("本机时区：\(status.timeZone)")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }
+            if editable, draft != nil {
+                Picker("运行安排", selection: Binding(
+                    get: { draft?.kind ?? "" }, set: { draft?.kind = $0 })) {
+                        Text("每隔 N 分钟").tag("interval")
+                        Text("每天固定时间").tag("daily")
+                    }
+                    .font(.kpBody)
+                if draft?.kind == "interval" {
+                    HStack(spacing: Spacing.s) {
+                        Text("每隔").font(.kpBody)
+                        TextField("1–1440", text: Binding(
+                            get: { draft?.minutesText ?? "" }, set: { draft?.minutesText = $0 }))
+                            .labelsHidden()
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                            .accessibilityLabel("\(role == .plan ? "规划" : "Review") 间隔分钟")
+                        Text("分钟（1–1440）").font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                } else if draft?.kind == "daily" {
+                    HStack(spacing: Spacing.s) {
+                        Text("每天").font(.kpBody)
+                        Picker("小时", selection: Binding(
+                            get: { draft?.hour ?? 0 }, set: { draft?.hour = $0 })) {
+                                ForEach(0..<24) { Text(String(format: "%02d", $0)).tag($0) }
+                            }
+                            .frame(width: 100)
+                        Picker("分钟", selection: Binding(
+                            get: { draft?.minute ?? 0 }, set: { draft?.minute = $0 })) {
+                                ForEach(0..<60) { Text(String(format: "%02d", $0)).tag($0) }
+                            }
+                            .frame(width: 100)
+                    }
+                }
+                Button("保存运行时间") {
+                    guard let schedule = draft?.schedule else { return }
+                    Task { await model.setDesktopAutomationSchedule(role, schedule: schedule) }
+                }
+                .disabled(model.desktopAutomationInFlight || draft?.schedule.payload == nil
+                          || draft?.schedule == status?.schedule)
+                .accessibilityLabel("保存\(role == .plan ? "规划" : " Review")运行时间")
+                Text("仅保存运行时间，不会开启已关闭的任务。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                if draft?.schedule.payload == nil {
+                    Text("间隔须为 1 到 1440 分钟。")
+                        .font(.kpSmall).foregroundStyle(.red)
+                }
+            } else if let status, status.controllable && !status.scheduleEditable {
+                Text("当前运行安排只读，请在 Codex 中修改。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
+            if status?.nativeAutomationURL != nil {
+                Button("在 Codex 中提前执行") { model.openDesktopAutomation(role) }
+                    .font(.kpBody)
+                    .accessibilityLabel(role == .plan ? "在 Codex 中提前执行规划" : "在 Codex 中提前执行 Review")
+                Text("打开任务后点击“立即执行”。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(model.desktopAutomationInFlight)
+        .onAppear { seedDraftIfNeeded() }
+        .onChange(of: status?.rrule) { _, _ in seedDraftIfNeeded() }
+        .onChange(of: status?.automationId) { _, _ in seedDraftIfNeeded() }
+        .onChange(of: editable) { _, _ in seedDraftIfNeeded() }
+    }
+
+    private func seedDraftIfNeeded() {
+        guard let status else { return }
+        guard editable, let schedule = status.schedule else {
+            if let rrule = status.rrule, draft?.sourceRrule != rrule { draft = nil }
+            return
+        }
+        guard draft == nil || draft?.sourceID != status.automationId
+                || draft?.sourceRrule != status.rrule else { return }
+        draft = DesktopAutomationScheduleDraft(status, schedule: schedule)
+    }
+}
+
 /// 设置（§4.4 / v3 §4.9）：顶部分段 规划环境 / 执行环境 / Review 环境 / 通用。
 struct SettingsView: View {
     @EnvironmentObject private var model: AppViewModel
+
+    var initialSegment: SettingsSegment = .projects
 
     private static let stageKeys = ["plan", "dispatch", "monitor", "review", "delivery"]
 
 
     @ObservedObject private var mcpManager = MCPServiceManager.shared
 
-    @State private var segment: SettingsSegment = .planner
+    @State private var segment: SettingsSegment = .projects
+    @State private var desktopPlanScheduleDraft: DesktopAutomationScheduleDraft?
+    @State private var desktopReviewScheduleDraft: DesktopAutomationScheduleDraft?
 
     // MARK: PI 执行配置状态（§4.4 / protocol §5.17 + v3 §5.23.3）
     @State private var execConfig: ExecConfig?
@@ -97,7 +224,7 @@ struct SettingsView: View {
     // MARK: v4 §5.24.1 角色运行端选择（各自独立，互不联动）
     /// 规划运行端（codex|pi_desktop；缺省 codex）。
     @State private var plannerBackend = "codex"
-    /// Plus 规划五字段草稿（permission_mode 固定 ask，不提供选择）。
+    /// Plus 规划五字段草稿（permission_mode 固定 auto，不提供选择）。
     @State private var plModelSource = "custom"
     @State private var plConnectionFile = ""
     @State private var plProviderId = ""
@@ -150,11 +277,13 @@ struct SettingsView: View {
                         EmptyView()
                     case .planner:
                         plannerSection
+                        desktopQueueSection
                     case .exec:
                         execSection
                         schedulerSection
                     case .review:
                         reviewSection
+                        desktopQueueSection
                     case .general:
                         backgroundSection
                         mcpServiceSection
@@ -171,18 +300,26 @@ struct SettingsView: View {
                 .formStyle(.grouped)
             }
         }
+        .onAppear { segment = initialSegment }
         .task {
+            await model.refreshDesktopAutomation()
             if model.doctor == nil { await model.runDoctor() }
             if !execLoaded && !execLoading && !savingExec { await loadExecConfig() }
             if !plannerLoaded && !model.plannerLoading { await loadPlanner() }
             if !reviewLoaded && !reviewLoading { await loadReview() }
             if executorStatus == nil { await refreshExecutorStatus() }
+            if model.desktopQueueStatus == nil { await model.refreshDesktopQueue() }
             if model.reviewCapabilities == nil {
                 await model.refreshReviewCapabilities()
             }
         }
         // §4.10：切运行端**只**刷新只读能力/候选，绝不重载配置覆盖草稿。
-        .onChange(of: model.lastRefreshAt) { Task { await refreshExecutorStatus() } }
+        .onChange(of: model.lastRefreshAt) {
+            Task {
+                await refreshExecutorStatus()
+                await model.refreshDesktopQueue()
+            }
+        }
         .onChange(of: plannerBackend) { _, backend in
             guard backend == "pi_desktop" else { return }
             Task { await model.refreshPlannerConfig() }
@@ -204,6 +341,12 @@ struct SettingsView: View {
         }
         .onChange(of: segment) { _, value in
             invalidatePiDesktopCatalog()
+            if value == .planner || value == .review {
+                Task {
+                    await model.refreshDesktopAutomation()
+                    await model.refreshDesktopQueue()
+                }
+            }
             if value == .exec && plusBlockInPlay {
                 ensurePiDesktopConnectionFile()
                 Task { await refreshPiDesktopCatalog() }
@@ -225,6 +368,123 @@ struct SettingsView: View {
         }
         .onChange(of: pdModelId) { _, _ in invalidatePiDesktopCatalog(clear: false) }
         .onChange(of: pdThinkingLevel) { _, _ in invalidatePiDesktopCatalog(clear: false) }
+    }
+
+    // MARK: Desktop 正式队列
+
+    private var desktopQueueSection: some View {
+        Section("Desktop 自动领取") {
+            Toggle("允许 Desktop 领取", isOn: Binding(
+                get: { model.desktopQueueStatus?.enabled ?? false },
+                set: { value in Task { await model.setDesktopQueueEnabled(value) } }))
+                .font(.kpBody)
+                .disabled(model.desktopQueueInFlight || model.desktopQueueStatus == nil)
+            if let status = model.desktopQueueStatus {
+                FieldRow("自动任务", status.autoConfigured ? "已绑定原生自动任务" : "尚未绑定原生自动任务")
+                FieldRow("等待领取", "规划 \(status.queue.plan) · Review \(status.queue.review)")
+                desktopThreadLink("规划", threadID: status.plannerThreadId)
+                desktopThreadLink("Review", threadID: status.reviewThreadId)
+                if !status.autoConfigured, let detail = status.detail {
+                    Text(detail).font(.kpSmall).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Text("电脑需保持开机，Codex Desktop 需保持运行；模型与权限继承 Desktop 会话/自动任务。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("关闭领取只阻止新任务领取；定时检查由下方开关独立控制。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text("Codex 定时检查").font(.kpBody)
+            desktopAutomationToggle("自动规划定时检查", role: .plan)
+            desktopAutomationToggle("自动 Review 定时检查", role: .review)
+            if let status = model.desktopAutomationStatus,
+               (!status.supported || !status.roles.plan.controllable || !status.roles.review.controllable),
+               !status.detail.isEmpty {
+                Text(status.detail).font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if model.desktopAutomationStatus == nil {
+                Text(model.desktopAutomationInFlight ? "正在读取定时检查状态…" : "尚未读取定时检查状态，暂不可控制。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("关闭后不再定时唤醒；已开始的规划或 Review 会继续。恢复后可能立即处理到期任务。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Codex 可能提前或延后几分钟启动。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("本地兼容适配；Codex 升级后若不兼容，请到 Codex 控制定时任务。任务缺失时，请在 Codex 恢复或重建并重新绑定，再刷新状态。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Spacing.m) {
+                Button("刷新 Desktop 状态") {
+                    Task {
+                        await model.refreshDesktopAutomation()
+                        await model.refreshDesktopQueue()
+                    }
+                }
+                .disabled(model.desktopQueueInFlight || model.desktopAutomationInFlight)
+                if model.desktopQueueInFlight || model.desktopAutomationInFlight {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 0)
+            }
+            if let error = model.desktopQueueError {
+                Text(error).font(.kpSmall).foregroundStyle(.red)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = model.desktopAutomationError {
+                Text(error).font(.kpSmall).foregroundStyle(.red)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func desktopAutomationToggle(_ title: String, role: DesktopAutomationRole) -> some View {
+        let status = model.desktopAutomationStatus?.roles.status(for: role)
+        let controllable = model.desktopAutomationStatus?.supported == true
+            && status?.controllable == true && status?.enabled != nil
+            && ["ACTIVE", "PAUSED"].contains(status?.status ?? "")
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            Toggle(isOn: Binding(
+                get: { status?.enabled ?? false },
+                set: { value in Task { await model.setDesktopAutomation(role, enabled: value) } })) {
+                    HStack(spacing: Spacing.m) {
+                        Text(title).font(.kpBody)
+                        Text(status?.statusText ?? "未读取")
+                            .font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!controllable || model.desktopAutomationInFlight)
+                .accessibilityLabel(title)
+            DesktopAutomationScheduleEditor(
+                role: role, status: status,
+                draft: role == .plan ? $desktopPlanScheduleDraft : $desktopReviewScheduleDraft)
+            if let status, !controllable, !status.detail.isEmpty {
+                Text(status.detail).font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func desktopThreadLink(_ role: String, threadID: String?) -> some View {
+        if let threadID, !threadID.isEmpty,
+           let url = URL(string: "codex://threads/\(threadID)") {
+            Link("打开 \(role) 自动领取聊天", destination: url).font(.kpBody)
+        }
+    }
+
+    private var desktopInheritedConfig: some View {
+        Group {
+            FieldRow("模型与思考等级", "继承 Desktop 会话/自动任务")
+            FieldRow("权限", "继承 Desktop 会话/自动任务")
+            Text("请在 Codex Desktop 配置对应会话或自动任务；保存只影响之后创建的请求。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: 本机 MCP 服务
@@ -1316,13 +1576,16 @@ struct SettingsView: View {
                 // §4.10：规划运行端（Codex / Pi-Desktop-Plus）。
                 Picker("规划运行端", selection: $plannerBackend) {
                     Text("Codex").tag("codex")
+                    Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                     Text("Claude").tag("claude")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("规划运行端")
                 .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
-                if plannerBackend == "pi_desktop" {
+                if plannerBackend == "codex_desktop" {
+                    desktopInheritedConfig
+                } else if plannerBackend == "pi_desktop" {
                     plannerPlusBlock
                 } else if plannerBackend == "claude" {
                     cliModelEditor("Claude 规划", model: $plannerClaudeModel, effort: $plannerClaudeEffort,
@@ -1349,7 +1612,7 @@ struct SettingsView: View {
         }
     }
 
-    /// §4.10 Plus 规划分支：五字段（权限固定 Ask）+ 只读目录候选 +
+    /// §4.10 Plus 规划分支：五字段（权限固定 auto）+ 只读目录候选 +
     /// 运行端就绪态。工具权限需在 Plus 处理，调度台不代批。
     @ViewBuilder
     private var plannerPlusBlock: some View {
@@ -1363,14 +1626,14 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         PlusRoleEditor(roleName: "规划",
+                       fixedPermission: ExecPiDesktopConfig.fixedPlanPermission,
                        hasSavedDesktopConfig: model.plannerPlusConfig != nil,
                        modelSource: $plModelSource,
                        connectionFile: $plConnectionFile,
                        providerId: $plProviderId,
                        modelId: $plModelId,
                        thinkingLevel: $plThinkingLevel)
-        Text("权限固定 ask：规划阶段只读协商，工具权限请在你的 Plus 界面处理"
-             + "（调度台不代批、不重发）。")
+        Text("新规划权限固定 auto：工具执行无需逐次确认，可运行命令或修改规划工作目录中的文件。已有请求保留原权限快照。")
             .font(.kpSmall)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -1468,9 +1731,10 @@ struct SettingsView: View {
     /// 并写明原因（spec_plan 是 Codex 插件运行方式）。
     @ViewBuilder
     private var plannerMethodRow: some View {
-        let plusSelected = plannerBackend != "codex"
+        let desktopSelected = plannerBackend == "codex_desktop"
+        let plusSelected = plannerBackend != "codex" && !desktopSelected
         let spec = model.plannerCapabilities?.specPlanMethod
-        let specDisabled = plusSelected || spec?.available == false
+        let specDisabled = plusSelected || (!desktopSelected && spec?.available == false)
         Picker("默认规划方式", selection: $selDefaultMethod) {
             Text("内置规划").tag("builtin")
             Text("Spec Planner 插件").tag("spec_plan")
@@ -1494,20 +1758,24 @@ struct SettingsView: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-        } else if spec?.available == false, let reason = spec?.reason {
+        } else if !desktopSelected, spec?.available == false, let reason = spec?.reason {
             Text("Spec Planner 插件不可用：\(reason)")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if !plusSelected && selDefaultMethod == "spec_plan" {
+        if desktopSelected && selDefaultMethod == "spec_plan" {
+            Text("Desktop 领取后使用施工规划技能；请确保对应会话/自动任务可使用该技能。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if !plusSelected && selDefaultMethod == "spec_plan" {
             Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
                  + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
                 .font(.kpSmall)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if model.plannerConfig?.supportsDefaultMethod != true {
+        if !desktopSelected && model.plannerConfig?.supportsDefaultMethod != true {
             Text("default_method 由核心版本决定是否持久化；"
                  + "未保存时仍可在规划面板逐批选择。")
                 .font(.kpSmall)
@@ -1601,7 +1869,7 @@ struct SettingsView: View {
         plThinkingLevel = plus?.thinkingLevel ?? ""
     }
 
-    /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 ask）。
+    /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 auto）。
     private var plannerPlusDraft: ExecPiDesktopConfig {
         ExecPiDesktopConfig(
             modelSource: plModelSource,
@@ -1718,8 +1986,8 @@ struct SettingsView: View {
     // MARK: Review 环境（v3 §5.23.4 + v4 §5.24.1：get/set-review-config）
 
     /// §4.10：Review 运行端（pi|pi_desktop）。
-    /// pi 分支保留 inherit/custom；Plus 分支复用目录候选并固定 `ask`，
-    /// 不混用任务执行的 `agent_preset`。保存只影响下一次 review 启动。
+    /// pi 分支保留 inherit/custom；Plus 分支复用目录候选并固定 `auto`，
+    /// 不混用任务执行的 `agent_preset`。保存只影响新建 Review 请求。
     private var reviewSection: some View {
         Section("Review 环境") {
             if reviewLoading && !reviewLoaded {
@@ -1755,30 +2023,35 @@ struct SettingsView: View {
             }
             if reviewLoaded {
                 // §5.24.2：review-capabilities 两分支就绪态（与执行能力分开）。
-                Text(reviewCapabilitiesText)
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if reviewBackend != "codex_desktop" {
+                    Text(reviewCapabilitiesText)
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Picker("Review 运行端", selection: $reviewBackend) {
                     Text("Pi CLI").tag("pi")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                     Text("Claude").tag("claude")
                     Text("Codex").tag("codex")
+                    Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("Review 运行端")
-                .help("Review 控制端的模型来源；保存只影响下一次 review 启动")
-                if reviewBackend == "pi_desktop" {
+                .help("Review 控制端的模型来源；保存只影响新建 Review 请求")
+                if reviewBackend == "codex_desktop" {
+                    desktopInheritedConfig
+                } else if reviewBackend == "pi_desktop" {
                     PlusRoleEditor(
                         roleName: "Review",
+                        fixedPermission: ExecPiDesktopConfig.fixedReviewPermission,
                         hasSavedDesktopConfig: reviewConfig?.piDesktop != nil,
                         modelSource: $rvModelSource,
                         connectionFile: $rvConnectionFile,
                         providerId: $rvProviderId,
                         modelId: $rvModelId,
                         thinkingLevel: $rvThinkingLevel)
-                    Text("权限固定 ask：Review 只读审查并输出结论，"
-                         + "不代批契约；工具权限需在你的 Plus 界面处理。")
+                    Text("权限固定 auto：工具执行无需逐次确认；Review 审查并输出结论，"
+                         + "不代批契约。已有轮次保留原权限快照。")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1825,7 +2098,7 @@ struct SettingsView: View {
                     .disabled(reviewLoading || reviewSaving
                               || reviewIssue != nil)
                     .help(reviewIssue
-                          ?? "set-review-config：仅影响下一次 review 启动")
+                          ?? "set-review-config：仅影响新建 Review 请求")
                     if reviewSaving {
                         ProgressView().controlSize(.small)
                     }
@@ -1845,7 +2118,7 @@ struct SettingsView: View {
                     }
                     .accessibilityElement(children: .combine)
                 }
-                Text("当前生效：\(reviewEffectiveText)；仅影响下一次 review 启动"
+                Text("当前生效：\(reviewEffectiveText)；仅影响新建 Review 请求"
                      + "（新控制轮），不改运行中进程。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
@@ -1924,8 +2197,9 @@ struct SettingsView: View {
     }
 
     /// 保存禁用原因（§5.24.1）：由运行端分支决定校验对象。
-    /// pi → mode 与 custom 三元组；pi_desktop → 五字段（权限固定 ask）。
+    /// pi → mode 与 custom 三元组；pi_desktop → 五字段（权限固定 auto）。
     private var reviewIssue: String? {
+        if reviewBackend == "codex_desktop" { return nil }
         if reviewBackend == "claude" { return emptyToNil(reviewClaudeModel) == nil ? "Claude 模型不能为空" : nil }
         if reviewBackend == "codex" { return emptyToNil(reviewCodexModel) == nil ? "Codex 模型不能为空" : nil }
         if reviewBackend == "pi_desktop" {
@@ -1955,6 +2229,9 @@ struct SettingsView: View {
     /// 当前生效来源（已保存值优先）：Plus 五字段 / custom 三元组 / inherit。
     private var reviewEffectiveText: String {
         let config = reviewConfig ?? reviewDefaults
+        if config?.effectiveBackend == "codex_desktop" {
+            return "Codex Desktop（继承 Desktop 会话/自动任务）"
+        }
         if config?.effectiveBackend == "claude" {
             return "Claude（\(config?.claude?.model ?? "?") / \(config?.claude?.effort ?? "?")）"
         }
@@ -1963,13 +2240,14 @@ struct SettingsView: View {
         }
         if config?.effectiveBackend == "pi_desktop" {
             let src = config?.piDesktop?.effectiveModelSource ?? "custom"
+            let permission = config?.piDesktop?.permissionMode ?? ExecPiDesktopConfig.fixedReviewPermission
             if src == "inherit" {
-                return "Pi-Desktop-Plus（跟随 Plus 默认配置，权限 ask）"
+                return "Pi-Desktop-Plus（跟随 Plus 默认配置，权限 \(permission)）"
             }
             let provider = config?.piDesktop?.providerId ?? "?"
             let modelName = config?.piDesktop?.modelId ?? "?"
             let level = config?.piDesktop?.thinkingLevel ?? "?"
-            return "Pi-Desktop-Plus（\(provider)/\(modelName)/\(level)，权限 ask）"
+            return "Pi-Desktop-Plus（\(provider)/\(modelName)/\(level)，权限 \(permission)）"
         }
         if config?.effectiveMode == "custom" {
             let provider = config?.provider ?? "?"
@@ -2016,7 +2294,7 @@ struct SettingsView: View {
         Task { await model.refreshReviewCapabilities() }
     }
 
-    /// Review Plus 五字段草稿（§5.24.5：plan 模式 + 固定 ask）。
+    /// Review Plus 五字段草稿（§5.24.5：plan 模式 + 固定 auto）。
     private var reviewPlusDraft: ExecPiDesktopConfig {
         ExecPiDesktopConfig(
             modelSource: rvModelSource,
@@ -2024,7 +2302,7 @@ struct SettingsView: View {
             providerId: emptyToNil(rvProviderId),
             modelId: emptyToNil(rvModelId),
             thinkingLevel: emptyToNil(rvThinkingLevel),
-            permissionMode: ExecPiDesktopConfig.fixedPlanPermission)
+            permissionMode: ExecPiDesktopConfig.fixedReviewPermission)
     }
 
     /// 保存：按所选运行端提交；失败保留草稿并展示核心 error 原文。
@@ -2039,7 +2317,7 @@ struct SettingsView: View {
             payload["claude"] = ["model": reviewClaudeModel, "effort": reviewClaudeEffort]
         } else if reviewBackend == "codex" {
             payload["codex"] = ["model": reviewCodexModel, "reasoning_effort": reviewCodexEffort]
-        } else {
+        } else if reviewBackend != "codex_desktop" {
             payload["mode"] = selReviewMode
             if selReviewMode == "custom" {
                 payload["provider"] = emptyToNil(selReviewProvider) ?? ""
@@ -2054,7 +2332,7 @@ struct SettingsView: View {
             reviewConfig = response.config ?? reviewConfig
             reviewDefaults = response.defaults ?? reviewDefaults
             reviewSaveError = nil
-            model.showToast("已保存 Review 配置（仅影响下一次 review 启动）")
+            model.showToast("已保存 Review 配置（仅影响新建 Review 请求）")
             Task { await model.refreshReviewCapabilities() }
         } catch {
             reviewSaveError = error.coreMessage  // 草稿保留
@@ -2115,6 +2393,9 @@ struct SettingsView: View {
     private var plannerStatusText: String {
         var parts: [String] = ["手动触发"]
         let status = executorStatus?.stages?["plan"]
+        if (status?.desktopWaiting ?? 0) > 0 {
+            parts.append("已排队，等待 Desktop 领取 \(status?.desktopWaiting ?? 0) 项")
+        }
         if status?.running != nil {
             parts.append("运行中")
         } else if let last = status?.last {
@@ -2195,6 +2476,9 @@ struct SettingsView: View {
         var parts: [String] = []
         if !executorEnabled { parts.append("已停用") }
         let status = executorStatus?.stages?[stage]
+        if (status?.desktopWaiting ?? 0) > 0 {
+            parts.append("已排队，等待 Desktop 领取 \(status?.desktopWaiting ?? 0) 项")
+        }
         if status?.running != nil {
             parts.append("运行中")
         } else if let last = status?.last {
@@ -2405,12 +2689,13 @@ private struct PathRow: View {
 
 /// 一个角色（规划 / Review）的 Plus 五字段编辑块：
 /// 连接文件 + provider/model（只读目录候选 + 模型搜索弹层）+ thinking_level；
-/// permission_mode 固定 `ask`（不提供选择；工具权限需在 Plus 处理）。
+/// 规划与 Review 固定 auto（不提供选择）。
 /// 候选来自只读 `pi-desktop-catalog`，只在**空草稿**里填 Plus 明确默认值，
 /// 不重载已保存配置、不调用 set-*；响应必须属于本次连接路径/provider 修订。
 private struct PlusRoleEditor: View {
     /// 角色名（"规划" / "Review"），用于可读名称。
     let roleName: String
+    let fixedPermission: String
     /// 该角色已有已保存的桌面块 → 只加载候选并提示不可用，不改草稿。
     let hasSavedDesktopConfig: Bool
     @Binding var modelSource: String
@@ -2562,9 +2847,9 @@ private struct PlusRoleEditor: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            // 权限固定 Ask（§5.24.1：plan / Review 不开放 auto/accept-edits）。
+            // 两个角色使用各自固定权限，不由模型目录覆盖。
             FieldRow("permission_mode",
-                     "\(ExecPiDesktopConfig.fixedPlanPermission)（固定）")
+                     "\(fixedPermission)（固定）")
             HStack(spacing: Spacing.m) {
                 Button(loading ? "读取中…" : "重新获取 Plus 列表") {
                     Task { await refresh() }

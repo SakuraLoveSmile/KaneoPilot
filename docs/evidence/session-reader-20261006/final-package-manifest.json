@@ -1,0 +1,15 @@
+{
+  "base_commit": "166ae24e77b50cc1032546e0dd42c2b626706ff7",
+  "uncommitted": true,
+  "bundle_id": "local.kaneopilot.session-reader-check",
+  "sha256": {
+    "macos/KaneoPilot/Views/SessionReaderView.swift": "1c30cf9f020c693415655d40f4dab050951e96f246ba75ecc955f044cbebd693",
+    "macos/KaneoPilot/Views/SessionReaderStore.swift": "6e2dc03f67d9428a51394a5cd538cc53b542b1788543d3a42bda91471f74b321",
+    "macos/KaneoPilot/Views/SessionMessagePresentation.swift": "a2291a4f4a6b04e0b3a0dc70284476c393f150d3698954c8765cb7c2afd26119",
+    "macos/KaneoPilot/Views/SessionMessageDetailView.swift": "c15c4abd9d0b37d20d1218ba30580dfa82e19e629c64d184a7f4883007a84583",
+    "macos/FakeCore/kanpilot-fake.py": "8f998d56b9722fd710ef082a64f0e849a4e14e95af8de4a545b060e47318b05a",
+    "dist/session-reader-check/KaneoPilot.app/Contents/MacOS/KaneoPilot": "5afa853cc55b97253300d172cd2f0f325cbae3654c5aef0b73aa6172d7f134d4",
+    "dist/session-reader-check/launch.py": "d41269b3fc15b6bc0149365a8e6cd34aef6441d1be26d07d37a5a9ef340e1354"
+  },
+  "stage": "independent search input observation; background diagnostic encoding"
+}

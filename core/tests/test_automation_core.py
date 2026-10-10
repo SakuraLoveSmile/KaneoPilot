@@ -6,10 +6,51 @@ from types import SimpleNamespace
 import pytest
 
 from kanpilot import (automation_policy, cli, cmd_config, cmd_exec, cmd_queue,
-                      cmd_read, cmd_remote, constants, core, db, derive, remote, util)
+                      cmd_read, cmd_remote, constants, core, db, derive, git_delivery, remote, util)
 
 NOW = '2026-10-05T05:00:00+00:00'
 TASK = 'automationtask00000000001'
+
+
+def test_background_recovers_goal_outside_write_transaction(state, monkeypatch):
+    from kanpilot import cmd_dispatch
+    state.update(status='needs_user', failure_code='execution_failed')
+    calls = []
+    def observe(ctx, payload):
+        assert not ctx.conn.in_transaction
+        calls.append(payload)
+        return {'status': 'deferred', 'detail': 'expired'}
+    monkeypatch.setattr(cmd_dispatch, 'cmd_round_observe', observe)
+    result = cmd_read.cmd_recover_execution_goals(state.ctx, {})
+    assert calls == [{'task_id': TASK, 'run_id': 'execution1', 'executor': 'scheduler',
+                      'continue_goal': True, 'continue_goal_only': True}]
+    assert result['goal_recoveries'] == []
+    assert state.task()['status'] == 'needs_user'
+
+
+def test_tick_never_waits_for_plus_goal_recovery(state, monkeypatch):
+    from kanpilot import cmd_dispatch
+    state.update(status='needs_user', failure_code='execution_failed')
+    monkeypatch.setattr(cmd_dispatch, 'cmd_round_observe', lambda *a: pytest.fail('tick must stay local'))
+    assert cmd_read.cmd_tick(state.ctx, {})['created'] == []
+
+
+@pytest.mark.parametrize('blocked', ['global', 'monitor', 'dispatch', 'task', 'manual', 'other_failure'])
+def test_background_does_not_recover_stopped_or_unrelated_task(state, monkeypatch, blocked):
+    from kanpilot import cmd_dispatch
+    state.update(status='needs_user', failure_code='execution_failed')
+    if blocked == 'global':
+        db.set_setting(state.conn, 'paused_global', True)
+    elif blocked in ('monitor', 'dispatch'):
+        db.set_setting(state.conn, 'paused_stages', [blocked])
+    elif blocked == 'task':
+        state.update(auto_advance_paused=1)
+    elif blocked == 'manual':
+        core.update_automation(state.conn, state.task(), NOW, manual_takeover=True)
+    else:
+        state.update(failure_code='verification_unconfirmed')
+    monkeypatch.setattr(cmd_dispatch, 'cmd_round_observe', lambda *a: pytest.fail('unexpected recovery'))
+    cmd_read.cmd_recover_execution_goals(state.ctx, {})
 
 
 @pytest.fixture
@@ -21,7 +62,10 @@ def state(tmp_path, monkeypatch):
                  (TASK, 'project1', 'Test', str(tmp_path), 'ready', 'dispatch', 'requirements', 'plan', 'execution1', NOW, NOW))
     task = db.require_task(conn, TASK)
     core.update_automation(conn, task, NOW, adopted_at=NOW, manual_takeover=False, fix_round=0, plan_attempts=1, segment_started_at=NOW, cost_usd=0)
-    core.update_delivery(conn, task, NOW, mode='pr', head_sha='head1', commits=[], next_sync_at=None)
+    core.update_delivery(conn, task, NOW, mode='pr', branch='kaneo/fixture', base_branch='main',
+                         base_sha='base1', head_sha='head1', worktree_path=str(tmp_path / 'worktree'),
+                         commits=[{'execution_run_id': 'execution1', 'sha': 'head1'}], next_sync_at=None)
+    monkeypatch.setattr(git_delivery, 'verify_branch_worktree', lambda *a, **k: None)
     db.set_setting(conn, 'project_mappings', {'version': 1, 'revision': 1, 'items': {'project1': {'repository': str(tmp_path), 'enabled': True, 'automation': dict(constants.AUTOMATION_DEFAULTS, enabled=True)}}})
     monkeypatch.setattr(automation_policy, 'automation_preflight', lambda c, p: [] if not c.in_transaction else pytest.fail('preflight in write txn'))
     monkeypatch.setattr(remote, 'get_client', lambda: object())
@@ -38,6 +82,8 @@ def state(tmp_path, monkeypatch):
     def claim(kind='review', run='review1'):
         r, _ = db.create_request(conn, NOW, kind, kind + ':' + TASK, task_id=TASK)
         db.update_request(conn, r['request_id'], NOW, status='claimed', run_id=run, lease_expires_at=util.plus_seconds(600, ctx.now), claimed_by='test')
+        if kind == 'review':
+            db.merge_request_payload(conn, r['request_id'], NOW, review_branch_snapshot=core.branch_review_snapshot(task()))
         return {'task_id': TASK, 'request_id': r['request_id'], 'run_id': run, 'expected_execution_run_id': task()['run_id']}
     def review(conclusion='changes_requested', key='key1'):
         update(status='in_review', stage='review', sent=1, send_state='sent', sent_at=NOW, lock_retained=1)
@@ -145,7 +191,11 @@ def test_auto_confirm_all_skip_reasons_once(state, monkeypatch, reason):
 
 
 def test_auto_confirm_and_delivery_tick_cycle(state):
-    state.extra(plan_execution_hold=True,plan_verify={'plan_sha256':'plan','commands':['test']})
+    plan = Path(state.task()['repository']) / 'current-plan.md'
+    plan.write_text('# Current authorized plan\n')
+    plan_sha = util.sha256_file(plan)
+    state.update(plan_path=str(plan), plan_sha256=plan_sha)
+    state.extra(plan_execution_hold=True,plan_verify={'plan_sha256':plan_sha,'commands':['test']})
     assert cmd_read.cmd_tick(state.ctx,{})['created'][0]['kind']=='dispatch'
     assert not db.task_extra(state.task()).get('plan_execution_hold')
     state.update(status='in_review',stage='review')

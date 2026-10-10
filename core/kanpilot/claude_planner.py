@@ -1,6 +1,8 @@
 """Read-only Claude planning, preserving the existing planner publish contract."""
 from __future__ import annotations
 
+from . import plan_questions
+
 import os
 import time
 from pathlib import Path
@@ -67,7 +69,7 @@ def run_one(db_path, request_id: str, run_id: str, *, context: dict,
     finally:
         conn.close()
     input_dir = Path(context["input_dir"]) if context.get("input_dir") else None
-    prompt_task = dict(task, fix_mode=payload.get("fix_mode"))
+    prompt_task = dict(task, fix_mode=payload.get("fix_mode"), plan_cwd=payload.get("plan_cwd"))
     prompt = codex_planner.build_prompt(prompt_task, manifest, input_dir)
     cwd = payload.get("plan_cwd") or task.get("repository") or (manifest.get("task") or {}).get("repository") or "."
     job["worktree_path"] = str(cwd)
@@ -127,8 +129,8 @@ def run_one(db_path, request_id: str, run_id: str, *, context: dict,
         draft.write_text(output["plan_markdown"], encoding="utf-8")
         finish("finished", 0, "needs_input", "needs_input")
         planner_runner._report(db_path, request_id, run_id, "needs_user",
-             "规划需要补充材料：" + "；".join(output["questions"] or ["见草稿"]),
-             failure_code="reported", evidence={"questions": output["questions"],
+             "规划需要补充材料：" + plan_questions.summary(output["questions"]),
+             failure_code="reported", evidence={"questions": output["questions"], "plan_markdown": output["plan_markdown"],
              "draft_path": str(draft), "evidence": output["evidence"]})
         return True
     generated_at = util.now_iso()

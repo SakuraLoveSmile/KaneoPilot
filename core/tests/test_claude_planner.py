@@ -28,7 +28,7 @@ class ClaudePlannerTest(KanpilotTestCase):
         finally:
             conn.close()
 
-    def prepare(self, status="ready"):
+    def prepare(self, status="ready", questions=None):
         self.fake.add_task(self.task_id, self.pid, status="to-do", title="Claude 规划测试")
         info = self.call("prepare-plan-input", {"task_id": self.task_id})
         entry = self.call("start-plans", {"items": [{"input_id": info["input_id"],
@@ -36,7 +36,7 @@ class ClaudePlannerTest(KanpilotTestCase):
         self.assertTrue(entry.get("request_id"), entry)
         output = {"status": status,
             "plan_markdown": "# 实施计划\n\n修改入口\n\n```verify\npython3 -m unittest\n```\n",
-            "questions": ["确认目标版本"] if status == "needs_input" else [], "evidence": []}
+            "questions": (questions if questions is not None else ["确认目标版本"]) if status == "needs_input" else [], "evidence": []}
         stub = self.root / "claude"
         stub.write_text("#!" + sys.executable + "\nimport json,sys,os\n"
             "open('claude-stdin.txt','w').write(sys.stdin.read())\n"
@@ -51,15 +51,12 @@ class ClaudePlannerTest(KanpilotTestCase):
 
     def test_runner_publishes_with_frozen_model_and_cost(self):
         request_id = self.prepare()
-        branch = self.root / "branch"
-        branch.mkdir()
         conn = db.connect(self.db_path)
         try:
             request = db.get_request(conn, request_id)
             payload = db.request_payload(request)
-            payload["plan_cwd"] = str(branch)
-            conn.execute("UPDATE requests SET payload_json=? WHERE request_id=?", (util.jdump(payload), request_id))
-            conn.commit()
+            branch = Path(payload["plan_cwd"])
+            self.assertEqual(payload["workspace_version"], 1)
         finally:
             conn.close()
         with mock.patch.object(cli, "run", wraps=cli.run) as calls:
@@ -83,6 +80,15 @@ class ClaudePlannerTest(KanpilotTestCase):
         view = self.call("get-task", {"task_id": self.task_id})["task"]
         self.assertEqual(view["status"], "needs_user")
         self.assertTrue(list(self.runs_root.rglob("plan-draft.md")))
+
+    def test_structured_questions_are_kept_in_software_card(self):
+        from test_plan_answers import QUESTION
+        request_id = self.prepare("needs_input", questions=[QUESTION])
+        self.assertTrue(planner_runner.run_one(self.db_path, request_id))
+        view = self.call("get-task", {"task_id": self.task_id})["task"]
+        self.assertEqual(view["plan_clarification"]["questions"], [QUESTION])
+        self.assertIn("播放全部", view["failure_reason"])
+        self.assertNotIn("{'id'", view["failure_reason"])
 
     def test_claude_snapshot_and_configuration(self):
         conn = db.connect(self.db_path)
@@ -133,7 +139,7 @@ class ClaudePlannerTest(KanpilotTestCase):
 
     def test_prompt_contract(self):
         prompt = codex_planner.build_prompt({"fix_mode": "same_task"}, {"files": []}, None)
-        for token in ("恰好一个 ```verify", "1–5", "新建 worktree", "工作树已含前几轮提交", "只修 Review", "verify 要覆盖修复点"):
+        for token in ("恰好一个 ```verify", "1–5", "专用分支/worktree", "工作区由核心准备", "工作树已含前几轮提交", "只修 Review", "verify 要覆盖修复点"):
             self.assertIn(token, prompt)
 
     def test_codex_and_claude_prompt_describes_partial_state_materials(self):
@@ -187,8 +193,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         task_id, request_id = fixture["task_id"], fixture["request_id"]
         sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
         branch = self.worktrees_root / task_id / "branch"
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", "kaneo/" + task_id,
-                        str(branch), sha], capture_output=True, check=True)
+        self.assertTrue(branch.is_dir())  # Created by the first formal planning submission.
         partial = b"partial changes retained after failure\n"
         (branch / "partial.py").write_bytes(partial)
         (branch / "obsolete.txt").unlink()
@@ -208,6 +213,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
                                 {"path": ".env", "status": "??", "reason": "sensitive"}]}
                 payload.update(plan_cwd=str(branch), delivery_mode="pr", delivery_head_sha=sha,
                                planner_input_sha256=pi_desktop_planner.manifest_sha(manifest))
+                payload.pop("workspace_version", None)  # Historical PR partial-material contract.
                 db.update_request(conn, request_id, util.now_iso(), payload_json=payload)
         finally:
             conn.close()
@@ -246,8 +252,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         task_id, repo = fixture["task_id"], fixture["repo"]
         sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
         branch = self.worktrees_root / task_id / "branch"
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", "kaneo/" + task_id,
-                        str(branch), sha], capture_output=True, check=True)
+        self.assertTrue(branch.is_dir())  # Reuse core's existing branch for legacy takeover fixture.
         # Manual work may include both a newer commit and uncommitted files.
         (branch / "manual.txt").write_text("manual checkpoint")
         subprocess.run(["git", "-C", str(branch), "add", "manual.txt"], check=True)
@@ -264,6 +269,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
                               "worktree_path": str(branch), "head_sha": sha})
                 request = db.get_request(conn, fixture["request_id"])
                 payload = db.request_payload(request)
+                payload.pop("workspace_version", None)  # This fixture tests the historical takeover contract.
                 payload.update(delivery_mode="manual", plan_cwd=str(payload_cwd or branch),
                                delivery_head_sha=sha)
                 db.update_request(conn, fixture["request_id"], util.now_iso(), payload_json=payload)
@@ -292,7 +298,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         snapshots.assert_not_called()
         self.assertEqual(self.server.created["projectPath"], str(branch))
         self.assertEqual(self.server.created["mode"], "plan")
-        self.assertEqual(self.server.configured["permissionMode"], "ask")
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
         self.assertEqual(observed, {"tracked": "# dirty manual changes\n", "untracked": "untracked manual notes",
                                    "committed": "manual checkpoint"})
         self.assertEqual((branch / "AGENTS.md").read_text(), observed["tracked"])

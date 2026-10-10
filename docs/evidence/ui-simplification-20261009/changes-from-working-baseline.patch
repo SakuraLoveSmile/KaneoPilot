@@ -1,0 +1,2710 @@
+--- a/docs/plans/自动化工作台与交互简化.plan.md
++++ b/docs/plans/自动化工作台与交互简化.plan.md
+@@ -0,0 +1,20 @@
++# 自动化工作台与交互简化
++
++状态：待体验。T1/T2/T3 已实现并完成本次适用验证，等待用户体验确认。
++
++UI 简化冻结规格（2026-10-09）
++T1 自动化总览：默认首页，侧栏按“工作台”(总览/任务/需要处理)、“记录”(执行会话/运行记录/归档/回收站)、“配置”(设置)分组。继承系统原生色、13/18/11pt 与8/12/16间距，不新增依赖/全局皮肤。总览按运行状态与暂停/恢复、规划→执行→评审→交付阶段计数、需要你处理、正在推进、最近完成顺序；真实 executor-status/overview/task 数据，缺失/离线不能称运行正常。立即检查显式解释会接收任务并推进。暂停说明不终止已启动任务。阶段暂停、调度关闭、项目未开启、诊断失败都可见并给设置入口。列表打开统一详情，确认执行进入已验证计划页，危险决议保留。
++T2 任务与待处理：优先呈现核心异常、待确认计划/任务级暂停与失联；正常队列默认折叠，历史失败默认折叠且计数，保留原请求详情与清除确认。任务概览底栏一个安全推进主动作，低频动作进“更多操作”；发送不明不自动选风险决议，以重新校验为安全入口，危险操作仍二次确认。不新增核心状态写入。概览confirm_dispatch改为跳计划页，不直接执行；onSwitchTab不存在时禁用。允许动作与归档限制沿当前核心，不能自动重试/发布。
++T3 设置与规划：设置默认项目与仓库，按三角色配置独立保存；保留后台运行/自动化常用项，通用诊断、路径、参数、MCP与迁移及领取验证默认折叠。阶段开关折叠但显示已暂停阶段摘要。项目默认显示仓库、自动处理开关、自动确认计划和成本/时长/修复预算；标签过滤、PR目标分支放高级选项，错误与预算摘要始终可见，折叠不丢草稿/改变策略。手动规划减少步骤：选择任务→核对材料并开始；运行环境信息默认折叠，最终用户确认保留。任何补充/文件/排除变更使准备结果过期并禁用提交，重新准备后才可提交新哈希。不绕过本地网络授权、仓库映射与核心校验。
++分工：主 agent 唯一维护docs/ui-spec、docs/plans本次计划、RootView/AppViewModel/BoardView、新总览与Xcode注册，集成与原生核验。flow_worker独占PendingView与TaskDetailContentView；settings_worker独占SettingsView/ProjectMappingsView；planning_worker独占PlanningView及材料变更必要隔离夹具。三包接口仅复用现有model/core，可独立并行；不编辑其他文件，不派生。需共享模型新增请求回主控。
++验收：独立bundle ID + FakeCore +临时support/db/凭据/状态，调度关闭，不访问真实模型/远端写；Release构建与现有Swift模型/规划相关夹具；主agent实测1180×760和900×600、浅/深色、主入口导航、详情菜单、发送不明确认、待处理折叠、设置草稿、规划编辑失效与新哈希。记录隔离证据，构建不代替UI。现有脏改动已通过source.zip+SHA256.json可恢复备份。不安装、不push、不发布。
++
++实现与核验证据在本文件完成后追加。
++
++## 实现与验证结果
++
++T1/T2/T3 均为待体验。Release构建、121项模型夹具与材料状态夹具通过；主 agent 已实测1180×760浅色、900×600深色、暂停恢复、阶段导航、异常决议、计划正文两模式、设置草稿、材料编辑与提交完成收尾。
++
++补充收尾：成功项从本次提交集合移出，全部成功显示完成；多个无task_id失败结果按返回顺序逐项展示。人工交付不误报等待PR。计划页不重复父页标题和待确认徽标；AX桥接标签改为原生正文标注并移除产生环路的包装组合，实测恢复。
++
++详细记录：docs/evidence/ui-simplification-20261009/verification.md。体验脚本：scripts/preview_automation_ui.sh。正式应用未替换，未做真实模型端到端运行，未发布。
+--- a/docs/ui-spec.md
++++ b/docs/ui-spec.md
+@@ -389,3 +389,13 @@
+ 规划与Review环境底部共用“Desktop 领取验证”Section，沿现有字体、FieldRow与间距，提供“创建测试请求”“刷新验证状态”。说明固定plan/review测试请求由Codex Desktop通过MCP领取并回传，本次不启用自动领取。按钮只读写本地验证lane，不启动模型。原运行端、保存与草稿保留；撤掉本会话app-server连接/直接模型验证入口。
+ 
+ 显示同一批次两角色：queued为“等待Desktop领取”，claimed为“Desktop已领取”，completed为“已回传”。共用单飞守卫及错误；显示有限高度可展开结果，存在thread_id时才提供官方聊天深链。状态不能仅凭调用方提交的thread_id断言桌面进程执行。独立候选bundle local.kaneopilot.desktop-intake-check复用完整隔离环境守卫，缺少环境不能回落正式核心/DB。
++
++
++### 4.15 自动化工作台与交互简化（2026-10-09）
++
++UI 简化冻结规格（2026-10-09）
++T1 自动化总览：默认首页，侧栏按“工作台”(总览/任务/需要处理)、“记录”(执行会话/运行记录/归档/回收站)、“配置”(设置)分组。继承系统原生色、13/18/11pt 与8/12/16间距，不新增依赖/全局皮肤。总览按运行状态与暂停/恢复、规划→执行→评审→交付阶段计数、需要你处理、正在推进、最近完成顺序；真实 executor-status/overview/task 数据，缺失/离线不能称运行正常。立即检查显式解释会接收任务并推进。暂停说明不终止已启动任务。阶段暂停、调度关闭、项目未开启、诊断失败都可见并给设置入口。列表打开统一详情，确认执行进入已验证计划页，危险决议保留。
++T2 任务与待处理：优先呈现核心异常、待确认计划/任务级暂停与失联；正常队列默认折叠，历史失败默认折叠且计数，保留原请求详情与清除确认。任务概览底栏一个安全推进主动作，低频动作进“更多操作”；发送不明不自动选风险决议，以重新校验为安全入口，危险操作仍二次确认。不新增核心状态写入。概览confirm_dispatch改为跳计划页，不直接执行；onSwitchTab不存在时禁用。允许动作与归档限制沿当前核心，不能自动重试/发布。
++T3 设置与规划：设置默认项目与仓库，按三角色配置独立保存；保留后台运行/自动化常用项，通用诊断、路径、参数、MCP与迁移及领取验证默认折叠。阶段开关折叠但显示已暂停阶段摘要。项目默认显示仓库、自动处理开关、自动确认计划和成本/时长/修复预算；标签过滤、PR目标分支放高级选项，错误与预算摘要始终可见，折叠不丢草稿/改变策略。手动规划减少步骤：选择任务→核对材料并开始；运行环境信息默认折叠，最终用户确认保留。任何补充/文件/排除变更使准备结果过期并禁用提交，重新准备后才可提交新哈希。不绕过本地网络授权、仓库映射与核心校验。
++分工：主 agent 唯一维护docs/ui-spec、docs/plans本次计划、RootView/AppViewModel/BoardView、新总览与Xcode注册，集成与原生核验。flow_worker独占PendingView与TaskDetailContentView；settings_worker独占SettingsView/ProjectMappingsView；planning_worker独占PlanningView及材料变更必要隔离夹具。三包接口仅复用现有model/core，可独立并行；不编辑其他文件，不派生。需共享模型新增请求回主控。
++验收：独立bundle ID + FakeCore +临时support/db/凭据/状态，调度关闭，不访问真实模型/远端写；Release构建与现有Swift模型/规划相关夹具；主agent实测1180×760和900×600、浅/深色、主入口导航、详情菜单、发送不明确认、待处理折叠、设置草稿、规划编辑失效与新哈希。记录隔离证据，构建不代替UI。现有脏改动已通过source.zip+SHA256.json可恢复备份。不安装、不push、不发布。
+--- a/macos/FakeCore/kanpilot-fake.py
++++ b/macos/FakeCore/kanpilot-fake.py
+@@ -919,11 +919,11 @@
+ 
+ def merged_requests(state):
+     requests = {r["request_id"]: dict(r) for r in base_requests()}
++    for req in state.get("extra_requests", []):
++        requests[req["request_id"]] = dict(req)
+     for rid, patch in state.get("request_overrides", {}).items():
+         if rid in requests:
+             requests[rid].update(patch)
+-    for req in state.get("extra_requests", []):
+-        requests[req["request_id"]] = dict(req)
+     # v2 §5.21/§5.22：manual_authorized 由 payload_json.manual_authorized 派生到行级字段。
+     for req in requests.values():
+         payload = req.get("payload") or {}
+@@ -1161,6 +1161,28 @@
+         if task["task_id"] == tid:
+             return {"task": task_detail(task, merged_requests(state))}
+     return fail("任务不存在：%s" % tid, "not_found")
++
++
++def cmd_get_plan(state, payload):
++    """Static verified-response fixture; never read a user's real plan files."""
++    task = next((t for t in merged_tasks(state) if t["task_id"] == payload.get("task_id")), None)
++    if not task or not task.get("plan_path"):
++        return fail("该任务尚未生成计划", "not_found")
++    if state.get("plan_read_error"):
++        return fail("隔离演练：计划自发布后已变更", "conflict")
++    expected = payload.get("expected_plan_sha256")
++    if expected and expected != task.get("plan_sha256"):
++        return fail("计划哈希不匹配", "conflict")
++    markdown = ("# " + task["title"] + "\n\n"
++                "> 隔离预览材料，不会调用真实模型或修改真实仓库。\n\n"
++                "## 本次目标\n\n让用户明确当前阶段、需要决定的事项和最终交付结果。\n\n"
++                "## 实施与验证\n\n1. 核对需求和材料。\n2. 在隔离环境执行与验证。\n3. 保留记录并提交评审。\n\n"
++                "| 检查 | 预期 |\n| --- | --- |\n| 正常操作 | 状态清晰 |\n| 失败状态 | 保留原因和恢复入口 |\n")
++    return {"task_id": task["task_id"], "title": task["title"],
++            "plan_kind": task.get("plan_kind", "standard"),
++            "generated_at": task.get("plan_generated_at"),
++            "plan_sha256": task.get("plan_sha256"), "plan_path": task["plan_path"],
++            "markdown": markdown}
+ 
+ 
+ def cmd_list_requests(state, payload):
+@@ -2534,7 +2556,8 @@
+         return fail("需求已变更（requirements_sha256 不符），请重新获取 To Do",
+                     "conflict")
+     excluded = set(payload.get("excluded_remote_ids") or [])
+-    input_id = "pin-" + (tid or "x")
++    input_sha = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
++    input_id = "pin-" + (tid or "x") + "-" + input_sha[:12]
+     files = [{
+         "name": "source-snapshot.json", "source": "snapshot",
+         "media_type": "application/json",
+@@ -2547,7 +2570,7 @@
+     if payload.get("supplement"):
+         files.append({"name": "supplement.md", "source": "supplement",
+                       "media_type": "text/markdown",
+-                      "sha256": sha("supp-" + tid), "size": 256})
++                      "sha256": hashlib.sha256(payload["supplement"].encode("utf-8")).hexdigest(), "size": 256})
+     issues = []
+     for att in (todo or {}).get("attachments") or []:
+         rid_ = att.get("remote_id") or att.get("url")
+@@ -2560,13 +2583,13 @@
+     def apply(s):
+         s.setdefault("plan_inputs", {})[input_id] = {
+             "task_id": tid, "files": files,
+-            "input_sha256": sha("input-" + tid + str(len(files))),
++            "input_sha256": input_sha,
+         }
+         append_event(s, "plan_input_prepared", task_id=tid, actor="user",
+                      detail={"input_id": input_id, "can_start": can_start})
+     mutate(state, apply)
+     return {"input_id": input_id,
+-            "input_sha256": sha("input-" + tid + str(len(files))),
++            "input_sha256": input_sha,
+             "files": files, "issues": issues, "can_start": can_start,
+             "requirements_sha256": req_sha,
+             "source_sha256": (todo or {}).get("source_sha256")
+@@ -2870,6 +2893,7 @@
+     "overview": lambda s, p: cmd_overview(s),
+     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
+     "get-task": lambda s, p: cmd_get_task(s, p),
++    "get-plan": lambda s, p: cmd_get_plan(s, p),
+     "list-requests": lambda s, p: cmd_list_requests(s, p),
+     "list-events": lambda s, p: cmd_list_events(s, p),
+     "enqueue": lambda s, p: cmd_enqueue(s, p),
+--- a/macos/KaneoPilot.xcodeproj/project.pbxproj
++++ b/macos/KaneoPilot.xcodeproj/project.pbxproj
+@@ -14,6 +14,7 @@
+ 		BA5E00000000000000001104 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001004 /* Models.swift */; };
+ 		BA5E00000000000000001105 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001005 /* AppViewModel.swift */; };
+ 		BA5E00000000000000001106 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001006 /* RootView.swift */; };
++		BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001081 /* AutomationDashboardView.swift */; };
+ 		BA5E00000000000000001107 /* TasksSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001007 /* TasksSectionView.swift */; };
+ 		BA5E00000000000000001108 /* TaskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001008 /* TaskDetailView.swift */; };
+ 		BA5E00000000000000001109 /* PendingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001009 /* PendingView.swift */; };
+@@ -49,6 +50,7 @@
+ 		BA5E00000000000000001004 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+ 		BA5E00000000000000001005 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+ 		BA5E00000000000000001006 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
++		BA5E00000000000000001081 /* AutomationDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDashboardView.swift; sourceTree = "<group>"; };
+ 		BA5E00000000000000001007 /* TasksSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksSectionView.swift; sourceTree = "<group>"; };
+ 		BA5E00000000000000001008 /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
+ 		BA5E00000000000000001009 /* PendingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingView.swift; sourceTree = "<group>"; };
+@@ -137,6 +139,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				BA5E00000000000000001006 /* RootView.swift */,
++				BA5E00000000000000001081 /* AutomationDashboardView.swift */,
+ 				BA5E00000000000000001043 /* MenuBarView.swift */,
+ 				BA5E00000000000000001007 /* TasksSectionView.swift */,
+ 				BA5E00000000000000001013 /* BoardView.swift */,
+@@ -249,6 +252,7 @@
+ 				BA5E00000000000000001140 /* AppRuntime.swift in Sources */,
+ 				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
+ 				BA5E00000000000000001106 /* RootView.swift in Sources */,
++				BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */,
+ 				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,
+ 				BA5E00000000000000001113 /* BoardView.swift in Sources */,
+ 				BA5E00000000000000001108 /* TaskDetailView.swift in Sources */,
+--- a/macos/KaneoPilot/AppViewModel.swift
++++ b/macos/KaneoPilot/AppViewModel.swift
+@@ -6,13 +6,14 @@
+     // MARK: - 顶层节
+ 
+     enum Section: String, CaseIterable, Identifiable {
+-        case tasks, sessions, pending, archive, trash, runs, settings
++        case dashboard, tasks, sessions, pending, archive, trash, runs, settings
+         var id: String { rawValue }
+         var title: String {
+             switch self {
++            case .dashboard: return "自动化总览"
+             case .tasks: return "任务"
+             case .sessions: return "执行会话"
+-            case .pending: return "待处理"
++            case .pending: return "需要处理"
+             case .archive: return "归档"
+             case .trash: return "回收站"
+             case .runs: return "运行记录"
+@@ -21,6 +22,7 @@
+         }
+         var icon: String {
+             switch self {
++            case .dashboard: return "rectangle.3.group"
+             case .tasks: return "list.bullet.rectangle"
+             case .sessions: return "bubble.left.and.bubble.right"
+             case .pending: return "tray.full"
+@@ -48,6 +50,8 @@
+     // MARK: - 数据
+ 
+     @Published var tasks: [TaskSummary] = []
++    /// 总览与任务页共享筛选；仅改变展示，不改变核心阶段。
++    @Published var taskColumnFilter: String?
+     /// §5.15.3 归档列表（save_state=archived）。
+     @Published var archivedTasks: [TaskSummary] = []
+     /// §5.15.3 回收站列表（save_state=trashed）。
+@@ -157,6 +161,14 @@
+     var busy: Bool { actionInFlight != nil }
+     var globalPaused: Bool { overview?.paused?.global ?? false }
+     var hasData: Bool { !tasks.isEmpty || !requests.isEmpty || overview != nil }
++    var attentionCount: Int {
++        var ids = Set(tasks.filter(\.needsAttention).map(\.taskId))
++        for request in requests where (request.status == "queued" || request.status == "claimed")
++            && (request.isLost || (request.status == "queued" && request.isUnauthorizedPlan)) {
++            ids.insert(request.taskId ?? "request:\(request.requestId)")
++        }
++        return ids.count
++    }
+ 
+     private var toastTask: Task<Void, Never>?
+ 
+--- a/macos/KaneoPilot/Core/CoreLocator.swift
++++ b/macos/KaneoPilot/Core/CoreLocator.swift
+@@ -21,7 +21,8 @@
+         let fm = FileManager.default
+ 
+         // A standalone acceptance bundle must never fall through to the production core.
+-        if ["local.kaneopilot.session-reader-check", "local.kaneopilot.desktop-intake-check"]
++        if ["local.kaneopilot.session-reader-check", "local.kaneopilot.desktop-intake-check",
++            "local.kaneopilot.ui-simplification"]
+             .contains(Bundle.main.bundleIdentifier ?? "") {
+             let required = ["KANPILOT_CORE", "KANPILOT_APP_SUPPORT", "KANPILOT_DB", "KANPILOT_LEGACY_ROOT", "KANPILOT_PLAN_ROOT", "KANPILOT_REPOS_ROOT", "KANPILOT_REPORTS_ROOT", "KANEO_CREDENTIALS_PATH"]
+             guard required.allSatisfy({ environment[$0]?.isEmpty == false }) else { return nil }
+--- a/macos/KaneoPilot/Core/Models.swift
++++ b/macos/KaneoPilot/Core/Models.swift
+@@ -298,6 +298,13 @@
+ 
+     /// 归档/回收站任务（不在看板上）。
+     var isSaved: Bool { saveState == "archived" || saveState == "trashed" }
++
++    /// 需要用户查看的当前状态；正常排队和运行不算待处理。
++    var needsAttention: Bool {
++        !isSaved && readOnly != true && (boardColumn == "failed" || exception != nil
++            || status == "needs_user" || planExecutionHold == true || autoAdvancePaused == 1
++            || !(blockedReason?.isEmpty ?? true))
++    }
+ }
+ 
+ struct ListTasksResponse: Decodable {
+--- a/macos/KaneoPilot/Views/AutomationDashboardView.swift
++++ b/macos/KaneoPilot/Views/AutomationDashboardView.swift
+@@ -0,0 +1,251 @@
++import SwiftUI
++
++/// 只展示核心事实，所有推进仍经既有命令和调度器。
++struct AutomationDashboardView: View {
++    @EnvironmentObject private var model: AppViewModel
++    @ObservedObject private var scheduler = AppRuntime.shared.scheduler
++    @AppStorage("executorSchedulingEnabled") private var schedulingEnabled = true
++    let onTasks: (BoardColumn?) -> Void
++    let onPending: () -> Void
++    let onSettings: (SettingsSegment) -> Void
++
++    @State private var status: ExecutorStatusDTO?
++    @State private var statusError: String?
++    @State private var detailItem: TaskSheetItem?
++    @State private var planningAfterDismissal: String?
++
++    private var stale: Bool { model.banner != nil || statusError != nil || scheduler.error != nil }
++    private var pausedStages: [String] { model.overview?.paused?.stages ?? status?.paused?.stages ?? [] }
++    private var attention: [TaskSummary] { sorted(model.tasks.filter(\.needsAttention)) }
++    private var progressing: [TaskSummary] {
++        sorted(model.tasks.filter {
++            !$0.needsAttention && ["needs_plan", "todo", "in_progress", "in_review"].contains($0.boardColumn ?? "")
++        })
++    }
++    private var completed: [TaskSummary] { sorted(model.tasks.filter { $0.boardColumn == "done" }) }
++    private var waitingMerge: [TaskSummary] {
++        sorted(model.tasks.filter {
++            $0.status == "in_review" && $0.reviewSummary?.conclusion == "pass"
++                && $0.delivery?.prState == "open" && AutomationPresentation.active($0.automation)
++        })
++    }
++    private var statusTitle: String {
++        if stale { return "运行状态需要确认" }
++        if scheduler.isSchedulingStopped { return "本机调度已停止" }
++        if model.overview == nil || status == nil { return "正在读取自动化状态" }
++        if model.globalPaused { return "自动推进已暂停" }
++        if !schedulingEnabled { return "本机自动调度已关闭" }
++        if !pausedStages.isEmpty { return "部分阶段已暂停" }
++        if status?.automation?.enabledProjects == 0 { return "尚未开启项目自动处理" }
++        return "自动调度已开启"
++    }
++    private var statusExplanation: String {
++        if stale { return "自动化状态或调度出现问题，请查看错误信息。已有内容可能已过期。" }
++        if scheduler.isSchedulingStopped { return "调度器已停止。请检查错误信息，重新打开应用后再恢复自动处理。" }
++        if model.overview == nil || status == nil { return "正在读取任务、队列与项目状态。" }
++        if model.globalPaused { return "新的自动推进已暂停；已启动的任务继续完成当前工作。" }
++        if !schedulingEnabled { return "打开通用设置，开启本机执行端调度后自动处理才会持续运行。" }
++        if !pausedStages.isEmpty { return "已暂停：\(pausedStages.map { Labels.stage($0) }.joined(separator: "、"))。其他阶段仍按配置推进。" }
++        if status?.automation?.enabledProjects == 0 { return "先设置项目仓库并开启自动处理，调度台才会接收项目任务。" }
++        return "已开启的项目按配置自动规划、执行、评审与交付；需要你决定的事项列在下方。"
++    }
++
++    var body: some View {
++        ScrollView {
++            VStack(alignment: .leading, spacing: Spacing.l) {
++                controlSection
++                Divider()
++                flowSection
++                Divider()
++                attentionSection
++                Divider()
++                taskSection("正在推进", tasks: progressing, empty: "当前没有等待推进或正在运行的任务。", column: nil)
++                if !waitingMerge.isEmpty {
++                    Divider()
++                    taskSection("等待合并", tasks: waitingMerge, empty: "", column: nil)
++                }
++                Divider()
++                taskSection("最近完成", tasks: completed, empty: "完成的任务与交付结果会显示在这里。", column: .done)
++            }
++            .padding(Spacing.l)
++            .frame(maxWidth: .infinity, alignment: .leading)
++        }
++        .background(Color.kpWindow)
++        .navigationTitle("自动化总览")
++        .task(id: model.lastRefreshAt) { await readStatus() }
++        .sheet(item: $detailItem, onDismiss: {
++            if let id = planningAfterDismissal {
++                planningAfterDismissal = nil
++                model.openPlanning(focusTaskID: id)
++            }
++        }) { item in
++            TaskDetailSheet(item: item, onPreparePlanning: { id in
++                planningAfterDismissal = id
++                detailItem = nil
++            })
++        }
++    }
++
++    private var controlSection: some View {
++        VStack(alignment: .leading, spacing: Spacing.m) {
++            Label(statusTitle, systemImage: stale ? "exclamationmark.triangle" : model.globalPaused || !schedulingEnabled ? "pause.circle" : "arrow.triangle.2.circlepath")
++                .font(.kpTitle)
++            Text(statusExplanation).font(.kpBody).foregroundStyle(.secondary)
++                .fixedSize(horizontal: false, vertical: true)
++            HStack(spacing: Spacing.m) {
++                Button(model.globalPaused ? "恢复自动推进" : "暂停自动推进") {
++                    Task { await model.toggleGlobalPause() }
++                }
++                .disabled(model.busy || model.overview == nil || stale)
++                Button("添加任务…") { model.openPlanning() }
++                    .disabled(!model.coreFound || model.busy)
++                Menu("更多") {
++                    Button("立即检查并推进") { model.runIntakeNow() }
++                        .disabled(model.busy || stale || status == nil)
++                    Button("自动化设置…") { onSettings(.general) }
++                    Button("项目与仓库…") { onSettings(.projects) }
++                }
++                .help("立即检查会按已保存策略接收任务并推进；暂停和核心安全规则仍有效。")
++                Spacer(minLength: 0)
++            }
++            if !schedulingEnabled || !pausedStages.isEmpty {
++                Button("检查调度设置…") { onSettings(.general) }.font(.kpBody)
++            }
++            if status?.automation?.enabledProjects == 0 {
++                Button("设置自动处理项目…") { onSettings(.projects) }.font(.kpBody)
++            }
++            if let error = statusError {
++                Text(error).font(.kpSmall).foregroundStyle(.red).textSelection(.enabled)
++                Button("重新读取运行状态") { Task { await readStatus() } }
++            }
++            if let error = scheduler.error {
++                Label(error, systemImage: "exclamationmark.triangle")
++                    .font(.kpSmall).foregroundStyle(.red).textSelection(.enabled)
++                Button("查看运行诊断…") { onSettings(.general) }.font(.kpBody)
++            }
++            if let automation = status?.automation {
++                Text("自动处理项目 \(automation.enabledProjects.map(String.init) ?? "—") · 在途 \(automation.activeTasks.map(String.init) ?? "—") / \(automation.maxActiveTasks.map(String.init) ?? "—") · 上次接收 \(TimeFormat.short(automation.lastIntake?.finishedAt))")
++                    .font(.kpSmall).foregroundStyle(.secondary)
++            }
++            ForEach(status?.automation?.lastIntake?.projects?.filter { $0.ready == false } ?? [], id: \.projectId) { project in
++                ForEach(project.preflight ?? []) { issue in
++                    HStack(alignment: .top, spacing: Spacing.s) {
++                        Label(issue.message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
++                        Button("检查项目配置") { onSettings(.projects) }
++                    }.font(.kpSmall)
++                }
++            }
++            if let errors = status?.automation?.lastIntake?.errors, !errors.isEmpty {
++                Label("最近自动接收有 \(errors.count) 项错误", systemImage: "exclamationmark.triangle")
++                    .font(.kpSmall).foregroundStyle(.orange)
++                DisclosureGroup("查看接收错误") {
++                    ForEach(Array(errors.enumerated()), id: \.offset) { _, error in
++                        Text(error.text).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
++                    }
++                }
++            }
++        }
++    }
++
++    private var flowSection: some View {
++        VStack(alignment: .leading, spacing: Spacing.m) {
++            Text("自动化流程").font(.kpBody.weight(.semibold))
++            HStack(spacing: Spacing.s) {
++                flowButton("规划", icon: "doc.text", count: count(.needsPlan), column: .needsPlan)
++                Image(systemName: "chevron.right").foregroundStyle(.secondary)
++                flowButton("执行", icon: "play.circle", count: count(.inProgress), column: .inProgress)
++                Image(systemName: "chevron.right").foregroundStyle(.secondary)
++                flowButton("评审", icon: "checkmark.seal", count: count(.inReview), column: .inReview)
++                Image(systemName: "chevron.right").foregroundStyle(.secondary)
++                flowButton("交付", icon: "shippingbox", count: completed.count, column: .done)
++            }
++            Button("待执行 \(count(.todo)) 项 · 查看计划与队列") { onTasks(.todo) }.font(.kpSmall)
++            Text("数字表示规划、执行、评审中的任务与已完成交付。已排队要等执行端领取后才会开始；等待合并的 PR 单独列出。")
++                .font(.kpSmall).foregroundStyle(.secondary)
++                .fixedSize(horizontal: false, vertical: true)
++        }
++    }
++
++    private func flowButton(_ title: String, icon: String, count: Int, column: BoardColumn) -> some View {
++        Button { onTasks(column) } label: {
++            VStack(alignment: .leading, spacing: Spacing.s) {
++                Label(title, systemImage: icon).font(.kpBody)
++                Text(stale || model.overview == nil ? "—" : "\(count)")
++                    .font(.kpTitle).monospacedDigit()
++            }
++            .frame(maxWidth: .infinity, alignment: .leading)
++            .padding(Spacing.s)
++        }
++        .buttonStyle(.borderless)
++        .accessibilityLabel("\(title)，\(count) 项，查看任务")
++    }
++
++    private var attentionSection: some View {
++        VStack(alignment: .leading, spacing: Spacing.s) {
++            HStack {
++                Label("需要你处理 · \(model.attentionCount)", systemImage: model.attentionCount == 0 ? "checkmark.circle" : "exclamationmark.circle")
++                    .font(.kpBody.weight(.semibold))
++                Spacer()
++                Button("查看全部") { onPending() }.font(.kpSmall)
++            }
++            if model.attentionCount == 0 {
++                Text(stale || model.overview == nil ? "正在确认是否有需要处理的事项。" : "当前没有需要你决定的事项。可以让自动化按配置继续推进。")
++                    .font(.kpSmall).foregroundStyle(.secondary)
++            } else {
++                ForEach(attention.prefix(4)) { task in taskRow(task) }
++                if model.attentionCount > attention.count {
++                    Button("查看失联或等待材料的请求") { onPending() }.font(.kpBody)
++                }
++            }
++        }
++    }
++
++    private func taskSection(_ title: String, tasks: [TaskSummary], empty: String, column: BoardColumn?) -> some View {
++        VStack(alignment: .leading, spacing: Spacing.s) {
++            HStack {
++                Text("\(title) · \(tasks.count)").font(.kpBody.weight(.semibold))
++                Spacer()
++                Button(column == nil ? "查看所有任务" : "查看任务") { onTasks(column) }.font(.kpSmall)
++            }
++            if tasks.isEmpty { Text(empty).font(.kpSmall).foregroundStyle(.secondary) }
++            ForEach(tasks.prefix(3)) { task in taskRow(task) }
++        }
++    }
++
++    private func taskRow(_ task: TaskSummary) -> some View {
++        Button {
++            detailItem = TaskSheetItem(id: task.taskId, startTab: task.planExecutionHold == true ? .plan : .overview)
++        } label: {
++            HStack(alignment: .top, spacing: Spacing.m) {
++                VStack(alignment: .leading, spacing: Spacing.s) {
++                    Text(task.title ?? task.taskId).font(.kpBody).foregroundStyle(.primary)
++                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
++                    Text([task.projectName, task.blockedReason ?? task.lastProgress].compactMap { $0 }.joined(separator: " · "))
++                        .font(.kpSmall).foregroundStyle(.secondary).lineLimit(2)
++                }
++                StatusBadge(status: DisplayStatus.effective(task))
++                Image(systemName: "chevron.right").font(.kpSmall).foregroundStyle(.secondary)
++            }
++            .padding(.vertical, Spacing.s)
++            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
++            .contentShape(Rectangle())
++        }.buttonStyle(.plain)
++        .accessibilityLabel("\(task.title ?? task.taskId)，\(DisplayStatus.effective(task))，打开任务")
++    }
++
++    private func sorted(_ tasks: [TaskSummary]) -> [TaskSummary] {
++        tasks.sorted { (TimeFormat.parse($0.updatedAt) ?? .distantPast) > (TimeFormat.parse($1.updatedAt) ?? .distantPast) }
++    }
++    private func count(_ column: BoardColumn) -> Int { model.tasks.filter { $0.boardColumn == column.rawValue }.count }
++    private func readStatus() async {
++        do {
++            let response = try await model.client.run("executor-status", as: ExecutorStatusDTO.self)
++            guard !Task.isCancelled else { return }
++            status = response
++            statusError = nil
++        } catch {
++            guard !Task.isCancelled else { return }
++            statusError = error.coreMessage
++        }
++    }
++}
+--- a/macos/KaneoPilot/Views/BoardView.swift
++++ b/macos/KaneoPilot/Views/BoardView.swift
+@@ -71,10 +71,13 @@
+ 
+     @EnvironmentObject private var model: AppViewModel
+     @State private var search = ""
+-    @State private var columnFilter: BoardColumn?
++    private var columnFilter: BoardColumn? {
++        get { model.taskColumnFilter.flatMap(BoardColumn.init(rawValue:)) }
++        nonmutating set { model.taskColumnFilter = newValue?.rawValue }
++    }
+     @State private var detailItem: TaskSheetItem?
+     @State private var planningAfterDetailDismissal: String?
+-    @State private var displayMode: BoardDisplayMode = .board
++    @State private var displayMode: BoardDisplayMode = .compactList
+     @State private var userSelectedMode: Bool = false
+     // 批量整理状态 (T2)
+     @State private var isBatchMode = false
+@@ -186,10 +189,10 @@
+                     Button {
+                         model.openPlanning()
+                     } label: {
+-                        Label("规划…", systemImage: "doc.text.magnifyingglass")
++                        Label("添加任务…", systemImage: "plus")
+                     }
+                     .help("打开规划面板：获取 To Do → 准备材料 → 开始规划")
+-                    .accessibilityLabel("规划")
++                    .accessibilityLabel("添加任务并规划")
+                     .disabled(!model.coreFound)
+                 }
+                 ToolbarItem(placement: .primaryAction) {
+--- a/macos/KaneoPilot/Views/MarkdownReaderView.swift
++++ b/macos/KaneoPilot/Views/MarkdownReaderView.swift
+@@ -552,6 +552,8 @@
+ 
+     func makeNSView(context: Context) -> NSScrollView {
+         let textView = NSTextView()
++        // 原生桥接控件由 AppKit 标注，正文仍可被辅助工具读取。
++        textView.setAccessibilityLabel("计划正文（渲染）")
+         textView.isEditable = false
+         textView.isSelectable = true
+         textView.isRichText = true
+--- a/macos/KaneoPilot/Views/PendingView.swift
++++ b/macos/KaneoPilot/Views/PendingView.swift
+@@ -1,11 +1,13 @@
+ import SwiftUI
+ 
+-/// 待处理（§4.2）：活动请求（queued/claimed/lost）+ needs_user 任务 + 最近失败请求。
++/// 需要处理（§4.15）：用户决策优先，正常队列与历史失败默认折叠。
+ /// v2 §5.21.1：请求行点击进入请求详情页（get-request）。
+ struct PendingView: View {
+     @EnvironmentObject private var model: AppViewModel
+     @State private var confirmRelease: RequestItem?
+     @State private var confirmDismissIDs: [String] = []
++    @State private var queueExpanded = false
++    @State private var failedExpanded = false
+ 
+     /// 待处理节内导航目标：任务详情与请求详情。
+     enum PendingRoute: Hashable {
+@@ -32,14 +34,21 @@
+     }
+ 
+     private var needsUserTasks: [TaskSummary] {
+-        model.tasks.filter { $0.status == "needs_user" || DisplayStatus.effective($0) == "需人工" }
++        model.tasks.filter(\.needsAttention)
++    }
++
++    private var attentionRequests: [RequestItem] {
++        activeRequests.filter { $0.isLost || ($0.status == "queued" && $0.isUnauthorizedPlan) }
++    }
++
++    private var normalRequests: [RequestItem] {
++        activeRequests.filter { !$0.isLost && !($0.status == "queued" && $0.isUnauthorizedPlan) }
+     }
+ 
+     private var recentFailed: [RequestItem] {
+-        Array(model.requests
++        model.requests
+             .filter { $0.status == "failed" && $0.failureDismissedAt == nil }
+             .sorted { (TimeFormat.parse($0.updatedAt) ?? .distantPast) > (TimeFormat.parse($1.updatedAt) ?? .distantPast) }
+-            .prefix(10))
+     }
+ 
+     private var isEmpty: Bool {
+@@ -55,48 +64,61 @@
+                     emptyState
+                 } else {
+                     List {
+-                        if !activeRequests.isEmpty {
+-                            Section("活动请求") {
+-                                ForEach(activeRequests) { request in
++                        Section("需要你处理") {
++                            if needsUserTasks.isEmpty && attentionRequests.isEmpty {
++                                Text("暂无需要你处理的事项。下方可查看正常队列与历史失败记录。")
++                                    .font(.kpSmall)
++                                    .foregroundStyle(.secondary)
++                            } else {
++                                ForEach(needsUserTasks) { task in
++                                    NavigationLink(value: PendingRoute.task(task.taskId)) {
++                                        NeedsUserRow(task: task)
++                                    }
++                                }
++                                ForEach(attentionRequests) { request in
+                                     requestRow(request)
+                                 }
+                             }
+                         }
+-                        if !needsUserTasks.isEmpty {
+-                            Section("需人工处理") {
+-                                ForEach(needsUserTasks) { task in
+-                                    NavigationLink(value: PendingRoute.task(task.taskId)) {
+-                                        NeedsUserRow(task: task)
++                        if !normalRequests.isEmpty {
++                            Section {
++                                DisclosureGroup("正常队列（\(normalRequests.count)）", isExpanded: $queueExpanded) {
++                                    Text("已排队的请求尚未开始；执行端领取后才会进入进行中。")
++                                        .font(.kpSmall)
++                                        .foregroundStyle(.secondary)
++                                    ForEach(normalRequests) { request in
++                                        requestRow(request)
+                                     }
+                                 }
+                             }
+                         }
+                         if !recentFailed.isEmpty {
+                             Section {
+-                                ForEach(recentFailed) { request in
+-                                    requestRow(request)
+-                                        .contextMenu {
+-                                            Button("从待处理移除") { confirmDismissIDs = [request.requestId] }
+-                                                .disabled(model.busy)
++                                DisclosureGroup("历史失败记录（\(recentFailed.count)）", isExpanded: $failedExpanded) {
++                                    HStack {
++                                        Text("保留最近 10 条详情入口；历史和执行证据始终保留。")
++                                            .font(.kpSmall)
++                                            .foregroundStyle(.secondary)
++                                        Spacer()
++                                        Button("清空失败记录") {
++                                            confirmDismissIDs = recentFailed.map(\.requestId)
+                                         }
+-                                }
+-                            } header: {
+-                                HStack {
+-                                    Text("最近失败")
+-                                    Spacer()
+-                                    Button("清空最近失败") {
+-                                        confirmDismissIDs = model.requests.filter {
+-                                            $0.status == "failed" && $0.failureDismissedAt == nil
+-                                        }.map(\.requestId)
++                                        .disabled(model.busy)
+                                     }
+-                                    .disabled(model.busy)
++                                    ForEach(Array(recentFailed.prefix(10))) { request in
++                                        requestRow(request)
++                                            .contextMenu {
++                                                Button("从待处理移除") { confirmDismissIDs = [request.requestId] }
++                                                    .disabled(model.busy)
++                                            }
++                                    }
+                                 }
+                             }
+                         }
+                     }
+                 }
+             }
+-            .navigationTitle("待处理")
++            .navigationTitle("需要处理")
+             .navigationDestination(for: PendingRoute.self) { route in
+                 switch route {
+                 case .task(let taskID):
+@@ -140,7 +162,7 @@
+ 
+     private var emptyState: some View {
+         ContentUnavailableView {
+-            Label("暂无待处理项", systemImage: "tray")
++            Label("暂无需要处理的事项", systemImage: "tray")
+         } description: {
+             Text("没有排队、进行中、失联或阻塞的任务。")
+         } actions: {
+@@ -279,7 +301,7 @@
+                 Text(task.title ?? task.taskId)
+                     .font(.kpBody)
+                     .lineLimit(1)
+-                Text(AutomationPresentation.title(task.exception?.failureCode) ?? task.blockedReason ?? "需人工处理")
++                Text(attentionReason(task))
+                     .font(.kpSmall)
+                     .foregroundStyle(.secondary)
+                     .lineLimit(1)
+@@ -288,7 +310,16 @@
+         .padding(.vertical, Spacing.s)
+         .frame(minHeight: 40)
+         .accessibilityElement(children: .combine)
+-        .accessibilityLabel("\(task.title ?? task.taskId)，需人工，\(task.blockedReason ?? "")，双击查看详情")
++        .accessibilityLabel("\(task.title ?? task.taskId)，\(attentionReason(task))，双击查看详情")
++    }
++
++    private func attentionReason(_ task: TaskSummary) -> String {
++        if let exception = task.exception {
++            return AutomationPresentation.title(exception.failureCode) ?? exception.label ?? exception.detail ?? "查看异常并决定下一步"
++        }
++        if task.planExecutionHold == true { return "待确认执行：查看计划后再安排执行" }
++        if task.autoAdvancePaused == 1 { return "此任务已暂停：查看详情并恢复自动推进" }
++        return task.blockedReason ?? "查看详情并决定下一步"
+     }
+ }
+ 
+--- a/macos/KaneoPilot/Views/PlanningView.swift
++++ b/macos/KaneoPilot/Views/PlanningView.swift
+@@ -2,7 +2,7 @@
+ import AppKit
+ 
+ /// v2 §4.7 规划面板（protocol §5.22 手动规划链路）：
+-/// ① 获取 To Do → ② 准备材料（prepare-plan-input）→ ③ 开始规划（start-plans）。
++/// ① 选择任务 → ② 核对材料并显式开始（prepare-plan-input / start-plans）。
+ /// sheet 展示，不阻塞主窗口；所有可点行/按钮沿用 13/11pt + 8/12/16 间距。
+ struct PlanningView: View {
+     @EnvironmentObject private var model: AppViewModel
+@@ -23,7 +23,8 @@
+     @State private var supplements: [String: String] = [:]
+     @State private var localPaths: [String: [String]] = [:]
+     @State private var exclusions: [String: Set<String>] = [:]
+-    // ③ start-plans 结果
++    // 最终显式 start-plans 的逐项结果
++    @State private var showRuntimeDetails = false
+     @State private var starting = false
+     @State private var startResults: [StartPlanResult]?
+     // §4.7 T2：规划方式（builtin/spec_plan），对本批次勾选任务生效。
+@@ -42,8 +43,7 @@
+             Group {
+                 switch step {
+                 case 1: todoStep
+-                case 2: prepareStep
+-                default: startStep
++                default: prepareStep
+                 }
+             }
+             .frame(maxWidth: .infinity, maxHeight: .infinity)
+@@ -128,23 +128,16 @@
+         }
+     }
+ 
+-    /// v2.1 §5.22.6 / v4 §5.24.3：当前生效规划配置摘要（运行端 + 方式 + 型号）。
+-    /// 11pt secondary；数据用 AppViewModel 缓存的 get-planner-config。
+-    @ViewBuilder
++    /// 默认显示本次实际采用的配置，详细环境留在材料页展开。
+     private var plannerConfigSummary: some View {
+-        VStack(alignment: .leading, spacing: 2) {
+-            Text("运行端 \(RoleBackend.shortLabel(batchBackend))　方式 \(methodLabel)")
+-            Text(plusSelected
+-                 ? "Plus 型号 \(batchModelSummary)"
+-                 : "普通规划 \(batchModelSummary)　评审修复 \(fixModelSummary)")
+-        }
+-        .font(.kpSmall)
+-        .foregroundStyle(.secondary)
+-        .lineLimit(1)
+-        .truncationMode(.tail)
+-        .padding(.horizontal, Spacing.l)
+-        .padding(.vertical, Spacing.s)
+-        .frame(maxWidth: .infinity, alignment: .leading)
++        Text("本次规划：\(RoleBackend.shortLabel(batchBackend)) · \(methodLabel) · \(batchModelSummary)")
++            .font(.kpSmall)
++            .foregroundStyle(.secondary)
++            .lineLimit(1)
++            .truncationMode(.tail)
++            .padding(.horizontal, Spacing.l)
++            .padding(.vertical, Spacing.s)
++            .frame(maxWidth: .infinity, alignment: .leading)
+     }
+ 
+     // MARK: 头部：步骤指示 + 关闭
+@@ -153,11 +146,9 @@
+         HStack(spacing: Spacing.m) {
+             Text("规划")
+                 .font(.kpTitle)
+-            stepBadge(1, "获取 To Do")
++            stepBadge(1, "选择任务")
+             Image(systemName: "chevron.right").foregroundStyle(.secondary)
+-            stepBadge(2, "准备材料")
+-            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+-            stepBadge(3, "开始规划")
++            stepBadge(2, "核对材料并开始")
+             Spacer()
+             Button {
+                 dismiss()
+@@ -179,55 +170,63 @@
+             .accessibilityLabel("第 \(index) 步：\(title)")
+     }
+ 
+-    // MARK: 底部：上一步 / 下一步
++    // MARK: 底部：选择任务 / 最终开始
+ 
+     private var footer: some View {
+-        HStack(spacing: Spacing.m) {
+-            if step > 1 {
+-                Button {
+-                    step -= 1
+-                } label: {
+-                    Label("上一步", systemImage: "chevron.left")
+-                }
+-            }
+-            Spacer()
++        VStack(alignment: .leading, spacing: Spacing.s) {
+             footerHint
+-            if step == 1 {
+-                Button {
+-                    step = 2
+-                    kickAutoPrepare()
+-                } label: {
+-                    Label("下一步：准备材料", systemImage: "chevron.right")
+-                }
+-                .disabled(checkedTasks.isEmpty)
+-                .help(checkedTasks.isEmpty ? "先勾选可规划的 To Do" : "对勾选任务准备规划材料")
+-            } else if step == 2 {
+-                Button {
+-                    step = 3
+-                } label: {
+-                    Label("下一步：开始规划", systemImage: "chevron.right")
+-                }
+-                .disabled(startableTasks.isEmpty)
+-                .help(startableReason)
++            HStack(spacing: Spacing.m) {
++                if step > 1 {
++                    Button {
++                        step = 1
++                        startResults = nil
++                        Task { await fetchTodos(auto: true) }
++                    } label: {
++                        Label("重新选择任务", systemImage: "chevron.left")
++                    }
++                    .disabled(starting)
++                }
++                Spacer()
++                if step == 1 {
++                    Button {
++                        step = 2
++                        kickAutoPrepare()
++                    } label: {
++                        Label("核对材料", systemImage: "chevron.right")
++                    }
++                    .disabled(checkedTasks.isEmpty)
++                    .help(checkedTasks.isEmpty ? "先勾选可规划的任务" : "准备勾选任务的材料；核对后再确认开始")
++                } else {
++                    if startResults != nil && checked.isEmpty {
++                        Button("完成") { dismiss() }.buttonStyle(.borderedProminent)
++                    } else {
++                    Button {
++                        Task { await startPlans() }
++                    } label: {
++                        if starting {
++                            ProgressView().controlSize(.small)
++                        } else {
++                            Label("开始规划（\(startableTasks.count) 项）", systemImage: "play.fill")
++                        }
++                    }
++                    .buttonStyle(.borderedProminent)
++                    .disabled(starting || startableTasks.isEmpty)
++                    .help("仅提交材料就绪的任务；成功后按本次配置启动规划")
++                    }
++                }
+             }
+         }
+         .padding(.horizontal, Spacing.l)
+         .padding(.vertical, Spacing.m)
+     }
+ 
+-    @ViewBuilder
+     private var footerHint: some View {
+-        switch step {
+-        case 1:
+-            Text("已勾选 \(checked.count) 项；仅可选行可勾选")
+-                .font(.kpSmall).foregroundStyle(.secondary)
+-        case 2:
+-            Text(startableReason)
+-                .font(.kpSmall).foregroundStyle(.secondary)
+-        default:
+-            Text("成功后核心立即唤起规划 runner")
+-                .font(.kpSmall).foregroundStyle(.secondary)
+-        }
++        Text(step == 1
++             ? "已选择 \(checked.count) 项；核对材料不会启动规划。"
++             : startableReason)
++            .font(.kpSmall)
++            .foregroundStyle(.secondary)
++            .fixedSize(horizontal: false, vertical: true)
+     }
+ 
+     // MARK: - ① 获取 To Do
+@@ -439,9 +438,7 @@
+     @ViewBuilder
+     private var plannerMethodSection: some View {
+         let spec = model.plannerCapabilities?.specPlanMethod
+-        Section("运行端与规划方式") {
+-            FieldRow("规划运行端", RoleBackend.label(batchBackend))
+-            FieldRow("型号", batchModelSummary)
++        Section("本次规划") {
+             Picker("规划方式", selection: $plannerMethod) {
+                 Text("内置规划").tag("builtin")
+                 Text("Spec Planner 插件").tag("spec_plan")
+@@ -452,6 +449,13 @@
+             .help(plusSelected
+                   ? "Plus 运行端按内置规划提交"
+                   : "本批次提交时固化所选方式")
++            DisclosureGroup("运行环境详情", isExpanded: $showRuntimeDetails) {
++                FieldRow("规划运行端", RoleBackend.label(batchBackend))
++                FieldRow("型号", batchModelSummary)
++                if !plusSelected {
++                    FieldRow("评审修复", fixModelSummary)
++                }
++            }
+             if plusSelected {
+                 Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
+                      + "不会在 Plus 下运行。")
+@@ -484,54 +488,121 @@
+ 
+     private var prepareStep: some View {
+         List {
+-            plannerMethodSection
+-            ForEach(checkedTasks) { item in
+-                PrepareRow(
+-                    item: item,
+-                    preparation: binding(for: item.taskId),
+-                    supplement: supplementBinding(for: item.taskId),
+-                    paths: pathsBinding(for: item.taskId),
+-                    excluded: exclusionsBinding(for: item.taskId),
+-                    onPrepare: { Task { await prepare(item) } },
+-                    onPickFiles: { pickLocalFiles(for: item.taskId) }
+-                )
+-            }
++            if !checkedTasks.isEmpty {
++                plannerMethodSection
++                    .disabled(starting)
++                Section("核对材料") {
++                    ForEach(checkedTasks) { item in
++                        PrepareRow(
++                            item: item,
++                            preparation: preparations[item.taskId] ?? PlanPreparation(),
++                            supplement: supplementBinding(for: item.taskId),
++                            paths: pathsBinding(for: item.taskId),
++                            excluded: exclusionsBinding(for: item.taskId),
++                            onPrepare: { Task { await prepare(item) } },
++                            onPickFiles: { pickLocalFiles(for: item.taskId) }
++                        )
++                        .disabled(starting)
++                    }
++                }
++                Section("开始前确认") {
++                    Text("点击“开始规划”后，仅提交材料就绪的 \(startableTasks.count) 项任务，并使用上方配置启动规划。其他任务保留在此，处理问题并重新准备后再开始。")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                        .fixedSize(horizontal: false, vertical: true)
++                }
++            }
++            if let results = startResults {
++                Section(header: Text("提交结果").font(.kpSmall)) {
++                    ForEach(Array(results.enumerated()), id: \.offset) { _, result in
++                        startResultRow(result)
++                    }
++                }
++            }
++            inFlightSection
+         }
+         .listStyle(.inset)
+     }
+ 
+-    /// 单个任务的 prepare-plan-input 状态（嵌套 struct 供 PrepareRow 绑定）。
++    /// 每项材料独立失效；准备期间编辑也不能让旧响应重新启用开始。
++    // BEGIN PLANNING PREPARATION STATE
+     struct PlanPreparation {
+         var loading = false
+         var response: PreparePlanInputResponse?
+         var error: String?
+-    }
+-
+-    private func binding(for taskID: String) -> Binding<PlanPreparation> {
+-        Binding(
+-            get: { preparations[taskID] ?? PlanPreparation() },
+-            set: { preparations[taskID] = $0 }
+-        )
++        // 仅保留上次问题供连续编辑排除项；不保留可提交的旧 input/hash。
++        private(set) var previousIssues: [PlanInputIssue] = []
++        private(set) var revision = 0
++        private(set) var needsPreparation = false
++
++        var canStart: Bool {
++            !loading && !needsPreparation && response?.canStart == true
++                && response?.inputId != nil && response?.inputSha256 != nil
++        }
++
++        mutating func invalidate() {
++            revision += 1
++            if let response { previousIssues = response.issues ?? [] }
++            response = nil
++            error = nil
++            needsPreparation = true
++        }
++
++        mutating func begin() -> Int? {
++            guard !loading else { return nil }
++            loading = true
++            response = nil
++            error = nil
++            return revision
++        }
++
++        mutating func finish(response: PreparePlanInputResponse?, error: String?, revision: Int) {
++            loading = false
++            guard self.revision == revision else { return }
++            self.response = response
++            self.error = error
++            previousIssues = []
++            needsPreparation = false
++        }
++    }
++    // END PLANNING PREPARATION STATE
++
++    private func invalidatePreparation(for taskID: String) {
++        var prep = preparations[taskID] ?? PlanPreparation()
++        prep.invalidate()
++        preparations[taskID] = prep
+     }
+ 
+     private func supplementBinding(for taskID: String) -> Binding<String> {
+         Binding(
+             get: { supplements[taskID] ?? "" },
+-            set: { supplements[taskID] = $0 }
++            set: {
++                guard (supplements[taskID] ?? "") != $0 else { return }
++                supplements[taskID] = $0
++                invalidatePreparation(for: taskID)
++            }
+         )
+     }
+ 
+     private func pathsBinding(for taskID: String) -> Binding<[String]> {
+         Binding(
+             get: { localPaths[taskID] ?? [] },
+-            set: { localPaths[taskID] = $0 }
++            set: {
++                guard (localPaths[taskID] ?? []) != $0 else { return }
++                localPaths[taskID] = $0
++                invalidatePreparation(for: taskID)
++            }
+         )
+     }
+ 
+     private func exclusionsBinding(for taskID: String) -> Binding<Set<String>> {
+         Binding(
+             get: { exclusions[taskID] ?? [] },
+-            set: { exclusions[taskID] = $0 }
++            set: {
++                guard (exclusions[taskID] ?? []) != $0 else { return }
++                exclusions[taskID] = $0
++                invalidatePreparation(for: taskID)
++            }
+         )
+     }
+ 
+@@ -545,23 +616,29 @@
+ 
+     private func prepare(_ item: TodoItem) async {
+         var prep = preparations[item.taskId] ?? PlanPreparation()
+-        guard !prep.loading else { return }
+-        prep.loading = true
+-        prep.error = nil
++        guard !starting, let revision = prep.begin() else { return }
+         preparations[item.taskId] = prep
++        // 固化请求输入；完成时合并当前状态，不覆盖等待期间的草稿修订。
++        let paths = localPaths[item.taskId] ?? []
++        let supplement = supplements[item.taskId] ?? ""
++        let excluded = Array(exclusions[item.taskId] ?? [])
++        let response: PreparePlanInputResponse?
++        let failure: String?
+         do {
+-            let response = try await model.preparePlanInput(
++            response = try await model.preparePlanInput(
+                 taskID: item.taskId,
+                 expectedRequirementsSha256: item.requirementsSha256,
+-                localPaths: localPaths[item.taskId] ?? [],
+-                supplement: supplements[item.taskId] ?? "",
+-                excludedRemoteIDs: Array(exclusions[item.taskId] ?? []))
+-            prep.response = response
++                localPaths: paths,
++                supplement: supplement,
++                excludedRemoteIDs: excluded)
++            failure = nil
+         } catch {
+-            prep.error = error.coreMessage
+-        }
+-        prep.loading = false
+-        preparations[item.taskId] = prep
++            response = nil
++            failure = error.coreMessage
++        }
++        var current = preparations[item.taskId] ?? PlanPreparation()
++        current.finish(response: response, error: failure, revision: revision)
++        preparations[item.taskId] = current
+     }
+ 
+     private func pickLocalFiles(for taskID: String) {
+@@ -576,81 +653,23 @@
+         for path in paths where !existing.contains(path) {
+             existing.append(path)
+         }
+-        localPaths[taskID] = existing
++        pathsBinding(for: taskID).wrappedValue = existing
+     }
+ 
+     /// can_start=true 的已勾选任务。
+     private var startableTasks: [TodoItem] {
+-        checkedTasks.filter { preparations[$0.taskId]?.response?.canStart == true }
++        checkedTasks.filter { preparations[$0.taskId]?.canStart == true }
+     }
+ 
+     private var startableReason: String {
+-        if checkedTasks.isEmpty { return "没有勾选的任务" }
+-        let blocking = checkedTasks.filter {
+-            preparations[$0.taskId]?.response?.canStart != true
+-        }
+-        if blocking.isEmpty { return "\(startableTasks.count) 项材料就绪，可开始规划" }
+-        return "\(blocking.count) 项有待处理问题（issues 未清零前不能开始）；"
+-            + "\(startableTasks.count) 项可开始"
+-    }
+-
+-    // MARK: - ③ 开始规划
+-
+-    private var startStep: some View {
+-        List {
+-            Section(header: Text("待提交").font(.kpSmall)) {
+-                // §4.10：提交前明示本次请求的运行端、型号与方式。
+-                FieldRow("规划运行端", RoleBackend.label(batchBackend))
+-                FieldRow("型号", batchModelSummary)
+-                FieldRow("规划方式", methodLabel)
+-                ForEach(startableTasks) { item in
+-                    HStack(spacing: Spacing.m) {
+-                        Image(systemName: "checkmark.circle")
+-                            .foregroundStyle(.green)
+-                        VStack(alignment: .leading, spacing: 2) {
+-                            Text(item.title ?? item.taskId)
+-                                .font(.kpBody).lineLimit(1)
+-                            if let sha = preparations[item.taskId]?.response?.inputSha256 {
+-                                Text("材料哈希 \(String(sha.prefix(12)))…")
+-                                    .font(.kpSmall).foregroundStyle(.secondary)
+-                            }
+-                        }
+-                        Spacer()
+-                        resultBadge(for: item.taskId)
+-                    }
+-                    .padding(.vertical, Spacing.s)
+-                    .frame(minHeight: 40)
+-                }
+-            }
+-            if let results = startResults {
+-                Section(header: Text("提交结果").font(.kpSmall)) {
+-                    ForEach(results, id: \.taskId) { result in
+-                        startResultRow(result)
+-                    }
+-                }
+-            }
+-            inFlightSection
+-        }
+-        .listStyle(.inset)
+-        .safeAreaInset(edge: .bottom) {
+-            HStack {
+-                Spacer()
+-                Button {
+-                    Task { await startPlans() }
+-                } label: {
+-                    if starting {
+-                        ProgressView().controlSize(.small)
+-                    } else {
+-                        Label("开始规划", systemImage: "play.fill")
+-                    }
+-                }
+-                .disabled(starting || startableTasks.isEmpty)
+-                .help("start-plans：逐项提交已确认材料；成功项进入规划队列")
+-                Spacer()
+-            }
+-            .padding(.vertical, Spacing.s)
+-        }
+-    }
++        if startResults != nil && checked.isEmpty { return "本次规划已排队，可完成并回到总览。" }
++        if checkedTasks.isEmpty { return "没有选择的任务" }
++        let remaining = checkedTasks.count - startableTasks.count
++        if remaining == 0 { return "\(startableTasks.count) 项材料就绪，核对后点击开始规划。" }
++        return "\(startableTasks.count) 项材料就绪；\(remaining) 项仍需准备或处理问题，暂不提交。"
++    }
++
++    // MARK: - 最终提交与逐项结果
+ 
+     @ViewBuilder
+     private func resultBadge(for taskID: String) -> some View {
+@@ -714,7 +733,8 @@
+         starting = true
+         defer { starting = false }
+         let items = startableTasks.compactMap { item -> [String: Any]? in
+-            guard let response = preparations[item.taskId]?.response,
++            guard preparations[item.taskId]?.canStart == true,
++                  let response = preparations[item.taskId]?.response,
+                   let inputID = response.inputId,
+                   let sha = response.inputSha256 else { return nil }
+             // v3 §5.23.2 + v4 §5.24.3：每项总是提交明确的运行端与方式；
+@@ -728,6 +748,8 @@
+             // 成功项由 model.startPlans 唤起规划 runner（kickPlanner）。
+             let response = try await model.startPlans(items: items)
+             startResults = response.results ?? []
++            // 成功项已排队，从本次待提交集合移出；失败项保留，允许修正后再提交。
++            checked.subtract((response.results ?? []).filter(\.succeeded).compactMap(\.taskId))
+             let okCount = (response.results ?? []).filter(\.succeeded).count
+             if okCount > 0 {
+                 model.showToast("已排队 \(okCount) 个规划任务")
+@@ -828,7 +850,7 @@
+ 
+ private struct PrepareRow: View {
+     let item: TodoItem
+-    @Binding var preparation: PlanningView.PlanPreparation
++    let preparation: PlanningView.PlanPreparation
+     @Binding var supplement: String
+     @Binding var paths: [String]
+     @Binding var excluded: Set<String>
+@@ -848,9 +870,17 @@
+                 Label(error, systemImage: "exclamationmark.triangle")
+                     .font(.kpSmall).foregroundStyle(.red)
+                     .textSelection(.enabled)
++            } else if preparation.needsPreparation {
++                Label("材料已变更，请重新准备后开始。", systemImage: "arrow.clockwise.circle")
++                    .font(.kpSmall).foregroundStyle(.orange)
++                if !preparation.previousIssues.isEmpty {
++                    Text("上次核验的问题（重新准备后更新）")
++                        .font(.kpSmall).foregroundStyle(.secondary)
++                    issuesList(preparation.previousIssues, cannotStart: true)
++                }
+             } else if let response = preparation.response {
+                 filesList(response)
+-                issuesList(response)
++                issuesList(response.issues ?? [], cannotStart: response.canStart != true)
+             }
+             inputs
+         }
+@@ -863,16 +893,20 @@
+                 .font(.kpBody).lineLimit(1)
+             Spacer()
+             if let response = preparation.response {
+-                Label(response.canStart == true ? "材料就绪" : "待处理问题",
+-                      systemImage: response.canStart == true
++                Label(preparation.canStart ? "材料就绪" : "待处理问题",
++                      systemImage: preparation.canStart
+                         ? "checkmark.circle" : "exclamationmark.triangle")
+                     .font(.kpSmall)
+-                    .foregroundStyle(response.canStart == true ? Color.green : Color.orange)
++                    .foregroundStyle(preparation.canStart ? Color.green : Color.orange)
++                if let sha = response.inputSha256 {
++                    Text("材料 \(String(sha.prefix(12)))…")
++                        .font(.kpSmall).foregroundStyle(.secondary)
++                }
+             }
+             Button {
+                 onPrepare()
+             } label: {
+-                Label(preparation.response == nil ? "准备" : "重新准备",
++                Label(preparation.response == nil && !preparation.needsPreparation ? "准备" : "重新准备",
+                       systemImage: "arrow.clockwise")
+             }
+             .disabled(preparation.loading)
+@@ -903,9 +937,8 @@
+     }
+ 
+     /// issues[]：红图标+文字；可排除项给「排除后重备」勾选。
+-    private func issuesList(_ response: PreparePlanInputResponse) -> some View {
+-        let issues = response.issues ?? []
+-        return VStack(alignment: .leading, spacing: 4) {
++    private func issuesList(_ issues: [PlanInputIssue], cannotStart: Bool) -> some View {
++        VStack(alignment: .leading, spacing: 4) {
+             ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
+                 HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                     Image(systemName: "xmark.circle.fill")
+@@ -927,8 +960,8 @@
+                     }
+                 }
+             }
+-            if response.canStart != true {
+-                Text("issues 未清零前不能开始；补齐或勾选排除后重新准备。")
++            if cannotStart {
++                Text("处理问题或勾选排除后，重新准备再开始。")
+                     .font(.kpSmall).foregroundStyle(.secondary)
+             }
+         }
+@@ -955,11 +988,32 @@
+                         .font(.kpSmall).foregroundStyle(.secondary)
+                 }
+             }
++            if !excluded.isEmpty {
++                Text("已排除材料（\(excluded.count)）")
++                    .font(.kpSmall).foregroundStyle(.secondary)
++                ForEach(excluded.sorted(), id: \.self) { key in
++                    HStack(spacing: Spacing.s) {
++                        Text(key)
++                            .font(.kpSmall).foregroundStyle(.secondary)
++                            .lineLimit(1).truncationMode(.middle)
++                        Spacer()
++                        Button("恢复") { excluded.remove(key) }
++                            .font(.kpSmall)
++                            .accessibilityLabel("恢复排除材料 \(key)")
++                    }
++                }
++            }
+             if !paths.isEmpty {
+                 ForEach(paths, id: \.self) { path in
+-                    Text(path)
+-                        .font(.kpSmall).foregroundStyle(.secondary)
+-                        .lineLimit(1).truncationMode(.middle)
++                    HStack(spacing: Spacing.s) {
++                        Text(path)
++                            .font(.kpSmall).foregroundStyle(.secondary)
++                            .lineLimit(1).truncationMode(.middle)
++                        Spacer()
++                        Button("移除") { paths.removeAll { $0 == path } }
++                            .font(.kpSmall)
++                            .accessibilityLabel("移除材料 \(URL(fileURLWithPath: path).lastPathComponent)")
++                    }
+                 }
+             }
+         }
+--- a/macos/KaneoPilot/Views/ProjectMappingsView.swift
++++ b/macos/KaneoPilot/Views/ProjectMappingsView.swift
+@@ -401,14 +401,11 @@
+                 Label(issue.message, systemImage: "exclamationmark.triangle")
+                     .font(.kpSmall).foregroundStyle(.orange)
+             }
+-            VStack(alignment: .leading, spacing: Spacing.s) {
+-                Text("标签过滤（逗号分隔，留空接收全部）")
+-                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+-                TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
+-                    .textFieldStyle(.roundedBorder).font(.kpBody)
+-                    .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
+-            }
+             Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).font(.kpBody)
++            Text("预算：最多修复 \(draft.fixRounds) 轮 · \(draft.minutes) 分钟 · \(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "成本不限" : "成本上限 $\(draft.cost)")")
++                .font(.kpSmall)
++                .foregroundStyle(.secondary)
++                .fixedSize(horizontal: false, vertical: true)
+             Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
+             Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
+             VStack(alignment: .leading, spacing: Spacing.s) {
+@@ -419,12 +416,27 @@
+                     .accessibilityLabel("成本上限，美元，留空不限")
+             }
+             if !draft.valid { Text("成本需为 0.5–100 美元，或留空。 ").font(.kpSmall).foregroundStyle(.red) }
+-            VStack(alignment: .leading, spacing: Spacing.s) {
+-                Text("PR 目标分支（留空使用默认分支）")
+-                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+-                TextField("例如 main", text: draftBinding(id, \.base))
+-                    .textFieldStyle(.roundedBorder).font(.kpBody)
+-                    .accessibilityLabel("PR 目标分支，留空使用默认分支")
++            Text(automationAdvancedSummary(draft))
++                .font(.kpSmall)
++                .foregroundStyle(.secondary)
++                .fixedSize(horizontal: false, vertical: true)
++            DisclosureGroup("高级选项：标签与 PR 分支") {
++                VStack(alignment: .leading, spacing: Spacing.m) {
++                    VStack(alignment: .leading, spacing: Spacing.s) {
++                        Text("标签过滤（逗号分隔，留空接收全部）")
++                            .font(.kpBody).fixedSize(horizontal: false, vertical: true)
++                        TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
++                            .textFieldStyle(.roundedBorder).font(.kpBody)
++                            .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
++                    }
++                    VStack(alignment: .leading, spacing: Spacing.s) {
++                        Text("PR 目标分支（留空使用默认分支）")
++                            .font(.kpBody).fixedSize(horizontal: false, vertical: true)
++                        TextField("例如 main", text: draftBinding(id, \.base))
++                            .textFieldStyle(.roundedBorder).font(.kpBody)
++                            .accessibilityLabel("PR 目标分支，留空使用默认分支")
++                    }
++                }
+             }
+             HStack(spacing: Spacing.m) {
+                 Button("保存自动处理设置") { Task { await saveAutomation(id) } }
+@@ -438,6 +450,12 @@
+             Text("策略版本 r\(draft.revision)；保存冲突时保留草稿，重新载入会替换当前策略草稿。")
+                 .font(.kpSmall).foregroundStyle(.secondary)
+         }
++    }
++
++    private func automationAdvancedSummary(_ draft: AutomationDraft) -> String {
++        let labels = draft.labels.trimmingCharacters(in: .whitespacesAndNewlines)
++        let base = draft.base.trimmingCharacters(in: .whitespacesAndNewlines)
++        return "标签：\(labels.isEmpty ? "全部任务" : labels) · PR 目标：\(base.isEmpty ? "默认分支" : base)"
+     }
+ 
+     private func saveAutomation(_ id: String) async {
+--- a/macos/KaneoPilot/Views/RootView.swift
++++ b/macos/KaneoPilot/Views/RootView.swift
+@@ -1,16 +1,26 @@
+ import SwiftUI
+ 
+-/// 顶层 NavigationSplitView：侧栏固定七节（任务/执行会话/待处理/归档/回收站/运行记录/设置）。
++/// 工作台优先，记录与配置保留在次级分组。
+ struct RootView: View {
+     @EnvironmentObject private var model: AppViewModel
+-    @State private var section: AppViewModel.Section = .tasks
++    @State private var section: AppViewModel.Section = .dashboard
++    @State private var settingsSegment: SettingsSegment = .projects
+ 
+     var body: some View {
+         NavigationSplitView {
+-            List(AppViewModel.Section.allCases, selection: $section) { item in
+-                Label(item.title, systemImage: item.icon)
+-                    .tag(item)
+-                    .accessibilityLabel(item.title)
++            List(selection: $section) {
++                Section("工作台") {
++                    sidebarItem(.dashboard)
++                    sidebarItem(.tasks)
++                    sidebarItem(.pending)
++                }
++                Section("记录") {
++                    sidebarItem(.sessions)
++                    sidebarItem(.runs)
++                    sidebarItem(.archive)
++                    sidebarItem(.trash)
++                }
++                Section("配置") { sidebarItem(.settings) }
+             }
+             .listStyle(.sidebar)
+             .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
+@@ -61,8 +71,29 @@
+     }
+ 
+     @ViewBuilder
++    private func sidebarItem(_ item: AppViewModel.Section) -> some View {
++        HStack {
++            Label(item.title, systemImage: item.icon)
++            if item == .pending && model.attentionCount > 0 {
++                Spacer(minLength: Spacing.s)
++                Text("\(model.attentionCount)").font(.kpSmall).foregroundStyle(.secondary)
++            }
++        }
++        .tag(item)
++        .accessibilityLabel(item == .pending ? "\(item.title)，\(model.attentionCount) 项" : item.title)
++    }
++
++    @ViewBuilder
+     private var sectionView: some View {
+         switch section {
++        case .dashboard:
++            AutomationDashboardView(onTasks: { column in
++                model.taskColumnFilter = column?.rawValue
++                section = .tasks
++            }, onPending: { section = .pending }, onSettings: { group in
++                settingsSegment = group
++                section = .settings
++            })
+         case .tasks:
+             TasksSectionView()
+         case .sessions:
+@@ -76,7 +107,7 @@
+         case .runs:
+             RunsView()
+         case .settings:
+-            SettingsView()
++            SettingsView(initialSegment: settingsSegment)
+         }
+     }
+ 
+@@ -114,18 +145,20 @@
+             .foregroundStyle(.secondary)
+             .lineLimit(1)
+         }
+-        ToolbarItem(placement: .primaryAction) {
+-            // 暂停/恢复自动推进（全局态）
+-            Button {
+-                Task { await model.toggleGlobalPause() }
+-            } label: {
+-                Label(model.globalPaused ? "恢复自动推进" : "暂停自动推进",
+-                      systemImage: model.globalPaused ? "play.fill" : "pause.fill")
++        if section != .dashboard {
++            ToolbarItem(placement: .primaryAction) {
++                // 暂停/恢复自动推进（全局态）
++                Button {
++                    Task { await model.toggleGlobalPause() }
++                } label: {
++                    Label(model.globalPaused ? "恢复自动推进" : "暂停自动推进",
++                          systemImage: model.globalPaused ? "play.fill" : "pause.fill")
++                }
++                .labelStyle(.titleAndIcon)
++                .help(model.globalPaused ? "恢复自动推进（当前全局暂停）" : "暂停自动推进")
++                .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
++                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
+             }
+-            .labelStyle(.iconOnly)
+-            .help(model.globalPaused ? "恢复自动推进（当前全局暂停）" : "暂停自动推进")
+-            .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
+-            .disabled(model.busy || !model.coreFound)
+         }
+         ToolbarItem(placement: .primaryAction) {
+             Button {
+--- a/macos/KaneoPilot/Views/SettingsView.swift
++++ b/macos/KaneoPilot/Views/SettingsView.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ /// §4.9/§4.11 设置页五段（segmented，不按软件名分节）：项目与仓库 / 规划环境 / 执行环境 / Review 环境 / 通用。
+-private enum SettingsSegment: String, CaseIterable, Identifiable {
++enum SettingsSegment: String, CaseIterable, Identifiable {
+     case projects, planner, exec, review, general
+ 
+     var id: String { rawValue }
+@@ -16,16 +16,18 @@
+     }
+ }
+ 
+-/// 设置（§4.4 / v3 §4.9）：顶部分段 规划环境 / 执行环境 / Review 环境 / 通用。
++/// 设置（§4.4 / §4.15）：默认项目与仓库，三角色环境各自独立保存。
+ struct SettingsView: View {
+     @EnvironmentObject private var model: AppViewModel
+ 
++    var initialSegment: SettingsSegment = .projects
++
+     private static let stageKeys = ["plan", "dispatch", "monitor", "review", "delivery"]
+ 
+ 
+     @ObservedObject private var mcpManager = MCPServiceManager.shared
+ 
+-    @State private var segment: SettingsSegment = .planner
++    @State private var segment: SettingsSegment = .projects
+ 
+     // MARK: PI 执行配置状态（§4.4 / protocol §5.17 + v3 §5.23.3）
+     @State private var execConfig: ExecConfig?
+@@ -159,9 +161,9 @@
+                         desktopProbeSection
+                     case .general:
+                         backgroundSection
++                        automationSection
+                         mcpServiceSection
+                         diagnosticsSection
+-                        automationSection
+                         parametersSection
+                         countsSection
+                         pathsSection
+@@ -173,6 +175,7 @@
+                 .formStyle(.grouped)
+             }
+         }
++        .onAppear { segment = initialSegment }
+         .task {
+             if model.doctor == nil { await model.runDoctor() }
+             if !execLoaded && !execLoading && !savingExec { await loadExecConfig() }
+@@ -232,26 +235,7 @@
+     // MARK: Desktop 主动领取验证
+ 
+     private var desktopProbeSection: some View {
+-        Section("Desktop 领取验证") {
+-            Text("创建固定规划和 Review 测试请求；由 Codex Desktop 通过 MCP 领取，完成后回传。本次不启用自动领取。")
+-                .font(.kpSmall)
+-                .foregroundStyle(.secondary)
+-                .fixedSize(horizontal: false, vertical: true)
+-            HStack(spacing: Spacing.m) {
+-                Button("创建测试请求") { Task { await model.createDesktopProbe() } }
+-                Button("刷新验证状态") { Task { await model.refreshDesktopProbe() } }
+-                Spacer(minLength: 0)
+-            }
+-            .disabled(model.desktopProbeInFlight)
+-            if model.desktopProbeInFlight {
+-                HStack(spacing: Spacing.m) {
+-                    ProgressView().controlSize(.small)
+-                    Text("正在更新验证请求…")
+-                        .font(.kpSmall)
+-                        .foregroundStyle(.secondary)
+-                }
+-                .accessibilityElement(children: .combine)
+-            }
++        Section {
+             if let error = model.desktopProbeError {
+                 Text(error)
+                     .font(.kpSmall)
+@@ -259,15 +243,36 @@
+                     .textSelection(.enabled)
+                     .fixedSize(horizontal: false, vertical: true)
+             }
+-            if let result = model.desktopProbeResponse {
+-                if let batchId = result.batchId { FieldRow("验证批次", batchId) }
+-                Text(result.detail)
++            DisclosureGroup("Desktop 领取验证") {
++                Text("创建固定规划和 Review 测试请求；由 Codex Desktop 通过 MCP 领取，完成后回传。本次不启用自动领取。")
+                     .font(.kpSmall)
+                     .foregroundStyle(.secondary)
+-                    .textSelection(.enabled)
+                     .fixedSize(horizontal: false, vertical: true)
+-                ForEach(result.requests) { request in
+-                    desktopProbeRequestRow(request)
++                HStack(spacing: Spacing.m) {
++                    Button("创建测试请求") { Task { await model.createDesktopProbe() } }
++                    Button("刷新验证状态") { Task { await model.refreshDesktopProbe() } }
++                    Spacer(minLength: 0)
++                }
++                .disabled(model.desktopProbeInFlight)
++                if model.desktopProbeInFlight {
++                    HStack(spacing: Spacing.m) {
++                        ProgressView().controlSize(.small)
++                        Text("正在更新验证请求…")
++                            .font(.kpSmall)
++                            .foregroundStyle(.secondary)
++                    }
++                    .accessibilityElement(children: .combine)
++                }
++                if let result = model.desktopProbeResponse {
++                    if let batchId = result.batchId { FieldRow("验证批次", batchId) }
++                    Text(result.detail)
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                        .textSelection(.enabled)
++                        .fixedSize(horizontal: false, vertical: true)
++                    ForEach(result.requests) { request in
++                        desktopProbeRequestRow(request)
++                    }
+                 }
+             }
+         }
+@@ -303,68 +308,7 @@
+     // MARK: 本机 MCP 服务
+ 
+     private var mcpServiceSection: some View {
+-        Section("本机 MCP 服务") {
+-            HStack(spacing: Spacing.m) {
+-                Text("服务状态")
+-                    .font(.kpSmall)
+-                    .foregroundStyle(.secondary)
+-                    .frame(width: 96, alignment: .trailing)
+-                Text(mcpManager.status.running
+-                     ? (mcpManager.status.owned ? "运行中" : "运行中（外部服务）")
+-                     : "已停止")
+-                    .font(.kpBody)
+-                    .foregroundStyle(mcpManager.status.running ? Color.green : Color.secondary)
+-                Spacer(minLength: 0)
+-                if mcpManager.status.running && mcpManager.status.owned {
+-                    Button("停止服务") {
+-                        mcpManager.stop()
+-                    }
+-                    .buttonStyle(.bordered)
+-                    .accessibilityLabel("停止本机 MCP 服务")
+-                } else if !mcpManager.status.running {
+-                    Button("启动服务") {
+-                        mcpManager.start()
+-                    }
+-                    .buttonStyle(.borderedProminent)
+-                    .accessibilityLabel("启动本机 MCP 服务")
+-                }
+-            }
+-            if mcpManager.status.running && !mcpManager.status.owned {
+-                Text("该服务由其他进程管理；KaneoPilot 只读取状态，不会停止它。")
+-                    .font(.kpSmall)
+-                    .foregroundStyle(.secondary)
+-            }
+-            if let url = mcpManager.status.url {
+-                FieldRow("服务地址", url)
+-            }
+-            if let pid = mcpManager.status.pid {
+-                FieldRow("进程 PID", "\(pid)")
+-            }
+-            DisclosureGroup(isExpanded: $mcpProbeAdvancedExpanded) {
+-                TextField("Plus 连接文件路径", text: $mcpProbeConnectionFile)
+-                    .font(.kpBody)
+-                    .textFieldStyle(.roundedBorder)
+-                    .accessibilityLabel("通用设置 Plus 连接文件路径")
+-                    .onChange(of: mcpProbeConnectionFile) { _, _ in
+-                        piDesktopProbeControlText = nil
+-                        piDesktopProbeAttachmentText = nil
+-                    }
+-            } label: {
+-                Text("Plus 高级设置（连接文件路径）")
+-                    .font(.kpSmall)
+-                    .foregroundStyle(.secondary)
+-            }
+-            HStack(spacing: Spacing.m) {
+-                Button(piDesktopProbeLoading ? "连接中…" : "连接 Plus") {
+-                    Task { await probePiDesktopConnection(connectionFile: mcpProbeConnectionFile) }
+-                }
+-                .disabled(piDesktopProbeLoading)
+-                .accessibilityLabel("连接并探测 Pi-Desktop-Plus")
+-                if piDesktopProbeLoading { ProgressView().controlSize(.small) }
+-                Spacer(minLength: 0)
+-            }
+-            FieldRow("Plus 控制面", piDesktopProbeControlText ?? "未探测")
+-            FieldRow("会话挂接", "本版本不需要会话挂接")
++        Section {
+             if let error = mcpManager.status.error {
+                 HStack(spacing: Spacing.s) {
+                     Image(systemName: "exclamationmark.triangle.fill")
+@@ -379,45 +323,118 @@
+                     .accessibilityLabel("重试启动 MCP 服务")
+                 }
+             }
+-            Text("标准 MCP 双向通信服务（kp_runtime_* 控制域与 kp_task_* 任务域）。")
+-                .font(.kpSmall)
+-                .foregroundStyle(.secondary)
++            DisclosureGroup("本机 MCP 服务") {
++                HStack(spacing: Spacing.m) {
++                    Text("服务状态")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                        .frame(width: 96, alignment: .trailing)
++                    Text(mcpManager.status.running
++                         ? (mcpManager.status.owned ? "运行中" : "运行中（外部服务）")
++                         : "已停止")
++                        .font(.kpBody)
++                        .foregroundStyle(mcpManager.status.running ? Color.green : Color.secondary)
++                    Spacer(minLength: 0)
++                    if mcpManager.status.running && mcpManager.status.owned {
++                        Button("停止服务") {
++                            mcpManager.stop()
++                        }
++                        .buttonStyle(.bordered)
++                        .accessibilityLabel("停止本机 MCP 服务")
++                    } else if !mcpManager.status.running {
++                        Button("启动服务") {
++                            mcpManager.start()
++                        }
++                        .buttonStyle(.borderedProminent)
++                        .accessibilityLabel("启动本机 MCP 服务")
++                    }
++                }
++                if mcpManager.status.running && !mcpManager.status.owned {
++                    Text("该服务由其他进程管理；KaneoPilot 只读取状态，不会停止它。")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                }
++                if let url = mcpManager.status.url {
++                    FieldRow("服务地址", url)
++                }
++                if let pid = mcpManager.status.pid {
++                    FieldRow("进程 PID", "\(pid)")
++                }
++                DisclosureGroup(isExpanded: $mcpProbeAdvancedExpanded) {
++                    TextField("Plus 连接文件路径", text: $mcpProbeConnectionFile)
++                        .font(.kpBody)
++                        .textFieldStyle(.roundedBorder)
++                        .accessibilityLabel("通用设置 Plus 连接文件路径")
++                        .onChange(of: mcpProbeConnectionFile) { _, _ in
++                            piDesktopProbeControlText = nil
++                            piDesktopProbeAttachmentText = nil
++                        }
++                } label: {
++                    Text("Plus 高级设置（连接文件路径）")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                }
++                HStack(spacing: Spacing.m) {
++                    Button(piDesktopProbeLoading ? "连接中…" : "连接 Plus") {
++                        Task { await probePiDesktopConnection(connectionFile: mcpProbeConnectionFile) }
++                    }
++                    .disabled(piDesktopProbeLoading)
++                    .accessibilityLabel("连接并探测 Pi-Desktop-Plus")
++                    if piDesktopProbeLoading { ProgressView().controlSize(.small) }
++                    Spacer(minLength: 0)
++                }
++                FieldRow("Plus 控制面", piDesktopProbeControlText ?? "未探测")
++                FieldRow("会话挂接", "本版本不需要会话挂接")
++                Text("标准 MCP 双向通信服务（kp_runtime_* 控制域与 kp_task_* 任务域）。")
++                    .font(.kpSmall)
++                    .foregroundStyle(.secondary)
++            }
+         }
+     }
+ 
+     // MARK: 环境诊断
+ 
+     private var diagnosticsSection: some View {
+-        Section("环境诊断") {
++        Section {
+             if let checks = model.doctor?.checks {
+-                ForEach(checks) { check in
+-                    HStack(spacing: Spacing.m) {
+-                        Image(systemName: iconName(for: check))
+-                            .foregroundStyle(iconColor(for: check))
+-                            .accessibilityLabel(accessibility(for: check))
+-                        Text(Labels.doctorCheck(check.name))
+-                            .font(.kpBody)
+-                        Spacer(minLength: 0)
+-                        Text(check.detail ?? "")
+-                            .font(.kpSmall)
+-                            .foregroundStyle(.secondary)
+-                            .lineLimit(1)
+-                            .truncationMode(.middle)
++                let failed = checks.filter { $0.ok == false && $0.skipped != true }
++                if !failed.isEmpty {
++                    Label("\(failed.count) 项诊断未通过，展开查看详情", systemImage: "exclamationmark.triangle")
++                        .font(.kpSmall)
++                        .foregroundStyle(.orange)
++                }
++            }
++            DisclosureGroup("环境诊断") {
++                if let checks = model.doctor?.checks {
++                    ForEach(checks) { check in
++                        HStack(spacing: Spacing.m) {
++                            Image(systemName: iconName(for: check))
++                                .foregroundStyle(iconColor(for: check))
++                                .accessibilityLabel(accessibility(for: check))
++                            Text(Labels.doctorCheck(check.name))
++                                .font(.kpBody)
++                            Spacer(minLength: 0)
++                            Text(check.detail ?? "")
++                                .font(.kpSmall)
++                                .foregroundStyle(.secondary)
++                                .lineLimit(1)
++                                .truncationMode(.middle)
++                        }
++                        .frame(minHeight: 24)
++                        .accessibilityElement(children: .combine)
+                     }
+-                    .frame(minHeight: 24)
+-                    .accessibilityElement(children: .combine)
+-                }
+-            } else {
+-                Text("尚未运行诊断")
+-                    .font(.kpBody)
+-                    .foregroundStyle(.secondary)
+-            }
+-            HStack(spacing: Spacing.m) {
+-                Toggle("包含 Kaneo 连通性", isOn: $model.doctorOnline)
+-                    .font(.kpBody)
+-                Spacer()
+-                Button("重新检查") { Task { await model.runDoctor() } }
+-                    .disabled(model.busy)
++                } else {
++                    Text("尚未运行诊断")
++                        .font(.kpBody)
++                        .foregroundStyle(.secondary)
++                }
++                HStack(spacing: Spacing.m) {
++                    Toggle("包含 Kaneo 连通性", isOn: $model.doctorOnline)
++                        .font(.kpBody)
++                    Spacer()
++                    Button("重新检查") { Task { await model.runDoctor() } }
++                        .disabled(model.busy)
++                }
+             }
+         }
+     }
+@@ -2171,8 +2188,7 @@
+ 
+     private var schedulerSection: some View {
+         Section("执行端调度") {
+-            Toggle("启用执行端调度", isOn: $executorEnabled)
+-                .font(.kpBody)
++            FieldRow("调度状态", executorEnabled ? "已启用" : "已关闭（在通用设置中启用）")
+             Text("应用运行期间每 20 秒检查队列，每 300 秒自动接收；关闭主窗口后继续后台运行，退出应用后停止。")
+                 .font(.kpSmall).foregroundStyle(.secondary)
+             ForEach(["plan", "dispatch", "monitor", "review", "delivery", "intake"], id: \.self) { stage in
+@@ -2315,35 +2331,41 @@
+ 
+     private var backgroundSection: some View {
+         Section("后台运行") {
++            Toggle("启用执行端调度", isOn: $executorEnabled)
++                .font(.kpBody)
+             Toggle("开机启动 KaneoPilot", isOn: Binding(get: { model.loginItemEnabled }, set: { model.setLoginItemEnabled($0) }))
+                 .font(.kpBody)
+             if model.loginItemNeedsApproval {
+                 Text("请到系统设置 → 通用 → 登录项，批准 KaneoPilot 后台运行。")
+                     .font(.kpSmall).foregroundStyle(.orange)
+             }
+-            Stepper("全局在途上限：\(maxActiveTasks)", value: $maxActiveTasks, in: 1...5).font(.kpBody)
+-            Button("保存并发上限") { Task { await model.setAutomationGlobal(maxActiveTasks: maxActiveTasks); await refreshExecutorStatus() } }
+-                .disabled(model.busy)
+-            FieldRow("上次接收", TimeFormat.fullString(executorStatus?.automation?.lastIntake?.finishedAt
+-                                                       ?? executorStatus?.automation?.lastIntake?.startedAt))
+-            if let intake = executorStatus?.automation?.lastIntake {
+-                let projects = intake.projects ?? []
+-                FieldRow("接收摘要", "\(projects.count) 个项目 · 接收 \(projects.reduce(0) { $0 + ($1.adopted?.count ?? 0) }) 个 · 错误 \(intake.errors?.count ?? 0) 个")
+-                ForEach(Array(projects.enumerated()), id: \.offset) { _, project in
+-                    DisclosureGroup(project.projectId ?? "项目") {
+-                        ForEach(Array((project.preflight ?? []).enumerated()), id: \.offset) { _, issue in
+-                            Text(issue.message).font(.kpSmall).foregroundStyle(.orange)
+-                        }
+-                        ForEach(Array((project.skipped ?? []).enumerated()), id: \.offset) { _, skipped in
+-                            FieldRow(skipped.taskId ?? "跳过", skipped.reason)
++            Text("关闭主窗口后仍在菜单栏运行；退出应用后停止调度。")
++                .font(.kpSmall).foregroundStyle(.secondary)
++            DisclosureGroup("并发与接收记录") {
++                Stepper("全局在途上限：\(maxActiveTasks)", value: $maxActiveTasks, in: 1...5).font(.kpBody)
++                Button("保存并发上限") { Task { await model.setAutomationGlobal(maxActiveTasks: maxActiveTasks); await refreshExecutorStatus() } }
++                    .disabled(model.busy)
++                FieldRow("上次接收", TimeFormat.fullString(executorStatus?.automation?.lastIntake?.finishedAt
++                                                           ?? executorStatus?.automation?.lastIntake?.startedAt))
++                if let intake = executorStatus?.automation?.lastIntake {
++                    let projects = intake.projects ?? []
++                    FieldRow("接收摘要", "\(projects.count) 个项目 · 接收 \(projects.reduce(0) { $0 + ($1.adopted?.count ?? 0) }) 个 · 错误 \(intake.errors?.count ?? 0) 个")
++                    ForEach(Array(projects.enumerated()), id: \.offset) { _, project in
++                        DisclosureGroup(project.projectId ?? "项目") {
++                            ForEach(Array((project.preflight ?? []).enumerated()), id: \.offset) { _, issue in
++                                Text(issue.message).font(.kpSmall).foregroundStyle(.orange)
++                            }
++                            ForEach(Array((project.skipped ?? []).enumerated()), id: \.offset) { _, skipped in
++                                FieldRow(skipped.taskId ?? "跳过", skipped.reason)
++                            }
+                         }
+                     }
+-                }
+-            } else { Text("尚无接收记录").font(.kpSmall).foregroundStyle(.secondary) }
+-            Button("立即检查") { model.runIntakeNow(); Task { await refreshExecutorStatus() } }
+-                .disabled(!model.coreFound)
+-            Text("关闭主窗口后仍在菜单栏运行；退出应用后停止调度。")
+-                .font(.kpSmall).foregroundStyle(.secondary)
++                } else { Text("尚无接收记录").font(.kpSmall).foregroundStyle(.secondary) }
++                Button("立即检查") { model.runIntakeNow(); Task { await refreshExecutorStatus() } }
++                    .disabled(!model.coreFound)
++                Text("立即检查会接收符合项目策略的新任务，并推进自动化流程。")
++                    .font(.kpSmall).foregroundStyle(.secondary)
++            }
+         }
+     }
+ 
+@@ -2354,15 +2376,26 @@
+             Toggle("全局自动推进", isOn: globalBinding)
+                 .font(.kpBody)
+                 .disabled(model.busy)
+-            ForEach(Self.stageKeys, id: \.self) { stage in
+-                Toggle("\(Labels.stage(stage))阶段", isOn: stageBinding(stage))
+-                    .font(.kpBody)
+-                    .disabled(model.busy)
+-            }
++            Text(stagePauseSummary)
++                .font(.kpSmall)
++                .foregroundStyle((model.overview?.paused?.stages ?? []).isEmpty ? Color.secondary : Color.orange)
+             Text("暂停只阻止新领取，不影响已领取的执行。")
+                 .font(.kpSmall)
+                 .foregroundStyle(.secondary)
+-        }
++            DisclosureGroup("按阶段控制（高级）") {
++                ForEach(Self.stageKeys, id: \.self) { stage in
++                    Toggle("\(Labels.stage(stage))阶段", isOn: stageBinding(stage))
++                        .font(.kpBody)
++                        .disabled(model.busy)
++                }
++            }
++        }
++    }
++
++    private var stagePauseSummary: String {
++        guard let paused = model.overview?.paused else { return "阶段状态尚未读取" }
++        let stages = paused.stages ?? []
++        return stages.isEmpty ? "没有单独暂停的阶段" : "已暂停：" + stages.map { Labels.stage($0) }.joined(separator: "、")
+     }
+ 
+     private var globalBinding: Binding<Bool> {
+@@ -2384,14 +2417,16 @@
+     @ViewBuilder
+     private var parametersSection: some View {
+         let settings = model.overview?.settings
+-        Section("调度参数") {
+-            FieldRow("领取间隔（租约）", settings?.leaseSeconds.map { "\($0) 秒" })
+-            FieldRow("监控间隔", settings?.monitorIntervalSeconds.map { "\($0) 秒" })
+-            FieldRow("计划扫描周期", settings?.planScanIntervalHours.map { "\($0) 小时" })
+-            FieldRow("计划扫描锚点", settings?.planScanAnchor)
+-            FieldRow("上次计划扫描", TimeFormat.fullString(settings?.lastPlanScanAt))
+-            FieldRow("上次 tick", TimeFormat.fullString(model.overview?.lastTickAt))
+-            FieldRow("schema 版本", model.overview?.schemaVersion.map { "\($0)" })
++        Section {
++            DisclosureGroup("调度参数") {
++                FieldRow("领取间隔（租约）", settings?.leaseSeconds.map { "\($0) 秒" })
++                FieldRow("监控间隔", settings?.monitorIntervalSeconds.map { "\($0) 秒" })
++                FieldRow("计划扫描周期", settings?.planScanIntervalHours.map { "\($0) 小时" })
++                FieldRow("计划扫描锚点", settings?.planScanAnchor)
++                FieldRow("上次计划扫描", TimeFormat.fullString(settings?.lastPlanScanAt))
++                FieldRow("上次 tick", TimeFormat.fullString(model.overview?.lastTickAt))
++                FieldRow("schema 版本", model.overview?.schemaVersion.map { "\($0)" })
++            }
+         }
+     }
+ 
+@@ -2399,17 +2434,19 @@
+ 
+     @ViewBuilder
+     private var countsSection: some View {
+-        Section("队列概览") {
+-            if let tasks = model.overview?.counts?.tasks, !tasks.isEmpty {
+-                FieldRow("任务", tasks.keys.sorted().map { "\(Labels.stage($0)) \(tasks[$0] ?? 0)" }.joined(separator: "，"))
+-            }
+-            if let requests = model.overview?.counts?.requests, !requests.isEmpty {
+-                FieldRow("请求", requests.keys.sorted().map { "\(Labels.requestStatus($0)) \(requests[$0] ?? 0)" }.joined(separator: "，"))
+-            }
+-            if model.overview?.counts == nil {
+-                Text("核心未提供统计")
+-                    .font(.kpSmall)
+-                    .foregroundStyle(.secondary)
++        Section {
++            DisclosureGroup("队列概览") {
++                if let tasks = model.overview?.counts?.tasks, !tasks.isEmpty {
++                    FieldRow("任务", tasks.keys.sorted().map { "\(Labels.stage($0)) \(tasks[$0] ?? 0)" }.joined(separator: "，"))
++                }
++                if let requests = model.overview?.counts?.requests, !requests.isEmpty {
++                    FieldRow("请求", requests.keys.sorted().map { "\(Labels.requestStatus($0)) \(requests[$0] ?? 0)" }.joined(separator: "，"))
++                }
++                if model.overview?.counts == nil {
++                    Text("核心未提供统计")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                }
+             }
+         }
+     }
+@@ -2417,13 +2454,15 @@
+     // MARK: 路径（doctor detail 提取 + 客户端已解析核心路径）
+ 
+     private var pathsSection: some View {
+-        Section("路径") {
+-            PathRow(label: "核心路径", path: model.client.location?.path,
+-                    note: model.coreFound ? nil : "未找到")
+-            PathRow(label: "DB 路径", path: doctorDetail("db_writable"))
+-            PathRow(label: "Plan 根", path: doctorDetail("plan_root"))
+-            PathRow(label: "仓库根", path: doctorDetail("repos_root"))
+-            PathRow(label: "状态目录", path: doctorDetail("state_root"))
++        Section {
++            DisclosureGroup("路径") {
++                PathRow(label: "核心路径", path: model.client.location?.path,
++                        note: model.coreFound ? nil : "未找到")
++                PathRow(label: "DB 路径", path: doctorDetail("db_writable"))
++                PathRow(label: "Plan 根", path: doctorDetail("plan_root"))
++                PathRow(label: "仓库根", path: doctorDetail("repos_root"))
++                PathRow(label: "状态目录", path: doctorDetail("state_root"))
++            }
+         }
+     }
+ 
+@@ -2435,10 +2474,12 @@
+     // MARK: 迁移状态（settings.migration 存在才显示）
+ 
+     private func migrationSection(_ migration: MigrationInfo) -> some View {
+-        Section("迁移状态") {
+-            FieldRow("导入时间", TimeFormat.fullString(migration.at))
+-            if let backup = migration.backupPath {
+-                PathRow(label: "备份路径", path: backup)
++        Section {
++            DisclosureGroup("迁移状态") {
++                FieldRow("导入时间", TimeFormat.fullString(migration.at))
++                if let backup = migration.backupPath {
++                    PathRow(label: "备份路径", path: backup)
++                }
+             }
+         }
+     }
+--- a/macos/KaneoPilot/Views/TaskDetailContentView.swift
++++ b/macos/KaneoPilot/Views/TaskDetailContentView.swift
+@@ -29,8 +29,8 @@
+         .background(Color.kpWindow)
+         .focusable()
+         .focusEffectDisabled()
+-        .accessibilityElement(children: .contain)
+-        .accessibilityLabel("任务详情")
++        // 让原生阅读器与分段控件直接暴露各自的可访问性节点。
++        // 包装含 AppKit 文本的容器会使系统 AX 标签解析反复回到父节点。
+         .onKeyPress(.leftArrow) { moveTab(-1); return .handled }
+         .onKeyPress(.rightArrow) { moveTab(1); return .handled }
+         .task {
+@@ -53,7 +53,15 @@
+ 
+     @ViewBuilder
+     private var headerBar: some View {
+-        if tab == .execution {
++        if tab == .plan {
++            // 计划页已有自己的标题与核验状态，不重复铺一组相同信息。
++            HStack(spacing: Spacing.m) {
++                Text(detail?.projectName ?? "计划").font(.kpSmall).foregroundStyle(.secondary)
++                Spacer(minLength: 0)
++                headerNavigation
++            }
++            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
++        } else if tab == .execution {
+             VStack(alignment: .leading, spacing: Spacing.s) {
+                 headerTitle
+                 HStack(spacing: Spacing.m) { headerStatus; Spacer(minLength: 0); headerNavigation }
+@@ -89,7 +97,9 @@
+             if let detail {
+                 StatusBadge(status: DisplayStatus.effective(detail))
+                 Text("阶段：\(Labels.stage(detail.stage))")
+-                if detail.planExecutionHold == true { StatusBadge(status: "待确认执行") }
++                if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
++                    StatusBadge(status: "待确认执行")
++                }
+             }
+         }.font(.kpSmall).foregroundStyle(.secondary)
+     }
+@@ -252,17 +262,51 @@
+ 
+     private var visibleActions: [String] {
+         if detail.readOnly == true { return [] }
+-        var list = actions
+-        if isActive {
+-            for extra in ["archive", "trash"] where !list.contains(extra) {
+-                list.append(extra)
+-            }
+-        } else {
+-            for extra in ["restore", "resume-auto"] where !list.contains(extra) {
+-                list.append(extra)
+-            }
+-        }
+-        return list
++        // 动作资格由核心提供，不在界面补充恢复、自动推进或移出动作。
++        return actions
++    }
++
++    private var primaryAction: String? {
++        let available = visibleActions
++        // 发送不明仅推荐校验；恢复原任务、接受重复、登记发送必须由用户裁决。
++        if detail.sendState == "unknown" {
++            return available.contains("recheck") ? "recheck" : nil
++        }
++        if !isActive { return available.contains("restore") ? "restore" : nil }
++        // 主动作优先级：查看确认计划 → 恢复已完成执行后的评审 → 接受验证 →
++        // 恢复/重试 → 恢复任务自动推进 → 准备规划 → 安排当前阶段 → 校验。
++        // 危险裁决、重新规划、取消、归档等低频操作始终留在更多操作中。
++        let order = ["confirm_dispatch", "recover_review", "accept_verification", "resume", "retry",
++                     "resume-auto", "prepare_plan", "enqueue", "plan", "start_plan",
++                     "dispatch", "monitor", "review", "recheck"]
++        return order.first { available.contains($0) }
++    }
++
++    private var secondaryActions: [String] {
++        visibleActions.filter { $0 != primaryAction }
++    }
++
++    private var nextStepExplanation: String {
++        if detail.readOnly == true { return "此任务为只读记录，可查看计划、会话和历史证据。" }
++        if detail.sendState == "unknown" {
++            return "发送结果不明。先重新校验并查看执行证据，再通过更多操作作出裁决。"
++        }
++        if detail.activeRequest?.status == "queued" && primaryAction != "confirm_dispatch" {
++            return "请求已排队，尚未开始；执行端领取后才会推进。"
++        }
++        switch primaryAction {
++        case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
++        case "recover_review": return "保留执行成果并恢复到待评审，恢复后自动推进保持暂停。"
++        case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
++        case "resume", "retry": return "按当前允许的恢复方式重新推进；已有记录与证据保留。"
++        case "resume-auto": return "此任务已暂停，恢复后会按当前配置继续自动推进。"
++        case "prepare_plan": return "打开规划页面，核对任务材料后开始规划。"
++        case "enqueue", "plan", "start_plan", "dispatch", "monitor", "review":
++            return "为当前阶段安排请求；排队后等待执行端领取。"
++        case "restore": return "恢复到任务列表，默认暂停自动推进，可在恢复时选择继续。"
++        case "recheck": return "重新核验计划、来源和远端状态，再查看下一步允许的操作。"
++        default: return "查看当前阶段的记录与证据，自动化进度会随刷新更新。"
++        }
+     }
+ 
+     var body: some View {
+@@ -365,6 +409,9 @@
+ 
+     private var nextStepSection: some View {
+         DetailSection(title: "状态与推进") {
++            Text(nextStepExplanation)
++                .font(.kpBody)
++                .fixedSize(horizontal: false, vertical: true)
+             FieldRow("当前状态", display)
+             FieldRow("生命周期阶段", Labels.stage(detail.stage))
+             if let at = detail.updatedAt {
+@@ -412,6 +459,7 @@
+                 }
+             }
+             .font(.kpSmall)
++            .disabled(onSwitchTab == nil)
+         }
+     }
+ 
+@@ -478,21 +526,28 @@
+     private var actionBar: some View {
+         VStack(spacing: 0) {
+             Divider()
+-            ScrollView(.horizontal, showsIndicators: false) {
+-                HStack(spacing: Spacing.m) {
+-                    ForEach(visibleActions, id: \.self) { action in
+-                        actionButton(action)
++            HStack(spacing: Spacing.m) {
++                if let primaryAction {
++                    actionButton(primaryAction)
++                        .buttonStyle(.borderedProminent)
++                }
++                Spacer(minLength: 0)
++                if !secondaryActions.isEmpty {
++                    Menu("更多操作") {
++                        ForEach(secondaryActions, id: \.self) { action in
++                            actionButton(action)
++                        }
+                     }
+-                    Spacer(minLength: 0)
+-                    if detail.readOnly == true {
+-                        Label("只读模式", systemImage: "lock.fill")
+-                            .font(.kpSmall)
+-                            .foregroundStyle(.secondary)
+-                    }
+-                }
+-                .padding(.horizontal, Spacing.l)
+-                .padding(.vertical, Spacing.s)
+-            }
++                    .disabled(model.busy)
++                }
++                if detail.readOnly == true {
++                    Label("只读模式", systemImage: "lock.fill")
++                        .font(.kpSmall)
++                        .foregroundStyle(.secondary)
++                }
++            }
++            .padding(.horizontal, Spacing.l)
++            .padding(.vertical, Spacing.s)
+         }
+         .background(Color.kpWindow)
+     }
+@@ -528,6 +583,16 @@
+         case "enqueue":
+             Button("安排下一步") { Task { await model.enqueue(taskID: detail.taskId) } }
+                 .disabled(model.busy)
++        case "retry":
++            Button(detail.stage == "review" ? "重试评审" : "重试派发") {
++                Task { await model.resolve(taskID: detail.taskId, action: "retry") }
++            }
++            .disabled(model.busy)
++        case "replan":
++            Button("重新规划") {
++                Task { await model.resolve(taskID: detail.taskId, action: "replan") }
++            }
++            .disabled(model.busy)
+         case "plan", "start_plan":
+             Button("安排规划") {
+                 Task { await model.resolve(taskID: detail.taskId, action: action) }
+@@ -542,10 +607,11 @@
+             Button("终止排队计划", role: .destructive) { confirm = .cancelPlan }
+                 .disabled(model.busy || detail.queuedPlanRequestId == nil)
+         case "confirm_dispatch":
+-            Button("确认执行") {
+-                Task { await model.confirmDispatch(taskID: detail.taskId, planSha256: detail.planSha256) }
+-            }
+-            .disabled(model.busy)
++            Button("查看计划并确认") {
++                onSwitchTab?(.plan)
++            }
++            .disabled(model.busy || onSwitchTab == nil)
++            .help("进入计划页核验正文与哈希，再确认安排执行")
+         case "monitor":
+             Button("安排检查") {
+                 Task { await model.resolve(taskID: detail.taskId, action: action) }
+@@ -593,12 +659,35 @@
+             .help(moveOutBlockedReason ?? "移入归档")
+         case "trash":
+             Button(role: .destructive) {
+-                Task { await model.trashTask(taskID: detail.taskId) }
++                Alerts.confirmTrash(title: "移入回收站") {
++                    Task { await model.trashTask(taskID: detail.taskId) }
++                }
+             } label: {
+                 Label("移入回收站", systemImage: "trash")
+             }
+             .disabled(model.busy || moveOutBlockedReason != nil)
+             .help(moveOutBlockedReason ?? "移入回收站")
++        case "purge", "purge-task":
++            Button(PurgeText.actionTitle, role: .destructive) { confirmingPurge = true }
++                .disabled(model.busy)
++                .help(PurgeText.confirmMessage)
++        case "set-priority":
++            Menu("调整顺序") {
++                Button("上移") {
++                    guard let request = queuedPriorityRequest else { return }
++                    Task { await model.setPriority(requestID: request.requestId,
++                                                   taskID: detail.taskId,
++                                                   priority: max(0, (request.priority ?? 100) - 10)) }
++                }
++                Button("下移") {
++                    guard let request = queuedPriorityRequest else { return }
++                    Task { await model.setPriority(requestID: request.requestId,
++                                                   taskID: detail.taskId,
++                                                   priority: (request.priority ?? 100) + 10) }
++                }
++            }
++            .disabled(model.busy || queuedPriorityRequest == nil)
++            .help(queuedPriorityRequest == nil ? "当前没有可调整顺序的排队请求" : "调整本任务排队请求的优先级")
+         case "resume-auto":
+             Button(detail.status == "in_review" ? "开始评审" : "恢复自动推进") {
+                 Task { await model.resumeAuto(taskID: detail.taskId) }
+@@ -606,11 +695,25 @@
+             .disabled(model.busy)
+             .help(detail.status == "in_review" ? "允许调度台调用当前配置的模型开始新的评审。" : "恢复该任务的自动推进")
+         default:
+-            Button(Labels.action(action)) {
+-                Task { await model.resolve(taskID: detail.taskId, action: action) }
+-            }
+-            .disabled(model.busy)
+-        }
++            Button(Labels.action(action)) {}
++                .disabled(true)
++                .help("核心暂不支持该操作")
++        }
++    }
++
++    /// activeRequest 可能是已领取的请求；顺序调整仅绑定队首的 queued 请求。
++    private var queuedPriorityRequest: RequestItem? {
++        model.requests
++            .filter { $0.taskId == detail.taskId && $0.status == "queued" }
++            .sorted { a, b in
++                let (pa, pb) = (a.priority ?? 100, b.priority ?? 100)
++                if pa != pb { return pa < pb }
++                let (da, db) = (TimeFormat.parse(a.createdAt) ?? .distantFuture,
++                                TimeFormat.parse(b.createdAt) ?? .distantFuture)
++                if da != db { return da < db }
++                return a.requestId < b.requestId
++            }
++            .first
+     }
+ 
+     private var moveOutBlockedReason: String? {
+--- a/macos/KaneoPilot/Views/TaskDetailTabs.swift
++++ b/macos/KaneoPilot/Views/TaskDetailTabs.swift
+@@ -97,7 +97,7 @@
+                 .lineLimit(2)
+                 .textSelection(.enabled)
+                 .frame(maxWidth: .infinity, alignment: .leading)
+-                .accessibilityLabel("计划标题")
++                .accessibilityAddTraits(.isHeader)
+ 
+             metadata
+ 
+@@ -241,11 +241,9 @@
+             // §4.8 渲染模式：Foundation `.full` 的 PresentationIntent 语义结构
+             // → 原生块级 AppKit 排版（标题/列表/引用/代码/表格）。
+             MarkdownReaderView(markdown: plan.markdown ?? "")
+-                .accessibilityLabel("计划正文（渲染）")
+         case .raw:
+             // 原文模式：逐字显示（含所有字符，不折叠/不重排），可选中复制。
+             RawMarkdownView(text: plan.markdown ?? "")
+-                .accessibilityLabel("计划正文（原文）")
+         }
+     }
+ 
+@@ -321,6 +319,7 @@
+ 
+     func makeNSView(context: Context) -> NSScrollView {
+         let textView = NSTextView()
++        textView.setAccessibilityLabel("计划正文（原文）")
+         textView.isEditable = false
+         textView.isSelectable = true
+         textView.isRichText = false
+@@ -858,72 +857,83 @@
+     var body: some View {
+         if let delivery = detail.delivery {
+             DetailSection(title: "交付") {
+-                FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
+-                FieldRow("分支", delivery.branch)
+-                FieldRow("目标分支", delivery.baseBranch)
+-                FieldRow("工作树", delivery.worktreePath)
+-                FieldRow("PR 状态", delivery.prState)
++                FieldRow("状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
+                 if let url = delivery.prUrl {
+-                    Text(url).font(.kpSmall).textSelection(.enabled)
+-                        .fixedSize(horizontal: false, vertical: true)
+-                    Button("打开 PR") { Workspace.open(url) }
+-                }
+-                ForEach(delivery.commits ?? []) { commit in
+-                    VStack(alignment: .leading, spacing: Spacing.s) {
+-                        FieldRow("提交", commit.sha)
+-                        Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
+-                            .font(.kpSmall).foregroundStyle(.secondary)
+-                    }
+-                }
+-                if delivery.commits?.isEmpty ?? true {
+-                    Text("暂无交付提交").font(.kpSmall).foregroundStyle(.secondary)
+-                }
+-                FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
+-                FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
+-                FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
+-                FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
++                    Button("打开 PR，查看交付结果") { Workspace.open(url) }
++                }
++                DisclosureGroup("分支、提交与同步记录") {
++                    FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
++                    FieldRow("分支", delivery.branch)
++                    FieldRow("目标分支", delivery.baseBranch)
++                    FieldRow("工作树", delivery.worktreePath)
++                    if let url = delivery.prUrl {
++                        Text(url).font(.kpSmall).textSelection(.enabled)
++                            .fixedSize(horizontal: false, vertical: true)
++                    }
++                    ForEach(delivery.commits ?? []) { commit in
++                        VStack(alignment: .leading, spacing: Spacing.s) {
++                            FieldRow("提交", commit.sha)
++                            Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
++                                .font(.kpSmall).foregroundStyle(.secondary)
++                        }
++                    }
++                    if delivery.commits?.isEmpty ?? true {
++                        Text("暂无交付提交").font(.kpSmall).foregroundStyle(.secondary)
++                    }
++                    FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
++                    FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
++                    FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
++                    FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
++                }.font(.kpSmall)
+             }
+         } else {
+-            DetailSection(title: "交付") {
+-                FieldRow("状态", "未开启")
+-            }
++            DetailSection(title: "交付") { FieldRow("状态", "未开启") }
+         }
+         if let automation = detail.automation {
+             DetailSection(title: "自动处理") {
+                 FieldRow("状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
+                 FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
+-                FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
+-                FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
+-                FieldRow("时长", elapsed(automation.segmentStartedAt))
+-                FieldRow("时长上限", automation.maxTaskMinutes.map { "\($0) 分钟" })
+-                FieldRow("累计成本", automation.costUsd.map { String(format: "$%.2f", $0) })
+-                FieldRow("成本上限", automation.maxTaskCostUsd.map { String(format: "$%.2f", $0) } ?? "不限")
+-                FieldRow("未计价步数", "\(automation.costUnknownSteps ?? 0)")
+-                FieldRow("上次跳过原因", automation.lastSkip?.reason)
+-                FieldRow("跳过时间", TimeFormat.fullString(automation.lastSkip?.at))
+-            }
+-            DetailSection(title: "Review 历史") {
++                if let reason = automation.lastSkip?.reason {
++                    FieldRow("上次跳过原因", reason)
++                }
++                DisclosureGroup("预算与运行详情") {
++                    FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
++                    FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
++                    FieldRow("时长", elapsed(automation.segmentStartedAt))
++                    FieldRow("时长上限", automation.maxTaskMinutes.map { "\($0) 分钟" })
++                    FieldRow("累计成本", automation.costUsd.map { String(format: "$%.2f", $0) })
++                    FieldRow("成本上限", automation.maxTaskCostUsd.map { String(format: "$%.2f", $0) } ?? "不限")
++                    FieldRow("未计价步数", "\(automation.costUnknownSteps ?? 0)")
++                    FieldRow("跳过时间", TimeFormat.fullString(automation.lastSkip?.at))
++                }.font(.kpSmall)
+                 if let history = detail.reviewHistory, !history.isEmpty {
+-                    ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
+-                        VStack(alignment: .leading, spacing: Spacing.s) {
+-                            FieldRow("结论", Labels.reviewConclusion(entry.conclusion))
+-                            FieldRow("登记时间", TimeFormat.fullString(entry.registeredAt))
+-                            FieldRow("执行轮次", entry.executionRunId)
+-                            FieldRow("提交", entry.headSha)
+-                            FieldRow("报告", entry.reportPath)
+-                            if let path = entry.reportPath {
+-                                Button("打开报告") { Workspace.open(path) }
++                    DisclosureGroup("评审历史（\(history.count)）") {
++                        ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
++                            VStack(alignment: .leading, spacing: Spacing.s) {
++                                FieldRow("结论", Labels.reviewConclusion(entry.conclusion))
++                                FieldRow("登记时间", TimeFormat.fullString(entry.registeredAt))
++                                FieldRow("执行轮次", entry.executionRunId)
++                                FieldRow("提交", entry.headSha)
++                                FieldRow("报告", entry.reportPath)
++                                if let path = entry.reportPath {
++                                    Button("打开报告") { Workspace.open(path) }
++                                }
+                             }
+                         }
+-                    }
+-                } else {
+-                    Text("暂无 Review 历史").font(.kpSmall).foregroundStyle(.secondary)
++                    }.font(.kpSmall)
+                 }
+             }
+         } else {
+-            DetailSection(title: "自动处理") {
+-                FieldRow("状态", "未开启")
+-            }
++            DetailSection(title: "自动处理") { FieldRow("状态", "未开启") }
++        }
++    }
++    private func deliveryState(_ state: String?) -> String {
++        switch state {
++        case "open": return "PR 已创建"
++        case "merged": return "已合并"
++        case "closed": return "PR 已关闭"
++        case nil: return "尚未创建 PR"
++        default: return state ?? "—"
+         }
+     }
+     private func elapsed(_ at: String?) -> String? {
+--- a/macos/README.md
++++ b/macos/README.md
+@@ -84,7 +84,7 @@
+     Models.swift           协议 Codable 模型 + 时间格式化
+     ExecutorScheduler.swift 执行端调度器（§5.19：错开分钟拉起 executor_runner）
+   Views/
+-    RootView.swift         七节侧栏 + 工具栏 + 横幅/toast
++    RootView.swift         工作台/记录/配置侧栏 + 工具栏 + 横幅/toast
+     TasksSectionView.swift 任务节入口（包 BoardView）
+     BoardView.swift        六列看板（排序/搜索/筛选/键盘/卡片）+ 详情浮层（执行会话/任务信息分段）
+     TaskDetailView.swift   详情六区块 + allowed_actions 操作区（含归档/回收站/恢复）
+@@ -109,3 +109,24 @@
+ - **已排队排序键**：`TaskSummary.priority` 用作排队优先级代理（协议未在 summary 暴露请求级 priority）。
+ - **运行记录**：以 `list-events` 时间线为主，attempts 摘要体现在 claimed/reported 等事件中（无跨任务 attempts 查询命令）。
+ - **组头**：§4.1「项目可分组标题」为可选项，当前为平铺列表（行内项目徽标），保证全局排序不被分组打断。
++
++## 自动化工作台预览（2026-10-09）
++
++默认首页为自动化总览；需要用户决定的事项优先展示，任务默认用列表阅读，保留看板切换。详情突出一个当前主操作，其余放入“更多操作”。确认执行先进入核验计划页；手动规划为选择任务、核对材料并开始两步。
++
++隔离体验当前构建（只使用 FakeCore，不安装或覆盖正式应用）：
++
++```bash
++bash scripts/preview_automation_ui.sh 1180x760 light
++# 退出预览后可检查小窗口深色外观
++bash scripts/preview_automation_ui.sh 900x600 dark
++```
++
++预览使用独立 bundle ID 和 build/ui-simplification/fixture 存储；缺少隔离环境时核心不可用，不回落到正式核心。计划正文为静态演练响应，不代表真实计划文件已核验。
++
++模型与材料状态检查：
++
++```bash
++bash macos/tests/run-fixtures.sh
++bash macos/tests/run-planning-input-fixtures.sh
++```
+--- a/macos/tests/main.swift
++++ b/macos/tests/main.swift
+@@ -476,6 +476,22 @@
+ 
+ expect(ExecPiDesktopConfig.fixedReviewPermission == "auto", "新 Review 权限固定 auto")
+ 
++// UI 总览与需要处理页共用边界：正常队列不制造待办，真实决定不能隐藏。
++for (suffix, expected, label) in [
++    ("\"board_column\":\"todo\"", false, "正常待执行不需人工"),
++    ("\"board_column\":\"in_progress\"", false, "正常执行不需人工"),
++    ("\"plan_execution_hold\":true", true, "计划待确认必须可见"),
++    ("\"auto_advance_paused\":1", true, "任务级暂停必须可见"),
++    ("\"board_column\":\"failed\"", true, "当前异常必须可见"),
++    ("\"blocked_reason\":\"\"", false, "空阻塞原因不制造待办"),
++    ("\"blocked_reason\":\"等待决定\"", true, "非空阻塞必须可见"),
++    ("\"save_state\":\"archived\",\"auto_advance_paused\":1", false, "归档不制造待办"),
++    ("\"read_only\":true,\"board_column\":\"failed\"", false, "只读记录不制造待办")
++] {
++    let json = "{\"task_id\":\"fixture\",\"status\":\"ready\",\(suffix)}"
++    if let task = decode(TaskSummary.self, json) { expect(task.needsAttention == expected, label) }
++}
++
+ print("夹具断言：\(checks - failures.count)/\(checks) 通过")
+ if failures.isEmpty {
+     print("RESULT: ALL FIXTURE CHECKS PASSED")
+@@ -484,4 +500,3 @@
+     for failure in failures { print(" - \(failure)") }
+     exit(1)
+ }
+-
+--- a/macos/tests/planning_input_main.swift
++++ b/macos/tests/planning_input_main.swift
+@@ -0,0 +1,85 @@
++import Foundation
++
++/// Compile the marked PlanPreparation type from the actual PlanningView.swift,
++/// together with Models.swift and LabelsStub.swift. No core, model, DB or network calls.
++@main struct PlanningInputFixtures {
++    static func check(_ value: Bool, _ reason: String) {
++        if !value {
++            FileHandle.standardError.write(Data("FAIL: \(reason)\n".utf8))
++            exit(1)
++        }
++    }
++
++    static func response(_ hash: String, canStart: Bool = true,
++                         inputID: String? = "input") -> PreparePlanInputResponse {
++        PreparePlanInputResponse(inputId: inputID, inputSha256: hash,
++                                 files: [], issues: [], canStart: canStart,
++                                 requirementsSha256: nil, sourceSha256: nil, inputDir: nil)
++    }
++
++    static func main() {
++        var state = PlanPreparation()
++        check(!state.canStart, "unprepared task cannot start")
++        let first = state.begin()!
++        check(state.begin() == nil, "prepare is single flight")
++        state.finish(response: response("old-hash"), error: nil, revision: first)
++        check(state.canStart, "matching prepared material can start")
++
++        let untouched = state
++        state.invalidate()
++        check(!state.canStart && state.response == nil && state.needsPreparation,
++              "editing prepared materials removes the old input and blocks start")
++        check(untouched.canStart, "editing one task leaves another task ready")
++        let changed = state.begin()!
++        check(!state.canStart && state.loading, "preparing a new draft blocks start")
++        // Multiple material edits, including restoring an old draft, stay invalidated.
++        state.invalidate()
++        state.invalidate()
++        state.invalidate()
++        state.finish(response: response("stale-hash"), error: nil, revision: changed)
++        check(!state.loading && !state.canStart && state.response == nil && state.needsPreparation,
++              "response for edited in-flight draft is discarded")
++
++        let fresh = state.begin()!
++        state.finish(response: response("new-hash"), error: nil, revision: fresh)
++        check(state.canStart && state.response?.inputSha256 == "new-hash",
++              "repreparing enables only the new material hash")
++
++        let failed = state.begin()!
++        check(state.response == nil && !state.canStart,
++              "explicit reprepare cannot submit the prior successful response")
++        state.finish(response: nil, error: "preparation failed", revision: failed)
++        check(!state.canStart && state.error == "preparation failed",
++              "current request failure is visible and blocks start")
++
++        let staleFailure = state.begin()!
++        state.invalidate()
++        state.finish(response: nil, error: "old failure", revision: staleFailure)
++        check(state.error == nil && state.needsPreparation && !state.canStart,
++              "stale failure does not replace the edited draft state")
++
++        let blocked = state.begin()!
++        state.finish(response: response("blocked-hash", canStart: false), error: nil, revision: blocked)
++        check(!state.canStart, "core canStart false is respected")
++        let incomplete = state.begin()!
++        state.finish(response: response("no-input-id", inputID: nil), error: nil, revision: incomplete)
++        check(!state.canStart, "missing immutable input identity cannot be submitted")
++
++        let issues = state.begin()!
++        let problematic = PreparePlanInputResponse(
++            inputId: "blocked", inputSha256: "blocked-hash", files: [],
++            issues: [PlanInputIssue(remoteId: "attachment-a", url: nil, localPath: nil, issue: "unavailable"),
++                     PlanInputIssue(remoteId: "attachment-b", url: nil, localPath: nil, issue: "unavailable")],
++            canStart: false, requirementsSha256: nil, sourceSha256: nil, inputDir: nil)
++        state.finish(response: problematic, error: nil, revision: issues)
++        state.invalidate()
++        state.invalidate()
++        check(state.response == nil && !state.canStart && state.previousIssues.count == 2,
++              "old issues remain available for multiple exclusions without retaining the old hash")
++        let cleared = state.begin()!
++        state.finish(response: response("exclusions-updated-hash"), error: nil, revision: cleared)
++        check(state.canStart && state.previousIssues.isEmpty,
++              "new preparation replaces the obsolete issues")
++        print("PASS planning materials: invalidation; per-task isolation; single flight; stale success/failure; new hash; core start boundary")
++    }
++}
+--- a/macos/tests/run-planning-input-fixtures.sh
++++ b/macos/tests/run-planning-input-fixtures.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++# Compile the actual material preparation state without launching core or UI.
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
++FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/kaneopilot-planning-fixtures.XXXXXX")"
++trap 'rm -rf "$FIXTURE"' EXIT
++python3 - "$ROOT" "$FIXTURE" <<'PY'
++from pathlib import Path
++import sys
++root, fixture = map(Path, sys.argv[1:])
++source = (root / 'macos/KaneoPilot/Views/PlanningView.swift').read_text()
++state = source.split('// BEGIN PLANNING PREPARATION STATE')[1].split('// END PLANNING PREPARATION STATE')[0]
++(fixture / 'Preparation.swift').write_text('import Foundation\n' + state)
++PY
++swiftc -O "$ROOT/macos/KaneoPilot/Core/Models.swift" \
++  "$ROOT/macos/tests/LabelsStub.swift" "$FIXTURE/Preparation.swift" \
++  "$ROOT/macos/tests/planning_input_main.swift" -o "$FIXTURE/fixture"
++"$FIXTURE/fixture"
+--- a/scripts/preview_automation_ui.sh
++++ b/scripts/preview_automation_ui.sh
+@@ -0,0 +1,65 @@
++#!/bin/bash
++# Isolated UI preview: FakeCore only, a separate bundle ID and storage roots.
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++OUT="$ROOT/build/ui-simplification"
++SIZE="${1:-1180x760}"
++APPEARANCE="${2:-light}"
++case "$SIZE" in 900x600|1180x760|1440x900) ;; *) echo '窗口尺寸须为 900x600、1180x760 或 1440x900' >&2; exit 2 ;; esac
++case "$APPEARANCE" in light|dark) ;; *) echo '外观须为 light 或 dark' >&2; exit 2 ;; esac
++if pgrep -f "$OUT/KaneoPilot UI Preview.app/Contents/MacOS/KaneoPilot" >/dev/null; then
++    echo '请先退出 KaneoPilot UI Preview，再重新启动预览。' >&2
++    exit 2
++fi
++mkdir -p "$OUT"
++xcodebuild -project "$ROOT/macos/KaneoPilot.xcodeproj" -scheme KaneoPilot \
++  -configuration Release -derivedDataPath "$OUT/DerivedData" \
++  CODE_SIGNING_ALLOWED=NO PRODUCT_BUNDLE_IDENTIFIER=local.kaneopilot.ui-simplification \
++  build > "$OUT/build.log" 2>&1 || { tail -50 "$OUT/build.log"; exit 1; }
++python3 - "$ROOT" "$OUT" "$SIZE" "$APPEARANCE" <<'PY'
++from pathlib import Path
++import json, os, plistlib, shutil, subprocess, sys
++root, out = map(Path, sys.argv[1:3])
++app = out / 'KaneoPilot UI Preview.app'
++shutil.copytree(out / 'DerivedData/Build/Products/Release/KaneoPilot.app', app, dirs_exist_ok=True)
++resources = app / 'Contents/Resources/core'
++resources.mkdir(parents=True, exist_ok=True)
++shutil.copy2(root / 'macos/FakeCore/kanpilot-fake.py', resources / 'kanpilot.py')
++info_path = app / 'Contents/Info.plist'
++info = plistlib.loads(info_path.read_bytes())
++info['CFBundleName'] = info['CFBundleDisplayName'] = 'KaneoPilot UI Preview'
++info_path.write_bytes(plistlib.dumps(info))
++subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(app)], check=True, capture_output=True)
++fixture = out / 'fixture'
++for name in ('support', 'legacy', 'plans', 'repos', 'reports'):
++    (fixture / name).mkdir(parents=True, exist_ok=True)
++(fixture / 'credentials.json').write_text('{}\n')
++env = {
++    'KANPILOT_CORE': str(resources / 'kanpilot.py'),
++    'KANPILOT_APP_SUPPORT': str(fixture / 'support'),
++    'KANPILOT_DB': str(fixture / 'fixture.db'),
++    'KANPILOT_LEGACY_ROOT': str(fixture / 'legacy'),
++    'KANPILOT_PLAN_ROOT': str(fixture / 'plans'),
++    'KANPILOT_REPOS_ROOT': str(fixture / 'repos'),
++    'KANPILOT_REPORTS_ROOT': str(fixture / 'reports'),
++    'KANEO_CREDENTIALS_PATH': str(fixture / 'credentials.json'),
++    'KANPILOT_FAKE_STATE': str(fixture / 'state.json'),
++    'KANPILOT_FAKE_REQUEST_LOG': str(fixture / 'requests.jsonl'),
++    'KANPILOT_WINDOW_SIZE': sys.argv[3], 'KANPILOT_APPEARANCE': sys.argv[4],
++    'PYTHONDONTWRITEBYTECODE': '1',
++}
++(out / 'preview-environment.json').write_text(json.dumps(env, ensure_ascii=False, indent=2))
++(out / 'launch-preview.py').write_text('''from pathlib import Path
++import json, os, subprocess
++root = Path(__file__).resolve().parent
++env = {k: os.environ[k] for k in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'USER') if k in os.environ}
++env.update(json.loads((root / 'preview-environment.json').read_text()))
++with (root / 'preview.log').open('ab') as log:
++    process = subprocess.Popen([str(root / 'KaneoPilot UI Preview.app/Contents/MacOS/KaneoPilot')],
++        env=env, stdout=log, stderr=log, start_new_session=True)
++(root / 'preview-pid.txt').write_text(str(process.pid))
++print('Preview PID', process.pid)
++''')
++subprocess.run([sys.executable, str(out / 'launch-preview.py')], check=True)
++print('隔离预览：', app)
++PY

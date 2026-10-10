@@ -401,14 +401,11 @@ struct ProjectMappingsView: View {
                 Label(issue.message, systemImage: "exclamationmark.triangle")
                     .font(.kpSmall).foregroundStyle(.orange)
             }
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("标签过滤（逗号分隔，留空接收全部）")
-                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
-                    .textFieldStyle(.roundedBorder).font(.kpBody)
-                    .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
-            }
             Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).font(.kpBody)
+            Text("预算：最多修复 \(draft.fixRounds) 轮 · \(draft.minutes) 分钟 · \(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "成本不限" : "成本上限 $\(draft.cost)")")
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
             Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
             VStack(alignment: .leading, spacing: Spacing.s) {
@@ -419,12 +416,27 @@ struct ProjectMappingsView: View {
                     .accessibilityLabel("成本上限，美元，留空不限")
             }
             if !draft.valid { Text("成本需为 0.5–100 美元，或留空。 ").font(.kpSmall).foregroundStyle(.red) }
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("PR 目标分支（留空使用默认分支）")
-                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                TextField("例如 main", text: draftBinding(id, \.base))
-                    .textFieldStyle(.roundedBorder).font(.kpBody)
-                    .accessibilityLabel("PR 目标分支，留空使用默认分支")
+            Text(automationAdvancedSummary(draft))
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup("高级选项：标签与 PR 分支") {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Text("标签过滤（逗号分隔，留空接收全部）")
+                            .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                        TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
+                            .textFieldStyle(.roundedBorder).font(.kpBody)
+                            .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Text("PR 目标分支（留空使用默认分支）")
+                            .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                        TextField("例如 main", text: draftBinding(id, \.base))
+                            .textFieldStyle(.roundedBorder).font(.kpBody)
+                            .accessibilityLabel("PR 目标分支，留空使用默认分支")
+                    }
+                }
             }
             HStack(spacing: Spacing.m) {
                 Button("保存自动处理设置") { Task { await saveAutomation(id) } }
@@ -438,6 +450,12 @@ struct ProjectMappingsView: View {
             Text("策略版本 r\(draft.revision)；保存冲突时保留草稿，重新载入会替换当前策略草稿。")
                 .font(.kpSmall).foregroundStyle(.secondary)
         }
+    }
+
+    private func automationAdvancedSummary(_ draft: AutomationDraft) -> String {
+        let labels = draft.labels.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = draft.base.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "标签：\(labels.isEmpty ? "全部任务" : labels) · PR 目标：\(base.isEmpty ? "默认分支" : base)"
     }
 
     private func saveAutomation(_ id: String) async {

@@ -151,6 +151,98 @@ struct DoctorResponse: Decodable {
     let checks: [DoctorCheck]?
 }
 
+/// Desktop 正式队列只读状态；不包含会话凭据或模型假定值。
+struct DesktopQueueStatusResponse: Decodable {
+    let enabled: Bool
+    let pollMinutes: Int
+    let autoConfigured: Bool
+    let plannerThreadId: String?
+    let reviewThreadId: String?
+    let queue: Counts
+    let detail: String?
+
+    struct Counts: Decodable {
+        let plan: Int
+        let review: Int
+    }
+}
+
+enum DesktopAutomationRole: String {
+    case plan, review
+}
+
+/// Codex 原生自动任务文件的实际状态；与 Desktop 队列领取许可独立。
+struct DesktopAutomationStatusResponse: Decodable {
+    let supported: Bool
+    let detail: String
+    let roles: Roles
+
+    struct Roles: Decodable {
+        let plan: RoleStatus
+        let review: RoleStatus
+
+        func status(for role: DesktopAutomationRole) -> RoleStatus {
+            role == .plan ? plan : review
+        }
+    }
+
+    struct RoleStatus: Decodable {
+        let automationId: String?
+        let name: String?
+        let status: String
+        let enabled: Bool?
+        let controllable: Bool
+        let detail: String
+        let rrule: String?
+        let schedule: Schedule?
+        let scheduleSummary: String
+        let scheduleEditable: Bool
+        let timeZone: String
+
+        var nativeAutomationURL: URL? {
+            guard ["ACTIVE", "PAUSED"].contains(status),
+                  let automationId, !automationId.isEmpty, automationId.count <= 200,
+                  automationId.unicodeScalars.allSatisfy({ scalar in
+                      (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
+                          || (48...57).contains(scalar.value) || scalar.value == 45 || scalar.value == 95
+                  }) else { return nil }
+            var components = URLComponents()
+            components.scheme = "codex"
+            components.host = "automations"
+            components.path = "/" + automationId
+            components.queryItems = [URLQueryItem(name: "automationSource", value: "local")]
+            return components.url
+        }
+
+        var statusText: String {
+            switch status {
+            case "ACTIVE": return "已开启"
+            case "PAUSED": return "已关闭"
+            default: return "不可控制"
+            }
+        }
+    }
+
+    struct Schedule: Decodable, Equatable {
+        let kind: String
+        let minutes: Int?
+        let hour: Int?
+        let minute: Int?
+
+        var payload: [String: Any]? {
+            switch kind {
+            case "interval":
+                guard let minutes, (1...1440).contains(minutes) else { return nil }
+                return ["kind": kind, "minutes": minutes]
+            case "daily":
+                guard let hour, let minute, (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+                return ["kind": kind, "hour": hour, "minute": minute]
+            default: return nil
+            }
+        }
+    }
+}
+
 // MARK: - §5.2 overview / list / get
 
 struct PausedInfo: Decodable {
@@ -247,6 +339,7 @@ struct TaskSummary: Decodable, Identifiable {
     let blockedReason: String?
     let nextClaimAt: String?
     let activeRequest: ActiveRequest?
+    let queuedPlanRequestId: String?
     let kaneoStatus: String?
     let kaneoCheckedAt: String?
     let priority: Int?
@@ -270,6 +363,13 @@ struct TaskSummary: Decodable, Identifiable {
 
     /// 归档/回收站任务（不在看板上）。
     var isSaved: Bool { saveState == "archived" || saveState == "trashed" }
+
+    /// 需要用户查看的当前状态；正常排队和运行不算待处理。
+    var needsAttention: Bool {
+        !isSaved && readOnly != true && (boardColumn == "failed" || exception != nil
+            || status == "needs_user" || planExecutionHold == true || autoAdvancePaused == 1
+            || !(blockedReason?.isEmpty ?? true))
+    }
 }
 
 struct ListTasksResponse: Decodable {
@@ -298,6 +398,151 @@ struct TaskLinks: Decodable {
     let reportFile: String?
 }
 
+/// 核心确认的历史评审阶段恢复身份；界面不自行猜测旧请求。
+struct ReviewRecovery: Decodable {
+    let executionRunId: String
+    let failedReviewRequestId: String
+}
+
+/// 核心确认的当前报告身份；所有处置携带冻结版本，不从报告文字猜测结论。
+struct ReviewResolution: Decodable, Identifiable, Equatable {
+    let id: String
+    let executionRunId: String
+    let reviewRequestId: String
+    let reviewRunId: String?
+    let reportSha256: String
+    let planSha256: String
+    let summary: String
+    let canPrepareRepair: Bool
+    let canAddEvidence: Bool
+
+    func payload(taskID: String) -> [String: Any] {
+        ["task_id": taskID, "expected_execution_run_id": executionRunId,
+         "expected_review_request_id": reviewRequestId, "expected_report_sha256": reportSha256,
+         "expected_plan_sha256": planSha256]
+    }
+}
+
+struct PrepareReviewRepairResponse: Decodable {
+    let ok: Bool
+    let taskId: String
+    let deduplicated: Bool
+    let detail: JSONValue?
+}
+
+struct SupplementReviewResponse: Decodable {
+    let ok: Bool
+    let requestId: String
+    let deduplicated: Bool
+}
+
+struct VerificationCheckResult: Decodable {
+    let command: String
+    let exitCode: Int?
+    let timedOut: Bool?
+    let detail: String?
+    let outputTail: String?
+}
+
+struct RunVerificationChecksResponse: Decodable {
+    let ok: Bool
+    let verificationOk: Bool
+    let recoveryPending: Bool?
+    let deduplicated: Bool?
+    let checks: [VerificationCheckResult]?
+    let detail: String?
+}
+
+struct VerificationCheckStatusResponse: Decodable {
+    let ok: Bool
+    let state: String
+    let verificationOk: Bool?
+    let recoveryPending: Bool?
+    let checks: [VerificationCheckResult]?
+    let detail: String?
+}
+
+struct VerificationCheckOperation: Decodable {
+    let operationId: String
+    let state: String
+    let executionRunId: String
+    let planSha256: String
+    let checks: [VerificationCheckResult]?
+    let verificationOk: Bool?
+    let recoveryPending: Bool?
+    let detail: String?
+}
+
+struct ReviewEvidenceSnapshot: Equatable {
+    var text = ""
+    var localPaths: [String] = []
+    var hasContent: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !localPaths.isEmpty
+    }
+}
+
+struct PlanQuestionOption: Decodable, Identifiable, Equatable {
+    let id: String
+    let label: String
+    let description: String?
+}
+
+struct PlanQuestion: Decodable, Identifiable, Equatable {
+    let id: String
+    let title: String
+    let description: String?
+    let options: [PlanQuestionOption]
+    let recommendedOptionId: String?
+    let allowCustom: Bool
+    let required: Bool
+}
+
+struct PlanAnswer: Decodable, Equatable {
+    let questionId: String
+    var optionId: String?
+    var text: String?
+
+    var payload: [String: Any] {
+        var value: [String: Any] = ["question_id": questionId]
+        if let optionId { value["option_id"] = optionId }
+        if let text { value["text"] = text }
+        return value
+    }
+}
+
+struct PlanClarification: Decodable, Identifiable, Equatable {
+    let id: String
+    let requestId: String
+    let runId: String?
+    let questions: [PlanQuestion]
+    let savedAnswers: [PlanAnswer]
+    let supplement: String?
+    let savedAt: String?
+}
+
+struct SubmitPlanAnswersResponse: Decodable {
+    let ok: Bool
+    let requestId: String
+    let deduplicated: Bool
+}
+
+/// An immutable CLI snapshot also serves as the operation's idempotency identity.
+struct PlanAnswerSnapshot: Equatable {
+    let answers: [PlanAnswer]
+    let supplement: String
+}
+
+extension PlanQuestion {
+    func isAnswered(by answer: PlanAnswer?) -> Bool {
+        guard let answer else { return !required }
+        let text = (answer.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if options.isEmpty { return !text.isEmpty || !required }
+        if answer.optionId == "custom" { return allowCustom && !text.isEmpty }
+        guard let optionId = answer.optionId else { return !required }
+        return options.contains { $0.id == optionId }
+    }
+}
+
 /// §5.2 TaskDetail = TaskSummary + 明细字段
 struct TaskDetail: Decodable, Identifiable {
     let automation: TaskAutomationView?
@@ -321,6 +566,7 @@ struct TaskDetail: Decodable, Identifiable {
     let blockedReason: String?
     let nextClaimAt: String?
     let activeRequest: ActiveRequest?
+    let queuedPlanRequestId: String?
     let kaneoStatus: String?
     let kaneoCheckedAt: String?
     let priority: Int?
@@ -355,6 +601,10 @@ struct TaskDetail: Decodable, Identifiable {
     let runId: String?
     let failureCode: String?
     let failureStage: String?
+    let reviewRecovery: ReviewRecovery?
+    let reviewResolution: ReviewResolution?
+    let verificationChecks: VerificationCheckOperation?
+    let planClarification: PlanClarification?
     let failureReason: String?
     let blockedAt: String?
     let blockedSummary: String?
@@ -378,6 +628,7 @@ struct GetTaskResponse: Decodable {
 
 /// §5.2 Request
 struct RequestItem: Decodable, Identifiable {
+    let failureDismissedAt: String?
     let requestId: String
     let idempotencyKey: String?
     let taskId: String?
@@ -399,6 +650,12 @@ struct RequestItem: Decodable, Identifiable {
     let updatedAt: String?
     /// v2 §5.22.2：kind=plan 请求是否已确认材料（payload.manual_authorized）。
     let manualAuthorized: Bool?
+    /// 请求创建时固化的运行端，不由当前全局设置推断。
+    let backend: String?
+
+    var isDesktopWaiting: Bool {
+        status == "queued" && backend == "codex_desktop"
+    }
 
     var id: String { requestId }
 
@@ -489,6 +746,7 @@ struct SessionInfo: Decodable, Identifiable {
     var isTrashed: Bool { saveState == "trashed" }
     /// §5.16.2：可移入回收站。
     var canTrash: Bool { allowedActions?.contains("trash-session") == true }
+    var canForcePurge: Bool { allowedActions?.contains("force-purge-session") == true }
     /// §5.16.2：可恢复。
     var canRestore: Bool { allowedActions?.contains("restore-session") == true }
     /// v2 §5.20.2：可永久从列表移除（仅回收站内）。
@@ -498,7 +756,7 @@ struct SessionInfo: Decodable, Identifiable {
 /// §5.23.3 pi_desktop 分支配置块（exec_config.pi_desktop 五字段）。
 /// permission_mode 须用户显式保存（核心不自动补 auto）。
 /// §5.24.1：同一形状被 planner_config.pi_desktop / review_config.pi_desktop
-/// 复用；plan / Review 角色固定 `ask`（工具权限需在 Plus 处理）。
+/// 复用；plan / Review 角色固定 `auto`（工具执行无需逐次确认）。
 struct ExecPiDesktopConfig: Decodable, Equatable {
     var modelSource: String?
     var connectionFile: String?
@@ -526,8 +784,9 @@ struct ExecPiDesktopConfig: Decodable, Equatable {
     /// Plus 合法思考等级枚举（§5.23.3）；目录未给子集时列全部合法值。
     static let thinkingLevels = ["off", "minimal", "low", "medium", "high",
                                  "xhigh", "max"]
-    /// plan / Review 角色固定权限：调度台不代批 Plus 工具权限。
-    static let fixedPlanPermission = "ask"
+    /// 新规划与 Review 允许自动工具权限。
+    static let fixedPlanPermission = "auto"
+    static let fixedReviewPermission = "auto"
     /// Plus 默认连接文件（仅用于空草稿预填；不扫描其他目录）。
     static let defaultConnectionFile: String = FileManager.default
         .homeDirectoryForCurrentUser
@@ -593,6 +852,7 @@ enum RoleBackend {
         case "pi_desktop": return "Pi-Desktop-Plus（本机 MCP）"
         case "pi": return "Pi CLI"
         case "codex": return "Codex"
+        case "codex_desktop": return "Codex Desktop（MCP 主动领取）"
         default: return tag ?? "—"
         }
     }
@@ -603,6 +863,7 @@ enum RoleBackend {
         case "pi_desktop": return "Pi-Desktop-Plus"
         case "pi": return "Pi CLI"
         case "codex": return "Codex"
+        case "codex_desktop": return "Codex Desktop"
         default: return tag ?? "—"
         }
     }
@@ -807,7 +1068,7 @@ struct PiDesktopProbeResponse: Decodable {
 /// 已有已保存桌面块时只提示候选不可用，不改草稿。
 enum PlusDraftSeeder {
     /// 角色草稿中由目录播种的字段（permission_mode 不在此列：plan/Review
-    /// 固定 ask，任务执行必须用户显式选择）。
+    /// 规划与 Review 固定 auto，任务执行必须用户显式选择）。
     struct Draft: Equatable {
         var connectionFile: String
         var providerId: String
@@ -958,6 +1219,8 @@ struct ExecutorStageStatus: Decodable {
     let running: ExecutorRunEntry?
     let last: ExecutorRunEntry?
     let claimable: Int?
+    /// 已排队等待 Desktop 领取，不计入本地 runner 可领取数。
+    let desktopWaiting: Int?
 }
 
 /// 核心登记的本 App 实例 worker；发信号前还需独立核验系统启动时间。
@@ -1134,6 +1397,9 @@ struct RoundConfig: Decodable {
     /// 「运行端 · 模型 · 思考等级」单行摘要（全无 → nil）。
     /// 会话阅读器/详情按快照展示，不用当前设置推断。
     var summaryText: String? {
+        if effectiveBackend == "codex_desktop" {
+            return "Codex Desktop · 继承 Desktop 会话/自动任务"
+        }
         let model = model ?? plannerModel ?? plusModelId
         let level = reasoningEffort ?? plusThinkingLevel
         let backendText = effectiveBackend.map(RoleBackend.shortLabel)
@@ -1170,6 +1436,7 @@ struct ExecutionRound: Decodable {
     /// 「运行端 · 模型/思考」一行（记录页/执行页展示快照值）。
     /// config 快照已带运行端时不重复前缀。
     var backendSummary: String? {
+        if backend == "codex_desktop" { return "Codex Desktop · 继承 Desktop 会话/自动任务" }
         if let configText = config?.summaryText { return configText }
         guard backend != nil else { return nil }
         return RoleBackend.shortLabel(backend)
@@ -1209,6 +1476,34 @@ struct SessionConnection: Decodable {
 
     /// detail 非空即携带读取失败原因（§5.15.5）。
     var hasDetail: Bool { detail?.isEmpty == false }
+}
+
+struct SessionControlStatus: Decodable {
+    let taskId: String
+    let runId: String
+    let requestId: String?
+    let backend: String?
+    let state: String
+    let detail: String
+    let connected: Bool
+    let sessionId: String?
+    let turnId: String?
+    let canStart: Bool
+    let blockedReason: String?
+    let startLabel: String
+    /// 同一 Plus 会话在历史失败后手动继续的新轮次，仅用于会话显示。
+    let continuedState: String?
+    let continuedTurnId: String?
+    let continuedEndedAt: String?
+    let continuedDetail: String?
+    let originalTurnEndedAt: String?
+}
+
+struct SessionStartResponse: Decodable {
+    let requestId: String
+    let stage: String
+    let queued: Bool
+    let deduplicated: Bool
 }
 
 /// §5.15.5 消息（按 seq 排序，按 id+revision 去重/更新）。
@@ -1268,6 +1563,7 @@ struct SessionMessagesResponse: Decodable {
     let messages: [SessionMessage]?
     let nextCursor: String?
     let hasMore: Bool?
+    let sourceVersion: String?
     let connection: SessionConnection?
 }
 
@@ -1557,10 +1853,17 @@ struct TodoItem: Decodable, Identifiable {
     /// false 时灰显 + blocked_reason（UI 仅展示，不自判）。
     let selectable: Bool?
     let blockedReason: String?
+    /// 核心允许用户显式重新接入；枚举本身不恢复任务。
+    let reconnectable: Bool?
 
     var id: String { taskId }
     var isSelectable: Bool { selectable == true }
     var isUnmapped: Bool { mappingState == "unmapped" }
+    /// Repository readiness is independent of task eligibility (for example, already planning).
+    var needsRepositoryConfiguration: Bool {
+        guard let mappingState else { return false }
+        return mappingState != "available"
+    }
     var attachmentCount: Int { attachments?.count ?? 0 }
 
     /// 规划面板「定位任务」兜底：fetch-todos 列表之外的聚焦任务占位行。
@@ -1571,7 +1874,7 @@ struct TodoItem: Decodable, Identifiable {
          repositoryKind: String? = nil, mappingProjectId: String? = nil,
          localStatus: String? = nil, localSaveState: String? = nil,
          attachments: [TodoAttachment]? = nil, selectable: Bool? = nil,
-         blockedReason: String? = nil) {
+         blockedReason: String? = nil, reconnectable: Bool? = nil) {
         self.taskId = taskId
         self.title = title
         self.projectId = projectId
@@ -1588,6 +1891,7 @@ struct TodoItem: Decodable, Identifiable {
         self.attachments = attachments
         self.selectable = selectable
         self.blockedReason = blockedReason
+        self.reconnectable = reconnectable
     }
 }
 
@@ -1690,7 +1994,7 @@ struct PlannerStoredConfig: Decodable {
     let defaultMethod: String?
     /// §5.24.1：规划运行端；缺省按 codex 解释。
     let backend: String?
-    /// §5.24.1：Plus 五字段块（脱敏，无 token；permission_mode 固定 ask）。
+    /// §5.24.1：Plus 规划五字段块（脱敏，无 token；新规划 permission_mode 固定 auto）。
     let piDesktop: ExecPiDesktopConfig?
 
     init(standard: PlannerGroupConfig? = nil,
@@ -1946,7 +2250,7 @@ struct GetPlanResponse: Decodable {
 /// settings.review_config：{mode:"inherit"|"custom", provider?, model?,
 /// reasoning_effort?, updated_at?}。inherit = 继承本机 PI 默认会话配置。
 /// v4 §5.24.1：新增 backend（pi|pi_desktop，缺省 pi）与 pi_desktop 五字段块；
-/// `mode` 仅对 backend=pi 生效，Plus 分支必须完整五字段且固定 ask。
+/// `mode` 仅对 backend=pi 生效，Plus 分支必须完整五字段且固定 auto。
 struct ReviewConfig: Decodable, Equatable {
     let claude: CLIModelConfig?
     let codex: CLIModelConfig?

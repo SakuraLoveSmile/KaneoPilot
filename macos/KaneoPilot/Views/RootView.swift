@@ -1,16 +1,26 @@
 import SwiftUI
 
-/// 顶层 NavigationSplitView：侧栏固定七节（任务/执行会话/待处理/归档/回收站/运行记录/设置）。
+/// 工作台优先，记录与配置保留在次级分组。
 struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
-    @State private var section: AppViewModel.Section = .tasks
+    @State private var section: AppViewModel.Section = .dashboard
+    @State private var settingsSegment: SettingsSegment = .projects
 
     var body: some View {
         NavigationSplitView {
-            List(AppViewModel.Section.allCases, selection: $section) { item in
-                Label(item.title, systemImage: item.icon)
-                    .tag(item)
-                    .accessibilityLabel(item.title)
+            List(selection: $section) {
+                Section("工作台") {
+                    sidebarItem(.dashboard)
+                    sidebarItem(.tasks)
+                    sidebarItem(.pending)
+                }
+                Section("记录") {
+                    sidebarItem(.sessions)
+                    sidebarItem(.runs)
+                    sidebarItem(.archive)
+                    sidebarItem(.trash)
+                }
+                Section("配置") { sidebarItem(.settings) }
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
@@ -34,12 +44,12 @@ struct RootView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: model.toast)
-            // v2 §4.7：规划面板（独立 sheet，不阻塞主窗口操作）。
-            .sheet(isPresented: $model.planningPresented) {
-                PlanningView()
-                    .environmentObject(model)
-                    .frame(minWidth: 760, idealWidth: 760, minHeight: 600)
-            }
+        }
+        // 由窗口根呈现：需要处理的导航详情也能打开，避免列内 presenter 被 push 页面占用。
+        .sheet(isPresented: $model.planningPresented) {
+            PlanningView()
+                .environmentObject(model)
+                .frame(minWidth: 760, idealWidth: 760, minHeight: 600)
         }
         .task { await model.refreshAll() }
         .task { await model.loadSaved() }
@@ -61,8 +71,29 @@ struct RootView: View {
     }
 
     @ViewBuilder
+    private func sidebarItem(_ item: AppViewModel.Section) -> some View {
+        HStack {
+            Label(item.title, systemImage: item.icon)
+            if item == .pending && model.attentionCount > 0 {
+                Spacer(minLength: Spacing.s)
+                Text("\(model.attentionCount)").font(.kpSmall).foregroundStyle(.secondary)
+            }
+        }
+        .tag(item)
+        .accessibilityLabel(item == .pending ? "\(item.title)，\(model.attentionCount) 项" : item.title)
+    }
+
+    @ViewBuilder
     private var sectionView: some View {
         switch section {
+        case .dashboard:
+            AutomationDashboardView(onTasks: { column in
+                model.taskColumnFilter = column?.rawValue
+                section = .tasks
+            }, onPending: { section = .pending }, onSettings: { group in
+                settingsSegment = group
+                section = .settings
+            })
         case .tasks:
             TasksSectionView()
         case .sessions:
@@ -76,7 +107,7 @@ struct RootView: View {
         case .runs:
             RunsView()
         case .settings:
-            SettingsView()
+            SettingsView(initialSegment: settingsSegment)
         }
     }
 
@@ -114,18 +145,20 @@ struct RootView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
         }
-        ToolbarItem(placement: .primaryAction) {
-            // 暂停/恢复自动推进（全局态）
-            Button {
-                Task { await model.toggleGlobalPause() }
-            } label: {
-                Label(model.globalPaused ? "恢复自动推进" : "暂停自动推进",
-                      systemImage: model.globalPaused ? "play.fill" : "pause.fill")
+        if section != .dashboard {
+            ToolbarItem(placement: .primaryAction) {
+                // 暂停/恢复自动推进（全局态）
+                Button {
+                    Task { await model.toggleGlobalPause() }
+                } label: {
+                    Label(model.globalPaused ? "恢复自动推进" : "暂停自动推进",
+                          systemImage: model.globalPaused ? "play.fill" : "pause.fill")
+                }
+                .labelStyle(.titleAndIcon)
+                .help(model.globalPaused ? "恢复自动推进（当前全局暂停）" : "暂停自动推进")
+                .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
+                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
             }
-            .labelStyle(.iconOnly)
-            .help(model.globalPaused ? "恢复自动推进（当前全局暂停）" : "暂停自动推进")
-            .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
-            .disabled(model.busy || !model.coreFound)
         }
         ToolbarItem(placement: .primaryAction) {
             Button {

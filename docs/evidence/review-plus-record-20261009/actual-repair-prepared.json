@@ -1,0 +1,17 @@
+{
+  "task_id": "ozb7d8vw1sbp653zs7u0jn2f",
+  "status": "needs_plan",
+  "stage": "plan",
+  "auto_advance_paused": 1,
+  "branch": "kaneo/ozb7d8vw1sbp653zs7u0jn2f",
+  "worktree_path": "/Users/sakurasep/Library/Application Support/KaneoPilot/worktrees/ozb7d8vw1sbp653zs7u0jn2f/branch",
+  "manual_takeover": true,
+  "original_fingerprint": "9cb4e2c071e8b27eb467244ca91bb59be5841837dbaa21132bd92fdfa38cebed",
+  "target_fingerprint": "4b8437000856f1976daeb220d1a065d20d397a448566d0281e1702938e966c5e",
+  "original_worktree_unchanged": true,
+  "repair_worktree_same_head_diff_bytes_and_modes": true,
+  "clone_tracked_changes_staged": true,
+  "active_requests": 0,
+  "original_report_sha256": "2a37b117cb899041c9e9711f739c6d980ac602ab8678b586adbb9ff49068622a",
+  "original_plan_sha256": "b17e2b98af08fe414c87a4e1a8e0657cc95e791e1b902943550355dd103d04e3"
+}

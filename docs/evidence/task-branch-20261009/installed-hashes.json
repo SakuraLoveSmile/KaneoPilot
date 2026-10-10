@@ -1,0 +1,7 @@
+{
+  "Contents/MacOS/KaneoPilot": "e70d8f5c08b2274aa2eb7404c3abaf5540434e8905011bd7ac6c0c3f7bdc4183",
+  "Contents/Resources/core/kanpilot/task_workspace.py": "87adec6c797e324f7a5ee04767553a5f2142571f2e25b9849e626383e66e61e6",
+  "Contents/Resources/core/kanpilot/cmd_exec.py": "d75dd3684320e843be21efcc8ea8573400a629b8140f938f1014e295c142bc4f",
+  "Contents/Resources/core/kanpilot/cmd_dispatch.py": "65ed39180b7ca42854fd259e2b201c76339bd480721e136b5b8e66c954115887",
+  "Contents/Resources/core/kanpilot/pi_desktop_review.py": "1eda7f43e138e474736df2c7e6f102160dc77e0b3569f644e7cf6897a14c30c2"
+}

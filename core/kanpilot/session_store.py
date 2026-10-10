@@ -90,6 +90,25 @@ def get_position(
     }
 
 
+def checked_at(conn: sqlite3.Connection, session_key: str) -> Optional[str]:
+    """Read only the small timestamp; metadata rendering never decodes revisions."""
+    row = conn.execute(
+        "SELECT updated_at FROM session_reads WHERE session_key=?", (session_key,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def touch_position(conn: sqlite3.Connection, session_key: str, task_id: str,
+                   run_id: str, state: str, now: str) -> None:
+    """Refresh check time without selecting or copying the revision map."""
+    conn.execute(
+        "INSERT INTO session_reads(session_key, task_id, run_id, state, updated_at) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(session_key) DO UPDATE SET "
+        "state=excluded.state, updated_at=excluded.updated_at",
+        (session_key, task_id, run_id, state, now),
+    )
+
+
 def save_position(
     conn: sqlite3.Connection,
     session_key: str,

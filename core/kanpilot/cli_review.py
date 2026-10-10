@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import (claude_cli, claude_planner, codex_planner, constants, db,
+from . import (claude_cli, claude_planner, codex_planner, constants, core, db,
                pi_desktop_controller as control, pi_desktop_review as review,
                review_config, review_settle, util)
 
@@ -120,7 +120,8 @@ def _persisted(conn):
     return (job, directory) if isinstance(job, dict) and job.get("stage") == STAGE else None
 
 
-def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=False):
+def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=False,
+              request_id=None, config_override=None):
     if stage != STAGE:
         return 2
     pending = _persisted(conn)
@@ -143,7 +144,14 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         request = review._request_state(db_path, pending[0].get("request_id"))
         if request and request.get("status") == "claimed" and review._lease_valid(request):
             return 1
-    config = review_config.snapshot(conn)
+    if config_override is None:
+        from . import cmd_exec
+        candidate = cmd_exec._select_candidate(conn, STAGE, request_id, util.now_dt())
+        if candidate is not None:
+            request_id = candidate["request_id"]
+            config_override = review_config.for_request(conn, db.request_payload(candidate))
+    config = (review_config.snapshot(conn, config_override=config_override)
+              if config_override is not None else review_config.snapshot(conn))
     backend = config.get("backend")
     if backend not in ("claude", "codex"):
         return 2
@@ -162,12 +170,18 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         return review._blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
                                        log=log, record_run=record, detail=detail)
     save()
-    claim = review.core_call(db_path, "claim", {"stage": STAGE, "executor": review.EXECUTOR_ID})
+    claim = review.core_call(db_path, "claim", {"stage": STAGE, "executor": review.EXECUTOR_ID,
+                             **({"request_id": request_id} if request_id else {})})
     if not claim.get("claimed"):
         review._close(job=job, job_path=job_path, log=log, record_run=record,
                       status="finished", exit_code=0, detail=claim.get("reason"), reason="no_request")
         return 0
     context = claim.get("context") or {}
+    if isinstance((context.get("payload") or {}).get("review_config"), dict):
+        config = review_config.snapshot(conn, config_override=review_config.for_request(conn, context["payload"]))
+        if config.get("backend") != backend:
+            raise util.KanpilotError("conflict", "Review request backend differs from selected runner")
+        job["config"] = config
     job.update(request_id=claim["request_id"], run_id=claim["run_id"],
                task_id=context.get("task_id") or (context.get("task") or {}).get("task_id"))
     save()
@@ -180,22 +194,31 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     worktree = Path(task["execution_round"]["worktree_path"])
     job["execution_worktree"] = str(worktree)
     delivery = task.get("delivery") or (task.get("extra") or {}).get("delivery") or {}
-    suffix = str(delivery.get("head_sha") or "")[:12] if delivery.get("mode") == "pr" else job["run_id"]
+    suffix = str(delivery.get("head_sha") or "")[:12] if core.requires_branch_review(task) else job["run_id"]
     snapshot = review._review_root(conn, task["task_id"], suffix)
-    problem = review.prepare_worktree(task, worktree, snapshot)
+    try:
+        frozen_snapshot = review.review_snapshot.freeze(worktree) if not core.requires_branch_review(task) else None
+    except util.KanpilotError as exc:
+        return blocked(exc.message)
+    problem = review.prepare_worktree(task, worktree, snapshot, snapshot=frozen_snapshot)
     if problem:
         return blocked(problem)
     try:
         materials = review.collect_materials(db_path=db_path, conn=conn, materials=directory / "materials",
                                              task=task, execution_worktree=worktree,
-                                             execution_run_id=job["execution_run_id"])
+                                             execution_run_id=job["execution_run_id"], snapshot=frozen_snapshot)
+        if frozen_snapshot is not None:
+            review.review_snapshot.verify_root(snapshot, frozen_snapshot)
+            review._freeze_manual_job(job, frozen_snapshot, materials)
+        else:
+            review._freeze_branch_job(job, task, materials)
         budget = claude_planner.budget_for(conn, review_settle.raw_task(task)) if backend == "claude" else None
         provider = codex_planner.codex_provider.resolve_provider(constants.codex_home()) if backend == "codex" else None
         if provider and not provider.auth_ready:
             return blocked(f"Codex 认证未就绪：{provider.auth_detail}")
         argv = launcher_argv(backend, config, directory, snapshot, directory / "materials", budget=budget, provider=provider)
-    except util.KanpilotError as exc:
-        return blocked(exc.message)
+    except (util.KanpilotError, OSError) as exc:
+        return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     prompt = (Path(__file__).resolve().parents[1] / "executor_prompts" / "review_cli.md").read_text(encoding="utf-8")
     instruction = review.review_instruction(prompt, job=job, review_root=snapshot, materials=materials, facts=facts)
     job.update(review_root=str(snapshot), materials=materials["files"], send_state="unknown")

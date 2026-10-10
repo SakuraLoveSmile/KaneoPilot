@@ -203,11 +203,12 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 | active | archive-task | archived（取消 queued 请求；进行中/评审/规划/派发/失联未解除/发送不明 → `conflict`） |
 | active | trash-task | trashed（同上前置） |
 | archived/trashed | restore-task | active（`auto_advance_paused=1`，除非 `resume_auto=true`） |
-| trashed | purge-task / purge-session | purged（终态；不可恢复，历史与文件保留） |
+| trashed | purge-task / purge-session | purged（普通入口不可恢复，历史与文件保留；任务显式重新接入例外如下） |
+| archived/trashed/purged 任务 | reconnect-task（用户显式确认） | active + needs_plan/plan（保留旧轮次保存状态；自动推进暂停；契约见 protocol 手动重新接入章节） |
 | 任意（幂等） | archive/trash/restore 到同一状态 | 原状态（`deduplicated: true`） |
 | purged | purge-task / purge-session | purged（`deduplicated: true`） |
 
-`save_state` 不改写 `status`/`stage`，不产生 `status_change` 事件；每次真实转换写 `task_archived`/`task_trashed`/`task_restored` 事件（actor、原因）。
+除显式 `reconnect-task` 同时将任务转为 needs_plan/plan 并记录 `task_reconnected` 外，`save_state` 不改写 `status`/`stage`，不产生 `status_change` 事件；每次真实转换写 `task_archived`/`task_trashed`/`task_restored` 事件（actor、原因）。
 
 ## 2.2 看板归列（board_column / lifecycle_column / exception，v1.3）
 
@@ -227,7 +228,7 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 
 ## 4. 事件 kind（固定枚举）
 
-`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `round_start_failed`（轮次启动失败） `round_observe`(v3 观察者续接) `exec_config_updated`(执行配置保存) `planner_config_updated`(v2.1 规划配置保存) `review_config_updated`(v3 Review 环境保存) `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `goal_report_evaluated`(v3 Goal 报告完成判定留痕) `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
+`task_created` `task_updated` `requirements_changed` `kaneo_observed` `plan_published` `enqueued` `claimed` `heartbeat` `status_change` `dispatch_prepared` `kaneo_transition` `dispatch_sent` `dispatch_failed` `reported` `review_registered` `fix_task_created` `resolved` `paused` `unpaused` `priority_changed` `migrated` `rechecked` `request_cancelled` `task_archived` `task_trashed` `task_restored` `session_trashed`(v1.5 会话移入回收站) `session_restored`(v1.5 会话恢复) `round_started`(v1.5 轮次启动意图落盘) `round_start_failed`（轮次启动失败） `round_observe`(v3 观察者续接) `exec_config_updated`(执行配置保存) `planner_config_updated`(v2.1 规划配置保存) `review_config_updated`(v3 Review 环境保存) `task_reconnected`（用户显式重新接入待规划） `task_purged` `session_purged`（v2 永久从列表移除） `plan_input_prepared` `plan_started`（v2 手动规划） `plan_ready` `plan_needs_input`（v2 Codex 结果） `goal_report_evaluated`(v3 Goal 报告完成判定留痕) `lost_detected`(仅展示层概念，不落库——以租约派生为准)。
 
 本清单必须与 `core/kanpilot/derive.py` 的 `_EVENT_KIND_CN` 以及桌面端
 `Labels.eventKind` 逐项一致；三者不一致时以核心**实际写入**的 kind 为准，并由
@@ -285,3 +286,50 @@ T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩�
 ## 全自动流水线 v5 增量
 
 以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan，accept_verification 仅回到 running；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。
+
+## Desktop 正式队列补充（2026-10-08）
+
+Desktop不另建任务状态机：plan/review正式requests仍使用queued→claimed→succeeded/failed/lost，只有领到且回报心跳才算开始。Desktop队列暂停只停止新的claim，不代表原生自动任务已暂停。领取收据、后端配置、执行轮次和计划哈希固化于请求；设置变更不重写旧请求。Desktop Review独立run索引不替换task的执行run_id。
+
+规划ready沿publish-plan进入ready并保持执行hold；needs_input沿needs_user。Review沿既有三结论及修复流程，手工解除失联仍为明确边界。native配置存在、mock通过与真实Desktop领取/结算分别记证据。
+
+
+### 执行失败的手动恢复（2026-10-09）
+
+当前执行轮次经核验失败、任务 needs_user/execution_failed、stage=monitor（兼容 failure_stage=running）时，用户确认 resume 并携带匹配的 expected_execution_run_id，可沿原确认计划转为 ready/dispatch 并排队新请求。原 failed 轮次及改动保留；本轮发送字段和会话指针清除，新轮次由执行端领取后建立。资格、远端需求与状态、计划和工作树指纹不匹配或有活动请求时拒绝恢复，不改变原失败任务。
+
+
+### verification_unconfirmed 恢复
+
+当前活跃 needs_user/monitor/verification_unconfirmed 经用户 reverify 且本轮全部可信验证通过时，转回 running、排队同一执行轮次的 monitor；不创建新执行轮次、不修改原计划、工作树或配置，不写人工验证 override。真实失败、不完整或身份变化保持原阻塞。
+# 规划问题及答案保存（2026-10-09）
+
+需要补充材料的规划请求结束后，任务保留 `needs_user`，问题绑定原 request/run 与材料版本。
+答案草稿经核心存储到 SQLite，不启动规划。完整提交原子校验当前问题和任务资格，登记用户决定，
+保留原请求/草稿/材料，创建新的规划输入及请求，并转入规划队列；不复活旧领取或写入 harness 会话。
+持久化提交 operation_id 和内容指纹，防止重复排队及同 ID 异内容重放。
+原需求、材料或问题版本变化时拒绝旧答案；错误不解除阻塞、不丢失已保存草稿。
+新的 ready 计划继续使用现有执行确认门控。此功能无数据库破坏性迁移。
+
+## 新任务分支工作区（2026-10-09）
+
+首次规划登记 `extra.delivery.workspace_version=1`、mode=manual 与固定任务 branch/worktree/base/head；
+自动化 PR 任务继续沿用已有登记。创建和 Git 校验在 SQLite 写事务外执行，状态只经核心登记。
+补充回答和同任务修复保留登记，不创建第二任务分支；旧请求无标记按其原快照处理。
+执行结束且验证通过后，核心按当前执行 run 做幂等本地提交并更新 head_sha，随后才允许分支模式 Review。
+Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA 漂移均不能登记 pass。
+本地提交不改变手动任务为自动 PR 交付，不新增推送、合并或远端发布授权。
+
+## Review blocked 处置（2026-10-09）
+
+只对当前有效 needs_user/review_blocked、已登记 blocked 报告和结束的执行轮次提供处置。
+显式准备修复冻结失败 Review 请求、报告/计划哈希及执行成果，登记独立 review_remediation provenance，
+保持人工接管和执行确认闸；原报告/计划/轮次留存，状态转 needs_plan，无模型调用或自动执行。
+历史 detached 成果显式恢复到核心拥有的专用分支，保留原树，未提交成果完整进入新规划输入。
+原远端 in-review 仅在该次有明确恢复授权和身份核验时允许重新规划/派发，不能泛化放宽其他任务。
+补充证据后在同执行轮次排队新 Review，保留原 blocked 记录；用户证据标注来源且不可写为验证通过。
+失效报告、活动请求、材料漂移或创建/校验失败拒绝，不解除阻塞、不丢用户成果。
+
+### 独立验证检查回执（2026-10-10）
+
+`verification_unconfirmed` 的显式检查重跑不产生新模型执行轮次。核心保存操作归属与状态；检查运行时原任务保持阻塞并拒绝竞争写入。失败/未知/中断均不清除阻塞。全部检查独立通过且任务、计划、执行、工作树身份未漂移后，原子登记可信回执，清除阻塞并重新排队 monitor。回执不能跨计划或执行轮次复用，也不能替代原计划原生验收或 Review。

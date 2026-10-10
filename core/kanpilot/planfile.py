@@ -40,6 +40,10 @@ def expected_model_snapshot(req_payload: dict) -> Optional[dict]:
       ``model_id``/``thinking_level``（Plus 没有 codex 的 ``reasoning_effort``）；
     - 快照缺失/不完整：None（旧记录回落 §6 历史常量，由调用方留痕）。
     """
+    if req_payload.get("planner_backend") == "codex_desktop":
+        # 来源标记只表明 Desktop 继承配置，不是对实际型号的核验结果。
+        from .planner_config import DESKTOP_MODEL
+        return dict(DESKTOP_MODEL)
     expected = req_payload.get("model_config")
     if isinstance(expected, dict) and expected.get("planner_model"):
         return expected

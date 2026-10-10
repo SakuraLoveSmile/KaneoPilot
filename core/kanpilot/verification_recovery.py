@@ -1,0 +1,263 @@
+"""Recheck real command evidence without executing code or overriding results."""
+
+import json
+from pathlib import Path
+
+from . import core, db, derive, dsh_events, round_store, util, verify_evidence
+
+
+def _conflict(message):
+    raise util.KanpilotError("conflict", message)
+
+
+def candidate(conn, task):
+    """Cheap UI eligibility; the command independently requires all evidence."""
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    return bool(db.task_is_active(task) and task["status"] == "needs_user"
+                and task["stage"] == "monitor"
+                and task["failure_code"] == "verification_unconfirmed"
+                and task["sent"] == 1 and task["send_state"] == "sent"
+                and task["plan_path"] and task["plan_sha256"]
+                and row is not None and row["save_state"] == "active"
+                and row["backend"] == "pi_desktop"
+                and not conn.execute("SELECT 1 FROM requests WHERE task_id=? "
+                                     "AND status IN ('queued','claimed') LIMIT 1",
+                                     (task["task_id"],)).fetchone())
+
+
+def request_candidate(conn, task, request):
+    """Only the failed monitor that produced the current block gets an entry."""
+    if (task is None or request["kind"] != "monitor" or request["status"] != "failed"
+            or request["task_id"] != task["task_id"] or not candidate(conn, task)
+            or not request["finished_at"] or request["finished_at"] != task["blocked_at"]):
+        return False
+    latest = conn.execute("SELECT request_id FROM requests WHERE task_id=? AND kind='monitor' "
+                          "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task["task_id"],)).fetchone()
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    claimed = util.parse_ts(request["claimed_at"])
+    started = util.parse_ts(row["started_at"] or row["created_at"])
+    reported = conn.execute("SELECT detail_json FROM events WHERE task_id=? AND request_id=? "
+                            "AND kind='reported' AND at=? ORDER BY id DESC LIMIT 1",
+                            (task["task_id"], request["request_id"], request["finished_at"])).fetchone()
+    # Monitor run_id identifies its claim, not the execution round. The claim
+    # must postdate this execution's start, so an old failure cannot acquire an
+    # entry when a newer execution becomes the task's current round.
+    return bool(latest and latest["request_id"] == request["request_id"]
+                and claimed is not None and started is not None and claimed >= started
+                and reported and (util.jload(reported["detail_json"]) or {}).get("outcome") == "needs_user")
+
+
+def _snapshot(conn, task_id, run_id):
+    row = round_store.get_round(conn, task_id, run_id)
+    return {"task": dict(db.require_task(conn, task_id)),
+            "round": dict(row) if row is not None else None,
+            "requests": [dict(r) for r in conn.execute(
+                "SELECT * FROM requests WHERE task_id=? ORDER BY rowid", (task_id,))],
+            "events": [dict(r) for r in conn.execute(
+                "SELECT * FROM events WHERE task_id=? ORDER BY id", (task_id,))]}
+
+
+def _read_evidence(conn, task, *, require_pass=True):
+    from . import cmd_session, headless_adapter, planfile
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    job, directory = cmd_session._identity_job(
+        headless_adapter.resolve_source(conn), task["task_id"], task["run_id"])
+    if row is None or job is None:
+        _conflict("当前轮次缺少可信本机执行记录")
+    hashes = {}
+
+    def read(path):
+        try:
+            # A symlink cannot substitute evidence from outside this run.
+            path = util.inside(path, directory, "verification evidence")
+            raw = path.read_bytes()
+        except (OSError, util.KanpilotError) as exc:
+            raise util.KanpilotError("conflict", "本机验证证据不可读或已越界") from exc
+        hashes[str(path)] = util.sha256_bytes(raw)
+        return raw
+
+    try:
+        job = json.loads(read(directory / "job.json"))
+        spec = json.loads(read(directory / "spec.json"))
+    except (ValueError, UnicodeError) as exc:
+        raise util.KanpilotError("conflict", "执行记录或固化配置解析失败") from exc
+    if not isinstance(job, dict) or not isinstance(spec, dict):
+        _conflict("执行记录或固化配置不是对象")
+    if (any(record.get("task_id") != task["task_id"]
+            or record.get("run_id") != task["run_id"]
+            or record.get("backend") != row["backend"]
+            or record.get("plan_sha256") != task["plan_sha256"]
+            or record.get("completion_policy") != "command_verification"
+            for record in (job, spec))
+            or spec.get("plan_path") != task["plan_path"]
+            or spec.get("repository") != task["repository"]
+            or not row["worktree_path"] or spec.get("cwd") != row["worktree_path"]
+            or spec.get("runs_dir") != str(directory)
+            or spec.get("config") != util.jload(row["config_json"])
+            or job.get("config") != spec.get("config")):
+        _conflict("本机记录、固化执行配置或当前计划身份不符")
+    session_id = job.get("session_id")
+    if (not isinstance(session_id, str) or not session_id.strip()
+            or session_id != row["session_id"] or session_id != task["session_id"]
+            or not isinstance(job.get("turn_id"), str) or not job["turn_id"].strip()
+            or job.get("send_state") != "sent"):
+        _conflict("当前执行会话或发送身份不完整")
+    if (job.get("status") != "finished"
+            or type(job.get("exit_code")) is not int or job["exit_code"] != 0
+            or any(util.pid_alive(pid) for pid in
+                   (job.get("observe_pid"), job.get("pid"), row["pid"]))):
+        _conflict("当前轮次尚无 finished/0 终态或观察进程仍存活")
+    raw_events = read(directory / dsh_events.EVENT_LOG_NAME)
+    try:
+        # The display reader tolerates partial tails; a recovery decision cannot.
+        events = [json.loads(line) for line in raw_events.decode("utf-8").splitlines()
+                  if line.strip()]
+    except (ValueError, UnicodeError) as exc:
+        raise util.KanpilotError("conflict", "执行事件不完整或解析失败") from exc
+    if (not events or any(not isinstance(event, dict)
+            or type(event.get("seq")) is not int for event in events)
+            or events[0]["seq"] != 1
+            or any(right["seq"] != left["seq"] + 1 for left, right in zip(events, events[1:]))):
+        _conflict("执行事件缺失或序列身份不完整")
+    session = dsh_events.session_event(events)
+    terminal = dsh_events.terminal_event(events)
+    if (not session or session.get("session_id") != session_id
+            or not terminal or terminal.get("outcome") != "completed"
+            or events[-1].get("type") != "terminal"
+            or any(event.get("task_id") not in (None, task["task_id"])
+                   or event.get("run_id") not in (None, task["run_id"])
+                   or event.get("session_id") not in (None, session_id)
+                   for event in events)):
+        _conflict("执行事件的任务、轮次、会话身份或 completed 终态不符")
+    try:
+        meta, raw, path = planfile.load_plan(task["plan_path"], task["task_id"])
+    except (util.KanpilotError, OSError, ValueError) as exc:
+        raise util.KanpilotError("conflict", "当前计划文件不可核验") from exc
+    if (util.sha256_bytes(raw) != task["plan_sha256"]
+            or any(meta.get(key) != task[key]
+                   for key in ("project_id", "repository", "requirements_sha256"))):
+        _conflict("计划文件、项目或需求身份已变化")
+    hashes[str(path)] = util.sha256_bytes(raw)
+    declaration = db.task_extra(task).get("plan_verify") or {}
+    parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+    if (declaration.get("plan_sha256") != task["plan_sha256"]
+            or not parsed["ok"] or declaration.get("commands") != parsed.get("commands")):
+        _conflict("当前计划缺少一致的固化 verify 命令声明")
+    # Goal reports and verification_override are deliberately never consulted.
+    result = verify_evidence.match_verification(declaration["commands"],
+        verify_evidence.extract_command_results(dsh_events.to_messages(events)))
+    receipt_record = db.task_extra(task).get("verification_checks") or {}
+    if require_pass and (receipt_record.get("binding") or {}).get("execution_run_id") == task["run_id"]:
+        from . import verification_checks
+        receipt = verification_checks.valid_receipt(conn, task)
+        if receipt is not None:
+            result = receipt
+        else:
+            _conflict("本轮逐条验证尚未全部通过，未恢复推进")
+    if require_pass and not result["ok"]:
+        _conflict("本轮真实验证命令仍缺失、失败或结果未知，未恢复推进")
+    try:
+        if any(util.sha256_file(Path(path)) != digest for path, digest in hashes.items()):
+            _conflict("读取期间本机执行证据或计划文件已变化")
+    except OSError as exc:
+        raise util.KanpilotError("conflict", "读取期间本机执行证据或计划文件已不可读") from exc
+    return hashes, job, result
+
+
+def _require_live_terminal(job):
+    from . import harness_plus_adapter
+    connection = (job.get("config") or {}).get("connection_file")
+    if not connection:
+        _conflict("当前 Plus 轮次缺少固化连接配置")
+    def read_status():
+        status = harness_plus_adapter.plus_status(connection, session_id=job["session_id"], timeout=2)
+        planning = (status.get("raw_status") or {}).get("planningState")
+        if (status.get("session_id") != job["session_id"]
+                or status.get("is_running") is not False or status.get("pending_permission")
+                or planning in ("planning", "awaiting_approval")
+                or status.get("current_turn_id") not in (None, job["turn_id"])):
+            _conflict("Plus 会话仍在运行、等待授权或已有后续轮次，未恢复推进")
+        return (status.get("session_id"), status.get("current_turn_id"), planning)
+
+    before = read_status()
+    turn = harness_plus_adapter.plus_turn_get(connection, session_id=job["session_id"],
+        turn_id=job["turn_id"], timeout=2, require_identity=True)
+    if (turn.get("session_id") != job["session_id"]
+            or turn.get("turn_id") != job["turn_id"] or turn.get("status") != "completed"):
+        _conflict("Plus 当前执行轮次缺少可信 completed 终态")
+    # A manual continuation can start while the old persistent turn is read.
+    # Keep these network reads outside SQLite's write transaction. The Plus
+    # host has no cross-system CAS, so this narrows rather than removes that gap.
+    if read_status() != before:
+        _conflict("核验期间 Plus 会话或当前轮次已变化，未恢复推进")
+
+
+def _deduplicated(conn, task, run_id):
+    event = conn.execute("SELECT detail_json FROM events WHERE task_id=? "
+                         "AND kind='verification_reverified' ORDER BY id DESC LIMIT 1",
+                         (task["task_id"],)).fetchone()
+    detail = util.jload(event["detail_json"]) if event else None
+    if not detail or detail.get("execution_run_id") != run_id:
+        return None
+    if task["run_id"] != run_id or task["plan_sha256"] != detail.get("plan_sha256"):
+        _conflict("当前执行轮次或计划已变化，不能恢复旧验证")
+    # A later block must be freshly verified, never masked by an earlier success.
+    if task["status"] == "needs_user":
+        return None
+    request = db.get_request(conn, detail.get("monitor_request_id"))
+    return {"ok": True, "deduplicated": True, "task_status": task["status"],
+            "request": derive.request_view(request, util.now_dt()) if request is not None else None}
+
+
+def recover(ctx, payload):
+    run_id = payload.get("expected_execution_run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise util.bad_request("reverify 必须指定期望的当前执行轮次")
+    conn, task_id = ctx.conn, payload["task_id"]
+    with db.write_txn(conn):
+        task = db.require_task(conn, task_id)
+        if not db.task_is_active(task) or task["run_id"] != run_id:
+            _conflict("任务不在活跃列表或当前执行轮次已变化")
+        repeated = _deduplicated(conn, task, run_id)
+        if repeated:
+            return repeated
+        if not candidate(conn, task):
+            _conflict("仅当前待确认验证且没有活动请求的执行轮次可重新核验")
+        snapshot = _snapshot(conn, task_id, run_id)
+    hashes, job, verification = _read_evidence(conn, task)
+    _require_live_terminal(job)
+    # Receipt validation also reads Git and process state. Keep those reads
+    # outside the SQLite write transaction, as with the live Plus checks.
+    if _read_evidence(conn, db.require_task(conn, task_id))[0] != hashes:
+        _conflict("核验期间本机执行证据或计划文件已变化")
+    with db.write_txn(conn):
+        current = db.require_task(conn, task_id)
+        if not db.task_is_active(current):
+            _conflict("核验期间任务已移出活跃列表")
+        repeated = _deduplicated(conn, current, run_id)
+        if repeated:
+            return repeated
+        if _snapshot(conn, task_id, run_id) != snapshot or not candidate(conn, current):
+            _conflict("核验期间任务、轮次或请求已变化，请刷新后重试")
+        try:
+            if any(util.sha256_file(Path(path)) != digest for path, digest in hashes.items()):
+                _conflict("核验期间本机执行证据或计划文件已变化")
+        except OSError as exc:
+            raise util.KanpilotError("conflict", "核验期间本机执行证据或计划文件已不可读") from exc
+        resolution = {"action": "reverify", "actor": "user", "at": ctx.now_iso,
+                      "note": payload.get("note"), "execution_run_id": run_id}
+        previous = {key: current[key] for key in
+                    ("failure_code", "failure_reason", "failure_stage", "blocked_at")}
+        core.transition_task(conn, current, "running", ctx.now_iso, "user",
+            detail={"via": "resolve reverify", "execution_run_id": run_id},
+            **core.clear_block_fields(), resolution=resolution)
+        from . import cmd_queue
+        request, _ = cmd_queue._new_cycle_request(conn, ctx.now_iso, current, "monitor")
+        db.add_event(conn, ctx.now_iso, "verification_reverified", task_id=task_id,
+            request_id=request["request_id"], actor="user",
+            detail={"execution_run_id": run_id, "plan_sha256": current["plan_sha256"],
+                    "monitor_request_id": request["request_id"], "matched": verification["matched"],
+                    "evidence_sha256": hashes, "previous": previous})
+        db.add_event(conn, ctx.now_iso, "resolved", task_id=task_id, actor="user", detail=resolution)
+        return {"ok": True, "deduplicated": False, "task_status": "running",
+                "request": derive.request_view(request, ctx.now)}

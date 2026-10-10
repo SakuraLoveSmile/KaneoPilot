@@ -1,0 +1,18 @@
+{
+  "core-verification-check-01.log": {
+    "path": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kp-verified-review-materials-20261010-4b2m8aya/core-verification-check-01.log",
+    "sha256": "7bb8050e41a39a859547048f7bd721bbcc6d4f7b14270a6854deddb3516f15cf"
+  },
+  "core-verification-check-02.log": {
+    "path": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kp-verified-review-materials-20261010-4b2m8aya/core-verification-check-02.log",
+    "sha256": "4271eaca9b7fad036b3ffef2e576b672bc7a2fa8ab4554ac75471525f47dcf50"
+  },
+  "core-verification-check-03.log": {
+    "path": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kp-verified-review-materials-20261010-4b2m8aya/core-verification-check-03.log",
+    "sha256": "68e7ab8fcfb6047d613beeb28aa0976cb64dd9a9ef494d086edea455b4f59e55"
+  },
+  "core-verification-checks.json": {
+    "path": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kp-verified-review-materials-20261010-4b2m8aya/core-verification-checks.json",
+    "sha256": "3c01664956db9e13ba57964339db99097f16332824f9a33a629c5a132a454a48"
+  }
+}

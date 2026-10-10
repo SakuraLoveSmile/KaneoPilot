@@ -1,0 +1,7 @@
+{
+  "kanpilot/review_resolution.py": "0e8d9b23c349b0ee2a2978e4c9c5f0b8bc1e2d9d25ff58b9eea04db203e51c55",
+  "kanpilot/desktop_queue.py": "eec861db24d4ebc32948ee8a5e85738c8faa229eb424e3aab94e2a534a28f327",
+  "kanpilot/pi_desktop_review.py": "eca1f4d4933f67da266c4812dc9e878fc4ef009b540d53eba63e07d70415d717",
+  "executor_prompts/review.md": "afb38d3c600531fea1e7861310d15fc0a4a0e362dda8fed35a127d2b8ae6e74c",
+  "executor_prompts/review_cli.md": "7cf48a21e99c6650184e102831574e0264ac34c214e4468d6095fa83ab6eb34d"
+}

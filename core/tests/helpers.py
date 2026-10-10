@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -307,6 +308,15 @@ class KanpilotTestCase(unittest.TestCase):
     def make_repo(self, project_name):
         path = self.repos_root / project_name
         path.mkdir(parents=True, exist_ok=True)
+        # New planning requires a committed Git baseline. These repositories
+        # remain wholly inside the test's temporary roots and have no remotes.
+        if not (path / ".git").exists():
+            for args in (("init", "-b", "main"),
+                         ("config", "user.name", "KaneoPilot Fixture"),
+                         ("config", "user.email", "fixture@example.invalid"),
+                         ("commit", "--allow-empty", "-m", "isolated baseline")):
+                subprocess.run(["git", "-C", str(path), *args], check=True,
+                               capture_output=True, timeout=10)
         return path
 
     def make_source_snapshot(self, task):

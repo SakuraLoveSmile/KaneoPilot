@@ -1,0 +1,31 @@
+{
+  "baseline_files": 463,
+  "changed": [
+    "core/kanpilot/desktop_queue.py",
+    "core/kanpilot/review_snapshot.py",
+    "core/executor_prompts/review.md",
+    "core/executor_prompts/review_cli.md",
+    "core/kanpilot/cli.py",
+    "core/kanpilot/cmd_dispatch.py",
+    "core/kanpilot/cmd_exec.py",
+    "core/kanpilot/codex_planner.py",
+    "core/kanpilot/core.py",
+    "core/kanpilot/derive.py",
+    "core/kanpilot/dispatch_validate.py",
+    "core/kanpilot/pi_desktop_planner.py",
+    "core/kanpilot/pi_desktop_review.py",
+    "core/kanpilot/planner_inputs.py",
+    "core/kanpilot/planner_runner.py",
+    "docs/protocol.md",
+    "docs/state-model.md",
+    "docs/ui-spec.md",
+    "macos/FakeCore/kanpilot-fake.py",
+    "macos/KaneoPilot/AppViewModel.swift",
+    "macos/KaneoPilot/Core/Models.swift",
+    "macos/KaneoPilot/Views/Components.swift",
+    "macos/KaneoPilot/Views/RootView.swift",
+    "macos/KaneoPilot/Views/TaskDetailContentView.swift",
+    "scripts/build_app.sh"
+  ],
+  "missing": []
+}

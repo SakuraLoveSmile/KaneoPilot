@@ -120,6 +120,7 @@ struct CoreClient: Sendable {
         // 3.9.6（无 certifi → 远端 HTTPS 证书校验失败）。前置用户 bin 目录，让
         // `python3` 解析到带 certifi 的安装（/usr/local 或 ~/.npm-global 等）。
         var env = ProcessInfo.processInfo.environment
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         let npmBin = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"

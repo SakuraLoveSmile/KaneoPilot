@@ -11,10 +11,12 @@ struct TaskDetailView: View {
     @State private var confirm: ConfirmableAction?
     /// v2 §5.20：回收站任务「永久从列表移除」确认。
     @State private var confirmingPurge = false
+    @State private var reverifyError: String?
 
     /// 需二次确认的动作（§4.1 + §6 危险操作清单）。
     enum ConfirmableAction: Identifiable {
-        case restore, acceptDuplicate, markSent, markDone, releaseLost
+        case restore, acceptDuplicate, markSent, markDone, releaseLost, cancelPlan
+        case retryExecution(runID: String)
 
         var id: String {
             switch self {
@@ -23,6 +25,8 @@ struct TaskDetailView: View {
             case .markSent: return "mark_sent"
             case .markDone: return "mark_done"
             case .releaseLost: return "release_lost"
+            case .cancelPlan: return "cancel-request"
+            case .retryExecution: return "resume"
             }
         }
         var title: String {
@@ -32,6 +36,8 @@ struct TaskDetailView: View {
             case .markSent: return "登记已发出"
             case .markDone: return "登记完成"
             case .releaseLost: return "释放失联请求"
+            case .cancelPlan: return "终止排队计划"
+            case .retryExecution: return "重新执行（沿用计划）"
             }
         }
         var message: String {
@@ -44,15 +50,23 @@ struct TaskDetailView: View {
                 return "人工确认消息已发出：任务转为执行中并建立监控请求。"
             case .markDone:
                 return "将任务归档为完成，不再自动推进。"
+            case .cancelPlan:
+                return "撤销尚未领取的规划请求，保留材料与历史，等待手动重新规划。若已被领取，本操作会拒绝终止。"
             case .releaseLost:
                 return "取消失联请求并把任务恢复到可安全推进的状态。"
+            case .retryExecution:
+                return "沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。"
             }
         }
         var destructive: Bool {
             switch self {
-            case .acceptDuplicate, .markDone, .releaseLost: return true
-            case .restore, .markSent: return false
+            case .acceptDuplicate, .markDone, .releaseLost, .cancelPlan: return true
+            case .restore, .markSent, .retryExecution: return false
             }
+        }
+        var expectedExecutionRunID: String? {
+            if case .retryExecution(let runID) = self { return runID }
+            return nil
         }
     }
 
@@ -139,6 +153,13 @@ struct TaskDetailView: View {
             .padding(Spacing.l)
         }
         .safeAreaInset(edge: .bottom) { actionBar }
+        .alert("重新核验未完成", isPresented: Binding(
+            get: { reverifyError != nil }, set: { if !$0 { reverifyError = nil } }
+        )) {
+            Button("好", role: .cancel) { reverifyError = nil }
+        } message: {
+            Text(reverifyError ?? "")
+        }
         .confirmationDialog(
             confirm?.title ?? "",
             isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
@@ -148,7 +169,13 @@ struct TaskDetailView: View {
                 Button(confirm.title, role: confirm.destructive ? .destructive : nil) {
                     let action = confirm.id
                     self.confirm = nil
-                    Task { await model.resolve(taskID: detail.taskId, action: action) }
+                    Task {
+                        if action == "cancel-request", let requestID = detail.queuedPlanRequestId {
+                            await model.cancelPlan(requestID: requestID, taskID: detail.taskId)
+                        } else {
+                            await model.resolve(taskID: detail.taskId, action: action, expectedExecutionRunID: confirm.expectedExecutionRunID)
+                        }
+                    }
                 }
                 Button("取消", role: .cancel) { self.confirm = nil }
             }
@@ -387,7 +414,7 @@ struct TaskDetailView: View {
                 .disabled(model.busy)
                 .help(model.busy ? "正在执行操作" : "按核心推断请求类型并排入队列")
         case "retry":
-            Button("重试派发") { Task { await model.resolve(taskID: detail.taskId, action: "retry") } }
+            Button(detail.stage == "review" ? "重试评审" : "重试派发") { Task { await model.resolve(taskID: detail.taskId, action: "retry") } }
                 .disabled(model.busy)
                 .help(model.busy ? "正在执行操作" : "确认未发送后重新排队派发")
         case "restore":
@@ -417,17 +444,40 @@ struct TaskDetailView: View {
         case "mark_done":
             Button("登记完成") { confirm = .markDone }
                 .disabled(model.busy)
+        case "reverify":
+            Button("重新核验验证证据") {
+                guard let runID = detail.runId else { return }
+                Task {
+                    await model.resolve(taskID: detail.taskId, action: "reverify", expectedExecutionRunID: runID,
+                                        onError: { reverifyError = $0 })
+                }
+            }
+            .disabled(model.busy || detail.runId == nil)
+            .help("只重新读取当前执行记录，全部验证通过才继续；不会调用模型或设置人工认可。")
         case "resume", "accept_verification":
             Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
-                Task { await model.resolve(taskID: detail.taskId, action: action) }
+                if action == "resume", detail.failureCode == "execution_failed", let runID = detail.runId {
+                    confirm = .retryExecution(runID: runID)
+                } else {
+                    Task { await model.resolve(taskID: detail.taskId, action: action) }
+                }
             }.disabled(model.busy)
+        case "recover_review":
+            Button("恢复评审阶段") {
+                guard let recovery = detail.reviewRecovery else { return }
+                Task { await model.recoverReview(taskID: detail.taskId, recovery: recovery) }
+            }.disabled(model.busy || detail.reviewRecovery == nil)
+             .help("保留已完成的执行成果，恢复到待评审并暂停自动推进。")
         case "dismiss":
-            Button(AutomationPresentation.active(detail.automation) ? "转为人工处理" : "清除阻塞标记") { Task { await model.resolve(taskID: detail.taskId, action: "dismiss") } }
+            Button(AutomationPresentation.dismissLabel(stage: detail.failureStage ?? detail.stage, failureCode: detail.failureCode, automatic: AutomationPresentation.active(detail.automation))) { Task { await model.resolve(taskID: detail.taskId, action: "dismiss") } }
                 .disabled(model.busy)
         case "recheck":
             Button("重新校验") { Task { await model.recheck(taskID: detail.taskId) } }
                 .disabled(model.busy)
                 .help("重新核验计划/来源哈希与远端状态")
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirm = .cancelPlan }
+                .disabled(model.busy || detail.queuedPlanRequestId == nil)
         case "set-priority":
             priorityMenu
         case "set-paused":
@@ -469,12 +519,12 @@ struct TaskDetailView: View {
                 .help("打开规划面板，为本任务准备材料后排队规划")
                 .accessibilityLabel("准备规划")
         case "resume-auto":
-            Button("恢复自动推进") {
+            Button(detail.status == "in_review" ? "开始评审" : "恢复自动推进") {
                 Task { await model.resumeAuto(taskID: detail.taskId) }
             }
             .disabled(model.busy)
-            .help("恢复后该任务的自动推进（领取/监控/评审）")
-            .accessibilityLabel("恢复自动推进")
+            .help(detail.status == "in_review" ? "允许调度台调用当前配置的模型开始新的评审。" : "恢复后该任务的自动推进（领取/监控/评审）")
+            .accessibilityLabel(detail.status == "in_review" ? "开始评审" : "恢复自动推进")
         default:
             // 未知动作：置灰并写明原因
             Button(AppViewModel.actionLabel(action)) {}

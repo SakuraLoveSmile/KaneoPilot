@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 @MainActor
 final class AppViewModel: ObservableObject {
@@ -6,13 +7,14 @@ final class AppViewModel: ObservableObject {
     // MARK: - 顶层节
 
     enum Section: String, CaseIterable, Identifiable {
-        case tasks, sessions, pending, archive, trash, runs, settings
+        case dashboard, tasks, sessions, pending, archive, trash, runs, settings
         var id: String { rawValue }
         var title: String {
             switch self {
+            case .dashboard: return "自动化总览"
             case .tasks: return "任务"
             case .sessions: return "执行会话"
-            case .pending: return "待处理"
+            case .pending: return "需要处理"
             case .archive: return "归档"
             case .trash: return "回收站"
             case .runs: return "运行记录"
@@ -21,6 +23,7 @@ final class AppViewModel: ObservableObject {
         }
         var icon: String {
             switch self {
+            case .dashboard: return "rectangle.3.group"
             case .tasks: return "list.bullet.rectangle"
             case .sessions: return "bubble.left.and.bubble.right"
             case .pending: return "tray.full"
@@ -48,6 +51,8 @@ final class AppViewModel: ObservableObject {
     // MARK: - 数据
 
     @Published var tasks: [TaskSummary] = []
+    /// 总览与任务页共享筛选；仅改变展示，不改变核心阶段。
+    @Published var taskColumnFilter: String?
     /// §5.15.3 归档列表（save_state=archived）。
     @Published var archivedTasks: [TaskSummary] = []
     /// §5.15.3 回收站列表（save_state=trashed）。
@@ -103,6 +108,9 @@ final class AppViewModel: ObservableObject {
     private var eventResult: String? = nil
     /// 初次全量刷新成功后唤起一次规划 runner（drain 已授权队列）。
     private var didKickPlanner = false
+    private var planAnswerDrafts: [String: PlanAnswerStore] = [:]
+    private var reviewResolutionDrafts: [String: ReviewResolutionStore] = [:]
+    private var verificationCheckOperations: [String: VerificationCheckStore] = [:]
 
     let client = CoreClient()
     /// App 内置执行端调度器（§5.19，v1.6）：init 即 start；client 未解析核心时
@@ -157,6 +165,14 @@ final class AppViewModel: ObservableObject {
     var busy: Bool { actionInFlight != nil }
     var globalPaused: Bool { overview?.paused?.global ?? false }
     var hasData: Bool { !tasks.isEmpty || !requests.isEmpty || overview != nil }
+    var attentionCount: Int {
+        var ids = Set(tasks.filter(\.needsAttention).map(\.taskId))
+        for request in requests where (request.status == "queued" || request.status == "claimed")
+            && (request.isLost || (request.status == "queued" && request.isUnauthorizedPlan)) {
+            ids.insert(request.taskId ?? "request:\(request.requestId)")
+        }
+        return ids.count
+    }
 
     private var toastTask: Task<Void, Never>?
 
@@ -274,6 +290,16 @@ final class AppViewModel: ObservableObject {
             throw CoreError.badOutput("get-task 无结果")
         }
         let list = (try? e.get())?.events ?? []
+        for (key, store) in reviewResolutionDrafts where key.hasPrefix("\(taskID)/") {
+            store.observe(current: taskResp.task.reviewResolution,
+                          canResolve: taskResp.task.allowedActions?.contains("resolve_review_blocker") == true
+                            && taskResp.task.readOnly != true)
+        }
+        for (key, store) in verificationCheckOperations where key.hasPrefix("\(taskID)/") {
+            store.observe(executionRunID: taskResp.task.runId, planSHA: taskResp.task.planSha256,
+                allowed: taskResp.task.allowedActions?.contains("run_verification_checks") == true
+                    && taskResp.task.readOnly != true)
+        }
         return (taskResp.task, list)
     }
 
@@ -325,6 +351,7 @@ final class AppViewModel: ObservableObject {
     private func perform(_ label: String,
                          successToast: String? = nil,
                          refreshSaved: Bool = false,
+                         onError: ((String) -> Void)? = nil,
                          _ work: @escaping () async throws -> String?) async {
         guard actionInFlight == nil else { return }
         actionInFlight = label
@@ -336,7 +363,8 @@ final class AppViewModel: ObservableObject {
             if refreshSaved { await loadSaved() }
             if let selected = selectedTaskID { await loadDetail(taskID: selected) }
         } catch {
-            alertMessage = error.coreMessage
+            if let onError { onError(error.coreMessage) }
+            else { alertMessage = error.coreMessage }
         }
     }
 
@@ -361,13 +389,140 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func resolve(taskID: String, action: String, note: String? = nil) async {
-        await perform(Self.actionLabel(action)) {
+    func dismissFailedRequests(requestIDs: [String]) async {
+        await perform("移除失败记录") {
+            _ = try await self.client.run("dismiss-failed-requests",
+                                          payload: ["request_ids": requestIDs],
+                                          as: OkResponse.self)
+            return "已从待处理移除，历史保留在运行记录中"
+        }
+    }
+
+    func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil,
+                 onError: ((String) -> Void)? = nil) async {
+        let executionRetry = action == "resume" && expectedExecutionRunID != nil
+        await perform(executionRetry ? "重新执行（沿用计划）" : Self.actionLabel(action),
+                      successToast: action == "reverify" ? "验证已通过，监控已排队"
+                        : executionRetry ? "重新执行已排队，等待执行端领取" : nil,
+                      onError: onError) {
             var payload: [String: Any] = ["task_id": taskID, "action": action]
             if let note, !note.isEmpty { payload["note"] = note }
+            if let expectedExecutionRunID { payload["expected_execution_run_id"] = expectedExecutionRunID }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
             return nil
         }
+    }
+
+    func recoverReview(taskID: String, recovery: ReviewRecovery) async {
+        await perform("恢复评审阶段", successToast: "已恢复到待评审；评审尚未开始") {
+            _ = try await self.client.run("resolve", payload: [
+                "task_id": taskID, "action": "recover_review",
+                "expected_execution_run_id": recovery.executionRunId,
+                "expected_failed_review_request_id": recovery.failedReviewRequestId,
+            ], as: OkResponse.self)
+            return nil
+        }
+    }
+
+    func pendingVerificationCheckStore(taskID: String) -> VerificationCheckStore? {
+        verificationCheckOperations.first(where: {
+            $0.key.hasPrefix("\(taskID)/") && $0.value.hasPendingOperation
+        })?.value
+    }
+
+    func verificationCheckStore(taskID: String, executionRunID: String, planSHA: String,
+                                restored: VerificationCheckOperation? = nil) -> VerificationCheckStore {
+        if let pending = pendingVerificationCheckStore(taskID: taskID) { return pending }
+        let key = "\(taskID)/\(executionRunID)/\(planSHA)"
+        if let store = verificationCheckOperations[key] { return store }
+        let store = VerificationCheckStore(executionRunID: executionRunID, planSHA: planSHA, restored: restored,
+            run: { [weak self] operationID in
+                guard let self else { throw CoreError.coreMissing }
+                guard !self.busy else { throw ReviewResolutionError.operationBusy }
+                self.actionInFlight = "重新运行验证检查"
+                defer { self.actionInFlight = nil }
+                return try await self.client.run("run-verification-checks", payload: [
+                    "task_id": taskID, "expected_execution_run_id": executionRunID,
+                    "expected_plan_sha256": planSHA, "operation_id": operationID,
+                ], timeout: 3600, as: RunVerificationChecksResponse.self)
+            }, status: { [weak self] operationID in
+                guard let self else { throw CoreError.coreMissing }
+                return try await self.client.run("get-verification-check-status", payload: [
+                    "task_id": taskID, "operation_id": operationID,
+                ], as: VerificationCheckStatusResponse.self)
+            }, didFinish: { [weak self] passed in
+                guard let self else { return }
+                self.showToast(passed ? "验证检查已通过，继续推进" : "验证检查未通过，请查看具体结果")
+                if self.selectedTaskID == taskID { await self.loadDetail(taskID: taskID) }
+                await self.refreshAll()
+            })
+        verificationCheckOperations[key] = store
+        return store
+    }
+
+    func pendingReviewResolutionStore(taskID: String) -> ReviewResolutionStore? {
+        reviewResolutionDrafts.first(where: {
+            $0.key.hasPrefix("\(taskID)/") && $0.value.hasPendingOperation
+        })?.value
+    }
+
+    func expiredReviewResolutionStore(taskID: String) -> ReviewResolutionStore? {
+        reviewResolutionDrafts.first(where: {
+            $0.key.hasPrefix("\(taskID)/") && $0.value.isStale && $0.value.snapshot.hasContent
+                && !$0.value.prepared && !$0.value.submitted
+        })?.value
+    }
+
+    func discardStaleReviewEvidence(taskID: String, store: ReviewResolutionStore) async throws {
+        guard store.isStale && !store.awaitingReceipt && !store.awaitingPreparationReceipt
+                && !store.submitting && !store.preparing else { return }
+        _ = try await fetchDetail(taskID: taskID)
+        reviewResolutionDrafts = reviewResolutionDrafts.filter { $0.value !== store }
+        objectWillChange.send()
+        lastRefreshAt = Date()
+    }
+
+    func reviewResolutionStore(taskID: String, resolution: ReviewResolution) -> ReviewResolutionStore {
+        if let pending = pendingReviewResolutionStore(taskID: taskID) { return pending }
+        if let stale = expiredReviewResolutionStore(taskID: taskID) { return stale }
+        let key = "\(taskID)/\(resolution.id)"
+        if let store = reviewResolutionDrafts[key] { return store }
+        let store = ReviewResolutionStore(resolution: resolution, prepare: { [weak self] in
+            guard let self else { throw CoreError.coreMissing }
+            guard !self.busy else { throw ReviewResolutionError.operationBusy }
+            self.actionInFlight = "准备评审修复"
+            defer { self.actionInFlight = nil }
+            let response = try await self.client.run("prepare-review-repair",
+                payload: resolution.payload(taskID: taskID), as: PrepareReviewRepairResponse.self)
+            guard response.ok, response.taskId == taskID else { throw CoreError.badOutput("修复规划未确认成功") }
+        }, submit: { [weak self] snapshot, operationID in
+            guard let self else { throw CoreError.coreMissing }
+            guard !self.busy else { throw ReviewResolutionError.operationBusy }
+            self.actionInFlight = "补充评审证据"
+            defer { self.actionInFlight = nil }
+            var payload = resolution.payload(taskID: taskID)
+            payload["evidence_text"] = snapshot.text
+            payload["local_paths"] = snapshot.localPaths
+            payload["operation_id"] = operationID
+            let response = try await self.client.run("supplement-review", payload: payload,
+                                                    as: SupplementReviewResponse.self)
+            guard response.ok, !response.requestId.isEmpty else { throw CoreError.badOutput("新评审未确认排队成功") }
+            return response
+        }, didSubmit: { [weak self] in
+            guard let self else { return }
+            self.showToast("补充证据已保存，新一轮评审已排队")
+            if self.selectedTaskID == taskID { await self.loadDetail(taskID: taskID) }
+            await self.refreshAll()
+        }, didPrepare: { [weak self] in
+            guard let self else { return }
+            self.showToast("已准备修复规划，请核对材料后继续")
+        }, refresh: { [weak self] in
+            guard let self else { return }
+            _ = try? await self.fetchDetail(taskID: taskID)
+            await self.refreshAll()
+        })
+        reviewResolutionDrafts[key] = store
+        return store
     }
 
     func recheck(taskID: String) async {
@@ -475,6 +630,25 @@ final class AppViewModel: ObservableObject {
                 as: OkResponse.self)
             return response.deduplicated == true
                 ? "会话已不在列表中" : "已永久从列表移除"
+        }
+    }
+
+    func forcePurgeSession(taskID: String, runID: String, saveState: String) async {
+        await perform("强制删除残留会话", refreshSaved: true) {
+            let response = try await self.client.run(
+                "force-purge-session",
+                payload: ["task_id": taskID, "run_id": runID,
+                          "expected_save_state": saveState], as: OkResponse.self)
+            return response.deduplicated == true ? "会话已不在列表中" : "已删除残留会话"
+        }
+    }
+
+    func cancelPlan(requestID: String, taskID: String) async {
+        await perform("终止排队计划", refreshSaved: true) {
+            _ = try await self.client.run(
+                "cancel-request", payload: ["request_id": requestID, "task_id": taskID],
+                as: OkResponse.self)
+            return "已终止排队计划"
         }
     }
 
@@ -616,6 +790,15 @@ final class AppViewModel: ObservableObject {
                              as: FetchTodosResponse.self)
     }
 
+    /// 用户显式重新接入，仅恢复待规划状态，不运行规划或自动执行。
+    func reconnectTask(taskID: String, expectedSaveState: String) async throws {
+        _ = try await client.run("reconnect-task",
+                                 payload: ["task_id": taskID,
+                                           "expected_save_state": expectedSaveState],
+                                 timeout: 120, as: OkResponse.self)
+        await refreshAll()
+    }
+
     /// prepare-plan-input：重新获取任务核验需求哈希 → 建不可变材料目录。
     func preparePlanInput(taskID: String,
                           expectedRequirementsSha256: String?,
@@ -645,7 +828,10 @@ final class AppViewModel: ObservableObject {
                                             timeout: 120,
                                             as: StartPlansResponse.self)
         if (response.results ?? []).contains(where: { $0.succeeded }) {
-            kickPlanner()
+            // Desktop 请求由原生会话领取，纯 Desktop 批次不拉起本地 CLI。
+            if items.contains(where: { ($0["planner_backend"] as? String) != "codex_desktop" }) {
+                kickPlanner()
+            }
             await refreshAll()
         }
         return response
@@ -655,6 +841,75 @@ final class AppViewModel: ObservableObject {
     /// 单飞在 ExecutorScheduler 内经 executor-status 判定；可安全重复调用。
     func kickPlanner() {
         executorScheduler?.runPlanner()
+    }
+
+    func planAnswerStore(taskID: String, clarification: PlanClarification) -> PlanAnswerStore {
+        let key = "\(taskID)/\(clarification.id)"
+        // A changed task must not hide an unconfirmed submit or an unsaved stale draft.
+        if let stale = expiredPlanAnswerStore(taskID: taskID) { return stale }
+        if let store = planAnswerDrafts[key] { return store }
+        let store = PlanAnswerStore(clarification: clarification, save: { [weak self] snapshot in
+            guard let self else { throw CoreError.coreMissing }
+            _ = try await self.client.run("save-plan-answers", payload: [
+                "task_id": taskID, "clarification_id": clarification.id,
+                "answers": snapshot.answers.map(\.payload), "supplement": snapshot.supplement,
+            ])
+        }, submit: { [weak self] snapshot, operationID in
+            guard let self else { throw CoreError.coreMissing }
+            let response = try await self.client.run("submit-plan-answers", payload: [
+                "task_id": taskID, "clarification_id": clarification.id,
+                "answers": snapshot.answers.map(\.payload), "supplement": snapshot.supplement,
+                "operation_id": operationID,
+            ], as: SubmitPlanAnswersResponse.self)
+            guard response.ok else { throw CoreError.badOutput("规划作答未确认成功") }
+            return response
+        }, didSubmit: { [weak self] in
+            guard let self else { return }
+            self.showToast("答案已保存，等待继续规划")
+            self.kickPlanner()
+            await self.refreshAll()
+        }, refresh: { [weak self] in await self?.refreshAll() })
+        planAnswerDrafts[key] = store
+        return store
+    }
+
+    func expiredPlanAnswerStore(taskID: String) -> PlanAnswerStore? {
+        planAnswerDrafts.first(where: {
+            $0.key.hasPrefix("\(taskID)/")
+                && ($0.value.awaitingReceipt || ($0.value.isStale && $0.value.dirty))
+        })?.value
+    }
+
+    func discardStalePlanAnswers(taskID: String, store: PlanAnswerStore) async throws {
+        // Verify that new detail is readable before honoring the explicit discard.
+        _ = try await fetchDetail(taskID: taskID)
+        store.discardExpiredDraft()
+        planAnswerDrafts = planAnswerDrafts.filter { $0.value !== store }
+        objectWillChange.send()
+        lastRefreshAt = Date()
+    }
+
+    /// Called before application termination; a failed save keeps the app open.
+    func flushPlanAnswerDrafts() async throws {
+        for (key, store) in Array(planAnswerDrafts) {
+            if !(await store.saveNow()) {
+                let taskID = String(key.prefix { $0 != "/" })
+                throw CoreError.badOutput("任务「\(taskTitle(for: taskID))」的规划答案草稿尚未保存：\(store.error ?? "请重试保存")")
+            }
+        }
+        for (key, store) in Array(reviewResolutionDrafts) where store.submitting || store.awaitingReceipt
+            || store.preparing || store.awaitingPreparationReceipt {
+            if !(await store.confirmReceipt()) {
+                let taskID = String(key.prefix { $0 != "/" })
+                throw CoreError.badOutput("任务「\(taskTitle(for: taskID))」的补充评审结果尚未确认：\(store.error ?? "请重试确认")")
+            }
+        }
+        for (key, store) in Array(verificationCheckOperations) where store.hasPendingOperation {
+            if !(await store.confirmReceipt()) {
+                let taskID = String(key.prefix { $0 != "/" })
+                throw CoreError.badOutput("任务「\(taskTitle(for: taskID))」的验证检查结果尚未确认：\(store.error ?? store.feedback ?? "请确认运行结果")")
+            }
+        }
     }
 
     /// 打开规划面板（任务详情/请求详情的 prepare_plan、fetch_todos 入口）。
@@ -732,7 +987,9 @@ final class AppViewModel: ObservableObject {
         defer { plannerSaving = false }
         do {
             var payload: [String: Any] = ["backend": backend]
-            if backend == "pi_desktop" {
+            if backend == "codex_desktop" {
+                payload["default_method"] = defaultMethod ?? "builtin"
+            } else if backend == "pi_desktop" {
                 guard let piDesktop, piDesktop.isComplete else {
                     return "Plus 规划配置需要完整的五字段（权限固定 ask）"
                 }
@@ -777,6 +1034,108 @@ final class AppViewModel: ObservableObject {
     /// §5.24.2：已保存的 Plus 规划五字段（无桌面块 → nil）。
     var plannerPlusConfig: ExecPiDesktopConfig? {
         plannerConfig?.config?.piDesktop
+    }
+
+    // MARK: - Desktop 正式队列
+
+    @Published private(set) var desktopQueueInFlight = false
+    @Published private(set) var desktopQueueStatus: DesktopQueueStatusResponse?
+    @Published private(set) var desktopQueueError: String?
+
+    func refreshDesktopQueue() async {
+        await runDesktopQueueCommand("desktop-queue-status", payload: [:])
+    }
+
+    func setDesktopQueueEnabled(_ enabled: Bool) async {
+        await runDesktopQueueCommand("set-desktop-queue-config", payload: ["enabled": enabled])
+    }
+
+    private func runDesktopQueueCommand(_ command: String, payload: [String: Any]) async {
+        guard !desktopQueueInFlight else { return }
+        desktopQueueInFlight = true
+        desktopQueueError = nil
+        defer { desktopQueueInFlight = false }
+        do {
+            desktopQueueStatus = try await client.run(
+                command, payload: payload, as: DesktopQueueStatusResponse.self)
+        } catch {
+            desktopQueueError = error.coreMessage
+        }
+    }
+
+    // MARK: - Codex 原生定时检查（本地兼容适配）
+
+    @Published private(set) var desktopAutomationInFlight = false
+    @Published private(set) var desktopAutomationStatus: DesktopAutomationStatusResponse?
+    @Published private(set) var desktopAutomationError: String?
+
+    func refreshDesktopAutomation() async {
+        guard !desktopAutomationInFlight else { return }
+        desktopAutomationInFlight = true
+        desktopAutomationError = nil
+        defer { desktopAutomationInFlight = false }
+        do {
+            desktopAutomationStatus = try await client.run(
+                "desktop-automation-status", as: DesktopAutomationStatusResponse.self)
+        } catch {
+            desktopAutomationStatus = nil
+            desktopAutomationError = error.coreMessage
+        }
+    }
+
+    func setDesktopAutomation(_ role: DesktopAutomationRole, enabled: Bool) async {
+        guard !desktopAutomationInFlight,
+              let current = desktopAutomationStatus,
+              current.supported else { return }
+        let roleStatus = current.roles.status(for: role)
+        guard roleStatus.controllable, roleStatus.enabled != nil,
+              ["ACTIVE", "PAUSED"].contains(roleStatus.status) else { return }
+        await runDesktopAutomationMutation("set-desktop-automation", payload: [
+            "role": role.rawValue, "enabled": enabled, "expected_status": roleStatus.status])
+    }
+
+    func setDesktopAutomationSchedule(_ role: DesktopAutomationRole,
+                                      schedule: DesktopAutomationStatusResponse.Schedule) async {
+        guard !desktopAutomationInFlight,
+              let current = desktopAutomationStatus, current.supported else { return }
+        let roleStatus = current.roles.status(for: role)
+        guard roleStatus.controllable, roleStatus.scheduleEditable,
+              ["ACTIVE", "PAUSED"].contains(roleStatus.status),
+              let rrule = roleStatus.rrule, let schedulePayload = schedule.payload else { return }
+        await runDesktopAutomationMutation("set-desktop-automation-schedule", payload: [
+            "role": role.rawValue, "schedule": schedulePayload,
+            "expected_status": roleStatus.status, "expected_rrule": rrule])
+    }
+
+    func openDesktopAutomation(_ role: DesktopAutomationRole) {
+        guard let url = desktopAutomationStatus?.roles.status(for: role).nativeAutomationURL else {
+            desktopAutomationError = "没有可打开的 Codex 原生任务，请检查任务绑定。"
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            desktopAutomationError = "无法打开 Codex 原生任务，请在 Codex 中打开对应定时任务。"
+        }
+    }
+
+    private func runDesktopAutomationMutation(_ command: String, payload: [String: Any]) async {
+        desktopAutomationInFlight = true
+        desktopAutomationError = nil
+        defer { desktopAutomationInFlight = false }
+        do {
+            desktopAutomationStatus = try await client.run(
+                command, payload: payload, as: DesktopAutomationStatusResponse.self)
+        } catch {
+            desktopAutomationError = error.coreMessage
+            // 写入失败后重新读文件；不能让旧开关状态冒充实际结果。
+            do {
+                desktopAutomationStatus = try await client.run(
+                    "desktop-automation-status", as: DesktopAutomationStatusResponse.self)
+            } catch {
+                desktopAutomationStatus = nil
+                desktopAutomationError = (desktopAutomationError ?? "修改定时任务失败")
+                    + "；重新读取失败：" + error.coreMessage
+            }
+        }
     }
 
     // MARK: - v4 §5.24.2 Review 能力（review-capabilities）
@@ -950,15 +1309,19 @@ final class AppViewModel: ObservableObject {
         switch action {
         case "enqueue": return "安排下一步"
         case "retry": return "重试派发"
+        case "answer_plan_questions": return "回答问题"
         case "restore": return "恢复原任务"
         case "accept_duplicate": return "接受可能重复，重新派发"
         case "mark_sent": return "登记已发出"
         case "replan": return "重新规划"
         case "resume": return "继续"
         case "accept_verification": return "接受验证结果"
+        case "reverify": return "重新核验验证证据"
+        case "run_verification_checks": return "重新运行验证检查"
         case "release_lost": return "释放失联请求"
         case "mark_done": return "登记完成"
         case "dismiss": return "清除阻塞标记"
+        case "recover_review": return "恢复评审阶段"
         case "recheck": return "重新校验"
         case "archive": return "归档"
         case "trash": return "移入回收站"
@@ -969,12 +1332,541 @@ final class AppViewModel: ObservableObject {
         case "fetch_todos": return "重新获取 To Do"
         case "view": return "查看关联"
         case "set-priority": return "调整顺序"
+        case "cancel-request": return "终止排队计划"
+        case "force-purge-session": return "强制删除残留会话"
         // v2 §5.20：终态永久移除（回收站内）。purge 为任务级动作词。
         case "purge", "purge-task", "purge-session": return "永久从列表移除"
         default: return action
         }
     }
 }
+
+// BEGIN PLAN ANSWER STORE
+/// Lives in the app model so tab changes and periodic detail reads cannot discard edits.
+@MainActor
+final class PlanAnswerStore: ObservableObject {
+    let clarification: PlanClarification
+    @Published private(set) var snapshot: PlanAnswerSnapshot
+    @Published private(set) var saving = false
+    @Published private(set) var submitting = false
+    @Published private(set) var submitted = false
+    @Published private(set) var awaitingReceipt = false
+    @Published private(set) var error: String?
+    @Published private(set) var isStale = false
+    @Published private(set) var feedback: String?
+    private var revision = 0
+    private var savedRevision = 0
+    private var debounce: Task<Void, Never>?
+    private var saveTask: Task<Bool, Never>?
+    private var submitTask: Task<Void, Never>?
+    private var operation: (snapshot: PlanAnswerSnapshot, id: String)?
+    private let save: (PlanAnswerSnapshot) async throws -> Void
+    private let send: (PlanAnswerSnapshot, String) async throws -> SubmitPlanAnswersResponse
+    private let didSubmit: () async -> Void
+    private let refresh: () async -> Void
+
+    init(clarification: PlanClarification,
+         save: @escaping (PlanAnswerSnapshot) async throws -> Void,
+         submit: @escaping (PlanAnswerSnapshot, String) async throws -> SubmitPlanAnswersResponse,
+         didSubmit: @escaping () async -> Void,
+         refresh: @escaping () async -> Void) {
+        self.clarification = clarification
+        snapshot = PlanAnswerSnapshot(answers: clarification.savedAnswers,
+                                      supplement: clarification.supplement ?? "")
+        self.save = save
+        send = submit
+        self.didSubmit = didSubmit
+        self.refresh = refresh
+    }
+
+    var dirty: Bool { revision != savedRevision }
+    var inputsLocked: Bool { submitting || submitted || isStale || awaitingReceipt }
+    var canSubmit: Bool {
+        !submitted && !submitting && (!isStale || awaitingReceipt)
+            && !clarification.questions.isEmpty
+            && clarification.questions.allSatisfy { $0.isAnswered(by: answer($0.id)) }
+    }
+
+    func answer(_ questionID: String) -> PlanAnswer? {
+        snapshot.answers.first { $0.questionId == questionID }
+    }
+
+    func setOption(_ optionID: String?, questionID: String) {
+        var value = answer(questionID) ?? PlanAnswer(questionId: questionID, optionId: nil, text: nil)
+        value.optionId = optionID
+        if optionID != "custom" { value.text = nil }
+        setAnswer(value)
+    }
+
+    func setText(_ text: String, questionID: String) {
+        var value = answer(questionID) ?? PlanAnswer(questionId: questionID, optionId: nil, text: nil)
+        value.text = text
+        setAnswer(value)
+    }
+
+    private func setAnswer(_ value: PlanAnswer) {
+        guard !inputsLocked else { return }
+        let answers = clarification.questions.compactMap { question -> PlanAnswer? in
+            let answer = question.id == value.questionId ? value : self.answer(question.id)
+            guard let answer, answer.optionId != nil || !(answer.text ?? "").isEmpty else { return nil }
+            return answer
+        }
+        update(PlanAnswerSnapshot(answers: answers, supplement: snapshot.supplement))
+    }
+
+    func setSupplement(_ text: String) {
+        guard !inputsLocked else { return }
+        update(PlanAnswerSnapshot(answers: snapshot.answers, supplement: text))
+    }
+
+    private func update(_ next: PlanAnswerSnapshot) {
+        guard next != snapshot else { return }
+        snapshot = next
+        revision += 1
+        error = nil
+        feedback = nil
+        debounce?.cancel()
+        debounce = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            _ = await self?.saveNow()
+        }
+    }
+
+    /// Save the newest revision, waiting for any older write before issuing another.
+    /// Also used by close/quit, rather than cancelling the in-flight core process.
+    @discardableResult
+    func saveNow() async -> Bool {
+        debounce?.cancel()
+        debounce = nil
+        if let submitTask { await submitTask.value }
+        if submitted { return true }
+        if awaitingReceipt {
+            // The server may already have queued planning. Never send a draft write
+            // until the original operation has a definitive acknowledgement.
+            submit()
+            if let recovery = submitTask { await recovery.value }
+            return submitted
+        }
+        while let inFlight = saveTask {
+            if !(await inFlight.value) { return false }
+        }
+        // A submit can begin while we await an older draft write.
+        if submitting || awaitingReceipt || submitted { return await saveNow() }
+        guard dirty else { return true }
+        guard !isStale else { return false }
+        let value = snapshot
+        let savingRevision = revision
+        saving = true
+        let pending = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            defer { self.saveTask = nil; self.saving = false }
+            do {
+                try await self.save(value)
+                self.savedRevision = savingRevision
+                if self.revision == savingRevision {
+                    self.error = nil
+                    self.feedback = "草稿已保存"
+                }
+                return true
+            } catch {
+                self.record(error)
+                return false
+            }
+        }
+        saveTask = pending
+        guard await pending.value else { return false }
+        // Edits made during the write must not be left behind by closing the view.
+        if dirty { return await saveNow() }
+        return true
+    }
+
+    func submit() {
+        guard canSubmit else { return }
+        submitting = true
+        error = nil
+        feedback = nil
+        debounce?.cancel()
+        debounce = nil
+        let value = awaitingReceipt ? operation!.snapshot : snapshot
+        if operation?.snapshot != value { operation = (value, UUID().uuidString) }
+        let operationID = operation!.id
+        submitTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.submitting = false; self.submitTask = nil }
+            if let saving = self.saveTask { _ = await saving.value }
+            do {
+                _ = try await self.send(value, operationID)
+                self.submitted = true
+                self.awaitingReceipt = false
+                self.savedRevision = self.revision
+                self.error = nil
+                self.isStale = false
+                self.feedback = "答案已保存，等待继续规划"
+                await self.didSubmit()
+            } catch {
+                self.awaitingReceipt = self.hasUnknownSubmitResult(error)
+                self.record(error)
+                if self.awaitingReceipt {
+                    self.feedback = "提交结果待确认，请重试确认"
+                }
+            }
+        }
+    }
+
+    func reload() async { await refresh() }
+
+    func discardExpiredDraft() {
+        guard isStale && !awaitingReceipt else { return }
+        savedRevision = revision
+    }
+
+    func showFailure(_ failure: Error) { record(failure) }
+
+    private func hasUnknownSubmitResult(_ failure: Error) -> Bool {
+        guard let core = failure as? CoreError else { return true }
+        switch core {
+        case .timedOut, .badOutput, .launchFailed: return true
+        // A missing core during recovery says nothing about the earlier commit.
+        case .coreMissing: return awaitingReceipt
+        // An unframed process exit is not a definite protocol rejection.
+        case .exited(_, _, let code):
+            return code?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        }
+    }
+
+    private func record(_ failure: Error) {
+        if case CoreError.exited(_, _, let code) = failure, code == "conflict" || code == "not_found" {
+            isStale = true
+        }
+        error = failure.coreMessage
+        feedback = nil
+    }
+}
+// END PLAN ANSWER STORE
+
+// BEGIN REVIEW RESOLUTION STORE
+enum ReviewResolutionError: LocalizedError {
+    case operationBusy
+    var errorDescription: String? { "另一项操作正在进行，请稍后再试" }
+}
+
+/// 保存本轮材料及回执身份，关闭 sheet、切换页或刷新不会丢弃未确认提交。
+@MainActor
+final class ReviewResolutionStore: ObservableObject {
+    let resolution: ReviewResolution
+    @Published private(set) var snapshot = ReviewEvidenceSnapshot()
+    @Published private(set) var submitting = false
+    @Published private(set) var preparing = false
+    @Published private(set) var submitted = false
+    @Published private(set) var prepared = false
+    @Published private(set) var awaitingReceipt = false
+    @Published private(set) var awaitingPreparationReceipt = false
+    @Published private(set) var isStale = false
+    @Published private(set) var error: String?
+    @Published private(set) var feedback: String?
+    private var operation: (snapshot: ReviewEvidenceSnapshot, id: String)?
+    private var submitTask: Task<Void, Never>?
+    private var prepareTask: Task<Bool, Never>?
+    private let send: (ReviewEvidenceSnapshot, String) async throws -> SupplementReviewResponse
+    private let prepare: () async throws -> Void
+    private let didSubmit: () async -> Void
+    private let didPrepare: () async -> Void
+    private let refresh: () async -> Void
+
+    init(resolution: ReviewResolution, prepare: @escaping () async throws -> Void,
+         submit: @escaping (ReviewEvidenceSnapshot, String) async throws -> SupplementReviewResponse,
+         didSubmit: @escaping () async -> Void, didPrepare: @escaping () async -> Void,
+         refresh: @escaping () async -> Void) {
+        self.resolution = resolution
+        self.prepare = prepare
+        send = submit
+        self.didSubmit = didSubmit
+        self.didPrepare = didPrepare
+        self.refresh = refresh
+    }
+
+    var inputsLocked: Bool {
+        submitting || preparing || awaitingReceipt || awaitingPreparationReceipt || submitted || prepared || isStale
+    }
+    var hasPendingOperation: Bool {
+        !submitted && !prepared && (submitting || preparing || awaitingReceipt || awaitingPreparationReceipt)
+    }
+    var canSubmit: Bool {
+        !submitting && !preparing && !submitted && !prepared && !awaitingPreparationReceipt
+            && (awaitingReceipt || (!isStale && resolution.canAddEvidence && snapshot.hasContent))
+    }
+    var canPrepare: Bool {
+        !submitting && !preparing && !submitted && !prepared && !awaitingReceipt
+            && (awaitingPreparationReceipt || (!isStale && resolution.canPrepareRepair))
+    }
+
+    func setText(_ text: String) {
+        guard !inputsLocked else { return }
+        snapshot.text = text
+        error = nil
+    }
+    func addPaths(_ paths: [String]) {
+        guard !inputsLocked else { return }
+        for path in paths where !snapshot.localPaths.contains(path) { snapshot.localPaths.append(path) }
+        error = nil
+    }
+    func removePath(_ path: String) {
+        guard !inputsLocked else { return }
+        snapshot.localPaths.removeAll { $0 == path }
+        error = nil
+    }
+
+    func observe(current: ReviewResolution?, canResolve: Bool) {
+        guard !submitted && !prepared && !submitting && !preparing
+                && !awaitingReceipt && !awaitingPreparationReceipt else { return }
+        if !canResolve || current != resolution {
+            isStale = true
+            error = "评审报告或任务轮次已变化。原输入已保留，请刷新并查看当前任务后再处理。"
+        }
+    }
+
+    func prepareRepair() async -> Bool {
+        guard canPrepare else { return false }
+        preparing = true
+        error = nil
+        feedback = nil
+        let pending = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            defer { self.preparing = false; self.prepareTask = nil }
+            do {
+                try await self.prepare()
+                self.prepared = true
+                self.awaitingPreparationReceipt = false
+                self.feedback = "已准备修复规划，请核对材料后继续"
+                await self.didPrepare()
+                return true
+            } catch {
+                self.awaitingPreparationReceipt = self.unknownResult(error, wasAwaiting: self.awaitingPreparationReceipt)
+                self.record(error)
+                if self.awaitingPreparationReceipt { self.feedback = "准备结果待确认，请重试确认；不会自动开始规划。" }
+                return false
+            }
+        }
+        prepareTask = pending
+        return await pending.value
+    }
+
+    func submit() {
+        guard canSubmit else { return }
+        submitting = true
+        error = nil
+        feedback = nil
+        let value = awaitingReceipt ? operation!.snapshot : snapshot
+        if operation?.snapshot != value { operation = (value, UUID().uuidString) }
+        let operationID = operation!.id
+        submitTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.submitting = false; self.submitTask = nil }
+            do {
+                let response = try await self.send(value, operationID)
+                guard response.ok, !response.requestId.isEmpty else { throw CoreError.badOutput("新评审未确认排队成功") }
+                self.submitted = true
+                self.awaitingReceipt = false
+                self.isStale = false
+                self.feedback = "补充证据已保存，新一轮评审已排队"
+                await self.didSubmit()
+            } catch {
+                self.awaitingReceipt = self.unknownResult(error, wasAwaiting: self.awaitingReceipt)
+                self.record(error)
+                if self.awaitingReceipt { self.feedback = "提交结果待确认，请重试确认；材料已锁定，避免重复发起评审。" }
+            }
+        }
+    }
+
+    /// App 的既有退出保存入口会等待在途操作或恢复回执，失败时保持 App 打开。
+    func confirmReceipt() async -> Bool {
+        if let pending = prepareTask { _ = await pending.value }
+        if awaitingPreparationReceipt { return await prepareRepair() }
+        if let pending = submitTask { await pending.value }
+        if awaitingReceipt {
+            submit()
+            if let pending = submitTask { await pending.value }
+        }
+        return !awaitingReceipt && !awaitingPreparationReceipt
+    }
+
+    func reload() async { await refresh() }
+
+    private func unknownResult(_ failure: Error, wasAwaiting: Bool) -> Bool {
+        if failure is ReviewResolutionError { return wasAwaiting }
+        guard let core = failure as? CoreError else { return true }
+        switch core {
+        case .timedOut, .badOutput, .launchFailed: return true
+        case .coreMissing: return wasAwaiting
+        case .exited(_, _, let code):
+            return code?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        }
+    }
+
+    private func record(_ failure: Error) {
+        if case CoreError.exited(_, _, let code) = failure, code == "conflict" || code == "not_found" {
+            isStale = true
+        }
+        error = failure.coreMessage
+        feedback = nil
+    }
+}
+// END REVIEW RESOLUTION STORE
+
+// BEGIN VERIFICATION CHECK STORE
+@MainActor
+final class VerificationCheckStore: ObservableObject {
+    let executionRunID: String
+    let planSHA: String
+    @Published private(set) var running = false
+    @Published private(set) var awaitingReceipt = false
+    @Published private(set) var succeeded = false
+    @Published private(set) var recoveryPending = false
+    @Published private(set) var isStale = false
+    @Published private(set) var checks: [VerificationCheckResult] = []
+    @Published private(set) var error: String?
+    @Published private(set) var feedback: String?
+    private var operationID: String?
+    private var framedRunRejection: String?
+    private var operationTask: Task<Void, Never>?
+    private let run: (String) async throws -> RunVerificationChecksResponse
+    private let status: (String) async throws -> VerificationCheckStatusResponse
+    private let didFinish: (Bool) async -> Void
+
+    init(executionRunID: String, planSHA: String, restored: VerificationCheckOperation? = nil,
+         run: @escaping (String) async throws -> RunVerificationChecksResponse,
+         status: @escaping (String) async throws -> VerificationCheckStatusResponse,
+         didFinish: @escaping (Bool) async -> Void) {
+        self.executionRunID = executionRunID
+        self.planSHA = planSHA
+        self.run = run
+        self.status = status
+        self.didFinish = didFinish
+        if let restored, restored.executionRunId == executionRunID, restored.planSha256 == planSHA {
+            operationID = restored.operationId
+            checks = restored.checks ?? []
+            if restored.state == "completed" && restored.verificationOk == true && restored.recoveryPending == true {
+                recoveryPending = true
+                feedback = "检查已通过，恢复推进待确认。"
+            } else if restored.state == "running" || (restored.state == "completed" && restored.verificationOk == true) {
+                awaitingReceipt = true
+                feedback = "已有验证运行记录。请确认原操作结果，不会重复启动检查。"
+            } else {
+                error = restored.detail
+                feedback = "原验证检查未通过或已中断，可查看结果后重新运行。"
+            }
+        }
+    }
+
+    var hasPendingOperation: Bool { running || awaitingReceipt || recoveryPending }
+    var canRun: Bool { !running && !succeeded && (awaitingReceipt || recoveryPending || !isStale) }
+    var buttonTitle: String {
+        running ? "验证检查处理中…" : awaitingReceipt ? "确认验证检查结果" : recoveryPending ? "继续恢复推进" : "重新运行验证检查"
+    }
+
+    func observe(executionRunID: String?, planSHA: String?, allowed: Bool) {
+        guard !hasPendingOperation && !succeeded else { return }
+        if executionRunID != self.executionRunID || planSHA != self.planSHA || !allowed {
+            isStale = true
+            error = "执行轮次或计划已变化，请刷新任务后运行当前计划的检查。"
+        }
+    }
+
+    func start() {
+        guard canRun else { return }
+        let recovering = awaitingReceipt
+        if !recovering && !recoveryPending {
+            operationID = UUID().uuidString
+            framedRunRejection = nil
+            checks = []
+        }
+        guard let operationID else { return }
+        running = true
+        error = nil
+        feedback = recovering ? "正在确认原验证运行结果，不会重复启动检查。"
+            : recoveryPending ? "检查已通过，正在恢复推进；不会重复运行检查。"
+            : "正在原任务工作树逐条运行原计划检查，分别记录退出码。"
+        operationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.running = false; self.operationTask = nil }
+            var attemptedRun = false
+            do {
+                if recovering {
+                    let receipt = try await self.status(operationID)
+                    guard receipt.ok else { throw CoreError.badOutput("验证检查状态未确认") }
+                    switch receipt.state {
+                    case "running":
+                        self.awaitingReceipt = true
+                        self.checks = receipt.checks ?? self.checks
+                        self.feedback = "原验证检查仍在运行。稍后确认结果；不会重复启动检查。"
+                        return
+                    case "completed":
+                        guard let passed = receipt.verificationOk else { throw CoreError.badOutput("验证检查回执缺少结果") }
+                        await self.finish(passed: passed, checks: receipt.checks ?? [], detail: receipt.detail,
+                                          recoveryPending: receipt.recoveryPending == true)
+                        return
+                    case "interrupted":
+                        await self.finish(passed: false, checks: receipt.checks ?? [],
+                            detail: receipt.detail ?? "验证检查已中断，可重新运行检查。")
+                        return
+                    case "not_found":
+                        if let rejection = self.framedRunRejection {
+                            // A framed failure can occur after a receipt commit. Only a
+                            // confirmed absent intent makes the rejection definitive.
+                            self.awaitingReceipt = false
+                            self.recoveryPending = false
+                            self.error = rejection
+                            self.feedback = "核心已确认本次检查未开始；请查看错误并刷新任务状态。"
+                            return
+                        }
+                        break // Unframed lost reply: retain the original intent id.
+                    default: throw CoreError.badOutput("未知验证检查状态：\(receipt.state)")
+                    }
+                }
+                attemptedRun = true
+                let response = try await self.run(operationID)
+                guard response.ok else { throw CoreError.badOutput("验证运行未确认完成") }
+                await self.finish(passed: response.verificationOk, checks: response.checks ?? [], detail: response.detail,
+                                  recoveryPending: response.recoveryPending == true)
+            } catch {
+                if attemptedRun, case CoreError.exited(_, _, let code) = error,
+                   code?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    self.framedRunRejection = error.coreMessage
+                }
+                let uncertain: Bool
+                switch error as? CoreError {
+                case .some(.coreMissing): uncertain = recovering || self.recoveryPending
+                default: uncertain = !(error is ReviewResolutionError) || recovering || self.recoveryPending
+                }
+                self.awaitingReceipt = uncertain
+                self.error = error.coreMessage
+                self.feedback = uncertain ? "验证运行结果待确认。请确认原操作回执，避免重复执行检查。" : nil
+            }
+        }
+    }
+
+    private func finish(passed: Bool, checks: [VerificationCheckResult], detail: String?, recoveryPending: Bool = false) async {
+        self.checks = checks
+        awaitingReceipt = false
+        self.recoveryPending = passed && recoveryPending
+        succeeded = passed && !recoveryPending
+        feedback = self.recoveryPending ? "检查已通过，恢复推进待确认。"
+            : passed ? "验证检查已通过，继续推进。" : "验证检查未通过；未作人工接受，也未进入评审。"
+        error = self.recoveryPending ? detail : passed ? nil : detail ?? "请查看下方独立检查结果。"
+        if !self.recoveryPending { await didFinish(passed) }
+    }
+
+    func confirmReceipt() async -> Bool {
+        if let pending = operationTask { await pending.value }
+        if awaitingReceipt || recoveryPending {
+            start()
+            if let pending = operationTask { await pending.value }
+        }
+        return !hasPendingOperation
+    }
+}
+// END VERIFICATION CHECK STORE
 
 extension Error {
     /// 核心返回的 error 原文优先，其次本地错误描述。

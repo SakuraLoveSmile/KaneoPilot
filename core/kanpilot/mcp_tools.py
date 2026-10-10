@@ -226,6 +226,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "scope_id": {"type": "string"},
                 "session_id": {"type": "string"},
                 "turn_id": {"type": "string"},
+                "require_identity": {"type": "boolean"},
             },
             "required": ["scope_id", "session_id", "turn_id"],
             "additionalProperties": False,
@@ -267,6 +268,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "message_end": {"type": ["integer", "null"]},
                 "has_more_before": {"type": "boolean"},
                 "has_more_after": {"type": "boolean"},
+                "truncated": {"type": "boolean"},
+                "reason": {"type": "string"},
             },
             "required": ["session_id", "messages"],
         },
@@ -393,6 +396,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "proposal_id": {"type": "string"},
                 "version": {"type": "integer"},
                 "action": {"type": "string", "enum": ["accept", "reject"]},
+                "goal_continuation": {"type": "boolean"},
             },
             "required": ["scope_id", "operation_id", "session_id", "turn_id", "proposal_id", "version", "action"],
             "additionalProperties": False,
@@ -537,6 +541,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "run_id": {"type": "string"},
                 "cursor": {"type": "string"},
                 "limit": {"type": "integer"},
+                "source_version": {"type": "string"},
+                "force_reload": {"type": "boolean"},
             },
             "required": ["task_id", "run_id"],
             "additionalProperties": False,
@@ -546,6 +552,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "properties": {
                 "messages": {"type": "array"},
                 "next_cursor": {"type": ["string", "null"]},
+                "source_version": {"type": ["string", "null"]},
             },
             "required": ["messages"],
         },
@@ -818,7 +825,9 @@ for _spec in TOOLS_SPEC:
         _spec["inputSchema"]["required"].append("tool_call_id")
     _spec["outputSchema"] = {
         "type": "object", "properties": {
-            "ok": {"type": "boolean"}, "data": {"type": "object"},
+            "ok": {"type": "boolean"},
+            "data": (_spec["outputSchema"] if _spec["name"] == "kp_runtime_messages"
+                     else {"type": "object"}),
             "error": {"type": "object", "properties": {
                 "code": {"type": "string"}, "message": {"type": "string"}},
                 "required": ["code", "message"]},
@@ -875,6 +884,19 @@ def _scope_valid(manager, scope):
         raise util.KanpilotError("forbidden", "scope has expired or been revoked")
 
 
+def _goal_continuation_task_guard(conn, scope, args):
+    task = db.require_task(conn, scope.task_id)
+    automation = db.task_extra(task).get("automation") or {}
+    if (scope.role != "execution" or (scope.runtime_config or {}).get("permission_mode") != "auto"
+            or args.get("action") != "accept" or args.get("target_permission_mode") != "auto"
+            or task["run_id"] != scope.run_id or not db.task_schedulable(task)
+            or db.paused(conn, "dispatch") or db.paused(conn, "monitor")
+            or not automation or automation.get("manual_takeover")
+            or task["status"] not in ("running", "needs_user")
+            or (task["status"] == "needs_user" and task["failure_code"] != "execution_failed")):
+        raise util.KanpilotError("forbidden", "目标自动续接已暂停或不属于当前自动执行轮次")
+
+
 def _runtime_guard(conn, scope, tool, args):
     if args.get("harness_id", "pi_desktop") != "pi_desktop":
         raise util.bad_request("unsupported harness")
@@ -891,14 +913,37 @@ def _runtime_guard(conn, scope, tool, args):
     session_id = args.get("session_id")
     if session_id and not runtime_operations.session_owned(conn, scope.scope_id, session_id):
         raise util.KanpilotError("forbidden", "session does not belong to scope")
+    if tool == "kp_runtime_proposal_resolve" and args.get("goal_continuation"):
+        _goal_continuation_task_guard(conn, scope, args)
+        receipt = runtime_operations.get_operation(conn, scope.scope_id, args["operation_id"])
+        if receipt is None or receipt["status"] != "accepted":
+            from .pi_desktop_worker import _pending_goal_contract
+            status = harness_plus_adapter.plus_status(scope.connection_file, session_id=session_id)
+            raw = status.get("raw_status") or {}
+            inner = raw.get("status") or raw
+            proposal = _pending_goal_contract(
+                {"plans": harness_plus_adapter.plus_proposals(scope.connection_file, session_id=session_id).get("proposals")},
+                session_id, args["turn_id"])
+            if (status.get("current_turn_id") != args["turn_id"]
+                    or inner.get("planningState") not in ("planning", "awaiting_approval")
+                    or status.get("pending_permission") or proposal is None
+                    or any(proposal.get(source) != args.get(target) for source, target in
+                           (("id", "proposal_id"), ("version", "version"), ("toolCallId", "tool_call_id")))):
+                raise util.KanpilotError("conflict", "当前目标提案已变化或不再可自动批准")
     if tool == "kp_runtime_goal_report_get" and not (
         args.get("execution_id") or args.get("report_id")
     ):
         raise util.bad_request("Goal report get requires execution_id or report_id")
     if tool == "kp_runtime_session_configure":
         permission = (scope.runtime_config or {}).get("permission_mode")
-        if scope.role in ("planner", "review"):
-            permission = "ask"
+        if scope.role == "review" and permission not in (
+                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+                constants.PI_DESKTOP_REVIEW_PERMISSION_MODE):
+            raise util.KanpilotError("forbidden", "unsupported review permission snapshot")
+        elif scope.role == "planner" and permission not in (
+                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+                constants.PI_DESKTOP_PLANNER_PERMISSION_MODE):
+            raise util.KanpilotError("forbidden", "unsupported planner permission snapshot")
         if args["mode"] != mode or args["permission_mode"] != permission:
             raise util.KanpilotError("forbidden", "configuration exceeds authorized snapshot")
     if args.get("target_permission_mode") is not None and (scope.role != "execution" or args["target_permission_mode"] != (scope.runtime_config or {}).get("permission_mode")):
@@ -968,12 +1013,16 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         ctx = cli.Context(db_path)
         try:
             _runtime_guard(ctx.conn, scope, tool_name, arguments)
-            ctx.conn.authorization_guard = lambda conn: _scope_valid(scope_manager, scope)
+            def authorization_guard(conn):
+                _scope_valid(scope_manager, scope)
+                if tool_name == "kp_runtime_proposal_resolve" and arguments.get("goal_continuation"):
+                    _goal_continuation_task_guard(conn, scope, arguments)
+            ctx.conn.authorization_guard = authorization_guard
             readers = {
                 "kp_runtime_capabilities": lambda: harness_plus_adapter.plus_capabilities(conn_file),
                 "kp_runtime_catalog": lambda: harness_plus_adapter.plus_catalog(conn_file, provider_id=arguments.get("provider_id")),
                 "kp_runtime_status": lambda: harness_plus_adapter.plus_status(conn_file, session_id=arguments["session_id"]),
-                "kp_runtime_turn_get": lambda: harness_plus_adapter.plus_turn_get(conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"]),
+                "kp_runtime_turn_get": lambda: harness_plus_adapter.plus_turn_get(conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"], require_identity=arguments.get("require_identity", False)),
                 "kp_runtime_messages": lambda: harness_plus_adapter.plus_messages(conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
                 "kp_runtime_proposals": lambda: harness_plus_adapter.plus_proposals(conn_file, session_id=arguments["session_id"], turn_id=arguments.get("turn_id")),
                 "kp_runtime_goal_report_list": lambda: harness_plus_adapter.plus_goal_report_list(conn_file, session_id=arguments["session_id"]),
@@ -985,7 +1034,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
                 grant = scope_manager.get_task_grant_file(scope.scope_id)
                 if not grant or not grant.is_file():
                     raise util.KanpilotError("not_found", "task grant file is missing")
-            op = runtime_operations.reserve_downstream(ctx.conn, scope.scope_id, arguments["operation_id"], "pi_desktop", tool_name, arguments)
+            op = runtime_operations.reserve_downstream(ctx.conn, scope.scope_id, arguments["operation_id"], "pi_desktop", tool_name, {key: value for key, value in arguments.items() if key != "goal_continuation"})
             if not op["send"]:
                 if op["status"] == "accepted":
                     return op["result"]

@@ -67,6 +67,8 @@ def _executable(binary):
 def _planner_ready(conn):
     from . import codex_planner, exec_config, planner_config
     backend = planner_config.backend(conn)
+    if backend == "codex_desktop":
+        return planner_config.desktop_queue_ready(conn)
     if backend == "codex":
         return codex_planner.check_available()[0]
     if backend == "claude":
@@ -95,7 +97,7 @@ def automation_preflight(conn, project_id):
             else:
                 origin = subprocess.run(["git", "-C", str(Path(repo).expanduser()), "remote", "get-url", "origin"],
                                         capture_output=True, text=True, timeout=0.07)
-                if origin.returncode or not github_repository(origin.stdout):
+                if origin.returncode or not github_repository(origin.stdout, cwd=str(Path(repo).expanduser())):
                     add("origin_not_github", "origin 不是 GitHub 仓库")
         except (OSError, subprocess.TimeoutExpired):
             add("not_git_repo", "本机 git 检查不可用")
@@ -105,7 +107,11 @@ def automation_preflight(conn, project_id):
         add("planner_unconfigured", "规划后端未配置或本机不可用")
     review = review_config.load(conn) or {}
     if review.get("backend", "pi") not in constants.AUTOMATION_REVIEW_BACKENDS:
-        add("review_backend_unsupported", "Review 后端需为 Plus/Claude/Codex")
+        add("review_backend_unsupported", "Review 后端需为 Plus/Claude/Codex/Desktop")
+    elif review.get("backend") == "codex_desktop":
+        from . import planner_config
+        if not planner_config.desktop_queue_ready(conn):
+            add("review_desktop_unconfigured", "Desktop Review 自动领取尚未配置或未启用")
     execution = exec_config.load(conn)
     if execution.get("backend") != "pi_desktop":
         add("exec_backend_not_plus", "执行端需为 Plus")
