@@ -586,6 +586,12 @@ def cmd_recheck(ctx, payload: dict) -> dict:
     conn = ctx.conn
     task = db.require_task(conn, payload["task_id"])
     offline = bool(payload.get("offline"))
+    # A14: the panel's manual recheck is "user" (default); the monitor stage's
+    # unattended recheck passes "automation" so it is not recorded as a user
+    # action (same pair as ``prepare-plan-input`` / ``enqueue``).
+    actor = payload.get("actor", "user")
+    if actor not in ("user", "automation"):
+        raise util.bad_request("actor 必须为 user 或 automation")
     checks = []
 
     if task["plan_path"]:
@@ -651,7 +657,7 @@ def cmd_recheck(ctx, payload: dict) -> dict:
             updates["kaneo_status"] = observed_status
         db.update_task(conn, task["task_id"], now, **updates)
         db.add_event(
-            conn, now, "rechecked", task_id=task["task_id"], actor="user",
+            conn, now, "rechecked", task_id=task["task_id"], actor=actor,
             detail={"offline": offline,
                     "ok": all(item["ok"] for item in checks)},
         )
