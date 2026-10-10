@@ -84,7 +84,7 @@ KaneoPilot/
     Models.swift           协议 Codable 模型 + 时间格式化
     ExecutorScheduler.swift 执行端调度器（§5.19：错开分钟拉起 executor_runner）
   Views/
-    RootView.swift         七节侧栏 + 工具栏 + 横幅/toast
+    RootView.swift         工作台/记录/配置侧栏 + 工具栏 + 横幅/toast
     TasksSectionView.swift 任务节入口（包 BoardView）
     BoardView.swift        六列看板（排序/搜索/筛选/键盘/卡片）+ 详情浮层（执行会话/任务信息分段）
     TaskDetailView.swift   详情六区块 + allowed_actions 操作区（含归档/回收站/恢复）
@@ -101,10 +101,32 @@ FakeCore/
 ## 已知取舍 / 契约缺口
 
 - **settings 值与路径无读取命令**：protocol v1 没有暴露 `lease_seconds` 等 settings 值、`settings.migration`、Plan 根/DB 路径的命令。实现：`overview` 响应可选解码 `settings` 对象（FakeCore 提供，真核心 v1 不返回则对应区块隐藏/显示「—」）；路径从 `doctor` 各项 `detail` 字符串提取。
-- **「取消排队」未实现**：协议无 cancel 命令（ui-spec §4.2 明确「没有则不给该按钮」）。
+- **排队规划可手动终止**：任务/请求详情经 `cancel-request` 撤销 queued plan；已领取则拒绝，保留材料和历史，等待手动重新规划。派发排队不在此操作范围。
+- **无记录残留会话可强制删除**：核心允许时，会话菜单提供 `force-purge-session`；仅永久移出列表，保留历史和文件。活跃请求、已有会话及无法核验的记录受保护。
 - **打开会话**：session_id/marker 为本地会话标识，按规格仅展示 + 「复制会话标识」，不臆造 URL。
 - **`resume-auto` 无独立命令**：protocol §5.15.6 只把它列为 allowed_action，未定义命令。实现按 §5.15.2「restore-task 对 active 任务幂等」的语义走 `restore-task {task_id, resume_auto: true}`（置 `auto_advance_paused=0`）。
 - **连接中断态为本地派生**：协议 `connection.state` 只有 ok/degraded/unavailable；读取失败（连接类错误）时 UI 派生「连接中断，重连中」，不清空已加载消息。
 - **已排队排序键**：`TaskSummary.priority` 用作排队优先级代理（协议未在 summary 暴露请求级 priority）。
 - **运行记录**：以 `list-events` 时间线为主，attempts 摘要体现在 claimed/reported 等事件中（无跨任务 attempts 查询命令）。
 - **组头**：§4.1「项目可分组标题」为可选项，当前为平铺列表（行内项目徽标），保证全局排序不被分组打断。
+
+## 自动化工作台预览（2026-10-09）
+
+默认首页为自动化总览；需要用户决定的事项优先展示，任务默认用列表阅读，保留看板切换。详情突出一个当前主操作，其余放入“更多操作”。确认执行先进入核验计划页；手动规划为选择任务、核对材料并开始两步。
+
+隔离体验当前构建（只使用 FakeCore，不安装或覆盖正式应用）：
+
+```bash
+bash scripts/preview_automation_ui.sh 1180x760 light
+# 退出预览后可检查小窗口深色外观
+bash scripts/preview_automation_ui.sh 900x600 dark
+```
+
+预览使用独立 bundle ID 和 build/ui-simplification/fixture 存储；缺少隔离环境时核心不可用，不回落到正式核心。计划正文为静态演练响应，不代表真实计划文件已核验。
+
+模型与材料状态检查：
+
+```bash
+bash macos/tests/run-fixtures.sh
+bash macos/tests/run-planning-input-fixtures.sh
+```

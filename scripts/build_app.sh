@@ -55,7 +55,9 @@ modules = (
     "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
     "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "delivery_runner",
     "claude_cli", "claude_planner", "review_settle", "cli_review",
-    "process_owner",
+    "process_owner", "desktop_queue", "desktop_automation_control", "verification_recovery", "verification_checks", "verification_process", "review_snapshot", "review_resolution",
+    "plan_questions", "plan_answers",
+    "task_workspace",
 )
 for name in modules:
     relative = Path("kanpilot") / (name + ".py")

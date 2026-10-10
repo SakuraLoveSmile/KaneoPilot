@@ -27,6 +27,24 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "run-verification-checks": (
+        {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "operation_id": (True, "str")},
+        _automation_command("verification_checks", "cmd_run_verification_checks")),
+    "get-verification-check-status": (
+        {"task_id": (True, "str"), "operation_id": (True, "str")},
+        _automation_command("verification_checks", "cmd_get_verification_check_status")),
+    "prepare-review-repair": (
+        {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
+         "expected_review_request_id": (True, "str"), "expected_report_sha256": (True, "str"),
+         "expected_plan_sha256": (True, "str")},
+        _automation_command("review_resolution", "cmd_prepare_review_repair")),
+    "supplement-review": (
+        {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
+         "expected_review_request_id": (True, "str"), "expected_report_sha256": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "evidence_text": (False, "str"),
+         "local_paths": (False, "list"), "operation_id": (True, "str")},
+        _automation_command("review_resolution", "cmd_supplement_review")),
     "set-project-automation": ({"project_id": (True, "str"), "automation": (True, "dict"), "expected_policy_revision": (False, "int")}, _automation_command("automation_policy", "cmd_set_project_automation")),
     "set-automation-global": ({"max_active_tasks": (True, "int")}, _automation_command("automation_policy", "cmd_set_automation_global")),
     "record-cost": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "stage": (True, "str"), "cost_usd": (True, "any"), "source": (True, "str")}, _automation_command("automation_policy", "cmd_record_cost")),
@@ -36,7 +54,36 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "doctor": (
         {"online": (False, "bool")}, cmd_read.cmd_doctor,
     ),
+    "desktop-queue-status": ({}, _automation_command("desktop_queue", "cmd_desktop_queue_status")),
+    "desktop-automation-status": ({}, _automation_command("desktop_automation_control", "cmd_desktop_automation_status")),
+    "set-desktop-automation": (
+        {"role": (True, "str"), "enabled": (True, "bool"), "expected_status": (True, "str")},
+        _automation_command("desktop_automation_control", "cmd_set_desktop_automation"),
+    ),
+    "set-desktop-automation-schedule": (
+        {"role": (True, "str"), "schedule": (True, "dict"),
+         "expected_status": (True, "str"), "expected_rrule": (True, "str")},
+        _automation_command("desktop_automation_control", "cmd_set_desktop_automation_schedule"),
+    ),
+    "set-desktop-queue-config": (
+        {"enabled": (False, "bool"), "poll_minutes": (False, "int"),
+         "auto_configured": (False, "bool"), "planner_thread_id": (False, "str|null"),
+         "review_thread_id": (False, "str|null"), "automation_ids": (False, "list")},
+        _automation_command("desktop_queue", "cmd_set_desktop_queue_config"),
+    ),
+    "desktop-probe-create": ({}, _automation_command("desktop_intake_probe", "cmd_desktop_probe_create")),
+    "desktop-probe-status": ({}, _automation_command("desktop_intake_probe", "cmd_desktop_probe_status")),
+    "desktop-probe-claim": (
+        {"role": (True, "str")},
+        _automation_command("desktop_intake_probe", "cmd_desktop_probe_claim"),
+    ),
+    "desktop-probe-report": (
+        {"request_id": (True, "str"), "claim_token": (True, "str"),
+         "output": (True, "str"), "thread_id": (False, "str"), "model": (False, "str")},
+        _automation_command("desktop_intake_probe", "cmd_desktop_probe_report"),
+    ),
     "tick": ({}, cmd_read.cmd_tick),
+    "recover-execution-goals": ({}, cmd_read.cmd_recover_execution_goals),
     "overview": ({}, cmd_read.cmd_overview),
     "list-tasks": (
         {
@@ -54,6 +101,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "expected_plan_sha256": (False, "str"),
         },
         cmd_read.cmd_get_plan,
+    ),
+    "dismiss-failed-requests": (
+        {"request_ids": (True, "list")}, cmd_queue.cmd_dismiss_failed_requests,
     ),
     "list-requests": (
         {
@@ -101,6 +151,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {
             "task_id": (True, "str"), "action": (True, "str"),
             "note": (False, "str"),
+            "expected_execution_run_id": (False, "str"),
+            "expected_failed_review_request_id": (False, "str"),
         },
         cmd_queue.cmd_resolve,
     ),
@@ -234,6 +286,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "resume_auto": (False, "bool")},
         cmd_archive.cmd_restore_task,
     ),
+    "reconnect-task": (
+        {"task_id": (True, "str"), "expected_save_state": (True, "str")},
+        cmd_archive.cmd_reconnect_task,
+    ),
     # v2（§5.20.2）：回收站终态移除（历史/文件保留，不复活）。
     "purge-task": (
         {"task_id": (True, "str"), "expected_save_state": (False, "str")},
@@ -252,13 +308,23 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_session.cmd_list_sessions,
     ),
     "get-session": (
-        {"task_id": (True, "str"), "run_id": (True, "str")},
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "status_only": (False, "bool")},
         cmd_session.cmd_get_session,
+    ),
+    "session-control-status": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("session_control", "cmd_session_control_status"),
+    ),
+    "session-request-start": (
+        {"task_id": (True, "str"), "run_id": (True, "str"), "request_id": (True, "str")},
+        _automation_command("session_control", "cmd_session_request_start"),
     ),
     "session-messages": (
         {
             "task_id": (True, "str"), "run_id": (False, "str"),
             "cursor": (False, "str"), "limit": (False, "int"),
+            "source_version": (False, "str"), "force_reload": (False, "bool"),
         },
         cmd_session.cmd_session_messages,
     ),
@@ -281,6 +347,15 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "expected_save_state": (False, "str"),
         },
         cmd_session.cmd_purge_session,
+    ),
+    "force-purge-session": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "expected_save_state": (False, "str")},
+        _automation_command("cmd_session", "cmd_force_purge_session"),
+    ),
+    "cancel-request": (
+        {"request_id": (True, "str"), "task_id": (True, "str")},
+        _automation_command("cmd_queue", "cmd_cancel_request"),
     ),
     # v1.6（protocol §5.17）：pi 执行配置与能力查询。
     "get-exec-config": ({}, cmd_config.cmd_get_exec_config),
@@ -329,6 +404,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {
             "task_id": (True, "str"), "run_id": (True, "str"),
             "executor": (False, "str"),
+            "continue_goal": (False, "bool"),
+            "continue_goal_only": (False, "bool"),
         },
         cmd_dispatch.cmd_round_observe,
     ),
@@ -372,6 +449,16 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "excluded_remote_ids": (False, "list"),
         },
         planner_inputs.prepare_plan_input,
+    ),
+    "save-plan-answers": (
+        {"task_id": (True, "str"), "clarification_id": (True, "str"),
+         "answers": (True, "list"), "supplement": (False, "str")},
+        _automation_command("plan_answers", "cmd_save_plan_answers"),
+    ),
+    "submit-plan-answers": (
+        {"task_id": (True, "str"), "clarification_id": (True, "str"),
+         "answers": (True, "list"), "supplement": (False, "str"), "operation_id": (True, "str")},
+        _automation_command("plan_answers", "cmd_submit_plan_answers"),
     ),
     "start-plans": (
         {"items": (True, "list")},
@@ -498,6 +585,17 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
     allow_upgrade = (command == "migrate")
     ctx = Context(db_path, allow_upgrade=allow_upgrade)
     try:
+        # Check inside each write transaction as well as before a mutating
+        # command, so a task cannot be replanned/overridden during its checks.
+        if command != "run-verification-checks" and not command.startswith(("get-", "list-", "session-")):
+            task_id = payload.get("task_id")
+            if not task_id and payload.get("request_id"):
+                request = db.get_request(ctx.conn, payload["request_id"])
+                task_id = request["task_id"] if request is not None else None
+            if task_id:
+                from . import verification_checks
+                ctx.conn.authorization_guard = lambda conn: verification_checks.require_not_running(conn, task_id)
+                ctx.conn.authorization_guard(ctx.conn)
         return COMMANDS[command][1](ctx, payload)
     finally:
         ctx.close()
@@ -572,6 +670,20 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--json", dest="json_payload")
     parser.add_argument("--db", dest="db_path")
     args, extras = parser.parse_known_args(argv)
+
+    if args.command == "desktop-queue-mcp":
+        if not args.db_path or args.json_payload is not None or extras:
+            sys.stderr.write("desktop-queue-mcp requires an explicit --db and accepts no payload\n")
+            return 1
+        from . import desktop_queue
+        return desktop_queue.run_stdio(resolve_db_path(args.db_path))
+
+    if args.command == "desktop-probe-mcp":
+        if not args.db_path or args.json_payload is not None or extras:
+            sys.stderr.write("desktop-probe-mcp requires an explicit --db and accepts no payload\n")
+            return 1
+        from . import desktop_intake_probe
+        return desktop_intake_probe.run_stdio(resolve_db_path(args.db_path))
 
     # Flag-style payloads: `--task-id x` merges into {"task_id": "x"}.
     flags: dict[str, Any] = {}

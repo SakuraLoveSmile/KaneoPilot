@@ -123,6 +123,10 @@ enum Labels {
         case "dispatch_failed": return "派发失败"
         case "reported": return "执行端汇报"
         case "review_registered": return "评审登记"
+        case "review_repair_prepared": return "评审修复材料已准备"
+        case "review_supplemented": return "评审证据已补充"
+        case "verification_checks_started": return "验证检查已开始"
+        case "verification_checks_completed": return "验证检查已完成"
         case "fix_task_created": return "修复任务创建"
         case "resolved": return "人工决议"
         case "paused": return "自动推进暂停"
@@ -131,9 +135,13 @@ enum Labels {
         case "migrated": return "数据迁移"
         case "rechecked": return "重新校验"
         case "request_cancelled": return "请求取消"
+        case "failed_request_dismissed": return "失败记录已移除"
         case "task_archived": return "任务归档"
         case "task_trashed": return "任务移入回收站"
         case "task_restored": return "任务恢复"
+        case "review_stage_recovered": return "评审阶段已恢复"
+        case "review_result_cleared": return "旧评审结果已留存"
+        case "task_reconnected": return "任务重新接入待规划"
         case "session_trashed": return "会话移入回收站"
         case "session_restored": return "会话恢复"
         case "task_purged": return "任务永久从列表移除"
@@ -142,6 +150,8 @@ enum Labels {
         case "plan_started": return "规划已排队"
         case "plan_ready": return "规划产出就绪"
         case "plan_needs_input": return "规划需要补充输入"
+        case "plan_answers_submitted": return "规划答案已提交"
+        case "execution_retry_requested": return "已确认沿用计划重新执行"
         case "round_started": return "轮次启动"
         case "round_observe": return "观察者续接"
         case "round_start_failed": return "轮次启动失败"
@@ -257,6 +267,8 @@ enum DisplayStatus {
             return StatusStyle(icon: "paperplane", color: .blue, label: "派发中")
         case "执行中", "running":
             return StatusStyle(icon: "play.circle", color: .blue, label: "执行中")
+        case "待评审":
+            return StatusStyle(icon: "clock", color: .orange, label: "待评审")
         case "评审中", "in_review":
             return StatusStyle(icon: "eye", color: .orange, label: "评审中")
         case "需人工", "needs_user":
@@ -700,6 +712,12 @@ extension JSONValue {
 
 // 自动化失败的展示词表；可用性始终由核心 allowed_actions 决定。
 enum AutomationPresentation {
+    static func dismissLabel(stage: String?, failureCode: String?, automatic: Bool) -> String {
+        let review = stage == "review" || failureCode == "review_blocked" || failureCode == "review_backend_unsupported"
+        return review ? (automatic ? "转为人工评审" : "清除评审阻塞")
+            : (automatic ? "转为人工处理" : "清除阻塞标记")
+    }
+
     static func title(_ code: String?) -> String? {
         switch code {
         case "verification_unconfirmed": return "验证结果待确认"
@@ -718,7 +736,7 @@ enum AutomationPresentation {
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
-        case "verification_unconfirmed": return "验证证据尚未确认；查看执行记录后可接受验证结果或重新规划。"
+        case "verification_unconfirmed": return "验证退出码未知或证据无法确认。可重新运行原计划检查，由核心分别记录退出码；全部通过才恢复推进。仅重新核验会读取现有证据，不运行检查。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
         case "automation_stopped": return "请先重新开启项目自动处理，再继续修复。"
@@ -734,6 +752,7 @@ enum AutomationPresentation {
     }
     static func resumeLabel(_ code: String?) -> String {
         switch code {
+        case "execution_failed": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"
         case "delivery_blocked_files", "delivery_commit_failed": return "重新提交"

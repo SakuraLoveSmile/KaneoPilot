@@ -457,3 +457,50 @@ agent、未调用付费模型、未触碰 `~/.pi-desktop-plus`：**14/14 通过*
   分段切换与键盘焦点未做脚本化点击，仅以离屏渲染 + 窗口截图核对；
   **macOS 14 仍待体验**（本机为较新 SDK/系统，只证明编译通过）。
   用户正式 App（`/Applications/KaneoPilot.app`）与正式数据目录未被替换。
+
+
+## 2026-10-06 执行会话 T1–T4 施工复核
+
+本次基线 `166ae24e77b50cc1032546e0dd42c2b626706ff7`，仅隔离候选与临时来源；未覆盖正式应用或生产任务。详见 [本次证据记录](../docs/evidence/session-reader-20261006/report.md)。核心真实CLI/末端版本确认、实际Store/FakeCore A400与B1000、Models99项及Release构建已通过；原生核对工具stdout、连续分页贴底、搜索实际全文定位/完整复制、上滚追加、同ID修订、读取失败旧内容保留和恢复。历史截图或mock通过不代替本次原生结果。
+
+T1待体验；T2–T4实现中，用户尚未验收。后续已解决 C 全文停顿：独占后台 TextKit 图与所属阅读器的非模态 NSPanel，最终实际 NSHostingView 夹具709个10ms探针 p95 30.53ms、max165.12ms，完整Unicode/AX/选区/复制及生命周期通过。900×600长标题两入口、Tab到消息展开/复制及Enter连续展开收起已原生核对。
+
+严格已加载 A/B 的 Time Profiler + Activity Monitor 录制及导出成功；A主线程采样753→465ms、CPU均值5.789→4.814%，B1620→857ms、7.946→4.099%。采样窗峰值及A real memory增加见报告，不能称全生命周期峰值。Hangs单独仪器仍因系统log archive错误失败；实际VoiceOver未保持运行；1440×900受屏幕可用高度限制。最终20动作的搜索回显/缓存滚动计时端点仍补核，不使用早期额外发布正文的诊断数据宣布100ms达标。冻结验收目标未降低。
+
+
+**本轮最终补核：** 输入状态隔离和实际Store A回归通过（400首载0.520s、查询0.434s、idle30s工作0）。最终20原生动作p9557.479ms、max66.913ms；4925个10ms探针max75.023ms，无≥250ms，达到代表动作目标。实际搜索匹配200条、Tab/Enter清除恢复正文已核对。T1/T2待体验；T3/T4实现中，尚缺Hangs、实际VoiceOver与精确1440×900环境证据；详见报告最终结论，前两轮超标记录保留。最终候选包已更新，未正式安装/发布/提交/推送。
+
+
+## 2026-10-06 项目与仓库配置浮层裁切
+
+PlanningView的嵌套配置sheet因缺尺寸约束、GeometryReader理想高度近零而只显示头部，已局部补最小600×480、理想760×560pt；ui-spec §4.11同步。Release及修正版DMG0.2/20261006.1构建、签名、完整包体/107个核心文件校验通过。状态仍实现中：原生检查打开规划时遇Mac锁定，配置浮层与设置页两入口及滚动尚待解锁核对。详见docs/evidence/project-mapping-20261006/report.md。未安装、未改正式任务或数据。
+
+
+## 2026-10-06 GitHub SSH 别名预检修复
+
+预检/PR/推送仓库识别共用本机SSH别名展开，原推送地址与单一目标/仓库/rewrite守卫保留。真实Blog+用户SSH配置只读验证正确识别SakuraLoveSmile/Sakura-Blog；临时DB公共get-project-mappings不再返回origin_not_github，5次54–83ms。Git/Policy初轮128通过，最终新增/受影响50通过；PR/pipeline34+29subtests通过，另一次终态写回竞态单项复跑通过，未弱化断言。Release安装包0.2/20261006.2签名、DMG、107个核心文件与包内Blog解析校验通过。状态待体验，未安装正式App、远端push/PR或启用自动处理；没有将已安装旧版UI称为新版验证。完整证据见docs/evidence/github-ssh-alias-20261006/report.md。
+
+
+## 2026-10-06 有效仓库被误报未配置
+
+PlanningView错把available与任务状态ready混用，且对所有不可选任务显示配置入口，已改用TodoItem.needsRepositoryConfiguration共享映射判定。Models111/111及Fake协议检查通过；主agent原生核验available+planning不误报/仍不可选，unmapped正确警告；配置sheet实际600×560完整显示。Release0.2/20261006.3签名、DMG与107个包内核心文件校验通过。待体验；正式用户StarTool配置已通过核心检查，刷新当时任务自动规划中，未由agent重启或重新规划。证据见docs/evidence/planning-mapping-state-20261006/report.md。
+
+
+## 2026-10-07 准备规划弹窗交接
+
+旧版看板详情sheet仍在呈现时请求规划sheet，已改为onDismiss后交接；主agent隔离原生验证面板打开/任务定位勾选、取消后刷新、缺失目标占位连续刷新、普通关闭及快速双击通过；命令日志没有prepare-plan-input/start-plans。Release0.2/20261007安装包构建、签名、DMG只读包体及107个核心文件校验通过。看板修复待体验；待处理内联入口原生补查因Mac锁定仍实现中。未替换正式App、未启动真实规划，详见[本次证据](../docs/evidence/planning-handoff-20261007/report.md)。
+
+
+## 2026-10-07 等待事件日志误报读取失败
+
+正常pending的等待说明不再写connection.detail；真实半写入无快照回退pending仍保留读取错误。核心/契约109项及实际Store隔离回归通过；主agent原生核对实际核心响应回放的等待/解析失败两态及定时更新。Release0.2/20261007.1签名、DMG和107个包内核心文件校验通过，待体验。原生恢复截图阶段Mac锁定，未声称完成该附加检查；正式App与任务未操作。详见[证据记录](../docs/evidence/session-pending-20261007/report.md)。
+
+
+## 2026-10-07 会话布局与Plus开始请求
+
+空/等待/失败页头部固定顶部、元数据左对齐；新增真实Plus状态与确认开始入口，仅重新排队同一授权未发送的规划请求。真实现场只读返回Plus已连接/执行端失联/可开始；未发真实prompt或改正式请求。核心最终联跑87+19subtests，末次专项22+20subtests；实际Store与原生1180×760、900×600布局/确认/权限禁令通过，reviewer缺工具门P2已修。Release0.2/20261007.2包体/签名/DMG/108个核心文件校验通过，待体验。真实模型启动未代用户触发。详见[证据记录](../docs/evidence/plus-session-control-20261007/report.md)。
+
+
+## 2026-10-07 Plus规划快照产物兼容
+
+只允许未跟踪.pi/plan直层普通md，保留干净tracked.pi配置、材料和安全边界；Git工作树错误保留分类与脱敏原因。Git套件122通过后新增基线case，最终受影响21通过；Plus最终定向11、交付PR30+29subtests通过。安装包内guard只读接受用户现有快照且计划hash不变。Release0.2/20261007.3构建/签名/DMG/108个核心文件校验通过，待体验；没有正式重跑任务或模型调用。见[本次证据](../docs/evidence/plus-plan-artifacts-20261007/report.md)。

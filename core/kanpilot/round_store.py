@@ -141,6 +141,9 @@ def upsert_discovered(
             ("run_status", run_status),
         ):
             # 只在显式提供时刷新发现类字段；backend 恒按最新核验值刷新。
+            if name == "session_id" and not value:
+                # 空观察值不能抹掉已知会话身份，否则缺文件后可能被误判为残留。
+                continue
             if name == "backend" or value is not None:
                 if name == "run_status" and value not in constants.ROUND_RUN_STATUSES:
                     continue
@@ -275,11 +278,46 @@ def derive_run_status(
     return stored
 
 
+def _plan_round_has_activity(
+    conn: sqlite3.Connection, task_id: str, run_id: str
+) -> bool:
+    """规划删除只检查本轮次；同一任务的新规划不保护旧轮次。"""
+    if conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND run_id=? "
+        "AND status IN ('queued','claimed') LIMIT 1", (task_id, run_id),
+    ).fetchone():
+        return True
+    if conn.execute(
+        "SELECT 1 FROM attempts WHERE run_id=? AND (task_id=? OR request_id IN "
+        "(SELECT request_id FROM requests WHERE task_id=?)) "
+        "AND (outcome IN ('claimed','running','started') OR "
+        "(COALESCE(outcome,'')='' AND finished_at IS NULL)) LIMIT 1",
+        (run_id, task_id, task_id),
+    ).fetchone():
+        return True
+    return False
+
+
+def _ended_plan_request(
+    conn: sqlite3.Connection, task_id: str, run_id: str, request_id: str
+) -> bool:
+    """仅明确结束且没有同轮次活动的规划请求可解除历史运行观察值。"""
+    request = db.get_request(conn, request_id)
+    if (request is None or request["task_id"] != task_id
+            or request["run_id"] != run_id or request["kind"] != "plan"
+            or request["stage"] != "plan"
+            or request["status"] not in ("cancelled", "failed", "succeeded")):
+        return False
+    return not _plan_round_has_activity(conn, task_id, run_id)
+
+
 def session_trash_block_reason(
     conn: sqlite3.Connection,
     task_id: str,
     run_id: str,
     now,
+    *,
+    exited_plan_request_id: Optional[str] = None,
 ) -> Optional[str]:
     """会话移入回收站的禁止条件（protocol §5.16.2）；None=允许。
     ① 仍在执行/评审：run_status=running，或该轮为任务当前轮次且 task.status
@@ -292,7 +330,10 @@ def session_trash_block_reason(
         raise util.KanpilotError(
             "not_found", f"execution round not found: {task_id}/{run_id}"
         )
-    if row["run_status"] == "running":
+    ended_plan = bool(exited_plan_request_id) and _ended_plan_request(
+        conn, task_id, run_id, exited_plan_request_id
+    )
+    if row["run_status"] == "running" and not ended_plan:
         return "该执行轮次仍在运行，暂不能移入会话回收站"
     task = conn.execute(
         "SELECT * FROM tasks WHERE task_id=?", (task_id,)
@@ -303,7 +344,7 @@ def session_trash_block_reason(
         current = (task["run_id"] == run_id) or (
             task["session_marker"] == marker
         )
-        if current and task["status"] in (
+        if current and not (ended_plan and task["status"] == "planning") and task["status"] in (
             "planning", "dispatching", "prepared", "submitting",
             "running", "in_review",
         ):
@@ -323,4 +364,45 @@ def session_trash_block_reason(
     for req in rows:
         if util.lease_lost(req["lease_expires_at"], now):
             return "存在未解除的执行端失联请求，暂不能移入会话回收站"
+    return None
+
+
+def session_force_purge_block_reason(
+    conn: sqlite3.Connection, task_id: str, run_id: str
+) -> Optional[str]:
+    """真实活动保护；索引 run_status 不足以判定残留轮次仍在运行。"""
+    if conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND run_id=? "
+        "AND status IN ('queued','claimed') LIMIT 1", (task_id, run_id)
+    ).fetchone():
+        return "该轮次仍有排队或领取中的请求，不能强制移除"
+    task = conn.execute(
+        "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+    ).fetchone()
+    if task is None:
+        return None
+    current = task["run_id"] == run_id or task["session_marker"] == f"{task_id}/{run_id}"
+    if not current:
+        return None
+    if task["send_state"] == "unknown":
+        return "该轮次发送结果不明，不能强制移除"
+    if task["status"] == "planning":
+        # 规划请求有独立 run_id，tasks.run_id 可能还保留旧执行轮次。
+        latest = conn.execute(
+            "SELECT run_id FROM attempts WHERE task_id=? AND kind='plan' "
+            "ORDER BY id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+        if latest is not None and latest["run_id"] != run_id:
+            return None
+        other = conn.execute(
+            "SELECT 1 FROM requests WHERE task_id=? AND kind='plan' "
+            "AND status IN ('queued','claimed') AND (run_id IS NULL OR run_id!=?) "
+            "LIMIT 1", (task_id, run_id)
+        ).fetchone()
+        if other is not None:
+            return None
+    if task["status"] in (
+        "planning", "dispatching", "prepared", "submitting", "running", "in_review",
+    ):
+        return "任务正在该轮次执行或评审，不能强制移除"
     return None

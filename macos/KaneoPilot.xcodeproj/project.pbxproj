@@ -14,6 +14,7 @@
 		BA5E00000000000000001104 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001004 /* Models.swift */; };
 		BA5E00000000000000001105 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001005 /* AppViewModel.swift */; };
 		BA5E00000000000000001106 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001006 /* RootView.swift */; };
+		BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001081 /* AutomationDashboardView.swift */; };
 		BA5E00000000000000001107 /* TasksSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001007 /* TasksSectionView.swift */; };
 		BA5E00000000000000001108 /* TaskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001008 /* TaskDetailView.swift */; };
 		BA5E00000000000000001109 /* PendingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001009 /* PendingView.swift */; };
@@ -35,6 +36,9 @@
 		BA5E00000000000000001142 /* LoginItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001042 /* LoginItem.swift */; };
 		BA5E00000000000000001143 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001043 /* MenuBarView.swift */; };
 		BA5E00000000000000001136 /* MarkdownReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001036 /* MarkdownReaderView.swift */; };
+		BA5E00000000000000001160 /* SessionReaderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001060 /* SessionReaderStore.swift */; };
+		BA5E00000000000000001161 /* SessionMessagePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001061 /* SessionMessagePresentation.swift */; };
+		BA5E00000000000000001162 /* SessionMessageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001062 /* SessionMessageDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +50,7 @@
 		BA5E00000000000000001004 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001005 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001006 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001081 /* AutomationDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDashboardView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001007 /* TasksSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksSectionView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001008 /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001009 /* PendingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingView.swift; sourceTree = "<group>"; };
@@ -69,6 +74,9 @@
 		BA5E00000000000000001041 /* SchedulerDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerDecision.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001042 /* LoginItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginItem.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001043 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001060 /* SessionReaderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderStore.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001061 /* SessionMessagePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessagePresentation.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001062 /* SessionMessageDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessageDetailView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,6 +139,7 @@
 			isa = PBXGroup;
 			children = (
 				BA5E00000000000000001006 /* RootView.swift */,
+				BA5E00000000000000001081 /* AutomationDashboardView.swift */,
 				BA5E00000000000000001043 /* MenuBarView.swift */,
 				BA5E00000000000000001007 /* TasksSectionView.swift */,
 				BA5E00000000000000001013 /* BoardView.swift */,
@@ -139,6 +148,9 @@
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
 				BA5E00000000000000001012 /* Components.swift */,
+				BA5E00000000000000001060 /* SessionReaderStore.swift */,
+				BA5E00000000000000001061 /* SessionMessagePresentation.swift */,
+				BA5E00000000000000001062 /* SessionMessageDetailView.swift */,
 				BA5E00000000000000001014 /* SessionReaderView.swift */,
 				BA5E00000000000000001015 /* SavedTasksView.swift */,
 				BA5E00000000000000001030 /* PlanningView.swift */,
@@ -240,6 +252,7 @@
 				BA5E00000000000000001140 /* AppRuntime.swift in Sources */,
 				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
 				BA5E00000000000000001106 /* RootView.swift in Sources */,
+				BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */,
 				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,
 				BA5E00000000000000001113 /* BoardView.swift in Sources */,
 				BA5E00000000000000001108 /* TaskDetailView.swift in Sources */,
@@ -247,6 +260,9 @@
 				BA5E00000000000000001110 /* RunsView.swift in Sources */,
 				BA5E00000000000000001111 /* SettingsView.swift in Sources */,
 				BA5E00000000000000001112 /* Components.swift in Sources */,
+				BA5E00000000000000001160 /* SessionReaderStore.swift in Sources */,
+				BA5E00000000000000001161 /* SessionMessagePresentation.swift in Sources */,
+				BA5E00000000000000001162 /* SessionMessageDetailView.swift in Sources */,
 				BA5E00000000000000001114 /* SessionReaderView.swift in Sources */,
 				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,

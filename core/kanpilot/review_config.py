@@ -9,7 +9,7 @@
   {provider, model, reasoning_effort}，保存时按 ``exec-capabilities`` 校验
   （同 §5.17.2），生效点为下一次 review 控制端启动。
 - ``backend="pi_desktop"``（v4）：使用 ``review_config.pi_desktop`` 五字段，
-  会话为 ``mode=plan`` + ``permission_mode=ask``（只读倾向，防自动 shell 写入），
+  新会话为 ``mode=plan`` + ``permission_mode=auto``；审查职责与契约边界不变，
   ``mode`` 不参与生效（仅属 pi 分支，切换后端不删除）。
 - ``backend="claude"|"codex"``（v5）：分别保存 model/effort 与
   model/reasoning_effort；只读 CLI 使用本机认证配置，保存时不调用模型。
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 import shutil
+from copy import deepcopy
 from typing import Optional
 
 from . import constants, db, exec_config, util, planner_config
@@ -33,7 +34,7 @@ from . import constants, db, exec_config, util, planner_config
 # settings.review_config 形状：{backend, mode, provider?, model?,
 # reasoning_effort?, pi_desktop?, updated_at}。inherit 时忽略三字段；custom 时
 # 三字段必填且有效；pi_desktop 分支忽略 mode、要求五字段完整（permission_mode
-# 固定 ask）。
+# 固定 auto）。
 MODES = ("inherit", "custom")
 CUSTOM_KEYS = ("provider", "model", "reasoning_effort")
 BACKENDS = constants.REVIEW_BACKENDS
@@ -60,8 +61,8 @@ def _validate_cli(block, backend):
     return planner_config.validate_group(
         {"planner_model": block.get("model"), "reasoning_effort": block.get("reasoning_effort")}, None)
 
-# Plus Review 分支只允许该权限模式（§5.24：不开放 auto/accept-edits）。
-PI_DESKTOP_PERMISSION_MODE = constants.PI_DESKTOP_READONLY_PERMISSION_MODE
+# Plus Review 新轮次固定 auto；既有轮次继续使用其固化权限快照。
+PI_DESKTOP_PERMISSION_MODE = constants.PI_DESKTOP_REVIEW_PERMISSION_MODE
 
 
 def backend(conn: sqlite3.Connection) -> str:
@@ -99,6 +100,9 @@ def load(conn: sqlite3.Connection) -> Optional[dict]:
     config["pi_desktop"] = exec_config.merge_pi_desktop_block(
         stored.get("pi_desktop")
     )
+    if config["pi_desktop"] is not None:
+        # 投影下一轮的生效权限，不写回旧设置，也不修改历史请求/轮次。
+        config["pi_desktop"]["permission_mode"] = PI_DESKTOP_PERMISSION_MODE
     for name in CLI_KEYS:
         config[name] = cli_block(stored, name)
     if isinstance(stored.get("updated_at"), str):
@@ -111,7 +115,7 @@ def resolve_runtime_config(
     block: Optional[dict] = None,
     timeout: int = 10,
 ) -> tuple:
-    """解析脱敏的 5 字段 runtime_config 快照（permission_mode 固定 ask）。"""
+    """解析新轮次的脱敏 5 字段快照（permission_mode 固定 auto）。"""
     if block is None:
         cfg = load(conn) or {}
         block = cfg.get("pi_desktop")
@@ -122,7 +126,36 @@ def resolve_runtime_config(
     return exec_config.resolve_runtime_config(conn, b, timeout=timeout)
 
 
-def snapshot(conn: sqlite3.Connection) -> dict:
+def queue_snapshot(conn: sqlite3.Connection) -> dict:
+    """新请求的纯本地配置；Plus 默认模型留到 runner 启动时解析。"""
+    config = deepcopy(load(conn) or {"backend": DEFAULT_BACKEND, "mode": "inherit"})
+    config.pop("updated_at", None)
+    return config
+
+
+def for_request(conn: sqlite3.Connection, payload: dict) -> dict:
+    """使用请求快照；旧请求在首次切 Desktop 时保留原配置归属。"""
+    frozen = payload.get("review_config")
+    if isinstance(frozen, dict):
+        return deepcopy(frozen)
+    stored = db.get_setting(conn, "review_config") or {}
+    legacy = stored.get("legacy_config")
+    if isinstance(legacy, dict):
+        return deepcopy(legacy)
+    current = queue_snapshot(conn)
+    if current["backend"] == "codex_desktop":
+        return {"backend": DEFAULT_BACKEND, "mode": "inherit"}
+    return current
+
+
+def backend_for_request(conn: sqlite3.Connection, payload: dict) -> str:
+    explicit = payload.get("review_backend")
+    if explicit in BACKENDS:
+        return explicit
+    return _backend(for_request(conn, payload).get("backend"))
+
+
+def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -> dict:
     """脱敏快照（运行记录/事件 detail 用）：按生效分支输出，不含 updated_at。
 
     - pi → ``{backend:"pi", mode, provider?, model?, reasoning_effort?}``
@@ -131,12 +164,15 @@ def snapshot(conn: sqlite3.Connection) -> dict:
 
     未保存 → ``{backend:"pi", mode:"inherit"}``（=继承 PI 默认会话配置）。
     """
-    config = load(conn)
+    config = deepcopy(config_override) if config_override is not None else load(conn)
+    if config and config.get("backend") == "codex_desktop":
+        return {"backend": "codex_desktop", "model_source": "desktop_session",
+                "reasoning_effort": "inherit"}
     if config and config.get("backend") in CLI_KEYS:
         active = config["backend"]
         return {"backend": active, **cli_block(config, active)}
     if config is not None and config.get("backend") == "pi_desktop":
-        resolved, error = resolve_runtime_config(conn)
+        resolved, error = resolve_runtime_config(conn, config.get("pi_desktop") or {})
         if resolved is None:
             raise util.KanpilotError(
                 "validation_failed",
@@ -154,7 +190,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
 
 
 def _validate_pi_desktop(block: Optional[dict]) -> Optional[str]:
-    """Plus Review 分支校验（§5.24 / T7.1）：五字段完整 + 权限固定 ask。"""
+    """Plus Review 分支校验：五字段完整 + 新轮次权限固定 auto。"""
     if not isinstance(block, dict) or not block:
         return "Plus Review 分支配置未保存"
     b = dict(block)
@@ -164,8 +200,7 @@ def _validate_pi_desktop(block: Optional[dict]) -> Optional[str]:
     if b.get("permission_mode") != PI_DESKTOP_PERMISSION_MODE:
         return (
             f"Plus Review 分支仅允许 permission_mode="
-            f"{PI_DESKTOP_PERMISSION_MODE}（当前 {b.get('permission_mode')}）："
-            f"Plan 模式不是 OS 只读沙箱，仅 ask 能拦住自动 shell 写入"
+            f"{PI_DESKTOP_PERMISSION_MODE}（当前 {b.get('permission_mode')}）"
         )
     return None
 
@@ -173,7 +208,7 @@ def validate(config: dict, caps: dict) -> Optional[str]:
     """保存校验（§5.23.4 + §5.24.1）——按 backend 分支化。返回中文错误原因。
 
     - ``pi_desktop``：五字段（connection_file 绝对路径、thinking_level/
-      permission_mode 合法、permission_mode 必须 ask）；``mode`` 不参与。
+      permission_mode 合法、permission_mode 必须 auto）；``mode`` 不参与。
     - ``pi``（缺省）：mode 必须 inherit|custom；custom 时
       provider/model/reasoning_effort 必填非空且经 exec-capabilities 校验
       （agent_preset 以 "default" 占位参与校验）。
@@ -189,6 +224,8 @@ def validate(config: dict, caps: dict) -> Optional[str]:
     if _backend(resolved) in CLI_KEYS:
         active = _backend(resolved)
         return _validate_cli(cli_block(config, active), active)
+    if _backend(resolved) == "codex_desktop":
+        return None
     if _backend(resolved) == "pi_desktop":
         return _validate_pi_desktop(
             exec_config.merge_pi_desktop_block(config.get("pi_desktop"))
@@ -216,7 +253,7 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
 
     fields={backend?, mode?, provider?, model?, reasoning_effort?,
     pi_desktop?}：按**当前生效 backend** 分支校验（pi → mode/三字段；
-    pi_desktop → 五字段 + ask），**服务离线仍可保存**；切换后端不删除另一
+    pi_desktop → 五字段 + auto），**服务离线仍可保存**；切换后端不删除另一
     分支已存字段。失败 raise bad_request（中文原因，旧值不变）；成功写
     settings.review_config + updated_at，返回完整生效值。
     """
@@ -225,6 +262,9 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     stored = db.get_setting(conn, "review_config")
     stored = dict(stored) if isinstance(stored, dict) else {}
     merged = dict(stored)
+    if isinstance(stored.get("pi_desktop"), dict) and stored["pi_desktop"]:
+        merged["pi_desktop"] = dict(stored["pi_desktop"],
+                                    permission_mode=PI_DESKTOP_PERMISSION_MODE)
 
     if "backend" in fields:
         submitted = fields["backend"]
@@ -250,7 +290,7 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         block = fields["pi_desktop"]
         if not isinstance(block, dict):
             raise util.bad_request("pi_desktop 必须是对象")
-        merged_block = dict(stored.get("pi_desktop") or {})
+        merged_block = dict(merged.get("pi_desktop") or {})
         merged_block.update(block)
         merged["pi_desktop"] = merged_block
 
@@ -294,6 +334,11 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     for name in CLI_KEYS:
         record[name] = cli_block(merged, name)
     record["updated_at"] = now
+    if isinstance(stored.get("legacy_config"), dict):
+        record["legacy_config"] = deepcopy(stored["legacy_config"])
+    elif resolved == "codex_desktop" and _backend(stored.get("backend")) != "codex_desktop":
+        # 首次切换时只读本地设置，不能在保存事务内解析 Plus/provider。
+        record["legacy_config"] = queue_snapshot(conn)
     db.set_setting(conn, "review_config", record)
     return record
 
@@ -380,4 +425,5 @@ def capabilities(conn: sqlite3.Connection, timeout: int = 10) -> dict:
     return {
         "pi": {"available": pi_available, "detail": pi_detail},
         "pi_desktop": pi_desktop, **cli_caps,
+        "codex_desktop": planner_config.desktop_capabilities(conn),
     }

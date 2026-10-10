@@ -182,6 +182,12 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
             detail="lease_expired: 租约失效，停止写入，交人工恢复",
         )
 
+    # Optional secured native consumer: recheck its claim and frozen materials
+    # before writing a report. Existing drivers have no extra guard.
+    guard = getattr(driver, "guard", None)
+    if guard is not None:
+        guard()
+
     # 报告落盘（恢复时按既有 sha 复用，不写第二份不同内容）。
     markdown = job.get("report_markdown")
     if not isinstance(markdown, str) or not markdown.strip():
@@ -219,6 +225,8 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
     else:
         if conclusion == "changes_requested" and not automated:
             fix = job.get("fix") or {}
+            if guard is not None:
+                guard()
             try:
                 created = core_call(db_path, "create-review-fix", {
                     "source_task_id": task_id,
@@ -252,6 +260,8 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
                 "fix_task_source_sha256": job.get("fix_task_source_sha256"),
             })
         try:
+            if guard is not None:
+                guard()
             core_call(db_path, "register-review", payload)
         except util.KanpilotError as exc:
             return _registration_failed(

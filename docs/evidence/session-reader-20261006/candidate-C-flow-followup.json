@@ -1,0 +1,105 @@
+{
+  "stage": "candidate-C-flow",
+  "time_profiler_record_exit": 0,
+  "activity_monitor_record_exit": 0,
+  "cpu_samples": 3141,
+  "sampled_cpu_ms": 3141.0,
+  "sampled_main_ms": 950.0,
+  "main_top_frames": [
+    [
+      "<deduplicated_symbol>",
+      40.0
+    ],
+    [
+      "objc_msgSend",
+      30.0
+    ],
+    [
+      "AG::Graph::UpdateStack::update()",
+      14.0
+    ],
+    [
+      "find(_:key:filter:)",
+      14.0
+    ],
+    [
+      "mach_msg2_trap",
+      13.0
+    ],
+    [
+      "swift_retain",
+      12.0
+    ],
+    [
+      "___chkstk_darwin",
+      12.0
+    ],
+    [
+      "swift::MetadataCacheKey::operator==(swift::MetadataCacheKey const&) const",
+      11.0
+    ],
+    [
+      "vDilate_ZeroCenter_CV_vec",
+      11.0
+    ],
+    [
+      "_platform_memmove",
+      9.0
+    ]
+  ],
+  "main_relevant_inclusive_frames": [
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      44.0
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      40.0
+    ],
+    [
+      "thunk for @escaping @callee_guaranteed (@guaranteed [NSAttributedStringKey : Any], @unowned _NSRange, @unowned UnsafeMutablePointer<ObjCBool>) -> ()",
+      21.0
+    ],
+    [
+      "-[NSAttributedString enumerateAttributesInRange:options:usingBlock:]",
+      21.0
+    ],
+    [
+      "NSAttributedString.MetricsCache.metrics(requestedSize:layoutMargins:wantsNumberOfLineFragments:context:)",
+      17.0
+    ],
+    [
+      "SessionReaderView.body.getter",
+      15.0
+    ],
+    [
+      "-[NSAttributedString(NSExtendedStringDrawing) boundingRectWithSize:options:context:]",
+      15.0
+    ],
+    [
+      "closure #1 in closure #6 in closure #1 in SessionReaderView.selectors.getter",
+      14.0
+    ],
+    [
+      "SessionReaderView.roundLabel(_:)",
+      14.0
+    ],
+    [
+      "thunk for @callee_guaranteed (@guaranteed [NSAttributedStringKey : Any], @unowned _NSRange, @unowned UnsafeMutablePointer<ObjCBool>) -> ()",
+      13.0
+    ],
+    [
+      "closure #1 in SessionReaderView.body.getter",
+      12.0
+    ],
+    [
+      "TTypesetterAttrString::TTypesetterAttrString(__CFAttributedString const*, __CFDictionary const*, bool)",
+      11.0
+    ]
+  ],
+  "activity_samples": 28,
+  "memory_physical_footprint_peak_bytes": 115000448.0,
+  "memory_real_peak_bytes": 214188032.0,
+  "cpu_percent_mean": 10.958197586037034,
+  "method": "Instruments direct instruments; sampled peak within the 30s window, not lifetime maximum"
+}

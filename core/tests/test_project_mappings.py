@@ -177,6 +177,10 @@ class TestProjectMappings(KanpilotTestCase):
         star_repo = self.root / "StarToolWorkspace"
         star_repo.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", str(star_repo)], capture_output=True, check=True)
+        for args in (("config", "user.name", "Mapping Fixture"),
+                     ("config", "user.email", "fixture@example.invalid"),
+                     ("commit", "--allow-empty", "-m", "isolated mapping baseline")):
+            subprocess.run(["git", "-C", str(star_repo), *args], capture_output=True, check=True)
 
         self.call("set-project-mapping", {
             "project_id": pid,

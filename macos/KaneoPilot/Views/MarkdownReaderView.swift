@@ -552,6 +552,8 @@ struct MarkdownReaderView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
+        // 原生桥接控件由 AppKit 标注，正文仍可被辅助工具读取。
+        textView.setAccessibilityLabel("计划正文（渲染）")
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true

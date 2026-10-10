@@ -1,0 +1,12 @@
+{
+  "kanpilot/verification_checks.py": "4708acd15f339dd8c659e03e0cae32eaf150232328bb63eed1c41d5b11203721",
+  "kanpilot/verification_process.py": "8094b7171bb0c6fdb1d5b04653ac358e7bd0139b86974aaac902ed91106c4900",
+  "kanpilot/verification_recovery.py": "a371234dd64d01eba93306b8631b3c0eceb9a4210da15052fa634611f2de5119",
+  "kanpilot/auto_monitor.py": "4928791ae878499b796799de57933e75c98272019c0666bc9a9046ec685a4c78",
+  "kanpilot/db.py": "04d5885c3e8fcd62cda11c6c129b61730daf346234844edc150e97f05915ae92",
+  "kanpilot/cli.py": "aaa781beabe38bdae6a7e5b98e750d79488cb728f6d2f984fdfa8b9fe87ad764",
+  "agents/default.md": "9a5c7f066bb03b292b1bbe3a3da4172ca458ee3e672a9d6e01c0137f1f0fc51b",
+  "kanpilot/constants.py": "458df02c787f365ba96ca4e76bdae15de43fb7983fcd55439552a56338c50ef6",
+  "kanpilot/cmd_remote.py": "9cac03ddce0b0b6d74e54684fee839031df45a7336be067987c70f476a668573",
+  "kanpilot/pi_desktop_review.py": "7ea02d98e6af5aebb161151a4c3304f085981cbc14bc330d9044c4ce39aba78d"
+}

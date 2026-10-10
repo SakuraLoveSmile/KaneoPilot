@@ -41,6 +41,8 @@ KANPILOT_CODEX_FAKE（隔离测试接缝，不拉起 codex）：
 
 from __future__ import annotations
 
+from . import plan_questions
+
 import argparse
 import json
 import os
@@ -238,7 +240,7 @@ def build_plan_meta(
 
 def write_plan_file(
     context: dict, manifest: dict, plan_markdown: str, generated_at: str,
-    task_row=None, model_config=None,
+    task_row=None, model_config=None, target_path=None,
 ) -> Path:
     """``build_plan_meta`` 的 frontmatter + 模型 plan_markdown 正文 → PLAN_ROOT。"""
     meta = build_plan_meta(
@@ -254,7 +256,9 @@ def write_plan_file(
         lines.append(f"{key}: {scalar}")
     lines.append("---")
     body = _strip_model_frontmatter(plan_markdown or "")
-    path = _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan")
+    path = (util.inside(Path(target_path), constants.plan_root(), "plan_path")
+            if target_path is not None else
+            _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan"))
     path.write_text("\n".join(lines) + "\n\n" + body, encoding="utf-8")
     return path
 
@@ -298,10 +302,7 @@ def parse_output(path: Path) -> dict:
         raise util.KanpilotError(
             "validation_failed", f"规划输出 status 非法：{status!r}"
         )
-    questions = data.get("questions")
-    if not isinstance(questions, list):
-        questions = []
-    questions = [str(q) for q in questions if str(q).strip()]
+    questions = plan_questions.normalize(data.get("questions", []))
     plan_markdown = data.get("plan_markdown")
     if not isinstance(plan_markdown, str):
         plan_markdown = ""
@@ -582,6 +583,15 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     backend = req_payload.get("planner_backend") or constants.PLANNER_BACKEND
     try:
         _verify_partial_materials(context)
+        from . import task_workspace
+        conn = db.connect(db_path)
+        try:
+            workspace_task = db.require_task(conn, task_id)
+            task_workspace.verify_plan_workspace(workspace_task, req_payload)
+            from . import review_resolution
+            review_resolution.verify_plan_cycle(conn, workspace_task, req_payload)
+        finally:
+            conn.close()
     except util.KanpilotError as exc:
         _fail_planner_input(db_path, run_dir, req_id, run_id, task_id, backend, exc.message)
         return True
@@ -740,7 +750,7 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         manifest, Path(input_dir) if input_dir else None
     )
     prompt = codex_planner.build_prompt(
-        dict(task, fix_mode=req_payload.get("fix_mode")), manifest, Path(input_dir) if input_dir else None,
+        dict(task, fix_mode=req_payload.get("fix_mode"), plan_cwd=req_payload.get("plan_cwd")), manifest, Path(input_dir) if input_dir else None,
         method=method,
     )
     job_for_argv = {
@@ -971,10 +981,10 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
             draft_path.write_text(output["plan_markdown"], encoding="utf-8")
         finalize("finished", 0, "needs_input", "completed", "needs_input")
         _report(db_path, req_id, run_id, "needs_user",
-                "规划需要补充材料：" + "；".join(output["questions"] or ["见草稿"]),
+                "规划需要补充材料：" + plan_questions.summary(output["questions"]),
                 failure_code="reported",
                 evidence={
-                    "questions": output["questions"],
+                    "questions": output["questions"], "plan_markdown": output["plan_markdown"],
                     "draft_path": str(draft_path),
                     "evidence": output["evidence"],
                 })
@@ -1087,9 +1097,9 @@ def _run_fake(db_path: Path, run_dir: Path, job: dict, log: _EventLog,
     if parsed["status"] == "needs_input":
         finalize("finished", 0, "needs_input", "completed", "needs_input")
         _report(db_path, req_id, run_id, "needs_user",
-                "规划需要补充材料：" + "；".join(parsed["questions"]),
+                "规划需要补充材料：" + plan_questions.summary(parsed["questions"]),
                 failure_code="reported",
-                evidence={"questions": parsed["questions"]})
+                evidence={"questions": parsed["questions"], "plan_markdown": parsed["plan_markdown"]})
         return True
 
     generated_at = util.now_iso()

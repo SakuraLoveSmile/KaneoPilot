@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import (
-    automation_policy, bridge, codex_planner, constants, core, db, planner_config, project_config, remote, util,
+    automation_policy, bridge, cmd_archive, codex_planner, constants, core, db, planner_config, project_config, remote, util, task_workspace,
 )
 
 # --------------------------------------------------------------- 附件识别
@@ -160,7 +160,7 @@ def _selectable(conn, task_id: str, mapping: Optional[dict]) -> tuple[bool, Opti
     save_state = db.task_save_state(task)
     if save_state != "active":
         label = {"archived": "归档", "trashed": "回收站",
-                 "purged": "已永久移除"}.get(save_state, save_state)
+                 "purged": "永久移除"}.get(save_state, save_state)
         return False, f"本地任务已{label}，不重复规划"
     if task["send_state"] == "unknown":
         return False, "发送结果不明，请先处理派发状态"
@@ -208,13 +208,20 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                     "mapping_state": mapping_state, "repository_kind": repository_kind,
                     "mapping_project_id": project_id,
                     "local_status": None, "local_save_state": None,
-                    "attachments": [], "selectable": False,
+                    "attachments": [], "selectable": False, "reconnectable": False,
                     "blocked_reason": f"任务详情读取失败：{exc}",
                 })
                 continue
             attachments = _attachment_entries(context.get("task") or {})
             local = _local_status(conn, task_id)
             selectable, blocked = _selectable(conn, task_id, mapping)
+            local_task = db.get_task(conn, task_id)
+            reconnect_blocked = cmd_archive.reconnect_blocked_reason(
+                conn, local_task, mapping, util.now_dt(), context.get("task") or {},
+            )
+            reconnectable = reconnect_blocked is None
+            if local_task is not None and db.task_save_state(local_task) != "active" and not reconnectable:
+                blocked = reconnect_blocked
             # 输出脱敏：附件 url 去 query/fragment（下载经 prepare 重新取
             # 完整地址；列表项只用于展示与排除勾选）。
             attachments = [
@@ -241,8 +248,34 @@ def fetch_todos(conn: sqlite3.Connection) -> dict:
                 "number": context["task"].get("number") or todo.get("number"),
                 **({"labels": bridge.label_names(todo["labels"])} if isinstance(todo.get("labels"), list) else {}),
                 "selectable": selectable,
+                "reconnectable": reconnectable,
                 "blocked_reason": blocked,
             })
+    # A user-authorized blocked-Review repair remains on the remote review
+    # column. List only these registered cycles, never all in-review tasks.
+    from . import review_resolution
+    seen = {item["task_id"] for item in items}
+    for task in conn.execute("SELECT * FROM tasks WHERE status IN ('needs_plan','needs_user','ready')").fetchall():
+        record = review_resolution.remediation_of(task)
+        if not record or task["task_id"] in seen or not db.task_is_active(task):
+            continue
+        mapping = project_config.get_effective_mapping(conn, task["project_id"])
+        try:
+            context = remote.get_task(client, task["task_id"])
+            review_resolution.validate_remote(task, context, accepted=record["remote_status"])
+            selectable, blocked = _selectable(conn, task["task_id"], mapping)
+        except (util.KanpilotError, bridge.BridgeError) as exc:
+            context, selectable, blocked = {}, False, str(exc)
+        item = context.get("task") or {}
+        local = _local_status(conn, task["task_id"])
+        items.append({"task_id": task["task_id"], "title": item.get("title") or task["title"],
+            "project_id": task["project_id"], "project_name": task["project_name"],
+            "requirements_sha256": context.get("requirements_sha256"), "source_sha256": context.get("source_sha256"),
+            "kaneo_status": item.get("status") or record["remote_status"], "repository": task["repository"],
+            "mapping_state": mapping.get("mapping_state", "unmapped") if mapping else "unmapped",
+            "repository_kind": mapping.get("repository_kind") if mapping else None,
+            "mapping_project_id": task["project_id"], **local, "attachments": _attachment_entries(item),
+            "selectable": selectable, "reconnectable": False, "blocked_reason": blocked})
     return {"fetched_at": util.now_iso(), "items": items}
 
 
@@ -400,14 +433,22 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
             "远端需求已变化（requirements_sha256 不符），请重新获取后再准备",
         )
     local_task = db.get_task(conn, task_id)
+    from . import review_resolution
+    remediation = review_resolution.verify_remediation(conn, local_task) if local_task is not None else None
+    if remediation:
+        review_resolution.validate_remote(local_task, context, accepted=remediation["remote_status"])
     task_obj = context.get("task") or {}
     project_id = task_obj.get("projectId") or (local_task["project_id"] if local_task else None)
     mapping = project_config.get_effective_mapping(conn, project_id)
     project_name = (mapping.get("project_name") if mapping else None) or (local_task["project_name"] if local_task else None)
     repository = mapping.get("repository") if mapping else (local_task["repository"] if local_task else None)
+    if remediation:
+        util.require(repository and Path(repository).expanduser().resolve() == Path(local_task["repository"]).expanduser().resolve(),
+                     "修复任务项目映射的仓库已变化", "conflict")
+        repository = local_task["repository"]
     mapping_revision = mapping.get("revision", 0) if mapping else 0
     fix_report = _fix_report_material(local_task)
-    replan_sha = _replan_worktree_state(local_task) if local_task is not None and core.is_user_replan(local_task) and core.delivery_of(local_task).get("branch") else None
+    replan_sha = _replan_worktree_state(local_task) if local_task is not None and (core.is_user_replan(local_task) or core.delivery_of(local_task).get("workspace_version") == 1) and core.delivery_of(local_task).get("branch") else None
 
     issues: list = []
     files: list = []
@@ -461,6 +502,13 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         report_copy = files_dir / "review-report.md"
         report_copy.write_bytes(fix_report)
         register(report_copy, "review_report", "text/markdown")
+
+    if remediation:
+        for name, entry in remediation["files"].items():
+            content, _sha = review_resolution._read(Path(entry["path"]), entry["sha256"])
+            target = files_dir / name
+            target.write_bytes(content)
+            register(target, "review_remediation", "text/markdown")
 
     # 2c) 附件（同源下载；跨源/失效/超限 → issue，can_start=false）。
     for entry in _attachment_entries(task_obj):
@@ -589,6 +637,9 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
     }
     if execution_worktree is not None:
         manifest["execution_worktree"] = execution_worktree
+    if remediation:
+        manifest["review_remediation"] = remediation
+        review_resolution.verify_remediation(conn, local_task)
     input_sha = _manifest_sha(manifest)
     (root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True,
@@ -597,6 +648,9 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
     )
 
     with db.write_txn(conn):
+        if remediation:
+            util.require(review_resolution.remediation_of(db.require_task(conn, task_id)) == remediation,
+                         "修复处置在准备材料期间已变化", "conflict")
         db.insert_planner_input(
             conn, input_id, task_id, input_sha, remote_req,
             source["source_sha256"], manifest, now,
@@ -696,6 +750,13 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     task_id = row["task_id"]
     task = db.get_task(conn, task_id)
     prepared = prepared or {}
+    from . import review_resolution
+    remediation = review_resolution.remediation_of(task) if task is not None else {}
+    if remediation:
+        if (prepared.get("remediation_error") or prepared.get("remediation_fingerprint") != util.jdump(remediation)
+                or manifest.get("review_remediation") != remediation):
+            return {"task_id": task_id, "code": "conflict",
+                    "error": prepared.get("remediation_error") or "修复处置材料或身份已变化，请重新准备"}
     authorization = item.get("automation")
     actor = "automation" if authorization is not None else "user"
     if authorization is not None and (not isinstance(authorization, dict) or authorization.get("authorized_by") != "automation"):
@@ -788,7 +849,8 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
             return {"task_id": task_id, "code": "conflict",
                     "error": f"任务状态 {task['status']} 不能排队规划"}
 
-    if core.is_user_replan(task):
+    if core.is_user_replan(task) or (core.delivery_of(task).get("workspace_version") == 1
+                                   and prepared.get("task_workspace") is not None):
         if prepared.get("replan_requested_at") != core.automation_of(task).get("replan_requested_at") or prepared.get("replan_delivery_fingerprint") != util.jdump(core.delivery_of(task)):
             return {"task_id": task_id, "code": "conflict", "error": "重新规划授权或分支登记在准备期间变化"}
         if prepared.get("replan_error"):
@@ -854,7 +916,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     if prepared.get("input_sha256") != row["input_sha256"]:
         return {"task_id": task_id, "code": "conflict", "error": "规划材料在解析期间变化，请重新提交"}
     plugin = None
-    if method == "spec_plan":
+    if method == "spec_plan" and planner_backend != "codex_desktop":
         plugin = prepared.get("plugin") or {"available": False, "reason": "未解析插件"}
         if not plugin.get("available"):
             return {"task_id": task_id, "code": "validation_failed",
@@ -893,7 +955,13 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         "confirmed_at": now,
         "planner_method": method,
     }
-    if runtime_config is not None:
+    if planner_backend == "codex_desktop":
+        payload["model_config"] = planner_config.model_snapshot(
+            conn, planner_config.group_for(plan_kind), backend="codex_desktop")
+        payload["runtime_config"] = dict(planner_config.DESKTOP_RUNTIME)
+        if method == "spec_plan":
+            payload["planner_skill"] = planner_config.DESKTOP_SKILL
+    elif runtime_config is not None:
         payload["runtime_config"] = runtime_config
     else:
         if planner_backend == "claude":
@@ -903,6 +971,16 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     if plugin is not None:
         payload["plugin_id"] = plugin["plugin_id"]
         payload["plugin_version"] = plugin["version"]
+    workspace = prepared.get("task_workspace")
+    if workspace is not None:
+        if workspace["fingerprint"] != util.jdump(core.delivery_of(task)):
+            return {"task_id": task_id, "code": "conflict",
+                    "error": "任务工作区登记在准备期间变化，请重新提交"}
+        core.update_delivery(conn, task, now, **workspace["delivery"])
+        if workspace.get("intent_key"):
+            db.set_setting(conn, workspace["intent_key"], None)
+        payload.update(task_workspace.payload_fields(workspace["delivery"]))
+        payload["worktree_state_sha256"] = workspace["state_sha256"]
     if same_task:
         payload.update({"plan_kind": "review_fix", "fix_mode": "same_task",
                         "review_source_task_id": task_id, "fix_task_id": task_id,
@@ -966,6 +1044,8 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                     "planner_method": method,
                     "planner_backend": planner_backend},
         )
+        if authorization is None:
+            _authorize_reconnected_plan(conn, task_id, now, prepared, manifest)
         return {"task_id": task_id, "request_id": existing["request_id"],
                 "deduplicated": False, "reused": True}
 
@@ -980,8 +1060,34 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
                 "planner_method": method,
                 "planner_backend": planner_backend},
     )
+    if authorization is None:
+        _authorize_reconnected_plan(conn, task_id, now, prepared, manifest)
     return {"task_id": task_id, "request_id": request["request_id"],
             "deduplicated": False}
+
+
+def _authorize_reconnected_plan(conn, task_id, now, prepared, manifest):
+    task = db.require_task(conn, task_id)
+    from . import review_resolution
+    if review_resolution.remediation_of(task):
+        # Explicit start-plans authorizes this planning request. Manual takeover
+        # and the publish execution hold still prevent automatic execution.
+        db.update_task(conn, task_id, now, auto_advance_paused=0,
+                       requirements_sha256=manifest.get("requirements_sha256"),
+                       source_sha256=manifest.get("source_sha256"), source_path=prepared.get("source_path"))
+    reconnect = db.task_extra(task).get("reconnect") or {}
+    if reconnect.get("awaiting_plan"):
+        db.set_extra(conn, task, now, reconnect={**reconnect, "awaiting_plan": False, "plan_authorized_at": now})
+        # Only the newly confirmed material becomes the publish baseline; old
+        # snapshot files and their audit pointers remain intact.
+        project = manifest["task"]
+        db.update_task(
+            conn, task_id, now, auto_advance_paused=0,
+            requirements_sha256=manifest.get("requirements_sha256"),
+            source_sha256=manifest.get("source_sha256"),
+            source_path=prepared.get("source_path"),
+            repository=project.get("repository"), project_name=project.get("project_name"),
+        )
 
 
 class _SubmissionRejected(Exception):
@@ -998,12 +1104,32 @@ def _prepare_submission(conn, item):
         manifest = db.planner_input_manifest(row)
         meta = manifest.get("task") or {}
         task = db.get_task(conn, row["task_id"])
+        from . import review_resolution
+        remediation = review_resolution.remediation_of(task) if task is not None else {}
+        if remediation:
+            prepared["remediation_fingerprint"] = util.jdump(remediation)
+            try:
+                review_resolution.verify_remediation(conn, task)
+                review_resolution._remote(task, accepted=remediation["remote_status"])
+                if manifest.get("review_remediation") != remediation:
+                    raise util.KanpilotError("conflict", "材料未包含当前阻塞修复来源")
+                for original in remediation["files"].values():
+                    entries = [entry for entry in manifest.get("files", [])
+                               if entry.get("source") == "review_remediation" and entry.get("sha256") == original["sha256"]]
+                    if len(entries) != 1:
+                        raise util.KanpilotError("conflict", "材料缺少原计划或阻塞报告")
+                    source_path = _inputs_root(conn) / row["input_id"]
+                    content, reason = _read_worktree_material(str(source_path), entries[0]["path"], constants.PLAN_INPUT_FILE_MAX_BYTES)
+                    if content is None or util.sha256_bytes(content) != original["sha256"]:
+                        raise util.KanpilotError("conflict", "原计划或报告材料已变化")
+            except util.KanpilotError as exc:
+                prepared["remediation_error"] = exc.message
         project_id = meta.get("project_id") or (task["project_id"] if task else None) or constants.PROJECTS.get(meta.get("project_name") or (task["project_name"] if task else ""))
         prepared["mapping"] = project_config.get_effective_mapping(conn, project_id)
         prepared["mapping_fingerprint"] = util.jdump(project_config.load_raw_mappings(conn))
         source_path = _inputs_root(conn) / manifest["input_id"] / "source.json"
         prepared["source_path"] = str(source_path) if source_path.is_file() else None
-        if task is not None and core.is_user_replan(task):
+        if task is not None and (core.is_user_replan(task) or core.delivery_of(task).get("workspace_version") == 1):
             prepared["replan_requested_at"] = core.automation_of(task).get("replan_requested_at")
             prepared["replan_delivery_fingerprint"] = util.jdump(core.delivery_of(task))
             try:
@@ -1045,6 +1171,20 @@ def _prepare_submission(conn, item):
         prepared["runtime_config"], prepared["runtime_error"] = planner_config.resolve_runtime_config(conn)
     elif backend == "codex" and method == "spec_plan":
         prepared["plugin"] = codex_planner.probe_spec_plugin()
+    mapping = prepared.get("mapping")
+    if (item.get("automation") is None and mapping and mapping.get("enabled")
+            and not prepared.get("runtime_error")
+            and (method != "spec_plan" or backend == "codex_desktop"
+                 or (prepared.get("plugin") or {}).get("available"))
+            and (task is None or (db.task_is_active(task)
+                 and task["status"] in ("needs_plan", "needs_user", "ready")
+                 and task["send_state"] != "unknown"))
+            and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                 (row["task_id"],)).fetchone()):
+        repository = meta.get("repository") or (task["repository"] if task is not None else "")
+        if repository and Path(repository).expanduser().resolve() == Path(mapping["repository"]).expanduser().resolve():
+            prepared["task_workspace"] = task_workspace.prepare_for_submission(
+                conn, row["task_id"], repository, task)
     return prepared
 
 

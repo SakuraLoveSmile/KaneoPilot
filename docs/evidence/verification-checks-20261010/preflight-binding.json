@@ -1,0 +1,13 @@
+{
+  "task_id": "ozb7d8vw1sbp653zs7u0jn2f",
+  "execution_run_id": "c4cd6776-45ef-4f9d-b1f4-c878eca4e70c",
+  "plan_sha256": "8d8d789144e1e43e8632b2637c959aec6bb29a6ccb23b4d2e0b57333265acb87",
+  "worktree_path": "/Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch",
+  "worktree_sha256": "d09213826b106369c2050e6ef13b56594e7337e3b40cf93a00910078fdd7cd3d",
+  "source_content_sha256": "00c88a30bdfeb4d94272976f1a1f994c86ac0ad9c2e6da2279c806ad5783cab7",
+  "commands": [
+    "dart format --output=none --set-exit-if-changed lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+    "flutter analyze --no-pub lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+    "flutter test --no-pub test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart"
+  ]
+}

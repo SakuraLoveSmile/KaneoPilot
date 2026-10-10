@@ -11,7 +11,7 @@
    ``git diff`` 生成改动材料，并把计划/（修复周期时的）原评审报告/执行证据复制
    进该 worktree 的材料目录——它是本轮的审查输入。
 3. ``pi_session_create(mode="plan", projectPath=<review worktree>)`` +
-   ``permissionMode="ask"``；指令只要求审查并输出冻结 JSON，不 SubmitPlan、
+   ``permissionMode=<本轮快照，新轮次 auto>``；指令只要求审查并输出冻结 JSON，不 SubmitPlan、
    不 SubmitGoal、不代批任何契约。
 4. ``completed`` + 完整转录后**严格解析** ``{conclusion, report_markdown, fix}``
    （``priority`` ∈ ``constants.REVIEW_FIX_PRIORITIES``）。意外 proposal 只
@@ -45,8 +45,8 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from . import (
-    constants, db, headless_adapter, pi_desktop_controller,
-    util, git_delivery, review_settle,
+    constants, core, db, headless_adapter, pi_desktop_controller,
+    util, git_delivery, review_settle, review_snapshot,
 )
 
 from .review_settle import RESULT_SCHEMA
@@ -266,48 +266,55 @@ def _git(args: list, timeout: int = _GIT_TIMEOUT) -> Tuple[Optional[str], Option
     return proc.stdout, None
 
 
-def prepare_worktree(task: dict, execution_worktree: Path, review_root: Path
+def prepare_worktree(task: dict, execution_worktree: Path, review_root: Path, snapshot=None
                      ) -> Optional[str]:
     """建/复用专属 Review worktree（独立于执行会话）。返回错误原因或 None。"""
-    delivery = task.get("delivery") or (task.get("extra") or {}).get("delivery") or {}
-    if delivery.get("mode") == "pr":
+    delivery = core.delivery_of(task)
+    if core.requires_branch_review(task):
         try:
             if not delivery.get("head_sha") or str(execution_worktree) != delivery.get("worktree_path"):
                 raise git_delivery.GitDeliveryError("worktree_invalid", "工作树或提交身份缺失")
-            git_delivery.verify_branch_worktree(
-                dict(delivery, repository=task.get("repository")),
-                require_clean=True, expected_head=delivery["head_sha"])
+            core.require_committed_review(task)
             snapshot = git_delivery.prepare_snapshot_worktree(
                 task["repository"], task["task_id"], sha=delivery["head_sha"],
                 purpose="review", worktrees_root=review_root.parent.parent)
             if Path(snapshot) != review_root:
                 return "review_blocked: Review 快照路径与登记不符"
             return None
-        except git_delivery.GitDeliveryError:
+        except (git_delivery.GitDeliveryError, util.KanpilotError, OSError):
             return "review_blocked: 执行工作树与已提交版本不一致"
-    if review_root.exists():
-        top, error = _git(["-C", str(review_root), "rev-parse", "--show-toplevel"])
-        if error is not None:
-            return f"review_worktree_invalid: 已有目录不可核验（{error}）"
-        if Path((top or "").strip()).resolve() != review_root.resolve():
-            return "review_worktree_invalid: 已有目录不是独立 worktree"
-        return None
-    review_root.parent.mkdir(parents=True, exist_ok=True)
-    commit, error = _git(["-C", str(execution_worktree), "rev-parse", "HEAD"])
-    if error is not None:
-        return f"review_worktree_failed: 执行 worktree 不可读（{error}）"
+    try:
+        if execution_worktree.resolve() == review_root.resolve():
+            raise util.KanpilotError("review_blocked", "Review 不得复用执行工作树")
+        snapshot = snapshot if snapshot is not None else review_snapshot.freeze(execution_worktree)
+        review_snapshot.verify_source(execution_worktree, snapshot)
+        if review_root.exists():
+            review_snapshot.verify_root(review_root, snapshot)
+            review_snapshot.verify_source(execution_worktree, snapshot)
+            return None
+    except util.KanpilotError as exc:
+        return f"review_worktree_invalid: {exc.message}"
+    try:
+        review_root.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"review_worktree_failed: Review 目录不可创建（{exc}）"
     repo = Path(str(task.get("repository") or "")).expanduser()
     _out, error = _git([
         "-C", str(repo), "worktree", "add", "--detach",
-        str(review_root), (commit or "HEAD").strip(),
+        str(review_root), snapshot["head"],
     ], timeout=60)
     if error is not None:
         _out, error = _git([
             "-C", str(execution_worktree), "worktree", "add", "--detach",
-            str(review_root), (commit or "HEAD").strip(),
+            str(review_root), snapshot["head"],
         ], timeout=60)
     if error is not None:
         return f"review_worktree_failed: {error}"
+    try:
+        review_snapshot.populate(review_root, snapshot)
+        review_snapshot.verify_source(execution_worktree, snapshot)
+    except (util.KanpilotError, OSError) as exc:
+        return "review_worktree_failed: " + (exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     return None
 
 
@@ -317,28 +324,83 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def collect_materials(*, db_path, conn, materials: Path, task: dict,
-                      execution_worktree: Path, execution_run_id: str
+                      execution_worktree: Path, execution_run_id: str, snapshot=None
                       ) -> dict:
+    try:
+        return _collect_materials(db_path=db_path, conn=conn, materials=materials, task=task,
+                                  execution_worktree=execution_worktree,
+                                  execution_run_id=execution_run_id, snapshot=snapshot)
+    except OSError as exc:
+        raise util.KanpilotError("review_blocked", f"Review 材料不可写入或读取：{exc}") from exc
+
+
+def _collect_core_verification(conn, task, execution_run_id, materials):
+    """Every Review backend receives the same authenticated independent checks."""
+    from . import verification_checks
+    current = db.require_task(conn, task["task_id"])
+    record = db.task_extra(current).get("verification_checks") or {}
+    if (record.get("binding") or {}).get("execution_run_id") != execution_run_id:
+        return {}
+    if (current["run_id"] != execution_run_id
+            or current["plan_sha256"] != task.get("plan_sha256")):
+        raise util.KanpilotError("review_blocked", "核心验证材料的执行轮次或计划身份已变化")
+    try:
+        if verification_checks.valid_receipt(conn, current) is None:
+            raise util.KanpilotError("review_blocked", "本轮核心逐条验证尚未全部通过")
+        receipt = record["receipt"]
+        files, outputs = {}, []
+        for index, check in enumerate(receipt["checks"], 1):
+            source = util.inside(Path(check["output_path"]), Path(receipt["output_root"]), "核心验证输出")
+            target = materials / f"core-verification-check-{index:02d}.log"
+            shutil.copyfile(source, target)
+            if (util.sha256_file(target) != check["output_sha256"]
+                    or util.sha256_file(source) != check["output_sha256"]):
+                raise util.KanpilotError("review_blocked", "核心验证输出在材料复制期间已变化")
+            files[target.name] = str(target)
+            outputs.append({"command": check["command"], "exit_code": check["exit_code"],
+                            "material": target.name, "sha256": check["output_sha256"]})
+        manifest = materials / "core-verification-checks.json"
+        _write_text(manifest, json.dumps({
+            "source": "KaneoPilot core independent verification",
+            "operation_id": record["operation_id"], "receipt": receipt, "outputs": outputs,
+            "note": "这些检查由核心在本执行工作树中逐条运行，退出码直接来自受控进程，"
+                    "已核验当前执行、计划、源码及输出身份。execution-events.jsonl 中原组合脚本"
+                    "属于历史执行证据，其未知独立退出码由此回执和完整输出补充。"
+                    "这些命令结果仅证明所列检查；不替代原计划要求的原生、设备或其他验收，"
+                    "也不直接认定代码无缺陷或评审通过。",
+        }, ensure_ascii=False, sort_keys=True, indent=2))
+        files[manifest.name] = str(manifest)
+        refreshed = db.require_task(conn, task["task_id"])
+        if (db.task_extra(refreshed).get("verification_checks") != record
+                or verification_checks.valid_receipt(conn, refreshed) is None):
+            raise util.KanpilotError("review_blocked", "准备期间核心验证回执或执行成果已变化")
+        return files
+    except util.KanpilotError as exc:
+        raise util.KanpilotError("review_blocked", "核心验证材料无法核验：" + exc.message) from exc
+
+
+def _collect_materials(*, db_path, conn, materials: Path, task: dict,
+                       execution_worktree: Path, execution_run_id: str, snapshot=None
+                       ) -> dict:
     """只读生成审查材料（改动 diff/status + 计划 + 执行证据 + 修复来源报告）。"""
     materials.mkdir(parents=True, exist_ok=True)
     files = {}
+    from . import review_resolution
+    files.update(review_resolution.collect_evidence(conn, task, execution_run_id, materials))
+    files.update(review_resolution.collect_remediation(task, materials))
+    files.update(_collect_core_verification(conn, task, execution_run_id, materials))
     plan_path = Path(str(task.get("plan_path") or ""))
     if plan_path.is_file():
         target = materials / "plan.md"
         shutil.copyfile(plan_path, target)
         files["plan.md"] = str(target)
 
-    status_out, status_error = _git(
-        ["-C", str(execution_worktree), "status", "--porcelain"]
-    )
-    _write_text(
-        materials / "changes.status",
-        status_out if status_error is None else f"# git status 失败：{status_error}",
-    )
-    files["changes.status"] = str(materials / "changes.status")
-
-    delivery = task.get("delivery") or (task.get("extra") or {}).get("delivery") or {}
-    if delivery.get("mode") == "pr":
+    delivery = core.delivery_of(task)
+    if core.requires_branch_review(task):
+        core.require_committed_review(task, execution_run_id)
+        status_out, status_error = _git(["-C", str(execution_worktree), "status", "--porcelain"])
+        _write_text(materials / "changes.status", status_out if status_error is None else f"# git status 失败：{status_error}")
+        files["changes.status"] = str(materials / "changes.status")
         base, head = delivery.get("base_sha"), delivery.get("head_sha")
         if not base or not head:
             raise util.KanpilotError("review_blocked", "交付任务缺少已提交版本身份")
@@ -360,7 +422,8 @@ def collect_materials(*, db_path, conn, materials: Path, task: dict,
             files[name] = str(materials / name)
         diff_material("changes.diff", base)
         material("commits.log", ["log", "--oneline", f"{base}..{head}"])
-        history = task.get("review_history") or (task.get("extra") or {}).get("review_history") or []
+        history = task.get("review_history") or (task.get("extra") or {}).get("review_history") or (
+            db.task_extra(task).get("review_history") if "extra_json" in task else [])
         if history:
             previous = history[-1]
             if previous.get("head_sha"):
@@ -371,10 +434,9 @@ def collect_materials(*, db_path, conn, materials: Path, task: dict,
                 shutil.copyfile(previous_report, target)
                 files[target.name] = str(target)
     else:
-        diff_out, diff_error = _git(
-            ["-C", str(execution_worktree), "diff", "HEAD", "--no-color"])
-        _write_text(materials / "changes.diff", diff_out if diff_error is None else f"# git diff 失败：{diff_error}")
-        files["changes.diff"] = str(materials / "changes.diff")
+        snapshot = snapshot if snapshot is not None else review_snapshot.freeze(execution_worktree)
+        review_snapshot.verify_source(execution_worktree, snapshot)
+        files.update(review_snapshot.write_materials(materials, snapshot))
 
     # 执行证据（本周期执行轮次的脱敏 job/events）。
     evidence_note = None
@@ -435,11 +497,17 @@ def collect_materials(*, db_path, conn, materials: Path, task: dict,
         "review_key": task.get("review_key"),
         "materials": files,
     }
+    if core.requires_branch_review(task):
+        context["review_branch_snapshot"] = core.branch_review_snapshot(task)
     _write_text(
         materials / "context.json",
         json.dumps(context, ensure_ascii=False, sort_keys=True, indent=2),
     )
     files["context.json"] = str(materials / "context.json")
+    if snapshot is not None:
+        review_snapshot.verify_source(execution_worktree, snapshot)
+    elif core.requires_branch_review(task):
+        core.require_committed_review(task, execution_run_id)
     return {"files": files, "context": context}
 
 # --------------------------------------------------------------- 指令
@@ -474,7 +542,13 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
         f"  - 仓库 `{task.get('repository')}`：以执行 worktree 与下面的改动材料为准，"
         "**不得**只审主仓库。"
     )
-    lines.append("- 审查材料（已只读复制到专属 Review worktree）：")
+    if core.requires_branch_review(task):
+        delivery = core.delivery_of(task)
+        lines.append(f"  - 指定任务分支 `{delivery.get('branch')}`；基线分支 `{delivery.get('base_branch')}`。")
+        lines.append(f"  - 固定完整评审范围 `{delivery.get('base_sha')}..{delivery.get('head_sha')}`；"
+                     f"在专属 Review worktree `{review_root}` 审查该提交版本，不跟随分支后续变化。")
+        lines.append("  - 修复轮仍须审查基线至当前固定提交的全部功能改动；fix-increment.diff 仅用于核对修复，不能替代完整范围。")
+    lines.append("- 审查材料（已冻结到本轮独立材料目录；与下方专属 Review worktree 一致）：")
     for name in sorted(files):
         lines.append(f"  - `{files[name]}`")
     lines.append(f"- 项目根（专属 Review worktree）：`{review_root}`")
@@ -491,6 +565,10 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
         "  - `fix` 仅在 `changes_requested` 时给出，priority ∈ "
         f"{', '.join(constants.REVIEW_FIX_PRIORITIES)}；其余结论必须为 `null`。"
     )
+    lines.append("  - 已定位确定代码缺陷时必须使用 changes_requested，fix.description 包含可执行修复步骤及测试/原生验收缺口；不得仅因验收不足改成 blocked/fix=null。")
+    lines.append("  - 无确定代码缺陷但材料、环境或用户选择不足导致无法完成评审时使用 blocked；报告必须列具体原因、需补充材料或决定、可执行下一步与解除阻塞标准。用户补充证据需独立核验，不得当作自动验证或直接判 pass。")
+    if "original-plan.md" in files:
+        lines.append("  - 本轮包含原冻结计划 original-plan.md、原阻塞报告 blocked-review.md 和新修复计划 plan.md；三者共同核验。新计划遗漏原功能或原验收要求不能当作已解除阻塞，修复轮仍需核验原范围与验收。")
     lines.append(
         "  - 除该 JSON 外不要输出别的解释文字；格式不符将被判为评审受阻（交人工）。"
     )
@@ -505,7 +583,7 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
 
 def _create_plan_session(client, block: dict, directory: Path
                          ) -> Tuple[Optional[str], Optional[str]]:
-    """``mode="plan"`` + ``permissionMode="ask"`` 审查会话（§5.24.5）。"""
+    """按本轮快照配置 plan 审查会话，新轮次 auto、历史 ask 保留。"""
     try:
         created = client.session_create(
             str(directory), mode=constants.PI_DESKTOP_PLAN_MODE,
@@ -528,7 +606,7 @@ def _create_plan_session(client, block: dict, directory: Path
     try:
         client.session_configure(
             session_id, mode=constants.PI_DESKTOP_PLAN_MODE,
-            permission_mode=constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+            permission_mode=block["permission_mode"],
         )
     except util.KanpilotError as exc:
         return session_id, f"pi_session_configure 失败：{exc.message}"
@@ -692,11 +770,12 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
             "rejected": rejected_count,
         }
     if not complete:
+        detail = transcript_detail or "转录不完整"
+        if not detail.startswith("transcript_incomplete:"):
+            detail = f"transcript_incomplete: {detail}"
         return {
             "kind": "blocked",
-            "detail": (
-                f"transcript_incomplete: {transcript_detail or '转录不完整'}"
-            ),
+            "detail": detail,
         }
     result, error = parse_result(messages)
     if result is None:
@@ -846,9 +925,112 @@ def _registration_failed(*, db_path, job, job_path, log, record_run,
     )
 
 
+def _freeze_manual_job(job, snapshot, materials):
+    hashes = {path: util.sha256_file(Path(path)) for path in materials["files"].values()}
+    for name in ("tracked-manifest.json", "untracked-manifest.json"):
+        manifest = materials["files"].get(name)
+        if manifest:
+            entries = json.loads(Path(manifest).read_text(encoding="utf-8")).get("files") or []
+            hashes.update({entry["material_path"]: entry["sha256"] for entry in entries})
+    job.update(manual_snapshot_head=snapshot["head"],
+               manual_snapshot_fingerprint=review_snapshot.fingerprint(snapshot),
+               material_hashes=hashes)
+
+
+def _freeze_branch_job(job, task, materials):
+    job.update(review_branch_snapshot=core.branch_review_snapshot(task),
+               material_hashes={path: util.sha256_file(Path(path))
+                                for path in materials["files"].values()})
+
+
+def _guard_branch_job(job, task):
+    util.require(job["review_branch_snapshot"] == core.branch_review_snapshot(task),
+                 "Review 固定分支版本已变化", "review_blocked")
+    core.require_committed_review(task, job["execution_run_id"])
+    for path, digest in job["material_hashes"].items():
+        util.require(util.sha256_file(Path(path)) == digest,
+                     "Review 冻结材料已变化", "review_blocked")
+    root = job["review_root"]
+    for args, expected in ((["rev-parse", "HEAD"], job["review_branch_snapshot"]["head_sha"]),
+                           (["rev-parse", "--abbrev-ref", "HEAD"], "HEAD"),
+                           (["status", "--porcelain", "--untracked-files=all"], "")):
+        output, error = _git(["-C", root, *args])
+        util.require(error is None and (output or "").strip() == expected,
+                     "Review 提交快照已变化", "review_blocked")
+
+
+def _restore_legacy_pr_job(job, task):
+    """Recover the old PR freeze from its existing commit snapshot/materials."""
+    delivery = core.delivery_of(task)
+    core.require_committed_review(task, job["execution_run_id"])
+    root, files = job.get("review_root"), job.get("materials") or {}
+    util.require(root and files.get("changes.diff") and files.get("commits.log"),
+                 "历史 PR 评审缺少固定快照或完整范围材料", "review_blocked")
+    for name, args in (("changes.diff", ["diff", "--no-color", delivery["base_sha"], delivery["head_sha"]]),
+                       ("commits.log", ["log", "--oneline", delivery["base_sha"] + ".." + delivery["head_sha"]])):
+        output, error = _git(["-C", root, *args])
+        util.require(error is None, "历史 PR 评审版本不可读取", "review_blocked")
+        if name == "changes.diff" and len((output or "").encode("utf-8")) > 400 * 1024:
+            output, error = _git(["-C", root, "diff", "--stat", delivery["base_sha"], delivery["head_sha"]])
+            util.require(error is None, "历史 PR 评审范围不可读取", "review_blocked")
+            output = (output or "") + "\nDiff 超过 400KB，请在只读工作树中查看具体文件。\n"
+        expected = output if not output or output.endswith("\n") else output + "\n"
+        util.require(Path(files[name]).read_text(encoding="utf-8") == expected,
+                     "历史 PR 评审材料与当前固定完整范围不一致", "review_blocked")
+    _freeze_branch_job(job, task, {"files": files})
+    _guard_branch_job(job, task)
+
+
+def _guard_manual_job(job):
+    for path, digest in job["material_hashes"].items():
+        if util.sha256_file(Path(path)) != digest:
+            raise util.KanpilotError("review_blocked", "Review 冻结材料已变化")
+    snapshot = review_snapshot.from_materials(job["materials"], job["manual_snapshot_head"])
+    if review_snapshot.fingerprint(snapshot) != job["manual_snapshot_fingerprint"]:
+        raise util.KanpilotError("review_blocked", "Review 冻结快照身份已变化")
+    review_snapshot.verify_source(Path(job["execution_worktree"]), snapshot)
+    review_snapshot.verify_root(Path(job["review_root"]), snapshot)
+
+
 def _settle(**kwargs) -> int:
     from . import review_settle
-    return review_settle.settle_job(driver=sys.modules[__name__], **kwargs)
+    job = kwargs["job"]
+    module = sys.modules[__name__]
+    if not job.get("manual_snapshot_head") and not job.get("review_branch_snapshot"):
+        task = _facts(kwargs["db_path"], job["task_id"], job["request_id"]).get("task")
+        if isinstance(task, dict) and core.is_pr_delivery(task):
+            try:
+                _restore_legacy_pr_job(job, task)
+                pi_desktop_controller.write_json(kwargs["job_path"], job)
+            except (util.KanpilotError, OSError, ValueError, KeyError) as exc:
+                detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+                return _blocked_no_pass(**kwargs, detail="历史 PR 评审固定版本核验失败：" + detail)
+    if not job.get("manual_snapshot_head") and not job.get("review_branch_snapshot"):
+        return review_settle.settle_job(driver=module, **kwargs)
+
+    class SnapshotGuardError(Exception):
+        pass
+
+    class GuardedDriver:
+        def __getattr__(self, name):
+            return getattr(module, name)
+
+        def guard(self):
+            try:
+                if job.get("review_branch_snapshot"):
+                    task = _facts(kwargs["db_path"], job["task_id"], job["request_id"]).get("task")
+                    util.require(isinstance(task, dict), "Review 任务不可读", "review_blocked")
+                    _guard_branch_job(job, task)
+                else:
+                    _guard_manual_job(job)
+            except (util.KanpilotError, OSError, ValueError, KeyError) as exc:
+                detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+                raise SnapshotGuardError(detail) from exc
+
+    try:
+        return review_settle.settle_job(driver=GuardedDriver(), **kwargs)
+    except SnapshotGuardError as exc:
+        return _blocked_no_pass(**kwargs, detail="Review 快照或材料核验失败：" + str(exc))
 
 def _request_failed(*, db_path, job, job_path, log, record_run, detail: str) -> int:
     """连接/会话读不到等传输级失败：``report failed``（不写 pass、保留证据）。"""
@@ -911,7 +1093,8 @@ def _review_root(conn, task_id: str, run_id: str) -> Path:
 
 
 def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
-              log_path: Path, record_run: Callable, resume: bool = False) -> int:
+              log_path: Path, record_run: Callable, resume: bool = False,
+              request_id=None, config_override=None) -> int:
     """跑一个 Plus Review 控制轮；返回进程退出码（0=本轮已按契约收尾）。"""
     if stage != STAGE:
         print(f"unknown stage: {stage}", file=sys.stderr)
@@ -930,7 +1113,13 @@ def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
             timeout=timeout, log_path=log_path, record_run=record_run,
         )
 
-    backend, block = pi_desktop_controller.review_round_config(conn)
+    if config_override is None:
+        from . import cmd_exec, review_config
+        candidate = cmd_exec._select_candidate(conn, STAGE, request_id, util.now_dt())
+        if candidate is not None:
+            request_id = candidate["request_id"]
+            config_override = review_config.for_request(conn, db.request_payload(candidate))
+    backend, block = pi_desktop_controller.review_round_config(conn, config_override)
     if backend != "pi_desktop":
         print(
             f"executor review 控制端后端不是 pi_desktop（{backend}）："
@@ -959,6 +1148,7 @@ def run_stage(stage: str, *, conn, db_path, prompt: str, timeout: float,
     return _fresh_round(
         conn=conn, db_path=db_path, block=block, prompt=prompt,
         timeout=timeout, log_path=log_path, record_run=record_run,
+        request_id=request_id,
     )
 
 
@@ -990,7 +1180,7 @@ def _new_job(block: dict, invocation_id: str, directory: Path,
 
 
 def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
-                 log_path: Path, record_run: Callable) -> int:
+                 log_path: Path, record_run: Callable, request_id=None) -> int:
     invocation_id = util.new_uuid()
     directory = pi_desktop_controller.invocation_dir(STAGE, invocation_id)
     job_path = directory / "job.json"
@@ -999,7 +1189,8 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
 
-    claim = core_call(db_path, "claim", {"stage": STAGE, "executor": EXECUTOR_ID})
+    claim = core_call(db_path, "claim", {"stage": STAGE, "executor": EXECUTOR_ID,
+                      **({"request_id": request_id} if request_id else {})})
     if not claim.get("claimed"):
         reason = claim.get("reason")
         log.emit("system", util.now_iso(),
@@ -1038,10 +1229,15 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
         str((task.get("execution_round") or {}).get("worktree_path"))
     )
     job["execution_worktree"] = str(execution_worktree)
-    delivery = task.get("delivery") or (task.get("extra") or {}).get("delivery") or {}
-    suffix = str(delivery.get("head_sha") or "")[:12] if delivery.get("mode") == "pr" else job["run_id"]
+    delivery = core.delivery_of(task)
+    suffix = str(delivery.get("head_sha") or "")[:12] if core.requires_branch_review(task) else job["run_id"]
     review_root = _review_root(conn, job["task_id"], suffix)
-    problem = prepare_worktree(task, execution_worktree, review_root)
+    try:
+        snapshot = review_snapshot.freeze(execution_worktree) if not core.requires_branch_review(task) else None
+    except util.KanpilotError as exc:
+        return _blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
+                                log=log, record_run=record_run, detail=exc.message)
+    problem = prepare_worktree(task, execution_worktree, review_root, snapshot=snapshot)
     if problem is not None:
         return _blocked_no_pass(
             db_path=db_path, job=job, job_path=job_path, log=log,
@@ -1051,13 +1247,19 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
     try:
         materials = collect_materials(
             db_path=db_path, conn=conn,
-            materials=directory / "materials" if delivery.get("mode") == "pr" else review_root / "materials",
+            materials=directory / "materials",
             task=task, execution_worktree=execution_worktree,
-            execution_run_id=job["execution_run_id"],
+            execution_run_id=job["execution_run_id"], snapshot=snapshot,
         )
-    except util.KanpilotError as exc:
+        if snapshot is not None:
+            review_snapshot.verify_root(review_root, snapshot)
+            _freeze_manual_job(job, snapshot, materials)
+        else:
+            _freeze_branch_job(job, task, materials)
+    except (util.KanpilotError, OSError) as exc:
+        detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
         return _blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
-                                log=log, record_run=record_run, detail=exc.message)
+                                log=log, record_run=record_run, detail=detail)
     job["review_root"] = str(review_root)
     job["materials"] = materials["files"]
     pi_desktop_controller.write_json(job_path, job)

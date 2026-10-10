@@ -21,8 +21,39 @@ def planner_input_dir(conn, input_id: str) -> Path:
     return root / input_id
 
 
+def request_backend(conn, row) -> Optional[str]:
+    """Resolve the request's frozen role backend; old reviews stay legacy."""
+    payload = db.request_payload(row)
+    if row["stage"] == "plan":
+        return payload.get("planner_backend") or constants.PLANNER_BACKEND
+    if row["stage"] == "review":
+        from . import review_config
+        return review_config.backend_for_request(conn, payload)
+    return None
+
+
+def _backend_matches(conn, row, desktop):
+    if row["stage"] not in ("plan", "review"):
+        return not desktop
+    if desktop:
+        key = "planner_backend" if row["stage"] == "plan" else "review_backend"
+        return db.request_payload(row).get(key) == "codex_desktop"
+    return request_backend(conn, row) != "codex_desktop"
+
+
+def desktop_claim_receipt(conn, role, metadata):
+    receipts = db.get_setting(conn, "desktop_claim_receipts", {}) or {}
+    receipt = receipts.get(metadata["operation_id"])
+    if receipt is None:
+        return None
+    if receipt.get("role") != role or receipt.get("token_hash") != metadata["token_hash"]:
+        raise util.KanpilotError("conflict", "Desktop claim operation identity conflict")
+    return receipt["response"]
+
+
 def _select_candidate(
-    conn: sqlite3.Connection, stage: str, request_id: Optional[str], now, authorized_task_id=None
+    conn: sqlite3.Connection, stage: str, request_id: Optional[str], now, authorized_task_id=None,
+    desktop=False,
 ) -> Optional[sqlite3.Row]:
     if request_id:
         row = db.get_request(conn, request_id)
@@ -51,10 +82,12 @@ def _select_candidate(
         "AND (? IS NULL OR r.task_id=?) "
         "AND (r.task_id IS NULL OR (t.save_state='active' "
         "AND t.auto_advance_paused=0)) "
-        "ORDER BY r.priority ASC, r.created_at ASC LIMIT 20",
+        "ORDER BY r.priority ASC, r.created_at ASC",
         (stage, util.to_iso(now), authorized_task_id, authorized_task_id),
     ).fetchall()
     for row in rows:
+        if not _backend_matches(conn, row, desktop):
+            continue
         # v2 §5.22.2：未授权（payload 无 manual_authorized）的 plan 请求
         # 自动取单跳过——等待用户在规划面板确认材料。
         if row["kind"] == "plan" and not db.request_payload(row).get(
@@ -107,19 +140,112 @@ def _claim_row(
     return run_id
 
 
-def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Optional[str] = None) -> dict:
+def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Optional[str] = None,
+              desktop_claim: Optional[dict] = None) -> dict:
+    result = _claim(ctx, payload, scope_id, operation_id, desktop_claim)
+    if not result.get("claimed") or payload.get("stage") != "review":
+        return result
+    request = db.get_request(ctx.conn, result["request_id"])
+    task = db.require_task(ctx.conn, request["task_id"])
+    if request_backend(ctx.conn, request) == "pi" and db.task_extra(task).get("review_supplements"):
+        identity = dict(task_id=task["task_id"], request_id=result["request_id"], run_id=result["run_id"], expected_execution_run_id=task["run_id"])
+        try:
+            from . import review_resolution, pi_desktop_controller
+            directory = pi_desktop_controller.invocation_dir("review", result["run_id"]) / "materials"
+            directory.mkdir(parents=True, exist_ok=True)
+            evidence = review_resolution.collect_evidence(ctx.conn, dict(task), task["run_id"], directory)
+            frozen = {"files": evidence, "hashes": {path: util.sha256_file(Path(path)) for path in evidence.values()}}
+            with db.write_txn(ctx.conn):
+                core.require_review_identity(ctx.conn, identity, db.require_task(ctx.conn, task["task_id"]), util.now_dt())
+                db.merge_request_payload(ctx.conn, result["request_id"], ctx.now_iso, pi_user_evidence=frozen)
+            result["context"].update(materials=evidence)
+            result["context"]["payload"] = db.request_payload(db.get_request(ctx.conn, result["request_id"]))
+        except (util.KanpilotError, OSError, ValueError) as exc:
+            detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+            cmd_report(ctx, dict(identity, outcome="needs_user", failure_code="review_blocked", note=detail))
+            return {"claimed": False, "reason": "review_blocked", "request_id": result["request_id"],
+                    "run_id": result["run_id"], "detail": detail}
+    if request_backend(ctx.conn, request) != "pi" or not core.requires_branch_review(task):
+        return result
+    # The legacy pi runner receives a generic prompt and performs its own core
+    # settlement. Prepare its fixed inputs deterministically after releasing SQL.
+    from . import pi_desktop_review as review, pi_desktop_controller
+    identity = dict(task_id=task["task_id"], request_id=result["request_id"], run_id=result["run_id"],
+                    expected_execution_run_id=task["run_id"])
+    try:
+        core.require_review_identity(ctx.conn, identity, task, util.now_dt())
+        delivery = core.delivery_of(task)
+        root = review._review_root(ctx.conn, task["task_id"], delivery["head_sha"][:12])
+        source = Path(delivery["worktree_path"])
+        task_dto = cmd_read.cmd_get_task(ctx, {"task_id": task["task_id"]})["task"]
+        problem = review.prepare_worktree(task_dto, source, root)
+        util.require(problem is None, problem or "Review 准备失败", "review_blocked")
+        directory = pi_desktop_controller.invocation_dir("review", result["run_id"])
+        materials = review.collect_materials(db_path=ctx.db_path, conn=ctx.conn,
+            materials=directory / "materials", task=task_dto,
+            execution_worktree=source, execution_run_id=task["run_id"])
+        prepared = dict(review_root=str(root), materials=materials["files"],
+                        execution_run_id=task["run_id"])
+        review._freeze_branch_job(prepared, task_dto, materials)
+        review._guard_branch_job(prepared, task_dto)
+        with db.write_txn(ctx.conn):
+            core.require_review_identity(ctx.conn, identity,
+                                         db.require_task(ctx.conn, task["task_id"]), util.now_dt())
+            db.merge_request_payload(ctx.conn, result["request_id"], ctx.now_iso,
+                                     pi_branch_review=prepared)
+        result["context"].update(review_root=str(root), materials=materials["files"],
+                                  review_branch_snapshot=prepared["review_branch_snapshot"])
+        result["context"]["payload"] = db.request_payload(db.get_request(ctx.conn, result["request_id"]))
+        return result
+    except (util.KanpilotError, OSError, ValueError) as exc:
+        detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+        cmd_report(ctx, dict(identity, outcome="needs_user", failure_code="review_blocked", note=detail))
+        return {"claimed": False, "reason": "review_blocked", "request_id": result["request_id"],
+                "run_id": result["run_id"], "detail": detail}
+
+
+def require_pi_review_materials(ctx, payload, task):
+    """Validate the default pi review's persisted inputs before core writes."""
+    if not payload.get("request_id"):
+        return
+    request = db.get_request(ctx.conn, payload["request_id"])
+    prepared = db.request_payload(request).get("pi_branch_review") if request is not None else None
+    evidence = db.request_payload(request).get("pi_user_evidence") if request is not None else None
+    if evidence:
+        for path, sha in evidence["hashes"].items():
+            util.require(Path(path).is_file() and not Path(path).is_symlink() and util.sha256_file(Path(path)) == sha,
+                         "用户补充证据冻结材料已变化", "review_blocked")
+    if prepared is not None:
+        from . import pi_desktop_review as review
+        review._guard_branch_job(prepared, dict(task))
+
+
+def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Optional[str] = None,
+              desktop_claim: Optional[dict] = None) -> dict:
     conn, now = ctx.conn, ctx.now
     scope_id = scope_id or payload.get("scope_id")
     operation_id = operation_id or payload.get("operation_id")
     stage, executor = payload["stage"], payload["executor"]
     if stage not in constants.STAGES:
         raise util.KanpilotError("bad_request", f"invalid stage {stage}")
+    if desktop_claim is not None:
+        if stage not in ("plan", "review") or not isinstance(desktop_claim, dict):
+            raise util.bad_request("Desktop claim only supports plan/review")
+        if not all(isinstance(desktop_claim.get(k), str) and desktop_claim[k] for k in ("operation_id", "token_hash")):
+            raise util.bad_request("Desktop claim operation identity is required")
     lease_seconds = db.get_setting(
         conn, "lease_seconds", constants.DEFAULT_LEASE_SECONDS
     )
 
     dispatch_candidate = None
     with db.write_txn(conn):
+        if desktop_claim is not None:
+            cached = desktop_claim_receipt(conn, stage, desktop_claim)
+            if cached is not None:
+                return cached
+            config = db.get_setting(conn, "desktop_queue_config", {}) or {}
+            if not config.get("enabled", False):
+                return {"claimed": False, "reason": "disabled"}
         if scope_id and operation_id:
             cached = runtime_operations.claim_gate(conn, scope_id, operation_id, payload)
             if cached is not None:
@@ -127,18 +253,20 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
         cmd_read.tick_inline(conn, now)
         if db.paused(conn, stage):
             return {"claimed": False, "reason": "paused"}
-        request = _select_candidate(conn, stage, payload.get("request_id"), now, payload.get("authorized_task_id"))
+        request = _select_candidate(conn, stage, payload.get("request_id"), now, payload.get("authorized_task_id"), desktop=desktop_claim is not None)
+        if request is not None and not _backend_matches(conn, request, desktop_claim is not None):
+            return {"claimed": False, "reason": "backend_mismatch", "request_id": request["request_id"]}
         if stage == "review":
             from . import review_config
             while request is not None and request["status"] == "queued":
                 candidate_task = db.get_task(conn, request["task_id"])
-                if candidate_task is None or not db.task_schedulable(candidate_task) or not core.is_automation_managed(candidate_task) or review_config.backend(conn) in constants.AUTOMATION_REVIEW_BACKENDS:
+                if candidate_task is None or not db.task_schedulable(candidate_task) or not core.is_automation_managed(candidate_task) or request_backend(conn, request) in constants.AUTOMATION_REVIEW_BACKENDS:
                     break
                 core.fail_request(conn, request, util.to_iso(now), "自动化 Review 后端需为 Plus/Claude/Codex", actor=executor)
                 core.block_task(conn, candidate_task, util.to_iso(now), "自动化 Review 后端不支持", "review_backend_unsupported", executor, stage="review")
                 if payload.get("request_id"):
                     return {"claimed": False, "reason": "review_backend_unsupported"}
-                request = _select_candidate(conn, stage, None, now, payload.get("authorized_task_id"))
+                request = _select_candidate(conn, stage, None, now, payload.get("authorized_task_id"), desktop=desktop_claim is not None)
         # 定点领取：请求已在途 → already_claimed（先于 stage_busy/empty）。
         if request is not None and request["status"] == "claimed":
             return {
@@ -219,7 +347,16 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
                     "claimed": False, "reason": "guard_failed",
                     "request_id": request["request_id"], "detail": reason,
                 }
+            if stage == "review" and task is not None and core.requires_branch_review(task):
+                core.require_committed_review(task, verify_worktree=False)
             run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
+            if stage == "review" and task is not None and core.requires_branch_review(task):
+                db.merge_request_payload(conn, request["request_id"], util.to_iso(now),
+                                         review_branch_snapshot=core.branch_review_snapshot(task))
+            if desktop_claim is not None:
+                binding = dict(desktop_claim, role=stage, run_id=run_id)
+                db.merge_request_payload(conn, request["request_id"], util.to_iso(now), desktop_claim=binding)
+                _claimed_request(conn, request["request_id"], run_id, now)
             context = {
                 "kind": request["kind"],
                 "payload": db.request_payload(
@@ -261,10 +398,23 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
             if task is not None:
                 context["task_id"] = task["task_id"]
                 context["task"] = derive.task_summary(conn, task, now)
+                if desktop_claim is not None and stage == "review":
+                    round_store.upsert_on_claim(
+                        conn, task["task_id"], run_id,
+                        {"backend": "codex_desktop", "review": context["payload"].get("review_config")},
+                        util.to_iso(now), backend="codex_desktop",
+                    )
             res = {
                 "claimed": True, "request_id": request["request_id"],
                 "run_id": run_id, "context": context,
             }
+            if desktop_claim is not None:
+                receipts = db.get_setting(conn, "desktop_claim_receipts", {}) or {}
+                receipts[desktop_claim["operation_id"]] = {
+                    "role": stage, "token_hash": desktop_claim["token_hash"],
+                    "request_id": request["request_id"], "run_id": run_id, "response": res,
+                }
+                db.set_setting(conn, "desktop_claim_receipts", receipts)
             if scope_id and operation_id:
                 runtime_operations.complete_operation(
                     conn,
@@ -455,7 +605,7 @@ def cmd_mcp_claim(ctx, payload: dict) -> dict:
     return result
 
 
-def _claimed_request(conn, request_id: str, run_id: str) -> sqlite3.Row:
+def _claimed_request(conn, request_id: str, run_id: str, now=None) -> sqlite3.Row:
     request = db.get_request(conn, request_id)
     if request is None:
         raise util.KanpilotError("not_found", f"request not found: {request_id}")
@@ -465,13 +615,27 @@ def _claimed_request(conn, request_id: str, run_id: str) -> sqlite3.Row:
             f"request {request_id} status={request['status']} "
             f"run={request['run_id']}",
         )
+    if request_backend(conn, request) == "codex_desktop":
+        now = now or util.now_dt()
+        expires = util.parse_ts(request["lease_expires_at"])
+        if expires is None or expires <= now:
+            raise util.KanpilotError("stale_run", "Desktop claim lease expired")
+        task = db.get_task(conn, request["task_id"]) if request["task_id"] else None
+        if task is None or not db.task_is_active(task) or db.task_is_purged(task):
+            raise util.KanpilotError("stale_run", "Desktop task is no longer active")
+        frozen = db.request_payload(request)
+        if request["stage"] == "review" and (
+            not frozen.get("expected_execution_run_id") or frozen["expected_execution_run_id"] != task["run_id"]
+            or not frozen.get("plan_sha256") or frozen["plan_sha256"] != task["plan_sha256"]
+        ):
+            raise util.KanpilotError("stale_run", "Desktop Review execution or plan identity changed")
     return request
 
 
 def cmd_heartbeat(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now
     with db.write_txn(conn):
-        request = _claimed_request(conn, payload["request_id"], payload["run_id"])
+        request = _claimed_request(conn, payload["request_id"], payload["run_id"], now)
         lease_seconds = db.get_setting(
             conn, "lease_seconds", constants.DEFAULT_LEASE_SECONDS
         )
@@ -498,7 +662,10 @@ def cmd_report(ctx, payload: dict) -> dict:
     if outcome not in ("succeeded", "failed", "needs_user"):
         raise util.KanpilotError("bad_request", f"invalid outcome {outcome}")
     with db.write_txn(conn):
-        request = _claimed_request(conn, payload["request_id"], payload["run_id"])
+        request = _claimed_request(conn, payload["request_id"], payload["run_id"], now)
+        if request["stage"] == "review" and payload.get("expected_execution_run_id"):
+            core.require_review_identity(conn, payload,
+                                         db.require_task(conn, request["task_id"]), now)
         now_iso = util.to_iso(now)
         final = "succeeded" if outcome == "succeeded" else "failed"
         result = {
@@ -588,6 +755,9 @@ def cmd_report(ctx, payload: dict) -> dict:
                 ),
                 send_state=payload.get("send_state", task["send_state"]),
             )
+        if outcome == "needs_user" and task is not None and request["kind"] == "plan":
+            from . import plan_answers
+            plan_answers.register(conn, db.require_task(conn, task["task_id"]), request, now_iso, payload.get("evidence"))
         if (
             outcome == "succeeded"
             and request["kind"] == "monitor"
@@ -697,7 +867,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
                         db.task_extra(task).get("plan_execution_hold")),
                 }
         request = _claimed_request(
-            conn, payload["request_id"], payload["run_id"]
+            conn, payload["request_id"], payload["run_id"], now
         )
         if util.lease_lost(request["lease_expires_at"], now):
             raise util.KanpilotError(
@@ -861,6 +1031,12 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             "bad_request",
             "changes_requested requires fix_task_id and review_key",
         )
+    # Git IO must finish before acquiring SQLite's write lock. The transaction
+    # below repeats identity/frozen-version checks before recording a result.
+    review_task = db.require_task(conn, payload["task_id"])
+    core.require_review_identity(conn, payload, review_task, now)
+    core.require_committed_review(review_task)
+    require_pi_review_materials(ctx, payload, review_task)
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
         # v4（§5.24.5）：新自动链路必须带 request_id/run_id/expected_execution_run_id；
@@ -892,6 +1068,8 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                      "report_path": str(report), "report_sha256": report_sha,
                      "execution_run_id": task["run_id"], "head_sha": core.delivery_of(task).get("head_sha"),
                      "registered_at": ctx.now_iso, "fix_round": core.automation_of(task).get("fix_round", 0), "fix": fix}
+            entry.update({key: core.delivery_of(task).get(key)
+                          for key in ("branch", "base_branch", "base_sha", "worktree_path")})
             history.append(entry)
             db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
             task = db.require_task(conn, task["task_id"])
@@ -912,12 +1090,29 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                 return {"ok": True, "report_sha256": report_sha, "task_status": db.require_task(conn, task["task_id"])["status"]}
             if conclusion == "pass":
                 db.set_extra(conn, task, ctx.now_iso, fix_request=None)
+        elif core.requires_branch_review(task):
+            from . import review_settle
+            key = payload.get("review_key") or review_settle.review_key(task["task_id"], task["run_id"], report_sha)
+            history = list(db.task_extra(task).get("review_history") or [])
+            if not any(entry.get("review_key") == key for entry in history):
+                history.append({"review_key": key, "conclusion": conclusion,
+                                "report_path": str(report), "report_sha256": report_sha,
+                                **core.branch_review_snapshot(task),
+                                "registered_at": ctx.now_iso,
+                                "fix_task_id": payload.get("fix_task_id")})
+                db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
+            payload = dict(payload, review_key=key)
         fields = {
             "review_report_path": str(report),
             "review_report_sha256": report_sha,
         }
         extra_entries = {"review_conclusion": conclusion,
                          "review_registered_at": ctx.now_iso}
+        if payload.get("request_id") and payload.get("run_id"):
+            extra_entries["registered_review_identity"] = {
+                "request_id": payload["request_id"], "run_id": payload["run_id"],
+                "execution_run_id": task["run_id"], "report_sha256": report_sha,
+                "plan_sha256": task["plan_sha256"]}
         if payload.get("review_key"):
             fields["review_key"] = payload["review_key"]
         if payload.get("fix_task_id"):

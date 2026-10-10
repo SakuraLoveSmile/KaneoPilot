@@ -1,0 +1,30 @@
+{
+  "baseline_path": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kp-clarification-baseline-20261009-5ana8vi_",
+  "unchanged": 425,
+  "changed": [
+    "core/kanpilot/desktop_queue.py",
+    "core/tests/test_desktop_queue.py",
+    "core/executor_prompts/planner_prompt.md",
+    "core/kanpilot/claude_planner.py",
+    "core/kanpilot/cli.py",
+    "core/kanpilot/cmd_exec.py",
+    "core/kanpilot/cmd_queue.py",
+    "core/kanpilot/codex_planner.py",
+    "core/kanpilot/derive.py",
+    "core/kanpilot/pi_desktop_planner.py",
+    "core/kanpilot/planner_runner.py",
+    "core/tests/test_claude_planner.py",
+    "core/tests/test_plus_planner.py",
+    "docs/protocol.md",
+    "docs/state-model.md",
+    "docs/ui-spec.md",
+    "macos/FakeCore/kanpilot-fake.py",
+    "macos/KaneoPilot/AppViewModel.swift",
+    "macos/KaneoPilot/Core/Models.swift",
+    "macos/KaneoPilot/KaneoPilotApp.swift",
+    "macos/KaneoPilot/Views/Components.swift",
+    "macos/KaneoPilot/Views/TaskDetailContentView.swift",
+    "scripts/build_app.sh"
+  ],
+  "missing": []
+}

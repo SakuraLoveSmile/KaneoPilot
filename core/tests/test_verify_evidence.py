@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from kanpilot.verify_evidence import extract_command_results, match_verification, parse_verify_block
+from kanpilot.verify_evidence import extract_command_results, match_verification, normalize, parse_verify_block
 
 
 def test_valid_verify_and_normalization():
@@ -153,5 +153,171 @@ def test_exact_result_and_last_result_behavior_remain_authoritative():
     assert match_verification([command], [{"command": command, "exit_code": 0}])["ok"]
     result = match_verification(["pytest"], [{"command": "pytest", "exit_code": 0},
         {"command": "cd repo && pytest", "exit_code": 2}])
-    assert result["failed"] == [{"command": "pytest", "exit_code": 2}]
+    assert result["failed"] == [{"command": "pytest", "exit_code": None}]
     assert not result["ok"]
+
+
+@pytest.mark.parametrize("prefix", [
+    'export PATH="$PATH:/Users/developer/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n',
+    'export PATH="${PATH}:/opt/homebrew/bin" && ',
+    'export PATH=$PATH:/usr/local/bin\n',
+    'export PATH=/bin:/usr/bin && ',
+])
+def test_path_export_prefix_proves_single_success(tmp_path, prefix):
+    command = prefix + "echo verified"
+    completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert match_verification(["echo verified"], [{
+        "command": command, "exit_code": completed.returncode}]) == {
+            "ok": True, "matched": ["echo verified"], "missing": [], "failed": []}
+
+
+@pytest.mark.parametrize("command", [
+    '  export PATH="$PATH:/bin"\n\n \tprintf ok\n ',
+    'export PATH="$PATH:/bin" &&\n\nprintf ok\n',
+    'export PATH="$PATH:/bin"\nprintf ok && true\n',
+])
+def test_path_wrapper_blank_lines_and_outer_whitespace_are_inert(tmp_path, command):
+    completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert completed.returncode == 0 and completed.stdout == b"ok"
+    assert match_verification(["printf ok"], [{"command": command,
+        "exit_code": completed.returncode}])["ok"]
+
+
+@pytest.mark.parametrize("separator", ["\n", " && "])
+def test_path_prefix_uses_real_executable_and_keeps_real_failures(tmp_path, separator):
+    executable = tmp_path / "verification-check"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    wrapper = 'export PATH="$PATH:' + str(tmp_path) + '"' + separator + "verification-check"
+    successful = subprocess.run(["/bin/sh", "-c", wrapper], cwd=tmp_path,
+                                capture_output=True, timeout=5)
+    assert successful.returncode == 0
+    assert match_verification(["verification-check"], [{
+        "command": wrapper, "exit_code": successful.returncode}])["ok"]
+    executable.write_text("#!/bin/sh\nexit 7\n")
+    failure = subprocess.run(["/bin/sh", "-c", wrapper], cwd=tmp_path,
+                             capture_output=True, timeout=5)
+    assert failure.returncode == 7
+    results = [{"command": wrapper, "exit_code": successful.returncode},
+               {"command": wrapper, "exit_code": failure.returncode}]
+    # The wrapper's status remains unknown for this individual command, but
+    # still invalidates prior success and never allows verification to pass.
+    assert match_verification(["verification-check"], results)["failed"] == [
+        {"command": "verification-check", "exit_code": None}]
+
+
+@pytest.mark.parametrize("command", [
+    'export PATH="$PATH:/bin"\nfalse\ntrue',
+    'export PATH="$PATH:/bin"\nfalse; true',
+    'export PATH="$PATH:/bin"\nfalse || true',
+    'export PATH="$PATH:/bin"\nfalse | true',
+    'export PATH="$PATH:/bin"\n\nfalse\ntrue\n',
+    'export PATH="$PATH:/bin"\nfalse # unsupported comment\ntrue\n',
+    'export PATH="$PATH:/bin"\nexit 0 && false',
+    'export PATH="$PATH:/bin"\nexec true && false',
+    'export PATH="$PATH:/bin"\neval "exit 0" && false',
+    'export PATH="$PATH:/bin"\ntrap "exit 0" EXIT && false',
+    'export PATH="$PATH:/bin"\n. /dev/null && false || true',
+    'export PATH="$(printf /bin)" && false || true',
+    'export PATH="`printf /bin`" && false || true',
+])
+def test_path_prefix_cannot_mask_failed_or_skipped_verification(tmp_path, command):
+    completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert match_verification(["false"], [{"command": command,
+        "exit_code": completed.returncode}])["failed"] == [{"command": "false", "exit_code": None}]
+
+
+@pytest.mark.parametrize("prefix", [
+    'export PATH="$HOME:/bin"', 'export PATH="$PATH_EXTRA:/bin"',
+    'export PATH="${PATH:-/bin}"', 'export PATH="${PATH%:*}"',
+    'export PATH="/bin" X=x', 'export X=x', 'source /dev/null',
+    'export PATH="/bin"\nexport PATH="/usr/bin"',
+])
+def test_only_bounded_path_export_is_supported(prefix):
+    result = match_verification(["echo ok"], [{"command": prefix + "\necho ok", "exit_code": 0}])
+    assert result["failed"] == [{"command": "echo ok", "exit_code": None}]
+
+
+def test_path_chain_success_proves_all_and_commands_but_not_newline_commands(tmp_path):
+    for separator, passed in [(" && ", True), ("\n", False)]:
+        command = 'export PATH="$PATH:/bin"\necho first' + separator + "echo second"
+        completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                                   capture_output=True, timeout=5)
+        assert completed.returncode == 0
+        result = match_verification(["echo first", "echo second"], [{
+            "command": command, "exit_code": completed.returncode}])
+        assert result["ok"] is passed
+
+
+@pytest.mark.parametrize("command", ["true && false", "false && true", "false && false"])
+def test_nonzero_and_wrapper_does_not_blame_every_segment(tmp_path, command):
+    completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert completed.returncode == 1
+    result = match_verification(["true", "false"], [{"command": command,
+        "exit_code": completed.returncode}])
+    assert all(item["exit_code"] is None for item in result["failed"])
+
+
+@pytest.mark.parametrize("code", [None, "0", False, 2])
+def test_latest_path_wrapper_unknown_cannot_reuse_previous_success(code):
+    wrapper = 'export PATH="$PATH:/bin"\npytest'
+    result = match_verification(["pytest"], [
+        {"command": "pytest", "exit_code": 0}, {"command": wrapper, "exit_code": code}])
+    assert result["failed"] == [{"command": "pytest", "exit_code": None}]
+    assert match_verification(["pytest"], [
+        {"command": wrapper, "exit_code": code}, {"command": "pytest", "exit_code": 0}])["ok"]
+
+
+def test_three_real_style_path_verifications_are_sorted_by_sequence():
+    commands = [
+        "dart format --output=none --set-exit-if-changed lib/core/providers.dart",
+        "flutter analyze --no-pub lib/core/providers.dart",
+        "flutter test --no-pub test/daily_recommend_shuffle_test.dart",
+    ]
+    messages = [{"seq": seq, "type": "command_output", "tool": {"exit_code": 0,
+        "input": {"command": 'export PATH="$PATH:/Users/developer/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n' + command}}}
+        for seq, command in zip((235, 237, 239), commands)]
+    old_failure = {"seq": 100, "type": "command_output", "tool": {
+        "exit_code": 1, "input": {"command": commands[0]}}}
+    results = extract_command_results(list(reversed(messages)) + [old_failure])
+    assert match_verification(commands, results)["ok"]
+
+
+def test_normalization_preserves_shell_argument_whitespace():
+    assert normalize('  echo  "a  b"  ') == 'echo "a  b"'
+    assert normalize("echo 'a  b'") == "echo 'a  b'"
+    assert normalize(r"echo a\ \ b") == r"echo a\ \ b"
+    assert normalize("false\ntrue") == "false\ntrue"
+    declaration = parse_verify_block("```verify\n  test  'a  b'  =  'a b'  \n```")
+    assert declaration["commands"] == ["test 'a  b' = 'a b'"]
+
+
+@pytest.mark.parametrize("expected,actual", [
+    ("false true", "false\ntrue"),
+    ("test 'a  b' = 'a b'", "test 'a b' = 'a b'"),
+    ('test "a  b" = "a b"', 'test "a b" = "a b"'),
+])
+def test_normalization_cannot_turn_different_success_into_verification(tmp_path, expected, actual):
+    failed = subprocess.run(["/bin/sh", "-c", expected], cwd=tmp_path,
+                            capture_output=True, timeout=5)
+    completed = subprocess.run(["/bin/sh", "-c", actual], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert failed.returncode == 1 and completed.returncode == 0
+    assert not match_verification([expected], [{"command": actual,
+        "exit_code": completed.returncode}])["ok"]
+
+
+def test_path_wrapper_does_not_collapse_quoted_arguments(tmp_path):
+    expected = "test 'a  b' = 'a b'"
+    command = 'export PATH="$PATH:/bin"\n' + "test 'a b' = 'a b'"
+    completed = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path,
+                               capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert not match_verification([expected], [{"command": command,
+        "exit_code": completed.returncode}])["ok"]

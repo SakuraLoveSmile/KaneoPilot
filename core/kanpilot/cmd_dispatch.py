@@ -54,7 +54,7 @@ def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
 def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     task, _request = _entry(ctx, payload, ("prepared",))
-    if core.is_pr_delivery(task) or _manual_branch_delivery(task):
+    if core.is_pr_delivery(task) or _manual_branch_delivery(task) or core.execution_retry_of(task):
         # Recheck outside the transaction before any remote status mutation.
         _ensure_worktree(task, task["task_id"], payload["run_id"], conn)
     with db.write_txn(conn):
@@ -215,6 +215,14 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             session_title=evidence.get("session_title"),
             dispatch_lease_expires_at=None, lock_retained=0,
         )
+        # The user-confirmed repair has begun execution. Preserve provenance,
+        # while retiring the pre-execution frozen-worktree guard so subsequent
+        # execution recovery and replanning can retain newly produced results.
+        fresh = db.require_task(conn, task["task_id"])
+        remediation = db.task_extra(fresh).get("review_remediation") or {}
+        if remediation.get("state") == "prepared":
+            db.set_extra(conn, fresh, now, review_remediation={**remediation, "state": "executing",
+                "repair_execution_run_id": payload["run_id"], "execution_started_at": now})
         core.finish_request(
             conn, request, now, "succeeded", "succeeded",
             result={"outcome": "succeeded", "send_state": "sent"},
@@ -836,6 +844,15 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     task = db.require_task(conn, payload["task_id"])
     task_id, run_id = task["task_id"], payload["run_id"]
+    continue_goal = payload.get("continue_goal") is True
+    continue_only = payload.get("continue_goal_only") is True
+    if continue_goal:
+        automation = db.task_extra(task).get("automation") or {}
+        if (not db.task_schedulable(task) or db.paused(conn, "dispatch")
+                or db.paused(conn, "monitor") or not automation or automation.get("manual_takeover")
+                or task["status"] not in ("running", "needs_user")
+                or (task["status"] == "needs_user" and task["failure_code"] != "execution_failed")):
+            return {"status": "deferred", "pid": None, "detail": "目标自动续接已暂停或需人工处理"}
     if task["run_id"] != run_id:
         raise util.KanpilotError(
             "conflict", "只允许续接该任务当前轮次的观察进程"
@@ -846,6 +863,8 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         )
     row = round_store.require_round(conn, task_id, run_id)
     if row["backend"] != "pi_desktop":
+        if continue_only:
+            return {"status": "deferred", "pid": None, "detail": "历史后端不支持目标自动续接"}
         raise util.KanpilotError(
             "validation_failed", "只有 pi_desktop 轮次需要本机观察进程"
         )
@@ -870,7 +889,8 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
     events, _detail = dsh_events.iter_events(
         run_dir / dsh_events.EVENT_LOG_NAME
     )
-    if dsh_events.session_event(events) is None:
+    session_event = dsh_events.session_event(events)
+    if session_event is None or session_event.get("session_id") != job.get("session_id"):
         raise util.KanpilotError(
             "validation_failed",
             "该轮次没有 session 事件（未确认发送/启动），不能续接观察",
@@ -905,6 +925,33 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         raise util.KanpilotError("validation_failed", "spec.json 不可读，无法登记观察者归属")
     if not isinstance(spec, dict) or spec.get("task_id") != task_id or spec.get("run_id") != run_id:
         raise util.KanpilotError("conflict", "spec.json 与当前执行轮次身份不符")
+    # Never trust a continuation copied from a previous observer invocation.
+    spec.pop("continue_goal_authorization", None)
+    if continue_goal:
+        from . import pi_desktop_worker, runtime_client, runtime_operations
+        try:
+            expected_scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
+            if (job.get("scope_id") != expected_scope
+                    or not runtime_operations.session_owned(conn, expected_scope, job["session_id"])
+                    or spec.get("plan_path") != task["plan_path"]
+                    or spec.get("plan_sha256") != task["plan_sha256"]
+                    or spec.get("config") != util.jload(row["config_json"])):
+                raise util.KanpilotError("forbidden", "goal_continuation_identity: 原执行快照或scope身份不符")
+            config = spec.get("config") or {}
+            if config.get("permission_mode") != "auto":
+                raise util.KanpilotError("forbidden", "目标自动续接仅适用于已保存的全自动权限")
+            client = runtime_client.RuntimeClient(
+                role="execution", connection_file=config.get("connection_file"),
+                project_path=spec["cwd"], runtime_config=config, task_id=task_id,
+                run_id=run_id, timeout=10, lease_seconds=spec.get("timeout_seconds"), read_only=True)
+            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+            spec["continue_goal_authorization"] = pi_desktop_worker.prepare_goal_continuation(spec, job, client)
+        except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+            if continue_only:
+                detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+                return {"status": "deferred", "pid": None, "detail": detail}
+            # Ordinary monitor reconnects running observations even without a
+            # pending contract; the worker remains strictly read-only.
     if "KANPILOT_EXECUTOR_INSTANCE_ID" in os.environ:
         process_owner.bind_spec(spec, ctx.db_path)
     else:
@@ -993,17 +1040,25 @@ def _wait_session_event(run_dir):
 
 def _manual_branch_delivery(task):
     delivery = core.delivery_of(task)
-    return (core.automation_of(task).get("manual_takeover") is True
+    return ((core.automation_of(task).get("manual_takeover") is True
+             or delivery.get("workspace_version") == 1)
             and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
 
 
 def _execution_instruction(task, worktree_path, *, desktop):
+    if core.execution_retry_of(task):
+        plan_ref = "下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}"
+        return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
+                f"这是沿用已确认计划的重新执行。当前目录是原执行工作树 {worktree_path}。"
+                f"直接在此完整执行{plan_ref}，保留已有提交和未提交改动；"
+                "不要另建 worktree 或分支，也不要切换分支。按计划使用 subagent，完成验证并报告结果。")
     if _manual_branch_delivery(task):
         plan_ref = "下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}"
         return (f"任务标识：{task['session_marker']}。当前目录 {worktree_path} 是本任务保留的分支 "
                 f"{core.delivery_of(task)['branch']} 的工作树。直接在此完整执行{plan_ref}，"
                 "保留已有提交和未提交改动；不要另建 worktree 或分支，也不要切换分支。"
-                "按计划使用 subagent，完成验证并报告结果。")
+                "按计划使用 subagent，完成验证并报告结果。不要自行提交；"
+                "验证通过后由核心在 Review 前创建本地提交，不推送或合并。")
     if core.is_pr_delivery(task):
         return constants.DISPATCH_INSTRUCTION_BRANCH.format(
             marker=task["session_marker"], worktree=str(worktree_path),
@@ -1021,12 +1076,34 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
     """protocol §5.18.1：worktrees_root/<task>/<run>；git 仓库 → 独立
     worktree（已存在复用），非 git / git 失败 → 直接用 task.repository 作
     cwd（worktree_mode="plain"，不阻断测试夹具与非 git 目录）。"""
+    from . import review_resolution
+    review_resolution.verify_remediation(conn, task)
+    retry = core.execution_retry_of(task)
+    delivery = core.delivery_of(task)
+    versioned = delivery.get("workspace_version") == 1
+    if versioned:
+        util.require(all(delivery.get(key) for key in
+                         ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")),
+                     "任务工作区登记不完整，未启动执行", "validation_failed")
+    if retry:
+        from . import cmd_queue
+        cmd_queue.verify_execution_retry_terminal(conn, task)
+        delivery = retry.get("worktree") or {}
+        util.require(delivery.get("repository") == task["repository"],
+                     "重新执行工作树仓库身份不符", "validation_failed")
+        try:
+            util.require(git_delivery.worktree_state_sha256(delivery, detached=retry.get("detached") is True)
+                         == retry.get("worktree_sha256"),
+                         "重新执行确认后工作树内容已变化，请重新确认", "validation_failed")
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("validation_failed", exc.message) from exc
+        return Path(delivery["worktree_path"]), "reuse" if retry.get("detached") else "branch"
     manual_branch = _manual_branch_delivery(task)
     if core.is_pr_delivery(task) or manual_branch:
         delivery = dict(core.delivery_of(task), repository=task["repository"])
         user_replan = core.is_user_replan(task)
         state_sha = core.automation_of(task).get("replan_worktree_sha256")
-        if not manual_branch:
+        if not manual_branch or versioned:
             util.require(bool(delivery.get("head_sha")), "交付 HEAD 登记缺失", "validation_failed")
         if user_replan:
             util.require(bool(state_sha), "重新规划缺少工作树状态指纹", "validation_failed")
@@ -1035,7 +1112,7 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
         try:
             git_delivery.verify_branch_worktree(
                 delivery, require_clean=not (manual_branch or user_replan),
-                expected_head=None if manual_branch else delivery.get("head_sha"))
+                expected_head=None if manual_branch and not versioned else delivery.get("head_sha"))
             if user_replan:
                 util.require(git_delivery.worktree_state_sha256(delivery) == state_sha,
                              "重新规划后工作树内容已变化，请重新准备规划材料", "validation_failed")

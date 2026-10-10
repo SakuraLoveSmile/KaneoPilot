@@ -1,0 +1,105 @@
+{
+  "stage": "candidate-B-stable",
+  "time_profiler_record_exit": 0,
+  "activity_monitor_record_exit": 0,
+  "cpu_samples": 1184,
+  "sampled_cpu_ms": 1184.0,
+  "sampled_main_ms": 857.0,
+  "main_top_frames": [
+    [
+      "AG::Graph::UpdateStack::update()",
+      39.0
+    ],
+    [
+      "<deduplicated_symbol>",
+      39.0
+    ],
+    [
+      "AG::Graph::propagate_dirty(AG::AttributeID)",
+      23.0
+    ],
+    [
+      "find(_:key:filter:)",
+      23.0
+    ],
+    [
+      "objc_msgSend",
+      21.0
+    ],
+    [
+      "_platform_memmove",
+      11.0
+    ],
+    [
+      "swift_release",
+      11.0
+    ],
+    [
+      "___chkstk_darwin",
+      11.0
+    ],
+    [
+      "swift::MetadataCacheKey::operator==(swift::MetadataCacheKey const&) const",
+      11.0
+    ],
+    [
+      "closure #6 in find(_:key:filter:)",
+      8.0
+    ]
+  ],
+  "main_relevant_inclusive_frames": [
+    [
+      "SessionReaderView.roundLabel(_:)",
+      18.0
+    ],
+    [
+      "closure #1 in closure #6 in closure #1 in SessionReaderView.selectors.getter",
+      18.0
+    ],
+    [
+      "SessionReaderPerformance.record(_:_:)",
+      17.0
+    ],
+    [
+      "closure #1 in closure #1 in SessionReaderPerformance.startMainThreadProbe()",
+      16.0
+    ],
+    [
+      "thunk for @escaping @callee_guaranteed (@guaranteed [NSAttributedStringKey : Any], @unowned _NSRange, @unowned UnsafeMutablePointer<ObjCBool>) -> ()",
+      11.0
+    ],
+    [
+      "-[NSAttributedString enumerateAttributesInRange:options:usingBlock:]",
+      11.0
+    ],
+    [
+      "SessionReaderView.body.getter",
+      10.0
+    ],
+    [
+      "NSAttributedString.MetricsCache.metrics(requestedSize:layoutMargins:wantsNumberOfLineFragments:context:)",
+      10.0
+    ],
+    [
+      "-[NSConcreteMutableAttributedString initWithString:attributes:]",
+      10.0
+    ],
+    [
+      "-[NSAttributedString(NSExtendedStringDrawing) boundingRectWithSize:options:context:]",
+      9.0
+    ],
+    [
+      "closure #1 in SessionReaderView.body.getter",
+      8.0
+    ],
+    [
+      "__NSCoreTypesetterCreateBaseLineFromAttributedString",
+      8.0
+    ]
+  ],
+  "activity_samples": 27,
+  "memory_physical_footprint_peak_bytes": 122848384.0,
+  "memory_real_peak_bytes": 237993984.0,
+  "cpu_percent_mean": 4.0987637733076925,
+  "method": "Instruments direct instruments; sampled peak within the 30s window, not lifetime maximum"
+}

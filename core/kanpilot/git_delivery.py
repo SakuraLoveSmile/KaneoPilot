@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -57,32 +58,100 @@ def _recode(exc, code, message):
     return GitDeliveryError(code, message + "：" + exc.message)
 
 
-def github_repository(url: str) -> Optional[str]:
-    """Parse the supported GitHub origin forms without exposing credentials."""
+def _github_ssh_alias(host, port, cwd):
+    """Expand local OpenSSH configuration; never connect or replace the URL."""
+    if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host)
+            or port not in (None, 22, 443)
+            or "GIT_SSH" in os.environ or "GIT_SSH_COMMAND" in os.environ):
+        return False
+    deadline = time.monotonic() + 0.1
+    try:
+        variant = os.environ.get("GIT_SSH_VARIANT")
+        if cwd is not None:
+            transport = subprocess.run(["git", "-C", str(cwd), "config", "--null", "--get-regexp",
+                                        r"^(core\.sshcommand|ssh\.variant)$"],
+                                       capture_output=True, timeout=0.1, env=git_env())
+            if transport.returncode not in (0, 1):
+                return False
+            config_variant = None
+            for entry in transport.stdout.split(b"\0"):
+                key, _, value = entry.partition(b"\n")
+                if key == b"core.sshcommand":
+                    # Do not execute a repository's alternate SSH command.
+                    return False
+                if key == b"ssh.variant":
+                    config_variant = value.decode("utf-8", "replace")
+            if variant is None:
+                variant = config_variant
+        if variant not in (None, "auto", "ssh"):
+            return False
+        args = ["ssh", "-G", "-oCanonicalizeHostname=no", "-l", "git"]
+        if port is not None:
+            args += ["-p", str(port)]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        result = subprocess.run([*args, host], cwd=cwd, capture_output=True,
+                                text=True, errors="replace", timeout=remaining)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode:
+        return False
+    fields = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key in ("hostname", "user", "port"):
+            if key in fields:
+                return False
+            fields[key] = value.strip()
+    return (fields.get("hostname", "").lower() in ("github.com", "ssh.github.com")
+            and fields.get("user") == "git" and fields.get("port") in ("22", "443"))
+
+
+def github_repository(url: str, *, cwd=None) -> Optional[str]:
+    """Parse GitHub origins, resolving SSH host aliases in their repository."""
     if not isinstance(url, str):
         return None
     url = url.strip()
-    scp = re.fullmatch(r"git@github\.com:([^/]+/[^/]+)", url, re.I)
+    scp = re.fullmatch(r"git@([^:]+):([^/]+/[^/]+)", url, re.I)
+    alias_host = None
+    alias_port = None
     if scp:
-        name = scp.group(1)
+        host, name = scp.groups()
+        if host.lower() != "github.com":
+            if not url.startswith("git@"):
+                return None
+            alias_host = host
     else:
         try:
             parts = urlsplit(url)
             hostname = parts.hostname
-            parts.port  # Reject malformed ports before accepting an origin.
+            port = parts.port  # Reject malformed ports before accepting an origin.
         except ValueError:
             return None
-        if (parts.scheme not in ("https", "ssh") or hostname != "github.com"
-                or parts.query or parts.fragment):
+        if parts.scheme not in ("https", "ssh") or parts.query or parts.fragment:
             return None
+        if hostname != "github.com":
+            if parts.scheme != "ssh" or parts.username != "git" or parts.password is not None:
+                return None
+            alias_host, alias_port = hostname, port
+            if not alias_host:
+                return None
         name = parts.path[1:] if parts.path.startswith("/") else parts.path
     name = name[:-4] if name.endswith(".git") else name
-    return name if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) else None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name):
+        return None
+    if alias_host is not None:
+        # urlsplit strips embedded tabs/newlines; validate the original alias
+        # URL as well so normalization cannot hide an invalid SSH address.
+        if re.search(r"\s|[\x00-\x1f\x7f]", url) or not _github_ssh_alias(alias_host, alias_port, cwd):
+            return None
+    return name
 
 
 def origin_github_repo(repo: str) -> Optional[str]:
     try:
-        return github_repository(_value(["remote", "get-url", "origin"], repo))
+        return github_repository(_value(["remote", "get-url", "origin"], repo), cwd=repo)
     except GitDeliveryError:
         return None
 
@@ -90,7 +159,7 @@ def origin_github_repo(repo: str) -> Optional[str]:
 def _push_target(worktree, expected_repo):
     targets = _value(["remote", "get-url", "--push", "--all", "origin"], worktree).splitlines()
     if (len(targets) != 1 or not expected_repo
-            or (github_repository(targets[0]) or "").lower() != expected_repo.lower()):
+            or (github_repository(targets[0], cwd=worktree) or "").lower() != expected_repo.lower()):
         raise GitDeliveryError("branch_diverged", "origin 推送目标必须是已核验的单一 GitHub 仓库")
     target = targets[0]
     # A resolved URL passed explicitly to push is subject to rewriting again.
@@ -156,6 +225,37 @@ def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root) -> di
             "base_sha": sha, "head_sha": sha}
 
 
+def _local_task_id(task_id):
+    if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", task_id):
+        raise GitDeliveryError("worktree_invalid", "任务标识不适合创建工作树")
+
+
+def prepare_local_branch_worktree(repo, task_id, *, worktrees_root, base_sha=None, base_branch=None) -> dict:
+    """Freeze committed local HEAD without fetching or copying primary changes."""
+    _local_task_id(task_id)
+    try:
+        if base_sha is not None and not re.fullmatch(r"[0-9a-f]{40,64}", base_sha):
+            raise GitDeliveryError("worktree_invalid", "修复基线提交标识无效")
+        sha = _value(["rev-parse", "--verify", (base_sha or "HEAD") + "^{commit}"], repo)
+        base = base_branch or _value(["rev-parse", "--abbrev-ref", "HEAD"], repo)
+        branch = constants.DELIVERY_BRANCH_PREFIX + task_id
+        path = Path(worktrees_root).expanduser().resolve() / task_id / "branch"
+        _git(["check-ref-format", "--branch", branch], repo, 10)
+        refs = _value(["for-each-ref", "--format=%(refname)",
+                       "refs/heads/" + branch, "refs/remotes/origin/" + branch], repo)
+        if refs or os.path.lexists(path):
+            raise GitDeliveryError("branch_exists", "任务分支或工作树路径已存在，未覆盖现有成果")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git(["worktree", "add", "-b", branch, str(path), sha], repo, 60)
+    except GitDeliveryError as exc:
+        raise _recode(exc, "worktree_invalid", "创建本地任务工作树失败") from exc
+    except OSError as exc:
+        raise GitDeliveryError("worktree_invalid", "创建本地任务工作树失败：" + str(exc)) from exc
+    return {"mode": "manual", "workspace_version": 1, "branch": branch,
+            "worktree_path": str(path), "base_branch": base,
+            "base_sha": sha, "head_sha": sha}
+
+
 def _common_dir(repo):
     value = Path(_value(["rev-parse", "--git-common-dir"], repo))
     return (value if value.is_absolute() else Path(repo) / value).resolve()
@@ -188,7 +288,7 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
 
 
 def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root) -> str:
-    _task_id(task_id)
+    _local_task_id(task_id)
     if purpose not in ("review", "plan") or not re.fullmatch(r"[0-9a-f]{40,64}", sha or ""):
         raise GitDeliveryError("worktree_invalid", "快照类型或提交标识无效")
     path = Path(worktrees_root).expanduser() / task_id / (purpose + "-" + sha[:12])
@@ -217,9 +317,40 @@ def _snapshot_has_disallowed_changes(path, purpose):
     material_name = ".kaneopilot-plan-material"
     for change in worktree_changes(str(path)):
         parts = Path(change["path"]).parts
-        if (change["status"] != "??" or len(parts) < 2
-                or parts[0] != material_name or ".." in parts):
+        material = len(parts) >= 2 and parts[0] == material_name
+        plus_plan = (len(parts) == 3 and parts[:2] == (".pi", "plan")
+                     and Path(parts[2]).suffix == ".md")
+        if (change["status"] != "??" or ".." in parts
+                or not (material or plus_plan)):
             return True
+    # Plus writes SubmitPlan Markdown in this isolated snapshot. Check the
+    # actual tree as well as Git status, including ignored entries; .pi is not
+    # a blanket exemption, and neither parent directory may be a symlink.
+    plus_root = path / ".pi"
+    if os.path.lexists(plus_root):
+        if not stat.S_ISDIR(plus_root.lstat().st_mode):
+            return True
+        tracked = {os.fsdecode(name) for name in
+                   _git(["ls-files", "-z", "--", ".pi"], path, 10).stdout.split(b"\0") if name}
+        pending_plus = [plus_root]
+        while pending_plus:
+            directory = pending_plus.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    relative = Path(entry.path).relative_to(path)
+                    name = relative.as_posix()
+                    parts = relative.parts
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    in_plan = parts[:2] == (".pi", "plan")
+                    if stat.S_ISDIR(mode):
+                        if name != ".pi/plan" and not any(t.startswith(name + "/") for t in tracked):
+                            return True
+                        pending_plus.append(Path(entry.path))
+                    elif stat.S_ISREG(mode):
+                        if name not in tracked and not (len(parts) == 3 and in_plan and relative.suffix == ".md"):
+                            return True
+                    elif not (stat.S_ISLNK(mode) and name in tracked and not in_plan):
+                        return True
     # Inspect the whole material tree, including entries hidden by .gitignore.
     # Never follow symlinks: even an empty symlink directory could redirect the
     # next runner's copies outside this snapshot.
@@ -323,19 +454,32 @@ def _candidate_state(worktree, relative_path):
         os.close(directory)
 
 
-def worktree_state_sha256(delivery) -> str:
+def worktree_state_sha256(delivery, *, detached=False) -> str:
     """Fingerprint HEAD and current candidate contents, with no credential output."""
     if not delivery.get("head_sha"):
         raise GitDeliveryError("worktree_invalid", "交付 HEAD 登记缺失")
+    def verify():
+        if not detached:
+            verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
+            return
+        path = Path(delivery.get("worktree_path") or "").expanduser()
+        repo = Path(delivery.get("repository") or "").expanduser()
+        if (not delivery.get("worktree_path") or not delivery.get("repository")
+                or path.resolve() == repo.resolve()
+                or _common_dir(path) != _common_dir(repo)
+                or Path(_value(["rev-parse", "--show-toplevel"], path)).resolve() != path.resolve()
+                or _value(["rev-parse", "--abbrev-ref", "HEAD"], path) != "HEAD"
+                or _value(["rev-parse", "HEAD"], path) != delivery["head_sha"]):
+            raise GitDeliveryError("worktree_invalid", "旧执行工作树归属或 HEAD 不符")
     try:
-        verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
+        verify()
         worktree = str(Path(delivery["worktree_path"]).expanduser())
         raw = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree, 10).stdout
         candidates = _parse_worktree_status(raw)
         records = [{**change, **_candidate_state(worktree, change["path"])}
                    for change in sorted(candidates, key=lambda x: (x["path"], x["status"]))]
         # Detect changes to the branch or candidate set during streaming reads.
-        verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
+        verify()
         after = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree, 10).stdout
         if raw != after:
             raise GitDeliveryError("worktree_invalid", "工作树状态在核验期间发生变化")
@@ -373,7 +517,10 @@ def _committed_files(path, sha):
 
 
 def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300) -> dict:
-    _task_id(task_id)
+    if delivery.get("workspace_version") == 1:
+        _local_task_id(task_id)
+    else:
+        _task_id(task_id)
     if not isinstance(execution_run_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", execution_run_id):
         raise GitDeliveryError("delivery_commit_failed", "执行轮次标识无效")
     verify_branch_worktree(delivery, require_clean=False, expected_head=None)

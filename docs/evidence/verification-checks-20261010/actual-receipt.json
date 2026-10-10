@@ -1,0 +1,122 @@
+{
+  "binding": {
+    "commands": [
+      "dart format --output=none --set-exit-if-changed lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+      "flutter analyze --no-pub lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+      "flutter test --no-pub test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart"
+    ],
+    "execution_run_id": "c4cd6776-45ef-4f9d-b1f4-c878eca4e70c",
+    "plan_sha256": "8d8d789144e1e43e8632b2637c959aec6bb29a6ccb23b4d2e0b57333265acb87",
+    "source_content_sha256": "00c88a30bdfeb4d94272976f1a1f994c86ac0ad9c2e6da2279c806ad5783cab7",
+    "task_id": "ozb7d8vw1sbp653zs7u0jn2f",
+    "worktree_path": "/Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch",
+    "worktree_sha256": "d09213826b106369c2050e6ef13b56594e7337e3b40cf93a00910078fdd7cd3d"
+  },
+  "checks": [
+    {
+      "command": "dart format --output=none --set-exit-if-changed lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+      "detail": null,
+      "exit_code": 0,
+      "finished_at": "2026-10-09T16:55:04.762769+00:00",
+      "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/0.log",
+      "output_sha256": "7bb8050e41a39a859547048f7bd721bbcc6d4f7b14270a6854deddb3516f15cf",
+      "output_tail": "Formatted 4 files (0 changed) in 0.10 seconds.\n",
+      "started_at": "2026-10-09T16:55:04.362054+00:00",
+      "timed_out": false
+    },
+    {
+      "command": "flutter analyze --no-pub lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+      "detail": null,
+      "exit_code": 0,
+      "finished_at": "2026-10-09T16:55:08.048791+00:00",
+      "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/1.log",
+      "output_sha256": "4271eaca9b7fad036b3ffef2e576b672bc7a2fa8ab4554ac75471525f47dcf50",
+      "output_tail": "Analyzing 4 items...                                            \nNo issues found! (ran in 2.4s)\n",
+      "started_at": "2026-10-09T16:55:04.949111+00:00",
+      "timed_out": false
+    },
+    {
+      "command": "flutter test --no-pub test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+      "detail": null,
+      "exit_code": 0,
+      "finished_at": "2026-10-09T16:55:14.008839+00:00",
+      "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/2.log",
+      "output_sha256": "68e7ab8fcfb6047d613beeb28aa0976cb64dd9a9ef494d086edea455b4f59e55",
+      "output_tail": "/sakurasep/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +15: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +16: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +17: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +18: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +19: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +20: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +21: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +22: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:01 +23: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in IDLE state refreshes card songs without touching player\n00:01 +24: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in PAUSED state refreshes card songs without touching player\n00:01 +25: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in PLAYING state refreshes card songs without touching player\n00:01 +26: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: tapping card body triggers full playback of current batch with featured song first\n00:01 +27: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: tapping card body after shuffle plays the newly displayed batch\n00:01 +28: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: pure keyboard Space activation on shuffle button triggers shuffle without player commands\n00:01 +29: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: pure keyboard Enter activation on shuffle button triggers shuffle without player commands\n00:02 +30: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: network failure on shuffle retains existing batch and does not trigger player commands\n00:02 +31: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: empty response on shuffle retains existing batch and does not trigger player commands\n00:02 +32: All tests passed!\n",
+      "started_at": "2026-10-09T16:55:08.241158+00:00",
+      "timed_out": false
+    }
+  ],
+  "command_birth": null,
+  "command_pid": null,
+  "monitor_request_id": "13516430-46bc-4eeb-979e-8325fb3d2361",
+  "operation_id": "E2F36521-1ABF-4B53-9CDE-07F61F1DA494",
+  "owner_birth": {
+    "started_microseconds": 15516,
+    "started_seconds": 1791564903
+  },
+  "owner_pid": null,
+  "receipt": {
+    "binding": {
+      "commands": [
+        "dart format --output=none --set-exit-if-changed lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+        "flutter analyze --no-pub lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+        "flutter test --no-pub test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart"
+      ],
+      "execution_run_id": "c4cd6776-45ef-4f9d-b1f4-c878eca4e70c",
+      "plan_sha256": "8d8d789144e1e43e8632b2637c959aec6bb29a6ccb23b4d2e0b57333265acb87",
+      "source_content_sha256": "00c88a30bdfeb4d94272976f1a1f994c86ac0ad9c2e6da2279c806ad5783cab7",
+      "task_id": "ozb7d8vw1sbp653zs7u0jn2f",
+      "worktree_path": "/Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch",
+      "worktree_sha256": "d09213826b106369c2050e6ef13b56594e7337e3b40cf93a00910078fdd7cd3d"
+    },
+    "checks": [
+      {
+        "command": "dart format --output=none --set-exit-if-changed lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+        "detail": null,
+        "exit_code": 0,
+        "finished_at": "2026-10-09T16:55:04.762769+00:00",
+        "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/0.log",
+        "output_sha256": "7bb8050e41a39a859547048f7bd721bbcc6d4f7b14270a6854deddb3516f15cf",
+        "output_tail": "Formatted 4 files (0 changed) in 0.10 seconds.\n",
+        "started_at": "2026-10-09T16:55:04.362054+00:00",
+        "timed_out": false
+      },
+      {
+        "command": "flutter analyze --no-pub lib/core/providers.dart lib/features/home/home_screen.dart test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+        "detail": null,
+        "exit_code": 0,
+        "finished_at": "2026-10-09T16:55:08.048791+00:00",
+        "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/1.log",
+        "output_sha256": "4271eaca9b7fad036b3ffef2e576b672bc7a2fa8ab4554ac75471525f47dcf50",
+        "output_tail": "Analyzing 4 items...                                            \nNo issues found! (ran in 2.4s)\n",
+        "started_at": "2026-10-09T16:55:04.949111+00:00",
+        "timed_out": false
+      },
+      {
+        "command": "flutter test --no-pub test/daily_recommend_shuffle_test.dart test/home_daily_card_widget_test.dart",
+        "detail": null,
+        "exit_code": 0,
+        "finished_at": "2026-10-09T16:55:14.008839+00:00",
+        "output_path": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494/2.log",
+        "output_sha256": "68e7ab8fcfb6047d613beeb28aa0976cb64dd9a9ef494d086edea455b4f59e55",
+        "output_tail": "/sakurasep/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +15: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +16: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +17: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +18: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +19: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +20: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +21: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:00 +22: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: right circular shuffle button has key, refresh icon and tooltip\n00:01 +23: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in IDLE state refreshes card songs without touching player\n00:01 +24: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in PAUSED state refreshes card songs without touching player\n00:01 +25: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: clicking right button in PLAYING state refreshes card songs without touching player\n00:01 +26: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: tapping card body triggers full playback of current batch with featured song first\n00:01 +27: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: tapping card body after shuffle plays the newly displayed batch\n00:01 +28: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: pure keyboard Space activation on shuffle button triggers shuffle without player commands\n00:01 +29: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: pure keyboard Enter activation on shuffle button triggers shuffle without player commands\n00:02 +30: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: network failure on shuffle retains existing batch and does not trigger player commands\n00:02 +31: /Users/developer/Library/Application Support/KaneoPilot/worktrees/example-worktree/branch/test/home_daily_card_widget_test.dart: empty response on shuffle retains existing batch and does not trigger player commands\n00:02 +32: All tests passed!\n",
+        "started_at": "2026-10-09T16:55:08.241158+00:00",
+        "timed_out": false
+      }
+    ],
+    "completed_at": "2026-10-09T16:55:14.962206+00:00",
+    "detail": "全部验证命令逐条通过，已重新核验并安排监控推进",
+    "evidence_sha256": {
+      "/Users/developer/Documents/Code/Plan/projects/example-project-01/随机歌曲右侧按钮应随机新歌而非直接播放_2026-10-09_23-52-12.md": "8d8d789144e1e43e8632b2637c959aec6bb29a6ccb23b4d2e0b57333265acb87",
+      "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/c4cd6776-45ef-4f9d-b1f4-c878eca4e70c/events.jsonl": "5c8a661eaf4fb1c8cb71c58f0bd61a0a2a5cc2174fedbae84fd8621678a53ecd",
+      "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/c4cd6776-45ef-4f9d-b1f4-c878eca4e70c/job.json": "26790943712c24e4bcce9096c2110c89371a12ea202e6e9899263e00408587e4",
+      "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/c4cd6776-45ef-4f9d-b1f4-c878eca4e70c/spec.json": "312bf4c3016ac67a2da11b9296d568341c5ecfbaa395dc8aba1a9656612e360d"
+    },
+    "output_root": "/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/verification-checks/E2F36521-1ABF-4B53-9CDE-07F61F1DA494",
+    "verification_ok": true
+  },
+  "recovery_error": null,
+  "started_at": "2026-10-09T16:55:04.177809+00:00",
+  "state": "completed"
+}

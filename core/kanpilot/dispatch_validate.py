@@ -33,6 +33,8 @@ def _require(condition, message, code="validation_failed"):
 def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     """Run the full §4.5 chain; returns the dispatch claim context fields."""
     task_id = task["task_id"]
+    from . import review_resolution
+    review_resolution.verify_remediation(conn, task)
     plan_kind = task["plan_kind"] or "standard"
 
     # 1. plan file + frontmatter + registered hash -------------------------
@@ -209,7 +211,18 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
                      and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
     user_replan = core.is_user_replan(task)
     state_sha = core.automation_of(task).get("replan_worktree_sha256")
-    if core.is_pr_delivery(task) or manual_branch:
+    retry = core.execution_retry_of(task)
+    if retry:
+        from . import cmd_queue
+        cmd_queue.verify_execution_retry_terminal(conn, task, now)
+        worktree = retry.get("worktree") or {}
+        _require(worktree.get("repository") == task["repository"], "重新执行工作树仓库身份不符")
+        try:
+            _require(git_delivery.worktree_state_sha256(worktree, detached=retry.get("detached") is True)
+                     == retry.get("worktree_sha256"), "重新执行确认后工作树内容已变化，请重新确认")
+        except git_delivery.GitDeliveryError as exc:
+            raise DispatchCheckFailed(exc.message) from exc
+    elif core.is_pr_delivery(task) or manual_branch:
         if not manual_branch:
             _require(bool(delivery.get("head_sha")), "delivery head missing")
         if user_replan:

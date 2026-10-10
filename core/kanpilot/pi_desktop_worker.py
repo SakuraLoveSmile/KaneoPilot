@@ -68,6 +68,7 @@ KANPILOT_PI_DESKTOP_FAKE（隔离测试接缝；未知值按 finished 语义）�
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -86,7 +87,7 @@ _HEARTBEAT_SECONDS = 30.0
 _PROOF_WAIT_SECONDS = 30.0       # 启动证明（pi_turn_get+heartbeat）等待上限
 _STOP_GRACE_SECONDS = 10.0       # pi_agent_stop 后的宽限
 _PAGE_LIMIT = 40                 # pi_session_get 单页消息数（初始值）
-_PAGE_MIN_LIMIT = 5              # 结果超限时自适应缩小的下限
+_PAGE_MIN_LIMIT = 1              # 单条仍超限时 runtime 可完整分片读取
 _READ_RECOVERY_SECONDS = 10.0
 _READ_RECOVERY_ATTEMPTS = 3
 _STOP_VERIFY_SECONDS = 30.0
@@ -285,7 +286,8 @@ class _Collector:
         """取一页；控制面因结果超出大小上限而截断时，减半缩小消息数重试。
 
         返回 ``(result, truncated, limit)``；``limit`` 为本次实际生效的页大小，
-        调用方沿用到后续页（一次超限即整轮降档，不每页重试）。最小页仍被截断
+        每个有进展的物理页之后恢复初始页大小，避免局部超大消息耗尽
+        后续普通消息的物理页预算。最小页仍被截断
         → ``(None, True, limit)``（调用方按分页链断裂处理，已采证据全部保留）。
         """
         while True:
@@ -385,6 +387,7 @@ class _Collector:
                     self.truncated = True
                     break
                 boundary = start
+                limit = _PAGE_LIMIT
             else:
                 self.truncated = True
         finally:
@@ -630,6 +633,102 @@ class _ReadRecovery:
         return self._read("agent_status", session_id)
 
 
+def _pending_goal_contract(view: dict, session_id: str, turn_id: str) -> Optional[dict]:
+    """Never infer identity from the queried session or choose between proposals."""
+    plans = view.get("plans")
+    if not isinstance(plans, list):
+        return None
+    pending = [item for item in plans if isinstance(item, dict)
+               and item.get("kind") == "goal" and item.get("status") == "pending"]
+    if len(pending) != 1:
+        return None
+    proposal = pending[0]
+    if (proposal.get("sessionId") != session_id or proposal.get("turnId") != turn_id
+            or any(not isinstance(proposal.get(key), str) or not proposal[key].strip()
+                   for key in ("id", "toolCallId"))
+            or not isinstance(proposal.get("version"), int)
+            or isinstance(proposal.get("version"), bool) or proposal["version"] < 1):
+        return None
+    if proposal.get("expiresAt") is not None:
+        expiry = _strict_turn_time(proposal["expiresAt"])
+        if expiry is None or expiry <= util.now_dt():
+            return None
+    return proposal
+
+
+def _strict_turn_time(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
+def prepare_goal_continuation(spec: dict, job: dict, client) -> dict:
+    """Read-only preflight, repeated by the observer before its one bound write."""
+    expected_scope = runtime_client.stable_scope_id(
+        "execution", task_id=spec["task_id"], run_id=spec["run_id"])
+    if (job.get("scope_id") != expected_scope or client.scope_id != expected_scope
+            or (spec.get("config") or {}).get("permission_mode") != "auto"
+            or job.get("config") != spec.get("config")
+            or job.get("task_id") != spec["task_id"] or job.get("run_id") != spec["run_id"]
+            or job.get("backend") != "pi_desktop"):
+        raise util.KanpilotError("forbidden", "goal_continuation_identity: 非当前自动执行 scope")
+    raw = Path(spec["plan_path"]).read_bytes()
+    if not spec.get("plan_sha256") or hashlib.sha256(raw).hexdigest() != spec["plan_sha256"]:
+        raise util.KanpilotError("validation_failed", "goal_continuation_plan: 原计划哈希不符")
+    body = raw.decode("utf-8")
+    if body.startswith("---\n"):
+        body = body.split("---", 2)[2].removeprefix("\n")
+    session_id, original = job["session_id"], job["turn_id"]
+    status = client.agent_status(session_id)
+    inner = status.get("status") or status
+    current = inner.get("currentTurnId")
+    if (inner.get("planningState") not in ("planning", "awaiting_approval")
+            or not isinstance(current, str) or not current
+            or inner.get("pendingPermission")):
+        raise util.KanpilotError("conflict", "goal_continuation_pending: 无可自动批准的当前目标")
+    proposal = _pending_goal_contract(client.plans_pending(session_id), session_id, current)
+    if proposal is None:
+        raise util.KanpilotError("conflict", "goal_continuation_pending: 当前唯一 pending Goal 身份不完整或已过期")
+    record = client.turn_get(session_id, current, require_identity=True)
+    if not _turn_identity_matches(record, session_id, current) or _turn_status(record) != "completed":
+        raise util.KanpilotError("conflict", "goal_continuation_turn: 当前目标轮次尚未持久完成")
+    if current != original:
+        history = job.get("turn_adopted") or []
+        if (len(history) >= _MAX_TURN_ADOPTIONS
+                or any(item.get("to") == current for item in history)):
+            raise util.KanpilotError("conflict", "goal_continuation_turn: 后续轮次已接续或超出接续上限")
+        previous = client.turn_get(session_id, original, require_identity=True)
+        old = previous.get("turn") if isinstance(previous.get("turn"), dict) else previous
+        new = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        old_end, new_end = _strict_turn_time(old.get("endedAt")), _strict_turn_time(new.get("endedAt"))
+        if (not _turn_identity_matches(previous, session_id, original)
+                or _turn_status(previous) != "error"
+                or old.get("errorCode") not in ("EMPTY_MODEL_RESPONSE", "NETWORK_ERROR")
+                or old_end is None or new_end is None or new_end <= old_end):
+            raise util.KanpilotError("conflict", "goal_continuation_turn: 原瞬时失败与后续轮次证据不符")
+    collector = _Collector(client, session_id, None, spec.get("session_marker") or "")
+    collector.poll()
+    expected = (spec.get("instruction") or "").rstrip() + "\n\n" + body
+    normalize = lambda text: re.sub(r"\s+", " ", str(text or "")).strip()
+    if (collector.truncated or collector.read_error or collector.unrecognized
+            or len(collector.user_messages) != 1
+            or normalize(collector.first_user_message) != normalize(expected)):
+        raise util.KanpilotError("conflict", "goal_continuation_prompt: 转录不完整、原始授权不符或有追加用户指令")
+    after = client.agent_status(session_id)
+    after = after.get("status") or after
+    if any(inner.get(key) != after.get(key) for key in
+           ("currentTurnId", "planningState", "isRunning", "pendingPermission")):
+        raise util.KanpilotError("conflict", "goal_continuation_changed: 当前会话状态已变化")
+    return {"scope_id": expected_scope, "session_id": session_id,
+            "original_turn_id": original, "turn_id": current,
+            "proposal_id": proposal["id"], "tool_call_id": proposal["toolCallId"],
+            "version": proposal["version"]}
+
+
 def _resume_job(job_path: Path, spec: dict):
     """``--resume`` 前置核验（§5.23.7）：只接受本轮自己的、已确认发送的现场。
 
@@ -700,7 +799,8 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         resume_events, _detail = dsh_events.iter_events(
             run_dir / dsh_events.EVENT_LOG_NAME
         )
-        if dsh_events.session_event(resume_events) is None:
+        session_event = dsh_events.session_event(resume_events)
+        if session_event is None or session_event.get("session_id") != existing.get("session_id"):
             print("resume rejected: session 事件缺失（该轮未确认发送/启动）",
                   file=sys.stderr)
             return 1
@@ -822,6 +922,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 invocation_id=None, request_id=None,
                 run_id=spec["run_id"], task_id=spec["task_id"], timeout=10,
                 lease_seconds=timeout, read_only=resume,
+                goal_continuation=spec.get("continue_goal_authorization") if resume else None,
             )
             client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
             job["scope_id"] = client.scope_id
@@ -1054,21 +1155,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     def pending_goal_contract() -> Optional[dict]:
         """本会话当前待批准的 Goal 契约（只读；非 goal/无契约 → None）。"""
         view = client.plans_pending(job["session_id"])
-        plans = view.get("plans")
-        if not isinstance(plans, list):
-            return None
-        for proposal in plans:
-            if not isinstance(proposal, dict):
-                continue
-            if str(proposal.get("kind") or "") != "goal":
-                continue
-            if str(proposal.get("status") or "") != "pending":
-                continue
-            owner = str(proposal.get("sessionId") or job["session_id"])
-            if owner != job["session_id"]:
-                continue
-            return proposal
-        return None
+        return _pending_goal_contract(view, job["session_id"], turn_id)
 
     def goal_contract_gate() -> tuple:
         """Goal 契约审批门（§5.23.9）。返回 ``(outcome, detail, reason)``。
@@ -1078,11 +1165,24 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         - ``failed``：契约未出现/批准失败/执行轮次未开启——明确失败，
           绝不重发 prompt（reason 供终态细分）。
         """
+        authorization = spec.get("continue_goal_authorization") if resume else None
+        read_only_resume = resume and not authorization
         approval = job.get("goal_approval")
         if isinstance(approval, dict) and approval.get("status") == "approved":
             if not resume or approval.get("execution_turn_id") == turn_id:
                 return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
             return ("deferred", "goal_resume_unconfirmed: 执行轮次与既有审批检查点不符", "")
+        if authorization:
+            try:
+                owner.check()
+                origin = dict(job, turn_id=authorization["original_turn_id"])
+                history = list(job.get("turn_adopted") or [])
+                if history and history[-1].get("from") == authorization["original_turn_id"] and history[-1].get("to") == authorization["turn_id"]:
+                    origin["turn_adopted"] = history[:-1]
+                if prepare_goal_continuation(spec, origin, client) != authorization:
+                    return ("deferred", "goal_continuation_changed: 目标授权身份已变化", "")
+            except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+                return ("deferred", "goal_continuation_blocked: " + str(exc), "")
         owned_origin = bool(spec.get("executor_instance_id") or spec.get("original_executor_instance_id")
                             or spec.get("requires_goal_identity"))
         # 只有会话仍处 Goal 契约模式（planning / awaiting_approval）才过审批门：
@@ -1096,10 +1196,10 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             return ("none", "", "")
         inner = status_view.get("status") or status_view
         planning_state = inner.get("planningState")
-        if resume and planning_state in ("planning", "awaiting_approval"):
+        if read_only_resume and planning_state in ("planning", "awaiting_approval"):
             return ("deferred", "goal_approval_observation_pending: 只读续接不代批目标契约，请在 Plus 完成审批", "")
         current = inner.get("currentTurnId")
-        if resume and current == turn_id:
+        if read_only_resume and current == turn_id:
             if owned_origin:
                 return ("deferred", "goal_resume_unconfirmed: App 归属轮次缺少执行检查点且当前仍是原轮次", "")
             try:
@@ -1110,7 +1210,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                    and item.get("status") == "approved" and item.get("sessionId") == job["session_id"]
                    and item.get("turnId") == turn_id for item in history):
                 return ("deferred", "goal_resume_unconfirmed: 契约已批准但尚无不同的执行轮次身份", "")
-        if resume and not current:
+        if read_only_resume and not current:
             try:
                 history = client.plans_pending(job["session_id"]).get("history") or []
             except util.KanpilotError:
@@ -1123,7 +1223,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             # Historical manual agent rounds predate Goal ownership and can
             # have a terminal turn with no current-turn projection.
             return ("none", "", "")
-        if resume and current != turn_id:
+        if read_only_resume and current != turn_id:
             # Approval may have reached Plus before the observer persisted it.
             # A current turn alone is not proof: require the exact approved Goal
             # history and a complete transcript containing only our initial user.
@@ -1193,12 +1293,11 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             owner.check()
             client.plans_resolve(
                 proposal_id, job["session_id"],
-                str(proposal.get("turnId") or planning_turn),
-                str(proposal.get("toolCallId") or ""),
+                proposal["turnId"],
+                proposal["toolCallId"],
                 "approve",
                 target_permission_mode=permission_mode,
-                version=(version if isinstance(version, int)
-                         and not isinstance(version, bool) else None),
+                version=version,
             )
         except util.KanpilotError as exc:
             # 并发代批（另一个观察进程已批）不算失败：以「契约已不再 pending」
@@ -1224,11 +1323,26 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 if current and str(current) != planning_turn:
                     candidate = str(current)
                     try:
-                        record = client.turn_get(job["session_id"], candidate)
+                        record = client.turn_get(job["session_id"], candidate,
+                                                 **({"require_identity": True} if authorization else {}))
                         if (_turn_identity_matches(record, job["session_id"],
                                                    candidate)
                                 and _turn_status(record) in
                                 ("running", "completed", "error", "aborted")):
+                            if authorization:
+                                collector.poll()
+                                approved = [item for item in (client.plans_pending(job["session_id"]).get("history") or [])
+                                            if isinstance(item, dict) and item.get("kind") == "goal"
+                                            and item.get("status") == "approved"
+                                            and item.get("sessionId") == job["session_id"]
+                                            and item.get("turnId") == planning_turn
+                                            and item.get("id") == proposal_id
+                                            and item.get("toolCallId") == proposal["toolCallId"]
+                                            and item.get("version") == version + 1]
+                                if (len(approved) != 1 or collector.truncated or collector.read_error
+                                        or collector.unrecognized or len(collector.user_messages) != 1
+                                        or _normalize(collector.first_user_message) != _normalize(expected_prompt)):
+                                    return ("deferred", "goal_execution_unconfirmed: 已批准，但执行归属或原始授权转录不完整", "")
                             execution_turn = candidate
                             break
                     except util.KanpilotError:
@@ -1237,6 +1351,8 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 break
             time.sleep(_GOAL_POLL_SECONDS)
         if not execution_turn:
+            if authorization:
+                return ("deferred", "goal_execution_unconfirmed: 已批准，但无法严格核验执行轮次身份", "")
             return ("failed",
                     "goal_execution_unstarted: 目标契约已批准但 "
                     f"{_GOAL_EXECUTION_WAIT_SECONDS:g}s 内未观察到同会话执行轮次"
@@ -1271,6 +1387,18 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         return finalize("failed", 1, detail, True, "failed", reason)
 
     # ---- 5. Persistent failure is not proof of a successful startup.
+    authorization = spec.get("continue_goal_authorization") if resume else None
+    if authorization:
+        try:
+            owner.check()
+            if prepare_goal_continuation(spec, job, client) != authorization:
+                return defer("goal_continuation_changed: 目标授权身份已变化")
+            if authorization["turn_id"] != turn_id:
+                original_record = client.turn_get(job["session_id"], turn_id, require_identity=True)
+                job["goal_continuation_previous_turn"] = original_record
+                adopt(authorization["turn_id"], original_record)
+        except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+            return defer("goal_continuation_blocked: " + str(exc))
     proof_deadline = min(deadline, time.monotonic() + _PROOF_WAIT_SECONDS)
     while True:
         try:

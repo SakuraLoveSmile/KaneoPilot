@@ -1,5 +1,6 @@
 """Review backend argv, fake subprocesses and isolated deterministic runner."""
 import json
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -85,12 +86,23 @@ def runner_scene(tmp_path, monkeypatch):
     monkeypatch.setenv('KANPILOT_APP_SUPPORT', str(tmp_path / 'support'))
     monkeypatch.setenv('KANPILOT_REPORTS_ROOT', str(tmp_path / 'reports'))
     conn = db.connect(tmp_path / 'isolated.db')
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    def git(*args):
+        subprocess.run(['git', '-C', str(repository), *args], check=True, capture_output=True)
+    git('init', '-q')
+    git('config', 'user.name', 'Isolated Review Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    (repository / 'app.py').write_text('print("baseline")\n')
+    git('add', 'app.py')
+    git('commit', '-qm', 'isolated baseline')
     worktree = tmp_path / 'worktree'
-    worktree.mkdir()
+    git('worktree', 'add', '--detach', str(worktree), 'HEAD')
+    (worktree / 'app.py').write_text('print("reviewed change")\n')
     plan = tmp_path / 'plan.md'
     plan.write_text('# Plan\n')
     task = {'task_id': 't1', 'project_id': 'p1', 'run_id': 'exec1', 'status': 'in_review', 'extra': {},
-            'plan_path': str(plan), 'plan_sha256': util.sha256_file(plan), 'repository': str(tmp_path / 'repo'),
+            'plan_path': str(plan), 'plan_sha256': util.sha256_file(plan), 'repository': str(repository),
             'execution_round': {'backend': 'pi_desktop', 'worktree_path': str(worktree)}}
     request = {'request_id': 'req1', 'run_id': 'review1', 'stage': 'review', 'status': 'claimed',
                'lease_expires_at': util.to_iso(util.now_dt() + timedelta(minutes=10))}
@@ -110,10 +122,6 @@ def runner_scene(tmp_path, monkeypatch):
             request.update(status='succeeded' if payload['outcome'] == 'succeeded' else 'failed', result=payload)
         return {'ok': True}
     monkeypatch.setattr(review, 'core_call', core_call)
-    def prepare(_task, _worktree, snapshot):
-        snapshot.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(review, 'prepare_worktree', prepare)
-    monkeypatch.setattr(review, 'collect_materials', lambda **kwargs: {'files': {}, 'context': {}})
     monkeypatch.setattr(codex_planner.codex_provider, 'resolve_provider',
                         lambda _home: SimpleNamespace(auth_ready=True, auth_detail='', config_args=[], env={}))
     yield conn, task, calls
@@ -149,7 +157,10 @@ def test_run_stage_records_cost_before_settlement(runner_scene, tmp_path, monkey
 def test_delivery_materials_full_diff_increment_and_large_diff(tmp_path, monkeypatch):
     old = tmp_path / 'old.md'
     old.write_text('上一轮报告')
-    task = {'task_id': 't1', 'delivery': {'mode': 'pr', 'base_sha': 'base', 'head_sha': 'head'},
+    task = {'task_id': 't1', 'run_id': 'exec', 'repository': str(tmp_path),
+            'delivery': {'mode': 'pr', 'branch': 'fixture', 'base_branch': 'main',
+                         'base_sha': 'base', 'head_sha': 'head', 'worktree_path': str(tmp_path),
+                         'commits': [{'execution_run_id': 'exec', 'sha': 'head'}]},
             'review_history': [{'head_sha': 'previous', 'report_path': str(old)}]}
     git_calls = []
     def git(args, **kwargs):
@@ -160,6 +171,7 @@ def test_delivery_materials_full_diff_increment_and_large_diff(tmp_path, monkeyp
             return 'x' * (400 * 1024 + 1), None
         return 'increment or commit evidence\n', None
     monkeypatch.setattr(review, '_git', git)
+    monkeypatch.setattr(git_delivery, 'verify_branch_worktree', lambda *a, **k: None)
     monkeypatch.setattr(review.headless_adapter, 'resolve_source', Mock(side_effect=ValueError('fixture missing evidence')))
     materials = review.collect_materials(db_path='isolated', conn=None, materials=tmp_path / 'inputs',
                                          task=task, execution_worktree=tmp_path, execution_run_id='exec')
@@ -172,7 +184,10 @@ def test_delivery_materials_full_diff_increment_and_large_diff(tmp_path, monkeyp
 
 
 def test_dirty_or_mismatched_execution_blocks_before_snapshot(tmp_path, monkeypatch):
-    task = {'task_id': 't1', 'repository': '/repo', 'delivery': {'mode': 'pr', 'worktree_path': '/worktree', 'head_sha': 'a' * 40}}
+    task = {'task_id': 't1', 'repository': '/repo', 'run_id': 'exec',
+            'delivery': {'mode': 'pr', 'worktree_path': '/worktree', 'head_sha': 'a' * 40,
+                         'base_sha': 'base', 'base_branch': 'main', 'branch': 'fixture',
+                         'commits': [{'execution_run_id': 'exec', 'sha': 'a' * 40}]}}
     verify = Mock(side_effect=git_delivery.GitDeliveryError('worktree_invalid', 'dirty'))
     snapshot = Mock()
     monkeypatch.setattr(git_delivery, 'verify_branch_worktree', verify)
@@ -187,9 +202,9 @@ def test_plus_configures_and_never_attaches(tmp_path):
     client = Mock()
     client.session_create.return_value = {'sessionId': 's1'}
     client.attach_mcp.side_effect = AssertionError('must not attach')
-    assert review._create_plan_session(client, {}, tmp_path) == ('s1', None)
+    assert review._create_plan_session(client, {'permission_mode': 'auto'}, tmp_path) == ('s1', None)
     client.attach_mcp.assert_not_called()
-    assert client.session_configure.call_args.kwargs['permission_mode'] == 'ask'
+    assert client.session_configure.call_args.kwargs['permission_mode'] == 'auto'
 
 
 def test_review_cli_config_save_switch_snapshot_and_invalid(tmp_path, monkeypatch):

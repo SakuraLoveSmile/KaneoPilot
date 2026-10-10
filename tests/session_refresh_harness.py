@@ -22,7 +22,7 @@ def check(name, cond, evidence=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{evidence}]" if evidence and not cond else ""))
 
 def cli(db, cmd, payload):
-    env = dict(os.environ, KANPILOT_DB=str(db))
+    env = dict(ISOLATED_ENV, KANPILOT_DB=str(db))
     r = subprocess.run([sys.executable, str(CORE), cmd, "--json", json.dumps(payload)],
                        capture_output=True, text=True, env=env)
     try:
@@ -34,6 +34,31 @@ def cli(db, cmd, payload):
         out.setdefault("_err", r.stderr[-500:])
     return out.get("result", out), r.returncode
 
+def guarded_ack(db, payload):
+    """A separate real CLI process with expensive reading paths forbidden."""
+    program = '''
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from kanpilot import cli, cmd_session, dsh_events, headless_adapter, session_store
+def forbidden(*args, **kwargs):
+    raise AssertionError("acknowledged source attempted full read/preparation")
+for module, names in (
+    (dsh_events, ("iter_events", "_read_events", "to_messages")),
+    (headless_adapter, ("slice_messages",)),
+    (cmd_session, ("_load_snapshot", "_save_snapshot")),
+    (session_store, ("decode_revisions",)),
+):
+    for name in names:
+        setattr(module, name, forbidden)
+print(json.dumps(cli.run("session-messages", json.loads(sys.argv[3]), Path(sys.argv[2]))))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(REPO / "core"), str(db), json.dumps(payload)],
+        capture_output=True, text=True, env=ISOLATED_ENV,
+    )
+    return json.loads(result.stdout) if result.returncode == 0 else {}, result.returncode
+
 def need(r, key):
     if not isinstance(r, dict) or key not in r:
         print("UNEXPECTED RESPONSE:", json.dumps(r, ensure_ascii=False)[:800])
@@ -41,10 +66,26 @@ def need(r, key):
     return r
 
 tmp = Path(tempfile.mkdtemp(prefix="kp-refresh-"))
+ISOLATED_ENV = dict(os.environ, **{
+    "KANPILOT_APP_SUPPORT": str(tmp / "app-support"),
+    "KANPILOT_DB": str(tmp / "k.db"),
+    "KANPILOT_LEGACY_ROOT": str(tmp / "legacy"),
+    "KANPILOT_PLAN_ROOT": str(tmp / "plans"),
+    "KANPILOT_REPOS_ROOT": str(tmp / "repos"),
+    "KANPILOT_REPORTS_ROOT": str(tmp / "reports"),
+    "KANEO_CREDENTIALS_PATH": str(tmp / "credentials.json"),
+})
+for name in ("app-support", "legacy", "plans", "repos", "reports", "backups"):
+    (tmp / name).mkdir()
+(tmp / "credentials.json").write_text("{}", encoding="utf-8")
 db = tmp / "k.db"; root = tmp / "runs"; run_dir = root / TASK_ID / RUN_ID
 run_dir.mkdir(parents=True)
-subprocess.run([sys.executable, str(CORE), "migrate", "--json", json.dumps({})],
-               env=dict(os.environ, KANPILOT_DB=str(db)), capture_output=True)
+migration, rc = cli(db, "migrate", {
+    "legacy_root": str(tmp / "legacy"), "plan_root": str(tmp / "plans"),
+    "backup_root": str(tmp / "backups"),
+})
+if rc:
+    raise RuntimeError("isolated migration failed: " + repr(migration))
 conn = sqlite3.connect(db)
 cols = {r[1]: r for r in conn.execute("PRAGMA table_info(tasks)")}
 seed = {"task_id": TASK_ID, "run_id": RUN_ID, "status": "running"}
@@ -99,11 +140,26 @@ check("B 首载=user+assistant+tool_call+工具输出",
       and set(types) & {"tool_result", "command_output"}, str(types))
 cursor = r["next_cursor"]
 ids1 = {m["id"]: m["revision"] for m in r["messages"]}
+version = r["source_version"]
+check("B 稳定来源版本", isinstance(version, str) and len(version) == 64)
+checked = r["session"]["last_checked_at"]
+r, guarded_rc = guarded_ack(db, {"task_id": TASK_ID, "cursor": cursor,
+                                 "source_version": version})
+check("B 快返不读全文/快照/revision map", guarded_rc == 0)
+need(r, "session")
+check("B 独立进程末端确认", r["messages"] == [] and not r["has_more"]
+      and r["next_cursor"] == cursor and r["source_version"] == version
+      and r["session"]["last_checked_at"] > checked)
+r, _ = cli(db, "session-messages", {"task_id": TASK_ID, "cursor": cursor,
+                                    "source_version": version, "force_reload": True})
+check("B 强制刷新保留游标与版本", r["source_version"] == version
+      and not r["has_more"])
 
 # C. 追加一条事件 → 增量只回新消息、无重复
 events = [json.loads(l) for l in ef.read_text().splitlines() if l.strip()]
 write_events(events + [ev("assistant_message", 1, content="done")])
-r, _ = cli(db, "session-messages", {"task_id": TASK_ID, "cursor": cursor})
+r, _ = cli(db, "session-messages", {"task_id": TASK_ID, "cursor": cursor,
+                                    "source_version": version})
 check("C 增量只含新 seq", all(m["seq"] > int(str(cursor).split(":")[-1]) for m in r["messages"])
       and len(r["messages"]) >= 1, json.dumps([m["seq"] for m in r["messages"]]))
 check("C 旧消息不重复", all(m["id"] not in ids1 for m in r["messages"]))
@@ -127,6 +183,7 @@ check("E 半写入保留内容", len(r["messages"]) > 0,
       json.dumps(r, ensure_ascii=False)[:200])
 check("E 半写入带原因", bool((r.get("connection") or {}).get("detail"))
       or r["session"]["state"] == "pending", json.dumps(r.get("connection")))
+check("E 失败不确认版本", r["source_version"] is None)
 ef.write_text(good)
 
 # F. 身份不符 → unavailable/失败原因，不读内容
@@ -158,6 +215,41 @@ check("H 轮次不串线", all("only-run2" in m.get("content", "") or m["type"] 
                           for m in r["messages"])
       and any("only-run2" in m.get("content", "") for m in r["messages"]),
       json.dumps([m.get("content", "")[:30] for m in r["messages"]]))
+
+# I. >2MB: paginate across independent processes before acknowledging the tail.
+large_run = "hrun-large"
+large = root / TASK_ID / large_run
+large.mkdir()
+(large / "job.json").write_text(json.dumps(
+    {"task_id": TASK_ID, "run_id": large_run, "backend": "pi"}))
+large_events = [dict(v=1, seq=i, ts="2026-09-21T09:00:00+00:00",
+                     type="user", content=(f"message-{i}:" + "x" * 65536))
+                for i in range(1, 41)]
+large_file = large / "events.jsonl"
+large_file.write_text("".join(json.dumps(e) + "\n" for e in large_events))
+loaded = []
+request = {"task_id": TASK_ID, "run_id": large_run, "limit": 7}
+while True:
+    page, rc = cli(db, "session-messages", request)
+    need(page, "messages")
+    loaded.extend(page["messages"])
+    if not page["has_more"]:
+        break
+    request["cursor"] = page["next_cursor"]
+check("I >2MB 独立进程连续分页完整", large_file.stat().st_size > 2_000_000
+      and [m["seq"] for m in loaded] == list(range(1, 41)))
+conn = sqlite3.connect(db)
+meta = json.loads(conn.execute("SELECT value FROM settings WHERE key=?",
+                             ("session_snapshot_meta:" + TASK_ID + "/" + large_run,)).fetchone()[0])
+conn.close()
+check("I 大会话仅小meta无全文快照", meta["full_snapshot_available"] is False)
+ack, rc = guarded_ack(db, {"task_id": TASK_ID, "run_id": large_run,
+                          "cursor": page["next_cursor"], "source_version": page["source_version"]})
+check("I 大会话末端快返不读全文", rc == 0 and ack.get("messages") == []
+      and ack.get("next_cursor") == page["next_cursor"]
+      and ack.get("source_version") == page["source_version"])
+reopen, _ = cli(db, "session-messages", {"task_id": TASK_ID, "run_id": large_run, "limit": 500})
+check("I 大会话重开仍读完整历史", len(reopen["messages"]) == 40)
 
 shutil.rmtree(tmp, ignore_errors=True)
 fails = [n for n, ok, _ in results if not ok]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 
-from . import util, verify_evidence
+from . import core, util, verify_evidence
 from .auto_dispatch import Controller, StaleRun
 
 _OLD_BACKENDS = ("dsh", "headless", "atif", "ATIF")
@@ -60,8 +60,10 @@ def _observe(controller, task, detail):
     if detail.get("observer_alive") is True or detail.get("backend") != "pi_desktop" or (detail.get("observer_alive") is not False
             and not str(detail.get("detail") or "").startswith("heartbeat_failed:")):
         return None
+    automation = (task.get("extra") or {}).get("automation") or {}
     return controller.call("round-observe", {"task_id": task["task_id"],
-                           "run_id": task["run_id"], "executor": "kaneo-monitor"})
+                           "run_id": task["run_id"], "executor": "kaneo-monitor",
+                           "continue_goal": bool(automation) and not automation.get("manual_takeover", False)})
 
 
 def _verification(task, messages):
@@ -74,7 +76,9 @@ def _verification(task, messages):
     result = verify_evidence.match_verification(declaration["commands"],
                                                verify_evidence.extract_command_results(messages))
     result["note"] = "；".join(["缺失：" + command for command in result["missing"]] + [
-        "失败：" + item["command"] + "（exit_code=" + str(item["exit_code"]) + "）"
+        ("证据无法确认：" + item["command"] + "（缺少独立退出码或命令组合不受支持）"
+         if item["exit_code"] is None else
+         "失败：" + item["command"] + "（exit_code=" + str(item["exit_code"]) + "）")
         for item in result["failed"]])
     return result
 
@@ -98,10 +102,16 @@ def _record_cost(controller, task, detail):
 
 def _complete(controller, task, detail, expected, messages):
     verification = _verification(task, messages)
+    checks = (task.get("extra") or {}).get("verification_checks") or {}
+    if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
+        receipt = controller.call("get-verification-check-status", {
+            "task_id": task["task_id"], "operation_id": checks["operation_id"]})
+        verification = {"ok": receipt.get("state") == "completed" and receipt.get("verification_ok") is True,
+                        "note": receipt.get("detail") or "逐条验证尚未完成或证据已变化"}
     if not verification["ok"]:
         controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"])
         return
-    if ((task.get("extra") or {}).get("delivery") or {}).get("mode") == "pr":
+    if core.requires_branch_review(task):
         commit = _commit(controller, task)
         if commit.get("outcome") == "blocked":
             controller.report("failed", note="blocked:" + str(commit.get("failure_code")))
@@ -125,7 +135,8 @@ def _monitor(controller):
         remote_status = recheck.get("kaneo_status")
         automation = (task.get("extra") or {}).get("automation") or {}
         managed = bool(automation) and not automation.get("manual_takeover", False)
-        if remote_status == "done" or (remote_status == "in-review" and not managed):
+        if remote_status == "done" or (remote_status == "in-review" and not managed
+                                       and not core.requires_branch_review(task)):
             _advance(controller, task, remote_status, remote_status)
             controller.report("succeeded", progress="已同步远端状态")
             return

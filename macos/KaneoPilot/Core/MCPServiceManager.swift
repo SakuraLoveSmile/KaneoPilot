@@ -153,6 +153,7 @@ final class MCPServiceManager: ObservableObject {
             proc.arguments = ["mcp-serve", "--transport", "http"]
         }
         var env = ProcessInfo.processInfo.environment
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         let npmBin = (NSHomeDirectory() as NSString).appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"
         env["PATH"] = env["PATH"].map { "\(extraPath):\($0)" } ?? extraPath

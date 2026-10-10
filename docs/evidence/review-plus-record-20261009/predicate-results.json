@@ -1,0 +1,20 @@
+{
+  "candidate_current": true,
+  "execution_completed_and_plus_session_idle": true,
+  "actual_plus_job_startup_spec_round_config_match": true,
+  "original_successful_dispatch_request_matches": true,
+  "original_plan_report_hash_metadata_match": true,
+  "formal_desktop_review_job_role_request_run_report_match": true,
+  "source_git_workspace_and_review_fingerprint_match": true,
+  "files_and_source_recheck": true,
+  "kaneo_get_project_requirements_review_status_match": true,
+  "source_detached": true,
+  "target_branch_and_path_free": true,
+  "no_unknown_preparing_intent": true,
+  "source_head_resolves": true,
+  "source_fingerprint": "9cb4e2c071e8b27eb467244ca91bb59be5841837dbaa21132bd92fdfa38cebed",
+  "production_task_unchanged": true,
+  "production_round_unchanged": true,
+  "original_worktree_unchanged": true,
+  "no_prepare_or_supplement_command_invoked": true
+}

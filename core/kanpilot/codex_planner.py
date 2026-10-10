@@ -30,12 +30,14 @@
   ``error``/``turn.failed``/错误 item → ``system`` 事件（§5.22.6）。
 
 输出契约（§5.22.3）：``{"status": "ready|needs_input",
-"plan_markdown": str, "questions": [str], "evidence": [str]}``。
+"plan_markdown": str, "questions": [问题对象或历史文本], "evidence": [str]}``。
 ready 必须 plan_markdown 非空且 questions 为空；needs_input 由 runner 落为
 needs_user。模型自报的 ID/模型名/哈希一律不信（核心按真实输入登记）。
 """
 
 from __future__ import annotations
+
+from . import plan_questions
 
 import json
 import os
@@ -210,7 +212,7 @@ def output_schema() -> dict:
         "properties": {
             "status": {"type": "string", "enum": ["ready", "needs_input"]},
             "plan_markdown": {"type": "string"},
-            "questions": {"type": "array", "items": {"type": "string"}},
+            "questions": {"type": "array", "items": plan_questions.QUESTION_SCHEMA},
             "evidence": {"type": "array", "items": {"type": "string"}},
         },
     }
@@ -293,7 +295,7 @@ def build_prompt(task: dict, manifest: dict, input_dir: Optional[Path],
             .replace("{TASK_ID}", str(
                 task.get("task_id") or manifest_task.get("task_id") or ""))
             .replace("{REPOSITORY}", str(
-                task.get("repository")
+                task.get("plan_cwd") or task.get("repository")
                 or manifest_task.get("repository") or "."))
             .replace("{INPUT_DIR}", str(input_dir) if input_dir else "")
             .replace("{FILES_BLOCK}", files_block)
@@ -303,7 +305,8 @@ def build_prompt(task: dict, manifest: dict, input_dir: Optional[Path],
         prompt = SPEC_PROMPT_PREFIX + prompt
     if task.get("fix_mode") == "same_task":
         prompt += "\n## 同任务修复轮\n\n工作树已含前几轮提交，只修 Review 报告列出的问题，verify 要覆盖修复点。\n"
-    return prompt
+    from . import review_resolution
+    return prompt + plan_questions.prompt_block(manifest) + review_resolution.prompt_block(manifest)
 
 
 def launcher_argv(

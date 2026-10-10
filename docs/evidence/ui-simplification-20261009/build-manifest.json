@@ -1,0 +1,34 @@
+{
+  "bundle_id": "local.kaneopilot.ui-simplification",
+  "binary_sha256": "7bf42f704236f48c863e06a8a43fd149ab58f7eb113e8b97ddbea07eb73eea7e",
+  "fake_core_sha256": "d9f80c8e921b9fac8f516d47f718b66c87c6f40a425677c859b304ae7aa6b58d",
+  "source_files": {
+    "docs/plans/自动化工作台与交互简化.plan.md": "13e5a690df57ebac753d78c08295569114f7314b78b64cca5010040e542b55bb",
+    "docs/ui-spec.md": "c441d34bcf1aaa9c358a4dc1399be6ceb8abfeca8ce60f5da4ec4f28fdbcc94a",
+    "macos/FakeCore/kanpilot-fake.py": "d9f80c8e921b9fac8f516d47f718b66c87c6f40a425677c859b304ae7aa6b58d",
+    "macos/KaneoPilot.xcodeproj/project.pbxproj": "61024fb854c6de0a28051d888d43dff8e3ca6fd7b38a235a6487fd9dcfbda55d",
+    "macos/KaneoPilot/AppViewModel.swift": "4052840782724ac669bb304245dc3296369c1155be3922f31cbeaca829231dcc",
+    "macos/KaneoPilot/Core/CoreLocator.swift": "4e5368640ea8d210dd3108b4152c50289f0cb516a5fd58d861cf1d66edb99771",
+    "macos/KaneoPilot/Core/Models.swift": "0452b710dbb25d8ab88864ca985ff8fb138d5169c050c96a6c67be7a7e26491b",
+    "macos/KaneoPilot/Views/AutomationDashboardView.swift": "5f5b1f2d23104249109e66e3e4bf5f415fa9bd5c43a7c7fb3be5f6b34301ccac",
+    "macos/KaneoPilot/Views/BoardView.swift": "96cd8f48cdca04a1ad1df43c5b9a1d98b8a990fd2f5d35e74c40409ead70ccd3",
+    "macos/KaneoPilot/Views/MarkdownReaderView.swift": "41d45d2bb4c5db38e33971c5eee12aeb53e965b9bd2a6a94f5e1732ae4c68d20",
+    "macos/KaneoPilot/Views/PendingView.swift": "1c6f4fd5bafc8b14f9c422223f34c6bfd70ce7eaeafb87032ccfb5495e5fbd7c",
+    "macos/KaneoPilot/Views/PlanningView.swift": "b09fa62f6c88e46f6f38d9bd113d6a677373a52b44dc6a7ceddaf35a4eec40aa",
+    "macos/KaneoPilot/Views/ProjectMappingsView.swift": "938e717e25c9b76f9721411266087134c6312cee1c0ed1dbfcc513f30e2dceb4",
+    "macos/KaneoPilot/Views/RootView.swift": "4379316d9138c0210f9c528a34777c82cd393194e5d4ed2b5d3ab82d5503b9a8",
+    "macos/KaneoPilot/Views/SettingsView.swift": "646ae3e956b7e0b33fc59e83f3c8510eb0b60858c3b316d8a2a19c11a608339d",
+    "macos/KaneoPilot/Views/TaskDetailContentView.swift": "e2a24b0a4d62753efe9aebce20f5fcf0967170ddb55ebda70ba447870812a4b7",
+    "macos/KaneoPilot/Views/TaskDetailTabs.swift": "428dc371aa1d2081e5d6e4431c6cacb26f19f1c647686a6d9d859fe728a06a35",
+    "macos/README.md": "24b43cf33b3987111a632b45c92581a9bd549ec7dc2d1297aab82fba0500dc75",
+    "macos/tests/main.swift": "70c4cf85b0e6ac8ee253ff3a46b3f9930b45b0f15c72a261c632282f8dfa20a3",
+    "macos/tests/planning_input_main.swift": "841e61bdc818c479682aec5fc076c22744fcb03de773ac3d66f0c03c7c4305c9",
+    "macos/tests/run-planning-input-fixtures.sh": "bdeb7530ed2d25483030d30151c34d3aac4468a357691017225c3e1b6b7b7f22",
+    "scripts/preview_automation_ui.sh": "50f6a045c69c21d1952ef624df408d56aeaafd055076047103527d6a7798a109"
+  },
+  "ui_validated": [
+    "1180x760 light",
+    "900x600 dark"
+  ],
+  "state": "待体验"
+}

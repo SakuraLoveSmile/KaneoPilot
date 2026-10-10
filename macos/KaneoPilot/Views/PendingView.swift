@@ -1,10 +1,13 @@
 import SwiftUI
 
-/// 待处理（§4.2）：活动请求（queued/claimed/lost）+ needs_user 任务 + 最近失败请求。
+/// 需要处理（§4.15）：用户决策优先，正常队列与历史失败默认折叠。
 /// v2 §5.21.1：请求行点击进入请求详情页（get-request）。
 struct PendingView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var confirmRelease: RequestItem?
+    @State private var confirmDismissIDs: [String] = []
+    @State private var queueExpanded = false
+    @State private var failedExpanded = false
 
     /// 待处理节内导航目标：任务详情与请求详情。
     enum PendingRoute: Hashable {
@@ -31,14 +34,21 @@ struct PendingView: View {
     }
 
     private var needsUserTasks: [TaskSummary] {
-        model.tasks.filter { $0.status == "needs_user" || DisplayStatus.effective($0) == "需人工" }
+        model.tasks.filter(\.needsAttention)
+    }
+
+    private var attentionRequests: [RequestItem] {
+        activeRequests.filter { $0.isLost || ($0.status == "queued" && $0.isUnauthorizedPlan) }
+    }
+
+    private var normalRequests: [RequestItem] {
+        activeRequests.filter { !$0.isLost && !($0.status == "queued" && $0.isUnauthorizedPlan) }
     }
 
     private var recentFailed: [RequestItem] {
-        Array(model.requests
-            .filter { $0.status == "failed" }
+        model.requests
+            .filter { $0.status == "failed" && $0.failureDismissedAt == nil }
             .sorted { (TimeFormat.parse($0.updatedAt) ?? .distantPast) > (TimeFormat.parse($1.updatedAt) ?? .distantPast) }
-            .prefix(10))
     }
 
     private var isEmpty: Bool {
@@ -54,33 +64,61 @@ struct PendingView: View {
                     emptyState
                 } else {
                     List {
-                        if !activeRequests.isEmpty {
-                            Section("活动请求") {
-                                ForEach(activeRequests) { request in
-                                    requestRow(request)
-                                }
-                            }
-                        }
-                        if !needsUserTasks.isEmpty {
-                            Section("需人工处理") {
+                        Section("需要你处理") {
+                            if needsUserTasks.isEmpty && attentionRequests.isEmpty {
+                                Text("暂无需要你处理的事项。下方可查看正常队列与历史失败记录。")
+                                    .font(.kpSmall)
+                                    .foregroundStyle(.secondary)
+                            } else {
                                 ForEach(needsUserTasks) { task in
                                     NavigationLink(value: PendingRoute.task(task.taskId)) {
                                         NeedsUserRow(task: task)
                                     }
                                 }
+                                ForEach(attentionRequests) { request in
+                                    requestRow(request)
+                                }
+                            }
+                        }
+                        if !normalRequests.isEmpty {
+                            Section {
+                                DisclosureGroup("正常队列（\(normalRequests.count)）", isExpanded: $queueExpanded) {
+                                    Text("已排队的请求尚未开始；执行端领取后才会进入进行中。")
+                                        .font(.kpSmall)
+                                        .foregroundStyle(.secondary)
+                                    ForEach(normalRequests) { request in
+                                        requestRow(request)
+                                    }
+                                }
                             }
                         }
                         if !recentFailed.isEmpty {
-                            Section("最近失败") {
-                                ForEach(recentFailed) { request in
-                                    requestRow(request)
+                            Section {
+                                DisclosureGroup("历史失败记录（\(recentFailed.count)）", isExpanded: $failedExpanded) {
+                                    HStack {
+                                        Text("保留最近 10 条详情入口；历史和执行证据始终保留。")
+                                            .font(.kpSmall)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Button("清空失败记录") {
+                                            confirmDismissIDs = recentFailed.map(\.requestId)
+                                        }
+                                        .disabled(model.busy)
+                                    }
+                                    ForEach(Array(recentFailed.prefix(10))) { request in
+                                        requestRow(request)
+                                            .contextMenu {
+                                                Button("从待处理移除") { confirmDismissIDs = [request.requestId] }
+                                                    .disabled(model.busy)
+                                            }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            .navigationTitle("待处理")
+            .navigationTitle("需要处理")
             .navigationDestination(for: PendingRoute.self) { route in
                 switch route {
                 case .task(let taskID):
@@ -89,6 +127,19 @@ struct PendingView: View {
                     RequestDetailView(requestID: requestID)
                 }
             }
+        }
+        .confirmationDialog("从待处理移除失败记录",
+                            isPresented: Binding(get: { !confirmDismissIDs.isEmpty },
+                                                 set: { if !$0 { confirmDismissIDs = [] } }),
+                            titleVisibility: .visible) {
+            Button("移除 \(confirmDismissIDs.count) 条失败记录") {
+                let ids = confirmDismissIDs
+                confirmDismissIDs = []
+                Task { await model.dismissFailedRequests(requestIDs: ids) }
+            }
+            Button("取消", role: .cancel) { confirmDismissIDs = [] }
+        } message: {
+            Text("仅从待处理列表隐藏，历史和执行证据保留在运行记录中，不影响当前任务。")
         }
         .confirmationDialog(
             "释放失联请求",
@@ -111,7 +162,7 @@ struct PendingView: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("暂无待处理项", systemImage: "tray")
+            Label("暂无需要处理的事项", systemImage: "tray")
         } description: {
             Text("没有排队、进行中、失联或阻塞的任务。")
         } actions: {
@@ -211,7 +262,11 @@ struct PendingView: View {
 
     @ViewBuilder
     private func actions(_ request: RequestItem) -> some View {
-        if request.isLost, request.taskId != nil {
+        if request.status == "failed" {
+            Button("移除") { confirmDismissIDs = [request.requestId] }
+                .help("仅从待处理隐藏，保留历史和执行证据")
+                .disabled(model.busy)
+        } else if request.isLost, request.taskId != nil {
             Button("释放失联请求") { release(request) }
                 .disabled(model.busy)
         } else if request.status == "queued" {
@@ -246,7 +301,7 @@ struct PendingView: View {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
-                Text(AutomationPresentation.title(task.exception?.failureCode) ?? task.blockedReason ?? "需人工处理")
+                Text(attentionReason(task))
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -255,7 +310,16 @@ struct PendingView: View {
         .padding(.vertical, Spacing.s)
         .frame(minHeight: 40)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(task.title ?? task.taskId)，需人工，\(task.blockedReason ?? "")，双击查看详情")
+        .accessibilityLabel("\(task.title ?? task.taskId)，\(attentionReason(task))，双击查看详情")
+    }
+
+    private func attentionReason(_ task: TaskSummary) -> String {
+        if let exception = task.exception {
+            return AutomationPresentation.title(exception.failureCode) ?? exception.label ?? exception.detail ?? "查看异常并决定下一步"
+        }
+        if task.planExecutionHold == true { return "待确认执行：查看计划后再安排执行" }
+        if task.autoAdvancePaused == 1 { return "此任务已暂停：查看详情并恢复自动推进" }
+        return task.blockedReason ?? "查看详情并决定下一步"
     }
 }
 
@@ -284,6 +348,11 @@ struct RequestDetailView: View {
     @State private var error: String?
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
+    @State private var confirmCancelPlan = false
+    @State private var retryExecutionConfirmation: TaskDetailView.ConfirmableAction?
+    @State private var preparingExecutionRetry = false
+    @State private var preparingReverification = false
+    @State private var reverifyError: String?
     @State private var generation = 0
 
     var body: some View {
@@ -303,6 +372,41 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("请求详情")
+        .alert("重新核验未完成", isPresented: Binding(
+            get: { reverifyError != nil }, set: { if !$0 { reverifyError = nil } }
+        )) {
+            Button("好", role: .cancel) { reverifyError = nil }
+        } message: {
+            Text(reverifyError ?? "")
+        }
+        .confirmationDialog("重新执行（沿用计划）？", isPresented: Binding(
+            get: { retryExecutionConfirmation != nil },
+            set: { if !$0 { retryExecutionConfirmation = nil } }
+        ), titleVisibility: .visible) {
+            if let confirmation = retryExecutionConfirmation {
+                Button("重新执行（沿用计划）") {
+                    retryExecutionConfirmation = nil
+                    if let taskID = detail?.request?.taskId {
+                        Task { await model.resolve(taskID: taskID, action: "resume",
+                            expectedExecutionRunID: confirmation.expectedExecutionRunID) }
+                    }
+                }.disabled(model.busy)
+            }
+            Button("取消", role: .cancel) { retryExecutionConfirmation = nil }
+        } message: {
+            Text(retryExecutionConfirmation?.message ?? "")
+        }
+        .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
+                            titleVisibility: .visible) {
+            Button("终止计划", role: .destructive) {
+                if let taskID = detail?.request?.taskId {
+                    Task { await model.cancelPlan(requestID: requestID, taskID: taskID) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("撤销尚未领取的规划请求，保留规划材料与历史，等待你手动重新规划。若已被领取，本操作会拒绝终止。")
+        }
         .task(id: requestID) { await load() }
         .onChange(of: model.lastRefreshAt) {
             Task { await load() }
@@ -334,6 +438,44 @@ struct RequestDetailView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将任务归档为完成，不再自动推进。")
+        }
+    }
+
+    private func prepareExecutionRetry(taskID: String) async {
+        guard !preparingExecutionRetry else { return }
+        let owner = generation
+        preparingExecutionRetry = true
+        defer { preparingExecutionRetry = false }
+        do {
+            let task = try await model.client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
+            guard owner == generation, detail?.request?.taskId == taskID else { return }
+            guard task.failureCode == "execution_failed", task.allowedActions?.contains("resume") == true,
+                  let runID = task.runId else {
+                model.alertMessage = "该失败轮次已不能重新执行，请刷新任务状态。"
+                return
+            }
+            retryExecutionConfirmation = .retryExecution(runID: runID)
+        } catch {
+            if owner == generation { model.alertMessage = error.coreMessage }
+        }
+    }
+
+    private func reverify(taskID: String) async {
+        guard !model.busy, !preparingReverification else { return }
+        let owner = generation
+        preparingReverification = true
+        defer { preparingReverification = false }
+        do {
+            let task = try await model.client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
+            guard owner == generation, (detail?.request?.taskId ?? detail?.task?.taskId) == taskID else { return }
+            guard task.allowedActions?.contains("reverify") == true, let runID = task.runId else {
+                reverifyError = "当前执行轮次已不能重新核验，请刷新任务状态。"
+                return
+            }
+            await model.resolve(taskID: taskID, action: "reverify", expectedExecutionRunID: runID,
+                                onError: { reverifyError = $0 })
+        } catch {
+            if owner == generation { reverifyError = error.coreMessage }
         }
     }
 
@@ -632,6 +774,7 @@ struct RequestDetailView: View {
                         }
                     }
                     .padding(Spacing.m)
+                    .disabled(preparingReverification)
                 }
                 .background(Color.kpWindow)
             }
@@ -691,16 +834,30 @@ struct RequestDetailView: View {
             }
             .disabled(model.busy)
             .help("调整排队优先级")
+        case "cancel-request":
+            Button("终止排队计划", role: .destructive) { confirmCancelPlan = true }
+                .disabled(model.busy || taskID == nil)
         case "release_lost":
             Button("释放失联请求") { confirmRelease = true }
                 .disabled(model.busy || taskID == nil)
+        case "reverify":
+            Button("重新核验验证证据") {
+                guard let taskID else { return }
+                Task { await reverify(taskID: taskID) }
+            }
+            .disabled(model.busy || preparingExecutionRetry || preparingReverification || taskID == nil)
+            .help("只重新读取当前执行记录，全部验证通过才继续；不会调用模型或设置人工认可。")
         case "resume", "accept_verification", "dismiss":
             Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode)
                    : action == "accept_verification" ? "接受验证结果"
-                   : AutomationPresentation.active(detail.task?.automation) ? "转为人工处理" : "清除阻塞标记") {
+                   : AutomationPresentation.dismissLabel(stage: detail.task?.stage, failureCode: detail.task?.exception?.failureCode, automatic: AutomationPresentation.active(detail.task?.automation))) {
                 guard let taskID else { return }
-                Task { await model.resolve(taskID: taskID, action: action) }
-            }.disabled(model.busy || taskID == nil)
+                if action == "resume", detail.task?.exception?.failureCode == "execution_failed" {
+                    Task { await prepareExecutionRetry(taskID: taskID) }
+                } else {
+                    Task { await model.resolve(taskID: taskID, action: action) }
+                }
+            }.disabled(model.busy || preparingExecutionRetry || taskID == nil)
         case "retry":
             Button("重试") {
                 guard let taskID else { return }

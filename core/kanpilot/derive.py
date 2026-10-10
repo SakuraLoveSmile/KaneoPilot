@@ -5,6 +5,7 @@ docs/protocol.md §2/§5.2."""
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Any, Optional
 
 from . import bridge, constants, db, util
@@ -58,6 +59,20 @@ def queued_request_for_task(
     ).fetchone()
 
 
+def queued_plan_request_for_task(conn: sqlite3.Connection, task_id: str):
+    return conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='plan' AND status='queued' "
+        "ORDER BY priority ASC, created_at ASC LIMIT 1", (task_id,),
+    ).fetchone()
+
+
+def _review_waiting_paused(conn, task):
+    return db.task_auto_paused(task) and conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND kind='review' AND status='claimed'",
+        (task["task_id"],),
+    ).fetchone() is None
+
+
 def task_display_status(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> str:
@@ -85,6 +100,8 @@ def task_display_status(
     if status == "running":
         return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else "执行中"
     if status == "in_review":
+        if _review_waiting_paused(conn, task):
+            return "待评审"
         return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else "评审中"
     if status == "done":
         return "已归档"
@@ -313,7 +330,7 @@ def task_board_substatus(
     if column == "in_progress":
         return "执行中"
     if column == "in_review":
-        return "评审中"
+        return "待评审" if _review_waiting_paused(conn, task) else "评审中"
     return "已完成"  # done
 
 
@@ -390,6 +407,7 @@ def request_view(request: sqlite3.Row, now) -> dict:
 def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     active = active_request_for_task(conn, task["task_id"])
     queued = queued_request_for_task(conn, task["task_id"])
+    queued_plan = queued_plan_request_for_task(conn, task["task_id"])
     next_claim_at = None
     if queued is not None and queued["not_before"] is not None:
         next_claim_at = queued["not_before"]
@@ -418,6 +436,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "delivery": core.delivery_of(task) or None,
         "review_history": db.task_extra(task).get("review_history") or [],
         "task_id": task["task_id"],
+        "queued_plan_request_id": queued_plan["request_id"] if queued_plan is not None else None,
         "project_id": task["project_id"],
         "project_name": task["project_name"],
         "title": task["title"],
@@ -491,16 +510,27 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if archive_blocked_reason(conn, task, now) is None:
             actions.extend(["archive", "trash"])
         hold = bool(db.task_extra(task).get("plan_execution_hold"))
-        if status == "ready" and hold:
+        dispatch_sent = bool(task["sent"]) or send_state not in (None, "not_sent")
+        if status == "ready" and hold and not dispatch_sent:
             # v2 §5.22.4：待确认执行——以 confirm_dispatch 替代普通排队。
             actions.append("confirm_dispatch")
-        elif status in constants.ENQUEUE_INFER and status != "needs_plan":
+        elif (status in constants.ENQUEUE_INFER and status != "needs_plan"
+              and not (status == "ready" and dispatch_sent)
+              and not (status == "in_review" and db.task_auto_paused(task))):
             actions.append("enqueue")
+        from . import review_recovery
+        from . import review_resolution
+        if review_resolution.candidate(conn, task) is not None:
+            actions.append("resolve_review_blocker")
+        if review_recovery.candidate(conn, task) is not None:
+            actions.append("recover_review")
         if status == "needs_plan":
             # v2 §5.22.2：规划改为手动门控——面板准备材料后经 start-plans。
             actions.append("prepare_plan")
         if queued_request_for_task(conn, task["task_id"]) is not None:
             actions.append("set-priority")
+        if queued_plan_request_for_task(conn, task["task_id"]) is not None:
+            actions.append("cancel-request")
         if lost_request_for_task(conn, task["task_id"], now) is not None:
             actions.append("release_lost")
         if status == "needs_user":
@@ -508,10 +538,22 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             code = task["failure_code"]
             if code == "verification_unconfirmed":
                 actions.append("accept_verification")
+                from . import verification_recovery
+                if verification_recovery.candidate(conn, task):
+                    actions.append("run_verification_checks")
+                    actions.append("reverify")
+            if cmd_queue.execution_retry_candidate(conn, task):
+                actions.append("resume")
             if core.is_automation_managed(task) and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
                 if code != "remote_conflict" or task["failure_stage"] != "dispatch":
                     actions.append("resume")
-            if send_state in (None, "not_sent") and code not in constants.AUTOMATION_FAILURE_CODES:
+            from . import plan_answers
+            clarification = plan_answers.candidate(conn, task)
+            if clarification is not None:
+                actions.append("answer_plan_questions")
+            if clarification is None and send_state in (None, "not_sent") and code not in constants.AUTOMATION_FAILURE_CODES:
+                actions.append("retry")
+            elif clarification is None and send_state == "sent" and not core.is_automation_managed(task) and cmd_queue._retry_target(conn, task)[1] == "review":
                 actions.append("retry")
             if send_state == "unknown":
                 actions.extend(["restore", "accept_duplicate", "mark_sent"])
@@ -527,6 +569,19 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
 
 def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     detail = task_summary(conn, task, now)
+    from . import review_recovery
+    detail["review_recovery"] = review_recovery.candidate(conn, task)
+    from . import review_resolution
+    detail["review_resolution"] = review_resolution.candidate(conn, task)
+    if detail["review_resolution"] is not None:
+        try:
+            path = util.inside(Path(task["review_report_path"]), constants.review_reports_root(), "review report")
+            raw, _sha = review_resolution._read(path, task["review_report_sha256"])
+            detail["review_resolution"]["summary"] = review_resolution.report_summary(raw)
+        except (util.KanpilotError, OSError):
+            detail["review_resolution"]["summary"] = "原评审报告不可核验，请检查报告文件后再处置。"
+    from . import plan_answers
+    detail["plan_clarification"] = plan_answers.view(conn, task)
     attempts = conn.execute(
         "SELECT * FROM attempts WHERE task_id=? ORDER BY id", (task["task_id"],)
     ).fetchall()
@@ -560,9 +615,15 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             # v1.5（protocol §5.18.5）：当前轮次索引视图（worktree_path /
             # backend / run_status / config 快照）；无轮次（历史任务）→ null。
             "execution_round": _execution_round(conn, task),
+            "verification_checks": _verification_checks(task),
         }
     )
     return detail
+
+
+def _verification_checks(task):
+    from . import verification_checks
+    return verification_checks.public_state(task)
 
 
 def _execution_round(conn: sqlite3.Connection, task: sqlite3.Row):
@@ -618,8 +679,10 @@ def request_allowed_actions(
     actions = ["view"]
     if status == "queued":
         actions.append("set-priority")
-        if kind == "plan" and not request_is_authorized_plan(request):
-            actions.append("prepare_plan")
+        if kind == "plan":
+            actions.append("cancel-request")
+            if not request_is_authorized_plan(request):
+                actions.append("prepare_plan")
         return actions
     if status == "claimed":
         if request_is_lost(request, now):
@@ -633,6 +696,9 @@ def request_allowed_actions(
             actions.append("prepare_plan")
         if task is not None and task["status"] == "needs_user":
             send_state = task["send_state"]
+            from . import verification_recovery
+            if verification_recovery.request_candidate(conn, task, request):
+                actions.append("reverify")
             if send_state in (None, "not_sent") and kind != "plan":
                 actions.append("retry")
             actions.append("replan")
@@ -782,6 +848,7 @@ _EVENT_KIND_CN = {
     "delivery_pushed": "交付分支已推送", "pr_opened": "PR 已创建", "kaneo_comment_posted": "PR 链接已回写",
     "pr_merged": "PR 已合并", "pr_closed": "PR 已关闭", "cost_recorded": "运行成本登记",
     "requirements_accepted": "已接受远端需求", "automation_stopped": "自动处理已停止",
+    "execution_retry_requested": "已确认沿用计划重新执行",
     "lost_request_released": "失联观察请求已释放",
 
     "task_created": "任务创建",
@@ -807,9 +874,17 @@ _EVENT_KIND_CN = {
     "migrated": "数据迁移",
     "rechecked": "重新校验",
     "request_cancelled": "请求取消",
+    "failed_request_dismissed": "失败记录已移除",
     "task_archived": "任务归档",
     "task_trashed": "任务移入回收站",
     "task_restored": "任务恢复",
+    "review_stage_recovered": "评审阶段已恢复",
+    "review_result_cleared": "旧评审结果已留存",
+    "review_repair_prepared": "评审修复材料已准备",
+    "verification_checks_started": "验证检查已开始",
+    "verification_checks_completed": "验证检查已完成",
+    "review_supplemented": "评审证据已补充",
+    "task_reconnected": "任务重新接入待规划",
     "session_trashed": "会话移入回收站",
     "session_restored": "会话恢复",
     "round_started": "轮次启动",
@@ -820,6 +895,7 @@ _EVENT_KIND_CN = {
     "plan_started": "规划已排队",
     "plan_ready": "规划产出就绪",
     "plan_needs_input": "规划需要补充输入",
+    "plan_answers_submitted": "规划答案已提交",
     # v3 T5（§5.23.10）：Goal 报告完成判定留痕。
     "goal_report_evaluated": "Goal 报告完成判定",
     # v3 修复：以下 kind 由核心自身发出（cmd_dispatch/cmd_config/cmd_planner），
@@ -876,6 +952,8 @@ def _event_summary(kind: str, detail) -> str:
         return "需求指纹变化，需重新规划"
     if kind == "fix_task_created":
         return f"创建修复任务 {detail.get('fix_task_id')}"
+    if kind == "failed_request_dismissed":
+        return "已从待处理移除失败记录，历史证据保留"
     if kind == "request_cancelled":
         return f"请求取消（{detail.get('reason') or detail.get('via') or ''}）"
     if kind in ("paused", "unpaused"):
@@ -892,6 +970,8 @@ def _event_summary(kind: str, detail) -> str:
         return "规划请求已排队（手动授权）"
     if kind == "plan_ready":
         return "规划产出计划，等待确认执行"
+    if kind == "plan_answers_submitted":
+        return detail.get("note") or "用户答案已保存，等待继续规划"
     if kind == "plan_needs_input":
         return "规划需要补充输入"
     if kind == "goal_report_evaluated":
@@ -992,6 +1072,10 @@ def event_view(
         if prev.get("outcome") == "needs_user":
             result = "needs_user"
 
+    if row["kind"] == "plan_answers_submitted":
+        # This event records the completed user decision, independent of the
+        # newly queued planner request's later result.
+        stage, result = "plan", "succeeded"
     detail = util.jload(row["detail_json"])
     return {
         "id": row["id"],

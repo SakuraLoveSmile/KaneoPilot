@@ -834,6 +834,15 @@ class TaskFactory:
         project_id = project_id or PROJECTS[project]
         repository = self.env.repos_root / project
         repository.mkdir(parents=True, exist_ok=True)
+        # First-time planning now requires an isolated branch from a Git commit.
+        # This fixture never adds a remote or touches a user's repository.
+        if not (repository / ".git").exists():
+            for args in (("init", "-b", "main"),
+                         ("config", "user.name", "KaneoPilot Fixture"),
+                         ("config", "user.email", "fixture@example.invalid"),
+                         ("commit", "--allow-empty", "-m", "isolated baseline")):
+                subprocess.run(["git", "-C", str(repository), *args], check=True,
+                               capture_output=True, timeout=10)
         if remote:
             rt = self.kaneo.add_task(project_id, title, description,
                                      status=remote_status)
@@ -1021,6 +1030,14 @@ class TaskFactory:
         req = self.active_request(task.task_id, kind="monitor")
         c = self.claim("monitor", request_id=req["request_id"])
         assert c["claimed"] is True, f"monitor claim 失败：{c}"
+        current = self.get_task(task.task_id)
+        delivery = current.get("delivery") or {}
+        if delivery.get("workspace_version") == 1:
+            (Path(delivery["worktree_path"]) / "fixture-feature.py").write_text("VALUE = 42\n")
+            committed = self.cli("delivery-commit", {
+                "task_id": task.task_id, "request_id": c["request_id"], "run_id": c["run_id"],
+                "expected_execution_run_id": running.dispatch_run_id})
+            assert committed["outcome"] in ("committed", "already_committed"), committed
         self.cli("advance-task", {
             "task_id": task.task_id, "run_id": c["run_id"],
             "target": "in-review", "expected_current": "in-progress",

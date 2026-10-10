@@ -97,7 +97,7 @@ struct PlanReaderView: View {
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("计划标题")
+                .accessibilityAddTraits(.isHeader)
 
             metadata
 
@@ -241,11 +241,9 @@ struct PlanReaderView: View {
             // §4.8 渲染模式：Foundation `.full` 的 PresentationIntent 语义结构
             // → 原生块级 AppKit 排版（标题/列表/引用/代码/表格）。
             MarkdownReaderView(markdown: plan.markdown ?? "")
-                .accessibilityLabel("计划正文（渲染）")
         case .raw:
             // 原文模式：逐字显示（含所有字符，不折叠/不重排），可选中复制。
             RawMarkdownView(text: plan.markdown ?? "")
-                .accessibilityLabel("计划正文（原文）")
         }
     }
 
@@ -321,6 +319,7 @@ private struct RawMarkdownView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
+        textView.setAccessibilityLabel("计划正文（原文）")
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -858,72 +857,83 @@ struct TaskAutomationSections: View {
     var body: some View {
         if let delivery = detail.delivery {
             DetailSection(title: "交付") {
-                FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
-                FieldRow("分支", delivery.branch)
-                FieldRow("目标分支", delivery.baseBranch)
-                FieldRow("工作树", delivery.worktreePath)
-                FieldRow("PR 状态", delivery.prState)
+                FieldRow("状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
                 if let url = delivery.prUrl {
-                    Text(url).font(.kpSmall).textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("打开 PR") { Workspace.open(url) }
+                    Button("打开 PR，查看交付结果") { Workspace.open(url) }
                 }
-                ForEach(delivery.commits ?? []) { commit in
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        FieldRow("提交", commit.sha)
-                        Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
-                            .font(.kpSmall).foregroundStyle(.secondary)
+                DisclosureGroup("分支、提交与同步记录") {
+                    FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
+                    FieldRow("分支", delivery.branch)
+                    FieldRow("目标分支", delivery.baseBranch)
+                    FieldRow("工作树", delivery.worktreePath)
+                    if let url = delivery.prUrl {
+                        Text(url).font(.kpSmall).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                }
-                if delivery.commits?.isEmpty ?? true {
-                    Text("暂无交付提交").font(.kpSmall).foregroundStyle(.secondary)
-                }
-                FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
-                FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
-                FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
-                FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
+                    ForEach(delivery.commits ?? []) { commit in
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            FieldRow("提交", commit.sha)
+                            Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
+                                .font(.kpSmall).foregroundStyle(.secondary)
+                        }
+                    }
+                    if delivery.commits?.isEmpty ?? true {
+                        Text("暂无交付提交").font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                    FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
+                    FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
+                    FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
+                    FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
+                }.font(.kpSmall)
             }
         } else {
-            DetailSection(title: "交付") {
-                FieldRow("状态", "未开启")
-            }
+            DetailSection(title: "交付") { FieldRow("状态", "未开启") }
         }
         if let automation = detail.automation {
             DetailSection(title: "自动处理") {
                 FieldRow("状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
                 FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
-                FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
-                FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
-                FieldRow("时长", elapsed(automation.segmentStartedAt))
-                FieldRow("时长上限", automation.maxTaskMinutes.map { "\($0) 分钟" })
-                FieldRow("累计成本", automation.costUsd.map { String(format: "$%.2f", $0) })
-                FieldRow("成本上限", automation.maxTaskCostUsd.map { String(format: "$%.2f", $0) } ?? "不限")
-                FieldRow("未计价步数", "\(automation.costUnknownSteps ?? 0)")
-                FieldRow("上次跳过原因", automation.lastSkip?.reason)
-                FieldRow("跳过时间", TimeFormat.fullString(automation.lastSkip?.at))
-            }
-            DetailSection(title: "Review 历史") {
+                if let reason = automation.lastSkip?.reason {
+                    FieldRow("上次跳过原因", reason)
+                }
+                DisclosureGroup("预算与运行详情") {
+                    FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
+                    FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
+                    FieldRow("时长", elapsed(automation.segmentStartedAt))
+                    FieldRow("时长上限", automation.maxTaskMinutes.map { "\($0) 分钟" })
+                    FieldRow("累计成本", automation.costUsd.map { String(format: "$%.2f", $0) })
+                    FieldRow("成本上限", automation.maxTaskCostUsd.map { String(format: "$%.2f", $0) } ?? "不限")
+                    FieldRow("未计价步数", "\(automation.costUnknownSteps ?? 0)")
+                    FieldRow("跳过时间", TimeFormat.fullString(automation.lastSkip?.at))
+                }.font(.kpSmall)
                 if let history = detail.reviewHistory, !history.isEmpty {
-                    ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            FieldRow("结论", Labels.reviewConclusion(entry.conclusion))
-                            FieldRow("登记时间", TimeFormat.fullString(entry.registeredAt))
-                            FieldRow("执行轮次", entry.executionRunId)
-                            FieldRow("提交", entry.headSha)
-                            FieldRow("报告", entry.reportPath)
-                            if let path = entry.reportPath {
-                                Button("打开报告") { Workspace.open(path) }
+                    DisclosureGroup("评审历史（\(history.count)）") {
+                        ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                FieldRow("结论", Labels.reviewConclusion(entry.conclusion))
+                                FieldRow("登记时间", TimeFormat.fullString(entry.registeredAt))
+                                FieldRow("执行轮次", entry.executionRunId)
+                                FieldRow("提交", entry.headSha)
+                                FieldRow("报告", entry.reportPath)
+                                if let path = entry.reportPath {
+                                    Button("打开报告") { Workspace.open(path) }
+                                }
                             }
                         }
-                    }
-                } else {
-                    Text("暂无 Review 历史").font(.kpSmall).foregroundStyle(.secondary)
+                    }.font(.kpSmall)
                 }
             }
         } else {
-            DetailSection(title: "自动处理") {
-                FieldRow("状态", "未开启")
-            }
+            DetailSection(title: "自动处理") { FieldRow("状态", "未开启") }
+        }
+    }
+    private func deliveryState(_ state: String?) -> String {
+        switch state {
+        case "open": return "PR 已创建"
+        case "merged": return "已合并"
+        case "closed": return "PR 已关闭"
+        case nil: return "尚未创建 PR"
+        default: return state ?? "—"
         }
     }
     private func elapsed(_ at: String?) -> String? {

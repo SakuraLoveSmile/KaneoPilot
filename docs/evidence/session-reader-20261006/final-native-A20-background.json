@@ -1,0 +1,239 @@
+{
+  "boundary": {
+    "start": 720156839477375,
+    "end": 720201075231291
+  },
+  "actions": [
+    {
+      "uptime_ns": 720166224075500,
+      "event_to_handler_ms": 12.354708,
+      "action": "collapse",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 36.400749,
+      "handler_to_confirm_ms": 8.530833,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 24.046041,
+      "kind": "native_action_display"
+    },
+    {
+      "event_to_handler_ms": 4.196166,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 34.274374,
+      "handler_to_confirm_ms": 14.054333,
+      "uptime_ns": 720166288133958,
+      "action": "collapse",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 30.078208
+    },
+    {
+      "uptime_ns": 720166326972833,
+      "event_to_handler_ms": 0.760083,
+      "action": "collapse",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 26.665499,
+      "handler_to_confirm_ms": 12.246083,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 25.905416,
+      "kind": "native_action_display"
+    },
+    {
+      "event_to_handler_ms": 7.057583,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 37.091583,
+      "handler_to_confirm_ms": 13.563917,
+      "uptime_ns": 720166380473083,
+      "action": "collapse",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 30.034
+    },
+    {
+      "uptime_ns": 720166428773083,
+      "event_to_handler_ms": 8.298708,
+      "action": "collapse",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 34.961333,
+      "handler_to_confirm_ms": 12.622333,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 26.662625,
+      "kind": "native_action_display"
+    },
+    {
+      "event_to_handler_ms": 5.654417,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 34.375709,
+      "handler_to_confirm_ms": 13.791458,
+      "uptime_ns": 720166479400166,
+      "action": "collapse",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 28.721292
+    },
+    {
+      "uptime_ns": 720166528898583,
+      "event_to_handler_ms": 9.225208,
+      "action": "collapse",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 36.133625,
+      "handler_to_confirm_ms": 11.865459,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 26.908417,
+      "kind": "native_action_display"
+    },
+    {
+      "event_to_handler_ms": 6.038792,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 35.660542,
+      "handler_to_confirm_ms": 13.767417,
+      "uptime_ns": 720166580665000,
+      "action": "collapse",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 29.62175
+    },
+    {
+      "uptime_ns": 720166627060416,
+      "event_to_handler_ms": 5.620583,
+      "action": "collapse",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 31.766667,
+      "handler_to_confirm_ms": 12.521584,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 26.146084,
+      "kind": "native_action_display"
+    },
+    {
+      "event_to_handler_ms": 7.395375,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 37.55175,
+      "handler_to_confirm_ms": 14.208459,
+      "uptime_ns": 720166680803125,
+      "action": "collapse",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 30.156375
+    },
+    {
+      "uptime_ns": 720174288214958,
+      "event_to_handler_ms": 27.903291,
+      "action": "search_input",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 99.699999,
+      "handler_to_confirm_ms": 34.609625,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 71.796708,
+      "kind": "native_action_display"
+    },
+    {
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 112.071083,
+      "event_to_handler_ms": 51.352333,
+      "handler_to_draw_ms": 60.71875,
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "uptime_ns": 720174317159833,
+      "handler_to_confirm_ms": 35.495833,
+      "action": "search_input"
+    },
+    {
+      "event_to_handler_ms": 26.754791,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 89.782333,
+      "handler_to_confirm_ms": 27.021875,
+      "uptime_ns": 720174454023333,
+      "action": "search_input",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 63.027542
+    },
+    {
+      "uptime_ns": 720174480877541,
+      "event_to_handler_ms": 52.768292,
+      "action": "search_input",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 102.275083,
+      "handler_to_confirm_ms": 25.363333,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 49.506791,
+      "kind": "native_action_display"
+    },
+    {
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 44.007499,
+      "event_to_handler_ms": 15.019666,
+      "handler_to_draw_ms": 28.987833,
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "uptime_ns": 720174529304500,
+      "handler_to_confirm_ms": 27.901958,
+      "action": "search_input"
+    },
+    {
+      "uptime_ns": 720174597825625,
+      "event_to_handler_ms": 21.213209,
+      "action": "search_input",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 58.084917,
+      "handler_to_confirm_ms": 24.37425,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 36.871708,
+      "kind": "native_action_display"
+    },
+    {
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 30.661542,
+      "event_to_handler_ms": 10.552625,
+      "handler_to_draw_ms": 20.108917,
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "uptime_ns": 720183253916166,
+      "handler_to_confirm_ms": 3.686042,
+      "action": "scroll"
+    },
+    {
+      "event_to_handler_ms": 5.279666,
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 14.209791,
+      "handler_to_confirm_ms": 3.086,
+      "uptime_ns": 720183593202833,
+      "action": "scroll",
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 8.930125
+    },
+    {
+      "uptime_ns": 720183962456500,
+      "event_to_handler_ms": 6.415792,
+      "action": "scroll",
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 22.573209,
+      "handler_to_confirm_ms": 7.771083,
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 16.157417,
+      "kind": "native_action_display"
+    },
+    {
+      "reader_id": "008DBF49-A5E6-4AD7-9073-5696B92E2B40",
+      "milliseconds": 19.526667,
+      "event_to_handler_ms": 4.836083,
+      "handler_to_draw_ms": 14.690584,
+      "origin": "NSEvent.timestamp",
+      "kind": "native_action_display",
+      "uptime_ns": 720184309735083,
+      "handler_to_confirm_ms": 9.007459,
+      "action": "scroll"
+    }
+  ],
+  "coverage": {
+    "collapse": 10,
+    "search_input": 6,
+    "scroll": 4
+  },
+  "p95_ms": 102.275083,
+  "max_ms": 112.071083,
+  "probe_count": 4424,
+  "probe_max_ms": 77.438,
+  "probe_ge250": 0,
+  "endpoint": "NSEvent.timestamp to actual applied field/collapse/clip bounds confirmation and next matching NSView draw; not compositor latency"
+}

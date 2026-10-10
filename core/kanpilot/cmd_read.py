@@ -140,12 +140,42 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dic
     return {"created": created, "skipped": skipped}
 
 
+def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
+    from . import cmd_dispatch
+    # Recover only automatic executions blocked by an exited observer. Plus
+    # reads and worker attachment stay outside the SQLite write transaction.
+    goal_recoveries = []
+    if not db.paused(ctx.conn, "monitor") and not db.paused(ctx.conn, "dispatch"):
+        candidates = ctx.conn.execute(
+            "SELECT * FROM tasks WHERE status='needs_user' "
+            "AND failure_code='execution_failed' ORDER BY task_id"
+        ).fetchall()
+        for task in candidates:
+            if (not db.task_schedulable(task) or not core.is_automation_managed(task)
+                    or not task["run_id"]):
+                continue
+            try:
+                result = cmd_dispatch.cmd_round_observe(ctx, {
+                    "task_id": task["task_id"], "run_id": task["run_id"],
+                    "executor": "scheduler", "continue_goal": True,
+                    "continue_goal_only": True,
+                })
+                if result.get("status") != "deferred":
+                    goal_recoveries.append({"task_id": task["task_id"], **result})
+            except util.KanpilotError as exc:
+                # A failed read is not permission to resend or unblock a task.
+                goal_recoveries.append({"task_id": task["task_id"],
+                                        "status": "deferred", "code": exc.code})
+    return {"goal_recoveries": goal_recoveries}
+
+
 def cmd_tick(ctx, payload: dict) -> dict:
     from . import automation_policy
     projects = {t["project_id"] for t in ctx.conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall() if core.is_automation_managed(t)}
     checks = {pid: automation_policy.automation_preflight(ctx.conn, pid) for pid in projects}
     with db.write_txn(ctx.conn):
-        return tick_inline(ctx.conn, ctx.now, checks)
+        result = tick_inline(ctx.conn, ctx.now, checks)
+    return result
 
 
 def cmd_overview(ctx, payload: dict) -> dict:
@@ -355,7 +385,10 @@ def cmd_get_request(ctx, payload: dict) -> dict:
         raise util.KanpilotError(
             "not_found", f"request not found: {payload['request_id']}"
         )
-    return derive.request_detail(ctx.conn, request, ctx.now)
+    from . import cmd_exec
+    result = derive.request_detail(ctx.conn, request, ctx.now)
+    result["request"]["backend"] = cmd_exec.request_backend(ctx.conn, request)
+    return result
 
 
 def cmd_list_requests(ctx, payload: dict) -> dict:
@@ -391,8 +424,16 @@ def cmd_list_requests(ctx, payload: dict) -> dict:
         (*params, limit),
     ).fetchall()
     views = []
+    dismissed = db.get_setting(ctx.conn, "dismissed_failed_requests", {})
+    dismissed = dismissed if isinstance(dismissed, dict) else {}
+    from . import cmd_exec
     for row in rows:
-        views.append(derive.request_view(row, ctx.now))
+        view = derive.request_view(row, ctx.now)
+        view["backend"] = cmd_exec.request_backend(ctx.conn, row)
+        view["failure_dismissed_at"] = dismissed.get(row["request_id"])
+        task = db.get_task(ctx.conn, row["task_id"]) if row["task_id"] else None
+        view["allowed_actions"] = derive.request_allowed_actions(ctx.conn, row, task, ctx.now)
+        views.append(view)
     return {"requests": views}
 
 

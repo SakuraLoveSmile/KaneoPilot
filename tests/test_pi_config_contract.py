@@ -248,11 +248,11 @@ def test_planner_and_review_backend_are_independent(cli):
     assert "pi_desktop 配置未保存" in out["error"]
 
     cfg = cli("set-planner-config", {
-        "backend": "pi_desktop", "pi_desktop": PLUS_BLOCK,
+        "backend": "pi_desktop", "pi_desktop": dict(PLUS_BLOCK, permission_mode="auto"),
     })["config"]
     assert cfg["backend"] == "pi_desktop"
     assert cfg["default_method"] == "builtin"
-    assert cfg["pi_desktop"]["permission_mode"] == "ask"
+    assert cfg["pi_desktop"]["permission_mode"] == "auto"
 
     # Plus 计划分支只支持 builtin：spec_plan 是 Codex 插件方式，明确禁用。
     blocked = cli("set-planner-config", {"default_method": "spec_plan"},
@@ -266,9 +266,13 @@ def test_planner_and_review_backend_are_independent(cli):
     assert review["backend"] == "pi" and review["mode"] == "inherit"
 
     review_plus = cli("set-review-config", {
-        "backend": "pi_desktop", "pi_desktop": PLUS_BLOCK,
+        "backend": "pi_desktop", "pi_desktop": dict(PLUS_BLOCK, permission_mode="auto"),
     })["config"]
     assert review_plus["backend"] == "pi_desktop"
+    assert review_plus["pi_desktop"]["permission_mode"] == "auto"
+    rejected = cli("set-review-config", {"pi_desktop": {"permission_mode": "ask"}}, expect=1)
+    assert rejected["code"] == "bad_request"
+    assert cli("get-review-config", {})["config"]["pi_desktop"]["permission_mode"] == "auto"
 
 
 def test_role_capability_commands_report_each_branch(cli):

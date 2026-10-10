@@ -1,0 +1,238 @@
+{
+  "boundary": {
+    "start": 719629768536000,
+    "end": 719674189028250
+  },
+  "actions": [
+    {
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "origin": "NSEvent.timestamp",
+      "handler_to_confirm_ms": 11.067875,
+      "handler_to_draw_ms": 26.891833,
+      "kind": "native_action_display",
+      "action": "collapse",
+      "milliseconds": 36.923625,
+      "event_to_handler_ms": 10.031792,
+      "uptime_ns": 719640562568000
+    },
+    {
+      "kind": "native_action_display",
+      "uptime_ns": 719640611768333,
+      "milliseconds": 33.594459,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "event_to_handler_ms": 9.823709,
+      "handler_to_confirm_ms": 8.605,
+      "handler_to_draw_ms": 23.77075,
+      "origin": "NSEvent.timestamp",
+      "action": "collapse"
+    },
+    {
+      "action": "collapse",
+      "event_to_handler_ms": 8.037208,
+      "handler_to_confirm_ms": 13.5415,
+      "kind": "native_action_display",
+      "uptime_ns": 719640680444125,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 28.230625,
+      "milliseconds": 36.267833,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "event_to_handler_ms": 7.957958,
+      "handler_to_draw_ms": 26.592375,
+      "handler_to_confirm_ms": 12.250375,
+      "milliseconds": 34.550333,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "uptime_ns": 719640729200000,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "action": "collapse"
+    },
+    {
+      "action": "collapse",
+      "event_to_handler_ms": 7.417542,
+      "handler_to_confirm_ms": 13.6835,
+      "kind": "native_action_display",
+      "uptime_ns": 719640781615708,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 28.8935,
+      "milliseconds": 36.311042,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "event_to_handler_ms": 10.435458,
+      "handler_to_draw_ms": 25.629042,
+      "handler_to_confirm_ms": 11.824625,
+      "milliseconds": 36.0645,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "uptime_ns": 719640831088416,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "action": "collapse"
+    },
+    {
+      "action": "collapse",
+      "event_to_handler_ms": 7.216334,
+      "handler_to_confirm_ms": 12.35425,
+      "kind": "native_action_display",
+      "uptime_ns": 719640870719666,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 29.139208,
+      "milliseconds": 36.355542,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "event_to_handler_ms": 1.69175,
+      "handler_to_draw_ms": 26.071666,
+      "handler_to_confirm_ms": 11.757583,
+      "milliseconds": 27.763416,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "uptime_ns": 719640914009416,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "action": "collapse"
+    },
+    {
+      "action": "collapse",
+      "event_to_handler_ms": 5.732333,
+      "handler_to_confirm_ms": 13.710125,
+      "kind": "native_action_display",
+      "uptime_ns": 719640964655125,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 29.020709,
+      "milliseconds": 34.753042,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "event_to_handler_ms": 7.057958,
+      "handler_to_draw_ms": 25.958,
+      "handler_to_confirm_ms": 12.012625,
+      "milliseconds": 33.015958,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "uptime_ns": 719641011879291,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "action": "collapse"
+    },
+    {
+      "handler_to_confirm_ms": 29.042833,
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 30.063708,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "milliseconds": 50.901708,
+      "event_to_handler_ms": 20.838,
+      "uptime_ns": 719652299483416,
+      "action": "search_input",
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "handler_to_confirm_ms": 38.498875,
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 85.854708,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "milliseconds": 115.420291,
+      "event_to_handler_ms": 29.565583,
+      "uptime_ns": 719652430429583,
+      "action": "search_input",
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "handler_to_confirm_ms": 33.9425,
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 40.942791,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "milliseconds": 111.368749,
+      "event_to_handler_ms": 70.425958,
+      "uptime_ns": 719652443185583,
+      "action": "search_input",
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "action": "search_input",
+      "event_to_handler_ms": 14.603542,
+      "handler_to_confirm_ms": 35.745625,
+      "kind": "native_action_display",
+      "uptime_ns": 719652518305625,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 49.592458,
+      "milliseconds": 64.196,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "handler_to_confirm_ms": 26.100333,
+      "kind": "native_action_display",
+      "handler_to_draw_ms": 34.508541,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "milliseconds": 42.357707,
+      "event_to_handler_ms": 7.849166,
+      "uptime_ns": 719652585667625,
+      "action": "search_input",
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "action": "search_input",
+      "event_to_handler_ms": 2.341,
+      "handler_to_confirm_ms": 37.398625,
+      "kind": "native_action_display",
+      "uptime_ns": 719652641801250,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "handler_to_draw_ms": 51.387792,
+      "milliseconds": 53.728792,
+      "origin": "NSEvent.timestamp"
+    },
+    {
+      "handler_to_confirm_ms": 10.632375,
+      "uptime_ns": 719663656959416,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 25.816292,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "event_to_handler_ms": 7.273834,
+      "action": "scroll",
+      "milliseconds": 33.090126
+    },
+    {
+      "handler_to_confirm_ms": 9.090625,
+      "uptime_ns": 719664037060041,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 14.785083,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "event_to_handler_ms": 4.679667,
+      "action": "scroll",
+      "milliseconds": 19.46475
+    },
+    {
+      "handler_to_confirm_ms": 9.105583,
+      "uptime_ns": 719664405490041,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 16.569667,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "event_to_handler_ms": 4.453208,
+      "action": "scroll",
+      "milliseconds": 21.022875
+    },
+    {
+      "handler_to_confirm_ms": 8.501667,
+      "uptime_ns": 719664917622500,
+      "kind": "native_action_display",
+      "origin": "NSEvent.timestamp",
+      "handler_to_draw_ms": 13.556542,
+      "reader_id": "6138430B-D60F-4693-BE8B-F72E7A3C4E1B",
+      "event_to_handler_ms": 5.064042,
+      "action": "scroll",
+      "milliseconds": 18.620584
+    }
+  ],
+  "coverage": {
+    "collapse": 10,
+    "search_input": 6,
+    "scroll": 4
+  },
+  "p95_ms": 111.368749,
+  "max_ms": 115.420291,
+  "probe_count": 4442,
+  "probe_max_ms": 77.542,
+  "probe_ge250": 0
+}

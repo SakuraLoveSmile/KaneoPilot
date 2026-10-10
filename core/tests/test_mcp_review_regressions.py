@@ -12,7 +12,8 @@ from test_pi_desktop_backend import PiDesktopCase as _PiDesktopCase
 class TestRuntimeNamingAndReports(_PiDesktopCase):
     """真实 RuntimeClient → 本机项目 MCP → HTTP fake Plus 的隔离回归。"""
 
-    def runtime(self, role="execution", *, invocation="runtime_contract", read_only=False):
+    def runtime(self, role="execution", *, invocation="runtime_contract", read_only=False,
+                permission="ask"):
         from kanpilot.runtime_client import RuntimeClient
         for tool in ("pi_goal_report_list", "pi_goal_report_get"):
             if tool not in self.server.tools:
@@ -22,11 +23,28 @@ class TestRuntimeNamingAndReports(_PiDesktopCase):
             project_path=str(self.repos_root / "Feedback"),
             runtime_config={"connection_file": str(self.connection_file),
                             "provider_id": "test-provider", "model_id": "test-model",
-                            "thinking_level": "low", "permission_mode": "ask"},
+                            "thinking_level": "low", "permission_mode": permission},
             invocation_id=invocation, read_only=read_only,
         )
         client.connect()
         return client
+
+    def test_review_auto_and_historical_ask_reach_plus_through_runtime(self):
+        for permission in ("auto", "ask"):
+            with self.subTest(permission=permission):
+                client = self.runtime(role="review", invocation=f"review-{permission}",
+                                      permission=permission)
+                session = client.session_create(str(self.repos_root / "Feedback"),
+                                                mode="plan")["session"]
+                result = client.session_configure(session["id"], mode="plan",
+                                                  permission_mode=permission)
+                self.assertTrue(result["configured"])
+                self.assertEqual(self.server.configured["permissionMode"], permission)
+                self.assertEqual(self.server.configured["mode"], "plan")
+                with self.assertRaises(util.KanpilotError) as raised:
+                    client.session_configure(session["id"], mode="plan",
+                                             permission_mode="ask" if permission == "auto" else "auto")
+                self.assertEqual(raised.exception.code, "forbidden")
 
     def create(self, client):
         return client.session_create(
@@ -160,6 +178,40 @@ def test_runtime_resource_and_config_scope_guards(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("role,snapshot,requested,allowed", [
+    ("planner", "auto", "auto", True),
+    ("planner", "ask", "ask", True),
+    ("planner", "ask", "auto", False),
+    ("planner", "auto", "ask", False),
+    ("planner", "accept-edits", "accept-edits", False),
+    ("review", "ask", "ask", True),
+    ("review", "ask", "auto", False),
+    ("review", "auto", "auto", True),
+    ("review", "auto", "ask", False),
+    ("review", "accept-edits", "accept-edits", False),
+    ("execution", "auto", "auto", True),
+    ("execution", "ask", "auto", False),
+])
+def test_runtime_configure_respects_role_and_immutable_permission(tmp_path, role, snapshot, requested, allowed):
+    conn = db.connect(tmp_path / "configure.db")
+    scope = mcp_scopes.Scope(
+        "scope", "invocation", role,
+        util.to_iso(util.now_dt() + timedelta(minutes=10)),
+        project_path=str(tmp_path), runtime_config={"permission_mode": snapshot},
+    )
+    args = {"scope_id": "scope", "mode": "goal" if role == "execution" else "plan",
+            "permission_mode": requested}
+    try:
+        if allowed:
+            mcp_tools._runtime_guard(conn, scope, "kp_runtime_session_configure", args)
+        else:
+            with pytest.raises(util.KanpilotError) as caught:
+                mcp_tools._runtime_guard(conn, scope, "kp_runtime_session_configure", args)
+            assert caught.value.code == "forbidden"
+    finally:
+        conn.close()
+
+
 def test_runtime_prompt_uses_session_ownership_without_attachment(tmp_path):
     conn = db.connect(tmp_path / 'test.db')
     scope = mcp_scopes.Scope(
@@ -260,8 +312,8 @@ def test_plan_resolution_has_no_write_lock_and_existing_authorization_is_offline
     from kanpilot import cli, planner_inputs, planner_config
     task = factory.sync_task(title='snapshot lock boundary')
     prepared = factory.cli('prepare-plan-input', {'task_id':task.task_id})
-    factory.cli('set-planner-config', {'backend':'pi_desktop', 'pi_desktop':{'model_source':'inherit', 'connection_file':str(tmp_env.root/'plus.json'), 'permission_mode':'ask'}})
-    runtime = {'connection_file':str(tmp_env.root/'plus.json'), 'provider_id':'p', 'model_id':'m', 'thinking_level':'off', 'permission_mode':'ask'}
+    factory.cli('set-planner-config', {'backend':'pi_desktop', 'pi_desktop':{'model_source':'inherit', 'connection_file':str(tmp_env.root/'plus.json'), 'permission_mode':'auto'}})
+    runtime = {'connection_file':str(tmp_env.root/'plus.json'), 'provider_id':'p', 'model_id':'m', 'thinking_level':'off', 'permission_mode':'auto'}
     calls = []
     def resolve(conn, block=None, **kwargs):
         assert not conn.in_transaction

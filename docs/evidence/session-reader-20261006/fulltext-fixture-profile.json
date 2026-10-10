@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-06",
+  "instrument": "Time Profiler",
+  "template": "Blank (no --template)",
+  "duration_seconds": 8.31273,
+  "target_exit_status": 1,
+  "fixture_probe_max_ms": 271.835167,
+  "main_running_samples": 968,
+  "swift_string_compare_samples": 571,
+  "fixture_wait_string_compare_samples": 450,
+  "ns_move_helper_samples": 0,
+  "parent_close_sync_ms": 3.025834,
+  "cause": "Fixture wait predicates and complete-content assertions compare foreign NSTextView NSString values through Swift NFC normalization.",
+  "example_stack": [
+    "CFStorageGetConstValueAtIndex",
+    "-[NSBigMutableString characterAtIndex:]",
+    "_StringGuts.foreignErrorCorrectedUTF16CodeUnit(at:)",
+    "String.UnicodeScalarView._foreignIndex(after:)",
+    "specialized closure #1 in Unicode._InternalNFC.Iterator.next()",
+    "Unicode._NFDNormalizer._resume(consuming:)",
+    "specialized Unicode._NFCNormalizer._resume(consumingNFD:)",
+    "_StringGutsSlice._slowCompare(with:expecting:)",
+    "_stringCompareSlow(_:_:expecting:)",
+    "specialized static SessionFulltextFixtures.wait(_:condition:)",
+    "static SessionFulltextFixtures.run()",
+    "closure #1 in static SessionFulltextFixtures.main()",
+    "<deduplicated_symbol>",
+    "<deduplicated_symbol>",
+    "<deduplicated_symbol>",
+    "completeTaskWithClosure(swift::AsyncContext*, swift::SwiftError*)"
+  ],
+  "literal_comparison_probe": {
+    "exact_1MiB": true,
+    "milliseconds": 6.285292,
+    "distinguishes_composed_vs_decomposed": true
+  },
+  "fixture_check_string_compare_samples": 121,
+  "fix": "Wait for textStorage.length and prepared graph identity; verify complete original/AX/Markdown text independently with NSString.compare(options:.literal).",
+  "verified_after_fix": {
+    "probe_max_ms": 165.118292,
+    "probe_p95_ms": 30.527166,
+    "probe_samples": 709,
+    "result": "PASS",
+    "single_utf16": 1048586,
+    "unicode_utf16": 175014
+  }
+}

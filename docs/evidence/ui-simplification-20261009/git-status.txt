@@ -1,0 +1,106 @@
+## main...origin/main
+ M core/executor_prompts/_preamble.md
+ M core/executor_prompts/review.md
+ M core/kanpilot/automation_policy.py
+ M core/kanpilot/cli.py
+ M core/kanpilot/cmd_archive.py
+ M core/kanpilot/cmd_config.py
+ M core/kanpilot/cmd_planner.py
+ M core/kanpilot/cmd_queue.py
+ M core/kanpilot/cmd_read.py
+ M core/kanpilot/cmd_session.py
+ M core/kanpilot/constants.py
+ M core/kanpilot/derive.py
+ M core/kanpilot/dsh_events.py
+ M core/kanpilot/git_delivery.py
+ M core/kanpilot/harness_plus_adapter.py
+ M core/kanpilot/headless_adapter.py
+ M core/kanpilot/mcp_tools.py
+ M core/kanpilot/pi_desktop_controller.py
+ M core/kanpilot/pi_desktop_planner.py
+ M core/kanpilot/pi_desktop_review.py
+ M core/kanpilot/pi_desktop_worker.py
+ M core/kanpilot/planner_config.py
+ M core/kanpilot/planner_inputs.py
+ M core/kanpilot/review_config.py
+ M core/kanpilot/round_store.py
+ M core/kanpilot/runtime_client.py
+ M core/kanpilot/session_store.py
+ M core/kanpilot/util.py
+ M core/tests/test_archive.py
+ M core/tests/test_automation_core.py
+ M core/tests/test_automation_policy.py
+ M core/tests/test_board.py
+ M core/tests/test_claude_planner.py
+ M core/tests/test_delivery_pr.py
+ M core/tests/test_git_delivery.py
+ M core/tests/test_harness_plus_adapter.py
+ M core/tests/test_mcp_review_regressions.py
+ M core/tests/test_planner_config.py
+ M core/tests/test_planner_partial_preflight.py
+ M core/tests/test_plus_planner.py
+ M core/tests/test_plus_review.py
+ M core/tests/test_review_settle.py
+ M core/tests/test_role_config.py
+ M core/tests/test_session.py
+ M docs/protocol.md
+ M docs/state-model.md
+ M docs/ui-spec.md
+ M macos/FakeCore/kanpilot-fake.py
+ M macos/KaneoPilot.xcodeproj/project.pbxproj
+ M macos/KaneoPilot/AppViewModel.swift
+ M macos/KaneoPilot/Core/CoreLocator.swift
+ M macos/KaneoPilot/Core/Models.swift
+ M macos/KaneoPilot/KaneoPilotApp.swift
+ M macos/KaneoPilot/Views/BoardView.swift
+ M macos/KaneoPilot/Views/Components.swift
+ M macos/KaneoPilot/Views/MarkdownReaderView.swift
+ M macos/KaneoPilot/Views/PendingView.swift
+ M macos/KaneoPilot/Views/PlanningView.swift
+ M macos/KaneoPilot/Views/ProjectMappingsView.swift
+ M macos/KaneoPilot/Views/RootView.swift
+ M macos/KaneoPilot/Views/SavedTasksView.swift
+ M macos/KaneoPilot/Views/SessionReaderView.swift
+ M macos/KaneoPilot/Views/SettingsView.swift
+ M macos/KaneoPilot/Views/TaskDetailContentView.swift
+ M macos/KaneoPilot/Views/TaskDetailTabs.swift
+ M macos/KaneoPilot/Views/TaskDetailView.swift
+ M macos/README.md
+ M macos/tests/main.swift
+ M tests/session_refresh_harness.py
+ M tests/test_auto_pipeline.py
+ M tests/test_pi_config_contract.py
+ M tests/test_session_contract.py
+ M tests/ui-acceptance.md
+?? core/kanpilot/desktop_intake_probe.py
+?? core/kanpilot/review_recovery.py
+?? core/kanpilot/session_control.py
+?? core/tests/test_cancel_request.py
+?? core/tests/test_desktop_intake_probe.py
+?? core/tests/test_failed_request_dismissal.py
+?? core/tests/test_force_purge_session.py
+?? core/tests/test_reconnect_task.py
+?? core/tests/test_review_stage_recovery.py
+?? core/tests/test_runtime_transcript_paging.py
+?? core/tests/test_session_control.py
+?? core/tests/test_session_status.py
+?? core/tests/test_stale_plan_session.py
+?? docs/evidence/
+?? docs/plans/执行会话性能与可读性_50fa5654.plan.md
+?? docs/plans/执行空转检测与自动重试_4a949aba.plan.md
+?? docs/plans/自动化工作台与交互简化.plan.md
+?? macos/KaneoPilot/Views/AutomationDashboardView.swift
+?? macos/KaneoPilot/Views/SessionMessageDetailView.swift
+?? macos/KaneoPilot/Views/SessionMessagePresentation.swift
+?? macos/KaneoPilot/Views/SessionReaderStore.swift
+?? macos/tests/planning_input_main.swift
+?? macos/tests/run-planning-input-fixtures.sh
+?? macos/tests/run-session-fulltext-fixtures.sh
+?? macos/tests/run-session-reader-fixtures.sh
+?? macos/tests/run-session-search-input-fixtures.sh
+?? macos/tests/session_fulltext_main.swift
+?? macos/tests/session_reader_main.swift
+?? macos/tests/session_search_input_main.swift
+?? scripts/preview_automation_ui.sh
+?? scripts/preview_desktop_intake.sh
+?? scripts/preview_session_reader.sh
