@@ -268,3 +268,37 @@ done**——这个身份核对门是按设计工作的，不是缺陷。
 **A14 仍未满足（unmet）**，但比 §2 大幅推进：黄金路径已由真实 Plus 完整走通 1 次（到 Kaneo `done`），
 3 个 PR 已合并，B1/B2 两个阻断缺陷经实测确认修复，`actor=user` 约束首次满足。
 剩余阻碍是 12.3（夹具）与 12.4（交付提交构建产物）两项，其中 12.4 是真实的引擎改进点。
+
+## 13. 第三次重跑：G1/G2/F1 + P1 + .gitignore 就位后（2026-10-11）
+
+清空验收库与 Kaneo 侧，重建 5 个 To Do（描述不含代码围栏，规避 §12.3），沙盒仓库已有
+`.gitignore`。引擎侧修复：B1（lifecycle 串行位让行）、B2（事件 actor）、
+G1（retry_base 落库）、G2（dispatching 反向单测）、F1（fallback connection_file +
+审计事件）、P1（构建产物过滤）。全量 core 2357 passed / rehearsal 63 passed。
+
+### 13.1 已实证修复
+
+- **B1**：任务 1/2 并发 dispatch 全部 `send_state=sent`，无 `busy`。
+- **B2**：沙盒项目 `actor=user` 事件数 = **0**。
+- **§12.3 围栏缺陷规避**：5 个计划均正常解析出 verify 围栏，monitor 全部 `succeeded`。
+- **§12.4 产物冲突规避**：仓库有 `.gitignore` 且 P1 兜底，本轮无 PR `CONFLICTING`。
+- **执行质量完好**：`runs/<task>/<run>/job.json` 显示 `exit_code: 0`、`ended_at` 已写、
+  计划 criteria 全 `met`、两条 verify 命令退出码均 0——Plus 执行与核心验证都成功。
+
+### 13.2 新阻断缺陷：轮次终态未登记，任务卡在 observe/running
+
+现象：两个任务 monitor 均 `succeeded`，但 `tasks.status` 停在 `running`、
+`execution_rounds.run_status` 仍 `running`，引擎 `decide` 恒判
+`[observe/running] 等待中` → `AWAIT`，不再产生命令。worker 进程已退出，
+`job.json` 的 `ended_at`/`exit_code` 已写。
+
+根因（时序竞）：monitor 在轮次实际结束**之前**完成观察并回报 `succeeded`
+（monitor finished 20:14:00 vs job.json ended_at 20:14:30），此后无组件再把
+`run_status` 更新为终态——`auto_monitor` 的终态检测只在那一次观察窗口内有效。
+即 D3「租约/轮次回收零散」在新引擎下的同源复现：`decide` 只读 `run_status`，
+而它的写方只有 worker 收尾那一次机会，错过就无人兜底。
+
+**建议修法（未实现）**：`observe/running` 且无活动请求时，引擎做世界探测——
+`round.pid` 已死 + `job.json` 有 `ended_at`/`exit_code`，即按 `exit_code` 派生终态
+（0 → 走 verdict，非 0 → 按失败阶梯归因），而非无限 AWAIT。原设计只覆盖「引擎被杀」，
+未覆盖「worker 正常退出但终态登记错过窗口」。
