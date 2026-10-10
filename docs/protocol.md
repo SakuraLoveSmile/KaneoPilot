@@ -1372,7 +1372,9 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  set-project-engine-mode {project_id, engine_mode?: "legacy"|"shadow"|"live", expected_revision?: int}
  ```
 
- - 写入 `project_mappings.items[project_id].automation.engine_mode`，带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。
+ - 写入 `project_mappings.items[project_id].engine_mode`（**映射条目层**，不是 `automation` 内），带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。
+ - **为什么在条目层**：`set-project-automation` 会用固定键白名单重建 `automation` 子字典（`validate_automation`），存在它里面的 `engine_mode` 会被下一次 automation 写入静默丢弃（已在生产库实测复现）。条目层键同时经受 `set-project-mapping`（它展开 `existing_entry`）与 `set-project-automation`（它只替换 `automation` 键）。
+ - 配套 `set-project-verify-env {project_id, verify_env, expected_revision?}` 同样写在条目层（`items[pid].verify_env`），供 `engine-verdict` 的 login-shell 注入读取；`verify_env` 必须是扁平字符串→字符串字典，**凭据类键（`TOKEN`/`SECRET`/`AUTHORIZATION`/`KANEO_TOKEN`/`PI_DESKTOP_TOKEN` 等）一律拒绝**——凭据走凭据文件，不进 `verify_env`。
  - `engine_mode` 缺省或省略 → `legacy`（strangler 安全默认：旧项目行为不变，引擎不驱动）。
  - 非法值 → `bad_request`；命令独立于 `set-project-automation`（后者不改动、不校验该键，读侧 `automation_policy.policy_for` 原样透出）。
  - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
