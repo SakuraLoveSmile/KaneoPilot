@@ -48,6 +48,11 @@ try:
 except ImportError:  # 包上下文
     from tests.test_migration import _migrate  # noqa: E402
 
+try:
+    from conftest import make_due  # noqa: E402
+except ImportError:  # 包上下文
+    from tests.conftest import make_due  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # 助手
 # ---------------------------------------------------------------------------
@@ -91,13 +96,18 @@ def _count_requests(db_path, task_id, kind, statuses):
 # ---------------------------------------------------------------------------
 
 
-def test_scenario_transient_backoff_capped_then_escalate(factory, tmp_env):
-    """瞬时失败阶梯 1：指数退避重试上限 2 次/阶段 → 升级阶梯 2 停止自动重试。"""
+def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
+    """瞬时失败阶梯 1：指数退避重试真实执行 → 封顶守卫停止重试。
+
+    执行层已验证：瞬时失败 → 引擎重新入队（退避 not_before + actor=automation）。
+    已知缺口（留痕报 engine_builder）：重入队以新请求承载、attempt_no 归零
+    重计，≤2/阶段 的封顶在实时链路不跨请求累积；此处封顶断言以后门构造的
+    attempt_no 达上限失败请求钉住守卫本身。"""
+    # 决策层（规格阶梯表）
     transient = ["remote_unavailable", "kaneo_timeout", "kaneo_500",
                  "network_timeout", "git_probe_timeout"]
     for code in transient:
         assert kladder.classify(code) == kladder.LADDER_TRANSIENT == 1, code
-    # attempt_no 0 → RETRY backoff 1.0；1 → RETRY 2.0；2（>=MAX）→ BLOCK 升级阶梯 2
     d0 = kdecide.failure_decision("kaneo_timeout", attempt_no=0)
     assert d0.action == kdecide.RETRY
     assert d0.params["backoff_seconds"] == 1.0 and d0.params["attempt_no"] == 1
@@ -115,27 +125,78 @@ def test_scenario_transient_backoff_capped_then_escalate(factory, tmp_env):
         assert kladder.classify(code) == 2, code
         assert kladder.auto_retry_allowed(2) is False
 
-    # DB 层：needs_user 任务 → BLOCK、无命令执行、带 explain；shadow 不写库。
-    blocked = factory.make_needs_user()
-    tid = blocked.task.task_id
+    # 执行层：monitor 瞬时失败 → 引擎真实重新入队（退避 not_before、
+    # actor=automation）；attempt_no 达上限后停止重试、不产生新请求。
+    running = factory.make_running()
+    tid = running.task.task_id
     _adopt(tmp_env.db, tid)
-    before = _count_requests(tmp_env.db, tid, "dispatch",
-                             ("queued", "claimed"))
+    monitor = factory.active_request(tid, kind="monitor")
+    assert monitor is not None, "running 任务应有 monitor 请求"
+    claimed = cli("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                            "request_id": monitor["request_id"]})
+    assert claimed["claimed"] is True, claimed
+    cli("report", {"request_id": claimed["request_id"],
+                   "run_id": claimed["run_id"], "outcome": "failed",
+                   "failure_code": "remote_unavailable",
+                   "failure_reason": "Kaneo 瞬时不可达（演练注入）"})
     summary = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
     mine = [a for a in summary["actions"] if a["task_id"] == tid]
-    assert len(mine) == 1, mine
-    action = mine[0]
-    assert action["action"] == kdecide.BLOCK, action
-    assert action["command"] is None, action
-    assert action.get("explain"), action
-    assert action.get("executed") is not True, action
-    assert _count_requests(tmp_env.db, tid, "dispatch",
-                           ("queued", "claimed")) == before
+    retry_actions = [a for a in mine if a["action"] == kdecide.RETRY]
+    assert retry_actions, mine
+    assert all(a.get("executed") is True for a in retry_actions), retry_actions
+    reqs = cli("list-requests", {})["requests"]
+    retried = [r for r in reqs if r["task_id"] == tid and r["kind"] == "monitor"
+               and r["status"] == "queued"]
+    assert len(retried) == 1, reqs
+    assert retried[0]["requested_by"] == "automation", retried[0]
+    assert kutil.ts_before(kutil.now_iso(), retried[0]["not_before"]), retried[0]
 
+    # 封顶守卫：attempt_no 已达上限（>=MAX_TRANSIENT_RETRIES）的失败请求 →
+    # 不再退避重试、不产生新请求。该状态 CLI 无法表达（同一请求不能两次
+    # 失败），用 DB 后门构造（与 core/tests/test_engine_retry.py 同构）。
+    # 缺口留痕：重入队创建新请求（attempt_no 归零重计），实时链路里预算
+    # 不跨请求累积——≤2/阶段 的封顶目前只对单请求的 attempt_no 生效；
+    # 端到端封顶待引擎侧携带/持久化重试计数（已报 engine_builder）。
+    capped = factory.make_running()
+    ctid = capped.task.task_id
+    _adopt(tmp_env.db, ctid)
+    cmonitor = factory.active_request(ctid, kind="monitor")
+    conn = _connect(tmp_env.db)
+    try:
+        with kdb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO requests(request_id, idempotency_key, task_id, "
+                "stage, kind, status, attempt_no, result_json, created_at, "
+                "updated_at) VALUES (?,?,?,?,?, 'failed', ?, ?, ?, ?)",
+                (kutil.new_uuid(), f"monitor:{ctid}:capped", ctid, "monitor",
+                 "monitor", kladder.MAX_TRANSIENT_RETRIES,
+                 kutil.jdump({"failure_code": "remote_unavailable"}),
+                 kutil.now_iso(), kutil.now_iso()))
+    finally:
+        conn.close()
+    summary2 = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
+    mine2 = [a for a in summary2["actions"] if a["task_id"] == ctid]
+    assert not [a for a in mine2 if a["action"] == kdecide.RETRY], mine2
+    reqs2 = cli("list-requests", {})["requests"]
+    assert not [r for r in reqs2 if r["task_id"] == ctid
+                and r["kind"] == "monitor" and r["status"] == "queued"
+                and r["requested_by"] == "automation"], reqs2
+
+    # 升级面：needs_user 任务 → BLOCK、无命令执行、带 explain；shadow 不写库。
+    blocked = factory.make_needs_user()
+    btid = blocked.task.task_id
+    _adopt(tmp_env.db, btid)
+    before = _count_requests(tmp_env.db, btid, "dispatch",
+                             ("queued", "claimed"))
+    live = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
+    live_mine = [a for a in live["actions"] if a["task_id"] == btid]
+    assert len(live_mine) == 1, live_mine
+    assert live_mine[0]["action"] == kdecide.BLOCK, live_mine
+    assert live_mine[0]["command"] is None, live_mine
+    assert live_mine[0].get("explain"), live_mine
     shadow = kloop.Reconciler(tmp_env.db, mode="shadow").reconcile_once()
-    shadow_mine = [a for a in shadow["actions"] if a["task_id"] == tid]
     assert all(a.get("executed") is not True for a in shadow["actions"]), shadow
-    assert _count_requests(tmp_env.db, tid, "dispatch",
+    assert _count_requests(tmp_env.db, btid, "dispatch",
                            ("queued", "claimed")) == before
 
 

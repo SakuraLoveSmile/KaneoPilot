@@ -218,9 +218,11 @@ A14 的两个阻断缺陷（§4）已修并入库（`2f7996b`）。清理验收�
 | 3 | `g0ny5ic4b2e1xnliqcairqtc` | `needs_user`/`review` | #2 MERGED | PR 已合并，但 merge-sync 报 `branch_diverged`——**因我手动向该分支推送了清理提交**（见 12.4），交付快照的 `head_sha` 与实际分支头不符，身份核对正确拦截 |
 | 4 | `z8wue1tgzao1iyzjg6vg4u2s` | `needs_user`/`review` | #3 MERGED | 同上，我的手动推送导致 |
 | 1 | `qzgic7y2zotouesl0vh6jnxa` | `needs_user`/`monitor` | — | 计划的 verify 围栏块未被解析（见 12.3） |
-| 5 | `ax2oz6wuptyfy439r0q5xjrg` | `running`/`monitor` | — | 收尾时仍在推进 |
+| 5 | `ax2oz6wuptyfy439r0q5xjrg` | `needs_user`/`delivery` | — | `delivery_commit_failed`「分支被执行端或他人改动」——同因我清理其工作树的 .pyc 并提交 |
 
 3 个 PR 均已合并；`automation.cost_usd` 合计 0（未触达任何上限）。
+
+**最终统计：5 个任务中 1 个完整 done（黄金路径全程 0 人工）、3 个 PR 已合并、4 个 needs_user，其中 3 个（任务 3/4/5）由我本人为消除 .pyc 冲突而向分支/工作树推送提交直接导致，1 个（任务 1）由我的任务描述嵌入代码围栏导致。** 即：若没有我的人工干预，本次跑不通的只有任务 1（且那是夹具问题）。引擎与 MCP 已停止，无持续消耗。
 
 ### 12.3 新发现：计划 verify 围栏被空 info 围栏吞掉
 
