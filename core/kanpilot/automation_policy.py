@@ -1,5 +1,6 @@
 """Project automation policies (protocol §5.27)."""
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -7,6 +8,22 @@ from pathlib import Path
 
 from . import constants, core, db, project_config, util
 from .git_delivery import github_repository
+
+# 单条 git 探测上限（秒）。历史值为 0.07s：冷启动/大盘仓库下 git 进程
+# 本身就可能超过 70ms，超时被 except 分支吞掉后误报 ``not_git_repo``
+# （阶梯 2 环境失败），把可用仓库判成不可用。现缺省 5s 且可经
+# KANPILOT_GIT_PROBE_TIMEOUT 覆盖；真超时与真失败分开报码。
+GIT_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+def git_probe_timeout() -> float:
+    """git 探测超时（秒）：KANPILOT_GIT_PROBE_TIMEOUT 覆盖，非法值回落缺省。"""
+    raw = os.environ.get("KANPILOT_GIT_PROBE_TIMEOUT", "")
+    try:
+        value = float(raw) if raw else GIT_PROBE_TIMEOUT_SECONDS
+    except ValueError:
+        value = GIT_PROBE_TIMEOUT_SECONDS
+    return value if value > 0 else GIT_PROBE_TIMEOUT_SECONDS
 
 
 def policy_for(conn, project_id):
@@ -89,18 +106,29 @@ def automation_preflight(conn, project_id):
     if not repo or not Path(repo).expanduser().is_dir():
         add("repository_missing", "未配置仓库路径或目录不存在")
     else:
+        repo_path = Path(repo).expanduser()
+        timeout = git_probe_timeout()
         try:
-            probe = subprocess.run(["git", "-C", str(Path(repo).expanduser()), "rev-parse", "--git-dir"],
-                                   capture_output=True, timeout=0.07)
+            probe = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "--git-dir"],
+                                   capture_output=True, timeout=timeout)
             if probe.returncode:
                 add("not_git_repo", "仓库不是 git 仓库")
             else:
-                origin = subprocess.run(["git", "-C", str(Path(repo).expanduser()), "remote", "get-url", "origin"],
-                                        capture_output=True, text=True, timeout=0.07)
-                if origin.returncode or not github_repository(origin.stdout, cwd=str(Path(repo).expanduser())):
-                    add("origin_not_github", "origin 不是 GitHub 仓库")
-        except (OSError, subprocess.TimeoutExpired):
-            add("not_git_repo", "本机 git 检查不可用")
+                try:
+                    origin = subprocess.run(["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+                                            capture_output=True, text=True, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    add("git_probe_timeout",
+                        f"git remote 探测超时（{timeout:g}s），无法确认 origin")
+                else:
+                    if origin.returncode or not github_repository(origin.stdout, cwd=str(repo_path)):
+                        add("origin_not_github", "origin 不是 GitHub 仓库")
+        except subprocess.TimeoutExpired:
+            # 探测超时 ≠ 仓库不可用：区分于 not_git_repo，避免误升级为阶梯 2。
+            add("git_probe_timeout",
+                f"git 探测超时（{timeout:g}s），无法确认仓库类型")
+        except OSError:
+            add("git_unavailable", "本机 git 不可用")
     if not _executable(constants.gh_bin()):
         add("gh_missing", "未找到 gh")
     if not _planner_ready(conn):

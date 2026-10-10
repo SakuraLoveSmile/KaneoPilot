@@ -1,0 +1,18 @@
+{
+ "_captured_at": "2026-10-10",
+ "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
+ "_plus_version": "0.15.7",
+ "_redacted": true,
+ "payload": {
+  "operation": "agent/getStatus",
+  "result": {
+   "status": {
+    "sessionId": "undefined",
+    "isRunning": false,
+    "pendingToolConfirmations": 0
+   }
+  }
+ },
+ "_note": "真实录制：MCP pi_desktop_invoke {operation:\"agent/getStatus\"}。注意该端点只给粗粒度存活信号（sessionId/isRunning/pendingToolConfirmations），不含终态 outcome。",
+ "_operation": "agent/getStatus"
+}

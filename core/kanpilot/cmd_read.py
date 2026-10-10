@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import socket
 import sqlite3
+import subprocess
 import sys
 from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 
 from . import constants, core, db, derive, planfile, remote, util
@@ -178,6 +182,17 @@ def cmd_tick(ctx, payload: dict) -> dict:
     return result
 
 
+def _board_attention(ctx) -> dict:
+    """A15: the board ``attention`` section — the SAME inbox as ``attention-list``.
+
+    Delegates to ``engine.commands.attention_items`` (single aggregation source);
+    no second aggregation logic here. Shape matches the ``attention-list``
+    command output exactly.
+    """
+    from .engine.commands import attention_items
+    return {"items": attention_items(ctx.conn, ctx.now, ctx.now_iso)}
+
+
 def cmd_overview(ctx, payload: dict) -> dict:
     conn = ctx.conn
     task_counts = {}
@@ -274,6 +289,8 @@ def cmd_overview(ctx, payload: dict) -> dict:
                 )
             ),
         },
+        # A15：attention 收件箱（与 attention-list 同一来源，逐字段一致）。
+        "attention": _board_attention(ctx),
     }
 
 
@@ -323,7 +340,8 @@ def cmd_list_tasks(ctx, payload: dict) -> dict:
             if not attention:
                 continue
         tasks.append(derive.task_summary(ctx.conn, row, ctx.now))
-    return {"tasks": tasks}
+    # A15：attention 收件箱（与 attention-list 同一来源，逐字段一致）。
+    return {"tasks": tasks, "attention": _board_attention(ctx)}
 
 
 def cmd_get_task(ctx, payload: dict) -> dict:
@@ -515,8 +533,187 @@ def cmd_list_events(ctx, payload: dict) -> dict:
     return {"events": page, "next_before_id": next_before_id}
 
 
+# ---------------------------------------------------------------- doctor 探针
+# protocol.md §5.27.6：在线诊断。所有探针超时可经 KANPILOT_DOCTOR_TIMEOUT
+# （秒）覆盖，缺省 5s。**超时与真实失败必须分开表达**（``timed_out`` 标记）：
+# 探测慢不等于服务坏，不得把超时误报成确定性失败。
+
+DOCTOR_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+def _doctor_probe_timeout() -> float:
+    """doctor 探针超时（秒）：KANPILOT_DOCTOR_TIMEOUT 覆盖，非法值回落缺省。"""
+    raw = os.environ.get("KANPILOT_DOCTOR_TIMEOUT", "")
+    try:
+        value = float(raw) if raw else DOCTOR_PROBE_TIMEOUT_SECONDS
+    except ValueError:
+        value = DOCTOR_PROBE_TIMEOUT_SECONDS
+    return value if value > 0 else DOCTOR_PROBE_TIMEOUT_SECONDS
+
+
+def _probe_timed_out(exc) -> bool:
+    """沿 ``__cause__`` / ``reason`` 链判断异常是否为探测超时。
+
+    bridge/pi_desktop 的网络错误会包装底层 socket.timeout；仅凭最外层
+    类型名分不清超时与拒绝连接，必须走链判断。
+    """
+    seen = set()
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (socket.timeout, TimeoutError)):
+            return True
+        text = str(current).lower()
+        if ("timed out" in text or "timeout" in text or "timeouterror" in text
+                or "超时" in str(current)):
+            return True
+        stack.append(getattr(current, "__cause__", None))
+        stack.append(getattr(current, "reason", None))
+    return False
+
+
+def _probe_check(name, *, ok, detail, skipped=False, timed_out=False) -> dict:
+    return {"name": name, "ok": bool(ok), "detail": detail,
+            "skipped": bool(skipped), "timed_out": bool(timed_out)}
+
+
+def _doctor_kaneo_ping(timeout: float) -> dict:
+    """Kaneo 连通性（§5.27.6）：HTTP 200 = 通；超时与真实失败分开。"""
+    try:
+        client = remote.get_client()
+        if hasattr(client, "timeout"):
+            client.timeout = timeout  # 探测超时独立于 KANEO_TIMEOUT
+        client.request("/api/project?workspaceId=" + constants.WORKSPACE_ID)
+    except Exception as exc:
+        timed_out = _probe_timed_out(exc)
+        detail = str(exc) or exc.__class__.__name__
+        if timed_out:
+            detail = f"探测超时（{timeout:g}s）：{detail}"
+        return _probe_check("kaneo_ping", ok=False, detail=detail,
+                            timed_out=timed_out)
+    return _probe_check("kaneo_ping", ok=True, detail="HTTP 200")
+
+
+def _doctor_gh(timeout: float) -> dict:
+    """gh 可执行探测（gh_missing 前置）：存在且可运行；缺失/超时/退出非零分开。"""
+    gh = constants.gh_bin()
+    try:
+        result = subprocess.run([gh, "--version"], capture_output=True,
+                                text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _probe_check("gh", ok=False,
+                            detail=f"探测超时（{timeout:g}s）：gh --version 未在时限内返回",
+                            timed_out=True)
+    except OSError:
+        return _probe_check("gh", ok=False, detail="未找到 gh")
+    if result.returncode:
+        return _probe_check("gh", ok=False,
+                            detail=f"gh --version 退出 {result.returncode}")
+    lines = (result.stdout or "").strip().splitlines()
+    return _probe_check("gh", ok=True, detail=lines[0] if lines else "gh 可用")
+
+
+def _doctor_plus(ctx, timeout: float) -> dict:
+    """Plus（PI-Desktop）控制面探测：连接文件校验 + MCP 握手；绝不输出 token。
+
+    执行后端为 pi 且未配置连接文件 → skipped（Plus 非当前执行路径）；
+    backend=pi_desktop 却缺连接文件 → 真实失败（自动化就绪条件不满足）。
+    """
+    try:
+        from . import exec_config, pi_desktop_backend
+    except Exception as exc:  # pragma: no cover - defensive
+        return _probe_check("plus", ok=False, detail=f"Plus 模块缺失：{exc}")
+    try:
+        config = exec_config.load(ctx.conn)
+    except Exception as exc:
+        return _probe_check("plus", ok=False, detail=f"执行配置不可读：{exc}")
+    backend = config.get("backend") or "pi"
+    block = config.get("pi_desktop") or {}
+    conn_file = block.get("connection_file") or constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
+    path = Path(str(conn_file)).expanduser()
+    if not path.is_file():
+        if backend == "pi_desktop":
+            return _probe_check("plus", ok=False,
+                                detail=f"Plus 连接文件不存在：{path}")
+        return _probe_check("plus", ok=True,
+                            detail=f"未配置 Plus 连接文件（执行后端 {backend}）",
+                            skipped=True)
+    try:
+        probe = pi_desktop_backend.probe_connection(path, timeout=timeout)
+    except Exception as exc:  # pragma: no cover - defensive
+        return _probe_check("plus", ok=False, detail=f"Plus 探测异常：{exc}")
+    detail = probe.get("detail") or (
+        "Plus 控制面就绪" if probe.get("ok") else "Plus 控制面不可用")
+    return _probe_check("plus", ok=probe.get("ok"), detail=detail,
+                        timed_out=_probe_timed_out(detail))
+
+
+def _doctor_engine_lease(ctx) -> dict:
+    """engine_lease（§5.27.6）：活跃引擎实例数。引擎未安装 → informational。"""
+    try:
+        from . import cli as _cli
+        commands = getattr(_cli, "COMMANDS", {})
+        engine_installed = any(
+            key == "engine" or key.startswith("engine-") for key in commands)
+    except Exception:  # pragma: no cover - defensive
+        engine_installed = False
+    from . import process_owner
+    instances = db.get_setting(ctx.conn, process_owner.SETTING, {}) or {}
+    active = sum(1 for entry in instances.values()
+                 if isinstance(entry, dict) and entry.get("state") != "stopped")
+    detail = f"active instances: {active}"
+    if not engine_installed:
+        detail += "（引擎未安装：engine run 未实现，计数仅含 executor-instance 登记）"
+    return {"name": "engine_lease", "ok": True, "detail": detail}
+def _doctor_attention_backlog(ctx) -> dict:
+    """attention_backlog（§5.27.6/§5.27.3）：待处理聚合计数（informational）。
+
+    单一来源 = ``engine.attention``（§5.27.3 的聚合与计数）；引擎模块不可用
+    时回落本地 SQL（needs_user 任务 + failed 请求 + 派生 lost）。
+    """
+    try:
+        from .engine import attention as engine_attention
+        from .engine import commands as engine_commands
+        items = engine_commands.cmd_attention_list(
+            ctx, {"include_historical": True})["items"]
+        counts = engine_attention.counts(items)
+        detail = (f"actionable: {counts['actionable']}, "
+                  f"historical: {counts['historical']}")
+        if counts.get("informational"):
+            detail += f", informational: {counts['informational']}"
+        return {"name": "attention_backlog", "ok": True, "detail": detail}
+    except Exception:
+        pass  # 引擎未就绪 → 下方本地计数兜底
+    actionable = ctx.conn.execute(
+        "SELECT COUNT(*) FROM tasks "
+        "WHERE status='needs_user' AND save_state='active'"
+    ).fetchone()[0]
+    historical = 0
+    rows = ctx.conn.execute(
+        "SELECT r.status, r.lease_expires_at, t.save_state FROM requests r "
+        "LEFT JOIN tasks t ON t.task_id = r.task_id "
+        "WHERE r.status IN ('failed', 'claimed')"
+    ).fetchall()
+    for row in rows:
+        if row["status"] == "failed":
+            if (row["save_state"] or "active") != "active":
+                historical += 1
+            else:
+                actionable += 1
+        elif row["lease_expires_at"] and row["lease_expires_at"] < ctx.now_iso:
+            actionable += 1  # claimed 且租约过期 → 派生 lost
+    return {"name": "attention_backlog", "ok": True,
+            "detail": f"actionable: {actionable}, historical: {historical}"}
+
+
+
 def cmd_doctor(ctx, payload: dict) -> dict:
-    online = bool(payload.get("online"))
+    # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
+    online = bool(payload.get("online") or payload.get("live"))
+    timeout = _doctor_probe_timeout()
     checks = []
 
     checks.append({
@@ -562,23 +759,20 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     )
 
     if online:
-        try:
-            client = remote.get_client()
-            client.request("/api/project?workspaceId=" + constants.WORKSPACE_ID)
-            checks.append(
-                {"name": "kaneo_ping", "ok": True, "detail": "HTTP 200",
-                 "skipped": False}
-            )
-        except Exception as exc:
-            checks.append(
-                {"name": "kaneo_ping", "ok": False, "detail": str(exc),
-                 "skipped": False}
-            )
+        checks.append(_doctor_kaneo_ping(timeout))
+        checks.append(_doctor_gh(timeout))
+        checks.append(_doctor_plus(ctx, timeout))
     else:
-        checks.append(
-            {"name": "kaneo_ping", "ok": True, "detail": "offline",
-             "skipped": True}
-        )
+        checks.append(_probe_check("kaneo_ping", ok=True, detail="offline",
+                                   skipped=True))
+        checks.append(_probe_check("gh", ok=True, detail="offline",
+                                   skipped=True))
+        checks.append(_probe_check("plus", ok=True, detail="offline",
+                                   skipped=True))
+    # §5.27.6：engine_lease 与 attention_backlog 为 informational 检查项；
+    # 引擎未实现时返回「未安装」而非失败。
+    checks.append(_doctor_engine_lease(ctx))
+    checks.append(_doctor_attention_backlog(ctx))
     return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
 

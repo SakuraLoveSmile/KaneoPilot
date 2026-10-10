@@ -1,0 +1,15 @@
+{
+ "_captured_at": "2026-10-10",
+ "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
+ "_plus_version": "0.15.7",
+ "_redacted": true,
+ "payload": {
+  "ok": false,
+  "error": {
+   "code": "NOT_FOUND",
+   "message": "turn not found"
+  }
+ },
+ "_note": "真实录制：同一 operation 对不存在的 turnId 的错误信封 {ok:false,error:{code:\"NOT_FOUND\",message:\"turn not found\"}}。核心必须把 NOT_FOUND 与网络/超时失败区分。",
+ "_operation": "turn/get-missing"
+}

@@ -1,0 +1,20 @@
+{
+ "_captured_at": "2026-10-10",
+ "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
+ "_plus_version": "0.15.7",
+ "_redacted": true,
+ "payload": {
+  "operation": "app/getVersion",
+  "result": {
+   "name": "Pi-Desktop-Plus",
+   "version": "0.15.7",
+   "protocolVersion": 11,
+   "hostProtocolVersion": 11,
+   "hostVersion": "0.15.7",
+   "platform": "darwin",
+   "arch": "arm64"
+  }
+ },
+ "_note": "真实录制：MCP tools/call pi_desktop_invoke {operation:\"app/getVersion\"}。用于 doctor --live 的 plus 版本探针期望值。",
+ "_operation": "app/getVersion"
+}
