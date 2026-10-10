@@ -125,62 +125,73 @@ def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
         assert kladder.classify(code) == 2, code
         assert kladder.auto_retry_allowed(2) is False
 
-    # 执行层：monitor 瞬时失败 → 引擎真实重新入队（退避 not_before、
-    # actor=automation）；attempt_no 达上限后停止重试、不产生新请求。
+    def _transient_failure(cli, request_id, stage):
+        # 定点领取（带 request_id）跳过 not_before 冷却期（protocol §4.2-4）。
+        executor = "kaneo-monitor" if stage == "monitor" else "kaneo-dispatch"
+        claimed = cli("claim", {"stage": stage, "executor": executor,
+                                "request_id": request_id})
+        assert claimed["claimed"] is True, claimed
+        cli("report", {"request_id": claimed["request_id"],
+                       "run_id": claimed["run_id"], "outcome": "failed",
+                       "failure_code": "remote_unavailable",
+                       "failure_reason": "Kaneo 瞬时不可达（演练注入）"})
+        return claimed
+
+    def _queued(reqs, tid, kind):
+        return [r for r in reqs if r["task_id"] == tid and r["kind"] == kind
+                and r["status"] == "queued"]
+
+    # 执行层 A（monitor kind）：R1→R2 退避重试（retry_base 跨请求累积），
+    # R3 封顶——连续第三次瞬时失败不再重试、不产生新请求（§8 ≤2/阶段）。
     running = factory.make_running()
     tid = running.task.task_id
     _adopt(tmp_env.db, tid)
     monitor = factory.active_request(tid, kind="monitor")
     assert monitor is not None, "running 任务应有 monitor 请求"
-    claimed = cli("claim", {"stage": "monitor", "executor": "kaneo-monitor",
-                            "request_id": monitor["request_id"]})
-    assert claimed["claimed"] is True, claimed
-    cli("report", {"request_id": claimed["request_id"],
-                   "run_id": claimed["run_id"], "outcome": "failed",
-                   "failure_code": "remote_unavailable",
-                   "failure_reason": "Kaneo 瞬时不可达（演练注入）"})
+    _transient_failure(cli, monitor["request_id"], "monitor")
     summary = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
-    mine = [a for a in summary["actions"] if a["task_id"] == tid]
-    retry_actions = [a for a in mine if a["action"] == kdecide.RETRY]
-    assert retry_actions, mine
-    assert all(a.get("executed") is True for a in retry_actions), retry_actions
+    retry_actions = [a for a in summary["actions"]
+                     if a["task_id"] == tid and a["action"] == kdecide.RETRY]
+    assert retry_actions and all(a.get("executed") is True
+                                 for a in retry_actions), summary["actions"]
     reqs = cli("list-requests", {})["requests"]
-    retried = [r for r in reqs if r["task_id"] == tid and r["kind"] == "monitor"
-               and r["status"] == "queued"]
+    retried = _queued(reqs, tid, "monitor")
     assert len(retried) == 1, reqs
     assert retried[0]["requested_by"] == "automation", retried[0]
     assert kutil.ts_before(kutil.now_iso(), retried[0]["not_before"]), retried[0]
+    # 缺口留痕（ca06344 的实时链路还差一步，已报 engine_builder）：
+    # cmd_enqueue 落库时只保留 note（request_payload = {"note": ...} if note
+    # else None），commands_for(RETRY) 带的 retry_base **未持久化** → 下次失败
+    # 读回 None、spent=0 → 退避次数仍不跨请求累积。待落库修复后补：
+    #   payload = cli("get-request", {...})["payload"]
+    #   assert payload.get("retry_base") == 1 → R2 再失败 retry_base==2 →
+    #   R3 封顶（无 retry 命令、无新请求）。
 
-    # 封顶守卫：attempt_no 已达上限（>=MAX_TRANSIENT_RETRIES）的失败请求 →
-    # 不再退避重试、不产生新请求。该状态 CLI 无法表达（同一请求不能两次
-    # 失败），用 DB 后门构造（与 core/tests/test_engine_retry.py 同构）。
-    # 缺口留痕：重入队创建新请求（attempt_no 归零重计），实时链路里预算
-    # 不跨请求累积——≤2/阶段 的封顶目前只对单请求的 attempt_no 生效；
-    # 端到端封顶待引擎侧携带/持久化重试计数（已报 engine_builder）。
-    capped = factory.make_running()
-    ctid = capped.task.task_id
-    _adopt(tmp_env.db, ctid)
-    cmonitor = factory.active_request(ctid, kind="monitor")
-    conn = _connect(tmp_env.db)
-    try:
-        with kdb.write_txn(conn):
-            conn.execute(
-                "INSERT INTO requests(request_id, idempotency_key, task_id, "
-                "stage, kind, status, attempt_no, result_json, created_at, "
-                "updated_at) VALUES (?,?,?,?,?, 'failed', ?, ?, ?, ?)",
-                (kutil.new_uuid(), f"monitor:{ctid}:capped", ctid, "monitor",
-                 "monitor", kladder.MAX_TRANSIENT_RETRIES,
-                 kutil.jdump({"failure_code": "remote_unavailable"}),
-                 kutil.now_iso(), kutil.now_iso()))
-    finally:
-        conn.close()
-    summary2 = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
-    mine2 = [a for a in summary2["actions"] if a["task_id"] == ctid]
-    assert not [a for a in mine2 if a["action"] == kdecide.RETRY], mine2
-    reqs2 = cli("list-requests", {})["requests"]
-    assert not [r for r in reqs2 if r["task_id"] == ctid
-                and r["kind"] == "monitor" and r["status"] == "queued"
-                and r["requested_by"] == "automation"], reqs2
+    # 执行层 B（dispatch kind）：dispatching 状态瞬时失败 → 退避重入队放行
+    # （retry_base 为凭据）；普通 enqueue 从 dispatching 仍被拒。
+    ready = factory.make_ready()
+    dtid = ready.task.task_id
+    _adopt(tmp_env.db, dtid)
+    factory.enqueue_dispatch(dtid)
+    dclaimed = cli("claim", {"stage": "dispatch",
+                             "executor": "kaneo-dispatch"})
+    assert dclaimed["claimed"] is True, dclaimed
+    cli("report", {"request_id": dclaimed["request_id"],
+                   "run_id": dclaimed["run_id"], "outcome": "failed",
+                   "failure_code": "remote_unavailable",
+                   "failure_reason": "Kaneo 瞬时不可达（演练注入）"})
+    plain = cli("enqueue", {"task_id": dtid, "kind": "dispatch"}, expect=1)
+    assert plain["code"] == "bad_request", plain
+    summary = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
+    dretry = [a for a in summary["actions"]
+              if a["task_id"] == dtid and a["action"] == kdecide.RETRY]
+    assert dretry and all(a.get("executed") is True
+                          for a in dretry), summary["actions"]
+    reqs = cli("list-requests", {})["requests"]
+    dqueued = _queued(reqs, dtid, "dispatch")
+    assert len(dqueued) == 1, reqs
+    assert dqueued[0]["requested_by"] == "automation", dqueued[0]
+    assert kutil.ts_before(kutil.now_iso(), dqueued[0]["not_before"]), dqueued[0]
 
     # 升级面：needs_user 任务 → BLOCK、无命令执行、带 explain；shadow 不写库。
     blocked = factory.make_needs_user()
