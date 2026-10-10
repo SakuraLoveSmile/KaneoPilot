@@ -141,7 +141,19 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
                 row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=expected_sha, actor=actor, note=payload.get("note"))
                 return {"request": derive.request_view(row, ctx.now), "deduplicated": not created}
         key = f"{kind}:{task['task_id']}"
-        request_payload = {"note": payload.get("note")} if payload.get("note") else None
+        # 阶梯 1 退避重试的「已花费次数」必须随请求落库：commands_for(RETRY)
+        # 重入队的是**新**请求（attempt_no 归零），不传递的话 _transient_retry
+        # 每次读回 None、spent=0，state-model §8 的 ≤2/阶段 上限永远达不到
+        # （无限退避重试）。只有引擎的退避重入队会带它（同时是 cmd_enqueue
+        # 放行 dispatching 状态重入队的凭据）。legacy 语义不变：无 note 时仍写
+        # NULL，不改成 {}。
+        request_payload = {}
+        if payload.get("note"):
+            request_payload["note"] = payload["note"]
+        if isinstance(payload.get("retry_base"), int):
+            request_payload["retry_base"] = payload["retry_base"]
+        if not request_payload:
+            request_payload = None
         # requested_by doubles as the ``enqueued`` event actor (db.create_request).
         # Legacy callers that only set not_before keep the historical "engine".
         requested_by = "automation" if actor == "automation" else (

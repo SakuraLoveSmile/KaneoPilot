@@ -269,12 +269,10 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     assert value["status"] == "needs_user", value
     assert value["failure_code"] == "no_changes", value
 
-    # 备用模型·路径 B（已配置，fake cache 中存在该模型）：当前接线下探针
-    # 拿不到 connection_file（loop._quality_retry 调 fallback.plan_retry 未传
-    # connection_file=primary.get("connection_file")，探针以 None 建连必败）
-    # → BLOCK validation_failed（阶梯 2）+ 不换模型。core 单测
-    # （test_engine_fallback.py，注入假探针）覆盖「探针通过 → model: fallback
-    # + 快照覆盖」；接线修复后此处应翻转为 model: fallback + override。
+    # 备用模型·路径 B（已配置，fake cache 中存在该模型）：探针通过 →
+    # START_FIX_ROUND（阶梯 3）+ `model: fallback` 事件 + 一次性快照覆盖
+    # extra.engine_model_override（model_source=custom + 该 provider/model，
+    # 沿用主模型 connection_file/thinking_level/permission_mode，不新增凭据）。
     out = pipeline.call("set-project-fallback-model", {
         "project_id": PROJECT,
         "fallback_model": {"provider_id": "test-provider",
@@ -283,15 +281,28 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     summary = _reconcile(pipeline)
     mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
     assert len(mine) == 1, mine
-    assert mine[0]["action"] == "block", mine[0]
-    assert mine[0]["reason"] == "validation_failed", mine[0]
-    assert mine[0]["ladder"] == 2, mine[0]
+    assert mine[0]["action"] == "start_fix_round", mine[0]
+    assert mine[0]["reason"] == "empty_diff", mine[0]
+    assert mine[0]["ladder"] == 3, mine[0]
     extra = pipeline.task(TASK).get("extra") or {}
-    assert not extra.get("engine_model_override"), extra
+    override = extra.get("engine_model_override")
+    assert override, extra
+    assert override.get("model") == "fallback", override
+    # 注意：override 不带 model_source——它由 exec_config
+    # .snapshot_with_model_override 在 dispatch claim 应用时按
+    # 「provider_id + model_id 齐全」派生（core 单测覆盖），payload 只带
+    # 快照本体与计划身份。
+    assert override.get("provider_id") == "test-provider", override
+    assert override.get("model_id") == "test-model", override
+    # 附计划身份：dispatch claim 只在计划一致时应用，新轮次开始后清除
+    assert override.get("plan_sha256") == value["plan_sha256"], override
+    # 沿用主模型连接与权限，不新增第二套凭据
+    for key in ("connection_file", "thinking_level", "permission_mode"):
+        assert override.get(key), override
     events = pipeline.call("list-events",
                            {"task_id": TASK, "limit": 40})["events"]
-    assert not [e for e in events if e["kind"] == "model"
-                and (e.get("detail") or {}).get("model") == "fallback"], events
+    assert [e for e in events if e["kind"] == "model"
+            and (e.get("detail") or {}).get("model") == "fallback"], events
 
     # 补救轮用尽后引擎不再自动补救：reconcile 只记录决策、不下命令
     summary = _reconcile(pipeline)

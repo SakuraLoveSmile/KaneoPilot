@@ -298,8 +298,23 @@ class Reconciler:
         primary = None
         if configured is not None:
             primary, _error = fallback.primary_snapshot(conn)
-        plan = fallback.plan_retry(configured, primary=primary)
+        # connection_file 必须传：plan_retry 的默认探针以 None 建连，
+        # probe_connection(None) 恒败，配置了 fallback 反而会 BLOCK（阶梯 2）
+        # ——而 primary_snapshot 返回的快照本身就带它。
+        plan = fallback.plan_retry(
+            configured, primary=primary,
+            connection_file=(primary or {}).get("connection_file"))
         if plan["validation_failed"]:
+            # 审计：探针失败也要落库「为什么没换模型」，否则事件表里看不出
+            # 这次有界补救曾考虑过 fallback（plan_retry 已备好事件，此前因
+            # 提前 return 被丢弃）。shadow 只算不写。
+            if pmode == "live":
+                now_iso = util.to_iso(now)
+                with db.write_txn(conn):
+                    for event in plan["events"]:
+                        db.add_event(conn, now_iso, event["kind"],
+                                     task_id=task["task_id"], actor="engine",
+                                     detail=event["detail"])
             return decide.Decision(
                 decide.BLOCK, reason="validation_failed",
                 ladder=ladder.LADDER_ENVIRONMENTAL, attention=True,
