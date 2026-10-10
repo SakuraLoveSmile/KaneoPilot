@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from kanpilot import constants
 from kanpilot.verify_evidence import extract_command_results, match_verification, normalize, parse_verify_block
 
 
@@ -321,3 +322,52 @@ def test_path_wrapper_does_not_collapse_quoted_arguments(tmp_path):
     assert completed.returncode == 0
     assert not match_verification([expected], [{"command": command,
         "exit_code": completed.returncode}])["ok"]
+
+
+# ---------------------------------------------------------------- 嵌套围栏诊断
+
+_NESTED = "```\n```verify\npython3 -m pytest -q\n```\n```\n"
+
+
+def test_nested_verify_fence_gets_actionable_error():
+    """沙盒任务 1 的形态：verify 围栏被空 info 围栏吞掉。
+
+    诊断只改错误信息、不改判定结果（仍然 error）；消息要点明「似被其他围栏
+    嵌套 + 顶层要求」，把定位时间从人工翻计划降到几秒。
+    """
+    result = parse_verify_block(_NESTED)
+    assert result["ok"] is False
+    assert "嵌套" in result["error"]
+    assert "顶层" in result["error"]
+    assert "缩进" in result["error"]
+
+
+def test_top_level_verify_is_unaffected_by_the_diagnostic():
+    """合法计划不受诊断影响（正常识别、正常命令）。"""
+    assert parse_verify_block("# 计划\n\n```verify\npython3 -m pytest -q\n```\n") == {
+        "ok": True, "commands": ["python3 -m pytest -q"]}
+
+
+@pytest.mark.parametrize("text", [
+    "no fence at all",                                   # 没有 verify 围栏
+    "```verify\nx\n```\n```verify\ny\n```",              # 两个 verify 块
+    "```verify\nx\n",                                     # 未闭合
+    "```bash\nls\n```\n",                                 # 只有别的围栏
+])
+def test_generic_error_kept_when_nesting_is_not_the_signal(text):
+    """诊断只在「文本里确有 verify 围栏行却一个都没识别出」时触发。
+
+    其他失败形状仍用原来的通用错误，不猜意图。
+    """
+    assert parse_verify_block(text)["error"] == "计划必须恰好包含一个 verify 围栏块" \
+        or parse_verify_block(text)["error"] == "verify 围栏块未闭合"
+
+
+def test_planner_prompt_states_the_top_level_rule():
+    """planner prompt 必须写明 verify 围栏的顶层要求与替代写法。"""
+    prompt = (constants.core_root() / "executor_prompts" / "planner_prompt.md")
+    text = prompt.read_text(encoding="utf-8")
+    assert "顶层" in text
+    assert "缩进代码" in text
+    # 规则挂在 verify 围栏那一节里，而不是散落到别处
+    assert "```verify 块必须是计划正文的**顶层**块" in text
