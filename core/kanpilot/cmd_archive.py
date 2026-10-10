@@ -11,11 +11,8 @@
   已领取）→ 中止并返回 conflict，不取消、不改保存状态。
 - 幂等：已处于目标 save_state → {"ok": true, "deduplicated": true}，不重复写事件。
 - restore-task：save_state→active、清 saved_at、auto_advance_paused 默认 1
-  （resume_auto=true 时 0）；``resume_auto=true`` 同时是 ``resolve
-  {action:"dismiss"}`` 人工接管的**逆向入口**——清 ``manual_takeover``、
-  交付模式从 manual 回 pr（仅当 PR 身份字段齐全），让 take_over → resume_auto
-  → 自动交付到 done 闭环（scenarios.md 场景 16）。本地重算计划/来源哈希并尝试
-  远端 get-task 观察（远端不可达→warning 不阻断）；返回刷新后 task。
+  （resume_auto=true 时 0）；本地重算计划/来源哈希并尝试远端 get-task 观察
+  （远端不可达→warning 不阻断）；返回刷新后 task（derive.task_detail）。
 """
 
 from __future__ import annotations
@@ -268,41 +265,6 @@ def _reverify(ctx, task) -> list:
     return warnings
 
 
-# PR 交付身份字段（delivery.mode="pr" 的最小可发布集合）。
-_PR_DELIVERY_KEYS = ("branch", "base_branch", "base_sha", "head_sha",
-                     "worktree_path")
-
-
-def _manual_takeover_of(task) -> bool:
-    """任务是否处于人工接管（``resolve {action:"dismiss"}`` 写入）。"""
-    return core.automation_of(task).get("manual_takeover") is True
-
-
-def _release_manual_takeover(conn, task, now) -> bool:
-    """把人工接管的任务交回自动化（``restore-task {resume_auto:true}``）。
-
-    ``dismiss`` 写 ``automation.manual_takeover=True`` + ``delivery.mode="manual"``
-    （分支直提、不走 PR）并暂停自动推进。接管是用户决定，交回同样必须是显式动作：
-    只有 ``resume_auto=true`` 才走这里，普通恢复/幂等恢复不动自动化归属。
-
-    交付模式只在 PR 身份字段齐全时回 ``pr``——否则保持 manual，让用户显式处理，
-    不造出「PR 模式但不可发布」的半态。返回是否有实际变更。
-    """
-    changed = False
-    if _manual_takeover_of(task):
-        core.update_automation(conn, task, now, manual_takeover=False)
-        changed = True
-    delivery = core.delivery_of(task)
-    if delivery.get("mode") == "manual":
-        if all(delivery.get(key) for key in _PR_DELIVERY_KEYS):
-            core.update_delivery(conn, task, now, mode="pr")
-            changed = True
-    if changed:
-        db.add_event(conn, now, "automation_resumed", task_id=task["task_id"],
-                     actor="user", detail={"via": "resume_auto"})
-    return changed
-
-
 def cmd_restore_task(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     task_id = payload["task_id"]
@@ -316,17 +278,13 @@ def cmd_restore_task(ctx, payload: dict) -> dict:
                 "conflict", "任务已永久从列表移除（终态），不能恢复"
             )
         deduplicated = current == "active"
-        takeover = _manual_takeover_of(task)
-        if deduplicated and resume_auto and (db.task_auto_paused(task) or takeover):
-            # Explicit resume on an active task must release its task-level pause
-            # (and hand a manually taken-over task back to automation). An
-            # ordinary idempotent restore does not authorize automatic work.
+        if deduplicated and resume_auto and db.task_auto_paused(task):
+            # Explicit resume on an active task must release its task-level pause.
+            # An ordinary idempotent restore does not authorize automatic work.
             if task["status"] == "in_review":
                 from .cmd_queue import clear_review_result_inline
                 clear_review_result_inline(conn, task, now, actor="user")
             db.update_task(conn, task_id, now, auto_advance_paused=0)
-            if takeover:
-                _release_manual_takeover(conn, db.require_task(conn, task_id), now)
             db.add_event(
                 conn, now, "task_restored", task_id=task_id, actor="user",
                 detail={"from": "active", "to": "active", "resume_auto": True},
@@ -344,8 +302,6 @@ def cmd_restore_task(ctx, payload: dict) -> dict:
                 detail={"from": current, "to": "active",
                         "resume_auto": resume_auto},
             )
-            if resume_auto:
-                _release_manual_takeover(conn, db.require_task(conn, task_id), now)
         fresh = db.require_task(conn, task_id)
     # 事务外核验（含远端观察）；幂等 active 也执行状态核验并返回任务。
     warnings = _reverify(ctx, fresh)
