@@ -357,6 +357,102 @@ class TestQualityRetryLoop(KanpilotTestCase):
         self.assertIsNone(fallback.read_override(self._extra(tid)))
 
 
+class TestQualityRetryProbeWiring(KanpilotTestCase):
+    """live 路径的 fallback 探针必须拿到连接文件，否则配了也白配。
+
+    ``plan_retry`` 的默认探针把 ``connection_file=None`` 传给
+    ``probe_connection``，而它对 None 恒返回 ok=False（"连接文件不存在：."）——
+    于是项目配了 fallback 也会被误判 validation_failed 而 BLOCK（阶梯 2），
+    永远换不成模型。_quality_retry 必须把 primary 快照里的 connection_file 透传。
+    既有单测都传显式 probe/mock，所以没暴露这条。
+    """
+
+    def _adopt_live(self, task_id, fallback=None):
+        info = self.make_ready_task(task_id=task_id, project_name=REPO,
+                                    project_id=PROJECT_ID)
+        tid = info["remote"]["id"]
+        revision = self.call("get-project-mappings", {}).get("revision", 0)
+        self.call("set-project-mapping", {
+            "project_id": PROJECT_ID, "repository": str(self.repos_root / REPO),
+            "enabled": True, "expected_revision": revision})
+        self.call("set-project-engine-mode",
+                  {"project_id": PROJECT_ID, "engine_mode": "live"})
+        if fallback is not None:
+            self.call("set-project-fallback-model",
+                      {"project_id": PROJECT_ID, "fallback_model": fallback})
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task = db.require_task(conn, tid)
+                core.update_automation(conn, task, util.now_iso(),
+                                       adopted_at=util.now_iso())
+        finally:
+            conn.close()
+        return tid
+
+    def _empty_verdict(self, tid, run_id="run-empty-1"):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task = db.require_task(conn, tid)
+                db.set_extra(conn, task, util.now_iso(), engine_verdict={
+                    "execution_run_id": run_id,
+                    "plan_sha256": task["plan_sha256"],
+                    "empty_diff": True, "verification_ok": False})
+        finally:
+            conn.close()
+
+    def test_probe_receives_the_connection_file(self):
+        tid = self._adopt_live("taskfbprobe000000001", fallback=_FALLBACK)
+        self._empty_verdict(tid)
+        seen = {}
+
+        def _probe(provider_id, model_id):
+            seen["provider_id"] = provider_id
+            seen["model_id"] = model_id
+            seen["connection_file"] = _probe.conn_file
+            return True, "cache 命中"
+
+        # 经 plan_retry 的默认路径（不传显式 probe），只替换 probe_model，
+        # 这样 connection_file 的传递本身也被测到。
+        with mock.patch.object(fallback, "probe_model") as probe:
+            probe.side_effect = lambda p, m, **kw: (
+                seen.update(provider_id=p, model_id=m,
+                            connection_file=kw.get("connection_file"))
+                or (True, "cache 命中"))
+            with mock.patch.object(fallback, "primary_snapshot",
+                                   return_value=(_PRIMARY, None)):
+                actions = [a for a in loop.Reconciler(
+                    self.db_path, mode="live").reconcile_once()["actions"]
+                    if a.get("task_id") == tid]
+        self.assertEqual(seen.get("provider_id"), _FALLBACK["provider_id"])
+        self.assertEqual(seen.get("model_id"), _FALLBACK["model_id"])
+        # 关键断言：连接文件来自 primary 快照，而不是 None
+        self.assertEqual(seen.get("connection_file"),
+                         _PRIMARY["connection_file"])
+        self.assertTrue(actions)
+
+    def test_probe_failure_still_records_why_no_switch(self):
+        """探针失败要落审计事件：否则事件表看不出曾考虑过 fallback。"""
+        tid = self._adopt_live("taskfbprobe000000002", fallback=_FALLBACK)
+        self._empty_verdict(tid)
+        with mock.patch.object(fallback, "probe_model",
+                               return_value=(False, "model 不存在")), \
+                mock.patch.object(fallback, "primary_snapshot",
+                                  return_value=(_PRIMARY, None)):
+            actions = [a for a in loop.Reconciler(
+                self.db_path, mode="live").reconcile_once()["actions"]
+                if a.get("task_id") == tid]
+        self.assertTrue(actions)
+        self.assertEqual(actions[0]["action"], "block")
+        self.assertEqual(actions[0]["reason"], "validation_failed")
+        events = [e for e in self.call(
+            "list-events", {"task_id": tid, "limit": 50})["events"]
+            if e["kind"] in ("model", "model_hint")]
+        self.assertTrue(events, "探针失败也应落审计事件")
+        self.assertEqual(events[0]["detail"]["reason"], "fallback_probe_failed")
+
+
 class TestDispatchClaimSeam(KanpilotTestCase):
     def _task_with_override(self, override):
         info = self.make_ready_task(task_id=TASK_ID, project_name=REPO,
