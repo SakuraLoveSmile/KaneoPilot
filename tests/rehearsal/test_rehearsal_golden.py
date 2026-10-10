@@ -186,6 +186,28 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     assert verdict["verification_ok"] is False, verdict
     assert verdict["effective_changes"] == [], verdict
 
+    # 备用模型·路径 A（未配置）：主模型重跑 + model_hint + 武装补救轮，
+    # 不换模型（engine/fallback.py plan_retry 的 not-configured 分支）。
+    summary = _reconcile(pipeline)
+    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
+    assert len(mine) == 1, mine
+    assert mine[0]["action"] == "start_fix_round", mine[0]
+    assert mine[0]["ladder"] == 3, mine[0]
+    events = pipeline.call("list-events",
+                           {"task_id": TASK, "limit": 40})["events"]
+    model_events = [e for e in events if e["kind"] == "model"]
+    assert len(model_events) == 1, events
+    assert model_events[0]["detail"]["model"] == "primary", model_events[0]
+    assert model_events[0]["actor"] == "engine", model_events[0]
+    hints = [e for e in events if e["kind"] == "model_hint"]
+    assert hints and hints[0]["detail"]["hint"] == "configure_fallback_model", events
+    extra = pipeline.task(TASK).get("extra") or {}
+    rounds = extra.get("engine_fix_rounds") or []
+    assert len(rounds) == 1, rounds
+    assert rounds[0]["model"] == "primary", rounds
+    assert rounds[0]["execution_run_id"] == run_id, rounds
+    assert not extra.get("engine_model_override"), extra
+
     # 质量阶梯（阶梯 3）：同计划有界补救 ≤2 轮，超出 → 阶梯 4 收件箱
     first = decide.failure_decision("empty_diff", fix_round=0)
     assert first.action == decide.START_FIX_ROUND, first
@@ -218,6 +240,30 @@ def test_scenario_empty_diff_backup_model_then_attention(pipeline):
     value = pipeline.task(TASK)
     assert value["status"] == "needs_user", value
     assert value["failure_code"] == "no_changes", value
+
+    # 备用模型·路径 B（已配置，fake cache 中存在该模型）：当前接线下探针
+    # 拿不到 connection_file（loop._quality_retry 调 fallback.plan_retry 未传
+    # connection_file=primary.get("connection_file")，探针以 None 建连必败）
+    # → BLOCK validation_failed（阶梯 2）+ 不换模型。core 单测
+    # （test_engine_fallback.py，注入假探针）覆盖「探针通过 → model: fallback
+    # + 快照覆盖」；接线修复后此处应翻转为 model: fallback + override。
+    out = pipeline.call("set-project-fallback-model", {
+        "project_id": PROJECT,
+        "fallback_model": {"provider_id": "test-provider",
+                           "model_id": "test-model"}})
+    assert out.get("fallback_model"), out
+    summary = _reconcile(pipeline)
+    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
+    assert len(mine) == 1, mine
+    assert mine[0]["action"] == "block", mine[0]
+    assert mine[0]["reason"] == "validation_failed", mine[0]
+    assert mine[0]["ladder"] == 2, mine[0]
+    extra = pipeline.task(TASK).get("extra") or {}
+    assert not extra.get("engine_model_override"), extra
+    events = pipeline.call("list-events",
+                           {"task_id": TASK, "limit": 40})["events"]
+    assert not [e for e in events if e["kind"] == "model"
+                and (e.get("detail") or {}).get("model") == "fallback"], events
 
     # 补救轮用尽后引擎不再自动补救：reconcile 只记录决策、不下命令
     summary = _reconcile(pipeline)
@@ -484,95 +530,6 @@ def test_scenario_take_over_then_resume_auto_delivers(pipeline):
     value = _deliver_to_merge(pipeline)
     assert value["status"] == "done", value
     assert pipeline.fake.tasks[TASK]["status"] == "done"
-
-
-def _empty_diff_round(case):
-    """造一个「执行完成但工作树零改动」的轮次并返回 run_id。"""
-    _script_rounds(case, {case.round + 1: None})
-    run_id = case._execute()
-    value = case.task(TASK)
-    verdict = case.call("engine-verdict", {
-        "task_id": TASK, "expected_execution_run_id": run_id,
-        "expected_plan_sha256": value["plan_sha256"]})
-    assert verdict["empty_diff"] is True, verdict
-    return run_id
-
-
-def test_empty_diff_fallback_model_paths():
-    """场景 5 执行层：备用模型三条路径（protocol §5.27 / engine/fallback.py）。
-
-    假 Plus 能回答模型目录探针（providers/list + providers/listModels
-    {source:"cache"}），因此执行层可直接验证：
-    - 未配置 → START_FIX_ROUND（阶梯 3）+ model:primary 事件 + model_hint
-      提示 + 补救轮武装，**不换模型**（无 engine_model_override）；
-    - 已配置（fake cache 中存在）→ 当前接线下探针拿不到 connection_file
-      （loop._quality_retry 调 fallback.plan_retry 未传
-      connection_file=primary.get("connection_file")，探针以 None 建连必败）
-      → BLOCK validation_failed（阶梯 2）+ 不换模型。core 单测
-      （test_engine_fallback.py，注入假探针）覆盖「探针通过 → model:
-      fallback + 快照覆盖」路径；接线修复后本用例路径 B 应翻转为
-      model: fallback + extra.engine_model_override。
-    """
-    # ---- 路径 A：未配置 fallback → 主模型重跑 + 提示 + 武装 ----
-    case = _pipeline.TestAutoPipeline()
-    case.setUp()
-    try:
-        case._adopt_and_plan()
-        run_id = _empty_diff_round(case)
-        summary = _reconcile(case)
-        mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-        assert len(mine) == 1, mine
-        assert mine[0]["action"] == "start_fix_round", mine[0]
-        assert mine[0]["ladder"] == 3, mine[0]
-        events = case.call("list-events", {"task_id": TASK, "limit": 40})["events"]
-        model_events = [e for e in events if e["kind"] == "model"]
-        assert len(model_events) == 1, events
-        assert model_events[0]["detail"]["model"] == "primary", model_events[0]
-        assert model_events[0]["actor"] == "engine", model_events[0]
-        hints = [e for e in events if e["kind"] == "model_hint"]
-        assert hints and hints[0]["detail"]["hint"] == "configure_fallback_model", events
-        extra = case.task(TASK).get("extra") or {}
-        rounds = extra.get("engine_fix_rounds") or []
-        assert len(rounds) == 1, rounds
-        assert rounds[0]["model"] == "primary", rounds
-        assert rounds[0]["execution_run_id"] == run_id, rounds
-        assert not extra.get("engine_model_override"), extra
-    finally:
-        case.tearDown()
-        case.doCleanups()
-        _rehearsal_conftest.terminate_lingering_workers()
-
-    # ---- 路径 B：已配置 fallback → 当前接线探针失败 → 阶梯 2 不换模型 ----
-    case = _pipeline.TestAutoPipeline()
-    case.setUp()
-    try:
-        case._adopt_and_plan()
-        _empty_diff_round(case)
-        out = case.call("set-project-fallback-model", {
-            "project_id": PROJECT,
-            "fallback_model": {"provider_id": "test-provider",
-                               "model_id": "test-model"}})
-        assert out.get("fallback_model"), out
-        summary = _reconcile(case)
-        mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-        assert len(mine) == 1, mine
-        assert mine[0]["action"] == "block", mine[0]
-        assert mine[0]["reason"] == "validation_failed", mine[0]
-        assert mine[0]["ladder"] == 2, mine[0]
-        # 不静默换模型：无覆盖、无补救轮武装、无 model:fallback 事件
-        extra = case.task(TASK).get("extra") or {}
-        assert not extra.get("engine_model_override"), extra
-        assert not extra.get("engine_fix_rounds"), extra
-        events = case.call("list-events", {"task_id": TASK, "limit": 40})["events"]
-        assert not [e for e in events if e["kind"] == "model"
-                    and (e.get("detail") or {}).get("model") == "fallback"], events
-        # 注：BLOCK 是决策不写状态——任务此时仍 running；「进收件箱」发生在
-        # monitor/report 真正把任务置 needs_user 之后（引擎决策与状态写入的
-        # 边界），此处只钉决策与「不换模型」的不变量。
-    finally:
-        case.tearDown()
-        case.doCleanups()
-        _rehearsal_conftest.terminate_lingering_workers()
 
 
 def load_tests(loader, standard_tests, pattern):
