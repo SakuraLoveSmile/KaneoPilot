@@ -159,13 +159,37 @@ def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
     assert len(retried) == 1, reqs
     assert retried[0]["requested_by"] == "automation", retried[0]
     assert kutil.ts_before(kutil.now_iso(), retried[0]["not_before"]), retried[0]
-    # 缺口留痕（ca06344 的实时链路还差一步，已报 engine_builder）：
-    # cmd_enqueue 落库时只保留 note（request_payload = {"note": ...} if note
-    # else None），commands_for(RETRY) 带的 retry_base **未持久化** → 下次失败
-    # 读回 None、spent=0 → 退避次数仍不跨请求累积。待落库修复后补：
-    #   payload = cli("get-request", {...})["payload"]
-    #   assert payload.get("retry_base") == 1 → R2 再失败 retry_base==2 →
-    #   R3 封顶（无 retry 命令、无新请求）。
+    payload = cli("get-request",
+                  {"request_id": retried[0]["request_id"]})["payload"]
+    assert payload.get("retry_base") == 1, payload
+
+    # R2：领回重试请求再失败 → 再次退避重试，retry_base 跨请求累积为 2
+    # （0a093bc：retry_base 随请求 payload 落库，_transient_retry 读它）。
+    make_due(tmp_env.db, retried[0]["request_id"])
+    _transient_failure(cli, retried[0]["request_id"], "monitor")
+    summary = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
+    retry_actions = [a for a in summary["actions"]
+                     if a["task_id"] == tid and a["action"] == kdecide.RETRY]
+    assert retry_actions and all(a.get("executed") is True
+                                 for a in retry_actions), summary["actions"]
+    reqs = cli("list-requests", {})["requests"]
+    retried2 = _queued(reqs, tid, "monitor")
+    assert len(retried2) == 1, reqs
+    payload2 = cli("get-request",
+                   {"request_id": retried2[0]["request_id"]})["payload"]
+    assert payload2.get("retry_base") == 2, payload2
+
+    # R3：第三次瞬时失败 → 封顶（≤2/阶段）：不再重试、不产生新请求；
+    # 失败原因保留在失败请求上，等待用户/环境修复。
+    make_due(tmp_env.db, retried2[0]["request_id"])
+    _transient_failure(cli, retried2[0]["request_id"], "monitor")
+    summary = kloop.Reconciler(tmp_env.db, mode="live").reconcile_once()
+    mine3 = [a for a in summary["actions"] if a["task_id"] == tid]
+    assert not [a for a in mine3 if a["action"] == kdecide.RETRY], mine3
+    reqs = cli("list-requests", {})["requests"]
+    assert not _queued(reqs, tid, "monitor"), reqs
+    assert [r for r in reqs if r["task_id"] == tid and r["kind"] == "monitor"
+            and r["status"] == "failed"], reqs
 
     # 执行层 B（dispatch kind）：dispatching 状态瞬时失败 → 退避重入队放行
     # （retry_base 为凭据）；普通 enqueue 从 dispatching 仍被拒。
@@ -192,6 +216,9 @@ def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
     assert len(dqueued) == 1, reqs
     assert dqueued[0]["requested_by"] == "automation", dqueued[0]
     assert kutil.ts_before(kutil.now_iso(), dqueued[0]["not_before"]), dqueued[0]
+    dpayload = cli("get-request",
+                   {"request_id": dqueued[0]["request_id"]})["payload"]
+    assert dpayload.get("retry_base") == 1, dpayload
 
     # 升级面：needs_user 任务 → BLOCK、无命令执行、带 explain；shadow 不写库。
     blocked = factory.make_needs_user()
