@@ -196,7 +196,7 @@ class Reconciler:
         surfaces via attention), or a dispatch prompt was already sent/unknown.
         """
         row = conn.execute(
-            "SELECT kind, attempt_no, result_json FROM requests "
+            "SELECT kind, payload_json, result_json FROM requests "
             "WHERE task_id=? AND status='failed' ORDER BY updated_at DESC LIMIT 1",
             (task["task_id"],)).fetchone()
         if row is None:
@@ -209,15 +209,21 @@ class Reconciler:
             return None
         if self._has_active_request(conn, task["task_id"], kind):
             return None
-        attempt_no = row["attempt_no"] or 0
-        fd = decide.failure_decision(code, attempt_no=attempt_no)
+        # 「≤2/阶段」必须**跨请求累积**：commands_for(RETRY) 重入队的是新请求，
+        # 它的 attempt_no 从零开始，所以已花费的重试次数随 payload 的 retry_base
+        # 传递。只读失败请求自身的 attempt_no 会让上限永远达不到（无限退避）。
+        base = db.request_payload(row).get("retry_base")
+        spent = base if isinstance(base, int) and base >= 0 else 0
+        fd = decide.failure_decision(code, attempt_no=spent)
         if fd.action != decide.RETRY:
             return None
         not_before = util.plus_seconds(fd.params["backoff_seconds"], now)
         return decide.Decision(
             decide.RETRY, reason=code or "transient", ladder=ladder.LADDER_TRANSIENT,
             params={"kind": kind, "not_before": not_before,
-                    "attempt_no": fd.params["attempt_no"]})
+                    "attempt_no": fd.params["attempt_no"],
+                    "backoff_seconds": fd.params["backoff_seconds"],
+                    "retry_base": fd.params["attempt_no"]})
 
     # ------------------------------------------------------------- quality fix
     def _project_fallback(self, conn, project_id):

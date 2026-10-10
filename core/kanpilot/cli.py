@@ -139,6 +139,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # A14：谁在入队——面板/CLI 用户（缺省 user）或引擎/runner
             # （automation）。无人值守时 actor=user 只允许出现在任务创建本身。
             "actor": (False, "str"),
+            # 阶梯 1 退避重入队的跨请求重试计数（整数）；只有引擎的
+            # commands_for(RETRY) 会带它，cmd_enqueue 据此放行 dispatching
+            # 状态下的 dispatch 重入队。
+            "retry_base": (False, "int"),
         },
         cmd_queue.cmd_enqueue,
     ),
