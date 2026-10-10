@@ -54,6 +54,17 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
         return [CommandCall("enqueue", {"task_id": task_id, "kind": "monitor",
                                         "actor": "automation"},
                             kind="monitor")]
+    if action == decide.SETTLE_ROUND:
+        # 轮次已退出但终态未登记（sandbox §13.2）：补一次 monitor 请求，由
+        # 确定性 monitor 阶段读最新 job.json 收尾——exit 0 走 _complete
+        # （核心亲判 verify → 提交 → in-review），非 0 报 needs_user/
+        # execution_failed（阶梯 4 → 收件箱）。引擎自身不写轮次状态。
+        return [CommandCall(
+            "enqueue",
+            {"task_id": task_id, "kind": "monitor", "actor": "automation",
+             "note": "引擎补登记轮次终态：exit_code=%s"
+                     % decision.params.get("exit_code")},
+            kind="monitor")]
     if action in (decide.COMMIT_DELIVERY, decide.SYNC_DELIVERY):
         return [CommandCall("enqueue", {"task_id": task_id, "kind": "delivery",
                                         "actor": "automation"},
