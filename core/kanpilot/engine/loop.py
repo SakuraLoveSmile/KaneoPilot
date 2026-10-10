@@ -38,18 +38,35 @@ ENGINE_MODES = ("legacy", "shadow", "live")
 # extra key where the engine records its same-plan bounded remediation rounds
 # (scenarios.md #5: ≤2 per plan, each armed for one retry execution round).
 FIX_ROUNDS_KEY = "engine_fix_rounds"
+# Stages whose spawned workers perform Kaneo remote writes under the global
+# lifecycle serial (``core.acquire_lifecycle``, state-model §5):
+#   dispatch → ``dispatch-begin-send`` (owner ``begin-send:<run_id>``)
+#   monitor  → ``advance-task`` from ``auto_monitor._advance``
+#   delivery → ``advance-task`` from ``delivery_runner`` (merge → done)
+# ``plan`` and ``review`` do not take the serial (register-review is local).
+LIFECYCLE_SERIAL_STAGES = frozenset({"dispatch", "monitor", "delivery"})
 
 
-def plan_spawns(queued_stages, live_stages, *, foreign_active: bool):
+def plan_spawns(queued_stages, live_stages, *, foreign_active: bool,
+                lifecycle_busy: bool = False):
     """Which stages to spawn a worker for (pure).
 
     Spawn a stage only when it has queued work, no live runner already handles
     it, and no foreign (App) scheduler is driving workers (avoid double-spawn).
+
+    ``lifecycle_busy`` additionally defers :data:`LIFECYCLE_SERIAL_STAGES`:
+    starting one of them while another owner holds the serial loses the race,
+    and the loser is recorded as a *definite* outcome even though nothing was
+    written — dispatch becomes ``send_state=unknown`` (protocol: after
+    begin-send, always unknown) and the task lands in needs_user for a send
+    that never happened (sandbox evidence §4.1: tasks 2/4/5 stuck). Deferring is
+    safe: the request stays queued and the next tick retries.
     """
     if foreign_active:
         return []
     return [s for s in STAGES_WITH_WORKERS
-            if queued_stages.get(s, 0) > 0 and s not in (live_stages or set())]
+            if queued_stages.get(s, 0) > 0 and s not in (live_stages or set())
+            and not (lifecycle_busy and s in LIFECYCLE_SERIAL_STAGES)]
 
 
 class Reconciler:
@@ -439,20 +456,48 @@ class Reconciler:
         return runners.spawn(stage, db_path, instance_id=instance_id)
 
     def spawn_step(self, conn, modes) -> dict:
-        """Spawn per-stage workers for queued requests of live projects (no App scheduler)."""
+        """Spawn per-stage workers for queued requests of live projects (no App scheduler).
+
+        Lifecycle-serial stages (dispatch/monitor/delivery) are deferred while
+        another owner holds ``lifecycle_owner`` — see :data:`LIFECYCLE_SERIAL_STAGES`.
+        """
         if self.foreign_scheduler_active(conn):
             return {"action": "spawn", "executed": False,
                     "reason": "app_scheduler_active", "spawned": []}
         queued = self._queued_stages(conn, modes)
         live = self._live_runner_stages(conn)
-        stages = plan_spawns(queued, live, foreign_active=False)
+        busy = self.lifecycle_busy(conn)
+        stages = plan_spawns(queued, live, foreign_active=False, lifecycle_busy=busy)
         spawner = self.spawn or self._default_spawn
         spawned = []
         for stage in stages:
             spawner(stage, self.db_path, self.instance_id)
             spawned.append(stage)
             self.log("engine spawned worker: " + stage)
-        return {"action": "spawn", "executed": True, "spawned": spawned}
+        result = {"action": "spawn", "executed": True, "spawned": spawned}
+        deferred = [stage for stage in LIFECYCLE_SERIAL_STAGES
+                    if busy and queued.get(stage, 0) > 0
+                    and stage not in (live or set()) and stage not in spawned]
+        if deferred:
+            # Observability: queued lifecycle work deliberately not started this
+            # tick. It stays queued; the next tick retries once the serial frees.
+            result["deferred"] = {"stages": deferred,
+                                  "reason": "lifecycle_serial_busy"}
+        return result
+
+    @staticmethod
+    def lifecycle_busy(conn) -> bool:
+        """True while an owner holds the global lifecycle serial (state-model §5).
+
+        ``lifecycle_owner`` is a plain setting with no timestamp, so a worker
+        that dies between ``acquire_lifecycle`` and its ``finally`` release
+        would leak it and defer these stages forever. Both holders release in a
+        ``finally`` around a single remote write, so the exposure is a hard
+        crash only — and a deferred spawn is recoverable (the request stays
+        queued), unlike a task wrongly pushed to needs_user. A reaper would need
+        a protocol decision about staleness for a serial with no heartbeat.
+        """
+        return bool(db.get_setting(conn, "lifecycle_owner", "") or "")
 
     # ------------------------------------------------------------- long-lived
     def run(self, *, instance_id=None, stage=None, lease_seconds=None,

@@ -17,7 +17,10 @@ def _get_task(controller):
 
 
 def _recheck(controller, task):
-    return controller.call("recheck", {"task_id": task["task_id"]})
+    # A14: the monitor stage runs unattended, so its recheck is an automation
+    # action — not a user action (the panel's manual recheck keeps the default).
+    return controller.call("recheck", {"task_id": task["task_id"],
+                                       "actor": "automation"})
 
 
 def _advance(controller, task, target, expected):

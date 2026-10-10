@@ -36,7 +36,8 @@ class TestRetrySteps(unittest.TestCase):
         call = calls[0]
         self.assertEqual(call.command, "enqueue")
         self.assertEqual(call.payload, {"task_id": "t1", "kind": "monitor",
-                                        "not_before": "2099-01-01T00:00:00+00:00"})
+                                        "not_before": "2099-01-01T00:00:00+00:00",
+                                        "actor": "automation"})
         self.assertEqual(call.kind, "monitor")
 
     def test_dispatch_not_sent_rebuilds(self):

@@ -116,19 +116,31 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         hold = bool(extra.get("plan_execution_hold"))
         confirm_plan = bool(payload.get("confirm_plan"))
         expected_sha = payload.get("expected_plan_sha256")
+        # A14: who is enqueueing — the panel/CLI user ("user", the default) or
+        # the reconciler/runners ("automation"). On an unattended run the only
+        # ``actor=user`` events must be the task creations themselves, so an
+        # automated caller has to be able to say so instead of inheriting the
+        # hard-coded "user" below (same pair as ``prepare-plan-input``).
+        actor = payload.get("actor", "user")
+        if actor not in ("user", "automation"):
+            raise util.bad_request("actor 必须为 user 或 automation")
         if kind == "dispatch":
             _require_current_plan(task)
             _require_unsent_dispatch(task)
             if hold and not confirm_plan:
                 raise util.KanpilotError("conflict", "计划已发布但尚未确认执行（需要 confirm_plan:true）")
             if hold or expected_sha is not None:
-                row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=expected_sha, actor="user", note=payload.get("note"))
+                row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=expected_sha, actor=actor, note=payload.get("note"))
                 return {"request": derive.request_view(row, ctx.now), "deduplicated": not created}
         key = f"{kind}:{task['task_id']}"
         request_payload = {"note": payload.get("note")} if payload.get("note") else None
+        # requested_by doubles as the ``enqueued`` event actor (db.create_request).
+        # Legacy callers that only set not_before keep the historical "engine".
+        requested_by = "automation" if actor == "automation" else (
+            "engine" if payload.get("not_before") else "user")
         row, created = db.create_request(
             conn, now, kind, key, task_id=task["task_id"],
-            payload=request_payload, requested_by="engine" if payload.get("not_before") else "user",
+            payload=request_payload, requested_by=requested_by,
             not_before=payload.get("not_before"),
         )
         return {
@@ -459,6 +471,12 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     action = payload["action"]
     note = payload.get("note")
+    # A14: resolve is a user-action surface today (no automation caller), but the
+    # actor is explicit so an unattended caller would be recorded honestly
+    # instead of silently inheriting "user".
+    actor = payload.get("actor", "user")
+    if actor not in ("user", "automation"):
+        raise util.bad_request("actor 必须为 user 或 automation")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
     if action == "recover_review":
@@ -775,7 +793,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             )
 
         db.add_event(
-            conn, now, "resolved", task_id=task["task_id"], actor="user",
+            conn, now, "resolved", task_id=task["task_id"], actor=actor,
             detail=resolution,
         )
         fresh = db.require_task(conn, task["task_id"])

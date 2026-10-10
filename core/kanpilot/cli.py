@@ -136,6 +136,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "expected_plan_sha256": (False, "str"),
             # v6：阶梯 1 退避重试的 not_before（ISO-8601；空=立即）。
             "not_before": (False, "str|null"),
+            # A14：谁在入队——面板/CLI 用户（缺省 user）或引擎/runner
+            # （automation）。无人值守时 actor=user 只允许出现在任务创建本身。
+            "actor": (False, "str"),
         },
         cmd_queue.cmd_enqueue,
     ),
@@ -156,11 +159,15 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "note": (False, "str"),
             "expected_execution_run_id": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
+            # A14：同上；resolve 目前只有用户动作面，缺省 user。
+            "actor": (False, "str"),
         },
         cmd_queue.cmd_resolve,
     ),
     "recheck": (
-        {"task_id": (True, "str"), "offline": (False, "bool")},
+        {"task_id": (True, "str"), "offline": (False, "bool"),
+         # A14：auto_monitor 的无人值守复校传 automation。
+         "actor": (False, "str")},
         cmd_remote.cmd_recheck,
     ),
     "sync-tasks": (

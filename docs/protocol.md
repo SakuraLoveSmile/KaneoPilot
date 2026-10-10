@@ -1410,3 +1410,39 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 推荐缺省值（**仅建议值，绝不隐式套用**）：`{"provider_id": "707a4c67-4ee0-484d-b635-730372501eaf", "model_id": "google/gemini-3.7-flash"}`，理由见 `docs/evidence/spike-fallback-model-id-20261010.md`（同 provider 复用鉴权、跨厂商 flash 档、目录内确认存在）。
  - 非法形状（缺 `provider_id`/`model_id`、非字符串、空串）→ `bad_request`；省略 `fallback_model` 或传 null → 清除配置，回到「不换模型」。
  - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
+
+#### 5.27.9 spawn 与 lifecycle 串行位（A14 并发派发）
+
+ `lifecycle_owner` 是「同一时刻只允许一次 Kaneo 远端写」的全局串行位（state-model §5）。
+ 持锁的写入方：`dispatch-begin-send`（owner `begin-send:<run_id>`）、`advance-task`、
+ `create-review-fix`；`recheck` 与 `register-review` **不**持锁。
+
+ - 因此会被 spawn 的 worker 分成两类：`dispatch` / `monitor` / `delivery` 的 worker 会持锁
+   （monitor 与 delivery 都经 `advance-task` 收尾），`plan` / `review` 不持锁。
+ - **引擎在 `lifecycle_owner` 非空时不起前一类 worker**（`loop.plan_spawns` 的
+   `lifecycle_busy`）：抢锁失败会被记成「已发生」的确定结果——dispatch 记
+   `send_state=unknown`（begin-send 之后一律 unknown）并把任务推进 needs_user，
+   而这一次发送根本没有发生。让行是安全的：请求保持 queued，下一 tick 重试。
+ - 本轮让行的 stage 记在 `spawn` action 的 `deferred={stages:[...], reason:"lifecycle_serial_busy"}`，
+   便于观测「为什么这个 tick 没起 worker」。已有 live runner 的 stage 不算让行。
+ - `lifecycle_owner` 是无时间戳的普通 setting：worker 在 acquire 与 `finally` release
+   之间硬崩会泄漏它，使这三类 stage 无限期让行（请求不丢、可恢复，但不再推进）。
+   回收器需要协议对「无心跳串行位的陈旧判定」给出定义，属后续事项。
+
+#### 5.27.10 `actor` 入参（A14 无人值守事件归属）
+
+ A14 要求无人值守运行时 `actor=user` 的事件**仅限任务创建本身**。以下命令新增显式
+ `actor`（`"user"` 缺省保持兼容，`"automation"` 表示无人值守调用方；非法值 → `bad_request`），
+ 与 `prepare-plan-input` 同一对词表：
+
+ | 命令 | 事件 | 无人值守调用方 |
+ |---|---|---|
+ | `enqueue {task_id, kind?, actor?}` | `enqueued`（+ `confirm_plan` 时的 `resolved`） | 引擎 Reconciler 的每一次入队 |
+ | `resolve {task_id, action, actor?}` | `resolved` | 当前只有用户动作面；参数为显式化预留 |
+ | `recheck {task_id, offline?, actor?}` | `rechecked` | monitor stage 的无人值守复校 |
+
+ - `enqueue` 的 `actor="automation"` 同时把 `requests.requested_by` 写为 `automation`
+   （该列即 `enqueued` 事件的 actor）。历史调用方只设 `not_before` 时仍写 `engine`，
+   不静默改变既有语义。
+ - 其余 `requested_by` 取值不变：`scheduler`（legacy 自动推进）、`migration`、
+   `user`（规划问答/评审决议等真正的用户动作）。
