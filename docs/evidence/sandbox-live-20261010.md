@@ -133,3 +133,36 @@ status 停在 `in_review`）。
 「评审通过即 done」vs「PR 合并后才 done」两条完成路径如何切换），属后续事项。
 
 **验证**：回退后 `tests/test_review_settle.py` → 16 passed（基线一致）。
+
+## 9. resume_auto 闭环落地（2026-10-10 晚，取代 §8 的回退决定）
+
+§8 曾把 engine_builder 的 `resume_auto` 实现回退。重新评估后**接受该实现**，理由：
+
+1. 计划 D4 明确「`manual_takeover` → 可逆暂停；`resume_auto` 一键恢复」——这是既定设计意图；
+2. `docs/state-model.md` §10 的动作表把 `resume_auto` 的前置条件写成「**已转人工任务**，环境已修复」，效果「恢复自动推进，继续原 phase」——对接管任务而言，「恢复自动推进」必然意味着解除接管；
+3. scenarios.md 场景 16 的标题就是「take_over → resume_auto 后仍能交付」；
+4. 桌面端「恢复自动推进」按钮（`AppViewModel.resumeAuto`）本来就在调 `restore-task {resume_auto:true}`；
+5. **不实现的后果是 `resume_auto` 对接管任务为空操作**：接管任务同时被 `auto_advance_paused=1` 挡住，既不能 claim 也不能 advance，正是 D4 诊断的单向门。
+
+§8 记录的「回归」其实是**旧测试编码了那个不自洽的中间态**（resume_auto=True 却仍 manual_takeover=True：解除了暂停却没解除接管）。新语义下该组合不存在。
+
+实现（`core/kanpilot/cmd_archive.py`）：
+- `resume_auto=true` 清 `automation.manual_takeover`；
+- `delivery.mode`：`manual` → `pr`，**仅当 PR 身份字段齐全**（branch/base_branch/base_sha/head_sha/worktree_path 全非空），否则保持 manual，不造「PR 模式但不可发布」的半态；
+- 清 `auto_advance_paused`（原有语义）；
+- 落 `automation_resumed` 事件（幂等，只落一次）；
+- 普通 `restore-task`（无 resume_auto）与幂等恢复都不动自动化归属；
+- active 幂等路径与 save_state 恢复路径两个入口都覆盖。
+
+测试调整：
+- `core/tests/test_review_settle.py::test_real_dismiss_takeover_restores_manual_pass` 改为断言新语义（resume 后 `manual_takeover=False`、`mode='pr'`、pass 后 `status=='in_review'` 进入交付周期）；
+- 新增 `test_real_dismiss_takeover_manual_pass_still_finishes` 保住 `conclusion=="pass" and not automated → advance-task → done` 分支的覆盖（仍处接管 + 用户手动清暂停的路径）；
+- 新增 `core/tests/test_resume_auto_takeover.py` 8 例：清接管与回 pr、无 PR 身份不切模式、普通恢复不动归属、幂等只落一次事件、归档后 resume、引擎对接管任务零动作、resume 后引擎重新驱动、经真实 `resolve dismiss` 的往返；
+- `tests/rehearsal/test_rehearsal_golden.py` 场景 16 的缺口断言改为闭环断言。
+
+**修测试时发现并修掉的两个测试自身缺陷**（供后人参考）：
+1. `db.set_extra(conn, task_row, ...)` 用**传入行**的 `extra_json` 全量覆写——分多次写时若复用写前读到的行，会抹掉前一次写入（`_take_over` 因此丢过 `manual_takeover`）。改为每次写前重新 `require_task`。
+2. 同一基座里定义了两个 `_view`，后者静默覆盖前者，导致 `save_state` KeyError。
+
+**验证**：`tests/test_resume_auto_takeover.py` 8 passed；`tests/test_review_settle.py` 17 passed；
+`python3 -m pytest tests/rehearsal -q` → 63 passed / 5 skipped / exit 0。

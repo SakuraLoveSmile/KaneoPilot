@@ -207,14 +207,79 @@ def test_real_dismiss_takeover_restores_manual_pass(factory, tmp_env):
             db.create_request(conn, util.now_iso(), 'review', 'takeover-review:' + task_id, task_id=task_id, requested_by='test')
     finally:
         conn.close()
-    # The user explicitly resumes before authorizing another Review cycle.
-    assert not cli.run('claim', {'stage': 'review', 'executor': 'kaneo-review'}, tmp_env.db)['claimed']
+    # resume_auto is the reverse entry of ``resolve {action:"dismiss"}``: it
+    # hands the task back to automation (clears manual_takeover) and, when the
+    # PR identity is complete, flips delivery.mode back to "pr". That is the
+    # point of the action — without it resume_auto would be a no-op for a
+    # taken-over task (the one-way door D4 diagnoses), because a paused +
+    # taken-over task can neither claim nor advance on its own.
     cli.run('restore-task', {'task_id': task_id, 'resume_auto': True}, tmp_env.db)
+    resumed = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
+    assert resumed['automation']['manual_takeover'] is False, resumed['automation']
+    assert resumed['delivery']['mode'] == 'pr', resumed['delivery']
+    assert resumed['auto_advance_paused'] in (0, False), resumed
     claim = cli.run('claim', {'stage': 'review', 'executor': 'kaneo-review'}, tmp_env.db)
     assert claim['claimed']
     task = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
     request = cli.run('get-request', {'request_id': claim['request_id']}, tmp_env.db)['request']
     assert review_settle.settle(db_path=tmp_env.db, task=task, request=request, run_id=claim['run_id'],
-                                result={'conclusion': 'pass', 'report_markdown': '人工接管后的评审通过', 'fix': None},
+                                result={'conclusion': 'pass', 'report_markdown': '交回自动化后的评审通过', 'fix': None},
+                                backend='codex', cost_usd=None)['exit_code'] == 0
+    # Back under automation with PR delivery, a pass does not finish the task
+    # directly: it enters the PR delivery cycle (commit → push → PR → merge →
+    # done), which is the take_over → resume_auto → deliver loop of scenario 16.
+    after = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
+    assert after['status'] == 'in_review', after
+    assert after['delivery']['mode'] == 'pr', after['delivery']
+
+
+def test_real_dismiss_takeover_manual_pass_still_finishes(factory, tmp_env):
+    """A task that stays taken over still finishes directly on a review pass.
+
+    Covers the ``conclusion == "pass" and not automated`` branch of
+    ``review_settle.settle``: while ``manual_takeover`` is set the task is not
+    automation-managed, so a pass advances straight to done instead of entering
+    the PR delivery cycle. Set up directly (takeover + pause cleared) because a
+    taken-over task cannot claim a review on its own — this is the path a user
+    drives by hand.
+    """
+    from kanpilot import cli, core, db, util
+    conn = db.connect(tmp_env.db)
+    try:
+        with db.write_txn(conn):
+            db.set_setting(conn, 'review_config', {'backend': 'codex'})
+    finally:
+        conn.close()
+    initial = factory.make_in_review()
+    task_id = initial.task.task_id
+    conn = db.connect(tmp_env.db)
+    try:
+        with db.write_txn(conn):
+            task = db.require_task(conn, task_id)
+            db.set_extra(conn, task, util.now_iso(), automation={'fix_round': 0},
+                         delivery={**core.delivery_of(task), 'mode': 'manual'})
+            core.block_task(conn, db.require_task(conn, task_id), util.now_iso(), '人工复核', 'review_blocked', 'test', stage='review')
+    finally:
+        conn.close()
+    cli.run('resolve', {'task_id': task_id, 'action': 'dismiss'}, tmp_env.db)
+    # Still taken over (no resume_auto), but the user cleared the pause by hand
+    # so a review cycle can be claimed.
+    conn = db.connect(tmp_env.db)
+    try:
+        with db.write_txn(conn):
+            conn.execute("UPDATE requests SET status='cancelled' WHERE task_id=? AND status IN ('pending','claimed')", (task_id,))
+            db.update_task(conn, task_id, util.now_iso(), status='in_review', auto_advance_paused=0)
+            db.create_request(conn, util.now_iso(), 'review', 'manual-takeover-review:' + task_id, task_id=task_id, requested_by='test')
+    finally:
+        conn.close()
+    taken = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
+    assert taken['automation']['manual_takeover']
+    assert taken['delivery']['mode'] == 'manual'
+    claim = cli.run('claim', {'stage': 'review', 'executor': 'kaneo-review'}, tmp_env.db)
+    assert claim['claimed']
+    task = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
+    request = cli.run('get-request', {'request_id': claim['request_id']}, tmp_env.db)['request']
+    assert review_settle.settle(db_path=tmp_env.db, task=task, request=request, run_id=claim['run_id'],
+                                result={'conclusion': 'pass', 'report_markdown': '人工接管期间的评审通过', 'fix': None},
                                 backend='codex', cost_usd=None)['exit_code'] == 0
     assert cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']['status'] == 'done'
