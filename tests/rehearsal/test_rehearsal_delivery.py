@@ -41,6 +41,10 @@ import pytest  # noqa: E402
 
 import test_auto_pipeline  # noqa: E402
 from test_auto_pipeline import TASK  # noqa: E402
+try:
+    from tests.rehearsal.conftest import terminate_lingering_workers  # noqa: E402
+except ImportError:  # 顶层模块收集（discover -s tests/rehearsal）
+    from conftest import terminate_lingering_workers  # noqa: E402
 from kanpilot import core, db, delivery_runner, util  # noqa: E402
 from kanpilot.engine import ladder  # noqa: E402
 
@@ -92,6 +96,8 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
             if own:
                 self.tearDown()
                 self.doCleanups()
+            # 常驻 worker 会跨用例漂移（父夹具竞态）：收口时清理本进程树的。
+            terminate_lingering_workers()
     def _review_pass_to_in_review(self):
         """走到 in_review：假 claude 首轮评审即 pass（review-count 预置 '1'）。"""
         (self.root / 'review-count').write_text('1')
@@ -218,10 +224,9 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
 
         self.call('tick'); self._stage(delivery_runner, 'delivery')
         value = self.task(TASK)
-        # 实际交付层（cmd_delivery_pr._failure）把 gh 类错误统一映射为
-        # gh_unavailable；scenarios.md 期望的 gh_not_logged_in 码尚未落地，
-        # 这里钉住实际值（差异见提交报告）。
-        self.assertEqual(value['failure_code'], 'gh_unavailable', value)
+        # 交付层透出未登录码（P1 细化后）：环境失败，归阶梯 2
+        # （scenarios.md 场景 14 预期行为，与 ladder 表一致）。
+        self.assertEqual(value['failure_code'], 'gh_not_logged_in', value)
         self.assertEqual(value['status'], 'needs_user', value)
         self.assertEqual(value['failure_stage'], 'delivery', value)
         self.assertIsNone(value['delivery'].get('pr_number'), value['delivery'])
@@ -233,11 +238,13 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
         for secret in ('ghp_', 'github_pat_', 'GH_TOKEN=', 'Authorization',
                        'Bearer '):
             self.assertNotIn(secret, blob, '失败原因泄露凭据样式内容')
-        # 阶梯记入报告：gh_unavailable 未列入阶梯表 → 默认 needs-you（阶梯 4）。
+        # 阶梯 2 环境失败：不自动重试、不升级失败，等待用户修复环境。
         self.assertEqual(ladder.classify(value['failure_code']),
-                         ladder.LADDER_NEEDS_YOU)
+                         ladder.LADDER_ENVIRONMENTAL)
         self.assertEqual(ladder.ladder_type(ladder.classify(value['failure_code'])),
-                         'needs-you')
+                         'environmental')
+        self.assertFalse(ladder.auto_retry_allowed(
+            ladder.classify(value['failure_code'])))
 
         # 恢复 gh 登录环境 + resume → 成功建 PR：环境失败，不是永久失败。
         (self.root / 'fake-gh').write_text(

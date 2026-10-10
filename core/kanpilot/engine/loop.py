@@ -30,12 +30,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .. import cli, core, db, util
-from . import decide, health, steps
-from . import decide, health, ladder, steps
+from . import decide, fallback, health, ladder, steps
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
 # Valid per-project engine modes (state-model §strangler).
 ENGINE_MODES = ("legacy", "shadow", "live")
+# extra key where the engine records its same-plan bounded remediation rounds
+# (scenarios.md #5: ≤2 per plan, each armed for one retry execution round).
+FIX_ROUNDS_KEY = "engine_fix_rounds"
 
 
 def plan_spawns(queued_stages, live_stages, *, foreign_active: bool):
@@ -200,6 +202,119 @@ class Reconciler:
             params={"kind": kind, "not_before": not_before,
                     "attempt_no": fd.params["attempt_no"]})
 
+    # ------------------------------------------------------------- quality fix
+    def _project_fallback(self, conn, project_id):
+        """Project-configured fallback model (``{provider_id, model_id}``) or None."""
+        from .. import project_config
+        _, _, items, _ = project_config.load_raw_mappings(conn)
+        return fallback.configured_model(items.get(project_id) or {})
+
+    @staticmethod
+    def _engine_fix_rounds(task) -> list:
+        """Remediation rounds the engine already armed for this task (per plan)."""
+        value = db.task_extra(task).get(FIX_ROUNDS_KEY)
+        return value if isinstance(value, list) else []
+
+    def _clear_consumed_override(self, conn, task, now):
+        """Drop the one-shot model override once a new execution round started.
+
+        The override is armed for exactly one retry round (scenarios.md #5); when
+        the task moves on to another run it must not silently apply to an
+        unrelated round.
+        """
+        extra = db.task_extra(task)
+        if not fallback.read_override(extra):
+            return
+        receipt = extra.get("engine_verdict") or {}
+        run_id = task["run_id"]
+        if not run_id or run_id == receipt.get("execution_run_id"):
+            return
+        with db.write_txn(conn):
+            fresh = db.require_task(conn, task["task_id"])
+            db.set_extra(conn, fresh, now, **{fallback.MODEL_OVERRIDE_KEY: None})
+
+    def _quality_retry(self, conn, task, now, snap, pmode):
+        """Ladder-3 bounded remediation for an empty-diff verdict (scenarios.md #5).
+
+        The core-owned verdict receipt (``extra.engine_verdict``) is the trigger:
+        a non-empty effective diff is required, so an empty diff means the round
+        produced nothing countable. While the same-plan fix-round budget lasts,
+        the engine resolves the project's ``fallback_model``, probes it in the
+        Plus cache catalog and records ``model: fallback`` / ``model: primary``
+        (+ a configure hint). A configured-but-unprobeable model is a hard
+        ``validation_failed`` (ladder 2): no silent model switch.
+
+        The chosen snapshot is staged as a one-shot override
+        (``extra.engine_model_override``) that the next dispatch claim freezes
+        into the round (``exec_config.snapshot_with_model_override``). The
+        re-execution itself stays authorized by the existing resolve/replan
+        path: ``CLAIM_GUARDS['dispatch'] == {'ready'}`` plus the unsent-dispatch
+        guard make an engine-driven re-send impossible without forging a user
+        action. This method decides, records and arms — it never re-sends.
+        """
+        extra = db.task_extra(task)
+        receipt = extra.get("engine_verdict")
+        if not isinstance(receipt, dict) or not receipt.get("empty_diff"):
+            return None
+        if receipt.get("verification_ok"):
+            return None
+        fix_round = len([row for row in self._engine_fix_rounds(task)
+                         if row.get("plan_sha256") == task["plan_sha256"]])
+        # 已为这一个失败轮次武装过补救（等重跑轮真正开始）就不再重复计入：
+        # 主模型路径不写模型覆盖，只用轮次身份判重。
+        if any(row.get("execution_run_id") == receipt.get("execution_run_id")
+               for row in self._engine_fix_rounds(task)):
+            return None
+        configured = self._project_fallback(conn, task["project_id"])
+        fd = decide.failure_decision("empty_diff", fix_round=fix_round,
+                                     budget_ok=snap.get("budget_ok", True),
+                                     fallback_model=configured)
+        if fd.action != decide.START_FIX_ROUND:
+            # Same-plan budget spent: the steady path blocks to the inbox.
+            return None
+        primary = None
+        if configured is not None:
+            primary, _error = fallback.primary_snapshot(conn)
+        plan = fallback.plan_retry(configured, primary=primary)
+        if plan["validation_failed"]:
+            return decide.Decision(
+                decide.BLOCK, reason="validation_failed",
+                ladder=ladder.LADDER_ENVIRONMENTAL, attention=True,
+                params={"failure_code": "validation_failed",
+                        "detail": plan["probe_detail"], "fix_round": fix_round})
+        if pmode != "live":
+            # shadow: computed + logged only, never written.
+            return decide.Decision(
+                decide.START_FIX_ROUND, reason="empty_diff",
+                ladder=ladder.LADDER_QUALITY,
+                params=dict(fd.params, probe_detail=plan["probe_detail"]))
+        if fallback.read_override(extra):
+            # A remediation round is already armed: wait for the next run to
+            # consume it instead of burning the same-plan budget in one tick.
+            return None
+        now_iso = util.to_iso(now)
+        with db.write_txn(conn):
+            fresh = db.require_task(conn, task["task_id"])
+            for event in plan["events"]:
+                db.add_event(conn, now_iso, event["kind"],
+                             task_id=task["task_id"], actor="engine",
+                             detail=event["detail"])
+            rounds = self._engine_fix_rounds(fresh)
+            rounds.append({"plan_sha256": task["plan_sha256"],
+                           "execution_run_id": receipt.get("execution_run_id"),
+                           "model": plan["model"], "at": now_iso})
+            # 一次 set_extra 写全：db.set_extra 按传入行的 extra_json 合并，
+            # 分两次调用会用陈旧快照覆盖前一次写入。
+            entries = {FIX_ROUNDS_KEY: rounds}
+            if plan["snapshot"] is not None:
+                entries[fallback.MODEL_OVERRIDE_KEY] = (
+                    fallback.override_payload(plan["snapshot"], task))
+            db.set_extra(conn, fresh, now_iso, **entries)
+        return decide.Decision(
+            decide.START_FIX_ROUND, reason="empty_diff",
+            ladder=ladder.LADDER_QUALITY,
+            params=dict(fd.params, probe_detail=plan["probe_detail"]))
+
     # ------------------------------------------------------------- reconcile
     def reconcile_once(self, now=None) -> dict:
         now = now or util.now_dt()
@@ -213,8 +328,14 @@ class Reconciler:
                 if pmode == "legacy":
                     # The engine does not drive legacy projects at all.
                     continue
+                if pmode == "live":
+                    # A consumed one-shot model override must not leak into a
+                    # later, unrelated round of the same task.
+                    self._clear_consumed_override(conn, task, now)
                 snap = self._snapshot(conn, task, now)
-                decision = self._transient_retry(conn, task, now) or decide.decide(snap)
+                decision = (self._transient_retry(conn, task, now)
+                            or self._quality_retry(conn, task, now, snap, pmode)
+                            or decide.decide(snap))
                 base = {"task_id": task["task_id"], "action": decision.action,
                         "reason": decision.reason, "ladder": decision.ladder,
                         "engine_mode": pmode, "explain": decide.explain(snap, decision)}

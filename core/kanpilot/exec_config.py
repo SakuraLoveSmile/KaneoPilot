@@ -161,6 +161,34 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
         **{key: config.get(key) for key in constants.EXEC_CONFIG_KEYS if key in config},
     }
 
+def snapshot_with_model_override(conn: sqlite3.Connection, task) -> dict:
+    """``snapshot`` + 引擎一次性模型覆盖（``engine/fallback.py``，scenarios.md #5）。
+
+    有界补救轮次前，引擎把选定的模型快照写进 ``extra.engine_model_override``
+    （探针通过才写；探针失败不写、不换模型）。这里只在覆盖与当前计划身份一致时
+    应用，且**不**回写 ``settings.exec_config``——设置变更仍只影响新轮次，覆盖
+    只影响它瞄准的那一次重跑。无覆盖（旧数据/普通轮次）时与 ``snapshot(conn)``
+    完全一致。
+    """
+    from .engine import fallback
+    override = fallback.read_override(db.task_extra(task))
+    if not override or not fallback.override_matches(override, task):
+        return snapshot(conn)
+    merged = dict(load(conn))
+    if merged.get("backend") == "pi_desktop":
+        block = dict(merged.get("pi_desktop") or {})
+        for key in constants.EXEC_PI_DESKTOP_ALL_KEYS:
+            if override.get(key):
+                block[key] = override[key]
+        if block.get("provider_id") and block.get("model_id"):
+            block["model_source"] = "custom"
+        merged["pi_desktop"] = block
+    else:
+        for key in constants.EXEC_CONFIG_KEYS:
+            if override.get(key):
+                merged[key] = override[key]
+    return snapshot(conn, config_override=merged)
+
 def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     """校验并合并保存（§5.23.3 + §5.24.1）。
 

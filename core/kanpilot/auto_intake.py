@@ -104,7 +104,10 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
                        base_branch=policy.get("delivery_base"),
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
         prepared = cli.run("prepare-plan-input", {"task_id": task_id,
-                          "expected_requirements_sha256": expected, "local_paths": []}, db_path)
+                          "expected_requirements_sha256": expected, "local_paths": [],
+                          # A14: unattended preparation must not be recorded as a
+                          # user action.
+                          "actor": "automation"}, db_path)
         if not prepared.get("can_start"):
             raise util.KanpilotError("validation_failed", "规划材料不完整，请人工补齐或排除附件")
         task = db.get_task(conn, task_id)

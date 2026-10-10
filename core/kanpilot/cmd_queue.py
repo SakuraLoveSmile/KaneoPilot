@@ -280,6 +280,7 @@ _AUTO_RESUME_TARGETS = {
     "branch_exists": ("needs_plan", None), "delivery_base_unknown": ("needs_plan", None),
     "review_blocked": ("in_review", "review"), "review_backend_unsupported": ("in_review", "review"),
     "branch_diverged": ("in_review", "delivery"), "gh_unavailable": ("in_review", "delivery"), "pr_closed": ("in_review", "delivery"),
+    "gh_missing": ("in_review", "delivery"), "gh_timeout": ("in_review", "delivery"), "gh_not_logged_in": ("in_review", "delivery"),
 }
 
 

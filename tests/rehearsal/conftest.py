@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +78,68 @@ def active_faults() -> frozenset:
         raise AssertionError(
             f"未知故障注入开关：{sorted(unknown)}（可用：{sorted(FAULTS)}）")
     return frozenset(faults)
+
+
+def terminate_lingering_workers(timeout: float = 5.0) -> list:
+    """终止本进程派生的常驻 worker 子进程，返回被终止的 pid 列表。
+
+    ``tests/test_auto_pipeline.py`` 的 worker 以 ``start_new_session=True``
+    派生、用例结束后仍常驻轮询；下一用例的假 Plus 若复用同一临时端口，常驻
+    worker 会连接新服务器并消费其 turn 状态队列，造成跨用例观测漂移（父夹具
+    已知竞态，根因修复归属父文件）。这里在用例收口时按 **ppid==本进程** 清理
+    worker——只动本进程树的子进程，不影响其他测试进程/ agent。
+    """
+    mine = os.getpid()
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=", "-o", "ppid=", "-o", "command="],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    victims = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if ppid != mine:
+            continue
+        command = parts[2]
+        if ("kanpilot.pi_desktop_worker" in command
+                or "kanpilot.pi_worker" in command):
+            victims.append(pid)
+
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        except OSError:
+            return False
+        return True
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in victims:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not any(_alive(pid) for pid in victims):
+                break
+            time.sleep(0.05)
+    return victims
+
+
+@pytest.fixture(autouse=True)
+def _rehearsal_worker_cleanup():
+    """用例收口（最后执行的 finalizer）：清理常驻 worker，防跨用例漂移。"""
+    yield
+    terminate_lingering_workers()
 
 
 @pytest.fixture

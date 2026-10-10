@@ -190,6 +190,7 @@ def failure_decision(
     attempt_no: int = 0,
     fix_round: int = 0,
     budget_ok: bool = True,
+    fallback_model: Optional[dict] = None,
 ) -> Decision:
     """Decide what to do after a step fails (state-model §8 ladder rules).
 
@@ -197,7 +198,10 @@ def failure_decision(
       ``MAX_TRANSIENT_RETRIES``; then escalate to environmental and block.
     - environmental (阶梯 2): block immediately, wait for the user to fix.
     - quality (阶梯 3): bounded same-branch fix round until ``MAX_FIX_ROUNDS``
-      (and within budget); then escalate to needs-you and block.
+      (and within budget); then escalate to needs-you and block. A configured
+      ``fallback_model`` (``{provider_id, model_id}``) is recorded in the
+      decision params as ``model="fallback"`` so the reconciler can probe and
+      stage that snapshot (``engine.fallback``); otherwise ``model="primary"``.
     - needs-you (阶梯 4): block to the attention inbox.
     """
     level = ladder.classify(failure_code)
@@ -218,7 +222,9 @@ def failure_decision(
         if fix_round < ladder.MAX_FIX_ROUNDS and budget_ok:
             return Decision(
                 START_FIX_ROUND, reason=failure_code or "quality", ladder=level,
-                params={"fix_round": fix_round + 1},
+                params={"fix_round": fix_round + 1,
+                        "model": "fallback" if fallback_model else "primary",
+                        "fallback_model": fallback_model},
             )
         reason = ("fix_rounds_exhausted" if fix_round >= ladder.MAX_FIX_ROUNDS
                   else "auto_budget_exceeded")

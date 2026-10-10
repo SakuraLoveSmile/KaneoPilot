@@ -162,7 +162,7 @@ class DeliveryPR(KanpilotTestCase):
 
     def test_auth_not_counted_and_credentials_never_persist(self):
         with patch.object(gh_client, "pr_list", side_effect=gh_client.GhError("auth", "https://u:secret@github.com token=secret12345")):
-            self.assertEqual(self.publish_delivery()["failure_code"], "gh_unavailable")
+            self.assertEqual(self.publish_delivery()["failure_code"], "gh_not_logged_in")
         self.assertEqual(core.delivery_of(self.task())["publish_failures"], 0)
         self.assertNotIn("secret", self.task()["failure_reason"])
 

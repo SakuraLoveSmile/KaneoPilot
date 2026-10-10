@@ -36,6 +36,11 @@ def _run(args, *, json_output=True):
     try:
         result = subprocess.run([constants.gh_bin(), *args], capture_output=True, text=True,
                                 env=gh_env(), timeout=60)
+    except FileNotFoundError as exc:
+        # Missing binary is an environment failure (ladder 2), not a transient retry.
+        raise GhError("missing", "未找到 gh 可执行文件") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GhError("timeout", "GitHub 调用超时") from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise GhError("transient", "GitHub 调用失败：" + str(exc)) from exc
     if result.returncode:

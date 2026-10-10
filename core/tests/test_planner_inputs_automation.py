@@ -450,3 +450,40 @@ class TestUserReplanMaterial(KanpilotTestCase):
         self.assertEqual(db.require_task(conn,task_id)['status'],'ready')
         self.assertEqual(db.get_request(conn,result['request_id'])['status'],'succeeded')
         conn.close()
+
+
+class TestPreparePlanInputActor(KanpilotTestCase):
+    """A14: unattended plan-input preparation must not be a user action.
+
+    ``prepare-plan-input`` used to hard-code ``actor="user"`` on the
+    ``plan_input_prepared`` event, so the automation intake path recorded every
+    material preparation as a user action. The command now accepts
+    ``actor ∈ {user, automation}`` (default ``user`` for the planning panel).
+    """
+
+    def test_actor_defaults_to_user_and_rejects_unknown(self):
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        exc = self.call_err("prepare-plan-input",
+                            {"task_id": task_id, "actor": "robot"})
+        self.assertEqual(exc.code, "bad_request")
+
+    def test_automation_actor_is_recorded(self):
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        result = self.call("prepare-plan-input",
+                           {"task_id": task_id, "actor": "automation"})
+        self.assertTrue(result.get("input_id"))
+        rows = [r for r in self.call("list-events", {"task_id": task_id})["events"]
+                if r["kind"] == "plan_input_prepared"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["actor"], "automation")
+
+    def test_user_actor_is_still_the_default(self):
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        self.call("prepare-plan-input", {"task_id": task_id})
+        rows = [r for r in self.call("list-events", {"task_id": task_id})["events"]
+                if r["kind"] == "plan_input_prepared"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["actor"], "user")

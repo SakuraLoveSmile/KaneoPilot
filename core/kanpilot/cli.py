@@ -455,6 +455,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "local_paths": (False, "list"),
             "supplement": (False, "str"),
             "excluded_remote_ids": (False, "list"),
+            # Who prepares the material: "user" (planning panel, default) or
+            # "automation" (unattended intake). A14 needs the automated path to
+            # stop recording plan_input_prepared as a user action.
+            "actor": (False, "str"),
         },
         planner_inputs.prepare_plan_input,
     ),
@@ -564,6 +568,14 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"project_id": (True, "str"), "verify_env": (False, "dict"),
          "expected_revision": (False, "int")},
         _automation_command("engine.commands", "cmd_set_project_verify_env"),
+    ),
+    # v6 引擎（scenarios.md #5）：按项目持久化 fallback 执行模型
+    # {provider_id, model_id}（条目层，同 engine_mode/verify_env 理由）。
+    # 缺省不配置 = 不换模型；配置后引擎先探针 Plus cache 目录再决定是否换。
+    "set-project-fallback-model": (
+        {"project_id": (True, "str"), "fallback_model": (False, "dict"),
+         "expected_revision": (False, "int")},
+        _automation_command("engine.commands", "cmd_set_project_fallback_model"),
     ),
 }
 

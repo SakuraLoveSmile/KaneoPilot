@@ -193,7 +193,10 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     #    pi_desktop 为连接文件/token/tools/provider/model。任一不可用 → 确定性
     #    validation_failed（task 进 needs_user），**不自动换模型、agent 或后端**。
     #    失败信息取自 exec_config.check_available 的中文原因。
-    config_snapshot = exec_config.snapshot(conn)
+    #    快照经 snapshot_with_model_override：引擎在有界补救轮次前写入的一次性
+    #    模型覆盖（engine/fallback.py，scenarios.md #5）在此冻结进轮次；无覆盖时
+    #    与 snapshot(conn) 完全一致（旧数据零迁移），设置变更仍只影响新轮次。
+    config_snapshot = exec_config.snapshot_with_model_override(conn, task)
     backend = config_snapshot.get("backend") or "pi"
     if backend == "pi_desktop":
         try:

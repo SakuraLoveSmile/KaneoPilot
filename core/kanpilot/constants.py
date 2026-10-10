@@ -462,6 +462,7 @@ AUTOMATION_FAILURE_STAGES = {
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",
     "no_changes": "delivery", "branch_diverged": "delivery", "gh_unavailable": "delivery", "pr_closed": "delivery",
+    "gh_missing": "delivery", "gh_timeout": "delivery", "gh_not_logged_in": "delivery",
 }
 AUTOMATION_FAILURE_CODES = frozenset(AUTOMATION_FAILURE_STAGES)
 
