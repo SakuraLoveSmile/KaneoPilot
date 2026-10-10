@@ -144,6 +144,7 @@ def test_scenario_golden_path_to_pr_merge(pipeline):
     value = pipeline.task(TASK)
     assert value["status"] == "in_review", value
     assert len(value["delivery"]["commits"]) == 1, value["delivery"]
+    _assert_commit_excludes_build_artifacts(pipeline, value)
 
     pipeline._review()
     value = pipeline.task(TASK)
@@ -165,6 +166,33 @@ def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           capture_output=True, text=True,
                           timeout=30).stdout.strip()
+
+
+def _assert_commit_excludes_build_artifacts(pipeline, view):
+    """P1（3e8484f）：交付提交不含构建产物，且产物仍留在工作树。
+
+    执行器跑 verify 必然生成 ``tests/__pycache__/*.pyc``；提交它们会把本机
+    二进制差异带进分支（沙盒 PR add/add 冲突的根因）。过滤只改提交内容，
+    不删工作树文件——两侧都钉。
+    """
+    from kanpilot import git_delivery as gd
+
+    worktree = Path(view["delivery"]["worktree_path"])
+    commits = view["delivery"]["commits"]
+    assert commits, view["delivery"]
+    for commit in commits:
+        sha = commit.get("sha")
+        assert sha, commit
+        out = subprocess.run(
+            ["git", "-C", str(worktree), "show", "--name-only", "--format=", sha],
+            capture_output=True, text=True, timeout=30, check=True).stdout
+        files = [line.strip() for line in out.splitlines() if line.strip()]
+        assert files, f"交付提交无文件：{sha}"
+        artifacts = [f for f in files if gd.is_build_artifact(f)]
+        assert not artifacts, (
+            f"交付提交含构建产物 {artifacts}（commit {sha[:8]}）")
+    assert (worktree / "tests" / "__pycache__").exists(), (
+        f"工作树应残留 verify 产物（过滤不删文件）：{worktree}")
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +426,7 @@ def test_scenario_review_two_changes_requested_then_pass(pipeline):
     assert value["automation"]["fix_round"] == 1, value["automation"]
     commits = value["delivery"]["commits"]
     assert [c["execution_run_id"] for c in commits] == [first, second], commits
+    _assert_commit_excludes_build_artifacts(pipeline, value)
 
     value = _deliver_to_merge(pipeline)
     assert value["status"] == "done", value
