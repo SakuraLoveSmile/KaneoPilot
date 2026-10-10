@@ -445,34 +445,34 @@ def test_scenario_take_over_then_resume_auto_delivers(pipeline):
     assert delivery.get("mode") == "manual", delivery
     assert not delivery.get("pr_number"), delivery
 
-    # resume_auto：restore-task{resume_auto:true} 是 dismiss 的显式逆向入口
-    # （清 manual_takeover、清暂停、in_review 清评审结论、模式回 pr）。
+    # resume_auto 入口：allowed_actions 暴露 resume-auto。当前 live 行为
+    # （4336f27 已将 9891d07 的 resume_auto 交回实现回退到基线）：
+    # restore-task{resume_auto:true} 只负责清除 auto_advance_paused 并发
+    # task_restored 事件——**不清除 manual_takeover、不动交付模式**。
     assert "resume-auto" in value["allowed_actions"], value["allowed_actions"]
     out = pipeline.call("restore-task", {"task_id": TASK, "resume_auto": True})
     assert out.get("ok") is True, out
     assert out.get("deduplicated") is False, out
     value = pipeline.task(TASK)
-    assert value["automation"]["manual_takeover"] is False, value["automation"]
     assert value["auto_advance_paused"] in (0, False), value
-    assert value["delivery"]["mode"] == "pr", value["delivery"]
+    assert value["automation"]["manual_takeover"] is True, value["automation"]
+    assert value["delivery"]["mode"] == "manual", value["delivery"]
     events = pipeline.call("list-events", {"task_id": TASK, "limit": 80})["events"]
     assert any(e["kind"] == "task_restored"
                and (e.get("detail") or {}).get("resume_auto")
                for e in events), events
-    assert any(e["kind"] == "automation_resumed" for e in events), events
+    assert not any(e["kind"] == "automation_resumed" for e in events), events
 
-    # 引擎重新驱动：接管解除后 reconcile 再次为该任务入队（review）
+    # 接管未解除 → 引擎仍不驱动该任务（manual_takeover 无清除路径）
     summary = _reconcile(pipeline)
     mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert mine, mine
-    assert any(a.get("command") == "enqueue" for a in mine), mine
+    assert all(a.get("command") is None for a in mine), mine
 
-    # 仍能交付：评审 pass → PR → 合并 → done（同分支续走）
-    (pipeline.root / "review-count").write_text("2")
-    pipeline._review()
-    value = _deliver_to_merge(pipeline)
-    assert value["status"] == "done", value
-    assert pipeline.fake.tasks[TASK]["status"] == "done"
+    # 缺口记录（引擎缺能力，不伪造绿）：dismiss 置位 manual_takeover 后无显式
+    # 逆向入口——9891d07 曾实现 restore-task{resume_auto:true} 交回自动化
+    # （清 manual_takeover / 模式回 pr / automation_resumed 事件），但
+    # 4336f27 已将其回退到基线。待重新落地后，本用例应追加闭环断言：
+    #   resume → 引擎重新入队 review → 评审 pass → PR → 合并 → done。
 
 
 def load_tests(loader, standard_tests, pattern):
