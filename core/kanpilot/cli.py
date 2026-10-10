@@ -134,6 +134,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # v2（§5.22.4）：确认放行 hold 的 dispatch 排队。
             "confirm_plan": (False, "bool"),
             "expected_plan_sha256": (False, "str"),
+            # v6：阶梯 1 退避重试的 not_before（ISO-8601；空=立即）。
+            "not_before": (False, "str|null"),
         },
         cmd_queue.cmd_enqueue,
     ),
@@ -549,10 +551,19 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         _automation_command("engine.commands", "cmd_session_view"),
     ),
     # v6 引擎（A12）：按项目持久化 engine_mode（legacy|shadow|live，缺省 legacy）。
+    # 写在映射**条目层**（items[pid].engine_mode）而非 automation 内——
+    # validate_automation 会按固定键白名单重建 automation，静默丢弃未知键。
     "set-project-engine-mode": (
         {"project_id": (True, "str"), "engine_mode": (False, "str"),
          "expected_revision": (False, "int")},
         _automation_command("engine.commands", "cmd_set_project_engine_mode"),
+    ),
+    # v6 引擎（A10）：按项目持久化 verify_env（条目层，同上理由）。
+    # 凭据类键（TOKEN/SECRET/...）一律拒绝——凭据走凭据文件。
+    "set-project-verify-env": (
+        {"project_id": (True, "str"), "verify_env": (False, "dict"),
+         "expected_revision": (False, "int")},
+        _automation_command("engine.commands", "cmd_set_project_verify_env"),
     ),
 }
 
