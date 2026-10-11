@@ -11,7 +11,7 @@ extension JSONDecoder {
 
 // MARK: - 自由 JSON（evidence / result / detail / resolution 等）
 
-enum JSONValue: Decodable {
+enum JSONValue: Decodable, Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -317,6 +317,9 @@ struct TaskException: Decodable {
 
 /// §5.2 TaskSummary
 struct TaskSummary: Decodable, Identifiable {
+    let phase: String?
+    let condition: String?
+    let attention: AttentionItem?
     let automation: TaskAutomationView?
     let delivery: TaskDeliveryView?
     let reviewHistory: [ReviewHistoryEntry]?
@@ -364,12 +367,11 @@ struct TaskSummary: Decodable, Identifiable {
     /// 归档/回收站任务（不在看板上）。
     var isSaved: Bool { saveState == "archived" || saveState == "trashed" }
 
-    /// 需要用户查看的当前状态；正常排队和运行不算待处理。
+    /// 核心 attention 投影；缺失时不在桌面推导。
     var needsAttention: Bool {
-        !isSaved && readOnly != true && (boardColumn == "failed" || exception != nil
-            || status == "needs_user" || planExecutionHold == true || autoAdvancePaused == 1
-            || !(blockedReason?.isEmpty ?? true))
+        return attention?.attentionState == "actionable"
     }
+
 }
 
 struct ListTasksResponse: Decodable {
@@ -545,6 +547,9 @@ extension PlanQuestion {
 
 /// §5.2 TaskDetail = TaskSummary + 明细字段
 struct TaskDetail: Decodable, Identifiable {
+    let phase: String?
+    let condition: String?
+    let attention: AttentionItem?
     let automation: TaskAutomationView?
     let delivery: TaskDeliveryView?
     let reviewHistory: [ReviewHistoryEntry]?
@@ -2294,6 +2299,9 @@ struct ProjectMappingRemote: Decodable {
 }
 
 struct ProjectMappingItem: Decodable, Identifiable {
+    let engineMode: String?
+    let verifyEnv: [String: String]?
+    let fallbackModel: EngineFallbackModel?
     let automation: ProjectAutomationDTO?
     let automationPreflight: [AutomationPreflightIssue]?
     let projectId: String
@@ -2378,4 +2386,41 @@ struct TaskDeliveryView: Decodable {
 struct ReviewHistoryEntry: Decodable {
     let reviewKey: String?; let conclusion: String?; let reportPath: String?; let reportSha256: String?
     let executionRunId: String?; let headSha: String?; let registeredAt: String?; let fixRound: Int?
+}
+
+// protocol §5.27: one attention snapshot for inbox, menu and notifications.
+struct AttentionResponse: Decodable { let items: [AttentionItem] }
+struct AttentionItem: Decodable, Identifiable, Sendable {
+    let attentionId: String
+    let taskId: String
+    let projectName: String?
+    let title: String?
+    let reasonCode: String?
+    let failureCode: String?
+    let failureStage: String?
+    let failureReason: String?
+    let evidence: [JSONValue]?
+    let blockedSummary: String?
+    let recommended: String?
+    let alternatives: [String]?
+    let allowedActions: [String]?
+    let attentionState: String?
+    let since: String?
+    var id: String { attentionId }
+}
+struct EngineFallbackModel: Decodable { let providerId: String; let modelId: String }
+struct EngineStatusResponse: Decodable {
+    let instances: [Instance]
+    struct Instance: Decodable, Identifiable {
+        let instanceId: String
+        let state: String?
+        let active: Bool?
+        let holderAlive: Bool?
+        let stage: String?
+        let pid: Int32?
+        let startedAt: String?
+        let leaseExpiresAt: String?
+        let ownedWorkers: [JSONValue]?
+        var id: String { instanceId }
+    }
 }

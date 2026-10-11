@@ -1,0 +1,184 @@
+import AppKit
+import Combine
+import Foundation
+@preconcurrency import UserNotifications
+
+/// App owns one engine process. Core owns all queue decisions and workers.
+@MainActor
+final class EngineSupervisor: ObservableObject {
+    @Published private(set) var status: ExecutorStatusDTO?
+    @Published private(set) var engineStatus: EngineStatusResponse?
+    @Published private(set) var attentionItems: [AttentionItem] = []
+    @Published private(set) var attentionLoaded = false
+    @Published private(set) var error: String?
+    @Published private(set) var restartFailures = 0
+    @Published private(set) var isSchedulingStopped = false
+    @Published private(set) var isStopping = false
+    private let client: CoreClient
+    private var process: Process?
+    private var loop: Task<Void, Never>?
+    private var reading = false
+    private var retryAt = Date.distantPast
+    private var launchedAt: Date?
+    private var seenAttention = Set<String>()
+    private var notificationBaselineLoaded = false
+    private var activity: NSObjectProtocol?
+    var preventsIdleSleep: Bool { activity != nil }
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: "executorSchedulingEnabled") == nil
+            || UserDefaults.standard.bool(forKey: "executorSchedulingEnabled")
+    }
+    init(client: CoreClient) { self.client = client }
+
+    func start() {
+        guard loop == nil, !isStopping else { return }
+        isSchedulingStopped = false
+        loop = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.isSchedulingStopped else { return }
+                await self.refresh()
+                self.ensureEngine()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+
+    /// Manual check reads facts; it never spawns a stage outside the engine.
+    func checkNow() { Task { await refresh(); ensureEngine() } }
+    func runPlanner() { checkNow() }
+    func runNow(_ stage: String) { checkNow() }
+
+    func refresh() async {
+        guard !reading, !isSchedulingStopped else { return }
+        reading = true
+        defer { reading = false }
+        do {
+            async let engines = client.run("engine-status", timeout: 10, as: EngineStatusResponse.self)
+            async let inbox = client.run("attention-list", timeout: 10, as: AttentionResponse.self)
+            async let runtime = client.run("executor-status", timeout: 10, as: ExecutorStatusDTO.self)
+            let (e, a, r) = try await (engines, inbox, runtime)
+            guard !isSchedulingStopped else { return }
+            engineStatus = e
+            status = r
+            attentionItems = a.items.filter { $0.attentionState == "actionable" }
+            attentionLoaded = true
+            publishNotifications(attentionItems)
+            let healthy = e.instances.contains { $0.active == true }
+            if healthy {
+                error = nil
+                restartFailures = 0
+            } else if process?.isRunning == true, let launchedAt, Date().timeIntervalSince(launchedAt) > 15 {
+                error = "引擎心跳未确认，请检查环境健康与运行记录"
+            }
+            if (r.automation?.activeTasks ?? 0) > 0, activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "KaneoPilot 自动化任务进行中")
+            } else if (r.automation?.activeTasks ?? 0) == 0, let activity {
+                ProcessInfo.processInfo.endActivity(activity)
+                self.activity = nil
+            }
+        } catch { self.error = error.coreMessage }
+    }
+
+    private func ensureEngine() {
+        guard !isSchedulingStopped, Self.isEnabled, process?.isRunning != true,
+              Date() >= retryAt else { return }
+        // A live external holder keeps ownership; do not start a competing child.
+        guard engineStatus != nil, engineStatus?.instances.contains(where: { $0.active == true }) != true else { return }
+        guard let location = client.location else { error = CoreError.coreMissing.coreMessage; return }
+        let child = Process()
+        let payload = "{\"mode\":\"legacy\",\"intake\":true,\"spawn\":true}"
+        if location.usesPython {
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            child.arguments = ["python3", location.path, "engine-run", "--json", payload]
+        } else {
+            child.executableURL = URL(fileURLWithPath: location.path)
+            child.arguments = ["engine-run", "--json", payload]
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        child.environment = environment
+        // Engine logs may contain verifier output; never persist unredacted output in UI.
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        child.terminationHandler = { [weak self] child in
+            Task { @MainActor in
+                guard let self, self.process === child else { return }
+                self.process = nil
+                guard !self.isSchedulingStopped, Self.isEnabled else { return }
+                self.recordFailure("引擎已退出（exit \(child.terminationStatus)）")
+            }
+        }
+        do {
+            try child.run()
+            process = child
+            launchedAt = Date()
+        } catch { recordFailure("无法启动引擎：\(error.localizedDescription)") }
+    }
+
+    private func recordFailure(_ message: String) {
+        restartFailures += 1
+        let delay = min(60.0, pow(2.0, Double(min(restartFailures - 1, 6))))
+        retryAt = Date().addingTimeInterval(delay)
+        error = "\(message)；\(restartFailures >= 5 ? "退避中，" : "")\(Int(delay)) 秒后重试"
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        if !enabled { process?.terminate() }
+        else { retryAt = .distantPast; checkNow() }
+    }
+
+    func setPaused(_ paused: Bool) async {
+        do {
+            _ = try await client.run("set-paused", payload: ["stage": NSNull(), "paused": paused], timeout: 10)
+            await refresh()
+        } catch { self.error = error.coreMessage }
+    }
+
+    func stop(completion: @escaping (Bool) -> Void = { _ in }) {
+        isSchedulingStopped = true
+        loop?.cancel()
+        loop = nil
+        isStopping = true
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
+        // Only terminate our Process object. Never kill Plus or external engine holders.
+        guard let child = process, child.isRunning else {
+            isStopping = false
+            completion(true)
+            return
+        }
+        child.terminate()
+        Task {
+            for _ in 0..<100 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+            self.isStopping = false
+            let exited = !child.isRunning
+            if !exited { self.error = "本实例引擎尚未退出，请稍后重试退出" }
+            completion(exited)
+        }
+    }
+
+    func requestNotifications() {
+        guard ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func publishNotifications(_ items: [AttentionItem]) {
+        let ids = Set(items.map(\.attentionId))
+        defer { seenAttention = ids; notificationBaselineLoaded = true }
+        guard notificationBaselineLoaded,
+              ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil else { return }
+        let newItems = items.filter { !seenAttention.contains($0.attentionId) }
+        guard !newItems.isEmpty else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else { return }
+            for item in newItems {
+                let content = UNMutableNotificationContent()
+                content.title = "KaneoPilot · 需要你"
+                content.body = [item.title ?? item.taskId, item.blockedSummary ?? item.failureReason].compactMap { $0 }.joined(separator: "：")
+                content.userInfo = ["task_id": item.taskId, "attention_id": item.attentionId]
+                center.add(UNNotificationRequest(identifier: item.attentionId, content: content, trigger: nil))
+            }
+        }
+    }
+}

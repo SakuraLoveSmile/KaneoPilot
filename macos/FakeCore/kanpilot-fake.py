@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import uuid
+import signal
 from datetime import datetime, timedelta, timezone
 
 STATE_PATH = os.environ.get(
@@ -61,6 +62,17 @@ def sha(seed, n=64):
 
 # 同一阻塞和 failed monitor 的精确时间关联；跨 CLI 调用保持稳定。
 VERIFICATION_FIXTURE_BLOCKED_AT = "2026-10-09T07:56:27.000000+00:00"
+VERIFICATION_FIXTURE_COMMANDS = [
+    "dart format --output=none --set-exit-if-changed lib/core/providers.dart",
+    "flutter analyze --no-pub lib/core/providers.dart",
+    "flutter test --no-pub test/daily_recommend_shuffle_test.dart",
+]
+VERIFICATION_FIXTURE_PLAN = (
+    "# 自动处理示例 · verification_unconfirmed\n\n"
+    "> 隔离假数据：不会运行真实命令、模型或修改真实仓库。\n\n"
+    "## 验证声明\n\n```verify\n" + "\n".join(VERIFICATION_FIXTURE_COMMANDS) + "\n```\n"
+)
+VERIFICATION_FIXTURE_PLAN_SHA = hashlib.sha256(VERIFICATION_FIXTURE_PLAN.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------- state
@@ -735,6 +747,7 @@ def base_events():
 
 SUMMARY_KEYS = [
     "task_id", "project_id", "project_name", "title", "stage", "status",
+    "phase", "condition", "attention",
     "display_status", "board_column", "lifecycle_column", "exception",
     "board_substatus", "last_checked_at",
     "review_summary", "last_progress", "blocked_reason", "next_claim_at",
@@ -937,7 +950,24 @@ def merged_tasks(state):
         # v2 §5.22.4：计划已发布未确认 → display_status「待确认执行」。
         if task["status"] == "ready" and task.get("plan_execution_hold"):
             task["display_status"] = "待确认执行"
+        task.setdefault("display_status", {
+            "needs_plan": "待规划", "planning": "规划中", "ready": "就绪",
+            "dispatching": "派发中", "prepared": "派发中", "submitting": "派发中",
+            "running": "执行中", "in_review": "评审中", "needs_user": "需人工", "done": "已归档",
+        }.get(task["status"]))
         derive_board(task, requests)
+        task["phase"], task["condition"] = {
+            "needs_plan": ("plan", "wanted"), "planning": ("plan", "drafting"),
+            "ready": ("plan", "ready"), "dispatching": ("dispatch", "confirmed"),
+            "prepared": ("dispatch", "submitting"), "submitting": ("dispatch", "submitting"),
+            "running": ("observe", "running"), "in_review": ("review", "reviewing"),
+            "needs_user": ("needs-you", "blocked"), "done": ("done", "merged"),
+        }.get(task["status"], (None, None))
+        delivery = task.get("delivery") or {}
+        if task["status"] == "in_review" and (task.get("review_conclusion") == "pass" or delivery.get("pr_number") or delivery.get("pushed_sha")):
+            task["phase"], task["condition"] = "delivery", "syncing"
+        task["attention"] = None if state.get("attention_empty") else fake_attention_item(task, requests)
+
     return list(tasks.values())
 
 def merged_requests(state):
@@ -1283,8 +1313,7 @@ def cmd_verification_checks(state, payload, status_only=False):
     checks = [{"command": command, "exit_code": code if i == 0 else 0,
                "timed_out": False, "detail": "隔离模拟检查失败" if code and i == 0 else None,
                "output_tail": "隔离 FakeCore 输出：" + ("检查失败" if code and i == 0 else "检查通过")}
-              for i, command in enumerate(["dart format --output=none --set-exit-if-changed lib/core/providers.dart",
-                                            "flutter analyze --no-pub lib/core/providers.dart", "flutter test --no-pub test/daily_recommend_shuffle_test.dart"])]
+              for i, command in enumerate(VERIFICATION_FIXTURE_COMMANDS)]
     pending = code == 0 and state.get("verification_checks_fixture_recovery_pending", False)
     result = {"ok": True, "verification_ok": code == 0, "recovery_pending": pending, "deduplicated": False, "checks": checks,
               "detail": "所有检查独立通过，已排队监控" if code == 0 else "检查未通过，原成果与阻塞保留"}
@@ -1360,6 +1389,7 @@ def cmd_get_plan(state, payload):
                 "## 本次目标\n\n让用户明确当前阶段、需要决定的事项和最终交付结果。\n\n"
                 "## 实施与验证\n\n1. 核对需求和材料。\n2. 在隔离环境执行与验证。\n3. 保留记录并提交评审。\n\n"
                 "| 检查 | 预期 |\n| --- | --- |\n| 正常操作 | 状态清晰 |\n| 失败状态 | 保留原因和恢复入口 |\n")
+    markdown = task.get("_verification_plan_markdown", markdown)
     return {"task_id": task["task_id"], "title": task["title"],
             "plan_kind": task.get("plan_kind", "standard"),
             "generated_at": task.get("plan_generated_at"),
@@ -2949,6 +2979,9 @@ def cmd_get_project_mappings(state, payload):
             "repository": effective["repository"] or "",
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
+            "engine_mode": item.get("engine_mode", "legacy"),
+            "verify_env": item.get("verify_env", {}),
+            "fallback_model": item.get("fallback_model"),
             "automation": item.get("automation") or automation_policy(pid == PROJECTS["Music"]),
             "automation_preflight": ([{"code": "origin_not_github", "message": "origin 不是 GitHub 仓库"},
                                       {"code": "review_backend_unsupported", "message": "Review 后端需为 Plus/Claude/Codex"}]
@@ -3056,7 +3089,20 @@ def automation_tasks():
                                            "registered_at": past(minutes=25), "report_path": "/tmp/fake-review.md",
                                            "head_sha": sha(tid, 40), "execution_run_id": "run-fake-1"}]})
         if code == "verification_unconfirmed":
-            result[-1].update(run_id="run-auto-verification-unconfirmed", _verification_passed=True,
+            run_id = "run-auto-verification-unconfirmed"
+            session_id = "session-auto-verification-unconfirmed"
+            plan_path = os.path.join(os.environ.get("KANPILOT_PLAN_ROOT", tempfile.gettempdir()), "auto-verification_unconfirmed.plan.md")
+            result[-1].update(run_id=run_id, _verification_passed=True,
+                              plan_path=plan_path, plan_sha256=VERIFICATION_FIXTURE_PLAN_SHA, plan_kind="standard",
+                              plan_generated_at="2026-10-09T07:50:27.000000+00:00",
+                              _verification_plan_markdown=VERIFICATION_FIXTURE_PLAN,
+                              plan_verify={"plan_sha256": VERIFICATION_FIXTURE_PLAN_SHA, "commands": list(VERIFICATION_FIXTURE_COMMANDS)},
+                              session_id=session_id,
+                              execution_round={"task_id": tid, "run_id": run_id, "backend": "pi_desktop",
+                                               "session_id": session_id, "turn_id": "turn-auto-verification-unconfirmed",
+                                               "run_status": "finished", "send_state": "sent", "save_state": "active",
+                                               "worktree_path": result[-1]["delivery"]["worktree_path"],
+                                               "started_at": "2026-10-09T07:53:27.000000+00:00"},
                               blocked_at=VERIFICATION_FIXTURE_BLOCKED_AT,
                               _execution_started_at="2026-10-09T07:53:27.000000+00:00",
                               failure_reason="隔离示例：验证退出码尚未识别，等待重新核验现有记录",
@@ -3194,7 +3240,128 @@ def cmd_session_request_start(state, payload):
     return {"request_id": status["request_id"], "stage": "plan", "queued": True, "deduplicated": repeated}
 
 
+# Engine/inbox fixtures never import real core or contact network services.
+def fake_attention_item(task, requests):
+    if task["status"] != "needs_user" or task.get("save_state", "active") != "active":
+        return None
+    code = task.get("failure_code")
+    reasons = {
+        "verification_unconfirmed": "verify_unconfirmed", "empty_diff": "verify_unconfirmed",
+        "send_state_unknown": "plus_send_unknown", "plus_unreachable": "plus_unreachable",
+        "fix_rounds_exhausted": "review_changes_exhausted", "review_blocked": "review_changes_exhausted",
+        "review_backend_unsupported": "review_changes_exhausted", "review_fix_exhausted": "review_changes_exhausted",
+        "planner_failed": "needs_plan_input", "plan_missing": "needs_plan_input", "plan_failed": "needs_plan_input",
+        "planner_timeout": "needs_plan_input", "planner_output_invalid": "needs_plan_input", "planner_input_invalid": "needs_plan_input",
+        "needs_input": "needs_plan_input", "branch_exists": "needs_plan_input", "delivery_base_unknown": "needs_plan_input",
+        "auto_budget_exceeded": "budget_exceeded", "remote_unavailable": "remote_unavailable", "remote_task_missing": "remote_unavailable",
+        "remote_conflict": "remote_unavailable", "delivery_commit_failed": "delivery_blocked", "delivery_blocked_files": "delivery_blocked",
+        "branch_diverged": "delivery_blocked", "no_changes": "delivery_blocked", "gh_unavailable": "delivery_blocked",
+        "push_rejected": "push_rejected", "pr_closed_unmerged": "pr_closed_unmerged", "pr_closed": "pr_closed_unmerged",
+        "gh_missing": "gh_environment", "gh_not_logged_in": "gh_environment", "gh_timeout": "gh_environment",
+        "lease_expired": "concurrency_stalled", "request_lost": "concurrency_stalled", "plus_timeout": "plus_unreachable",
+    }
+    stage_reasons = {"plan": "needs_plan_input", "monitor": "verify_unconfirmed", "review": "review_changes_exhausted", "delivery": "delivery_blocked", "dispatch": "delivery_blocked"}
+    reason = reasons.get(code, "needs_user_other") if code else stage_reasons.get(task.get("failure_stage"), "needs_user_other")
+    actions = allowed_actions(task, requests)
+    since = task.get("blocked_at") or task.get("updated_at")
+    return {"attention_id": "attn_%s_%s" % (task["task_id"], reason), "task_id": task["task_id"],
+            "project_name": task.get("project_name"), "title": task.get("title"), "reason_code": reason,
+            "failure_code": code, "failure_stage": task.get("failure_stage"), "failure_reason": task.get("failure_reason"),
+            "blocked_summary": task.get("blocked_summary"), "since": since,
+            "evidence": [{"kind": "event", "id": "fake-" + task["task_id"], "at": since, "detail": "隔离假数据证据"}],
+            "recommended": actions[0] if actions else None, "alternatives": actions[1:], "allowed_actions": actions,
+            "attention_state": "actionable"}
+
+
+def cmd_attention_list(state, payload):
+    if state.get("attention_error"): return fail("隔离收件箱读取失败", "fixture_failure")
+    tasks = merged_tasks(state)
+    items = [t["attention"] for t in tasks if t.get("attention")]
+    # Frozen ladder precedence; stable input order within equivalent tiers.
+    fourth = {"auto_budget_exceeded", "fix_rounds_exhausted", "review_fix_exhausted"}
+    second = {"send_state_unknown", "plus_unreachable", "plus_timeout", "gh_missing", "gh_not_logged_in", "gh_timeout"}
+    def rank(item):
+        return 4 if item["failure_code"] in fourth else 2 if item["failure_code"] in second else 3
+    items.sort(key=lambda item: (-rank(item), item.get("since") or ""))
+    return {"items": items}
+
+
+def cmd_engine_status(state, payload):
+    try:
+        with open(STATE_PATH + ".engine.json", encoding="utf-8") as handle:
+            entry = json.load(handle)
+        try: os.kill(entry["pid"], 0); alive = True
+        except ProcessLookupError: alive = False
+        entry["holder_alive"] = alive
+        try:
+            expires = datetime.fromisoformat(entry.get("lease_expires_at", "").replace("Z", "+00:00"))
+            unexpired = expires > utcnow()
+        except (ValueError, TypeError):
+            unexpired = False
+        entry["active"] = alive and unexpired and entry["state"] == "active" and not state.get("engine_heartbeat_lost")
+        return {"instances": [entry]}
+    except FileNotFoundError:
+        return {"instances": []}
+
+
+def cmd_engine_run(state, payload):
+    if os.environ.get("KANPILOT_FAKE_ENGINE_FAIL") == "1":
+        return fail("隔离引擎启动失败", "fake_failure")
+    stopped = [False]
+    def stop(signum, frame): stopped[0] = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    entry = {"instance_id": "fake-engine-%s" % os.getpid(), "pid": os.getpid(), "state": "active", "active": True,
+             "holder_alive": True, "stage": None, "started_at": iso(utcnow()), "lease_expires_at": future(minutes=2), "owned_workers": []}
+    marker = STATE_PATH + ".engine.json"
+    def publish():
+        # Readers always observe a complete heartbeat snapshot.
+        pending = marker + ".%s.tmp" % os.getpid()
+        with open(pending, "w", encoding="utf-8") as handle: json.dump(entry, handle)
+        os.replace(pending, marker)
+    publish()
+    next_heartbeat = time.monotonic() + 1.0
+    while not stopped[0]:
+        time.sleep(0.1)
+        if time.monotonic() >= next_heartbeat:
+            if not load_state().get("engine_heartbeat_lost"):
+                entry["lease_expires_at"] = future(minutes=2)
+                publish()
+            next_heartbeat = time.monotonic() + 1.0
+    entry["state"] = "stopped"; entry["active"] = False
+    publish()
+    return {"instance_id": entry["instance_id"], "ticks": 1, "failures": 0}
+
+
+def cmd_engine_project_setting(state, payload, key):
+    mappings = copy.deepcopy(fake_project_mappings(state))
+    if payload.get("expected_revision", mappings.get("revision", 0)) != mappings.get("revision", 0):
+        return fail("项目映射版本已变化", "conflict")
+    pid = payload.get("project_id")
+    if pid not in mappings.get("items", {}): return fail("项目不存在", "not_found")
+    value = payload.get(key)
+    if key == "engine_mode" and value not in ("legacy", "shadow", "live"):
+        return fail("引擎模式无效", "bad_request")
+    if key == "verify_env":
+        forbidden = {"TOKEN", "ACCESS_TOKEN", "ACCESSTOKEN", "REFRESH_TOKEN", "API_KEY", "APIKEY", "SECRET", "PASSWORD", "CREDENTIALS", "AUTHORIZATION", "KANEO_TOKEN", "KANEO_ACCESS_TOKEN", "PI_DESKTOP_TOKEN"}
+        if not isinstance(value, dict) or len(value) > 64 or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or k.strip().upper() in forbidden for k, v in value.items()):
+            return fail("verify_env 必须为无凭据的字符串字典", "bad_request")
+    if key == "fallback_model" and value is not None:
+        if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ("provider_id", "model_id")):
+            return fail("备用模型必须含 provider_id/model_id", "bad_request")
+    mappings["items"][pid][key] = value
+    mappings["revision"] = mappings.get("revision", 0) + 1
+    return mutate(state, lambda s: s.update(project_mappings=mappings) or {"project_id": pid, key: value, "revision": mappings["revision"]})
+
+
 COMMANDS = {
+    "engine-status": cmd_engine_status,
+    "engine-run": cmd_engine_run,
+    "attention-list": cmd_attention_list,
+    "session-view": lambda s, p: {"session": {"task_id": p.get("task_id"), "run_id": p.get("run_id"), "state": "associated", "backend": "pi_desktop", "run_status": "running", "connection": {"state": "ok", "detail": "隔离假会话"}, "allowed_actions": []}},
+    "set-project-engine-mode": lambda s, p: cmd_engine_project_setting(s, p, "engine_mode"),
+    "set-project-verify-env": lambda s, p: cmd_engine_project_setting(s, p, "verify_env"),
+    "set-project-fallback-model": lambda s, p: cmd_engine_project_setting(s, p, "fallback_model"),
     "desktop-queue-status": lambda s, p: desktop_queue_status(s, p),
     "set-desktop-queue-config": lambda s, p: desktop_queue_status(s, p, True),
     "desktop-automation-status": lambda s, p: desktop_automation_status(s, p),

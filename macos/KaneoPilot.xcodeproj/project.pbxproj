@@ -16,7 +16,7 @@
 		BA5E00000000000000001106 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001006 /* RootView.swift */; };
 		BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001081 /* AutomationDashboardView.swift */; };
 		BA5E00000000000000001107 /* TasksSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001007 /* TasksSectionView.swift */; };
-		BA5E00000000000000001108 /* TaskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001008 /* TaskDetailView.swift */; };
+		BA5E00000000000000001108 /* ConfirmableAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001008 /* ConfirmableAction.swift */; };
 		BA5E00000000000000001109 /* PendingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001009 /* PendingView.swift */; };
 		BA5E00000000000000001110 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001010 /* RunsView.swift */; };
 		BA5E00000000000000001111 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001011 /* SettingsView.swift */; };
@@ -24,7 +24,7 @@
 		BA5E00000000000000001113 /* BoardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001013 /* BoardView.swift */; };
 		BA5E00000000000000001114 /* SessionReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001014 /* SessionReaderView.swift */; };
 		BA5E00000000000000001115 /* SavedTasksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001015 /* SavedTasksView.swift */; };
-		BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* ExecutorScheduler.swift */; };
+		BA5E00000000000000001116 /* EngineSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001016 /* EngineSupervisor.swift */; };
 		BA5E00000000000000001130 /* PlanningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001030 /* PlanningView.swift */; };
 		BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001031 /* TaskDetailTabs.swift */; };
 		BA5E00000000000000001132 /* MCPServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001032 /* MCPServiceManager.swift */; };
@@ -52,7 +52,7 @@
 		BA5E00000000000000001006 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001081 /* AutomationDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDashboardView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001007 /* TasksSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksSectionView.swift; sourceTree = "<group>"; };
-		BA5E00000000000000001008 /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001008 /* ConfirmableAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmableAction.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001009 /* PendingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001010 /* RunsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunsView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001011 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -60,7 +60,7 @@
 		BA5E00000000000000001013 /* BoardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001014 /* SessionReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001015 /* SavedTasksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedTasksView.swift; sourceTree = "<group>"; };
-		BA5E00000000000000001016 /* ExecutorScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutorScheduler.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001016 /* EngineSupervisor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineSupervisor.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001030 /* PlanningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanningView.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001031 /* TaskDetailTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailTabs.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001032 /* MCPServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServiceManager.swift; sourceTree = "<group>"; };
@@ -129,7 +129,7 @@
 				BA5E00000000000000001042 /* LoginItem.swift */,
 				BA5E00000000000000001041 /* SchedulerDecision.swift */,
 				BA5E00000000000000001040 /* AppRuntime.swift */,
-				BA5E00000000000000001016 /* ExecutorScheduler.swift */,
+				BA5E00000000000000001016 /* EngineSupervisor.swift */,
 				BA5E00000000000000001032 /* MCPServiceManager.swift */,
 			);
 			path = Core;
@@ -143,7 +143,7 @@
 				BA5E00000000000000001043 /* MenuBarView.swift */,
 				BA5E00000000000000001007 /* TasksSectionView.swift */,
 				BA5E00000000000000001013 /* BoardView.swift */,
-				BA5E00000000000000001008 /* TaskDetailView.swift */,
+				BA5E00000000000000001008 /* ConfirmableAction.swift */,
 				BA5E00000000000000001009 /* PendingView.swift */,
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
@@ -255,7 +255,7 @@
 				BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */,
 				BA5E00000000000000001107 /* TasksSectionView.swift in Sources */,
 				BA5E00000000000000001113 /* BoardView.swift in Sources */,
-				BA5E00000000000000001108 /* TaskDetailView.swift in Sources */,
+				BA5E00000000000000001108 /* ConfirmableAction.swift in Sources */,
 				BA5E00000000000000001109 /* PendingView.swift in Sources */,
 				BA5E00000000000000001110 /* RunsView.swift in Sources */,
 				BA5E00000000000000001111 /* SettingsView.swift in Sources */,
@@ -268,7 +268,7 @@
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
 				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,
 				BA5E00000000000000001136 /* MarkdownReaderView.swift in Sources */,
-				BA5E00000000000000001116 /* ExecutorScheduler.swift in Sources */,
+				BA5E00000000000000001116 /* EngineSupervisor.swift in Sources */,
 				BA5E00000000000000001132 /* MCPServiceManager.swift in Sources */,
 				BA5E00000000000000001133 /* ProjectMappingsView.swift in Sources */,
 				BA5E00000000000000001134 /* TaskDetailContentView.swift in Sources */,

@@ -495,16 +495,32 @@ expect(ExecPiDesktopConfig.fixedReviewPermission == "auto", "新 Review 权限�
 for (suffix, expected, label) in [
     ("\"board_column\":\"todo\"", false, "正常待执行不需人工"),
     ("\"board_column\":\"in_progress\"", false, "正常执行不需人工"),
-    ("\"plan_execution_hold\":true", true, "计划待确认必须可见"),
-    ("\"auto_advance_paused\":1", true, "任务级暂停必须可见"),
-    ("\"board_column\":\"failed\"", true, "当前异常必须可见"),
+    ("\"plan_execution_hold\":true", false, "缺失attention不由计划闸推断"),
+    ("\"auto_advance_paused\":1", false, "缺失attention不由暂停推断"),
+    ("\"board_column\":\"failed\"", false, "缺失attention不由看板推断"),
     ("\"blocked_reason\":\"\"", false, "空阻塞原因不制造待办"),
-    ("\"blocked_reason\":\"等待决定\"", true, "非空阻塞必须可见"),
+    ("\"blocked_reason\":\"等待决定\"", false, "缺失attention不由阻塞原因推断"),
     ("\"save_state\":\"archived\",\"auto_advance_paused\":1", false, "归档不制造待办"),
     ("\"read_only\":true,\"board_column\":\"failed\"", false, "只读记录不制造待办")
 ] {
     let json = "{\"task_id\":\"fixture\",\"status\":\"ready\",\(suffix)}"
     if let task = decode(TaskSummary.self, json) { expect(task.needsAttention == expected, label) }
+}
+
+// New core phase/condition/attention contract; legacy payloads do not invent it.
+let attentionJSON = """
+{"attention_id":"attn_t_verify_unconfirmed","task_id":"t","reason_code":"verify_unconfirmed","attention_state":"actionable","allowed_actions":["reverify"],"evidence":[{"kind":"event","id":42}]}
+"""
+if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"needs_user\",\"phase\":\"needs-you\",\"condition\":\"blocked\",\"attention\":\(attentionJSON)}") {
+    expect(task.phase == "needs-you" && task.condition == "blocked", "核心阶段条件原样解码")
+    expect(task.needsAttention, "核心actionable可见")
+    expect(task.attention?.allowedActions == ["reverify"], "收件箱动作来自核心")
+}
+if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"running\"}") {
+    expect(task.phase == nil && task.condition == nil && task.attention == nil, "旧响应不推断phase/condition/attention")
+}
+if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"needs_user\",\"attention\":\(attentionJSON.replacingOccurrences(of: "actionable", with: "historical"))}") {
+    expect(!task.needsAttention, "历史attention不列入需要你")
 }
 
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")

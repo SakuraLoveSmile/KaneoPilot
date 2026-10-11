@@ -314,6 +314,11 @@ struct ProjectMappingsView: View {
                         }
 
                         automationEditor(item)
+                        Divider()
+                        ProjectEngineEditor(item: item, revision: revision, onSaved: {
+                            await loadMappings(refreshRemote: false)
+                        })
+                        .id(item.projectId)
 
                         // 活动统计与说明
                         if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
@@ -666,5 +671,94 @@ struct ProjectMappingsView: View {
             return df.string(from: d)
         }
         return iso
+    }
+}
+
+/// Each setting uses the fixed core command and mapping revision CAS.
+private struct ProjectEngineEditor: View {
+    @EnvironmentObject private var model: AppViewModel
+    let item: ProjectMappingItem
+    let revision: Int
+    let onSaved: () async -> Void
+    @State private var mode = "legacy"
+    @State private var verifyJSON = "{}"
+    @State private var provider = ""
+    @State private var fallback = ""
+    @State private var loaded = false
+    @State private var saving = false
+    @State private var error: String?
+    @State private var message: String?
+    @State private var confirmingLive = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("项目引擎").font(.kpBody.weight(.semibold))
+            Picker("引擎模式", selection: $mode) {
+                Text("Legacy · 旧 CLI 路径").tag("legacy")
+                Text("Shadow · 只记录对比").tag("shadow")
+                Text("Live · 自动推进").tag("live")
+            }.font(.kpBody)
+            Text("Live 会接收并推进已开启自动处理的项目；Shadow 仅记录对比。新 App 不自动驱动 Legacy 项目，旧 CLI 路径保留；显式手动规划不受影响。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            Button("保存引擎模式") {
+                if mode == "live", item.engineMode != "live" { confirmingLive = true }
+                else { Task { await save("set-project-engine-mode", field: "engine_mode", value: mode) } }
+            }
+            Text("验证环境（JSON 字符串字典）").font(.kpBody)
+            TextEditor(text: $verifyJSON).font(.system(size: 13, design: .monospaced))
+                .frame(minHeight: 80, maxHeight: 120)
+                .accessibilityLabel("项目 verify_env")
+            Text("例如 {\"PATH\":\"/usr/local/bin:/usr/bin:/bin\"}。凭据放在凭据文件；TOKEN / SECRET / AUTHORIZATION 等键会被核心拒绝。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            Button("保存验证环境") {
+                do {
+                    guard let data = verifyJSON.data(using: .utf8),
+                          let object = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+                        error = "验证环境必须为字符串→字符串字典"; return
+                    }
+                    Task { await save("set-project-verify-env", field: "verify_env", value: object) }
+                } catch { self.error = "验证环境 JSON 无效：\(error.localizedDescription)" }
+            }
+            Text("备用模型").font(.kpBody)
+            TextField("provider_id", text: $provider).textFieldStyle(.roundedBorder)
+                .accessibilityLabel("备用模型 provider_id")
+            TextField("model_id", text: $fallback).textFieldStyle(.roundedBorder)
+                .accessibilityLabel("备用模型 model_id")
+            Text("留空两项可清除；使用前核心会检查 Plus 本地模型缓存，不会静默改模型。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            Button("保存备用模型") {
+                let p = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+                let m = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard p.isEmpty == m.isEmpty else { error = "请同时填写 provider_id 和 model_id，或同时留空"; return }
+                Task { await save("set-project-fallback-model", field: "fallback_model", value: p.isEmpty ? NSNull() : ["provider_id": p, "model_id": m]) }
+            }
+            if let error { Text(error).font(.kpSmall).foregroundStyle(.red).textSelection(.enabled) }
+            if let message { Text(message).font(.kpSmall).foregroundStyle(.secondary) }
+            Button("重新载入引擎设置") { seed(); error = nil; message = nil }
+            Text("映射版本 r\(revision)；冲突时保留草稿，重新读取项目后可重新载入。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+        }.disabled(saving || model.busy)
+        .onAppear { if !loaded { seed(); loaded = true } }
+        .confirmationDialog("启用此项目 Live 自动推进？", isPresented: $confirmingLive) {
+            Button("启用 Live") { Task { await save("set-project-engine-mode", field: "engine_mode", value: mode) } }
+            Button("取消", role: .cancel) { }
+        } message: { Text("常驻引擎会按已保存策略接收、规划、执行、评审和交付此项目的新任务。") }
+    }
+    private func seed() {
+        mode = item.engineMode ?? "legacy"
+        if let data = try? JSONSerialization.data(withJSONObject: item.verifyEnv ?? [:], options: [.prettyPrinted, .sortedKeys]) {
+            verifyJSON = String(decoding: data, as: UTF8.self)
+        }
+        provider = item.fallbackModel?.providerId ?? ""
+        fallback = item.fallbackModel?.modelId ?? ""
+    }
+    private func save(_ command: String, field: String, value: Any) async {
+        guard !saving else { return }
+        saving = true; error = nil; message = nil
+        defer { saving = false }
+        do {
+            _ = try await model.client.run(command, payload: ["project_id": item.projectId, "expected_revision": revision, field: value])
+            message = "已保存"
+            await onSaved()
+        } catch { self.error = "\(error.coreMessage)；草稿已保留" }
     }
 }

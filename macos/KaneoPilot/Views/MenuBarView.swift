@@ -2,19 +2,28 @@ import SwiftUI
 import AppKit
 
 struct MenuBarView: View {
+    @EnvironmentObject private var model: AppViewModel
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.openWindow) private var openWindow
     @State private var pauseInFlight = false
 
     private var paused: Bool { scheduler.status?.paused?.global == true }
-    private var pending: Int { scheduler.status?.automation?.pendingTasks ?? 0 }
+    private var pending: Int { scheduler.attentionItems.count }
 
     var body: some View {
         Text(scheduler.isStopping ? "正在退出" : scheduler.isSchedulingStopped ? "调度已停止" :
-             scheduler.status == nil ? "正在读取运行状态" : (paused ? "已暂停" : "运行中"))
-        Text("在途 \(scheduler.status?.automation?.activeTasks ?? 0) · 待处理 \(pending)")
+             !EngineSupervisor.isEnabled ? "本机引擎已停用" : scheduler.status == nil ? "正在读取运行状态" : (paused ? "已暂停" : "运行中"))
+        Text("在途 \(scheduler.status?.automation?.activeTasks ?? 0) · 需要你 \(pending)")
+        Text(scheduler.engineStatus?.instances.contains(where: { $0.active == true }) == true ? "引擎心跳正常" : "引擎心跳未确认")
         Text("上次接收任务：\(lastIntake)")
         if let error = scheduler.error { Text(error).foregroundStyle(.secondary) }
+        ForEach(scheduler.attentionItems.prefix(5)) { item in
+            Button(item.title ?? item.taskId) {
+                model.attentionTaskToOpen = item.taskId
+                AppRuntime.shared.mainWindowDidOpen()
+                openWindow(id: "main")
+            }
+        }
         Divider()
         Button("打开 KaneoPilot") {
             AppRuntime.shared.mainWindowDidOpen()
@@ -28,7 +37,7 @@ struct MenuBarView: View {
             }
         }
         .disabled(pauseInFlight || scheduler.status == nil || scheduler.isSchedulingStopped)
-        Button("立即检查") { scheduler.checkNow() }
+        Button("刷新引擎状态") { scheduler.checkNow() }
             .disabled(scheduler.isSchedulingStopped)
         Divider()
         Button(scheduler.isSchedulingStopped && !scheduler.isStopping ? "重试退出" : "退出") {

@@ -53,6 +53,9 @@ struct RootView: View {
         }
         .task { await model.refreshAll() }
         .task { await model.loadSaved() }
+        .onChange(of: model.attentionTaskToOpen) { _, id in
+            if id != nil { section = .dashboard }
+        }
         .task { await pollLoop() }
         .onChange(of: section) { _, newSection in
             // 归档/回收站/会话节按需加载（与看板周期刷新解耦）

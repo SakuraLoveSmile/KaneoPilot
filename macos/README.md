@@ -130,3 +130,22 @@ bash scripts/preview_automation_ui.sh 900x600 dark
 bash macos/tests/run-fixtures.sh
 bash macos/tests/run-planning-input-fixtures.sh
 ```
+
+## 引擎总览（Stage B）隔离体验
+
+默认首页按「需要你 → 流水线计数 → 进行中任务 → 项目自动化 → 环境健康」显示。总览、菜单栏和通知读取同一个 `attention-list` 快照；任务仍通过五段详情进入计划、执行会话、评审报告和记录。设置为连接、项目、规划与评审、高级四页；项目引擎设置分别经固定核心命令保存并带映射版本校验。
+
+`EngineSupervisor` 只拉起 `engine-run`，进程默认 `legacy`，由项目配置决定是否自动推进。关闭窗口保留后台引擎；退出只停止本实例，不结束 Plus 会话。手动规划保留核心显式授权队列。`ExecutorScheduler.swift` 与其历史夹具保留作旧路径参考，不再编入 App 的调度所有权。通知许可只能由「高级 → 允许需要你通知」显式请求；FakeCore 不请求通知、不启动真实 MCP 或真实服务。
+
+```bash
+xcodebuild -project macos/KaneoPilot.xcodeproj -scheme KaneoPilot -configuration Debug \
+  -derivedDataPath /tmp/kp-stage-b-ui-build \
+  PRODUCT_BUNDLE_IDENTIFIER=local.kaneopilot.ui-engine-check CODE_SIGNING_ALLOWED=NO build
+bash macos/tests/launch-engine-ui-check.sh /tmp/kp-stage-b-ui-build/Build/Products/Debug/KaneoPilot.app 1180x760
+```
+
+启动脚本要求独立 bundle id，创建临时 HOME、FakeCore 状态和全部数据根。可将最后参数改为 `900x600` 验证最小窗口，关闭窗口后从菜单栏重开，再用应用退出完成引擎收尾。不要以此假数据体验代替真实项目验收。
+
+走查清单：默认总览区块顺序、需要你数量与菜单栏一致；搜索与阶段筛选、↑↓/回车打开五段详情；进行中阶段仅突出核心提供值；设置四页可达、项目模式/验证环境/备用模型保存与回读；拒绝凭据环境键且保留草稿；关闭窗口后菜单栏仍在；退出不结束其他引擎或 Plus。
+
+验证入口：`bash macos/tests/run-engine-fixtures.sh`（健康启动、外部实例、失败退避、同源收件箱、默认模式、CAS 与凭据环境拒绝）以及既有 `run-fixtures.sh`、规划材料、回答、评审决议、验证回执与会话夹具。

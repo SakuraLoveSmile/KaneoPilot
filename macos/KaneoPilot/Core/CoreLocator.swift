@@ -22,7 +22,7 @@ enum CoreLocator {
 
         // A standalone acceptance bundle must never fall through to the production core.
         if ["local.kaneopilot.session-reader-check", "local.kaneopilot.desktop-intake-check",
-            "local.kaneopilot.ui-simplification"]
+            "local.kaneopilot.ui-simplification", "local.kaneopilot.ui-engine-check"]
             .contains(Bundle.main.bundleIdentifier ?? "") {
             let required = ["KANPILOT_CORE", "KANPILOT_APP_SUPPORT", "KANPILOT_DB", "KANPILOT_LEGACY_ROOT", "KANPILOT_PLAN_ROOT", "KANPILOT_REPOS_ROOT", "KANPILOT_REPORTS_ROOT", "KANEO_CREDENTIALS_PATH"]
             guard required.allSatisfy({ environment[$0]?.isEmpty == false }) else { return nil }

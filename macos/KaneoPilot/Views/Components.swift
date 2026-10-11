@@ -128,7 +128,7 @@ enum Labels {
         case "verification_checks_started": return "验证检查已开始"
         case "verification_checks_completed": return "验证检查已完成"
         case "fix_task_created": return "修复任务创建"
-        case "resolved": return "人工决议"
+        case "resolved": return "处置决议"
         case "paused": return "自动推进暂停"
         case "unpaused": return "自动推进恢复"
         case "priority_changed": return "优先级调整"
@@ -152,6 +152,9 @@ enum Labels {
         case "plan_needs_input": return "规划需要补充输入"
         case "plan_answers_submitted": return "规划答案已提交"
         case "execution_retry_requested": return "已确认沿用计划重新执行"
+        case "engine_fix_started": return "自动补救轮开始"
+        case "model": return "执行模型选择"
+        case "model_hint": return "执行模型配置建议"
         case "round_started": return "轮次启动"
         case "round_observe": return "观察者续接"
         case "round_start_failed": return "轮次启动失败"
@@ -282,13 +285,9 @@ enum DisplayStatus {
         }
     }
 
-    /// 任务有效显示态：claimed 请求租约过期时本地派生「执行端失联」。
+    /// Core supplies display_status; desktop never infers a lost execution from a local clock.
     static func effective(status: String?, displayStatus: String?, activeRequest: ActiveRequest?) -> String {
-        if let request = activeRequest, request.status == "claimed",
-           let lease = TimeFormat.parse(request.leaseExpiresAt), lease < Date() {
-            return "执行端失联"
-        }
-        return displayStatus ?? status ?? "未知"
+        displayStatus ?? "未提供"
     }
 
     static func effective(_ task: TaskSummary) -> String {
@@ -762,5 +761,112 @@ enum AutomationPresentation {
     }
     static func active(_ automation: TaskAutomationView?) -> Bool {
         automation != nil && automation?.manualTakeover != true
+    }
+}
+
+/// Highlight only the phase supplied by core, without inferring completed stages.
+struct PhaseStepperView: View {
+    let phase: String?
+    let condition: String?
+    static func title(_ phase: String) -> String {
+        switch phase {
+        case "plan": return "规划"
+        case "dispatch": return "派发"
+        case "observe": return "执行"
+        case "verdict": return "验证"
+        case "commit": return "提交"
+        case "intake": return "接收"
+        case "needs-you": return "需要你"
+        case "review": return "评审"
+        case "delivery": return "交付"
+        case "done": return "完成"
+        default: return phase
+        }
+    }
+    static func conditionTitle(_ value: String) -> String {
+        switch value {
+        case "wanted": return "等待规划"
+        case "drafting": return "规划中"
+        case "ready": return "计划就绪"
+        case "confirmed": return "已确认"
+        case "submitting": return "提交中"
+        case "running": return "执行中"
+        case "observing": return "观察中"
+        case "checking": return "验证中"
+        case "unconfirmed": return "待确认"
+        case "committing": return "提交中"
+        case "reviewing": return "评审中"
+        case "repairing": return "修复中"
+        case "syncing": return "同步交付"
+        case "merged": return "已合并"
+        case "blocked": return "需处理"
+        default: return value
+        }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.s) {
+                ForEach(["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"], id: \.self) { step in
+                    Text(Self.title(step))
+                        .font(.kpSmall.weight(phase == step ? .semibold : .regular))
+                        .foregroundStyle(phase == step ? Color.accentColor : Color.secondary)
+                }
+            }
+            Text("阶段：\(phase.map(Self.title) ?? "未提供") · 条件：\(condition.map(Self.conditionTitle) ?? "未提供")")
+                .font(.kpSmall).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - recheck 结果
+
+struct RecheckResultView: View {
+    let result: RecheckResponse?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            Text("重新校验结果")
+                .font(.kpTitle)
+            if let result {
+                HStack(spacing: Spacing.s) {
+                    Image(systemName: result.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(result.ok == false ? Color.red : Color.green)
+                    Text(result.ok == false ? "存在未通过项" : "全部通过")
+                        .font(.kpBody)
+                }
+                if let checks = result.checks {
+                    ForEach(checks) { check in
+                        HStack(spacing: Spacing.m) {
+                            Image(systemName: check.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
+                                .foregroundStyle(check.ok == false ? Color.red : Color.green)
+                                .accessibilityLabel(check.ok == false ? "未通过" : "通过")
+                            Text(check.name ?? "—")
+                                .font(.kpBody)
+                            Spacer(minLength: 0)
+                            Text(check.detail ?? "")
+                                .font(.kpSmall)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                if let status = result.kaneoStatus {
+                    FieldRow("远端状态", status)
+                }
+            } else {
+                Text("无结果")
+                    .font(.kpBody)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(Spacing.l)
+        .frame(minWidth: 420, minHeight: 220)
     }
 }

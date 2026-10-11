@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @MainActor
 final class AppViewModel: ObservableObject {
@@ -11,7 +12,7 @@ final class AppViewModel: ObservableObject {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .dashboard: return "自动化总览"
+            case .dashboard: return "总览"
             case .tasks: return "任务"
             case .sessions: return "执行会话"
             case .pending: return "需要处理"
@@ -66,7 +67,9 @@ final class AppViewModel: ObservableObject {
     @Published var overview: Overview?
     @Published var doctor: DoctorResponse?
     @Published var doctorOnline = false
+    @Published var doctorRunning = false
 
+    @Published var attentionTaskToOpen: String?
     @Published var selectedTaskID: String?
     @Published var detail: TaskDetail?
     @Published var detailEvents: [EventItem] = []
@@ -106,19 +109,19 @@ final class AppViewModel: ObservableObject {
     private var eventQuery: String? = nil
     private var eventStage: String? = nil
     private var eventResult: String? = nil
-    /// 初次全量刷新成功后唤起一次规划 runner（drain 已授权队列）。
-    private var didKickPlanner = false
     private var planAnswerDrafts: [String: PlanAnswerStore] = [:]
     private var reviewResolutionDrafts: [String: ReviewResolutionStore] = [:]
     private var verificationCheckOperations: [String: VerificationCheckStore] = [:]
 
     let client = CoreClient()
-    /// App 内置执行端调度器（§5.19，v1.6）：init 即 start；client 未解析核心时
-    /// 调度器内部自行跳过触发，不报错。
-    private(set) var executorScheduler: ExecutorScheduler?
+    /// Engine process and inbox observation belong to the App lifecycle.
+    private(set) var executorScheduler: EngineSupervisor?
+    @Published var attentionItems: [AttentionItem] = []
+    private var attentionSubscription: AnyCancellable?
 
     init() {
         executorScheduler = AppRuntime.shared.scheduler
+        attentionSubscription = AppRuntime.shared.scheduler.$attentionItems.sink { [weak self] in self?.attentionItems = $0 }
     }
 
     @Published var loginItemEnabled = LoginItem.isEnabled
@@ -165,14 +168,7 @@ final class AppViewModel: ObservableObject {
     var busy: Bool { actionInFlight != nil }
     var globalPaused: Bool { overview?.paused?.global ?? false }
     var hasData: Bool { !tasks.isEmpty || !requests.isEmpty || overview != nil }
-    var attentionCount: Int {
-        var ids = Set(tasks.filter(\.needsAttention).map(\.taskId))
-        for request in requests where (request.status == "queued" || request.status == "claimed")
-            && (request.isLost || (request.status == "queued" && request.isUnauthorizedPlan)) {
-            ids.insert(request.taskId ?? "request:\(request.requestId)")
-        }
-        return ids.count
-    }
+    var attentionCount: Int { attentionItems.count }
 
     private var toastTask: Task<Void, Never>?
 
@@ -198,6 +194,7 @@ final class AppViewModel: ObservableObject {
     /// v2 §4.3：用户已翻页/筛选过运行记录时不再回灌第一页（游标与顺序由
     /// reloadEvents/loadMoreEvents 独占管理）。
     func refreshAll() async {
+        await AppRuntime.shared.scheduler.refresh()
         isLoading = !hasData
         defer { isLoading = false }
 
@@ -228,12 +225,6 @@ final class AppViewModel: ObservableObject {
         if failures.isEmpty {
             banner = nil
             lastRefreshAt = Date()
-            // v2 §5.22.2：初次全量成功后唤起一次规划 runner（单飞由
-            // executor-status 的 executor_runs["plan"] pid 探测保证）。
-            if !didKickPlanner {
-                didKickPlanner = true
-                kickPlanner()
-            }
         } else if failures.count == 4 {
             let first = failures[0]
             if (first as? CoreError)?.isConnectivity == true {
@@ -331,7 +322,17 @@ final class AppViewModel: ObservableObject {
                                     as: GetPlanResponse.self)
     }
 
+    func runDoctorOnline() async {
+        let previous = doctorOnline
+        doctorOnline = true
+        defer { doctorOnline = previous }
+        await runDoctor()
+    }
+
     func runDoctor() async {
+        guard !doctorRunning else { return }
+        doctorRunning = true
+        defer { doctorRunning = false }
         let online = doctorOnline
         actionInFlight = "诊断中"
         defer { actionInFlight = nil }
@@ -820,7 +821,7 @@ final class AppViewModel: ObservableObject {
     }
 
     /// start-plans {items:[{input_id, input_sha256, expected_plan_sha256?}]}。
-    /// 有任何成功项 → 立即唤起规划 runner（§5.22.2）。
+    /// Successful requests stay explicitly user-authorized; engine owns claiming/spawning.
     @discardableResult
     func startPlans(items: [[String: Any]]) async throws -> StartPlansResponse {
         let response = try await client.run("start-plans",
@@ -837,8 +838,7 @@ final class AppViewModel: ObservableObject {
         return response
     }
 
-    /// 唤起规划 runner（kanpilot.planner_runner，无 --once drain 队列）。
-    /// 单飞在 ExecutorScheduler 内经 executor-status 判定；可安全重复调用。
+    /// Refresh engine supervision after a manual planning action; core owns single flight.
     func kickPlanner() {
         executorScheduler?.runPlanner()
     }

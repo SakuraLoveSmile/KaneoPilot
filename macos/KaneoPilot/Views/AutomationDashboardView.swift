@@ -1,78 +1,69 @@
 import SwiftUI
 
-/// 只展示核心事实，所有推进仍经既有命令和调度器。
+/// Inbox is the default route; every automation fact comes from core JSON.
 struct AutomationDashboardView: View {
     @EnvironmentObject private var model: AppViewModel
-    @ObservedObject private var scheduler = AppRuntime.shared.scheduler
-    @AppStorage("executorSchedulingEnabled") private var schedulingEnabled = true
+    @ObservedObject private var engine = AppRuntime.shared.scheduler
     let onTasks: (BoardColumn?) -> Void
     let onPending: () -> Void
     let onSettings: (SettingsSegment) -> Void
-
-    @State private var status: ExecutorStatusDTO?
-    @State private var statusError: String?
     @State private var detailItem: TaskSheetItem?
     @State private var planningAfterDismissal: String?
-
-    private var stale: Bool { model.banner != nil || statusError != nil || scheduler.error != nil }
-    private var pausedStages: [String] { model.overview?.paused?.stages ?? status?.paused?.stages ?? [] }
-    private var attention: [TaskSummary] { sorted(model.tasks.filter(\.needsAttention)) }
+    @State private var projects: [ProjectMappingItem] = []
+    @State private var projectsError: String?
+    @State private var query = ""
+    @State private var appliedQuery = ""
+    @State private var phase = ""
+    @State private var selectedID: String?
+    private var inbox: [AttentionItem] {
+        model.attentionItems.filter { item in
+            (appliedQuery.isEmpty || [item.title, item.projectName].compactMap { $0 }.joined(separator: " ").localizedCaseInsensitiveContains(appliedQuery))
+            && (phase.isEmpty || item.failureStage == phase)
+        }
+    }
     private var progressing: [TaskSummary] {
-        sorted(model.tasks.filter {
-            !$0.needsAttention && ["needs_plan", "todo", "in_progress", "in_review"].contains($0.boardColumn ?? "")
-        })
-    }
-    private var completed: [TaskSummary] { sorted(model.tasks.filter { $0.boardColumn == "done" }) }
-    private var waitingMerge: [TaskSummary] {
-        sorted(model.tasks.filter {
-            $0.status == "in_review" && $0.reviewSummary?.conclusion == "pass"
-                && $0.delivery?.prState == "open" && AutomationPresentation.active($0.automation)
-        })
-    }
-    private var statusTitle: String {
-        if stale { return "运行状态需要确认" }
-        if scheduler.isSchedulingStopped { return "本机调度已停止" }
-        if model.overview == nil || status == nil { return "正在读取自动化状态" }
-        if model.globalPaused { return "自动推进已暂停" }
-        if !schedulingEnabled { return "本机自动调度已关闭" }
-        if !pausedStages.isEmpty { return "部分阶段已暂停" }
-        if status?.automation?.enabledProjects == 0 { return "尚未开启项目自动处理" }
-        return "自动调度已开启"
-    }
-    private var statusExplanation: String {
-        if stale { return "自动化状态或调度出现问题，请查看错误信息。已有内容可能已过期。" }
-        if scheduler.isSchedulingStopped { return "调度器已停止。请检查错误信息，重新打开应用后再恢复自动处理。" }
-        if model.overview == nil || status == nil { return "正在读取任务、队列与项目状态。" }
-        if model.globalPaused { return "新的自动推进已暂停；已启动的任务继续完成当前工作。" }
-        if !schedulingEnabled { return "打开通用设置，开启本机执行端调度后自动处理才会持续运行。" }
-        if !pausedStages.isEmpty { return "已暂停：\(pausedStages.map { Labels.stage($0) }.joined(separator: "、"))。其他阶段仍按配置推进。" }
-        if status?.automation?.enabledProjects == 0 { return "先设置项目仓库并开启自动处理，调度台才会接收项目任务。" }
-        return "已开启的项目按配置自动规划、执行、评审与交付；需要你决定的事项列在下方。"
+        model.tasks.filter { $0.phase != nil && $0.phase != "done" && !$0.needsAttention }
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.l) {
-                controlSection
+                attentionSection
                 Divider()
                 flowSection
                 Divider()
-                attentionSection
+                progressingSection
                 Divider()
-                taskSection("正在推进", tasks: progressing, empty: "当前没有等待推进或正在运行的任务。", column: nil)
-                if !waitingMerge.isEmpty {
-                    Divider()
-                    taskSection("等待合并", tasks: waitingMerge, empty: "", column: nil)
-                }
+                projectsSection
                 Divider()
-                taskSection("最近完成", tasks: completed, empty: "完成的任务与交付结果会显示在这里。", column: .done)
-            }
-            .padding(Spacing.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
+                healthSection
+            }.padding(Spacing.l).frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.kpWindow)
-        .navigationTitle("自动化总览")
-        .task(id: model.lastRefreshAt) { await readStatus() }
+        .navigationTitle("总览")
+        .focusable().focusEffectDisabled()
+        .onKeyPress(.downArrow) { moveSelection(1) }
+        .onKeyPress(.upArrow) { moveSelection(-1) }
+        .onKeyPress(.return) {
+            guard !(NSApp.keyWindow?.firstResponder is NSTextView), let selectedID else { return .ignored }
+            open(selectedID); return .handled
+        }
+        .task {
+            if let id = model.attentionTaskToOpen { open(id); model.attentionTaskToOpen = nil }
+        }
+        .onChange(of: model.attentionTaskToOpen) { _, id in
+            if let id { open(id); model.attentionTaskToOpen = nil }
+        }
+        .task(id: query) {
+            do { try await Task.sleep(for: .milliseconds(300)); appliedQuery = query }
+            catch { return }
+        }
+        .task(id: model.lastRefreshAt) {
+            do {
+                projects = try await model.client.run("get-project-mappings", as: ProjectMappingsResponse.self).items ?? []
+                projectsError = nil
+            } catch { projectsError = error.coreMessage }
+        }
         .sheet(item: $detailItem, onDismiss: {
             if let id = planningAfterDismissal {
                 planningAfterDismissal = nil
@@ -80,68 +71,63 @@ struct AutomationDashboardView: View {
             }
         }) { item in
             TaskDetailSheet(item: item, onPreparePlanning: { id in
-                planningAfterDismissal = id
-                detailItem = nil
+                planningAfterDismissal = id; detailItem = nil
             })
         }
     }
 
-    private var controlSection: some View {
+    private var attentionSection: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Label(statusTitle, systemImage: stale ? "exclamationmark.triangle" : model.globalPaused || !schedulingEnabled ? "pause.circle" : "arrow.triangle.2.circlepath")
-                .font(.kpTitle)
-            Text(statusExplanation).font(.kpBody).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("需要你 · \(model.attentionCount)").font(.kpTitle)
+                Spacer()
+                Button("查看请求") { onPending() }.font(.kpBody)
+            }
             HStack(spacing: Spacing.m) {
-                Button(model.globalPaused ? "恢复自动推进" : "暂停自动推进") {
-                    Task { await model.toggleGlobalPause() }
-                }
-                .disabled(model.busy || model.overview == nil || stale)
-                Button("添加任务…") { model.openPlanning() }
-                    .disabled(!model.coreFound || model.busy)
-                Menu("更多") {
-                    Button("立即检查并推进") { model.runIntakeNow() }
-                        .disabled(model.busy || stale || status == nil)
-                    Button("自动化设置…") { onSettings(.general) }
-                    Button("项目与仓库…") { onSettings(.projects) }
-                }
-                .help("立即检查会按已保存策略接收任务并推进；暂停和核心安全规则仍有效。")
-                Spacer(minLength: 0)
-            }
-            if !schedulingEnabled || !pausedStages.isEmpty {
-                Button("检查调度设置…") { onSettings(.general) }.font(.kpBody)
-            }
-            if status?.automation?.enabledProjects == 0 {
-                Button("设置自动处理项目…") { onSettings(.projects) }.font(.kpBody)
-            }
-            if let error = statusError {
-                Text(error).font(.kpSmall).foregroundStyle(.red).textSelection(.enabled)
-                Button("重新读取运行状态") { Task { await readStatus() } }
-            }
-            if let error = scheduler.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.kpSmall).foregroundStyle(.red).textSelection(.enabled)
-                Button("查看运行诊断…") { onSettings(.general) }.font(.kpBody)
-            }
-            if let automation = status?.automation {
-                Text("自动处理项目 \(automation.enabledProjects.map(String.init) ?? "—") · 在途 \(automation.activeTasks.map(String.init) ?? "—") / \(automation.maxActiveTasks.map(String.init) ?? "—") · 上次接收 \(TimeFormat.short(automation.lastIntake?.finishedAt))")
-                    .font(.kpSmall).foregroundStyle(.secondary)
-            }
-            ForEach(status?.automation?.lastIntake?.projects?.filter { $0.ready == false } ?? [], id: \.projectId) { project in
-                ForEach(project.preflight ?? []) { issue in
-                    HStack(alignment: .top, spacing: Spacing.s) {
-                        Label(issue.message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-                        Button("检查项目配置") { onSettings(.projects) }
-                    }.font(.kpSmall)
-                }
-            }
-            if let errors = status?.automation?.lastIntake?.errors, !errors.isEmpty {
-                Label("最近自动接收有 \(errors.count) 项错误", systemImage: "exclamationmark.triangle")
-                    .font(.kpSmall).foregroundStyle(.orange)
-                DisclosureGroup("查看接收错误") {
-                    ForEach(Array(errors.enumerated()), id: \.offset) { _, error in
-                        Text(error.text).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
+                TextField("搜索标题或项目", text: $query).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("搜索收件箱")
+                Picker("阻塞阶段", selection: $phase) {
+                    Text("全部阶段").tag("")
+                    ForEach(["plan", "dispatch", "monitor", "review", "delivery"], id: \.self) {
+                        Text(Labels.stage($0)).tag($0)
                     }
+                }.frame(width: 160)
+            }.font(.kpBody)
+            if !engine.attentionLoaded, let error = engine.error {
+                Text(error).font(.kpSmall).foregroundStyle(.red)
+                Button("重试读取") { Task { await model.refreshAll() } }
+            } else if !engine.attentionLoaded {
+                HStack { ProgressView().controlSize(.small); Text("正在读取…").font(.kpBody) }
+            } else if inbox.isEmpty {
+                Text("暂无待处理项").font(.kpBody)
+                Text(appliedQuery.isEmpty && phase.isEmpty ? "自动化会继续推进；需要你决定时会显示在这里。" : "没有匹配的项目或阶段。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                Button("刷新") { Task { await model.refreshAll() } }
+            } else {
+                ForEach(inbox) { item in
+                    Button {
+                        selectedID = item.taskId
+                        open(item.taskId)
+                    } label: {
+                        HStack(spacing: Spacing.m) {
+                            Text(item.projectName ?? "未提供项目").font(.kpSmall).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                Text(item.title ?? item.taskId).font(.kpBody).lineLimit(1).foregroundStyle(.primary)
+                                if let reason = item.blockedSummary ?? item.failureReason {
+                                    Text(reason).font(.kpSmall).foregroundStyle(.red).lineLimit(2)
+                                }
+                                Label("\(item.failureStage.map { Labels.stage($0) } ?? "未提供阶段") · \(attentionStateTitle(item.attentionState))", systemImage: "exclamationmark.circle")
+                                    .font(.kpSmall).foregroundStyle(.secondary)
+                                Text("下一步：\(item.recommended.map { Labels.action($0) } ?? "查看详情")")
+                                    .font(.kpSmall).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                            Text("等待自 \(TimeFormat.short(item.since))").font(.kpSmall).foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right").font(.kpSmall)
+                        }.padding(.vertical, Spacing.s).frame(minHeight: 40)
+                        .background(selectedID == item.taskId ? Color.accentColor.opacity(0.08) : Color.clear)
+                        .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                    Divider()
                 }
             }
         }
@@ -149,103 +135,91 @@ struct AutomationDashboardView: View {
 
     private var flowSection: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Text("自动化流程").font(.kpBody.weight(.semibold))
-            HStack(spacing: Spacing.s) {
-                flowButton("规划", icon: "doc.text", count: count(.needsPlan), column: .needsPlan)
-                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                flowButton("执行", icon: "play.circle", count: count(.inProgress), column: .inProgress)
-                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                flowButton("评审", icon: "checkmark.seal", count: count(.inReview), column: .inReview)
-                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                flowButton("交付", icon: "shippingbox", count: completed.count, column: .done)
+            Text("流水线计数").font(.kpTitle)
+            HStack(spacing: Spacing.m) {
+                ForEach(BoardColumn.allCases.filter { $0 != .failed }) { column in
+                    Button { onTasks(column) } label: {
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            Text(column.title).font(.kpBody)
+                            Text(model.overview?.counts?.board?[column.rawValue].map(String.init) ?? "—").font(.kpTitle).monospacedDigit()
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.borderless)
+                }
             }
-            Button("待执行 \(count(.todo)) 项 · 查看计划与队列") { onTasks(.todo) }.font(.kpSmall)
-            Text("数字表示规划、执行、评审中的任务与已完成交付。已排队要等执行端领取后才会开始；等待合并的 PR 单独列出。")
+            Text("已排队要等执行端领取后才会开始；PR 合并后才完成交付。")
                 .font(.kpSmall).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func flowButton(_ title: String, icon: String, count: Int, column: BoardColumn) -> some View {
-        Button { onTasks(column) } label: {
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Label(title, systemImage: icon).font(.kpBody)
-                Text(stale || model.overview == nil ? "—" : "\(count)")
-                    .font(.kpTitle).monospacedDigit()
+    private var progressingSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            HStack { Text("进行中任务").font(.kpTitle); Spacer(); Button("任务看板") { onTasks(nil) } }
+            if progressing.isEmpty { Text("当前没有进行中任务").font(.kpSmall).foregroundStyle(.secondary) }
+            ForEach(progressing) { task in
+                Button { open(task.taskId) } label: {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Text([task.projectName, task.title ?? task.taskId].compactMap { $0 }.joined(separator: " · "))
+                            .font(.kpBody).foregroundStyle(.primary).lineLimit(1)
+                        PhaseStepperView(phase: task.phase, condition: task.condition)
+                    }.frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                }.buttonStyle(.plain)
+                Divider()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Spacing.s)
         }
-        .buttonStyle(.borderless)
-        .accessibilityLabel("\(title)，\(count) 项，查看任务")
     }
 
-    private var attentionSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
+    private var projectsSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            HStack { Text("项目自动化").font(.kpTitle); Spacer(); Button("项目设置") { onSettings(.projects) } }
+            if let projectsError { Text(projectsError).font(.kpSmall).foregroundStyle(.red) }
+            if projects.isEmpty { Text("尚无项目配置").font(.kpSmall).foregroundStyle(.secondary) }
+            ForEach(projects) { project in
+                HStack(spacing: Spacing.m) {
+                    Text(project.displayName).font(.kpBody).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(project.automation?.enabled == true ? "自动处理已开" : "自动处理已关").font(.kpSmall)
+                    Text(project.engineMode ?? "未提供模式").font(.kpSmall).foregroundStyle(.secondary)
+                }.frame(minHeight: 40)
+            }
+        }
+    }
+
+    private var healthSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
             HStack {
-                Label("需要你处理 · \(model.attentionCount)", systemImage: model.attentionCount == 0 ? "checkmark.circle" : "exclamationmark.circle")
-                    .font(.kpBody.weight(.semibold))
+                Text("环境健康").font(.kpTitle)
                 Spacer()
-                Button("查看全部") { onPending() }.font(.kpSmall)
+                Button(model.doctorRunning ? "检测中…" : "在线诊断") { Task { await model.runDoctorOnline() } }
+                    .disabled(model.doctorRunning || model.busy)
+                Button(model.globalPaused ? "恢复自动推进" : "暂停自动推进") { Task { await model.toggleGlobalPause() } }
+                    .disabled(model.overview == nil || model.busy)
             }
-            if model.attentionCount == 0 {
-                Text(stale || model.overview == nil ? "正在确认是否有需要处理的事项。" : "当前没有需要你决定的事项。可以让自动化按配置继续推进。")
+            Text(engine.engineStatus?.instances.contains(where: { $0.active == true }) == true ? "引擎心跳正常" : "引擎心跳未确认")
+                .font(.kpBody)
+            if let error = engine.error { Text(error).font(.kpSmall).foregroundStyle(.red) }
+            ForEach(engine.engineStatus?.instances ?? []) { instance in
+                Text("\(instance.state ?? "未提供状态") · PID \(instance.pid.map(String.init) ?? "—") · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
                     .font(.kpSmall).foregroundStyle(.secondary)
-            } else {
-                ForEach(attention.prefix(4)) { task in taskRow(task) }
-                if model.attentionCount > attention.count {
-                    Button("查看失联或等待材料的请求") { onPending() }.font(.kpBody)
-                }
+            }
+            if model.doctor == nil { Text("尚未检测环境，点击在线诊断获取检查结果。").font(.kpSmall).foregroundStyle(.secondary) }
+            ForEach(model.doctor?.checks ?? []) { check in
+                Label("\(check.name)：\(check.detail ?? "未提供详情")", systemImage: check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(check.ok == true ? Color.secondary : Color.orange)
             }
         }
     }
-
-    private func taskSection(_ title: String, tasks: [TaskSummary], empty: String, column: BoardColumn?) -> some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            HStack {
-                Text("\(title) · \(tasks.count)").font(.kpBody.weight(.semibold))
-                Spacer()
-                Button(column == nil ? "查看所有任务" : "查看任务") { onTasks(column) }.font(.kpSmall)
-            }
-            if tasks.isEmpty { Text(empty).font(.kpSmall).foregroundStyle(.secondary) }
-            ForEach(tasks.prefix(3)) { task in taskRow(task) }
+    private func attentionStateTitle(_ state: String?) -> String {
+        switch state {
+        case "actionable": return "需要你"
+        case "historical": return "历史"
+        case "informational": return "信息"
+        default: return state ?? "未提供状态"
         }
     }
-
-    private func taskRow(_ task: TaskSummary) -> some View {
-        Button {
-            detailItem = TaskSheetItem(id: task.taskId, startTab: task.planExecutionHold == true ? .plan : .overview)
-        } label: {
-            HStack(alignment: .top, spacing: Spacing.m) {
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text(task.title ?? task.taskId).font(.kpBody).foregroundStyle(.primary)
-                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                    Text([task.projectName, task.blockedReason ?? task.lastProgress].compactMap { $0 }.joined(separator: " · "))
-                        .font(.kpSmall).foregroundStyle(.secondary).lineLimit(2)
-                }
-                StatusBadge(status: DisplayStatus.effective(task))
-                Image(systemName: "chevron.right").font(.kpSmall).foregroundStyle(.secondary)
-            }
-            .padding(.vertical, Spacing.s)
-            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-            .contentShape(Rectangle())
-        }.buttonStyle(.plain)
-        .accessibilityLabel("\(task.title ?? task.taskId)，\(DisplayStatus.effective(task))，打开任务")
-    }
-
-    private func sorted(_ tasks: [TaskSummary]) -> [TaskSummary] {
-        tasks.sorted { (TimeFormat.parse($0.updatedAt) ?? .distantPast) > (TimeFormat.parse($1.updatedAt) ?? .distantPast) }
-    }
-    private func count(_ column: BoardColumn) -> Int { model.tasks.filter { $0.boardColumn == column.rawValue }.count }
-    private func readStatus() async {
-        do {
-            let response = try await model.client.run("executor-status", as: ExecutorStatusDTO.self)
-            guard !Task.isCancelled else { return }
-            status = response
-            statusError = nil
-        } catch {
-            guard !Task.isCancelled else { return }
-            statusError = error.coreMessage
-        }
+    private func open(_ id: String) { detailItem = TaskSheetItem(id: id, startTab: .overview) }
+    private func moveSelection(_ step: Int) -> KeyPress.Result {
+        guard !(NSApp.keyWindow?.firstResponder is NSTextView), !inbox.isEmpty else { return .ignored }
+        let old = inbox.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : inbox.count)
+        selectedID = inbox[min(max(old + step, 0), inbox.count - 1)].taskId
+        return .handled
     }
 }
