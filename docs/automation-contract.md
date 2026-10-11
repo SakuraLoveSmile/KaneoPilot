@@ -1,13 +1,13 @@
 # KaneoPilot 执行端契约（现状）
 
-现行冻结契约以 protocol §5.27 为准。App 每 20 秒读取 tick/status，intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
+现行冻结契约以 protocol §5.27 为准。App 的 EngineSupervisor 监督 engine run 并读取核心状态；引擎 intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
 
 ## 现行路由与结算
 
 本节覆盖当前生效行为；完整接口、载荷和失败语义见 protocol §5.27。
 
 - **dispatch/monitor** 不再调用模型，不看 controller_backend，经 `cli.run` 驱动确定性流程；monitor 使用 `task.run_id` 观察执行，`advance-task` 不传 `request_id`，被动同步 `in-review`/`in-review` 与 `done`/`done` 均允许。
-- 验证缺失或最后一次失败进入 `verification_unconfirmed`。
+- legacy 验证缺失或最后一次失败进入 `verification_unconfirmed`；live 以核心 verdict 与已验证提交树为判定源，质量失败自动补救，身份不明与环境失败分别进入 attention，见 protocol §5.27.11–12。
 - intake 每 300 秒，只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
 - Review 统一结算：手动任务保留跨任务修复，自动化任务 `changes_requested` 在同任务分支最多修复 2 轮并受段预算约束，`pass` 只登记。
 - delivery 提交后 Review，pass 后推送/开 PR/评论，合并才 done，不自动 merge。
@@ -22,7 +22,9 @@
 - 关闭/中断不意味着操作结束：已 claimed 请求由租约派生失联，人工 resolve 才释放。
 - 暂停只影响新领取；执行端不得因全局暂停中止已 running 的轮次。
 
-## 调度循环（ExecutorScheduler）
+## 旧调度循环（ExecutorScheduler，仅历史兼容）
+
+以下保留旧 CLI / 旧 App 行为记录；新版 App 不启动这套定时器，自动驱动仅限 live 项目。显式用户授权的手动规划由引擎消费，见 protocol §5.27.14。
 
 - 四个执行端（plan/dispatch/monitor/review/delivery）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57、delivery 按 `next_sync_at` 动态）。
 - 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
@@ -143,7 +145,9 @@ publish-plan:629 和 dispatch_validate:111 都改用它。begin-send 依靠 clai
 
 **sync-tasks（主控）：** 受自动化管理的任务只更新元数据、kaneo_status 和事件，不做任何状态转移，也不改 requirements_sha256。这样需求变化会由 advance-task 和 dispatch_validate 的既有指纹校验拦下，停给用户处理。
 
-## 执行验证证据
+## 执行验证证据（legacy / shadow 兼容路径）
+
+Live 以 protocol §5.27.11 的核心判定及提交树绑定为准，不接受转录或人工override绕过验证；以下保留旧匹配路径。
 
 **计划格式：**
 
@@ -432,10 +436,11 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 
 | failure_code | 来源 | 自动化任务可用动作 |
 |---|---|---|
-| verification_unconfirmed | monitor | accept_verification（→ running + monitor）、replan、mark_done、dismiss |
+| verification_unconfirmed | monitor | 材料可信时 run_verification_checks/reverify；legacy/shadow可accept_verification（→ running + monitor）；replan、mark_done、dismiss |
 | execution_failed | monitor | resume（沿用确认计划 → ready + 新 dispatch 请求）、replan、mark_done、dismiss |
 | fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
 | auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
+| verification_environment_failure | live monitor 核心验证 | resume（环境修复后 → running + monitor；保留原 run/plan/worktree，不重新派发或消耗补救轮）、replan、mark_done、dismiss |
 | automation_stopped | register-review（项目已关闭） | resume（需先重新开启项目，同上）、replan、mark_done、dismiss |
 | review_blocked | review | resume（→ in_review + 新 review 请求）、replan、mark_done、dismiss |
 | review_backend_unsupported | claim(review) | resume（需 Review 后端已改为 Plus/Claude/Codex，→ in_review + review）、mark_done、dismiss |
@@ -467,7 +472,7 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 
 | failure_stage | failure_code |
 |---|---|
-| monitor | verification_unconfirmed |
+| monitor | verification_unconfirmed、verification_environment_failure |
 | plan | branch_exists、delivery_base_unknown |
 | review | fix_rounds_exhausted、auto_budget_exceeded、automation_stopped、review_backend_unsupported |
 | delivery | delivery_*、no_changes、branch_diverged、gh_unavailable、pr_closed |

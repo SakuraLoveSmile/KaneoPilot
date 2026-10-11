@@ -333,7 +333,7 @@ Plus 控制面连接与会话 MCP 挂接能力分别显示；attachment_supporte
 
 菜单栏显示运行中/已暂停、在途/待处理数和上次 intake，提供打开、暂停/恢复、立即检查、退出。关窗切 accessory，重开切 regular。任务详情增加自动处理信息（修复轮、段预算、未计价步数、跳过原因）和交付信息（分支、工作树路径、提交、PR 链接、合并状态）；看板显示「自动」「等待合并」「修复 n/m」。
 
-待处理原因、说明与动作按 protocol §5.27.13。verification_unconfirmed 显示「验证结果待确认」/「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。branch_exists/delivery_base_unknown 为「分支准备受阻」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，永久退出自动流程。其他失败原因与按钮遵照 §5.27.13，禁止 UI 绕过核心 allowed_actions。
+待处理原因、说明与动作按 automation-contract「待处理原因、处置与事件」与 protocol §5.27.4。verification_unconfirmed 显示「验证结果待确认」；可核验材料优先「重新运行验证检查」，仅legacy/shadow允许「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。branch_exists/delivery_base_unknown 为「分支准备受阻」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，暂停自动流程，可恢复自动处理。其他失败原因与按钮遵照核心 allowed_actions 和 automation-contract 处置表，禁止 UI 绕过核心 allowed_actions。
 
 
 旧任务兼容：任务详情缺少 automation 或 delivery 字段时，概览沿用现有 DetailSection / FieldRow 度量，分别显示「自动处理／状态：未开启」及「交付／状态：未开启」。不补写数据库字段，不触发迁移或自动化。

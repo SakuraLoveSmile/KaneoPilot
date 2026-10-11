@@ -1469,7 +1469,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - legacy 保持转录匹配；shadow 保持旧结果，同时记录核心 verdict 对比回执；live 完成点调用 engine-verdict，转录仅用于展示。回执绑定 task/run/plan，验证前后复校身份，禁止陈旧结果覆盖新轮次。
 - 核心读取冻结且哈希匹配的顶层 verify 围栏（1–5 条），沿用 parse_verify_block 的命令限制；cwd 为本轮已验证的任务工作树，环境继承并注入项目 verify_env，输出和回执脱敏。缺少可信声明或工作树不能确认时 fail closed，不能退回仓库根目录执行。
 - 每条命令上限 600 秒，整组含 PATH 探测总时限不超过 monitor 租约 80%，同时受 runner 剩余时限约束；命令之间续心跳，超时终止进程组，禁止遗留验证子进程。
-- 有效 diff 非空且全部通过 → delivery-commit、advance in-review、成本、report succeeded。环境失败 → 环境阶梯 waiting_env；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
+- 有效 diff 非空且全部通过 → delivery-commit、advance in-review、成本、report succeeded。环境失败 → needs_user，failure_code=verification_environment_failure，环境阶梯 waiting_env；修复 verify_env/PATH 后用户 resume 将原 run/plan/worktree 排回 monitor，不新增 dispatch、执行轮次或补救计数；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
 - live 派发提示允许执行端自检，由核心判通过；不改变发送已知/未知不重发守卫。
 
 #### 5.27.12 自动补救闭环（A2）
@@ -1490,3 +1490,12 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 get-project-mappings.items 增加 engine_mode（legacy缺省）、verify_env（字典）、fallback_model（{provider_id,model_id}|null），从映射条目层回读，不改变既有 automation 投影。get-task.task 与 list-tasks.tasks 各项增加 phase/condition（state-model §7；Review通过或PR存在为delivery/syncing）以及 attention（当前active需人工项，形状与attention-list同一项逐字段相等，否则null）。纯读取，无新schema或状态写入。
 
 engine-verdict 可选 request_id/run_id（monitor租约身份）、budget_seconds:int（正数）；resolve 可选 engine_fix:dict 为引擎事务内补救参数，必须核验 automation actor 与绑定失败回执，不允许借其绕过发送守卫。
+
+
+A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命令中的凭据；交付提交使用私有 Git index 与冻结源码/tree 对照，保留仓库 hooks。hook 或并发变化导致最终提交 tree 与通过验证的 tree 不同则阻塞，不登记交付、不进入Review、不发布；异常本地提交保留以便恢复，不自动reset工作树。shadow验证使用隔离快照，失败、异常和验证产物不得改变旧monitor判定或旧工作树。
+
+
+三态与手动规划兼容：engine-owned worker 携带进程默认mode/force与实例身份，核心在候选选择、定点领取及dispatch验证后的事务再次校验当前项目模式与活动引擎租约；自动请求仅可领live项目，旧CLI/App runner不套用此限制。唯一手动例外是用户通过start-plans明确授权的plan请求（requested_by=user、manual_authorized=true），可由引擎代原App拉起，领取后仍走核心单飞和原后端守卫；这不授权该项目后续自动派发，也不改变legacy/shadow设置。
+
+
+Live 手动处置边界：核心验证不读取人工verification_override，因此live不得提供无效的accept_verification入口；allowed_actions隐藏该动作，直接resolve同样在任何写入前明确拒绝。可重新运行验证检查、修复/重规划，或使用其他核心允许的处置；legacy/shadow保留原人工接受行为。此约束不改变发送恢复或手动重新执行。
