@@ -457,3 +457,10 @@ Goal 模式提交契约后的 completed 仅表示目标规划结束。仍 awaiti
  - 正文 13pt、区段标题 18pt semibold、辅助信息 11pt。
  - 间距 8/12/16pt；列表行高 ≥40pt。
  - 默认 1180×760，最小 900×600。
+
+
+### 4.16 引擎监督与设置分组（B1–B6）
+
+总览继承既有列表/详情外壳与系统原生控件；按“需要你 → 流水线计数 → 进行中任务 → 项目自动化 → 环境健康”排列。侧栏总览默认，任务看板为次级入口。phase/condition/attention 来自核心 JSON，缺失字段只显示未提供，不在 Swift 再推断自动化状态。菜单栏计数、通知和总览同源 attention-list；详情沿用五段导航，加 phase 步进与既有证据入口。
+
+设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。

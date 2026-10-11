@@ -1417,11 +1417,11 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
  - 写入 `project_mappings.items[project_id].fallback_model`（**映射条目层**，同 `engine_mode`/`verify_env` 的理由：`validate_automation` 的白名单会静默丢弃 `automation` 内的未知键）。
  - **缺省不配置 = 不换模型**。配置项只是「允许换」的前置条件，不是「一定换」——换不换由探针结果决定。
- - 触发条件：空 diff（`empty_diff`，阶梯 3 质量失败）进入同计划有界补救轮次时（≤2 轮，按 `plan_sha256` 记账）。
+ - 触发条件：空 diff（`empty_diff`，阶梯 3 质量失败）进入同计划有界补救轮次时（空 diff 同计划至多一次；任务总补救 ≤2 轮，跨 replan 累计）。
  - **探针先行**：模型必须存在于 Plus 本地 cache 目录（只读 `providers/list` + `providers/listModels {source:"cache"}`，复用 `pi_desktop_backend.probe_connection`，不返回 token/连接文件全文）。探针失败 → `validation_failed`（阶梯 2 环境类，block + attention），**不静默换模型**。
  - 探针通过 → 记事件 `model`（`detail.model="fallback"`、`model_source="custom"`、provider/model），并用该模型快照重跑：`model_source="custom"` + `provider_id`/`model_id`，**沿用主模型的 `connection_file`/`thinking_level`/`permission_mode`**（不新增第二套凭据）。未配置 → 记 `model`（`detail.model="primary"`）+ 事件 `model_hint`（「建议配置备用模型」，带推荐值）。
  - 快照经一次性覆盖 `extra.engine_model_override` 落盘，dispatch claim 冻结轮次快照时应用（`exec_config.snapshot_with_model_override`）：只在计划身份（`plan_sha256`/`plan_generated_at`）一致时应用，**不写回** `settings.exec_config`（设置变更仍只影响新轮次），新执行轮次开始后由引擎清除，不套用到无关轮次。
- - 重跑的**授权**仍走既有 resolve/replan 路径：`CLAIM_GUARDS["dispatch"] == {"ready"}` 加上「不得重发已发送 prompt」闸门，引擎不能自行重发（那需要伪造用户动作）。引擎负责决策、记录审计事件、武装快照。
+ - 重跑授权见 §5.27.12：引擎以 `actor=automation` 经 execution_retry 或 resolve/replan 开启新轮次，保留既有轮次不得重发闸门。
  - 主执行后端不是 `pi_desktop` 时 fallback 不适用：按主模型重试并记 `reason="unsupported_backend"`，不换模型。
  - 推荐缺省值（**仅建议值，绝不隐式套用**）：`{"provider_id": "707a4c67-4ee0-484d-b635-730372501eaf", "model_id": "google/gemini-3.7-flash"}`，理由见 `docs/evidence/spike-fallback-model-id-20261010.md`（同 provider 复用鉴权、跨厂商 flash 档、目录内确认存在）。
  - 非法形状（缺 `provider_id`/`model_id`、非字符串、空串）→ `bad_request`；省略 `fallback_model` 或传 null → 清除配置，回到「不换模型」。
@@ -1454,7 +1454,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  | 命令 | 事件 | 无人值守调用方 |
  |---|---|---|
  | `enqueue {task_id, kind?, actor?}` | `enqueued`（+ `confirm_plan` 时的 `resolved`） | 引擎 Reconciler 的每一次入队 |
- | `resolve {task_id, action, actor?}` | `resolved` | 当前只有用户动作面；参数为显式化预留 |
+ | `resolve {task_id, action, actor?}` | `resolved` | 引擎补救与用户动作；所有子事件继承显式 actor |
  | `recheck {task_id, offline?, actor?}` | `rechecked` | monitor stage 的无人值守复校 |
 
  - `enqueue` 的 `actor="automation"` 同时把 `requests.requested_by` 写为 `automation`
@@ -1462,3 +1462,24 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    不静默改变既有语义。
  - 其余 `requested_by` 取值不变：`scheduler`（legacy 自动推进）、`migration`、
    `user`（规划问答/评审决议等真正的用户动作）。
+
+
+#### 5.27.11 live monitor 核心判定（A1）
+
+- legacy 保持转录匹配；shadow 保持旧结果，同时记录核心 verdict 对比回执；live 完成点调用 engine-verdict，转录仅用于展示。回执绑定 task/run/plan，验证前后复校身份，禁止陈旧结果覆盖新轮次。
+- 核心读取冻结且哈希匹配的顶层 verify 围栏（1–5 条），沿用 parse_verify_block 的命令限制；cwd 为本轮已验证的任务工作树，环境继承并注入项目 verify_env，输出和回执脱敏。缺少可信声明或工作树不能确认时 fail closed，不能退回仓库根目录执行。
+- 每条命令上限 600 秒，整组含 PATH 探测总时限不超过 monitor 租约 80%，同时受 runner 剩余时限约束；命令之间续心跳，超时终止进程组，禁止遗留验证子进程。
+- 有效 diff 非空且全部通过 → delivery-commit、advance in-review、成本、report succeeded。环境失败 → 环境阶梯 waiting_env；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
+- live 派发提示允许执行端自检，由核心判通过；不改变发送已知/未知不重发守卫。
+
+#### 5.27.12 自动补救闭环（A2）
+
+- START_FIX_ROUND 必须真正执行新轮次，事件 actor=automation。空 diff 沿 execution_retry 同计划重跑一次（可用已配置且探针通过的备用模型）；verify 失败沿 resolve replan 同分支修复，失败输出尾部进入 planner 输入。
+- execution_retry 保留远端 In Progress、计划哈希、工作树身份与 expected_execution_run_id 守卫；只放行已绑定核心空 diff 回执的自动补救，绝不重发旧已发送轮次。
+- engine_fix_rounds 按任务跨 replan 累计至多 2；同一失败 execution_run_id 至多启动一次。领取/排队失败不可产生虚假成功回执；崩溃后可幂等继续。任务成本/时间上限继续生效；超限进入 attention。评审修复单独记账。
+- shadow 只计算决策、不下补救命令、不写补救计数；legacy 不接管。
+
+#### 5.27.13 评审与探针（A3）
+
+- 评审快照仍要求 detached HEAD 且 HEAD==冻结 head_sha；git status 中只有 git_delivery.is_build_artifact 命中的路径（包括 tracked 修改）可忽略。源文件、重命名源与目标中任一非产物变化仍阻塞。CLI 与 Plus 同守卫。
+- doctor --live 增加 Claude CLI 可用性探针；不调用付费模型，不输出凭据。后端与模型切换仅经核心配置命令，真实库切换需对应授权。
