@@ -222,8 +222,8 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
         in_saved = pid in saved_items
         in_remote = pid in remote_projects
 
+        entry = saved_items.get(pid) or {}
         if in_saved:
-            entry = saved_items[pid]
             pname = remote_projects.get(pid) or entry.get("project_name") or ""
             raw_repo = entry.get("repository")
             enabled = bool(entry.get("enabled", True))
@@ -255,6 +255,9 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
             "active_task_count": task_count,
             "active_request_count": req_count,
             "updated_at": updated_at,
+            "engine_mode": entry.get("engine_mode") or (entry.get("automation") or {}).get("engine_mode") or "legacy",
+            "verify_env": entry.get("verify_env") or {},
+            "fallback_model": entry.get("fallback_model"),
             "automation": automation_policy.policy_for(conn, pid) or dict(constants.AUTOMATION_DEFAULTS),
             "automation_preflight": automation_policy.automation_preflight(conn, pid),
         })

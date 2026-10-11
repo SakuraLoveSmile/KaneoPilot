@@ -471,6 +471,28 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         # v2 §5.20.1：purged 任务只读审计详情。
         "read_only": db.task_is_purged(task),
     }
+    # B5: desktop consumers decode these core-owned fields instead of rebuilding
+    # the automation state machine in Swift. The attention item uses precisely
+    # the same evidence/actions builder as attention-list.
+    from .engine import decide, attention
+    phase, condition = decide.phase_condition(task["status"]) or (None, None)
+    if task["status"] == "in_review" and (
+            db.task_extra(task).get("review_conclusion") == "pass"
+            or core.delivery_of(task).get("pr_number")
+            or core.delivery_of(task).get("pushed_sha")):
+        phase, condition = "delivery", "syncing"
+    view.update(phase=phase, condition=condition, attention=None)
+    if task["status"] == "needs_user" and db.task_is_active(task):
+        from .engine.commands import _task_evidence
+        source = dict(view, failure_code=task["failure_code"],
+                      failure_stage=task["failure_stage"],
+                      failure_reason=task["failure_reason"],
+                      blocked_summary=task["blocked_summary"],
+                      blocked_at=task["blocked_at"],
+                      allowed_actions=allowed_actions(conn, task, now),
+                      evidence=_task_evidence(conn, task["task_id"],
+                                              task["blocked_at"] or task["updated_at"]))
+        view["attention"] = attention.build_item(source, util.to_iso(now))
     if db.task_is_purged(task) and not view["blocked_reason"]:
         view["blocked_reason"] = "任务已永久从列表移除（只读审计）"
     return view
