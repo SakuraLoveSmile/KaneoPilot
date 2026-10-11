@@ -616,6 +616,24 @@ def _doctor_gh(timeout: float) -> dict:
     return _probe_check("gh", ok=True, detail=lines[0] if lines else "gh 可用")
 
 
+def _doctor_claude(timeout: float) -> dict:
+    """Claude CLI local availability only; --version never invokes a model."""
+    try:
+        result = subprocess.run([constants.claude_bin(), "--version"],
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _probe_check("claude", ok=False,
+                            detail=f"探测超时（{timeout:g}s）：claude --version 未在时限内返回",
+                            timed_out=True)
+    except OSError:
+        return _probe_check("claude", ok=False, detail="未找到 claude")
+    if result.returncode:
+        return _probe_check("claude", ok=False,
+                            detail=f"claude --version 退出 {result.returncode}")
+    lines = (result.stdout or "").strip().splitlines()
+    return _probe_check("claude", ok=True, detail=lines[0] if lines else "claude 可用")
+
+
 def _doctor_plus(ctx, timeout: float) -> dict:
     """Plus（PI-Desktop）控制面探测：连接文件校验 + MCP 握手；绝不输出 token。
 
@@ -829,6 +847,7 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     if online:
         checks.append(_doctor_kaneo_ping(timeout))
         checks.append(_doctor_gh(timeout))
+        checks.append(_doctor_claude(timeout))
         checks.append(_doctor_plus(ctx, timeout))
         # spike-fallback-model-id-20261010.md「失效与刷新」：核对配置的
         # fallback 模型仍在 Plus cache 目录；只在 online 有意义。

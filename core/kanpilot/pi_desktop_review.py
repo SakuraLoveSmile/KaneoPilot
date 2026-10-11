@@ -956,11 +956,18 @@ def _guard_branch_job(job, task):
                      "Review 冻结材料已变化", "review_blocked")
     root = job["review_root"]
     for args, expected in ((["rev-parse", "HEAD"], job["review_branch_snapshot"]["head_sha"]),
-                           (["rev-parse", "--abbrev-ref", "HEAD"], "HEAD"),
-                           (["status", "--porcelain", "--untracked-files=all"], "")):
+                           (["rev-parse", "--abbrev-ref", "HEAD"], "HEAD")):
         output, error = _git(["-C", root, *args])
         util.require(error is None and (output or "").strip() == expected,
                      "Review 提交快照已变化", "review_blocked")
+    try:
+        # Shared NUL-delimited parser includes both ends of renames/copies.
+        # Tracked artifacts are as disposable as newly generated artifacts.
+        changes = git_delivery.worktree_changes(root)
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("review_blocked", "Review 提交快照不可读取") from exc
+    util.require(all(git_delivery.is_build_artifact(change["path"]) for change in changes),
+                 "Review 提交快照已变化", "review_blocked")
 
 
 def _restore_legacy_pr_job(job, task):
