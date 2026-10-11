@@ -25,15 +25,18 @@ from ... import constants, process_owner
 _EXECUTOR_STAGES = ("dispatch", "monitor", "review", "delivery")
 
 
-def _child_env(db_path, instance_id):
+def _child_env(db_path, instance_id, mode="legacy", force=False):
     env = dict(os.environ)
-    env.setdefault("KANPILOT_DB", str(db_path))
+    env["KANPILOT_DB"] = str(db_path)
+    env["KANPILOT_ENGINE_WORKER"] = "1"
+    env["KANPILOT_ENGINE_MODE"] = mode
+    env["KANPILOT_ENGINE_FORCE"] = "1" if force else "0"
     if instance_id:
         env[process_owner.INSTANCE_ENV] = instance_id
     return env
 
 
-def spawn_stage(stage, db_path, *, instance_id=None, resume=False) -> subprocess.Popen:
+def spawn_stage(stage, db_path, *, instance_id=None, resume=False, mode="legacy", force=False) -> subprocess.Popen:
     """Launch ``executor_runner`` for a deterministic/Plus stage."""
     if stage not in _EXECUTOR_STAGES:
         raise ValueError(f"spawn_stage: unsupported stage {stage!r}")
@@ -41,20 +44,20 @@ def spawn_stage(stage, db_path, *, instance_id=None, resume=False) -> subprocess
     if resume:
         argv.append("--resume")
     return subprocess.Popen(
-        argv, cwd=str(constants.core_root()), env=_child_env(db_path, instance_id),
+        argv, cwd=str(constants.core_root()), env=_child_env(db_path, instance_id, mode, force),
         stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def spawn_planner(db_path, *, instance_id=None) -> subprocess.Popen:
+def spawn_planner(db_path, *, instance_id=None, mode="legacy", force=False) -> subprocess.Popen:
     """Launch ``planner_runner`` (planning stage)."""
     return subprocess.Popen(
         [sys.executable, "-m", "kanpilot.planner_runner"],
-        cwd=str(constants.core_root()), env=_child_env(db_path, instance_id),
+        cwd=str(constants.core_root()), env=_child_env(db_path, instance_id, mode, force),
         stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def spawn(stage, db_path, *, instance_id=None, resume=False) -> subprocess.Popen:
+def spawn(stage, db_path, *, instance_id=None, resume=False, mode="legacy", force=False) -> subprocess.Popen:
     """Dispatch to the right runner for a stage."""
     if stage == "plan":
-        return spawn_planner(db_path, instance_id=instance_id)
-    return spawn_stage(stage, db_path, instance_id=instance_id, resume=resume)
+        return spawn_planner(db_path, instance_id=instance_id, mode=mode, force=force)
+    return spawn_stage(stage, db_path, instance_id=instance_id, resume=resume, mode=mode, force=force)

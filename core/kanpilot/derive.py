@@ -559,7 +559,9 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             from . import core, cmd_queue
             code = task["failure_code"]
             if code == "verification_unconfirmed":
-                actions.append("accept_verification")
+                from . import engine_claim_scope
+                if engine_claim_scope.effective_mode(conn, task["project_id"]) != "live":
+                    actions.append("accept_verification")
                 from . import verification_recovery
                 if verification_recovery.candidate(conn, task):
                     actions.append("run_verification_checks")
@@ -879,6 +881,9 @@ _EVENT_KIND_CN = {
     "pr_merged": "PR 已合并", "pr_closed": "PR 已关闭", "cost_recorded": "运行成本登记",
     "requirements_accepted": "已接受远端需求", "automation_stopped": "自动处理已停止",
     "execution_retry_requested": "已确认沿用计划重新执行",
+    "engine_fix_started": "自动补救轮开始",
+    "model": "执行模型选择",
+    "model_hint": "执行模型配置建议",
     "lost_request_released": "失联观察请求已释放",
 
     "task_created": "任务创建",
@@ -897,7 +902,7 @@ _EVENT_KIND_CN = {
     "reported": "执行端汇报",
     "review_registered": "评审登记",
     "fix_task_created": "修复任务创建",
-    "resolved": "人工决议",
+    "resolved": "处置决议",
     "paused": "自动推进暂停",
     "unpaused": "自动推进恢复",
     "priority_changed": "优先级调整",
@@ -977,7 +982,8 @@ def _event_summary(kind: str, detail) -> str:
     if kind == "review_registered":
         return f"评审登记：{detail.get('conclusion')}"
     if kind == "resolved":
-        return f"人工决议：{detail.get('action')}"
+        prefix = "自动处置" if detail.get("actor") == "automation" else "人工决议"
+        return f"{prefix}：{detail.get('action')}"
     if kind == "requirements_changed":
         return "需求指纹变化，需重新规划"
     if kind == "fix_task_created":

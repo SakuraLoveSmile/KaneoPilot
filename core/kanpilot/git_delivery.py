@@ -37,10 +37,10 @@ def git_env() -> dict:
     return dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
 
 
-def _git(args, cwd, timeout):
+def _git(args, cwd, timeout, *, env=None, input=None):
     try:
         result = subprocess.run(["git", "-C", str(cwd), *args],
-                                capture_output=True, timeout=timeout, env=git_env())
+                                capture_output=True, timeout=timeout, env=env if env is not None else git_env(), input=input)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitDeliveryError("delivery_commit_failed", "Git 操作失败：" + str(exc)) from exc
     if result.returncode:
@@ -453,9 +453,24 @@ def deliverable_paths(changes) -> tuple:
     return deliverable, artifacts
 
 
-def _candidate_state(worktree, relative_path):
+def _budget_timeout(deadline, ceiling=10, heartbeat=None):
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitDeliveryError("verification_identity_unconfirmed", "整组验证时限已用尽")
+        if heartbeat is not None:
+            heartbeat()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GitDeliveryError("verification_identity_unconfirmed", "整组验证时限已用尽")
+        return min(ceiling, remaining)
+    return ceiling
+
+
+def _candidate_state(worktree, relative_path, *, deadline=None, heartbeat=None):
     """Read a candidate through directory descriptors, never following a link."""
     relative = Path(relative_path)
+    _budget_timeout(deadline, heartbeat=heartbeat)
     parts = relative.parts
     if relative.is_absolute() or not parts or any(x in (".", "..") for x in parts):
         raise GitDeliveryError("worktree_invalid", "工作树候选路径无效")
@@ -491,6 +506,7 @@ def _candidate_state(worktree, relative_path):
                 raise GitDeliveryError("worktree_invalid", "工作树文件类型在核验期间发生变化")
             digest = hashlib.sha256()
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                _budget_timeout(deadline, heartbeat=heartbeat)
                 digest.update(chunk)
             after = os.fstat(source.fileno())
         def identity(info):
@@ -541,6 +557,80 @@ def worktree_state_sha256(delivery, *, detached=False) -> str:
         raise GitDeliveryError("worktree_invalid", "工作树状态核验失败") from exc
 
 
+def source_state(worktree, *, deadline=None, heartbeat=None):
+    """Source bytes used by both core verification and delivery commit."""
+    names = _git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], worktree,
+                 _budget_timeout(deadline, heartbeat=heartbeat)).stdout.decode().split("\0")
+    records = []
+    for name in sorted(set(names) - {""}):
+        if name.startswith(".pi/") or is_build_artifact(name):
+            continue
+        state = _candidate_state(str(worktree), name, deadline=deadline, heartbeat=heartbeat)
+        if state["kind"] == "missing":
+            continue  # tracked deletions are absent from the staged tree too
+        if "mode" in state:
+            state["mode"] = "100755" if state["mode"] & 0o111 else "100644"
+        records.append({"path": name, **state})
+    return records
+
+
+def source_state_sha256(worktree, *, deadline=None, heartbeat=None):
+    return util.sha256_text(util.jdump(source_state(worktree, deadline=deadline, heartbeat=heartbeat)))
+
+
+def index_source_sha256(worktree, *, env=None):
+    records = []
+    raw = _git(["ls-files", "--stage", "-z"], worktree, 10, env=env).stdout
+    for entry in raw.split(b"\0"):
+        if not entry:
+            continue
+        meta, name = entry.split(b"\t", 1)
+        mode, sha, stage = meta.decode("ascii").split()
+        name = os.fsdecode(name)
+        if name.startswith(".pi/") or is_build_artifact(name):
+            continue
+        if stage != "0" or mode not in ("100644", "100755", "120000"):
+            raise GitDeliveryError("delivery_commit_failed", "索引包含无法绑定的文件类型")
+        records.append({"path": name, "mode": mode, "blob": sha})
+    return util.sha256_text(util.jdump(sorted(records, key=lambda x: x["path"])))
+
+
+def expected_index_source_sha256(worktree, *, deadline=None, heartbeat=None):
+    """Freeze Git's clean/EOL representation while also binding raw bytes."""
+    records = []
+    for source in source_state(worktree, deadline=deadline, heartbeat=heartbeat):
+        name = source["path"]
+        if source["kind"] == "symlink":
+            blob = _git(["hash-object", "--stdin"], worktree, _budget_timeout(deadline, heartbeat=heartbeat),
+                        input=os.fsencode(os.readlink(Path(worktree) / name))).stdout.decode().strip()
+            mode = "120000"
+        elif source["kind"] == "file":
+            blob = _git(["hash-object", "--path=" + name, "--", name], worktree,
+                        _budget_timeout(deadline, heartbeat=heartbeat)).stdout.decode().strip()
+            mode = source["mode"]
+        else:
+            raise GitDeliveryError("delivery_commit_failed", "源码包含无法绑定的文件类型")
+        records.append({"path": name, "mode": mode, "blob": blob})
+    return util.sha256_text(util.jdump(records))
+
+
+def tree_source_sha256(worktree, revision, *, deadline=None, heartbeat=None):
+    records = []
+    for entry in _git(["ls-tree", "-rz", revision], worktree,
+                      _budget_timeout(deadline, heartbeat=heartbeat)).stdout.split(b"\0"):
+        if not entry:
+            continue
+        meta, name = entry.split(b"\t", 1)
+        mode, kind, sha = meta.decode("ascii").split()
+        name = os.fsdecode(name)
+        if name.startswith(".pi/") or is_build_artifact(name):
+            continue
+        if kind != "blob":
+            raise GitDeliveryError("delivery_commit_failed", "交付树包含无法绑定的文件类型")
+        records.append({"path": name, "mode": mode, "blob": sha})
+    return util.sha256_text(util.jdump(sorted(records, key=lambda x: x["path"])))
+
+
 def _blocked_files(files):
     return [x["path"] for x in files
             if ((Path(x["path"]).name not in constants.DELIVERY_ALLOWED_NAMES
@@ -567,7 +657,8 @@ def _committed_files(path, sha):
     return [x["path"] for x in files]
 
 
-def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300) -> dict:
+def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300,
+                    verified_source_sha256=None, verified_index_sha256=None) -> dict:
     if delivery.get("workspace_version") == 1:
         _local_task_id(task_id)
     else:
@@ -581,9 +672,20 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         parents = _value(["show", "-s", "--format=%P", "HEAD"], path).split()
         trailers = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
         if parents == [expected] and trailers == [execution_run_id]:
+            if verified_source_sha256:
+                if (source_state_sha256(path) != verified_source_sha256
+                        or tree_source_sha256(path, head) != verified_index_sha256):
+                    raise GitDeliveryError("delivery_commit_failed", "未登记提交内容与核心验证回执不符，保留本地提交")
+                staged_tree = _value(["write-tree"], path)
+                if staged_tree != _value(["rev-parse", "HEAD^{tree}"], path):
+                    # A recovery never resets possibly unique staging. Normal
+                    # completion publishes the private index before DB phase 3.
+                    raise GitDeliveryError("delivery_commit_failed", "未登记提交存在待确认索引，保留本地提交与暂存改动")
             verify_branch_worktree(delivery, require_clean=True, expected_head=head)
             return {"sha": head, "files": _committed_files(path, head)}
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
+    if verified_source_sha256 and source_state_sha256(path) != verified_source_sha256:
+        raise GitDeliveryError("delivery_commit_failed", "源码已变化，不能提交未经核心验证的内容")
     changes = worktree_changes(path)
     if not changes:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
@@ -606,15 +708,63 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
     # .gitignore 忽略的路径」会让 git add 返回 1（即使暂存结果是对的）。改为
     # add -A 之后按产物 pathspec 撤销暂存：仓库有 .gitignore 时 add -A 本就不会
     # 暂存它们，reset 是无害空操作。
-    _git(["add", "-A"], path, 60)
-    _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60)
     clean_title = " ".join(str(title or "").split())[:72]
     message = (f"kaneo({task_id}): {clean_title}\n\nKaneo-Task: {task_id}\n"
                f"KaneoPilot-Run: {execution_run_id}\nFix-Round: {fix_round}\n")
     with tempfile.TemporaryDirectory(prefix="kanpilot-commit-") as temp:
         message_path = Path(temp) / "message.txt"
         message_path.write_text(message, encoding="utf-8")
-        _git(["commit", "-F", str(message_path)], path, timeout)
+        if verified_source_sha256:
+            # Each live commit gets an isolated index. Freeze the exact Git
+            # tree before hooks; retain a hook-modified local commit as failure
+            # evidence rather than registering/publishing unverified bytes.
+            env = dict(git_env(), GIT_INDEX_FILE=str(Path(temp) / "index"))
+            normal_index = Path(_value(["rev-parse", "--git-path", "index"], path))
+            if not normal_index.is_absolute():
+                normal_index = Path(path) / normal_index
+            before_index = normal_index.read_bytes() if normal_index.exists() else None
+            _git(["read-tree", expected], path, 60, env=env)
+            _git(["add", "-A"], path, 60, env=env)
+            _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60, env=env)
+            if (source_state_sha256(path) != verified_source_sha256
+                    or index_source_sha256(path, env=env) != verified_index_sha256):
+                raise GitDeliveryError("delivery_commit_failed", "验证源码与待提交索引不符，未提交")
+            tree = _git(["write-tree"], path, 60, env=env).stdout.decode().strip()
+            _git(["commit", "-F", str(message_path)], path, timeout, env=env)
+            if _value(["rev-parse", "HEAD^{tree}"], path) != tree:
+                raise GitDeliveryError("delivery_commit_failed", "提交钩子改变了已验证树；本地提交已保留但未登记或交付")
+            if source_state_sha256(path) != verified_source_sha256:
+                raise GitDeliveryError("delivery_commit_failed", "提交期间源码变化；本地提交已保留但未登记或交付")
+            # HEAD now contains exactly the verified sources. Updating the
+            # normal index avoids displaying the old HEAD as staged changes.
+            # Respect concurrent index edits. Publish the already verified
+            # private index under Git's own lock protocol, without resetting a
+            # user's newly staged contents.
+            lock = Path(str(normal_index) + ".lock")
+            descriptor, owned_lock = None, False
+            try:
+                descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                owned_lock = True
+                current_index = normal_index.read_bytes() if normal_index.exists() else None
+                if current_index != before_index:
+                    raise GitDeliveryError("delivery_commit_failed", "提交期间普通索引已变化，已保留本地提交与用户索引")
+                with os.fdopen(descriptor, "wb") as stream:
+                    descriptor = None
+                    stream.write(Path(env["GIT_INDEX_FILE"]).read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(lock, normal_index)
+            except OSError as exc:
+                raise GitDeliveryError("delivery_commit_failed", "普通索引无法安全更新，已保留本地提交：" + str(exc)) from exc
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                if owned_lock and lock.exists():
+                    lock.unlink()
+        else:
+            _git(["add", "-A"], path, 60)
+            _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60)
+            _git(["commit", "-F", str(message_path)], path, timeout)
     head = _value(["rev-parse", "HEAD"], path)
     verify_branch_worktree(delivery, require_clean=True, expected_head=head)
     return {"sha": head, "files": _committed_files(path, head)}

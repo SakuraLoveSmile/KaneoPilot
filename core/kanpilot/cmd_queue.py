@@ -308,6 +308,7 @@ def _retry_target(conn, task) -> tuple[str, str]:
 
 
 _AUTO_RESUME_TARGETS = {
+    "verification_environment_failure": ("running", "monitor"),
     "delivery_blocked_files": ("running", "monitor"), "delivery_commit_failed": ("running", "monitor"),
     "branch_exists": ("needs_plan", None), "delivery_base_unknown": ("needs_plan", None),
     "review_blocked": ("in_review", "review"), "review_backend_unsupported": ("in_review", "review"),
@@ -320,12 +321,13 @@ def _resolution_snapshot(task):
     return tuple(task[key] for key in ("status", "stage", "run_id", "failure_code", "failure_stage", "project_id", "repository", "plan_path", "plan_sha256", "plan_generated_at", "source_path", "source_sha256", "requirements_sha256", "session_id", "sent", "send_state", "lock_retained", "extra_json"))
 
 
-def execution_retry_candidate(conn, task):
+def execution_retry_candidate(conn, task, *, engine_empty=False):
     """Cheap UI gate; current terminal and external identities are checked on resolve."""
     from . import round_store
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     return bool(db.task_is_active(task) and task["status"] == "needs_user"
-                and task["stage"] == "monitor" and task["failure_code"] == "execution_failed"
+                and task["stage"] == "monitor" and (task["failure_code"] == "execution_failed"
+                     or (engine_empty and task["failure_code"] == "verification_unconfirmed"))
                 and task["failure_stage"] in ("monitor", "running")
                 and task["sent"] == 1 and task["send_state"] == "sent"
                 and task["plan_path"] and task["plan_sha256"]
@@ -389,10 +391,11 @@ def verify_execution_retry_terminal(conn, task, now=None):
 
 def _prepare_execution_retry(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
+    engine_empty = _engine_empty_retry(task, payload)
     if (payload["action"] == "resume" and payload.get("expected_execution_run_id")
-            and task["failure_code"] != "execution_failed"):
+            and task["failure_code"] != "execution_failed" and not engine_empty):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
-    if payload["action"] != "resume" or task["failure_code"] != "execution_failed":
+    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty):
         return None
     from pathlib import Path
     from . import bridge, git_delivery, headless_adapter, remote
@@ -401,7 +404,7 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("conflict", "重新执行必须确认当前失败轮次")
     if expected != task["run_id"]:
         raise util.KanpilotError("stale_run", "所选会话已不是当前失败轮次，请刷新后重试")
-    if not execution_retry_candidate(ctx.conn, task):
+    if not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty):
         raise util.KanpilotError("conflict", "当前任务不能沿用计划重新执行，请先确认旧轮次和发送状态")
     snapshot = _resolution_snapshot(task)
     source = headless_adapter.resolve_source(ctx.conn)
@@ -443,6 +446,98 @@ def _prepare_execution_retry(ctx, payload):
     return {"snapshot": snapshot, "round_snapshot": dict(row), "source_signature": signature,
             "source": source, "worktree": delivery, "detached": not bool(branch_delivery),
             "worktree_sha256": worktree_sha}
+
+
+def _engine_empty_retry(task, payload):
+    fix = payload.get("engine_fix") or {}
+    receipt = db.task_extra(task).get("engine_verdict") or {}
+    return (payload.get("actor") == "automation" and fix.get("reason") == "empty_diff"
+            and receipt.get("kind") == "empty_diff" and receipt.get("empty_diff") is True
+            and receipt.get("execution_run_id") == task["run_id"]
+            and receipt.get("plan_sha256") == task["plan_sha256"] and bool(receipt.get("binding")))
+
+
+def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
+    """Only a bound core quality verdict can authorize a new automation round."""
+    from . import automation_policy, engine_claim_scope, exec_config, project_config
+    from .engine import fallback, ladder, verdict
+    fix = payload.get("engine_fix")
+    if not isinstance(fix, dict) or payload.get("actor") != "automation":
+        raise util.bad_request("引擎补救必须由 automation 发起")
+    task = db.require_task(ctx.conn, payload["task_id"])
+    rounds = db.task_extra(task).get("engine_fix_rounds") or []
+    prior = next((row for row in rounds if row.get("execution_run_id") == fix.get("execution_run_id")), None)
+    if prior:
+        return {"deduplicated": True, "prior": prior}
+    _, _, items, _ = project_config.load_raw_mappings(ctx.conn)
+    entry = items.get(task["project_id"]) or {}
+    mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
+    receipt = db.task_extra(task).get("engine_verdict") or {}
+    policy = automation_policy.policy_for(ctx.conn, task["project_id"]) or {}
+    if (mode != "live" or not core.is_automation_managed(task) or not policy.get("enabled")
+            or db.get_setting(ctx.conn, "paused_global", False)
+            or task["status"] != "needs_user" or task["stage"] != "monitor"
+            or task["failure_code"] != "verification_unconfirmed"
+            or task["send_state"] != "sent" or task["sent"] != 1
+            or not db.task_is_active(task)
+            or fix.get("execution_run_id") != task["run_id"]
+            or payload.get("expected_execution_run_id") != task["run_id"]
+            or fix.get("plan_sha256") != task["plan_sha256"]
+            or receipt.get("execution_run_id") != task["run_id"]
+            or receipt.get("plan_sha256") != task["plan_sha256"]
+            or receipt.get("verification_ok") or receipt.get("environment_failure")
+            or receipt.get("kind") not in ("empty_diff", "verify_failed")
+            or fix.get("reason") != receipt.get("kind") or not receipt.get("binding")
+            or ctx.conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                (task["task_id"],)).fetchone()):
+        raise util.KanpilotError("conflict", "自动补救的任务、失败轮次或核心回执已变化")
+    if check_binding and verdict.binding(ctx.conn, task) != receipt["binding"]:
+        raise util.KanpilotError("verification_identity_unconfirmed", "失败回执的计划或工作树已变化")
+    reason = fix["reason"]
+    block = None
+    if not core.automation_budget(task, policy, util.now_dt())["ok"]:
+        block = "auto_budget_exceeded"
+    elif len(rounds) >= min(ladder.MAX_FIX_ROUNDS, policy.get("max_fix_rounds", 2)):
+        block = "fix_rounds_exhausted"
+    elif reason == "empty_diff" and any(row.get("reason") == "empty_diff"
+         and row.get("plan_sha256") == task["plan_sha256"] for row in rounds):
+        block = "fix_rounds_exhausted"
+    configured = fallback.configured_model(entry) if reason == "empty_diff" else None
+    config_fingerprint = util.jdump({"mapping": entry, "exec_config": exec_config.load(ctx.conn)})
+    if prepared is not None:
+        if prepared["config_fingerprint"] != config_fingerprint:
+            raise util.KanpilotError("conflict", "补救模型或项目配置在探针后已变化")
+        plan = prepared["plan"]
+    elif reason == "empty_diff" and not block:
+        primary, primary_error = fallback.primary_snapshot(ctx.conn) if configured else (None, None)
+        plan = fallback.plan_retry(configured, primary=primary,
+                                   connection_file=(primary or {}).get("connection_file"))
+        if primary_error:
+            plan = {"model": "primary", "snapshot": None, "validation_failed": True,
+                    "probe_detail": primary_error, "events": []}
+    else:
+        plan = {"model": "primary", "snapshot": None, "validation_failed": False, "events": []}
+    if plan.get("validation_failed"):
+        block = block or "validation_failed"
+    if block is None and payload["action"] != ("resume" if reason == "empty_diff" else "replan"):
+        raise util.bad_request("自动补救动作与核心判定不符")
+    return {"snapshot": _resolution_snapshot(task), "block": block, "plan": plan,
+            "config_fingerprint": config_fingerprint}
+
+
+def _record_engine_fix(conn, task, now, fix, plan):
+    from .engine import fallback
+    rows = db.task_extra(task).get("engine_fix_rounds") or []
+    rows.append({"execution_run_id": fix["execution_run_id"], "plan_sha256": fix["plan_sha256"],
+                 "reason": fix["reason"], "model": plan.get("model", "primary"), "at": now})
+    entries = {"engine_fix_rounds": rows}
+    if plan.get("snapshot") is not None:
+        entries[fallback.MODEL_OVERRIDE_KEY] = fallback.override_payload(plan["snapshot"], task)
+    db.set_extra(conn, task, now, **entries)
+    for event in plan.get("events") or []:
+        db.add_event(conn, now, event["kind"], task_id=task["task_id"], actor="automation",
+                     detail=event["detail"])
+    db.add_event(conn, now, "engine_fix_started", task_id=task["task_id"], actor="automation", detail=rows[-1])
 
 
 def _accept_remote_for_resolution(ctx, payload):
@@ -505,10 +600,37 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     if action == "reverify":
         from . import verification_recovery
         return verification_recovery.recover(ctx, payload)
+    engine_fix = _engine_fix_guard(ctx, payload) if payload.get("engine_fix") else None
+    if engine_fix and engine_fix.get("deduplicated"):
+        return {"ok": True, "deduplicated": True, "task_status": db.require_task(conn, payload["task_id"])["status"], "request": None}
+    if engine_fix and engine_fix.get("block"):
+        with db.write_txn(conn):
+            guarded = _engine_fix_guard(ctx, payload, check_binding=False, prepared=engine_fix)
+            task = db.require_task(conn, payload["task_id"])
+            if _resolution_snapshot(task) != engine_fix["snapshot"]:
+                raise util.KanpilotError("conflict", "自动补救处置状态已变化")
+            code = guarded["block"]
+            if not code:
+                raise util.KanpilotError("conflict", "自动补救上限或探针结果已变化")
+            for event in engine_fix["plan"].get("events") or []:
+                db.add_event(conn, now, event["kind"], task_id=task["task_id"], actor=actor, detail=event["detail"])
+            core.block_task(conn, task, now, engine_fix["plan"].get("probe_detail") or code, code,
+                            actor, stage="monitor")
+        return {"ok": True, "task_status": "needs_user", "request": None}
     execution_retry = _prepare_execution_retry(ctx, payload)
     accepted_remote = _accept_remote_for_resolution(ctx, payload)
+    if engine_fix:
+        if accepted_remote and (accepted_remote["requirements_sha256"] != db.require_task(conn, payload["task_id"])["requirements_sha256"]
+                                or accepted_remote["kaneo_status"] != constants.IN_PROGRESS_SLUG):
+            raise util.KanpilotError("remote_conflict", "自动补救要求原需求未变且 Kaneo 仍为 In Progress")
+        _engine_fix_guard(ctx, payload, prepared=engine_fix)  # external worktree/plan recheck after I/O
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        if engine_fix:
+            guarded = _engine_fix_guard(ctx, payload, check_binding=False, prepared=engine_fix)
+            if (guarded.get("deduplicated") or guarded.get("block")
+                    or _resolution_snapshot(task) != engine_fix["snapshot"]):
+                raise util.KanpilotError("conflict", "自动补救处置状态已变化")
         # §5.20.1（v2）：purged 终态拒绝一切写入口。
         if db.task_is_purged(task):
             raise util.KanpilotError(
@@ -528,7 +650,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             from . import git_delivery, round_store
             old_round = round_store.get_round(conn, task["task_id"], task["run_id"])
             if (execution_retry["snapshot"] != _resolution_snapshot(task)
-                    or not execution_retry_candidate(conn, task)
+                    or not execution_retry_candidate(conn, task, engine_empty=_engine_empty_retry(task, payload))
                     or old_round is None or dict(old_round) != execution_retry["round_snapshot"]
                     or execution_retry["source"].source_signature(task["task_id"], task["run_id"])
                     != execution_retry["source_signature"]):
@@ -554,9 +676,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 if old_round is None or dict(old_round) != accepted_remote["round_snapshot"]:
                     raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
             db.update_task(conn, task["task_id"], now, requirements_sha256=accepted_remote["requirements_sha256"], kaneo_status=accepted_remote["kaneo_status"], kaneo_checked_at=now)
-            db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor="user")
+            db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor=actor)
             task = db.require_task(conn, task["task_id"])
-        resolution = {"action": action, "note": note, "at": now, "actor": "user"}
+        resolution = {"action": action, "note": note, "at": now, "actor": actor}
         new_request = None
 
         if action in ("resume", "accept_verification"):
@@ -565,11 +687,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             code = task["failure_code"]
             from . import automation_policy, review_config
             if action == "accept_verification":
+                from . import engine_claim_scope
+                if engine_claim_scope.effective_mode(conn, task["project_id"]) == "live":
+                    raise util.KanpilotError("conflict", "Live 项目由核心执行验证，请重新运行验证检查或修复计划；不能人工跳过验证")
                 if code != "verification_unconfirmed" or not task["run_id"]:
                     raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
                 db.set_extra(conn, task, now, verification_override={"execution_run_id": task["run_id"], "actor": "user", "at": now, "note": note})
                 target, kind = "running", "monitor"
-            elif code == "execution_failed" and execution_retry:
+            elif execution_retry:
                 target, kind = "ready", "dispatch"
                 extra = db.task_extra(task)
                 extra["execution_retry"] = {
@@ -582,7 +707,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 }
                 extra.pop("verification_override", None)
                 db.update_task(conn, task["task_id"], now, extra_json=extra)
-                db.add_event(conn, now, "execution_retry_requested", task_id=task["task_id"], actor="user",
+                db.add_event(conn, now, "execution_retry_requested", task_id=task["task_id"], actor=actor,
                              detail={"source_run_id": task["run_id"], "plan_sha256": task["plan_sha256"],
                                      "previous": {key: task[key] for key in
                                                   ("session_marker", "session_id", "session_title", "sent_at", "ui_evidence", "send_evidence")}})
@@ -611,7 +736,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             task = db.require_task(conn, task["task_id"])
             if core.is_automation_managed(task):
                 a = core.automation_of(task)
-                core.update_automation(conn, task, now, segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0), **({"plan_wanted": True, "plan_attempts": 0} if target == "needs_plan" else {}))
+                core.update_automation(conn, task, now, **({"segment_started_at": now, "segment_cost_base_usd": a.get("cost_usd", 0)} if actor == "user" else {}), **({"plan_wanted": True, "plan_attempts": 0} if target == "needs_plan" else {}))
             task = db.require_task(conn, task["task_id"])
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
@@ -624,11 +749,11 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                               transition_verified_at=None, last_progress=None)
             if kind == "review":
                 task = clear_review_result_inline(conn, task, now)
-            core.transition_task(conn, task, target, now, "user", detail={"via": "resolve " + action}, **fields)
+            core.transition_task(conn, task, target, now, actor, detail={"via": "resolve " + action}, **fields)
             if kind == "delivery":
                 core.update_delivery(conn, task, now, next_sync_at=now)
             if kind:
-                new_request, _ = _new_cycle_request(conn, now, task, kind)
+                new_request, _ = _new_cycle_request(conn, now, task, kind, requested_by=actor)
 
         elif action == "retry":
             from . import plan_answers
@@ -717,13 +842,13 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
             core.transition_task(
-                conn, task, "needs_plan", now, "user",
+                conn, task, "needs_plan", now, actor,
                 detail={"via": "resolve replan"}, **fields,
             )
             if core.is_automation_managed(task):
                 a = core.automation_of(task)
                 core.update_automation(conn, task, now, plan_wanted=True, plan_attempts=0,
-                                       segment_started_at=now, segment_cost_base_usd=a.get("cost_usd", 0),
+                                       **({"segment_started_at": now, "segment_cost_base_usd": a.get("cost_usd", 0)} if actor == "user" else {}),
                                        replan_requested_at=now,
                                        replan_remote_status=(accepted_remote or {}).get("kaneo_status"),
                                        replan_worktree_sha256=None)
@@ -812,6 +937,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 detail={"via": "resolve dismiss"}, **fields,
             )
 
+        if engine_fix:
+            _record_engine_fix(conn, db.require_task(conn, task["task_id"]), now,
+                               payload["engine_fix"], engine_fix["plan"])
         db.add_event(
             conn, now, "resolved", task_id=task["task_id"], actor=actor,
             detail=resolution,

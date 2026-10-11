@@ -9,7 +9,7 @@ from typing import Optional
 
 from . import (
     cmd_read, constants, core, db, derive, dispatch_validate, exec_config,
-    planfile, remote, round_store, runtime_operations, util,
+    planfile, remote, round_store, runtime_operations, util, engine_claim_scope,
 )
 
 
@@ -71,7 +71,7 @@ def _select_candidate(
         # 定点领取跳过 not_before：冷却期只约束自动取单（protocol §4.2-4）。
         # status 判定交给调用方：'claimed' → claimed:false（并发失败），
         # 其他非 queued → conflict。
-        return row
+        return row if engine_claim_scope.allows(conn, row, now) else None
     # §5.15.3：自动取单排除归档/回收站与恢复后暂停任务的请求；
     # plan-scan 等无任务请求（task_id IS NULL）不受影响。
     rows = conn.execute(
@@ -86,6 +86,8 @@ def _select_candidate(
         (stage, util.to_iso(now), authorized_task_id, authorized_task_id),
     ).fetchall()
     for row in rows:
+        if not engine_claim_scope.allows(conn, row, now):
+            continue
         if not _backend_matches(conn, row, desktop):
             continue
         # v2 §5.22.2：未授权（payload 无 manual_authorized）的 plan 请求
@@ -457,6 +459,8 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
                 return cached
         request = db.get_request(conn, request_id)
         task = db.require_task(conn, task_id)
+        if not engine_claim_scope.allows(conn, request, util.now_dt()):
+            return {"claimed": False, "reason": "engine_project_scope"}
         # §4.2-4：并发竞争失败（校验期间被他方领取）→ already_claimed；
         # 其他非 queued 状态（failed/succeeded/cancelled）→ conflict。
         if request["status"] == "claimed":
@@ -561,10 +565,10 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
         if cmd_dispatch._manual_branch_delivery(task):
             delivery = core.delivery_of(task)
             context["worktree_path"] = delivery["worktree_path"]
-            context["instruction"] = cmd_dispatch._execution_instruction(dict(task, session_marker=session_marker), delivery["worktree_path"], desktop=(backend == "pi_desktop"))
+            context["instruction"] = cmd_dispatch._execution_instruction(dict(task, session_marker=session_marker), delivery["worktree_path"], desktop=(backend == "pi_desktop"), conn=conn)
         elif core.is_pr_delivery(task):
             delivery = core.delivery_of(task)
-            context["instruction"] = constants.DISPATCH_INSTRUCTION_BRANCH.format(marker=session_marker, worktree=delivery["worktree_path"], branch=delivery["branch"], plan_ref="下面已核验的计划正文" if backend == "pi_desktop" else "计划文件 " + checked["plan_path"])
+            context["instruction"] = cmd_dispatch.branch_instruction(conn, task).format(marker=session_marker, worktree=delivery["worktree_path"], branch=delivery["branch"], plan_ref="下面已核验的计划正文" if backend == "pi_desktop" else "计划文件 " + checked["plan_path"])
         res = {
             "claimed": True, "request_id": request_id,
             "run_id": run_id, "context": context,

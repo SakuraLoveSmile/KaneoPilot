@@ -468,7 +468,14 @@ DISPATCH_INSTRUCTION_BRANCH = (
     "提交与推送由调度台完成。每条 verify 命令分别使用一次终端工具调用，直接记录独立退出码；"
     "需要 PATH 时只设置 PATH 后运行这一条检查，不将多项检查、echo 或打印退出码合并。最终答复逐条列出命令与退出码。"
 )
+DISPATCH_INSTRUCTION_BRANCH_LIVE = (
+    "任务标识：{marker}。当前目录 {worktree} 是本任务专用分支 {branch} 的工作树，直接在这里完整执行{plan_ref}。"
+    "可以按计划使用 subagent，但所有改动必须落在本工作树；不要新建 worktree 或分支，不要 commit、push、reset、stash、rebase 或切换分支；"
+    "提交与推送由调度台完成。按计划自检并报告结果；调度台核心会在本工作树独立运行冻结计划中的 verify 命令，"
+    "以核心退出码和有效改动判定通过。最终答复列出完成项与剩余问题。"
+)
 AUTOMATION_FAILURE_STAGES = {
+    "verification_environment_failure": "monitor",
     "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",

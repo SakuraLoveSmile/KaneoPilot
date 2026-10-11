@@ -505,7 +505,7 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
         "worktree_mode": worktree_mode,
         "repository": task["repository"],
         "plan_path": task["plan_path"],
-        "instruction": _execution_instruction(task, worktree_path, desktop=False),
+        "instruction": _execution_instruction(task, worktree_path, desktop=False, conn=conn),
         "runs_dir": str(run_dir),
         "pi_home": str(constants.pi_home()),
         "agent_md": _agent_md_path(conn, config_snapshot),
@@ -693,7 +693,7 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
             "plan_path": task["plan_path"],
             "plan_sha256": task["plan_sha256"],
             # 任务标识 + 计划哈希 提示头（§5.23.3）；计划正文由 worker 注入。
-            "instruction": _execution_instruction(task, worktree_path, desktop=True),
+            "instruction": _execution_instruction(task, worktree_path, desktop=True, conn=ctx.conn),
             # T6（§5.23.10）：展示快照——旧 spec 缺这两字段仍按旧语义读取/
             # 续接（worker 只在两字段齐备时才在 pi_session_create 携带）。
             "workspace_display_name": workspace_display_name,
@@ -1045,7 +1045,15 @@ def _manual_branch_delivery(task):
             and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
 
 
-def _execution_instruction(task, worktree_path, *, desktop):
+def branch_instruction(conn, task):
+    from . import engine_claim_scope
+    if conn is not None:
+        if engine_claim_scope.effective_mode(conn, task["project_id"]) == "live":
+            return constants.DISPATCH_INSTRUCTION_BRANCH_LIVE
+    return constants.DISPATCH_INSTRUCTION_BRANCH
+
+
+def _execution_instruction(task, worktree_path, *, desktop, conn=None):
     if core.execution_retry_of(task):
         plan_ref = "下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}"
         return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
@@ -1060,7 +1068,7 @@ def _execution_instruction(task, worktree_path, *, desktop):
                 "按计划使用 subagent，完成验证并报告结果。不要自行提交；"
                 "验证通过后由核心在 Review 前创建本地提交，不推送或合并。")
     if core.is_pr_delivery(task):
-        return constants.DISPATCH_INSTRUCTION_BRANCH.format(
+        return branch_instruction(conn, task).format(
             marker=task["session_marker"], worktree=str(worktree_path),
             branch=core.delivery_of(task)["branch"],
             plan_ref="下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}")

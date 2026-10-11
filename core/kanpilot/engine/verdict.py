@@ -43,10 +43,15 @@ Spec gap resolved: ``verify_env`` now read from project mapping
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import tempfile
+import time
+import shutil
+from pathlib import Path
 from typing import Dict, List, Optional
 
-from .. import db, git_delivery, project_config, round_store, util
+from .. import core, db, git_delivery, project_config, round_store, util, verify_evidence
 
 # .pi/** is engine/plan bookkeeping; it never counts as task work.
 PI_EXCLUDE_PREFIX = ".pi/"
@@ -76,7 +81,7 @@ def verify_timeout() -> int:
         value = int(raw) if raw else DEFAULT_VERIFY_TIMEOUT
     except ValueError:
         value = DEFAULT_VERIFY_TIMEOUT
-    return value if value > 0 else DEFAULT_VERIFY_TIMEOUT
+    return min(value, DEFAULT_VERIFY_TIMEOUT) if value > 0 else DEFAULT_VERIFY_TIMEOUT
 
 
 def project_verify_env(conn, project_id) -> Dict[str, str]:
@@ -88,32 +93,35 @@ def project_verify_env(conn, project_id) -> Dict[str, str]:
     return {str(k): str(v) for k, v in env.items()}
 
 
-def effective_changes(worktree, *, exclude_prefix: str = PI_EXCLUDE_PREFIX) -> List[str]:
+def effective_changes(worktree, *, exclude_prefix: str = PI_EXCLUDE_PREFIX, deadline=None, heartbeat=None) -> List[str]:
     """Changed files in the worktree, excluding the ``.pi/**`` bookkeeping tree.
 
     An empty list means the execution produced no countable task work.
     """
     prefix = exclude_prefix if exclude_prefix.endswith("/") else exclude_prefix + "/"
-    changes = git_delivery.worktree_changes(str(worktree))
+    git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+    changes = git_delivery._parse_worktree_status(git_delivery._git(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree,
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)).stdout)
     return [c.get("path") or "" for c in changes
-            if not (c.get("path") or "").startswith(prefix)]
+            if any(not p.startswith(prefix) and not git_delivery.is_build_artifact(p)
+                   for p in (c.get("path") or "", c.get("original_path") or c.get("path") or ""))]
 
 
 def has_effective_changes(worktree, **kw) -> bool:
     return bool(effective_changes(worktree, **kw))
 
 
-def login_shell_path() -> Optional[str]:
+def login_shell_path(*, timeout=60, cwd=None) -> Optional[str]:
     """PATH as seen by the login shell (probed once; A4 spike ③).
 
     Returns ``None`` when the login shell cannot be probed; callers then keep
     the inherited PATH. Never hardcodes ``/usr/bin:/bin``.
     """
     try:
-        proc = subprocess.run(verify_shell() + ['printf %s "$PATH"'],
-                              capture_output=True, timeout=60)
-        if proc.returncode == 0:
-            return proc.stdout.decode("utf-8", errors="replace").strip() or None
+        result = run_command('printf %s "$PATH"', cwd=cwd, timeout=timeout)
+        if result["exit_code"] == 0:
+            return result["output_tail"].strip() or None
     except (OSError, subprocess.SubprocessError):
         pass
     return None
@@ -139,54 +147,80 @@ def run_command(command: str, *, cwd, env: Optional[Dict[str, str]] = None,
     ``env`` is merged onto the inherited environment. ``command_not_found``
     flags rc=127 / "command not found" (environment failure, ladder 2).
     """
-    timeout = timeout or verify_timeout()
+    timeout = min(timeout if timeout is not None else verify_timeout(), DEFAULT_VERIFY_TIMEOUT)
     child = dict(os.environ)
     if env:
         child.update({str(k): str(v) for k, v in env.items()})
     shell = verify_shell()
     started = util.now_iso()
-    timed_out, code, tail, detail = False, None, "", None
+    timed_out, code, tail, detail, launch_failed = False, None, "", None, False
+    secrets = [v for k, v in child.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "AUTHORIZATION"))]
     try:
-        proc = subprocess.run(shell + [command], cwd=str(cwd), env=child,
-                              capture_output=True, timeout=timeout)
-        code = proc.returncode
-        tail = _decode(proc.stdout) + _decode(proc.stderr)
-    except subprocess.TimeoutExpired as exc:
-        timed_out, detail = True, "验证命令超时，未认定通过"
-        tail = _decode(exc.stdout) + _decode(exc.stderr)
+        # File-backed capture bounds memory and kills the entire process group,
+        # including a shell's background grandchildren, on every exit path.
+        with tempfile.TemporaryFile() as output:
+            proc = subprocess.Popen(shell + [command], cwd=str(cwd) if cwd else None, env=child,
+                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = proc.wait(timeout=max(0.001, timeout))
+            except subprocess.TimeoutExpired:
+                timed_out, detail = True, "验证命令超时，未认定通过"
+            finally:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - _OUTPUT_TAIL_BYTES - max((len(s.encode()) for s in secrets), default=0)))
+            tail = _decode(output.read())
     except OSError as exc:
+        launch_failed = True
         detail = "验证命令无法启动：" + str(exc)
-    return {"command": command, "exit_code": code, "timed_out": timed_out,
-            "command_not_found": _command_not_found(code, tail),
-            "detail": detail, "started_at": started, "finished_at": util.now_iso(),
-            "output_tail": tail[-_OUTPUT_TAIL_BYTES:]}
+    return {"command": util.redact(command, secrets), "exit_code": code, "timed_out": timed_out,
+            "command_not_found": launch_failed or _command_not_found(code, tail),
+            "detail": util.redact(detail, secrets), "started_at": started, "finished_at": util.now_iso(),
+            "output_tail": util.redact(tail, secrets)[-_OUTPUT_TAIL_BYTES:]}
 
 
-def run_verify_commands(commands, *, cwd, verify_env=None, timeout=None) -> List[dict]:
+def run_verify_commands(commands, *, cwd, verify_env=None, timeout=None,
+                        deadline=None, heartbeat=None) -> List[dict]:
     """Run all verify commands; probe+inject the login-shell PATH when verify_env
     does not set PATH (A4 spike ③)."""
     env = dict(verify_env or {})
     if "PATH" not in env:
-        probed = login_shell_path()
+        remaining = deadline - time.monotonic() if deadline else 60
+        probed = login_shell_path(timeout=min(60, max(0.001, remaining)), cwd=cwd)
         if probed:
             env["PATH"] = probed
-    return [run_command(c, cwd=cwd, env=env, timeout=timeout) for c in (commands or [])]
+    checks = []
+    for command in commands or []:
+        if heartbeat:
+            heartbeat()
+        remaining = deadline - time.monotonic() if deadline else DEFAULT_VERIFY_TIMEOUT
+        if remaining <= 0:
+            checks.append({"command": util.redact(command), "exit_code": None, "timed_out": True,
+                           "command_not_found": False, "detail": "整组验证时限已用尽", "output_tail": ""})
+            break
+        checks.append(run_command(command, cwd=cwd, env=env,
+                                  timeout=min(timeout or verify_timeout(), remaining)))
+    return checks
 
 
 def evaluate(commands, worktree, *, verify_env=None, timeout=None,
-             exclude_prefix: str = PI_EXCLUDE_PREFIX) -> dict:
+             exclude_prefix: str = PI_EXCLUDE_PREFIX, deadline=None, heartbeat=None) -> dict:
     """Core verdict: non-empty effective diff AND every verify command exits 0.
 
     ``environment_failure`` (any rc=127 / command-not-found) is a ladder-2
     environment problem, distinct from a ladder-3 quality verify failure.
     """
     commands = list(commands or [])
-    changes = effective_changes(worktree, exclude_prefix=exclude_prefix)
+    changes = effective_changes(worktree, exclude_prefix=exclude_prefix, deadline=deadline, heartbeat=heartbeat)
     empty_diff = not changes
     checks: List[dict] = []
     if not empty_diff:
         checks = run_verify_commands(commands, cwd=worktree, verify_env=verify_env,
-                                     timeout=timeout)
+                                     timeout=timeout, deadline=deadline, heartbeat=heartbeat)
     env_failure = any(c.get("command_not_found") for c in checks)
     if empty_diff:
         passed, detail = False, "执行完成后没有可计入的改动（.pi/** 已排除），判定空转"
@@ -203,19 +237,146 @@ def evaluate(commands, worktree, *, verify_env=None, timeout=None,
                   else "验证未全部通过，请查看各条独立退出码与输出")
     return {"verification_ok": passed, "empty_diff": empty_diff,
             "environment_failure": env_failure, "effective_changes": changes,
+            "kind": "passed" if passed else ("empty_diff" if empty_diff else
+                    "environment_failure" if env_failure else "verify_failed" if commands else "unconfirmed"),
             "checks": checks, "detail": detail}
 
 
-def _task_verify_commands(task) -> List[str]:
-    extra = db.task_extra(task)
-    return list((extra.get("plan_verify") or {}).get("commands") or [])
+def binding(conn, task, *, allow_core_commit=False, deadline=None, heartbeat=None) -> dict:
+    """Require the frozen declaration and the registered isolated task tree."""
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        def value(args, directory):
+            return git_delivery._git(args, directory, git_delivery._budget_timeout(deadline, heartbeat=heartbeat)).stdout.decode().strip()
+        def common(directory):
+            target = Path(value(["rev-parse", "--git-common-dir"], directory))
+            return (target if target.is_absolute() else directory / target).resolve()
+        path = Path(task["plan_path"])
+        raw = path.read_bytes()
+        parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+        declaration = db.task_extra(task).get("plan_verify") or {}
+        if (util.sha256_bytes(raw) != task["plan_sha256"] or not parsed["ok"]
+                or declaration.get("plan_sha256") != task["plan_sha256"]
+                or declaration.get("commands") != parsed["commands"]):
+            raise ValueError("计划内容或 verify 声明不符")
+        row = round_store.get_round(conn, task["task_id"], task["run_id"])
+        if row is None or not row["worktree_path"] or row["save_state"] != "active":
+            raise ValueError("缺少登记执行工作树")
+        worktree = Path(row["worktree_path"])
+        repo = Path(task["repository"])
+        if (worktree.is_symlink() or worktree.resolve() == repo.resolve()
+                or common(worktree) != common(repo)
+                or Path(value(["rev-parse", "--show-toplevel"], worktree)).resolve() != worktree.resolve()):
+            raise ValueError("执行工作树归属不可确认")
+        delivery = core.delivery_of(task)
+        head = value(["rev-parse", "HEAD"], worktree)
+        branch = value(["rev-parse", "--abbrev-ref", "HEAD"], worktree)
+        if core.requires_branch_review(task):
+            if row["worktree_path"] != delivery.get("worktree_path"):
+                raise ValueError("执行工作树与任务不符")
+            registered = delivery.get("head_sha")
+            if allow_core_commit and head != registered:
+                parents = value(["show", "-s", "--format=%P", "HEAD"], worktree).split()
+                trailers = value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], worktree).splitlines()
+                if parents != [registered] or trailers != [task["run_id"]]:
+                    raise ValueError("未登记提交不是本轮核心提交")
+            if branch != delivery.get("branch") or (not allow_core_commit and head != registered):
+                raise ValueError("任务分支或登记 HEAD 不符")
+        elif branch != "HEAD":
+            raise ValueError("执行工作树未分离 HEAD")
+        # Capture all source bytes, not just status: verification may generate
+        # pyc/cache files, but must not silently edit the source being judged.
+        return {"task_id": task["task_id"], "execution_run_id": task["run_id"],
+                "plan_sha256": task["plan_sha256"], "commands_sha256": util.sha256_text(util.jdump(parsed["commands"])),
+                "worktree_path": str(worktree), "head_sha": head, "branch": branch,
+                "source_sha256": git_delivery.source_state_sha256(worktree, deadline=deadline, heartbeat=heartbeat)}
+    except (OSError, ValueError, TypeError, KeyError, git_delivery.GitDeliveryError) as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", "计划或执行工作树不可确认：" + util.redact(str(exc))) from exc
 
 
-def evaluate_task(conn, task, *, verify_env=None, timeout=None) -> dict:
+def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, heartbeat=None, isolated=False) -> dict:
     """Verdict for a task: commands from ``plan_verify``, cwd = execution worktree."""
-    commands = _task_verify_commands(task)
-    row = round_store.get_round(conn, task["task_id"], task["run_id"])
-    worktree = (row["worktree_path"] if row and row["worktree_path"] else task["repository"])
+    frozen = binding(conn, task, deadline=deadline, heartbeat=heartbeat)
     if verify_env is None:
         verify_env = project_verify_env(conn, task["project_id"])
-    return evaluate(commands, worktree, verify_env=verify_env, timeout=timeout)
+    raw = Path(task["plan_path"]).read_bytes()
+    parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+    if (util.sha256_bytes(raw) != frozen["plan_sha256"] or not parsed.get("ok")
+            or util.sha256_text(util.jdump(parsed["commands"])) != frozen["commands_sha256"]):
+        raise util.KanpilotError("verification_identity_unconfirmed", "验证前冻结计划已变化，未执行命令")
+    commands = parsed["commands"]
+    if isolated:
+        # A shadow comparison must never run commands in the legacy task tree.
+        # Copy ignored dependencies too; reject symlinks because an absolute
+        # link could send a verifier's writes back into the original workspace.
+        with tempfile.TemporaryDirectory(prefix="kanpilot-shadow-verify-") as temporary:
+            root = Path(frozen["worktree_path"])
+            for directory, dirs, files in os.walk(root, followlinks=False):
+                git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+                dirs[:] = [d for d in dirs if d != ".git"]
+                if any((Path(directory) / name).is_symlink() for name in dirs + files if name != ".git"):
+                    raise util.KanpilotError("verification_identity_unconfirmed", "shadow 工作树含符号链接，不能安全复制验证")
+            copied = Path(temporary) / "worktree"
+            git_delivery._git(["clone", "--no-hardlinks", "--no-checkout", str(root), str(copied)], root,
+                             git_delivery._budget_timeout(deadline, 30, heartbeat))
+            git_delivery._git(["checkout", "--detach", frozen["head_sha"]], copied,
+                             git_delivery._budget_timeout(deadline, heartbeat=heartbeat))
+            for child in copied.iterdir():
+                git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+                if child.name != ".git":
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            def copy_file(source, destination):
+                with open(source, "rb") as original, open(destination, "wb") as duplicate:
+                    while True:
+                        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise util.KanpilotError("verification_identity_unconfirmed", "shadow 副本准备时限已用尽")
+                        chunk = original.read(1 << 20)
+                        if not chunk:
+                            break
+                        duplicate.write(chunk)
+                shutil.copystat(source, destination)
+                return destination
+            shutil.copytree(root, copied, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"), copy_function=copy_file)
+            checks = run_verify_commands(commands, cwd=copied, verify_env=verify_env, timeout=timeout,
+                                        deadline=deadline, heartbeat=heartbeat)
+            if git_delivery.source_state_sha256(copied, deadline=deadline, heartbeat=heartbeat) != frozen["source_sha256"]:
+                raise util.KanpilotError("verification_identity_unconfirmed", "shadow 验证改动了副本源文件，不能判定通过")
+            changes = effective_changes(root, deadline=deadline, heartbeat=heartbeat)
+            env_failure = any(check.get("command_not_found") for check in checks)
+            passed = bool(changes) and len(checks) == len(commands) and all(
+                check.get("exit_code") == 0 and not check.get("timed_out") for check in checks)
+            result = {"verification_ok": passed, "empty_diff": not changes,
+                "environment_failure": env_failure, "effective_changes": changes, "checks": checks,
+                "kind": "passed" if passed else "empty_diff" if not changes else "environment_failure" if env_failure else "verify_failed",
+                "detail": "shadow 副本验证通过" if passed else "shadow 副本验证未通过"}
+    else:
+        result = evaluate(commands, frozen["worktree_path"], verify_env=verify_env, timeout=timeout,
+                          deadline=deadline, heartbeat=heartbeat)
+    if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
+        raise util.KanpilotError("verification_identity_unconfirmed", "验证期间计划、轮次或源文件已变化")
+    result["binding"] = frozen
+    if result["verification_ok"] and not isolated:
+        result["index_source_sha256"] = git_delivery.expected_index_source_sha256(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+        if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
+            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码已变化")
+    return result
+
+
+def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
+    """A core commit changes HEAD/status, but not the verified source bytes."""
+    if (receipt.get("verification_ok") is not True
+            or receipt.get("execution_run_id") != task["run_id"]
+            or receipt.get("plan_sha256") != task["plan_sha256"]):
+        return False
+    frozen = receipt.get("binding") or {}
+    actual = binding(conn, task, allow_core_commit=True, deadline=deadline, heartbeat=heartbeat)
+    delivery = core.delivery_of(task)
+    return (dict(actual, head_sha=frozen.get("head_sha")) == frozen
+            and (actual["head_sha"] != frozen.get("head_sha")
+                 or any(row.get("execution_run_id") == task["run_id"] and row.get("sha") == actual["head_sha"]
+                        for row in delivery.get("commits") or []))
+            and git_delivery.tree_source_sha256(actual["worktree_path"], actual["head_sha"], deadline=deadline, heartbeat=heartbeat) == receipt.get("index_source_sha256"))

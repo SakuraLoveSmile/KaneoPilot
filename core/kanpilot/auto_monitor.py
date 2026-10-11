@@ -104,6 +104,38 @@ def _record_cost(controller, task, detail):
 
 
 def _complete(controller, task, detail, expected, messages):
+    mode = _engine_mode(controller, task)
+    if mode in ("live", "shadow"):
+        lease = controller.claim["context"].get("lease_seconds", 180)
+        budget = int(min(lease * 0.8, controller.deadline - controller.clock()))
+        if mode == "shadow":
+            budget = min(budget, 30, int((controller.deadline - controller.clock()) / 2))
+        if budget <= 0 and mode == "live":
+            raise util.KanpilotError("observation_blocked", "核心验证剩余时限不足")
+        if budget <= 0:
+            controller.log("shadow-verdict", "budget_exhausted")
+            result = {"verification_ok": False}
+        else:
+            controller.heartbeat(force=True)
+            try:
+                result = controller.call("engine-verdict", dict(controller.identity(),
+                    task_id=task["task_id"], expected_execution_run_id=task["run_id"],
+                    expected_plan_sha256=task["plan_sha256"], budget_seconds=budget,
+                    operation_id="monitor-verdict:" + controller.claim["request_id"]))
+            except util.KanpilotError as exc:
+                if mode == "live" or exc.code in ("stale_run", "not_found"):
+                    raise
+                controller.log("shadow-verdict", exc.code)
+                result = {"verification_ok": False}
+        if mode == "live":
+            if result.get("verification_ok") is not True:
+                code = ("verification_identity_unconfirmed" if result.get("kind") == "unconfirmed" else
+                        "verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed")
+                controller.report("needs_user", failure_code=code,
+                                  note=result.get("detail") or "核心验证结果未通过")
+                return
+            _finish_complete(controller, task, detail, expected)
+            return
     verification = _verification(task, messages)
     checks = (task.get("extra") or {}).get("verification_checks") or {}
     if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
@@ -114,6 +146,17 @@ def _complete(controller, task, detail, expected, messages):
     if not verification["ok"]:
         controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"])
         return
+    _finish_complete(controller, task, detail, expected)
+
+
+def _engine_mode(controller, task):
+    mappings = controller.call("get-project-mappings", {})
+    entry = next((item for item in mappings.get("items", [])
+                  if item.get("project_id") == task.get("project_id")), {})
+    return entry.get("effective_engine_mode") or entry.get("engine_mode", "legacy")
+
+
+def _finish_complete(controller, task, detail, expected):
     if core.requires_branch_review(task):
         commit = _commit(controller, task)
         if commit.get("outcome") == "blocked":
@@ -186,7 +229,8 @@ def _monitor(controller):
         if failure:
             controller.report("needs_user", failure_code="execution_failed", note=terminal_detail or "执行轮次明确失败")
             return
-        messages = _read_messages(controller, task)
+        # live verdict is independent of transcript availability and tool exits.
+        messages = [] if _engine_mode(controller, task) == "live" else _read_messages(controller, task)
         if outcome == "completed" and detail.get("run_status") == "finished":
             if type(detail.get("exit_code")) is not int or detail["exit_code"] != 0:
                 controller.report("needs_user", failure_code="execution_failed", note="执行退出码不可确认")
@@ -195,7 +239,7 @@ def _monitor(controller):
         else:
             _running(controller)
     except util.KanpilotError as exc:
-        if exc.code == "execution_failed":
+        if exc.code in ("execution_failed", "verification_identity_unconfirmed"):
             controller.report("needs_user", failure_code=exc.code, note=exc.message)
         else:
             controller.report("failed", note=exc.code if exc.code in ("remote_conflict", "remote_unavailable") else "observation_blocked")
