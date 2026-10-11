@@ -1,0 +1,88 @@
+{
+  "db": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kanpilot-a4-engine-9qrtq5qf/engine.db",
+  "config": {
+    "mode": "legacy",
+    "intake": false,
+    "spawn": false
+  },
+  "first": {
+    "instance_id": "383128dc-9ab3-4d88-8628-8245bc9a26f2",
+    "lease_expires_at": "2026-10-11T16:42:42.915195+00:00",
+    "pid": 73430,
+    "stage": null,
+    "started_at": "2026-10-11T16:40:42.912511+00:00",
+    "started_microseconds": 810050,
+    "started_seconds": 1791736842,
+    "state": "active",
+    "workers": []
+  },
+  "killed_status": {
+    "instances": [
+      {
+        "active": false,
+        "holder_alive": false,
+        "instance_id": "383128dc-9ab3-4d88-8628-8245bc9a26f2",
+        "lease_expires_at": "2026-10-11T16:42:42.915195+00:00",
+        "owned_workers": [],
+        "pid": 73430,
+        "stage": null,
+        "started_at": "2026-10-11T16:40:42.912511+00:00",
+        "state": "active"
+      }
+    ]
+  },
+  "takeover_seconds": 0.11484824999934062,
+  "after_takeover": {
+    "383128dc-9ab3-4d88-8628-8245bc9a26f2": {
+      "instance_id": "383128dc-9ab3-4d88-8628-8245bc9a26f2",
+      "lease_expires_at": "2026-10-11T16:42:42.915195+00:00",
+      "pid": 73430,
+      "stage": null,
+      "started_at": "2026-10-11T16:40:42.912511+00:00",
+      "started_microseconds": 810050,
+      "started_seconds": 1791736842,
+      "state": "stopped",
+      "stopped_at": "2026-10-11T16:40:43.170775+00:00",
+      "stopped_reason": "holder_dead",
+      "workers": []
+    },
+    "64366ab7-0b38-42bd-a635-9422a05575ef": {
+      "instance_id": "64366ab7-0b38-42bd-a635-9422a05575ef",
+      "lease_expires_at": "2026-10-11T16:40:46.174182+00:00",
+      "pid": 73432,
+      "stage": null,
+      "started_at": "2026-10-11T16:40:43.170775+00:00",
+      "started_microseconds": 67477,
+      "started_seconds": 1791736843,
+      "state": "active",
+      "workers": []
+    }
+  },
+  "second_exit_code": 0,
+  "final_status": {
+    "instances": [
+      {
+        "active": false,
+        "holder_alive": false,
+        "instance_id": "383128dc-9ab3-4d88-8628-8245bc9a26f2",
+        "lease_expires_at": "2026-10-11T16:42:42.915195+00:00",
+        "owned_workers": [],
+        "pid": 73430,
+        "stage": null,
+        "started_at": "2026-10-11T16:40:42.912511+00:00",
+        "state": "stopped"
+      },
+      {
+        "active": false,
+        "holder_alive": false,
+        "instance_id": "64366ab7-0b38-42bd-a635-9422a05575ef",
+        "lease_expires_at": "2026-10-11T16:40:46.174182+00:00",
+        "owned_workers": [],
+        "pid": 73432,
+        "stage": null,
+        "started_at": "2026-10-11T16:40:43.170775+00:00",
+        "state": "stopped"
+      }
+    ]
+  }
+}
