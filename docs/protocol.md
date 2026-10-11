@@ -1483,3 +1483,10 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 - 评审快照仍要求 detached HEAD 且 HEAD==冻结 head_sha；git status 中只有 git_delivery.is_build_artifact 命中的路径（包括 tracked 修改）可忽略。源文件、重命名源与目标中任一非产物变化仍阻塞。CLI 与 Plus 同守卫。
 - doctor --live 增加 Claude CLI 可用性探针；不调用付费模型，不输出凭据。后端与模型切换仅经核心配置命令，真实库切换需对应授权。
+
+
+#### 5.27.14 原生读侧共享字段（B4/B5）
+
+get-project-mappings.items 增加 engine_mode（legacy缺省）、verify_env（字典）、fallback_model（{provider_id,model_id}|null），从映射条目层回读，不改变既有 automation 投影。get-task.task 与 list-tasks.tasks 各项增加 phase/condition（state-model §7；Review通过或PR存在为delivery/syncing）以及 attention（当前active需人工项，形状与attention-list同一项逐字段相等，否则null）。纯读取，无新schema或状态写入。
+
+engine-verdict 可选 request_id/run_id（monitor租约身份）、budget_seconds:int（正数）；resolve 可选 engine_fix:dict 为引擎事务内补救参数，必须核验 automation actor 与绑定失败回执，不允许借其绕过发送守卫。
