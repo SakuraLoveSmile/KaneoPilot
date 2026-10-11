@@ -80,6 +80,65 @@ def test_completion_and_execution_identity(monkeypatch, tmp_path):
     assert records[-1]["exit_code"] == 0
 
 
+@pytest.mark.parametrize("result,code", [
+    ({"verification_ok": True}, None),
+    ({"verification_ok": False, "empty_diff": True}, "verification_unconfirmed"),
+    ({"verification_ok": False, "checks": [{"exit_code": 1}]}, "verification_unconfirmed"),
+    ({"verification_ok": False, "checks": [{"timed_out": True}]}, "verification_unconfirmed"),
+    ({"verification_ok": False, "environment_failure": True}, "verification_environment_failure"),
+])
+def test_live_core_verdict_ignores_transcript(monkeypatch, tmp_path, result, code):
+    value = task()
+    value["project_id"] = "live-project"
+    value["extra"]["delivery"] = {"mode": "pr"}
+    result = dict(result, detail="core verdict")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[], responses={
+        "get-project-mappings": {"items": [{"project_id": "live-project", "engine_mode": "live"}]},
+        "engine-verdict": result,
+        "session-messages": util.KanpilotError("observation_blocked", "transcript unavailable"),
+    })
+    assert not any(c == "session-messages" for c, _ in calls)
+    verdict_call = next(p for c, p in calls if c == "engine-verdict")
+    assert verdict_call["expected_execution_run_id"] == "execution"
+    assert verdict_call["expected_plan_sha256"] == "plan"
+    assert verdict_call["budget_seconds"] <= 180 * 0.8
+    if code:
+        assert report(calls)["failure_code"] == code
+        assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+    else:
+        assert report(calls)["outcome"] == "succeeded"
+        assert any(c == "delivery-commit" for c, _ in calls)
+
+
+def test_live_untrusted_binding_enters_attention(monkeypatch, tmp_path):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "live"}]},
+        "engine-verdict": util.KanpilotError("verification_identity_unconfirmed", "计划已变化"),
+    })
+    assert report(calls)["failure_code"] == "verification_identity_unconfirmed"
+    assert not any(c == "advance-task" for c, _ in calls)
+
+
+def test_shadow_retains_legacy_outcome(monkeypatch, tmp_path):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[message(code=7)], responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "shadow"}]},
+        "engine-verdict": {"verification_ok": True},
+    })
+    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert any(c == "engine-verdict" for c, _ in calls)
+
+
+def test_shadow_comparison_error_keeps_passing_legacy_result(monkeypatch, tmp_path):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "shadow"}]},
+        "engine-verdict": util.KanpilotError("verification_identity_unconfirmed", "副本验证失败"),
+    })
+    assert report(calls)["outcome"] == "succeeded"
+
+
 def test_running_and_superseded_terminal(monkeypatch, tmp_path):
     value = dict(detail(), run_status="running", terminal=None, exit_code=None,
                  terminal_superseded={"outcome": "failed"})

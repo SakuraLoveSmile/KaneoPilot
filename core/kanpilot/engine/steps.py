@@ -39,6 +39,13 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
     task_id = task.get("task_id")
     plan_sha = task.get("plan_sha256")
 
+    if action in (decide.START_FIX_ROUND, decide.BLOCK) and decision.params.get("engine_fix"):
+        fix = decision.params["engine_fix"]
+        return [CommandCall("resolve", {"task_id": task_id, "actor": "automation",
+            "action": "resume" if fix["reason"] == "empty_diff" or fix.get("block") else "replan",
+            "expected_execution_run_id": fix["execution_run_id"], "engine_fix": fix,
+            "note": "核心判定后的有界自动补救"})]
+
     if action == decide.CONFIRM_PLAN:
         return [CommandCall(
             "enqueue",
@@ -94,10 +101,5 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
                              "retry_base": decision.params.get("attempt_no")},
                             kind=kind)]
     # AWAIT / BLOCK / NOOP / ENQUEUE_PLAN / ADVANCE_INTAKE / ADVANCE_DISPATCH /
-    # RESUME_OBSERVE: no direct scheduling command here (worker-owned,
-    # user-owned, or delegated to intake/planner). START_FIX_ROUND is decided
-    # and recorded by ``loop._quality_retry`` (model choice + one-shot override);
-    # the re-execution itself is authorized by the existing resolve/replan path,
-    # so there is no enqueue here — an engine-driven re-send would need a
-    # ``ready`` task plus an unsent prompt (``CLAIM_GUARDS`` / dispatch guard).
+    # RESUME_OBSERVE: worker-owned or delegated to intake/planner.
     return []

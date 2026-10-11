@@ -181,6 +181,10 @@ def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_
     if not job.get("plan_sha256") or job["plan_sha256"] != task["plan_sha256"]:
         raise util.KanpilotError("conflict", "执行计划哈希与当前计划不符，不能进入评审")
     extra = db.task_extra(task)
+    if verified_receipt and verified_receipt.get("engine_owned"):
+        if extra.get("engine_verdict") != verified_receipt["receipt"]:
+            raise util.KanpilotError("conflict", "本轮核心判定回执已变化")
+        return
     if (extra.get("verification_override") or {}).get("execution_run_id") == task["run_id"]:
         return
     declaration = extra.get("plan_verify") or {}
@@ -396,7 +400,23 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         # terminal logs. Git/process/file reads must precede the writer lock.
         current = db.require_task(conn, payload["task_id"])
         checks = db.task_extra(current).get("verification_checks") or {}
-        if current["run_id"] and (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
+        from . import engine_claim_scope, git_delivery
+        if engine_claim_scope.effective_mode(conn, current["project_id"]) == "live":
+            from .engine import verdict
+            receipt = db.task_extra(current).get("engine_verdict") or {}
+            frozen = receipt.get("binding") or {}
+            actual = verdict.binding(conn, current)
+            if (receipt.get("verification_ok") is not True
+                    or receipt.get("execution_run_id") != current["run_id"]
+                    or receipt.get("plan_sha256") != current["plan_sha256"]
+                    or dict(actual, head_sha=frozen.get("head_sha")) != frozen
+                    or not receipt.get("index_source_sha256")
+                    or git_delivery.tree_source_sha256(actual["worktree_path"], actual["head_sha"]) != receipt["index_source_sha256"]):
+                raise util.KanpilotError("conflict", "本轮核心判定或已提交树未通过核验，不能进入评审")
+            verified_receipt = {"engine_owned": True, "receipt": receipt}
+            receipt_snapshot = receipt_identity(current)
+            _require_goal_gate(ctx, payload, current, verified_receipt)
+        elif current["run_id"] and (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
             from . import verification_checks
             receipt_snapshot = receipt_identity(current)
             verified_receipt = verification_checks.valid_receipt(conn, current)
@@ -421,7 +441,10 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             # 硬闸只读且绝不触碰远端；失败一律 conflict（不写本地、不改远端）。
             if verified_receipt is not None:
                 _require_command_monitor_claim(ctx, payload, task)
-                if verified_receipt.get("matched") != (db.task_extra(task).get("plan_verify") or {}).get("commands"):
+                if verified_receipt.get("engine_owned"):
+                    if db.task_extra(task).get("engine_verdict") != verified_receipt["receipt"]:
+                        raise util.KanpilotError("conflict", "核验后的核心判定已变化")
+                elif verified_receipt.get("matched") != (db.task_extra(task).get("plan_verify") or {}).get("commands"):
                     raise util.KanpilotError("conflict", "核验后的 verify 声明已变化")
             else:
                 _require_goal_gate(ctx, payload, task)

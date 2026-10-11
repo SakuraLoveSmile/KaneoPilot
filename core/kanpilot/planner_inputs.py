@@ -511,6 +511,20 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         report_copy.write_bytes(fix_report)
         register(report_copy, "review_report", "text/markdown")
 
+    # Core verification failures become immutable planner material on replan.
+    verdict = (db.task_extra(local_task).get("engine_verdict") or {}) if local_task is not None else {}
+    if replan_sha is not None and verdict.get("kind") == "verify_failed":
+        failed = [{"command": check.get("command"), "exit_code": check.get("exit_code"),
+                   "timed_out": check.get("timed_out"), "output_tail": util.redact(check.get("output_tail", ""))}
+                  for check in verdict.get("checks", [])
+                  if check.get("exit_code") != 0 or check.get("timed_out")]
+        material = {"execution_run_id": verdict.get("execution_run_id"),
+                    "plan_sha256": verdict.get("plan_sha256"), "detail": util.redact(verdict.get("detail")),
+                    "failed_checks": failed}
+        failure_copy = files_dir / "core-verification-failure.json"
+        failure_copy.write_text(json.dumps(material, ensure_ascii=False), encoding="utf-8")
+        register(failure_copy, "core_verification", "application/json")
+
     if remediation:
         for name, entry in remediation["files"].items():
             content, _sha = review_resolution._read(Path(entry["path"]), entry["sha256"])

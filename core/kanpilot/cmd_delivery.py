@@ -42,13 +42,29 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         if existing:
             result = {"sha": existing["sha"], "files": []}
         else:
+            from . import engine_claim_scope
+            from .engine import verdict
+            live = engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
+            verified = {}
+            if live:
+                receipt = db.task_extra(task).get("engine_verdict") or {}
+                frozen = receipt.get("binding") or {}
+                actual = verdict.binding(conn, task, allow_core_commit=True)
+                if (receipt.get("verification_ok") is not True
+                        or receipt.get("execution_run_id") != execution_run_id
+                        or receipt.get("plan_sha256") != task["plan_sha256"]
+                        or not receipt.get("index_source_sha256")
+                        or dict(actual, head_sha=frozen.get("head_sha")) != frozen):
+                    raise git_delivery.GitDeliveryError("delivery_commit_failed", "缺少与当前源码绑定的核心验证回执，未提交")
+                verified = {"verified_source_sha256": receipt["binding"]["source_sha256"],
+                            "verified_index_sha256": receipt["index_source_sha256"]}
             result = git_delivery.commit_worktree(
                 git_input, task_id=payload["task_id"], title=title,
-                execution_run_id=execution_run_id, fix_round=fix_round)
+                execution_run_id=execution_run_id, fix_round=fix_round, **verified)
         git_delivery.verify_branch_worktree(
             git_input, require_clean=True, expected_head=result["sha"])
-    except git_delivery.GitDeliveryError as exc:
-        failure = exc
+    except (git_delivery.GitDeliveryError, util.KanpilotError) as exc:
+        failure = exc if isinstance(exc, git_delivery.GitDeliveryError) else git_delivery.GitDeliveryError("delivery_commit_failed", exc.message)
 
     # Phase 3: reject any concurrent lifecycle/delivery metadata change.
     with db.write_txn(conn):

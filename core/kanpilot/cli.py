@@ -163,7 +163,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "note": (False, "str"),
             "expected_execution_run_id": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
-            # A14：同上；resolve 目前只有用户动作面，缺省 user。
+            # A14/A2：用户动作与引擎补救，缺省 user。
+            "engine_fix": (False, "dict"),
             "actor": (False, "str"),
         },
         cmd_queue.cmd_resolve,
@@ -556,7 +557,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     # v6 引擎 verdict（A10）：核心亲判——有效 diff（排除 .pi/**）+ login-shell verify。
     "engine-verdict": (
         {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
-         "expected_plan_sha256": (True, "str"), "operation_id": (False, "str")},
+         "expected_plan_sha256": (True, "str"), "operation_id": (False, "str"),
+         "request_id": (False, "str"), "run_id": (False, "str"),
+         "budget_seconds": (False, "int")},
         _automation_command("engine.commands", "cmd_engine_verdict"),
     ),
     # v6 引擎 session-view（§5.27.5）：只读会话状态总览；status_only 不读消息。

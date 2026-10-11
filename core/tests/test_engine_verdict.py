@@ -10,10 +10,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import db, util  # noqa: E402
+from kanpilot import db, util, round_store  # noqa: E402
 from kanpilot.engine import verdict  # noqa: E402
 
 
@@ -53,6 +55,11 @@ class TestVerdictPure(unittest.TestCase):
     def test_effective_changes_empty(self):
         self.assertEqual(verdict.effective_changes(str(self._repo())), [])
 
+    def test_build_artifacts_are_not_effective_changes(self):
+        repo = self._repo()
+        (repo / "module.pyc").write_bytes(b"cache")
+        self.assertEqual(verdict.effective_changes(repo), [])
+
     def test_run_command_exit_codes(self):
         repo = self._repo()
         self.assertEqual(verdict.run_command("exit 0", cwd=str(repo))["exit_code"], 0)
@@ -69,6 +76,17 @@ class TestVerdictPure(unittest.TestCase):
         repo = self._repo()
         result = verdict.run_command("sleep 5", cwd=str(repo), timeout=1)
         self.assertTrue(result["timed_out"])
+
+    def test_timeout_kills_background_process_group_and_redacts_output(self):
+        repo = self._repo()
+        result = verdict.run_command("sleep 30 & echo $! > child.pyc; printf %s \"$KP_SECRET_TOKEN\"; wait",
+                                     cwd=repo, timeout=0.1, env={"KP_SECRET_TOKEN": "private-secret-value"})
+        self.assertTrue(result["timed_out"])
+        self.assertNotIn("private-secret-value", result["output_tail"])
+        pid = int((repo / "child.pyc").read_text())
+        # A killed child can briefly remain a zombie; it must never run.
+        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True).stdout.decode()
+        self.assertTrue(not status.strip() or status.strip().startswith("Z"), status)
 
     def test_verify_shell_default_and_override(self):
         # Default: $SHELL -l -c (A4 spike ③), fallback /bin/zsh; override = whole binary.
@@ -98,6 +116,14 @@ class TestVerdictPure(unittest.TestCase):
         self.assertTrue(missing["command_not_found"])          # rc=127 -> env failure
         self.assertFalse(verdict.run_command("exit 0", cwd=str(repo))["command_not_found"])
         self.assertFalse(verdict.run_command("exit 3", cwd=str(repo))["command_not_found"])
+
+    def test_group_deadline_bounds_all_commands(self):
+        repo = self._repo()
+        started = time.monotonic()
+        checks = verdict.run_verify_commands(["sleep 0.1", "sleep 3", "sleep 3"], cwd=repo,
+                                             verify_env={"PATH": os.environ["PATH"]}, deadline=started + 0.3)
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertTrue(any(check["timed_out"] for check in checks))
 
     def test_evaluate_environment_failure_is_separate(self):
         repo = self._repo()
@@ -135,17 +161,27 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         info = self.make_ready_task(task_id=task_id)
         tid = info["remote"]["id"]
         repo = self.repos_root / "Feedback"
+        worktree = self.root / ("verdict-tree-" + task_id)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree)],
+                       check=True, capture_output=True)
         if change:
-            (repo / f"change-{task_id}.py").write_text("x = 1\n", encoding="utf-8")
+            (worktree / f"change-{task_id}.py").write_text("x = 1\n", encoding="utf-8")
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
+                task = db.require_task(conn, tid)
+                plan = Path(task["plan_path"])
+                plan.write_text("# Frozen plan\n```verify\n" + "\n".join(commands) + "\n```\n")
+                sha = util.sha256_file(plan)
+                db.update_task(conn, tid, util.now_iso(), plan_sha256=sha)
                 task = db.require_task(conn, tid)
                 db.set_extra(conn, task, util.now_iso(),
                              plan_verify={"plan_sha256": task["plan_sha256"],
                                           "commands": commands})
                 conn.execute("UPDATE tasks SET status='running', run_id=? WHERE task_id=?",
                              ("run-" + task_id, tid))
+                round_store.upsert_on_claim(conn, tid, "run-" + task_id, {}, util.now_iso())
+                round_store.mark_started(conn, tid, "run-" + task_id, util.now_iso(), worktree_path=str(worktree))
         finally:
             conn.close()
         view = self.task(tid)
@@ -186,6 +222,85 @@ class TestEngineVerdictCommand(KanpilotTestCase):
             "task_id": tid, "expected_execution_run_id": "wrong-run",
             "expected_plan_sha256": sha})
         self.assertEqual(exc.code, "conflict")
+
+    def test_verdict_never_falls_back_to_repository(self):
+        tid, sha = self._running_task_with_repo("taskvrdmissing000001", commands=["true"])
+        conn = db.connect(self.db_path)
+        conn.execute("UPDATE execution_rounds SET worktree_path=NULL WHERE task_id=?", (tid,))
+        conn.close()
+        with patch.object(verdict, "run_verify_commands") as runner:
+            result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                  "expected_plan_sha256": sha})
+        self.assertEqual(result["kind"], "unconfirmed")
+        self.assertFalse(result["verification_ok"])
+        runner.assert_not_called()
+
+    def test_changed_plan_cannot_execute_cached_commands(self):
+        tid, sha = self._running_task_with_repo("taskvrdplan000000001", commands=["true"])
+        Path(self._row(tid)["plan_path"]).write_text("# changed\n```verify\nfalse\n```\n")
+        with patch.object(verdict, "run_verify_commands") as runner:
+            result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                  "expected_plan_sha256": sha})
+        self.assertEqual(result["kind"], "unconfirmed")
+        runner.assert_not_called()
+
+    def test_source_mutation_during_verify_is_not_a_pass(self):
+        tid, sha = self._running_task_with_repo("taskvrdsource0000001", commands=["true"])
+        def changed(commands, *, cwd, **kw):
+            (Path(cwd) / "source.py").write_text("changed by verify")
+            return [{"exit_code": 0, "timed_out": False}]
+        with patch.object(verdict, "run_verify_commands", side_effect=changed):
+            result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                  "expected_plan_sha256": sha})
+        self.assertEqual(result["kind"], "unconfirmed")
+        self.assertFalse(result["verification_ok"])
+
+    def test_total_budget_includes_source_binding(self):
+        tid, sha = self._running_task_with_repo("taskvrdbudget000001", commands=["true"])
+        original = verdict.git_delivery.source_state_sha256
+        def exhausted(path, **kw):
+            # The preparation reaches the deadline before any shell command.
+            kw["deadline"] = time.monotonic() - 1
+            return original(path, **kw)
+        with patch.object(verdict.git_delivery, "source_state_sha256", side_effect=exhausted), patch.object(verdict, "run_verify_commands") as runner:
+            result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                  "expected_plan_sha256": sha, "budget_seconds": 1})
+        self.assertEqual(result["kind"], "unconfirmed")
+        runner.assert_not_called()
+
+    def test_same_operation_reuses_bound_receipt(self):
+        tid, sha = self._running_task_with_repo("taskvrdreuse00000001", commands=["true"])
+        payload = {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                   "expected_plan_sha256": sha, "operation_id": "one-operation"}
+        self.assertTrue(self.call("engine-verdict", payload)["verification_ok"])
+        with patch.object(verdict, "run_verify_commands") as runner:
+            self.assertTrue(self.call("engine-verdict", payload)["deduplicated"])
+        runner.assert_not_called()
+
+    def test_shadow_runs_in_copy_and_keeps_original_source(self):
+        tid, sha = self._running_task_with_repo("taskvrdshadow000001", commands=["printf changed > shadow-source.py"])
+        task = self._row(tid)
+        self.call("set-project-mapping", {"project_id": task["project_id"], "repository": task["repository"], "enabled": True,
+                                         "expected_revision": self.call("get-project-mappings")["revision"]})
+        self.call("set-project-engine-mode", {"project_id": task["project_id"], "engine_mode": "shadow"})
+        self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                     "expected_plan_sha256": sha})
+        conn = db.connect(self.db_path)
+        row = round_store.get_round(conn, tid, "run-" + tid)
+        self.assertFalse((Path(row["worktree_path"]) / "shadow-source.py").exists())
+        extra = db.task_extra(db.require_task(conn, tid))
+        self.assertIn("engine_verdict_shadow", extra)
+        self.assertNotIn("engine_verdict", extra)
+        conn.close()
+
+    def test_receipt_never_copies_raw_secret_commands(self):
+        secret = "sensitive-private-token"
+        tid, sha = self._running_task_with_repo("taskvrdredact000001", commands=["printf '%s' 'Authorization: Bearer " + secret + "'"])
+        result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                             "expected_plan_sha256": sha})
+        self.assertTrue(result["verification_ok"])
+        self.assertNotIn(secret, util.jdump(result))
+        self.assertNotIn(secret, util.jdump(db.task_extra(self._row(tid))["engine_verdict"]))
 
     def _row(self, task_id):
         conn = db.connect(self.db_path)

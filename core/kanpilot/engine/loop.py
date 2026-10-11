@@ -35,8 +35,7 @@ from . import decide, fallback, health, ladder, rounds, steps
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
 # Valid per-project engine modes (state-model §strangler).
 ENGINE_MODES = ("legacy", "shadow", "live")
-# extra key where the engine records its same-plan bounded remediation rounds
-# (scenarios.md #5: ≤2 per plan, each armed for one retry execution round).
+# Task-wide remediation accounting, retained across replans (at most two).
 FIX_ROUNDS_KEY = "engine_fix_rounds"
 # extra key where the engine records the rounds it settled after a missed
 # terminal-state registration (sandbox §13.2). Bounded per run: a monitor
@@ -178,6 +177,7 @@ class Reconciler:
             "failure_stage": task["failure_stage"],
             "failure_reason": task["failure_reason"],
             "plan_sha256": task["plan_sha256"],
+            "execution_run_id": task["run_id"],
             "plan_execution_hold": bool(extra.get("plan_execution_hold")),
         }
 
@@ -263,101 +263,53 @@ class Reconciler:
             db.set_extra(conn, fresh, now, **{fallback.MODEL_OVERRIDE_KEY: None})
 
     def _quality_retry(self, conn, task, now, snap, pmode):
-        """Ladder-3 bounded remediation for an empty-diff verdict (scenarios.md #5).
-
-        The core-owned verdict receipt (``extra.engine_verdict``) is the trigger:
-        a non-empty effective diff is required, so an empty diff means the round
-        produced nothing countable. While the same-plan fix-round budget lasts,
-        the engine resolves the project's ``fallback_model``, probes it in the
-        Plus cache catalog and records ``model: fallback`` / ``model: primary``
-        (+ a configure hint). A configured-but-unprobeable model is a hard
-        ``validation_failed`` (ladder 2): no silent model switch.
-
-        The chosen snapshot is staged as a one-shot override
-        (``extra.engine_model_override``) that the next dispatch claim freezes
-        into the round (``exec_config.snapshot_with_model_override``). The
-        re-execution itself stays authorized by the existing resolve/replan
-        path: ``CLAIM_GUARDS['dispatch'] == {'ready'}`` plus the unsent-dispatch
-        guard make an engine-driven re-send impossible without forging a user
-        action. This method decides, records and arms — it never re-sends.
-        """
+        """Choose a bounded new round; resolve commits accounting + enqueue atomically."""
         extra = db.task_extra(task)
         receipt = extra.get("engine_verdict")
-        if not isinstance(receipt, dict) or not receipt.get("empty_diff"):
+        if (task["status"] != "needs_user" or task["failure_code"] != "verification_unconfirmed"
+                or snap.get("paused") or snap.get("manual_takeover")
+                or not isinstance(receipt, dict) or receipt.get("verification_ok")
+                or receipt.get("environment_failure")
+                or receipt.get("execution_run_id") != task["run_id"]
+                or receipt.get("plan_sha256") != task["plan_sha256"]
+                or not receipt.get("binding")
+                or receipt.get("kind") not in ("empty_diff", "verify_failed")):
             return None
-        if receipt.get("verification_ok"):
+        rounds = self._engine_fix_rounds(task)
+        if any(row.get("execution_run_id") == task["run_id"] for row in rounds):
             return None
-        fix_round = len([row for row in self._engine_fix_rounds(task)
-                         if row.get("plan_sha256") == task["plan_sha256"]])
-        # 已为这一个失败轮次武装过补救（等重跑轮真正开始）就不再重复计入：
-        # 主模型路径不写模型覆盖，只用轮次身份判重。
-        if any(row.get("execution_run_id") == receipt.get("execution_run_id")
-               for row in self._engine_fix_rounds(task)):
+        if conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                        (task["task_id"],)).fetchone():
             return None
-        configured = self._project_fallback(conn, task["project_id"])
-        fd = decide.failure_decision("empty_diff", fix_round=fix_round,
-                                     budget_ok=snap.get("budget_ok", True),
+        reason = receipt["kind"]
+        configured = self._project_fallback(conn, task["project_id"]) if reason == "empty_diff" else None
+        fd = decide.failure_decision("empty_diff" if reason == "empty_diff" else "verification_unconfirmed",
+                                     fix_round=len(rounds), budget_ok=snap.get("budget_ok", True),
                                      fallback_model=configured)
+        block = None
         if fd.action != decide.START_FIX_ROUND:
-            # Same-plan budget spent: the steady path blocks to the inbox.
-            return None
-        primary = None
-        if configured is not None:
-            primary, _error = fallback.primary_snapshot(conn)
-        # connection_file 必须传：plan_retry 的默认探针以 None 建连，
-        # probe_connection(None) 恒败，配置了 fallback 反而会 BLOCK（阶梯 2）
-        # ——而 primary_snapshot 返回的快照本身就带它。
-        plan = fallback.plan_retry(
-            configured, primary=primary,
-            connection_file=(primary or {}).get("connection_file"))
-        if plan["validation_failed"]:
-            # 审计：探针失败也要落库「为什么没换模型」，否则事件表里看不出
-            # 这次有界补救曾考虑过 fallback（plan_retry 已备好事件，此前因
-            # 提前 return 被丢弃）。shadow 只算不写。
-            if pmode == "live":
-                now_iso = util.to_iso(now)
-                with db.write_txn(conn):
-                    for event in plan["events"]:
-                        db.add_event(conn, now_iso, event["kind"],
-                                     task_id=task["task_id"], actor="engine",
-                                     detail=event["detail"])
-            return decide.Decision(
-                decide.BLOCK, reason="validation_failed",
-                ladder=ladder.LADDER_ENVIRONMENTAL, attention=True,
-                params={"failure_code": "validation_failed",
-                        "detail": plan["probe_detail"], "fix_round": fix_round})
-        if pmode != "live":
-            # shadow: computed + logged only, never written.
-            return decide.Decision(
-                decide.START_FIX_ROUND, reason="empty_diff",
-                ladder=ladder.LADDER_QUALITY,
-                params=dict(fd.params, probe_detail=plan["probe_detail"]))
-        if fallback.read_override(extra):
-            # A remediation round is already armed: wait for the next run to
-            # consume it instead of burning the same-plan budget in one tick.
-            return None
-        now_iso = util.to_iso(now)
-        with db.write_txn(conn):
-            fresh = db.require_task(conn, task["task_id"])
-            for event in plan["events"]:
-                db.add_event(conn, now_iso, event["kind"],
-                             task_id=task["task_id"], actor="engine",
-                             detail=event["detail"])
-            rounds = self._engine_fix_rounds(fresh)
-            rounds.append({"plan_sha256": task["plan_sha256"],
-                           "execution_run_id": receipt.get("execution_run_id"),
-                           "model": plan["model"], "at": now_iso})
-            # 一次 set_extra 写全：db.set_extra 按传入行的 extra_json 合并，
-            # 分两次调用会用陈旧快照覆盖前一次写入。
-            entries = {FIX_ROUNDS_KEY: rounds}
-            if plan["snapshot"] is not None:
-                entries[fallback.MODEL_OVERRIDE_KEY] = (
-                    fallback.override_payload(plan["snapshot"], task))
-            db.set_extra(conn, fresh, now_iso, **entries)
-        return decide.Decision(
-            decide.START_FIX_ROUND, reason="empty_diff",
-            ladder=ladder.LADDER_QUALITY,
-            params=dict(fd.params, probe_detail=plan["probe_detail"]))
+            block = fd.reason
+        elif reason == "empty_diff" and any(row.get("reason") == "empty_diff"
+             and row.get("plan_sha256") == task["plan_sha256"] for row in rounds):
+            # The same confirmed plan is retried at most once; verify repairs
+            # retain the separate task-wide <=2 accounting.
+            block = "fix_rounds_exhausted"
+        plan = {"model": "primary", "snapshot": None, "validation_failed": False,
+                "events": [], "probe_detail": ""}
+        if block is None and reason == "empty_diff":
+            primary, _error = fallback.primary_snapshot(conn) if configured else (None, None)
+            plan = fallback.plan_retry(configured, primary=primary,
+                                       connection_file=(primary or {}).get("connection_file"))
+            if plan["validation_failed"]:
+                block = "validation_failed"
+        fix = {"execution_run_id": task["run_id"], "plan_sha256": task["plan_sha256"],
+               "reason": reason, "plan": plan}
+        if block:
+            fix["block"] = block
+            return decide.Decision(decide.BLOCK, reason=block,
+                ladder=ladder.classify(block), attention=True, params={"engine_fix": fix})
+        return decide.Decision(decide.START_FIX_ROUND, reason=reason, ladder=ladder.LADDER_QUALITY,
+            params=dict(fd.params, engine_fix=fix, probe_detail=plan["probe_detail"]))
 
     # ------------------------------------------- round terminal fallback
     @staticmethod
@@ -433,6 +385,23 @@ class Reconciler:
         return decision
 
     # ------------------------------------------------------------- reconcile
+    def _schedule_engine_plan(self, conn, task_id, now):
+        """Prepare only this authorized repair; avoid the broad intake interval."""
+        from .. import auto_intake, automation_policy
+        task = db.require_task(conn, task_id)
+        if (task["status"] != "needs_plan" or not self._engine_fix_rounds(task)
+                or not core.automation_of(task).get("plan_wanted")
+                or self._has_active_request(conn, task_id, "plan")):
+            return None
+        policy = automation_policy.policy_for(conn, task["project_id"])
+        if not policy or not policy.get("enabled"):
+            return None
+        issues = automation_policy.automation_preflight(conn, task["project_id"])
+        if issues:
+            return {"task_id": task_id, "reason": issues[0]["code"]}
+        return auto_intake._submit(conn, self.db_path, task_id, policy, now,
+                                   task["requirements_sha256"], wanted=True)
+
     def reconcile_once(self, now=None) -> dict:
         now = now or util.now_dt()
         now_iso = util.to_iso(now)
@@ -470,6 +439,11 @@ class Reconciler:
                     continue
                 # live: execute forward commands.
                 if not calls:
+                    if decision.action == decide.ENQUEUE_PLAN:
+                        submitted = self._schedule_engine_plan(conn, task["task_id"], now_iso)
+                        if submitted is not None:
+                            actions.append(dict(base, command="start-plans", executed=bool(submitted.get("request_id")), result=submitted))
+                            continue
                     actions.append(dict(base, command=None))
                     continue
                 for call in calls:
@@ -481,11 +455,18 @@ class Reconciler:
                         actions.append(dict(record, skipped="already_scheduled"))
                         continue
                     try:
-                        result = self.run_command(call.command, call.payload)
+                        from .. import engine_claim_scope
+                        with engine_claim_scope.command_mode(self.mode, self.force_mode):
+                            result = self.run_command(call.command, call.payload)
                         actions.append(dict(record, executed=True,
                                             deduplicated=bool(result.get("deduplicated"))))
+                        if call.command == "resolve" and result.get("task_status") == "needs_plan" and call.payload.get("engine_fix"):
+                            submitted = self._schedule_engine_plan(conn, task["task_id"], now_iso)
+                            if submitted is not None:
+                                actions.append({"task_id": task["task_id"], "action": decide.ENQUEUE_PLAN,
+                                    "engine_mode": pmode, "command": "start-plans", "executed": bool(submitted.get("request_id")), "result": submitted})
                     except util.KanpilotError as exc:
-                        actions.append(dict(record, error=exc.code))
+                        actions.append(dict(record, error=exc.code, detail=util.redact(exc.message)))
 
             if self.enable_intake and self._intake_due(now):
                 actions.append(self.intake_step(conn, now, modes))
@@ -525,18 +506,18 @@ class Reconciler:
                 if isinstance(run, dict) and util.pid_alive(run.get("pid"))}
 
     def _queued_stages(self, conn, modes):
-        """Queued-request counts per stage, restricted to LIVE projects' tasks."""
-        live = {pid for pid, mode in modes.items() if mode == "live"}
-        if not live:
-            return {}
-        placeholders = ",".join("?" * len(live))
+        """Live automation plus explicitly user-authorized manual planning."""
+        from .. import engine_claim_scope
         counts = {}
-        for row in conn.execute(
-                "SELECT r.stage AS stage, COUNT(*) AS n FROM requests r "
-                "JOIN tasks t ON t.task_id = r.task_id "
-                f"WHERE r.status='queued' AND t.project_id IN ({placeholders}) "
-                "GROUP BY r.stage", tuple(live)):
-            counts[row["stage"]] = row["n"]
+        rows = conn.execute(
+            "SELECT r.* FROM requests r JOIN tasks t ON t.task_id=r.task_id "
+            "WHERE r.status='queued' AND t.save_state='active' "
+            "AND t.auto_advance_paused=0").fetchall()
+        for request in rows:
+            task = db.require_task(conn, request["task_id"])
+            if modes.get(task["project_id"], self.mode) != "live" and not engine_claim_scope.manual_plan(request):
+                continue
+            counts[request["stage"]] = counts.get(request["stage"], 0) + 1
         return counts
 
     @staticmethod
@@ -555,7 +536,8 @@ class Reconciler:
 
     def _default_spawn(self, stage, db_path, instance_id):
         from . import runners
-        return runners.spawn(stage, db_path, instance_id=instance_id)
+        return runners.spawn(stage, db_path, instance_id=instance_id,
+                             mode=self.mode, force=self.force_mode)
 
     def spawn_step(self, conn, modes) -> dict:
         """Spawn per-stage workers for queued requests of live projects (no App scheduler).
@@ -608,7 +590,7 @@ class Reconciler:
         instance_id = instance_id or util.new_uuid()
         self.instance_id = instance_id
         pid = os.getpid()
-        sleeper = sleeper or time.sleep
+        sleeper = sleeper or (stop_event.wait if stop_event is not None else time.sleep)
         conn = db.connect(self.db_path)
         try:
             lease = lease_seconds or health.lease_seconds(conn)

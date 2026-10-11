@@ -91,6 +91,7 @@ _FAILURE_CODE_LADDER = {
     "review_backend_unsupported": LADDER_ENVIRONMENTAL,
     "review_desktop_unconfigured": LADDER_ENVIRONMENTAL,
     "validation_failed": LADDER_ENVIRONMENTAL,  # scenarios.md #2 plus probe fail
+    "verification_environment_failure": LADDER_ENVIRONMENTAL,
     # 阶梯 3 quality：有界补救（≤2 轮同分支修复）。
     "verification_unconfirmed": LADDER_QUALITY,
     "review_blocked": LADDER_QUALITY,

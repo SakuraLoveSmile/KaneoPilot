@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import cli, cmd_delivery, core, db, git_delivery, util
+from kanpilot import cli, cmd_delivery, core, db, git_delivery, round_store, util
 from test_git_delivery import make_repo, branch, commit, git
 
 
@@ -36,6 +36,104 @@ class DeliveryCommit(KanpilotTestCase):
             return original(*args, **kwargs)
         with patch.object(git_delivery, "_git", side_effect=checked):
             return cmd_delivery.cmd_delivery_commit(self.ctx, payload or self.payload)
+
+    def live_verdict(self):
+        from pathlib import Path
+        task = db.require_task(self.ctx.conn, "task1234")
+        self.call("set-project-mapping", {"project_id": task["project_id"], "repository": str(self.repo), "enabled": True,
+                                         "expected_revision": self.call("get-project-mappings")["revision"]})
+        self.call("set-project-engine-mode", {"project_id": task["project_id"], "engine_mode": "live"})
+        plan = Path(task["plan_path"])
+        plan.write_text("# Frozen\n```verify\ntrue\n```\n")
+        sha = util.sha256_file(plan)
+        db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, plan_sha256=sha)
+        db.set_extra(self.ctx.conn, db.require_task(self.ctx.conn, "task1234"), self.ctx.now_iso,
+                     plan_verify={"plan_sha256": sha, "commands": ["true"]})
+        round_store.upsert_on_claim(self.ctx.conn, "task1234", "exec1", {}, self.ctx.now_iso)
+        round_store.mark_started(self.ctx.conn, "task1234", "exec1", self.ctx.now_iso, worktree_path=str(self.wt))
+        result = self.call("engine-verdict", dict(self.payload, expected_plan_sha256=sha))
+        self.assertTrue(result["verification_ok"], result)
+        return result
+
+    def test_live_source_change_after_verdict_never_commits(self):
+        (self.wt / "change").write_text("verified")
+        self.live_verdict()
+        (self.wt / "change").write_text("unverified")
+        result = self.call_commit()
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
+        self.assertEqual(git(self.wt, "rev-parse", "HEAD"), self.delivery["head_sha"])
+
+    def test_live_staging_race_never_commits(self):
+        (self.wt / "change").write_text("verified")
+        self.live_verdict()
+        original = git_delivery._git
+        def changed(args, *a, **kw):
+            result = original(args, *a, **kw)
+            if args[:2] == ["add", "-A"]:
+                (self.wt / "change").write_text("unverified while staging")
+            return result
+        with patch.object(git_delivery, "_git", side_effect=changed):
+            result = self.call_commit()
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
+        self.assertEqual(git(self.wt, "rev-parse", "HEAD"), self.delivery["head_sha"])
+
+    def test_live_crash_after_git_commit_recovers_without_model_rerun(self):
+        (self.wt / "change").write_text("verified")
+        receipt = self.live_verdict()
+        result = git_delivery.commit_worktree(dict(self.delivery, repository=str(self.repo)), task_id="task1234", title="x",
+            execution_run_id="exec1", fix_round=0, verified_source_sha256=receipt["binding"]["source_sha256"],
+            verified_index_sha256=receipt["index_source_sha256"])
+        recovered = self.call("engine-verdict", dict(self.payload, expected_plan_sha256=receipt["plan_sha256"], operation_id="recovery-monitor"))
+        self.assertTrue(recovered["verification_ok"])
+        self.assertTrue(recovered["deduplicated"])
+        self.assertEqual(self.call_commit()["sha"], result["sha"])
+        self.assertEqual(len(core.delivery_of(db.require_task(self.ctx.conn, "task1234"))["commits"]), 1)
+
+    def test_live_late_monitor_reuses_verified_core_commit(self):
+        (self.wt / "change").write_text("verified")
+        receipt = self.live_verdict()
+        self.call_commit()
+        result = self.call("engine-verdict", dict(self.payload, expected_plan_sha256=receipt["plan_sha256"], operation_id="late-monitor"))
+        self.assertTrue(result["verification_ok"])
+        self.assertTrue(result["deduplicated"])
+
+    def test_live_crlf_git_normalization_is_accepted(self):
+        (self.wt / ".gitattributes").write_text("*.txt text eol=lf\n")
+        (self.wt / "crlf.txt").write_bytes(b"verified\r\n")
+        self.live_verdict()
+        self.assertEqual(self.call_commit()["outcome"], "committed")
+
+    def test_live_hook_changed_tree_keeps_local_commit_unregistered(self):
+        (self.wt / "change").write_text("verified")
+        self.live_verdict()
+        from pathlib import Path
+        hook = Path(git(self.repo, "rev-parse", "--git-path", "hooks"))
+        if not hook.is_absolute():
+            hook = self.repo / hook
+        hook = hook / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf unsafe > hook-source.txt\ngit add hook-source.txt\n")
+        hook.chmod(0o755)
+        result = self.call_commit()
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
+        self.assertIn("未登记", result["message"])
+        self.assertNotEqual(git(self.wt, "rev-parse", "HEAD"), self.delivery["head_sha"])
+        self.assertEqual(core.delivery_of(db.require_task(self.ctx.conn, "task1234"))["commits"], [])
+
+    def test_live_concurrent_index_change_is_preserved(self):
+        (self.wt / "change").write_text("verified")
+        self.live_verdict()
+        original = git_delivery._git
+        def changed(args, *a, **kw):
+            result = original(args, *a, **kw)
+            if args[:1] == ["commit"]:
+                blob = original(["hash-object", "-w", "--stdin"], self.wt, 10, input=b"user staged bytes").stdout.decode().strip()
+                original(["update-index", "--add", "--cacheinfo", "100644," + blob + ",change"], self.wt, 10)
+            return result
+        with patch.object(git_delivery, "_git", side_effect=changed):
+            result = self.call_commit()
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
+        self.assertEqual(git(self.wt, "show", ":change"), "user staged bytes")
+        self.assertEqual(core.delivery_of(db.require_task(self.ctx.conn, "task1234"))["commits"], [])
 
     def test_commit_idempotent_and_event(self):
         (self.wt / "change").touch()

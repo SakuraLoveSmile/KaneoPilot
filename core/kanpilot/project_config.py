@@ -215,7 +215,7 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
         if rpid not in all_pids:
             all_pids.append(rpid)
 
-    from . import automation_policy
+    from . import automation_policy, engine_claim_scope
 
     items_output = []
     for pid in all_pids:
@@ -256,6 +256,7 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
             "active_request_count": req_count,
             "updated_at": updated_at,
             "engine_mode": entry.get("engine_mode") or (entry.get("automation") or {}).get("engine_mode") or "legacy",
+            "effective_engine_mode": engine_claim_scope.effective_mode(conn, pid),
             "verify_env": entry.get("verify_env") or {},
             "fallback_model": entry.get("fallback_model"),
             "automation": automation_policy.policy_for(conn, pid) or dict(constants.AUTOMATION_DEFAULTS),

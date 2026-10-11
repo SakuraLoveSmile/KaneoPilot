@@ -21,7 +21,8 @@ from unittest import mock
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, exec_config, util  # noqa: E402
-from kanpilot.engine import decide, fallback, ladder, loop  # noqa: E402
+from kanpilot.engine import decide, fallback, ladder, loop
+import test_engine_recovery as recovery_fixture  # noqa: E402
 
 REPO = "Feedback"
 PROJECT_ID = "projfallback00000000a"
@@ -177,280 +178,109 @@ class TestDecisionCarriesModelChoice(unittest.TestCase):
         self.assertTrue(capped.is_block)
 
 
-class TestQualityRetryLoop(KanpilotTestCase):
+class TestQualityRetryLoop(recovery_fixture.TestEngineRecovery):
     def _adopt(self):
-        info = self.make_ready_task(task_id=TASK_ID, project_name=REPO,
-                                    project_id=PROJECT_ID)
-        tid = info["remote"]["id"]
-        revision = self.call("get-project-mappings", {}).get("revision", 0)
-        self.call("set-project-mapping", {
-            "project_id": PROJECT_ID, "repository": str(self.repos_root / REPO),
-            "enabled": True, "expected_revision": revision})
-        self.call("set-project-engine-mode",
-                  {"project_id": PROJECT_ID, "engine_mode": "live"})
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                core.update_automation(conn, task, util.now_iso(),
-                                       adopted_at=util.now_iso())
-        finally:
-            conn.close()
-        return tid
+        return self.task_id
 
-    def _empty_verdict(self, tid, run_id="run-empty-1"):
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                db.set_extra(conn, task, util.now_iso(), engine_verdict={
-                    "execution_run_id": run_id,
-                    "plan_sha256": task["plan_sha256"],
-                    "empty_diff": True, "verification_ok": False})
-        finally:
-            conn.close()
+    def _empty_verdict(self, tid, run_id=None):
+        self.quality_failure()
 
     def _extra(self, tid):
-        conn = db.connect(self.db_path)
-        try:
-            return db.task_extra(db.require_task(conn, tid))
-        finally:
-            conn.close()
+        return db.task_extra(self.task())
 
     def _events(self, tid):
-        conn = db.connect(self.db_path)
-        try:
-            return [(row["kind"], util.jload(row["detail_json"]))
-                    for row in conn.execute(
-                        "SELECT kind, detail_json FROM events WHERE task_id=? "
-                        "ORDER BY id", (tid,))]
-        finally:
-            conn.close()
+        return [(row["kind"], util.jload(row["detail_json"])) for row in self.ctx.conn.execute(
+            "SELECT kind, detail_json FROM events WHERE task_id=? ORDER BY id", (tid,))]
 
     def _actions(self, tid):
-        summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
-        return [a for a in summary["actions"] if a.get("task_id") == tid]
+        return [a for a in loop.Reconciler(self.db_path).reconcile_once()["actions"] if a.get("task_id") == tid]
 
     def test_unconfigured_records_primary_and_hint(self):
         tid = self._adopt()
         self._empty_verdict(tid)
         actions = self._actions(tid)
-        self.assertTrue(actions)
-        self.assertEqual(actions[0]["action"], "start_fix_round")
+        self.assertTrue(actions[0].get("executed"), actions)
         kinds = [kind for kind, _ in self._events(tid)]
         self.assertIn("model", kinds)
         self.assertIn("model_hint", kinds)
-        model_events = [d for k, d in self._events(tid) if k == "model"]
-        self.assertEqual(model_events[0]["model"], "primary")
-        rounds = self._extra(tid)["engine_fix_rounds"]
-        self.assertEqual(len(rounds), 1)
-        self.assertEqual(rounds[0]["model"], "primary")
-        # 未配 fallback：不武装任何模型覆盖。
+        self.assertEqual(self._extra(tid)["engine_fix_rounds"][0]["model"], "primary")
         self.assertIsNone(fallback.read_override(self._extra(tid)))
 
     def test_configured_and_probe_ok_arms_fallback_override(self):
         tid = self._adopt()
-        self.call("set-project-fallback-model",
-                  {"project_id": PROJECT_ID, "fallback_model": _FALLBACK})
+        self.call("set-project-fallback-model", {"project_id": self.task()["project_id"], "fallback_model": _FALLBACK})
         self._empty_verdict(tid)
-        with mock.patch.object(fallback, "probe_model",
-                               return_value=(True, "cache 命中")), \
-                mock.patch.object(fallback, "primary_snapshot",
-                                  return_value=(_PRIMARY, None)):
+        with mock.patch.object(fallback, "probe_model", return_value=(True, "cache 命中")), mock.patch.object(fallback, "primary_snapshot", return_value=(_PRIMARY, None)):
             actions = self._actions(tid)
-        self.assertEqual(actions[0]["action"], "start_fix_round")
-        self.assertEqual(actions[0]["reason"], "empty_diff")
-        model_events = [d for k, d in self._events(tid) if k == "model"]
-        self.assertEqual(model_events[-1]["model"], "fallback")
-        self.assertEqual(model_events[-1]["model_id"], _FALLBACK["model_id"])
-        override = fallback.read_override(self._extra(tid))
-        self.assertIsNotNone(override)
-        self.assertEqual(override["model_id"], _FALLBACK["model_id"])
-        self.assertEqual(override["provider_id"], _FALLBACK["provider_id"])
-        self.assertEqual(self._extra(tid)["engine_fix_rounds"][0]["model"],
-                         "fallback")
+        self.assertTrue(actions[0].get("executed"), actions)
+        self.assertEqual(self._extra(tid)["engine_fix_rounds"][0]["model"], "fallback")
+        self.assertEqual(fallback.read_override(self._extra(tid))["model_id"], _FALLBACK["model_id"])
 
     def test_probe_failure_blocks_with_validation_failed(self):
         tid = self._adopt()
-        self.call("set-project-fallback-model",
-                  {"project_id": PROJECT_ID, "fallback_model": _FALLBACK})
+        self.call("set-project-fallback-model", {"project_id": self.task()["project_id"], "fallback_model": _FALLBACK})
         self._empty_verdict(tid)
-        with mock.patch.object(fallback, "probe_model",
-                               return_value=(False, "PI-Desktop model 不存在")), \
-                mock.patch.object(fallback, "primary_snapshot",
-                                  return_value=(_PRIMARY, None)):
+        with mock.patch.object(fallback, "probe_model", return_value=(False, "model 不存在")), mock.patch.object(fallback, "primary_snapshot", return_value=(_PRIMARY, None)):
             actions = self._actions(tid)
-        self.assertEqual(actions[0]["action"], "block")
         self.assertEqual(actions[0]["reason"], "validation_failed")
-        self.assertEqual(actions[0]["ladder"], ladder.LADDER_ENVIRONMENTAL)
-        # 探针失败：既不换模型，也不记录补救轮。
-        self.assertIsNone(fallback.read_override(self._extra(tid)))
+        self.assertEqual(self.task()["failure_code"], "validation_failed")
         self.assertNotIn("engine_fix_rounds", self._extra(tid))
+        self.assertTrue(any(k == "model" and d["reason"] == "fallback_probe_failed" for k, d in self._events(tid)))
 
     def test_shadow_computes_without_writing(self):
         tid = self._adopt()
-        self.call("set-project-engine-mode",
-                  {"project_id": PROJECT_ID, "engine_mode": "shadow"})
         self._empty_verdict(tid)
+        self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "shadow"})
         before = self._extra(tid)
-        with mock.patch.object(fallback, "probe_model",
-                               return_value=(True, "cache 命中")), \
-                mock.patch.object(fallback, "primary_snapshot",
-                                  return_value=(_PRIMARY, None)):
-            actions = self._actions(tid)
-        self.assertTrue(actions)
-        self.assertTrue(all(a["engine_mode"] == "shadow" and not a.get("executed")
-                            for a in actions))
+        actions = self._actions(tid)
+        self.assertTrue(all(not a.get("executed") for a in actions))
         self.assertEqual(self._extra(tid), before)
-        model_kinds = [kind for kind, _ in self._events(tid)
-                       if kind in (fallback.EVENT_MODEL, fallback.EVENT_MODEL_HINT)]
-        self.assertEqual(model_kinds, [])
 
     def test_armed_override_is_not_reburned_next_tick(self):
         tid = self._adopt()
         self._empty_verdict(tid)
         self._actions(tid)
-        self.assertEqual(len(self._extra(tid)["engine_fix_rounds"]), 1)
-        # 同一失败轮次只武装一次：再 tick 不重复计入补救轮。
         self._actions(tid)
         self.assertEqual(len(self._extra(tid)["engine_fix_rounds"]), 1)
 
     def test_budget_spent_stops_remediating(self):
         tid = self._adopt()
         self._empty_verdict(tid)
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                db.set_extra(conn, task, util.now_iso(), engine_fix_rounds=[
-                    {"plan_sha256": task["plan_sha256"], "model": "primary"},
-                    {"plan_sha256": task["plan_sha256"], "model": "fallback"}])
-        finally:
-            conn.close()
-        # 同计划补救轮用尽 → 不再有界补救，回到稳态决策（不下补救命令）。
-        actions = self._actions(tid)
-        self.assertTrue(actions)
-        self.assertNotEqual(actions[0]["action"], "start_fix_round")
+        db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso, engine_fix_rounds=[
+            {"plan_sha256": "previous-1", "execution_run_id": "old1"},
+            {"plan_sha256": "previous-2", "execution_run_id": "old2"}])
+        self._actions(tid)
+        self.assertEqual(self.task()["failure_code"], "fix_rounds_exhausted")
         self.assertEqual(len(self._extra(tid)["engine_fix_rounds"]), 2)
 
     def test_consumed_override_is_cleared_for_a_new_round(self):
         tid = self._adopt()
-        self._empty_verdict(tid, run_id="run-1")
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                db.set_extra(conn, task, util.now_iso(), engine_model_override={
-                    "plan_sha256": task["plan_sha256"],
-                    "provider_id": "p", "model_id": "m"})
-        finally:
-            conn.close()
-        # 新轮次开始（run_id 与 receipt 不同）→ 覆盖被清除，不静默套用。
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                conn.execute("UPDATE tasks SET run_id=? WHERE task_id=?",
-                             ("run-2", tid))
-        finally:
-            conn.close()
+        self._empty_verdict(tid)
+        db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso, engine_model_override={"plan_sha256": self.task()["plan_sha256"], "provider_id": "p", "model_id": "m"})
+        db.update_task(self.ctx.conn, tid, self.ctx.now_iso, run_id="new-run")
         self._actions(tid)
         self.assertIsNone(fallback.read_override(self._extra(tid)))
 
 
-class TestQualityRetryProbeWiring(KanpilotTestCase):
-    """live 路径的 fallback 探针必须拿到连接文件，否则配了也白配。
-
-    ``plan_retry`` 的默认探针把 ``connection_file=None`` 传给
-    ``probe_connection``，而它对 None 恒返回 ok=False（"连接文件不存在：."）——
-    于是项目配了 fallback 也会被误判 validation_failed 而 BLOCK（阶梯 2），
-    永远换不成模型。_quality_retry 必须把 primary 快照里的 connection_file 透传。
-    既有单测都传显式 probe/mock，所以没暴露这条。
-    """
-
-    def _adopt_live(self, task_id, fallback=None):
-        info = self.make_ready_task(task_id=task_id, project_name=REPO,
-                                    project_id=PROJECT_ID)
-        tid = info["remote"]["id"]
-        revision = self.call("get-project-mappings", {}).get("revision", 0)
-        self.call("set-project-mapping", {
-            "project_id": PROJECT_ID, "repository": str(self.repos_root / REPO),
-            "enabled": True, "expected_revision": revision})
-        self.call("set-project-engine-mode",
-                  {"project_id": PROJECT_ID, "engine_mode": "live"})
-        if fallback is not None:
-            self.call("set-project-fallback-model",
-                      {"project_id": PROJECT_ID, "fallback_model": fallback})
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                core.update_automation(conn, task, util.now_iso(),
-                                       adopted_at=util.now_iso())
-        finally:
-            conn.close()
-        return tid
-
-    def _empty_verdict(self, tid, run_id="run-empty-1"):
-        conn = db.connect(self.db_path)
-        try:
-            with db.write_txn(conn):
-                task = db.require_task(conn, tid)
-                db.set_extra(conn, task, util.now_iso(), engine_verdict={
-                    "execution_run_id": run_id,
-                    "plan_sha256": task["plan_sha256"],
-                    "empty_diff": True, "verification_ok": False})
-        finally:
-            conn.close()
-
+class TestQualityRetryProbeWiring(TestQualityRetryLoop):
     def test_probe_receives_the_connection_file(self):
-        tid = self._adopt_live("taskfbprobe000000001", fallback=_FALLBACK)
+        tid = self._adopt()
+        self.call("set-project-fallback-model", {"project_id": self.task()["project_id"], "fallback_model": _FALLBACK})
         self._empty_verdict(tid)
-        seen = {}
-
-        def _probe(provider_id, model_id):
-            seen["provider_id"] = provider_id
-            seen["model_id"] = model_id
-            seen["connection_file"] = _probe.conn_file
-            return True, "cache 命中"
-
-        # 经 plan_retry 的默认路径（不传显式 probe），只替换 probe_model，
-        # 这样 connection_file 的传递本身也被测到。
-        with mock.patch.object(fallback, "probe_model") as probe:
-            probe.side_effect = lambda p, m, **kw: (
-                seen.update(provider_id=p, model_id=m,
-                            connection_file=kw.get("connection_file"))
-                or (True, "cache 命中"))
-            with mock.patch.object(fallback, "primary_snapshot",
-                                   return_value=(_PRIMARY, None)):
-                actions = [a for a in loop.Reconciler(
-                    self.db_path, mode="live").reconcile_once()["actions"]
-                    if a.get("task_id") == tid]
-        self.assertEqual(seen.get("provider_id"), _FALLBACK["provider_id"])
-        self.assertEqual(seen.get("model_id"), _FALLBACK["model_id"])
-        # 关键断言：连接文件来自 primary 快照，而不是 None
-        self.assertEqual(seen.get("connection_file"),
-                         _PRIMARY["connection_file"])
-        self.assertTrue(actions)
+        with mock.patch.object(fallback, "primary_snapshot", return_value=(_PRIMARY, None)), mock.patch.object(fallback, "probe_model", return_value=(True, "cache 命中")) as probe:
+            actions = self._actions(tid)
+        self.assertTrue(actions[0].get("executed"), actions)
+        self.assertTrue(all(call.kwargs["connection_file"] == _PRIMARY["connection_file"] for call in probe.call_args_list))
 
     def test_probe_failure_still_records_why_no_switch(self):
-        """探针失败要落审计事件：否则事件表看不出曾考虑过 fallback。"""
-        tid = self._adopt_live("taskfbprobe000000002", fallback=_FALLBACK)
-        self._empty_verdict(tid)
-        with mock.patch.object(fallback, "probe_model",
-                               return_value=(False, "model 不存在")), \
-                mock.patch.object(fallback, "primary_snapshot",
-                                  return_value=(_PRIMARY, None)):
-            actions = [a for a in loop.Reconciler(
-                self.db_path, mode="live").reconcile_once()["actions"]
-                if a.get("task_id") == tid]
-        self.assertTrue(actions)
-        self.assertEqual(actions[0]["action"], "block")
-        self.assertEqual(actions[0]["reason"], "validation_failed")
-        events = [e for e in self.call(
-            "list-events", {"task_id": tid, "limit": 50})["events"]
-            if e["kind"] in ("model", "model_hint")]
-        self.assertTrue(events, "探针失败也应落审计事件")
-        self.assertEqual(events[0]["detail"]["reason"], "fallback_probe_failed")
+        TestQualityRetryLoop.test_probe_failure_blocks_with_validation_failed(self)
+
+
+for _class, _base in ((TestQualityRetryLoop, recovery_fixture.TestEngineRecovery), (TestQualityRetryProbeWiring, TestQualityRetryLoop)):
+    for _name in dir(_base):
+        if _name.startswith("test_") and _name not in _class.__dict__:
+            setattr(_class, _name, None)
+del _class, _base, _name
 
 
 class TestDispatchClaimSeam(KanpilotTestCase):

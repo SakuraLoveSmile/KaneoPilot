@@ -11,6 +11,7 @@ on calling → clean error, never a load-time ImportError).
 from __future__ import annotations
 
 import sys
+import time
 
 from . import attention, health
 from .. import db, derive, util
@@ -161,35 +162,76 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
     freeze validation does not map onto this synchronous engine run.
     """
     from . import verdict
+    from .. import cmd_exec, core, constants, engine_claim_scope
 
-    task = db.require_task(ctx.conn, payload["task_id"])
-    if (not db.task_is_active(task)
-            or task["run_id"] != payload["expected_execution_run_id"]
-            or task["plan_sha256"] != payload["expected_plan_sha256"]):
-        raise util.KanpilotError("conflict", "当前任务、执行轮次或计划已变化")
-    result = verdict.evaluate_task(ctx.conn, task)
+    started = time.monotonic()
+    def current_task():
+        task = db.require_task(ctx.conn, payload["task_id"])
+        if (not db.task_is_active(task)
+                or task["run_id"] != payload["expected_execution_run_id"]
+                or task["plan_sha256"] != payload["expected_plan_sha256"]):
+            raise util.KanpilotError("conflict", "当前任务、执行轮次或计划已变化")
+        core.require_stage_identity(ctx.conn, payload, task, util.now_dt(), stages=("monitor",))
+        return task
+
+    task = current_task()
+    mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
+    receipt_key = "engine_verdict_shadow" if mode == "shadow" else "engine_verdict"
     operation_id = payload.get("operation_id") or util.new_uuid()
-    receipt = {
-        "operation_id": operation_id,
-        "execution_run_id": task["run_id"],
-        "plan_sha256": task["plan_sha256"],
-        "verification_ok": result["verification_ok"],
-        "empty_diff": result["empty_diff"],
-        "environment_failure": result["environment_failure"],
-        "effective_changes": result["effective_changes"],
-        "checks": result["checks"],
-        "detail": result["detail"],
-        "completed_at": ctx.now_iso,
-    }
+    prior = db.task_extra(task).get(receipt_key) or {}
+    lease = constants.DEFAULT_LEASE_SECONDS
+    budget = lease * 0.8
+    if payload.get("request_id"):
+        request = core.require_stage_identity(ctx.conn, payload, task, util.now_dt(), stages=("monitor",))
+        remaining = (util.parse_ts(request["lease_expires_at"]) - util.now_dt()).total_seconds()
+        budget = min(budget, remaining * 0.8)
+    requested = payload.get("budget_seconds")
+    if requested is not None:
+        if requested <= 0:
+            raise util.bad_request("验证总时限必须大于 0")
+        budget = min(budget, requested)
+    deadline = started + budget
+
+    last_heartbeat = [started - 60]
+    def heartbeat():
+        if time.monotonic() - last_heartbeat[0] < min(60, lease / 3):
+            return
+        last_heartbeat[0] = time.monotonic()
+        current_task()
+        if payload.get("request_id"):
+            ctx.now, ctx.now_iso = util.now_dt(), util.now_iso()
+            cmd_exec.cmd_heartbeat(ctx, {"request_id": payload["request_id"], "run_id": payload["run_id"]})
+
+    try:
+        if (mode == "live" and prior.get("verification_ok") is True
+                and prior.get("execution_run_id") == task["run_id"]
+                and prior.get("plan_sha256") == task["plan_sha256"]):
+            if verdict.valid_committed_receipt(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat):
+                # Covers the real monitor recovery order: Git completed before
+                # DB phase 3, so engine-verdict must preserve this passed receipt
+                # until delivery-commit registers the already frozen commit.
+                return dict(prior, ok=True, deduplicated=True)
+        if prior.get("operation_id") == operation_id:
+            if prior.get("execution_run_id") != task["run_id"] or prior.get("plan_sha256") != task["plan_sha256"]:
+                raise util.KanpilotError("conflict", "判定操作身份不符")
+            if prior.get("binding") != verdict.binding(ctx.conn, task, deadline=deadline, heartbeat=heartbeat):
+                raise util.KanpilotError("verification_identity_unconfirmed", "判定回执的工作树已变化")
+            return dict(prior, ok=True, deduplicated=True)
+
+        result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
+    except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code != "verification_identity_unconfirmed":
+            raise
+        result = {"verification_ok": False, "empty_diff": False, "environment_failure": False,
+                  "effective_changes": [], "checks": [], "kind": "unconfirmed", "binding": None,
+                  "detail": util.redact(getattr(exc, "message", str(exc)))}
+    current = current_task()
+    receipt = dict(result, operation_id=operation_id, execution_run_id=task["run_id"],
+                   plan_sha256=task["plan_sha256"], completed_at=util.now_iso(), engine_mode=mode)
     with db.write_txn(ctx.conn):
-        current = db.require_task(ctx.conn, task["task_id"])
-        db.set_extra(ctx.conn, current, ctx.now_iso, engine_verdict=receipt)
-    return {"ok": True, "operation_id": operation_id,
-            "verification_ok": result["verification_ok"],
-            "empty_diff": result["empty_diff"],
-            "effective_changes": result["effective_changes"],
-            "checks": result["checks"], "detail": result["detail"],
-            "environment_failure": result["environment_failure"]}
+        current = current_task()
+        db.set_extra(ctx.conn, current, receipt["completed_at"], **{receipt_key: receipt})
+    return dict(receipt, ok=True)
 
 
 # Backends whose sessions are deprecated (protocol §5.27.5): return unavailable.
