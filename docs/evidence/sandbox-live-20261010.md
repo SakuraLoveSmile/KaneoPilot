@@ -314,7 +314,7 @@ G1（retry_base 落库）、G2（dispatching 反向单测）、F1（fallback con
  
  - 两个卡死任务（qyk2q7r6…/vzyxurg7…）被 `_round_settle` 正确捞起：补登记
    monitor 请求入队 → worker 读最新 job.json 收尾。
- - 任务 1/5：exit 0 → 核心亲判 verify 通过 → delivery-commit → `in_review`，
+ - 任务 1/5：exit 0 → 转录证据匹配通过（当时尚未接入核心 verdict） → delivery-commit → `in_review`，
    review 请求已入队——从「卡死 observe/running」一路恢复进黄金路径。
  - 任务 2/5：补登记成功但 verify 证据不可确认（见 14.3）。
  
@@ -348,3 +348,8 @@ G1（retry_base 落库）、G2（dispatching 反向单测）、F1（fallback con
  租约修复（25fd5261）落地后重启引擎：任务 1 续跑 review→PR→merge→done；
  intake 领养 Kaneo 侧剩余 3 个 To Do（max_active_tasks=2，任务 1 离开
  running 后释放槽位）。任务 2 的最终处置随 fb9e1595 方案确定后更新本节。
+
+
+### 15. 2026-10-12 对账补记（历史证据，非本次实跑）
+
+按用户批准的对账记录：qyk2q7r6 done（PR #4 合并）；c15qfexm / l90mm8yw 的 PR #5/#6 打开且 review pass；vzyxurg7 卡 verification_unconfirmed（转录匹配）；wmzafpq0… review_blocked（tracked pyc 弄脏 review 快照）。该批事件 actor=user 为 0。原 §14.1 不构成核心运行 verify 的证据；A1 接线与 A2 自动补救待本次隔离验证，A5 实机复跑待费用及沙盒合并授权。

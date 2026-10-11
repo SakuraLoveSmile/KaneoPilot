@@ -9,7 +9,7 @@
  - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
  - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
  - strangler 三态切换：`engine_mode: legacy|shadow|live`（按项目切换，不跨项目混用）。旧模块全部保留；Phase 4/5/6 不在当前范围，不声称已支持。
- - verdict 由核心亲判：有效 diff 排除 `.pi/**` 目录，核心亲跑 verify 命令，不依赖 Plus 转录作为完成依据。
+ - live verdict 按 protocol §5.27.11 接入核心亲判：排除 `.pi/**` 与交付构建产物，核心亲跑 verify；legacy 保持旧路径，shadow 对比记录。接线完成前不得声称 live 已由核心判定。
  - 外部副作用先写 `runtime_operations` 回执再执行；远端写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
  
  ## 布局与归属
