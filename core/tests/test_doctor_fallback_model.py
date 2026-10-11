@@ -10,6 +10,7 @@ Run: ``cd core && python3 -m pytest tests/test_doctor_fallback_model.py -q``.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
@@ -55,6 +56,24 @@ class TestConfiguredModels(unittest.TestCase):
 
 
 class TestDoctorFallbackCheck(KanpilotTestCase):
+    def setUp(self):
+        super().setUp()
+        # Doctor must not discover the developer's real Plus connection or
+        # contact a running Plus instance, even in the unconfigured case.
+        connection_file = self.root / "plus-connection.json"
+        connection_file.write_text(json.dumps({
+            "url": "http://127.0.0.1:1/mcp", "token": "fixture-token",
+        }), encoding="utf-8")
+        probe = mock.patch("kanpilot.pi_desktop_backend.probe_connection",
+                           return_value={"ok": True, "detail": "fixture"})
+        probe.start()
+        self.addCleanup(probe.stop)
+        self.call("set-exec-config", {"pi_desktop": {
+            "connection_file": str(connection_file),
+            "provider_id": "fixture-provider", "model_id": "fixture-model",
+            "thinking_level": "medium", "permission_mode": "auto",
+        }})
+
     def _map_project(self, model=_FALLBACK):
         self.make_repo("Feedback")   # set-project-mapping 校验仓库路径存在
         revision = self.call("get-project-mappings", {}).get("revision", 0)

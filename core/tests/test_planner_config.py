@@ -45,8 +45,12 @@ def _meta(**overrides):
     return meta
 
 
-class CheckPlanMetaExpectedModel(unittest.TestCase):
+class CheckPlanMetaExpectedModel(KanpilotTestCase):
     """planfile.check_plan_meta 的 expected_model 三态（§5.22.6 冻结签名）。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.repos_root / "Feedback").mkdir()
 
     def test_expected_model_match(self):
         meta = _meta(planner_model="m", reasoning_effort="r")

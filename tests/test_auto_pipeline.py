@@ -27,6 +27,20 @@ VERIFY = 'python3 -m unittest discover -s tests'
 class TestAutoPipeline(PiDesktopCase):
     def setUp(self):
         super().setUp()
+        # Retain the exact child handles: a resumed observer can outlive the
+        # assertion and otherwise consume the next fixture's reused Plus port.
+        self.worker_processes = []
+        real_popen = subprocess.Popen
+        def popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            argv = args[0] if args else kwargs.get('args', [])
+            if isinstance(argv, (list, tuple)) and 'kanpilot.pi_desktop_worker' in argv:
+                self.worker_processes.append(process)
+            return process
+        worker_spawn = mock.patch('kanpilot.cmd_dispatch.subprocess.Popen', side_effect=popen)
+        worker_spawn.start()
+        self.addCleanup(worker_spawn.stop)
+        self.addCleanup(self._stop_workers)
         self.repo = make_repo(self.root / 'git')
         tests = self.repo / 'tests'; tests.mkdir()
         (tests / 'test_feedback.py').write_text("import unittest\nfrom pathlib import Path\nclass Feedback(unittest.TestCase):\n def test_feedback(self):\n  self.assertTrue(Path('feedback.txt').read_text().startswith('round '))\n")
@@ -108,6 +122,12 @@ class TestAutoPipeline(PiDesktopCase):
                     'exitCode':None if self.omit_exit else result.returncode,'turnId':self.server.execution_turn}]
             return response
         self.server.tool_call = plus
+
+    def _stop_workers(self):
+        for process in self.worker_processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
 
     def _stage(self, module, stage):
         conn = db.connect(self.db_path)
