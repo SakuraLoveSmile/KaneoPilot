@@ -5,12 +5,14 @@ Run: ``cd core && python3 -m pytest tests/test_engine_loop.py -q``.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import unittest
 import uuid
 from datetime import timedelta
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import core, db, util  # noqa: E402
+from kanpilot import core, db, process_owner, util  # noqa: E402
 from kanpilot.engine import health, loop  # noqa: E402
 
 
@@ -99,6 +101,161 @@ class TestEngineLease(KanpilotTestCase):
         self.assertEqual(code, 1)
         code, _, _ = self.call_main(["engine", "bogus", "--db", str(self.db_path)])
         self.assertEqual(code, 1)
+
+
+class TestLeaseHolderTakeover(KanpilotTestCase):
+    """失联持有者接管（protocol §5.27.1）：pid 经 birth 核验已死 → 放行接管。
+
+    形状：引擎被 SIGKILL（``finally`` 未执行）→ 租约条目停在 active 且
+    ``lease_expires_at`` 未到 → 旧口径下任何新引擎都被拒绝，直到租约自然
+    过期（沙盒实测 7200 秒堵死验收）。新口径按「持有进程是否经 birth 核验
+    存活」判定，并允许把失联条目标记 stopped 后接管。
+    """
+
+    def _conn(self):
+        return db.connect(self.db_path)
+
+    def _instances(self, conn):
+        return db.get_setting(conn, process_owner.SETTING, {})
+
+    def _dead_holder_pid(self):
+        """A real pid that has already exited (and its recorded birth)."""
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(proc.kill)
+        birth = process_owner.process_birth(proc.pid)
+        proc.kill()
+        proc.wait()
+        return proc.pid, birth
+
+    def _seed_entry(self, conn, instance_id, *, pid, birth=None, lease_seconds=600):
+        now = util.now_dt()
+        entry = {"state": "active", "instance_id": instance_id, "pid": pid,
+                 "stage": None, "started_at": util.to_iso(now),
+                 "lease_expires_at": util.plus_seconds(lease_seconds, now),
+                 "workers": []}
+        if birth:
+            entry.update(birth)
+        with db.write_txn(conn):
+            instances = self._instances(conn)
+            instances[instance_id] = entry
+            db.set_setting(conn, process_owner.SETTING, instances)
+        return entry
+
+    def test_dead_holder_lease_is_taken_over_and_marked_stopped(self):
+        pid, birth = self._dead_holder_pid()
+        self.assertIsNotNone(birth, "无法读取子进程 birth，测试前提不成立")
+        dead, live = _iid(), _iid()
+        conn = self._conn()
+        try:
+            self._seed_entry(conn, dead, pid=pid, birth=birth)
+            # 未过期的活跃租约，但持有进程已死 → 放行接管。
+            health.acquire_or_renew_lease(
+                conn, util.now_iso(), instance_id=live, stage=None,
+                pid=os.getpid(), lease_seconds=600)
+            instances = self._instances(conn)
+            self.assertEqual(instances[dead]["state"], "stopped")
+            self.assertEqual(instances[dead]["stopped_reason"], "holder_dead")
+            self.assertIsNotNone(instances[dead]["stopped_at"])
+            # 原 active/未过期字段不被改写（只追加停止标记）。
+            self.assertEqual(instances[live]["state"], "active")
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 1)
+        finally:
+            conn.close()
+
+    def test_live_holder_still_refuses_a_second_engine(self):
+        live_a, live_b = _iid(), _iid()
+        conn = self._conn()
+        try:
+            health.acquire_or_renew_lease(
+                conn, util.now_iso(), instance_id=live_a, stage=None,
+                pid=os.getpid(), lease_seconds=600)
+            with self.assertRaises(util.KanpilotError) as ctx:
+                health.acquire_or_renew_lease(
+                    conn, util.now_iso(), instance_id=live_b, stage=None,
+                    pid=os.getpid(), lease_seconds=600)
+            self.assertEqual(ctx.exception.code, "conflict")
+            # 被拒不改写任何条目。
+            self.assertEqual(self._instances(conn)[live_a]["state"], "active")
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 1)
+        finally:
+            conn.close()
+
+    def test_reused_pid_with_foreign_birth_is_not_mistaken_for_alive(self):
+        """pid 仍在（本测试进程），但 birth 与记录不符 → 原持有者已死。"""
+        stale = _iid()
+        conn = self._conn()
+        try:
+            self._seed_entry(conn, stale, pid=os.getpid(),
+                             birth={"started_seconds": 1,
+                                    "started_microseconds": 2})
+            fresh = _iid()
+            health.acquire_or_renew_lease(
+                conn, util.now_iso(), instance_id=fresh, stage=None,
+                pid=os.getpid(), lease_seconds=600)
+            self.assertEqual(self._instances(conn)[stale]["stopped_reason"],
+                             "holder_dead")
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 1)
+        finally:
+            conn.close()
+
+    def test_legacy_entry_without_birth_stays_conservative(self):
+        """历史条目无 birth → 无法核验存活 → 按未过期拒绝接管（含死 pid）。"""
+        pid, _birth = self._dead_holder_pid()
+        legacy, fresh = _iid(), _iid()
+        conn = self._conn()
+        try:
+            self._seed_entry(conn, legacy, pid=pid)          # 无 birth
+            with self.assertRaises(util.KanpilotError) as ctx:
+                health.acquire_or_renew_lease(
+                    conn, util.now_iso(), instance_id=fresh, stage=None,
+                    pid=os.getpid(), lease_seconds=600)
+            self.assertEqual(ctx.exception.code, "conflict")
+            self.assertEqual(self._instances(conn)[legacy]["state"], "active")
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 1)
+        finally:
+            conn.close()
+
+    def test_expired_lease_is_still_taken_over(self):
+        """过期租约接管（既有行为，不因 birth 规则回归）。"""
+        stale, fresh = _iid(), _iid()
+        conn = self._conn()
+        try:
+            entry = self._seed_entry(conn, stale, pid=os.getpid())
+            with db.write_txn(conn):
+                instances = self._instances(conn)
+                instances[stale] = dict(
+                    entry, lease_expires_at=util.to_iso(
+                        util.now_dt() - timedelta(seconds=120)))
+                db.set_setting(conn, process_owner.SETTING, instances)
+            health.acquire_or_renew_lease(
+                conn, util.now_iso(), instance_id=fresh, stage=None,
+                pid=os.getpid(), lease_seconds=600)
+            # 过期条目按既有口径不改写（只「跳过」）；只有失联持有者才会被
+            # 标记 stopped/holder_dead，两者是可区分的审计事实。
+            self.assertEqual(self._instances(conn)[stale]["state"], "active")
+            self.assertNotIn("stopped_reason", self._instances(conn)[stale])
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 1)
+        finally:
+            conn.close()
+
+    def test_status_reports_dead_holder_without_counting_it_active(self):
+        pid, birth = self._dead_holder_pid()
+        self.assertIsNotNone(birth, "无法读取子进程 birth，测试前提不成立")
+        dead = _iid()
+        conn = self._conn()
+        try:
+            self._seed_entry(conn, dead, pid=pid, birth=birth)
+            status = health.engine_status(conn, util.now_dt())
+            self.assertEqual(len(status["instances"]), 1)
+            view = status["instances"][0]
+            # 失联条目仍可见（诊断需要），但不计为活动实例。
+            self.assertEqual(view["instance_id"], dead)
+            self.assertEqual(view["state"], "active")
+            self.assertFalse(view["holder_alive"])
+            self.assertFalse(view["active"])
+            self.assertEqual(health.active_instance_count(conn, util.now_dt()), 0)
+        finally:
+            conn.close()
 
 
 class TestReconcile(KanpilotTestCase):
