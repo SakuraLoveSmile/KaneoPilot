@@ -168,6 +168,55 @@ def test_run_stage_records_cost_before_settlement(runner_scene, tmp_path, monkey
     assert ('register-review' in commands) is not failed
 
 
+@pytest.mark.parametrize('backend', ['claude', 'codex'])
+@pytest.mark.parametrize('source_dirty', [False, True])
+def test_cli_branch_review_shares_artifact_guard(runner_scene, tmp_path, monkeypatch, backend, source_dirty):
+    conn, task, calls = runner_scene
+    worktree = Path(task['execution_round']['worktree_path'])
+    def git(*args):
+        return subprocess.run(['git', '-C', str(worktree), *args], check=True,
+                              capture_output=True).stdout.decode().strip()
+    base = git('rev-parse', 'HEAD')
+    git('checkout', '-qb', 'kaneo/t1')
+    (worktree / 'tracked.pyc').write_bytes(b'baseline artifact')
+    git('add', '.')
+    git('commit', '-qm', 'committed execution')
+    head = git('rev-parse', 'HEAD')
+    task['delivery'] = {'mode': 'manual', 'workspace_version': 1, 'branch': 'kaneo/t1',
+                        'worktree_path': str(worktree), 'base_branch': 'main',
+                        'base_sha': base, 'head_sha': head,
+                        'commits': [{'execution_run_id': 'exec1', 'sha': head}]}
+    conn.execute('UPDATE tasks SET extra_json=? WHERE task_id=?',
+                 (util.jdump({'execution_round': task['execution_round'], 'delivery': task['delivery']}), 't1'))
+    conn.commit()
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+    monkeypatch.setattr(review_config, 'snapshot', lambda _conn: {
+        'backend': backend, 'model': 'm', 'effort': 'high', 'reasoning_effort': 'high'})
+    observed = []
+    original_guard = review._guard_branch_job
+    def guard(job, current):
+        observed.append('guard')
+        return original_guard(job, current)
+    monkeypatch.setattr(review, '_guard_branch_job', guard)
+    def process(argv, **kwargs):
+        observed.append('process')
+        root = Path(kwargs['cwd'])
+        (root / 'tracked.pyc').write_bytes(b'review generated artifact')
+        (root / 'untracked.pyc').write_bytes(b'new artifact')
+        if source_dirty:
+            (root / 'app.py').write_text('mutated source\n')
+        return {'is_error': False, 'structured_output': RESULT, 'total_cost_usd': 0}
+    monkeypatch.setattr(claude_cli, 'run', process)
+    monkeypatch.setattr(cli_review, 'run_codex', process)
+    code = cli_review.run_stage('review', conn=conn, db_path='isolated', timeout=3,
+                                log_path=tmp_path / 'review.log', record_run=lambda **kwargs: None)
+    assert observed[:2] == ['guard', 'process']
+    assert observed.count('guard') >= 2
+    assert code == (1 if source_dirty else 0)
+    commands = [cmd for cmd, _ in calls]
+    assert ('register-review' in commands) is not source_dirty
+
+
 def test_delivery_materials_full_diff_increment_and_large_diff(tmp_path, monkeypatch):
     old = tmp_path / 'old.md'
     old.write_text('上一轮报告')

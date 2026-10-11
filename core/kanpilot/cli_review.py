@@ -221,7 +221,13 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     prompt = (Path(__file__).resolve().parents[1] / "executor_prompts" / "review_cli.md").read_text(encoding="utf-8")
     instruction = review.review_instruction(prompt, job=job, review_root=snapshot, materials=materials, facts=facts)
-    job.update(review_root=str(snapshot), materials=materials["files"], send_state="unknown")
+    job.update(review_root=str(snapshot), materials=materials["files"])
+    try:
+        if job.get("review_branch_snapshot"):
+            review._guard_branch_job(job, task)
+    except (util.KanpilotError, OSError) as exc:
+        return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
+    job["send_state"] = "unknown"
     save()
     interval = review._heartbeat_interval(facts.get("request"))
     next_heartbeat = time.monotonic() + interval
