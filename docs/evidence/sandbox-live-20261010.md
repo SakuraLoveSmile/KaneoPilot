@@ -302,3 +302,49 @@ G1（retry_base 落库）、G2（dispatching 反向单测）、F1（fallback con
 `round.pid` 已死 + `job.json` 有 `ended_at`/`exit_code`，即按 `exit_code` 派生终态
 （0 → 走 verdict，非 0 → 按失败阶梯归因），而非无限 AWAIT。原设计只覆盖「引擎被杀」，
 未覆盖「worker 正常退出但终态登记错过窗口」。
+ 
+ ## 14. 第四次重跑：§13.2 修复（51d43db）后（2026-10-11 上午）
+ 
+ 引擎侧修复已由 engine_builder 提交 `51d43db`（rounds.py 只读世界探测 +
+ decide.round_settled_decision 纯函数 + loop._round_settle 有界补登记，
+ MAX_ROUND_SETTLE=2；17+3 支新测试；core 2385 passed / rehearsal 63 passed）。
+ 重启 MCP + live 引擎（验收库），本轮实测：
+ 
+ ### 14.1 §13.2 修复实证（live 形状通过）
+ 
+ - 两个卡死任务（qyk2q7r6…/vzyxurg7…）被 `_round_settle` 正确捞起：补登记
+   monitor 请求入队 → worker 读最新 job.json 收尾。
+ - 任务 1/5：exit 0 → 核心亲判 verify 通过 → delivery-commit → `in_review`，
+   review 请求已入队——从「卡死 observe/running」一路恢复进黄金路径。
+ - 任务 2/5：补登记成功但 verify 证据不可确认（见 14.3）。
+ 
+ ### 14.2 新缺陷 A：引擎被杀后租约堵死恢复（已补规格，实现中）
+ 
+ 引擎进程被外部杀死（`finally` 未执行，租约未释放），`lease_expires_at`
+ 7200 秒内任何新引擎都被 `acquire_or_renew_lease` 拒绝——崩溃恢复被堵死
+ 整整一个租约周期。已在 docs/protocol.md §5.27.1 补规格：租约条目记录
+ pid + birth，接管判据收紧为「active 且未过期 且持有进程经 birth 核验存活」，
+ pid 已死 → 放行接管并标记旧条目 stopped(holder_dead)。任务 25fd5261 实现中。
+ 
+ ### 14.3 新缺陷 B：verify 证据不可确认的黄金路径缺口（方案待确认）
+ 
+ 任务 2/5 进 `needs_user/verification_unconfirmed`，且人工 reverify 对此
+ 形状无效（重读同一证据仍不匹配），只有 replan 重开轮次能恢复。事实链：
+ 
+ - 该轮 20+ 次 Bash 调用遇 Plus 宿主 `HOST_OVERLOADED`（exit_code=null）；
+ - 执行器重试后改用 `python3 -m unittest discover -s tests 2>&1; echo
+   "EXIT_CODE=$?"` 组合跑法——测试实际全过（output 含 `Ran 3 tests OK
+   EXIT_CODE=0`），但 `verify_evidence.match_verification` 按设计拒绝不受支持
+   组合，无法归属独立退出码；
+ - `auto_monitor` 直报 needs_user（ladder 的 quality 分级被绕过）。
+ 
+ 对照组：任务 1 同样 29 次 HOST_OVERLOADED，执行器坚持原样重试，最终拿到
+ 精确匹配 + exit 0 所以通过——差异在执行器变通行为，属概率性，五连跑会再遇。
+ 处置方案（任务 fb9e1595）调研中，硬约束：不削弱证据严格性、不破坏未发送
+ 派发守卫、写经核心命令。
+ 
+ ### 14.4 待续
+ 
+ 租约修复（25fd5261）落地后重启引擎：任务 1 续跑 review→PR→merge→done；
+ intake 领养 Kaneo 侧剩余 3 个 To Do（max_active_tasks=2，任务 1 离开
+ running 后释放槽位）。任务 2 的最终处置随 fb9e1595 方案确定后更新本节。

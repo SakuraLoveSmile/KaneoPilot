@@ -1232,10 +1232,11 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  ```
  
  - `stage` 缺省时读取 `settings.executor_runs` 当前未暂停且可领取的阶段。
- - **单实例租约**：在 `BEGIN IMMEDIATE` 事务内写入 `settings.executor_instances`（`instance_id, started_at, pid, stage, lease_expires_at`）；重复调用同一 `instance_id` 幂等续租。
+ - **单实例租约**：在 `BEGIN IMMEDIATE` 事务内写入 `settings.executor_instances`（`instance_id, started_at, pid, stage, lease_expires_at`）；重复调用同一 `instance_id` 幂等续租。条目同时记录持有者进程启动时间（birth，`started_seconds`/`started_microseconds`，与 worker 登记同口径）。
+ - **失联持有者接管**：另一引擎条目除「未过期」外，还须「持有进程存活」才阻止第二个长驻引擎。持有条目的 pid 经 birth 核验已不存在（进程退出且启动时间无法匹配）→ 该条目失联，`acquire_or_renew_lease` 放行接管，并把失联条目标记 `state=stopped`（附 `stopped_reason=holder_dead`），不得仅因 `lease_expires_at` 未到就无限期拒绝恢复。pid 复用由 birth 核验防混淆；`engine status` 与活动实例计数同口径（pid 已死不计为活动）。
  - **心跳**：启动后每 `min(lease_seconds/3, 60)` 秒刷新 `lease_expires_at`；租约过期前 60 秒主动续约。
  - **退避重启**：非零退出或信号终止时，按指数退避（1s → 2s → 4s → … → 上限 60s）重试；连续失败 5 次后进入 backoff 状态，由 `engine status` 展示。
- - **失联判定**：`lease_expires_at < now` 且无心跳 → 派生 `lost`；不自动释放、不自动重启。
+ - **失联判定**：`lease_expires_at < now` 且无心跳 → 派生 `lost`；不自动释放、不自动重启。持有 pid 经 birth 核验已死 → 同样派生失联（可按上条接管），不自动释放、不自动重启。
  - 环境变量 `KANPILOT_EXECUTOR_INSTANCE_ID` 由 App 启动时生成 UUID 并传入 runner/worker；worker 启动后经 `executor-instance` 的 `register-worker` 登记真实 PID 与启动时间。
  
 #### 5.27.2 engine status
