@@ -6,22 +6,23 @@ import Combine
 @MainActor
 final class AppRuntime {
     static let shared = AppRuntime()
-    let scheduler: ExecutorScheduler
+    let scheduler: EngineSupervisor
     let mcpManager: MCPServiceManager
     private var started = false
     private var stopping = false
     private var stopCompletions: [(Bool) -> Void] = []
 
     init(client: CoreClient = CoreClient(), mcpManager: MCPServiceManager? = nil) {
-        self.scheduler = ExecutorScheduler(client: client)
+        self.scheduler = EngineSupervisor(client: client)
         self.mcpManager = mcpManager ?? .shared
     }
 
     func start() {
         guard !started, !stopping else { return }
         started = true
-        mcpManager.restoreAtAppLaunch()
-        ExecutorScheduler.LocalNetworkGate.probeAtLaunch()
+        if ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil {
+            mcpManager.restoreAtAppLaunch()
+        }
         scheduler.start()
     }
 
@@ -32,8 +33,8 @@ final class AppRuntime {
         guard !stopping else { return }
         stopping = true
         started = false
-        // 先关闭实例并停止本地观察进程，再停 MCP，避免观察者因控制面先消失
-        // 把正常退出写成执行失败。核心无法证明归属清理时保留 App 与现场。
+        // Stop this App’s engine first, then its MCP. External engines and Plus
+        // sessions keep running; a pending local shutdown cancels App exit.
         scheduler.stop { [weak self] successful in
             guard let self else { return }
             let finish = {

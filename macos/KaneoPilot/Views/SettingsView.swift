@@ -1,19 +1,22 @@
 import SwiftUI
 
-/// §4.9/§4.11 设置页五段（segmented，不按软件名分节）：项目与仓库 / 规划环境 / 执行环境 / Review 环境 / 通用。
+/// Four reachable settings pages, retaining existing role editors and confirmations.
 enum SettingsSegment: String, CaseIterable, Identifiable {
-    case projects, planner, exec, review, general
-
+    case connections, projects, planning, advanced
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .projects: return "项目与仓库"
-        case .planner: return "规划环境"
-        case .exec: return "执行环境"
-        case .review: return "Review 环境"
-        case .general: return "通用"
+        case .connections: return "连接"
+        case .projects: return "项目"
+        case .planning: return "规划与评审"
+        case .advanced: return "高级"
         }
     }
+    // Existing contextual entry points route to the new containing page.
+    static var planner: Self { .planning }
+    static var review: Self { .planning }
+    static var exec: Self { .connections }
+    static var general: Self { .advanced }
 }
 
 private struct DesktopAutomationScheduleDraft {
@@ -275,18 +278,16 @@ struct SettingsView: View {
                     switch segment {
                     case .projects:
                         EmptyView()
-                    case .planner:
+                    case .planning:
                         plannerSection
-                        desktopQueueSection
-                    case .exec:
-                        execSection
-                        schedulerSection
-                    case .review:
                         reviewSection
                         desktopQueueSection
-                    case .general:
-                        backgroundSection
+                    case .connections:
+                        execSection
                         mcpServiceSection
+                    case .advanced:
+                        backgroundSection
+                        schedulerSection
                         diagnosticsSection
                         automationSection
                         parametersSection
@@ -2373,125 +2374,17 @@ struct SettingsView: View {
     // MARK: 执行端调度（§5.19，v1.6：App 内置调度器）
 
     private var schedulerSection: some View {
-        Section("执行端调度") {
-            Toggle("启用执行端调度", isOn: $executorEnabled)
+        Section("引擎监督") {
+            Toggle("启用本机引擎", isOn: $executorEnabled)
                 .font(.kpBody)
-            Text("应用运行期间每 20 秒检查队列，每 300 秒自动接收；关闭主窗口后继续后台运行，退出应用后停止。")
+                .onChange(of: executorEnabled) { _, value in model.executorScheduler?.setEnabled(value) }
+            Text("App 监督 engine run；核心按项目的 legacy / shadow / live 设置处理任务，关闭窗口仍运行。已启动引擎在退出 App 时停止。")
                 .font(.kpSmall).foregroundStyle(.secondary)
-            ForEach(["plan", "dispatch", "monitor", "review", "delivery", "intake"], id: \.self) { stage in
-                executorStageRow(stage)
-            }
-            HStack(spacing: Spacing.m) {
-                Spacer(minLength: 0)
-                Button("刷新") { Task { await refreshExecutorStatus() } }
-                    .accessibilityLabel("刷新执行端状态")
-            }
+            Button("检查引擎状态") { model.runIntakeNow() }
+            Button("允许需要你通知") { model.executorScheduler?.requestNotifications() }
+            Text("通知使用与总览、菜单栏相同的收件箱；仅在新增待处理事项时提醒。")
+                .font(.kpSmall).foregroundStyle(.secondary)
         }
-    }
-
-    /// 规划 runner 最近状态（executor-status stages["plan"]；非定时，无下次触发）。
-    private var plannerStatusText: String {
-        var parts: [String] = ["手动触发"]
-        let status = executorStatus?.stages?["plan"]
-        if (status?.desktopWaiting ?? 0) > 0 {
-            parts.append("已排队，等待 Desktop 领取 \(status?.desktopWaiting ?? 0) 项")
-        }
-        if status?.running != nil {
-            parts.append("运行中")
-        } else if let last = status?.last {
-            let at = TimeFormat.short(last.finishedAt ?? last.startedAt)
-            switch last.exitCode {
-            case .some(0): parts.append("成功 \(at)")
-            case .some(let code): parts.append("失败(exit \(code)) \(at)")
-            case .none: parts.append("尚无记录")
-            }
-        } else {
-            parts.append("尚无记录")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    /// 单 stage 行：下次触发时间 + 最近一次运行状态 + 控制轮身份 + 「立即运行」。
-    /// §5.24.4：Plus 控制轮的 backend/会话/turn/控制轮/发送状态逐行可见。
-    private func executorStageRow(_ stage: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-            Text(Labels.stage(stage))
-                .font(.kpSmall)
-                .foregroundStyle(.secondary)
-                .frame(width: 96, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(executorStageText(stage))
-                    .font(.kpBody)
-                    .textSelection(.enabled)
-                if let identity = executorStageIdentity(stage) {
-                    Text(identity)
-                        .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let note = executorStageNote(stage) {
-                    Text(note)
-                        .font(.kpSmall)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 0)
-            Button("立即运行") {
-                if stage == "intake" { model.runIntakeNow() }
-                else { model.executorScheduler?.runNow(stage) }
-                Task {
-                    // runner 写 executor_runs 有延迟，稍后刷新一次状态。
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    await refreshExecutorStatus()
-                }
-            }
-            .disabled(!model.coreFound)
-            .help(executorStageNote(stage)
-                  ?? "按当前 schedule 立即拉起本阶段执行端（单飞：在途则跳过）")
-            .accessibilityLabel("立即运行\(Labels.stage(stage))执行端")
-        }
-    }
-
-    /// §5.24.4：控制轮身份（运行端 · 会话 → turn · 控制轮 · 发送状态）。
-    private func executorStageIdentity(_ stage: String) -> String? {
-        let status = executorStatus?.stages?[stage]
-        return (status?.running ?? status?.last)?.identityText
-    }
-
-    /// §5.24.4：持久活跃 / unknown 控制轮的单飞说明（不自动重发）。
-    private func executorStageNote(_ stage: String) -> String? {
-        let status = executorStatus?.stages?[stage]
-        guard let entry = status?.running,
-              entry.backend == "pi_desktop" else { return nil }
-        var text = "持久控制轮在途（单飞）：同一阶段不会重复启动；"
-            + "控制进程消失只触发只读恢复，不代表已完成。"
-        if entry.sendState == "unknown" {
-            text += "发送不明：保留人工阻塞，不会自动重发。"
-        }
-        return text
-    }
-
-    private func executorStageText(_ stage: String) -> String {
-        var parts: [String] = []
-        if !executorEnabled { parts.append("已停用") }
-        let status = executorStatus?.stages?[stage]
-        if (status?.desktopWaiting ?? 0) > 0 {
-            parts.append("已排队，等待 Desktop 领取 \(status?.desktopWaiting ?? 0) 项")
-        }
-        if status?.running != nil {
-            parts.append("运行中")
-        } else if let last = status?.last {
-            let at = TimeFormat.short(last.finishedAt ?? last.startedAt)
-            switch last.exitCode {
-            case .some(0): parts.append("成功 \(at)")
-            case .some(let code): parts.append("失败(exit \(code)) \(at)")
-            case .none: parts.append("尚无记录")
-            }
-        } else {
-            parts.append("尚无记录")
-        }
-        return parts.joined(separator: " · ")
     }
 
     private func refreshExecutorStatus() async {
@@ -2549,7 +2442,7 @@ struct SettingsView: View {
                     }
                 }
             } else { Text("尚无接收记录").font(.kpSmall).foregroundStyle(.secondary) }
-            Button("立即检查") { model.runIntakeNow(); Task { await refreshExecutorStatus() } }
+            Button("刷新引擎状态") { model.runIntakeNow(); Task { await refreshExecutorStatus() } }
                 .disabled(!model.coreFound)
             Text("关闭主窗口后仍在菜单栏运行；退出应用后停止调度。")
                 .font(.kpSmall).foregroundStyle(.secondary)

@@ -102,7 +102,7 @@ struct TaskDetailContentView: View {
         HStack(spacing: Spacing.m) {
             if let detail {
                 StatusBadge(status: DisplayStatus.effective(detail))
-                Text("阶段：\(Labels.stage(detail.stage))")
+                Text("阶段：\(detail.phase.map(PhaseStepperView.title) ?? "未提供")")
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
                     StatusBadge(status: "待确认执行")
                 }
@@ -622,7 +622,7 @@ struct TaskOverviewTabView: View {
     var onRefreshDetail: (() -> Void)? = nil
 
     @EnvironmentObject private var model: AppViewModel
-    @State private var confirm: TaskDetailView.ConfirmableAction?
+    @State private var confirm: ConfirmableAction?
     @State private var confirmingPurge = false
     @State private var technicalExpanded = false
     @State private var reverifyError: String?
@@ -766,6 +766,18 @@ struct TaskOverviewTabView: View {
                 }
                 if let store = verificationStore {
                     VerificationCheckResultsView(store: store)
+                }
+
+                PhaseStepperView(phase: detail.phase, condition: detail.condition)
+                if let evidence = detail.attention?.evidence, !evidence.isEmpty {
+                    DisclosureGroup("阻塞证据") {
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            ForEach(Array(evidence.enumerated()), id: \.offset) { _, item in
+                                Text(item.text).font(.kpSmall).textSelection(.enabled)
+                            }
+                            Button("查看相关记录") { onSwitchTab?(.log) }
+                        }
+                    }
                 }
 
                 // 2. 状态与下一步安全动作

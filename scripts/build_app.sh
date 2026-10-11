@@ -57,10 +57,16 @@ modules = (
     "claude_cli", "claude_planner", "review_settle", "cli_review",
     "process_owner", "desktop_queue", "desktop_automation_control", "verification_recovery", "verification_checks", "verification_process", "review_snapshot", "review_resolution",
     "plan_questions", "plan_answers",
-    "task_workspace",
+    "task_workspace", "engine_claim_scope", "cmd_queue", "cmd_remote",
+    "cmd_delivery", "derive", "planner_inputs", "constants",
+    "engine.commands", "engine.verdict", "engine.loop", "engine.health",
+    "engine.steps", "engine.decide", "engine.fallback", "engine.attention",
+    "engine.ladder", "engine.rounds", "engine.runners",
 )
 for name in modules:
-    relative = Path("kanpilot") / (name + ".py")
+    relative = Path("kanpilot") / (name.replace(".", "/") + ".py")
+    if not (source / relative).is_file():
+        relative = Path("kanpilot") / name.replace(".", "/") / "__init__.py"
     expected = hashlib.sha256((source / relative).read_bytes()).digest()
     actual = hashlib.sha256((bundled / relative).read_bytes()).digest()
     if actual != expected:

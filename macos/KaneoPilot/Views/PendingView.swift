@@ -349,7 +349,7 @@ struct RequestDetailView: View {
     @State private var confirmRelease = false
     @State private var confirmMarkDone = false
     @State private var confirmCancelPlan = false
-    @State private var retryExecutionConfirmation: TaskDetailView.ConfirmableAction?
+    @State private var retryExecutionConfirmation: ConfirmableAction?
     @State private var preparingExecutionRetry = false
     @State private var preparingReverification = false
     @State private var reverifyError: String?

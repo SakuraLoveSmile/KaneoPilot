@@ -1,11 +1,16 @@
 import SwiftUI
 import AppKit
+@preconcurrency import UserNotifications
 
 @MainActor
-private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
+private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var windowCloseObserver: NSObjectProtocol?
     weak var model: AppViewModel?
+    var openMainWindow: (() -> Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil {
+            UNUserNotificationCenter.current().delegate = self
+        }
         AppRuntime.shared.start()
         // Explicit local acceptance override also defeats restored/ideal window sizes.
         // Production launch has no override and retains normal macOS restoration.
@@ -28,6 +33,18 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse, withCompletionHandler completion: @escaping () -> Void) {
+        let id = response.notification.request.content.userInfo["task_id"] as? String
+        Task { @MainActor in
+            if let id { self.model?.attentionTaskToOpen = id; self.openMainWindow?(); AppRuntime.shared.mainWindowDidOpen() }
+            completion()
+        }
+    }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification, withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completion([.banner, .sound])
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -62,6 +79,7 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct KaneoPilotApp: App {
     @NSApplicationDelegateAdaptor(KaneoPilotAppDelegate.self) private var appDelegate
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var model = AppViewModel()
     @StateObject private var mcpManager = MCPServiceManager.shared
 
@@ -89,11 +107,12 @@ struct KaneoPilotApp: App {
                 .frame(minWidth: 900, idealWidth: 1180, idealHeight: 760)
                 .onAppear {
                     appDelegate.model = model
+                    appDelegate.openMainWindow = { openWindow(id: "main") }
                     AppRuntime.shared.mainWindowDidOpen()
                 }
         }
         .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
         .windowResizability(.automatic)
-        MenuBarExtra("KaneoPilot", systemImage: "arrow.triangle.branch") { MenuBarView() }
+        MenuBarExtra("需要你 \(model.attentionCount)", systemImage: "arrow.triangle.branch") { MenuBarView().environmentObject(model) }
     }
 }
