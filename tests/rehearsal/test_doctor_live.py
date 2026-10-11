@@ -52,7 +52,11 @@ def _check(out, name):
 def _fake_gh_env(tmp_path):
     bin_dir = tmp_path / "gh-bin"
     bin_dir.mkdir(exist_ok=True)
-    return {"KANPILOT_GH_BIN": str(write_fake_gh(bin_dir / "gh"))}
+    claude = bin_dir / "claude"
+    claude.write_text("#!/bin/sh\nprintf 'claude rehearsal 1\\n'\n")
+    claude.chmod(0o755)
+    return {"KANPILOT_GH_BIN": str(write_fake_gh(bin_dir / "gh")),
+            "KANPILOT_CLAUDE_BIN": str(claude)}
 
 
 def _write_connection_file(home, plus):

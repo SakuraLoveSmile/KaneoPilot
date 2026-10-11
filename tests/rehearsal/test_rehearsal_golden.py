@@ -5,8 +5,7 @@
 包成 pytest fixture（手动 setUp/tearDown + doCleanup），因此真实 pytest 与
 ``python3 -m pytest tests/rehearsal -q`` 的 unittest discover 兜底路径都能跑。
 
-每个场景按 scenarios.md「预期行为」列逐条断言；引擎尚未实现的能力（如空
-diff 的备用模型重试执行）不伪造，仅在决策层断言并在模块 docstring 注明。
+每个场景按 scenarios.md 断言真实 monitor 与自动补救；不由测试注入 verdict 或代调用 resolve。
 """
 
 from __future__ import annotations
@@ -62,8 +61,14 @@ def _script_rounds(case, contents):
     写默认 ``round N``。verify 命令真实在工作树执行，退出码记入消息。
     """
     original = case.server.tool_call
+    completed_turns = set()
 
     def plus(name, args):
+        identity = (args.get("sessionId"), args.get("turnId"))
+        if (name == "pi_turn_get" and identity in completed_turns
+                and identity[0] != case.server.session_id):
+            return {"structuredContent": {
+                "sessionId": identity[0], "turnId": identity[1], "status": "completed"}}
         response = original(name, args)
         if name == "pi_plans_resolve" and args.get("action") == "approve":
             worktree = Path(case.server.created["projectPath"])
@@ -82,13 +87,23 @@ def _script_rounds(case, contents):
                     [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                     cwd=worktree, capture_output=True, text=True, timeout=120)
                 exit_code, output = result.returncode, result.stdout + result.stderr
+            # Explicit fixture artifact, independent of the interpreter's
+            # PYTHONDONTWRITEBYTECODE setting. Empty-diff rounds remain clean.
+            if content is not None:
+                cache = worktree / "tests" / "__pycache__"
+                cache.mkdir(exist_ok=True)
+                (cache / "fixture.pyc").write_bytes(b"rehearsal-build-artifact")
             case.server.messages = [{
                 "id": "verify-" + str(case.round), "role": "toolResult",
                 "toolName": "exec", "toolArgs": {"command": VERIFY},
-                "toolResult": {"output": output, "exit_code": exit_code},
-                "exitCode": exit_code,
+                "toolResult": {"output": output, "exit_code": None if case.omit_exit else exit_code},
+                "exitCode": None if case.omit_exit else exit_code,
                 "turnId": case.server.execution_turn,
             }]
+            # Scripted work is finished; expose the matching idle Plus state,
+            # rather than the base fake's permanently running default.
+            case.server.is_running = False
+            completed_turns.add((case.server.session_id, case.server.execution_turn))
         return response
 
     case.server.tool_call = plus
@@ -129,6 +144,9 @@ def _delivery_runner():
 
 def test_scenario_golden_path_to_pr_merge(pipeline):
     (pipeline.root / "review-count").write_text("2")  # 首轮评审即 pass
+    _live(pipeline)
+    _script_rounds(pipeline, {})
+    pipeline.omit_exit = True  # transcript evidence is deliberately incomplete
     pipeline._adopt_and_plan()
     value = pipeline.task(TASK)
     assert value["status"] == "ready", value
@@ -144,6 +162,7 @@ def test_scenario_golden_path_to_pr_merge(pipeline):
     value = pipeline.task(TASK)
     assert value["status"] == "in_review", value
     assert len(value["delivery"]["commits"]) == 1, value["delivery"]
+    assert value["extra"]["engine_verdict"]["verification_ok"] is True
     _assert_commit_excludes_build_artifacts(pipeline, value)
 
     pipeline._review()
@@ -171,7 +190,7 @@ def _git(repo, *args):
 def _assert_commit_excludes_build_artifacts(pipeline, view):
     """P1（3e8484f）：交付提交不含构建产物，且产物仍留在工作树。
 
-    执行器跑 verify 必然生成 ``tests/__pycache__/*.pyc``；提交它们会把本机
+    夹具显式放置 ``tests/__pycache__/fixture.pyc``；提交它们会把本机
     二进制差异带进分支（沙盒 PR add/add 冲突的根因）。过滤只改提交内容，
     不删工作树文件——两侧都钉。
     """
@@ -200,228 +219,139 @@ def _assert_commit_excludes_build_artifacts(pipeline, view):
 # ---------------------------------------------------------------------------
 
 
-def test_scenario_empty_diff_backup_model_then_attention(pipeline):
-    pipeline._adopt_and_plan()
-    _script_rounds(pipeline, {1: None})          # 轮次 1：执行完成但零改动
-    run_id = pipeline._execute()
-    value = pipeline.task(TASK)
-
-    # 核心亲判（engine-verdict）：有效 diff 为空 → 不进交付
-    verdict = pipeline.call("engine-verdict", {
-        "task_id": TASK, "expected_execution_run_id": run_id,
-        "expected_plan_sha256": value["plan_sha256"]})
-    assert verdict["empty_diff"] is True, verdict
-    assert verdict["verification_ok"] is False, verdict
-    assert verdict["effective_changes"] == [], verdict
-
-    # 备用模型·路径 A（未配置）：主模型重跑 + model_hint + 武装补救轮，
-    # 不换模型（engine/fallback.py plan_retry 的 not-configured 分支）。
-    summary = _reconcile(pipeline)
-    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert len(mine) == 1, mine
-    assert mine[0]["action"] == "start_fix_round", mine[0]
-    assert mine[0]["ladder"] == 3, mine[0]
-    events = pipeline.call("list-events",
-                           {"task_id": TASK, "limit": 40})["events"]
-    model_events = [e for e in events if e["kind"] == "model"]
-    assert len(model_events) == 1, events
-    assert model_events[0]["detail"]["model"] == "primary", model_events[0]
-    assert model_events[0]["actor"] == "engine", model_events[0]
-    hints = [e for e in events if e["kind"] == "model_hint"]
-    assert hints and hints[0]["detail"]["hint"] == "configure_fallback_model", events
-    extra = pipeline.task(TASK).get("extra") or {}
-    rounds = extra.get("engine_fix_rounds") or []
-    assert len(rounds) == 1, rounds
-    assert rounds[0]["model"] == "primary", rounds
-    assert rounds[0]["execution_run_id"] == run_id, rounds
-    assert not extra.get("engine_model_override"), extra
-
-    # 质量阶梯（阶梯 3）：同计划有界补救 ≤2 轮，超出 → 阶梯 4 收件箱
-    first = decide.failure_decision("empty_diff", fix_round=0)
-    assert first.action == decide.START_FIX_ROUND, first
-    assert first.params["fix_round"] == 1
-    assert ladder.classify("empty_diff") == ladder.LADDER_QUALITY
-    capped = decide.failure_decision("empty_diff", fix_round=ladder.MAX_FIX_ROUNDS)
-    assert capped.action == decide.BLOCK, capped
-    assert capped.ladder == ladder.LADDER_NEEDS_YOU, capped
-    assert capped.attention is True
-
-    # 监控读到"干净完成但无可计入改动" → no_changes 阻塞，不伪造提交/PR
-    pipeline._monitor()
-    value = pipeline.task(TASK)
-    assert value["status"] == "needs_user", value
-    assert value["failure_code"] == "no_changes", value
-    assert not value["delivery"].get("commits"), value["delivery"]
-    assert not value["delivery"].get("pr_number"), value["delivery"]
-
-    # 修复轮仍空 diff（同计划重试一次）→ 再次核心亲判仍为空
-    pipeline.call("resolve", {"task_id": TASK, "action": "replan"})
-    pipeline._adopt_and_plan()
-    _script_rounds(pipeline, {2: None})
-    run2 = pipeline._execute()
-    value = pipeline.task(TASK)
-    verdict2 = pipeline.call("engine-verdict", {
-        "task_id": TASK, "expected_execution_run_id": run2,
-        "expected_plan_sha256": value["plan_sha256"]})
-    assert verdict2["empty_diff"] is True, verdict2
-    pipeline._monitor()
-    value = pipeline.task(TASK)
-    assert value["status"] == "needs_user", value
-    assert value["failure_code"] == "no_changes", value
-
-    # 备用模型·路径 B（已配置，fake cache 中存在该模型）：探针通过 →
-    # START_FIX_ROUND（阶梯 3）+ `model: fallback` 事件 + 一次性快照覆盖
-    # extra.engine_model_override（model_source=custom + 该 provider/model，
-    # 沿用主模型 connection_file/thinking_level/permission_mode，不新增凭据）。
-    out = pipeline.call("set-project-fallback-model", {
-        "project_id": PROJECT,
-        "fallback_model": {"provider_id": "test-provider",
-                           "model_id": "test-model"}})
-    assert out.get("fallback_model"), out
-    summary = _reconcile(pipeline)
-    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert len(mine) == 1, mine
-    assert mine[0]["action"] == "start_fix_round", mine[0]
-    assert mine[0]["reason"] == "empty_diff", mine[0]
-    assert mine[0]["ladder"] == 3, mine[0]
-    extra = pipeline.task(TASK).get("extra") or {}
-    override = extra.get("engine_model_override")
-    assert override, extra
-    assert override.get("model") == "fallback", override
-    # 注意：override 不带 model_source——它由 exec_config
-    # .snapshot_with_model_override 在 dispatch claim 应用时按
-    # 「provider_id + model_id 齐全」派生（core 单测覆盖），payload 只带
-    # 快照本体与计划身份。
-    assert override.get("provider_id") == "test-provider", override
-    assert override.get("model_id") == "test-model", override
-    # 附计划身份：dispatch claim 只在计划一致时应用，新轮次开始后清除
-    assert override.get("plan_sha256") == value["plan_sha256"], override
-    # 沿用主模型连接与权限，不新增第二套凭据
-    for key in ("connection_file", "thinking_level", "permission_mode"):
-        assert override.get(key), override
-    events = pipeline.call("list-events",
-                           {"task_id": TASK, "limit": 40})["events"]
-    assert [e for e in events if e["kind"] == "model"
-            and (e.get("detail") or {}).get("model") == "fallback"], events
-
-    # 备用模型·路径 C（探针失败）：配置的模型不在 Plus cache 目录 →
-    # validation_failed + 不换模型（plan_retry 真实代码 + 假 Plus 目录探针；
-    # live 侧 BLOCK 与「为什么没换模型」审计事件由 0a093bc 落库、core 单测
-    # 覆盖）。
-    from kanpilot.engine import fallback as kfallback
-
-    bad = kfallback.plan_retry(
-        {"provider_id": "no-such-provider", "model_id": "nope"},
-        primary=None, connection_file=str(pipeline.connection_file))
-    assert bad["validation_failed"] is True, bad
-    assert bad["snapshot"] is None, bad
-    assert bad["model"] == "primary", bad
-    assert bad["events"], bad
-    assert bad["events"][0]["detail"]["reason"] == "fallback_probe_failed", bad
-
-    # 补救轮用尽后引擎不再自动补救：reconcile 只记录决策、不下命令
-    summary = _reconcile(pipeline)
-    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert mine and all(a["command"] is None for a in mine), mine
-    # 收件箱单一来源：attention-list 能看到该阻塞任务
-    items = pipeline.call("attention-list", {})["items"]
-    assert any(i["task_id"] == TASK for i in items), items
-    # 全程只发了两次 prompt（两轮执行），无额外自动重发
-    assert pipeline.server.prompt_count == 2, pipeline.server.prompt_count
-    # 备用模型选择（engine/fallback.py）三条路径已在本用例内全覆盖：
-    # 未配置 → model: primary + model_hint；配置 + 探针通过 → model:
-    # fallback + 快照覆盖；配置 + 探针失败 → validation_failed 不换模型。
+def _live(case):
+    case.call("set-project-engine-mode", {"project_id": PROJECT, "engine_mode": "live"})
 
 
-def _reconcile(case, mode="live"):
+def _reconcile(case, mode="live", intake=False):
     from kanpilot.engine import loop
-    return loop.Reconciler(case.db_path, mode=mode).reconcile_once()
+    def run(command, payload):
+        try:
+            return case.call(command, payload)
+        except util.KanpilotError as exc:
+            print("engine command failed:", command, exc.code, util.redact(exc.message))
+            raise
+    return loop.Reconciler(case.db_path, mode=mode, enable_intake=intake,
+                           run_command=run).reconcile_once()
+
+
+def _automatic_plan(case):
+    from kanpilot import planner_runner
+    _reconcile(case, intake=True)  # engine intake prepares the repair plan request
+    assert planner_runner.run_one(case.db_path), case.task(TASK)
+    assert case.task(TASK)["status"] == "ready", case.task(TASK)
+    _reconcile(case)  # automatic confirmation, no fixture resolve
+
+
+def _assert_automatic_remediation(case):
+    events = case.call("list-events", {"task_id": TASK, "limit": 200})["events"]
+    fixes = [e for e in events if e["kind"] == "resolved"
+             and (e.get("detail") or {}).get("action") in ("resume", "replan")]
+    assert fixes, events
+    assert all(e["actor"] == "automation" for e in fixes), fixes
+    assert not [e for e in events if e["actor"] == "user"], events
+    rounds = case.task(TASK)["extra"].get("engine_fix_rounds") or []
+    assert len({r["execution_run_id"] for r in rounds}) == len(rounds), rounds
+    assert len(rounds) <= 2, rounds
+
+
+def test_scenario_empty_diff_backup_model_then_attention(pipeline):
+    _live(pipeline)
+    pipeline.call("set-project-fallback-model", {
+        "project_id": PROJECT,
+        "fallback_model": {"provider_id": "test-provider", "model_id": "test-model"}})
+    pipeline._adopt_and_plan()
+    plan_sha = pipeline.task(TASK)["plan_sha256"]
+    _script_rounds(pipeline, {1: None, 2: None})
+    first = pipeline._execute()
+    pipeline._monitor()  # monitor itself produces the bound core verdict
+    value = pipeline.task(TASK)
+    assert value["extra"]["engine_verdict"]["empty_diff"] is True, value
+    assert not value["delivery"].get("commits"), value
+    summary = _reconcile(pipeline)
+    assert any(a.get("task_id") == TASK and a["action"] == "start_fix_round"
+               for a in summary["actions"]), summary
+    value = pipeline.task(TASK)
+    assert value["status"] == "ready", util.jdump({"task": value, "summary": summary})
+    assert value["plan_sha256"] == plan_sha, value
+    second = pipeline._execute()
+    assert first != second
+    pipeline._monitor()
+    _reconcile(pipeline)
+    value = pipeline.task(TASK)
+    assert value["status"] == "needs_user", value
+    assert value["failure_code"] == "fix_rounds_exhausted", value
+    assert pipeline.server.prompt_count == 2
+    assert len(value["extra"]["engine_fix_rounds"]) == 1, value
+    assert value["extra"]["engine_fix_rounds"][0]["model"] == "fallback", value
+    assert not value["delivery"].get("commits")
+    assert not value["delivery"].get("pr_number")
+    assert any(i["task_id"] == TASK for i in pipeline.call("attention-list", {})["items"])
+    _assert_automatic_remediation(pipeline)
+    _reconcile(pipeline)  # repeated ticks must not start another dispatch
+    assert pipeline.server.prompt_count == 2
 
 
 # ---------------------------------------------------------------------------
-# 场景 6：verify 失败 → 同分支修复轮通过
+# 场景 6：真实 monitor verify 失败 → 自动同分支修复 → done
 # ---------------------------------------------------------------------------
 
 
 def test_scenario_verify_fail_fix_round_passes(pipeline):
+    _live(pipeline)
     pipeline._adopt_and_plan()
-    _script_rounds(pipeline, {1: "oops"})        # 轮次 1：verify 失败
-    run1 = pipeline._execute()
+    _script_rounds(pipeline, {1: "oops"})
+    first = pipeline._execute()
     pipeline._monitor()
     value = pipeline.task(TASK)
-    assert value["status"] == "needs_user", value
-    assert value["failure_code"] == "verification_unconfirmed", value
-    assert ladder.classify(value["failure_code"]) == ladder.LADDER_QUALITY
-    actions = set(value["allowed_actions"])
-    assert {"accept_verification", "replan"} <= actions, actions
-
-    # 阶梯 3 决策：同任务分支修复轮（fix_round+1），未超限
-    step = decide.failure_decision("verification_unconfirmed", fix_round=0)
-    assert step.action == decide.START_FIX_ROUND, step
-    assert step.params["fix_round"] == 1
-
-    # 用户/引擎驱动的修复轮：同分支重规划 → 第二轮写对 → 验证通过
-    branch_before = value["delivery"]["worktree_path"]
-    pipeline.call("resolve", {"task_id": TASK, "action": "replan"})
-    pipeline._adopt_and_plan()
-    value = pipeline.task(TASK)
-    assert value["delivery"]["worktree_path"] == branch_before, value["delivery"]
-    run2 = pipeline._execute()                    # 轮次 2 默认写对内容
-    assert run2 != run1
+    assert value["extra"]["engine_verdict"]["verification_ok"] is False, value
+    branch = value["delivery"]["worktree_path"]
+    _reconcile(pipeline)
+    assert pipeline.task(TASK)["status"] == "needs_plan", pipeline.task(TASK)
+    _automatic_plan(pipeline)
+    second = pipeline._execute()
+    assert second != first
     pipeline._monitor()
     value = pipeline.task(TASK)
     assert value["status"] == "in_review", value
-    assert len(value["delivery"]["commits"]) == 1, value["delivery"]
-
-    (pipeline.root / "review-count").write_text("2")   # 本轮评审即 pass
+    assert value["delivery"]["worktree_path"] == branch
+    assert len(value["delivery"]["commits"]) == 1
+    (pipeline.root / "review-count").write_text("2")
     pipeline._review()
-    value = _deliver_to_merge(pipeline)
-    assert value["status"] == "done", value
-    assert pipeline.fake.tasks[TASK]["status"] == "done"
+    assert _deliver_to_merge(pipeline)["status"] == "done"
+    _assert_automatic_remediation(pipeline)
 
 
 # ---------------------------------------------------------------------------
-# 场景 7：verify 连续失败 → 修复轮用尽 → needs-you
+# 场景 7：连续 verify 失败 → 任务累计上限（1+2 轮）
 # ---------------------------------------------------------------------------
 
 
 def test_scenario_verify_fail_exhausted_needs_you(pipeline):
+    _live(pipeline)
     pipeline._adopt_and_plan()
-    _script_rounds(pipeline, {1: "oops", 2: "oops"})
-    pipeline._execute()
-    pipeline._monitor()
+    _script_rounds(pipeline, {1: "oops", 2: "oops", 3: "oops"})
+    run_ids = []
+    for round_no in range(3):
+        run_ids.append(pipeline._execute())
+        pipeline._monitor()
+        _reconcile(pipeline)
+        if round_no < 2:
+            _automatic_plan(pipeline)
     value = pipeline.task(TASK)
-    assert value["failure_code"] == "verification_unconfirmed", value
-
-    # 第一轮修复：同分支重规划后再失败
-    pipeline.call("resolve", {"task_id": TASK, "action": "replan"})
-    pipeline._adopt_and_plan()
-    pipeline._execute()
-    pipeline._monitor()
-    value = pipeline.task(TASK)
-    assert value["failure_code"] == "verification_unconfirmed", value
-
-    # 决策层：fix_round 达到 MAX_FIX_ROUNDS → BLOCK（阶梯 4），不再自动补救
-    exhausted = decide.failure_decision("verification_unconfirmed",
-                                        fix_round=ladder.MAX_FIX_ROUNDS)
-    assert exhausted.action == decide.BLOCK, exhausted
-    assert exhausted.reason == "fix_rounds_exhausted", exhausted
-    assert exhausted.ladder == ladder.LADDER_NEEDS_YOU, exhausted
-    assert ladder.retries_exhausted(ladder.LADDER_QUALITY,
-                                    ladder.MAX_FIX_ROUNDS) is True
-
-    # 引擎对阻塞任务只记录决策、不下任何命令（无第三次自动执行）
-    summary = _reconcile(pipeline)
-    mine = [a for a in summary["actions"] if a.get("task_id") == TASK]
-    assert mine and all(a["command"] is None for a in mine), mine
-    assert pipeline.server.prompt_count == 2, pipeline.server.prompt_count
-
-    # 收件箱单一来源 + 用户动作可用
+    assert len(set(run_ids)) == 3
+    assert value["status"] == "needs_user", value
+    assert value["failure_code"] == "fix_rounds_exhausted", value
+    assert pipeline.server.prompt_count == 3
+    assert len(value["extra"]["engine_fix_rounds"]) == 2, value
+    _assert_automatic_remediation(pipeline)
+    _reconcile(pipeline)
+    assert pipeline.server.prompt_count == 3
     items = pipeline.call("attention-list", {})["items"]
-    mine_item = [i for i in items if i["task_id"] == TASK]
-    assert len(mine_item) == 1, items
-    assert set(mine_item[0]["allowed_actions"]) >= {"replan", "dismiss"}, mine_item
-    assert not pipeline.task(TASK)["delivery"].get("pr_number")
+    mine = [i for i in items if i["task_id"] == TASK]
+    assert len(mine) == 1, items
+    assert "replan" in mine[0]["allowed_actions"]
+    assert not value["delivery"].get("pr_number")
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +360,7 @@ def test_scenario_verify_fail_exhausted_needs_you(pipeline):
 
 
 def test_scenario_review_two_changes_requested_then_pass(pipeline):
+    _script_rounds(pipeline, {})
     pipeline._adopt_and_plan()
     first = pipeline._execute()
     pipeline._monitor()
@@ -593,3 +524,37 @@ def load_tests(loader, standard_tests, pattern):
     except ImportError:  # 包上下文（tests.test_x 导入形态）
         from tests import unittest_compat
     return unittest_compat.collect_module(sys.modules[__name__])
+
+
+def test_scenario_review_tracked_build_artifact_is_accepted(pipeline):
+    """A3: actual CLI review leaves a tracked artifact dirty and still settles."""
+    _live(pipeline)
+    artifact = pipeline.repo / "tracked.pyc"
+    artifact.write_bytes(b"committed baseline cache")
+    _git(pipeline.repo, "add", "tracked.pyc")
+    _git(pipeline.repo, "commit", "-m", "tracked cache fixture baseline")
+    _git(pipeline.repo, "push", "origin", "main")  # disposable local bare remote
+    pipeline.primary = (_git(pipeline.repo, "rev-parse", "HEAD"),
+                        _git(pipeline.repo, "status", "--porcelain"))
+    claude = pipeline.root / "fake-claude"
+    script = claude.read_text().replace(
+        'if "conclusion" in schema["properties"]:\n',
+        'if "conclusion" in schema["properties"]:\n'
+        ' pathlib.Path("tracked.pyc").write_bytes(b"review regenerated cache")\n')
+    claude.write_text(script)
+    (pipeline.root / "review-count").write_text("2")
+    _script_rounds(pipeline, {})
+    pipeline._adopt_and_plan()
+    pipeline._execute()
+    pipeline._monitor()
+    value = pipeline.task(TASK)
+    assert value["status"] == "in_review", value
+    head = value["delivery"]["head_sha"]
+    pipeline._review()
+    value = pipeline.task(TASK)
+    assert value["extra"]["review_conclusion"] == "pass", value
+    snapshot = pipeline.root / "trees" / TASK / ("review-" + head[:12])
+    assert _git(snapshot, "status", "--porcelain") == "M tracked.pyc"
+    assert _git(snapshot, "rev-parse", "HEAD") == head
+    assert _git(snapshot, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    assert _deliver_to_merge(pipeline)["status"] == "done"

@@ -1,0 +1,17 @@
+{
+  "app": "/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/KaneoPilot.app",
+  "build_log": "/tmp/kp-app-build-final-20261012.log",
+  "source_hash_check": "passed by build_app.sh",
+  "signing": "local ad hoc; strict codesign verification passed",
+  "installed": false,
+  "sha256": {
+    "Contents/MacOS/KaneoPilot": "1be8ef8bd373512c1a3ba23ef5717420f5cf2b8a5f1c4ac9ac33298199221281",
+    "Contents/Resources/core/kanpilot.py": "ed120ae4277f8f8f7d10c32f18da1a117e80018f5c22332d1ea38581a00b2f66",
+    "Contents/Resources/core/kanpilot/auto_monitor.py": "46a58464662591c354a05a50059810c5bc8710a429f8ebc4d2c207b9596c227f",
+    "Contents/Resources/core/kanpilot/constants.py": "5d87056fbbdc67fc722561973088184feefd2c9ad58ade36779bb73e1fe0478f",
+    "Contents/Resources/core/kanpilot/cmd_queue.py": "73fc3edec95a52d885a6aa0a632b6bdbad511a5edcbc94c935c27730731c9fb6",
+    "Contents/Resources/core/kanpilot/engine/ladder.py": "89c5c4d50437659ca3a9e3068c704a838c2b0790e44b6794b4e8833bf7422486",
+    "Contents/Resources/core/kanpilot/engine/verdict.py": "826fdca710b6ecf58677368f86de6008319082dea28e7d593e3a64c6c63664bc",
+    "Contents/Resources/core/kanpilot/engine/loop.py": "c6180a7c67a995cae06f1e67e24fb8a86a2c8c4441b15e708bb756eddb596bc4"
+  }
+}

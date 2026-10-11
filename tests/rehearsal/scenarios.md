@@ -1,6 +1,6 @@
 # KaneoPilot 调度台集成演练场景清单（冻结）
 
-- **清单版本**：v1.0
+- **清单版本**：v1.1（2026-10-12 自动补救接线）
 - **冻结日期**：2026-10-10
 - **权威输入**：`docs/state-model.md`（§7 phase×condition、§8 失败阶梯、§9 黄金路径、§10 用户动作）、`docs/protocol.md` §5.27（engine run/status、attention-list、8 个用户动作、session-view、doctor --live）、`docs/automation-contract.md`（调度容量/预算时限/同任务修复轮/交付/待处理原因）、`core/kanpilot/pi_desktop_worker.py` 与 `core/kanpilot/pi_desktop_backend.py`（Plus 响应真实字段形状）。
 - **状态**：冻结。实现分歧先改规格再动工（AGENTS.md）；本清单只描述"应然"，新增/改动场景须主 agent 评审后升版本。
@@ -219,3 +219,9 @@
 | `empty_diff` | 5 |
 | `engine_kill_at_step` | 11 |
 | `lease_expired` | 12 |
+
+
+### 26. review_tracked_build_artifact_is_accepted（A3 回归）
+- 临时仓库基线跟踪 tracked.pyc；真实CLI review阶段的假模型程序修改其review工作树的该产物；保持冻结detached HEAD。
+- 核心允许Review登记并继续PR合并→done，产物dirty不误报快照变化；源码或HEAD变化的反例由core守卫测试覆盖。
+- 不调用真实模型或远端服务；仅真实本地Git、核心命令和回环假件。

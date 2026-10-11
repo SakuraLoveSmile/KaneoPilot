@@ -377,6 +377,7 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  
  **阶梯规则：**
  - 瞬时失败（network timeout、git_transient、remote_unavailable）归入阶梯 1，按退避重试。
+ - live 核心验证的 `verification_environment_failure` 属环境阶梯：环境修复后用户 resume 只恢复原轮 monitor，不重新 dispatch，不增加 execution_rounds 或 engine_fix_rounds。
  - 环境失败（repository_missing、not_git_repo、origin_not_github、gh_missing、exec_permission_not_auto）归入阶梯 2，明确原因并等待用户。
  - 质量失败（verification_unconfirmed、review_blocked、delivery_commit_failed、branch_diverged）归入阶梯 3，受 max_fix_rounds ≤2 约束。
  - 其余 needs_user 归入阶梯 4，统一进入 attention inbox，由用户单点处置。
@@ -385,16 +386,16 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  
  Kaneo To Do → intake → plan → confirm → dispatch → observe → verdict → commit → review ⇄ fix(≤2 同分支) → PR → merge-sync → done
  
- 各阶段只向下一阶段推进，或向 needs-you 升级；needs-you 经用户 resolve 后回到对应 phase。
+ 各阶段只向下一阶段推进，或向 needs-you 升级；live 的绑定质量失败可由引擎以 actor=automation 经 resolve 开启有界补救，其余由用户处置。
  
  - intake：只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
- - plan：规划请求只来自规划面板手动授权（prepare-plan-input + start-plans）；publish-plan 成功后进入 plan_execution_hold。
- - confirm：用户「确认并安排执行」解除 hold，进入 dispatch。
+ - plan：手动规划由面板授权；live 自动接收/修复由核心以 automation 经同一 prepare-plan-input + start-plans 生成请求；publish-plan 后保留 plan_execution_hold。
+ - confirm：手动任务由用户「确认并安排执行」解除 hold；live 自动任务遵循策略自动确认。
  - dispatch：派发请求 claimed → dispatch-prepare → dispatch-begin-send → dispatch-start → dispatch-confirm → running。
  - observe：worker 执行中；观察者缺席时只读续接（round-observe），不重发 prompt。
- - verdict：monitor 读取终态 + 验证证据；有效 diff 排除 `.pi/**`，核心亲跑 verify 命令。
+ - verdict：live monitor 读取可信终态，排除 `.pi/**` 与构建产物后核心亲跑 verify；legacy 保留转录匹配，shadow 在隔离副本比较、不改旧判定。
  - commit：受 PR 交付管理的任务先 delivery-commit，再进入 review。
- - review：评审通过 → advance-task done；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮）。
+ - review：评审通过只登记，PR 交付继续等待合并；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮，与引擎质量补救分别记账）。
  - delivery：PR 已开 → delivery-sync 轮询合并状态；合并后 advance-task done。
  - done：任务归档，保留全部历史与文件。
  
