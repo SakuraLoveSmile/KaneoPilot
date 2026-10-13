@@ -22,11 +22,15 @@
 - 基线：分支 `feat/engine-rewrite`，HEAD `870c42411161fdc1f6e65683892822531ff4e3bc`。
 - 工作区现有 8 处未提交路径：7 处是用户在途工作（与本计划无关），1 处是本计划文件（未跟踪）。见“实施顺序与前置”。
 
-**本计划由用户自行施工。**
+**当前执行授权：用户已要求实施全部 WP1–WP6。**
+
+- 本次实际起点为干净的 `main`，HEAD `eacbc6be97b1c52677c41d7081446c4caf94e01b`；上面的 `870c424` 是原计划的历史基线。
+- WP1 的三处规格已先落地；WP2/WP3 与 WP4 分别由独占文件的 worker 并行实施，主 agent 负责规格、集成、完整回归、安装和原生界面核验。
+- 下列参考实现与排查结论保留为历史依据。本次执行结果见文末“本次执行记录”，不得把历史测试当作本次重跑。
 
 - 按本计划写好的参考实现（测试已通过）已存成补丁 `build/patches/plus-asktool-image-sniff_804952ec.patch`，并于 2026-10-13 从工作区撤下。它没有提交、打包或安装。
 - 线上引擎跑的是 `/Applications/KaneoPilot.app` 里打包的核心。那里仍是旧提示词，两项修复都没有生效。
-- WP1–WP6 都未施工。WP1–WP5 的代码与补丁一致：可以按步骤手工改，也可以直接 `git apply` 补丁，用法见“实施顺序与前置”。
+- 原计划成稿时 WP1–WP6 均未施工；WP1–WP5 的参考实现可从补丁恢复，用法见“实施顺序与前置”。本次另补评论、重名、内容/哈希保持及缺失/未知权限快照的回归覆盖。
 - 文中行号取自 HEAD `870c424`。撤下参考实现后已逐一核对，与当前工作区一致。
 
 **覆盖范围**：Plus 规划与 Plus Review 的角色指令、描述/评论链接图片的类型识别、对应的规格与测试、打包安装与验收。
@@ -54,10 +58,13 @@
 | 是否改 PI-Desktop | 不改（用户未选） | 禁令只能写在提示词里，属于软约束。模型不遵守时，仍靠 1800 秒超时兜底（见“风险与规避”）。 |
 | 失败的任务怎么重新规划 | 在补充说明里预先回答 3 个问题 | 已执行，见“当前任务的处置建议”。 |
 | 参考实现怎么处置 | 存补丁后还原（已执行） | 补丁在 `build/patches/`；工作区回到 HEAD 加用户在途工作。用法见“实施顺序与前置”。 |
+| 本次实施范围 | 用户明确要求实施全部 WP1–WP6 | 完成代码、测试、提交、打包、空闲安装和实机核验。 |
+| 本次安装基线 | 用户明确选择当前 `main` 加本次修复 | 同时带入 `eacbc6b` 已提交的其他模块变化；安装前保留旧 App。 |
+| 本次真实模型验收 | 用户允许最多两轮，规划与 Review 各一轮、每轮最多 5 分钟、不自动重试 | 独立测试库与材料、真实 Plus 会话；不改现有 StarTool 任务。 |
 
-### 待用户确认
+### 安装窗口
 
-1. 什么时候替换 App。替换会重启引擎、打断进行中的轮次，请选没有规划、执行或 Review 在跑的时候。
+安装已获授权，主 agent 在替换前重新核对调度台和核心队列空闲，正常退出 App 及打包核心进程后备份、替换并启动。若仍有运行轮次，先完成其他验证、等待空闲，不中止用户轮次。
 
 ## 排查结论
 
@@ -466,7 +473,7 @@ diff -rq -x __pycache__ /Applications/KaneoPilot.app/Contents/Resources/core/kan
 | 替换 App 会打断进行中的轮次 | 选空闲时段；先确认没有轮次在跑、打包核心进程都已退出。 |
 | 打包带上其他在途改动 | 见“实施顺序与前置”，打包前核对。 |
 
-## 未验证项
+## 原计划未验证项（历史；本次结果见文末）
 
 1. 禁令生效后的模型行为没有实测。19:29 那次重新规划虽然成功，但用的仍是旧提示词，是靠补充说明预先回答了问题才通过的，不能证明禁令有效。
 2. 不知道 `step-5-preview` 以外的模型是否遵守禁令。
@@ -523,3 +530,19 @@ diff -rq -x __pycache__ /Applications/KaneoPilot.app/Contents/Resources/core/kan
 - PI-Desktop fork 源码：`packages/agent-runtime/src/mode-prompts.ts:10`。
 - 已安装 KaneoPilot 的打包核心：`/Applications/KaneoPilot.app/Contents/Resources/core/kanpilot/`。其中 `pi_desktop_planner.py` 修改于 2026-10-13 12:43，早于失败的那一轮。
 - 参考实现补丁：`build/patches/plus-asktool-image-sniff_804952ec.patch`（git 忽略目录）。
+
+## 本次执行记录
+
+本次源代码起点为 `main / eacbc6b`，工作区干净。用户已明确授权 WP1–WP6、安装当前 main 的全部已提交变化，以及规划/Review 各一轮真实模型验收（每轮最多 5 分钟、不重试）。正式任务与实例数据保持原有流程；隔离验收不用于证明生产业务已经执行。
+
+| WP | 状态 | 本次证据 |
+| --- | --- | --- |
+| WP1 | 待体验 | 主 agent 先补 protocol 三处规格，后启动实现。 |
+| WP2–WP3 | 待体验 | 提示词 worker 独占两份 source 与三份 tests；旧 source 加新断言：6 failed/1 passed；修复后完整受影响套件 94 passed/3 subtests passed。 |
+| WP4 | 待体验 | 材料 worker 独占 source 与新测试；红基线 6 failed/1 passed；修复后目标及相邻套件 40 passed/3 subtests passed。覆盖描述、评论、重名、哈希/字节保持及附件/本地路径边界。 |
+| WP5 | 待体验 | 独立 reviewer 没有发现实质问题；本次完整核心回归 2560 passed/573 subtests passed，1575.74 秒。集成候选与未修复 `eacbc6b` 基线均为 354 passed/5 skipped/19 failed/7 errors；26 个失败/报错 nodeid 与分类完全一致，无新增失败（`integration-comparison.json`）。 |
+| WP6 | 实现中 | 新 App 构建、打包模块哈希/导入、本地签名核对通过；独立实机脚本前检通过，尚未安装或发送模型 prompt。 |
+
+- 真实 Kaneo 资源兼容性：新构建 App 的 bundled core 在独立本地库中 `prepare-plan-input` 读取原 StarTool 评论；`elm7r313lixh98kqi28infio` 成为 `elm7r313lixh98kqi28infio.png`、`image/png`、107186 bytes，SHA256 `f2bbefc90f25987976b217d342035aa3da8d23a56ff8d023c9b34aa205f6404e`，`can_start=true/issues=[]`。只向 Kaneo 读取，没有模型调用、远端写入或生产 DB 写入。
+- 真实模型验收准备：独立 DB、根目录、fake loopback Kaneo 和第二个 MCP 服务共用隔离路径；PNG 经无后缀 URL 下载，故意返回 `application/octet-stream`，仍正确识别。前检未发送模型 prompt。Review 的执行记录为合成夹具，不能作为真实业务执行证据。
+- 所有原始日志和隔离夹具保存在 `build/validation/plus-asktool/`（git 忽略）；主要文件为 `prompts-red.log`、`prompts-green.log`、`core.log/core.xml`、`integration.log/integration.xml`、`baseline-eacbc6b-20261013/`、`build.log`、`real-asset-result.json` 及各 `live-*/summary.json`。

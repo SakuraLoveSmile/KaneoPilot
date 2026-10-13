@@ -834,6 +834,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - 识别任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接及 HTML 图片；未知附件结构/格式/失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
 - 下载只向 Kaneo 同源地址发凭据；跨域/重定向不携带 `Authorization`；不输出凭据或带认证参数的 URL。
 - 本地文件与已下载文件复制到应用管理的材料目录 `planner_inputs/<input_id>/`，记录 `name/source/media_type/sha256/size`；不依赖临时剪贴板路径长期存在。
+- 描述/评论链接下载的文件（如无扩展名的 Kaneo `/api/asset/<id>`）按文件头魔数识别图片：PNG（`89 50 4E 47 0D 0A 1A 0A`）、JPEG（`FF D8 FF`）、WebP（`RIFF????WEBP`）。命中时 `media_type` 记 `image/png|image/jpeg|image/webp`；原名不带该类型扩展名时在原名后追加 `.png|.jpg|.webp`（不改原名其余部分、不改文件内容），使 Codex/Claude（按扩展名）与 Plus（按 media_type/扩展名）都把它作为图片附件。未命中保持原名与 `media_type=null`。只看文件内容，不信远端 `Content-Type`。
 - `source_sha256`/`requirements_sha256` 保持原口径；补充说明、附件内容、排除项进入独立 `planner_input_sha256`（= `input_sha256`，对 manifest 规范化重算）。
 - 源快照与附件按 `input_id` 存为不可变产物（`planner_inputs` 表 + 目录）；复用请求 `payload_json` 保存 manifest，不新增附件数据库表。
 
@@ -1143,6 +1144,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   4. 读取正文后调 `pi_plans_resolve(action:"reject", confirm:true)` 关闭该**生成阶段** proposal 并留痕「已导入 KaneoPilot；此会话不用于执行」；**不发 approve**、不生成 Plus 执行 turn。reject 失败 → 保留产物与身份、`plan_failed`，不发布。若期间该 proposal 已被批准或同会话出现执行 turn → `plan_approval_conflict`：报告冲突、禁止本地发布与二次派发，**不**声称已阻止 Plus 侧执行。reject 后须确认该 proposal 已 `rejected`（空 pending 清单不算成功）。
   5. 正文规范化为现有 `{status:"ready", plan_markdown, questions:[], evidence:[...]}` 后走现有发布逻辑；`task_id`/哈希由核心重算，不信模型自报。**frontmatter 的 `planner_model/reasoning_effort` 取本轮运行快照的**真值：codex 分支取 `model_config`，Plus 分支取 `runtime_config` 的 `model_id`/`thinking_level`（Plus 没有 codex 的 `reasoning_effort`，两者不得混用）；只有两者都缺（旧记录）才回落 §6 历史常量，并必须留痕（`model_pair_source` + 事件），不得让 Plus 计划在计划文件里声称一个从未运行的 Codex 模型。`publish-plan` 继续置 `plan_execution_hold=true`，用户确认后才 dispatch。
   6. `needs_input`：最终答复必须严格为 `{status:"needs_input", plan_markdown, questions:[...], evidence:[...]}`，**不提交 proposal**；completed + 完整最终答复经现有解析器校验后按 §5.22.3 处理（草稿保留、`report needs_user`）。不新增自动修复 JSON 的第二次模型调用。`ready` 无有效 proposal、空输出、混入 `needs_input` 与 proposal、分页不完整 → 明确失败并保留证据。
+     - **无人值守**：角色指令按本轮权限快照如实描述（`auto` = 工具自动批准、无人在 Pi 界面值守；旧 `ask` 快照保留「工具调用需确认」的说明），不得在 `auto` 轮次声称权限为 Ask。指令必须明确禁止 `asktool` 及任何在 Pi 界面等待用户作答的交互工具，并声明 Pi 计划模式系统提示中「用 asktool 解决未定选择」的指引本轮不适用；需要用户决定时只能以上述 `needs_input` JSON 结束。核心经 MCP 观察不到挂起的 asktool（`pendingToolConfirmations` 不含它，转录也不含未完成的调用），违反该约束时只能等超时后 stop→abort 收尾（`planner_timeout`）。
   7. 附件：`pi_agent_prompt` 支持可选 `attachments`（类型取 Plus `AgentPromptAttachment` 真实定义）。图片按 manifest 逐一校验哈希，复制到该规划 project 根下独立材料子目录后传绝对路径；不得静默省略无法解析的图片；型号/附件不支持 → 明确阻塞（`attachment_unsupported`）。超过 `PI_DESKTOP_MCP_MAX_REQUEST_BYTES`（2 MiB）在发送前拒绝，不截断正文或图片。
 - 失败分类扩展 §5.22.6：`plan_proposal_missing`、`plan_proposal_ambiguous`、`plan_approval_conflict`、`plan_reject_failed`、`attachment_unsupported`、`transcript_incomplete`；均不自动重试、不静默换后端或方式。
 - review_fix 计划走同一 Plus 路径，仍核验 `review_key`/原报告/关联任务并按 §5.22.5 回写；修复计划仍由用户手动 `prepare-plan-input`/`start-plans` 发起，**不**因创建修复任务自动规划。
@@ -1164,7 +1166,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 ### 5.24.5 Plus review 控制端（v4）
 
 - `executor_runner --stage review` 按 `review_config.backend` 分流；`pi` 分支沿用 §5.23.4（inherit/custom 固化 pi 参数）。
-- Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", …)` + `permissionMode:"auto"`；指令只要求审查并输出 JSON，不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。
+- Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", …)` + `permissionMode:"auto"`；指令只要求审查并输出 JSON，不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。本轮无人值守：指令同样禁止 `asktool` 及任何在 Pi 界面等待用户作答的交互工具（Pi 计划模式的 asktool 指引不适用）；需要用户决定或补充材料时以 `blocked` 结论在报告中列出。
 - 最终答复结构冻结为 `{"conclusion":"pass|changes_requested|blocked","report_markdown":"<非空>","fix":{"title","description","priority"}|null}`；`changes_requested` 必须有 `fix`；`priority ∈ no-priority|low|medium|high|urgent`（`bridge.VALID_PRIORITIES`）。Plus 无原生 outputSchema 能力：runner 在 `completed` + 完整转录后严格解析，**不**把 MCP `structuredContent` 当模型结构化输出保证。
 - 意外生成 proposal：只读确认本 session/turn 身份后 `pi_plans_resolve(action:"reject", confirm:true)` 关闭并记 `review_blocked`，**不**按其 markdown 登记 pass。
 - 格式错误、转录不完整、身份不符、权限等待、超时 → 不写 pass、不推进 done，保留错误与证据。

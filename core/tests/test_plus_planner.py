@@ -901,6 +901,10 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
         self.assertEqual(self.server.configured["mode"], "plan")
         self.assertEqual(self.server.configured["permissionMode"], "ask")
+        # 旧 ask 快照保留原说明；asktool 同样无人作答，仍禁止。
+        self.assertIn("权限为 **Ask**", self.server.prompt_content)
+        self.assertNotIn("权限为 **auto**", self.server.prompt_content)
+        self.assertIn("**禁止**调用 `asktool`", self.server.prompt_content)
         _, job = self.job_for(fixture["task_id"], fixture["request_id"])
         self.assertEqual(job["config"]["permission_mode"], "ask")
         conn = db.connect(self.db_path)
@@ -1049,6 +1053,21 @@ class TestPlusReadyPath(PlusPlannerCase):
         # 绝对路径也出现在 prompt 里（模型可直接读取）。
         self.assertIn(item["path"], self.server.prompt_content)
         self.assertIn("Pi-Desktop-Plus 计划模式", self.server.prompt_content)
+
+    def test_auto_prompt_is_unattended_and_forbids_asktool(self):
+        """§5.24.3 第 6 项：auto 轮次不声称 Ask；asktool 无人作答，必须禁止。"""
+        self._fixture()
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.configured["permissionMode"], "auto")
+        prompt = self.server.prompt_content
+        self.assertIn("权限为 **auto**", prompt)
+        self.assertIn("**无人值守**", prompt)
+        self.assertNotIn("权限为 **Ask**", prompt)
+        self.assertNotIn("{PERMISSION_LINE}", prompt)
+        self.assertIn("**禁止**调用 `asktool`", prompt)
+        self.assertIn("「用 asktool 解决未定选择」的指引本轮**不适用**", prompt)
+        self.assertIn("待确认事项", prompt)
 
     def test_send_state_unknown_before_prompt_and_prompt_body_has_task(self):
         fixture, _payload = self._fixture()
