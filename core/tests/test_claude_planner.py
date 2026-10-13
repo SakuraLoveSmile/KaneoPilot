@@ -178,7 +178,15 @@ class ClaudePlannerTest(KanpilotTestCase):
         self.assertEqual((self.repo / "source.txt").read_text(), "dirty primary checkout")
         self.assertEqual(subprocess.check_output(["git", "-C", str(worktree), "rev-parse",
             "--abbrev-ref", "HEAD"], text=True).strip(), "HEAD")
-        self.assertIn("恰好一个 ```verify", instance._render_prompt(materials))
+        # 缺失和未知快照直接渲染时不声称权限级别，asktool 禁令照常保留。
+        for runtime in (None, {}, {"permission_mode": "unknown"}):
+            with self.subTest(runtime=runtime):
+                instance.runtime = runtime
+                prompt = instance._render_prompt(materials)
+                self.assertIn("恰好一个 ```verify", prompt)
+                self.assertNotIn("{PERMISSION_LINE}", prompt)
+                self.assertNotIn("权限为", prompt)
+                self.assertIn("**禁止**调用 `asktool`", prompt)
 
 
 class PlusPlanningSnapshotTest(PlusPlannerCase):

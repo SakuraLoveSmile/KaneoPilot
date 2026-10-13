@@ -124,6 +124,26 @@ def _description_links(source: dict) -> list:
     return links
 
 
+def _sniff_image(path: Path) -> Optional[tuple]:
+    """按文件头魔数识别 PNG/JPEG/WebP → (media_type, 合法扩展名…)；未命中 None。
+
+    描述/评论里的 Kaneo 资源地址（``/api/asset/<id>``）没有扩展名，只能看内容
+    （§5.22.1）；不信远端 Content-Type。
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", (".png",)
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", (".jpg", ".jpeg")
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp", (".webp",)
+    return None
+
+
 def _attachment_kind(name: Optional[str], media_type: Optional[str]) -> str:
     suffix = Path(name or "").suffix.lower()
     mt = (media_type or "").lower()
@@ -582,7 +602,16 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         except bridge.BridgeError as exc:
             issues.append({"url": _safe_url(url), "issue": str(exc)})
             continue
-        register(dest, f"{link['where']}:{kind}", None)
+        # 图片补 media_type 与扩展名：Codex/Claude 按扩展名、Plus 按类型取附件。
+        media_type = None
+        sniffed = _sniff_image(dest)
+        if sniffed is not None:
+            media_type, suffixes = sniffed
+            if dest.suffix.lower() not in suffixes:
+                named = _unique_path(files_dir, dest.name + suffixes[0])
+                dest.rename(named)
+                dest = named
+        register(dest, f"{link['where']}:{kind}", media_type)
 
     # 2e) 本地路径（只读复制进材料目录；缺文件 → issue）。
     for raw in local_paths:

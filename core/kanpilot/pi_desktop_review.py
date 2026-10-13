@@ -527,6 +527,11 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
         "- 本轮由 KaneoPilot runner 已领取并核对；你只做**只读**审查：不要调用任何"
         " kanpilot/CLI 命令、不要登记结论、不要修改仓库文件、不要提交、不要跑产品构建。"
     )
+    lines.append(
+        "- 本轮**无人值守**：禁止调用 `asktool` 或任何在 Pi 界面等待用户作答的交互工具"
+        "（Pi 计划模式「用 asktool 解决未定选择」的指引本轮不适用），这类调用只会挂起到超时；"
+        "需要用户决定或补充材料时，按下方结构给出 `blocked` 结论并在报告中列出。"
+    )
     lines.append("- 评审身份（本轮固定）：")
     lines.append(
         f"  - 任务 `{job.get('task_id')}`（{task.get('project_name') or ''}）"

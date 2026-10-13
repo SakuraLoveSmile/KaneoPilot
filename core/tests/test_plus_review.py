@@ -294,6 +294,9 @@ class TestReviewIdentityAndMaterials(ReviewCase):
 
         prompt = self.server.prompt_content
         self.assertIn("\"conclusion\":\"pass|changes_requested|blocked\"", prompt)
+        # §5.24.5：无人值守，asktool 只会挂到超时；需用户决定时走 blocked。
+        self.assertIn("本轮**无人值守**：禁止调用 `asktool`", prompt)
+        self.assertIn("给出 `blocked` 结论", prompt)
         self.assertIn(os.path.join(materials, "changes.diff"), prompt)
         self.assertIn(EXECUTION_RUN_ID, prompt)
         self.assertNotIn("Bearer", prompt)

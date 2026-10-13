@@ -97,11 +97,23 @@ _IMAGE_MIME = {
 # 已关闭的产物状态（reject 确认只认 rejected）。
 _TERMINAL_PROPOSAL_STATUSES = ("rejected", "approved", "changes_requested",
                                "expired", "interrupted")
+# 权限说明按本轮快照如实渲染（§5.24.3 第 6 项）：auto 轮次不得声称 Ask。
+_PERMISSION_LINES = {
+    constants.PI_DESKTOP_PLANNER_PERMISSION_MODE: (
+        "- 本会话固定在 **Plan 模式**、权限为 **auto**：工具调用自动批准。本轮\n"
+        "  **无人值守**——没有人在 Pi 界面确认工具或回答问题。"),
+    constants.PI_DESKTOP_READONLY_PERMISSION_MODE: (
+        "- 本会话固定在 **Plan 模式**、权限为 **Ask**：工具调用需要用户确认，不要假设\n"
+        "  自动批准。"),
+}
 _PLUS_INSTRUCTION = """
 ## 本轮执行方式（Pi-Desktop-Plus 计划模式，protocol §5.24.3）
 
-- 本会话固定在 **Plan 模式**、权限为 **Ask**：工具调用需要用户确认，不要假设
-  自动批准。
+{PERMISSION_LINE}
+- **禁止**调用 `asktool` 或任何在 Pi 界面等待用户作答的交互工具：KaneoPilot
+  不在 Pi 界面收集答案，这类调用只会挂起到超时被中止。Pi 计划模式系统提示里
+  「用 asktool 解决未定选择」的指引本轮**不适用**；需要用户决定时按下方
+  needs_input JSON 结束本轮。
 - 你的工作目录是**独立规划 worktree**（HEAD 基线，不是用户主工作区）：除计划
   产物外不要在里面创建/修改文件，不要修改业务源码。
 - 材料已复制到 `{MATERIAL_DIR}`（清单 `{MANIFEST_PATH}`）；图片作为本轮附件
@@ -110,7 +122,8 @@ _PLUS_INSTRUCTION = """
 - 计划正文必须经 **SubmitPlan** 提交（kind=plan），把完整计划 Markdown 放进
   提交内容。计划元数据（task_id/各 sha256/模型名）由调度核心按真实输入写入
   frontmatter——**不要**自己写 frontmatter，不要自报 ID/模型名/哈希。
-- 缺少必要信息、无法产出可靠计划时：**不要** SubmitPlan；本轮以严格 JSON 结束：
+- 缺少必要信息、存在必须由用户决定且材料/补充说明未作答的选择（如任务描述中的
+  待确认事项）、无法产出可靠计划时：**不要** SubmitPlan；本轮以严格 JSON 结束：
   `{"status": "needs_input", "plan_markdown": "<草稿，可为空>",
     "questions": [结构化问题对象，字段按上文共同契约], "evidence": ["..."]}`
 - 计划用中文、自包含、可执行（含文件级步骤与验证方式）；证据缺口如实标注，
@@ -1159,8 +1172,14 @@ class _Round:
             instruction = instruction.replace(
                 "独立规划 worktree**（HEAD 基线，不是用户主工作区）",
                 "已登记的任务分支 worktree**（手动接管后的当前状态，含未提交改动）")
+        # 快照缺失/未知（_check_snapshot 已在发送前拒绝）时不声称任何权限级别。
+        permission_line = _PERMISSION_LINES.get(
+            (self.runtime or {}).get("permission_mode"),
+            "- 本会话固定在 **Plan 模式**。")
         from . import review_resolution
         return prompt + plan_questions.prompt_block(self.manifest) + review_resolution.prompt_block(self.manifest) + instruction.replace(
+            "{PERMISSION_LINE}", permission_line
+        ).replace(
             "{MATERIAL_DIR}", str(materials.directory)
         ).replace(
             "{MANIFEST_PATH}", str(materials.manifest_path)
