@@ -1238,6 +1238,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - **退避重启**：非零退出或信号终止时，按指数退避（1s → 2s → 4s → … → 上限 60s）重试；连续失败 5 次后进入 backoff 状态，由 `engine status` 展示。
  - **失联判定**：`lease_expires_at < now` 且无心跳 → 派生 `lost`；不自动释放、不自动重启。持有 pid 经 birth 核验已死 → 同样派生失联（可按上条接管），不自动释放、不自动重启。
  - 环境变量 `KANPILOT_EXECUTOR_INSTANCE_ID` 由 App 启动时生成 UUID 并传入 runner/worker；worker 启动后经 `executor-instance` 的 `register-worker` 登记真实 PID 与启动时间。
+ - **旧 App 调度器互斥**：`executor-instance start` 首次登记时，App 的直接 Python CLI 调用经 `KANPILOT_SCHEDULER_PID` 与核心父 PID 一致核验后，由核心读取父进程 birth，保存为 `scheduler_pid`、`scheduler_started_seconds`、`scheduler_started_microseconds`，不接受调用者提供的进程身份，重复 start 不替换身份。引擎只在旧实例仍为 active 且调度进程经 birth 核验存活（或尚有存活归属 worker）时避让；已证明退出或 PID 被复用且无存活 worker 的旧实例不阻塞排队请求。birth 不可读但 PID 仍存活时保持避让；未标识直接调用、可执行 shim 及缺完整进程身份的历史 active 登记保持保守避让，核实失效后只经 `executor-instance stop` 关闭；不凭时间或 worker 为空自动停用。
  
 #### 5.27.2 engine status
  

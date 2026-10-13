@@ -121,6 +121,12 @@ struct CoreClient: Sendable {
         // `python3` 解析到带 certifi 的安装（/usr/local 或 ~/.npm-global 等）。
         var env = ProcessInfo.processInfo.environment
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        // Only a direct Python child has this App as its scheduler parent.
+        // Executable shims keep conservative ownership.
+        env.removeValue(forKey: "KANPILOT_SCHEDULER_PID")
+        if location.usesPython && command == "executor-instance" {
+            env["KANPILOT_SCHEDULER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        }
         let npmBin = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"

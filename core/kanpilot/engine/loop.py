@@ -530,8 +530,8 @@ class Reconciler:
         """
         from .. import process_owner
         instances = db.get_setting(conn, process_owner.SETTING, {}) or {}
-        return any(isinstance(entry, dict) and entry.get("state") == "active"
-                   and "lease_expires_at" not in entry
+        return any(isinstance(entry, dict) and "lease_expires_at" not in entry
+                   and process_owner.scheduler_active(entry)
                    for entry in instances.values())
 
     def _default_spawn(self, stage, db_path, instance_id):

@@ -13,6 +13,30 @@ struct OwnerLifecycleFixtures {
             let id = UUID().uuidString.lowercased()
             let started = try await client.run("executor-instance", payload: ["instance_id": id, "action": "start"], as: ExecutorInstanceResponse.self)
             guard started.instanceId == id, started.state == "active", started.ownedWorkers.isEmpty else { fatalError("real start contract mismatch") }
+            // Inspect only this fixture DB, while this Swift parent is still alive.
+            let probe = Process()
+            probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            probe.arguments = ["python3", "-B", "-c", """
+            import json, os, sqlite3, sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(sys.argv[1]).parent))
+            from kanpilot import process_owner
+            database = Path(os.environ['KANPILOT_DB']).resolve()
+            assert database.is_file(), 'isolated fixture database missing: ' + str(database)
+            conn = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
+            entries = json.loads(conn.execute("SELECT value FROM settings WHERE key='executor_instances'").fetchone()[0])
+            entry = entries[sys.argv[2]]
+            assert entry['scheduler_pid'] == os.getppid()
+            birth = process_owner.process_birth(os.getppid())
+            assert birth and all(entry['scheduler_' + key] == value for key, value in birth.items())
+            print('real Swift parent PID and birth verified')
+            """, path, id]
+            var probeEnvironment = ProcessInfo.processInfo.environment
+            probeEnvironment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (probeEnvironment["PATH"] ?? "/usr/bin:/bin")
+            probe.environment = probeEnvironment
+            try probe.run()
+            probe.waitUntilExit()
+            guard probe.terminationStatus == 0 else { fatalError("real scheduler parent identity mismatch") }
             let status = try await client.run("executor-status", payload: ["instance_id": id], as: ExecutorStatusDTO.self)
             guard status.ownedWorkers?.isEmpty == true else { fatalError("real status contract mismatch") }
             let closed = try await client.run("executor-instance", payload: ["instance_id": id, "action": "stop"], as: ExecutorInstanceResponse.self)
