@@ -411,6 +411,8 @@ class _Collector:
                 message.get("toolResult"),
                 message.get("toolCompletedAt"),
                 message.get("isError"),
+                message.get("turnId") or message.get("turn_id"),
+                message.get("timestamp") or message.get("createdAt"),
             ],
             ensure_ascii=False, sort_keys=True, default=str,
         )
@@ -455,6 +457,9 @@ class _Collector:
         self.seen[mid] = (fingerprint, revision)
         role = str(message.get("role") or "").lower()
         source = {"source_message_id": mid, "source_revision": revision}
+        source_turn = message.get("turnId") or message.get("turn_id")
+        if isinstance(source_turn, str) and source_turn:
+            source["turn_id"] = source_turn
         if not role:
             self.unrecognized = True
             return
@@ -476,6 +481,10 @@ class _Collector:
             )
         ts = message.get("timestamp") or message.get("createdAt") \
             or util.now_iso()
+        if util.parse_ts(message.get("timestamp") or message.get("createdAt")) is None:
+            # The event still needs a collection time, but it is not proof of
+            # when Plus executed this message.
+            source["source_timestamp_missing"] = True
         extra = {}
         if message.get("parentToolCallId"):
             extra["parent_tool_call_id"] = message["parentToolCallId"]
@@ -1251,8 +1260,11 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 planning_turn = turn_id
                 job["goal_approval"] = {"proposal_id": proposal["id"], "status": "approved",
                     "planning_turn_id": planning_turn, "execution_turn_id": current,
-                    "approved_by": "plus_history", "recovered_at": util.now_iso()}
-                log.emit("system", util.now_iso(), content=(
+                    "approved_by": "plus_history", "recovered_at": util.now_iso(),
+                    "execution_started_at": record.get("startedAt")
+                        if util.parse_ts(record.get("startedAt")) is not None else None}
+                log.emit("system", util.now_iso(), execution_turn_id=current,
+                    execution_started_at=job["goal_approval"]["execution_started_at"], content=(
                     f"goal_execution_recovered: {planning_turn} → {current}（已批准 Goal 历史与完整转录核验；只读续接）"))
                 rebind_turn(current)
                 return ("adopted", "", "")
@@ -1289,8 +1301,10 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                  content=(f"goal_contract: 目标契约待批准（{title or proposal_id}）；"
                           f"本机代批后同一会话开启执行轮次"))
         version = proposal.get("version")
+        approval_requested_at = None
         try:
             owner.check()
+            requested_at = util.now_iso()
             client.plans_resolve(
                 proposal_id, job["session_id"],
                 proposal["turnId"],
@@ -1299,6 +1313,9 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 target_permission_mode=permission_mode,
                 version=version,
             )
+            # Only our successful resolve call establishes this boundary;
+            # a concurrent approval must rely on turn identity/start proof.
+            approval_requested_at = requested_at
         except util.KanpilotError as exc:
             # 并发代批（另一个观察进程已批）不算失败：以「契约已不再 pending」
             # 为准继续等执行轮次；仍 pending 才是真失败。
@@ -1367,8 +1384,14 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             "target_permission_mode": permission_mode,
             "approved_at": util.now_iso(),
             "approved_by": "kaneopilot",
+            "approval_requested_at": approval_requested_at,
+            "execution_started_at": record.get("startedAt")
+                if util.parse_ts(record.get("startedAt")) is not None else None,
         }
         log.emit("system", util.now_iso(),
+                 execution_turn_id=execution_turn,
+                 approval_requested_at=approval_requested_at,
+                 execution_started_at=job["goal_approval"]["execution_started_at"],
                  content=(f"goal_approved: {proposal_id} → 执行轮次 "
                           f"{execution_turn}（权限 {permission_mode}；本机代批，"
                           f"未重发 prompt）"))

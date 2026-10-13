@@ -4,7 +4,98 @@ import subprocess
 import pytest
 
 from kanpilot import constants
-from kanpilot.verify_evidence import extract_command_results, match_verification, normalize, parse_verify_block
+from kanpilot.verify_evidence import (execution_window, extract_command_results,
+                                     match_verification, normalize, parse_verify_block)
+
+
+def goal_marker(**fields):
+    return dict({"type": "system", "seq": 2, "content": "goal_approved: proposal → execution",
+                 "execution_turn_id": "execution"}, **fields)
+
+
+def window_command(seq, **fields):
+    return dict({"seq": seq, "type": "command_output", "tool": {
+        "input": {"command": "pytest"}, "exit_code": 0}}, **fields)
+
+
+def test_goal_window_uses_turn_identity_even_for_backfilled_transcript():
+    baseline = window_command(4, turn_id="planning")
+    actual = window_command(1, raw={"turn_id": "execution"})
+    selected, metadata = execution_window([baseline, goal_marker(), actual])
+    assert selected == [actual]
+    assert metadata == {"evidence_window": "after_goal_approved", "window_basis": "execution_turn"}
+
+
+@pytest.mark.parametrize("field,basis", [("execution_started_at", "execution_started_at"),
+                                        ("approval_requested_at", "approval_request")])
+def test_goal_window_requires_real_timestamps_and_rejects_wrong_turn(field, basis):
+    marker = goal_marker(**{field: "2026-10-07T13:00:00Z"})
+    baseline = window_command(3, source_at="2026-10-07T12:59:59Z")
+    actual = window_command(4, source_at="2026-10-07T13:00:00Z")
+    unknown = window_command(5, source_at="2026-10-07T13:00:01Z", source_timestamp_missing=True)
+    missing = window_command(6)
+    wrong_turn = window_command(7, source_at="2026-10-07T13:00:01Z", turn_id="planning")
+    selected, metadata = execution_window([baseline, marker, actual, unknown, missing, wrong_turn])
+    assert selected == [actual]
+    assert metadata["window_basis"] == basis
+
+
+def test_goal_window_start_timestamp_precedes_approval_request_timestamp():
+    actual = window_command(1, source_at="2026-10-07T13:00:00Z")
+    selected, metadata = execution_window([actual, goal_marker(
+        execution_started_at="2026-10-07T13:00:00Z",
+        approval_requested_at="2026-10-07T13:00:01Z")])
+    assert selected == [actual]
+    assert metadata["window_basis"] == "execution_started_at"
+
+
+def test_goal_window_invalid_start_can_use_approval_request():
+    actual = window_command(1, source_at="2026-10-07T13:00:00Z")
+    selected, metadata = execution_window([actual, goal_marker(
+        execution_started_at="invalid", approval_requested_at="2026-10-07T13:00:00Z")])
+    assert selected == [actual]
+    assert metadata["window_basis"] == "approval_request"
+
+
+def test_unscoped_goal_window_does_not_invent_marker_time_as_execution_start():
+    messages = [window_command(1), goal_marker(source_at="2026-10-07T13:00:00Z")]
+    selected, metadata = execution_window(messages)
+    assert selected == messages
+    assert metadata == {"evidence_window": "whole_round", "window_basis": "unscoped_goal_window"}
+
+
+def test_ordinary_round_retains_whole_round_and_latest_goal_boundary_wins():
+    actual = window_command(1, turn_id="continued")
+    assert execution_window([actual])[1]["window_basis"] == "whole_round"
+    marker = goal_marker()
+    recovered = goal_marker(seq=3, content="goal_execution_recovered: planning → continued",
+                            execution_turn_id="continued")
+    selected, metadata = execution_window([actual, marker, recovered])
+    assert selected == [actual]
+    assert metadata["window_basis"] == "execution_turn"
+
+
+def test_goal_continuation_uses_current_verified_turn_identity():
+    old = window_command(1, turn_id="execution")
+    current = window_command(3, turn_id="continued")
+    selected, metadata = execution_window([old, goal_marker(), current], "continued")
+    assert selected == [current]
+    assert metadata["window_basis"] == "execution_turn"
+
+
+def test_goal_continuation_does_not_reuse_initial_turn_timestamp_boundary():
+    marker = goal_marker(execution_started_at="2026-10-07T13:00:00Z",
+                         approval_requested_at="2026-10-07T12:59:59Z")
+    initial_command = window_command(3, source_at="2026-10-07T13:00:01Z")
+    current_reply = {"type": "assistant", "seq": 4, "turn_id": "continued", "content": "done"}
+    selected, metadata = execution_window([marker, initial_command, current_reply], "continued")
+    assert selected == [current_reply]
+    assert metadata["window_basis"] == "execution_turn"
+
+
+def test_transcript_system_message_cannot_define_goal_window():
+    message = goal_marker(id="desktop:source:system")
+    assert execution_window([message])[1]["window_basis"] == "whole_round"
 
 
 def test_valid_verify_and_normalization():

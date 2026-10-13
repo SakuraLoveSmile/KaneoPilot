@@ -284,7 +284,7 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
             # 构建产物不算「未提交改动」：执行器跑 verify 必然生成它们，而
             # commit_worktree 只提交交付路径，产物留在工作树。若这里不放行，
             # 每次提交后的干净核验都会把产物误判成残留改动。
-            leftover = [c for c in worktree_changes(str(path))
+            leftover = [c for c in effective_worktree_changes(str(path))
                         if not is_build_artifact(c["path"])]
             if leftover:
                 raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
@@ -405,6 +405,74 @@ def worktree_changes(worktree: str) -> list:
             raise GitDeliveryError("delivery_commit_failed", "无法检查候选文件：" + str(exc)) from exc
         change["size"] = size
     return changes
+
+
+def _goal_material(worktree, change, tracked):
+    relative = Path(change["path"])
+    parts = relative.parts
+    # New staging does not confer repository ownership; existing HEAD files,
+    # deletions and links must remain actual delivery changes.
+    if (change["status"] not in ("??", "A ", "AM", " A")
+            or relative.is_absolute() or len(parts) != 3
+            or parts[:2] != (".pi", "goal") or ".." in parts
+            or relative.suffix != ".md" or change["path"] in tracked):
+        return False
+    path = Path(worktree)
+    try:
+        return (stat.S_ISDIR((path / ".pi").lstat().st_mode)
+                and stat.S_ISDIR((path / ".pi" / "goal").lstat().st_mode)
+                and stat.S_ISREG((path / relative).lstat().st_mode))
+    except OSError:
+        return False
+
+
+def _effective_changes(worktree):
+    changes = worktree_changes(worktree)
+    tracked = {os.fsdecode(name) for name in
+               _git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".pi/goal"],
+                    worktree, 10).stdout.split(b"\0") if name}
+    material = [change for change in changes if _goal_material(worktree, change, tracked)]
+    return [change for change in changes if change not in material], material
+
+
+def effective_worktree_changes(worktree: str) -> list:
+    """Delivery candidates excluding only safe newly generated goal Markdown."""
+    return _effective_changes(worktree)[0]
+
+
+def _index_tree_without_goal_material(path):
+    """Inspect recovery staging without rewriting unique user staging."""
+    _, material = _effective_changes(path)
+    if not material:
+        return _value(["write-tree"], path)
+    index = Path(_value(["rev-parse", "--git-path", "index"], path))
+    if not index.is_absolute():
+        index = Path(path) / index
+    with tempfile.TemporaryDirectory(prefix="kanpilot-recovery-index-") as temp:
+        copied = Path(temp) / "index"
+        copied.write_bytes(index.read_bytes())
+        env = dict(git_env(), GIT_INDEX_FILE=str(copied))
+        _git(["reset", "-q", "--", *[":(literal)" + c["path"] for c in material]], path, 60, env=env)
+        return _git(["write-tree"], path, 60, env=env).stdout.decode().strip()
+
+
+def _require_no_new_goal_commit(path, base, head):
+    # Recovery cannot accept a goal inserted by a hook after the private tree
+    # was frozen. Inspect the commit, not mutable worktree bytes; existing goal
+    # modifications/deletions and detected renames stay ordinary changes.
+    records = _git(["diff", "--name-status", "-z", "--find-renames", base, head], path, 10).stdout.split(b"\0")
+    cursor = 0
+    while cursor < len(records) and records[cursor]:
+        status = records[cursor].decode("ascii")
+        name = os.fsdecode(records[cursor + 1])
+        cursor += 3 if status.startswith(("R", "C")) else 2
+        relative = Path(name)
+        if (status != "A" or len(relative.parts) != 3
+                or relative.parts[:2] != (".pi", "goal") or relative.suffix != ".md"):
+            continue
+        entry = _git(["ls-tree", "-z", head, "--", ":(literal)" + name], path, 10).stdout
+        if entry.startswith((b"100644 blob ", b"100755 blob ")):
+            raise GitDeliveryError("delivery_commit_failed", "未登记提交包含新生成 goal 材料，保留本地提交但不交付")
 
 
 def is_build_artifact(path: str) -> bool:
@@ -672,11 +740,12 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         parents = _value(["show", "-s", "--format=%P", "HEAD"], path).split()
         trailers = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
         if parents == [expected] and trailers == [execution_run_id]:
+            _require_no_new_goal_commit(path, expected, head)
             if verified_source_sha256:
                 if (source_state_sha256(path) != verified_source_sha256
                         or tree_source_sha256(path, head) != verified_index_sha256):
                     raise GitDeliveryError("delivery_commit_failed", "未登记提交内容与核心验证回执不符，保留本地提交")
-                staged_tree = _value(["write-tree"], path)
+                staged_tree = _index_tree_without_goal_material(path)
                 if staged_tree != _value(["rev-parse", "HEAD^{tree}"], path):
                     # A recovery never resets possibly unique staging. Normal
                     # completion publishes the private index before DB phase 3.
@@ -686,7 +755,7 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
     if verified_source_sha256 and source_state_sha256(path) != verified_source_sha256:
         raise GitDeliveryError("delivery_commit_failed", "源码已变化，不能提交未经核心验证的内容")
-    changes = worktree_changes(path)
+    changes, material = _effective_changes(path)
     if not changes:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
     _require_safe_files(changes)
@@ -714,29 +783,43 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
     with tempfile.TemporaryDirectory(prefix="kanpilot-commit-") as temp:
         message_path = Path(temp) / "message.txt"
         message_path.write_text(message, encoding="utf-8")
-        if verified_source_sha256:
-            # Each live commit gets an isolated index. Freeze the exact Git
-            # tree before hooks; retain a hook-modified local commit as failure
-            # evidence rather than registering/publishing unverified bytes.
+        if verified_source_sha256 or material:
+            # Live verification and generated goal staging both need an
+            # isolated index. Live commits additionally freeze the exact tree
+            # before hooks and retain unverified commits as failure evidence.
             env = dict(git_env(), GIT_INDEX_FILE=str(Path(temp) / "index"))
             normal_index = Path(_value(["rev-parse", "--git-path", "index"], path))
             if not normal_index.is_absolute():
                 normal_index = Path(path) / normal_index
             before_index = normal_index.read_bytes() if normal_index.exists() else None
+            # Read goal staging from the frozen ordinary index, not from the
+            # current worktree (which may contain a newer unstaged revision).
+            goal_entries = b""
+            if material and before_index is not None:
+                original_index = Path(temp) / "original-index"
+                original_index.write_bytes(before_index)
+                original_env = dict(git_env(), GIT_INDEX_FILE=str(original_index))
+                goal_entries = _git(["ls-files", "--stage", "-z", "--",
+                                     *[":(literal)" + c["path"] for c in material]],
+                                    path, 60, env=original_env).stdout
             _git(["read-tree", expected], path, 60, env=env)
             _git(["add", "-A"], path, 60, env=env)
-            _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60, env=env)
-            if (source_state_sha256(path) != verified_source_sha256
+            _git(["reset", "-q", "--", *artifact_pathspecs(),
+                  *[":(literal)" + c["path"] for c in material]], path, 60, env=env)
+            if verified_source_sha256 and (source_state_sha256(path) != verified_source_sha256
                     or index_source_sha256(path, env=env) != verified_index_sha256):
                 raise GitDeliveryError("delivery_commit_failed", "验证源码与待提交索引不符，未提交")
             tree = _git(["write-tree"], path, 60, env=env).stdout.decode().strip()
             _git(["commit", "-F", str(message_path)], path, timeout, env=env)
             if _value(["rev-parse", "HEAD^{tree}"], path) != tree:
                 raise GitDeliveryError("delivery_commit_failed", "提交钩子改变了已验证树；本地提交已保留但未登记或交付")
-            if source_state_sha256(path) != verified_source_sha256:
+            if verified_source_sha256 and source_state_sha256(path) != verified_source_sha256:
                 raise GitDeliveryError("delivery_commit_failed", "提交期间源码变化；本地提交已保留但未登记或交付")
-            # HEAD now contains exactly the verified sources. Updating the
-            # normal index avoids displaying the old HEAD as staged changes.
+            if goal_entries:
+                # Only after checking the committed tree, restore generated
+                # goal entries into the index to publish, outside that tree.
+                _git(["update-index", "-z", "--index-info"], path, 60, env=env, input=goal_entries)
+            # Updating the normal index avoids displaying the old HEAD as staged changes.
             # Respect concurrent index edits. Publish the already verified
             # private index under Git's own lock protocol, without resetting a
             # user's newly staged contents.
