@@ -71,6 +71,47 @@ def test_start_stop_idempotence_and_no_restart(scene):
     assert caught.value.code == "conflict"
 
 
+def test_start_captures_scheduler_parent_identity_without_rebinding(scene, monkeypatch):
+    ctx, _, _, _ = scene
+    owner = str(uuid.uuid4())
+    birth = {"started_seconds": 100, "started_microseconds": 200}
+    monkeypatch.setenv(process_owner.SCHEDULER_PID_ENV, "12345")
+    monkeypatch.setattr(process_owner.os, "getppid", lambda: 12345)
+    monkeypatch.setattr(process_owner, "process_birth", lambda pid: birth if pid == 12345 else None)
+    cli.run("executor-instance", {"instance_id": owner, "action": "start"}, ctx.db_path)
+    entry = db.get_setting(ctx.conn, process_owner.SETTING)[owner]
+    assert entry["scheduler_pid"] == 12345
+    assert entry["scheduler_started_seconds"] == 100
+    assert entry["scheduler_started_microseconds"] == 200
+    monkeypatch.setattr(process_owner.os, "getppid", lambda: 54321)
+    cli.run("executor-instance", {"instance_id": owner, "action": "start"}, ctx.db_path)
+    assert db.get_setting(ctx.conn, process_owner.SETTING)[owner] == entry
+
+
+@pytest.mark.parametrize("parent_marker", [None, "54321"])
+def test_unmarked_or_shim_parent_keeps_conservative_identity(scene, monkeypatch, parent_marker):
+    ctx, _, _, _ = scene
+    owner = str(uuid.uuid4())
+    monkeypatch.delenv(process_owner.SCHEDULER_PID_ENV, raising=False)
+    if parent_marker:
+        monkeypatch.setenv(process_owner.SCHEDULER_PID_ENV, parent_marker)
+    monkeypatch.setattr(process_owner.os, "getppid", lambda: 12345)
+    cli.run("executor-instance", {"instance_id": owner, "action": "start"}, ctx.db_path)
+    entry = db.get_setting(ctx.conn, process_owner.SETTING)[owner]
+    assert "scheduler_pid" not in entry
+    assert process_owner.scheduler_active(entry)
+
+
+def test_unreadable_scheduler_birth_does_not_prove_exit(monkeypatch):
+    entry = {"state": "active", "scheduler_pid": 12345,
+             "scheduler_started_seconds": 100, "scheduler_started_microseconds": 200}
+    monkeypatch.setattr(process_owner, "process_birth", lambda pid: None)
+    monkeypatch.setattr(process_owner.util, "pid_alive", lambda pid: True)
+    assert process_owner.scheduler_active(entry)
+    monkeypatch.setattr(process_owner.util, "pid_alive", lambda pid: False)
+    assert not process_owner.scheduler_active(entry)
+
+
 def test_registration_uses_actual_process_and_is_idempotent(scene):
     first = register(scene)
     assert first == register(scene)

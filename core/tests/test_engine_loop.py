@@ -10,6 +10,7 @@ import subprocess
 import unittest
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, process_owner, util  # noqa: E402
@@ -452,6 +453,61 @@ class TestSpawn(KanpilotTestCase):
         self.assertFalse(result["executed"])
         self.assertEqual(result["reason"], "app_scheduler_active")
         self.assertEqual(spawned, [])
+
+    def test_dead_app_scheduler_does_not_block_manual_plan(self):
+        info = self.make_ready_task(task_id="taskstale000000000001")
+        tid = info["remote"]["id"]
+        conn = self._conn()
+        try:
+            with db.write_txn(conn):
+                db.create_request(conn, util.now_iso(), "plan", f"plan:{tid}",
+                                  task_id=tid, payload={"manual_authorized": True}, requested_by="user")
+                db.set_setting(conn, "executor_instances", {
+                    _iid(): {"state": "active", "scheduler_pid": 12345,
+                             "scheduler_started_seconds": 100,
+                             "scheduler_started_microseconds": 200, "workers": []}})
+            spawned = []
+            rec = loop.Reconciler(self.db_path, mode="legacy",
+                                  spawn=lambda stage, *_: spawned.append(stage))
+            # Both a dead PID and a reused PID must unblock this exact manual request.
+            for birth in (None, {"started_seconds": 101, "started_microseconds": 200}):
+                with self.subTest(birth=birth), patch.object(process_owner, "process_birth", return_value=birth), \
+                        patch.object(util, "pid_alive", return_value=False):
+                    result = rec.spawn_step(conn, {})
+                    self.assertEqual(result["spawned"], ["plan"])
+            self.assertEqual(spawned, ["plan", "plan"])
+        finally:
+            conn.close()
+
+    def test_live_idle_app_scheduler_still_blocks_spawn(self):
+        conn = self._conn()
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "executor_instances", {
+                    _iid(): {"state": "active", "scheduler_pid": 12345,
+                             "scheduler_started_seconds": 100,
+                             "scheduler_started_microseconds": 200, "workers": []}})
+            with patch.object(process_owner, "process_birth", return_value={
+                    "started_seconds": 100, "started_microseconds": 200}):
+                self.assertTrue(loop.Reconciler.foreign_scheduler_active(conn))
+        finally:
+            conn.close()
+
+    def test_dead_app_with_live_detached_worker_still_blocks_spawn(self):
+        conn = self._conn()
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "executor_instances", {
+                    _iid(): {"state": "active", "scheduler_pid": 12345,
+                             "scheduler_started_seconds": 100,
+                             "scheduler_started_microseconds": 200,
+                             "workers": [{"pid": os.getpid(), **process_owner.process_birth(os.getpid())}]}})
+            actual_birth = process_owner.process_birth
+            with patch.object(process_owner, "process_birth", side_effect=lambda pid:
+                              None if pid == 12345 else actual_birth(pid)):
+                self.assertTrue(loop.Reconciler.foreign_scheduler_active(conn))
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

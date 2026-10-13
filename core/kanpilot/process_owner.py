@@ -17,6 +17,7 @@ from pathlib import Path
 from . import db, util
 
 INSTANCE_ENV = "KANPILOT_EXECUTOR_INSTANCE_ID"
+SCHEDULER_PID_ENV = "KANPILOT_SCHEDULER_PID"
 SETTING = "executor_instances"
 
 
@@ -110,6 +111,23 @@ def owned_workers(conn, instance_id) -> list:
     return _live_workers(_instances(conn).get(instance_id))
 
 
+def scheduler_active(entry) -> bool:
+    """An idle live scheduler still owns scheduling; dead owners cannot block forever."""
+    if not isinstance(entry, dict) or entry.get("state") != "active":
+        return False
+    if _live_workers(entry):
+        return True  # Detached workers keep ownership after the App exits.
+    pid = entry.get("scheduler_pid")
+    recorded = {key: entry.get("scheduler_" + key)
+                for key in ("started_seconds", "started_microseconds")}
+    if type(pid) is not int or pid <= 0 or not all(type(v) is int for v in recorded.values()):
+        return True  # Historical/shim entries need explicit confirmed stop.
+    current = process_birth(pid)
+    if current is None:
+        return util.pid_alive(pid)  # Unreadable birth is not proof of a dead process.
+    return all(current[key] == value for key, value in recorded.items())
+
+
 def registered_worker_alive(conn, task_id, run_id, pid):
     """Exact registered identity, or None when this PID has no owner record."""
     records = [worker for entry in _instances(conn).values()
@@ -143,6 +161,14 @@ def set_instance(ctx, instance_id, action) -> dict:
                          if key == instance_id or value.get("state") != "stopped" or _live_workers(value)}
             if not entry:
                 entry = {"state": "active", "started_at": ctx.now_iso, "workers": []}
+                # CoreClient marks direct Python launches. A spawning shim or an
+                # in-process CLI caller must not register a short-lived parent as App.
+                pid = os.getppid()
+                if os.environ.get(SCHEDULER_PID_ENV) == str(pid):
+                    birth = process_birth(pid)
+                    if birth:
+                        entry.update(scheduler_pid=pid,
+                                     **{"scheduler_" + key: value for key, value in birth.items()})
         elif action == "stop":
             entry = dict(entry, state="stopped", stopped_at=entry.get("stopped_at") or ctx.now_iso,
                          workers=entry.get("workers", []))
