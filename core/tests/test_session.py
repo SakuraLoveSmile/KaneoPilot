@@ -213,6 +213,34 @@ class HeadlessCase(KanpilotTestCase):
 
 # ------------------------------------------------- 数据源解析 / 设置优先级
 
+class TestGoalEvidenceMetadata(HeadlessCase):
+    def test_goal_execution_metadata_survives_real_session_messages_chain(self):
+        self.make_task("window-task", "window-run")
+        events = [pi_event(1, "session", session_id="sess-pi-0001"),
+                  pi_event(2, "system", content="goal_approved: p → execution",
+                           execution_turn_id="execution",
+                           execution_started_at="2026-09-20T13:00:02Z",
+                           approval_requested_at="2026-09-20T13:00:01Z"),
+                  pi_event(3, "command_output", input={"command": "pytest"}, exit_code=0,
+                           turn_id="execution", source_timestamp_missing=True)]
+        self.make_run("window-task", "window-run", events)
+        messages = self.read_all("window-task")["messages"]
+        marker, command = messages[1:]
+        self.assertEqual(marker["execution_turn_id"], "execution")
+        self.assertEqual(marker["execution_started_at"], "2026-09-20T13:00:02Z")
+        self.assertEqual(marker["approval_requested_at"], "2026-09-20T13:00:01Z")
+        self.assertEqual(command["turn_id"], "execution")
+        self.assertIs(command["source_timestamp_missing"], True)
+
+    def test_goal_metadata_revision_invalidates_reader_revision_snapshot(self):
+        first = pi_event(1, "command_output", input={"command": "pytest"}, exit_code=0)
+        revised = dict(first, source_timestamp_missing=True, turn_id="execution")
+        before = dsh_events.to_messages([first])[0]
+        after = dsh_events.to_messages([revised])[0]
+        self.assertNotEqual(before["revision"], after["revision"])
+        self.assertEqual(h.normalize_message(after)["turn_id"], "execution")
+
+
 class TestRunsRootResolution(HeadlessCase):
     def test_default_root_constant_is_lazy_expanduser(self):
         saved_app_support = os.environ.pop("KANPILOT_APP_SUPPORT", None)

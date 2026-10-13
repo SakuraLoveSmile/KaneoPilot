@@ -339,6 +339,7 @@ def plus_turn_get(
         "session_id": session_id,
         "turn_id": turn_id,
         "status": status,
+        "started_at": res.get("startedAt") or res.get("started_at"),
         "ended_at": res.get("endedAt") or res.get("ended_at"),
         "error_code": res.get("errorCode") or res.get("error_code"),
     }, record.get("token"))

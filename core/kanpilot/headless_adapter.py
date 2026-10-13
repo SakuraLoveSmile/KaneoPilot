@@ -65,7 +65,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from . import constants, util
+from . import constants, util, verify_evidence
 
 # ------------------------------------------------------------- 状态词汇
 
@@ -128,6 +128,7 @@ def normalize_message(raw: dict, run_id: Optional[str] = None) -> dict:
         "revision": raw.get("revision") if raw.get("revision") is not None else 0,
         "source_at": raw.get("source_at"),
     }
+    message.update(verify_evidence.window_metadata(raw))
     if msg_type in _TOOL_TYPES:
         tool = raw.get("tool") or {}
         message["tool"] = {

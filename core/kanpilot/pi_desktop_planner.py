@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import (
-    bridge, cli, cmd_exec, codex_planner, constants, core, db, dsh_events, headless_adapter,
+    bridge, cli, cmd_exec, codex_planner, constants, core, db, dsh_events, git_delivery, headless_adapter,
     pi_desktop_backend, pi_desktop_worker, planfile, planner_runner, round_store, util,
 )
 from . import runtime_client
@@ -447,10 +447,15 @@ class _Round:
             return self._fail_unexpected(exc)
 
     def _fail_unexpected(self, exc: Exception) -> bool:
-        # 异常文本可能包含连接凭据或整个请求，故只记录异常类型。
+        # GitDeliveryError 已去除 URL；再脱敏本轮已知凭据。其他异常仅留类名。
         reason = "planner_internal_error"
         detail = (f"{reason}: 规划进程异常退出（{type(exc).__name__}）；"
                   "本轮已停止，未自动重试")
+        evidence = {"error_category": reason, **self._evidence()}
+        if isinstance(exc, git_delivery.GitDeliveryError):
+            message = util.redact(exc.message, self._secrets)
+            evidence.update(git_delivery_code=exc.code, git_delivery_message=message)
+            detail += f"；{exc.code}: {message}"
         ctx = cli.Context(self.db_path)
         try:
             def guard(conn):
@@ -470,7 +475,7 @@ class _Round:
                 "request_id": self.request_id, "run_id": self.run_id,
                 "outcome": "failed", "note": detail,
                 "failure_code": "planner_failed", "failure_reason": detail,
-                "evidence": {"error_category": reason, **self._evidence()},
+                "evidence": evidence,
             })
         except util.KanpilotError as error:
             if error.code not in ("stale_run", "conflict", "not_found"):

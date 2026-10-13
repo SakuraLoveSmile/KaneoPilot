@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-from . import constants, util
+from . import constants, util, verify_evidence
 
 # 事件 type → Message.type（protocol §5.18.2 + §5.22.6）。
 _EVENT_TO_MESSAGE = {
@@ -229,6 +229,10 @@ def to_messages(events: list) -> list:
                 )
             revision_parts = (etype_origin, content)
         raw["content"] = content
+        metadata = verify_evidence.window_metadata(event)
+        raw.update(metadata)
+        if metadata:
+            revision_parts += (metadata,)
         source_id = event.get("source_message_id")
         source_revision = event.get("source_revision")
         if (isinstance(source_id, str) and source_id

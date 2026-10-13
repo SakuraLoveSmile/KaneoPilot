@@ -101,7 +101,7 @@ struct SessionReaderView: View {
         } message: { _ in
             Text("沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。")
         }
-        .confirmationDialog("向 Plus 请求开始规划？", isPresented: Binding(
+        .confirmationDialog("向 Plus \(startConfirmation?.startLabel ?? "请求开始")？", isPresented: Binding(
             get: { startConfirmation != nil },
             set: { if !$0 { startConfirmation = nil } }
         ), titleVisibility: .visible, presenting: startConfirmation) { expected in

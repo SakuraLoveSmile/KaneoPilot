@@ -334,7 +334,8 @@ class RuntimeClient:
         result = self._call("kp_runtime_turn_get", {"session_id": session_id, "turn_id": turn_id,
                             **({"require_identity": True} if require_identity else {})})
         return {"sessionId": result.get("session_id"), "turnId": result.get("turn_id"),
-                "status": result.get("status"), "endedAt": result.get("ended_at"),
+                "status": result.get("status"), "startedAt": result.get("started_at"),
+                "endedAt": result.get("ended_at"),
                 "errorCode": result.get("error_code")}
 
     def session_get(self, session_id: str, **kwargs) -> dict:
@@ -446,6 +447,7 @@ class HistoricalReadClient:
         )
         return {"sessionId": result.get("session_id"),
                 "turnId": result.get("turn_id"), "status": result.get("status"),
+                "startedAt": result.get("started_at"),
                 "endedAt": result.get("ended_at"),
                 "errorCode": result.get("error_code")}
 
