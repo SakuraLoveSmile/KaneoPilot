@@ -29,7 +29,7 @@
 - 下列参考实现与排查结论保留为历史依据。本次执行结果见文末“本次执行记录”，不得把历史测试当作本次重跑。
 
 - 按本计划写好的参考实现（测试已通过）已存成补丁 `build/patches/plus-asktool-image-sniff_804952ec.patch`，并于 2026-10-13 从工作区撤下。它没有提交、打包或安装。
-- 线上引擎跑的是 `/Applications/KaneoPilot.app` 里打包的核心。那里仍是旧提示词，两项修复都没有生效。
+- 线上引擎执行 `/Applications/KaneoPilot.app` 的打包核心。本次已于 2026-10-14 00:11 替换并启动新包，两项修复已安装；真实模型与原生界面结果见文末。
 - 原计划成稿时 WP1–WP6 均未施工；WP1–WP5 的参考实现可从补丁恢复，用法见“实施顺序与前置”。本次另补评论、重名、内容/哈希保持及缺失/未知权限快照的回归覆盖。
 - 文中行号取自 HEAD `870c424`。撤下参考实现后已逐一核对，与当前工作区一致。
 
@@ -389,7 +389,7 @@ lines.append(
    - **C. 截图。** 描述或评论带 Kaneo 图片链接的任务，准备材料后：
      - `manifest.json` 中对应条目的 `media_type` 为 `image/png`（或 `image/jpeg`、`image/webp`），文件名带对应扩展名；
      - 该轮规划 `job.json` 的 `attachment_count` ≥ 1。
-   - **D. Review。** 下一次 Plus Review 的 `events.jsonl` 中，`grep -cF '本轮**无人值守**：禁止调用'` ≥ 1。
+   - **D. Review。** 检查本轮 `executor-sessions/review/<invocation_id>/transcript.json` 的完整 user 消息，含「本轮**无人值守**：禁止调用 `asktool`」。本次实测发现 Review 的 `events.jsonl` 只记录指令前 2000 字，角色禁令位于其后，不能用 events 的 grep 阴性判定禁令未发送；完整转录是本项的发送证据。并核对最终 `blocked`、报告中的未定选择及调度台的受阻状态。
 
 ### 适用命令
 
@@ -541,8 +541,22 @@ diff -rq -x __pycache__ /Applications/KaneoPilot.app/Contents/Resources/core/kan
 | WP2–WP3 | 待体验 | 提示词 worker 独占两份 source 与三份 tests；旧 source 加新断言：6 failed/1 passed；修复后完整受影响套件 94 passed/3 subtests passed。 |
 | WP4 | 待体验 | 材料 worker 独占 source 与新测试；红基线 6 failed/1 passed；修复后目标及相邻套件 40 passed/3 subtests passed。覆盖描述、评论、重名、哈希/字节保持及附件/本地路径边界。 |
 | WP5 | 待体验 | 独立 reviewer 没有发现实质问题；本次完整核心回归 2560 passed/573 subtests passed，1575.74 秒。集成候选与未修复 `eacbc6b` 基线均为 354 passed/5 skipped/19 failed/7 errors；26 个失败/报错 nodeid 与分类完全一致，无新增失败（`integration-comparison.json`）。 |
-| WP6 | 实现中 | 新 App 构建、打包模块哈希/导入、本地签名核对通过；独立实机脚本前检通过，尚未安装或发送模型 prompt。 |
+| WP6 | 待体验 | 2026-10-14 00:11 新 App 已备份替换并启动；安装核心与仓库一致、签名通过、生产引擎心跳正常。真实 Plus 规划/Review 各一轮通过，原生问题表单和受阻报告入口已实查。 |
 
 - 真实 Kaneo 资源兼容性：新构建 App 的 bundled core 在独立本地库中 `prepare-plan-input` 读取原 StarTool 评论；`elm7r313lixh98kqi28infio` 成为 `elm7r313lixh98kqi28infio.png`、`image/png`、107186 bytes，SHA256 `f2bbefc90f25987976b217d342035aa3da8d23a56ff8d023c9b34aa205f6404e`，`can_start=true/issues=[]`。只向 Kaneo 读取，没有模型调用、远端写入或生产 DB 写入。
-- 真实模型验收准备：独立 DB、根目录、fake loopback Kaneo 和第二个 MCP 服务共用隔离路径；PNG 经无后缀 URL 下载，故意返回 `application/octet-stream`，仍正确识别。前检未发送模型 prompt。Review 的执行记录为合成夹具，不能作为真实业务执行证据。
+- 真实模型验收：独立 DB、根目录、fake loopback Kaneo 和第二个 MCP 服务共用隔离路径；PNG 经无后缀 URL 下载，故意返回 `application/octet-stream`，仍正确识别。实际仅发送两轮模型 prompt，没有重试。Review 的执行记录为合成夹具，不能作为真实业务执行证据。
 - 所有原始日志和隔离夹具保存在 `build/validation/plus-asktool/`（git 忽略）；主要文件为 `prompts-red.log`、`prompts-green.log`、`core.log/core.xml`、`integration.log/integration.xml`、`baseline-eacbc6b-20261013/`、`build.log`、`real-asset-result.json` 及各 `live-*/summary.json`。
+
+### 安装与真实验收结果（2026-10-14）
+
+- WP1–WP5 已本地提交：`77efd98`。本次全部测试使用 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`（pytest 9.1.1）；默认 pyenv Python 未用于最终测试结果。
+- 旧 App 备份：`/Users/sakurasep/KaneoPilot-backup-20261014-001114/KaneoPilot.app`。安装前确认没有 claimed/queued 请求、没有执行 worker，按完整 App 路径正常退出；闲置的旧 stdio queue 服务亦已退出。新 App 安装后的 `diff -rq -x __pycache__ …/core/kanpilot core/kanpilot` 无输出，签名复核通过，新引擎 PID 79381 心跳正常。
+- 一次安装前校验发现前检导入生成的 `__pycache__` 破坏了构建包签名；该次没有替换旧 App。已移除构建包生成缓存、重新签名，真实验收使用 `PYTHONDONTWRITEBYTECODE=1` 与 `sys.dont_write_bytecode=True`，安装后再次签名核对通过。
+- 实机证据根：`build/validation/plus-asktool/live-20261014T001158-5e5b47f0/`。规划沿用 `step-5-preview/high`，178.13 秒结束为 `needs_input`，任务 `needs_user`；session `311e997a-213c-4436-b654-a7b564913f71`，turn `e1a84386-d7e2-4ab6-8df5-f2fba5e6fea4`，run `fdb33fec-6110-4336-9710-5830039a3142`。提示词含 auto 和禁令、不含 Ask，`attachment_count=1`。模型经标准库解码 PNG 核对左上红、右上绿、左下蓝、右下黄，哈希与 manifest 相符；这证明图片附件可用，不声称模型只凭原生视觉识别。
+- Review 沿用 `deepseek/deepseek-v4.1-flash/high`，92.32 秒结束为 `blocked`，任务 `needs_user/review_blocked`，报告已登记并列出必须用户决定的返回状态；session `d46495ea-97b9-460e-b127-85f0e7931b15`，turn `ede8fd89-f5ae-4e56-886f-7d9d720023fe`，run `b2f8d30d-ac13-4895-b08e-0aaeb396df3c`。完整 `transcript.json` 的 `complete=true`；按真实结构核对工具调用，规划使用 Read/Glob/Bash，Review 使用 Bash，两轮均没有 asktool。
+- 发送提示词核对：规划完整 user 事件含 auto/禁令、不含 Ask；Review 的 events 指令截为前 2000 字，改核完整转录的 user 消息（12088 字符），确认无人值守和 asktool 禁令实际收到（`prompt-checks.json`）。这仅修正取证入口，没有修改禁令、结论或界面验收目标。
+- 原生界面：独立验收副本与已安装 App 的构建 UUID 一致（`9F05EB59-E944-354C-AF53-828E3F535753 / arm64`），明确读取已安装 bundled core 和隔离 DB；总览显示两项“需要你”。规划详情显示问题、“返回 0 / 返回 1 / 自定义方案”选项及回答前禁用的提交按钮；Review 的评审页显示“受阻”、报告及打开入口。未填写答案、未发第三次模型调用。记录在 `native-ui-result.json`，界面经 CUA 文本与截图亲查；验收副本随后正常退出，测试库维持暂停。
+- 原有 StarTool 任务的状态、阶段、run_id、计划路径/哈希、需求/来源哈希及 `plan_execution_hold` 与安装前完全一致：仍为 ready、待确认执行，未开始业务执行（`startool-before.json/startool-after.json`）。
+- 额外观察：当前 main 的 Review 阻塞概览主按钮仍显示“重试派发”。本次未点击或调整这项既有 UI；核验使用“评审”页和报告入口，不把后续恢复操作算作已验证。
+
+WP1–WP6 均为**待体验**；没有用户确认“已验收”。禁令仍属提示词软约束，两次实机结果不构成所有模型或未来 Plus 版本的硬保证；生产正常任务的后续表现仍应沿既有日志观察。已有集成失败保持原范围，本次未扩展修复。
