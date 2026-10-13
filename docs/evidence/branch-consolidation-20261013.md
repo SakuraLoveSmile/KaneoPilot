@@ -25,7 +25,7 @@
 - sandbox.tar.gz 保存外层沙盒完整原始目录；sandbox-admin.tar.gz、sandbox-index、binary patches 保存原 Git 登记及暂存状态。文件内容和链接已与解包流的 SHA-256 清单核对。
 - 外层 `/Users/developer/KaneoPilot-sandbox` 的 index 与旧 main=9d0ecf0 一致，工作内容为较早的沙盒快照。完整归档后解除外层登记并清理源码，没有用旧状态覆盖新版引擎。
 - 独立嵌套仓库 `/Users/developer/KaneoPilot-sandbox/kaneopilot-sandbox` 原位保留。正式映射仍引用它；其 HEAD、全部 refs、38 个工作树登记及各 git common-dir 已复核不变。没有修改生产映射或该独立仓库。
-- 本次 managed 验证工作树完成验证后通过 Codex archive_worktree 归档清理；有效构建产物和日志提前保存到归档根。
+- 本次 managed 验证工作树的 Codex archive_worktree 两次仅返回 queued，未实际移除目录；随后独立保存并验证 validation-worktree-source.tar.gz / admin 备份，确认源码干净且 HEAD 为 main 祖先后使用 git worktree remove 清理。有效构建产物和日志保留在归档根；App 的归档请求/附件同步仍可能排队。
 
 ## 本次验证
 
