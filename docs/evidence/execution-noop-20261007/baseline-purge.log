@@ -1,0 +1,85 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________ TestPurge.test_purge_session _________________________
+
+self = <test_v2_planning.TestPurge testMethod=test_purge_session>
+
+    def test_purge_session(self):
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        # 造一个轮次会话：claim plan（backend=codex）。
+        request_id, _ = self.queue_plan(
+            task_id, source_sha256=fixture["source_sha256"],
+            requirements_sha256=fixture["requirements_sha256"])
+        # 任务已 ready → plan guard 需要 needs_plan，先搬回去。
+        self.set_task_status(task_id, "needs_plan")
+        claim = self.call("claim", {
+            "stage": "plan", "executor": "test-planner",
+            "request_id": request_id})
+        self.assertTrue(claim["claimed"])
+        run_id = claim["run_id"]
+        sessions = self.call(
+            "list-sessions", {"task_id": task_id})["sessions"]
+        self.assertTrue(any(s["run_id"] == run_id for s in sessions))
+        # 活跃会话不可 purge；先 trash 再 purge。
+        exc = self.call_err("purge-session", {
+            "task_id": task_id, "run_id": run_id})
+        self.assertEqual(exc.code, "conflict")
+>       self.call("trash-session", {"task_id": task_id, "run_id": run_id})
+
+/tmp/kaneopilot-noop-baseline-check/core/tests/test_v2_planning.py:84: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/tmp/kaneopilot-noop-baseline-check/core/tests/helpers.py:285: in call
+    result = cli.run(command, payload or {}, self.db_path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/private/tmp/kaneopilot-noop-baseline-check/core/kanpilot/cli.py:519: in run
+    return COMMANDS[command][1](ctx, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/private/tmp/kaneopilot-noop-baseline-check/core/kanpilot/cmd_session.py:1014: in cmd_trash_session
+    return _save_session(ctx, payload, "trashed", "session_trashed")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+ctx = <kanpilot.cli.Context object at 0x10793ccb0>
+payload = {'task_id': 'taskready000000000000001', 'run_id': 'bce9891c-e315-4292-b747-2e93c4fbafec'}
+target_state = 'trashed', event_kind = 'session_trashed'
+
+    def _save_session(ctx, payload: dict, target_state: str, event_kind: str) -> dict:
+        conn, now = ctx.conn, ctx.now_iso
+        task_id, run_id = payload["task_id"], payload["run_id"]
+        expected = payload.get("expected_save_state")
+        source = headless.resolve_source(conn)
+        job: Optional[dict] = None
+        with db.write_txn(conn):
+            db.require_task(conn, task_id)
+            # 轮次不存在且无法经身份核验回填 → not_found（§5.16.1 写入点含本命令）。
+            _row, job = _backfill_one(conn, source, task_id, run_id, now)
+            row = round_store.require_round(conn, task_id, run_id)
+            current = row["save_state"]
+            # v2 §5.20.1：purged 终态——不可再回收/恢复。
+            if current == "purged":
+                raise util.KanpilotError(
+                    "conflict",
+                    "该会话轮次已永久从列表移除（终态），不能再变更保存状态",
+                )
+            if current == target_state:
+                # 已处于目标状态 → 幂等成功，不重复写事件（§5.16.2）。
+                deduplicated = True
+            else:
+                # expected_save_state 与当前不符（且非目标态）→ conflict。
+                if expected is not None and current != expected:
+                    raise util.KanpilotError(
+                        "conflict",
+                        f"会话保存状态冲突（期望 {expected}，实际为 {current}）",
+                    )
+                # 禁止删除（§5.16.2）：conflict + 中文原因；restore 无禁止条件。
+                if target_state == "trashed":
+                    reason = _session_trash_reason(conn, source, row, ctx.now)
+                    if reason is not None:
+>                       raise util.KanpilotError("conflict", reason)
+E                       kanpilot.util.KanpilotError: 该规划轮次仍有排队或领取中的请求或活动轮次，暂不能移除会话
+
+/private/tmp/kaneopilot-noop-baseline-check/core/kanpilot/cmd_session.py:1055: KanpilotError
+=========================== short test summary info ============================
+FAILED ../../../../../../tmp/kaneopilot-noop-baseline-check/core/tests/test_v2_planning.py::TestPurge::test_purge_session
+1 failed in 0.21s
