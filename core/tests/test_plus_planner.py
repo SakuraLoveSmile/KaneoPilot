@@ -1680,6 +1680,37 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
 
 
 class TestUnexpectedPlannerExit(PlusPlannerCase):
+    def test_git_delivery_error_keeps_code_and_sanitized_message(self):
+        fixture = self.plus_request()
+        error = git_delivery.GitDeliveryError(
+            "branch_exists", "分支已存在：https://token@host/private token=secret-token-value")
+        with mock.patch.object(pi_desktop_planner._Round, "_prepare_materials",
+                               side_effect=error):
+            self.run_round()
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        conn = db.connect(self.db_path)
+        try:
+            details = [util.jload(row["detail_json"]) for row in conn.execute(
+                "SELECT detail_json FROM events WHERE task_id=? AND request_id=?",
+                (fixture["task_id"], fixture["request_id"]))]
+            evidence = util.jload(conn.execute(
+                "SELECT evidence_json FROM attempts WHERE request_id=? AND run_id=?",
+                (fixture["request_id"], run_id)).fetchone()["evidence_json"])
+        finally:
+            conn.close()
+        self.assertEqual(evidence["git_delivery_code"], "branch_exists")
+        self.assertIn("分支已存在", evidence["git_delivery_message"])
+        reported = next(detail for detail in details if detail.get("outcome") == "failed")
+        self.assertIn("branch_exists", reported["note"])
+        self.assertIn("分支已存在", reported["note"])
+        persisted = json.dumps({"job": job, "details": details, "evidence": evidence,
+                                "events": self.events_for(fixture["task_id"], run_id)})
+        self.assertNotIn("https://", persisted)
+        self.assertNotIn("token@host", persisted)
+        self.assertNotIn("secret-token-value", persisted)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(self.server.prompt_count, 0)
+
     def test_exception_before_session_creation_finishes_claim(self):
         fixture = self.plus_request()
         raw_detail = f"token={TOKEN}; raw request payload must not be persisted"
