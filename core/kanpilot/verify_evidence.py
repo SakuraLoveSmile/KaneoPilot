@@ -6,6 +6,25 @@ import json
 import re
 import shlex
 
+from . import util
+
+
+# Only these scalar fields carry the Goal execution boundary through adapters.
+WINDOW_FIELDS = ("turn_id", "source_timestamp_missing", "execution_turn_id",
+                 "execution_started_at", "approval_requested_at")
+
+
+def window_metadata(source: dict) -> dict:
+    metadata = {}
+    for name in WINDOW_FIELDS:
+        value = source.get(name)
+        if name == "source_timestamp_missing":
+            if isinstance(value, bool):
+                metadata[name] = value
+        elif isinstance(value, str) and value:
+            metadata[name] = value
+    return metadata
+
 
 def normalize(command: str) -> str:
     # Fold only shell word separators. Quoted/escaped whitespace belongs to
@@ -93,12 +112,78 @@ def _has_verify_fence_line(plan_text: str) -> bool:
     return any(_VERIFY_FENCE_LINE.match(line) for line in plan_text.splitlines())
 
 
-def extract_command_results(messages: list) -> list:
-    results = []
+def _ordered(messages: list) -> list:
     # Core messages carry monotonically increasing seq; timestamp breaks ties.
-    ordered = sorted(enumerate(messages), key=lambda pair: (
+    return sorted(enumerate(messages), key=lambda pair: (
         pair[1].get("seq") if isinstance(pair[1].get("seq"), int) else float("inf"),
         str(pair[1].get("source_at") or pair[1].get("timestamp") or pair[1].get("ts") or ""), pair[0]))
+
+
+def _window_field(message: dict, name: str):
+    raw = message.get("raw")
+    return message.get(name, raw.get(name) if isinstance(raw, dict) else None)
+
+
+def _timestamp(message: dict):
+    if _window_field(message, "source_timestamp_missing") is True:
+        return None
+    return util.parse_ts(message.get("source_at") or message.get("timestamp") or message.get("ts"))
+
+
+def execution_window(messages: list, execution_turn_id=None) -> tuple:
+    """Select trusted Goal execution evidence, never by collection order/time.
+
+    A transcript may have been backfilled after the local approval event. Turn
+    identity wins; timestamps are used only for messages without a turn label.
+    Unscoped historical Goal rounds remain explicitly whole_round, so callers
+    can refuse to treat their drafting evidence as execution verification.
+    """
+    ordered = [message for _, message in _ordered(messages)]
+    markers = [message for message in ordered
+               if message.get("type", message.get("kind")) == "system"
+               and not message.get("source_message_id")
+               and not str(message.get("id") or "").startswith("desktop:")
+               and isinstance(message.get("content"), str)
+               and message["content"].startswith(("goal_approved:", "goal_execution_recovered:"))]
+    if not markers:
+        return ordered, {"evidence_window": "whole_round", "window_basis": "whole_round"}
+    marker = markers[-1]
+    marker_turn = _window_field(marker, "execution_turn_id")
+    turn_id = execution_turn_id or marker_turn
+    turn_id = turn_id if isinstance(turn_id, str) and turn_id else None
+    started_at = _window_field(marker, "execution_started_at")
+    boundary = util.parse_ts(started_at)
+    basis = "execution_started_at"
+    if boundary is None:
+        boundary = util.parse_ts(_window_field(marker, "approval_requested_at"))
+        basis = "approval_request"
+    if execution_turn_id and marker_turn and execution_turn_id != marker_turn:
+        # A continuation's identity does not make the original execution's
+        # start time its own. Without a current-turn start proof, accept only
+        # messages explicitly labelled with the bound continuation turn.
+        boundary = None
+    scoped = turn_id is not None and any(_window_field(message, "turn_id") == turn_id
+                                         for message in ordered)
+    if boundary is None and not scoped:
+        return ordered, {"evidence_window": "whole_round", "window_basis": "unscoped_goal_window"}
+    selected = []
+    for message in ordered:
+        source_turn = _window_field(message, "turn_id")
+        if isinstance(source_turn, str) and source_turn:
+            if turn_id is None or source_turn != turn_id:
+                continue
+        else:
+            timestamp = _timestamp(message)
+            if boundary is None or timestamp is None or timestamp < boundary:
+                continue
+        selected.append(message)
+    return selected, {"evidence_window": "after_goal_approved",
+                      "window_basis": "execution_turn" if scoped else basis}
+
+
+def extract_command_results(messages: list) -> list:
+    results = []
+    ordered = _ordered(messages)
     for index, message in ordered:
         raw = message.get("raw") or {}
         tool = message.get("tool") or (raw.get("tool") if isinstance(raw, dict) else None)

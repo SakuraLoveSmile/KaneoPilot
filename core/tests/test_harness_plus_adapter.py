@@ -67,6 +67,48 @@ def test_plus_turn_get_default_retains_legacy_missing_identity_behavior():
     assert result["status"] == "completed"
 
 
+@pytest.mark.parametrize("field", ["startedAt", "started_at"])
+def test_plus_turn_get_preserves_started_at_metadata(field):
+    client = MagicMock()
+    started_at = "2026-10-09T03:40:00.089Z"
+    client.call_tool.return_value = {"sessionId": "session-1", "turnId": "turn-1",
+                                     "status": "completed", field: started_at}
+    with patch.object(harness_plus_adapter, "_get_client", return_value=(client, {})):
+        result = harness_plus_adapter.plus_turn_get("/fake", session_id="session-1", turn_id="turn-1",
+                                                    require_identity=True)
+    assert result["started_at"] == started_at
+
+
+@pytest.mark.parametrize("started_at", ["2026-10-09T03:40:00.089Z", None])
+def test_runtime_turn_get_preserves_start_metadata_and_identity_request(started_at):
+    facade = runtime_client.RuntimeClient(
+        role="execution", connection_file="/fake/conn.json",
+        project_path="/fake/project", runtime_config={}, task_id="task-1", run_id="run-1")
+    response = {"session_id": "session-1", "turn_id": "turn-1", "status": "running"}
+    if started_at is not None:
+        response["started_at"] = started_at
+    with patch.object(facade, "_call", return_value=response) as call:
+        result = facade.turn_get("session-1", "turn-1", require_identity=True)
+    assert result["startedAt"] == started_at
+    assert result["sessionId"] == "session-1"
+    assert result["turnId"] == "turn-1"
+    call.assert_called_once_with("kp_runtime_turn_get", {
+        "session_id": "session-1", "turn_id": "turn-1", "require_identity": True})
+
+
+@pytest.mark.parametrize("started_at", ["2026-10-09T03:40:00.089Z", None])
+def test_historical_turn_get_preserves_start_metadata_without_inventing_it(started_at):
+    facade = runtime_client.HistoricalReadClient("/fake/conn.json")
+    response = {"session_id": "session-1", "turn_id": "turn-1", "status": "running"}
+    if started_at is not None:
+        response["started_at"] = started_at
+    with patch.object(harness_plus_adapter, "plus_turn_get", return_value=response):
+        result = facade.turn_get("session-1", "turn-1")
+    assert result["startedAt"] == started_at
+    assert result["sessionId"] == "session-1"
+    assert result["turnId"] == "turn-1"
+
+
 def test_plus_capabilities_mocked_client(tmp_path: Path):
     mock_client = MagicMock()
     mock_client.server_info = {"version": "0.18.0", "name": "pi-desktop"}

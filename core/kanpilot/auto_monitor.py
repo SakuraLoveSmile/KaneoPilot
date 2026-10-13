@@ -69,15 +69,19 @@ def _observe(controller, task, detail):
                            "continue_goal": bool(automation) and not automation.get("manual_takeover", False)})
 
 
-def _verification(task, messages):
+def _verification(task, messages, execution_turn_id=None):
     extra = task.get("extra") or {}
     if (extra.get("verification_override") or {}).get("execution_run_id") == task["run_id"]:
         return {"ok": True}
     declaration = extra.get("plan_verify") or {}
     if declaration.get("plan_sha256") != task.get("plan_sha256") or not declaration.get("commands"):
         return {"ok": False, "note": declaration.get("error") or "计划缺少可信 verify 命令声明"}
+    messages, window = verify_evidence.execution_window(messages, execution_turn_id)
+    if window["window_basis"] == "unscoped_goal_window":
+        return dict(window, ok=False, note="Goal 执行证据窗口无法确认：缺少可信执行轮次或起点（whole_round）")
     result = verify_evidence.match_verification(declaration["commands"],
                                                verify_evidence.extract_command_results(messages))
+    result.update(window)
     result["note"] = "；".join(["缺失：" + command for command in result["missing"]] + [
         ("证据无法确认：" + item["command"] + "（缺少独立退出码或命令组合不受支持）"
          if item["exit_code"] is None else
@@ -136,7 +140,7 @@ def _complete(controller, task, detail, expected, messages):
                 return
             _finish_complete(controller, task, detail, expected)
             return
-    verification = _verification(task, messages)
+    verification = _verification(task, messages, detail.get("turn_id"))
     checks = (task.get("extra") or {}).get("verification_checks") or {}
     if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
         receipt = controller.call("get-verification-check-status", {

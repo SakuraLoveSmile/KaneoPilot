@@ -228,10 +228,7 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             result={"outcome": "succeeded", "send_state": "sent"},
             send_state="sent", evidence=evidence,
         )
-        interval = db.get_setting(
-            conn, "monitor_interval_seconds",
-            constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
-        )
+        interval = util.monitor_interval(conn)
         db.create_request(
             conn, now, "monitor", f"monitor:{task['task_id']}",
             task_id=task["task_id"], requested_by="scheduler",

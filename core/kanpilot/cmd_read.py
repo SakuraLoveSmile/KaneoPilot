@@ -21,10 +21,7 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dic
     created: list = []
     skipped: list = []
 
-    monitor_interval = db.get_setting(
-        conn, "monitor_interval_seconds",
-        constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
-    )
+    monitor_interval = util.monitor_interval(conn)
 
     # v2（protocol §5.22.2）：tick 不再生成 plan-scan——规划改为手动门控，
     # 看板枚举由规划面板 fetch-todos 按需只读拉取。
@@ -239,10 +236,7 @@ def cmd_overview(ctx, payload: dict) -> dict:
             "lease_seconds": db.get_setting(
                 conn, "lease_seconds", constants.DEFAULT_LEASE_SECONDS
             ),
-            "monitor_interval_seconds": db.get_setting(
-                conn, "monitor_interval_seconds",
-                constants.DEFAULT_MONITOR_INTERVAL_SECONDS,
-            ),
+            "monitor_interval_seconds": util.monitor_interval(conn),
             "plan_scan_interval_hours": db.get_setting(
                 conn, "plan_scan_interval_hours",
                 constants.DEFAULT_PLAN_SCAN_INTERVAL_HOURS,

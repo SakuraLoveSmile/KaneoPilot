@@ -361,7 +361,7 @@ def cmd_session_control_status(ctx, payload):
               "continued_state": None, "continued_turn_id": None,
               "continued_ended_at": None, "continued_detail": None,
               "original_turn_ended_at": None,
-              "start_label": "请求开始规划"}
+              "start_label": "请求开始规划" if request is not None and request["kind"] == "plan" else "请求开始"}
     if not job or not task:
         return result
     if job.get("backend") != "pi_desktop":

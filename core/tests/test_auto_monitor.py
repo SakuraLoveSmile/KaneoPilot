@@ -139,6 +139,65 @@ def test_shadow_comparison_error_keeps_passing_legacy_result(monkeypatch, tmp_pa
     assert report(calls)["outcome"] == "succeeded"
 
 
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+@pytest.mark.parametrize("boundary", ["turn", "start", "request", "unknown"])
+@pytest.mark.parametrize("has_execution_result", [False, True])
+def test_goal_drafting_verification_is_not_execution_verification(
+        monkeypatch, tmp_path, mode, boundary, has_execution_result):
+    value = dict(task(), project_id="p")
+    baseline = dict(message(seq=3), turn_id="planning", source_at="2026-10-07T12:59:59Z")
+    marker = {"type": "system", "seq": 2, "content": "goal_approved: p → exec",
+              "execution_turn_id": "exec", "source_at": "2026-10-07T13:00:01Z"}
+    if boundary in ("start", "request"):
+        marker[{"start": "execution_started_at", "request": "approval_requested_at"}[boundary]] = "2026-10-07T13:00:00Z"
+    messages = [marker, baseline]
+    if has_execution_result:
+        actual = message("cd repo && pytest", seq=1)
+        if boundary == "turn":
+            actual["turn_id"] = "exec"
+        elif boundary != "unknown":
+            actual["source_at"] = "2026-10-07T13:00:00Z"
+        messages.append(actual)
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=messages, responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
+        "engine-verdict": {"verification_ok": True},
+    })
+    passed = has_execution_result and boundary != "unknown"
+    assert (report(calls)["outcome"] == "succeeded") == passed
+    if not passed:
+        assert report(calls)["failure_code"] == "verification_unconfirmed"
+        assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+    if boundary == "unknown":
+        assert "whole_round" in report(calls)["note"]
+
+
+def test_monitor_continuation_scopes_verification_to_bound_current_turn(monkeypatch, tmp_path):
+    round_value = dict(detail(), turn_id="continued")
+    messages = [{"type": "system", "seq": 1, "content": "goal_approved: p → initial",
+                 "execution_turn_id": "initial"},
+                dict(message(code=1, seq=2), turn_id="initial"),
+                dict(message(seq=3), turn_id="continued")]
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=round_value, messages=messages)
+    assert report(calls)["outcome"] == "succeeded"
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_continued_turn_cannot_reuse_unlabelled_initial_verification(monkeypatch, tmp_path, mode):
+    value = dict(task(), project_id="p")
+    messages = [{"type": "system", "seq": 1, "content": "goal_approved: p → initial",
+                 "execution_turn_id": "initial", "execution_started_at": "2026-10-07T13:00:00Z",
+                 "approval_requested_at": "2026-10-07T12:59:59Z"},
+                dict(message(seq=2), source_at="2026-10-07T13:00:01Z"),
+                {"type": "assistant", "seq": 3, "turn_id": "continued", "content": "done"}]
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
+        round_value=dict(detail(), turn_id="continued"), messages=messages, responses={
+            "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
+            "engine-verdict": {"verification_ok": True},
+        })
+    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+
+
 def test_running_and_superseded_terminal(monkeypatch, tmp_path):
     value = dict(detail(), run_status="running", terminal=None, exit_code=None,
                  terminal_superseded={"outcome": "failed"})
