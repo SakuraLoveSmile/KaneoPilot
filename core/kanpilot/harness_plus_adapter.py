@@ -175,6 +175,7 @@ def plus_session_create(
     runtime_config: dict,
     title: Optional[str] = None,
     project_name: Optional[str] = None,
+    interaction_mode: Optional[str] = None,
     timeout: int = 10,
 ) -> dict:
     """Create a new session in Plus with authorized runtime config."""
@@ -183,6 +184,8 @@ def plus_session_create(
         "projectPath": str(Path(project_path).expanduser()),
         "mode": mode,
     }
+    if interaction_mode is not None:
+        params["interactionMode"] = interaction_mode
     if title is not None:
         params["title"] = title
     if project_name is not None:
@@ -202,6 +205,9 @@ def plus_session_create(
     result = {"session_id": session_id}
     # 名称用于 worker 核对 Host 实际创建结果；缺失时绝不回显请求值。
     returned = session if isinstance(session, dict) else res
+    for key in ("interactionMode", "interactionPolicyVersion"):
+        if key in returned:
+            result[key] = returned[key]
     for target, names in (("title", ("title", "name")),
                           ("project_name", ("projectName", "project_name"))):
         for name in names:
@@ -217,6 +223,7 @@ def plus_session_configure(
     session_id: str,
     mode: str,
     permission_mode: str,
+    interaction_mode: Optional[str] = None,
     timeout: int = 10,
 ) -> dict:
     """Configure session mode and permission mode in Plus."""
@@ -227,8 +234,11 @@ def plus_session_configure(
         "permissionMode": permission_mode,
         "confirm": True,
     }
+    if interaction_mode is not None:
+        params["interactionMode"] = interaction_mode
     res = client.call_tool("pi_session_configure", params)
-    return _redact_output({"session_id": session_id, "configured": True, "detail": res}, record.get("token"))
+    return _redact_output({"session_id": session_id, "configured": True, "detail": res,
+                           **({"session": res["session"]} if isinstance(res.get("session"), dict) else {})}, record.get("token"))
 
 
 def plus_prompt(
@@ -237,6 +247,7 @@ def plus_prompt(
     session_id: str,
     content: str,
     attachments: Optional[list] = None,
+    expected_interaction_mode: Optional[str] = None,
     timeout: int = 10,
 ) -> dict:
     """Send a prompt to the Plus session."""
@@ -249,6 +260,8 @@ def plus_prompt(
         "sessionId": session_id,
         "content": content,
     }
+    if expected_interaction_mode is not None:
+        params["expectedInteractionMode"] = expected_interaction_mode
     if attachments:
         params["attachments"] = attachments
 
@@ -320,7 +333,7 @@ def plus_turn_get(
     """Get persistent turn outcome from Plus."""
     client, record = _get_client(connection_file, timeout=timeout)
     res = client.call_tool("pi_turn_get", {"sessionId": session_id, "turnId": turn_id})
-    if require_identity:
+    if require_identity or (isinstance(res, dict) and res.get("errorCode") == "INTERACTION_REQUIRED"):
         if not isinstance(res, dict):
             raise util.KanpilotError("validation_failed", "Plus 返回的轮次状态格式无效")
         if res.get("sessionId") != session_id or res.get("turnId") != turn_id:
@@ -342,6 +355,7 @@ def plus_turn_get(
         "started_at": res.get("startedAt") or res.get("started_at"),
         "ended_at": res.get("endedAt") or res.get("ended_at"),
         "error_code": res.get("errorCode") or res.get("error_code"),
+        "error_details": res.get("errorDetails") or res.get("error_details"),
     }, record.get("token"))
 
 
@@ -456,6 +470,7 @@ def plus_messages(
     return _redact_output({
         "session_id": session_id,
         "messages": messages,
+        **{key: session_data[key] for key in ("interactionMode", "interactionPolicyVersion") if key in session_data and session_data.get("id") == session_id},
         "message_start": session_data.get("messageStart"),
         "message_end": session_data.get("messageEnd"),
         "has_more_before": bool(session_data.get("hasMoreBefore")),

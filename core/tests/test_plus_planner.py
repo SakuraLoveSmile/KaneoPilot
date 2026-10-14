@@ -178,6 +178,8 @@ class FakePlusServer:
         self.session_id = SESSION_ID
         self.turn_id = TURN_ID
         # 会话/发送
+        self.interaction_mode = "unattended"
+        self.interaction_policy_version = 1
         self.created = None
         self.configured = None
         self.prompt_content = None
@@ -274,10 +276,11 @@ class FakePlusServer:
         if name == "pi_session_create":
             self.created = dict(args)
             return {"structuredContent": {"session": {
-                "id": self.session_id, "title": args.get("title")}}}
+                "id": self.session_id, "title": args.get("title"),
+                "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version}}}
         if name == "pi_session_configure":
             self.configured = dict(args)
-            return {"structuredContent": {"ok": True}}
+            return {"structuredContent": {"ok": True, "session": {"id": self.session_id, "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version}}}
         if name == "pi_session_attach_mcp":
             grant = json.loads(Path(args["bridgeFile"]).read_text(encoding="utf-8"))
             role = grant.get("role")
@@ -307,7 +310,7 @@ class FakePlusServer:
                 "pendingToolConfirmations": [],
             }}}
         if name == "pi_session_get":
-            if self.transcript_truncated:
+            if self.transcript_truncated and self.prompt_count:
                 return {"structuredContent": {
                     "truncated": True,
                     "session": {"id": self.session_id, "messages": []}}}
@@ -320,6 +323,7 @@ class FakePlusServer:
             start = end - len(page)
             return {"structuredContent": {"session": {
                 "id": self.session_id,
+                "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version,
                 "messages": page,
                 "messageStart": start if page else None,
                 "messageEnd": end if page else None,
@@ -1900,6 +1904,17 @@ class TestResumeDoesNotResend(PlusPlannerCase):
         self.server.add_plan_proposal()
         return fixture, prev_run
 
+    def test_resumed_turn_missing_policy_is_blocked_without_prompt(self):
+        fixture, previous = self._fixture_with_previous()
+        self.server.interaction_policy_version = None
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertIsNone(self.server.created)
+        self.assertIsNone(self.server.configured)
+        self.assertEqual(self.server.resolve_calls, [])
+        self.assertIn('硬交互策略', self.task(fixture['task_id'])['failure_reason'])
+
     def test_resume_observes_existing_turn_without_resend(self):
         fixture, prev_run = self._fixture_with_previous()
         with self.fast():
@@ -2098,3 +2113,207 @@ class TestReviewFixPlusPath(PlusPlannerCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHardInteractionPolicy(PlusPlannerCase):
+    def test_missing_policy_is_rejected_before_prompt(self):
+        self.server.interaction_policy_version = None
+        self.plus_request()
+        self.save_plus_config()
+        self.server.add_message('user', 'prompt')
+        self.server.add_plan_proposal()
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_interaction_required_overrides_proposal(self):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        self.server.turn_status = 'error'
+        self.server.turn_error_code = 'INTERACTION_REQUIRED'
+        self.server.turn_error_details = {
+            'kind': 'interaction_required', 'toolName': 'asktool',
+            'toolCallId': 'ask-1', 'questions': [{
+                'question': '目标版本？', 'options': ['版本一', {'label': '版本二', 'description': '新版本'}]}]}
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name in ('pi_session_create', 'pi_session_configure', 'pi_session_get'):
+                body = result['structuredContent']
+                body.setdefault('session', {'id': SESSION_ID}).update(
+                    interactionMode='unattended', interactionPolicyVersion=1)
+            if name == 'pi_turn_get':
+                result['structuredContent']['errorDetails'] = self.server.turn_error_details
+            return result
+        self.server.tool_call = call
+        self.server.add_message('user', 'prompt')
+        self.server.add_plan_proposal()
+        with self.fast():
+            self.run_round()
+        view = self.task(fixture['task_id'])
+        self.assertEqual(view['status'], 'needs_user')
+        self.assertEqual(view['plan_clarification']['questions'][0]['title'], '目标版本？')
+        self.assertEqual(self.server.resolve_calls, [])
+        self.assertFalse(self.plan_files())
+
+    def policy_failure(self, tool, change):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == tool:
+                change(result['structuredContent']['session'])
+            return result
+        self.server.tool_call = call
+        self.server.add_message('user', 'prompt')
+        self.server.add_plan_proposal()
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertEqual(self.server.resolve_calls, [])
+        self.assertIn('硬交互策略', self.task(fixture['task_id'])['failure_reason'])
+
+    def test_create_receipt_unsupported_version(self):
+        self.policy_failure('pi_session_create', lambda session: session.update(interactionPolicyVersion=2))
+
+    def test_configure_receipt_mode_mismatch(self):
+        self.policy_failure('pi_session_configure', lambda session: session.update(interactionMode='interactive'))
+
+    def test_configure_receipt_invalid_boolean_version(self):
+        self.policy_failure('pi_session_configure', lambda session: session.update(interactionPolicyVersion=True))
+
+    def test_readback_missing_policy(self):
+        self.policy_failure('pi_session_get', lambda session: session.pop('interactionMode'))
+
+    def test_readback_mode_mismatch(self):
+        self.policy_failure('pi_session_get', lambda session: session.update(interactionMode='interactive'))
+
+    def test_host_rejects_unattended_without_prompt(self):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        actual = self.server.tool_call
+        def call(name, args):
+            if name == 'pi_session_create':
+                return {'isError': True, 'structuredContent': {'error': {'code': 'INVALID_ARGUMENT', 'message': 'unknown interactionMode'}}}
+            return actual(name, args)
+        self.server.tool_call = call
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertEqual(self.task(fixture['task_id'])['status'], 'needs_plan')
+
+    def intercepted_scene(self, questions, *, empty_transcript=False, **extra):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        self.server.turn_status = 'error'
+        self.server.turn_error_code = 'INTERACTION_REQUIRED'
+        details = {'kind': 'interaction_required', 'toolName': 'asktool',
+                   'toolCallId': 'ask-1', 'questions': questions, **extra}
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == 'pi_turn_get':
+                result['structuredContent']['errorDetails'] = details
+            return result
+        self.server.tool_call = call
+        # A final pass-like answer and pending proposal must never take precedence.
+        self.server.add_message('user', 'prompt')
+        self.server.add_message('assistant', '{"status":"ready","plan_markdown":"# Plan","questions":[],"evidence":[]}')
+        if empty_transcript:
+            self.server.messages = []
+        self.server.add_plan_proposal()
+        with self.fast():
+            self.run_round()
+        return fixture
+
+    def test_invalid_arguments_keep_evidence_without_inventing_questions(self):
+        fixture = self.intercepted_scene([], invalidArguments=True)
+        view = self.task(fixture['task_id'])
+        self.assertEqual(view['status'], 'needs_plan')
+        self.assertIn('问题无效', view['failure_reason'])
+        self.assertFalse(view.get('plan_clarification'))
+        self.assertEqual(self.server.resolve_calls, [])
+        run_id, job = self.job_for(fixture['task_id'], fixture['request_id'])
+        self.assertTrue(Path(job['interaction_required_path']).exists())
+        self.assertFalse(self.plan_files())
+
+    def test_multiselect_can_be_answered_and_preserves_all_choices(self):
+        questions = [{'question': '包含哪些版本？', 'options': ['版本一', {'label': '版本二', 'description': '新版本'}], 'multiSelect': True}]
+        fixture = self.intercepted_scene(questions)
+        # The legacy hand-built fixture stores its manifest only in SQLite.
+        # Answer submission also verifies the source manifest on disk.
+        with db.connect(self.db_path) as conn:
+            manifest = db.planner_input_manifest(db.get_planner_input(conn, fixture['info']['input_id']))
+        (self.inputs_root / fixture['info']['input_id']).mkdir(parents=True, exist_ok=True)
+        (self.inputs_root / fixture['info']['input_id'] / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False), encoding='utf-8')
+        view = self.task(fixture['task_id'])
+        clarification = view['plan_clarification']
+        question = clarification['questions'][0]
+        self.assertEqual(question['options'], [])
+        self.assertIn('版本二：新版本', question['description'])
+        answers = [{'question_id': question['id'], 'text': '版本一、版本二'}]
+        result = self.call('submit-plan-answers', {'task_id': fixture['task_id'],
+            'clarification_id': clarification['id'], 'operation_id': 'multi-answer', 'answers': answers})
+        with db.connect(self.db_path) as conn:
+            payload = db.request_payload(db.get_request(conn, result['request_id']))
+        self.assertEqual(payload['manifest']['plan_clarification']['answers'], answers)
+        self.assertEqual(payload['manifest']['plan_clarification']['questions'], clarification['questions'])
+
+    def test_completed_duplicate_run_does_not_resend_or_publish(self):
+        fixture = self.intercepted_scene([{'question': '选择？', 'options': ['A', 'B']}])
+        before = self.server.prompt_count
+        with self.fast():
+            self.assertFalse(planner_runner.run_one(self.db_path))
+        self.assertEqual(self.server.prompt_count, before)
+        self.assertEqual(self.server.resolve_calls, [])
+        self.assertEqual(self.task(fixture['task_id'])['status'], 'needs_user')
+
+    def test_interception_from_foreign_turn_is_not_settled(self):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        self.server.turn_status = 'error'
+        self.server.turn_error_code = 'INTERACTION_REQUIRED'
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == 'pi_turn_get':
+                result['structuredContent'].update(turnId='foreign-turn', errorDetails={
+                    'kind': 'interaction_required', 'toolName': 'asktool', 'toolCallId': 'ask-1',
+                    'questions': [{'question': '其他任务的问题', 'options': ['A', 'B']}]})
+            return result
+        self.server.tool_call = call
+        self.server.add_message('user', 'prompt')
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.task(fixture['task_id'])['status'], 'needs_plan')
+        self.assertFalse(self.task(fixture['task_id']).get('plan_clarification'))
+        self.assertEqual(self.server.resolve_calls, [])
+
+    def test_interception_with_no_assistant_text_still_saves_questions(self):
+        fixture = self.intercepted_scene([{'question': '选择？', 'options': ['A', 'B']}], empty_transcript=True)
+        self.assertEqual(self.task(fixture['task_id'])['status'], 'needs_user')
+        self.assertEqual(self.task(fixture['task_id'])['plan_clarification']['questions'][0]['title'], '选择？')
+        self.assertEqual(self.server.resolve_calls, [])
+
+    def test_atomic_host_policy_rejection_never_recovers_an_old_turn(self):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        self.server.add_message('user', 'old prompt')
+        self.server.add_plan_proposal()
+        actual = self.server.tool_call
+        def call(name, args):
+            if name == 'pi_agent_prompt':
+                self.assertEqual(args['expectedInteractionMode'], 'unattended')
+                return {'isError': True, 'structuredContent': {'error': {
+                    'code': 'INTERACTION_POLICY_MISMATCH', 'message': 'policy changed before admission'}}}
+            return actual(name, args)
+        self.server.tool_call = call
+        with self.fast():
+            self.run_round()
+        run_id, job = self.job_for(fixture['task_id'], fixture['request_id'])
+        self.assertEqual(job['send_state'], 'not_sent')
+        self.assertFalse(job.get('turn_id'))
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertEqual(self.server.resolve_calls, [])
+        self.assertFalse(self.plan_files())

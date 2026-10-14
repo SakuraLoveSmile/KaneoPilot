@@ -60,6 +60,7 @@ _TOOL_ERROR_CODES = {
     "INVALID_PARAMS": "validation_failed",
     "INVALID_ARGUMENT": "validation_failed",
     "CONFIRMATION_REQUIRED": "validation_failed",
+    "INTERACTION_POLICY_MISMATCH": "interaction_policy_unverified",
 }
 
 
@@ -496,8 +497,11 @@ class MCPClient:
         provider_id: Optional[str] = None, model_id: Optional[str] = None,
         thinking_level: Optional[str] = None, title: Optional[str] = None,
         project_name: Optional[str] = None,
+        interaction_mode: Optional[str] = None,
     ) -> dict:
         args = {"projectPath": project_path, "mode": mode}
+        if interaction_mode is not None:
+            args["interactionMode"] = interaction_mode
         if provider_id:
             args["providerId"] = provider_id
         if model_id:
@@ -512,9 +516,12 @@ class MCPClient:
         return self.call_tool("pi_session_create", args)
 
     def session_configure(self, session_id: str, mode: str = "agent",
-                          permission_mode: Optional[str] = None) -> dict:
+                          permission_mode: Optional[str] = None,
+                          interaction_mode: Optional[str] = None) -> dict:
         """dangerous 操作：必带 confirm=true（PI-Desktop 校验）。"""
         args = {"id": session_id, "mode": mode, "confirm": True}
+        if interaction_mode is not None:
+            args["interactionMode"] = interaction_mode
         if permission_mode:
             args["permissionMode"] = permission_mode
         return self.call_tool("pi_session_configure", args)
@@ -522,6 +529,7 @@ class MCPClient:
     def agent_prompt(
         self, session_id: str, content: str,
         attachments: Optional[list] = None,
+        expected_interaction_mode: Optional[str] = None,
     ) -> dict:
         """发送 prompt（§5.24.3）。``attachments`` 为 Plus ``AgentPromptAttachment``
         的真实形状（``packages/shared/src/types/agent.ts``）：
@@ -531,6 +539,8 @@ class MCPClient:
         （由调用方按 manifest 校验哈希后复制、由 Plus 侧再做根内校验）。
         """
         args = {"sessionId": session_id, "content": content}
+        if expected_interaction_mode is not None:
+            args["expectedInteractionMode"] = expected_interaction_mode
         if attachments:
             args["attachments"] = list(attachments)
         return self.call_tool("pi_agent_prompt", args)

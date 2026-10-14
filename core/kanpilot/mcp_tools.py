@@ -90,6 +90,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "runtime_config": {"type": "object"},
                 "title": {"type": "string"},
                 "project_name": {"type": "string"},
+                "interaction_mode": {"type": "string", "enum": ["interactive", "unattended"]},
             },
             "required": ["scope_id", "operation_id", "mode", "project_path"],
             "additionalProperties": False,
@@ -97,6 +98,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "outputSchema": {
             "type": "object",
             "properties": {
+                "interactionMode": {"type": "string", "enum": ["interactive", "unattended"]},
+                "interactionPolicyVersion": {"type": "integer"},
                 "session_id": {"type": "string"},
                 "title": {"type": ["string", "null"]},
                 "project_name": {"type": ["string", "null"]},
@@ -117,6 +120,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "session_id": {"type": "string"},
                 "mode": {"type": "string", "enum": ["agent", "plan", "goal"]},
                 "permission_mode": {"type": "string", "enum": ["ask", "accept-edits", "auto"]},
+                "interaction_mode": {"type": "string", "enum": ["interactive", "unattended"]},
             },
             "required": ["scope_id", "operation_id", "session_id", "mode", "permission_mode"],
             "additionalProperties": False,
@@ -124,6 +128,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "outputSchema": {
             "type": "object",
             "properties": {
+                "session": {"type": "object"},
                 "session_id": {"type": "string"},
                 "configured": {"type": "boolean"},
             },
@@ -165,6 +170,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "expected_interaction_mode": {"type": "string", "enum": ["interactive", "unattended"]},
                 "scope_id": {"type": "string"},
                 "operation_id": {"type": "string"},
                 "session_id": {"type": "string"},
@@ -234,6 +240,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "outputSchema": {
             "type": "object",
             "properties": {
+                "error_details": {"type": ["object", "null"]},
                 "session_id": {"type": "string"},
                 "turn_id": {"type": "string"},
                 "status": {"type": "string", "enum": ["running", "completed", "error", "aborted", "unknown"]},
@@ -262,6 +269,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "outputSchema": {
             "type": "object",
             "properties": {
+                "interactionMode": {"type": "string", "enum": ["interactive", "unattended"]},
+                "interactionPolicyVersion": {"type": "integer"},
                 "session_id": {"type": "string"},
                 "messages": {"type": "array"},
                 "message_start": {"type": ["integer", "null"]},
@@ -903,6 +912,9 @@ def _runtime_guard(conn, scope, tool, args):
     if args.get("scope_id") != scope.scope_id:
         raise util.KanpilotError("forbidden", "scope_id does not match grant")
     mode = {"planner": "plan", "review": "plan", "execution": "goal"}.get(scope.role, "agent")
+    if tool in ("kp_runtime_session_create", "kp_runtime_session_configure") and scope.role in ("planner", "review"):
+        if args.get("interaction_mode") != "unattended":
+            raise util.KanpilotError("forbidden", "planner/Review require unattended interaction policy")
     if tool == "kp_runtime_session_create":
         if not scope.project_path or Path(args["project_path"]).resolve() != Path(scope.project_path).resolve():
             raise util.KanpilotError("forbidden", "project_path does not match authorized snapshot")
@@ -953,6 +965,16 @@ def _runtime_guard(conn, scope, tool, args):
             path = Path(attachment["path"])
             if not path.is_absolute() or not path.resolve().is_relative_to(Path(scope.project_path).resolve()):
                 raise util.KanpilotError("forbidden", "attachment is outside the authorized project")
+        if scope.role in ("planner", "review"):
+            if args.get("expected_interaction_mode") != "unattended":
+                raise util.KanpilotError("forbidden", "planner/Review prompt require atomic unattended precondition")
+            from . import plus_interaction
+            connection_file = (scope.connection_file or (scope.runtime_config or {}).get("connection_file")
+                               or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser()))
+            policy = harness_plus_adapter.plus_messages(connection_file, session_id=session_id, limit=1)
+            session = {"id": policy.get("session_id"), **{
+                key: policy[key] for key in ("interactionMode", "interactionPolicyVersion") if key in policy}}
+            plus_interaction.require_unattended({"session": session}, session_id)
 
 
 def _task_identity(conn, scope):
@@ -1044,10 +1066,10 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         # No SQLite transaction or service-wide lock spans a Plus callback.
         sid = arguments.get("session_id")
         writers = {
-            "kp_runtime_session_create": lambda: harness_plus_adapter.plus_session_create(conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name")),
-            "kp_runtime_session_configure": lambda: harness_plus_adapter.plus_session_configure(conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"]),
+            "kp_runtime_session_create": lambda: harness_plus_adapter.plus_session_create(conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name"), interaction_mode=arguments.get("interaction_mode")),
+            "kp_runtime_session_configure": lambda: harness_plus_adapter.plus_session_configure(conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"], interaction_mode=arguments.get("interaction_mode")),
             "kp_runtime_attach_mcp": lambda: harness_plus_adapter.plus_attach_mcp(conn_file, session_id=sid, bridge_file=str(grant)),
-            "kp_runtime_prompt": lambda: harness_plus_adapter.plus_prompt(conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments")),
+            "kp_runtime_prompt": lambda: harness_plus_adapter.plus_prompt(conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments"), expected_interaction_mode=arguments.get("expected_interaction_mode")),
             "kp_runtime_stop": lambda: harness_plus_adapter.plus_stop(conn_file, session_id=sid),
             "kp_runtime_abort": lambda: harness_plus_adapter.plus_abort(conn_file, session_id=sid),
             "kp_runtime_proposal_resolve": lambda: harness_plus_adapter.plus_proposal_resolve(conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode")),

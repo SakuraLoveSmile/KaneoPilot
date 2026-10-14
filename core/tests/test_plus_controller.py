@@ -158,6 +158,8 @@ class FakeMCPServer:
         self.prompt_mode = "ok"            # ok | http500
         self.prompt_count = 0
         self.prompt_content = None
+        self.interaction_mode = "unattended"
+        self.interaction_policy_version = 1
         self.created = None
         self.created_count = 0
         self.configured = None
@@ -216,12 +218,13 @@ class FakeMCPServer:
             self.created = dict(args)
             self.created_count += 1
             return {"structuredContent": {
-                "session": {"id": self.session_id, "title": args.get("title")},
+                "session": {"id": self.session_id, "title": args.get("title"),
+                "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version},
             }}
         if name == "pi_session_configure":
             self.configured = dict(args)
             self.configured_count += 1
-            return {"structuredContent": {"ok": True}}
+            return {"structuredContent": {"ok": True, "session": {"id": self.session_id, "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version}}}
         if name == "pi_session_attach_mcp":
             grant_path = Path(args["bridgeFile"])
             grant = json.loads(grant_path.read_text(encoding="utf-8"))
@@ -263,6 +266,7 @@ class FakeMCPServer:
             start = end - len(page)
             return {"structuredContent": {"session": {
                 "id": self.session_id,
+                "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version,
                 "messages": page,
                 "messageStart": start if page else None,
                 "messageEnd": end if page else None,

@@ -46,7 +46,7 @@ from typing import Callable, Optional, Tuple
 
 from . import (
     constants, core, db, headless_adapter, pi_desktop_controller,
-    util, git_delivery, review_settle, review_snapshot,
+    util, git_delivery, review_settle, review_snapshot, plus_interaction,
 )
 
 from .review_settle import RESULT_SCHEMA
@@ -599,7 +599,7 @@ def _create_plan_session(client, block: dict, directory: Path
             provider_id=block.get("provider_id"),
             model_id=block.get("model_id"),
             thinking_level=block.get("thinking_level"),
-            title=f"KaneoPilot Review · {directory.name}",
+            title=f"KaneoPilot Review · {directory.name}", interaction_mode="unattended",
         )
     except util.KanpilotError as exc:
         return None, f"pi_session_create 失败：{exc.message}"
@@ -613,10 +613,13 @@ def _create_plan_session(client, block: dict, directory: Path
     if not isinstance(session_id, str) or not session_id:
         return None, "pi_session_create 未返回 session id"
     try:
-        client.session_configure(
+        plus_interaction.require_unattended(created, session_id)
+        configured = client.session_configure(
             session_id, mode=constants.PI_DESKTOP_PLAN_MODE,
-            permission_mode=block["permission_mode"],
+            permission_mode=block["permission_mode"], interaction_mode="unattended",
         )
+        plus_interaction.require_unattended(configured, session_id)
+        plus_interaction.verify_session(client, session_id)
     except util.KanpilotError as exc:
         return session_id, f"pi_session_configure 失败：{exc.message}"
     return session_id, None
@@ -651,9 +654,18 @@ def _observe_turn(*, db_path, client, job: dict, log, timeout: float,
     permission_seen = False
     outcome, detail = None, None
     while True:
-        status, error = pi_desktop_controller.turn_status(
-            client, session_id, turn_id
-        )
+        try:
+            record = client.turn_get(session_id, turn_id)
+            turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+            if turn.get("sessionId") != session_id or turn.get("turnId") != turn_id:
+                raise util.KanpilotError("conflict", "Plus 返回的轮次身份不符")
+            status, error = turn.get("status"), None
+            if (turn.get("errorCode") or turn.get("error_code")) == "INTERACTION_REQUIRED":
+                job["interaction_required"] = record
+                pi_desktop_controller.write_json(Path(job["invocation_dir"]) / "interaction-required.json", record)
+                return {"outcome": "interaction_required", "record": record}
+        except util.KanpilotError as exc:
+            status, error = None, exc.message
         if status == "completed":
             outcome = "completed"
             break
@@ -720,6 +732,18 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
         request=request,
     )
     outcome = observed["outcome"]
+    if outcome == "interaction_required":
+        try:
+            details = plus_interaction.required_interaction(observed["record"])
+        except util.KanpilotError as exc:
+            return {"kind": "blocked", "detail": "review_interaction_invalid: " + exc.message}
+        # Collect available evidence, but the structured stop has priority over
+        # missing/final assistant text and proposals. No proposal resolve call.
+        messages, complete, detail = pi_desktop_controller.read_transcript(client, session_id)
+        job["transcript_complete"] = bool(complete)
+        pi_desktop_controller.write_json(Path(job["invocation_dir"]) / "transcript.json",
+            {"complete": bool(complete), "detail": detail, "messages": messages or []})
+        return {"kind": "settle", "result": plus_interaction.blocked_review(details)}
     if outcome == "timeout":
         stopped = pi_desktop_controller.stop_turn(client, session_id, turn_id)
         reason = (
@@ -805,14 +829,17 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     if detail is not None:
         return detail
+    job["interaction_policy"] = {"interactionMode": "unattended", "interactionPolicyVersion": 1}
     job["send_state"] = "unknown"
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     try:
         result = client.agent_prompt(session_id, instruction)
     except util.KanpilotError as exc:
-        if exc.code == "validation_failed":
+        if exc.code in ("validation_failed", "interaction_policy_unverified"):
             job["send_state"] = "not_sent"
+        if exc.code == "interaction_policy_unverified":
+            return f"interaction_policy_unverified: {exc.message}（未发送模型请求）"
         return f"prompt_response_lost: {exc.message}（不重发）"
     turn_id = result.get("turnId") if isinstance(result, dict) else None
     if not isinstance(turn_id, str) or not turn_id:
@@ -820,7 +847,7 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
     job["turn_id"] = turn_id
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
-    started, proof_detail = pi_desktop_controller.prove_started(
+    started, proof_detail = _prove_started(
         client, session_id, turn_id
     )
     if not started:
@@ -833,6 +860,23 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     return None
+
+
+def _prove_started(client, session_id: str, turn_id: str):
+    """A persistent hard interception proves acceptance even if it ended fast."""
+    started, detail = pi_desktop_controller.prove_started(client, session_id, turn_id)
+    if started:
+        return True, None
+    try:
+        record = client.turn_get(session_id, turn_id)
+        turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        if (turn.get("sessionId") == session_id and turn.get("turnId") == turn_id
+                and turn.get("status") == "error"
+                and (turn.get("errorCode") or turn.get("error_code")) == "INTERACTION_REQUIRED"):
+            return True, None
+    except util.KanpilotError:
+        pass
+    return False, detail
 
 # --------------------------------------------------------------- 收尾动作
 
@@ -1449,7 +1493,12 @@ def _resume_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
                 record_run=record_run,
                 detail=f"pi_desktop_controller_unavailable: {exc.message}",
             )
-        started, proof_detail = pi_desktop_controller.prove_started(
+        try:
+            job["interaction_policy"] = plus_interaction.verify_session(client, session_id)
+        except util.KanpilotError as exc:
+            return _request_failed(db_path=db_path, job=job, job_path=job_path, log=log,
+                                   record_run=record_run, detail=exc.message)
+        started, proof_detail = _prove_started(
             client, session_id, turn_id
         )
         if not started:

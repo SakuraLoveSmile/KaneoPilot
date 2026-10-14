@@ -63,7 +63,7 @@ from . import (
     bridge, cli, cmd_exec, codex_planner, constants, core, db, dsh_events, git_delivery, headless_adapter,
     pi_desktop_backend, pi_desktop_worker, planfile, planner_runner, round_store, util,
 )
-from . import runtime_client
+from . import runtime_client, plus_interaction
 
 # 计划会话固定 mode=plan；权限严格使用请求快照，兼容既有 ask 请求。
 _PLAN_SESSION_MODE = constants.PI_DESKTOP_PLAN_MODE
@@ -675,6 +675,11 @@ class _Round:
         problem = self._connect()
         if problem:
             return self.defer(f"connection_unavailable: {problem}")
+        try:
+            self.job["interaction_policy"] = plus_interaction.verify_session(self.client, session_id)
+            self.write_job()
+        except util.KanpilotError as exc:
+            return self.fail(exc.message, "interaction_policy_unverified", evidence=self._evidence())
         self._refresh_round(session_id=session_id,
                            session_title=self.job.get("session_title"))
         self.collector = pi_desktop_worker._Collector(
@@ -731,7 +736,7 @@ class _Round:
                 provider_id=self.runtime.get("provider_id"),
                 model_id=self.runtime.get("model_id"),
                 thinking_level=self.runtime.get("thinking_level"),
-                title=f"kanpilot plan {self.task_id}")
+                title=f"kanpilot plan {self.task_id}", interaction_mode="unattended")
             session = created.get("session") if isinstance(created, dict) else None
             session = session if isinstance(session, dict) else {}
             session_id = (session.get("id")
@@ -744,13 +749,16 @@ class _Round:
             self.job["session_title"] = (
                 session.get("title") or session.get("name"))
             self.write_job()
+            plus_interaction.require_unattended(created, self.job["session_id"])
             # 保留该请求的权限快照；新请求 auto，旧 ask 请求不能被提升。
-            self.client.session_configure(
+            configured = self.client.session_configure(
                 self.job["session_id"], mode=_PLAN_SESSION_MODE,
-                permission_mode=self.runtime["permission_mode"])
+                permission_mode=self.runtime["permission_mode"], interaction_mode="unattended")
+            plus_interaction.require_unattended(configured, self.job["session_id"])
+            self.job["interaction_policy"] = plus_interaction.verify_session(self.client, self.job["session_id"])
         except util.KanpilotError as exc:
             return self.fail(f"plan_session_setup_failed: {exc.message}",
-                             "plan_session_setup_failed",
+                             exc.code if exc.code == "interaction_policy_unverified" else "plan_session_setup_failed",
                              evidence=self._evidence())
         self._refresh_round(session_id=self.job["session_id"],
                             session_title=self.job.get("session_title"),
@@ -788,6 +796,10 @@ class _Round:
                 f"attachment_unsupported: PI-Desktop 后端不支持附件参数（{exc}）",
                 "attachment_unsupported", evidence=self._evidence())
         except util.KanpilotError as exc:
+            if exc.code == "interaction_policy_unverified":
+                self.job["send_state"] = "not_sent"
+                self.write_job()
+                return self.fail(exc.message, exc.code, evidence=self._evidence())
             return self._send_lost(exc)
         turn_id = None
         if isinstance(result, dict):
@@ -1277,6 +1289,27 @@ class _Round:
 
     def _settle(self, session_id: str, turn_id: str, state: str,
                 record: dict) -> bool:
+        turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
+        if (turn.get("errorCode") or turn.get("error_code")) == "INTERACTION_REQUIRED":
+            path = self.run_dir / "interaction-required.json"
+            planner_runner._write_json(path, record)
+            self.job["interaction_required_path"] = str(path)
+            self.write_job()
+            try:
+                details = plus_interaction.required_interaction(record)
+                questions = plus_interaction.planner_questions(details)
+            except util.KanpilotError as exc:
+                return self.fail(exc.message, "plan_interaction_invalid", evidence={**self._evidence(), "interaction_required_path": str(path)})
+            if self.collector is not None:
+                self.collector.poll()
+            self.finish("finished", 0, "needs_input", "completed", "needs_input")
+            planner_runner._report(
+                self.db_path, self.request_id, self.run_id, "needs_user",
+                "规划需要用户决定：" + plan_questions.summary(questions), failure_code="reported",
+                evidence={"questions": questions, "plan_markdown": "", "evidence": [str(path)],
+                          "interaction_required": details, "interaction_required_path": str(path),
+                          "plan_session_id": session_id, "plan_turn_id": turn_id})
+            return True
         if self.collector is not None:
             self.collector.poll()
         if self.collector is not None and (self.collector.truncated

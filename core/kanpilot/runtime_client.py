@@ -262,7 +262,7 @@ class RuntimeClient:
 
     def session_create(self, project_path: str, *, mode: str, provider_id=None,
                        model_id=None, thinking_level=None, title=None,
-                       project_name=None, **_kwargs) -> dict:
+                       project_name=None, interaction_mode=None, **_kwargs) -> dict:
         config = dict(self.runtime_config)
         for key, value in (("provider_id", provider_id), ("model_id", model_id),
                            ("thinking_level", thinking_level)):
@@ -272,6 +272,8 @@ class RuntimeClient:
             "mode": mode, "project_path": str(Path(project_path).expanduser()),
             "runtime_config": config,
         }
+        if interaction_mode is not None:
+            arguments["interaction_mode"] = interaction_mode
         if title is not None:
             arguments["title"] = title
         if project_name is not None:
@@ -281,16 +283,20 @@ class RuntimeClient:
         if not isinstance(session_id, str) or not session_id:
             raise util.KanpilotError("protocol_error", "runtime session_create 未返回有效 session_id")
         session = {"id": session_id}
+        for key in ("interactionMode", "interactionPolicyVersion"):
+            if key in result:
+                session[key] = result[key]
         for source, target in (("title", "title"), ("project_name", "projectName")):
             if source in result:
                 session[target] = result[source]
         return {"session": session}
 
     def session_configure(self, session_id: str, *, mode: str,
-                          permission_mode: str, **_kwargs) -> dict:
+                          permission_mode: str, interaction_mode=None, **_kwargs) -> dict:
         result = self._write("kp_runtime_session_configure", "session_configure", {
             "session_id": session_id, "mode": mode,
             "permission_mode": permission_mode,
+            **({"interaction_mode": interaction_mode} if interaction_mode is not None else {}),
         })
         if result.get("session_id") != session_id or result.get("configured") is not True:
             raise util.KanpilotError("protocol_error", "runtime session_configure 未确认配置")
@@ -309,9 +315,13 @@ class RuntimeClient:
         self._attached_sessions.add(session_id)
         return result
 
-    def agent_prompt(self, session_id: str, content: str, *, attachments=None) -> dict:
+    def agent_prompt(self, session_id: str, content: str, *, attachments=None,
+                     expected_interaction_mode=None) -> dict:
+        if expected_interaction_mode is None and self.role in ("planner", "review"):
+            expected_interaction_mode = "unattended"
         result = self._write("kp_runtime_prompt", "prompt", {
             "session_id": session_id, "content": content,
+            **({"expected_interaction_mode": expected_interaction_mode} if expected_interaction_mode is not None else {}),
             **({"attachments": attachments} if attachments else {}),
         })
         if result.get("session_id") != session_id or result.get("accepted") is not True:
@@ -336,7 +346,8 @@ class RuntimeClient:
         return {"sessionId": result.get("session_id"), "turnId": result.get("turn_id"),
                 "status": result.get("status"), "startedAt": result.get("started_at"),
                 "endedAt": result.get("ended_at"),
-                "errorCode": result.get("error_code")}
+                "errorCode": result.get("error_code"),
+                "errorDetails": result.get("error_details")}
 
     def session_get(self, session_id: str, **kwargs) -> dict:
         result = self._call("kp_runtime_messages", {
@@ -348,6 +359,7 @@ class RuntimeClient:
             return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
+            **{key: result[key] for key in ("interactionMode", "interactionPolicyVersion") if key in result},
             "messageStart": result.get("message_start"),
             "messageEnd": result.get("message_end"),
             "hasMoreBefore": result.get("has_more_before", False),
@@ -449,7 +461,8 @@ class HistoricalReadClient:
                 "turnId": result.get("turn_id"), "status": result.get("status"),
                 "startedAt": result.get("started_at"),
                 "endedAt": result.get("ended_at"),
-                "errorCode": result.get("error_code")}
+                "errorCode": result.get("error_code"),
+                "errorDetails": result.get("error_details")}
 
     def session_get(self, session_id: str, **kwargs) -> dict:
         result = harness_plus_adapter.plus_messages(
@@ -462,6 +475,7 @@ class HistoricalReadClient:
             return {"truncated": True, "reason": result.get("reason", "MCP_RESULT_LIMIT")}
         return {"session": {
             "id": session_id, "messages": result.get("messages", []),
+            **{key: result[key] for key in ("interactionMode", "interactionPolicyVersion") if key in result},
             "messageStart": result.get("message_start"),
             "messageEnd": result.get("message_end"),
             "hasMoreBefore": result.get("has_more_before", False),
