@@ -569,14 +569,17 @@ class TestReviewNeverWritesPass(ReviewCase):
 class TestReviewRecovery(ReviewCase):
     def test_session_configuration_keeps_historical_ask_snapshot(self):
         client = mock.Mock()
-        client.session_create.return_value = {"sessionId": "historical-review"}
+        receipt = {"session": {"id": "historical-review", "interactionMode": "unattended", "interactionPolicyVersion": 1}}
+        client.session_create.return_value = receipt
+        client.session_configure.return_value = receipt
+        client.session_get.return_value = receipt
         snapshot = {"provider_id": "old-provider", "model_id": "old-model",
                     "thinking_level": "high", "permission_mode": "ask"}
         session, error = pi_desktop_review._create_plan_session(client, snapshot, self.root)
         self.assertIsNone(error)
         self.assertEqual(session, "historical-review")
         client.session_configure.assert_called_once_with(
-            session, mode="plan", permission_mode="ask")
+            session, mode="plan", permission_mode="ask", interaction_mode="unattended")
         self.assertEqual(snapshot["permission_mode"], "ask")
 
     def _run_with_failing_report(self, failures=2):
@@ -684,3 +687,99 @@ class TestReviewRecovery(ReviewCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestReviewHardInteractionPolicy(ReviewCase):
+    def intercept(self, questions=None, invalid=False):
+        self.server.turn_status = 'error'
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == 'pi_turn_get':
+                result['structuredContent'].update(errorCode='INTERACTION_REQUIRED', errorDetails={
+                    'kind': 'interaction_required', 'toolName': 'asktool', 'toolCallId': 'ask-1',
+                    'questions': questions if questions is not None else [{'question': '允许升级吗？', 'options': ['允许', '暂缓']}],
+                    **({'invalidArguments': True} if invalid else {})})
+            return result
+        self.server.tool_call = call
+
+    def test_missing_policy_prevents_model_request(self):
+        self.make_scene()
+        self.review_result('pass')
+        self.server.interaction_policy_version = None
+        self.record_core_calls()
+        self.run_review()
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertNotIn('register-review', self.commands())
+        self.assertNotIn('advance-task', self.commands())
+
+    def test_interception_settles_blocked_before_pass_or_proposal(self):
+        self.make_scene()
+        self.review_result('pass')
+        self.server.plans.append({'id': 'p', 'sessionId': SESSION_ID, 'turnId': TURN_ID,
+                                  'toolCallId': 'submit-1', 'status': 'pending'})
+        self.intercept()
+        self.record_core_calls()
+        self.run_review()
+        self.assertEqual(self.payload_of('register-review')['conclusion'], 'blocked')
+        self.assertIn('允许升级吗', self.review_job()['report_markdown'])
+        self.assertEqual(self.review_job()['interaction_policy'], {'interactionMode': 'unattended', 'interactionPolicyVersion': 1})
+        self.assertNotIn('advance-task', self.commands())
+        self.assertNotIn('create-review-fix', self.commands())
+        self.assertNotIn('pi_plans_resolve', [name for name, args in self.server.calls])
+        self.assertEqual(self.payload_of('report')['outcome'], 'needs_user')
+        self.assertTrue((Path(self.review_job()['invocation_dir']) / 'interaction-required.json').exists())
+
+    def test_invalid_interception_never_registers_pass(self):
+        self.make_scene()
+        self.review_result('pass')
+        self.intercept(questions=[], invalid=True)
+        self.record_core_calls()
+        self.run_review()
+        self.assertNotIn('register-review', self.commands())
+        self.assertNotIn('advance-task', self.commands())
+        self.assertIn('review_interaction_invalid', self.review_job()['detail'])
+
+    def test_interception_from_foreign_turn_never_registers(self):
+        self.make_scene()
+        self.review_result('pass')
+        self.intercept()
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == 'pi_turn_get':
+                result['structuredContent']['turnId'] = 'foreign-turn'
+            return result
+        self.server.tool_call = call
+        self.record_core_calls()
+        self.run_review()
+        self.assertNotIn('register-review', self.commands())
+        self.assertNotIn('advance-task', self.commands())
+        self.assertEqual(self.server.prompt_count, 1)
+
+    def test_interception_with_empty_transcript_still_registers_blocked(self):
+        self.make_scene()
+        self.server.messages = []
+        self.intercept()
+        self.record_core_calls()
+        self.run_review()
+        self.assertEqual(self.payload_of('register-review')['conclusion'], 'blocked')
+        self.assertNotIn('advance-task', self.commands())
+
+    def test_atomic_policy_rejection_is_not_sent_and_never_registers(self):
+        self.make_scene()
+        self.review_result('pass')
+        actual = self.server.tool_call
+        def call(name, args):
+            if name == 'pi_agent_prompt':
+                self.assertEqual(args['expectedInteractionMode'], 'unattended')
+                return {'isError': True, 'structuredContent': {'error': {
+                    'code': 'INTERACTION_POLICY_MISMATCH', 'message': 'policy changed before admission'}}}
+            return actual(name, args)
+        self.server.tool_call = call
+        self.record_core_calls()
+        self.run_review()
+        self.assertEqual(self.review_job()['send_state'], 'not_sent')
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertNotIn('register-review', self.commands())
+        self.assertNotIn('advance-task', self.commands())

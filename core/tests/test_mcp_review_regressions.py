@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import timedelta
 import sqlite3
 import pytest
+from unittest import mock
 
 from kanpilot import db, runtime_operations, util, mcp_scopes, mcp_tools
 from test_pi_desktop_backend import PiDesktopCase as _PiDesktopCase
@@ -35,16 +36,70 @@ class TestRuntimeNamingAndReports(_PiDesktopCase):
                 client = self.runtime(role="review", invocation=f"review-{permission}",
                                       permission=permission)
                 session = client.session_create(str(self.repos_root / "Feedback"),
-                                                mode="plan")["session"]
+                                                mode="plan", interaction_mode="unattended")["session"]
                 result = client.session_configure(session["id"], mode="plan",
-                                                  permission_mode=permission)
+                                                  permission_mode=permission, interaction_mode="unattended")
                 self.assertTrue(result["configured"])
                 self.assertEqual(self.server.configured["permissionMode"], permission)
                 self.assertEqual(self.server.configured["mode"], "plan")
                 with self.assertRaises(util.KanpilotError) as raised:
                     client.session_configure(session["id"], mode="plan",
-                                             permission_mode="ask" if permission == "auto" else "auto")
+                                             permission_mode="ask" if permission == "auto" else "auto", interaction_mode="unattended")
                 self.assertEqual(raised.exception.code, "forbidden")
+
+    def test_unattended_policy_and_error_details_survive_runtime(self):
+        actual = self.server.tool_call
+        details = {"kind": "interaction_required", "toolName": "asktool", "toolCallId": "ask-1",
+                   "questions": [{"question": "决定？", "options": ["A", "B"]}]}
+        def call(name, args):
+            result = actual(name, args)
+            if name in ("pi_session_create", "pi_session_configure", "pi_session_get"):
+                result["structuredContent"].setdefault("session", {"id": self.server.session_id}).update(
+                    interactionMode="unattended", interactionPolicyVersion=1)
+            if name == "pi_turn_get":
+                result["structuredContent"].update(errorCode="INTERACTION_REQUIRED", errorDetails=details)
+            return result
+        self.server.tool_call = call
+        client = self.runtime(role="review", invocation="hard-policy", permission="auto")
+        sid = client.session_create(str(self.repos_root / "Feedback"), mode="plan", interaction_mode="unattended")["session"]["id"]
+        configured = client.session_configure(sid, mode="plan", permission_mode="auto", interaction_mode="unattended")
+        self.assertEqual(configured["session"]["interactionPolicyVersion"], 1)
+        self.assertEqual(client.session_get(sid)["session"]["interactionMode"], "unattended")
+        self.assertEqual(client.turn_get(sid, "test-turn")["errorDetails"], details)
+        self.assertEqual(self.server.created["interactionMode"], "unattended")
+        self.assertEqual(self.server.configured["interactionMode"], "unattended")
+
+    def test_runtime_prompt_sends_atomic_policy_precondition(self):
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name in ("pi_session_create", "pi_session_get"):
+                result["structuredContent"].setdefault("session", {"id": self.server.session_id}).update(
+                    interactionMode="unattended", interactionPolicyVersion=1)
+            return result
+        self.server.tool_call = call
+        client = self.runtime(role="review", invocation="atomic-policy", permission="auto")
+        sid = client.session_create(str(self.repos_root / "Feedback"), mode="plan", interaction_mode="unattended")["session"]["id"]
+        client.agent_prompt(sid, "bounded prompt")
+        calls = [args for name, args in self.server.calls if name == "pi_agent_prompt"]
+        self.assertEqual(calls[-1]["expectedInteractionMode"], "unattended")
+
+    def test_core_prompt_gate_rejects_changed_policy(self):
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == "pi_session_create":
+                result["structuredContent"]["session"].update(interactionMode="unattended", interactionPolicyVersion=1)
+            if name == "pi_session_get":
+                result["structuredContent"]["session"].update(interactionMode="interactive", interactionPolicyVersion=1)
+            return result
+        self.server.tool_call = call
+        client = self.runtime(role="review", invocation="changed-policy", permission="auto")
+        sid = client.session_create(str(self.repos_root / "Feedback"), mode="plan", interaction_mode="unattended")["session"]["id"]
+        with self.assertRaises(util.KanpilotError) as caught:
+            client.agent_prompt(sid, "must not reach Plus")
+        self.assertEqual(caught.exception.code, "interaction_policy_unverified")
+        self.assertEqual(self.server.prompt_count, 0)
 
     def create(self, client):
         return client.session_create(
@@ -170,8 +225,8 @@ def test_runtime_resource_and_config_scope_guards(tmp_path):
         with pytest.raises(util.KanpilotError, match='does not belong'):
             mcp_tools._runtime_guard(conn, scope, 'kp_runtime_status', {'scope_id': 'scope', 'session_id': 'foreign'})
         with pytest.raises(util.KanpilotError, match='snapshot'):
-            mcp_tools._runtime_guard(conn, scope, 'kp_runtime_session_create', {'scope_id': 'scope', 'project_path': str(tmp_path), 'mode': 'plan', 'runtime_config': {**cfg, 'permission_mode': 'auto'}})
-        mcp_tools._runtime_guard(conn, scope, 'kp_runtime_session_create', {'scope_id': 'scope', 'project_path': str(tmp_path), 'mode': 'plan', 'runtime_config': cfg})
+            mcp_tools._runtime_guard(conn, scope, 'kp_runtime_session_create', {'scope_id': 'scope', 'project_path': str(tmp_path), 'mode': 'plan', 'interaction_mode': 'unattended', 'runtime_config': {**cfg, 'permission_mode': 'auto'}})
+        mcp_tools._runtime_guard(conn, scope, 'kp_runtime_session_create', {'scope_id': 'scope', 'project_path': str(tmp_path), 'mode': 'plan', 'interaction_mode': 'unattended', 'runtime_config': cfg})
         with pytest.raises(util.KanpilotError, match='unknown fields'):
             mcp_tools._validate_arguments(mcp_tools.TOOLS_REGISTRY['kp_task_heartbeat']['inputSchema'], {'request_id': 'r', 'run_id': 'x', 'token': 'secret'})
     finally:
@@ -200,7 +255,7 @@ def test_runtime_configure_respects_role_and_immutable_permission(tmp_path, role
         project_path=str(tmp_path), runtime_config={"permission_mode": snapshot},
     )
     args = {"scope_id": "scope", "mode": "goal" if role == "execution" else "plan",
-            "permission_mode": requested}
+            "permission_mode": requested, "interaction_mode": "unattended"}
     try:
         if allowed:
             mcp_tools._runtime_guard(conn, scope, "kp_runtime_session_configure", args)
@@ -228,8 +283,10 @@ def test_runtime_prompt_uses_session_ownership_without_attachment(tmp_path):
                 conn, scope.scope_id, 'create', session_id='owned-session',
             )
         assert not runtime_operations.session_attached(conn, scope.scope_id, 'owned-session')
-        args = {'scope_id': scope.scope_id, 'session_id': 'owned-session', 'content': 'plan'}
-        mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', args)
+        args = {'scope_id': scope.scope_id, 'session_id': 'owned-session', 'content': 'plan', 'expected_interaction_mode': 'unattended'}
+        with mock.patch.object(mcp_tools.harness_plus_adapter, 'plus_messages', return_value={
+            'session_id': 'owned-session', 'interactionMode': 'unattended', 'interactionPolicyVersion': 1}):
+            mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', args)
         with pytest.raises(util.KanpilotError, match='does not belong'):
             mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', {
                 **args, 'session_id': 'foreign-session',
@@ -353,3 +410,21 @@ def test_mcp_server_rejects_old_schema_without_upgrade(tmp_path):
     assert conn.execute('SELECT version FROM schema_meta').fetchone()[0]==4
     conn.close()
     assert server.http_server is None
+
+
+@pytest.mark.parametrize('expected', [None, 'interactive'])
+def test_core_prompt_requires_unattended_precondition(tmp_path, expected):
+    conn = db.connect(tmp_path / 'precondition.db')
+    scope = mcp_scopes.Scope('scope', 'invocation', 'planner',
+        util.to_iso(util.now_dt() + timedelta(minutes=10)), project_path=str(tmp_path))
+    args = {'scope_id': scope.scope_id, 'content': 'plan'}
+    if expected is not None:
+        args['expected_interaction_mode'] = expected
+    try:
+        with mock.patch.object(mcp_tools.harness_plus_adapter, 'plus_messages') as reader:
+            with pytest.raises(util.KanpilotError) as caught:
+                mcp_tools._runtime_guard(conn, scope, 'kp_runtime_prompt', args)
+        assert caught.value.code == 'forbidden'
+        reader.assert_not_called()
+    finally:
+        conn.close()
