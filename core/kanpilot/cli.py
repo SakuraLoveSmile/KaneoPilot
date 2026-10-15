@@ -27,6 +27,16 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "set-config": ({"worktree_pool_size": (True, "int")}, cmd_config.cmd_set_config),
+    "worktree-slot-release": ({"slot_id": (True, "str"), "holder_id": (True, "str"),
+                               "lease_token": (True, "str"), "confirm": (True, "bool")},
+                              _automation_command("worktree_pool", "cmd_worktree_slot_release")),
+    "worktree-audit": ({"retention_days": (False, "int")},
+                       _automation_command("cmd_worktree", "cmd_worktree_audit")),
+    "worktree-gc": ({"dry_run": (False, "bool"), "retention_days": (False, "int"),
+                     "confirm": (False, "bool"), "paths": (False, "list"),
+                     "expected_audit_sha256": (False, "str")},
+                    _automation_command("cmd_worktree", "cmd_worktree_gc")),
     "report-execution-question": ({**{k:(True,"str") for k in ("task_id","run_id","session_id","turn_id","request_id","tool_call_id","state")},"questions":(False,"list"),"detail":(False,"str")}, _automation_command("execution_questions","cmd_report_execution_question")),
     "save-execution-answers": ({**{k:(True,"str") for k in ("task_id","request_id","questions_sha256")},"answers":(True,"list")}, _automation_command("execution_questions","cmd_save_execution_answers")),
     "submit-execution-answers": ({**{k:(True,"str") for k in ("task_id","run_id","request_id","questions_sha256","operation_id")},"answers":(False,"list"),"skip_all":(False,"bool"),"by":(False,"str")}, _automation_command("execution_questions","cmd_submit_execution_answers")),

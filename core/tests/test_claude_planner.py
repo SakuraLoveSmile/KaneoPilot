@@ -39,7 +39,8 @@ class ClaudePlannerTest(KanpilotTestCase):
             "questions": (questions if questions is not None else ["确认目标版本"]) if status == "needs_input" else [], "evidence": []}
         stub = self.root / "claude"
         stub.write_text("#!" + sys.executable + "\nimport json,sys,os\n"
-            "open('claude-stdin.txt','w').write(sys.stdin.read())\n"
+            "open(" + repr(str(self.root / "claude-stdin.txt")) + ",'w').write(sys.stdin.read())\n"
+            "open(" + repr(str(self.root / "claude-cwd.txt")) + ",'w').write(os.getcwd())\n"
             "print(json.dumps({'type':'system','subtype':'init','tools':['Read','Grep','Glob'],'session_id':'fake-sid'}),flush=True)\n"
             "print(" + repr(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                 "structured_output": output, "total_cost_usd": .17, "session_id": "fake-sid"})) + ",flush=True)\n")
@@ -71,8 +72,25 @@ class ClaudePlannerTest(KanpilotTestCase):
         self.assertEqual(meta["planner_model"], "test-sonnet")
         self.assertEqual(meta["reasoning_effort"], "high")
         self.assertIn(b"```verify", raw)
-        self.assertTrue((branch / "claude-stdin.txt").exists())
+        self.assertTrue((self.root / "claude-stdin.txt").exists())
+        self.assertFalse((branch / "claude-stdin.txt").exists())
         self.assertFalse((self.repo / "claude-stdin.txt").exists())
+        cwd = Path((self.root / "claude-cwd.txt").read_text())
+        self.assertEqual(cwd.name, "slot-1")
+        self.assertNotEqual(cwd, branch.resolve())
+        with db.connect(self.db_path) as conn:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE path=?", (str(cwd),)).fetchone()
+            self.assertEqual(slot["state"], "free")
+
+    def test_missing_claude_binary_reports_failed_and_returns_unstarted_slot(self):
+        request_id = self.prepare()
+        with mock.patch.dict(os.environ, {"KANPILOT_CLAUDE_BIN": str(self.root / "missing-claude")}):
+            self.assertTrue(planner_runner.run_one(self.db_path, request_id))
+        with db.connect(self.db_path) as conn:
+            request = db.get_request(conn, request_id)
+            self.assertEqual(request["status"], "failed")
+            self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
+        self.assertIn("Claude 拉起失败", self.call("get-task", {"task_id": self.task_id})["task"]["failure_reason"])
 
     def test_needs_input_keeps_draft(self):
         request_id = self.prepare("needs_input")
@@ -169,11 +187,15 @@ class ClaudePlannerTest(KanpilotTestCase):
         (self.repo / "source.txt").write_text("dirty primary checkout")
         run_dir = self.root / "plus-run"
         run_dir.mkdir()
+        with db.connect(self.db_path) as conn:
+            now = util.now_iso()
+            conn.execute("INSERT INTO requests(request_id,idempotency_key,stage,kind,status,run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                         ("request", "fixture", "plan", "plan", "claimed", "run", now, now))
         instance = pi_desktop_planner._Round(self.db_path, "request", "run", task_id=self.task_id,
             context={"payload": {"delivery_head_sha": sha, "manifest": {"files": []}}},
             task={"repository": str(self.repo)}, run_dir=run_dir, timeout=2, heartbeat_every=1)
         worktree, mode, materials = instance._prepare_materials()
-        self.assertEqual(worktree.name, "plan-" + sha[:12])
+        self.assertEqual(worktree.name, "slot-1")
         self.assertEqual((worktree / "source.txt").read_text(), "committed baseline")
         self.assertEqual((self.repo / "source.txt").read_text(), "dirty primary checkout")
         self.assertEqual(subprocess.check_output(["git", "-C", str(worktree), "rev-parse",
@@ -242,7 +264,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
             return real_call(name, args)
         with self.fast(), mock.patch.object(self.server, "tool_call", side_effect=observe):
             self.run_round()
-        self.assertTrue(self.server.created["projectPath"].endswith("plan-" + sha[:12]))
+        self.assertEqual(Path(self.server.created["projectPath"]).name, "slot-1")
         self.assertEqual(observed["partial"], partial)
         self.assertEqual(observed["baseline"], "baseline source\n")
         self.assertEqual(observed["deleted_baseline"], "baseline obsolete\n")
@@ -362,5 +384,5 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         self.server.add_plan_proposal(markdown=markdown)
         with self.fast():
             self.run_round()
-        self.assertTrue(self.server.created["projectPath"].endswith("plan-" + sha[:12]))
+        self.assertEqual(Path(self.server.created["projectPath"]).name, "slot-1")
         self.assertEqual(self.call("get-task", {"task_id": fixture["task_id"]})["task"]["status"], "ready")

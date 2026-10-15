@@ -153,6 +153,23 @@ class TaskBranchReview(KanpilotTestCase):
         self.assertIn("assert True", full)
         self.assertEqual(context["payload"]["pi_branch_review"]["execution_run_id"], "exec2")
 
+    def test_default_pi_keeps_lease_until_owning_runner_has_stopped(self):
+        from kanpilot import executor_runner
+        self.commit()
+        identity = self.claim_review()
+        payload = db.request_payload(db.get_request(self.ctx.conn, identity["request_id"]))
+        lease = payload["pool_lease"]
+        self.assertEqual(self.ctx.conn.execute("SELECT state FROM worktree_slots WHERE slot_id=?",
+                                              (lease["slot_id"],)).fetchone()[0], "leased")
+        cmd_exec.cmd_report(self.ctx, dict(request_id=identity["request_id"], run_id=identity["run_id"],
+                                           outcome="failed", note="isolated process ended"))
+        self.assertEqual(self.ctx.conn.execute("SELECT state FROM worktree_slots WHERE slot_id=?",
+                                              (lease["slot_id"],)).fetchone()[0], "leased")
+        with patch.object(executor_runner.constants, "default_db_path", return_value=self.db_path):
+            executor_runner._release_pi_review(self.ctx.conn, identity["request_id"])
+        self.assertEqual(self.ctx.conn.execute("SELECT state FROM worktree_slots WHERE slot_id=?",
+                                              (lease["slot_id"],)).fetchone()[0], "free")
+
     def test_default_pi_prepare_failure_reports_blocked_without_live_claim(self):
         self.commit()
         (self.worktree / "dirty.txt").write_text("later uncommitted work")
@@ -188,6 +205,8 @@ class TaskBranchReview(KanpilotTestCase):
         second = self.commit("test.py", "assert True\n")
         task = dict(self.task())
         root = self.root / "trees" / "task1234" / ("review-" + second["sha"][:12])
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.worktree, "worktree", "add", "--detach", str(root), "HEAD")
         self.assertIsNone(review.prepare_worktree(task, self.worktree, root))
         self.assertEqual(self.git(root, "rev-parse", "HEAD"), second["sha"])
         self.assertEqual(self.git(root, "status", "--porcelain"), "")
@@ -252,6 +271,8 @@ class TaskBranchReview(KanpilotTestCase):
         identity = self.claim_review()
         task = dict(self.task())
         root = self.root / "trees" / "task1234" / ("review-" + result["sha"][:12])
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.worktree, "worktree", "add", "--detach", str(root), "HEAD")
         self.assertIsNone(review.prepare_worktree(task, self.worktree, root))
         materials = review.collect_materials(db_path=self.db_path, conn=self.ctx.conn,
             materials=self.root / "materials", task=task,
@@ -275,6 +296,10 @@ class TaskBranchReview(KanpilotTestCase):
         (self.worktree / "untracked.txt").write_text("historical untracked work")
         root = self.root / "trees" / "task1234" / "review-legacy"
         self.assertFalse(core.requires_branch_review(self.task()))
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.worktree, "worktree", "add", "--detach", str(root), "HEAD")
+        from kanpilot import review_snapshot
+        review_snapshot.populate(root, review_snapshot.freeze(self.worktree))
         self.assertIsNone(review.prepare_worktree(dict(self.task()), self.worktree, root))
         self.assertEqual((root / "app.py").read_text(), "uncommitted historic work")
         self.assertEqual((root / "untracked.txt").read_text(), "historical untracked work")
@@ -284,6 +309,8 @@ class TaskBranchReview(KanpilotTestCase):
         core.update_delivery(self.ctx.conn, self.task(), self.ctx.now_iso, mode="pr", workspace_version=None)
         task = dict(self.task())
         root = self.root / "trees" / "task1234" / ("review-" + result["sha"][:12])
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.worktree, "worktree", "add", "--detach", str(root), "HEAD")
         self.assertIsNone(review.prepare_worktree(task, self.worktree, root))
         materials = review.collect_materials(db_path=self.db_path, conn=self.ctx.conn,
             materials=self.root / "materials", task=task,

@@ -27,10 +27,10 @@ class TestSchemaAndCli(KanpilotTestCase):
         }
         self.assertTrue(
             {"schema_meta", "tasks", "requests", "attempts", "events",
-             "settings", "planner_inputs", "runtime_operations"} <= tables
+             "settings", "planner_inputs", "runtime_operations", "worktree_slots"} <= tables
         )
         version = conn.execute("SELECT version FROM schema_meta").fetchone()[0]
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode, "wal")
         conn.close()
@@ -40,7 +40,7 @@ class TestSchemaAndCli(KanpilotTestCase):
             ["overview", "--db", str(self.db_path), "--json", "{}"]
         )
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["schema_version"], 5)
+        self.assertEqual(json.loads(out)["schema_version"], 6)
 
     def test_cli_stdin_fallback(self):
         code, out, _ = self.call_main(

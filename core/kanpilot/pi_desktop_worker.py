@@ -698,13 +698,14 @@ class _ExecutionInputObserver:
 class _ReadRecovery:
     """Reconnect only observation calls; never replay a desktop mutation."""
 
-    def __init__(self, client, connection_file, session_id, turn_id):
+    def __init__(self, client, connection_file, session_id, turn_id, *, require_identity=False):
         self.client = client
         self.connection_file = connection_file
         self.session_id = session_id
         self.turn_id = turn_id
         self.pid = None
         self.allow_input_recovery = False
+        self.require_identity = require_identity
 
     def _checked_turn(self, record):
         if not _turn_identity_matches(record, self.session_id, self.turn_id):
@@ -733,7 +734,8 @@ class _ReadRecovery:
                         "remote_unavailable", "runtime MCP client 不支持安全重连")
                 candidate = reconnect()
                 candidate._timeout = min(1.0, remaining / 5)
-                turn = self._checked_turn(candidate.turn_get(self.session_id, self.turn_id))
+                turn = self._checked_turn(candidate.turn_get(
+                    self.session_id, self.turn_id, **({"require_identity": True} if self.require_identity else {})))
                 if _turn_status(turn) == "running":
                     status=candidate.agent_status(self.session_id)
                     inner=status.get("status") or status
@@ -752,7 +754,8 @@ class _ReadRecovery:
         raise util.KanpilotError("remote_unavailable", "只读重连失败，可能仍在运行：" + last.message)
 
     def turn_get(self, session_id, turn_id):
-        return self._checked_turn(self._read("turn_get", session_id, turn_id))
+        return self._checked_turn(self._read("turn_get", session_id, turn_id,
+                                             **({"require_identity": True} if self.require_identity else {})))
 
     def session_get(self, session_id, **kwargs):
         return self._read("session_get", session_id, **kwargs)

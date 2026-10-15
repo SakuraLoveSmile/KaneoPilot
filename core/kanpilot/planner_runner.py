@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import cli, codex_planner, constants, db, headless_adapter, util
-from . import dsh_events
+from . import dsh_events, task_workspace
 
 DEFAULT_PLANNER_TIMEOUT_SECONDS = 1800
 
@@ -539,6 +539,17 @@ def _classify_failure(returncode, errors: list, tail: list,
 
 
 def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
+    lifecycle = {}
+    try:
+        return _run_one(db_path, request_id, lifecycle=lifecycle)
+    finally:
+        job = lifecycle.get("job")
+        if job and job.get("pool_lease"):
+            task_workspace.release_pool(db_path, job, lifecycle["run_dir"])
+            _write_json(lifecycle["run_dir"] / dsh_events.JOB_NAME, job)
+
+
+def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> bool:
     """领取并执行一个规划轮次。返回 True=处理了一个请求（可继续领取）。"""
     claim = cli.run("claim", {
         "stage": "plan", "executor": constants.PLANNER_EXECUTOR_ID,
@@ -618,7 +629,7 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
 
     method = req_payload.get("planner_method") or "builtin"
     job = {
-        "task_id": task_id, "run_id": run_id, "backend": "codex",
+        "task_id": task_id, "request_id": req_id, "run_id": run_id, "backend": "codex",
         "session_id": None, "session_title": None,
         "config": req_payload.get("model_config"),
         "input_id": context.get("input_id"),
@@ -626,8 +637,9 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         "planner_method": method,
         "pid": os.getpid(), "status": "running",
         "started_at": util.now_iso(), "ended_at": None,
-        "exit_code": None, "detail": None,
+        "exit_code": None, "detail": None, "send_state": "not_sent",
     }
+    lifecycle.update(job=job, run_dir=run_dir)
     # §5.23.2：spec_plan 记录固化的插件身份/版本（有则）；不写凭据。
     if method == "spec_plan":
         if req_payload.get("plugin_id"):
@@ -743,6 +755,21 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
                               "error_category": "auth_not_ready"})
             return True
 
+    conn = db.connect(db_path)
+    try:
+        plan_cwd = task_workspace.prepare_plan_pool(conn, db_path, db.require_task(conn, task_id),
+            req_payload, job, run_dir / dsh_events.JOB_NAME)
+    except (util.KanpilotError, OSError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
+            finalize("finished", 0, exc.message, "completed", exc.code)
+            return True
+        detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+        finalize("failed", 1, detail, "failed", "plan_worktree_failed")
+        _report(db_path, req_id, run_id, "failed", detail, failure_code="planner_failed")
+        return True
+    finally:
+        conn.close()
+
     schema_path = run_dir / "output-schema.json"
     out_path = run_dir / "last-message.txt"
     _write_json(schema_path, codex_planner.output_schema())
@@ -750,11 +777,11 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         manifest, Path(input_dir) if input_dir else None
     )
     prompt = codex_planner.build_prompt(
-        dict(task, fix_mode=req_payload.get("fix_mode"), plan_cwd=req_payload.get("plan_cwd")), manifest, Path(input_dir) if input_dir else None,
+        dict(task, fix_mode=req_payload.get("fix_mode"), plan_cwd=str(plan_cwd)), manifest, Path(input_dir) if input_dir else None,
         method=method,
     )
     job_for_argv = {
-        "plan_cwd": req_payload.get("plan_cwd"),
+        "plan_cwd": str(plan_cwd),
         "model_config": req_payload.get("model_config"),
         "repository": task.get("repository")
         or (manifest.get("task") or {}).get("repository"),
@@ -771,12 +798,20 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
     deadline = time.monotonic() + timeout
     next_heartbeat = time.monotonic() + heartbeat_every
     try:
+        job["send_state"] = "unknown"
+        conn = db.connect(db_path)
+        try:
+            task_workspace.pool_owner(conn, job, state="running", pid=os.getpid())
+        finally:
+            conn.close()
+        _write_json(run_dir / dsh_events.JOB_NAME, job)
         proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            argv, cwd=str(plan_cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=env, start_new_session=True,
             bufsize=0,
         )
     except OSError as exc:
+        job["send_state"] = "not_sent"
         finalize("failed", 1, f"launch failed: {exc}", "failed",
                  "launch_failed")
         _report(db_path, req_id, run_id, "failed",
@@ -887,6 +922,7 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         if now_m >= next_heartbeat:
             try:
                 _heartbeat(db_path, req_id, run_id, "planning")
+                task_workspace.heartbeat_pool(db_path, job)
                 heartbeat_failures = 0
             except util.KanpilotError as exc:
                 # stale_run / 失联 → 终止并禁止发布；瞬时错误（busy/锁）
@@ -926,11 +962,13 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
 
     if state["stale"]:
         _terminate(proc)
+        job["owner_stopped"] = proc.poll() is not None
         finalize("failed", proc.returncode, "lease lost (stale_run)",
                  "failed", "stale_run")
         return True  # 不汇报：请求所有权已失
     if timed_out:
         _terminate(proc)
+        job["owner_stopped"] = proc.poll() is not None
         finalize("failed", proc.returncode, f"timeout after {timeout:g}s",
                  "failed", "timeout")
         _report(db_path, req_id, run_id, "failed",
@@ -943,6 +981,7 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         _terminate(proc)
+    job["owner_stopped"] = proc.poll() is not None
     returncode = proc.returncode
     try:
         proc.stdout.close()

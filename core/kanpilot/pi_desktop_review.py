@@ -46,7 +46,7 @@ from typing import Callable, Optional, Tuple
 
 from . import (
     constants, core, db, headless_adapter, pi_desktop_controller,
-    util, git_delivery, review_settle, review_snapshot, plus_interaction,
+    util, git_delivery, review_settle, review_snapshot, plus_interaction, task_workspace, worktree_pool,
 )
 
 from .review_settle import RESULT_SCHEMA
@@ -294,28 +294,38 @@ def prepare_worktree(task: dict, execution_worktree: Path, review_root: Path, sn
             return None
     except util.KanpilotError as exc:
         return f"review_worktree_invalid: {exc.message}"
-    try:
-        review_root.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return f"review_worktree_failed: Review 目录不可创建（{exc}）"
-    repo = Path(str(task.get("repository") or "")).expanduser()
-    _out, error = _git([
-        "-C", str(repo), "worktree", "add", "--detach",
-        str(review_root), snapshot["head"],
-    ], timeout=60)
-    if error is not None:
-        _out, error = _git([
-            "-C", str(execution_worktree), "worktree", "add", "--detach",
-            str(review_root), snapshot["head"],
-        ], timeout=60)
-    if error is not None:
-        return f"review_worktree_failed: {error}"
-    try:
-        review_snapshot.populate(review_root, snapshot)
+    return "review_worktree_failed: 新评审快照必须经核心槽位租约创建"
+
+
+def prepare_pooled_worktree(conn, db_path, job, task, execution_worktree, snapshot=None):
+    """Freeze one leased detached checkout independently from the execution tree."""
+    if core.requires_branch_review(task):
+        core.require_committed_review(task)
+        sha = core.delivery_of(task)["head_sha"]
+    else:
+        snapshot = snapshot if snapshot is not None else review_snapshot.freeze(execution_worktree)
         review_snapshot.verify_source(execution_worktree, snapshot)
-    except (util.KanpilotError, OSError) as exc:
-        return "review_worktree_failed: " + (exc.message if isinstance(exc, util.KanpilotError) else str(exc))
-    return None
+        sha = snapshot["head"]
+    lease = task_workspace.acquire_pool(conn, task["repository"], stage=STAGE,
+                                        run_id=job["run_id"], request_id=job["request_id"], sha=sha)
+    job.update(pool_lease=lease, pool_db_path=str(db_path), review_root=lease["path"], send_state="not_sent")
+    if job.get("invocation_dir"):
+        pi_desktop_controller.write_json(Path(job["invocation_dir"]) / "job.json", job)
+    root = Path(lease["path"])
+    util.require(root.resolve() != execution_worktree.resolve(), "Review 不得复用执行工作树", "review_blocked")
+    if snapshot is not None:
+        worktree_pool.register_snapshot(conn, **task_workspace.pool_identity(lease), snapshot=snapshot)
+        review_snapshot.verify_source(execution_worktree, snapshot)
+    return root
+
+
+def validate_job_pool(job):
+    if job.get("pool_lease"):
+        conn = db.connect(job["pool_db_path"])
+        try:
+            task_workspace.validate_pool(conn, job["pool_lease"])
+        finally:
+            conn.close()
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -634,6 +644,12 @@ def _heartbeat(db_path, job: dict, state: dict) -> dict:
         core_call(db_path, "heartbeat", {
             "request_id": job["request_id"], "run_id": job["run_id"],
         })
+        if job.get("pool_lease"):
+            conn = db.connect(db_path)
+            try:
+                worktree_pool.heartbeat(conn, **task_workspace.pool_identity(job["pool_lease"]))
+            finally:
+                conn.close()
     except util.KanpilotError as exc:
         if exc.code in ("stale_run", "not_found"):
             state["stopped"] = f"{exc.code}: {exc.message}"
@@ -655,11 +671,13 @@ def _observe_turn(*, db_path, client, job: dict, log, timeout: float,
     outcome, detail = None, None
     while True:
         try:
-            record = client.turn_get(session_id, turn_id)
+            record = client.turn_get(session_id, turn_id, require_identity=True)
             turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
             if turn.get("sessionId") != session_id or turn.get("turnId") != turn_id:
                 raise util.KanpilotError("conflict", "Plus 返回的轮次身份不符")
             status, error = turn.get("status"), None
+            if status in ("completed", "error", "aborted"):
+                job["owner_stopped"] = True
             if (turn.get("errorCode") or turn.get("error_code")) == "INTERACTION_REQUIRED":
                 job["interaction_required"] = record
                 pi_desktop_controller.write_json(Path(job["invocation_dir"]) / "interaction-required.json", record)
@@ -746,6 +764,16 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
         return {"kind": "settle", "result": plus_interaction.blocked_review(details)}
     if outcome == "timeout":
         stopped = pi_desktop_controller.stop_turn(client, session_id, turn_id)
+        # The generic controller permits historical identity normalization.
+        # Only a fresh strict read can prove this leased reader has stopped.
+        try:
+            proof = client.turn_get(session_id, turn_id, require_identity=True)
+            turn = proof.get("turn") if isinstance(proof.get("turn"), dict) else proof
+            if (turn.get("sessionId") == session_id and turn.get("turnId") == turn_id
+                    and turn.get("status") in ("completed", "error", "aborted")):
+                job["owner_stopped"] = True
+        except util.KanpilotError:
+            pass
         reason = (
             "permission_waiting" if job.get("permission_waiting") else "timeout"
         )
@@ -831,6 +859,12 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
         return detail
     job["interaction_policy"] = {"interactionMode": "unattended", "interactionPolicyVersion": 1}
     job["send_state"] = "unknown"
+    if job.get("pool_lease"):
+        conn = db.connect(job["pool_db_path"])
+        try:
+            task_workspace.pool_owner(conn, job, state="running")
+        finally:
+            conn.close()
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     try:
@@ -845,6 +879,12 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
     if not isinstance(turn_id, str) or not turn_id:
         return "prompt_response_lost: 响应未含 turnId（不重发）"
     job["turn_id"] = turn_id
+    if job.get("pool_lease"):
+        conn = db.connect(job["pool_db_path"])
+        try:
+            task_workspace.pool_owner(conn, job, state="running")
+        finally:
+            conn.close()
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     started, proof_detail = _prove_started(
@@ -913,6 +953,8 @@ def _close(*, job, job_path, log, record_run, status: str, exit_code: int,
         "status": status, "exit_code": exit_code, "ended_at": util.now_iso(),
         "detail": detail,
     })
+    if job.get("pool_db_path"):
+        task_workspace.release_pool(job["pool_db_path"], job, Path(job_path).parent)
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     log.emit("terminal", util.now_iso(),
@@ -997,6 +1039,7 @@ def _freeze_branch_job(job, task, materials):
 
 
 def _guard_branch_job(job, task):
+    validate_job_pool(job)
     util.require(job["review_branch_snapshot"] == core.branch_review_snapshot(task),
                  "Review 固定分支版本已变化", "review_blocked")
     core.require_committed_review(task, job["execution_run_id"])
@@ -1042,6 +1085,7 @@ def _restore_legacy_pr_job(job, task):
 
 
 def _guard_manual_job(job):
+    validate_job_pool(job)
     for path, digest in job["material_hashes"].items():
         if util.sha256_file(Path(path)) != digest:
             raise util.KanpilotError("review_blocked", "Review 冻结材料已变化")
@@ -1055,6 +1099,11 @@ def _guard_manual_job(job):
 def _settle(**kwargs) -> int:
     from . import review_settle
     job = kwargs["job"]
+    try:
+        validate_job_pool(job)
+    except util.KanpilotError as exc:
+        return _stop_no_write(job=job, job_path=kwargs["job_path"], log=kwargs["log"],
+                              record_run=kwargs["record_run"], detail=exc.message)
     module = sys.modules[__name__]
     if not job.get("manual_snapshot_head") and not job.get("review_branch_snapshot"):
         task = _facts(kwargs["db_path"], job["task_id"], job["request_id"]).get("task")
@@ -1289,20 +1338,17 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
         str((task.get("execution_round") or {}).get("worktree_path"))
     )
     job["execution_worktree"] = str(execution_worktree)
-    delivery = core.delivery_of(task)
-    suffix = str(delivery.get("head_sha") or "")[:12] if core.requires_branch_review(task) else job["run_id"]
-    review_root = _review_root(conn, job["task_id"], suffix)
     try:
         snapshot = review_snapshot.freeze(execution_worktree) if not core.requires_branch_review(task) else None
-    except util.KanpilotError as exc:
+        review_root = prepare_pooled_worktree(conn, db_path, job, task, execution_worktree, snapshot)
+    except (util.KanpilotError, OSError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
+            _close(job=job, job_path=job_path, log=log, record_run=record_run,
+                   status="finished", exit_code=0, detail=exc.message, reason=exc.code)
+            return 0
         return _blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
-                                log=log, record_run=record_run, detail=exc.message)
-    problem = prepare_worktree(task, execution_worktree, review_root, snapshot=snapshot)
-    if problem is not None:
-        return _blocked_no_pass(
-            db_path=db_path, job=job, job_path=job_path, log=log,
-            record_run=record_run, detail=problem,
-        )
+                                log=log, record_run=record_run,
+                                detail=exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     # Keep generated inputs outside the committed snapshot so it stays clean/reusable.
     try:
         materials = collect_materials(
@@ -1413,6 +1459,11 @@ def _resume_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
     if job.get("status") == "finished":
         print("executor review 控制轮已收尾：无需恢复", file=sys.stderr)
         return 0
+    try:
+        validate_job_pool(job)
+    except util.KanpilotError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
     directory, job_path = pending["directory"], pending["job_path"]
     job["log"] = str(log_path)
     job["resumed_at"] = util.now_iso()

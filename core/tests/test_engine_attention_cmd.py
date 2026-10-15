@@ -26,7 +26,8 @@ class TestAttentionListCommand(KanpilotTestCase):
         return remote["id"]
 
     def test_empty_inbox(self):
-        self.assertEqual(self.call("attention-list", {}), {"items": []})
+        self.assertEqual(self.call("attention-list", {}), {"items": [], "worktree_pool": {
+            "free": 0, "leased": 0, "quarantined": 0, "unconfirmed": 0, "waiting": [], "slots": []}})
 
     def test_item_shape_and_fields(self):
         tid = self._make_needs_user("taskattn00000000000001", "pr_closed")

@@ -490,3 +490,10 @@ failure_code=execution_input_required映射reason_code=execution_question（阶�
 推荐answer_execution_questions，替代skip_execution_questions/stop_execution。
 execution_question_opened/answered/closed事件同步中文标签。详情与session-view透出同一execution_question DTO，
 attention-list透出question_preview；DTO、答案映射、五命令和测试验收以protocol §5.28为唯一权威。
+
+
+## 规划评审目录生命周期（protocol §5.29）
+
+新规划/评审先租仓库池槽位；容量不足排队，禁止回退到真实仓库或新建per-run树。转录、计划/评审正文与冻结材料在释放前持久化。Plus状态未知、尚未结束的turn、活进程都不得因心跳过期清理；恢复使用租约代次隔离旧消费者。执行分支及非规划UUID保持既有持久语义。
+
+历史回收默认为dry-run，候选需无活动/历史路径引用、超过7天且干净；每批最多10项，需用户根据具体清单确认，重审指纹、SQLite一致备份、intent回执、无force删除与prune缺一不可。save_state不释放磁盘，缺历史行不证明无引用。Plus会话和projects表不在回收范围。空闲整池回收同样遵守确认/引用守卫。

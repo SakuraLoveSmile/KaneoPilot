@@ -98,7 +98,8 @@ def cmd_attention_list(ctx, payload: dict) -> dict:
         raise util.bad_request("invalid save_state")
     items = attention_items(ctx.conn, ctx.now, ctx.now_iso, save_state=save_filter,
                             include_historical=bool(payload.get("include_historical")))
-    return {"items": items}
+    from .. import worktree_status
+    return {"items": items, "worktree_pool": worktree_status.summary(ctx.conn)}
 
 
 def cmd_engine_status(ctx, payload: dict) -> dict:

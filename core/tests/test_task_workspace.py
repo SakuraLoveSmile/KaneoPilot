@@ -1,10 +1,13 @@
 """New local task branches against disposable Git repositories and FakeKaneo."""
+import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
 from helpers import KanpilotTestCase
-from kanpilot import cmd_dispatch, core, db, git_delivery, pi_desktop_planner, planner_inputs, task_workspace, util
+from kanpilot import cmd_dispatch, core, db, git_delivery, pi_desktop_planner, planner_inputs, task_workspace, util, worktree_pool, planner_runner
 
 
 def git(repo, *args):
@@ -238,7 +241,8 @@ class TaskWorkspaceTest(KanpilotTestCase):
         try:
             run_dir = self.runs_root / "frozen-plan"
             run_dir.mkdir()
-            round_ = pi_desktop_planner._Round(self.db_path, result["request_id"], "dirty-plan-run",
+            claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+            round_ = pi_desktop_planner._Round(self.db_path, result["request_id"], claim["run_id"],
                 task_id=task["task_id"], context={"payload": payload,
                     "input_dir": str(self.app_support / "planner_inputs" / payload["input_id"])},
                 task={"repository": str(repo)}, run_dir=run_dir, timeout=2, heartbeat_every=1)
@@ -253,5 +257,196 @@ class TaskWorkspaceTest(KanpilotTestCase):
             self.assertTrue(materials.manifest_path.is_file())
             self.assertEqual(task_workspace.verify_plan_workspace(task, payload), branch)
             self.assertEqual((repo / "tracked.txt").read_text(), "primary dirty\n")
+        finally:
+            conn.close()
+
+    def test_acquire_binding_race_returns_unexposed_slot_without_changing_new_owner(self):
+        repo = self.repository()
+        result = self.start()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+        conn, task, payload = self.stored(result)
+        original = worktree_pool.acquire
+        def taken_during_git(*args, **kwargs):
+            lease = original(*args, **kwargs)
+            with db.write_txn(conn):
+                db.update_request(conn, result["request_id"], util.now_iso(), run_id="replacement-run")
+            return lease
+        try:
+            with mock.patch.object(worktree_pool, "acquire", taken_during_git), self.assertRaises(util.KanpilotError):
+                task_workspace.acquire_pool(conn, repo, stage="plan", run_id=claim["run_id"],
+                    request_id=result["request_id"], sha=payload["delivery_head_sha"])
+            self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
+            self.assertEqual(db.get_request(conn, result["request_id"])["run_id"], "replacement-run")
+        finally:
+            conn.close()
+
+    def test_acquire_binding_failure_preserves_existing_running_or_unknown_owner(self):
+        repo = self.repository()
+        for state in ("running", "unknown"):
+            with self.subTest(state=state):
+                result = self.start("binding" + state)
+                claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+                conn, task, payload = self.stored(result)
+                try:
+                    lease = worktree_pool.acquire(conn, repo, stage="plan", holder_id=claim["run_id"], sha=payload["delivery_head_sha"])
+                    worktree_pool.mark_owner(conn, **task_workspace.pool_identity(lease), state=state)
+                    with db.write_txn(conn):
+                        db.update_request(conn, result["request_id"], util.now_iso(), run_id="replacement-run")
+                    with self.assertRaises(util.KanpilotError):
+                        task_workspace.acquire_pool(conn, repo, stage="plan", run_id=claim["run_id"],
+                            request_id=result["request_id"], sha=payload["delivery_head_sha"])
+                    current = worktree_pool.validate_lease(conn, **task_workspace.pool_identity(lease))
+                    self.assertEqual(current["state"], "leased")
+                    self.assertEqual(current["owner_state"], state)
+                    self.assertEqual(db.get_request(conn, result["request_id"])["run_id"], "replacement-run")
+                    task_workspace.release_pool(self.db_path,
+                        {"pool_lease": lease, "request_id": result["request_id"], "send_state": "not_sent"},
+                        self.root, unexposed=True)
+                    current = worktree_pool.validate_lease(conn, **task_workspace.pool_identity(lease))
+                    self.assertEqual(current["owner_state"], state)
+                    with db.write_txn(conn):
+                        db.update_request(conn, result["request_id"], util.now_iso(), status="failed")
+                finally:
+                    conn.close()
+
+    def test_plan_pool_uses_frozen_task_head_after_primary_advances(self):
+        repo = self.repository()
+        result = self.start()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "advance primary")
+        conn, task, payload = self.stored(result)
+        job = {"request_id": result["request_id"], "run_id": claim["run_id"]}
+        try:
+            root = task_workspace.prepare_plan_pool(conn, self.db_path, task, payload, job, self.root / "job.json")
+            self.assertEqual(root.name, "slot-1")
+            self.assertEqual(git(root, "rev-parse", "HEAD"), payload["delivery_head_sha"])
+            self.assertEqual((root / "tracked.txt").read_text(), "committed baseline\n")
+            self.assertNotEqual(git(repo, "rev-parse", "HEAD"), payload["delivery_head_sha"])
+            self.assertEqual(db.request_payload(db.get_request(conn, result["request_id"]))["plan_cwd"], payload["plan_cwd"])
+        finally:
+            conn.close()
+
+    def test_codex_real_subprocess_uses_slot_and_releases_after_wait(self):
+        self.repository()
+        result = self.start()
+        conn, task, payload = self.stored(result)
+        branch = Path(payload["plan_cwd"])
+        conn.close()
+        observed = self.root / "observed.json"
+        output = {"status": "ready", "plan_markdown": "# 计划\n\n修改入口\n\n```verify\npython3 -m unittest\n```\n", "questions": [], "evidence": []}
+        stub = self.root / "codex-observer"
+        stub.write_text("#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\n"
+            "prompt=sys.stdin.read()\n"
+            "Path(" + repr(str(observed)) + ").write_text(json.dumps({'cwd':os.getcwd(),'argv':sys.argv,'prompt':prompt}))\n"
+            "Path(sys.argv[sys.argv.index('-o')+1]).write_text(" + repr(json.dumps(output)) + ")\n"
+            "print(json.dumps({'type':'turn.completed'}),flush=True)\n")
+        stub.chmod(0o755)
+        with mock.patch.dict(os.environ, {"KANPILOT_CODEX_BIN": str(stub), "KANPILOT_CODEX_FAKE": ""}):
+            self.assertTrue(planner_runner.run_one(self.db_path, result["request_id"]))
+        seen = json.loads(observed.read_text())
+        root = Path(seen["cwd"])
+        self.assertEqual(root.name, "slot-1")
+        self.assertEqual(seen["argv"][seen["argv"].index("-C") + 1], str(root))
+        self.assertNotEqual(root, branch.resolve())
+        self.assertIn(str(root), seen["prompt"])
+        with db.connect(self.db_path) as conn:
+            request = db.get_request(conn, result["request_id"])
+            self.assertEqual(request["status"], "succeeded")
+            self.assertEqual(db.request_payload(request)["plan_cwd"], str(branch))
+            self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
+        self.assertEqual((branch / "tracked.txt").read_text(), "committed baseline\n")
+
+    def test_plan_pool_detects_clean_source_change_during_acquire(self):
+        repo = self.repository()
+        result = self.start()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+        conn, task, payload = self.stored(result)
+        branch = Path(payload["plan_cwd"])
+        original = worktree_pool.acquire
+        def change_source(*args, **kwargs):
+            lease = original(*args, **kwargs)
+            (branch / "tracked.txt").write_text("changed during preparation\n")
+            return lease
+        job = {"request_id": result["request_id"], "run_id": claim["run_id"]}
+        try:
+            with mock.patch.object(worktree_pool, "acquire", change_source), self.assertRaises(util.KanpilotError):
+                task_workspace.prepare_plan_pool(conn, self.db_path, task, payload, job, self.root / "job.json")
+            self.assertEqual(job["send_state"], "not_sent")
+            self.assertIn("pool_lease", job)
+        finally:
+            conn.close()
+
+    def test_plan_pool_preserves_frozen_dirty_baseline_and_returns_clean_slot(self):
+        self.repository()
+        result = self.start()
+        conn, task, payload = self.stored(result)
+        branch = Path(payload["plan_cwd"])
+        (branch / "tracked.txt").write_text("frozen task changes\n")
+        (branch / "new.txt").write_text("frozen untracked\n")
+        with db.write_txn(conn):
+            db.update_request(conn, result["request_id"], util.now_iso(), status="succeeded")
+        conn.close()
+        result = self.start()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+        conn, task, payload = self.stored(result)
+        job = {"request_id": result["request_id"], "run_id": claim["run_id"]}
+        try:
+            root = task_workspace.prepare_plan_pool(conn, self.db_path, task, payload, job, self.root / "job.json")
+            self.assertEqual((root / "tracked.txt").read_text(), "frozen task changes\n")
+            self.assertEqual((root / "new.txt").read_text(), "frozen untracked\n")
+            with db.write_txn(conn):
+                db.update_request(conn, result["request_id"], util.now_iso(), status="failed")
+            task_workspace.release_pool(self.db_path, job, self.root / "evidence")
+            self.assertTrue(job["pool_released"], job)
+            self.assertEqual((root / "tracked.txt").read_text(), "committed baseline\n")
+            self.assertFalse((root / "new.txt").exists())
+            self.assertEqual((branch / "tracked.txt").read_text(), "frozen task changes\n")
+            self.assertEqual((branch / "new.txt").read_text(), "frozen untracked\n")
+        finally:
+            conn.close()
+
+    def test_full_pool_keeps_codex_and_claude_requests_queued_without_launch(self):
+        repo = self.repository()
+        with db.connect(self.db_path) as conn:
+            with db.write_txn(conn):
+                db.set_setting(conn, "worktree_pool_size", 1)
+            worktree_pool.acquire(conn, repo, stage="plan", holder_id="occupied",
+                                  sha=git(repo, "rev-parse", "HEAD"))
+        launched = self.root / "unexpected-launch"
+        stub = self.root / "never-launch-planner"
+        stub.write_text("#!" + sys.executable + "\nfrom pathlib import Path\nPath(" + repr(str(launched)) + ").touch()\n")
+        stub.chmod(0o755)
+        for backend in ("codex", "claude"):
+            with self.subTest(backend=backend):
+                result = self.start("fullpool" + backend, backend)
+                with mock.patch.dict(os.environ, {"KANPILOT_CODEX_FAKE": "", "KANPILOT_CODEX_BIN": str(stub), "KANPILOT_CLAUDE_BIN": str(stub)}):
+                    self.assertTrue(planner_runner.run_one(self.db_path, result["request_id"]))
+                with db.connect(self.db_path) as conn:
+                    request = db.get_request(conn, result["request_id"])
+                    self.assertEqual(request["status"], "queued")
+                    self.assertIsNone(request["run_id"])
+                    self.assertEqual(db.require_task(conn, result["task_id"])["status"], "needs_plan")
+                    self.assertIsNotNone(db.get_setting(conn, "worktree_pool_waiting:" + result["request_id"]))
+                self.assertFalse(launched.exists())
+
+    def test_unexposed_cleanup_rechecks_owner_inside_release_transaction(self):
+        repo = self.repository()
+        result = self.start()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
+        conn, task, payload = self.stored(result)
+        job = {"request_id": result["request_id"], "run_id": claim["run_id"]}
+        try:
+            task_workspace.prepare_plan_pool(conn, self.db_path, task, payload, job, self.root / "job.json")
+            release = worktree_pool.release
+            def starts_before_release(*args, **kwargs):
+                worktree_pool.mark_owner(conn, **task_workspace.pool_identity(job["pool_lease"]), state="running")
+                return release(*args, **kwargs)
+            with mock.patch.object(worktree_pool, "release", starts_before_release):
+                task_workspace.release_pool(self.db_path, job, self.root, unexposed=True)
+            current = worktree_pool.validate_lease(conn, **task_workspace.pool_identity(job["pool_lease"]))
+            self.assertEqual(current["owner_state"], "running")
+            self.assertEqual(current["state"], "leased")
+            self.assertFalse(job.get("pool_released"))
         finally:
             conn.close()

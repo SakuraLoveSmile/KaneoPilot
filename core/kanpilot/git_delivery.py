@@ -292,10 +292,17 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
         raise GitDeliveryError("worktree_invalid", "工作树核验失败：" + str(exc)) from exc
 
 
-def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root) -> str:
+def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root, conn=None, holder_id=None) -> str:
     _local_task_id(task_id)
     if purpose not in ("review", "plan") or not re.fullmatch(r"[0-9a-f]{40,64}", sha or ""):
         raise GitDeliveryError("worktree_invalid", "快照类型或提交标识无效")
+    if conn is not None:
+        from . import worktree_pool
+        lease = worktree_pool.acquire(conn, repo, stage=purpose, holder_id=holder_id, sha=sha,
+                                      worktrees_root=worktrees_root)
+        if lease["state"] == "waiting":
+            raise util.KanpilotError("worktree_pool_waiting", "仓库槽位已满")
+        return lease["path"]
     path = Path(worktrees_root).expanduser() / task_id / (purpose + "-" + sha[:12])
     try:
         if os.path.lexists(path):
@@ -307,10 +314,7 @@ def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root) ->
             if _value(["rev-parse", "--abbrev-ref", "HEAD"], path) != "HEAD":
                 raise GitDeliveryError("worktree_invalid", "快照工作树不是 detached HEAD")
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _git(["worktree", "add", "--detach", str(path), sha], repo, 60)
-            if _snapshot_has_disallowed_changes(path, purpose):
-                raise GitDeliveryError("worktree_invalid", "快照材料目录不安全")
+            raise GitDeliveryError("worktree_invalid", "新快照必须经核心槽位租约创建")
     except (GitDeliveryError, OSError) as exc:
         raise GitDeliveryError("worktree_invalid", "创建或核验快照失败：" + str(exc)) from exc
     return str(path)

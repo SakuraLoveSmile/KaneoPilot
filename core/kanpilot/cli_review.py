@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import (claude_cli, claude_planner, codex_planner, constants, core, db,
                pi_desktop_controller as control, pi_desktop_review as review,
-               review_config, review_settle, util)
+               review_config, review_settle, util, task_workspace, worktree_pool)
 
 STAGE = "review"
 
@@ -102,6 +102,7 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
         if proc:
             if proc.poll() is None:
                 claude_cli._terminate(proc)
+            proc.wait(timeout=5)
             if proc.stdout:
                 proc.stdout.close()
             if proc.stdin and not proc.stdin.closed:
@@ -129,6 +130,8 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         if pending is None:
             return 1
         job, directory = pending
+        if job.get("status") != "finished":
+            review.validate_job_pool(job)
         log = control.EventLog(directory / "events.jsonl")
         def record(**fields):
             record_run(**dict(fields, backend=job["backend"]))
@@ -193,16 +196,16 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     job["execution_run_id"] = task["run_id"]
     worktree = Path(task["execution_round"]["worktree_path"])
     job["execution_worktree"] = str(worktree)
-    delivery = task.get("delivery") or (task.get("extra") or {}).get("delivery") or {}
-    suffix = str(delivery.get("head_sha") or "")[:12] if core.requires_branch_review(task) else job["run_id"]
-    snapshot = review._review_root(conn, task["task_id"], suffix)
     try:
         frozen_snapshot = review.review_snapshot.freeze(worktree) if not core.requires_branch_review(task) else None
-    except util.KanpilotError as exc:
-        return blocked(exc.message)
-    problem = review.prepare_worktree(task, worktree, snapshot, snapshot=frozen_snapshot)
-    if problem:
-        return blocked(problem)
+        snapshot = review.prepare_pooled_worktree(conn, db_path, job, task, worktree, frozen_snapshot)
+        save()
+    except (util.KanpilotError, OSError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
+            review._close(job=job, job_path=job_path, log=log, record_run=record,
+                          status="finished", exit_code=0, detail=exc.message, reason=exc.code)
+            return 0
+        return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     try:
         materials = review.collect_materials(db_path=db_path, conn=conn, materials=directory / "materials",
                                              task=task, execution_worktree=worktree,
@@ -228,6 +231,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     except (util.KanpilotError, OSError) as exc:
         return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     job["send_state"] = "unknown"
+    task_workspace.pool_owner(conn, job, state="running")
     save()
     interval = review._heartbeat_interval(facts.get("request"))
     next_heartbeat = time.monotonic() + interval
@@ -235,6 +239,8 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         nonlocal next_heartbeat
         if time.monotonic() >= next_heartbeat:
             review.core_call(db_path, "heartbeat", {"request_id": job["request_id"], "run_id": job["run_id"]})
+            if job.get("pool_lease"):
+                worktree_pool.heartbeat(conn, **task_workspace.pool_identity(job["pool_lease"]))
             next_heartbeat = time.monotonic() + interval
         if event is None:
             return
@@ -269,6 +275,12 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         except util.KanpilotError as exc:
             if exc.code not in ("stale_run", "not_found", "conflict"):
                 raise
+    # Normal returns and callback KanpilotError both pass the adapter finally
+    # block, which terminates and waits its actual handle. A timeout/OSError
+    # raised by that cleanup has no such proof and conservatively retains it.
+    if run_error is None or isinstance(run_error, util.KanpilotError):
+        job["owner_stopped"] = True
+        save()
     if run_error is not None:
         if isinstance(run_error, util.KanpilotError) and run_error.code in ("stale_run", "not_found", "conflict"):
             return review._stop_no_write(job=job, job_path=job_path, log=log, record_run=record,

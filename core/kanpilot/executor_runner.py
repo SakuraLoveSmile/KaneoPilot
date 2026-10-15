@@ -235,6 +235,7 @@ def run_stage(stage: str, resume: bool = False) -> int:
     argv.append(prompt)
     env = dict(os.environ)
     env["PI_HOME"] = str(constants.pi_home())
+    env["KANPILOT_EXECUTOR_OWNER_PID"] = str(os.getpid())
     env.setdefault("KANPILOT_DB", str(constants.default_db_path()))
 
     deadline = time.monotonic() + timeout
@@ -255,6 +256,8 @@ def run_stage(stage: str, resume: bool = False) -> int:
         proc.wait(timeout=max(1, int(deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         _terminate(proc)
+        if stage == "review" and proc.poll() is not None:
+            _release_pi_review(conn, selected_request_id)
         print(f"executor {stage} 超时（{timeout}s）已终止：{log_path}",
               file=sys.stderr)
         _record_run(conn, stage, exit_code=-2,
@@ -262,12 +265,38 @@ def run_stage(stage: str, resume: bool = False) -> int:
         return 1
 
     rc = proc.returncode
+    if stage == "review":
+        _release_pi_review(conn, selected_request_id)
     _record_run(conn, stage, exit_code=rc,
                 finished_at=datetime.now(timezone.utc).isoformat())
     if rc != 0:
         print(f"executor {stage} 退出码 {rc}：{log_path}", file=sys.stderr)
         return 1
     return 0
+
+
+def _release_pi_review(conn, request_id):
+    """The owning runner waited its child; the short claim process is not proof."""
+    from . import task_workspace, util
+    if not request_id:
+        return
+    request = db.get_request(conn, request_id)
+    prepared = db.request_payload(request).get("pi_branch_review") if request is not None else None
+    if not prepared or not prepared.get("pool_lease"):
+        return
+    try:
+        slot = task_workspace.validate_pool(conn, prepared["pool_lease"])
+    except util.KanpilotError:
+        return
+    if slot["owner_pid"] != os.getpid():
+        return
+    prepared["owner_stopped"] = True
+    task_workspace.release_pool(constants.default_db_path(), prepared,
+                                constants.app_support() / "executor-sessions" / "review" / prepared["run_id"])
+    with db.write_txn(conn):
+        current = db.get_request(conn, request_id)
+        if current is not None and current["run_id"] == prepared["run_id"]:
+            db.merge_request_payload(conn, request_id, util.now_iso(), pi_branch_review=prepared)
 
 
 def _terminate(proc, grace: float = 5.0) -> None:

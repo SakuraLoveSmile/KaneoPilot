@@ -673,7 +673,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 ### 5.18.1 后端、进程与 worktree
 
 - **新 dispatch claim 按 `exec_config.backend` 固化**：缺省 `backend:"pi"`（claim context 增加 `backend` 与 `exec_config` 快照 `{provider, model, reasoning_effort, agent_preset}`）；v3 起 `backend:"pi_desktop"` 时走 §5.23.3 分支（快照 `{backend:"pi_desktop", connection_file, provider_id, model_id, thinking_level, permission_mode}`）。**历史轮次**（rounds.backend ∈ `dsh|headless` 等旧值）：DB 行保留，读取层返回 `unavailable` + detail「旧后端会话已弃用（仅 pi 可读）」，不取消、不重发。
-- 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：`worktree_path = worktrees_root/<task_id>/<run_id>`（settings `worktrees_root`，缺省 `<app_support>/worktrees`），自 `task.repository` 创建；会话删除不删除 worktree。
+- 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：执行分支持续使用 `worktrees_root/<task_id>/branch`（历史非分支执行回退仍为 `<task_id>/<run_id>`）；规划与评审使用 §5.29 的仓库槽位池，自 `task.repository` 创建；会话删除不删除 worktree。
 - worker 拉起 `pi -p --mode json --session-dir <run_dir>/pi-sessions --model <provider>/<model> --thinking <level> --system-prompt <agent.md>`（`agent.md` 为空则不传该参数），`cwd=spec.cwd`，`start_new_session`，env 透传 + `PI_HOME`（`KANPILOT_PI_HOME` 优先）。stdout 逐行消费 JSONL：OSC 序列与非 JSON 行丢弃。
 - 运行记录目录沿用 `<session_runs_root>/<task_id>/<run_id>/`（缺省 `~/Library/Application Support/KaneoPilot/runs`）：`job.json`（`backend:"pi"|"codex"|"pi_desktop"`、`session_id`/`session_title`、config 快照、pid、`status ∈ running|finished|failed`、起止时间、`exit_code`、`detail`；pi_desktop 轮次另含 §5.23.3 的 `turn_id`/`send_state`）+ `events.jsonl`。`job.json` 身份核验（task_id/run_id/backend）同 §5.15.5；身份不符 → 读取 `unavailable` + `run_status` 记 `failed`（detail=identity_mismatch），不读他目录。
 
@@ -1623,3 +1623,30 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - PI_DESKTOP_INPUT_TOOLS 包含 pi_asks_pending/pi_asks_resolve，并入新派发必需工具列表。旧Plus明确unsupported_tools/能力tools_ok=false，发prompt前阻断；旧轮次只读恢复保留原能力，不凭新增工具门停止旧轮次。
 - 隔离测试覆盖原计划全部验收：10秒内收件箱/通知；同turn原tool续跑；Plus先答与双端竞争；unknown不自动重发且同答案重试；重叠等待/六小时假时钟/最长等待；scope到期/observer崩溃及并发恢复；终态/重启草稿保留；engine关闭仍可回答；直接CLI非法动作拒绝；日志与DB不泄漏token；历史恢复不变。
 - 单测/mock通过不能替代真实Rust Host、生产sidecar、loopback确定性SSE联合演练及原生问答卡/系统通知核验。候选记录base/head/源码与产物指纹；各未运行项明确NOT RUN。适用检查齐备后为待体验，只有用户确认该新功能才标已验收。
+
+
+## 5.29 规划/评审槽位池与历史目录回收（schema 6）
+
+### 5.29.1 范围与租约
+
+规划与评审（Plus、Claude/Codex CLI，包括 plan-scan、干净交付快照及脏状态快照）在 `<worktrees_root>/pool/<repo_key>/slot-<k>` 执行，不在真实仓库执行。执行 `<task>/branch`、恢复分支及历史执行 UUID 不池化。repo_key 取规范 git common dir 的 SHA256 前16位；同一仓库多工作树共池。`set-config {worktree_pool_size:N}` 配置每仓库上限，默认4，取1–32整数；隔离槽位计入上限，缩小配置不删除已有槽位，不再增建直至数量低于上限。容量不足返回等待，保留可重试请求，不转为业务失败；attention-list 暴露等待/隔离。
+
+核心在 BEGIN IMMEDIATE 内分配 free 槽位，登记 stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，防止并发超过上限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确属于本池，实际顶层与git common dir须匹配，且为detached；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`，不覆盖忽略文件，不使用force/reset/clean。
+
+租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
+
+### 5.29.2 产物与脏快照
+
+规划正文、proposal、转录与 `.pi/plan/*.md` 等证据先保存到plan_root、runs或executor-sessions，重规划继续读取持久任务分支并冻结到planner_inputs，不依赖槽位旧路径。manual_branch已有交付目录规则不改变；需要隔离的脏规划仍从被冻结分支状态构造槽位。
+
+正常干净释放只删除未跟踪的系统产物 `.kaneopilot-plan-material/` 与 `.pi/plan/*.md`；不得删除tracked文件、符号链接或目录逃逸。删除后 `git status --porcelain` 为空才置free，否则quarantined，不清未知改动。脏快照是已知输入而非未知改动：populate前后持久登记完整冻结基线（review_snapshot材料与哈希）；释放前删除上述产物后，以verify_root核对HEAD、diff、原始字节/模式、精确新增文件；完全匹配才对该冻结diff执行反向apply并仅移除冻结新增文件，恢复到原HEAD的干净树。恢复失败隔离，保留现场；不得使用reset/clean。Review仍满足HEAD=snapshot.head，快照路径不同于执行路径，源分支后续移动不影响已租槽位。
+
+### 5.29.3 只读审计与确认回收
+
+`worktree-audit {}` 报告目录类别、引用/未知原因、脏状态、进程/活动状态与分配大小；只读。`worktree-gc {dry_run?:true, retention_days?:7}` 默认只预览。执行要求 `dry_run:false, confirm:true, paths:[...], expected_audit_sha256:<预览指纹>`，每批至多10项；重新审计后候选身份、HEAD、状态、引用与交付状态必须仍匹配，不扩大确认范围。每批删除前用SQLite backup API备份一致的DB（含WAL内容），核验integrity_check并记录备份路径与哈希；逐项先intent，再git worktree remove（无force），再prune并更新回执。
+
+请求终态为succeeded/failed/cancelled；其它状态含未知均视作引用。save_state active/trashed/purged仅是显示/保存状态，均不证明目录可删。GC结合requests、execution_rounds、tasks与经task_id/run_id/backend身份验证的runs/job.json、payload/持久计划材料路径；不得以requests/tasks行缺失认定无引用。历史读取仍依赖目录或无法证明终态时只报告并保留。历史Codex Desktop也须同run的可信owner停止证明；只有请求终态和短CLI进程消失不足以回收，已知为Desktop却缺job时仍保护。执行branch还须当前执行run的终态请求链、同run可信job停止、终态execution_round与交付commit的run/SHA一致，以及交付已合并、来源分支已清理；历史执行UUID默认保留，待独立证据核实。不能归类、非git、runs/executor-sessions/planner_inputs只报告。脏存量只在迁移或可恢复备份后再考虑；不在GC中强制删除。
+
+### 5.29.4 项目记忆登记（M4）
+
+核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为pool下精确slot路径。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在槽位；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。

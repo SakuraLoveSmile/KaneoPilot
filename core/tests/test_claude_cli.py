@@ -283,7 +283,7 @@ def test_invalid_settings_env_settles_review_without_launch(runner_scene, tmp_pa
     process = Mock()
     monkeypatch.setattr(claude_cli, "run", process)
     conn, _task, calls = runner_scene
-    rc = cli_review.run_stage("review", conn=conn, db_path="isolated", timeout=3,
+    rc = cli_review.run_stage("review", conn=conn, db_path=tmp_path / "isolated.db", timeout=3,
                                log_path=tmp_path / "review.log", record_run=lambda **kwargs: None)
     assert rc == 1
     process.assert_not_called()

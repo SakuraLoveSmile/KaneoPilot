@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from kanpilot import git_delivery as gd
-from test_git_delivery import branch, git, make_repo, repo
+from test_git_delivery import branch, git, legacy_snapshot, make_repo, repo
 
 
 def new_goal(wt, name="goal [literal].md"):
@@ -236,12 +236,14 @@ def test_source_hash_and_detached_worktree_hash_keep_existing_contract(repo, tmp
     new_goal(wt)
     (wt / ".pi" / "settings.json").write_text("{}")
     assert before == (gd.source_state_sha256(wt), gd.expected_index_source_sha256(wt))
+    root = tmp_path / "worktrees"
+    legacy_snapshot(repo, root, "review", delivery["head_sha"])
     snapshot = gd.prepare_snapshot_worktree(str(repo), "task1234", sha=delivery["head_sha"],
-                                           purpose="review", worktrees_root=tmp_path / "worktrees")
+                                           purpose="review", worktrees_root=root)
     detached = dict(delivery, worktree_path=snapshot)
     clean = gd.worktree_state_sha256(detached, detached=True)
     new_goal(snapshot)
     assert gd.worktree_state_sha256(detached, detached=True) != clean
     with pytest.raises(gd.GitDeliveryError):
         gd.prepare_snapshot_worktree(str(repo), "task1234", sha=delivery["head_sha"],
-                                     purpose="review", worktrees_root=tmp_path / "worktrees")
+                                     purpose="review", worktrees_root=root)

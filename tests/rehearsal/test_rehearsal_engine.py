@@ -542,13 +542,13 @@ def test_scenario_migration_v5_to_v6_gc_reversible(cli, tmp_env, legacy_state):
     assert len(copied) >= 3, f"备份应含三 manifest：{list(backup.rglob('*'))}"
     for p, h in before.items():
         assert hashlib.sha256(Path(p).read_bytes()).hexdigest() == h, p
-    # 版本仍为 5
+    # 版本仍为 6
     conn = _connect(tmp_env.db)
     try:
         version = conn.execute("SELECT version FROM schema_meta").fetchone()[0]
     finally:
         conn.close()
-    assert version == 5
+    assert version == 6
 
     tasks1 = cli("list-tasks", {})["tasks"]
     reqs1 = cli("list-requests", {})["requests"]

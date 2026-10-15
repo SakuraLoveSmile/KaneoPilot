@@ -63,7 +63,7 @@ from . import (
     bridge, cli, cmd_exec, codex_planner, constants, core, db, dsh_events, git_delivery, headless_adapter,
     pi_desktop_backend, pi_desktop_worker, planfile, planner_runner, round_store, util,
 )
-from . import runtime_client, plus_interaction
+from . import runtime_client, plus_interaction, task_workspace, worktree_pool
 
 # 计划会话固定 mode=plan；权限严格使用请求快照，兼容既有 ask 请求。
 _PLAN_SESSION_MODE = constants.PI_DESKTOP_PLAN_MODE
@@ -309,7 +309,7 @@ class _Round:
             "plan_kind": self.plan_kind,
             "pid": os.getpid(), "status": "running",
             "started_at": util.now_iso(), "ended_at": None, "exit_code": None,
-            "detail": None, "send_state": None,
+            "detail": None, "send_state": "not_sent",
         }
         self._secrets: list = []
         self.answers: list = []
@@ -396,6 +396,12 @@ class _Round:
         try:
             planner_runner._heartbeat(
                 self.db_path, self.request_id, self.run_id, progress)
+            if self.job.get("pool_lease"):
+                conn = db.connect(self.db_path)
+                try:
+                    worktree_pool.heartbeat(conn, **task_workspace.pool_identity(self.job["pool_lease"]))
+                finally:
+                    conn.close()
             self._heartbeat_failures = 0
         except util.KanpilotError as exc:
             if exc.code in ("stale_run", "conflict", "not_found"):
@@ -458,6 +464,9 @@ class _Round:
             return self._run()
         except Exception as exc:  # noqa: BLE001 - 本轮意外退出必须收束 claim
             return self._fail_unexpected(exc)
+        finally:
+            task_workspace.release_pool(self.db_path, self.job, self.run_dir)
+            self.write_job()
 
     def _fail_unexpected(self, exc: Exception) -> bool:
         # GitDeliveryError 已去除 URL；再脱敏本轮已知凭据。其他异常仅留类名。
@@ -611,6 +620,16 @@ class _Round:
             "status": previous.get("status"),
             "started_at": previous.get("started_at"),
         }
+        if previous.get("pool_lease"):
+            self.job["pool_lease"] = previous["pool_lease"]
+            conn = db.connect(self.db_path)
+            try:
+                task_workspace.validate_pool(conn, self.job["pool_lease"])
+            except util.KanpilotError as exc:
+                self.job.pop("pool_lease", None)
+                return self.fail(exc.message, "plan_round_unverifiable")
+            finally:
+                conn.close()
         previous_worktree = previous.get("worktree_path")
         previous_config = previous.get("config")
         if turn_id and (
@@ -685,7 +704,7 @@ class _Round:
         self.collector = pi_desktop_worker._Collector(
             self.client, session_id, self.log, "")
         self.observer = pi_desktop_worker._ReadRecovery(
-            self.client, self.runtime["connection_file"], session_id, turn_id)
+            self.client, self.runtime["connection_file"], session_id, turn_id, require_identity=True)
         self.collector.client = self.observer
         try:
             record = self.observer.turn_get(session_id, turn_id)
@@ -717,6 +736,9 @@ class _Round:
             worktree, mode, materials = self._prepare_materials()
             prompt = self._render_prompt(materials)
         except util.KanpilotError as exc:
+            if exc.code == "worktree_pool_waiting":
+                self.finish("finished", 0, exc.message, "completed", exc.code)
+                return True
             return self.fail(str(exc.message), exc.code or "plan_worktree_failed",
                              evidence=self._evidence())
         self.job.update({
@@ -779,6 +801,11 @@ class _Round:
                 f"{_RUNTIME_MAX_BYTES} 字节上限，发送前拒绝（不截断正文或图片）",
                 "plan_request_too_large", evidence=self._evidence())
         self.job["send_state"] = "unknown"
+        conn = db.connect(self.db_path)
+        try:
+            task_workspace.pool_owner(conn, self.job, state="running", pid=os.getpid())
+        finally:
+            conn.close()
         self.write_job()
         try:
             if attachments:
@@ -808,11 +835,16 @@ class _Round:
             return self._send_lost(util.KanpilotError(
                 "internal", "pi_agent_prompt 未返回 turnId"))
         self.job["turn_id"] = str(turn_id)
+        conn = db.connect(self.db_path)
+        try:
+            task_workspace.pool_owner(conn, self.job, state="running", pid=os.getpid())
+        finally:
+            conn.close()
         # 仍保持 send_state=unknown：取得启动证明后才登记 sent（§5.24.3-2）。
         self.write_job()
         self.observer = pi_desktop_worker._ReadRecovery(
             self.client, self.runtime["connection_file"],
-            self.job["session_id"], self.job["turn_id"])
+            self.job["session_id"], self.job["turn_id"], require_identity=True)
         self.collector.client = self.observer
         record, error = self._await_proof(
             self.job["session_id"], self.job["turn_id"])
@@ -936,7 +968,6 @@ class _Round:
                              and self.req_payload.get("plan_cwd")
                              and self.req_payload.get("workspace_version") != 1)
             if self.req_payload.get("workspace_version") == 1:
-                from . import task_workspace
                 workspace_task = db.require_task(conn, self.task_id)
                 task_workspace.verify_plan_workspace(workspace_task, self.req_payload)
             if manual_branch:
@@ -953,25 +984,37 @@ class _Round:
             conn.close()
         from . import git_delivery
         try:
-            if (self.req_payload.get("workspace_version") == 1
-                    and git_delivery.worktree_changes(self.req_payload["plan_cwd"])):
-                worktree = task_workspace.prepare_dirty_plan_snapshot(
-                    workspace_task, self.req_payload, worktrees_root=root, run_id=self.run_id)
-                mode = "git"
-            elif manual_branch:
+            if manual_branch:
                 git_delivery.verify_branch_worktree(
                     dict(delivery, repository=str(repo)),
                     require_clean=False, expected_head=None)
                 worktree = Path(delivery["worktree_path"])
                 mode = "manual"
-            elif self.req_payload.get("delivery_head_sha"):
-                worktree = Path(git_delivery.prepare_snapshot_worktree(
-                    repo, self.task_id, sha=self.req_payload["delivery_head_sha"],
-                    purpose="plan", worktrees_root=root))
-                mode = "git"
             else:
-                worktree = root / self.task_id / self.run_id
-                mode = self._ensure_worktree(repo, worktree)
+                frozen = None
+                if (self.req_payload.get("workspace_version") == 1
+                        and git_delivery.worktree_changes(self.req_payload["plan_cwd"])):
+                    from . import review_snapshot
+                    source = task_workspace.verify_plan_workspace(workspace_task, self.req_payload)
+                    frozen = review_snapshot.freeze(source)
+                    sha = frozen["head"]
+                else:
+                    sha = self.req_payload.get("delivery_head_sha") or _git(repo, "rev-parse", "HEAD")
+                conn = db.connect(self.db_path)
+                try:
+                    lease = task_workspace.acquire_pool(conn, repo, stage="plan", run_id=self.run_id,
+                                                        request_id=self.request_id, sha=sha)
+                    self.job["pool_lease"] = lease
+                    self.write_job()
+                    worktree = Path(lease["path"])
+                    if frozen is not None:
+                        worktree_pool.register_snapshot(conn, **task_workspace.pool_identity(lease), snapshot=frozen)
+                        review_snapshot.verify_source(source, frozen)
+                    if self.req_payload.get("workspace_version") == 1:
+                        task_workspace.verify_plan_workspace(workspace_task, self.req_payload)
+                finally:
+                    conn.close()
+                mode = "git"
         except git_delivery.GitDeliveryError as exc:
             # Git 已脱敏 URL/认证形态；再去掉本轮凭据的裸值。
             # 准备工作树先于 MCP 连接，读取连接记录只为脱敏，不发请求。
@@ -1008,45 +1051,15 @@ class _Round:
                                           manifest_path)
 
     def _ensure_worktree(self, repo: Path, worktree: Path) -> str:
-        """git worktree（HEAD 基线）；失败/非 git → 明确失败。
-
-        绝不退回用户主工作区：SubmitPlan 的产物落在 projectPath，用户仓库不得被
-        写入（§5.24.3-1）。
-        """
-        if worktree.exists():
-            top = _git(worktree, "rev-parse", "--show-toplevel")
-            common = _git(worktree, "rev-parse", "--path-format=absolute",
-                          "--git-common-dir")
-            repo_common = _git(repo, "rev-parse", "--path-format=absolute",
-                               "--git-common-dir")
-            if (Path(top).resolve() != worktree.resolve()
-                    or Path(common) != Path(repo_common)):
-                raise util.KanpilotError(
-                    "plan_worktree_failed",
-                    f"已有规划目录不是本仓库独立 worktree：{worktree}")
-            return "reuse"
-        if not (repo / ".git").exists():
-            raise util.KanpilotError(
-                "plan_worktree_failed",
-                "Pi-Desktop-Plus 规划要求 Git 仓库与独立 worktree"
-                "（避免把计划产物写进用户主工作区）")
+        """Historical compatibility: validate only, never create a run directory."""
+        lease = self.job.get("pool_lease")
+        if not lease or Path(lease["path"]) != worktree:
+            raise util.KanpilotError("plan_worktree_failed", "新规划目录必须经核心槽位租约创建")
+        conn = db.connect(self.db_path)
         try:
-            result = subprocess.run(
-                ["git", "-C", str(repo), "worktree", "add", "--detach",
-                 str(worktree), "HEAD"],
-                capture_output=True, text=True, timeout=120,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise util.KanpilotError(
-                "plan_worktree_failed", f"git worktree add 执行失败：{exc}") from exc
-        if result.returncode != 0:
-            tail = util.redact(
-                (result.stderr or result.stdout or "").strip(),
-                self._secrets)[:300]
-            raise util.KanpilotError(
-                "plan_worktree_failed",
-                f"无法创建独立规划 worktree（git 退出码 "
-                f"{result.returncode}）：{tail}")
+            task_workspace.validate_pool(conn, lease)
+        finally:
+            conn.close()
         return "git"
 
     def _copy_materials(self, materials_dir: Path):
@@ -1278,7 +1291,9 @@ class _Round:
             try:
                 record = self.observer.turn_get(session_id, turn_id)
                 state = pi_desktop_worker._turn_status(record)
-                if state in ("completed", "error", "aborted"):
+                if (state in ("completed", "error", "aborted")
+                        and pi_desktop_worker._turn_identity_matches(record, session_id, turn_id)):
+                    self.job["owner_stopped"] = True
                     return state
             except util.KanpilotError:
                 pass
@@ -1289,6 +1304,8 @@ class _Round:
 
     def _settle(self, session_id: str, turn_id: str, state: str,
                 record: dict) -> bool:
+        if pi_desktop_worker._turn_identity_matches(record, session_id, turn_id) and state in ("completed", "error", "aborted"):
+            self.job["owner_stopped"] = True
         turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
         if (turn.get("errorCode") or turn.get("error_code")) == "INTERACTION_REQUIRED":
             path = self.run_dir / "interaction-required.json"
@@ -1344,6 +1361,7 @@ class _Round:
             return self._needs_input_or_missing(detail)
         if reason is not None:
             return self.fail(detail, reason, evidence=self._evidence())
+        planner_runner._write_json(self.run_dir / "plan-proposal.json", proposal)
         markdown = str(proposal.get("markdown") or proposal.get("plan") or "")
         self.collector.poll()
         parsed, _detail = self._final_answer()

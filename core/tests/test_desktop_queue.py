@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from helpers import KanpilotTestCase
 from kanpilot import (cli, db, desktop_queue as desktop, headless_adapter,
-                      pi_desktop_review, remote, review_snapshot, round_store, util)
+                      pi_desktop_review, remote, review_snapshot, round_store, util, worktree_pool)
 
 
 class DesktopQueueTests(KanpilotTestCase):
@@ -123,6 +123,9 @@ class DesktopQueueTests(KanpilotTestCase):
         claim = self.claim()
         self.assertEqual(claim["request_id"], request_id)
         self.assertLessEqual(claim["heartbeat_seconds"], 60)
+        job = self.read_job(claim)
+        self.assertEqual(Path(claim["context"]["plan_cwd"]).name, "slot-1")
+        self.assertNotEqual(claim["context"]["plan_cwd"], job["context"]["payload"]["plan_cwd"])
         self.assertEqual(self.native("heartbeat", {**self.identity(claim), "progress": "读取冻结材料"})["ok"], True)
         result = self.submit_plan(claim)
         self.assertEqual(result["task_status"], "ready")
@@ -132,6 +135,9 @@ class DesktopQueueTests(KanpilotTestCase):
         with closing(db.connect(self.db_path)) as conn:
             row = db.require_task(conn, task["id"])
             self.assertEqual(row["planner_model"], "codex-desktop")
+            slot = worktree_pool.validate_lease(conn, **desktop.task_workspace.pool_identity(job["pool_lease"]))
+            self.assertEqual(slot["state"], "leased")
+            self.assertEqual(slot["owner_state"], "unknown")
             self.assertEqual(row["reasoning_effort"], "inherit")
             self.assertEqual(round_store.get_round(conn, task["id"], claim["run_id"])["backend"], "codex_desktop")
         published = Path(result["plan_path"])
@@ -255,6 +261,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(self.call("get-request", {"request_id": claim["request_id"]})["request"]["status"], "claimed")
 
     def test_expired_archive_cancel_and_changed_source_deny_submit(self):
+        self.call("set-config", {"worktree_pool_size": 4})
         for suffix, sql, value in (
             ("expired", "UPDATE requests SET lease_expires_at=? WHERE request_id=?", util.to_iso(util.now_dt() - timedelta(seconds=1))),
             ("archive", "UPDATE tasks SET save_state=? WHERE task_id=?", "archived"),
@@ -300,6 +307,8 @@ class DesktopQueueTests(KanpilotTestCase):
             self.assertNotIn("token_hash", json.dumps(value))
 
     def test_all_review_conclusions_reuse_core_and_exact_retry(self):
+        # Each Desktop plan and review consumer keeps its unknown lease.
+        self.call("set-config", {"worktree_pool_size": 6})
         for suffix, conclusion in enumerate(("pass", "changes_requested", "blocked")):
             task, request_id = self.make_review(str(suffix))
             claim = self.claim("review", "review-" + str(suffix))
@@ -309,6 +318,12 @@ class DesktopQueueTests(KanpilotTestCase):
             reply = self.native("submit_review", {**self.identity(claim), "result": result})
             self.assertEqual(reply["request_status"], "failed" if conclusion == "blocked" else "succeeded")
             self.assertTrue(Path(reply["report_path"]).is_file())
+            job = json.loads(Path(claim["context"]["job_path"]).read_text())
+            with closing(db.connect(self.db_path)) as conn:
+                slot = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?",
+                                    (job["pool_lease"]["slot_id"],)).fetchone()
+                self.assertEqual(slot["state"], "leased")
+                self.assertEqual(slot["owner_state"], "unknown")
             before = len(self.fake.requests_log)
             self.assertTrue(self.native("submit_review", {**self.identity(claim), "result": result})["deduplicated"])
             self.assertEqual(before, len(self.fake.requests_log))
@@ -330,6 +345,8 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(current["extra"]["fix_request"]["state"], "open")
 
     def test_review_new_execution_plan_or_material_changes_stop_before_remote(self):
+        # Five plan and five review consumers intentionally retain their leases.
+        self.call("set-config", {"worktree_pool_size": 10})
         for suffix, mutation in enumerate(("run", "plan", "material", "snapshot", "execution")):
             task, request_id = self.make_review(str(suffix))
             claim = self.claim("review", "review-" + str(suffix))
@@ -384,6 +401,7 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertFalse(first.result(timeout=5)["isError"])
 
     def test_review_response_loss_after_each_committed_core_stage_recovers(self):
+        self.call("set-config", {"worktree_pool_size": 8})
         for suffix, command, conclusion in (("register", "register-review", "pass"),
                                             ("fix", "create-review-fix", "changes_requested"),
                                             ("advance", "advance-task", "pass"),
@@ -530,16 +548,81 @@ class DesktopQueueTests(KanpilotTestCase):
         repository = self.repos_root / "Feedback"
         tracked = repository / "sample.py"
         tracked.write_text("def square(n):\n    return n ** 2\n")
-        prepare = pi_desktop_review.prepare_worktree
+        prepare = pi_desktop_review.prepare_pooled_worktree
         def changed_after_snapshot(*args, **kwargs):
             result = prepare(*args, **kwargs)
             tracked.write_text("def square(n):\n    return -1\n")
             return result
-        with patch.object(pi_desktop_review, "prepare_worktree", changed_after_snapshot):
+        with patch.object(pi_desktop_review, "prepare_pooled_worktree", changed_after_snapshot):
             failure = self.native("claim", {"role": "review", "operation_id": "review"}, error=True)
         self.assertEqual(failure["code"], "review_blocked")
         self.assertEqual(self.call("get-request", {"request_id": request_id})["request"]["status"], "failed")
         self.assertEqual(tracked.read_text(), "def square(n):\n    return -1\n")
+        with closing(db.connect(self.db_path)) as conn:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE holder_stage='review'").fetchone()
+            self.assertEqual(slot["state"], "free")
+
+    def test_plan_change_after_preparation_releases_unexposed_slot(self):
+        task, request_id = self.plan()
+        prepare = desktop._prepare
+        def change_after_prepare(*args, **kwargs):
+            job = prepare(*args, **kwargs)
+            branch = Path(job["context"]["payload"]["plan_cwd"])
+            (branch / "sample.py").write_text("changed after preparation\n")
+            return job
+        with patch.object(desktop, "_prepare", change_after_prepare):
+            failure = self.native("claim", {"role": "plan", "operation_id": "changed-plan"}, error=True)
+        self.assertEqual(failure["code"], "worktree_invalid")
+        with closing(db.connect(self.db_path)) as conn:
+            self.assertEqual(db.get_request(conn, request_id)["status"], "failed")
+            self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
+
+    def assert_plan_ownership_lost_before_delivery_releases_slot(self, takeover):
+        task, request_id = self.plan()
+        prepare = desktop._prepare
+        def lose_after_prepare(ctx, *args, **kwargs):
+            job = prepare(ctx, *args, **kwargs)
+            if takeover:
+                self.mutate("UPDATE requests SET run_id=? WHERE request_id=?", ("replacement-run", request_id))
+            else:
+                self.mutate("UPDATE requests SET lease_expires_at=? WHERE request_id=?",
+                            (util.to_iso(util.now_dt() - timedelta(seconds=1)), request_id))
+            return job
+        before = len(self.fake.requests_log)
+        with patch.object(desktop, "_prepare", lose_after_prepare):
+            failure = self.native("claim", {"role": "plan", "operation_id": "ownership-lost"}, error=True)
+        self.assertIn(failure["code"], ("stale_run", "forbidden"))
+        with closing(db.connect(self.db_path)) as conn:
+            request = db.get_request(conn, request_id)
+            self.assertEqual(request["status"], "claimed")
+            self.assertIsNone(request["result_json"])
+            if takeover:
+                self.assertEqual(request["run_id"], "replacement-run")
+            self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
+        self.assertEqual(before, len(self.fake.requests_log))
+
+    def test_expired_plan_before_delivery_releases_unexposed_slot(self):
+        self.assert_plan_ownership_lost_before_delivery_releases_slot(False)
+
+    def test_reclaimed_plan_before_delivery_releases_unexposed_slot(self):
+        self.assert_plan_ownership_lost_before_delivery_releases_slot(True)
+
+    def test_full_plan_pool_replays_waiting_receipt_without_stale_run(self):
+        task, request_id = self.plan()
+        with closing(db.connect(self.db_path)) as conn:
+            payload = db.request_payload(db.get_request(conn, request_id))
+            repository = db.require_task(conn, task["id"])["repository"]
+            with db.write_txn(conn):
+                db.set_setting(conn, "worktree_pool_size", 1)
+            worktree_pool.acquire(conn, repository, stage="plan", holder_id="other-reader", sha=payload["delivery_head_sha"])
+        first = self.claim(op="full-pool")
+        self.assertEqual(first, {"claimed": False, "reason": "worktree_pool_waiting", "request_id": request_id})
+        self.assertEqual(self.claim(op="full-pool"), first)
+        with closing(db.connect(self.db_path)) as conn:
+            request = db.get_request(conn, request_id)
+            self.assertEqual(request["status"], "queued")
+            self.assertIsNone(request["run_id"])
+            self.assertEqual(db.require_task(conn, task["id"])["status"], "needs_plan")
 
     def test_manual_root_and_materials_share_frozen_bytes_and_collection_detects_source_race(self):
         task, _request = self.make_review()
@@ -552,6 +635,9 @@ class DesktopQueueTests(KanpilotTestCase):
         root = self.root / "direct-review"
         with closing(db.connect(self.db_path)) as conn:
             summary = dict(db.require_task(conn, task["id"]))
+            root.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.check_call(["git", "-C", str(repository), "worktree", "add", "--detach", str(root), frozen["head"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            review_snapshot.populate(root, frozen)
             self.assertIsNone(pi_desktop_review.prepare_worktree(summary, repository, root, snapshot=frozen))
             write = review_snapshot.write_materials
             def source_changes_after_frozen_materials(directory, snapshot):

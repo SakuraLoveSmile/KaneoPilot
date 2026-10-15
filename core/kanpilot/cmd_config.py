@@ -27,6 +27,20 @@ _PI_DESKTOP_THINKING_LEVELS = (
 )
 
 
+def cmd_set_config(ctx, payload: dict) -> dict:
+    """Bounded pool configuration; shrinking never deletes existing slots."""
+    if set(payload) != {"worktree_pool_size"}:
+        raise util.bad_request("set-config 仅接受 worktree_pool_size")
+    value = payload["worktree_pool_size"]
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
+        raise util.bad_request("worktree_pool_size 必须为1–32整数")
+    with db.write_txn(ctx.conn):
+        db.set_setting(ctx.conn, "worktree_pool_size", value)
+        db.add_event(ctx.conn, ctx.now_iso, "config_updated", actor="user",
+                     detail={"worktree_pool_size": value})
+    return {"worktree_pool_size": value}
+
+
 def cmd_get_exec_config(ctx, payload: dict) -> dict:
     """get-exec-config {} → {"config": {...}|null, "defaults": {...}}。
     config=null 表示从未保存；defaults 恒为初始默认；config 存在时含

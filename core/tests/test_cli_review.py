@@ -117,6 +117,8 @@ def runner_scene(tmp_path, monkeypatch):
          task["plan_sha256"], task["run_id"], now, now,
          util.jdump({"execution_round": task["execution_round"]})),
     )
+    conn.execute("INSERT INTO requests(request_id,idempotency_key,task_id,stage,kind,status,run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                 ('req1', 'review:t1', 't1', 'review', 'review', 'claimed', 'review1', now, now))
     conn.commit()
     request = {'request_id': 'req1', 'run_id': 'review1', 'stage': 'review', 'status': 'claimed',
                'lease_expires_at': util.to_iso(util.now_dt() + timedelta(minutes=10))}
@@ -134,6 +136,8 @@ def runner_scene(tmp_path, monkeypatch):
             return {'ok': True}
         if command == 'report':
             request.update(status='succeeded' if payload['outcome'] == 'succeeded' else 'failed', result=payload)
+            db.update_request(conn, 'req1', util.now_iso(), status=request['status'])
+            conn.commit()
         return {'ok': True}
     monkeypatch.setattr(review, 'core_call', core_call)
     monkeypatch.setattr(codex_planner.codex_provider, 'resolve_provider',
@@ -154,11 +158,11 @@ def test_run_stage_records_cost_before_settlement(runner_scene, tmp_path, monkey
                 'structured_output': RESULT, 'total_cost_usd': .4}
     monkeypatch.setattr(claude_cli, 'run', process)
     monkeypatch.setattr(cli_review, 'run_codex', process)
-    code = cli_review.run_stage('review', conn=conn, db_path='isolated', timeout=3,
+    code = cli_review.run_stage('review', conn=conn, db_path=tmp_path / 'isolated.db', timeout=3,
                                 log_path=tmp_path / 'review.log', record_run=lambda **kwargs: None)
     assert code == (1 if failed else 0)
     assert len(seen) == 1
-    assert seen[0][1].name.startswith('review-')
+    assert seen[0][1].name.startswith('slot-')
     assert 'kp_task' not in seen[0][2]
     commands = [cmd for cmd, _ in calls]
     assert commands.index('record-cost') < commands.index('report')
@@ -208,7 +212,7 @@ def test_cli_branch_review_shares_artifact_guard(runner_scene, tmp_path, monkeyp
         return {'is_error': False, 'structured_output': RESULT, 'total_cost_usd': 0}
     monkeypatch.setattr(claude_cli, 'run', process)
     monkeypatch.setattr(cli_review, 'run_codex', process)
-    code = cli_review.run_stage('review', conn=conn, db_path='isolated', timeout=3,
+    code = cli_review.run_stage('review', conn=conn, db_path=tmp_path / 'isolated.db', timeout=3,
                                 log_path=tmp_path / 'review.log', record_run=lambda **kwargs: None)
     assert observed[:2] == ['guard', 'process']
     assert observed.count('guard') >= 2
