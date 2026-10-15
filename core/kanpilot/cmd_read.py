@@ -148,18 +148,22 @@ def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
     goal_recoveries = []
     if not db.paused(ctx.conn, "monitor") and not db.paused(ctx.conn, "dispatch"):
         candidates = ctx.conn.execute(
-            "SELECT * FROM tasks WHERE status='needs_user' "
-            "AND failure_code='execution_failed' ORDER BY task_id"
+            "SELECT * FROM tasks WHERE (status='needs_user' "
+            "AND failure_code IN ('execution_failed','execution_input_required')) OR status='running' ORDER BY task_id"
         ).fetchall()
         for task in candidates:
-            if (not db.task_schedulable(task) or not core.is_automation_managed(task)
+            from .execution_questions import open_records, records
+            waiting=bool(open_records(task))
+            if task["status"]=="running" and not any(q["run_id"]==task["run_id"] for q in records(task)):
+                continue
+            if (not db.task_schedulable(task) or (task["failure_code"] != "execution_input_required" and not core.is_automation_managed(task))
                     or not task["run_id"]):
                 continue
             try:
                 result = cmd_dispatch.cmd_round_observe(ctx, {
                     "task_id": task["task_id"], "run_id": task["run_id"],
-                    "executor": "scheduler", "continue_goal": True,
-                    "continue_goal_only": True,
+                    "executor": "scheduler", "continue_goal": not waiting,
+                    "continue_goal_only": not waiting,
                 })
                 if result.get("status") != "deferred":
                     goal_recoveries.append({"task_id": task["task_id"], **result})
@@ -1152,8 +1156,7 @@ def _report_result(identity: dict, resolved: dict) -> dict:
         "session_id": identity["session_id"],
         "proposal_id": identity["proposal_id"],
         "execution_id": identity.get("execution_id"),
-        "turn_id": ((report or {}).get("turnId")
-                    or (report or {}).get("turn_id")),
+        "turn_id": pi_desktop_backend.report_identity(report).get("turn_id"),
         "ready": resolved.get("state") == "ready",
         "structured": (
             pi_desktop_backend.report_integrity_kind(report) == "structured"
@@ -1265,7 +1268,7 @@ def collect_criterion_reviews(criterion_reviews) -> tuple:
         })
     return reviews, referenced
 def verify_goal_completion(report: dict, reviews: list,
-                          referenced: set) -> None:
+                          referenced: set, *, report_state=None) -> None:
     """确定性报告底线（§5.23.10 T5-C）；任一不满足 → conflict。
 
     报告自称 ``verdict=met`` 是**必要但非充分**条件：这里只核对不可绕过的
@@ -1275,9 +1278,10 @@ def verify_goal_completion(report: dict, reviews: list,
 
     if not isinstance(report, dict):
         raise util.KanpilotError("conflict", "缺少可用于完成判定的结构化报告")
-    if str(report.get("status") or "").lower() != "ready":
+    state = report_state if report_state is not None else report.get("status")
+    if str(state or "").lower() != "ready":
         raise util.KanpilotError(
-            "conflict", f"报告 status 不是 ready：{report.get('status')!r}"
+            "conflict", f"报告 status 不是 ready：{state!r}"
         )
     kind = pi_desktop_backend.report_integrity_kind(report)
     if kind != "structured":

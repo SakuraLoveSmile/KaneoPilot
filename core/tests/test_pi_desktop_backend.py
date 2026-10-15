@@ -50,7 +50,7 @@ SESSION_ID = "pd-sess-1"
 TURN_ID = "turn-1"
 FOLLOW_UP_TURN_ID = "turn-2"
 ALL_TOOLS = (tuple(constants.PI_DESKTOP_REQUIRED_TOOLS)
-            + tuple(constants.PI_DESKTOP_GOAL_TOOLS))
+            + tuple(constants.PI_DESKTOP_GOAL_TOOLS) + tuple(constants.PI_DESKTOP_INPUT_TOOLS))
 
 
 # ------------------------------------------------------------ fake MCP server
@@ -1162,6 +1162,14 @@ class TestRunReal(PiDesktopCase):
         cwd.mkdir(parents=True, exist_ok=True)
         spec = self.make_spec(run_dir, cwd, plan, **kw)
         return spec, run_dir
+
+    def test_old_plus_missing_execution_input_tools_blocks_before_prompt(self):
+        self.server.tools.remove('pi_asks_pending')
+        spec,run_dir=self._base()
+        self.assertEqual(self._run(spec),1)
+        self.assertEqual(self.server.prompt_count,0)
+        self.assertIsNone(self.server.created)
+        self.assertIn('pi_asks_pending',self.read_job(run_dir)['detail'])
 
     def test_completed_flow_events_and_order(self):
         """turn running→completed：job finished、send_state=sent、首事件

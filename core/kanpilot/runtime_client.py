@@ -186,6 +186,8 @@ class RuntimeClient:
                 required_runtime.update({
                     "kp_runtime_goal_report_list", "kp_runtime_goal_report_get",
                 })
+                if "pi_asks_pending" in self._required_tools:
+                    required_runtime.add("kp_runtime_input_pending")
         missing = required_runtime - tools
         if missing:
             raise util.KanpilotError("unsupported_tools", "KaneoPilot MCP 缺少 runtime 工具：" + "、".join(sorted(missing)))
@@ -236,7 +238,26 @@ class RuntimeClient:
     def _call(self, name: str, args: dict) -> dict:
         if self.client is None:
             raise util.KanpilotError("remote_unavailable", "runtime MCP client 尚未连接")
-        return self.client.call_tool(name, {"scope_id": self.scope_id, **args})
+        try:
+            return self.client.call_tool(name, {"scope_id": self.scope_id, **args})
+        except util.KanpilotError as exc:
+            grant = constants.app_support() / "mcp" / "grants" / f"{self.scope_id}_runtime.json"
+            try:
+                info=json.loads(grant.read_text(encoding="utf-8"))
+                expiry=util.parse_ts(info.get("expires_at"))
+            except (OSError, ValueError):
+                expiry=None
+            if (not name.startswith("kp_runtime_") or name not in {
+                    "kp_runtime_status", "kp_runtime_turn_get", "kp_runtime_messages",
+                    "kp_runtime_proposals", "kp_runtime_input_pending",
+                    "kp_runtime_goal_report_list", "kp_runtime_goal_report_get"}
+                    or expiry is None or expiry > util.now_dt()
+                    or not (exc.code in ("forbidden", "unauthorized")
+                            or exc.code == "-32000" and exc.message.startswith("Unauthorized:")
+                            or exc.code == "http_error" and exc.message.startswith("HTTP 401:"))):
+                raise
+            self.connect(required_tools=self._required_tools)
+            return self.client.call_tool(name, {"scope_id":self.scope_id, **args})
 
     def _write(self, name: str, op: str, args: dict) -> dict:
         if self.read_only:
@@ -337,7 +358,8 @@ class RuntimeClient:
         raw = dict(result.get("raw_status") or {})
         raw.update({"isRunning": result.get("is_running"),
                     "currentTurnId": result.get("current_turn_id"),
-                    "pendingPermission": result.get("pending_permission")})
+                    "pendingPermission": result.get("pending_permission"),
+                    **({"pendingInputs": result["pending_inputs"]} if result.get("pending_inputs") is not None else {})})
         return raw
 
     def turn_get(self, session_id: str, turn_id: str, *, require_identity: bool = False) -> dict:
@@ -401,6 +423,16 @@ class RuntimeClient:
         })
         return resolved
 
+    def input_pending(self, session_id: str) -> dict:
+        result=self._call("kp_runtime_input_pending", {"session_id":session_id})
+        return {"sessionId":result.get("session_id"),"asks":result.get("asks")}
+
+    def input_respond(self, session_id, request_id, expected_tool_call_id, answers, *, operation_id):
+        from .execution_questions import validate_wire_answers
+        validate_wire_answers(answers,session_id,request_id,expected_tool_call_id)
+        return self._write("kp_runtime_input_respond", operation_id, {"session_id":session_id,
+            "request_id":request_id,"expected_tool_call_id":expected_tool_call_id,"answers":answers})
+
     def agent_stop(self, session_id: str) -> dict:
         return self._write("kp_runtime_stop", "stop", {"session_id": session_id})
 
@@ -452,10 +484,11 @@ class HistoricalReadClient:
         client.connect()
         return client
 
-    def turn_get(self, session_id: str, turn_id: str) -> dict:
+    def turn_get(self, session_id: str, turn_id: str, *, require_identity: bool = False) -> dict:
         result = harness_plus_adapter.plus_turn_get(
             self.connection_file, session_id=session_id,
-            turn_id=turn_id, timeout=max(1, int(self.timeout)),
+            turn_id=turn_id, require_identity=require_identity,
+            timeout=max(1, int(self.timeout)),
         )
         return {"sessionId": result.get("session_id"),
                 "turnId": result.get("turn_id"), "status": result.get("status"),
@@ -499,6 +532,10 @@ class HistoricalReadClient:
         )
         return {"plans": result.get("proposals", []),
                 "history": result.get("history", [])}
+
+    def input_pending(self,session_id):
+        result=harness_plus_adapter.plus_asks_pending(self.connection_file,session_id=session_id,timeout=max(1,int(self.timeout)))
+        return {"sessionId":result["session_id"],"asks":result["asks"]}
 
     def _deny_write(self, *_args, **_kwargs):
         raise util.KanpilotError(

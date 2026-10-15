@@ -383,7 +383,8 @@ class ExecBackendConfig(_ReviewCommandsCase):
             snap = exec_config.snapshot(conn)
         finally:
             conn.close()
-        self.assertEqual(snap, {"backend": "pi_desktop", **PI_DESKTOP_SNAPSHOT})
+        self.assertEqual(snap, {"backend": "pi_desktop", **PI_DESKTOP_SNAPSHOT,
+            "execution_question_max_wait_seconds":constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS})
         blob = json.dumps(snap, ensure_ascii=False)
         self.assertNotIn("token", blob.lower())
 

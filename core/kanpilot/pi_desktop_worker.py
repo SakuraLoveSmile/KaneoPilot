@@ -249,18 +249,26 @@ class _Collector:
     """
 
     def __init__(self, client: "runtime_client.RuntimeClient",
-                 session_id: str, log: _EventLog, marker: str):
+                 session_id: str, log: _EventLog, marker: str, previous_events=()):
         self.client = client
         self.session_id = session_id
         self.log = log
         self.marker = marker
         self.seen: dict = {}          # str(message_id) -> (fingerprint, revision)
+        # Prior events establish revision floors only. Their flattened content
+        # cannot reconstruct a Host message fingerprint, so re-read it normally.
+        self.revision_floors = {}
+        for event in previous_events:
+            mid, revision = event.get("source_message_id"), event.get("source_revision")
+            if isinstance(mid, str) and mid and type(revision) is int and revision > 0:
+                self.revision_floors[mid] = max(self.revision_floors.get(mid, 0), revision)
         self.verified_end = 0         # 已核验的物理前缀长度（[0, verified_end)）
         self._prefix_hashes: list = []  # 该前缀逐条指纹（索引对齐，None=未采到）
         # 会话归属锚点（§5.23.8）：物理下标最小的 user 消息 = 本轮派发的 prompt。
         # 用户随后在同一会话追加的指令不改变锚点；锚点不符 → 会话不是本轮的。
         self.first_user_index = None
         self.first_user_message = None
+        self.input_resolutions = {}   # (turn_id, tool_call_id) -> durable resolution kind
         self.user_messages = {}       # physical index -> user content; recovery forbids appended instructions
         self._last_page_start = object()
         self.unrecognized = False
@@ -453,7 +461,7 @@ class _Collector:
         previous = self.seen.get(mid)
         if previous and previous[0] == fingerprint:
             return
-        revision = (previous[1] + 1) if previous else 1
+        revision = (previous[1] + 1) if previous else self.revision_floors.get(mid, 0) + 1
         self.seen[mid] = (fingerprint, revision)
         role = str(message.get("role") or "").lower()
         source = {"source_message_id": mid, "source_revision": revision}
@@ -519,6 +527,12 @@ class _Collector:
             finished = role in ("toolresult", "tool_result") or status in (
                 "success", "completed", "done", "finished", "error", "failed", "aborted",
             ) or completed_at is not None or output is not None
+            if (finished and not is_error and str(name).lower() in ("asktool","askuserquestion")
+                    and isinstance(raw_output,dict) and isinstance(raw_output.get("details"),dict)
+                    and isinstance(source_turn,str) and isinstance(message.get("toolCallId"),str)):
+                kind=raw_output["details"].get("resolutionKind")
+                if kind in ("answered","stopped","aborted"):
+                    self.input_resolutions[(source_turn,message["toolCallId"])]=kind
             tool_extra = dict(source)
             tool_extra.update(extra)
             if message.get("toolCallId") is not None:
@@ -581,6 +595,106 @@ def _turn_identity_matches(record: dict, session_id: str, turn_id: str) -> bool:
     )
 
 
+def _core_input_state(spec):
+    if not spec or not spec.get("db_path"): return None
+    try:
+        task=cli.run("get-task",{"task_id":spec["task_id"]},Path(spec["db_path"]))["task"]
+        if task.get("run_id") != spec["run_id"]: return None
+        return {"task_id":task["task_id"],"run_id":task["run_id"],"extra_json":util.jdump(task.get("extra") or {})}
+    except util.KanpilotError: return None
+
+
+def _input_wait_seconds(spec):
+    from .execution_questions import wait_seconds
+    task=_core_input_state(spec)
+    return wait_seconds(task,util.now_dt(),run_id=spec["run_id"]) if task else 0
+
+
+class _ExecutionInputObserver:
+    """Poll summary every two seconds, fetch details only for new identities."""
+    def __init__(self,spec,job,log):
+        self.spec,self.job,self.log=spec,job,log
+        self.known={}
+        self.stop_info=None
+        self.terminal_failure=None
+        task=_core_input_state(spec)
+        if task:
+            from .execution_questions import open_records
+            self.known={q["request_id"]:q for q in open_records(task)}
+            self.stop_info=next((q for q in self.known.values() if q.get("stop_requested_at")),None)
+
+    def _report(self,q,state,detail=None):
+        payload={"task_id":self.spec["task_id"],"run_id":self.spec["run_id"],
+                 "session_id":self.job["session_id"],"turn_id":q["turn_id"],
+                 "request_id":q["request_id"],"tool_call_id":q["tool_call_id"],"state":state}
+        if state=="open": payload["questions"]=q["questions"]
+        if detail: payload["detail"]=detail
+        return cli.run("report-execution-question",payload,Path(self.spec["db_path"]))
+
+    def observe(self,reader,status,record):
+        from . import execution_questions as eq
+        task=_core_input_state(self.spec)
+        if task:
+            self.stop_info=next((q for q in eq.records(task) if q["run_id"]==self.spec["run_id"] and q.get("stop_requested_at")),self.stop_info)
+        terminal=_turn_status(record) in ("completed","error","aborted")
+        if terminal:
+            if self.known:
+                # A durable ask result can precede completed between two polls.
+                # Core reads the complete transcript and applies the same identity gate.
+                cli.run("reconcile-execution-question", {"task_id":self.spec["task_id"],"run_id":self.spec["run_id"]},Path(self.spec["db_path"]))
+                task=_core_input_state(self.spec)
+                self.known={q["request_id"]:q for q in eq.open_records(task)} if task else self.known
+            failed=[q for q in eq.records(task) if q["run_id"]==self.spec["run_id"]
+                and q["turn_id"]==self.job["turn_id"] and q["state"] in ("expired","stopped")] if task else []
+            if failed: self.terminal_failure=failed[-1]
+            return bool(self.known)
+        inner=status.get("status") or status
+        summary=inner.get("pendingInputs")
+        if summary is None: return bool(self.known) # historical host: no new capability gate
+        if (not isinstance(summary,dict) or type(summary.get("count")) is not int
+                or not isinstance(summary.get("requestIds"),list)
+                or summary["count"] != len(summary["requestIds"])
+                or any(not isinstance(v,str) for v in summary["requestIds"])):
+            raise util.KanpilotError("protocol_error","执行问题摘要无效")
+        ids=set(summary["requestIds"])
+        new=ids-set(self.known)
+        if new:
+            pending=reader.input_pending(self.job["session_id"])
+            if pending.get("sessionId")!=self.job["session_id"] or not isinstance(pending.get("asks"),list):
+                raise util.KanpilotError("conflict","执行问题 pending 身份不符")
+            for ask in pending["asks"]:
+                if not isinstance(ask,dict) or ask.get("requestId") not in new: continue
+                turn=ask.get("turnId",inner.get("currentTurnId"))
+                if turn != self.job["turn_id"] or inner.get("currentTurnId")!=self.job["turn_id"]:
+                    raise util.KanpilotError("conflict","执行问题 turn 身份不符")
+                q={"request_id":ask.get("requestId"),"tool_call_id":ask.get("toolCallId"),"turn_id":turn,"questions":ask.get("questions")}
+                try: result=self._report(q,"open")
+                except util.KanpilotError as exc:
+                    # dispatch-confirm can race the first ask in the Goal turn.
+                    # Keep pending and try next poll; no answer or send is replayed.
+                    if exc.code=="conflict": continue
+                    raise
+                self.known[q["request_id"]]=q
+                self.log.emit("system",util.now_iso(),content="input_requested",request_id=q["request_id"])
+        for rid,q in list(self.known.items()):
+            if rid not in ids and inner.get("currentTurnId")==self.job["turn_id"] and inner.get("isRunning") is True:
+                self._report(q,"closed")
+                self.known.pop(rid,None)
+        task=_core_input_state(self.spec)
+        if task:
+            current=eq.open_records(task)
+            self.known={q["request_id"]:q for q in current}
+        self.job["pending_input"]=list(self.known)
+        self.job["input_wait_seconds"]=_input_wait_seconds(self.spec)
+        return bool(self.known) or bool(ids)
+
+    def expired(self):
+        maximum=(self.spec.get("config") or {}).get("execution_question_max_wait_seconds",constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)
+        if not maximum: return False
+        opened=[util.parse_ts(q.get("opened_at")) for q in self.known.values()]
+        return any(value and (util.now_dt()-value).total_seconds()>=maximum for value in opened)
+
+
 class _ReadRecovery:
     """Reconnect only observation calls; never replay a desktop mutation."""
 
@@ -590,6 +704,7 @@ class _ReadRecovery:
         self.session_id = session_id
         self.turn_id = turn_id
         self.pid = None
+        self.allow_input_recovery = False
 
     def _checked_turn(self, record):
         if not _turn_identity_matches(record, self.session_id, self.turn_id):
@@ -620,7 +735,11 @@ class _ReadRecovery:
                 candidate._timeout = min(1.0, remaining / 5)
                 turn = self._checked_turn(candidate.turn_get(self.session_id, self.turn_id))
                 if _turn_status(turn) == "running":
-                    raise util.KanpilotError("conflict", "服务恢复后 turn 仍 running，需人工核实")
+                    status=candidate.agent_status(self.session_id)
+                    inner=status.get("status") or status
+                    pending=inner.get("pendingInputs") or {}
+                    if inner.get("currentTurnId")!=self.turn_id or not pending.get("count"):
+                        raise util.KanpilotError("conflict", "服务恢复后 turn 仍 running，需人工核实")
                 self.client = candidate
                 self.pid = getattr(candidate, "harness_pid", None)
                 if method == "turn_get":
@@ -640,6 +759,9 @@ class _ReadRecovery:
 
     def agent_status(self, session_id):
         return self._read("agent_status", session_id)
+
+    def input_pending(self,session_id):
+        return self._read("input_pending",session_id)
 
 
 def _pending_goal_contract(view: dict, session_id: str, turn_id: str) -> Optional[dict]:
@@ -767,13 +889,13 @@ def _resume_job(job_path: Path, spec: dict):
     return job, None
 
 
-def _round_remaining_seconds(job: dict, timeout: float) -> float:
+def _round_remaining_seconds(job: dict, timeout: float, spec=None) -> float:
     """续接观察的剩余预算（自 job.started_at 起算；不可解析 → 全额时限）。"""
     started = util.parse_ts(job.get("started_at"))
     now = util.parse_ts(util.now_iso())
     if started is None or now is None:
         return timeout
-    return timeout - max(0.0, now.timestamp() - started.timestamp())
+    return timeout - max(0.0, now.timestamp() - started.timestamp() - (_input_wait_seconds(spec) if spec else 0))
 
 
 def run_real(spec: dict, resume: bool = False) -> int:
@@ -923,7 +1045,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         if resume and not job.get("scope_id"):
             client = runtime_client.HistoricalReadClient(
                 config.get("connection_file"), timeout=10)
-            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+            client.connect(required_tools=(constants.PI_DESKTOP_REQUIRED_TOOLS + constants.PI_DESKTOP_GOAL_TOOLS) if resume else constants.PI_DESKTOP_DISPATCH_TOOLS)
         else:
             client = runtime_client.RuntimeClient(
                 role="execution", connection_file=config.get("connection_file"),
@@ -933,7 +1055,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 lease_seconds=timeout, read_only=resume,
                 goal_continuation=spec.get("continue_goal_authorization") if resume else None,
             )
-            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+            client.connect(required_tools=(constants.PI_DESKTOP_REQUIRED_TOOLS + constants.PI_DESKTOP_GOAL_TOOLS) if resume else constants.PI_DESKTOP_DISPATCH_TOOLS)
             job["scope_id"] = client.scope_id
         job["pi_desktop_pid"] = getattr(client, "harness_pid", None)
         if not resume:
@@ -944,14 +1066,17 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     permission_mode = config.get("permission_mode")
     if resume:
         # ---- 3'-4'. 续接观察（§5.23.7）：只读接管既有 session/turn。
-        remaining = _round_remaining_seconds(job, timeout)
-        if remaining <= 0:
+        remaining = _round_remaining_seconds(job, timeout,spec)
+        early_status=client.agent_status(job["session_id"])
+        early_inner=early_status.get("status") or early_status
+        active_input=bool((early_inner.get("pendingInputs") or {}).get("count"))
+        if remaining <= 0 and not active_input:
             # 已超时的轮次只能人工判定终态：续接不得先动手停止仍在跑的会话。
             return defer("round_timeout_elapsed: 轮次已超出时限，需人工判定终态")
         deadline = time.monotonic() + remaining
         turn_id = job["turn_id"]
         collector = _Collector(client, job["session_id"], log,
-                               spec.get("session_marker") or "")
+                               spec.get("session_marker") or "", previous_events=resume_events)
         observer = _ReadRecovery(client, config["connection_file"],
                                  job["session_id"], turn_id)
         collector.client = observer
@@ -1465,6 +1590,9 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         job.update({"status": "running", "detail": None,
                     "ended_at": None, "exit_code": None})
         _write_json(job_path, job)
+        # The original session event and this turn's takeover proof are both
+        # verified; resume appends evidence without emitting a second session.
+        collector.drain()
     else:
         try:
             _heartbeat(spec)
@@ -1485,31 +1613,61 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     abort_attempted = False
     abort_accepted = False
     stop_detail = ""
+    stop_reason = "timeout"
+    inputs=_ExecutionInputObserver(spec,job,log)
     while True:
         owner.check()
         now_m = time.monotonic()
-        if now_m >= deadline and not stop_requested:
-            stop_requested, stop_at = True, now_m
-            observer.client._timeout = min(2.0, _STOP_VERIFY_SECONDS / 5)
-            try:
-                owner.check()
-                observer.client.agent_stop(job["session_id"])
-                stop_detail = "stop 请求已接受"
-            except util.KanpilotError as exc:
-                stop_detail = "stop 响应未证实：" + exc.message
         try:
             record = observe_turn()
             state = _turn_status(record)
             turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
         except util.KanpilotError as exc:
             return unknown("turn 终态无法核实，可能仍在运行：" + exc.message)
+        try:
+            status_view=observer.agent_status(job["session_id"])
+            inner=status_view.get("status") or status_view
+            current=inner.get("currentTurnId")
+            if current and current != turn_id and state == "running":
+                return unknown("turn_mismatch: 会话当前 turn 与本轮不符", "turn_mismatch")
+            waiting=inputs.observe(observer,status_view,record) if spec.get("db_path") else False
+            observer.allow_input_recovery=waiting
+            if inputs.stop_info and not stop_requested:
+                stamp=util.parse_ts(inputs.stop_info["stop_requested_at"])
+                stop_requested=True
+                stop_at=now_m-max(0,(util.now_dt()-stamp).total_seconds())
+                stop_reason=inputs.stop_info.get("termination_reason") or "user_stop"
+                stop_detail="核心已登记停止请求"
+            waited=_input_wait_seconds(spec)
+            job["input_wait_seconds"]=waited
+            _write_json(job_path,job)
+            remaining=_round_remaining_seconds(job,timeout,spec)
+            # Preserve monotonic fallback for historical tests/jobs without UTC starts.
+            elapsed=remaining<=0 if util.parse_ts(job.get("started_at")) else now_m>=deadline
+            if not stop_requested and (inputs.expired() or elapsed and not waiting):
+                stop_requested,stop_at=True,now_m
+                stop_reason="execution_question_expired" if inputs.expired() else "timeout"
+                observer.client._timeout=min(2.0,_STOP_VERIFY_SECONDS/5)
+                try:
+                    if stop_reason=="execution_question_expired":
+                        cli.run("stop-execution",{"task_id":spec["task_id"],"run_id":spec["run_id"],
+                            "operation_id":"input_wait_stop", "reason":stop_reason},Path(spec["db_path"]))
+                    else: observer.client.agent_stop(job["session_id"])
+                    stop_detail="stop 请求已接受"
+                except util.KanpilotError as exc: stop_detail="stop 响应未证实："+exc.message
+        except util.KanpilotError as exc:
+            return unknown("执行问题观察无法核实："+exc.message)
         if state in ("completed", "error", "aborted"):
+            if inputs.terminal_failure and not stop_requested:
+                collector.poll()
+                return finalize("failed",1,"execution_failed: 执行问题缺少正常回答终态证据",
+                    True,"failed","execution_failed")
             if state in ("error", "aborted"):
                 follow = adopt_follow_up(record)
                 if follow is not None:
                     adopt(follow, record)
                     continue
-            if state == "completed":
+            if state == "completed" and not stop_requested:
                 # §5.23.9：goal 模式的规划轮次以「提交目标契约」结束——审批门
                 # 通过后继续观察同会话执行轮次；否则按普通 completed 收尾。
                 outcome, detail, reason = goal_contract_gate()
@@ -1526,7 +1684,10 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 abort_attempted = True
                 try:
                     owner.check()
-                    observer.client.agent_abort(job["session_id"])
+                    if stop_reason in ("execution_question_expired","user_stop"):
+                        cli.run("stop-execution",{"task_id":spec["task_id"],"run_id":spec["run_id"],
+                            "operation_id":"input_wait_abort","abort":True},Path(spec["db_path"]))
+                    else: observer.client.agent_abort(job["session_id"])
                     abort_accepted = True
                 except util.KanpilotError as exc:
                     stop_detail += "；abort 响应未证实：" + exc.message
@@ -1561,8 +1722,8 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     # ---- 7. 末轮采集（尽力补全 transcript）+ 终态判定。
     collector.poll()
     if stop_requested:
-        reason = "timeout"
-        detail = f"timeout after {timeout:g}s"
+        reason = stop_reason
+        detail = stop_reason if stop_reason in ("execution_question_expired","user_stop") else f"timeout after {timeout:g}s"
         if abort_accepted:
             detail += "；abort 请求已接受"
         detail += "；" + stop_detail
@@ -1652,7 +1813,7 @@ def _goal_report_settlement(client, job: dict) -> tuple:
             job["goal_report"] = {
                 "report_id": resolved.get("report_id"),
                 "report_sha256": resolved.get("report_sha256"),
-                "execution_id": execution_id,
+                "execution_id": resolved.get("execution_id"),
                 "proposal_id": proposal_id,
                 "turn_id": resolved.get("turn_id"),
                 "integrity_kind": resolved.get("integrity_kind"),
@@ -1763,6 +1924,7 @@ def _fetch_report_payload(client, session_id, execution_id, proposal_id,
             "conflict", "报告 turnId 不属于本轮已批准的执行轮次"
         )
     resolved["turn_id"] = turn_id
+    resolved["execution_id"] = fields["execution_id"]
     resolved["integrity_kind"] = pi_desktop_backend.report_integrity_kind(
         report
     )

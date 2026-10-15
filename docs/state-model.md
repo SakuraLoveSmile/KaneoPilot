@@ -184,6 +184,9 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 | running | monitor report kaneo_status=in-review（经 advance-task） | in_review |
 | running | advance-task done / 远端观察 done | done |
 | running | report needs_user / dispatch 类阻塞 | needs_user |
+| running | report-execution-question open（当前 run，protocol §5.28） | needs_user（execution_input_required；轮次仍 running） |
+| needs_user | execution_answer / answered_in_plus（该 run 全部开放问题关闭） | running（只清 execution_input_required） |
+| needs_user | execution question expired / stopped（持久终态证据） | needs_user（execution_failed；保留问题与草稿） |
 | in_review | advance-task done | done |
 | in_review | register-review blocked | needs_user |
 | needs_user | resolve retry/restore/accept_duplicate | ready + dispatch 请求 |
@@ -233,6 +236,12 @@ CREATE INDEX IF NOT EXISTS planner_inputs_task ON planner_inputs(task_id, create
 本清单必须与 `core/kanpilot/derive.py` 的 `_EVENT_KIND_CN` 以及桌面端
 `Labels.eventKind` 逐项一致；三者不一致时以核心**实际写入**的 kind 为准，并由
 `core/tests/test_event_kind_labels.py` 钉住。
+
+执行问答增加 `execution_question_opened`（执行中提问）、
+`execution_question_answered`（执行问题已回答）、`execution_question_closed`（执行问题已关闭）。
+目标契约见 protocol §5.28；当前为实现中，固定枚举与实际写入须在实施时同步。
+问答记录保存在 task.extra.execution_questions，核心记录同 run 开放集合的等待区间，
+多个问题区间取并集；不增加独立 task 子状态或第二状态写入源。
 
 ## 5. 串行位
 

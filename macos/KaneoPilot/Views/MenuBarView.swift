@@ -18,7 +18,7 @@ struct MenuBarView: View {
         Text("上次接收任务：\(lastIntake)")
         if let error = scheduler.error { Text(error).foregroundStyle(.secondary) }
         ForEach(scheduler.attentionItems.prefix(5)) { item in
-            Button(item.title ?? item.taskId) {
+            Button(item.questionPreview.map { "\(item.title ?? item.taskId) · 执行中提问 · \($0.count)题 · \($0.firstTitle) · 回答" } ?? item.title ?? item.taskId) {
                 model.attentionTaskToOpen = item.taskId
                 AppRuntime.shared.mainWindowDidOpen()
                 openWindow(id: "main")

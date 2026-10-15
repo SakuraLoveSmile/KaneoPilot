@@ -90,6 +90,17 @@ def report_payload(report: dict, report_sha256=REPORT_SHA) -> dict:
     return payload
 
 
+def formal_report_payload(**overrides) -> dict:
+    """Actual Plus goalReportReadResult envelope; the report has no status."""
+    report = goal_report(**overrides)
+    report.pop("status")
+    report["schemaVersion"] = 1
+    report["goal"] = {"title": "目标契约", "markdown": "验收计划",
+                      "contractHash": report.pop("contractHash")}
+    return {"state": "ready", "report": report,
+            "report_sha256": REPORT_SHA}
+
+
 class _GoalReportCase(KanpilotTestCase):
     """共享夹具：一轮已批准 Goal 契约的 pi_desktop 轮次 + monitor claim。"""
 
@@ -274,6 +285,78 @@ def _goal_server():
 # ======================================================= T5-A 报告读取分态
 
 class TestGoalReportReadStates(_GoalReportCase):
+    def test_formal_envelope_read_evaluate_and_advance(self):
+        self.seed_round()
+        self.server.goal_report = formal_report_payload()
+        self.fake.add_task(TASK_ID, "example-project-05", status="in-progress")
+        out = self.call("get-goal-report", {"task_id": TASK_ID, "run_id": RUN_ID})
+        self.assertEqual(out["state"], "ready")
+        self.assertEqual(out["turn_id"], EXEC_TURN_ID)
+        self.assertEqual(out["report"], self.server.goal_report["report"])
+        self.assertNotIn("status", out["report"], "do not rewrite trusted report bytes")
+        self.assertEqual(pi_desktop_backend.report_identity(out["report"])["contract_hash"], CONTRACT_HASH)
+        request = self.seed_monitor_claim()
+        evaluation = self.record(request)
+        advanced = self.call("advance-task", {
+            "task_id": TASK_ID, "target": "in-review", "expected_current": "in-progress",
+            "monitor_request_id": request, "monitor_run_id": MONITOR_RUN_ID,
+            "evaluation_event_id": evaluation["event_id"],
+        })
+        self.assertEqual(advanced["task_status"], "in_review")
+
+    def test_formal_envelope_worker_reads_same_execution(self):
+        from unittest.mock import Mock
+        client = Mock()
+        client.goal_report_list.return_value = {"reports": [{
+            "reportId": "report-1", "proposalId": PROPOSAL_ID,
+            "executionId": EXECUTION_ID, "turnId": EXEC_TURN_ID}]}
+        client.goal_report_get.return_value = formal_report_payload()
+        out = pi_desktop_worker._fetch_report_payload(
+            client, SESSION_ID, None, PROPOSAL_ID, {EXEC_TURN_ID})
+        self.assertEqual(out["state"], "ready")
+        self.assertEqual(out["turn_id"], EXEC_TURN_ID)
+        self.assertEqual(out["integrity_kind"], "structured")
+        job = {"session_id": SESSION_ID, "goal_approval": {
+            "status": "approved", "proposal_id": PROPOSAL_ID,
+            "execution_turn_id": EXEC_TURN_ID}}
+        self.assertEqual(pi_desktop_worker._goal_report_settlement(client, job), (None, None))
+        self.assertEqual(job["goal_report"]["execution_id"], EXECUTION_ID)
+
+    def test_formal_envelope_keeps_fail_closed_boundaries(self):
+        for state in ("pending", "draft", "failed", "not_found", "corrupt", "truncated"):
+            with self.subTest(state=state):
+                payload = formal_report_payload()
+                payload["state"] = state
+                payload["report"]["status"] = "ready"  # stale body cannot override envelope
+                out = pi_desktop_backend.normalize_goal_report(payload)
+                self.assertEqual(out["state"], state)
+                self.assertIsNone(out["report"])
+        for state in (None, "unknown", {}, ["ready"]):
+            with self.subTest(invalid_state=state):
+                payload = formal_report_payload()
+                payload["state"] = state
+                self.assertEqual(pi_desktop_backend.normalize_goal_report(payload)["state"], "corrupt")
+        payload = formal_report_payload()
+        payload["report"] = None
+        payload.update(sessionId=SESSION_ID, executionId=EXECUTION_ID)
+        self.assertEqual(pi_desktop_backend.normalize_goal_report(payload)["state"], "corrupt")
+        payload = report_payload(goal_report())
+        payload["state"] = None
+        self.assertEqual(pi_desktop_backend.normalize_goal_report(payload)["state"], "corrupt")
+        for field in ("report_sha256", "sessionId", "executionId"):
+            with self.subTest(missing=field):
+                payload = formal_report_payload()
+                (payload if field == "report_sha256" else payload["report"]).pop(field)
+                out = pi_desktop_backend.normalize_goal_report(payload)
+                self.assertEqual(out["state"], "corrupt")
+                self.assertIsNone(out["report"])
+
+    def test_formal_envelope_cross_turn_still_rejected(self):
+        self.seed_round()
+        self.server.goal_report = formal_report_payload(turnId="another-turn")
+        code, _ = self.call_err_code("get-goal-report", {"task_id": TASK_ID, "run_id": RUN_ID})
+        self.assertEqual(code, "conflict")
+
     def test_ready_structured_report_is_returned_with_identity(self):
         self.seed_round()
         self.set_report(goal_report())

@@ -599,6 +599,10 @@ def _desktop_plan_finished(conn, row) -> bool:
 def _round_run_status(conn, row, job, now, timeout) -> str:
     if _desktop_plan_finished(conn, row):
         return "finished"
+    task=db.get_task(conn,row["task_id"])
+    if task and row["run_id"]==task["run_id"]:
+        from .execution_questions import wait_seconds
+        timeout += wait_seconds(task,now,run_id=row["run_id"])
     return round_store.derive_run_status(row, job, now, timeout)
 
 
@@ -617,6 +621,9 @@ def _round_fields(
     超时判定，不回写）/ save_state / saved_at / allowed_actions /
     blocked_reason。无索引行 → 安全默认（backend null、run_status unknown、
     save_state active、allowed_actions []）。"""
+    from .execution_questions import view as question_view
+    task_for_question=db.get_task(conn,task_id)
+    execution_question=question_view(task_for_question,now,conn) if task_for_question and task_for_question["run_id"]==run_id else None
     if row is None:
         # 无 execution_rounds 索引行（运行记录不可用/未关联）——回收站动作
         # 无法落库，给原因让 UI 可解释而非静默空菜单。
@@ -650,6 +657,7 @@ def _round_fields(
             allowed.append("force-purge-session")
             blocked = None
     return {
+        "execution_question": execution_question,
         "backend": row["backend"],
         "run_status": _round_run_status(conn, row, job, now, timeout),
         "save_state": save_state,

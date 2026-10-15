@@ -104,6 +104,7 @@ RUNTIME_ROLE_TOOLS: Dict[str, Set[str]] = {
         "kp_runtime_proposal_resolve",
         "kp_runtime_goal_report_list",
         "kp_runtime_goal_report_get",
+        "kp_runtime_input_pending", "kp_runtime_input_respond",
     },
 }
 

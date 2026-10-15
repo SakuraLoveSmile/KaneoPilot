@@ -476,3 +476,27 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 | plan | branch_exists、delivery_base_unknown |
 | review | fix_rounds_exhausted、auto_budget_exceeded、automation_stopped、review_backend_unsupported |
 | delivery | delivery_*、no_changes、branch_diverged、gh_unavailable、pr_closed |
+
+## 执行期提问转交（P2–P7，protocol §5.28）
+
+目标契约已冻结，当前为实现中。执行保持interactive，目标契约轮和执行轮的asktool都由worker发现，
+问题转needs_user/execution_input_required但轮次仍running。只能回答、全部跳过或停止本轮；
+任务不创建第二执行者、不重规划、不消耗修复轮。规划与Review硬拦截语义保持原样。
+
+等待不计入轮次时限或自动化本段时长预算，核心按待答集合的等待区间并集记录；
+多个同时问题不重复扣除，段预算只扣与本段重叠部分。成本预算仍按实际费用累计。
+默认24小时最长等待，执行配置可设0不限，轮次冻结快照；到期经核心收据stop→必要时abort，
+detail=execution_question_expired，保留问题和草稿并进入execution_failed恢复。
+
+runtime输入写仅核心提交使用，经scope归属验证、reserve_downstream及完成收据；不持SQLite写锁调用Plus。
+unknown不自动重发、冻结答案，只读pending仍在不能判为not_applied；用户显式重试只允许相同冻结答案。
+晚返回不能覆盖新的run/请求/operation状态。停止接受不等于持久终态。
+
+引擎模式不影响提问报告、送达或核心结算。提交、App后台恢复与详情重连共同确保同身份只读observer；
+legacy/shadow和engine关闭同样覆盖，恢复启动用原子占位去重。只读worker不取得回答或通用停止写权限；
+到期走专用核心操作。scope到期仅以同身份重注册，旧token失效且不得进入job、事件、SQLite或日志。
+
+failure_code=execution_input_required映射reason_code=execution_question（阶梯3），
+推荐answer_execution_questions，替代skip_execution_questions/stop_execution。
+execution_question_opened/answered/closed事件同步中文标签。详情与session-view透出同一execution_question DTO，
+attention-list透出question_preview；DTO、答案映射、五命令和测试验收以protocol §5.28为唯一权威。

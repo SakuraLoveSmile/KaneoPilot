@@ -159,6 +159,7 @@ class Reconciler:
         policy = automation_policy.policy_for(conn, task["project_id"]) or {}
         budget = core.automation_budget(task, policy, now)
         paused_global = bool(db.get_setting(conn, "paused_global", False))
+        from ..execution_questions import view as question_view
         return {
             "task_id": task["task_id"],
             "status": status,
@@ -178,6 +179,8 @@ class Reconciler:
             "failure_reason": task["failure_reason"],
             "plan_sha256": task["plan_sha256"],
             "execution_run_id": task["run_id"],
+            "run_id":task["run_id"],
+            "execution_question":question_view(task,now,conn),
             "plan_execution_hold": bool(extra.get("plan_execution_hold")),
         }
 
@@ -419,10 +422,15 @@ class Reconciler:
                     # later, unrelated round of the same task.
                     self._clear_consumed_override(conn, task, now)
                 snap = self._snapshot(conn, task, now)
-                decision = (self._transient_retry(conn, task, now)
-                            or self._quality_retry(conn, task, now, snap, pmode)
-                            or self._round_settle(conn, task, now, snap, pmode)
-                            or decide.decide(snap))
+                if (snap.get("execution_question") or {}).get("state")=="open":
+                    # Human input owns this round. Historical failed requests
+                    # cannot take priority over its BLOCK/observer recovery.
+                    decision=decide.decide(snap)
+                else:
+                    decision = (self._transient_retry(conn, task, now)
+                                or self._quality_retry(conn, task, now, snap, pmode)
+                                or self._round_settle(conn, task, now, snap, pmode)
+                                or decide.decide(snap))
                 base = {"task_id": task["task_id"], "action": decision.action,
                         "reason": decision.reason, "ladder": decision.ladder,
                         "attention": decision.attention,

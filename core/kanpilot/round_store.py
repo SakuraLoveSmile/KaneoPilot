@@ -341,6 +341,8 @@ def session_trash_block_reason(
     current = False
     if task is not None:
         marker = f"{task_id}/{run_id}"
+        from .execution_questions import open_records
+        if task["run_id"]==run_id and open_records(task): return "执行轮次正在等待回答，不能移入会话回收站"
         current = (task["run_id"] == run_id) or (
             task["session_marker"] == marker
         )

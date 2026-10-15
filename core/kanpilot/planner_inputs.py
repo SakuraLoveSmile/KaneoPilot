@@ -801,6 +801,9 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     task_id = row["task_id"]
     task = db.get_task(conn, task_id)
     prepared = prepared or {}
+    if task is not None:
+        from .execution_questions import guard_active
+        guard_active(task)
     from . import review_resolution
     remediation = review_resolution.remediation_of(task) if task is not None else {}
     if remediation:
@@ -1155,6 +1158,9 @@ def _prepare_submission(conn, item):
         manifest = db.planner_input_manifest(row)
         meta = manifest.get("task") or {}
         task = db.get_task(conn, row["task_id"])
+        if task is not None:
+            from .execution_questions import guard_active
+            guard_active(task)
         from . import review_resolution
         remediation = review_resolution.remediation_of(task) if task is not None else {}
         if remediation:

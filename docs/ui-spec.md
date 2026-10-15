@@ -288,6 +288,8 @@ Plus轮次在搜索框前增加紧凑状态行，初次进入及“检查 Plus �
 
 ## 8. 验收基线
 
+执行期问答的新增验收见 §4.17 和 protocol §5.28；仅规格冻结不表示界面已实现或核验。
+
 - v2 追加：回收站两段视图（任务/会话）+ purge 确认与结果；请求详情页（attempts/allowed_actions/attention_state/只读态）；运行记录翻页与全史搜索；规划面板三步流（获取→准备→开始，含 issues 阻断与逐条结果）；`待确认执行` 与确认派发闭环截图。
 - v1.5 追加：会话删除/恢复闭环截图（阅读器按钮 → 确认框 → toast → 回收站筛选 → 恢复）；设置页 PI 执行配置错误状态截图（能力加载失败重试、非法组合禁用保存、凭据未就绪行）与执行端调度区（含最近一次运行状态）；两种窗口尺寸 × 浅/深色各一遍。
 
@@ -464,3 +466,35 @@ Goal 模式提交契约后的 completed 仅表示目标规划结束。仍 awaiti
 总览继承既有列表/详情外壳与系统原生控件；按“需要你 → 流水线计数 → 进行中任务 → 项目自动化 → 环境健康”排列。侧栏总览默认，任务看板为次级入口。phase/condition/attention 来自核心 JSON，缺失字段只显示未提供，不在 Swift 再推断自动化状态。菜单栏计数、通知和总览同源 attention-list；详情沿用五段导航，加 phase 步进与既有证据入口。
 
 设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。
+
+### 4.17 执行期问答（P6，protocol §5.28）
+
+状态为实现中；本节冻结指定差异，不改变既有五段详情、规划问答、会话页、全局token或布局。
+基线为 TaskDetailContentView 的规划澄清表单（answerField/optionButton）、
+AutomationDashboardView 的 attention 行及 MenuBarView 的任务入口。
+
+- 总览和菜单栏沿用原有行，状态文字“执行中提问 · N题”，显示 first_title 和“回答”入口。
+  count 是当前显示的一份请求的题数，不混同 queued 请求数；queued>0 另显示“还有 N 份提问”。
+  通知复用新 attention 通知，正文取 blocked_summary；同请求轮询不得重复通知；执行问答用attention_id+question_preview.request_id去重，下一份FIFO显示可再次通知，attention_id不改。
+- 点击回答打开该任务的既有详情，在概览阻塞证据之后、下一步操作之前加入问答区。
+  顺序为标题/来源/等待与队列摘要 → 题目和选项 → 送达状态/错误 → 保存草稿/提交答案。
+  所有题目可见且纵向滚动；title、description、label 支持换行和选择文本，不增加独立大卡片、阴影或全局皮肤。
+- 正文13pt、区段标题18pt semibold、辅助11pt；间距8/12/16；颜色沿系统语义色，任何状态同时配文字。
+  选项继承既有 optionButton 形态，多选用勾选状态，单选选择与自定义互斥；明确逐题“跳过”。
+  自定义输入沿现有多行TextField；仅执行问题增加multi_select，不改变规划字段与保存语义。
+- 保存草稿只调用 save-execution-answers。提交只作用 DTO 的 run/request/指纹，保留原 operation_id 直到收到明确结果。
+  输入锁定于 submitting；unknown 锁定原答案，显示“送达结果未知，正在核对”，提供只读“重新核对”。
+  有 pending 不能显示“未送达”；显式重试只送原冻结答案、新 operation_id，不提供改答案后重发。
+- 下方低频动作保留“全部跳过并继续”与“停止本轮”；停止沿既有危险确认样式，明确会结束当前轮次。
+  跳过整份请求对应 Plus Decline all，不跳过其它 queued 请求。
+  answerable=false 显示“请在 Plus 中回答”与原因，关闭本地回答/跳过，保留停止。
+- 成功显示“已回答，继续执行”；来源plus显示“已在 Plus 回答”；未知来源不冒充某端作答。
+  expired/stopped 只读展示旧问题和草稿及终止原因，后续操作来自核心 execution_failed。
+  observer_alive=false 显示“观察已中断”与“重新连接”，仅恢复该 run 的只读观察。
+- 切换任务/run/request/指纹时不将上一份草稿应用到下一份，异步返回必须匹配完整身份。
+  新问题加载失败保留草稿与上一状态并标“可能已过期”，不得把加载失败当问题已答。
+  禁用/忙碌/错误不只用颜色；按钮和字段有题目相关accessibilityLabel，键盘Tab、空格/回车沿原控件行为。
+- 本机 dirty 草稿遇外端回答、过期或锁定仍保留，不用新 DTO 静默覆盖。保存失败阻止退出或切换丢稿；提供“复制原答案”及二次确认“放弃未保存本机编辑”，只清本机编辑，不改核心历史。not_applied 可编辑时显示 draft，unknown/submitting 显示冻结 submitted。
+- 主 agent 在隔离原生候选核验1180×760及900×600：单选/多选/自定义/跳过、长题目选项滚动、
+  queued切换、提交中/unknown/过期/观察中断与通知。截图存 build/validation/execution-questions/。
+  构建或FakeCore不能替代真实命令送达与系统通知证据；未实测明确NOT RUN。

@@ -610,6 +610,7 @@ struct TaskDetail: Decodable, Identifiable {
     let reviewResolution: ReviewResolution?
     let verificationChecks: VerificationCheckOperation?
     let planClarification: PlanClarification?
+    let executionQuestion: ExecutionQuestion?
     let failureReason: String?
     let blockedAt: String?
     let blockedSummary: String?
@@ -713,6 +714,7 @@ struct ListEventsResponse: Decodable {
 /// `unavailable` = 读取失败（UI 显示 detail 原因 + 重试，不按标题猜测）。
 /// v1.5（protocol §5.16.3）扩展：backend/run_status/保存状态/allowed_actions。
 struct SessionInfo: Decodable, Identifiable {
+    let executionQuestion: ExecutionQuestion?
     let taskId: String?
     let runId: String?
     let sessionMarker: String?
@@ -2392,6 +2394,7 @@ struct ReviewHistoryEntry: Decodable {
 struct AttentionResponse: Decodable { let items: [AttentionItem] }
 struct AttentionItem: Decodable, Identifiable, Sendable {
     let attentionId: String
+    let questionPreview: ExecutionQuestionPreview?
     let taskId: String
     let projectName: String?
     let title: String?
@@ -2407,6 +2410,10 @@ struct AttentionItem: Decodable, Identifiable, Sendable {
     let attentionState: String?
     let since: String?
     var id: String { attentionId }
+    var notificationIdentity: String {
+        guard reasonCode == "execution_question", let requestID = questionPreview?.requestId else { return attentionId }
+        return "\(attentionId)/\(requestID)"
+    }
 }
 struct EngineFallbackModel: Decodable { let providerId: String; let modelId: String }
 struct EngineStatusResponse: Decodable {
@@ -2423,4 +2430,79 @@ struct EngineStatusResponse: Decodable {
         let ownedWorkers: [JSONValue]?
         var id: String { instanceId }
     }
+}
+
+// protocol §5.28: fixed core projection; no Plus transport values are derived in Swift.
+struct ExecutionQuestionPreview: Decodable, Sendable {
+    let requestId: String?
+    let count: Int
+    let firstTitle: String
+}
+
+struct ExecutionQuestionOption: Decodable, Equatable, Identifiable {
+    let id: String
+    let label: String
+    let description: String?
+}
+
+struct ExecutionQuestionItem: Decodable, Equatable, Identifiable {
+    let id: String
+    let title: String
+    let description: String?
+    let multiSelect: Bool
+    let allowCustom: Bool
+    let required: Bool
+    let options: [ExecutionQuestionOption]
+}
+
+struct ExecutionAnswer: Decodable, Equatable {
+    let questionId: String
+    var optionIds: [String]
+    var text: String
+    var skipped: Bool
+
+    var payload: [String: Any] {
+        ["question_id": questionId, "option_ids": optionIds, "text": text, "skipped": skipped]
+    }
+}
+
+struct ExecutionQuestion: Decodable, Equatable {
+    let requestId: String
+    let runId: String
+    let sessionId: String
+    let turnId: String
+    let toolCallId: String
+    let source: String
+    let questionsSha256: String
+    let answerable: Bool
+    let state: String
+    let delivery: String
+    let answeredBy: String?
+    let openedAt: String
+    let closedAt: String?
+    let waitSeconds: Double
+    let observerAlive: Bool
+    let queued: Int
+    let questions: [ExecutionQuestionItem]
+    let draft: [ExecutionAnswer]
+    let submitted: Submitted?
+    let detail: String?
+    var rejectionReason: String? = nil
+
+    struct Submitted: Decodable, Equatable {
+        let answers: [ExecutionAnswer]
+        let operationId: String
+        let at: String
+        let by: String
+    }
+
+    // All external identities and the core fingerprint bind every async UI result.
+    var identity: [String] { [runId, sessionId, turnId, requestId, toolCallId, questionsSha256] }
+}
+
+struct ExecutionQuestionCommandResponse: Decodable {
+    var status: String? = nil
+    let taskId: String
+    let runId: String
+    let executionQuestion: ExecutionQuestion?
 }

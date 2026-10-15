@@ -16,6 +16,10 @@ final class EngineSupervisor: ObservableObject {
     @Published private(set) var isStopping = false
     private let client: CoreClient
     private var process: Process?
+    private var recoveryProcess: Process?
+    private var recoveryCheckAt = Date.distantPast
+    private var recoveryError: String?
+    private let allowsFakeRecovery: Bool
     private var loop: Task<Void, Never>?
     private var reading = false
     private var retryAt = Date.distantPast
@@ -28,7 +32,10 @@ final class EngineSupervisor: ObservableObject {
         UserDefaults.standard.object(forKey: "executorSchedulingEnabled") == nil
             || UserDefaults.standard.bool(forKey: "executorSchedulingEnabled")
     }
-    init(client: CoreClient) { self.client = client }
+    init(client: CoreClient, allowsFakeRecovery: Bool = false) {
+        self.client = client
+        self.allowsFakeRecovery = allowsFakeRecovery
+    }
 
     func start() {
         guard loop == nil, !isStopping else { return }
@@ -63,9 +70,10 @@ final class EngineSupervisor: ObservableObject {
             attentionItems = a.items.filter { $0.attentionState == "actionable" }
             attentionLoaded = true
             publishNotifications(attentionItems)
+            ensureObserverRecovery()
             let healthy = e.instances.contains { $0.active == true }
             if healthy {
-                error = nil
+                error = recoveryError
                 restartFailures = 0
             } else if process?.isRunning == true, let launchedAt, Date().timeIntervalSince(launchedAt) > 15 {
                 error = "引擎心跳未确认，请检查环境健康与运行记录"
@@ -116,6 +124,56 @@ final class EngineSupervisor: ObservableObject {
         } catch { recordFailure("无法启动引擎：\(error.localizedDescription)") }
     }
 
+    /// Recover only existing round observers. The core owns pause gates, candidate
+    /// identity, Goal approval and the atomic observer launch reservation.
+    /// A separate owned child keeps slow Plus reads outside the inbox poll.
+    private func ensureObserverRecovery() {
+        guard !isSchedulingStopped, recoveryProcess?.isRunning != true,
+              Date() >= recoveryCheckAt, let runtime = status,
+              runtime.paused?.global != true else { return }
+        let pausedStages = Set(runtime.paused?.stages ?? [])
+        guard !pausedStages.contains("dispatch"), !pausedStages.contains("monitor"),
+              let location = client.location else { return }
+        if ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] != nil {
+            // Native previews never run recovery. Only the isolated fixture's
+            // explicit injection may run its own fake command, never a real core.
+            guard allowsFakeRecovery,
+                  URL(fileURLWithPath: location.path).lastPathComponent == "kanpilot-fake.py" else { return }
+        }
+        let child = Process()
+        if location.usesPython {
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            child.arguments = ["python3", location.path, "recover-execution-goals", "--json", "{}"]
+        } else {
+            child.executableURL = URL(fileURLWithPath: location.path)
+            child.arguments = ["recover-execution-goals", "--json", "{}"]
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        child.environment = environment
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        child.terminationHandler = { [weak self] child in
+            Task { @MainActor in
+                guard let self, self.recoveryProcess === child else { return }
+                self.recoveryProcess = nil
+                guard !self.isSchedulingStopped else { return }
+                self.recoveryError = child.terminationStatus == 0 ? nil : "观察恢复检查失败（exit \(child.terminationStatus)）"
+                if let recoveryError = self.recoveryError { self.error = recoveryError }
+            }
+        }
+        // One attempt per interval, even if a launch fails. Core does not retry writes.
+        recoveryCheckAt = Date().addingTimeInterval(20)
+        do {
+            try child.run()
+            recoveryProcess = child
+        } catch {
+            recoveryError = "无法启动观察恢复检查：\(error.localizedDescription)"
+            self.error = recoveryError
+        }
+    }
+
     private func recordFailure(_ message: String) {
         restartFailures += 1
         let delay = min(60.0, pow(2.0, Double(min(restartFailures - 1, 6))))
@@ -141,18 +199,22 @@ final class EngineSupervisor: ObservableObject {
         loop = nil
         isStopping = true
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
-        // Only terminate our Process object. Never kill Plus or external engine holders.
-        guard let child = process, child.isRunning else {
+        // Only terminate our exact Process objects. Plus, observer workers and
+        // external engine/recovery holders keep their independent ownership.
+        let children = [process, recoveryProcess].compactMap { $0 }.filter { $0.isRunning }
+        guard !children.isEmpty else {
             isStopping = false
             completion(true)
             return
         }
-        child.terminate()
+        children.forEach { $0.terminate() }
         Task {
-            for _ in 0..<100 where child.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
+            for _ in 0..<100 where children.contains(where: { $0.isRunning }) {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
             self.isStopping = false
-            let exited = !child.isRunning
-            if !exited { self.error = "本实例引擎尚未退出，请稍后重试退出" }
+            let exited = children.allSatisfy { !$0.isRunning }
+            if !exited { self.error = "本实例引擎或观察恢复检查尚未退出，请稍后重试退出" }
             completion(exited)
         }
     }
@@ -163,11 +225,11 @@ final class EngineSupervisor: ObservableObject {
     }
 
     private func publishNotifications(_ items: [AttentionItem]) {
-        let ids = Set(items.map(\.attentionId))
+        let ids = Set(items.map(\.notificationIdentity))
         defer { seenAttention = ids; notificationBaselineLoaded = true }
         guard notificationBaselineLoaded,
               ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil else { return }
-        let newItems = items.filter { !seenAttention.contains($0.attentionId) }
+        let newItems = items.filter { !seenAttention.contains($0.notificationIdentity) }
         guard !newItems.isEmpty else { return }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
@@ -175,9 +237,9 @@ final class EngineSupervisor: ObservableObject {
             for item in newItems {
                 let content = UNMutableNotificationContent()
                 content.title = "KaneoPilot · 需要你"
-                content.body = [item.title ?? item.taskId, item.blockedSummary ?? item.failureReason].compactMap { $0 }.joined(separator: "：")
+                content.body = item.blockedSummary ?? item.failureReason ?? item.title ?? item.taskId
                 content.userInfo = ["task_id": item.taskId, "attention_id": item.attentionId]
-                center.add(UNNotificationRequest(identifier: item.attentionId, content: content, trigger: nil))
+                center.add(UNNotificationRequest(identifier: item.notificationIdentity, content: content, trigger: nil))
             }
         }
     }

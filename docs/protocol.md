@@ -158,6 +158,11 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
 | `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
 | `record-goal-evaluation` | monitor 执行端 | 登记 AI 完成判定（幂等；校验 monitor claim 与报告底线，§5.23.10） |
+| `report-execution-question` | worker | 登记/关闭当前轮次问题与等待区间（§5.28） |
+| `save-execution-answers` | 桌面 | 保存当前问题草稿，不触达 Plus（§5.28） |
+| `submit-execution-answers` | 桌面 | 收据先行，回答同一 Plus 待答请求（§5.28） |
+| `reconcile-execution-question` | 桌面/核心 | 只读 Plus、核心结算送达与问题状态（§5.28） |
+| `stop-execution` | 桌面/核心 | 收据先行停止当前轮次，观察终态再结算（§5.28） |
 
 ## 4. 通用行为
 
@@ -625,6 +630,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 ```
 
 - **初始默认**（未保存时生效值）：`CloseAI / deepseek-flash / xhigh / default`。
+- 执行问答扩展 `execution_question_max_wait_seconds`（非负整数，缺省86400，0不限）；在 `set-exec-config` 顶层接收并合并保存，派发快照冻结。`pi_desktop` 五字段授权配置形状不变，旧配置/快照缺省值见 §5.28.5。
 - `agent_preset` 对应 `agents_dir`（缺省 `<app_support>/agents`，`KANPILOT_AGENTS_DIR` 覆盖）下的 `<name>.md` 文件；worker 经 `pi --system-prompt <file>` 注入。
 - 凭据只查就绪态：`pi auth check --provider <p> --model <m>` 的退出码；任何命令、界面、日志、数据库**不得**输出或持久化凭据值，也不读取 `~/.pi` 之外的 pi-desktop 内部库。
 - 调度台改配置只写本库 `settings.exec_config`；不写 `~/.pi/agent/*`、不动 pi 全局配置。
@@ -996,7 +1002,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 命令：`round-observe {task_id, run_id, executor?, continue_goal?, continue_goal_only?}`。`run_id` 必须是该任务**当前**执行轮次；任务须处于 `running|in_review|needs_user`；轮次 `backend=pi_desktop`；`job.json` 身份核验通过、`session_id`/`turn_id` 齐备、`send_state ∈ {sent, unknown}`，且 **events.jsonl 已有 session 事件**（「已确认发送」的硬证据，由发送成功 + 启动证明共同产生；`send_state` 只作粗筛）；`status=finished` → 返回 `{"status":"finished"}`（无需续接）。
 - **只读续接**：仅以既有 `spec.json` 拉起 `python3 -m kanpilot.pi_desktop_worker --spec <spec.json> --resume`（独立会话，stdout/stderr 追加 `worker.log`）。`--resume` 分支**不建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**；接管成功写 `job.observation_resumed_at`/`observe_pid`/`resume_started_at`，把轮次恢复为 `running`，并把 `send_state` 修回 `sent`（旧版假失败会写成 `unknown`）；首次续接前的收尾现场（status/detail/ended_at/exit_code/send_state）存入 `job.resume_previous` 供审计。
 - **幂等**：原 worker 或上一次续接的进程仍存活（轮次行 `pid` 或 `job.observe_pid`）→ 返回 `{"status":"observing","deduplicated":true}`，绝不拉起第二个观察者。
-- **剩余预算**：续接按 `job.started_at + 轮次时限` 计算剩余时间；已超时 → 不续接、也不动手停止仍在跑的会话，返回 `deferred`（`round_timeout_elapsed`），交人工判定终态。
+- **剩余预算**：续接按 `job.started_at + 轮次时限` 计算剩余时间；执行问答的当前/历史等待按 §5.28.5 扣除核心区间并集（不累加 job 缓存）；有开放问题时先检测并接管等待。已超时 → 不续接、也不动手停止仍在跑的会话，返回 `deferred`（`round_timeout_elapsed`），交人工判定终态。
 - **观察环境不成立**（连接不可用/身份不符/turn 读不到/已超时）→ worker 退出码 3，只写 `job.resume_detail`/`resume_deferred_at`/`resume_attempts`，**既有 job 状态与 terminal 事件一字不改**。
 - 返回形状：`{"status": "observing"|"settled"|"finished"|"deferred"|"exited"|"starting", "pid", "detail", "run_id", "reopened"}`；`observing` = 已接管且在观察，`settled` = 接管即见持久终态（进程已退出），`finished` = 轮次已按 completed 收尾；`deferred|exited|starting` = 本轮未接管成功（监控端按「会话读不到」处置，不改任务状态）。`reopened` = 本次接管是否顺带解除了误报的执行失败阻塞（§5.23.8），只在 `observing` 时可能为 true。
 - 事件：`round_observe`（detail 含 run_id/pid/status/detail/reopened）。命令不写远端、不发消息、不重复 agent_prompt；**task 状态只在 §5.23.8 的解除误报阻塞一种情形下被改写**（本任务本轮 `needs_user` + `failure_code=execution_failed` → `running`），其余情形一律不改。
@@ -1045,6 +1051,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - Plus 本机 MCP 新增两个**只读**具名工具，由既有 Host `goalReports.list/get` 提供，不开放 `submitDraft`/`retry`/`finalize`/`invalidate` 等写操作：
   - `pi_goal_report_list {sessionId}` → `{reports:[…GoalReportSummary]}`；
   - `pi_goal_report_get {sessionId, executionId}`（`reportId` 亦可）→ 完整报告 JSON，附 `report_sha256`。
+- 正式返回形状为 `{state, report, report_sha256, ...}`：`state` 属于 Host 读取信封，报告正文不要求重复 `status`。核心只在信封明确 `ready` 且哈希、报告 schema 与本轮身份全部有效时放行；旧直传报告形态继续按其 `status` 校验，不能把缺失状态推断为 ready。
 - Host 对 `status=ready` 的文件**重算** `file_hash`/`file_size` 并校验 schema 与身份，`report_sha256` 即重算值（不得直接回显 DB 旧值）；返回上限沿用既有 256 KiB，超限 → 明确 `truncated`，不返回截断正文。
 - 分态必须互不混淆：`pending` / `draft` / `failed` / `not_found` / `corrupt`(哈希或 schema 不符) / `truncated`。`fallback` 是**成功返回的报告**，但其 `integrity.kind=fallback` 表示**没有完成报告**，不能与 `structured` 混为一谈。
 - 只读工具不得返回提示词、转录或凭据；只按本机 `goal_reports` 表**同 session** 查询，跨 session → `not_found`/拒绝。
@@ -1069,7 +1076,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 新核心命令 `record-goal-evaluation {task_id, execution_run_id, monitor_request_id, monitor_run_id, plan_sha256, report_id, report_sha256, decision, criterion_reviews, reason}`：
   1. 先核对该 monitor 请求仍由 `kaneo-monitor` 领取且**租约有效**；
   2. 只读**重新取回同一报告**并核对当前任务/执行轮次/计划/报告 hash；
-  3. `decision=complete` 时还须**确定性**核对报告 `status=ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；`criterion_reviews` 非空、ID 不重复、结果**全为 `met`**；引用的 criterion/check/evidence ID **确实存在于报告**。任一不满足 → 拒绝记录完成判定。
+  3. `decision=complete` 时还须**确定性**核对 Host 读取状态 `state=ready`（旧直传形态为 `status=ready`）、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；传入硬闸的读取状态须来自本次经哈希与身份校验的核心读取结果，不能来自用户参数，也不向报告正文补造 `status`。`criterion_reviews` 非空、ID 不重复、结果**全为 `met`**；引用的 criterion/check/evidence ID **确实存在于报告**。任一不满足 → 拒绝记录完成判定。
   4. 通过后把 AI 判定、理由、引用 ID 与两种轮次身份写入 `goal_report_evaluated` 事件。
 - **幂等**：同一 `task_id`/`execution_run_id`/`plan_sha256`/`report_sha256` 已有判定 → 返回原事件，**不重复调用 AI**；新的 monitor 请求可引用它，但必须自己仍是有效 claim。
 - **`advance-task in-progress -> in-review` 对 `pi_desktop`** 必须带当前 monitor claim 与 evaluation event ID；核心在**远端更新前再次**复核：当前任务的执行轮次、报告身份/hash、上述确定性报告底线、事件确由有效 monitor 请求登记、`decision=complete` 与执行终态 `completed + finished/0`。绕过 monitor 直接调用、旧判定或报告变化 → 一律 `conflict`，**不触碰远端**。
@@ -1196,6 +1203,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 ## 5.25 本机双向 MCP（schema 5）
 
+- 执行问答增量增加 execution role 的 kp_runtime_input_pending/read 与 kp_runtime_input_respond/write，DTO、必需工具门、确认与送达规则见 §5.28；只读 worker 不获得 respond 权限。
+
 - 项目服务为 `kaneopilot`，HTTP 只绑定 loopback，协商 `2025-06-18` / `2025-03-26`；stdio 是同一服务的逐行 JSON-RPC 桥，不建立第二份任务状态。
 - 每次 HTTP 请求必须验证 Bearer、精确 Host、存在时的 Origin；transport session 绑定同一凭据、scope、协议与来源。撤销、过期、重启后的旧 grant 无效。管理凭据仅用于 `/admin/scopes` 与 initialize/initialized/ping 就绪检查，不可列出或调用模型工具。
 - runtime/task grant 分离。角色 scope 是稳定 invocation 或 task/run 身份、安全文件名、固定项目/五字段运行配置与有效期；文件 owner-only，凭据不进模型、argv、数据库或日志。有效 scope 同 ID 只能复用完整快照，续期不得超出初始观察边界；过期后由本机管理端重新注册相同身份，新 token 替代旧 token。
@@ -1278,7 +1287,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
                "reason_code", "failure_code", "failure_stage", "failure_reason",
                "evidence", "blocked_summary",
                "recommended", "alternatives", "allowed_actions": [...],
-               "attention_state": "actionable|historical|informational", "since"}]}
+               "attention_state": "actionable|historical|informational", "since", "question_preview": null}]}
    ```
  - `save_state` 缺省 `active`；`include_historical=true` 时包含已归档/回收站中的历史阻塞。
 
@@ -1290,6 +1299,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    | reason_code | 来源 failure_code | 阶梯 | 含义 |
    |---|---|---|---|
    | `needs_plan_input` | `planner_failed`、`plan_missing` | 3 | 规划材料不足或规划失败，需重新规划 |
+   | `execution_question` | `execution_input_required` | 3 | 执行中待答问题，轮次仍在运行（§5.28） |
    | `verify_unconfirmed` | `verification_unconfirmed` | 3 | 核心亲跑 verify 未通过或证据缺失 |
    | `review_changes_exhausted` | `review_blocked`、`review_fix_exhausted` | 3→4 | 同分支修复轮已达上限 |
    | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged` | 3 | 提交/推送/PR 受阻 |
@@ -1309,7 +1319,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `alternatives`：其余可选动作数组（`allowed_actions` 去掉 `recommended` 后的有序列表）。
  - `since`：该开放项首次出现的 ISO-8601 时间戳（UTC）。同一任务同一 `reason_code` 复用首次出现时间，不随重复观测刷新；用于「等待多久」展示与排序稳定性。
  
-#### 5.27.4 8 个用户动作
+#### 5.27.4 用户动作
  
  以下动作由 `resolve` 或专用命令实现，核心在事务内校验身份与任务状态，桌面只渲染 `allowed_actions`。
  
@@ -1323,9 +1333,13 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  | resolve | resolve {action:"release_lost"/"mark_sent"/"restore"/"accept_duplicate"} | 失联/发送不明/unknown | 释放失联/确认发送/恢复原任务 |
  | accept_verification | resolve {action:"accept_verification"} | verification_unconfirmed | 写入 verification_override，回到 running + monitor |
  | review_recovery | resolve {action:"recover_review"} | review_blocked 历史误退 | 恢复 in_review + 新 review 请求 |
+| answer_execution_questions | submit-execution-answers | §5.28 当前可答请求 | 回答同一 Plus 工具调用 |
+| skip_execution_questions | submit-execution-answers {skip_all:true} | §5.28 当前可答请求 | 全部跳过，继续同一 turn |
+| stop_execution | stop-execution | §5.28 当前轮次；界面二次确认 | 停止本轮，由观察者收尾 |
  
  - 所有动作写 `event kind=resolved`（actor、action、note）。
  - 危险操作须二次确认；动作结果写入 `resolution` JSON。
+- `execution_input_required` 只允许上述三个执行问答动作。通用 `resolve`、归档、回收、重新规划或新派发不能绕过 §5.28 的活跃轮次守卫。
  
 #### 5.27.5 session-view
  
@@ -1338,7 +1352,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `status_only=true` 时不请求 `session-messages`，仅返回状态摘要。
  - 返回形状：
    ```json
-   {"session": {"task_id", "run_id", "backend", "run_status", "session_id", "turn_id", "save_state", "state", "connection": {"state": "ok|degraded|unavailable", "detail"}, "allowed_actions": [...], "blocked_reason"?}}
+   {"session": {"task_id", "run_id", "backend", "run_status", "session_id", "turn_id", "save_state", "state", "connection": {"state": "ok|degraded|unavailable", "detail"}, "allowed_actions": [...], "blocked_reason"?, "execution_question": null}}
    ```
  - `run_status` ∈ `pending|running|finished|failed|unknown`。
  - 状态页刷新沿用既有 `session_poll_seconds`（默认 2s）；连接失败保留上一份有效状态并标「可能已过期」。
@@ -1507,3 +1521,88 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 
 
 Live 手动处置边界：核心验证不读取人工verification_override，因此live不得提供无效的accept_verification入口；allowed_actions隐藏该动作，直接resolve同样在任何写入前明确拒绝。可重新运行验证检查、修复/重规划，或使用其他核心允许的处置；legacy/shadow保留原人工接受行为。此约束不改变发送恢复或手动重新执行。
+
+## 5.28 执行期提问转交（P0 冻结，2026-10-14）
+
+本节为执行期问答的目标契约。当前状态为实现中，接口尚未实现；源码、测试和候选实测齐备前不得宣称可用。执行保持 `goal/auto`、`interactive`，覆盖目标契约轮及执行轮；规划、Review、Team 托管输入、permission 确认不属于本节。部署顺序为先 Plus、后 KaneoPilot，不含手机端、远程访问、付费模型验证或正式安装。
+
+### 5.28.1 发现、身份与存储
+
+- Plus `pi_agent_status` 的摘要位于 `status.pendingInputs={count,requestIds}`；Main 合并，runtime `getStatus()` 不变。摘要和详情用同一过滤条件：排除 `teamManaged`/`teamPending`，`native-pi:` 返回空。`pi_asks_pending {sessionId}` 返回 `{sessionId,asks:[{requestId,toolCallId,turnId?,createdAt?,questions}]}`，不得沿 Renderer 的最多八项裁剪冒充完整列表。
+- worker 每两秒先读摘要，发现新 requestId 再读详情。详情必须匹配当前 session 及 job.turn_id；缺省 turnId 时以同次观察的 status.currentTurnId 核验。不匹配不接受、不作答，不得用“当前唯一问题”猜身份。turn 终态需结合持久工具结果，不能仅因 completed 判过期。
+- 外部身份为 `(session_id,request_id)`，核心还绑定 `task_id/run_id/turn_id/tool_call_id`。存放在 task.extra 的 execution_questions 集合，不新建第二状态源。worker/job 只是缓存，核心命令重新校验当前轮次及实际 job 归属。
+- 请求首次 open 时间取核心 UTC 时间，不信任 Plus createdAt。重复同一身份、同一指纹幂等，不能重开已关闭记录或覆盖指纹不同的请求。问题上限为20题、每题100项、问题 UTF-8 JSON 64 KiB、身份字段512 UTF-8字节。非法/超限仍阻塞，但 `answerable=false`，保留安全摘要与拒绝原因，提示在 Plus 回答；不截断问题后伪装可答。
+- 同任务多请求按 opened_at/request_id 稳定先进先出。主 DTO 只显示一份，`queued` 为其余开放请求数；关闭后选下一份，直到所有开放请求关闭才解除阻塞。历史问题和草稿保留。
+
+### 5.28.2 稳定 DTO 与答案
+
+`get-task.task`（任务详情）、`session-view.session` 增加 `execution_question`，无记录时为 null；有开放请求返回最早一份，否则返回当前 run 最近的关闭记录。attention-list 条目增量增加 `question_preview:{count,first_title,request_id}|null`，沿用同一 DTO，不由 Swift 再派生另一套状态。
+
+```json
+{
+  "request_id":"…", "run_id":"…", "session_id":"…", "turn_id":"…", "tool_call_id":"…",
+  "source":"plus_asktool", "questions_sha256":"…", "answerable":true,
+  "state":"open", "delivery":"none", "answered_by":null,
+  "opened_at":"…", "closed_at":null, "wait_seconds":0,
+  "observer_alive":true, "queued":0,
+  "questions":[{"id":"q0","title":"…","description":"","multi_select":false,
+    "allow_custom":true,"required":false,
+    "options":[{"id":"o0","label":"…","description":"…"}]}],
+  "draft":[{"question_id":"q0","option_ids":["o0"],"text":"","skipped":false}],
+  "submitted":null
+}
+```
+
+- state 为 `open|answered|expired|stopped`；delivery 为 `none|submitting|accepted|not_pending|unknown|not_applied`；answered_by 为 `kaneopilot|plus|unknown|null`。submitted 非空时为 `{answers,operation_id,at,by}`，answers 是冻结的核心草稿形状，by 为调用端标签，不是权限来源。
+- `questions_sha256` 是核心对规范化问题的规范 JSON（UTF-8、排序对象键、无多余空白）计算的 SHA256；不传给 Plus。选项原始 label 保留，显示时不得改写回送值。新增 multi_select 只用于执行 DTO，规划 DTO 不变。
+- 每题身份为 q<i>，选项为 o<j>。answers 必须逐题按原顺序对应，拒绝未知、重复、遗漏 question_id/option_id 和超限文本。skipped=true 必须无选项与文本，回送 null；否则单选的自定义文本与选项互斥，多选去重后保持原选项顺序，可追加一项非空自定义文本。save可保存未完成条目（option_ids=[]、text=""、skipped=false）；submit对非跳过但没有任何有效值明确拒绝，不隐式代答。草稿同样校验身份、形状、互斥与上限。
+- 回送 Plus 的 answers 是 `(null|string[])[]`。不超过20题，每题最多100个非空字符串（含多选的自定义项）。规范化答案 JSON UTF-8 上限1 MiB，并额外校验完整 MCP 编码请求不超过2 MiB，包含转义、身份和 JSON-RPC 信封；超限明确拒绝，不截断。skip_all 生成每题 null，不可答请求不走此入口。
+
+### 5.28.3 五个核心命令
+
+命令沿固定 JSON 信封，只能写 SQLite；远端副作用只经 §5.25 runtime 域。业务校验失败不改变已有草稿、请求或任务。
+成功 data 共同字段为 `{task_id,run_id,execution_question}`，execution_question 沿 §5.28.2，可为null；
+命令特定status/observer字段只作补充。桌面写后经get-task重读权威DTO，不从返回字符串推断任务状态。
+
+| 命令与字段 | 行为 |
+|---|---|
+| `report-execution-question {task_id,run_id,session_id,turn_id,request_id,tool_call_id,questions?,state:open|closed|expired,detail?}` | worker 经 cli.run 调用。open 仅允许当前 running，或替换当前 run 的 observation_blocked/已有执行提问阻塞；核心规范化并登记。closed 结算身份一致、turn仍运行时已消失的请求，或 completed 且具有下述真实回答持久证据的请求。expired 在 turn 终止/丢失 waiter 的证据下结算。重复回报幂等。 |
+| `save-execution-answers {task_id,request_id,questions_sha256,answers}` | 核验当前 run 的开放可答请求与指纹，保存完整草稿；不触达 Plus。submitting/unknown 的冻结答案不得修改。 |
+| `submit-execution-answers {task_id,run_id,request_id,questions_sha256,answers|skip_all,operation_id}` | 短事务校验、预留并冻结答案，事务外调用 runtime.input_respond，再在短事务按当前 run/request/指纹/operation_id 条件结算；成功后确保有观察者。 |
+| `reconcile-execution-question {task_id,run_id}` | 只读 Plus status/turn/pending，再写核心结算。结果未知可自动调用一次；无外部写、无自动重发，读取失败保留 unknown 与原草稿。 |
+| `stop-execution {task_id,run_id,operation_id,reason?,abort?}` | 二次确认由 UI 承担；核心核验活动轮次后，经 runtime stop 收据先行。接受停止请求不等于已终止；确保观察者，按持久 turn 终态完成 stopped/失败恢复。未知结果不重发。worker可传reason=execution_question_expired；abort=true仅同run已有核心stop_requested_at且满10秒，使用新operation_id，不重新计时。UI不传内部字段。 |
+
+- 同 operation_id、同冻结参数返回现有结果，不同参数冲突；本机并发提交只能一个预留成功，不持 SQLite 写锁等待 Plus。未答期间通用 resolve、重新派发、归档、回收等核心入口在外部 I/O 前及写事务内拒绝，不仅隐藏 UI 按钮。
+- open：`running→needs_user`，failure_code=`execution_input_required`，reason_code=`execution_question`（阶梯3），blocked_summary=`执行中提问：<首题>（共 N 题）`。轮次仍 running，engine decide 对任务保持 BLOCK。
+- 全部答完：仅当前 run 的 execution_input_required 清阻塞并 `needs_user→running`；外部其它阻塞原样保留，不触发重新规划或新派发。`round-observe` 的 §5.23.8 解除逻辑仍只作用 execution_failed，不得提前清除提问阻塞。
+- 终止/过期：保留草稿和回答历史，核心同事务改为既有 execution_failed 恢复流程；不能保留已无开放问题的 execution_input_required，不能仅靠 worker.finalize 修改 job。最长等待原因 detail=`execution_question_expired`，显式停止保留 stopped 来源。
+- 事件 kind 增加 `execution_question_opened/answered/closed`，中文分别为“执行中提问”“执行问题已回答”“执行问题已关闭”；同步 derive、Swift Labels 和固定枚举测试。只记录 operation_id/指纹/答案摘要/端来源，不记 token、请求头或连接文件全文。
+
+### 5.28.4 送达、竞争与未知结果
+
+- `kp_runtime_input_respond` 先 reserve_downstream，再调用 `pi_asks_resolve {sessionId,requestId,expectedToolCallId,answers,confirm:true}`，最后 complete_operation。Plus 由 runtime waiter 删除保证最多一次，桌面与 MCP 谁先答谁生效；本地锁不能阻止 Plus UI 竞争。
+- `answered`：delivery=accepted，结算 answered_by=kaneopilot。`not_pending`：先读取持久 turn/status；turn 已终止时按持久证据规则结算，身份一致仍运行且问题消失可结算 answered。没有被接受的本地送达时来源为 plus，有未知本地送达时为 unknown；不能将未知送达冒充 Plus 端已答。
+- 传输失败、断连或进程中断的应用结果不明：delivery=unknown，保持阻塞，核心答案冻结。只读 pending 仍在只说明该次读取尚待答，**不能证明原调用未生效**：原网络调用可能仍在途。原计划由 pending 直接推断 not_applied 的规则在此废止。
+- not_applied 仅在原调用明确拒绝且可证明没有后续执行时使用。不得以 worker 退出、pending 快照、无回答或找不到回执单独证明未应用。
+- unknown 后不自动重发。用户显式重新提交只能使用原冻结答案和新 operation_id；本机仍在 submitting 时拒绝重复提交，unknown 时允许同答案重试并保留各次收据。不同答案拒绝直到原结果确定，防止旧答案晚到覆盖用户新选择。重复最多得到 not_pending，不声称未知的旧调用被取消。
+- 问题消失但 turn 不可读或身份无法核实：保持 unknown/阻塞，不猜结算。durable running 但 status.currentTurnId 缺省、pending为空时不得猜已回答；sidecar 重启造成 waiter 丢失不代表工具已答。晚到完成回执不能重新打开已关闭请求或覆盖更新的 run/operation；条件更新失败只保留审计回执。
+
+- 快速完成：Plus 在现有 asktool toolResult.details 持久化 resolutionKind=`answered|stopped|aborted`。普通回答及 Decline all 为 answered，graceful-stop 取消为 stopped，abort 取消为 aborted。completed 时必须读取完整 transcript，匹配同 session/turn/toolCallId 且 resolutionKind=answered，才按 answered 正常收尾；错误、aborted、stopped 或缺少真实回答证据仍按 expired 处理。Plus session.get 的 message.turnId 必须来自同session消息ID对应的持久messages索引及同session turn归属，不按当前turn/时间猜测；索引未知保留缺省。input.resolved.by 仅事件可见，不作为持久来源证据，不新增表或历史 API。
+
+### 5.28.5 等待、时限与恢复
+
+- 最长等待默认86400秒（24小时）；执行配置增加非负整数 execution_question_max_wait_seconds，0为不限，派发冻结到该轮快照。旧快照缺省86400，不读当前设置覆盖旧轮次。成本预算不变。
+- 核心是等待时间唯一权威。run 待答集合 `0→1` 开启等待区间，`1→0` 关闭；并发问题的等待取**区间并集**，不能将各请求重叠时长相加。开放区间计算到本次核心时间，历史区间重报/恢复不重复累计。
+- 轮次剩余预算=`时限−max(0,now−started_at−等待并集时长)`；自动化预算扣除等待区间与本段 `[segment_started_at,now]` 的交集并集。新段采用新起点，不清除历史问答。job.input_wait_seconds 仅缓存；resume 从核心重建，不使用旧缓存再加一次。
+- pending 检测先于 deadline 判断，包括 resume 第一轮与 Goal 契约轮。有开放问题不得因普通时限 stop/abort。最长等待达到后，经核心停止操作收据执行 stop；十秒后未见终态才 abort，原因 execution_question_expired，不扩大只读 client 的写权限。
+- Plus graceful stop 预期关闭 ordinary waiter 并 completed；abort 是 aborted。P1 必须先红验证 spec17 的 stop 跳过规则（当前 runtime graceful stop 的 waiter 关闭尚缺实现），修复时保留 Team 与 preserveRunningTools 边界。worker 不得用 runtime idle 冒充成功完成。
+- 观察续接保持同 task/run/session；只读接管活跃 ask，不传 continue_goal_only。continue_goal 状态门可接受该 run 的 execution_input_required，但不绕过 Goal 精确审批授权，也不获得回答/停止写权限。
+- 提交后、App 后台恢复入口及任务详情“重新连接”汇入同一只读 observer ensure。engine 可发恢复意图，但 legacy/shadow 或 engine关闭时仍有已有 recover-execution-goals 本机入口；不依赖 desktop_queue 领取。该 run 有问答历史、任务 running 且观察者缺席时，后台恢复继续检查；开放问题走普通只读观察，已答契约轮完成后仅沿既有精确 continue_goal_only 审批门续接。多路恢复必须有原子 launch reservation，PID检查只作存活核实，不能单靠检查后spawn宣称并发去重。
+- scope 到期按 §5.25 同身份重新注册，新token替代旧token，accepted create收据仍证明session归属。只对可确认的授权过期恢复，不把全部forbidden作为可重试；只读重连允许身份一致且正在等答的running turn，保留原有历史恢复错误门。
+
+### 5.28.6 runtime 工具、能力门与验收
+
+- execution role 增加 `kp_runtime_input_pending {scope_id,session_id}`（read）、`kp_runtime_input_respond {scope_id,session_id,request_id,expected_tool_call_id,answers,operation_id}`（write）。guard校验有效scope、execution角色及accepted create的session归属，连接只取scope冻结值。其他角色拒绝。respond仅核心提交使用非只读client，不能放宽worker的通用_write门。
+- PI_DESKTOP_INPUT_TOOLS 包含 pi_asks_pending/pi_asks_resolve，并入新派发必需工具列表。旧Plus明确unsupported_tools/能力tools_ok=false，发prompt前阻断；旧轮次只读恢复保留原能力，不凭新增工具门停止旧轮次。
+- 隔离测试覆盖原计划全部验收：10秒内收件箱/通知；同turn原tool续跑；Plus先答与双端竞争；unknown不自动重发且同答案重试；重叠等待/六小时假时钟/最长等待；scope到期/observer崩溃及并发恢复；终态/重启草稿保留；engine关闭仍可回答；直接CLI非法动作拒绝；日志与DB不泄漏token；历史恢复不变。
+- 单测/mock通过不能替代真实Rust Host、生产sidecar、loopback确定性SSE联合演练及原生问答卡/系统通知核验。候选记录base/head/源码与产物指纹；各未运行项明确NOT RUN。适用检查齐备后为待体验，只有用户确认该新功能才标已验收。

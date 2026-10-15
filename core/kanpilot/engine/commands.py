@@ -52,6 +52,7 @@ def _needs_user_views(conn, now, *, include_historical):
         f"AND save_state IN ({placeholders}) ORDER BY updated_at DESC"
     )
     views = []
+    from ..execution_questions import view as question_view, preview as question_preview
     for row in conn.execute(query, states).fetchall():
         views.append({
             "task_id": row["task_id"],
@@ -68,6 +69,7 @@ def _needs_user_views(conn, now, *, include_historical):
             # Authoritative action list (single source; attention never
             # recomputes it).
             "allowed_actions": derive.allowed_actions(conn, row, now),
+            "question_preview":question_preview(question_view(row,now)),
             "evidence": _task_evidence(conn, row["task_id"],
                                        row["blocked_at"] or row["updated_at"]),
         })
@@ -282,7 +284,9 @@ def cmd_session_view(ctx, payload: dict) -> dict:
         connection = {"state": "ok",
                       "detail": f"后端 {backend}，运行状态 {run_status}"}
         state = sread["state"] if sread else "associated"
+    from ..execution_questions import view as question_view
     session = {
+        "execution_question":question_view(task,ctx.now,ctx.conn) if task["run_id"]==run_id else None,
         "task_id": task_id, "run_id": run_id, "backend": backend,
         "run_status": run_status, "session_id": session_id, "turn_id": None,
         "save_state": save_state, "state": state, "connection": connection,

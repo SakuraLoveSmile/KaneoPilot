@@ -113,7 +113,10 @@ struct AutomationDashboardView: View {
                             Text(item.projectName ?? "未提供项目").font(.kpSmall).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
                             VStack(alignment: .leading, spacing: Spacing.s) {
                                 Text(item.title ?? item.taskId).font(.kpBody).lineLimit(1).foregroundStyle(.primary)
-                                if let reason = item.blockedSummary ?? item.failureReason {
+                                if let preview = item.questionPreview {
+                                    Text("执行中提问 · \(preview.count)题").font(.kpSmall).foregroundStyle(.orange)
+                                    Text(preview.firstTitle).font(.kpSmall).foregroundStyle(.secondary).lineLimit(2)
+                                } else if let reason = item.blockedSummary ?? item.failureReason {
                                     Text(reason).font(.kpSmall).foregroundStyle(.red).lineLimit(2)
                                 }
                                 Label("\(item.failureStage.map { Labels.stage($0) } ?? "未提供阶段") · \(attentionStateTitle(item.attentionState))", systemImage: "exclamationmark.circle")
@@ -122,6 +125,7 @@ struct AutomationDashboardView: View {
                                     .font(.kpSmall).foregroundStyle(.secondary)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                             Text("等待自 \(TimeFormat.short(item.since))").font(.kpSmall).foregroundStyle(.secondary)
+                            if item.questionPreview != nil { Text("回答").font(.kpSmall).foregroundStyle(Color.accentColor) }
                             Image(systemName: "chevron.right").font(.kpSmall)
                         }.padding(.vertical, Spacing.s).frame(minHeight: 40)
                         .background(selectedID == item.taskId ? Color.accentColor.opacity(0.08) : Color.clear)

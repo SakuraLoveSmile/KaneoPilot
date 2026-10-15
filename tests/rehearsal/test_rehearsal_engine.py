@@ -590,21 +590,22 @@ def test_migration_no_implicit_upgrade(cli, tmp_env):
 # 场景 20：attention_list_contract_snapshot（protocol §5.27.3 冻结规格）
 # ---------------------------------------------------------------------------
 
-# 单一来源 attention.ITEM_FIELDS 的 15 字段（顺序即规格顺序）。
+# 单一来源 attention.ITEM_FIELDS（顺序即规格顺序，§5.28新增问题预览）。
 ATTENTION_ITEM_FIELDS = (
     "attention_id", "task_id", "project_name", "title", "reason_code",
     "failure_code", "failure_stage", "failure_reason", "evidence",
     "blocked_summary", "recommended", "alternatives", "allowed_actions",
-    "attention_state", "since",
+    "attention_state", "since", "question_preview",
 )
 
-# §5.27.3 冻结的 13 个 reason_code 枚举。
+# §5.27.3 + §5.28 冻结的 reason_code 枚举。
 REASON_CODES = (
     "needs_plan_input", "verify_unconfirmed", "review_changes_exhausted",
     "delivery_blocked", "remote_unavailable", "plus_unreachable",
     "plus_send_unknown", "gh_environment", "push_rejected",
     "pr_closed_unmerged", "budget_exceeded", "concurrency_stalled",
     "needs_user_other",
+    "execution_question",
 )
 
 # evidence 绝不含的凭据/连接材料字样。
@@ -626,7 +627,7 @@ def _view(task_id, failure_code, failure_stage="", since="2026-10-10T00:00:00+00
 
 
 def test_scenario_attention_list_contract_snapshot(cli, factory):
-    """attention-list 只读聚合：15 字段精确快照 + reason_code 枚举 + 证据脱敏。"""
+    """attention-list 只读聚合：精确快照 + reason_code 枚举 + 证据脱敏。"""
     assert tuple(kattention.ITEM_FIELDS) == ATTENTION_ITEM_FIELDS
     blocked = factory.make_needs_user()
     tid = blocked.task.task_id
@@ -640,7 +641,7 @@ def test_scenario_attention_list_contract_snapshot(cli, factory):
     assert len(mine) == 1, items
     item = mine[0]
 
-    # 15 字段精确相等（不缺不多）
+    # 字段精确相等（不缺不多）
     assert set(item.keys()) == set(ATTENTION_ITEM_FIELDS), (
         f"缺字段：{sorted(set(ATTENTION_ITEM_FIELDS) - set(item))}；"
         f"多字段：{sorted(set(item) - set(ATTENTION_ITEM_FIELDS))}")
@@ -648,7 +649,7 @@ def test_scenario_attention_list_contract_snapshot(cli, factory):
     # attention_id 确定性格式 attn_<task_id>_<reason_code>（重启稳定）
     assert item["attention_id"] == f"attn_{tid}_{item['reason_code']}", item
 
-    # reason_code ∈ 13 个冻结枚举
+    # reason_code 属于冻结枚举
     assert item["reason_code"] in REASON_CODES, item
 
     # attention_state 词表
