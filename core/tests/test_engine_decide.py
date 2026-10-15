@@ -369,7 +369,7 @@ class TestReasonCode(unittest.TestCase):
         self.assertIn(item["evidence"][0]["kind"],
                       ("event", "request", "probe", "runtime_operation"))
 
-    def test_all_13_reason_codes_reachable_with_example(self):
+    def test_all_reason_codes_reachable_with_example(self):
         codes = {
             attention.NEEDS_PLAN_INPUT, attention.VERIFY_UNCONFIRMED,
             attention.REVIEW_CHANGES_EXHAUSTED, attention.DELIVERY_BLOCKED,
@@ -378,8 +378,9 @@ class TestReasonCode(unittest.TestCase):
             attention.PUSH_REJECTED, attention.PR_CLOSED_UNMERGED,
             attention.BUDGET_EXCEEDED, attention.CONCURRENCY_STALLED,
             attention.NEEDS_USER_OTHER,
+            attention.EXECUTION_QUESTION,
         }
-        self.assertEqual(len(codes), 13)
+        self.assertEqual(len(codes), 14)
         produced = set(attention._REASON_TABLE.values())
         # every non-fallback code is produced by >=1 failure_code
         self.assertEqual(produced, codes - {attention.NEEDS_USER_OTHER})

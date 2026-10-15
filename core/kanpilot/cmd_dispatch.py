@@ -832,6 +832,33 @@ def _observer_pid_alive(conn, task_id, run_id, pid, run_dir, job):
 
 
 def cmd_round_observe(ctx, payload: dict) -> dict:
+    """Reserve the observer launch atomically across App/engine/answer paths."""
+    import uuid
+    token=uuid.uuid4().hex
+    task_id,run_id=payload["task_id"],payload["run_id"]
+    with db.write_txn(ctx.conn):
+        task=db.require_task(ctx.conn,task_id)
+        if task["run_id"]!=run_id: raise util.KanpilotError("conflict","只允许续接当前执行轮次")
+        if payload.get("executor")=="scheduler" and (not db.task_schedulable(task)
+                or db.paused(ctx.conn,"dispatch") or db.paused(ctx.conn,"monitor")):
+            return {"status":"deferred","pid":None,"detail":"观察恢复已暂停"}
+        previous=db.task_extra(task).get("observer_launch") or {}
+        deadline=util.parse_ts(previous.get("expires_at"))
+        if previous.get("run_id")==run_id and deadline and deadline>util.now_dt():
+            return {"status":"starting","pid":previous.get("pid"),"deduplicated":True}
+        import datetime
+        db.set_extra(ctx.conn,task,ctx.now_iso,observer_launch={"run_id":run_id,"token":token,
+            "expires_at":util.to_iso(util.now_dt()+datetime.timedelta(seconds=120))})
+    try:
+        return _round_observe_reserved(ctx,payload)
+    finally:
+        with db.write_txn(ctx.conn):
+            task=db.require_task(ctx.conn,task_id)
+            if (db.task_extra(task).get("observer_launch") or {}).get("token")==token:
+                db.set_extra(ctx.conn,task,util.now_iso(),observer_launch=None)
+
+
+def _round_observe_reserved(ctx, payload: dict) -> dict:
     """round-observe（protocol §5.23.7）：pi_desktop 轮次的观察者续接。
 
     观察进程退出（应用重启/崩溃/被清理）而 PI-Desktop 会话仍在运行时，重新
@@ -843,12 +870,15 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
     task_id, run_id = task["task_id"], payload["run_id"]
     continue_goal = payload.get("continue_goal") is True
     continue_only = payload.get("continue_goal_only") is True
+    if task["failure_code"] == "execution_input_required":
+        continue_goal=False
+        continue_only=False
     if continue_goal:
         automation = db.task_extra(task).get("automation") or {}
         if (not db.task_schedulable(task) or db.paused(conn, "dispatch")
                 or db.paused(conn, "monitor") or not automation or automation.get("manual_takeover")
                 or task["status"] not in ("running", "needs_user")
-                or (task["status"] == "needs_user" and task["failure_code"] != "execution_failed")):
+                or (task["status"] == "needs_user" and task["failure_code"] not in ("execution_failed","execution_input_required"))):
             return {"status": "deferred", "pid": None, "detail": "目标自动续接已暂停或需人工处理"}
     if task["run_id"] != run_id:
         raise util.KanpilotError(
@@ -941,7 +971,7 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
                 role="execution", connection_file=config.get("connection_file"),
                 project_path=spec["cwd"], runtime_config=config, task_id=task_id,
                 run_id=run_id, timeout=10, lease_seconds=spec.get("timeout_seconds"), read_only=True)
-            client.connect(required_tools=constants.PI_DESKTOP_DISPATCH_TOOLS)
+            client.connect(required_tools=constants.PI_DESKTOP_REQUIRED_TOOLS + constants.PI_DESKTOP_GOAL_TOOLS)
             spec["continue_goal_authorization"] = pi_desktop_worker.prepare_goal_continuation(spec, job, client)
         except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
             if continue_only:
@@ -957,6 +987,11 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
             spec["requires_goal_identity"] = True
         spec.pop("executor_instance_id", None)
     spec_path = run_dir / "observer-spec.json"
+    # Recheck after remote preflight: a pause during a slow Plus read must
+    # prevent the background scheduler from launching a new observer.
+    if payload.get("executor")=="scheduler" and (not db.task_schedulable(db.require_task(conn,task_id))
+            or db.paused(conn,"dispatch") or db.paused(conn,"monitor")):
+        return {"status":"deferred","pid":None,"detail":"观察恢复已暂停"}
     spec_path.write_text(util.jdump(spec), encoding="utf-8")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(constants.core_root())
@@ -975,6 +1010,8 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         raise util.KanpilotError("internal", f"观察进程拉起失败：{exc}")
 
     _register_started_worker(ctx, spec, proc, spec_path)
+    with db.write_txn(conn):
+        round_store.mark_started(conn,task_id,run_id,now,pid=proc.pid)
 
     status, detail = _wait_observe_attach(run_dir, proc, job)
     reopened = False

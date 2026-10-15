@@ -69,6 +69,7 @@ _LADDERS = {
 # §待处理原因/§交付, and scenarios.md fault switches. Anything not listed is a
 # needs-you (阶梯 4) item by default.
 _FAILURE_CODE_LADDER = {
+    "execution_input_required": LADDER_QUALITY,
     # 阶梯 1 transient：网络/远端瞬时；git 探测超时单独成码，区别于 not_git_repo
     # （automation_policy 明确"避免误升级为阶梯 2"）。
     "remote_unavailable": LADDER_TRANSIENT,

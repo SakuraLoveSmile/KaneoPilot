@@ -70,12 +70,15 @@ def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=No
 
 
 def cmd_enqueue(ctx, payload: dict) -> dict:
+    from .execution_questions import guard_active
     conn, now = ctx.conn, ctx.now_iso
     initial = db.require_task(conn, payload["task_id"])
+    guard_active(initial)
     if (payload.get("kind") or constants.ENQUEUE_INFER.get(initial["status"])) == "review":
         core.require_committed_review(initial)
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        guard_active(task)
         # §5.20.1（v2）：purged 终态拒绝一切写入口。
         if db.task_is_purged(task):
             raise util.KanpilotError(
@@ -583,7 +586,9 @@ def _accept_remote_for_resolution(ctx, payload):
 
 
 def cmd_resolve(ctx, payload: dict) -> dict:
+    from .execution_questions import guard_active
     conn, now = ctx.conn, ctx.now_iso
+    guard_active(db.require_task(conn, payload["task_id"]))
     action = payload["action"]
     note = payload.get("note")
     # A14: resolve is a user-action surface today (no automation caller), but the
@@ -607,6 +612,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         with db.write_txn(conn):
             guarded = _engine_fix_guard(ctx, payload, check_binding=False, prepared=engine_fix)
             task = db.require_task(conn, payload["task_id"])
+            guard_active(task)
             if _resolution_snapshot(task) != engine_fix["snapshot"]:
                 raise util.KanpilotError("conflict", "自动补救处置状态已变化")
             code = guarded["block"]
@@ -626,6 +632,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         _engine_fix_guard(ctx, payload, prepared=engine_fix)  # external worktree/plan recheck after I/O
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
+        guard_active(task)
         if engine_fix:
             guarded = _engine_fix_guard(ctx, payload, check_binding=False, prepared=engine_fix)
             if (guarded.get("deduplicated") or guarded.get("block")

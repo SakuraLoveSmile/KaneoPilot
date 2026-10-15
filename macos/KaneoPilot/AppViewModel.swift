@@ -109,6 +109,7 @@ final class AppViewModel: ObservableObject {
     private var eventQuery: String? = nil
     private var eventStage: String? = nil
     private var eventResult: String? = nil
+    private var executionAnswerDrafts: [[String]: ExecutionAnswerStore] = [:]
     private var planAnswerDrafts: [String: PlanAnswerStore] = [:]
     private var reviewResolutionDrafts: [String: ReviewResolutionStore] = [:]
     private var verificationCheckOperations: [String: VerificationCheckStore] = [:]
@@ -269,6 +270,8 @@ final class AppViewModel: ObservableObject {
 
     /// get-task + list-events(task_id)，供任务详情列与 push 页共用。
     func fetchDetail(taskID: String) async throws -> (TaskDetail, [EventItem]) {
+        let executionVersions = executionAnswerDrafts.values.filter { $0.taskID == taskID }
+            .map { ($0, $0.beginObservation()) }
         async let taskResult = attempt {
             try await self.client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self)
         }
@@ -277,7 +280,10 @@ final class AppViewModel: ObservableObject {
         }
         let (t, e) = await (taskResult, eventsResult)
         guard case .success(let taskResp) = t else {
-            if case .failure(let error) = t { throw error }
+            if case .failure(let error) = t {
+                for (store, version) in executionVersions where store.generation == version { store.loadingFailed(error) }
+                throw error
+            }
             throw CoreError.badOutput("get-task 无结果")
         }
         let list = (try? e.get())?.events ?? []
@@ -290,6 +296,10 @@ final class AppViewModel: ObservableObject {
             store.observe(executionRunID: taskResp.task.runId, planSHA: taskResp.task.planSha256,
                 allowed: taskResp.task.allowedActions?.contains("run_verification_checks") == true
                     && taskResp.task.readOnly != true)
+        }
+        for (store, version) in executionVersions where store.generation == version {
+            store.observe(current: taskResp.task.executionQuestion, currentRunID: taskResp.task.runId,
+                          readOnly: taskResp.task.readOnly == true)
         }
         return (taskResp.task, list)
     }
@@ -843,6 +853,32 @@ final class AppViewModel: ObservableObject {
         executorScheduler?.runPlanner()
     }
 
+    func retainedExecutionAnswerStores(taskID: String, excluding identity: [String]?) -> [ExecutionAnswerStore] {
+        executionAnswerDrafts.values.filter {
+            $0.taskID == taskID && $0.dirty && $0.question.identity != identity
+        }.sorted { $0.question.openedAt < $1.question.openedAt }
+    }
+
+    func executionAnswerStore(taskID: String, question: ExecutionQuestion, readOnly: Bool) -> ExecutionAnswerStore {
+        let key = [taskID] + question.identity
+        if let store = executionAnswerDrafts[key] { return store }
+        let store = ExecutionAnswerStore(taskID: taskID, question: question, readOnly: readOnly,
+            command: { [weak self] command, payload in
+                guard let self else { throw CoreError.coreMissing }
+                return try await self.client.run(command, payload: payload, as: ExecutionQuestionCommandResponse.self)
+            }, reconnect: { [weak self] in
+                guard let self else { throw CoreError.coreMissing }
+                _ = try await self.client.run("round-observe", payload: ["task_id": taskID, "run_id": question.runId])
+            }, refresh: { [weak self] in
+                guard let self else { return nil }
+                let (detail, _) = try await self.fetchDetail(taskID: taskID)
+                await self.refreshAll()
+                return detail.executionQuestion
+            })
+        executionAnswerDrafts[key] = store
+        return store
+    }
+
     func planAnswerStore(taskID: String, clarification: PlanClarification) -> PlanAnswerStore {
         let key = "\(taskID)/\(clarification.id)"
         // A changed task must not hide an unconfirmed submit or an unsaved stale draft.
@@ -891,6 +927,11 @@ final class AppViewModel: ObservableObject {
 
     /// Called before application termination; a failed save keeps the app open.
     func flushPlanAnswerDrafts() async throws {
+        for store in executionAnswerDrafts.values {
+            if !(await store.finishForExit()) {
+                throw CoreError.badOutput("执行答案草稿尚未保存：\(store.error ?? "请重试保存")")
+            }
+        }
         for (key, store) in Array(planAnswerDrafts) {
             if !(await store.saveNow()) {
                 let taskID = String(key.prefix { $0 != "/" })
@@ -1310,6 +1351,9 @@ final class AppViewModel: ObservableObject {
         case "enqueue": return "安排下一步"
         case "retry": return "重试派发"
         case "answer_plan_questions": return "回答问题"
+        case "answer_execution_questions": return "回答执行问题"
+        case "skip_execution_questions": return "全部跳过并继续"
+        case "stop_execution": return "停止本轮"
         case "restore": return "恢复原任务"
         case "accept_duplicate": return "接受可能重复，重新派发"
         case "mark_sent": return "登记已发出"
@@ -1875,3 +1919,368 @@ extension Error {
         return localizedDescription
     }
 }
+
+// BEGIN EXECUTION ANSWER STORE
+/// Core owns delivery and history. This store only retains unsaved form edits and in-flight identity.
+@MainActor
+final class ExecutionAnswerStore: ObservableObject {
+    let taskID: String
+    private let identity: [String]
+    @Published private(set) var question: ExecutionQuestion
+    @Published private(set) var answers: [ExecutionAnswer]
+    @Published private(set) var customQuestionIDs: Set<String> = []
+    @Published private(set) var working = false
+    @Published private(set) var saving = false
+    @Published private(set) var submitting = false
+    @Published private(set) var error: String?
+    @Published private(set) var feedback: String?
+    @Published private(set) var possiblyStale = false
+    @Published private(set) var obsolete = false
+    @Published private(set) var resultUnknown = false
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readOnly: Bool
+    private var revision = 0
+    private var savedRevision = 0
+    private(set) var generation = 0
+    private var operation: (id: String, answers: [ExecutionAnswer], skipAll: Bool)?
+    private var stopOperationID: String?
+    @Published private(set) var stopResultUnknown = false
+    @Published private(set) var stopRequested = false
+    private let command: (String, [String: Any]) async throws -> ExecutionQuestionCommandResponse
+    private let reconnect: () async throws -> Void
+    private let refresh: () async throws -> ExecutionQuestion?
+
+    init(taskID: String, question: ExecutionQuestion, readOnly: Bool = false,
+         command: @escaping (String, [String: Any]) async throws -> ExecutionQuestionCommandResponse,
+         reconnect: @escaping () async throws -> Void,
+         refresh: @escaping () async throws -> ExecutionQuestion?) {
+        self.taskID = taskID
+        self.question = question
+        identity = question.identity
+        let restored = Self.restoredAnswers(question)
+        answers = restored
+        customQuestionIDs = Set(restored.filter { !$0.text.isEmpty }.map(\.questionId))
+        self.readOnly = readOnly
+        self.command = command
+        self.reconnect = reconnect
+        self.refresh = refresh
+    }
+
+    private static func restoredAnswers(_ question: ExecutionQuestion) -> [ExecutionAnswer] {
+        let frozen = question.delivery == "unknown" || question.delivery == "submitting" || question.state == "answered"
+        let draft = frozen ? (question.submitted?.answers ?? question.draft) : question.draft
+        return question.questions.map { item in
+            draft.first { $0.questionId == item.id }
+                ?? ExecutionAnswer(questionId: item.id, optionIds: [], text: "", skipped: false)
+        }
+    }
+
+    var formIdentity: [String] { [taskID] + identity }
+    var dirty: Bool { revision != savedRevision }
+    var canDiscardUnsaved: Bool {
+        dirty && !working && (obsolete || possiblyStale || question.state != "open" || readOnly)
+            && (obsolete || (!unknown && question.delivery != "submitting"))
+    }
+    func discardUnsavedEdits() {
+        guard canDiscardUnsaved else { return }
+        answers = Self.restoredAnswers(question)
+        customQuestionIDs = Set(answers.filter { !$0.text.isEmpty }.map(\.questionId))
+        savedRevision = revision
+        generation += 1
+        feedback = "已放弃未保存的本机编辑，核心历史仍保留"
+    }
+    var unknown: Bool { resultUnknown || question.delivery == "unknown" }
+    var inputsLocked: Bool {
+        readOnly || obsolete || possiblyStale || working || question.state != "open"
+            || !question.answerable || question.delivery == "submitting" || unknown || stopResultUnknown || stopRequested
+    }
+    var canSubmit: Bool {
+        !inputsLocked && !question.questions.isEmpty && question.questions.allSatisfy { item in
+            guard let answer = answer(item.id) else { return false }
+            return answer.skipped || !answer.optionIds.isEmpty || !answer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+    var canRetry: Bool {
+        unknown && !working && !obsolete && !possiblyStale && !readOnly && !stopResultUnknown
+            && !stopRequested && question.answerable && question.state == "open"
+    }
+    var canStop: Bool {
+        !working && !obsolete && !possiblyStale && !readOnly && !stopResultUnknown && !stopRequested && question.state == "open"
+    }
+    var statusText: String {
+        if obsolete || possiblyStale { return "可能已过期，草稿已保留" }
+        if question.state == "expired" { return "已过期，原问题与草稿保留" }
+        if question.state == "stopped" { return "本轮已停止，原问题与草稿保留" }
+        if question.state == "answered" {
+            switch question.answeredBy {
+            case "plus": return "已在 Plus 回答"
+            case "kaneopilot": return "已回答，继续执行"
+            default: return "问题已回答，回答来源未知"
+            }
+        }
+        if stopResultUnknown { return "停止结果未知，请重新核对；不会自动重发停止请求" }
+        if stopRequested { return "停止请求已提交，等待本轮终态" }
+        if submitting || question.delivery == "submitting" { return "正在提交答案" }
+        if unknown { return "送达结果未知，正在核对" }
+        if !question.answerable { return "请在 Plus 中回答" }
+        if question.delivery == "not_applied" { return "原提交明确未应用，可重新提交" }
+        return "等待回答"
+    }
+
+    func answer(_ id: String) -> ExecutionAnswer? { answers.first { $0.questionId == id } }
+
+    func toggleOption(_ id: String, questionID: String) {
+        guard !inputsLocked, let item = question.questions.first(where: { $0.id == questionID }),
+              item.options.contains(where: { $0.id == id }), var answer = answer(questionID) else { return }
+        answer.skipped = false
+        if item.multiSelect {
+            let selected = Set(answer.optionIds).symmetricDifference([id])
+            answer.optionIds = item.options.filter { selected.contains($0.id) }.map(\.id)
+        } else {
+            answer.optionIds = [id]
+            answer.text = ""
+            customQuestionIDs.remove(questionID)
+        }
+        update(answer)
+    }
+
+    func selectCustom(questionID: String) {
+        guard !inputsLocked, let item = question.questions.first(where: { $0.id == questionID }),
+              item.allowCustom, var answer = answer(questionID) else { return }
+        if item.multiSelect && customQuestionIDs.contains(questionID) {
+            customQuestionIDs.remove(questionID)
+            answer.text = ""
+        } else {
+            customQuestionIDs.insert(questionID)
+            if !item.multiSelect { answer.optionIds = [] }
+        }
+        answer.skipped = false
+        update(answer)
+    }
+
+    func setText(_ text: String, questionID: String) {
+        guard !inputsLocked, let item = question.questions.first(where: { $0.id == questionID }),
+              item.allowCustom, var answer = answer(questionID) else { return }
+        answer.text = text
+        customQuestionIDs.insert(questionID)
+        answer.skipped = false
+        if !item.multiSelect { answer.optionIds = [] }
+        update(answer)
+    }
+
+    func setSkipped(_ skipped: Bool, questionID: String) {
+        guard !inputsLocked, var answer = answer(questionID) else { return }
+        answer.skipped = skipped
+        if skipped { answer.optionIds = []; answer.text = ""; customQuestionIDs.remove(questionID) }
+        update(answer)
+    }
+
+    private func update(_ value: ExecutionAnswer) {
+        guard let index = answers.firstIndex(where: { $0.questionId == value.questionId }), answers[index] != value else { return }
+        answers[index] = value
+        revision += 1
+        generation += 1
+        error = nil
+        feedback = nil
+    }
+
+    func beginObservation() -> Int {
+        generation += 1
+        return generation
+    }
+
+    func observe(current: ExecutionQuestion?, currentRunID: String?, readOnly: Bool, expectedGeneration: Int? = nil) {
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        self.readOnly = readOnly
+        guard currentRunID == identity[0], let current, current.identity == identity else {
+            obsolete = true
+            return
+        }
+        // Core state may advance while a local command/read is in flight. Keep the
+        // controls locked, but do not leave the retained card on an older state.
+        apply(current)
+        possiblyStale = false
+    }
+
+    private func apply(_ current: ExecutionQuestion) {
+        guard current.identity == identity else { obsolete = true; return }
+        // A request's terminal state is immutable. Older reads or command replies
+        // cannot reopen it, including expired/stopped requests.
+        if ["answered", "expired", "stopped"].contains(question.state), current.state != question.state { return }
+        generation += 1
+        question = current
+        // The send owns its exact answer snapshot until it finishes; a concurrent
+        // observer must not replace it with a pre-submit draft.
+        if !submitting && (current.delivery == "unknown" || current.delivery == "submitting" || !dirty) {
+            answers = Self.restoredAnswers(current)
+            customQuestionIDs = Set(answers.filter { !$0.text.isEmpty }.map(\.questionId))
+            savedRevision = revision
+        }
+        if current.delivery != "none" { resultUnknown = current.delivery == "unknown" }
+        if current.state != "open" { stopResultUnknown = false }
+    }
+
+    func loadingFailed(_ failure: Error) {
+        possiblyStale = true
+        error = failure.coreMessage
+    }
+
+    private var payload: [String: Any] {
+        ["task_id": taskID, "run_id": identity[0], "request_id": identity[3], "questions_sha256": identity[5]]
+    }
+
+    private func accept(_ response: ExecutionQuestionCommandResponse) {
+        guard response.taskId == taskID, response.runId == identity[0] else {
+            possiblyStale = true
+            error = "返回的问题身份不匹配，草稿已保留"
+            return
+        }
+        guard let current = response.executionQuestion else { obsolete = true; return }
+        apply(current)
+    }
+
+    private func finishWorking() {
+        working = false
+        let pending = idleWaiters
+        idleWaiters = []
+        pending.forEach { $0.resume() }
+    }
+
+    func finishForExit() async -> Bool {
+        while working { await withCheckedContinuation { idleWaiters.append($0) } }
+        guard dirty else { return true }
+        guard !inputsLocked else {
+            if error == nil { error = "这份草稿尚未保存，请先核对当前问题再退出" }
+            return false
+        }
+        return await saveNow()
+    }
+
+    @discardableResult
+    func saveNow() async -> Bool {
+        guard dirty else { return true }
+        guard !inputsLocked else { return false }
+        working = true; saving = true; generation += 1
+        defer { saving = false; finishWorking() }
+        let value = answers
+        let saved = revision
+        do {
+            var body = payload
+            // Save is local only; protocol does not accept run_id on this command.
+            body.removeValue(forKey: "run_id")
+            body["answers"] = value.map(\.payload)
+            accept(try await command("save-execution-answers", body))
+            guard !obsolete, !possiblyStale else { return false }
+            savedRevision = saved
+            feedback = "草稿已保存"
+            error = nil
+            return true
+        } catch {
+            record(error)
+            return false
+        }
+    }
+
+    func submit(skipAll: Bool = false, retry: Bool = false) async {
+        guard retry ? canRetry : (skipAll ? !inputsLocked : canSubmit) else { return }
+        let frozen: [ExecutionAnswer]
+        if retry {
+            frozen = operation?.answers ?? question.submitted?.answers ?? answers
+        } else if skipAll {
+            frozen = question.questions.map { ExecutionAnswer(questionId: $0.id, optionIds: [], text: "", skipped: true) }
+        } else { frozen = answers }
+        // Only an explicit same-answer retry creates a new operation after unknown.
+        operation = (UUID().uuidString, frozen, skipAll && !retry)
+        answers = frozen
+        working = true; submitting = true; generation += 1
+        error = nil; feedback = nil
+        var body = payload
+        body["operation_id"] = operation!.id
+        if skipAll && !retry { body["skip_all"] = true } else { body["answers"] = frozen.map(\.payload) }
+        do {
+            accept(try await command("submit-execution-answers", body))
+            savedRevision = revision
+        } catch {
+            if Self.uncertain(error) { resultUnknown = true }
+            record(error)
+        }
+        submitting = false; finishWorking()
+        // Exactly one read-only reconciliation; no implicit resend, including on close/quit.
+        if unknown { await reconcile() }
+        else { await reload() }
+    }
+
+    func reconcile() async {
+        guard !working, !obsolete, !readOnly else { return }
+        working = true; generation += 1
+        defer { finishWorking() }
+        do {
+            accept(try await command("reconcile-execution-question", ["task_id": taskID, "run_id": identity[0]]))
+            possiblyStale = false
+            error = nil
+        } catch { self.error = error.coreMessage }
+    }
+
+    func reload() async {
+        guard !working else { return }
+        working = true; generation += 1
+        let refreshGeneration = generation
+        defer { finishWorking() }
+        do {
+            let current = try await refresh()
+            // refresh can itself publish observations before returning its earlier
+            // DTO. Only use the direct reply when no newer observation began.
+            guard generation == refreshGeneration else { return }
+            if let current, current.identity == identity { apply(current); possiblyStale = false; error = nil }
+            else { obsolete = true }
+        } catch {
+            guard generation == refreshGeneration else { return }
+            loadingFailed(error)
+        }
+    }
+
+    func reconnectObserver() async {
+        guard !working, !obsolete, !readOnly, question.state == "open" else { return }
+        working = true; generation += 1
+        do { try await reconnect(); error = nil }
+        catch { self.error = error.coreMessage }
+        finishWorking()
+        await reload()
+    }
+
+    func stop() async {
+        guard canStop else { return }
+        working = true; generation += 1
+        stopOperationID = UUID().uuidString
+        do {
+            let response = try await command("stop-execution", ["task_id": taskID, "run_id": identity[0], "operation_id": stopOperationID!])
+            accept(response)
+            stopResultUnknown = response.status == "unknown"
+            stopRequested = !stopResultUnknown
+            feedback = stopResultUnknown ? nil : "停止请求已提交，等待本轮终态"
+            error = nil
+        } catch {
+            if Self.uncertain(error) { stopResultUnknown = true }
+            record(error)
+        }
+        finishWorking()
+        if stopResultUnknown { await reconcile() } else { await reload() }
+    }
+
+    private func record(_ failure: Error) {
+        error = failure.coreMessage
+        if case CoreError.exited(_, _, let code) = failure, ["conflict", "stale_run", "not_found"].contains(code ?? "") {
+            possiblyStale = true
+        }
+    }
+
+    private static func uncertain(_ failure: Error) -> Bool {
+        switch failure {
+        case CoreError.timedOut, CoreError.badOutput: return true
+        case CoreError.exited(_, _, let code): return code == nil
+        default: return false
+        }
+    }
+
+}
+// END EXECUTION ANSWER STORE

@@ -137,6 +137,7 @@ _FAILED_SUBSTATUS = {
     "validation_failed": "派发失败",
     "dispatch_failed": "派发失败",
     "execution_failed": "执行失败",
+    "execution_input_required": "执行中待答问题",
 }
 
 # 失联 blocked_reason 里的请求 kind 中文名。
@@ -276,6 +277,8 @@ def archive_blocked_reason(
     """protocol.md §5.15.2 归档/回收站禁用条件；None 表示可移出看板。
     task.status ∈ ARCHIVE_BLOCKED_STATUSES、存在未解除失联请求、
     send_state='unknown' 或存在 claimed 请求（执行端已领取）任一即禁用（返回中文原因）。"""
+    from .execution_questions import open_records
+    if open_records(task): return "执行轮次正在等待回答，暂不能移出看板"
     status = task["status"]
     if status in constants.ARCHIVE_BLOCKED_STATUSES:
         return f"任务正在{_SAVE_STATUS_CN.get(status, status)}中，暂不能移出看板"
@@ -431,7 +434,11 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     automation = core.automation_of(task)
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
+    from .execution_questions import view as question_view, preview as question_preview
+    question = question_view(task,now,conn)
     view = {
+        "execution_question": question,
+        "question_preview": question_preview(question),
         "automation": automation or None,
         "delivery": core.delivery_of(task) or None,
         "review_history": db.task_extra(task).get("review_history") or [],
@@ -521,6 +528,9 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
     if db.task_is_purged(task):
         # v2 §5.20.1：purged 终态无任何动作（read_only 审计视图）。
         return []
+    from .execution_questions import open_records
+    if open_records(task):
+        return ["answer_execution_questions", "skip_execution_questions", "stop_execution"]
     actions = ["recheck"]
     if not db.task_is_active(task):
         # 归档任务：仅提供恢复（§5.15.6）；回收站任务追加永久移除（v2）。
@@ -875,6 +885,9 @@ def request_detail(
 # ===================================================== v2 事件视图（§5.21.2）
 
 _EVENT_KIND_CN = {
+    "execution_question_opened":"执行中提问",
+    "execution_question_answered":"执行问题已回答",
+    "execution_question_closed":"执行问题已关闭",
     "automation_adopted": "自动接收任务", "auto_confirm_skipped": "跳过自动确认",
     "fix_round_started": "同任务修复轮开始", "delivery_committed": "分支改动已提交",
     "delivery_pushed": "交付分支已推送", "pr_opened": "PR 已创建", "kaneo_comment_posted": "PR 链接已回写",

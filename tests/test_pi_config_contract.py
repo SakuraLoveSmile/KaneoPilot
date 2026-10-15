@@ -31,6 +31,7 @@ DEFAULTS = {
 # v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
 CONFIG_KEYS = set(DEFAULTS) | {
     "updated_at", "backend", "pi_desktop", "controller_backend",
+    "execution_question_max_wait_seconds",
 }
 
 # 夹具凭据占位值：只存在于 models.json 的 apiKey 字段，响应绝不透出。
@@ -55,6 +56,7 @@ def test_get_exec_config_roundtrip_after_set(cli):
     saved = cli("set-exec-config", payload)
     assert set(saved) == {"config"}
     assert set(saved["config"]) == CONFIG_KEYS
+    assert saved['config']['execution_question_max_wait_seconds'] == 86400
     assert ISO_RE.match(saved["config"]["updated_at"])
     got = cli("get-exec-config", {})
     assert got["config"] == saved["config"]
@@ -64,6 +66,18 @@ def test_get_exec_config_roundtrip_after_set(cli):
     again = cli("get-exec-config", {})
     assert {k: again["config"][k] for k in payload} == payload
     assert again["defaults"] == DEFAULTS
+
+
+def test_execution_question_wait_limit_roundtrip_and_validation(cli):
+    for value in (0,3600):
+        saved=cli('set-exec-config',{'execution_question_max_wait_seconds':value})
+        assert saved['config']['execution_question_max_wait_seconds']==value
+        assert cli('get-exec-config')['config']==saved['config']
+    before=cli('get-exec-config')['config']
+    for value in (-1,True,1.5,'3600'):
+        result=cli('set-exec-config',{'execution_question_max_wait_seconds':value},expect=1)
+        assert result['code']=='bad_request'
+        assert cli('get-exec-config')['config']==before
 
 
 def test_set_partial_payload_merges_defaults(cli):

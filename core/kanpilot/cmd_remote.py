@@ -336,7 +336,8 @@ def _require_goal_gate(ctx, payload: dict, task, verified_receipt=None) -> None:
         )
     reviews = detail.get("criterion_reviews") or []
     referenced = set(detail.get("evidence_refs") or [])
-    cmd_read.verify_goal_completion(resolved["report"], reviews, referenced)
+    cmd_read.verify_goal_completion(resolved["report"], reviews, referenced,
+                                    report_state=resolved["state"])
 
 
 def run_store_run_dir(conn, task_id: str, run_id: str):

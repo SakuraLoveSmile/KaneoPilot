@@ -409,7 +409,8 @@ def automation_budget(task, policy, now):
     a = automation_of(task)
     started = util.parse_ts(a.get("segment_started_at"))
     current = util.parse_ts(now) if isinstance(now, str) else now
-    minutes = max(0, (current - started).total_seconds() / 60) if started else 0
+    from .execution_questions import wait_seconds
+    minutes = max(0, ((current - started).total_seconds() - wait_seconds(task,current,since=started)) / 60) if started else 0
     cost = max(0, float(a.get("cost_usd", 0)) - float(a.get("segment_cost_base_usd", 0)))
     limit = policy.get("max_task_cost_usd")
     exceeded = minutes >= policy.get("max_task_minutes", 240) or (limit is not None and cost >= limit)

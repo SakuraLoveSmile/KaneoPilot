@@ -289,7 +289,7 @@ def plus_status(connection_file: str, *, session_id: str, timeout: int = 10) -> 
     # New hosts wrap the status object; legacy hosts return the same fields flat.
     # Do not combine conflicting envelopes or coerce missing/string booleans.
     fields = ("sessionId", "isRunning", "currentTurnId",
-              "pendingPermission", "pendingToolConfirmations", "planningState")
+              "pendingPermission", "pendingToolConfirmations", "planningState", "pendingInputs")
     if status is not res and any(key in res and (key not in status or
             type(res[key]) is not type(status[key]) or res[key] != status[key]) for key in fields):
         raise util.KanpilotError("validation_failed", "Plus 返回的内外层运行状态不一致")
@@ -319,6 +319,7 @@ def plus_status(connection_file: str, *, session_id: str, timeout: int = 10) -> 
         "current_turn_id": status.get("currentTurnId"),
         "pending_permission": _redact_catalog(permission) if permission else None,
         "raw_status": _redact_catalog(status),
+        **({"pending_inputs":status["pendingInputs"]} if "pendingInputs" in status else {}),
     }, record.get("token"))
 
 
@@ -679,3 +680,23 @@ def plus_attach_mcp(
         "role": role,
         "tool_names": tool_names,
     }, record.get("token"))
+
+
+def plus_asks_pending(connection_file, *, session_id, timeout=10):
+    client, record = _get_client(connection_file, timeout=timeout)
+    res = client.call_tool("pi_asks_pending", {"sessionId": session_id})
+    if (not isinstance(res, dict) or res.get("sessionId") != session_id
+            or not isinstance(res.get("asks"), list)):
+        raise util.KanpilotError("protocol_error", "Plus pending inputs 身份或格式不符")
+    return _redact_output({"session_id":session_id,"asks":res["asks"]},record.get("token"))
+
+
+def plus_asks_resolve(connection_file, *, session_id, request_id, expected_tool_call_id, answers, timeout=10):
+    from .execution_questions import validate_wire_answers
+    validate_wire_answers(answers,session_id,request_id,expected_tool_call_id)
+    client, record = _get_client(connection_file, timeout=timeout)
+    res=client.call_tool("pi_asks_resolve", {"sessionId":session_id,"requestId":request_id,
+        "expectedToolCallId":expected_tool_call_id,"answers":answers,"confirm":True})
+    if not isinstance(res,dict) or res.get("requestId")!=request_id or res.get("status") not in ("answered","not_pending"):
+        raise util.KanpilotError("protocol_error", "Plus execution answer receipt 格式不符")
+    return _redact_output({"session_id":session_id,"request_id":request_id,"status":res["status"]},record.get("token"))

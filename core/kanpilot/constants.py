@@ -86,11 +86,13 @@ PI_DESKTOP_REQUIRED_TOOLS = (
 # 首轮协商出「目标契约」，审批后宿主在同会话开启执行轮次。审批经这两个工具
 # 完成；缺其一则派发会在审批门停滞，故启动前即失败（unsupported_tools）。
 PI_DESKTOP_GOAL_TOOLS = ("pi_plans_pending", "pi_plans_resolve")
+PI_DESKTOP_INPUT_TOOLS = ("pi_asks_pending", "pi_asks_resolve")
+EXECUTION_QUESTION_MAX_WAIT_SECONDS = 86400
 PI_DESKTOP_EXEC_MODE = "goal"
 # 派发就绪（exec-capabilities / probe / worker 工具门）要求的完整工具集：
 # 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。
 PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
-                             + PI_DESKTOP_GOAL_TOOLS)
+                             + PI_DESKTOP_GOAL_TOOLS + PI_DESKTOP_INPUT_TOOLS)
 # T5-A（protocol §5.23.10）：Goal 报告只读工具。核心只在读取报告时要求它们；
 # 派发就绪门不要求（旧 Plus 仍可派发，但报告读取会明确失败）。
 PI_DESKTOP_GOAL_REPORT_TOOLS = ("pi_goal_report_list", "pi_goal_report_get")

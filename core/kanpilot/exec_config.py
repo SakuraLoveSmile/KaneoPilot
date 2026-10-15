@@ -71,7 +71,10 @@ def _merge(stored: Optional[dict]) -> dict:
     五字段的非空字符串；整块缺失/为空 → None。未知字段忽略。
     """
     config = dict(constants.EXEC_CONFIG_DEFAULTS)
+    config["execution_question_max_wait_seconds"] = constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS
     if isinstance(stored, dict):
+        value=stored.get("execution_question_max_wait_seconds")
+        if type(value) is int and value >= 0: config["execution_question_max_wait_seconds"]=value
         for key in constants.EXEC_CONFIG_KEYS:
             value = stored.get(key)
             if isinstance(value, str) and value:
@@ -155,7 +158,7 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
                 "validation_failed",
                 f"pi_desktop 运行配置快照解析失败：{error or '未知原因'}",
             )
-        return {"backend": "pi_desktop", **resolved}
+        return {"backend": "pi_desktop", **resolved, "execution_question_max_wait_seconds":config.get("execution_question_max_wait_seconds",constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)}
     return {
         "backend": "pi",
         **{key: config.get(key) for key in constants.EXEC_CONFIG_KEYS if key in config},
@@ -204,6 +207,10 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         raise util.bad_request("exec_config 必须是对象")
     stored = _stored_dict(conn)
     merged_stored = dict(stored)
+    if "execution_question_max_wait_seconds" in fields:
+        value=fields["execution_question_max_wait_seconds"]
+        if type(value) is not int or value < 0: raise util.bad_request("execution_question_max_wait_seconds 必须是非负整数")
+        merged_stored["execution_question_max_wait_seconds"]=value
     for key in constants.EXEC_CONFIG_KEYS:
         if key in fields:
             merged_stored[key] = fields[key]

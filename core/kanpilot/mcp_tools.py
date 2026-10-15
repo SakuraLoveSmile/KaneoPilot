@@ -846,6 +846,19 @@ for _spec in TOOLS_SPEC:
         ], "additionalProperties": False,
     }
 
+TOOLS_SPEC.extend([
+    {"name":"kp_runtime_input_pending","description":"Read ordinary execution inputs in the owned Plus session.",
+     "domain":"runtime","readOnlyHint":True,"inputSchema":{"type":"object","properties":{
+         "scope_id":{"type":"string"},"session_id":{"type":"string"}},"required":["scope_id","session_id"],"additionalProperties":False},
+     "outputSchema":{"type":"object","properties":{"session_id":{"type":"string"},"asks":{"type":"array"}},"required":["session_id","asks"]}},
+    {"name":"kp_runtime_input_respond","description":"Resolve the same ordinary execution tool call with a durable receipt.",
+     "domain":"runtime","destructiveHint":True,"inputSchema":{"type":"object","properties":{
+         "scope_id":{"type":"string"},"session_id":{"type":"string"},"request_id":{"type":"string"},
+         "expected_tool_call_id":{"type":"string"},"operation_id":{"type":"string"},"answers":{"type":"array"}},
+         "required":["scope_id","session_id","request_id","expected_tool_call_id","operation_id","answers"],"additionalProperties":False},
+     "outputSchema":{"type":"object","properties":{"session_id":{"type":"string"},"request_id":{"type":"string"},"status":{"type":"string","enum":["answered","not_pending"]}},"required":["session_id","request_id","status"]}}
+])
+
 TOOLS_REGISTRY = {t["name"]: t for t in TOOLS_SPEC}
 
 
@@ -902,11 +915,18 @@ def _goal_continuation_task_guard(conn, scope, args):
             or db.paused(conn, "dispatch") or db.paused(conn, "monitor")
             or not automation or automation.get("manual_takeover")
             or task["status"] not in ("running", "needs_user")
-            or (task["status"] == "needs_user" and task["failure_code"] != "execution_failed")):
+            or (task["status"] == "needs_user" and task["failure_code"] not in ("execution_failed","execution_input_required"))):
         raise util.KanpilotError("forbidden", "目标自动续接已暂停或不属于当前自动执行轮次")
 
 
 def _runtime_guard(conn, scope, tool, args):
+    if tool in ("kp_runtime_input_pending", "kp_runtime_input_respond"):
+        if scope.role != "execution":
+            raise util.KanpilotError("forbidden", "input tools require execution scope")
+        if tool == "kp_runtime_input_respond":
+            from .execution_questions import validate_wire_answers
+            validate_wire_answers(args["answers"],args["session_id"],args["request_id"],args["expected_tool_call_id"])
+
     if args.get("harness_id", "pi_desktop") != "pi_desktop":
         raise util.bad_request("unsupported harness")
     if args.get("scope_id") != scope.scope_id:
@@ -1043,6 +1063,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
             readers = {
                 "kp_runtime_capabilities": lambda: harness_plus_adapter.plus_capabilities(conn_file),
                 "kp_runtime_catalog": lambda: harness_plus_adapter.plus_catalog(conn_file, provider_id=arguments.get("provider_id")),
+                "kp_runtime_input_pending": lambda: harness_plus_adapter.plus_asks_pending(conn_file, session_id=arguments["session_id"]),
                 "kp_runtime_status": lambda: harness_plus_adapter.plus_status(conn_file, session_id=arguments["session_id"]),
                 "kp_runtime_turn_get": lambda: harness_plus_adapter.plus_turn_get(conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"], require_identity=arguments.get("require_identity", False)),
                 "kp_runtime_messages": lambda: harness_plus_adapter.plus_messages(conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
@@ -1070,6 +1091,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
             "kp_runtime_session_configure": lambda: harness_plus_adapter.plus_session_configure(conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"], interaction_mode=arguments.get("interaction_mode")),
             "kp_runtime_attach_mcp": lambda: harness_plus_adapter.plus_attach_mcp(conn_file, session_id=sid, bridge_file=str(grant)),
             "kp_runtime_prompt": lambda: harness_plus_adapter.plus_prompt(conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments"), expected_interaction_mode=arguments.get("expected_interaction_mode")),
+            "kp_runtime_input_respond": lambda: harness_plus_adapter.plus_asks_resolve(conn_file, session_id=sid, request_id=arguments["request_id"], expected_tool_call_id=arguments["expected_tool_call_id"], answers=arguments["answers"]),
             "kp_runtime_stop": lambda: harness_plus_adapter.plus_stop(conn_file, session_id=sid),
             "kp_runtime_abort": lambda: harness_plus_adapter.plus_abort(conn_file, session_id=sid),
             "kp_runtime_proposal_resolve": lambda: harness_plus_adapter.plus_proposal_resolve(conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode")),

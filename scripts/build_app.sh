@@ -56,7 +56,7 @@ modules = (
     "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "delivery_runner",
     "claude_cli", "claude_planner", "review_settle", "cli_review",
     "process_owner", "desktop_queue", "desktop_automation_control", "verification_recovery", "verification_checks", "verification_process", "review_snapshot", "review_resolution",
-    "plan_questions", "plan_answers",
+    "plan_questions", "plan_answers", "execution_questions",
     "task_workspace", "engine_claim_scope", "cmd_queue", "cmd_remote",
     "cmd_delivery", "derive", "planner_inputs", "constants",
     "engine.commands", "engine.verdict", "engine.loop", "engine.health",

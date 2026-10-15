@@ -19,7 +19,7 @@ from . import (
 
 # set-exec-config 允许的字段：契约四字段 + v3 后端扩展 + v4 控制器后端。
 _SET_FIELDS = (
-    constants.EXEC_CONFIG_KEYS
+    ("execution_question_max_wait_seconds",) + constants.EXEC_CONFIG_KEYS
     + ("backend", "pi_desktop", constants.CONTROLLER_BACKEND_KEY)
 )
 _PI_DESKTOP_THINKING_LEVELS = (

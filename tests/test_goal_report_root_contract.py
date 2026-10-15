@@ -120,6 +120,7 @@ class FakePlus:
             "pi_agent_prompt", "pi_agent_status", "pi_session_get",
             "pi_agent_stop", "pi_agent_abort", "pi_desktop_invoke",
             "pi_plans_pending", "pi_plans_resolve",
+            "pi_asks_pending", "pi_asks_resolve",
             "pi_goal_report_list", "pi_goal_report_get",
         ))
         self.project_name_field = project_name_field

@@ -1371,7 +1371,8 @@ def cmd_record_goal_evaluation(ctx, payload: dict) -> dict:
 
     report = resolved["report"]
     if decision == "complete":
-        cmd_read.verify_goal_completion(report, reviews, referenced)
+        cmd_read.verify_goal_completion(report, reviews, referenced,
+                                        report_state=resolved["state"])
 
     detail = {
         "task_id": task_id,

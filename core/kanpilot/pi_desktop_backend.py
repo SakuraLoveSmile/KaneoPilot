@@ -1045,20 +1045,31 @@ def normalize_goal_report(payload, *, report_id=None) -> dict:
         result["state"] = _classify_report_failure(None, payload.get("detail"))
         result["detail"] = str(payload.get("detail") or "报告读取失败")
         return result
+    # Plus GoalReportRead puts readiness in the trusted read envelope, not in
+    # the report bytes. A non-ready envelope must never expose/upgrade a body.
+    explicit = payload.get("state")
+    has_explicit_state = "state" in payload
+    if has_explicit_state:
+        if not isinstance(explicit, str) or explicit not in GOAL_REPORT_STATES:
+            result["detail"] = f"报告 state 非法：{explicit!r}"
+            return result
+        if explicit != "ready":
+            result["state"] = explicit
+            result["detail"] = str(payload.get("detail") or "")
+            return result
     report = payload.get("report")
-    if report is None and ("status" in payload or "sessionId" in payload):
+    if (report is None and not has_explicit_state
+            and ("status" in payload or "sessionId" in payload)):
         # Host 直接回传报告对象（并附 report_sha256）的形态。
         report = payload
     if not isinstance(report, dict):
-        explicit = payload.get("state")
-        if explicit in GOAL_REPORT_STATES:
-            result["state"] = explicit
-            result["detail"] = str(payload.get("detail") or "")
+        if explicit == "ready":
+            result["detail"] = "ready 回包中没有报告对象"
             return result
         result["state"] = "not_found"
         result["detail"] = "回包中没有报告对象"
         return result
-    status = str(report.get("status") or "").lower()
+    status = explicit or str(report.get("status") or "").lower()
     if status in ("pending", "draft", "failed"):
         result["state"] = status
         result["detail"] = str(
@@ -1081,6 +1092,7 @@ def normalize_goal_report(payload, *, report_id=None) -> dict:
         result["state"] = "corrupt"
         result["detail"] = "报告缺少 sessionId/executionId 身份字段"
         return result
+    result["report_id"] = result["report_id"] or report.get("reportId") or report.get("report_id")
     result["state"] = "ready"
     result["report"] = report
     return result
@@ -1097,9 +1109,9 @@ def report_identity(report: dict) -> dict:
         "turn_id": report.get("turnId") or report.get("turn_id"),
         # Plus Goal 契约的 artifact 哈希与 KaneoPilot 的 plan_sha256 各管
         # 各的文件，**不可**直接比较成同一个哈希（§5.23.10 T5-B）。
-        "contract_hash": (
-            report.get("contractHash") or report.get("contract_hash")
-        ),
+        "contract_hash": ((report.get("goal") or {}).get("contractHash")
+                          if isinstance(report.get("goal"), dict) else None)
+                         or report.get("contractHash") or report.get("contract_hash"),
     }
 
 def report_integrity_kind(report: dict):

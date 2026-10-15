@@ -27,6 +27,12 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "report-execution-question": ({**{k:(True,"str") for k in ("task_id","run_id","session_id","turn_id","request_id","tool_call_id","state")},"questions":(False,"list"),"detail":(False,"str")}, _automation_command("execution_questions","cmd_report_execution_question")),
+    "save-execution-answers": ({**{k:(True,"str") for k in ("task_id","request_id","questions_sha256")},"answers":(True,"list")}, _automation_command("execution_questions","cmd_save_execution_answers")),
+    "submit-execution-answers": ({**{k:(True,"str") for k in ("task_id","run_id","request_id","questions_sha256","operation_id")},"answers":(False,"list"),"skip_all":(False,"bool"),"by":(False,"str")}, _automation_command("execution_questions","cmd_submit_execution_answers")),
+    "reconcile-execution-question": ({"task_id":(True,"str"),"run_id":(True,"str")},_automation_command("execution_questions","cmd_reconcile_execution_question")),
+    "stop-execution": ({"task_id":(True,"str"),"run_id":(True,"str"),"operation_id":(True,"str"),"reason":(False,"str"),"abort":(False,"bool")},_automation_command("execution_questions","cmd_stop_execution")),
+
     "run-verification-checks": (
         {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
          "expected_plan_sha256": (True, "str"), "operation_id": (True, "str")},
@@ -380,7 +386,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     # v1.6（protocol §5.17）：pi 执行配置与能力查询。
     "get-exec-config": ({}, cmd_config.cmd_get_exec_config),
     "set-exec-config": (
-        {
+        {"execution_question_max_wait_seconds": (False,"int"),
             "provider": (False, "str"), "model": (False, "str"),
             "reasoning_effort": (False, "str"),
             "agent_preset": (False, "str"),
@@ -672,7 +678,13 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
                 task_id = request["task_id"] if request is not None else None
             if task_id:
                 from . import verification_checks
-                ctx.conn.authorization_guard = lambda conn: verification_checks.require_not_running(conn, task_id)
+                def command_guard(conn):
+                    verification_checks.require_not_running(conn, task_id)
+                    if command in {"resolve", "enqueue", "archive-task", "trash-task", "purge-task",
+                                   "start-plans", "dispatch-prepare", "dispatch-begin-send", "dispatch-start", "cancel-request"}:
+                        from .execution_questions import guard_active
+                        guard_active(db.require_task(conn, task_id))
+                ctx.conn.authorization_guard = command_guard
                 ctx.conn.authorization_guard(ctx.conn)
         return COMMANDS[command][1](ctx, payload)
     finally:

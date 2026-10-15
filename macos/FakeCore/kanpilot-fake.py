@@ -1029,6 +1029,8 @@ def allowed_actions(task, requests):
     if any(request_is_lost(r) for r in task_reqs):
         return ["release_lost", "recheck"]
     if status == "needs_user":
+        if task.get("failure_code") == "execution_input_required":
+            return ["answer_execution_questions", "skip_execution_questions", "stop_execution"]
         if task.get("plan_clarification"):
             return ["answer_plan_questions", "replan", "dismiss", "recheck"]
         if task.get("failure_code") == "verification_unconfirmed":
@@ -3240,12 +3242,69 @@ def cmd_session_request_start(state, payload):
     return {"request_id": status["request_id"], "stage": "plan", "queued": True, "deduplicated": repeated}
 
 
+def cmd_recover_execution_goals_fixture(state, payload):
+    """A bounded sleeping process for supervisor ownership/latency fixtures only."""
+    delay = state.get("recovery_fixture_delay_seconds", 0)
+    if delay:
+        time.sleep(min(max(float(delay), 0), 60))
+    return {"goal_recoveries": []}
+
+
+def cmd_execution_answers(state, payload, mode):
+    """Native form fixture only: no real core, SQLite, Plus, model or service."""
+    tid = payload.get("task_id")
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    question = copy.deepcopy((task or {}).get("execution_question"))
+    if not question:
+        return fail("执行提问不存在", "not_found")
+    if mode in ("save", "submit") and (question["request_id"] != payload.get("request_id")
+            or question["questions_sha256"] != payload.get("questions_sha256")):
+        return fail("执行提问身份已变化", "conflict")
+    if mode != "save" and question["run_id"] != payload.get("run_id"):
+        return fail("执行轮次已变化", "stale_run")
+    status = question["delivery"]
+    if mode == "save":
+        question["draft"] = copy.deepcopy(payload["answers"])
+    elif mode == "submit":
+        if question["delivery"] == "submitting": return fail("正在提交", "conflict")
+        values = ([{"question_id": item["id"], "option_ids": [], "text": "", "skipped": True}
+                   for item in question["questions"]] if payload.get("skip_all") else payload["answers"])
+        if question["delivery"] == "unknown" and values != question["submitted"]["answers"]:
+            return fail("送达未知期间答案已冻结", "conflict")
+        question["draft"] = copy.deepcopy(values)
+        question["submitted"] = {"answers": copy.deepcopy(values), "operation_id": payload["operation_id"],
+                                 "at": iso(utcnow()), "by": "native_ui_fixture"}
+        status = state.get("execution_fixture_submit_result", "accepted")
+        question["delivery"] = status
+        if status == "accepted": question.update(state="answered", answered_by="kaneopilot", closed_at=iso(utcnow()))
+    elif mode == "stop":
+        status = state.get("execution_fixture_stop_result", "accepted")
+        if status != "unknown": question.update(state="stopped", closed_at=iso(utcnow()), detail="用户停止了本轮（隔离夹具）")
+    elif mode == "observe":
+        question["observer_alive"] = True
+        status = "observing"
+    patch = state.setdefault("task_overrides", {}).setdefault(tid, {})
+    patch["execution_question"] = question
+    if question["state"] == "answered":
+        queued = patch.get("execution_question_queue") or []
+        if queued:
+            question = queued.pop(0)
+            patch["execution_question"] = question
+            patch["blocked_summary"] = "执行中提问：%s（共 %s 题）" % (question["questions"][0]["title"], len(question["questions"]))
+        else: patch.update(status="running", display_status="执行中", failure_code=None, blocked_summary=None, blocked_reason=None)
+    elif question["state"] in ("expired", "stopped"):
+        patch.update(failure_code="execution_failed", blocked_summary=question.get("detail") or "本轮已结束")
+    save_state(state)
+    return {"task_id": tid, "run_id": question["run_id"], "execution_question": question, "status": status}
+
+
 # Engine/inbox fixtures never import real core or contact network services.
 def fake_attention_item(task, requests):
     if task["status"] != "needs_user" or task.get("save_state", "active") != "active":
         return None
     code = task.get("failure_code")
     reasons = {
+        "execution_input_required": "execution_question",
         "verification_unconfirmed": "verify_unconfirmed", "empty_diff": "verify_unconfirmed",
         "send_state_unknown": "plus_send_unknown", "plus_unreachable": "plus_unreachable",
         "fix_rounds_exhausted": "review_changes_exhausted", "review_blocked": "review_changes_exhausted",
@@ -3270,6 +3329,9 @@ def fake_attention_item(task, requests):
             "blocked_summary": task.get("blocked_summary"), "since": since,
             "evidence": [{"kind": "event", "id": "fake-" + task["task_id"], "at": since, "detail": "隔离假数据证据"}],
             "recommended": actions[0] if actions else None, "alternatives": actions[1:], "allowed_actions": actions,
+            "question_preview": {"request_id": task["execution_question"]["request_id"], "count": len(task["execution_question"]["questions"]),
+                "first_title": task["execution_question"]["questions"][0]["title"] if task["execution_question"]["questions"] else "请在 Plus 回答"}
+                if task.get("execution_question") and task.get("failure_code") == "execution_input_required" else None,
             "attention_state": "actionable"}
 
 
@@ -3382,6 +3444,12 @@ COMMANDS = {
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
     "get-task": lambda s, p: cmd_get_task(s, p),
+    "recover-execution-goals": cmd_recover_execution_goals_fixture,
+    "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
+    "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),
+    "reconcile-execution-question": lambda s, p: cmd_execution_answers(s, p, "reconcile"),
+    "stop-execution": lambda s, p: cmd_execution_answers(s, p, "stop"),
+    "round-observe": lambda s, p: cmd_execution_answers(s, p, "observe"),
     "save-plan-answers": lambda s, p: cmd_plan_answers(s, p),
     "submit-plan-answers": lambda s, p: cmd_plan_answers(s, p, submit=True),
     "prepare-review-repair": lambda s, p: cmd_review_resolution(s, p),

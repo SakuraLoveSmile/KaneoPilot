@@ -47,10 +47,12 @@ PR_CLOSED_UNMERGED = "pr_closed_unmerged"
 BUDGET_EXCEEDED = "budget_exceeded"
 CONCURRENCY_STALLED = "concurrency_stalled"
 NEEDS_USER_OTHER = "needs_user_other"
+EXECUTION_QUESTION = "execution_question"
 
 # failure_code → reason_code (protocol §5.27.3 table + the codebase's actual
 # codes grouped into the same categories). Unknown codes → NEEDS_USER_OTHER.
 _REASON_TABLE = {
+    "execution_input_required": EXECUTION_QUESTION,
     # needs_plan_input (阶梯 3): planning material/failure.
     "planner_failed": NEEDS_PLAN_INPUT, "plan_missing": NEEDS_PLAN_INPUT,
     "plan_failed": NEEDS_PLAN_INPUT, "planner_timeout": NEEDS_PLAN_INPUT,
@@ -100,7 +102,7 @@ ITEM_FIELDS = (
     "attention_id", "task_id", "project_name", "title", "reason_code",
     "failure_code", "failure_stage", "failure_reason", "evidence",
     "blocked_summary", "recommended", "alternatives", "allowed_actions",
-    "attention_state", "since",
+    "attention_state", "since", "question_preview",
 )
 
 
@@ -195,6 +197,7 @@ def build_item(task: dict, now=None) -> Optional[dict]:
         "allowed_actions": actions,
         "attention_state": attention_state(task),
         "since": since,
+        "question_preview":task.get("question_preview"),
     }
 
 

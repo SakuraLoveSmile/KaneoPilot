@@ -39,6 +39,9 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
     task_id = task.get("task_id")
     plan_sha = task.get("plan_sha256")
 
+    if (action == decide.BLOCK and task.get("failure_code") == "execution_input_required"
+            and task.get("run_id") and not (task.get("execution_question") or {}).get("observer_alive")):
+        return [CommandCall("round-observe", {"task_id":task_id,"run_id":task["run_id"],"executor":"engine"})]
     if action in (decide.START_FIX_ROUND, decide.BLOCK) and decision.params.get("engine_fix"):
         fix = decision.params["engine_fix"]
         return [CommandCall("resolve", {"task_id": task_id, "actor": "automation",
