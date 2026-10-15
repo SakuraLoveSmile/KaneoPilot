@@ -4,6 +4,7 @@ register-review (protocol.md §4.2/§4.3/§4.5/§4.7/§5.5/§5.6/§5.7)."""
 from __future__ import annotations
 
 import sqlite3
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -167,41 +168,59 @@ def cmd_claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: 
             cmd_report(ctx, dict(identity, outcome="needs_user", failure_code="review_blocked", note=detail))
             return {"claimed": False, "reason": "review_blocked", "request_id": result["request_id"],
                     "run_id": result["run_id"], "detail": detail}
-    if request_backend(ctx.conn, request) != "pi" or not core.requires_branch_review(task):
+    if request_backend(ctx.conn, request) != "pi":
         return result
     # The legacy pi runner receives a generic prompt and performs its own core
     # settlement. Prepare its fixed inputs deterministically after releasing SQL.
     from . import pi_desktop_review as review, pi_desktop_controller
     identity = dict(task_id=task["task_id"], request_id=result["request_id"], run_id=result["run_id"],
                     expected_execution_run_id=task["run_id"])
+    prepared = None
     try:
         core.require_review_identity(ctx.conn, identity, task, util.now_dt())
         delivery = core.delivery_of(task)
-        root = review._review_root(ctx.conn, task["task_id"], delivery["head_sha"][:12])
-        source = Path(delivery["worktree_path"])
+        source = Path(delivery["worktree_path"]) if core.requires_branch_review(task) else Path(
+            cmd_read.cmd_get_task(ctx, {"task_id": task["task_id"]})["task"]["execution_round"]["worktree_path"])
         task_dto = cmd_read.cmd_get_task(ctx, {"task_id": task["task_id"]})["task"]
-        problem = review.prepare_worktree(task_dto, source, root)
-        util.require(problem is None, problem or "Review 准备失败", "review_blocked")
+        prepared = dict(request_id=result["request_id"], run_id=result["run_id"],
+                        execution_run_id=task["run_id"], execution_worktree=str(source))
+        snapshot = None if core.requires_branch_review(task) else review.review_snapshot.freeze(source)
+        root = review.prepare_pooled_worktree(ctx.conn, ctx.db_path, prepared, task_dto, source, snapshot)
         directory = pi_desktop_controller.invocation_dir("review", result["run_id"])
         materials = review.collect_materials(db_path=ctx.db_path, conn=ctx.conn,
             materials=directory / "materials", task=task_dto,
-            execution_worktree=source, execution_run_id=task["run_id"])
-        prepared = dict(review_root=str(root), materials=materials["files"],
-                        execution_run_id=task["run_id"])
-        review._freeze_branch_job(prepared, task_dto, materials)
-        review._guard_branch_job(prepared, task_dto)
+            execution_worktree=source, execution_run_id=task["run_id"], snapshot=snapshot)
+        prepared.update(review_root=str(root), materials=materials["files"])
+        if snapshot is None:
+            review._freeze_branch_job(prepared, task_dto, materials)
+            review._guard_branch_job(prepared, task_dto)
+        else:
+            review._freeze_manual_job(prepared, snapshot, materials)
+            review._guard_manual_job(prepared)
+        from . import task_workspace
+        owner_pid = os.environ.get("KANPILOT_EXECUTOR_OWNER_PID")
+        task_workspace.pool_owner(ctx.conn, prepared, state="running",
+                                  pid=int(owner_pid) if owner_pid and owner_pid.isdigit() else os.getpid())
+        prepared["send_state"] = "sent"
         with db.write_txn(ctx.conn):
             core.require_review_identity(ctx.conn, identity,
                                          db.require_task(ctx.conn, task["task_id"]), util.now_dt())
             db.merge_request_payload(ctx.conn, result["request_id"], ctx.now_iso,
                                      pi_branch_review=prepared)
         result["context"].update(review_root=str(root), materials=materials["files"],
-                                  review_branch_snapshot=prepared["review_branch_snapshot"])
+                                  **({"review_branch_snapshot": prepared["review_branch_snapshot"]}
+                                     if prepared.get("review_branch_snapshot") else {}))
         result["context"]["payload"] = db.request_payload(db.get_request(ctx.conn, result["request_id"]))
         return result
     except (util.KanpilotError, OSError, ValueError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
+            return {"claimed": False, "reason": exc.code, "request_id": result["request_id"]}
         detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
         cmd_report(ctx, dict(identity, outcome="needs_user", failure_code="review_blocked", note=detail))
+        if prepared and prepared.get("pool_lease"):
+            from . import task_workspace
+            task_workspace.release_pool(ctx.db_path, prepared,
+                                         pi_desktop_controller.invocation_dir("review", result["run_id"]))
         return {"claimed": False, "reason": "review_blocked", "request_id": result["request_id"],
                 "run_id": result["run_id"], "detail": detail}
 
@@ -219,7 +238,10 @@ def require_pi_review_materials(ctx, payload, task):
                          "用户补充证据冻结材料已变化", "review_blocked")
     if prepared is not None:
         from . import pi_desktop_review as review
-        review._guard_branch_job(prepared, dict(task))
+        if prepared.get("review_branch_snapshot"):
+            review._guard_branch_job(prepared, dict(task))
+        else:
+            review._guard_manual_job(prepared)
 
 
 def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Optional[str] = None,

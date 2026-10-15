@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from . import (automation_policy, claude_cli, cli, codex_planner, constants,
-               core, db, dsh_events, planner_runner, util)
+               core, db, dsh_events, planner_runner, util, task_workspace)
 
 
 def budget_for(conn, task) -> float:
@@ -25,18 +25,33 @@ def budget_for(conn, task) -> float:
 def run_one(db_path, request_id: str, run_id: str, *, context: dict,
             task: dict, task_id: str, run_dir: Path, timeout,
             heartbeat_every) -> bool:
+    lifecycle = {}
+    try:
+        return _run_one(db_path, request_id, run_id, context=context, task=task,
+                        task_id=task_id, run_dir=run_dir, timeout=timeout,
+                        heartbeat_every=heartbeat_every, lifecycle=lifecycle)
+    finally:
+        job = lifecycle.get("job")
+        if job and job.get("pool_lease"):
+            task_workspace.release_pool(db_path, job, run_dir)
+            planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
+
+
+def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
+             timeout, heartbeat_every, lifecycle):
     payload = context.get("payload") or {}
     manifest = payload.get("manifest") or {}
     config = payload.get("model_config") or {}
     log = planner_runner._EventLog(run_dir / dsh_events.EVENT_LOG_NAME,
                                    redact=util.redact)
-    job = {"task_id": task_id, "run_id": run_id, "backend": "claude",
+    job = {"task_id": task_id, "request_id": request_id, "run_id": run_id, "backend": "claude",
            "config": config, "input_id": context.get("input_id"),
            "planner_input_sha256": payload.get("planner_input_sha256"),
            "planner_method": payload.get("planner_method") or "builtin",
            "session_id": None, "session_title": "Claude · 规划",
            "pid": os.getpid(), "status": "running", "started_at": util.now_iso(),
-           "ended_at": None, "exit_code": None, "detail": None}
+           "ended_at": None, "exit_code": None, "detail": None, "send_state": "not_sent"}
+    lifecycle["job"] = job
     planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
 
     def finish(status, code, detail, reason):
@@ -69,9 +84,18 @@ def run_one(db_path, request_id: str, run_id: str, *, context: dict,
     finally:
         conn.close()
     input_dir = Path(context["input_dir"]) if context.get("input_dir") else None
-    prompt_task = dict(task, fix_mode=payload.get("fix_mode"), plan_cwd=payload.get("plan_cwd"))
+    conn = db.connect(db_path)
+    try:
+        cwd = task_workspace.prepare_plan_pool(conn, db_path, raw_task, payload, job, run_dir / dsh_events.JOB_NAME)
+    except (util.KanpilotError, OSError) as exc:
+        if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
+            finish("finished", 0, exc.message, exc.code)
+            return True
+        return fail(exc.message if isinstance(exc, util.KanpilotError) else str(exc), "plan_worktree_failed")
+    finally:
+        conn.close()
+    prompt_task = dict(task, fix_mode=payload.get("fix_mode"), plan_cwd=str(cwd))
     prompt = codex_planner.build_prompt(prompt_task, manifest, input_dir)
-    cwd = payload.get("plan_cwd") or task.get("repository") or (manifest.get("task") or {}).get("repository") or "."
     job["worktree_path"] = str(cwd)
     argv = claude_cli.build_argv(model=config["planner_model"],
                                 effort=config["reasoning_effort"],
@@ -84,6 +108,7 @@ def run_one(db_path, request_id: str, run_id: str, *, context: dict,
         nonlocal next_heartbeat
         if time.monotonic() >= next_heartbeat:
             planner_runner._heartbeat(db_path, request_id, run_id, "planning")
+            task_workspace.heartbeat_pool(db_path, job)
             next_heartbeat = time.monotonic() + heartbeat_every
         if event is None:
             return
@@ -98,10 +123,19 @@ def run_one(db_path, request_id: str, run_id: str, *, context: dict,
 
     result = {}
     try:
+        job["send_state"] = "unknown"
+        conn = db.connect(db_path)
+        try:
+            task_workspace.pool_owner(conn, job, state="running", pid=os.getpid())
+        finally:
+            conn.close()
+        planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
         result = claude_cli.run(argv, prompt=prompt, cwd=cwd,
                                 env=claude_cli.child_env(), timeout=timeout,
                                 log_path=run_dir / "claude.jsonl", on_event=on_event)
+        job["owner_stopped"] = True
     except util.KanpilotError as exc:
+        job["owner_stopped"] = True
         finish("failed", None, exc.message, exc.code)
         if exc.code not in ("stale_run", "conflict", "not_found"):
             planner_runner._report(db_path, request_id, run_id, "failed", exc.message,

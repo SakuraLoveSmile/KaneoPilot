@@ -265,6 +265,8 @@ def _material_db_identity(conn, row, task):
 
 
 def _guard_materials(ctx, row, task, job):
+    if job.get("pool_lease"):
+        task_workspace.validate_pool(ctx.conn, job["pool_lease"])
     payload = db.request_payload(row)
     frozen = job.get("frozen") or {}
     for key in ("source_sha256", "requirements_sha256", "repository"):
@@ -351,19 +353,21 @@ def _prepare(ctx, claim, metadata):
                "session_id": metadata.get("thread_id"), "session_title": "Desktop " + role,
                "pid": metadata["pid"], "ppid": metadata["ppid"],
                "config": MODEL_SOURCE, "context": context, "checkpoints": {},
+               "invocation_dir": str(directory),
                "frozen": {key: task[key] for key in ("source_sha256", "requirements_sha256",
                                                       "repository", "plan_sha256")}}
         if role == "plan":
             from . import review_resolution
             review_resolution.verify_plan_cycle(ctx.conn, task, context["payload"])
-            workspace = task_workspace.verify_plan_workspace(task, context["payload"])
+            workspace = task_workspace.prepare_plan_pool(ctx.conn, ctx.db_path, task, context["payload"],
+                                                         job, directory / "job.json")
             if workspace is not None:
                 job["plan_cwd"] = str(workspace)
             job["planner_input_sha256"] = db.request_payload(db.get_request(ctx.conn, claim["request_id"])).get("planner_input_sha256")
             manifest = context.get("payload", {}).get("manifest") or {}
             job["instruction"] = codex_planner.build_prompt(
                 dict(context["task"], fix_mode=context["payload"].get("fix_mode"),
-                     plan_cwd=context["payload"].get("plan_cwd")), manifest,
+                     plan_cwd=job.get("plan_cwd")), manifest,
                 Path(context["input_dir"]) if context.get("input_dir") else None,
                 method=context["payload"].get("planner_method") or "builtin")
             _guard_materials(ctx, db.get_request(ctx.conn, claim["request_id"]), task, job)
@@ -379,11 +383,8 @@ def _prepare(ctx, claim, metadata):
             branch_review = core.requires_branch_review(summary)
             snapshot = review_snapshot.freeze(execution) if not branch_review else None
             frozen_execution = review_snapshot.fingerprint(snapshot) if snapshot is not None else _execution_fingerprint(execution)
-            suffix = str(delivery.get("head_sha") or "")[:12] if branch_review else claim["run_id"]
-            review_root = pi_desktop_review._review_root(ctx.conn, task["task_id"], suffix)
-            problem = pi_desktop_review.prepare_worktree(summary, execution, review_root, snapshot=snapshot)
-            if problem:
-                raise util.KanpilotError("review_blocked", problem)
+            review_root = pi_desktop_review.prepare_pooled_worktree(
+                ctx.conn, ctx.db_path, job, summary, execution, snapshot)
             materials = pi_desktop_review.collect_materials(
                 db_path=ctx.db_path, conn=ctx.conn, materials=directory / "materials",
                 task=summary, execution_worktree=execution, execution_run_id=task["run_id"], snapshot=snapshot)
@@ -445,19 +446,39 @@ def _claim(ctx, payload):
     bound = db.request_payload(row)["desktop_claim"]
     try:
         job = _prepare(ctx, claim, bound)
+        ctx.now = util.now_dt()
+        ctx.now_iso = util.to_iso(ctx.now)
+        row, task = _authenticate(ctx, identity, role)
+        _guard_materials(ctx, row, task, job)
     except util.KanpilotError as exc:
+        if exc.code == "worktree_pool_waiting":
+            return {"claimed": False, "reason": exc.code, "request_id": claim["request_id"]}
         if exc.code == "busy":
             raise
         # This valid claim is now blocked, never returned as ready to review.
-        _secured_command(ctx, "report", {"request_id": row["request_id"], "run_id": row["run_id"],
-                                  "outcome": "needs_user", "note": "Desktop 材料准备受阻：" + exc.message,
-                                  "failure_code": "review_blocked" if role == "review" else "planner_input_invalid"}, identity, role)
+        try:
+            _secured_command(ctx, "report", {"request_id": row["request_id"], "run_id": row["run_id"],
+                                      "outcome": "needs_user", "note": "Desktop 材料准备受阻：" + exc.message,
+                                      "failure_code": "review_blocked" if role == "review" else "planner_input_invalid"}, identity, role)
+        finally:
+            # Request ownership may already be lost. Only this never-delivered,
+            # not-started slot can be returned without reporting the new owner.
+            directory = _directory(ctx.conn, task["task_id"], identity["run_id"])
+            saved = directory / "job.json"
+            if saved.is_file():
+                prepared = _load(saved)
+                if (prepared.get("request_id") == identity["request_id"]
+                        and prepared.get("run_id") == identity["run_id"]
+                        and prepared.get("send_state") == "not_sent"):
+                    task_workspace.release_pool(ctx.db_path, prepared, directory, unexposed=True)
+                    _record(ctx, prepared, directory)
         raise
-    ctx.now = util.now_dt()
-    ctx.now_iso = util.to_iso(ctx.now)
-    row, task = _authenticate(ctx, identity, role)
-    _guard_materials(ctx, row, task, job)
     directory = _directory(ctx.conn, task["task_id"], row["run_id"])
+    if job.get("pool_lease"):
+        # The stdio caller is short lived; external consumer termination is unknown.
+        job["send_state"] = "unknown"
+        task_workspace.pool_owner(ctx.conn, job, state="unknown")
+        _record(ctx, job, directory)
     # Context is a bounded material summary. Full frozen input stays in the
     # trusted core directory; a model cannot provide a replacement path.
     return {"claimed": True, **identity, "context": {
@@ -488,7 +509,12 @@ def _heartbeat(ctx, payload):
     if "progress" in payload:
         _text(payload["progress"], limit=2000)
     _reject_token_text(payload, payload.get("progress", ""))
-    _authenticate(ctx, payload)
+    row, task = _authenticate(ctx, payload)
+    directory = _directory(ctx.conn, task["task_id"], row["run_id"])
+    job = _load(directory / "job.json")
+    if job.get("pool_lease"):
+        from . import worktree_pool
+        worktree_pool.heartbeat(ctx.conn, **task_workspace.pool_identity(job["pool_lease"]))
     return _secured_command(ctx, "heartbeat", {key: value for key, value in payload.items() if key != "claim_token"}, payload)
 
 

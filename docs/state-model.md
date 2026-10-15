@@ -427,3 +427,31 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  - 所有动作经核心 `resolve` 或专用命令校验身份与任务状态，不绕过 allowed_actions。
  - 危险操作（retry、replan、mark_done）须二次确认。
  - 动作结果写入 event，桌面即时刷新。
+
+
+## 槽位池（schema 6，protocol §5.29）
+
+worktree_slots保存slot_id主键、repo_key、path唯一、repository、git_common_dir、state(free/leased/quarantined)、holder_stage、holder_id、lease_token、sha、lease_expires_at、heartbeat_at、updated_at及恢复所需owner_pid/baseline_json/reason等字段。5→6显式迁移先备份，保留全部已有任务/请求/轮次/回执；不隐式升级live库。
+
+状态转换：free→leased（事务分配并生成新代次）；leased→free（持有者已停止、产物持久化、已知基线恢复且工作区干净）；任一守卫/Git/释放失败→quarantined（现场不覆盖）；quarantined→free仅经confirm核心命令及重新校验。leased过期不自动等于free。每仓库包括隔离在内最多N行，迁移不预创建；JSON登记只是该表投影。
+
+### 新增物理表
+
+```sql
+CREATE TABLE IF NOT EXISTS worktree_slots(
+  slot_id TEXT PRIMARY KEY,
+  repo_key TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  repository TEXT NOT NULL,
+  git_common_dir TEXT NOT NULL,
+  worktrees_root TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('free','leased','quarantined')),
+  holder_stage TEXT, holder_id TEXT, lease_token TEXT, sha TEXT,
+  lease_expires_at TEXT, heartbeat_at TEXT, updated_at TEXT NOT NULL,
+  owner_pid INTEGER, owner_state TEXT, session_id TEXT, turn_id TEXT,
+  baseline_json TEXT, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS worktree_slots_repo ON worktree_slots(repo_key,state);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_key,holder_stage,holder_id)
+  WHERE state='leased';
+```

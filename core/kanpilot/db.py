@@ -166,6 +166,7 @@ CREATE INDEX IF NOT EXISTS runtime_operations_tool ON runtime_operations(harness
 """
 
 DEFAULT_SETTINGS = {
+    "worktree_pool_size": constants.DEFAULT_WORKTREE_POOL_SIZE,
     "paused_global": False,
     "paused_stages": [],
     "lease_seconds": constants.DEFAULT_LEASE_SECONDS,
@@ -337,11 +338,40 @@ def _upgrade_v4_to_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+WORKTREE_SLOTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS worktree_slots(
+  slot_id TEXT PRIMARY KEY,
+  repo_key TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  repository TEXT NOT NULL,
+  git_common_dir TEXT NOT NULL,
+  worktrees_root TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('free','leased','quarantined')),
+  holder_stage TEXT, holder_id TEXT, lease_token TEXT, sha TEXT,
+  lease_expires_at TEXT, heartbeat_at TEXT, updated_at TEXT NOT NULL,
+  owner_pid INTEGER, owner_state TEXT, session_id TEXT, turn_id TEXT,
+  baseline_json TEXT, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS worktree_slots_repo ON worktree_slots(repo_key,state);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_key,holder_stage,holder_id)
+  WHERE state='leased';
+"""
+SCHEMA += WORKTREE_SLOTS_SCHEMA
+
+
+def _upgrade_v5_to_v6(conn: sqlite3.Connection) -> None:
+    # executescript commits implicitly; keep migration inside its existing txn.
+    for statement in WORKTREE_SLOTS_SCHEMA.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+
+
 _UPGRADES = {
     (1, 2): _upgrade_v1_to_v2,
     (2, 3): _upgrade_v2_to_v3,
     (3, 4): _upgrade_v3_to_v4,
     (4, 5): _upgrade_v4_to_v5,
+    (5, 6): _upgrade_v5_to_v6,
 }
 
 def _upgrade_schema(conn: sqlite3.Connection, version: int) -> None:

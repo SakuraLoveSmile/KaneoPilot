@@ -156,7 +156,7 @@ def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, fact
     assert_legacy(task, reviewed=True)
     conn = db.connect(tmp_env.db)
     try:
-        assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] == 5
+        assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] == 6
     finally:
         conn.close()
 

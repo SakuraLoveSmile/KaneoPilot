@@ -50,6 +50,15 @@ def commit(delivery, run="run1"):
                               execution_run_id=run, fix_round=0)
 
 
+def legacy_snapshot(repo, root, purpose, sha=None, task_id="task1234"):
+    sha = sha or git(repo, "rev-parse", "HEAD")
+    path = Path(root) / task_id / (purpose + "-" + sha[:12])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(path), sha],
+                   check=True, capture_output=True, env=gd.git_env())
+    return path
+
+
 def test_branch_base_and_snapshot_reuse(repo, tmp_path):
     delivery = branch(repo, tmp_path / "worktrees")
     assert delivery["base_branch"] == "main"
@@ -58,13 +67,16 @@ def test_branch_base_and_snapshot_reuse(repo, tmp_path):
     preferred = branch(repo, tmp_path / "worktrees", task_id="task5678", base="main")
     assert preferred["base_branch"] == "main"
     gd.verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    root = tmp_path / "worktrees"
+    legacy_snapshot(repo, root, "review", delivery["head_sha"])
     snapshot = gd.prepare_snapshot_worktree(str(repo), "task1234", sha=delivery["head_sha"],
-                                           purpose="review", worktrees_root=tmp_path / "worktrees")
+                                           purpose="review", worktrees_root=root)
     assert snapshot == gd.prepare_snapshot_worktree(str(repo), "task1234", sha=delivery["head_sha"],
-                                                    purpose="review", worktrees_root=tmp_path / "worktrees")
+                                                    purpose="review", worktrees_root=root)
     assert git(snapshot, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    legacy_snapshot(repo, root, "plan", delivery["head_sha"])
     plan = gd.prepare_snapshot_worktree(str(repo), "task1234", sha=delivery["head_sha"],
-                                       purpose="plan", worktrees_root=tmp_path / "worktrees")
+                                       purpose="plan", worktrees_root=root)
     assert Path(plan).name == "plan-" + delivery["head_sha"][:12]
     (Path(snapshot) / "dirty").touch()
     with pytest.raises(gd.GitDeliveryError, match="已有快照"):
@@ -73,8 +85,21 @@ def test_branch_base_and_snapshot_reuse(repo, tmp_path):
 
 
 def plan_snapshot(repo, root):
-    return Path(gd.prepare_snapshot_worktree(str(repo), "task1234", sha=git(repo, "rev-parse", "HEAD"),
+    sha = git(repo, "rev-parse", "HEAD")
+    path = Path(root) / "task1234" / ("plan-" + sha[:12])
+    if not path.exists():
+        legacy_snapshot(repo, root, "plan", sha)
+    return Path(gd.prepare_snapshot_worktree(str(repo), "task1234", sha=sha,
                                             purpose="plan", worktrees_root=root))
+
+
+def test_missing_legacy_snapshot_is_not_created(repo, tmp_path):
+    root = tmp_path / "worktrees"
+    path = root / "task1234" / ("plan-" + git(repo, "rev-parse", "HEAD")[:12])
+    with pytest.raises(gd.GitDeliveryError, match="新快照必须经核心槽位租约创建"):
+        gd.prepare_snapshot_worktree(str(repo), "task1234", sha=git(repo, "rev-parse", "HEAD"),
+                                     purpose="plan", worktrees_root=root)
+    assert not path.exists()
 
 
 def test_plan_snapshot_reuses_two_runs_of_regular_materials(repo, tmp_path):
@@ -205,8 +230,13 @@ def test_plan_snapshot_rejects_other_changes_and_unsafe_materials(repo, tmp_path
 def test_review_and_branch_do_not_allow_plan_materials(repo, tmp_path, artifact):
     delivery = branch(repo, tmp_path / "worktrees")
     for purpose in ("branch", "review"):
-        path = Path(delivery["worktree_path"]) if purpose == "branch" else Path(gd.prepare_snapshot_worktree(
-            str(repo), "task1234", sha=delivery["head_sha"], purpose="review", worktrees_root=tmp_path / "worktrees"))
+        if purpose == "branch":
+            path = Path(delivery["worktree_path"])
+        else:
+            root = tmp_path / "worktrees"
+            legacy_snapshot(repo, root, "review", delivery["head_sha"])
+            path = Path(gd.prepare_snapshot_worktree(
+                str(repo), "task1234", sha=delivery["head_sha"], purpose="review", worktrees_root=root))
         materials = path / (".kaneopilot-plan-material" if artifact == "materials" else ".pi") / ("run1" if artifact == "materials" else "plan")
         materials.mkdir(parents=True)
         (materials / ("manifest.json" if artifact == "materials" else "plan.md")).write_text("{}")

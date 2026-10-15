@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from helpers import CORE  # noqa: F401
-from kanpilot import pi_desktop_review as review, util
+from kanpilot import pi_desktop_review as review, util, db
 
 
 def git(root, *args):
@@ -33,7 +33,27 @@ def scene(tmp_path):
     return repo, execution, root, task
 
 
-def test_manual_snapshot_includes_full_worktree_without_touching_source(scene):
+@pytest.fixture
+def pooled(scene, tmp_path, monkeypatch):
+    repository, execution, _root, task = scene
+    monkeypatch.setenv("KANPILOT_APP_SUPPORT", str(tmp_path / "support"))
+    database = tmp_path / "snapshot.db"
+    conn = db.connect(database)
+    now = util.now_iso()
+    with db.write_txn(conn):
+        db.set_setting(conn, "worktrees_root", str(tmp_path / "worktrees"))
+        conn.execute("INSERT INTO requests(request_id,idempotency_key,stage,kind,status,run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                     ("review-request", "fixture", "review", "review", "claimed", "review-run", now, now))
+    directory = tmp_path / "invocation"
+    directory.mkdir()
+    job = {"request_id": "review-request", "run_id": "review-run", "invocation_dir": str(directory)}
+    def prepare(snapshot=None):
+        return review.prepare_pooled_worktree(conn, database, job, task, execution, snapshot)
+    yield prepare
+    conn.close()
+
+
+def test_manual_snapshot_includes_full_worktree_without_touching_source(scene, pooled):
     repo, execution, root, task = scene
     (execution / "tracked.txt").write_bytes(b"staged\n")
     git(execution, "add", "tracked.txt")
@@ -52,7 +72,7 @@ def test_manual_snapshot_includes_full_worktree_without_touching_source(scene):
     before_index = git(execution, "diff", "--cached", "--binary")
     before_diff = git(execution, "diff", "HEAD", "--binary", "--full-index", "--no-color")
 
-    assert review.prepare_worktree(task, execution, root) is None
+    root = pooled()
 
     assert git(root, "rev-parse", "HEAD") == before_head
     assert git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == b"HEAD"
@@ -67,16 +87,17 @@ def test_manual_snapshot_includes_full_worktree_without_touching_source(scene):
     assert git(repo, "status", "--porcelain") == b""
 
 
-def test_manual_snapshot_reuses_only_matching_content(scene):
+def test_manual_snapshot_reuses_only_matching_content(scene, pooled):
     _repo, execution, root, task = scene
     (execution / "tracked.txt").write_bytes(b"reviewed work\n")
     (execution / "new.py").write_bytes(b"assert True\n")
-    assert review.prepare_worktree(task, execution, root) is None
+    root = pooled()
     before = (root / "tracked.txt").read_bytes(), (root / "new.py").read_bytes()
-    assert review.prepare_worktree(task, execution, root) is None
+    assert pooled() == root
     assert before == ((root / "tracked.txt").read_bytes(), (root / "new.py").read_bytes())
     (execution / "tracked.txt").write_bytes(b"later source edit\n")
-    assert review.prepare_worktree(task, execution, root) is not None
+    with pytest.raises(util.KanpilotError):
+        pooled()
     assert (root / "tracked.txt").read_bytes() == before[0]
 
 
@@ -105,14 +126,14 @@ def test_frozen_manual_input_rejects_source_changes_before_preparation(scene):
     assert review.prepare_worktree(task, execution, root, snapshot=frozen) is not None
 
 
-def test_frozen_manual_snapshot_verifies_untracked_executable_mode(scene):
+def test_frozen_manual_snapshot_verifies_untracked_executable_mode(scene, pooled):
     from kanpilot import review_snapshot
     _repo, execution, root, task = scene
     added = execution / "new.py"
     added.write_bytes(b"print('fixture')\n")
     added.chmod(0o644)
     frozen = review_snapshot.freeze(execution)
-    assert review.prepare_worktree(task, execution, root, snapshot=frozen) is None
+    root = pooled(frozen)
     review_snapshot.verify_root(root, frozen)
     (root / "new.py").chmod(0o755)
     with pytest.raises(util.KanpilotError):
@@ -122,12 +143,12 @@ def test_frozen_manual_snapshot_verifies_untracked_executable_mode(scene):
         review_snapshot.verify_source(execution, frozen)
 
 
-def test_materials_still_validate_frozen_untracked_file_when_git_now_ignores_it(scene):
+def test_materials_still_validate_frozen_untracked_file_when_git_now_ignores_it(scene, pooled):
     from kanpilot import review_snapshot
     repo, execution, root, task = scene
     (execution / "new.py").write_bytes(b"frozen new test\n")
     frozen = review_snapshot.freeze(execution)
-    assert review.prepare_worktree(task, execution, root, snapshot=frozen) is None
+    root = pooled(frozen)
     materials = repo.parent / "materials"
     materials.mkdir()
     files = review_snapshot.write_materials(materials, frozen)
@@ -141,7 +162,7 @@ def test_materials_still_validate_frozen_untracked_file_when_git_now_ignores_it(
         review_snapshot.verify_root(root, from_materials)
 
 
-def test_crlf_tracked_bytes_survive_snapshot_and_materials_detect_normalization(scene):
+def test_crlf_tracked_bytes_survive_snapshot_and_materials_detect_normalization(scene, pooled):
     from kanpilot import review_snapshot
     repo, execution, root, task = scene
     (repo / ".gitattributes").write_text("*.txt text eol=lf\n")
@@ -152,7 +173,7 @@ def test_crlf_tracked_bytes_survive_snapshot_and_materials_detect_normalization(
     raw = b"changed CRLF line\r\nsecond CRLF line\r\n"
     (execution / "tracked.txt").write_bytes(raw)
     frozen = review_snapshot.freeze(execution)
-    assert review.prepare_worktree(task, execution, root, snapshot=frozen) is None
+    root = pooled(frozen)
     assert (root / "tracked.txt").read_bytes() == raw
     materials = repo.parent / "materials"
     materials.mkdir()
@@ -169,7 +190,7 @@ def test_crlf_tracked_bytes_survive_snapshot_and_materials_detect_normalization(
         review_snapshot.verify_source(execution, frozen)
 
 
-def test_pr_snapshot_still_uses_registered_clean_commit_and_rejects_dirty_execution(scene):
+def test_pr_snapshot_still_uses_registered_clean_commit_and_rejects_dirty_execution(scene, pooled):
     repo, execution, manual_root, task = scene
     git(execution, "switch", "-c", "kaneo/task1234")
     (execution / "tracked.txt").write_bytes(b"committed delivery\n")
@@ -182,9 +203,10 @@ def test_pr_snapshot_still_uses_registered_clean_commit_and_rejects_dirty_execut
                         "worktree_path": str(execution), "head_sha": head,
                         "base_branch": "main", "base_sha": git(execution, "rev-parse", "HEAD^").decode().strip(),
                         "commits": [{"execution_run_id": task["run_id"], "sha": head}]}
-    assert review.prepare_worktree(task, execution, root) is None
+    root = pooled()
     assert (root / "tracked.txt").read_bytes() == b"committed delivery\n"
     assert git(root, "status", "--porcelain") == b""
     (execution / "tracked.txt").write_bytes(b"uncommitted later change\n")
-    assert review.prepare_worktree(task, execution, root) is not None
+    with pytest.raises(util.KanpilotError):
+        pooled()
     assert (root / "tracked.txt").read_bytes() == b"committed delivery\n"

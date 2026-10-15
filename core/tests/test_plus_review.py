@@ -242,21 +242,28 @@ class TestReviewIdentityAndMaterials(ReviewCase):
         repo, worktree = self.make_scene()
         self.review_result("pass")
         self.record_core_calls()
-        self.assertEqual(self.run_review(), 0)
+        start_round = pi_desktop_review._start_model_round
+        observed = {}
+        def inspect_snapshot(**kwargs):
+            observed["app"] = (Path(kwargs["job"]["review_root"]) / "app.py").read_bytes()
+            return start_round(**kwargs)
+        with mock.patch.object(pi_desktop_review, "_start_model_round", inspect_snapshot):
+            self.assertEqual(self.run_review(), 0)
 
         job = self.review_job()
         self.assertEqual(job["execution_run_id"], EXECUTION_RUN_ID)
         self.assertEqual(job["execution_worktree"], str(worktree))
         review_root = job["review_root"]
-        self.assertTrue(review_root.startswith(str(constants.worktrees_root(None))))
+        self.assertTrue(review_root.startswith(str(constants.worktrees_root(None).resolve())))
         self.assertNotEqual(review_root, str(worktree),
                             "专属 Review worktree 不复用执行目录")
         materials = str(pi_desktop_controller.invocation_dir(
             "review", self.review_run()["invocation_id"]) / "materials")
         self.assertFalse((Path(review_root) / "materials").exists(),
                          "审查材料不能污染产品快照")
-        self.assertEqual((Path(review_root) / "app.py").read_bytes(),
-                         (worktree / "app.py").read_bytes())
+        self.assertEqual(observed["app"], (worktree / "app.py").read_bytes())
+        self.assertTrue(job["pool_released"])
+        self.assertIn(b"return 0", (Path(review_root) / "app.py").read_bytes())
         self.assertTrue(os.path.isfile(os.path.join(materials, "changes.diff")))
         self.assertIn(
             "return 1",
@@ -340,6 +347,8 @@ class TestReviewConclusions(ReviewCase):
         job = self.review_job()
         task = self.task(TASK_ID)
         self.assertEqual(task["status"], "done")
+        self.assertTrue(job["pool_released"])
+        self.assertEqual(subprocess.check_output(["git", "-C", job["review_root"], "status", "--porcelain"]), b"")
         self.assertEqual(task["review_summary"]["conclusion"], "pass")
         self.assertEqual(task["review_report_path"], job["report_path"])
         self.assertTrue(os.path.isfile(job["report_path"]))
@@ -562,6 +571,22 @@ class TestReviewNeverWritesPass(ReviewCase):
         self.assertEqual(request["result"]["outcome"], "needs_user")
         self.assertEqual(self.task(TASK_ID)["failure_code"], "review_blocked")
 
+    def test_timeout_with_unconfirmed_stop_retains_lease(self):
+        self.make_scene()
+        self.server.turn_status = "running"
+        self.set_setting("executor_timeout_seconds", 1)
+        with mock.patch.object(pi_desktop_controller, "stop_turn", return_value={"terminal": None, "unknown": True}):
+            self.assertEqual(self.run_review(), 1)
+        job = self.review_job()
+        conn = db.connect(self.db_path)
+        try:
+            row = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?",
+                               (job["pool_lease"]["slot_id"],)).fetchone()
+            self.assertEqual(row["state"], "leased")
+            self.assertEqual(row["owner_state"], "unknown")
+        finally:
+            conn.close()
+
 
 # ------------------------------------------------------------ 部分成功恢复
 
@@ -783,3 +808,46 @@ class TestReviewHardInteractionPolicy(ReviewCase):
         self.assertEqual(self.server.prompt_count, 0)
         self.assertNotIn('register-review', self.commands())
         self.assertNotIn('advance-task', self.commands())
+
+
+class TestReviewPoolTerminationProof(ReviewCase):
+    def assert_unproven_identity_retains_slot(self, field, value=None):
+        self.make_scene()
+        self.review_result("pass")
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == "pi_turn_get":
+                if value is None:
+                    result["structuredContent"].pop(field, None)
+                else:
+                    result["structuredContent"][field] = value
+            return result
+        self.server.tool_call = call
+        self.record_core_calls()
+        self.assertEqual(self.run_review(), 1)
+        self.assertNotIn("register-review", self.commands())
+        job = self.review_job()
+        with db.connect(self.db_path) as conn:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (job["pool_lease"]["slot_id"],)).fetchone()
+            self.assertEqual(slot["state"], "leased")
+            self.assertEqual(slot["owner_state"], "unknown")
+        self.assertIsNot(job.get("owner_stopped"), True)
+
+    def test_raw_completed_without_session_identity_retains_slot(self):
+        self.assert_unproven_identity_retains_slot("sessionId")
+
+    def test_raw_completed_with_foreign_turn_identity_retains_slot(self):
+        self.assert_unproven_identity_retains_slot("turnId", "foreign-turn")
+
+    def test_timeout_loose_stop_receipt_does_not_release_running_turn(self):
+        self.make_scene()
+        self.server.turn_status = "running"
+        self.set_setting("executor_timeout_seconds", 1)
+        with mock.patch.object(pi_desktop_controller, "stop_turn", return_value={"terminal": "completed"}):
+            self.assertEqual(self.run_review(), 1)
+        job = self.review_job()
+        with db.connect(self.db_path) as conn:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (job["pool_lease"]["slot_id"],)).fetchone()
+            self.assertEqual(slot["state"], "leased")
+            self.assertEqual(slot["owner_state"], "unknown")

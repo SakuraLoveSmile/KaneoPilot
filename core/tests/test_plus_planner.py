@@ -933,7 +933,7 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.assertEqual(created["thinkingLevel"], "medium")
         worktree = Path(created["projectPath"])
         self.assertNotEqual(worktree, fixture["repo"])
-        self.assertTrue(str(worktree).startswith(str(self.worktrees_root)))
+        self.assertTrue(str(worktree).startswith(str(self.worktrees_root.resolve())))
         self.assertEqual(self.server.configured["permissionMode"], "auto")
         self.assertEqual(self.server.configured["mode"], "plan")
         self.assertIs(self.server.configured["confirm"], True)
@@ -1034,11 +1034,16 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.assertTrue((material_dir / "manifest.json").is_file())
         # 材料目录在规划 worktree 内（Plus 附件路径校验要求）。
         self.assertTrue(
-            str(material_dir).startswith(job["worktree_path"] + os.sep))
+            "plan-materials" in material_dir.parts)
 
     def test_image_attachment_real_plus_shape(self):
         fixture, payload = self._fixture()
-        with self.fast():
+        real_prompt = runtime_client.RuntimeClient.agent_prompt
+        observed = {}
+        def prompt(client, *args, **kwargs):
+            observed["attachment_exists"] = Path(kwargs["attachments"][0]["path"]).is_file()
+            return real_prompt(client, *args, **kwargs)
+        with self.fast(), mock.patch.object(runtime_client.RuntimeClient, "agent_prompt", prompt):
             self.run_round()
         attachments = self.server.prompt_attachments
         self.assertIsInstance(attachments, list)
@@ -1051,7 +1056,8 @@ class TestPlusReadyPath(PlusPlannerCase):
         self.assertEqual(item["mimeType"], "image/png")
         self.assertEqual(item["size"], len(payload))
         self.assertTrue(os.path.isabs(item["path"]))
-        self.assertTrue(Path(item["path"]).is_file())
+        self.assertTrue(observed["attachment_exists"])
+        self.assertFalse(Path(item["path"]).exists())
         _run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
         self.assertTrue(item["path"].startswith(job["worktree_path"] + os.sep))
         # 绝对路径也出现在 prompt 里（模型可直接读取）。
@@ -1549,6 +1555,15 @@ class TestTranscriptGates(PlusPlannerCase):
         view = self.task(fixture["task_id"])
         self.assertEqual(view["status"], "needs_plan")
         self.assertIn("send_unknown", view["failure_reason"])
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        conn = db.connect(self.db_path)
+        try:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?",
+                                (job["pool_lease"]["slot_id"],)).fetchone()
+            self.assertEqual(slot["state"], "leased")
+            self.assertEqual(slot["owner_state"], "unknown")
+        finally:
+            conn.close()
         self.assertEqual(self.server.prompt_count, 1, "响应不明不得重发")
         _run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
         self.assertEqual(job["send_state"], "unknown")
@@ -1573,9 +1588,52 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
         finally:
             conn.close()
         fixture["sha"] = sha
-        fixture["worktree"] = (self.worktrees_root / fixture["task_id"]
-                               / ("plan-" + sha[:12]))
+        from kanpilot import worktree_pool
+        repo_key = worktree_pool.repository_identity(fixture["repo"])["repo_key"]
+        fixture["worktree"] = self.worktrees_root.resolve() / "pool" / repo_key / "slot-1"
         return fixture
+
+    def test_full_pool_keeps_same_request_queued_without_sending(self):
+        from kanpilot import worktree_pool
+        fixture = self.snapshot_fixture()
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "worktree_pool_size", 1)
+            worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id="another-reader",
+                                  sha=fixture["sha"])
+        finally:
+            conn.close()
+        self.run_round()
+        request = self.request_view(fixture["request_id"])
+        self.assertEqual(request["status"], "queued")
+        self.assertEqual(self.task(fixture["task_id"])["status"], "needs_plan")
+        self.assertEqual(self.server.prompt_count, 0)
+        self.assertIsNone(self.server.created)
+
+    def test_resume_rejects_previous_generation_before_connecting(self):
+        from kanpilot import worktree_pool
+        fixture = self.snapshot_fixture()
+        claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": fixture["request_id"]})
+        conn = db.connect(self.db_path)
+        try:
+            old = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id="old-reader", sha=fixture["sha"])
+            worktree_pool.release(conn, old["slot_id"], old["holder_id"], old["lease_token"], owner_stopped=True)
+            current = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id=claim["run_id"], sha=fixture["sha"])
+            self.assertEqual(old["path"], current["path"])
+            self.assertNotEqual(old["lease_token"], current["lease_token"])
+        finally:
+            conn.close()
+        directory = self.root / "resume-generation"
+        directory.mkdir()
+        round_ = pi_desktop_planner._Round(self.db_path, fixture["request_id"], claim["run_id"],
+            context=claim["context"], task=claim["context"]["task"], task_id=fixture["task_id"],
+            run_dir=directory, timeout=1, heartbeat_every=1)
+        with mock.patch.object(round_, "_connect") as connect, mock.patch.object(round_, "fail", return_value=True) as fail:
+            self.assertTrue(round_._resume({"pool_lease": old, "run_id": "old-reader"}))
+        connect.assert_not_called()
+        self.assertEqual(fail.call_args.args[1], "plan_round_unverifiable")
+        self.assertNotIn("pool_lease", round_.job)
 
     def assert_preparation_failed(self, fixture, code, detail):
         run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
@@ -1599,7 +1657,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
         error = git_delivery.GitDeliveryError(
             "worktree_invalid",
             f"快照身份不符：{TOKEN} https://user:private@github.com/org/repo")
-        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+        with mock.patch("kanpilot.worktree_pool.acquire",
                                side_effect=error):
             self.run_round()
         self.assert_preparation_failed(fixture, "worktree_invalid", "快照身份不符")
@@ -1615,7 +1673,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
 
     def test_git_transient_keeps_specific_reason(self):
         fixture = self.snapshot_fixture()
-        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+        with mock.patch("kanpilot.worktree_pool.acquire",
                                side_effect=git_delivery.GitDeliveryError(
                                    "git_transient", "Git 操作暂时不可用")):
             self.run_round()
@@ -1624,7 +1682,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
     def test_unavailable_connection_does_not_replace_worktree_error(self):
         fixture = self.snapshot_fixture()
         self.write_connection(active=False)
-        with mock.patch.object(git_delivery, "prepare_snapshot_worktree",
+        with mock.patch("kanpilot.worktree_pool.acquire",
                                side_effect=git_delivery.GitDeliveryError(
                                    "worktree_invalid", "快照工作树有源码改动")):
             self.run_round()
@@ -1665,41 +1723,42 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
                         str(fixture["worktree"]), "HEAD"],
                        capture_output=True, check=True)
         self.run_round()
-        self.assert_preparation_failed(fixture, "worktree_invalid", "已有快照工作树与登记不符")
+        self.assert_preparation_failed(fixture, "worktree_invalid", "新槽位路径已有未登记内容")
         self.assertEqual(self.git_status(foreign), "")
 
     def test_snapshot_tracked_changes_still_block_plus_creation(self):
         fixture = self.snapshot_fixture()
-        git_delivery.prepare_snapshot_worktree(
-            fixture["repo"], fixture["task_id"], sha=fixture["sha"],
-            purpose="plan", worktrees_root=self.worktrees_root)
+        fixture["worktree"].parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(fixture["repo"]), "worktree", "add", "--detach",
+                        str(fixture["worktree"]), fixture["sha"]], capture_output=True, check=True)
         (fixture["worktree"] / "AGENTS.md").write_text("changed source\n", encoding="utf-8")
         self.run_round()
-        self.assert_preparation_failed(fixture, "worktree_invalid", "已有快照工作树与登记不符")
+        self.assert_preparation_failed(fixture, "worktree_invalid", "新槽位路径已有未登记内容")
         self.assertEqual((fixture["worktree"] / "AGENTS.md").read_text(), "changed source\n")
 
-    def test_reused_snapshot_keeps_plus_plan_markdown_and_sends_once(self):
+    def test_released_snapshot_preserves_plus_plan_evidence_before_reuse(self):
         fixture = self.snapshot_fixture()
-        git_delivery.prepare_snapshot_worktree(
-            fixture["repo"], fixture["task_id"], sha=fixture["sha"],
-            purpose="plan", worktrees_root=self.worktrees_root)
-        artifact = fixture["worktree"] / ".pi" / "plan" / "previous-plan.md"
-        artifact.parent.mkdir(parents=True)
         original = "# 已有 Plus 计划\n\n保留这份规划证据。\n".encode("utf-8")
-        artifact.write_bytes(original)
+        real_prompt = runtime_client.RuntimeClient.agent_prompt
+        def prompt(client, *args, **kwargs):
+            artifact = fixture["worktree"] / ".pi" / "plan" / "previous-plan.md"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(original)
+            return real_prompt(client, *args, **kwargs)
         self.server.add_message("user", "kanpilot plan prompt")
         self.server.add_message("assistant", "# 新计划\n")
         self.server.add_plan_proposal(markdown="# 新计划\n")
-        with self.fast():
+        with self.fast(), mock.patch.object(runtime_client.RuntimeClient, "agent_prompt", prompt):
             self.run_round()
         self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
         self.assertEqual(self.server.created["projectPath"], str(fixture["worktree"]))
         self.assertEqual(self.server.prompt_count, 1)
-        self.assertEqual(artifact.read_bytes(), original)
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        persisted = Path(job["material_dir"]).parents[1]
+        self.assertEqual((persisted / "plus-plan-evidence" / "previous-plan.md").read_bytes(), original)
+        self.assertFalse((fixture["worktree"] / ".pi" / "plan" / "previous-plan.md").exists())
+        self.assertTrue(job["pool_released"])
         self.assertEqual(self.git_status(fixture["repo"]), "")
-        head = subprocess.run(["git", "-C", str(fixture["repo"]), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(head, fixture["sha"])
 
 
 class TestUnexpectedPlannerExit(PlusPlannerCase):
@@ -2316,4 +2375,28 @@ class TestHardInteractionPolicy(PlusPlannerCase):
         self.assertFalse(job.get('turn_id'))
         self.assertEqual(self.server.prompt_count, 0)
         self.assertEqual(self.server.resolve_calls, [])
+        self.assertFalse(self.plan_files())
+
+
+class TestPlanPoolTerminationProof(PlusPlannerCase):
+    def test_raw_terminal_without_turn_identity_never_releases_slot(self):
+        fixture = self.plus_request()
+        self.save_plus_config()
+        self.server.add_message("user", "prompt")
+        self.server.add_plan_proposal()
+        actual = self.server.tool_call
+        def call(name, args):
+            result = actual(name, args)
+            if name == "pi_turn_get":
+                result["structuredContent"].pop("turnId", None)
+            return result
+        self.server.tool_call = call
+        with self.fast():
+            self.run_round()
+        run_id, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertIsNot(job.get("owner_stopped"), True)
+        with db.connect(self.db_path) as conn:
+            slot = conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (job["pool_lease"]["slot_id"],)).fetchone()
+            self.assertEqual(slot["state"], "leased")
+            self.assertEqual(slot["owner_state"], "unknown")
         self.assertFalse(self.plan_files())

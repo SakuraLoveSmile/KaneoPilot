@@ -42,9 +42,11 @@ class TestBoardAttention(KanpilotTestCase):
         overview = self.call("overview", {})
         listed = self.call("list-tasks", {})
         listing = self.call("attention-list", {})
-        self.assertEqual(overview["attention"], {"items": []})
-        self.assertEqual(listed["attention"], {"items": []})
-        self.assertEqual(listing, {"items": []})
+        expected = {"items": [], "worktree_pool": {
+            "free": 0, "leased": 0, "quarantined": 0, "unconfirmed": 0, "waiting": [], "slots": []}}
+        self.assertEqual(overview["attention"], expected)
+        self.assertEqual(listed["attention"], expected)
+        self.assertEqual(listing, expected)
 
     def test_item_shape_is_contract(self):
         self._make_needs_user("taskbrdshape0000000001")

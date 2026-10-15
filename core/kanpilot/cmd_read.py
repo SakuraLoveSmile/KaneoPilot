@@ -210,8 +210,8 @@ def _board_attention(ctx) -> dict:
     no second aggregation logic here. Shape matches the ``attention-list``
     command output exactly.
     """
-    from .engine.commands import attention_items
-    return {"items": attention_items(ctx.conn, ctx.now, ctx.now_iso)}
+    from .engine.commands import cmd_attention_list
+    return cmd_attention_list(ctx, {})
 
 
 def cmd_overview(ctx, payload: dict) -> dict:
@@ -900,6 +900,12 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     checks.append(_doctor_engine_lease(ctx))
     checks.append(_doctor_business_tick(ctx))
     checks.append(_doctor_attention_backlog(ctx))
+    from . import worktree_status
+    pool = worktree_status.summary(ctx.conn)
+    checks.append({"name": "worktree_pool", "ok": not (pool["quarantined"] or pool["unconfirmed"]),
+                   "detail": f"free: {pool['free']}, leased: {pool['leased']}, "
+                             f"quarantined: {pool['quarantined']}, unconfirmed: {pool['unconfirmed']}, "
+                             f"waiting: {len(pool['waiting'])}"})
     # §5.27.6：doctor 输出绝不泄露凭据。所有 check 的 detail 统一过一道脱敏
     # （util.redact，protocol §5.22.3），不依赖每个探针自己构造得正确——
     # 例如 `plus` 检查原样透传 probe["detail"]，此前只靠「detail 由本仓构造」

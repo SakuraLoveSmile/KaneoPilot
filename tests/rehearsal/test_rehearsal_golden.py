@@ -553,7 +553,13 @@ def test_scenario_review_tracked_build_artifact_is_accepted(pipeline):
     pipeline._review()
     value = pipeline.task(TASK)
     assert value["extra"]["review_conclusion"] == "pass", value
-    snapshot = pipeline.root / "trees" / TASK / ("review-" + head[:12])
+    pool = pipeline.call("attention-list")["worktree_pool"]
+    assert pool["quarantined"] == 1
+    slot = next(item for item in pool["slots"] if item["state"] == "quarantined")
+    assert slot["holder_stage"] == "review"
+    snapshot = Path(slot["path"])
+    assert snapshot.name.startswith("slot-")
+    assert _git(snapshot, "rev-parse", "HEAD") == head
     assert _git(snapshot, "status", "--porcelain") == "M tracked.pyc"
     assert _git(snapshot, "rev-parse", "HEAD") == head
     assert _git(snapshot, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
