@@ -524,11 +524,11 @@ def test_scenario_concurrency_two_slots_four_tasks_no_deadlock(
 
 
 def test_scenario_migration_v5_to_v6_gc_reversible(cli, tmp_env, legacy_state):
-    """migrate 备份/幂等/dry_run 契约；v6 升级与 GC 引擎缺能力（SCHEMA_VERSION=5）。"""
+    """schema v6 下保留 legacy migrate 的备份、只读源与幂等契约。"""
     import hashlib
     from kanpilot import constants
 
-    assert constants.SCHEMA_VERSION == 5, "当前 schema 版本应为 5（v6 未实现）"
+    assert constants.SCHEMA_VERSION == 6, "槽位池迁移后的 schema 版本应为 6"
 
     before = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
               for p in (legacy_state.executor_manifest,
@@ -561,11 +561,11 @@ def test_scenario_migration_v5_to_v6_gc_reversible(cli, tmp_env, legacy_state):
 def test_migration_no_implicit_upgrade(cli, tmp_env):
     """普通命令对旧库/不明库报 migration_needed，不隐式升级（§5.12）。
 
-    场景 19 的支撑断言（非独立场景）：SCHEMA_VERSION=5，缺版本/版本过低的库
+    场景 19 的支撑断言（非独立场景）：SCHEMA_VERSION=6，缺版本/版本过低的库
     经普通命令拒绝并报 ``migration_needed``，只有显式 ``migrate`` 才允许升级。
     """
     import sqlite3
-    # 先建一个 v5 库，再把版本改低 → 普通命令应拒绝（不升级）。
+    # 先建一个当前版本库，再把版本改低 → 普通命令应拒绝（不升级）。
     cli("overview", {})
     conn = sqlite3.connect(str(tmp_env.db))
     try:
