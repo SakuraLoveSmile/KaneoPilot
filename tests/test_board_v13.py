@@ -230,14 +230,24 @@ class TestClassificationMutex:
         rj = factory.make_in_review(title="异常-评审未通过")
         src = rj.task.task_id
         rv = claim_request(factory, src, "review")
+        # §5.24.5：create-review-fix 与 register-review 共享
+        # core.require_review_identity，分支任务同样必须带同一次真实
+        # review 领取（rv）的 request_id/run_id
         fix = cli("create-review-fix", {
             "source_task_id": src, "title": "修复任务",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-V13-MUTEX"})
+            "dedupe_key": "RK-V13-MUTEX",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         rep = write_review_report(factory.env.app_support, task_id=src,
                                   conclusion="changes_requested")
+        # §5.24.5 分支评审领取身份（core.require_review_identity）：本文件
+        # 夹具的工作区由 start-plans 登记为 workspace_version=1，登记任何
+        # 评审结论都必须带 request_id + run_id，且两者同源上面那次真实的
+        # review 领取（rv=claim_request(...,"review")）；只传 run_id 属旧
+        # 非分支手动兼容，分支评审下会 validation_failed。不伪造请求。
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix["fix_task_id"], "review_key": "RK-V13-MUTEX"})
         s["review_rejected"] = src
@@ -431,7 +441,9 @@ class TestExceptionKindTable:
         rv = claim_request(factory, tid, "review")
         rep = write_review_report(factory.env.app_support, task_id=tid,
                                   conclusion="blocked")
-        cli("register-review", {"task_id": tid, "run_id": rv["run_id"],
+        cli("register-review", {"task_id": tid,
+                                "request_id": rv["request_id"],
+                                "run_id": rv["run_id"],
                                 "report_path": str(rep.path),
                                 "conclusion": "blocked"})
         t = assert_exception(factory, cli, tid, kind="review_blocked",
@@ -473,14 +485,17 @@ class TestExceptionKindTable:
         ir = factory.make_in_review(title="判定-评审未通过")
         src = ir.task.task_id
         rv = claim_request(factory, src, "review")
+        # 领取身份同上：同一次真实 rv 的 request_id/run_id（同一守卫消费点）
         fix = cli("create-review-fix", {
             "source_task_id": src, "title": "修复任务",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-V13-KIND"})
+            "dedupe_key": "RK-V13-KIND",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         rep = write_review_report(factory.env.app_support, task_id=src,
                                   conclusion="changes_requested")
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix["fix_task_id"], "review_key": "RK-V13-KIND"})
         t = assert_exception(factory, cli, src, kind="review_rejected",
@@ -505,14 +520,17 @@ class TestReviewFixChain:
         ir = factory.make_in_review(title="修复链-原任务")
         src = ir.task.task_id
         rv = claim_request(factory, src, "review")
+        # 领取身份同上：create-review-fix 也要过 require_review_identity
         fix = cli("create-review-fix", {
             "source_task_id": src, "title": "修复链-修复任务",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": key})
+            "dedupe_key": key,
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         rep = write_review_report(factory.env.app_support, task_id=src,
                                   conclusion="changes_requested")
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix["fix_task_id"], "review_key": key})
         return src, fix["fix_task_id"], rv
@@ -607,7 +625,9 @@ class TestReviewFixChain:
         rv2 = claim_request(factory, src, "review")
         rep = write_review_report(factory.env.app_support, task_id=src,
                                   conclusion="pass")
-        cli("register-review", {"task_id": src, "run_id": rv2["run_id"],
+        cli("register-review", {"task_id": src,
+                                "request_id": rv2["request_id"],
+                                "run_id": rv2["run_id"],
                                 "report_path": str(rep.path),
                                 "conclusion": "pass"})
         cli("advance-task", {"task_id": src, "target": "done",
@@ -663,12 +683,12 @@ class TestHistoryDoesNotPollute:
         """execution_failed → replan → 重走 plan → ready：异常清除、历史失败
         不污染当前归列（§5.15.4）。
 
-        附带固化一个已知产品缺口（v1.2 既有、非 v1.3 回归，已上报用户决定，
-        （conflicting send evidence，v2 起码为 send_conflict，归列为
-        manual_block/需人工处理），且 §4.10 的
-        resolve 动作里没有一个能清掉 send_state="sent" 的发送证据（retry 仅限
-        not_sent；restore/mark_sent/accept_duplicate 仅限 unknown）——
-        replan 之后重派发无路可走。此处只断言当前行为，防回归。
+        旧轮发送证据按 manual replan 既有合同保留，enqueue 被
+        cmd_queue._require_unsent_dispatch（提交 9d0ecf0 刻意保留的纵深守卫）
+        前置拒绝——conflict 且不建请求；§4.10 的 resolve 动作没有一个能清
+        掉 send_state="sent" 的发送证据（retry 仅限 not_sent；
+        restore/mark_sent/accept_duplicate 仅限 unknown）——replan 之后重派发
+        无路可走，该已上报产品缺口本轮不改，只断言当前行为防回归。
         """
         running = factory.make_running(title="历史-执行失败")
         tid = running.task.task_id
@@ -693,21 +713,19 @@ class TestHistoryDoesNotPollute:
         assert not t["blocked_reason"]
         assert t["exception"] is None
 
-        # 重派发：校验 6 拒绝（已发送证据冲突）→ 新的 needs_user。
-        # v2：该守卫码为 send_conflict（§5.14 失败码表外），归列为
-        # manual_block/需人工处理而非派发失败。
-        factory.enqueue_dispatch(tid)
-        dreq = factory.find_request(tid, "dispatch")
-        assert dreq is not None, "replan 后应可重新入队"
-        d = factory.claim("dispatch", request_id=dreq["request_id"])
-        assert d["claimed"] is False
-        assert d.get("reason") == "guard_failed"
-        assert d.get("code") == "send_conflict"
-        blocked = assert_exception(factory, cli, tid, kind="manual_block",
-                                   label="需人工处理", severity="blocked",
-                                   lifecycle_column="todo",
-                                   failure_code="send_conflict")
-        assert blocked["status"] == "needs_user"
+        # 重派发：enqueue 前置守卫直接拒绝（旧轮 sent 证据保留）——不建
+        # 请求、不改任务状态，后续 claim 守卫根本无从触发。
+        out = cli("enqueue", {"task_id": tid, "kind": "dispatch",
+                              "confirm_plan": True,
+                              "expected_plan_sha256":
+                                  factory.get_task(tid)["plan_sha256"]},
+                  expect=1)
+        assert out["code"] == "conflict"
+        # 任务仍 todo/就绪、无异常；且无任何新的 dispatch 请求（含 claimed）
+        t = assert_normal(factory, cli, tid, "todo", "就绪")
+        assert t["status"] == "ready"
+        assert factory.find_request(tid, "dispatch",
+                                    statuses=("queued", "claimed")) is None
         # 事件里仍有历史失败记录（审计不丢），但归列不看它
         kinds = {e["kind"] for e in cli("list-events",
                                         {"task_id": tid})["events"]}

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -704,6 +706,203 @@ def test_attention_collect_orders_by_ladder_and_dedups():
     for item in items:
         assert item["attention_id"] == f"attn_{item['task_id']}_{item['reason_code']}"
         assert item["reason_code"] in REASON_CODES
+
+
+# ---------------------------------------------------------------------------
+# §5.27.15：队列排空后，实际引擎循环补观察并继续评审
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", [
+    "running", "manual_takeover", "answered_question", "backfilled_finished",
+    "legacy",
+])
+def test_scenario_drained_round_reaches_review_via_engine_cycles(
+        variant, cli, factory, tmp_env, fake_kaneo, fake_plus, monkeypatch):
+    """终态 job 只是输入；任务推进、verify 与评审领取均由真实命令完成。
+
+    所有路径（含 HOME、DB、凭据、Git、runs、Plus 连接文件）属于 tmp_env；
+    spawn 只用受控内进程 runner，不运行用户执行器、不访问正式服务。
+    """
+    from conftest import rewind_finished_at, ui_evidence, write_plan_file
+    from kanpilot import (auto_monitor, automation_policy, engine_claim_scope, round_store,
+                          runtime_client)
+
+    verify = ('test "$(cat execution-result.txt)" = complete '
+              '&& printf core-verified > verify-ran.pyc')
+    # Review 只领取、不调用模型；托管评审不能使用历史默认 pi 后端。
+    cli("set-review-config", {"backend": "codex"})
+    task = factory.sync_task(title="终态轮次补给演练")
+    plan = write_plan_file(
+        tmp_env.plan_root, task_id=task.task_id, project_id=task.project_id,
+        project_name=task.project_name, repository=task.repository,
+        source_sha256=task.source_sha256,
+        requirements_sha256=task.requirements_sha256,
+        body="# 执行计划\n\n```verify\n" + verify + "\n```\n")
+    factory.publish(task, plan_file=plan)
+    factory.enqueue_dispatch(task.task_id)
+    dispatch = factory.claim("dispatch")
+    assert dispatch["claimed"] is True, dispatch
+    tid, run_id = task.task_id, dispatch["run_id"]
+    evidence = ui_evidence(
+        session_marker=dispatch["context"]["session_marker"],
+        repository=dispatch["context"]["repository"],
+        attachment_name=dispatch["context"]["attachment_name"])
+    cli("dispatch-prepare", {"task_id": tid, "run_id": run_id,
+                             "evidence": evidence})
+    cli("dispatch-begin-send", {"task_id": tid, "run_id": run_id})
+    cli("dispatch-confirm", {"task_id": tid, "run_id": run_id,
+                             "evidence": dict(evidence, message_visible=True,
+                                              session_id="topup-session",
+                                              session_title="终态演练")})
+    # 表达上次 monitor 窗口已结束且队列排空；不是测试手工补建请求。
+    queued_monitor = factory.active_request(tid, kind="monitor")
+    assert queued_monitor is not None
+    previous = factory.claim("monitor", request_id=queued_monitor["request_id"])
+    assert previous["claimed"] is True, previous
+    cli("report", {"request_id": previous["request_id"],
+                   "run_id": previous["run_id"], "outcome": "succeeded"})
+    rewind_finished_at(tmp_env.db, previous["request_id"], 121)
+    _adopt(tmp_env.db, tid, manual_takeover=variant == "manual_takeover")
+    cli("set-project-automation", {"project_id": task.project_id,
+                                   "automation": {"enabled": True}})
+
+    current = factory.get_task(tid)
+    worktree = Path((current.get("delivery") or {}).get("worktree_path") or
+                    tmp_env.root / "execution-tree")
+    if not worktree.exists():
+        subprocess.run(["git", "-C", str(task.repository), "worktree", "add",
+                        "--detach", str(worktree)], check=True,
+                       capture_output=True, timeout=15)
+    (worktree / "execution-result.txt").write_text("complete\n", encoding="utf-8")
+    runs = tmp_env.app_support / "runs"
+    directory = runs / tid / run_id
+    directory.mkdir(parents=True)
+    session_id = fake_plus.server.add_session("topup-session")
+    fake_plus.server.set_turn(session_id, "topup-turn", status="completed")
+    fake_plus.server.set_agent_status(session_id, currentTurnId="topup-turn",
+                                      isRunning=False)
+    now = kutil.now_iso()
+    dead_pid = 2 ** 22 + 7
+    config = {"backend": "pi_desktop",
+              "connection_file": str(fake_plus.connection_file),
+              "provider_id": "rehearsal-provider", "model_id": "rehearsal-model",
+              "permission_mode": "auto", "thinking_level": "medium"}
+    job = {"task_id": tid, "run_id": run_id, "backend": "pi_desktop",
+           "scope_id": runtime_client.stable_scope_id("execution", task_id=tid,
+                                                      run_id=run_id),
+           "session_id": session_id, "turn_id": "topup-turn", "config": config,
+           "completion_policy": "command_verification",
+           "plan_sha256": current["plan_sha256"],
+           "status": "running", "send_state": "sent", "pid": dead_pid,
+           "started_at": now, "worktree_path": str(worktree)}
+    (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    (directory / "spec.json").write_text(json.dumps(
+        {"task_id": tid, "run_id": run_id, "cwd": str(worktree), "config": config}),
+        encoding="utf-8")
+    conn = _connect(tmp_env.db)
+    try:
+        with kdb.write_txn(conn):
+            kdb.set_setting(conn, "session_runs_root", str(runs))
+            round_store.upsert_on_claim(conn, tid, run_id, config, now,
+                                        backend="pi_desktop")
+            round_store.mark_started(conn, tid, run_id, now, pid=dead_pid,
+                                     worktree_path=str(worktree))
+            round_store.upsert_discovered(
+                conn, tid, run_id, now, backend="pi_desktop", session_id=session_id,
+                run_status="finished" if variant == "backfilled_finished" else "running")
+    finally:
+        conn.close()
+    if variant == "answered_question":
+        question = {"task_id": tid, "run_id": run_id, "session_id": session_id,
+                    "turn_id": "topup-turn", "request_id": "topup-ask",
+                    "tool_call_id": "topup-tool", "state": "open",
+                    "questions": [{"title": "继续执行？", "options": [{"label": "继续"}]}]}
+        assert cli("report-execution-question", question)["execution_question"]["state"] == "open"
+        closed = cli("report-execution-question", dict(question, state="closed"))
+        assert closed["execution_question"]["state"] == "answered", closed
+        assert factory.get_task(tid)["status"] == "running"
+    job.update(status="finished", ended_at=now, exit_code=0)
+    (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    events = [
+        {"v": 1, "seq": 1, "ts": now, "type": "session", "task_id": tid,
+         "run_id": run_id, "session_id": session_id, "turn_id": "topup-turn"},
+        {"v": 1, "seq": 2, "ts": now, "type": "terminal",
+         "outcome": "completed", "reason": "control_turn_completed"},
+    ]
+    (directory / "events.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    assert _count_requests(tmp_env.db, tid, "monitor", ("queued", "claimed")) == 0
+    assert _count_requests(tmp_env.db, tid, "review", ("queued", "claimed")) == 0
+
+    # preflight 暂时失败仅应阻止新采纳，不能阻止已运行任务的观察与收尾。
+    preflight_calls = []
+
+    def unavailable_preflight(conn, pid):
+        preflight_calls.append(pid)
+        return ["temporary_plus_unavailable"]
+
+    monkeypatch.setattr(automation_policy, "automation_preflight", unavailable_preflight)
+    monkeypatch.setenv("KANPILOT_VERIFY_SHELL", "/bin/sh")
+    spawned, review_claims = [], []
+
+    def spawn(stage, db_path, instance_id):
+        assert Path(db_path) == tmp_env.db
+        spawned.append(stage)
+        if stage == "monitor":
+            conn = _connect(db_path)
+            try:
+                # 与 engine-owned runner 一样承接引擎模式；Controller 只有
+                # 剩余 >=120s 才领取，预算足够但本地测试无需等待。
+                with engine_claim_scope.command_mode("live"):
+                    assert auto_monitor.run_stage(
+                        stage, conn=conn, db_path=db_path, timeout=180,
+                        log_path=tmp_env.root / "topup-monitor.jsonl",
+                        record_run=lambda **fields: None) == 0
+            finally:
+                conn.close()
+        elif stage == "review":
+            claimed = factory.claim("review")
+            assert claimed["claimed"] is True, claimed
+            review_claims.append(claimed)
+        else:
+            raise AssertionError("演练不允许执行其他阶段：" + stage)
+
+    rec = kloop.Reconciler(
+        tmp_env.db, mode="legacy" if variant == "legacy" else "live",
+        enable_tick=True, enable_intake=True, enable_spawn=True, spawn=spawn)
+    first = rec.reconcile_once()
+    if variant == "legacy":
+        rec.reconcile_once()
+        assert factory.get_task(tid)["status"] == "running"
+        assert spawned == []
+        assert not (worktree / "verify-ran.pyc").exists()
+        assert _count_requests(tmp_env.db, tid, "monitor", ("queued", "claimed")) == 0
+        assert _count_requests(tmp_env.db, tid, "review", ("queued", "claimed")) == 0
+        return
+
+    value = factory.get_task(tid)
+    assert task.project_id in preflight_calls
+    assert any(a.get("action") == "business_tick" and a.get("executed") is True
+               for a in first["actions"]), first
+    assert value["status"] == "in_review", (
+        first, value["status"], value.get("failure_code"),
+        (tmp_env.root / "topup-monitor.jsonl").read_text())
+    assert fake_kaneo.tasks[tid]["status"] == "in-review"
+    assert value["extra"]["engine_verdict"]["verification_ok"] is True
+    assert (worktree / "verify-ran.pyc").read_text() == "core-verified"
+    assert spawned == ["monitor"], (first, spawned)
+    assert review_claims == []
+    second = rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=60))
+    assert spawned == ["monitor", "review"], (second, spawned)
+    assert len(review_claims) == 1
+    assert review_claims[0]["context"]["task_id"] == tid
+    assert _count_requests(tmp_env.db, tid, "review", "claimed") == 1
+    assert _count_requests(tmp_env.db, tid, "delivery", ("queued", "claimed")) == 0
+    if variant == "manual_takeover":
+        assert factory.get_task(tid)["automation"]["manual_takeover"] is True
+        assert not [a for a in first["actions"]
+                    if a.get("command") == "resolve"]
 
 
 def load_tests(loader, standard_tests, pattern):

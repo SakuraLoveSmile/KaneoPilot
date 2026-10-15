@@ -7,6 +7,7 @@ import json
 import sys
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -36,12 +37,34 @@ def monitor(module, env):
     stage(module, 'monitor', env)
 
 
-def assert_legacy(task):
+# PR/发布授权字段全集：仅由 PR 发布/同步链路写入（cmd_delivery_pr 的
+# pr_number/pr_url/pr_state/pushed_sha/merged_at/publish_failures/last_sync_at、
+# cmd_queue delivery resolve 的 next_sync_at），manual 分支工作区任务永不应出现。
+PR_PUBLISH_FIELDS = ("pr_url", "pr_number", "pr_state", "pushed_sha",
+                     "merged_at", "publish_failures", "last_sync_at", "next_sync_at")
+
+
+def assert_legacy(task, reviewed=False):
+    """manual legacy 形态：无 automation、无 plan_verify，delivery 只是本地分支工作区。
+
+    docs/state-model「新任务分支工作区（2026-10-09）」条款：首次规划（start-plans 经
+    task_workspace.prepare_for_submission 落库）就登记 delivery=mode=manual +
+    workspace_version=1 + branch/worktree/base/head 完整本地登记，这是符合规格的
+    形态而非 PR 升级，不能再断言其不存在。阶段边界按 auto_monitor._finish_complete：
+    验证通过才会执行 delivery-commit——done/评审通过前（reviewed=False）head_sha
+    不得离开 base_sha、不得有 commits；done/评审通过后（reviewed=True）允许
+    head_sha 与 commits 前进。两阶段都严禁 PR_PUBLISH_FIELDS 出现。
+    """
     assert not task.get('automation')
-    assert not task.get('delivery')
     assert not task['extra'].get('automation')
-    assert not task['extra'].get('delivery')
     assert 'plan_verify' not in task['extra']
+    delivery = task.get('delivery') or task['extra'].get('delivery') or {}
+    assert delivery.get('mode') == 'manual', task
+    assert delivery.get('workspace_version') == 1, task
+    assert not [key for key in PR_PUBLISH_FIELDS if key in delivery], task
+    if not reviewed:
+        assert delivery.get('head_sha') == delivery.get('base_sha'), task
+        assert not delivery.get('commits'), task
 
 
 @pytest.fixture
@@ -85,18 +108,12 @@ def legacy_execution(factory, cli, tmp_env, monkeypatch):
 
 def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, factory, cli, tmp_env, monkeypatch):
     tid, execution_run = legacy_execution
-    monitor(auto_monitor, tmp_env)
-    task = factory.get_task(tid)
-    assert task['status'] == 'needs_user', task
-    assert task['failure_code'] == 'verification_unconfirmed', task
-    assert 'accept_verification' in task['allowed_actions']
-    assert_legacy(task)
-    cli('resolve', {'task_id': tid, 'action': 'accept_verification', 'note': 'User checked legacy result'})
-    accepted = factory.get_task(tid)
-    assert accepted['status'] == 'running'
-    assert accepted['extra']['verification_override']['execution_run_id'] == execution_run
-    monitor(auto_monitor, tmp_env)
-    assert factory.get_task(tid)['status'] == 'in_review', factory.get_task(tid)
+    # 任务28B（配置时序）：review 请求按入队时冻结后端快照——db.create_request
+    # 把 review_backend/review_config 写进请求 payload，进入 in_review 后再改配置
+    # 不生效。codex fake 与 set-review-config 必须移到进入 in_review（第二次
+    # monitor 推进）之前；该接口只改 role=review 独立配置，不触碰
+    # planner/exec，规划与派发已在 legacy_execution 夹具内完成，用例开头即是
+    # 不影响任何前段的最早安全点。
     codex = tmp_env.root / 'codex-review'
     codex.write_text('#!' + sys.executable + '\nimport json,pathlib,sys\n'
         'if "--version" in sys.argv: print("codex fake"); sys.exit(0)\n'
@@ -109,12 +126,34 @@ def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, fact
     # CLI fixture subprocesses retain their isolated env snapshot.
     cli.env['KANPILOT_CODEX_BIN'] = str(codex)
     cli('set-review-config', {'backend': 'codex', 'codex': {'model':'gpt-6.1-sol', 'reasoning_effort':'medium'}})
+    monitor(auto_monitor, tmp_env)
+    task = factory.get_task(tid)
+    assert task['status'] == 'needs_user', task
+    assert task['failure_code'] == 'verification_unconfirmed', task
+    assert 'accept_verification' in task['allowed_actions']
+    assert_legacy(task)
+    cli('resolve', {'task_id': tid, 'action': 'accept_verification', 'note': 'User checked legacy result'})
+    accepted = factory.get_task(tid)
+    assert accepted['status'] == 'running'
+    assert accepted['extra']['verification_override']['execution_run_id'] == execution_run
+    # 任务28A（真实改动前提）：workspace_version=1 → auto_monitor._finish_complete
+    # 验证通过后必须先 delivery-commit；隔离工作树无改动时 git_delivery.
+    # commit_worktree 抛 no_changes，cmd_delivery_commit 返回 blocked 并阻塞 →
+    # needs_user，进不了 in_review。参照 conftest make_in_review：在第二次
+    # monitor 完成提交前，从权威 delivery.worktree_path 写一个非产物文件
+    # （untracked 计真实改动：status --untracked-files=all）。
+    delivery = accepted.get('delivery') or {}
+    assert delivery.get('worktree_path'), delivery
+    (Path(delivery['worktree_path']) / 'legacy-manual-result.py').write_text(
+        'VALUE = 1\n', encoding='utf-8')
+    monitor(auto_monitor, tmp_env)
+    assert factory.get_task(tid)['status'] == 'in_review', factory.get_task(tid)
     stage(cli_review, 'review', tmp_env)
     task = factory.get_task(tid)
     assert task['status'] == 'done', task
     assert task['extra']['review_conclusion'] == 'pass', task
     assert factory.kaneo.get_task(tid)['status'] == 'done'
-    assert_legacy(task)
+    assert_legacy(task, reviewed=True)
     conn = db.connect(tmp_env.db)
     try:
         assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] == 5

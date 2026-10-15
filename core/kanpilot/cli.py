@@ -89,7 +89,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "output": (True, "str"), "thread_id": (False, "str"), "model": (False, "str")},
         _automation_command("desktop_intake_probe", "cmd_desktop_probe_report"),
     ),
-    "tick": ({}, cmd_read.cmd_tick),
+    "tick": ({"project_ids": (False, "list")}, cmd_read.cmd_tick),
     "recover-execution-goals": ({}, cmd_read.cmd_recover_execution_goals),
     "overview": ({}, cmd_read.cmd_overview),
     "list-tasks": (
@@ -553,7 +553,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     # 与只读实例状态。同样惰性 import。
     "engine-run": (
         {"stage": (False, "str"), "executor_id": (False, "str"),
-         "lease_seconds": (False, "int"), "mode": (False, "str"), "intake": (False, "bool"), "spawn": (False, "bool"), "force": (False, "bool")},
+         "lease_seconds": (False, "int"), "mode": (False, "str"), "intake": (False, "bool"), "spawn": (False, "bool"), "tick": (False, "bool"), "force": (False, "bool")},
         _automation_command("engine.commands", "cmd_engine_run"),
     ),
     "engine-status": (

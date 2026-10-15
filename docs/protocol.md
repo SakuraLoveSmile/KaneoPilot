@@ -257,10 +257,10 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 ### 4.8 tick（业务周期调度）
 
-`tick` 幂等，在 `claim` 内联执行，也可单独调用：
+`tick {project_ids?: string[]}` 幂等，有三个入口：`claim` 内联（全部项目，不传 preflight、不做自动确认）、CLI 手动调用、引擎每循环一次（仅有效 live 项目，见 §5.27.15）。过滤缺省为全部项目；传入时 monitor、review、托管处理及 ready preflight 都限于列出的项目。列表须非空，元素为非空且非纯空白字符串，去重；不合法时返回 `bad_request`。
 
 - `plan-scan`：距上次该请求完成 ≥ `plan_scan_interval_hours`（默认 24）且无活动同 key 请求 → 建 `plan-scan`。
-- `monitor`：每个 `running|in_review`（仅当 review 监控 pending?——in_review 由 review 请求覆盖，monitor 只针对 `running`）且无活动 monitor 请求的 task → 建 `monitor`（key `monitor:<task_id>`）。
+- `monitor`：每个 `running` 且无活动 monitor 请求的 task → 建 `monitor`（key `monitor:<task_id>`）。
 - `review`：每个 `in_review` 且无活动 review 请求、无未消费的 review 结论的 task → 建 `review`（key `review:<task_id>`）。
 - `queued` 请求的 `not_before` 语义：monitor 连续观察由 `not_before = 上次 report + monitor_interval_seconds`（有效默认 120 秒；旧存储值 900 按 120 解释，不重写 DB；其他已设值保持）控制，避免同一 task 每 tick 重复建。tick 只建 `not_before <= now` 不限制的请求——即 tick 创建时立即生效的是 not_before 已过期的；新 cycle 请求由 report 时写 not_before。实现上 tick 对 running task 建 monitor 请求的条件：无活动 monitor 请求 **且**（无历史 monitor 完成记录 或 最近一次完成时间 + interval <= now）。
 
@@ -310,7 +310,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 ### 5.2 tick / overview / list / get
 
-- `tick {}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`
+- `tick {project_ids?: string[]}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`；缺省为全部项目，空列表或元素不是非空字符串时返回 `bad_request`。
 - `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "board": {"needs_plan": 1, "todo": 2, "in_progress": 1, "in_review": 0, "done": 5, "failed": 0}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 120, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
 - `list-tasks {stage?, status?, board_column?, needs_attention?: bool, save_state?: active|archived|trashed|all}` → `{"tasks": [TaskSummary]}`，`TaskSummary = {task_id, project_id, project_name, title, stage, status, display_status, board_column, lifecycle_column, exception, board_substatus, last_checked_at, review_summary, last_progress, blocked_reason, next_claim_at, active_request: {request_id, kind, status, priority, claimed_by, heartbeat_at, lease_expires_at, not_before}|null, kaneo_status, kaneo_checked_at, priority, plan_path, updated_at, save_state, saved_at, auto_advance_paused, move_out_eligibility: {allowed: bool, reason: string|null}}`。`board_column` 过滤参数按 §2/§5.15.4 归列结果过滤（派生后过滤）；`save_state` 缺省 `active`。
 - `get-task {task_id}` → `{"task": TaskDetail}`，`TaskDetail = TaskSummary + {repository, plan_sha256, plan_kind, requirements_sha256, source_sha256, source_path, review_report_path, review_report_sha256, review_key, review_source_task_id, fix_task_id, session_id, session_title, session_marker, send_state, sent, run_id, failure_code, failure_reason, failure_stage, manual_recovery_required, allowed_actions: [...], attempts: [Attempt], links: {kaneo_task_url, plan_file, report_file}}`；`Attempt = {request_id, run_id, stage, kind, started_at, finished_at, outcome, send_state, note, evidence}`- `list-requests {status?: queued|claimed|lost|failed|succeeded|cancelled|active, limit?: 200}` → `{"requests": [Request]}`，`Request = {request_id, idempotency_key, task_id, stage, kind, status, display_status, priority,`（`display_status` 用 §2 同一中文显示词汇；`status` 为库内原值，失联派生只在 `display_status` 标 `执行端失联`） not_before, requested_by, run_id, claimed_by, claimed_at, heartbeat_at, lease_expires_at, result, attempt_no, created_at, updated_at}`
@@ -586,6 +586,7 @@ UI **仅在当前来源版本的分页全部读取完成（`has_more=false`）�
 - **写入点**：① dispatch claim 时创建（backend/config 快照固化；v3 起 backend ∈ `pi|pi_desktop`，快照形状见 §5.23.3）；② 读取层回填——`list-sessions`/`get-session`/`trash-session`/`restore-session` 按 runs 根目录 `job.json` 身份核验（同 §5.15.5）后补入缺失行。
 - **回填永不改写 `save_state`/`saved_at`**：已存在行只刷新 `backend/session_id/session_title/run_status/worktree_path/updated_at`——重复导入不得复活已删除会话。
 - `run_status` 观察：pi 轮次以 `job.json.status` 为准并在读取时刷新索引；无 job.json/无 status 字段保持已存值（无则 `unknown`）。
+- `run_status` 只是最近观察值，不作收尾信号；轮次是否已收尾以任务是否离开 observe/running 为准（§5.27.15）。
 - 删除会话只改本表 `save_state`；不终止进程、不改任务生命周期、不删事件日志/运行记录/工作目录。
 
 ### 5.16.2 `trash-session` / `restore-session`
@@ -746,6 +747,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
  - **命令面**：`engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}`（幂等，`operation_id` 去重）。
 
 ## 5.19 执行端调度（App 内置，v1.6）
+
+本节为历史记录；已由 §5.27 的 EngineSupervisor + `engine run` 取代。当前周期 tick 见 §5.27.15，不再由 ExecutorScheduler 调用。
 
 - 四个执行端（plan/dispatch/monitor/review）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分，与旧 automation 契约一致）。
 - 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
@@ -1244,11 +1247,12 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  长驻进程：DB 级单实例租约 + 心跳 + 退避重启。
  
  ```json
- engine run {stage?: string, executor_id?: string, lease_seconds?: int}
+ engine run {stage?: string, executor_id?: string, lease_seconds?: int, mode?: legacy|shadow|live, intake?: bool, spawn?: bool, tick?: bool, force?: bool}
  ```
  
  - `stage` 缺省时读取 `settings.executor_runs` 当前未暂停且可领取的阶段。
  - **单实例租约**：在 `BEGIN IMMEDIATE` 事务内写入 `settings.executor_instances`（`instance_id, started_at, pid, stage, lease_expires_at`）；重复调用同一 `instance_id` 幂等续租。条目同时记录持有者进程启动时间（birth，`started_seconds`/`started_microseconds`，与 worker 登记同口径）。
+ - 每循环在 intake 之后、spawn 之前执行业务 tick（§5.27.15）；`tick` 缺省同 `spawn`，`intake`/`spawn` 缺省 true。进程 `mode` 缺省 legacy，项目配置覆盖进程默认；`force=true` 时一律采用进程模式。租约附记 `mode`/`force` 供独立 doctor 重建有效模式；旧条目缺省 legacy/false，不新增 setting 或 schema。
  - **失联持有者接管**：另一引擎条目除「未过期」外，还须「持有进程存活」才阻止第二个长驻引擎。持有条目的 pid 经 birth 核验已不存在（进程退出且启动时间无法匹配）→ 该条目失联，`acquire_or_renew_lease` 放行接管，并把失联条目标记 `state=stopped`（附 `stopped_reason=holder_dead`），不得仅因 `lease_expires_at` 未到就无限期拒绝恢复。pid 复用由 birth 核验防混淆；`engine status` 与活动实例计数同口径（pid 已死不计为活动）。
  - **心跳**：启动后每 `min(lease_seconds/3, 60)` 秒刷新 `lease_expires_at`；租约过期前 60 秒主动续约。
  - **退避重启**：非零退出或信号终止时，按指数退避（1s → 2s → 4s → … → 上限 60s）重试；连续失败 5 次后进入 backoff 状态，由 `engine status` 展示。
@@ -1266,10 +1270,11 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  
  - 返回形状：
    ```json
-   {"instances": [{"instance_id", "stage", "pid", "started_at", "lease_expires_at", "owned_workers": [{"pid", "started_seconds", "task_id", "run_id", "spec_path"}]}]}
+   {"instances": [{"instance_id", "stage", "pid", "started_at", "lease_expires_at", "owned_workers": [{"pid", "started_seconds", "task_id", "run_id", "spec_path"}]}], "business_tick": {"last_tick_at": null, "age_seconds": null}}
    ```
  - 缺 `instance_id` 时返回全部实例。
  - `owned_workers` 仅返回该实例登记且启动时间仍匹配的进程；历史实例可在新登记时清除。
+ - `business_tick` 读自 `settings.last_tick_at`，`age_seconds` 为距该时刻的非负秒数；时间缺失或无法解析时 age 为 null。该时间也会由手动/claim tick 刷新，不独立证明引擎 tick 成功。
  
 #### 5.27.3 attention-list
  
@@ -1383,6 +1388,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `online` 缺省 false → `kaneo_ping` `skipped:true`；`--live`/`--online` 任一强制包含连通性检查。
  - 凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
  - 新增 `engine_lease`（当前活跃实例数与健康状态）与 `attention_backlog`（attention-list 聚合计数）检查项。
+ - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式包含租约的进程默认与 force（旧条目 legacy/false），不使用带 enabled/preflight 门的 intake 范围。
 
  **探针超时与失败区分（A8）：**
 
@@ -1522,6 +1528,15 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 
 Live 手动处置边界：核心验证不读取人工verification_override，因此live不得提供无效的accept_verification入口；allowed_actions隐藏该动作，直接resolve同样在任何写入前明确拒绝。可重新运行验证检查、修复/重规划，或使用其他核心允许的处置；legacy/shadow保留原人工接受行为。此约束不改变发送恢复或手动重新执行。
 
+#### 5.27.15 运行中轮次的补给与收尾兜底
+
+- 引擎对 `save_state=active AND status!=done` 任务所在项目取有效模式（项目配置优先进程默认，force 时采用进程模式），只为 live 项目执行业务 tick；不要求 enabled/preflight，以免已运行任务因临时环境失败而失去观察。legacy/shadow 不调用 tick、不新增请求。
+- `Reconciler(enable_tick=False)` 默认关闭；`engine run` 的 `tick` 缺省同 spawn。开启时每循环在 intake 后、spawn 前，经核心 `tick {project_ids: sorted(pids)}` 补给，同循环可拉起新 monitor/review worker。空范围记录 `business_tick` / `executed=false` / `reason=no_live_projects`。
+- 每循环 `min(lease_seconds/3,60)` 秒（默认 60 秒）；monitor 仍遵守有效默认 120 秒的间隔门，通常约 2–3 分钟观察一次。action 记录 created/skipped 计数和 created 明细；范围查询、命令或结果处理异常均以脱敏错误记 action/日志，继续 spawn 与续租，不持有包裹核心命令的外层写事务。
+- 人工接管只停止自动化决策，不停止观察、收尾与评审：tick 的 monitor/review 覆盖普通及接管任务；托管的丢失租约释放、自动确认与 PR 交付补建仍跳过接管任务。
+- `_round_settle` 仅对仍在 observe/running、无活动请求的托管任务生效：job.json 身份可信且含 ended_at/exit_code 即可补 monitor，不因 run_status 已为 finished/failed 跳过。每轮最多 2 次 settle，shadow 只计算不写；run_status/terminal_recorded 仅诊断。任务离开 observe/running 即不再 settle。
+- settle 在业务 tick 前入队；两者共用 `monitor:<task>` 活动 key 去重。2 次预算只限制 settle，不限制 tick 按间隔继续观察。观察者恢复与本节收尾职责分离。
+
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 
 本节为执行期问答的目标契约。当前状态为实现中，接口尚未实现；源码、测试和候选实测齐备前不得宣称可用。执行保持 `goal/auto`、`interactive`，覆盖目标契约轮及执行轮；规划、Review、Team 托管输入、permission 确认不属于本节。部署顺序为先 Plus、后 KaneoPilot，不含手机端、远程访问、付费模型验证或正式安装。
@@ -1590,6 +1605,8 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - 快速完成：Plus 在现有 asktool toolResult.details 持久化 resolutionKind=`answered|stopped|aborted`。普通回答及 Decline all 为 answered，graceful-stop 取消为 stopped，abort 取消为 aborted。completed 时必须读取完整 transcript，匹配同 session/turn/toolCallId 且 resolutionKind=answered，才按 answered 正常收尾；错误、aborted、stopped 或缺少真实回答证据仍按 expired 处理。Plus session.get 的 message.turnId 必须来自同session消息ID对应的持久messages索引及同session turn归属，不按当前turn/时间猜测；索引未知保留缺省。input.resolved.by 仅事件可见，不作为持久来源证据，不新增表或历史 API。
 
 ### 5.28.5 等待、时限与恢复
+
+观察者恢复只保证观察，不负责收尾；执行轮结束后的 monitor/review 补给与收尾见 §5.27.15。
 
 - 最长等待默认86400秒（24小时）；执行配置增加非负整数 execution_question_max_wait_seconds，0为不限，派发冻结到该轮快照。旧快照缺省86400，不读当前设置覆盖旧轮次。成本预算不变。
 - 核心是等待时间唯一权威。run 待答集合 `0→1` 开启等待区间，`1→0` 关闭；并发问题的等待取**区间并集**，不能将各请求重叠时长相加。开放区间计算到本次核心时间，历史区间重报/恢复不重复累计。

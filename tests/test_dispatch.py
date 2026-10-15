@@ -208,11 +208,18 @@ class TestClaimValidation:
     def test_review_fix_requires_marker(self, factory, cli):
         """校验 5：review_fix 计划要求远端描述含 review 标记；缺失 → 失败。"""
         ir = factory.make_in_review()
+        # §5.24.5：create-review-fix 与 register-review 共享
+        # core.require_review_identity，本用例意图是校验 5 的坏 marker 拒绝，
+        # 须先真实领取本轮评审并携带同源身份，避免缺身份错误混入 marker 断言
+        rreq = factory.find_request(ir.task.task_id, "review")
+        rv = factory.claim("review", request_id=rreq["request_id"])
+        assert rv["claimed"] is True, f"review claim 失败：{rv}"
         # 造 fix task（带标记）
         fix = cli("create-review-fix", {
             "source_task_id": ir.task.task_id,
             "title": "修复任务", "description": "修复描述",
-            "priority": "high", "dedupe_key": "RK-nomarker"})
+            "priority": "high", "dedupe_key": "RK-nomarker",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         fix_id = fix["fix_task_id"]
         detail = factory.get_task(fix_id)
         assert detail["plan_kind"] == "review_fix"
@@ -232,6 +239,15 @@ class TestClaimValidation:
               "review_report_sha256": report.sha256,
               "review_source_task_id": ir.task.task_id,
               "review_key": "RK-nomarker"}
+        # start-plans 首次提交 review_fix 需原评审固定提交：task_workspace.
+        # prepare_for_submission 校验 source 的 review_history 有同 review_key
+        # 且 head_sha 的条目，由 register-review 走 requires_branch_review
+        # 分支写入；repair_plan_* 由 publish-plan 成功时自动写回（§5.22.5）
+        cli("register-review", {
+            "task_id": ir.task.task_id, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
+            "report_path": str(report.path), "conclusion": "changes_requested",
+            "fix_task_id": fix_id, "review_key": "RK-nomarker"})
         plan = write_plan_file(
             factory.env.plan_root, task_id=fix_id,
             project_id=task_view.project_id,
@@ -257,11 +273,17 @@ class TestClaimValidation:
         assert factory.get_task(fix_id)["status"] == "needs_user"
 
     def test_send_conflict_blocks_claim(self, factory, cli, tmp_env):
-        """校验 6：send_state=unknown 的任务不得直接重派 → needs_user。"""
+        """校验 6：send_state=unknown 的任务不得直接重派 → needs_user。
+
+        领取路径守卫（dispatch_validate §4.5-6）只在 claim 时生效：先于干净
+        ready 建好 dispatch 请求，再用 DB 后门置 unknown；enqueue 对已发送/
+        发送不明任务的先行拒绝（cmd_queue._require_unsent_dispatch，
+        §5.22.4）另有其它用例覆盖，本用例不得先置状态否则撞不到 claim 守卫。
+        """
         ready = factory.make_ready()
-        # 构造 send_state=unknown 的 ready（经 DB 后门；正常路径只能经 needs_user+resolve）
-        set_task_send_state(tmp_env.db, ready.task.task_id, "unknown", sent=0)
         _queued_dispatch(factory, cli, ready)
+        # 经 DB 后门构造 send_state=unknown（正常路径只能经 needs_user+resolve）
+        set_task_send_state(tmp_env.db, ready.task.task_id, "unknown", sent=0)
         c = cli("claim", {"stage": "dispatch",
                           "executor": EXECUTORS["dispatch"]})
         assert c["claimed"] is False

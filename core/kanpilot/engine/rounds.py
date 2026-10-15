@@ -66,7 +66,7 @@ def round_exit(conn, task_id: str, run_id: Optional[str]) -> dict:
     stored = row["run_status"]
     view["run_status"] = stored if stored in constants.ROUND_RUN_STATUSES \
         else "unknown"
-    # 已登记终态 = 没有「登记缺口」可补（幂等：不重复动作）。
+    # 仅诊断：run_status 为观察值，不作收尾门。
     view["terminal_recorded"] = view["run_status"] in _TERMINAL_RUN_STATUSES
     source = headless.resolve_source(conn)
     try:

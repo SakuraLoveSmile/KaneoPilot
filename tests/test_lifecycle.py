@@ -7,6 +7,8 @@ changes_requested→create-review-fix(dedupe)→review_fix plan 流程。
 §4（事件 kind 枚举）；automation-contract §2（各 stage 流程）。
 """
 
+from pathlib import Path
+
 import pytest
 
 try:
@@ -100,6 +102,29 @@ class TestHappyPath:
         hb = cli("heartbeat", {"request_id": m["request_id"],
                                "run_id": m["run_id"], "progress": "执行顺利"})
         assert hb["ok"] is True
+        # §5.9 分支评审前置（claim→snapshot→commit→register）：任务工作区由
+        # start-plans 登记为 workspace_version=1，推进 in-review 前必须先有
+        # 本轮执行的核心本地提交（core.require_committed_review 要求
+        # delivery.commits 中存在 execution_run_id==本轮执行 run 且
+        # sha==delivery.head_sha 的登记）。这里沿用 tests/conftest.py
+        # TaskFactory.make_in_review 的既有正确生命周期模式：在 tmp_env 的
+        # 临时本地仓库工作树里造一处真实改动，再经核心命令 delivery-commit
+        # （monitor 领取身份 + expected_execution_run_id=派发 run_id）由核心
+        # 完成提交与登记——不手写 delivery 证据、不弱化守卫、不触真实远端。
+        delivery = factory.get_task(tid).get("delivery") or {}
+        assert (delivery.get("mode") == "pr"
+                or delivery.get("workspace_version") == 1) and all(
+            delivery.get(field) for field in ("branch", "base_branch",
+                                              "base_sha", "head_sha",
+                                              "worktree_path")), (
+            f"{tid} 应已登记完整分支评审工作区：{delivery}")
+        (Path(delivery["worktree_path"]) / "lifecycle-feature.py").write_text(
+            "VALUE = 1\n", encoding="utf-8")
+        committed = cli("delivery-commit", {
+            "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
+            "expected_execution_run_id": d["run_id"]})
+        assert committed["outcome"] in ("committed", "already_committed"), committed
+        assert committed["sha"] == factory.get_task(tid)["delivery"]["head_sha"], committed
         adv = cli("advance-task", {"task_id": tid, "run_id": m["run_id"],
                                    "target": "in-review",
                                    "expected_current": "in-progress"})
@@ -120,7 +145,11 @@ class TestHappyPath:
         assert rv["claimed"] is True
         report = write_review_report(factory.env.app_support, task_id=tid,
                                      conclusion="pass")
-        reg = cli("register-review", {"task_id": tid, "run_id": rv["run_id"],
+        # §5.24.5 分支评审领取身份：request_id 与 run_id 同源于上面那次真实
+        # 的 review 领取（rv），不是任务执行轮次 d/m 的 run。
+        reg = cli("register-review", {"task_id": tid,
+                                      "request_id": rv["request_id"],
+                                      "run_id": rv["run_id"],
                                       "report_path": str(report.path),
                                       "conclusion": "pass"})
         assert reg["ok"] is True
@@ -165,10 +194,14 @@ class TestReviewFix:
     def test_create_review_fix_dedupe(self, factory, cli):
         ir, rv = self._in_review_with_review_claim(factory, cli)
         src = ir.task.task_id
+        # §5.24.5：create-review-fix 与 register-review 共享
+        # core.require_review_identity，分支任务必须带 _in_review_with_review_claim
+        # 那次真实 review 领取（rv）的 request_id/run_id
         f1 = cli("create-review-fix", {
             "source_task_id": src, "title": "修复登录态",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-100"})
+            "dedupe_key": "RK-100",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         assert f1["ok"] is True
         assert f1["created"] is True
         fix_id = f1["fix_task_id"]
@@ -177,11 +210,12 @@ class TestReviewFix:
         remote = factory.kaneo.get_task(fix_id)
         assert remote is not None
         assert "<!-- codex-kaneo-review:RK-100 -->" in (remote["description"] or "")
-        # 重复调用同 dedupe_key → 返回已存在
+        # 重复调用同 dedupe_key → 返回已存在（命中在守卫之前返回）；仍带同一领取身份
         f2 = cli("create-review-fix", {
             "source_task_id": src, "title": "修复登录态",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-100"})
+            "dedupe_key": "RK-100",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         assert f2["created"] is False
         assert f2["fix_task_id"] == fix_id
         # fix task 登记：needs_plan + plan_kind=review_fix + review 字段
@@ -196,7 +230,8 @@ class TestReviewFix:
         report = write_review_report(factory.env.app_support, task_id=src,
                                      conclusion="changes_requested")
         reg = cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(report.path),
             "conclusion": "changes_requested",
             "fix_task_id": fix_id, "review_key": "RK-100"})
@@ -208,10 +243,12 @@ class TestReviewFix:
         """fix task 走 review_fix 计划 → dispatch 校验标记 → running。"""
         ir, rv = self._in_review_with_review_claim(factory, cli)
         src = ir.task.task_id
+        # 领取身份同上：rv 的真实 request_id/run_id（同一守卫消费点）
         f = cli("create-review-fix", {
             "source_task_id": src, "title": "修复问题",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-200"})
+            "dedupe_key": "RK-200",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         fix_id = f["fix_task_id"]
         # create-review-fix 已把远端 task_context 落盘为 source 快照
         detail = factory.get_task(fix_id)
@@ -235,7 +272,8 @@ class TestReviewFix:
                 "review_key": "RK-200",
             })
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(report.path),
             "conclusion": "changes_requested",
             "fix_task_id": fix_id, "review_key": "RK-200",
@@ -280,6 +318,7 @@ class TestReviewFix:
                                      task_id=ir.task.task_id,
                                      conclusion="blocked")
         cli("register-review", {"task_id": ir.task.task_id,
+                                "request_id": rv["request_id"],
                                 "run_id": rv["run_id"],
                                 "report_path": str(report.path),
                                 "conclusion": "blocked"})
@@ -383,9 +422,21 @@ class TestAdvanceAndRecheck:
         """远端实际状态与 expected_current 不符 → remote_conflict + needs_user。"""
         running = factory.make_running()
         tid = running.task.task_id
-        factory.kaneo.set_status(tid, "done")  # 远端被人为改
         mreq = factory.find_request(tid, "monitor")
         m = factory.claim("monitor", request_id=mreq["request_id"])
+        # §5.9：advance target=in-review 先过 core.require_committed_review
+        # 才到远端比较（cmd_remote.cmd_advance_task）——make_running 的任务已被
+        # start-plans 登记 workspace_version=1 分支工作区，按本文件 e2e 与
+        # conftest.make_in_review 既有模式先完成真实 delivery-commit 再篡改
+        # 远端，保留原篡改与 remote_conflict 断言不变。
+        delivery = factory.get_task(tid).get("delivery") or {}
+        (Path(delivery["worktree_path"]) / "lifecycle-conflict.py").write_text(
+            "VALUE = 1\n", encoding="utf-8")
+        committed = cli("delivery-commit", {
+            "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
+            "expected_execution_run_id": running.dispatch_run_id})
+        assert committed["outcome"] in ("committed", "already_committed"), committed
+        factory.kaneo.set_status(tid, "done")  # 远端被人为改
         out = cli("advance-task", {
             "task_id": tid, "run_id": m["run_id"], "target": "in-review",
             "expected_current": "in-progress"}, expect=1)

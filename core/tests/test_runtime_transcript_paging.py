@@ -115,11 +115,19 @@ class TestRuntimeTranscriptPaging(_PiDesktopCase):
             invocation_id=f"paging_{role}",
         )
         client.connect()
+        # 镜像生产 planner/Review 硬策略快照：建会话必须声明 unattended，
+        # 否则核心工具门（mcp_tools._runtime_guard）直接拒绝；execution 保持
+        # 与 pi_desktop_worker 一致，不传该字段。
+        create_kwargs = {} if role == "execution" else {"interaction_mode": "unattended"}
         session = client.session_create(
             str(self.repos_root / "Feedback"),
             mode="goal" if role == "execution" else "plan",
+            **create_kwargs,
         )
         self.assertEqual(session["session"]["id"], self.server.session_id)
+        if create_kwargs:
+            # 假 Plus 确实收到 unattended 声明，而非被旁路后默认放行。
+            self.assertEqual(self.server.created["interactionMode"], "unattended")
         return client
 
     def collector(self, client, name="events"):
