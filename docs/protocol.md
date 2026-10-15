@@ -1629,7 +1629,7 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 
 ### 5.29.1 范围与租约
 
-规划与评审（Plus、Claude/Codex CLI，包括 plan-scan、干净交付快照及脏状态快照）在 `<worktrees_root>/pool/<repo_key>/slot-<k>` 执行，不在真实仓库执行。执行 `<task>/branch`、恢复分支及历史执行 UUID 不池化。repo_key 取规范 git common dir 的 SHA256 前16位；同一仓库多工作树共池。`set-config {worktree_pool_size:N}` 配置每仓库上限，默认4，取1–32整数；隔离槽位计入上限，缩小配置不删除已有槽位，不再增建直至数量低于上限。容量不足返回等待，保留可重试请求，不转为业务失败；attention-list 暴露等待/隔离。
+规划与评审（Plus、Claude/Codex CLI、Codex Desktop，包括 plan-scan、干净交付快照及脏状态快照）在 `<worktrees_root>/pool/<repo_key>/slot-<k>` 执行，不在真实仓库执行。执行 `<task>/branch`、恢复分支及历史执行 UUID 不池化。repo_key 取规范 git common dir 的 SHA256 前16位；同一仓库多工作树共池。`set-config {worktree_pool_size:N}` 配置每仓库上限，默认4，取1–32整数；隔离槽位计入上限，缩小配置不删除已有槽位，不再增建直至数量低于上限。容量不足返回等待，保留可重试请求，不转为业务失败；attention-list 暴露等待/隔离。
 
 核心在 BEGIN IMMEDIATE 内分配 free 槽位，登记 stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，防止并发超过上限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确属于本池，实际顶层与git common dir须匹配，且为detached；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`，不覆盖忽略文件，不使用force/reset/clean。
 
