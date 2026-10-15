@@ -82,7 +82,8 @@ def lease_seconds(conn) -> int:
         return int(constants.DEFAULT_LEASE_SECONDS)
 
 
-def acquire_or_renew_lease(conn, now_iso, *, instance_id, stage, pid, lease_seconds) -> dict:
+def acquire_or_renew_lease(conn, now_iso, *, instance_id, stage, pid, lease_seconds,
+                           mode=None, force=None) -> dict:
     """Create or renew this engine instance's lease (idempotent per instance_id).
 
     Single-instance: refuse while another *active, unexpired, verifiably live*
@@ -123,6 +124,10 @@ def acquire_or_renew_lease(conn, now_iso, *, instance_id, stage, pid, lease_seco
         birth = process_owner.process_birth(pid) if type(pid) is int else None
         if birth:
             entry.update(birth)
+        if mode is not None:
+            entry["mode"] = mode
+        if force is not None:
+            entry["force"] = force
         entry.setdefault("workers", [])
         instances[instance_id] = entry
         db.set_setting(conn, process_owner.SETTING, instances)
@@ -159,6 +164,35 @@ def active_instance_count(conn, now) -> int:
     return sum(1 for entry in _instances(conn).values() if _entry_active(entry, now))
 
 
+def business_tick_status(conn, now) -> dict:
+    """Freshness of the shared tick clock (manual and claim ticks also update it)."""
+    last = db.get_setting(conn, "last_tick_at")
+    parsed = util.parse_ts(last)
+    age = max(0.0, (now - parsed).total_seconds()) if parsed is not None else None
+    return {"last_tick_at": last, "age_seconds": age}
+
+
+def has_live_observation_tasks(conn, now) -> bool:
+    """Whether any active engine owns live running/review observations.
+
+    Old lease entries use legacy/false. Reuse command scope resolution so a
+    process default or force override has the same meaning as a worker claim.
+    """
+    from .. import engine_claim_scope
+    projects = [row["project_id"] for row in conn.execute(
+        "SELECT DISTINCT project_id FROM tasks WHERE save_state='active' "
+        "AND status IN ('running','in_review')").fetchall()]
+    for entry in _instances(conn).values():
+        if not _entry_active(entry, now):
+            continue
+        with engine_claim_scope.command_mode(entry.get("mode", "legacy"),
+                                             entry.get("force", False)):
+            if any(engine_claim_scope.effective_mode(conn, pid) == "live"
+                   for pid in projects):
+                return True
+    return False
+
+
 def engine_status(conn, now, instance_id: Optional[str] = None) -> dict:
     """``engine status`` (§5.27.2): current engine instances + live workers.
 
@@ -193,4 +227,4 @@ def engine_status(conn, now, instance_id: Optional[str] = None) -> dict:
                 for w in workers
             ],
         })
-    return {"instances": out}
+    return {"instances": out, "business_tick": business_tick_status(conn, now)}

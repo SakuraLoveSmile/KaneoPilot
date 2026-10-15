@@ -263,13 +263,32 @@ class TestPiRoundLifecycle:
         flow = _to_running(factory, cli, tmp_env)
         task_id, run_id, run_dir = flow.task_id, flow.run_id, flow.run_dir
 
-        # dispatch-start：worktree/mode（非 git 夹具 → plain，cwd=仓库目录）。
-        assert flow.started["worktree_path"] == str(
-            tmp_env.repos_root / "StudyTool"
-        )
+        # dispatch-start：worktree/mode（docs/state-model「新任务分支工作区」：
+        # 首次规划 start-plans 经 task_workspace.prepare_for_submission 创建
+        # <app_support>/worktrees/<task>/branch 固定分支工作树，登记 mode=manual
+        # + workspace_version=1 + branch/worktree/base/head；cmd_dispatch.
+        # _ensure_worktree 对 versioned 任务校验登记五字段后按 branch 模式
+        # 使用权威登记路径启动——不再是 plain repos_root）。
+        delivery = factory.get_task(task_id)["delivery"]
+        assert delivery["mode"] == "manual", delivery
+        assert delivery["workspace_version"] == 1, delivery
+        assert delivery["branch"] == f"kaneo/{task_id}", delivery
+        assert delivery["base_branch"], delivery
+        assert all(delivery.get(key) for key in
+                   ("base_sha", "head_sha", "worktree_path")), delivery
+        # 本轮尚未执行提交：head 仍冻结在登记的 base 提交上。
+        assert delivery["head_sha"] == delivery["base_sha"], delivery
+        # 登记路径＝默认 worktrees_root（<app_support>/worktrees）下
+        # <task>/branch（task_workspace.prepare_for_submission :59）。
+        assert Path(delivery["worktree_path"]) == (
+            tmp_env.app_support / "worktrees" / task_id / "branch").resolve()
+        # dispatch-start 输出＝权威登记路径；真实固定分支工作树的 .git 是指向
+        # 主仓 gitdir 的文件（linked worktree），不是 plain 仓库目录。
+        assert flow.started["worktree_path"] == delivery["worktree_path"]
+        assert (Path(delivery["worktree_path"]) / ".git").is_file()
         spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
         assert spec["v"] == 1
-        assert spec["worktree_mode"] == "plain"
+        assert spec["worktree_mode"] == "branch"
         assert spec["cwd"] == flow.started["worktree_path"]
         assert spec["runs_dir"] == str(run_dir)
         assert spec["config"] == flow.ctx["exec_config"]

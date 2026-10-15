@@ -263,11 +263,22 @@ def test_dirty_or_mismatched_execution_blocks_before_snapshot(tmp_path, monkeypa
 
 def test_plus_configures_and_never_attaches(tmp_path):
     client = Mock()
-    client.session_create.return_value = {'sessionId': 's1'}
+    # 真实硬交互策略回执：create/configure/回读三步都必须声明 unattended v1
+    # （plus_interaction.require_unattended：session.id 匹配 + interactionMode
+    # == "unattended" + interactionPolicyVersion 为 int 1）。
+    receipt = {'session': {'id': 's1', 'interactionMode': 'unattended',
+                           'interactionPolicyVersion': 1}}
+    client.session_create.return_value = receipt
+    client.session_configure.return_value = receipt
+    client.session_get.return_value = receipt
     client.attach_mcp.side_effect = AssertionError('must not attach')
     assert review._create_plan_session(client, {'permission_mode': 'auto'}, tmp_path) == ('s1', None)
     client.attach_mcp.assert_not_called()
+    assert client.session_create.call_args.kwargs['interaction_mode'] == 'unattended'
     assert client.session_configure.call_args.kwargs['permission_mode'] == 'auto'
+    assert client.session_configure.call_args.kwargs['interaction_mode'] == 'unattended'
+    # 发送前核心必须回读核验策略（verify_session：message_limit=1）。
+    client.session_get.assert_called_once_with('s1', message_limit=1)
 
 
 def test_review_cli_config_save_switch_snapshot_and_invalid(tmp_path, monkeypatch):

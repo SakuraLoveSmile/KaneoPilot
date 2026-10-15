@@ -78,7 +78,7 @@ class TestEngineLease(KanpilotTestCase):
             conn.close()
 
     def test_engine_status_command_empty(self):
-        self.assertEqual(self.call("engine-status", {}), {"instances": []})
+        self.assertEqual(self.call("engine-status", {}), {"instances": [], "business_tick": {"last_tick_at": None, "age_seconds": None}})
 
     def test_engine_status_command_lists_lease(self):
         iid = _iid()
@@ -95,7 +95,7 @@ class TestEngineLease(KanpilotTestCase):
     def test_engine_two_token_status(self):
         code, out, _ = self.call_main(["engine", "status", "--db", str(self.db_path)])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"instances": []})
+        self.assertEqual(json.loads(out), {"instances": [], "business_tick": {"last_tick_at": None, "age_seconds": None}})
 
     def test_engine_requires_subcommand(self):
         code, _, _ = self.call_main(["engine", "--db", str(self.db_path)])

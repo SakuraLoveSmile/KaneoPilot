@@ -17,6 +17,7 @@ v1.2 的 `failure_stage` 归列口径只用于计算 `lifecycle_column`。细分
 """
 
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -175,7 +176,29 @@ class TestBoardDirectMapping:
         assert_board(factory, tid, "in_progress", "执行中")
 
         # in_review → in_review/评审中
+        # §5.9 分支评审前置：core.require_committed_review 要求
+        # delivery.commits 中存在 execution_run_id==本轮执行 run_id 且
+        # sha==delivery.head_sha 的登记，缺证据即 validation_failed
+        # （「本轮执行尚未完成核心本地提交，不能进入分支评审」）。这里沿用
+        # tests/conftest.py TaskFactory.make_in_review 的既有正确生命周期模式：
+        # 在 tmp_env 的临时本地仓库工作树里造一处真实改动，再调用核心命令
+        # delivery-commit（monitor 请求身份 + expected_execution_run_id=派发
+        # run_id）由核心完成本地提交并登记证据——不手工写入 delivery 证据、
+        # 不弱化守卫、本用例仍走 in-review（pr/分支）路径，不触真实远端。
         m = claim_request(factory, tid, "monitor")
+        delivery = factory.get_task(tid).get("delivery") or {}
+        assert (delivery.get("mode") == "pr"
+                or delivery.get("workspace_version") == 1) and all(
+            delivery.get(key) for key in ("branch", "base_branch", "base_sha",
+                                          "head_sha", "worktree_path")), (
+            f"{tid} 应已登记完整分支评审工作区：{delivery}")
+        (Path(delivery["worktree_path"]) / "board-lifecycle-feature.py").write_text(
+            "VALUE = 1\n", encoding="utf-8")
+        committed = cli("delivery-commit", {
+            "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
+            "expected_execution_run_id": d["run_id"]})
+        assert committed["outcome"] in ("committed", "already_committed"), committed
+        assert committed["sha"] == factory.get_task(tid)["delivery"]["head_sha"], committed
         cli("advance-task", {"task_id": tid, "run_id": m["run_id"],
                              "target": "in-review",
                              "expected_current": "in-progress"})
@@ -295,7 +318,14 @@ class TestBoardBlocked:
         rv = claim_request(factory, tid, "review")
         rep = write_review_report(factory.env.app_support, task_id=tid,
                                   conclusion="blocked")
-        cli("register-review", {"task_id": tid, "run_id": rv["run_id"],
+        # §5.24.5 分支评审领取身份（core.require_review_identity）：本夹具的
+        # 任务工作区由 start-plans 登记为 workspace_version=1，登记任何评审
+        # 结论都必须带 request_id + run_id，且两者同源上面那次真实 review
+        # 领取；只传 run_id 属旧非分支手动兼容，分支评审下 validation_failed
+        # 「分支评审必须携带领取身份」。不伪造请求、不把夹具改成 manual 逃避。
+        cli("register-review", {"task_id": tid,
+                                "request_id": rv["request_id"],
+                                "run_id": rv["run_id"],
                                 "report_path": str(rep.path),
                                 "conclusion": "blocked"})
         t = assert_board(factory, tid, "failed", "评审受阻",
@@ -407,37 +437,74 @@ class TestBoardRecovery:
 
 
 # ---------------------------------------------------------------------------
-# §5.9 Review 前置守卫（v1.2）：in-progress→done 需当前周期 pass 结论
+# §5.9 Review 前置守卫（v1.2）+ §5.24.5 分支评审领取身份：未评审、或登记
+# 缺领取身份，分支任务都不能完成；合规评审通过后方可完成
 # ---------------------------------------------------------------------------
 
 
 class TestReviewGuard:
-    def test_done_from_in_progress_requires_pass(self, factory, cli):
-        """无 pass 结论 → conflict；登记 pass 后放行。"""
+    def test_branch_task_requires_compliant_review_before_done(
+            self, factory, cli):
+        """分支任务未评审不能完成，合规评审通过后完成（§5.9 + §5.24.5）。
+
+        三段各自独立：
+        1. in-progress 直接 advance done → conflict（§5.9 评审前置守卫）。
+        2. 同一任务上不带领取身份的 register-review → validation_failed，且
+           拦截发生在任何登记写入之前（core.require_review_identity 先于写
+           事务）：pass 未落库、任务状态不变、原守卫继续拒绝。分支任务
+           （workspace_version=1）的评审请求只在 in_review 创建与领取
+           （constants.CLAIM_GUARDS["review"]），执行中不存在合规登记路径。
+        3. 合规链路：make_in_review（内含真实 delivery-commit）→ 领取本轮评审
+           请求 → 报告 pass → register-review 带同一 request_id/run_id →
+           advance done（expected_current=in-review）→ done/已完成。
+        """
         running = factory.make_running(title="跳评审完成")
         tid = running.task.task_id
         m = claim_request(factory, tid, "monitor")
-        # 无当前周期 pass 结论 → 守卫拒绝（§5.9 v1.2）
+        # 1) 无当前周期 pass 结论 → 守卫拒绝（§5.9 v1.2）；先置校验：远端未被
+        #    写、本地状态不变
         out = cli("advance-task", {
             "task_id": tid, "run_id": m["run_id"], "target": "done",
             "expected_current": "in-progress"}, expect=1)
         assert out["code"] == "conflict"
-        # 守卫是先置校验：远端未被写、本地状态不变
         assert factory.kaneo.get_task(tid)["status"] == "in-progress"
         assert_board(factory, tid, "in_progress")
-        # 登记当前周期 pass 结论 → 同操作放行
+
+        # 2) 分支评审必须携带领取身份：这里只传 monitor 的执行 run（不是评审
+        #    请求的 run），workspace_version=1 下被拒，且不留任何登记痕迹
         rep = write_review_report(factory.env.app_support, task_id=tid,
                                   conclusion="pass")
-        cli("register-review", {"task_id": tid, "run_id": m["run_id"],
-                                "report_path": str(rep.path),
-                                "conclusion": "pass"})
-        factory.kaneo.set_status(tid, "in-progress")  # 远端仍应 in-progress
-        adv = cli("advance-task", {
+        rej = cli("register-review", {"task_id": tid, "run_id": m["run_id"],
+                                      "report_path": str(rep.path),
+                                      "conclusion": "pass"}, expect=1)
+        assert rej["code"] == "validation_failed", rej
+        assert "领取身份" in rej["error"], rej
+        assert factory.get_task(tid).get("review_summary") is None
+        assert factory.kaneo.get_task(tid)["status"] == "in-progress"
+        assert_board(factory, tid, "in_progress")
+        # pass 确实没有登记进去：同一 advance 仍被 §5.9 守卫拒绝
+        again = cli("advance-task", {
             "task_id": tid, "run_id": m["run_id"], "target": "done",
-            "expected_current": "in-progress"})
+            "expected_current": "in-progress"}, expect=1)
+        assert again["code"] == "conflict"
+
+        # 3) 合规路径：进入评审后领取真实评审请求，登记 pass 再完成
+        ir = factory.make_in_review(title="评审通过完成")
+        rid = ir.task.task_id
+        rv = claim_request(factory, rid, "review")
+        rep2 = write_review_report(factory.env.app_support, task_id=rid,
+                                   conclusion="pass")
+        cli("register-review", {
+            "task_id": rid, "request_id": rv["request_id"],
+            "run_id": rv["run_id"], "report_path": str(rep2.path),
+            "conclusion": "pass"})
+        # get-task 透出的是核心内部状态 in_review（in-review 是 Kaneo 远端词表）
+        assert factory.get_task(rid)["status"] == "in_review"
+        adv = cli("advance-task", {"task_id": rid, "target": "done",
+                                   "expected_current": "in-review"})
         assert adv["ok"] is True
         assert adv["task_status"] == "done"
-        assert_board(factory, tid, "done", "已完成")
+        assert_board(factory, rid, "done", "已完成")
 
     def test_done_from_in_review_needs_no_conclusion(self, factory, cli):
         """expected_current=in-review 不受守卫限制（§5.9）。"""
@@ -463,17 +530,24 @@ class TestReviewFixBoard:
         assert factory.get_task(src).get("review_summary") is None
 
         rv = claim_request(factory, src, "review")
+        # §5.24.5：create-review-fix 与 register-review 共享
+        # core.require_review_identity，分支任务必须带这次真实 review 领取
+        # （rv）的 request_id/run_id，不能只靠 source_task_id
         fix = cli("create-review-fix", {
             "source_task_id": src, "title": "看板修复任务",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-BOARD-1"})
+            "dedupe_key": "RK-BOARD-1",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         assert fix["created"] is True
         fix_id = fix["fix_task_id"]
 
         rep = write_review_report(factory.env.app_support, task_id=src,
                                   conclusion="changes_requested")
+        # 领取身份同上：rv 是本轮 in_review 的真实 review claim（run_id 是
+        # 评审请求的 run，不是任务执行 run）
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix_id, "review_key": "RK-BOARD-1"})
 
@@ -498,15 +572,20 @@ class TestReviewFixBoard:
         assert ft["plan_kind"] == "review_fix"
         assert ft["review_source_task_id"] == src
 
-        # 不重复建：同 dedupe_key 返回既有；重复 register 不报错
+        # 不重复建：同 dedupe_key 返回既有（命中在守卫之前返回）；调用方仍
+        # 携带同一次领取身份；重复 register 不报错
         f2 = cli("create-review-fix", {
             "source_task_id": src, "title": "看板修复任务",
             "description": "修复描述", "priority": "high",
-            "dedupe_key": "RK-BOARD-1"})
+            "dedupe_key": "RK-BOARD-1",
+            "request_id": rv["request_id"], "run_id": rv["run_id"]})
         assert f2["created"] is False
         assert f2["fix_task_id"] == fix_id
+        # 重复登记复用同一仍被领取的评审身份（请求未 report 前 status 仍是
+        # claimed）——幂等核对的是身份+review_key，不是缺身份的手动兼容路径。
         cli("register-review", {
-            "task_id": src, "run_id": rv["run_id"],
+            "task_id": src, "request_id": rv["request_id"],
+            "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix_id, "review_key": "RK-BOARD-1"})
         ids = [x["task_id"] for x in cli("list-tasks", {})["tasks"]]

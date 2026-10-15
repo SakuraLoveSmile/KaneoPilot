@@ -81,7 +81,8 @@ class Reconciler:
                  executor_id: str = "kaneo-engine", log: Optional[Callable] = None,
                  run_command: Optional[Callable] = None,
                  enable_intake: bool = False, intake_interval_seconds: int = 300,
-                 enable_spawn: bool = False, instance_id: Optional[str] = None,
+                 enable_spawn: bool = False, enable_tick: bool = False,
+                 instance_id: Optional[str] = None,
                  spawn: Optional[Callable] = None, force_mode: bool = False):
         self.db_path = Path(db_path)
         self.mode = mode                      # process default engine_mode
@@ -98,6 +99,7 @@ class Reconciler:
         # Optional worker spawn: the engine launches per-stage runners for
         # queued requests of live projects when no App scheduler drives them.
         self.enable_spawn = enable_spawn
+        self.enable_tick = enable_tick
         self.instance_id = instance_id
         self.spawn = spawn  # callable(stage, db_path, instance_id) -> handle|None
 
@@ -322,22 +324,21 @@ class Reconciler:
         return value if isinstance(value, list) else []
 
     def _round_settle(self, conn, task, now, snap, pmode):
-        """Pre-decide world probe: settle a round that exited without its
-        terminal state ever being registered (sandbox §13.2).
+        """Pre-decide world probe: settle an exited round still in observe/running
+        (protocol §5.27.15; sandbox §13.2).
 
         ``execution_rounds.run_status`` is a *last observed* value whose only
         writers are the worker's own收尾 and the read-layer backfill inside
-        ``get-session``. When the monitor's observation window closes before
-        ``job.json`` lands, nobody records the terminal state: the task waits
-        in observe/running and :func:`decide.decide` can only AWAIT. This
-        probe is the read-only兜底 for that shape —
+        ``get-session``. Neither writer schedules a monitor, so even a terminal
+        observation can leave the task in observe/running indefinitely.
+        This probe supplies the missing monitor for that shape —
 
         1. the task is still in observe/running (a task that moved on is not
            our business);
         2. no queued/claimed request exists (a worker owns the step — probing
            would race it, and the enqueue dedups on the active key anyway);
-        3. the round's registered ``run_status`` is not terminal yet (an
-           already-registered outcome is not a registration gap → idempotent);
+        3. ``run_status`` is diagnostic only; the task leaving observe/running
+           is the signal that the round has been settled;
         4. the identity-verified ``job.json`` says the process is gone and
            recorded ``ended_at``/``exit_code`` (otherwise keep waiting — an
            unproven exit belongs to lease recovery, D3).
@@ -360,7 +361,7 @@ class Reconciler:
             return None
         run_id = task["run_id"]
         world = rounds.round_exit(conn, task["task_id"], run_id)
-        if not world.get("exited") or world.get("terminal_recorded"):
+        if not world.get("exited"):
             return None
         decision = decide.round_settled_decision(world["exit_code"])
         spent = len([row for row in self._round_settles(task)
@@ -479,12 +480,43 @@ class Reconciler:
             if self.enable_intake and self._intake_due(now):
                 actions.append(self.intake_step(conn, now, modes))
 
+            if self.enable_tick:
+                actions.append(self.business_tick_step(conn, modes))
+
             if self.enable_spawn:
                 actions.append(self.spawn_step(conn, modes))
         finally:
             conn.close()
         return {"mode": self.mode, "project_modes": modes,
                 "at": now_iso, "actions": actions}
+
+    def business_tick_step(self, conn, modes) -> dict:
+        """Top up live-project observations before spawning (§5.27.15).
+
+        Scope reads, command execution and result processing are all isolated:
+        a failed business tick must not interrupt spawn or the engine heartbeat.
+        Core commands own their transactions; do not hold a write txn here.
+        """
+        action = {"action": "business_tick", "executed": False}
+        try:
+            project_ids = sorted({row["project_id"] for row in conn.execute(
+                "SELECT DISTINCT project_id FROM tasks "
+                "WHERE save_state='active' AND status!='done'").fetchall()
+                if modes.get(row["project_id"], self.mode) == "live"})
+            if not project_ids:
+                return dict(action, reason="no_live_projects")
+            from .. import engine_claim_scope
+            with engine_claim_scope.command_mode(self.mode, self.force_mode):
+                result = self.run_command("tick", {"project_ids": project_ids})
+            created, skipped = result["created"], result["skipped"]
+            return dict(action, executed=True, project_ids=project_ids,
+                        created=len(created), skipped=len(skipped),
+                        created_requests=created, skipped_requests=skipped)
+        except Exception as exc:
+            code = exc.code if isinstance(exc, util.KanpilotError) else "internal_error"
+            detail = util.redact(str(exc))
+            self.log("业务 tick 失败 [%s]: %s" % (code, detail))
+            return dict(action, error=code, detail=detail)
 
     def _intake_due(self, now) -> bool:
         if self._last_intake is None:
@@ -604,7 +636,7 @@ class Reconciler:
             lease = lease_seconds or health.lease_seconds(conn)
             health.acquire_or_renew_lease(
                 conn, util.now_iso(), instance_id=instance_id, stage=stage,
-                pid=pid, lease_seconds=lease)
+                pid=pid, lease_seconds=lease, mode=self.mode, force=self.force_mode)
         finally:
             conn.close()
         interval = min(lease / 3.0, 60.0)

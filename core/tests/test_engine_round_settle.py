@@ -250,15 +250,42 @@ class RoundSettleReconcileTest(KanpilotTestCase):
         extra = self.task(tid)["extra"]
         self.assertNotIn(loop.ROUND_SETTLE_KEY, extra)
 
-    def test_registered_terminal_state_is_not_repeated(self):
+    def test_backfilled_terminal_status_still_settles_running_task(self):
         tid = self._stuck("tasksettledone000001", run_status="finished")
         summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
         actions = self._actions(tid, summary)
         self.assertTrue(actions)
-        self.assertEqual(actions[0]["action"], decide.AWAIT)
-        self.assertEqual(self._monitor_requests(tid), [])
+        self.assertEqual(actions[0]["action"], decide.SETTLE_ROUND)
+        self.assertEqual(len(self._monitor_requests(tid)), 1)
         extra = self.task(tid)["extra"]
-        self.assertNotIn(loop.ROUND_SETTLE_KEY, extra)
+        self.assertEqual(len(extra[loop.ROUND_SETTLE_KEY]), 1)
+
+    def test_task_that_left_running_is_not_settled(self):
+        for index, status in enumerate(("in_review", "needs_user")):
+            with self.subTest(status=status):
+                tid = self._stuck("tasksettlemoved" + str(index).zfill(6),
+                                  run_status="finished")
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        db.update_task(conn, tid, util.now_iso(), status=status)
+                finally:
+                    conn.close()
+                summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
+                actions = self._actions(tid, summary)
+                self.assertFalse(any(a["action"] == decide.SETTLE_ROUND for a in actions))
+                self.assertNotIn(loop.ROUND_SETTLE_KEY, self.task(tid)["extra"])
+
+    def test_settle_and_business_tick_deduplicate_within_one_loop(self):
+        tid = self._stuck("tasksettletopup00001", run_status="finished")
+        summary = loop.Reconciler(self.db_path, mode="live", enable_tick=True).reconcile_once()
+        self.assertEqual(len(self._monitor_requests(tid)), 1)
+        self.assertEqual(self._actions(tid, summary)[0]["action"], decide.SETTLE_ROUND)
+        tick = next(a for a in summary["actions"] if a["action"] == "business_tick")
+        self.assertEqual(tick["created"], 0)
+        self.assertEqual(tick["skipped_requests"],
+                         [{"kind": "monitor", "task_id": tid, "reason": "active"}])
+        self.assertEqual(len(self.task(tid)["extra"][loop.ROUND_SETTLE_KEY]), 1)
 
     def test_still_running_round_keeps_waiting(self):
         tid = self._stuck("tasksettlerun0000001", status="running",

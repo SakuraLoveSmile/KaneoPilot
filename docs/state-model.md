@@ -397,7 +397,7 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  
  各阶段只向下一阶段推进，或向 needs-you 升级；live 的绑定质量失败可由引擎以 actor=automation 经 resolve 开启有界补救，其余由用户处置。
  
- - intake：只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
+ - intake：只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行（live 项目由引擎决策与周期 tick 执行，见 protocol §5.27.15）。
  - plan：手动规划由面板授权；live 自动接收/修复由核心以 automation 经同一 prepare-plan-input + start-plans 生成请求；publish-plan 后保留 plan_execution_hold。
  - confirm：手动任务由用户「确认并安排执行」解除 hold；live 自动任务遵循策略自动确认。
  - dispatch：派发请求 claimed → dispatch-prepare → dispatch-begin-send → dispatch-start → dispatch-confirm → running。

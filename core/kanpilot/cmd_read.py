@@ -15,20 +15,27 @@ from typing import Optional
 from . import constants, core, db, derive, planfile, remote, util
 
 
-def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dict:
+def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
+                project_ids=None) -> dict:
     """Business-cycle request top-up (protocol.md §4.8). Idempotent."""
     now_iso = util.to_iso(now)
     created: list = []
     skipped: list = []
 
     monitor_interval = util.monitor_interval(conn)
+    scope = ""
+    scope_params = ()
+    if project_ids is not None:
+        scope_params = tuple(project_ids)
+        scope = " AND project_id IN (%s)" % ",".join("?" for _ in scope_params)
 
     # v2（protocol §5.22.2）：tick 不再生成 plan-scan——规划改为手动门控，
     # 看板枚举由规划面板 fetch-todos 按需只读拉取。
 
     # --- monitor: every running task keeps a monitor cycle ------------------
     for task in conn.execute(
-        "SELECT * FROM tasks WHERE status='running' ORDER BY task_id"
+        "SELECT * FROM tasks WHERE status='running'" + scope + " ORDER BY task_id",
+        scope_params,
     ).fetchall():
         # §5.15.3：归档/回收站/恢复后暂停的任务不建监控周期。
         if not db.task_schedulable(task):
@@ -67,7 +74,8 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dic
 
     # --- review: in_review tasks without a pending conclusion --------------
     for task in conn.execute(
-        "SELECT * FROM tasks WHERE status='in_review' ORDER BY task_id"
+        "SELECT * FROM tasks WHERE status='in_review'" + scope + " ORDER BY task_id",
+        scope_params,
     ).fetchall():
         # §5.15.3：归档/回收站/恢复后暂停的任务不建评审请求。
         if not db.task_schedulable(task):
@@ -99,7 +107,9 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None) -> dic
             )
 
     from . import automation_policy, cmd_queue
-    for task in conn.execute("SELECT * FROM tasks WHERE status!='done'").fetchall():
+    for task in conn.execute(
+        "SELECT * FROM tasks WHERE status!='done'" + scope, scope_params
+    ).fetchall():
         if not core.is_automation_managed(task) or not db.task_schedulable(task):
             continue
         a = core.automation_of(task)
@@ -176,10 +186,20 @@ def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
 
 def cmd_tick(ctx, payload: dict) -> dict:
     from . import automation_policy
-    projects = {t["project_id"] for t in ctx.conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall() if core.is_automation_managed(t)}
+    project_ids = payload.get("project_ids")
+    if "project_ids" in payload:
+        if (not isinstance(project_ids, list) or not project_ids
+                or any(not isinstance(pid, str) or not pid.strip()
+                       for pid in project_ids)):
+            raise util.bad_request("project_ids 必须为非空字符串列表")
+        project_ids = sorted(set(project_ids))
+    projects = {t["project_id"] for t in ctx.conn.execute(
+        "SELECT * FROM tasks WHERE status='ready'").fetchall()
+        if core.is_automation_managed(t)
+        and (project_ids is None or t["project_id"] in project_ids)}
     checks = {pid: automation_policy.automation_preflight(ctx.conn, pid) for pid in projects}
     with db.write_txn(ctx.conn):
-        result = tick_inline(ctx.conn, ctx.now, checks)
+        result = tick_inline(ctx.conn, ctx.now, checks, project_ids=project_ids)
     return result
 
 
@@ -794,6 +814,24 @@ def _doctor_attention_backlog(ctx) -> dict:
 
 
 
+def _doctor_business_tick(ctx) -> dict:
+    from .engine import health
+    check = {"name": "business_tick_fresh", "ok": True}
+    if not health.active_instance_count(ctx.conn, ctx.now):
+        return dict(check, detail="没有活动引擎实例")
+    if not health.has_live_observation_tasks(ctx.conn, ctx.now):
+        return dict(check, detail="活动引擎没有需观察的 live 任务")
+    status = health.business_tick_status(ctx.conn, ctx.now)
+    age = status["age_seconds"]
+    if age is None:
+        return dict(check, ok=False,
+                    detail="业务 tick 时间缺失或无效；检查 business_tick actions，必要时重启引擎")
+    if age > constants.BUSINESS_TICK_FRESH_SECONDS:
+        return dict(check, ok=False,
+                    detail=f"业务 tick 已过去 {age:.0f} 秒；检查 business_tick actions，必要时重启引擎")
+    return dict(check, detail=f"业务 tick 已过去 {age:.0f} 秒")
+
+
 def cmd_doctor(ctx, payload: dict) -> dict:
     # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
     online = bool(payload.get("online") or payload.get("live"))
@@ -860,6 +898,7 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     # §5.27.6：engine_lease 与 attention_backlog 为 informational 检查项；
     # 引擎未实现时返回「未安装」而非失败。
     checks.append(_doctor_engine_lease(ctx))
+    checks.append(_doctor_business_tick(ctx))
     checks.append(_doctor_attention_backlog(ctx))
     # §5.27.6：doctor 输出绝不泄露凭据。所有 check 的 detail 统一过一道脱敏
     # （util.redact，protocol §5.22.3），不依赖每个探针自己构造得正确——

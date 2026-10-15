@@ -395,7 +395,7 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 
 ## 常驻调度与菜单栏
 
-**AppRuntime（包 I）：** 单例，App 启动时（AppDelegate `applicationDidFinishLaunching`）创建，持有 `ExecutorScheduler` 和 `MCPServiceManager.shared`。
+**AppRuntime：** 单例，App 启动时（AppDelegate `applicationDidFinishLaunching`）创建，持有 `EngineSupervisor` 和 `MCPServiceManager.shared`。
 
 - 启动时依次执行：
   1. 恢复 MCP 服务，沿用 MCPServiceManager 现有的检查与启动入口；
@@ -403,19 +403,9 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
   3. 启动调度循环。
 - 退出时沿用 `stopOwnedProcessForAppExit()`。
 
-**调度循环（ExecutorScheduler 重写）：** 每 20 秒执行一轮，系统唤醒通知到达时立即执行一轮：
+**当前调度：** EngineSupervisor 监督常驻 `engine run {mode:legacy,intake:true,spawn:true}`，退出退避重启，并每 20 秒调用一次 `recover-execution-goals` 恢复观察者。周期 tick 由引擎执行，不由 App 定时器执行；每循环（默认 60 秒）在 intake 后、spawn 前对有效 live 项目补给 monitor/review，同循环可领取，详见 protocol §5.27.15。CLI 独立引擎同样适用。
 
-1. 调用核心 `tick`。
-2. 调用 `executor-status`。
-3. 交给纯函数 `SchedulerDecision.decide` 计算需要拉起的进程：
-   - 对 plan/dispatch/monitor/review/delivery 中的每个阶段：未暂停、无存活进程、`claimable>0` → 拉起该阶段的进程；
-   - intake：有已开启的项目、未处于全局暂停或 plan 暂停、无存活进程，且距上次 ≥300 秒或被强制触发 → 拉起。
-4. 按决策拉起进程：
-   - plan 用 planner_runner；
-   - 其余阶段用 `executor_runner --stage <s>`；
-   - intake 用 `python3 -m kanpilot.auto_intake`。
-
-   子进程的环境变量和路径解析沿用现有实现（CoreLocator/CoreClient）。
+ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调用周期 tick；其清理不在本次范围。子进程环境与路径沿用现有 CoreLocator/CoreClient 及核心 runner。
 
 **其他约束：**
 
@@ -461,9 +451,9 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
   3. 在事务内把 requirements_sha256 和 kaneo_status 更新为远端当前值，记录事件 `requirements_accepted`。
   4. 回到上一个失败请求对应的步骤：monitor → running + monitor；delivery → in_review + delivery；review → in_review + review；plan → needs_plan + plan_wanted；dispatch → 拒绝，改用既有的发送恢复动作。
 - **replan：** 对自动化任务改为 needs_plan + plan_wanted，`plan_attempts=0`，开新段。如果远端需求有变化，用与上面相同的三段式先接受当前需求；用户点「重新规划」即视为已看过新内容。
-- **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。
+- **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。转为人工处理不停止观察、收尾与评审；live 项目的 monitor/review 由引擎周期 tick 补给。
 - **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
-- **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）。dispatch、plan、review 的丢失请求仍留给用户处理。
+- **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
 - **plan 失败：** 自动化任务第一次失败时置 plan_wanted，让 intake 自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。
 
 **新事件：** automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。

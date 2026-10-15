@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,55 @@ from kanpilot import (auto_dispatch, auto_intake, auto_monitor, automation_polic
 TASK = 'pipelinefeedback000000001'
 PROJECT = 'ryryo1reph1xfemqtwkjyiiz'
 VERIFY = 'python3 -m unittest discover -s tests'
+
+
+def _fully_settled(detail: dict) -> bool:
+    """get-session round_detail 的完整结算证据，与生产
+    cmd_queue._require_execution_terminal 同判定方向：terminal 存在、
+    exit_code 已落盘（is not None——0 不得当假）、run_status 为
+    finished/failed、观察者已退出（observer_alive is False）。
+    cmd_get_session 先读 job 再读 events，job-finalize→terminal 写入间隙
+    会读到 terminal.completed + exit None + running + 观察者仍存活的
+    混合视图，不得当作结算（Debug 证据 20261015）。"""
+    return bool(detail.get('terminal')) and detail.get('exit_code') is not None \
+        and detail.get('run_status') in ('finished', 'failed') \
+        and detail.get('observer_alive') is False
+
+
+def _wait_for(read, done, *, deadline, sleep=time.sleep, interval=.05, monotonic=time.monotonic):
+    """有界轮询：read() 取视图，done(view) 为停止条件（达到目标或出现
+    不可重试状态）；超时返回最后一次视图由调用方断言报错。
+    deadline 固定，不无限延长、不空转。"""
+    while True:
+        view = read()
+        if done(view) or monotonic() >= deadline:
+            return view
+        sleep(interval)
+
+
+def _assert_settled(case, detail: dict) -> None:
+    """有界轮询超时后的显式终态结算失败门：不满足 _fully_settled 一律
+    AssertionError（消息带最后一次完整 detail），不得只靠 exit_code/outcome
+    偶然相等收场——观察者永不退出、run_status 仍 running、terminal 缺失的
+    视图都会被生产 cmd_queue._require_execution_terminal 拒绝（Debug 探针
+    20261015 场景 A/C/D）。放在既有精确断言之前，因此 terminal 为 None/缺失
+    时走本门的 AssertionError+detail，而不是 None.get(...) 的
+    AttributeError（丢 detail）。"""
+    case.assertTrue(_fully_settled(detail),
+                    '固定 deadline 内未读到完整结算证据（terminal 存在、'
+                    'exit_code 已落盘、run_status finished/failed、'
+                    f'观察者已退出），最后一次 detail={detail}')
+
+
+def _monitor_settled(expect: dict):
+    """_monitor_until 的停止条件：仅「尚未达标且仍处在合法异步结算
+    窗口」（观察者 --resume 会把已结算 run 瞬时重置为 running，下一轮
+    读取即自愈）可继续有界重试；其余与目标不符的已结算状态立即停止，
+    原样返回交调用点精确断言报错——不把任何失败当可重试吞掉。"""
+    def done(value):
+        return all(value.get(key) == want for key, want in expect.items()) \
+            or value.get('status') != 'running'
+    return done
 
 
 class TestAutoPipeline(PiDesktopCase):
@@ -165,11 +215,12 @@ class TestAutoPipeline(PiDesktopCase):
         self._stage(auto_dispatch,'dispatch')
         value=self.task(TASK)
         self.assertEqual(value['status'],'running',value)
-        deadline=time.monotonic()+15
-        while time.monotonic()<deadline:
-            detail=self.call('get-session',{'task_id':TASK,'run_id':value['run_id']}).get('round_detail') or {}
-            if detail.get('terminal'): break
-            time.sleep(.05)
+        # 有界轮询完整结算证据：仅 terminal 到达而 job 未定稿
+        # （exit None / run_status running / 观察者仍在）的混合视图不算结算；
+        # 超时先由结算门带最后一次视图失败，再进行既有精确结果断言。
+        detail=_wait_for(lambda: self.call('get-session',{'task_id':TASK,'run_id':value['run_id']}).get('round_detail') or {},
+                         _fully_settled,deadline=time.monotonic()+15)
+        _assert_settled(self,detail)
         self.assertEqual(detail.get('exit_code'),1 if should_fail else 0,detail)
         self.assertEqual(detail.get('terminal',{}).get('outcome'),'failed' if should_fail else 'completed',detail)
         return value['run_id']
@@ -183,11 +234,21 @@ class TestAutoPipeline(PiDesktopCase):
         self.call('tick')
         self._stage(auto_monitor,'monitor')
 
+    def _monitor_until(self, **expect):
+        """已知合法异步结算窗口（--resume 瞬时 running）内有界重 tick/读取
+        直至目标状态；不符状态立即停止；超时返回最后视图供调用点断言。"""
+        def tick_and_read():
+            self._monitor()
+            return self.task(TASK)
+        return _wait_for(tick_and_read, _monitor_settled(expect),
+                         deadline=time.monotonic()+15)
+
     def _review(self):
         self._stage(cli_review,'review')
 
     def test_failed_execution_replan_preserves_partial_work(self):
-        self._adopt_and_plan();self._execute(should_fail=True);self._monitor()
+        self._adopt_and_plan();self._execute(should_fail=True)
+        self._monitor_until(failure_code='execution_failed')
         value=self.task(TASK)
         self.assertEqual(value['failure_code'],'execution_failed',value)
         self.assertEqual(self.fake.tasks[TASK]['status'],'in-progress')
@@ -233,7 +294,8 @@ class TestAutoPipeline(PiDesktopCase):
         self.assertTrue(Path(value['delivery']['worktree_path']).exists())
 
     def test_missing_verification_user_accepts_then_review(self):
-        self._adopt_and_plan();self.omit_exit=True;self._execute();self._monitor()
+        self._adopt_and_plan();self.omit_exit=True;self._execute()
+        self._monitor_until(failure_code='verification_unconfirmed')
         value=self.task(TASK)
         self.assertEqual(value['failure_code'],'verification_unconfirmed')
         self.assertIn('accept_verification',value['allowed_actions'])
@@ -271,3 +333,105 @@ class TestAutoPipeline(PiDesktopCase):
         self.assertEqual(value['status'],'needs_user')
         self.assertEqual(self.fake.tasks[TASK]['status'],'in-review')
         self.assertIn('resume',value['allowed_actions'])
+
+
+class TestSettlementWait(unittest.TestCase):
+    """结算等待条件的确定性回归：序列 stub 替换真实 worker/MCP，
+    时钟与 sleep 均注入，不含真实等待。覆盖 Debug 混合结算窗口、
+    永久不结算超时、合法 running 窗口重试、意外终态不得误吞、
+    超时后结算门不得因 exit_code 偶然相等放行、terminal 缺失必须
+    AssertionError（而非 AttributeError 丢 detail）六类行为。"""
+
+    TRAP = {'terminal': {'outcome': 'completed'}, 'exit_code': None,
+            'run_status': 'running', 'observer_alive': True}
+    SETTLED = {'terminal': {'outcome': 'completed'}, 'exit_code': 0,
+               'run_status': 'finished', 'observer_alive': False}
+    # 只差一项结算证据但 exit_code 已是 0、terminal 已 completed 的视图：
+    # 旧写法（仅断言这两项）全部偶然 PASS，生产终态守卫却全部拒绝。
+    ZERO_EXIT_VIEWS = (
+        {'terminal': {'outcome': 'completed'}, 'exit_code': 0,
+         'run_status': 'finished', 'observer_alive': True},
+        {'terminal': {'outcome': 'completed'}, 'exit_code': 0,
+         'run_status': 'running', 'observer_alive': False},
+    )
+
+    def run_wait(self, views, done, deadline=3):
+        remaining = list(views)
+        reads = []
+        def read():
+            reads.append(None)
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        result = _wait_for(read, done, deadline=deadline,
+                           sleep=lambda _seconds: None,
+                           monotonic=iter(range(1000)).__next__)
+        return result, len(reads)
+
+    def test_mixed_settle_view_is_repollled_until_full_evidence(self):
+        # Debug 证据窗口：terminal.completed 但 exit None/running/观察者存活
+        # 的视图不算结算；下一轮读到完整证据才返回。exit_code 0 不判假。
+        self.assertFalse(_fully_settled(self.TRAP))
+        self.assertTrue(_fully_settled(self.SETTLED))
+        result, reads = self.run_wait([self.TRAP, self.SETTLED], _fully_settled)
+        self.assertEqual(result, self.SETTLED)
+        self.assertEqual(reads, 2)
+
+    def test_never_settled_view_times_out_with_last_view(self):
+        # 永久混合视图必须在固定 deadline 后停止并交出最后视图（由调用方
+        # 断言报错），轮询次数有界、不无限 tick。
+        result, reads = self.run_wait([self.TRAP], _fully_settled)
+        self.assertEqual(result, self.TRAP)
+        self.assertEqual(reads, 4)  # monotonic 0/1/2/3，首次 >= deadline 即停
+
+    def test_monitor_retries_running_then_target_state(self):
+        # 合法异步窗口：任务仍 running 时有界重 tick，目标 failure_code
+        # 出现即停；既有精确断言仍由调用点执行。
+        running = {'status': 'running'}
+        target = {'status': 'needs_user', 'failure_code': 'execution_failed'}
+        result, reads = self.run_wait([running, running, target],
+                                      _monitor_settled({'failure_code': 'execution_failed'}))
+        self.assertEqual(result, target)
+        self.assertEqual(reads, 3)
+
+    def test_monitor_unexpected_terminal_state_never_falsely_passes(self):
+        # 与目标不符的已结算状态不是可重试的 running 窗口：立即停止并
+        # 原样返回该视图，由调用点精确断言报错，不吞不符结果。
+        wrong = {'status': 'needs_user', 'failure_code': 'other_code'}
+        done = _monitor_settled({'failure_code': 'execution_failed'})
+        self.assertTrue(done(wrong))
+        result, reads = self.run_wait([{'status': 'running'}, wrong], done)
+        self.assertEqual(result, wrong)
+        self.assertEqual(reads, 2)
+
+    def test_stuck_observer_with_zero_exit_fails_after_timeout(self):
+        # 缺口实证：观察者一直存活（或 run_status 仍 running）时，超时后
+        # 即使 exit_code 0 + terminal completed 也必须 AssertionError，
+        # 不得只靠 exit_code 偶然失败。
+        for view in self.ZERO_EXIT_VIEWS:
+            with self.subTest(view=view):
+                result, reads = self.run_wait([view], _fully_settled)
+                self.assertEqual(result, view)  # 超时交出最后视图
+                self.assertEqual(reads, 4)      # 固定 deadline，有界轮询
+                self.assertFalse(_fully_settled(view))
+                # 旧写法的两条精确断言在这里都会 PASS——缺口所在
+                self.assertEqual(view.get('exit_code'), 0)
+                self.assertEqual(view['terminal'].get('outcome'), 'completed')
+                with self.assertRaises(AssertionError) as caught:
+                    _assert_settled(self, view)
+                message = str(caught.exception)
+                self.assertIn('observer_alive', message)
+                self.assertIn('run_status', message)  # 带完整最后 detail
+
+    def test_absent_terminal_fails_with_detail_not_attribute_error(self):
+        # terminal 缺失/为 None：必须是带 detail 的 AssertionError，
+        # 而不是 None.get('outcome') 抛 AttributeError 丢掉诊断信息。
+        for view in ({'exit_code': 0, 'run_status': 'finished', 'observer_alive': False},
+                     {'terminal': None, 'exit_code': 0, 'run_status': 'finished',
+                      'observer_alive': False}):
+            with self.subTest(view=view):
+                self.assertFalse(_fully_settled(view))
+                result, reads = self.run_wait([view], _fully_settled)
+                self.assertEqual(result, view)
+                self.assertEqual(reads, 4)
+                with self.assertRaises(AssertionError) as caught:
+                    _assert_settled(self, view)
+                self.assertIn('run_status', str(caught.exception))

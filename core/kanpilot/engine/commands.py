@@ -107,7 +107,7 @@ def cmd_engine_status(ctx, payload: dict) -> dict:
 
 
 def cmd_engine_run(ctx, payload: dict) -> dict:
-    """``engine run {stage?, executor_id?, lease_seconds?, mode?, force?}`` (§5.27.1, A12).
+    """``engine run {stage?, executor_id?, lease_seconds?, mode?, intake?, spawn?, tick?, force?}`` (§5.27.1).
 
     Long-lived foreground process: single-instance lease + heartbeat +
     exponential backoff until SIGTERM/SIGINT. ``mode`` is the **process
@@ -139,6 +139,7 @@ def cmd_engine_run(ctx, payload: dict) -> dict:
         executor_id=payload.get("executor_id") or "kaneo-engine",
         enable_intake=bool(payload.get("intake", True)),
         enable_spawn=bool(payload.get("spawn", True)),
+        enable_tick=bool(payload.get("tick", payload.get("spawn", True))),
         force_mode=bool(payload.get("force", False)),
         log=lambda message: sys.stderr.write(message + "\n"))
     try:

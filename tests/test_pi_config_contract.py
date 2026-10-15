@@ -291,7 +291,9 @@ def test_planner_and_review_backend_are_independent(cli):
 
 def test_role_capability_commands_report_each_branch(cli):
     caps = cli("review-capabilities", {})
-    assert set(caps) == {"pi", "pi_desktop", "claude", "codex"}
+    # 权威形状：review_config.capabilities 返回 pi/pi_desktop + claude/codex
+    # 两 CLI 分支 + codex_desktop（planner_config.desktop_capabilities），五键全集。
+    assert set(caps) == {"pi", "pi_desktop", "claude", "codex", "codex_desktop"}
     assert set(caps["pi"]) == {"available", "detail"}
     assert set(caps["pi_desktop"]) == {"available", "detail", "tools_ok",
                                        "version"}
@@ -303,7 +305,9 @@ def test_role_capability_commands_report_each_branch(cli):
     assert caps["pi_desktop"]["detail"]
 
     planner = cli("planner-capabilities", {})
-    assert set(planner["backends"]) == {"codex", "pi_desktop", "claude"}
+    # 权威词表：cmd_planner 的 result["backends"] 与 constants.PLANNER_BACKENDS
+    # 同为 codex/pi_desktop/claude/codex_desktop 四键；pi 不是规划后端。
+    assert set(planner["backends"]) == {"codex", "pi_desktop", "claude", "codex_desktop"}
     assert planner["backends"]["pi_desktop"]["available"] is False
 
     exec_caps = cli("exec-capabilities", {})

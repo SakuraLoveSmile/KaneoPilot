@@ -70,3 +70,87 @@ class MonitorIntervalTests(KanpilotTestCase):
             self.assertEqual(db.get_setting(conn, "monitor_interval_seconds"), 900)
         finally:
             conn.close()
+
+    def test_project_filter_limits_monitor_review_and_automation_segments(self):
+        from unittest.mock import patch
+        from kanpilot import core
+        tasks = {}
+        for project in ("filteredproject00001", "outsideproject000001"):
+            for status in ("running", "in_review", "ready"):
+                tid = "taskfilter" + str(len(tasks)).zfill(10)
+                self.make_ready_task(task_id=tid, project_id=project)
+                tasks[(project, status)] = tid
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                for (project, status), tid in tasks.items():
+                    db.update_task(conn, tid, util.now_iso(), status=status)
+                    if status == "ready":
+                        core.update_automation(conn, db.require_task(conn, tid),
+                            util.now_iso(), adopted_at=util.now_iso())
+                        db.set_extra(conn, db.require_task(conn, tid), util.now_iso(),
+                                     plan_execution_hold=True)
+            with patch("kanpilot.automation_policy.automation_preflight", return_value=[]) as preflight:
+                result = self.call("tick", {"project_ids": ["filteredproject00001"] * 2})
+            self.assertEqual(preflight.call_count, 1)
+            self.assertEqual(preflight.call_args.args[1], "filteredproject00001")
+            self.assertEqual({(r["kind"], r["task_id"]) for r in result["created"]}, {
+                ("monitor", tasks[("filteredproject00001", "running")]),
+                ("review", tasks[("filteredproject00001", "in_review")])})
+            selected = db.require_task(conn, tasks[("filteredproject00001", "ready")])
+            outside = db.require_task(conn, tasks[("outsideproject000001", "ready")])
+            self.assertIn("last_skip", core.automation_of(selected))
+            self.assertNotIn("last_skip", core.automation_of(outside))
+            self.assertIsNotNone(db.get_setting(conn, "last_tick_at"))
+        finally:
+            conn.close()
+
+    def test_project_filter_applies_to_lost_managed_lease_release(self):
+        from kanpilot import core
+        tids = []
+        for index in range(2):
+            tid = "taskfilterlost" + str(index).zfill(6)
+            self.make_ready_task(task_id=tid, project_id=f"projectlost{index}")
+            tids.append(tid)
+        conn = db.connect(self.db_path)
+        try:
+            requests = []
+            with db.write_txn(conn):
+                for tid in tids:
+                    db.update_task(conn, tid, util.now_iso(), status="running")
+                    core.update_automation(conn, db.require_task(conn, tid),
+                        util.now_iso(), adopted_at=util.now_iso())
+                    req, _ = db.create_request(conn, util.now_iso(), "monitor",
+                        f"monitor:{tid}", task_id=tid, requested_by="scheduler")
+                    db.update_request(conn, req["request_id"], util.now_iso(),
+                        status="claimed", lease_expires_at="2020-01-01T00:00:00Z")
+                    requests.append(req["request_id"])
+            self.call("tick", {"project_ids": ["projectlost0"]})
+            statuses = [conn.execute("SELECT status FROM requests WHERE request_id=?",
+                                     (rid,)).fetchone()[0] for rid in requests]
+            self.assertEqual(statuses, ["cancelled", "claimed"])
+        finally:
+            conn.close()
+
+    def test_project_filter_validation_and_unknown_fields(self):
+        for values in ([], [1], [None], [True], [""], ["  "], "project", None):
+            with self.subTest(project_ids=values):
+                self.assertEqual(self.call_err("tick", {"project_ids": values}).code,
+                                 "bad_request")
+        self.assertEqual(self.call_err("tick", {"unknown": True}).code, "bad_request")
+
+    def test_default_tick_still_covers_all_projects(self):
+        tids = []
+        for index in range(2):
+            tid = "taskfilterdefault" + str(index).zfill(5)
+            self.make_ready_task(task_id=tid, project_id=f"projectdefault{index}")
+            tids.append(tid)
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                for tid in tids:
+                    db.update_task(conn, tid, util.now_iso(), status="running")
+            result = self.call("tick", {})
+            self.assertEqual({r["task_id"] for r in result["created"]}, set(tids))
+        finally:
+            conn.close()
