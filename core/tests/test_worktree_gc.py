@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kanpilot import cmd_worktree, db, util
+from kanpilot import cmd_worktree, db, runtime_operations, util
 
 
 OLD = "2020-01-01T00:00:00+00:00"
@@ -277,6 +277,175 @@ def test_terminal_pool_location_does_not_keep_idle_pool_forever(estate):
     job["material_dir"] = str(path / "material")
     (directory / "job.json").write_text(json.dumps(job))
     assert "persistent_job_path" in entry(e, path)["reasons"]
+
+
+def returned_desktop_pool(e):
+    path = pool_slot(e, 1)
+    e.ctx.conn.execute("INSERT INTO tasks(task_id,project_id,project_name,stage,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                       ("task", "project", "Project", "plan", "done", OLD, OLD))
+    e.ctx.conn.execute("INSERT INTO requests(request_id,idempotency_key,task_id,stage,kind,status,run_id,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       ("request", "key", "task", "plan", "plan", "succeeded", "run",
+                        json.dumps({"cwd": str(path), "planner_backend": "codex_desktop"}), OLD, OLD))
+    lease = {"slot_id": "1", "holder_id": "run", "holder_stage": "plan", "lease_token": "generation-one", "path": str(path)}
+    e.ctx.conn.execute("UPDATE requests SET payload_json=?", (json.dumps({"cwd": str(path), "sha": e.sha,
+                       "planner_backend": "codex_desktop", "pool_lease": lease}),))
+    e.ctx.conn.execute("UPDATE worktree_slots SET holder_id='run',holder_stage='plan',lease_token='generation-one',owner_pid=?,owner_state='returned'", (os.getpid(),))
+    directory = e.runs / "task" / "run"
+    directory.mkdir(parents=True)
+    job = {"task_id": "task", "run_id": "run", "request_id": "request", "backend": "codex_desktop",
+           "status": "finished", "pid": os.getpid(), "worktree_path": str(path), "pool_lease": lease,
+           "consumer_returned": True}
+    file = directory / "job.json"
+    file.write_text(json.dumps(job))
+    e.ctx.conn.execute("INSERT INTO execution_rounds(task_id,run_id,backend,run_status,worktree_path,pid,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                       ("task", "run", "codex_desktop", "finished", str(path), os.getpid(), OLD, OLD))
+    result = {"request_id": "request", "run_id": "run", "slot_id": "1", "holder_id": "run",
+              "lease_token": "generation-one", "backend": "codex_desktop", "contract": "no_more_directory_access"}
+    runtime_operations.begin_operation(e.ctx.conn, "run", "desktop-return:generation-one", "desktop_queue", "worktree_consumer_return", result, now=OLD)
+    runtime_operations.complete_operation(e.ctx.conn, "run", "desktop-return:generation-one", result=result, now=OLD)
+    return path, file, job
+
+
+def test_desktop_explicit_return_allows_complete_idle_pool_without_claiming_process_exit(estate):
+    e = estate
+    path, _, _ = returned_desktop_pool(e)
+    second = pool_slot(e, 2)
+    result = entry(e, path)
+    assert result["candidate"], result["reasons"]
+    assert all(item["process"] == "alive" and item["consumer_returned"] for item in result["activity"])
+    assert set(cmd_worktree.cmd_worktree_audit(e.ctx, {})["candidates"]) == {str(path), str(second)}
+    result = cmd_worktree.cmd_worktree_gc(e.ctx, confirmation(e, [path, second]))
+    assert [item["status"] for item in result["results"]] == ["accepted", "accepted"]
+
+
+@pytest.mark.parametrize("defect", ["missing", "unknown", "wrong_token", "wrong_request", "wrong_scope", "wrong_tool", "wrong_contract", "wrong_job_token", "wrong_frozen_token", "malformed_job_token"])
+def test_desktop_return_requires_exact_sqlite_receipt_not_job_claim(estate, defect):
+    e = estate
+    path, file, job = returned_desktop_pool(e)
+    if defect == "missing":
+        e.ctx.conn.execute("DELETE FROM runtime_operations")
+    elif defect in ("wrong_token", "wrong_request", "wrong_contract"):
+        receipt = json.loads(e.ctx.conn.execute("SELECT result_json FROM runtime_operations").fetchone()[0])
+        receipt[{"wrong_token": "lease_token", "wrong_request": "request_id", "wrong_contract": "contract"}[defect]] = "other"
+        e.ctx.conn.execute("UPDATE runtime_operations SET result_json=?", (json.dumps(receipt),))
+    elif defect in ("wrong_job_token", "malformed_job_token"):
+        job["pool_lease"]["lease_token"] = "other-generation" if defect == "wrong_job_token" else 123
+        file.write_text(json.dumps(job))
+    elif defect == "wrong_frozen_token":
+        payload = json.loads(e.ctx.conn.execute("SELECT payload_json FROM requests").fetchone()[0])
+        payload["pool_lease"]["lease_token"] = "other-generation"
+        e.ctx.conn.execute("UPDATE requests SET payload_json=?", (json.dumps(payload),))
+    else:
+        column, value = {"unknown": ("status", "unknown"), "wrong_scope": ("scope_id", "other-run"),
+                         "wrong_tool": ("tool", "other_tool")}[defect]
+        e.ctx.conn.execute("UPDATE runtime_operations SET " + column + "=?", (value,))
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "desktop_owner_stop_unproven" in result["reasons"]
+
+
+def test_old_desktop_return_does_not_prove_new_slot_generation_returned(estate):
+    e = estate
+    path, _, _ = returned_desktop_pool(e)
+    e.ctx.conn.execute("UPDATE worktree_slots SET lease_token='new-generation'")
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "pool_owner_unproven" in result["reasons"]
+
+
+def test_desktop_pool_lease_only_treats_its_path_as_location(estate):
+    e = estate
+    path, file, job = returned_desktop_pool(e)
+    assert entry(e, path)["candidate"]
+    job["pool_lease"]["material_dir"] = str(path / "retained-material")
+    file.write_text(json.dumps(job))
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "persistent_job_path" in result["reasons"]
+
+
+@pytest.mark.parametrize("authority", ["job_nested", "payload_nested", "result"])
+def test_pool_lease_named_inside_retained_material_is_not_location(estate, authority):
+    e = estate
+    path, file, job = returned_desktop_pool(e)
+    retained = {"pool_lease": {"path": str(path / "retained-material")}}
+    if authority == "job_nested":
+        job["retained_material"] = retained
+        file.write_text(json.dumps(job))
+    elif authority == "payload_nested":
+        payload = json.loads(e.ctx.conn.execute("SELECT payload_json FROM requests").fetchone()[0])
+        payload["retained_material"] = retained
+        e.ctx.conn.execute("UPDATE requests SET payload_json=?", (json.dumps(payload),))
+    else:
+        e.ctx.conn.execute("UPDATE requests SET result_json=?", (json.dumps(retained),))
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert ("persistent_job_path" if authority == "job_nested" else "persistent_request_path") in result["reasons"]
+
+
+@pytest.mark.parametrize("unresolved_scope", ["old-run", "old-session"])
+def test_idle_pool_requires_every_historical_holder_return_and_resolved_operations(estate, unresolved_scope):
+    e = estate
+    path, _, job = returned_desktop_pool(e)
+    previous = json.loads(json.dumps(job))
+    previous.update(run_id="old-run", request_id="old-request", session_id="old-session")
+    previous["pool_lease"].update(holder_id="old-run", lease_token="old-generation")
+    directory = e.runs / "task" / "old-run"
+    directory.mkdir()
+    (directory / "job.json").write_text(json.dumps(previous))
+    payload = {"cwd": str(path), "planner_backend": "codex_desktop", "pool_lease": previous["pool_lease"]}
+    e.ctx.conn.execute("INSERT INTO requests(request_id,idempotency_key,task_id,stage,kind,status,run_id,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       ("old-request", "old-key", "task", "plan", "plan", "succeeded", "old-run", json.dumps(payload), OLD, OLD))
+    proof = {"request_id": "old-request", "run_id": "old-run", "slot_id": "1", "holder_id": "old-run",
+             "lease_token": "old-generation", "backend": "codex_desktop", "contract": "no_more_directory_access"}
+    runtime_operations.begin_operation(e.ctx.conn, "old-run", "desktop-return:old-generation", "desktop_queue", "worktree_consumer_return", proof, now=OLD)
+    runtime_operations.complete_operation(e.ctx.conn, "old-run", "desktop-return:old-generation", result=proof, now=OLD)
+    assert entry(e, path)["candidate"]
+    runtime_operations.begin_operation(e.ctx.conn, "old-run" if unresolved_scope == "old-run" else "other-scope",
+                                       "unresolved", "core", "read_turn", {}, now=OLD)
+    if unresolved_scope == "old-session":
+        e.ctx.conn.execute("UPDATE runtime_operations SET session_id='old-session' WHERE operation_id='unresolved'")
+    assert "pool_operation_unconfirmed" in entry(e, path)["reasons"]
+    e.ctx.conn.execute("DELETE FROM runtime_operations WHERE operation_id='unresolved'")
+    e.ctx.conn.execute("DELETE FROM runtime_operations WHERE operation_id='desktop-return:old-generation'")
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "desktop_owner_stop_unproven" in result["reasons"]
+
+
+@pytest.mark.parametrize("authority", ["run_scope", "round_session"])
+def test_pool_round_only_historical_holder_blocks_unresolved_operations(estate, authority):
+    e = estate
+    path = pool_slot(e, 1)
+    e.ctx.conn.execute("INSERT INTO execution_rounds(task_id,run_id,backend,run_status,worktree_path,session_id,pid,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                       ("old-task", "old-run", "codex", "finished", str(path), "old-session", 2147483647, OLD, OLD))
+    assert entry(e, path)["candidate"]
+    runtime_operations.begin_operation(e.ctx.conn, "old-run" if authority == "run_scope" else "other-scope", "pending", "core", "read_turn", {}, now=OLD)
+    if authority == "round_session":
+        e.ctx.conn.execute("UPDATE runtime_operations SET session_id='old-session'")
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "pool_operation_unconfirmed" in result["reasons"]
+
+
+def test_desktop_return_does_not_allow_reclaiming_historical_nonpool_directory(estate):
+    e = estate
+    returned_desktop_pool(e)
+    e.ctx.conn.execute("UPDATE tasks SET repository=?", (str(e.repo),))
+    historical = snapshot(e, with_request=False)
+    result = entry(e, historical)
+    assert not result["candidate"]
+    assert "desktop_owner_stop_unproven" in result["reasons"]
+
+
+@pytest.mark.parametrize("scope", ["run", "worktree-slot:1"])
+def test_desktop_return_does_not_override_unresolved_pool_operation(estate, scope):
+    e = estate
+    path, _, _ = returned_desktop_pool(e)
+    runtime_operations.begin_operation(e.ctx.conn, scope, "unresolved", "core", "worktree_checkout", {}, now=OLD)
+    result = entry(e, path)
+    assert not result["candidate"]
+    assert "pool_operation_unconfirmed" in result["reasons"]
 
 
 def test_missing_historical_pool_holder_is_unknown(estate):

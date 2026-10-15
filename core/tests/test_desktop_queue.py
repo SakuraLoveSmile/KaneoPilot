@@ -68,10 +68,12 @@ class DesktopQueueTests(KanpilotTestCase):
     def read_job(self, claim):
         return json.loads(Path(claim["context"]["job_path"]).read_text())
 
-    def make_review(self, suffix="1", automated=False):
+    def make_review(self, suffix="1", automated=False, return_plan=False):
         task, _request = self.plan(suffix)
         claimed = self.claim(op="plan-" + suffix)
         self.submit_plan(claimed)
+        if return_plan:
+            self.return_slot(claimed)
         repository = self.repos_root / "Feedback"
         def git(*args):
             subprocess.run(["git", "-C", str(repository), *args], check=True, capture_output=True)
@@ -117,6 +119,352 @@ class DesktopQueueTests(KanpilotTestCase):
         return {"conclusion": conclusion, "report_markdown": "# Review\n证据、结论与待补事项。",
                 "fix": {"title": "补充校验", "description": "覆盖小数与非数字输入", "priority": "high"}
                 if conclusion == "changes_requested" else None}
+
+    def return_slot(self, claim, error=False, **override):
+        return self.native("return_slot", {**self.identity(claim), "confirm": True, **override}, error=error)
+
+    def slot(self, claim):
+        lease = self.read_job(claim)["pool_lease"]
+        with closing(db.connect(self.db_path)) as conn:
+            return dict(conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone())
+
+    def test_return_requires_explicit_terminal_identity_and_persisted_output(self):
+        self.plan()
+        claim = self.claim()
+        self.assertEqual(self.return_slot(claim, error=True)["code"], "conflict")
+        self.submit_plan(claim)
+        for override in ({"confirm": False}, {"confirm": 1}, {"claim_token": "foreign"},
+                         {"run_id": "foreign"}, {"path": "/not-accepted"}):
+            self.return_slot(claim, error=True, **override)
+            self.assertEqual(self.slot(claim)["state"], "leased")
+        job = self.read_job(claim)
+        output = Path(job["plan_path"])
+        original = output.read_bytes()
+        output.write_text("changed output")
+        self.assertEqual(self.return_slot(claim, error=True)["code"], "conflict")
+        self.assertEqual(self.slot(claim)["state"], "leased")
+        output.write_bytes(original)
+        reply = self.return_slot(claim)
+        self.assertEqual(reply["state"], "free")
+        self.assertEqual(self.slot(claim)["owner_state"], "returned")
+        self.assertNotIn("owner_stopped", self.read_job(claim))
+        with closing(db.connect(self.db_path)) as conn:
+            lease = job["pool_lease"]
+            receipt = db.get_runtime_operation(conn, claim["run_id"], "desktop-return:" + lease["lease_token"])
+            self.assertEqual(receipt["status"], "accepted")
+            self.assertTrue(worktree_pool.consumer_returned(conn, lease))
+        self.assertTrue(self.return_slot(claim)["deduplicated"])
+        self.assertFalse(self.submit_plan(claim)["return_slot_required"])
+        self.native("heartbeat", {**self.identity(claim), "progress": "too late"}, error=True)
+
+    def test_return_needs_input_and_fail_preserve_persistent_results(self):
+        self.call("set-config", {"worktree_pool_size": 1})
+        self.plan("draft")
+        draft_claim = self.claim(op="draft")
+        self.submit_plan(draft_claim, status="needs_input", plan_markdown="# 草稿", questions=["范围？"])
+        self.assertEqual(self.return_slot(draft_claim)["state"], "free")
+        draft = Path(draft_claim["context"]["job_path"]).parent / "plan-draft.md"
+        self.assertEqual(draft.read_text(), "# 草稿")
+        self.plan("failed")
+        failed = self.claim(op="failed")
+        response = self.native("fail", {**self.identity(failed), "reason": "fixture failure"})
+        self.assertTrue(response["return_slot_required"])
+        self.assertEqual(self.slot(failed)["state"], "leased")
+        self.assertEqual(self.return_slot(failed)["state"], "free")
+        with patch.object(desktop, "_secured_command", side_effect=AssertionError("terminal replay wrote")):
+            retry = self.native("fail", {**self.identity(failed), "reason": "fixture failure"})
+        self.assertTrue(retry["deduplicated"])
+        self.assertFalse(retry["return_slot_required"])
+        self.native("fail", {**self.identity(failed), "reason": "different failure"}, error=True)
+
+    def test_manual_branch_without_pool_never_cleans_persistent_directory(self):
+        task, request_id = self.plan()
+        with closing(db.connect(self.db_path)) as conn:
+            row = db.require_task(conn, task["id"])
+            extra = db.task_extra(row)
+            delivery = extra["delivery"]
+            delivery.pop("workspace_version", None)
+            delivery["mode"] = "manual"
+            extra["automation"] = {"manual_takeover": True}
+            db.update_task(conn, task["id"], util.now_iso(), extra_json=extra)
+            request = db.get_request(conn, request_id)
+            payload = db.request_payload(request)
+            payload.pop("workspace_version", None)
+            payload.update(delivery_mode="manual", plan_cwd=delivery["worktree_path"])
+            db.update_request(conn, request_id, util.now_iso(), payload_json=payload)
+        claim = self.claim()
+        self.assertNotIn("pool_lease", self.read_job(claim))
+        persistent = Path(delivery["worktree_path"])
+        sentinel = persistent / "manual-notes.txt"
+        sentinel.write_text("keep manual work")
+        self.submit_plan(claim)
+        with patch.object(desktop.task_workspace, "release_pool", side_effect=AssertionError("manual directory cleaned")):
+            response = self.return_slot(claim)
+        self.assertEqual(response["reason"], "no_pool_lease")
+        self.assertFalse(response["return_slot_required"])
+        self.assertEqual(sentinel.read_text(), "keep manual work")
+
+    def test_fail_missing_or_foreign_job_does_not_settle_request(self):
+        self.plan()
+        claim = self.claim()
+        path = Path(claim["context"]["job_path"])
+        original = path.read_bytes()
+        path.unlink()
+        self.native("fail", {**self.identity(claim), "reason": "fixture failure"}, error=True)
+        path.write_bytes(original)
+        job = self.read_job(claim)
+        job["request_id"] = "foreign"
+        path.write_text(json.dumps(job))
+        self.native("fail", {**self.identity(claim), "reason": "fixture failure"}, error=True)
+        self.assertEqual(self.call("get-request", {"request_id": claim["request_id"]})["request"]["status"], "claimed")
+
+    def test_return_old_generation_replay_never_reads_reused_slot(self):
+        self.call("set-config", {"worktree_pool_size": 1})
+        self.plan("old")
+        old = self.claim(op="old")
+        self.submit_plan(old)
+        self.return_slot(old)
+        self.plan("new")
+        new = self.claim(op="new")
+        self.assertEqual(self.slot(old)["path"], self.slot(new)["path"])
+        before = self.slot(new)
+        with patch.object(worktree_pool, "_validate", side_effect=AssertionError("old replay read slot")), \
+             patch.object(desktop, "_guard_materials", side_effect=AssertionError("old replay read materials")):
+            self.assertTrue(self.return_slot(old)["deduplicated"])
+            self.assertTrue(self.submit_plan(old)["deduplicated"])
+            reply = self.claim(op="old")
+            self.assertEqual(reply["reason"], "slot_returned")
+            self.assertNotIn("context", reply)
+            self.assertNotIn("claim_token", reply)
+        self.assertEqual(before, self.slot(new))
+
+    def test_return_receipt_crash_reaper_preserves_artifacts_before_cleanup(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        root = Path(claim["context"]["plan_cwd"])
+        evidence = root / ".pi" / "plan" / "proposal.md"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text("durable optional proposal")
+        material = root / ".kaneopilot-plan-material"
+        material.mkdir()
+        (material / "input.md").write_text("durable optional material")
+        with patch.object(desktop.task_workspace, "release_pool", side_effect=SystemExit("crash after receipt")):
+            with self.assertRaises(SystemExit):
+                self.return_slot(claim)
+        self.assertEqual(self.slot(claim)["state"], "leased")
+        self.assertNotIn("return_result", self.read_job(claim))
+        self.mutate("UPDATE worktree_slots SET lease_expires_at=?", ("2000-01-01T00:00:00Z",))
+        with closing(db.connect(self.db_path)) as conn:
+            self.assertEqual(worktree_pool.reap_expired(conn)[0]["state"], "free")
+        saved = Path(claim["context"]["job_path"]).parent
+        self.assertEqual((saved / "plus-plan-evidence" / "proposal.md").read_text(), "durable optional proposal")
+        self.assertEqual((saved / "plan-materials" / "input.md").read_text(), "durable optional material")
+        self.assertFalse(evidence.exists())
+        self.assertEqual(self.return_slot(claim)["state"], "free")
+
+    def test_return_crash_before_receipt_keeps_slot_and_retry_recovers(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        with patch.object(desktop.runtime_operations, "complete_operation", side_effect=SystemExit("receipt transaction crash")):
+            with self.assertRaises(SystemExit):
+                self.return_slot(claim)
+        with closing(db.connect(self.db_path)) as conn:
+            lease = self.read_job(claim)["pool_lease"]
+            self.assertIsNone(db.get_runtime_operation(conn, claim["run_id"], "desktop-return:" + lease["lease_token"]))
+        self.assertEqual(self.slot(claim)["state"], "leased")
+        self.assertEqual(self.return_slot(claim)["state"], "free")
+
+    def test_return_crash_after_release_recovers_without_reading_slot(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        with patch.object(desktop, "_write", side_effect=SystemExit("job write crash")):
+            with self.assertRaises(SystemExit):
+                self.return_slot(claim)
+        self.assertEqual(self.slot(claim)["state"], "free")
+        with patch.object(worktree_pool, "_validate", side_effect=AssertionError("recovery read freed slot")):
+            self.assertEqual(self.return_slot(claim)["state"], "free")
+
+    def test_replayed_claim_cannot_overwrite_or_expose_after_return(self):
+        self.plan()
+        claim = self.claim()
+        entered, resume = threading.Event(), threading.Event()
+        expose = desktop._expose_claim
+        def paused(*args, **kwargs):
+            entered.set()
+            self.assertTrue(resume.wait(timeout=15))
+            return expose(*args, **kwargs)
+        with patch.object(desktop, "_expose_claim", paused):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                replay = executor.submit(self.claim)
+                self.assertTrue(entered.wait(timeout=15))
+                self.submit_plan(claim)
+                self.return_slot(claim)
+                before = Path(claim["context"]["job_path"]).read_bytes()
+                resume.set()
+                reply = replay.result(timeout=15)
+        self.assertEqual(reply["reason"], "slot_returned")
+        self.assertNotIn("context", reply)
+        self.assertEqual(before, Path(claim["context"]["job_path"]).read_bytes())
+
+    def test_claim_exposure_holds_same_lock_as_terminal_submission(self):
+        self.plan()
+        claim = self.claim()
+        entered, resume = threading.Event(), threading.Event()
+        owner = desktop.task_workspace.pool_owner
+        def paused(*args, **kwargs):
+            entered.set()
+            self.assertTrue(resume.wait(timeout=15))
+            return owner(*args, **kwargs)
+        with patch.object(desktop.task_workspace, "pool_owner", paused):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                replay = executor.submit(self.claim)
+                self.assertTrue(entered.wait(timeout=15))
+                result = {"status": "ready", "plan_markdown": "# 规划"}
+                failure = self.native("submit_plan", {**self.identity(claim), "result": result}, error=True)
+                self.assertEqual(failure["code"], "busy")
+                resume.set()
+                self.assertTrue(replay.result(timeout=15)["claimed"])
+        self.submit_plan(claim)
+        self.assertEqual(self.return_slot(claim)["state"], "free")
+
+    def test_desktop_forged_stop_flags_and_backend_cannot_release_without_receipt(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        for override in ({"owner_stopped": True}, {"send_state": "not_sent"},
+                         {"backend": "codex", "owner_stopped": True, "send_state": "not_sent"}):
+            job = self.read_job(claim)
+            job.update(override)
+            desktop.task_workspace.release_pool(self.db_path, job, Path(claim["context"]["job_path"]).parent)
+            self.assertEqual(self.slot(claim)["state"], "leased")
+            self.assertEqual(self.slot(claim)["owner_state"], "unknown")
+
+    def test_returned_quarantine_recovery_preserves_previously_uncopied_ignored_artifacts(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        root = Path(claim["context"]["plan_cwd"])
+        ignore = self.repos_root / "Feedback" / ".git" / "info" / "exclude"
+        with ignore.open("a") as stream:
+            stream.write("\n.pi/\n.kaneopilot-plan-material/\n")
+        proposal = root / ".pi" / "plan" / "proposal.md"
+        proposal.parent.mkdir(parents=True)
+        proposal.write_text("preserve before unquarantine")
+        material = root / ".kaneopilot-plan-material"
+        material.mkdir()
+        (material / "input.md").write_text("preserve material before unquarantine")
+        with patch.object(desktop.task_workspace, "preserve_pool_artifacts", side_effect=OSError("copy temporarily failed")):
+            self.assertEqual(self.return_slot(claim)["state"], "quarantined")
+        directory = Path(claim["context"]["job_path"]).parent
+        self.assertFalse((directory / "plus-plan-evidence" / "proposal.md").exists())
+        lease = self.read_job(claim)["pool_lease"]
+        with closing(db.connect(self.db_path)) as conn:
+            result = worktree_pool.unquarantine(conn, **desktop.task_workspace.pool_identity(lease), confirm=True)
+        self.assertEqual(result["state"], "free")
+        self.assertEqual((directory / "plus-plan-evidence" / "proposal.md").read_text(), "preserve before unquarantine")
+        self.assertEqual((directory / "plan-materials" / "input.md").read_text(), "preserve material before unquarantine")
+        replay = self.return_slot(claim)
+        self.assertTrue(replay["ok"])
+        self.assertTrue(replay["pool_released"])
+        self.assertEqual(replay["state"], "free")
+
+    def test_unknown_return_receipt_is_not_promoted_or_cleaned(self):
+        self.plan()
+        claim = self.claim()
+        self.submit_plan(claim)
+        lease = self.read_job(claim)["pool_lease"]
+        with closing(db.connect(self.db_path)) as conn:
+            db.insert_runtime_operation(conn, claim["run_id"], "desktop-return:" + lease["lease_token"],
+                                        "desktop_queue", "worktree_consumer_return", "unknown", "unknown", util.now_iso())
+        self.assertEqual(self.return_slot(claim, error=True)["code"], "conflict")
+        self.assertEqual(self.slot(claim)["state"], "leased")
+        with closing(db.connect(self.db_path)) as conn:
+            self.assertEqual(db.get_runtime_operation(conn, claim["run_id"], "desktop-return:" + lease["lease_token"])["status"], "unknown")
+
+    def test_fail_response_loss_recovers_persisted_failure_then_can_return(self):
+        self.plan()
+        claim = self.claim()
+        entry = cli.COMMANDS["report"]
+        def lost(ctx, payload):
+            entry[1](ctx, payload)
+            raise util.KanpilotError("response_lost", "isolated response lost")
+        with patch.dict(cli.COMMANDS, {"report": (entry[0], lost)}):
+            self.native("fail", {**self.identity(claim), "reason": "fixture failure"}, error=True)
+        self.assertEqual(self.slot(claim)["state"], "leased")
+        with patch.object(desktop, "_secured_command", side_effect=AssertionError("failure replay wrote")):
+            self.native("fail", {**self.identity(claim), "reason": "fixture failure"})
+        self.assertEqual(self.return_slot(claim)["state"], "free")
+
+    def test_return_receipt_reaper_missing_or_foreign_checkpoint_retains_slot(self):
+        self.call("set-config", {"worktree_pool_size": 2})
+        for kind in ("missing", "lease"):
+            self.plan(kind)
+            claim = self.claim(op=kind)
+            self.submit_plan(claim)
+            with patch.object(desktop.task_workspace, "release_pool", side_effect=SystemExit("crash")):
+                with self.assertRaises(SystemExit):
+                    self.return_slot(claim)
+            path = Path(claim["context"]["job_path"])
+            job = self.read_job(claim)
+            if kind == "missing":
+                path.unlink()
+            else:
+                job["pool_lease"]["path"] = "/foreign"
+                path.write_text(json.dumps(job))
+            self.mutate("UPDATE worktree_slots SET lease_expires_at=?", ("2000-01-01T00:00:00Z",))
+            with closing(db.connect(self.db_path)) as conn:
+                with patch.object(desktop.task_workspace, "release_pool", side_effect=AssertionError("invalid checkpoint released")):
+                    rows = worktree_pool.reap_expired(conn)
+                self.assertTrue(all(row["state"] == "leased" for row in rows))
+
+    def test_return_preserves_unknown_operations_and_unknown_changes(self):
+        self.call("set-config", {"worktree_pool_size": 2})
+        for kind in ("operation", "changes"):
+            self.plan(kind)
+            claim = self.claim(op=kind)
+            self.submit_plan(claim)
+            root = Path(claim["context"]["plan_cwd"])
+            if kind == "operation":
+                with closing(db.connect(self.db_path)) as conn:
+                    db.insert_runtime_operation(conn, claim["run_id"], "unknown", "fixture", "fixture", "hash", "unknown", util.now_iso())
+            else:
+                (root / "unknown.txt").write_text("preserve me")
+            response = self.return_slot(claim)
+            self.assertFalse(response["ok"])
+            self.assertTrue(response["returned"])
+            self.assertEqual(response["state"], "leased" if kind == "operation" else "quarantined")
+            if kind == "changes":
+                self.assertEqual((root / "unknown.txt").read_text(), "preserve me")
+
+    def test_twenty_desktop_plan_review_consumers_reuse_one_slot_with_outputs(self):
+        self.call("set-config", {"worktree_pool_size": 1})
+        tokens, roots, outputs = [], set(), []
+        for number in range(10):
+            task, _ = self.make_review("reuse" + str(number), return_plan=True)
+            with closing(db.connect(self.db_path)) as conn:
+                outputs.append(Path(db.require_task(conn, task["id"])["plan_path"]))
+                plan_request = conn.execute("SELECT * FROM requests WHERE task_id=? AND stage='plan'", (task["id"],)).fetchone()
+                plan_lease = db.request_payload(plan_request)["pool_lease"]
+                tokens.append(plan_lease["lease_token"])
+                roots.add(plan_lease["path"])
+            claim = self.claim("review", "review-reuse" + str(number))
+            lease = self.read_job(claim)["pool_lease"]
+            tokens.append(lease["lease_token"])
+            roots.add(lease["path"])
+            reply = self.native("submit_review", {**self.identity(claim), "result": self.review_result("pass")})
+            self.assertEqual(self.slot(claim)["state"], "leased")
+            outputs.append(Path(reply["report_path"]))
+            self.assertEqual(self.return_slot(claim)["state"], "free")
+        self.assertEqual(len(tokens), 20)
+        self.assertEqual(len(set(tokens)), 20)
+        self.assertEqual(len(roots), 1)
+        self.assertTrue(all(path.is_file() and path.read_text().strip() for path in outputs))
+        with closing(db.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM runtime_operations WHERE tool='worktree_consumer_return' AND status='accepted'").fetchone()[0], 20)
 
     def test_formal_plan_publishes_hold_and_terminal_retry_is_read_only(self):
         task, request_id = self.plan()
@@ -334,6 +682,7 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertTrue(current["review_summary"]["fix_task_id"])
             else:
                 self.assertEqual(reply["task_status"], "needs_user")
+            self.assertEqual(self.return_slot(claim)["state"], "free")
 
     def test_automated_changes_requested_keeps_same_task(self):
         task, _request = self.make_review(automated=True)
@@ -726,7 +1075,7 @@ class DesktopQueueTests(KanpilotTestCase):
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(responses), 5)
         names = {tool["name"] for tool in responses[1]["result"]["tools"]}
-        self.assertEqual(names, {"kp_desktop_" + name for name in ("status", "claim", "heartbeat", "submit_plan", "submit_review", "fail")})
+        self.assertEqual(names, {"kp_desktop_" + name for name in ("status", "claim", "heartbeat", "submit_plan", "submit_review", "return_slot", "fail")})
         self.assertTrue(responses[2]["result"]["isError"])
         self.assertTrue(responses[3]["result"]["isError"])
         self.assertEqual(responses[4]["error"]["message"], "Message too large")

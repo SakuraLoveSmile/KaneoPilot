@@ -21,7 +21,7 @@ import sys
 
 from . import (cmd_exec, codex_planner, constants, core, db, headless_adapter, pi_desktop_controller, planfile,
                pi_desktop_review, planner_inputs, planner_runner, review_settle, review_snapshot,
-               util, task_workspace)
+               util, task_workspace, worktree_pool, runtime_operations)
 
 SETTING_KEY = "desktop_queue_config"
 BACKEND = "codex_desktop"
@@ -234,6 +234,8 @@ def _authenticate(ctx, arguments, role=None, *, terminal=False, check_files=True
     task = db.require_task(ctx.conn, row["task_id"])
     if terminal and row["status"] in ("succeeded", "failed", "cancelled"):
         return row, task
+    if _returned(ctx.conn, row):
+        raise util.KanpilotError("conflict", "Desktop 已交还槽位，禁止继续访问目录或续租")
     if row["status"] != "claimed" or util.lease_lost(row["lease_expires_at"], ctx.now):
         raise util.KanpilotError("stale_run", "Desktop 请求非在途或租约已过期；交人工恢复")
     if not db.task_is_active(task) or db.task_is_purged(task):
@@ -248,6 +250,11 @@ def _authenticate(ctx, arguments, role=None, *, terminal=False, check_files=True
         if check_files and (not plan.is_file() or util.sha256_file(plan) != payload["plan_sha256"]):
             raise util.KanpilotError("conflict", "Desktop Review 计划文件已变化")
     return row, task
+
+
+def _returned(conn, request):
+    lease = db.request_payload(request).get("pool_lease")
+    return bool(lease and worktree_pool.consumer_returned(conn, lease))
 
 
 def _material_db_identity(conn, row, task):
@@ -265,6 +272,8 @@ def _material_db_identity(conn, row, task):
 
 
 def _guard_materials(ctx, row, task, job):
+    if _returned(ctx.conn, row):
+        raise util.KanpilotError("conflict", "Desktop 已交还槽位，禁止重新访问目录")
     if job.get("pool_lease"):
         task_workspace.validate_pool(ctx.conn, job["pool_lease"])
     payload = db.request_payload(row)
@@ -440,16 +449,16 @@ def _claim(ctx, payload):
         return claim
     identity = {"request_id": claim["request_id"], "run_id": claim["run_id"], "claim_token": token}
     row, task = _authenticate(ctx, identity, role, terminal=True)
+    if _returned(ctx.conn, row):
+        return {"claimed": False, "reason": "slot_returned", "request_id": row["request_id"],
+                "run_id": row["run_id"], "completed": True}
     if row["status"] != "claimed":
         return {"claimed": True, **identity, "status": row["status"], "completed": True}
     _authenticate(ctx, identity, role)
     bound = db.request_payload(row)["desktop_claim"]
     try:
-        job = _prepare(ctx, claim, bound)
-        ctx.now = util.now_dt()
-        ctx.now_iso = util.to_iso(ctx.now)
-        row, task = _authenticate(ctx, identity, role)
-        _guard_materials(ctx, row, task, job)
+        _prepare(ctx, claim, bound)
+        return _expose_claim(ctx, identity, role, claim)
     except util.KanpilotError as exc:
         if exc.code == "worktree_pool_waiting":
             return {"claimed": False, "reason": exc.code, "request_id": claim["request_id"]}
@@ -473,23 +482,39 @@ def _claim(ctx, payload):
                     task_workspace.release_pool(ctx.db_path, prepared, directory, unexposed=True)
                     _record(ctx, prepared, directory)
         raise
-    directory = _directory(ctx.conn, task["task_id"], row["run_id"])
-    if job.get("pool_lease"):
-        # The stdio caller is short lived; external consumer termination is unknown.
-        job["send_state"] = "unknown"
-        task_workspace.pool_owner(ctx.conn, job, state="unknown")
-        _record(ctx, job, directory)
-    # Context is a bounded material summary. Full frozen input stays in the
-    # trusted core directory; a model cannot provide a replacement path.
-    return {"claimed": True, **identity, "context": {
-        "task_id": task["task_id"], "title": task["title"], "role": role,
-        "repository": task["repository"], "planner_method": claim["context"].get("payload", {}).get("planner_method"),
-        "input_dir": claim["context"].get("input_dir"), "review_root": job.get("review_root"),
-        "plan_cwd": job.get("plan_cwd"),
-        "materials": job.get("materials", {}), "job_path": str(directory / "job.json")},
-        "instructions": _consumer_instruction(role, job, directory),
-        "heartbeat_seconds": min(claim["context"]["lease_seconds"] / 3.0, 60),
-        "lease_expires_at": row["lease_expires_at"]}
+
+
+def _expose_claim(ctx, identity, role, claim):
+    request = db.get_request(ctx.conn, identity["request_id"])
+    directory = _directory(ctx.conn, request["task_id"], identity["run_id"])
+    with _serialized(directory):
+        ctx.now = util.now_dt()
+        ctx.now_iso = util.to_iso(ctx.now)
+        row, task = _authenticate(ctx, identity, role, terminal=True)
+        if _returned(ctx.conn, row):
+            return {"claimed": False, "reason": "slot_returned", "request_id": row["request_id"],
+                    "run_id": row["run_id"], "completed": True}
+        if row["status"] != "claimed":
+            return {"claimed": True, **identity, "status": row["status"], "completed": True}
+        row, task = _authenticate(ctx, identity, role)
+        job = _load(directory / "job.json")
+        _require_job_identity(row, task, job)
+        _guard_materials(ctx, row, task, job)
+        if job.get("pool_lease"):
+            # This lock also covers submit/return, so a replay cannot publish
+            # an earlier running checkpoint after directory access was returned.
+            job["send_state"] = "unknown"
+            task_workspace.pool_owner(ctx.conn, job, state="unknown")
+            _record(ctx, job, directory)
+        return {"claimed": True, **identity, "context": {
+            "task_id": task["task_id"], "title": task["title"], "role": role,
+            "repository": task["repository"], "planner_method": claim["context"].get("payload", {}).get("planner_method"),
+            "input_dir": claim["context"].get("input_dir"), "review_root": job.get("review_root"),
+            "plan_cwd": job.get("plan_cwd"),
+            "materials": job.get("materials", {}), "job_path": str(directory / "job.json")},
+            "instructions": _consumer_instruction(role, job, directory),
+            "heartbeat_seconds": min(claim["context"]["lease_seconds"] / 3.0, 60),
+            "lease_expires_at": row["lease_expires_at"]}
 
 
 def _consumer_instruction(role, job, directory):
@@ -499,7 +524,9 @@ def _consumer_instruction(role, job, directory):
             "读取 " + str(directory / "job.json") + " 中的 instruction 与冻结材料。"
             "只读仓库；不执行业务修改、构建、测试、外部发布或直接写 Kaneo。"
             "每 heartbeat_seconds 秒显式调用 kp_desktop_heartbeat；不得由 MCP 存活代替续租。"
-            "完成后仅调用 kp_desktop_submit_" + role + " 提交结果正文，由核心生成文件并收尾。"
+            "先完成全部目录读取，调用 kp_desktop_submit_" + role + " 提交结果正文，由核心生成文件并收尾。"
+            "submit/fail取得终态后，最后以原领取身份调用 kp_desktop_return_slot(confirm=true)。"
+            "交还后禁止继续访问槽位、heartbeat或新提交；这是停止目录访问的协作承诺，不是原生进程退出证明。"
             "不要在结果、进度、文件或日志中写领取凭据。"
             "thread_id 仅在确知当前会话身份时填写，不得猜测；模型和权限继承当前 Desktop 原生会话。")
 
@@ -511,11 +538,13 @@ def _heartbeat(ctx, payload):
     _reject_token_text(payload, payload.get("progress", ""))
     row, task = _authenticate(ctx, payload)
     directory = _directory(ctx.conn, task["task_id"], row["run_id"])
-    job = _load(directory / "job.json")
-    if job.get("pool_lease"):
-        from . import worktree_pool
-        worktree_pool.heartbeat(ctx.conn, **task_workspace.pool_identity(job["pool_lease"]))
-    return _secured_command(ctx, "heartbeat", {key: value for key, value in payload.items() if key != "claim_token"}, payload)
+    with _serialized(directory):
+        row, task = _authenticate(ctx, payload)
+        job = _load(directory / "job.json")
+        _require_job_identity(row, task, job)
+        if job.get("pool_lease"):
+            worktree_pool.heartbeat(ctx.conn, **task_workspace.pool_identity(job["pool_lease"]))
+        return _secured_command(ctx, "heartbeat", {key: value for key, value in payload.items() if key != "claim_token"}, payload)
 
 
 def _reject_token_text(identity, text):
@@ -559,7 +588,7 @@ def _submit(ctx, payload, role):
         if row["status"] in ("succeeded", "failed", "cancelled"):
             if job.get("result_digest") != digest or not job.get("submit_intent"):
                 raise util.KanpilotError("conflict", "Desktop 请求已结束，不能写新结果")
-            return _public_result(row, task, job, deduplicated=True)
+            return _public_result(row, task, job, deduplicated=True, returned=_returned(ctx.conn, row))
         _authenticate(ctx, payload, role)
         _guard_materials(ctx, row, task, job)
         if not job.get("result_digest"):
@@ -582,12 +611,133 @@ def _submit(ctx, payload, role):
         return _public_result(fresh, db.require_task(ctx.conn, task["task_id"]), job)
 
 
-def _public_result(row, task, job, deduplicated=False):
+def _public_result(row, task, job, deduplicated=False, returned=False):
     return {"ok": row["status"] in ("succeeded", "failed"), "deduplicated": deduplicated,
             "request_id": row["request_id"], "run_id": row["run_id"],
             "request_status": row["status"], "task_status": task["status"],
             "plan_path": job.get("plan_path"), "report_path": job.get("report_path"),
-            "detail": job.get("detail"), "conclusion": job.get("conclusion")}
+            "detail": job.get("detail"), "conclusion": job.get("conclusion"),
+            **_return_guidance(job, returned=returned)}
+
+
+def _return_guidance(job, *, returned=False):
+    returned = returned or bool(job.get("return_result", {}).get("returned"))
+    required = bool(job.get("pool_lease")) and not returned
+    return {"return_slot_required": required,
+            "next_action": ("完成所有目录读取后，以原领取身份调用 kp_desktop_return_slot(confirm=true)；交还后禁止访问槽位。"
+                            if required else "槽位已交还，禁止继续访问目录。" if returned
+                            else "无池槽位，无需交还；保留持久任务目录。")}
+
+
+def _require_job_identity(row, task, job):
+    util.require(job.get("backend") == BACKEND and job.get("role") == row["stage"]
+                 and job.get("task_id") == task["task_id"]
+                 and job.get("request_id") == row["request_id"] and job.get("run_id") == row["run_id"],
+                 "Desktop 检查点身份不符", "conflict")
+
+
+def _require_terminal_job(row, task, job):
+    _require_job_identity(row, task, job)
+    util.require(row["status"] in ("succeeded", "failed", "cancelled"),
+                 "Desktop 请求尚未结算，不能交还槽位", "conflict")
+    util.require(job.get("status") in ("finished", "failed") and job.get("ended_at"),
+                 "Desktop 同身份终态检查点缺失，保留槽位", "conflict")
+
+
+def _require_persisted_output(conn, row, job):
+    result = util.jload(row["result_json"]) or {}
+    util.require(bool(result), "Desktop 终态记录缺失，保留槽位", "conflict")
+    if job.get("submit_intent"):
+        util.require(job.get("submit_intent") == row["stage"] and job.get("result_digest"),
+                     "Desktop 提交记录不完整", "conflict")
+        if row["stage"] == "review":
+            target, digest = job.get("report_path"), job.get("report_sha256")
+        elif job.get("output_status") == "ready":
+            target, digest = job.get("plan_path"), job.get("plan_sha256")
+        else:
+            attempt = conn.execute("SELECT * FROM attempts WHERE request_id=? AND run_id=? "
+                                   "AND outcome='needs_user' ORDER BY id DESC LIMIT 1",
+                                   (row["request_id"], row["run_id"])).fetchone()
+            evidence = util.jload(attempt["evidence_json"]) if attempt is not None else {}
+            util.require(result.get("outcome") == "needs_user"
+                         and isinstance(evidence, dict)
+                         and evidence.get("plan_markdown") == job.get("plan_markdown")
+                         and evidence.get("questions") == job.get("questions"),
+                         "Desktop 草稿或提问尚未持久保存", "conflict")
+            return
+        util.require(target and digest and Path(target).is_file()
+                     and util.sha256_file(Path(target)) == digest,
+                     "Desktop 提交产物缺失或已变化，保留槽位", "conflict")
+    else:
+        util.require(job.get("status") == "failed" and job.get("detail")
+                     and result.get("outcome") == "failed" and result.get("note") == job["detail"],
+                     "Desktop 失败记录尚未持久保存", "conflict")
+
+
+def _return_slot(ctx, payload):
+    _validate(payload, (*_IDENTITY, "confirm"))
+    if payload["confirm"] is not True:
+        raise util.bad_request("交还槽位需要confirm=true")
+    row, task = _authenticate(ctx, payload, terminal=True)
+    directory = _directory(ctx.conn, task["task_id"], row["run_id"])
+    with _serialized(directory):
+        job = _load(directory / "job.json")
+        _require_terminal_job(row, task, job)
+        lease = job.get("pool_lease")
+        if not lease:
+            return {"ok": True, "returned": False, "return_slot_required": False,
+                    "request_id": row["request_id"], "run_id": row["run_id"], "reason": "no_pool_lease"}
+        frozen = db.request_payload(row).get("pool_lease") or {}
+        util.require(all(lease.get(key) == frozen.get(key) and lease.get(key)
+                         for key in ("slot_id", "holder_id", "lease_token", "path"))
+                     and lease["holder_id"] == row["run_id"],
+                     "Desktop 槽位与请求冻结身份不符", "conflict")
+        proof = {"request_id": row["request_id"], "run_id": row["run_id"],
+                 **task_workspace.pool_identity(lease), "backend": BACKEND,
+                 "contract": "no_more_directory_access", "role": row["stage"], "task_id": task["task_id"]}
+        operation_id = "desktop-return:" + lease["lease_token"]
+        accepted = worktree_pool.consumer_returned(ctx.conn, frozen)
+        if not accepted:
+            _require_persisted_output(ctx.conn, row, job)
+            with db.write_txn(ctx.conn):
+                current, current_task = _authenticate(ctx, payload, terminal=True)
+                _require_terminal_job(current, current_task, job)
+                slot = ctx.conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone()
+                util.require(slot is not None and slot["state"] == "leased"
+                             and slot["holder_id"] == lease["holder_id"] and slot["lease_token"] == lease["lease_token"],
+                             "Desktop 槽位代次已变化，未交还其它持有者目录", "conflict")
+                util.require(db.get_runtime_operation(ctx.conn, row["run_id"], operation_id) is None,
+                             "Desktop 交还证明状态或身份未知，保留现场", "conflict")
+                receipt = runtime_operations.begin_operation(ctx.conn, row["run_id"], operation_id,
+                    "desktop_queue", "worktree_consumer_return", proof)
+                util.require(receipt["status"] in ("prepared", "accepted"),
+                             "Desktop 交还证明状态未知，保留现场", "conflict")
+                runtime_operations.complete_operation(ctx.conn, row["run_id"], operation_id, result=proof)
+        # Read only SQL before touching a slot: an old receipt must never read
+        # a checkout that already belongs to a later generation.
+        slot = ctx.conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone()
+        same = (slot is not None and slot["holder_id"] == lease["holder_id"]
+                and slot["lease_token"] == lease["lease_token"])
+        state = slot["state"] if same else "superseded"
+        if accepted and job.get("return_result") and state in ("free", "superseded"):
+            return dict(job["return_result"], deduplicated=True, ok=True,
+                        pool_released=True, state=state, reason=None)
+        if same and state == "leased":
+            task_workspace.release_pool(ctx.db_path, job, directory)
+            slot = ctx.conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone()
+            util.require(slot is not None and slot["holder_id"] == lease["holder_id"]
+                         and slot["lease_token"] == lease["lease_token"],
+                         "Desktop 释放期间槽位代次已变化", "conflict")
+            state = slot["state"]
+        response = {"ok": state in ("free", "superseded"), "returned": True,
+                    "return_slot_required": False, "request_id": row["request_id"], "run_id": row["run_id"],
+                    "pool_released": state in ("free", "superseded"), "state": state,
+                    "reason": slot["reason"] if same and slot is not None else None,
+                    "deduplicated": accepted}
+        job.update(consumer_returned=True, return_result=response,
+                   pool_released=response["pool_released"], pool_release_state=state)
+        _write(directory / "job.json", job)
+        return response
 
 
 def _settle_plan(ctx, identity, row, task, job, directory):
@@ -752,18 +902,33 @@ def _fail(ctx, payload):
     _validate(payload, (*_IDENTITY, "reason"))
     reason = _text(payload["reason"], limit=4000)
     _reject_token_text(payload, reason)
-    row, task = _authenticate(ctx, payload)
+    row, task = _authenticate(ctx, payload, terminal=True)
     directory = _directory(ctx.conn, task["task_id"], row["run_id"])
     with _serialized(directory):
-        _authenticate(ctx, payload)
-        response = _secured_command(ctx, "report", {"request_id": row["request_id"], "run_id": row["run_id"],
+        row, task = _authenticate(ctx, payload, terminal=True)
+        job = _load(directory / "job.json")
+        _require_job_identity(row, task, job)
+        util.require(not job.get("submit_intent") and job.get("fail_intent", reason) == reason,
+                     "Desktop 已开始提交其它结果，不能改为失败", "conflict")
+        if row["status"] in ("succeeded", "failed", "cancelled"):
+            result = util.jload(row["result_json"]) or {}
+            util.require(job.get("fail_intent") == reason and result.get("outcome") == "failed"
+                         and result.get("note") == reason,
+                         "Desktop 请求已结束，不能写新失败结果", "conflict")
+            if job.get("fail_result"):
+                return dict(job["fail_result"], deduplicated=True, **_return_guidance(job, returned=_returned(ctx.conn, row)))
+            util.require(not _returned(ctx.conn, row), "Desktop 已交还槽位，不能改写结果", "conflict")
+            response = {"ok": True, "request_status": row["status"], "task_status": task["status"]}
+        else:
+            _authenticate(ctx, payload)
+            job["fail_intent"] = reason
+            _write(directory / "job.json", job)
+            response = _secured_command(ctx, "report", {"request_id": row["request_id"], "run_id": row["run_id"],
                                              "outcome": "failed", "note": reason,
                                              "failure_code": "planner_failed" if row["stage"] == "plan" else "review_blocked"}, payload)
-        if (directory / "job.json").is_file():
-            job = _load(directory / "job.json")
-            job.update(status="failed", exit_code=1, ended_at=util.to_iso(ctx.now), detail=reason)
-            _record(ctx, job, directory)
-        return response
+        job.update(status="failed", exit_code=1, ended_at=util.to_iso(ctx.now), detail=reason, fail_result=response)
+        _record(ctx, job, directory)
+        return dict(response, **_return_guidance(job))
 
 
 def _schema(properties, required=()):
@@ -782,6 +947,7 @@ _TOOLS = [
     {"name": "kp_desktop_heartbeat", "description": "显式续租自身有效领取；过期轮次不能复活。", "inputSchema": _schema({**_IDENTITY_PROPERTIES, "progress": _STRING}, _IDENTITY)},
     {"name": "kp_desktop_submit_plan", "description": "提交规划正文；核心生成元数据并发布，或保存草稿转人工。", "inputSchema": _schema({**_IDENTITY_PROPERTIES, "result": _PLAN_SCHEMA, "thread_id": _STRING}, (*_IDENTITY, "result"))},
     {"name": "kp_desktop_submit_review", "description": "提交严格 Review 结果；核心复用登记、修复任务及结算流程。", "inputSchema": _schema({**_IDENTITY_PROPERTIES, "result": review_settle.RESULT_SCHEMA, "thread_id": _STRING}, (*_IDENTITY, "result"))},
+    {"name": "kp_desktop_return_slot", "description": "终态提交后确认不再访问槽位并交还；不是原生进程退出证明。", "inputSchema": _schema({**_IDENTITY_PROPERTIES, "confirm": {"type": "boolean", "const": True}}, (*_IDENTITY, "confirm"))},
     {"name": "kp_desktop_fail", "description": "失败结束自身有效领取；不修改其它阶段。", "inputSchema": _schema({**_IDENTITY_PROPERTIES, "reason": _STRING}, (*_IDENTITY, "reason"))},
 ]
 
@@ -790,7 +956,8 @@ def _tool_result(name, arguments, db_path):
     from .cli import Context
     methods = {"kp_desktop_status": cmd_desktop_queue_status, "kp_desktop_claim": _claim,
                "kp_desktop_heartbeat": _heartbeat, "kp_desktop_submit_plan": lambda c, p: _submit(c, p, "plan"),
-               "kp_desktop_submit_review": lambda c, p: _submit(c, p, "review"), "kp_desktop_fail": _fail}
+               "kp_desktop_submit_review": lambda c, p: _submit(c, p, "review"), "kp_desktop_fail": _fail,
+               "kp_desktop_return_slot": _return_slot}
     if name not in methods:
         return {"content": [{"type": "text", "text": "Unknown tool"}], "isError": True}
     ctx = None

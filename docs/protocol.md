@@ -1635,6 +1635,12 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
 
+**Desktop 显式交还（2026-10-16 用户授权）**：新增 `kp_desktop_return_slot {request_id,run_id,claim_token,confirm:true}`。消费者必须先完成所有目录读取、经submit/fail持久提交正文/失败记录并等核心结算为请求终态，再调用本接口；交还以后禁止继续读取或写入槽位，包括原生会话仍存活的情形。submit成功、MCP短进程退出、租约到期都不自动视为交还。这是协作协议证明，不是原生进程退出证明，不能写 `owner_stopped=true` 冒充。
+
+核心认证同backend/role/request/run及领取凭据、同身份终态job，并在SQLite原子登记 `runtime_operations` accepted证明：scope_id=holder/run_id，operation_id=`desktop-return:<lease_token>`，harness_id=`desktop_queue`，tool=`worktree_consumer_return`；result绑定request_id、run_id、slot_id、holder_id、lease_token、backend=`codex_desktop`、contract=`no_more_directory_access`。仅接受逐字段匹配的同代证明。owner_state可记录returned；其语义为交还访问权，与stopped的原生停止证据有别。随后先保全产物，再经既有未决操作、身份、冻结输入与未知改动守卫归还；任何失败不强制清理。隔离后的手工confirm恢复仍须同代证明、干净状态和既有两次身份校验；单独owner_state=returned不构成证明。证明先于清理持久化，中断后能按同代证明恢复；未决prepared/unknown、旧代次及伪造job字段均不能放行。
+
+该接口只读取核心持久记录绑定的槽位，不接受调用方路径。成功交还及终态submit允许只读幂等查询；旧代次重放不得访问已复用目录。交还之后禁止heartbeat、重新取得目录或重写提交结果；无池的manual_branch只返回无需归还，不清理持久执行目录。历史非池Desktop目录不因新协议获得回收资格。GC对已交还的池holder可认可同请求/同代SQLite证明作为停止目录访问的协作依据，原PID仍存活不等同于仍持有槽位；其余活动、引用和整池守卫不变。
+
 ### 5.29.2 产物与脏快照
 
 规划正文、proposal、转录与 `.pi/plan/*.md` 等证据先保存到plan_root、runs或executor-sessions，重规划继续读取持久任务分支并冻结到planner_inputs，不依赖槽位旧路径。manual_branch已有交付目录规则不改变；需要隔离的脏规划仍从被冻结分支状态构造槽位。

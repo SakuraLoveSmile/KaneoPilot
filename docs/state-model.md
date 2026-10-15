@@ -433,7 +433,7 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
 
 worktree_slots保存slot_id主键、repo_key、path唯一、repository、git_common_dir、state(free/leased/quarantined)、holder_stage、holder_id、lease_token、sha、lease_expires_at、heartbeat_at、updated_at及恢复所需owner_pid/baseline_json/reason等字段。5→6显式迁移先备份，保留全部已有任务/请求/轮次/回执；不隐式升级live库。
 
-状态转换：free→leased（事务分配并生成新代次）；leased→free（持有者已停止、产物持久化、已知基线恢复且工作区干净）；任一守卫/Git/释放失败→quarantined（现场不覆盖）；quarantined→free仅经confirm核心命令及重新校验。leased过期不自动等于free。每仓库包括隔离在内最多N行，迁移不预创建；JSON登记只是该表投影。
+状态转换：free→leased（事务分配并生成新代次）；leased→free（持有者已停止，或Desktop已有同代显式交还证明；且产物持久化、已知基线恢复、工作区干净）；任一守卫/Git/释放失败→quarantined（现场不覆盖）；quarantined→free仅经confirm核心命令及重新校验。leased过期不自动等于free。每仓库包括隔离在内最多N行，迁移不预创建；JSON登记只是该表投影。
 
 ### 新增物理表
 
@@ -455,3 +455,5 @@ CREATE INDEX IF NOT EXISTS worktree_slots_repo ON worktree_slots(repo_key,state)
 CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_key,holder_stage,holder_id)
   WHERE state='leased';
 ```
+
+Desktop协作交还补充（protocol §5.29.1）：owner_state=returned只表示消费者已交还目录访问权，不证明原生进程退出。权威证明保存在runtime_operations accepted收据（scope=run_id，operation=desktop-return:<lease_token>，tool=worktree_consumer_return，harness=desktop_queue）；result逐字段绑定同request/run/slot/holder/token、backend和no_more_directory_access契约。job中的交还字段仅为恢复记录，不能单独授权清理。收据写入与确认在短事务内完成，Git和产物复制在事务外；中断恢复仍须同代身份和原有守卫。

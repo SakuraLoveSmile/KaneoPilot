@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from helpers import CORE  # noqa: F401
-from kanpilot import constants, db, review_snapshot, util, worktree_pool as pool
+from kanpilot import constants, db, review_snapshot, runtime_operations, util, worktree_pool as pool
 
 
 def git(root, *args):
@@ -45,6 +45,70 @@ def acquire(scene, holder="run-1", stage="plan", sha="HEAD"):
 
 def release(conn, lease):
     return pool.release(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], owner_stopped=True)
+
+
+def returned_proof(conn, lease, **overrides):
+    request, _ = db.create_request(conn, util.now_iso(), "plan", "return:" + lease["lease_token"],
+                                   payload={"planner_backend": "codex_desktop", "pool_lease": lease})
+    db.update_request(conn, request["request_id"], util.now_iso(), status="succeeded", run_id=lease["holder_id"])
+    proof = {"request_id": request["request_id"], "run_id": lease["holder_id"],
+             "slot_id": lease["slot_id"], "holder_id": lease["holder_id"],
+             "lease_token": lease["lease_token"], "backend": "codex_desktop",
+             "contract": "no_more_directory_access", **overrides}
+    operation = "desktop-return:" + lease["lease_token"]
+    runtime_operations.begin_operation(conn, lease["holder_id"], operation, "desktop_queue", "worktree_consumer_return", proof)
+    runtime_operations.complete_operation(conn, lease["holder_id"], operation, result=proof)
+    return request["request_id"]
+
+
+@pytest.mark.parametrize("field", ["request_id", "run_id", "slot_id", "holder_id", "lease_token", "backend", "contract"])
+def test_return_proof_rejects_every_foreign_identity_field(scene, field):
+    _repo, conn, _root = scene
+    lease = acquire(scene)
+    returned_proof(conn, lease, **{field: "foreign"})
+    assert not pool.consumer_returned(conn, lease)
+    assert pool.release(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"])["state"] == "leased"
+
+
+@pytest.mark.parametrize("mutation", ["prepared", "unknown", "harness", "tool", "nonterminal", "frozen_lease"])
+def test_return_proof_requires_accepted_trusted_terminal_frozen_request(scene, mutation):
+    _repo, conn, _root = scene
+    lease = acquire(scene)
+    request_id = returned_proof(conn, lease)
+    if mutation in ("prepared", "unknown"):
+        conn.execute("UPDATE runtime_operations SET status=? WHERE tool='worktree_consumer_return'", (mutation,))
+    elif mutation in ("harness", "tool"):
+        column = "harness_id" if mutation == "harness" else "tool"
+        conn.execute("UPDATE runtime_operations SET " + column + "='foreign' WHERE tool='worktree_consumer_return'")
+    elif mutation == "nonterminal":
+        db.update_request(conn, request_id, util.now_iso(), status="claimed")
+    else:
+        db.merge_request_payload(conn, request_id, util.now_iso(), pool_lease={**lease, "lease_token": "foreign"})
+    assert not pool.consumer_returned(conn, lease)
+
+
+def test_return_proof_releases_access_without_native_stop_claim(scene):
+    _repo, conn, _root = scene
+    lease = acquire(scene)
+    pool.mark_owner(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], state="running", pid=os.getpid())
+    returned_proof(conn, lease)
+    result = pool.release(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"])
+    assert result["state"] == "free"
+    assert result["owner_state"] == "returned"
+    assert result["owner_pid"] == os.getpid()
+
+
+def test_unquarantine_requires_real_return_proof_even_if_state_says_returned(scene):
+    _repo, conn, _root = scene
+    lease = acquire(scene)
+    pool.quarantine(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], "fixture")
+    conn.execute("UPDATE worktree_slots SET owner_state='returned'")
+    with pytest.raises(util.KanpilotError):
+        pool.unquarantine(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], confirm=True)
+    returned_proof(conn, lease)
+    with patch.object(pool, "_recover_returned") as recover:
+        assert pool.unquarantine(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], confirm=True)["state"] == "free"
+    recover.assert_called_once()
 
 
 def test_twenty_rounds_reuse_one_slot_and_new_generation(scene):

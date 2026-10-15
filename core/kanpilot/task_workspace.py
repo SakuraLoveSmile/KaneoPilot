@@ -168,6 +168,34 @@ def pool_owner(conn, job, *, state, pid=None):
                                  session_id=job.get("session_id"), turn_id=job.get("turn_id"))
 
 
+def preserve_pool_artifacts(job, evidence_dir):
+    """Copy allowed slot evidence before release or returned-owner recovery."""
+    import shutil
+    import stat
+    root = Path(job["pool_lease"]["path"])
+    material = root / ".kaneopilot-plan-material"
+    if material.exists():
+        for entry in (material, *material.rglob("*")):
+            mode = entry.lstat().st_mode
+            util.require(stat.S_ISDIR(mode) or stat.S_ISREG(mode),
+                         "规划材料包含不安全类型，未释放槽位", "worktree_invalid")
+        destination = Path(evidence_dir) / "plan-materials"
+        shutil.copytree(material, destination, dirs_exist_ok=True)
+        if job.get("material_dir"):
+            previous = Path(job["material_dir"])
+            # A prior copy can succeed before release is blocked or crashes.
+            relative = (previous.relative_to(destination) if previous.is_relative_to(destination)
+                        else previous.relative_to(material))
+            job["material_dir"] = str(destination / relative)
+    plans = root / ".pi" / "plan"
+    if plans.is_dir() and not plans.is_symlink() and not plans.parent.is_symlink():
+        target = Path(evidence_dir) / "plus-plan-evidence"
+        for source in plans.glob("*.md"):
+            if source.is_file() and not source.is_symlink():
+                target.mkdir(parents=True, exist_ok=True)
+                (target / source.name).write_bytes(source.read_bytes())
+
+
 def release_pool(db_path, job, evidence_dir, *, unexposed=False):
     """Persist allowed plan artifacts before returning a proven stopped owner."""
     from . import worktree_pool
@@ -189,40 +217,29 @@ def release_pool(db_path, job, evidence_dir, *, unexposed=False):
             return
         request = db.get_request(conn, job.get("request_id"))
         terminal = request is not None and request["status"] in ("succeeded", "failed", "cancelled")
+        owner_request = conn.execute("SELECT * FROM requests WHERE run_id=? AND stage=? LIMIT 1",
+                                     (current["holder_id"], current["holder_stage"])).fetchone()
+        owner_payload = db.request_payload(owner_request) if owner_request is not None else {}
+        backend_key = "planner_backend" if current["holder_stage"] == "plan" else "review_backend"
+        desktop_owner = (owner_payload.get(backend_key) == "codex_desktop"
+                         or job.get("backend") == "codex_desktop")
         never_exposed = (unexposed and job.get("send_state") == "not_sent"
                          and current["owner_state"] == "not_started")
         stopped = (never_exposed if unexposed else
-                   terminal and (job.get("owner_stopped") is True or job.get("send_state") == "not_sent"))
-        if not stopped:
+                   not desktop_owner and terminal
+                   and (job.get("owner_stopped") is True or job.get("send_state") == "not_sent"))
+        returned = (not unexposed and terminal and job.get("backend") == "codex_desktop"
+                    and worktree_pool.consumer_returned(conn, current))
+        if not stopped and not returned:
             if unexposed:
                 return
-            state = ("not_started" if job.get("send_state") == "not_sent" else
+            state = ("unknown" if desktop_owner else
+                     "not_started" if job.get("send_state") == "not_sent" else
                      "stopped" if job.get("owner_stopped") is True else "unknown")
             pool_owner(conn, job, state=state)
             return
-        root = Path(lease["path"])
-        material = root / ".kaneopilot-plan-material"
-        if material.exists():
-            import shutil
-            import stat
-            for entry in (material, *material.rglob("*")):
-                mode = entry.lstat().st_mode
-                util.require(stat.S_ISDIR(mode) or stat.S_ISREG(mode),
-                             "规划材料包含不安全类型，未释放槽位", "worktree_invalid")
-            destination = Path(evidence_dir) / "plan-materials"
-            shutil.copytree(material, destination, dirs_exist_ok=True)
-            if job.get("material_dir"):
-                relative = Path(job["material_dir"]).relative_to(material)
-                job["material_dir"] = str(destination / relative)
-        # Never follow links while preserving optional Plus evidence.
-        plans = root / ".pi" / "plan"
-        if plans.is_dir() and not plans.is_symlink() and not plans.parent.is_symlink():
-            target = Path(evidence_dir) / "plus-plan-evidence"
-            for source in plans.glob("*.md"):
-                if source.is_file() and not source.is_symlink():
-                    target.mkdir(parents=True, exist_ok=True)
-                    (target / source.name).write_bytes(source.read_bytes())
-        result = worktree_pool.release(conn, **pool_identity(lease), owner_stopped=True,
+        preserve_pool_artifacts(job, evidence_dir)
+        result = worktree_pool.release(conn, **pool_identity(lease), owner_stopped=stopped,
                                        only_not_started=unexposed)
         job["pool_release_state"] = result["state"]
         job["pool_released"] = result["state"] == "free"
