@@ -60,12 +60,14 @@ def _path_mentions(value, path):
     return False
 
 
-def _persistent_path(value, path, pool=False):
+def _persistent_path(value, path, pool=False, lease_location=False):
     """A terminal pool's old cwd is a location, not retained material authority."""
     if not pool:
         return _path_mentions(value, path)
     if isinstance(value, dict):
-        return any(_persistent_path(item, path, pool=True) for key, item in value.items()
+        return any(_persistent_path({name: field for name, field in item.items() if name != "path"}
+                                    if lease_location and key == "pool_lease" and isinstance(item, dict) else item,
+                                    path, pool=True) for key, item in value.items()
                    if key not in ("worktree_path", "review_root", "cwd", "plan_cwd", "review_cwd"))
     if isinstance(value, list):
         return any(_persistent_path(item, path, pool=True) for item in value)
@@ -133,6 +135,43 @@ def _desktop_owner_stopped(jobs, task_id, run_id):
                and item["job"].get("status") in _ROUND_TERMINAL
                and _process(item["job"].get("pid")) == "absent"
                and _owner_terminal(item["job"]) for item in jobs)
+
+
+def _desktop_returned(item, slot, requests, operations):
+    """Core receipt relinquishes this pool generation, not the native process."""
+    if not slot or not item["identity_valid"]:
+        return False
+    job = item["job"]
+    lease = job.get("pool_lease")
+    if (job.get("backend") != "codex_desktop" or job.get("status") not in _ROUND_TERMINAL
+            or not isinstance(lease, dict) or not isinstance(lease.get("lease_token"), str) or not lease["lease_token"]
+            or lease.get("slot_id") != slot["slot_id"] or lease.get("path") != slot["path"]
+            or not job.get("run_id") or lease.get("holder_id") != job["run_id"]):
+        return False
+    request = next((req for req in requests if req["request_id"] == job.get("request_id")), None)
+    if (not request or request["task_id"] != job.get("task_id") or request.get("run_id") != job["run_id"]
+            or request["stage"] not in ("plan", "review") or request["status"] not in _REQUEST_TERMINAL
+            or lease.get("holder_stage") != request["stage"]
+            or job.get("role", request["stage"]) != request["stage"]):
+        return False
+    payload = _json(request.get("payload_json"))
+    frozen = payload.get("pool_lease") if isinstance(payload, dict) else None
+    if (not _frozen_desktop(payload, request["stage"]) or not isinstance(frozen, dict)
+            or any(frozen.get(key) != lease.get(key) for key in
+                   ("slot_id", "holder_id", "holder_stage", "lease_token", "path"))):
+        return False
+    expected = {"request_id": request["request_id"], "run_id": job["run_id"],
+                "slot_id": slot["slot_id"], "holder_id": job["run_id"], "lease_token": lease["lease_token"],
+                "backend": "codex_desktop", "contract": "no_more_directory_access"}
+    for operation in operations:
+        if (operation["scope_id"] != job["run_id"] or operation["operation_id"] != "desktop-return:" + lease["lease_token"]
+                or operation["status"] != "accepted" or operation["harness_id"] != "desktop_queue"
+                or operation["tool"] != "worktree_consumer_return"):
+            continue
+        proof = _json(operation.get("result_json"))
+        if isinstance(proof, dict) and all(proof.get(key) == value for key, value in expected.items()):
+            return True
+    return False
 
 
 def _frozen_desktop(payload, stage):
@@ -379,6 +418,7 @@ def _audit(ctx, retention_days):
                 reasons.append("dirty_worktree")
             match = _SNAPSHOT.fullmatch(path.name)
             slot = slot_paths.get(str(path))
+            returned_jobs = [item["job"] for item in jobs if _desktop_returned(item, slot, requests, operations)]
             task_id = relative.parts[0] if len(relative.parts) == 2 else None
             task = tasks.get(task_id)
             run_category, named_run, run_reasons = _run_directory(path, task_id, requests, jobs, head) if task_id else (None, None, [])
@@ -394,10 +434,14 @@ def _audit(ctx, retention_days):
                     reasons.append("slot_identity_mismatch")
                 if slot["state"] != "free":
                     reasons.append("pool_not_free")
-                if slot.get("owner_pid"):
+                if slot.get("owner_pid") or slot.get("owner_state") == "returned":
                     process = _process(slot["owner_pid"])
-                    activity.append({"kind": "slot", "process": process, "owner_state": slot.get("owner_state")})
-                    if process != "absent" or slot.get("owner_state") not in ("stopped", "not_started"):
+                    returned = any(job["run_id"] == slot.get("holder_id")
+                                   and job["pool_lease"]["lease_token"] == slot.get("lease_token")
+                                   and job["pool_lease"]["holder_stage"] == slot.get("holder_stage") for job in returned_jobs)
+                    activity.append({"kind": "slot", "process": process, "owner_state": slot.get("owner_state"),
+                                     "consumer_returned": returned})
+                    if not returned and (process != "absent" or slot.get("owner_state") not in ("stopped", "not_started")):
                         reasons.append("pool_owner_unproven")
             elif task_id and match and head.startswith(match.group(2)):
                 entry.update(category=match.group(1) + "_snapshot", task_id=task_id)
@@ -450,9 +494,11 @@ def _audit(ctx, retention_days):
                     reasons.append("request_not_terminal")
                 frozen = data["payload"]
                 if (_frozen_desktop(frozen, req["stage"])
-                        and not _desktop_owner_stopped(jobs, req.get("task_id"), req.get("run_id"))):
+                        and not _desktop_owner_stopped(jobs, req.get("task_id"), req.get("run_id"))
+                        and not any(job["request_id"] == req["request_id"] for job in returned_jobs)):
                     reasons.append("desktop_owner_stop_unproven")
-                if direct and _persistent_path(data, path, pool=location_only or branch_proven):
+                if direct and (_persistent_path(data["payload"], path, pool=location_only or branch_proven, lease_location=bool(slot))
+                               or _persistent_path(data["result"], path, pool=location_only or branch_proven)):
                     reasons.append("persistent_request_path")
             if slot and slot.get("holder_id") and not related_run_ids:
                 reasons.append("pool_holder_identity_unknown")
@@ -478,13 +524,15 @@ def _audit(ctx, retention_days):
                         reasons.append("job_backend_or_request_identity_mismatch")
                 related_run_ids.add((job["task_id"], job["run_id"]))
                 process = _process(job.get("pid"))
-                activity.append({"kind": "job", "run_id": job["run_id"], "status": job.get("status"), "process": process})
-                if job.get("status") not in _ROUND_TERMINAL or process != "absent":
+                returned = job in returned_jobs
+                activity.append({"kind": "job", "run_id": job["run_id"], "status": job.get("status"), "process": process,
+                                 "consumer_returned": returned})
+                if job.get("status") not in _ROUND_TERMINAL or (process != "absent" and not returned):
                     reasons.append("job_activity_unproven")
-                if not _owner_terminal(job):
+                if not _owner_terminal(job) and not returned:
                     reasons.append("plus_turn_terminal_unproven" if job.get("backend") == "pi_desktop"
                                    else "desktop_owner_stop_unproven")
-                if _persistent_path(job, path, pool=location_only or branch_proven):
+                if _persistent_path(job, path, pool=location_only or branch_proven, lease_location=bool(slot)):
                     reasons.append("persistent_job_path")
             for run in rounds:
                 run_paths = {"worktree_path": run.get("worktree_path"), "config": _json(run.get("config_json"))}
@@ -495,14 +543,17 @@ def _audit(ctx, retention_days):
                 refs.append({"kind": "round", "task_id": run["task_id"], "run_id": run["run_id"],
                              "status": run["run_status"], "save_state": run["save_state"], "updated_at": run["updated_at"],
                              "fingerprint": _sha(run)})
+                related_run_ids.add((run["task_id"], run["run_id"]))
                 if run["run_status"] not in _ROUND_TERMINAL:
                     reasons.append("round_not_terminal")
-                if run["backend"] == "codex_desktop" and not _desktop_owner_stopped(jobs, run["task_id"], run["run_id"]):
+                returned = any(job["task_id"] == run["task_id"] and job["run_id"] == run["run_id"] for job in returned_jobs)
+                if run["backend"] == "codex_desktop" and not _desktop_owner_stopped(jobs, run["task_id"], run["run_id"]) and not returned:
                     reasons.append("desktop_owner_stop_unproven")
                 if run.get("pid"):
                     process = _process(run["pid"])
-                    activity.append({"kind": "round", "run_id": run["run_id"], "process": process})
-                    if process != "absent":
+                    activity.append({"kind": "round", "run_id": run["run_id"], "process": process,
+                                     "consumer_returned": returned})
+                    if process != "absent" and not returned:
                         reasons.append("round_process_unproven")
                 if direct and _persistent_path(run_paths, path, pool=location_only or branch_proven):
                     reasons.append("persistent_round_path")
@@ -512,7 +563,19 @@ def _audit(ctx, retention_days):
                 if _persistent_path(data, path, pool=branch_proven and record["task_id"] == task_id):
                     refs.append({"kind": "task", "task_id": record["task_id"], "status": record["status"], "data_sha256": _sha(data)})
                     reasons.append("persistent_task_path")
+            if slot:
+                scopes = {run_id for _, run_id in related_run_ids if run_id}
+                scopes.update(("worktree-slot:" + slot["slot_id"], slot.get("holder_id")))
+                sessions = {item["job"].get("session_id") for item in jobs
+                            if (item["job"].get("task_id"), item["job"].get("run_id")) in related_run_ids}
+                sessions.update(run.get("session_id") for run in rounds
+                                if (run.get("task_id"), run.get("run_id")) in related_run_ids)
+                sessions.add(slot.get("session_id"))
             for operation in operations:
+                if slot and operation["status"] in ("prepared", "unknown"):
+                    if operation["scope_id"] in scopes or (operation.get("session_id") and operation["session_id"] in sessions):
+                        refs.append({"kind": "operation", "operation_id": operation["operation_id"], "status": operation["status"]})
+                        reasons.append("pool_operation_unconfirmed")
                 if (operation["tool"] == "worktree_remove" and operation["status"] in ("prepared", "unknown")
                         and _path_mentions(_json(operation.get("result_json")), path)):
                     refs.append({"kind": "operation", "operation_id": operation["operation_id"], "status": operation["status"]})

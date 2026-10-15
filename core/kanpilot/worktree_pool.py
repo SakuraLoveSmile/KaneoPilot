@@ -394,6 +394,34 @@ def _unresolved_operation(conn, row):
     ).fetchone() is not None
 
 
+def consumer_returned(conn, row):
+    """SQLite proof of relinquished directory access, never native exit proof."""
+    operation = db.get_runtime_operation(conn, row["holder_id"], "desktop-return:" + row["lease_token"])
+    if (operation is None or operation["status"] != "accepted"
+            or operation["harness_id"] != "desktop_queue"
+            or operation["tool"] != "worktree_consumer_return"):
+        return False
+    proof = util.jload(operation["result_json"])
+    if not isinstance(proof, dict):
+        return False
+    expected = {"run_id": row["holder_id"], "slot_id": row["slot_id"],
+                "holder_id": row["holder_id"], "lease_token": row["lease_token"],
+                "backend": "codex_desktop", "contract": "no_more_directory_access"}
+    if any(proof.get(key) != value for key, value in expected.items()):
+        return False
+    request = db.get_request(conn, proof.get("request_id"))
+    if (request is None or request["run_id"] != row["holder_id"]
+            or request["stage"] != row["holder_stage"]
+            or request["status"] not in ("succeeded", "failed", "cancelled")):
+        return False
+    payload = db.request_payload(request)
+    backend_key = "planner_backend" if request["stage"] == "plan" else "review_backend"
+    frozen = payload.get("pool_lease") or {}
+    return (payload.get(backend_key) == "codex_desktop"
+            and all(frozen.get(key) == row[key] for key in
+                    ("slot_id", "holder_id", "holder_stage", "lease_token", "path")))
+
+
 def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_not_started=False):
     with db.write_txn(conn):
         row = _owned(conn, slot_id, holder_id, lease_token)
@@ -405,10 +433,12 @@ def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_
             conn.execute("UPDATE worktree_slots SET reason='operation_unconfirmed',updated_at=? WHERE slot_id=?",
                          (util.now_iso(), slot_id))
             return _result(_owned(conn, slot_id, holder_id, lease_token))
-        if not owner_stopped:
+        returned = consumer_returned(conn, row)
+        if not owner_stopped and not returned:
             conn.execute("UPDATE worktree_slots SET reason='owner_stop_unconfirmed',updated_at=? WHERE slot_id=?", (util.now_iso(), slot_id))
             return _result(_owned(conn, slot_id, holder_id, lease_token))
-        conn.execute("UPDATE worktree_slots SET reason='release_in_progress',owner_state='stopped',updated_at=? WHERE slot_id=?", (util.now_iso(), slot_id))
+        conn.execute("UPDATE worktree_slots SET reason='release_in_progress',owner_state=?,updated_at=? WHERE slot_id=?",
+                     ("stopped" if owner_stopped else "returned", util.now_iso(), slot_id))
     try:
         path = _validate(row)
         snapshot = _load_baseline(row) if row["baseline_json"] else None
@@ -447,12 +477,47 @@ def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_
     return _result(_owned(conn, slot_id, holder_id, lease_token))
 
 
+def _recover_returned(conn, row, *, release_slot):
+    """Verify a trusted terminal run and persist artifacts under its run lock."""
+    from . import desktop_queue, task_workspace
+    util.require(consumer_returned(conn, row), "Desktop 同代交还证明缺失", "conflict")
+    proof = util.jload(db.get_runtime_operation(
+        conn, row["holder_id"], "desktop-return:" + row["lease_token"])["result_json"])
+    request = db.get_request(conn, proof["request_id"])
+    task = db.require_task(conn, request["task_id"])
+    directory = desktop_queue._directory(conn, task["task_id"], request["run_id"])
+    with desktop_queue._serialized(directory):
+        job = desktop_queue._load(directory / "job.json")
+        desktop_queue._require_terminal_job(request, task, job)
+        util.require(job.get("pool_lease") == db.request_payload(request)["pool_lease"],
+                     "Desktop 恢复检查点租约与冻结记录不符", "conflict")
+        desktop_queue._require_persisted_output(conn, request, job)
+        if release_slot:
+            db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+            task_workspace.release_pool(db_path, job, directory)
+        else:
+            task_workspace.preserve_pool_artifacts(job, directory)
+        desktop_queue._write(directory / "job.json", job)
+
+
 def reap_expired(conn):
     """Expiry alone is never proof that a remote Plus turn has stopped."""
     results = []
     for row in conn.execute("SELECT * FROM worktree_slots WHERE state='leased'").fetchall():
         expiry = util.parse_ts(row["lease_expires_at"])
         if expiry is None or expiry >= util.now_dt():
+            continue
+        if consumer_returned(conn, row):
+            # The receipt relinquishes access, but does not itself prove that
+            # optional slot artifacts have reached persistent run storage.
+            try:
+                _recover_returned(conn, row, release_slot=True)
+            except (OSError, ValueError, KeyError, TypeError, util.KanpilotError):
+                with db.write_txn(conn):
+                    conn.execute("UPDATE worktree_slots SET reason='return_checkpoint_unconfirmed',updated_at=? "
+                                 "WHERE slot_id=? AND holder_id=? AND lease_token=? AND state='leased'",
+                                 (util.now_iso(), row["slot_id"], row["holder_id"], row["lease_token"]))
+            results.append(_result(_owned(conn, row["slot_id"], row["holder_id"], row["lease_token"])))
             continue
         request = conn.execute("SELECT status FROM requests WHERE request_id=? OR run_id=? LIMIT 1", (row["holder_id"], row["holder_id"])).fetchone()
         stopped = False
@@ -494,7 +559,12 @@ def unquarantine(conn, slot_id, holder_id, lease_token, *, confirm=False):
                      (reservation, util.now_iso(), slot_id))
     try:
         path = _validate(row)
-        if row["owner_state"] not in ("stopped", "not_started") or _git(path, "status", "--porcelain"):
+        returned = consumer_returned(conn, row)
+        if row["owner_state"] not in ("stopped", "not_started") and not returned:
+            raise util.KanpilotError("conflict", "槽位停止证明或干净状态不满足解除条件")
+        if returned:
+            _recover_returned(conn, row, release_slot=False)
+        if _git(path, "status", "--porcelain"):
             raise util.KanpilotError("conflict", "槽位停止证明或干净状态不满足解除条件")
     except Exception as exc:
         # Only clear our own reservation; another generation is never touched.
@@ -506,6 +576,9 @@ def unquarantine(conn, slot_id, holder_id, lease_token, *, confirm=False):
         current = _owned(conn, slot_id, holder_id, lease_token)
         if current["state"] != "quarantined" or current["reason"] != reservation:
             raise util.KanpilotError("conflict", "解除隔离期间槽位身份或状态已变化")
+        if (_unresolved_operation(conn, current)
+                or current["owner_state"] not in ("stopped", "not_started") and not consumer_returned(conn, current)):
+            raise util.KanpilotError("conflict", "解除隔离期间访问权或操作证明已变化")
         changed = conn.execute("UPDATE worktree_slots SET state='free',reason=NULL,baseline_json=NULL,updated_at=? WHERE slot_id=? AND holder_id=? AND lease_token=? AND state='quarantined' AND reason=?",
                                (util.now_iso(), slot_id, holder_id, lease_token, reservation)).rowcount
         if changed != 1:

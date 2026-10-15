@@ -497,3 +497,5 @@ attention-list透出question_preview；DTO、答案映射、五命令和测试�
 新规划/评审先租仓库池槽位；容量不足排队，禁止回退到真实仓库或新建per-run树。转录、计划/评审正文与冻结材料在释放前持久化。Plus状态未知、尚未结束的turn、活进程都不得因心跳过期清理；恢复使用租约代次隔离旧消费者。执行分支及非规划UUID保持既有持久语义。
 
 历史回收默认为dry-run，候选需无活动/历史路径引用、超过7天且干净；每批最多10项，需用户根据具体清单确认，重审指纹、SQLite一致备份、intent回执、无force删除与prune缺一不可。save_state不释放磁盘，缺历史行不证明无引用。Plus会话和projects表不在回收范围。空闲整池回收同样遵守确认/引用守卫。
+
+Codex Desktop显式交还：先完成所有目录读取，经kp_desktop_submit_plan/review或kp_desktop_fail持久提交并取得终态，再以原request/run/claim_token调用kp_desktop_return_slot(confirm=true)。交还后禁止任何槽位访问、heartbeat或新提交；仅允许不读取槽位的终态/交还幂等结果。submit本身不释放租约；消费者未交还时维持unknown并按容量等待。核心以同代SQLite accepted收据证明协作交还，owner_state=returned，不伪造owner_stopped或原生进程退出。原有未决操作、未知改动、产物先保存及整池GC守卫继续适用；历史非池目录不扩大回收资格。
