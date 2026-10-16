@@ -500,6 +500,66 @@ def _recover_returned(conn, row, *, release_slot):
         desktop_queue._write(directory / "job.json", job)
 
 
+def _recover_stopped(conn, row, request):
+    """Persist evidence from the same stopped, terminal CLI/Plus checkpoint."""
+    from . import headless_adapter, task_workspace
+    payload = db.request_payload(request)
+    backend_key = "planner_backend" if row["holder_stage"] == "plan" else "review_backend"
+    review_config = payload.get("review_config")
+    review_config = review_config if isinstance(review_config, dict) else {}
+    backend = payload.get(backend_key) or ("codex" if row["holder_stage"] == "plan" else
+                                         review_config.get("backend") or "pi")
+    util.require(backend != "codex_desktop", "Desktop 交还证明缺失", "conflict")
+    frozen = payload.get("pool_lease")
+    keys = ("slot_id", "holder_id", "holder_stage", "lease_token", "path")
+    util.require(isinstance(frozen, dict) and all(frozen.get(key) == row[key] for key in keys),
+                 "回收检查点缺少同代冻结租约", "conflict")
+    if row["holder_stage"] == "plan":
+        try:
+            paths = [headless_adapter.resolve_source(conn).run_dir(request["task_id"], row["holder_id"]) / "job.json"]
+        except headless_adapter.HeadlessError as exc:
+            raise util.KanpilotError("conflict", exc.detail) from exc
+    else:
+        paths = (constants.app_support() / "executor-sessions" / "review").glob("*/job.json")
+    matches = []
+    for path in paths:
+        try:
+            _no_links(path)
+            job = json.loads(path.read_bytes())
+        except (OSError, ValueError, util.KanpilotError):
+            continue
+        if (isinstance(job, dict) and job.get("request_id") == request["request_id"]
+                and job.get("task_id") == request["task_id"] and job.get("run_id") == row["holder_id"]
+                and (row["holder_stage"] != "review" or
+                     (job.get("stage") == "review" and job.get("invocation_id") == path.parent.name))):
+            matches.append((path, job))
+    util.require(len(matches) == 1, "回收检查点缺失或身份不唯一", "conflict")
+    path, job = matches[0]
+    lease = job.get("pool_lease")
+    util.require(job.get("backend") == backend
+                 and job.get("status") in ("finished", "failed", "cancelled")
+                 and (job.get("owner_stopped") is True or job.get("send_state") == "not_sent")
+                 and job.get("pid") == row["owner_pid"]
+                 and isinstance(lease, dict) and all(lease.get(key) == row[key] for key in keys)
+                 and all(not row[key] or job.get(key) == row[key] for key in ("session_id", "turn_id")),
+                 "回收检查点终态、持有者或租约身份不符", "conflict")
+    validate_lease(conn, row["slot_id"], row["holder_id"], row["lease_token"])
+    task_workspace.preserve_pool_artifacts(job, path.parent)
+    # Save relocated material paths before release can remove slot artifacts.
+    path.write_text(util.jdump(job), encoding="utf-8")
+    current = db.get_request(conn, request["request_id"])
+    util.require(current is not None and current["run_id"] == row["holder_id"]
+                 and current["stage"] == row["holder_stage"] and current["task_id"] == request["task_id"]
+                 and current["status"] in ("succeeded", "failed", "cancelled")
+                 and db.request_payload(current) == payload,
+                 "产物保全期间请求身份或冻结输入已变化", "conflict")
+    validate_lease(conn, row["slot_id"], row["holder_id"], row["lease_token"])
+    result = release(conn, row["slot_id"], row["holder_id"], row["lease_token"], owner_stopped=True)
+    job.update(pool_release_state=result["state"], pool_released=result["state"] == "free")
+    path.write_text(util.jdump(job), encoding="utf-8")
+    return result
+
+
 def reap_expired(conn):
     """Expiry alone is never proof that a remote Plus turn has stopped."""
     results = []
@@ -519,7 +579,8 @@ def reap_expired(conn):
                                  (util.now_iso(), row["slot_id"], row["holder_id"], row["lease_token"]))
             results.append(_result(_owned(conn, row["slot_id"], row["holder_id"], row["lease_token"])))
             continue
-        request = conn.execute("SELECT status FROM requests WHERE request_id=? OR run_id=? LIMIT 1", (row["holder_id"], row["holder_id"])).fetchone()
+        request = conn.execute("SELECT * FROM requests WHERE run_id=? AND stage=? LIMIT 1",
+                               (row["holder_id"], row["holder_stage"])).fetchone()
         stopped = False
         if row["owner_pid"]:
             try:
@@ -532,6 +593,16 @@ def reap_expired(conn):
                   and stopped and row["owner_state"] in ("stopped", "not_started"))
         if _unresolved_operation(conn, row):
             proven = False
+        if proven:
+            try:
+                results.append(_recover_stopped(conn, row, request))
+            except (OSError, ValueError, KeyError, TypeError, util.KanpilotError):
+                with db.write_txn(conn):
+                    conn.execute("UPDATE worktree_slots SET reason='owner_checkpoint_unconfirmed',updated_at=? "
+                                 "WHERE slot_id=? AND holder_id=? AND lease_token=? AND state='leased'",
+                                 (util.now_iso(), row["slot_id"], row["holder_id"], row["lease_token"]))
+                results.append(_result(_owned(conn, row["slot_id"], row["holder_id"], row["lease_token"])))
+            continue
         results.append(release(conn, row["slot_id"], row["holder_id"], row["lease_token"], owner_stopped=proven))
     return results
 
@@ -559,6 +630,8 @@ def unquarantine(conn, slot_id, holder_id, lease_token, *, confirm=False):
                      (reservation, util.now_iso(), slot_id))
     try:
         path = _validate(row)
+        if _value(path, "rev-parse", "HEAD") != row["sha"]:
+            raise util.KanpilotError("conflict", "槽位冻结提交已变化，保留隔离现场")
         returned = consumer_returned(conn, row)
         if row["owner_state"] not in ("stopped", "not_started") and not returned:
             raise util.KanpilotError("conflict", "槽位停止证明或干净状态不满足解除条件")

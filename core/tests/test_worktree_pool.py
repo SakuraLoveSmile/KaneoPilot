@@ -61,6 +61,35 @@ def returned_proof(conn, lease, **overrides):
     return request["request_id"]
 
 
+def stopped_checkpoint(scene, lease, *, backend="codex", status="claimed"):
+    _repo, conn, root = scene
+    from kanpilot import task_workspace
+    conn.execute("INSERT OR IGNORE INTO tasks(task_id,project_id,project_name,stage,status,created_at,updated_at) "
+                 "VALUES('task','project','fixture','plan','needs_user','then','then')")
+    backend_key = "planner_backend" if lease["holder_stage"] == "plan" else "review_backend"
+    request, _ = db.create_request(conn, util.now_iso(), lease["holder_stage"], "stopped:" + lease["lease_token"],
+                                   task_id="task", payload={
+                                       backend_key: backend, "pool_lease": lease})
+    db.merge_request_payload(conn, request["request_id"], util.now_iso(), **{backend_key: backend})
+    db.update_request(conn, request["request_id"], util.now_iso(), status=status, run_id=lease["holder_id"])
+    if lease["holder_stage"] == "plan":
+        db.set_setting(conn, "session_runs_root", str(root.parent / "runs"))
+        directory = root.parent / "runs" / "task" / lease["holder_id"]
+    else:
+        directory = constants.app_support() / "executor-sessions" / "review" / "invocation"
+    directory.mkdir(parents=True, exist_ok=True)
+    job = {"task_id": "task", "request_id": request["request_id"], "run_id": lease["holder_id"],
+           "backend": backend, "pool_lease": lease, "status": "finished", "owner_stopped": True,
+           "pid": 2147483647, "send_state": "sent", "worktree_path": lease["path"]}
+    if backend == "pi_desktop":
+        job.update(session_id="session", turn_id="turn")
+    if lease["holder_stage"] == "review":
+        job.update(stage="review", invocation_id="invocation", review_root=lease["path"])
+    task_workspace.pool_owner(conn, job, state="running", pid=2147483647)
+    (directory / "job.json").write_text(util.jdump(job))
+    return request, directory, job
+
+
 @pytest.mark.parametrize("field", ["request_id", "run_id", "slot_id", "holder_id", "lease_token", "backend", "contract"])
 def test_return_proof_rejects_every_foreign_identity_field(scene, field):
     _repo, conn, _root = scene
@@ -109,6 +138,89 @@ def test_unquarantine_requires_real_return_proof_even_if_state_says_returned(sce
     with patch.object(pool, "_recover_returned") as recover:
         assert pool.unquarantine(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], confirm=True)["state"] == "free"
     recover.assert_called_once()
+
+
+def test_unquarantine_rejects_new_clean_detached_commit(scene):
+    from kanpilot import task_workspace
+    _repo, conn, root = scene
+    lease = acquire(scene)
+    slot = Path(lease["path"])
+    (slot / "file.txt").write_text("unpublished work\n")
+    git(slot, "add", "file.txt")
+    git(slot, "commit", "-qm", "unpublished detached commit")
+    new_head = git(slot, "rev-parse", "HEAD")
+    assert new_head.strip().decode() != lease["sha"]
+    task_workspace.release_pool(root.parent / "isolated.db", {"pool_lease": lease}, root.parent / "evidence")
+    assert conn.execute("SELECT state FROM worktree_slots").fetchone()[0] == "quarantined"
+    with pytest.raises(util.KanpilotError, match="冻结提交"):
+        pool.unquarantine(conn, lease["slot_id"], lease["holder_id"], lease["lease_token"], confirm=True)
+    assert conn.execute("SELECT state FROM worktree_slots").fetchone()[0] == "quarantined"
+    assert git(slot, "rev-parse", "HEAD") == new_head
+    assert (slot / "file.txt").read_text() == "unpublished work\n"
+
+
+@pytest.mark.parametrize("stage,backend", [("plan", "codex"), ("plan", "claude"),
+                                          ("plan", "pi_desktop"), ("review", "codex"),
+                                          ("review", "pi_desktop")])
+def test_reaper_preserves_stopped_checkpoint_artifacts_after_request_settles(scene, stage, backend):
+    from kanpilot import task_workspace
+    _repo, conn, root = scene
+    lease = acquire(scene, stage=stage)
+    request, directory, job = stopped_checkpoint(scene, lease, backend=backend)
+    slot = Path(lease["path"])
+    material = slot / ".kaneopilot-plan-material"
+    material.mkdir()
+    (material / "input.txt").write_text("persistent input")
+    plans = slot / ".pi" / "plan"
+    plans.mkdir(parents=True)
+    (plans / "proposal.md").write_text("persistent proposal")
+    job["material_dir"] = str(material)
+    task_workspace.release_pool(root.parent / "isolated.db", job, directory)
+    (directory / "job.json").write_text(util.jdump(job))
+    assert conn.execute("SELECT state FROM worktree_slots").fetchone()[0] == "leased"
+    assert conn.execute("SELECT owner_state FROM worktree_slots").fetchone()[0] == "stopped"
+    db.update_request(conn, request["request_id"], util.now_iso(), status="cancelled")
+    conn.execute("UPDATE worktree_slots SET lease_expires_at='2000-01-01T00:00:00+00:00'")
+    result = pool.reap_expired(conn)[0]
+    assert result["state"] == "free", result["reason"]
+    assert (directory / "plan-materials" / "input.txt").read_text() == "persistent input"
+    assert (directory / "plus-plan-evidence" / "proposal.md").read_text() == "persistent proposal"
+    saved = json.loads((directory / "job.json").read_text())
+    assert saved["material_dir"] == str(directory / "plan-materials")
+    assert saved["pool_released"] is True
+    assert not material.exists() and not (plans / "proposal.md").exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "lease", "request", "task", "backend", "running", "owner", "pid", "session", "copy", "request_changed"])
+def test_reaper_keeps_slot_if_stopped_checkpoint_cannot_be_preserved(scene, damage):
+    from kanpilot import task_workspace
+    _repo, conn, _root = scene
+    lease = acquire(scene)
+    request, directory, job = stopped_checkpoint(scene, lease, backend="pi_desktop", status="cancelled")
+    task_workspace.pool_owner(conn, job, state="stopped")
+    material = Path(lease["path"]) / ".kaneopilot-plan-material"
+    material.mkdir()
+    (material / "keep.txt").write_text("retain original")
+    if damage == "lease":job["pool_lease"]={**lease,"lease_token":"old"}
+    elif damage in ("request", "task", "backend", "session"):job[damage + "_id" if damage != "backend" else damage]="foreign"
+    elif damage == "running":job["status"]="running"
+    elif damage == "owner":job["owner_stopped"]=False
+    elif damage == "pid":job["pid"]=1
+    checkpoint = directory / "job.json"
+    checkpoint.write_text(util.jdump(job))
+    if damage == "missing":checkpoint.unlink()
+    conn.execute("UPDATE worktree_slots SET lease_expires_at='2000-01-01T00:00:00+00:00'")
+    preserve = task_workspace.preserve_pool_artifacts
+    def copy(job, directory):
+        if damage == "copy":raise OSError("copy failed")
+        preserve(job, directory)
+        if damage == "request_changed":
+            db.update_request(conn, request["request_id"], util.now_iso(), run_id="new-run")
+    with patch.object(task_workspace, "preserve_pool_artifacts", side_effect=copy):
+        result = pool.reap_expired(conn)[0]
+    assert result["state"] == "leased"
+    assert result["reason"] == "owner_checkpoint_unconfirmed"
+    assert (material / "keep.txt").read_text() == "retain original"
 
 
 def test_twenty_rounds_reuse_one_slot_and_new_generation(scene):
@@ -244,7 +356,7 @@ def test_user_symlink_root_is_rejected(scene, tmp_path):
 def test_expired_lease_requires_terminal_request_dead_pid_and_known_owner(scene):
     _repo, conn, _root = scene
     lease = acquire(scene)
-    conn.execute("INSERT INTO requests(request_id,idempotency_key,stage,kind,status,run_id,created_at,updated_at) VALUES('request','request','plan','plan','succeeded',?,'then','then')", (lease["holder_id"],))
+    stopped_checkpoint(scene, lease, status="succeeded")
     conn.execute("UPDATE worktree_slots SET lease_expires_at='2000-01-01T00:00:00+00:00',owner_pid=2147483647,owner_state='unknown'")
     assert pool.reap_expired(conn)[0]["state"] == "leased"
     conn.execute("UPDATE worktree_slots SET owner_state='stopped'")
@@ -372,7 +484,7 @@ def test_unresolved_slot_git_receipt_blocks_cleanup(scene, operation_state, owne
     material.mkdir()
     sentinel = material / "pending-git.txt"
     sentinel.write_text("keep until operation is resolved")
-    conn.execute("INSERT INTO requests(request_id,idempotency_key,stage,kind,status,run_id,created_at,updated_at) VALUES('request','request','plan','plan','succeeded',?,'then','then')", (lease["holder_id"],))
+    stopped_checkpoint(scene, lease, status="succeeded")
     conn.execute("UPDATE worktree_slots SET lease_expires_at='2000-01-01T00:00:00+00:00',owner_pid=2147483647,owner_state=?", (owner_state,))
     scope = "worktree-slot:" + lease["slot_id"]
     runtime_operations.begin_operation(conn, scope, "interrupted-git", "worktree_pool", "worktree_checkout", {})

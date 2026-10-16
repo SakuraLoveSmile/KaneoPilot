@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from kanpilot import auto_dispatch, auto_monitor, cli_review, db
+from kanpilot import auto_dispatch, auto_monitor, cli_review, constants, db
 
 
 def stage(module, name, env):
@@ -156,7 +156,12 @@ def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, fact
     assert_legacy(task, reviewed=True)
     conn = db.connect(tmp_env.db)
     try:
-        assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] == 6
+        # schema 版本只引用核心权威常量 constants.SCHEMA_VERSION（不作硬编码
+        # 字面量）：db._init_schema/_upgrade_schema 的收敛终点即该常量，
+        # _UPGRADES 链 1→…→6 由提交 13713b9（worktree slots，_upgrade_v5_to_v6）
+        # 推进到 6；后续核心再升版本时本断言随常量前进，不再重复漂移。
+        assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] \
+            == constants.SCHEMA_VERSION
     finally:
         conn.close()
 
