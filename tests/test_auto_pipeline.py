@@ -5,6 +5,7 @@ writes in the task branch and runs the declared verification command; the real
 worker records its exit status through the MCP event adapter.
 """
 import json
+from datetime import timedelta
 import os
 from pathlib import Path
 import subprocess
@@ -230,6 +231,13 @@ class TestAutoPipeline(PiDesktopCase):
         conn=db.connect(self.db_path)
         try:
             conn.execute("UPDATE requests SET not_before=NULL WHERE kind='monitor' AND status='queued'")
+            # A prior observation may finish while its resumed worker is still
+            # settling. Advance the finished-request interval as well, so the
+            # bounded retry represents another scheduler cycle.
+            due = (util.now_dt() - timedelta(seconds=util.monitor_interval(conn) + 1)).isoformat()
+            conn.execute("UPDATE requests SET finished_at=? WHERE task_id=? AND kind='monitor' "
+                         "AND status IN ('succeeded','failed','cancelled') AND finished_at IS NOT NULL",
+                         (due, TASK))
         finally: conn.close()
         self.call('tick')
         self._stage(auto_monitor,'monitor')

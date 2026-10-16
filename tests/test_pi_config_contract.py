@@ -29,6 +29,8 @@ DEFAULTS = {
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
 # v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
+# 执行期提问等待上限（exec_config._merge :74 写入
+# constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS）也是 load/get 响应顶层键。
 CONFIG_KEYS = set(DEFAULTS) | {
     "updated_at", "backend", "pi_desktop", "controller_backend",
     "execution_question_max_wait_seconds",
