@@ -49,7 +49,7 @@ enum BoardDisplayMode: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .board: return "看板"
-        case .compactList: return "紧凑列表"
+        case .compactList: return "列表"
         }
     }
     var icon: String {
@@ -173,26 +173,17 @@ struct BoardView: View {
             .navigationTitle("任务")
             .searchable(text: $search, placement: .toolbar, prompt: "搜索标题、项目或任务 ID")
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(isBatchMode ? "完成" : "批量选择") {
-                        if isBatchMode {
-                            exitBatchMode()
-                        } else {
-                            enterBatchMode()
-                        }
-                    }
-                    .help(isBatchMode ? "完成批量选择" : "批量选择")
-                }
-
-                // v2 §4.7：规划面板入口（手动规划链路）。
+                // 任务组（ui-spec §4.13）：规划待办 → 看板/列表 → 阶段筛选 → 更多（批量选择）
+                // v2 §4.7：规划面板入口（手动规划链路），从待办开始。
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         model.openPlanning()
                     } label: {
-                        Label("添加任务…", systemImage: "plus")
+                        Label("规划待办…", systemImage: "doc.text.magnifyingglass")
                     }
-                    .help("打开规划面板：获取 To Do → 准备材料 → 开始规划")
-                    .accessibilityLabel("添加任务并规划")
+                    .labelStyle(.titleAndIcon)
+                    .help("从 Kaneo 待办中选择任务，准备材料后排队规划")
+                    .accessibilityLabel("规划待办")
                     .disabled(!model.coreFound)
                 }
                 ToolbarItem(placement: .primaryAction) {
@@ -204,15 +195,33 @@ struct BoardView: View {
                         }
                     )) {
                         ForEach(BoardDisplayMode.allCases) { mode in
-                            Label(mode.label, systemImage: mode.icon).tag(mode)
+                            Text(mode.label).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
+                    .help("切换看板与列表视图")
                     .accessibilityLabel("视图模式切换")
                 }
 
                 ToolbarItem(placement: .primaryAction) {
                     filterMenu
+                }
+
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button(isBatchMode ? "退出批量选择" : "批量选择…") {
+                            if isBatchMode {
+                                exitBatchMode()
+                            } else {
+                                enterBatchMode()
+                            }
+                        }
+                    } label: {
+                        Label("更多", systemImage: "ellipsis.circle")
+                    }
+                    .labelStyle(.titleAndIcon)
+                    .help("更多操作")
+                    .accessibilityLabel("更多")
                 }
             }
         }
@@ -399,11 +408,18 @@ struct BoardView: View {
                 }
             }
         } label: {
-            Label("阶段筛选", systemImage: "line.3.horizontal.decrease.circle")
+            Label(filterTitle, systemImage: "line.3.horizontal.decrease.circle")
         }
-        .labelStyle(.iconOnly)
-        .help("按看板列筛选")
+        .labelStyle(.titleAndIcon)
+        .tint(columnFilter == nil ? nil : Color.accentColor)
+        .help("按看板列筛选，当前：\(columnFilter?.title ?? "全部")")
         .accessibilityLabel("阶段筛选")
+        .accessibilityValue(filterTitle)
+    }
+
+    /// 顶栏标签显示当前阶段，避免筛选生效时看不出看板已被过滤。
+    private var filterTitle: String {
+        "阶段：\(columnFilter?.title ?? "全部")"
     }
 
     // MARK: 批量整理动作 (T2)
