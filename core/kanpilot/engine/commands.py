@@ -158,12 +158,8 @@ def cmd_engine_run(ctx, payload: dict) -> dict:
 def cmd_engine_verdict(ctx, payload: dict) -> dict:
     """``engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}``
 
-    Core-owned verdict (§5.27 / A10): non-empty effective diff (``.pi/**``
-    excluded) AND every plan-declared verify command passing in a login shell
-    with the project ``verify_env``. The receipt is recorded durably in
-    ``extra.engine_verdict`` (auditable via get-task); it does not overwrite the
-    interactive ``verification_checks`` receipt, whose output-file + binding
-    freeze validation does not map onto this synchronous engine run.
+    Pilot checks current Plus tool results and source identity without running
+    verification commands. The receipt remains in ``extra.engine_verdict``.
     """
     from . import verdict
     from .. import cmd_exec, core, constants, engine_claim_scope
@@ -215,7 +211,9 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 # DB phase 3, so engine-verdict must preserve this passed receipt
                 # until delivery-commit registers the already frozen commit.
                 return dict(prior, ok=True, deduplicated=True)
-        if prior.get("operation_id") == operation_id:
+        if (prior.get("evidence_source") == "plus_tool_results"
+                and prior.get("operation_id") == operation_id
+                and verdict.receipt_evidence_current(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat)):
             if prior.get("execution_run_id") != task["run_id"] or prior.get("plan_sha256") != task["plan_sha256"]:
                 raise util.KanpilotError("conflict", "判定操作身份不符")
             if prior.get("binding") != verdict.binding(ctx.conn, task, deadline=deadline, heartbeat=heartbeat):
@@ -224,11 +222,12 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
 
         result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
-        if isinstance(exc, util.KanpilotError) and exc.code != "verification_identity_unconfirmed":
+        if isinstance(exc, util.KanpilotError) and exc.code not in ("verification_identity_unconfirmed", "verification_unconfirmed"):
             raise
         result = {"verification_ok": False, "empty_diff": False, "environment_failure": False, "environment_reasons": [],
                   "effective_changes": [], "checks": [], "kind": "unconfirmed", "binding": None,
-                  "detail": util.redact(getattr(exc, "message", str(exc)))}
+                  "detail": util.redact(getattr(exc, "message", str(exc))),
+                  "failure_code": exc.code if isinstance(exc, util.KanpilotError) else "verification_identity_unconfirmed"}
     current = current_task()
     receipt = dict(result, operation_id=operation_id, execution_run_id=task["run_id"],
                    plan_sha256=task["plan_sha256"], completed_at=util.now_iso(), engine_mode=mode)
@@ -380,7 +379,7 @@ def cmd_set_project_verify_env(ctx, payload: dict) -> dict:
     Persist the project ``verify_env`` at the mapping entry level
     (``project_mappings.items[pid].verify_env``) for the same reason as
     ``engine_mode``: ``validate_automation`` drops unknown keys inside
-    ``automation``. Read by ``engine.verdict.project_verify_env``.
+    ``automation``. Retained as historical configuration; Plus owns its environment.
     """
     from .. import project_config
 

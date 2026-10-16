@@ -78,7 +78,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, dsh_events, pi_desktop_backend, process_owner, runtime_client, util
+from . import constants, dsh_events, git_delivery, pi_desktop_backend, process_owner, runtime_client, util, verify_evidence
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
 
 # MCP 轮询节奏（worker 进程内部参数，不进 settings）。
@@ -162,6 +162,7 @@ def _base_job(spec: dict) -> dict:
         "config": spec.get("config"),
         "completion_policy": spec.get("completion_policy", "goal_report"),
         "plan_sha256": spec.get("plan_sha256"),
+        "verification_evidence_version": 1,
         "pid": os.getpid(),
         "status": "running",
         "started_at": util.now_iso(),
@@ -169,6 +170,19 @@ def _base_job(spec: dict) -> dict:
         "exit_code": None,
         "detail": None,
     }
+
+
+def _record_verification_source(job: dict, spec: dict) -> None:
+    # Old jobs/resumes have no contemporaneous snapshot contract. Never fill in
+    # historical evidence using the source bytes observed by a later worker.
+    if type(job.get("verification_evidence_version")) is not int or job["verification_evidence_version"] != 1:
+        return
+    job.pop("verification_source_sha256", None)
+    job.pop("verification_source_error", None)
+    try:
+        job["verification_source_sha256"] = git_delivery.source_state_sha256(spec["cwd"])
+    except (git_delivery.GitDeliveryError, OSError, KeyError):
+        job["verification_source_error"] = "Plus 结束时无法核验源码快照，验证证据尚未确认"
 
 
 def run_fake(spec: dict, mode: str) -> int:
@@ -223,14 +237,23 @@ def _run_fake(spec: dict, mode: str, owner) -> int:
         "send_state": "sent",
         "detail": "fake failure" if failed else None,
     })
+    if not failed:
+        _record_verification_source(job, spec)
     _write_json(job_path, job)
     log.emit("session", now, session_id=session_id,
              session_title=job["session_title"], turn_id=turn_id)
     log.emit("user", now, content=spec.get("instruction") or "")
     if not failed:
-        log.emit("assistant_message", util.now_iso(), content="执行完成。")
-        log.emit("command_output", util.now_iso(), name="exec",
-                 input="{}", output="ok\nExit code: 0", exit_code=0)
+        log.emit("assistant_message", util.now_iso(), content="执行完成。", turn_id=turn_id)
+        parsed = {"ok": False}
+        try:
+            parsed = verify_evidence.parse_verify_block(Path(spec["plan_path"]).read_text(encoding="utf-8"))
+        except (OSError, KeyError, UnicodeError):
+            pass
+        for command in parsed.get("commands", []) if parsed.get("ok") else [None]:
+            log.emit("command_output", util.now_iso(), name="exec", turn_id=turn_id,
+                     input=json.dumps({"command": command}) if command is not None else "{}",
+                     output="ok\nExit code: 0", exit_code=0)
     log.emit("terminal", util.now_iso(),
              outcome="failed" if failed else "completed",
              reason="fake failure" if failed else "ok")
@@ -249,7 +272,8 @@ class _Collector:
     """
 
     def __init__(self, client: "runtime_client.RuntimeClient",
-                 session_id: str, log: _EventLog, marker: str, previous_events=()):
+                 session_id: str, log: _EventLog, marker: str, previous_events=(),
+                 retain_messages: bool = False):
         self.client = client
         self.session_id = session_id
         self.log = log
@@ -270,6 +294,8 @@ class _Collector:
         self.first_user_message = None
         self.input_resolutions = {}   # (turn_id, tool_call_id) -> durable resolution kind
         self.user_messages = {}       # physical index -> user content; recovery forbids appended instructions
+        self.messages = {}            # opt-in physical transcript for strict turn recovery
+        self.retain_messages = retain_messages
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -414,9 +440,12 @@ class _Collector:
                 message.get("content"),
                 message.get("toolName") or message.get("name"),
                 message.get("toolCallId"),
-                message.get("toolStatus"),
-                message.get("toolArgs"),
-                message.get("toolResult"),
+                message.get("parentToolCallId"),
+                message.get("agentName"),
+                message.get("toolStatus") or message.get("status"),
+                message.get("toolArgs", message.get("arguments")),
+                message.get("toolResult", message.get("output")),
+                message.get("exitCode"),
                 message.get("toolCompletedAt"),
                 message.get("isError"),
                 message.get("turnId") or message.get("turn_id"),
@@ -453,6 +482,8 @@ class _Collector:
             self._queued.append((etype, ts, fields))
 
     def _emit(self, message: dict, index: Optional[int] = None) -> None:
+        if self.retain_messages and index is not None:
+            self.messages[index] = message
         mid = message.get("id")
         if not isinstance(mid, str) or not mid:
             self.unrecognized = True
@@ -863,6 +894,117 @@ def prepare_goal_continuation(spec: dict, job: dict, client) -> dict:
             "version": proposal["version"]}
 
 
+def prepare_turn_recovery(spec: dict, job: dict, client, *, turn_id=None) -> Optional[dict]:
+    """Prove a read-only continuation; an explicit turn binds user-authorized recovery.
+
+    Automatic recovery rejects appended user instructions: an owned session and
+    later timestamps alone do not prove that its next task is this execution.
+    Explicit selection relaxes only that ambiguity, never identity, transcript,
+    ordering or pending-Goal checks. This function performs no desktop writes.
+    """
+    expected_scope = runtime_client.stable_scope_id(
+        "execution", task_id=spec["task_id"], run_id=spec["run_id"])
+    if (job.get("scope_id") != expected_scope or client.scope_id != expected_scope
+            or job.get("task_id") != spec["task_id"] or job.get("run_id") != spec["run_id"]
+            or job.get("backend") != "pi_desktop" or job.get("config") != spec.get("config")):
+        raise util.KanpilotError("forbidden", "turn_recovery_identity: 非本轮 execution scope")
+    session_id, original = job.get("session_id"), job.get("turn_id")
+    if not session_id or not original:
+        raise util.KanpilotError("conflict", "turn_recovery_identity: 缺少原始轮次身份")
+    status = client.agent_status(session_id)
+    inner = status.get("status") or status
+    current = inner.get("currentTurnId")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id or turn_id != current):
+        raise util.KanpilotError("conflict", "turn_recovery_candidate: 显式轮次不是该会话当前轮次")
+    if not isinstance(current, str) or not current or current == original:
+        return None
+    if (inner.get("sessionId", session_id) != session_id
+            or inner.get("planningState") in ("planning", "awaiting_approval")
+            or inner.get("pendingPermission") or (inner.get("pendingInputs") or {}).get("count")):
+        raise util.KanpilotError("conflict", "turn_recovery_pending: 会话身份不符或仍有待处理审批/输入")
+    history = job.get("turn_adopted") or []
+    if len(history) >= _MAX_TURN_ADOPTIONS or any(item.get("to") == current for item in history):
+        raise util.KanpilotError("conflict", "turn_recovery_candidate: 重复轮次或超出接续上限")
+    old_record = client.turn_get(session_id, original, require_identity=True)
+    new_record = client.turn_get(session_id, current, require_identity=True)
+    old = old_record.get("turn") if isinstance(old_record.get("turn"), dict) else old_record
+    new = new_record.get("turn") if isinstance(new_record.get("turn"), dict) else new_record
+    old_state, new_state = _turn_status(old_record), _turn_status(new_record)
+    if (not _turn_identity_matches(old_record, session_id, original)
+            or not _turn_identity_matches(new_record, session_id, current)):
+        raise util.KanpilotError("conflict", "turn_recovery_identity: 持久轮次身份不符")
+    if old_state not in ("error", "aborted"):
+        return None
+    if (old.get("errorCode") not in ("TURN_ABORTED", "EMPTY_MODEL_RESPONSE", "NETWORK_ERROR")
+            or new_state not in ("running", "completed")
+            or inner.get("isRunning") is not (new_state == "running")):
+        raise util.KanpilotError("conflict", "turn_recovery_state: 原失败或后续轮次状态不支持接续")
+    old_start, old_end = _strict_turn_time(old.get("startedAt")), _strict_turn_time(old.get("endedAt"))
+    new_start, new_end = _strict_turn_time(new.get("startedAt")), _strict_turn_time(new.get("endedAt"))
+    if (old_end is None or (old.get("startedAt") is not None and old_start is None)
+            or (old_start is not None and old_end < old_start)
+            or (new.get("startedAt") is not None and new_start is None)
+            or (new_state == "completed" and new_end is None)):
+        raise util.KanpilotError("conflict", "turn_recovery_time: 缺少完整且有序的持久轮次时序")
+    raw = Path(spec["plan_path"]).read_bytes()
+    if not spec.get("plan_sha256") or hashlib.sha256(raw).hexdigest() != spec["plan_sha256"]:
+        raise util.KanpilotError("validation_failed", "turn_recovery_plan: 原计划哈希不符")
+    body = raw.decode("utf-8")
+    if body.startswith("---\n"):
+        body = body.split("---", 2)[2].removeprefix("\n")
+    expected = (spec.get("instruction") or "").rstrip() + "\n\n" + body
+    collector = _Collector(client, session_id, None, spec.get("session_marker") or "", retain_messages=True)
+    collector.poll()
+    normalize = lambda text: re.sub(r"\s+", " ", str(text or "")).strip()
+    events, _detail = dsh_events.iter_events(Path(spec["runs_dir"]) / dsh_events.EVENT_LOG_NAME)
+    session = dsh_events.session_event(events) or {}
+    first = collector.messages.get(collector.first_user_index) or {}
+    anchor_turn = first.get("turnId") or first.get("turn_id")
+    if (collector.truncated or collector.read_error or collector.unrecognized
+            or not collector.messages or collector.verified_end != len(collector.messages)
+            or normalize(collector.first_user_message) != normalize(expected)
+            or session.get("session_id") != session_id or not session.get("turn_id")
+            or anchor_turn != session["turn_id"]
+            or (turn_id is None and len(collector.user_messages) != 1)):
+        raise util.KanpilotError("conflict", "turn_recovery_prompt: 转录不完整、派发锚点不符或存在未明确归属的追加指令")
+    candidate_transcript = [message for message in collector.messages.values()
+        if (message.get("turnId") or message.get("turn_id")) == current]
+    time_basis = "persistent_turn"
+    started_at = new.get("startedAt")
+    if new_start is None:
+        # Current Plus versions expose endedAt but omit startedAt. Identity was
+        # established above; only timestamps on this exact turn may supply its
+        # observed lower bound, never the latest unrelated session message.
+        times = [(message.get("timestamp") or message.get("createdAt"),
+                  _strict_turn_time(message.get("timestamp") or message.get("createdAt")))
+                 for message in candidate_transcript]
+        if not times or any(stamp is None for _raw, stamp in times):
+            raise util.KanpilotError("conflict", "turn_recovery_time: 后续轮次缺少可核实的开始时序")
+        started_at, new_start = min(times, key=lambda item: item[1])
+        time_basis = "transcript_turn_messages"
+    if new_start <= old_end or (new_end is not None and new_end < new_start):
+        raise util.KanpilotError("conflict", "turn_recovery_time: 原失败与后续轮次时序不符")
+    candidate_messages = [message for message in candidate_transcript
+        if str(message.get("role") or "").lower() in ("assistant", "assistant_message")]
+    if not candidate_messages or any(
+            (stamp := _strict_turn_time(message.get("timestamp") or message.get("createdAt"))) is None
+            or stamp < new_start or (new_end is not None and stamp > new_end)
+            for message in candidate_messages):
+        raise util.KanpilotError("conflict", "turn_recovery_transcript: 后续轮次缺少可核实的 assistant 转录与时序")
+    after = client.agent_status(session_id)
+    after = after.get("status") or after
+    if any(inner.get(key) != after.get(key) for key in
+           ("currentTurnId", "planningState", "isRunning", "pendingPermission", "pendingInputs")):
+        raise util.KanpilotError("conflict", "turn_recovery_changed: 会话状态在核验期间发生变化")
+    if client.turn_get(session_id, current, require_identity=True) != new_record:
+        raise util.KanpilotError("conflict", "turn_recovery_changed: 持久后续轮次在核验期间发生变化")
+    return {"scope_id": expected_scope, "session_id": session_id,
+            "original_turn_id": original, "turn_id": current,
+            "original_ended_at": old["endedAt"], "started_at": started_at, "time_basis": time_basis,
+            "prompt_sha256": hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+            "explicit": turn_id is not None}
+
+
 def _resume_job(job_path: Path, spec: dict):
     """``--resume`` 前置核验（§5.23.7）：只接受本轮自己的、已确认发送的现场。
 
@@ -960,12 +1102,19 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                  outcome: str = "failed", reason: str = "") -> int:
         """收尾写序：job 先写 → session 补齐 → terminal 最后。"""
         owner.check()
+        job.pop("observation_finalizing", None)
+        if resume:
+            # A terminal takeover is visible only together with its new result,
+            # so readers cannot mistake the previous failed snapshot for it.
+            job["observation_resumed_at"] = util.now_iso()
         job.update({
             "status": status,
             "exit_code": exit_code,
             "ended_at": util.now_iso(),
             "detail": detail,
         })
+        if status == "finished":
+            _record_verification_source(job, spec)
         _write_json(job_path, job)
         emit_session()
         if terminal:
@@ -976,6 +1125,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     def defer(detail: str) -> int:
         """续接观察未成立（§5.23.7）：既有轮次终态/证据原样保留，只记本次尝试
         与原因；退出码 3 与「轮次失败」（1）区分，监控端据此下一轮再试。"""
+        job.pop("observation_finalizing", None)
         job.update({
             "resume_detail": detail,
             "resume_deferred_at": util.now_iso(),
@@ -994,6 +1144,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     if resume:
         # 续接标记先落盘（谁在接管、何时开始）；status/detail 保持原值。
         session_written["done"] = True      # session 事件已存在于现场
+        job.pop("observation_finalizing", None)
         job["observe_pid"] = os.getpid()
         job["resume_started_at"] = util.now_iso()
         _write_json(job_path, job)
@@ -1274,18 +1425,20 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                                  job["session_id"], follow)
         collector.client = observer
 
-    def adopt(follow: str, record: dict) -> None:
+    def adopt(follow: str, record: dict, recovery_authorization=None) -> None:
         """记账并切换到新 turn 的观察（job 先写、事件留痕；不新建会话）。"""
         turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
         code = str(turn.get("errorCode") or turn.get("error_code") or "")
         history = list(job.get("turn_adopted") or [])
         previous = turn_id
-        history.append({"from": previous, "to": follow, "code": code,
-                        "at": util.now_iso()})
+        entry = {"from": previous, "to": follow, "code": code, "at": util.now_iso()}
+        if recovery_authorization is not None:
+            entry["recovery_authorization"] = recovery_authorization
+        history.append(entry)
         job["turn_adopted"] = history
         log.emit("system", util.now_iso(),
                  content=(f"turn_adopted: {previous} → {follow}"
-                          f"（{code} 后同一会话自动重开，继续观察；"
+                          f"（{code} 后同一会话后续轮次，只读接续观察；"
                           f"未重发 prompt）"))
         rebind_turn(follow)
 
@@ -1306,7 +1459,15 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         read_only_resume = resume and not authorization
         approval = job.get("goal_approval")
         if isinstance(approval, dict) and approval.get("status") == "approved":
-            if not resume or approval.get("execution_turn_id") == turn_id:
+            approved_turn = approval.get("execution_turn_id")
+            # Strictly verified read-only recovery continues the already approved
+            # execution; it is not authority to approve another Goal contract.
+            for adoption in job.get("turn_adopted") or []:
+                if (adoption.get("from") == approved_turn
+                        and adoption.get("recovery_authorization", {}).get("original_turn_id") == approved_turn
+                        and adoption.get("recovery_authorization", {}).get("turn_id") == adoption.get("to")):
+                    approved_turn = adoption["to"]
+            if not resume or approved_turn == turn_id:
                 return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
             return ("deferred", "goal_resume_unconfirmed: 执行轮次与既有审批检查点不符", "")
         if authorization:
@@ -1550,6 +1711,26 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 adopt(authorization["turn_id"], original_record)
         except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
             return defer("goal_continuation_blocked: " + str(exc))
+    turn_authorization = spec.get("continue_turn_authorization") if resume else None
+    if turn_authorization:
+        try:
+            owner.check()
+            origin = job
+            already_adopted = job.get("turn_id") == turn_authorization.get("turn_id")
+            if already_adopted:
+                history = list(job.get("turn_adopted") or [])
+                if not history or history[-1].get("recovery_authorization") != turn_authorization:
+                    return defer("turn_recovery_changed: 缺少后续轮次已绑定的审计记录")
+                origin = dict(job, turn_id=turn_authorization["original_turn_id"], turn_adopted=history[:-1])
+            candidate = prepare_turn_recovery(spec, origin, client,
+                turn_id=turn_authorization.get("turn_id") if turn_authorization.get("explicit") else None)
+            if candidate is None or candidate != turn_authorization:
+                return defer("turn_recovery_changed: 后续轮次授权身份已变化")
+            if not already_adopted:
+                previous = client.turn_get(job["session_id"], turn_id, require_identity=True)
+                adopt(candidate["turn_id"], previous, candidate)
+        except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+            return defer("turn_recovery_blocked: " + str(exc))
     proof_deadline = min(deadline, time.monotonic() + _PROOF_WAIT_SECONDS)
     while True:
         try:
@@ -1562,15 +1743,32 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             time.sleep(min(0.5, max(0, proof_deadline - time.monotonic())))
     state = _turn_status(record)
     turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
-    if state in ("error", "aborted") and not resume:
-        follow = adopt_follow_up(record)
+    if state in ("error", "aborted"):
+        recovery = None
+        if resume and job.get("scope_id"):
+            try:
+                recovery = prepare_turn_recovery(spec, job, client)
+            except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+                # A failed continuation proof must never resurrect the old turn.
+                job["resume_detail"] = "turn_recovery_blocked: " + str(exc)
+            follow = recovery["turn_id"] if recovery else None
+        else:
+            follow = adopt_follow_up(record) if not resume else None
         if follow is None:
             collector.poll()
             collector.preserve_unverified(run_dir)
             code = turn.get("errorCode") or state
-            return finalize("failed", 1, f"turn {state}: {code}",
+            detail = f"turn {state}: {code}"
+            if resume and job.get("status") == "failed" and job.get("detail") == detail:
+                # Idempotent terminal observation: preserve the existing evidence.
+                _write_json(job_path, job)
+                return 1
+            return finalize("failed", 1, detail,
                             True, "failed", str(code))
-        adopt(follow, record)     # 同一会话继续执行 → 观察新 turn（不重发）
+        adopt(follow, record, recovery)  # 身份、换绑与审计授权在同一次 job 写入
+        if resume:
+            record = observe_turn()
+            state = _turn_status(record)
     if resume:
         # 续接接管证明：持久 turn 可读 + 身份相符即视为接管成功（启动证明已
         # 由原进程完成，不重复 heartbeat、不重复写 session 事件）。
@@ -1585,13 +1783,19 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 "exit_code": job.get("exit_code"),
                 "send_state": job.get("send_state"),
             }
-        job["observation_resumed_at"] = util.now_iso()
+        if state == "running":
+            job["observation_resumed_at"] = util.now_iso()
         job["resume_detail"] = None
         # session 事件即「已确认发送」证据：把旧版假失败留下的 unknown 修回
         # sent（原值已在 resume_previous 保留），避免轮次继续显示发送不明。
         job["send_state"] = "sent"
-        job.update({"status": "running", "detail": None,
-                    "ended_at": None, "exit_code": None})
+        if state == "running":
+            job.update({"status": "running", "detail": None,
+                        "ended_at": None, "exit_code": None})
+        elif state == "completed":
+            # Persist the proved completed identity before potentially slow
+            # transcript/report settlement, without publishing a running turn.
+            job["observation_finalizing"] = {"turn_id": turn_id, "observed_status": "completed"}
         _write_json(job_path, job)
         # The original session event and this turn's takeover proof are both
         # verified; resume appends evidence without emitting a second session.
@@ -1666,9 +1870,17 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 return finalize("failed",1,"execution_failed: 执行问题缺少正常回答终态证据",
                     True,"failed","execution_failed")
             if state in ("error", "aborted"):
-                follow = adopt_follow_up(record)
+                recovery = None
+                if resume and job.get("scope_id"):
+                    try:
+                        recovery = prepare_turn_recovery(spec, job, client)
+                    except (util.KanpilotError, OSError, UnicodeDecodeError, IndexError) as exc:
+                        job["resume_detail"] = "turn_recovery_blocked: " + str(exc)
+                    follow = recovery["turn_id"] if recovery else None
+                else:
+                    follow = adopt_follow_up(record) if not resume else None
                 if follow is not None:
-                    adopt(follow, record)
+                    adopt(follow, record, recovery)
                     continue
             if state == "completed" and not stop_requested:
                 # §5.23.9：goal 模式的规划轮次以「提交目标契约」结束——审批门

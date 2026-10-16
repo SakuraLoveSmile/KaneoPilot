@@ -799,9 +799,13 @@ def _wait_observe_attach(run_dir, proc, previous_job):
             if deferred and deferred != baseline_deferred:
                 return "deferred", current.get("resume_detail")
             if resumed and resumed != baseline_resumed:
-                if proc.poll() is None:
+                if proc.poll() is not None:
+                    return "settled", current.get("detail")
+                if current.get("status") == "running":
                     return "observing", None
-                return "settled", current.get("detail")
+                # A live finalizer can still carry the previous failed job
+                # while collecting the completed follow-up. Wait for exit;
+                # its old exit code is not this recovery's settlement proof.
         if proc.poll() is not None:
             return ("exited", "观察进程已退出且未给出接管证明")
         if _time.monotonic() >= deadline:
@@ -834,6 +838,8 @@ def _observer_pid_alive(conn, task_id, run_id, pid, run_dir, job):
 def cmd_round_observe(ctx, payload: dict) -> dict:
     """Reserve the observer launch atomically across App/engine/answer paths."""
     import uuid
+    if payload.get("recovery_turn_id") and payload.get("executor") != "user":
+        raise util.KanpilotError("forbidden", "只有显式人工恢复可指定后续执行轮次")
     token=uuid.uuid4().hex
     task_id,run_id=payload["task_id"],payload["run_id"]
     with db.write_txn(ctx.conn):
@@ -954,6 +960,7 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
         raise util.KanpilotError("conflict", "spec.json 与当前执行轮次身份不符")
     # Never trust a continuation copied from a previous observer invocation.
     spec.pop("continue_goal_authorization", None)
+    spec.pop("continue_turn_authorization", None)
     if continue_goal:
         from . import pi_desktop_worker, runtime_client, runtime_operations
         try:
@@ -979,6 +986,44 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
                 return {"status": "deferred", "pid": None, "detail": detail}
             # Ordinary monitor reconnects running observations even without a
             # pending contract; the worker remains strictly read-only.
+    terminal = dsh_events.terminal_event(events) or {}
+    failed_turn = (job.get("status") == "failed"
+                   and terminal.get("outcome") in ("failed", "error", "aborted")
+                   and str(job.get("detail") or "").startswith(("turn error:", "turn aborted:")))
+    recovery_turn = payload.get("recovery_turn_id")
+    if failed_turn or recovery_turn:
+        from . import pi_desktop_worker, runtime_client, runtime_operations
+        try:
+            expected_scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
+            if (job.get("scope_id") != expected_scope
+                    or not runtime_operations.session_owned(conn, expected_scope, job["session_id"])
+                    or row["session_id"] != job["session_id"]
+                    or spec.get("plan_path") != task["plan_path"]
+                    or spec.get("plan_sha256") != task["plan_sha256"]
+                    or spec.get("config") != util.jload(row["config_json"])):
+                raise util.KanpilotError("forbidden", "turn_recovery_identity: 原执行快照或 scope 身份不符")
+            config = spec.get("config") or {}
+            client = runtime_client.RuntimeClient(
+                role="execution", connection_file=config.get("connection_file"),
+                project_path=spec["cwd"], runtime_config=config, task_id=task_id,
+                run_id=run_id, timeout=10, lease_seconds=spec.get("timeout_seconds"), read_only=True)
+            client.connect(required_tools=constants.PI_DESKTOP_REQUIRED_TOOLS)
+            authorization = pi_desktop_worker.prepare_turn_recovery(
+                spec, job, client, turn_id=recovery_turn)
+            if authorization:
+                spec["continue_turn_authorization"] = authorization
+            elif failed_turn:
+                record = client.turn_get(job["session_id"], job["turn_id"], require_identity=True)
+                if pi_desktop_worker._turn_status(record) in ("error", "aborted"):
+                    return _settled_failed_observation(ctx, task, row, job)
+            elif recovery_turn:
+                raise util.KanpilotError("conflict", "指定的后续轮次没有可核验的恢复证据")
+        except (util.KanpilotError, OSError, UnicodeDecodeError) as exc:
+            if recovery_turn:
+                raise
+            # A durable failed turn stays failed when its recovery cannot be
+            # proved. Never turn reconnect attempts into new running rounds.
+            return _settled_failed_observation(ctx, task, row, job)
     if "KANPILOT_EXECUTOR_INSTANCE_ID" in os.environ:
         process_owner.bind_spec(spec, ctx.db_path)
     else:
@@ -1014,14 +1059,30 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
         round_store.mark_started(conn,task_id,run_id,now,pid=proc.pid)
 
     status, detail = _wait_observe_attach(run_dir, proc, job)
+    current_job, _ = dsh_events.read_job(run_dir, task_id, run_id, backend="pi_desktop")
+    finalizing = (current_job or {}).get("observation_finalizing") or {}
+    if (status == "starting" and current_job and current_job.get("observe_pid") == proc.pid
+            and finalizing.get("turn_id") == current_job.get("turn_id")
+            and finalizing.get("observed_status") == "completed"
+            and _observer_pid_alive(conn, task_id, run_id, proc.pid, run_dir, current_job)):
+        status, detail = "finalizing", "执行已完成，正在收尾"
+    if (status in ("observing", "settled") and current_job
+            and current_job.get("status") in ("finished", "failed")
+            and proc.poll() is not None):
+        status, detail = "settled", current_job.get("detail")
     reopened = False
     with db.write_txn(conn):
+        if status == "settled" and current_job:
+            round_store.upsert_discovered(conn, task_id, run_id, now,
+                backend="pi_desktop", run_status=current_job.get("status"))
         if status == "observing":
             round_store.mark_started(conn, task_id, run_id, now, pid=proc.pid)
             round_store.upsert_discovered(
                 conn, task_id, run_id, now, backend="pi_desktop",
                 run_status="running",
             )
+        if (status in ("observing", "finalizing") or (status == "settled" and current_job
+                and current_job.get("status") == "finished" and current_job.get("exit_code") == 0)):
             # §5.23.8：本轮已被重新接管观察（例如瞬时模型错误后同一会话自动
             # 重开的新轮次），任务不得继续停在由此产生的执行失败上。只解除
             # 本轮的 execution_failed 阻塞；其它 needs_user 原因原样保留。
@@ -1047,6 +1108,16 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
         "status": status, "pid": proc.pid, "detail": detail,
         "run_id": run_id, "reopened": reopened,
     }
+
+
+def _settled_failed_observation(ctx, task, row, job):
+    """Index an existing terminal failure without spawning another observer."""
+    if row["run_status"] != "failed":
+        with db.write_txn(ctx.conn):
+            round_store.upsert_discovered(ctx.conn, task["task_id"], task["run_id"], ctx.now_iso,
+                                          backend="pi_desktop", run_status="failed")
+    return {"status": "settled", "pid": None, "detail": job.get("detail"),
+            "run_id": task["run_id"], "reopened": False}
 
 
 def _start_wait_seconds() -> float:
@@ -1088,6 +1159,11 @@ def branch_instruction(conn, task):
 
 
 def _execution_instruction(task, worktree_path, *, desktop, conn=None):
+    return (_base_execution_instruction(task, worktree_path, desktop=desktop, conn=conn)
+            + constants.EXECUTION_VERIFICATION_INSTRUCTION)
+
+
+def _base_execution_instruction(task, worktree_path, *, desktop, conn=None):
     if core.execution_retry_of(task):
         plan_ref = "下面已核验的计划正文" if desktop else f"计划文件 {task['plan_path']}"
         return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"

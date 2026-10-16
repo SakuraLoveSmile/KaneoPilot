@@ -719,17 +719,28 @@ def test_attention_collect_orders_by_ladder_and_dedups():
 ])
 def test_scenario_drained_round_reaches_review_via_engine_cycles(
         variant, cli, factory, tmp_env, fake_kaneo, fake_plus, monkeypatch):
-    """终态 job 只是输入；任务推进、verify 与评审领取均由真实命令完成。
+    """终态 Plus 工具证据只是输入；核对、任务推进与评审领取由真实命令完成。
 
     所有路径（含 HOME、DB、凭据、Git、runs、Plus 连接文件）属于 tmp_env；
     spawn 只用受控内进程 runner，不运行用户执行器、不访问正式服务。
     """
     from conftest import rewind_finished_at, ui_evidence, write_plan_file
-    from kanpilot import (auto_monitor, automation_policy, engine_claim_scope, round_store,
+    from kanpilot import (auto_monitor, automation_policy, engine_claim_scope, git_delivery, round_store,
                           runtime_client)
 
+    original_plus_tool = fake_plus.server._call_tool
+
+    def plus_tool(name, arguments):
+        # This scenario exercises the current flat pi_turn_get wire contract;
+        # the shared historical fake also serves older wrapper-based clients.
+        if name == "pi_turn_get":
+            return dict(fake_plus.server.turns.get((arguments.get("sessionId"),
+                                                   arguments.get("turnId"))) or {})
+        return original_plus_tool(name, arguments)
+
+    monkeypatch.setattr(fake_plus.server, "_call_tool", plus_tool)
     verify = ('test "$(cat execution-result.txt)" = complete '
-              '&& printf core-verified > verify-ran.pyc')
+              '&& printf pilot-ran-verify > verify-ran.pyc')
     recovery_variant = variant in ("environment", "quality_detached", "historical_revert", "branch_quality")
     if recovery_variant:
         verify = "./verify-fixture"
@@ -792,7 +803,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         script = worktree / "verify-fixture"
         script.write_text('#!/bin/sh\nif [ "$KP_VERIFY_READY" != "1" ]; then\n'
                           + "  printf '%s\\n' '" + message + "'\n  exit 1\nfi\n"
-                          + 'test "$(cat execution-result.txt)" = complete && printf core-verified > verify-ran.pyc\n')
+                          + 'test "$(cat execution-result.txt)" = complete && printf pilot-ran-verify > verify-ran.pyc\n')
         script.chmod(0o755)
         cli("set-project-engine-mode", {"project_id": task.project_id, "engine_mode": "live"})
     if variant == "branch_quality":
@@ -828,11 +839,14 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
            "session_id": session_id, "turn_id": "topup-turn", "config": config,
            "completion_policy": "command_verification",
            "plan_sha256": current["plan_sha256"],
+           "verification_evidence_version": 1,
+           "verification_source_sha256": git_delivery.source_state_sha256(worktree),
            "status": "running", "send_state": "sent", "pid": dead_pid,
            "started_at": now, "worktree_path": str(worktree)}
     (directory / "job.json").write_text(json.dumps(job), encoding="utf-8")
     (directory / "spec.json").write_text(json.dumps(
-        {"task_id": tid, "run_id": run_id, "cwd": str(worktree), "config": config}),
+        dict(job, cwd=str(worktree), repository=str(task.repository),
+             plan_path=str(plan.path), runs_dir=str(directory))),
         encoding="utf-8")
     conn = _connect(tmp_env.db)
     try:
@@ -861,7 +875,12 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
     events = [
         {"v": 1, "seq": 1, "ts": now, "type": "session", "task_id": tid,
          "run_id": run_id, "session_id": session_id, "turn_id": "topup-turn"},
-        {"v": 1, "seq": 2, "ts": now, "type": "terminal",
+        {"v": 1, "seq": 2, "ts": now, "type": "command_output",
+         "task_id": tid, "run_id": run_id, "session_id": session_id, "turn_id": "topup-turn",
+         "name": "exec", "input": json.dumps({"command": verify, "cwd": str(worktree)}),
+         "exit_code": 1 if recovery_variant else 0,
+         "output": message if recovery_variant else "Plus verified execution result"},
+        {"v": 1, "seq": 3, "ts": now, "type": "terminal",
          "outcome": "completed", "reason": "control_turn_completed"},
     ]
     (directory / "events.jsonl").write_text(
@@ -878,6 +897,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
 
     monkeypatch.setattr(automation_policy, "automation_preflight", unavailable_preflight)
     monkeypatch.setenv("KANPILOT_VERIFY_SHELL", "/bin/sh")
+    monkeypatch.delenv("KP_VERIFY_READY", raising=False)
     spawned, review_claims = [], []
 
     def spawn(stage, db_path, instance_id):
@@ -916,6 +936,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         return
 
     value = factory.get_task(tid)
+    assert value.get("failure_code") != "verification_identity_unconfirmed", value.get("failure_reason")
     if recovery_variant:
         assert value["status"] == "needs_user", (first, value)
         assert value["run_id"] == run_id and value["plan_sha256"] == job["plan_sha256"]
@@ -976,11 +997,56 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
             assert restored["automation"]["fix_round"] == 1
         cli("set-project-verify-env", {"project_id": task.project_id,
                                        "verify_env": {"KP_VERIFY_READY": "1"}})
-        cli("resolve", {"task_id": tid, "action": "resume"})
+        assert "KP_VERIFY_READY" not in os.environ
+        assert "KP_VERIFY_READY" not in json.dumps(config)
+        assert not (worktree / "verify-ran.pyc").exists()
+        cli("resolve", {"task_id": tid, "action": "retry_verification",
+                        "expected_execution_run_id": run_id})
         resumed = factory.get_task(tid)
-        assert resumed["status"] == "running" and resumed["run_id"] == run_id
+        assert resumed["status"] == "ready"
+        assert _count_requests(tmp_env.db, tid, "dispatch", "queued") == 1
+        retry = factory.claim("dispatch")
+        assert retry["claimed"] is True, retry
+        old_run_id, run_id = run_id, retry["run_id"]
+        assert run_id != old_run_id
+        retry_evidence = ui_evidence(
+            session_marker=retry["context"]["session_marker"],
+            repository=retry["context"]["repository"],
+            attachment_name=retry["context"]["attachment_name"])
+        cli("dispatch-prepare", {"task_id": tid, "run_id": run_id, "evidence": retry_evidence})
+        cli("dispatch-begin-send", {"task_id": tid, "run_id": run_id})
+        cli("dispatch-confirm", {"task_id": tid, "run_id": run_id,
+                                 "evidence": dict(retry_evidence, message_visible=True,
+                                                  session_id=session_id, session_title="Plus 重新验证")})
+        fake_plus.server.set_turn(session_id, "topup-retry-turn", status="completed")
+        fake_plus.server.set_agent_status(session_id, currentTurnId="topup-retry-turn", isRunning=False)
+        directory = runs / tid / run_id
+        directory.mkdir(parents=True)
+        job.update(run_id=run_id, turn_id="topup-retry-turn",
+                   scope_id=runtime_client.stable_scope_id("execution", task_id=tid, run_id=run_id),
+                   verification_source_sha256=git_delivery.source_state_sha256(worktree))
+        for name, record in (("job.json", job), ("spec.json", dict(job, cwd=str(worktree),
+                repository=str(task.repository), plan_path=str(plan.path), runs_dir=str(directory)))):
+            (directory / name).write_text(json.dumps(record), encoding="utf-8")
+        retry_events = [dict(event, run_id=run_id, turn_id="topup-retry-turn") for event in events]
+        retry_events[1].update(exit_code=0, output="Plus verified execution result after environment repair")
+        (directory / "events.jsonl").write_text(
+            "".join(json.dumps(event) + "\n" for event in retry_events), encoding="utf-8")
+        conn = _connect(tmp_env.db)
+        try:
+            with kdb.write_txn(conn):
+                round_store.upsert_on_claim(conn, tid, run_id, config, kutil.now_iso(), backend="pi_desktop")
+                round_store.mark_started(conn, tid, run_id, kutil.now_iso(), pid=dead_pid, worktree_path=str(worktree))
+                round_store.upsert_discovered(conn, tid, run_id, kutil.now_iso(), backend="pi_desktop",
+                                              session_id=session_id, run_status="finished")
+        finally:
+            conn.close()
+        assert factory.get_task(tid)["run_id"] == run_id
         assert _count_requests(tmp_env.db, tid, "monitor", "queued") == 1
         assert _count_requests(tmp_env.db, tid, "dispatch", ("queued", "claimed")) == 0
+        # A fresh dispatch has the normal monitor cooldown. Advance only its
+        # clock boundary, as the in-process runner uses actual wall time.
+        make_due(tmp_env.db, factory.active_request(tid, kind="monitor")["request_id"])
         rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=120))
         value = factory.get_task(tid)
         if value["status"] != "in_review":
@@ -995,7 +1061,8 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         (tmp_env.root / "topup-monitor.jsonl").read_text())
     assert fake_kaneo.tasks[tid]["status"] == "in-review"
     assert value["extra"]["engine_verdict"]["verification_ok"] is True
-    assert (worktree / "verify-ran.pyc").read_text() == "core-verified"
+    assert value["extra"]["engine_verdict"]["evidence_source"] == "plus_tool_results"
+    assert not (worktree / "verify-ran.pyc").exists(), "Pilot must only read Plus evidence"
     assert spawned == (["monitor", "monitor"] if recovery_variant else ["monitor"]), (first, spawned)
     assert review_claims == []
     second = rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=180 if recovery_variant else 60))

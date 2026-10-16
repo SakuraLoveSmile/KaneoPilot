@@ -572,10 +572,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 from . import engine_claim_scope
                 if engine_claim_scope.effective_mode(conn, task["project_id"]) != "live":
                     actions.append("accept_verification")
-                from . import verification_recovery
-                if verification_recovery.candidate(conn, task):
-                    actions.append("run_verification_checks")
-                    actions.append("reverify")
+            from . import verification_recovery
+            if verification_recovery.candidate(conn, task):
+                actions.append("reverify")
+            if cmd_queue.verification_retry_candidate(conn, task):
+                actions.append("retry_verification")
             if cmd_queue.execution_retry_candidate(conn, task):
                 actions.append("resume")
             monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")

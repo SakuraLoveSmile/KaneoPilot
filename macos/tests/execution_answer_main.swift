@@ -299,6 +299,19 @@ struct ExecutionAnswerFixtures {
         checkOrdering(observedBeforeFailure.question.state == "expired" && !observedBeforeFailure.possiblyStale
             && observedBeforeFailure.error == nil, "late reload failure cannot mask a newer authoritative observation")
         check(orderingFailures.isEmpty, orderingFailures.joined(separator: "\nFAIL: "))
-        print("PASS execution answers: partial local drafts; single/custom exclusivity; ordered multiselect; skip; identity switch; unknown freezes and read-only reconcile; explicit same-answer retry; closed and invalid forms; read failure retention; stop no resend; observer reconnect; busy observations; late reload rejection; terminal authority; in-flight answer freeze")
+        // Bottom-bar submit: progress and the first unanswered question come from one rule.
+        let partial = store(question(draft: [ExecutionAnswer(questionId: "q0", optionIds: ["o0"], text: "", skipped: false)]))
+        check(partial.answeredCount == 1 && partial.submitBlockedReason == "还差第 2 题" && !partial.canSubmit,
+              "bottom submit names the first unanswered question")
+        let complete = store(question(draft: [ExecutionAnswer(questionId: "q0", optionIds: ["o0"], text: "", skipped: false),
+                                              ExecutionAnswer(questionId: "q1", optionIds: [], text: "", skipped: true)]))
+        check(complete.answeredCount == 2 && complete.submitBlockedReason == nil && complete.canSubmit,
+              "fully answered form is submittable without a blocked reason")
+        let closed = store(question(state: "answered", delivery: "accepted",
+                                    draft: [ExecutionAnswer(questionId: "q0", optionIds: ["o0"], text: "", skipped: false)],
+                                    by: "kaneopilot"))
+        check(closed.submitBlockedReason == "已回答，继续执行" && !closed.canSubmit,
+              "closed record reports its status instead of a missing answer")
+        print("PASS execution answers:partial local drafts; single/custom exclusivity; ordered multiselect; skip; identity switch; unknown freezes and read-only reconcile; explicit same-answer retry; closed and invalid forms; read failure retention; stop no resend; observer reconnect; busy observations; late reload rejection; terminal authority; in-flight answer freeze")
     }
 }

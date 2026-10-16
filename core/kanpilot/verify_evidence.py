@@ -9,16 +9,17 @@ import shlex
 from . import util
 
 
-# Only these scalar fields carry the Goal execution boundary through adapters.
+# Only these scalar fields carry execution identity/provenance through adapters.
 WINDOW_FIELDS = ("turn_id", "source_timestamp_missing", "execution_turn_id",
-                 "execution_started_at", "approval_requested_at")
+                 "execution_started_at", "approval_requested_at", "tool_call_id",
+                 "parent_tool_call_id", "agent_name", "event_type", "is_error")
 
 
 def window_metadata(source: dict) -> dict:
     metadata = {}
     for name in WINDOW_FIELDS:
         value = source.get(name)
-        if name == "source_timestamp_missing":
+        if name in ("source_timestamp_missing", "is_error"):
             if isinstance(value, bool):
                 metadata[name] = value
         elif isinstance(value, str) and value:
@@ -359,3 +360,187 @@ def match_verification(commands: list, results: list) -> dict:
                 failed.append({"command": command, "exit_code": last.get("exit_code")})
     return {"ok": not missing and not failed, "matched": matched,
             "missing": missing, "failed": failed}
+
+
+# Exact names only: unknown tools, including delegated/Team tools, can write.
+# These are the existing filesystem inspection tools, not arbitrary read* names.
+_READ_ONLY_TOOLS = frozenset(("read", "grep", "glob"))
+_SHELL_TOOLS = frozenset(("bash", "shell", "exec", "run_command", "terminal", "command"))
+
+
+def _tool(message):
+    value = _window_field(message, "tool")
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_input(tool):
+    arguments = tool.get("input")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return None
+    return arguments if isinstance(arguments, dict) else None
+
+
+def _verification_shell(command, commands):
+    """Only declared checks and inert cwd/PATH prefixes may share a shell.
+
+    Matching a check inside `pytest && edit-source` must not make the entire
+    invocation exempt from the write barrier. The plan's exact commands remain
+    authoritative; only wrappers get this additional bounded recognition.
+    """
+    expected = {normalize(item) for item in commands}
+    if normalize(command.strip(" \t\r\n")) in expected:
+        return True
+    prefix = _path_prefix(command)
+    remaining = prefix[1] if prefix is not None else command
+    segments, supported = _command_segments(remaining, allow_single=True)
+    if not supported:
+        return False
+    has_check = False
+    for segment in segments:
+        if segment in expected:
+            has_check = True
+            continue
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            return False
+        if (not words or words[0] != "cd" or len(words) not in (2, 3)
+                or (len(words) == 3 and words[1] != "--")
+                or any(char in segment for char in "$`<>")):
+            return False
+    return has_check
+
+
+def _strict_execution_window(messages, execution_turn_id):
+    ordered = _ordered(messages)
+    # Only locally generated approval markers carry a trustworthy time bound.
+    markers = [message for _, message in ordered
+               if message.get("type", message.get("kind")) == "system"
+               and not message.get("source_message_id")
+               and not str(message.get("id") or "").startswith("desktop:")
+               and isinstance(message.get("content"), str)
+               and message["content"].startswith(("goal_approved:", "goal_execution_recovered:"))
+               and _window_field(message, "execution_turn_id") == execution_turn_id]
+    marker = markers[-1] if markers else {}
+    boundary = util.parse_ts(_window_field(marker, "execution_started_at"))
+    basis = "execution_started_at"
+    if boundary is None:
+        boundary = util.parse_ts(_window_field(marker, "approval_requested_at"))
+        basis = "approval_request"
+    selected = []
+    scoped = False
+    for index, message in ordered:
+        turn = _window_field(message, "turn_id")
+        timestamp = _timestamp(message)
+        if isinstance(turn, str) and turn:
+            if turn != execution_turn_id:
+                continue
+            if boundary is not None and timestamp is not None and timestamp < boundary:
+                continue
+            scoped = True
+        elif boundary is None or timestamp is None or timestamp < boundary:
+            continue
+        selected.append((index, message))
+    return selected, {"evidence_window": "current_execution_turn",
+                      "window_basis": "execution_turn" if scoped else basis if boundary else "unconfirmed_execution_turn"}
+
+
+def match_execution_verification(commands: list, messages: list, execution_turn_id) -> dict:
+    """Match current Plus checks and revoke proof after any possible source write.
+
+    Completed transcript tools can be represented by a single result; where a
+    separate call exists, its turn, name, input and completion must agree. Calls
+    left pending are not proof and cannot be assumed to have finished writing.
+    `command_results` carries original message indexes for further cwd/output
+    checks by the verdict; it is not a second persisted evidence stream.
+    """
+    if not isinstance(execution_turn_id, str) or not execution_turn_id:
+        return dict(match_verification(commands, []), command_results=[],
+                    evidence_window="current_execution_turn", window_basis="unconfirmed_execution_turn",
+                    detail="无法确认 Plus 当前执行轮次，请由 Plus 重新验证")
+    selected, metadata = _strict_execution_window(messages, execution_turn_id)
+    selected_indexes = {index for index, _ in selected}
+    all_calls = {}
+    for index, message in _ordered(messages):
+        if message.get("type", message.get("kind")) == "tool_call":
+            call_id = _window_field(message, "tool_call_id")
+            if isinstance(call_id, str) and call_id:
+                all_calls.setdefault(call_id, []).append((index, message))
+    positions = {index: position for position, (index, _) in enumerate(selected)}
+    results, barriers, completed_calls = [], [], set()
+    pending = []
+    active_subagents = {}
+    for position, (index, message) in enumerate(selected):
+        kind = message.get("type", message.get("kind"))
+        tool = _tool(message)
+        delegated = bool(_window_field(message, "parent_tool_call_id") or _window_field(message, "agent_name"))
+        if kind not in ("tool_call", "tool_result", "command_output"):
+            event_type = _window_field(message, "event_type")
+            if event_type in ("subagent_start", "subagent_end"):
+                agent = _window_field(message, "agent_name") or ""
+                active_subagents[agent] = max(0, active_subagents.get(agent, 0)
+                                             + (1 if event_type == "subagent_start" else -1))
+            if delegated or event_type in ("subagent_start", "subagent_end"):
+                barriers.append(position)
+            continue
+        name = str(tool.get("name") or "").strip().lower()
+        arguments = _tool_input(tool)
+        call_id = _window_field(message, "tool_call_id")
+        calls = all_calls.get(call_id, []) if isinstance(call_id, str) else []
+        pair_ok = True
+        start_position = position
+        if kind != "tool_call" and calls:
+            # A result cannot borrow another turn's invocation or contradict
+            # the invocation's command. Multiple call identities are ambiguous.
+            pair_ok = len(calls) == 1 and calls[0][0] in selected_indexes
+            if pair_ok:
+                call_index, call = calls[0]
+                call_tool = _tool(call)
+                call_arguments = _tool_input(call_tool)
+                pair_ok = (positions[call_index] < position
+                           and str(call_tool.get("name") or "").strip().lower() == name
+                           and ((arguments is None and tool.get("input") is None)
+                                or arguments == call_arguments))
+                if pair_ok:
+                    arguments = call_arguments
+                    completed_calls.add(call_index)
+                    start_position = positions[call_index]
+                    delegated = delegated or bool(_window_field(call, "parent_tool_call_id")
+                                                  or _window_field(call, "agent_name"))
+        if name in _READ_ONLY_TOOLS and pair_ok and not delegated:
+            continue
+        command = arguments.get("command") if isinstance(arguments, dict) else None
+        is_verify = (pair_ok and not delegated and name in _SHELL_TOOLS and isinstance(command, str)
+                     and _verification_shell(command, commands))
+        if kind == "tool_call":
+            pending.append(index)
+            if not is_verify:
+                barriers.append(position)
+            continue
+        if not is_verify:
+            barriers.append(position)
+            continue
+        code = tool.get("exit_code")
+        if _window_field(message, "is_error") is True:
+            code = None
+        results.append({"command": command, "exit_code": code if type(code) is int else None,
+                        "message_id": message.get("id"), "index": index, "_position": start_position})
+    for index in pending:
+        if index not in completed_calls:
+            # An unfinished tool may still change source after a later check.
+            barriers.append(len(selected))
+    if any(active_subagents.values()):
+        barriers.append(len(selected))
+    barrier = max(barriers, default=-1)
+    for result in results:
+        if result.pop("_position") <= barrier:
+            result["exit_code"] = None
+    outcome = dict(match_verification(commands, results), **metadata, command_results=results)
+    if barriers and not outcome["ok"]:
+        outcome["detail"] = "Plus 验证后存在可能修改源码或尚未完成的工具调用，请由 Plus 重新验证"
+    elif not selected:
+        outcome["detail"] = "缺少当前执行轮次的可信工具结果，请由 Plus 重新验证"
+    return outcome

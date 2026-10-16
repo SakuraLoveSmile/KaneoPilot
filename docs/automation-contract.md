@@ -150,7 +150,7 @@ publish-plan:629 和 dispatch_validate:111 都改用它。begin-send 依靠 clai
 
 ## 执行验证证据（legacy / shadow 兼容路径）
 
-Live 以 protocol §5.27.11 的核心判定及提交树绑定为准，不接受转录或人工override绕过验证；以下保留旧匹配路径。
+验证执行归 Plus，Pilot 只监控和核对工具证据。Live 按 protocol §5.18.6 / §5.27.11 校验当前 turn、终态源码指纹及提交树；不接受助手文字、旧本机验证回执或人工 override 绕过。以下格式与严格工具匹配仍复用，历史 Goal/legacy 保留原完成策略。
 
 **计划格式：**
 
@@ -429,11 +429,11 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 
 | failure_code | 来源 | 自动化任务可用动作 |
 |---|---|---|
-| verification_unconfirmed | monitor | 材料可信时 run_verification_checks/reverify；legacy/shadow可accept_verification（→ running + monitor）；replan、mark_done、dismiss |
+| verification_unconfirmed | monitor | 材料可信时 reverify 只读核证；身份完整时 retry_verification 沿用计划和原工作树让 Plus 新轮次执行验证；legacy/shadow可accept_verification；replan、mark_done、dismiss |
 | execution_failed | monitor | resume（沿用确认计划 → ready + 新 dispatch 请求）、replan、mark_done、dismiss |
 | fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
 | auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
-| verification_environment_failure | live monitor 核心验证（protocol §5.18.6 四类环境签名） | failure_stage=monitor 时 resume（重新验证本轮，不限托管 → running + monitor；原 run/plan/worktree，不派发或耗补救轮）、replan、mark_done、dismiss |
+| verification_environment_failure | Plus 验证工具结果（protocol §5.18.6 环境签名；兼容历史本机阻塞） | failure_stage=monitor 时 resume（重新核对原 Plus 证据，不限托管 → running + monitor；原 run/plan/worktree，不派发或耗补救轮）；身份完整时 retry_verification 由用户发起新的 Plus 执行轮次、replan、mark_done、dismiss |
 | fix_branch_unavailable | 引擎补救 monitor / register-review review | monitor：resume（重新验证本轮）、replan、mark_done、dismiss；review：replan、mark_done、dismiss，禁止 resume |
 | automation_stopped | register-review（项目已关闭） | resume（需先重新开启项目，同上）、replan、mark_done、dismiss |
 | review_blocked | review | resume（→ in_review + 新 review 请求）、replan、mark_done、dismiss |

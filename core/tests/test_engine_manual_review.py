@@ -2,7 +2,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from kanpilot import core, db, remote, util
+from kanpilot import core, db, git_delivery, harness_plus_adapter, remote, util
 import test_execution_retry as retry_fixture
 from test_session import pi_event, write_json
 
@@ -11,7 +11,7 @@ class TestLiveManualReview(retry_fixture.TestExecutionRetry):
     def setUp(self):
         super().setUp()
         plan = Path(self.task()["plan_path"])
-        plan.write_text("# Frozen manual execution\n```verify\ntrue\n```\n")
+        plan.write_text(plan.read_text() + "\n# Frozen manual execution\n```verify\ntrue\n```\n")
         sha = util.sha256_file(plan)
         db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso, status="running", stage="monitor",
                        plan_sha256=sha, **core.clear_block_fields())
@@ -22,19 +22,37 @@ class TestLiveManualReview(retry_fixture.TestExecutionRetry):
                                          "expected_revision": self.call("get-project-mappings")["revision"]})
         self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "live"})
         self.job.update(status="finished", exit_code=0, plan_sha256=sha,
-                        completion_policy="command_verification")
+                        completion_policy="command_verification", verification_evidence_version=1,
+                        verification_source_sha256=git_delivery.source_state_sha256(self.worktree))
         write_json(self.directory / "job.json", self.job)
+        write_json(self.directory / "spec.json", {
+            "task_id": self.task_id, "run_id": self.run_id, "backend": "pi_desktop",
+            "config": self.job["config"], "plan_sha256": sha,
+            "completion_policy": "command_verification", "plan_path": str(plan),
+            "repository": self.task()["repository"], "cwd": str(self.worktree), "runs_dir": str(self.directory)})
         (self.directory / "events.jsonl").write_text(
             util.jdump(pi_event(1, "session", session_id="failed-session", turn_id="failed-turn")) + "\n"
-            + util.jdump(pi_event(2, "terminal", outcome="completed")) + "\n")
+            + util.jdump(pi_event(2, "command_output", name="exec", turn_id="failed-turn",
+                                  input=util.jdump({"command": "true", "cwd": str(self.worktree)}),
+                                  exit_code=0, output="passed")) + "\n"
+            + util.jdump(pi_event(3, "terminal", outcome="completed")) + "\n")
+        self.plus_status["session_id"] = "failed-session"
         self.plus_turn["status"] = "completed"
+        def read_turn(*args, **kwargs):
+            self.assertFalse(self.ctx.conn.in_transaction)
+            return {"session_id": self.plus_turn["sessionId"], "turn_id": self.plus_turn["turnId"],
+                    "status": self.plus_turn["status"]}
+        turn_patch = patch.object(harness_plus_adapter, "plus_turn_get", side_effect=read_turn)
+        turn_patch.start()
+        self.addCleanup(turn_patch.stop)
         self.call("get-session", {"task_id": self.task_id, "run_id": self.run_id, "status_only": True})
         self.call("enqueue", {"task_id": self.task_id, "kind": "monitor"})
         claim = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor"})
         self.assertTrue(claim["claimed"])
         result = self.call("engine-verdict", {"task_id": self.task_id,
                            "expected_execution_run_id": self.run_id, "expected_plan_sha256": sha})
-        self.assertTrue(result["verification_ok"])
+        self.assertTrue(result["verification_ok"], result)
+        self.assertEqual(result["evidence_source"], "plus_tool_results")
         self.advance = {"task_id": self.task_id, "run_id": claim["run_id"],
                         "target": "in-review", "expected_current": "in-progress"}
 

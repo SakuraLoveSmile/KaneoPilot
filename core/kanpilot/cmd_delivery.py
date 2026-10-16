@@ -51,11 +51,12 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 frozen = receipt.get("binding") or {}
                 actual = verdict.binding(conn, task, allow_core_commit=True)
                 if (receipt.get("verification_ok") is not True
+                        or not verdict.receipt_evidence_current(conn, task, receipt)
                         or receipt.get("execution_run_id") != execution_run_id
                         or receipt.get("plan_sha256") != task["plan_sha256"]
                         or not receipt.get("index_source_sha256")
                         or dict(actual, head_sha=frozen.get("head_sha")) != frozen):
-                    raise git_delivery.GitDeliveryError("delivery_commit_failed", "缺少与当前源码绑定的核心验证回执，未提交")
+                    raise git_delivery.GitDeliveryError("delivery_commit_failed", "缺少与当前源码绑定的 Plus 验证证据，未提交")
                 verified = {"verified_source_sha256": receipt["binding"]["source_sha256"],
                             "verified_index_sha256": receipt["index_source_sha256"]}
             result = git_delivery.commit_worktree(

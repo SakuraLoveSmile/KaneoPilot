@@ -722,7 +722,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ```
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
-- **legacy/shadow 的 Goal 验证证据窗口**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 继续由核心亲跑 verify，不据转录完成判定。
+- **legacy/shadow 的 Goal 验证证据窗口**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
 - **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进 legacy/live 交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
 - **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（本轮工具事件中，计划 verify 块的每条命令最后一次匹配的整数退出码为 0；缺失转 verification_unconfirmed，用户可接受验证结果）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
 - **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
@@ -733,18 +733,19 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
 - Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
 
-### 5.18.6 引擎 verdict（v6，A10 核心亲判）
+### 5.18.6 引擎 verdict（Plus 执行验证，Pilot 核对证据）
 
- 新引擎（`engine_mode=live`）的 verdict 由**核心亲判**，不依赖 Plus 转录：
+验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
- - **有效 diff**：以计划声明的执行工作树为范围取改动，**排除 `.pi/**` 前缀**后必须非空；为空即空转，归阶梯 3（quality）按空转重试一次处理。
- - **核心亲跑 verify 命令**：取计划 verify 块的每条命令，由核心以 **login shell** 执行并注入项目 `verify_env`，超时可配（`KANPILOT_VERIFY_TIMEOUT`，默认 600s）。
- - **login shell 口径（A4 spike 实测）**：默认用 `$SHELL -l -c`（读 `os.environ["SHELL"]`，本机为 `/bin/zsh`）；`/bin/bash -l -c` 仅作 `$SHELL` 缺失时的兜底；`KANPILOT_VERIFY_SHELL` 可整体覆盖。**不得**默认 `/bin/bash -l -c`——本机 `~/.bash_profile` 不含 homebrew/pyenv PATH，会导致 `gh`/`pytest` 全部 `command not found`（rc=127），而 `~/.zprofile` 有。详见 `docs/evidence/spike-verify-env-20261010.md`。
- - **环境分类（阶梯 2）**：只在启动失败或明确非零退出、且未超时的输出尾部判定，依次为 command_not_found（启动失败、rc=127、command not found）、jdk_version（This build uses a Java N JVM、requires at least JVM runtime version、Unsupported class file major version）、android_sdk_missing（SDK location not found）、no_connected_device（No connected devices）。新检查在内存原文上先计算受控枚举，再脱敏输出后持久化，原文不落盘；避免单字符敏感值替换破坏签名。读取时在成功、超时与退出状态门之后采用有效枚举；旧收据缺枚举时才从已脱敏输出重判。成功输出不因签名失败；单条超时与整组时限耗尽的 environment_reason 均为 null。
- - **判定**：有效 diff 非空且每条命令退出码为 0 才通过；任一检查命中环境类，整组 environment_failure=true，映射 verification_environment_failure，不开自动质量补救；其余质量失败为 verification_unconfirmed，同分支前提见 §5.27.12。逐条保留 command_not_found 并增加 environment_reason；整组增加去重保序 environment_reasons。evaluate、shadow 和失败 stub 同形。历史收据缺新字段时经同一入口按 command_not_found/exit_code/timed_out/output_tail 读取期重判，原收据不回写。
- - **`verify_env` 形态**：项目映射 `project_mappings.items[project_id].verify_env`，为字符串→字符串的 dict（缺省 `{}`），在 login shell 内作为环境变量注入；不得包含凭据/token（凭据另走凭据文件，不进入 verify_env）。
- - **证据**：逐命令的退出码 / 是否超时 / 输出尾部由核心落库（`extra.engine_verdict` 与既有 verification 回执并存，不互相覆写）；Plus 转录仅用于 UI 按需展示，**不参与判定、不整段持久化**。
- - **命令面**：`engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}`（幂等，`operation_id` 去重）。
+- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
+- 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条以终端工具执行，保留真实独立退出码与工具输出；助手的文字总结不能作为通过依据。
+- 核心核对 task/run/plan/session/turn、完整终态与登记工作树，只认当前执行 turn 的工具证据；无 turn 标签只允许可信 Goal 执行起点窗口。显式 cwd/workdir 不能越出登记工作树。规划、旧 turn、任意人工接续与其他 agent 的未绑定结果不能混用。
+- 每条声明取最后一次匹配结果；退出码缺失、非整数、截断或缺命令均未确认。验证后出现可写工具（包括非验证 shell、Edit/Write、未知工具、Team/subagent）使先前通过失效，必须在写入后重新验证。仅明确只读工具可忽略。
+- 新执行记录标记 `verification_evidence_version=1`；Plus worker 在成功终态落地前记录 `verification_source_sha256`，核心与当前源码指纹比较，并前后复校 binding 和证据文件哈希。该快照与工具顺序用于识别已记录的验证后改动，不宣称是 Plus 原生工具提供的逐命令源码签名。
+- `extra.engine_verdict` 保留当前收据结构，新增 `evidence_source=plus_tool_results` 与证据文件指纹。真实非零结果为质量失败；明确 Plus 环境错误为环境失败；缺证据、缺终态快照、身份变化为 unconfirmed，不自动启动质量补救。新通过收据仍绑定交付提交树。
+- 旧本机 `verification_checks` 和旧 engine verdict 保留供历史审计，不覆盖新的 Plus 结果、不作为当前完成门的替代凭据；历史 job 不得在只读恢复时补造“当时源码快照”。
+- `verify_env` 保留配置兼容与历史查阅，不注入 Pilot 验证进程，也不作为 Plus 已配置的证明。Java/SDK/设备问题应在 Plus 实际执行环境处理。
+- `engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}` 只核证，不派发模型、不代跑验证。相同操作去重必须同时符合当前证据来源、文件指纹和源码身份。
 
 ## 5.19 执行端调度（App 内置，v1.6）
 
@@ -1002,12 +1003,15 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 **背景**：pi_desktop 轮次由本机 worker 进程观察（采集 `events.jsonl`、判定终态）。worker 退出（崩溃/被清理/机器重启）时轮次会停在中间态，而 PI-Desktop 里的会话可能仍在跑。
 
 - **心跳被拒不等于轮次失败**：派发请求在 `dispatch-confirm` 后即 `succeeded`，worker 对它后续的 `heartbeat` 只会得到 `stale_run`/`not_found`——这是**正常收尾路径**：worker 停止续租、继续观察，**绝不**把心跳被拒写成 job `failed`/terminal。启动证明阶段的 heartbeat 失败仍按「证明未闭环」处理（不写 session 事件）。
-- 命令：`round-observe {task_id, run_id, executor?, continue_goal?, continue_goal_only?}`。`run_id` 必须是该任务**当前**执行轮次；任务须处于 `running|in_review|needs_user`；轮次 `backend=pi_desktop`；`job.json` 身份核验通过、`session_id`/`turn_id` 齐备、`send_state ∈ {sent, unknown}`，且 **events.jsonl 已有 session 事件**（「已确认发送」的硬证据，由发送成功 + 启动证明共同产生；`send_state` 只作粗筛）；`status=finished` → 返回 `{"status":"finished"}`（无需续接）。
-- **只读续接**：仅以既有 `spec.json` 拉起 `python3 -m kanpilot.pi_desktop_worker --spec <spec.json> --resume`（独立会话，stdout/stderr 追加 `worker.log`）。`--resume` 分支**不建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**；接管成功写 `job.observation_resumed_at`/`observe_pid`/`resume_started_at`，把轮次恢复为 `running`，并把 `send_state` 修回 `sent`（旧版假失败会写成 `unknown`）；首次续接前的收尾现场（status/detail/ended_at/exit_code/send_state）存入 `job.resume_previous` 供审计。
+- 命令：`round-observe {task_id, run_id, executor?, continue_goal?, continue_goal_only?, recovery_turn_id?}`。`run_id` 必须是该任务**当前**执行轮次；任务须处于 `running|in_review|needs_user`；轮次 `backend=pi_desktop`；`job.json` 身份核验通过、`session_id`/`turn_id` 齐备、`send_state ∈ {sent, unknown}`，且 **events.jsonl 已有 session 事件**（「已确认发送」的硬证据，由发送成功 + 启动证明共同产生；`send_state` 只作粗筛）；`status=finished` → 返回 `{"status":"finished"}`（无需续接）。
+- **只读续接**：仅以既有 `spec.json` 拉起 `python3 -m kanpilot.pi_desktop_worker --spec <spec.json> --resume`（独立会话，stdout/stderr 追加 `worker.log`）。`--resume` 分支**不建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**；接管成功写 `job.observation_resumed_at`/`observe_pid`/`resume_started_at`，仅在持久执行轮次确为 `running` 时把轮次恢复为 `running`；已落持久终态则直接收尾，不清除退出码或写入瞬时 `running`。把 `send_state` 修回 `sent`（旧版假失败会写成 `unknown`）；首次续接前的收尾现场（status/detail/ended_at/exit_code/send_state）存入 `job.resume_previous` 供审计。
 - **幂等**：原 worker 或上一次续接的进程仍存活（轮次行 `pid` 或 `job.observe_pid`）→ 返回 `{"status":"observing","deduplicated":true}`，绝不拉起第二个观察者。
+- **完成后收尾窗口**：已核实持久 `completed`、但转录采集/报告核对尚未完成时，job 保留上一结果，另记 `observation_finalizing={turn_id, observed_status:"completed"}`，不伪造 `running`。读取层仅透出当前 turn 的标记；monitor 仅在观察者仍存活时等待“执行已完成，正在收尾”，进程已退出则继续核对/恢复，不能靠残留标记隐藏失败。最终结果、退出码与 `observation_resumed_at` 同次写入并移除标记，再追加 terminal；命令须等收尾进程退出后才确认新 `settled`。
+- **真实失败停止循环**：已有 `turn error` / `turn aborted` 失败终态时，先只读核对后续轮次；无可信续轮则返回 `settled`、索引保持 `failed`，不反复拉起观察进程。monitor 根据真实失败转待处理，不得报告“仍在运行”。恢复环境不可读也不抹掉既有真实失败。
+- **中断后结果恢复**：恢复只接受当前 task/run 的 execution scope 已拥有的 session，并核对固化配置、冻结计划哈希、原始 session 事件与完整转录 prompt 锚点、原轮与候选轮身份及时序。Plus 未提供 `startedAt` 时，只能用完整转录中明确带候选 `turnId` 的最早消息时间作为下界，并记 `time_basis=transcript_turn_messages`；原轮结束时间和候选完成时间仍取持久轮次记录。自动恢复不允许有追加用户指令；此时不能仅凭同一 session 或较晚时间认定同任务。`executor="user"` 可用 `recovery_turn_id` 显式指定已确认属于本任务的续轮，仍须通过全部身份检查；调度器、monitor、engine 不可指定。续轮可为 `running` 或 `completed`，worker 启动后重复预检并比对授权。全程只读 Plus，不发 prompt、不批准新 Goal；既有批准执行只能沿带恢复授权的 `turn_adopted` 链收尾。
 - **剩余预算**：续接按 `job.started_at + 轮次时限` 计算剩余时间；执行问答的当前/历史等待按 §5.28.5 扣除核心区间并集（不累加 job 缓存）；有开放问题时先检测并接管等待。已超时 → 不续接、也不动手停止仍在跑的会话，返回 `deferred`（`round_timeout_elapsed`），交人工判定终态。
 - **观察环境不成立**（连接不可用/身份不符/turn 读不到/已超时）→ worker 退出码 3，只写 `job.resume_detail`/`resume_deferred_at`/`resume_attempts`，**既有 job 状态与 terminal 事件一字不改**。
-- 返回形状：`{"status": "observing"|"settled"|"finished"|"deferred"|"exited"|"starting", "pid", "detail", "run_id", "reopened"}`；`observing` = 已接管且在观察，`settled` = 接管即见持久终态（进程已退出），`finished` = 轮次已按 completed 收尾；`deferred|exited|starting` = 本轮未接管成功（监控端按「会话读不到」处置，不改任务状态）。`reopened` = 本次接管是否顺带解除了误报的执行失败阻塞（§5.23.8），只在 `observing` 时可能为 true。
+- 返回形状：`{"status": "observing"|"settled"|"finished"|"finalizing"|"deferred"|"exited"|"starting", "pid", "detail", "run_id", "reopened"}`；`observing` = 已接管且在观察，`settled` = 已确认终态（恢复进程已完成收尾退出，或既有真实失败无需重启观察进程），`finished` = 轮次已按 completed 收尾；`finalizing` = 已证明当前轮次完成、同一恢复进程仍活且正在收尾（超过启动等待时限仍可继续 monitor）；`deferred|exited|starting` = 本轮未接管成功（监控端按「会话读不到」处置，不改任务状态）。`reopened` = 本次接管是否顺带解除了误报的执行失败阻塞（§5.23.8），只在 `observing|finalizing` 或 `settled` 且新结果为 `finished/exit_code=0` 时可能为 true。
 - 事件：`round_observe`（detail 含 run_id/pid/status/detail/reopened）。命令不写远端、不发消息、不重复 agent_prompt；**task 状态只在 §5.23.8 的解除误报阻塞一种情形下被改写**（本任务本轮 `needs_user` + `failure_code=execution_failed` → `running`），其余情形一律不改。
 - **`round_detail.observe_pid`/`observer_alive`**：读取层按本机进程存活派生（`observe_pid` 优先 job，其次轮次行 pid），**只**用于判断是否需要续接观察者；完成判定仍只认 §5.18.4 三证据，不得以进程存活/进程消失代替。
 - **旧终态作废（`terminal_superseded`）**：续接接管后（job `status=running` 且已写 `observation_resumed_at`），早于接管时刻的 `terminal` 属上一次观察者收尾留下的旧终态（旧版把心跳被拒写成 `failed`），**不再作为本轮判定依据**：`round_detail.terminal` 只反映接管后新写的终态（无则为 `null`），旧终态原文转 `round_detail.terminal_superseded`（含 `outcome`/`reason`/`ts`）供审计。events.jsonl 行 append-only**一字不改**；未续接的轮次（无 `observation_resumed_at`）行为不变。
@@ -1023,7 +1027,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   4. 未超接续上限（每轮最多 5 次）且不重复接续同一 turn。
 - **接续动作只读**：`job.turn_id` 前移为新 turn，`job.turn_adopted` 追加 `{from, to, code, at}` 审计记录，events.jsonl 追加一条 `system` 事件（`turn_adopted: <旧> → <新>（<code> 后同一会话自动重开，继续观察；未重发 prompt）`），观察进程换绑新 turn 继续轮询；**不新建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**，既有 session 事件与 turn 记录一字不改。
 - **适用范围**：启动证明阶段（首个 `pi_turn_get` 已是 error/aborted）与观察循环（轮询中落 error/aborted）走同一判据与同一动作。
-- **`round-observe` 解除误报阻塞**：续接接管成功（`status=observing`）后，若本任务停在 `needs_user` + `failure_code=execution_failed` 且 `task.run_id` 与本轮一致 → 核心清空 block 字段（`clear_block_fields`）并把任务转回 `running`（`status_change` 事件 detail 带 `via=round-observe`、`reopened=true`；`round_observe` 事件与返回形状带 `reopened:true`）。**只**解除本轮的 `execution_failed`——其它阻塞原因（`review_failed`/`observation_blocked`/…）与其它轮次一律原样保留，`deduplicated` 幂等返回不触发解除。
+- **`round-observe` 解除误报阻塞**：续接接管成功（`status=observing|finalizing` 或 `status=settled` 且新结果 `finished/exit_code=0`）后，若本任务停在 `needs_user` + `failure_code=execution_failed` 且 `task.run_id` 与本轮一致 → 核心清空 block 字段（`clear_block_fields`）并把任务转回 `running`（`status_change` 事件 detail 带 `via=round-observe`、`reopened=true`；`round_observe` 事件与返回形状带 `reopened:true`）。**只**解除本轮的 `execution_failed`——其它阻塞原因（`review_failed`/`observation_blocked`/…）与其它轮次一律原样保留，`deduplicated` 幂等返回不触发解除。
 - **读取层**：`round_detail.turn_adopted` 透出接续历史（`null` = 从未接续），只作审计展示；完成判定仍只认 §5.18.4 三证据 + §5.23.3 的持久 turn 终态。
 
 ### 5.23.9 Goal 模式派发与契约审批门（v3 补丁）
@@ -1305,7 +1309,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    |---|---|---|---|
    | `needs_plan_input` | `planner_failed`、`plan_missing` | 3 | 规划材料不足或规划失败，需重新规划 |
    | `execution_question` | `execution_input_required` | 3 | 执行中待答问题，轮次仍在运行（§5.28） |
-   | `verify_unconfirmed` | `verification_unconfirmed` | 3 | 核心亲跑 verify 未通过或证据缺失 |
+   | `verify_unconfirmed` | `verification_unconfirmed` | 3 | Plus 验证失败或证据缺失（证据不明不自动质量补救） |
    | `review_changes_exhausted` | `review_blocked`、`review_fix_exhausted` | 3→4 | 同分支修复轮已达上限 |
    | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged` | 3 | 提交/推送/PR 受阻 |
    | `remote_unavailable` | `remote_unavailable`、`remote_task_missing` | 1→2 | Kaneo 不可达或任务在远端已不存在 |
@@ -1422,7 +1426,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
  - 写入 `project_mappings.items[project_id].engine_mode`（**映射条目层**，不是 `automation` 内），带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。
  - **为什么在条目层**：`set-project-automation` 会用固定键白名单重建 `automation` 子字典（`validate_automation`），存在它里面的 `engine_mode` 会被下一次 automation 写入静默丢弃（已在生产库实测复现）。条目层键同时经受 `set-project-mapping`（它展开 `existing_entry`）与 `set-project-automation`（它只替换 `automation` 键）。
- - 配套 `set-project-verify-env {project_id, verify_env, expected_revision?}` 同样写在条目层（`items[pid].verify_env`），供 `engine-verdict` 的 login-shell 注入读取；`verify_env` 必须是扁平字符串→字符串字典，**凭据类键（`TOKEN`/`SECRET`/`AUTHORIZATION`/`KANEO_TOKEN`/`PI_DESKTOP_TOKEN` 等）一律拒绝**——凭据走凭据文件，不进 `verify_env`。
+ - 配套 `set-project-verify-env {project_id, verify_env, expected_revision?}` 同样写在条目层（`items[pid].verify_env`），仅保留历史配置兼容，不再注入 Pilot 验证进程；`verify_env` 必须是扁平字符串→字符串字典，**凭据类键（`TOKEN`/`SECRET`/`AUTHORIZATION`/`KANEO_TOKEN`/`PI_DESKTOP_TOKEN` 等）一律拒绝**——凭据走凭据文件，不进 `verify_env`。
  - `engine_mode` 缺省或省略 → `legacy`（strangler 安全默认：旧项目行为不变，引擎不驱动）。
  - 非法值 → `bad_request`；命令独立于 `set-project-automation`（后者不改动、不校验该键，读侧 `automation_policy.policy_for` 原样透出）。
  - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
@@ -1494,14 +1498,16 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    `user`（规划问答/评审决议等真正的用户动作）。
 
 
-#### 5.27.11 live monitor 核心判定（A1）
+#### 5.27.11 live monitor 核心判定（Plus 验证证据）
 
-- legacy 保持转录匹配；shadow 保持旧结果，同时记录核心 verdict 对比回执；live 完成点调用 engine-verdict，转录仅用于展示。回执绑定 task/run/plan，验证前后复校身份，禁止陈旧结果覆盖新轮次。
-- 核心读取冻结且哈希匹配的顶层 verify 围栏（1–5 条），沿用 parse_verify_block 的命令限制；cwd 为本轮已验证的任务工作树，环境继承并注入项目 verify_env，输出和回执脱敏。缺少可信声明或工作树不能确认时 fail closed，不能退回仓库根目录执行。
-- 每条命令上限 600 秒，整组含 PATH 探测总时限不超过 monitor 租约 80%，同时受 runner 剩余时限约束；命令之间续心跳，超时终止进程组，禁止遗留验证子进程。
-- 有效 diff 非空且全部通过 → advance in-review、成本、report succeeded；requires_branch_review 的轮次先 delivery-commit，并核对 HEAD 已提交树与冻结预期索引。manual detached 轮次保留未提交成果，不提交或建 PR；推进仍严格核对当前源码、执行轮、计划和回执 binding，不要求 HEAD 含本轮成果。环境失败 → needs_user，failure_code=verification_environment_failure，环境阶梯 waiting_env；修复 verify_env/PATH 后用户 resume 将原 run/plan/worktree 排回 monitor，不新增 dispatch、执行轮次或补救计数；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
-- 环境失败的 resume 不要求托管，但必须 failure_stage=monitor；非托管任务不写 automation 段字段。交互式「重新运行验证检查」保留执行 PATH 来源，再叠加同源 project_verify_env，显式 PATH 优先；继续使用 /bin/bash --noprofile --norc，不放宽 verification_recovery.candidate。回执只新增排序 verify_env_keys 与规范化 JSON 的完整 verify_env_sha256，不记录环境值，注入的敏感值须从输出、事件与日志脱敏。
-- live 派发提示允许执行端自检，由核心判通过；不改变发送已知/未知不重发守卫。
+- live 调用 engine-verdict 核对 §5.18.6 的 Plus 工具证据；shadow 记录同源对比收据，保留旧结果路径；legacy 保留历史 Goal/command_verification 完成策略。三种模式均不在 Pilot 执行 verify。
+- 核心只读取冻结且哈希匹配的计划、可信本机 spec/job/events 与登记工作树，拒绝 payload 自带的伪造检查。核对失败不得退回仓库根目录执行或让助手文字代替工具证据。
+- 证据读取、Git 指纹与逐阶段核对受 monitor 租约和 runner 剩余时限约束，在 SQLite 写锁外进行，期间保留心跳与前后身份复校。
+- 有效 diff 非空且 Plus 验证全部通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 证据门。
+- 环境失败 → verification_environment_failure，提示检查 Plus 执行环境。旧环境失败 resume 将原 run/plan/worktree 排回 monitor，只重新核对已有 Plus 证据，不新增模型调用、派发、执行轮或补救计数。缺失/未知/源码变化等证据未确认进入 attention，不触发自动质量修复；真实测试失败和空转仍沿既有质量阶梯。
+- `resolve reverify` 只读重新核对当前 Plus 证据，保留远端状态、轮次、终态、计划及证据复校。`run-verification-checks` 兼容入口拒绝本地执行，历史状态接口可读取旧审计记录。
+- 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
+- 不支持在已完成 Plus 会话里任意追加 turn 后直接采纳为原轮次验证；不得宣传手动补验后“同步即可通过”。需通过上条有身份守卫的新执行轮次取得新证据。
 
 #### 5.27.12 自动补救闭环（A2）
 
@@ -1529,7 +1535,7 @@ get-project-mappings.items 增加 engine_mode（legacy缺省）、verify_env（�
 engine-verdict 可选 request_id/run_id（monitor租约身份）、budget_seconds:int（正数）；resolve 可选 engine_fix:dict 为引擎事务内补救参数，必须核验 automation actor 与绑定失败回执，不允许借其绕过发送守卫。
 
 
-A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命令中的凭据；交付提交使用私有 Git index 与冻结源码/tree 对照，保留仓库 hooks。hook 或并发变化导致最终提交 tree 与通过验证的 tree 不同则阻塞，不登记交付、不进入Review、不发布；异常本地提交保留以便恢复，不自动reset工作树。shadow验证使用隔离快照，失败、异常和验证产物不得改变旧monitor判定或旧工作树。
+A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命令中的凭据；交付提交使用私有 Git index 与冻结源码/tree 对照，保留仓库 hooks。hook 或并发变化导致最终提交 tree 与通过验证的 tree 不同则阻塞，不登记交付、不进入Review、不发布；异常本地提交保留以便恢复，不自动reset工作树。shadow只读核对同一 Plus 证据，不代跑命令或创建验证副本；失败和异常不改变旧 monitor 判定或工作树。
 
 
 三态与手动规划兼容：engine-owned worker 携带进程默认mode/force与实例身份，核心在候选选择、定点领取及dispatch验证后的事务再次校验当前项目模式与活动引擎租约；自动请求仅可领live项目，旧CLI/App runner不套用此限制。唯一手动例外是用户通过start-plans明确授权的plan请求（requested_by=user、manual_authorized=true），可由引擎代原App拉起，领取后仍走核心单飞和原后端守卫；这不授权该项目后续自动派发，也不改变legacy/shadow设置。

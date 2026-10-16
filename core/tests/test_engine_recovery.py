@@ -1,10 +1,9 @@
 """Actual automation resolve/queue boundary, disposable Git + fake Kaneo/Plus."""
 from pathlib import Path
-import os
 import time
 from unittest.mock import patch
 
-from kanpilot import cmd_queue, core, db, remote, util
+from kanpilot import cmd_queue, core, db, git_delivery, harness_plus_adapter, remote, util
 from kanpilot.engine import ladder, loop
 import test_execution_retry as retry_fixture
 from test_session import pi_event, write_json
@@ -24,6 +23,15 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
                                          "expected_revision": self.call("get-project-mappings")["revision"]})
         self.call("set-project-engine-mode", {"project_id": pid, "engine_mode": "live"})
         self.call("set-project-automation", {"project_id": pid, "automation": {"enabled": True}})
+        self.original_plan = Path(self.task()["plan_path"]).read_text()
+        self.plus_status["session_id"] = "failed-session"
+        def read_turn(*args, **kwargs):
+            self.assertFalse(self.ctx.conn.in_transaction)
+            return {"session_id": self.plus_turn["sessionId"], "turn_id": self.plus_turn["turnId"],
+                    "status": self.plus_turn["status"]}
+        turn_patch = patch.object(harness_plus_adapter, "plus_turn_get", side_effect=read_turn)
+        turn_patch.start()
+        self.addCleanup(turn_patch.stop)
         self.job.update(status="finished", exit_code=0)
         write_json(self.directory / "job.json", self.job)
         (self.directory / "events.jsonl").write_text(util.jdump(pi_event(1, "session", session_id="failed-session", turn_id="failed-turn")) + "\n"
@@ -31,19 +39,41 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
         self.plus_turn["status"] = "completed"
         self.call("get-session", {"task_id": self.task_id, "run_id": self.run_id, "status_only": True})
 
+    def write_plus_verification(self, commands, *, exit_code=0, output="passed"):
+        """Persist the worker's trusted execution shape without running tools."""
+        task = self.task()
+        self.job.update(status="finished", exit_code=0, plan_sha256=task["plan_sha256"],
+                        completion_policy="command_verification", verification_evidence_version=1,
+                        verification_source_sha256=git_delivery.source_state_sha256(self.worktree))
+        write_json(self.directory / "job.json", self.job)
+        write_json(self.directory / "spec.json", {
+            "task_id": self.task_id, "run_id": self.run_id, "backend": "pi_desktop",
+            "config": self.job["config"], "plan_sha256": task["plan_sha256"],
+            "completion_policy": "command_verification", "plan_path": task["plan_path"],
+            "repository": task["repository"], "cwd": str(self.worktree), "runs_dir": str(self.directory)})
+        events = [pi_event(1, "session", session_id="failed-session", turn_id="failed-turn")]
+        events.extend(pi_event(index + 2, "command_output", name="exec", turn_id="failed-turn",
+                              input=util.jdump({"command": command}), exit_code=exit_code, output=output)
+                      for index, command in enumerate(commands))
+        events.append(pi_event(len(events) + 1, "terminal", outcome="completed"))
+        (self.directory / "events.jsonl").write_text("".join(util.jdump(event) + "\n" for event in events))
+
     def quality_failure(self, *, empty=True):
         command = "true" if empty else "false"
         if empty:
             (self.worktree / "tracked.txt").write_text("base\n")
             (self.worktree / "new.txt").unlink(missing_ok=True)
         plan = Path(self.task()["plan_path"])
-        plan.write_text("# Frozen\n```verify\n" + command + "\n```\n")
+        plan.write_text(self.original_plan + "\n```verify\n" + command + "\n```\n")
         sha = util.sha256_file(plan)
         db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso, plan_sha256=sha)
         db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
                      plan_verify={"plan_sha256": sha, "commands": [command]})
-        self.call("engine-verdict", {"task_id": self.task_id, "expected_execution_run_id": self.run_id,
+        self.write_plus_verification([command], exit_code=0 if empty else 1, output="passed" if empty else "assertion failed")
+        result = self.call("engine-verdict", {"task_id": self.task_id, "expected_execution_run_id": self.run_id,
                                      "expected_plan_sha256": sha})
+        self.assertEqual(result["kind"], "empty_diff" if empty else "verify_failed", result)
+        self.assertEqual(result["evidence_source"], "plus_tool_results")
         db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso,
                        failure_code="verification_unconfirmed", failure_stage="monitor")
         return {"task_id": self.task_id, "action": "resume" if empty else "replan", "actor": "automation",
@@ -144,11 +174,11 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
             self.assertEqual(self.call_err("resolve", payload).code, "conflict")
         self.assertNotIn("engine_fix_rounds", db.task_extra(self.task()))
 
-    def test_fixed_verify_environment_resumes_original_execution_without_prompt(self):
+    def test_pilot_verify_environment_cannot_override_plus_environment_failure(self):
         from kanpilot import auto_dispatch, auto_monitor
         command = "kp_fixture_environment_verify"
         plan = Path(self.task()["plan_path"])
-        plan.write_text("# Frozen environment verification\n```verify\n" + command + "\n```\n")
+        plan.write_text(self.original_plan + "\n```verify\n" + command + "\n```\n")
         sha = util.sha256_file(plan)
         db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso, status="running", stage="monitor",
                        plan_sha256=sha, **core.clear_block_fields())
@@ -158,8 +188,7 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
         # workspace follows the existing versioned local-task contract.
         core.update_delivery(self.ctx.conn, self.task(), self.ctx.now_iso, workspace_version=1,
                              base_branch="main", base_sha=self.git(self.worktree, "rev-parse", "HEAD"))
-        self.job.update(plan_sha256=sha, completion_policy="command_verification")
-        write_json(self.directory / "job.json", self.job)
+        self.write_plus_verification([command], exit_code=127, output="command not found: " + command)
         dispatch_count = self.ctx.conn.execute("SELECT COUNT(*) FROM requests WHERE kind='dispatch'").fetchone()[0]
         original_rounds = self.ctx.conn.execute("SELECT COUNT(*) FROM execution_rounds").fetchone()[0]
 
@@ -180,13 +209,8 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
         self.assertEqual(self.task()["run_id"], self.run_id)
         self.assertIn("resume", self.call("get-task", {"task_id": self.task_id})["task"]["allowed_actions"])
 
-        tools = self.root / "fixed-verify-tools"
-        tools.mkdir()
-        binary = tools / command
-        binary.write_text("#!/bin/sh\nexit 0\n")
-        binary.chmod(0o755)
         self.call("set-project-verify-env", {"project_id": self.task()["project_id"],
-                                            "verify_env": {"PATH": str(tools) + os.pathsep + os.environ["PATH"]}})
+                                            "verify_env": {"PATH": "/configured-only-in-pilot"}})
         result = self.call("resolve", {"task_id": self.task_id, "action": "resume", "actor": "user"})
         self.assertEqual(result["task_status"], "running")
         self.assertEqual(result["request"]["kind"], "monitor")
@@ -194,8 +218,9 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
         self.assertEqual(self.task()["plan_sha256"], sha)
         self.assertEqual(core.delivery_of(self.task())["worktree_path"], str(self.worktree))
         complete_existing_monitor()
-        self.assertEqual(self.task()["status"], "in_review", util.jdump(db.task_extra(self.task()).get("engine_verdict")))
-        self.assertTrue(db.task_extra(self.task())["engine_verdict"]["verification_ok"])
+        self.assertEqual(self.task()["status"], "needs_user")
+        self.assertEqual(self.task()["failure_code"], "verification_environment_failure")
+        self.assertFalse(db.task_extra(self.task())["engine_verdict"]["verification_ok"])
         self.assertFalse(db.task_extra(self.task()).get("engine_fix_rounds"))
         self.assertEqual(self.ctx.conn.execute("SELECT COUNT(*) FROM requests WHERE kind='dispatch'").fetchone()[0], dispatch_count)
         self.assertEqual(self.ctx.conn.execute("SELECT COUNT(*) FROM execution_rounds").fetchone()[0], original_rounds)

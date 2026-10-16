@@ -38,9 +38,9 @@
   4. **评审**：结论/报告路径/fix_task_id/`打开报告`；无评审数据显示空态。
   5. **记录**：两个并列区段（不嵌套卡片）——「尝试记录」（时间、阶段、结果、说明，结果列图标+文字，行高 ≥40pt，说明按内容自然撑高不截断单行）与「事件时间线」（时间、类型、摘要三列，行高 ≥40pt，类型列固定宽度且不折断 `round_observe` 等标识）。单个外层滚动；点击一行展开完整 note/evidence 或结构化 `detail` 原文（可复制）；默认显示核心 `EventItem.summary` 中文一句话；未知 kind 保留原值且可完整查看。此页只称「最近记录」（数据源 `get-task.attempts` + `list-events(limit:200)`），不冒充全史。
   没有对应数据时显示清晰空态文案，不显示空白表。
-  五段导航始终固定在浮层顶部，切换分段不改变浮层的有效尺寸；内容区填满导航以下的可用高度且只滚动一次。
+  五段导航始终固定在浮层顶部，切换分段不改变浮层的有效尺寸；内容区填满导航以下的可用高度且只滚动一次。顶栏在五段间结构与高度一致：第一行为项目标签与任务标题（最多两行，可选择与获取完整文字），第二行为状态、五段导航与关闭；切换分段时顶栏高度与导航位置不变。计划页与执行页一样不重复标题（见 §4.8）。
 - **待办列直达计划页（T1）**：待办（`board_column=todo`）列卡片的主入口直接打开同一详情容器的**计划页**（非概览）；其他列仍默认打开概览。计划页可切回概览/其他页；「准备/重新规划」仍跳转既有规划面板。
- - 计划页头部按 §4.8 展示任务标题（18pt，单独首行、最多两行）、`待确认执行` 状态、`plan_kind`、生成时间与 plan_sha256 前 12 位（可复制）；模式分段与打开/定位按钮置于独立操作行，不与元数据争宽。
+ - 计划页头部按 §4.8 展示 `plan_kind`、生成时间与 plan_sha256 前 12 位（可复制）；任务标题与 `待确认执行` 状态只由父详情顶栏显示一处（同执行页），父详情隐藏顶栏时计划页补回（标题 18pt，单独首行、最多两行）；模式分段与打开/定位按钮置于独立操作行，不与元数据争宽。
 - 详情底栏操作区：按钮由 `get-task` 返回的 `allowed_actions` 渲染，映射：
   - `enqueue` → `安排下一步`（task needs_plan/ready/running/in_review 时按核心推断 kind；label 按 kind 变：`安排派发`/`安排规划`/`安排检查`/`安排评审`）
   - `retry` → `重试派发`（仅 send_state=not_sent 等明确未发送）
@@ -223,7 +223,7 @@ Plus轮次在搜索框前增加紧凑状态行，初次进入及“检查 Plus �
 ### 4.8 计划阅读页（T1，protocol §5.23.1）
 
 - 数据源：`get-plan {task_id, expected_plan_sha256}`；进入时携带当前 `get-task` 的 plan_sha256 做预期核验。读取在后台进行，**任务切换/在途响应归属用 request generation 守卫**——旧任务响应不得覆盖新页面。
- - 头部（固定，不随正文滚动）：标题（18pt）**单独占满第一行且最多两行**（可选中复制）；`待确认执行` 状态、`plan_kind`、生成时间、`plan_sha256` 前 12 位（可复制）与可截断路径置于元数据区，长路径**中间截断**但可复制并经 `在 Finder 显示` 定位；**渲染/原文**模式分段与 `打开计划文件`、`在 Finder 显示` 置于**独立操作行**（宽度不足时在该行换行），不与元数据争宽。右上无裁切、重叠或漂浮残字。底栏确认条与按钮可用性规则不变。
+ - 头部（固定，不随正文滚动）：标题由父详情顶栏显示一处（最多两行，可选中复制）；父详情隐藏顶栏时，计划页补回同样的标题（18pt，**单独占满第一行且最多两行**，可选中复制）；`plan_kind`、生成时间、`plan_sha256` 前 12 位（可复制）与可截断路径置于元数据区（`待确认执行` 状态与标题同样只显示一处，见 §4.1），长路径**中间截断**但可复制并经 `在 Finder 显示` 定位；**渲染/原文**模式分段与 `打开计划文件`、`在 Finder 显示` 置于**独立操作行**（宽度不足时在该行换行），不与元数据争宽。右上无裁切、重叠或漂浮残字。底栏确认条与按钮可用性规则不变。
  - **渲染/原文双模式**：默认渲染视图以 Foundation `.full` Markdown 的 `PresentationIntent` 语义结构（标题/列表/代码/引用/分隔/GFM 表格）做**块级**原生排版，不用单个 `Text` 承载整篇，也不手写正则解析器；H1 用 18pt，其余标题/正文以 13pt 的字重与间距区分，代码沿用 12pt 等宽，颜色/分隔沿系统语义色。超宽单元格/代码行可换行或在内容区水平查看，不撑宽整个 sheet。原文模式逐字显示（含所有字符，不折叠/不重排）。两种模式正文均可选中复制，跨块选择保留合理换行及列表/表格内容。
  - **安全约束**：渲染**不执行**内嵌 HTML/脚本，不自动加载远端媒体（图片仅显示 alt/占位）；Markdown 链接以文字+图标显示，点击经 `NSWorkspace` 打开系统默认浏览器（仅 `http/https`）。页面内**不允许**修改计划内容。
  - **核验失败状态**（`get-plan` 返回错误）：保留任务摘要区，显示错误原因（中文）、`重试`、`打开计划文件` 入口；底栏执行确认（`confirm_dispatch` 等写操作）**保持禁用**直到核心重新核验通过——不把不可信正文当作已批准计划展示，也不允许「确认并安排执行」。
@@ -263,6 +263,7 @@ Plus轮次在搜索框前增加紧凑状态行，初次进入及“检查 Plus �
 | 已归档 done | `archivebox` | gray |
 | 待确认执行 ready（plan_execution_hold） | `checkmark.circle` | green（文字必须为「待确认执行」） |
 | 等待确认材料（未授权 plan 请求） | `doc.badge.questionmark` | orange |
+| 等待你回答（开放执行提问，详情头部附加） | `exclamationmark.circle` | orange（文字必须为「等待你回答」） |
 | 需处理 actionable | `exclamationmark.circle` | orange |
 | 历史记录 historical | `clock` | secondary |
 | 纯记录 informational | `info.circle` | secondary |
@@ -335,7 +336,7 @@ Plus 控制面连接与会话 MCP 挂接能力分别显示；attachment_supporte
 
 菜单栏显示运行中/已暂停、在途/待处理数和上次 intake，提供打开、暂停/恢复、立即检查、退出。关窗切 accessory，重开切 regular。任务详情增加自动处理信息（修复轮、段预算、未计价步数、跳过原因）和交付信息（分支、工作树路径、提交、PR 链接、合并状态）；看板显示「自动」「等待合并」「修复 n/m」。
 
-待处理原因、说明与动作按 automation-contract「待处理原因、处置与事件」与 protocol §5.27.4。verification_unconfirmed 显示「验证结果待确认」；可核验材料优先「重新运行验证检查」，仅legacy/shadow允许「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。verification_environment_failure 为「验证环境未就绪」，说明指向项目 verify_env 的 JDK/SDK/设备设置；monitor 动作为「重新验证本轮」。fix_branch_unavailable 为「无法同分支修复」/「本轮改动在独立工作树，无法同分支修复」，monitor 可「重新验证本轮」，review 不提供 resume；replan 二次确认「将从目标分支新建工作树，本轮改动不会带入」。branch_exists 为「任务分支已存在」/「重新准备分支」；delivery_base_unknown 为「PR 目标分支不存在」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，暂停自动流程，可恢复自动处理。其他失败原因与按钮遵照核心 allowed_actions 和 automation-contract 处置表，禁止 UI 绕过核心 allowed_actions。
+待处理原因、说明与动作按 automation-contract「待处理原因、处置与事件」与 protocol §5.27.4。verification_unconfirmed 显示「验证结果待确认」；可核验材料提供「重新核对验证证据」，缺少证据且身份完整时提供「让 Plus 重新执行并验证」（新执行轮次，沿用计划和工作树），仅legacy/shadow允许「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。verification_environment_failure 为「验证环境未就绪」，说明指向 Plus 实际执行环境的 JDK/SDK/设备；monitor 动作为重新核对原 Plus 验证证据，不在 Pilot 运行验证。fix_branch_unavailable 为「无法同分支修复」/「本轮改动在独立工作树，无法同分支修复」，monitor 可「重新验证本轮」，review 不提供 resume；replan 二次确认「将从目标分支新建工作树，本轮改动不会带入」。branch_exists 为「任务分支已存在」/「重新准备分支」；delivery_base_unknown 为「PR 目标分支不存在」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，暂停自动流程，可恢复自动处理。其他失败原因与按钮遵照核心 allowed_actions 和 automation-contract 处置表，禁止 UI 绕过核心 allowed_actions。
 
 
 撤回自动补救：沿用待处理详情与任务详情的动作区/原生二次确认；仅 allowed_actions 含 revert_engine_fix 时显示，候选存在时排在 resume 之前作为当前主动作。先读取新鲜详情，两个 expected 都来自同一 engine_fix_revert 候选，候选改变或消失须拒绝，不拼接摘要/旧缓存。确认说明固定为「恢复本轮验证待处理、退还一次自动补救、不重新执行、不改本轮工作树」；取消不发命令，冲突显示核心错误并刷新候选。自动处理信息卡增加独立「自动补救轮 used/max」，来自持续存在的 engine_fix_summary；现有评审「修复轮」仍读 automation.fix_round，撤回后 summary 保留并显示退额。Models 对新增字段可选解码兼容旧核心，FakeCore 同步新字段、动作、两个 expected 和失败响应。
@@ -467,7 +468,7 @@ Goal 模式提交契约后的 completed 仅表示目标规划结束。仍 awaiti
 
 总览继承既有列表/详情外壳与系统原生控件；按“需要你 → 流水线计数 → 进行中任务 → 项目自动化 → 环境健康”排列。侧栏总览默认，任务看板为次级入口。phase/condition/attention 来自核心 JSON，缺失字段只显示未提供，不在 Swift 再推断自动化状态。菜单栏计数、通知和总览同源 attention-list；详情沿用五段导航，加 phase 步进与既有证据入口。
 
-设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；verify_env 同时用于核心验证和「重新运行验证检查」，凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。
+设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；verify_env 仅保留历史配置兼容，不再供 Pilot 执行验证，项目页明确标记；凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。
 
 ### 4.17 执行期问答（P6，protocol §5.28）
 
@@ -479,15 +480,17 @@ AutomationDashboardView 的 attention 行及 MenuBarView 的任务入口。
   count 是当前显示的一份请求的题数，不混同 queued 请求数；queued>0 另显示“还有 N 份提问”。
   通知复用新 attention 通知，正文取 blocked_summary；同请求轮询不得重复通知；执行问答用attention_id+question_preview.request_id去重，下一份FIFO显示可再次通知，attention_id不改。
 - 点击回答打开该任务的既有详情，在概览阻塞证据之后、下一步操作之前加入问答区。
-  顺序为标题/来源/等待与队列摘要 → 题目和选项 → 送达状态/错误 → 保存草稿/提交答案。
+  顺序为标题/来源/等待与队列摘要 → 题目和选项 → 送达状态/错误。提交答案是详情底栏主按钮「提交答案」，未答完时禁用并写明「还差第 N 题」；保存草稿与低频动作在底栏「更多操作」中。
   所有题目可见且纵向滚动；title、description、label 支持换行和选择文本，不增加独立大卡片、阴影或全局皮肤。
+- 状态分流（2026-10-17）：开放且可答的记录显示完整问答，标题为“等待你回答 · N题”，元信息显示“已答 X/N”，卡片不使用橙色底色。已回答、已过期或已停止的记录收成一行摘要：状态文字沿用上文“已回答，继续执行”“已在 Plus 回答”“问题已回答，回答来源未知”“已过期，原问题与草稿保留”“本轮已停止，原问题与草稿保留”，并附结束时间；“查看问题与回答”展开只读列表，不显示可编辑输入。开放但不可答的记录标题为“等待你在 Plus 中回答”，显示核心原因；底栏不出现回答或提交入口，只显示“等待你在 Plus 中回答”，“停止本轮”仍在「更多操作」中（见下文 answerable=false）。已关闭记录不再标题为“执行中提问”。
+- 头部状态：核心 display_status 的展示不变；开放且可答的提问在头部另加“等待你回答”徽标（图标+文字，橙色，见 §5 映射）。
 - 正文13pt、区段标题18pt semibold、辅助11pt；间距8/12/16；颜色沿系统语义色，任何状态同时配文字。
   选项继承既有 optionButton 形态，多选用勾选状态，单选选择与自定义互斥；明确逐题“跳过”。
   自定义输入沿现有多行TextField；仅执行问题增加multi_select，不改变规划字段与保存语义。
 - 保存草稿只调用 save-execution-answers。提交只作用 DTO 的 run/request/指纹，保留原 operation_id 直到收到明确结果。
   输入锁定于 submitting；unknown 锁定原答案，显示“送达结果未知，正在核对”，提供只读“重新核对”。
   有 pending 不能显示“未送达”；显式重试只送原冻结答案、新 operation_id，不提供改答案后重发。
-- 下方低频动作保留“全部跳过并继续”与“停止本轮”；停止沿既有危险确认样式，明确会结束当前轮次。
+- 低频动作“全部跳过并继续”与“停止本轮”位于底栏「更多操作」，仅在核心 allowed_actions 含对应动作时出现；停止沿既有危险确认样式，明确会结束当前轮次。
   跳过整份请求对应 Plus Decline all，不跳过其它 queued 请求。
   answerable=false 显示“请在 Plus 中回答”与原因，关闭本地回答/跳过，保留停止。
 - 成功显示“已回答，继续执行”；来源plus显示“已在 Plus 回答”；未知来源不冒充某端作答。

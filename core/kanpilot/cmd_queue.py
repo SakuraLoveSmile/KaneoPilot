@@ -325,13 +325,15 @@ def _resolution_snapshot(task):
     return tuple(task[key] for key in ("status", "stage", "run_id", "failure_code", "failure_stage", "project_id", "repository", "plan_path", "plan_sha256", "plan_generated_at", "source_path", "source_sha256", "requirements_sha256", "session_id", "sent", "send_state", "lock_retained", "extra_json"))
 
 
-def execution_retry_candidate(conn, task, *, engine_empty=False):
+def execution_retry_candidate(conn, task, *, engine_empty=False, verification_retry=False):
     """Cheap UI gate; current terminal and external identities are checked on resolve."""
     from . import round_store
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     return bool(db.task_is_active(task) and task["status"] == "needs_user"
                 and task["stage"] == "monitor" and (task["failure_code"] == "execution_failed"
-                     or (engine_empty and task["failure_code"] == "verification_unconfirmed"))
+                     or (engine_empty and task["failure_code"] == "verification_unconfirmed")
+                     or (verification_retry and task["failure_code"] in
+                         ("verification_unconfirmed", "verification_environment_failure")))
                 and task["failure_stage"] in ("monitor", "running")
                 and task["sent"] == 1 and task["send_state"] == "sent"
                 and task["plan_path"] and task["plan_sha256"]
@@ -341,6 +343,16 @@ def execution_retry_candidate(conn, task, *, engine_empty=False):
                 and not conn.execute("SELECT 1 FROM requests WHERE task_id=? "
                                      "AND status IN ('queued','claimed') LIMIT 1",
                                      (task["task_id"],)).fetchone())
+
+
+def verification_retry_candidate(conn, task):
+    """A new Plus round is available only for known verification blocks."""
+    from . import round_store
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    return bool(task["failure_code"] in ("verification_unconfirmed", "verification_environment_failure")
+                and execution_retry_candidate(conn, task, verification_retry=True)
+                and row["backend"] == "pi_desktop" and row["worktree_path"]
+                and task["session_id"] and row["session_id"] == task["session_id"])
 
 
 def _require_execution_terminal(ctx, task, expected):
@@ -396,10 +408,13 @@ def verify_execution_retry_terminal(conn, task, now=None):
 def _prepare_execution_retry(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
     engine_empty = _engine_empty_retry(task, payload)
+    verification_retry = payload.get("verification_retry") is True
+    if verification_retry and not verification_retry_candidate(ctx.conn, task):
+        raise util.KanpilotError("conflict", "当前验证身份或发送状态不明，不能重新执行；请先重新核验验证证据")
     if (payload["action"] == "resume" and payload.get("expected_execution_run_id")
-            and task["failure_code"] != "execution_failed" and not engine_empty):
+            and task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
-    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty):
+    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry):
         return None
     from pathlib import Path
     from . import bridge, git_delivery, headless_adapter, remote
@@ -408,7 +423,7 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("conflict", "重新执行必须确认当前失败轮次")
     if expected != task["run_id"]:
         raise util.KanpilotError("stale_run", "所选会话已不是当前失败轮次，请刷新后重试")
-    if not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty):
+    if not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty, verification_retry=verification_retry):
         raise util.KanpilotError("conflict", "当前任务不能沿用计划重新执行，请先确认旧轮次和发送状态")
     snapshot = _resolution_snapshot(task)
     source = headless_adapter.resolve_source(ctx.conn)
@@ -604,6 +619,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         raise util.bad_request("actor 必须为 user 或 automation")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
+    requested_action = action
+    if payload.get("verification_retry") is True:
+        raise util.bad_request("请使用 retry_verification 显式发起 Plus 重新执行并验证")
+    if action == "retry_verification":
+        if actor != "user":
+            raise util.bad_request("重新执行并验证必须由用户明确发起")
+        payload = dict(payload, action="resume", verification_retry=True)
+        action = "resume"
     if action == "revert_engine_fix":
         from . import engine_fix_revert
         return engine_fix_revert.revert(ctx, payload)
@@ -667,7 +690,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             from . import git_delivery, round_store
             old_round = round_store.get_round(conn, task["task_id"], task["run_id"])
             if (execution_retry["snapshot"] != _resolution_snapshot(task)
-                    or not execution_retry_candidate(conn, task, engine_empty=_engine_empty_retry(task, payload))
+                    or not execution_retry_candidate(conn, task, engine_empty=_engine_empty_retry(task, payload),
+                                                         verification_retry=payload.get("verification_retry") is True)
                     or old_round is None or dict(old_round) != execution_retry["round_snapshot"]
                     or execution_retry["source"].source_signature(task["task_id"], task["run_id"])
                     != execution_retry["source_signature"]):
@@ -695,7 +719,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             db.update_task(conn, task["task_id"], now, requirements_sha256=accepted_remote["requirements_sha256"], kaneo_status=accepted_remote["kaneo_status"], kaneo_checked_at=now)
             db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor=actor)
             task = db.require_task(conn, task["task_id"])
-        resolution = {"action": action, "note": note, "at": now, "actor": actor}
+        resolution = {"action": requested_action, "note": note, "at": now, "actor": actor}
         new_request = None
 
         if action in ("resume", "accept_verification"):
@@ -706,7 +730,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             if action == "accept_verification":
                 from . import engine_claim_scope
                 if engine_claim_scope.effective_mode(conn, task["project_id"]) == "live":
-                    raise util.KanpilotError("conflict", "Live 项目由核心执行验证，请重新运行验证检查或修复计划；不能人工跳过验证")
+                    raise util.KanpilotError("conflict", "Live 项目核对 Plus 验证证据；请让 Plus 重新执行并验证，不能人工跳过验证")
                 if code != "verification_unconfirmed" or not task["run_id"]:
                     raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
                 db.set_extra(conn, task, now, verification_override={"execution_run_id": task["run_id"], "actor": "user", "at": now, "note": note})

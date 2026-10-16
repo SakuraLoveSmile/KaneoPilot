@@ -277,3 +277,38 @@ class TestExecutionRetry(HeadlessCase):
         self.assertTrue(core.is_automation_managed(self.task()))
         path, mode = cmd_dispatch._ensure_worktree(self.task(), self.task_id, "new-run", self.ctx.conn)
         self.assertEqual((self.worktree, "branch"), (path, mode))
+
+    def test_verification_retry_preserves_original_worktree_and_records_explicit_action(self):
+        for code in ("verification_unconfirmed", "verification_environment_failure"):
+            db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso,
+                           failure_code=code, failure_stage="monitor")
+            self.assertIn("retry_verification", derive.allowed_actions(self.ctx.conn, self.task(), self.ctx.now))
+        payload = dict(self.payload, action="retry_verification")
+        result = cmd_queue.cmd_resolve(self.ctx, payload)
+        self.assertEqual(result["request"]["kind"], "dispatch")
+        self.assertEqual(core.execution_retry_of(self.task())["worktree"]["worktree_path"], str(self.worktree))
+        self.assertEqual(self.task()["plan_sha256"], self.plan_sha)
+        self.assertEqual(util.jload(self.task()["resolution"])["action"], "retry_verification")
+        self.assertEqual((self.worktree / "new.txt").read_text(), "keep this untracked file\n")
+
+    def test_verification_retry_rejects_unknown_identity_and_plus_running(self):
+        payload = dict(self.payload, action="retry_verification")
+        db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso,
+                       failure_code="verification_identity_unconfirmed", failure_stage="monitor")
+        self.assertNotIn("retry_verification", derive.allowed_actions(self.ctx.conn, self.task(), self.ctx.now))
+        self.reject(payload)
+        db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso, failure_code="verification_unconfirmed")
+        self.plus_status["is_running"] = True
+        self.reject(payload)
+        self.plus_status["is_running"] = False
+        self.reject(dict(payload, expected_execution_run_id="stale"))
+        db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso, send_state="unknown")
+        self.assertNotIn("retry_verification", derive.allowed_actions(self.ctx.conn, self.task(), self.ctx.now))
+        self.reject(payload)
+
+
+    def test_verification_retry_requires_explicit_user_action(self):
+        db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso,
+                       failure_code="verification_unconfirmed", failure_stage="monitor")
+        self.reject(dict(self.payload, action="retry_verification", actor="automation"))
+        self.reject(dict(self.payload, verification_retry=True))

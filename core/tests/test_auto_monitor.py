@@ -87,7 +87,7 @@ def test_completion_and_execution_identity(monkeypatch, tmp_path):
     ({"verification_ok": False, "checks": [{"timed_out": True}]}, "verification_unconfirmed"),
     ({"verification_ok": False, "environment_failure": True}, "verification_environment_failure"),
 ])
-def test_live_core_verdict_ignores_transcript(monkeypatch, tmp_path, result, code):
+def test_live_verdict_reads_messages_and_uses_trusted_core_result(monkeypatch, tmp_path, result, code):
     value = task()
     value["project_id"] = "live-project"
     value["extra"]["delivery"] = {"mode": "pr"}
@@ -95,9 +95,8 @@ def test_live_core_verdict_ignores_transcript(monkeypatch, tmp_path, result, cod
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[], responses={
         "get-project-mappings": {"items": [{"project_id": "live-project", "engine_mode": "live"}]},
         "engine-verdict": result,
-        "session-messages": util.KanpilotError("observation_blocked", "transcript unavailable"),
     })
-    assert not any(c == "session-messages" for c, _ in calls)
+    assert any(c == "session-messages" for c, _ in calls)
     verdict_call = next(p for c, p in calls if c == "engine-verdict")
     assert verdict_call["expected_execution_run_id"] == "execution"
     assert verdict_call["expected_plan_sha256"] == "plan"
@@ -502,3 +501,51 @@ def test_plan_verification_hash_mismatch(monkeypatch, tmp_path):
     value["extra"]["plan_verify"]["plan_sha256"] = "old"
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value)
     assert report(calls)["failure_code"] == "verification_unconfirmed"
+
+
+def test_legacy_core_manual_receipt_cannot_override_plus_failure(monkeypatch, tmp_path):
+    value = task()
+    value["extra"]["verification_checks"] = {"operation_id": "old-core",
+        "binding": {"execution_run_id": "execution"}}
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[message(code=3)], responses={
+        "get-verification-check-status": {"state": "completed", "verification_ok": True},
+    })
+    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert not any(c in ("get-verification-check-status", "delivery-commit", "advance-task") for c, _ in calls)
+
+
+def test_live_unavailable_messages_cannot_advance(monkeypatch, tmp_path):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "live"}]},
+        "session-messages": util.KanpilotError("observation_blocked", "unavailable"),
+        "engine-verdict": {"verification_ok": True},
+    })
+    assert report(calls)["outcome"] == "failed"
+    assert not any(c in ("engine-verdict", "delivery-commit", "advance-task") for c, _ in calls)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_versioned_legacy_and_shadow_require_current_plus_turn(monkeypatch, tmp_path, mode):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
+        round_value=dict(detail(), turn_id="current", verification_evidence_version=1),
+        messages=[dict(message(), turn_id="planning")], responses={
+            "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
+            "engine-verdict": {"verification_ok": True}})
+    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+
+
+@pytest.mark.parametrize("result,code", [
+    ({"verification_ok": False, "kind": "unconfirmed"}, "verification_unconfirmed"),
+    ({"verification_ok": False, "kind": "unconfirmed", "failure_code": "verification_unconfirmed"}, "verification_unconfirmed"),
+    ({"verification_ok": False, "kind": "unconfirmed", "failure_code": "verification_identity_unconfirmed"}, "verification_identity_unconfirmed"),
+])
+def test_live_distinguishes_missing_evidence_from_identity_conflict(monkeypatch, tmp_path, result, code):
+    value = dict(task(), project_id="p")
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "live"}]},
+        "engine-verdict": result})
+    assert report(calls)["failure_code"] == code
+    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)

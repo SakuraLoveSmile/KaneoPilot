@@ -443,6 +443,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "executor": (False, "str"),
             "continue_goal": (False, "bool"),
             "continue_goal_only": (False, "bool"),
+            "recovery_turn_id": (False, "str"),
         },
         cmd_dispatch.cmd_round_observe,
     ),

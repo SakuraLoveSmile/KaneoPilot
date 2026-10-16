@@ -1051,7 +1051,11 @@ def allowed_actions(task, requests):
         if task.get("plan_clarification"):
             return ["answer_plan_questions", "replan", "dismiss", "recheck"]
         if task.get("failure_code") == "verification_unconfirmed":
-            return ["run_verification_checks", "reverify", "accept_verification", "replan", "dismiss", "recheck"]
+            return ["retry_verification", "reverify", "accept_verification", "replan", "dismiss", "recheck"]
+        if task.get("failure_code") == "verification_environment_failure":
+            return ["retry_verification", "reverify", "resume", "replan", "dismiss", "recheck"]
+        if task.get("failure_code") == "verification_identity_unconfirmed":
+            return ["reverify", "replan", "dismiss", "recheck"]
         if task.get("review_resolution"):
             return ["resolve_review_blocker", "retry", "replan", "dismiss", "recheck"]
         if task.get("send_state") == "unknown":
@@ -1325,7 +1329,7 @@ def cmd_verification_checks(state, payload, status_only=False):
             return mutate(state, recover)
         return dict(previous["response"], deduplicated=True)
     task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
-    if not task or task.get("failure_code") != "verification_unconfirmed":
+    if not task or task.get("failure_code") not in ("verification_unconfirmed", "verification_environment_failure", "verification_identity_unconfirmed"):
         return fail("当前任务不允许重新运行验证检查", "conflict")
     if (payload.get("expected_execution_run_id") != task.get("run_id")
             or payload.get("expected_plan_sha256") != task.get("plan_sha256")):
@@ -1664,7 +1668,7 @@ def cmd_resolve(state, payload):
         if scenario.get("revert_error"):
             return fail(str(scenario["revert_error"]), "conflict")
     if action == "reverify":
-        if action not in allowed_actions(task, requests) or task.get("failure_code") != "verification_unconfirmed":
+        if action not in allowed_actions(task, requests) or task.get("failure_code") not in ("verification_unconfirmed", "verification_environment_failure", "verification_identity_unconfirmed"):
             return fail("当前状态不允许重新核验验证证据", "conflict")
         if not payload.get("expected_execution_run_id") or payload["expected_execution_run_id"] != task.get("run_id"):
             return fail("执行轮次已变化，请刷新后重新核验", "conflict")
@@ -1684,7 +1688,7 @@ def cmd_resolve(state, payload):
         if action == "revert_engine_fix":
             ov.update({"status": "needs_user", "stage": "monitor", "failure_stage": "monitor",
                        "failure_code": "verification_environment_failure", "display_status": "需人工",
-                       "failure_reason": "验证所需 JDK 版本不符：请在 verify_env 设置 JAVA_HOME 后重新验证本轮",
+                       "failure_reason": "验证所需 JDK 版本不符：请核对 Plus 原轮次证据或让 Plus 重新执行并验证",
                        "send_state": "sent", "sent": 1, "sent_at": task.get("sent_at"),
                        "engine_fix_revert": None,
                        "engine_fix_summary": {"used": max(0, (task.get("engine_fix_summary") or {"used": 1})["used"] - 1), "max": 2},
@@ -1698,10 +1702,10 @@ def cmd_resolve(state, payload):
                 ov[k] = None
             ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
             enqueue_request(s, tid, "monitor")
-        elif action in ("resume", "accept_verification"):
+        elif action in ("resume", "retry_verification", "accept_verification"):
             if action not in allowed_actions(task, requests):
                 return fail_action("核心未允许此动作")
-            failed_execution = action == "resume" and task.get("failure_code") == "execution_failed"
+            failed_execution = (action == "resume" and task.get("failure_code") == "execution_failed") or action == "retry_verification"
             if "expected_execution_run_id" in payload and not failed_execution:
                 return fail_action("失败执行状态已变化，请刷新后重新操作")
             if failed_execution and (not payload.get("expected_execution_run_id") or
@@ -3105,7 +3109,8 @@ def automation_tasks():
         tid = "auto-" + (code or ["waiting-plan", "planning", "long-pr"][i - len(failures)])
         status = "needs_user" if code else ["needs_plan", "planning", "in_review"][i - len(failures)]
         actions = ["resume", "replan", "mark_done", "dismiss", "recheck"]
-        if code == "verification_unconfirmed": actions = ["run_verification_checks", "reverify", "accept_verification", "replan", "mark_done", "dismiss"]
+        if code == "verification_unconfirmed": actions = ["retry_verification", "reverify", "accept_verification", "replan", "mark_done", "dismiss"]
+        if code == "verification_environment_failure": actions = ["retry_verification", "reverify", "resume", "replan", "dismiss"]
         if code == "no_changes": actions.remove("resume")
         if code in ("planner_failed", "needs_input"): actions = ["replan", "dismiss", "prepare_plan"]
         if code == "dispatch_failed": actions = ["retry", "replan", "dismiss"]
@@ -3136,8 +3141,8 @@ def automation_tasks():
                        "review_history": [{"review_key": sha(tid, 12), "conclusion": "changes_requested",
                                            "registered_at": past(minutes=25), "report_path": "/tmp/fake-review.md",
                                            "head_sha": sha(tid, 40), "execution_run_id": "run-fake-1"}]})
-        if code == "verification_unconfirmed":
-            run_id = "run-auto-verification-unconfirmed"
+        if code in ("verification_unconfirmed", "verification_environment_failure"):
+            run_id = "run-" + tid
             session_id = "session-auto-verification-unconfirmed"
             plan_path = os.path.join(os.environ.get("KANPILOT_PLAN_ROOT", tempfile.gettempdir()), "auto-verification_unconfirmed.plan.md")
             result[-1].update(run_id=run_id, _verification_passed=True,
@@ -3155,14 +3160,14 @@ def automation_tasks():
                               _execution_started_at="2026-10-09T07:53:27.000000+00:00",
                               failure_reason="隔离示例：验证退出码尚未识别，等待重新核验现有记录",
                               send_state="sent", sent=1,
-                              session_marker="auto-verification_unconfirmed/run-auto-verification-unconfirmed")
+                              session_marker=tid + "/" + run_id)
         if code in ("branch_exists", "delivery_base_unknown"):
             result[-1].update(run_id="run-" + tid, plan_sha256=sha(tid + "plan", 64), sent=1,
                               sent_at=past(hours=1), send_state="sent", engine_fix_summary={"used": 1, "max": 2},
                               engine_fix_revert={"execution_run_id": "run-" + tid,
                                                  "plan_sha256": sha(tid + "plan", 64), "expected_failure_code": code})
         if code == "verification_environment_failure":
-            result[-1]["failure_reason"] = "验证所需 JDK 版本不符，请在 verify_env 设置 JAVA_HOME 后重新验证本轮"
+            result[-1]["failure_reason"] = "验证所需 JDK 版本不符，请核对 Plus 原轮次证据或让 Plus 重新执行并验证"
         if code == "fix_branch_unavailable":
             result[-1]["failure_reason"] = "本轮改动在独立工作树，无法同分支修复"
         if code == "execution_failed":
@@ -3519,7 +3524,7 @@ COMMANDS = {
     "save-plan-answers": lambda s, p: cmd_plan_answers(s, p),
     "submit-plan-answers": lambda s, p: cmd_plan_answers(s, p, submit=True),
     "prepare-review-repair": lambda s, p: cmd_review_resolution(s, p),
-    "run-verification-checks": lambda s, p: cmd_verification_checks(s, p),
+    "run-verification-checks": lambda s, p: fail("Pilot 不再运行本机验证；请让 Plus 重新执行并验证，或重新核验已有证据", "conflict"),
     "get-verification-check-status": lambda s, p: cmd_verification_checks(s, p, status_only=True),
     "supplement-review": lambda s, p: cmd_review_resolution(s, p, evidence=True),
     "get-plan": lambda s, p: cmd_get_plan(s, p),

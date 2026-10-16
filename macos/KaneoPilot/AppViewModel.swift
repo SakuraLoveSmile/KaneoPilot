@@ -295,7 +295,7 @@ final class AppViewModel: ObservableObject {
         }
         for (key, store) in verificationCheckOperations where key.hasPrefix("\(taskID)/") {
             store.observe(executionRunID: taskResp.task.runId, planSHA: taskResp.task.planSha256,
-                allowed: taskResp.task.allowedActions?.contains("run_verification_checks") == true
+                allowed: false
                     && taskResp.task.readOnly != true)
         }
         for (store, version) in executionVersions where store.generation == version {
@@ -412,7 +412,7 @@ final class AppViewModel: ObservableObject {
 
     func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil, expectedPlanSHA256: String? = nil,
                  onError: ((String) -> Void)? = nil) async {
-        let executionRetry = action == "resume" && expectedExecutionRunID != nil
+        let executionRetry = (action == "resume" || action == "retry_verification") && expectedExecutionRunID != nil
         await perform(executionRetry ? "重新执行（沿用计划）" : Self.actionLabel(action),
                       successToast: action == "reverify" ? "验证已通过，监控已排队"
                         : executionRetry ? "重新执行已排队，等待执行端领取" : nil,
@@ -468,15 +468,8 @@ final class AppViewModel: ObservableObject {
         let key = "\(taskID)/\(executionRunID)/\(planSHA)"
         if let store = verificationCheckOperations[key] { return store }
         let store = VerificationCheckStore(executionRunID: executionRunID, planSHA: planSHA, restored: restored,
-            run: { [weak self] operationID in
-                guard let self else { throw CoreError.coreMissing }
-                guard !self.busy else { throw ReviewResolutionError.operationBusy }
-                self.actionInFlight = "重新运行验证检查"
-                defer { self.actionInFlight = nil }
-                return try await self.client.run("run-verification-checks", payload: [
-                    "task_id": taskID, "expected_execution_run_id": executionRunID,
-                    "expected_plan_sha256": planSHA, "operation_id": operationID,
-                ], timeout: 3600, as: RunVerificationChecksResponse.self)
+            run: { _ in
+                throw CoreError.badOutput("Pilot 不再运行本机验证；请让 Plus 重新执行并验证，或重新核验已有证据。")
             }, status: { [weak self] operationID in
                 guard let self else { throw CoreError.coreMissing }
                 return try await self.client.run("get-verification-check-status", payload: [
@@ -1383,7 +1376,7 @@ final class AppViewModel: ObservableObject {
         case "accept_verification": return "接受验证结果"
         case "revert_engine_fix": return "撤回自动补救"
         case "reverify": return "重新核验验证证据"
-        case "run_verification_checks": return "重新运行验证检查"
+        case "retry_verification": return "让 Plus 重新执行并验证"
         case "release_lost": return "释放失联请求"
         case "mark_done": return "登记完成"
         case "dismiss": return "清除阻塞标记"
@@ -2017,10 +2010,21 @@ final class ExecutionAnswerStore: ObservableObject {
             || !question.answerable || question.delivery == "submitting" || unknown || stopResultUnknown || stopRequested
     }
     var canSubmit: Bool {
-        !inputsLocked && !question.questions.isEmpty && question.questions.allSatisfy { item in
-            guard let answer = answer(item.id) else { return false }
-            return answer.skipped || !answer.optionIds.isEmpty || !answer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+        !inputsLocked && !question.questions.isEmpty && question.questions.allSatisfy { isAnswered($0.id) }
+    }
+    /// 已选择、已填写自定义文字或明确跳过的题数；底栏进度与「还差第 N 题」共用这一口径。
+    var answeredCount: Int { question.questions.filter { isAnswered($0.id) }.count }
+    /// 底栏提交禁用的原因；可提交时为 nil。
+    var submitBlockedReason: String? {
+        if canSubmit { return nil }
+        if inputsLocked { return working ? "正在处理，请稍候" : statusText }
+        if question.questions.isEmpty { return "没有可回答的题目" }
+        guard let index = question.questions.firstIndex(where: { !isAnswered($0.id) }) else { return nil }
+        return "还差第 \(index + 1) 题"
+    }
+    private func isAnswered(_ id: String) -> Bool {
+        guard let answer = answer(id) else { return false }
+        return answer.skipped || !answer.optionIds.isEmpty || !answer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     var canRetry: Bool {
         unknown && !working && !obsolete && !possiblyStale && !readOnly && !stopResultUnknown

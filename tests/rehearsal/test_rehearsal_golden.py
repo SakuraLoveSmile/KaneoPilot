@@ -146,7 +146,9 @@ def test_scenario_golden_path_to_pr_merge(pipeline):
     (pipeline.root / "review-count").write_text("2")  # 首轮评审即 pass
     _live(pipeline)
     _script_rounds(pipeline, {})
-    pipeline.omit_exit = True  # transcript evidence is deliberately incomplete
+    # Live progression requires the fake Plus executor's actual tool exit code;
+    # Pilot no longer fills incomplete transcript evidence by running verify.
+    pipeline.omit_exit = False
     pipeline._adopt_and_plan()
     value = pipeline.task(TASK)
     assert value["status"] == "ready", value
@@ -163,6 +165,7 @@ def test_scenario_golden_path_to_pr_merge(pipeline):
     assert value["status"] == "in_review", value
     assert len(value["delivery"]["commits"]) == 1, value["delivery"]
     assert value["extra"]["engine_verdict"]["verification_ok"] is True
+    assert value["extra"]["engine_verdict"]["evidence_source"] == "plus_tool_results"
     _assert_commit_excludes_build_artifacts(pipeline, value)
 
     pipeline._review()

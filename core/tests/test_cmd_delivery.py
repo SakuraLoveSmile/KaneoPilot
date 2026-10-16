@@ -1,7 +1,8 @@
+import json
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import cli, cmd_delivery, core, db, git_delivery, round_store, util
+from kanpilot import cli, cmd_delivery, core, db, git_delivery, harness_plus_adapter, round_store, util
 from test_git_delivery import make_repo, branch, commit, git
 
 
@@ -28,6 +29,15 @@ class DeliveryCommit(KanpilotTestCase):
         self.wt = Path(self.delivery["worktree_path"])
         self.primary = (git(self.repo, "rev-parse", "HEAD"), git(self.repo, "status", "--porcelain"))
         self.addCleanup(lambda: self.assertEqual(self.primary, (git(self.repo, "rev-parse", "HEAD"), git(self.repo, "status", "--porcelain"))))
+        for name, response in (
+            ("plus_status", {"session_id": "delivery-session", "is_running": False,
+                             "current_turn_id": "delivery-turn", "pending_permission": None}),
+            ("plus_turn_get", {"session_id": "delivery-session", "turn_id": "delivery-turn",
+                               "status": "completed"}),
+        ):
+            mocked = patch.object(harness_plus_adapter, name, return_value=response)
+            mocked.start()
+            self.addCleanup(mocked.stop)
 
     def call_commit(self, payload=None):
         original = git_delivery._git
@@ -38,19 +48,42 @@ class DeliveryCommit(KanpilotTestCase):
             return cmd_delivery.cmd_delivery_commit(self.ctx, payload or self.payload)
 
     def live_verdict(self):
-        from pathlib import Path
         task = db.require_task(self.ctx.conn, "task1234")
         self.call("set-project-mapping", {"project_id": task["project_id"], "repository": str(self.repo), "enabled": True,
                                          "expected_revision": self.call("get-project-mappings")["revision"]})
         self.call("set-project-engine-mode", {"project_id": task["project_id"], "engine_mode": "live"})
-        plan = Path(task["plan_path"])
-        plan.write_text("# Frozen\n```verify\ntrue\n```\n")
+        plan = self.write_plan(task["project_name"], self.fixture["remote"],
+            {"repository": str(self.repo), "source_sha256": task["source_sha256"],
+             "requirements_sha256": task["requirements_sha256"]},
+            body="# Frozen\n```verify\ntrue\n```\n")
         sha = util.sha256_file(plan)
         db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, plan_sha256=sha)
         db.set_extra(self.ctx.conn, db.require_task(self.ctx.conn, "task1234"), self.ctx.now_iso,
                      plan_verify={"plan_sha256": sha, "commands": ["true"]})
-        round_store.upsert_on_claim(self.ctx.conn, "task1234", "exec1", {}, self.ctx.now_iso)
+        config = {"connection_file": str(self.root / "fake-plus.json")}
+        round_store.upsert_on_claim(self.ctx.conn, "task1234", "exec1", config,
+                                    self.ctx.now_iso, backend="pi_desktop")
         round_store.mark_started(self.ctx.conn, "task1234", "exec1", self.ctx.now_iso, worktree_path=str(self.wt))
+        round_store.upsert_discovered(self.ctx.conn, "task1234", "exec1", self.ctx.now_iso,
+                                     backend="pi_desktop", session_id="delivery-session", run_status="finished")
+        db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso,
+                       session_id="delivery-session", sent=1, send_state="sent")
+        directory = self.runs_root / "task1234" / "exec1"
+        directory.mkdir(parents=True)
+        job = {"task_id": "task1234", "run_id": "exec1", "backend": "pi_desktop",
+               "config": config, "status": "finished", "exit_code": 0,
+               "session_id": "delivery-session", "turn_id": "delivery-turn", "send_state": "sent",
+               "plan_sha256": sha, "completion_policy": "command_verification",
+               "verification_evidence_version": 1,
+               "verification_source_sha256": git_delivery.source_state_sha256(self.wt)}
+        spec = dict(job, plan_path=str(plan), repository=str(self.repo), cwd=str(self.wt), runs_dir=str(directory))
+        for name, data in (("job.json", job), ("spec.json", spec)):
+            (directory / name).write_text(json.dumps(data))
+        events = [{"seq": 1, "type": "session", "session_id": "delivery-session", "turn_id": "delivery-turn"},
+                  {"seq": 2, "type": "command_output", "turn_id": "delivery-turn", "name": "exec",
+                   "input": json.dumps({"command": "true", "cwd": str(self.wt)}), "exit_code": 0, "output": "passed"},
+                  {"seq": 3, "type": "terminal", "outcome": "completed"}]
+        (directory / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
         result = self.call("engine-verdict", dict(self.payload, expected_plan_sha256=sha))
         self.assertTrue(result["verification_ok"], result)
         return result

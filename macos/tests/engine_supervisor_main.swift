@@ -46,16 +46,25 @@ struct EngineSupervisorFixtures {
             await supervisor.refresh()
             precondition(supervisor.engineStatus?.instances.first?.leaseExpiresAt != firstLease, "healthy fake must renew its lease")
             let verification = try await client.run("get-task", payload: ["task_id": "auto-verification_unconfirmed"], as: GetTaskResponse.self).task
-            precondition(verification.allowedActions?.contains("run_verification_checks") == true)
+            precondition(verification.allowedActions?.contains("run_verification_checks") != true)
+            precondition(verification.allowedActions?.contains("retry_verification") == true)
             precondition(verification.runId != nil && verification.planSha256 != nil && verification.planPath != nil, "visible verification action needs frozen identity")
             precondition(verification.executionRound?.runId == verification.runId && verification.executionRound?.backend == "pi_desktop")
             let plan = try await client.run("get-plan", payload: ["task_id": verification.taskId, "expected_plan_sha256": verification.planSha256!])
             precondition(plan["plan_sha256"] as? String == verification.planSha256)
             precondition((plan["markdown"] as? String)?.contains("```verify") == true)
-            let checks = try await client.run("run-verification-checks", payload: ["task_id": verification.taskId,
-                "operation_id": UUID().uuidString, "expected_execution_run_id": verification.runId!,
-                "expected_plan_sha256": verification.planSha256!])
-            precondition(checks["verification_ok"] as? Bool == true, "fake action must accept its exact frozen identity")
+            do {
+                _ = try await client.run("run-verification-checks", payload: ["task_id": verification.taskId,
+                    "operation_id": UUID().uuidString, "expected_execution_run_id": verification.runId!,
+                    "expected_plan_sha256": verification.planSha256!])
+                preconditionFailure("Pilot must reject local verification")
+            } catch CoreError.exited(_, _, let code) { precondition(code == "conflict") }
+            let retry = try await client.run("resolve", payload: ["task_id": verification.taskId,
+                "action": "retry_verification", "expected_execution_run_id": verification.runId!])
+            precondition(retry["task_status"] as? String == "ready")
+            let queued = try await client.run("get-task", payload: ["task_id": verification.taskId], as: GetTaskResponse.self).task
+            precondition(queued.planSha256 == verification.planSha256 && queued.runId == nil,
+                         "new Plus round retains the confirmed plan")
             // Requests remain queued; supervisor must never start an old stage directly.
             supervisor.runPlanner()
             await supervisor.refresh()
