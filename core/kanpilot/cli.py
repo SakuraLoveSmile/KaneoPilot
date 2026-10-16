@@ -179,6 +179,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "note": (False, "str"),
             "expected_execution_run_id": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
+            "expected_plan_sha256": (False, "str"),
             # A14/A2：用户动作与引擎补救，缺省 user。
             "engine_fix": (False, "dict"),
             "actor": (False, "str"),

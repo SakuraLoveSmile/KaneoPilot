@@ -156,6 +156,8 @@ enum Labels {
         case "plan_answers_submitted": return "规划答案已提交"
         case "execution_retry_requested": return "已确认沿用计划重新执行"
         case "engine_fix_started": return "自动补救轮开始"
+        case "engine_fix_reverted": return "自动补救已撤回"
+        case "branch_worktree_adopted": return "已收养任务分支工作树"
         case "model": return "执行模型选择"
         case "model_hint": return "执行模型配置建议"
         case "round_started": return "轮次启动"
@@ -714,6 +716,8 @@ extension JSONValue {
 
 // 自动化失败的展示词表；可用性始终由核心 allowed_actions 决定。
 enum AutomationPresentation {
+    static let revertMessage = "恢复本轮验证待处理、退还一次自动补救、不重新执行、不改本轮工作树"
+    static let replanMessage = "将从目标分支新建工作树，本轮改动不会带入"
     static func dismissLabel(stage: String?, failureCode: String?, automatic: Bool) -> String {
         let review = stage == "review" || failureCode == "review_blocked" || failureCode == "review_backend_unsupported"
         return review ? (automatic ? "转为人工评审" : "清除评审阻塞")
@@ -726,7 +730,10 @@ enum AutomationPresentation {
         case "fix_rounds_exhausted": return "修复轮已用完"
         case "auto_budget_exceeded": return "超出自动处理预算"
         case "automation_stopped": return "项目自动处理已关闭"
-        case "branch_exists", "delivery_base_unknown": return "分支准备受阻"
+        case "verification_environment_failure": return "验证环境未就绪"
+        case "fix_branch_unavailable": return "无法同分支修复"
+        case "branch_exists": return "任务分支已存在"
+        case "delivery_base_unknown": return "PR 目标分支不存在"
         case "delivery_blocked_files", "delivery_commit_failed": return "提交受阻"
         case "review_blocked", "review_backend_unsupported": return "Review 受阻"
         case "branch_diverged", "gh_unavailable", "pr_closed": return "PR 交付受阻"
@@ -742,7 +749,10 @@ enum AutomationPresentation {
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
         case "automation_stopped": return "请先重新开启项目自动处理，再继续修复。"
-        case "branch_exists", "delivery_base_unknown": return "请检查已有任务分支或 PR 目标分支，再重新准备分支。"
+        case "verification_environment_failure": return "请在项目与仓库配置的 verify_env 设置 JAVA_HOME 或 ANDROID_HOME，或连接所需设备后重新验证本轮。"
+        case "fix_branch_unavailable": return "本轮改动在独立工作树，无法同分支修复"
+        case "branch_exists": return "请检查已有任务分支及工作树，再重新准备分支。"
+        case "delivery_base_unknown": return "请在项目与仓库配置中选择 origin 上存在的 PR 目标分支，再重新准备分支。"
         case "delivery_blocked_files", "delivery_commit_failed": return "请查看提交失败证据，处理文件或仓库问题后重新提交。"
         case "review_backend_unsupported": return "请把 Review 后端改为 Plus、Claude 或 Codex 后重试。"
         case "review_blocked": return "请查看 Review 证据并处理阻塞，再重新 Review。"
@@ -754,6 +764,7 @@ enum AutomationPresentation {
     }
     static func resumeLabel(_ code: String?) -> String {
         switch code {
+        case "verification_environment_failure", "fix_branch_unavailable": return "重新验证本轮"
         case "execution_failed": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"

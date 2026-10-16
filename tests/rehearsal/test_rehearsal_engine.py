@@ -715,7 +715,7 @@ def test_attention_collect_orders_by_ladder_and_dedups():
 
 @pytest.mark.parametrize("variant", [
     "running", "manual_takeover", "answered_question", "backfilled_finished",
-    "legacy",
+    "legacy", "environment", "quality_detached", "historical_revert", "branch_quality",
 ])
 def test_scenario_drained_round_reaches_review_via_engine_cycles(
         variant, cli, factory, tmp_env, fake_kaneo, fake_plus, monkeypatch):
@@ -730,6 +730,9 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
 
     verify = ('test "$(cat execution-result.txt)" = complete '
               '&& printf core-verified > verify-ran.pyc')
+    recovery_variant = variant in ("environment", "quality_detached", "historical_revert", "branch_quality")
+    if recovery_variant:
+        verify = "./verify-fixture"
     # Review 只领取、不调用模型；托管评审不能使用历史默认 pi 后端。
     cli("set-review-config", {"backend": "codex"})
     task = factory.sync_task(title="终态轮次补给演练")
@@ -768,6 +771,14 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
                                    "automation": {"enabled": True}})
 
     current = factory.get_task(tid)
+    if recovery_variant and variant != "branch_quality":
+        conn = _connect(tmp_env.db)
+        try:
+            with kdb.write_txn(conn):
+                kdb.set_extra(conn, kdb.require_task(conn, tid), kutil.now_iso(), delivery={"mode": "manual"})
+        finally:
+            conn.close()
+        current = factory.get_task(tid)
     worktree = Path((current.get("delivery") or {}).get("worktree_path") or
                     tmp_env.root / "execution-tree")
     if not worktree.exists():
@@ -775,6 +786,29 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
                         "--detach", str(worktree)], check=True,
                        capture_output=True, timeout=15)
     (worktree / "execution-result.txt").write_text("complete\n", encoding="utf-8")
+    if recovery_variant:
+        message = ("Dependency requires at least JVM runtime version 11. This build uses a Java 8 JVM."
+                   if variant in ("environment", "historical_revert") else "quality assertion failed")
+        script = worktree / "verify-fixture"
+        script.write_text('#!/bin/sh\nif [ "$KP_VERIFY_READY" != "1" ]; then\n'
+                          + "  printf '%s\\n' '" + message + "'\n  exit 1\nfi\n"
+                          + 'test "$(cat execution-result.txt)" = complete && printf core-verified > verify-ran.pyc\n')
+        script.chmod(0o755)
+        cli("set-project-engine-mode", {"project_id": task.project_id, "engine_mode": "live"})
+    if variant == "branch_quality":
+        branch = "kaneo/recovery-" + tid
+        subprocess.run(["git", "-C", str(worktree), "switch", "-c", branch],
+                       check=True, capture_output=True, timeout=15)
+        conn = _connect(tmp_env.db)
+        try:
+            with kdb.write_txn(conn):
+                current_task = kdb.require_task(conn, tid)
+                kcore.update_delivery(conn, current_task, kutil.now_iso(), mode="pr",
+                                      workspace_version=1, branch=branch, worktree_path=str(worktree),
+                                      head_sha=subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip())
+        finally:
+            conn.close()
+
     runs = tmp_env.app_support / "runs"
     directory = runs / tid / run_id
     directory.mkdir(parents=True)
@@ -840,7 +874,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
 
     def unavailable_preflight(conn, pid):
         preflight_calls.append(pid)
-        return ["temporary_plus_unavailable"]
+        return [{"code": "temporary_plus_unavailable"}]
 
     monkeypatch.setattr(automation_policy, "automation_preflight", unavailable_preflight)
     monkeypatch.setenv("KANPILOT_VERIFY_SHELL", "/bin/sh")
@@ -882,6 +916,77 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         return
 
     value = factory.get_task(tid)
+    if recovery_variant:
+        assert value["status"] == "needs_user", (first, value)
+        assert value["run_id"] == run_id and value["plan_sha256"] == job["plan_sha256"]
+        assert len([stage for stage in spawned if stage == "monitor"]) == 1
+        assert not value["extra"].get("engine_fix_rounds")
+        if variant in ("quality_detached", "branch_quality"):
+            rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=60))
+            value = factory.get_task(tid)
+            if variant == "quality_detached":
+                assert value["failure_code"] == "fix_branch_unavailable", value
+                assert value["failure_stage"] == "monitor"
+                assert not value["extra"].get("engine_fix_rounds")
+                assert not value["automation"].get("plan_wanted")
+            else:
+                assert value["status"] == "needs_plan", value
+                assert value["automation"]["plan_wanted"] is True
+                assert len(value["extra"]["engine_fix_rounds"]) == 1
+                assert value["delivery"]["worktree_path"] == str(worktree)
+            assert _count_requests(tmp_env.db, tid, "dispatch", ("queued", "claimed")) == 0
+            return
+        assert value["failure_code"] == "verification_environment_failure", value
+        assert value["extra"]["engine_verdict"]["environment_reasons"] == ["jdk_version"]
+        rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=60))
+        assert not factory.get_task(tid)["extra"].get("engine_fix_rounds")
+        if variant == "historical_revert":
+            # Historical migration fixture: the old classifier already opened a remediation;
+            # current code must restore it, without relaxing the new detached guard.
+            conn = _connect(tmp_env.db)
+            try:
+                with kdb.write_txn(conn):
+                    fresh = kdb.require_task(conn, tid)
+                    receipt = kdb.task_extra(fresh)["engine_verdict"]
+                    receipt.pop("environment_reasons", None)
+                    receipt["environment_failure"] = False
+                    for check in receipt["checks"]:
+                        check.pop("environment_reason", None)
+                    row = {"at": kutil.now_iso(), "execution_run_id": run_id,
+                           "plan_sha256": fresh["plan_sha256"], "reason": "verify_failed"}
+                    automation = dict(kcore.automation_of(fresh), plan_wanted=False, fix_round=1)
+                    kdb.set_extra(conn, fresh, kutil.now_iso(), engine_verdict=receipt,
+                                  engine_fix_rounds=[row], automation=automation, delivery={"mode": "pr"})
+                    kdb.update_task(conn, tid, kutil.now_iso(), stage="plan", status="needs_user",
+                                    failure_stage="plan", failure_code="delivery_base_unknown",
+                                    sent=0, send_state=None, sent_at=None)
+            finally:
+                conn.close()
+            candidate = cli("get-task", {"task_id": tid})["task"]["engine_fix_revert"]
+            assert candidate is not None
+            cli("resolve", {"task_id": tid, "action": "revert_engine_fix",
+                            "expected_execution_run_id": candidate["execution_run_id"],
+                            "expected_plan_sha256": candidate["plan_sha256"]})
+            restored = cli("get-task", {"task_id": tid})["task"]
+            assert restored["delivery"] == {"mode": "manual"}
+            assert restored["stage"] == restored["failure_stage"] == "monitor"
+            assert restored["sent"] == 1 and restored["send_state"] == "sent"
+            assert restored["engine_fix_revert"] is None
+            assert restored["engine_fix_summary"] == {"used": 0, "max": 2}
+            assert restored["automation"]["fix_round"] == 1
+        cli("set-project-verify-env", {"project_id": task.project_id,
+                                       "verify_env": {"KP_VERIFY_READY": "1"}})
+        cli("resolve", {"task_id": tid, "action": "resume"})
+        resumed = factory.get_task(tid)
+        assert resumed["status"] == "running" and resumed["run_id"] == run_id
+        assert _count_requests(tmp_env.db, tid, "monitor", "queued") == 1
+        assert _count_requests(tmp_env.db, tid, "dispatch", ("queued", "claimed")) == 0
+        rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=120))
+        value = factory.get_task(tid)
+        if value["status"] != "in_review":
+            print((tmp_env.root / "topup-monitor.jsonl").read_text())
+        assert value["status"] == "in_review", (value, (tmp_env.root / "topup-monitor.jsonl").read_text())
+        assert spawned == ["monitor", "monitor"]
     assert task.project_id in preflight_calls
     assert any(a.get("action") == "business_tick" and a.get("executed") is True
                for a in first["actions"]), first
@@ -891,10 +996,10 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
     assert fake_kaneo.tasks[tid]["status"] == "in-review"
     assert value["extra"]["engine_verdict"]["verification_ok"] is True
     assert (worktree / "verify-ran.pyc").read_text() == "core-verified"
-    assert spawned == ["monitor"], (first, spawned)
+    assert spawned == (["monitor", "monitor"] if recovery_variant else ["monitor"]), (first, spawned)
     assert review_claims == []
-    second = rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=60))
-    assert spawned == ["monitor", "review"], (second, spawned)
+    second = rec.reconcile_once(now=kutil.now_dt() + timedelta(seconds=180 if recovery_variant else 60))
+    assert spawned == (["monitor", "monitor", "review"] if recovery_variant else ["monitor", "review"]), (second, spawned)
     assert len(review_claims) == 1
     assert review_claims[0]["context"]["task_id"] == tid
     assert _count_requests(tmp_env.db, tid, "review", "claimed") == 1

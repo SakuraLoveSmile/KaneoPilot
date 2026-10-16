@@ -178,3 +178,25 @@ def test_new_deterministic_prepare_failure_imports_blocked_row(intake, monkeypat
     assert task['status'] == 'needs_user'
     assert not core.automation_of(task)['plan_wanted']
     assert core.automation_of(task)['last_skip']['reason'] == 'validation_failed'
+
+
+def test_failed_branch_preparation_preserves_manual_delivery(intake, monkeypatch):
+    task_id = intake.task(1, automation={'plan_wanted':True}, delivery={'mode':'manual'})
+    def fail(*a, **kw):
+        raise git_delivery.GitDeliveryError('branch_exists', 'unsafe branch')
+    monkeypatch.setattr(git_delivery, 'prepare_branch_worktree', fail)
+    result = auto_intake._submit(intake.conn, intake.path, task_id, intake.policy, NOW, 'r'*64, wanted=True)
+    assert result['reason'] == 'branch_exists'
+    assert core.delivery_of(db.require_task(intake.conn, task_id)) == {'mode':'manual'}
+
+
+def test_adopted_branch_flag_is_transient_and_event_recorded_once(intake, monkeypatch):
+    original = intake.branch
+    monkeypatch.setattr(git_delivery, 'prepare_branch_worktree', lambda *a, **kw: dict(original(*a, **kw), adopted=True))
+    intake.candidate(1)
+    auto_intake.run_once(intake.path, now=NOW)
+    task_id = 'task00000001'
+    assert 'adopted' not in core.delivery_of(db.require_task(intake.conn, task_id))
+    assert intake.conn.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='branch_worktree_adopted'", (task_id,)).fetchone()[0] == 1
+    auto_intake.run_once(intake.path, now=NOW)
+    assert intake.conn.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='branch_worktree_adopted'", (task_id,)).fetchone()[0] == 1

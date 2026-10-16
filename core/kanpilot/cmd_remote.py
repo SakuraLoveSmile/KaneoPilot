@@ -407,12 +407,17 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             receipt = db.task_extra(current).get("engine_verdict") or {}
             frozen = receipt.get("binding") or {}
             actual = verdict.binding(conn, current)
+            # Manual detached executions retain verified dirty results; only
+            # branch review has a delivery-commit whose tree must match them.
+            branch_review = core.requires_branch_review(current)
+            comparable = dict(actual, head_sha=frozen.get("head_sha")) if branch_review else actual
             if (receipt.get("verification_ok") is not True
                     or receipt.get("execution_run_id") != current["run_id"]
                     or receipt.get("plan_sha256") != current["plan_sha256"]
-                    or dict(actual, head_sha=frozen.get("head_sha")) != frozen
-                    or not receipt.get("index_source_sha256")
-                    or git_delivery.tree_source_sha256(actual["worktree_path"], actual["head_sha"]) != receipt["index_source_sha256"]):
+                    or comparable != frozen
+                    or (branch_review and (
+                        not receipt.get("index_source_sha256")
+                        or git_delivery.tree_source_sha256(actual["worktree_path"], actual["head_sha"]) != receipt["index_source_sha256"]))):
                 raise util.KanpilotError("conflict", "本轮核心判定或已提交树未通过核验，不能进入评审")
             verified_receipt = {"engine_owned": True, "receipt": receipt}
             receipt_snapshot = receipt_identity(current)

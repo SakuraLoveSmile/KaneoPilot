@@ -139,14 +139,15 @@ final class AppViewModel: ObservableObject {
     func runIntakeNow() { AppRuntime.shared.scheduler.checkNow() }
 
     @discardableResult
-    func setProjectAutomation(projectID: String, automation: [String: Any], expectedPolicyRevision: Int?) async -> Bool {
+    func setProjectAutomation(projectID: String, automation: [String: Any], expectedPolicyRevision: Int?, onSavedCheck: ((String?) -> Void)? = nil) async -> Bool {
         guard actionInFlight == nil else { return false }
         actionInFlight = "保存自动处理设置"
         defer { actionInFlight = nil }
         do {
             var payload: [String: Any] = ["project_id": projectID, "automation": automation]
             if let expectedPolicyRevision { payload["expected_policy_revision"] = expectedPolicyRevision }
-            _ = try await client.run("set-project-automation", payload: payload)
+            let response = try await client.run("set-project-automation", payload: payload)
+            onSavedCheck?(response["delivery_base_check"] as? String)
             showToast("已保存自动处理设置")
             return true
         } catch {
@@ -409,7 +410,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil,
+    func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil, expectedPlanSHA256: String? = nil,
                  onError: ((String) -> Void)? = nil) async {
         let executionRetry = action == "resume" && expectedExecutionRunID != nil
         await perform(executionRetry ? "重新执行（沿用计划）" : Self.actionLabel(action),
@@ -419,9 +420,29 @@ final class AppViewModel: ObservableObject {
             var payload: [String: Any] = ["task_id": taskID, "action": action]
             if let note, !note.isEmpty { payload["note"] = note }
             if let expectedExecutionRunID { payload["expected_execution_run_id"] = expectedExecutionRunID }
+            if let expectedPlanSHA256 { payload["expected_plan_sha256"] = expectedPlanSHA256 }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
             return nil
         }
+    }
+
+    func currentEngineFixRevert(taskID: String) async throws -> EngineFixRevert {
+        let task = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
+        guard task.allowedActions?.contains("revert_engine_fix") == true, let candidate = task.engineFixRevert else {
+            throw CoreError.exited(status: 1, message: "自动补救撤回候选已变化，请刷新后重试。", code: "conflict")
+        }
+        return candidate
+    }
+
+    func revertEngineFix(taskID: String, candidate: EngineFixRevert) async {
+        do {
+            guard try await currentEngineFixRevert(taskID: taskID) == candidate else {
+                throw CoreError.exited(status: 1, message: "自动补救撤回候选已变化，请刷新后重试。", code: "conflict")
+            }
+            await resolve(taskID: taskID, action: "revert_engine_fix",
+                          expectedExecutionRunID: candidate.executionRunId, expectedPlanSHA256: candidate.planSha256)
+        } catch { alertMessage = error.coreMessage }
+        await refreshAll()
     }
 
     func recoverReview(taskID: String, recovery: ReviewRecovery) async {
@@ -1360,6 +1381,7 @@ final class AppViewModel: ObservableObject {
         case "replan": return "重新规划"
         case "resume": return "继续"
         case "accept_verification": return "接受验证结果"
+        case "revert_engine_fix": return "撤回自动补救"
         case "reverify": return "重新核验验证证据"
         case "run_verification_checks": return "重新运行验证检查"
         case "release_lost": return "释放失联请求"

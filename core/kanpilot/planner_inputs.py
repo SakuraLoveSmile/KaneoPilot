@@ -873,6 +873,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         delivery = authorization.get("delivery") or core.delivery_of(task)
         if not isinstance(delivery, dict) or delivery.get("mode") != "pr" or not all(delivery.get(k) for k in ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")):
             return {"task_id": task_id, "code": "bad_request", "error": "自动接收须有完整的 PR 分支工作树"}
+        delivery = {key: value for key, value in delivery.items() if key != "adopted"}
         old = db.active_request_for_key(conn, f"plan:{task_id}")
         if old is not None and not db.request_payload(old).get("manual_authorized"):
             return {"task_id": task_id, "code": "conflict", "error": "不能将未授权的旧规划请求收养为自动化请求"}
@@ -1059,6 +1060,9 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
         a.update(plan_wanted=False, plan_attempts=int(a.get("plan_attempts", 0)) + 1)
         core.update_automation(conn, task, now, **a)
         core.update_delivery(conn, task, now, **delivery)
+        if authorization.get("adopted") is True:
+            db.add_event(conn, now, "branch_worktree_adopted", task_id=task_id, actor=actor,
+                         detail={key: delivery.get(key) for key in ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")})
         db.update_task(conn, task_id, now, requirements_sha256=manifest.get("requirements_sha256"),
                        source_sha256=manifest.get("source_sha256"),
                        source_path=prepared.get("source_path"), plan_kind=plan_kind)

@@ -893,6 +893,9 @@ struct TaskAutomationSections: View {
             DetailSection(title: "自动处理") {
                 FieldRow("状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
                 FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
+                if let summary = detail.engineFixSummary {
+                    FieldRow("自动补救轮", "\(summary.used)/\(summary.max)")
+                }
                 if let reason = automation.lastSkip?.reason {
                     FieldRow("上次跳过原因", reason)
                 }

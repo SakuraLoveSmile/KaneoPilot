@@ -606,6 +606,8 @@ struct TaskDetail: Decodable, Identifiable {
     let runId: String?
     let failureCode: String?
     let failureStage: String?
+    let engineFixSummary: EngineFixSummary?
+    let engineFixRevert: EngineFixRevert?
     let reviewRecovery: ReviewRecovery?
     let reviewResolution: ReviewResolution?
     let verificationChecks: VerificationCheckOperation?
@@ -2301,6 +2303,8 @@ struct ProjectMappingRemote: Decodable {
 }
 
 struct ProjectMappingItem: Decodable, Identifiable {
+    let originDefaultBranch: String?
+    let deliveryBaseExists: Bool?
     let engineMode: String?
     let verifyEnv: [String: String]?
     let fallbackModel: EngineFallbackModel?
@@ -2367,6 +2371,13 @@ struct ProjectAutomationDTO: Decodable {
     let deliveryBase: String?; let policyRevision: Int?; let updatedAt: String?
 }
 struct AutomationSkipDTO: Decodable { let reason: String?; let at: String? }
+struct EngineFixSummary: Decodable { let used: Int; let max: Int }
+struct EngineFixRevert: Decodable, Equatable {
+    let executionRunId: String
+    let planSha256: String
+    let expectedFailureCode: String
+}
+
 struct TaskAutomationView: Decodable {
     let policyRevision: Int?; let adoptedAt: String?; let fixRound: Int?
     let segmentStartedAt: String?; let segmentCostBaseUsd: Double?

@@ -331,12 +331,14 @@ Plus 控制面连接与会话 MCP 挂接能力分别显示；attachment_supporte
 
 ### 4.14 自动处理与菜单栏
 
-沿用现有设置/任务详情组件与冻结度量（13/18/11pt、8/12/16 间距、1180×760/900×600），不换肤。项目与仓库页在每项映射下显示「自动处理」、标签过滤、自动确认、修复轮 0–2、时长 30–1440 分钟、成本 0.5–100 美元或不限、PR 目标分支；保存后显示未就绪原因，关闭只停止新的自动决策。后台运行区提供登录项开关及需要批准时的系统设置提示。规划增加 Claude，Review 增加 Claude/Codex，控制端配置为展示。
+沿用现有设置/任务详情组件与冻结度量（13/18/11pt、8/12/16 间距、1180×760/900×600），不换肤。项目与仓库页在每项映射下显示「自动处理」、标签过滤、自动确认、修复轮 0–2、时长 30–1440 分钟、成本 0.5–100 美元或不限、PR 目标分支（占位显示「留空使用默认分支 X」，X 来自 origin_default_branch；未知时不编造 main）；delivery_base_exists=false 就地显示「origin 上不存在该分支」，保存拒绝显示核心原文；delivery_base_check=unverified 使用非阻塞就地提示，保留草稿且不禁用保存；保存后显示未就绪原因，关闭只停止新的自动决策。后台运行区提供登录项开关及需要批准时的系统设置提示。规划增加 Claude，Review 增加 Claude/Codex，控制端配置为展示。
 
 菜单栏显示运行中/已暂停、在途/待处理数和上次 intake，提供打开、暂停/恢复、立即检查、退出。关窗切 accessory，重开切 regular。任务详情增加自动处理信息（修复轮、段预算、未计价步数、跳过原因）和交付信息（分支、工作树路径、提交、PR 链接、合并状态）；看板显示「自动」「等待合并」「修复 n/m」。
 
-待处理原因、说明与动作按 automation-contract「待处理原因、处置与事件」与 protocol §5.27.4。verification_unconfirmed 显示「验证结果待确认」；可核验材料优先「重新运行验证检查」，仅legacy/shadow允许「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。branch_exists/delivery_base_unknown 为「分支准备受阻」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，暂停自动流程，可恢复自动处理。其他失败原因与按钮遵照核心 allowed_actions 和 automation-contract 处置表，禁止 UI 绕过核心 allowed_actions。
+待处理原因、说明与动作按 automation-contract「待处理原因、处置与事件」与 protocol §5.27.4。verification_unconfirmed 显示「验证结果待确认」；可核验材料优先「重新运行验证检查」，仅legacy/shadow允许「接受验证结果」；fix_rounds_exhausted 显示「修复轮已用完」/「再修一轮」；auto_budget_exceeded 显示「超出自动处理预算」/「再修一轮」；automation_stopped 显示「项目自动处理已关闭」，重新开启后可继续。verification_environment_failure 为「验证环境未就绪」，说明指向项目 verify_env 的 JDK/SDK/设备设置；monitor 动作为「重新验证本轮」。fix_branch_unavailable 为「无法同分支修复」/「本轮改动在独立工作树，无法同分支修复」，monitor 可「重新验证本轮」，review 不提供 resume；replan 二次确认「将从目标分支新建工作树，本轮改动不会带入」。branch_exists 为「任务分支已存在」/「重新准备分支」；delivery_base_unknown 为「PR 目标分支不存在」/「重新准备分支」；delivery_blocked_files/delivery_commit_failed 为「提交受阻」/「重新提交」；review_blocked/review_backend_unsupported 为「Review 受阻」/「重新 Review」；branch_diverged/gh_unavailable/pr_closed 为「PR 交付受阻」/「继续」；no_changes 为「执行未产生改动」，不显示 resume。remote_conflict 显示远端需求/状态变化与「继续」；resume/replan 即用户已阅远端内容；dispatch 中途仅显示既有发送恢复动作。自动化任务 dismiss 文案为「转为人工处理」，暂停自动流程，可恢复自动处理。其他失败原因与按钮遵照核心 allowed_actions 和 automation-contract 处置表，禁止 UI 绕过核心 allowed_actions。
 
+
+撤回自动补救：沿用待处理详情与任务详情的动作区/原生二次确认；仅 allowed_actions 含 revert_engine_fix 时显示，候选存在时排在 resume 之前作为当前主动作。先读取新鲜详情，两个 expected 都来自同一 engine_fix_revert 候选，候选改变或消失须拒绝，不拼接摘要/旧缓存。确认说明固定为「恢复本轮验证待处理、退还一次自动补救、不重新执行、不改本轮工作树」；取消不发命令，冲突显示核心错误并刷新候选。自动处理信息卡增加独立「自动补救轮 used/max」，来自持续存在的 engine_fix_summary；现有评审「修复轮」仍读 automation.fix_round，撤回后 summary 保留并显示退额。Models 对新增字段可选解码兼容旧核心，FakeCore 同步新字段、动作、两个 expected 和失败响应。
 
 旧任务兼容：任务详情缺少 automation 或 delivery 字段时，概览沿用现有 DetailSection / FieldRow 度量，分别显示「自动处理／状态：未开启」及「交付／状态：未开启」。不补写数据库字段，不触发迁移或自动化。
 
@@ -465,7 +467,7 @@ Goal 模式提交契约后的 completed 仅表示目标规划结束。仍 awaiti
 
 总览继承既有列表/详情外壳与系统原生控件；按“需要你 → 流水线计数 → 进行中任务 → 项目自动化 → 环境健康”排列。侧栏总览默认，任务看板为次级入口。phase/condition/attention 来自核心 JSON，缺失字段只显示未提供，不在 Swift 再推断自动化状态。菜单栏计数、通知和总览同源 attention-list；详情沿用五段导航，加 phase 步进与既有证据入口。
 
-设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。
+设置保留已有控件、危险确认和错误反馈，分为连接、项目、规划与评审、高级四页。项目页增加 engine_mode、verify_env、fallback_model，只调用核心固定命令；verify_env 同时用于核心验证和「重新运行验证检查」，凭据不进入 verify_env。EngineSupervisor 拉起 engine run 并监督退避，替换旧 20 秒调度所有权，关闭窗口不停止，退出只终止本实例引擎，不杀 Plus 会话。FakeCore 不访问真实服务或生产库，原生走查使用独立假数据与临时 HOME。
 
 ### 4.17 执行期问答（P6，protocol §5.28）
 

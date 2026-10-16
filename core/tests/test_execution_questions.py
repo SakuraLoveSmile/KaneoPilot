@@ -259,6 +259,56 @@ class ExecutionQuestionsTests(KanpilotTestCase):
             self.assertEqual(self.call('recover-execution-goals')['goal_recoveries'],[])
             self.assertEqual(launch.call_count,0)
 
+    def test_answered_running_recovery_only_observes_with_engine_disabled(self):
+        from kanpilot import cmd_dispatch
+        self.scene()
+        self.call('report-execution-question',{
+            **{k:v for k,v in self.payload.items() if k!='questions'},'state':'closed'})
+        for manual in (False, True):
+            with self.subTest(manual_takeover=manual):
+                conn=db.connect(self.db_path)
+                with db.write_txn(conn):
+                    task=db.require_task(conn,'t');extra=db.task_extra(task)
+                    extra['automation']['manual_takeover']=manual
+                    db.set_extra(conn,task,util.now_iso(),**extra)
+                conn.close()
+                # No engine/reconciler runs in this fixture: the App's fallback
+                # command must reconnect an exited observer without a Goal.
+                def observe(ctx,payload):
+                    return {'status':'deferred' if payload['continue_goal_only'] else 'observing','pid':123}
+                with mock.patch.object(cmd_dispatch,'_round_observe_reserved',side_effect=observe) as launch:
+                    result=self.call('recover-execution-goals')
+                self.assertEqual(len(result['goal_recoveries']),1)
+                self.assertEqual(result['goal_recoveries'][0]['status'],'observing')
+                self.assertFalse(launch.call_args.args[1]['continue_goal'])
+                self.assertFalse(launch.call_args.args[1]['continue_goal_only'])
+                self.assertEqual(self.call('get-task',{'task_id':'t'})['task']['status'],'running')
+
+    def test_background_goal_recovery_keeps_failure_and_history_gates(self):
+        from kanpilot import cmd_dispatch
+        self.scene()
+        conn=db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task=db.require_task(conn,'t');extra=db.task_extra(task)
+                extra['execution_questions']=[]
+                conn.execute("UPDATE tasks SET status='needs_user',failure_code='execution_failed',extra_json=? WHERE task_id='t'",(util.jdump(extra),))
+            with mock.patch.object(cmd_dispatch,'_round_observe_reserved',return_value={'status':'deferred'}) as launch:
+                self.assertEqual(self.call('recover-execution-goals')['goal_recoveries'],[])
+                self.assertTrue(launch.call_args.args[1]['continue_goal'])
+                self.assertTrue(launch.call_args.args[1]['continue_goal_only'])
+                launch.reset_mock()
+                with db.write_txn(conn):
+                    extra['automation']['manual_takeover']=True
+                    conn.execute("UPDATE tasks SET extra_json=? WHERE task_id='t'",(util.jdump(extra),))
+                self.assertEqual(self.call('recover-execution-goals')['goal_recoveries'],[])
+                launch.assert_not_called()
+                with db.write_txn(conn):
+                    conn.execute("UPDATE tasks SET status='running',failure_code=NULL WHERE task_id='t'")
+                self.assertEqual(self.call('recover-execution-goals')['goal_recoveries'],[])
+                launch.assert_not_called()
+        finally:conn.close()
+
     def test_engine_wait_blocks_stale_retry_and_only_recovers_observer(self):
         from kanpilot.engine import loop,decide
         self.scene()

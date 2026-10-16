@@ -48,6 +48,7 @@ import subprocess
 import tempfile
 import time
 import shutil
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -140,6 +141,50 @@ def _command_not_found(code, tail: str) -> bool:
     return code == 127 or "command not found" in tail.lower()
 
 
+def environment_reason(check) -> Optional[str]:
+    """Classify current and historical checks without changing their receipt."""
+    if check.get("timed_out"):
+        return None
+    code = check.get("exit_code")
+    if type(code) is int and code == 0:
+        return None
+    if type(code) is not int:
+        # Old receipts use command_not_found for a failed shell launch.
+        return "command_not_found" if check.get("command_not_found") else None
+    # Current checks classify the raw in-memory output before redaction. A
+    # short credential may obscure the signature in the persisted safe text.
+    saved = check.get("environment_reason")
+    if saved in ("command_not_found", "jdk_version", "android_sdk_missing", "no_connected_device"):
+        return saved
+    if check.get("command_not_found"):
+        return "command_not_found"
+    tail = (check.get("output_tail") or "").lower()
+    if _command_not_found(code, tail):
+        return "command_not_found"
+    if (re.search(r"this build uses a java \d+ jvm", tail)
+            or "requires at least jvm runtime version" in tail
+            or "unsupported class file major version" in tail):
+        return "jdk_version"
+    if "sdk location not found" in tail:
+        return "android_sdk_missing"
+    if "no connected devices" in tail:
+        return "no_connected_device"
+    return None
+
+
+def environment_reasons(checks) -> List[str]:
+    return list(dict.fromkeys(reason for check in checks or []
+                              for reason in [environment_reason(check)] if reason))
+
+
+def environment_detail(reasons) -> str:
+    hints = {"command_not_found": "验证命令不存在，请检查 PATH 与工具安装",
+             "jdk_version": "Java 版本不符合要求，请在 verify_env 配置 JAVA_HOME",
+             "android_sdk_missing": "Android SDK 未就绪，请在 verify_env 配置 ANDROID_HOME",
+             "no_connected_device": "没有可用的已连接设备，请连接并授权测试设备"}
+    return "验证环境未就绪：" + "；".join(hints[reason] for reason in reasons)
+
+
 def run_command(command: str, *, cwd, env: Optional[Dict[str, str]] = None,
                 timeout: Optional[int] = None) -> dict:
     """Run one verify command in the login shell; return an independent check.
@@ -154,7 +199,8 @@ def run_command(command: str, *, cwd, env: Optional[Dict[str, str]] = None,
     shell = verify_shell()
     started = util.now_iso()
     timed_out, code, tail, detail, launch_failed = False, None, "", None, False
-    secrets = [v for k, v in child.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "AUTHORIZATION"))]
+    from .. import verification_redaction
+    secrets = verification_redaction.values(child, (env or {}).keys())
     try:
         # File-backed capture bounds memory and kills the entire process group,
         # including a shell's background grandchildren, on every exit path.
@@ -177,10 +223,14 @@ def run_command(command: str, *, cwd, env: Optional[Dict[str, str]] = None,
     except OSError as exc:
         launch_failed = True
         detail = "验证命令无法启动：" + str(exc)
-    return {"command": util.redact(command, secrets), "exit_code": code, "timed_out": timed_out,
-            "command_not_found": launch_failed or _command_not_found(code, tail),
-            "detail": util.redact(detail, secrets), "started_at": started, "finished_at": util.now_iso(),
-            "output_tail": util.redact(tail, secrets)[-_OUTPUT_TAIL_BYTES:]}
+    command_not_found = not timed_out and (launch_failed or (code != 0 and _command_not_found(code, tail)))
+    reason = environment_reason({"exit_code": code, "timed_out": timed_out,
+                                 "command_not_found": command_not_found, "output_tail": tail})
+    check = {"command": verification_redaction.redact(command, secrets), "exit_code": code, "timed_out": timed_out,
+            "command_not_found": command_not_found, "environment_reason": reason,
+            "detail": verification_redaction.redact(detail, secrets), "started_at": started, "finished_at": util.now_iso(),
+            "output_tail": verification_redaction.redact(tail, secrets)[-_OUTPUT_TAIL_BYTES:]}
+    return check
 
 
 def run_verify_commands(commands, *, cwd, verify_env=None, timeout=None,
@@ -200,7 +250,8 @@ def run_verify_commands(commands, *, cwd, verify_env=None, timeout=None,
         remaining = deadline - time.monotonic() if deadline else DEFAULT_VERIFY_TIMEOUT
         if remaining <= 0:
             checks.append({"command": util.redact(command), "exit_code": None, "timed_out": True,
-                           "command_not_found": False, "detail": "整组验证时限已用尽", "output_tail": ""})
+                           "command_not_found": False, "environment_reason": None,
+                           "detail": "整组验证时限已用尽", "output_tail": ""})
             break
         checks.append(run_command(command, cwd=cwd, env=env,
                                   timeout=min(timeout or verify_timeout(), remaining)))
@@ -221,14 +272,20 @@ def evaluate(commands, worktree, *, verify_env=None, timeout=None,
     if not empty_diff:
         checks = run_verify_commands(commands, cwd=worktree, verify_env=verify_env,
                                      timeout=timeout, deadline=deadline, heartbeat=heartbeat)
-    env_failure = any(c.get("command_not_found") for c in checks)
+    return _check_result(commands, changes, checks)
+
+
+def _check_result(commands, changes, checks):
+    empty_diff = not changes
+    reasons = environment_reasons(checks)
+    env_failure = bool(reasons)
     if empty_diff:
         passed, detail = False, "执行完成后没有可计入的改动（.pi/** 已排除），判定空转"
     elif not commands:
         passed, detail = False, "计划未声明 verify 命令，需人工接受验证结果"
     elif env_failure:
         passed = False
-        detail = "验证命令不存在（环境类，阶梯 2），请修复 verify 环境后重试"
+        detail = environment_detail(reasons)
     else:
         passed = len(checks) == len(commands) and all(
             type(c["exit_code"]) is int and c["exit_code"] == 0 and not c["timed_out"]
@@ -236,7 +293,7 @@ def evaluate(commands, worktree, *, verify_env=None, timeout=None,
         detail = ("有效改动非空且验证命令逐条通过" if passed
                   else "验证未全部通过，请查看各条独立退出码与输出")
     return {"verification_ok": passed, "empty_diff": empty_diff,
-            "environment_failure": env_failure, "effective_changes": changes,
+            "environment_failure": env_failure, "environment_reasons": reasons, "effective_changes": changes,
             "kind": "passed" if passed else ("empty_diff" if empty_diff else
                     "environment_failure" if env_failure else "verify_failed" if commands else "unconfirmed"),
             "checks": checks, "detail": detail}
@@ -346,13 +403,7 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
             if git_delivery.source_state_sha256(copied, deadline=deadline, heartbeat=heartbeat) != frozen["source_sha256"]:
                 raise util.KanpilotError("verification_identity_unconfirmed", "shadow 验证改动了副本源文件，不能判定通过")
             changes = effective_changes(root, deadline=deadline, heartbeat=heartbeat)
-            env_failure = any(check.get("command_not_found") for check in checks)
-            passed = bool(changes) and len(checks) == len(commands) and all(
-                check.get("exit_code") == 0 and not check.get("timed_out") for check in checks)
-            result = {"verification_ok": passed, "empty_diff": not changes,
-                "environment_failure": env_failure, "effective_changes": changes, "checks": checks,
-                "kind": "passed" if passed else "empty_diff" if not changes else "environment_failure" if env_failure else "verify_failed",
-                "detail": "shadow 副本验证通过" if passed else "shadow 副本验证未通过"}
+            result = _check_result(commands, changes, checks)
     else:
         result = evaluate(commands, frozen["worktree_path"], verify_env=verify_env, timeout=timeout,
                           deadline=deadline, heartbeat=heartbeat)

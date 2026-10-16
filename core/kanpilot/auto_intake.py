@@ -46,7 +46,7 @@ def _sort_key(item):
     return (0, created.timestamp(), str(item["task_id"])) if created else (1, str(number or item["task_id"]).zfill(20), str(item["task_id"]))
 
 
-def _adopt(conn, task, now, policy, *, wanted, delivery=None):
+def _adopt(conn, task, now, policy, *, wanted, delivery=None, adopted=False):
     a = core.automation_of(task)
     if not a:
         a = {"policy_revision": policy["policy_revision"], "adopted_at": now, "fix_round": 0,
@@ -55,13 +55,14 @@ def _adopt(conn, task, now, policy, *, wanted, delivery=None):
         db.add_event(conn, now, "automation_adopted", task_id=task["task_id"], actor="automation",
                      detail={"policy_revision": policy["policy_revision"]})
     core.update_automation(conn, task, now, **dict(a, plan_wanted=wanted))
-    if delivery:
-        core.update_delivery(conn, task, now, **dict(delivery, mode="pr"))
-    elif not core.delivery_of(task):
-        core.update_delivery(conn, task, now, mode="pr")
+    if delivery and delivery.get("branch"):
+        core.update_delivery(conn, task, now, **delivery)
+        if adopted:
+            db.add_event(conn, now, "branch_worktree_adopted", task_id=task["task_id"], actor="automation",
+                         detail={key: delivery.get(key) for key in ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")})
 
 
-def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delivery=None, candidate=None):
+def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delivery=None, candidate=None, adopted=False):
     manifest, source_path = None, None
     if input_id:
         row = db.get_planner_input(conn, input_id)
@@ -84,7 +85,7 @@ def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delive
             task = planner_inputs._import_task(conn, now, manifest, actor="automation", source_path=source_path)
         if task is None or not db.task_is_active(task) or task["auto_advance_paused"] or core.automation_of(task).get("manual_takeover"):
             return
-        _adopt(conn, task, now, policy, wanted=code in _TRANSIENT, delivery=delivery)
+        _adopt(conn, task, now, policy, wanted=code in _TRANSIENT, delivery=delivery, adopted=adopted)
         core.update_automation(conn, task, now, last_skip={"reason": code, "at": now})
         if code not in _TRANSIENT:
             core.block_task(conn, db.require_task(conn, task_id), now, message, code, "automation", stage="plan")
@@ -97,12 +98,18 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         _failure(conn, task_id, now, policy, "auto_budget_exceeded", "无人值守段成本或时长已达到上限")
         return {"task_id": task_id, "reason": "auto_budget_exceeded"}
     prepared = None
+    adopted = False
+    prepared_delivery = None
     delivery = core.delivery_of(task) if task else {}
     try:
         if wanted and not delivery.get("branch"):
             delivery = git_delivery.prepare_branch_worktree(task["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
+            adopted = bool(delivery.pop("adopted", False))
+            if delivery.get("branch"):
+                delivery["mode"] = "pr"
+                prepared_delivery = delivery
         prepared = cli.run("prepare-plan-input", {"task_id": task_id,
                           "expected_requirements_sha256": expected, "local_paths": [],
                           # A14: unattended preparation must not be recorded as a
@@ -117,11 +124,14 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
             delivery = git_delivery.prepare_branch_worktree(meta["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
-        delivery = dict(delivery, mode="pr")
+            adopted = bool(delivery.pop("adopted", False))
+            if delivery.get("branch"):
+                delivery["mode"] = "pr"
+                prepared_delivery = delivery
         config = planner_config.merged(conn)
         item = {"input_id": prepared["input_id"], "input_sha256": prepared["input_sha256"],
                 "planner_backend": config["backend"], "planner_method": config["default_method"],
-                "automation": {"authorized_by": "automation", "policy_revision": policy["policy_revision"], "delivery": delivery}}
+                "automation": {"authorized_by": "automation", "policy_revision": policy["policy_revision"], "delivery": delivery, "adopted": adopted}}
         response = cli.run("start-plans", {"items": [item]}, db_path)["results"][0]
         if not response.get("request_id"):
             raise util.KanpilotError(response.get("code") or "validation_failed", response.get("error") or "规划提交失败")
@@ -131,7 +141,7 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         if wanted and code == "conflict" and "远端需求" in message:
             code, message = "remote_conflict", "远端需求已变化（新增内容未经筛选）"
         _failure(conn, task_id, now, policy, code, message,
-                 input_id=prepared.get("input_id") if prepared else None, delivery=delivery, candidate=candidate)
+                 input_id=prepared.get("input_id") if prepared else None, delivery=prepared_delivery, candidate=candidate, adopted=adopted)
         return {"task_id": task_id, "reason": code}
 
 

@@ -748,3 +748,92 @@ def test_alias_push_target_rewrite_chain_rejected(repo, ssh_aliases):
     git(repo, "config", "url.https://github.com/owner/repo.git.insteadOf", url)
     with pytest.raises(gd.GitDeliveryError, match="重复 URL 改写"):
         gd._push_target(str(repo), "owner/repo")
+
+
+def test_adopt_registered_empty_local_branch_fast_forwards(repo, tmp_path):
+    root = tmp_path / "worktrees"
+    delivery = branch(repo, root)
+    # Advance only the remote/base, leaving the registered task branch behind.
+    other = tmp_path / "publisher"
+    subprocess.run(["git", "clone", str(repo.parent / "origin.git"), str(other)], check=True, capture_output=True)
+    git(other, "config", "user.name", "Publisher")
+    git(other, "config", "user.email", "publisher@example.invalid")
+    (other / "new-source.txt").write_text("upstream change")
+    git(other, "add", ".")
+    git(other, "commit", "-m", "advance")
+    git(other, "push", "origin", "main")
+    adopted = branch(repo, root)
+    assert adopted["adopted"] is True
+    assert adopted["head_sha"] != delivery["head_sha"]
+    assert git(adopted["worktree_path"], "rev-parse", "HEAD") == adopted["base_sha"]
+    assert git(adopted["worktree_path"], "status", "--porcelain", "--untracked-files=all") == ""
+
+
+@pytest.mark.parametrize("reason", ["remote", "unregistered", "own_commit", "dirty", "missing_directory"])
+def test_adoption_rejects_five_unsafe_shapes(repo, tmp_path, reason):
+    root = tmp_path / "worktrees"
+    if reason in ("remote", "unregistered"):
+        git(repo, "branch", "kaneo/task1234")
+        if reason == "remote":
+            git(repo, "push", "origin", "kaneo/task1234")
+    elif reason == "missing_directory":
+        delivery = branch(repo, root)
+        import shutil
+        shutil.rmtree(delivery["worktree_path"])
+    else:
+        delivery = branch(repo, root)
+        worktree = Path(delivery["worktree_path"])
+        (worktree / "untracked-source.txt").write_text("preserve work")
+        if reason == "own_commit":
+            git(worktree, "add", ".")
+            git(worktree, "commit", "-m", "own work")
+    with pytest.raises(gd.GitDeliveryError) as caught:
+        branch(repo, root)
+    assert caught.value.code == "branch_exists"
+    expected = {"remote": "origin", "unregistered": "预期路径", "own_commit": "自有提交", "dirty": "未跟踪", "missing_directory": "目录缺失"}
+    assert expected[reason] in caught.value.message
+
+
+def test_missing_base_uses_real_default_name(repo):
+    with pytest.raises(gd.GitDeliveryError, match="origin 上不存在分支 missing（默认分支 main）"):
+        gd.resolve_base(str(repo), "missing")
+    git(repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    with pytest.raises(gd.GitDeliveryError) as caught:
+        gd.resolve_base(str(repo), "missing")
+    assert "默认分支" not in caught.value.message
+
+
+@pytest.mark.parametrize("relative", ["protected.bin", "build/cache.bin"])
+@pytest.mark.parametrize("late", [False, True])
+def test_adoption_preserves_ignored_files_when_upstream_tracks_same_path(repo, tmp_path, relative, late):
+    root = tmp_path / "worktrees"
+    delivery = branch(repo, root)
+    worktree = Path(delivery["worktree_path"])
+    with (repo / ".git/info/exclude").open("a") as exclude:
+        exclude.write("\n" + relative + "\n")
+    local = worktree / relative
+    local.parent.mkdir(parents=True, exist_ok=True)
+    if not late:
+        local.write_text("private ignored local data")
+    other = tmp_path / "publisher"
+    subprocess.run(["git", "clone", str(repo.parent / "origin.git"), str(other)], check=True, capture_output=True)
+    git(other, "config", "user.name", "Publisher")
+    git(other, "config", "user.email", "publisher@example.invalid")
+    upstream = other / relative
+    upstream.parent.mkdir(parents=True, exist_ok=True)
+    upstream.write_text("upstream tracked contents")
+    git(other, "add", relative)
+    git(other, "commit", "-m", "track previously ignored path")
+    git(other, "push", "origin", "main")
+    original = gd._git
+    def appeared_after_status(args, directory, *a, **kw):
+        result = original(args, directory, *a, **kw)
+        if late and args[0] == "status" and Path(directory) == worktree:
+            local.write_text("private ignored local data")
+        return result
+    with patch.object(gd, "_git", side_effect=appeared_after_status):
+        with pytest.raises(gd.GitDeliveryError) as caught:
+            branch(repo, root)
+    assert caught.value.code == "branch_exists"
+    assert local.read_text() == "private ignored local data"
+    assert git(worktree, "rev-parse", "HEAD") == delivery["head_sha"]

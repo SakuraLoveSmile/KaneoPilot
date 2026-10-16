@@ -200,10 +200,131 @@ class TestVerificationChecks(KanpilotTestCase):
         executable.chmod(0o755)
         event = {"seq": 2, "type": "command_output", "name": "exec", "exit_code": 0,
             "input": json.dumps({"command": 'export PATH="' + str(directory) + ':$PATH"\nfixturetool; echo $?'}), "output": "0"}
-        env = verification_checks._path_environment([self.events[0], event, self.events[-1]])
+        conn = db.connect(self.db_path)
+        self.addCleanup(conn.close)
+        task = db.require_task(conn, self.task_id)
+        env = verification_checks._verification_environment(conn, task, [self.events[0], event, self.events[-1]])
         self.assertTrue(env["PATH"].startswith(str(directory) + ":"))
         event["input"] = json.dumps({"command": 'export PATH="$(echo /bad):$PATH"\nfixturetool'})
-        self.assertEqual(verification_checks._path_environment([event])["PATH"], os.environ["PATH"])
+        self.assertEqual(verification_checks._verification_environment(conn, task, [event])["PATH"], os.environ["PATH"])
+
+    def test_project_environment_overrides_path_and_redacts_values_from_receipt_and_logs(self):
+        conn = db.connect(self.db_path)
+        self.addCleanup(conn.close)
+        task = db.require_task(conn, self.task_id)
+        secret = "private-project-injected-value"
+        project_env = {"PATH": os.environ["PATH"], "FIXTURE_VALUE": secret}
+        from kanpilot import project_config
+        _, _, items, _ = project_config.load_raw_mappings(conn)
+        items[task["project_id"]]["verify_env"] = project_env
+        setting = db.get_setting(conn, "project_mappings") or {"version": 1, "revision": 0}
+        setting["items"] = items
+        db.set_setting(conn, "project_mappings", setting)
+        env = verification_checks._verification_environment(conn, task, [])
+        self.assertEqual(env["PATH"], project_env["PATH"])
+        original = verification_checks._run_command
+        def injected(ctx, operation_id, command, cwd, environment, output):
+            result = original(ctx, operation_id, '/usr/bin/printf %s "$FIXTURE_VALUE"', cwd, environment, output)
+            result["command"] = command
+            return result
+        with patch.object(verification_checks, "_run_command", side_effect=injected):
+            result = self.call("run-verification-checks", self.check_payload)
+        self.assertTrue(result["verification_ok"])
+        fresh = db.require_task(conn, self.task_id)
+        receipt = db.task_extra(fresh)["verification_checks"]["receipt"]
+        self.assertEqual(receipt["verify_env_keys"], sorted(project_env))
+        self.assertEqual(receipt["verify_env_sha256"], util.sha256_text(util.jdump(project_env)))
+        self.assertEqual(len(receipt["verify_env_sha256"]), 64)
+        self.assertNotIn(secret, util.jdump(receipt))
+        for check in receipt["checks"]:
+            self.assertNotIn(secret, Path(check["output_path"]).read_text())
+            self.assertIn("«redacted»", check["output_tail"])
+        for event in conn.execute("SELECT detail_json FROM events"):
+            self.assertNotIn(secret, event["detail_json"] or "")
+
+    def test_short_sensitive_environment_values_are_redacted_across_output_blocks(self):
+        from kanpilot.engine import verdict
+        project_env = {"PASSWORD": "123456", "TOKEN": "abcdef", "SECRET": "uvwxyz",
+                       "API_KEY": "987654", "AUTHORIZATION": "auth56", "KP_VERIFY_READY": "1"}
+        original = verification_checks._run_command
+        def injected(ctx, operation_id, command, cwd, environment, output):
+            script = ('printf "%4093s" ""; printf "%s|%s|%s|%s|%s|ready=%s" '
+                      '"$PASSWORD" "$TOKEN" "$SECRET" "$API_KEY" "$AUTHORIZATION" "$KP_VERIFY_READY"; '
+                      'printf "%5000s" ""')
+            result = original(ctx, operation_id, script, cwd, environment, output)
+            result["command"] = command
+            return result
+        with patch.object(verdict, "project_verify_env", return_value=project_env), \
+                patch.object(verification_checks, "_run_command", side_effect=injected):
+            result = self.call("run-verification-checks", self.check_payload)
+        self.assertTrue(result["verification_ok"])
+        conn = db.connect(self.db_path)
+        self.addCleanup(conn.close)
+        receipt = db.task_extra(db.require_task(conn, self.task_id))["verification_checks"]["receipt"]
+        logs = "".join(Path(check["output_path"]).read_text() for check in receipt["checks"])
+        persisted = util.jdump(receipt) + logs + "".join(row[0] or "" for row in conn.execute("SELECT detail_json FROM events"))
+        for key, value in project_env.items():
+            if key != "KP_VERIFY_READY":
+                self.assertNotIn(value, persisted, key)
+        self.assertIn("ready=1", logs)
+        self.assertIn("«redacted»", logs)
+
+    def test_project_environment_is_read_once_for_execution_receipt_and_redaction(self):
+        from kanpilot.engine import verdict
+        first = {"SNAPSHOT_A": "first-private-snapshot"}
+        second = {"SNAPSHOT_B": "second-private-snapshot"}
+        original = verification_checks._run_command
+        observed = []
+        def injected(ctx, operation_id, command, cwd, environment, output):
+            observed.append({key: environment[key] for key in ("SNAPSHOT_A", "SNAPSHOT_B") if key in environment})
+            result = original(ctx, operation_id, 'printf "%s%s" "$SNAPSHOT_A" "$SNAPSHOT_B"', cwd, environment, output)
+            result["command"] = command
+            return result
+        with patch.object(verdict, "project_verify_env", side_effect=[first, second]) as read, \
+                patch.object(verification_checks, "_run_command", side_effect=injected):
+            result = self.call("run-verification-checks", self.check_payload)
+        self.assertTrue(result["verification_ok"])
+        self.assertEqual(observed, [first] * len(self.commands))
+        self.assertEqual(read.call_count, 1)
+        receipt = db.task_extra(self.state()["task"])["verification_checks"]["receipt"]
+        self.assertEqual(receipt["verify_env_keys"], sorted(first))
+        self.assertEqual(receipt["verify_env_sha256"], util.sha256_text(util.jdump(first)))
+        for check in receipt["checks"]:
+            self.assertEqual(Path(check["output_path"]).read_text(), "«redacted»")
+
+    def test_failed_interactive_checks_only_persist_redacted_output_and_never_queue_recovery(self):
+        from kanpilot.engine import verdict
+        original = verification_checks._run_command
+        def injected(ctx, operation_id, command, cwd, environment, output):
+            return original(ctx, operation_id, "printf 'SDK location not found.\\nsecret=%s' \"$PASSWORD\"; exit 1",
+                            cwd, environment, output)
+        with patch.object(verdict, "project_verify_env", return_value={"PASSWORD": "a"}), \
+                patch.object(verification_checks, "_run_command", side_effect=injected):
+            result = self.call("run-verification-checks", self.check_payload)
+        self.assertFalse(result["verification_ok"])
+        self.assertIsNone(result["request"])
+        task = self.state()["task"]
+        self.assertEqual(task["status"], "needs_user")
+        receipt = db.task_extra(task)["verification_checks"]["receipt"]
+        for check in receipt["checks"]:
+            self.assertEqual(Path(check["output_path"]).read_text(), "SDK loc«redacted»tion not found.\nsecret=«redacted»")
+        self.assertNotIn("secret=a", util.jdump(receipt))
+
+    def test_explicit_project_path_resolves_conflicting_historical_prefixes(self):
+        from kanpilot.engine import verdict
+        events = [{"seq": index + 2, "type": "command_output", "name": "exec", "exit_code": 0,
+                   "input": json.dumps({"command": 'export PATH="/' + name + ':$PATH"\nfixturetool'}), "output": "0"}
+                  for index, name in enumerate(("first", "second"))]
+        conn = db.connect(self.db_path)
+        self.addCleanup(conn.close)
+        task = db.require_task(conn, self.task_id)
+        with patch.object(verdict, "project_verify_env", return_value={"PATH": "/explicit/project/bin"}):
+            environment = verification_checks._verification_environment(conn, task, events)
+        self.assertEqual(environment["PATH"], "/explicit/project/bin")
+        with patch.object(verdict, "project_verify_env", return_value={}):
+            with self.assertRaises(util.KanpilotError) as caught:
+                verification_checks._verification_environment(conn, task, events)
+        self.assertEqual(caught.exception.code, "conflict")
 
     def test_timeouts_are_failures_and_leave_no_command_process(self):
         original = verification_checks._run_command
