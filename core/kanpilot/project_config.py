@@ -243,6 +243,9 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
 
         task_count, req_count = _get_active_counts(conn, pid)
 
+        from . import git_delivery
+        default_branch, base_exists = git_delivery.origin_branch_info(
+            raw_repo, (entry.get("automation") or {}).get("delivery_base")) if raw_repo else (None, None)
         items_output.append({
             "project_id": pid,
             "project_name": pname,
@@ -259,6 +262,7 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
             "effective_engine_mode": engine_claim_scope.effective_mode(conn, pid),
             "verify_env": entry.get("verify_env") or {},
             "fallback_model": entry.get("fallback_model"),
+            "origin_default_branch": default_branch, "delivery_base_exists": base_exists,
             "automation": automation_policy.policy_for(conn, pid) or dict(constants.AUTOMATION_DEFAULTS),
             "automation_preflight": automation_policy.automation_preflight(conn, pid),
         })

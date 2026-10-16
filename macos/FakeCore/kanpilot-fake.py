@@ -972,6 +972,11 @@ def merged_tasks(state):
 
 def merged_requests(state):
     requests = {r["request_id"]: dict(r) for r in base_requests()}
+    for code in ("branch_exists", "delivery_base_unknown"):
+        rid = "req-plan-auto-" + code
+        requests[rid] = {"request_id": rid, "task_id": "auto-" + code, "kind": "plan", "stage": "plan",
+                         "status": "failed", "priority": 100, "attempt_no": 1, "requested_by": "scheduler",
+                         "created_at": past(minutes=2), "updated_at": past(minutes=1)}
     for req in state.get("extra_requests", []):
         requests[req["request_id"]] = dict(req)
     for rid, patch in state.get("request_overrides", {}).items():
@@ -1006,6 +1011,18 @@ def move_out_blocked_reason(task, requests):
     return None
 
 
+def fake_engine_fix_revert(task, requests):
+    candidate = task.get("engine_fix_revert")
+    if (not candidate or not task.get("automation") or task.get("status") != "needs_user"
+            or task.get("failure_stage") != "plan"
+            or task.get("failure_code") not in ("branch_exists", "delivery_base_unknown")
+            or candidate.get("execution_run_id") != task.get("run_id")
+            or candidate.get("plan_sha256") != task.get("plan_sha256")
+            or any(r.get("task_id") == task["task_id"] and r.get("status") in ("queued", "claimed") for r in requests)):
+        return None
+    return dict(candidate)
+
+
 def allowed_actions(task, requests):
     """按 §4.10 / §5.15.6 前置条件近似推导 allowed_actions。"""
     if task.get("save_state") == "purged":
@@ -1019,7 +1036,7 @@ def allowed_actions(task, requests):
         return actions
     status = task.get("status")
     if task.get("_automation_allowed") and status == "needs_user":
-        return task["_automation_allowed"]
+        return list(task["_automation_allowed"]) + (["revert_engine_fix"] if fake_engine_fix_revert(task, requests) else [])
     if status == "done":
         actions = ["recheck"]
         if move_out_blocked_reason(task, requests) is None:
@@ -1115,6 +1132,8 @@ def task_detail(task, requests):
     detail = {k: task.get(k) for k in SUMMARY_KEYS}
     for key, value in task.items():
         detail.setdefault(key, value)
+    detail["engine_fix_summary"] = task.get("engine_fix_summary", {"used": 1, "max": 2}) if task.get("automation") else None
+    detail["engine_fix_revert"] = fake_engine_fix_revert(task, requests)
     detail["allowed_actions"] = allowed_actions(task, requests)
     detail["attempts"] = attempts_for(task)
     # v2 §5.20：purged 任务详情为只读审计视图。
@@ -1428,6 +1447,7 @@ EVENT_KIND_CN = {
     "dispatch_sent": "派发已发送", "dispatch_failed": "派发失败",
     "reported": "已回报", "review_registered": "评审登记",
     "fix_task_created": "修复任务创建", "resolved": "人工解决",
+    "engine_fix_reverted": "自动补救已撤回", "branch_worktree_adopted": "已收养任务分支工作树",
     "paused": "已暂停", "unpaused": "已恢复",
     "priority_changed": "优先级变更", "migrated": "已迁移",
     "rechecked": "已重新校验", "request_cancelled": "请求取消",
@@ -1634,6 +1654,15 @@ def cmd_resolve(state, payload):
     scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
     if scenario.get("resolve_error"):
         return fail(str(scenario["resolve_error"]), "conflict")
+    if action == "revert_engine_fix":
+        if not payload.get("expected_execution_run_id") or not payload.get("expected_plan_sha256"):
+            return fail("撤回需要执行轮次与计划摘要", "bad_request")
+        candidate = fake_engine_fix_revert(task, requests)
+        if (not candidate or payload["expected_execution_run_id"] != candidate["execution_run_id"]
+                or payload["expected_plan_sha256"] != candidate["plan_sha256"]):
+            return fail("自动补救撤回候选已变化，请刷新后重试", "conflict")
+        if scenario.get("revert_error"):
+            return fail(str(scenario["revert_error"]), "conflict")
     if action == "reverify":
         if action not in allowed_actions(task, requests) or task.get("failure_code") != "verification_unconfirmed":
             return fail("当前状态不允许重新核验验证证据", "conflict")
@@ -1652,7 +1681,19 @@ def cmd_resolve(state, payload):
         clear = ["failure_code", "failure_reason", "failure_stage",
                  "blocked_at", "blocked_reason", "blocked_summary",
                  "manual_recovery_required", "lock_retained"]
-        if action == "reverify":
+        if action == "revert_engine_fix":
+            ov.update({"status": "needs_user", "stage": "monitor", "failure_stage": "monitor",
+                       "failure_code": "verification_environment_failure", "display_status": "需人工",
+                       "failure_reason": "验证所需 JDK 版本不符：请在 verify_env 设置 JAVA_HOME 后重新验证本轮",
+                       "send_state": "sent", "sent": 1, "sent_at": task.get("sent_at"),
+                       "engine_fix_revert": None,
+                       "engine_fix_summary": {"used": max(0, (task.get("engine_fix_summary") or {"used": 1})["used"] - 1), "max": 2},
+                       "_automation_allowed": ["resume", "replan", "mark_done", "dismiss"],
+                       "delivery": {"mode": "manual"}})
+            append_event(s, "engine_fix_reverted", task_id=tid, actor="user",
+                         detail={"execution_run_id": candidate["execution_run_id"], "plan_sha256": candidate["plan_sha256"],
+                                 "failure_code": "verification_environment_failure", "environment_reasons": ["jdk_version"]})
+        elif action == "reverify":
             for k in clear:
                 ov[k] = None
             ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
@@ -2665,6 +2706,8 @@ def cmd_get_request(state, payload):
                         for e in merged_events(state))
                 and not any(r.get("status") in ("queued", "claimed") for r in task_requests)):
             actions.insert(0, "reverify")
+    if status == "failed" and task is not None and fake_engine_fix_revert(task, merged_requests(state)):
+        actions.insert(0, "revert_engine_fix")
     if req.get("kind") == "plan-scan" and req.get("task_id") is None:
         actions = ["view", "fetch_todos"]
     if status == "queued" and req.get("kind") == "plan" \
@@ -2982,6 +3025,8 @@ def cmd_get_project_mappings(state, payload):
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
             "engine_mode": item.get("engine_mode", "legacy"),
+            "origin_default_branch": item.get("origin_default_branch", "master"),
+            "delivery_base_exists": None if item.get("delivery_base_unverified") else ((item.get("automation") or {}).get("delivery_base") in (None, "", "master", "develop")),
             "verify_env": item.get("verify_env", {}),
             "fallback_model": item.get("fallback_model"),
             "automation": item.get("automation") or automation_policy(pid == PROJECTS["Music"]),
@@ -3049,7 +3094,8 @@ def automation_policy(enabled=False):
 
 
 def automation_tasks():
-    failures = ["verification_unconfirmed", "execution_failed", "fix_rounds_exhausted",
+    failures = ["verification_unconfirmed", "verification_environment_failure", "fix_branch_unavailable",
+                "execution_failed", "fix_rounds_exhausted",
                 "auto_budget_exceeded", "automation_stopped", "review_blocked", "review_backend_unsupported",
                 "branch_exists", "delivery_base_unknown", "delivery_blocked_files", "delivery_commit_failed",
                 "no_changes", "branch_diverged", "gh_unavailable", "pr_closed", "remote_conflict",
@@ -3067,7 +3113,7 @@ def automation_tasks():
         if code in ("review_backend_unsupported", "branch_diverged", "gh_unavailable", "pr_closed"): actions = ["resume", "mark_done", "dismiss"]
         stage = ("plan" if code in ("branch_exists", "delivery_base_unknown", "planner_failed", "needs_input") or status in ("needs_plan", "planning")
                  else "delivery" if code in ("delivery_blocked_files", "delivery_commit_failed", "no_changes", "branch_diverged", "gh_unavailable", "pr_closed")
-                 else "monitor" if code in ("verification_unconfirmed", "execution_failed") else "review")
+                 else "monitor" if code in ("verification_unconfirmed", "verification_environment_failure", "fix_branch_unavailable", "execution_failed") else "review")
         result.append({"task_id": tid, "title": "自动处理示例 · " + (code or status),
                        "project_id": PROJECTS["Music"], "project_name": "Music", "status": status,
                        "stage": stage, "kaneo_status": "to-do" if stage == "plan" else "in-review",
@@ -3110,11 +3156,27 @@ def automation_tasks():
                               failure_reason="隔离示例：验证退出码尚未识别，等待重新核验现有记录",
                               send_state="sent", sent=1,
                               session_marker="auto-verification_unconfirmed/run-auto-verification-unconfirmed")
+        if code in ("branch_exists", "delivery_base_unknown"):
+            result[-1].update(run_id="run-" + tid, plan_sha256=sha(tid + "plan", 64), sent=1,
+                              sent_at=past(hours=1), send_state="sent", engine_fix_summary={"used": 1, "max": 2},
+                              engine_fix_revert={"execution_run_id": "run-" + tid,
+                                                 "plan_sha256": sha(tid + "plan", 64), "expected_failure_code": code})
+        if code == "verification_environment_failure":
+            result[-1]["failure_reason"] = "验证所需 JDK 版本不符，请在 verify_env 设置 JAVA_HOME 后重新验证本轮"
+        if code == "fix_branch_unavailable":
+            result[-1]["failure_reason"] = "本轮改动在独立工作树，无法同分支修复"
         if code == "execution_failed":
             result[-1].update(run_id="run-auto-execution-failed", plan_path="/tmp/fake-confirmed-plan.md",
                               plan_sha256=sha("confirmed-plan", 64), plan_kind="standard",
                               send_state="sent", sent=1,
                               session_marker="auto-execution_failed/run-auto-execution-failed")
+    review = copy.deepcopy(next(t for t in result if t.get("failure_code") == "fix_branch_unavailable"))
+    review.update(task_id="auto-fix_branch_unavailable-review", title="评审示例 · 无法同分支修复",
+                  stage="review", failure_stage="review", _automation_allowed=["replan", "mark_done", "dismiss"])
+    result.append(review)
+    manual = copy.deepcopy(next(t for t in result if t.get("failure_code") == "verification_environment_failure"))
+    manual.update(task_id="manual-verification-environment", title="人工处理示例 · 验证环境未就绪", automation=None)
+    result.append(manual)
     return result
 
 
@@ -3132,10 +3194,14 @@ def cmd_set_project_automation(state, payload):
     if expected is not None and expected != current["policy_revision"]:
         return fail("策略版本冲突，请重新载入后保存", "conflict")
     policy = dict(payload.get("automation") or {})
+    base = policy.get("delivery_base")
+    check = "unverified" if item.get("delivery_base_unverified") else "verified"
+    if base and check != "unverified" and base not in ("master", "develop"):
+        return fail("origin 上不存在该分支 %s；可用默认分支为 master" % base, "bad_request")
     policy.update({"policy_revision": current["policy_revision"] + 1, "updated_at": iso(utcnow())})
     item["automation"] = policy
     save_state(state)
-    return {"ok": True, "automation": policy}
+    return {"ok": True, "automation": policy, "delivery_base_check": check}
 
 
 PLANNER_CONFIG = {"backend": "codex", "default_method": "builtin",

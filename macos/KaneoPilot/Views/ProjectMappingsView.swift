@@ -25,6 +25,7 @@ struct ProjectMappingsView: View {
     @State private var isSaving = false
     @State private var errorMessage: String? = nil
     @State private var successMessage: String? = nil
+    @State private var deliveryBaseNotice: [String: String] = [:]
 
     @State private var showUnmapConfirm = false
     @State private var automationDrafts: [String: AutomationDraft] = [:]
@@ -437,9 +438,16 @@ struct ProjectMappingsView: View {
                     VStack(alignment: .leading, spacing: Spacing.s) {
                         Text("PR 目标分支（留空使用默认分支）")
                             .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                        TextField("例如 main", text: draftBinding(id, \.base))
+                        TextField(item.originDefaultBranch.map { "留空使用默认分支 \($0)" } ?? "留空使用默认分支", text: draftBinding(id, \.base))
                             .textFieldStyle(.roundedBorder).font(.kpBody)
                             .accessibilityLabel("PR 目标分支，留空使用默认分支")
+                        if item.deliveryBaseExists == false, draft.base == (item.automation?.deliveryBase ?? "") {
+                            Text("origin 上不存在该分支").font(.kpSmall).foregroundStyle(.red)
+                        }
+                        if let notice = deliveryBaseNotice[id] {
+                            Text(notice).font(.kpSmall).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -467,9 +475,14 @@ struct ProjectMappingsView: View {
         guard let draft = automationDrafts[id], draft.valid else { return }
         isSaving = true
         defer { isSaving = false }
-        if await model.setProjectAutomation(projectID: id, automation: draft.fields, expectedPolicyRevision: draft.revision) {
-            automationDrafts.removeValue(forKey: id)
+        if await model.setProjectAutomation(projectID: id, automation: draft.fields, expectedPolicyRevision: draft.revision, onSavedCheck: { check in
+            deliveryBaseNotice[id] = check == "unverified" ? "设置已保存；暂时无法确认 origin 上的目标分支，请稍后重新保存核验。" : nil
+        }) {
+            if deliveryBaseNotice[id] == nil { automationDrafts.removeValue(forKey: id) }
             await loadMappings(refreshRemote: false)
+            if deliveryBaseNotice[id] != nil, let revision = items.first(where: { $0.projectId == id })?.automation?.policyRevision {
+                automationDrafts[id]?.revision = revision
+            }
             successMessage = "已保存自动处理设置"
             errorMessage = nil
         } else {

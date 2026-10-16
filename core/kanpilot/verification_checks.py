@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 
-from . import bridge, core, db, derive, dsh_events, git_delivery, process_owner, remote, review_snapshot, round_store, util, verification_recovery, verify_evidence
+from . import bridge, core, db, derive, dsh_events, git_delivery, process_owner, remote, review_snapshot, round_store, util, verification_recovery, verification_redaction, verify_evidence
 
 CHECK_TIMEOUT_SECONDS = 600
 
@@ -144,15 +144,18 @@ def _equivalent_core_commit(task, expected, actual):
     return True
 
 
-def _path_environment(events):
+def _verification_environment(conn, task, events, *, verify_env=None):
     """Reuse only inert, literal PATH exports from this execution's tool results."""
     environment = os.environ.copy()
+    if verify_env is None:
+        from .engine import verdict
+        verify_env = verdict.project_verify_env(conn, task["project_id"])
     prefixes = []
     for result in verify_evidence.extract_command_results(dsh_events.to_messages(events)):
         parsed = verify_evidence._path_prefix(result["command"])
         if parsed and parsed[0] not in prefixes:
             prefixes.append(parsed[0])
-    if prefixes:
+    if prefixes and "PATH" not in verify_env:
         # Different commands may use the same frozen prefix. Conflicting prefixes
         # need an explicit environment decision rather than silently picking one.
         if len(prefixes) != 1:
@@ -161,6 +164,7 @@ def _path_environment(events):
         if value.startswith('"'):
             value = value[1:-1]
         environment["PATH"] = re.sub(r'\$\{PATH\}|\$PATH', lambda _: environment.get("PATH", ""), value)
+    environment.update(verify_env)
     return environment
 
 
@@ -288,11 +292,13 @@ def _run_command(ctx, operation_id, command, cwd, environment, output):
     timed_out, code, detail = False, None, None
     process = None
     handshake = output.with_suffix(".start.json")
+    secrets = verification_redaction.values(environment, getattr(ctx, "verification_redact_keys", []))
     with output.open("xb") as stream:
         try:
             process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("verification_process.py")),
                 str(os.getpid()), str(handshake), command, str(CHECK_TIMEOUT_SECONDS),
-                util.jdump(process_owner.process_birth(os.getpid()))],
+                util.jdump(process_owner.process_birth(os.getpid())),
+                util.jdump(getattr(ctx, "verification_redact_keys", []))],
                 cwd=cwd, env=environment, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
             _update_operation(ctx, operation_id, command_pid=process.pid,
                               command_birth=process_owner.process_birth(process.pid))
@@ -319,7 +325,7 @@ def _run_command(ctx, operation_id, command, cwd, environment, output):
                 code = process.returncode
         except OSError as exc:
             detail = "验证命令无法启动：" + str(exc)
-            stream.write(detail.encode("utf-8"))
+            stream.write(verification_redaction.redact(detail, secrets).encode("utf-8"))
         finally:
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -328,7 +334,7 @@ def _run_command(ctx, operation_id, command, cwd, environment, output):
     with output.open("rb") as stream:
         stream.seek(max(0, output.stat().st_size - 4000))
         tail = stream.read().decode("utf-8", errors="replace")
-    return {"command": command, "exit_code": code, "timed_out": timed_out, "detail": detail,
+    return {"command": verification_redaction.redact(command, secrets), "exit_code": code, "timed_out": timed_out, "detail": verification_redaction.redact(detail, secrets),
             "started_at": started, "finished_at": util.now_iso(), "output_tail": tail,
             "output_path": str(output), "output_sha256": util.sha256_file(output)}
 
@@ -360,7 +366,10 @@ def cmd_run_verification_checks(ctx, payload):
     binding = _binding(ctx.conn, task)
     directory = Path(next(path for path in hashes if Path(path).name == "job.json")).parent
     events = [json.loads(line) for line in (directory / dsh_events.EVENT_LOG_NAME).read_text().splitlines() if line.strip()]
-    environment = _path_environment(events)
+    from .engine import verdict
+    verify_env = verdict.project_verify_env(ctx.conn, task["project_id"])
+    environment = _verification_environment(ctx.conn, task, events, verify_env=verify_env)
+    ctx.verification_redact_keys = sorted(verify_env)
     snapshot = verification_recovery._snapshot(ctx.conn, task_id, task["run_id"])
     output_root = directory.parent / "verification-checks" / operation_id
     with db.write_txn(ctx.conn):
@@ -403,7 +412,8 @@ def cmd_run_verification_checks(ctx, payload):
     detail = "全部验证命令逐条通过，已重新核验并安排监控推进" if passed else error or "验证未全部通过，请查看各条独立退出码与输出后修复并重跑"
     receipt = {"binding": binding, "checks": checks, "verification_ok": passed,
                "detail": detail, "output_root": str(output_root), "completed_at": util.now_iso(),
-               "evidence_sha256": hashes}
+               "evidence_sha256": hashes, "verify_env_keys": sorted(verify_env),
+               "verify_env_sha256": util.sha256_text(util.jdump(verify_env))}
     with db.write_txn(ctx.conn):
         current = db.require_task(ctx.conn, task_id)
         _identity(current, payload)

@@ -226,7 +226,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
         if isinstance(exc, util.KanpilotError) and exc.code != "verification_identity_unconfirmed":
             raise
-        result = {"verification_ok": False, "empty_diff": False, "environment_failure": False,
+        result = {"verification_ok": False, "empty_diff": False, "environment_failure": False, "environment_reasons": [],
                   "effective_changes": [], "checks": [], "kind": "unconfirmed", "binding": None,
                   "detail": util.redact(getattr(exc, "message", str(exc)))}
     current = current_task()

@@ -320,6 +320,23 @@ def requires_branch_review(task) -> bool:
     return delivery.get("mode") == "pr" or delivery.get("workspace_version") == 1
 
 
+FIX_BRANCH_UNAVAILABLE_DETAIL = "本轮改动在独立工作树，无法同分支修复"
+
+
+def same_branch_fix_ready(task, binding=None) -> tuple:
+    """Metadata-only guard. Filesystem/Git verification belongs to the caller."""
+    delivery = delivery_of(task)
+    reason = None
+    if not requires_branch_review(task):
+        reason = "detached"
+    elif not delivery.get("branch") or not delivery.get("worktree_path"):
+        reason = "no_branch_worktree"
+    elif binding is not None and (binding.get("branch") != delivery["branch"]
+                                  or binding.get("worktree_path") != delivery["worktree_path"]):
+        reason = "worktree_mismatch"
+    return reason is None, reason
+
+
 def branch_review_snapshot(task) -> dict:
     delivery = delivery_of(task)
     return {**{key: delivery.get(key) for key in (
