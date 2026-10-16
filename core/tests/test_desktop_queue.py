@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from helpers import KanpilotTestCase
 from kanpilot import (cli, db, desktop_queue as desktop, headless_adapter,
-                      pi_desktop_review, remote, review_snapshot, round_store, util, worktree_pool)
+                      pi_desktop_review, remote, review_snapshot, round_store, util, worktree_pool, git_delivery)
 
 
 class DesktopQueueTests(KanpilotTestCase):
@@ -94,10 +94,20 @@ class DesktopQueueTests(KanpilotTestCase):
         with closing(db.connect(self.db_path)) as conn:
             db.update_task(conn, task["id"], util.now_iso(), status="in_review", stage="review", run_id=execution_run)
             row = db.require_task(conn, task["id"])
-            # These cases cover historical uncommitted Review snapshots.
-            # New branch-only Review has its own committed-worktree cases.
+            # Manual cases retain historical snapshots; same-task automation
+            # requires a real, core-owned commit on the registered branch.
             extra = db.task_extra(row)
-            extra.pop("delivery", None)
+            execution_worktree = repository
+            if automated:
+                delivery = extra["delivery"]
+                execution_worktree = Path(delivery["worktree_path"])
+                (execution_worktree / "automated-feature.py").write_text("feature = True\n")
+                committed = git_delivery.commit_worktree(dict(delivery, repository=str(repository)),
+                    task_id=task["id"], title="Automated fixture", execution_run_id=execution_run, fix_round=0)
+                extra["delivery"] = dict(delivery, head_sha=committed["sha"],
+                    commits=[{"execution_run_id": execution_run, "sha": committed["sha"]}])
+            else:
+                extra.pop("delivery", None)
             db.update_task(conn, task["id"], util.now_iso(), extra_json=extra)
             row = db.require_task(conn, task["id"])
             if automated:
@@ -105,7 +115,7 @@ class DesktopQueueTests(KanpilotTestCase):
                                                                   "max_fix_rounds": 3})
             round_store.upsert_on_claim(conn, task["id"], execution_run, {"backend": "pi"}, util.now_iso(), backend="pi")
             conn.execute("UPDATE execution_rounds SET worktree_path=?,run_status='finished' WHERE task_id=? AND run_id=?",
-                         (str(repository), task["id"], execution_run))
+                         (str(execution_worktree), task["id"], execution_run))
             evidence = headless_adapter.resolve_source(conn).run_dir(task["id"], execution_run)
             evidence.mkdir(parents=True)
             (evidence / "job.json").write_text(json.dumps({"task_id": task["id"], "run_id": execution_run,

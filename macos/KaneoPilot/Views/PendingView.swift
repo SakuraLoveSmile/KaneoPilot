@@ -350,6 +350,9 @@ struct RequestDetailView: View {
     @State private var confirmMarkDone = false
     @State private var confirmCancelPlan = false
     @State private var retryExecutionConfirmation: ConfirmableAction?
+    @State private var revertConfirmation: (taskID: String, candidate: EngineFixRevert)?
+    @State private var preparingRevert = false
+    @State private var confirmReplan = false
     @State private var preparingExecutionRetry = false
     @State private var preparingReverification = false
     @State private var reverifyError: String?
@@ -396,6 +399,29 @@ struct RequestDetailView: View {
         } message: {
             Text(retryExecutionConfirmation?.message ?? "")
         }
+        .confirmationDialog("撤回自动补救？", isPresented: Binding(
+            get: { revertConfirmation != nil }, set: { if !$0 { revertConfirmation = nil } }
+        ), titleVisibility: .visible) {
+            if let confirmation = revertConfirmation {
+                Button("撤回自动补救") {
+                    revertConfirmation = nil
+                    Task {
+                        await model.revertEngineFix(taskID: confirmation.taskID, candidate: confirmation.candidate)
+                        await load()
+                    }
+                }.disabled(model.busy)
+            }
+            Button("取消", role: .cancel) { revertConfirmation = nil }
+        } message: { Text(AutomationPresentation.revertMessage) }
+        .confirmationDialog("重新规划？", isPresented: $confirmReplan, titleVisibility: .visible) {
+            Button("重新规划", role: .destructive) {
+                if let taskID = detail?.request?.taskId ?? detail?.task?.taskId {
+                    Task { await model.resolve(taskID: taskID, action: "replan") }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { Text(AutomationPresentation.replanMessage) }
+        .onChange(of: requestID) { revertConfirmation = nil; generation += 1 }
         .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
                             titleVisibility: .visible) {
             Button("终止计划", role: .destructive) {
@@ -438,6 +464,20 @@ struct RequestDetailView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将任务归档为完成，不再自动推进。")
+        }
+    }
+
+    private func prepareRevert(taskID: String) async {
+        guard !preparingRevert else { return }
+        let owner = generation
+        preparingRevert = true
+        defer { preparingRevert = false }
+        do {
+            let candidate = try await model.currentEngineFixRevert(taskID: taskID)
+            guard owner == generation, (detail?.request?.taskId ?? detail?.task?.taskId) == taskID else { return }
+            revertConfirmation = (taskID, candidate)
+        } catch {
+            if owner == generation { model.alertMessage = error.coreMessage; await load() }
         }
     }
 
@@ -764,7 +804,7 @@ struct RequestDetailView: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Spacing.m) {
-                        ForEach(detail.allowedActions ?? [], id: \.self) { action in
+                        ForEach((detail.allowedActions ?? []).sorted { $0 == "revert_engine_fix" && $1 != "revert_engine_fix" }, id: \.self) { action in
                             actionButton(action, detail: detail)
                         }
                         if model.busy {
@@ -847,6 +887,11 @@ struct RequestDetailView: View {
             }
             .disabled(model.busy || preparingExecutionRetry || preparingReverification || taskID == nil)
             .help("只重新读取当前执行记录，全部验证通过才继续；不会调用模型或设置人工认可。")
+        case "revert_engine_fix":
+            Button("撤回自动补救") {
+                guard let taskID else { return }
+                Task { await prepareRevert(taskID: taskID) }
+            }.disabled(model.busy || preparingRevert || taskID == nil)
         case "resume", "accept_verification", "dismiss":
             Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode)
                    : action == "accept_verification" ? "接受验证结果"
@@ -867,7 +912,11 @@ struct RequestDetailView: View {
         case "replan":
             Button("重新规划") {
                 guard let taskID else { return }
-                Task { await model.resolve(taskID: taskID, action: "replan") }
+                if detail.task?.exception?.failureCode == "fix_branch_unavailable" {
+                    confirmReplan = true
+                } else {
+                    Task { await model.resolve(taskID: taskID, action: "replan") }
+                }
             }
             .disabled(model.busy || taskID == nil)
         case "mark_done":

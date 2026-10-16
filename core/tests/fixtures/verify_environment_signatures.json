@@ -1,0 +1,71 @@
+[
+  {
+    "command": [
+      "./gradlew",
+      ":app:assembleDebug",
+      "--offline",
+      "--no-daemon",
+      "--no-configuration-cache",
+      "--max-workers=2",
+      "-Dorg.gradle.jvmargs=-Xmx1g -Dfile.encoding=UTF-8"
+    ],
+    "exit_code": 1,
+    "timed_out": false,
+    "seconds": 12.67,
+    "isolation": "local clone; APFS copied cache, independent HOME/GRADLE_USER_HOME; no adb called",
+    "name": "sdk-missing",
+    "environment_reason": "android_sdk_missing",
+    "output_tail": "> SDK location not found. Define a valid SDK location with an ANDROID_HOME environment variable or by setting the sdk.dir path in your project's local properties file at '/private<fixture>/repository/local.properties'.",
+    "source_repository": "StarTool disposable local clone",
+    "source_head": "a97165af685f48ff2214ec1d5047d110c6caa8fa",
+    "gradle_version": "8.14",
+    "collected_at": "2026-10-16"
+  },
+  {
+    "command": [
+      "./gradlew",
+      ":app:connectedE2eAndroidTest",
+      "--offline",
+      "--no-daemon",
+      "--no-configuration-cache",
+      "--max-workers=2",
+      "-Dorg.gradle.jvmargs=-Xmx1g -Dfile.encoding=UTF-8 -DANDROID_ADB_SERVER_PORT=52057"
+    ],
+    "exit_code": 1,
+    "timed_out": false,
+    "seconds": 16.7,
+    "isolation": "clone; independent HOME, Gradle cache and SDK; adb private port + nonexistent USB serial + emulator scan disabled + mDNS auto-connect disabled; no default adb commands",
+    "name": "no-device",
+    "environment_reason": "no_connected_device",
+    "output_tail": "> com.android.builder.testing.api.DeviceException: No connected devices!",
+    "source_repository": "StarTool disposable local clone",
+    "source_head": "a97165af685f48ff2214ec1d5047d110c6caa8fa",
+    "gradle_version": "8.14",
+    "collected_at": "2026-10-16",
+    "private_adb_devices": "List of devices attached",
+    "private_adb_port": 52057
+  },
+  {
+    "name": "jdk-java8",
+    "environment_reason": "jdk_version",
+    "source_repository": "StarTool disposable local clone",
+    "source_head": "a97165af685f48ff2214ec1d5047d110c6caa8fa",
+    "gradle_version": "8.14",
+    "java_runtime": "Java 8",
+    "collected_at": "2026-10-16",
+    "isolation": "same independent clone, HOME and Gradle cache; JAVA_HOME selected Java 8",
+    "output_tail": "> Dependency requires at least JVM runtime version 11. This build uses a Java 8 JVM.",
+    "command": [
+      "./gradlew",
+      ":app:assembleDebug",
+      "--offline",
+      "--no-daemon",
+      "--no-configuration-cache",
+      "--max-workers=2",
+      "-Dorg.gradle.jvmargs=-Xmx1g -Dfile.encoding=UTF-8"
+    ],
+    "exit_code": 1,
+    "timed_out": false,
+    "seconds": 5.01
+  }
+]

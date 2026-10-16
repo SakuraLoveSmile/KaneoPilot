@@ -6,9 +6,11 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kanpilot.process_owner import process_birth
+from kanpilot import verification_redaction
 
 
 def _alive(pid, birth):
@@ -67,7 +69,33 @@ def main():
                          "owner_birth": owner_birth, "command_birth": process_birth(os.getpid())}
             or not _alive(owner, owner_birth)):
         return 125
-    process = subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-c", command], start_new_session=True)
+    # Pipe through a bounded redactor before any command output reaches the log.
+    keys = json.loads(sys.argv[6]) if len(sys.argv) > 6 else []
+    secrets = verification_redaction.values(os.environ, keys)
+    process = subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-c", command],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    def copy_output():
+        pending = ""
+        overlap = max([len(value) for value in secrets] + [4096])
+        import codecs
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        while True:
+            chunk = process.stdout.read(4096)
+            pending += decoder.decode(chunk, final=not chunk)
+            cut = max(0, len(pending) - overlap) if chunk else len(pending)
+            # Do not emit the beginning of a value whose end is still buffered.
+            for secret in secrets:
+                start = pending.rfind(secret, 0, min(len(pending), cut + len(secret)))
+                if 0 <= start < cut < start + len(secret):
+                    cut = start
+            if cut:
+                sys.stdout.write(verification_redaction.redact(pending[:cut], secrets))
+                sys.stdout.flush()
+                pending = pending[cut:]
+            if not chunk:
+                break
+    copier = threading.Thread(target=copy_output, daemon=True)
+    copier.start()
     def cancelled(signum, frame):
         _stop_group(process.pid)
         process.wait()
@@ -85,6 +113,7 @@ def main():
         return 124
     finally:
         _stop_group(process.pid)
+        copier.join(timeout=5)
 
 
 if __name__ == "__main__":

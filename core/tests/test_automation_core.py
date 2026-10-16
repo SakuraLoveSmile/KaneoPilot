@@ -82,7 +82,7 @@ def state(tmp_path, monkeypatch):
     def claim(kind='review', run='review1'):
         r, _ = db.create_request(conn, NOW, kind, kind + ':' + TASK, task_id=TASK)
         db.update_request(conn, r['request_id'], NOW, status='claimed', run_id=run, lease_expires_at=util.plus_seconds(600, ctx.now), claimed_by='test')
-        if kind == 'review':
+        if kind == 'review' and core.requires_branch_review(task()):
             db.merge_request_payload(conn, r['request_id'], NOW, review_branch_snapshot=core.branch_review_snapshot(task()))
         return {'task_id': TASK, 'request_id': r['request_id'], 'run_id': run, 'expected_execution_run_id': task()['run_id']}
     def review(conclusion='changes_requested', key='key1'):
@@ -492,3 +492,36 @@ def test_automatic_fix_does_not_inherit_user_replan_status_authorization(state):
     cmd_exec.cmd_register_review(state.ctx,state.review())
     assert not core.is_user_replan(state.task())
     assert 'in-progress' not in core.expected_remote_slugs(state.task())
+
+
+@pytest.mark.parametrize('exhausted', [False, True])
+def test_detached_review_holds_fix_before_quota_without_advancing_round(state, exhausted):
+    state.extra(delivery={'mode':'manual'})
+    if exhausted:
+        state.policy(max_fix_rounds=0)
+    result = cmd_exec.cmd_register_review(state.ctx, state.review())
+    assert result['task_status'] == 'needs_user'
+    assert state.task()['failure_code'] == 'fix_branch_unavailable'
+    assert state.task()['failure_stage'] == 'review'
+    assert state.task()['failure_reason'] == core.FIX_BRANCH_UNAVAILABLE_DETAIL
+    assert db.task_extra(state.task())['fix_request']['state'] == 'held'
+    assert core.automation_of(state.task())['fix_round'] == 0
+    assert 'resume' not in derive.allowed_actions(state.conn, state.task(), state.ctx.now)
+
+
+def test_review_binding_mismatch_holds_same_branch_fix(state):
+    payload = state.review()
+    state.extra(engine_verdict={'execution_run_id':state.task()['run_id'], 'plan_sha256':state.task()['plan_sha256'],
+                                'binding':{'branch':'kaneo/fixture','worktree_path':'/different/worktree'}})
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    assert state.task()['failure_code'] == 'fix_branch_unavailable'
+    assert core.automation_of(state.task())['fix_round'] == 0
+
+
+def test_historical_verdict_binding_does_not_block_current_review_branch(state):
+    payload = state.review()
+    state.extra(engine_verdict={'execution_run_id':'old-run', 'plan_sha256':'old-plan',
+                                'binding':{'branch':'kaneo/old','worktree_path':'/old/worktree'}})
+    result = cmd_exec.cmd_register_review(state.ctx, payload)
+    assert result['task_status'] == 'needs_plan'
+    assert core.automation_of(state.task())['fix_round'] == 1

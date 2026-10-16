@@ -578,7 +578,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                     actions.append("reverify")
             if cmd_queue.execution_retry_candidate(conn, task):
                 actions.append("resume")
-            if core.is_automation_managed(task) and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
+            monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
+                              and task["failure_stage"] == "monitor")
+            if monitor_resume:
+                actions.append("resume")
+            if core.is_automation_managed(task) and code not in ("verification_environment_failure", "fix_branch_unavailable") and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
                 if code != "remote_conflict" or task["failure_stage"] != "dispatch":
                     actions.append("resume")
             from . import plan_answers
@@ -596,6 +600,9 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             actions.append("dismiss")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
+    from . import engine_fix_revert
+    if engine_fix_revert.candidate(conn, task) is not None:
+        actions.append("revert_engine_fix")
     from . import core  # noqa: F401  (局部导入，避免与 bridge/db 形成循环)
     # resume-auto is the reverse entry of ``resolve {action:"dismiss"}``
     # (plan D4: manual_takeover is a *reversible* pause). It must be offered
@@ -611,6 +618,9 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
 
 def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     detail = task_summary(conn, task, now)
+    from . import engine_fix_revert
+    detail["engine_fix_summary"] = engine_fix_revert.summary(conn, task)
+    detail["engine_fix_revert"] = engine_fix_revert.candidate(conn, task)
     from . import review_recovery
     detail["review_recovery"] = review_recovery.candidate(conn, task)
     from . import review_resolution
@@ -895,6 +905,8 @@ _EVENT_KIND_CN = {
     "requirements_accepted": "已接受远端需求", "automation_stopped": "自动处理已停止",
     "execution_retry_requested": "已确认沿用计划重新执行",
     "engine_fix_started": "自动补救轮开始",
+    "engine_fix_reverted": "自动补救已撤回",
+    "branch_worktree_adopted": "已收养任务分支工作树",
     "model": "执行模型选择",
     "model_hint": "执行模型配置建议",
     "lost_request_released": "失联观察请求已释放",

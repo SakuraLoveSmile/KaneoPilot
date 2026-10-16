@@ -173,3 +173,44 @@ def test_unknown_cost_on_manual_task_does_not_adopt(ctx):
     db.set_extra(ctx.conn,task,NOW,automation=None)
     assert not policy.cmd_record_cost(ctx,dict(payload,cost_usd=None))['recorded']
     assert not core.is_automation_managed(db.require_task(ctx.conn,payload['task_id']))
+
+
+def test_base_save_three_states_and_local_read_fields(ctx, tmp_path, monkeypatch):
+    from kanpilot import git_delivery
+    from test_git_delivery import make_repo
+    repo = make_repo(tmp_path / 'base-check')
+    pid = next(iter(project_config.load_raw_mappings(ctx.conn)[2]))
+    revision = project_config.load_raw_mappings(ctx.conn)[0]
+    project_config.set_project_mapping(ctx.conn, {'project_id':pid, 'repository':str(repo), 'enabled':True, 'expected_revision':revision}, NOW)
+    original = git_delivery._git
+    calls = []
+    def outside(args, *a, **kw):
+        assert not ctx.conn.in_transaction
+        calls.append(args)
+        return original(args, *a, **kw)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(git_delivery, '_git', outside)
+        result = policy.cmd_set_project_automation(ctx, {'project_id':pid,'automation':{'delivery_base':'main'}})
+        assert result['delivery_base_check'] == 'verified'
+        assert not any(args[0] == 'fetch' for args in calls)
+        with pytest.raises(util.KanpilotError, match='origin 上不存在分支 missing（默认分支 main）'):
+            policy.cmd_set_project_automation(ctx, {'project_id':pid,'automation':{'delivery_base':'missing'}})
+    def offline(args, *a, **kw):
+        assert not ctx.conn.in_transaction
+        if args[0] == 'fetch':
+            assert a[1] == policy.git_probe_timeout()
+            raise git_delivery.GitDeliveryError('git_transient', 'offline')
+        return original(args, *a, **kw)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(git_delivery, '_git', offline)
+        result = policy.cmd_set_project_automation(ctx, {'project_id':pid,'automation':{'delivery_base':'missing'}})
+        assert result['delivery_base_check'] == 'unverified'
+    # Read side never refreshes remote refs.
+    calls.clear()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(git_delivery, '_git', outside)
+        view = project_config.cmd_get_project_mappings(ctx, {})
+    entry = next(item for item in view['items'] if item['project_id'] == pid)
+    assert entry['origin_default_branch'] == 'main'
+    assert entry['delivery_base_exists'] is False
+    assert not any(args[0] == 'fetch' for args in calls)

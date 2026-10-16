@@ -312,6 +312,7 @@ def _retry_target(conn, task) -> tuple[str, str]:
 
 _AUTO_RESUME_TARGETS = {
     "verification_environment_failure": ("running", "monitor"),
+    "fix_branch_unavailable": ("running", "monitor"),
     "delivery_blocked_files": ("running", "monitor"), "delivery_commit_failed": ("running", "monitor"),
     "branch_exists": ("needs_plan", None), "delivery_base_unknown": ("needs_plan", None),
     "review_blocked": ("in_review", "review"), "review_backend_unsupported": ("in_review", "review"),
@@ -468,8 +469,9 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
     if not isinstance(fix, dict) or payload.get("actor") != "automation":
         raise util.bad_request("引擎补救必须由 automation 发起")
     task = db.require_task(ctx.conn, payload["task_id"])
-    rounds = db.task_extra(task).get("engine_fix_rounds") or []
-    prior = next((row for row in rounds if row.get("execution_run_id") == fix.get("execution_run_id")), None)
+    history = db.task_extra(task).get("engine_fix_rounds") or []
+    rounds = [row for row in history if not row.get("reverted_at")]
+    prior = next((row for row in history if row.get("execution_run_id") == fix.get("execution_run_id")), None)
     if prior:
         return {"deduplicated": True, "prior": prior}
     _, _, items, _ = project_config.load_raw_mappings(ctx.conn)
@@ -488,17 +490,20 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
             or fix.get("plan_sha256") != task["plan_sha256"]
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]
-            or receipt.get("verification_ok") or receipt.get("environment_failure")
+            or receipt.get("verification_ok") or receipt.get("environment_failure") or verdict.environment_reasons(receipt.get("checks"))
             or receipt.get("kind") not in ("empty_diff", "verify_failed")
             or fix.get("reason") != receipt.get("kind") or not receipt.get("binding")
             or ctx.conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
                                 (task["task_id"],)).fetchone()):
         raise util.KanpilotError("conflict", "自动补救的任务、失败轮次或核心回执已变化")
-    if check_binding and verdict.binding(ctx.conn, task) != receipt["binding"]:
+    branch_ready = core.same_branch_fix_ready(task, receipt["binding"])[0]
+    if check_binding and (receipt["kind"] != "verify_failed" or branch_ready) and verdict.binding(ctx.conn, task) != receipt["binding"]:
         raise util.KanpilotError("verification_identity_unconfirmed", "失败回执的计划或工作树已变化")
     reason = fix["reason"]
     block = None
-    if not core.automation_budget(task, policy, util.now_dt())["ok"]:
+    if reason == "verify_failed" and not branch_ready:
+        block = "fix_branch_unavailable"
+    elif not core.automation_budget(task, policy, util.now_dt())["ok"]:
         block = "auto_budget_exceeded"
     elif len(rounds) >= min(ladder.MAX_FIX_ROUNDS, policy.get("max_fix_rounds", 2)):
         block = "fix_rounds_exhausted"
@@ -528,11 +533,11 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
             "config_fingerprint": config_fingerprint}
 
 
-def _record_engine_fix(conn, task, now, fix, plan):
+def _record_engine_fix(conn, task, now, fix, plan, before):
     from .engine import fallback
     rows = db.task_extra(task).get("engine_fix_rounds") or []
     rows.append({"execution_run_id": fix["execution_run_id"], "plan_sha256": fix["plan_sha256"],
-                 "reason": fix["reason"], "model": plan.get("model", "primary"), "at": now})
+                 "reason": fix["reason"], "model": plan.get("model", "primary"), "at": now, "before": before})
     entries = {"engine_fix_rounds": rows}
     if plan.get("snapshot") is not None:
         entries[fallback.MODEL_OVERRIDE_KEY] = fallback.override_payload(plan["snapshot"], task)
@@ -599,6 +604,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         raise util.bad_request("actor 必须为 user 或 automation")
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
+    if action == "revert_engine_fix":
+        from . import engine_fix_revert
+        return engine_fix_revert.revert(ctx, payload)
     if action == "recover_review":
         from . import review_recovery
         return review_recovery.recover(ctx, payload)
@@ -620,7 +628,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("conflict", "自动补救上限或探针结果已变化")
             for event in engine_fix["plan"].get("events") or []:
                 db.add_event(conn, now, event["kind"], task_id=task["task_id"], actor=actor, detail=event["detail"])
-            core.block_task(conn, task, now, engine_fix["plan"].get("probe_detail") or code, code,
+            core.block_task(conn, task, now, core.FIX_BRANCH_UNAVAILABLE_DETAIL if code == "fix_branch_unavailable" else engine_fix["plan"].get("probe_detail") or code, code,
                             actor, stage="monitor")
         return {"ok": True, "task_status": "needs_user", "request": None}
     execution_retry = _prepare_execution_retry(ctx, payload)
@@ -650,6 +658,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 f"任务已{_SAVE_STATE_CN.get(db.task_save_state(task))}，"
                 "不在活跃看板，请先恢复后再处理",
             )
+        from . import engine_fix_revert
+        fix_before = engine_fix_revert.before(task) if engine_fix else None
         status, send_state = task["status"], task["send_state"]
 
         if execution_retry:
@@ -727,7 +737,11 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 core.start_fix_round_inline(conn, task, now, fix_request=fix, actor="user", new_segment=True)
                 target, kind = "needs_plan", None
             else:
-                if not core.is_automation_managed(task):
+                monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
+                                  and task["failure_stage"] == "monitor")
+                if code in ("verification_environment_failure", "fix_branch_unavailable") and not monitor_resume:
+                    raise util.KanpilotError("conflict", "当前失败阶段不允许重新验证本轮")
+                if not core.is_automation_managed(task) and not monitor_resume:
                     raise util.KanpilotError("conflict", "该任务不受自动化管理")
                 if code == "remote_conflict" and accepted_remote:
                     kind = accepted_remote["stage"]
@@ -946,7 +960,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
 
         if engine_fix:
             _record_engine_fix(conn, db.require_task(conn, task["task_id"]), now,
-                               payload["engine_fix"], engine_fix["plan"])
+                               payload["engine_fix"], engine_fix["plan"], fix_before)
         db.add_event(
             conn, now, "resolved", task_id=task["task_id"], actor=actor,
             detail=resolution,

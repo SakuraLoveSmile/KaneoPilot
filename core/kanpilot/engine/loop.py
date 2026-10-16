@@ -244,10 +244,10 @@ class Reconciler:
         return fallback.configured_model(items.get(project_id) or {})
 
     @staticmethod
-    def _engine_fix_rounds(task) -> list:
+    def _engine_fix_rounds(task, *, include_reverted=False) -> list:
         """Remediation rounds the engine already armed for this task (per plan)."""
         value = db.task_extra(task).get(FIX_ROUNDS_KEY)
-        return value if isinstance(value, list) else []
+        return [row for row in value if include_reverted or not row.get("reverted_at")] if isinstance(value, list) else []
 
     def _clear_consumed_override(self, conn, task, now):
         """Drop the one-shot model override once a new execution round started.
@@ -269,19 +269,20 @@ class Reconciler:
 
     def _quality_retry(self, conn, task, now, snap, pmode):
         """Choose a bounded new round; resolve commits accounting + enqueue atomically."""
+        from . import verdict
         extra = db.task_extra(task)
         receipt = extra.get("engine_verdict")
         if (task["status"] != "needs_user" or task["failure_code"] != "verification_unconfirmed"
                 or snap.get("paused") or snap.get("manual_takeover")
                 or not isinstance(receipt, dict) or receipt.get("verification_ok")
-                or receipt.get("environment_failure")
+                or receipt.get("environment_failure") or verdict.environment_reasons(receipt.get("checks"))
                 or receipt.get("execution_run_id") != task["run_id"]
                 or receipt.get("plan_sha256") != task["plan_sha256"]
                 or not receipt.get("binding")
                 or receipt.get("kind") not in ("empty_diff", "verify_failed")):
             return None
         rounds = self._engine_fix_rounds(task)
-        if any(row.get("execution_run_id") == task["run_id"] for row in rounds):
+        if any(row.get("execution_run_id") == task["run_id"] for row in self._engine_fix_rounds(task, include_reverted=True)):
             return None
         if conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
                         (task["task_id"],)).fetchone():
@@ -292,7 +293,9 @@ class Reconciler:
                                      fix_round=len(rounds), budget_ok=snap.get("budget_ok", True),
                                      fallback_model=configured)
         block = None
-        if fd.action != decide.START_FIX_ROUND:
+        if reason == "verify_failed" and not core.same_branch_fix_ready(task, receipt["binding"])[0]:
+            block = "fix_branch_unavailable"
+        elif fd.action != decide.START_FIX_ROUND:
             block = fd.reason
         elif reason == "empty_diff" and any(row.get("reason") == "empty_diff"
              and row.get("plan_sha256") == task["plan_sha256"] for row in rounds):
