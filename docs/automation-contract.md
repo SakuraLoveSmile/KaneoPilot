@@ -45,7 +45,7 @@
    - 占用数 = 受自动化管理、且状态不是 done/needs_user、也不在「pass 后等待合并」的任务数。
 5. **先处理 plan_wanted 任务（不受容量限制）**：
    - 条件：状态为 needs_plan、`plan_wanted=true`、没有活动的 plan 请求、未转人工；
-   - 若还没有 `delivery.branch`，先补建分支工作树；
+   - 若还没有 `delivery.branch`，先补建分支工作树；fetch 与 resolve_base 成功后，可收养仅本地存在、origin 无同名分支、预期路径登记到该分支且目录存在、相对 base 无自有提交、包含全部未跟踪文件的工作树状态为空的遗留分支；只执行 merge --ff-only 到 base，不 force/reset/delete/覆盖未知路径；
    - 然后准备材料并提交规划。
 6. **新候选**：
    - 来源：`fetch-todos` 的条目。
@@ -64,16 +64,18 @@
       - 写入任务的 automation（`plan_attempts=1`，开启第一段）和 delivery；
       - 建 plan 请求：`requested_by="automation"`，`manual_authorized` 仍为 true，以便既有 claim 过滤放行；
       - 载荷增加 `authorized_by`、`plan_cwd`、`delivery_mode`、`delivery_head_sha`；
-      - 记录事件 `automation_adopted`。
+      - 记录事件 `automation_adopted`；本次收养以临时 adopted 标志传入，在持久化 delivery 的同一事务记录一次 branch_worktree_adopted（branch/worktree_path/base_sha），adopted 不落入 delivery。
 9. **plan_wanted 任务的材料准备**：
    - prepare-plan-input 传任务当前的 `requirements_sha256`；
    - 远端需求不符 → 任务进入 needs_user（failure_code=remote_conflict，note「远端需求已变化（新增内容未经筛选）」）。
 10. **失败处理**：
-    - 分支失败（branch_exists/delivery_base_unknown）→ 照常导入任务行，写入 automation（`plan_wanted=false`），然后转 needs_user 并带该 failure_code。
+    - 分支失败（branch_exists/delivery_base_unknown）→ 照常导入任务行，写入 automation（`plan_wanted=false`），然后转 needs_user 并带该 failure_code；保留已有 delivery，只有本次新建/收养成功且带 branch 才写 mode=pr，空参数/准备失败不得把 manual 改为 pr。branch_exists 分别说明已推 origin、有自有提交、工作树脏、预期路径未登记、目录缺失五类原因；delivery_base_unknown 显示 origin 不存在分支及可确定的真实默认分支，不能泄露无意义 Git 原文。
     - 确定性失败（validation_failed、bad_request、conflict）→ 清掉 plan_wanted，在 `last_skip` 记录原因，然后转 needs_user。
     - 瞬时失败（remote_unavailable、git_transient）→ 下轮重试。
 11. **摘要**：写入 settings `automation_last_intake`，形状为 `{started_at, finished_at, projects:[{project_id, ready, preflight, adopted, skipped:[{task_id, reason}]}], errors}`。
 12. **dry-run**：只做 fetch-todos、标签读取和前置检查，输出将会接收的候选；不调用 prepare-plan-input，不写任何东西。
+
+保存显式 delivery_base 时，Git 核验全部在写事务外：origin 本地引用确认存在即保存；需要刷新时有界 fetch --prune origin，复用 git_probe_timeout；刷新成功仍不存在则 bad_request，显示真实默认分支；fetch/探测失败则允许保存并返回 delivery_base_check=unverified，不将网络失败当不存在。get-project-mappings 只读本地引用返回 origin_default_branch 与 delivery_base_exists，不确定为 null，不 fetch，不新增阻塞式 automation_preflight。resolve_base 使用相同可读不存在说明。
 
 ## 计划自动确认
 
@@ -103,7 +105,7 @@
 
 - **适用范围：** 只用于受自动化管理的任务，payload 带 `fix_mode:"same_task"`、`fix:{title, description, priority}`、`review_key` 和既有的 Review 身份字段。对这类任务，旧的 `fix_task_id`/create-review-fix 路径一律返回 conflict。
 - **幂等：** `fix_request.review_key` 或 `review_history[-1].review_key` 已等于本次 key → 返回 `{already_registered:true}`。
-- **未超上限**（`fix_round < max_fix_rounds`、本段时长和成本未超、项目仍开启）：调用 `core.start_fix_round_inline`，在同一事务内完成：
+- **未超上限**（same_branch_fix_ready 成立、`fix_round < max_fix_rounds`、本段时长和成本未超、项目仍开启）：调用 `core.start_fix_round_inline`，在同一事务内完成：
   1. 本次 Review 归档进 review_history；
   2. `fix_round += 1`；
   3. fix_request 写入并置为 open；
@@ -112,6 +114,7 @@
   6. **重置发送字段**：`sent=0, send_state=NULL, sent_at=NULL, lock_retained=0, manual_recovery_required=0`；以 db.py 的 tasks 列为准，主控逐列核对；
   7. in_review → needs_plan；
   8. 记录事件 `fix_round_started`。
+- **无法同分支修复：** 先于额度判断，复用 protocol §5.27.12 的纯内存守卫。fix_request 写入并置为 held，needs_user/fix_branch_unavailable，显式 failure_stage=review，不计 fix_round，不调用 start_fix_round_inline。
 - **超出上限：** fix_request 写入并置为 held，任务进入 needs_user。failure_code 按触发原因取：
   - 修复轮用完 → fix_rounds_exhausted；
   - 时长或成本超出 → auto_budget_exceeded；
@@ -430,11 +433,12 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 | execution_failed | monitor | resume（沿用确认计划 → ready + 新 dispatch 请求）、replan、mark_done、dismiss |
 | fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
 | auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
-| verification_environment_failure | live monitor 核心验证 | resume（环境修复后 → running + monitor；保留原 run/plan/worktree，不重新派发或消耗补救轮）、replan、mark_done、dismiss |
+| verification_environment_failure | live monitor 核心验证（protocol §5.18.6 四类环境签名） | failure_stage=monitor 时 resume（重新验证本轮，不限托管 → running + monitor；原 run/plan/worktree，不派发或耗补救轮）、replan、mark_done、dismiss |
+| fix_branch_unavailable | 引擎补救 monitor / register-review review | monitor：resume（重新验证本轮）、replan、mark_done、dismiss；review：replan、mark_done、dismiss，禁止 resume |
 | automation_stopped | register-review（项目已关闭） | resume（需先重新开启项目，同上）、replan、mark_done、dismiss |
 | review_blocked | review | resume（→ in_review + 新 review 请求）、replan、mark_done、dismiss |
 | review_backend_unsupported | claim(review) | resume（需 Review 后端已改为 Plus/Claude/Codex，→ in_review + review）、mark_done、dismiss |
-| branch_exists、delivery_base_unknown | intake | resume（→ needs_plan + plan_wanted，重新准备分支）、dismiss |
+| branch_exists、delivery_base_unknown | intake | resume（→ needs_plan + plan_wanted，重新准备分支）、dismiss；候选成立时 revert_engine_fix（恢复原轮验证待处理并退额） |
 | delivery_blocked_files、delivery_commit_failed | delivery-commit | resume（→ running + monitor，重新走完成判定与提交）、replan、mark_done、dismiss |
 | no_changes | delivery-commit | replan、mark_done、dismiss |
 | branch_diverged、gh_unavailable、pr_closed | delivery | resume（→ in_review + delivery，next_sync_at=now）、mark_done、dismiss |
@@ -444,27 +448,28 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 
 **处置规则：**
 
-- **resume / accept_verification：** 新增的 resolve 动作，只对上表列出的原因可用。核心校验 failure_code 后，按表中目标转移。
+- **resume / accept_verification：** 只对上表列出的原因可用，derive/resolve 同时核对 failure_code 和 failure_stage。verification_environment_failure 的 monitor resume 不要求托管，非托管不写 automation 段字段；创建可领取 monitor 请求，不能重新 dispatch。
+- **revert_engine_fix：** 候选、before 全快照、两个 expected、事务外远端/binding 校验、事务内快照比较与恢复，以 protocol §5.27.12 为唯一共享契约；拒绝零任务写入，不修改原收据，不操作分支磁盘，不修改评审 automation.fix_round。全历史用于去重，未撤回行用于全部额度和两处 empty_diff 规则。engine_fix_summary 在撤回后仍显示退额。
 - **remote_conflict 的 resume：** 走三段式。
   1. 读取远端任务（不在事务内）。
   2. 远端状态必须是下一步所需的值：monitor 需要 in-progress、in-review 或 done；delivery 需要 in-review 或 done；plan 不限。不符 → conflict，提示「请先在 Kaneo 调整到 X 再继续」。
   3. 在事务内把 requirements_sha256 和 kaneo_status 更新为远端当前值，记录事件 `requirements_accepted`。
   4. 回到上一个失败请求对应的步骤：monitor → running + monitor；delivery → in_review + delivery；review → in_review + review；plan → needs_plan + plan_wanted；dispatch → 拒绝，改用既有的发送恢复动作。
-- **replan：** 对自动化任务改为 needs_plan + plan_wanted，`plan_attempts=0`，开新段。如果远端需求有变化，用与上面相同的三段式先接受当前需求；用户点「重新规划」即视为已看过新内容。
+- **replan：** 对自动化任务改为 needs_plan + plan_wanted，`plan_attempts=0`，开新段。如果远端需求有变化，用与上面相同的三段式先接受当前需求；用户点「重新规划」即视为已看过新内容。无法同分支修复时二次确认「将从目标分支新建工作树，本轮改动不会带入」。
 - **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。转为人工处理不停止观察、收尾与评审；live 项目的 monitor/review 由引擎周期 tick 补给。
 - **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
 - **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
 - **plan 失败：** 自动化任务第一次失败时置 plan_wanted，让 intake 自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。
 
-**新事件：** automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
+**新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
 
 `BOARD_FAILURE_CODES` 不增加，新原因通过 failure_stage 归类。归类如下：
 
 | failure_stage | failure_code |
 |---|---|
-| monitor | verification_unconfirmed、verification_environment_failure |
+| monitor | verification_unconfirmed、verification_environment_failure、fix_branch_unavailable（引擎补救） |
 | plan | branch_exists、delivery_base_unknown |
-| review | fix_rounds_exhausted、auto_budget_exceeded、automation_stopped、review_backend_unsupported |
+| review | fix_rounds_exhausted、auto_budget_exceeded、automation_stopped、review_backend_unsupported、fix_branch_unavailable（评审修复） |
 | delivery | delivery_*、no_changes、branch_diverged、gh_unavailable、pr_closed |
 
 ## 执行期提问转交（P2–P7，protocol §5.28）

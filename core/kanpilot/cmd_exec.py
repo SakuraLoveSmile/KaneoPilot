@@ -1107,12 +1107,18 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                 policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
                 fix_request = dict(entry, **fix, review_run_id=payload["run_id"], created_at=ctx.now_iso, state="held")
                 a = core.automation_of(task)
-                code = ("automation_stopped" if not policy.get("enabled") else
+                receipt = db.task_extra(task).get("engine_verdict") or {}
+                fix_binding = (receipt.get("binding") if receipt.get("execution_run_id") == task["run_id"]
+                               and receipt.get("plan_sha256") == task["plan_sha256"] else None)
+                code = ("fix_branch_unavailable" if not core.same_branch_fix_ready(task, fix_binding)[0] else
+                        "automation_stopped" if not policy.get("enabled") else
                         "fix_rounds_exhausted" if a.get("fix_round", 0) >= policy["max_fix_rounds"] else
                         "auto_budget_exceeded" if not core.automation_budget(task, policy, now)["ok"] else None)
                 if code:
                     db.set_extra(conn, task, ctx.now_iso, fix_request=fix_request)
-                    core.block_task(conn, db.require_task(conn, task["task_id"]), ctx.now_iso, code, code, "kaneo-review", stage="review")
+                    core.block_task(conn, db.require_task(conn, task["task_id"]), ctx.now_iso,
+                                    core.FIX_BRANCH_UNAVAILABLE_DETAIL if code == "fix_branch_unavailable" else code,
+                                    code, "kaneo-review", stage="review")
                 else:
                     core.start_fix_round_inline(conn, task, ctx.now_iso, fix_request=fix_request)
                 db.add_event(conn, ctx.now_iso, "review_registered", task_id=task["task_id"], actor="kaneo-review", detail={"conclusion": conclusion, "review_key": payload["review_key"]})

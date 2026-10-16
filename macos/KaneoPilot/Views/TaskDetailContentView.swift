@@ -624,6 +624,8 @@ struct TaskOverviewTabView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var confirm: ConfirmableAction?
     @State private var confirmingPurge = false
+    @State private var revertConfirmation: (taskID: String, candidate: EngineFixRevert)?
+    @State private var revertPreparationID: UUID?
     @State private var technicalExpanded = false
     @State private var reverifyError: String?
     @State private var answerFocusRequest = 0
@@ -714,7 +716,7 @@ struct TaskOverviewTabView: View {
         // 恢复/重试 → 恢复任务自动推进 → 准备规划 → 安排当前阶段 → 校验。
         // 危险裁决、重新规划、取消、归档等低频操作始终留在更多操作中。
         if verificationStore?.hasPendingOperation == true { return "run_verification_checks" }
-        let order = ["answer_execution_questions", "answer_plan_questions", "resolve_review_blocker", "confirm_dispatch", "recover_review", "run_verification_checks", "reverify", "accept_verification", "resume", "retry",
+        let order = ["answer_execution_questions", "answer_plan_questions", "resolve_review_blocker", "confirm_dispatch", "recover_review", "run_verification_checks", "reverify", "accept_verification", "revert_engine_fix", "resume", "retry",
                      "resume-auto", "prepare_plan", "enqueue", "plan", "start_plan",
                      "dispatch", "monitor", "review", "recheck"]
         return order.first { available.contains($0) }
@@ -741,6 +743,7 @@ struct TaskOverviewTabView: View {
         case "run_verification_checks": return "在原任务工作树依次执行原计划检查，分别记录退出码；全部通过才继续推进，失败不会人工接受。"
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
+        case "revert_engine_fix": return AutomationPresentation.revertMessage
         case "resume", "retry": return "按当前允许的恢复方式重新推进；已有记录与证据保留。"
         case "resume-auto": return "此任务已暂停，恢复后会按当前配置继续自动推进。"
         case "prepare_plan": return "打开规划页面，核对任务材料后开始规划。"
@@ -856,6 +859,21 @@ struct TaskOverviewTabView: View {
         } message: {
             Text(confirm?.message ?? "")
         }
+        .confirmationDialog("撤回自动补救？", isPresented: Binding(
+            get: { revertConfirmation != nil }, set: { if !$0 { revertConfirmation = nil } }
+        ), titleVisibility: .visible) {
+            if let confirmation = revertConfirmation {
+                Button("撤回自动补救") {
+                    revertConfirmation = nil
+                    Task {
+                        await model.revertEngineFix(taskID: confirmation.taskID, candidate: confirmation.candidate)
+                        onRefreshDetail?()
+                    }
+                }.disabled(model.busy)
+            }
+            Button("取消", role: .cancel) { revertConfirmation = nil }
+        } message: { Text(AutomationPresentation.revertMessage) }
+        .onChange(of: detail.taskId) { revertConfirmation = nil; revertPreparationID = nil }
         .confirmationDialog(
             PurgeText.actionTitle,
             isPresented: $confirmingPurge,
@@ -1077,6 +1095,22 @@ struct TaskOverviewTabView: View {
             }
             .disabled(model.busy || detail.runId == nil)
             .help("只重新读取当前执行记录，全部验证通过才继续；不会调用模型或设置人工认可。")
+        case "revert_engine_fix":
+            Button("撤回自动补救") {
+                let token = UUID(), taskID = detail.taskId
+                revertPreparationID = token
+                Task {
+                    defer { if revertPreparationID == token { revertPreparationID = nil } }
+                    do {
+                        let candidate = try await model.currentEngineFixRevert(taskID: taskID)
+                        guard revertPreparationID == token else { return }
+                        revertConfirmation = (taskID, candidate)
+                    } catch {
+                        guard revertPreparationID == token else { return }
+                        model.alertMessage = error.coreMessage; onRefreshDetail?()
+                    }
+                }
+            }.disabled(model.busy || revertPreparationID != nil)
         case "resume", "accept_verification":
             Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
                 if action == "resume", detail.failureCode == "execution_failed", let runID = detail.runId {
@@ -1117,7 +1151,11 @@ struct TaskOverviewTabView: View {
             .help(detail.stage == "review" ? "只重新评审现有成果，不会修改代码；按当前评审配置发起新一轮。" : "按当前允许的恢复方式重新派发")
         case "replan":
             Button("重新规划") {
-                Task { await model.resolve(taskID: detail.taskId, action: "replan") }
+                if detail.failureCode == "fix_branch_unavailable" {
+                    confirm = .replanBranchUnavailable
+                } else {
+                    Task { await model.resolve(taskID: detail.taskId, action: "replan") }
+                }
             }
             .disabled(model.busy)
         case "plan", "start_plan":

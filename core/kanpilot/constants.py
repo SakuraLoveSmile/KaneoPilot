@@ -265,7 +265,7 @@ DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "revert_engine_fix",
 )
 
 ERROR_CODES = (
@@ -480,7 +480,7 @@ DISPATCH_INSTRUCTION_BRANCH_LIVE = (
     "以核心退出码和有效改动判定通过。最终答复列出完成项与剩余问题。"
 )
 AUTOMATION_FAILURE_STAGES = {
-    "verification_environment_failure": "monitor",
+    "verification_environment_failure": "monitor", "fix_branch_unavailable": "monitor",
     "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",

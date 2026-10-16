@@ -153,8 +153,9 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
 
 def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
     from . import cmd_dispatch
-    # Recover only automatic executions blocked by an exited observer. Plus
-    # reads and worker attachment stay outside the SQLite write transaction.
+    # Reconnect question-bearing runs as read-only observers. Only the original
+    # managed execution_failed path may request precise Goal continuation.
+    # Plus reads and worker attachment stay outside the write transaction.
     goal_recoveries = []
     if not db.paused(ctx.conn, "monitor") and not db.paused(ctx.conn, "dispatch"):
         candidates = ctx.conn.execute(
@@ -166,14 +167,15 @@ def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
             waiting=bool(open_records(task))
             if task["status"]=="running" and not any(q["run_id"]==task["run_id"] for q in records(task)):
                 continue
-            if (not db.task_schedulable(task) or (task["failure_code"] != "execution_input_required" and not core.is_automation_managed(task))
+            continuation = task["status"] == "needs_user" and task["failure_code"] == "execution_failed"
+            if (not db.task_schedulable(task) or (continuation and not core.is_automation_managed(task))
                     or not task["run_id"]):
                 continue
             try:
                 result = cmd_dispatch.cmd_round_observe(ctx, {
                     "task_id": task["task_id"], "run_id": task["run_id"],
-                    "executor": "scheduler", "continue_goal": not waiting,
-                    "continue_goal_only": not waiting,
+                    "executor": "scheduler", "continue_goal": continuation and not waiting,
+                    "continue_goal_only": continuation and not waiting,
                 })
                 if result.get("status") != "deferred":
                     goal_recoveries.append({"task_id": task["task_id"], **result})

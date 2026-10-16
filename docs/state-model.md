@@ -386,9 +386,10 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  
  **阶梯规则：**
  - 瞬时失败（network timeout、git_transient、remote_unavailable）归入阶梯 1，按退避重试。
- - live 核心验证的 `verification_environment_failure` 属环境阶梯：环境修复后用户 resume 只恢复原轮 monitor，不重新 dispatch，不增加 execution_rounds 或 engine_fix_rounds。
+ - live 核心验证的 verification_environment_failure 按 protocol §5.18.6 四类签名归环境阶梯；仅非零/启动失败且未超时分类，组内环境优先。failure_stage=monitor 时不限托管可 resume，只恢复原轮 monitor，不 dispatch，不增加 execution_rounds 或 engine_fix_rounds；非托管不写 automation 段字段。
  - 环境失败（repository_missing、not_git_repo、origin_not_github、gh_missing、exec_permission_not_auto）归入阶梯 2，明确原因并等待用户。
- - 质量失败（verification_unconfirmed、review_blocked、delivery_commit_failed、branch_diverged）归入阶梯 3，受 max_fix_rounds ≤2 约束。
+ - 质量失败（verification_unconfirmed、review_blocked、delivery_commit_failed、branch_diverged）归阶梯 3，受 max_fix_rounds ≤2 约束；verify_failed 同分支补救先核对 same_branch_fix_ready，不就绪归 fix_branch_unavailable/monitor（评审为 review），不消耗计数，转阶梯 4。
+ - engine_fix_rounds 与评审 automation.fix_round 独立。全历史用于执行轮去重，未撤回行用于额度、阶梯及引擎/核心 empty_diff 同计划规则。revert_engine_fix 仅按 protocol §5.27.12 候选恢复 needs_user/monitor 及失败码/发送字段/完整 delivery，补救行标记不删除，原 verdict 不变，不改评审计数；稳定 engine_fix_summary 继续提供 used/max。
  - 其余 needs_user 归入阶梯 4，统一进入 attention inbox，由用户单点处置。
  
  ## 9. 黄金路径

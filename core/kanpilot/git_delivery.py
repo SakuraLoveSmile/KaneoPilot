@@ -179,16 +179,41 @@ def _push_target(worktree, expected_repo):
     return target
 
 
+def origin_branch_info(repo, preferred=None, *, timeout=None):
+    """Local remote refs only. Unknown probe results remain None, never absent."""
+    from .automation_policy import git_probe_timeout
+    try:
+        raw = _value(["for-each-ref", "--format=%(refname)%00%(symref)", "refs/remotes/origin/"],
+                     repo, timeout if timeout is not None else git_probe_timeout())
+        refs = {}
+        for line in raw.splitlines():
+            name, _, target = line.partition("\0")
+            refs[name] = target
+        target = refs.get("refs/remotes/origin/HEAD")
+        default = target[len("refs/remotes/origin/"):] if target and target.startswith("refs/remotes/origin/") and target in refs else None
+        exists = ("refs/remotes/origin/" + preferred in refs) if preferred else None
+        return default, exists
+    except GitDeliveryError:
+        return None, None
+
+
+def missing_base_message(base, default):
+    return "origin 上不存在分支 " + base + ("（默认分支 " + default + "）" if default else "")
+
+
 def resolve_base(repo: str, preferred: Optional[str]) -> tuple:
     try:
-        base = preferred or _value(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)
-        if not preferred and base.startswith("origin/"):
-            base = base[len("origin/"):]
+        default, exists = origin_branch_info(repo, preferred)
+        base = preferred or default
         if not base or base.startswith("-"):
-            raise GitDeliveryError("delivery_base_unknown", "交付目标分支无效")
+            raise GitDeliveryError("delivery_base_unknown", "无法确定 origin 默认交付目标分支")
+        if preferred and exists is False:
+            raise GitDeliveryError("delivery_base_unknown", missing_base_message(base, default))
         sha = _value(["rev-parse", "--verify", "refs/remotes/origin/" + base + "^{commit}"], repo)
         return base, sha
     except GitDeliveryError as exc:
+        if exc.code == "delivery_base_unknown":
+            raise
         raise _recode(exc, "delivery_base_unknown", "无法确定交付目标分支") from exc
 
 
@@ -206,13 +231,36 @@ def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root) -> di
     base, sha = resolve_base(repo, base_branch)
     branch = constants.DELIVERY_BRANCH_PREFIX + task_id
     path = Path(worktrees_root).expanduser() / task_id / "branch"
-    # rev-parse --verify is read-only even when these refs are absent.
-    for ref in ("refs/heads/" + branch, "refs/remotes/origin/" + branch):
+    refs = set(_value(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch,
+                       "refs/remotes/origin/" + branch], repo).splitlines())
+    if "refs/remotes/origin/" + branch in refs:
+        raise GitDeliveryError("branch_exists", "origin 上已有本任务同名分支，不能收养")
+    if "refs/heads/" + branch in refs:
+        listing = _value(["worktree", "list", "--porcelain"], repo)
+        registered = any(dict(line.split(" ", 1) for line in block.splitlines() if " " in line).get("worktree") == str(path)
+                         and "branch refs/heads/" + branch in block.splitlines()
+                         for block in listing.strip().split("\n\n"))
+        if not registered or path.is_symlink():
+            raise GitDeliveryError("branch_exists", "本任务分支没有在预期路径登记工作树，未自动收养")
+        if not path.is_dir():
+            raise GitDeliveryError("branch_exists", "本任务分支的工作树目录缺失，未自动收养")
         try:
-            _value(["rev-parse", "--verify", ref], repo)
-        except GitDeliveryError:
-            continue
-        raise GitDeliveryError("branch_exists", "本任务分支已存在，未创建工作树")
+            if (_common_dir(path) != _common_dir(repo)
+                    or Path(_value(["rev-parse", "--show-toplevel"], path)).resolve() != path.resolve()
+                    or _value(["symbolic-ref", "--short", "HEAD"], path) != branch):
+                raise GitDeliveryError("branch_exists", "预期工作树归属或分支不符，不能收养")
+            own_commits = int(_value(["rev-list", "--count", sha + "..refs/heads/" + branch], repo))
+            if own_commits:
+                raise GitDeliveryError("branch_exists", "本任务分支有 " + str(own_commits) + " 个目标分支之外的自有提交，未自动收养")
+            if _git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"], path, 10).stdout:
+                raise GitDeliveryError("branch_exists", "本地分支工作树含未提交或未跟踪文件，不能收养")
+            _git(["merge", "--ff-only", "--no-overwrite-ignore", sha], path, 60)
+        except GitDeliveryError as exc:
+            if exc.code == "branch_exists":
+                raise
+            raise _recode(exc, "branch_exists", "本地分支无法安全快进，未收养") from exc
+        return {"branch": branch, "worktree_path": str(path), "base_branch": base,
+                "base_sha": sha, "head_sha": sha, "adopted": True}
     if os.path.lexists(path):
         raise GitDeliveryError("branch_exists", "本任务工作树路径已存在，未创建工作树")
     try:

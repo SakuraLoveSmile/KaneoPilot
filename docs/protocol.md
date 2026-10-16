@@ -270,7 +270,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 ### 4.10 人工解决（resolve）
 
-`resolve {task_id, action, note?}`，action 只允许与当前事实相容的项（核心校验，非法 → `bad_request`）：
+`resolve {task_id, action, note?, expected_execution_run_id?, expected_plan_sha256?}`，action 只允许与当前事实相容的项（核心校验，非法 → `bad_request`）：
 
 | action | 前置条件 | 效果 |
 |---|---|---|
@@ -278,12 +278,12 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 | `restore` | `needs_user` 且 `send_state='unknown'` | 认定未发送：`sent=false, send_state='not_sent'`，task→`ready` 并建 dispatch 请求 |
 | `accept_duplicate` | `needs_user` 且 `send_state='unknown'` | 接受可能重复执行：同 restore 建 dispatch 请求，`resolution` 记录用户知情 |
 | `mark_sent` | `needs_user` 且 `send_state='unknown'` | 人工确认已发出：`sent=true, send_state='sent'`，task→`running`，建 monitor 请求 |
-| `replan` | `needs_user`（任意来源） | task→`needs_plan`，建 plan 请求 |
+| `replan` | `needs_user`（任意来源） | task→`needs_plan`，建 plan 请求；独立工作树的新规划从目标分支准备，本轮改动不会带入 |
 | `release_lost` | 存在 claimed 且租约过期请求 | 该请求→`cancelled`；task→阻塞前可安全态（dispatch 中途→`needs_user` send_state 保持；monitor/plan/review 中途→回原 status）并建相应新请求 |
 | `mark_done` | `in_review`/`needs_user`/`running`（非 dispatch 中途） | task→`done` |
 | `dismiss` | `needs_user` | 清阻塞字段，task→`ready`（不自动建请求） |
 
-所有 resolve 写 `event kind=resolved`（actor、action、note）。
+自动化与验证恢复动作（resume、accept_verification、recover_review、reverify、revert_engine_fix）见 §5.27.4；撤回必须同时提供两个 expected 字段。所有 resolve 写 `event kind=resolved`（actor、action、note）。
 
 ### 4.11 错误码（稳定值）
 
@@ -740,8 +740,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
  - **有效 diff**：以计划声明的执行工作树为范围取改动，**排除 `.pi/**` 前缀**后必须非空；为空即空转，归阶梯 3（quality）按空转重试一次处理。
  - **核心亲跑 verify 命令**：取计划 verify 块的每条命令，由核心以 **login shell** 执行并注入项目 `verify_env`，超时可配（`KANPILOT_VERIFY_TIMEOUT`，默认 600s）。
  - **login shell 口径（A4 spike 实测）**：默认用 `$SHELL -l -c`（读 `os.environ["SHELL"]`，本机为 `/bin/zsh`）；`/bin/bash -l -c` 仅作 `$SHELL` 缺失时的兜底；`KANPILOT_VERIFY_SHELL` 可整体覆盖。**不得**默认 `/bin/bash -l -c`——本机 `~/.bash_profile` 不含 homebrew/pyenv PATH，会导致 `gh`/`pytest` 全部 `command not found`（rc=127），而 `~/.zprofile` 有。详见 `docs/evidence/spike-verify-env-20261010.md`。
- - **命令不存在（rc=127）归环境类失败（阶梯 2）**，不得与「验证未通过（阶梯 3）」混为一谈。
- - **判定**：有效 diff 非空 **且** 每条 verify 命令退出码为 0 → verdict 通过；否则 `verification_unconfirmed`，进入阶梯 3 同分支有界补救（≤`max_fix_rounds` 轮）。
+ - **环境分类（阶梯 2）**：只在启动失败或明确非零退出、且未超时的输出尾部判定，依次为 command_not_found（启动失败、rc=127、command not found）、jdk_version（This build uses a Java N JVM、requires at least JVM runtime version、Unsupported class file major version）、android_sdk_missing（SDK location not found）、no_connected_device（No connected devices）。新检查在内存原文上先计算受控枚举，再脱敏输出后持久化，原文不落盘；避免单字符敏感值替换破坏签名。读取时在成功、超时与退出状态门之后采用有效枚举；旧收据缺枚举时才从已脱敏输出重判。成功输出不因签名失败；单条超时与整组时限耗尽的 environment_reason 均为 null。
+ - **判定**：有效 diff 非空且每条命令退出码为 0 才通过；任一检查命中环境类，整组 environment_failure=true，映射 verification_environment_failure，不开自动质量补救；其余质量失败为 verification_unconfirmed，同分支前提见 §5.27.12。逐条保留 command_not_found 并增加 environment_reason；整组增加去重保序 environment_reasons。evaluate、shadow 和失败 stub 同形。历史收据缺新字段时经同一入口按 command_not_found/exit_code/timed_out/output_tail 读取期重判，原收据不回写。
  - **`verify_env` 形态**：项目映射 `project_mappings.items[project_id].verify_env`，为字符串→字符串的 dict（缺省 `{}`），在 login shell 内作为环境变量注入；不得包含凭据/token（凭据另走凭据文件，不进入 verify_env）。
  - **证据**：逐命令的退出码 / 是否超时 / 输出尾部由核心落库（`extra.engine_verdict` 与既有 verification 回执并存，不互相覆写）；Plus 转录仅用于 UI 按需展示，**不参与判定、不整段持久化**。
  - **命令面**：`engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}`（幂等，`operation_id` 去重）。
@@ -1338,6 +1338,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  | resolve | resolve {action:"release_lost"/"mark_sent"/"restore"/"accept_duplicate"} | 失联/发送不明/unknown | 释放失联/确认发送/恢复原任务 |
  | accept_verification | resolve {action:"accept_verification"} | verification_unconfirmed | 写入 verification_override，回到 running + monitor |
  | review_recovery | resolve {action:"recover_review"} | review_blocked 历史误退 | 恢复 in_review + 新 review 请求 |
+ | revert_engine_fix | resolve {action:"revert_engine_fix", expected_execution_run_id, expected_plan_sha256} | §5.27.12 候选成立 | needs_user/monitor，退还一次自动补救；不重新执行、不改工作树 |
+ | 重新验证本轮 | resolve {action:"resume"} | failure_stage=monitor，verification_environment_failure（不限托管）或 fix_branch_unavailable | 原 run/plan/worktree → running + 可领取 monitor 请求，不重新 dispatch |
 | answer_execution_questions | submit-execution-answers | §5.28 当前可答请求 | 回答同一 Plus 工具调用 |
 | skip_execution_questions | submit-execution-answers {skip_all:true} | §5.28 当前可答请求 | 全部跳过，继续同一 turn |
 | stop_execution | stop-execution | §5.28 当前轮次；界面二次确认 | 停止本轮，由观察者收尾 |
@@ -1497,14 +1499,21 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - legacy 保持转录匹配；shadow 保持旧结果，同时记录核心 verdict 对比回执；live 完成点调用 engine-verdict，转录仅用于展示。回执绑定 task/run/plan，验证前后复校身份，禁止陈旧结果覆盖新轮次。
 - 核心读取冻结且哈希匹配的顶层 verify 围栏（1–5 条），沿用 parse_verify_block 的命令限制；cwd 为本轮已验证的任务工作树，环境继承并注入项目 verify_env，输出和回执脱敏。缺少可信声明或工作树不能确认时 fail closed，不能退回仓库根目录执行。
 - 每条命令上限 600 秒，整组含 PATH 探测总时限不超过 monitor 租约 80%，同时受 runner 剩余时限约束；命令之间续心跳，超时终止进程组，禁止遗留验证子进程。
-- 有效 diff 非空且全部通过 → delivery-commit、advance in-review、成本、report succeeded。环境失败 → needs_user，failure_code=verification_environment_failure，环境阶梯 waiting_env；修复 verify_env/PATH 后用户 resume 将原 run/plan/worktree 排回 monitor，不新增 dispatch、执行轮次或补救计数；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
+- 有效 diff 非空且全部通过 → advance in-review、成本、report succeeded；requires_branch_review 的轮次先 delivery-commit，并核对 HEAD 已提交树与冻结预期索引。manual detached 轮次保留未提交成果，不提交或建 PR；推进仍严格核对当前源码、执行轮、计划和回执 binding，不要求 HEAD 含本轮成果。环境失败 → needs_user，failure_code=verification_environment_failure，环境阶梯 waiting_env；修复 verify_env/PATH 后用户 resume 将原 run/plan/worktree 排回 monitor，不新增 dispatch、执行轮次或补救计数；空 diff / verify 失败 → 质量阶梯；缺失声明、身份变化等不可确认结果进入 attention，不误判成功。构建产物沿交付谓词排除，不因 pyc 形成有效交付。
+- 环境失败的 resume 不要求托管，但必须 failure_stage=monitor；非托管任务不写 automation 段字段。交互式「重新运行验证检查」保留执行 PATH 来源，再叠加同源 project_verify_env，显式 PATH 优先；继续使用 /bin/bash --noprofile --norc，不放宽 verification_recovery.candidate。回执只新增排序 verify_env_keys 与规范化 JSON 的完整 verify_env_sha256，不记录环境值，注入的敏感值须从输出、事件与日志脱敏。
 - live 派发提示允许执行端自检，由核心判通过；不改变发送已知/未知不重发守卫。
 
 #### 5.27.12 自动补救闭环（A2）
 
-- START_FIX_ROUND 必须真正执行新轮次，事件 actor=automation。空 diff 沿 execution_retry 同计划重跑一次（可用已配置且探针通过的备用模型）；verify 失败沿 resolve replan 同分支修复，失败输出尾部进入 planner 输入。
+- START_FIX_ROUND 必须真正执行新轮次，事件 actor=automation。空 diff 沿 execution_retry 同计划重跑一次（可用已配置且探针通过的备用模型）。verify_failed 仅在 same_branch_fix_ready(task, binding) 成立时 resolve replan 同分支修复；该纯内存判定要求 requires_branch_review、delivery.branch/worktree_path 与既有 binding 一致，分别返回 detached、no_branch_worktree、worktree_mismatch，不执行 Git。引擎与核心权威守卫共用，先于额度判断；不就绪 → fix_branch_unavailable/monitor，不创建补救、不耗额度。评审 changes_requested 同守卫，显式 failure_stage=review，fix_request=held，不调用 start_fix_round_inline。统一说明「本轮改动在独立工作树，无法同分支修复」；monitor 可 resume/replan/mark_done/dismiss，review 禁止 resume，两端均核对阶段。attention 沿 needs_user_other，不新增 reason_code。
 - execution_retry 保留远端 In Progress、计划哈希、工作树身份与 expected_execution_run_id 守卫；只放行已绑定核心空 diff 回执的自动补救，绝不重发旧已发送轮次。
-- engine_fix_rounds 按任务跨 replan 累计至多 2；同一失败 execution_run_id 至多启动一次。领取/排队失败不可产生虚假成功回执；崩溃后可幂等继续。任务成本/时间上限继续生效；超限进入 attention。评审修复单独记账。
+- engine_fix_rounds 按任务跨 replan 累计至多 2。全历史（含已撤回）按 execution_run_id 去重，避免同轮再次补救；未撤回行用于额度、fix_round 阶梯、引擎与核心两处 empty_diff 同计划规则和引擎快速规划门。评审 automation.fix_round 是独立计数器，撤回绝不修改。领取/排队失败不产生虚假成功，预算上限继续生效。
+- 补救前在 cmd_resolve 写事务内、任何状态转移前记录 before：task 的 status/stage/failure_code/failure_stage/failure_reason/blocked_at/blocked_summary/sent/send_state/sent_at/lock_retained；完整 delivery；automation 的 plan_wanted/plan_attempts/replan_requested_at/replan_remote_status/replan_worktree_sha256/last_skip。不得裁剪 delivery。
+- 撤回候选只读取内存/数据库：有效 live 且托管、needs_user、failure_stage=plan、branch_exists 或 delivery_base_unknown；最近未撤回行为 verify_failed 且 run/plan 匹配；补救后无新规划生成/plan 请求/planner_inputs；无 queued/claimed 活动请求；原 engine_verdict 的 run/plan 匹配且有可复核 binding。详情候选不得扫描工作树。
+- revert_engine_fix 三段式：事务外记录 resolution 快照，按 resume-monitor 口径只读核对远端项目及 in-progress/in-review/done，构造恢复 delivery 后的任务视图，以 git_probe_timeout 预算重算 binding；不符、失败或变化均 conflict 且零任务写入。事务内重新读取任务并比较快照、候选与两个 expected，禁止 spawn/远端/工作树扫描。缺任一 expected 为 bad_request，过期或不符为 conflict。
+- 恢复显式写 needs_user、stage=monitor、failure_stage=monitor；统一分类器重判原检查，恢复 verification_environment_failure 或 verification_unconfirmed 及说明；sent=1/send_state=sent，sent_at/lock_retained 取 before。存量无 before 时，sent_at 必须来自本轮 dispatch_sent，lock_retained=0；binding.branch=HEAD 时完整 delivery 恢复 manual；其他情况须有充分归属证据并通过 binding，禁止猜测。
+- delivery 用 db.set_extra 整体替换；automation 恢复 plan_attempts、关闭 plan_wanted、清理 replan_requested_at/replan_remote_status/replan_worktree_sha256/last_skip。所有 extra 修改基于事务内新鲜行一次合并写入。补救行仅加 reverted_at/reverted_by，不删除，engine_verdict 不改。被舍弃分支路径仅记 orphaned_branch，不操作磁盘；事件 engine_fix_reverted 含执行轮、计划摘要、恢复失败码、environment_reasons、orphaned_branch，另记 resolved。
+- 桌面详情契约：托管任务持续提供 engine_fix_summary={used:int,max:int}（未撤回行数、硬上限与项目上限较小值），非托管为 null；engine_fix_revert 仅候选时为 {execution_run_id,plan_sha256,expected_failure_code}，否则 null；仅候选时 allowed_actions 含 revert_engine_fix。撤回后 candidate 消失，summary 仍提供退额证据。
 - shadow 只计算决策、不下补救命令、不写补救计数；legacy 不接管。
 
 #### 5.27.13 评审与探针（A3）

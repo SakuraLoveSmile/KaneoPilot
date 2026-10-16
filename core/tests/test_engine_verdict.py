@@ -77,6 +77,29 @@ class TestVerdictPure(unittest.TestCase):
         result = verdict.run_command("sleep 5", cwd=str(repo), timeout=1)
         self.assertTrue(result["timed_out"])
 
+    def test_short_sensitive_env_redacts_command_detail_and_output_but_keeps_ready_flag(self):
+        environment = {"PASSWORD": "123456", "TOKEN": "abcdef", "SECRET": "uvwxyz",
+                       "API_KEY": "987654", "AUTHORIZATION": "auth56", "KP_VERIFY_READY": "1"}
+        result = verdict.run_command('printf "%4093s" ""; printf "%s|%s|%s|%s|%s|ready=%s" '
+                                     '"$PASSWORD" "$TOKEN" "$SECRET" "$API_KEY" "$AUTHORIZATION" "$KP_VERIFY_READY"',
+                                     cwd=self._repo(), env=environment)
+        for key, value in environment.items():
+            if key != "KP_VERIFY_READY":
+                self.assertNotIn(value, util.jdump(result), key)
+        self.assertIn("ready=1", result["output_tail"])
+        with patch.object(verdict.subprocess, "Popen", side_effect=OSError("123456")):
+            failed = verdict.run_command("printf 123456", cwd=None, env=environment)
+        self.assertNotIn("123456", util.jdump(failed))
+
+    def test_sensitive_environment_values_have_no_minimum_length(self):
+        for value in ("a", "1", "pw"):
+            with self.subTest(value=value):
+                result = verdict.run_command('printf %s "$PASSWORD"', cwd=None, env={"PASSWORD": value})
+                self.assertEqual(result["output_tail"], "«redacted»")
+        with patch.dict(os.environ, {"TOKEN": "short"}):
+            result = verdict.run_command('printf %s "$TOKEN"', cwd=None)
+        self.assertEqual(result["output_tail"], "«redacted»")
+
     def test_timeout_kills_background_process_group_and_redacts_output(self):
         repo = self._repo()
         result = verdict.run_command("sleep 30 & echo $! > child.pyc; printf %s \"$KP_SECRET_TOKEN\"; wait",
@@ -302,6 +325,56 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.assertNotIn(secret, util.jdump(result))
         self.assertNotIn(secret, util.jdump(db.task_extra(self._row(tid))["engine_verdict"]))
 
+    def test_live_and_shadow_receipts_redact_short_password_values(self):
+        for mode in ("live", "shadow"):
+            with self.subTest(mode=mode):
+                tid, sha = self._running_task_with_repo("shortsecret" + mode, commands=['printf "%s|ready=%s" "$PASSWORD" "$KP_VERIFY_READY"'])
+                task = self._row(tid)
+                self.call("set-project-mapping", {"project_id": task["project_id"], "repository": task["repository"], "enabled": True,
+                                                 "expected_revision": self.call("get-project-mappings")["revision"]})
+                self.call("set-project-engine-mode", {"project_id": task["project_id"], "engine_mode": mode})
+                with patch.object(verdict, "project_verify_env", return_value={"PASSWORD": "123456", "KP_VERIFY_READY": "1"}):
+                    result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                         "expected_plan_sha256": sha})
+                self.assertTrue(result["verification_ok"])
+                key = "engine_verdict_shadow" if mode == "shadow" else "engine_verdict"
+                receipt = db.task_extra(self._row(tid))[key]
+                self.assertNotIn("123456", util.jdump(receipt))
+                self.assertIn("ready=1", receipt["checks"][0]["output_tail"])
+                conn = db.connect(self.db_path)
+                try:
+                    for row in conn.execute("SELECT detail_json FROM events WHERE task_id=?", (tid,)):
+                        self.assertNotIn("123456", row[0] or "")
+                finally:
+                    conn.close()
+
+    def test_live_and_shadow_classify_raw_failure_before_redacting_receipts(self):
+        for mode in ("live", "shadow"):
+            with self.subTest(mode=mode):
+                tid, sha = self._running_task_with_repo("rawclassify" + mode,
+                    commands=["printf 'SDK location not found.\\nsecret=%s' \"$PASSWORD\"; exit 1"])
+                task = self._row(tid)
+                self.call("set-project-mapping", {"project_id": task["project_id"], "repository": task["repository"], "enabled": True,
+                                                 "expected_revision": self.call("get-project-mappings")["revision"]})
+                self.call("set-project-engine-mode", {"project_id": task["project_id"], "engine_mode": mode})
+                with patch.object(verdict, "project_verify_env", return_value={"PASSWORD": "a"}):
+                    result = self.call("engine-verdict", {"task_id": tid, "expected_execution_run_id": "run-" + tid,
+                                                         "expected_plan_sha256": sha})
+                self.assertEqual(result["kind"], "environment_failure")
+                self.assertTrue(result["environment_failure"])
+                self.assertEqual(result["environment_reasons"], ["android_sdk_missing"])
+                key = "engine_verdict_shadow" if mode == "shadow" else "engine_verdict"
+                receipt = db.task_extra(self._row(tid))[key]
+                self.assertEqual(receipt["checks"][0]["output_tail"], "SDK loc«redacted»tion not found.\nsecret=«redacted»")
+                self.assertEqual(verdict.environment_reasons(receipt["checks"]), ["android_sdk_missing"])
+                self.assertNotIn("secret=a", util.jdump(receipt))
+                conn = db.connect(self.db_path)
+                try:
+                    for row in conn.execute("SELECT detail_json FROM events WHERE task_id=?", (tid,)):
+                        self.assertNotIn("secret=a", row[0] or "")
+                finally:
+                    conn.close()
+
     def _row(self, task_id):
         conn = db.connect(self.db_path)
         try:
@@ -312,3 +385,103 @@ class TestEngineVerdictCommand(KanpilotTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnvironmentClassification(unittest.TestCase):
+    def test_sensitive_value_redaction_cannot_erase_environment_failure_classification(self):
+        cases = [("SDK location not found.", "a", "android_sdk_missing"),
+                 ("Dependency requires at least JVM runtime version 17", "a", "jdk_version"),
+                 ("No connected devices!", "o", "no_connected_device"),
+                 ("command not found: gradle", "o", "command_not_found")]
+        for output, password, reason in cases:
+            with self.subTest(reason=reason):
+                command = "printf '%s' '" + output + "'; exit 1"
+                check = verdict.run_command(command, cwd=None, env={"PASSWORD": password})
+                self.assertEqual(check["environment_reason"], reason)
+                self.assertEqual(verdict.environment_reasons([check]), [reason])
+                self.assertIn("«redacted»", check["output_tail"])
+                self.assertNotIn(output, check["output_tail"])
+                self.assertIsNone(verdict.environment_reason(dict(check, exit_code=0)))
+                self.assertIsNone(verdict.environment_reason(dict(check, timed_out=True)))
+        success = verdict.run_command("printf 'SDK location not found.'", cwd=None, env={"PASSWORD": "a"})
+        self.assertIsNone(success["environment_reason"])
+        timeout = verdict.run_command("printf 'SDK location not found.'; sleep 5", cwd=None,
+                                      timeout=0.05, env={"PASSWORD": "a"})
+        self.assertTrue(timeout["timed_out"])
+        self.assertIsNone(timeout["environment_reason"])
+
+    def test_controlled_persisted_reason_survives_redaction_with_legacy_fallback(self):
+        check = {"exit_code": 1, "timed_out": False, "environment_reason": "android_sdk_missing",
+                 "output_tail": "SDK loc«redacted»tion not found."}
+        self.assertEqual(verdict.environment_reason(check), "android_sdk_missing")
+        self.assertIsNone(verdict.environment_reason(dict(check, exit_code=0)))
+        self.assertIsNone(verdict.environment_reason(dict(check, timed_out=True)))
+        self.assertIsNone(verdict.environment_reason(dict(check, exit_code=None)))
+        self.assertIsNone(verdict.environment_reason(dict(check, environment_reason="unknown")))
+        self.assertEqual(verdict.environment_reason({"exit_code": 1, "output_tail": "SDK location not found."}),
+                         "android_sdk_missing")
+
+    def test_explicit_failures_prioritize_environment_signatures(self):
+        cases = [(127, "Unsupported class file major version 61", "command_not_found"),
+                 (1, "command not found: gradle", "command_not_found"),
+                 (1, "This build uses a Java 8 JVM", "jdk_version"),
+                 (1, "Dependency requires at least JVM runtime version 17", "jdk_version"),
+                 (1, "Unsupported class file major version 61", "jdk_version"),
+                 (1, "SDK location not found", "android_sdk_missing"),
+                 (1, "No connected devices!", "no_connected_device")]
+        for code, output, reason in cases:
+            with self.subTest(output=output):
+                check = {"exit_code": code, "output_tail": output, "timed_out": False}
+                self.assertEqual(verdict.environment_reason(check), reason)
+                self.assertIsNone(verdict.environment_reason(dict(check, exit_code=0)))
+                self.assertIsNone(verdict.environment_reason(dict(check, timed_out=True)))
+                self.assertIsNone(verdict.environment_reason(dict(check, exit_code=None)))
+        self.assertEqual(verdict.environment_reason({"command_not_found": True, "exit_code": None}), "command_not_found")
+        self.assertIsNone(verdict.environment_reason({"command_not_found": True, "exit_code": 127, "timed_out": True}))
+
+    def test_real_shell_nonzero_success_timeout_and_failed_launch(self):
+        from unittest.mock import patch
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as root:
+            failed = verdict.run_command("printf 'SDK location not found'; exit 1", cwd=root)
+            self.assertEqual(failed["environment_reason"], "android_sdk_missing")
+            self.assertIsNone(verdict.run_command("printf 'SDK location not found'; exit 0", cwd=root)["environment_reason"])
+            timed = verdict.run_command("printf 'This build uses a Java 8 JVM'; sleep 5", cwd=root, timeout=0.05)
+            self.assertTrue(timed["timed_out"])
+            self.assertIsNone(timed["environment_reason"])
+            with patch.object(verdict, "verify_shell", return_value=["/missing/verify-shell", "-l", "-c"]):
+                launch = verdict.run_command("true", cwd=root)
+            self.assertTrue(launch["command_not_found"])
+            self.assertEqual(launch["environment_reason"], "command_not_found")
+
+    def test_group_environment_wins_and_reasons_deduplicate_in_order(self):
+        from unittest.mock import patch
+        checks = [{"exit_code": 1, "timed_out": False, "output_tail": "test assertion failed"},
+                  {"exit_code": 1, "timed_out": False, "output_tail": "SDK location not found"},
+                  {"exit_code": 1, "timed_out": False, "output_tail": "SDK location not found"},
+                  {"exit_code": 1, "timed_out": False, "output_tail": "No connected devices"}]
+        with patch.object(verdict, "effective_changes", return_value=["source.py"]), patch.object(verdict, "run_verify_commands", return_value=checks):
+            result = verdict.evaluate(["test", "sdk", "sdk", "device"], "/unused")
+        self.assertTrue(result["environment_failure"])
+        self.assertEqual(result["environment_reasons"], ["android_sdk_missing", "no_connected_device"])
+        self.assertEqual(result["kind"], "environment_failure")
+        self.assertIn("ANDROID_HOME", result["detail"])
+        with patch.object(verdict, "login_shell_path", return_value="/bin"):
+            import time
+            exhausted = verdict.run_verify_commands(["false"], cwd="/unused", deadline=time.monotonic()-1)
+        self.assertIsNone(exhausted[0]["environment_reason"])
+
+
+class TestCapturedEnvironmentSignatures(unittest.TestCase):
+    def test_real_isolated_gradle_failure_fragments(self):
+        import json
+        captured = json.loads((Path(__file__).parent / "fixtures" / "verify_environment_signatures.json").read_text())
+        self.assertEqual({item["environment_reason"] for item in captured}, {"jdk_version", "android_sdk_missing", "no_connected_device"})
+        for record in captured:
+            with self.subTest(name=record["name"]):
+                self.assertEqual(record["exit_code"], 1)
+                self.assertFalse(record["timed_out"])
+                self.assertEqual(verdict.environment_reason(record), record["environment_reason"])
+                self.assertIsNone(verdict.environment_reason(dict(record, exit_code=0)))
+                self.assertIsNone(verdict.environment_reason(dict(record, timed_out=True)))
+                self.assertEqual(record["source_head"], "a97165af685f48ff2214ec1d5047d110c6caa8fa")

@@ -157,10 +157,30 @@ def cmd_set_project_automation(ctx, payload):
     expected = payload.get("expected_policy_revision")
     if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int) or expected < 0):
         raise util.bad_request("expected_policy_revision 须为非负整数")
+    # All Git/network I/O finishes before the SQLite writer lock.
+    _, _, prepared_items, _ = project_config.load_raw_mappings(ctx.conn)
+    if project_id not in prepared_items:
+        raise util.KanpilotError("not_found", "项目映射不存在")
+    repository = (prepared_items[project_id] or {}).get("repository")
+    base_check = None
+    if value.get("delivery_base"):
+        from . import git_delivery
+        default, exists = git_delivery.origin_branch_info(repository, value["delivery_base"])
+        if exists is not True:
+            try:
+                git_delivery._git(["fetch", "--prune", "origin"], repository, git_probe_timeout())
+                default, exists = git_delivery.origin_branch_info(repository, value["delivery_base"])
+            except git_delivery.GitDeliveryError:
+                exists = None
+        if exists is False:
+            raise util.bad_request(git_delivery.missing_base_message(value["delivery_base"], default))
+        base_check = "verified" if exists else "unverified"
     with db.write_txn(ctx.conn):
         revision, workspace, items, _ = project_config.load_raw_mappings(ctx.conn)
         if project_id not in items:
             raise util.KanpilotError("not_found", "项目映射不存在")
+        if (items[project_id] or {}).get("repository") != repository:
+            raise util.KanpilotError("conflict", "项目仓库在校验期间已变化")
         current = policy_for(ctx.conn, project_id) or constants.AUTOMATION_DEFAULTS
         if expected is not None and expected != current["policy_revision"]:
             raise util.KanpilotError("conflict", "automation policy_revision 不符")
@@ -169,7 +189,8 @@ def cmd_set_project_automation(ctx, payload):
         db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
                        {"version": project_config.CURRENT_VERSION, "revision": revision,
                         "workspace_id": workspace, "items": items})
-    return {"project_id": project_id, "automation": value, "policy_revision": value["policy_revision"]}
+    return {"project_id": project_id, "automation": value, "policy_revision": value["policy_revision"],
+            **({"delivery_base_check": base_check} if base_check else {})}
 
 
 def cmd_set_automation_global(ctx, payload):

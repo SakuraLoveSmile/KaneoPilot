@@ -3,6 +3,7 @@ import Foundation
 enum ConfirmableAction: Identifiable {
         case restore, acceptDuplicate, markSent, markDone, releaseLost, cancelPlan
         case retryExecution(runID: String)
+        case replanBranchUnavailable
 
         var id: String {
             switch self {
@@ -13,6 +14,7 @@ enum ConfirmableAction: Identifiable {
             case .releaseLost: return "release_lost"
             case .cancelPlan: return "cancel-request"
             case .retryExecution: return "resume"
+            case .replanBranchUnavailable: return "replan"
             }
         }
         var title: String {
@@ -24,6 +26,7 @@ enum ConfirmableAction: Identifiable {
             case .releaseLost: return "释放失联请求"
             case .cancelPlan: return "终止排队计划"
             case .retryExecution: return "重新执行（沿用计划）"
+            case .replanBranchUnavailable: return "重新规划"
             }
         }
         var message: String {
@@ -40,13 +43,15 @@ enum ConfirmableAction: Identifiable {
                 return "撤销尚未领取的规划请求，保留材料与历史，等待手动重新规划。若已被领取，本操作会拒绝终止。"
             case .releaseLost:
                 return "取消失联请求并把任务恢复到可安全推进的状态。"
+            case .replanBranchUnavailable:
+                return "将从目标分支新建工作树，本轮改动不会带入"
             case .retryExecution:
                 return "沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。"
             }
         }
         var destructive: Bool {
             switch self {
-            case .acceptDuplicate, .markDone, .releaseLost, .cancelPlan: return true
+            case .acceptDuplicate, .markDone, .releaseLost, .cancelPlan, .replanBranchUnavailable: return true
             case .restore, .markSent, .retryExecution: return false
             }
         }
