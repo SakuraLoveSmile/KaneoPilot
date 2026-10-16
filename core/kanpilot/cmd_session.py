@@ -922,7 +922,8 @@ def _status_summary(job: dict, events: list) -> dict:
     return {"record": record, "events": lifecycle,
             "round_job": {key: job.get(key) for key in
                           ("status", "pid", "observe_pid", "ended_at", "exit_code", "detail",
-                           "turn_id", "turn_adopted", "send_state", "observation_resumed_at")},
+                           "turn_id", "turn_adopted", "send_state", "observation_resumed_at",
+                           "observation_finalizing")},
             "has_actual_content": any(event.get("session_id") or event.get("type")
                                       not in ("system", "terminal", "turn_end")
                                       for event in events)}

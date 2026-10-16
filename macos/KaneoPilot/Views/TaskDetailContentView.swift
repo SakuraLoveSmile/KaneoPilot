@@ -57,31 +57,14 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
-    @ViewBuilder
+    /// 五段共用同一顶栏（§4.1）：第一行项目与标题（最多两行），第二行状态、五段导航与关闭。
+    /// 切换分段不改变顶栏高度与导航位置。
     private var headerBar: some View {
-        if tab == .plan {
-            // 计划页已有自己的标题与核验状态，不重复铺一组相同信息。
-            HStack(spacing: Spacing.m) {
-                Text(detail?.projectName ?? "计划").font(.kpSmall).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                headerNavigation
-            }
-            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
-        } else if tab == .execution {
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                headerTitle
-                HStack(spacing: Spacing.m) { headerStatus; Spacer(minLength: 0); headerNavigation }
-            }
-            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
-        } else {
-            HStack(alignment: .center, spacing: Spacing.m) {
-                VStack(alignment: .leading, spacing: 3) { headerTitle; headerStatus }
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: Spacing.m)
-                headerNavigation
-            }
-            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            headerTitle
+            HStack(spacing: Spacing.m) { headerStatus; Spacer(minLength: 0); headerNavigation }
         }
+        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
     }
 
     private var headerTitle: some View {
@@ -92,9 +75,10 @@ struct TaskDetailContentView: View {
                     .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
             }
             Text(detail?.title ?? taskID).font(.kpTitle)
-                .lineLimit(tab == .execution ? 2 : 1).truncationMode(.tail)
+                .lineLimit(2).truncationMode(.tail)
                 .textSelection(.enabled).help(detail?.title ?? taskID)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -102,6 +86,9 @@ struct TaskDetailContentView: View {
         HStack(spacing: Spacing.m) {
             if let detail {
                 StatusBadge(status: DisplayStatus.effective(detail))
+                if detail.executionQuestion?.state == "open", detail.executionQuestion?.answerable == true, detail.readOnly != true {
+                    StatusBadge(status: "等待你回答")
+                }
                 Text("阶段：\(detail.phase.map(PhaseStepperView.title) ?? "未提供")")
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
                     StatusBadge(status: "待确认执行")
@@ -144,7 +131,7 @@ struct TaskDetailContentView: View {
                 errorStateView
             }
         case .plan:
-            PlanReaderView(taskID: taskID, detail: detail)
+            PlanReaderView(taskID: taskID, detail: detail, showsHeaderInfo: !showsHeader)
         case .execution:
             TaskExecutionTabView(taskID: taskID, detail: detail, showsTaskTitle: !showsHeader)
         case .review:
@@ -560,60 +547,6 @@ private struct ReviewEvidenceSheet: View {
     }
 }
 
-private struct VerificationCheckActionButton: View {
-    @ObservedObject var store: VerificationCheckStore
-    let busy: Bool
-
-    var body: some View {
-        Button(store.buttonTitle) { store.start() }
-            .disabled(busy || !store.canRun)
-            .help("在原任务工作树逐条执行原计划检查，记录独立退出码。失败不会人工接受；不会调用模型。")
-    }
-}
-
-private struct VerificationCheckResultsView: View {
-    @ObservedObject var store: VerificationCheckStore
-
-    var body: some View {
-        if store.running || store.feedback != nil || store.error != nil || !store.checks.isEmpty {
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                if store.running {
-                    HStack(spacing: Spacing.s) {
-                        ProgressView().controlSize(.small)
-                        Text(store.recoveryPending ? "正在恢复推进" : "验证检查处理中").font(.kpBody)
-                    }
-                }
-                if let feedback = store.feedback {
-                    Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
-                }
-                if let error = store.error {
-                    Text(error).font(.kpSmall).foregroundStyle(.red).textSelection(.enabled)
-                }
-                ForEach(Array(store.checks.enumerated()), id: \.offset) { _, check in
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        Text(check.command).font(.kpSmall).textSelection(.enabled)
-                        Text(check.timedOut == true ? "超时" : check.exitCode.map { "退出码：\($0)" } ?? "尚无独立退出码")
-                            .font(.kpSmall)
-                            .foregroundStyle(check.exitCode == 0 && check.timedOut != true ? Color.secondary : Color.orange)
-                        if let detail = check.detail, !detail.isEmpty {
-                            Text(detail).font(.kpSmall).textSelection(.enabled)
-                        }
-                        if let output = check.outputTail, !output.isEmpty {
-                            DisclosureGroup("查看检查输出") {
-                                Text(output).font(.kpSmall).textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(Spacing.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-}
-
 struct TaskOverviewTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
@@ -628,19 +561,12 @@ struct TaskOverviewTabView: View {
     @State private var revertPreparationID: UUID?
     @State private var technicalExpanded = false
     @State private var reverifyError: String?
+    @State private var retryVerificationRunID: String?
     @State private var answerFocusRequest = 0
     @State private var reviewFocusRequest = 0
     @State private var executionFocusRequest = 0
-
-    private var verificationStore: VerificationCheckStore? {
-        if let pending = model.pendingVerificationCheckStore(taskID: detail.taskId) { return pending }
-        let restoringRunning = detail.verificationChecks?.state == "running"
-            || detail.verificationChecks?.recoveryPending == true
-        guard detail.readOnly != true, actions.contains("run_verification_checks") || restoringRunning,
-              let runID = detail.runId, let planSHA = detail.planSha256 else { return nil }
-        return model.verificationCheckStore(taskID: detail.taskId, executionRunID: runID, planSHA: planSHA,
-                                            restored: detail.verificationChecks)
-    }
+    @State private var confirmingExecutionSkip = false
+    @State private var confirmingExecutionStop = false
 
     private var reviewStore: ReviewResolutionStore? {
         if let pending = model.pendingReviewResolutionStore(taskID: detail.taskId) { return pending }
@@ -653,6 +579,25 @@ struct TaskOverviewTabView: View {
     private var executionStore: ExecutionAnswerStore? {
         guard let question = detail.executionQuestion else { return nil }
         return model.executionAnswerStore(taskID: detail.taskId, question: question, readOnly: detail.readOnly == true)
+    }
+
+    /// 开放且可答的执行提问才由底栏提交；只读或核心未允许回答时不给提交入口。
+    private var openExecutionStore: ExecutionAnswerStore? {
+        guard actions.contains("answer_execution_questions"), let store = liveExecutionStore, store.question.answerable else { return nil }
+        return store
+    }
+
+    /// 开放中的执行提问，无论能否在本机回答：更多操作里的停止与草稿动作都从这里取。
+    private var liveExecutionStore: ExecutionAnswerStore? {
+        guard detail.readOnly != true, actions.contains("answer_execution_questions") || actions.contains("stop_execution"),
+              let store = executionStore, store.question.state == "open" else { return nil }
+        return store
+    }
+
+    /// 开放但核心判定不可在本机回答：底栏不给回答入口，只说明去 Plus 回答。
+    private var executionAwaitingPlus: Bool {
+        guard detail.readOnly != true, let question = detail.executionQuestion else { return false }
+        return question.state == "open" && !question.answerable
     }
 
     private var answerStore: PlanAnswerStore? {
@@ -702,7 +647,8 @@ struct TaskOverviewTabView: View {
     private var visibleActions: [String] {
         if detail.readOnly == true { return [] }
         // 动作资格由核心提供，不在界面补充恢复、自动推进或移出动作。
-        return actions
+        // 开放但不可在本机回答的提问不给「回答」入口，停止仍由更多操作提供。
+        return executionAwaitingPlus ? actions.filter { $0 != "answer_execution_questions" } : actions
     }
 
     private var primaryAction: String? {
@@ -715,8 +661,7 @@ struct TaskOverviewTabView: View {
         // 主动作优先级：查看确认计划 → 恢复已完成执行后的评审 → 重新核验 → 接受验证 →
         // 恢复/重试 → 恢复任务自动推进 → 准备规划 → 安排当前阶段 → 校验。
         // 危险裁决、重新规划、取消、归档等低频操作始终留在更多操作中。
-        if verificationStore?.hasPendingOperation == true { return "run_verification_checks" }
-        let order = ["answer_execution_questions", "answer_plan_questions", "resolve_review_blocker", "confirm_dispatch", "recover_review", "run_verification_checks", "reverify", "accept_verification", "revert_engine_fix", "resume", "retry",
+        let order = ["answer_execution_questions", "answer_plan_questions", "resolve_review_blocker", "confirm_dispatch", "recover_review", "retry_verification", "reverify", "accept_verification", "revert_engine_fix", "resume", "retry",
                      "resume-auto", "prepare_plan", "enqueue", "plan", "start_plan",
                      "dispatch", "monitor", "review", "recheck"]
         return order.first { available.contains($0) }
@@ -731,16 +676,17 @@ struct TaskOverviewTabView: View {
         if detail.sendState == "unknown" {
             return "发送结果不明。先重新校验并查看执行证据，再通过更多操作作出裁决。"
         }
+        if executionAwaitingPlus { return "这道执行提问只能在 Plus 中回答，本机不提供回答入口；可在「更多操作」中停止本轮。" }
         if detail.activeRequest?.status == "queued" && primaryAction != "confirm_dispatch" {
             return "请求已排队，尚未开始；执行端领取后才会推进。"
         }
         switch primaryAction {
-        case "answer_execution_questions": return "回答上方执行问题，继续同一轮次；保存草稿不会提交到 Plus。"
+        case "answer_execution_questions": return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交到 Plus。"
         case "answer_plan_questions": return "在上方回答待确认问题，提交后继续规划；执行仍按原确认规则安排。"
         case "resolve_review_blocker": return "查看上方报告摘要，选择准备修复或补充证据；原成果与报告保留。"
         case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
         case "recover_review": return "保留执行成果并恢复到待评审，恢复后自动推进保持暂停。"
-        case "run_verification_checks": return "在原任务工作树依次执行原计划检查，分别记录退出码；全部通过才继续推进，失败不会人工接受。"
+        case "retry_verification": return "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
         case "revert_engine_fix": return AutomationPresentation.revertMessage
@@ -771,11 +717,9 @@ struct TaskOverviewTabView: View {
                             else { model.openPlanning(focusTaskID: detail.taskId) }
                         }, onRefreshDetail: onRefreshDetail)
                         .id("review-resolution")
-                } else if isBlocked {
+                } else if isBlocked, detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
+                    // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
-                }
-                if let store = verificationStore {
-                    VerificationCheckResultsView(store: store)
                 }
 
                 PhaseStepperView(phase: detail.phase, condition: detail.condition)
@@ -792,14 +736,13 @@ struct TaskOverviewTabView: View {
 
                 if let store = executionStore {
                     ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail,
-                        terminalReason: detail.failureCode == "execution_failed" ? (detail.failureReason ?? detail.blockedSummary) : nil)
+                        terminalReason: detail.failureCode == "execution_failed" ? (detail.failureReason ?? detail.blockedSummary) : nil,
+                        reconcileInBar: openExecutionStore != nil)
                         .id("execution-answers")
                 }
 
                 ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.executionQuestion?.identity), id: \.formIdentity) { store in
-                    DisclosureGroup("保留的未保存草稿") {
-                        ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
-                    }
+                    ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
                 }
 
                 // 2. 状态与下一步安全动作
@@ -836,6 +779,22 @@ struct TaskOverviewTabView: View {
             Button("好", role: .cancel) { reverifyError = nil }
         } message: {
             Text(reverifyError ?? "")
+        }
+        .confirmationDialog("让 Plus 重新执行并验证？", isPresented: Binding(
+            get: { retryVerificationRunID != nil },
+            set: { if !$0 { retryVerificationRunID = nil } }
+        ), titleVisibility: .visible) {
+            Button("让 Plus 重新执行并验证") {
+                guard let runID = retryVerificationRunID else { return }
+                retryVerificationRunID = nil
+                Task {
+                    await model.resolve(taskID: detail.taskId, action: "retry_verification",
+                                        expectedExecutionRunID: runID, onError: { reverifyError = $0 })
+                }
+            }
+            Button("取消", role: .cancel) { retryVerificationRunID = nil }
+        } message: {
+            Text("沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
         }
         .confirmationDialog(
             confirm?.title ?? "",
@@ -874,6 +833,20 @@ struct TaskOverviewTabView: View {
             Button("取消", role: .cancel) { revertConfirmation = nil }
         } message: { Text(AutomationPresentation.revertMessage) }
         .onChange(of: detail.taskId) { revertConfirmation = nil; revertPreparationID = nil }
+        .confirmationDialog("全部跳过并继续？", isPresented: $confirmingExecutionSkip, titleVisibility: .visible) {
+            Button("全部跳过并继续") {
+                guard let store = executionStore else { return }
+                Task { await store.submit(skipAll: true); onRefreshDetail?() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { Text("跳过当前这份请求的所有问题，继续同一轮次；其它排队提问仍需处理。") }
+        .confirmationDialog("停止本轮？", isPresented: $confirmingExecutionStop, titleVisibility: .visible) {
+            Button("停止本轮", role: .destructive) {
+                guard let store = executionStore else { return }
+                Task { await store.stop(); onRefreshDetail?() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { Text("这会结束当前执行轮次。原问题、草稿和执行记录将保留。") }
         .confirmationDialog(
             PurgeText.actionTitle,
             isPresented: $confirmingPurge,
@@ -1044,13 +1017,20 @@ struct TaskOverviewTabView: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: Spacing.m) {
-                if let primaryAction {
+                if let store = openExecutionStore {
+                    executionSubmitControls(store)
+                } else if executionAwaitingPlus {
+                    Text("等待你在 Plus 中回答").font(.kpSmall).foregroundStyle(.secondary)
+                } else if let primaryAction {
                     actionButton(primaryAction)
                         .buttonStyle(.borderedProminent)
                 }
                 Spacer(minLength: 0)
-                if !secondaryActions.isEmpty {
+                if !secondaryActions.isEmpty || liveExecutionStore != nil {
                     Menu("更多操作") {
+                        if let store = liveExecutionStore {
+                            executionMenuItems(store)
+                        }
                         ForEach(secondaryActions, id: \.self) { action in
                             actionButton(action)
                         }
@@ -1069,6 +1049,40 @@ struct TaskOverviewTabView: View {
         .background(Color.kpWindow)
     }
 
+    /// 开放提问的提交入口：与问答卡片共用同一个 store；禁用原因写在按钮旁边。
+    @ViewBuilder
+    private func executionSubmitControls(_ store: ExecutionAnswerStore) -> some View {
+        HStack(spacing: Spacing.s) {
+            if store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
+                Button("重新核对") { Task { await store.reconcile(); onRefreshDetail?() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.working || store.obsolete)
+            } else {
+                Button("提交答案") { Task { await store.submit(); onRefreshDetail?() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!store.canSubmit)
+            }
+            Text(store.submitBlockedReason ?? "已答 \(store.answeredCount)/\(store.question.questions.count)")
+                .font(.kpSmall).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func executionMenuItems(_ store: ExecutionAnswerStore) -> some View {
+        if store.question.answerable {
+            Button("保存草稿") { Task { _ = await store.saveNow(); onRefreshDetail?() } }
+                .disabled(store.inputsLocked || !store.dirty)
+            if actions.contains("skip_execution_questions") {
+                Button("全部跳过并继续") { confirmingExecutionSkip = true }
+                    .disabled(store.inputsLocked)
+            }
+        }
+        if actions.contains("stop_execution") {
+            Button("停止本轮", role: .destructive) { confirmingExecutionStop = true }
+                .disabled(!store.canStop)
+        }
+    }
+
     @ViewBuilder
     private func actionButton(_ action: String) -> some View {
         switch action {
@@ -1081,10 +1095,10 @@ struct TaskOverviewTabView: View {
         case "resolve_review_blocker":
             Button("处理评审阻塞") { reviewFocusRequest += 1 }
                 .disabled(reviewStore == nil)
-        case "run_verification_checks":
-            if let store = verificationStore {
-                VerificationCheckActionButton(store: store, busy: model.busy)
-            }
+        case "retry_verification":
+            Button("让 Plus 重新执行并验证") { retryVerificationRunID = detail.runId }
+                .disabled(model.busy || detail.runId == nil)
+                .help("沿用原计划和工作树，会启动新的 Plus 执行轮次。")
         case "reverify":
             Button("重新核验验证证据") {
                 guard let runID = detail.runId else { return }
@@ -1298,28 +1312,51 @@ struct TaskOverviewTabView: View {
     }
 }
 
-/// Execution questions inherit the existing planning form's native controls and spacing.
+/// Execution questions: an open, answerable record keeps the native form; every other record collapses to one status line.
 private struct ExecutionAnswerCard: View {
     @ObservedObject var store: ExecutionAnswerStore
     var onRefreshDetail: (() -> Void)?
     var terminalReason: String? = nil
-    @State private var confirmingSkip = false
-    @State private var confirmingStop = false
+    /// 底栏已经给出「重新核对」时，卡片不再重复出现。
+    var reconcileInBar = false
     @State private var confirmingRetry = false
     @State private var confirmingDiscard = false
+    @State private var showingRecord = false
+
+    private var isAnswering: Bool {
+        store.question.state == "open" && store.question.answerable && !store.obsolete
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Text(store.obsolete ? "保留的未保存草稿" : "执行中提问 · \(store.question.questions.count)题").font(.kpTitle)
+            if isAnswering {
+                answerForm
+            } else {
+                closedSummary
+            }
+            statusDetails
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onDisappear { Task { if store.dirty && !store.inputsLocked { _ = await store.saveNow() } } }
+        .confirmationDialog("放弃未保存的本机编辑？", isPresented: $confirmingDiscard, titleVisibility: .visible) {
+            Button("放弃本机编辑", role: .destructive) { store.discardUnsavedEdits(); onRefreshDetail?() }
+            Button("取消", role: .cancel) {}
+        } message: { Text("只放弃这份问题尚未保存的本机输入。核心已经保存的问题、草稿、送达收据与历史保持不变。") }
+        .confirmationDialog("使用相同答案重新提交？", isPresented: $confirmingRetry, titleVisibility: .visible) {
+            Button("使用相同答案重新提交") { run { await store.submit(retry: true) } }
+            Button("取消", role: .cancel) {}
+        } message: { Text("原提交可能仍在处理中。本次仅重送冻结的相同答案，不能撤销原调用，也不会修改答案。") }
+    }
+
+    /// 开放可答：完整表单。提交与保存在详情底栏，这里只负责选择。
+    private var answerForm: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
             VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("来源：Plus 执行会话 · 已等待 \(waitText)").font(.kpSmall).foregroundStyle(.secondary)
+                Text("等待你回答 · \(store.question.questions.count) 题").font(.kpTitle)
+                Text("来源：Plus 执行会话 · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
+                    .font(.kpSmall).foregroundStyle(.secondary)
                 if store.question.queued > 0 {
                     Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(.secondary)
-                }
-                if !store.question.answerable {
-                    Text("请在 Plus 中回答").font(.kpBody).foregroundStyle(.orange)
-                    Text(store.question.rejectionReason ?? store.question.detail ?? "此请求不符合本机回答规则，原始问题未裁剪为可答表单。")
-                        .font(.kpSmall).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }
             ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
@@ -1363,83 +1400,128 @@ private struct ExecutionAnswerCard: View {
                 }
                 if index < store.question.questions.count - 1 { Divider() }
             }
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Text(store.statusText).font(.kpBody).textSelection(.enabled)
-                    // Recreate selectable text when its status changes so macOS
-                    // accessibility does not retain the previous status label.
-                    .id(store.statusText)
-                if let detail = terminalReason ?? store.question.detail, store.question.answerable {
-                    Text(detail).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                if let error = store.error {
-                    Text(error).font(.kpSmall).foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                }
-                if let feedback = store.feedback { Text(feedback).font(.kpSmall).foregroundStyle(.secondary) }
-                if store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
-                    HStack(spacing: Spacing.m) {
-                        Button("重新核对") { run { await store.reconcile() } }.disabled(store.working || store.obsolete)
-                        if store.unknown {
-                            Button("使用相同答案重新提交") { confirmingRetry = true }.disabled(!store.canRetry)
-                        }
-                    }.font(.kpSmall)
-                }
-                if store.canDiscardUnsaved {
-                    Text("本机未保存的编辑保留在此。请先复制，再确认放弃；不会修改核心问题与历史。")
-                        .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: Spacing.m) {
-                        Button("复制原答案") { copyAnswers() }
-                        Button("放弃未保存的本机编辑", role: .destructive) { confirmingDiscard = true }
-                    }.font(.kpSmall)
-                }
-                if store.possiblyStale || store.obsolete {
-                    Button("刷新当前问题") { run { await store.reload() } }.font(.kpSmall).disabled(store.working)
-                }
-                if store.question.state == "open" && !store.question.observerAlive {
-                    HStack(spacing: Spacing.m) {
-                        Text("观察已中断").font(.kpSmall).foregroundStyle(.orange)
-                        Button("重新连接") { run { await store.reconnectObserver() } }
-                            .font(.kpSmall).disabled(store.working || store.obsolete)
-                    }
-                }
+        }
+    }
+
+    /// 已回答、已结束、不可答或保留草稿：一行状态加可展开的只读记录，不占用概览高度。
+    private var closedSummary: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text(summaryTitle).font(.kpBody).fontWeight(.semibold)
+            Text(store.statusText).font(.kpBody).textSelection(.enabled)
+                // Recreate selectable text when its status changes so macOS
+                // accessibility does not retain the previous status label.
+                .id(store.statusText)
+            Text(summaryMeta).font(.kpSmall).foregroundStyle(.secondary)
+            if let reason = closedReason {
+                Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
-            if store.question.state == "open" {
-                HStack(spacing: Spacing.m) {
-                    Button("保存草稿／稍后处理") { Task { _ = await store.saveNow() } }
-                        .disabled(store.inputsLocked || !store.dirty)
-                    Button("提交答案并继续") { run { await store.submit() } }
-                        .buttonStyle(.borderedProminent).disabled(!store.canSubmit)
-                    if store.working {
-                        ProgressView().controlSize(.small)
-                        Text(store.saving ? "正在保存…" : store.submitting ? "正在提交…" : "正在核对…")
-                            .font(.kpSmall).foregroundStyle(.secondary)
-                    }
-                }.font(.kpSmall)
-                HStack(spacing: Spacing.m) {
-                    Button("全部跳过并继续") { confirmingSkip = true }.disabled(store.inputsLocked)
-                    Button("停止本轮", role: .destructive) { confirmingStop = true }.disabled(!store.canStop)
-                }.font(.kpSmall)
+            DisclosureGroup(isExpanded: $showingRecord) {
+                recordList
+            } label: {
+                Text("查看问题与回答").font(.kpSmall).foregroundStyle(.secondary)
             }
         }
-        .padding(Spacing.m).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        .onDisappear { Task { if store.dirty && !store.inputsLocked { _ = await store.saveNow() } } }
-        .confirmationDialog("全部跳过并继续？", isPresented: $confirmingSkip, titleVisibility: .visible) {
-            Button("全部跳过并继续") { run { await store.submit(skipAll: true) } }
-            Button("取消", role: .cancel) {}
-        } message: { Text("跳过当前这份请求的所有问题，继续同一轮次；其它排队提问仍需处理。") }
-        .confirmationDialog("停止本轮？", isPresented: $confirmingStop, titleVisibility: .visible) {
-            Button("停止本轮", role: .destructive) { run { await store.stop() } }
-            Button("取消", role: .cancel) {}
-        } message: { Text("这会结束当前执行轮次。原问题、草稿和执行记录将保留。") }
-        .confirmationDialog("放弃未保存的本机编辑？", isPresented: $confirmingDiscard, titleVisibility: .visible) {
-            Button("放弃本机编辑", role: .destructive) { store.discardUnsavedEdits(); onRefreshDetail?() }
-            Button("取消", role: .cancel) {}
-        } message: { Text("只放弃这份问题尚未保存的本机输入。核心已经保存的问题、草稿、送达收据与历史保持不变。") }
-        .confirmationDialog("使用相同答案重新提交？", isPresented: $confirmingRetry, titleVisibility: .visible) {
-            Button("使用相同答案重新提交") { run { await store.submit(retry: true) } }
-            Button("取消", role: .cancel) {}
-        } message: { Text("原提交可能仍在处理中。本次仅重送冻结的相同答案，不能撤销原调用，也不会修改答案。") }
+    }
+
+    private var summaryTitle: String {
+        let count = store.question.questions.count
+        if store.obsolete { return "保留的未保存草稿 · \(count) 题" }
+        switch store.question.state {
+        case "open": return "等待你在 Plus 中回答 · \(count) 题"
+        case "answered": return "执行问题已回答 · \(count) 题"
+        default: return "执行问题已结束 · \(count) 题"
+        }
+    }
+
+    private var summaryMeta: String {
+        guard let closedAt = store.question.closedAt else { return "来源：Plus 执行会话 · 已等待 \(waitText)" }
+        return "结束于 \(TimeFormat.short(closedAt)) · 共等待 \(waitText)"
+    }
+
+    /// 不可答时说明原因；已结束的记录沿用核心 detail 或失败原因。
+    private var closedReason: String? {
+        if store.question.state == "open" && !store.question.answerable {
+            return store.question.rejectionReason ?? store.question.detail ?? "此请求不符合本机回答规则，原始问题未裁剪为可答表单。"
+        }
+        return terminalReason ?? store.question.detail
+    }
+
+    private var recordList: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(index + 1). \(question.title)").font(.kpSmall).fontWeight(.medium)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    Text(recordLine(for: question)).font(.kpBody).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            }
+            Button("复制原答案") { copyAnswers() }.font(.kpSmall)
+        }
+        .padding(.top, Spacing.s)
+    }
+
+    /// 送达、错误与本机草稿状态：只在有内容时出现，不占位。
+    private var statusDetails: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if isAnswering, store.statusText != "等待回答" {
+                Text(store.statusText).font(.kpBody).textSelection(.enabled)
+                    // Same accessibility refresh as the closed summary above.
+                    .id(store.statusText)
+            }
+            if isAnswering, let detail = terminalReason ?? store.question.detail {
+                Text(detail).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if store.working {
+                HStack(spacing: Spacing.s) {
+                    ProgressView().controlSize(.small)
+                    Text(store.saving ? "正在保存…" : store.submitting ? "正在提交…" : "正在核对…")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }
+            if let error = store.error {
+                Text(error).font(.kpSmall).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+            if let feedback = store.feedback {
+                Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
+            }
+            if !reconcileInBar, store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
+                Button("重新核对") { run { await store.reconcile() } }
+                    .font(.kpSmall).disabled(store.working || store.obsolete)
+            }
+            if store.unknown {
+                Button("使用相同答案重新提交") { confirmingRetry = true }
+                    .font(.kpSmall).disabled(!store.canRetry)
+            }
+            if store.canDiscardUnsaved {
+                Text("本机未保存的编辑保留在此。请先复制，再确认放弃；不会修改核心问题与历史。")
+                    .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Spacing.m) {
+                    Button("复制原答案") { copyAnswers() }
+                    Button("放弃未保存的本机编辑", role: .destructive) { confirmingDiscard = true }
+                }.font(.kpSmall)
+            }
+            if store.possiblyStale || store.obsolete {
+                Button("刷新当前问题") { run { await store.reload() } }.font(.kpSmall).disabled(store.working)
+            }
+            if store.question.state == "open" && !store.question.observerAlive {
+                HStack(spacing: Spacing.m) {
+                    Text("观察已中断").font(.kpSmall).foregroundStyle(.orange)
+                    Button("重新连接") { run { await store.reconnectObserver() } }
+                        .font(.kpSmall).disabled(store.working || store.obsolete)
+                }
+            }
+        }
+    }
+
+    private func recordLine(for question: ExecutionQuestionItem) -> String {
+        guard let answer = store.answer(question.id) else { return "未回答" }
+        if answer.skipped { return "已跳过" }
+        let selected = question.options.filter { answer.optionIds.contains($0.id) }.map(\.label)
+        let values = selected + (answer.text.isEmpty ? [] : [answer.text])
+        return values.isEmpty ? "未回答" : values.joined(separator: "、")
     }
 
     private func copyAnswers() {

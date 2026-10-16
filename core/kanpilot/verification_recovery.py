@@ -15,7 +15,8 @@ def candidate(conn, task):
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     return bool(db.task_is_active(task) and task["status"] == "needs_user"
                 and task["stage"] == "monitor"
-                and task["failure_code"] == "verification_unconfirmed"
+                and task["failure_code"] in ("verification_unconfirmed", "verification_environment_failure",
+                                             "verification_identity_unconfirmed")
                 and task["sent"] == 1 and task["send_state"] == "sent"
                 and task["plan_path"] and task["plan_sha256"]
                 and row is not None and row["save_state"] == "active"
@@ -143,19 +144,21 @@ def _read_evidence(conn, task, *, require_pass=True):
     if (declaration.get("plan_sha256") != task["plan_sha256"]
             or not parsed["ok"] or declaration.get("commands") != parsed.get("commands")):
         _conflict("当前计划缺少一致的固化 verify 命令声明")
-    # Goal reports and verification_override are deliberately never consulted.
-    result = verify_evidence.match_verification(declaration["commands"],
-        verify_evidence.extract_command_results(dsh_events.to_messages(events)))
-    receipt_record = db.task_extra(task).get("verification_checks") or {}
-    if require_pass and (receipt_record.get("binding") or {}).get("execution_run_id") == task["run_id"]:
-        from . import verification_checks
-        receipt = verification_checks.valid_receipt(conn, task)
-        if receipt is not None:
-            result = receipt
-        else:
-            _conflict("本轮逐条验证尚未全部通过，未恢复推进")
+    # Only Plus tool results from this execution window can establish a pass.
+    # Historical core-run receipts and manual overrides are audit data only.
+    messages = dsh_events.to_messages(events)
+    if job.get("verification_evidence_version") == 1:
+        result = verify_evidence.match_execution_verification(
+            declaration["commands"], messages, job["turn_id"])
+    else:
+        selected, window = verify_evidence.execution_window(messages, job["turn_id"])
+        result = verify_evidence.match_verification(
+            declaration["commands"], verify_evidence.extract_command_results(selected))
+        result.update(window)
+        if window.get("window_basis") == "unscoped_goal_window":
+            result.update(ok=False, missing=list(declaration["commands"]))
     if require_pass and not result["ok"]:
-        _conflict("本轮真实验证命令仍缺失、失败或结果未知，未恢复推进")
+        _conflict("本轮 Plus 验证命令仍缺失、失败或结果未知；请让 Plus 重新执行并验证，未恢复推进")
     try:
         if any(util.sha256_file(Path(path)) != digest for path, digest in hashes.items()):
             _conflict("读取期间本机执行证据或计划文件已变化")

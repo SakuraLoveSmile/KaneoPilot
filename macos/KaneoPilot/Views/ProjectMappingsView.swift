@@ -716,13 +716,13 @@ private struct ProjectEngineEditor: View {
                 if mode == "live", item.engineMode != "live" { confirmingLive = true }
                 else { Task { await save("set-project-engine-mode", field: "engine_mode", value: mode) } }
             }
-            Text("验证环境（JSON 字符串字典）").font(.kpBody)
+            Text("历史兼容验证环境（JSON 字符串字典）").font(.kpBody)
             TextEditor(text: $verifyJSON).font(.system(size: 13, design: .monospaced))
                 .frame(minHeight: 80, maxHeight: 120)
                 .accessibilityLabel("项目 verify_env")
-            Text("例如 {\"PATH\":\"/usr/local/bin:/usr/bin:/bin\"}。凭据放在凭据文件；TOKEN / SECRET / AUTHORIZATION 等键会被核心拒绝。")
+            Text("此配置仅为历史兼容保留，不用于当前 Plus 验证；验证环境由 Plus 执行端管理。凭据放在凭据文件；TOKEN / SECRET / AUTHORIZATION 等键会被核心拒绝。")
                 .font(.kpSmall).foregroundStyle(.secondary)
-            Button("保存验证环境") {
+            Button("保存历史兼容配置") {
                 do {
                     guard let data = verifyJSON.data(using: .utf8),
                           let object = try JSONSerialization.jsonObject(with: data) as? [String: String] else {

@@ -24,13 +24,15 @@ enum TaskDetailTab: String, CaseIterable, Identifiable {
 
 // MARK: - 计划阅读页（ui-spec §4.8 / protocol §5.23.1，T2）
 
-/// 计划页：固定头部（标题独占首行 + 元数据区 + 独立操作行）+
+/// 计划页：固定头部（可选标题行 + 元数据区 + 独立操作行）+
 /// 渲染/原文双模式正文。数据源 `get-plan`（携带当前视图 plan_sha256
 /// 做 expected 核验）；正文只读，核验失败不展示旧正文。
 struct PlanReaderView: View {
     let taskID: String
     /// 当前 get-task 详情（预期哈希、计划路径、状态行）。加载期间可为 nil。
     let detail: TaskDetail?
+    /// 父详情隐藏顶栏时为 true：计划页补回标题与「待确认执行」状态，与顶栏只显示一处。
+    var showsHeaderInfo: Bool = true
 
     @EnvironmentObject private var model: AppViewModel
 
@@ -87,17 +89,19 @@ struct PlanReaderView: View {
 
     // MARK: 固定头部（不随正文滚动）
 
-    /// 三行结构（§4.8）：标题独占首行（≤2 行，可选中）→ 元数据区 →
+    /// 结构（§4.8）：标题行（仅父详情隐藏顶栏时出现，≤2 行，可选中）→ 元数据区 →
     /// 独立操作行（模式分段 + 打开/定位按钮，窄时换行）。
     /// 操作行与元数据分行，右侧不再被固定宽度控件挤压。
     private var header: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            Text(plan?.title ?? detail?.title ?? taskID)
-                .font(.kpTitle)
-                .lineLimit(2)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityAddTraits(.isHeader)
+            if showsHeaderInfo {
+                Text(plan?.title ?? detail?.title ?? taskID)
+                    .font(.kpTitle)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+            }
 
             metadata
 
@@ -113,7 +117,7 @@ struct PlanReaderView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: Spacing.m) {
                 // §4.8/§5：plan_execution_hold → 「待确认执行」图标+文字。
-                if detail?.planExecutionHold == true {
+                if detail?.planExecutionHold == true, showsHeaderInfo {
                     StatusBadge(status: "待确认执行")
                 }
                 if let kind = plan?.planKind ?? detail?.planKind {

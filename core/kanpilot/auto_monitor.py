@@ -69,19 +69,22 @@ def _observe(controller, task, detail):
                            "continue_goal": bool(automation) and not automation.get("manual_takeover", False)})
 
 
-def _verification(task, messages, execution_turn_id=None):
+def _verification(task, messages, execution_turn_id=None, evidence_version=None):
     extra = task.get("extra") or {}
     if (extra.get("verification_override") or {}).get("execution_run_id") == task["run_id"]:
         return {"ok": True}
     declaration = extra.get("plan_verify") or {}
     if declaration.get("plan_sha256") != task.get("plan_sha256") or not declaration.get("commands"):
         return {"ok": False, "note": declaration.get("error") or "计划缺少可信 verify 命令声明"}
-    messages, window = verify_evidence.execution_window(messages, execution_turn_id)
-    if window["window_basis"] == "unscoped_goal_window":
-        return dict(window, ok=False, note="Goal 执行证据窗口无法确认：缺少可信执行轮次或起点（whole_round）")
-    result = verify_evidence.match_verification(declaration["commands"],
-                                               verify_evidence.extract_command_results(messages))
-    result.update(window)
+    if evidence_version == 1:
+        result = verify_evidence.match_execution_verification(declaration["commands"], messages, execution_turn_id)
+    else:
+        messages, window = verify_evidence.execution_window(messages, execution_turn_id)
+        if window["window_basis"] == "unscoped_goal_window":
+            return dict(window, ok=False, note="Goal 执行证据窗口无法确认：缺少可信执行轮次或起点（whole_round）")
+        result = verify_evidence.match_verification(declaration["commands"],
+                                                   verify_evidence.extract_command_results(messages))
+        result.update(window)
     result["note"] = "；".join(["缺失：" + command for command in result["missing"]] + [
         ("证据无法确认：" + item["command"] + "（缺少独立退出码或命令组合不受支持）"
          if item["exit_code"] is None else
@@ -115,7 +118,7 @@ def _complete(controller, task, detail, expected, messages):
         if mode == "shadow":
             budget = min(budget, 30, int((controller.deadline - controller.clock()) / 2))
         if budget <= 0 and mode == "live":
-            raise util.KanpilotError("observation_blocked", "核心验证剩余时限不足")
+            raise util.KanpilotError("observation_blocked", "Plus 证据核验剩余时限不足")
         if budget <= 0:
             controller.log("shadow-verdict", "budget_exhausted")
             result = {"verification_ok": False}
@@ -133,20 +136,14 @@ def _complete(controller, task, detail, expected, messages):
                 result = {"verification_ok": False}
         if mode == "live":
             if result.get("verification_ok") is not True:
-                code = ("verification_identity_unconfirmed" if result.get("kind") == "unconfirmed" else
-                        "verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed")
+                code = (result.get("failure_code") or
+                        ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
                 controller.report("needs_user", failure_code=code,
-                                  note=result.get("detail") or "核心验证结果未通过")
+                                  note=result.get("detail") or "Plus 验证证据未通过核验")
                 return
             _finish_complete(controller, task, detail, expected)
             return
-    verification = _verification(task, messages, detail.get("turn_id"))
-    checks = (task.get("extra") or {}).get("verification_checks") or {}
-    if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
-        receipt = controller.call("get-verification-check-status", {
-            "task_id": task["task_id"], "operation_id": checks["operation_id"]})
-        verification = {"ok": receipt.get("state") == "completed" and receipt.get("verification_ok") is True,
-                        "note": receipt.get("detail") or "逐条验证尚未完成或证据已变化"}
+    verification = _verification(task, messages, detail.get("turn_id"), detail.get("verification_evidence_version"))
     if not verification["ok"]:
         controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"])
         return
@@ -204,13 +201,13 @@ def _monitor(controller):
             raise util.KanpilotError("execution_failed", "执行会话身份不符")
         observed = _observe(controller, task, detail)
         if observed:
-            if observed.get("reopened"):
+            if observed.get("reopened") and observed.get("status") == "observing":
                 _running(controller, "观察者已续接，本轮仍在运行")
                 return
             if observed.get("status") in ("deferred", "exited", "starting"):
                 controller.report("failed", note="observation_blocked")
                 return
-            if observed.get("status") in ("observing", "finished", "settled"):
+            if observed.get("status") in ("observing", "finished", "settled", "finalizing"):
                 detail = _get_session(controller, task).get("round_detail")
                 if not isinstance(detail, dict):
                     controller.report("failed", note="observation_blocked")
@@ -218,6 +215,9 @@ def _monitor(controller):
             else:
                 controller.report("failed", note="observation_blocked")
                 return
+        if detail.get("observation_finalizing") is True and detail.get("observer_alive") is True:
+            _running(controller, "执行已完成，正在收尾")
+            return
         terminal = detail.get("terminal") or {}
         terminal_detail = "；".join(str(value) for value in
                                    (terminal.get("detail"), terminal.get("reason"), detail.get("detail")) if value)
@@ -233,8 +233,7 @@ def _monitor(controller):
         if failure:
             controller.report("needs_user", failure_code="execution_failed", note=terminal_detail or "执行轮次明确失败")
             return
-        # live verdict is independent of transcript availability and tool exits.
-        messages = [] if _engine_mode(controller, task) == "live" else _read_messages(controller, task)
+        messages = _read_messages(controller, task)
         if outcome == "completed" and detail.get("run_status") == "finished":
             if type(detail.get("exit_code")) is not int or detail["exit_code"] != 0:
                 controller.report("needs_user", failure_code="execution_failed", note="执行退出码不可确认")

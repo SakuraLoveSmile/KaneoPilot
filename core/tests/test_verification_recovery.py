@@ -321,3 +321,56 @@ class TestVerificationRecovery(KanpilotTestCase):
         self.assertEqual(before, self.state())
         self.mutate(run_id="new-run")
         self.reject()
+
+
+    def test_historical_environment_and_identity_blocks_can_only_recheck_original_run(self):
+        for code in ("verification_environment_failure", "verification_identity_unconfirmed"):
+            self.mutate(failure_code=code)
+            self.assertIn("reverify", self.task(self.task_id)["allowed_actions"])
+            if code == "verification_identity_unconfirmed":
+                self.assertNotIn("retry_verification", self.task(self.task_id)["allowed_actions"])
+        before = self.state()
+        result = self.call("resolve", self.payload)
+        self.assertEqual(result["request"]["kind"], "monitor")
+        self.assertEqual(before["round"], self.state()["round"])
+
+    def test_old_environment_resume_returns_to_monitor_without_creating_execution(self):
+        self.mutate(failure_code="verification_environment_failure")
+        result = self.call("resolve", {"task_id": self.task_id, "action": "resume"})
+        self.assertEqual(result["request"]["kind"], "monitor")
+        self.assertEqual(self.state()["task"]["run_id"], self.run_id)
+
+    def test_historical_core_pass_cannot_override_failed_plus_results(self):
+        conn = db.connect(self.db_path)
+        db.set_extra(conn, db.require_task(conn, self.task_id), util.now_iso(), verification_checks={
+            "state": "completed", "binding": {"execution_run_id": self.run_id},
+            "receipt": {"verification_ok": True}})
+        conn.close()
+        self.events[1]["exit_code"] = 1
+        self.write_files()
+        self.reject()
+
+    def test_goal_drafting_results_cannot_recover_execution_window(self):
+        self.events = [self.events[0], self.events[1], self.events[2],
+            {"seq": 4, "type": "system", "content": "goal_approved: execution started",
+             "execution_turn_id": "execution-turn", "execution_started_at": "2026-10-16T01:00:00Z"},
+            {"seq": 5, "type": "terminal", "outcome": "completed"}]
+        self.write_files()
+        self.reject()
+
+
+    def test_versioned_plus_evidence_uses_current_turn_and_preserves_command_results(self):
+        self.job["verification_evidence_version"] = 1
+        for event in self.events[1:-1]:
+            event["turn_id"] = "execution-turn"
+        self.write_files()
+        conn = db.connect(self.db_path)
+        try:
+            _, _, result = verification_recovery._read_evidence(conn, db.require_task(conn, self.task_id), require_pass=False)
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["command_results"]), 2)
+        finally:
+            conn.close()
+        self.events[1]["turn_id"] = "drafting-turn"
+        self.write_files()
+        self.reject()

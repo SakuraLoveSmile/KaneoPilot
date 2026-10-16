@@ -265,7 +265,7 @@ DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "revert_engine_fix",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "retry_verification", "revert_engine_fix",
 )
 
 ERROR_CODES = (
@@ -473,12 +473,15 @@ DISPATCH_INSTRUCTION_BRANCH = (
     "提交与推送由调度台完成。每条 verify 命令分别使用一次终端工具调用，直接记录独立退出码；"
     "需要 PATH 时只设置 PATH 后运行这一条检查，不将多项检查、echo 或打印退出码合并。最终答复逐条列出命令与退出码。"
 )
-DISPATCH_INSTRUCTION_BRANCH_LIVE = (
-    "任务标识：{marker}。当前目录 {worktree} 是本任务专用分支 {branch} 的工作树，直接在这里完整执行{plan_ref}。"
-    "可以按计划使用 subagent，但所有改动必须落在本工作树；不要新建 worktree 或分支，不要 commit、push、reset、stash、rebase 或切换分支；"
-    "提交与推送由调度台完成。按计划自检并报告结果；调度台核心会在本工作树独立运行冻结计划中的 verify 命令，"
-    "以核心退出码和有效改动判定通过。最终答复列出完成项与剩余问题。"
+# 所有引擎模式由执行端完成验证，调度台仅核对真实工具结果。
+DISPATCH_INSTRUCTION_BRANCH_LIVE = DISPATCH_INSTRUCTION_BRANCH
+EXECUTION_VERIFICATION_INSTRUCTION = (
+    "验证由你在当前任务工作树执行，调度台不会替你运行检查。"
+    "完成全部代码修改、终端检查和 git status/diff 等状态查看后，最后逐条执行计划 verify 块的命令，每条使用独立终端工具调用并保留真实退出码；"
+    "不要合并多项检查或用 echo/文字总结替代工具结果。验证后只允许 Read/Grep/Glob 只读工具和最终文字；任何新的非验证终端调用（包括 git status/diff）、未知工具或子任务都会使证据失效，必须最后重新逐条验证。"
+    "环境缺失或失败请如实报告，最终答复逐条列出命令、退出码与剩余问题。"
 )
+
 AUTOMATION_FAILURE_STAGES = {
     "verification_environment_failure": "monitor", "fix_branch_unavailable": "monitor",
     "verification_unconfirmed": "monitor", "branch_exists": "plan", "delivery_base_unknown": "plan",

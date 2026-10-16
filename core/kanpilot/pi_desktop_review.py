@@ -345,52 +345,25 @@ def collect_materials(*, db_path, conn, materials: Path, task: dict,
 
 
 def _collect_core_verification(conn, task, execution_run_id, materials):
-    """Every Review backend receives the same authenticated independent checks."""
-    from . import verification_checks
+    """Keep retired local checks as history; Plus events are current evidence."""
     if conn is None:
-        # 无 DB 连接（只读材料收集的调用方未提供 conn）：无从读取核心验证回执，
-        # 视为本轮无核心验证材料，返回空而非崩溃。
         return {}
     current = db.require_task(conn, task["task_id"])
     record = db.task_extra(current).get("verification_checks") or {}
     if (record.get("binding") or {}).get("execution_run_id") != execution_run_id:
         return {}
-    if (current["run_id"] != execution_run_id
-            or current["plan_sha256"] != task.get("plan_sha256")):
-        raise util.KanpilotError("review_blocked", "核心验证材料的执行轮次或计划身份已变化")
-    try:
-        if verification_checks.valid_receipt(conn, current) is None:
-            raise util.KanpilotError("review_blocked", "本轮核心逐条验证尚未全部通过")
-        receipt = record["receipt"]
-        files, outputs = {}, []
-        for index, check in enumerate(receipt["checks"], 1):
-            source = util.inside(Path(check["output_path"]), Path(receipt["output_root"]), "核心验证输出")
-            target = materials / f"core-verification-check-{index:02d}.log"
-            shutil.copyfile(source, target)
-            if (util.sha256_file(target) != check["output_sha256"]
-                    or util.sha256_file(source) != check["output_sha256"]):
-                raise util.KanpilotError("review_blocked", "核心验证输出在材料复制期间已变化")
-            files[target.name] = str(target)
-            outputs.append({"command": check["command"], "exit_code": check["exit_code"],
-                            "material": target.name, "sha256": check["output_sha256"]})
-        manifest = materials / "core-verification-checks.json"
-        _write_text(manifest, json.dumps({
-            "source": "KaneoPilot core independent verification",
-            "operation_id": record["operation_id"], "receipt": receipt, "outputs": outputs,
-            "note": "这些检查由核心在本执行工作树中逐条运行，退出码直接来自受控进程，"
-                    "已核验当前执行、计划、源码及输出身份。execution-events.jsonl 中原组合脚本"
-                    "属于历史执行证据，其未知独立退出码由此回执和完整输出补充。"
-                    "这些命令结果仅证明所列检查；不替代原计划要求的原生、设备或其他验收，"
-                    "也不直接认定代码无缺陷或评审通过。",
-        }, ensure_ascii=False, sort_keys=True, indent=2))
-        files[manifest.name] = str(manifest)
-        refreshed = db.require_task(conn, task["task_id"])
-        if (db.task_extra(refreshed).get("verification_checks") != record
-                or verification_checks.valid_receipt(conn, refreshed) is None):
-            raise util.KanpilotError("review_blocked", "准备期间核心验证回执或执行成果已变化")
-        return files
-    except util.KanpilotError as exc:
-        raise util.KanpilotError("review_blocked", "核心验证材料无法核验：" + exc.message) from exc
+    # Do not re-run, validate or promote a historical local result over the
+    # current execution's Plus evidence. Missing old output is not a blocker.
+    target = materials / "historical-core-verification.json"
+    _write_text(target, json.dumps({
+        "source": "historical_pilot_verification",
+        "operation_id": record.get("operation_id"),
+        "state": record.get("state"),
+        "verification_ok": (record.get("receipt") or {}).get("verification_ok"),
+        "note": "历史 Pilot 本机验证记录，仅供审计；不代表当前 Plus 验证结果，"
+                "不作为本轮完成或 Review 通过依据。当前验证以 execution-events.jsonl 的 Plus 工具结果为准。",
+    }, ensure_ascii=False, sort_keys=True, indent=2))
+    return {target.name: str(target)}
 
 
 def _collect_materials(*, db_path, conn, materials: Path, task: dict,

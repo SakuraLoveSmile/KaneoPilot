@@ -191,15 +191,17 @@ def _require_command_verification_gate(ctx, payload: dict, task, job: dict, run_
     if (declaration.get("plan_sha256") != task["plan_sha256"]
             or not declaration.get("commands")):
         raise util.KanpilotError("conflict", "计划缺少本轮可信 verify 命令声明")
-    checks = extra.get("verification_checks") or {}
-    if (checks.get("binding") or {}).get("execution_run_id") == task["run_id"]:
-        if not verified_receipt or verified_receipt.get("matched") != declaration["commands"]:
-            raise util.KanpilotError("conflict", "本轮核心逐条验证回执未通过核验，不能进入评审")
-        return
-    result = verify_evidence.match_verification(
-        declaration["commands"],
-        verify_evidence.extract_command_results(dsh_events.to_messages(events)),
-    )
+    # Historical Pilot-run receipts never override Plus command results.
+    messages = dsh_events.to_messages(events)
+    if job.get("verification_evidence_version") == 1:
+        result = verify_evidence.match_execution_verification(
+            declaration["commands"], messages, job.get("turn_id"))
+    else:
+        messages, window = verify_evidence.execution_window(messages, job.get("turn_id"))
+        result = verify_evidence.match_verification(
+            declaration["commands"], verify_evidence.extract_command_results(messages))
+        if window["window_basis"] == "unscoped_goal_window":
+            result["ok"] = False
     if not result["ok"]:
         raise util.KanpilotError("conflict", "本轮验证命令缺失或失败，不能进入评审")
 
@@ -397,10 +399,9 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
 
     actor = payload.get("run_id") or "executor"
     if target == "in-review" and expected == "in-progress":
-        # Core rerun receipts bind actual source bytes as well as the original
-        # terminal logs. Git/process/file reads must precede the writer lock.
+        # Plus evidence receipts bind source bytes and the original
+        # terminal tool results. Git/process/file reads must precede the writer lock.
         current = db.require_task(conn, payload["task_id"])
-        checks = db.task_extra(current).get("verification_checks") or {}
         from . import engine_claim_scope, git_delivery
         if engine_claim_scope.effective_mode(conn, current["project_id"]) == "live":
             from .engine import verdict
@@ -412,6 +413,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             branch_review = core.requires_branch_review(current)
             comparable = dict(actual, head_sha=frozen.get("head_sha")) if branch_review else actual
             if (receipt.get("verification_ok") is not True
+                    or not verdict.receipt_evidence_current(conn, current, receipt)
                     or receipt.get("execution_run_id") != current["run_id"]
                     or receipt.get("plan_sha256") != current["plan_sha256"]
                     or comparable != frozen
@@ -422,12 +424,6 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             verified_receipt = {"engine_owned": True, "receipt": receipt}
             receipt_snapshot = receipt_identity(current)
             _require_goal_gate(ctx, payload, current, verified_receipt)
-        elif current["run_id"] and (checks.get("binding") or {}).get("execution_run_id") == current["run_id"]:
-            from . import verification_checks
-            receipt_snapshot = receipt_identity(current)
-            verified_receipt = verification_checks.valid_receipt(conn, current)
-            if verified_receipt is None:
-                raise util.KanpilotError("conflict", "本轮核心逐条验证尚未通过，不能进入评审")
     if target == "in-review":
         core.require_committed_review(db.require_task(conn, payload["task_id"]))
     # Phase 1 (txn): local checks + acquire lifecycle serial.

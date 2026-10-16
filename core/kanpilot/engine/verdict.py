@@ -1,53 +1,13 @@
-"""Engine-owned verdict (protocol §5.27 / target A10, §5.18.6 verify env).
+"""Read-only verdict over Plus command results and the registered source tree.
 
-The core — not a model transcript — decides the verdict:
-
-1. **effective diff** — the worktree's changed files *excluding* ``.pi/**``
-   (the engine/plan bookkeeping tree). An empty effective diff is a no-op
-   execution (空转) → quality ladder (阶梯 3).
-2. **core-run verify** — every command the plan declared (``plan_verify``) is
-   run by the core in the user's **login shell** with the project ``verify_env``
-   injected and a configurable timeout. Plus transcripts are UI-only.
-
-Shell choice (A4 spike ③, ``docs/evidence/spike-verify-env-20261010.md``): the
-default is ``$SHELL -l -c`` (the user's login shell — zsh here, whose
-``~/.zprofile`` carries homebrew/pyenv PATH), **not** ``/bin/bash -l -c`` which
-misses that PATH and yields ``rc=127`` for ``gh``/``pytest``. Override with
-``KANPILOT_VERIFY_SHELL``. When ``verify_env`` has no ``PATH`` the login shell's
-``PATH`` is probed once and injected (never hardcoded ``/usr/bin:/bin``).
-
-``rc=127`` / "command not found" is attributed as an **environment failure**
-(阶梯 2), separate from a verify failure (阶梯 3); :func:`run_command` reports
-``command_not_found`` and :func:`evaluate` surfaces ``environment_failure`` so
-the caller dispatches to the right ladder.
-
-This module does **not** modify :mod:`kanpilot.verification_checks`; it reuses
-its data sources (``plan_verify`` commands, ``round_store`` worktree) and check
-shape, replacing only *how the shell is started* and the *diff criterion*. The
-verdict receipt is recorded by the ``engine-verdict`` command handler.
-
-Receipt decision (intentional — do NOT "fix" by hard-wiring
-``verification_checks``): the engine records its verdict in
-``extra.engine_verdict`` rather than reusing ``verification_checks``' receipt.
-That receipt's validation (per-command output-file sha + worktree binding
-freeze + ``verification_recovery.recover``) is built for the interactive,
-user-driven rerun path and does not map onto the engine's synchronous in-loop
-run; forcing it would risk corrupting the interactive recover path for marginal
-gain. A10's acceptance — "the core decides the verdict, the core runs the
-verify commands, and the Plus transcript never decides or is persisted" — is
-fully met by ``extra.engine_verdict``.
-
-Spec gap resolved: ``verify_env`` now read from project mapping
-``items[project_id].verify_env`` (dict, default empty) per protocol §5.18.6.
+Pilot never runs plan verification.  It checks trusted local Plus evidence,
+source identity and delivery binding before permitting completion.
 """
 from __future__ import annotations
 
 import os
-import signal
-import subprocess
-import tempfile
-import time
-import shutil
+import json
+import shlex
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -56,37 +16,11 @@ from .. import core, db, git_delivery, project_config, round_store, util, verify
 
 # .pi/** is engine/plan bookkeeping; it never counts as task work.
 PI_EXCLUDE_PREFIX = ".pi/"
-DEFAULT_VERIFY_TIMEOUT = 600
-# A4 spike ③: the user's login shell (zsh) sources the PATH that has gh/pytest;
-# /bin/bash -l misses it. Used only when neither KANPILOT_VERIFY_SHELL nor $SHELL
-# is set.
-DEFAULT_VERIFY_SHELL_BINARY = "/bin/zsh"
 _OUTPUT_TAIL_BYTES = 4000
 
 
-def verify_shell() -> List[str]:
-    """Login-shell argv prefix ``[shell, '-l', '-c']`` (A4 spike ③).
-
-    ``shell = KANPILOT_VERIFY_SHELL || $SHELL || /bin/zsh``.
-    """
-    binary = (os.environ.get("KANPILOT_VERIFY_SHELL", "").strip()
-              or os.environ.get("SHELL", "").strip()
-              or DEFAULT_VERIFY_SHELL_BINARY)
-    return [binary, "-l", "-c"]
-
-
-def verify_timeout() -> int:
-    """Per-command verify timeout in seconds (KANPILOT_VERIFY_TIMEOUT)."""
-    raw = os.environ.get("KANPILOT_VERIFY_TIMEOUT", "")
-    try:
-        value = int(raw) if raw else DEFAULT_VERIFY_TIMEOUT
-    except ValueError:
-        value = DEFAULT_VERIFY_TIMEOUT
-    return min(value, DEFAULT_VERIFY_TIMEOUT) if value > 0 else DEFAULT_VERIFY_TIMEOUT
-
-
 def project_verify_env(conn, project_id) -> Dict[str, str]:
-    """Project verify_env dict injected into the verify shell (default {})."""
+    """Read historical project configuration; never used by Plus verdicts."""
     _, _, items, _ = project_config.load_raw_mappings(conn)
     env = (items.get(project_id) or {}).get("verify_env")
     if not isinstance(env, dict):
@@ -111,29 +45,6 @@ def effective_changes(worktree, *, exclude_prefix: str = PI_EXCLUDE_PREFIX, dead
 
 def has_effective_changes(worktree, **kw) -> bool:
     return bool(effective_changes(worktree, **kw))
-
-
-def login_shell_path(*, timeout=60, cwd=None) -> Optional[str]:
-    """PATH as seen by the login shell (probed once; A4 spike ③).
-
-    Returns ``None`` when the login shell cannot be probed; callers then keep
-    the inherited PATH. Never hardcodes ``/usr/bin:/bin``.
-    """
-    try:
-        result = run_command('printf %s "$PATH"', cwd=cwd, timeout=timeout)
-        if result["exit_code"] == 0:
-            return result["output_tail"].strip() or None
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return None
-
-
-def _decode(data) -> str:
-    if data is None:
-        return ""
-    if isinstance(data, bytes):
-        return data.decode("utf-8", errors="replace")
-    return str(data)
 
 
 def _command_not_found(code, tail: str) -> bool:
@@ -178,101 +89,21 @@ def environment_reasons(checks) -> List[str]:
 
 
 def environment_detail(reasons) -> str:
-    hints = {"command_not_found": "验证命令不存在，请检查 PATH 与工具安装",
-             "jdk_version": "Java 版本不符合要求，请在 verify_env 配置 JAVA_HOME",
-             "android_sdk_missing": "Android SDK 未就绪，请在 verify_env 配置 ANDROID_HOME",
-             "no_connected_device": "没有可用的已连接设备，请连接并授权测试设备"}
+    hints = {"command_not_found": "Plus 验证命令不存在，请检查 Plus 执行环境的 PATH 与工具安装",
+             "jdk_version": "Plus 使用的 Java 版本不符合要求，请配置 Plus 执行环境的 JAVA_HOME",
+             "android_sdk_missing": "Plus 的 Android SDK 未就绪，请配置 Plus 执行环境的 ANDROID_HOME",
+             "no_connected_device": "Plus 没有可用的已连接设备，请连接并授权测试设备"}
     return "验证环境未就绪：" + "；".join(hints[reason] for reason in reasons)
 
 
-def run_command(command: str, *, cwd, env: Optional[Dict[str, str]] = None,
-                timeout: Optional[int] = None) -> dict:
-    """Run one verify command in the login shell; return an independent check.
-
-    ``env`` is merged onto the inherited environment. ``command_not_found``
-    flags rc=127 / "command not found" (environment failure, ladder 2).
-    """
-    timeout = min(timeout if timeout is not None else verify_timeout(), DEFAULT_VERIFY_TIMEOUT)
-    child = dict(os.environ)
-    if env:
-        child.update({str(k): str(v) for k, v in env.items()})
-    shell = verify_shell()
-    started = util.now_iso()
-    timed_out, code, tail, detail, launch_failed = False, None, "", None, False
-    from .. import verification_redaction
-    secrets = verification_redaction.values(child, (env or {}).keys())
-    try:
-        # File-backed capture bounds memory and kills the entire process group,
-        # including a shell's background grandchildren, on every exit path.
-        with tempfile.TemporaryFile() as output:
-            proc = subprocess.Popen(shell + [command], cwd=str(cwd) if cwd else None, env=child,
-                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                code = proc.wait(timeout=max(0.001, timeout))
-            except subprocess.TimeoutExpired:
-                timed_out, detail = True, "验证命令超时，未认定通过"
-            finally:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                proc.wait()
-            output.seek(0, os.SEEK_END)
-            output.seek(max(0, output.tell() - _OUTPUT_TAIL_BYTES - max((len(s.encode()) for s in secrets), default=0)))
-            tail = _decode(output.read())
-    except OSError as exc:
-        launch_failed = True
-        detail = "验证命令无法启动：" + str(exc)
-    command_not_found = not timed_out and (launch_failed or (code != 0 and _command_not_found(code, tail)))
-    reason = environment_reason({"exit_code": code, "timed_out": timed_out,
-                                 "command_not_found": command_not_found, "output_tail": tail})
-    check = {"command": verification_redaction.redact(command, secrets), "exit_code": code, "timed_out": timed_out,
-            "command_not_found": command_not_found, "environment_reason": reason,
-            "detail": verification_redaction.redact(detail, secrets), "started_at": started, "finished_at": util.now_iso(),
-            "output_tail": verification_redaction.redact(tail, secrets)[-_OUTPUT_TAIL_BYTES:]}
-    return check
+def run_command(*args, **kwargs):
+    """Retired compatibility entry point: Pilot must never execute verification."""
+    raise util.KanpilotError("local_verification_disabled", "验证由 Plus 执行；Pilot 只核对工具证据")
 
 
-def run_verify_commands(commands, *, cwd, verify_env=None, timeout=None,
-                        deadline=None, heartbeat=None) -> List[dict]:
-    """Run all verify commands; probe+inject the login-shell PATH when verify_env
-    does not set PATH (A4 spike ③)."""
-    env = dict(verify_env or {})
-    if "PATH" not in env:
-        remaining = deadline - time.monotonic() if deadline else 60
-        probed = login_shell_path(timeout=min(60, max(0.001, remaining)), cwd=cwd)
-        if probed:
-            env["PATH"] = probed
-    checks = []
-    for command in commands or []:
-        if heartbeat:
-            heartbeat()
-        remaining = deadline - time.monotonic() if deadline else DEFAULT_VERIFY_TIMEOUT
-        if remaining <= 0:
-            checks.append({"command": util.redact(command), "exit_code": None, "timed_out": True,
-                           "command_not_found": False, "environment_reason": None,
-                           "detail": "整组验证时限已用尽", "output_tail": ""})
-            break
-        checks.append(run_command(command, cwd=cwd, env=env,
-                                  timeout=min(timeout or verify_timeout(), remaining)))
-    return checks
-
-
-def evaluate(commands, worktree, *, verify_env=None, timeout=None,
-             exclude_prefix: str = PI_EXCLUDE_PREFIX, deadline=None, heartbeat=None) -> dict:
-    """Core verdict: non-empty effective diff AND every verify command exits 0.
-
-    ``environment_failure`` (any rc=127 / command-not-found) is a ladder-2
-    environment problem, distinct from a ladder-3 quality verify failure.
-    """
-    commands = list(commands or [])
-    changes = effective_changes(worktree, exclude_prefix=exclude_prefix, deadline=deadline, heartbeat=heartbeat)
-    empty_diff = not changes
-    checks: List[dict] = []
-    if not empty_diff:
-        checks = run_verify_commands(commands, cwd=worktree, verify_env=verify_env,
-                                     timeout=timeout, deadline=deadline, heartbeat=heartbeat)
-    return _check_result(commands, changes, checks)
+def run_verify_commands(*args, **kwargs):
+    """Retired compatibility entry point; retained to fail closed for old callers."""
+    return run_command(*args, **kwargs)
 
 
 def _check_result(commands, changes, checks):
@@ -351,77 +182,172 @@ def binding(conn, task, *, allow_core_commit=False, deadline=None, heartbeat=Non
         raise util.KanpilotError("verification_identity_unconfirmed", "计划或执行工作树不可确认：" + util.redact(str(exc))) from exc
 
 
+def _read_plus_evidence(conn, task, *, deadline=None, heartbeat=None):
+    from .. import verification_recovery
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        evidence = verification_recovery._read_evidence(conn, task, require_pass=False)
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        # A finished local job remains historical once its Plus session has a
+        # new turn. Query only status/turn; never send a prompt or run a model.
+        verification_recovery._require_live_terminal(evidence[1])
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        return evidence
+    except util.KanpilotError as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", exc.message) from exc
+
+
+def _evidence_unchanged(hashes):
+    try:
+        return bool(hashes) and all(util.sha256_file(Path(path)) == digest for path, digest in hashes.items())
+    except OSError:
+        return False
+
+
+def _require_snapshot(job, source_sha256):
+    if (type(job.get("verification_evidence_version")) is not int
+            or job["verification_evidence_version"] != 1
+            or not job.get("verification_source_sha256")):
+        raise util.KanpilotError("verification_unconfirmed",
+            "Plus 验证缺少源码快照；请通过新的执行轮次补齐验证证据")
+    if not source_sha256 or job["verification_source_sha256"] != source_sha256:
+        raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证完成后源码已变化，不能沿用旧验证")
+
+
+def receipt_evidence_current(conn, task, receipt, *, deadline=None, heartbeat=None):
+    """Recheck receipt evidence on retries; historical local receipts never pass."""
+    if receipt.get("evidence_source") != "plus_tool_results":
+        return False
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        hashes, job, result = _read_plus_evidence(conn, task, deadline=deadline, heartbeat=heartbeat)
+        _require_snapshot(job, (receipt.get("binding") or {}).get("source_sha256"))
+        return (hashes == receipt.get("evidence_sha256")
+                and job.get("turn_id") == receipt.get("execution_turn_id")
+                and _evidence_unchanged(hashes)
+                and (receipt.get("verification_ok") is not True or result.get("ok") is True))
+    except (util.KanpilotError, OSError, ValueError, TypeError, git_delivery.GitDeliveryError):
+        return False
+
+
+def _inside_worktree(value, cwd, root):
+    if not isinstance(value, str) or not value or any(char in value for char in "$`*?[]~"):
+        raise ValueError("工具工作目录不是可核验的固定路径")
+    target = Path(value)
+    target = (target if target.is_absolute() else cwd / target).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Plus 验证工具工作目录越出本轮执行工作树") from exc
+    return target
+
+
+def _command_context(message, root):
+    tool = message.get("tool") or {}
+    arguments = tool.get("input")
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
+    if not isinstance(arguments, dict):
+        raise ValueError("Plus 验证工具参数无法核验")
+    cwd, explicit_cwd = root, None
+    for key in ("cwd", "workdir"):
+        if key in arguments:
+            selected = _inside_worktree(arguments[key], root, root)
+            if explicit_cwd is not None and explicit_cwd != selected:
+                raise ValueError("Plus 工具工作目录参数互相冲突")
+            cwd = explicit_cwd = selected
+    segments, _ = verify_evidence._command_segments(arguments.get("command", ""), allow_single=True)
+    for segment in segments:
+        words = shlex.split(segment)
+        if words and words[0] == "cd":
+            arguments = words[1:]
+            if arguments and arguments[0] == "--":
+                arguments = arguments[1:]
+            if len(arguments) != 1:
+                raise ValueError("Plus 验证命令的 cd 目标无法核验")
+            cwd = _inside_worktree(arguments[0], cwd, root)
+
+
+def _plus_checks(commands, result, messages, root):
+    # The shared matcher has already limited these to the current execution
+    # window and invalidated checks preceding a later writable tool.
+    results = result.get("command_results") or []
+    from .. import verification_redaction
+    secrets = verification_redaction.values(os.environ)
+    checks = []
+    for command in commands:
+        candidates = [row for row in results
+                      if not verify_evidence.match_verification([command], [row])["missing"]]
+        if not candidates:
+            continue
+        row = candidates[-1]
+        message = next((item for item in messages if item.get("id") == row.get("message_id")), None)
+        if message is None:
+            raise ValueError("Plus 验证工具消息身份无法核验")
+        _command_context(message, root)
+        single = verify_evidence.match_verification([command], [row])
+        code = 0 if single["ok"] else single["failed"][0]["exit_code"]
+        output = (message.get("tool") or {}).get("output") or message.get("content") or ""
+        if not isinstance(output, str):
+            output = util.jdump(output)
+        raw = {"exit_code": code, "output_tail": output, "timed_out": False}
+        checks.append({"command": verification_redaction.redact(command, secrets), "exit_code": code,
+                       "timed_out": False, "command_not_found": environment_reason(raw) == "command_not_found",
+                       "environment_reason": environment_reason(raw), "message_id": row.get("message_id"),
+                       "output_tail": verification_redaction.redact(output, secrets)[-_OUTPUT_TAIL_BYTES:]})
+    return checks
+
+
 def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, heartbeat=None, isolated=False) -> dict:
-    """Verdict for a task: commands from ``plan_verify``, cwd = execution worktree."""
+    """Read Plus evidence in every mode; never execute or copy verification."""
+    from .. import dsh_events
     frozen = binding(conn, task, deadline=deadline, heartbeat=heartbeat)
-    if verify_env is None:
-        verify_env = project_verify_env(conn, task["project_id"])
+    hashes, job, verification = _read_plus_evidence(conn, task, deadline=deadline, heartbeat=heartbeat)
+    _require_snapshot(job, frozen["source_sha256"])
     raw = Path(task["plan_path"]).read_bytes()
-    parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
-    if (util.sha256_bytes(raw) != frozen["plan_sha256"] or not parsed.get("ok")
-            or util.sha256_text(util.jdump(parsed["commands"])) != frozen["commands_sha256"]):
-        raise util.KanpilotError("verification_identity_unconfirmed", "验证前冻结计划已变化，未执行命令")
-    commands = parsed["commands"]
-    if isolated:
-        # A shadow comparison must never run commands in the legacy task tree.
-        # Copy ignored dependencies too; reject symlinks because an absolute
-        # link could send a verifier's writes back into the original workspace.
-        with tempfile.TemporaryDirectory(prefix="kanpilot-shadow-verify-") as temporary:
-            root = Path(frozen["worktree_path"])
-            for directory, dirs, files in os.walk(root, followlinks=False):
-                git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-                dirs[:] = [d for d in dirs if d != ".git"]
-                if any((Path(directory) / name).is_symlink() for name in dirs + files if name != ".git"):
-                    raise util.KanpilotError("verification_identity_unconfirmed", "shadow 工作树含符号链接，不能安全复制验证")
-            copied = Path(temporary) / "worktree"
-            git_delivery._git(["clone", "--no-hardlinks", "--no-checkout", str(root), str(copied)], root,
-                             git_delivery._budget_timeout(deadline, 30, heartbeat))
-            git_delivery._git(["checkout", "--detach", frozen["head_sha"]], copied,
-                             git_delivery._budget_timeout(deadline, heartbeat=heartbeat))
-            for child in copied.iterdir():
-                git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-                if child.name != ".git":
-                    if child.is_dir() and not child.is_symlink():
-                        shutil.rmtree(child)
-                    else:
-                        child.unlink()
-            def copy_file(source, destination):
-                with open(source, "rb") as original, open(destination, "wb") as duplicate:
-                    while True:
-                        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-                        if deadline is not None and time.monotonic() >= deadline:
-                            raise util.KanpilotError("verification_identity_unconfirmed", "shadow 副本准备时限已用尽")
-                        chunk = original.read(1 << 20)
-                        if not chunk:
-                            break
-                        duplicate.write(chunk)
-                shutil.copystat(source, destination)
-                return destination
-            shutil.copytree(root, copied, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"), copy_function=copy_file)
-            checks = run_verify_commands(commands, cwd=copied, verify_env=verify_env, timeout=timeout,
-                                        deadline=deadline, heartbeat=heartbeat)
-            if git_delivery.source_state_sha256(copied, deadline=deadline, heartbeat=heartbeat) != frozen["source_sha256"]:
-                raise util.KanpilotError("verification_identity_unconfirmed", "shadow 验证改动了副本源文件，不能判定通过")
-            changes = effective_changes(root, deadline=deadline, heartbeat=heartbeat)
-            result = _check_result(commands, changes, checks)
-    else:
-        result = evaluate(commands, frozen["worktree_path"], verify_env=verify_env, timeout=timeout,
-                          deadline=deadline, heartbeat=heartbeat)
+    commands = verify_evidence.parse_verify_block(raw.decode("utf-8"))["commands"]
+    try:
+        # Re-read only hashed files; a concurrent append/replacement cannot be
+        # accepted because all evidence hashes are checked again below.
+        event_path = next(Path(path) for path in hashes if Path(path).name == dsh_events.EVENT_LOG_NAME)
+        events = [json.loads(line) for line in event_path.read_text().splitlines() if line.strip()]
+        messages = dsh_events.to_messages(events)
+        checks = _plus_checks(commands, verification, messages, Path(frozen["worktree_path"]).resolve())
+    except (ValueError, TypeError, KeyError, StopIteration) as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证证据无法确认：" + util.redact(str(exc))) from exc
+    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    result = _check_result(commands, changes, checks)
+    if not verification.get("ok") and not result["empty_diff"]:
+        # Missing/ambiguous results cannot trigger a quality repair. Only a
+        # real independent nonzero exit is a verification failure.
+        failed = verification.get("failed") or []
+        real_failure = any(type(item.get("exit_code")) is int and item["exit_code"] != 0 for item in failed)
+        result["verification_ok"] = False
+        if not real_failure:
+            result.update(kind="unconfirmed", environment_failure=False, environment_reasons=[],
+                          detail="当前 Plus 轮次的验证证据缺失、已过期或退出码不明确；请通过新的执行轮次补齐验证")
+    if not _evidence_unchanged(hashes):
+        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间 Plus 执行证据或计划文件已变化")
     if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
-        raise util.KanpilotError("verification_identity_unconfirmed", "验证期间计划、轮次或源文件已变化")
-    result["binding"] = frozen
+        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间计划、轮次或源文件已变化")
+    result.update(binding=frozen, evidence_source="plus_tool_results", evidence_sha256=hashes,
+                  execution_turn_id=job["turn_id"], verification_evidence_version=1)
     if result["verification_ok"] and not isolated:
         result["index_source_sha256"] = git_delivery.expected_index_source_sha256(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
-        if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
-            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码已变化")
+        if (binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen
+                or not _evidence_unchanged(hashes)):
+            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码或 Plus 证据已变化")
     return result
 
 
 def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
     """A core commit changes HEAD/status, but not the verified source bytes."""
-    if (receipt.get("verification_ok") is not True
+    if (receipt.get("evidence_source") != "plus_tool_results"
+            or receipt.get("verification_ok") is not True
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]):
+        return False
+    if not receipt_evidence_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat):
         return False
     frozen = receipt.get("binding") or {}
     actual = binding(conn, task, allow_core_commit=True, deadline=deadline, heartbeat=heartbeat)

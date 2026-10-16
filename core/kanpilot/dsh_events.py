@@ -230,6 +230,11 @@ def to_messages(events: list) -> list:
             revision_parts = (etype_origin, content)
         raw["content"] = content
         metadata = verify_evidence.window_metadata(event)
+        if etype_origin in ("subagent_start", "subagent_end"):
+            metadata["event_type"] = etype_origin
+            agent = event.get("agent_name") or event.get("name") or event.get("label")
+            if isinstance(agent, str) and agent:
+                metadata["agent_name"] = agent
         raw.update(metadata)
         if metadata:
             revision_parts += (metadata,)
@@ -348,6 +353,7 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
     # 观察进程（§5.23.7）：续接观察只用它判断「本机是否还有人在看」，不作
     # 完成/失败判定依据（完成只认 terminal + job.status + 验证证据）。
     observe_pid = job.get("observe_pid") or job.get("pid") or view.get("pid")
+    finalizing = job.get("observation_finalizing") or {}
     return {
         "backend": view.get("backend"),
         "run_status": view.get("run_status"),
@@ -356,6 +362,9 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         else view.get("pid"),
         "observe_pid": observe_pid,
         "observer_alive": util.pid_alive(observe_pid),
+        "observation_finalizing": bool(
+            finalizing.get("turn_id") == job.get("turn_id")
+            and finalizing.get("observed_status") == "completed"),
         "started_at": view.get("started_at"),
         "ended_at": job.get("ended_at"),
         "exit_code": job.get("exit_code"),
@@ -370,4 +379,6 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         # 只作审计展示；完成判定仍只认三证据。
         "turn_adopted": job.get("turn_adopted") or None,
         "send_state": job.get("send_state"),
+        "verification_evidence_version": job.get("verification_evidence_version"),
+        "verification_source_sha256": job.get("verification_source_sha256"),
     }

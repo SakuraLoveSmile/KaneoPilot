@@ -281,6 +281,9 @@ enum DisplayStatus {
             return StatusStyle(icon: "eye", color: .orange, label: "评审中")
         case "需人工", "needs_user":
             return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "需人工")
+        // 开放且可答的执行期提问（详情头部附加；文字必须为「等待你回答」）。
+        case "等待你回答":
+            return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "等待你回答")
         case "执行端失联", "lost":
             return StatusStyle(icon: "exclamationmark.triangle.fill", color: .red, label: "执行端失联")
         case "已归档", "done":
@@ -730,7 +733,8 @@ enum AutomationPresentation {
         case "fix_rounds_exhausted": return "修复轮已用完"
         case "auto_budget_exceeded": return "超出自动处理预算"
         case "automation_stopped": return "项目自动处理已关闭"
-        case "verification_environment_failure": return "验证环境未就绪"
+        case "verification_environment_failure": return "Plus 验证环境未就绪"
+        case "verification_identity_unconfirmed": return "验证身份待核对"
         case "fix_branch_unavailable": return "无法同分支修复"
         case "branch_exists": return "任务分支已存在"
         case "delivery_base_unknown": return "PR 目标分支不存在"
@@ -745,11 +749,12 @@ enum AutomationPresentation {
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
-        case "verification_unconfirmed": return "验证退出码未知或证据无法确认。可重新运行原计划检查，由核心分别记录退出码；全部通过才恢复推进。仅重新核验会读取现有证据，不运行检查。"
+        case "verification_unconfirmed": return "Plus 验证退出码未知或证据无法确认。可重新核验已有证据，或让 Plus 沿用原计划和工作树，启动新的执行轮次并验证。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
         case "automation_stopped": return "请先重新开启项目自动处理，再继续修复。"
-        case "verification_environment_failure": return "请在项目与仓库配置的 verify_env 设置 JAVA_HOME 或 ANDROID_HOME，或连接所需设备后重新验证本轮。"
+        case "verification_identity_unconfirmed": return "计划、工作树或执行轮次身份无法确认。请重新核验原轮次证据；身份未确认前不能启动新的 Plus 执行轮次。"
+        case "verification_environment_failure": return "请检查 Plus 执行环境的 JDK、SDK 或设备。若为旧版 Pilot 本机阻塞，可先重新核对原轮次证据；证据不足时让 Plus 重新执行并验证。"
         case "fix_branch_unavailable": return "本轮改动在独立工作树，无法同分支修复"
         case "branch_exists": return "请检查已有任务分支及工作树，再重新准备分支。"
         case "delivery_base_unknown": return "请在项目与仓库配置中选择 origin 上存在的 PR 目标分支，再重新准备分支。"
@@ -764,7 +769,8 @@ enum AutomationPresentation {
     }
     static func resumeLabel(_ code: String?) -> String {
         switch code {
-        case "verification_environment_failure", "fix_branch_unavailable": return "重新验证本轮"
+        case "verification_environment_failure": return "重新核对原轮次证据"
+        case "fix_branch_unavailable": return "重新验证本轮"
         case "execution_failed": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"
