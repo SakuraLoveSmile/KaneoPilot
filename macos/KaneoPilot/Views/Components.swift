@@ -788,6 +788,8 @@ enum AutomationPresentation {
 struct PhaseStepperView: View {
     let phase: String?
     let condition: String?
+    /// 概览只需要步进高亮，条件由调用方按需显示；自动化工作台保持默认的说明行。
+    var showsCaption = true
     static func title(_ phase: String) -> String {
         switch phase {
         case "plan": return "规划"
@@ -832,8 +834,10 @@ struct PhaseStepperView: View {
                         .foregroundStyle(phase == step ? Color.accentColor : Color.secondary)
                 }
             }
-            Text("阶段：\(phase.map(Self.title) ?? "未提供") · 条件：\(condition.map(Self.conditionTitle) ?? "未提供")")
-                .font(.kpSmall).foregroundStyle(.secondary)
+            if showsCaption {
+                Text("阶段：\(phase.map(Self.title) ?? "未提供") · 条件：\(condition.map(Self.conditionTitle) ?? "未提供")")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
         }
         .accessibilityElement(children: .combine)
     }
