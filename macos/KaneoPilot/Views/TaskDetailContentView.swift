@@ -1192,7 +1192,7 @@ struct TaskOverviewTabView: View {
             }
                 .disabled(model.busy)
         case "enqueue":
-            Button("安排下一步") { Task { await model.enqueue(taskID: detail.taskId) } }
+            Button(detail.enqueueActionLabel) { Task { await model.enqueue(taskID: detail.taskId) } }
                 .disabled(model.busy)
         case "retry":
             Button(detail.stage == "review" ? "重试评审" : "重试派发") {

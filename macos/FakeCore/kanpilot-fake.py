@@ -1045,6 +1045,8 @@ def allowed_actions(task, requests):
     task_reqs = [r for r in requests if r.get("task_id") == task["task_id"]]
     if any(request_is_lost(r) for r in task_reqs):
         return ["release_lost", "recheck"]
+    # protocol §5.3（2026-10-17）：同一任务有 queued/claimed 活动请求时不再提供 enqueue。
+    has_active_request = any(r.get("status") in ("queued", "claimed") for r in task_reqs)
     if status == "needs_user":
         if task.get("failure_code") == "execution_input_required":
             return ["answer_execution_questions", "skip_execution_questions", "stop_execution"]
@@ -1070,19 +1072,29 @@ def allowed_actions(task, requests):
         # v2 §5.22.4：plan_execution_hold → 仅确认执行（enqueue confirm_plan）。
         if task.get("plan_execution_hold"):
             return ["confirm_dispatch", "recheck"]
-        actions = ["enqueue", "recheck"]
+        actions = ["recheck"] if has_active_request else ["enqueue", "recheck"]
         if any(r["status"] == "queued" for r in task_reqs):
-            actions.insert(1, "set-priority")
+            actions.insert(1 if "enqueue" in actions else 0, "set-priority")
             actions.append("set-paused")
         if move_out_blocked_reason(task, requests) is None:
             actions += ["archive", "trash"]
         return actions
     if status in ("running", "in_review"):
-        actions = ["enqueue", "mark_done", "recheck"]
+        actions = ["mark_done", "recheck"] if has_active_request else ["enqueue", "mark_done", "recheck"]
         if any(r["status"] == "queued" for r in task_reqs):
-            actions.insert(2, "set-priority")
+            actions.insert(2 if "enqueue" in actions else 1, "set-priority")
         return actions
     return ["recheck"]
+
+
+ENQUEUE_INFER = {"needs_plan": "plan", "ready": "dispatch", "running": "monitor", "in_review": "review"}
+
+
+def enqueue_kind(task, actions):
+    """protocol §5.2：下一次 enqueue 的 kind；仅当 allowed_actions 含 enqueue。"""
+    if "enqueue" not in actions:
+        return None
+    return ENQUEUE_INFER.get(task.get("status"))
 
 
 def attempts_for(task):
@@ -1139,6 +1151,7 @@ def task_detail(task, requests):
     detail["engine_fix_summary"] = task.get("engine_fix_summary", {"used": 1, "max": 2}) if task.get("automation") else None
     detail["engine_fix_revert"] = fake_engine_fix_revert(task, requests)
     detail["allowed_actions"] = allowed_actions(task, requests)
+    detail["enqueue_kind"] = enqueue_kind(task, detail["allowed_actions"])
     detail["attempts"] = attempts_for(task)
     # v2 §5.20：purged 任务详情为只读审计视图。
     detail["read_only"] = task.get("save_state") == "purged"
