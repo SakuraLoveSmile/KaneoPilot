@@ -544,3 +544,49 @@ def match_execution_verification(commands: list, messages: list, execution_turn_
     elif not selected:
         outcome["detail"] = "缺少当前执行轮次的可信工具结果，请由 Plus 重新验证"
     return outcome
+
+
+# Plus structured Goal report checks (protocol §5.18.6, evidence_source=goal_report).
+_GOAL_ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+")
+_GOAL_NOTE = re.compile(r"\s*（.*", re.S)
+
+
+def goal_command_key(command) -> str:
+    """Compare a frozen verify command with a report check by its executed text.
+
+    Trailing Chinese notes and inline ``VAR=value`` prefixes are dropped; the
+    remaining shell words are folded with ``normalize``.
+    """
+    if not isinstance(command, str):
+        return ""
+    text = _GOAL_NOTE.sub("", command.strip(), count=1).strip()
+    return normalize(_GOAL_ENV_PREFIX.sub("", text, count=1).strip())
+
+
+def match_goal_checks(commands: list, checks) -> dict:
+    """Pair every frozen verify command with the last matching Plus report check.
+
+    A command passes only when that last record has ``exitCode`` 0 and
+    ``result`` "passed". A real nonzero exit is a failure; anything else (no
+    record, a non-integer exit, a contradictory result) stays unconfirmed.
+    """
+    records = [item for item in checks or [] if isinstance(item, dict)]
+    rows, matched, failed, missing = [], [], [], []
+    for command in commands or []:
+        key = goal_command_key(command)
+        matches = [item for item in records if key and goal_command_key(item.get("command")) == key]
+        last = matches[-1] if matches else None
+        code = last.get("exitCode") if last is not None else None
+        exit_code = code if type(code) is int else None
+        row = {"command": command, "exit_code": exit_code, "report_check_id": (last or {}).get("id"),
+               "detail": str((last or {}).get("detail") or "")}
+        rows.append(row)
+        if last is not None and exit_code == 0 and last.get("result") == "passed":
+            matched.append(command)
+        elif last is not None and exit_code not in (None, 0):
+            failed.append(row)
+        else:
+            missing.append(command)
+    unconfirmed = [{"command": command, "exit_code": None} for command in missing]
+    return {"ok": bool(rows) and not failed and not missing, "matched": matched, "missing": missing,
+            "failed": failed + unconfirmed, "rows": rows}

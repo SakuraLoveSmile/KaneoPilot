@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
 
-from helpers import KanpilotTestCase
-from kanpilot import (core, db, harness_plus_adapter, round_store, util,
+from helpers import KanpilotTestCase, goal_checks, goal_report_read
+from kanpilot import (cmd_read, core, db, harness_plus_adapter, round_store, util,
                       verification_recovery)
 
 
@@ -72,6 +72,16 @@ class TestVerificationRecovery(KanpilotTestCase):
         self.payload = {"task_id": self.task_id, "action": "reverify",
                         "expected_execution_run_id": self.run_id}
         self.fake.requests_log.clear()
+        # Plus's Goal report is the only result source; each test edits this fake read.
+        self.goal = {"checks": goal_checks(self.commands), "turn_id": "execution-turn",
+                     "approved": None, "state": "ready", "structured": True,
+                     "execution_status": "completed", "verdict": "met"}
+        goal_read = patch.object(cmd_read, "read_goal_report", side_effect=lambda *a, **k: goal_report_read(
+            self.goal["checks"], turn_id=self.goal["turn_id"], approved=self.goal["approved"], state=self.goal["state"],
+            structured=self.goal["structured"], execution_status=self.goal["execution_status"],
+            verdict=self.goal["verdict"]))
+        goal_read.start()
+        self.addCleanup(goal_read.stop)
 
     def write_files(self):
         (self.directory / "job.json").write_text(json.dumps(self.job))
@@ -183,27 +193,23 @@ class TestVerificationRecovery(KanpilotTestCase):
         self.write_files()
         self.reject()
 
-    def test_failures_missing_unknown_and_later_failure_cannot_be_overridden(self):
-        for replacement in ([], [{"seq": 2, "type": "assistant_message", "content": "tests passed"}],
-                            [{**self.events[1], "exit_code": 1}], [{**self.events[1], "exit_code": None}]):
-            events = [self.events[0], *replacement, self.events[2], self.events[-1]]
-            (self.directory / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    def test_report_missing_unknown_or_failed_check_blocks_recovery(self):
+        passed = goal_checks(self.commands)
+        for checks in (passed[:1],                                                  # no record for the second command
+                       [passed[0], dict(passed[1], exitCode=None)],                 # exit code is not an integer
+                       [passed[0], dict(passed[1], result="failed")],               # contradictory result
+                       [passed[0], dict(passed[1], exitCode=1, result="failed")]):  # real failure
+            self.goal["checks"] = checks
             self.reject()
-        self.write_files()
-        conn = db.connect(self.db_path)
-        db.set_extra(conn, db.require_task(conn, self.task_id), util.now_iso(),
-                     verification_override={"execution_run_id": self.run_id})
-        conn.close()
-        self.events = self.events[:-1] + [{**self.events[1], "seq": 4, "exit_code": 1},
-                                         {"seq": 5, "type": "terminal", "outcome": "completed"}]
-        self.write_files()
-        self.reject()
 
-    def test_path_prefix_evidence_recovers_without_rerunning_commands(self):
-        for event in self.events[1:-1]:
-            command = json.loads(event["input"])["command"]
-            event["input"] = json.dumps({"command": 'export PATH="/opt/flutter/bin:$PATH"\n' + command})
+    def test_transcript_results_never_override_a_passing_report(self):
+        # Transcript tool results are audit data; the Plus Goal report decides.
+        self.events[1]["exit_code"] = 1
         self.write_files()
+        self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")
+
+    def test_report_check_with_inline_env_prefix_matches_frozen_commands(self):
+        self.goal["checks"] = goal_checks(["FLUTTER_ROOT=/opt/flutter " + command for command in self.commands])
         self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")
 
     def test_plan_file_and_frozen_declaration_must_match(self):
@@ -340,23 +346,38 @@ class TestVerificationRecovery(KanpilotTestCase):
         self.assertEqual(result["request"]["kind"], "monitor")
         self.assertEqual(self.state()["task"]["run_id"], self.run_id)
 
-    def test_historical_core_pass_cannot_override_failed_plus_results(self):
+    def test_historical_core_pass_cannot_override_failed_report_check(self):
         conn = db.connect(self.db_path)
         db.set_extra(conn, db.require_task(conn, self.task_id), util.now_iso(), verification_checks={
             "state": "completed", "binding": {"execution_run_id": self.run_id},
             "receipt": {"verification_ok": True}})
         conn.close()
-        self.events[1]["exit_code"] = 1
-        self.write_files()
+        self.goal["checks"][1] = dict(self.goal["checks"][1], exitCode=1, result="failed")
         self.reject()
 
-    def test_goal_drafting_results_cannot_recover_execution_window(self):
-        self.events = [self.events[0], self.events[1], self.events[2],
-            {"seq": 4, "type": "system", "content": "goal_approved: execution started",
-             "execution_turn_id": "execution-turn", "execution_started_at": "2026-10-16T01:00:00Z"},
-            {"seq": 5, "type": "terminal", "outcome": "completed"}]
-        self.write_files()
+    def test_report_from_another_turn_cannot_recover_this_round(self):
+        # The report's turn and this round's execution turn must both sit in the approved chain.
+        self.goal["turn_id"] = "drafting-turn"
         self.reject()
+        self.goal.update(turn_id="drafting-turn", approved=["execution-turn"])
+        self.reject()
+        self.goal.update(turn_id="execution-turn", approved=["drafting-turn"])
+        self.reject()
+
+    def test_unready_report_stays_unconfirmed(self):
+        for state in ("pending", "not_found", "truncated"):
+            self.goal["state"] = state
+            self.reject(code="verification_unconfirmed")
+
+    def test_report_floor_requires_structured_completed_and_met(self):
+        # S1 floor without reviews: a fallback, unfinished or unmet report is not completion evidence.
+        defaults = {"structured": True, "execution_status": "completed", "verdict": "met"}
+        for field, value in (("structured", False), ("execution_status", "running"), ("verdict", "partial")):
+            with self.subTest(field=field):
+                self.goal[field] = value
+                self.reject(code="verification_unconfirmed")
+                self.goal[field] = defaults[field]
+        self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")
 
 
     def test_versioned_plus_evidence_uses_current_turn_and_preserves_command_results(self):
@@ -371,6 +392,13 @@ class TestVerificationRecovery(KanpilotTestCase):
             self.assertEqual(len(result["command_results"]), 2)
         finally:
             conn.close()
+        # Legacy transcript evidence still needs its own execution window when it decides a pass.
         self.events[1]["turn_id"] = "drafting-turn"
         self.write_files()
-        self.reject()
+        conn = db.connect(self.db_path)
+        try:
+            with self.assertRaises(util.KanpilotError) as caught:
+                verification_recovery._read_evidence(conn, db.require_task(conn, self.task_id))
+            self.assertEqual(caught.exception.code, "conflict")
+        finally:
+            conn.close()

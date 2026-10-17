@@ -2,6 +2,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
+from helpers import use_simulated_plus_goal_reports
 from kanpilot import core, db, git_delivery, harness_plus_adapter, remote, util
 import test_execution_retry as retry_fixture
 from test_session import pi_event, write_json
@@ -10,6 +11,8 @@ from test_session import pi_event, write_json
 class TestLiveManualReview(retry_fixture.TestExecutionRetry):
     def setUp(self):
         super().setUp()
+        # Live verdicts read Plus's Goal report; the double mirrors this round's command results.
+        use_simulated_plus_goal_reports(self)
         plan = Path(self.task()["plan_path"])
         plan.write_text(plan.read_text() + "\n# Frozen manual execution\n```verify\ntrue\n```\n")
         sha = util.sha256_file(plan)
@@ -52,8 +55,8 @@ class TestLiveManualReview(retry_fixture.TestExecutionRetry):
         result = self.call("engine-verdict", {"task_id": self.task_id,
                            "expected_execution_run_id": self.run_id, "expected_plan_sha256": sha})
         self.assertTrue(result["verification_ok"], result)
-        self.assertEqual(result["evidence_source"], "plus_tool_results")
-        self.advance = {"task_id": self.task_id, "run_id": claim["run_id"],
+        self.assertEqual(result["evidence_source"], "goal_report")
+        self.advance ={"task_id": self.task_id, "run_id": claim["run_id"],
                         "target": "in-review", "expected_current": "in-progress"}
 
     def test_verified_manual_detached_dirty_results_enter_review_without_commit(self):
