@@ -348,6 +348,14 @@ def _continued_status(job, view, connection_file):
                                  "aborted": "Plus 手动继续的轮次已停止"}[state]}
 
 
+def settled_continuation(conn, task_id, run_id, view, connection_file):
+    """Execution-retry evidence: the same continuation check control-status displays."""
+    _, job, _, _, _ = _context(conn, task_id, run_id)
+    if not job:
+        raise util.KanpilotError("validation_failed", "原执行轮次身份不可核验")
+    return _continued_status(job, view, connection_file)
+
+
 def cmd_session_control_status(ctx, payload):
     task_id, run_id = payload["task_id"], payload["run_id"]
     source, job, _, task, request = _context(ctx.conn, task_id, run_id)

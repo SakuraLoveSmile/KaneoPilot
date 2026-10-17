@@ -1276,6 +1276,8 @@ struct RoundDetail: Decodable {
     /// §5.23.8：瞬时模型错误后同一会话自动重开的接续审计（null = 从未接续），
     /// 只作审计展示，不参与完成/失败判定。
     let turnAdopted: [TurnAdoption]?
+    /// 轮次绑定的 Plus turn（核心 job.turn_id）；Plus 当前 turn 与之不同即存在后续轮次。
+    let turnId: String?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
