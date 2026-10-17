@@ -69,7 +69,8 @@ final class AppViewModel: ObservableObject {
     @Published var doctorOnline = false
     @Published var doctorRunning = false
 
-    @Published var attentionTaskToOpen: String?
+    // 仅供隔离验收：与外观、视口覆盖一样，预览启动时直接打开指定任务的详情；正常启动为空。
+    @Published var attentionTaskToOpen: String? = ProcessInfo.processInfo.environment["KANPILOT_PREVIEW_OPEN_TASK"]
     @Published var selectedTaskID: String?
     @Published var detail: TaskDetail?
     @Published var detailEvents: [EventItem] = []

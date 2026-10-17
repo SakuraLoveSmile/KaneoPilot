@@ -600,6 +600,11 @@ struct TaskOverviewTabView: View {
         return question.state == "open" && !question.answerable
     }
 
+    /// 开放（含开放但不可在本机回答）或保留草稿的执行提问留在「需要你处理」；已结束的记录收进「进展」。
+    private func executionNeedsAttention(_ store: ExecutionAnswerStore) -> Bool {
+        store.question.state == "open" || store.obsolete
+    }
+
     private var answerStore: PlanAnswerStore? {
         if let stale = model.expiredPlanAnswerStore(taskID: detail.taskId) { return stale }
         guard detail.readOnly != true,
@@ -608,6 +613,12 @@ struct TaskOverviewTabView: View {
     }
 
     private var display: String { DisplayStatus.effective(detail) }
+
+    /// 步进条件与头部状态文字相同则不再重复，只在条件提供了新信息时显示。
+    private var conditionDifferingFromStatus: String? {
+        guard let condition = detail.condition.map(PhaseStepperView.conditionTitle), condition != display else { return nil }
+        return condition
+    }
 
     private var isBlocked: Bool {
         detail.status == "needs_user" || display == "执行端失联" || display == "需人工" || detail.blockedReason != nil
@@ -671,6 +682,17 @@ struct TaskOverviewTabView: View {
         visibleActions.filter { $0 != primaryAction && !["skip_execution_questions", "stop_execution"].contains($0) }
     }
 
+    /// 排队请求的类别，只用于显示；kind 由核心给出，Swift 不据状态推导。
+    private var queuedKindTitle: String {
+        switch detail.activeRequest?.kind ?? "" {
+        case "plan": return "规划请求"
+        case "dispatch": return "派发请求"
+        case "monitor": return "检查请求"
+        case "review": return "评审请求"
+        default: return "请求"
+        }
+    }
+
     private var nextStepExplanation: String {
         if detail.readOnly == true { return "此任务为只读记录，可查看计划、会话和历史证据。" }
         if detail.sendState == "unknown" {
@@ -678,7 +700,7 @@ struct TaskOverviewTabView: View {
         }
         if executionAwaitingPlus { return "这道执行提问只能在 Plus 中回答，本机不提供回答入口；可在「更多操作」中停止本轮。" }
         if detail.activeRequest?.status == "queued" && primaryAction != "confirm_dispatch" {
-            return "请求已排队，尚未开始；执行端领取后才会推进。"
+            return "\(queuedKindTitle)已排队，尚未开始；执行端领取后才会推进。"
         }
         switch primaryAction {
         case "answer_execution_questions": return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交到 Plus。"
@@ -705,7 +727,7 @@ struct TaskOverviewTabView: View {
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.l) {
-                // 1. 状态与阻塞信息
+                // 1. 需要你处理：阻塞、待答与待评审，仅在出现时显示
                 if let store = answerStore {
                     PlanAnswerCard(taskID: detail.taskId, store: store)
                         .id("plan-answers")
@@ -722,7 +744,6 @@ struct TaskOverviewTabView: View {
                     blockedBanner
                 }
 
-                PhaseStepperView(phase: detail.phase, condition: detail.condition)
                 if let evidence = detail.attention?.evidence, !evidence.isEmpty {
                     DisclosureGroup("阻塞证据") {
                         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -734,11 +755,8 @@ struct TaskOverviewTabView: View {
                     }
                 }
 
-                if let store = executionStore {
-                    ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail,
-                        terminalReason: detail.failureCode == "execution_failed" ? (detail.failureReason ?? detail.blockedSummary) : nil,
-                        reconcileInBar: openExecutionStore != nil)
-                        .id("execution-answers")
+                if let store = executionStore, executionNeedsAttention(store) {
+                    executionAnswerCard(store)
                 }
 
                 ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.executionQuestion?.identity), id: \.formIdentity) { store in
@@ -748,8 +766,17 @@ struct TaskOverviewTabView: View {
                 // 2. 状态与下一步安全动作
                 nextStepSection
 
-                // 3. 关联阶段快捷直达
-                stageShortcutsSection
+                // 3. 进展：阶段步进、已结束的问答与直达入口
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false)
+                    if let condition = conditionDifferingFromStatus {
+                        Text("条件：\(condition)").font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                    if let store = executionStore, !executionNeedsAttention(store) {
+                        executionAnswerCard(store)
+                    }
+                    stageShortcutsSection
+                }
 
                 // 4. Kaneo 关联信息
                 if hasKaneo {
@@ -866,6 +893,15 @@ struct TaskOverviewTabView: View {
         }
     }
 
+    /// 执行问答卡片的唯一构造处。两个位置（需要你处理、进展）互斥渲染，因此 `execution-answers` 锚点只出现一次。
+    @ViewBuilder
+    private func executionAnswerCard(_ store: ExecutionAnswerStore) -> some View {
+        ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail,
+            terminalReason: detail.failureCode == "execution_failed" ? (detail.failureReason ?? detail.blockedSummary) : nil,
+            reconcileInBar: openExecutionStore != nil)
+            .id("execution-answers")
+    }
+
     // MARK: - 阻塞警告条
 
     private var blockedBanner: some View {
@@ -897,67 +933,68 @@ struct TaskOverviewTabView: View {
 
     // MARK: - 下一步安全动作与状态
 
+    /// 下一步说明与最近更新。头部已有状态与阶段，这里不重复，也不另设区段标题。
     private var nextStepSection: some View {
-        DetailSection(title: "状态与推进") {
+        VStack(alignment: .leading, spacing: Spacing.s) {
             Text(nextStepExplanation)
                 .font(.kpBody)
                 .fixedSize(horizontal: false, vertical: true)
-            FieldRow("当前状态", display)
-            FieldRow("生命周期阶段", Labels.stage(detail.stage))
-            if let at = detail.updatedAt {
-                FieldRow("最后更新", TimeFormat.fullString(at))
-            }
-            if detail.autoAdvancePaused == 1 {
-                FieldRow("自动推进", "已暂停")
-            }
-            if let saveState = detail.saveState, saveState != "active" {
-                FieldRow("保存状态", Labels.saveState(saveState))
+            if !statusFacts.isEmpty {
+                Text(statusFacts.joined(separator: " · "))
+                    .font(.kpSmall).foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 最后更新，以及仅在有值时出现的自动推进暂停与保存状态，合并为一行辅助信息。
+    /// 核心未给出 phase（未识别的状态）时，生命周期阶段作为唯一的阶段信息保留。
+    private var statusFacts: [String] {
+        var facts: [String] = []
+        if detail.phase == nil { facts.append("生命周期阶段 \(Labels.stage(detail.stage))") }
+        if let at = detail.updatedAt { facts.append("最后更新 \(TimeFormat.fullString(at))") }
+        if detail.autoAdvancePaused == 1 { facts.append("自动推进已暂停") }
+        if let saveState = detail.saveState, saveState != "active" { facts.append("保存状态：\(Labels.saveState(saveState))") }
+        return facts
     }
 
     // MARK: - 阶段快捷直达
 
+    /// 直达入口与顶部页签去向相同，收成一行内联链接，不另设区段标题与图标按钮。
     private var stageShortcutsSection: some View {
-        DetailSection(title: "阶段入口") {
-            HStack(spacing: Spacing.m) {
-                if hasPlan {
-                    Button {
-                        onSwitchTab?(.plan)
-                    } label: {
-                        Label("查看计划正文", systemImage: "doc.text")
-                    }
-                }
-                if hasExecution {
-                    Button {
-                        onSwitchTab?(.execution)
-                    } label: {
-                        Label("查看执行会话", systemImage: "bubble.left.and.bubble.right")
-                    }
-                }
-                if hasReview {
-                    Button {
-                        onSwitchTab?(.review)
-                    } label: {
-                        Label("查看评审报告", systemImage: "checkmark.seal")
-                    }
-                }
-                Button {
-                    onSwitchTab?(.log)
-                } label: {
-                    Label("查看记录与时间线", systemImage: "clock")
-                }
+        HStack(spacing: Spacing.m) {
+            if hasPlan {
+                Button("查看计划正文") { onSwitchTab?(.plan) }
             }
-            .font(.kpSmall)
-            .disabled(onSwitchTab == nil)
+            if hasExecution {
+                Button("查看执行会话") { onSwitchTab?(.execution) }
+            }
+            if hasReview {
+                Button("查看评审报告") { onSwitchTab?(.review) }
+            }
+            Button("查看记录与时间线") { onSwitchTab?(.log) }
         }
+        .buttonStyle(.link)
+        .font(.kpSmall)
+        .disabled(onSwitchTab == nil)
     }
 
     // MARK: - Kaneo 关联
 
+    /// Kaneo 列名的显示名，只收录已在核心中出现的 slug；未收录的值保留原文。
+    static func kaneoStatusTitle(_ slug: String) -> String {
+        switch slug {
+        case "to-do", "todo": return "待办"
+        case "in-progress": return "进行中"
+        case "in-review", "review": return "评审中"
+        case "done": return "已完成"
+        default: return slug
+        }
+    }
+
     private var kaneoSection: some View {
         DetailSection(title: "Kaneo 关联") {
-            FieldRow("远端状态", detail.kaneoStatus)
+            FieldRow("远端状态", detail.kaneoStatus.map(Self.kaneoStatusTitle))
             FieldRow("最后核验", TimeFormat.fullString(detail.kaneoCheckedAt))
             if let url = detail.links?.kaneoTaskUrl, !url.isEmpty {
                 Button("打开 Kaneo 任务页面") { Workspace.open(url) }
@@ -1403,40 +1440,36 @@ private struct ExecutionAnswerCard: View {
         }
     }
 
-    /// 已回答、已结束、不可答或保留草稿：一行状态加可展开的只读记录，不占用概览高度。
+    /// 已回答、已结束、不可答或保留草稿：一行摘要，展开后是只读记录，不占用概览高度。
     private var closedSummary: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            Text(summaryTitle).font(.kpBody).fontWeight(.semibold)
-            Text(store.statusText).font(.kpBody).textSelection(.enabled)
-                // Recreate selectable text when its status changes so macOS
-                // accessibility does not retain the previous status label.
-                .id(store.statusText)
-            Text(summaryMeta).font(.kpSmall).foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: $showingRecord) {
+                recordList
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    // 摘要行即展开入口，暂不设可选文本；选择文本与展开点击的共存需实机确认。
+                    Text(summaryLine).font(.kpBody)
+                        // Recreate the text when its status changes so macOS
+                        // accessibility does not retain the previous status label.
+                        .id(store.statusText)
+                    Spacer(minLength: 0)
+                    Text("查看问题与回答").font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }
             if let reason = closedReason {
                 Text(reason).font(.kpSmall).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
-            DisclosureGroup(isExpanded: $showingRecord) {
-                recordList
-            } label: {
-                Text("查看问题与回答").font(.kpSmall).foregroundStyle(.secondary)
-            }
         }
     }
 
-    private var summaryTitle: String {
-        let count = store.question.questions.count
-        if store.obsolete { return "保留的未保存草稿 · \(count) 题" }
-        switch store.question.state {
-        case "open": return "等待你在 Plus 中回答 · \(count) 题"
-        case "answered": return "执行问题已回答 · \(count) 题"
-        default: return "执行问题已结束 · \(count) 题"
-        }
-    }
-
-    private var summaryMeta: String {
-        guard let closedAt = store.question.closedAt else { return "来源：Plus 执行会话 · 已等待 \(waitText)" }
-        return "结束于 \(TimeFormat.short(closedAt)) · 共等待 \(waitText)"
+    /// 一行摘要：状态文字 · 题数 · 结束时间（规格 §4.17）。没有结束时间的记录省略时间。
+    private var summaryLine: String {
+        // 开放但不可在本机回答时标题为「等待你在 Plus 中回答」，原因由下方一行说明。
+        let status = store.question.state == "open" && !store.obsolete ? "等待你在 Plus 中回答" : store.statusText
+        var parts = [status, "\(store.question.questions.count) 题"]
+        if let closedAt = store.question.closedAt { parts.append("\(TimeFormat.short(closedAt)) 结束") }
+        return parts.joined(separator: " · ")
     }
 
     /// 不可答时说明原因；已结束的记录沿用核心 detail 或失败原因。
@@ -1449,6 +1482,7 @@ private struct ExecutionAnswerCard: View {
 
     private var recordList: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("共等待 \(waitText)").font(.kpSmall).foregroundStyle(.secondary)
             ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(index + 1). \(question.title)").font(.kpSmall).fontWeight(.medium)
