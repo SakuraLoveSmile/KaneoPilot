@@ -216,6 +216,8 @@ def _require_snapshot(job, source_sha256):
 
 def receipt_evidence_current(conn, task, receipt, *, deadline=None, heartbeat=None):
     """Recheck receipt evidence on retries; historical local receipts never pass."""
+    if receipt.get("evidence_source") == "goal_report":
+        return _goal_receipt_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") != "plus_tool_results":
         return False
     try:
@@ -340,9 +342,76 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
     return result
 
 
+def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=False) -> dict:
+    """Live verdict from Plus's structured Goal report; transcript tool results are never read."""
+    from .. import verification_recovery
+    frozen = binding(conn, task, deadline=deadline, heartbeat=heartbeat)
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        evidence = verification_recovery.read_goal_evidence(conn, task)
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+    except util.KanpilotError as exc:
+        if exc.code == "verification_unconfirmed":
+            raise
+        raise util.KanpilotError("verification_identity_unconfirmed", util.redact(exc.message)) from exc
+    _require_snapshot(evidence["job"], frozen["source_sha256"])
+    commands, coverage, report = evidence["commands"], evidence["coverage"], evidence["report"]
+    checks = [{"command": row["command"], "exit_code": row["exit_code"], "timed_out": False,
+               "command_not_found": False, "message_id": row["report_check_id"],
+               "output_tail": util.redact(row["detail"])[-_OUTPUT_TAIL_BYTES:]}
+              for row in coverage["rows"]]
+    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    result = _check_result(commands, changes, checks)
+    if not coverage["ok"] and not result["empty_diff"]:
+        # Missing or unconfirmed report records stay unconfirmed; only a real nonzero exit fails.
+        real_failure = any(type(item.get("exit_code")) is int and item["exit_code"] != 0
+                           for item in coverage["failed"])
+        result["verification_ok"] = False
+        if not real_failure:
+            result.update(kind="unconfirmed", environment_failure=False, environment_reasons=[],
+                          detail="Plus 结构化报告未覆盖全部冻结验证命令或报告未就绪；请通过新的执行轮次补齐验证")
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        recheck = verification_recovery.read_goal_evidence(conn, db.require_task(conn, task["task_id"]))
+    except util.KanpilotError as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", util.redact(exc.message)) from exc
+    if (not _evidence_unchanged(evidence["hashes"]) or recheck["hashes"] != evidence["hashes"]
+            or recheck["report"]["report_sha256"] != report["report_sha256"]):
+        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间 Plus 报告或执行证据已变化")
+    if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
+        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间计划、轮次或源文件已变化")
+    result.update(binding=frozen, evidence_source="goal_report", evidence_sha256=evidence["hashes"],
+                  execution_turn_id=report["turn_id"], report_id=report.get("report_id"),
+                  report_sha256=report["report_sha256"], verification_evidence_version=1)
+    if result["verification_ok"] and not isolated:
+        result["index_source_sha256"] = git_delivery.expected_index_source_sha256(
+            frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+        if (binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen
+                or not _evidence_unchanged(evidence["hashes"])):
+            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码或 Plus 证据已变化")
+    return result
+
+
+def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None):
+    """Recheck a goal_report receipt: same run files, same report bytes, same coverage result."""
+    from .. import verification_recovery
+    try:
+        git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
+        evidence = verification_recovery.read_goal_evidence(conn, task)
+        _require_snapshot(evidence["job"], (receipt.get("binding") or {}).get("source_sha256"))
+        report = evidence["report"]
+        return (evidence["hashes"] == receipt.get("evidence_sha256")
+                and report["report_sha256"] == receipt.get("report_sha256")
+                and report["turn_id"] == receipt.get("execution_turn_id")
+                and _evidence_unchanged(evidence["hashes"])
+                and (receipt.get("verification_ok") is not True or evidence["coverage"]["ok"] is True))
+    except (util.KanpilotError, OSError, ValueError, TypeError, git_delivery.GitDeliveryError):
+        return False
+
+
 def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
     """A core commit changes HEAD/status, but not the verified source bytes."""
-    if (receipt.get("evidence_source") != "plus_tool_results"
+    if (receipt.get("evidence_source") != "goal_report"
             or receipt.get("verification_ok") is not True
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]):

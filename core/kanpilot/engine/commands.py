@@ -155,6 +155,18 @@ def cmd_engine_run(ctx, payload: dict) -> dict:
                 pass
 
 
+def _goal_comparison(conn, task, *, deadline=None, heartbeat=None) -> dict:
+    """Shadow-only report-path verdict, kept beside the transcript result that still decides."""
+    from . import verdict
+    try:
+        goal = verdict.evaluate_goal_task(conn, task, deadline=deadline, heartbeat=heartbeat, isolated=True)
+    except (util.KanpilotError, OSError, ValueError, TypeError, KeyError, verdict.git_delivery.GitDeliveryError) as exc:
+        return {"verification_ok": False, "kind": "unconfirmed",
+                "failure_code": exc.code if isinstance(exc, util.KanpilotError) else "verification_identity_unconfirmed",
+                "detail": util.redact(getattr(exc, "message", str(exc)))}
+    return {key: goal.get(key) for key in ("verification_ok", "kind", "detail", "report_sha256", "execution_turn_id")}
+
+
 def cmd_engine_verdict(ctx, payload: dict) -> dict:
     """``engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}``
 
@@ -211,7 +223,9 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 # DB phase 3, so engine-verdict must preserve this passed receipt
                 # until delivery-commit registers the already frozen commit.
                 return dict(prior, ok=True, deduplicated=True)
-        if (prior.get("evidence_source") == "plus_tool_results"
+        # Live retries reuse only Plus report receipts; transcript receipts are audit data.
+        source = "goal_report" if mode == "live" else "plus_tool_results"
+        if (prior.get("evidence_source") == source
                 and prior.get("operation_id") == operation_id
                 and verdict.receipt_evidence_current(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat)):
             if prior.get("execution_run_id") != task["run_id"] or prior.get("plan_sha256") != task["plan_sha256"]:
@@ -220,7 +234,13 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("verification_identity_unconfirmed", "判定回执的工作树已变化")
             return dict(prior, ok=True, deduplicated=True)
 
-        result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
+        if mode == "live":
+            result = verdict.evaluate_goal_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
+        else:
+            result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
+        if mode == "shadow":
+            # Shadow keeps the transcript verdict as the decider; the report verdict is recorded beside it.
+            result["goal_report_comparison"] = _goal_comparison(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
         if isinstance(exc, util.KanpilotError) and exc.code not in ("verification_identity_unconfirmed", "verification_unconfirmed"):
             raise

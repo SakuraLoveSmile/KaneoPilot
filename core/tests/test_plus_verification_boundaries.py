@@ -59,3 +59,10 @@ def test_retired_local_review_output_is_only_history(monkeypatch, tmp_path):
 def test_all_branch_modes_instruct_plus_to_run_the_checks():
     assert constants.DISPATCH_INSTRUCTION_BRANCH_LIVE == constants.DISPATCH_INSTRUCTION_BRANCH
     assert "调度台不会替你运行检查" in constants.EXECUTION_VERIFICATION_INSTRUCTION
+
+
+def test_execution_instruction_requires_goal_report_and_drops_transcript_rules():
+    text = constants.EXECUTION_VERIFICATION_INSTRUCTION
+    assert "SubmitGoalReport" in text and "exitCode" in text and "passed" in text
+    assert "使证据失效" not in text and "只读工具" not in text
+    assert "PATH" not in constants.DISPATCH_INSTRUCTION_BRANCH

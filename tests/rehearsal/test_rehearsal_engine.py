@@ -93,6 +93,20 @@ def _count_requests(db_path, task_id, kind, statuses):
         conn.close()
 
 
+def _goal_approval(turn_id, proposal_id, now):
+    """worker 留痕的 ``job.goal_approval``（未记录 executionId：报告按 proposal + 已批准 turn 列出）。"""
+    return {"proposal_id": proposal_id, "title": "目标契约", "status": "approved",
+            "planning_turn_id": "topup-plan-turn", "execution_turn_id": turn_id,
+            "target_permission_mode": "auto", "approved_at": now, "approved_by": "kaneopilot"}
+
+
+def _verify_check(command, event):
+    """Plus Goal 报告的一条检查项：退出码与输出取自本轮 verify 工具结果。"""
+    code = event["exit_code"]
+    return {"id": "C1", "command": command, "exitCode": code,
+            "result": "passed" if code == 0 else "failed", "detail": event["output"]}
+
+
 # ---------------------------------------------------------------------------
 # 场景 10：transient_backoff_capped_then_escalate
 # ---------------------------------------------------------------------------
@@ -838,6 +852,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
                                                       run_id=run_id),
            "session_id": session_id, "turn_id": "topup-turn", "config": config,
            "completion_policy": "command_verification",
+           "goal_approval": _goal_approval("topup-turn", "prop-topup", now),
            "plan_sha256": current["plan_sha256"],
            "verification_evidence_version": 1,
            "verification_source_sha256": git_delivery.source_state_sha256(worktree),
@@ -885,6 +900,10 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
     ]
     (directory / "events.jsonl").write_text(
         "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    # Plus 的 Goal 报告是唯一结果来源：检查项与本轮 verify 工具结果一致（退出码与输出）。
+    report_sha = fake_plus.server.set_goal_report(
+        session_id, proposal_id="prop-topup", turn_id="topup-turn", execution_id="exec-topup",
+        checks=[_verify_check(verify, events[1])])
     assert _count_requests(tmp_env.db, tid, "monitor", ("queued", "claimed")) == 0
     assert _count_requests(tmp_env.db, tid, "review", ("queued", "claimed")) == 0
 
@@ -1024,6 +1043,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         directory.mkdir(parents=True)
         job.update(run_id=run_id, turn_id="topup-retry-turn",
                    scope_id=runtime_client.stable_scope_id("execution", task_id=tid, run_id=run_id),
+                   goal_approval=_goal_approval("topup-retry-turn", "prop-topup-retry", kutil.now_iso()),
                    verification_source_sha256=git_delivery.source_state_sha256(worktree))
         for name, record in (("job.json", job), ("spec.json", dict(job, cwd=str(worktree),
                 repository=str(task.repository), plan_path=str(plan.path), runs_dir=str(directory)))):
@@ -1032,6 +1052,9 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         retry_events[1].update(exit_code=0, output="Plus verified execution result after environment repair")
         (directory / "events.jsonl").write_text(
             "".join(json.dumps(event) + "\n" for event in retry_events), encoding="utf-8")
+        retry_sha = fake_plus.server.set_goal_report(
+            session_id, proposal_id="prop-topup-retry", turn_id="topup-retry-turn",
+            execution_id="exec-topup-retry", checks=[_verify_check(verify, retry_events[1])])
         conn = _connect(tmp_env.db)
         try:
             with kdb.write_txn(conn):
@@ -1061,7 +1084,9 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
         (tmp_env.root / "topup-monitor.jsonl").read_text())
     assert fake_kaneo.tasks[tid]["status"] == "in-review"
     assert value["extra"]["engine_verdict"]["verification_ok"] is True
-    assert value["extra"]["engine_verdict"]["evidence_source"] == "plus_tool_results"
+    assert value["extra"]["engine_verdict"]["evidence_source"] == "goal_report"
+    # 收据绑定的是 Plus 报告字节（最后一轮执行的报告）。
+    assert value["extra"]["engine_verdict"]["report_sha256"] == (retry_sha if recovery_variant else report_sha)
     assert not (worktree / "verify-ran.pyc").exists(), "Pilot must only read Plus evidence"
     assert spawned == (["monitor", "monitor"] if recovery_variant else ["monitor"]), (first, spawned)
     assert review_claims == []
