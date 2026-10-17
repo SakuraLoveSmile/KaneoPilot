@@ -433,6 +433,24 @@ if let old = decode(TaskDetail.self, #"{"task_id":"task1234","status":"ready"}"#
     expect(old.automation == nil && old.delivery == nil, "旧任务缺自动字段零迁移解码")
 }
 
+// §4.1（2026-10-17）：enqueue 主按钮跟随核心给出的 kind，不据 status 推导。
+for (kind, label) in [("plan", "安排规划"), ("dispatch", "安排派发"),
+                      ("monitor", "安排检查"), ("review", "安排评审")] {
+    let json = #"{"task_id":"t-enqueue","status":"ready","allowed_actions":["enqueue"],"enqueue_kind":"\#(kind)"}"#
+    if let detail = decode(TaskDetail.self, json) {
+        expect(detail.enqueueActionLabel == label, "enqueue_kind=\(kind) 显示「\(label)」")
+    }
+}
+for json in [
+    #"{"task_id":"t-enqueue","status":"ready","allowed_actions":["enqueue"]}"#,
+    #"{"task_id":"t-enqueue","status":"ready","allowed_actions":["recheck"],"enqueue_kind":null}"#,
+    #"{"task_id":"t-enqueue","status":"ready","enqueue_kind":"unknown_kind"}"#
+] {
+    if let detail = decode(TaskDetail.self, json) {
+        expect(detail.enqueueActionLabel == "安排下一步", "缺省或未知 enqueue_kind 保持通用文案")
+    }
+}
+
 // MARK: - 结果
 
 // MARK: - To Do 仓库映射状态独立于任务可规划状态
