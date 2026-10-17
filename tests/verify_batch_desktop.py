@@ -160,15 +160,24 @@ def send_key(key: str):
 
 
 def click_batch_select_toolbar():
+    # 批量选择已收入顶栏「更多」菜单（ui-spec §4.1 / §4.13）：先开菜单，再点「批量选择…」
     code = """
     tell application "System Events"
         tell process "KaneoPilot"
             set frontmost to true
-            repeat with b in (buttons of toolbar 1 of front window)
+            repeat with pb in (pop up buttons of toolbar 1 of front window)
                 try
-                    if description of b contains "批量选择" then
-                        click b
-                        return "clicked"
+                    if description of pb contains "更多" then
+                        click pb
+                        delay 0.4
+                        repeat with mi in (menu items of menu 1 of pb)
+                            if name of mi contains "批量选择" then
+                                click mi
+                                return "clicked"
+                            end if
+                        end repeat
+                        key code 53
+                        return "menu_item_not_found"
                     end if
                 end try
             end repeat
@@ -178,7 +187,7 @@ def click_batch_select_toolbar():
     """
     res = run_osa(code)
     if res != "clicked":
-        raise RuntimeError("Toolbar batch button not found")
+        raise RuntimeError(f"Toolbar 更多 → 批量选择 not clickable: {res}")
     time.sleep(0.6)
 
 
@@ -205,7 +214,7 @@ def run_suite_for_mode(mode: str):
         # 1. 宽屏 1180x760
         set_window_size(1180, 760)
 
-        # 点击工具栏的“批量选择”进入批量模式
+        # 点击顶栏「更多」菜单中的「批量选择…」进入批量模式
         click_batch_select_toolbar()
 
         # 点击操作条“全选当前结果” (button 1)

@@ -130,36 +130,41 @@ struct RootView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        // 命令不可用原因提示（ui-spec §2）
-        ToolbarItem(placement: .status) {
-            Group {
-                if let action = model.actionInFlight {
-                    Label("正在执行：\(action)", systemImage: "hourglass")
-                } else if let banner = model.banner {
-                    Text(banner.message)
-                } else if let at = model.lastRefreshAt {
-                    Text("更新于 \(TimeFormat.fullString(ISO8601DateFormatter().string(from: at)))")
-                        .accessibilityLabel("上次刷新时间")
-                } else if !model.coreFound {
-                    Text("未找到调度核心")
+        // 命令不可用原因提示（ui-spec §2）：平时不占位，仅在命令进行中、横幅或核心缺失时出现
+        if model.actionInFlight != nil || model.banner != nil || !model.coreFound {
+            ToolbarItem(placement: .status) {
+                Group {
+                    if let action = model.actionInFlight {
+                        Label("正在执行：\(action)", systemImage: "hourglass")
+                    } else if let banner = model.banner {
+                        Text(banner.message)
+                    } else {
+                        Text("未找到调度核心")
+                    }
                 }
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
-            .font(.kpSmall)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
         }
         if section != .dashboard {
             ToolbarItem(placement: .primaryAction) {
-                // 暂停/恢复自动推进（全局态）
+                // 全局自动推进：状态写进按钮文字（ui-spec §2 / §4.1）
                 Button {
                     Task { await model.toggleGlobalPause() }
                 } label: {
-                    Label(model.globalPaused ? "恢复自动推进" : "暂停自动推进",
-                          systemImage: model.globalPaused ? "play.fill" : "pause.fill")
+                    if model.globalPaused {
+                        Label("已暂停 · 恢复自动推进", systemImage: "play.fill")
+                    } else {
+                        Label("暂停自动推进", systemImage: "pause.fill")
+                    }
                 }
                 .labelStyle(.titleAndIcon)
-                .help(model.globalPaused ? "恢复自动推进（当前全局暂停）" : "暂停自动推进")
-                .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
+                .tint(model.globalPaused ? Color.orange : nil)
+                .help(model.globalPaused
+                      ? "全局已暂停：不再自动领取新任务。点击恢复自动推进"
+                      : "全局：暂停后不再自动领取新任务，已在执行的任务不受影响")
+                .accessibilityLabel(model.globalPaused ? "已暂停，恢复自动推进" : "暂停自动推进")
                 .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
             }
         }
@@ -167,13 +172,36 @@ struct RootView: View {
             Button {
                 Task { await model.refreshAll() }
             } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
+                Label(refreshTitle, systemImage: "arrow.clockwise")
             }
-            .labelStyle(.iconOnly)
-            .help("刷新（⌘R）")
+            .labelStyle(.titleAndIcon)
+            .help(refreshHelp)
             .accessibilityLabel("刷新")
+            .accessibilityValue(lastRefreshFull ?? "")
             .keyboardShortcut("r", modifiers: .command)
             .disabled(model.busy)
         }
     }
+
+    /// 上次刷新的完整时间（提示与无障碍值）；从未刷新时为 nil。
+    private var lastRefreshFull: String? {
+        model.lastRefreshAt.map { TimeFormat.fullString(ISO8601DateFormatter().string(from: $0)) }
+    }
+
+    /// 刷新按钮文字：有刷新记录时附带 HH:mm，让用户看到数据停在何时。
+    private var refreshTitle: String {
+        guard let at = model.lastRefreshAt else { return "刷新" }
+        return "刷新 \(Self.clockFormatter.string(from: at))"
+    }
+
+    private var refreshHelp: String {
+        guard let full = lastRefreshFull else { return "刷新（⌘R）" }
+        return "刷新（⌘R）· 上次刷新 \(full)"
+    }
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
 }
