@@ -548,7 +548,9 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             actions.append("confirm_dispatch")
         elif (status in constants.ENQUEUE_INFER and status != "needs_plan"
               and not (status == "ready" and dispatch_sent)
-              and not (status == "in_review" and db.task_auto_paused(task))):
+              and not (status == "in_review" and db.task_auto_paused(task))
+              and active_request_for_task(conn, task["task_id"]) is None):
+            # protocol §5.3（2026-10-17）：已有 queued/claimed 活动请求时不再提供 enqueue。
             actions.append("enqueue")
         from . import review_recovery
         from . import review_resolution
@@ -617,6 +619,13 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
     return actions
 
 
+def enqueue_kind(task: sqlite3.Row, actions: list) -> Optional[str]:
+    """protocol §5.2 `enqueue_kind`：仅当 allowed_actions 含 enqueue 时为 §5.3 推断 kind，否则 None。"""
+    if "enqueue" not in actions:
+        return None
+    return constants.ENQUEUE_INFER.get(task["status"])
+
+
 def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     detail = task_summary(conn, task, now)
     from . import engine_fix_revert
@@ -638,6 +647,7 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     attempts = conn.execute(
         "SELECT * FROM attempts WHERE task_id=? ORDER BY id", (task["task_id"],)
     ).fetchall()
+    actions = allowed_actions(conn, task, now)
     detail.update(
         {
             "extra": db.task_extra(task),
@@ -662,7 +672,8 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             "failure_reason": task["failure_reason"],
             "failure_stage": task["failure_stage"],
             "manual_recovery_required": task["manual_recovery_required"],
-            "allowed_actions": allowed_actions(conn, task, now),
+            "allowed_actions": actions,
+            "enqueue_kind": enqueue_kind(task, actions),
             "attempts": [attempt_view(row) for row in attempts],
             "links": task_links(task),
             # v1.5（protocol §5.18.5）：当前轮次索引视图（worktree_path /
