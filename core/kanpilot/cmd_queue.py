@@ -355,7 +355,23 @@ def verification_retry_candidate(conn, task):
                 and task["session_id"] and row["session_id"] == task["session_id"])
 
 
-def _require_execution_terminal(ctx, task, expected):
+def _require_settled_continuation(ctx, task, expected, status, connection_file):
+    """Accept a later Plus turn only when it is a verified, settled manual continuation."""
+    from . import session_control
+    try:
+        continued = session_control.settled_continuation(ctx.conn, task["task_id"], expected, status, connection_file)
+    except util.KanpilotError as exc:
+        raise util.KanpilotError("conflict", "Plus 手动继续后的状态无法核验，请先检查 Plus 状态，不能重复执行") from exc
+    state = continued.get("continued_state")
+    if state == "running":
+        raise util.KanpilotError("conflict", "Plus 手动继续的轮次仍在运行，请先检查 Plus 状态，不能重复执行")
+    if state == "waiting_permission":
+        raise util.KanpilotError("conflict", "Plus 手动继续的轮次仍在等待确认，请先在 Plus 中处理，不能重复执行")
+    if state not in ("finished", "failed", "aborted"):
+        raise util.KanpilotError("conflict", "Plus 存在后续轮次，但原执行轮次不满足手动继续的核验条件，不能重复执行")
+
+
+def _require_execution_terminal(ctx, task, expected, *, allow_settled_continuation=False):
     from . import cmd_session, headless_adapter, round_store
     source = headless_adapter.resolve_source(ctx.conn)
     signature = source.source_signature(task["task_id"], expected)
@@ -376,9 +392,13 @@ def _require_execution_terminal(ctx, task, expected):
         if not config.get("connection_file") or not session_id or not turn_id:
             raise util.KanpilotError("conflict", "旧 Plus 会话身份或配置不完整，请先恢复会话观察")
         status = harness_plus_adapter.plus_status(config["connection_file"], session_id=session_id, timeout=2)
-        if (status.get("is_running") is not False or status.get("pending_permission")
-                or status.get("current_turn_id") not in (None, turn_id)):
-            raise util.KanpilotError("conflict", "Plus 会话仍有运行或接续轮次，请先检查 Plus 状态，不能重复执行")
+        if status.get("is_running") is not False or status.get("pending_permission"):
+            raise util.KanpilotError("conflict", "Plus 会话仍有运行或等待权限，请先检查 Plus 状态，不能重复执行")
+        if status.get("current_turn_id") not in (None, turn_id):
+            # A later turn is a manual continuation; only a retry may proceed once that turn has settled.
+            if not allow_settled_continuation:
+                raise util.KanpilotError("conflict", "Plus 会话存在后续轮次，请先检查 Plus 状态，不能重复执行")
+            _require_settled_continuation(ctx, task, expected, status, config["connection_file"])
         client, _record = harness_plus_adapter._get_client(config["connection_file"], timeout=2)
         record = client.turn_get(session_id, turn_id)
         turn = record.get("turn") if isinstance(record.get("turn"), dict) else record
@@ -402,7 +422,7 @@ def verify_execution_retry_terminal(conn, task, now=None):
     if retry:
         current = now or util.now_dt()
         _require_execution_terminal(SimpleNamespace(conn=conn, now=current, now_iso=util.to_iso(current)),
-                                    task, retry["source_run_id"])
+                                    task, retry["source_run_id"], allow_settled_continuation=True)
 
 
 def _prepare_execution_retry(ctx, payload):
@@ -428,7 +448,7 @@ def _prepare_execution_retry(ctx, payload):
     snapshot = _resolution_snapshot(task)
     source = headless_adapter.resolve_source(ctx.conn)
     signature = source.source_signature(task["task_id"], expected)
-    row, detail = _require_execution_terminal(ctx, task, expected)
+    row, detail = _require_execution_terminal(ctx, task, expected, allow_settled_continuation=True)
     if not task["requirements_sha256"]:
         raise util.KanpilotError("conflict", "旧计划需求身份缺失，请重新规划")
     try:

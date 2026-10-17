@@ -2279,7 +2279,7 @@ def cmd_get_session(state, payload):
     if scenario.get("status_read_error"):
         return fail(str(scenario["status_read_error"]), "remote_unavailable")
     status = scenario.get("round_status") or session.get("run_status") or "unknown"
-    detail = {"backend": session.get("backend") or "pi", "run_status": status,
+    detail = {"backend": session.get("backend") or "pi", "run_status": status, "turn_id": "turn-round",
               "worktree_path": os.path.join(os.environ.get("KANPILOT_REPOS_ROOT", "/tmp"), run_id),
               "started_at": session.get("started_at"), "exit_code": 1 if status == "failed" else None,
               "terminal": {"outcome": "failed" if status == "failed" else "completed",

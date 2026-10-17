@@ -99,7 +99,9 @@ struct SessionReaderView: View {
             }.disabled(store.acting)
             Button("取消", role: .cancel) { retryConfirmationRunID = nil }
         } message: { _ in
-            Text("沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。")
+            Text(store.hasManualContinuation
+                 ? "沿用已确认计划重新排队执行，保留已有改动、Plus 手动继续留下的改动和原失败记录。执行端领取后会再次调用模型。"
+                 : "沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。")
         }
         .confirmationDialog("向 Plus \(startConfirmation?.startLabel ?? "请求开始")？", isPresented: Binding(
             get: { startConfirmation != nil },
@@ -368,13 +370,13 @@ struct SessionReaderView: View {
                             }
                         }.font(.kpBody)
                     }
-                    if isPlus || store.canRetryExecution {
+                    if isPlus || store.retryEligible {
                         HStack(spacing: Spacing.m) {
-                            if store.canRetryExecution {
+                            if store.retryEligible {
                                 Button { retryConfirmationRunID = store.selectedRunID } label: {
                                     Label("重新执行（沿用计划）", systemImage: "arrow.clockwise")
                                 }.buttonStyle(.borderedProminent)
-                                    .disabled(store.acting || store.requestingStart)
+                                    .disabled(!store.canRetryExecution || store.acting || store.requestingStart)
                             }
                             if isPlus {
                             Button("检查 Plus 状态") { Task { await store.checkControlStatus() } }
@@ -385,6 +387,9 @@ struct SessionReaderView: View {
                             }
                             }
                             if store.controlLoading || store.requestingStart || store.acting { ProgressView().controlSize(.small) }
+                        }
+                        if let reason = store.retryBlockedReason {
+                            Text(reason).font(.kpSmall).foregroundStyle(.secondary).help(reason)
                         }
                     }
                     Divider()
