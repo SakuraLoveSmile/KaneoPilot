@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch
 
-from helpers import KanpilotTestCase
+from helpers import KanpilotTestCase, use_simulated_plus_goal_reports
 from kanpilot import cli, cmd_delivery, core, db, git_delivery, harness_plus_adapter, round_store, util
 from test_git_delivery import make_repo, branch, commit, git
 
@@ -9,6 +9,8 @@ from test_git_delivery import make_repo, branch, commit, git
 class DeliveryCommit(KanpilotTestCase):
     def setUp(self):
         super().setUp()
+        # Live verdicts read Plus's Goal report; the double mirrors this round's command results.
+        use_simulated_plus_goal_reports(self)
         self.repo = make_repo(self.root / "delivery-repo")
         self.fixture = self.make_ready_task(task_id="task1234")
         self.ctx = cli.Context(self.db_path)

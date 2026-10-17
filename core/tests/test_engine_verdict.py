@@ -13,8 +13,8 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import db, util, round_store, harness_plus_adapter  # noqa: E402
+from helpers import KanpilotTestCase, goal_checks, goal_report_read  # noqa: E402
+from kanpilot import cmd_read, db, util, round_store, harness_plus_adapter  # noqa: E402
 from kanpilot.engine import verdict  # noqa: E402
 
 
@@ -62,6 +62,15 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.plus_turn_mock = turn_patch.start()
         self.addCleanup(status_patch.stop)
         self.addCleanup(turn_patch.stop)
+        # Plus's Goal report is the live result source; each test edits this fake read.
+        self.goal = {"checks": [], "turn_id": "execution", "approved": None, "state": "ready",
+                     "structured": True, "execution_status": "completed", "verdict": "met"}
+        goal_read = patch.object(cmd_read, "read_goal_report", side_effect=lambda *a, **k: goal_report_read(
+            self.goal["checks"], turn_id=self.goal["turn_id"], approved=self.goal["approved"], state=self.goal["state"],
+            structured=self.goal["structured"], execution_status=self.goal["execution_status"],
+            verdict=self.goal["verdict"]))
+        goal_read.start()
+        self.addCleanup(goal_read.stop)
 
     def _running_task_with_repo(self, task_id, *, commands, change=True):
         info = self.make_ready_task(task_id=task_id)
@@ -94,6 +103,8 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.directory = self.runs_root / tid / ("run-" + task_id)
         self.directory.mkdir(parents=True)
         self.commands = commands
+        self.goal = {"checks": goal_checks(commands), "turn_id": "execution", "approved": None, "state": "ready",
+                     "structured": True, "execution_status": "completed", "verdict": "met"}
         self.worktree = worktree
         self.job = {"task_id": tid, "run_id": "run-" + task_id, "backend": "pi_desktop",
                     "config": {"connection_file": str(self.root / "fake-plus.json")}, "status": "finished", "exit_code": 0, "session_id": "session",
@@ -131,6 +142,12 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         finally:
             conn.close()
 
+    def _set_mode(self, tid, mode):
+        row = self._row(tid)
+        self.call("set-project-mapping", {"project_id": row["project_id"], "repository": row["repository"], "enabled": True,
+            "expected_revision": self.call("get-project-mappings")["revision"]})
+        self.call("set-project-engine-mode", {"project_id": row["project_id"], "engine_mode": mode})
+
     def test_plus_success_never_runs_pilot_verification_in_live_or_shadow(self):
         for mode in ("live", "shadow"):
             tid, sha = self._running_task_with_repo("pass-" + mode, commands=["exit 91"])
@@ -142,7 +159,9 @@ class TestEngineVerdictCommand(KanpilotTestCase):
                     patch.object(verdict, "project_verify_env", side_effect=AssertionError("Pilot env must not be read")):
                 result = self.verdict(tid, sha)
             self.assertTrue(result["verification_ok"])
-            self.assertEqual(result["evidence_source"], "plus_tool_results")
+            self.assertEqual(result["evidence_source"], "goal_report" if mode == "live" else "plus_tool_results")
+            if mode == "shadow":
+                self.assertTrue(result["goal_report_comparison"]["verification_ok"])
             self.assertEqual(result["checks"][0]["exit_code"], 0)
 
     def test_real_failure_unknown_missing_and_wrong_turn_cannot_pass(self):
@@ -279,8 +298,7 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         try:
             self.assertTrue(verdict.valid_committed_receipt(conn, db.require_task(conn, tid), receipt))
             self.assertTrue(self.verdict(tid, sha)["deduplicated"])
-            self.events[1]["exit_code"] = 1
-            self.write_evidence()
+            self.goal["checks"] = [dict(self.goal["checks"][0], exitCode=1, result="failed")]
             self.assertFalse(verdict.valid_committed_receipt(conn, db.require_task(conn, tid), receipt))
         finally:
             conn.close()
@@ -323,6 +341,96 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         with (self.directory / "events.jsonl").open("a") as file:
             file.write('{"seq":')
         self.assertEqual(self.verdict(tid, sha)["kind"], "unconfirmed")
+
+    def test_live_goal_report_decides_state_coverage_and_real_failures(self):
+        for state in ("pending", "not_found"):
+            tid, sha = self._running_task_with_repo("report-" + state, commands=["pytest"])
+            self._set_mode(tid, "live")
+            self.goal["state"] = state
+            result = self.verdict(tid, sha)
+            self.assertEqual((result["kind"], result["failure_code"]), ("unconfirmed", "verification_unconfirmed"), state)
+        tid, sha = self._running_task_with_repo("report-missing", commands=["pytest"])
+        self.goal["checks"] = []
+        self.assertEqual(self.verdict(tid, sha)["kind"], "unconfirmed")
+        tid, sha = self._running_task_with_repo("report-failed", commands=["pytest"])
+        self.goal["checks"] = [dict(self.goal["checks"][0], exitCode=7, result="failed")]
+        result = self.verdict(tid, sha)
+        self.assertFalse(result["verification_ok"])
+        self.assertEqual(result["kind"], "verify_failed")
+
+    def test_live_verdict_ignores_transcript_results_and_legacy_receipts(self):
+        tid, sha = self._running_task_with_repo("transcript-audit", commands=["pytest"])
+        self._set_mode(tid, "live")
+        self.events[1]["exit_code"] = 1
+        self.write_evidence()
+        receipt = self.verdict(tid, sha)
+        self.assertTrue(receipt["verification_ok"])
+        self.assertEqual(receipt["evidence_source"], "goal_report")
+        # A transcript receipt from an earlier build is never reused as a live pass.
+        tid, sha = self._running_task_with_repo("legacy-receipt", commands=["pytest"])
+        conn = db.connect(self.db_path)
+        db.set_extra(conn, db.require_task(conn, tid), util.now_iso(), engine_verdict={
+            "operation_id": "same", "verification_ok": True, "evidence_source": "plus_tool_results",
+            "execution_run_id": "run-" + tid, "plan_sha256": sha,
+            "binding": verdict.binding(conn, db.require_task(conn, tid))})
+        conn.close()
+        self._set_mode(tid, "live")
+        self.goal["checks"] = [dict(self.goal["checks"][0], exitCode=1, result="failed")]
+        result = self.verdict(tid, sha, operation_id="same")
+        self.assertFalse(result["verification_ok"])
+        self.assertEqual(result["evidence_source"], "goal_report")
+
+    def test_live_goal_report_must_belong_to_the_approved_turn_chain(self):
+        tid, sha = self._running_task_with_repo("report-turn", commands=["pytest"])
+        self._set_mode(tid, "live")
+        self.goal.update(turn_id="drafting", approved=["execution"])
+        result = self.verdict(tid, sha)
+        self.assertEqual(result["kind"], "unconfirmed")
+        self.assertEqual(result["failure_code"], "verification_identity_unconfirmed")
+
+    def test_live_report_floor_requires_structured_completed_and_met(self):
+        # S1 floor without reviews: a fallback, unfinished or unmet report never becomes a pass.
+        for field, value in (("structured", False), ("execution_status", "running"), ("verdict", "partial")):
+            with self.subTest(field=field):
+                tid, sha = self._running_task_with_repo("floor-" + field, commands=["pytest"])
+                self._set_mode(tid, "live")
+                self.goal[field] = value
+                result = self.verdict(tid, sha)
+                self.assertFalse(result["verification_ok"])
+                self.assertEqual(result["kind"], "unconfirmed")
+
+    def test_live_receipt_binds_the_report_bytes(self):
+        tid, sha = self._running_task_with_repo("report-binding", commands=["pytest"])
+        self._set_mode(tid, "live")
+        receipt = self.verdict(tid, sha)
+        self.assertTrue(receipt["verification_ok"])
+        self.assertEqual(receipt["report_sha256"],
+                         goal_report_read(self.goal["checks"], turn_id="execution")["report_sha256"])
+        conn = db.connect(self.db_path)
+        try:
+            task = db.require_task(conn, tid)
+            self.assertTrue(verdict.receipt_evidence_current(conn, task, receipt))
+            # An edited report body is different evidence: the earlier pass no longer stands.
+            self.goal["checks"] = [dict(self.goal["checks"][0], detail="edited after the pass")]
+            self.assertFalse(verdict.receipt_evidence_current(conn, task, receipt))
+        finally:
+            conn.close()
+
+    def test_shadow_records_the_report_verdict_beside_the_transcript_decision(self):
+        tid, sha = self._running_task_with_repo("shadow-compare", commands=["pytest"])
+        self._set_mode(tid, "shadow")
+        self.goal["checks"] = [dict(self.goal["checks"][0], exitCode=1, result="failed")]
+        result = self.verdict(tid, sha)
+        self.assertTrue(result["verification_ok"])  # the transcript still decides in shadow
+        self.assertEqual(result["evidence_source"], "plus_tool_results")
+        self.assertFalse(result["goal_report_comparison"]["verification_ok"])
+        self.assertEqual(result["goal_report_comparison"]["kind"], "verify_failed")
+        tid, sha = self._running_task_with_repo("shadow-pending", commands=["pytest"])
+        self.goal["state"] = "pending"
+        result = self.verdict(tid, sha)
+        self.assertTrue(result["verification_ok"])
+        self.assertEqual(result["goal_report_comparison"]["kind"], "unconfirmed")
+
 
 class TestEnvironmentClassification(unittest.TestCase):
     def test_controlled_persisted_reason_survives_redaction_with_legacy_fallback(self):

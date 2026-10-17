@@ -1314,6 +1314,27 @@ def collect_criterion_reviews(criterion_reviews) -> tuple:
             "evidence_refs": clean_refs,
         })
     return reviews, referenced
+
+
+def goal_report_floor_reason(read: dict):
+    """报告底线（不含审查项）：``read_goal_report`` 结果能否作为完成证据（S1）。
+
+    与 ``verify_goal_completion`` 的确定性部分同口径（ready、structured、
+    execution.status=completed、verdict=met），但不核对 reviews：live 判定的
+    语义由 Plus 报告的 checks 承载，不由 AI 审查项承载。返回不满足的中文原因；
+    底线成立返回 ``None``。
+    """
+    if read.get("state") != "ready":
+        return f"报告 state 不是 ready：{read.get('state')!r}"
+    if read.get("structured") is not True:
+        return "报告 integrity.kind 不是 structured：fallback 等同没有完成报告"
+    if read.get("execution_status") != "completed":
+        return f"报告 execution.status 不是 completed：{read.get('execution_status')!r}"
+    if read.get("verdict") != "met":
+        return f"报告 verdict 不是 met：{read.get('verdict')!r}"
+    return None
+
+
 def verify_goal_completion(report: dict, reviews: list,
                           referenced: set, *, report_state=None) -> None:
     """确定性报告底线（§5.23.10 T5-C）；任一不满足 → conflict。

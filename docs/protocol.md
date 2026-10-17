@@ -733,16 +733,16 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
 - Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
 
-### 5.18.6 引擎 verdict（Plus 执行验证，Pilot 核对证据）
+### 5.18.6 引擎 verdict（Plus 执行验证，Pilot 核对结构化报告）
 
-验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
+验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。完成判定的结果来源是 Plus 结构化 Goal 报告，Pilot 不回查转录中的工具结果。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
 - 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
-- 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条以终端工具执行，保留真实独立退出码与工具输出；助手的文字总结不能作为通过依据。
-- 核心核对 task/run/plan/session/turn、完整终态与登记工作树，只认当前执行 turn 的工具证据；无 turn 标签只允许可信 Goal 执行起点窗口。显式 cwd/workdir 不能越出登记工作树。规划、旧 turn、任意人工接续与其他 agent 的未绑定结果不能混用。
-- 每条声明取最后一次匹配结果；退出码缺失、非整数、截断或缺命令均未确认。验证后出现可写工具（包括非验证 shell、Edit/Write、未知工具、Team/subagent）使先前通过失效，必须在写入后重新验证。仅明确只读工具可忽略。
-- 新执行记录标记 `verification_evidence_version=1`；Plus worker 在成功终态落地前记录 `verification_source_sha256`，核心与当前源码指纹比较，并前后复校 binding 和证据文件哈希。该快照与工具顺序用于识别已记录的验证后改动，不宣称是 Plus 原生工具提供的逐命令源码签名。
-- `extra.engine_verdict` 保留当前收据结构，新增 `evidence_source=plus_tool_results` 与证据文件指纹。真实非零结果为质量失败；明确 Plus 环境错误为环境失败；缺证据、缺终态快照、身份变化为 unconfirmed，不自动启动质量补救。新通过收据仍绑定交付提交树。
+- 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条执行，并在完成时以结构化 Goal 报告（`SubmitGoalReport`）提交 `checks`，逐条列出冻结命令、退出码与结果。报告是完成判定的唯一结果来源；助手的文字总结不能作为通过依据。
+- 核心核对 task/run/turn 身份、`plan_sha256` 与登记工作树。报告经 `read_goal_report` 读取并做身份核对（session、proposal、execution 相符；绝不按名称或标题匹配）。本轮执行 turn 与报告 turn 都必须属于已批准的 turn 链（含 `turn_adopted`）。规划、旧 turn、任意人工接续与其他 agent 的报告不能混用。报告不可用（not_found、pending、draft、failed、corrupt、truncated）为未确认。报告底线（不含 reviews，与 `verify_goal_completion` 的确定性部分同口径）要求 `ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；任一不满足（如 fallback 报告）同为未确认。
+- 冻结 verify 每条命令（去除行内 `VAR=value` 环境前缀与尾部中文注释、去首尾空白后，与检查命令精确相等）必须在报告 `checks` 中对应一条 `exitCode=0` 且 `result=passed` 的记录；缺一条即未确认。真实非零退出或 `result=failed` 为质量失败。
+- Plus worker 在成功终态落地前记录 `verification_source_sha256`，核心与当前源码指纹比较，并前后复校 binding 与报告哈希。报告不带源码指纹，该终态快照用于补足“验证的树 = 交付的树”。
+- `extra.engine_verdict` 收据新增 `evidence_source=goal_report`，并记录 `report_id`、`report_sha256` 与逐条覆盖结果。真实非零结果为质量失败；明确 Plus 环境错误为环境失败；报告缺失、身份变化、覆盖缺失为 unconfirmed，不自动启动质量补救。新通过收据仍绑定交付提交树。旧值 `plus_tool_results` 仅用于历史审计。
 - 旧本机 `verification_checks` 和旧 engine verdict 保留供历史审计，不覆盖新的 Plus 结果、不作为当前完成门的替代凭据；历史 job 不得在只读恢复时补造“当时源码快照”。
 - `verify_env` 保留配置兼容与历史查阅，不注入 Pilot 验证进程，也不作为 Plus 已配置的证明。Java/SDK/设备问题应在 Plus 实际执行环境处理。
 - `engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}` 只核证，不派发模型、不代跑验证。相同操作去重必须同时符合当前证据来源、文件指纹和源码身份。
@@ -1498,12 +1498,12 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    `user`（规划问答/评审决议等真正的用户动作）。
 
 
-#### 5.27.11 live monitor 核心判定（Plus 验证证据）
+#### 5.27.11 live monitor 核心判定（Plus 结构化报告）
 
-- live 调用 engine-verdict 核对 §5.18.6 的 Plus 工具证据；shadow 记录同源对比收据，保留旧结果路径；legacy 保留历史 Goal/command_verification 完成策略。三种模式均不在 Pilot 执行 verify。
-- 核心只读取冻结且哈希匹配的计划、可信本机 spec/job/events 与登记工作树，拒绝 payload 自带的伪造检查。核对失败不得退回仓库根目录执行或让助手文字代替工具证据。
+- live 调用 engine-verdict 核对 §5.18.6 的 Plus 结构化报告（`evidence_source=goal_report`）。shadow 同时记录转录路径与报告路径的对比收据，结果仍以旧路径为准；legacy 保留历史 Goal/command_verification 完成策略。三种模式均不在 Pilot 执行 verify。
+- 核心只读取冻结且哈希匹配的计划、可信本机 spec/job 与登记工作树，并经 `read_goal_report` 读取报告；拒绝 payload 自带的伪造检查。核对失败不得退回仓库根目录执行或让助手文字代替报告。
 - 证据读取、Git 指纹与逐阶段核对受 monitor 租约和 runner 剩余时限约束，在 SQLite 写锁外进行，期间保留心跳与前后身份复校。
-- 有效 diff 非空且 Plus 验证全部通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 证据门。
+- 有效 diff 非空且 Plus 报告覆盖全部冻结命令并通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 报告门。
 - 环境失败 → verification_environment_failure，提示检查 Plus 执行环境。旧环境失败 resume 将原 run/plan/worktree 排回 monitor，只重新核对已有 Plus 证据，不新增模型调用、派发、执行轮或补救计数。缺失/未知/源码变化等证据未确认进入 attention，不触发自动质量修复；真实测试失败和空转仍沿既有质量阶梯。
 - `resolve reverify` 只读重新核对当前 Plus 证据，保留远端状态、轮次、终态、计划及证据复校。`run-verification-checks` 兼容入口拒绝本地执行，历史状态接口可读取旧审计记录。
 - 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。

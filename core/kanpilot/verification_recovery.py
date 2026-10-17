@@ -58,7 +58,8 @@ def _snapshot(conn, task_id, run_id):
                 "SELECT * FROM events WHERE task_id=? ORDER BY id", (task_id,))]}
 
 
-def _read_evidence(conn, task, *, require_pass=True):
+def _read_run_evidence(conn, task):
+    """Trusted local run identity and frozen plan; transcript tool results are not matched here."""
     from . import cmd_session, headless_adapter, planfile
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     job, directory = cmd_session._identity_job(
@@ -144,6 +145,21 @@ def _read_evidence(conn, task, *, require_pass=True):
     if (declaration.get("plan_sha256") != task["plan_sha256"]
             or not parsed["ok"] or declaration.get("commands") != parsed.get("commands")):
         _conflict("当前计划缺少一致的固化 verify 命令声明")
+    _require_unchanged(hashes)
+    return hashes, job, events, declaration
+
+
+def _require_unchanged(hashes):
+    try:
+        if any(util.sha256_file(Path(path)) != digest for path, digest in hashes.items()):
+            _conflict("读取期间本机执行证据或计划文件已变化")
+    except OSError as exc:
+        raise util.KanpilotError("conflict", "读取期间本机执行证据或计划文件已不可读") from exc
+
+
+def _read_evidence(conn, task, *, require_pass=True):
+    """Transcript-matched evidence: legacy and shadow audit only. Live verdicts read the Goal report."""
+    hashes, job, events, declaration = _read_run_evidence(conn, task)
     # Only Plus tool results from this execution window can establish a pass.
     # Historical core-run receipts and manual overrides are audit data only.
     messages = dsh_events.to_messages(events)
@@ -159,12 +175,39 @@ def _read_evidence(conn, task, *, require_pass=True):
             result.update(ok=False, missing=list(declaration["commands"]))
     if require_pass and not result["ok"]:
         _conflict("本轮 Plus 验证命令仍缺失、失败或结果未知；请让 Plus 重新执行并验证，未恢复推进")
-    try:
-        if any(util.sha256_file(Path(path)) != digest for path, digest in hashes.items()):
-            _conflict("读取期间本机执行证据或计划文件已变化")
-    except OSError as exc:
-        raise util.KanpilotError("conflict", "读取期间本机执行证据或计划文件已不可读") from exc
+    _require_unchanged(hashes)
     return hashes, job, result
+
+
+def read_goal_evidence(conn, task):
+    """Plus's structured Goal report for this round, checked against the frozen commands.
+
+    Transcript tool results are never read. Run identity, terminal state and file
+    hashes come from the trusted local run; ``cmd_read.read_goal_report`` checks
+    the report's own identity.
+    """
+    from . import cmd_read
+    hashes, job, _events, declaration = _read_run_evidence(conn, task)
+    _require_live_terminal(job)
+    report = cmd_read.read_goal_report(conn, task["task_id"], task["run_id"])
+    if report.get("state") != "ready":
+        raise util.KanpilotError(
+            "verification_unconfirmed",
+            "Plus 结构化报告未就绪（" + str(report.get("state")) + "）："
+            + util.redact(str(report.get("detail") or "")))
+    # Structured, completed, met: a fallback or unfinished report is not completion evidence.
+    floor = cmd_read.goal_report_floor_reason(report)
+    if floor:
+        raise util.KanpilotError("verification_unconfirmed", util.redact(floor))
+    # The round's execution turn and the report's turn must both belong to the approved chain.
+    approved = {str(item) for item in (report.get("identity") or {}).get("approved_turns") or ()}
+    if (str(job["turn_id"]) not in approved or not report.get("turn_id")
+            or str(report["turn_id"]) not in approved):
+        _conflict("Goal 报告的执行轮次不属于本轮已批准的执行轮次")
+    commands = declaration["commands"]
+    coverage = verify_evidence.match_goal_checks(commands, (report.get("report") or {}).get("checks"))
+    _require_unchanged(hashes)
+    return {"hashes": hashes, "job": job, "report": report, "commands": commands, "coverage": coverage}
 
 
 def _require_live_terminal(job):
@@ -227,12 +270,16 @@ def recover(ctx, payload):
         if not candidate(conn, task):
             _conflict("仅当前待确认验证且没有活动请求的执行轮次可重新核验")
         snapshot = _snapshot(conn, task_id, run_id)
-    hashes, job, verification = _read_evidence(conn, task)
-    _require_live_terminal(job)
+    evidence = read_goal_evidence(conn, task)
+    hashes, coverage = evidence["hashes"], evidence["coverage"]
+    if not coverage["ok"]:
+        _conflict("Plus 结构化报告仍未覆盖全部冻结验证命令；请让 Plus 重新执行并验证，未恢复推进")
     # Receipt validation also reads Git and process state. Keep those reads
     # outside the SQLite write transaction, as with the live Plus checks.
-    if _read_evidence(conn, db.require_task(conn, task_id))[0] != hashes:
-        _conflict("核验期间本机执行证据或计划文件已变化")
+    again = read_goal_evidence(conn, db.require_task(conn, task_id))
+    if (again["hashes"] != hashes
+            or again["report"]["report_sha256"] != evidence["report"]["report_sha256"]):
+        _conflict("核验期间本机执行证据、计划文件或 Goal 报告已变化")
     with db.write_txn(conn):
         current = db.require_task(conn, task_id)
         if not db.task_is_active(current):
@@ -259,8 +306,9 @@ def recover(ctx, payload):
         db.add_event(conn, ctx.now_iso, "verification_reverified", task_id=task_id,
             request_id=request["request_id"], actor="user",
             detail={"execution_run_id": run_id, "plan_sha256": current["plan_sha256"],
-                    "monitor_request_id": request["request_id"], "matched": verification["matched"],
-                    "evidence_sha256": hashes, "previous": previous})
+                    "monitor_request_id": request["request_id"], "matched": coverage["matched"],
+                    "evidence_sha256": hashes, "report_sha256": evidence["report"]["report_sha256"],
+                    "previous": previous})
         db.add_event(conn, ctx.now_iso, "resolved", task_id=task_id, actor="user", detail=resolution)
         return {"ok": True, "deduplicated": False, "task_status": "running",
                 "request": derive.request_view(request, ctx.now)}
