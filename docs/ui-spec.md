@@ -42,7 +42,7 @@
 - **待办列直达计划页（T1）**：待办（`board_column=todo`）列卡片的主入口直接打开同一详情容器的**计划页**（非概览）；其他列仍默认打开概览。计划页可切回概览/其他页；「准备/重新规划」仍跳转既有规划面板。
  - 计划页头部按 §4.8 展示 `plan_kind`、生成时间与 plan_sha256 前 12 位（可复制）；任务标题与 `待确认执行` 状态只由父详情顶栏显示一处（同执行页），父详情隐藏顶栏时计划页补回（标题 18pt，单独首行、最多两行）；模式分段与打开/定位按钮置于独立操作行，不与元数据争宽。
 - 详情底栏操作区：按钮由 `get-task` 返回的 `allowed_actions` 渲染，映射：
-  - `enqueue` → `安排下一步`（task needs_plan/ready/running/in_review 时按核心推断 kind；label 按 kind 变：`安排派发`/`安排规划`/`安排检查`/`安排评审`）
+  - `enqueue` → 按 `get-task` 的 `enqueue_kind` 显示：`plan`→`安排规划`、`dispatch`→`安排派发`、`monitor`→`安排检查`、`review`→`安排评审`；`enqueue_kind` 缺省或未知时回退 `安排下一步`。kind 只由核心给出，界面不据 status 推导。存在活动请求时核心不返回 `enqueue`，界面不自行补出。
   - `retry` → `重试派发`（仅 send_state=not_sent 等明确未发送）
   - `restore` → `恢复原任务`（unknown）
   - `accept_duplicate` → `接受可能重复，重新派发`（unknown；需二次确认对话框写明风险）

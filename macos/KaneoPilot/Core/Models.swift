@@ -626,8 +626,21 @@ struct TaskDetail: Decodable, Identifiable {
     let planExecutionHold: Bool?
     /// v2 §5.20.1：purged 终态任务的只读审计详情标记。
     let readOnly: Bool?
+    /// §4.1（2026-10-17）：核心给出下一次 `enqueue` 的 kind；界面只显示，不据 status 推导。
+    let enqueueKind: String?
 
     var id: String { taskId }
+
+    /// §4.1：`enqueue` 主按钮按核心给出的 kind 变文案；缺省或未知保持通用文案。
+    var enqueueActionLabel: String {
+        switch enqueueKind {
+        case "plan": return "安排规划"
+        case "dispatch": return "安排派发"
+        case "monitor": return "安排检查"
+        case "review": return "安排评审"
+        default: return "安排下一步"
+        }
+    }
 }
 
 struct GetTaskResponse: Decodable {
