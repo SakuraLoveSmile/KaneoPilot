@@ -307,6 +307,7 @@ Desktop不另建任务状态机：plan/review正式requests仍使用queued→cla
 
 当前执行轮次经核验失败、任务 needs_user/execution_failed、stage=monitor（兼容 failure_stage=running）时，用户确认 resume 并携带匹配的 expected_execution_run_id，可沿原确认计划转为 ready/dispatch 并排队新请求。原 failed 轮次及改动保留；本轮发送字段和会话指针清除，新轮次由执行端领取后建立。资格、远端需求与状态、计划和工作树指纹不匹配或有活动请求时拒绝恢复，不改变原失败任务。
 
+Plus 会话资格（2026-10-17）：放行前还须核验 Plus 已空闲，即 `isRunning=false` 且无待确认权限。`currentTurnId` 仍为原失败 turn 时沿用原核验；已指向其后的手动继续 turn 时，仅当该继续 turn 经 protocol §5.23 的同 session+turn 双键核验为 finished/failed/aborted（终态时间晚于原失败 turn，且 Plus 空闲）才放行。running、waiting_permission、目标契约待确认、核验失败、身份不符，或原执行轮次 job 状态不是 failed，一律拒绝。放行后新轮次沿用原工作树，手动继续留下的改动随之保留，原失败记录不改写。引擎 `actor=automation` 的 empty_diff 重跑与 retry_verification 共用此守卫。
 
 ### verification_unconfirmed 恢复
 

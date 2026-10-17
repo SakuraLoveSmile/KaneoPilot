@@ -62,6 +62,8 @@ final class SessionReaderStore: ObservableObject {
     @Published private(set) var requestingStart = false
     private var controlTask: Task<Void, Never>?
     private var controlRequest = UUID()
+    /// 轮询静默核验的单飞标记；不驱动“正在检查”界面。
+    private var controlPolling = false
     /// 连接中断（本地派生：读取抛出连接类错误）。
     @Published var interrupted = false
     let searchInputState = SessionSearchInputState()
@@ -231,6 +233,12 @@ final class SessionReaderStore: ObservableObject {
         return status
     }
 
+    /// Any continuation field, complete or not: a partial continuation must never look healthy.
+    private func hasPartialContinuation(_ control: SessionControlStatus) -> Bool {
+        control.continuedState != nil || control.continuedTurnId != nil
+            || control.continuedEndedAt != nil || control.continuedDetail != nil
+    }
+
     func displayStatusLabel(_ info: SessionInfo?, selected: Bool = true) -> String {
         guard let info else { return loading ? "正在读取状态" : "未选择会话" }
         if selected, readFailure != nil { return "状态未确认" }
@@ -238,10 +246,9 @@ final class SessionReaderStore: ObservableObject {
         if runStatus == "finished" { return "已结束" }
         if runStatus == "failed" {
             guard selected, isPlus else { return "失败" }
-            guard let control = matchingControlStatus else { return "状态未确认" }
+            guard let control = matchingControlStatus else { return controlLoading ? "正在检查状态" : "状态未确认" }
             // A partial continuation must never reuse a previously healthy observation.
-            let hasContinuation = control.continuedState != nil || control.continuedTurnId != nil
-                || control.continuedEndedAt != nil || control.continuedDetail != nil
+            let hasContinuation = hasPartialContinuation(control)
             if hasContinuation, continuedStatus == nil { return "状态未确认" }
             switch continuedStatus?.continuedState {
             case "running": return "运行中"
@@ -297,22 +304,30 @@ final class SessionReaderStore: ObservableObject {
         return displayStatusLabel(session) == "失败" ? roundDetail?.failureText : nil
     }
 
+    /// 失败的 Plus 轮次在获得可信后续状态前（含检查中）视为未确认，不展示旧结束时间。
+    private var failedPlusUnconfirmed: Bool {
+        isPlus && (roundDetail?.runStatus ?? session?.runStatus) == "failed"
+            && ["状态未确认", "正在检查状态"].contains(displayStatusLabel(session))
+    }
+
     var displayStatusDetail: String? {
         if let continuedStatus { return continuedStatus.continuedDetail }
-        if isPlus, (roundDetail?.runStatus ?? session?.runStatus) == "failed", matchingControlStatus == nil {
-            return controlError ?? "尚未确认同一 Plus 会话的最新状态；此前失败记录保留在下方。"
+        guard isPlus else { return nil }
+        if failedPlusUnconfirmed {
+            // 未确认时保留核心给出的具体原因，只有没有原因时才用通用说明。
+            return controlError ?? controlStatus?.detail ?? "尚未确认同一 Plus 会话的最新状态；此前失败记录保留在下方。"
         }
-        return isPlus ? controlError ?? controlStatus?.detail : nil
+        return controlError ?? controlStatus?.detail
     }
 
     var displayEndedAt: String? {
         if let continuedStatus { return continuedStatus.continuedEndedAt }
-        if isPlus, (roundDetail?.runStatus ?? session?.runStatus) == "failed", displayStatusLabel(session) == "状态未确认" { return nil }
+        if failedPlusUnconfirmed { return nil }
         return roundDetail?.endedAt
     }
 
     var previousFailureText: String? {
-        guard isPlus, (continuedStatus != nil || displayStatusLabel(session) == "状态未确认") else { return nil }
+        guard isPlus, continuedStatus != nil || failedPlusUnconfirmed else { return nil }
         return roundDetail?.failureText
     }
 
@@ -533,8 +548,11 @@ final class SessionReaderStore: ObservableObject {
                   !Task.isCancelled,
                   selectedRunID == runID,
                   sessionsContain(runID) else { return }
+            let previousSessionID = session?.sessionId
             session = response.session
-            if controlStatus?.sessionId != session?.sessionId { controlStatus = nil }
+            // Clear only when the selected Plus session really changes; comparing against the
+            // status on every poll would blank a trusted observation whenever the ids disagree.
+            if previousSessionID != session?.sessionId { controlStatus = nil }
             connection = response.connection
             interrupted = false
             roundDetail = response.roundDetail
@@ -550,7 +568,8 @@ final class SessionReaderStore: ObservableObject {
             guard generation == self.generation else { return }
             if !statusOnly && schedulePolling { restartPolling(generation: generation) }
             if roundDetail?.backend == "pi_desktop" || session?.backend == "pi_desktop" {
-                controlTask = Task { await checkControlStatus() }
+                // 轮询只静默核验（不显示检查中、不禁用按钮）；其它入口仍可见地检查。
+                controlTask = Task { await checkControlStatus(silent: !schedulePolling) }
             }
         } catch let underlying {
             guard generation == self.generation, !Task.isCancelled,
@@ -561,9 +580,8 @@ final class SessionReaderStore: ObservableObject {
         }
     }
 
-    var canRetryExecution: Bool {
-        // A verified manual continuation is still using this session; do not offer a new dispatch.
-        if let state = continuedStatus?.continuedState, ["running", "waiting_permission"].contains(state) { return false }
+    /// 选中轮次是否属于「重新执行（沿用计划）」入口（不含 Plus 状态确认）。
+    var retryEligible: Bool {
         guard statusOnly, saveFilter == "active", session?.isTrashed != true,
               session?.readOnly != true, readFailure == nil,
               let runID = selectedRunID, session?.runId == runID,
@@ -574,6 +592,44 @@ final class SessionReaderStore: ObservableObject {
             && task.allowedActions?.contains("resume") == true
             && task.readOnly != true && task.saveState == "active"
     }
+
+    /// 非空即禁用「重新执行」并说明原因。Plus 轮次须先由核心确认当前空闲；
+    /// 其后的手动继续若存在，必须已终态（完成、失败或中止），否则不能重复派发。
+    var retryBlockedReason: String? {
+        guard retryEligible, isPlus else { return nil }
+        if controlLoading { return "正在检查 Plus 状态，完成后再重新执行" }
+        guard let control = matchingControlStatus else {
+            return controlError ?? controlStatus?.detail ?? "尚未核验 Plus 会话状态，请先检查 Plus 状态"
+        }
+        if let state = continuedStatus?.continuedState {
+            if state == "running" { return "Plus 手动继续的轮次仍在运行，不能重复执行" }
+            if state == "waiting_permission" { return "Plus 手动继续的轮次仍在等待确认，不能重复执行" }
+        }
+        if continuedStatus == nil, hasPartialContinuation(control) { return "手动继续的状态未确认，请先检查 Plus 状态" }
+        // 核心只放行本轮自己的 turn；其后的 turn 须是已核验的手动继续（即上面的 continuedStatus）。
+        if continuedStatus == nil {
+            guard let roundTurn = roundDetail?.turnId, !roundTurn.isEmpty else {
+                return "旧 Plus 会话身份或配置不完整，请先恢复会话观察"
+            }
+            if let current = control.turnId, current != roundTurn {
+                // 已完成的轮次没有手动继续的核验证据，核心一律不放行其后的 turn；检查 Plus 无济于事。
+                if (roundDetail?.runStatus ?? session?.runStatus) == "finished" {
+                    return "执行轮次已完成，Plus 会话之后又有新轮次，不能沿用计划重新执行，请改用重新规划"
+                }
+                return "Plus 存在后续轮次，但无法核验为手动继续，请先在 Plus 中检查"
+            }
+        }
+        switch control.state {
+        case "running": return "Plus 仍在运行，不能重复执行"
+        case "waiting_permission": return "Plus 正在等待权限确认，请先在 Plus 中处理"
+        default: return nil
+        }
+    }
+
+    var canRetryExecution: Bool { retryEligible && retryBlockedReason == nil }
+
+    /// 已核验的手动继续存在；确认文案据此说明其改动随新轮次一并保留。
+    var hasManualContinuation: Bool { continuedStatus != nil }
 
     private func loadRetryTask(generation: Int, taskID: String, runID: String) async {
         guard statusOnly, saveFilter == "active", session?.isTrashed != true,
@@ -899,16 +955,18 @@ final class SessionReaderStore: ObservableObject {
         if !committedQuery.isEmpty { searchFollowing = true; searchAnchor = nil; search = "" }
     }
 
-    func checkControlStatus() async {
-        guard !controlLoading, let client, let runID = selectedRunID,
+    /// 静默核验只供轮询使用：不清空上一次可信结果，也不显示检查中；手动检查才显示进度。
+    func checkControlStatus(silent: Bool = false) async {
+        guard !controlLoading, !(silent && controlPolling), let client, let runID = selectedRunID,
               let taskID = taskID ?? session?.taskId else { return }
         let owner = generation
         let request = UUID()
         controlRequest = request
-        controlLoading = true
-        controlStatus = nil
-        controlError = nil
-        defer { if controlRequest == request { controlLoading = false } }
+        // A silent poll never supersedes a manual check: polls skip while controlLoading is set.
+        if silent { controlPolling = true } else { controlLoading = true }
+        defer {
+            if silent { controlPolling = false } else if controlRequest == request { controlLoading = false }
+        }
         do {
             let response = try await client.run("session-control-status",
                 payload: ["task_id": taskID, "run_id": runID], timeout: 20,
@@ -916,6 +974,7 @@ final class SessionReaderStore: ObservableObject {
             guard !Task.isCancelled, owner == generation, selectedRunID == runID,
                   controlRequest == request else { return }
             guard response.taskId == taskID, response.runId == runID else {
+                controlStatus = nil
                 controlError = "Plus 状态身份与选中轮次不匹配，请重新检查"
                 return
             }
@@ -954,6 +1013,7 @@ final class SessionReaderStore: ObservableObject {
         controlTask?.cancel(); controlTask = nil
         controlRequest = UUID()
         controlLoading = false
+        controlPolling = false
         requestingStart = false
         SessionReaderPerformance.shared.discardNativeEvents(readerID: performanceReaderID)
         refreshing = false

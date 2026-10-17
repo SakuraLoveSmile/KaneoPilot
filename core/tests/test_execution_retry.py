@@ -154,17 +154,91 @@ class TestExecutionRetry(HeadlessCase):
         self.ctx.conn.execute("UPDATE execution_rounds SET save_state='trashed' WHERE task_id=?", (self.task_id,))
         self.reject()
 
-    def test_live_plus_running_pending_new_turn_or_unverifiable_terminal_block_retry(self):
-        for update in ({"is_running": True}, {"pending_permission": True}, {"current_turn_id": "adopted-turn"}):
+    def use_manual_continuation(self, status="aborted", ended="2026-10-17T02:00:00+00:00", running=False,
+                                planning=None, proposals=None, **raw_fields):
+        """Install a later Plus turn with the same evidence that control-status reads."""
+        raw = {"sessionId": "failed-session", "currentTurnId": "adopted-turn", "isRunning": running,
+               "pendingPermission": None, "pendingToolConfirmations": 0, "planningState": planning,
+               "pendingPlanId": None}
+        raw.update(raw_fields)
+        self.plus_status = {"session_id": "failed-session", "is_running": running, "current_turn_id": "adopted-turn",
+                            "pending_permission": None, "raw_status": raw}
+        turns = {"failed-turn": {"session_id": "failed-session", "turn_id": "failed-turn", "status": "error",
+                                 "ended_at": "2026-10-17T01:00:00+00:00"},
+                 "adopted-turn": {"session_id": "failed-session", "turn_id": "adopted-turn", "status": status,
+                                  "ended_at": ended}}
+        patcher = patch.object(harness_plus_adapter, "plus_turn_get",
+                               side_effect=lambda _file, *, session_id, turn_id, **_: dict(turns[turn_id]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        proposal_patcher = patch.object(harness_plus_adapter, "plus_proposals",
+                                        return_value=proposals or {"proposals": [], "history": []})
+        proposal_patcher.start()
+        self.addCleanup(proposal_patcher.stop)
+
+    def test_live_plus_running_or_pending_permission_blocks_retry(self):
+        for update in ({"is_running": True}, {"pending_permission": True}):
             original = dict(self.plus_status)
             self.plus_status.update(update)
-            self.reject()
+            self.assertIn("仍有运行或等待权限", self.reject().message)
             self.plus_status = original
+
+    def test_original_turn_must_remain_settled_before_retry(self):
         for update in ({"status": "running"}, {"sessionId": "other-session"}, {"turnId": None}):
             original = dict(self.plus_turn)
             self.plus_turn.update(update)
             self.reject()
             self.plus_turn = original
+
+    def test_unverifiable_manual_continuation_blocks_retry(self):
+        self.plus_status = {"is_running": False, "current_turn_id": "adopted-turn", "pending_permission": None}
+        self.assertIn("无法核验", self.reject().message)
+        for kwargs in ({"status": "running"}, {"sessionId": "other-session"}, {"ended": "2026-10-17T00:30:00+00:00"}):
+            self.use_manual_continuation(**kwargs)
+            self.assertIn("无法核验", self.reject().message, kwargs)
+
+    def test_running_or_waiting_manual_continuation_blocks_retry(self):
+        self.use_manual_continuation(status="running", running=True)
+        self.assertIn("仍有运行或等待权限", self.reject().message)
+        self.use_manual_continuation(status="completed", planning="awaiting_approval", pendingPlanId="goal-1",
+                                     proposals={"proposals": [{"kind": "goal", "sessionId": "failed-session",
+                                                               "turnId": "adopted-turn", "id": "goal-1",
+                                                               "status": "pending"}], "history": []})
+        self.assertIn("仍在等待确认", self.reject().message)
+
+    def test_settled_manual_continuation_allows_retry_and_claim(self):
+        self.use_manual_continuation(status="aborted")
+        result = cmd_queue.cmd_resolve(self.ctx, self.payload)
+        self.assertEqual("ready", result["task_status"])
+        claimed = cmd_exec.cmd_claim(self.ctx, {"stage": "dispatch", "executor": "retry-test",
+                                              "request_id": result["request"]["request_id"]})
+        self.assertTrue(claimed["claimed"], claimed)
+
+    def test_settled_completed_manual_continuation_allows_retry(self):
+        self.use_manual_continuation(status="completed")
+        self.assertEqual("ready", cmd_queue.cmd_resolve(self.ctx, self.payload)["task_status"])
+
+    def test_expired_goal_contract_never_entered_execution_allows_retry(self):
+        self.use_manual_continuation(status="completed", planning="awaiting_approval", pendingPlanId="goal-1",
+                                     proposals={"proposals": [], "history": [{"kind": "goal",
+                                                                             "sessionId": "failed-session",
+                                                                             "turnId": "adopted-turn",
+                                                                             "id": "goal-1", "status": "expired"}]})
+        self.assertEqual("ready", cmd_queue.cmd_resolve(self.ctx, self.payload)["task_status"])
+
+    def test_finished_round_with_later_turn_is_not_settled_evidence(self):
+        self.job.update(status="finished", exit_code=0)
+        write_json(self.directory / "job.json", self.job)
+        self.write_events(self.task_id, self.run_id, [pi_event(1, "session", session_id="failed-session"),
+                                                    pi_event(2, "terminal", outcome="completed")])
+        self.use_manual_continuation(status="aborted")
+        self.assertIn("不满足手动继续的核验条件", self.reject().message)
+
+    def test_review_remediation_keeps_refusing_any_later_turn(self):
+        self.use_manual_continuation(status="aborted")
+        with self.assertRaises(util.KanpilotError) as caught:
+            cmd_queue._require_execution_terminal(self.ctx, self.task(), self.run_id)
+        self.assertIn("存在后续轮次", caught.exception.message)
 
     def test_running_observer_or_local_job_never_allows_duplicate_execution(self):
         for update in ({"status": "running", "started_at": self.ctx.now_iso}, {"observe_pid": os.getpid()}):
