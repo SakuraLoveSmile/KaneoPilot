@@ -38,7 +38,7 @@ import test_auto_pipeline as _pipeline  # noqa: E402
 TASK = _pipeline.TASK  # noqa: E402
 PROJECT = _pipeline.PROJECT  # noqa: E402
 VERIFY = _pipeline.VERIFY  # noqa: E402
-from kanpilot import core, db, util  # noqa: E402
+from kanpilot import constants, core, db, util  # noqa: E402
 from kanpilot.engine import decide, ladder  # noqa: E402
 
 
@@ -47,6 +47,7 @@ def pipeline():
     """v5 全链演练夹具（手动生命周期；不依赖 unittest 运行器）。"""
     case = _pipeline.TestAutoPipeline()
     case.setUp()
+    _expose_goal_report_tools(case)
     try:
         yield case
     finally:
@@ -100,6 +101,7 @@ def _script_rounds(case, contents):
                 "exitCode": None if case.omit_exit else exit_code,
                 "turnId": case.server.execution_turn,
             }]
+            _publish_goal_report(case, exit_code, output)
             # Scripted work is finished; expose the matching idle Plus state,
             # rather than the base fake's permanently running default.
             case.server.is_running = False
@@ -107,6 +109,37 @@ def _script_rounds(case, contents):
         return response
 
     case.server.tool_call = plus
+
+
+def _expose_goal_report_tools(case):
+    """fake Plus 暴露只读 Goal 报告工具（真实 Plus 的形状；与 test_goal_report_contract 同口径）。"""
+    for name in constants.PI_DESKTOP_GOAL_REPORT_TOOLS:
+        if name not in case.server.tools:
+            case.server.tools.append(name)
+    case.server.httpd.tools = case.server.tools
+
+
+def _publish_goal_report(case, exit_code, output):
+    """Plus 的 Goal 报告（结构化、已完成、met）：冻结 verify 命令的检查项与本轮工具结果一致。
+
+    报告经 ``pi_goal_report_list`` / ``pi_goal_report_get`` 被 Pilot 读取；列表行与
+    取回的报告体在本轮内固定（同一 sha 每次读取相同，收据重核对才稳定）。
+    """
+    execution_id = "exec-" + str(case.round)
+    code = None if case.omit_exit else exit_code
+    body = {"sessionId": case.server.session_id, "proposalId": "goal-" + str(case.round),
+            "executionId": execution_id, "turnId": case.server.execution_turn,
+            "reportId": "report-" + execution_id,
+            "integrity": {"kind": "structured", "issues": []},
+            "execution": {"status": "completed"}, "verdict": "met",
+            "checks": [{"id": "C1", "command": VERIFY, "exitCode": code,
+                        "result": None if code is None else ("passed" if code == 0 else "failed"),
+                        "detail": output}]}
+    case.server.goal_reports = [{"reportId": body["reportId"], "executionId": execution_id,
+                                 "proposalId": body["proposalId"], "turnId": body["turnId"],
+                                 "sessionId": body["sessionId"]}]
+    case.server.goal_report = {"state": "ready", "report": body,
+                               "report_sha256": util.sha256_bytes(util.jdump(body).encode())}
 
 
 def _force_sync_due(case):
@@ -165,7 +198,8 @@ def test_scenario_golden_path_to_pr_merge(pipeline):
     assert value["status"] == "in_review", value
     assert len(value["delivery"]["commits"]) == 1, value["delivery"]
     assert value["extra"]["engine_verdict"]["verification_ok"] is True
-    assert value["extra"]["engine_verdict"]["evidence_source"] == "plus_tool_results"
+    assert value["extra"]["engine_verdict"]["evidence_source"] == "goal_report"
+    assert value["extra"]["engine_verdict"]["report_id"] == "report-exec-" + str(pipeline.round)
     _assert_commit_excludes_build_artifacts(pipeline, value)
 
     pipeline._review()

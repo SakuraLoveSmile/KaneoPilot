@@ -129,6 +129,72 @@ def make_codex_fixture(root: Path, with_provider: bool = True,
 
 
 FAKE_BEARER_TOKEN = "test-bearer-token-000000"
+
+
+def goal_checks(commands):
+    """Plus Goal report ``checks`` for ``commands``: each frozen command passes with exit 0."""
+    return [{"id": f"check-{number}", "command": command, "exitCode": 0,
+             "result": "passed", "detail": "ok", "evidenceRefs": []}
+            for number, command in enumerate(commands, start=1)]
+
+
+def goal_report_read(checks, *, turn_id="execution-turn", approved=None, state="ready", detail=None,
+                     structured=True, execution_status="completed", verdict="met"):
+    """``cmd_read.read_goal_report`` result shape for a fake Plus Goal report.
+
+    The floor fields (structured integrity, execution status, verdict) default to a
+    completed, met, structured report; tests override one to exercise the S1 floor.
+    """
+    ready = state == "ready"
+    report = ({"sessionId": "session", "proposalId": "proposal", "executionId": "execution",
+               "turnId": turn_id, "checks": checks} if ready else None)
+    return {"identity": {"approved_turns": list(approved or [turn_id])}, "state": state,
+            "detail": detail, "report": report,
+            "report_sha256": util.sha256_bytes(util.jdump(report).encode()) if ready else None,
+            "report_id": "report-1" if ready else None, "session_id": "session",
+            "proposal_id": "proposal", "execution_id": "execution",
+            "turn_id": turn_id if ready else None, "ready": ready,
+            "structured": ready and structured,
+            "execution_status": execution_status if ready else None,
+            "verdict": verdict if ready else None}
+
+
+def simulated_plus_goal_report(conn, task_id, run_id, **_):
+    """``cmd_read.read_goal_report`` double: Plus's report mirrors the round's own command results.
+
+    Each frozen verify command gets one check from its last result in the execution
+    window, with that result's output as ``detail``. A command without a result has no check.
+    """
+    from kanpilot import dsh_events, headless_adapter, verify_evidence
+    task = db.require_task(conn, task_id)
+    commands = (db.task_extra(task).get("plan_verify") or {}).get("commands") or []
+    run_dir = headless_adapter.resolve_source(conn).run_dir(task_id, run_id)
+    job = json.loads((run_dir / "job.json").read_text())
+    events, _error = dsh_events.iter_events(run_dir / dsh_events.EVENT_LOG_NAME)
+    messages = dsh_events.to_messages(events)
+    selected, _window = verify_evidence.execution_window(messages, job.get("turn_id"))
+    rows = verify_evidence.extract_command_results(selected)
+    outputs = {message.get("id"): str((message.get("tool") or {}).get("output") or "") for message in messages}
+    checks = []
+    for number, command in enumerate(commands, start=1):
+        found = [row for row in rows if not verify_evidence.match_verification([command], [row])["missing"]]
+        if found:
+            code = found[-1]["exit_code"]
+            checks.append({"id": f"C{number}", "command": command, "exitCode": code,
+                           "result": "passed" if code == 0 else "failed",
+                           "detail": outputs.get(found[-1]["message_id"], "")})
+    return goal_report_read(checks, turn_id=job.get("turn_id"))
+
+
+def use_simulated_plus_goal_reports(case):
+    """Route ``read_goal_report`` through the simulator for one test case (cleanup registered)."""
+    from unittest import mock
+    from kanpilot import cmd_read
+    patcher = mock.patch.object(cmd_read, "read_goal_report", side_effect=simulated_plus_goal_report)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 def path_qs(path):
     """解析 url query 段 → {key: [values]}（fake 路由按 status 过滤用）。"""
     from urllib.parse import parse_qs, urlsplit

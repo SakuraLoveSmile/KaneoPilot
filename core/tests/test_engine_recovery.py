@@ -6,12 +6,15 @@ from unittest.mock import patch
 from kanpilot import cmd_queue, core, db, git_delivery, harness_plus_adapter, remote, util
 from kanpilot.engine import ladder, loop
 import test_execution_retry as retry_fixture
+from helpers import use_simulated_plus_goal_reports
 from test_session import pi_event, write_json
 
 
 class TestEngineRecovery(retry_fixture.TestExecutionRetry):
     def setUp(self):
         super().setUp()
+        # Live verdicts read Plus's Goal report; the double mirrors this fixture's command results.
+        use_simulated_plus_goal_reports(self)
         self.git(self.worktree, "switch", "-c", "kaneo/retry-task")
         core.update_automation(self.ctx.conn, self.task(), self.ctx.now_iso,
                                manual_takeover=False, adopted_at=self.ctx.now_iso,
@@ -73,7 +76,7 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
         result = self.call("engine-verdict", {"task_id": self.task_id, "expected_execution_run_id": self.run_id,
                                      "expected_plan_sha256": sha})
         self.assertEqual(result["kind"], "empty_diff" if empty else "verify_failed", result)
-        self.assertEqual(result["evidence_source"], "plus_tool_results")
+        self.assertEqual(result["evidence_source"], "goal_report")
         db.update_task(self.ctx.conn, self.task_id, self.ctx.now_iso,
                        failure_code="verification_unconfirmed", failure_stage="monitor")
         return {"task_id": self.task_id, "action": "resume" if empty else "replan", "actor": "automation",

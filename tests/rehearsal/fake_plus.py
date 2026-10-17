@@ -15,6 +15,7 @@ tools/list / tools/call），响应体经 ``structuredContent`` 返回工具结�
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -32,6 +33,8 @@ REQUIRED_TOOLS = (
     "pi_plans_pending", "pi_plans_resolve",
     "pi_asks_pending", "pi_asks_resolve",
 )
+# Goal 报告只读工具（constants.PI_DESKTOP_GOAL_REPORT_TOOLS）：Pilot 的唯一结果来源。
+GOAL_REPORT_TOOLS = ("pi_goal_report_list", "pi_goal_report_get")
 
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -58,6 +61,7 @@ class FakePlus:
         self.turns = {}                # (session_id, turn_id) -> turn record
         self.statuses = {}             # session_id -> status inner dict
         self.messages = {}             # session_id -> [message, ...]
+        self.goal_reports = []         # Goal 报告（set_goal_report 写入）
         self.providers = [
             {"id": "rehearsal-provider", "displayName": "Rehearsal", "disabled": False},
         ]
@@ -100,6 +104,22 @@ class FakePlus:
     def add_message(self, session_id, message):
         self.messages.setdefault(session_id, []).append(message)
         return message
+
+    def set_goal_report(self, session_id, *, proposal_id, turn_id, execution_id, checks,
+                        integrity="structured", execution_status="completed", verdict="met"):
+        """发布一份 Goal 报告（Plus 只读报告的 ``{state, report, report_sha256}`` 形状）。
+
+        ``checks`` 由测试按本轮真实工具结果写出：每条冻结 verify 命令的退出码与输出。
+        返回 ``report_sha256``，供断言收据绑定。
+        """
+        body = {"sessionId": session_id, "proposalId": proposal_id, "executionId": execution_id,
+                "turnId": turn_id, "reportId": "report-" + execution_id,
+                "integrity": {"kind": integrity, "issues": []},
+                "execution": {"status": execution_status}, "verdict": verdict,
+                "checks": checks}
+        sha = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        self.goal_reports.append({"state": "ready", "report": body, "report_sha256": sha})
+        return sha
 
     def requests_to(self, rpc_method):
         return [params for (_m, method, params) in self.log if method == rpc_method]
@@ -209,9 +229,9 @@ class FakePlus:
                                    "version": "0.0.0-rehearsal"}}
         if method == "tools/list":
             tools = []
-            names = REQUIRED_TOOLS
+            names = REQUIRED_TOOLS + GOAL_REPORT_TOOLS
             if "plus_tools_missing" in self.faults:
-                names = tuple(n for n in REQUIRED_TOOLS
+                names = tuple(n for n in names
                               if n not in ("pi_plans_pending", "pi_plans_resolve"))
             for name in names:
                 schema = {"type": "object", "properties": {}}
@@ -273,4 +293,19 @@ class FakePlus:
             return {"operation": operation, "result": {}}
         if name == "pi_plans_pending":
             return {"history": []}
+        if name == "pi_goal_report_list":
+            session_id = args.get("sessionId")
+            return {"reports": [
+                {"reportId": row["report"]["reportId"], "executionId": row["report"]["executionId"],
+                 "proposalId": row["report"]["proposalId"], "turnId": row["report"]["turnId"],
+                 "sessionId": row["report"]["sessionId"]}
+                for row in self.goal_reports if row["report"]["sessionId"] == session_id]}
+        if name == "pi_goal_report_get":
+            for row in self.goal_reports:
+                body = row["report"]
+                if (body["sessionId"] == args.get("sessionId")
+                        and body["executionId"] == args.get("executionId")):
+                    return dict(row)
+            return {"state": "not_found", "detail": "没有该执行的 Goal 报告",
+                    "report": None, "report_sha256": None}
         return {}
