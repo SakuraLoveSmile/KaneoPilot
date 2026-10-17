@@ -1025,6 +1025,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   2. **会话归属锚点**：转录（`pi_session_get`）里**物理下标最小的 user 消息仍是本轮派发的 prompt**（normalize 空白后逐字比较）——证明该会话确由本轮创建。用户随后在同一会话里追加指令（如「用中文回复我」）不阻止接续；锚点不符（会话被改用）则绝不接续；
   3. `pi_agent_status` 显示**同一会话仍在跑另一个 turn**（`isRunning=true` 且 `currentTurnId` ≠ 旧 turn）；
   4. 未超接续上限（每轮最多 5 次）且不重复接续同一 turn。
+- **与 execution_retry 的关系（2026-10-17）**：本节判据只决定能否自动接续原失败 turn。空闲后的手动继续不经本节接续；其终态若要作为 execution_retry 的 Plus 空闲证据，须经同一 `session_control` 双键核验（`isRunning=true` 或待确认权限时一律不放行），见 §5.27.12。
 - **接续动作只读**：`job.turn_id` 前移为新 turn，`job.turn_adopted` 追加 `{from, to, code, at}` 审计记录，events.jsonl 追加一条 `system` 事件（`turn_adopted: <旧> → <新>（<code> 后同一会话自动重开，继续观察；未重发 prompt）`），观察进程换绑新 turn 继续轮询；**不新建会话、不下发 `pi_session_configure`、绝不 `pi_agent_prompt`**，既有 session 事件与 turn 记录一字不改。
 - **适用范围**：启动证明阶段（首个 `pi_turn_get` 已是 error/aborted）与观察循环（轮询中落 error/aborted）走同一判据与同一动作。
 - **`round-observe` 解除误报阻塞**：续接接管成功（`status=observing|finalizing` 或 `status=settled` 且新结果 `finished/exit_code=0`）后，若本任务停在 `needs_user` + `failure_code=execution_failed` 且 `task.run_id` 与本轮一致 → 核心清空 block 字段（`clear_block_fields`）并把任务转回 `running`（`status_change` 事件 detail 带 `via=round-observe`、`reopened=true`；`round_observe` 事件与返回形状带 `reopened:true`）。**只**解除本轮的 `execution_failed`——其它阻塞原因（`review_failed`/`observation_blocked`/…）与其它轮次一律原样保留，`deduplicated` 幂等返回不触发解除。
@@ -1506,13 +1507,13 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 有效 diff 非空且 Plus 报告覆盖全部冻结命令并通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 报告门。
 - 环境失败 → verification_environment_failure，提示检查 Plus 执行环境。旧环境失败 resume 将原 run/plan/worktree 排回 monitor，只重新核对已有 Plus 证据，不新增模型调用、派发、执行轮或补救计数。缺失/未知/源码变化等证据未确认进入 attention，不触发自动质量修复；真实测试失败和空转仍沿既有质量阶梯。
 - `resolve reverify` 只读重新核对当前 Plus 证据，保留远端状态、轮次、终态、计划及证据复校。`run-verification-checks` 兼容入口拒绝本地执行，历史状态接口可读取旧审计记录。
-- 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
+- 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲（含 §5.27.12 的已核验手动继续放行）/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
 - 不支持在已完成 Plus 会话里任意追加 turn 后直接采纳为原轮次验证；不得宣传手动补验后“同步即可通过”。需通过上条有身份守卫的新执行轮次取得新证据。
 
 #### 5.27.12 自动补救闭环（A2）
 
 - START_FIX_ROUND 必须真正执行新轮次，事件 actor=automation。空 diff 沿 execution_retry 同计划重跑一次（可用已配置且探针通过的备用模型）。verify_failed 仅在 same_branch_fix_ready(task, binding) 成立时 resolve replan 同分支修复；该纯内存判定要求 requires_branch_review、delivery.branch/worktree_path 与既有 binding 一致，分别返回 detached、no_branch_worktree、worktree_mismatch，不执行 Git。引擎与核心权威守卫共用，先于额度判断；不就绪 → fix_branch_unavailable/monitor，不创建补救、不耗额度。评审 changes_requested 同守卫，显式 failure_stage=review，fix_request=held，不调用 start_fix_round_inline。统一说明「本轮改动在独立工作树，无法同分支修复」；monitor 可 resume/replan/mark_done/dismiss，review 禁止 resume，两端均核对阶段。attention 沿 needs_user_other，不新增 reason_code。
-- execution_retry 保留远端 In Progress、计划哈希、工作树身份与 expected_execution_run_id 守卫；只放行已绑定核心空 diff 回执的自动补救，绝不重发旧已发送轮次。
+- execution_retry 保留远端 In Progress、计划哈希、工作树身份与 expected_execution_run_id 守卫；只放行已绑定核心空 diff 回执的自动补救，绝不重发旧已发送轮次。Plus 空闲守卫（2026-10-17）：pi_desktop 分支要求 `isRunning=false` 且无待确认权限；`currentTurnId` 已指向原失败 turn 之后的手动继续时，仅当其经 `session_control` 双键核验为 finished/failed/aborted 才放行，细则见 state-model「执行失败的手动恢复」。该规则对用户 resume、retry_verification 与引擎 `actor=automation` 的 empty_diff 重跑一并生效；review 修复等其他 `_require_execution_terminal` 调用方仍拒绝任何后续 turn。
 - engine_fix_rounds 按任务跨 replan 累计至多 2。全历史（含已撤回）按 execution_run_id 去重，避免同轮再次补救；未撤回行用于额度、fix_round 阶梯、引擎与核心两处 empty_diff 同计划规则和引擎快速规划门。评审 automation.fix_round 是独立计数器，撤回绝不修改。领取/排队失败不产生虚假成功，预算上限继续生效。
 - 补救前在 cmd_resolve 写事务内、任何状态转移前记录 before：task 的 status/stage/failure_code/failure_stage/failure_reason/blocked_at/blocked_summary/sent/send_state/sent_at/lock_retained；完整 delivery；automation 的 plan_wanted/plan_attempts/replan_requested_at/replan_remote_status/replan_worktree_sha256/last_skip。不得裁剪 delivery。
 - 撤回候选只读取内存/数据库：有效 live 且托管、needs_user、failure_stage=plan、branch_exists 或 delivery_base_unknown；最近未撤回行为 verify_failed 且 run/plan 匹配；补救后无新规划生成/plan 请求/planner_inputs；无 queued/claimed 活动请求；原 engine_verdict 的 run/plan 匹配且有可复核 binding。详情候选不得扫描工作树。

@@ -55,14 +55,19 @@ struct SessionReaderFixtures {
                 state["task_overrides"] = overrides
             }
         }
+        // Every scenario keeps an idle, identity-matched Plus session unless a case overrides it.
+        let idlePlus: [String: Any] = ["backend": "pi_desktop", "session_id": "retry-session", "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false]]
         func scenario(_ value: [String: Any]) throws {
-            try mutate { $0["session_scenarios"] = ["\(taskID)/\(runID)": value] }
+            try mutate { $0["session_scenarios"] = ["\(taskID)/\(runID)": idlePlus.merging(value) { _, next in next }] }
         }
         func resolveCount() throws -> Int {
             try loggedRequests(commandLog).filter { $0["command"] as? String == "resolve" }.count
         }
+        try scenario([:])
         let store = SessionReaderStore(taskID: taskID, preferredRunID: runID, statusOnly: true)
         await store.start(client: client)
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
         check(store.canRetryExecution, "current failed execution exposes core-authorized retry")
         for state in ["running", "waiting_permission"] {
             try scenario(["backend": "pi_desktop", "session_id": "retry-session", "control": [
@@ -70,14 +75,78 @@ struct SessionReaderFixtures {
                 "continued_state": state, "continued_turn_id": "manual-turn",
                 "continued_detail": "同一会话手动继续中"]])
             await store.refresh()
-            await store.checkControlStatus()
+            await waitFor { store.controlStatus?.continuedState == state && !store.controlLoading }
             check(!store.canRetryExecution, "active manual continuation cannot offer a duplicate dispatch")
             let beforeContinuation = try resolveCount()
             check(!(await store.retryExecution(expectedRunID: runID)), "retry confirmation refuses an active manual continuation")
             check(try resolveCount() == beforeContinuation, "active continuation never submits resolve")
         }
+        // A verified, settled continuation on an idle Plus session releases the retry; anything else keeps it blocked.
+        try scenario(["backend": "pi_desktop", "session_id": "retry-session", "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false,
+            "turn_id": "manual-turn", "continued_state": "aborted", "continued_turn_id": "manual-turn",
+            "continued_detail": "同一会话手动继续已中止", "continued_ended_at": "2026-10-17T02:33:33Z",
+            "original_turn_ended_at": "2026-10-17T02:31:28Z"]])
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(store.canRetryExecution && store.retryBlockedReason == nil && store.hasManualContinuation,
+              "a verified aborted manual continuation on an idle Plus session allows retry")
+        // A finished round carries no continuation evidence: a later Plus turn blocks retry unless it is the round's own turn.
+        try scenario(["round_status": "finished", "backend": "pi_desktop", "session_id": "retry-session", "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false, "turn_id": "turn-round"]])
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(store.canRetryExecution && store.retryBlockedReason == nil,
+              "a finished round on the round's own idle Plus turn keeps retry")
+        try scenario(["round_status": "finished", "backend": "pi_desktop", "session_id": "retry-session", "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false, "turn_id": "later-turn"]])
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(store.retryEligible && !store.canRetryExecution
+              && store.retryBlockedReason == "执行轮次已完成，Plus 会话之后又有新轮次，不能沿用计划重新执行，请改用重新规划",
+              "a finished round with a later Plus turn blocks retry and points to replanning, not a Plus recheck")
+        let beforeUnverified = try resolveCount()
+        check(!(await store.retryExecution(expectedRunID: runID)), "an unverified later Plus turn refuses retry confirmation")
+        check(try resolveCount() == beforeUnverified, "an unverified later Plus turn never submits resolve")
+        // A failed round whose later turn cannot be verified may still be rechecked in Plus, so that wording stays.
+        try scenario(["backend": "pi_desktop", "session_id": "retry-session", "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false, "turn_id": "later-turn"]])
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(!store.canRetryExecution
+              && store.retryBlockedReason == "Plus 存在后续轮次，但无法核验为手动继续，请先在 Plus 中检查",
+              "a failed round with an unverifiable later Plus turn keeps the Plus recheck wording")
+        // A Plus round without its own turn id is refused by core as incomplete identity, so the button stays disabled.
+        try scenario(["round_detail": ["turn_id": NSNull()], "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false]])
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(!store.canRetryExecution
+              && store.retryBlockedReason == "旧 Plus 会话身份或配置不完整，请先恢复会话观察",
+              "a Plus round without a turn id disables retry with the core's identity reason")
+        try scenario(["backend": "pi_desktop", "session_id": "retry-session", "control_delay_ms": 500, "control": [
+            "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false]])
+        // Reload the round as well: the null-turn refresh above left a round without a turn id behind.
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        let inFlight = Task { await store.checkControlStatus() }
+        await waitFor { store.controlLoading }
+        check(!store.canRetryExecution && store.retryBlockedReason == "正在检查 Plus 状态，完成后再重新执行",
+              "a manual Plus check disables retry until it returns")
+        let beforeBlocked = try resolveCount()
+        let blockedAccepted = await store.retryExecution(expectedRunID: runID)
+        let afterBlocked = try resolveCount()
+        check(!blockedAccepted && afterBlocked == beforeBlocked, "retry confirmation refuses while Plus is being checked")
+        await inFlight.value
+        check(store.canRetryExecution, "an idle Plus check restores retry")
+        try scenario(["backend": "pi_desktop", "session_id": "retry-session", "control_error": "Plus 控制接口不可用"])
+        await store.refresh()
+        await waitFor { store.controlError != nil && !store.controlLoading }
+        check(!store.canRetryExecution && store.retryBlockedReason == store.controlError,
+              "an unconfirmed Plus status keeps retry disabled and shows the reason")
         try scenario(["round_status": "finished"])
         await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
         check(store.canRetryExecution, "finished round with task execution failure remains retryable when core allows it")
         try scenario([:])
         await store.refresh()
@@ -93,6 +162,7 @@ struct SessionReaderFixtures {
         check(!store.canRetryExecution && store.retryTask == nil, "permission-read failure clears the prior retry authority")
         try scenario([:])
         await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
         check(store.canRetryExecution, "successful permission refresh restores the retry entrance")
         let beforeStale = try resolveCount()
         try patchTask(["run_id": "run-replaced"])
@@ -100,12 +170,14 @@ struct SessionReaderFixtures {
         check(try resolveCount() == beforeStale, "replaced-round confirmation does not send resolve")
         try patchTask(["run_id": runID])
         await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
         try scenario(["resolve_error": "old round changed"])
         check(!(await store.retryExecution(expectedRunID: runID)) && store.actionError != nil,
               "core rejection stays visible and keeps the failed round")
         check(store.selectedRunID == runID && store.roundDetail?.runStatus == "failed", "rejected retry retains failure details")
         try scenario([:])
         await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
         let beforeSuccess = try resolveCount()
         let first = Task { await store.retryExecution(expectedRunID: runID) }
         let second = Task { await store.retryExecution(expectedRunID: runID) }
@@ -179,6 +251,19 @@ struct SessionReaderFixtures {
         await waitFor { store.roundDetail?.runStatus == "running" && store.controlStatus?.state == "idle" }
         check(store.roundDetail?.runStatus == "running" && store.controlStatus?.state == "idle",
               "polling refreshes both round status and Plus status")
+        // Polls verify Plus silently: the last trusted observation stays visible and no checking state appears.
+        try scenario(["backend": "pi_desktop", "round_status": "running", "control_delay_ms": 300,
+                      "control": ["state": "running", "connected": true, "can_start": false]])
+        var sawCheckingState = false, sawEmptyStatus = false
+        let pollWindow = Date().addingTimeInterval(4)
+        while Date() < pollWindow, store.controlStatus?.state != "running" {
+            sawCheckingState = sawCheckingState || store.controlLoading
+            sawEmptyStatus = sawEmptyStatus || store.controlStatus == nil
+            await pause(20)
+        }
+        check(store.controlStatus?.state == "running", "polling refreshes Plus status without a manual check")
+        check(!sawCheckingState, "silent polls never publish a checking state")
+        check(!sawEmptyStatus, "silent polls keep the last trusted Plus observation until the new one arrives")
         try scenario(["status_read_error": "status read interrupted"])
         let checkedBeforeFailure = store.lastStatusCheckedAt
         await store.refresh()
@@ -325,6 +410,20 @@ struct SessionReaderFixtures {
             check(store.previousFailureText?.contains("NETWORK_ERROR") == true)
             check(store.previousFailureEndedAt == nil, "untrusted status cannot expose a verified historical time")
         }
+        try scenario(fixture(control: ["state": "unavailable", "detail": "无法核验手动继续后的 Plus 状态，请刷新后重试"]))
+        await store.refresh()
+        await waitFor { store.controlStatus != nil && !store.controlLoading }
+        check(store.displayStatusDetail == "无法核验手动继续后的 Plus 状态，请刷新后重试",
+              "an unconfirmed failed round shows the core's reason instead of a generic placeholder")
+        try scenario(fixture("aborted"))
+        await store.refresh()
+        await waitFor { store.displayStatusLabel(store.session) == "已中止" && !store.controlLoading }
+        try scenario(fixture("aborted", extra: ["control_delay_ms": 500]))
+        let checking = Task { await store.checkControlStatus() }
+        await waitFor { store.controlLoading }
+        check(store.displayStatusLabel(store.session) == "已中止" && store.controlStatus != nil,
+              "a manual check keeps the last trusted continuation while it is in flight")
+        await checking.value
         try scenario(fixture(control: ["original_turn_ended_at": NSNull()]))
         await store.refresh()
         await waitFor { store.controlStatus != nil && !store.controlLoading }
