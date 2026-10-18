@@ -1672,6 +1672,56 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 
 请求终态为succeeded/failed/cancelled；其它状态含未知均视作引用。save_state active/trashed/purged仅是显示/保存状态，均不证明目录可删。GC结合requests、execution_rounds、tasks与经task_id/run_id/backend身份验证的runs/job.json、payload/持久计划材料路径；不得以requests/tasks行缺失认定无引用。历史读取仍依赖目录或无法证明终态时只报告并保留。历史Codex Desktop也须同run的可信owner停止证明；只有请求终态和短CLI进程消失不足以回收，已知为Desktop却缺job时仍保护。执行branch还须当前执行run的终态请求链、同run可信job停止、终态execution_round与交付commit的run/SHA一致，以及交付已合并、来源分支已清理；历史执行UUID默认保留，待独立证据核实。不能归类、非git、runs/executor-sessions/planner_inputs只报告。脏存量只在迁移或可恢复备份后再考虑；不在GC中强制删除。
 
+**人工确认路径（2026-10-18 用户选定：归档后删除、每批不超过10条、删除前逐批确认）**。仅新增下列命令；不放宽上述自动守卫，不改池化逻辑，不改 Plus 仓库。
+
+1. **范围**。类别仅 `plan_snapshot`、`review_snapshot`、`plan_run`、`review_run`、`plan_state`。不纳入：`pool_slot`（由 §5.29.1–5.29.2 的池释放与隔离规则管理，本路径不提供强制丢弃）、`execution_branch`（须任务已合并，按 AGENTS.md 清理规则处理）、`execution_or_state`（UUID 执行回退，待 B9 另行定义）、未知与只报告目录。
+
+2. **阻塞原因**。人工确认只可覆盖下列八项，清单中单列为「覆盖项」（与代码 `_CLEANUP_OVERRIDABLE` 一致）：`dirty_worktree`（先归档，核验通过后方可丢弃）、`retention_period`（用户逐批确认覆盖保留期）、`plus_turn_terminal_unproven`（历史 Plus 轮次终态证据缺失，且进程已不存在）、`task_identity_unknown`（目录无对应任务行）、`terminal_request_evidence_missing`（快照或运行目录无关联请求行）、`run_head_evidence_missing`（运行缺少 HEAD 证据）、`persistent_job_path`（作业记录以本路径作为持久材料位置）、`job_identity_unknown`（作业身份无效，且仅在下列证明通过时）。其中 `task_identity_unknown`、`terminal_request_evidence_missing`、`run_head_evidence_missing`、`persistent_job_path` 四项的产生分支均不跳过进程、轮次终态、cwd 探测或锁检查，故可覆盖；`persistent_job_path` 所在的作业循环先执行状态与进程检查。
+   - `job_identity_unknown` 的人工证明仅在人工审计模式（`_audit(..., manual=True)`）中执行。`worktree-audit` 与 `worktree-gc` 不变：仍记 `job_identity_unknown` 硬阻塞，并跳过该作业。普通路径跳过的检查，人工证明补做，且不采用 `returned` 豁免（较严）：
+     ① 作业 pid 经 `_process` 证实为 absent 且状态为终态，否则记 `job_activity_unproven`（硬）且不记 `job_identity_unknown`；② owner 已终止，否则与普通路径相同：pi_desktop 记 `plus_turn_terminal_unproven`，其余记 `desktop_owner_stop_unproven`（不豁免）。
+     身份集合 U：记录声明的 (task_id, run_id) 与目录身份（`runs/<task>/<run>/job.json` 的父目录名，即 `directory_identity`），仅取两项均为非空字符串者；R：记录的 `request_id`，不论作业来源。对 U 中的轮次检查 `round_not_terminal`、codex_desktop 的 `desktop_owner_stop_unproven` 与带 pid 的 `round_process_unproven`；对 U 或 R 命中的请求检查 `request_not_terminal` 与冻结 Desktop 请求的 `desktop_owner_stop_unproven`（较严：无 returned 豁免）。
+     扫描全部作业（不论身份是否有效）：凡记录身份或目录身份落在 U 中、或 `request_id` 落在 R 中者，须 pid absent、状态终态且 owner 已终止，否则记 `job_activity_unproven`（硬；较严，不得以覆盖项放行）。该作业的 `persistent_job_path` 检查照常执行。
+   - 其余阻塞原因一律硬阻塞，包括 `request_not_terminal`、`round_not_terminal`、`job_activity_unproven`、`round_process_unproven`、`pool_owner_unproven`、`desktop_owner_stop_unproven`、`persistent_request_path`、`persistent_round_path`、`persistent_task_path`、`persistent_execution_directory`、身份与仓库不匹配类、`pool_operation_unconfirmed`、`previous_gc_unknown`、`previous_cleanup_unknown`、`inspection_incomplete`、`unsafe_symlink`、`unclassified_directory`、`report_only`，以及人工路径新增的 `category_out_of_scope`、`archive_entry_refused`（嵌套仓库、特殊文件或无法安全复制的条目）、`live_cwd_holder`、`cwd_probe_unproven`、`worktree_locked`。归档与删除的全部核验项同样硬阻塞。
+
+3. **只读清单** `worktree-cleanup-list {retention_days?:7}`。返回 `audit_sha256` 与按路径排序的条目。每条含：路径、分类、阻塞原因（硬）、覆盖项（第2条覆盖集合中命中者）、脏改动摘要（tracked/untracked/ignored 计数，untracked 与 ignored 的字节数，前若干路径）、分配大小（allocated_bytes）、最后修改时间（UTC ISO）、保留至、是否可人工确认、所属批次。`batches` 将可确认条目按路径顺序装入每批至多10条，`sha256 = H(audit_sha256, paths)`，供用户逐批确认。清单不写库、不写文件系统。
+
+4. **进程探测（辅助证据）**。归档与删除前对目标运行 `/usr/sbin/lsof -a -d cwd -Fpn`；工具缺失、退出码非 0/1 或输出不可解析即失败。进程 cwd 位于目标内记 `live_cwd_holder`，探测失败记 `cwd_probe_unproven`，两者均阻塞。探测不能证明无进程持有目录内文件，因此不替代第2条与第7条的任何守卫。测试以可注入替身代替真实 lsof。
+
+5. **指纹**。每条审计结果的 `entry_sha256 = H({路径、分类、head、branch、dirty、status、allocated_bytes、modified_ns、contains_symlinks、identity、references、activity、task_id、run_id、task_fingerprint、branch_evidence、硬阻塞原因、覆盖项（不含 retention_period）})`。`retention_period` 随时间变化，不计入指纹。
+
+6. **归档** `worktree-cleanup-archive {paths:[1–10], expected_audit_sha256?, dry_run?:true, confirm?, retention_days?:7}`。
+   - `dry_run` 缺省为 true，只返回每条的可归档性与计划。执行须 `dry_run:false, confirm:true`，且 `expected_audit_sha256` 与当前审计一致；路径须为不重复的绝对路径且全部可人工确认，否则整批拒绝。
+   - 每条在写事务内重新审计并探测，硬阻塞非空则拒绝。若已存在 accepted 归档且其 `entry_sha256` 与当前指纹一致，直接返回该归档（幂等）。否则写回执 `runtime_operations(scope_id=worktree-cleanup, operation_id=archive:<archive_id>, harness_id=core, tool=worktree_archive)`，先置 unknown 并在结果中写入路径，再开始写归档。
+   - 归档位置：`<数据库所在目录>/KaneoPilot-archives/<YYYYMMDD>/<archive_id>/`，与 `backups/` 同级，且不得位于 worktrees_root 内。`<YYYYMMDD>` 为本地日历日，写入回执后不再重算。
+   - 提交与引用：临时索引位于归档目录内，不在工作树内。复制工作树 index 文件得 `index_tree`；对同一副本执行 `add -A` 得 `work_tree`。`index_tree` 与 HEAD 树不同时先建 index 提交（父为 HEAD）；`work_tree` 与当前父树不同时再建工作树提交（父为上一步），否则直接指向父。提交使用固定的 GIT_AUTHOR_*/GIT_COMMITTER_* 身份并带 `--no-gpg-sign`。引用 `refs/archive/worktree-cleanup/<YYYYMMDD>/<archive_id>` 以 `update-ref <ref> <commit> ""` 创建，不得覆盖。
+   - 文件：未跟踪（`ls-files --others --exclude-standard`）与被忽略（`ls-files --others --ignored --exclude-standard`）文件逐个复制到 `files/<相对路径>`，经 O_NOFOLLOW 读取并计算 SHA256；复制前后 lstat（设备、inode、大小、mtime、模式）不一致即失败。符号链接以链接保存并记录目标。以 `/` 结尾的目录条目（嵌套仓库）与非普通文件、非链接的特殊文件一律拒绝。
+   - 清单：`manifest.json`（schema、archive_id、日期、worktree_path、head、branch、ref、commit、index_tree、work_tree、entry_sha256、tracked_changes、files 逐项的 source/kind/size/mode/mtime_ns/sha256/target）与 `SHA256SUMS`（普通文件，每行 `<sha256>  files/<路径>`）。`manifest.json` 字节的 SHA256 写入回执 `manifest_sha256`。
+   - 核验：清单哈希；每个副本的 SHA256 或链接目标；`<ref>^{commit}` 指向 commit 且 `commit^{tree}` 等于 work_tree；未跟踪普通文件在树中的 blob 等于副本经 `hash-object --path` 的结果，符号链接的 blob 等于目标字节的哈希；归档前后 HEAD、branch、工作树 index 字节与 `git status` 一致。任一失败回执为 rejected。
+   - 归档不删除任何工作树文件。rejected 或 unknown 后残留的目录与引用不被任何回执引用，不参与删除。
+   - 回执结果含 path、archive_id、date、ref、commit、head、index_tree、work_tree、archive_dir、manifest_sha256、entry_sha256、file_count、bytes。
+   - 完成前复核：写事务内重新审计时排除本归档自身的 unknown 回执（不计入 `previous_cleanup_unknown`，其余阻塞与指纹照常比较）；`entry_sha256` 与意图时不一致则回执为 rejected。
+
+7. **删除** `worktree-cleanup-remove {paths:[1–10], archives:[{path, archive_id, manifest_sha256}], dry_run?:true, confirm?}`（第二次确认）。
+   - `archives` 与 `paths` 一一对应，即用户看过归档结果后的再次确认凭据。`dry_run` 缺省为 true，只返回核验结果，不写回执、不改文件与引用。执行须 `dry_run:false, confirm:true`。
+   - 执行前先对全部条目完成只读预检：a 与 b 两项（读盘并哈希，在写事务之外执行，不持写锁），另检查目录未被 `git worktree lock` 锁定（否则为 `worktree_locked`），再对当前审计复核指纹、硬阻塞与探测。每条执行时同样先做 a、b 与锁定检查，再进入写事务做 c。任一条失败则整批拒绝，不做任何改动。预检通过后对本批调用一次 `_backup(ctx)`（SQLite backup API，integrity_check，记录路径与哈希），与自动路径一致。
+   - 每条按序执行：
+     a. 归档核验：回执 `archive:<archive_id>` 为 accepted，路径与 manifest_sha256 一致，且第6条的全部核验通过。
+     b. 内容证明：临时索引重算 index_tree 与 work_tree，须等于回执；当前未跟踪与被忽略文件集合须等于清单；逐个 lstat 与 SHA256（或链接目标）须与清单一致。
+     c. 写事务内复核：重新审计，`entry_sha256` 须等于回执，硬阻塞为空，探测无命中，且不存在既有 `remove:<archive_id>` 回执。随后写回执 `remove:<archive_id>`（tool=worktree_remove）为 unknown，并在结果中写入路径。
+     d. 丢弃前先再次执行 b（紧邻丢弃，缩小 b 与还原之间的窗口；失败同样记 unknown）。丢弃只允许三种动作：① 按清单逐个 unlink 未跟踪与被忽略文件，unlink 前复核 lstat（类型、大小、mtime、模式）；② 仅对已变空的目录 rmdir，失败即跳过，绝不强删；③ `git restore --source=HEAD --staged --worktree -- .` 还原已跟踪改动（内容已在归档提交中）。随后 `git status --porcelain=v1 --untracked-files=all --ignored=matching` 必须为空。
+     e. `git worktree remove <path>`（不加 `--force`），随后 `git worktree prune`。
+     f. 双向核对：路径不在 `git worktree list --porcelain -z` 中且磁盘上不存在；列表中位于 worktrees_root 下的每个已登记路径目录都存在。
+     g. 回执置 accepted。
+   - d 起任何失败：回执保持 unknown，停止本批，归档保留为恢复来源。不自动重试；同一 archive_id 的再次删除被拒绝。该路径因 unknown 回执被 `previous_gc_unknown` 阻塞，待人工处理。
+   - 预检与执行之间的变化由指纹、内容证明与逐文件 lstat 复核拦截；服务端无 CAS，本地锁不阻止外部进程写入。
+
+8. **审计补充**。`_audit` 新增：tool 为 `worktree_archive`、status 为 prepared/unknown 且结果引用本路径的回执，记 `previous_cleanup_unknown`（硬阻塞）。该补充只收紧，不放宽。
+
+9. **硬约束**。人工路径的所有 git 调用参数不含 `--force` 或 `-f`，不使用 `reset`、`clean` 或 `checkout -f`；`worktree remove` 不加 `--force`。dry-run 不写 DB、引用或归档目录（可能产生未被引用的 git 对象，无害）。被拒绝的请求不写回执。
+
+10. **测试**。`core/tests/test_worktree_cleanup.py` 仅使用临时 KANPILOT_DB 与 KANPILOT_APP_SUPPORT，覆盖：归档成功且脏改动可由引用取回，归档前后 HEAD、branch、index 字节与 status 不变；缺确认、未归档、归档被篡改、归档后目录变化时均拒绝删除且目录完整；排除类别、硬阻塞、超过10条与重复路径被拒；覆盖项放行；探测命中或失败即阻塞；所有 git 调用参数无 `--force`；unknown 不重发；删除后双向一致；写事务之后、丢弃之前的已跟踪改动被拦截且未丢弃任何文件。自动路径测试保持不变。
+   - 补充（人工证明）：孤立目录经确认后归档并删除（干净与脏两种）；`job_identity_unknown` 仅在作业 pid 不存在时放行，存活 pid 拒绝；扫描到同身份的存活作业拒绝；声明对、目录对与 request_id 命中的非终态轮次或请求均拒绝；活动进程、cwd 命中与锁定仍拒绝；清单的 overridden 与 eligible 正确；自动审计对同一作业仍为硬阻塞。
+
 ### 5.29.4 项目记忆登记（M4）
 
 核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为pool下精确slot路径。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在槽位；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。
