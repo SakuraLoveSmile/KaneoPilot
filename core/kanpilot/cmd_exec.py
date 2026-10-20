@@ -315,6 +315,9 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
             if request["task_id"]
             else None
         )
+        if task is not None and request["kind"] == "plan":
+            from . import task_workspace
+            task_workspace.require_no_workspace_repair(conn, task["task_id"])
         # §5.15.3：归档/回收站/恢复后暂停的任务不可领取（调度入口排除）。
         if task is not None and not db.task_schedulable(task):
             return {
@@ -532,7 +535,13 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
                 "detail": "plan changed between validation and claim",
                 "code": "validation_failed",
             }
+        repair = core.review_repair_of(task)
+        if repair:
+            util.require(repair.get("state") == "queued" and checked.get("review_repair") == repair,
+                         "修复材料在领取期间已变化", "conflict")
         run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
+        if repair:
+            db.set_extra(conn, task, util.to_iso(now), fix_request=dict(repair, state="running", repair_execution_run_id=run_id))
         session_marker = f"{task_id}/{run_id}"
         # v3（protocol §5.16.1/§5.23.3）：claim 按 exec_config.backend 固化
         # 轮次索引行与后端标识（该轮此后不受 set-exec-config 影响）。
@@ -557,6 +566,10 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
             sent_at=None, session_id=None, session_title=None,
             **core.clear_block_fields(),
         )
+        if repair.get("source_kind") == "merge_conflict":
+            from . import task_ai_action
+            task_ai_action.record_progress(conn, db.require_task(conn, task_id), util.to_iso(now),
+                                           "running", execution_run_id=run_id)
         db.set_setting(conn, "dispatch_serial", run_id)
         db.add_event(
             conn, util.to_iso(now), "status_change", task_id=task_id,
@@ -815,16 +828,50 @@ def cmd_report(ctx, payload: dict) -> dict:
         # Scheduler follow-ups.
         if request["kind"] == "plan-scan" and outcome == "succeeded":
             db.set_setting(conn, "last_plan_scan_at", now_iso)
-        # monitor 的下一周期由 tick 按 monitor_interval_seconds 重建（§4.8）。
+        # An explicitly authorized repair in a legacy project is also served by
+        # engine-only installations, whose broad business tick only covers live
+        # projects. Keep just this run's observation chain alive.
+        if task is not None and outcome == "succeeded" and request["kind"] in ("dispatch", "monitor"):
+            current = db.require_task(conn, task["task_id"])
+            repair = core.review_repair_of(current)
+            if (current["status"] == "running" and repair.get("state") == "running"
+                    and repair.get("authorized_by") == "user"
+                    and repair.get("repair_execution_run_id") == current["run_id"]):
+                db.create_request(conn, now_iso, "monitor", "monitor:" + current["task_id"],
+                    task_id=current["task_id"], requested_by="scheduler",
+                    not_before=util.plus_seconds(util.monitor_interval(conn), now) if request["kind"] == "monitor" else None)
+        # Only this explicitly authorized action continues through delivery in
+        # legacy/shadow engines; its pass receipt survives fix_request cleanup.
+        if task is not None and outcome == "succeeded" and request["kind"] in ("review", "delivery"):
+            current = db.require_task(conn, task["task_id"])
+            if engine_claim_scope.action_delivery_allowed(conn, current, allow_paused=True):
+                from . import task_ai_action
+                continuation = task_ai_action.delivery_continuation(current, allow_paused=True)
+                expected_review = continuation["review_identity"]
+                if request["kind"] == "review":
+                    current_request = (request["request_id"] == expected_review["request_id"]
+                                       and request["run_id"] == expected_review["run_id"])
+                else:
+                    current_request = engine_claim_scope.action_delivery_allowed(conn, current, request, allow_paused=True)
+                if current_request:
+                    db.create_request(conn, now_iso, "delivery", "delivery:" + current["task_id"],
+                        task_id=current["task_id"], requested_by="scheduler",
+                        not_before=core.delivery_of(current).get("next_sync_at") if request["kind"] == "delivery" else None,
+                        payload={"task_ai_action_id": continuation["action"]["action_id"],
+                                 "expected_execution_run_id": current["run_id"],
+                                 "expected_head_sha": continuation["head_sha"],
+                                 "expected_plan_sha256": current["plan_sha256"]})
+        # Other monitor cycles retain the existing scoped tick policy.
         fresh = db.get_request(conn, request["request_id"])
         task_status = task["status"] if task is not None else None
         if outcome == "needs_user" and task is not None:
             task_status = "needs_user"
-        return {
-            "ok": True,
-            "request_status": fresh["status"],
-            "task_status": task_status,
-        }
+        response = {"ok": True, "request_status": fresh["status"], "task_status": task_status}
+    if outcome == "succeeded" and request["kind"] == "review" and task is not None:
+        from . import review_repair
+        review_repair.try_auto_start(ctx, task["task_id"])
+        response["task_status"] = db.require_task(conn, task["task_id"])["status"]
+    return response
 
 
 def _publish_expected_model(req_payload: dict) -> Optional[dict]:
@@ -1078,7 +1125,27 @@ def cmd_register_review(ctx, payload: dict) -> dict:
         )
         util.require(report.is_file(), f"review report missing: {report}")
         report_sha = util.sha256_file(report)
-        if core.is_automation_managed(task):
+        from . import task_ai_action
+        action_fix = core.review_repair_of(task)
+        task_ai_action.record_review_result(conn, task, ctx.now_iso, conclusion)
+        task = db.require_task(conn, task["task_id"])
+        if (conclusion == "changes_requested" and payload.get("fix_mode") != "same_task"
+                and not core.is_automation_managed(task)):
+            fix_task = db.get_task(conn, payload["fix_task_id"])
+            # Historical identity-free manual calls may name a remote fix that
+            # has never been imported. New settlements must bind a local child.
+            util.require(fix_task is not None or not (payload.get("request_id") or payload.get("run_id")),
+                         "review fix binding child not registered")
+            if fix_task is not None:
+                util.require(fix_task["plan_kind"] == "review_fix"
+                             and fix_task["review_source_task_id"] == task["task_id"]
+                             and fix_task["review_key"] == payload["review_key"]
+                             and fix_task["project_id"] == task["project_id"]
+                             and fix_task["repository"] == task["repository"],
+                             "review fix binding does not match source/key/project/repository")
+                db.update_task(conn, fix_task["task_id"], ctx.now_iso,
+                               review_report_path=str(report), review_report_sha256=report_sha)
+        if core.is_automation_managed(task) or payload.get("fix_mode") == "same_task":
             if payload.get("fix_task_id") or (conclusion == "changes_requested" and payload.get("fix_mode") != "same_task"):
                 raise util.KanpilotError("conflict", "自动化任务必须在同任务内修复")
             if not all(payload.get(k) for k in ("request_id", "run_id", "expected_execution_run_id", "review_key")):
@@ -1096,33 +1163,21 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             entry = {"review_key": payload["review_key"], "conclusion": conclusion,
                      "report_path": str(report), "report_sha256": report_sha,
                      "execution_run_id": task["run_id"], "head_sha": core.delivery_of(task).get("head_sha"),
-                     "registered_at": ctx.now_iso, "fix_round": core.automation_of(task).get("fix_round", 0), "fix": fix}
+                     "registered_at": ctx.now_iso, "fix_round": (core.automation_of(task).get("fix_round", 0)
+                         if core.is_automation_managed(task) else db.task_extra(task).get("review_repair_round", 0)), "fix": fix}
             entry.update({key: core.delivery_of(task).get(key)
                           for key in ("branch", "base_branch", "base_sha", "worktree_path")})
             history.append(entry)
             db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
             task = db.require_task(conn, task["task_id"])
             if conclusion == "changes_requested":
-                from . import automation_policy
-                policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
-                fix_request = dict(entry, **fix, review_run_id=payload["run_id"], created_at=ctx.now_iso, state="held")
-                a = core.automation_of(task)
-                receipt = db.task_extra(task).get("engine_verdict") or {}
-                fix_binding = (receipt.get("binding") if receipt.get("execution_run_id") == task["run_id"]
-                               and receipt.get("plan_sha256") == task["plan_sha256"] else None)
-                code = ("fix_branch_unavailable" if not core.same_branch_fix_ready(task, fix_binding)[0] else
-                        "automation_stopped" if not policy.get("enabled") else
-                        "fix_rounds_exhausted" if a.get("fix_round", 0) >= policy["max_fix_rounds"] else
-                        "auto_budget_exceeded" if not core.automation_budget(task, policy, now)["ok"] else None)
-                if code:
-                    db.set_extra(conn, task, ctx.now_iso, fix_request=fix_request)
-                    core.block_task(conn, db.require_task(conn, task["task_id"]), ctx.now_iso,
-                                    core.FIX_BRANCH_UNAVAILABLE_DETAIL if code == "fix_branch_unavailable" else code,
-                                    code, "kaneo-review", stage="review")
-                else:
-                    core.start_fix_round_inline(conn, task, ctx.now_iso, fix_request=fix_request)
-                db.add_event(conn, ctx.now_iso, "review_registered", task_id=task["task_id"], actor="kaneo-review", detail={"conclusion": conclusion, "review_key": payload["review_key"]})
-                return {"ok": True, "report_sha256": report_sha, "task_status": db.require_task(conn, task["task_id"])["status"]}
+                fix_request = dict(entry, **fix, mode="direct", review_run_id=payload["run_id"],
+                    source_execution_run_id=task["run_id"], task_id=task["task_id"],
+                    project_id=task["project_id"], repository=task["repository"],
+                    requirements_sha256=task["requirements_sha256"], plan_sha256=task["plan_sha256"],
+                    created_at=ctx.now_iso, state="held")
+                # Never replace task.run_id while this Review remains claimed.
+                db.set_extra(conn, task, ctx.now_iso, fix_request=fix_request)
             if conclusion == "pass":
                 db.set_extra(conn, task, ctx.now_iso, fix_request=None)
         elif core.requires_branch_review(task):
@@ -1130,13 +1185,18 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             key = payload.get("review_key") or review_settle.review_key(task["task_id"], task["run_id"], report_sha)
             history = list(db.task_extra(task).get("review_history") or [])
             if not any(entry.get("review_key") == key for entry in history):
-                history.append({"review_key": key, "conclusion": conclusion,
+                entry = {"review_key": key, "conclusion": conclusion,
                                 "report_path": str(report), "report_sha256": report_sha,
                                 **core.branch_review_snapshot(task),
                                 "registered_at": ctx.now_iso,
-                                "fix_task_id": payload.get("fix_task_id")})
+                                "fix_task_id": payload.get("fix_task_id")}
+                if action_fix.get("source_kind") == "merge_conflict":
+                    entry["fix_round"] = core.automation_of(task).get("fix_round", 0)
+                history.append(entry)
                 db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
             payload = dict(payload, review_key=key)
+        if conclusion == "pass" and core.review_repair_of(db.require_task(conn, task["task_id"])):
+            db.set_extra(conn, db.require_task(conn, task["task_id"]), ctx.now_iso, fix_request=None)
         fields = {
             "review_report_path": str(report),
             "review_report_sha256": report_sha,
@@ -1169,6 +1229,9 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             conn, db.require_task(conn, task["task_id"]), ctx.now_iso,
             **extra_entries,
         )
+        if conclusion == "pass" and action_fix.get("source_kind") == "merge_conflict":
+            task_ai_action.register_delivery_continuation(conn, db.require_task(conn, task["task_id"]),
+                                                          ctx.now_iso, action_fix)
         db.add_event(
             conn, ctx.now_iso, "review_registered", task_id=task["task_id"],
             actor="kaneo-review",

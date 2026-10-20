@@ -2,6 +2,12 @@
 
 SQLite 是队列与运行状态的唯一写入来源。所有写经 protocol.md 命令完成；桌面与执行端不得直接改库或文件锁。
 
+跨 Harness 阶段契约（2026-10-20）见 [harness-contract.md](harness-contract.md) 与 protocol §5.30。契约及结果复用各阶段既有 spec/job 审计文件；交付使用 `extra.delivery.stage_contracts/stage_results`，外部操作沿用 `runtime_operations`。不新增任务生命周期或 DB schema。结果信封通过后仍须满足现有推进门，损坏的新记录不能按无契约历史记录恢复。交付轮询更新审计信封不改变任务内 AI 处理已确认的业务身份；head、PR、评审、状态及未决操作守卫仍生效。
+
+原始任务收尾（2026-10-19）：按 protocol §5.27.18，从当前周期的评审历史绑定全部二级修复；子任务完成只投影「待收尾校验」，不自动写 done。`extra.parent_closeout` 独立保存 blocked/unknown/completed 结果与复用证据，旧 Review 不改写；远端确认后才经固定命令标本地 done。ready/blocked/unknown 保留评审列，阻塞与失败区分；未核验的人工/设备/真实服务体验继续保持未核验。无新增任务 status/schema。
+
+构建发布（2026-10-19）：按 [release-contract.md](release-contract.md) 冻结项目策略与父子共享批次，复用 `runtime_operations` 保存批次及独立 dispatch intent；无新增任务 status 或请求阶段。未完成任务保留交付阶段直到 published，构建 failed 为失败、身份/权限/结果 unknown 为阻塞。关闭策略不抹除已登记的 required 批次；历史 done 不回溯。只有当前任务/运行/计划/需求/评审/源码身份对应的成功回执可解除完成门。
+
 ## 1. 物理模型
 
 ```sql
@@ -407,7 +413,7 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  - verdict：live monitor 读取可信终态，排除 `.pi/**` 与构建产物后核心亲跑 verify；legacy 保留转录匹配，shadow 在隔离副本比较、不改旧判定。
  - commit：受 PR 交付管理的任务先 delivery-commit，再进入 review。
  - review：评审通过只登记，PR 交付继续等待合并；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮，与引擎质量补救分别记账）。
- - delivery：PR 已开 → delivery-sync 轮询合并状态；合并后 advance-task done。
+ - delivery：PR 已开 → delivery-sync 按 protocol §5.27.16 的项目开关检查并自动合并，或被动轮询合并状态；合并确认后 advance-task done。
  - done：任务归档，保留全部历史与文件。
  
  ## 10. 8 个用户动作清单
@@ -459,3 +465,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_k
 ```
 
 Desktop协作交还补充（protocol §5.29.1）：owner_state=returned只表示消费者已交还目录访问权，不证明原生进程退出。权威证明保存在runtime_operations accepted收据（scope=run_id，operation=desktop-return:<lease_token>，tool=worktree_consumer_return，harness=desktop_queue）；result逐字段绑定同request/run/slot/holder/token、backend和no_more_directory_access契约。job中的交还字段仅为恢复记录，不能单独授权清理。收据写入与确认在短事务内完成，Git和产物复制在事务外；中断恢复仍须同代身份和原有守卫。
+
+### Review 直接修复（2026-10-19）
+
+protocol §5.27.17 的 direct fix_request 是同任务当前修复轮，held→queued→running→awaiting_review；不回 needs_plan、不创建新任务。内部可复用 ready/dispatching/running 和 dispatch/monitor 请求，但读侧阶段保持 review/repairing，复审时为 review/reviewing；自动引擎仍按内部真实请求调度。修复 run/head 获当前 pass 后清当前修复对象，旧报告与历史子任务不改变。已有 PR 或 pushed_sha 不能证明新修复轮已通过评审。
+
+任务内一次性 AI 合并冲突处理沿用 direct 身份与内部状态，`source_kind=merge_conflict`，只经用户确认从 delivery 启动；不消费 Review 修复次数。queued 与尚未发送的 dispatching/prepared/submitting 显示“AI 处理待启动”，真实 running 显示“AI 正在处理”，awaiting_review 显示“处理后待复审”。原 pass 清为历史，新合并提交必须经过同 run/head 的新 Review；通过/需后续修复/阻塞/失败结果保存到 ai_action_history，清当前 fix_request 不删除处理历史。仅展示新增处理状态，不新增任务 status 或数据库表；完整命令与 Git 双父提交契约见 protocol 的“任务内 AI 一次性处理”。
+
+该处理已结束但验证报告缺证时保持 needs_user/monitor。显式 `retry_verification` 绑定当前执行轮，创建 queued 补报轮并保留 `fix_request.verification_recovery`、原计划/配置、原 run 与报告、源码/索引及合并双父现场；派发前再次复核，不重新准备合并或规划。当前 run 清空至新 dispatch 领取，不把旧轮当新轮开始。源码、索引、合并标记或远端身份漂移拒绝。补报仍缺证时回到 needs_user，不自动付费重试；新报告通过后才允许核心双父提交与新 Review。新 command_verification spec 的冻结命令贯通 Plus 批准绑定，提交报告前缺项属于可修正的当前轮工具错误，不能产生成功草稿。

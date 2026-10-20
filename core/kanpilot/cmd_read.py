@@ -187,7 +187,7 @@ def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
 
 
 def cmd_tick(ctx, payload: dict) -> dict:
-    from . import automation_policy
+    from . import automation_policy, release_delivery
     project_ids = payload.get("project_ids")
     if "project_ids" in payload:
         if (not isinstance(project_ids, list) or not project_ids
@@ -195,6 +195,15 @@ def cmd_tick(ctx, payload: dict) -> dict:
                        for pid in project_ids)):
             raise util.bad_request("project_ids 必须为非空字符串列表")
         project_ids = sorted(set(project_ids))
+    # Already-authorized builds keep progressing even when all members were
+    # historical done. Network reads precede the business-cycle writer lock.
+    release_results = release_delivery.sync_existing(ctx, project_ids=project_ids, limit=3)
+    # Recover a committed Review result before entering tick's write transaction.
+    # This helper only starts already-authorized managed repairs; manual rows stay held.
+    from . import review_repair
+    for task in ctx.conn.execute("SELECT * FROM tasks WHERE save_state='active'").fetchall():
+        if (project_ids is None or task["project_id"] in project_ids) and core.review_repair_of(task).get("state") == "held":
+            review_repair.try_auto_start(ctx, task["task_id"])
     projects = {t["project_id"] for t in ctx.conn.execute(
         "SELECT * FROM tasks WHERE status='ready'").fetchall()
         if core.is_automation_managed(t)
@@ -202,6 +211,8 @@ def cmd_tick(ctx, payload: dict) -> dict:
     checks = {pid: automation_policy.automation_preflight(ctx.conn, pid) for pid in projects}
     with db.write_txn(ctx.conn):
         result = tick_inline(ctx.conn, ctx.now, checks, project_ids=project_ids)
+    if release_results.get("results"):
+        result["release_batches"] = release_results["results"]
     return result
 
 

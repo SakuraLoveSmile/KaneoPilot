@@ -249,6 +249,7 @@ def _submit_plan_answers(ctx, payload):
     task, item = _current(conn, payload)
     request = db.get_request(conn, item["request_id"])
     old_payload, manifest, copies = _material(conn, item, request)
+    _require_continuation_workspace(conn, task, old_payload)
     if item.get("task_material_version") != {key: task[key] for key in ("requirements_sha256", "source_sha256")}:
         raise util.KanpilotError("conflict", "任务材料版本已变化，请重新准备材料")
     try:
@@ -294,6 +295,7 @@ def _submit_plan_answers(ctx, payload):
                 shutil.rmtree(root)
                 return cached
             fresh_task, fresh_item = _current(conn, payload)
+            _require_continuation_workspace(conn, fresh_task, old_payload)
             stable_item = {k: v for k, v in item.items() if k != "saved_at"}
             stable_fresh = {k: v for k, v in fresh_item.items() if k != "saved_at"}
             if stable_fresh != stable_item or task["requirements_sha256"] != fresh_task["requirements_sha256"] or task["source_sha256"] != fresh_task["source_sha256"]:
@@ -340,6 +342,16 @@ def _submit_plan_answers(ctx, payload):
         # transactions leave the original material and draft untouched.
         shutil.rmtree(root)
         raise
+
+
+def _require_continuation_workspace(conn, task, original):
+    from . import task_workspace
+    task_workspace.require_no_workspace_repair(conn, task["task_id"])
+    if original.get("delivery_head_sha"):
+        current = core.delivery_of(task)
+        util.require(original["delivery_head_sha"] == current.get("head_sha")
+                     and original.get("plan_cwd") == current.get("worktree_path"),
+                     "修复工作树基线或路径已更新，请重新准备规划材料；答案已保存", "conflict")
 
 
 def cmd_submit_plan_answers(ctx, payload):

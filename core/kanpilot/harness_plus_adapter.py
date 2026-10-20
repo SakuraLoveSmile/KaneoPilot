@@ -18,7 +18,43 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import constants, mcp_scopes, pi_desktop_backend, util
+from . import constants, harnesses, mcp_scopes, pi_desktop_backend, util
+
+
+def _semantic_capabilities(tools=None, command_binding=None) -> dict:
+    """Describe mechanisms only; a report tool is not independent command evidence."""
+    def tool_capability(required, detail):
+        state = "unknown" if tools is None else (
+            "supported" if set(required).issubset(tools) else "unsupported")
+        return harnesses.capability(state, "host", detail)
+
+    return {
+        "structured_result": tool_capability(
+            ("pi_turn_get", "pi_session_get"), "适配器规范化结构化状态；不保证模型正文正确"),
+        "durable_status": tool_capability(("pi_turn_get",), "持久轮次状态查询机制"),
+        "verification_report": tool_capability(
+            ("pi_goal_report_list", "pi_goal_report_get"), "Goal 结构化验证报告读取机制"),
+        "verification_command_binding": harnesses.capability(
+            "unknown" if command_binding is None else ("supported" if command_binding else "unsupported"),
+            "host", "由 pi_plans_resolve schema 的 requiredVerificationCommands 能力确认"),
+        "observed_command_results": harnesses.capability(
+            "unsupported", "adapter", "当前适配器没有独立采集命令退出码；模型报告不构成独立执行证据"),
+        "input_requests": tool_capability(
+            ("pi_asks_pending", "pi_asks_resolve"), "宿主执行问题查询及回应机制"),
+        "stop_confirmation": harnesses.capability(
+            "unknown" if tools is None else "unsupported", "adapter",
+            "停止请求回执与状态读取不证明所有工具及子进程已停止"),
+        "read_only_workspace": harnesses.capability(
+            "unknown", "host", "需要宿主强制只读保障；plan 模式本身不构成只读证明"),
+    }
+
+
+def _capability_envelope(*, connected, tools=None, command_binding=None) -> dict:
+    return {
+        "contract_version": harnesses.CONTRACT_VERSION, "harness_id": "pi_desktop",
+        "adapter_version": "1", "connected": connected,
+        "capabilities": _semantic_capabilities(tools, command_binding),
+    }
 
 
 _SENSITIVE_CATALOG_KEYS = frozenset({
@@ -79,7 +115,10 @@ def plus_capabilities(connection_file: str, *, timeout: int = 10) -> dict:
             if tools_ok
             else f"PI-Desktop 控制面缺少必需工具：{'、'.join(missing)}"
         )
+        binding = client.supports_required_verification_commands() if "pi_plans_resolve" in tools else False
+        binding = binding if isinstance(binding, bool) else None
         return _redact_output({
+            **_capability_envelope(connected=True, tools=tools, command_binding=binding),
             "available": tools_ok,
             "connected": True,
             "pid": record.get("pid"),
@@ -88,9 +127,11 @@ def plus_capabilities(connection_file: str, *, timeout: int = 10) -> dict:
             "attachment_supported": "pi_session_attach_mcp" in tools,
             "version": version,
             "supported_operations": sorted(tools),
+            "required_verification_commands_supported": binding is True,
         }, record.get("token"))
     except util.KanpilotError as exc:
         return _redact_output({
+            **_capability_envelope(connected=False),
             "available": False,
             "connected": False,
             "detail": exc.message,
@@ -101,6 +142,7 @@ def plus_capabilities(connection_file: str, *, timeout: int = 10) -> dict:
         }, record.get("token"))
     except Exception as exc:
         return _redact_output({
+            **_capability_envelope(connected=False),
             "available": False,
             "connected": False,
             "detail": f"Plus 连接失败：{exc}",
@@ -548,8 +590,10 @@ def plus_proposal_resolve(
     version: int,
     action: str,
     target_permission_mode: Optional[str] = None,
+    required_verification_commands: Optional[list] = None,
     timeout: int = 10,
 ) -> dict:
+    pi_desktop_backend.validate_required_verification_commands(required_verification_commands, action)
     if target_permission_mode is not None and target_permission_mode not in constants.EXEC_PERMISSION_MODES:
         raise util.bad_request("target_permission_mode 必须为 ask、accept-edits 或 auto")
     client, record = _get_client(connection_file, timeout=timeout)
@@ -578,6 +622,12 @@ def plus_proposal_resolve(
     }
     if target_permission_mode is not None:
         args["targetPermissionMode"] = target_permission_mode
+    if required_verification_commands is not None:
+        if required_verification_commands and proposal.get("kind") != "goal":
+            raise util.bad_request("验证命令要求仅适用于 Goal 提案")
+        if required_verification_commands and not client.supports_required_verification_commands():
+            raise util.KanpilotError("unsupported_tools", "请升级 Plus：pi_plans_resolve 缺少 requiredVerificationCommands 能力")
+        args["requiredVerificationCommands"] = list(required_verification_commands)
     res = client.call_tool("pi_plans_resolve", args)
     return _redact_output({
         "session_id": session_id, "proposal_id": proposal_id,
@@ -700,3 +750,127 @@ def plus_asks_resolve(connection_file, *, session_id, request_id, expected_tool_
     if not isinstance(res,dict) or res.get("requestId")!=request_id or res.get("status") not in ("answered","not_pending"):
         raise util.KanpilotError("protocol_error", "Plus execution answer receipt 格式不符")
     return _redact_output({"session_id":session_id,"request_id":request_id,"status":res["status"]},record.get("token"))
+
+
+def validate_runtime_policy(conn, scope, tool, args):
+    """Native Plus mode, permission, proposal, and interaction interpretation."""
+    from . import runtime_operations
+    session_id = args.get("session_id")
+    mode = {"planner": "plan", "review": "plan", "execution": "goal"}.get(scope.role, "agent")
+    if tool in ("kp_runtime_session_create", "kp_runtime_session_configure") and scope.role in ("planner", "review"):
+        if args.get("interaction_mode") != "unattended":
+            raise util.KanpilotError("forbidden", "planner/Review require unattended interaction policy")
+    if tool == "kp_runtime_session_create" and args["mode"] != mode:
+        raise util.KanpilotError("forbidden", "session mode does not match role")
+    if tool == "kp_runtime_proposal_resolve" and args.get("goal_continuation"):
+        receipt = runtime_operations.get_operation(conn, scope.scope_id, args["operation_id"])
+        if receipt is None or receipt["status"] != "accepted":
+            from .pi_desktop_worker import _pending_goal_contract
+            status = plus_status(scope.connection_file, session_id=session_id)
+            raw = status.get("raw_status") or {}
+            inner = raw.get("status") or raw
+            proposal = _pending_goal_contract(
+                {"plans": plus_proposals(scope.connection_file, session_id=session_id).get("proposals")},
+                session_id, args["turn_id"])
+            if (status.get("current_turn_id") != args["turn_id"]
+                    or inner.get("planningState") not in ("planning", "awaiting_approval")
+                    or status.get("pending_permission") or proposal is None
+                    or any(proposal.get(source) != args.get(target) for source, target in
+                           (("id", "proposal_id"), ("version", "version"), ("toolCallId", "tool_call_id")))):
+                raise util.KanpilotError("conflict", "当前目标提案已变化或不再可自动批准")
+    if tool == "kp_runtime_session_configure":
+        permission = (scope.runtime_config or {}).get("permission_mode")
+        if scope.role == "review" and permission not in (
+                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+                constants.PI_DESKTOP_REVIEW_PERMISSION_MODE):
+            raise util.KanpilotError("forbidden", "unsupported review permission snapshot")
+        elif scope.role == "planner" and permission not in (
+                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
+                constants.PI_DESKTOP_PLANNER_PERMISSION_MODE):
+            raise util.KanpilotError("forbidden", "unsupported planner permission snapshot")
+        if args["mode"] != mode or args["permission_mode"] != permission:
+            raise util.KanpilotError("forbidden", "configuration exceeds authorized snapshot")
+    if args.get("target_permission_mode") is not None and (scope.role != "execution" or args["target_permission_mode"] != (scope.runtime_config or {}).get("permission_mode")):
+        raise util.KanpilotError("forbidden", "proposal permission exceeds authorized snapshot")
+    if tool == "kp_runtime_prompt":
+        if scope.role in ("planner", "review"):
+            if args.get("expected_interaction_mode") != "unattended":
+                raise util.KanpilotError("forbidden", "planner/Review prompt require atomic unattended precondition")
+            from . import plus_interaction
+            connection_file = (scope.connection_file or (scope.runtime_config or {}).get("connection_file")
+                               or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser()))
+            policy = plus_messages(connection_file, session_id=session_id, limit=1)
+            session = {"id": policy.get("session_id"), **{
+                key: policy[key] for key in ("interactionMode", "interactionPolicyVersion") if key in policy}}
+            plus_interaction.require_unattended({"session": session}, session_id)
+
+
+class PlusAdapter:
+    """Runtime interface implemented by the statically registered Plus harness."""
+    harness_id = "pi_desktop"
+    adapter_version = "1"
+    runtime_control = True
+    validate_runtime_policy = staticmethod(validate_runtime_policy)
+    validate_verification_commands = staticmethod(pi_desktop_backend.validate_required_verification_commands)
+    _operations = {
+        'capabilities': 'plus_capabilities',
+        'catalog': 'plus_catalog',
+        'input_pending': 'plus_asks_pending',
+        'status': 'plus_status',
+        'turn_get': 'plus_turn_get',
+        'messages': 'plus_messages',
+        'proposals': 'plus_proposals',
+        'goal_report_list': 'plus_goal_report_list',
+        'goal_report_get': 'plus_goal_report_get',
+        'session_create': 'plus_session_create',
+        'session_configure': 'plus_session_configure',
+        'attach_mcp': 'plus_attach_mcp',
+        'prompt': 'plus_prompt',
+        'input_respond': 'plus_asks_resolve',
+        'stop': 'plus_stop',
+        'abort': 'plus_abort',
+        'proposal_resolve': 'plus_proposal_resolve',
+    }
+
+    def call(self, operation, connection_file, **kwargs):
+        function = self._operations.get(operation)
+        if function is None:
+            raise util.KanpilotError("unsupported_operation", "Plus 适配器不支持该操作")
+        return globals()[function](connection_file, **kwargs)
+
+    def capabilities(self, connection_file, **kwargs):
+        return self.call("capabilities", connection_file, **kwargs)
+
+    def verification_checks(self, report, *, source_sha256):
+        """Normalize report claims without upgrading their evidence provenance."""
+        checks = (report.get("report") or {}).get("checks")
+        util.require(isinstance(checks, list), "验证报告缺少 checks 列表",
+                     "verification_unconfirmed")
+        return [{"id": item.get("id"), "command": item.get("command"),
+                 "exit_code": item.get("exitCode"), "result": item.get("result"),
+                 "detail": util.redact(str(item.get("detail") or "")),
+                 "provenance": "model_declared", "source_sha256": source_sha256}
+                for item in checks if isinstance(item, dict)]
+
+    def continuation_permission_authorized(self, scope, args):
+        return (scope.role == "execution"
+                and (scope.runtime_config or {}).get("permission_mode") == "auto"
+                and args.get("action") == "accept"
+                and args.get("target_permission_mode") == "auto")
+
+    def observe_status(self, connection_file, *, session_id, **kwargs):
+        status = self.call("status", connection_file, session_id=session_id, **kwargs)
+        return self.observation(status)
+
+    def observation(self, status):
+        """Idle is an observation, never a claim that execution completed."""
+        return {
+            "contract_version": harnesses.CONTRACT_VERSION, "harness_id": self.harness_id,
+            "session_id": status["session_id"], "turn_id": status.get("current_turn_id"),
+            "state": "running" if status["is_running"] else "idle",
+            "waiting_for_permission": bool(status.get("pending_permission")),
+            "input_requests": status.get("pending_inputs"),
+        }
+
+
+ADAPTER = PlusAdapter()

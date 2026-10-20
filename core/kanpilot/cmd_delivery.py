@@ -23,6 +23,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
     with db.write_txn(conn):
         task = _identity(ctx, payload)
         delivery = core.delivery_of(task)
+        repair = core.review_repair_of(task)
         existing = next((commit for commit in delivery.get("commits") or []
                          if commit.get("execution_run_id") == execution_run_id), None)
         if existing:
@@ -44,13 +45,15 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         else:
             from . import engine_claim_scope
             from .engine import verdict
-            live = engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
+            strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
+                      or repair.get("source_kind") == "merge_conflict")
             verified = {}
-            if live:
+            if strict:
                 receipt = db.task_extra(task).get("engine_verdict") or {}
                 frozen = receipt.get("binding") or {}
                 actual = verdict.binding(conn, task, allow_core_commit=True)
-                if (receipt.get("verification_ok") is not True
+                if (receipt.get("evidence_source") != "goal_report"
+                        or receipt.get("verification_ok") is not True
                         or not verdict.receipt_evidence_current(conn, task, receipt)
                         or receipt.get("execution_run_id") != execution_run_id
                         or receipt.get("plan_sha256") != task["plan_sha256"]
@@ -59,6 +62,10 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                     raise git_delivery.GitDeliveryError("delivery_commit_failed", "缺少与当前源码绑定的 Plus 验证证据，未提交")
                 verified = {"verified_source_sha256": receipt["binding"]["source_sha256"],
                             "verified_index_sha256": receipt["index_source_sha256"]}
+            if repair.get("source_kind") == "merge_conflict":
+                from . import review_repair
+                review_repair.verify_frozen(task)
+                verified["merge_parent_sha"] = repair["target_base_sha"]
             result = git_delivery.commit_worktree(
                 git_input, task_id=payload["task_id"], title=title,
                 execution_run_id=execution_run_id, fix_round=fix_round, **verified)
@@ -94,7 +101,10 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         commits = list(current.get("commits") or [])
         commits.append({"execution_run_id": execution_run_id, "sha": result["sha"],
                         "at": now, "files": len(result["files"]), "fix_round": fix_round})
-        core.update_delivery(conn, fresh, now, commits=commits, head_sha=result["sha"])
+        updates = {"commits": commits, "head_sha": result["sha"]}
+        if repair.get("source_kind") == "merge_conflict":
+            updates["base_sha"] = repair["target_base_sha"]
+        core.update_delivery(conn, fresh, now, **updates)
         db.add_event(conn, now, "delivery_committed", task_id=payload["task_id"],
                      request_id=payload["request_id"], actor="kaneo-monitor",
                      detail=commits[-1])

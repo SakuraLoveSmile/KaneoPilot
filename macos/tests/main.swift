@@ -541,6 +541,104 @@ if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"needs_us
     expect(!task.needsAttention, "历史attention不列入需要你")
 }
 
+// Direct task relationships share the list/detail contract; old cores remain readable.
+let relationsJSON = #"{"parent":{"task_id":"root","title":"原始任务","display_status":"评审中","available":true},"children":[{"task_id":"fix","title":"修复任务","display_status":"执行中","available":true}]}"#
+if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"in_review\",\"task_relations\":\(relationsJSON)}") {
+    expect(task.taskRelations?.parent?.taskId == "root", "看板解码来源任务身份")
+    expect(task.taskRelations?.children.first?.title == "修复任务", "看板解码二级任务名称")
+}
+if let task = decode(TaskDetail.self, "{\"task_id\":\"t\",\"status\":\"in_review\",\"task_relations\":\(relationsJSON)}") {
+    expect(task.taskRelations?.parent?.available == true, "详情来源导航资格来自核心")
+}
+if let task = decode(TaskSummary.self, #"{"task_id":"t","status":"ready","task_relations":{"parent":{"task_id":"missing","title":null,"display_status":null,"available":false},"children":[]}}"#) {
+    expect(task.taskRelations?.parent?.available == false, "不可用来源仍保留禁用关联")
+    expect(task.taskRelations?.parent?.title == nil, "不为不可用来源伪造标题")
+}
+if let task = decode(TaskSummary.self, #"{"task_id":"t","status":"ready"}"#) {
+    expect(task.taskRelations == nil, "旧响应不推断任务层级")
+}
+
+// Project merge authorization is opt-in; delivery notices cannot leak across heads.
+if let policy = decode(ProjectAutomationDTO.self, #"{"auto_merge_pr":true}"#) {
+    expect(policy.autoMergePr == true, "项目自动合并开关解码")
+}
+if let policy = decode(ProjectAutomationDTO.self, #"{}"#) {
+    expect(policy.autoMergePr != true, "旧策略缺字段保持关闭")
+}
+for state in ["waiting_checks", "blocked", "merging", "unknown", "merged", "disabled"] {
+    let json = """
+    {"mode":"pr","head_sha":"current","auto_merge":{"state":"\(state)","reason":"自动合并状态","head_sha":"current","updated_at":"2026-10-18T22:00:00Z"}}
+    """
+    if let delivery = decode(TaskDeliveryView.self, json) {
+        expect((delivery.autoMergeNotice != nil) == (state != "disabled"), "自动合并 \(state) 可见性")
+        expect(delivery.autoMerge?.needsAttention == ["blocked", "unknown"].contains(state), "自动合并 \(state) 提示语义")
+    }
+}
+if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"new","auto_merge":{"state":"merged","reason":"旧提交已合并","head_sha":"old"}}"#) {
+    expect(delivery.autoMergeNotice == nil, "新提交不显示旧 head 的合并结果")
+}
+
+// Direct repair startup carries the exact reviewed material identity.
+let repairJSON = """
+{"state":"held","title":"有界读取","reason":"可直接修复","round":0,"max_rounds":2,"review_key":"review-a","report_path":"/fixture/review.md","report_sha256":"report-a","plan_sha256":"plan-a","source_execution_run_id":"exec-a","repair_execution_run_id":null,"session_id":null,"can_start":true}
+"""
+if let task = decode(TaskSummary.self, "{\"task_id\":\"t\",\"status\":\"in_review\",\"review_repair\":\(repairJSON)}") {
+    expect(task.reviewRepair?.canStart == true, "修复候选从核心解码")
+    expect(task.reviewRepair?.startFields["expected_execution_run_id"] as? String == "exec-a", "修复绑定原执行轮次")
+    expect(task.reviewRepair?.startFields["expected_review_key"] as? String == "review-a", "修复绑定本轮评审")
+    expect(task.reviewRepair?.startFields["expected_report_sha256"] as? String == "report-a", "修复绑定报告字节")
+    expect(task.reviewRepair?.startFields["expected_plan_sha256"] as? String == "plan-a", "修复保留原计划验证基线")
+}
+if let task = decode(TaskDetail.self, "{\"task_id\":\"t\",\"status\":\"running\",\"review_repair\":\(repairJSON.replacingOccurrences(of: "held", with: "running"))}") {
+    expect(task.reviewRepair?.stateTitle == "修复中", "详情修复状态解码")
+}
+
+// Release policy and task projection remain optional for older cores.
+if let policy = decode(ProjectAutomationDTO.self, #"{"release":{"enabled":true,"channel":"prerelease","workflow_path":".github/workflows/pilot-release.yml","workflow_ref":"main","version_base":"0.1.0","required_assets":["Music-unsigned.ipa"],"required_jobs":["iOS"]}}"#) {
+    expect(policy.release?.enabled == true, "发布策略按项目解码")
+    expect(policy.release?.channel == "prerelease", "预发布渠道解码")
+    expect(policy.release?.requiredAssets == ["Music-unsigned.ipa"], "必需安装包精确文件名")
+}
+if let release = decode(TaskRelease.self, #"{"state":"published","title":"版本已发布","reason":"证据已核验","required":true,"channel":"stable","root_task_id":"root","member_task_ids":["root"],"workflow_run_id":22000000000,"assets":[{"name":"Music-iOS-unsigned.ipa","url":"https://github.com/example/music/releases/download/v0.1.0/Music-iOS-unsigned.ipa","size":42123456,"sha256":"asset-sha"}],"blockers":[],"can_start":false,"can_reconcile":true}"#) {
+    expect(release.workflowRunId == 22000000000, "GitHub run id 使用64位整数")
+    expect(release.assets.first?.size == 42123456, "发布包大小解码")
+    expect(release.assets.first?.sha256 == "asset-sha", "发布包哈希保留")
+    expect(release.hasUnsignedAssets, "未签名iOS包明确标注")
+    expect(release.channelLabel == "正式版", "stable使用正式版文案")
+    expect(release.isPublished && !release.isFailed && !release.isBlocked, "发布成功与失败阻塞分开")
+}
+let releaseJSON = #"{"state":"unknown","title":"发布结果待确认","reason":"只读对账","required":true,"channel":"prerelease","context_sha256":"context-a","batch_id":"batch-a","root_task_id":"root-a","member_task_ids":["root-a","fix-a"],"target_sha":"abc","version":"0.1.0","tag":"v0.1.0-pilot.1","build_number":1,"assets":[],"blockers":[],"can_start":false,"can_reconcile":true}"#
+if let task = decode(TaskDetail.self, "{\"task_id\":\"root-a\",\"status\":\"in_review\",\"release\":\(releaseJSON)}") {
+    expect(task.release?.canStart == false, "未知发布不能重新发送")
+    expect(task.release?.canReconcile == true, "未知发布仅核对")
+    expect(task.release?.syncLabel == "核对发布结果", "未知发布核对文案")
+    expect(task.release?.memberTaskIds == ["root-a", "fix-a"], "共享批次完整成员解码")
+}
+if let legacyRelease = decode(TaskRelease.self, releaseJSON) {
+    expect(legacyRelease.canAbandon == nil && !legacyRelease.showsAbandonAction, "旧核心缺can_abandon不显示放弃入口")
+}
+for (state, allowed) in [("ready", true), ("blocked", true), ("unknown", false)] {
+    let json = releaseJSON.replacingOccurrences(of: #""state":"unknown""#, with: "\"state\":\"\(state)\"")
+        .replacingOccurrences(of: #""can_start":false"#, with: #""can_abandon":true,"can_start":false"#)
+    if let release = decode(TaskRelease.self, json) {
+        expect(release.canAbandon == true, "can_abandon按核心解码")
+        expect(release.showsAbandonAction == allowed, "仅核心允许且非unknown显示放弃未发送批次")
+    }
+}
+for (state, allowed) in [("blocked", true), ("dispatching", true), ("unknown", false)] {
+    let json = releaseJSON.replacingOccurrences(of: #""state":"unknown""#, with: "\"state\":\"\(state)\"")
+        .replacingOccurrences(of: #""can_start":false"#, with: #""can_start":true"#)
+    if let release = decode(TaskRelease.self, json) {
+        expect(release.showsStartAction == allowed, "未发送批次按核心can_start恢复首次发送，unknown不可发送")
+    }
+}
+if let response = decode(PrepareTaskReleaseResponse.self, "{\"task_id\":\"root-a\",\"context_sha256\":\"context-a\",\"release\":\(releaseJSON)}") {
+    expect(response.contextSha256 == "context-a", "准备候选固化指纹原样解码")
+}
+if let legacy = decode(TaskSummary.self, #"{"task_id":"old","status":"done"}"#) {
+    expect(legacy.release == nil, "旧任务不凭空追加发布门")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

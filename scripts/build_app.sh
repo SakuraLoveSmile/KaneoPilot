@@ -26,6 +26,9 @@ cp -R "$ROOT/core/kanpilot.py" "$ROOT/core/kanpilot" "$ROOT/core/_vendor" "$RES/
 # v1.6：pi worker 为纯 Python（无桥接包）；执行端 prompt 与 agent.md 内置预设
 # 随 kanpilot 包同层打入（executor_runner/pi_worker 运行时按 core_root() 定位）。
 cp -R "$ROOT/core/executor_prompts" "$ROOT/core/agents" "$RES/"
+# The rendered controller preamble references these exact bundled paths.
+mkdir -p "$APP_DST/Contents/Resources/docs"
+cp "$ROOT/docs/protocol.md" "$ROOT/docs/automation-contract.md" "$ROOT/docs/release-contract.md" "$ROOT/docs/harness-contract.md" "$APP_DST/Contents/Resources/docs/"
 find "$RES" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 # fallback: single-file layout
 [ -f "$ROOT/core/kanpilot.py" ] && cp "$ROOT/core/kanpilot.py" "$RES/"
@@ -52,9 +55,12 @@ modules = (
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
     "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
     "harness_plus_adapter", "runtime_operations", "runtime_client",
+    "harnesses", "stage_contract", "stage_evidence", "execution_contract", "delivery_contract",
     "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
-    "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "delivery_runner",
-    "claude_cli", "claude_planner", "review_settle", "cli_review",
+    "git_delivery", "cmd_delivery", "gh_client", "cmd_delivery_pr", "pr_auto_merge", "delivery_runner",
+    "parent_closeout", "parent_closeout_github",
+    "release_delivery", "release_github",
+    "claude_cli", "claude_planner", "review_settle", "review_repair", "repair_prompt", "task_ai_action", "cli_review",
     "process_owner", "desktop_queue", "desktop_automation_control", "verification_recovery", "verification_checks", "verification_process", "review_snapshot", "review_resolution",
     "plan_questions", "plan_answers", "execution_questions",
     "task_workspace", "engine_claim_scope", "cmd_queue", "cmd_remote",
@@ -77,6 +83,9 @@ for name in modules:
 for relative in (Path("executor_prompts/review_cli.md"), Path("executor_prompts/planner_prompt.md")):
     if hashlib.sha256((source / relative).read_bytes()).digest() != hashlib.sha256((bundled / relative).read_bytes()).digest():
         raise SystemExit("Bundled prompt differs from source: " + str(relative))
+for name in ("protocol.md", "automation-contract.md", "release-contract.md", "harness-contract.md"):
+    if (source.parent / "docs" / name).read_bytes() != (bundled.parent / "docs" / name).read_bytes():
+        raise SystemExit("Bundled contract differs from source: " + name)
 print("Desktop and automation backend imports and source hashes verified")
 PY
 

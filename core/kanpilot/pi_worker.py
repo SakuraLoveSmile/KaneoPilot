@@ -183,6 +183,7 @@ def _run_real(spec: dict, owner) -> int:
             return
         session_seen["written"] = True
         job["session_id"] = session_id
+        session_title = spec.get("session_display_name") or session_title
         job["session_title"] = session_title
         log.emit("session", util.now_iso(),
                  session_id=session_id, session_title=session_title)
@@ -213,6 +214,14 @@ def _run_real(spec: dict, owner) -> int:
                     or constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS)
     if timeout <= 0:
         timeout = float(constants.DEFAULT_PI_ROUND_TIMEOUT_SECONDS)
+    if spec.get("review_repair") is not None or spec.get("repair_prompt"):
+        from . import repair_prompt
+        try:
+            spec = dict(spec, instruction=(spec.get("instruction") or "").rstrip()
+                        + "\n\n" + repair_prompt.execution_body(spec))
+        except util.KanpilotError as exc:
+            return finalize("failed", 1, "repair_materials: " + exc.message,
+                            "failed", "repair_materials")
     agent_md = spec.get("agent_md")
     agent_md_path = Path(agent_md) if agent_md else None
     try:

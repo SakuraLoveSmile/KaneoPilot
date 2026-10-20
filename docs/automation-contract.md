@@ -2,6 +2,12 @@
 
 现行冻结契约以 protocol §5.27 为准。App 的 EngineSupervisor 监督 engine run 并读取核心状态；引擎 intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
 
+跨 Harness 边界见 [harness-contract.md](harness-contract.md)（protocol §5.30）。新规划、执行、评审与交付冻结 `kp-stage-v1` 输入，并在既有业务核证后消费结果信封；新记录损坏或缺必要结果不降级为旧记录。能力按语义探测，unknown 不代表支持。当前执行仍限实际可控的 Plus；Codex/Claude CLI 接入共同规划/评审契约，不因此取得执行权限。验证命令始终由执行端运行。
+
+父任务收尾见 protocol §5.27.18：用户显式「校验并完成」只核对既有 Plus 正式报告、原始问题到修复的绑定及真实 GitHub 合并/最终整合源码，不启动规划、执行、Review 或模型。缺证据不绕过、不在 Pilot 本地执行 verify；补充付费验证仍需授权。远端完成经核心回执与写后重查，unknown 仅只读对账，不重复发送。历史父任务不会因更新 App 自动完成或启动旧问题修复。
+
+构建与发布交付见 [release-contract.md](release-contract.md)（protocol §5.27.19）。项目显式开启后，合并回执继续驱动确定性 Actions；只认同批次、固定提交、完整必需包及来源证明的发布结果。未确认发布前，正常完成、人工完成及远端 done 同步均受完成门约束。旧 done 不自动补发；unknown 只对账；预发布不改写稳定更新入口。调度和轮询均无模型调用。
+
 ## 现行路由与结算
 
 本节覆盖当前生效行为；完整接口、载荷和失败语义见 protocol §5.27。
@@ -101,25 +107,11 @@
 
 ## 同任务修复轮
 
-**register-review 的 same_task 分支（主控，cmd_exec 815–905）：**
+新 Review 遵循 protocol §5.27.17：changes_requested 直接进入同任务修复会话，不再创建修复子任务或重新规划。原计划只作为需求/验证基线保留。自动任务在当前 Review 已成功结算且门控满足后直接排队；手动及历史任务由 start-review-repair 显式确认。修复轮仍沿用原次数、预算、暂停和分支保护，修复 run/session 独立冻结身份和正文，结束后必须复审当前成果。
 
-- **适用范围：** 只用于受自动化管理的任务，payload 带 `fix_mode:"same_task"`、`fix:{title, description, priority}`、`review_key` 和既有的 Review 身份字段。对这类任务，旧的 `fix_task_id`/create-review-fix 路径一律返回 conflict。
-- **幂等：** `fix_request.review_key` 或 `review_history[-1].review_key` 已等于本次 key → 返回 `{already_registered:true}`。
-- **未超上限**（same_branch_fix_ready 成立、`fix_round < max_fix_rounds`、本段时长和成本未超、项目仍开启）：调用 `core.start_fix_round_inline`，在同一事务内完成：
-  1. 本次 Review 归档进 review_history；
-  2. `fix_round += 1`；
-  3. fix_request 写入并置为 open；
-  4. `plan_wanted=true`，`plan_attempts=0`；
-  5. 清空列 review_report_path、review_report_sha256、review_key，删除 extra 的 review_conclusion 和 review_registered_at；
-  6. **重置发送字段**：`sent=0, send_state=NULL, sent_at=NULL, lock_retained=0, manual_recovery_required=0`；以 db.py 的 tasks 列为准，主控逐列核对；
-  7. in_review → needs_plan；
-  8. 记录事件 `fix_round_started`。
-- **无法同分支修复：** 先于额度判断，复用 protocol §5.27.12 的纯内存守卫。fix_request 写入并置为 held，needs_user/fix_branch_unavailable，显式 failure_stage=review，不计 fix_round，不调用 start_fix_round_inline。
-- **超出上限：** fix_request 写入并置为 held，任务进入 needs_user。failure_code 按触发原因取：
-  - 修复轮用完 → fix_rounds_exhausted；
-  - 时长或成本超出 → auto_budget_exceeded；
-  - 项目已关闭 → automation_stopped。
-- **pass 与 blocked：** 自动化任务的 pass 和 blocked 同样追加 review_history；pass 后把 fix_request 置为 null。
+交付中的 PR 合并冲突可由用户显式调用 `prepare-task-ai-action`／`start-task-ai-action` 发起一次处理（完整契约见 protocol“任务内 AI 一次性处理”）。沿用全局执行配置快照与原验证要求、不创建规划或子任务、不消费 Review 修复次数；失败不自动增加 AI 轮次。核心准备冻结 base 的合并，AI 只解决文件冲突并验证，核心登记严格双父提交后重新评审，再更新同一 PR。已开启自动合并不构成自动调用一次性 AI 的授权。
+
+以下 publish-plan/计划元数据段落仅为已持久化的历史 same_task 规划恢复契约，新直接修复不走这些入口。
 
 **publish-plan 的 same_task 分支（主控，cmd_exec 614–812）：**
 
@@ -238,6 +230,8 @@ exit_code 缺失或不是整数时记为 None。
 连续 3 次 retry → blocked，failure_code=gh_unavailable。gh 的环境变量为 `GH_PROMPT_DISABLED=1`、`GH_NO_UPDATE_NOTIFIER=1`、`NO_COLOR=1`、`GH_PAGER=`，每次调用超时 60 秒。
 
 **delivery-sync（包 F）：**
+
+项目自动合并扩展以 protocol §5.27.16 为唯一契约：默认关闭，显式开启后 OPEN 分支先核对 GitHub 检查、正常合并资格与当前评审身份，经 runtime_operations 回执发送一次绑定 head 的 merge 请求；确认 MERGED 后进入下述既有同步流程。未开启保持被动观察。
 
 1. 先读 Kaneo 任务（只读，无事务）：
    - 远端已 done → 返回 `{outcome:"kaneo_done"}`；
@@ -445,6 +439,8 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 | remote_conflict | advance-task、intake、begin-send | resume（接受远端当前需求和状态，回到被阻塞的步骤；派发中途不可用）、replan、mark_done、dismiss |
 | planner_failed（自动重试一次后）、needs_input | plan | replan、dismiss；也可以在规划面板补充材料后手动提交 |
 | dispatch_failed | dispatch | 沿用 retry/restore/accept_duplicate/mark_sent；另有 replan、dismiss |
+
+一次性 `merge_conflict` 的验证缺证为上述 retry_verification 的受限补报路径：必须用户明确确认当前 run 与费用，复用原计划/固化配置及已解决暂存现场；不创建规划、不重做合并、不自动重试、不消耗 Review fix_round。身份、合并标记、源码/索引和远端漂移拒绝，普通 resume/retry/replan 不放行。具体守卫见 protocol「任务内 AI 一次性处理」。新 command_verification 在首次模型调用前要求 Plus 支持 requiredVerificationCommands；冻结命令经 runtime 可信核对并绑定批准事务，报告漏项在当前轮提交时返回工具错误，不能靠提示词替代该门。
 
 **处置规则：**
 

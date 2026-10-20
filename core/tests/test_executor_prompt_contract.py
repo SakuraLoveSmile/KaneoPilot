@@ -2,10 +2,10 @@
 
 四个 prompt（_preamble/dispatch/monitor/review）必须与冻结契约一致：
 
-- 角色流程 + 控制端后端分支都写明（``pi`` 分支命令不变；``pi_desktop`` 分支在
+- 角色流程 + 控制端后端分支都写明（``pi`` 分支遵守核心命令契约；``pi_desktop`` 分支在
   Plus ``mode="agent"`` 控制会话里跑同一角色 prompt，**不**拉起 ``pi -p``）。
 - Plus 控制轮的固定包装器与显式宿主环境（六个契约键）。
-- Review 的冻结 JSON 结论结构、登记顺序（**先** create 后 register）、报告根
+- Review 的版本化评审文本、同任务修复登记与交付门控、报告根
   ``<task_id>/<run_id>.md``、登记身份字段；意外 proposal 只 reject 关闭。
 - 不越权语义：控制轮 ``completed`` ≠ 请求成功、权限等待不算成功、
   「已排队 ≠ 已开始」、发送不明不重发。
@@ -92,38 +92,44 @@ class MonitorPromptContractTests(unittest.TestCase):
 
 
 class ReviewPromptContractTests(unittest.TestCase):
-    def test_plus_branch_freezes_json_contract(self):
+    def test_plus_branch_requires_raw_markdown_transport(self):
         prompt = read("review.md")
 
-        self.assertIn('"conclusion":"pass|changes_requested|blocked"', prompt)
-        self.assertIn(
-            '"priority":"no-priority|low|medium|high|urgent"', prompt
-        )
-        self.assertIn("report_markdown", prompt)
-        self.assertIn("fix", prompt)
+        self.assertIn("review_text_v1", prompt)
+        self.assertIn("**不要输出 JSON**", prompt)
+        self.assertIn("pass/changes_requested/blocked", prompt)
+        self.assertIn("no-priority/low/medium/high/urgent", prompt)
+        self.assertIn("两段修复正文留空", prompt)
+        self.assertIn("各出现一次", prompt)
         # Plus 分支不 SubmitPlan / 不代批契约。
         self.assertIn("SubmitPlan", prompt)
         self.assertIn("SubmitGoal", prompt)
         self.assertIn("reject", prompt)
 
-    def test_changes_requested_creates_before_register(self):
+    def test_changes_requested_registers_same_task_repair_without_plan(self):
         prompt = read("review.md")
+        self.assertIn('"fix_mode":"same_task"', prompt)
+        self.assertIn('"fix":{"title":', prompt)
+        self.assertNotIn("create-review-fix", prompt)
+        self.assertNotIn("fix_task_source_sha256", prompt)
+        self.assertNotIn("needs_plan", prompt)
+        self.assertIn("不创建 Kaneo 子任务", prompt)
+        self.assertIn("不生成新计划", prompt)
+        self.assertIn("report", prompt)
 
-        create_at = prompt.index("create-review-fix")
-        register_at = prompt.index("register-review", create_at + 1)
-        self.assertLess(
-            create_at, register_at,
-            "changes_requested 必须先 create-review-fix 再 register-review",
-        )
-        self.assertIn("**先**", prompt)
-        self.assertIn("fix_task_source_sha256", prompt)
+    def test_pass_keeps_automated_delivery_gate(self):
+        prompt = read("review.md")
+        self.assertIn("自动管理任务", prompt)
+        self.assertIn("只登记 pass", prompt)
+        self.assertIn("交付流程", prompt)
+        self.assertIn("不直接推进 done", prompt)
 
     def test_report_root_and_registration_identity(self):
         prompt = read("review.md")
 
         self.assertIn("<task_id>/<run_id>.md", prompt)
         for field in ("request_id", "run_id", "expected_execution_run_id",
-                      "review_key", "dedupe_key"):
+                      "review_key", "fix_mode"):
             self.assertIn(field, prompt, field)
         self.assertIn("review_blocked", prompt)
         self.assertIn("stale_run", prompt)

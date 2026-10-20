@@ -95,8 +95,8 @@ PI_DESKTOP_EXEC_MODE = "goal"
 # 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。
 PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
                              + PI_DESKTOP_GOAL_TOOLS + PI_DESKTOP_INPUT_TOOLS)
-# T5-A（protocol §5.23.10）：Goal 报告只读工具。核心只在读取报告时要求它们；
-# 派发就绪门不要求（旧 Plus 仍可派发，但报告读取会明确失败）。
+# T5-A（protocol §5.23.10）：Goal 报告只读工具。旧记录沿历史能力门；
+# 新 kp-stage-v1 执行在 worker 原生启动前还要求 verification_report 语义能力。
 PI_DESKTOP_GOAL_REPORT_TOOLS = ("pi_goal_report_list", "pi_goal_report_get")
 # T6（protocol §5.23.10）：`pi_session_create.inputSchema.properties.projectName`
 # 是旧 Plus 与新 Plus 的兼容门；缺字段 → 明确阻断，不静默派发 UUID 名称。
@@ -441,10 +441,16 @@ INTAKE_INTERVAL_SECONDS = 300
 INTAKE_MAX_ADOPT_PER_PASS = 3
 INTAKE_LABEL_LOOKUPS_PER_PASS = 20
 INTAKE_LABEL_RECHECK_SECONDS = 1800
+RELEASE_DEFAULTS = {
+    "enabled": False, "channel": "prerelease",
+    "workflow_path": ".github/workflows/pilot-release.yml", "workflow_ref": "main",
+    "version_base": "0.1.0", "required_assets": [], "required_jobs": [],
+}
 AUTOMATION_DEFAULTS = {
-    "enabled": False, "label_filter": [], "auto_confirm_plan": True,
+    "enabled": False, "label_filter": [], "auto_confirm_plan": True, "auto_merge_pr": False,
     "max_fix_rounds": 2, "max_task_minutes": 240, "max_task_cost_usd": 10.0,
-    "delivery_base": None, "policy_revision": 0, "updated_at": None,
+    "delivery_base": None, "release": RELEASE_DEFAULTS,
+    "policy_revision": 0, "updated_at": None,
 }
 AUTOMATION_GLOBAL_DEFAULTS = {"max_active_tasks": 2}
 KANEO_MARKER_PREFIX = "[kaneopilot:"

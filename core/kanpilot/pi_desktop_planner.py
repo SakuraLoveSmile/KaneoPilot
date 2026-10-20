@@ -230,7 +230,7 @@ def _published_model_pair(context: dict, manifest: dict, generated_at: str,
         try:
             planfile.check_plan_meta(meta, plan_kind, expected_model=expected, expected_project=expected_project)
             return pair, source, note
-        except planfile.PlanValidationError as exc:
+        except util.KanpilotError as exc:
             if "planner_model" not in str(exc.message):
                 # 与本候选无关（缺字段/repository 等）→ 交真实发布路径报错。
                 return pair, source, str(exc.message)
@@ -311,6 +311,8 @@ class _Round:
             "started_at": util.now_iso(), "ended_at": None, "exit_code": None,
             "detail": None, "send_state": "not_sent",
         }
+        if "stage_contract" in self.context:
+            self.job["stage_contract"] = self.context["stage_contract"]
         self._secrets: list = []
         self.answers: list = []
         self.client = None
@@ -336,6 +338,8 @@ class _Round:
 
     def finish(self, status: str, exit_code, detail, outcome: str,
                reason: str) -> None:
+        if status == "failed":
+            planner_runner._failed_stage_result(self.job, detail, reason)
         self.job.update({
             "status": status, "exit_code": exit_code,
             "ended_at": util.now_iso(), "detail": detail,
@@ -544,6 +548,11 @@ class _Round:
         return None
 
     def _check_input(self):
+        try:
+            self.prepared = planner_runner._prepare_stage_inputs(
+                self.context, self.task_id, self.request_id, self.run_id, "pi_desktop")
+        except util.KanpilotError as exc:
+            return exc.message, "plan_input_mismatch"
         manifest = self.manifest
         if not isinstance(manifest, dict) or not manifest:
             return ("请求缺少规划材料 manifest", "plan_input_mismatch")
@@ -610,6 +619,29 @@ class _Round:
     # ---------------------------------------------------------- 恢复（不重发）
 
     def _resume(self, previous: dict) -> bool:
+        if previous.get("stage_contract_required") and "stage_contract" not in previous:
+            return self.fail("规划父轮次缺少冻结契约", "plan_round_unverifiable")
+        # Finished contracted parents require their saved result; an active
+        # crashed reader may resume observation without having produced one yet.
+        parent = None
+        if "stage_contract" in previous:
+            from . import stage_contract
+            try:
+                parent = stage_contract.validate_contract(previous["stage_contract"], expected={
+                    "stage": "plan", "task_id": self.task_id,
+                    "request_id": self.request_id, "run_id": previous.get("run_id"),
+                    "harness_id": "pi_desktop"})
+                util.require(parent["inputs"].get("input_id") == self.context.get("input_id")
+                             and parent["inputs"].get("planner_input_sha256") == self.req_payload.get("planner_input_sha256"),
+                             "规划恢复材料与父契约不符", "validation_failed")
+                util.require(previous.get("status") != "finished" or "stage_result" in previous,
+                             "已结束规划父轮次缺少结果包", "validation_failed")
+                if "stage_result" in previous:
+                    stage_contract.validate_result(previous["stage_result"], parent)
+            except util.KanpilotError as exc:
+                return self.fail(exc.message, "plan_round_unverifiable")
+        else:
+            self.job["legacy_resume"] = True
         prev_run_id = previous.get("run_id")
         session_id = previous.get("session_id")
         turn_id = previous.get("turn_id")
@@ -664,6 +696,22 @@ class _Round:
                     evidence={"resume_from_run_id": prev_run_id},
                 )
             self.historical_read_only = old_scope is None
+            if parent is not None:
+                try:
+                    util.require(parent["config"].get("runtime") == self.runtime,
+                                 "规划父契约配置与持久配置不符", "validation_failed")
+                    planner_runner._verify_plan_contract_workspace(previous, parent)
+                    self.job["managed_material_paths"] = previous.get("managed_material_paths") or []
+                    prepared = planner_runner._prepare_stage_inputs(
+                        self.context, self.task_id, self.request_id, self.run_id, "pi_desktop")
+                    prepared["config"] = dict(parent["config"])
+                    planner_runner._freeze_plan_contract(self.job, prepared, previous_worktree,
+                        resume_from={"contract_sha256": parent["contract_sha256"],
+                                     "run_id": prev_run_id, "session_id": session_id, "turn_id": turn_id})
+                except (util.KanpilotError, OSError, ValueError) as exc:
+                    detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+                    return self.fail(detail, "plan_round_unverifiable")
+
         if not turn_id:
             if send_state == "unknown":
                 self.write_job()
@@ -747,6 +795,13 @@ class _Round:
             "material_dir": str(materials.directory),
             "attachment_count": len(materials.attachments),
         })
+        self.job["managed_material_paths"] = [str(materials.manifest_path)] + [item["path"] for item in materials.files]
+        try:
+            prepared = planner_runner._prepare_stage_inputs(
+                self.context, self.task_id, self.request_id, self.run_id, "pi_desktop")
+            planner_runner._freeze_plan_contract(self.job, prepared, worktree)
+        except util.KanpilotError as exc:
+            return self.fail(exc.message, "plan_input_mismatch")
         self.write_job()
         problem = self._connect()
         if problem:
@@ -1315,6 +1370,10 @@ class _Round:
             try:
                 details = plus_interaction.required_interaction(record)
                 questions = plus_interaction.planner_questions(details)
+                planner_runner._plan_stage_result(self.job, {
+                    "status": "needs_input", "plan_markdown": "", "questions": questions,
+                    "evidence": [str(path)]}, evidence={"mechanism": "plus_interaction",
+                    "session_id": session_id, "turn_id": turn_id})
             except util.KanpilotError as exc:
                 return self.fail(exc.message, "plan_interaction_invalid", evidence={**self._evidence(), "interaction_required_path": str(path)})
             if self.collector is not None:
@@ -1515,7 +1574,8 @@ class _Round:
             }
             self.write_job()
             self.emit("system", content=(
-                f"plan_proposal_rejected: {proposal_id} → 已导入 KaneoPilot；"
+                f"plan_proposal_rejected: {proposal_id} → 生成阶段产物已关闭，"
+                "等待 KaneoPilot 发布校验；"
                 "此会话不用于执行（未发 approve、未生成执行轮次）"))
             return (True, None, None)
         if status in ("approved", "changes_requested"):
@@ -1560,12 +1620,24 @@ class _Round:
 
     def _publish(self, markdown: str, session_id: str, turn_id: str,
                  proposal: dict) -> bool:
+        try:
+            planner_runner._plan_stage_result(self.job, {
+                "status": "ready", "plan_markdown": markdown, "questions": [],
+                "evidence": [str(self.run_dir / "plan-proposal.json")]}, evidence={
+                    "mechanism": "plus_plan_proposal", "session_id": session_id,
+                    "turn_id": turn_id, "proposal_id": proposal.get("id")})
+        except util.KanpilotError as exc:
+            return self.fail(exc.message, "planner_output_invalid")
         generated_at = util.now_iso()
         task_row = None
         if self.plan_kind == "review_fix" and self.task_id:
             conn = db.connect(self.db_path)
             try:
-                task_row = db.get_task(conn, self.task_id)
+                task_row = planner_runner.review_fix_plan_task(
+                    conn, self.task_id, self.req_payload)
+            except util.KanpilotError as exc:
+                return self.fail(f"计划发布被拒：{exc.message}", "publish_failed",
+                                 evidence=self._evidence())
             finally:
                 conn.close()
         pair, pair_source, note = _published_model_pair(
@@ -1638,6 +1710,12 @@ class _Round:
             self.collector.poll()
         parsed, detail = self._final_answer()
         if parsed is not None and parsed.get("status") == "needs_input":
+            try:
+                planner_runner._plan_stage_result(self.job, parsed, evidence={
+                    "mechanism": "plus_final_answer", "session_id": self.job.get("session_id"),
+                    "turn_id": self.job.get("turn_id")})
+            except util.KanpilotError as exc:
+                return self.fail(exc.message, "planner_output_invalid")
             draft_path = self.run_dir / "plan-draft.md"
             if parsed["plan_markdown"].strip():
                 draft_path.write_text(parsed["plan_markdown"],

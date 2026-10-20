@@ -112,12 +112,14 @@ def _record_cost(controller, task, detail):
 
 def _complete(controller, task, detail, expected, messages):
     mode = _engine_mode(controller, task)
-    if mode in ("live", "shadow"):
+    action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
+    strict = mode == "live" or action
+    if mode in ("live", "shadow") or action:
         lease = controller.claim["context"].get("lease_seconds", 180)
         budget = int(min(lease * 0.8, controller.deadline - controller.clock()))
-        if mode == "shadow":
+        if mode == "shadow" and not action:
             budget = min(budget, 30, int((controller.deadline - controller.clock()) / 2))
-        if budget <= 0 and mode == "live":
+        if budget <= 0 and strict:
             raise util.KanpilotError("observation_blocked", "Plus 证据核验剩余时限不足")
         if budget <= 0:
             controller.log("shadow-verdict", "budget_exhausted")
@@ -130,11 +132,11 @@ def _complete(controller, task, detail, expected, messages):
                     expected_plan_sha256=task["plan_sha256"], budget_seconds=budget,
                     operation_id="monitor-verdict:" + controller.claim["request_id"]))
             except util.KanpilotError as exc:
-                if mode == "live" or exc.code in ("stale_run", "not_found"):
+                if strict or exc.code in ("stale_run", "not_found"):
                     raise
                 controller.log("shadow-verdict", exc.code)
                 result = {"verification_ok": False}
-        if mode == "live":
+        if strict:
             if result.get("verification_ok") is not True:
                 code = (result.get("failure_code") or
                         ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
