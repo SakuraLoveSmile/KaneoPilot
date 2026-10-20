@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 import test_delivery_pr as fixture_pr
-from kanpilot import automation_policy, core, db, gh_client, project_config, remote, util
+from kanpilot import automation_policy, core, db, gh_client, project_config, remote, stage_contract, util
 
 
 @pytest.fixture
@@ -315,7 +315,14 @@ def test_policy_change_plus_failed_read_does_not_block_or_mutate_task(delivery):
     assert error.value.code == 'conflict'
     merge.assert_not_called()
     assert case.task()['status'] == 'in_review'
-    assert core.delivery_of(case.task()) == before
+    after = core.delivery_of(case.task())
+    audit_fields = {'stage_contracts', 'stage_results'}
+    assert {key: value for key, value in after.items() if key not in audit_fields} == {
+        key: value for key, value in before.items() if key not in audit_fields}
+    contract = stage_contract.validate_contract(after['stage_contracts']['sync'], expected={
+        'stage': 'delivery', 'task_id': case.task()['task_id'], 'harness_id': 'core_delivery'})
+    assert contract['inputs']['operation'] == 'sync'
+    assert 'sync' not in after['stage_results']
 
 
 @pytest.mark.parametrize('mutation', ['task', 'project', 'status', 'requirements', 'missing_requirements'])
