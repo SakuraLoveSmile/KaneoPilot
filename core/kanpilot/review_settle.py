@@ -125,6 +125,66 @@ def validate_result(value) -> dict:
         raise util.KanpilotError("validation_failed", error)
     return result
 
+
+def _make_stage_contract(job, task):
+    from . import stage_contract
+    config = job.get("config") or {}
+    # Persist operational configuration only, never provider environment/token values.
+    config = {key: config[key] for key in (
+        "backend", "model", "effort", "reasoning_effort", "connection_file",
+        "provider_id", "model_id", "thinking_level", "permission_mode") if key in config}
+    return stage_contract.make_contract(
+        STAGE, task_id=job["task_id"], request_id=job["request_id"], run_id=job["run_id"],
+        harness_id=job.get("backend") or "pi_desktop",
+        workspace=str(Path(job["review_root"]).resolve()), config=config,
+        inputs={"execution_run_id": job["execution_run_id"],
+                "execution_worktree": job.get("execution_worktree"),
+                "plan_sha256": task.get("plan_sha256"),
+                "review_branch_snapshot": job.get("review_branch_snapshot"),
+                "manual_snapshot_head": job.get("manual_snapshot_head"),
+                "manual_snapshot_fingerprint": job.get("manual_snapshot_fingerprint"),
+                "material_hashes": job.get("material_hashes"),
+                "materials": job.get("materials")},
+        allowed_actions=("read_workspace", "produce_review"))
+
+
+def freeze_stage_contract(job, task):
+    """Called only after source/material guards freeze, and before model send."""
+    from . import stage_contract
+    contract = _make_stage_contract(job, task)
+    if "stage_contract" in job:
+        stage_contract.validate_contract(job["stage_contract"], expected=contract)
+    job["stage_contract"] = contract
+    job["stage_contract_required"] = True
+    return contract
+
+
+def record_stage_result(job, result, *, facts, evidence=None):
+    """Package a freshly observed result only while its trusted claim is current."""
+    from . import stage_contract
+    result = validate_result(result)
+    util.require(not job.get("stage_contract_required") or "stage_contract" in job,
+                 "Review 新轮次缺少冻结契约", "validation_failed")
+    if "stage_contract" not in job:
+        job["legacy_contract_path"] = True
+        return result
+    task, request = facts.get("task") or {}, facts.get("request") or {}
+    util.require(request.get("run_id") == job.get("run_id")
+                 and request.get("request_id") == job.get("request_id")
+                 and task.get("task_id") == job.get("task_id")
+                 and request.get("stage") == STAGE and request.get("status") == "claimed"
+                 and task.get("run_id") == job.get("execution_run_id"),
+                 "Review 结果已失去当前轮次身份", "stale_run")
+    from .pi_desktop_review import _lease_valid
+    util.require(_lease_valid(request), "Review 结果租约已失效", "stale_run")
+    contract = stage_contract.validate_contract(job["stage_contract"],
+        expected=_make_stage_contract(job, task))
+    packaged = stage_contract.make_result(contract, result,
+        evidence=[evidence] if isinstance(evidence, dict) else evidence)
+    stage_contract.validate_result(packaged, contract, payload_validator=validate_result)
+    job["stage_result"] = packaged
+    return result
+
 def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
     """登记与推进（含部分成功恢复）：pass / changes_requested / blocked。"""
     # The driver keeps the existing Plus persistence/transport seams and recovery.
@@ -150,11 +210,35 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
             record_run=record_run,
             detail="收尾事实核对失败：核心已无该任务/请求",
         )
-    if request.get("stage") != STAGE or request.get("run_id") != job.get("run_id"):
+    if (request.get("stage") != STAGE or request.get("run_id") != job.get("run_id")
+            or request.get("request_id") != request_id or task.get("task_id") != task_id):
         return _stop_no_write(
             job=job, job_path=job_path, log=log, record_run=record_run,
             detail="请求已被新 run 接管（不覆盖新周期）",
         )
+    if job.get("stage_contract_required") and "stage_contract" not in job:
+        return _stop_no_write(job=job, job_path=job_path, log=log,
+            record_run=record_run, detail="Review 新轮次缺少冻结契约（不走历史路径）")
+    if "stage_contract" in job:
+        from . import stage_contract
+        try:
+            util.require(task.get("run_id") == job.get("execution_run_id"),
+                         "Review 执行轮次已变化", "stale_run")
+            contract = stage_contract.validate_contract(job["stage_contract"],
+                expected=_make_stage_contract(job, task))
+            packaged = stage_contract.validate_result(job.get("stage_result"), contract,
+                                                       payload_validator=validate_result)
+            util.require(packaged["outcome"] == "succeeded",
+                         "Review 结果包未成功，不能登记结论", "validation_failed")
+            util.require(packaged["payload"] == {key: job.get(key) for key in RESULT_KEYS},
+                         "Review 结果包与结算正文不一致", "validation_failed")
+        except (util.KanpilotError, KeyError, TypeError, ValueError) as exc:
+            detail = exc.message if isinstance(exc, util.KanpilotError) else str(exc)
+            return _stop_no_write(job=job, job_path=job_path, log=log,
+                record_run=record_run, detail="Review stage contract 核验失败：" + detail)
+    else:
+        # Pre-contract persisted jobs and the local legacy settlement API only.
+        job["legacy_contract_path"] = True
     automated = is_managed(task)
     status = request.get("status")
     if status in _TERMINAL_REQUEST_STATUSES:
@@ -223,42 +307,13 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
         log.emit("system", util.now_iso(),
                  content="登记已存在且与同一报告 sha/结论/key/fix 一致：跳过 register")
     else:
-        if conclusion == "changes_requested" and not automated:
-            fix = job.get("fix") or {}
-            if guard is not None:
-                guard()
-            try:
-                created = core_call(db_path, "create-review-fix", {
-                    "source_task_id": task_id,
-                    "title": fix.get("title"),
-                    "description": fix.get("description"),
-                    "priority": fix.get("priority"),
-                    "dedupe_key": job["review_key"],
-                    **_identity_payload(job),
-                })
-            except util.KanpilotError as exc:
-                return _registration_failed(
-                    db_path=db_path, job=job, job_path=job_path, log=log,
-                    record_run=record_run, label="create-review-fix", exc=exc,
-                )
-            job["fix_task_id"] = created.get("fix_task_id")
-            job["fix_task_source_sha256"] = created.get("source_sha256")
-            checkpoints["fix_created"] = True
-            pi_desktop_controller.write_json(job_path, job)
         payload = {
             "task_id": task_id, "report_path": job["report_path"],
             "conclusion": conclusion, **_identity_payload(job),
         }
-        if automated:
-            payload["review_key"] = job["review_key"]
-            if conclusion == "changes_requested":
-                payload.update({"fix_mode": "same_task", "fix": job.get("fix")})
-        elif conclusion == "changes_requested":
-            payload.update({
-                "review_key": job["review_key"],
-                "fix_task_id": job["fix_task_id"],
-                "fix_task_source_sha256": job.get("fix_task_source_sha256"),
-            })
+        payload["review_key"] = job["review_key"]
+        if conclusion == "changes_requested":
+            payload.update({"fix_mode": "same_task", "fix": job.get("fix")})
         try:
             if guard is not None:
                 guard()
@@ -270,7 +325,16 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
             )
         checkpoints["registered"] = True
 
-    if conclusion == "pass" and not automated:
+    # The user authorized the action's normal Review/delivery chain. Its
+    # identity-bound pass receipt remains authoritative after fix_request clears.
+    # Refresh core facts because registration above may have created that receipt.
+    action_delivery = False
+    if conclusion == "pass":
+        from . import task_ai_action
+        current = _facts(db_path, task_id, request_id).get("task")
+        if isinstance(current, dict):
+            action_delivery = task_ai_action.delivery_continuation(raw_task(current), allow_paused=True) is not None
+    if conclusion == "pass" and not automated and not action_delivery:
         if task.get("status") == "done":
             if _review_summary(task).get("conclusion") != "pass":
                 return _stop_no_write(

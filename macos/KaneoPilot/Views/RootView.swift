@@ -136,6 +136,10 @@ struct RootView: View {
                 Group {
                     if let action = model.actionInFlight {
                         Label("正在执行：\(action)", systemImage: "hourglass")
+                            .labelStyle(.titleAndIcon)
+                            .padding(.horizontal, Spacing.m)
+                            .padding(.vertical, Spacing.s)
+                            .fixedSize(horizontal: true, vertical: false)
                     } else if let banner = model.banner {
                         Text(banner.message)
                     } else {

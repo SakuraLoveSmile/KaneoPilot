@@ -315,8 +315,26 @@ struct TaskException: Decodable {
     var isFailed: Bool { severity == "failed" }
 }
 
+/// Core-owned direct task relationships; reading them never advances a task.
+struct RelatedTask: Decodable, Identifiable {
+    let taskId: String
+    let title: String?
+    let displayStatus: String?
+    let available: Bool
+    var id: String { taskId }
+}
+
+struct TaskRelations: Decodable {
+    let parent: RelatedTask?
+    let children: [RelatedTask]
+}
+
 /// §5.2 TaskSummary
 struct TaskSummary: Decodable, Identifiable {
+    let release: TaskRelease?
+    let parentCloseout: ParentCloseout?
+    let reviewRepair: ReviewRepair?
+    let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
     let attention: AttentionItem?
@@ -547,6 +565,11 @@ extension PlanQuestion {
 
 /// §5.2 TaskDetail = TaskSummary + 明细字段
 struct TaskDetail: Decodable, Identifiable {
+    let release: TaskRelease?
+    let parentCloseout: ParentCloseout?
+    let taskAiAction: TaskAIActionView?
+    let reviewRepair: ReviewRepair?
+    let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
     let attention: AttentionItem?
@@ -2381,7 +2404,9 @@ struct AutomationPreflightIssue: Decodable, Identifiable {
     var id: String { code }
 }
 struct ProjectAutomationDTO: Decodable {
+    let release: ProjectReleasePolicy?
     let enabled: Bool?; let labelFilter: [String]?; let autoConfirmPlan: Bool?
+    let autoMergePr: Bool?
     let maxFixRounds: Int?; let maxTaskMinutes: Int?; let maxTaskCostUsd: Double?
     let deliveryBase: String?; let policyRevision: Int?; let updatedAt: String?
 }
@@ -2410,10 +2435,109 @@ struct TaskDeliveryView: Decodable {
     let commits: [DeliveryCommitDTO]?; let pushedSha: String?; let prNumber: Int?
     let prUrl: String?; let prState: String?; let publishFailures: Int?
     let kaneoCommentAt: String?; let mergedAt: String?; let lastSyncAt: String?; let nextSyncAt: String?
+    let autoMerge: PRAutoMergeDTO?
+
+    var autoMergeNotice: PRAutoMergeDTO? {
+        guard let autoMerge, autoMerge.headSha == headSha, autoMerge.state != "disabled" else { return nil }
+        return autoMerge
+    }
 }
+struct PRAutoMergeDTO: Decodable {
+    let state: String
+    let reason: String
+    let headSha: String
+    let updatedAt: String?
+    var needsAttention: Bool { ["blocked", "unknown"].contains(state) }
+}
+struct ReviewRepair: Decodable, Equatable {
+    let state: String
+    let title: String
+    let reason: String
+    let round: Int
+    let maxRounds: Int
+    let reviewKey: String
+    let reportPath: String
+    let reportSha256: String
+    let planSha256: String
+    let sourceExecutionRunId: String
+    let repairExecutionRunId: String?
+    let sessionId: String?
+    let canStart: Bool
+
+    var startFields: [String: Any] {
+        ["expected_execution_run_id": sourceExecutionRunId,
+         "expected_review_key": reviewKey,
+         "expected_report_sha256": reportSha256,
+         "expected_plan_sha256": planSha256]
+    }
+
+    var stateTitle: String {
+        switch state {
+        case "queued": return "修复会话待启动"
+        case "running": return "修复中"
+        case "awaiting_review": return "修复后待复审"
+        default: return "待修复"
+        }
+    }
+}
+
 struct ReviewHistoryEntry: Decodable {
     let reviewKey: String?; let conclusion: String?; let reportPath: String?; let reportSha256: String?
     let executionRunId: String?; let headSha: String?; let registeredAt: String?; let fixRound: Int?
+}
+
+/// 任务内一次性处理由核心投影；缺省兼容尚未提供此字段的核心。
+struct TaskAIActionView: Decodable {
+    let canPrepare: Bool
+    let reason: String?
+    let current: TaskAIActionEntry?
+    let history: [TaskAIActionEntry]?
+}
+
+struct TaskAIActionEntry: Decodable, Identifiable {
+    let actionId: String
+    let kind: String?
+    let title: String?
+    let state: String
+    let stateTitle: String?
+    let createdAt: String?
+    let executionRunId: String?
+    let sessionId: String?
+    let modelSummary: String?
+    let prNumber: Int?
+    let headSha: String?
+    let baseSha: String?
+    let reason: String?
+    var id: String { actionId }
+}
+
+struct TaskAIActionCandidate: Decodable {
+    let taskId: String
+    let kind: String
+    let title: String?
+    let contextSha256: String
+    let configSha256: String
+    let prNumber: Int?
+    let branch: String?
+    let baseBranch: String?
+    let headSha: String?
+    let baseSha: String?
+    let modelSummary: String?
+
+    var confirmationMessage: String {
+        let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
+        return "解决 PR 合并冲突\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。不重新规划，修复后验证并重新评审；通过后更新原 PR，并沿项目合并设置继续。"
+    }
+}
+
+struct PrepareTaskAIActionResponse: Decodable {
+    let candidate: TaskAIActionCandidate
+}
+
+struct StartTaskAIActionResponse: Decodable {
+    let ok: Bool
+    let requestId: String?
+    let alreadyStarted: Bool?
 }
 
 // protocol §5.27: one attention snapshot for inbox, menu and notifications.
@@ -2531,4 +2655,115 @@ struct ExecutionQuestionCommandResponse: Decodable {
     let taskId: String
     let runId: String
     let executionQuestion: ExecutionQuestion?
+}
+
+/// §5.27.18：核心提供收尾资格与结果，桌面不从子任务状态推导。
+struct ParentCloseout: Decodable {
+    struct Blocker: Decodable {
+        let code: String
+        let message: String
+    }
+    let state: String
+    let title: String
+    let reason: String
+    let contextSha256: String
+    let canComplete: Bool
+    let requiredChildren: Int
+    let completedChildren: Int
+    let checkedAt: String?
+    let blockers: [Blocker]
+    let evidenceTaskId: String?
+    let targetBranch: String?
+    let targetSha: String?
+    let acceptanceNote: String
+
+    var actionLabel: String { state == "unknown" ? "核对完成结果" : "校验并完成" }
+    var displayTitle: String? {
+        switch state {
+        case "waiting_children": return "等待二级任务完成"
+        case "ready": return "待收尾校验"
+        case "blocked": return "收尾校验受阻"
+        case "unknown": return "完成同步待确认"
+        default: return nil
+        }
+    }
+}
+
+struct CloseoutParentTaskResponse: Decodable {
+    let outcome: String
+    let parentCloseout: ParentCloseout
+}
+
+// MARK: - Deterministic GitHub Actions release (§5.27.19)
+struct ProjectReleasePolicy: Decodable {
+    let enabled: Bool?
+    let channel: String?
+    let workflowPath: String?
+    let workflowRef: String?
+    let versionBase: String?
+    let requiredAssets: [String]?
+    let requiredJobs: [String]?
+}
+
+struct TaskRelease: Decodable {
+    struct Asset: Decodable, Identifiable {
+        let name: String
+        let url: String
+        let size: Int64
+        let sha256: String
+        var id: String { name }
+    }
+    struct Blocker: Decodable {
+        let code: String
+        let message: String
+    }
+    let state: String
+    let title: String
+    let reason: String
+    let required: Bool
+    let channel: String
+    let contextSha256: String?
+    let batchId: String?
+    let rootTaskId: String
+    let memberTaskIds: [String]
+    let targetSha: String?
+    let version: String?
+    let tag: String?
+    let buildNumber: Int?
+    let workflowRunId: Int64?
+    let workflowUrl: String?
+    let releaseUrl: String?
+    let checkedAt: String?
+    let assets: [Asset]
+    let blockers: [Blocker]
+    let canStart: Bool
+    let canReconcile: Bool
+    let canAbandon: Bool?
+
+    var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
+    var showsStartAction: Bool { canStart && state != "unknown" }
+
+    var channelLabel: String { channel == "stable" ? "正式版" : "预发布" }
+    var syncLabel: String { state == "unknown" ? "核对发布结果" : "同步发布结果" }
+    var isBlocked: Bool { ["blocked", "unknown"].contains(state) }
+    var isFailed: Bool { state == "failed" }
+    var isPublished: Bool { state == "published" }
+    var hasUnsignedAssets: Bool { assets.contains { $0.name.lowercased().contains("unsigned") } }
+}
+
+struct PrepareTaskReleaseResponse: Decodable {
+    let taskId: String
+    let contextSha256: String
+    let release: TaskRelease
+
+    var confirmationMessage: String {
+        let target = release.targetSha.map { String($0.prefix(12)) } ?? "待核心固化"
+        let version = release.tag ?? release.version ?? "由核心分配并冻结"
+        return "将构建并发布\(release.channelLabel)，版本：\(version)。\n目标提交：\(target)\n关联任务：\(release.memberTaskIds.count) 项。\n使用 GitHub Actions，可能消耗 GitHub 配额；不调用模型。历史已完成任务保留完成状态。"
+    }
+}
+
+struct TaskReleaseMutationResponse: Decodable {
+    let outcome: String
+    let release: TaskRelease
 }

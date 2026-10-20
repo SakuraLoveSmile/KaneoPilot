@@ -849,6 +849,10 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     if task is not None and task["send_state"] == "unknown":
         return {"task_id": task_id, "code": "conflict",
                 "error": "发送结果不明，请先处理派发状态"}
+    try:
+        task_workspace.require_no_workspace_repair(conn, task_id)
+    except util.KanpilotError as exc:
+        return {"task_id": task_id, "code": exc.code, "error": exc.message}
 
     # 非规划活动请求 → 等待（waiting_reason）。
     if task is not None:

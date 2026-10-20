@@ -300,6 +300,12 @@ def automation_of(task) -> dict:
     return dict(db.task_extra(task).get("automation") or {})
 
 
+def review_repair_of(task) -> dict:
+    extra = (task.get("extra") or {}) if isinstance(task, dict) and "extra_json" not in task else db.task_extra(task)
+    value = extra.get("fix_request") or {}
+    return dict(value) if isinstance(value, dict) and value.get("mode") == "direct" else {}
+
+
 def delivery_of(task) -> dict:
     if isinstance(task, dict) and "extra_json" not in task:
         return dict(task.get("delivery") or (task.get("extra") or {}).get("delivery") or {})
@@ -404,6 +410,8 @@ def execution_retry_of(task):
 
 
 def expected_remote_slugs(task):
+    if review_repair_of(task):
+        return set(constants.REVIEW_SLUGS) | {constants.IN_PROGRESS_SLUG}
     if execution_retry_of(task):
         return {constants.IN_PROGRESS_SLUG}
     slugs = set(constants.TODO_SLUGS)
@@ -436,6 +444,11 @@ def automation_budget(task, policy, now):
 
 
 def start_fix_round_inline(conn, task, now, *, fix_request, actor="kaneo-review", new_segment=False):
+    if fix_request.get("mode") == "direct":
+        util.require(fix_request.get("source_kind") != "merge_conflict",
+                     "合并冲突需从任务内 AI 处理入口确认", "conflict")
+        from . import review_repair
+        return review_repair.start_inline(conn, task, now, fix_request, actor)["review_repair"]
     a = automation_of(task)
     a.update(fix_round=int(a.get("fix_round", 0)) + 1, plan_wanted=True, plan_attempts=0,
              replan_requested_at=None, replan_remote_status=None, replan_worktree_sha256=None)

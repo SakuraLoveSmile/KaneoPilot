@@ -31,7 +31,10 @@ def policy_for(conn, project_id):
     raw = (items.get(project_id) or {}).get("automation")
     if not isinstance(raw, dict):
         return None
-    return dict(constants.AUTOMATION_DEFAULTS, **raw)
+    result = dict(constants.AUTOMATION_DEFAULTS, **raw)
+    if isinstance(result.get("release"), dict):
+        result["release"] = dict(constants.RELEASE_DEFAULTS, **result["release"])
+    return result
 
 
 def global_settings(conn):
@@ -43,7 +46,7 @@ def validate_automation(raw):
     if not isinstance(raw, dict):
         raise util.bad_request("automation 必须为对象")
     result = dict(constants.AUTOMATION_DEFAULTS)
-    for key in ("enabled", "auto_confirm_plan"):
+    for key in ("enabled", "auto_confirm_plan", "auto_merge_pr"):
         value = raw.get(key, result[key])
         if not isinstance(value, bool):
             raise util.bad_request(f"{key} 必须为布尔值")
@@ -74,6 +77,8 @@ def validate_automation(raw):
                              or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", base)):
         raise util.bad_request("delivery_base 非法")
     result["delivery_base"] = base
+    from . import release_delivery
+    result["release"] = release_delivery.validate_policy(raw.get("release", {}))
     return result
 
 
@@ -141,8 +146,9 @@ def automation_preflight(conn, project_id):
         if not planner_config.desktop_queue_ready(conn):
             add("review_desktop_unconfigured", "Desktop Review 自动领取尚未配置或未启用")
     execution = exec_config.load(conn)
-    if execution.get("backend") != "pi_desktop":
-        add("exec_backend_not_plus", "执行端需为 Plus")
+    from . import harnesses
+    if not harnesses.supports_role(execution.get("backend"), "execution"):
+        add("exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力")
     if (execution.get("pi_desktop") or {}).get("permission_mode") != "auto":
         add("exec_permission_not_auto", "Plus 执行权限需为 auto")
     return errors
@@ -184,11 +190,23 @@ def cmd_set_project_automation(ctx, payload):
         current = policy_for(ctx.conn, project_id) or constants.AUTOMATION_DEFAULTS
         if expected is not None and expected != current["policy_revision"]:
             raise util.KanpilotError("conflict", "automation policy_revision 不符")
+        # A pre-release client saving unrelated automation fields must not
+        # silently turn off an already authorized release policy.
+        if "release" not in payload["automation"]:
+            from . import release_delivery
+            value["release"] = release_delivery.validate_policy(current.get("release", {}))
         value.update(policy_revision=current["policy_revision"] + 1, updated_at=ctx.now_iso)
         items[project_id] = dict(items[project_id], automation=value)
         db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
                        {"version": project_config.CURRENT_VERSION, "revision": revision,
                         "workspace_id": workspace, "items": items})
+        if value["auto_merge_pr"] and not current.get("auto_merge_pr", False):
+            # Save only local scheduling intent; the leased delivery runner owns I/O.
+            for task in ctx.conn.execute("SELECT * FROM tasks WHERE project_id=? "
+                                         "AND save_state='active' AND status='in_review'",
+                                         (project_id,)).fetchall():
+                if core.is_pr_delivery(task) and db.task_extra(task).get("review_conclusion") == "pass":
+                    core.update_delivery(ctx.conn, task, ctx.now_iso, next_sync_at=ctx.now_iso)
     return {"project_id": project_id, "automation": value, "policy_revision": value["policy_revision"],
             **({"delivery_base_check": base_check} if base_check else {})}
 

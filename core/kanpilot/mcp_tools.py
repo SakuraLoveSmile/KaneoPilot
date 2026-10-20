@@ -17,8 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import (
     cli, cmd_dispatch, cmd_exec, cmd_queue, cmd_read, cmd_remote, cmd_session,
-    constants, db, harness_plus_adapter, mcp_scopes, runtime_operations, util,
+    constants, db, harnesses, mcp_scopes, runtime_operations, util,
 )
+# Retain the legacy module alias for existing callers and isolated test seams.
+# Runtime routing and native policy interpretation go through the registry.
+from . import harness_plus_adapter
 
 TOOLS_SPEC: List[Dict[str, Any]] = [
     # ------------------------------------------------------------- Control Tools
@@ -39,12 +42,29 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "outputSchema": {
             "type": "object",
             "properties": {
+                "contract_version": {"type": "string", "enum": ["kp-harness-v1"]},
+                "harness_id": {"type": "string"},
+                "adapter_version": {"type": "string"},
+                "capabilities": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "state": {"type": "string", "enum": ["supported", "unsupported", "unknown"]},
+                            "guarantee": {"type": "string", "enum": ["host", "adapter", "model"]},
+                            "detail": {"type": "string"},
+                        },
+                        "required": ["state", "guarantee", "detail"],
+                        "additionalProperties": False,
+                    },
+                },
                 "available": {"type": "boolean"},
                 "connected": {"type": "boolean"},
                 "detail": {"type": "string"},
                 "tools_ok": {"type": "boolean"},
                 "version": {"type": ["string", "null"]},
                 "supported_operations": {"type": "array", "items": {"type": "string"}},
+                "required_verification_commands_supported": {"type": "boolean"},
             },
             "required": ["available", "connected", "detail", "tools_ok"],
         },
@@ -406,6 +426,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "version": {"type": "integer"},
                 "action": {"type": "string", "enum": ["accept", "reject"]},
                 "goal_continuation": {"type": "boolean"},
+                "required_verification_commands": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True},
             },
             "required": ["scope_id", "operation_id", "session_id", "turn_id", "proposal_id", "version", "action"],
             "additionalProperties": False,
@@ -909,8 +930,8 @@ def _scope_valid(manager, scope):
 def _goal_continuation_task_guard(conn, scope, args):
     task = db.require_task(conn, scope.task_id)
     automation = db.task_extra(task).get("automation") or {}
-    if (scope.role != "execution" or (scope.runtime_config or {}).get("permission_mode") != "auto"
-            or args.get("action") != "accept" or args.get("target_permission_mode") != "auto"
+    adapter = harnesses.runtime_adapter_for_scope(scope, args)
+    if (not adapter.continuation_permission_authorized(scope, args)
             or task["run_id"] != scope.run_id or not db.task_schedulable(task)
             or db.paused(conn, "dispatch") or db.paused(conn, "monitor")
             or not automation or automation.get("manual_takeover")
@@ -919,82 +940,64 @@ def _goal_continuation_task_guard(conn, scope, args):
         raise util.KanpilotError("forbidden", "目标自动续接已暂停或不属于当前自动执行轮次")
 
 
+def _verification_requirements_guard(conn, scope, args):
+    """The scope-owned dispatch spec grants commands, never caller/model text."""
+    supplied = args.get("required_verification_commands")
+    harnesses.runtime_adapter_for_scope(scope, args).validate_verification_commands(supplied, args.get("action"))
+    if args.get("action") != "accept":
+        return
+    expected = []
+    if scope.role == "execution":
+        if not scope.task_id or not scope.run_id:
+            raise util.KanpilotError("forbidden", "缺少验证要求所属执行轮次")
+        from . import headless_adapter, pi_desktop_worker
+        directory = headless_adapter.resolve_source(conn).run_dir(scope.task_id, scope.run_id)
+        path = directory / "spec.json"
+        if path.is_symlink() or not path.is_file():
+            raise util.KanpilotError("validation_failed", "缺少可信的冻结执行 spec，不能批准 Goal")
+        try:
+            frozen = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(frozen, dict) or frozen.get("task_id") != scope.task_id or frozen.get("run_id") != scope.run_id:
+                raise util.KanpilotError("forbidden", "验证要求不属于授权执行轮次")
+            if frozen.get("completion_policy", "goal_report") not in ("goal_report", "command_verification"):
+                raise util.KanpilotError("validation_failed", "冻结执行 spec 的完成策略无效")
+            expected = pi_desktop_worker.required_verification_commands(frozen)
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise util.KanpilotError("validation_failed", "无法读取冻结验证要求") from exc
+    if (supplied or expected) and supplied != expected:
+        raise util.KanpilotError("forbidden", "验证命令要求与授权执行 spec 不符")
+
+
 def _runtime_guard(conn, scope, tool, args):
+    adapter = harnesses.runtime_adapter_for_scope(scope, args)
+    if tool == "kp_runtime_proposal_resolve":
+        _verification_requirements_guard(conn, scope, args)
     if tool in ("kp_runtime_input_pending", "kp_runtime_input_respond"):
         if scope.role != "execution":
             raise util.KanpilotError("forbidden", "input tools require execution scope")
         if tool == "kp_runtime_input_respond":
             from .execution_questions import validate_wire_answers
-            validate_wire_answers(args["answers"],args["session_id"],args["request_id"],args["expected_tool_call_id"])
-
-    if args.get("harness_id", "pi_desktop") != "pi_desktop":
-        raise util.bad_request("unsupported harness")
+            validate_wire_answers(args["answers"], args["session_id"], args["request_id"], args["expected_tool_call_id"])
     if args.get("scope_id") != scope.scope_id:
         raise util.KanpilotError("forbidden", "scope_id does not match grant")
-    mode = {"planner": "plan", "review": "plan", "execution": "goal"}.get(scope.role, "agent")
-    if tool in ("kp_runtime_session_create", "kp_runtime_session_configure") and scope.role in ("planner", "review"):
-        if args.get("interaction_mode") != "unattended":
-            raise util.KanpilotError("forbidden", "planner/Review require unattended interaction policy")
     if tool == "kp_runtime_session_create":
         if not scope.project_path or Path(args["project_path"]).resolve() != Path(scope.project_path).resolve():
             raise util.KanpilotError("forbidden", "project_path does not match authorized snapshot")
         if args.get("runtime_config", scope.runtime_config) != scope.runtime_config:
             raise util.KanpilotError("forbidden", "runtime_config does not match authorized snapshot")
-        if args["mode"] != mode:
-            raise util.KanpilotError("forbidden", "session mode does not match role")
     session_id = args.get("session_id")
     if session_id and not runtime_operations.session_owned(conn, scope.scope_id, session_id):
         raise util.KanpilotError("forbidden", "session does not belong to scope")
     if tool == "kp_runtime_proposal_resolve" and args.get("goal_continuation"):
         _goal_continuation_task_guard(conn, scope, args)
-        receipt = runtime_operations.get_operation(conn, scope.scope_id, args["operation_id"])
-        if receipt is None or receipt["status"] != "accepted":
-            from .pi_desktop_worker import _pending_goal_contract
-            status = harness_plus_adapter.plus_status(scope.connection_file, session_id=session_id)
-            raw = status.get("raw_status") or {}
-            inner = raw.get("status") or raw
-            proposal = _pending_goal_contract(
-                {"plans": harness_plus_adapter.plus_proposals(scope.connection_file, session_id=session_id).get("proposals")},
-                session_id, args["turn_id"])
-            if (status.get("current_turn_id") != args["turn_id"]
-                    or inner.get("planningState") not in ("planning", "awaiting_approval")
-                    or status.get("pending_permission") or proposal is None
-                    or any(proposal.get(source) != args.get(target) for source, target in
-                           (("id", "proposal_id"), ("version", "version"), ("toolCallId", "tool_call_id")))):
-                raise util.KanpilotError("conflict", "当前目标提案已变化或不再可自动批准")
-    if tool == "kp_runtime_goal_report_get" and not (
-        args.get("execution_id") or args.get("report_id")
-    ):
+    if tool == "kp_runtime_goal_report_get" and not (args.get("execution_id") or args.get("report_id")):
         raise util.bad_request("Goal report get requires execution_id or report_id")
-    if tool == "kp_runtime_session_configure":
-        permission = (scope.runtime_config or {}).get("permission_mode")
-        if scope.role == "review" and permission not in (
-                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
-                constants.PI_DESKTOP_REVIEW_PERMISSION_MODE):
-            raise util.KanpilotError("forbidden", "unsupported review permission snapshot")
-        elif scope.role == "planner" and permission not in (
-                constants.PI_DESKTOP_READONLY_PERMISSION_MODE,
-                constants.PI_DESKTOP_PLANNER_PERMISSION_MODE):
-            raise util.KanpilotError("forbidden", "unsupported planner permission snapshot")
-        if args["mode"] != mode or args["permission_mode"] != permission:
-            raise util.KanpilotError("forbidden", "configuration exceeds authorized snapshot")
-    if args.get("target_permission_mode") is not None and (scope.role != "execution" or args["target_permission_mode"] != (scope.runtime_config or {}).get("permission_mode")):
-        raise util.KanpilotError("forbidden", "proposal permission exceeds authorized snapshot")
     if tool == "kp_runtime_prompt":
         for attachment in args.get("attachments", []):
             path = Path(attachment["path"])
             if not path.is_absolute() or not path.resolve().is_relative_to(Path(scope.project_path).resolve()):
                 raise util.KanpilotError("forbidden", "attachment is outside the authorized project")
-        if scope.role in ("planner", "review"):
-            if args.get("expected_interaction_mode") != "unattended":
-                raise util.KanpilotError("forbidden", "planner/Review prompt require atomic unattended precondition")
-            from . import plus_interaction
-            connection_file = (scope.connection_file or (scope.runtime_config or {}).get("connection_file")
-                               or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser()))
-            policy = harness_plus_adapter.plus_messages(connection_file, session_id=session_id, limit=1)
-            session = {"id": policy.get("session_id"), **{
-                key: policy[key] for key in ("interactionMode", "interactionPolicyVersion") if key in policy}}
-            plus_interaction.require_unattended({"session": session}, session_id)
+    adapter.validate_runtime_policy(conn, scope, tool, args)
 
 
 def _task_identity(conn, scope):
@@ -1051,25 +1054,28 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
     _scope_valid(scope_manager, scope)
     _validate_arguments(spec["inputSchema"], arguments)
     if tool_name.startswith("kp_runtime_"):
+        adapter = harnesses.runtime_adapter_for_scope(scope, arguments)
         conn_file = scope.connection_file or (scope.runtime_config or {}).get("connection_file") or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser())
         ctx = cli.Context(db_path)
         try:
             _runtime_guard(ctx.conn, scope, tool_name, arguments)
             def authorization_guard(conn):
                 _scope_valid(scope_manager, scope)
+                if tool_name == "kp_runtime_proposal_resolve":
+                    _verification_requirements_guard(conn, scope, arguments)
                 if tool_name == "kp_runtime_proposal_resolve" and arguments.get("goal_continuation"):
                     _goal_continuation_task_guard(conn, scope, arguments)
             ctx.conn.authorization_guard = authorization_guard
             readers = {
-                "kp_runtime_capabilities": lambda: harness_plus_adapter.plus_capabilities(conn_file),
-                "kp_runtime_catalog": lambda: harness_plus_adapter.plus_catalog(conn_file, provider_id=arguments.get("provider_id")),
-                "kp_runtime_input_pending": lambda: harness_plus_adapter.plus_asks_pending(conn_file, session_id=arguments["session_id"]),
-                "kp_runtime_status": lambda: harness_plus_adapter.plus_status(conn_file, session_id=arguments["session_id"]),
-                "kp_runtime_turn_get": lambda: harness_plus_adapter.plus_turn_get(conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"], require_identity=arguments.get("require_identity", False)),
-                "kp_runtime_messages": lambda: harness_plus_adapter.plus_messages(conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
-                "kp_runtime_proposals": lambda: harness_plus_adapter.plus_proposals(conn_file, session_id=arguments["session_id"], turn_id=arguments.get("turn_id")),
-                "kp_runtime_goal_report_list": lambda: harness_plus_adapter.plus_goal_report_list(conn_file, session_id=arguments["session_id"]),
-                "kp_runtime_goal_report_get": lambda: harness_plus_adapter.plus_goal_report_get(conn_file, session_id=arguments["session_id"], execution_id=arguments.get("execution_id"), report_id=arguments.get("report_id")),
+                "kp_runtime_capabilities": lambda: adapter.call("capabilities", conn_file),
+                "kp_runtime_catalog": lambda: adapter.call("catalog", conn_file, provider_id=arguments.get("provider_id")),
+                "kp_runtime_input_pending": lambda: adapter.call("input_pending", conn_file, session_id=arguments["session_id"]),
+                "kp_runtime_status": lambda: adapter.call("status", conn_file, session_id=arguments["session_id"]),
+                "kp_runtime_turn_get": lambda: adapter.call("turn_get", conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"], require_identity=arguments.get("require_identity", False)),
+                "kp_runtime_messages": lambda: adapter.call("messages", conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
+                "kp_runtime_proposals": lambda: adapter.call("proposals", conn_file, session_id=arguments["session_id"], turn_id=arguments.get("turn_id")),
+                "kp_runtime_goal_report_list": lambda: adapter.call("goal_report_list", conn_file, session_id=arguments["session_id"]),
+                "kp_runtime_goal_report_get": lambda: adapter.call("goal_report_get", conn_file, session_id=arguments["session_id"], execution_id=arguments.get("execution_id"), report_id=arguments.get("report_id")),
             }
             if tool_name in readers:
                 return readers[tool_name]()
@@ -1077,7 +1083,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
                 grant = scope_manager.get_task_grant_file(scope.scope_id)
                 if not grant or not grant.is_file():
                     raise util.KanpilotError("not_found", "task grant file is missing")
-            op = runtime_operations.reserve_downstream(ctx.conn, scope.scope_id, arguments["operation_id"], "pi_desktop", tool_name, {key: value for key, value in arguments.items() if key != "goal_continuation"})
+            op = runtime_operations.reserve_downstream(ctx.conn, scope.scope_id, arguments["operation_id"], adapter.harness_id, tool_name, {key: value for key, value in arguments.items() if key != "goal_continuation"})
             if not op["send"]:
                 if op["status"] == "accepted":
                     return op["result"]
@@ -1087,14 +1093,14 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         # No SQLite transaction or service-wide lock spans a Plus callback.
         sid = arguments.get("session_id")
         writers = {
-            "kp_runtime_session_create": lambda: harness_plus_adapter.plus_session_create(conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name"), interaction_mode=arguments.get("interaction_mode")),
-            "kp_runtime_session_configure": lambda: harness_plus_adapter.plus_session_configure(conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"], interaction_mode=arguments.get("interaction_mode")),
-            "kp_runtime_attach_mcp": lambda: harness_plus_adapter.plus_attach_mcp(conn_file, session_id=sid, bridge_file=str(grant)),
-            "kp_runtime_prompt": lambda: harness_plus_adapter.plus_prompt(conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments"), expected_interaction_mode=arguments.get("expected_interaction_mode")),
-            "kp_runtime_input_respond": lambda: harness_plus_adapter.plus_asks_resolve(conn_file, session_id=sid, request_id=arguments["request_id"], expected_tool_call_id=arguments["expected_tool_call_id"], answers=arguments["answers"]),
-            "kp_runtime_stop": lambda: harness_plus_adapter.plus_stop(conn_file, session_id=sid),
-            "kp_runtime_abort": lambda: harness_plus_adapter.plus_abort(conn_file, session_id=sid),
-            "kp_runtime_proposal_resolve": lambda: harness_plus_adapter.plus_proposal_resolve(conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode")),
+            "kp_runtime_session_create": lambda: adapter.call("session_create", conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name"), interaction_mode=arguments.get("interaction_mode")),
+            "kp_runtime_session_configure": lambda: adapter.call("session_configure", conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"], interaction_mode=arguments.get("interaction_mode")),
+            "kp_runtime_attach_mcp": lambda: adapter.call("attach_mcp", conn_file, session_id=sid, bridge_file=str(grant)),
+            "kp_runtime_prompt": lambda: adapter.call("prompt", conn_file, session_id=sid, content=arguments["content"], attachments=arguments.get("attachments"), expected_interaction_mode=arguments.get("expected_interaction_mode")),
+            "kp_runtime_input_respond": lambda: adapter.call("input_respond", conn_file, session_id=sid, request_id=arguments["request_id"], expected_tool_call_id=arguments["expected_tool_call_id"], answers=arguments["answers"]),
+            "kp_runtime_stop": lambda: adapter.call("stop", conn_file, session_id=sid),
+            "kp_runtime_abort": lambda: adapter.call("abort", conn_file, session_id=sid),
+            "kp_runtime_proposal_resolve": lambda: adapter.call("proposal_resolve", conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode"), required_verification_commands=arguments.get("required_verification_commands")),
         }
         result = writers[tool_name]()  # Exceptions leave the durable receipt unknown.
         if tool_name == "kp_runtime_attach_mcp":

@@ -240,6 +240,15 @@ enum Labels {
         case "repos_root": return "仓库根目录"
         case "state_root": return "状态目录"
         case "kaneo_ping": return "Kaneo 连通性"
+        case "codex_planner": return "Codex 规划环境"
+        case "gh": return "GitHub CLI"
+        case "claude": return "Claude CLI"
+        case "plus": return "Plus 连接"
+        case "plus_fallback_model": return "Plus 备用模型"
+        case "engine_lease": return "引擎租约"
+        case "business_tick_fresh": return "调度心跳"
+        case "attention_backlog": return "待处理积压"
+        case "worktree_pool": return "工作树池"
         default: return name
         }
     }
@@ -279,6 +288,24 @@ enum DisplayStatus {
             return StatusStyle(icon: "clock", color: .orange, label: "待评审")
         case "评审中", "in_review":
             return StatusStyle(icon: "eye", color: .orange, label: "评审中")
+        case "阻塞":
+            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "阻塞")
+        case "失败":
+            return StatusStyle(icon: "xmark.octagon.fill", color: .red, label: "失败")
+        case "修复会话待启动":
+            return StatusStyle(icon: "clock", color: .blue, label: status!)
+        case "修复中":
+            return StatusStyle(icon: "wrench.and.screwdriver", color: .blue, label: status!)
+        case "修复后待复审":
+            return StatusStyle(icon: "eye", color: .orange, label: status!)
+        case "等待二级任务完成", "待收尾校验":
+            return StatusStyle(icon: "checklist", color: .blue, label: status!)
+        case "收尾校验受阻", "完成同步待确认":
+            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: status!)
+        case "待修复":
+            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "待修复")
+        case "评审通过 · 待合并", "评审通过 · 待交付", "交付中":
+            return StatusStyle(icon: "checkmark.circle", color: .blue, label: status!)
         case "需人工", "needs_user":
             return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "需人工")
         // 开放且可答的执行期提问（详情头部附加；文字必须为「等待你回答」）。
@@ -286,7 +313,9 @@ enum DisplayStatus {
             return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "等待你回答")
         case "执行端失联", "lost":
             return StatusStyle(icon: "exclamationmark.triangle.fill", color: .red, label: "执行端失联")
-        case "已归档", "done":
+        case "已完成", "done":
+            return StatusStyle(icon: "checkmark.circle", color: .green, label: "已完成")
+        case "已归档":
             return StatusStyle(icon: "archivebox", color: .gray, label: "已归档")
         default:
             return StatusStyle(icon: "questionmark.circle", color: .secondary, label: status ?? "未知")
@@ -299,11 +328,49 @@ enum DisplayStatus {
     }
 
     static func effective(_ task: TaskSummary) -> String {
-        effective(status: task.status, displayStatus: task.displayStatus, activeRequest: task.activeRequest)
+        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
+        if let title = task.parentCloseout?.displayTitle { return title }
+        if let exception = task.exception {
+            return exception.isFailed ? "失败" : (exception.kind == "review_rejected" ? "待修复" : "阻塞")
+        }
+        if task.status == "done" { return task.displayStatus ?? "已完成" }
+        if let delivery = deliveryStatus(phase: task.phase, conclusion: task.reviewSummary?.conclusion,
+                                         delivery: task.delivery) { return delivery }
+        return effective(status: task.status, displayStatus: task.displayStatus, activeRequest: task.activeRequest)
     }
 
     static func effective(_ task: TaskDetail) -> String {
-        effective(status: task.status, displayStatus: task.displayStatus, activeRequest: task.activeRequest)
+        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
+        if let title = task.parentCloseout?.displayTitle { return title }
+        if let exception = task.exception {
+            return exception.isFailed ? "失败" : (exception.kind == "review_rejected" ? "待修复" : "阻塞")
+        }
+        if task.status == "done" { return task.displayStatus ?? "已完成" }
+        if let delivery = deliveryStatus(phase: task.phase, conclusion: task.reviewSummary?.conclusion,
+                                         delivery: task.delivery) { return delivery }
+        return effective(status: task.status, displayStatus: task.displayStatus, activeRequest: task.activeRequest)
+    }
+
+    private static func deliveryStatus(phase: String?, conclusion: String?, delivery: TaskDeliveryView?) -> String? {
+        guard phase == "delivery", conclusion == "pass" else { return nil }
+        if delivery?.mode == "pr" {
+            return delivery?.prState?.uppercased() == "MERGED" ? "交付中" : "评审通过 · 待合并"
+        }
+        return "评审通过 · 待交付"
+    }
+}
+
+enum ReleasePresentation {
+    static func color(_ release: TaskRelease) -> Color {
+        if release.isFailed { return .red }
+        if release.isBlocked { return .orange }
+        return release.isPublished ? .green : .blue
+    }
+    static func style(_ release: TaskRelease) -> StatusStyle {
+        let icon = release.isFailed ? "xmark.octagon.fill" : release.isBlocked ? "exclamationmark.triangle" : release.isPublished ? "checkmark.circle" : "shippingbox"
+        return StatusStyle(icon: icon, color: color(release), label: release.title)
     }
 }
 
@@ -721,6 +788,10 @@ extension JSONValue {
 enum AutomationPresentation {
     static let revertMessage = "恢复本轮验证待处理、退还一次自动补救、不重新执行、不改本轮工作树"
     static let replanMessage = "将从目标分支新建工作树，本轮改动不会带入"
+    static let verificationSupplementMessage = "沿用原计划、原工作树和已有冲突解决结果，只补充验证及正式报告。会调用本次处理固化配置的模型并产生费用。"
+    static func verificationRetryLabel(supplement: Bool) -> String {
+        supplement ? "补齐验证报告…" : "让 Plus 重新执行并验证"
+    }
     static func dismissLabel(stage: String?, failureCode: String?, automatic: Bool) -> String {
         let review = stage == "review" || failureCode == "review_blocked" || failureCode == "review_backend_unsupported"
         return review ? (automatic ? "转为人工评审" : "清除评审阻塞")
@@ -749,7 +820,7 @@ enum AutomationPresentation {
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
-        case "verification_unconfirmed": return "Plus 验证退出码未知或证据无法确认。可重新核验已有证据，或让 Plus 沿用原计划和工作树，启动新的执行轮次并验证。"
+        case "verification_unconfirmed": return "Plus 验证证据尚未完整确认。已有证据可重新核验；报告缺项时，需由 Plus 补齐验证及正式报告。请按当前可用操作继续。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
         case "automation_stopped": return "请先重新开启项目自动处理，再继续修复。"

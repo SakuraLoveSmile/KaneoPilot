@@ -10,6 +10,7 @@ struct TaskCompactListView: View {
     let isBatchMode: Bool
     @Binding var selectedTaskIDs: Set<String>
     let onOpen: (TaskSummary) -> Void
+    let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: (TaskSummary) -> Void
     let onToggleSelect: (String) -> Void
 
@@ -23,17 +24,11 @@ struct TaskCompactListView: View {
                             if items.isEmpty {
                                 emptyColumnRow(column)
                             } else {
-                                ForEach(items) { task in
-                                    TaskCompactRow(
-                                        task: task,
-                                        column: column,
-                                        isFocused: focused == task.taskId,
-                                        isBatchMode: isBatchMode,
-                                        isSelected: selectedTaskIDs.contains(task.taskId),
-                                        onOpen: { onOpen(task) },
-                                        onOpenSession: { onOpenSession(task) },
-                                        onToggleSelect: { onToggleSelect(task.taskId) }
-                                    )
+                                if column == .failed {
+                                    exceptionGroup(items, failed: false)
+                                    exceptionGroup(items, failed: true)
+                                } else {
+                                    taskGroups(items, column: column)
                                 }
                             }
                         } header: {
@@ -45,6 +40,43 @@ struct TaskCompactListView: View {
             .padding(Spacing.m)
         }
         .background(Color.kpWindow)
+    }
+
+    private func exceptionGroup(_ items: [TaskSummary], failed: Bool) -> some View {
+        let matching = items.filter { TaskBoardPresentation.isFailed($0) == failed }
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            TaskExceptionGroupHeader(failed: failed, count: matching.count)
+                .padding(.horizontal, Spacing.m)
+            taskGroups(matching, column: .failed)
+        }
+    }
+
+    private func taskGroups(_ items: [TaskSummary], column: BoardColumn) -> some View {
+        // LazyVStack flattens section content; sibling columns can share a parent.
+        // Keep their group identities distinct so SwiftUI never reuses another child.
+        ForEach(TaskBoardPresentation.groups(items, scope: "\(column.rawValue):\(items.first.map { TaskBoardPresentation.isFailed($0) } ?? false)")) { group in
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                if group.needsSourceContext, let parent = group.parent {
+                    TaskSourceContext(parent: parent, onOpen: onOpenRelated)
+                        .padding(.horizontal, Spacing.m)
+                }
+                ForEach(group.tasks) { task in
+                    TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
+                        TaskCompactRow(
+                            task: task,
+                            column: column,
+                            isFocused: focused == task.taskId,
+                            isBatchMode: isBatchMode,
+                            isSelected: selectedTaskIDs.contains(task.taskId),
+                            onOpen: { onOpen(task) },
+                            onOpenRelated: onOpenRelated,
+                            onOpenSession: { onOpenSession(task) },
+                            onToggleSelect: { onToggleSelect(task.taskId) }
+                        )
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - 分组头部
@@ -91,15 +123,22 @@ private struct TaskCompactRow: View {
     let isBatchMode: Bool
     let isSelected: Bool
     let onOpen: () -> Void
+    let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: () -> Void
     let onToggleSelect: () -> Void
 
     private var display: String { DisplayStatus.effective(task) }
-    private var style: StatusStyle { DisplayStatus.style(display) }
-
-    private var isBlocked: Bool {
-        if let reason = task.blockedReason, !reason.isEmpty { return true }
-        return display == "执行端失联" || display == "需人工"
+    private var style: StatusStyle {
+        if task.status != "done", let release = task.release, release.required { return ReleasePresentation.style(release) }
+        return DisplayStatus.style(display)
+    }
+    private var exceptionColor: Color {
+        TaskBoardPresentation.isFailed(task) ? .red : .orange
+    }
+    private var exceptionReason: String? {
+        if let reason = task.blockedReason, !reason.isEmpty { return reason }
+        if let detail = task.exception?.detail, !detail.isEmpty { return detail }
+        return nil
     }
     private var canOpenSession: Bool {
         task.status == "running" || task.activeRequest != nil || task.boardColumn == "in_progress"
@@ -118,26 +157,41 @@ private struct TaskCompactRow: View {
                 .labelsHidden()
             }
 
-            Image(systemName: style.icon)
-                .foregroundStyle(style.color)
+            Image(systemName: column == .failed
+                  ? (TaskBoardPresentation.isFailed(task) ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                  : style.icon)
+                .foregroundStyle(column == .failed ? exceptionColor : style.color)
                 .font(.system(size: 13))
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
+                TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
                 taskTitleView
 
-                if isBlocked, let reason = task.blockedReason {
+                if let reason = exceptionReason {
                     Text(reason)
                         .font(.kpSmall)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(exceptionColor)
                         .lineLimit(1)
+                } else if let release = task.release {
+                    Text("\(release.title) · \(release.reason)")
+                        .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
+                } else if let notice = task.delivery?.autoMergeNotice {
+                    Text(notice.reason)
+                        .font(.kpSmall)
+                        .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
+                        .lineLimit(2)
                 }
             }
 
             Spacer(minLength: Spacing.s)
 
             HStack(spacing: Spacing.m) {
-                StatusBadge(status: display)
+                if task.status != "done", let release = task.release, release.required {
+                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+                } else {
+                    StatusBadge(status: display)
+                }
 
                 if canOpenSession {
                     Button {

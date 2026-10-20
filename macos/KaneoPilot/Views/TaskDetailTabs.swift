@@ -376,14 +376,152 @@ private struct RawMarkdownView: NSViewRepresentable {
 
 // MARK: - 评审页（ui-spec §4.1 T4：结论/报告路径/fix_task_id/打开报告）
 
+struct TaskRelationsView: View {
+    let relations: TaskRelations
+    var onOpenTask: ((String) -> Void)? = nil
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        DetailSection(title: "任务层级") {
+            if let parent = relations.parent {
+                Label("二级任务 · 评审修复", systemImage: "arrow.turn.down.right")
+                    .font(.kpBody)
+                Text("来源原始任务").font(.kpSmall).foregroundStyle(.secondary)
+                relatedRow(parent)
+            } else {
+                Label("原始任务", systemImage: "doc.text")
+                    .font(.kpBody)
+            }
+            if !relations.children.isEmpty {
+                Text("关联二级任务（\(relations.children.count)）")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                ForEach(relations.children) { child in
+                    relatedRow(child).padding(.leading, Spacing.m)
+                }
+            } else if relations.parent == nil {
+                Text("暂未生成二级任务").font(.kpSmall).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func relatedRow(_ task: RelatedTask) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Button { onOpenTask?(task.taskId) } label: {
+                Label(task.title ?? task.taskId, systemImage: "arrow.up.right.square")
+                    .font(.kpBody).multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!task.available || onOpenTask == nil)
+            .help(task.available ? "查看关联任务详情" : "来源任务不可用，保留关联记录")
+            if !task.available {
+                Text("来源任务不可用").font(.kpSmall).foregroundStyle(.secondary)
+            } else if let current = model.tasks.first(where: { $0.taskId == task.taskId }) {
+                if current.status != "done", let release = current.release, release.required {
+                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+                } else {
+                    StatusBadge(status: DisplayStatus.effective(current))
+                }
+            } else if let status = task.displayStatus {
+                StatusBadge(status: status)
+            }
+        }
+    }
+}
+
 /// 复用 get-task 的评审字段渲染；无评审数据 → 空态。
 /// 内容区填满导航以下可用高度并只滚动一次：有数据时用 ScrollView 承载，
 /// 空态居中在同一块区域内（切换分段不改变 sheet 有效尺寸）。
+struct ParentCloseoutSection: View {
+    let closeout: ParentCloseout
+    var onOpenTask: ((String) -> Void)? = nil
+
+    var body: some View {
+        DetailSection(title: "收尾校验") {
+            StatusBadge(status: closeout.state == "completed" ? "已完成" : closeout.displayTitle ?? closeout.title)
+            Text("二级任务 \(closeout.completedChildren)/\(closeout.requiredChildren) 已完成")
+                .font(.kpBody)
+            Text(closeout.reason).font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(closeout.blockers.enumerated()), id: \.offset) { _, blocker in
+                Label(blocker.message, systemImage: "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if closeout.state == "unknown" {
+                Text("再次核对只读取完成结果，不会重复提交。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
+            if let branch = closeout.targetBranch {
+                FieldRow("目标分支", closeout.targetSha.map { "\(branch) · \(String($0.prefix(12)))" } ?? branch)
+            }
+            if let taskID = closeout.evidenceTaskId {
+                Button("查看复用的最终检查点") { onOpenTask?(taskID) }
+                    .buttonStyle(.link).font(.kpSmall).disabled(onOpenTask == nil)
+            }
+            if let at = closeout.checkedAt { FieldRow("核对时间", TimeFormat.fullString(at)) }
+            Text(closeout.acceptanceNote).font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        }
+    }
+}
+
+struct ReviewRepairSection: View {
+    let taskID: String
+    let repair: ReviewRepair
+    var readOnly = false
+    var onOpenSession: (() -> Void)? = nil
+    @EnvironmentObject private var model: AppViewModel
+    @State private var pending: ReviewRepair?
+    @State private var loadingCandidate = false
+
+    var body: some View {
+        DetailSection(title: "修复会话") {
+            FieldRow("状态", repair.stateTitle)
+            FieldRow("本轮问题", repair.title)
+            FieldRow("修复轮", "\(repair.round)/\(repair.maxRounds)")
+            Text(repair.reason).font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            HStack(spacing: Spacing.m) {
+                if repair.canStart && !readOnly {
+                    Button("开始修复会话") {
+                        loadingCandidate = true
+                        Task {
+                            defer { loadingCandidate = false }
+                            do { pending = try await model.currentReviewRepair(taskID: taskID) }
+                            catch { model.alertMessage = error.coreMessage }
+                        }
+                    }.disabled(model.busy || loadingCandidate)
+                }
+                if repair.repairExecutionRunId != nil {
+                    Button("查看修复会话") { onOpenSession?() }
+                        .disabled(onOpenSession == nil)
+                }
+                Button("查看本轮评审报告") { Workspace.open(repair.reportPath) }
+                if loadingCandidate { ProgressView().controlSize(.small) }
+            }.font(.kpSmall)
+        }
+        .alert("开始修复会话？", isPresented: Binding(
+            get: { pending != nil }, set: { if !$0 { pending = nil } }
+        ), presenting: pending) { candidate in
+            Button("取消", role: .cancel) { pending = nil }
+            Button("开始修复") {
+                pending = nil
+                Task { await model.startReviewRepair(taskID: taskID, candidate: candidate) }
+            }
+        } message: { _ in
+            Text("将按当前执行配置开启新的修复会话，产生模型费用。沿用本任务分支，只修复本轮评审问题，并执行原验证要求；修复后重新评审。不重新规划或创建子任务。")
+        }
+    }
+}
+
 struct TaskReviewTabView: View {
     let detail: TaskDetail
+    var onOpenTask: ((String) -> Void)? = nil
+    var onOpenSession: (() -> Void)? = nil
 
     private var hasReview: Bool {
-        detail.reviewReportPath != nil || detail.fixTaskId != nil
+        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewReportPath != nil || detail.fixTaskId != nil
             || detail.reviewKey != nil || detail.reviewConclusion != nil
             || detail.reviewSummary?.conclusion != nil
             || detail.reviewSummary?.reportPath != nil
@@ -409,22 +547,39 @@ struct TaskReviewTabView: View {
             if hasReview {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Spacing.l) {
-                        DetailSection(title: "评审状态") {
+                        if let relations = detail.taskRelations {
+                            TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
+                        }
+                        if let closeout = detail.parentCloseout {
+                            ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
+                        } else if let repair = detail.reviewRepair {
+                            ReviewRepairSection(taskID: detail.taskId, repair: repair,
+                                                readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
+                        }
+                        DetailSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
                             HStack(spacing: Spacing.m) {
-                                StatusBadge(status: DisplayStatus.effective(detail))
-                                if let at = detail.reviewSummary?.registeredAt {
+                                if detail.status != "done", let release = detail.release, release.required {
+                                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+                                } else {
+                                    StatusBadge(status: DisplayStatus.effective(detail))
+                                }
+                                if detail.parentCloseout == nil, let at = detail.reviewSummary?.registeredAt {
                                     Text("登记于 \(TimeFormat.fullString(at))")
                                         .font(.kpSmall)
                                         .foregroundStyle(.secondary)
                                 }
                             }
                         }
-                        DetailSection(title: "评审结论") {
+                        DetailSection(title: detail.parentCloseout == nil ? "评审结论" : "历史评审") {
+                            if detail.parentCloseout != nil {
+                                Text("以下为收尾前的评审记录，当前结果以上方收尾校验为准。")
+                                    .font(.kpSmall).foregroundStyle(.secondary)
+                            }
                             FieldRow("结论", Labels.reviewConclusion(conclusion))
                             FieldRow("报告", reportPath.map {
                                 ($0 as NSString).lastPathComponent
                             })
-                            FieldRow("修复任务", fixTaskID)
+                            if let fixTaskID { FieldRow("历史修复任务", fixTaskID) }
                             FieldRow("review_key",
                                      detail.reviewKey ?? detail.reviewSummary?.reviewKey)
                             FieldRow("报告哈希", detail.reviewReportSha256.map {
@@ -858,12 +1013,28 @@ struct FlowRow: Layout {
 // 自动处理与交付放在既有概览页，保持五段导航不变。
 struct TaskAutomationSections: View {
     let detail: TaskDetail
+    var onOpenSession: (() -> Void)? = nil
+    var onRefreshDetail: (() -> Void)? = nil
     var body: some View {
         if let delivery = detail.delivery {
             DetailSection(title: "交付") {
                 FieldRow("状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
+                if let notice = delivery.autoMergeNotice {
+                    Label(notice.reason, systemImage: notice.needsAttention ? "exclamationmark.triangle" : "arrow.triangle.merge")
+                        .font(.kpSmall)
+                        .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let action = detail.taskAiAction {
+                    TaskAIActionSection(detail: detail, action: action,
+                                        onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
+                }
                 if let url = delivery.prUrl {
                     Button("打开 PR，查看交付结果") { Workspace.open(url) }
+                }
+                if let release = detail.release {
+                    Divider()
+                    TaskReleaseSection(detail: detail, release: release, onRefreshDetail: onRefreshDetail)
                 }
                 DisclosureGroup("分支、提交与同步记录") {
                     FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
@@ -891,7 +1062,12 @@ struct TaskAutomationSections: View {
                 }.font(.kpSmall)
             }
         } else {
-            DetailSection(title: "交付") { FieldRow("状态", "未开启") }
+            DetailSection(title: "交付") {
+                FieldRow("状态", "未开启")
+                if let release = detail.release {
+                    TaskReleaseSection(detail: detail, release: release, onRefreshDetail: onRefreshDetail)
+                }
+            }
         }
         if let automation = detail.automation {
             DetailSection(title: "自动处理") {
@@ -935,7 +1111,7 @@ struct TaskAutomationSections: View {
         }
     }
     private func deliveryState(_ state: String?) -> String {
-        switch state {
+        switch state?.lowercased() {
         case "open": return "PR 已创建"
         case "merged": return "已合并"
         case "closed": return "PR 已关闭"
@@ -950,4 +1126,253 @@ struct TaskAutomationSections: View {
         let date = formatter.date(from: at) ?? ISO8601DateFormatter().date(from: at)
         return date.map { "\(max(0, Int(Date().timeIntervalSince($0) / 60))) 分钟" }
     }
+}
+
+/// 与原交付区共享上下文；确认弹窗绑定一次预检结果，取消不会提交启动命令。
+private struct TaskAIActionSection: View {
+    let detail: TaskDetail
+    let action: TaskAIActionView
+    var onOpenSession: (() -> Void)?
+    var onRefreshDetail: (() -> Void)?
+    @EnvironmentObject private var model: AppViewModel
+    @State private var preparing = false
+    @State private var starting = false
+    @State private var candidate: TaskAIActionCandidate?
+    @State private var errorText: String?
+    @State private var historyExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if let current = action.current {
+                actionEntry(current, history: false)
+            }
+            HStack(spacing: Spacing.s) {
+                if preparing || starting { ProgressView().controlSize(.small) }
+                Button(preparing ? "正在核对 PR…" : starting ? "正在安排处理…" : "AI 处理…") {
+                    guard !preparing, !starting, candidate == nil else { return }
+                    preparing = true
+                    errorText = nil
+                    Task {
+                        defer { preparing = false }
+                        do { candidate = try await model.prepareTaskAIAction(taskID: detail.taskId) }
+                        catch { errorText = error.coreMessage }
+                    }
+                }
+                .disabled(!action.canPrepare || detail.readOnly == true || preparing || starting
+                          || candidate != nil || model.actionInFlight != nil)
+                .help(action.reason ?? "使用通用执行配置处理 PR 合并冲突")
+            }
+            if !action.canPrepare, action.current == nil, let reason = action.reason, !reason.isEmpty {
+                Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let errorText {
+                Label(errorText, systemImage: "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(.orange).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let history = action.history, !history.isEmpty {
+                DisclosureGroup("AI 处理记录（\(history.count) 次）", isExpanded: $historyExpanded) {
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        ForEach(history) { entry in actionEntry(entry, history: true) }
+                    }
+                }.font(.kpSmall)
+            }
+        }
+        .alert("开始 AI 处理？", isPresented: Binding(
+            get: { candidate != nil }, set: { if !$0 { candidate = nil } }
+        ), presenting: candidate) { confirmed in
+            Button("开始处理") {
+                // 只提交弹窗所展示的候选，不重新预检或替换确认指纹。
+                candidate = nil
+                starting = true
+                Task {
+                    await model.startTaskAIAction(candidate: confirmed, onError: { errorText = $0 })
+                    starting = false
+                    onRefreshDetail?()
+                }
+            }
+            Button("取消", role: .cancel) { candidate = nil }
+        } message: { confirmed in
+            Text(confirmed.confirmationMessage)
+        }
+    }
+
+    private func stateColor(_ entry: TaskAIActionEntry) -> Color {
+        switch entry.state {
+        case "failed": return .red
+        case "blocked", "needs_followup": return .orange
+        case "completed": return .green
+        default: return .secondary
+        }
+    }
+
+    @ViewBuilder
+    private func actionEntry(_ entry: TaskAIActionEntry, history: Bool) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if history { FieldRow("处理", entry.title ?? "解决 PR 合并冲突") }
+            Text(entry.stateTitle ?? entry.state).font(.kpSmall).foregroundStyle(stateColor(entry))
+                .fixedSize(horizontal: false, vertical: true)
+            if let reason = entry.reason, !reason.isEmpty {
+                Text(reason).font(.kpSmall).foregroundStyle(stateColor(entry)).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            FieldRow("模型", entry.modelSummary)
+            if history { FieldRow("时间", TimeFormat.fullString(entry.createdAt)) }
+            if let runID = entry.executionRunId, runID == detail.runId, let onOpenSession {
+                Button("查看处理会话") { onOpenSession() }
+            } else if let session = entry.sessionId, !session.isEmpty {
+                FieldRow("会话", session)
+                Button("复制会话 ID") { Workspace.copy(session) }
+            }
+        }
+    }
+}
+
+/// Release mutations always use the candidate shown in the confirmation dialog.
+private struct TaskReleaseSection: View {
+    private struct AbandonCandidate {
+        let batchID: String
+        let contextSHA256: String
+    }
+    let detail: TaskDetail
+    let release: TaskRelease
+    var onRefreshDetail: (() -> Void)?
+    @EnvironmentObject private var model: AppViewModel
+    @State private var preparing = false
+    @State private var preparationID: UUID?
+    @State private var working = false
+    @State private var candidate: PrepareTaskReleaseResponse?
+    @State private var abandoning: AbandonCandidate?
+    @State private var errorText: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("构建与发布").font(.kpBody.weight(.semibold))
+            StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+            Text(release.reason).font(.kpSmall).foregroundStyle(ReleasePresentation.color(release))
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            FieldRow("渠道", release.channelLabel)
+            if release.tag != nil || release.version != nil { FieldRow("版本", release.tag ?? release.version) }
+            ForEach(Array(release.blockers.enumerated()), id: \.offset) { _, blocker in
+                Label(blocker.message, systemImage: "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            if release.state == "unknown" {
+                Text("仅核对既有发布结果，不会重新发送构建。")
+                    .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if release.state == "failed" {
+                Text("不会自动重试。可在 Actions 中检查并重跑，再同步发布结果。")
+                    .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let url = release.workflowUrl { Button("查看 Actions 构建") { Workspace.open(url) } }
+            if let url = release.releaseUrl { Button("打开版本发布页") { Workspace.open(url) } }
+            ForEach(release.assets) { asset in
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Button { Workspace.open(asset.url) } label: {
+                        Label(asset.name, systemImage: "arrow.down.circle")
+                            .font(.kpBody).foregroundStyle(Color.accentColor)
+                            .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                    }.buttonStyle(.borderless)
+                    Text(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file))
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                }
+            }
+            if release.hasUnsignedAssets {
+                Text("标记 unsigned 的 iOS 安装包未签名，不能作为可直接安装版本。")
+                    .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if !release.memberTaskIds.isEmpty || release.targetSha != nil {
+                DisclosureGroup("发布批次与证据") {
+                    FieldRow("关联任务", "\(release.memberTaskIds.count) 项")
+                    FieldRow("目标提交", release.targetSha)
+                    FieldRow("批次", release.batchId)
+                    FieldRow("构建编号", release.buildNumber.map(String.init))
+                    FieldRow("最近核验", release.checkedAt.map(TimeFormat.fullString))
+                    ForEach(release.assets) { asset in FieldRow("\(asset.name) SHA256", asset.sha256) }
+                }.font(.kpSmall)
+            }
+            if detail.readOnly != true {
+                HStack(spacing: Spacing.s) {
+                    if preparing || working { ProgressView().controlSize(.small) }
+                    if release.showsStartAction {
+                        Button(preparing ? "正在准备发布…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
+                            let token = UUID(), taskID = detail.taskId
+                            preparationID = token
+                            preparing = true
+                            errorText = nil
+                            Task {
+                                defer { if preparationID == token { preparing = false; preparationID = nil } }
+                                do {
+                                    let prepared = try await model.prepareTaskRelease(taskID: taskID)
+                                    guard preparationID == token else { return }
+                                    candidate = prepared
+                                } catch {
+                                    guard preparationID == token else { return }
+                                    errorText = error.coreMessage
+                                }
+                            }
+                        }.disabled(locked)
+                    } else if release.canReconcile, let batchID = release.batchId {
+                        Button(release.syncLabel) {
+                            working = true
+                            errorText = nil
+                            Task {
+                                await model.syncReleaseBatch(batchID: batchID, onError: { errorText = $0 })
+                                working = false
+                                onRefreshDetail?()
+                            }
+                        }.disabled(locked)
+                    }
+                    if release.showsAbandonAction, let batchID = release.batchId, let context = release.contextSha256 {
+                        Button("放弃未发送批次…") {
+                            errorText = nil
+                            abandoning = AbandonCandidate(batchID: batchID, contextSHA256: context)
+                        }.disabled(locked)
+                    }
+                }
+            }
+            if let errorText {
+                Label(errorText, systemImage: "exclamationmark.triangle")
+                    .font(.kpSmall).foregroundStyle(.orange).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .alert("确认构建并发布？", isPresented: Binding(
+            get: { candidate != nil }, set: { if !$0 { candidate = nil } }
+        ), presenting: candidate) { confirmed in
+            Button("构建并发布") {
+                candidate = nil
+                working = true
+                Task {
+                    await model.startTaskRelease(candidate: confirmed, onError: { errorText = $0 })
+                    working = false
+                    onRefreshDetail?()
+                }
+            }
+            .disabled(model.busy)
+            Button("取消", role: .cancel) { candidate = nil }
+        } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .confirmationDialog("放弃未发送批次？", isPresented: Binding(
+            get: { abandoning != nil }, set: { if !$0 { abandoning = nil } }
+        ), titleVisibility: .visible, presenting: abandoning) { confirmed in
+            Button("放弃未发送批次", role: .destructive) {
+                abandoning = nil
+                working = true
+                Task {
+                    await model.abandonUnsentRelease(batchID: confirmed.batchID, contextSHA256: confirmed.contextSHA256,
+                                                    onError: { errorText = $0 })
+                    working = false
+                    onRefreshDetail?()
+                }
+            }.disabled(model.busy)
+            Button("取消", role: .cancel) { abandoning = nil }
+        } message: { _ in
+            Text("该批次尚未发送到 GitHub。放弃仅停止使用这份未发送批次，不取消任何 GitHub 构建；原任务和历史记录均保留。之后可按当前配置重新准备发布。")
+        }
+        .onChange(of: detail.taskId) { candidate = nil; abandoning = nil; errorText = nil; preparationID = nil; preparing = false }
+        .onDisappear { candidate = nil; abandoning = nil; preparationID = nil; preparing = false }
+    }
+
+    private var locked: Bool { preparing || working || candidate != nil || abandoning != nil || model.busy }
 }

@@ -222,13 +222,20 @@ def _task_id(task_id):
         raise GitDeliveryError("worktree_invalid", "任务标识必须为 8 至 64 位小写字母或数字")
 
 
-def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root) -> dict:
+def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root, initial_head_sha=None) -> dict:
     _task_id(task_id)
     try:
         _git(["fetch", "--prune", "origin"], repo, 60)
     except GitDeliveryError as exc:
         raise _recode(exc, "git_transient", "获取远端分支失败") from exc
     base, sha = resolve_base(repo, base_branch)
+    head = sha
+    if initial_head_sha is not None:
+        if not isinstance(initial_head_sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", initial_head_sha):
+            raise GitDeliveryError("worktree_invalid", "修复基线提交标识无效")
+        head = _value(["rev-parse", "--verify", initial_head_sha + "^{commit}"], repo)
+        if head != initial_head_sha:
+            raise GitDeliveryError("worktree_invalid", "修复基线提交不精确")
     branch = constants.DELIVERY_BRANCH_PREFIX + task_id
     path = Path(worktrees_root).expanduser() / task_id / "branch"
     refs = set(_value(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch,
@@ -249,27 +256,27 @@ def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root) -> di
                     or Path(_value(["rev-parse", "--show-toplevel"], path)).resolve() != path.resolve()
                     or _value(["symbolic-ref", "--short", "HEAD"], path) != branch):
                 raise GitDeliveryError("branch_exists", "预期工作树归属或分支不符，不能收养")
-            own_commits = int(_value(["rev-list", "--count", sha + "..refs/heads/" + branch], repo))
+            own_commits = int(_value(["rev-list", "--count", head + "..refs/heads/" + branch], repo))
             if own_commits:
                 raise GitDeliveryError("branch_exists", "本任务分支有 " + str(own_commits) + " 个目标分支之外的自有提交，未自动收养")
             if _git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"], path, 10).stdout:
                 raise GitDeliveryError("branch_exists", "本地分支工作树含未提交或未跟踪文件，不能收养")
-            _git(["merge", "--ff-only", "--no-overwrite-ignore", sha], path, 60)
+            _git(["merge", "--ff-only", "--no-overwrite-ignore", head], path, 60)
         except GitDeliveryError as exc:
             if exc.code == "branch_exists":
                 raise
             raise _recode(exc, "branch_exists", "本地分支无法安全快进，未收养") from exc
         return {"branch": branch, "worktree_path": str(path), "base_branch": base,
-                "base_sha": sha, "head_sha": sha, "adopted": True}
+                "base_sha": sha, "head_sha": head, "adopted": True}
     if os.path.lexists(path):
         raise GitDeliveryError("branch_exists", "本任务工作树路径已存在，未创建工作树")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        _git(["worktree", "add", "-b", branch, str(path), sha], repo, 60)
+        _git(["worktree", "add", "-b", branch, str(path), head], repo, 60)
     except (GitDeliveryError, OSError) as exc:
         raise GitDeliveryError("git_transient", "创建任务工作树失败：" + str(exc)) from exc
     return {"branch": branch, "worktree_path": str(path), "base_branch": base,
-            "base_sha": sha, "head_sha": sha}
+            "base_sha": sha, "head_sha": head}
 
 
 def _local_task_id(task_id):
@@ -338,6 +345,71 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
                 raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
     except (GitDeliveryError, OSError, IndexError) as exc:
         raise GitDeliveryError("worktree_invalid", "工作树核验失败：" + str(exc)) from exc
+
+
+def _merge_marker(path, name):
+    marker = Path(_value(["rev-parse", "--git-path", name], path))
+    marker = marker if marker.is_absolute() else Path(path) / marker
+    if not marker.exists():
+        return None
+    if marker.is_symlink() or not marker.is_file():
+        raise GitDeliveryError("worktree_invalid", "合并状态文件身份不可确认")
+    return marker.read_text(encoding="ascii").strip()
+
+
+def verify_conflict_merge(delivery, target_base_sha):
+    """Recognize only this exact unfinished, two-parent merge; never repair it."""
+    verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
+    path = delivery["worktree_path"]
+    if (_merge_marker(path, "MERGE_HEAD") != target_base_sha
+            or _merge_marker(path, "ORIG_HEAD") != delivery["head_sha"]):
+        raise GitDeliveryError("worktree_invalid", "现有合并不属于本次冻结提交，保留工作树等待处理")
+    return Path(path)
+
+
+def verify_conflict_remote(delivery, *, expected_repo, target_base_sha):
+    """Read exact remote branch tips, without changing any local ref or tree."""
+    path = delivery["worktree_path"]
+    if origin_github_repo(path) != expected_repo:
+        raise GitDeliveryError("branch_diverged", "origin 仓库与已冻结 GitHub 仓库不符")
+    names = ["refs/heads/" + delivery["branch"], "refs/heads/" + delivery["base_branch"]]
+    for name in names:
+        _git(["check-ref-format", name], path, 10)
+    raw = _value(["ls-remote", "--heads", "origin", *names], path, 60)
+    refs = {}
+    for line in raw.splitlines():
+        sha, separator, name = line.partition("\t")
+        if not separator or name in refs:
+            raise GitDeliveryError("branch_diverged", "远端分支身份不可确认")
+        refs[name] = sha
+    if refs != dict(zip(names, [delivery["head_sha"], target_base_sha])):
+        raise GitDeliveryError("branch_diverged", "PR 来源或目标分支已经变化，请重新核验")
+
+
+def prepare_conflict_merge(delivery, *, expected_repo, target_base_sha, resume=False):
+    """Caller must persist an operation intent before invoking this mutator."""
+    verify_conflict_remote(delivery, expected_repo=expected_repo, target_base_sha=target_base_sha)
+    path = delivery["worktree_path"]
+    if resume:
+        return verify_conflict_merge(delivery, target_base_sha)
+    verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    if _merge_marker(path, "MERGE_HEAD") is not None:
+        raise GitDeliveryError("worktree_invalid", "工作树已有未归属的合并，未覆盖")
+    # Fetch explicit heads only. No destination ref, checkout, reset, or cleanup.
+    _git(["fetch", "--no-tags", "origin", "refs/heads/" + delivery["branch"],
+          "refs/heads/" + delivery["base_branch"]], path, 60)
+    verify_conflict_remote(delivery, expected_repo=expected_repo, target_base_sha=target_base_sha)
+    verify_branch_worktree(delivery, require_clean=True, expected_head=delivery["head_sha"])
+    if _merge_marker(path, "MERGE_HEAD") is not None:
+        raise GitDeliveryError("worktree_invalid", "准备期间工作树合并状态已变化，未覆盖")
+    try:
+        result = subprocess.run(["git", "-C", str(path), "merge", "--no-commit", "--no-ff", "--no-overwrite-ignore", target_base_sha],
+                                capture_output=True, timeout=120, env=git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitDeliveryError("worktree_invalid", "合并准备结果未知，保留现场等待核对") from exc
+    if result.returncode not in (0, 1):
+        raise GitDeliveryError("worktree_invalid", "合并准备失败，保留现场：" + _redact(result.stderr.decode("utf-8", "replace"))[-1024:])
+    return verify_conflict_merge(delivery, target_base_sha)
 
 
 def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root, conn=None, holder_id=None) -> str:
@@ -765,9 +837,9 @@ def _require_safe_files(files):
         raise GitDeliveryError("delivery_blocked_files", "交付包含敏感文件或超过 5MB 的文件", files=blocked)
 
 
-def _committed_files(path, sha):
+def _committed_files(path, sha, parent=None):
     raw = _git(["diff-tree", "--root", "--no-commit-id", "--raw", "--no-abbrev", "-r",
-                "--no-renames", "-z", sha], path, 10).stdout.split(b"\0")
+                "--no-renames", "-z", *([parent, sha] if parent else [sha])], path, 10).stdout.split(b"\0")
     files = []
     for index in range(0, len(raw) - 1, 2):
         oid = raw[index].split()[3].decode("ascii")
@@ -778,7 +850,8 @@ def _committed_files(path, sha):
 
 
 def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300,
-                    verified_source_sha256=None, verified_index_sha256=None) -> dict:
+                    verified_source_sha256=None, verified_index_sha256=None,
+                    merge_parent_sha=None) -> dict:
     if delivery.get("workspace_version") == 1:
         _local_task_id(task_id)
     else:
@@ -787,11 +860,21 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         raise GitDeliveryError("delivery_commit_failed", "执行轮次标识无效")
     verify_branch_worktree(delivery, require_clean=False, expected_head=None)
     path, expected = delivery["worktree_path"], delivery["head_sha"]
+    if merge_parent_sha is not None:
+        if (not isinstance(merge_parent_sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", merge_parent_sha)
+                or merge_parent_sha == expected or not verified_source_sha256 or not verified_index_sha256):
+            raise GitDeliveryError("delivery_commit_failed", "冲突处理必须绑定双父提交与完整验证树")
     head = _value(["rev-parse", "HEAD"], path)
     if head != expected:
         parents = _value(["show", "-s", "--format=%P", "HEAD"], path).split()
         trailers = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
-        if parents == [expected] and trailers == [execution_run_id]:
+        expected_parents = [expected, merge_parent_sha] if merge_parent_sha else [expected]
+        task_trailers = _value(["show", "-s", "--format=%(trailers:key=Kaneo-Task,valueonly)", "HEAD"], path).splitlines() if merge_parent_sha else None
+        if (parents == expected_parents and trailers == [execution_run_id]
+                and (not merge_parent_sha or task_trailers == [task_id])):
+            if merge_parent_sha and (_merge_marker(path, "MERGE_HEAD") is not None
+                                     or _merge_marker(path, "ORIG_HEAD") != expected):
+                raise GitDeliveryError("delivery_commit_failed", "未登记合并提交的恢复状态不符，保留现场")
             _require_no_new_goal_commit(path, expected, head)
             if verified_source_sha256:
                 if (source_state_sha256(path) != verified_source_sha256
@@ -803,19 +886,25 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
                     # completion publishes the private index before DB phase 3.
                     raise GitDeliveryError("delivery_commit_failed", "未登记提交存在待确认索引，保留本地提交与暂存改动")
             verify_branch_worktree(delivery, require_clean=True, expected_head=head)
-            return {"sha": head, "files": _committed_files(path, head)}
+            return {"sha": head, "files": _committed_files(path, head, expected if merge_parent_sha else None)}
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
     if verified_source_sha256 and source_state_sha256(path) != verified_source_sha256:
         raise GitDeliveryError("delivery_commit_failed", "源码已变化，不能提交未经核心验证的内容")
+    if merge_parent_sha:
+        verify_conflict_merge(delivery, merge_parent_sha)
+        if _git(["ls-files", "--unmerged", "-z"], path, 10).stdout:
+            raise GitDeliveryError("delivery_commit_failed", "合并冲突尚未全部解决并暂存")
+        if index_source_sha256(path) != verified_index_sha256:
+            raise GitDeliveryError("delivery_commit_failed", "合并处理结果尚未完整暂存为已验证树，未提交")
     changes, material = _effective_changes(path)
-    if not changes:
+    if not changes and not merge_parent_sha:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
     _require_safe_files(changes)
     # 只提交交付路径：构建产物（__pycache__/*.pyc 等）留在工作树，不进提交。
     # 提交它们会把本机二进制差异带进分支，多任务分支间内容不同即 add/add 冲突
     # （沙盒 PR #2/#3 CONFLICTING 的根因）。
     deliverable, artifacts = deliverable_paths(changes)
-    if not deliverable:
+    if not deliverable and not merge_parent_sha:
         raise GitDeliveryError(
             "no_changes",
             "可提交改动只有构建产物（" + "、".join(artifacts[:5]) + " 等），"
@@ -824,6 +913,8 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
     # the branch between monitor completion and this command.
     if _value(["rev-parse", "HEAD"], path) != expected:
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
+    if merge_parent_sha:
+        verify_conflict_merge(delivery, merge_parent_sha)
     # 不逐个 add 交付路径：重命名/删除的路径可能已不在索引或工作树里，逐个传给
     # `git add --` 会报 "pathspec did not match"；也不用 `:(exclude)`——它对「被
     # .gitignore 忽略的路径」会让 git add 返回 1（即使暂存结果是对的）。改为
@@ -901,8 +992,16 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
             _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60)
             _git(["commit", "-F", str(message_path)], path, timeout)
     head = _value(["rev-parse", "HEAD"], path)
+    if merge_parent_sha:
+        parents = _value(["show", "-s", "--format=%P", "HEAD"], path).split()
+        run_trailers = _value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], path).splitlines()
+        task_trailers = _value(["show", "-s", "--format=%(trailers:key=Kaneo-Task,valueonly)", "HEAD"], path).splitlines()
+        if (parents != [expected, merge_parent_sha] or run_trailers != [execution_run_id]
+                or task_trailers != [task_id] or _merge_marker(path, "MERGE_HEAD") is not None
+                or _merge_marker(path, "ORIG_HEAD") != expected):
+            raise GitDeliveryError("delivery_commit_failed", "合并提交身份或恢复状态不符；本地提交已保留但未交付")
     verify_branch_worktree(delivery, require_clean=True, expected_head=head)
-    return {"sha": head, "files": _committed_files(path, head)}
+    return {"sha": head, "files": _committed_files(path, head, expected if merge_parent_sha else None)}
 
 
 def push_branch(delivery, *, expected_repo, before_push=None, timeout=120) -> dict:

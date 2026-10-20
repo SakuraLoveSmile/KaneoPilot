@@ -566,17 +566,26 @@ class MCPClient:
         """本会话待审批的 Plan/Goal 契约（§5.23.9 只读；`plans` 数组）。"""
         return self.call_tool("pi_plans_pending", {"sessionId": session_id})
 
+    def supports_required_verification_commands(self) -> bool:
+        properties = self.tool_input_properties("pi_plans_resolve")
+        field = properties.get("requiredVerificationCommands") if isinstance(properties, dict) else None
+        return (isinstance(field, dict) and field.get("type") == "array"
+                and isinstance(field.get("items"), dict)
+                and field["items"].get("type") == "string")
+
     def plans_resolve(
         self, proposal_id: str, session_id: str, turn_id: str,
         tool_call_id: str, action: str,
         target_permission_mode: Optional[str] = None,
         version: Optional[int] = None,
+        required_verification_commands: Optional[list] = None,
     ) -> dict:
         """dangerous 操作：批准/拒绝目标契约，必带 confirm=true。
 
         批准成功即由宿主在同会话开启执行轮次（新的 turnId）；KaneoPilot 的
         计划已在本地批准，这里批准的是 PI-Desktop 侧的契约形式（§5.23.9）。
         """
+        validate_required_verification_commands(required_verification_commands, action)
         args = {
             "proposalId": proposal_id, "sessionId": session_id,
             "turnId": turn_id, "toolCallId": tool_call_id,
@@ -586,6 +595,10 @@ class MCPClient:
             args["targetPermissionMode"] = target_permission_mode
         if isinstance(version, int) and not isinstance(version, bool) and version > 0:
             args["version"] = version
+        if required_verification_commands and not self.supports_required_verification_commands():
+            raise util.KanpilotError("unsupported_tools", "请升级 Plus：pi_plans_resolve 缺少 requiredVerificationCommands 能力")
+        if required_verification_commands is not None:
+            args["requiredVerificationCommands"] = list(required_verification_commands)
         return self.call_tool("pi_plans_resolve", args)
 
     def goal_report_list(self, session_id: str) -> dict:
@@ -1172,3 +1185,23 @@ def report_reference_ids(report: dict) -> dict:
                     ids.add(value)
         buckets[name] = ids
     return buckets
+
+
+def validate_required_verification_commands(commands, action):
+    """Validate the optional Host-bound command contract before any mutation."""
+    if commands is None:
+        return
+    if (not isinstance(commands, list) or not 1 <= len(commands) <= 200
+            or any(not isinstance(command, str) or not command.strip() for command in commands)):
+        raise util.bad_request("required_verification_commands 必须为 1–200 条非空命令的数组")
+    if action not in ("approve", "accept"):
+        raise util.bad_request("required_verification_commands 仅允许批准 Goal 时传入")
+    if (len(set(commands)) != len(commands)
+            or any(any(char in command for char in "\x00\r\n") for command in commands)):
+        raise util.bad_request("验证命令不得重复或包含 NUL、CR、LF")
+    try:
+        sizes = [len(command.encode("utf-8")) for command in commands]
+    except UnicodeEncodeError as exc:
+        raise util.bad_request("验证命令必须为有效 UTF-8") from exc
+    if any(size > 4096 for size in sizes) or sum(sizes) > 65536:
+        raise util.bad_request("验证命令每条不得超过 4096 字节、总计不得超过 65536 字节")

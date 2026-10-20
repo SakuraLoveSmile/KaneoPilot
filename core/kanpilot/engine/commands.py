@@ -188,7 +188,9 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
 
     task = current_task()
     mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
-    receipt_key = "engine_verdict_shadow" if mode == "shadow" else "engine_verdict"
+    action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
+    strict = mode == "live" or action
+    receipt_key = "engine_verdict_shadow" if mode == "shadow" and not action else "engine_verdict"
     operation_id = payload.get("operation_id") or util.new_uuid()
     prior = db.task_extra(task).get(receipt_key) or {}
     lease = constants.DEFAULT_LEASE_SECONDS
@@ -215,7 +217,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
             cmd_exec.cmd_heartbeat(ctx, {"request_id": payload["request_id"], "run_id": payload["run_id"]})
 
     try:
-        if (mode == "live" and prior.get("verification_ok") is True
+        if (strict and prior.get("verification_ok") is True
                 and prior.get("execution_run_id") == task["run_id"]
                 and prior.get("plan_sha256") == task["plan_sha256"]):
             if verdict.valid_committed_receipt(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat):
@@ -224,7 +226,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 # until delivery-commit registers the already frozen commit.
                 return dict(prior, ok=True, deduplicated=True)
         # Live retries reuse only Plus report receipts; transcript receipts are audit data.
-        source = "goal_report" if mode == "live" else "plus_tool_results"
+        source = "goal_report" if strict else "plus_tool_results"
         if (prior.get("evidence_source") == source
                 and prior.get("operation_id") == operation_id
                 and verdict.receipt_evidence_current(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat)):
@@ -234,11 +236,11 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("verification_identity_unconfirmed", "判定回执的工作树已变化")
             return dict(prior, ok=True, deduplicated=True)
 
-        if mode == "live":
+        if strict:
             result = verdict.evaluate_goal_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
         else:
             result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
-        if mode == "shadow":
+        if mode == "shadow" and not action:
             # Shadow keeps the transcript verdict as the decider; the report verdict is recorded beside it.
             result["goal_report_comparison"] = _goal_comparison(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:

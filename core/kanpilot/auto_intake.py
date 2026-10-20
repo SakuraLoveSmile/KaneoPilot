@@ -92,7 +92,7 @@ def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delive
 
 
 def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, candidate=None):
-    from . import git_delivery
+    from . import git_delivery, task_workspace
     task = db.get_task(conn, task_id)
     if task and not core.automation_budget(task, policy, now)["ok"]:
         _failure(conn, task_id, now, policy, "auto_budget_exceeded", "无人值守段成本或时长已达到上限")
@@ -103,8 +103,10 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
     delivery = core.delivery_of(task) if task else {}
     try:
         if wanted and not delivery.get("branch"):
+            initial = task_workspace.review_fix_head(conn, task, allow_pending=True) if task["plan_kind"] == "review_fix" else None
             delivery = git_delivery.prepare_branch_worktree(task["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
+                       initial_head_sha=initial,
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
             adopted = bool(delivery.pop("adopted", False))
             if delivery.get("branch"):
@@ -121,8 +123,11 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         if not delivery.get("branch"):
             row = db.get_planner_input(conn, prepared["input_id"])
             meta = db.planner_input_manifest(row)["task"]
+            initial = (task_workspace.review_fix_head(conn, task, allow_pending=True)
+                       if task is not None and task["plan_kind"] == "review_fix" else None)
             delivery = git_delivery.prepare_branch_worktree(meta["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
+                       initial_head_sha=initial,
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
             adopted = bool(delivery.pop("adopted", False))
             if delivery.get("branch"):
@@ -138,6 +143,8 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         return {"task_id": task_id, "request_id": response["request_id"]}
     except (util.KanpilotError, git_delivery.GitDeliveryError) as exc:
         code, message = exc.code, exc.message
+        if code == "review_fix_waiting":
+            return {"task_id": task_id, "reason": code}
         if wanted and code == "conflict" and "远端需求" in message:
             code, message = "remote_conflict", "远端需求已变化（新增内容未经筛选）"
         _failure(conn, task_id, now, policy, code, message,

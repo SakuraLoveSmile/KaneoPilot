@@ -117,3 +117,54 @@ def test_known_token_and_host_isolation(monkeypatch):
 def test_rejects_untrusted_pr_data(changes):
     with pytest.raises(gh.GhError):
         gh._pr(dict(pr(), **changes))
+
+
+def test_merge_cli_uses_atomic_sha_and_normal_merge_only(fake_gh, monkeypatch):
+    monkeypatch.setenv('FAKE_GH_PR', json.dumps({'merged': True, 'message': 'merged'}))
+    assert gh.pr_merge('owner/repo', 7, sha='a' * 40) == {'merged': True, 'message': 'merged'}
+    args = json.loads(fake_gh.read_text().splitlines()[-1])['argv']
+    assert args == ['api', '--method', 'PUT', 'repos/owner/repo/pulls/7/merge',
+                    '-f', 'sha=' + 'a' * 40, '-f', 'merge_method=merge']
+    assert all(value not in args for value in ('--admin', '--auto', '--force'))
+
+
+def test_auto_merge_read_requests_all_safety_fields(fake_gh):
+    gh.pr_view('owner/repo', 7, merge_checks=True)
+    args = json.loads(fake_gh.read_text().splitlines()[-1])['argv']
+    assert {'isDraft', 'mergeable', 'mergeStateStatus', 'reviewDecision', 'statusCheckRollup'} <= set(args[-1].split(','))
+
+
+@pytest.mark.parametrize('value', [{}, {'merged': None}, {'merged': 'true'}, [], None])
+def test_merge_unconfirmed_json_stays_unknown(fake_gh, monkeypatch, value):
+    monkeypatch.setenv('FAKE_GH_PR', json.dumps(value))
+    with pytest.raises(gh.GhError) as error:
+        gh.pr_merge('owner/repo', 7, sha='a' * 40)
+    assert error.value.kind == 'transient'
+
+
+@pytest.mark.parametrize('error', ['HTTP 405 merge not allowed', 'HTTP 409 head does not match'])
+def test_server_merge_refusal_is_definitive(fake_gh, monkeypatch, error):
+    monkeypatch.setenv('FAKE_GH_ERROR', error)
+    with pytest.raises(gh.GhError) as caught:
+        gh.pr_merge('owner/repo', 7, sha='a' * 40)
+    assert caught.value.kind == 'rejected'
+
+
+@pytest.mark.parametrize("kind", ["auth", "missing", "rejected"])
+def test_create_marks_post_write_read_failure_as_dispatched(kind):
+    error = gh.GhError(kind, "read failed")
+    with patch.object(gh, "_run", return_value=None) as create, patch.object(
+            gh, "pr_view", side_effect=error), pytest.raises(gh.GhError) as caught:
+        gh.pr_create("owner/repo", base="main", head="task", title="test", body="body")
+    assert caught.value is error and caught.value.operation_dispatched is True
+    assert create.call_count == 1
+
+
+@pytest.mark.parametrize("kind", ["auth", "missing", "rejected"])
+def test_create_preserves_definitive_write_rejection(kind):
+    error = gh.GhError(kind, "write rejected")
+    with patch.object(gh, "_run", side_effect=error), patch.object(
+            gh, "pr_view") as view, pytest.raises(gh.GhError) as caught:
+        gh.pr_create("owner/repo", base="main", head="task", title="test", body="body")
+    assert caught.value is error and not getattr(caught.value, "operation_dispatched", False)
+    view.assert_not_called()

@@ -30,11 +30,28 @@ struct ProjectMappingsView: View {
     @State private var showUnmapConfirm = false
     @State private var automationDrafts: [String: AutomationDraft] = [:]
     @State private var mappingGeneration = 0
+    @State private var pendingAutomationSave: PendingAutomationSave?
+
+    private struct PendingAutomationSave {
+        let projectID: String
+        let projectName: String
+        let draft: AutomationDraft
+        let title: String
+        let message: String
+    }
 
     private struct AutomationDraft {
         var enabled = false
         var labels = ""
         var confirm = true
+        var autoMerge = false
+        var releaseEnabled = false
+        var releaseChannel = "prerelease"
+        var releaseWorkflowPath = ".github/workflows/pilot-release.yml"
+        var releaseWorkflowRef = "main"
+        var releaseVersionBase = "0.1.0"
+        var releaseAssets = ""
+        var releaseJobs = ""
         var fixRounds = 2
         var minutes = 240
         var cost = "10"
@@ -44,6 +61,14 @@ struct ProjectMappingsView: View {
             enabled = value?.enabled ?? false
             labels = (value?.labelFilter ?? []).joined(separator: ", ")
             confirm = value?.autoConfirmPlan ?? true
+            autoMerge = value?.autoMergePr ?? false
+            releaseEnabled = value?.release?.enabled ?? false
+            releaseChannel = value?.release?.channel ?? "prerelease"
+            releaseWorkflowPath = value?.release?.workflowPath ?? ".github/workflows/pilot-release.yml"
+            releaseWorkflowRef = value?.release?.workflowRef ?? "main"
+            releaseVersionBase = value?.release?.versionBase ?? "0.1.0"
+            releaseAssets = (value?.release?.requiredAssets ?? []).joined(separator: "\n")
+            releaseJobs = (value?.release?.requiredJobs ?? []).joined(separator: "\n")
             fixRounds = value?.maxFixRounds ?? 2
             minutes = value?.maxTaskMinutes ?? 240
             cost = value == nil ? "10" : value?.maxTaskCostUsd.map { String($0) } ?? ""
@@ -54,20 +79,56 @@ struct ProjectMappingsView: View {
             let costValue: Any = Double(cost.trimmingCharacters(in: .whitespacesAndNewlines)).map { $0 as Any } ?? NSNull()
             return ["enabled": enabled,
              "label_filter": labels.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-             "auto_confirm_plan": confirm, "max_fix_rounds": fixRounds,
+             "auto_confirm_plan": confirm, "auto_merge_pr": autoMerge,
+             "release": ["enabled": releaseEnabled, "channel": releaseChannel,
+                         "workflow_path": releaseWorkflowPath.trimmingCharacters(in: .whitespacesAndNewlines),
+                         "workflow_ref": releaseWorkflowRef.trimmingCharacters(in: .whitespacesAndNewlines),
+                         "version_base": releaseVersionBase.trimmingCharacters(in: .whitespacesAndNewlines),
+                         "required_assets": lines(releaseAssets), "required_jobs": lines(releaseJobs)],
+             "max_fix_rounds": fixRounds,
              "max_task_minutes": minutes,
              "max_task_cost_usd": costValue,
              "delivery_base": base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : base.trimmingCharacters(in: .whitespacesAndNewlines)]
         }
         var valid: Bool {
             let trimmed = cost.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty || Double(trimmed).map { (0.5...100).contains($0) } == true
+            return (trimmed.isEmpty || Double(trimmed).map { (0.5...100).contains($0) } == true) && releaseValidation == nil
+        }
+        private func lines(_ value: String) -> [String] {
+            value.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        var releaseValidation: String? {
+            guard releaseEnabled else { return nil }
+            if !["prerelease", "stable"].contains(releaseChannel) { return "请选择预发布或正式版渠道。" }
+            let path = releaseWorkflowPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.hasPrefix(".github/workflows/") || (!path.hasSuffix(".yml") && !path.hasSuffix(".yaml")) || path.split(separator: "/").contains("..") {
+                return "工作流需为 .github/workflows/ 下的 yml 或 yaml 文件。"
+            }
+            let ref = releaseWorkflowRef.trimmingCharacters(in: .whitespacesAndNewlines)
+            if ref.isEmpty { return "请填写工作流分支或标签。" }
+            if ref.range(of: #"^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$"#, options: .regularExpression) != nil {
+                return "工作流 ref 需为分支或标签，不能使用裸提交 SHA。"
+            }
+            if releaseVersionBase.trimmingCharacters(in: .whitespacesAndNewlines).range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) == nil {
+                return "初始版本需为三个数字，例如 0.1.0。"
+            }
+            let assets = lines(releaseAssets)
+            if assets.isEmpty { return "开启发布前，请声明至少一个必需安装包文件名。" }
+            if assets.contains(where: { $0.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\*?[]")) != nil || $0.contains("://") }) {
+                return "安装包只填写精确文件名，不接受路径、URL 或通配符。"
+            }
+            return nil
         }
     }
 
     private func draftBinding<Value>(_ id: String, _ key: WritableKeyPath<AutomationDraft, Value>) -> Binding<Value> {
-        Binding(get: { automationDrafts[id, default: AutomationDraft(nil)][keyPath: key] },
-                set: { automationDrafts[id, default: AutomationDraft(nil)][keyPath: key] = $0 })
+        Binding(get: {
+            (automationDrafts[id] ?? AutomationDraft(items.first(where: { $0.projectId == id })?.automation))[keyPath: key]
+        }, set: { value in
+            var draft = automationDrafts[id] ?? AutomationDraft(items.first(where: { $0.projectId == id })?.automation)
+            draft[keyPath: key] = value
+            automationDrafts[id] = draft
+        })
     }
 
     private var selectedItem: ProjectMappingItem? {
@@ -149,6 +210,18 @@ struct ProjectMappingsView: View {
             } else if selectedProjectId == nil, let first = items.first {
                 selectProject(first.projectId)
             }
+        }
+        .alert(pendingAutomationSave?.title ?? "保存自动处理设置？", isPresented: Binding(
+            get: { pendingAutomationSave != nil },
+            set: { if !$0 { pendingAutomationSave = nil } }
+        ), presenting: pendingAutomationSave) { pending in
+            Button("取消", role: .cancel) { pendingAutomationSave = nil }
+            Button("确认并保存") {
+                pendingAutomationSave = nil
+                Task { await saveAutomation(pending.projectID, draft: pending.draft) }
+            }
+        } message: { pending in
+            Text(pending.message)
         }
     }
 
@@ -408,6 +481,33 @@ struct ProjectMappingsView: View {
                     .font(.kpSmall).foregroundStyle(.orange)
             }
             Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).font(.kpBody)
+            Toggle("自动合并 PR", isOn: draftBinding(id, \.autoMerge)).font(.kpBody)
+            Text("开启后，当前及后续待交付任务在评审、GitHub 检查通过且无冲突时自动合并。使用 merge commit，遵守分支保护，无需额外模型费用；独立于新任务接收开关。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("合并后构建并发布", isOn: draftBinding(id, \.releaseEnabled)).font(.kpBody)
+            Text("保存只更新策略，不启动 Actions。开启后，新交付须完成发布；历史已完成任务仅可手动补发。关闭不取消已发送的构建。")
+                .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if draft.releaseEnabled {
+                Picker("发布渠道", selection: draftBinding(id, \.releaseChannel)) {
+                    Text("预发布").tag("prerelease")
+                    Text("正式版").tag("stable")
+                }.font(.kpBody)
+                DisclosureGroup("构建发布配置") {
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        releaseTextField("工作流文件", placeholder: ".github/workflows/pilot-release.yml", text: draftBinding(id, \.releaseWorkflowPath))
+                        releaseTextField("工作流分支或标签", placeholder: "main", text: draftBinding(id, \.releaseWorkflowRef))
+                        Text("工作流从此 ref 运行，构建内容使用批次冻结的目标提交。")
+                            .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        releaseTextField("初始版本", placeholder: "0.1.0", text: draftBinding(id, \.releaseVersionBase))
+                        releaseTextField("必需安装包（每行一个精确文件名）", placeholder: "Music-android.apk", text: draftBinding(id, \.releaseAssets), multiline: true)
+                        releaseTextField("必需工作流任务（每行一个显示名，可留空）", placeholder: "Android", text: draftBinding(id, \.releaseJobs), multiline: true)
+                    }.padding(.top, Spacing.s)
+                }.font(.kpBody)
+                if let issue = draft.releaseValidation {
+                    Text(issue).font(.kpSmall).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Text("预算：最多修复 \(draft.fixRounds) 轮 · \(draft.minutes) 分钟 · \(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "成本不限" : "成本上限 $\(draft.cost)")")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
@@ -421,7 +521,10 @@ struct ProjectMappingsView: View {
                     .textFieldStyle(.roundedBorder).font(.kpBody)
                     .accessibilityLabel("成本上限，美元，留空不限")
             }
-            if !draft.valid { Text("成本需为 0.5–100 美元，或留空。 ").font(.kpSmall).foregroundStyle(.red) }
+            if !draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               Double(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines)).map({ (0.5...100).contains($0) }) != true {
+                Text("成本需为 0.5–100 美元，或留空。").font(.kpSmall).foregroundStyle(.red)
+            }
             Text(automationAdvancedSummary(draft))
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
@@ -452,7 +555,7 @@ struct ProjectMappingsView: View {
                 }
             }
             HStack(spacing: Spacing.m) {
-                Button("保存自动处理设置") { Task { await saveAutomation(id) } }
+                Button("保存自动处理设置") { requestAutomationSave(item) }
                     .disabled(isSaving || model.busy || !draft.valid)
                 Button("重新载入策略") {
                     Task {
@@ -463,6 +566,16 @@ struct ProjectMappingsView: View {
             Text("策略版本 r\(draft.revision)；保存冲突时保留草稿，重新载入会替换当前策略草稿。")
                 .font(.kpSmall).foregroundStyle(.secondary)
         }
+        .disabled(isSaving || isLoading)
+    }
+
+    private func releaseTextField(_ title: String, placeholder: String, text: Binding<String>, multiline: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text(title).font(.kpBody).fixedSize(horizontal: false, vertical: true)
+            TextField(placeholder, text: text, axis: multiline ? .vertical : .horizontal)
+                .textFieldStyle(.roundedBorder).font(.kpBody).accessibilityLabel(title)
+                .lineLimit(multiline ? 2...6 : 1...1)
+        }
     }
 
     private func automationAdvancedSummary(_ draft: AutomationDraft) -> String {
@@ -471,15 +584,38 @@ struct ProjectMappingsView: View {
         return "标签：\(labels.isEmpty ? "全部任务" : labels) · PR 目标：\(base.isEmpty ? "默认分支" : base)"
     }
 
-    private func saveAutomation(_ id: String) async {
-        guard let draft = automationDrafts[id], draft.valid else { return }
+    private func requestAutomationSave(_ item: ProjectMappingItem) {
+        guard let draft = automationDrafts[item.projectId], draft.valid else { return }
+        let enablingMerge = draft.autoMerge && item.automation?.autoMergePr != true
+        let enablingRelease = draft.releaseEnabled && item.automation?.release?.enabled != true
+        let switchingStable = draft.releaseEnabled && draft.releaseChannel == "stable" && item.automation?.release?.channel != "stable"
+        if enablingMerge || enablingRelease || switchingStable {
+            var impacts: [String] = []
+            if enablingMerge {
+                impacts.append("当前及后续待交付任务在评审、GitHub 检查通过且无冲突时，使用 merge commit 自动合并 PR，遵守分支保护。")
+            }
+            if enablingRelease || switchingStable {
+                let channel = draft.releaseChannel == "stable" ? "正式版" : "预发布"
+                impacts.append("新交付将通过 GitHub Actions 构建并发布\(channel)，可能消耗 GitHub Actions 配额。历史已完成任务不会自动补发。保存本身不启动构建。")
+            }
+            pendingAutomationSave = PendingAutomationSave(projectID: item.projectId,
+                projectName: item.displayName, draft: draft,
+                title: enablingRelease || switchingStable ? "开启构建发布策略？" : "开启自动合并 PR？",
+                message: "项目「\(item.displayName)」\n" + impacts.joined(separator: "\n") + "\n不调用模型。")
+        } else {
+            Task { await saveAutomation(item.projectId, draft: draft) }
+        }
+    }
+
+    private func saveAutomation(_ id: String, draft: AutomationDraft) async {
+        guard draft.valid else { return }
         isSaving = true
         defer { isSaving = false }
         if await model.setProjectAutomation(projectID: id, automation: draft.fields, expectedPolicyRevision: draft.revision, onSavedCheck: { check in
             deliveryBaseNotice[id] = check == "unverified" ? "设置已保存；暂时无法确认 origin 上的目标分支，请稍后重新保存核验。" : nil
         }) {
-            if deliveryBaseNotice[id] == nil { automationDrafts.removeValue(forKey: id) }
-            await loadMappings(refreshRemote: false)
+            // Keep the saved draft visible while fetching the new policy revision.
+            await loadMappings(refreshRemote: false, resetAutomationFor: deliveryBaseNotice[id] == nil ? id : nil)
             if deliveryBaseNotice[id] != nil, let revision = items.first(where: { $0.projectId == id })?.automation?.policyRevision {
                 automationDrafts[id]?.revision = revision
             }

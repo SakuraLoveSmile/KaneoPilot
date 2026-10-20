@@ -6,6 +6,134 @@ from pathlib import Path
 from . import constants, core, db, git_delivery, util
 
 
+def review_fix_head(conn, task, *, allow_pending=False):
+    """Resolve an independent fix's exact immutable review, never latest HEAD."""
+    source_id, key = task["review_source_task_id"], task["review_key"]
+    util.require(task["plan_kind"] == "review_fix" and source_id
+                 and source_id != task["task_id"] and key,
+                 "任务不是独立评审修复任务", "worktree_invalid")
+    source = db.require_task(conn, source_id)
+    util.require(source["project_id"] == task["project_id"]
+                 and Path(source["repository"]).resolve() == Path(task["repository"]).resolve()
+                 and source["fix_task_id"] == task["task_id"] and source["review_key"] == key,
+                 "修复任务与原评审关联不符", "worktree_invalid")
+    entries = [entry for entry in db.task_extra(source).get("review_history", [])
+               if isinstance(entry, dict) and entry.get("review_key") == key]
+    # create-review-fix binds the child before register-review writes history.
+    # Intake may observe this normal settlement window; it must wait rather
+    # than permanently block an otherwise valid independent child.
+    if allow_pending and not entries:
+        registered = any((util.jload(row["detail_json"]) or {}).get("review_key") == key
+                         for row in conn.execute("SELECT detail_json FROM events WHERE task_id=? AND kind='review_registered'",
+                                                 (source_id,)))
+        if not registered:
+            raise util.KanpilotError("review_fix_waiting", "原评审正在登记，下一轮再接收修复任务")
+    util.require(len(entries) == 1 and entries[0].get("fix_task_id") == task["task_id"]
+                 and entries[0].get("conclusion") == "changes_requested"
+                 and isinstance(entries[0].get("head_sha"), str)
+                 and re.fullmatch(r"[0-9a-f]{40,64}", entries[0]["head_sha"]),
+                 "原评审没有唯一且匹配的固定提交", "worktree_invalid")
+    return entries[0]["head_sha"]
+
+
+def _repair_idle(conn, task):
+    util.require(db.task_is_active(task) and task["status"] in ("needs_plan", "needs_user", "planning")
+                 and not task["plan_path"] and not task["plan_sha256"] and not task["run_id"]
+                 and not task["sent"] and not task["sent_at"]
+                 and task["send_state"] in (None, "not_sent")
+                 and not core.automation_of(task).get("manual_takeover")
+                 and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                      (task["task_id"],)).fetchone()
+                 and not conn.execute("SELECT 1 FROM attempts WHERE task_id=? AND stage='dispatch' LIMIT 1",
+                                      (task["task_id"],)).fetchone()
+                 and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND stage='dispatch' LIMIT 1",
+                                      (task["task_id"],)).fetchone(),
+                 "任务已有活动请求、计划或执行记录，未移动工作树", "conflict")
+
+
+def require_no_workspace_repair(conn, task_id):
+    util.require(not db.get_setting(conn, "review_fix_workspace_repair:" + task_id),
+                 "修复分支基线恢复尚未完成，请先完成同一修复命令", "conflict")
+
+
+def cmd_repair_review_fix_workspace(ctx, payload):
+    """Repair only an unused ancestor baseline, with a durable crash receipt.
+
+    Git runs outside SQL transactions. A retry may finish registration after
+    a successful fast-forward; it can never adopt an unrelated new HEAD.
+    """
+    from . import runtime_operations
+    conn, task_id = ctx.conn, payload["task_id"]
+    task = db.require_task(conn, task_id)
+    reviewed = review_fix_head(conn, task)
+    util.require(payload["review_key"] == task["review_key"], "评审身份已变化", "conflict")
+    expected = payload["expected_head_sha"]
+    util.require(isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{40,64}", expected),
+                 "预期提交标识无效", "bad_request")
+    scope, operation = "review-fix-workspace:" + task_id, "repair:" + runtime_operations.compute_request_sha256(payload)
+    gate_key = "review_fix_workspace_repair:" + task_id
+    receipt = db.get_runtime_operation(conn, scope, operation)
+    if receipt is not None and receipt["status"] == "accepted":
+        import json
+        return json.loads(receipt["result_json"])
+    _repair_idle(conn, task)
+    delivery = core.delivery_of(task)
+    root = constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None).expanduser().resolve()
+    path = Path(delivery.get("worktree_path") or "").expanduser()
+    util.require(delivery.get("mode") == "pr" and delivery.get("branch") == constants.DELIVERY_BRANCH_PREFIX + task_id
+                 and delivery.get("head_sha") == delivery.get("base_sha") == expected
+                 and not any(delivery.get(key) for key in
+                             ("commits", "pushed_sha", "pr_url", "pr_number", "pr_state", "merged_at"))
+                 and not path.is_symlink() and path.resolve() == root / task_id / "branch",
+                 "修复分支不是登记的空白交付基线，未移动工作树", "worktree_invalid")
+    identity = dict(repository=task["repository"], delivery=delivery, reviewed_head_sha=reviewed,
+                    review_key=task["review_key"], review_source_task_id=task["review_source_task_id"])
+    try:
+        actual = git_delivery._value(["rev-parse", "HEAD"], delivery["worktree_path"])
+        util.require(actual == expected or (receipt is not None and actual == reviewed),
+                     "实际工作树 HEAD 已变化，未移动工作树", "worktree_invalid")
+        git_identity = dict(delivery, repository=task["repository"])
+        git_delivery.verify_branch_worktree(git_identity, require_clean=False, expected_head=actual)
+        util.require(not git_delivery._git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                                          delivery["worktree_path"], 10).stdout,
+                     "工作树包含修改、未跟踪或忽略文件，未移动工作树", "worktree_invalid")
+        git_delivery._git(["merge-base", "--is-ancestor", expected, reviewed], delivery["worktree_path"], 10)
+        with db.write_txn(conn):
+            fresh = db.require_task(conn, task_id)
+            _repair_idle(conn, fresh)
+            util.require(review_fix_head(conn, fresh) == reviewed and core.delivery_of(fresh) == delivery,
+                         "修复身份已变化", "conflict")
+            gate = db.get_setting(conn, gate_key)
+            util.require(gate is None or gate == operation, "另一个修复操作尚未完成", "conflict")
+            record = runtime_operations.begin_operation(conn, scope, operation, "core", "repair-review-fix-workspace", identity)
+            if record["result"] is not None:
+                util.require(record["result"].get("intent") == identity, "恢复回执身份不符", "conflict")
+            runtime_operations.complete_operation(conn, scope, operation, status="unknown", result={"intent": identity})
+            db.set_setting(conn, gate_key, operation)
+        if actual != reviewed:
+            git_delivery._git(["merge", "--ff-only", "--no-overwrite-ignore", reviewed], delivery["worktree_path"], 60)
+        git_delivery.verify_branch_worktree(git_identity, require_clean=False, expected_head=reviewed)
+        util.require(not git_delivery._git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                                          delivery["worktree_path"], 10).stdout,
+                     "快进后工作树内容已变化，须人工确认", "worktree_invalid")
+        state = git_delivery.worktree_state_sha256(dict(git_identity, head_sha=reviewed))
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("worktree_invalid", exc.message) from exc
+    result = {"ok": True, "task_id": task_id, "review_key": task["review_key"],
+              "previous_head_sha": expected, "head_sha": reviewed, "worktree_state_sha256": state}
+    with db.write_txn(conn):
+        fresh = db.require_task(conn, task_id)
+        _repair_idle(conn, fresh)
+        util.require(review_fix_head(conn, fresh) == reviewed and core.delivery_of(fresh) == delivery,
+                     "快进后任务身份已变化，保留恢复回执", "conflict")
+        core.update_delivery(conn, fresh, ctx.now_iso, head_sha=reviewed, worktree_state_sha256=state)
+        runtime_operations.complete_operation(conn, scope, operation, result=result)
+        db.set_setting(conn, gate_key, None)
+        db.add_event(conn, ctx.now_iso, "review_fix_workspace_repaired", task_id=task_id,
+                     actor="user", detail=result)
+    return result
+
+
 def payload_fields(delivery):
     fields = {"plan_cwd": delivery.get("worktree_path"),
               "delivery_mode": delivery.get("mode"),

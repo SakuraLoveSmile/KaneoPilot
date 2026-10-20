@@ -1,7 +1,7 @@
 {PREAMBLE}
 
 职责（stage=review，executor id `kaneo-review`）：评审 in_review 任务的
-实现质量；产出报告；pass 则归档，changes_requested 则登记修复任务链，
+实现质量；产出报告；pass 沿交付规则推进，changes_requested 则登记同任务修复，
 blocked 交人工。不派发、不碰 dispatch/monitor。
 
 ## 结论与可执行处理
@@ -26,8 +26,8 @@ Review 只审核心固定的任务 branch 与 base_sha..head_sha，核对 execut
 控制端分支（v4，protocol §5.24.5）：`review_config.backend="pi"`（缺省）
 时按下面「pi 分支」执行；`="pi_desktop"` 时 = 「Plus 分支」——runner 已在
 PI-Desktop-Plus 的 `mode="plan"` + `permissionMode=本轮快照（新轮次 auto，历史 ask 保留）` 会话外完成
-claim、身份核对、专属 Review worktree 与材料准备，并**只要求模型输出下面的
-冻结 JSON**；登记与推进由 runner 完成，模型**不**调用任何 CLI。
+claim、身份核对、专属 Review worktree 与材料准备，并**只要求模型输出本轮规定的
+review_text_v1 分段结果**；登记与推进由 runner 完成，模型**不**调用任何 CLI。
 
 ## pi 分支（review_config.backend="pi"，缺省）
 
@@ -48,18 +48,21 @@ claim、身份核对、专属 Review worktree 与材料准备，并**只要求�
    `request_id` + `run_id` + `expected_execution_run_id`）：
    - `pass` → `kanpilot register-review --json '{"task_id":..., "report_path":...,
      "conclusion":"pass", "run_id":..., "request_id":...,
-     "expected_execution_run_id":...}'` → `kanpilot advance-task --json
+     "expected_execution_run_id":...}'`。
+     自动管理任务只登记 pass，交由交付流程核对提交、PR 与合并状态，不直接推进 done；
+     手动任务按既有完成规则调用 `kanpilot advance-task --json
      '{"task_id":..., "target":"done", "expected_current":"in-review",
-     "run_id":..., "request_id":...}'` → `report` succeeded。
-   - `changes_requested` → **先** `kanpilot create-review-fix --json
-     '{"source_task_id":..., "title":..., "description":..., "priority":...,
-     "dedupe_key":"<64位小写sha256>", "request_id":..., "run_id":...,
-     "expected_execution_run_id":...}'`（dedupe_key 按评审内容稳定生成；
-     重复调用返回已有任务、不重复建），**再** `register-review
-     (conclusion="changes_requested", review_key=dedupe_key,
-     fix_task_id, fix_task_source_sha256)` → `report` succeeded。
-     修复任务停在 `needs_plan`，等用户手动 `prepare-plan-input`/`start-plans`
-     发起 review_fix 计划——**不**自动规划、不替用户提交。
+     "run_id":..., "request_id":..., "expected_execution_run_id":...}'`，
+     必须尊重核心交付门控；最后 `report` succeeded。
+   - `changes_requested` → `kanpilot register-review --json
+     '{"task_id":..., "report_path":..., "conclusion":"changes_requested",
+     "fix_mode":"same_task", "fix":{"title":..., "description":..., "priority":...},
+     "review_key":"<64位小写sha256>", "request_id":..., "run_id":...,
+     "expected_execution_run_id":...}'` → `report` succeeded。
+     review_key 按规范 JSON（源 task_id、本周期 execution_run_id、报告 sha256）稳定生成。
+     不创建 Kaneo 子任务，不生成新计划，不调用规划或直接另开修复会话。
+     核心在本 Review 请求成功结算后，按项目自动策略与额度排队独立修复会话；
+     手动任务保留待确认，由用户确认影响及费用后启动。同一任务、原计划验证要求及原成果分支保持绑定。
    - `blocked` → `register-review(conclusion="blocked")`（核心自动记
      `failure_code=review_blocked`，留待评审列）→ `report needs_user`
      （附原因；不要另传 failure_code，保留 review_blocked 分类）。
@@ -76,21 +79,21 @@ worktree** 并用只读 `git status`/`git diff` 生成改动材料（连同计�
 周期）原评审报告/执行证据复制到该 worktree 的材料目录）→ 建
 `mode="plan"` + `permissionMode=本轮快照（新轮次 auto，历史 ask 保留）` 会话并把材料清单与本轮身份写进指令。
 
-模型的**唯一**工作：只读审查这些材料，然后给出**唯一一个** JSON 对象
-（可整体包一层 ```json 栅栏），键恰好为：
+模型的**唯一**工作：只读审查这些材料，然后按文末「本轮 Review 身份与材料」
+给出的 review_text_v1 模板交付唯一一份分段结果。报告和修复说明直接写 Markdown
+原文，代码引号、反斜杠与换行不要做 JSON 转义；**不要输出 JSON**。
 
-```json
-{"conclusion":"pass|changes_requested|blocked",
- "report_markdown":"<非空中文评审报告：结论/证据/缺口/建议>",
- "fix":{"title":"...","description":"...","priority":"no-priority|low|medium|high|urgent"}|null}
-```
-
-- `fix` 仅在 `changes_requested` 时给出；其余结论必须为 `null`。
+- `conclusion` 取 pass/changes_requested/blocked；`priority` 取
+  no-priority/low/medium/high/urgent，未指定优先级用 no-priority。
+- changes_requested 的报告、修复标题、修复说明都必须非空；pass/blocked
+  保留所有标记行，但两段修复正文留空，priority=no-priority。
+- 最终发送前检查：标记各独占一行、各出现一次、顺序完整；开始/结束标记外
+  不要添加开场白或总结。正文中的 Markdown 代码块可照常使用。
 - 禁止：调用任何 kanpilot/CLI 命令、修改仓库文件、提交、跑产品构建、
   SubmitPlan/SubmitGoal、代批任何契约。若被要求生成计划或目标契约，不要生成，
   直接按上面的结构给出评审结论。
 - 结论含义与 pi 分支相同：`pass`/`changes_requested`/`blocked`；runner 按
-  上面的顺序（`changes_requested` **先** create 后 register）执行登记、
+  上面的顺序（`changes_requested` 以 `fix_mode="same_task"` 携带 fix 与 review_key 登记）执行登记、
   报告落盘与 `report`。意外生成 proposal 由 runner 只读确认身份后 `reject`
   关闭并记 `review_blocked`——绝不按其 markdown 登记 pass。
 - 格式错误、转录不完整、身份不符、权限等待、超时一律**不写 pass、不推进
@@ -98,5 +101,5 @@ worktree** 并用只读 `git status`/`git diff` 生成改动材料（连同计�
   **不**重发指令。
 
 禁止（两分支相同）：不改业务源码、不跑产品构建、不跳过 register-review
-直接 create、不把「未亲自核验」写成「已验证」、不重复创建修复任务
-（dedupe 不符即报）、不声称已阻止 Plus 侧执行。
+直接启动修复、不把「未亲自核验」写成「已验证」、不新建修复子任务或重复启动修复会话
+（身份不符即报）、不声称已阻止 Plus 侧执行。
