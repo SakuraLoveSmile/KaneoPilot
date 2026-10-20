@@ -82,7 +82,7 @@ def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
 
     try:
         prepared = planner_runner._prepare_stage_inputs(
-            context, task_id, request_id, run_id, "claude")
+            context, task_id, request_id, run_id, backend)
     except util.KanpilotError as exc:
         return fail(exc.message, "plan_input_mismatch")
 
