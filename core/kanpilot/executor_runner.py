@@ -162,7 +162,7 @@ def run_stage(stage: str, resume: bool = False) -> int:
         runner = import_module(".auto_" + stage if stage != "delivery" else ".delivery_runner", __package__)
         return runner.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
                                 log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume)
-    if stage == "review" and selected_review_backend in ("claude", "codex"):
+    if stage == "review" and selected_review_backend in ("claude", "codex", "qoder"):
         from . import cli_review
         return cli_review.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
                                     log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume,

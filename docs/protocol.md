@@ -39,7 +39,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `running` | 已确认发送，pi worker 执行中 |
 | `in_review` | 已进入评审阶段 |
 | `needs_user` | 阻塞，需人工决定 |
-| `done` | 已归档完成 |
+| `done` | 已完成；是否归档由 save_state 独立表示 |
 
 ### request.status
 
@@ -47,13 +47,15 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 
 ### 显示态（派生，服务端在 `list-tasks`/`get-task` 计算）
 
-`display_status` ∈ `待规划|规划中|就绪|已排队|派发中|执行中|评审中|需人工|执行端失联|已归档`：
+`display_status` ∈ `待规划|规划中|就绪|已排队|派发中|执行中|评审中|需人工|执行端失联|已完成|已归档`：
 
 - task `ready` 且有 `queued` dispatch 请求 → `已排队`
 - task `ready` 无活动请求 → `就绪`
 - task `dispatching|prepared|submitting` → `派发中`；其 claimed 请求失联 → `执行端失联`
 - task `running|in_review|planning` 同理叠加失联显示
 - task `needs_user` → `需人工`（附 `failure_reason`/`blocked_summary`）
+- task `done` 且 `save_state=active` → `已完成`；已归档记录保持 `已归档`，不把完成等同于归档。
+- `delivery.auto_merge` 为历史合并回执；读侧在 task 已 `done`、当前 head 与回执一致且 PR 为 `MERGED`/有 merged_at 时，将本轮提示显示为“PR 已合并，任务已完成”。仍在 `in_review` 时保持“等待完成同步”，不提前显示完成；不改写历史回执或触发远端操作。
 - 其余直译
 
 ### 看板列（board_column，派生，桌面唯一分列依据）
@@ -121,6 +123,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `publish-plan` | 规划 runner | 登记已落盘计划（v2 新协议：request_id/run_id/planner_input_sha256） |
 | `register-review` | review 执行端 | 登记评审结论与交付 |
 | `create-review-fix` | review 执行端 | 受控创建修复任务（远端写；规划请求不再自动启动） |
+| `repair-review-fix-workspace` | 本地修复入口 | 将尚未执行且完全干净的独立修复工作树快进到冻结的被评审提交，不启动规划或执行 |
 | `advance-task` | monitor/review 执行端 | 受控 Kaneo 状态迁移（远端写） |
 | `dispatch-prepare` | dispatch 执行端 | 核验 UI 证据 → prepared |
 | `dispatch-begin-send` | dispatch 执行端 | 远端核验+转 in-progress → submitting |
@@ -309,6 +312,8 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 `online` 缺省 false → `kaneo_ping` `skipped:true`。凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
 
 ### 5.2 tick / overview / list / get
+
+- TaskSummary/TaskDetail 新增只读 `task_relations: {parent: RelatedTask|null, children: [RelatedTask]}`；`RelatedTask = {task_id, title: string|null, display_status: string|null, available: bool}`。仅使用持久化 `review_source_task_id` 建立直接来源与二级任务关联，不按标题、时间或 review_key 猜测。来源必须存在、同项目同仓库、非自身且未 purged 才返回真实标题与状态；来源不可读时保留来源 ID、其余信息为 null、available=false。children 仅含同项目同仓库、非自身、未 purged 的直接子任务，按 created_at/task_id 稳定排序；归档/回收站记录仍可只读打开。投影不改变任务身份、状态、保存状态或远端关系，不自动完成原任务。
 
 - `tick {project_ids?: string[]}` → `{"created": [{"request_id","kind","task_id"}], "skipped": [...]}`；缺省为全部项目，空列表或元素不是非空字符串时返回 `bad_request`。
 - `overview {}` → `{"paused": {"global": false, "stages": ["dispatch"]}, "counts": {"tasks": {"ready": 3,...}, "board": {"needs_plan": 1, "todo": 2, "in_progress": 1, "in_review": 0, "done": 5, "failed": 0}, "requests": {"queued": 2, "claimed": 1, "lost": 0}}, "last_tick_at": ..., "schema_version": 1, "settings": {"lease_seconds": 1200, "monitor_interval_seconds": 120, "plan_scan_interval_hours": 24, "plan_scan_anchor": "09:00 Asia/Shanghai", "migration": {...}|null}, "paths": {"db": "...", "plan_root": "...", "repos_root": "...", "app_support": "...", "core": "..."}}`
@@ -734,7 +739,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ### 5.18.5 worktree 与评审衔接
 
 - context / `get-task.execution_round` 提供 `worktree_path` 时，monitor 验证与 review 评审在该 worktree 内进行（`git -C <worktree>` 读改动）；主仓库检出不被改动。
-- Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；调度台不 merge；普通手动任务沿旧流程。
+- Done 后 worktree 与运行记录保留；受 PR 交付管理的任务由调度台提交，Review 通过后推送并开 PR，合并后完成；项目显式开启自动合并时按 §5.27.16 合并，否则只观察；普通手动任务沿旧流程。
 
 ### 5.18.6 引擎 verdict（Plus 执行验证，Pilot 核对结构化报告）
 
@@ -896,6 +901,11 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 ### 5.22.5 review_fix 计划衔接
 修复计划继续核验 `review_key`、原报告及关联任务：publish-plan 成功时把修复计划路径/哈希写回**原评审任务**的 `extra_json.repair_plan_path`/`repair_plan_sha256`，保证 §4.5-5 派发校验（fix_task_id/review_key/repair_plan 匹配 + 远端 marker）通过。`plan_kind=review_fix` 的 frontmatter 必填项沿用 §6。
+
+- 独立修复任务的 `register-review(changes_requested)` 在同事务核对父子任务、`review_key`、项目与仓库后，把报告路径和指纹同步到已登记子任务。旧记录缺少报告时，规划发布只能从该 key/子任务对应的已登记报告回执或完整评审历史补足，并核对报告根目录与实体 SHA；不得仅凭父任务当前路径或自由文本猜测。无身份旧手动登记仍兼容尚未纳管的远端修复任务。
+- 自动接收独立修复任务时，PR 目标分支仍来自项目策略，工作树初始 HEAD 使用该 `review_key` 对应评审历史中冻结的提交；不使用主分支 HEAD 替代被评审源码。父子关联已成立但 Review 尚未登记时，仅跳过当前接收周期，不收养或永久阻塞；已登记但缺少冻结提交或身份不符仍明确失败。创建修复任务本身不启动规划，后续已授权自动接收按其策略单独处理。
+- 历史错基线恢复：`repair-review-fix-workspace {task_id, expected_head_sha, review_key}` 仅允许活跃、无已发布计划、无执行/发布证据、无排队或领取中请求的独立修复任务；核对登记工作树归属、原始 HEAD 与基线、完全干净（含 ignored 文件），并确认旧提交为冻结评审提交祖先后执行本地 `merge --ff-only --no-overwrite-ignore`。保留 PR 的 `base_branch/base_sha`，只更新工作树 HEAD 登记。Git 副作用前持久化身份和目标回执；崩溃恢复仅接受同一回执的旧 HEAD 或目标 HEAD，禁止覆盖用户改动。未完成回执阻止新规划，恢复后重新准备材料；该命令不调用模型、不安排执行、不写远端。
+- 规划问答续接同样受恢复门控；原请求固化的工作树 HEAD 或路径已变化时保留作答草稿并拒绝复用旧材料，提示重新准备。不得把修复前的旧提交快照直接复制成新规划请求。
 
 ### 5.22.6 规划配置与失败语义（v2.1）
 
@@ -1186,8 +1196,10 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 ### 5.24.5 Plus review 控制端（v4）
 
 - `executor_runner --stage review` 按 `review_config.backend` 分流；`pi` 分支沿用 §5.23.4（inherit/custom 固化 pi 参数）。
-- Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", interactionMode:"unattended", …)` + `permissionMode:"auto"`，并按 §5.24.3 核验实际硬策略及版本，未确认时不发送。指令只要求审查并输出 JSON，不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。Plus 的 `INTERACTION_REQUIRED` 持久回执直接生成 `blocked` 报告，保留问题/选项，经现有 `review_blocked` 结算交回用户，不要求模型自行再整理、不登记 pass、不推进远端任务。已登记结论的确定性恢复不要求重新连接；无效拦截回执明确受阻，不伪造审查通过。
-- 最终答复结构冻结为 `{"conclusion":"pass|changes_requested|blocked","report_markdown":"<非空>","fix":{"title","description","priority"}|null}`；`changes_requested` 必须有 `fix`；`priority ∈ no-priority|low|medium|high|urgent`（`bridge.VALID_PRIORITIES`）。Plus 无原生 outputSchema 能力：runner 在 `completed` + 完整转录后严格解析，**不**把 MCP `structuredContent` 当模型结构化输出保证。
+- Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", interactionMode:"unattended", …)` + `permissionMode:"auto"`，并按 §5.24.3 核验实际硬策略及版本，未确认时不发送。指令只要求审查并输出冻结结果（新轮次使用 review_text_v1），不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。Plus 的 `INTERACTION_REQUIRED` 持久回执直接生成 `blocked` 报告，保留问题/选项，经现有 `review_blocked` 结算交回用户，不要求模型自行再整理、不登记 pass、不推进远端任务。已登记结论的确定性恢复不要求重新连接；无效拦截回执明确受阻，不伪造审查通过。
+- 内部结算结果结构冻结为 `{"conclusion":"pass|changes_requested|blocked","report_markdown":"<非空>","fix":{"title","description","priority"}|null}`；`changes_requested` 必须有 `fix`；`priority ∈ no-priority|low|medium|high|urgent`（`bridge.VALID_PRIORITIES`）。Plus 无原生 outputSchema 能力：runner 在 `completed` + 完整转录后严格解析，**不**把 MCP `structuredContent` 当模型结构化输出保证。
+- 新 Plus Review 指令使用 `review_text_v1` 传输，避免模型手工转义长 Markdown。最终答复依次为下列独占行及分段正文：`<<<KANPILOT_REVIEW_V1>>>`、`conclusion: <结论>`、`priority: <优先级>`、`<<<REPORT>>>`、报告原文、`<<<FIX_TITLE>>>`、修复标题、`<<<FIX_DESCRIPTION>>>`、修复说明、`<<<END_KANPILOT_REVIEW_V1>>>`。全部标记必须各出现一次且顺序固定，标记行保留给协议；报告/标题/说明中的引号、反斜杠、换行和 Markdown 代码块均直接保留，不做 JSON 转义。`changes_requested` 三段正文均非空；pass/blocked 的两个修复段必须为空且 priority=no-priority。允许唯一完整分段结果包一层无语言或 text 代码栅栏；允许该结果前后附普通叙述说明，说明不作为结论来源，移除时记录 `job.result_normalizations=removed_text_frame_commentary`，原转录保留。外侧若含 JSON 对象/数组、额外代码栅栏、协议样式标记或 conclusion/priority 字段（包括大小写、缩进、引号及冒号/等号变体）必须拒收；多份结果、缺段、重复标记及非法枚举仍禁止。只放宽传输外壳，不推断外侧自然语言的语义，也不改写分段正文；已有失败请求不因解析器升级自动重新结算。解析后组装上述冻结对象并走共享严格校验；`job.result_format=review_text_v1` 记录来源。合法历史 JSON 保持兼容（记 json）；严格 JSON 解析失败后，答复任意位置出现协议标记或版本头即只执行文本校验，失败不得从报告中的 JSON 示例提取结论。损坏 JSON 不猜改、不从旧 assistant 消息取代最终答复。此传输格式不改变报告登记、请求租约、快照身份、proposal、超时或失败恢复规则。
+- 历史 JSON 结果接收仅允许两项可审计的格式标准化：最终答复含唯一完整的 `json`/无语言代码栅栏时，可去掉栅栏外的普通说明（外侧含其他栅栏或 JSON 对象/数组标记则拒收）；`changes_requested.fix` 恰好只有非空 `title`、`description` 而缺 `priority` 时，补 `no-priority`，表示模型未指定优先级，不推断等级。标准化后仍走完整冻结结构校验；显式空值、非法优先级、其他缺字段/多字段、多块或无效 JSON 均受阻。原转录不改写，job 的 `result_normalizations` 和事件记录标准化动作；其他后端与共享严格校验器不变。已失败并结束租约的旧请求不得借此重放结算或跳过周期保护。
 - 意外生成 proposal：只读确认本 session/turn 身份后 `pi_plans_resolve(action:"reject", confirm:true)` 关闭并记 `review_blocked`，**不**按其 markdown 登记 pass。
 - 格式错误、转录不完整、身份不符、权限等待、超时 → 不写 pass、不推进 done，保留错误与证据。
 - 报告与登记：runner 写 `<APP_SUPPORT>/reports/<task_id>/<run_id>.md`，核心重算报告哈希。
@@ -1512,6 +1524,9 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - `resolve reverify` 只读重新核对当前 Plus 证据，保留远端状态、轮次、终态、计划及证据复校。`run-verification-checks` 兼容入口拒绝本地执行，历史状态接口可读取旧审计记录。
 - 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲（含 §5.27.12 的已核验手动继续放行）/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
 - 不支持在已完成 Plus 会话里任意追加 turn 后直接采纳为原轮次验证；不得宣传手动补验后“同步即可通过”。需通过上条有身份守卫的新执行轮次取得新证据。
+- 新 `command_verification` 轮次从同次读取且哈希匹配的冻结计划解析 verify，保存 `spec.required_verification_commands`。首次创建会话或发送模型输入前，核对 Plus `pi_plans_resolve` 的 schema 支持 `requiredVerificationCommands: string[]`；缺能力明确阻塞升级，不降级为提示词。执行批准经 RuntimeClient → runtime MCP → Plus MCP → IPC → Host 透传该列表；runtime 以 scope 绑定的可信 spec 与计划哈希核对，调用者不得省略、替换或自定授权命令，操作回执哈希包含命令列表。
+- Plus 仅在 `approve` Goal 时接受此字段，并在批准事务内绑定 proposal/execution；同一批准重放必须保留原绑定。列表为 1–200 条非空原文，每条 UTF-8 最多 4096 字节、总计最多 64 KiB，无重复或 NUL/CR/LF。正式报告提交前要求每条命令恰好有一条同原文 `checks.command`；整数退出码 0 对应 passed，非 0 对应 failed，met 必须全部通过。partial/blocked 可诚实记录失败或未执行及原因。缺项/矛盾在当前模型轮次返回可修正的工具错误，不写成功草稿；未绑定的历史 Goal 保持原契约。该门校验报告完整性，不将模型填入整数视为独立执行证明。
+- 已就绪但 checks 不完整的报告明确列出缺少记录、整数退出码或状态矛盾及命令；不得显示为报告尚未就绪或真实测试失败。Pilot 继续核对报告底线、身份、源文件快照与全部冻结命令，不能人工补写报告或放宽成功门。
 
 #### 5.27.12 自动补救闭环（A2）
 
@@ -1556,9 +1571,47 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - `_round_settle` 仅对仍在 observe/running、无活动请求的托管任务生效：job.json 身份可信且含 ended_at/exit_code 即可补 monitor，不因 run_status 已为 finished/failed 跳过。每轮最多 2 次 settle，shadow 只计算不写；run_status/terminal_recorded 仅诊断。任务离开 observe/running 即不再 settle。
 - settle 在业务 tick 前入队；两者共用 `monitor:<task>` 活动 key 去重。2 次预算只限制 settle，不限制 tick 按间隔继续观察。观察者恢复与本节收尾职责分离。
 
+#### 5.27.16 项目自动合并 PR（2026-10-18）
+
+- `automation.auto_merge_pr: bool` 默认 false，随 `set-project-automation` 保存并按 `expected_policy_revision` 防覆盖；旧配置无该字段视为关闭。独立于新任务接收开关 `enabled`，只控制已托管 PR 的交付。显式开启即授权该项目当前及后续符合条件的任务自动合并，界面保存前确认影响；关闭不撤销已发出的请求。首次由 false 开启时，将该项目待交付任务的 `next_sync_at` 提前为 now，仍由既有 delivery runner 领取和执行。
+- 不启动模型，不自动解决冲突，不绕过 GitHub 分支保护，不用 admin/force，不改既有执行/Review 权限。`delivery-sync` 沿既有当前执行轮次、Review pass、报告摘要、提交、仓库及 claim/租约守卫；确认项目当前映射仓库与任务仓库一致、未全局暂停、未暂停该任务或转为人工处理。外部读取期间及写入前重核这些身份与开关/策略版本，变更则停止。
+- OPEN PR 开启自动合并后读取 GitHub 结构化 `isDraft/mergeable/mergeStateStatus/reviewDecision/statusCheckRollup` 及既有 PR 身份。仅同仓库、同 base/head 分支、head=pushed=head_sha，非 draft、mergeable=MERGEABLE、mergeStateStatus=CLEAN、无 CHANGES_REQUESTED/REVIEW_REQUIRED，且全部已报告检查完成并结论为 SUCCESS/NEUTRAL/SKIPPED（status context 为 SUCCESS）时执行。空检查列表仅在 CLEAN 时可放行；字段缺失/未知、pending、failure、冲突、保护或 merge queue 阻止时均不写远端，保存具体等待/阻塞原因并继续观察，不伪造任务失败。主动发送前同时核对 Kaneo 原任务仍属当前项目、状态为 in-review，非空 requirements_sha256 与当前登记一致；源任务变化时阻止新合并，unknown/已合并仍允许只读对账。
+- 采用 GitHub REST `PUT repos/{repo}/pulls/{number}/merge`，`sha` 固定已评审 head，`merge_method=merge`（保留来源提交祖先关系）；不支持该方式或服务器拒绝时显示原因，不自动换合并方式。GitHub 服务端原子核对 head；不声称本地锁能防止远端并发。实际合并仍受服务端权限与保护约束。
+- 发送前在短事务写 `runtime_operations` 回执，固定身份由 task/run/review key/report/head/repo/PR 导出；同身份仅一次发送。先 prepared 再 unknown 后外部写，网络事务外。超时、断连、无效响应或崩溃留下 unknown，后续只读 PR 对账，禁止盲目重发（包含策略版本或 Review 身份变化）。预留事务内若同任务已有其他 prepared/unknown 合并回执，亦禁止新发送，避免重新评审绕过未决请求。已明确拒绝同身份不自动重试，提示到 GitHub 处理；已 MERGED 可对账。响应成功也须重新读取同身份 PR 并确认 MERGED 才登记 accepted、merged_at 与 pr_merged 事件。
+- 读侧 `delivery.auto_merge` 可选对象：`{state, reason, head_sha, updated_at}`，state 为 `waiting_checks|blocked|merging|unknown|merged|disabled`。看板和详情展示 reason，unknown 明示结果待确认不会重复提交；不以此对象替代核心任务状态。无自动合并配置时保持被动观察。自动合并开启时 OPEN 等待沿用 300 秒快档检查；关闭时保留既有 5/30 分钟间隔。合并确认后复用 delivery runner 的 `advance-task` 同步 Kaneo/local done；同步失败保留已合并事实，不提前显示已完成。
+- 本功能不调用模型、无新增模型费用；开发验证仅使用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo。真实开启项目开关及合并需与实现/测试证据分开报告。
+
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 
 本节为执行期问答的目标契约。当前状态为实现中，接口尚未实现；源码、测试和候选实测齐备前不得宣称可用。执行保持 `goal/auto`、`interactive`，覆盖目标契约轮及执行轮；规划、Review、Team 托管输入、permission 确认不属于本节。部署顺序为先 Plus、后 KaneoPilot，不含手机端、远程访问、付费模型验证或正式安装。
+
+#### 5.27.17 Review 直接修复会话（2026-10-19）
+
+- 新 Review 的 `changes_requested` 统一登记同任务修复材料，不再自动调用 `create-review-fix`，不创建 Kaneo 子任务，不生成/发布新计划，不经过计划确认。沿用当前任务、原需求和已冻结计划的验证要求，在登记的同一分支工作树创建独立修复 run/session；普通执行的内部启动、观察和 Plus 验证设施可以复用，读侧保持评审修复语义。
+- `fix_request` 增加 `mode:"direct"`，冻结 review_key、report_path/report_sha256、plan_sha256、source_execution_run_id、head_sha/branch/worktree_path、fix 标题与描述；状态为 `held|queued|running|awaiting_review`。不以累计修复轮数或历史 PR 字段判断当前修复状态。修复指令只要求处理本报告、保留现有功能并执行原计划验证及必要修复专项；不得把原计划全文作为“重新实现计划”的指令。新 run 固化修复正文和身份，恢复路径核对同一正文及身份，发送不明不得重发。
+- 自动管理任务在原 Review 请求成功结算后、项目仍启用且同分支/暂停/预算/修复次数条件均满足时直接排队修复。原 Review 仍 claimed 时不可领取新修复 run，防止旧结算被新 task.run_id 覆盖。手动任务保留 held，在原生确认费用与影响后经 `start-review-repair` 开启；未授权的历史任务不因 App 更新自动启动。
+- `start-review-repair {task_id, expected_execution_run_id, expected_review_key, expected_report_sha256, expected_plan_sha256}`：核对当前 changes_requested 或同身份 held 材料、无其他活动请求、同项目仓库和需求、原计划及报告字节、已审 head/干净工作树、可修复分支、暂停与额度；先冻结材料并保留旧报告历史，再在事务内重置本轮发送证据和当前 Review 指针并排队修复。相同身份重复操作只返回既有修复，不额外计次或创建会话；身份变化拒绝。无可用分支/材料、预算不足或暂停时保留具体原因，不生成替代计划或新子任务。
+- 启动命令、派发领取及首次发送均复核原执行已有可信终态、观察者已退出，Plus 无仍在运行/等待权限或未核对的后续轮次；不能仅凭工作树暂时干净判断可并发写。手动 direct 修复持久保存用户授权身份，legacy 引擎仅为同身份修复的 dispatch/monitor/review 提供窄领取例外，不开启项目自动化。历史 `fix_task_id` 明确指向仍在处理的同项目同仓库子任务时，父任务保留待修复并提示先收尾该子任务，避免重复启动。
+- 修复运行期间，不能凭 Kaneo 仍处于 `in-review`/`done` 的状态提前完成本地修复；必须核对本次验证与提交。预算或次数用尽不能经旧 `resolve resume` 绕过直接修复的启动检查。
+- 修复完成后，Plus 执行验证，Pilot 只核对既有结构化证据；由核心提交本轮改动并打开新的 Review 周期。必须针对修复后的当前 run/head 复审，旧 pass、旧 PR/pushed_sha 不得跳过。通过后沿原手动或 PR 交付规则推进；仍需修改则在既有次数/预算限制内继续直接修复，受阻与执行失败继续区分。
+- TaskSummary/TaskDetail 增 `review_repair` 可选投影：`{state,title,reason,round,max_rounds,review_key,report_path,report_sha256,plan_sha256,source_execution_run_id,repair_execution_run_id,session_id,can_start}`。`can_start` 为核心权威动作依据，身份字段用于上述命令；queued 显示“修复会话待启动”，running 显示“修复中”，awaiting_review 显示“修复后待复审”。历史二级任务及报告保留，不自动删除或重跑；父任务可经 §5.27.18 的显式收尾校验完成，不能仅凭子任务 done 完成。
+
+#### 5.27.18 原始任务收尾校验（2026-10-19）
+
+- 适用于当前仍在 `in_review`、当前登记 `changes_requested`、已有历史二级修复任务的原始任务。仅处理当前执行周期；从父 `review_history` 中同 `execution_run_id` 的 `changes_requested` 与精确 `fix_task_id/review_key/report_sha256/head_sha` 建立必需修复集合，核对当前登记也属于该集合。缺失、歧义、循环、跨项目/仓库、已永久移除或未绑定的直接子任务均阻止收尾，不以展示层过滤后的子任务集推断完整性。父/子存在活动请求或新的直接修复时不启动收尾。
+- 固定命令 `closeout-parent-task {task_id, expected_context_sha256}` 不启动模型、不执行 verify、不创建计划、执行或 Review 请求。局部候选只读 SQL；网络与文件核对仅显式命令执行。所有二级任务完成后，原任务显示「待收尾校验」，主动作「校验并完成」。缺项返回结构化 `blocked` 结果和具体原因，保留状态与旧评审；可刷新后重核。界面不以子任务徽标自行决定完成。
+- 核对父/子冻结计划及需求身份、原始评审报告字节、每个子任务当前执行与最终 head 对应的正式 Review pass/报告、可信 Plus 终态与结构化 Goal 报告、已保存验证回执与 Git 源码快照。已完成历史轮次的正式回执按其既有身份/覆盖规则核对，只作历史审计；有 PATH 前缀的旧检查不冒充新协议的逐字执行或最终检查点。工作树已清理时从仓库已提交 tree 核对，不能因清理而跳过证据或要求本地代跑验证。历史 pass、旧轮次、手工 mark_done、缺报告均不足。
+- 真实读取每个子任务同仓库同 head/base 的 GitHub PR，要求 MERGED；固定同一目标分支 tip，确认包含父功能与每个修复提交。必须存在一个子任务的正式通过检查点，其提交已包含父功能及全部修复，且源码 tree 与目标 tip 一致；各自独立跑绿不能叠加为最终整合通过。检查点必须逐字覆盖自身冻结 verify，并以同一正式报告覆盖父任务及所有子任务的冻结 verify：通常按命令原文字节相等；仅允许简单 `flutter test test/..._test.dart ...` 的显式文件集合被同一检查点报告中的同形命令超集覆盖，忽略文件顺序，拒绝选项、shell 操作符、环境前缀、绝对/越界/通配路径，且文件须存在于检查点 tree。覆盖映射保存各任务原命令与实际检查命令，不伪造原命令执行记录，不改变 §5.27.11 对新报告冻结命令的逐字校验。其余命令不推断等价。
+- 同一检查命令重复出现时以最后一条记录为准。原冻结命令存在逐字记录时，其最后结果必须通过，明确失败或未确认不能退回文件集合超集；没有逐字记录时，才采用最后一条符合上述覆盖规则的记录，不能以较早成功掩盖后续失败或未执行。
+- 完成证据保存到 `extra.parent_closeout`，包含冻结 context、关联问题/修复、复用报告/验证/提交、目标分支 tip、覆盖映射、检查时间与剩余人工验收说明。独立结果优先于历史 `changes_requested` 显示；不改写旧 Review 为 pass、不替换父执行 run/计划。收尾确认软件交付及现有自动验证，原计划中真机/真实服务等未核验体验仍保留未核验，不能升级为人工已验收；结构化报告的非 met/未完成/硬性阻塞仍拒绝。
+- 写远端前使用既有生命周期串行及 `runtime_operations` 固化身份、先 prepared/unknown 再事务外 Kaneo 写；父/子/计划/报告及目标 tip 在写前再次核对。远端父 task/project/requirements/status 必须匹配；每个必需子任务亦须逐个远端核对同 id/project/冻结 requirements 且仍为 done，不能凭尚未同步的本地 done 关闭父任务。允许同身份已 done 的只读对账。重复点击/重启不得重复发送；不明结果保存 unknown，后续只读核对，不盲重发，也不能通过新 context 绕过旧 unknown。写后确认远端 done 后才在短事务标本地 done 并保存 accepted 回执。服务端无 CAS，本地串行不消除远端并发窗口。
+- 生命周期 owner 与调用进程身份持久化到操作回执；崩溃恢复须确认原调用已退出，方可释放本操作遗留 owner 并接管，不释放活跃调用或其他操作的锁。unknown 对账重新核对冻结的 `target_sha`、报告、源码及父子身份，并确认当前目标分支仍包含该冻结 tip；正常后续提交不要求重新验证，不改写历史校验目标。目标被移除、任务身份漂移或旧调用仍活跃时保留具体原因且不重复发送。
+- TaskSummary/TaskDetail 可选 `parent_closeout`：`{state,title,reason,context_sha256,can_complete,required_children,completed_children,checked_at?,blockers:[{code,message}],evidence_task_id?,target_branch?,target_sha?,acceptance_note}`。state 为 `waiting_children|ready|blocked|unknown|completed`。ready/blocked/unknown 保持评审列，分别显示「待收尾校验」「收尾校验受阻」「完成同步待确认」；后两者属于阻塞，不属于失败；completed 由真实 done 显示「已完成」。动作 `closeout_parent` 仅由核心提供；收尾候选隐藏重新开启旧问题修复的入口，原始评审在历史中仍可查。
+
+
+#### 5.27.19 构建与版本发布交付（2026-10-19）
+
+权威共享契约见 [release-contract.md](release-contract.md)。项目显式开启后，PR 合并后的确定性交付继续执行 GitHub Actions 构建、核对固定提交与安装包来源并发布版本；父子修复共享批次。公开命令、配置、DTO、未知结果对账及全部完成门以该文件为准。旧项目默认关闭，历史 done 不自动补发，不新增模型调用，不在 Pilot 本机代跑 verify。工作流未进入远端且未真实构建时，不得声称远端交付已接通。
 
 ### 5.28.1 发现、身份与存储
 
@@ -1644,6 +1697,20 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - 单测/mock通过不能替代真实Rust Host、生产sidecar、loopback确定性SSE联合演练及原生问答卡/系统通知核验。候选记录base/head/源码与产物指纹；各未运行项明确NOT RUN。适用检查齐备后为待体验，只有用户确认该新功能才标已验收。
 
 
+### 任务内 AI 一次性处理（2026-10-19）
+
+首个处理类型为 `merge_conflict`，只由用户在原任务内显式启动，使用全局 `exec_config` 的脱敏配置快照；不创建 Kaneo 子任务或 plan 请求。启动确认授权一次处理会话及其正常验证、复审、交付链，不授权失败后无限重试。配置变更不改变已确认的轮次；原计划、执行及评审报告保留。
+
+首版要求通用执行配置的后端为 Plus（`pi_desktop`），以获取可信结构化验证报告与源码快照；`pi` 缺少此证据能力时在只读预检明确拒绝，不自动切换后端或模型。该动作在 legacy/shadow/live 三种项目模式均强制核对 Goal 报告并将完整验证树存入 `engine_verdict`，不沿用旧转录判定或 shadow 的旁路回执。
+
+- `prepare-task-ai-action {task_id,kind:"merge_conflict"}` 只读核对任务、旧执行可信终态、原计划/评审哈希、干净任务分支、项目映射、Kaneo 来源及真实 GitHub PR。必须为同仓库 OPEN/CONFLICTING PR，远端 head 等于已评审提交，并取得真实 `baseRefOid`，不能使用旧 `delivery.base_sha` 替代。返回 `{candidate:{task_id,kind,title,context_sha256,config_sha256,pr_number,branch,base_branch,head_sha,base_sha,model_summary}}`；不调用模型、不改变分支或任务状态。
+- `start-task-ai-action {task_id,kind,expected_context_sha256,expected_config_sha256,confirm:true}` 重新核对同一候选，变化则 conflict；同一 task/原执行/PR/head/base 幂等，只创建一条 dispatch。冻结为 `fix_request.mode=direct,source_kind=merge_conflict`，保留原评审身份，另存 action_id、target_base_sha、github_repo、action_config、action_context_sha256。新 run/session 直接修复、不重新规划；当前有效 pass 清除，旧 pass 留在历史。
+- 仅核心在原任务工作树合入冻结 base：先写 runtime_operations，再 fetch/核对远端分支并准备 `merge --no-commit --no-ff`。不覆盖脏工作树、不 reset/clean、不 rebase/强推。结果未知时核对同一 MERGE_HEAD/ORIG_HEAD/HEAD；无法证明归属则保留现场并阻塞。AI 仅解决冲突、暂存解决后的文件、运行原计划全部 verify 和必要专项验证；禁止自行提交、推送、合并 PR 或另建分支。
+- 沿用现有 Plus Goal 报告与源码快照验证底线；核心提交严格绑定父提交 `[原 head,冻结 base]`、同执行轮次及已验证树，崩溃恢复也核对双父身份。新提交必须重新 Review；已有 PR/pushed_sha 不得跳过复审。通过后正常推送原 PR 分支、重新核对远端检查并沿现有项目自动合并策略推进。失败、base/head 漂移或结果未知不自动启动新的 AI 处理。
+- 复审通过时，保存 `extra.task_ai_action_delivery` 的同次授权、当前执行/计划/需求/新 head/PR 与精确 Review 身份；清除 fix_request 后仍只允许此结果的确定性交付及检查轮询。Review report 成功创建幂等 delivery 请求，未合并时按 next_sync_at 继续核对，合并后正常同步完成；legacy/shadow 只放行匹配该回执的请求，不扩大项目自动化范围。身份变化、人工接管或暂停后不继续。验证失败不自动新增质量修复轮，不允许人工跳过验证或从旧冲突身份重新派发；可只读重核已有证据。
+- 一次性处理完成但正式验证证据不足时，用户可显式确认 `resolve {action:"retry_verification",expected_execution_run_id}`，UI 称「补齐验证报告…」。仅当前 `merge_conflict`、可信已发送终态和空闲 Plus 可用；沿用原冻结计划及配置、工作树、已解决暂存结果，不创建 plan 请求、不重做 merge、不消耗 Review 修复次数。确认前冻结 `verification_recovery` 的 source run、原 run 记录目录、工作树源码/索引指纹与 MERGE_HEAD/ORIG_HEAD；事务内及 dispatch 前复核当前 run、execution_retry、修复身份、PR/head/base 和远端需求。漂移则保留现场并拒绝。新轮只核对原日志补证，无法确认时由 Plus 重新执行原验证；旧 run/报告保留。取消、旧 run、重复确认及自动 actor 均不得启动；普通 resume/retry/replan 不能绕过此门。新证据通过后沿原双父提交→新 Review→原 PR 链推进；再次缺证仅阻塞，不自动再调用模型。
+- `get-task.task_ai_action={can_prepare,reason,current,history}` 为核心投影；history 保留 action_id、类型、状态及中文 state_title、模型摘要、时间、执行轮次/会话、PR/head/base 与结果。状态区分 queued/running/awaiting_review/completed/needs_followup/blocked/failed；“已排队”不表示模型已启动。Review 修复轮额度不被冲突处理次数消耗；既有费用上限继续生效，用户启动开启新计时段。无数据库结构迁移，不直接改 Plus 数据。
+
 ## 5.29 规划/评审槽位池与历史目录回收（schema 6）
 
 ### 5.29.1 范围与租约
@@ -1675,3 +1742,18 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 ### 5.29.4 项目记忆登记（M4）
 
 核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为pool下精确slot路径。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在槽位；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。
+
+
+## Qoder CLI 规划与 Review（2026-10-20）
+
+规划与 Review 后端词表新增 `qoder`；任务执行仍沿用既有 Plus Goal 报告与验证契约。`planner_config.qoder`、`review_config.qoder` 均为 `{model, reasoning_effort}`，默认 `{model:"auto", reasoning_effort:"inherit"}`。模型为非空、无控制字符且不以 `-` 开头的标识；`inherit` 不向 CLI 传思考等级，其余接受官方等级 `disabled/off/none/low/medium/high/xhigh/max`，实际模型支持由 CLI 报告，不静默换模型或等级。各后端配置共存，离线可保存，只影响新建请求；规划请求固化为既有 `model_config {planner_model, reasoning_effort}`，claim、job、会话索引均保留 `backend=qoder` 与本轮模型。仅支持 `builtin`，`spec_plan` 明确拒绝。
+
+Qoder 只读运行在核心准备的规划/Review 快照中，沿用请求身份、心跳、超时终止进程组、工作树归还与 Review 统一结算规则。只允许 Read/Grep/Glob，禁用其他工具、MCP、hooks 与项目设置；显式设置 `skills.enabled=false`、`skills.loadFromAgentsDirectory=false`，关闭 CLI 默认内置及目录技能，init.skills 仍要求为空。非交互权限不得自动扩大。未知安全能力或无合规终态结果均明确失败。Qoder 没有已确认的 JSON Schema 输出开关，schema 作为纯文本输出约束传入，终态文本严格解析为单个 JSON 对象，再经既有规划/Review 校验；退出 0 或普通回答不视为完成。
+
+自定义模型必须显式使用完整 `<provider_id>/<upstream_model_id>`（只按第一个 `/` 分隔，保留 upstream 自带的 `/`），不猜测短名、不改用默认或其他模型。本次支持 `openai-compatible / openai / bearer` 连接；其他类型明确失败。运行时仅从本机 Qoder 用户设置读取该 provider，并投影连接类型、协议、认证类型、端点与目标模型的已知元数据；只保留目标 `models[]` 项，provider 默认模型同步固定为目标 upstream ID。不导入其他 provider、routing、MCP、插件、skills、hooks 或项目设置；仍使用空 `setting-sources` 和显式 `--model`。缺失 provider/型号、无效设置或认证引用无法解析时，模型请求前明确失败。离线保存不读取凭据。
+
+所选 provider 的 API key 仅在启动时从本机配置或其环境变量引用解析，放入该次子进程的专用环境变量；`--settings` 中只放环境引用，实际凭据不得进入 argv、请求快照、job、日志或 Pilot 创建的文件。Qoder 自身可能把内联 settings 写成临时文件，该文件只能包含认证引用；返回文本和事件按实际选中凭据脱敏。加载既有配置不修改原 Qoder 设置。模型身份由完整 ID 确定，是否免费由用户选择与上游实际计费决定，未知美元费用仍为 `null`。
+
+本机可执行文件由 `KANPILOT_QODER_BIN` 覆盖，缺省按 PATH 发现 `qoder`（兼容历史独立 CLI 名 `qodercli`）；Finder 启动时 PATH 可能不含用户安装目录，再依次检查可执行文件 `~/.qoder/entry/qoder` 与 `~/.local/bin/qodercli`。不得将 Qoder IDE 主程序当作 headless CLI。能力查询只做本地版本/帮助参数探测，不发模型请求、不安装、不登录；就绪仅表示 CLI 接口可用，认证与模型未实测。每次运行记录 `source=qoder` 的费用回执；CLI 未提供可核对美元费用时记录 `null`，不得填 0 冒充免费。中断无已保存结果不重发，保留现有身份与结算守卫。
+
+macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPERM。Qoder 清理仅在有界等待回收 leader 后重新发组信号、确认进程组不存在时，将其视为已经退出；leader 已退出不代表后代已停止，持续权限错误必须明确失败，不得忽略仍存活的进程组。

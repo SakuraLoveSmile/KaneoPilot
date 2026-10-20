@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import constants, harness_plus_adapter, mcp_client, mcp_scopes, util
+from . import constants, harness_plus_adapter, mcp_client, mcp_scopes, pi_desktop_backend, util
 
 
 def _read_admin_server(server_file: Path) -> tuple:
@@ -281,6 +281,10 @@ class RuntimeClient:
         caps = self._call("kp_runtime_capabilities", {})
         return set(caps.get("supported_operations") or [])
 
+    def supports_required_verification_commands(self) -> bool:
+        caps = self._call("kp_runtime_capabilities", {})
+        return caps.get("required_verification_commands_supported") is True
+
     def session_create(self, project_path: str, *, mode: str, provider_id=None,
                        model_id=None, thinking_level=None, title=None,
                        project_name=None, interaction_mode=None, **_kwargs) -> dict:
@@ -404,12 +408,15 @@ class RuntimeClient:
     def plans_resolve(self, proposal_id: str, session_id: str, turn_id: str,
                       tool_call_id: str, action: str,
                       target_permission_mode=None, version: Optional[int] = None,
-                      **_kwargs) -> dict:
+                      required_verification_commands=None, **_kwargs) -> dict:
+        pi_desktop_backend.validate_required_verification_commands(required_verification_commands, action)
         normalized_action = "accept" if action == "approve" else action
         result = self._write("kp_runtime_proposal_resolve", f"proposal_{proposal_id}_{normalized_action}", {
             "session_id": session_id, "turn_id": turn_id,
             "proposal_id": proposal_id, "tool_call_id": tool_call_id,
             "version": version, "action": normalized_action,
+            **({"required_verification_commands": list(required_verification_commands)}
+               if required_verification_commands is not None else {}),
             **({"target_permission_mode": target_permission_mode}
                if target_permission_mode else {}),
         })

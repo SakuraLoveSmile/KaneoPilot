@@ -380,6 +380,13 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             raise util.KanpilotError("stale_run", "推进期间任务执行周期或需求已变化")
         if receipt_snapshot is not None and receipt_identity(task) != receipt_snapshot:
             raise util.KanpilotError("conflict", "推进期间验证回执、执行轮次或计划身份已变化")
+        if target == "done":
+            require_release(task)
+    def require_release(task):
+        from . import release_delivery
+        gate = release_delivery.completion_gate(conn, task)
+        if gate is not None:
+            raise util.KanpilotError(gate["code"], gate["message"])
     target, expected = payload["target"], payload["expected_current"]
     if target not in ("in-review", "done"):
         raise util.KanpilotError("bad_request", f"invalid target {target}")
@@ -403,7 +410,8 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         # terminal tool results. Git/process/file reads must precede the writer lock.
         current = db.require_task(conn, payload["task_id"])
         from . import engine_claim_scope, git_delivery
-        if engine_claim_scope.effective_mode(conn, current["project_id"]) == "live":
+        if (engine_claim_scope.effective_mode(conn, current["project_id"]) == "live"
+                or core.review_repair_of(current).get("source_kind") == "merge_conflict"):
             from .engine import verdict
             receipt = db.task_extra(current).get("engine_verdict") or {}
             frozen = receipt.get("binding") or {}
@@ -412,7 +420,8 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             # branch review has a delivery-commit whose tree must match them.
             branch_review = core.requires_branch_review(current)
             comparable = dict(actual, head_sha=frozen.get("head_sha")) if branch_review else actual
-            if (receipt.get("verification_ok") is not True
+            if (receipt.get("evidence_source") != "goal_report"
+                    or receipt.get("verification_ok") is not True
                     or not verdict.receipt_evidence_current(conn, current, receipt)
                     or receipt.get("execution_run_id") != current["run_id"]
                     or receipt.get("plan_sha256") != current["plan_sha256"]
@@ -465,6 +474,8 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         if target == "done" and expected != "done" and core.is_pr_delivery(task):
             if not core.delivery_of(task).get("merged_at"):
                 raise util.KanpilotError("conflict", "PR 尚未合并，不能完成任务")
+        if target == "done":
+            require_release(task)
         if target == "done" and expected == "in-progress":
             # Review 前置守卫（§5.9 v1.2）：执行完成不得跳过 Review
             # 直接完成——须先在当前周期登记 review_conclusion='pass'。
@@ -573,6 +584,9 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                 extra_json = db.task_extra(task)
                 for key in ("review_conclusion", "review_registered_at"):
                     extra_json.pop(key, None)
+                repair = core.review_repair_of(task)
+                if repair and repair.get("repair_execution_run_id") == task["run_id"]:
+                    extra_json["fix_request"] = dict(repair, state="awaiting_review", session_id=task["session_id"])
                 extra["extra_json"] = extra_json
             transition_detail = {
                 "via": "advance-task", "target": target,
@@ -590,6 +604,10 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
                 detail=transition_detail,
                 **extra,
             )
+            if new_status == "in_review":
+                from . import task_ai_action
+                task_ai_action.record_progress(conn, db.require_task(conn, task["task_id"]), now,
+                                               "awaiting_review", session_id=task["session_id"])
             db.add_event(
                 conn, now, "kaneo_transition", task_id=task["task_id"],
                 actor=actor, detail={"from": expected, "to": target},

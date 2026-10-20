@@ -1,4 +1,4 @@
-"""Read-only Claude/Codex Review with deterministic shared settlement."""
+"""Read-only CLI Review with deterministic shared settlement."""
 from __future__ import annotations
 
 import json
@@ -13,9 +13,14 @@ from . import (claude_cli, claude_planner, codex_planner, constants, core, db,
                review_config, review_settle, util, task_workspace, worktree_pool)
 
 STAGE = "review"
+CLI_BACKENDS = ("claude", "codex", "qoder")
 
 
 def launcher_argv(backend, config, directory, snapshot, materials, *, budget=5, provider=None):
+    if backend == "qoder":
+        from . import qoder_cli
+        return qoder_cli.build_argv(model=config["model"], reasoning_effort=config["reasoning_effort"],
+                                    add_dirs=[materials])
     if backend == "claude":
         return claude_cli.build_argv(model=config["model"], effort=config["effort"],
                                     schema=review_settle.RESULT_SCHEMA, budget_usd=budget,
@@ -111,7 +116,7 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
 
 def _persisted(conn):
     entry = control.stored_setting(conn, "executor_runs").get(STAGE) or {}
-    if entry.get("backend") not in ("claude", "codex") or not entry.get("invocation_id"):
+    if entry.get("backend") not in CLI_BACKENDS or not entry.get("invocation_id"):
         return None
     directory = control.invocation_dir(STAGE, entry["invocation_id"])
     try:
@@ -156,7 +161,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     config = (review_config.snapshot(conn, config_override=config_override)
               if config_override is not None else review_config.snapshot(conn))
     backend = config.get("backend")
-    if backend not in ("claude", "codex"):
+    if backend not in CLI_BACKENDS:
         return 2
     invocation = util.new_uuid()
     directory = control.invocation_dir(STAGE, invocation)
@@ -207,6 +212,15 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
             return 0
         return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     try:
+        if backend == "qoder":
+            from . import qoder_cli
+            capability = qoder_cli.capabilities()
+            if not capability["available"]:
+                return blocked(capability["detail"])
+            error = review_config._validate_cli(
+                {"model": config.get("model"), "reasoning_effort": config.get("reasoning_effort")}, "qoder")
+            if error:
+                return blocked(error)
         materials = review.collect_materials(db_path=db_path, conn=conn, materials=directory / "materials",
                                              task=task, execution_worktree=worktree,
                                              execution_run_id=job["execution_run_id"], snapshot=frozen_snapshot)
@@ -219,7 +233,11 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         provider = codex_planner.codex_provider.resolve_provider(constants.codex_home()) if backend == "codex" else None
         if provider and not provider.auth_ready:
             return blocked(f"Codex 认证未就绪：{provider.auth_detail}")
-        argv = launcher_argv(backend, config, directory, snapshot, directory / "materials", budget=budget, provider=provider)
+        if backend == "qoder":
+            argv, launch_env = qoder_cli.prepare_launch(model=config["model"],
+                reasoning_effort=config["reasoning_effort"], add_dirs=[directory / "materials"])
+        else:
+            argv = launcher_argv(backend, config, directory, snapshot, directory / "materials", budget=budget, provider=provider)
     except (util.KanpilotError, OSError) as exc:
         return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     prompt = (Path(__file__).resolve().parents[1] / "executor_prompts" / "review_cli.md").read_text(encoding="utf-8")
@@ -244,7 +262,10 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
             next_heartbeat = time.monotonic() + interval
         if event is None:
             return
-        mapped = claude_cli.map_event(event) if backend == "claude" else codex_planner.map_event(event)
+        if backend == "qoder":
+            mapped = qoder_cli.map_event(event)
+        else:
+            mapped = claude_cli.map_event(event) if backend == "claude" else codex_planner.map_event(event)
         if mapped:
             if isinstance(mapped, dict):
                 fields = dict(mapped)
@@ -259,6 +280,10 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         if backend == "claude":
             result = claude_cli.run(argv, prompt=instruction, cwd=snapshot, env=claude_cli.child_env(),
                                     timeout=timeout, log_path=directory / "claude.jsonl", on_event=on_event)
+        elif backend == "qoder":
+            result = qoder_cli.run(argv, prompt=instruction, schema=review_settle.RESULT_SCHEMA,
+                                   cwd=snapshot, env=launch_env, timeout=timeout,
+                                   log_path=directory / "qoder.jsonl", on_event=on_event)
         else:
             result = run_codex(argv, prompt=instruction, cwd=snapshot, env=codex_planner.child_env(provider),
                                timeout=timeout, log_path=directory / "codex.jsonl",
@@ -271,7 +296,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         try:
             review.core_call(db_path, "record-cost", {"task_id": job["task_id"], "request_id": job["request_id"],
                                                      "run_id": job["run_id"], "stage": STAGE, "source": backend,
-                                                     "cost_usd": result.get("total_cost_usd") if backend == "claude" else None})
+                                                     "cost_usd": result.get("total_cost_usd") if backend in ("claude", "qoder") else None})
         except util.KanpilotError as exc:
             if exc.code not in ("stale_run", "not_found", "conflict"):
                 raise
@@ -292,6 +317,6 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         validated = review_settle.validate_result(result.get("structured_output"))
     except util.KanpilotError as exc:
         return blocked(f"review_result_invalid: {exc.message}")
-    job.update(validated, send_state="sent", cost_usd=result.get("total_cost_usd") if backend == "claude" else None)
+    job.update(validated, send_state="sent", cost_usd=result.get("total_cost_usd") if backend in ("claude", "qoder") else None)
     save()
     return review._settle(db_path=db_path, job=job, job_path=job_path, log=log, record_run=record)

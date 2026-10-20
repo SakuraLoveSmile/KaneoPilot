@@ -166,7 +166,15 @@ def binding(conn, task, *, allow_core_commit=False, deadline=None, heartbeat=Non
             if allow_core_commit and head != registered:
                 parents = value(["show", "-s", "--format=%P", "HEAD"], worktree).split()
                 trailers = value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", "HEAD"], worktree).splitlines()
-                if parents != [registered] or trailers != [task["run_id"]]:
+                expected_parents = [registered]
+                repair = core.review_repair_of(task)
+                if repair.get("source_kind") == "merge_conflict":
+                    from .. import review_repair
+                    review_repair.verify_frozen(task)
+                    if repair.get("head_sha") != registered or repair.get("repair_execution_run_id") != task["run_id"]:
+                        raise ValueError("合并冲突处理的提交身份不符")
+                    expected_parents.append(repair["target_base_sha"])
+                if parents != expected_parents or trailers != [task["run_id"]]:
                     raise ValueError("未登记提交不是本轮核心提交")
             if branch != delivery.get("branch") or (not allow_core_commit and head != registered):
                 raise ValueError("任务分支或登记 HEAD 不符")
@@ -369,7 +377,7 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
         result["verification_ok"] = False
         if not real_failure:
             result.update(kind="unconfirmed", environment_failure=False, environment_reasons=[],
-                          detail="Plus 结构化报告未覆盖全部冻结验证命令或报告未就绪；请通过新的执行轮次补齐验证")
+                          detail=verification_recovery.goal_coverage_detail(coverage))
     try:
         git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
         recheck = verification_recovery.read_goal_evidence(conn, db.require_task(conn, task["task_id"]))
@@ -382,7 +390,9 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
         raise util.KanpilotError("verification_identity_unconfirmed", "核验期间计划、轮次或源文件已变化")
     result.update(binding=frozen, evidence_source="goal_report", evidence_sha256=evidence["hashes"],
                   execution_turn_id=report["turn_id"], report_id=report.get("report_id"),
-                  report_sha256=report["report_sha256"], verification_evidence_version=1)
+                  report_sha256=report["report_sha256"], verification_evidence_version=1,
+                  goal_check_coverage={"matched": coverage["matched"], "missing": coverage["missing"],
+                                       "total": len(commands)})
     if result["verification_ok"] and not isolated:
         result["index_source_sha256"] = git_delivery.expected_index_source_sha256(
             frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)

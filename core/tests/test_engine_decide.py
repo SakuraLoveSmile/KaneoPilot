@@ -85,7 +85,7 @@ class TestStatusDerivation(unittest.TestCase):
         self.assertEqual(
             decide.phase_condition("in_review", fix_open=True), ("review", "repairing"))
         self.assertEqual(
-            decide.phase_condition("in_review", fix_round=1), ("review", "repairing"))
+            decide.phase_condition("in_review", fix_round=1), ("review", "reviewing"))
 
     def test_unknown_status_is_none(self):
         self.assertIsNone(decide.phase_condition("bogus"))

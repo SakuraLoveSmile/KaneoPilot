@@ -38,7 +38,9 @@ def _report(controller, result):
     if result.get("outcome") == "blocked":
         controller.report("failed", note="blocked:" + str(result.get("failure_code")))
     elif result.get("outcome") in ("retry", "waiting"):
-        controller.report("succeeded", progress="等待下次交付复核" if result["outcome"] == "waiting" else "交付暂不可用，稍后重试")
+        release = result.get("release") or {}
+        progress = release.get("reason") or ("等待下次交付复核" if result["outcome"] == "waiting" else "交付暂不可用，稍后重试")
+        controller.report("succeeded", progress=progress)
     else:
         raise util.KanpilotError("internal", "交付复核结果不可确认")
 

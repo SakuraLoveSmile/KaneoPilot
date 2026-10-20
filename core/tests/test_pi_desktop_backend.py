@@ -239,6 +239,9 @@ class FakeMCPServer:
 
     def tool_schema(self, name):
         """``tools/list`` 的 inputSchema（T6 兼容门读取 projectName）。"""
+        if name == "pi_plans_resolve" and getattr(self, "required_verification_commands", False):
+            return {"type": "object", "properties": {
+                "requiredVerificationCommands": {"type": "array", "items": {"type": "string"}}}}
         if name == "pi_session_create":
             properties = {
                 "projectPath": {"type": "string"},
@@ -675,6 +678,10 @@ class PiDesktopCase(KanpilotTestCase):
             "db_path": str(self.db_path),
         }
         spec.update(overrides)
+        # Runtime approval grants are bound to the dispatch-owned canonical spec.
+        canonical = self.runs_root / spec["task_id"] / spec["run_id"]
+        canonical.mkdir(parents=True, exist_ok=True)
+        (canonical / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
         return spec
 
     def write_spec(self, spec) -> Path:
@@ -2326,6 +2333,16 @@ class TestRunReal(PiDesktopCase):
 
 class TestDispatchPiDesktop(PiDesktopCase):
     """§5.23.3 派发状态机 e2e（fake worker subprocess + fake MCP 探测）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.server.required_verification_commands = True
+
+    def write_plan(self, project_name, task, meta_overrides=None,
+                   body="# plan\n\n```verify\ntrue\n```\n"):
+        # New dispatches freeze a verification contract before their real fake
+        # worker starts. Legacy/old-Plus fixtures in TestRunReal remain unchanged.
+        return super().write_plan(project_name, task, meta_overrides, body)
 
     def _save_pi_desktop_config(self, conn_file):
         return self.call("set-exec-config", {

@@ -940,7 +940,7 @@ class ReviewBackendConfig(_ReviewCommandsCase):
 
     def test_review_capabilities_shape_and_unsaved_plus(self):
         caps = self.call("review-capabilities", {})
-        self.assertEqual(set(caps), {"pi", "pi_desktop", "claude", "codex", "codex_desktop"})
+        self.assertEqual(set(caps), {"pi", "pi_desktop", "claude", "codex", "codex_desktop", "qoder"})
         self.assertEqual(set(caps["pi"]), {"available", "detail"})
         self.assertEqual(set(caps["pi_desktop"]),
                          {"available", "detail", "tools_ok", "version"})

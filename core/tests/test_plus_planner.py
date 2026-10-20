@@ -670,6 +670,37 @@ class PlusPlannerCase(KanpilotTestCase):
         return sorted(set(files))
 
 
+class TestWorkspaceRepairPlanningGate(PlusPlannerCase):
+    def set_repair_gate(self, task_id):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                db.set_setting(conn, "review_fix_workspace_repair:" + task_id,
+                               "repair:pending")
+        finally:
+            conn.close()
+
+    def test_repair_blocks_start_without_queuing_or_prompting(self):
+        repo = self.git_repo()
+        self.new_task(TASK_ID, repo=repo)
+        info = self.make_input(TASK_ID, repo)
+        self.set_repair_gate(TASK_ID)
+        result = self.start_plus_plan(TASK_ID, info, expect_ok=False)
+        self.assertEqual(result["code"], "conflict")
+        self.assertIn("恢复尚未完成", result["error"])
+        self.assertFalse(self.requests())
+        self.assertEqual(self.server.prompt_count, 0)
+
+    def test_repair_blocks_claim_of_preexisting_queued_request(self):
+        fixture = self.plus_request()
+        self.set_repair_gate(fixture["task_id"])
+        with self.assertRaisesRegex(util.KanpilotError, "恢复尚未完成"):
+            planner_runner.run_one(self.db_path)
+        self.assertEqual(self.request_view(fixture["request_id"])["status"], "queued")
+        self.assertIsNone(self.latest_run_id(fixture["request_id"]))
+        self.assertEqual(self.server.prompt_count, 0)
+
+
 # ------------------------------------------------------------ codex 兼容
 
 
@@ -2073,6 +2104,21 @@ class TestResumeDoesNotResend(PlusPlannerCase):
 # ------------------------------------------------------------ review_fix
 
 
+class TestPublishedModelValidation(unittest.TestCase):
+    def test_missing_review_report_preserves_validation_error(self):
+        runtime = {"model_id": "test-model", "thinking_level": "medium"}
+        payload = {"planner_backend": "pi_desktop", "runtime_config": runtime}
+        context = {"task_id": TASK_ID, "payload": payload,
+                   "task": {"plan_kind": "review_fix"}}
+        manifest = {"task": {"project_name": "Feedback", "repository": "/repo"}}
+        pair, source, note = pi_desktop_planner._published_model_pair(
+            context, manifest, util.now_iso(), None, payload, runtime, "review_fix")
+        self.assertEqual(pair, {"planner_model": "test-model", "reasoning_effort": "medium"})
+        self.assertEqual(source, "runtime_config_snapshot")
+        self.assertIn("review_report_path", note)
+        self.assertIn("review_report_sha256", note)
+
+
 class TestReviewFixPlusPath(PlusPlannerCase):
     def register_review_source(self, source_task_id, repo, review_key):
         self.register_task(source_task_id, repo)
@@ -2089,6 +2135,12 @@ class TestReviewFixPlusPath(PlusPlannerCase):
             conn.close()
 
     def test_review_fix_publishes_with_review_metadata(self):
+        self._publish_review_fix(legacy_missing_report=False)
+
+    def test_legacy_review_fix_imports_registered_parent_report(self):
+        self._publish_review_fix(legacy_missing_report=True)
+
+    def _publish_review_fix(self, *, legacy_missing_report):
         task_id = "taskreviewfix0000001"
         source_task_id = "tasksourcereview00001"
         repo = self.git_repo()
@@ -2106,6 +2158,25 @@ class TestReviewFixPlusPath(PlusPlannerCase):
             review_report_path=str(report),
             review_report_sha256=util.sha256_file(report),
         )
+        if legacy_missing_report:
+            conn = db.connect(self.db_path)
+            try:
+                with db.write_txn(conn):
+                    db.update_task(conn, task_id, util.now_iso(),
+                                   review_report_path=None, review_report_sha256=None)
+                    db.update_task(conn, source_task_id, util.now_iso(),
+                                   review_key=review_key, fix_task_id=task_id,
+                                   review_report_path=str(report),
+                                   review_report_sha256=util.sha256_file(report))
+                    source = db.require_task(conn, source_task_id)
+                    history = db.task_extra(source)["review_history"]
+                    history[-1].update(
+                        fix_task_id=task_id, conclusion="changes_requested",
+                        report_path=str(report), report_sha256=util.sha256_file(report))
+                    db.set_extra(conn, source, util.now_iso(),
+                                 review_conclusion="changes_requested", review_history=history)
+            finally:
+                conn.close()
         info = self.make_input(task_id, repo, plan_kind="review_fix")
         self.save_plus_config()
         self.server.add_message("user", "prompt")

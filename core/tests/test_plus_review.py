@@ -5,7 +5,7 @@
   关联来源；本周期已有登记报告 → 明确受阻（不覆盖新周期）。
 - 专属 Review worktree（独立于执行会话）+ 只读 git status/diff 材料 + 计划/
   （修复周期）原报告/执行证据复制；材料缺失必须显式记原因，不静默省略。
-- ``mode="plan"`` + ``permissionMode="auto"`` 新会话；指令只要求输出冻结 JSON。
+- ``mode="plan"`` + ``permissionMode="auto"`` 新会话；只要求输出版本化分段结果。
 - 三结论登记：pass → register→advance→report succeeded；changes_requested →
   **先** create-review-fix **再** register-review（带 review_key/fix_task_id/
   fix_task_source_sha256）→ report succeeded；blocked → register→report needs_user。
@@ -39,6 +39,73 @@ from test_plus_controller import (  # noqa: E402
 
 PROJECT_ID = "example-project-05"
 EXECUTION_RUN_ID = "runexec0000000000001"
+
+
+class TestReviewResultFormat(unittest.TestCase):
+    def setUp(self):
+        self.result = {
+            "conclusion": "changes_requested", "report_markdown": "# 评审\n需要修复",
+            "fix": {"title": "修复路径恢复", "description": "补齐身份守卫和回归测试"},
+        }
+
+    def parse(self, text, **kwargs):
+        return pi_desktop_review.parse_result(
+            [{"role": "assistant", "content": text}], **kwargs,
+        )
+
+    def test_incident_shape_preserves_report_and_defaults_unspecified_priority(self):
+        text = "核对完成：以下为最终评审结论。\n\n```json\n" + json.dumps(self.result) + "\n```\n"
+        normalizations = []
+        result, error = self.parse(text, normalizations=normalizations)
+        self.assertIsNone(error)
+        self.assertEqual(result, dict(self.result, fix=dict(self.result["fix"], priority="no-priority")))
+        self.assertEqual(normalizations, ["removed_fence_commentary", "missing_fix_priority=no-priority"])
+        self.assertNotIn("priority", self.result["fix"])
+        # Shared schema/API callers still require all frozen fields.
+        self.assertIsNotNone(pi_desktop_review.validate_result(self.result)[1])
+
+    def test_explicit_priorities_and_all_conclusions_preserved(self):
+        for conclusion in ("pass", "blocked", "changes_requested"):
+            for fence in ("json", ""):
+                with self.subTest(conclusion=conclusion, fence=fence):
+                    expected = dict(self.result, conclusion=conclusion,
+                                    fix=dict(self.result["fix"], priority="high") if conclusion == "changes_requested" else None)
+                    result, error = self.parse("结果如下\n```" + fence + "\n" + json.dumps(expected) + "\n```\n结束")
+                    self.assertIsNone(error)
+                    self.assertEqual(result, expected)
+
+    def test_ambiguous_or_invalid_wrappers_still_block(self):
+        body = json.dumps(self.result)
+        fenced = "```json\n" + body + "\n```"
+        for text in ("结果 " + body, "说明\n" + fenced + "\n" + fenced,
+                     body + "\n" + fenced, "说明 {}\n" + fenced,
+                     "说明 []\n" + fenced, "说明\n```python\n" + body + "\n```",
+                     "说明\n```json\n" + body,
+                     "说明\n```json\n{broken}\n```",
+                     "说明\n```json\n[]\n```"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.parse(text)[0])
+
+    def test_other_missing_extra_or_invalid_fields_still_block(self):
+        for fix in ({"title": "t"}, {"title": "", "description": "d"},
+                    dict(self.result["fix"], priority=None),
+                    dict(self.result["fix"], priority="P0"),
+                    dict(self.result["fix"], extra="x")):
+            with self.subTest(fix=fix):
+                normalizations = []
+                result, error = self.parse(json.dumps(dict(self.result, fix=fix)), normalizations=normalizations)
+                self.assertIsNone(result)
+                self.assertIsNotNone(error)
+                self.assertEqual(normalizations, [])
+        self.assertIsNone(self.parse(json.dumps(dict(self.result, extra=True)))[0])
+
+    def test_invalid_final_answer_does_not_reuse_older_valid_answer(self):
+        result, error = pi_desktop_review.parse_result([
+            {"role": "assistant", "content": json.dumps(self.result)},
+            {"role": "assistant", "content": "尚未完成评审"},
+        ])
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
 
 
 class ReviewCase(PlusCase):
@@ -300,7 +367,9 @@ class TestReviewIdentityAndMaterials(ReviewCase):
         self.assertTrue(self.server.configured["confirm"])
 
         prompt = self.server.prompt_content
-        self.assertIn("\"conclusion\":\"pass|changes_requested|blocked\"", prompt)
+        self.assertIn("<<<KANPILOT_REVIEW_V1>>>", prompt)
+        self.assertIn("**不要输出 JSON**", prompt)
+        self.assertIn("<<<FIX_DESCRIPTION>>>", prompt)
         # §5.24.5：无人值守，asktool 只会挂到超时；需用户决定时走 blocked。
         self.assertIn("本轮**无人值守**：禁止调用 `asktool`", prompt)
         self.assertIn("给出 `blocked` 结论", prompt)
@@ -333,6 +402,63 @@ class TestReviewIdentityAndMaterials(ReviewCase):
 
 
 class TestReviewConclusions(ReviewCase):
+    def test_text_frame_narration_settles_pass_with_original_transcript(self):
+        self.make_scene()
+        from test_plus_review_text import envelope
+        markdown = '# 评审\n\n冻结证据完整，未发现确定缺陷。'
+        text = '复核完成：冻结材料与提交范围逐字节一致。下面提交本轮评审结论。\n\n' + envelope(
+            'pass', 'no-priority', report=markdown, title='', description='')
+        self.server.messages = [{"role": "assistant", "content": text}]
+        self.record_core_calls()
+        self.assertEqual(self.run_review(), 0)
+        job = self.review_job()
+        self.assertEqual(job["result_normalizations"], ["removed_text_frame_commentary"])
+        self.assertEqual(Path(job["report_path"]).read_text(), markdown)
+        self.assertEqual(self.task(TASK_ID)["review_summary"]["conclusion"], "pass")
+        self.assertEqual(self.request_by_id(job["request_id"])["status"], "succeeded")
+        transcript = json.loads((Path(job["invocation_dir"]) / "transcript.json").read_text())
+        self.assertEqual(transcript["messages"][-1]["content"], text)
+
+    def test_text_result_registers_raw_markdown_and_creates_one_fix(self):
+        self.make_scene()
+        from test_plus_review_text import envelope
+        markdown = '## 评审\n`"${baseUrl}${href}"` 代码需要修复。\n```dart\nvar p = r"C:\\new";\n```'
+        self.server.messages = [{"role": "assistant", "content": envelope(report=markdown)}]
+        self.record_core_calls()
+        self.assertEqual(self.run_review(), 0)
+        job = self.review_job()
+        self.assertEqual(job["result_format"], "review_text_v1")
+        self.assertEqual(Path(job["report_path"]).read_text(), markdown)
+        self.assertEqual(job["conclusion"], "changes_requested")
+        self.assertEqual(len(self.fix_tasks()), 1)
+        self.assertEqual(self.payload_of("create-review-fix")["priority"], "medium")
+        self.assertNotIn("advance-task", self.commands())
+        self.assertEqual(self.task(TASK_ID)["review_summary"]["conclusion"], "changes_requested")
+        self.assertEqual(self.request_by_id(job["request_id"])["status"], "succeeded")
+
+    def test_incident_format_settles_changes_requested_with_audit(self):
+        self.make_scene()
+        markdown = "# 评审\n\n恢复身份守卫缺失，必须修复"
+        self.review_result("changes_requested", markdown=markdown,
+                           fix={"title": "修复路径", "description": "增加服务器身份守卫及测试"})
+        original = self.server.messages[-1]["content"]
+        self.server.messages[-1]["content"] = "核对完成。以下为最终评审结论。\n\n```json\n" + original + "\n```\n"
+        self.record_core_calls()
+        self.assertEqual(self.run_review(), 0)
+        job = self.review_job()
+        self.assertEqual(job["conclusion"], "changes_requested")
+        self.assertEqual(job["result_normalizations"], [
+            "removed_fence_commentary", "missing_fix_priority=no-priority",
+        ])
+        self.assertEqual(Path(job["report_path"]).read_text(), markdown)
+        self.assertEqual(self.payload_of("create-review-fix")["priority"], "no-priority")
+        self.assertEqual([c for c in self.commands() if c in (
+            "create-review-fix", "register-review", "advance-task", "report")],
+            ["create-review-fix", "register-review", "report"])
+        self.assertNotEqual(self.task(TASK_ID)["status"], "done")
+        transcript = json.loads((Path(job["invocation_dir"]) / "transcript.json").read_text())
+        self.assertEqual(transcript["messages"][-1]["content"], self.server.messages[-1]["content"])
+
     def test_pass_registers_advances_and_reports(self):
         self.make_scene()
         self.review_result("pass", markdown="# 评审\n\n通过：证据齐全")

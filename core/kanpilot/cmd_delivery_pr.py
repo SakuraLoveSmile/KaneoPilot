@@ -1,11 +1,11 @@
-"""Three-phase PR publication and passive merge observation."""
+"""Leased PR publication, merge observation and optional project auto merge."""
 
 import os
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import bridge, constants, core, db, gh_client, git_delivery, remote, util
+from . import bridge, constants, core, db, gh_client, git_delivery, pr_auto_merge, remote, util
 
 
 def _public_text(value):
@@ -78,7 +78,8 @@ def _fresh(ctx, payload, task, delivery):
     util.require(fresh["run_id"] == task["run_id"] and fresh["repository"] == task["repository"]
                  and fresh["plan_sha256"] == task["plan_sha256"]
                  and all(fresh[key] == task[key] for key in
-                         ("review_key", "review_report_path", "review_report_sha256"))
+                         ("review_key", "review_report_path", "review_report_sha256",
+                          "project_id", "requirements_sha256"))
                  and core.delivery_of(fresh) == delivery,
                  "交付期间执行轮次或交付登记已变更", "conflict")
     return _identity(ctx, payload)
@@ -232,45 +233,74 @@ def cmd_delivery_publish(ctx, payload) -> dict:
 
 
 def cmd_delivery_sync(ctx, payload) -> dict:
+    from . import release_delivery
     task, delivery = _snapshot(ctx, payload, publish=False)
+    policy = pr_auto_merge.snapshot(ctx.conn, task)
+    def boundary():
+        fresh = _fresh(ctx, payload, task, delivery)
+        _verify_review_report(fresh)
+        if policy:
+            pr_auto_merge.check_policy(ctx.conn, fresh, policy)
+        return _fresh(ctx, payload, task, delivery)
     try:
-        _verify_review_report(task)
-        _fresh(ctx, payload, task, delivery)
+        boundary()
         client = remote.get_client()
-        _fresh(ctx, payload, task, delivery)
+        boundary()
         live = remote.get_task(client, task["task_id"])
-        _fresh(ctx, payload, task, delivery)
-        if (live.get("task") or {}).get("status") == "done":
+        boundary()
+        remote_done = (live.get("task") or {}).get("status") == "done"
+        if remote_done and release_delivery.completion_gate(ctx.conn, task) is None:
             with db.write_txn(ctx.conn):
-                _fresh(ctx, payload, task, delivery)
+                boundary()
             return {"outcome": "kaneo_done"}
         repo = _repository(task, delivery)
-        _fresh(ctx, payload, task, delivery)
-        pr = gh_client.pr_view(repo, delivery["pr_number"])
-        _fresh(ctx, payload, task, delivery)
+        boundary()
+        pr = (gh_client.pr_view(repo, delivery["pr_number"], merge_checks=True) if policy
+              else gh_client.pr_view(repo, delivery["pr_number"]))
+        boundary()
         if not delivery.get("pushed_sha") or delivery["pushed_sha"] != delivery.get("head_sha"):
             raise git_delivery.GitDeliveryError("branch_diverged", "同步交付的提交与已推送快照不一致")
         _verify_pr_identity(pr, repo, delivery, delivery["pushed_sha"])
     except (git_delivery.GitDeliveryError, gh_client.GhError) as exc:
+        boundary()
         return _failure(ctx, payload, task, delivery, exc)
     except bridge.BridgeError as exc:
+        boundary()
         raise util.KanpilotError("remote_unavailable", gh_client.redact(str(exc))) from exc
     if pr["state"] == "CLOSED":
         return _closed(ctx, payload, task, delivery, pr)
-    _verify_review_report(task)
+    def verify_repository():
+        boundary()
+        util.require(_repository(task, delivery) == repo,
+                     "交付期间 GitHub 仓库身份已变化，未提交自动合并", "conflict")
+        boundary()
+    pr, auto_merge = pr_auto_merge.reconcile(ctx, task, delivery, repo, pr, policy, boundary,
+        lambda observed: _verify_pr_identity(observed, repo, delivery, delivery["pushed_sha"]),
+        verify_repository, lambda: pr_auto_merge.source_eligibility(task, live))
+    boundary()
     with db.write_txn(ctx.conn):
-        fresh = _fresh(ctx, payload, task, delivery)
+        fresh = boundary()
+        display = {"auto_merge": auto_merge} if auto_merge else {}
         if pr["state"] == "MERGED":
             core.update_delivery(ctx.conn, fresh, ctx.now_iso, merged_at=pr["mergedAt"],
-                                 pr_state="MERGED", last_sync_at=ctx.now_iso, publish_failures=0)
+                                 pr_state="MERGED", last_sync_at=ctx.now_iso, publish_failures=0,
+                                 next_sync_at=util.plus_seconds(300, ctx.now), **display)
             if not delivery.get("merged_at"):
                 db.add_event(ctx.conn, ctx.now_iso, "pr_merged", task_id=task["task_id"],
                              request_id=payload["request_id"], actor="kaneo-delivery",
                              detail={"pr_number": delivery["pr_number"], "merged_at": pr["mergedAt"]})
-            return {"outcome": "merged"}
-        registered = util.parse_ts(db.task_extra(fresh).get("review_registered_at"))
-        delay = 300 if registered and (ctx.now - registered).total_seconds() < 3600 else 1800
-        next_sync = util.plus_seconds(delay, ctx.now)
-        core.update_delivery(ctx.conn, fresh, ctx.now_iso, pr_state="OPEN", last_sync_at=ctx.now_iso,
-                             next_sync_at=next_sync, publish_failures=0)
+        else:
+            registered = util.parse_ts(db.task_extra(fresh).get("review_registered_at"))
+            delay = 300 if policy or (registered and (ctx.now - registered).total_seconds() < 3600) else 1800
+            next_sync = util.plus_seconds(delay, ctx.now)
+            core.update_delivery(ctx.conn, fresh, ctx.now_iso, pr_state="OPEN", last_sync_at=ctx.now_iso,
+                                 next_sync_at=next_sync, publish_failures=0, **display)
+    if pr["state"] == "MERGED":
+        # The merge receipt is local before Actions I/O. Release commands own
+        # their own intent/dispatch receipts and never hold this writer lock.
+        released = release_delivery.after_merge(ctx, db.require_task(ctx.conn, task["task_id"]), payload)
+        if released["outcome"] in ("disabled", "published"):
+            return {"outcome": "kaneo_done" if remote_done else "merged"}
+        return {"outcome": "waiting", "next_sync_at": util.plus_seconds(300, ctx.now),
+                "release": released.get("release")}
     return {"outcome": "waiting", "next_sync_at": next_sync}

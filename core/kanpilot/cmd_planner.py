@@ -58,12 +58,14 @@ def cmd_get_planner_config(ctx, payload: dict) -> dict:
         config["backend"] = state["backend"]
         config["pi_desktop"] = state["pi_desktop"]
         config["claude"] = state["claude"]
+        config["qoder"] = state["qoder"]
     defaults = {g: dict(planner_config.DEFAULTS[g])
                 for g in planner_config.PLANNER_GROUPS}
     defaults["default_method"] = planner_config.DEFAULT_METHOD
     defaults["backend"] = planner_config.DEFAULT_BACKEND
     defaults["pi_desktop"] = None
     defaults["claude"] = dict(planner_config.CLAUDE_DEFAULT)
+    defaults["qoder"] = dict(planner_config.QODER_DEFAULT)
     return {
         "config": config,
         "defaults": defaults,
@@ -106,8 +108,9 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     new_block = payload.get("pi_desktop")
     has_block = new_block is not None
     new_claude = payload.get("claude")
+    new_qoder = payload.get("qoder")
     if (not groups and new_method is None and not has_backend
-            and not has_block and new_claude is None):
+            and not has_block and new_claude is None and new_qoder is None):
         raise util.bad_request(
             "set-planner-config 至少提供一组（standard / review_fix）、"
             "default_method 或 backend"
@@ -127,6 +130,10 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
         raise util.bad_request("pi_desktop 必须是对象")
     if new_claude is not None:
         error = planner_config.validate_claude_block(new_claude)
+        if error:
+            raise util.bad_request(error)
+    if new_qoder is not None:
+        error = planner_config.validate_qoder_block(new_qoder)
         if error:
             raise util.bad_request(error)
 
@@ -167,6 +174,8 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
         cleaned["pi_desktop"] = new_block
     if new_claude is not None:
         cleaned["claude"] = {"model": new_claude["model"], "effort": new_claude["effort"]}
+    if new_qoder is not None:
+        cleaned["qoder"] = new_qoder
     saved = planner_config.save(ctx.conn, cleaned, ctx.now_iso)
     detail = {g: dict(saved[g]) for g in planner_config.PLANNER_GROUPS}
     detail["default_method"] = saved.get(
@@ -174,6 +183,7 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     detail["backend"] = saved.get("backend") or planner_config.DEFAULT_BACKEND
     detail["pi_desktop"] = saved.get("pi_desktop")
     detail["claude"] = saved.get("claude")
+    detail["qoder"] = saved.get("qoder")
     db.add_event(
         ctx.conn, ctx.now_iso, "planner_config_updated", actor="user",
         detail=detail,
@@ -183,6 +193,7 @@ def cmd_set_planner_config(ctx, payload: dict) -> dict:
     config["backend"] = detail["backend"]
     config["pi_desktop"] = detail["pi_desktop"]
     config["claude"] = detail["claude"]
+    config["qoder"] = detail["qoder"]
     return {
         "config": config,
         "updated_at": saved["updated_at"],
@@ -295,4 +306,12 @@ def cmd_planner_capabilities(ctx, payload: dict) -> dict:
             "spec_plan": {"available": False, "reason": planner_config.spec_plan_blocked_reason("claude")},
         },
     }
+    from . import qoder_cli
+    qoder = qoder_cli.capabilities()
+    result["backends"]["qoder"] = dict(qoder, planner_methods={
+        "builtin": {"available": qoder["available"],
+                    "reason": None if qoder["available"] else qoder["detail"]},
+        "spec_plan": {"available": False,
+                      "reason": planner_config.spec_plan_blocked_reason("qoder")},
+    })
     return result

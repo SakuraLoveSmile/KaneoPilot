@@ -73,12 +73,61 @@ def _review_waiting_paused(conn, task):
     ).fetchone() is None
 
 
+def _repair_status(task):
+    from . import core
+    if task["status"] in ("needs_user", "done"):
+        return None
+    repair = core.review_repair_of(task)
+    if repair.get("source_kind") == "merge_conflict":
+        return ("处理后待复审" if repair.get("state") == "awaiting_review"
+                else "AI 正在处理" if task["status"] == "running"
+                else "AI 处理待启动")
+    return {"held": "待修复", "queued": "修复会话待启动", "running": "修复中",
+            "awaiting_review": "修复后待复审"}.get(repair.get("state"))
+
+
+def _parent_closeout(conn, task, now=None):
+    from . import parent_closeout
+    return parent_closeout.projection(conn, task, now)
+
+
+_CLOSEOUT_LABELS = {"ready": "待收尾校验", "blocked": "收尾校验受阻",
+                    "unknown": "完成同步待确认"}
+
+
+def _release(conn, task):
+    from . import release_delivery
+    return release_delivery.projection(conn, task)
+
+
+def _release_display(conn, task):
+    """A pending release replaces the delivery sub-phase, never execution."""
+    if task["status"] != "in_review":
+        return None
+    value = _release(conn, task)
+    from . import core
+    if value and value.get("required") and (
+            value.get("batch_id") or value.get("can_start")
+            or core.delivery_of(task).get("merged_at") or value["state"] == "waiting_group"):
+        return value
+    return None
+
+
 def task_display_status(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> str:
     status = task["status"]
     if status == "needs_user":
         return "需人工"
+    release = _release_display(conn, task)
+    if release:
+        return release["title"]
+    closeout = _parent_closeout(conn, task, now)
+    if closeout and status != "done" and closeout["state"] in _CLOSEOUT_LABELS:
+        return _CLOSEOUT_LABELS[closeout["state"]]
+    repair_status = _repair_status(task)
+    if repair_status:
+        return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else repair_status
     if status == "needs_plan":
         return "待规划"
     if status == "planning":
@@ -104,7 +153,7 @@ def task_display_status(
             return "待评审"
         return "执行端失联" if lost_request_for_task(conn, task["task_id"], now) else "评审中"
     if status == "done":
-        return "已归档"
+        return "已归档" if db.task_save_state(task) == "archived" else "已完成"
     return status
 
 
@@ -175,6 +224,8 @@ def task_lifecycle_column(task: sqlite3.Row) -> str:
     running→in_progress；in_review→in_review；done→done；
     needs_user 按 failure_stage 归列，缺失回退 task.stage（同 v1.2 口径）。"""
     status = task["status"]
+    if _repair_status(task):
+        return "in_review"
     if status != "needs_user":
         return _BOARD_COLUMN_FOR.get(status, "todo")
     column = _BOARD_COLUMN_FOR.get(task["failure_stage"] or "")
@@ -194,6 +245,11 @@ def task_board_column(
     status = task["status"]
     if status == "needs_user":
         return "failed"
+    if conn is not None and _release_display(conn, task):
+        return "in_review"
+    closeout = _parent_closeout(conn, task, now) if conn is not None else None
+    if closeout and status != "done" and closeout["state"] in _CLOSEOUT_LABELS:
+        return "in_review"
     if (
         status == "in_review"
         and db.task_extra(task).get("review_conclusion") == "changes_requested"
@@ -217,6 +273,19 @@ def task_exception_kind(
     if lost_request_for_task(conn, task["task_id"], now) is not None:
         return "executor_lost"
     status = task["status"]
+    release = _release_display(conn, task)
+    if release:
+        if release["state"] == "failed":
+            return "release_failed"
+        if release["state"] in ("blocked", "unknown"):
+            return "release_blocked"
+        return None
+    closeout = _parent_closeout(conn, task, now)
+    if closeout and status != "done":
+        if closeout["state"] in ("blocked", "unknown"):
+            return "parent_closeout_blocked"
+        if closeout["state"] == "ready":
+            return None
     if (
         status == "in_review"
         and db.task_extra(task).get("review_conclusion") == "changes_requested"
@@ -245,6 +314,10 @@ def _exception_detail(
         return f"执行端失联（{kind_cn}请求租约过期）"
     if kind == "review_rejected":
         return "评审未通过·待修复"
+    if kind == "parent_closeout_blocked":
+        return _parent_closeout(conn, task, now)["reason"]
+    if kind in ("release_failed", "release_blocked"):
+        return _release(conn, task)["reason"]
     # needs_user 各 kind：阻塞摘要优先，回退失败原因（同 blocked_reason）。
     return task["blocked_summary"] or task["failure_reason"]
 
@@ -257,14 +330,18 @@ def task_exception(
     if kind is None:
         return None
     failure_code = task["failure_code"]
-    if kind == "failed":
+    if kind in ("release_failed", "release_blocked"):
+        label = _release(conn, task)["title"]
+    elif kind == "parent_closeout_blocked":
+        label = _CLOSEOUT_LABELS[_parent_closeout(conn, task, now)["state"]]
+    elif kind == "failed":
         label = _FAILED_SUBSTATUS.get(failure_code, "失败")
     else:
         label = _EXCEPTION_LABEL[kind]
     return {
         "kind": kind,
         "label": label,
-        "severity": "failed" if kind == "failed" else "blocked",
+        "severity": "failed" if kind in ("failed", "release_failed") else "blocked",
         "detail": _exception_detail(conn, task, now, kind),
         "failure_code": failure_code,
         "fix_task_id": task["fix_task_id"] if kind == "review_rejected" else None,
@@ -316,6 +393,15 @@ def task_board_substatus(
     第六列（failed）取 exception.label；前五列维持 v1.2 词表。"""
     if column == "failed":
         return exception["label"] if exception else "失败"
+    release = _release_display(conn, task)
+    if release:
+        return release["title"]
+    closeout = _parent_closeout(conn, task)
+    if closeout and task["status"] != "done" and closeout["state"] in _CLOSEOUT_LABELS:
+        return _CLOSEOUT_LABELS[closeout["state"]]
+    repair_status = _repair_status(task)
+    if repair_status:
+        return repair_status
     if task["status"] == "needs_user":
         # needs_user 恒归 failed 列；此处仅防御性回退。
         return _BLOCKED_SUBSTATUS.get(column, "需人工处理")
@@ -407,6 +493,53 @@ def request_view(request: sqlite3.Row, now) -> dict:
     }
 
 
+def task_relations(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
+    """Project only saved, direct review-fix links within the same scope.
+
+    Brief views deliberately do not recurse through task_summary: a child can
+    itself have children, or historical source links can contain a cycle.
+    """
+    def brief(row):
+        return {
+            "task_id": row["task_id"],
+            "title": row["title"],
+            "display_status": task_display_status(conn, row, now),
+            "available": True,
+        }
+
+    parent = None
+    source_id = task["review_source_task_id"]
+    if source_id:
+        source = conn.execute(
+            "SELECT * FROM tasks WHERE task_id=? AND project_id=? "
+            "AND repository IS ? AND task_id!=? AND save_state!='purged'",
+            (source_id, task["project_id"], task["repository"], task["task_id"]),
+        ).fetchone()
+        parent = brief(source) if source is not None else {
+            "task_id": source_id, "title": None, "display_status": None,
+            "available": False,
+        }
+    children = conn.execute(
+        "SELECT * FROM tasks WHERE review_source_task_id=? AND project_id=? "
+        "AND repository IS ? AND task_id!=? AND save_state!='purged' "
+        "ORDER BY created_at, task_id",
+        (task["task_id"], task["project_id"], task["repository"], task["task_id"]),
+    ).fetchall()
+    return {"parent": parent, "children": [brief(child) for child in children]}
+
+
+def task_delivery_view(task) -> Optional[dict]:
+    """The completed lifecycle supersedes a merge receipt's earlier progress."""
+    from . import core
+    delivery = core.delivery_of(task)
+    notice = delivery.get("auto_merge") or {}
+    if (task["status"] == "done" and delivery.get("pr_state") == "MERGED"
+            and delivery.get("merged_at") and notice.get("state") == "merged"
+            and delivery.get("head_sha") and notice.get("head_sha") == delivery["head_sha"]):
+        delivery = dict(delivery, auto_merge=dict(notice, reason="PR 已合并，任务已完成"))
+    return delivery or None
+
+
 def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     active = active_request_for_task(conn, task["task_id"])
     queued = queued_request_for_task(conn, task["task_id"])
@@ -430,7 +563,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     board_column = task_board_column(task, conn, now)
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
-    from . import core, automation_policy
+    from . import core, automation_policy, review_repair, task_ai_action
     automation = core.automation_of(task)
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
@@ -440,8 +573,13 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "execution_question": question,
         "question_preview": question_preview(question),
         "automation": automation or None,
-        "delivery": core.delivery_of(task) or None,
+        "review_repair": review_repair.view(conn, task, now),
+        "task_ai_action": task_ai_action.projection(conn, task, now),
+        "delivery": task_delivery_view(task),
+        "release": _release(conn, task),
         "review_history": db.task_extra(task).get("review_history") or [],
+        "parent_closeout": _parent_closeout(conn, task, now),
+        "task_relations": task_relations(conn, task, now),
         "task_id": task["task_id"],
         "queued_plan_request_id": queued_plan["request_id"] if queued_plan is not None else None,
         "project_id": task["project_id"],
@@ -483,7 +621,23 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     # the same evidence/actions builder as attention-list.
     from .engine import decide, attention
     phase, condition = decide.phase_condition(task["status"]) or (None, None)
-    if task["status"] == "in_review" and (
+    repair = core.review_repair_of(task)
+    repair_state = repair.get("state")
+    if _release_display(conn, task):
+        phase, condition = "delivery", "syncing"
+    elif (view["parent_closeout"] and task["status"] != "done"
+            and view["parent_closeout"]["state"] in _CLOSEOUT_LABELS):
+        phase, condition = "delivery", "syncing"
+    elif _repair_status(task) and repair.get("source_kind") == "merge_conflict":
+        if repair_state == "awaiting_review":
+            phase, condition = "review", "reviewing"
+        elif task["status"] == "running":
+            phase, condition = "observe", "running"
+        else:
+            phase, condition = "dispatch", "submitting" if task["status"] in ("prepared", "submitting") else "confirmed"
+    elif _repair_status(task):
+        phase, condition = "review", "reviewing" if repair_state == "awaiting_review" else "repairing"
+    elif task["status"] == "in_review" and db.task_extra(task).get("review_conclusion") != "changes_requested" and (
             db.task_extra(task).get("review_conclusion") == "pass"
             or core.delivery_of(task).get("pr_number")
             or core.delivery_of(task).get("pushed_sha")):
@@ -572,7 +726,8 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             code = task["failure_code"]
             if code == "verification_unconfirmed":
                 from . import engine_claim_scope
-                if engine_claim_scope.effective_mode(conn, task["project_id"]) != "live":
+                if (engine_claim_scope.effective_mode(conn, task["project_id"]) != "live"
+                        and core.review_repair_of(task).get("source_kind") != "merge_conflict"):
                     actions.append("accept_verification")
             from . import verification_recovery
             if verification_recovery.candidate(conn, task):
@@ -616,6 +771,20 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
     # never appear — leaving the one-way door D4 diagnoses half open.
     if db.task_auto_paused(task) or core.automation_of(task).get("manual_takeover"):
         actions.append("resume-auto")
+    from . import review_repair
+    repair = review_repair.candidate(task)
+    if repair and repair.get("state") == "held":
+        actions = [action for action in actions if action != "enqueue"]
+    closeout = _parent_closeout(conn, task, now)
+    if closeout and task["status"] != "done":
+        actions = [action for action in actions if action not in ("enqueue", "mark_done")]
+        if closeout["can_complete"] and db.task_is_active(task):
+            actions.append("closeout_parent")
+    from . import release_delivery
+    if release_delivery.completion_gate(conn, task) is not None:
+        actions = [action for action in actions if action not in ("mark_done", "closeout_parent")]
+    if _release_display(conn, task):
+        actions = [action for action in actions if action != "enqueue"]
     return actions
 
 
@@ -953,6 +1122,8 @@ _EVENT_KIND_CN = {
     "review_stage_recovered": "评审阶段已恢复",
     "review_result_cleared": "旧评审结果已留存",
     "review_repair_prepared": "评审修复材料已准备",
+    "task_ai_action_started": "AI 一次性处理已排队",
+    "task_ai_action_reviewed": "AI 处理复审结果",
     "verification_checks_started": "验证检查已开始",
     "verification_checks_completed": "验证检查已完成",
     "review_supplemented": "评审证据已补充",

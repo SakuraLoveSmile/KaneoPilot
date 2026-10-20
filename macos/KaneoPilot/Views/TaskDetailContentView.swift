@@ -17,6 +17,8 @@ struct TaskDetailContentView: View {
     @State private var loading = true
     @State private var error: String?
     @State private var loadGeneration = 0
+    @State private var taskPath: [String] = []
+    private var currentTaskID: String { taskPath.last ?? taskID }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +26,7 @@ struct TaskDetailContentView: View {
                 headerBar
                 Divider()
             }
-            content
+            content.id(currentTaskID)
         }
         .background(Color.kpWindow)
         .focusable()
@@ -47,10 +49,13 @@ struct TaskDetailContentView: View {
             Task { await load() }
         }
         .onChange(of: taskID) {
+            taskPath = []
+        }
+        .onChange(of: currentTaskID) {
             loadGeneration += 1
             detail = nil
             events = []
-            tab = initialTab
+            tab = taskPath.isEmpty ? initialTab : .overview
             Task { await load() }
         }
     }
@@ -69,14 +74,20 @@ struct TaskDetailContentView: View {
 
     private var headerTitle: some View {
         HStack(spacing: Spacing.s) {
+            if !taskPath.isEmpty {
+                Button { taskPath.removeLast() } label: {
+                    Label("返回上一级", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless).font(.kpSmall)
+            }
             if let project = detail?.projectName {
                 Text(project).font(.kpSmall).lineLimit(1).foregroundStyle(.secondary)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
             }
-            Text(detail?.title ?? taskID).font(.kpTitle)
+            Text(detail?.title ?? currentTaskID).font(.kpTitle)
                 .lineLimit(2).truncationMode(.tail)
-                .textSelection(.enabled).help(detail?.title ?? taskID)
+                .textSelection(.enabled).help(detail?.title ?? currentTaskID)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityAddTraits(.isHeader)
         }
@@ -85,7 +96,11 @@ struct TaskDetailContentView: View {
     private var headerStatus: some View {
         HStack(spacing: Spacing.m) {
             if let detail {
-                StatusBadge(status: DisplayStatus.effective(detail))
+                if detail.status != "done", let release = detail.release, release.required {
+                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+                } else {
+                    StatusBadge(status: DisplayStatus.effective(detail))
+                }
                 if detail.executionQuestion?.state == "open", detail.executionQuestion?.answerable == true, detail.readOnly != true {
                     StatusBadge(status: "等待你回答")
                 }
@@ -123,7 +138,8 @@ struct TaskDetailContentView: View {
                     events: events,
                     onSwitchTab: { tab = $0 },
                     onPreparePlanning: onPreparePlanning,
-                    onRefreshDetail: { Task { await load() } }
+                    onRefreshDetail: { Task { await load() } },
+                    onOpenTask: openRelatedTask
                 )
             } else if loading {
                 LoadingView()
@@ -131,12 +147,13 @@ struct TaskDetailContentView: View {
                 errorStateView
             }
         case .plan:
-            PlanReaderView(taskID: taskID, detail: detail, showsHeaderInfo: !showsHeader)
+            PlanReaderView(taskID: currentTaskID, detail: detail, showsHeaderInfo: !showsHeader)
         case .execution:
-            TaskExecutionTabView(taskID: taskID, detail: detail, showsTaskTitle: !showsHeader)
+            TaskExecutionTabView(taskID: currentTaskID, detail: detail, showsTaskTitle: !showsHeader)
         case .review:
             if let detail {
-                TaskReviewTabView(detail: detail)
+                TaskReviewTabView(detail: detail, onOpenTask: openRelatedTask,
+                                  onOpenSession: { tab = .execution })
             } else if loading {
                 LoadingView()
             } else {
@@ -176,6 +193,12 @@ struct TaskDetailContentView: View {
         return responder is NSTextField
     }
 
+    private func openRelatedTask(_ id: String) {
+        guard id != currentTaskID else { return }
+        taskPath.append(id)
+        tab = .overview
+    }
+
     private func load() async {
         loadGeneration += 1
         let generation = loadGeneration
@@ -183,7 +206,7 @@ struct TaskDetailContentView: View {
         error = nil
         defer { if generation == loadGeneration { loading = false } }
         do {
-            let (task, evs) = try await model.fetchDetail(taskID: taskID)
+            let (task, evs) = try await model.fetchDetail(taskID: currentTaskID)
             guard generation == loadGeneration else { return }
             detail = task
             events = evs
@@ -553,6 +576,7 @@ struct TaskOverviewTabView: View {
     var onSwitchTab: ((TaskDetailTab) -> Void)? = nil
     var onPreparePlanning: ((String) -> Void)? = nil
     var onRefreshDetail: (() -> Void)? = nil
+    var onOpenTask: ((String) -> Void)? = nil
 
     @EnvironmentObject private var model: AppViewModel
     @State private var confirm: ConfirmableAction?
@@ -569,6 +593,7 @@ struct TaskOverviewTabView: View {
     @State private var confirmingExecutionStop = false
 
     private var reviewStore: ReviewResolutionStore? {
+        guard detail.parentCloseout == nil else { return nil }
         if let pending = model.pendingReviewResolutionStore(taskID: detail.taskId) { return pending }
         if let stale = model.expiredReviewResolutionStore(taskID: detail.taskId) { return stale }
         guard detail.readOnly != true, actions.contains("resolve_review_blocker"),
@@ -655,6 +680,14 @@ struct TaskOverviewTabView: View {
         (detail.saveState ?? "active") == "active"
     }
 
+    private var supplementsVerificationReport: Bool {
+        detail.taskAiAction?.current?.kind == "merge_conflict"
+    }
+
+    private var retryVerificationLabel: String {
+        AutomationPresentation.verificationRetryLabel(supplement: supplementsVerificationReport)
+    }
+
     private var visibleActions: [String] {
         if detail.readOnly == true { return [] }
         // 动作资格由核心提供，不在界面补充恢复、自动推进或移出动作。
@@ -669,6 +702,10 @@ struct TaskOverviewTabView: View {
             return available.contains("recheck") ? "recheck" : nil
         }
         if !isActive { return available.contains("restore") ? "restore" : nil }
+        if available.contains("closeout_parent") { return "closeout_parent" }
+        if reviewPassedAwaitingDelivery {
+            return available.contains("recheck") ? "recheck" : nil
+        }
         // 主动作优先级：查看确认计划 → 恢复已完成执行后的评审 → 重新核验 → 接受验证 →
         // 恢复/重试 → 恢复任务自动推进 → 准备规划 → 安排当前阶段 → 校验。
         // 危险裁决、重新规划、取消、归档等低频操作始终留在更多操作中。
@@ -698,9 +735,21 @@ struct TaskOverviewTabView: View {
         if detail.sendState == "unknown" {
             return "发送结果不明。先重新校验并查看执行证据，再通过更多操作作出裁决。"
         }
+        if let release = detail.release, release.required, detail.status != "done" { return release.reason }
+        if let closeout = detail.parentCloseout { return closeout.reason }
+        if let repair = detail.reviewRepair { return repair.reason }
         if executionAwaitingPlus { return "这道执行提问只能在 Plus 中回答，本机不提供回答入口；可在「更多操作」中停止本轮。" }
         if detail.activeRequest?.status == "queued" && primaryAction != "confirm_dispatch" {
             return "\(queuedKindTitle)已排队，尚未开始；执行端领取后才会推进。"
+        }
+        if reviewPassedAwaitingDelivery {
+            if let notice = detail.delivery?.autoMergeNotice { return notice.reason }
+            if detail.delivery?.mode == "pr" {
+                return detail.delivery?.prState?.uppercased() == "MERGED"
+                    ? "评审已通过，PR 已合并，等待交付状态同步完成。"
+                    : "评审已通过，等待 PR 合并后同步完成；可打开 PR 查看交付结果。"
+            }
+            return "评审已通过，等待交付完成；可查看交付记录或重新校验当前状态。"
         }
         switch primaryAction {
         case "answer_execution_questions": return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交到 Plus。"
@@ -708,7 +757,9 @@ struct TaskOverviewTabView: View {
         case "resolve_review_blocker": return "查看上方报告摘要，选择准备修复或补充证据；原成果与报告保留。"
         case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
         case "recover_review": return "保留执行成果并恢复到待评审，恢复后自动推进保持暂停。"
-        case "retry_verification": return "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
+        case "retry_verification": return supplementsVerificationReport
+            ? "沿用原计划、原工作树和已有冲突解决结果，让 Plus 补齐验证及正式报告；确认后会调用模型并产生费用。"
+            : "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
         case "revert_engine_fix": return AutomationPresentation.revertMessage
@@ -721,6 +772,10 @@ struct TaskOverviewTabView: View {
         case "recheck": return "重新核验计划、来源和远端状态，再查看下一步允许的操作。"
         default: return "查看当前阶段的记录与证据，自动化进度会随刷新更新。"
         }
+    }
+
+    private var reviewPassedAwaitingDelivery: Bool {
+        detail.phase == "delivery" && detail.reviewSummary?.conclusion == "pass" && detail.exception == nil
     }
 
     var body: some View {
@@ -739,12 +794,12 @@ struct TaskOverviewTabView: View {
                             else { model.openPlanning(focusTaskID: detail.taskId) }
                         }, onRefreshDetail: onRefreshDetail)
                         .id("review-resolution")
-                } else if isBlocked, detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
+                } else if detail.parentCloseout == nil, isBlocked, detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
                     // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
                 }
 
-                if let evidence = detail.attention?.evidence, !evidence.isEmpty {
+                if detail.parentCloseout == nil, let evidence = detail.attention?.evidence, !evidence.isEmpty {
                     DisclosureGroup("阻塞证据") {
                         VStack(alignment: .leading, spacing: Spacing.s) {
                             ForEach(Array(evidence.enumerated()), id: \.offset) { _, item in
@@ -766,6 +821,14 @@ struct TaskOverviewTabView: View {
                 // 2. 状态与下一步安全动作
                 nextStepSection
 
+                if let closeout = detail.parentCloseout {
+                    ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
+                } else if let repair = detail.reviewRepair {
+                    ReviewRepairSection(taskID: detail.taskId, repair: repair,
+                                        readOnly: detail.readOnly == true,
+                                        onOpenSession: onSwitchTab.map { callback in { callback(.execution) } })
+                }
+
                 // 3. 进展：阶段步进、已结束的问答与直达入口
                 VStack(alignment: .leading, spacing: Spacing.m) {
                     PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false)
@@ -778,12 +841,18 @@ struct TaskOverviewTabView: View {
                     stageShortcutsSection
                 }
 
+                if let relations = detail.taskRelations {
+                    TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
+                }
+
                 // 4. Kaneo 关联信息
                 if hasKaneo {
                     kaneoSection
                 }
 
-                TaskAutomationSections(detail: detail)
+                TaskAutomationSections(detail: detail,
+                    onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
+                    onRefreshDetail: onRefreshDetail)
 
                 // 5. 技术详情与长路径（可折叠）
                 technicalDetailsSection
@@ -800,28 +869,32 @@ struct TaskOverviewTabView: View {
             withAnimation { proxy.scrollTo("review-resolution", anchor: .top) }
         }
         .safeAreaInset(edge: .bottom) { actionBar }
-        .alert("重新核验未完成", isPresented: Binding(
+        .alert(supplementsVerificationReport ? "验证恢复未完成" : "重新核验未完成", isPresented: Binding(
             get: { reverifyError != nil }, set: { if !$0 { reverifyError = nil } }
         )) {
             Button("好", role: .cancel) { reverifyError = nil }
         } message: {
             Text(reverifyError ?? "")
         }
-        .confirmationDialog("让 Plus 重新执行并验证？", isPresented: Binding(
+        .confirmationDialog(supplementsVerificationReport ? "让 Plus 补齐验证报告？" : "让 Plus 重新执行并验证？", isPresented: Binding(
             get: { retryVerificationRunID != nil },
             set: { if !$0 { retryVerificationRunID = nil } }
         ), titleVisibility: .visible) {
-            Button("让 Plus 重新执行并验证") {
+            Button(supplementsVerificationReport ? "补齐验证报告" : "让 Plus 重新执行并验证") {
                 guard let runID = retryVerificationRunID else { return }
                 retryVerificationRunID = nil
                 Task {
                     await model.resolve(taskID: detail.taskId, action: "retry_verification",
-                                        expectedExecutionRunID: runID, onError: { reverifyError = $0 })
+                                        expectedExecutionRunID: runID,
+                                        verificationReportSupplement: supplementsVerificationReport,
+                                        onError: { reverifyError = $0 })
                 }
             }
             Button("取消", role: .cancel) { retryVerificationRunID = nil }
         } message: {
-            Text("沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
+            Text(supplementsVerificationReport
+                 ? AutomationPresentation.verificationSupplementMessage
+                 : "沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
         }
         .confirmationDialog(
             confirm?.title ?? "",
@@ -907,11 +980,11 @@ struct TaskOverviewTabView: View {
     private var blockedBanner: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(AutomationPresentation.title(detail.failureCode) ?? "任务当前处于阻塞状态")
+                Image(systemName: detail.exception?.isFailed == true ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(detail.exception?.isFailed == true ? Color.red : .orange)
+                Text(detail.exception?.isFailed == true ? (detail.exception?.label ?? "任务失败") : (AutomationPresentation.title(detail.failureCode) ?? detail.exception?.label ?? "任务当前处于阻塞状态"))
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(detail.exception?.isFailed == true ? Color.red : .orange)
             }
             if let reason = detail.blockedReason {
                 Text(reason)
@@ -928,7 +1001,7 @@ struct TaskOverviewTabView: View {
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background((detail.exception?.isFailed == true ? Color.red : .orange).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - 下一步安全动作与状态
@@ -936,9 +1009,11 @@ struct TaskOverviewTabView: View {
     /// 下一步说明与最近更新。头部已有状态与阶段，这里不重复，也不另设区段标题。
     private var nextStepSection: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            Text(nextStepExplanation)
-                .font(.kpBody)
-                .fixedSize(horizontal: false, vertical: true)
+            if detail.parentCloseout == nil && !(detail.release?.required == true && detail.status != "done") {
+                Text(nextStepExplanation)
+                    .font(.kpBody)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !statusFacts.isEmpty {
                 Text(statusFacts.joined(separator: " · "))
                     .font(.kpSmall).foregroundStyle(.secondary)
@@ -967,7 +1042,7 @@ struct TaskOverviewTabView: View {
                 Button("查看计划正文") { onSwitchTab?(.plan) }
             }
             if hasExecution {
-                Button("查看执行会话") { onSwitchTab?(.execution) }
+                Button(detail.reviewRepair?.repairExecutionRunId != nil ? "查看修复会话" : "查看执行会话") { onSwitchTab?(.execution) }
             }
             if hasReview {
                 Button("查看评审报告") { onSwitchTab?(.review) }
@@ -1123,6 +1198,16 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func actionButton(_ action: String) -> some View {
         switch action {
+        case "closeout_parent":
+            Button(model.actionInFlight == "收尾校验" ? "正在核对…" : detail.parentCloseout?.actionLabel ?? "校验并完成") {
+                guard let closeout = detail.parentCloseout else { return }
+                Task {
+                    await model.closeoutParentTask(taskID: detail.taskId, contextSHA256: closeout.contextSha256)
+                    onRefreshDetail?()
+                }
+            }
+            .disabled(model.busy || detail.parentCloseout == nil)
+            .help("核对已有验证、评审与合并证据；不调用模型，不重新执行验证。")
         case "answer_execution_questions":
             Button("回答执行问题") { executionFocusRequest += 1 }
                 .disabled(executionStore == nil)
@@ -1133,9 +1218,10 @@ struct TaskOverviewTabView: View {
             Button("处理评审阻塞") { reviewFocusRequest += 1 }
                 .disabled(reviewStore == nil)
         case "retry_verification":
-            Button("让 Plus 重新执行并验证") { retryVerificationRunID = detail.runId }
+            Button(retryVerificationLabel) { retryVerificationRunID = detail.runId }
                 .disabled(model.busy || detail.runId == nil)
-                .help("沿用原计划和工作树，会启动新的 Plus 执行轮次。")
+                .help(supplementsVerificationReport ? AutomationPresentation.verificationSupplementMessage
+                      : "沿用原计划和工作树，会启动新的 Plus 执行轮次。")
         case "reverify":
             Button("重新核验验证证据") {
                 guard let runID = detail.runId else { return }

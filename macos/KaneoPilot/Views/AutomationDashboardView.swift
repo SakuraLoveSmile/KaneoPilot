@@ -15,6 +15,8 @@ struct AutomationDashboardView: View {
     @State private var appliedQuery = ""
     @State private var phase = ""
     @State private var selectedID: String?
+    @State private var healthChecksExpanded = false
+    @State private var engineRecordsExpanded = false
     private var inbox: [AttentionItem] {
         model.attentionItems.filter { item in
             (appliedQuery.isEmpty || [item.title, item.projectName].compactMap { $0 }.joined(separator: " ").localizedCaseInsensitiveContains(appliedQuery))
@@ -150,7 +152,7 @@ struct AutomationDashboardView: View {
                     }.buttonStyle(.borderless)
                 }
             }
-            Text("已排队要等执行端领取后才会开始；PR 合并后才完成交付。")
+            Text("已排队要等执行端领取后才会开始；开启构建发布的项目在版本发布后完成交付。")
                 .font(.kpSmall).foregroundStyle(.secondary)
         }
     }
@@ -197,18 +199,103 @@ struct AutomationDashboardView: View {
                 Button(model.globalPaused ? "恢复自动推进" : "暂停自动推进") { Task { await model.toggleGlobalPause() } }
                     .disabled(model.overview == nil || model.busy)
             }
-            Text(engine.engineStatus?.instances.contains(where: { $0.active == true }) == true ? "引擎心跳正常" : "引擎心跳未确认")
-                .font(.kpBody)
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Label(engineHealthTitle, systemImage: engineHealthIcon)
+                    .foregroundStyle(engine.engineStatus == nil ? Color.secondary : engineHealthy ? .green : .orange)
+                Label(doctorHealthTitle, systemImage: doctorHealthIcon)
+                    .foregroundStyle(doctorNeedsAttention ? Color.orange : Color.secondary)
+            }.font(.kpBody)
             if let error = engine.error { Text(error).font(.kpSmall).foregroundStyle(.red) }
-            ForEach(engine.engineStatus?.instances ?? []) { instance in
-                Text("\(instance.state ?? "未提供状态") · PID \(instance.pid.map(String.init) ?? "—") · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+            ForEach(doctorIssues) { check in
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Label(Labels.doctorCheck(check.name), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Text(check.detail ?? "未提供检查结果，请重新诊断。")
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }.font(.kpSmall)
             }
-            if model.doctor == nil { Text("尚未检测环境，点击在线诊断获取检查结果。").font(.kpSmall).foregroundStyle(.secondary) }
-            ForEach(model.doctor?.checks ?? []) { check in
-                Label("\(check.name)：\(check.detail ?? "未提供详情")", systemImage: check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.kpSmall).foregroundStyle(check.ok == true ? Color.secondary : Color.orange)
+            if !doctorChecks.isEmpty {
+                DisclosureGroup("诊断详情（\(doctorChecks.count) 项）", isExpanded: $healthChecksExpanded) {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        ForEach(doctorChecks) { check in
+                            HStack(alignment: .top, spacing: Spacing.m) {
+                                Label(Labels.doctorCheck(check.name), systemImage: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
+                                    .frame(width: 148, alignment: .leading)
+                                Text(check.skipped == true ? "未检查" : check.ok == true ? "通过" : check.ok == false ? "未通过" : "未确认")
+                                    .frame(width: 44, alignment: .leading)
+                                Text(check.detail ?? "未提供详情")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.enabled)
+                            }
+                            .foregroundStyle(check.skipped != true && check.ok != true ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }.font(.kpSmall).padding(.top, Spacing.s)
+                }.font(.kpSmall).foregroundStyle(.secondary)
             }
+            if !engineRecords.isEmpty {
+                DisclosureGroup("引擎记录（\(engineRecords.count) 条）", isExpanded: $engineRecordsExpanded) {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        ForEach(engineRecords) { instance in
+                            HStack(alignment: .top, spacing: Spacing.m) {
+                                Text(engineRecordTitle(instance)).frame(width: 100, alignment: .leading)
+                                    .foregroundStyle(instance.active == true ? Color.green : Color.secondary)
+                                Text("PID \(instance.pid.map(String.init) ?? "—")")
+                                    .monospacedDigit().frame(width: 96, alignment: .leading)
+                                Text("启动 \(TimeFormat.short(instance.startedAt)) · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.fixedSize(horizontal: false, vertical: true)
+                        }
+                    }.font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled).padding(.top, Spacing.s)
+                }.font(.kpSmall).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var engineHealthy: Bool {
+        engine.engineStatus?.instances.contains { $0.active == true } == true
+    }
+    private var engineHealthTitle: String {
+        engine.engineStatus == nil ? "正在读取引擎状态…" : engineHealthy ? "引擎心跳正常" : "引擎心跳未确认"
+    }
+    private var engineHealthIcon: String {
+        engine.engineStatus == nil ? "clock" : engineHealthy ? "checkmark.circle" : "exclamationmark.triangle"
+    }
+    private var doctorChecks: [DoctorCheck] { model.doctor?.checks ?? [] }
+    private var doctorIssues: [DoctorCheck] { doctorChecks.filter { $0.skipped != true && $0.ok != true } }
+    private var doctorNeedsAttention: Bool {
+        model.doctor != nil && (model.doctor?.ok != true || doctorChecks.isEmpty || !doctorIssues.isEmpty)
+    }
+    private var doctorHealthTitle: String {
+        if model.doctorRunning { return "正在诊断…" }
+        guard model.doctor != nil else { return "尚未诊断 · 点击在线诊断检查环境" }
+        if !doctorIssues.isEmpty { return "\(doctorIssues.count) 项检查需处理" }
+        if doctorNeedsAttention { return "诊断结果未确认，请重新检查" }
+        let passed = doctorChecks.filter { $0.skipped != true && $0.ok == true }.count
+        let skipped = doctorChecks.filter { $0.skipped == true }.count
+        if passed == 0 { return "\(skipped) 项未检查" }
+        return "\(passed) 项检查通过" + (skipped > 0 ? " · \(skipped) 项未检查" : "")
+    }
+    private var doctorHealthIcon: String {
+        if model.doctorRunning { return "clock" }
+        if model.doctor == nil { return "stethoscope" }
+        if doctorNeedsAttention { return "exclamationmark.triangle" }
+        return doctorChecks.contains { $0.skipped != true && $0.ok == true } ? "checkmark.circle" : "minus.circle"
+    }
+    private var engineRecords: [EngineStatusResponse.Instance] {
+        (engine.engineStatus?.instances ?? []).sorted {
+            if ($0.active == true) != ($1.active == true) { return $0.active == true }
+            return (TimeFormat.parse($0.startedAt) ?? .distantPast) > (TimeFormat.parse($1.startedAt) ?? .distantPast)
+        }
+    }
+    private func engineRecordTitle(_ instance: EngineStatusResponse.Instance) -> String {
+        if instance.active == true { return "运行中" }
+        switch instance.state {
+        case "stopped": return "已停止"
+        case "released": return "已释放"
+        case "active": return "心跳未确认"
+        default: return instance.state ?? "未提供状态"
         }
     }
     private func attentionStateTitle(_ state: String?) -> String {

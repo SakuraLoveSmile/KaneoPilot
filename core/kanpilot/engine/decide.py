@@ -123,7 +123,7 @@ def phase_condition(
     """
     if phase is not None:
         return (phase, condition)
-    if status == "in_review" and (fix_open or fix_round > 0):
+    if status == "in_review" and fix_open:
         return ("review", "repairing")
     return _STATUS_PHASE_CONDITION.get(status)
 

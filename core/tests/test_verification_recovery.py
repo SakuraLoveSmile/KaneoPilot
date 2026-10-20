@@ -208,6 +208,20 @@ class TestVerificationRecovery(KanpilotTestCase):
         self.write_files()
         self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")
 
+    def test_reverify_reports_the_exact_check_gap_and_preserves_the_block(self):
+        passed = goal_checks(self.commands)
+        for checks, reason in ((passed[:1], "缺少 1 项检查记录"),
+                               ([passed[0], dict(passed[1], exitCode=None)], "缺少整数退出码"),
+                               ([passed[0], dict(passed[1], result="failed")], "检查状态与退出码不一致")):
+            self.goal["checks"] = checks
+            before = self.state()
+            error = self.call_err("resolve", self.payload)
+            self.assertEqual(error.code, "conflict")
+            self.assertIn(reason, error.message)
+            self.assertIn(self.commands[1], error.message)
+            self.assertNotIn("未就绪", error.message)
+            self.assertEqual(before, self.state())
+
     def test_report_check_with_inline_env_prefix_matches_frozen_commands(self):
         self.goal["checks"] = goal_checks(["FLUTTER_ROOT=/opt/flutter " + command for command in self.commands])
         self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")

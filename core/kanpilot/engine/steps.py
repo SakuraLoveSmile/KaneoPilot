@@ -49,6 +49,13 @@ def commands_for(decision: decide.Decision, task: dict) -> List[CommandCall]:
             "expected_execution_run_id": fix["execution_run_id"], "engine_fix": fix,
             "note": "核心判定后的有界自动补救"})]
 
+    if action == decide.START_FIX_ROUND and (task.get("review_repair") or {}).get("state") == "held":
+        fix = task["review_repair"]
+        return [CommandCall("start-review-repair", {"task_id": task_id,
+            "expected_execution_run_id": fix["source_execution_run_id"],
+            "expected_review_key": fix["review_key"], "expected_report_sha256": fix["report_sha256"],
+            "expected_plan_sha256": fix["plan_sha256"]}, kind="dispatch")]
+
     if action == decide.CONFIRM_PLAN:
         return [CommandCall(
             "enqueue",

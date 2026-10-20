@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import KanpilotTestCase
-from kanpilot import (cli, codex_planner, db, desktop_queue, plan_answers,
+from kanpilot import (cli, codex_planner, core, db, desktop_queue, plan_answers,
                       plan_questions, planner_inputs, planner_runner, util)
 
 QUESTION = {"id": "button_color", "title": "播放全部采用哪种配色？", "description": "只改按钮配色",
@@ -16,6 +16,28 @@ QUESTION = {"id": "button_color", "title": "播放全部采用哪种配色？", 
 
 
 class PlanAnswersTest(KanpilotTestCase):
+    def test_workspace_repair_blocks_continuation_but_keeps_answer_draft(self):
+        task_id, item, _ = self.blocked()
+        with db.connect(self.db_path) as conn:
+            db.set_setting(conn, "review_fix_workspace_repair:" + task_id, "repair:pending")
+        payload = self.payload(task_id, item)
+        self.error("submit-plan-answers", payload, "conflict")
+        task = self.call("get-task", {"task_id": task_id})["task"]
+        self.assertEqual(task["plan_clarification"]["saved_answers"], payload["answers"])
+        self.assertFalse(any(r["status"] in ("queued", "claimed") for r in self.requests()))
+
+    def test_updated_workspace_requires_fresh_input_instead_of_old_snapshot(self):
+        task_id, item, _ = self.blocked()
+        with db.connect(self.db_path) as conn:
+            original = db.request_payload(db.get_request(conn, item["request_id"]))
+            original.update(delivery_head_sha="a" * 40, plan_cwd="/old/worktree")
+            db.update_request(conn, item["request_id"], util.now_iso(), payload_json=original)
+            core.update_delivery(conn, db.require_task(conn, task_id), util.now_iso(),
+                                 head_sha="b" * 40, worktree_path="/old/worktree")
+        with self.assertRaisesRegex(util.KanpilotError, "重新准备规划材料"):
+            self.call("submit-plan-answers", self.payload(task_id, item))
+        self.assertFalse(any(r["status"] in ("queued", "claimed") for r in self.requests()))
+
     def blocked(self, questions=None, legacy=False, backend="codex"):
         task_id = "clarification-task"
         project_id = "example-project-05"
