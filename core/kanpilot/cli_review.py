@@ -338,7 +338,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
                 "mechanism": "cli_process", "exit_code": result.get("exit_code"),
                 "owner_stopped": job.get("owner_stopped"),
                 "output_path": str(directory / "last-message.txt") if backend == "codex"
-                               else str(directory / "claude.jsonl")})
+                               else str(directory / f"{backend}.jsonl")})
     except util.KanpilotError as exc:
         if exc.code == "stale_run":
             return review._stop_no_write(job=job, job_path=job_path, log=log,

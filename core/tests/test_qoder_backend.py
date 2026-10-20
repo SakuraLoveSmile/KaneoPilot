@@ -10,7 +10,7 @@ import pytest
 from helpers import KanpilotTestCase
 from test_cli_review import runner_scene  # noqa: F401 - shared isolated fixture
 from kanpilot import (cli, cli_review, constants, db, planner_config, planner_runner,
-                       qoder_cli, review_config, util)
+                       qoder_cli, review_config, stage_contract, util)
 
 
 FLAGS = ('--print --output-format --tools --permission-mode --strict-mcp-config '
@@ -126,7 +126,13 @@ class QoderBackendTest(KanpilotTestCase):
             self.assertEqual(conn.execute('SELECT state FROM worktree_slots').fetchone()['state'], 'free')
         session = self.call('get-session', {'task_id': self.task_id, 'run_id': run_id})
         self.assertNotEqual(session.get('status'), 'unavailable')
-        self.assertEqual(json.loads((self.runs_root / self.task_id / run_id / 'job.json').read_text())['backend'], 'qoder')
+        job = json.loads((self.runs_root / self.task_id / run_id / 'job.json').read_text())
+        self.assertEqual(job['backend'], 'qoder')
+        contract = stage_contract.validate_contract(job['stage_contract'])
+        self.assertEqual(contract['harness_id'], 'qoder')
+        self.assertEqual(contract['config']['backend'], 'qoder')
+        result = stage_contract.validate_result(job['stage_result'], contract)
+        self.assertEqual(result['harness_id'], 'qoder')
 
     def test_needs_input_keeps_draft_and_questions(self):
         request_id = self.prepare('needs_input')
@@ -221,6 +227,12 @@ def test_review_real_fake_cli_settles_only_a_valid_result(runner_scene, tmp_path
     assert registered['conclusion'] == conclusion
     cost = next(payload for command, payload in calls if command == 'record-cost')
     assert cost['source'] == 'qoder' and cost['cost_usd'] is None
+    job_path, = (tmp_path / 'support' / 'executor-sessions' / 'review').glob('*/job.json')
+    job = json.loads(job_path.read_text())
+    result = stage_contract.validate_result(job['stage_result'], job['stage_contract'])
+    output_path = Path(result['evidence'][0]['output_path'])
+    assert output_path.name == 'qoder.jsonl'
+    assert output_path.is_file()
 
 
 def test_qoder_review_bad_business_json_cannot_register_pass(runner_scene, tmp_path, monkeypatch):
