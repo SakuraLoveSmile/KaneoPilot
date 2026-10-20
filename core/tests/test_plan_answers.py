@@ -313,10 +313,12 @@ class QuestionContractTest(KanpilotTestCase):
         path.write_text(json.dumps(output))
         parsed = planner_runner.parse_output(path)
         desktop = desktop_queue._plan_result(output)
-        self.assertEqual(parsed, desktop)
-        self.assertEqual(parsed["questions"][0], QUESTION)
-        self.assertEqual(parsed["questions"][1]["options"], [])
-        self.assertNotIn("{'id'", plan_questions.summary(parsed["questions"]))
+        self.assertEqual(parsed, output)
+        normalized = dict(parsed, questions=plan_questions.normalize(parsed["questions"]))
+        self.assertEqual(normalized, desktop)
+        self.assertEqual(normalized["questions"][0], QUESTION)
+        self.assertEqual(normalized["questions"][1]["options"], [])
+        self.assertNotIn("{'id'", plan_questions.summary(normalized["questions"]))
         self.assertEqual(codex_planner.output_schema()["properties"]["questions"]["items"], plan_questions.QUESTION_SCHEMA)
 
     def test_invalid_question_container_is_not_silently_dropped(self):
