@@ -210,20 +210,17 @@ def test_remote_done_still_verifies_merge_and_release_when_completion_is_gated(m
     assert case.task()["status"] == "in_review"
 
 
-def test_runner_does_not_advance_while_release_is_building():
-    from kanpilot import delivery_runner
-    from unittest.mock import Mock
-    controller = Mock()
-    controller.claim = dict(context=dict(task_id="isolated"))
-    controller.identity.return_value = dict(request_id="request", run_id="delivery")
-    def call(command, payload):
-        if command == "get-task":
-            return dict(task=dict(run_id="execution", delivery=dict(
-                pr_number=1, pushed_sha="head", head_sha="head")))
-        if command == "delivery-sync":
-            return dict(outcome="waiting", release=dict(state="building", reason="安装包构建中"))
-        raise AssertionError("unexpected command: " + command)
-    controller.call.side_effect = call
-    delivery_runner._delivery(controller)
-    controller.report.assert_called_once_with("succeeded", progress="安装包构建中")
+def test_runner_does_not_advance_while_release_is_building(monkeypatch, tmp_path):
+    from test_delivery_runner import invoke
+
+    code, calls, _ = invoke(monkeypatch, tmp_path,
+        delivery=dict(pr_number=1, pushed_sha="head", head_sha="head"),
+        sync=dict(outcome="waiting", release=dict(state="building", reason="安装包构建中")))
+    assert code == 0
+    commands = [command for command, _ in calls]
+    assert "delivery-publish" not in commands
+    assert "advance-task" not in commands
+    reports = [payload for command, payload in calls if command == "report"]
+    assert reports == [dict(request_id="request", run_id="delivery-run",
+                            outcome="succeeded", progress="安装包构建中")]
 
