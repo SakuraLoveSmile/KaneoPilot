@@ -5,7 +5,200 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import bridge, constants, core, db, gh_client, git_delivery, pr_auto_merge, remote, util
+from . import (bridge, constants, core, db, delivery_contract, gh_client,
+               git_delivery, pr_auto_merge, remote, runtime_operations, util)
+
+
+class _UnknownDelivery(Exception):
+    pass
+
+
+def _uncertain(exc):
+    return (getattr(exc, "operation_dispatched", False)
+            or isinstance(exc, bridge.BridgeError)
+            or isinstance(exc, gh_client.GhError) and exc.kind in ("timeout", "transient")
+            or isinstance(exc, git_delivery.GitDeliveryError) and exc.code == "push_failed")
+
+
+def _receipt_data(row):
+    return util.jload(row["result_json"]) or {}
+
+
+def _receipt_intent(row):
+    data = _receipt_data(row)
+    return data.get("intent", data)
+
+
+def _select_attempt(ctx, scope, root_id, intent, claim, kind):
+    """Run under the writer lock: uncertain writes outrank new retry intent."""
+    rows = ctx.conn.execute("SELECT * FROM runtime_operations WHERE scope_id=? ORDER BY created_at,operation_id",
+                            (scope,)).fetchall()
+    family = [row for row in rows if row["operation_id"] == root_id
+              or _receipt_intent(row).get("retry_root") == root_id]
+    pending = [row for row in rows if row["status"] in ("prepared", "unknown")]
+    if pending:
+        if len(pending) != 1 or pending[0] not in family:
+            raise _UnknownDelivery(kind)
+        selected = pending[0]
+    else:
+        accepted = [row for row in family if row["status"] == "accepted"]
+        if accepted:
+            selected = accepted[-1]
+        else:
+            root = next((row for row in family if row["operation_id"] == root_id), None)
+            if root is None:
+                return root_id, intent
+            if root["status"] != "rejected" or _receipt_data(root).get("claim") == claim:
+                selected = root
+            else:
+                retry_id = runtime_operations.compute_request_sha256({"retry_root": root_id, "claim": claim})
+                selected = next((row for row in family if row["operation_id"] == retry_id), None)
+                if selected is None:
+                    return retry_id, dict(intent, retry_root=root_id, retry_of=root_id, retry_claim=claim)
+    original = _receipt_intent(selected)
+    # Legacy accepted receipts contain only the observation; their stable root
+    # identity and begin_operation request hash still verify the arguments.
+    if selected["operation_id"] == root_id and "arguments" not in original:
+        return root_id, intent
+    base = {key: value for key, value in original.items()
+            if key not in ("retry_root", "retry_of", "retry_claim")}
+    util.require(base == intent, "交付操作已冻结不同参数，不能复用回执", "conflict")
+    return selected["operation_id"], original
+
+
+def _raise_rejected(data):
+    rejection = data.get("rejection") or {}
+    message = rejection.get("message") or "交付操作已明确拒绝，等待下一合法领取轮次重试"
+    if rejection.get("family") == "git":
+        raise git_delivery.GitDeliveryError(rejection.get("code") or "delivery_commit_failed", message)
+    raise gh_client.GhError(rejection.get("code") or "rejected", message)
+
+
+def _write_once(ctx, task, delivery, kind, arguments, boundary, send, observe):
+    """Persist intent before sending; a lost response only permits reads."""
+    intent = {"task_id": task["task_id"], "execution_run_id": task["run_id"],
+              "plan_sha256": task["plan_sha256"], "head_sha": delivery["head_sha"],
+              "review_key": task["review_key"], "review_report_sha256": task["review_report_sha256"],
+              "arguments": arguments}
+    scope = "delivery-" + kind + ":" + task["task_id"]
+    effect = dict(intent)
+    # PR title/body are frozen arguments, not a second permission to create
+    # the same PR. begin_operation rejects changed bytes under this identity.
+    if kind == "github_pr_create":
+        effect["arguments"] = {key: arguments[key] for key in ("repo", "base", "head")}
+    root_id = runtime_operations.compute_request_sha256(effect)
+    contract = (delivery.get("stage_contracts") or {}).get("publish") or {}
+    claim = {key: contract.get(key) for key in ("request_id", "run_id")}
+    util.require(all(claim.values()), "交付操作缺少当前领取身份", "validation_failed")
+    boundary()
+    with db.write_txn(ctx.conn):
+        boundary()
+        op_id, intent = _select_attempt(ctx, scope, root_id, intent, claim, kind)
+        prepared = runtime_operations.begin_operation(ctx.conn, scope, op_id, "core_delivery", kind, intent,
+                                                     now=ctx.now_iso)
+        if prepared["status"] == "prepared":
+            db.update_runtime_operation(ctx.conn, scope, op_id, ctx.now_iso,
+                                        result_json=util.jdump({"intent": intent, "claim": claim}))
+    slot = runtime_operations.reserve_downstream(ctx.conn, scope, op_id, "core_delivery", kind, intent)
+    boundary()
+    if ctx.conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? "
+            "AND status IN ('prepared','unknown') AND operation_id!=?", (scope, op_id)).fetchone():
+        raise _UnknownDelivery(kind)
+    if not slot["send"]:
+        if slot["status"] == "rejected":
+            _raise_rejected(slot["result"] or {})
+        try:
+            observed = observe(None)
+        except (git_delivery.GitDeliveryError, gh_client.GhError, bridge.BridgeError) as exc:
+            boundary()
+            if _uncertain(exc):
+                raise _UnknownDelivery(kind) from exc
+            raise
+        boundary()
+        if observed is None:
+            raise _UnknownDelivery(kind)
+    else:
+        try:
+            sent = send()
+        except (git_delivery.GitDeliveryError, gh_client.GhError, bridge.BridgeError) as exc:
+            # The downstream may have accepted the request. Leave its receipt
+            # unknown even when this process did not receive a usable response.
+            boundary()
+            if _uncertain(exc):
+                raise _UnknownDelivery(kind) from exc
+            with db.write_txn(ctx.conn):
+                boundary()
+                rejection = {"family": "git" if isinstance(exc, git_delivery.GitDeliveryError) else "github",
+                             "code": exc.code if isinstance(exc, git_delivery.GitDeliveryError) else exc.kind,
+                             "message": gh_client.redact(exc.message)}
+                runtime_operations.fail_operation(ctx.conn, scope, op_id, now=ctx.now_iso,
+                    result={"intent": intent, "claim": claim, "rejection": rejection})
+            raise
+        boundary()
+        try:
+            observed = observe(sent)
+        except (git_delivery.GitDeliveryError, gh_client.GhError, bridge.BridgeError) as exc:
+            boundary()
+            if _uncertain(exc):
+                raise _UnknownDelivery(kind) from exc
+            raise
+        boundary()
+        if observed is None:
+            raise _UnknownDelivery(kind)
+    with db.write_txn(ctx.conn):
+        boundary()
+        runtime_operations.complete_operation(ctx.conn, scope, op_id,
+            result={"intent": intent, "claim": claim, "observation": observed}, now=ctx.now_iso)
+    return observed
+
+
+def _reconcile_observed(ctx, task, delivery, kind, arguments, observed, boundary):
+    """An ordinary identity-checked read can settle a prior lost response."""
+    scope = "delivery-" + kind + ":" + task["task_id"]
+    rows = ctx.conn.execute("SELECT * FROM runtime_operations WHERE scope_id=? "
+        "AND status IN ('prepared','unknown')", (scope,)).fetchall()
+    for row in rows:
+        intent = _receipt_intent(row)
+        original = intent.get("arguments") or {}
+        if (row["harness_id"] == "core_delivery" and row["tool"] == kind
+                and intent.get("task_id") == task["task_id"]
+                and intent.get("head_sha") == delivery["head_sha"]
+                and all(original.get(key) == value for key, value in arguments.items())):
+            with db.write_txn(ctx.conn):
+                boundary()
+                runtime_operations.complete_operation(ctx.conn, scope, row["operation_id"],
+                    result={"intent": intent, "claim": _receipt_data(row).get("claim"),
+                            "observation": observed}, now=ctx.now_iso)
+
+
+def _observed_push(git_input, repo):
+    target = git_delivery._push_target(git_input["worktree_path"], repo)
+    ref = "refs/heads/" + git_input["branch"]
+    rows = git_delivery._value(["ls-remote", "--heads", target, ref], git_input["worktree_path"], 60).splitlines()
+    if rows == [git_input["head_sha"] + "\t" + ref]:
+        return {"pushed_sha": git_input["head_sha"]}
+    if rows:
+        raise git_delivery.GitDeliveryError("branch_diverged", "远端任务分支与冻结提交不一致")
+    return None
+
+
+def _with_contract(ctx, payload, operation, run):
+    task, delivery = _snapshot(ctx, payload, publish=operation == "publish")
+    contract, task, delivery = delivery_contract.begin(ctx, payload, task, delivery, operation)
+    result = run(ctx, payload, task, delivery, contract)
+    envelope = delivery_contract.verified_result(contract, task, payload, delivery, result)
+    with db.write_txn(ctx.conn):
+        fresh = db.require_task(ctx.conn, task["task_id"])
+        current = core.delivery_of(fresh)
+        util.require((current.get("stage_contracts") or {}).get(operation) == contract,
+                     "交付阶段契约已被替换", "conflict")
+        expected = dict(current, pr_number=delivery.get("pr_number"))
+        delivery_contract.validate_current(contract, fresh, payload, expected, operation)
+        core.require_stage_identity(ctx.conn, payload, fresh, util.now_dt(), stages=("delivery",))
+        results = dict(current.get("stage_results") or {})
+        results[operation] = envelope
+        core.update_delivery(ctx.conn, fresh, ctx.now_iso, stage_results=results)
+    return dict(result, stage_contract=contract, stage_result=envelope)
 
 
 def _public_text(value):
@@ -161,7 +354,10 @@ def _repository(task, delivery):
 
 
 def cmd_delivery_publish(ctx, payload) -> dict:
-    task, delivery = _snapshot(ctx, payload, publish=True)
+    return _with_contract(ctx, payload, "publish", _publish)
+
+
+def _publish(ctx, payload, task, delivery, contract):
     def boundary():
         fresh = _fresh(ctx, payload, task, delivery)
         _verify_review_report(fresh)
@@ -171,7 +367,10 @@ def cmd_delivery_publish(ctx, payload) -> dict:
         git_input = dict(delivery, repository=task["repository"])
         repo = _repository(task, delivery)
         boundary()
-        pushed = git_delivery.push_branch(git_input, expected_repo=repo, before_push=boundary)
+        pushed = _write_once(ctx, task, delivery, "git_push",
+            {"repo": repo, "branch": delivery["branch"], "sha": delivery["head_sha"]}, boundary,
+            lambda: git_delivery.push_branch(git_input, expected_repo=repo, before_push=boundary),
+            lambda _: _observed_push(git_input, repo))
         boundary()
         prs = gh_client.pr_list(repo, delivery["branch"])
         boundary()
@@ -192,10 +391,26 @@ def cmd_delivery_publish(ctx, payload) -> dict:
                 titles[sha] = git_delivery._value(["show", "-s", "--format=%s", sha], delivery["worktree_path"])
             title = _public_text("[Kaneo] " + " ".join(str(task["title"] or "").split()))[:100]
             boundary()
-            pr = gh_client.pr_create(repo, base=delivery["base_branch"], head=delivery["branch"],
-                                     title=title, body=build_pr_body(task, delivery, titles))
+            body = build_pr_body(task, delivery, titles)
+            arguments = {"repo": repo, "base": delivery["base_branch"], "head": delivery["branch"],
+                         "title": title, "body": body}
+            def observe_pr(sent):
+                # gh_client.pr_create returns a structured pr_view, not the
+                # create command's textual acceptance response.
+                candidates = [sent] if isinstance(sent, dict) else gh_client.pr_list(repo, delivery["branch"])
+                boundary()
+                if not candidates:
+                    return None
+                candidate = next((p for p in candidates if p.get("state") == "OPEN"), candidates[0])
+                _verify_pr_identity(candidate, repo, delivery, pushed["pushed_sha"])
+                return candidate
+            pr = _write_once(ctx, task, delivery, "github_pr_create", arguments, boundary,
+                lambda: gh_client.pr_create(repo, base=arguments["base"], head=arguments["head"],
+                                            title=title, body=body), observe_pr)
         boundary()
         _verify_pr_identity(pr, repo, delivery, pushed["pushed_sha"])
+        _reconcile_observed(ctx, task, delivery, "github_pr_create",
+            {"repo": repo, "base": delivery["base_branch"], "head": delivery["branch"]}, pr, boundary)
         if pr["state"] == "CLOSED":
             return _closed(ctx, payload, task, delivery, pr)
         boundary()
@@ -206,9 +421,19 @@ def cmd_delivery_publish(ctx, payload) -> dict:
         client = remote.get_client()
         marker = "[kaneopilot:delivery:" + task["task_id"] + "]"
         boundary()
-        if not remote.find_marker_comment(client, task["task_id"], marker):
+        comment = remote.find_marker_comment(client, task["task_id"], marker)
+        content = marker + " 已创建 PR：" + pr["url"]
+        if not comment:
             boundary()
-            remote.post_comment(client, task["task_id"], marker + " 已创建 PR：" + pr["url"])
+            _write_once(ctx, task, delivery, "kaneo_comment", {"content": content}, boundary,
+                lambda: remote.post_comment(client, task["task_id"], content),
+                lambda _: remote.find_marker_comment(client, task["task_id"], marker))
+        else:
+            _reconcile_observed(ctx, task, delivery, "kaneo_comment", {"content": content}, comment, boundary)
+    except _UnknownDelivery as exc:
+        boundary()
+        return {"outcome": "waiting", "operation_state": "unknown", "failure_code": "delivery_unknown",
+                "message": "交付操作 " + str(exc) + " 结果未知，保留回执并只读对账，不重复发送"}
     except (git_delivery.GitDeliveryError, gh_client.GhError) as exc:
         return _failure(ctx, payload, task, delivery, exc)
     except bridge.BridgeError as exc:
@@ -216,9 +441,13 @@ def cmd_delivery_publish(ctx, payload) -> dict:
     boundary()
     with db.write_txn(ctx.conn):
         fresh = _fresh(ctx, payload, task, delivery)
+        envelope = delivery_contract.verified_result(contract, fresh, payload, delivery,
+            {"outcome": "published", "pr_number": pr["number"], "pr_url": pr["url"]})
+        results = dict(delivery.get("stage_results") or {}, publish=envelope)
         core.update_delivery(ctx.conn, fresh, ctx.now_iso, pushed_sha=pushed["pushed_sha"],
                              pr_number=pr["number"], pr_url=pr["url"], pr_state=pr["state"],
                              kaneo_comment_at=ctx.now_iso, publish_failures=0,
+                             stage_results=results,
                              next_sync_at=util.plus_seconds(300, ctx.now))
         for kind in ("delivery_pushed", "pr_opened", "kaneo_comment_posted"):
             # Local duplicate invocation shouldn't duplicate successful event records.
@@ -233,8 +462,11 @@ def cmd_delivery_publish(ctx, payload) -> dict:
 
 
 def cmd_delivery_sync(ctx, payload) -> dict:
+    return _with_contract(ctx, payload, "sync", _sync)
+
+
+def _sync(ctx, payload, task, delivery, contract):
     from . import release_delivery
-    task, delivery = _snapshot(ctx, payload, publish=False)
     policy = pr_auto_merge.snapshot(ctx.conn, task)
     def boundary():
         fresh = _fresh(ctx, payload, task, delivery)
@@ -252,6 +484,7 @@ def cmd_delivery_sync(ctx, payload) -> dict:
         if remote_done and release_delivery.completion_gate(ctx.conn, task) is None:
             with db.write_txn(ctx.conn):
                 boundary()
+                delivery_contract.verified_result(contract, task, payload, delivery, {"outcome": "kaneo_done"})
             return {"outcome": "kaneo_done"}
         repo = _repository(task, delivery)
         boundary()
@@ -282,6 +515,13 @@ def cmd_delivery_sync(ctx, payload) -> dict:
         fresh = boundary()
         display = {"auto_merge": auto_merge} if auto_merge else {}
         if pr["state"] == "MERGED":
+            delivery_contract.verified_result(contract, fresh, payload, delivery, {"outcome": "merged"})
+            # The PR merge is confirmed, while release policy may still hold
+            # task completion. Persist an honest intermediate result with the
+            # merge receipt; the final envelope is stored after that gate.
+            intermediate = delivery_contract.verified_result(contract, fresh, payload, delivery,
+                {"outcome": "waiting", "message": "PR 已合并，等待交付收尾"})
+            display["stage_results"] = dict(delivery.get("stage_results") or {}, sync=intermediate)
             core.update_delivery(ctx.conn, fresh, ctx.now_iso, merged_at=pr["mergedAt"],
                                  pr_state="MERGED", last_sync_at=ctx.now_iso, publish_failures=0,
                                  next_sync_at=util.plus_seconds(300, ctx.now), **display)

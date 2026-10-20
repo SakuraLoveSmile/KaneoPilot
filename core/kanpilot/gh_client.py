@@ -155,4 +155,10 @@ def pr_create(repo_slug, *, base, head, title, body) -> dict:
         # gh pr create has no --json flag. Ignore its prose, then read structured data.
         _run(["pr", "create", "--repo", _repo(repo_slug), "--base", base, "--head", head,
               "--title", title, "--body-file", str(path)], json_output=False)
-    return pr_view(repo_slug, head)
+    try:
+        return pr_view(repo_slug, head)
+    except GhError as exc:
+        # The write command succeeded. A later read denial says nothing about
+        # whether the PR exists; callers must reconcile rather than resend.
+        exc.operation_dispatched = True
+        raise

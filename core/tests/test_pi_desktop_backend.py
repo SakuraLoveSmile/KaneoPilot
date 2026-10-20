@@ -2337,6 +2337,32 @@ class TestDispatchPiDesktop(PiDesktopCase):
     def setUp(self):
         super().setUp()
         self.server.required_verification_commands = True
+        # New contracted dispatches require a readable verification report;
+        # TestRunReal keeps the legacy server shape for historical specs.
+        self.server.tools.extend(constants.PI_DESKTOP_GOAL_REPORT_TOOLS)
+
+    def test_new_contract_missing_report_capability_never_sends(self):
+        claim = self._submit_round()
+        self.server.tools.remove("pi_goal_report_get")
+        _sync(self.server)
+        with self.env(KANPILOT_PI_START_WAIT="1"):
+            started = self.call("dispatch-start", {"task_id": TASK_ID, "run_id": claim["run_id"]})
+        self.addCleanup(self.kill_process_group, started["pid"])
+        path = self.runs_root / TASK_ID / claim["run_id"] / "job.json"
+        deadline = time.monotonic() + 10
+        job = {}
+        while time.monotonic() < deadline:
+            if path.is_file():
+                job = json.loads(path.read_text())
+                if job.get("status") == "failed":
+                    break
+            time.sleep(0.05)
+        self.assertEqual(job.get("status"), "failed", job)
+        self.assertEqual(job.get("send_state"), "not_sent")
+        self.assertIn("verification_report", job.get("detail", ""))
+        self.assertTrue(job.get("stage_contract_required"))
+        self.assertIsNone(self.server.created)
+        self.assertEqual(self.server.prompt_count, 0)
 
     def write_plan(self, project_name, task, meta_overrides=None,
                    body="# plan\n\n```verify\ntrue\n```\n"):

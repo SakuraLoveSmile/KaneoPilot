@@ -135,6 +135,24 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
         if pending is None:
             return 1
         job, directory = pending
+        if job.get("stage_contract_required") and "stage_contract" not in job:
+            return 1
+        if ("stage_contract" in job and job.get("status") == "finished"
+                and "stage_result" not in job):
+            return 1
+        if "stage_contract" in job:
+            from . import stage_contract
+            try:
+                stage_contract.validate_contract(job["stage_contract"], expected={
+                    "stage": STAGE, "task_id": job.get("task_id"),
+                    "request_id": job.get("request_id"), "run_id": job.get("run_id"),
+                    "harness_id": job.get("backend")})
+                if "stage_result" in job:
+                    stage_contract.validate_result(job["stage_result"], job["stage_contract"])
+            except util.KanpilotError:
+                return 1
+        else:
+            job["legacy_contract_path"] = True
         if job.get("status") != "finished":
             review.validate_job_pool(job)
         log = control.EventLog(directory / "events.jsonl")
@@ -244,6 +262,7 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     instruction = review.review_instruction(prompt, job=job, review_root=snapshot, materials=materials, facts=facts)
     job.update(review_root=str(snapshot), materials=materials["files"])
     try:
+        review_settle.freeze_stage_contract(job, task)
         if job.get("review_branch_snapshot"):
             review._guard_branch_job(job, task)
     except (util.KanpilotError, OSError) as exc:
@@ -314,8 +333,16 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     if result.get("is_error"):
         return blocked(result.get("error") or f"{backend} Review 失败")
     try:
-        validated = review_settle.validate_result(result.get("structured_output"))
+        validated = review_settle.record_stage_result(job, result.get("structured_output"),
+            facts=review._facts(db_path, job["task_id"], job["request_id"]), evidence={
+                "mechanism": "cli_process", "exit_code": result.get("exit_code"),
+                "owner_stopped": job.get("owner_stopped"),
+                "output_path": str(directory / "last-message.txt") if backend == "codex"
+                               else str(directory / "claude.jsonl")})
     except util.KanpilotError as exc:
+        if exc.code == "stale_run":
+            return review._stop_no_write(job=job, job_path=job_path, log=log,
+                record_run=record, detail=exc.message)
         return blocked(f"review_result_invalid: {exc.message}")
     job.update(validated, send_state="sent", cost_usd=result.get("total_cost_usd") if backend in ("claude", "qoder") else None)
     save()

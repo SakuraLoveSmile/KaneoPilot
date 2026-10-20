@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from . import core, db, derive, dsh_events, round_store, util, verify_evidence
+from . import core, db, derive, dsh_events, execution_contract, harnesses, round_store, stage_evidence, util, verify_evidence
 
 
 def _conflict(message):
@@ -26,6 +26,12 @@ def goal_coverage_detail(coverage):
     if absent:
         parts.append("缺少 " + str(len(absent)) + " 项检查记录：" + "；".join(absent))
     for reason, label in (("missing_exit_code", "以下检查缺少整数退出码"),
+                          ("invalid_exit_code", "以下检查退出码类型无效"),
+                          ("duplicate_records", "以下命令有重复检查记录"),
+                          ("source_mismatch", "以下检查源码身份不符"),
+                          ("unknown_provenance", "以下检查来源不可确认"),
+                          ("missing_result", "以下检查缺少结果"),
+                          ("unknown_result", "以下检查结果无效"),
                           ("contradictory_result", "以下检查状态与退出码不一致")):
         if groups.get(reason):
             parts.append(label + "：" + "；".join(groups[reason]))
@@ -110,6 +116,15 @@ def _read_run_evidence(conn, task):
         raise util.KanpilotError("conflict", "执行记录或固化配置解析失败") from exc
     if not isinstance(job, dict) or not isinstance(spec, dict):
         _conflict("执行记录或固化配置不是对象")
+    contract = execution_contract.validate_spec(spec, job=job)
+    if contract is not None:
+        util.require(contract["inputs"]["requirements_sha256"] == task["requirements_sha256"],
+                     "执行阶段契约的需求身份已变化", "verification_identity_unconfirmed")
+        request = conn.execute("SELECT task_id,run_id,stage FROM requests WHERE request_id=?",
+                               (contract["request_id"],)).fetchone()
+        util.require(request is not None and request["task_id"] == task["task_id"]
+                     and request["run_id"] == task["run_id"] and request["stage"] == "dispatch",
+                     "执行阶段契约的领取身份不可确认", "verification_identity_unconfirmed")
     if (any(record.get("task_id") != task["task_id"]
             or record.get("run_id") != task["run_id"]
             or record.get("backend") != row["backend"]
@@ -230,7 +245,15 @@ def read_goal_evidence(conn, task):
             or str(report["turn_id"]) not in approved):
         _conflict("Goal 报告的执行轮次不属于本轮已批准的执行轮次")
     commands = declaration["commands"]
-    coverage = verify_evidence.match_goal_checks(commands, (report.get("report") or {}).get("checks"))
+    if job.get("stage_contract_required") is True or "stage_contract" in job:
+        contract = job["stage_contract"]
+        adapter = harnesses.get_runtime_adapter(contract["harness_id"])
+        coverage = stage_evidence.match_checks(
+            contract["verification_commands"], adapter.verification_checks(
+                report, source_sha256=job.get("verification_source_sha256")),
+            expected_source_sha256=job.get("verification_source_sha256"))
+    else:
+        coverage = verify_evidence.match_goal_checks(commands, (report.get("report") or {}).get("checks"))
     _require_unchanged(hashes)
     return {"hashes": hashes, "job": job, "report": report, "commands": commands, "coverage": coverage}
 

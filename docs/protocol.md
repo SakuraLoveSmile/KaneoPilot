@@ -1757,3 +1757,16 @@ Qoder 只读运行在核心准备的规划/Review 快照中，沿用请求身份
 本机可执行文件由 `KANPILOT_QODER_BIN` 覆盖，缺省按 PATH 发现 `qoder`（兼容历史独立 CLI 名 `qodercli`）；Finder 启动时 PATH 可能不含用户安装目录，再依次检查可执行文件 `~/.qoder/entry/qoder` 与 `~/.local/bin/qodercli`。不得将 Qoder IDE 主程序当作 headless CLI。能力查询只做本地版本/帮助参数探测，不发模型请求、不安装、不登录；就绪仅表示 CLI 接口可用，认证与模型未实测。每次运行记录 `source=qoder` 的费用回执；CLI 未提供可核对美元费用时记录 `null`，不得填 0 冒充免费。中断无已保存结果不重发，保留现有身份与结算守卫。
 
 macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPERM。Qoder 清理仅在有界等待回收 leader 后重新发组信号、确认进程组不存在时，将其视为已经退出；leader 已退出不代表后代已停止，持续权限错误必须明确失败，不得忽略仍存活的进程组。
+
+## 5.30 跨 Harness 阶段契约（2026-10-20）
+
+完整冻结字段与证据边界见 [harness-contract.md](harness-contract.md)。核心统一维护任务、请求、运行、工作树、输入指纹、验收命令和状态推进；适配器翻译原生会话、终态、结果及证据。`kp-stage-v1` 与结果信封绑定同一阶段/任务/请求/运行/harness/契约 SHA256，格式通过后仍须通过该阶段现有业务门。未知版本、错身份、非法 JSON、未知字段或缺必要证据均拒绝；每个契约/结果最多 2 MiB、深度 64、节点 100000，inputs/config 不保存凭据值。
+
+- plan：分流前核对完整输入 manifest，真实槽位准备后、发送前冻结实际工作树及配置；Plus、Codex、Claude 共用严格结果格式。恢复核对父轮契约、实际槽位及配置；已完成新记录缺包不能补造成功。
+- execution：新 spec/job 绑定计划、需求、源码起点、配置、指令/实际正文及完整 prompt 摘要、修复来源与原文验收命令。开始前复核，核证时再次核对真实 dispatch request。执行端运行验证；Pilot 核对报告及当前源码，既有 live/shadow/手动入口不在本地代跑 verify。
+- review：材料冻结后、发送前建契约，结算及恢复时核对结果、正文、当前源码、请求与租约。信封不绕过既有修复权限或结论规则。
+- delivery：publish/sync 独立建契约，核心按真实远端观察构造信封，runner 核验后才推进。push/创建 PR/评论先记 `runtime_operations`；unknown 跨领取只读对账，明确未写入的拒绝按既有重试策略保留旧回执、登记新尝试。写入成功后的读取失败仍不能作为未写入证明。
+
+`kp-harness-v1` 按语义能力描述 `supported/unsupported/unknown` 和保证来源，不用工具名作为核心业务条件。当前可控执行仍为 Plus，Codex/Claude CLI 只提供现有规划/评审能力。既有 runtime scope 仅授权 Plus，调用参数不能切换 harness 或提升权限。Plus checks 转换后仍为 `model_declared`，不冒充宿主独立采集。
+
+真正无契约的历史记录按原规则读取；已有或标记必需契约的记录损坏时不得回退。契约复用既有 spec/job 与交付 JSON，SQLite 仍是状态写入源，无新 schema。外部操作的先意图后发送、同参数幂等及 unknown 不重发规则继续生效；无服务端 CAS 时本地锁不消除远端竞争。

@@ -1013,6 +1013,16 @@ def _report(db_path, job: dict, *, outcome: str, note: str,
 
 def _close(*, job, job_path, log, record_run, status: str, exit_code: int,
            detail: Optional[str], reason: Optional[str] = None) -> None:
+    if "stage_contract" in job and "stage_result" not in job and status == "failed":
+        from . import stage_contract
+        # An invalid contract remains invalid; closing must not downgrade it
+        # into a successful legacy result or prevent persistence of the stop.
+        try:
+            job["stage_result"] = stage_contract.make_result(job["stage_contract"],
+                {"code": reason or "review_failed", "detail": detail or "评审未完成"},
+                outcome="failed")
+        except util.KanpilotError:
+            job["stage_contract_invalid"] = True
     job.update({
         "status": status, "exit_code": exit_code, "ended_at": util.now_iso(),
         "detail": detail,
@@ -1432,6 +1442,11 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
                                 log=log, record_run=record_run, detail=detail)
     job["review_root"] = str(review_root)
     job["materials"] = materials["files"]
+    try:
+        review_settle.freeze_stage_contract(job, task)
+    except util.KanpilotError as exc:
+        return _blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
+            log=log, record_run=record_run, detail=exc.message)
     pi_desktop_controller.write_json(job_path, job)
     pi_desktop_controller.record_run_entry(record_run, STAGE, job)
     log.emit("system", util.now_iso(),
@@ -1500,6 +1515,19 @@ def _finish_round(*, db_path, client, job, job_path, log, record_run,
             record_run=record_run, detail=attached.get("detail") or "评审受阻",
         )
     result = attached.get("result") or {}
+    try:
+        result = review_settle.record_stage_result(job, result,
+            facts=_facts(db_path, job["task_id"], job["request_id"]), evidence={
+                "mechanism": "plus_turn", "session_id": job.get("session_id"),
+                "turn_id": job.get("turn_id"),
+                "transcript_complete": job.get("transcript_complete"),
+                "owner_stopped": job.get("owner_stopped")})
+    except util.KanpilotError as exc:
+        if exc.code == "stale_run":
+            return _stop_no_write(job=job, job_path=job_path, log=log,
+                record_run=record_run, detail=exc.message)
+        return _blocked_no_pass(db_path=db_path, job=job, job_path=job_path,
+            log=log, record_run=record_run, detail=exc.message)
     job["conclusion"] = result.get("conclusion")
     job["report_markdown"] = result.get("report_markdown")
     job["fix"] = result.get("fix")
@@ -1520,6 +1548,27 @@ def _resume_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
         print("executor review 没有可恢复的 Plus 控制轮", file=sys.stderr)
         return 1
     job = pending["job"]
+    if job.get("stage_contract_required") and "stage_contract" not in job:
+        print("Review 新轮次缺少冻结契约；不走历史恢复路径", file=sys.stderr)
+        return 1
+    if ("stage_contract" in job and job.get("status") == "finished"
+            and "stage_result" not in job):
+        print("Review 已结束轮次缺少结果包", file=sys.stderr)
+        return 1
+    if "stage_contract" in job:
+        from . import stage_contract
+        try:
+            stage_contract.validate_contract(job["stage_contract"], expected={
+                "stage": STAGE, "task_id": job.get("task_id"),
+                "request_id": job.get("request_id"), "run_id": job.get("run_id"),
+                "harness_id": job.get("backend") or "pi_desktop"})
+            if "stage_result" in job:
+                stage_contract.validate_result(job["stage_result"], job["stage_contract"])
+        except util.KanpilotError as exc:
+            print("Review 恢复契约无效：" + exc.message, file=sys.stderr)
+            return 1
+    else:
+        job["legacy_contract_path"] = True
     if job.get("status") == "finished":
         print("executor review 控制轮已收尾：无需恢复", file=sys.stderr)
         return 0

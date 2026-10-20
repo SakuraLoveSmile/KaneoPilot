@@ -3,7 +3,7 @@
 import os
 import time
 
-from . import util
+from . import delivery_contract, util
 from .auto_dispatch import Controller, StaleRun
 
 
@@ -14,14 +14,23 @@ def _delivery(controller):
     identity = dict(controller.identity(), task_id=task_id,
                     expected_execution_run_id=task["run_id"])
     try:
-        if not delivery.get("pr_number") or delivery.get("pushed_sha") != delivery.get("head_sha"):
+        incomplete_publish = ("publish" in (delivery.get("stage_contracts") or {})
+                              and "publish" not in (delivery.get("stage_results") or {}))
+        if (not delivery.get("pr_number") or delivery.get("pushed_sha") != delivery.get("head_sha")
+                or incomplete_publish):
             result = controller.call("delivery-publish", identity)
+            delivery_contract.consume(result, task, identity, "publish")
             if result.get("outcome") in ("blocked", "retry"):
                 _report(controller, result)
                 return
             if result.get("outcome") != "published":
+                if result.get("outcome") == "waiting":
+                    _report(controller, result)
+                    return
                 raise util.KanpilotError("internal", "交付发布结果不可确认")
+            task = controller.call("get-task", {"task_id": task_id})["task"]
         result = controller.call("delivery-sync", identity)
+        delivery_contract.consume(result, task, identity, "sync")
         outcome = result.get("outcome")
         if outcome in ("merged", "kaneo_done"):
             controller.call("advance-task", dict(identity,
@@ -39,7 +48,7 @@ def _report(controller, result):
         controller.report("failed", note="blocked:" + str(result.get("failure_code")))
     elif result.get("outcome") in ("retry", "waiting"):
         release = result.get("release") or {}
-        progress = release.get("reason") or ("等待下次交付复核" if result["outcome"] == "waiting" else "交付暂不可用，稍后重试")
+        progress = release.get("reason") or result.get("message") or ("等待下次交付复核" if result["outcome"] == "waiting" else "交付暂不可用，稍后重试")
         controller.report("succeeded", progress=progress)
     else:
         raise util.KanpilotError("internal", "交付复核结果不可确认")

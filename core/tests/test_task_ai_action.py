@@ -93,7 +93,9 @@ class TaskAIActionTest(ConflictActionFixture):
     def _start_with_delivery_poll(self, *, during_start):
         notice = {"state": "blocked", "reason": "PR 存在合并冲突", "head_sha": self.head, "updated_at": self.now}
         core.update_delivery(self.conn, self.task(), self.now, pr_state="OPEN", publish_failures=0,
-                             last_sync_at=self.now, next_sync_at=util.plus_seconds(300, self.ctx.now), auto_merge=notice)
+                             last_sync_at=self.now, next_sync_at=util.plus_seconds(300, self.ctx.now), auto_merge=notice,
+                             stage_contracts={"sync": {"run_id": "old-sync"}},
+                             stage_results={"sync": {"run_id": "old-sync", "outcome": "blocked"}})
         candidate = self.prepare()
         observer = cli.Context(self.db_path)
         self.addCleanup(observer.close)
@@ -103,7 +105,9 @@ class TaskAIActionTest(ConflictActionFixture):
                 core.update_delivery(observer.conn, db.require_task(observer.conn, self.task_id), poll_time,
                                      pr_state="OPEN", publish_failures=0, last_sync_at=poll_time,
                                      next_sync_at=util.plus_seconds(301, self.ctx.now),
-                                     auto_merge=dict(notice, updated_at=poll_time))
+                                     auto_merge=dict(notice, updated_at=poll_time),
+                                     stage_contracts={"sync": {"run_id": "new-sync"}},
+                                     stage_results={"sync": {"run_id": "new-sync", "outcome": "blocked"}})
         if during_start:
             prepare = action._prepare
             def prepare_then_poll(*args):
@@ -122,6 +126,8 @@ class TaskAIActionTest(ConflictActionFixture):
         delivery = core.delivery_of(self.task())
         assert delivery["last_sync_at"] == delivery["auto_merge"]["updated_at"] == poll_time
         assert delivery["next_sync_at"] == util.plus_seconds(301, self.ctx.now)
+        assert delivery["stage_contracts"]["sync"]["run_id"] == "new-sync"
+        assert delivery["stage_results"]["sync"]["run_id"] == "new-sync"
 
     def test_delivery_poll_between_prepare_and_start_keeps_confirmation_valid(self):
         self._start_with_delivery_poll(during_start=False)

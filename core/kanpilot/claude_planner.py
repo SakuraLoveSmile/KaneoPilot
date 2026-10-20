@@ -62,6 +62,8 @@ def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
     planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
 
     def finish(status, code, detail, reason):
+        if status == "failed":
+            planner_runner._failed_stage_result(job, detail, reason)
         job.update(status=status, exit_code=code, detail=detail, ended_at=util.now_iso())
         planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
         log.emit("terminal", util.now_iso(),
@@ -77,6 +79,12 @@ def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
         planner_runner._report(db_path, request_id, run_id, "failed", detail,
                                failure_code=reason)
         return True
+
+    try:
+        prepared = planner_runner._prepare_stage_inputs(
+            context, task_id, request_id, run_id, "claude")
+    except util.KanpilotError as exc:
+        return fail(exc.message, "plan_input_mismatch")
 
     if job["planner_method"] != "builtin":
         return fail(f"{title} 规划只支持 builtin；spec_plan 是 Codex 插件运行方式")
@@ -103,6 +111,8 @@ def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
     conn = db.connect(db_path)
     try:
         cwd = task_workspace.prepare_plan_pool(conn, db_path, raw_task, payload, job, run_dir / dsh_events.JOB_NAME)
+        planner_runner._freeze_plan_contract(job, prepared, cwd)
+        planner_runner._write_json(run_dir / dsh_events.JOB_NAME, job)
     except (util.KanpilotError, OSError) as exc:
         if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
             finish("finished", 0, exc.message, exc.code)
@@ -180,7 +190,9 @@ def _run_one(db_path, request_id, run_id, *, context, task, task_id, run_dir,
     out_path = run_dir / "last-message.txt"
     planner_runner._write_json(out_path, result.get("structured_output"))
     try:
-        output = planner_runner.parse_output(out_path)
+        output = planner_runner._plan_stage_result(job, planner_runner.parse_output(out_path),
+            evidence={"mechanism": "cli_process", "exit_code": result.get("exit_code"),
+                      "output_path": str(out_path)})
     except util.KanpilotError as exc:
         return fail(f"规划输出不合规：{exc.message}", "planner_output_invalid", 0)
     if output["status"] == "needs_input":

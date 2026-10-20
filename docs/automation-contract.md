@@ -2,6 +2,8 @@
 
 现行冻结契约以 protocol §5.27 为准。App 的 EngineSupervisor 监督 engine run 并读取核心状态；引擎 intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
 
+跨 Harness 边界见 [harness-contract.md](harness-contract.md)（protocol §5.30）。新规划、执行、评审与交付冻结 `kp-stage-v1` 输入，并在既有业务核证后消费结果信封；新记录损坏或缺必要结果不降级为旧记录。能力按语义探测，unknown 不代表支持。当前执行仍限实际可控的 Plus；Codex/Claude CLI 接入共同规划/评审契约，不因此取得执行权限。验证命令始终由执行端运行。
+
 父任务收尾见 protocol §5.27.18：用户显式「校验并完成」只核对既有 Plus 正式报告、原始问题到修复的绑定及真实 GitHub 合并/最终整合源码，不启动规划、执行、Review 或模型。缺证据不绕过、不在 Pilot 本地执行 verify；补充付费验证仍需授权。远端完成经核心回执与写后重查，unknown 仅只读对账，不重复发送。历史父任务不会因更新 App 自动完成或启动旧问题修复。
 
 构建与发布交付见 [release-contract.md](release-contract.md)（protocol §5.27.19）。项目显式开启后，合并回执继续驱动确定性 Actions；只认同批次、固定提交、完整必需包及来源证明的发布结果。未确认发布前，正常完成、人工完成及远端 done 同步均受完成门约束。旧 done 不自动补发；unknown 只对账；预发布不改写稳定更新入口。调度和轮询均无模型调用。

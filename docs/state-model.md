@@ -2,6 +2,8 @@
 
 SQLite 是队列与运行状态的唯一写入来源。所有写经 protocol.md 命令完成；桌面与执行端不得直接改库或文件锁。
 
+跨 Harness 阶段契约（2026-10-20）见 [harness-contract.md](harness-contract.md) 与 protocol §5.30。契约及结果复用各阶段既有 spec/job 审计文件；交付使用 `extra.delivery.stage_contracts/stage_results`，外部操作沿用 `runtime_operations`。不新增任务生命周期或 DB schema。结果信封通过后仍须满足现有推进门，损坏的新记录不能按无契约历史记录恢复。交付轮询更新审计信封不改变任务内 AI 处理已确认的业务身份；head、PR、评审、状态及未决操作守卫仍生效。
+
 原始任务收尾（2026-10-19）：按 protocol §5.27.18，从当前周期的评审历史绑定全部二级修复；子任务完成只投影「待收尾校验」，不自动写 done。`extra.parent_closeout` 独立保存 blocked/unknown/completed 结果与复用证据，旧 Review 不改写；远端确认后才经固定命令标本地 done。ready/blocked/unknown 保留评审列，阻塞与失败区分；未核验的人工/设备/真实服务体验继续保持未核验。无新增任务 status/schema。
 
 构建发布（2026-10-19）：按 [release-contract.md](release-contract.md) 冻结项目策略与父子共享批次，复用 `runtime_operations` 保存批次及独立 dispatch intent；无新增任务 status 或请求阶段。未完成任务保留交付阶段直到 published，构建 failed 为失败、身份/权限/结果 unknown 为阻塞。关闭策略不抹除已登记的 required 批次；历史 done 不回溯。只有当前任务/运行/计划/需求/评审/源码身份对应的成功回执可解除完成门。

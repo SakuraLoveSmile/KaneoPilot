@@ -154,7 +154,12 @@ class DeliveryPR(KanpilotTestCase):
             self.assertEqual(self.publish_delivery()["publish_failures"], 2)
         self.assertEqual(self.publish_delivery()["outcome"], "published")
         self.assertEqual(core.delivery_of(self.task())["publish_failures"], 0)
-        with patch.object(git_delivery, "push_branch", side_effect=git_delivery.GitDeliveryError("push_failed", "down")):
+        # An accepted push is still checked against the real remote head,
+        # but a repeated publish does not send it again.
+        with patch.object(git_delivery, "push_branch") as push:
+            self.assertEqual(self.publish_delivery()["outcome"], "published")
+            push.assert_not_called()
+        with patch.object(gh_client, "pr_list", side_effect=gh_client.GhError("transient", "down")):
             self.assertEqual(self.publish_delivery()["outcome"], "retry")
             self.assertEqual(self.publish_delivery()["outcome"], "retry")
             self.assertEqual(self.publish_delivery()["failure_code"], "gh_unavailable")
@@ -171,7 +176,9 @@ class DeliveryPR(KanpilotTestCase):
             self.post(*args)
             raise bridge.BridgeError("lost response")
         with patch.object(remote, "post_comment", side_effect=uncertain):
-            self.assertEqual(self.publish_delivery()["outcome"], "retry")
+            result = self.publish_delivery()
+            self.assertEqual(result["outcome"], "waiting")
+            self.assertEqual(result["operation_state"], "unknown")
         self.assertEqual(self.publish_delivery()["outcome"], "published")
         self.assertEqual(len(self.posts), 1)
 
@@ -191,8 +198,8 @@ class DeliveryPR(KanpilotTestCase):
     def test_sync_merged_does_not_advance_and_event_idempotent(self):
         self.update(pr_number=7, pushed_sha=self.delivery["head_sha"])
         with patch.object(gh_client, "pr_view", side_effect=self.outside("pr_view", self.pr("MERGED"))):
-            self.assertEqual(self.sync(), {"outcome": "merged"})
-            self.assertEqual(self.sync(), {"outcome": "merged"})
+            self.assertEqual(self.sync()["outcome"], "merged")
+            self.assertEqual(self.sync()["outcome"], "merged")
         self.assertEqual(self.task()["status"], "in_review")
         self.assertEqual(core.delivery_of(self.task())["merged_at"], self.pr("MERGED")["mergedAt"])
         self.assertEqual(self.ctx.conn.execute("SELECT count(*) FROM events WHERE kind='pr_merged'").fetchone()[0], 1)
@@ -200,7 +207,7 @@ class DeliveryPR(KanpilotTestCase):
     def test_sync_kaneo_done_skips_gh(self):
         self.update(pr_number=7, pushed_sha=self.delivery["head_sha"])
         with patch.object(remote, "get_task", side_effect=self.outside("get_task", {"task": {"status": "done"}})):
-            self.assertEqual(self.sync(), {"outcome": "kaneo_done"})
+            self.assertEqual(self.sync()["outcome"], "kaneo_done")
         self.assertNotIn("pr_view", self.order)
 
     def test_open_backoff_and_closed(self):
@@ -353,7 +360,11 @@ class DeliveryPR(KanpilotTestCase):
                     with self.assertRaises(util.KanpilotError) as caught:
                         self.publish_delivery()
                 self.assertEqual(caught.exception.code, "stale_run")
-                self.assertEqual(core.delivery_of(self.task()), before)
+                after = core.delivery_of(self.task())
+                self.assertEqual({k: v for k, v in after.items() if k not in ("stage_contracts", "stage_results")},
+                                 {k: v for k, v in before.items() if k not in ("stage_contracts", "stage_results")})
+                self.assertFalse(after.get("stage_results"))
+                self.assertIn("publish", after["stage_contracts"])
                 self.assertEqual(self.ctx.conn.execute("SELECT count(*) FROM events WHERE kind='pr_opened'").fetchone()[0], 0)
                 if name != "post_comment":
                     self.assertFalse(self.posts)
@@ -371,7 +382,10 @@ class DeliveryPR(KanpilotTestCase):
         with patch.object(gh_client, "pr_view", side_effect=expires), self.assertRaises(util.KanpilotError) as caught:
             self.sync()
         self.assertEqual(caught.exception.code, "stale_run")
-        self.assertEqual(core.delivery_of(self.task()), before)
+        after = core.delivery_of(self.task())
+        self.assertEqual({k: v for k, v in after.items() if k not in ("stage_contracts", "stage_results")}, before)
+        self.assertFalse(after.get("stage_results"))
+        self.assertIn("sync", after["stage_contracts"])
 
     def test_current_review_pass_required_before_any_io(self):
         initial = db.task_extra(self.task())
