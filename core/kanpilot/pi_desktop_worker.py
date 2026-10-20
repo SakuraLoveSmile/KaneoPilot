@@ -78,7 +78,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, dsh_events, git_delivery, pi_desktop_backend, process_owner, runtime_client, util, verify_evidence
+from . import constants, dsh_events, execution_contract, git_delivery, pi_desktop_backend, process_owner, runtime_client, util, verify_evidence
 from . import cli  # heartbeat 经命令层（worker 不直写 SQLite）
 
 # MCP 轮询节奏（worker 进程内部参数，不进 settings）。
@@ -150,7 +150,7 @@ class _EventLog:
 
 
 def _base_job(spec: dict) -> dict:
-    return {
+    return execution_contract.attach_to_job(spec, {
         "task_id": spec["task_id"],
         "run_id": spec["run_id"],
         "backend": "pi_desktop",
@@ -169,7 +169,7 @@ def _base_job(spec: dict) -> dict:
         "ended_at": None,
         "exit_code": None,
         "detail": None,
-    }
+    })
 
 
 def _record_verification_source(job: dict, spec: dict) -> None:
@@ -191,6 +191,7 @@ def run_fake(spec: dict, mode: str) -> int:
 
 def _run_fake(spec: dict, mode: str, owner) -> int:
     """KANPILOT_PI_DESKTOP_FAKE 隔离接缝（语义同 pi_worker fake）。"""
+    execution_contract.validate_spec(spec, starting=True)
     run_dir = Path(spec["runs_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
     job_path = run_dir / dsh_events.JOB_NAME
@@ -1015,6 +1016,10 @@ def _resume_job(job_path: Path, spec: dict):
         return None, "job.json 解析失败（半写入或损坏）"
     if not isinstance(job, dict):
         return None, "job.json 不是 JSON 对象"
+    try:
+        execution_contract.validate_spec(spec, job=job)
+    except (util.KanpilotError, KeyError) as exc:
+        return None, "执行阶段契约不可确认：" + str(exc)
     if job.get("task_id") != spec["task_id"] \
             or job.get("run_id") != spec["run_id"]:
         return None, "job.json 身份与目录不符"
@@ -1069,6 +1074,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
     权限、**绝不重发 prompt**。观察环境不成立 → 退出码 3 且既有轮次终态与
     证据原样保留（监控端下一轮可再试）。
     """
+    execution_contract.validate_spec(spec, starting=not resume)
     run_dir = Path(spec["runs_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
     job_path = run_dir / dsh_events.JOB_NAME
@@ -1241,6 +1247,14 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             job["scope_id"] = client.scope_id
         if commands and not client.supports_required_verification_commands():
             raise util.KanpilotError("unsupported_tools", "请升级 Plus：pi_plans_resolve 缺少 requiredVerificationCommands 能力，尚未启动模型")
+        if "stage_contract" in spec and not resume:
+            from . import harnesses
+            description = client.capabilities()
+            required = ["durable_status", "verification_report", "input_requests"]
+            if commands:
+                required.append("verification_command_binding")
+            harnesses.require_capabilities(description, required)
+            job["harness_capabilities"] = description
         job["pi_desktop_pid"] = getattr(client, "harness_pid", None)
         if not resume:
             _write_json(job_path, job)

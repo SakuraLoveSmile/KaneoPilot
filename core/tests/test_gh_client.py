@@ -148,3 +148,23 @@ def test_server_merge_refusal_is_definitive(fake_gh, monkeypatch, error):
     with pytest.raises(gh.GhError) as caught:
         gh.pr_merge('owner/repo', 7, sha='a' * 40)
     assert caught.value.kind == 'rejected'
+
+
+@pytest.mark.parametrize("kind", ["auth", "missing", "rejected"])
+def test_create_marks_post_write_read_failure_as_dispatched(kind):
+    error = gh.GhError(kind, "read failed")
+    with patch.object(gh, "_run", return_value=None) as create, patch.object(
+            gh, "pr_view", side_effect=error), pytest.raises(gh.GhError) as caught:
+        gh.pr_create("owner/repo", base="main", head="task", title="test", body="body")
+    assert caught.value is error and caught.value.operation_dispatched is True
+    assert create.call_count == 1
+
+
+@pytest.mark.parametrize("kind", ["auth", "missing", "rejected"])
+def test_create_preserves_definitive_write_rejection(kind):
+    error = gh.GhError(kind, "write rejected")
+    with patch.object(gh, "_run", side_effect=error), patch.object(
+            gh, "pr_view") as view, pytest.raises(gh.GhError) as caught:
+        gh.pr_create("owner/repo", base="main", head="task", title="test", body="body")
+    assert caught.value is error and not getattr(caught.value, "operation_dispatched", False)
+    view.assert_not_called()

@@ -1,4 +1,4 @@
-"""Plus runtime facade routed through the KaneoPilot MCP service."""
+"""Runtime observation API and compatible Plus facade via the project MCP service."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import constants, harness_plus_adapter, mcp_client, mcp_scopes, pi_desktop_backend, util
+from . import constants, harnesses, harness_plus_adapter, mcp_client, mcp_scopes, pi_desktop_backend, util
 
 
 def _read_admin_server(server_file: Path) -> tuple:
@@ -280,6 +280,17 @@ class RuntimeClient:
     def tools_list(self) -> set:
         caps = self._call("kp_runtime_capabilities", {})
         return set(caps.get("supported_operations") or [])
+
+    def capabilities(self) -> dict:
+        """Return the neutral capability contract plus legacy compatibility fields."""
+        return self._call("kp_runtime_capabilities", {})
+
+    def require_capabilities(self, required) -> None:
+        harnesses.require_capabilities(self.capabilities(), required)
+
+    def observe_status(self, session_id: str) -> dict:
+        status = self._call("kp_runtime_status", {"session_id": session_id})
+        return harnesses.get_runtime_adapter("pi_desktop").observation(status)
 
     def supports_required_verification_commands(self) -> bool:
         caps = self._call("kp_runtime_capabilities", {})

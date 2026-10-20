@@ -206,13 +206,13 @@ def cmd_prepare_task_ai_action(ctx, payload):
 
 
 def _start_snapshot(task):
-    """Ignore only delivery-sync observation times, retaining every identity/state."""
+    """Ignore delivery observations/audit envelopes, retaining business identity/state."""
     value = dict(task)
     value.pop("updated_at", None)
     extra = _extra(task)
     delivery = extra.get("delivery")
     if isinstance(delivery, dict):
-        for key in ("last_sync_at", "next_sync_at"):
+        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results"):
             delivery.pop(key, None)
         if isinstance(delivery.get("auto_merge"), dict):
             delivery["auto_merge"].pop("updated_at", None)

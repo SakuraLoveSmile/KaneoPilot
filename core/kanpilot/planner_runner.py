@@ -370,35 +370,153 @@ def parse_output(path: Path) -> dict:
             raise util.KanpilotError(
                 "validation_failed", "规划输出不是 JSON"
             )
-    if not isinstance(data, dict):
-        raise util.KanpilotError("validation_failed", "规划输出不是对象")
-    status = data.get("status")
-    if status not in ("ready", "needs_input"):
-        raise util.KanpilotError(
-            "validation_failed", f"规划输出 status 非法：{status!r}"
-        )
-    questions = plan_questions.normalize(data.get("questions", []))
-    plan_markdown = data.get("plan_markdown")
-    if not isinstance(plan_markdown, str):
-        plan_markdown = ""
-    evidence = data.get("evidence")
-    if not isinstance(evidence, list):
-        evidence = []
-    if status == "ready":
-        if not plan_markdown.strip():
-            raise util.KanpilotError(
-                "validation_failed", "ready 输出缺少 plan_markdown"
-            )
-        if questions:
-            raise util.KanpilotError(
-                "validation_failed", "ready 输出仍有未决 questions"
-            )
-    return {
-        "status": status,
-        "plan_markdown": plan_markdown,
-        "questions": questions,
-        "evidence": [str(e) for e in evidence],
+    from . import stage_contract
+    return stage_contract.validate_plan_result(data)
+
+
+def _prepare_stage_inputs(context, task_id, request_id, run_id, backend):
+    """Check shared claimed materials before selecting an adapter; no workspace freeze."""
+    from . import pi_desktop_planner, stage_contract
+    payload = context.get("payload") or {}
+    manifest = payload.get("manifest")
+    util.require(isinstance(manifest, dict) and bool(manifest),
+                 "请求缺少规划材料 manifest", "validation_failed")
+    input_id = payload.get("input_id")
+    util.require(isinstance(input_id, str) and bool(input_id)
+                 and manifest.get("input_id") == input_id
+                 and context.get("input_id") == input_id,
+                 "规划材料 input_id 与领取身份不符", "validation_failed")
+    digest = payload.get("planner_input_sha256")
+    util.require(isinstance(digest, str) and bool(digest)
+                 and pi_desktop_planner.manifest_sha(manifest) == digest,
+                 "规划材料指纹不符", "validation_failed")
+    manifest_task = manifest.get("task") or {}
+    util.require(isinstance(manifest_task, dict), "规划材料 task 不是对象", "validation_failed")
+    util.require(manifest_task.get("task_id") == task_id,
+                 "规划材料 task_id 与领取身份不符", "validation_failed")
+    project = payload.get("project_snapshot") or {}
+    util.require(isinstance(project, dict), "规划项目快照不是对象", "validation_failed")
+    repository = project.get("repository") or manifest_task.get("repository")
+    util.require(isinstance(repository, str) and Path(repository).is_absolute(),
+                 "规划材料缺少绝对项目路径", "validation_failed")
+    runtime = payload.get("runtime_config") or {}
+    model = payload.get("model_config") or {}
+    util.require(isinstance(runtime, dict) and isinstance(model, dict),
+                 "规划模型配置不是对象", "validation_failed")
+    config = {"backend": backend,
+              "planner_method": payload.get("planner_method") or "builtin",
+              "runtime": {key: runtime[key] for key in constants.EXEC_PI_DESKTOP_KEYS if key in runtime},
+              "model": {key: model[key] for key in ("planner_model", "reasoning_effort") if key in model}}
+    for key in ("plugin_id", "plugin_version", "planner_skill"):
+        if key in payload:
+            config[key] = payload[key]
+    prepared = {
+        "task_id": task_id, "request_id": request_id, "run_id": run_id,
+        "harness_id": backend, "repository": str(Path(repository).resolve()),
+        "inputs": {"input_id": input_id, "planner_input_sha256": digest,
+                   "manifest": manifest, "project_snapshot": project,
+                   "input_dir": context.get("input_dir")}, "config": config,
     }
+    util.require(len(util.jdump(prepared).encode("utf-8")) <= stage_contract.MAX_BYTES,
+                 "plan_request_too_large: 规划材料超过 2 MiB", "validation_failed")
+    if "stage_contract" in context:
+        stage_contract.validate_contract(context["stage_contract"], expected={
+            "stage": "plan", "task_id": task_id, "request_id": request_id,
+            "run_id": run_id, "harness_id": backend})
+    return prepared
+
+
+def _plan_workspace_identity(job, workspace):
+    from . import git_delivery
+    root = str(Path(workspace).resolve())
+    try:
+        util.require(str(Path(git_delivery._value(["rev-parse", "--show-toplevel"], root)).resolve()) == root,
+                     "规划目录不是独立工作树", "validation_failed")
+        head = git_delivery._value(["rev-parse", "HEAD"], root)
+        managed = set()
+        for path in job.get("managed_material_paths") or []:
+            relative = Path(path).relative_to(root)
+            util.require(relative.parts[:1] == (".kaneopilot-plan-material",)
+                         and ".." not in relative.parts,
+                         "规划材料路径不在受管目录", "validation_failed")
+            managed.add(relative.as_posix())
+        # Materials may be ignored by Git. Read every registered file through
+        # the same no-follow descriptor reader used for source fingerprints.
+        material_records = []
+        for name in sorted(managed):
+            state = git_delivery._candidate_state(root, name, deadline=time.monotonic() + 30)
+            util.require(state.get("kind") == "file", "规划受管材料不是普通文件", "validation_failed")
+            material_records.append({"path": name, **state})
+        all_records = git_delivery.source_state(root)
+        records = [entry for entry in all_records if entry["path"] not in managed]
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("validation_failed", exc.message) from exc
+    except (OSError, ValueError) as exc:
+        raise util.KanpilotError("validation_failed", "规划工作树源码身份不可读取") from exc
+    lease = job.get("pool_lease")
+    pool = None if not lease else {
+        "slot_id": lease["slot_id"], "holder_id": lease["holder_id"],
+        "lease_sha256": util.sha256_text(lease["lease_token"])}
+    return {"head_sha": head, "source_sha256": util.sha256_text(util.jdump(records)),
+            "pool": pool, "managed_material_sha256": util.sha256_text(util.jdump(material_records))}
+
+
+def _freeze_plan_contract(job, prepared, workspace, *, resume_from=None, fake=False):
+    """Bind the actual prepared root/configuration before connecting or sending."""
+    from . import stage_contract
+    root = str(Path(workspace).resolve())
+    inputs = dict(prepared["inputs"])
+    config = dict(prepared["config"])
+    if fake:
+        inputs["execution_mode"] = "isolated_fake"
+    else:
+        inputs["worktree_identity"] = _plan_workspace_identity(job, root)
+    if resume_from is not None:
+        inputs["resume_from"] = resume_from
+    contract = stage_contract.make_contract(
+        "plan", task_id=job["task_id"], request_id=job["request_id"], run_id=job["run_id"],
+        harness_id=job["backend"], workspace=root, inputs=inputs, config=config,
+        allowed_actions=("read_workspace", "produce_plan"))
+    if "stage_contract" in job:
+        stage_contract.validate_contract(job["stage_contract"], expected=contract)
+    job.update(stage_contract=contract, stage_contract_required=True, worktree_path=root)
+    return contract
+
+
+def _verify_plan_contract_workspace(job, contract):
+    util.require(str(Path(job.get("worktree_path") or "").resolve()) == contract["workspace"],
+                 "规划契约工作树与实际目录不符", "validation_failed")
+    if contract["inputs"].get("execution_mode") != "isolated_fake":
+        util.require(contract["inputs"].get("worktree_identity") ==
+                     _plan_workspace_identity(job, contract["workspace"]),
+                     "规划契约源码或槽位身份已变化", "validation_failed")
+
+
+def _plan_stage_result(job, output, *, evidence=None):
+    from . import stage_contract
+    output = stage_contract.validate_plan_result(output)
+    util.require(not job.get("stage_contract_required") or "stage_contract" in job,
+                 "规划新轮次缺少冻结契约", "validation_failed")
+    if "stage_contract" in job:
+        contract = stage_contract.validate_contract(job["stage_contract"], expected={
+            "stage": "plan", "task_id": job["task_id"],
+            "request_id": job["request_id"], "run_id": job["run_id"],
+            "harness_id": job["backend"]})
+        _verify_plan_contract_workspace(job, contract)
+        result = stage_contract.make_result(contract, output,
+            evidence=[evidence] if isinstance(evidence, dict) else evidence)
+        stage_contract.validate_result(result, contract,
+                                       payload_validator=stage_contract.validate_plan_result)
+        job["stage_result"] = result
+    return output
+
+
+def _failed_stage_result(job, detail, code):
+    if "stage_contract" in job and "stage_result" not in job:
+        from . import stage_contract
+        job["stage_result"] = stage_contract.make_result(
+            job["stage_contract"], {"code": code or "planner_failed",
+                                    "detail": detail or "规划未完成"}, outcome="failed")
 
 
 # ------------------------------------------------------------ 子进程
@@ -495,6 +613,7 @@ def _fail_unknown_backend(db_path: Path, run_dir: Path, request_id: str,
     _write_json(run_dir / dsh_events.JOB_NAME, {
         "task_id": task_id, "run_id": run_id, "backend": str(backend),
         "session_id": None, "turn_id": None, "status": "failed",
+        "send_state": "not_sent",
         "pid": os.getpid(), "started_at": util.now_iso(),
         "ended_at": util.now_iso(), "exit_code": 1, "detail": detail,
     })
@@ -543,6 +662,7 @@ def _fail_planner_input(db_path, run_dir, request_id, run_id, task_id, backend, 
     _write_json(run_dir / dsh_events.JOB_NAME, {
         "task_id": task_id, "run_id": run_id, "backend": str(backend),
         "session_id": None, "turn_id": None, "status": "failed",
+        "send_state": "not_sent",
         "pid": os.getpid(), "started_at": now, "ended_at": now,
         "exit_code": 1, "detail": detail,
     })
@@ -668,6 +788,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
     # ``pi_desktop_planner``（独立规划 worktree + plan 会话 + plan proposal 读取）。
     backend = req_payload.get("planner_backend") or constants.PLANNER_BACKEND
     try:
+        if backend in ("codex", "claude", "pi_desktop"):
+            _prepare_stage_inputs(context, task_id, req_id, run_id, backend)
         _verify_partial_materials(context)
         from . import task_workspace
         conn = db.connect(db_path)
@@ -714,6 +836,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
         "started_at": util.now_iso(), "ended_at": None,
         "exit_code": None, "detail": None, "send_state": "not_sent",
     }
+    if "stage_contract" in context:
+        job["stage_contract"] = context["stage_contract"]
     lifecycle.update(job=job, run_dir=run_dir)
     # §5.23.2：spec_plan 记录固化的插件身份/版本（有则）；不写凭据。
     if method == "spec_plan":
@@ -760,6 +884,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
 
     def finalize(status: str, exit_code, detail: str, outcome: str,
                  reason: str) -> None:
+        if status == "failed":
+            _failed_stage_result(job, detail, reason)
         job.update({
             "status": status, "exit_code": exit_code,
             "ended_at": util.now_iso(), "detail": detail,
@@ -778,6 +904,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
 
     fake = os.environ.get("KANPILOT_CODEX_FAKE")
     if fake:
+        prepared = _prepare_stage_inputs(context, task_id, req_id, run_id, backend)
+        _freeze_plan_contract(job, prepared, prepared["repository"], fake=True)
         # fake 下服务商解析失败只记 detail、不阻断（运行记录完整性）；fake
         # 各分支若再写 detail，把解析错误合并保留。
         if provider_error:
@@ -834,6 +962,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
     try:
         plan_cwd = task_workspace.prepare_plan_pool(conn, db_path, db.require_task(conn, task_id),
             req_payload, job, run_dir / dsh_events.JOB_NAME)
+        _freeze_plan_contract(job, _prepare_stage_inputs(context, task_id, req_id, run_id, backend), plan_cwd)
+        _write_json(run_dir / dsh_events.JOB_NAME, job)
     except (util.KanpilotError, OSError) as exc:
         if isinstance(exc, util.KanpilotError) and exc.code == "worktree_pool_waiting":
             finalize("finished", 0, exc.message, "completed", exc.code)
@@ -1079,7 +1209,9 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
 
     # exit 0 不等于成功：须通过输出契约校验（§5.22.3）。
     try:
-        output = parse_output(out_path)
+        output = _plan_stage_result(job, parse_output(out_path), evidence={
+            "mechanism": "cli_process", "exit_code": returncode,
+            "output_path": str(out_path)})
     except util.KanpilotError as exc:
         finalize("failed", returncode, str(exc), "failed",
                  "invalid_output")
@@ -1212,7 +1344,7 @@ def _run_fake(db_path: Path, run_dir: Path, job: dict, log: _EventLog,
     log.emit("assistant_message", util.now_iso(),
              content=json.dumps(output, ensure_ascii=False))
     log.emit("turn_end", util.now_iso(), will_retry=False)
-    parsed = parse_output(out_path)
+    parsed = _plan_stage_result(job, parse_output(out_path), evidence={"mechanism": "fake"})
 
     if parsed["status"] == "needs_input":
         finalize("finished", 0, "needs_input", "completed", "needs_input")

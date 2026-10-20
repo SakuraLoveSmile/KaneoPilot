@@ -720,6 +720,8 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
         if core.review_repair_of(task):
             from . import repair_prompt
             spec.update(repair_prompt.freeze(task))
+        from . import execution_contract
+        execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
         spec_path = run_dir / "spec.json"
         from . import process_owner
         process_owner.bind_spec(spec, ctx.db_path)

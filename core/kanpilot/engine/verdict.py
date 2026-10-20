@@ -366,6 +366,8 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
     commands, coverage, report = evidence["commands"], evidence["coverage"], evidence["report"]
     checks = [{"command": row["command"], "exit_code": row["exit_code"], "timed_out": False,
                "command_not_found": False, "message_id": row["report_check_id"],
+               "provenance": row.get("provenance", "model_declared"),
+               "source_sha256": row.get("source_sha256", evidence["job"].get("verification_source_sha256")),
                "output_tail": util.redact(row["detail"])[-_OUTPUT_TAIL_BYTES:]}
               for row in coverage["rows"]]
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
@@ -399,6 +401,10 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
         if (binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen
                 or not _evidence_unchanged(evidence["hashes"])):
             raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码或 Plus 证据已变化")
+    if "stage_contract" in evidence["job"]:
+        from .. import execution_contract
+        result["stage_result"] = execution_contract.verdict_result(
+            evidence["job"]["stage_contract"], result, report_sha256=report["report_sha256"])
     return result
 
 
@@ -410,6 +416,13 @@ def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None)
         evidence = verification_recovery.read_goal_evidence(conn, task)
         _require_snapshot(evidence["job"], (receipt.get("binding") or {}).get("source_sha256"))
         report = evidence["report"]
+        if "stage_contract" in evidence["job"]:
+            from .. import execution_contract, stage_contract
+            contract = evidence["job"]["stage_contract"]
+            envelope = stage_contract.validate_result(receipt.get("stage_result"), contract)
+            expected = execution_contract.verdict_result(contract, receipt, report_sha256=report["report_sha256"])
+            if envelope != expected:
+                return False
         return (evidence["hashes"] == receipt.get("evidence_sha256")
                 and report["report_sha256"] == receipt.get("report_sha256")
                 and report["turn_id"] == receipt.get("execution_turn_id")

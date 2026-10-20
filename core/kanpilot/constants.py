@@ -95,8 +95,8 @@ PI_DESKTOP_EXEC_MODE = "goal"
 # 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。
 PI_DESKTOP_DISPATCH_TOOLS = (PI_DESKTOP_REQUIRED_TOOLS
                              + PI_DESKTOP_GOAL_TOOLS + PI_DESKTOP_INPUT_TOOLS)
-# T5-A（protocol §5.23.10）：Goal 报告只读工具。核心只在读取报告时要求它们；
-# 派发就绪门不要求（旧 Plus 仍可派发，但报告读取会明确失败）。
+# T5-A（protocol §5.23.10）：Goal 报告只读工具。旧记录沿历史能力门；
+# 新 kp-stage-v1 执行在 worker 原生启动前还要求 verification_report 语义能力。
 PI_DESKTOP_GOAL_REPORT_TOOLS = ("pi_goal_report_list", "pi_goal_report_get")
 # T6（protocol §5.23.10）：`pi_session_create.inputSchema.properties.projectName`
 # 是旧 Plus 与新 Plus 的兼容门；缺字段 → 明确阻断，不静默派发 UUID 名称。

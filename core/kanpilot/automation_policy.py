@@ -148,8 +148,9 @@ def automation_preflight(conn, project_id):
         if not planner_config.desktop_queue_ready(conn):
             add("review_desktop_unconfigured", "Desktop Review 自动领取尚未配置或未启用")
     execution = exec_config.load(conn)
-    if execution.get("backend") != "pi_desktop":
-        add("exec_backend_not_plus", "执行端需为 Plus")
+    from . import harnesses
+    if not harnesses.supports_role(execution.get("backend"), "execution"):
+        add("exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力")
     if (execution.get("pi_desktop") or {}).get("permission_mode") != "auto":
         add("exec_permission_not_auto", "Plus 执行权限需为 auto")
     return errors
