@@ -586,6 +586,9 @@ def match_goal_checks(commands: list, checks) -> dict:
         elif last is not None and exit_code not in (None, 0):
             failed.append(row)
         else:
+            row["unconfirmed_reason"] = ("missing_record" if last is None else
+                                         "missing_exit_code" if exit_code is None else
+                                         "contradictory_result")
             missing.append(command)
     unconfirmed = [{"command": command, "exit_code": None} for command in missing]
     return {"ok": bool(rows) and not failed and not missing, "matched": matched, "missing": missing,

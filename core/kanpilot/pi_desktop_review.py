@@ -2,7 +2,7 @@
 
 ``executor_runner --stage review`` 在 ``review_config.backend == "pi_desktop"``
 时改走本模块。与 dispatch/monitor 控制轮不同，Review 的登记与推进**由 runner
-自己**完成（模型只产出评审 JSON）：
+自己**完成（模型只产出版本化评审文本，兼容历史 JSON）：
 
 1. ``claim(stage=review)``（核心固定 JSON 命令）→ 以 ``get-task``/``get-request``
    核对请求 ``run_id``、任务本轮执行 ``run_id`` 与 worktree、计划哈希、执行证据
@@ -11,32 +11,33 @@
    ``git diff`` 生成改动材料，并把计划/（修复周期时的）原评审报告/执行证据复制
    进该 worktree 的材料目录——它是本轮的审查输入。
 3. ``pi_session_create(mode="plan", projectPath=<review worktree>)`` +
-   ``permissionMode=<本轮快照，新轮次 auto>``；指令只要求审查并输出冻结 JSON，不 SubmitPlan、
+   ``permissionMode=<本轮快照，新轮次 auto>``；指令只要求审查并输出冻结结果，不 SubmitPlan、
    不 SubmitGoal、不代批任何契约。
 4. ``completed`` + 完整转录后**严格解析** ``{conclusion, report_markdown, fix}``
    （``priority`` ∈ ``constants.REVIEW_FIX_PRIORITIES``）。意外 proposal 只
    ``reject`` 关闭并记 ``review_blocked``，**不**按其 markdown 登记 pass。
    格式错误/转录不完整/身份不符/权限等待/超时 → 绝不写 pass、不推进 done。
 5. 报告写 ``<APP_SUPPORT>/reports/<task_id>/<run_id>.md``（核心重算哈希）；
-   手动任务三结论动作：
-   - ``pass``：``register-review(pass)`` → ``advance-task(done, in-review)`` →
-     ``report succeeded``；
-   - ``changes_requested``：**先** ``create-review-fix`` 取得
-     ``fix_task_id``/``source_sha256``，**再** ``register-review(changes_requested,
-     review_key, fix_task_id, fix_task_source_sha256)`` → ``report succeeded``；
+   三结论动作：
+   - ``pass``：``register-review(pass)``；自动管理任务等待既有交付流程，
+     手动任务按核心交付门控 ``advance-task(done, in-review)``；最后 ``report succeeded``；
+   - ``changes_requested``：``register-review(changes_requested,
+     fix_mode=same_task, fix, review_key)`` → ``report succeeded``。
+     不创建 Kaneo 子任务、不生成新计划；核心在原 Review 结算后按自动策略排队
+     同任务独立修复会话，手动任务保留 held 等待用户确认影响与费用；
    - ``blocked``：``register-review(blocked)`` → ``report needs_user``。
-   自动任务 pass 只登记等待交付；changes_requested 在同任务内登记修复请求。
-6. 登记身份：``register-review``/``create-review-fix``/``advance-task`` 都传
+6. 登记身份：``register-review``/``advance-task`` 都传
    ``request_id`` + ``run_id`` + ``expected_execution_run_id``（核心事务内核对）；
    ``review_key = sha256(规范 JSON(源 task_id, 本周期执行 run_id, 报告 sha))``。
 7. 部分成功恢复：job 检查点 + ``get-task``/``get-request`` 事实核对；登记一致
-   则跳过 ``register``，``pass`` 已 done 则跳过 ``advance``，同 key fix 已存在
-   则不重复创建；``report`` 响应丢失只读核对，**不**重放非幂等调用。
+   则跳过 ``register``，``pass`` 已 done 则跳过 ``advance``；同身份修复材料已
+   登记时不重复启动修复会话；``report`` 响应丢失只读核对，**不**重放非幂等调用。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,10 @@ _TERMINAL_REQUEST_STATUSES = ("succeeded", "failed", "cancelled")
 RESULT_KEYS = ("conclusion", "report_markdown", "fix")
 FIX_KEYS = ("title", "description", "priority")
 INSTRUCTION_MARKER = "## 本轮 Review 身份与材料（Pi-Desktop-Plus 控制端）"
+REVIEW_TEXT_MARKERS = (
+    "<<<KANPILOT_REVIEW_V1>>>", "<<<REPORT>>>", "<<<FIX_TITLE>>>",
+    "<<<FIX_DESCRIPTION>>>", "<<<END_KANPILOT_REVIEW_V1>>>",
+)
 
 
 def _sleep(seconds: float) -> None:  # 测试接缝
@@ -184,13 +189,94 @@ def validate_result(value):
     return _validate_result(value)
 
 
-def parse_result(messages: list) -> Tuple[Optional[dict], Optional[str]]:
-    """最终 assistant 答复 → 冻结结果（严格；绝不从自由文本里猜结构）。"""
+def _text_result(text: str, *, normalizations: Optional[list] = None
+                 ) -> Tuple[Optional[dict], Optional[str]]:
+    """Read one exact frame; only unstructured outer narration is removable."""
+    trimmed = text.strip()
+    lines = trimmed.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    markers = [(i, line) for i, line in enumerate(plain) if line in REVIEW_TEXT_MARKERS]
+    if ([line for _i, line in markers] != list(REVIEW_TEXT_MARKERS)
+            or markers[1][0] != markers[0][0] + 3):
+        return None, "review_text_v1 标记缺失、重复、乱序或混入额外文字"
+    start, end = markers[0][0], markers[-1][0]
+    before, after = lines[:start], lines[end + 1:]
+    # One fence immediately enclosing the frame is transport decoration. Do
+    # not unwrap arbitrary code blocks or search their contents for a result.
+    if (before and after and before[-1].rstrip("\r\n") in ("```", "```text")
+            and after[0].rstrip("\r\n") == "```"):
+        before, after = before[:-1], after[1:]
+    outside = "".join(before + after).strip()
+    if (any(token in outside for token in ("{", "}", "[", "]", "```", "<<<", ">>>"))
+            or re.search(r'''\b(?:conclusion|priority)\b["'`*_]*\s*[:=]''',
+                         outside, re.IGNORECASE)):
+        return None, "review_text_v1 外侧混入结构化结果或损坏标记"
+    conclusion = re.fullmatch(r"conclusion: (pass|changes_requested|blocked)", plain[start + 1])
+    priority = re.fullmatch(r"priority: (no-priority|low|medium|high|urgent)", plain[start + 2])
+    if conclusion is None or priority is None:
+        return None, "review_text_v1 conclusion/priority 缺失或非法"
+
+    def section(start, end):
+        content = "".join(lines[markers[start][0] + 1:markers[end][0]])
+        # Remove just the separator newline before the next marker. Interior
+        # quotes, literal backslashes, code fences and blank lines stay intact.
+        return content.removesuffix("\r\n") if content.endswith("\r\n") else content.removesuffix("\n")
+
+    report, title, description = section(1, 2), section(2, 3), section(3, 4)
+    verdict, level = conclusion[1], priority[1]
+    if verdict != "changes_requested" and (title.strip() or description.strip() or level != "no-priority"):
+        return None, "review_text_v1 非 changes_requested 的修复段必须为空且 priority=no-priority"
+    if outside and normalizations is not None:
+        normalizations.append("removed_text_frame_commentary")
+    return {"conclusion": verdict, "report_markdown": report,
+            "fix": {"title": title, "description": description, "priority": level}
+            if verdict == "changes_requested" else None}, None
+
+
+def parse_result(messages: list, *, normalizations: Optional[list] = None,
+                 metadata: Optional[dict] = None
+                 ) -> Tuple[Optional[dict], Optional[str]]:
+    """Final text frame / historical JSON → shared strict Review result."""
     text = pi_desktop_controller.last_assistant_text(messages)
+    applied = []
+    result_format = "json"
     value, error = pi_desktop_controller.strict_json_object(text)
+    if (error is not None and isinstance(text, str)
+            and (any(marker in text for marker in REVIEW_TEXT_MARKERS)
+                 or "<<<KANPILOT_REVIEW_" in text
+                 or "<<<END_KANPILOT_REVIEW_" in text)):
+        value, error = _text_result(text, normalizations=applied)
+        if error is not None:
+            return None, error
+        result_format = "review_text_v1"
+    if error is not None and isinstance(text, str):
+        # Never search for arbitrary braces or an older assistant answer. Only
+        # one explicitly delimited object in the final answer is eligible.
+        fences = list(re.finditer(r"^```[^\r\n]*", text, re.MULTILINE))
+        block = re.search(
+            r"^```(?:json)?[ \t]*\r?\n(.*?)^```[ \t]*(?=\r?$)",
+            text, re.MULTILINE | re.DOTALL,
+        )
+        if block is not None and len(fences) == 2:
+            outside = text[:block.start()] + text[block.end():]
+            if not any(marker in outside for marker in ("```", "{", "}", "[", "]")):
+                value, error = pi_desktop_controller.strict_json_object(block.group(1))
+                if error is None:
+                    applied.append("removed_fence_commentary")
     if error is not None:
         return None, error
-    return validate_result(value)
+    fix = value.get("fix")
+    if (value.get("conclusion") == "changes_requested"
+            and isinstance(fix, dict) and set(fix) == {"title", "description"}):
+        value = dict(value, fix=dict(fix, priority="no-priority"))
+        applied.append("missing_fix_priority=no-priority")
+    result, error = validate_result(value)
+    if error is None:
+        if normalizations is not None:
+            normalizations.extend(applied)
+        if metadata is not None:
+            metadata["result_format"] = result_format
+    return result, error
 
 
 # --------------------------------------------------------------- proposal 拒绝
@@ -502,7 +588,7 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
 
 def review_instruction(prompt: str, *, job: dict, review_root: Path,
                        materials: dict, facts: dict) -> str:
-    """只要求审查并输出冻结 JSON 的 Plus 指令（不 SubmitPlan、不代批契约）。"""
+    """Read-only Review with a raw Markdown result frame; no proposal approval."""
     task = facts.get("task") or {}
     files = materials.get("files") or {}
     lines = [prompt.rstrip(), "", INSTRUCTION_MARKER, ""]
@@ -544,25 +630,23 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
     for name in sorted(files):
         lines.append(f"  - `{files[name]}`")
     lines.append(f"- 项目根（专属 Review worktree）：`{review_root}`")
-    lines.append(
-        "- 最终答复必须**只是**一个 JSON 对象（可整体包一层 ```json 栅栏），键恰好为"
-        " `conclusion`、`report_markdown`、`fix`："
-    )
-    lines.append(
-        '  `{"conclusion":"pass|changes_requested|blocked",'
-        '"report_markdown":"<中文评审报告：结论/证据/缺口/建议>",'
-        '"fix":{"title":"...","description":"...","priority":"<优先级>"}|null}`'
-    )
-    lines.append(
-        "  - `fix` 仅在 `changes_requested` 时给出，priority ∈ "
-        f"{', '.join(constants.REVIEW_FIX_PRIORITIES)}；其余结论必须为 `null`。"
-    )
+    lines.append("- 最终答复使用 review_text_v1 分段文本，**不要输出 JSON**，不要手工转义报告中的引号、反斜杠或换行。按以下顺序输出，标记各独占一行、不得省略或重复：")
+    lines.extend([
+        "<<<KANPILOT_REVIEW_V1>>>", "conclusion: changes_requested", "priority: medium",
+        "<<<REPORT>>>", "<中文评审报告：结论/证据/缺口/建议，直接写 Markdown 原文>",
+        "<<<FIX_TITLE>>>", "<修复任务标题>",
+        "<<<FIX_DESCRIPTION>>>", "<完整可执行修复步骤与测试/原生验收缺口，直接写原文>",
+        "<<<END_KANPILOT_REVIEW_V1>>>",
+    ])
+    lines.append("  - 上例的 conclusion 必须替换为本轮实际结论 pass、changes_requested 或 blocked；priority 必须是 " + ", ".join(constants.REVIEW_FIX_PRIORITIES) + " 之一，未指定时写 no-priority。")
+    lines.append("  - changes_requested 的报告、标题、修复说明都必须非空；pass/blocked 时 priority 必须为 no-priority，保留 FIX_TITLE/FIX_DESCRIPTION 标记但两段正文留空（不要写 null、无、占位符）。")
+    lines.append("  - 标记行是协议保留字，正文不得重复这些独占标记行；正文里的 Markdown 代码块、双引号、反斜杠按原样书写。")
     lines.append("  - 已定位确定代码缺陷时必须使用 changes_requested，fix.description 包含可执行修复步骤及测试/原生验收缺口；不得仅因验收不足改成 blocked/fix=null。")
     lines.append("  - 无确定代码缺陷但材料、环境或用户选择不足导致无法完成评审时使用 blocked；报告必须列具体原因、需补充材料或决定、可执行下一步与解除阻塞标准。用户补充证据需独立核验，不得当作自动验证或直接判 pass。")
     if "original-plan.md" in files:
         lines.append("  - 本轮包含原冻结计划 original-plan.md、原阻塞报告 blocked-review.md 和新修复计划 plan.md；三者共同核验。新计划遗漏原功能或原验收要求不能当作已解除阻塞，修复轮仍需核验原范围与验收。")
     lines.append(
-        "  - 除该 JSON 外不要输出别的解释文字；格式不符将被判为评审受阻（交人工）。"
+        "  - 整个答复只包含上述一份分段结果，开始和结束标记外不要添加开场白、总结或解释文字。"
     )
     lines.append(
         "- 禁止 SubmitPlan/SubmitGoal、禁止代批任何契约；若被要求生成计划或目标契约，"
@@ -811,9 +895,16 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
             "kind": "blocked",
             "detail": detail,
         }
-    result, error = parse_result(messages)
+    normalizations, metadata = [], {}
+    result, error = parse_result(messages, normalizations=normalizations, metadata=metadata)
     if result is None:
         return {"kind": "blocked", "detail": f"review_result_invalid: {error}"}
+    job.update(metadata)
+    log.emit("system", util.now_iso(), content="Review 结果格式：" + metadata["result_format"])
+    if normalizations:
+        job["result_normalizations"] = normalizations
+        log.emit("system", util.now_iso(),
+                 content="Review 结果格式标准化：" + ", ".join(normalizations))
     return {"kind": "settle", "result": result}
 
 

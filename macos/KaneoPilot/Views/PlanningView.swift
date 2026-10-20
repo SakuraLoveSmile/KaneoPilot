@@ -91,10 +91,11 @@ struct PlanningView: View {
 
     private var plusSelected: Bool { batchBackend == "pi_desktop" }
     private var desktopSelected: Bool { batchBackend == "codex_desktop" }
+    private var qoderSelected: Bool { batchBackend == "qoder" }
 
-    /// 生效方式：Plus 运行端只支持内置规划（spec_plan 是 Codex 插件运行方式）。
+    /// 生效方式：Plus / Qoder 只支持内置规划（spec_plan 是 Codex 插件运行方式）。
     private var effectiveMethod: String {
-        plusSelected ? "builtin" : plannerMethod
+        plusSelected || qoderSelected ? "builtin" : plannerMethod
     }
 
     private var methodLabel: String {
@@ -104,6 +105,7 @@ struct PlanningView: View {
     /// 普通规划型号与思考等级（按运行端取对应快照，不用草稿）。
     private var batchModelSummary: String {
         if desktopSelected { return "继承 Desktop 会话/自动任务" }
+        if qoderSelected { return qoderModelSummary }
         if plusSelected {
             let plus = model.plannerConfig?.config?.piDesktop
             let provider = plus?.providerId ?? "未保存"
@@ -116,17 +118,23 @@ struct PlanningView: View {
             + "\(standard?.reasoningEffort ?? "未保存")"
     }
 
-    /// 评审修复规划型号（属 Codex 规划分支）。
+    /// 评审修复规划型号（按运行端取已保存配置）。
     private var fixModelSummary: String {
         if desktopSelected { return "继承 Desktop 会话/自动任务" }
+        if qoderSelected { return qoderModelSummary }
         let fix = model.plannerEffective("review_fix")
         return "\(fix?.plannerModel ?? "未保存") · 思考 "
             + "\(fix?.reasoningEffort ?? "未保存")"
     }
 
-    /// 切到 Plus 后收敛方式选择（配置里的旧 spec_plan 预选不生效）。
+    private var qoderModelSummary: String {
+        let qoder = model.plannerConfig?.config?.qoder
+        return "\(qoder?.model ?? "auto") · 思考 \(qoder?.reasoningEffort ?? "inherit")"
+    }
+
+    /// 切到 Plus / Qoder 后收敛方式选择（配置里的旧 spec_plan 预选不生效）。
     private func clampMethodToBackend() {
-        if plusSelected && plannerMethod == "spec_plan" {
+        if (plusSelected || qoderSelected) && plannerMethod == "spec_plan" {
             plannerMethod = "builtin"
         }
     }
@@ -436,7 +444,7 @@ struct PlanningView: View {
     // MARK: - ② 准备材料
 
     /// §4.7 T2 / v4 §5.24.3 规划方式与运行端：内置规划 / Spec Planner 插件
-    /// （默认预选 get-planner-config.default_method）；Plus 运行端只支持内置规划。
+    /// （默认预选 get-planner-config.default_method）；Plus / Qoder 只支持内置规划。
     /// 对本批次勾选任务生效——每项 start-plans 带 planner_method + planner_backend。
     @ViewBuilder
     private var plannerMethodSection: some View {
@@ -445,11 +453,13 @@ struct PlanningView: View {
             Picker("规划方式", selection: $plannerMethod) {
                 Text("内置规划").tag("builtin")
                 Text("Spec Planner 插件").tag("spec_plan")
-                    .disabled(plusSelected || (!desktopSelected && spec?.available == false))
+                    .disabled(plusSelected || qoderSelected || (!desktopSelected && spec?.available == false))
             }
             .pickerStyle(.menu)
             .accessibilityLabel("规划方式")
-            .help(plusSelected
+            .help(qoderSelected
+                  ? "Qoder CLI 只支持内置规划"
+                  : plusSelected
                   ? "Plus 运行端按内置规划提交"
                   : "本批次提交时固化所选方式")
             DisclosureGroup("运行环境详情", isExpanded: $showRuntimeDetails) {
@@ -459,7 +469,12 @@ struct PlanningView: View {
                     FieldRow("评审修复", fixModelSummary)
                 }
             }
-            if plusSelected {
+            if qoderSelected {
+                Text("Qoder CLI 只支持内置规划。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if plusSelected {
                 Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
                      + "不会在 Plus 下运行。")
                     .font(.kpSmall)
@@ -750,7 +765,7 @@ struct PlanningView: View {
                   let inputID = response.inputId,
                   let sha = response.inputSha256 else { return nil }
             // v3 §5.23.2 + v4 §5.24.3：每项总是提交明确的运行端与方式；
-            // Plus 运行端只允许内置规划。
+            // Plus / Qoder 只允许内置规划。
             return ["input_id": inputID, "input_sha256": sha,
                     "planner_method": effectiveMethod,
                     "planner_backend": batchBackend]

@@ -841,12 +841,10 @@ def prepare_goal_continuation(spec: dict, job: dict, client) -> dict:
             or job.get("task_id") != spec["task_id"] or job.get("run_id") != spec["run_id"]
             or job.get("backend") != "pi_desktop"):
         raise util.KanpilotError("forbidden", "goal_continuation_identity: 非当前自动执行 scope")
-    raw = Path(spec["plan_path"]).read_bytes()
-    if not spec.get("plan_sha256") or hashlib.sha256(raw).hexdigest() != spec["plan_sha256"]:
-        raise util.KanpilotError("validation_failed", "goal_continuation_plan: 原计划哈希不符")
-    body = raw.decode("utf-8")
-    if body.startswith("---\n"):
-        body = body.split("---", 2)[2].removeprefix("\n")
+    from . import repair_prompt
+    if not spec.get("plan_sha256"):
+        raise util.KanpilotError("validation_failed", "goal_continuation_plan: 原计划哈希缺失")
+    body = repair_prompt.execution_body(spec)
     session_id, original = job["session_id"], job["turn_id"]
     status = client.agent_status(session_id)
     inner = status.get("status") or status
@@ -946,12 +944,10 @@ def prepare_turn_recovery(spec: dict, job: dict, client, *, turn_id=None) -> Opt
             or (new.get("startedAt") is not None and new_start is None)
             or (new_state == "completed" and new_end is None)):
         raise util.KanpilotError("conflict", "turn_recovery_time: 缺少完整且有序的持久轮次时序")
-    raw = Path(spec["plan_path"]).read_bytes()
-    if not spec.get("plan_sha256") or hashlib.sha256(raw).hexdigest() != spec["plan_sha256"]:
-        raise util.KanpilotError("validation_failed", "turn_recovery_plan: 原计划哈希不符")
-    body = raw.decode("utf-8")
-    if body.startswith("---\n"):
-        body = body.split("---", 2)[2].removeprefix("\n")
+    from . import repair_prompt
+    if not spec.get("plan_sha256"):
+        raise util.KanpilotError("validation_failed", "turn_recovery_plan: 原计划哈希缺失")
+    body = repair_prompt.execution_body(spec)
     expected = (spec.get("instruction") or "").rstrip() + "\n\n" + body
     collector = _Collector(client, session_id, None, spec.get("session_marker") or "", retain_messages=True)
     collector.poll()
@@ -1041,6 +1037,25 @@ def _round_remaining_seconds(job: dict, timeout: float, spec=None) -> float:
     if started is None or now is None:
         return timeout
     return timeout - max(0.0, now.timestamp() - started.timestamp() - (_input_wait_seconds(spec) if spec else 0))
+
+
+def required_verification_commands(spec: dict) -> list:
+    """Read only frozen plan bytes; never infer requirements from model output."""
+    if spec.get("completion_policy") != "command_verification":
+        return []
+    if not isinstance(spec.get("plan_path"), str) or not spec["plan_path"]:
+        raise util.KanpilotError("validation_failed", "缺少冻结验证计划路径")
+    raw = Path(spec["plan_path"]).read_bytes()
+    if not spec.get("plan_sha256") or hashlib.sha256(raw).hexdigest() != spec["plan_sha256"]:
+        raise util.KanpilotError("conflict", "冻结验证计划哈希不符")
+    parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+    if not parsed.get("ok"):
+        raise util.KanpilotError("validation_failed", parsed.get("error") or "冻结验证命令无效")
+    commands = parsed["commands"]
+    pi_desktop_backend.validate_required_verification_commands(commands, "approve")
+    if "required_verification_commands" in spec and spec["required_verification_commands"] != commands:
+        raise util.KanpilotError("conflict", "冻结验证命令与计划不符")
+    return commands
 
 
 def run_real(spec: dict, resume: bool = False) -> int:
@@ -1186,11 +1201,24 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha:
             return fail("plan_mismatch", "plan_mismatch")
+    if spec.get("review_repair") is not None or spec.get("repair_prompt"):
+        from . import repair_prompt
+        try:
+            plan_body = repair_prompt.execution_body(spec)
+        except util.KanpilotError as exc:
+            return fail("repair_materials: " + exc.message, "repair_materials")
     body_bytes = plan_body.encode("utf-8")
     if len(body_bytes) > constants.PI_DESKTOP_MCP_MAX_REQUEST_BYTES:
         # 计划正文超限 → 发送前明确失败（不入队、不截断）。
         return fail(f"plan_too_large: {len(body_bytes)} 字节 > 2 MiB",
                     "plan_too_large")
+
+    commands = []
+    if not resume or spec.get("continue_goal_authorization"):
+        try:
+            commands = required_verification_commands(spec)
+        except (util.KanpilotError, OSError, UnicodeDecodeError) as exc:
+            return fail("verification_requirements_invalid: " + str(exc), "verification_requirements_invalid")
 
     # ---- 2. 通过 KaneoPilot runtime scope 连接并复核 Plus 工具集。
     owner.check()
@@ -1211,6 +1239,8 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
             )
             client.connect(required_tools=(constants.PI_DESKTOP_REQUIRED_TOOLS + constants.PI_DESKTOP_GOAL_TOOLS) if resume else constants.PI_DESKTOP_DISPATCH_TOOLS)
             job["scope_id"] = client.scope_id
+        if commands and not client.supports_required_verification_commands():
+            raise util.KanpilotError("unsupported_tools", "请升级 Plus：pi_plans_resolve 缺少 requiredVerificationCommands 能力，尚未启动模型")
         job["pi_desktop_pid"] = getattr(client, "harness_pid", None)
         if not resume:
             _write_json(job_path, job)
@@ -1601,6 +1631,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 "approve",
                 target_permission_mode=permission_mode,
                 version=version,
+                **({"required_verification_commands": commands} if commands else {}),
             )
             # Only our successful resolve call establishes this boundary;
             # a concurrent approval must rely on turn identity/start proof.

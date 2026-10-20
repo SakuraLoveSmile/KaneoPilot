@@ -129,6 +129,23 @@ def test_shadow_retains_legacy_outcome(monkeypatch, tmp_path):
     assert any(c == "engine-verdict" for c, _ in calls)
 
 
+@pytest.mark.parametrize("mode", ["legacy", "shadow", "live"])
+@pytest.mark.parametrize("passed", [False, True])
+def test_task_action_requires_bound_verdict_in_every_mode(monkeypatch, tmp_path, mode, passed):
+    value = dict(task(), project_id="p")
+    value["extra"]["fix_request"] = {"mode": "direct", "source_kind": "merge_conflict"}
+    value["extra"]["delivery"] = {"mode": "pr"}
+    # A transcript without checks cannot substitute for a structured verdict.
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[], responses={
+        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
+        "engine-verdict": {"verification_ok": passed},
+    })
+    assert sum(c == "engine-verdict" for c, _ in calls) == 1
+    assert any(c == "delivery-commit" for c, _ in calls) == passed
+    assert any(c == "advance-task" for c, _ in calls) == passed
+    assert report(calls)["outcome"] == ("succeeded" if passed else "needs_user")
+
+
 def test_shadow_comparison_error_keeps_passing_legacy_result(monkeypatch, tmp_path):
     value = dict(task(), project_id="p")
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={

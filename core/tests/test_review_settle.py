@@ -60,7 +60,8 @@ def test_all_settlement_paths_and_repeat(scene, automated, conclusion):
     if conclusion == 'pass':
         assert ('advance-task' in commands) is not automated
     if conclusion == 'changes_requested':
-        assert ('create-review-fix' in commands) is not automated
+        assert 'create-review-fix' not in commands
+        assert next(p for cmd, p in writes if cmd == 'register-review')['fix_mode'] == 'same_task'
     payload = next(p for cmd, p in writes if cmd == 'register-review')
     assert payload['request_id'] == 'req1'
     assert payload['run_id'] == 'review1'
@@ -162,12 +163,13 @@ def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusio
                           'fix': {'title': '修复缺口', 'description': '回归覆盖', 'priority': 'high'} if conclusion == 'changes_requested' else None})
     assert review_settle.settle(**kwargs)['exit_code'] == 0
     updated = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
-    assert updated['status'] == {'pass': 'in_review', 'changes_requested': 'needs_plan', 'blocked': 'needs_user'}[conclusion]
+    assert updated['status'] == {'pass': 'in_review', 'changes_requested': 'in_review', 'blocked': 'needs_user'}[conclusion]
     assert len(updated['review_history']) == 1
     if conclusion == 'changes_requested':
-        assert updated['extra']['fix_request']['state'] == 'open'
-        assert updated['automation']['fix_round'] == 1
-        assert updated['review_report_sha256'] is None
+        assert updated['extra']['fix_request']['state'] == 'held'
+        assert updated['automation']['fix_round'] == 0
+        assert updated['review_report_sha256']
+        assert '终态' in updated['extra']['fix_request']['reason']
     assert review_settle.settle(**kwargs)['exit_code'] == 0
     assert len(cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']['review_history']) == 1
 

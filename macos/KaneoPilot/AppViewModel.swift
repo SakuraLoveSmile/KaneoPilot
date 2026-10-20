@@ -412,10 +412,13 @@ final class AppViewModel: ObservableObject {
     }
 
     func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil, expectedPlanSHA256: String? = nil,
+                 verificationReportSupplement: Bool = false,
                  onError: ((String) -> Void)? = nil) async {
         let executionRetry = (action == "resume" || action == "retry_verification") && expectedExecutionRunID != nil
-        await perform(executionRetry ? "重新执行（沿用计划）" : Self.actionLabel(action),
+        let supplement = action == "retry_verification" && executionRetry && verificationReportSupplement
+        await perform(supplement ? "补齐验证报告" : executionRetry ? "重新执行（沿用计划）" : Self.actionLabel(action),
                       successToast: action == "reverify" ? "验证已通过，监控已排队"
+                        : supplement ? "补齐验证报告已排队，等待执行端领取"
                         : executionRetry ? "重新执行已排队，等待执行端领取" : nil,
                       onError: onError) {
             var payload: [String: Any] = ["task_id": taskID, "action": action]
@@ -444,6 +447,130 @@ final class AppViewModel: ObservableObject {
                           expectedExecutionRunID: candidate.executionRunId, expectedPlanSHA256: candidate.planSha256)
         } catch { alertMessage = error.coreMessage }
         await refreshAll()
+    }
+
+    func currentReviewRepair(taskID: String) async throws -> ReviewRepair {
+        let task = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
+        guard task.readOnly != true, let repair = task.reviewRepair, repair.canStart else {
+            throw CoreError.exited(status: 1, message: "修复候选已变化或当前不可启动，请刷新后检查。", code: "conflict")
+        }
+        return repair
+    }
+
+    /// 只读预检，不调用模型；候选指纹须原样交给用户确认后的 start。
+    func prepareTaskAIAction(taskID: String) async throws -> TaskAIActionCandidate {
+        guard actionInFlight == nil else {
+            throw CoreError.exited(status: 1, message: "有操作正在进行，请稍后重试。", code: "conflict")
+        }
+        actionInFlight = "正在核对 PR…"
+        defer { actionInFlight = nil }
+        let response = try await client.run("prepare-task-ai-action", payload: [
+            "task_id": taskID, "kind": "merge_conflict"
+        ], timeout: 120, as: PrepareTaskAIActionResponse.self)
+        guard response.candidate.taskId == taskID, response.candidate.kind == "merge_conflict" else {
+            throw CoreError.exited(status: 1, message: "AI 处理候选身份不匹配，请重新核对。", code: "conflict")
+        }
+        return response.candidate
+    }
+
+    func startTaskAIAction(candidate: TaskAIActionCandidate, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，AI 处理尚未启动，请稍后重新核对。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("开始 AI 处理", onError: onError) {
+            let response = try await self.client.run("start-task-ai-action", payload: [
+                "task_id": candidate.taskId, "kind": candidate.kind,
+                "expected_context_sha256": candidate.contextSha256,
+                "expected_config_sha256": candidate.configSha256, "confirm": true
+            ], timeout: 120, as: StartTaskAIActionResponse.self)
+            guard response.ok else {
+                throw CoreError.exited(status: 1, message: "AI 处理未确认启动，请刷新查看处理记录。", code: "conflict")
+            }
+            return response.alreadyStarted == true ? "已有相同 AI 处理，请查看处理状态" : "AI 处理已排队，等待执行端领取"
+        }
+    }
+
+    func prepareTaskRelease(taskID: String) async throws -> PrepareTaskReleaseResponse {
+        guard actionInFlight == nil else {
+            throw CoreError.exited(status: 1, message: "有操作正在进行，请稍后再准备发布。", code: "conflict")
+        }
+        actionInFlight = "准备构建发布"
+        defer { actionInFlight = nil }
+        let candidate = try await client.run("prepare-task-release", payload: ["task_id": taskID],
+                                            timeout: 300, as: PrepareTaskReleaseResponse.self)
+        guard candidate.taskId == taskID, candidate.release.canStart,
+              candidate.release.state != "unknown", !candidate.contextSha256.isEmpty else {
+            throw CoreError.exited(status: 1, message: candidate.release.reason, code: "conflict")
+        }
+        return candidate
+    }
+
+    func startTaskRelease(candidate: PrepareTaskReleaseResponse, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，发布尚未开始，请稍后重新准备。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("构建并发布", onError: onError) {
+            let response = try await self.client.run("start-task-release", payload: [
+                "task_id": candidate.taskId, "expected_context_sha256": candidate.contextSha256
+            ], timeout: 300, as: TaskReleaseMutationResponse.self)
+            return response.release.reason
+        }
+    }
+
+    func abandonUnsentRelease(batchID: String, contextSHA256: String, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，尚未放弃批次，请稍后重试。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("放弃未发送批次", onError: onError) {
+            let response = try await self.client.run("abandon-unsent-release", payload: [
+                "batch_id": batchID, "expected_context_sha256": contextSHA256
+            ], timeout: 300, as: TaskReleaseMutationResponse.self)
+            return response.release.reason
+        }
+    }
+
+    func syncReleaseBatch(batchID: String, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，尚未同步发布结果，请稍后重试。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("同步发布结果", onError: onError) {
+            let response = try await self.client.run("sync-release-batch", payload: ["batch_id": batchID],
+                                                    timeout: 300, as: TaskReleaseMutationResponse.self)
+            return response.release.reason
+        }
+    }
+
+    func closeoutParentTask(taskID: String, contextSHA256: String) async {
+        await perform("收尾校验") {
+            let response = try await self.client.run("closeout-parent-task", payload: [
+                "task_id": taskID, "expected_context_sha256": contextSHA256
+            ], timeout: 300, as: CloseoutParentTaskResponse.self)
+            switch response.outcome {
+            case "completed": return "收尾校验通过，任务已完成"
+            case "unknown": return "完成同步待确认；可再次只读核对结果"
+            default: return response.parentCloseout.reason
+            }
+        }
+    }
+
+    func startReviewRepair(taskID: String, candidate: ReviewRepair) async {
+        await perform("开始修复会话", successToast: "修复会话已排队，等待执行端领取") {
+            guard try await self.currentReviewRepair(taskID: taskID) == candidate else {
+                throw CoreError.exited(status: 1, message: "评审报告或修复身份已变化，请重新确认。", code: "conflict")
+            }
+            var payload = candidate.startFields
+            payload["task_id"] = taskID
+            _ = try await self.client.run("start-review-repair", payload: payload, as: OkResponse.self)
+            return nil
+        }
     }
 
     func recoverReview(taskID: String, recovery: ReviewRecovery) async {
@@ -1037,7 +1164,8 @@ final class AppViewModel: ObservableObject {
                            reviewFix: PlannerGroupConfig,
                            defaultMethod: String? = nil,
                            piDesktop: ExecPiDesktopConfig? = nil,
-                           claude: CLIModelConfig? = nil) async -> String? {
+                           claude: CLIModelConfig? = nil,
+                           qoder: CLIModelConfig? = nil) async -> String? {
         guard !plannerSaving else { return "正在保存规划配置" }
         plannerSaving = true
         defer { plannerSaving = false }
@@ -1050,6 +1178,16 @@ final class AppViewModel: ObservableObject {
                     return "Plus 规划配置需要完整的五字段（权限固定 ask）"
                 }
                 payload["pi_desktop"] = piDesktop.fields
+            } else if backend == "qoder" {
+                guard let model = qoder?.model, let effort = qoder?.reasoningEffort else {
+                    return "请填写 Qoder 模型与思考等级"
+                }
+                if let issue = CLIModelConfig.qoderIssue(model: model, reasoningEffort: effort) { return issue }
+                guard (defaultMethod ?? "builtin") == "builtin" else {
+                    return "Qoder 仅支持内置规划，请调整默认规划方式。"
+                }
+                payload["qoder"] = ["model": model, "reasoning_effort": effort]
+                payload["default_method"] = "builtin"
             } else if backend == "claude" {
                 guard let model = claude?.model, let effort = claude?.effort,
                       !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1383,6 +1521,7 @@ final class AppViewModel: ObservableObject {
         case "dismiss": return "清除阻塞标记"
         case "recover_review": return "恢复评审阶段"
         case "recheck": return "重新校验"
+        case "closeout_parent": return "校验并完成"
         case "archive": return "归档"
         case "trash": return "移入回收站"
         case "resume-auto": return "恢复自动推进"

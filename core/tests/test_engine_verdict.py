@@ -380,6 +380,21 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.assertFalse(result["verification_ok"])
         self.assertEqual(result["evidence_source"], "goal_report")
 
+    def test_ready_report_lists_missing_checks_without_claiming_report_is_pending(self):
+        commands = ["flutter analyze", "flutter test"]
+        tid, sha = self._running_task_with_repo("report-check-diagnostics", commands=commands)
+        self._set_mode(tid, "live")
+        self.goal["checks"] = []
+        result = self.verdict(tid, sha)
+        self.assertEqual(result["kind"], "unconfirmed")
+        self.assertFalse(result["verification_ok"])
+        self.assertIn("报告已就绪", result["detail"])
+        self.assertIn("缺少 2 项检查记录", result["detail"])
+        self.assertNotIn("未就绪", result["detail"])
+        for command in commands:
+            self.assertIn(command, result["detail"])
+        self.assertEqual(result["goal_check_coverage"]["missing"], commands)
+
     def test_live_goal_report_must_belong_to_the_approved_turn_chain(self):
         tid, sha = self._running_task_with_repo("report-turn", commands=["pytest"])
         self._set_mode(tid, "live")

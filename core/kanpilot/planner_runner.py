@@ -150,6 +150,81 @@ def _strip_model_frontmatter(markdown: str) -> str:
     return markdown
 
 
+def review_fix_plan_task(conn, task_id: str, req_payload: dict) -> dict:
+    """Resolve an independent fix's registered report; never infer paths or write DB.
+
+    Older create-review-fix rows lack report fields. Only a registered parent
+    delivery (current or historical) for this exact child/key can fill them.
+    Already complete historical child rows remain usable when their parent
+    predates report delivery history, with any available authority still checked.
+    """
+    task = dict(db.require_task(conn, task_id))
+    if task["plan_kind"] != "review_fix" or req_payload.get("fix_mode") == "same_task":
+        return task
+    source_id, key = task["review_source_task_id"], task["review_key"]
+    util.require(source_id and key, "review fix binding missing source/review_key")
+    for field, expected in (("review_source_task_id", source_id), ("review_key", key)):
+        util.require(not req_payload.get(field) or req_payload[field] == expected,
+                     "review fix " + field + " mismatch")
+    source = db.get_task(conn, source_id)
+    util.require(source is not None and not db.task_is_purged(source),
+                 "review fix binding source unavailable")
+    util.require(source["project_id"] == task["project_id"]
+                 and source["repository"] == task["repository"],
+                 "review fix binding project/repository mismatch")
+    extra = db.task_extra(source)
+    records = list(extra.get("review_history") or [])
+    if source["review_key"] == key:
+        util.require(not source["fix_task_id"] or source["fix_task_id"] == task_id,
+                     "review fix binding child mismatch")
+        # create-review-fix changes the parent link before register-review and
+        # leaves previous report columns intact. A receipt must bind those
+        # columns to this cycle before they can supply a missing child report.
+        registered = any(
+            isinstance(detail, dict)
+            and detail.get("conclusion") == "changes_requested"
+            and detail.get("review_key") == key
+            and detail.get("fix_task_id") == task_id
+            and detail.get("report_sha256") == source["review_report_sha256"]
+            for detail in (util.jload(row["detail_json"]) for row in conn.execute(
+                "SELECT detail_json FROM events WHERE task_id=? AND kind='review_registered'",
+                (source_id,))))
+        if source["fix_task_id"] == task_id and registered:
+            records.append({"review_key": key, "fix_task_id": task_id,
+                            "conclusion": extra.get("review_conclusion"),
+                            "report_path": source["review_report_path"],
+                            "report_sha256": source["review_report_sha256"]})
+    candidates = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("review_key") != key:
+            continue
+        util.require(not record.get("fix_task_id") or record["fix_task_id"] == task_id,
+                     "review fix binding history child mismatch")
+        if record.get("fix_task_id") != task_id:
+            continue
+        if not any(record.get(field) for field in ("conclusion", "report_path", "report_sha256")):
+            continue  # Older delivery links have no authoritative report receipt.
+        util.require(record.get("conclusion") == "changes_requested",
+                     "review fix binding conclusion mismatch")
+        if record.get("report_path") and record.get("report_sha256"):
+            candidates.append((record["report_path"], record["report_sha256"]))
+    path, digest = task["review_report_path"], task["review_report_sha256"]
+    if not path or not digest:
+        util.require(bool(candidates), "review fix report binding not registered")
+        recovered_path, recovered_digest = candidates[0]
+        util.require((not path or path == recovered_path)
+                     and (not digest or digest == recovered_digest),
+                     "review fix report binding mismatch")
+        path, digest = recovered_path, recovered_digest
+    util.require(all(pair == (path, digest) for pair in candidates),
+                 "review fix registered report binding mismatch")
+    report = util.inside(Path(path), constants.review_reports_root(), "review_report_path")
+    util.require(report.is_file(), "review report missing")
+    util.require(util.sha256_file(report) == digest, "review report sha256 mismatch")
+    task.update(review_report_path=str(report), review_report_sha256=digest)
+    return task
+
+
 def build_plan_meta(
     context: dict, manifest: dict, generated_at: str, task_row=None,
     model_config=None,
@@ -614,12 +689,12 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
             task_id=task_id, run_dir=run_dir, timeout=timeout,
             heartbeat_every=heartbeat_every,
         )
-    if backend == "claude":
+    if backend in ("claude", "qoder"):
         from . import claude_planner
         return claude_planner.run_one(
             db_path, req_id, run_id, context=context, task=task,
             task_id=task_id, run_dir=run_dir, timeout=timeout,
-            heartbeat_every=heartbeat_every,
+            heartbeat_every=heartbeat_every, backend=backend,
         )
     if backend != constants.PLANNER_BACKEND:
         # 非法/未知值 → 明确失败，不静默改走 codex（§5.24.1「不暗换后端」）。
@@ -1038,7 +1113,13 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
     if plan_kind == "review_fix" and task_id:
         conn = db.connect(db_path)
         try:
-            task_row = db.get_task(conn, task_id)
+            task_row = review_fix_plan_task(conn, task_id, req_payload)
+        except util.KanpilotError as exc:
+            finalize("failed", 0, f"review report invalid: {exc.message}", "failed",
+                     "publish_failed")
+            _report(db_path, req_id, run_id, "failed",
+                    f"计划发布被拒：{exc.message}", failure_code="planner_failed")
+            return True
         finally:
             conn.close()
     try:

@@ -27,6 +27,28 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "prepare-task-release": (
+        {"task_id": (True, "str")},
+        _automation_command("release_delivery", "cmd_prepare_task_release")),
+    "start-task-release": (
+        {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
+        _automation_command("release_delivery", "cmd_start_task_release")),
+    "sync-release-batch": (
+        {"batch_id": (True, "str")},
+        _automation_command("release_delivery", "cmd_sync_release_batch")),
+    "abandon-unsent-release": (
+        {"batch_id": (True, "str"), "expected_context_sha256": (True, "str")},
+        _automation_command("release_delivery", "cmd_abandon_unsent_release")),
+    "sync-release-batches": (
+        {"limit": (False, "int")},
+        _automation_command("release_delivery", "cmd_sync_release_batches")),
+    "closeout-parent-task": (
+        {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
+        _automation_command("parent_closeout", "cmd_closeout_parent_task")),
+    "repair-review-fix-workspace": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "review_key": (True, "str")},
+        _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
     "set-config": ({"worktree_pool_size": (True, "int")}, cmd_config.cmd_set_config),
     "worktree-slot-release": ({"slot_id": (True, "str"), "holder_id": (True, "str"),
                                "lease_token": (True, "str"), "confirm": (True, "bool")},
@@ -50,6 +72,17 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "get-verification-check-status": (
         {"task_id": (True, "str"), "operation_id": (True, "str")},
         _automation_command("verification_checks", "cmd_get_verification_check_status")),
+    "prepare-task-ai-action": (
+        {"task_id": (True, "str"), "kind": (True, "str")},
+        _automation_command("task_ai_action", "cmd_prepare_task_ai_action")),
+    "start-task-ai-action": (
+        {"task_id": (True, "str"), "kind": (True, "str"),
+         "expected_context_sha256": (True, "str"), "expected_config_sha256": (True, "str"),
+         "confirm": (True, "bool")},
+        _automation_command("task_ai_action", "cmd_start_task_ai_action")),
+    "start-review-repair": (
+        {key: (True, "str") for key in ("task_id", "expected_execution_run_id", "expected_review_key", "expected_report_sha256", "expected_plan_sha256")},
+        _automation_command("review_repair", "cmd_start_review_repair")),
     "prepare-review-repair": (
         {"task_id": (True, "str"), "expected_execution_run_id": (True, "str"),
          "expected_review_request_id": (True, "str"), "expected_report_sha256": (True, "str"),
@@ -515,7 +548,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "default_method": (False, "str"),
             # v4（§5.24.1）：规划后端与 Plus 分支五字段块（缺 backend 按 codex）。
             "backend": (False, "str"),
-            "pi_desktop": (False, "dict"), "claude": (False, "dict"),
+            "pi_desktop": (False, "dict"), "claude": (False, "dict"), "qoder": (False, "dict"),
         },
         cmd_planner.cmd_set_planner_config,
     ),
@@ -526,7 +559,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # v4（§5.24.1）：mode 仅在 backend=pi 时必需（Plus 分支用五字段）。
             "mode": (False, "str"),
             "backend": (False, "str"),
-            "pi_desktop": (False, "dict"), "claude": (False, "dict"), "codex": (False, "dict"),
+            "pi_desktop": (False, "dict"), "claude": (False, "dict"), "codex": (False, "dict"), "qoder": (False, "dict"),
             "provider": (False, "str"), "model": (False, "str"),
             "reasoning_effort": (False, "str"),
         },

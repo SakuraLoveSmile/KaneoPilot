@@ -49,6 +49,8 @@ DEFAULTS = {
 }
 CLAUDE_DEFAULT = {"model": "sonnet", "effort": "high"}
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+QODER_DEFAULT = {"model": "auto", "reasoning_effort": "inherit"}
+QODER_EFFORTS = ("inherit", "disabled", "off", "none", "low", "medium", "high", "xhigh", "max")
 DESKTOP_MODEL = {"planner_model": "codex-desktop", "reasoning_effort": "inherit"}
 DESKTOP_RUNTIME = {"model_source": "desktop_session", "permission_source": "desktop_session"}
 DESKTOP_SKILL = "spec-planner:spec-plan"
@@ -131,6 +133,8 @@ def merged(conn: sqlite3.Connection) -> dict:
         # 这里只投影生效配置，不修改已固化的请求或轮次。
         result["pi_desktop"]["permission_mode"] = PI_DESKTOP_PERMISSION_MODE
     result["claude"] = dict(CLAUDE_DEFAULT, **(stored.get("claude") or {}))
+    block = stored.get("qoder")
+    result["qoder"] = dict(QODER_DEFAULT, **(block if isinstance(block, dict) else {}))
     return result
 
 
@@ -150,6 +154,12 @@ def model_snapshot(conn: sqlite3.Connection, group: str, *, backend="codex") -> 
     if backend == "codex_desktop":
         return dict(DESKTOP_MODEL)
     state = merged(conn)
+    if backend == "qoder":
+        error = validate_qoder_block(state["qoder"])
+        if error:
+            raise util.bad_request(error)
+        return {"planner_model": state["qoder"]["model"],
+                "reasoning_effort": state["qoder"]["reasoning_effort"]}
     if backend == "claude":
         return {"planner_model": state["claude"]["model"],
                 "reasoning_effort": state["claude"]["effort"]}
@@ -209,6 +219,8 @@ def spec_plan_blocked_reason(backend_value: Optional[str]) -> Optional[str]:
         return SPEC_PLAN_DISABLED_REASON
     if backend_value == "claude":
         return "spec_plan 是 Codex 插件运行方式，Claude 计划分支只支持 builtin"
+    if backend_value == "qoder":
+        return "spec_plan 是 Codex 插件运行方式，Qoder 计划分支只支持 builtin"
     return None
 
 
@@ -257,7 +269,18 @@ def save(conn: sqlite3.Connection, groups: dict, now: str) -> dict:
         if error:
             raise util.bad_request(error)
         current["claude"] = dict(groups["claude"])
-    if current["backend"] in ("pi_desktop", "claude") and (
+    if "qoder" in groups:
+        block = groups["qoder"]
+        error = validate_qoder_block(block)
+        if error:
+            raise util.bad_request(error)
+        current["qoder"] = {"model": block["model"].strip(),
+                            "reasoning_effort": block["reasoning_effort"]}
+    if current["backend"] == "qoder":
+        error = validate_qoder_block(current["qoder"])
+        if error:
+            raise util.bad_request(error)
+    if current["backend"] in ("pi_desktop", "claude", "qoder") and (
             current["default_method"] == "spec_plan"):
         raise util.bad_request(
             f"{current['backend']} 计划分支不支持 default_method=spec_plan："
@@ -273,6 +296,7 @@ def save(conn: sqlite3.Connection, groups: dict, now: str) -> dict:
     stored["default_method"] = current["default_method"]
     stored["backend"] = current["backend"]
     stored["claude"] = dict(current["claude"])
+    stored["qoder"] = dict(current["qoder"])
     if current.get("pi_desktop") is not None:
         stored["pi_desktop"] = dict(current["pi_desktop"])
     stored["updated_at"] = now
@@ -292,6 +316,19 @@ def validate_claude_block(block) -> Optional[str]:
         return "claude.model 必须是非空模型标识"
     if block.get("effort") not in CLAUDE_EFFORTS:
         return "claude.effort 仅支持 low/medium/high/xhigh/max"
+    return None
+
+
+def validate_qoder_block(block) -> Optional[str]:
+    if not isinstance(block, dict):
+        return "qoder 必须是对象"
+    if set(block) - set(QODER_DEFAULT):
+        return "qoder 含不支持的字段"
+    model = _clean(block.get("model"))
+    if model is None or model.startswith("-"):
+        return "qoder.model 必须是非空且不以 - 开头的模型标识"
+    if block.get("reasoning_effort") not in QODER_EFFORTS:
+        return "qoder.reasoning_effort 仅支持 " + "/".join(QODER_EFFORTS)
     return None
 
 

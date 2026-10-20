@@ -223,42 +223,13 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
         log.emit("system", util.now_iso(),
                  content="登记已存在且与同一报告 sha/结论/key/fix 一致：跳过 register")
     else:
-        if conclusion == "changes_requested" and not automated:
-            fix = job.get("fix") or {}
-            if guard is not None:
-                guard()
-            try:
-                created = core_call(db_path, "create-review-fix", {
-                    "source_task_id": task_id,
-                    "title": fix.get("title"),
-                    "description": fix.get("description"),
-                    "priority": fix.get("priority"),
-                    "dedupe_key": job["review_key"],
-                    **_identity_payload(job),
-                })
-            except util.KanpilotError as exc:
-                return _registration_failed(
-                    db_path=db_path, job=job, job_path=job_path, log=log,
-                    record_run=record_run, label="create-review-fix", exc=exc,
-                )
-            job["fix_task_id"] = created.get("fix_task_id")
-            job["fix_task_source_sha256"] = created.get("source_sha256")
-            checkpoints["fix_created"] = True
-            pi_desktop_controller.write_json(job_path, job)
         payload = {
             "task_id": task_id, "report_path": job["report_path"],
             "conclusion": conclusion, **_identity_payload(job),
         }
-        if automated:
-            payload["review_key"] = job["review_key"]
-            if conclusion == "changes_requested":
-                payload.update({"fix_mode": "same_task", "fix": job.get("fix")})
-        elif conclusion == "changes_requested":
-            payload.update({
-                "review_key": job["review_key"],
-                "fix_task_id": job["fix_task_id"],
-                "fix_task_source_sha256": job.get("fix_task_source_sha256"),
-            })
+        payload["review_key"] = job["review_key"]
+        if conclusion == "changes_requested":
+            payload.update({"fix_mode": "same_task", "fix": job.get("fix")})
         try:
             if guard is not None:
                 guard()
@@ -270,7 +241,16 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
             )
         checkpoints["registered"] = True
 
-    if conclusion == "pass" and not automated:
+    # The user authorized the action's normal Review/delivery chain. Its
+    # identity-bound pass receipt remains authoritative after fix_request clears.
+    # Refresh core facts because registration above may have created that receipt.
+    action_delivery = False
+    if conclusion == "pass":
+        from . import task_ai_action
+        current = _facts(db_path, task_id, request_id).get("task")
+        if isinstance(current, dict):
+            action_delivery = task_ai_action.delivery_continuation(raw_task(current), allow_paused=True) is not None
+    if conclusion == "pass" and not automated and not action_delivery:
         if task.get("status") == "done":
             if _review_summary(task).get("conclusion") != "pass":
                 return _stop_no_write(

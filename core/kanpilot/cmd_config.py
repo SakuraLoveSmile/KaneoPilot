@@ -352,7 +352,7 @@ def cmd_set_review_config(ctx, payload: dict) -> dict:
     仅影响下一次 review 控制端启动。"""
     fields = {
         key: payload[key]
-        for key in ("mode", "backend", "pi_desktop", "claude", "codex") + review_config.CUSTOM_KEYS
+        for key in ("mode", "backend", "pi_desktop", "claude", "codex", "qoder") + review_config.CUSTOM_KEYS
         if key in payload
     }
     if not fields:

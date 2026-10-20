@@ -255,6 +255,10 @@ struct SettingsView: View {
     @State private var reviewClaudeEffort = "high"
     @State private var reviewCodexModel = ""
     @State private var reviewCodexEffort = "high"
+    @State private var plannerQoderModel = "auto"
+    @State private var plannerQoderEffort = "inherit"
+    @State private var reviewQoderModel = "auto"
+    @State private var reviewQoderEffort = "inherit"
     @State private var reviewGeneration = 0
     @State private var executorGeneration = 0
 
@@ -1579,6 +1583,7 @@ struct SettingsView: View {
                     Text("Codex").tag("codex")
                     Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                     Text("Claude").tag("claude")
+                    Text("Qoder CLI").tag("qoder")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
@@ -1588,6 +1593,11 @@ struct SettingsView: View {
                     desktopInheritedConfig
                 } else if plannerBackend == "pi_desktop" {
                     plannerPlusBlock
+                } else if plannerBackend == "qoder" {
+                    cliModelEditor("Qoder 规划", model: $plannerQoderModel, effort: $plannerQoderEffort,
+                                   efforts: CLIModelConfig.qoderEfforts)
+                    qoderModelHint
+                    FieldRow("Qoder 就绪态", qoderReadinessText(model.plannerCapabilities?.backends?.qoder))
                 } else if plannerBackend == "claude" {
                     cliModelEditor("Claude 规划", model: $plannerClaudeModel, effort: $plannerClaudeEffort,
                                    efforts: ["low", "medium", "high", "max"])
@@ -1602,7 +1612,7 @@ struct SettingsView: View {
                 }
                 plannerMethodRow
                 plannerSaveRow
-                Text("仅影响新建规划请求；不修改 Codex / Claude / Plus 全局配置；不显示凭据值。")
+                Text("仅影响新建规划请求；不修改 Codex / Claude / Qoder / Plus 全局配置；不显示凭据值。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
             } else if !model.plannerLoading && model.plannerError == nil {
@@ -1733,9 +1743,9 @@ struct SettingsView: View {
     @ViewBuilder
     private var plannerMethodRow: some View {
         let desktopSelected = plannerBackend == "codex_desktop"
-        let plusSelected = plannerBackend != "codex" && !desktopSelected
+        let builtinOnly = plannerBackend != "codex" && !desktopSelected
         let spec = model.plannerCapabilities?.specPlanMethod
-        let specDisabled = plusSelected || (!desktopSelected && spec?.available == false)
+        let specDisabled = builtinOnly || (!desktopSelected && spec?.available == false)
         Picker("默认规划方式", selection: $selDefaultMethod) {
             Text("内置规划").tag("builtin")
             Text("Spec Planner 插件").tag("spec_plan")
@@ -1743,11 +1753,11 @@ struct SettingsView: View {
         }
         .pickerStyle(.menu)
         .accessibilityLabel("默认规划方式")
-        .help(plusSelected
+        .help(builtinOnly
               ? "当前运行端仅支持内置规划"
               : "规划面板的默认预选；每个规划请求在提交时固化所选方式")
-        if plusSelected {
-            Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
+        if builtinOnly {
+            Text("当前运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
                  + "仅在 Codex 下运行。")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
@@ -1769,7 +1779,7 @@ struct SettingsView: View {
             Text("Desktop 领取后使用施工规划技能；请确保对应会话/自动任务可使用该技能。")
                 .font(.kpSmall).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-        } else if !plusSelected && selDefaultMethod == "spec_plan" {
+        } else if !builtinOnly && selDefaultMethod == "spec_plan" {
             Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
                  + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
                 .font(.kpSmall)
@@ -1862,6 +1872,8 @@ struct SettingsView: View {
         plannerBackend = model.plannerConfig?.config?.effectiveBackend ?? "codex"
         plannerClaudeModel = model.plannerConfig?.config?.claude?.model ?? "sonnet"
         plannerClaudeEffort = model.plannerConfig?.config?.claude?.effort ?? "high"
+        plannerQoderModel = model.plannerConfig?.config?.qoder?.model ?? "auto"
+        plannerQoderEffort = model.plannerConfig?.config?.qoder?.reasoningEffort ?? "inherit"
         let plus = model.plannerPlusConfig
         plModelSource = plus?.effectiveModelSource ?? "custom"
         plConnectionFile = plus?.connectionFile ?? ""
@@ -1885,6 +1897,11 @@ struct SettingsView: View {
     /// （connection_file 必须绝对路径；backend=pi_desktop 时 default_method
     /// 必须是 builtin——核心会拒绝 spec_plan，不静默改写用户选择）。
     private var plannerSaveIssue: String? {
+        if plannerBackend == "qoder" {
+            if let issue = CLIModelConfig.qoderIssue(model: plannerQoderModel, reasoningEffort: plannerQoderEffort) { return issue }
+            if selDefaultMethod != "builtin" { return "Qoder 仅支持内置规划，请调整默认规划方式。" }
+            return nil
+        }
         if plannerBackend == "claude" {
             if emptyToNil(plannerClaudeModel) == nil { return "Claude 模型不能为空" }
             if selDefaultMethod != "builtin" { return "Claude 仅支持内置规划，请调整默认规划方式。" }
@@ -1917,9 +1934,9 @@ struct SettingsView: View {
                                           reasoningEffort: fixEffort),
             defaultMethod: selDefaultMethod,
             piDesktop: plannerBackend == "pi_desktop" ? plannerPlusDraft : nil,
-            claude: plannerBackend == "claude" ? CLIModelConfig(model: plannerClaudeModel, effort: plannerClaudeEffort, plannerModel: nil, reasoningEffort: nil) : nil)
+            claude: plannerBackend == "claude" ? CLIModelConfig(model: plannerClaudeModel, effort: plannerClaudeEffort, plannerModel: nil, reasoningEffort: nil) : nil,
+            qoder: plannerBackend == "qoder" ? CLIModelConfig(model: plannerQoderModel, effort: nil, plannerModel: nil, reasoningEffort: plannerQoderEffort) : nil)
         plannerSaveError = error
-        if error == nil { seedPlannerDrafts() }
     }
 
     /// 模型提示：目录中已登记 → 显示名 + 已知思考等级；已验证但未登记 → 不在清单。
@@ -2034,6 +2051,7 @@ struct SettingsView: View {
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                     Text("Claude").tag("claude")
                     Text("Codex").tag("codex")
+                    Text("Qoder CLI").tag("qoder")
                     Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                 }
                 .pickerStyle(.menu)
@@ -2056,6 +2074,11 @@ struct SettingsView: View {
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if reviewBackend == "qoder" {
+                    cliModelEditor("Qoder Review", model: $reviewQoderModel, effort: $reviewQoderEffort,
+                                   efforts: CLIModelConfig.qoderEfforts)
+                    qoderModelHint
+                    FieldRow("Qoder 就绪态", qoderReadinessText(model.reviewCapabilities?.qoder))
                 } else if reviewBackend == "claude" {
                     cliModelEditor("Claude Review", model: $reviewClaudeModel, effort: $reviewClaudeEffort,
                                    efforts: ["low", "medium", "high", "max"])
@@ -2137,7 +2160,7 @@ struct SettingsView: View {
         if let caps = model.reviewCapabilities {
             let pi = caps.pi?.readinessText ?? "未上报"
             let plus = caps.piDesktop?.readinessText ?? "未上报"
-            return "Pi CLI：\(pi)；Plus：\(plus)；Claude：\(caps.claude?.readinessText ?? "未上报")；Codex：\(caps.codex?.readinessText ?? "未上报")"
+            return "Pi CLI：\(pi)；Plus：\(plus)；Claude：\(caps.claude?.readinessText ?? "未上报")；Codex：\(caps.codex?.readinessText ?? "未上报")；Qoder：\(qoderReadinessText(caps.qoder))"
         }
         if let error = model.reviewCapabilitiesError {
             return "review-capabilities 读取失败：\(error)"
@@ -2201,6 +2224,7 @@ struct SettingsView: View {
     /// pi → mode 与 custom 三元组；pi_desktop → 五字段（权限固定 auto）。
     private var reviewIssue: String? {
         if reviewBackend == "codex_desktop" { return nil }
+        if reviewBackend == "qoder" { return CLIModelConfig.qoderIssue(model: reviewQoderModel, reasoningEffort: reviewQoderEffort) }
         if reviewBackend == "claude" { return emptyToNil(reviewClaudeModel) == nil ? "Claude 模型不能为空" : nil }
         if reviewBackend == "codex" { return emptyToNil(reviewCodexModel) == nil ? "Codex 模型不能为空" : nil }
         if reviewBackend == "pi_desktop" {
@@ -2232,6 +2256,9 @@ struct SettingsView: View {
         let config = reviewConfig ?? reviewDefaults
         if config?.effectiveBackend == "codex_desktop" {
             return "Codex Desktop（继承 Desktop 会话/自动任务）"
+        }
+        if config?.effectiveBackend == "qoder" {
+            return "Qoder CLI（\(config?.qoder?.model ?? "auto") / \(config?.qoder?.reasoningEffort ?? "inherit")）"
         }
         if config?.effectiveBackend == "claude" {
             return "Claude（\(config?.claude?.model ?? "?") / \(config?.claude?.effort ?? "?")）"
@@ -2281,6 +2308,8 @@ struct SettingsView: View {
             reviewClaudeEffort = config?.claude?.effort ?? "high"
             reviewCodexModel = config?.codex?.model ?? config?.codex?.plannerModel ?? ""
             reviewCodexEffort = config?.codex?.reasoningEffort ?? "high"
+            reviewQoderModel = config?.qoder?.model ?? "auto"
+            reviewQoderEffort = config?.qoder?.reasoningEffort ?? "inherit"
             rvModelSource = config?.piDesktop?.effectiveModelSource ?? "custom"
             rvConnectionFile = config?.piDesktop?.connectionFile ?? ""
             rvProviderId = config?.piDesktop?.providerId ?? ""
@@ -2316,6 +2345,8 @@ struct SettingsView: View {
             payload["pi_desktop"] = reviewPlusDraft.fields
         } else if reviewBackend == "claude" {
             payload["claude"] = ["model": reviewClaudeModel, "effort": reviewClaudeEffort]
+        } else if reviewBackend == "qoder" {
+            payload["qoder"] = ["model": reviewQoderModel, "reasoning_effort": reviewQoderEffort]
         } else if reviewBackend == "codex" {
             payload["codex"] = ["model": reviewCodexModel, "reasoning_effort": reviewCodexEffort]
         } else if reviewBackend != "codex_desktop" {
@@ -2397,6 +2428,18 @@ struct SettingsView: View {
             maxActiveTasks = limit
             backgroundSeeded = true
         }
+    }
+
+    private var qoderModelHint: some View {
+        Text("可输入 Qoder CLI 支持的模型标识；inherit 继承 Qoder 默认思考等级。具体模型支持的等级以 CLI 为准；保存不调用模型。")
+            .font(.kpSmall).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func qoderReadinessText(_ status: PlusBackendStatus?) -> String {
+        let state = status?.available.map { $0 ? "CLI 接口可用" : "CLI 未安装或接口不可用" } ?? "CLI 就绪态未上报"
+        let detail = status?.detail ?? status?.reason
+        return state + (detail.map { "：\($0)" } ?? "") + "；认证与模型尚未实测"
     }
 
     private func cliModelEditor(_ title: String, model: Binding<String>, effort: Binding<String>, efforts: [String]) -> some View {

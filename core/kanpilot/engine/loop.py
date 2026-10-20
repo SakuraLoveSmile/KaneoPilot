@@ -154,7 +154,12 @@ class Reconciler:
             # Distinguish review vs delivery sub-phase for PR tasks.
             reviewing_done = (extra.get("review_conclusion") == "pass"
                               or delivery.get("pushed_sha"))
-            if delivery.get("mode") == "pr" and (delivery.get("pr_number") or reviewing_done):
+            repair = core.review_repair_of(task)
+            if repair.get("state") == "held":
+                phase, condition = "review", "repairing"
+            elif repair.get("state") == "awaiting_review":
+                phase, condition = "review", "reviewing"
+            elif delivery.get("mode") == "pr" and (delivery.get("pr_number") or reviewing_done):
                 phase, condition = "delivery", "syncing"
             else:
                 phase, condition = "review", "reviewing"
@@ -168,7 +173,8 @@ class Reconciler:
             "send_state": task["send_state"],
             "phase": phase, "condition": condition,
             "fix_round": automation.get("fix_round", 0),
-            "fix_open": bool(extra.get("fix_request")),
+            "fix_open": (extra.get("fix_request") or {}).get("state") in ("held", "open"),
+            "review_repair": core.review_repair_of(task),
             "automation_managed": core.is_automation_managed(task),
             "manual_takeover": automation.get("manual_takeover", False),
             "paused": paused_global,
@@ -271,6 +277,8 @@ class Reconciler:
         """Choose a bounded new round; resolve commits accounting + enqueue atomically."""
         from . import verdict
         extra = db.task_extra(task)
+        if core.review_repair_of(task).get("source_kind") == "merge_conflict":
+            return None
         receipt = extra.get("engine_verdict")
         if (task["status"] != "needs_user" or task["failure_code"] != "verification_unconfirmed"
                 or snap.get("paused") or snap.get("manual_takeover")
@@ -502,10 +510,18 @@ class Reconciler:
         """
         action = {"action": "business_tick", "executed": False}
         try:
-            project_ids = sorted({row["project_id"] for row in conn.execute(
+            candidates = {row["project_id"] for row in conn.execute(
                 "SELECT DISTINCT project_id FROM tasks "
-                "WHERE save_state='active' AND status!='done'").fetchall()
-                if modes.get(row["project_id"], self.mode) == "live"})
+                "WHERE save_state='active' AND status!='done'").fetchall()}
+            # Explicit historical releases have no unfinished task to keep a
+            # business tick alive. Include only their existing active batches.
+            from .. import release_delivery
+            for row in conn.execute("SELECT result_json FROM runtime_operations WHERE tool=?",
+                                    (release_delivery.BATCH_TOOL,)).fetchall():
+                batch = util.jload(row["result_json"]) or {}
+                if batch.get("state") in ("queued", "building", "publishing") and batch.get("project_id"):
+                    candidates.add(batch["project_id"])
+            project_ids = sorted(pid for pid in candidates if modes.get(pid, self.mode) == "live")
             if not project_ids:
                 return dict(action, reason="no_live_projects")
             from .. import engine_claim_scope
@@ -558,7 +574,7 @@ class Reconciler:
             "AND t.auto_advance_paused=0").fetchall()
         for request in rows:
             task = db.require_task(conn, request["task_id"])
-            if modes.get(task["project_id"], self.mode) != "live" and not engine_claim_scope.manual_plan(request):
+            if modes.get(task["project_id"], self.mode) != "live" and not engine_claim_scope.manual_plan(request) and not engine_claim_scope.manual_review_repair(conn, request, task):
                 continue
             counts[request["stage"]] = counts.get(request["stage"], 0) + 1
         return counts

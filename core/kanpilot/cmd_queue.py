@@ -329,7 +329,19 @@ def execution_retry_candidate(conn, task, *, engine_empty=False, verification_re
     """Cheap UI gate; current terminal and external identities are checked on resolve."""
     from . import round_store
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
-    return bool(db.task_is_active(task) and task["status"] == "needs_user"
+    repair = core.review_repair_of(task)
+    merge_retry = False
+    if repair.get("source_kind") == "merge_conflict":
+        if not verification_retry or repair.get("repair_execution_run_id") != task["run_id"]:
+            return False
+        from . import task_ai_action
+        try:
+            task_ai_action.verification_recovery_snapshot(task)
+            merge_retry = True
+        except (util.KanpilotError, OSError):
+            return False
+    return bool((repair.get("source_kind") != "merge_conflict" or merge_retry)
+                and db.task_is_active(task) and task["status"] == "needs_user"
                 and task["stage"] == "monitor" and (task["failure_code"] == "execution_failed"
                      or (engine_empty and task["failure_code"] == "verification_unconfirmed")
                      or (verification_retry and task["failure_code"] in
@@ -482,9 +494,19 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("conflict", "旧计划或执行工作树不可核验，请先恢复原执行材料") from exc
     if not signature or source.source_signature(task["task_id"], expected) != signature:
         raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新检查会话状态")
+    recovery = None
+    if core.review_repair_of(task).get("source_kind") == "merge_conflict":
+        from . import task_ai_action
+        fix = task_ai_action.verify_frozen(task, core.review_repair_of(task))
+        try:
+            git_delivery.verify_conflict_remote(delivery, expected_repo=fix["github_repo"], target_base_sha=fix["target_base_sha"])
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("conflict", "冻结 PR 的远端分支已变化，不能补齐验证") from exc
+        recovery = dict(task_ai_action.verification_recovery_snapshot(task), source_run_id=expected,
+                        requested_at=ctx.now_iso, source_records_dir=str(source.run_dir(task["task_id"], expected)))
     return {"snapshot": snapshot, "round_snapshot": dict(row), "source_signature": signature,
             "source": source, "worktree": delivery, "detached": not bool(branch_delivery),
-            "worktree_sha256": worktree_sha}
+            "worktree_sha256": worktree_sha, "verification_recovery": recovery}
 
 
 def _engine_empty_retry(task, payload):
@@ -504,6 +526,8 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
     if not isinstance(fix, dict) or payload.get("actor") != "automation":
         raise util.bad_request("引擎补救必须由 automation 发起")
     task = db.require_task(ctx.conn, payload["task_id"])
+    if core.review_repair_of(task).get("source_kind") == "merge_conflict":
+        raise util.KanpilotError("conflict", "一次性 AI 处理失败后需人工确认，不能自动启动补救轮次")
     history = db.task_extra(task).get("engine_fix_rounds") or []
     rounds = [row for row in history if not row.get("reverted_at")]
     prior = next((row for row in history if row.get("execution_run_id") == fix.get("execution_run_id")), None)
@@ -647,6 +671,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             raise util.bad_request("重新执行并验证必须由用户明确发起")
         payload = dict(payload, action="resume", verification_retry=True)
         action = "resume"
+    if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") == "merge_conflict"
+            and requested_action in ("resume", "retry", "replan")):
+        raise util.KanpilotError("conflict", "一次性冲突处理不能重新实施或规划；验证受阻时请显式补齐验证报告")
     if action == "revert_engine_fix":
         from . import engine_fix_revert
         return engine_fix_revert.revert(ctx, payload)
@@ -723,6 +750,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     raise util.KanpilotError("conflict", "计划或工作树内容已变化，请重新确认后再执行")
             except (OSError, git_delivery.GitDeliveryError) as exc:
                 raise util.KanpilotError("conflict", "计划或工作树已不可核验，未重新执行") from exc
+            if execution_retry.get("verification_recovery"):
+                from . import task_ai_action
+                task_ai_action.verify_verification_recovery(task, execution_retry["verification_recovery"])
 
         def need(condition: bool, message: str) -> None:
             if not condition:
@@ -749,7 +779,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             from . import automation_policy, review_config
             if action == "accept_verification":
                 from . import engine_claim_scope
-                if engine_claim_scope.effective_mode(conn, task["project_id"]) == "live":
+                if (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
+                        or core.review_repair_of(task).get("source_kind") == "merge_conflict"):
                     raise util.KanpilotError("conflict", "Live 项目核对 Plus 验证证据；请让 Plus 重新执行并验证，不能人工跳过验证")
                 if code != "verification_unconfirmed" or not task["run_id"]:
                     raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
@@ -766,6 +797,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     "detached": execution_retry["detached"],
                     "worktree_sha256": execution_retry["worktree_sha256"],
                 }
+                if execution_retry.get("verification_recovery"):
+                    extra["fix_request"] = dict(core.review_repair_of(task), state="queued",
+                                               verification_recovery=execution_retry["verification_recovery"])
                 extra.pop("verification_override", None)
                 db.update_task(conn, task["task_id"], now, extra_json=extra)
                 db.add_event(conn, now, "execution_retry_requested", task_id=task["task_id"], actor=actor,
@@ -778,8 +812,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 fix = db.task_extra(task).get("fix_request")
                 if not fix or fix.get("state") != "held":
                     raise util.KanpilotError("conflict", "没有待继续的修复请求")
+                if fix.get("mode") == "direct":
+                    raise util.KanpilotError("conflict", "请通过启动修复会话重新核对材料、分支和额度；不能跳过修复次数限制")
                 core.start_fix_round_inline(conn, task, now, fix_request=fix, actor="user", new_segment=True)
-                target, kind = "needs_plan", None
+                target, kind = ("ready" if fix.get("mode") == "direct" else "needs_plan"), None
             else:
                 monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
                                   and task["failure_stage"] == "monitor")
@@ -976,6 +1012,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 status in ("in_review", "needs_user", "running"),
                 f"mark_done not allowed from status {status}",
             )
+            from . import release_delivery
+            gate = release_delivery.completion_gate(conn, task)
+            need(gate is None, gate["message"] if gate else "发布尚未确认")
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
             core.transition_task(
@@ -1175,7 +1214,11 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                         conn, now, "task_updated", task_id=task_id,
                         actor=executor, detail={"fields": meta_keys},
                     )
-                if observed in constants.DONE_SLUGS and task["status"] != "done":
+                from . import parent_closeout, release_delivery
+                if (observed in constants.DONE_SLUGS and task["status"] != "done"
+                        and not core.review_repair_of(task)
+                        and parent_closeout.projection(conn, task) is None
+                        and release_delivery.completion_gate(conn, db.require_task(conn, task_id)) is None):
                     task = db.require_task(conn, task_id)
                     core.transition_task(
                         conn, task, "done", now, executor,
@@ -1187,6 +1230,7 @@ def cmd_sync_tasks(ctx, payload: dict) -> dict:
                 elif (
                     observed in constants.REVIEW_SLUGS
                     and task["status"] == "running"
+                    and not core.review_repair_of(task)
                 ):
                     task = db.require_task(conn, task_id)
                     # 新一轮评审周期起始（§2 review_summary「下同」）：

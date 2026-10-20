@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import (
     cli, cmd_dispatch, cmd_exec, cmd_queue, cmd_read, cmd_remote, cmd_session,
-    constants, db, harness_plus_adapter, mcp_scopes, runtime_operations, util,
+    constants, db, harness_plus_adapter, mcp_scopes, pi_desktop_backend, runtime_operations, util,
 )
 
 TOOLS_SPEC: List[Dict[str, Any]] = [
@@ -45,6 +45,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "tools_ok": {"type": "boolean"},
                 "version": {"type": ["string", "null"]},
                 "supported_operations": {"type": "array", "items": {"type": "string"}},
+                "required_verification_commands_supported": {"type": "boolean"},
             },
             "required": ["available", "connected", "detail", "tools_ok"],
         },
@@ -406,6 +407,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "version": {"type": "integer"},
                 "action": {"type": "string", "enum": ["accept", "reject"]},
                 "goal_continuation": {"type": "boolean"},
+                "required_verification_commands": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200, "uniqueItems": True},
             },
             "required": ["scope_id", "operation_id", "session_id", "turn_id", "proposal_id", "version", "action"],
             "additionalProperties": False,
@@ -919,7 +921,37 @@ def _goal_continuation_task_guard(conn, scope, args):
         raise util.KanpilotError("forbidden", "目标自动续接已暂停或不属于当前自动执行轮次")
 
 
+def _verification_requirements_guard(conn, scope, args):
+    """The scope-owned dispatch spec grants commands, never caller/model text."""
+    supplied = args.get("required_verification_commands")
+    pi_desktop_backend.validate_required_verification_commands(supplied, args.get("action"))
+    if args.get("action") != "accept":
+        return
+    expected = []
+    if scope.role == "execution":
+        if not scope.task_id or not scope.run_id:
+            raise util.KanpilotError("forbidden", "缺少验证要求所属执行轮次")
+        from . import headless_adapter, pi_desktop_worker
+        directory = headless_adapter.resolve_source(conn).run_dir(scope.task_id, scope.run_id)
+        path = directory / "spec.json"
+        if path.is_symlink() or not path.is_file():
+            raise util.KanpilotError("validation_failed", "缺少可信的冻结执行 spec，不能批准 Goal")
+        try:
+            frozen = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(frozen, dict) or frozen.get("task_id") != scope.task_id or frozen.get("run_id") != scope.run_id:
+                raise util.KanpilotError("forbidden", "验证要求不属于授权执行轮次")
+            if frozen.get("completion_policy", "goal_report") not in ("goal_report", "command_verification"):
+                raise util.KanpilotError("validation_failed", "冻结执行 spec 的完成策略无效")
+            expected = pi_desktop_worker.required_verification_commands(frozen)
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise util.KanpilotError("validation_failed", "无法读取冻结验证要求") from exc
+    if (supplied or expected) and supplied != expected:
+        raise util.KanpilotError("forbidden", "验证命令要求与授权执行 spec 不符")
+
+
 def _runtime_guard(conn, scope, tool, args):
+    if tool == "kp_runtime_proposal_resolve":
+        _verification_requirements_guard(conn, scope, args)
     if tool in ("kp_runtime_input_pending", "kp_runtime_input_respond"):
         if scope.role != "execution":
             raise util.KanpilotError("forbidden", "input tools require execution scope")
@@ -1057,6 +1089,8 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
             _runtime_guard(ctx.conn, scope, tool_name, arguments)
             def authorization_guard(conn):
                 _scope_valid(scope_manager, scope)
+                if tool_name == "kp_runtime_proposal_resolve":
+                    _verification_requirements_guard(conn, scope, arguments)
                 if tool_name == "kp_runtime_proposal_resolve" and arguments.get("goal_continuation"):
                     _goal_continuation_task_guard(conn, scope, arguments)
             ctx.conn.authorization_guard = authorization_guard
@@ -1094,7 +1128,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
             "kp_runtime_input_respond": lambda: harness_plus_adapter.plus_asks_resolve(conn_file, session_id=sid, request_id=arguments["request_id"], expected_tool_call_id=arguments["expected_tool_call_id"], answers=arguments["answers"]),
             "kp_runtime_stop": lambda: harness_plus_adapter.plus_stop(conn_file, session_id=sid),
             "kp_runtime_abort": lambda: harness_plus_adapter.plus_abort(conn_file, session_id=sid),
-            "kp_runtime_proposal_resolve": lambda: harness_plus_adapter.plus_proposal_resolve(conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode")),
+            "kp_runtime_proposal_resolve": lambda: harness_plus_adapter.plus_proposal_resolve(conn_file, session_id=sid, turn_id=arguments["turn_id"], proposal_id=arguments["proposal_id"], tool_call_id=arguments["tool_call_id"], version=arguments["version"], action=arguments["action"], target_permission_mode=arguments.get("target_permission_mode"), required_verification_commands=arguments.get("required_verification_commands")),
         }
         result = writers[tool_name]()  # Exceptions leave the durable receipt unknown.
         if tool_name == "kp_runtime_attach_mcp":

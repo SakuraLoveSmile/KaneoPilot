@@ -34,7 +34,16 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     """Run the full §4.5 chain; returns the dispatch claim context fields."""
     task_id = task["task_id"]
     from . import review_resolution
-    review_resolution.verify_remediation(conn, task)
+    repair = core.review_repair_of(task)
+    if repair:
+        from . import review_repair
+        try:
+            repair = review_repair.verify_frozen(task)
+            review_repair.verify_source_terminal(conn, task, now)
+        except util.KanpilotError as exc:
+            raise DispatchCheckFailed(exc.message, exc.code) from exc
+    else:
+        review_resolution.verify_remediation(conn, task)
     plan_kind = task["plan_kind"] or "standard"
 
     # 1. plan file + frontmatter + registered hash -------------------------
@@ -110,7 +119,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         "remote project mismatch",
     )
     _require(
-        live_task.get("status") in core.expected_remote_slugs(task),
+        live_task.get("status") in (core.expected_remote_slugs(task) | (set(constants.REVIEW_SLUGS) if repair else set())),
         "remote task not in expected status",
     )
     _require(
@@ -129,7 +138,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     )
 
     # 5. plan_kind-specific --------------------------------------------------
-    if meta.get("fix_mode") == "same_task":
+    if repair:
+        pass  # Frozen direct identity replaces historical parent/fix-plan pointers.
+    elif meta.get("fix_mode") == "same_task":
         fix = db.task_extra(task).get("fix_request") or {}
         _require(core.is_automation_managed(task), "same_task plan requires automation")
         try:
@@ -196,7 +207,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     #    快照经 snapshot_with_model_override：引擎在有界补救轮次前写入的一次性
     #    模型覆盖（engine/fallback.py，scenarios.md #5）在此冻结进轮次；无覆盖时
     #    与 snapshot(conn) 完全一致（旧数据零迁移），设置变更仍只影响新轮次。
-    config_snapshot = exec_config.snapshot_with_model_override(conn, task)
+    config_snapshot = (repair["action_config"]
+                       if repair and repair.get("source_kind") == "merge_conflict"
+                       else exec_config.snapshot_with_model_override(conn, task))
     backend = config_snapshot.get("backend") or "pi"
     if backend == "pi_desktop":
         try:
@@ -215,7 +228,23 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     user_replan = core.is_user_replan(task)
     state_sha = core.automation_of(task).get("replan_worktree_sha256")
     retry = core.execution_retry_of(task)
-    if retry:
+    if repair:
+        try:
+            recovery = repair.get("verification_recovery")
+            if repair.get("source_kind") == "merge_conflict" and recovery:
+                from . import cmd_queue, task_ai_action
+                _require(retry.get("source_run_id") == recovery.get("source_run_id"),
+                         "验证恢复与原处理轮次不符")
+                git_delivery.verify_conflict_remote(delivery, expected_repo=repair["github_repo"],
+                                                    target_base_sha=repair["target_base_sha"])
+                cmd_queue.verify_execution_retry_terminal(conn, task, now)
+                task_ai_action.verify_verification_recovery(task, recovery)
+            else:
+                git_delivery.verify_branch_worktree(delivery, require_clean=True,
+                                                    expected_head=repair["head_sha"])
+        except git_delivery.GitDeliveryError as exc:
+            raise DispatchCheckFailed(exc.message) from exc
+    elif retry:
         from . import cmd_queue
         cmd_queue.verify_execution_retry_terminal(conn, task, now)
         worktree = retry.get("worktree") or {}
@@ -240,6 +269,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         except git_delivery.GitDeliveryError as exc:
             raise DispatchCheckFailed(exc.message) from exc
     return {
+        **({"review_repair": repair} if repair else {}),
         "task_id": task_id,
         "plan_path": str(path),
         "plan_sha256": plan_sha,

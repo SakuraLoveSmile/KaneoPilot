@@ -88,6 +88,7 @@ def plus_capabilities(connection_file: str, *, timeout: int = 10) -> dict:
             "attachment_supported": "pi_session_attach_mcp" in tools,
             "version": version,
             "supported_operations": sorted(tools),
+            "required_verification_commands_supported": client.supports_required_verification_commands() is True,
         }, record.get("token"))
     except util.KanpilotError as exc:
         return _redact_output({
@@ -548,8 +549,10 @@ def plus_proposal_resolve(
     version: int,
     action: str,
     target_permission_mode: Optional[str] = None,
+    required_verification_commands: Optional[list] = None,
     timeout: int = 10,
 ) -> dict:
+    pi_desktop_backend.validate_required_verification_commands(required_verification_commands, action)
     if target_permission_mode is not None and target_permission_mode not in constants.EXEC_PERMISSION_MODES:
         raise util.bad_request("target_permission_mode 必须为 ask、accept-edits 或 auto")
     client, record = _get_client(connection_file, timeout=timeout)
@@ -578,6 +581,12 @@ def plus_proposal_resolve(
     }
     if target_permission_mode is not None:
         args["targetPermissionMode"] = target_permission_mode
+    if required_verification_commands is not None:
+        if required_verification_commands and proposal.get("kind") != "goal":
+            raise util.bad_request("验证命令要求仅适用于 Goal 提案")
+        if required_verification_commands and not client.supports_required_verification_commands():
+            raise util.KanpilotError("unsupported_tools", "请升级 Plus：pi_plans_resolve 缺少 requiredVerificationCommands 能力")
+        args["requiredVerificationCommands"] = list(required_verification_commands)
     res = client.call_tool("pi_plans_resolve", args)
     return _redact_output({
         "session_id": session_id, "proposal_id": proposal_id,

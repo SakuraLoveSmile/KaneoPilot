@@ -43,9 +43,11 @@ DEFAULT_BACKEND = constants.REVIEW_BACKEND
 # backend 的缺省解释是 pi（§5.24.1），不在此处扩展以免改动冻结响应。
 DEFAULTS = {"mode": "inherit"}
 CLI_DEFAULTS = {"claude": {"model": "sonnet", "effort": "high"},
+                "qoder": dict(planner_config.QODER_DEFAULT),
                 "codex": {"model": constants.REVIEW_FIX_PLANNER["planner_model"],
                           "reasoning_effort": constants.REVIEW_FIX_PLANNER["reasoning_effort"]}}
-CLI_KEYS = {"claude": ("model", "effort"), "codex": ("model", "reasoning_effort")}
+CLI_KEYS = {"claude": ("model", "effort"), "codex": ("model", "reasoning_effort"),
+            "qoder": ("model", "reasoning_effort")}
 
 def cli_block(config, backend):
     stored = (config or {}).get(backend)
@@ -58,6 +60,8 @@ def _validate_cli(block, backend):
         return f"{backend} 必须是对象"
     if backend == "claude":
         return planner_config.validate_claude_block(block)
+    if backend == "qoder":
+        return planner_config.validate_qoder_block(block)
     return planner_config.validate_group(
         {"planner_model": block.get("model"), "reasoning_effort": block.get("reasoning_effort")}, None)
 
@@ -422,6 +426,11 @@ def capabilities(conn: sqlite3.Connection, timeout: int = 10) -> dict:
         present = shutil.which(executable) is not None
         cli_caps[name] = {"available": present and error is None,
                           "detail": error or (f"{name} CLI 可用（模型/认证尚未验证）" if present else f"{name} CLI 不存在")}
+    from . import qoder_cli
+    cli_caps["qoder"] = qoder_cli.capabilities(timeout=timeout)
+    error = _validate_cli(cli_block(config, "qoder"), "qoder")
+    if error:
+        cli_caps["qoder"].update(available=False, detail=error)
     return {
         "pi": {"available": pi_available, "detail": pi_detail},
         "pi_desktop": pi_desktop, **cli_caps,

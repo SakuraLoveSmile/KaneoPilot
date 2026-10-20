@@ -10,6 +10,31 @@ def _conflict(message):
     raise util.KanpilotError("conflict", message)
 
 
+def goal_coverage_detail(coverage):
+    """Explain a ready report's exact gaps without changing its verdict."""
+    groups = {}
+    failures = []
+    for row in coverage.get("rows") or []:
+        command = util.redact(str(row.get("command") or ""))
+        reason = row.get("unconfirmed_reason")
+        if reason:
+            groups.setdefault(reason, []).append(command)
+        elif type(row.get("exit_code")) is int and row["exit_code"] != 0:
+            failures.append(command + "（退出码 " + str(row["exit_code"]) + "）")
+    parts = []
+    absent = groups.get("missing_record") or []
+    if absent:
+        parts.append("缺少 " + str(len(absent)) + " 项检查记录：" + "；".join(absent))
+    for reason, label in (("missing_exit_code", "以下检查缺少整数退出码"),
+                          ("contradictory_result", "以下检查状态与退出码不一致")):
+        if groups.get(reason):
+            parts.append(label + "：" + "；".join(groups[reason]))
+    if failures:
+        parts.append("验证命令执行失败：" + "；".join(failures))
+    return ("Plus 报告已就绪，但" + "；".join(parts or ["冻结验证命令尚未全部确认通过"])
+            + "。需由 Plus 在新的执行轮次补齐验证报告。")
+
+
 def candidate(conn, task):
     """Cheap UI eligibility; the command independently requires all evidence."""
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
@@ -273,7 +298,7 @@ def recover(ctx, payload):
     evidence = read_goal_evidence(conn, task)
     hashes, coverage = evidence["hashes"], evidence["coverage"]
     if not coverage["ok"]:
-        _conflict("Plus 结构化报告仍未覆盖全部冻结验证命令；请让 Plus 重新执行并验证，未恢复推进")
+        _conflict(goal_coverage_detail(coverage))
     # Receipt validation also reads Git and process state. Keep those reads
     # outside the SQLite write transaction, as with the live Plus checks.
     again = read_goal_evidence(conn, db.require_task(conn, task_id))

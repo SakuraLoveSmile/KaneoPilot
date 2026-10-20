@@ -230,7 +230,7 @@ def _published_model_pair(context: dict, manifest: dict, generated_at: str,
         try:
             planfile.check_plan_meta(meta, plan_kind, expected_model=expected, expected_project=expected_project)
             return pair, source, note
-        except planfile.PlanValidationError as exc:
+        except util.KanpilotError as exc:
             if "planner_model" not in str(exc.message):
                 # 与本候选无关（缺字段/repository 等）→ 交真实发布路径报错。
                 return pair, source, str(exc.message)
@@ -1515,7 +1515,8 @@ class _Round:
             }
             self.write_job()
             self.emit("system", content=(
-                f"plan_proposal_rejected: {proposal_id} → 已导入 KaneoPilot；"
+                f"plan_proposal_rejected: {proposal_id} → 生成阶段产物已关闭，"
+                "等待 KaneoPilot 发布校验；"
                 "此会话不用于执行（未发 approve、未生成执行轮次）"))
             return (True, None, None)
         if status in ("approved", "changes_requested"):
@@ -1565,7 +1566,11 @@ class _Round:
         if self.plan_kind == "review_fix" and self.task_id:
             conn = db.connect(self.db_path)
             try:
-                task_row = db.get_task(conn, self.task_id)
+                task_row = planner_runner.review_fix_plan_task(
+                    conn, self.task_id, self.req_payload)
+            except util.KanpilotError as exc:
+                return self.fail(f"计划发布被拒：{exc.message}", "publish_failed",
+                                 evidence=self._evidence())
             finally:
                 conn.close()
         pair, pair_source, note = _published_model_pair(

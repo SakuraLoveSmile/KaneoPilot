@@ -19,7 +19,7 @@ enum BoardColumn: String, CaseIterable, Identifiable {
         case .inProgress: return "进行中"
         case .inReview: return "待评审"
         case .done: return "已完成"
-        case .failed: return "失败 / 异常"
+        case .failed: return "阻塞 / 失败"
         }
     }
 
@@ -30,14 +30,11 @@ enum BoardColumn: String, CaseIterable, Identifiable {
         case .inProgress: return .orange
         case .inReview: return .purple
         case .done: return .green
-        case .failed: return .red
+        case .failed: return .gray
         }
     }
 
-    /// §4.1：第六列列名用红色文字。
-    var titleColor: Color {
-        self == .failed ? .red : .primary
-    }
+    var titleColor: Color { .primary }
 }
 
 /// 视图呈现模式（T2，ui-spec §4.13）：看板 / 紧凑列表。
@@ -105,9 +102,15 @@ struct BoardView: View {
     }
 
     private func tasks(in column: BoardColumn) -> [TaskSummary] {
-        model.tasks
+        let sorted = model.tasks
             .filter { $0.boardColumn == column.rawValue && matches($0) }
             .sorted(by: Self.order(in: column))
+        // 视觉分组和键盘导航共用相同顺序；异常列先阻塞、后失败。
+        let partitions = column == .failed
+            ? [sorted.filter { !TaskBoardPresentation.isFailed($0) },
+               sorted.filter { TaskBoardPresentation.isFailed($0) }]
+            : [sorted]
+        return partitions.flatMap { TaskBoardPresentation.groups($0).flatMap(\.tasks) }
     }
 
     /// 选中的任务集合（全量实体）
@@ -301,6 +304,7 @@ struct BoardView: View {
                     isBatchMode: isBatchMode,
                     selectedTaskIDs: $selectedTaskIDs,
                     onOpen: openDetail,
+                    onOpenRelated: openRelatedDetail,
                     onOpenSession: openSession,
                     onToggleSelect: toggleSelection
                 )
@@ -330,6 +334,7 @@ struct BoardView: View {
                         isBatchMode: isBatchMode,
                         selectedTaskIDs: $selectedTaskIDs,
                         onOpen: openDetail,
+                        onOpenRelated: openRelatedDetail,
                         onOpenSession: openSession,
                         onToggleSelect: toggleSelection
                     )
@@ -542,6 +547,12 @@ struct BoardView: View {
         }
     }
 
+    private func openRelatedDetail(_ related: RelatedTask) {
+        guard related.available else { return }
+        boardFocused = true
+        detailItem = TaskSheetItem(id: related.taskId, startTab: .overview)
+    }
+
     /// §4.1：进行中卡片「查看实时会话」→ 详情浮层直接打开「执行」分段。
     private func openSession(_ task: TaskSummary) {
         focusedTaskID = task.taskId
@@ -549,6 +560,134 @@ struct BoardView: View {
         let item = TaskSheetItem(id: task.taskId, startTab: .execution)
         if detailItem != item {
             detailItem = item
+        }
+    }
+}
+
+// MARK: - 看板与列表共用的只读层级呈现
+
+struct TaskBoardGroup: Identifiable {
+    let id: String
+    let parent: RelatedTask?
+    let tasks: [TaskSummary]
+
+    var needsSourceContext: Bool {
+        guard let parent else { return false }
+        return !tasks.contains { $0.taskId == parent.taskId }
+    }
+}
+
+enum TaskBoardPresentation {
+    static func isFailed(_ task: TaskSummary) -> Bool {
+        task.exception?.severity == "failed"
+    }
+
+    /// 输入已经按当前流程列排序；同一直接来源保持邻接，原任务在子任务之前。
+    static func groups(_ tasks: [TaskSummary], scope: String = "") -> [TaskBoardGroup] {
+        var keys: [String] = []
+        var members: [String: [TaskSummary]] = [:]
+        var parents: [String: RelatedTask] = [:]
+        for task in tasks {
+            let parent = task.taskRelations?.parent
+            let key = parent?.taskId ?? task.taskId
+            if members[key] == nil { keys.append(key) }
+            members[key, default: []].append(task)
+            if let parent { parents[key] = parent }
+        }
+        return keys.map { key in
+            let items = members[key] ?? []
+            return TaskBoardGroup(id: "\(scope):\(key)", parent: parents[key],
+                                  tasks: items.filter { $0.taskId == key }
+                                    + items.filter { $0.taskId != key })
+        }
+    }
+}
+
+struct TaskExceptionGroupHeader: View {
+    let failed: Bool
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: Spacing.s) {
+            Label(failed ? "失败" : "阻塞",
+                  systemImage: failed ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(failed ? Color.red : Color.orange)
+            Text("\(count)").foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .font(.kpSmall)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct TaskSourceContext: View {
+    let parent: RelatedTask
+    let onOpen: (RelatedTask) -> Void
+
+    var body: some View {
+        Button { onOpen(parent) } label: {
+            HStack(alignment: .top, spacing: Spacing.s) {
+                Image(systemName: "arrow.turn.down.right")
+                Text("\(parent.available ? "原始任务" : "来源不可用")：\(parent.title ?? parent.taskId)")
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .font(.kpSmall)
+            .foregroundStyle(parent.available ? Color.accentColor : Color.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!parent.available)
+        .focusable(false)
+        .help(parent.available ? "查看原始任务" : "原始任务当前不可用")
+    }
+}
+
+struct TaskHierarchyLabel: View {
+    let task: TaskSummary
+    let onOpenRelated: (RelatedTask) -> Void
+
+    var body: some View {
+        // 旧核心缺少关系投影时不推断来源或层级。
+        if let relations = task.taskRelations {
+            HStack(spacing: Spacing.s) {
+                if let parent = relations.parent {
+                    Text("二级任务 · 评审修复")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("来源") { onOpenRelated(parent) }
+                        .buttonStyle(.borderless)
+                        .disabled(!parent.available)
+                        .help("查看原始任务：\(parent.title ?? parent.taskId)")
+                } else {
+                    Text("原始任务").foregroundStyle(.secondary)
+                    if !relations.children.isEmpty {
+                        Text("\(relations.children.count) 个二级任务").foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .font(.kpSmall)
+        }
+    }
+}
+
+struct TaskHierarchyInset<Content: View>: View {
+    let isChild: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if isChild {
+                Rectangle().fill(Color.kpSeparator)
+                    .frame(width: 1)
+                    .padding(.leading, 3)
+                    .padding(.trailing, 8)
+                    .accessibilityHidden(true)
+            }
+            content()
         }
     }
 }
@@ -579,6 +718,7 @@ struct BoardColumnView: View {
     var isBatchMode: Bool
     @Binding var selectedTaskIDs: Set<String>
     let onOpen: (TaskSummary) -> Void
+    let onOpenRelated: (RelatedTask) -> Void
     var onOpenSession: ((TaskSummary) -> Void)?
     let onToggleSelect: (String) -> Void
 
@@ -615,17 +755,11 @@ struct BoardColumnView: View {
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: Spacing.s) {
-                        ForEach(tasks) { task in
-                            TaskCardView(
-                                task: task,
-                                column: column,
-                                focused: focused,
-                                isBatchMode: isBatchMode,
-                                isSelected: selectedTaskIDs.contains(task.taskId),
-                                onOpen: onOpen,
-                                onOpenSession: onOpenSession,
-                                onToggleSelect: onToggleSelect
-                            )
+                        if column == .failed {
+                            exceptionGroup(failed: false)
+                            exceptionGroup(failed: true)
+                        } else {
+                            taskGroups(tasks)
                         }
                     }
                     .padding(Spacing.m)
@@ -636,6 +770,39 @@ struct BoardColumnView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.kpSeparator, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.title)，\(tasks.count) 项任务")
+    }
+
+    private func exceptionGroup(failed: Bool) -> some View {
+        let items = tasks.filter { TaskBoardPresentation.isFailed($0) == failed }
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            TaskExceptionGroupHeader(failed: failed, count: items.count)
+            taskGroups(items)
+        }
+    }
+
+    private func taskGroups(_ items: [TaskSummary]) -> some View {
+        ForEach(TaskBoardPresentation.groups(items)) { group in
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                if group.needsSourceContext, let parent = group.parent {
+                    TaskSourceContext(parent: parent, onOpen: onOpenRelated)
+                }
+                ForEach(group.tasks) { task in
+                    TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
+                        TaskCardView(
+                            task: task,
+                            column: column,
+                            focused: focused,
+                            isBatchMode: isBatchMode,
+                            isSelected: selectedTaskIDs.contains(task.taskId),
+                            onOpen: onOpen,
+                            onOpenRelated: onOpenRelated,
+                            onOpenSession: onOpenSession,
+                            onToggleSelect: onToggleSelect
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -697,6 +864,7 @@ struct TaskCardView: View {
     /// Tab / 辅助功能把 AppKit 焦点落到本卡时，同步看板逻辑焦点。
     @FocusState private var cardFocused: Bool
     let onOpen: (TaskSummary) -> Void
+    let onOpenRelated: (RelatedTask) -> Void
     /// §4.1：in_progress 卡片「查看实时会话」。
     var onOpenSession: ((TaskSummary) -> Void)?
     var onToggleSelect: ((String) -> Void)?
@@ -708,6 +876,11 @@ struct TaskCardView: View {
     /// v2 §5.22.4：plan_execution_hold 在 todo 列覆盖为「待确认执行」
     ///（核心 board_substatus 词表不含 hold 态，display_status 才区分）。
     private var substatus: String {
+        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.phase == "delivery", task.reviewSummary?.conclusion == "pass" {
+            return task.delivery?.mode == "pr" && task.delivery?.prState?.uppercased() != "MERGED"
+                ? "待合并" : "待交付"
+        }
         if column == .todo, task.planExecutionHold == true,
            task.boardSubstatus == "就绪" || task.boardSubstatus == nil {
             return "待确认执行"
@@ -718,10 +891,12 @@ struct TaskCardView: View {
     /// §5 子状态配色：第六列按 exception.severity（failed 红 / blocked 橙），
     /// 前五列受阻类 orange、待修复 purple、已完成 green，其余列色。
     private var substatusColor: Color {
-        if column == .failed, let exception = task.exception {
-            return exception.isFailed ? .red : .orange
+        if task.status != "done", let release = task.release, release.required { return ReleasePresentation.color(release) }
+        if column == .failed {
+            return TaskBoardPresentation.isFailed(task) ? .red : .orange
         }
         switch substatus {
+        case "待合并", "待交付": return .blue
         case "规划受阻", "派发受阻", "执行受阻", "评审受阻": return .orange
         case "规划失败", "派发失败", "执行失败", "失败": return .red
         case "待修复": return .purple
@@ -742,11 +917,37 @@ struct TaskCardView: View {
     /// 阻塞/失联补充行：blocked_reason 优先；本地失联派生兜底。
     private var blockedText: String? {
         if let reason = task.blockedReason, !reason.isEmpty { return reason }
+        if let detail = task.exception?.detail, !detail.isEmpty { return detail }
         if isLost {
             let kind = task.activeRequest?.kind.map { Labels.kind($0) } ?? "请求"
             return "执行端失联：\(kind)请求租约过期"
         }
         return nil
+    }
+
+    private var cardAccessibilityLabel: String {
+        var label = "\(task.title ?? task.taskId)，\(substatus)"
+        if let blockedText {
+            label += "，\(TaskBoardPresentation.isFailed(task) ? "失败" : "阻塞")：\(blockedText)"
+        }
+        if let release = task.release { label += "，\(release.title)，\(release.reason)" }
+        else if let notice = task.delivery?.autoMergeNotice { label += "，\(notice.reason)" }
+        return label
+    }
+
+    @ViewBuilder
+    private var progressLine: some View {
+        if let release = task.release {
+            Text("\(release.title) · \(release.reason)")
+                .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
+        } else if let notice = task.delivery?.autoMergeNotice {
+            Text(notice.reason)
+                .font(.kpSmall)
+                .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
+                .lineLimit(2)
+        } else if let progress = task.lastProgress, !progress.isEmpty {
+            Text(progress).font(.kpSmall).foregroundStyle(.secondary).lineLimit(1)
+        }
     }
 
     var body: some View {
@@ -758,6 +959,7 @@ struct TaskCardView: View {
             }
         } label: {
             VStack(alignment: .leading, spacing: Spacing.s) {
+                TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
                 HStack(spacing: Spacing.s) {
                     if isBatchMode {
                         Image(systemName: isSelected ? "checkmark.square.fill" : "square")
@@ -787,12 +989,7 @@ struct TaskCardView: View {
                     .truncationMode(.tail)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if let progress = task.lastProgress, !progress.isEmpty {
-                    Text(progress)
-                        .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                progressLine
                 if let automation = task.automation, AutomationPresentation.active(automation),
                    let round = automation.fixRound, round > 0 {
                     Text("修复 \(round)/\(automation.maxFixRounds ?? 2)").font(.kpSmall).foregroundStyle(.secondary)
@@ -831,20 +1028,20 @@ struct TaskCardView: View {
         }
         .focusEffectDisabled()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(task.title ?? task.taskId)，\(substatus)"
-                            + (blockedText.map { "，阻塞：\($0)" } ?? ""))
+        .accessibilityLabel(cardAccessibilityLabel)
         .accessibilityValue(isBatchMode ? (isSelected ? "已选中" : "未选中") : "")
         .accessibilityHint(isBatchMode ? "空格键切换选中，回车键打开任务详情" : "回车键打开任务详情")
     }
 
-    /// 列补充行（§4.1）：阻塞卡红字 blocked_reason；否则按列：
+    /// 列补充行：阻塞用橙色，失败用红色；否则按列：
     /// in_progress 最近检查、in_review 评审结论、todo 预计领取。
     @ViewBuilder
     private var supplement: some View {
         if let blocked = blockedText {
-            Label(blocked, systemImage: "exclamationmark.triangle.fill")
+            Label(blocked, systemImage: TaskBoardPresentation.isFailed(task)
+                  ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
                 .font(.kpSmall)
-                .foregroundStyle(.red)
+                .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.red : Color.orange)
                 .lineLimit(2)
                 .accessibilityLabel("阻塞：\(blocked)")
         } else {
@@ -855,8 +1052,8 @@ struct TaskCardView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             case .inReview:
-                if let conclusion = task.reviewSummary?.conclusion {
-                    Text(conclusion == "pass" && task.delivery?.mode == "pr" && task.delivery?.prState != "merged" ? "等待 PR 合并" : "本轮结论 \(reviewConclusionText(conclusion))")
+                if task.release == nil, task.delivery?.autoMergeNotice == nil, let conclusion = task.reviewSummary?.conclusion {
+                    Text(conclusion == "pass" && task.delivery?.mode == "pr" && task.delivery?.prState?.uppercased() != "MERGED" ? "等待 PR 合并" : "本轮结论 \(reviewConclusionText(conclusion))")
                         .font(.kpSmall)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
