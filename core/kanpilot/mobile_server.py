@@ -12,6 +12,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 
 from . import cli, db, util
 from .mobile_access import _config, require_existing_database
@@ -53,6 +54,11 @@ class MobileServer(ThreadingHTTPServer):
             super().__init__((config["bind_host"], config["port"]), MobileHandler)
         except (OSError, KeyError):
             raise util.KanpilotError("unavailable", "手机连接启动失败：地址不可用、端口占用或证书不可读") from None
+
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        # The configured address is numeric IPv4; startup needs no reverse DNS.
+        self.server_name, self.server_port = self.server_address[:2]
 
     def get_request(self):
         connection, address = self.socket.accept()
