@@ -148,12 +148,13 @@ class TaskAIActionLifecycle(fixtures.ConflictActionFixture):
         assert len(db.task_extra(self.task())["review_history"]) == 2
         assert db.task_extra(self.task())["review_conclusion"] == "pass"
 
-    def test_live_commit_rejects_missing_plus_verification(self):
+    def test_live_commit_rejects_missing_execution_verification(self):
         payload = self.finish_files_and_claim_monitor()
         with patch("kanpilot.engine_claim_scope.effective_mode", return_value="live"):
             result = self.call("delivery-commit", payload)
         assert result["outcome"] == "blocked"
-        assert "Plus 验证证据" in result["message"]
+        assert result['failure_code'] == 'delivery_commit_failed'
+        assert "与当前源码绑定的执行验证证据" in result["message"]
         assert git(self.worktree, "rev-parse", "HEAD") == self.head
 
     def test_live_binding_recognizes_only_same_run_double_parent_recovery(self):
