@@ -35,17 +35,27 @@ def test_cli_describes_existing_readonly_runner_without_claiming_connection(harn
 
 
 @pytest.mark.parametrize("harness_id", ["codex", "claude"])
-def test_cli_has_no_runtime_control_or_execution_role(harness_id):
+def test_cli_has_no_mcp_runtime_control(harness_id):
     assert harnesses.supports_role(harness_id, "plan")
     assert harnesses.supports_role(harness_id, "review")
-    assert not harnesses.supports_role(harness_id, "execution")
+    assert harnesses.supports_role(harness_id, "execution") == (harness_id == "codex")
     assert not harnesses.supports_role("pi", "execution")
     with pytest.raises(util.KanpilotError) as caught:
         harnesses.get_runtime_adapter(harness_id)
     assert caught.value.code == "unsupported_harness"
-    with pytest.raises(util.KanpilotError) as caught:
-        harnesses.describe_cli_harness(harness_id, role="execution", connected=True)
-    assert caught.value.code == "unsupported_role"
+    if harness_id == "claude":
+        with pytest.raises(util.KanpilotError) as caught:
+            harnesses.describe_cli_harness(harness_id, role="execution", connected=True)
+        assert caught.value.code == "unsupported_role"
+
+
+def test_codex_execution_requires_managed_evidence_without_granting_runtime_scope():
+    description = harnesses.describe_cli_harness("codex", role="execution", connected=True)
+    harnesses.require_capabilities(description, ["structured_result", "durable_status", "verification_report",
+        "verification_command_binding", "observed_command_results", "input_requests", "stop_confirmation"])
+    assert description["capabilities"]["read_only_workspace"]["state"] == "unsupported"
+    with pytest.raises(util.KanpilotError):
+        harnesses.runtime_adapter_for_scope(SimpleNamespace(runtime_config={"harness_id": "codex"}), {"harness_id": "codex"})
 
 
 def test_required_role_capabilities_fail_without_fallback():

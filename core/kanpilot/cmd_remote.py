@@ -230,6 +230,12 @@ def _require_goal_gate(ctx, payload: dict, task, verified_receipt=None) -> None:
     row = round_store.get_round(ctx.conn, task["task_id"], run_id)
     if row is None:
         return
+    if row["backend"] == "codex":
+        if (not verified_receipt or verified_receipt.get("engine_owned") is not True
+                or (verified_receipt.get("receipt") or {}).get("evidence_source") != "codex_report"):
+            raise util.KanpilotError("conflict", "Codex 轮次必须通过当前严格验证回执才能进入评审")
+        _require_command_monitor_claim(ctx, payload, task)
+        return
     if row["backend"] != "pi_desktop":
         # pi（及历史只读后端）维持 §5.18.4 原接口与三证据口径。
         return
@@ -410,8 +416,10 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         # terminal tool results. Git/process/file reads must precede the writer lock.
         current = db.require_task(conn, payload["task_id"])
         from . import engine_claim_scope, git_delivery
+        execution_round = round_store.get_round(conn, current["task_id"], current["run_id"])
+        codex = execution_round is not None and execution_round["backend"] == "codex"
         if (engine_claim_scope.effective_mode(conn, current["project_id"]) == "live"
-                or core.review_repair_of(current).get("source_kind") == "merge_conflict"):
+                or core.review_repair_of(current).get("source_kind") == "merge_conflict" or codex):
             from .engine import verdict
             receipt = db.task_extra(current).get("engine_verdict") or {}
             frozen = receipt.get("binding") or {}
@@ -420,7 +428,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             # branch review has a delivery-commit whose tree must match them.
             branch_review = core.requires_branch_review(current)
             comparable = dict(actual, head_sha=frozen.get("head_sha")) if branch_review else actual
-            if (receipt.get("evidence_source") != "goal_report"
+            if (receipt.get("evidence_source") != ("codex_report" if codex else "goal_report")
                     or receipt.get("verification_ok") is not True
                     or not verdict.receipt_evidence_current(conn, current, receipt)
                     or receipt.get("execution_run_id") != current["run_id"]

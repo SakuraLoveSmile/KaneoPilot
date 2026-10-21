@@ -358,12 +358,12 @@ def execution_retry_candidate(conn, task, *, engine_empty=False, verification_re
 
 
 def verification_retry_candidate(conn, task):
-    """A new Plus round is available only for known verification blocks."""
+    """A new report-producing round is available only for known verification blocks."""
     from . import round_store
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     return bool(task["failure_code"] in ("verification_unconfirmed", "verification_environment_failure")
                 and execution_retry_candidate(conn, task, verification_retry=True)
-                and row["backend"] == "pi_desktop" and row["worktree_path"]
+                and row["backend"] in ("pi_desktop","codex") and row["worktree_path"]
                 and task["session_id"] and row["session_id"] == task["session_id"])
 
 
@@ -390,13 +390,36 @@ def _require_execution_terminal(ctx, task, expected, *, allow_settled_continuati
     view = cmd_session.cmd_get_session(ctx, {"task_id": task["task_id"], "run_id": expected, "status_only": True})
     detail = view.get("round_detail") or {}
     terminal = detail.get("terminal") or {}
+    row = round_store.require_round(ctx.conn, task["task_id"], expected)
     if (detail.get("run_status") not in ("failed", "finished")
             or terminal.get("outcome") not in ("completed", "failed", "error", "aborted", "timeout", "truncated")
-            or detail.get("observer_alive") is not False
+            or (row['backend']!='codex' and detail.get("observer_alive") is not False)
             or detail.get("send_state") == "unknown"):
         raise util.KanpilotError("conflict", "旧执行轮次尚无可核验失败终态，请先检查会话状态，不能重复执行")
-    row = round_store.require_round(ctx.conn, task["task_id"], expected)
-    if row["backend"] == "pi_desktop":
+    if row['backend']=='codex':
+        from . import codex_execution, dsh_events, execution_contract
+        directory=source.run_dir(task['task_id'],expected)
+        job,error=dsh_events.read_job(directory,task['task_id'],expected,backend='codex')
+        try:
+            spec=util.jload((directory/'spec.json').read_text(encoding='utf-8'))
+            if job is None or not isinstance(spec,dict): raise ValueError('missing records')
+            contract=execution_contract.validate_spec(spec,job=job)
+            if (spec.get('stage_contract_required') is not True or spec.get('backend')!='codex'
+                    or not job.get('session_id') or not job.get('turns')
+                    or not any(turn.get('turn_id')==job.get('turn_id') for turn in job['turns'])
+                    or job.get('send_state')!='sent' or job.get('session_id')!=row['session_id']
+                    or job.get('turn_id')!=detail.get('turn_id') or job.get('config')!=util.jload(row['config_json'])
+                    or spec.get('config')!=job.get('config') or spec.get('cwd')!=row['worktree_path']
+                    or spec.get('task_id')!=task['task_id'] or spec.get('run_id')!=expected
+                    or spec.get('plan_sha256')!=task['plan_sha256'] or job.get('plan_sha256')!=spec.get('plan_sha256')
+                    or spec.get('plan_path')!=task['plan_path'] or not contract
+                    or contract['inputs'].get('requirements_sha256')!=task['requirements_sha256']
+                    or job.get('spec_sha256')!=util.sha256_file(directory/'spec.json')):
+                raise ValueError('identity mismatch')
+            codex_execution.require_settled(job)
+        except (OSError,ValueError,util.KanpilotError) as exc:
+            raise util.KanpilotError('conflict','旧 Codex 轮次身份、进程出生或持久终态不可核验，不能重复执行') from exc
+    elif row["backend"] == "pi_desktop":
         from . import harness_plus_adapter
         config = util.jload(row["config_json"]) or {}
         session_id = row["session_id"]
@@ -778,7 +801,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             code = task["failure_code"]
             from . import automation_policy, review_config
             if action == "accept_verification":
-                from . import engine_claim_scope
+                from . import engine_claim_scope, round_store
+                execution=round_store.get_round(conn,task['task_id'],task['run_id'])
+                if execution is not None and execution['backend']=='codex':
+                    raise util.KanpilotError('conflict','Codex 执行必须核对结构化验证证据，不能人工跳过验证')
                 if (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
                         or core.review_repair_of(task).get("source_kind") == "merge_conflict"):
                     raise util.KanpilotError("conflict", "Live 项目核对 Plus 验证证据；请让 Plus 重新执行并验证，不能人工跳过验证")

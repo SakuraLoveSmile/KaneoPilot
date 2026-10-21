@@ -95,7 +95,7 @@ class ExecConfigCommands(KanpilotTestCase):
         resp = self.call("get-exec-config", {})
         self.assertEqual(set(resp), {"config", "defaults"})
         self.assertIsNone(resp["config"])  # 从未保存
-        self.assertEqual(resp["defaults"], DEFAULTS)
+        self.assertEqual(resp["defaults"], {**DEFAULTS, "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"}})
 
     def test_set_merges_partial_then_get_returns_saved(self):
         saved = self.call("set-exec-config", {"reasoning_effort": "low"})
@@ -115,8 +115,8 @@ class ExecConfigCommands(KanpilotTestCase):
         got2 = self.call("get-exec-config", {})
         self.assertEqual(got2["config"]["reasoning_effort"], "low")
         self.assertEqual(got2["config"]["agent_preset"], "default")
-        self.assertEqual(set(got2["defaults"]), set(DEFAULTS))
-        self.assertEqual(got2["defaults"], DEFAULTS)
+        self.assertEqual(set(got2["defaults"]), set(DEFAULTS) | {"codex"})
+        self.assertEqual(got2["defaults"], {**DEFAULTS, "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"}})
 
     def test_set_invalid_values_bad_request_with_available_list(self):
         cases = [

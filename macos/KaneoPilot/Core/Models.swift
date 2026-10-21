@@ -949,6 +949,18 @@ struct PlusBackendStatus: Decodable {
 /// v3（§5.23.3）扩展 backend/pi_desktop；缺省按 backend="pi" 解释。
 /// v4（§5.24.1）扩展 controller_backend：dispatch/monitor 控制端后端，
 /// 与任务执行后端独立，缺省 pi。
+struct ExecCodexConfig: Decodable, Equatable {
+    let model: String?
+    let reasoningEffort: String?
+}
+
+struct ExecCodexInfo: Decodable {
+    let available: Bool?
+    let detail: String?
+    let path: String?
+    let version: String?
+}
+
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
@@ -959,6 +971,7 @@ struct ExecConfig: Decodable, Equatable {
     let backend: String?
     /// v3：pi_desktop 分支配置块（任务执行与 Plus 控制端共用）。
     let piDesktop: ExecPiDesktopConfig?
+    let codex: ExecCodexConfig?
     /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
     let controllerBackend: String?
 
@@ -966,6 +979,7 @@ struct ExecConfig: Decodable, Equatable {
          reasoningEffort: String? = nil, agentPreset: String? = nil,
          updatedAt: String? = nil, backend: String? = nil,
          piDesktop: ExecPiDesktopConfig? = nil,
+         codex: ExecCodexConfig? = nil,
          controllerBackend: String? = nil) {
         self.provider = provider
         self.model = model
@@ -974,6 +988,7 @@ struct ExecConfig: Decodable, Equatable {
         self.updatedAt = updatedAt
         self.backend = backend
         self.piDesktop = piDesktop
+        self.codex = codex
         self.controllerBackend = controllerBackend
     }
 
@@ -1038,6 +1053,7 @@ struct ExecPiDesktopInfo: Decodable {
 struct ExecCapabilitiesResponse: Decodable {
     let ok: Bool?
     let pi: ExecPiInfo?
+    let codex: ExecCodexInfo?
     /// v3（§5.23.3）：PI-Desktop 后端就绪态；旧核心不返回 → nil。
     let piDesktop: ExecPiDesktopInfo?
     /// §5.24.2：dispatch/monitor 控制端就绪态（与任务执行就绪态分开）。

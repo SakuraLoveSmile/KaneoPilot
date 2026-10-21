@@ -9,7 +9,7 @@
  - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
  - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
  - strangler 三态切换：`engine_mode: legacy|shadow|live`（按项目切换，不跨项目混用）。旧模块按门控保留；当前实施范围见 docs/plans/自动化流水线最新计划_20261012.plan.md，未完成实机验收/生产切换不声称已上线。
- - 验证由 Plus 执行，Pilot 只获取并核对 Plus 结构化 Goal 报告并推进状态：live verdict 按 protocol §5.27.11 核对报告身份与底线，要求冻结计划的每条 verify 命令在报告 checks 中有退出码为 0 的通过记录，并核对工作树源码快照，排除 `.pi/**` 与交付构建产物；live/shadow/手动入口均不得在 Pilot 本地代跑 verify。legacy 保留历史完成策略，旧转录证据回执仅留审计。
+ - 验证由固化的执行端运行，Pilot 只核对报告与证据并推进状态。Plus live verdict 沿 protocol §5.27.11；Codex CLI 沿 §5.31，所有引擎模式均核对结构化报告、原生命令退出码和源码快照。冻结计划的每条 verify 必须有通过记录，源码快照排除 `.pi/**` 与交付构建产物；任何入口均不得在 Pilot 本地代跑 verify。其他后端 legacy 保留历史完成策略，旧转录证据回执仅留审计。
  - 外部副作用先写 `runtime_operations` 回执再执行；远端写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
  
  ## 布局与归属

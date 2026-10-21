@@ -12,9 +12,9 @@ struct ExecutionAnswerFixtures {
     static func question(state: String = "open", delivery: String = "none", request: String = "ask-1",
                          run: String = "run-1", draft: [ExecutionAnswer] = [],
                          submitted: ExecutionQuestion.Submitted? = nil, by: String? = nil,
-                         answerable: Bool = true) -> ExecutionQuestion {
+                         answerable: Bool = true, source: String = "plus_asktool") -> ExecutionQuestion {
         ExecutionQuestion(requestId: request, runId: run, sessionId: "session", turnId: "turn",
-            toolCallId: "call", source: "plus_asktool", questionsSha256: "sha", answerable: answerable,
+            toolCallId: "call", source: source, questionsSha256: "sha", answerable: answerable,
             state: state, delivery: delivery, answeredBy: by, openedAt: "2026-10-14T00:00:00Z", closedAt: nil,
             waitSeconds: 42, observerAlive: false, queued: 1,
             questions: [ExecutionQuestionItem(id: "q0", title: "单选", description: "说明", multiSelect: false,
@@ -124,6 +124,9 @@ struct ExecutionAnswerFixtures {
 
         let pending = store(question(delivery: "submitting", draft: frozen))
         check(pending.inputsLocked && !pending.canSubmit && !pending.canRetry, "submitting blocks duplicate submission and edits")
+        let codexPending = store(question(delivery: "accepted", draft: frozen, source: "codex"))
+        check(codexPending.inputsLocked && !codexPending.canSubmit && codexPending.canStop
+            && codexPending.statusText == "答案已提交，等待执行端接收", "Codex mailbox acceptance freezes answers until consumption, while allowing stop")
         let remote = store(question(state: "answered", delivery: "not_pending", draft: frozen, by: "plus"))
         check(remote.statusText == "已在 Plus 回答" && remote.inputsLocked, "Plus source is never mislabeled local")
         let expired = store(question(state: "expired", draft: frozen))

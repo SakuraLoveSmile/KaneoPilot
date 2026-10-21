@@ -20,7 +20,7 @@ from . import (
 # set-exec-config 允许的字段：契约四字段 + v3 后端扩展 + v4 控制器后端。
 _SET_FIELDS = (
     ("execution_question_max_wait_seconds",) + constants.EXEC_CONFIG_KEYS
-    + ("backend", "pi_desktop", constants.CONTROLLER_BACKEND_KEY)
+    + ("backend", "pi_desktop", "codex", constants.CONTROLLER_BACKEND_KEY)
 )
 _PI_DESKTOP_THINKING_LEVELS = (
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
@@ -47,7 +47,9 @@ def cmd_get_exec_config(ctx, payload: dict) -> dict:
     backend/pi_desktop/updated_at。"""
     stored = db.get_setting(ctx.conn, "exec_config")
     config = exec_config.load(ctx.conn) if isinstance(stored, dict) else None
-    return {"config": config, "defaults": dict(constants.EXEC_CONFIG_DEFAULTS)}
+    from . import codex_execution
+    defaults = {**constants.EXEC_CONFIG_DEFAULTS, "codex": dict(codex_execution.DEFAULT_CONFIG)}
+    return {"config": config, "defaults": defaults}
 
 
 def cmd_set_exec_config(ctx, payload: dict) -> dict:
@@ -63,7 +65,7 @@ def cmd_set_exec_config(ctx, payload: dict) -> dict:
         raise util.bad_request(
             "set-exec-config 至少提供一个字段"
             "（provider / model / reasoning_effort / agent_preset / "
-            "backend / controller_backend / pi_desktop）"
+            "backend / controller_backend / pi_desktop / codex）"
         )
     config = exec_config.save(ctx.conn, fields, ctx.now_iso)
     db.add_event(
@@ -80,6 +82,9 @@ def _exec_config_event_detail(config: dict) -> dict:
     controller = (
         config.get(constants.CONTROLLER_BACKEND_KEY) or "pi"
     )
+    if config.get("backend") == "codex":
+        return {"backend": "codex", constants.CONTROLLER_BACKEND_KEY: controller,
+                "codex": dict(config.get("codex") or {})}
     if config.get("backend") == "pi_desktop":
         block = config.get("pi_desktop") or {}
         return {

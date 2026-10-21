@@ -88,6 +88,10 @@ def _merge(stored: Optional[dict]) -> dict:
         config["backend"] = "pi"
         config[constants.CONTROLLER_BACKEND_KEY] = "pi"
         config["pi_desktop"] = None
+    from . import codex_execution
+    config["codex"] = dict(codex_execution.DEFAULT_CONFIG)
+    if isinstance(stored, dict) and isinstance(stored.get("codex"), dict):
+        config["codex"].update(stored["codex"])
     return config
 
 
@@ -148,6 +152,18 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
     """
     config = dict(config_override) if isinstance(config_override, dict) else load(conn)
     backend = config.get("backend") or "pi"
+    if backend == "codex":
+        from . import codex_execution
+        block = config.get("codex")
+        if config_override is None and not isinstance(_stored_dict(conn).get("codex"), dict):
+            block = None
+        if block is None and config_override is not None:
+            block = {key: config[key] for key in codex_execution.DEFAULT_CONFIG if key in config}
+        error = codex_execution.validate_config(block)
+        if error:
+            raise util.KanpilotError("validation_failed", f"Codex 执行配置无效：{error}")
+        return {"backend": "codex", **block, "sandbox": "workspace-write",
+                "execution_question_max_wait_seconds": config.get("execution_question_max_wait_seconds", constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)}
     if backend == "pi_desktop":
         block = config.get("pi_desktop")
         if block is None and all(config.get(k) is not None for k in ("connection_file", "provider_id", "model_id")):
@@ -178,7 +194,13 @@ def snapshot_with_model_override(conn: sqlite3.Connection, task) -> dict:
     if not override or not fallback.override_matches(override, task):
         return snapshot(conn)
     merged = dict(load(conn))
-    if merged.get("backend") == "pi_desktop":
+    if merged.get("backend") == "codex":
+        block = dict(merged.get("codex") or {})
+        for key in ("model", "reasoning_effort"):
+            if override.get(key):
+                block[key] = override[key]
+        merged["codex"] = block
+    elif merged.get("backend") == "pi_desktop":
         block = dict(merged.get("pi_desktop") or {})
         for key in constants.EXEC_PI_DESKTOP_ALL_KEYS:
             if override.get(key):
@@ -239,7 +261,24 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         merged_block = dict(stored.get("pi_desktop") or {})
         merged_block.update(block)
         merged_stored["pi_desktop"] = merged_block
+    if "codex" in fields:
+        from . import codex_execution
+        block = fields["codex"]
+        if not isinstance(block, dict):
+            raise util.bad_request("codex 必须是对象")
+        unknown = set(block) - set(codex_execution.DEFAULT_CONFIG)
+        if unknown:
+            raise util.bad_request(f"codex 不支持字段：{', '.join(sorted(unknown))}")
+        previous = stored.get("codex")
+        merged_block = dict(previous) if isinstance(previous, dict) else {}
+        merged_block.update(block)
+        merged_stored["codex"] = merged_block
     merged = _merge(merged_stored)
+    if "codex" in fields or backend == "codex":
+        from . import codex_execution
+        error = codex_execution.validate_config(merged_stored.get("codex"))
+        if error:
+            raise util.bad_request(f"执行配置校验失败：{error}")
 
     # 当前生效 backend 的必填组合整体校验；显式提交的 pi_desktop 块即使
     # backend=pi 也先验完整性（避免保存残块）。
@@ -259,9 +298,12 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
             raise util.bad_request(f"执行配置校验失败：{error}")
 
     payload = dict(merged)
+    # 展示默认值不等于用户已保存 Codex；切换其他后端不创建 Codex 配置。
+    if "codex" not in merged_stored:
+        payload.pop("codex", None)
     payload["updated_at"] = now
     db.set_setting(conn, "exec_config", payload)
-    return payload
+    return load(conn)
 
 
 def _stored_dict(conn: sqlite3.Connection) -> dict:
@@ -582,8 +624,21 @@ def capabilities(
             "session_naming": False,
         }
 
+    from . import codex_execution
+    codex_block = config.get("codex")
+    if config_snapshot is None:
+        codex_block = _stored_dict(conn).get("codex") if conn is not None else None
+    elif config.get("backend") == "codex" and "codex" not in config:
+        codex_block = config
+    codex = codex_execution.capabilities(codex_block, timeout=timeout)
+    selected_ok = {
+        "pi": all(item["ok"] for item in checks),
+        "pi_desktop": bool(pi_desktop.get("available")),
+        "codex": bool(codex.get("available")),
+    }.get(config.get("backend") or "pi", False)
     return {
-        "ok": all(item["ok"] for item in checks),
+        "ok": selected_ok,
+        "codex": codex,
         "pi": {"path": pi_path, "version": version, "home": str(pi_home)},
         "pi_desktop": pi_desktop,
         # v4（§5.24.2）：控制器就绪态与任务执行就绪态分开计算、分开展示。
@@ -698,6 +753,9 @@ def validate_config(config: dict, caps: Optional[dict]) -> Optional[str]:
     返回中文错误原因；通过返回 None。**不**校验凭据（属执行环境）。"""
     if not isinstance(config, dict):
         return "配置必须是对象"
+    if config.get("backend") == "codex":
+        from . import codex_execution
+        return codex_execution.validate_config(config.get("codex"))
     if config.get("backend") == "pi_desktop":
         return validate_pi_desktop_block(config.get("pi_desktop"))
     caps = caps if isinstance(caps, dict) else {}
@@ -753,6 +811,14 @@ def check_available(
         backend = config.get("backend")
         if backend not in constants.EXEC_BACKENDS:
             return False, f"exec_config 轮次快照 backend 不支持：{backend}"
+
+    if config.get("backend") == "codex":
+        from . import codex_execution
+        block = config.get("codex") if config_snapshot is None else config
+        if config_snapshot is None:
+            block = _stored_dict(conn).get("codex")
+        probe = codex_execution.capabilities(block, timeout=timeout)
+        return (True, None) if probe.get("available") else (False, probe.get("detail") or "Codex 执行环境不可用")
 
     if config.get("backend") == "pi_desktop":
         if all(config.get(k) is not None for k in ("provider_id", "model_id", "connection_file")):

@@ -958,6 +958,28 @@ def _goal_fail(code: str, reason: str, detail: str = "") -> None:
     raise util.KanpilotError(code, message)
 
 
+def _read_codex_report(conn, task_id, run_id):
+    """Expose the native Codex report without inventing a Plus Goal/proposal."""
+    from . import codex_execution, round_store
+    task = db.require_task(conn, task_id)
+    if task["run_id"] != run_id:
+        raise util.KanpilotError("conflict", "Codex 报告不是任务当前执行轮次")
+    evidence = codex_execution.read_evidence(conn, task)
+    job, envelope = evidence["job"], evidence["report"]
+    identity = {"task": task, "round": round_store.get_round(conn, task_id, run_id),
+                "job": job, "run_dir": Path(job["runs_dir"]), "backend": "codex",
+                "session_id": job["session_id"], "turn_id": job["turn_id"],
+                "proposal_id": None, "execution_id": None, "goal_approval": None,
+                "plan_sha256": task["plan_sha256"]}
+    return {"identity": identity, "backend": "codex", "evidence_source": "codex_report",
+            "state": envelope["state"], "detail": None, "report": envelope["report"],
+            "report_sha256": envelope["report_sha256"], "report_id": envelope["report_id"],
+            "session_id": job["session_id"], "turn_id": job["turn_id"],
+            "proposal_id": None, "execution_id": None, "ready": True, "structured": True,
+            "execution_status": envelope["report"]["status"], "verdict": None,
+            "checks_confirmed": evidence["coverage"]["ok"]}
+
+
 def goal_round_identity(conn, task_id: str, run_id: str) -> dict:
     """解析 pi_desktop 轮次的报告身份材料（只读；§5.23.10 T5-B）。
 
@@ -980,6 +1002,8 @@ def goal_round_identity(conn, task_id: str, run_id: str) -> dict:
         raise util.KanpilotError(
             "not_found", f"execution round not found: {task_id}/{run_id}"
         )
+    if row["backend"] == "codex":
+        return _read_codex_report(conn, task_id, run_id)["identity"]
     if row["backend"] != "pi_desktop":
         _goal_fail(
             "validation_failed",
@@ -1089,8 +1113,11 @@ def read_goal_report(conn, task_id: str, run_id: str, *,
     **绝不**返回跨轮/身份不符的报告正文；``state="ready"`` 且身份全部相符
     时 ``ready=True``。语义判断（AI 判定）不属于本函数职责。
     """
-    from . import pi_desktop_backend
+    from . import pi_desktop_backend, round_store
 
+    row = round_store.get_round(conn, task_id, run_id)
+    if row is not None and row["backend"] == "codex":
+        return _read_codex_report(conn, task_id, run_id)
     identity = goal_round_identity(conn, task_id, run_id)
     connection_file = connection_file or identity["connection_file"]
     if client is None:
@@ -1259,6 +1286,10 @@ def cmd_get_goal_report(ctx, payload: dict) -> dict:
     resolved = read_goal_report(ctx.conn, task_id, run_id)
     identity = resolved["identity"]
     report = resolved["report"]
+    if resolved.get("backend") == "codex":
+        return {key: value for key, value in dict(resolved, task_id=task_id, run_id=run_id,
+                integrity_kind="structured", goal_approval=None,
+                plan_sha256=identity["plan_sha256"], read_only=True).items() if key != "identity"}
     return {
         "task_id": task_id,
         "run_id": run_id,
