@@ -50,9 +50,9 @@ CAS 和身份门保留，迟到 completed/abort 不能覆盖。核心 runtime �
 
 主 agent 唯一维护两仓 docs、此记录及 Plus E2E catalog。Plus 起点
 `40e32b0a2`，分支 `codex/plus-asktool-hard-policy`，工作树
-`/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/plus-asktool-hard-policy-20261014`。
+`/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/plus-asktool-hard-policy-20261014`。
 KaneoPilot 起点 `4e77fab`，同名分支，工作树
-`/Users/sakurasep/.codex/worktrees/plus-asktool-hard-policy/KaneoPilot`。
+`/Users/developer/.codex/worktrees/plus-asktool-hard-policy/KaneoPilot`。
 主检出不开发，不覆盖其他任务。读取实际入口，缺少的局部 AGENTS/README
 不凭空替代；现有依赖与构建缓存按项目约定复用，不为验收安装第二套环境。
 

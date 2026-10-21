@@ -40,7 +40,7 @@ T6.2-B 交付状态（工作树可读，供集成核对；2026-09-30 23:25）
 4. 本文件（41 用例）。
 
 命令与结果：
-- ``cd core && /Users/sakurasep/.pyenv/shims/python3 -m pytest -p no:cacheprovider
+- ``cd core && /Users/developer/.pyenv/shims/python3 -m pytest -p no:cacheprovider
   tests/test_plus_planner.py tests/test_planner_method.py -q`` → 62 passed
 - ``… tests/test_plus_planner.py -q`` → 41 passed
 - ``… tests -q`` → **514 passed, 31 subtests passed, 0 failed**（2026-10-01 Lead 复跑；

@@ -241,7 +241,7 @@ def test_path_prefixed_checks_advance_with_original_execution_identity(monkeypat
                 "flutter analyze --no-pub lib/core/providers.dart",
                 "flutter test --no-pub test/daily_recommend_shuffle_test.dart"]
     value["extra"]["plan_verify"]["commands"] = commands
-    messages = [message('export PATH="$PATH:/Users/sakurasep/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n'
+    messages = [message('export PATH="$PATH:/Users/developer/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n'
                         + command, seq=seq) for seq, command in zip((235, 237, 239), commands)]
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=list(reversed(messages)))
     assert report(calls)["outcome"] == "succeeded"

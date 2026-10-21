@@ -250,7 +250,7 @@ def test_exact_result_and_last_result_behavior_remain_authoritative():
 
 
 @pytest.mark.parametrize("prefix", [
-    'export PATH="$PATH:/Users/sakurasep/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n',
+    'export PATH="$PATH:/Users/developer/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n',
     'export PATH="${PATH}:/opt/homebrew/bin" && ',
     'export PATH=$PATH:/usr/local/bin\n',
     'export PATH=/bin:/usr/bin && ',
@@ -373,7 +373,7 @@ def test_three_real_style_path_verifications_are_sorted_by_sequence():
         "flutter test --no-pub test/daily_recommend_shuffle_test.dart",
     ]
     messages = [{"seq": seq, "type": "command_output", "tool": {"exit_code": 0,
-        "input": {"command": 'export PATH="$PATH:/Users/sakurasep/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n' + command}}}
+        "input": {"command": 'export PATH="$PATH:/Users/developer/flutter/bin:/opt/homebrew/bin:/usr/local/bin"\n' + command}}}
         for seq, command in zip((235, 237, 239), commands)]
     old_failure = {"seq": 100, "type": "command_output", "tool": {
         "exit_code": 1, "input": {"command": commands[0]}}}

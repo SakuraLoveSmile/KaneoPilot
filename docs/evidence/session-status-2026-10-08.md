@@ -12,7 +12,7 @@ Plus 提供「打开 Pi-Desktop-Plus」和「复制会话 ID」。安装软件 b
 
 ## 本次验证
 
-- 主 agent 使用已有 /Users/sakurasep/.pyenv/versions/3.10.10/bin/python3 执行：pytest core/tests/test_session_status.py core/tests/test_force_purge_session.py core/tests/test_session.py core/tests/test_reconnect_task.py core/tests/test_stale_plan_session.py -q。结果 134 passed，73 subtests passed。全部为隔离夹具，无真实模型/远端服务调用。
+- 主 agent 使用已有 /Users/developer/.pyenv/versions/3.10.10/bin/python3 执行：pytest core/tests/test_session_status.py core/tests/test_force_purge_session.py core/tests/test_session.py core/tests/test_reconnect_task.py core/tests/test_stale_plan_session.py -q。结果 134 passed，73 subtests passed。全部为隔离夹具，无真实模型/远端服务调用。
 - 主 agent 执行 KANPILOT_TEST_STATUS_ONLY=1 bash macos/tests/run-session-reader-fixtures.sh，通过初载、手动刷新、轮询、切换、保存、失败恢复、停止和代数守卫；日志断言不请求 session-messages且状态读取带status_only:true，检查时间成功推进/失败保留/切换清空。
 - 本轮 worker 的默认 reader 脚本在增加最终时间与载荷断言前完成 400 条历史、30秒空闲及兼容性验证；最终 Store 由上述状态聚焦脚本验证。
 - 主 agent 在独立 FakeCore 原生预览、900×600 深色窗口验证：历史已结束、Plus未确认、等待权限及读取失败；选择器与摘要状态一致，无正文/消息搜索；读取失败仍保留元数据及检查时间并显示可能过期，外部查看按钮可见且无布局裁切。预览调用日志 session-messages=0；预览已退出。软件打开入口的安装身份经只读查证，未导航真实模型会话。

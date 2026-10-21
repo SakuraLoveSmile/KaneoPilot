@@ -1,10 +1,10 @@
 # 执行空转检测与自动重试：实施与验证记录
 
-施工目录：`/Users/sakurasep/.codex/worktrees/execution-noop/KaneoPilot`，本地分支 `codex/execution-noop`。
+施工目录：`/Users/developer/.codex/worktrees/execution-noop/KaneoPilot`，本地分支 `codex/execution-noop`。
 
 ## 基线与数据边界
 
-原 main 为 `166ae24e77b50cc1032546e0dd42c2b626706ff7`。原工作区全部在途内容逐文件复制到隔离工作树并核对 SHA256，408 个文件。基线可由本地提交 `66c3852` 恢复，哈希清单位于 `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot-archives/20261007-execution-noop-baseline/SHA256.json`。原工作区、真实数据库、真实执行任务与已安装 App 未改动。没有调用付费模型、推送或外部发布。
+原 main 为 `166ae24e77b50cc1032546e0dd42c2b626706ff7`。原工作区全部在途内容逐文件复制到隔离工作树并核对 SHA256，408 个文件。基线可由本地提交 `66c3852` 恢复，哈希清单位于 `/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot-archives/20261007-execution-noop-baseline/SHA256.json`。原工作区、真实数据库、真实执行任务与已安装 App 未改动。没有调用付费模型、推送或外部发布。
 
 ## 按 WP 的交付
 

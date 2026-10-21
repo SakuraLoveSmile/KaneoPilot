@@ -6,7 +6,7 @@
 
 上次从 main 脏工作区构建时，遗漏另一个工作树已安装的 codex_desktop 能力，导致保存的 Desktop 规划/Review 被读为默认 CLI。数据库原 backend 和队列配置未丢失。
 
-旧安装备份位于 /Users/sakurasep/Library/Application Support/KaneoPilot-install-backups/20261009-144946；与 /Users/sakurasep/.codex/worktrees/desktop-schedule-control/KaneoPilot 的 92 个 Python 文件逐一完全匹配。以该只读源码为参考、HEAD 166ae24 为共同基线进行三方合并，恢复 Desktop 后端配置、正式队列 MCP、领取/请求快照、路由与原生控制；保留当前界面导航和 execution_retry/CAS/原工作树校验。恢复原安装已有的 Plus Goal 与手动继续状态能力，继续运行时不得重复执行。
+旧安装备份位于 /Users/developer/Library/Application Support/KaneoPilot-install-backups/20261009-144946；与 /Users/developer/.codex/worktrees/desktop-schedule-control/KaneoPilot 的 92 个 Python 文件逐一完全匹配。以该只读源码为参考、HEAD 166ae24 为共同基线进行三方合并，恢复 Desktop 后端配置、正式队列 MCP、领取/请求快照、路由与原生控制；保留当前界面导航和 execution_retry/CAS/原工作树校验。恢复原安装已有的 Plus Goal 与手动继续状态能力，继续运行时不得重复执行。
 
 恢复后核心相对旧安装仅保留六个手动重试模块差异，加上精确 Codex 版本兼容变化。build_app.sh 将 desktop_queue/desktop_automation_control 纳入必需导入和源码哈希验证，避免再次漏装。
 
@@ -28,7 +28,7 @@
 
 ## 安装与真实只读核验
 
-先备份旧安装并逐文件 SHA-256 核验：/Users/sakurasep/Library/Application Support/KaneoPilot-install-backups/20261009-152138。正常退出旧进程后替换安装、重启；签名和安装内所有核心 Python 文件哈希再次核验。
+先备份旧安装并逐文件 SHA-256 核验：/Users/developer/Library/Application Support/KaneoPilot-install-backups/20261009-152138。正常退出旧进程后替换安装、重启；签名和安装内所有核心 Python 文件哈希再次核验。
 
 主 agent 在实际安装版核验：规划和 Review 都显示 Codex Desktop（MCP 主动领取）；原配置日期、模型/权限继承、绑定聊天恢复；自动规划检查仍 PAUSED/每5分钟，自动 Review 仍 ACTIVE/每60分钟，均 controllable=true。窗口最后停在 Review 环境。原 Music 任务失败与轮次79e14e66保持，执行页重新执行按钮仍可见，未点击。
 

@@ -23,7 +23,7 @@
 4. `pi_desktop_worker.py` 的 shell 工具名集合含小写 `bash`，实际名称是 `Bash`，所以这些结果被记录为 `tool_result`，没有透出 `exit_code`；实际结果 `details.exitCode` 可解析。即使修正采集，这四条 Git 读取仍不是验证。实际 monitor 所用的 `core/executor_prompts/monitor.md` 只把 `pi` 写进三证据分支，并把 `backend != pi` 称作旧后端；与 `pi_desktop` 当前协议冲突。本案监控实际仍检查了三证据，故该提示词缺口不是本案最终缺证据的原因。
 5. 本轮 `job.goal_approval` 为空，现有本地证据无法把它关联到一份已批准的 Goal execution/Canvas 报告。后续启用报告门时，不能据这一轮的 `finished/0` 或另一个会话的报告补判完成，也不改写历史记录。
 
-证据入口：`/Users/sakurasep/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/71de3380-0330-4cc8-9aa0-6c92674d529f/{spec.json,job.json,events.jsonl}`；对应 worktree 在同一应用支持目录的 `worktrees/ozb7d8vw1sbp653zs7u0jn2f/71de3380-0330-4cc8-9aa0-6c92674d529f`。这是一份 2026-09-27 只读快照，实施时先复核当前状态。没有可离线核对的 PI-Desktop 原始完整转录，因此不能断言新 turn 为何在没有后续验证消息的情况下结束。
+证据入口：`/Users/developer/Library/Application Support/KaneoPilot/runs/ozb7d8vw1sbp653zs7u0jn2f/71de3380-0330-4cc8-9aa0-6c92674d529f/{spec.json,job.json,events.jsonl}`；对应 worktree 在同一应用支持目录的 `worktrees/ozb7d8vw1sbp653zs7u0jn2f/71de3380-0330-4cc8-9aa0-6c92674d529f`。这是一份 2026-09-27 只读快照，实施时先复核当前状态。没有可离线核对的 PI-Desktop 原始完整转录，因此不能断言新 turn 为何在没有后续验证消息的情况下结束。
 
 ## 冻结的修复结果
 

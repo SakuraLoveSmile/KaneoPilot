@@ -1,5 +1,5 @@
 {
-  "app": "/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/KaneoPilot.app",
+  "app": "/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot/dist/KaneoPilot.app",
   "build_log": "/tmp/kp-app-build-final-20261012.log",
   "source_hash_check": "passed by build_app.sh",
   "signing": "local ad hoc; strict codesign verification passed",

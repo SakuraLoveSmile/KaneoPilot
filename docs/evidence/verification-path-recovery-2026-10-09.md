@@ -28,7 +28,7 @@
 
 ## 安装与保留
 
-最终安装 /Applications/KaneoPilot.app。最终替换前备份：/Users/sakurasep/Library/Application Support/KaneoPilot-install-backups/20261009-174953；首轮替换备份20261009-172018。锁屏阶段旧应用没有在途/排队请求，依据已有安装授权后台重启；用户解锁后完成界面实测及最终UI修正的正常菜单退出/替换/重启。
+最终安装 /Applications/KaneoPilot.app。最终替换前备份：/Users/developer/Library/Application Support/KaneoPilot-install-backups/20261009-174953；首轮替换备份20261009-172018。锁屏阶段旧应用没有在途/排队请求，依据已有安装授权后台重启；用户解锁后完成界面实测及最终UI修正的正常菜单退出/替换/重启。
 
 planner_config、review_config、desktop_queue_config的原始值SHA-256前后一致；保留原改动、人工接管方式、run和工作树。未提交、推送、发布或改自动任务设置。
 

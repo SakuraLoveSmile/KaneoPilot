@@ -21,7 +21,7 @@
 - Swift Release编译、既有模型夹具112/112通过（UI worker执行）；主agent独立Release构建/签名/包内queue与CLI哈希一致检查通过。
 - 主agent用真实原生界面点击创建和刷新，目视核对1180×760窗口中的2/2及两个已回传状态。完整文本已从核心读回；折叠正文展开和聊天深链目标界面未实测，不作额外视觉验收声明。
 - 独立候选：/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-desktop-intake.HPFrOU/KaneoPilot.app。重新启动用同目录launch.py传入隔离环境；也可运行scripts/preview_desktop_intake.sh构建并启动新候选。
-- 验证DB已用SQLite backup从临时目录迁至持久、0700隔离目录：/Users/sakurasep/Library/Application Support/KaneoPilot-Desktop-Validation/fixture.db（文件0600）。专用MCP配置及以后预览均指向该DB，避免重开预览或OS清理临时目录使两端队列错位。
+- 验证DB已用SQLite backup从临时目录迁至持久、0700隔离目录：/Users/developer/Library/Application Support/KaneoPilot-Desktop-Validation/fixture.db（文件0600）。专用MCP配置及以后预览均指向该DB，避免重开预览或OS清理临时目录使两端队列错位。
 - 本次全局仅添加kaneopilot-desktop-probe MCP，运行desktop-probe-mcp且带明确--db；只暴露三个验证工具，不暴露正式核心命令。官方CLI注册时规范化掉的四个既有MCP字段已恢复，逐项比较确认原配置其余值保持一致；配置备份在~/.codex/backups/2026-10-08-desktop-intake/（私有目录，不附凭据内容）。
 
 ## 旧方式撤除
@@ -34,9 +34,9 @@
 
 ## 证据文件
 
-/Users/sakurasep/Documents/Codex/2026-10-08/codex-desktop-control/outputs/desktop-intake-final-status.json
+/Users/developer/Documents/Codex/2026-10-08/codex-desktop-control/outputs/desktop-intake-final-status.json
 
-/Users/sakurasep/Documents/Codex/2026-10-08/codex-desktop-control/outputs/desktop-intake-thread-evidence.json
+/Users/developer/Documents/Codex/2026-10-08/codex-desktop-control/outputs/desktop-intake-thread-evidence.json
 
 状态文件无claim_token；聊天证据仅保存回合身份、工具名和状态，不保存工具参数或领取凭据。
 

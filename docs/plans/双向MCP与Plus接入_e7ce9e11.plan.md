@@ -26,13 +26,13 @@
 | T7.6 App 生命周期 | MCPServiceManager 与手动启动/停止 UI 已存在 | 实现中；补持久启用、启动/退出、profile 隔离、就绪门 |
 | T7.7 核心收据与验收 | schema 已声明 5、runtime_operations 与迁移代码已存在；当前开库仍自动升级 | 实现中；补显式迁移门、原子收据、claim 身份及双向验收 |
 
-代码目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`。Plus 只读基线：`/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop`，main HEAD `a395c6067`，两项目均有未提交改动。不得覆盖、重置或机械按旧 HEAD 重建。正式安装包/实时服务/正式库状态未在本轮重查，前轮 active=false 只作为历史记录。
+代码目录：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`。Plus 只读基线：`/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop`，main HEAD `a395c6067`，两项目均有未提交改动。不得覆盖、重置或机械按旧 HEAD 重建。正式安装包/实时服务/正式库状态未在本轮重查，前轮 active=false 只作为历史记录。
 
 
 **实施目录与既有规格：**
 
-- KP：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`；下文 Python 模块默认位于 `KP/core/kanpilot/`，原生页面位于 `KP/macos/KaneoPilot/`，测试按列出的 `core/tests/` 或 `tests/` 路径。
-- PLUS：`/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop`；Plus 主进程模块位于 `apps/desktop/electron/main/`。实际修改前按其 AGENTS 创建或复用支持 Plus 身份的独立工作树，不默认在脏 main 施工。
+- KP：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`；下文 Python 模块默认位于 `KP/core/kanpilot/`，原生页面位于 `KP/macos/KaneoPilot/`，测试按列出的 `core/tests/` 或 `tests/` 路径。
+- PLUS：`/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop`；Plus 主进程模块位于 `apps/desktop/electron/main/`。实际修改前按其 AGENTS 创建或复用支持 Plus 身份的独立工作树，不默认在脏 main 施工。
 - 必读 `KP/AGENTS.md`、`docs/protocol.md` §5.22–5.24、`docs/state-model.md`、`docs/ui-spec.md` §4.9、`docs/automation-contract.md`；新双向接口以本文件为施工依据，主控在开工时同步到新增 protocol §5.25。这些规格均在仓库可得，不依赖旧总计划中的多轮追加。
 - 规划/Review 固定 ask，Plus 规划仅使用内置方式；Codex 的 spec_plan 插件路径和 Pi CLI 分支保留，MCP 服务器不负责把 Codex 插件移植到 Plus。
 

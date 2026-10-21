@@ -4,8 +4,8 @@
 
 ## 工作区与范围
 
-- 原目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`，分支 `codex/review-result-format-20261018`，基准提交 `a459904ca4e2bdb59081fa7e663a1d6f2413b04d`。
-- 候选：`/Users/sakurasep/.codex/worktrees/harness-contracts/KaneoPilot`，分支 `codex/harness-contracts-20261020`。保留原工作区全部既有改动，再叠加本次实现；相对 HEAD 的整份 diff 不能直接视为本次修改。
+- 原目录：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`，分支 `codex/review-result-format-20261018`，基准提交 `a459904ca4e2bdb59081fa7e663a1d6f2413b04d`。
+- 候选：`/Users/developer/.codex/worktrees/harness-contracts/KaneoPilot`，分支 `codex/harness-contracts-20261020`。保留原工作区全部既有改动，再叠加本次实现；相对 HEAD 的整份 diff 不能直接视为本次修改。
 - 备份：`/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/kaneopilot-harness-baseline-_rz6e9jd`，保存原 tracked patch、684 文件的内容清单及候选增量清单。原目录 tracked patch 与开始时逐字节一致；原 RECORD 的历史 CRLF 换行保留，新 worktree checkout 为 LF。
 - 规格：[harness-contract.md](../harness-contract.md)，已同步 protocol §5.30、automation-contract 与 state-model，无 DB schema 迁移。
 

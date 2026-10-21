@@ -21,7 +21,7 @@ A/B/C 相同的原因是：这些子进程是从「已有完整 PATH 的终端�
 | D | 最小 PATH `/usr/bin:/bin:/usr/sbin:/sbin` + `/bin/bash -l -c` | 最小 | **rc=127** | **rc=127** | rc=0 |
 | E | 最小 PATH + **`/bin/zsh -l -c`** | 完整 | rc=0（gh 2.97.0） | rc=0（pytest 9.1.1） | rc=0 |
 
-D 组即 KaneoPilot App 的真实处境：App 由 Finder/launchd 拉起（`launchctl getenv PATH` 为空），子进程只拿到系统最小 PATH。`gh` 在 `/opt/homebrew/bin/gh`、`pytest` 在 `/Users/sakurasep/.pyenv/shims/pytest`，均不在最小 PATH 内。
+D 组即 KaneoPilot App 的真实处境：App 由 Finder/launchd 拉起（`launchctl getenv PATH` 为空），子进程只拿到系统最小 PATH。`gh` 在 `/opt/homebrew/bin/gh`、`pytest` 在 `/Users/developer/.pyenv/shims/pytest`，均不在最小 PATH 内。
 
 **D → E 的差别就是本 spike 的核心发现**：同一台机器，换 login shell 从「全挂」变「全通」。
 
@@ -30,7 +30,7 @@ D 组即 KaneoPilot App 的真实处境：App 由 Finder/launchd 拉起（`launc
 - `~/.zprofile`：`eval "$(/opt/homebrew/bin/brew shellenv)"`、`/Library/Frameworks/Python.framework/Versions/3.11/bin`、MacPorts——PATH 的真正来源。
 - `~/.bash_profile`：只有 conda 初始化、x-cmd、cargo、`~/.local/bin`——**没有** homebrew，**没有** pyenv shims。这解释了 D 组为什么挂。
 - `SHELL=/bin/zsh`（用户登录 shell）。
-- `python3 -m pytest --version` → `pytest 9.1.1`；`/Users/sakurasep/.pyenv/shims/pytest` 存在。**本机装有真实 pytest**（早前「环境缺 pytest」的判断有误：仓库根 `pytest.py` 是一个透传 shim，会把 `python3 -m pytest` 交给真实 pytest 9.1.1；`tests/pytest.py` 只是无真实 pytest 时的 unittest discover 兜底桩）。
+- `python3 -m pytest --version` → `pytest 9.1.1`；`/Users/developer/.pyenv/shims/pytest` 存在。**本机装有真实 pytest**（早前「环境缺 pytest」的判断有误：仓库根 `pytest.py` 是一个透传 shim，会把 `python3 -m pytest` 交给真实 pytest 9.1.1；`tests/pytest.py` 只是无真实 pytest 时的 unittest discover 兜底桩）。
 
 ## `verify_env` 形态（结论）
 

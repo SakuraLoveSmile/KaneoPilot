@@ -17,7 +17,7 @@
 
 **环境与基线**
 
-- 工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`。
+- 工作目录：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`。
 - 日期：2026-10-13。
 - 基线：分支 `feat/engine-rewrite`，HEAD `870c42411161fdc1f6e65683892822531ff4e3bc`。
 - 工作区现有 8 处未提交路径：7 处是用户在途工作（与本计划无关），1 处是本计划文件（未跟踪）。见“实施顺序与前置”。
@@ -550,7 +550,7 @@ diff -rq -x __pycache__ /Applications/KaneoPilot.app/Contents/Resources/core/kan
 ### 安装与真实验收结果（2026-10-14）
 
 - WP1–WP5 已本地提交：`77efd98`。本次全部测试使用 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`（pytest 9.1.1）；默认 pyenv Python 未用于最终测试结果。
-- 旧 App 备份：`/Users/sakurasep/KaneoPilot-backup-20261014-001114/KaneoPilot.app`。安装前确认没有 claimed/queued 请求、没有执行 worker，按完整 App 路径正常退出；闲置的旧 stdio queue 服务亦已退出。新 App 安装后的 `diff -rq -x __pycache__ …/core/kanpilot core/kanpilot` 无输出，签名复核通过，新引擎 PID 79381 心跳正常。
+- 旧 App 备份：`/Users/developer/KaneoPilot-backup-20261014-001114/KaneoPilot.app`。安装前确认没有 claimed/queued 请求、没有执行 worker，按完整 App 路径正常退出；闲置的旧 stdio queue 服务亦已退出。新 App 安装后的 `diff -rq -x __pycache__ …/core/kanpilot core/kanpilot` 无输出，签名复核通过，新引擎 PID 79381 心跳正常。
 - 一次安装前校验发现前检导入生成的 `__pycache__` 破坏了构建包签名；该次没有替换旧 App。已移除构建包生成缓存、重新签名，真实验收使用 `PYTHONDONTWRITEBYTECODE=1` 与 `sys.dont_write_bytecode=True`，安装后再次签名核对通过。
 - 实机证据根：`build/validation/plus-asktool/live-20261014T001158-5e5b47f0/`。规划沿用 `step-5-preview/high`，178.13 秒结束为 `needs_input`，任务 `needs_user`；session `311e997a-213c-4436-b654-a7b564913f71`，turn `e1a84386-d7e2-4ab6-8df5-f2fba5e6fea4`，run `fdb33fec-6110-4336-9710-5830039a3142`。提示词含 auto 和禁令、不含 Ask，`attachment_count=1`。模型经标准库解码 PNG 核对左上红、右上绿、左下蓝、右下黄，哈希与 manifest 相符；这证明图片附件可用，不声称模型只凭原生视觉识别。
 - Review 沿用 `deepseek/deepseek-v4.1-flash/high`，92.32 秒结束为 `blocked`，任务 `needs_user/review_blocked`，报告已登记并列出必须用户决定的返回状态；session `d46495ea-97b9-460e-b127-85f0e7931b15`，turn `ede8fd89-f5ae-4e56-886f-7d9d720023fe`，run `b2f8d30d-ac13-4895-b08e-0aaeb396df3c`。完整 `transcript.json` 的 `complete=true`；按真实结构核对工具调用，规划使用 Read/Glob/Bash，Review 使用 Bash，两轮均没有 asktool。

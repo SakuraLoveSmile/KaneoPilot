@@ -2,7 +2,7 @@
 
 ## 当前交付
 
-代码位于managed worktree `/Users/sakurasep/.codex/worktrees/desktop-formal-queue/KaneoPilot`，分支codex/desktop-formal-queue。原工作区424文件hash仍与开始前基线一致，不提交/push。安装路径 `/Applications/KaneoPilot.app`，本机恢复备份位于 `/Users/sakurasep/Documents/Codex/2026-10-08/desktop-formal-queue/install-backup`（旧app、SQLite backup API一致副本）。签名及新核心包hash已核对。
+代码位于managed worktree `/Users/developer/.codex/worktrees/desktop-formal-queue/KaneoPilot`，分支codex/desktop-formal-queue。原工作区424文件hash仍与开始前基线一致，不提交/push。安装路径 `/Applications/KaneoPilot.app`，本机恢复备份位于 `/Users/developer/Documents/Codex/2026-10-08/desktop-formal-queue/install-backup`（旧app、SQLite backup API一致副本）。签名及新核心包hash已核对。
 
 六项MCP正式工具已实现。规划/Review请求使用codex_desktop明确归属，新Review冻结配置/执行轮次/计划hash，旧CLI过滤该队列；收据重放、租约保护、固定计划文件路径、Review结算checkpoint、未跟踪文件正文与binary身份保护已在隔离测试覆盖。独立review四项发现修复后复核通过。
 

@@ -1,6 +1,6 @@
 {
   "source_commit": "333564058124843ad188d45521bcbb1c1f7b6a53",
-  "app": "/Users/sakurasep/.codex/worktrees/execution-noop/KaneoPilot/dist/KaneoPilot.app",
+  "app": "/Users/developer/.codex/worktrees/execution-noop/KaneoPilot/dist/KaneoPilot.app",
   "mach_o_sha256": "c213802c08c1b8d721d59f7c2193b1ae9fd309d17931fe452cec7c537901782e",
   "files": {
     "kanpilot/pi_desktop_backend.py": "77cda7a72b721c2bce475e486eeefe0f20db3bb87161d738f8d89152c04f93a5",

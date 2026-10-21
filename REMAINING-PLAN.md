@@ -6,7 +6,7 @@
 
 ## 0. 当前状态基线（已核验事实）
 
-- 仓库：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`，远端 `https://github.com/SakuraLoveSmile/KaneoPilot.git`。
+- 仓库：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`，远端 `https://github.com/SakuraLoveSmile/KaneoPilot.git`。
 - 本地 main HEAD：`6749f97`；`origin/main`：`166ae24`；本地 **ahead 70 / behind 0**，尚未推送。
 - 原两个前置工作树（`~/.codex/worktrees/execution-ask-relay/KaneoPilot`、`~/.codex/worktrees/running-round-monitor-topup/KaneoPilot`）已被外部移除，仅各留一个 0 字节 `.codex-worktree-name` 标记；`codex/*` 本地与远端分支引用已全部清除。
 - 两前置分支的**已提交内容**已并入 main 历史（`0a739c7`、`11f0da2`、`13713b9`、`8affa8a`、`96ccfdd`、`ccb1a43`、`6749f97`），`0a739c7` 为 HEAD 祖先，可达。

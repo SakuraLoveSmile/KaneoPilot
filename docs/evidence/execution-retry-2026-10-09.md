@@ -29,6 +29,6 @@
 
 ## 安装版替换与实测（2026-10-09 14:52，Asia/Taipei）
 
-用户明确授权“替换安装版吧”。替换前完整备份旧版并比对全部文件 SHA-256；备份路径 /Users/sakurasep/Library/Application Support/KaneoPilot-install-backups/20261009-144946。候选包 Bundle ID 从隔离测试 ID 恢复为 local.kaneopilot，重新 ad-hoc 签名后严格验证；正常退出旧版，将旧目录移入备份并替换 /Applications/KaneoPilot.app。安装后再次验证签名及 cmd_queue/derive/core/cmd_dispatch/dispatch_validate/git_delivery 模块与源码哈希一致。
+用户明确授权“替换安装版吧”。替换前完整备份旧版并比对全部文件 SHA-256；备份路径 /Users/developer/Library/Application Support/KaneoPilot-install-backups/20261009-144946。候选包 Bundle ID 从隔离测试 ID 恢复为 local.kaneopilot，重新 ad-hoc 签名后严格验证；正常退出旧版，将旧目录移入备份并替换 /Applications/KaneoPilot.app。安装后再次验证签名及 cmd_queue/derive/core/cmd_dispatch/dispatch_validate/git_delivery 模块与源码哈希一致。
 
 主 agent 在真实安装版打开截图中的原 Music 失败任务并切到执行页，确认当前原 run_id=79e14e66-5e78-4317-b0e4-1d4838d7000a、NETWORK_ERROR 仍保留，状态区下方已显示“重新执行（沿用计划）”。概览也显示相同入口。未点击重试按钮，未提交 resolve；原有调度配置照常恢复，数据与偏好未迁移或清空。

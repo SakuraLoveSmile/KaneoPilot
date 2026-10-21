@@ -2,7 +2,7 @@
 
 # Desktop 正式队列与自动领取执行约定
 
-本次为实现请求，直接施工。工作目录 `/Users/sakurasep/.codex/worktrees/desktop-formal-queue/KaneoPilot`，分支 `codex/desktop-formal-queue`。已复制并按424文件哈希核对当前dirty基线，原工作区不写入。主agent维护本文件及冻结规格，实施者只在独占文件中写入，不继续派生。
+本次为实现请求，直接施工。工作目录 `/Users/developer/.codex/worktrees/desktop-formal-queue/KaneoPilot`，分支 `codex/desktop-formal-queue`。已复制并按424文件哈希核对当前dirty基线，原工作区不写入。主agent维护本文件及冻结规格，实施者只在独占文件中写入，不继续派生。
 
 ## 交付与核心规则
 

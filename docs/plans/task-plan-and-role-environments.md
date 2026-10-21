@@ -8,11 +8,11 @@
 
 ## 依据与范围（2026-09-25 原始规划记录，T3 最新事实见下文）
 
-- 工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`。2026-09-25 核查时，规划核心、`AppViewModel.swift`、`PlanningView.swift`、`SettingsView.swift` 和冻结规格均有未提交改动；实施前先核对这些改动，不能覆盖或把当前工作树当成已发布版本。现有 `docs/planner-fix-implementation.md` 处理的是当前规划器修复，本计划不改写它的 T1-T4 契约。
+- 工作目录：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`。2026-09-25 核查时，规划核心、`AppViewModel.swift`、`PlanningView.swift`、`SettingsView.swift` 和冻结规格均有未提交改动；实施前先核对这些改动，不能覆盖或把当前工作树当成已发布版本。现有 `docs/planner-fix-implementation.md` 处理的是当前规划器修复，本计划不改写它的 T1-T4 契约。
 - 用户截图是当前深色界面的参考：待办任务详情只显示计划文件元数据，没有正文；设置是一个按软件命名的长 `Form`。截图不提供新的操作规则。旧页沿用 `docs/ui-spec.md` 的原生工具台基线：1180×760/900×600、18/13/11pt、8/12/16pt、系统语义色、状态图标加文字、列表行至少 40pt。
 - 当前待办卡片经 `BoardView.openDetail` 打开 `TaskDetailSheet`；`TaskDetailView` 将计划、执行、Kaneo、Review、历史和阻塞排在一页。`PlanningView` 是“获取 To Do → 准备材料 → 开始规划”的工作流，不能充当已发布计划的阅读页。`get-task` 已返回 `plan_path`/`plan_sha256`，核心尚无计划正文读取命令。
 - 当前规划为 `start-plans → planner_runner → codex exec`，内置模式使用 `--ignore-user-config -s read-only --output-schema`，由核心写入 frontmatter 并 `publish-plan`；发布后 `plan_execution_hold=true`，仍须人工“确认并安排执行”。当前没有选择施工规划插件的字段。
-- 当前任务执行后端是 `pi -p --mode json`；`executor_runner` 的 dispatch/monitor/review 控制端也使用 pi，但其模型目前继承 PI 默认会话设置，不读取任务执行的 `exec_config`。PI-Desktop 工作目录为 `/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop`，已有**需启动时显式开启**的本机 MCP 控制面（`PI_DESKTOP_MCP_CONTROL=1`），提供会话创建、提示、状态、分页记录和停止；没有 SSE、外部幂等键或按 `turnId` 读取持久终态的 MCP 操作。它的 Rust host 已将终态存入 `turns` 表。依据为该仓库 `docs/adr/0203-local-mcp-control-plane.md`、`docs/spec/03-runtime/01-ipc-protocol.md` §13d、`apps/desktop/electron/main/mcp-control.ts` 和 `crates/host-core/src/sessions.rs`。这修正了“完全没有外部接口”的初步判断；本轮没有启动服务或调用模型。PI-Desktop 当前主工作树也有未提交改动，且本地 `main` 落后 `origin/main`；实施其必要补充时遵守该仓库 `AGENTS.md` 的独立 worktree 流程，并重新核对最新目标分支接口。
+- 当前任务执行后端是 `pi -p --mode json`；`executor_runner` 的 dispatch/monitor/review 控制端也使用 pi，但其模型目前继承 PI 默认会话设置，不读取任务执行的 `exec_config`。PI-Desktop 工作目录为 `/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop`，已有**需启动时显式开启**的本机 MCP 控制面（`PI_DESKTOP_MCP_CONTROL=1`），提供会话创建、提示、状态、分页记录和停止；没有 SSE、外部幂等键或按 `turnId` 读取持久终态的 MCP 操作。它的 Rust host 已将终态存入 `turns` 表。依据为该仓库 `docs/adr/0203-local-mcp-control-plane.md`、`docs/spec/03-runtime/01-ipc-protocol.md` §13d、`apps/desktop/electron/main/mcp-control.ts` 和 `crates/host-core/src/sessions.rs`。这修正了“完全没有外部接口”的初步判断；本轮没有启动服务或调用模型。PI-Desktop 当前主工作树也有未提交改动，且本地 `main` 落后 `origin/main`；实施其必要补充时遵守该仓库 `AGENTS.md` 的独立 worktree 流程，并重新核对最新目标分支接口。
 - [OpenAI Docs 的技能说明](https://developers.openai.com/codex/skills/)确认 Codex CLI 可通过 `$` 显式引用技能，[插件说明](https://developers.openai.com/codex/plugins/)确认 CLI 安装插件后需在新会话使用。本机 `codex-cli 0.157.0` 的 `codex plugin list --json --marketplace personal` 显示 `spec-planner@personal` 已安装且启用。**能规划不等于必须使用插件**：内置规划保留，施工规划作为用户明确选择的方式。
 
 ## 已定的体验与共享契约
@@ -42,9 +42,9 @@
 
 | 别名 | 实际路径与用途 |
 |---|---|
-| KP | `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`，当前未提交实现是保留与修复基线 |
-| PLUS | `/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/feat-goal-completion-report`，核查 HEAD `f3528adeb`，已含 Plus 品牌、独立数据目录和 Goal 报告功能 |
-| TURN | `/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/feat-mcp-turn-get`，HEAD `35d690374` 上有未提交 `pi_turn_get` 实现，仅作为只读移植参考 |
+| KP | `/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`，当前未提交实现是保留与修复基线 |
+| PLUS | `/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/feat-goal-completion-report`，核查 HEAD `f3528adeb`，已含 Plus 品牌、独立数据目录和 Goal 报告功能 |
+| TURN | `/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop-worktrees/feat-mcp-turn-get`，HEAD `35d690374` 上有未提交 `pi_turn_get` 实现，仅作为只读移植参考 |
 | PLUS_IMPL | 后续实施时从 PLUS 已核对基线建立或复用的独立工作树；不默认从原版 `origin/main` 开工 |
 
 2026-09-26 同一会话调查所得事实：
@@ -289,7 +289,7 @@ env PI_DESKTOP_MCP_CONTROL=1 "<PLUS_APP_ABS>/Contents/MacOS/Pi-Desktop-Plus"
 
 KP 必读：`AGENTS.md`；`docs/protocol.md` §5.22、§5.23.3–5.23.9；`docs/state-model.md`；`docs/ui-spec.md` §4.9；`docs/automation-contract.md`；本节。上文 T1–T5 只作为兼容依据，冲突时由主 agent 将本节的新增契约同步到冻结规格后再施工。
 
-本轮核查的 Plus 源码根为 `/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop`（以下称 PLUS_SOURCE）；不是上文旧的 feat worktree 假定路径。本轮仅阅读，未改 Plus。必要外部依据：
+本轮核查的 Plus 源码根为 `/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop`（以下称 PLUS_SOURCE）；不是上文旧的 feat worktree 假定路径。本轮仅阅读，未改 Plus。必要外部依据：
 
 - `apps/desktop/electron/main/mcp-control.ts:351`：session/create 支持 agent/plan/goal、provider/model/thinking。
 - 同文件 `:380`：pi_turn_get；`:415`：session/configure；`:432`：agent/prompt 支持 attachments，返回 accepted/turnId；`:473`：plans/pending、plans/resolve。
@@ -905,7 +905,7 @@ plus_ui 说明我早先看到的 7 passed / 2 failed 是**它编辑中途态**�
 | T7.6 App 生命周期 | MCPServiceManager 与手动启动/停止 UI 已存在 | 实现中；补持久启用、启动/退出、profile 隔离、就绪门 |
 | T7.7 核心收据与验收 | schema 已声明 5、runtime_operations 与迁移代码已存在；当前开库仍自动升级 | 实现中；补显式迁移门、原子收据、claim 身份及双向验收 |
 
-代码目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`。Plus 只读基线：`/Users/sakurasep/Documents/Code/Project/Fork Project/PI-Desktop`，main HEAD `a395c6067`，两项目均有未提交改动。不得覆盖、重置或机械按旧 HEAD 重建。正式安装包/实时服务/正式库状态未在本轮重查，前轮 active=false 只作为历史记录。
+代码目录：`/Users/developer/Documents/Code/Project/Personal Project/KaneoPilot`。Plus 只读基线：`/Users/developer/Documents/Code/Project/Fork Project/PI-Desktop`，main HEAD `a395c6067`，两项目均有未提交改动。不得覆盖、重置或机械按旧 HEAD 重建。正式安装包/实时服务/正式库状态未在本轮重查，前轮 active=false 只作为历史记录。
 
 ### 交付物
 

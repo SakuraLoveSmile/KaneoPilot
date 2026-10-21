@@ -17,7 +17,7 @@ manual 交付共享快照由同一冻结 HEAD、binary diff、tracked 原始字�
 
 ## 安装与当前任务
 
-安装位置：/Applications/KaneoPilot.app。旧版完整备份及 SHA256 清单：/Users/sakurasep/Library/Application Support/KaneoPilot-install-backups/review-snapshot-20261009-183214/。仅在无 claimed 请求时刷新 14 个空闲旧 desktop-queue-mcp 进程，使后续连接加载新模块；未改自动化调度配置。
+安装位置：/Applications/KaneoPilot.app。旧版完整备份及 SHA256 清单：/Users/developer/Library/Application Support/KaneoPilot-install-backups/review-snapshot-20261009-183214/。仅在无 claimed 请求时刷新 14 个空闲旧 desktop-queue-mcp 进程，使后续连接加载新模块；未改自动化调度配置。
 
 任务 ozb7d8vw1sbp653zs7u0jn2f，执行 run 6895a2b0-fd9d-4297-922d-f5d478caacec。通过安装版固定 resolve retry 命令重新排队 Review 请求 52e6e4dd-8720-4ae5-ba0c-84bc3bdeddeb。保留旧 blocked 请求、报告和材料；没有重写结论。
 

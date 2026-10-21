@@ -19,7 +19,7 @@
 
 - Plan：`01a11b11-8b73-7cd0-9d8d-53b9639cac9c`
 - Review：`01a11b12-7560-7d60-9506-6f526c8dd76e`
-- 完整返回：`/Users/sakurasep/Documents/Codex/2026-10-08/codex-desktop-control/outputs/kaneopilot-plan-evidence.json`、`kaneopilot-review-evidence.json`。
+- 完整返回：`/Users/developer/Documents/Codex/2026-10-08/codex-desktop-control/outputs/kaneopilot-plan-evidence.json`、`kaneopilot-review-evidence.json`。
 - 桌面读回元数据：同目录 `kaneopilot-desktop-read-evidence.json`。
 - 受影响 dirty 文件备份：同目录 `kaneopilot-baseline/`。
 - 最终 Release 编译日志：`/tmp/kaneopilot-codex-final-build.log`；独立验证版构建日志位于下面预览目录的 build.log。
@@ -48,4 +48,4 @@
 
 桌面停止联动测试未执行：CUA策略禁止控制com.openai.codex自身界面，当前提供的桌面MCP工具没有停止方法。没有换用其他界面控制技术绕过限制，没有向已完成聊天发送额外消息冒充停止，也没有终止Desktop或daemon。进程归属已由实际连接证据得出结论，无需额外长任务来掩盖这项限制。
 
-结构化证据：/Users/sakurasep/Documents/Codex/2026-10-08/codex-desktop-control/outputs/kaneopilot-ui-host-evidence.json。先前的锁屏阻塞已解除；折叠正文/深链目标界面及真正Desktop宿主接入仍未核验。
+结构化证据：/Users/developer/Documents/Codex/2026-10-08/codex-desktop-control/outputs/kaneopilot-ui-host-evidence.json。先前的锁屏阻塞已解除；折叠正文/深链目标界面及真正Desktop宿主接入仍未核验。

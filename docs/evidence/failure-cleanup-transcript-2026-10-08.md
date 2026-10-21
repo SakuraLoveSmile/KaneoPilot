@@ -23,7 +23,7 @@ KaneoPilot分页可降到1，超长单条按需完整分片，校验会话/分�
 
 ## 控制面部署过程
 
-Plus候选已构建验签：/tmp/plus-mcp-session-chunk-candidate-20261008/Pi-Desktop-Plus.app；源码独立worktree /Users/sakurasep/.codex/worktrees/mcp-session-chunks/PI-Desktop，无commit/push。
+Plus候选已构建验签：/tmp/plus-mcp-session-chunk-candidate-20261008/Pi-Desktop-Plus.app；源码独立worktree /Users/developer/.codex/worktrees/mcp-session-chunks/PI-Desktop，无commit/push。
 用户确认原任务完成后再次核验39个会话均无运行或待确认；已授权重启。首版候选漏带Vite主模块chunk导致启动失败，已回滚并实测原版可用；修正完整out/main候选后再次安装并实测启动成功，分片接口已可用。旧Review会话重启后session/get为null且列表无该ID，不能采用旧结果，尚不能确定历史会话丢失原因。真实现存794消息会话已成功分片重组一条580268-byte消息，继续发现非最小缩页恢复不足的客户端问题，随后已修复，最终完整读取验收见下节。
 
 备份：/tmp/kaneopilot-failure-cleanup-1791441649321671000（DB及安装前应用）；/tmp/kaneopilot-transcript-fix-baseline-1791441805032980000（转录核心基线）。
