@@ -18,7 +18,7 @@ KANPILOT_CORE="$TASK_ROOT/macos/FakeCore/kanpilot-fake.py" \
   KANPILOT_FAKE_STATE="$TASK_FIXTURE/simulation/state.json" \
   KANPILOT_FAKE_COMMAND_LOG="$TASK_FIXTURE/simulation/commands.jsonl" \
   "$TASK_FIXTURE/fixture" simulation
-for mode in ready failure loopback-host; do
+for mode in ready failure loopback-host delayed-ready startup-timeout; do
   mkdir -p "$TASK_FIXTURE/$mode"
   env -u KANPILOT_FAKE_STATE \
     KANPILOT_CORE="$TASK_ROOT/macos/tests/mobile_fixture_core.py" \
@@ -32,12 +32,13 @@ import json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 commands = [json.loads(line)['command'] for line in (root/'simulation/commands.jsonl').read_text().splitlines()]
 assert 'mobile-serve' not in commands, 'FakeCore must not start listener'
-pid = int((root/'ready/service-started').read_text())
-try:
-    os.kill(pid, 0)
-except ProcessLookupError:
-    pass
-else:
-    raise AssertionError('owned child survived manager stop')
+for mode in ('ready', 'loopback-host', 'delayed-ready', 'startup-timeout'):
+    pid = int((root/mode/'service-started').read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError(f'owned child survived manager stop: {mode}')
 print('FakeCore no-listener and owned-child shutdown: passed')
 PY

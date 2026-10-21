@@ -97,7 +97,7 @@ PY
 echo "== verify requested application architectures =="
 EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DST/Contents/Info.plist")
 for arch in $ARCHS; do
-    lipo -verify_arch "$arch" "$APP_DST/Contents/MacOS/$EXECUTABLE"
+    lipo "$APP_DST/Contents/MacOS/$EXECUTABLE" -verify_arch "$arch"
 done
 
 echo "== verify requested application version =="
