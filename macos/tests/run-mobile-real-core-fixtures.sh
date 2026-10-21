@@ -12,7 +12,7 @@ swiftc -target "${TASK_ARCH}-apple-macos14" -g -Onone \
   "$TASK_ROOT/macos/KaneoPilot/Core/MobileModels.swift" "$TASK_ROOT/macos/KaneoPilot/Core/MobileServiceManager.swift" \
   "$TASK_ROOT/macos/tests/mobile_service_main.swift" -o "$TASK_FIXTURE/fixture"
 python3 - "$TASK_ROOT" "$TASK_FIXTURE" <<'PY'
-import os, pathlib, socket, subprocess, sys
+import os, pathlib, shutil, socket, subprocess, sys
 repo, root = map(pathlib.Path, sys.argv[1:])
 sys.path.insert(0, str(repo / 'core'))
 from kanpilot import db
@@ -29,6 +29,12 @@ for key, directory in [('KANPILOT_APP_SUPPORT', 'support'), ('KANPILOT_LEGACY_RO
                        ('KANPILOT_REPORTS_ROOT', 'reports')]:
     env[key] = str(root / directory)
 env.pop('KANPILOT_FAKE_STATE', None)
+# CoreClient deliberately prepares a desktop PATH; report that selected runtime
+# separately from the interpreter used to initialize this isolated database.
+desktop_path = str(pathlib.Path.home()/'.npm-global/bin') + ':/usr/local/bin:/opt/homebrew/bin:' + env.get('PATH', '/usr/bin:/bin')
+print('mobile fixture bootstrap Python:', sys.executable, flush=True)
+print('mobile fixture desktop Python:', shutil.which('python3', path=desktop_path), flush=True)
+print('mobile fixture bind host: 127.0.0.1', flush=True)
 subprocess.run([str(root/'fixture'), 'real-core'], env=env, check=True)
 print('isolated real-core loopback HTTPS, probe deadline, pairing and shutdown: passed')
 PY

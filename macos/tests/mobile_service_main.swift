@@ -14,7 +14,12 @@ struct MobileServiceFixtures {
         let manager = MobileServiceManager(client: client, localNetworkContextEnabled: mode == "real-core")
         await manager.refresh()
         precondition(manager.configuration?.enabled == false && !manager.running)
-        let host = manager.configuration!.addresses[0].address
+        // Core address order also includes LAN/VPN interfaces. This fixture
+        // promises loopback-only traffic, independently of runner interfaces.
+        let loopbackOnly = mode == "real-core" || mode == "loopback-host"
+        let host = loopbackOnly ? "127.0.0.1" : manager.configuration!.addresses[0].address
+        precondition(manager.configuration!.addresses.contains { $0.address == host },
+                     "fixture address unavailable: \(host)")
         let port = Int(ProcessInfo.processInfo.environment["KANPILOT_MOBILE_TEST_PORT"] ?? "47831")!
         await manager.configure(enabled: true, host: host, port: port)
         if mode == "simulation" {
@@ -33,8 +38,9 @@ struct MobileServiceFixtures {
         } else {
             precondition(!manager.running, "enabled must not be treated as ready")
             for _ in 0..<40 where manager.starting { try? await Task.sleep(for: .milliseconds(100)) }
-            if mode == "ready" || mode == "real-core" {
-                precondition(manager.running && !manager.starting && !manager.isSimulation)
+            if mode == "ready" || loopbackOnly {
+                precondition(manager.running && !manager.starting && !manager.isSimulation,
+                             startupDiagnostic(manager, mode: mode))
                 if mode == "real-core" {
                     // Pass the probe deadline: ready cleanup must not be repeated.
                     try? await Task.sleep(for: .seconds(7))
@@ -54,5 +60,12 @@ struct MobileServiceFixtures {
         }
         precondition(foreign.isRunning, "manager must preserve foreign processes")
         print("mobile manager \(mode): passed")
+    }
+
+    @MainActor
+    private static func startupDiagnostic(_ manager: MobileServiceManager, mode: String) -> String {
+        "mobile service startup failed: mode=\(mode), enabled=\(manager.configuration?.enabled.description ?? "nil"), "
+            + "running=\(manager.running), starting=\(manager.starting), simulation=\(manager.isSimulation), "
+            + "endpoint=\(manager.configuration?.endpoint ?? "nil"), error=\(manager.error ?? "nil")"
     }
 }

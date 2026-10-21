@@ -115,7 +115,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager" || { echo "Android command-line tools are missing at $sdkmanager" >&2; exit 1; }
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" 'platforms;android-36' 'build-tools;36.0.0'
       - name: Android unit and lint checks
         working-directory: android
         env:
@@ -260,7 +262,9 @@ jobs:
           bash scripts/build_dmg.sh 2>&1 | tee "$RUNNER_TEMP/macos-reports/dmg-build.log"
           app="$APP_OUTPUT_DIR/KaneoPilot.app"
           codesign --verify --deep --strict "$app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/KaneoPilot"
+          for arch in arm64 x86_64; do
+            lipo "$app/Contents/MacOS/KaneoPilot" -verify_arch "$arch"
+          done
           codesign -d --verbose=4 "$APP_OUTPUT_DIR/$DMG_NAME" 2> "$RUNNER_TEMP/mac-signature.txt"
           fingerprint=$(sed -n 's/^CandidateCDHashFull sha256=//p' "$RUNNER_TEMP/mac-signature.txt" | head -1)
           mkdir -p "$RUNNER_TEMP/macos-package"
