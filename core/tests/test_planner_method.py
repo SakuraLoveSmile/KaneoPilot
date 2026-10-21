@@ -368,38 +368,20 @@ class TestClaimTimePluginGate(_MethodCase):
     """领取时 spec_plan 复检（§5.23.2）：插件缺失 → report failed，不降级。"""
 
     def _queue_spec_plan(self, task_id):
-        """手工建一条已授权 spec_plan 请求（不经 start-plans 探测）。"""
-        info = self.make_planner_input(
-            task_id,
-            manifest_extra={
-                "task": {"task_id": task_id, "project_name": "Feedback"},
-            },
-        )
-        payload = {
-            "manual_authorized": True,
-            "input_id": info["input_id"],
-            "planner_input_sha256": info["input_sha256"],
-            "manifest": info["manifest"],
-            "model_config": {"planner_model": "gpt-6-astra",
-                             "reasoning_effort": "medium"},
-            "confirmed_at": util.now_iso(),
-            "planner_method": "spec_plan",
-            "plugin_id": codex_planner.SPEC_PLUGIN_ID,
-            "plugin_version": FAKE_PLUGIN_VERSION,
-        }
+        """插件仍可用时正常准备并授权，领取前再模拟卸载。"""
+        self._use_installed_plugin()
+        info = self.call("prepare-plan-input", {"task_id": task_id})
+        self.assertTrue(info["can_start"])
+        result = self._start_plans(info, method="spec_plan")["results"][0]
+        self.assertIn("request_id", result)
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
                 db.set_setting(conn, "session_runs_root",
                                str(self.app_support / "runs"))
-                request, _ = db.create_request(
-                    conn, util.now_iso(), "plan", f"plan:{task_id}",
-                    task_id=task_id, payload=payload, requested_by="user",
-                )
-                request_id = request["request_id"]
         finally:
             conn.close()
-        return request_id
+        return result["request_id"]
 
     def test_plugin_removed_at_claim_fails(self):
         os.environ.pop("KANPILOT_CODEX_FAKE", None)
@@ -430,6 +412,9 @@ class TestClaimTimePluginGate(_MethodCase):
         self.assertEqual(job["planner_method"], "spec_plan")
         self.assertEqual(job["plugin_version"], FAKE_PLUGIN_VERSION)
         self.assertIn("plugin_unavailable", job["detail"])
+        events, error = dsh_events.iter_events(run_dir / dsh_events.EVENT_LOG_NAME)
+        self.assertIsNone(error)
+        self.assertEqual(dsh_events.terminal_event(events)["reason"], "plugin_unavailable")
         # 没有拉过 codex exec：无 ready 计划文件、材料保留。
         self.assertFalse((run_dir / "last-message.txt").exists())
 

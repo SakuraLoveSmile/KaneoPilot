@@ -62,6 +62,7 @@ _COVERED_BY_AUTO_PIPELINE = (
     'test_full_feedback_two_rounds_to_pr_merge',
     'test_missing_verification_user_accepts_then_review',
     'test_fix_round_limit_and_manual_takeover',
+    'test_review_failure_manual_takeover_preserves_branch',
     'test_closed_pr_enters_pending_without_completing_kaneo',
 )
 
@@ -337,6 +338,9 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
         self.skipTest(_COVERED_NOTE)
 
     def test_fix_round_limit_and_manual_takeover(self):
+        self.skipTest(_COVERED_NOTE)
+
+    def test_review_failure_manual_takeover_preserves_branch(self):
         self.skipTest(_COVERED_NOTE)
 
     def test_closed_pr_enters_pending_without_completing_kaneo(self):

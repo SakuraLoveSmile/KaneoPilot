@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'core' / 'tests'))
 from test_pi_desktop_backend import PiDesktopCase, TURN_ID
 from test_git_delivery import make_repo, git
-from kanpilot import (auto_dispatch, auto_intake, auto_monitor, automation_policy, cli_review, core,
+from kanpilot import (auto_dispatch, auto_intake, auto_monitor, automation_policy, cli_review, constants, core,
                       db, delivery_runner, git_delivery, planner_runner, util)
 
 TASK = 'pipelinefeedback000000001'
@@ -118,11 +118,12 @@ class TestAutoPipeline(PiDesktopCase):
         claude.write_text('#!' + sys.executable + '\nimport json,sys,pathlib\n'
             'if "--version" in sys.argv: print("fake-claude 1"); sys.exit(0)\n'
             'prompt=sys.stdin.read()\nschema=json.loads(sys.argv[sys.argv.index("--json-schema")+1])\n'
+            'print(json.dumps({"type":"system","subtype":"init","tools":["Read","Grep","Glob"],"session_id":"fake-claude"}),flush=True)\n'
             'if "conclusion" in schema["properties"]:\n'
+            ' if pathlib.Path(' + repr(str(self.root / 'fail-review')) + ').exists(): sys.stderr.write("isolated Review process failure\\n"); sys.exit(1)\n'
             ' p=pathlib.Path(' + repr(str(review_count)) + '); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))\n'
             ' result={"conclusion":"changes_requested" if n==1 else "pass","report_markdown":"# Review\\nRepair requested issue" if n==1 else "# Review\\nAll checks passed","fix":{"title":"Fix feedback","description":"Please append a second verified round","priority":"high"} if n==1 else None}\n'
             'else: result={"status":"ready","plan_markdown":' + repr(plan) + ',"questions":[],"evidence":[]}\n'
-            'print(json.dumps({"type":"system","subtype":"init","tools":["Read","Grep","Glob"],"session_id":"fake-claude"}),flush=True)\n'
             'print(json.dumps({"type":"result","subtype":"success","is_error":False,"structured_output":result,"total_cost_usd":0.1}),flush=True)\n')
         claude.chmod(0o755)
         gh = self.root / 'fake-gh'
@@ -161,18 +162,75 @@ class TestAutoPipeline(PiDesktopCase):
         self.call('set-project-automation', {'project_id':PROJECT,'automation':{'enabled':True}})
         self.round = 0
         self.omit_exit = False
+        self.round_contents = {}
+        self.completed_turns = {}
+        # This actor implements the current Plus command-binding/report
+        # contract; the shared backend unit fixture deliberately defaults to
+        # an older host so its compatibility tests remain meaningful.
+        self.server.required_verification_commands = True
+        self.server.tools.extend(name for name in constants.PI_DESKTOP_GOAL_REPORT_TOOLS
+                                 if name not in self.server.tools)
         original = self.server.tool_call
         def plus(name,args):
+            identity = (args.get('sessionId'), args.get('turnId'))
+            if name == 'pi_agent_status' and args.get('sessionId') != self.server.session_id:
+                previous = [turn for session, turn in self.completed_turns
+                            if session == args.get('sessionId')]
+                if previous:
+                    return {'structuredContent': {'status': {'sessionId':args['sessionId'],
+                        'currentTurnId':previous[-1], 'isRunning':False,
+                        'planningState':'inactive', 'pendingToolConfirmations':[]}}}
+            if name == 'pi_turn_get' and identity in self.completed_turns:
+                return {'structuredContent': {'sessionId':identity[0], 'turnId':identity[1],
+                                              'status':self.completed_turns[identity]}}
             response = original(name,args)
             if name == 'pi_plans_resolve' and args.get('action')=='approve':
-                worktree = Path(self.server.created['projectPath'])
-                (worktree / 'feedback.txt').write_text('round ' + str(self.round) + '\n')
-                result = subprocess.run([sys.executable,'-m','unittest','discover','-s','tests'],cwd=worktree,capture_output=True,text=True)
-                self.server.messages = [{'id':'verify-'+str(self.round),'role':'toolResult','toolName':'exec',
-                    'toolArgs':{'command':VERIFY},'toolResult':{'output':result.stdout+result.stderr,'exit_code':None if self.omit_exit else result.returncode},
-                    'exitCode':None if self.omit_exit else result.returncode,'turnId':self.server.execution_turn}]
+                execution_id = 'exec-' + str(self.round)
+                response['structuredContent']['execution']['id'] = execution_id
+                self._plus_execute_approved_goal(args, execution_id)
             return response
         self.server.tool_call = plus
+
+    def _plus_execute_approved_goal(self, approval, execution_id):
+        """The fake Plus actor owns writes and exact frozen verify execution."""
+        commands = approval.get('requiredVerificationCommands')
+        self.assertEqual(commands, [VERIFY], approval)
+        self.assertEqual(approval.get('proposalId'), 'goal-' + str(self.round), approval)
+        worktree = Path(self.server.created['projectPath'])
+        content = self.round_contents.get(self.round, 'round ' + str(self.round))
+        if content is not None:
+            (worktree / 'feedback.txt').write_text(content + '\n', encoding='utf-8')
+        messages, checks = [], []
+        for index, command in enumerate(commands, 1):
+            result = subprocess.run(command, shell=True, executable='/bin/sh', cwd=worktree,
+                                    capture_output=True, text=True, timeout=120)
+            code = None if self.omit_exit else result.returncode
+            output = result.stdout + result.stderr
+            messages.append({'id':'verify-%s-%s' % (self.round, index), 'role':'toolResult',
+                'toolName':'exec', 'toolArgs':{'command':command, 'cwd':str(worktree)},
+                'toolResult':{'output':output, 'exit_code':code}, 'exitCode':code,
+                'turnId':self.server.execution_turn})
+            checks.append({'id':'C' + str(index), 'command':command, 'exitCode':code,
+                'result':None if code is None else ('passed' if code == 0 else 'failed'),
+                'detail':output})
+        # Generated artifacts exercise delivery filtering without changing
+        # source identity, independent of PYTHONDONTWRITEBYTECODE.
+        cache = worktree / 'tests' / '__pycache__'
+        cache.mkdir(exist_ok=True)
+        (cache / 'fixture.pyc').write_bytes(b'rehearsal-build-artifact')
+        body = {'sessionId':self.server.session_id, 'proposalId':approval['proposalId'],
+            'executionId':execution_id, 'turnId':self.server.execution_turn,
+            'reportId':'report-' + execution_id, 'integrity':{'kind':'structured', 'issues':[]},
+            'execution':{'status':'completed'},
+            'verdict':'met' if all(row['exitCode'] == 0 for row in checks) else 'partial',
+            'checks':checks}
+        self.server.messages = messages
+        self.server.goal_reports = [{key:body[key] for key in
+                                     ('reportId', 'executionId', 'proposalId', 'turnId', 'sessionId')}]
+        self.server.goal_report = {'state':'ready', 'report':body,
+                                  'report_sha256':util.sha256_bytes(util.jdump(body).encode())}
+        self.server.is_running = False
+        self.completed_turns[(self.server.session_id, self.server.execution_turn)] = self.server.turn_status
 
     def _stop_workers(self):
         for process in self.worker_processes:
@@ -180,12 +238,12 @@ class TestAutoPipeline(PiDesktopCase):
                 process.kill()
             process.wait(timeout=5)
 
-    def _stage(self, module, stage):
+    def _stage(self, module, stage, *, expected_exit=0):
         conn = db.connect(self.db_path)
         try:
             rc = module.run_stage(stage,conn=conn,db_path=self.db_path,timeout=180,
                 log_path=self.root / (stage + '-' + str(self.round) + '.log'),record_run=lambda **fields:None)
-            self.assertEqual(rc,0)
+            self.assertEqual(rc,expected_exit)
         finally: conn.close()
 
     def _adopt_and_plan(self):
@@ -208,6 +266,7 @@ class TestAutoPipeline(PiDesktopCase):
         self.server.turn_status='error' if should_fail else 'completed'
         self.server.execution_turn='pipeline-execution-'+str(self.round)
         self.server.current_turn=None
+        self.server.is_running=True
         self.server.messages=[]
         self.server.planning_state='awaiting_approval'
         self.server.plans=[{'id':'goal-'+str(self.round),'sessionId':self.server.session_id,'turnId':TURN_ID,
@@ -251,8 +310,26 @@ class TestAutoPipeline(PiDesktopCase):
         return _wait_for(tick_and_read, _monitor_settled(expect),
                          deadline=time.monotonic()+15)
 
-    def _review(self):
-        self._stage(cli_review,'review')
+    def _review(self, *, should_fail=False):
+        self._stage(cli_review,'review',expected_exit=1 if should_fail else 0)
+
+    def _assert_review_repair_held_at_limit(self):
+        value = self.task(TASK)
+        self.assertEqual(value['status'], 'in_review', value)
+        repair = value['review_repair']
+        self.assertEqual(repair['state'], 'held', value)
+        self.assertFalse(repair['can_start'], repair)
+        self.assertIn('修复次数已用尽', repair['reason'])
+        self.assertEqual(repair['round'], repair['max_rounds'])
+        before = self.call('list-requests', {})['requests']
+        error = self.call_err('start-review-repair', {'task_id':TASK,
+            'expected_execution_run_id':value['run_id'], 'expected_review_key':repair['review_key'],
+            'expected_report_sha256':repair['report_sha256'], 'expected_plan_sha256':repair['plan_sha256']})
+        self.assertIn('修复次数已用尽', error.message)
+        self.call_err('resolve', {'task_id':TASK, 'action':'resume'})
+        self.assertEqual(before, self.call('list-requests', {})['requests'])
+        self.assertIsNone(self.task(TASK)['active_request'])
+        return value
 
     def test_failed_execution_replan_preserves_partial_work(self):
         self._adopt_and_plan();self._execute(should_fail=True)
@@ -277,12 +354,17 @@ class TestAutoPipeline(PiDesktopCase):
     def test_full_feedback_two_rounds_to_pr_merge(self):
         self._adopt_and_plan();first=self._execute();self._monitor()
         self.assertEqual(self.task(TASK)['status'],'in_review',self.task(TASK))
+        plan_identity = (self.task(TASK)['plan_path'], self.task(TASK)['plan_sha256'])
         self._review()
-        self.assertEqual(self.task(TASK)['status'],'needs_plan',self.task(TASK))
+        self.assertEqual(self.task(TASK)['status'],'ready',self.task(TASK))
+        self.assertEqual(self.task(TASK)['review_repair']['state'],'queued')
         self.assertEqual(self.task(TASK)['automation']['fix_round'],1)
-        self._adopt_and_plan();second=self._execute();self._monitor();self._review()
+        second=self._execute();self._monitor();self._review()
         value=self.task(TASK)
         self.assertEqual(value['status'],'in_review',value)
+        self.assertEqual((value['plan_path'], value['plan_sha256']), plan_identity)
+        self.assertEqual(sum(a['stage'] == 'plan' for a in value['attempts']), 1)
+        self.assertNotEqual(first, second)
         self.assertEqual([c['execution_run_id'] for c in value['delivery']['commits']],[first,second])
         self.call('tick');self._stage(delivery_runner,'delivery')
         value=self.task(TASK)
@@ -315,10 +397,15 @@ class TestAutoPipeline(PiDesktopCase):
     def test_fix_round_limit_and_manual_takeover(self):
         self.call('set-project-automation',{'project_id':PROJECT,'automation':{'enabled':True,'max_fix_rounds':0}})
         self._adopt_and_plan();self._execute();self._monitor();self._review()
-        value=self.task(TASK)
-        self.assertEqual(value['failure_code'],'fix_rounds_exhausted',value)
-        self.assertIn('resume',value['allowed_actions'])
-        self.assertEqual(value['extra']['fix_request']['state'],'held')
+        value=self._assert_review_repair_held_at_limit()
+        self.assertEqual(self.server.prompt_count, 1)
+        self.assertTrue(Path(value['delivery']['worktree_path']).exists())
+
+    def test_review_failure_manual_takeover_preserves_branch(self):
+        self._adopt_and_plan();self._execute();self._monitor()
+        (self.root / 'fail-review').touch()
+        self._review(should_fail=True)
+        self.assertEqual(self.task(TASK)['status'], 'needs_user', self.task(TASK))
         self.call('resolve',{'task_id':TASK,'action':'dismiss'})
         value=self.task(TASK)
         self.assertTrue(value['automation']['manual_takeover'])

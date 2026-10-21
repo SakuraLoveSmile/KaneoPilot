@@ -152,10 +152,18 @@ class _RunnerCase(KanpilotTestCase):
         return task, source_sha, req_sha
 
     def _queue(self, task, source_sha, req_sha):
-        return self.queue_plan(
-            task["id"], source_sha256=source_sha,
-            requirements_sha256=req_sha,
-        )
+        prepared = self.call("prepare-plan-input", {
+            "task_id": task["id"],
+            "expected_requirements_sha256": req_sha,
+        })
+        self.assertTrue(prepared["can_start"])
+        self.assertEqual(prepared["source_sha256"], source_sha)
+        result = self.call("start-plans", {"items": [{
+            "input_id": prepared["input_id"],
+            "input_sha256": prepared["input_sha256"],
+        }]})["results"][0]
+        self.assertIn("request_id", result)
+        return result["request_id"], prepared["input_sha256"]
 
     def _use_codex_stub(self, name, lines=None, raw_lines=None,
                         exit_code=1, sleep_seconds=0):
@@ -311,7 +319,7 @@ class TestRunnerFailureClassification(_RunnerCase):
         self.assertEqual(self._terminal_reason(events), "timeout")
         job = json.loads((run_dir / dsh_events.JOB_NAME).read_text())
         self.assertEqual(job["status"], "failed")
-        self.assertIn("timeout", job["detail"])
+        self.assertEqual(job["detail"], "timeout after 1s")
 
     def test_secrets_redacted_in_logs(self):
         """凭据形态文本进入 events.jsonl/codex.jsonl 前经 util.redact。"""

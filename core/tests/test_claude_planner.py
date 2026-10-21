@@ -281,7 +281,12 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         fixture = self.plus_request()
         task_id, repo = fixture["task_id"], fixture["repo"]
         sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-        branch = self.worktrees_root / task_id / "branch"
+        with db.connect(self.db_path) as conn:
+            registered = db.task_extra(db.require_task(conn, task_id))['delivery']
+        # Reuse the core's canonical registration. Rebuilding this path from
+        # tempfile's /var alias breaks frozen material paths on macOS, where
+        # the registered worktree is under /private/var.
+        branch = Path(registered['worktree_path'])
         self.assertTrue(branch.is_dir())  # Reuse core's existing branch for legacy takeover fixture.
         # Manual work may include both a newer commit and uncommitted files.
         (branch / "manual.txt").write_text("manual checkpoint")
@@ -295,7 +300,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
             with db.write_txn(conn):
                 task = db.require_task(conn, task_id)
                 db.set_extra(conn, task, util.now_iso(), automation={"manual_takeover": takeover},
-                    delivery={"mode": "manual", "branch": "kaneo/" + task_id,
+                    delivery={"mode": "manual", "branch": registered['branch'],
                               "worktree_path": str(branch), "head_sha": sha})
                 request = db.get_request(conn, fixture["request_id"])
                 payload = db.request_payload(request)

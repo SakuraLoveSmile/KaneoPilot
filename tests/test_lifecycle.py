@@ -163,7 +163,8 @@ class TestHappyPath:
                        "outcome": "succeeded"})
         t = factory.get_task(tid)
         assert t["status"] == "done"
-        assert t["display_status"] == "已归档"
+        assert t["display_status"] == "已完成"
+        assert t["save_state"] == "active"
 
         # 9) 事件链覆盖关键 kind（state-model §4 枚举）
         kinds = _kinds(cli, tid)

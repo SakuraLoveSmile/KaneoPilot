@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -38,7 +37,7 @@ import test_auto_pipeline as _pipeline  # noqa: E402
 TASK = _pipeline.TASK  # noqa: E402
 PROJECT = _pipeline.PROJECT  # noqa: E402
 VERIFY = _pipeline.VERIFY  # noqa: E402
-from kanpilot import constants, core, db, util  # noqa: E402
+from kanpilot import core, db, util  # noqa: E402
 from kanpilot.engine import decide, ladder  # noqa: E402
 
 
@@ -47,7 +46,6 @@ def pipeline():
     """v5 全链演练夹具（手动生命周期；不依赖 unittest 运行器）。"""
     case = _pipeline.TestAutoPipeline()
     case.setUp()
-    _expose_goal_report_tools(case)
     try:
         yield case
     finally:
@@ -61,85 +59,9 @@ def _script_rounds(case, contents):
     ``contents``：{轮次: 内容}；``None`` = 不写入（空 diff）；未列出的轮次
     写默认 ``round N``。verify 命令真实在工作树执行，退出码记入消息。
     """
-    original = case.server.tool_call
-    completed_turns = set()
-
-    def plus(name, args):
-        identity = (args.get("sessionId"), args.get("turnId"))
-        if (name == "pi_turn_get" and identity in completed_turns
-                and identity[0] != case.server.session_id):
-            return {"structuredContent": {
-                "sessionId": identity[0], "turnId": identity[1], "status": "completed"}}
-        response = original(name, args)
-        if name == "pi_plans_resolve" and args.get("action") == "approve":
-            worktree = Path(case.server.created["projectPath"])
-            content = contents.get(case.round, "round %d" % case.round)
-            if content is None:
-                # 空 diff 轮：原钩子已写入 feedback.txt 并跑过 verify——删掉
-                # 写入与 __pycache__ 让工作树真正零改动；记录干净完成。
-                (worktree / "feedback.txt").unlink(missing_ok=True)
-                for cache in worktree.rglob("__pycache__"):
-                    shutil.rmtree(cache, ignore_errors=True)
-                exit_code, output = 0, "no changes written (empty-diff round)"
-            else:
-                (worktree / "feedback.txt").write_text(content + "\n",
-                                                       encoding="utf-8")
-                result = subprocess.run(
-                    [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-                    cwd=worktree, capture_output=True, text=True, timeout=120)
-                exit_code, output = result.returncode, result.stdout + result.stderr
-            # Explicit fixture artifact, independent of the interpreter's
-            # PYTHONDONTWRITEBYTECODE setting. Empty-diff rounds remain clean.
-            if content is not None:
-                cache = worktree / "tests" / "__pycache__"
-                cache.mkdir(exist_ok=True)
-                (cache / "fixture.pyc").write_bytes(b"rehearsal-build-artifact")
-            case.server.messages = [{
-                "id": "verify-" + str(case.round), "role": "toolResult",
-                "toolName": "exec", "toolArgs": {"command": VERIFY},
-                "toolResult": {"output": output, "exit_code": None if case.omit_exit else exit_code},
-                "exitCode": None if case.omit_exit else exit_code,
-                "turnId": case.server.execution_turn,
-            }]
-            _publish_goal_report(case, exit_code, output)
-            # Scripted work is finished; expose the matching idle Plus state,
-            # rather than the base fake's permanently running default.
-            case.server.is_running = False
-            completed_turns.add((case.server.session_id, case.server.execution_turn))
-        return response
-
-    case.server.tool_call = plus
-
-
-def _expose_goal_report_tools(case):
-    """fake Plus 暴露只读 Goal 报告工具（真实 Plus 的形状；与 test_goal_report_contract 同口径）。"""
-    for name in constants.PI_DESKTOP_GOAL_REPORT_TOOLS:
-        if name not in case.server.tools:
-            case.server.tools.append(name)
-    case.server.httpd.tools = case.server.tools
-
-
-def _publish_goal_report(case, exit_code, output):
-    """Plus 的 Goal 报告（结构化、已完成、met）：冻结 verify 命令的检查项与本轮工具结果一致。
-
-    报告经 ``pi_goal_report_list`` / ``pi_goal_report_get`` 被 Pilot 读取；列表行与
-    取回的报告体在本轮内固定（同一 sha 每次读取相同，收据重核对才稳定）。
-    """
-    execution_id = "exec-" + str(case.round)
-    code = None if case.omit_exit else exit_code
-    body = {"sessionId": case.server.session_id, "proposalId": "goal-" + str(case.round),
-            "executionId": execution_id, "turnId": case.server.execution_turn,
-            "reportId": "report-" + execution_id,
-            "integrity": {"kind": "structured", "issues": []},
-            "execution": {"status": "completed"}, "verdict": "met",
-            "checks": [{"id": "C1", "command": VERIFY, "exitCode": code,
-                        "result": None if code is None else ("passed" if code == 0 else "failed"),
-                        "detail": output}]}
-    case.server.goal_reports = [{"reportId": body["reportId"], "executionId": execution_id,
-                                 "proposalId": body["proposalId"], "turnId": body["turnId"],
-                                 "sessionId": body["sessionId"]}]
-    case.server.goal_report = {"state": "ready", "report": body,
-                               "report_sha256": util.sha256_bytes(util.jdump(body).encode())}
+    # The shared fake Plus actor executes each approved frozen command once,
+    # publishes its honest Goal report and preserves every native turn identity.
+    case.round_contents = dict(contents)
 
 
 def _force_sync_due(case):
@@ -405,10 +327,11 @@ def test_scenario_review_two_changes_requested_then_pass(pipeline):
 
     pipeline._review()                                  # 第 1 轮：要求修改
     value = pipeline.task(TASK)
-    assert value["status"] == "needs_plan", value
+    assert value["status"] == "ready", value
+    assert value["review_repair"]["state"] == "queued", value
     assert value["automation"]["fix_round"] == 1, value["automation"]
+    plan_identity = (value["plan_path"], value["plan_sha256"])
 
-    pipeline._adopt_and_plan()
     second = pipeline._execute()
     assert second != first
     pipeline._monitor()
@@ -417,6 +340,8 @@ def test_scenario_review_two_changes_requested_then_pass(pipeline):
     assert value["status"] == "in_review", value
     # fix_round 只在 changes_requested 登记时递增；pass 不递增
     assert value["automation"]["fix_round"] == 1, value["automation"]
+    assert (value["plan_path"], value["plan_sha256"]) == plan_identity
+    assert sum(a["stage"] == "plan" for a in value["attempts"]) == 1
     commits = value["delivery"]["commits"]
     assert [c["execution_run_id"] for c in commits] == [first, second], commits
     _assert_commit_excludes_build_artifacts(pipeline, value)
@@ -451,8 +376,10 @@ def test_scenario_review_fix_rounds_exhausted_needs_you(pipeline):
         pipeline._review()
         value = pipeline.task(TASK)
         assert value["automation"]["fix_round"] == expected_round, value["automation"]
-        # changes_requested 已开同任务修复请求（needs_plan），直接再规划
-        pipeline._adopt_and_plan()
+        # Current Review repair reuses the frozen plan and queues a distinct
+        # execution; it must not create a replacement planning request.
+        assert value["status"] == "ready", value
+        assert value["review_repair"]["state"] == "queued", value
 
     # 第三轮执行后再次送审：fix_round 已达上限 → fix_rounds_exhausted
     rounds.append(pipeline._execute())
@@ -460,18 +387,14 @@ def test_scenario_review_fix_rounds_exhausted_needs_you(pipeline):
     _always_changes_requested(pipeline)
     pipeline._review()
     value = pipeline.task(TASK)
-    assert value["status"] == "needs_user", value
-    assert value["failure_code"] == "fix_rounds_exhausted", value
+    pipeline._assert_review_repair_held_at_limit()
     assert value["automation"]["fix_round"] == ladder.MAX_FIX_ROUNDS, value["automation"]
     assert len(rounds) == 3 and len(set(rounds)) == 3, rounds
     assert pipeline.server.prompt_count == 3, pipeline.server.prompt_count
 
-    # 收件箱单一来源 + 允许的动作（不越界自动修复）
-    items = pipeline.call("attention-list", {})["items"]
-    mine = [i for i in items if i["task_id"] == TASK]
-    assert len(mine) == 1, items
-    actions = set(mine[0]["allowed_actions"])
-    assert {"replan", "review_recovery", "dismiss"} & actions, actions
+    assert sum(a["stage"] == "plan" for a in value["attempts"]) == 1
+    _reconcile(pipeline)
+    assert pipeline.server.prompt_count == 3
     assert not pipeline.task(TASK)["delivery"].get("pr_number")
 
 
@@ -487,10 +410,14 @@ def test_scenario_take_over_then_resume_auto_delivers(pipeline):
     pipeline._adopt_and_plan()
     pipeline._execute()
     pipeline._monitor()
-    _always_changes_requested(pipeline)
-    pipeline._review()
+    # A failed isolated Review process reaches the real needs_user takeover
+    # entry. Exhausted direct-repair material now remains held in in_review.
+    (pipeline.root / "fail-review").touch()
+    pipeline._review(should_fail=True)
+    (pipeline.root / "fail-review").unlink()
     value = pipeline.task(TASK)
-    assert value["failure_code"] == "fix_rounds_exhausted", value
+    assert value["status"] == "needs_user", value
+    assert value["failure_code"] == "review_blocked", value
 
     # take_over：resolve dismiss → 人工接管（manual_takeover + 手动交付模式）
     pipeline.call("resolve", {"task_id": TASK, "action": "dismiss"})

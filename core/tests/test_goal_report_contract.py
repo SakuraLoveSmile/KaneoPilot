@@ -272,6 +272,7 @@ def _goal_server():
     from test_pi_desktop_backend import FakeMCPServer
     server = FakeMCPServer()
     server.session_id = SESSION_ID
+    server.required_verification_commands = True
     server.protocol_version = "2025-06-18"
     # T5：fake Plus 同时暴露只读 Goal 报告工具（真实 Plus 版本的形状）。
     for name in pi_desktop_backend.GOAL_REPORT_LIST_TOOL, \
@@ -1736,6 +1737,7 @@ class T6Case(KanpilotTestCase):
             "db_path": str(self.db_path),
         }
         spec.update(overrides)
+        (run_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
         return spec
 
     def seed_ready(self, *, title="修复计划验收", project_name="Feedback"):
@@ -1887,7 +1889,7 @@ class TestT6WorkspaceNaming(T6Case):
             executionId="exec-1", turnId=self.server.execution_turn,
         ))
         conn_file = self.write_connection()
-        run_dir = self.root / "runs" / RUN_ID
+        run_dir = self.runs_root / TASK_ID / RUN_ID
         run_dir.mkdir(parents=True, exist_ok=True)
         plan = self.plan_root / "Feedback" / "plan-naming.md"
         plan.parent.mkdir(parents=True, exist_ok=True)
@@ -1914,7 +1916,7 @@ class TestT6WorkspaceNaming(T6Case):
         self.server.turn_status = "completed"
         self.server.created_response_names = {"title": "别的会话名"}
         conn_file = self.write_connection()
-        run_dir = self.root / "runs2" / RUN_ID
+        run_dir = self.runs_root / TASK_ID / RUN_ID
         run_dir.mkdir(parents=True, exist_ok=True)
         plan = self.plan_root / "Feedback" / "plan-naming2.md"
         plan.parent.mkdir(parents=True, exist_ok=True)
@@ -1954,7 +1956,7 @@ class TestT6WorkspaceNaming(T6Case):
              "timestamp": util.now_iso()},
         ]
         conn_file = self.write_connection()
-        run_dir = self.root / "runs3" / RUN_ID
+        run_dir = self.runs_root / TASK_ID / RUN_ID
         run_dir.mkdir(parents=True, exist_ok=True)
         plan = self.plan_root / "Feedback" / "plan-naming3.md"
         plan.parent.mkdir(parents=True, exist_ok=True)

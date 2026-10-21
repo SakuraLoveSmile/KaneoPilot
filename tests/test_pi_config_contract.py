@@ -25,8 +25,8 @@ DEFAULTS = {
     "model": "deepseek-flash",
     "reasoning_effort": "xhigh",
     "agent_preset": "default",
+    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"},
 }
-# v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
 # v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
 # 执行期提问等待上限（exec_config._merge :74 写入
@@ -100,7 +100,7 @@ def test_set_partial_payload_merges_defaults(cli):
 def test_exec_capabilities_shape_and_no_internal_fields(cli):
     resp = cli("exec-capabilities", {})
     assert set(resp) == {"ok", "pi", "pi_desktop", "providers", "presets",
-                         "checks", "controller"}
+                         "checks", "controller", "codex"}
     # v4（§5.24.2）：控制端就绪态独立展示（backend/available/detail），
     # 与任务执行分支分开，不用其一推断其二。
     assert set(resp["controller"]) == {"backend", "available", "detail"}
@@ -131,6 +131,14 @@ def test_exec_capabilities_shape_and_no_internal_fields(cli):
         "available", "detail", "tools_ok", "version", "session_naming"}
     assert isinstance(resp["pi_desktop"]["available"], bool)
 
+
+    # §5.31：Codex 独立能力块；未保存时不能把默认展示值当作就绪配置。
+    assert set(resp["codex"]) == {"available", "detail", "path", "version", "models"}
+    assert resp["codex"]["available"] is False
+    assert resp["codex"]["detail"] == "Codex 执行配置未保存"
+    assert isinstance(resp["codex"]["path"], str)
+    assert resp["codex"]["version"] is None
+    assert resp["codex"]["models"] == []
 
     providers = resp["providers"]
     assert providers, "夹具至少一个 provider"
@@ -293,9 +301,11 @@ def test_planner_and_review_backend_are_independent(cli):
 
 def test_role_capability_commands_report_each_branch(cli):
     caps = cli("review-capabilities", {})
-    # 权威形状：review_config.capabilities 返回 pi/pi_desktop + claude/codex
-    # 两 CLI 分支 + codex_desktop（planner_config.desktop_capabilities），五键全集。
-    assert set(caps) == {"pi", "pi_desktop", "claude", "codex", "codex_desktop"}
+    # 权威形状：PI/Plus + Claude/Codex/Qoder CLI + Codex Desktop 六键全集。
+    assert set(caps) == {"pi", "pi_desktop", "claude", "codex", "codex_desktop", "qoder"}
+    assert set(caps["qoder"]) == {"available", "detail", "path", "version"}
+    assert isinstance(caps["qoder"]["available"], bool)
+    assert caps["qoder"]["detail"] is None or isinstance(caps["qoder"]["detail"], str)
     assert set(caps["pi"]) == {"available", "detail"}
     assert set(caps["pi_desktop"]) == {"available", "detail", "tools_ok",
                                        "version"}
@@ -308,8 +318,15 @@ def test_role_capability_commands_report_each_branch(cli):
 
     planner = cli("planner-capabilities", {})
     # 权威词表：cmd_planner 的 result["backends"] 与 constants.PLANNER_BACKENDS
-    # 同为 codex/pi_desktop/claude/codex_desktop 四键；pi 不是规划后端。
-    assert set(planner["backends"]) == {"codex", "pi_desktop", "claude", "codex_desktop"}
+    # 同为 codex/pi_desktop/claude/codex_desktop/qoder 五键；pi 不是规划后端。
+    assert set(planner["backends"]) == {"codex", "pi_desktop", "claude", "codex_desktop", "qoder"}
+    qoder = planner["backends"]["qoder"]
+    assert set(qoder) == {"available", "detail", "path", "version", "planner_methods"}
+    assert isinstance(qoder["available"], bool)
+    assert set(qoder["planner_methods"]) == {"builtin", "spec_plan"}
+    assert qoder["planner_methods"]["builtin"]["available"] == qoder["available"]
+    assert qoder["planner_methods"]["spec_plan"]["available"] is False
+    assert qoder["planner_methods"]["spec_plan"]["reason"]
     assert planner["backends"]["pi_desktop"]["available"] is False
 
     exec_caps = cli("exec-capabilities", {})

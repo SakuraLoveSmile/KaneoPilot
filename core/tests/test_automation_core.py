@@ -1,12 +1,14 @@
 """v5 lifecycle tests: observable transitions, guards, and recovery boundaries."""
 from datetime import timedelta
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from kanpilot import (automation_policy, cli, cmd_config, cmd_exec, cmd_queue,
-                      cmd_read, cmd_remote, constants, core, db, derive, git_delivery, remote, util)
+                      cmd_read, cmd_remote, constants, core, db, derive, git_delivery,
+                      remote, review_repair, round_store, util)
 
 NOW = '2026-10-05T05:00:00+00:00'
 TASK = 'automationtask00000000001'
@@ -65,6 +67,7 @@ def state(tmp_path, monkeypatch):
     core.update_delivery(conn, task, NOW, mode='pr', branch='kaneo/fixture', base_branch='main',
                          base_sha='base1', head_sha='head1', worktree_path=str(tmp_path / 'worktree'),
                          commits=[{'execution_run_id': 'execution1', 'sha': 'head1'}], next_sync_at=None)
+    verify_branch_worktree = git_delivery.verify_branch_worktree
     monkeypatch.setattr(git_delivery, 'verify_branch_worktree', lambda *a, **k: None)
     db.set_setting(conn, 'project_mappings', {'version': 1, 'revision': 1, 'items': {'project1': {'repository': str(tmp_path), 'enabled': True, 'automation': dict(constants.AUTOMATION_DEFAULTS, enabled=True)}}})
     monkeypatch.setattr(automation_policy, 'automation_preflight', lambda c, p: [] if not c.in_transaction else pytest.fail('preflight in write txn'))
@@ -93,36 +96,128 @@ def state(tmp_path, monkeypatch):
         payload = dict(ident, report_path=str(report), conclusion=conclusion, review_key=key)
         if conclusion == 'changes_requested': payload.update(fix_mode='same_task', fix={'title':'Fix', 'description':'Repair this issue', 'priority':'high'})
         return payload
-    yield SimpleNamespace(ctx=ctx, conn=conn, task=task, update=update, extra=extra, policy=policy, claim=claim, review=review, live=live)
+    def direct_repair():
+        # These lifecycle cases exercise the real repair gates, including Git,
+        # frozen files and persisted terminal evidence, without running a model.
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(tmp_path), *args], text=True).strip()
+        git('init', '-q')
+        git('config', 'user.name', 'Isolated Fixture')
+        git('config', 'user.email', 'fixture@example.invalid')
+        (tmp_path / 'feature.py').write_text('feature = True\n')
+        git('add', 'feature.py')
+        git('commit', '-q', '-m', 'isolated feature')
+        head = git('rev-parse', 'HEAD')
+        worktree = tmp_path / 'worktree'
+        git('worktree', 'add', '-b', 'kaneo/fixture', str(worktree), 'HEAD')
+        monkeypatch.setattr(git_delivery, 'verify_branch_worktree', verify_branch_worktree)
+        plan = tmp_path / 'frozen-plan.md'
+        plan.write_text('# Frozen plan\nPreserve the feature and its verification.\n')
+        update(plan_path=str(plan), plan_sha256=util.sha256_file(plan))
+        core.update_delivery(conn, task(), NOW, head_sha=head, base_sha=head,
+                             commits=[{'execution_run_id': 'execution1', 'sha': head}])
+        runs = tmp_path / 'session-runs'
+        directory = runs / TASK / 'execution1'
+        directory.mkdir(parents=True)
+        (directory / 'job.json').write_text(util.jdump(dict(task_id=TASK, run_id='execution1',
+            backend='pi', status='finished', exit_code=0, pid=None)))
+        (directory / 'events.jsonl').write_text(util.jdump(dict(seq=1, type='terminal', outcome='completed', ts=NOW)) + '\n')
+        db.set_setting(conn, 'session_runs_root', str(runs))
+        round_store.upsert_on_claim(conn, TASK, 'execution1', {'backend': 'pi'}, NOW, backend='pi')
+        conn.execute("UPDATE execution_rounds SET run_status='finished', worktree_path=? WHERE task_id=? AND run_id='execution1'", (str(worktree), TASK))
+        return directory
+    yield SimpleNamespace(ctx=ctx, conn=conn, task=task, update=update, extra=extra, policy=policy, claim=claim, review=review, live=live, direct_repair=direct_repair)
     conn.close()
 
 
-def test_fix_round_resets_send_and_preserves_history(state):
-    result = cmd_exec.cmd_register_review(state.ctx, state.review())
-    assert result['task_status'] == 'needs_plan'
+def test_fix_round_waits_for_report_then_resets_send_without_replanning(state):
+    state.direct_repair()
+    payload = state.review()
+    frozen_plan = state.task()['plan_sha256']
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    t = state.task()
+    assert t['status'] == 'in_review' and t['run_id'] == 'execution1'
+    assert t['sent'] == 1 and t['send_state'] == 'sent' and t['lock_retained'] == 1
+    assert core.automation_of(t)['fix_round'] == 0
+    assert core.review_repair_of(t)['state'] == 'held'
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
+    identity = dict(task_id=TASK, **{k: core.review_repair_of(t)[v] for k, v in review_repair.IDENTITY.items()})
+    with pytest.raises(util.KanpilotError, match='当前评审或其他请求尚未结束'):
+        review_repair.cmd_start_review_repair(state.ctx, identity)
+    result = cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert result['task_status'] == 'ready'
     t = state.task()
     assert core.automation_of(t)['fix_round'] == 1
-    assert core.automation_of(t)['plan_wanted'] is True
+    assert core.automation_of(t)['plan_wanted'] is False
     assert all(t[k] is None for k in ('send_state', 'sent_at', 'review_report_path', 'review_key'))
     assert t['sent'] == 0 and t['lock_retained'] == 0
     assert db.task_extra(t)['review_history'][0]['execution_run_id'] == 'execution1'
-    assert db.task_extra(t)['fix_request']['state'] == 'open'
+    assert core.review_repair_of(t)['state'] == 'queued'
+    assert t['run_id'] == 'execution1' and t['plan_sha256'] == frozen_plan
+    assert state.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
+    requests = state.conn.execute('SELECT kind,status FROM requests ORDER BY rowid').fetchall()
+    assert [tuple(r) for r in requests] == [('review','succeeded'), ('dispatch','queued')]
+    assert review_repair.cmd_start_review_repair(state.ctx, identity)['already_started']
+    assert core.automation_of(state.task())['fix_round'] == 1
 
 
-@pytest.mark.parametrize('policy,automation,expected', [
-    ({'max_fix_rounds':0}, {}, 'fix_rounds_exhausted'),
-    ({'max_task_cost_usd':1}, {'cost_usd':1}, 'auto_budget_exceeded'),
-    ({'enabled':False}, {}, 'automation_stopped'),
-    ({'max_task_minutes':30}, {'segment_started_at':'2026-10-05T04:00:00+00:00'}, 'auto_budget_exceeded'),
+@pytest.mark.parametrize('policy,automation,paused,expected', [
+    ({'max_fix_rounds':0}, {}, False, '本任务修复次数已用尽'),
+    ({'max_task_cost_usd':1}, {'cost_usd':1}, False, '本任务时间或费用额度已用尽'),
+    ({'enabled':False}, {}, False, '项目自动处理已关闭'),
+    ({'max_task_minutes':30}, {'segment_started_at':'2026-10-05T04:00:00+00:00'}, False, '本任务时间或费用额度已用尽'),
+    ({}, {}, True, '任务或执行阶段已暂停'),
 ])
-def test_review_limit_holds_same_task_fix(state, policy, automation, expected):
+def test_review_limit_holds_direct_fix_after_successful_settlement(state, policy, automation, paused, expected):
+    state.direct_repair()
     state.policy(**policy)
     core.update_automation(state.conn, state.task(), NOW, **automation)
-    cmd_exec.cmd_register_review(state.ctx, state.review())
-    assert state.task()['failure_code'] == expected
-    assert state.task()['status'] == 'needs_user'
-    assert db.task_extra(state.task())['fix_request']['state'] == 'held'
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    if paused:
+        db.set_setting(state.conn, 'paused_stages', ['dispatch'])
+    result = cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert result['request_status'] == 'succeeded'
+    assert state.task()['status'] == 'in_review' and state.task()['run_id'] == 'execution1'
+    fix = core.review_repair_of(state.task())
+    assert fix['state'] == 'held' and fix['reason'] == expected
     assert core.automation_of(state.task())['fix_round'] == 0
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
+    identity = dict(task_id=TASK, **{k: fix[v] for k, v in review_repair.IDENTITY.items()})
+    with pytest.raises(util.KanpilotError, match=expected):
+        review_repair.cmd_start_review_repair(state.ctx, identity)
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'needs_user'])
+def test_unsuccessful_review_settlement_never_starts_direct_fix(state, outcome):
+    state.direct_repair()
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome=outcome))
+    fix = core.review_repair_of(state.task())
+    assert fix['state'] == 'held' and state.task()['run_id'] == 'execution1'
+    assert core.automation_of(state.task())['fix_round'] == 0
+    identity = dict(task_id=TASK, **{k: fix[v] for k, v in review_repair.IDENTITY.items()})
+    with pytest.raises(util.KanpilotError, match='原评审请求尚未成功结算'):
+        review_repair.cmd_start_review_repair(state.ctx, identity)
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
+
+
+def test_successful_review_report_cannot_replace_trusted_source_terminal(state):
+    directory = state.direct_repair()
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    job_path = directory / 'job.json'
+    job = util.jload(job_path.read_text())
+    job.update(status='running', exit_code=None)
+    job_path.write_text(util.jdump(job))
+    result = cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert result['request_status'] == 'succeeded' and result['task_status'] == 'in_review'
+    fix = core.review_repair_of(state.task())
+    assert fix['state'] == 'held' and '终态' in fix['reason']
+    assert core.automation_of(state.task())['fix_round'] == 0
+    assert state.task()['run_id'] == 'execution1'
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
 
 
 def test_review_same_key_is_idempotent_and_stale_cycle_rejected(state):
@@ -239,14 +334,22 @@ def test_accept_verification_requires_correct_reason_and_round(state):
     with pytest.raises(util.KanpilotError): cmd_queue.cmd_resolve(state.ctx,{'task_id':TASK,'action':'accept_verification'})
 
 
-def test_resume_fix_opens_new_segment_with_explicit_extra_round(state):
+def test_resume_cannot_bypass_direct_fix_budget_or_round_limit(state):
+    state.direct_repair()
     state.policy(max_fix_rounds=0)
-    cmd_exec.cmd_register_review(state.ctx,state.review())
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
     core.update_automation(state.conn,state.task(),NOW,cost_usd=50)
-    cmd_queue.cmd_resolve(state.ctx,{'task_id':TASK,'action':'resume'})
-    a=core.automation_of(state.task())
-    assert a['fix_round']==1 and a['segment_cost_base_usd']==50
-    assert db.task_extra(state.task())['fix_request']['state']=='open'
+    state.update(status='needs_user', failure_code='fix_rounds_exhausted', failure_stage='review')
+    before = dict(state.task())
+    with pytest.raises(util.KanpilotError, match='不能跳过修复次数限制'):
+        cmd_queue.cmd_resolve(state.ctx, {'task_id':TASK, 'action':'resume'})
+    assert dict(state.task()) == before
+    assert core.automation_of(state.task())['fix_round'] == 0
+    assert 'segment_cost_base_usd' not in core.automation_of(state.task())
+    assert core.review_repair_of(state.task())['state'] == 'held'
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
 
 
 def test_remote_resume_rejects_wrong_status_then_accepts_current_fingerprint(state):
@@ -487,41 +590,63 @@ def test_replan_requires_previous_execution_terminal(state,monkeypatch):
 
 
 def test_automatic_fix_does_not_inherit_user_replan_status_authorization(state):
-    core.update_automation(state.conn,state.task(),NOW,replan_requested_at=NOW,replan_remote_status='in-progress')
+    state.direct_repair()
+    replan = dict(replan_requested_at=NOW, replan_remote_status='in-progress',
+                  replan_worktree_sha256='source-worktree-sha')
+    core.update_automation(state.conn,state.task(),NOW,**replan)
     assert 'in-progress' in core.expected_remote_slugs(state.task())
-    cmd_exec.cmd_register_review(state.ctx,state.review())
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    assert core.is_user_replan(state.task()), 'registration must not reset the active source execution'
+    assert {key: core.automation_of(state.task())[key] for key in replan} == replan
+    cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert core.review_repair_of(state.task())['state'] == 'queued'
     assert not core.is_user_replan(state.task())
-    assert 'in-progress' not in core.expected_remote_slugs(state.task())
+    assert all(core.automation_of(state.task()).get(key) is None for key in replan)
+    assert core.expected_remote_slugs(state.task()) == set(constants.REVIEW_SLUGS) | {constants.IN_PROGRESS_SLUG}
 
 
 @pytest.mark.parametrize('exhausted', [False, True])
 def test_detached_review_holds_fix_before_quota_without_advancing_round(state, exhausted):
+    state.direct_repair()
     state.extra(delivery={'mode':'manual'})
     if exhausted:
         state.policy(max_fix_rounds=0)
-    result = cmd_exec.cmd_register_review(state.ctx, state.review())
-    assert result['task_status'] == 'needs_user'
-    assert state.task()['failure_code'] == 'fix_branch_unavailable'
-    assert state.task()['failure_stage'] == 'review'
-    assert state.task()['failure_reason'] == core.FIX_BRANCH_UNAVAILABLE_DETAIL
-    assert db.task_extra(state.task())['fix_request']['state'] == 'held'
-    assert core.automation_of(state.task())['fix_round'] == 0
-    assert 'resume' not in derive.allowed_actions(state.conn, state.task(), state.ctx.now)
-
-
-def test_review_binding_mismatch_holds_same_branch_fix(state):
     payload = state.review()
-    state.extra(engine_verdict={'execution_run_id':state.task()['run_id'], 'plan_sha256':state.task()['plan_sha256'],
-                                'binding':{'branch':'kaneo/fixture','worktree_path':'/different/worktree'}})
     cmd_exec.cmd_register_review(state.ctx, payload)
-    assert state.task()['failure_code'] == 'fix_branch_unavailable'
+    assert core.review_repair_of(state.task())['state'] == 'held'
+    result = cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert result['task_status'] == 'in_review'
+    fix = core.review_repair_of(state.task())
+    assert fix['state'] == 'held' and fix['reason'] == core.FIX_BRANCH_UNAVAILABLE_DETAIL
+    assert state.task()['run_id'] == 'execution1'
     assert core.automation_of(state.task())['fix_round'] == 0
+    assert not review_repair.view(state.conn, state.task(), state.ctx.now)['can_start']
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
+
+
+def test_registered_review_binding_mismatch_holds_direct_fix(state):
+    state.direct_repair()
+    payload = state.review()
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    frozen = core.review_repair_of(state.task())
+    core.update_delivery(state.conn, state.task(), NOW, worktree_path='/different/worktree')
+    cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    fix = core.review_repair_of(state.task())
+    assert fix['state'] == 'held' and fix['reason'] == '修复分支身份已变化'
+    assert fix['worktree_path'] == frozen['worktree_path']
+    assert core.automation_of(state.task())['fix_round'] == 0
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind IN ('dispatch','plan')").fetchone()
 
 
 def test_historical_verdict_binding_does_not_block_current_review_branch(state):
+    state.direct_repair()
     payload = state.review()
     state.extra(engine_verdict={'execution_run_id':'old-run', 'plan_sha256':'old-plan',
                                 'binding':{'branch':'kaneo/old','worktree_path':'/old/worktree'}})
-    result = cmd_exec.cmd_register_review(state.ctx, payload)
-    assert result['task_status'] == 'needs_plan'
+    cmd_exec.cmd_register_review(state.ctx, payload)
+    result = cmd_exec.cmd_report(state.ctx, dict(request_id=payload['request_id'], run_id=payload['run_id'], outcome='succeeded'))
+    assert result['task_status'] == 'ready'
     assert core.automation_of(state.task())['fix_round'] == 1
+    assert core.review_repair_of(state.task())['state'] == 'queued'
+    assert not state.conn.execute("SELECT 1 FROM requests WHERE kind='plan'").fetchone()

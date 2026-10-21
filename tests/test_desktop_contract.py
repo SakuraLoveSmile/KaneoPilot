@@ -160,7 +160,11 @@ class TestDisplayStatus:
         assert fget(running.task.task_id) == "执行端失联"
 
         cli("resolve", {"task_id": ir.task.task_id, "action": "mark_done"})
+        assert fget(ir.task.task_id) == "已完成"
+        assert factory.get_task(ir.task.task_id)["save_state"] == "active"
+        cli("archive-task", {"task_id": ir.task.task_id})
         assert fget(ir.task.task_id) == "已归档"
+        assert factory.get_task(ir.task.task_id)["save_state"] == "archived"
 
     def test_long_chinese_title(self, factory, cli):
         """40+ 字长中文标题不报错、原样返回（ui-spec §8 基线）。"""

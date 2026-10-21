@@ -242,25 +242,34 @@ def read_goal_evidence(conn, task):
             "verification_unconfirmed",
             "Plus 结构化报告未就绪（" + str(report.get("state")) + "）："
             + util.redact(str(report.get("detail") or "")))
-    # Structured, completed, met: a fallback or unfinished report is not completion evidence.
-    floor = cmd_read.goal_report_floor_reason(report)
-    if floor:
-        raise util.KanpilotError("verification_unconfirmed", util.redact(floor))
     # The round's execution turn and the report's turn must both belong to the approved chain.
     approved = {str(item) for item in (report.get("identity") or {}).get("approved_turns") or ()}
     if (str(job["turn_id"]) not in approved or not report.get("turn_id")
             or str(report["turn_id"]) not in approved):
         _conflict("Goal 报告的执行轮次不属于本轮已批准的执行轮次")
     commands = declaration["commands"]
-    if job.get("stage_contract_required") is True or "stage_contract" in job:
-        contract = job["stage_contract"]
-        adapter = harnesses.get_runtime_adapter(contract["harness_id"])
+    nonmet = report.get("verdict") != "met"
+    if job.get("stage_contract_required") is True or "stage_contract" in job or nonmet:
+        contract = job.get("stage_contract")
+        adapter = harnesses.get_runtime_adapter(contract["harness_id"] if contract else "pi_desktop")
         coverage = stage_evidence.match_checks(
-            contract["verification_commands"], adapter.verification_checks(
+            contract["verification_commands"] if contract else commands, adapter.verification_checks(
                 report, source_sha256=job.get("verification_source_sha256")),
             expected_source_sha256=job.get("verification_source_sha256"))
     else:
         coverage = verify_evidence.match_goal_checks(commands, (report.get("report") or {}).get("checks"))
+    # A truthful partial/blocked report with complete, consistent command
+    # failures is failure evidence for the quality/environment ladder. It
+    # can never satisfy coverage.ok, so recovery and closeout still reject it.
+    # Missing or contradictory records remain unconfirmed even if another
+    # command failed; met retains the existing completion floor unchanged.
+    floor = cmd_read.goal_report_floor_reason(report)
+    failed_report = (report.get("structured") is True
+                     and report.get("execution_status") == "completed"
+                     and report.get("verdict") in ("partial", "blocked")
+                     and not coverage["missing"] and bool(coverage["failed"]))
+    if floor and not failed_report:
+        raise util.KanpilotError("verification_unconfirmed", util.redact(floor))
     _require_unchanged(hashes)
     return {"hashes": hashes, "job": job, "report": report, "commands": commands, "coverage": coverage}
 

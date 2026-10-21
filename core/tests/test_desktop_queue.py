@@ -12,14 +12,18 @@ import threading
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import (cli, db, desktop_queue as desktop, headless_adapter,
-                      pi_desktop_review, remote, review_snapshot, round_store, util, worktree_pool, git_delivery)
+from kanpilot import (automation_policy, cli, db, desktop_queue as desktop, headless_adapter,
+                      pi_desktop_review, remote, review_repair, review_snapshot,
+                      round_store, util, worktree_pool, git_delivery)
 
 
 class DesktopQueueTests(KanpilotTestCase):
     def setUp(self):
         super().setUp()
         self.repos_root = self.repos_root.resolve()
+        # Keep legacy default mappings and registered task repositories on the
+        # same canonical path (macOS /var is a symlink to /private/var).
+        os.environ['KANPILOT_REPOS_ROOT'] = str(self.repos_root)
         self.call("set-planner-config", {"backend": "codex_desktop"})
         self.call("set-review-config", {"backend": "codex_desktop"})
         self.configure(enabled=True)
@@ -88,9 +92,11 @@ class DesktopQueueTests(KanpilotTestCase):
         self.fake.tasks[task["id"]]["status"] = "in-review"
         execution_run = "exec-" + suffix
         if automated:
+            with closing(db.connect(self.db_path)) as conn:
+                revision = (automation_policy.policy_for(conn, task['projectId']) or {}).get('policy_revision', 0)
             self.call("set-project-automation", {"project_id": task["projectId"],
                                                  "automation": {"enabled": True, "max_fix_rounds": 2},
-                                                 "expected_policy_revision": 0})
+                                                 "expected_policy_revision": revision})
         with closing(db.connect(self.db_path)) as conn:
             db.update_task(conn, task["id"], util.now_iso(), status="in_review", stage="review", run_id=execution_run)
             row = db.require_task(conn, task["id"])
@@ -120,7 +126,8 @@ class DesktopQueueTests(KanpilotTestCase):
             evidence.mkdir(parents=True)
             (evidence / "job.json").write_text(json.dumps({"task_id": task["id"], "run_id": execution_run,
                                                          "backend": "pi", "status": "finished", "exit_code": 0}))
-            (evidence / "events.jsonl").write_text('{"type":"terminal","outcome":"completed"}\n')
+            (evidence / "events.jsonl").write_text(util.jdump({
+                'seq': 1, 'ts': util.now_iso(), 'type': 'terminal', 'outcome': 'completed'}) + '\n')
             request, _ = db.create_request(conn, util.now_iso(), "review", "review:" + task["id"], task_id=task["id"])
             conn.commit()
         return task, request["request_id"]
@@ -689,7 +696,18 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertEqual(self.fake.tasks[task["id"]]["status"], "done")
             elif conclusion == "changes_requested":
                 current = self.call("get-task", {"task_id": task["id"]})["task"]
-                self.assertTrue(current["review_summary"]["fix_task_id"])
+                fix = current['extra']['fix_request']
+                self.assertEqual((fix['mode'], fix['state']), ('direct', 'held'))
+                self.assertEqual(fix['source_execution_run_id'], 'exec-' + str(suffix))
+                self.assertEqual(current['run_id'], fix['source_execution_run_id'])
+                self.assertEqual(fix['review_run_id'], claim['run_id'])
+                self.assertEqual(fix['report_sha256'], util.sha256_file(Path(reply['report_path'])))
+                self.assertEqual(fix['plan_sha256'], current['plan_sha256'])
+                self.assertIsNone(current['fix_task_id'])
+                self.assertFalse(current['review_repair']['can_start'])
+                self.assertFalse(any(r['kind'] in ('plan', 'dispatch')
+                    and r['status'] in ('queued', 'claimed')
+                    for r in self.requests() if r['task_id'] == task['id']))
             else:
                 self.assertEqual(reply["task_status"], "needs_user")
             self.assertEqual(self.return_slot(claim)["state"], "free")
@@ -700,8 +718,100 @@ class DesktopQueueTests(KanpilotTestCase):
         reply = self.native("submit_review", {**self.identity(claim), "result": self.review_result("changes_requested")})
         self.assertEqual(reply["request_status"], "succeeded")
         current = self.call("get-task", {"task_id": task["id"]})["task"]
-        self.assertEqual(current["status"], "needs_plan")
-        self.assertEqual(current["extra"]["fix_request"]["state"], "open")
+        self.assertEqual(current["status"], "ready", current['extra']['fix_request'])
+        fix = current['extra']['fix_request']
+        self.assertEqual((fix['mode'], fix['state']), ('direct', 'queued'))
+        self.assertEqual(current['run_id'], fix['source_execution_run_id'])
+        self.assertEqual(fix['source_execution_run_id'], 'exec-1')
+        self.assertEqual(current['extra']['automation']['fix_round'], 1)
+        self.assertFalse(current['extra']['automation']['plan_wanted'])
+        self.assertIsNone(current['fix_task_id'])
+        queued = [r for r in self.requests() if r['task_id'] == task['id'] and r['status'] == 'queued']
+        self.assertEqual([r['kind'] for r in queued], ['dispatch'])
+        identity = {**self.identity(claim), 'result': self.review_result('changes_requested')}
+        self.assertTrue(self.native('submit_review', identity)['deduplicated'])
+        retried = self.call('get-task', {'task_id': task['id']})['task']
+        self.assertEqual(retried['extra']['fix_request'], fix)
+        self.assertEqual(retried['extra']['automation']['fix_round'], 1)
+
+    def test_post_report_repair_keeps_previous_authorization_guard_and_restores_it(self):
+        task, _ = self.make_review(automated=True)
+        claim = self.claim('review')
+        secured = desktop._secured_command
+        checked = []
+        restored = []
+
+        def with_previous(ctx, command, arguments, identity, role=None, job=None):
+            if command != 'report':
+                return secured(ctx, command, arguments, identity, role, job)
+            original = getattr(ctx.conn, 'authorization_guard', None)
+            def previous(conn):
+                status = db.get_request(conn, claim['request_id'])['status']
+                checked.append(status)
+                if status == 'succeeded':
+                    raise util.KanpilotError('forbidden', 'prior guard revoked follow-up authorization')
+            ctx.conn.authorization_guard = previous
+            try:
+                return secured(ctx, command, arguments, identity, role, job)
+            finally:
+                restored.append(ctx.conn.authorization_guard is previous)
+                ctx.conn.authorization_guard = original
+
+        with patch.object(desktop, '_secured_command', with_previous):
+            reply = self.native('submit_review', {**self.identity(claim), 'result': self.review_result('changes_requested')})
+        self.assertEqual(reply['request_status'], 'succeeded')
+        self.assertIn('claimed', checked)
+        self.assertIn('succeeded', checked)
+        self.assertEqual(restored, [True])
+        current = self.call('get-task', {'task_id': task['id']})['task']
+        self.assertEqual(current['extra']['fix_request']['state'], 'held')
+        self.assertEqual(current['extra']['automation']['fix_round'], 0)
+        self.assertFalse(any(r['kind'] == 'dispatch' for r in self.requests()))
+
+    def test_post_report_repair_rejects_task_plan_or_execution_identity_drift(self):
+        self.call('set-config', {'worktree_pool_size': 3})
+        auto_start = review_repair.try_auto_start
+        for field in ('requirements_sha256', 'plan_sha256', 'run_id'):
+            with self.subTest(field=field):
+                # Use a fresh task per mutation so one rejected follow-up cannot
+                # supply evidence to another case.
+                task, _ = self.make_review('managed-' + field, automated=True, return_plan=True)
+                claim = self.claim('review', field)
+                seen = []
+                def drift(ctx, task_id):
+                    seen.append(db.get_request(ctx.conn, claim['request_id'])['status'])
+                    ctx.conn.execute('UPDATE tasks SET ' + field + '=? WHERE task_id=?',
+                                     ('changed-' + field, task_id))
+                    return auto_start(ctx, task_id)
+                with patch.object(review_repair, 'try_auto_start', drift):
+                    reply = self.native('submit_review', {**self.identity(claim), 'result': self.review_result('changes_requested')})
+                self.assertEqual(reply['request_status'], 'succeeded')
+                self.assertEqual(seen, ['succeeded'])
+                current = self.call('get-task', {'task_id': task['id']})['task']
+                self.assertEqual(current[field], 'changed-' + field)
+                self.assertEqual(current['extra']['fix_request']['state'], 'held')
+                self.assertEqual(current['extra']['automation']['fix_round'], 0)
+                self.assertFalse(any(r['kind'] == 'dispatch' and r['task_id'] == task['id'] for r in self.requests()))
+
+    def test_secured_report_does_not_admit_an_already_terminal_review(self):
+        self.call('set-config', {'worktree_pool_size': 3})
+        for status in ('succeeded', 'failed', 'cancelled'):
+            with self.subTest(status=status):
+                task, _ = self.make_review(status, automated=True, return_plan=True)
+                claim = self.claim('review', status)
+                self.mutate('UPDATE requests SET status=?,result_json=? WHERE request_id=?',
+                            (status, util.jdump({'outcome': 'succeeded' if status == 'succeeded' else 'failed'}), claim['request_id']))
+                ctx = cli.Context(self.db_path)
+                try:
+                    with self.assertRaises(util.KanpilotError) as error:
+                        desktop._secured_command(ctx, 'report', {'request_id': claim['request_id'],
+                            'run_id': claim['run_id'], 'outcome': 'succeeded'}, self.identity(claim),
+                            'review', self.read_job(claim))
+                    self.assertEqual(error.exception.code, 'stale_run')
+                    self.assertIsNone(getattr(ctx.conn, 'authorization_guard', None))
+                finally:
+                    ctx.close()
+                self.assertFalse(any(r['kind'] == 'dispatch' and r['task_id'] == task['id'] for r in self.requests()))
 
     def test_review_new_execution_plan_or_material_changes_stop_before_remote(self):
         # Five plan and five review consumers intentionally retain their leases.
@@ -760,20 +870,31 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertFalse(first.result(timeout=5)["isError"])
 
     def test_review_response_loss_after_each_committed_core_stage_recovers(self):
-        self.call("set-config", {"worktree_pool_size": 8})
+        self.call("set-config", {"worktree_pool_size": 10})
         for suffix, command, conclusion in (("register", "register-review", "pass"),
-                                            ("fix", "create-review-fix", "changes_requested"),
+                                            ("direct", "register-review", "changes_requested"),
                                             ("advance", "advance-task", "pass"),
-                                            ("report", "report", "pass")):
-            self.make_review(suffix)
+                                            ("report", "report", "pass"),
+                                            ("direct-report", "report", "changes_requested")):
+            task, _ = self.make_review(suffix)
             claim = self.claim("review", suffix)
             entry = cli.COMMANDS[command]
+            injected = []
             def lost(ctx, payload, original=entry[1]):
                 original(ctx, payload)
+                injected.append(dict(payload))
                 raise util.KanpilotError("response_lost", "isolated committed response lost")
             with patch.dict(cli.COMMANDS, {command: (entry[0], lost)}):
                 reply = self.native("submit_review", {**self.identity(claim), "result": self.review_result(conclusion)})
             self.assertEqual(reply["request_status"], "succeeded")
+            self.assertEqual(len(injected), 1, 'response loss must reach the real committed stage')
+            if conclusion == 'changes_requested':
+                current = self.call('get-task', {'task_id': task['id']})['task']
+                fix = current['extra']['fix_request']
+                self.assertEqual((fix['mode'], fix['state']), ('direct', 'held'))
+                self.assertEqual(fix['source_execution_run_id'], 'exec-' + suffix)
+                self.assertIsNone(current['fix_task_id'])
+                self.assertEqual(len(current['extra']['review_history']), 1)
             writes_before = len([log for log in self.fake.requests_log if log[0] in ("POST", "PUT", "PATCH")])
             self.assertTrue(self.native("submit_review", {**self.identity(claim), "result": self.review_result(conclusion)})["deduplicated"])
             self.assertEqual(writes_before, len([log for log in self.fake.requests_log if log[0] in ("POST", "PUT", "PATCH")]))

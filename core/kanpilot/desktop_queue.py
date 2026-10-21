@@ -197,12 +197,26 @@ def _secured_command(ctx, command, arguments, identity, role=None, job=None):
         _guard_materials(ctx, row, task, job)
         expected_material_identity = _material_db_identity(ctx.conn, row, task)
     previous = getattr(ctx.conn, "authorization_guard", None)
+    successful_review_report = (
+        command == "report" and role == "review" and job is not None
+        and arguments.get("outcome") == "succeeded"
+        and all(arguments.get(key) == identity.get(key) for key in ("request_id", "run_id")))
     def guard(conn):
         if previous:
             previous(conn)
         ctx.now = util.now_dt()
         ctx.now_iso = util.to_iso(ctx.now)
-        row, task = _authenticate(ctx, identity, role, check_files=False)
+        # cmd_report settles the claim before starting its core-owned repair.
+        # Only that same successful report may authenticate the follow-up with
+        # its settled identity; all other Desktop writes still need a live claim.
+        row, task = _authenticate(ctx, identity, role, terminal=successful_review_report,
+                                  check_files=False)
+        if row["status"] != "claimed":
+            if (not successful_review_report or row["status"] != "succeeded"
+                    or (util.jload(row["result_json"]) or {}).get("outcome") != "succeeded"
+                    or not db.task_is_active(task) or db.task_is_purged(task)
+                    or _returned(conn, row)):
+                raise util.KanpilotError("stale_run", "Desktop Review 成功汇报身份已变化")
         if job is not None:
             if _material_db_identity(conn, row, task) != expected_material_identity:
                 raise util.KanpilotError("conflict", "Desktop 材料或工作区登记在校验期间已变化")

@@ -106,12 +106,14 @@ class FakePlus:
         return message
 
     def set_goal_report(self, session_id, *, proposal_id, turn_id, execution_id, checks,
-                        integrity="structured", execution_status="completed", verdict="met"):
+                        integrity="structured", execution_status="completed", verdict=None):
         """发布一份 Goal 报告（Plus 只读报告的 ``{state, report, report_sha256}`` 形状）。
 
         ``checks`` 由测试按本轮真实工具结果写出：每条冻结 verify 命令的退出码与输出。
         返回 ``report_sha256``，供断言收据绑定。
         """
+        if verdict is None:
+            verdict = "met" if checks and all(check.get("exitCode") == 0 for check in checks) else "partial"
         body = {"sessionId": session_id, "proposalId": proposal_id, "executionId": execution_id,
                 "turnId": turn_id, "reportId": "report-" + execution_id,
                 "integrity": {"kind": integrity, "issues": []},
@@ -238,6 +240,9 @@ class FakePlus:
                 if name == "pi_session_create":
                     # T6 兼容门：必须暴露 projectName。
                     schema["properties"]["projectName"] = {"type": "string"}
+                if name == "pi_plans_resolve":
+                    schema["properties"]["requiredVerificationCommands"] = {
+                        "type": "array", "items": {"type": "string"}}
                 tools.append({"name": name, "inputSchema": schema})
             return {"tools": tools}
         if method == "tools/call":
