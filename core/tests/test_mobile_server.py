@@ -61,6 +61,22 @@ def http_pair(server, context, content):
     return phone
 
 
+def test_https_listener_and_requests_do_not_require_reverse_dns(monkeypatch, request):
+    def unavailable_reverse_dns(*args, **kwargs):
+        raise AssertionError("mobile listener must not perform reverse DNS")
+
+    monkeypatch.setattr(socket, "getfqdn", unavailable_reverse_dns)
+    monkeypatch.setattr(socket, "gethostbyaddr", unavailable_reverse_dns)
+    # Apply resolver restrictions before the real TLS fixture binds its socket.
+    server, content, context = request.getfixturevalue("https_server")
+    assert server.server_name == "127.0.0.1"
+    assert server.server_port == server.socket.getsockname()[1]
+    phone = http_pair(server, context, content)
+    status, value = http(server, context, "POST", "/mobile/v1/query",
+                         {"type": "overview", "args": {}}, phone["device_token"])
+    assert status == 200 and value["data"]["paused"]["global"] is False
+
+
 def test_certificate_san_permissions_and_hash(https_server, mobile_env):
     server, content, context = https_server
     assert content["certificate_sha256"] == hashlib.sha256(base64.b64decode(content["certificate_der"])).hexdigest()

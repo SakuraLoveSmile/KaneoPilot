@@ -7,10 +7,10 @@
 | 步骤 | 状态 | 当前结果 |
 |---|---|---|
 | T1 契约与隔离 | 待体验 | 固定接口、共享 DTO、CLI 接入和隔离分支已建立 |
-| T2 核心与设备接口 | 实现中 | 本地 HTTPS、安全、幂等与 42 项专项通过；远端真实核心启动超时正在定位 |
-| T3 Mac 设置与生命周期 | 实现中 | 原生页面与本地生命周期通过；远端真实核心启动夹具仍失败，正在采集调用栈 |
+| T2 核心与设备接口 | 实现中 | 反向 DNS 阻塞已修复，39 项服务/授权回归通过；远端待重跑 |
+| T3 Mac 设置与生命周期 | 实现中 | 原生页面与本地生命周期通过；远端真实核心夹具等待反向 DNS 修复后核验 |
 | T4 Android 控制台 | 待体验 | 20 项单元、Lint、构建、Mi 10 的 Compose 与 LAN 检查、固定签名覆盖升级通过 |
-| T5 双平台构建与发布 | 实现中 | 工作流、固定签名及 Secrets 已配置；已推送并运行首轮 Actions，正在修复远端构建问题；产物上传另受账号存储配额阻挡 |
+| T5 双平台构建与发布 | 实现中 | Android 检查和 APK、Mac Universal DMG 远端构建成功；产物上传受账号存储配额阻挡，Mac 真实核心夹具另待修复 |
 | T6 联合核验 | 实现中 | 真机 LAN、本地安装和完整核心/集成基线对照完成；Actions 产物下载与安装证据仍待完成 |
 
 只有用户确认后才记为“已验收”。本记录中的已通过检查均为本次执行，不将模拟器结果算作真机验收。
@@ -81,9 +81,11 @@ macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 
 
 为运行修复后的源码，首轮已保存平台失败日志并取消尚未完成的核心检查；不能把该次远端核心/集成检查记为通过。本地完整基线对照证据见前文。
 
-第三轮 [Actions 39560820072](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39560820072) 使用 `da1cb0c`：Android 单元、Lint、APK 和版本/签名校验通过；Mac Universal DMG 的编译、双架构、签名、镜像校验和 metadata staging 全部成功。两平台及报告上传仍被账号存储配额拒绝。Mac 假核心全部场景通过，真实核心服务在 15 秒产品期限内未就绪，因此 Mac job 另有夹具失败；没有因进入后续打包步骤就将该夹具记为通过。尚未完成的远端完整检查仍单独记为运行中。
+第三轮 [Actions 39560820072](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39560820072) 使用 `da1cb0c`：Android 单元、Lint、APK 和版本/签名校验通过；Mac Universal DMG 的编译、双架构、签名、镜像校验和 metadata staging 全部成功。两平台及报告上传仍被账号存储配额拒绝。Mac 假核心全部场景通过，真实核心服务在 15 秒产品期限内未就绪，因此 Mac job 另有夹具失败；没有因进入后续打包步骤就将该夹具记为通过。已保存状态后取消该轮尚未完成的检查，改跑诊断源码；取消的检查不记为通过。
 
-没有继续放宽产品超时。只读本地实验确认 `HTTPServer.server_bind → socket.getfqdn → gethostbyaddr` 的同步反向 DNS 可以阻塞 bind 后的 listen/ready，但尚不能认定是 runner 根因；下一步仅给隔离夹具加入不含 locals、argv、环境或凭据的限长调用栈诊断，再依据实际栈定位。
+第四轮 [Actions 39562851317](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39562851317) 使用 `a164ecd`，仅给隔离夹具加入第 10 秒限长调用栈诊断，未改变解释器、15 秒产品期限或断言。真实 runner 栈确认卡在 Python 3.14 的 `socket.getfqdn → HTTPServer.server_bind → MobileServer.__init__`，绑定后尚未开始 listen/ready。日志与摘要为 `verification/actions-macos-job-4.log` 和 `mobile-startup-ci-diagnosis.json`。这与本地隔离实验一致。
+
+修复只在 `MobileServer.server_bind` 复用 TCP 实际绑定，并直接用已验证的数字 IPv4 设置 HTTP 元信息，去掉服务不使用的反向 DNS 查询；证书、主机名验证、鉴权和启动期限不变。新增回归先在旧实现失败，修复后在禁止 `getfqdn/gethostbyaddr` 时完成真实 TLS 配对与授权总览查询；服务及授权专项 39 passed。独立 reviewer 检查实际差异后未发现新增实质问题。红绿及回归日志为 `verification/mobile-server-dns-red.log`、`mobile-server-dns-green.log` 和 `mobile-server-access-dns-regression.log`。远端修复验证仍待完成。
 
 GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。已读取 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。没有删除任何产物；当前没有远端安装包下载或安装证据。
 
