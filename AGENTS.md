@@ -1,10 +1,10 @@
  # KaneoPilot agent guide
  
- Kaneo 调度台：本机 macOS 工作台。SwiftUI 桌面 + Python 调度核心 + SQLite。集中查看 Kaneo 任务进度、失败原因、计划文件和执行证据，并安排下一步。正常流程自动推进，异常集中处理。
+ Kaneo 调度台：macOS 工作台与 Android 远程控制台。SwiftUI 桌面 + Python 调度核心 + SQLite；Android Kotlin/Compose 通过局域网或已有 VPN 连接 Mac。集中查看 Kaneo 任务进度、失败原因、计划文件和执行证据，并安排下一步。正常流程自动推进，异常集中处理。
  
  ## 边界
  
- - 第一版仅本机；不做云端、多用户、手机端、Kaneo 服务端改造。
+ - Mac 保持唯一数据和调度所有权；Android 是个人远程控制台。手机接口遵循 docs/mobile-console-contract.md，不做云端、多用户或 Kaneo 服务端改造。
  - 执行端由 App 常驻调度器按固化后端拉起；dispatch/monitor/delivery 为确定性流程；Plus 轮次经本项目 MCP runtime 域控制，不挂接 task grant。所有状态写入经核心命令。
  - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
  - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
@@ -17,6 +17,7 @@
  - `docs/` — 冻结规格（protocol.md / state-model.md / ui-spec.md / automation-contract.md），主 agent 唯一维护；实现分歧先改规格再动工。
  - `core/` — Python 调度核心 + `kanpilot` CLI + 隔离测试。
  - `macos/` — SwiftUI 桌面 app（Xcode 工程）。
+ - `android/` — Kotlin/Compose 安卓远程控制台（Gradle/JDK17）。
  - `tests/` — 集成测试与夹具（并发领取、崩溃恢复、迁移、验收）。
  - `automation/` — 执行端 prompt 与切换材料。
  - `scripts/` — 构建/安装脚本。

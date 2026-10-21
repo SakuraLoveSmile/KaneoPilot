@@ -1820,3 +1820,8 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 `kp-harness-v1` 按语义能力描述 `supported/unsupported/unknown` 和保证来源，不用工具名作为核心业务条件。当前可控执行仍为 Plus，Codex/Claude CLI 只提供现有规划/评审能力。既有 runtime scope 仅授权 Plus，调用参数不能切换 harness 或提升权限。Plus checks 转换后仍为 `model_declared`，不冒充宿主独立采集。
 
 真正无契约的历史记录按原规则读取；已有或标记必需契约的记录损坏时不得回退。契约复用既有 spec/job 与交付 JSON，SQLite 仍是状态写入源，无新 schema。外部操作的先意图后发送、同参数幂等及 unknown 不重发规则继续生效；无服务端 CAS 时本地锁不消除远端竞争。
+
+
+## 安卓远程控制台（2026-10-21）
+
+版本化 HTTPS 接口、受限设备权限、本机 CLI、配对与回执按 [安卓控制台契约 v1](mobile-console-contract.md) 冻结。每次网络请求通过 stdin JSON 启动单独核心 worker，核心复核设备授权、现有任务守卫与身份，不把现有 MCP 暴露到局域网。全局 set-paused 可选 expected_paused 在同一写事务内比较；旧调用兼容。

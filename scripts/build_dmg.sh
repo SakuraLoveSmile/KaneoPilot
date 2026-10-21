@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${APP_OUTPUT_DIR:-$ROOT/dist}"
 APP="$OUT/KaneoPilot.app"
-DMG="$OUT/KaneoPilot.dmg"
+DMG="$OUT/${DMG_NAME:-KaneoPilot.dmg}"
 VOLNAME="KaneoPilot"
 
 # 1. Build .app if not present or rebuild
@@ -33,8 +33,13 @@ hdiutil create \
     -format UDZO \
     "$DMG"
 
+echo "== Sign local disk image =="
+codesign --force --sign - "$DMG"
+codesign --verify --strict "$DMG"
+
 echo "== Verifying DMG =="
 hdiutil imageinfo "$DMG" >/dev/null
+hdiutil verify "$DMG" >/dev/null
 
 echo "== Successfully generated: $DMG =="
 ls -lh "$DMG"
