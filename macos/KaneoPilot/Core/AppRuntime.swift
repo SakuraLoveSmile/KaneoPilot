@@ -8,13 +8,16 @@ final class AppRuntime {
     static let shared = AppRuntime()
     let scheduler: EngineSupervisor
     let mcpManager: MCPServiceManager
+    let mobileManager: MobileServiceManager
     private var started = false
     private var stopping = false
     private var stopCompletions: [(Bool) -> Void] = []
 
-    init(client: CoreClient = CoreClient(), mcpManager: MCPServiceManager? = nil) {
+    init(client: CoreClient = CoreClient(), mcpManager: MCPServiceManager? = nil,
+         mobileManager: MobileServiceManager? = nil) {
         self.scheduler = EngineSupervisor(client: client)
         self.mcpManager = mcpManager ?? .shared
+        self.mobileManager = mobileManager ?? .shared
     }
 
     func start() {
@@ -23,6 +26,7 @@ final class AppRuntime {
         if ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil {
             mcpManager.restoreAtAppLaunch()
         }
+        mobileManager.restoreAtAppLaunch()
         scheduler.start()
     }
 
@@ -33,7 +37,7 @@ final class AppRuntime {
         guard !stopping else { return }
         stopping = true
         started = false
-        // Stop this App’s engine first, then its MCP. External engines and Plus
+        // Stop this App’s engine first, then its mobile service and MCP. External engines and Plus
         // sessions keep running; a pending local shutdown cancels App exit.
         scheduler.stop { [weak self] successful in
             guard let self else { return }
@@ -44,7 +48,16 @@ final class AppRuntime {
                 completions.forEach { $0(successful) }
             }
             if successful {
-                self.mcpManager.stopOwnedProcessForAppExit(completion: finish)
+                self.mobileManager.stopOwnedProcessForAppExit { mobileStopped in
+                    if mobileStopped {
+                        self.mcpManager.stopOwnedProcessForAppExit(completion: finish)
+                    } else {
+                        self.stopping = false
+                        let completions = self.stopCompletions
+                        self.stopCompletions.removeAll()
+                        completions.forEach { $0(false) }
+                    }
+                }
             } else {
                 finish()
             }

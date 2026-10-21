@@ -3904,7 +3904,66 @@ def cmd_engine_project_setting(state, payload, key):
     return mutate(state, lambda s: s.update(project_mappings=mappings) or {"project_id": pid, key: value, "revision": mappings["revision"]})
 
 
+# Mobile settings fixture: no socket, certificate generation, or network traffic.
+def cmd_mobile_status(state, payload):
+    config = state.get("mobile_access", {})
+    host = config.get("bind_host")
+    port = config.get("port", 47831)
+    return {"api_version": 1, "server_id": "isolated-mobile-fixture",
+            "enabled": config.get("enabled", False), "bind_host": host, "port": port,
+            "endpoint": "https://%s:%s" % (host, port) if host else None,
+            "certificate_sha256": "0" * 64 if host else None,
+            "addresses": [{"address": "192.0.2.10", "name": "en0 · 隔离示例"},
+                          {"address": "198.51.100.2", "name": "utun3 · VPN 示例"}],
+            "devices": config.get("devices", [])}
+
+
+def cmd_set_mobile_access(state, payload):
+    config = state.setdefault("mobile_access", {})
+    if payload.get("enabled"):
+        if payload.get("bind_host") not in {"192.0.2.10", "198.51.100.2"}:
+            return fail("所选本机地址当前不可用", "bad_request")
+        if not isinstance(payload.get("port"), int) or not 1024 <= payload["port"] <= 65535:
+            return fail("端口必须为 1024–65535", "bad_request")
+        if payload.get("bind_host") != config.get("bind_host"):
+            for device in config.get("devices", []):
+                device["revoked_at"] = iso(utcnow())
+        config.update({"bind_host": payload["bind_host"], "port": payload["port"]})
+    config["enabled"] = payload.get("enabled") is True
+    save_state(state)
+    return cmd_mobile_status(state, {})
+
+
+def cmd_create_mobile_pairing(state, payload):
+    import base64
+    status = cmd_mobile_status(state, {})
+    if not status["enabled"]:
+        return fail("请先启用手机连接", "conflict")
+    expires = future(minutes=5)
+    body = {"api_version": 1, "server_id": status["server_id"],
+            "endpoint": status["endpoint"], "certificate_der": "Zml4dHVyZQ==",
+            "certificate_sha256": status["certificate_sha256"],
+            "pairing_token": "isolated-fixture-only-" + uuid.uuid4().hex,
+            "expires_at": expires}
+    encoded = base64.urlsafe_b64encode(json.dumps(body).encode()).decode().rstrip("=")
+    return {"pairing_uri": "kaneopilot://pair?data=" + encoded, "expires_at": expires}
+
+
+def cmd_revoke_mobile_device(state, payload):
+    for device in state.get("mobile_access", {}).get("devices", []):
+        if device["device_id"] == payload.get("device_id"):
+            device["revoked_at"] = iso(utcnow())
+            save_state(state)
+            return {"ok": True}
+    return fail("设备不存在", "not_found")
+
+
 COMMANDS = {
+    "mobile-status": cmd_mobile_status,
+    "set-mobile-access": cmd_set_mobile_access,
+    "create-mobile-pairing": cmd_create_mobile_pairing,
+    "revoke-mobile-device": cmd_revoke_mobile_device,
+    "mobile-serve": lambda s, p: fail("FakeCore 禁止启动真实手机监听服务", "forbidden"),
     "prepare-task-ai-action": lambda s, p: cmd_task_ai_action_fixture(s, p),
     "start-task-ai-action": lambda s, p: cmd_task_ai_action_fixture(s, p, start=True),
     "engine-status": cmd_engine_status,

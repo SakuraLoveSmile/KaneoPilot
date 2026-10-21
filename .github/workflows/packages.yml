@@ -1,0 +1,314 @@
+name: Packages
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.identity.outputs.release }}
+      version: ${{ steps.identity.outputs.version }}
+      sha: ${{ steps.identity.outputs.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve immutable build identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, subprocess
+          release = os.environ['GITHUB_REF_TYPE'] == 'tag'
+          tag = os.environ['GITHUB_REF_NAME']
+          if release and not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
+              raise SystemExit('Only stable vX.Y.Z tags are supported')
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'release={str(release).lower()}\nversion={tag[1:] if release else "0.0.0"}\nsha={sha}\n')
+          PY
+
+  checks:
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Install and verify real pytest
+        id: pytest
+        run: |
+          python3 -m pip install pytest==8.4.2
+          python3 -I - <<'PY'
+          import pathlib, pytest, sysconfig
+          module = pathlib.Path(pytest.__file__).resolve()
+          site_packages = pathlib.Path(sysconfig.get_paths()['purelib']).resolve()
+          assert module.is_relative_to(site_packages), f'Unexpected pytest module: {module}'
+          print('Real pytest:', pytest.__version__, module)
+          PY
+      - name: Release recovery and packaging checks
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          python3 -m unittest discover -s scripts/tests -v 2>&1 | tee "$RUNNER_TEMP/test-reports/packaging.log"
+          bash -n scripts/build_app.sh scripts/build_dmg.sh 2>&1 | tee -a "$RUNNER_TEMP/test-reports/packaging.log"
+          git diff --check 2>&1 | tee -a "$RUNNER_TEMP/test-reports/packaging.log"
+      - name: Core isolated tests
+        if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
+        working-directory: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/core.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/core.log"
+      - name: Integration fixture tests
+        if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/integration.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/integration.log"
+      - name: Preserve isolated check reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: isolated-check-reports-${{ github.run_number }}
+          path: ${{ runner.temp }}/test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install fixed Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Android unit and lint checks
+        working-directory: android
+        env:
+          VERSION_NAME: ${{ needs.identity.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" --continue testDebugUnitTest lintDebug
+      - name: Build debug APK
+        id: debug-build
+        if: ${{ !cancelled() }}
+        working-directory: android
+        env:
+          VERSION_NAME: ${{ needs.identity.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug
+      - name: Restore release signing key
+        id: signing-key
+        if: ${{ !cancelled() && needs.identity.outputs.release == 'true' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" || { echo 'Missing Android release signing secrets' >&2; exit 1; }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kaneopilot-release.keystore"
+      - name: Signed release APK
+        id: release-build
+        if: ${{ !cancelled() && needs.identity.outputs.release == 'true' && steps.signing-key.outcome == 'success' }}
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/kaneopilot-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION_NAME: ${{ needs.identity.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleRelease
+      - name: Stage verified Android artifact
+        id: android-package
+        if: ${{ !cancelled() && ((needs.identity.outputs.release == 'true' && steps.release-build.outcome == 'success') || (needs.identity.outputs.release == 'false' && steps.debug-build.outcome == 'success')) }}
+        env:
+          RELEASE: ${{ needs.identity.outputs.release }}
+          VERSION_NAME: ${{ needs.identity.outputs.version }}
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/android-package"
+          if [ "$RELEASE" = true ]; then
+            apk=android/app/build/outputs/apk/release/app-release.apk
+            name="KaneoPilot-$VERSION_NAME-android.apk"
+          else
+            apk=android/app/build/outputs/apk/debug/app-debug.apk
+            name="KaneoPilot-ci-$BUILD_NUMBER-android-debug.apk"
+          fi
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+          python3 - <<'PYVERIFY'
+          import os, pathlib, re
+          badging = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'apk-badging.txt').read_text()
+          package = badging.splitlines()[0]
+          assert "name='com.sakurasep.kaneopilot'" in package, 'Unexpected APK application ID'
+          assert re.search(r"versionCode='([^']+)'", package).group(1) == os.environ['BUILD_NUMBER'], 'APK build number mismatch'
+          assert re.search(r"versionName='([^']+)'", package).group(1) == os.environ['VERSION_NAME'], 'APK version mismatch'
+          PYVERIFY
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/apk-verification.txt"
+          fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-verification.txt" | tr 'A-F' 'a-f')
+          cp "$apk" "$RUNNER_TEMP/android-package/$name"
+          python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/android-package/$name" --platform android --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures any --output "$RUNNER_TEMP/android-package/android-metadata.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.android-package.outcome == 'success' }}
+        with:
+          name: android-${{ needs.identity.outputs.release == 'true' && 'release-signed' || 'debug' }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/android-package/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve Android test and lint reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-check-reports-${{ github.run_number }}
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/test-results/
+            android/app/build/reports/lint-results-*
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/kaneopilot-release.keystore"
+
+  macos:
+    needs: identity
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Affected desktop fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/macos-reports"
+          result=0
+          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures; do
+            if bash "macos/tests/$fixture.sh" 2>&1 | tee "$RUNNER_TEMP/macos-reports/$fixture.log"; then
+              echo "$fixture passed"
+            else
+              result=1
+            fi
+          done
+          exit "$result"
+      - name: Build and verify Universal DMG
+        id: macos-package
+        if: ${{ !cancelled() }}
+        env:
+          ARCHS: arm64 x86_64
+          VERSION_NAME: ${{ needs.identity.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+          RELEASE: ${{ needs.identity.outputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export APP_OUTPUT_DIR="$RUNNER_TEMP/macos-build"
+          export DERIVED_DATA_DIR="$RUNNER_TEMP/KaneoPilotDerivedData"
+          if [ "$RELEASE" = true ]; then
+            export DMG_NAME="KaneoPilot-$VERSION_NAME-macos-universal.dmg"
+          else
+            export DMG_NAME="KaneoPilot-ci-$BUILD_NUMBER-macos-universal-local-signed.dmg"
+          fi
+          mkdir -p "$RUNNER_TEMP/macos-reports"
+          bash scripts/build_dmg.sh 2>&1 | tee "$RUNNER_TEMP/macos-reports/dmg-build.log"
+          app="$APP_OUTPUT_DIR/KaneoPilot.app"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/KaneoPilot"
+          codesign -d --verbose=4 "$APP_OUTPUT_DIR/$DMG_NAME" 2> "$RUNNER_TEMP/mac-signature.txt"
+          fingerprint=$(sed -n 's/^CandidateCDHashFull sha256=//p' "$RUNNER_TEMP/mac-signature.txt" | head -1)
+          mkdir -p "$RUNNER_TEMP/macos-package"
+          cp "$APP_OUTPUT_DIR/$DMG_NAME" "$RUNNER_TEMP/macos-package/"
+          python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/macos-package/$DMG_NAME" --platform macos --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures arm64,x86_64 --output "$RUNNER_TEMP/macos-package/macos-metadata.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.macos-package.outcome == 'success' }}
+        with:
+          name: macos-universal-local-signed-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-package/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve desktop check and packaging reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-check-reports-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    if: ${{ needs.identity.outputs.release == 'true' && needs.checks.result == 'success' && needs.android.result == 'success' && needs.macos.result == 'success' }}
+    needs: [identity, checks, android, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-release-signed-${{ github.run_number }}
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-universal-local-signed-${{ github.run_number }}
+          path: release
+      - name: Assemble checksums and immutable manifest
+        env:
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+        run: python3 scripts/release_bundle.py prepare --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
+      - name: Publish or verify this build's release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+        run: python3 scripts/release_bundle.py publish --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"

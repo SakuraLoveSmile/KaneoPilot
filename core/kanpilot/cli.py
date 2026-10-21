@@ -27,6 +27,21 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "mobile-status": ({}, _automation_command("mobile_access", "cmd_mobile_status")),
+    "set-mobile-access": (
+        {"enabled": (True, "bool"), "bind_host": (False, "str"), "port": (False, "int")},
+        _automation_command("mobile_access", "cmd_set_mobile_access")),
+    "create-mobile-pairing": ({}, _automation_command("mobile_access", "cmd_create_mobile_pairing")),
+    "revoke-mobile-device": (
+        {"device_id": (True, "str")}, _automation_command("mobile_access", "cmd_revoke_mobile_device")),
+    "mobile-serve": ({}, _automation_command("mobile_access", "cmd_mobile_serve")),
+    "mobile-request": (
+        {"kind": (True, "str"), "token": (False, "str"), "data": (True, "dict")},
+        _automation_command("mobile_access", "cmd_mobile_request")),
+    "get-review-report": (
+        {key: (True, "str") for key in (
+            "task_id", "review_key", "expected_execution_run_id", "expected_report_sha256")},
+        _automation_command("mobile_access", "cmd_get_review_report")),
     "prepare-task-release": (
         {"task_id": (True, "str")},
         _automation_command("release_delivery", "cmd_prepare_task_release")),
@@ -211,7 +226,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_queue.cmd_set_priority,
     ),
     "set-paused": (
-        {"stage": (True, "str|null"), "paused": (True, "bool")},
+        {"stage": (True, "str|null"), "paused": (True, "bool"),
+         "expected_paused": (False, "bool")},
         cmd_queue.cmd_set_paused,
     ),
     "resolve": (
@@ -719,6 +735,10 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
     if command not in COMMANDS:
         raise util.KanpilotError("bad_request", f"unknown command {command}")
     payload = validate_payload(command, payload)
+    if command in {"mobile-status", "set-mobile-access", "create-mobile-pairing",
+                   "revoke-mobile-device", "mobile-serve", "mobile-request"}:
+        from .mobile_access import require_existing_database
+        require_existing_database(db_path)
     allow_upgrade = (command == "migrate")
     ctx = Context(db_path, allow_upgrade=allow_upgrade)
     try:

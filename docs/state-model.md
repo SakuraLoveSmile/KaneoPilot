@@ -473,3 +473,8 @@ protocol §5.27.17 的 direct fix_request 是同任务当前修复轮，held→q
 任务内一次性 AI 合并冲突处理沿用 direct 身份与内部状态，`source_kind=merge_conflict`，只经用户确认从 delivery 启动；不消费 Review 修复次数。queued 与尚未发送的 dispatching/prepared/submitting 显示“AI 处理待启动”，真实 running 显示“AI 正在处理”，awaiting_review 显示“处理后待复审”。原 pass 清为历史，新合并提交必须经过同 run/head 的新 Review；通过/需后续修复/阻塞/失败结果保存到 ai_action_history，清当前 fix_request 不删除处理历史。仅展示新增处理状态，不新增任务 status 或数据库表；完整命令与 Git 双父提交契约见 protocol 的“任务内 AI 一次性处理”。
 
 该处理已结束但验证报告缺证时保持 needs_user/monitor。显式 `retry_verification` 绑定当前执行轮，创建 queued 补报轮并保留 `fix_request.verification_recovery`、原计划/配置、原 run 与报告、源码/索引及合并双父现场；派发前再次复核，不重新准备合并或规划。当前 run 清空至新 dispatch 领取，不把旧轮当新轮开始。源码、索引、合并标记或远端身份漂移拒绝。补报仍缺证时回到 needs_user，不自动付费重试；新报告通过后才允许核心双父提交与新 Review。新 command_verification spec 的冻结命令贯通 Plus 批准绑定，提交报告前缺项属于可修正的当前轮工具错误，不能产生成功草稿。
+
+
+## 安卓控制台设备状态（2026-10-21）
+
+按 [安卓控制台契约 v1](mobile-console-contract.md)，配置、设备及一次性配对摘要保存在 settings 的 mobile.* 命名空间；写动作回执复用 runtime_operations 的 mobile:<device_id> scope。设备令牌和配对令牌只保存 SHA256，私钥材料由核心保存到 app support/mobile 的受限文件。任务表与 schema 版本保持 6；手机启动接口不能创建空数据库或自动迁移。

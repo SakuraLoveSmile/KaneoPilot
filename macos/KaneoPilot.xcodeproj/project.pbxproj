@@ -39,6 +39,9 @@
 		BA5E00000000000000001160 /* SessionReaderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001060 /* SessionReaderStore.swift */; };
 		BA5E00000000000000001161 /* SessionMessagePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001061 /* SessionMessagePresentation.swift */; };
 		BA5E00000000000000001162 /* SessionMessageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001062 /* SessionMessageDetailView.swift */; };
+		BA5E00000000000000001170 /* MobileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001070 /* MobileModels.swift */; };
+		BA5E00000000000000001171 /* MobileServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001071 /* MobileServiceManager.swift */; };
+		BA5E00000000000000001172 /* MobileConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001072 /* MobileConnectionView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -77,6 +80,9 @@
 		BA5E00000000000000001060 /* SessionReaderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReaderStore.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001061 /* SessionMessagePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessagePresentation.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001062 /* SessionMessageDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessageDetailView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001070 /* MobileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModels.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001071 /* MobileServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileServiceManager.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001072 /* MobileConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileConnectionView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -124,6 +130,8 @@
 			isa = PBXGroup;
 			children = (
 				BA5E00000000000000001002 /* CoreLocator.swift */,
+				BA5E00000000000000001071 /* MobileServiceManager.swift */,
+				BA5E00000000000000001070 /* MobileModels.swift */,
 				BA5E00000000000000001003 /* CoreClient.swift */,
 				BA5E00000000000000001004 /* Models.swift */,
 				BA5E00000000000000001042 /* LoginItem.swift */,
@@ -147,6 +155,7 @@
 				BA5E00000000000000001009 /* PendingView.swift */,
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
+				BA5E00000000000000001072 /* MobileConnectionView.swift */,
 				BA5E00000000000000001012 /* Components.swift */,
 				BA5E00000000000000001060 /* SessionReaderStore.swift */,
 				BA5E00000000000000001061 /* SessionMessagePresentation.swift */,
@@ -244,6 +253,9 @@
 			files = (
 				BA5E00000000000000001101 /* KaneoPilotApp.swift in Sources */,
 				BA5E00000000000000001102 /* CoreLocator.swift in Sources */,
+				BA5E00000000000000001172 /* MobileConnectionView.swift in Sources */,
+				BA5E00000000000000001171 /* MobileServiceManager.swift in Sources */,
+				BA5E00000000000000001170 /* MobileModels.swift in Sources */,
 				BA5E00000000000000001103 /* CoreClient.swift in Sources */,
 				BA5E00000000000000001104 /* Models.swift in Sources */,
 				BA5E00000000000000001143 /* MenuBarView.swift in Sources */,
@@ -410,7 +422,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.0.2.10:8090 ）来执行队列中的计划任务。";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要通过本机网络提供你启用的手机连接服务，并访问已配置的本机模型服务。";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -438,7 +450,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KaneoPilot;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要访问本机网络上的模型服务（例如 http://192.0.2.10:8090 ）来执行队列中的计划任务。";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "KaneoPilot 需要通过本机网络提供你启用的手机连接服务，并访问已配置的本机模型服务。";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
