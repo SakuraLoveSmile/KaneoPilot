@@ -116,7 +116,7 @@ def assert_board(factory, task_id, column, substatus=None,
             f"{task_id} exception.label 应为 {exception_label!r}，实际 "
             f"{exc.get('label')!r}")
         assert t.get("board_substatus") == exception_label, (
-            "第六列 board_substatus 应等于 exception.label")
+            "board_substatus 应等于 exception.label")
     assert row.get("lifecycle_column") == t.get("lifecycle_column")
     return t
 
@@ -551,12 +551,20 @@ class TestReviewFixBoard:
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix_id, "review_key": "RK-BOARD-1"})
 
-        # 原任务：第六列 failed / 评审未通过·待修复，lifecycle_column=in_review
-        t = assert_board(factory, src, "failed", "评审未通过·待修复",
+        # §5.27.18：历史二级修复的父任务留评审列；Review 活动期间不能收尾。
+        t = assert_board(factory, src, "in_review", "收尾校验受阻",
                          lifecycle_column="in_review",
-                         exception_label="评审未通过·待修复")
-        assert t["exception"]["kind"] == "review_rejected"
-        assert t["exception"]["fix_task_id"] == fix_id
+                         exception_label="收尾校验受阻")
+        assert t["exception"]["kind"] == "parent_closeout_blocked"
+        assert t["exception"]["severity"] == "blocked"
+        assert t["exception"]["fix_task_id"] is None
+        assert t["fix_task_id"] == fix_id
+        closeout = t["parent_closeout"]
+        assert closeout["state"] == "blocked"
+        assert closeout["can_complete"] is False
+        assert closeout["required_children"] == 1
+        assert closeout["completed_children"] == 0
+        assert {b["code"] for b in closeout["blockers"]} == {"active_request"}
         summary = t.get("review_summary")
         assert summary is not None, "register-review 后应有 review_summary"
         assert {"conclusion", "registered_at", "fix_task_id", "review_key",

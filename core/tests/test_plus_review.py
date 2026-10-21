@@ -7,13 +7,13 @@
   （修复周期）原报告/执行证据复制；材料缺失必须显式记原因，不静默省略。
 - ``mode="plan"`` + ``permissionMode="auto"`` 新会话；只要求输出版本化分段结果。
 - 三结论登记：pass → register→advance→report succeeded；changes_requested →
-  **先** create-review-fix **再** register-review（带 review_key/fix_task_id/
-  fix_task_source_sha256）→ report succeeded；blocked → register→report needs_user。
-- 登记身份：register-review/create-review-fix/advance-task 都带 request_id +
+  register-review 冻结同任务 direct/held 材料 → report succeeded；不创建子任务
+  或新计划，独立 detached 执行工作树不能自动启动同分支修复。
+- 登记身份：register-review/advance-task 都带 request_id +
   run_id + expected_execution_run_id。
 - 意外 proposal：只 reject 关闭并记 review_blocked，绝不按其 markdown 登记 pass。
 - 格式错误/转录不完整/身份不符/权限等待/超时 → 绝不写 pass、不推进 done。
-- 部分成功恢复：登记一致跳过 register、同 key fix 不重复创建、report 响应丢失
+- 部分成功恢复：登记一致跳过 register、保留同 key direct 材料、report 响应丢失
   只读核对不重放；零 ``pi -p`` 子进程（Popen spy）。
 
 隔离：fake MCP server 复用 test_plus_controller 的实现；仓库与专属 worktree 都
@@ -31,7 +31,7 @@ from unittest import mock
 
 from helpers import KanpilotTestCase  # noqa: E402,F401
 from kanpilot import (  # noqa: E402
-    constants, db, pi_desktop_controller, pi_desktop_review, round_store, util,
+    constants, core, db, pi_desktop_controller, pi_desktop_review, round_store, util,
 )
 from test_plus_controller import (  # noqa: E402
     SESSION_ID, TASK_ID, TURN_ID, PlusCase, assistant_json,
@@ -203,7 +203,7 @@ class ReviewCase(PlusCase):
                     pid=os.getpid(), worktree_path=str(worktree),
                 )
                 conn.execute(
-                    "UPDATE tasks SET status='in_review', run_id=? "
+                    "UPDATE tasks SET status='in_review', stage='review', run_id=? "
                     "WHERE task_id=?",
                     (execution_run_id, TASK_ID),
                 )
@@ -266,6 +266,32 @@ class ReviewCase(PlusCase):
             ).fetchall()
         finally:
             conn.close()
+
+    def assert_held_direct_fix(self, job, *, priority=None):
+        """Detached dirty execution can be reviewed, but cannot auto-start repair."""
+        task = self.task(TASK_ID)
+        fix = task['extra']['fix_request']
+        self.assertEqual((fix['mode'], fix['state']), ('direct', 'held'))
+        self.assertEqual(task['run_id'], EXECUTION_RUN_ID)
+        self.assertEqual(fix['source_execution_run_id'], EXECUTION_RUN_ID)
+        self.assertEqual(fix['review_run_id'], job['run_id'])
+        self.assertEqual(fix['report_path'], job['report_path'])
+        self.assertEqual(fix['report_sha256'], util.sha256_file(Path(job['report_path'])))
+        self.assertEqual(fix['plan_sha256'], task['plan_sha256'])
+        self.assertEqual(fix['review_key'], pi_desktop_review.review_key(
+            TASK_ID, EXECUTION_RUN_ID, job['report_sha256']))
+        if priority is not None:
+            self.assertEqual(fix['priority'], priority)
+        self.assertIsNone(task['fix_task_id'])
+        self.assertEqual(self.fix_tasks(), [])
+        self.assertFalse(task['review_repair']['can_start'])
+        self.assertEqual(task['review_repair']['reason'], core.FIX_BRANCH_UNAVAILABLE_DETAIL)
+        self.assertNotIn('create-review-fix', self.commands())
+        self.assertNotIn('publish-plan', self.commands())
+        self.assertFalse(any(request['kind'] in ('plan', 'dispatch')
+                             and request['status'] in ('queued', 'claimed')
+                             for request in self.requests()))
+        return fix
 
     def review_result(self, conclusion, markdown="# 评审\n\n结论与证据",
                       fix=None):
@@ -419,7 +445,7 @@ class TestReviewConclusions(ReviewCase):
         transcript = json.loads((Path(job["invocation_dir"]) / "transcript.json").read_text())
         self.assertEqual(transcript["messages"][-1]["content"], text)
 
-    def test_text_result_registers_raw_markdown_and_creates_one_fix(self):
+    def test_text_result_registers_raw_markdown_and_holds_direct_fix(self):
         self.make_scene()
         from test_plus_review_text import envelope
         markdown = '## 评审\n`"${baseUrl}${href}"` 代码需要修复。\n```dart\nvar p = r"C:\\new";\n```'
@@ -430,8 +456,8 @@ class TestReviewConclusions(ReviewCase):
         self.assertEqual(job["result_format"], "review_text_v1")
         self.assertEqual(Path(job["report_path"]).read_text(), markdown)
         self.assertEqual(job["conclusion"], "changes_requested")
-        self.assertEqual(len(self.fix_tasks()), 1)
-        self.assertEqual(self.payload_of("create-review-fix")["priority"], "medium")
+        self.assert_held_direct_fix(job, priority='medium')
+        self.assertEqual(self.payload_of('register-review')['fix']['priority'], 'medium')
         self.assertNotIn("advance-task", self.commands())
         self.assertEqual(self.task(TASK_ID)["review_summary"]["conclusion"], "changes_requested")
         self.assertEqual(self.request_by_id(job["request_id"])["status"], "succeeded")
@@ -451,10 +477,11 @@ class TestReviewConclusions(ReviewCase):
             "removed_fence_commentary", "missing_fix_priority=no-priority",
         ])
         self.assertEqual(Path(job["report_path"]).read_text(), markdown)
-        self.assertEqual(self.payload_of("create-review-fix")["priority"], "no-priority")
+        self.assert_held_direct_fix(job, priority='no-priority')
+        self.assertEqual(self.payload_of('register-review')['fix']['priority'], 'no-priority')
         self.assertEqual([c for c in self.commands() if c in (
             "create-review-fix", "register-review", "advance-task", "report")],
-            ["create-review-fix", "register-review", "report"])
+            ["register-review", "report"])
         self.assertNotEqual(self.task(TASK_ID)["status"], "done")
         transcript = json.loads((Path(job["invocation_dir"]) / "transcript.json").read_text())
         self.assertEqual(transcript["messages"][-1]["content"], self.server.messages[-1]["content"])
@@ -503,7 +530,7 @@ class TestReviewConclusions(ReviewCase):
         self.assertEqual(run["send_state"], "sent")
         self.assertIn("invocation_id", run)
 
-    def test_changes_requested_creates_fix_before_register(self):
+    def test_changes_requested_registers_held_materials_without_child_or_plan(self):
         self.make_scene()
         self.review_result("changes_requested", fix={
             "title": "修复返回值", "description": "app.py 返回 1，应为 0",
@@ -514,31 +541,21 @@ class TestReviewConclusions(ReviewCase):
 
         names = [name for name in self.commands()
                  if name in ("create-review-fix", "register-review", "report")]
-        self.assertEqual(names, ["create-review-fix", "register-review", "report"],
-                         "changes_requested 必须先 create 后 register")
+        self.assertEqual(names, ["register-review", "report"])
         job = self.review_job()
         register = self.payload_of("register-review")
         self.assertEqual(register["conclusion"], "changes_requested")
         self.assertEqual(register["review_key"], job["review_key"])
-        self.assertEqual(register["fix_task_id"], job["fix_task_id"])
-        self.assertEqual(register["fix_task_source_sha256"],
-                         job["fix_task_source_sha256"])
+        self.assertEqual(register['fix_mode'], 'same_task')
+        self.assertNotIn('fix_task_id', register)
         expected_key = pi_desktop_review.review_key(
             TASK_ID, EXECUTION_RUN_ID, job["report_sha256"]
         )
         self.assertEqual(job["review_key"], expected_key)
-        create = self.payload_of("create-review-fix")
-        self.assertEqual(create["dedupe_key"], expected_key)
-        self.assertEqual(create["priority"], "high")
-        self.assertEqual(create["expected_execution_run_id"], EXECUTION_RUN_ID)
-
-        fix_rows = self.fix_tasks()
-        self.assertEqual(len(fix_rows), 1)
-        self.assertEqual(fix_rows[0]["task_id"], job["fix_task_id"])
-        self.assertEqual(fix_rows[0]["status"], "needs_plan",
-                         "修复任务等用户手动发起 review_fix 计划")
+        self.assertEqual(register['expected_execution_run_id'], EXECUTION_RUN_ID)
+        fix = self.assert_held_direct_fix(job, priority='high')
+        self.assertEqual({key: fix[key] for key in ('title', 'description', 'priority')}, register['fix'])
         task = self.task(TASK_ID)
-        self.assertEqual(task["fix_task_id"], job["fix_task_id"])
         self.assertEqual(task["review_summary"]["conclusion"],
                          "changes_requested")
         self.assertEqual(task["status"], "in_review")
@@ -757,23 +774,22 @@ class TestReviewRecovery(ReviewCase):
             self.assertEqual(self._run_with_failing_report(), 1)
         job = self.review_job()
         self.assertEqual(job["status"], "failed")
-        self.assertTrue(job["checkpoints"]["fix_created"])
         self.assertTrue(job["checkpoints"]["registered"])
         self.assertFalse(job["checkpoints"].get("reported"))
-        self.assertEqual(len(self.fix_tasks()), 1)
+        held = self.assert_held_direct_fix(job)
         create_calls = self.commands().count("create-review-fix")
         register_calls = self.commands().count("register-review")
         request = self.request_by_id(job["request_id"])
         self.assertEqual(request["status"], "claimed",
                          "汇报未完成，租约仍在有效期内")
 
-        # 恢复：登记一致 → 跳过 register、不重复建 fix，只完成 report。
+        # 恢复：登记一致 → 跳过 register、保持同一 held 材料，只完成 report。
         self.assertEqual(self.run_review(resume=True), 0)
         self.assertEqual(self.commands().count("create-review-fix"),
                          create_calls)
         self.assertEqual(self.commands().count("register-review"),
                          register_calls)
-        self.assertEqual(len(self.fix_tasks()), 1)
+        self.assertEqual(self.assert_held_direct_fix(self.review_job()), held)
         request = self.request_by_id(job["request_id"])
         self.assertEqual(request["status"], "succeeded")
         self.assertEqual(request["result"]["outcome"], "succeeded")

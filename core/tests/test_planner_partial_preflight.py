@@ -7,7 +7,7 @@ from unittest import mock
 from helpers import KanpilotTestCase
 import test_planner_inputs_automation as fixtures
 from kanpilot import (claude_planner, db, dsh_events, pi_desktop_planner,
-                       planner_config, planner_runner, util)
+                       planner_config, planner_inputs, planner_runner, util)
 
 
 class TestPartialPlannerPreflight(KanpilotTestCase):
@@ -60,6 +60,9 @@ class TestPartialPlannerPreflight(KanpilotTestCase):
                 payload = db.request_payload(db.get_request(conn, request_id))
                 partial = next(f for f in payload["manifest"]["files"] if f.get("repository_path") == "partial.py")
                 partial["path"] = "../escaped-copy.txt"
+                # Keep the forged manifest internally consistent so this case
+                # exercises the path boundary after the fingerprint gate.
+                payload["planner_input_sha256"] = planner_inputs._manifest_sha(payload["manifest"])
                 db.update_request(conn, request_id, util.now_iso(), payload_json=payload)
                 conn.commit()
             finally:
@@ -83,6 +86,9 @@ class TestPartialPlannerPreflight(KanpilotTestCase):
             task = db.require_task(conn, task_id)
             self.assertFalse(task["plan_path"])
             self.assertIn("重新准备材料", task["failure_reason"])
+            expected_reason = {"bytes": "sha256_mismatch", "symlink": "symlink",
+                               "directory_symlink": "symlink", "escape": "unsafe_path"}[tamper]
+            self.assertIn(expected_reason, task["failure_reason"])
         finally:
             conn.close()
         run_dir = self.runs_root / task_id / run_id

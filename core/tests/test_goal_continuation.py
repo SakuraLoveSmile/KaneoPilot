@@ -185,7 +185,7 @@ class TestGoalContinuation(PiDesktopCase):
     def test_continuation_only_expired_goal_does_not_launch_observer(self):
         spec, old_dir, job, _ = self.scene()
         run_dir = self.runs_root / TASK_ID / RUN_ID
-        run_dir.mkdir(parents=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
         spec["runs_dir"] = str(run_dir)
         self.write_spec(spec)
         for name in ("job.json", "events.jsonl"):

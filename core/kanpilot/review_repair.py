@@ -168,7 +168,9 @@ def start_inline(conn, task, now, value, actor):
     extra = db.task_extra(task)
     if core.is_automation_managed(task):
         automation = core.automation_of(task)
-        automation.update(fix_round=_round_count(task) + 1, plan_wanted=False)
+        automation.update(fix_round=_round_count(task) + 1, plan_wanted=False,
+                          replan_requested_at=None, replan_remote_status=None,
+                          replan_worktree_sha256=None)
         extra["automation"] = automation
         count = automation["fix_round"]
     else:

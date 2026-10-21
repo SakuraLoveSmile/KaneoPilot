@@ -51,7 +51,7 @@ except ImportError:  # 包上下文
     from tests.test_migration import _migrate  # noqa: E402
 
 try:
-    from conftest import make_due  # noqa: E402
+    from tests.conftest import make_due  # noqa: E402
 except ImportError:  # 包上下文
     from tests.conftest import make_due  # noqa: E402
 
@@ -352,7 +352,7 @@ def test_scenario_lease_expired_per_step_reclaim(factory, tmp_env, cli):
     结束 dispatch 请求，无 claimed 请求可过期）。dispatch 中途失联 → 释放后
     needs_user（protocol §5.27.4 / state-model §7）。
     """
-    from conftest import expire_lease  # noqa: E402
+    from tests.conftest import expire_lease  # noqa: E402
 
     ready = factory.make_ready()
     tid = ready.task.task_id
@@ -450,7 +450,7 @@ def test_scenario_concurrency_two_slots_four_tasks_no_deadlock(
     from kanpilot import (automation_policy, bridge as kbridge,
                           git_delivery, planner_inputs, remote as kremote)
 
-    from conftest import PROJECTS  # noqa: E402
+    from tests.conftest import PROJECTS  # noqa: E402
     project = "StudyTool"
     project_id = PROJECTS[project]
     repository = tmp_env.repos_root / project
@@ -738,7 +738,7 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
     所有路径（含 HOME、DB、凭据、Git、runs、Plus 连接文件）属于 tmp_env；
     spawn 只用受控内进程 runner，不运行用户执行器、不访问正式服务。
     """
-    from conftest import rewind_finished_at, ui_evidence, write_plan_file
+    from tests.conftest import rewind_finished_at, ui_evidence, write_plan_file
     from kanpilot import (auto_monitor, automation_policy, engine_claim_scope, git_delivery, round_store,
                           runtime_client)
 

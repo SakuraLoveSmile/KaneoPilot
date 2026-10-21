@@ -124,6 +124,8 @@ enum Labels {
         case "reported": return "执行端汇报"
         case "review_registered": return "评审登记"
         case "review_repair_prepared": return "评审修复材料已准备"
+        case "task_ai_action_started": return "AI 一次性处理已排队"
+        case "task_ai_action_reviewed": return "AI 处理复审结果"
         case "review_supplemented": return "评审证据已补充"
         case "verification_checks_started": return "验证检查已开始"
         case "verification_checks_completed": return "验证检查已完成"

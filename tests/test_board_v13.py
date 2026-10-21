@@ -2,21 +2,23 @@
 
 覆盖契约条款：protocol §2「看板列」v1.3 口径与伴随字段、§5.15.4
 （`board_column`/`lifecycle_column`/`exception` 三字段、六列唯一分列依据、
-异常统一进第六列 `failed`、kind/label/severity 判定表、观测异常自动清除、
+一般异常进第六列 `failed`、§5.27.18 收尾阻塞留评审列、kind/label/severity 判定表、观测异常自动清除、
 历史错误不影响已恢复任务、收到新会话日志不解除异常）、§5.9（新一轮
 in-review 清空上一周期结论）、§5.7/§5.8（修复链）、§5.14（v1.2 一致性：
 list/get 同列、counts.board、board_column 过滤）；state-model §2.2。
 
 关键不变量（本文件反复断言）：
 
-- **互斥**：每任务恰归入一列；`board_column=='failed'` ⟺ `exception` 非空；
-  无异常时 `board_column == lifecycle_column`（异常时二者必然不同）。
+- **互斥**：每任务恰归入一列；一般异常进入 `failed`；收尾阻塞保留
+  `in_review`。无异常时 `board_column == lifecycle_column`。
 - `lifecycle_column` 只取五列（纯生命周期位置，needs_user 按 failure_stage
-  归列），`board_column` 取六列（异常一律进 `failed`）。
-- `board_substatus` 在第六列等于 `exception.label`；前五列维持 v1.2 词表。
+  归列），`board_column` 取六列（一般异常进 `failed`，收尾阻塞留评审列）。
+- `board_substatus` 在第六列等于 `exception.label`；收尾阻塞采用 §5.27.18 词表。
 """
 
 from collections import Counter
+import json
+import sqlite3
 
 import pytest
 
@@ -53,12 +55,13 @@ NORMAL_SUBSTATUS = {
 EXCEPTION_LABELS = {
     "规划失败", "派发失败", "执行失败", "失败",
     "发送不明", "需人工处理", "执行端失联",
-    "评审受阻", "监控异常", "评审未通过·待修复",
+    "评审受阻", "监控异常", "评审未通过·待修复", "收尾校验受阻",
 }
 
 EXCEPTION_KINDS = {
     "failed", "send_unknown", "manual_block", "executor_lost",
     "review_blocked", "observation_blocked", "review_rejected",
+    "parent_closeout_blocked",
 }
 
 EXCEPTION_KEYS = {
@@ -153,18 +156,42 @@ def assert_exception(factory, cli, task_id, *, kind, label, severity,
     assert exc["detail"] == t["blocked_reason"], (
         f"exception.detail 应与 blocked_reason 一致："
         f"{exc['detail']!r} != {t['blocked_reason']!r}")
-    # 互斥：异常卡只在第六列；第六列子状态 = exception.label
+    # 每卡只在预期列；收尾阻塞留评审列，其他异常在第六列。
     assert t["board_column"] == board_column, (
         f"{task_id} board_column 应为 {board_column}：{t['board_column']}")
     assert t["board_substatus"] == label, (
-        f"{task_id} 第六列 board_substatus 应等于 exception.label "
+        f"{task_id} board_substatus 应等于 exception.label "
         f"{label}：{t['board_substatus']}")
     if lifecycle_column is not None:
         assert t["lifecycle_column"] == lifecycle_column, (
             f"{task_id} lifecycle_column 应为 {lifecycle_column}："
             f"{t['lifecycle_column']}")
-        assert t["lifecycle_column"] != t["board_column"], (
-            "异常任务的 lifecycle_column 与 board_column 必须不同（互斥）")
+        if kind == "parent_closeout_blocked":
+            assert t["lifecycle_column"] == t["board_column"] == "in_review"
+        else:
+            assert t["lifecycle_column"] != t["board_column"], (
+                "第六列异常任务的 lifecycle_column 与 board_column 必须不同")
+    return t
+
+
+def assert_parent_closeout_blocked(factory, cli, task_id, fix_task_id):
+    """历史修复仍有已领取的 Review，父任务不能抢先收尾。"""
+    t = assert_exception(
+        factory, cli, task_id, kind="parent_closeout_blocked",
+        label="收尾校验受阻", severity="blocked", board_column="in_review",
+        lifecycle_column="in_review", failure_code=None)
+    closeout = t["parent_closeout"]
+    assert closeout["state"] == "blocked"
+    assert closeout["title"] == "收尾校验受阻"
+    assert closeout["can_complete"] is False
+    assert closeout["required_children"] == 1
+    assert closeout["completed_children"] == 0
+    assert {b["code"] for b in closeout["blockers"]} == {"active_request"}
+    assert closeout["reason"] == closeout["blockers"][0]["message"]
+    assert t["fix_task_id"] == fix_task_id
+    assert t["review_summary"]["fix_task_id"] == fix_task_id
+    row, _ = pair(factory, cli, task_id)
+    assert row["parent_closeout"] == closeout
     return t
 
 
@@ -255,7 +282,7 @@ class TestClassificationMutex:
         return s
 
     def test_columns_are_mutually_exclusive(self, factory, cli, mixed):
-        """每任务恰归入一列；异常只在第六列；无异常时两列字段相同。"""
+        """每任务恰归入一列；收尾阻塞留评审列；无异常时两列字段相同。"""
         assert_normal(factory, cli, mixed["np"], "needs_plan", "待规划")
         assert_normal(factory, cli, mixed["ready"], "todo", "就绪")
         assert_normal(factory, cli, mixed["running"],
@@ -276,11 +303,8 @@ class TestClassificationMutex:
                          kind="executor_lost", label="执行端失联",
                          severity="blocked", lifecycle_column="in_progress",
                          failure_code=None)
-        assert_exception(factory, cli, mixed["review_rejected"],
-                         kind="review_rejected", label="评审未通过·待修复",
-                         severity="blocked", lifecycle_column="in_review",
-                         failure_code=None,
-                         fix_task_id=mixed["fix_id"])
+        assert_parent_closeout_blocked(
+            factory, cli, mixed["review_rejected"], mixed["fix_id"])
         # 修复任务自身是正常卡，不占原任务的列
         assert_normal(factory, cli, mixed["fix_id"], "needs_plan", "待规划")
 
@@ -314,17 +338,25 @@ class TestClassificationMutex:
             assert board[col] == manual.get(col, 0), (
                 f"counts.board[{col}]={board[col]} 与分组 "
                 f"{manual.get(col, 0)} 不一致")
-        assert manual["failed"] == 4, f"应有四个异常卡：{manual}"
-        assert board["failed"] == 4
+        assert dict(manual) == {
+            "needs_plan": 2, "todo": 1, "in_progress": 1,
+            "in_review": 2, "done": 1, "failed": 3,
+        }
+        assert board["failed"] == 3
 
-        # 异常卡互斥：exception 非空 ⟺ 第六列
+        # 普通异常只在第六列；收尾阻塞只在评审列，各任务仍只出现一次。
         for t in rows:
+            is_closeout = t["task_id"] == mixed["review_rejected"]
             assert (t["board_column"] == "failed") == (
-                t["exception"] is not None), (
+                t["exception"] is not None and not is_closeout), (
                 f"{t['task_id']} 列/异常不一致：{t['board_column']} "
                 f"{t['exception']}")
             if t["exception"] is None:
                 assert t["board_column"] == t["lifecycle_column"]
+            elif is_closeout:
+                assert t["exception"]["kind"] == "parent_closeout_blocked"
+                assert t["exception"]["severity"] == "blocked"
+                assert t["lifecycle_column"] == t["board_column"] == "in_review"
             else:
                 assert t["lifecycle_column"] in LIFECYCLE_COLUMNS
                 assert t["lifecycle_column"] != t["board_column"]
@@ -336,7 +368,6 @@ class TestClassificationMutex:
         failed_ids = {t["task_id"] for t in failed}
         assert failed_ids == {
             mixed["plan_failed"], mixed["send_unknown"], mixed["lost"],
-            mixed["review_rejected"],
         }
         for t in failed:
             assert t["board_substatus"] == t["exception"]["label"]
@@ -480,8 +511,8 @@ class TestExceptionKindTable:
                          label="执行端失联", severity="blocked",
                          lifecycle_column="todo", failure_code=None)
 
-    def test_review_rejected_with_fix_task(self, factory, cli):
-        """in_review + changes_requested → review_rejected，关联 fix_task_id。"""
+    def test_parent_closeout_blocked_with_fix_task(self, factory, cli, tmp_env):
+        """历史修复的活动 Review 和缺失身份均阻止父任务收尾。"""
         ir = factory.make_in_review(title="判定-评审未通过")
         src = ir.task.task_id
         rv = claim_request(factory, src, "review")
@@ -498,16 +529,32 @@ class TestExceptionKindTable:
             "run_id": rv["run_id"],
             "report_path": str(rep.path), "conclusion": "changes_requested",
             "fix_task_id": fix["fix_task_id"], "review_key": "RK-V13-KIND"})
-        t = assert_exception(factory, cli, src, kind="review_rejected",
-                             label="评审未通过·待修复", severity="blocked",
-                             lifecycle_column="in_review",
-                             failure_code=None,
-                             fix_task_id=fix["fix_task_id"])
+        t = assert_parent_closeout_blocked(factory, cli, src, fix["fix_task_id"])
         summary = t["review_summary"]
         assert summary["conclusion"] == "changes_requested"
         assert summary["fix_task_id"] == fix["fix_task_id"]
         assert summary["review_key"] == "RK-V13-KIND"
         assert_iso8601(summary["registered_at"])
+
+        # 隔离夹具破坏当前历史记录的报告绑定，不可凭 fix_task_id 视作可收尾。
+        with sqlite3.connect(tmp_env.db) as conn:
+            extra = json.loads(conn.execute(
+                "SELECT extra_json FROM tasks WHERE task_id=?", (src,)
+            ).fetchone()[0])
+            assert len(extra["review_history"]) == 1
+            extra["review_history"][0]["report_sha256"] = None
+            conn.execute("UPDATE tasks SET extra_json=? WHERE task_id=?",
+                         (json.dumps(extra), src))
+        t = assert_exception(
+            factory, cli, src, kind="parent_closeout_blocked",
+            label="收尾校验受阻", severity="blocked", board_column="in_review",
+            lifecycle_column="in_review", failure_code=None)
+        closeout = t["parent_closeout"]
+        assert closeout["state"] == "blocked"
+        assert closeout["can_complete"] is False
+        assert closeout["required_children"] == 0
+        assert "repair_binding_ambiguous" in {b["code"] for b in closeout["blockers"]}
+        assert t["review_summary"] == summary
 
 
 # ---------------------------------------------------------------------------
@@ -538,9 +585,7 @@ class TestReviewFixChain:
     def test_fix_task_runs_independent_flow(self, factory, cli):
         """修复任务走自己的 needs_plan→ready 流程，不占原任务的列。"""
         src, fix_id, _rv = self._rejected(factory, cli, "RK-V13-CHAIN")
-        assert_exception(factory, cli, src, kind="review_rejected",
-                         label="评审未通过·待修复", severity="blocked",
-                         lifecycle_column="in_review", fix_task_id=fix_id)
+        assert_parent_closeout_blocked(factory, cli, src, fix_id)
         # 修复任务：needs_plan 正常卡
         ft = assert_normal(factory, cli, fix_id, "needs_plan", "待规划")
         assert ft["plan_kind"] == "review_fix"
@@ -566,10 +611,8 @@ class TestReviewFixChain:
                 "review_key": "RK-V13-CHAIN",
             })
         assert_normal(factory, cli, fix_id, "todo", "就绪")
-        # 原任务仍在第六列，互不影响
-        assert_exception(factory, cli, src, kind="review_rejected",
-                         label="评审未通过·待修复", severity="blocked",
-                         lifecycle_column="in_review", fix_task_id=fix_id)
+        # 原任务仍在评审列等待收尾材料，子任务独立规划不解除阻塞
+        assert_parent_closeout_blocked(factory, cli, src, fix_id)
         assert plan.resp["task_status"] == "ready"
 
     def test_source_returns_to_in_review_after_new_round(self, factory, cli,
@@ -584,9 +627,7 @@ class TestReviewFixChain:
         进新一轮 in-review。
         """
         src, fix_id, rv = self._rejected(factory, cli, "RK-V13-ROUND")
-        assert_exception(factory, cli, src, kind="review_rejected",
-                         label="评审未通过·待修复", severity="blocked",
-                         lifecycle_column="in_review", fix_task_id=fix_id)
+        assert_parent_closeout_blocked(factory, cli, src, fix_id)
         # 评审执行端回报本轮完成（结论已登记）
         cli("report", {"request_id": rv["request_id"], "run_id": rv["run_id"],
                        "outcome": "succeeded", "note": "结论已登记"})

@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
@@ -392,6 +393,46 @@ class TestVerificationRecovery(KanpilotTestCase):
                 self.reject(code="verification_unconfirmed")
                 self.goal[field] = defaults[field]
         self.assertEqual(self.call("resolve", self.payload)["task_status"], "running")
+
+    def read_goal_evidence(self):
+        conn = db.connect(self.db_path)
+        try:
+            return verification_recovery.read_goal_evidence(conn, db.require_task(conn, self.task_id))
+        finally:
+            conn.close()
+
+    def test_honest_failed_reports_are_failure_evidence_but_cannot_recover(self):
+        self.goal["checks"][1] = dict(self.goal["checks"][1], exitCode=1, result="failed")
+        for verdict in ("partial", "blocked"):
+            with self.subTest(verdict=verdict):
+                self.goal["verdict"] = verdict
+                before = self.state()
+                with patch.object(subprocess, "run", side_effect=AssertionError("Pilot must not run verify")):
+                    evidence = self.read_goal_evidence()
+                self.assertFalse(evidence["coverage"]["ok"])
+                self.assertEqual(evidence["coverage"]["missing"], [])
+                self.assertEqual([row["exit_code"] for row in evidence["coverage"]["failed"]], [1])
+                self.assertEqual(evidence["report"]["verdict"], verdict)
+                self.assertEqual(before, self.state())
+                self.reject()
+
+    def test_nonmet_reports_require_complete_consistent_real_failures(self):
+        passed = goal_checks(self.commands)
+        failed = dict(passed[1], exitCode=1, result="failed")
+        cases = [
+            ("partial", passed),
+            ("unknown", [passed[0], failed]),
+            ("partial", [failed]),
+            ("partial", [dict(passed[0], exitCode=None), failed]),
+            ("partial", [dict(passed[0], exitCode=True), failed]),
+            ("partial", [dict(passed[0], exitCode=1, result="passed"), failed]),
+            ("partial", [passed[0], failed, dict(failed)]),
+            ("partial", [passed[0], dict(failed, command=" " + self.commands[1])]),
+        ]
+        for verdict, checks in cases:
+            with self.subTest(verdict=verdict, checks=checks):
+                self.goal.update(verdict=verdict, checks=checks)
+                self.reject(code="verification_unconfirmed")
 
 
     def test_versioned_plus_evidence_uses_current_turn_and_preserves_command_results(self):
