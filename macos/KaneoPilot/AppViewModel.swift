@@ -111,6 +111,7 @@ final class AppViewModel: ObservableObject {
     private var eventStage: String? = nil
     private var eventResult: String? = nil
     private var executionAnswerDrafts: [[String]: ExecutionAnswerStore] = [:]
+    private var executionStopOperations: [[String]: String] = [:]
     private var planAnswerDrafts: [String: PlanAnswerStore] = [:]
     private var reviewResolutionDrafts: [String: ReviewResolutionStore] = [:]
     private var verificationCheckOperations: [String: VerificationCheckStore] = [:]
@@ -999,6 +1000,22 @@ final class AppViewModel: ObservableObject {
         executionAnswerDrafts.values.filter {
             $0.taskID == taskID && $0.dirty && $0.question.identity != identity
         }.sorted { $0.question.openedAt < $1.question.openedAt }
+    }
+
+    func stopExecution(taskID: String, runID: String, operationID: String) async {
+        let key = [taskID, runID]
+        let frozenOperation = executionStopOperations[key] ?? operationID
+        executionStopOperations[key] = frozenOperation
+        await perform("停止本轮") {
+            let response = try await self.client.run("stop-execution", payload: [
+                "task_id": taskID, "run_id": runID, "operation_id": frozenOperation,
+            ], as: ExecutionQuestionCommandResponse.self)
+            switch response.status {
+            case "stopped": return "本轮已停止，工作树和执行记录已保留"
+            case "unknown": return "停止结果尚未确认；刷新后可重新核对"
+            default: return "停止请求已提交，等待本轮终态"
+            }
+        }
     }
 
     func executionAnswerStore(taskID: String, question: ExecutionQuestion, readOnly: Bool) -> ExecutionAnswerStore {
@@ -2145,9 +2162,10 @@ final class ExecutionAnswerStore: ObservableObject {
         feedback = "已放弃未保存的本机编辑，核心历史仍保留"
     }
     var unknown: Bool { resultUnknown || question.delivery == "unknown" }
+    var waitingForCodex: Bool { question.source == "codex" && question.state == "open" && question.delivery == "accepted" }
     var inputsLocked: Bool {
         readOnly || obsolete || possiblyStale || working || question.state != "open"
-            || !question.answerable || question.delivery == "submitting" || unknown || stopResultUnknown || stopRequested
+            || !question.answerable || question.delivery == "submitting" || waitingForCodex || unknown || stopResultUnknown || stopRequested
     }
     var canSubmit: Bool {
         !inputsLocked && !question.questions.isEmpty && question.questions.allSatisfy { isAnswered($0.id) }
@@ -2188,6 +2206,7 @@ final class ExecutionAnswerStore: ObservableObject {
         if stopRequested { return "停止请求已提交，等待本轮终态" }
         if submitting || question.delivery == "submitting" { return "正在提交答案" }
         if unknown { return "送达结果未知，正在核对" }
+        if waitingForCodex { return "答案已提交，等待执行端接收" }
         if !question.answerable { return "请在 Plus 中回答" }
         if question.delivery == "not_applied" { return "原提交明确未应用，可重新提交" }
         return "等待回答"

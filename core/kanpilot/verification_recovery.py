@@ -144,10 +144,17 @@ def _read_run_evidence(conn, task):
             or not isinstance(job.get("turn_id"), str) or not job["turn_id"].strip()
             or job.get("send_state") != "sent"):
         _conflict("当前执行会话或发送身份不完整")
+    if row["backend"] == "codex":
+        from . import codex_execution
+        if job.get("pid") != row["pid"] or job.get("observe_pid") not in (None, job.get("pid")):
+            _conflict("Codex worker 进程登记与持久记录不符")
+        process_alive = codex_execution.job_alive(job)
+    else:
+        process_alive = any(util.pid_alive(pid) for pid in
+                            (job.get("observe_pid"), job.get("pid"), row["pid"]))
     if (job.get("status") != "finished"
             or type(job.get("exit_code")) is not int or job["exit_code"] != 0
-            or any(util.pid_alive(pid) for pid in
-                   (job.get("observe_pid"), job.get("pid"), row["pid"]))):
+            or process_alive):
         _conflict("当前轮次尚无 finished/0 终态或观察进程仍存活")
     raw_events = read(directory / dsh_events.EVENT_LOG_NAME)
     try:

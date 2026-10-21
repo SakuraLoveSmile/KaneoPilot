@@ -51,7 +51,8 @@ class _CLIHarness:
         self.harness_id = harness_id
 
     def describe(self, *, role: str, connected=None) -> dict:
-        if role not in ("plan", "planner", "review"):
+        execution = self.harness_id == "codex" and role == "execution"
+        if role not in ("plan", "planner", "review") and not execution:
             raise util.KanpilotError("unsupported_role", "CLI harness 仅支持现有规划和评审 runner")
         if connected is not None and not isinstance(connected, bool):
             raise util.bad_request("connected must be true, false, or unknown")
@@ -62,6 +63,17 @@ class _CLIHarness:
         caps["read_only_workspace"] = capability(
             "supported", "host", "Codex read-only sandbox" if self.harness_id == "codex"
             else "Claude restricted Read/Grep/Glob 工具集及严格 MCP 配置")
+        if execution:
+            caps["read_only_workspace"] = capability("unsupported", "host", "Codex 执行使用 workspace-write 沙箱")
+            for name, detail in {
+                "durable_status": "受管 worker 持久记录线程、适配器代次和进程出生身份；观察不发送输入",
+                "verification_report": "结构化终答及原生命令事件绑定本轮执行契约和源码快照",
+                "verification_command_binding": "模型 checks 与原生命令事件分别逐条核对冻结 verify 命令",
+                "observed_command_results": "退出码来自 Codex CLI command_execution 事件",
+                "input_requests": "结构化问题经 Pilot 作答，操作回执和消费代次先持久化再 resume",
+                "stop_confirmation": "停止核对 worker/CLI 出生身份及持久终态；未确认时保留未知",
+            }.items():
+                caps[name] = capability("supported", "adapter", detail)
         return {
             "contract_version": CONTRACT_VERSION, "harness_id": self.harness_id,
             "adapter_version": self.adapter_version, "connected": connected,
@@ -101,7 +113,7 @@ def supports_role(harness_id: str, role: str) -> bool:
     """Implemented phase mechanisms, independent of connectivity or readiness."""
     roles = {
         "pi_desktop": ("plan", "planner", "review", "execution"),
-        "codex": ("plan", "planner", "review"),
+        "codex": ("plan", "planner", "review", "execution"),
         "claude": ("plan", "planner", "review"),
     }
     return role in roles.get(harness_id, ())

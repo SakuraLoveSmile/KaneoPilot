@@ -600,10 +600,10 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
         if cmd_dispatch._manual_branch_delivery(task):
             delivery = core.delivery_of(task)
             context["worktree_path"] = delivery["worktree_path"]
-            context["instruction"] = cmd_dispatch._execution_instruction(dict(task, session_marker=session_marker), delivery["worktree_path"], desktop=(backend == "pi_desktop"), conn=conn)
+            context["instruction"] = cmd_dispatch._execution_instruction(dict(task, session_marker=session_marker), delivery["worktree_path"], desktop=(backend in ("pi_desktop", "codex")), conn=conn)
         elif core.is_pr_delivery(task):
             delivery = core.delivery_of(task)
-            context["instruction"] = cmd_dispatch.branch_instruction(conn, task).format(marker=session_marker, worktree=delivery["worktree_path"], branch=delivery["branch"], plan_ref="下面已核验的计划正文" if backend == "pi_desktop" else "计划文件 " + checked["plan_path"])
+            context["instruction"] = cmd_dispatch.branch_instruction(conn, task).format(marker=session_marker, worktree=delivery["worktree_path"], branch=delivery["branch"], plan_ref="下面已核验的计划正文" if backend in ("pi_desktop", "codex") else "计划文件 " + checked["plan_path"])
         res = {
             "claimed": True, "request_id": request_id,
             "run_id": run_id, "context": context,
@@ -1429,6 +1429,9 @@ def cmd_record_goal_evaluation(ctx, payload: dict) -> dict:
                 "execution_run_id 不是该任务的当前执行轮次"
                 f"（当前 {task['run_id']}）",
             )
+        execution = round_store.get_round(conn, task_id, execution_run_id)
+        if execution is not None and execution["backend"] == "codex":
+            raise util.KanpilotError("conflict", "Codex 执行须经 engine-verdict 核对原生命令证据，不能使用 Plus Goal 判定")
         signature = goal_evaluation_signature(payload)
         existing = find_goal_evaluation(conn, signature)
         if existing is not None:

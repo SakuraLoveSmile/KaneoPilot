@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -446,8 +447,8 @@ def _collect_core_verification(conn, task, execution_run_id, materials):
         "operation_id": record.get("operation_id"),
         "state": record.get("state"),
         "verification_ok": (record.get("receipt") or {}).get("verification_ok"),
-        "note": "历史 Pilot 本机验证记录，仅供审计；不代表当前 Plus 验证结果，"
-                "不作为本轮完成或 Review 通过依据。当前验证以 execution-events.jsonl 的 Plus 工具结果为准。",
+        "note": "历史 Pilot 本机验证记录，仅供审计；不代表当前执行端验证结果，"
+                "不作为本轮完成或 Review 通过依据。当前验证以本轮执行端报告和命令证据为准。",
     }, ensure_ascii=False, sort_keys=True, indent=2))
     return {target.name: str(target)}
 
@@ -528,6 +529,8 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
             shutil.copyfile(source, target)
             files[target.name] = str(target)
             copied += 1
+    if conn is not None:
+        files.update(_collect_codex_evidence(conn, task, execution_run_id, materials))
     if evidence_note is None and copied == 0:
         # 证据缺失必须显式记原因（不静默省略、不据此判成功）。
         evidence_note = (
@@ -582,6 +585,40 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
     elif core.requires_branch_review(task):
         core.require_committed_review(task, execution_run_id)
     return {"files": files, "context": context}
+
+
+def _collect_codex_evidence(conn, task, execution_run_id, materials):
+    """Review reads the same frozen Codex evidence that admitted delivery."""
+    from . import codex_execution, round_store, verification_redaction
+    from .engine import verdict
+    row = round_store.get_round(conn, task["task_id"], execution_run_id)
+    if row is None or row["backend"] != "codex":
+        return {}
+    current = db.require_task(conn, task["task_id"])
+    if current["run_id"] != execution_run_id:
+        raise util.KanpilotError("review_blocked", "Codex 执行轮次已变化，不能收集历史证据")
+    receipt = db.task_extra(current).get("engine_verdict") or {}
+    if receipt.get("evidence_source") != "codex_report" or receipt.get("verification_ok") is not True:
+        raise util.KanpilotError("review_blocked", "缺少已确认的 Codex 验证报告")
+    evidence = codex_execution.read_evidence(conn, current)
+    if evidence["hashes"] != receipt.get("evidence_sha256"):
+        raise util.KanpilotError("review_blocked", "Codex 执行证据与验证回执不符")
+    run_dir = headless_adapter.resolve_source(conn).run_dir(task["task_id"], execution_run_id)
+    secrets = verification_redaction.values(os.environ)
+    files = {}
+    for path, digest in evidence["hashes"].items():
+        source = Path(path)
+        if source.parent != run_dir:
+            continue
+        raw = source.read_bytes()
+        if util.sha256_bytes(raw) != digest:
+            raise util.KanpilotError("review_blocked", "收集期间 Codex 执行证据已变化")
+        target = materials / ("execution-" + source.name)
+        target.write_text(verification_redaction.redact(raw.decode("utf-8"), secrets), encoding="utf-8")
+        files[target.name] = str(target)
+    if not verdict.receipt_evidence_current(conn, current, receipt):
+        raise util.KanpilotError("review_blocked", "收集期间 Codex 报告或源码已变化")
+    return files
 
 # --------------------------------------------------------------- 指令
 
