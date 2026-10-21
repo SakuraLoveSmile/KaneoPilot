@@ -115,12 +115,28 @@ def _wait_session(controller, result):
 def _confirm(controller, evidence, session_id):
     evidence = dict(evidence, session_id=session_id, protocol_seen=True)
     if evidence["backend"] in ("pi_desktop", "codex"):
-        observed = controller.call("get-session", controller.task_identity())
-        session = observed.get("session") or {}
-        detail = observed.get("round_detail") or {}
-        # Goal approval can already have replaced the current turn. Confirm
-        # against the immutable startup session event, not the execution turn.
-        turn_id = detail.get("startup_turn_id") if "startup_turn_id" in detail else detail.get("turn_id")
+        deadline = min(controller.deadline, controller.clock() + 300)
+        while True:
+            observed = controller.call("get-session", controller.task_identity())
+            session = observed.get("session") or {}
+            detail = observed.get("round_detail") or {}
+            # Goal approval can already have replaced the current turn. Confirm
+            # against the immutable startup session event, not the execution turn.
+            turn_id = detail.get("startup_turn_id") if "startup_turn_id" in detail else detail.get("turn_id")
+            # A worker can rewrite job.json after dispatch-start saw its startup
+            # event. The read layer exposes a partial read without a snapshot as
+            # pending, not as a conflicting identity. Wait only for that explicit
+            # absence; associated/incompatible identities still fail immediately.
+            pending = (session.get("task_id") == controller.task_identity()["task_id"]
+                       and session.get("run_id") == controller.claim["run_id"]
+                       and session.get("state") == "pending"
+                       and session.get("session_id") in (None, "")
+                       and turn_id in (None, "")
+                       and (observed.get("connection") or {}).get("state") != "unavailable")
+            remaining = deadline - controller.clock()
+            if not pending or remaining <= 0:
+                break
+            controller.wait(min(1.0, remaining))
         if (session.get("task_id") != controller.task_identity()["task_id"]
                 or session.get("run_id") != controller.claim["run_id"]
                 or session.get("session_id") != session_id

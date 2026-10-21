@@ -3,7 +3,7 @@ import base64
 import json
 import os
 import sys
-import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,7 +41,8 @@ sys.exit(1 if "error" in step else 0)
     monkeypatch.setenv("READ_FIXTURE_CALLS", str(calls))
     monkeypatch.setenv("READ_FIXTURE_PLAN", str(plan))
     delays = []
-    monkeypatch.setattr(time, "sleep", delays.append)
+    # subprocess also sleeps while waiting on POSIX; observe only gh retries.
+    monkeypatch.setattr(gh, "time", SimpleNamespace(sleep=delays.append))
 
     def configure(steps):
         plan.write_text(json.dumps(steps))
