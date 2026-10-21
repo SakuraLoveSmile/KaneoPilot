@@ -174,7 +174,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
     verification commands. The receipt remains in ``extra.engine_verdict``.
     """
     from . import verdict
-    from .. import cmd_exec, core, constants, engine_claim_scope
+    from .. import cmd_exec, core, constants, engine_claim_scope, round_store
 
     started = time.monotonic()
     def current_task():
@@ -189,8 +189,10 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
     task = current_task()
     mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
     action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
-    strict = mode == "live" or action
-    receipt_key = "engine_verdict_shadow" if mode == "shadow" and not action else "engine_verdict"
+    execution = round_store.get_round(ctx.conn, task["task_id"], task["run_id"])
+    codex = execution is not None and execution["backend"] == "codex"
+    strict = mode == "live" or action or codex
+    receipt_key = "engine_verdict_shadow" if mode == "shadow" and not strict else "engine_verdict"
     operation_id = payload.get("operation_id") or util.new_uuid()
     prior = db.task_extra(task).get(receipt_key) or {}
     lease = constants.DEFAULT_LEASE_SECONDS
@@ -226,7 +228,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 # until delivery-commit registers the already frozen commit.
                 return dict(prior, ok=True, deduplicated=True)
         # Live retries reuse only Plus report receipts; transcript receipts are audit data.
-        source = "goal_report" if strict else "plus_tool_results"
+        source = "codex_report" if codex else "goal_report" if strict else "plus_tool_results"
         if (prior.get("evidence_source") == source
                 and prior.get("operation_id") == operation_id
                 and verdict.receipt_evidence_current(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat)):
@@ -236,11 +238,13 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("verification_identity_unconfirmed", "判定回执的工作树已变化")
             return dict(prior, ok=True, deduplicated=True)
 
-        if strict:
+        if codex:
+            result = verdict.evaluate_codex_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
+        elif strict:
             result = verdict.evaluate_goal_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
         else:
             result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
-        if mode == "shadow" and not action:
+        if mode == "shadow" and not strict:
             # Shadow keeps the transcript verdict as the decider; the report verdict is recorded beside it.
             result["goal_report_comparison"] = _goal_comparison(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
@@ -250,6 +254,8 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                   "effective_changes": [], "checks": [], "kind": "unconfirmed", "binding": None,
                   "detail": util.redact(getattr(exc, "message", str(exc))),
                   "failure_code": exc.code if isinstance(exc, util.KanpilotError) else "verification_identity_unconfirmed"}
+    if codex:
+        result["evidence_source"] = "codex_report"
     current = current_task()
     receipt = dict(result, operation_id=operation_id, execution_run_id=task["run_id"],
                    plan_sha256=task["plan_sha256"], completed_at=util.now_iso(), engine_mode=mode)

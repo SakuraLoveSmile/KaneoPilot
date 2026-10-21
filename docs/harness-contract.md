@@ -36,7 +36,7 @@
 
 通用能力词为 `structured_result / durable_status / verification_report / verification_command_binding / observed_command_results / input_requests / stop_confirmation / read_only_workspace`。按阶段要求匹配，不要求所有执行机制实现全部能力。
 
-Plus 原工具目录/schema 探测由适配器转换为语义能力。工具存在证明相应机制存在，不等于本次执行已成功或命令结果来自独立采集。现有 Goal checks 可以是模型声明，不能将其标为宿主独立命令回执。现有 Codex/Claude CLI 只声明实际实现的规划/评审能力；本次不开放其执行权限，不伪造持久宿主会话、独立命令证据或停止证明。
+Plus 原工具目录/schema 探测由适配器转换为语义能力。工具存在证明相应机制存在，不等于本次执行已成功或命令结果来自独立采集。现有 Goal checks 可以是模型声明，不能将其标为宿主独立命令回执。Codex CLI 的执行机制见 protocol「Codex CLI 执行适配」：线程、受管进程、结构化结果和命令事件各按实际来源核验，不伪造 Plus Goal 或原生 turn 身份。Claude CLI 仍仅支持现有规划/评审。
 
 新执行契约在原生会话创建前要求 `durable_status / verification_report / input_requests`，有验收命令时还要求 `verification_command_binding`。缺少报告机制的旧宿主不能开始新契约任务，保留 `not_sent` 及具体能力缺口；真正历史无契约记录沿原能力门恢复。
 

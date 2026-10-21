@@ -101,8 +101,9 @@ struct TaskDetailContentView: View {
                 } else {
                     StatusBadge(status: DisplayStatus.effective(detail))
                 }
-                if detail.executionQuestion?.state == "open", detail.executionQuestion?.answerable == true, detail.readOnly != true {
-                    StatusBadge(status: "等待你回答")
+                if let question = detail.executionQuestion, question.state == "open", question.answerable, detail.readOnly != true {
+                    StatusBadge(status: question.source == "codex" && question.delivery == "accepted"
+                        ? "等待执行端接收" : "等待你回答")
                 }
                 Text("阶段：\(detail.phase.map(PhaseStepperView.title) ?? "未提供")")
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
@@ -591,6 +592,7 @@ struct TaskOverviewTabView: View {
     @State private var executionFocusRequest = 0
     @State private var confirmingExecutionSkip = false
     @State private var confirmingExecutionStop = false
+    @State private var executionStopOperation: (runID: String, operationID: String)?
 
     private var reviewStore: ReviewResolutionStore? {
         guard detail.parentCloseout == nil else { return nil }
@@ -752,14 +754,22 @@ struct TaskOverviewTabView: View {
             return "评审已通过，等待交付完成；可查看交付记录或重新校验当前状态。"
         }
         switch primaryAction {
-        case "answer_execution_questions": return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交到 Plus。"
+        case "answer_execution_questions":
+            if openExecutionStore?.waitingForCodex == true {
+                return "答案已提交，等待执行端接收；可重新核对送达状态，或在「更多操作」中停止本轮。"
+            }
+            return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交给执行端。"
         case "answer_plan_questions": return "在上方回答待确认问题，提交后继续规划；执行仍按原确认规则安排。"
         case "resolve_review_blocker": return "查看上方报告摘要，选择准备修复或补充证据；原成果与报告保留。"
         case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
         case "recover_review": return "保留执行成果并恢复到待评审，恢复后自动推进保持暂停。"
-        case "retry_verification": return supplementsVerificationReport
-            ? "沿用原计划、原工作树和已有冲突解决结果，让 Plus 补齐验证及正式报告；确认后会调用模型并产生费用。"
-            : "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
+        case "retry_verification":
+            if detail.executionRound?.backend == "codex" {
+                return "沿用原计划和工作树，启动新的 Codex CLI 执行轮次，由 Codex 运行验证并返回报告与命令证据。"
+            }
+            return supplementsVerificationReport
+                ? "沿用原计划、原工作树和已有冲突解决结果，让 Plus 补齐验证及正式报告；确认后会调用模型并产生费用。"
+                : "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
         case "revert_engine_fix": return AutomationPresentation.revertMessage
@@ -942,11 +952,21 @@ struct TaskOverviewTabView: View {
         } message: { Text("跳过当前这份请求的所有问题，继续同一轮次；其它排队提问仍需处理。") }
         .confirmationDialog("停止本轮？", isPresented: $confirmingExecutionStop, titleVisibility: .visible) {
             Button("停止本轮", role: .destructive) {
-                guard let store = executionStore else { return }
-                Task { await store.stop(); onRefreshDetail?() }
+                if let store = liveExecutionStore {
+                    Task { await store.stop(); onRefreshDetail?() }
+                } else if let runID = detail.runId {
+                    if executionStopOperation?.runID != runID {
+                        executionStopOperation = (runID, UUID().uuidString)
+                    }
+                    guard let operation = executionStopOperation else { return }
+                    Task {
+                        await model.stopExecution(taskID: detail.taskId, runID: runID, operationID: operation.operationID)
+                        onRefreshDetail?()
+                    }
+                }
             }
             Button("取消", role: .cancel) {}
-        } message: { Text("这会结束当前执行轮次。原问题、草稿和执行记录将保留。") }
+        } message: { Text("这会结束当前执行轮次。工作树、原问题、草稿和执行记录将保留。") }
         .confirmationDialog(
             PurgeText.actionTitle,
             isPresented: $confirmingPurge,
@@ -1138,10 +1158,14 @@ struct TaskOverviewTabView: View {
                         .buttonStyle(.borderedProminent)
                 }
                 Spacer(minLength: 0)
-                if !secondaryActions.isEmpty || liveExecutionStore != nil {
+                if !secondaryActions.isEmpty || liveExecutionStore != nil || actions.contains("stop_execution") {
                     Menu("更多操作") {
                         if let store = liveExecutionStore {
                             executionMenuItems(store)
+                        } else if actions.contains("stop_execution") {
+                            Button(executionStopOperation?.runID == detail.runId ? "重新核对停止结果" : "停止本轮", role: .destructive) {
+                                confirmingExecutionStop = true
+                            }
                         }
                         ForEach(secondaryActions, id: \.self) { action in
                             actionButton(action)
@@ -1165,7 +1189,7 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func executionSubmitControls(_ store: ExecutionAnswerStore) -> some View {
         HStack(spacing: Spacing.s) {
-            if store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
+            if store.unknown || store.question.delivery == "submitting" || store.waitingForCodex || store.stopResultUnknown {
                 Button("重新核对") { Task { await store.reconcile(); onRefreshDetail?() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(store.working || store.obsolete)
@@ -1221,7 +1245,7 @@ struct TaskOverviewTabView: View {
             Button(retryVerificationLabel) { retryVerificationRunID = detail.runId }
                 .disabled(model.busy || detail.runId == nil)
                 .help(supplementsVerificationReport ? AutomationPresentation.verificationSupplementMessage
-                      : "沿用原计划和工作树，会启动新的 Plus 执行轮次。")
+                      : "沿用原计划和工作树，会启动新的执行轮次。")
         case "reverify":
             Button("重新核验验证证据") {
                 guard let runID = detail.runId else { return }
@@ -1475,8 +1499,8 @@ private struct ExecutionAnswerCard: View {
     private var answerForm: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("等待你回答 · \(store.question.questions.count) 题").font(.kpTitle)
-                Text("来源：Plus 执行会话 · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
+                Text("\(store.waitingForCodex ? "等待执行端接收" : "等待你回答") · \(store.question.questions.count) 题").font(.kpTitle)
+                Text("来源：\(store.question.source == "codex" ? "Codex CLI" : "Plus") 执行会话 · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
                     .font(.kpSmall).foregroundStyle(.secondary)
                 if store.question.queued > 0 {
                     Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(.secondary)

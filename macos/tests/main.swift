@@ -667,6 +667,20 @@ if let legacy = decode(TaskSummary.self, #"{"task_id":"old","status":"done"}"#) 
     expect(legacy.release == nil, "旧任务不凭空追加发布门")
 }
 
+// Codex CLI 执行配置与独立能力；旧 PI 检查失败不覆盖 Codex 就绪态。
+if let config = decode(ExecConfig.self, #"{"backend":"codex","codex":{"model":"gpt-6.1-sol","reasoning_effort":"high"},"model":"pi-retained"}"#) {
+    expect(config.effectiveBackend == "codex", "Codex CLI 执行后端解码")
+    expect(config.codex?.model == "gpt-6.1-sol" && config.codex?.reasoningEffort == "high", "Codex 执行分组独立解码")
+    expect(config.model == "pi-retained", "Codex 不覆盖 PI 模型")
+}
+if let caps = decode(ExecCapabilitiesResponse.self, #"{"ok":true,"codex":{"available":true,"detail":"Codex 就绪","path":"/tmp/codex","version":"0.1"},"checks":[{"name":"pi_binary","ok":false}]}"#) {
+    expect(caps.ok == true && caps.codex?.available == true, "Codex 就绪不依赖 PI")
+    expect(caps.checks?.first?.ok == false, "PI 旧检查 DTO 保留")
+}
+if let caps = decode(ExecCapabilitiesResponse.self, #"{"ok":false,"codex":{"available":false,"detail":"Codex 执行配置未保存"}}"#) {
+    expect(caps.codex?.available == false, "Codex 未保存配置不冒充可用")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

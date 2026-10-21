@@ -58,7 +58,7 @@ EXEC_CONFIG_KEYS = (
 # v3（protocol §5.23.3）：任务执行后端词表与 PI-Desktop 配置块字段名。
 # backend 缺省按 "pi" 解释；pi_desktop 子块五字段须用户显式保存
 # （permission_mode 不自动补 auto）。
-EXEC_BACKENDS = ("pi", "pi_desktop")
+EXEC_BACKENDS = ("pi", "pi_desktop", "codex")
 EXEC_PI_DESKTOP_KEYS = (
     "connection_file", "provider_id", "model_id", "thinking_level",
     "permission_mode",

@@ -214,7 +214,7 @@ def _register_identity(ctx, instance_id, worker) -> dict:
             raise util.KanpilotError("conflict", "worker 已不是任务当前执行轮次")
         from . import round_store
         row = round_store.require_round(ctx.conn, worker["task_id"], worker["run_id"])
-        if row["backend"] not in ("pi", "pi_desktop"):
+        if row["backend"] not in ("pi", "pi_desktop", "codex"):
             raise util.KanpilotError("conflict", "该轮次不支持 App 独立 worker 登记")
         for other_id, other in instances.items():
             for registered in _live_workers(other):

@@ -174,6 +174,8 @@ struct SettingsView: View {
     @State private var selPreset = ""
     // v3 §5.23.3：任务执行后端（pi|pi_desktop）与 pi_desktop 分支草稿。
     @State private var selBackend = "pi"
+    @State private var execCodexModel = ""
+    @State private var execCodexEffort = ""
     @State private var pdModelSource = "custom"
     @State private var pdAdvancedExpanded = false
     @State private var pdConnectionFile = ""
@@ -673,6 +675,7 @@ struct SettingsView: View {
                 // ① 任务执行后端（§5.23.3）：轮次执行的模型来源。
                 Picker("任务执行后端", selection: $selBackend) {
                     Text("pi").tag("pi")
+                    Text("Codex CLI").tag("codex")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
@@ -682,6 +685,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 if selBackend == "pi_desktop" {
                     piDesktopBlock(caps)
+                } else if selBackend == "codex" {
+                    codexExecBlock(caps)
                 } else {
                     execPickers(caps)
                 }
@@ -693,7 +698,7 @@ struct SettingsView: View {
                     .font(.kpSmall).foregroundStyle(.secondary)
                 execSaveRow(caps)
                 execChecksList(caps)
-                Text("仅影响新轮次 / 新控制轮；不修改 pi 与 Plus 全局配置；"
+                Text("仅影响新轮次 / 新控制轮；不修改 pi、Plus 与 Codex 全局配置；"
                      + "凭据只查就绪态，不保存密钥值。")
                     .font(.kpSmall)
                     .foregroundStyle(.secondary)
@@ -707,6 +712,49 @@ struct SettingsView: View {
                     .font(.kpBody)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func codexExecBlock(_ caps: ExecCapabilitiesResponse) -> some View {
+        Group {
+            let models = model.plannerCapabilities?.models ?? []
+            if models.isEmpty {
+                TextField("Codex 模型", text: $execCodexModel)
+                    .font(.kpBody).textFieldStyle(.roundedBorder)
+            } else {
+                Picker("Codex 模型", selection: $execCodexModel) {
+                    if !models.contains(where: { $0.id == execCodexModel }) {
+                        Text(execCodexModel).tag(execCodexModel)
+                    }
+                    ForEach(models) { item in
+                        if let id = item.id { Text(item.name ?? id).tag(id) }
+                    }
+                }
+                .onChange(of: execCodexModel) { _, value in
+                    let efforts = model.plannerCapabilities?.efforts(for: value) ?? []
+                    if !efforts.isEmpty && !efforts.contains(execCodexEffort) {
+                        execCodexEffort = efforts.first ?? ""
+                    }
+                }
+            }
+            let efforts = model.plannerCapabilities?.efforts(for: execCodexModel) ?? []
+            if efforts.isEmpty {
+                TextField("Codex 思考等级", text: $execCodexEffort)
+                    .font(.kpBody).textFieldStyle(.roundedBorder)
+                Text("模型能力未验证；保存时由核心校验。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            } else {
+                Picker("Codex 思考等级", selection: $execCodexEffort) {
+                    if !efforts.contains(execCodexEffort) { Text(execCodexEffort).tag(execCodexEffort) }
+                    ForEach(efforts, id: \.self) { Text($0).tag($0) }
+                }
+            }
+            FieldRow("Codex CLI", caps.codex.map { "\($0.path ?? "未找到")（\($0.version ?? "未知")）" } ?? "未上报")
+            FieldRow("已保存配置就绪态", caps.codex?.detail ?? "未检测")
+            Text("执行权限固定为工作树写入；配置仅影响新轮次。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            Button("检测已保存配置") { Task { await refreshExecCapabilities() } }
+                .disabled(execLoading || savingExec)
         }
     }
 
@@ -1173,6 +1221,8 @@ struct SettingsView: View {
                 selEffort = base.reasoningEffort ?? ""
                 selPreset = base.agentPreset ?? ""
                 selBackend = base.effectiveBackend
+                execCodexModel = base.codex?.model ?? loaded.defaults?.codex?.model ?? ""
+                execCodexEffort = base.codex?.reasoningEffort ?? loaded.defaults?.codex?.reasoningEffort ?? ""
                 // v4 §5.24.1：派发与监控运行端（旧核心未返回 → pi）。
                 selControllerBackend = base.effectiveControllerBackend
                 // pi_desktop 五字段草稿（旧核心未返回 → 全空）。
@@ -1305,7 +1355,7 @@ struct SettingsView: View {
     private func execChecksList(_ caps: ExecCapabilitiesResponse) -> some View {
         Group {
             // §4.10：这组检查只针对 PI CLI 分支，不阻挡 Plus 保存/选择。
-            Text("环境检查（PI CLI 分支；不阻挡 Plus 保存）")
+            Text("环境检查（PI CLI 分支；不阻挡其他后端保存）")
                 .font(.kpSmall)
                 .foregroundStyle(.secondary)
             ForEach(caps.checks ?? []) { check in
@@ -1346,6 +1396,8 @@ struct SettingsView: View {
             if selBackend == "pi_desktop" {
                 // 桌面保存只提交桌面五字段；CLI 草稿由核心保留。
                 payload["pi_desktop"] = piDesktopDraft.fields
+            } else if selBackend == "codex" {
+                payload["codex"] = ["model": execCodexModel, "reasoning_effort": execCodexEffort]
             } else {
                 // CLI 保存不携带空桌面块；核心保留已保存的桌面分支。
                 payload["provider"] = selProvider
@@ -1429,6 +1481,15 @@ struct SettingsView: View {
     ///   已有 Plus 时，CLI 草稿按原样提交，真实错误由核心返回。
     private func execIssue(_ caps: ExecCapabilitiesResponse?) -> String? {
         guard let caps else { return "执行配置能力未加载" }
+        if selBackend == "codex" {
+            if emptyToNil(execCodexModel) == nil { return "Codex 模型不能为空" }
+            if emptyToNil(execCodexEffort) == nil { return "Codex 思考等级不能为空" }
+            if let efforts = model.plannerCapabilities?.efforts(for: execCodexModel),
+               !efforts.isEmpty, !efforts.contains(execCodexEffort) {
+                return "模型 \(execCodexModel) 不支持思考等级「\(execCodexEffort)」"
+            }
+            return nil
+        }
         if plusBlockInPlay {
             if let plusIssue = piDesktopDraftIssue { return plusIssue }
             if selBackend == "pi", caps.ok != false,
@@ -1437,7 +1498,7 @@ struct SettingsView: View {
             }
             return nil
         }
-        if caps.ok == false {
+        if (caps.checks ?? []).contains(where: { $0.ok == false }) {
             let failed = (caps.checks ?? []).filter { $0.ok == false }
                 .map { execCheckName($0.name) }
             return failed.isEmpty

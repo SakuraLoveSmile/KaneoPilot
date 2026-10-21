@@ -309,9 +309,11 @@ enum DisplayStatus {
             return StatusStyle(icon: "checkmark.circle", color: .blue, label: status!)
         case "需人工", "needs_user":
             return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "需人工")
-        // 开放且可答的执行期提问（详情头部附加；文字必须为「等待你回答」）。
+        // 执行期提问分别显示等待回答与已提交等待接收。
         case "等待你回答":
             return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "等待你回答")
+        case "等待执行端接收":
+            return StatusStyle(icon: "clock", color: .blue, label: "等待执行端接收")
         case "执行端失联", "lost":
             return StatusStyle(icon: "exclamationmark.triangle.fill", color: .red, label: "执行端失联")
         case "已完成", "done":
