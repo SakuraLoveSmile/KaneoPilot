@@ -7,10 +7,10 @@
 | 步骤 | 状态 | 当前结果 |
 |---|---|---|
 | T1 契约与隔离 | 待体验 | 固定接口、共享 DTO、CLI 接入和隔离分支已建立 |
-| T2 核心与设备接口 | 实现中 | 反向 DNS 阻塞已修复，39 项服务/授权回归通过；远端待重跑 |
-| T3 Mac 设置与生命周期 | 实现中 | 原生页面与本地生命周期通过；远端真实核心夹具等待反向 DNS 修复后核验 |
+| T2 核心与设备接口 | 待体验 | HTTPS、安全、幂等与受影响回归通过；反向 DNS 修复后远端真实核心夹具通过 |
+| T3 Mac 设置与生命周期 | 待体验 | 原生页面、本地生命周期及远端全部受影响夹具通过；远端真实核心约 0.334 秒就绪 |
 | T4 Android 控制台 | 待体验 | 20 项单元、Lint、构建、Mi 10 的 Compose 与 LAN 检查、固定签名覆盖升级通过 |
-| T5 双平台构建与发布 | 实现中 | Android 检查和 APK、Mac Universal DMG 远端构建成功；产物上传受账号存储配额阻挡，Mac 真实核心夹具另待修复 |
+| T5 双平台构建与发布 | 实现中 | 两平台检查、打包和产物校验通过；上传受账号存储配额阻挡，完整核心/集成检查仍在运行 |
 | T6 联合核验 | 实现中 | 真机 LAN、本地安装和完整核心/集成基线对照完成；Actions 产物下载与安装证据仍待完成 |
 
 只有用户确认后才记为“已验收”。本记录中的已通过检查均为本次执行，不将模拟器结果算作真机验收。
@@ -28,7 +28,7 @@
 | 真机 LAN 主流程 | 1 passed，101.259 秒；真实 HTTPS 配对、页面阅读、答案保存与提交、停服后禁用写入并保留草稿、重连恢复、快速切换任务 |
 | 真机 LAN 消息更新 | 1 passed，67.715 秒；同 ID 消息从指纹 78928302865365 更新为更小的 67974362889250，正常五秒轮询显示新正文 |
 | 原生设备撤销 | 在 Mac 点击撤销后，真机显示设备授权失效并禁用写操作 |
-| 固定签名真机升级 | versionCode 1 安装成功，再 install-r 为 2；UID 和 firstInstallTime 相同；手机实际 APK SHA256 与最终 Release 包相同 |
+| 固定签名真机升级 | versionCode 1 → 2 → 3 覆盖安装成功；UID 和 firstInstallTime 相同；手机实际 APK SHA256 与最终 Release 包相同 |
 | 系统浅深色与大字体 | font_scale=1.3 的长标题、计划、工具输出和评审正文实测；修复浅色状态栏白色图标后，浅深色均亲自检查 |
 | 发布包恢复/不可变校验 | 12 passed，actionlint / shellcheck 通过 |
 | Universal DMG | x86_64 + arm64，App 和 DMG 严格本地签名通过；镜像校验通过 |
@@ -53,6 +53,8 @@ Mac 正常退出后，候选进程及其所属 47831 监听子进程均退出；
 
 完整集成真实 pytest：候选版与干净基线均为 368 passed / 28 failed / 5 skipped，另有 4 subtests passed；各运行约 69 分钟。28 个失败的 classname 与用例名完全相同，没有新增失败。对照结果与原始 JUnit 分别保存在 `verification/integration-baseline-comparison.json` 和 `integration.xml` / `baseline-integration-pytest.xml`。
 
+上述完整基线对照在后续 CI 启动修复前完成；修复后补跑受影响的移动服务/授权专项与 Mac 真实核心夹具，不把早先完整结果写成最新 HEAD 的全量重跑。当前源码的远端完整检查单独记录。
+
 这些继承失败涉及既有自动修复、规划错误归类、评审及标签一致性等路径，当前不扩展到手机功能之外修改。它们保留为失败；若远端同样失败，标签 Release 会被门槛阻止。普通分支构建产物须在平台构建和上传均成功后才可下载。
 
 详细日志、JUnit、截图和本地安装包位于忽略目录 `build/mobile-acceptance/`。关键文件包括 `verification/android-device-lan.txt`、`android-device-lan-content-update.txt`、`android-release-upgrade.json`、`mobile-lifecycle-quit.json` 和 `core-baseline-comparison.json`。不在 Git 中保存配对 URI、设备令牌、签名密码或临时数据库。
@@ -63,17 +65,17 @@ Android 固定证书 SHA256：`5062db967ce58d65df2c47895649df43464bab9a6eadf135f
 
 macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 3.9+。没有替换正式 Mac App。
 
-最终本地候选从源码 `da1cb0c6ac6616b7f687978963ab73760f25c72a` 重新构建，版本 0.3.0 / build 3：
+最终本地候选从源码 `36b4a70a7ddb77d383ba87983a92e5350db20d39` 重新构建，版本 0.3.0 / build 3：
 
 - `packages/KaneoPilot-0.3.0-local-3-android.apk`，SHA256 `5ec322b25f0550c359b7ab58f8decf25f456eb3d02ae91b71f852aa651dcc354`。
-- `packages/KaneoPilot-0.3.0-local-3-macos-universal.dmg`，SHA256 `e4d0389280a14557b3159cdf1d790815550262c83494d6d605eab0fe6069960c`。
-- `packages/manifest.json` 与 `SHA256SUMS` 记录相同源码、版本和构建号；三项校验通过。App 中 158 份运行时源码、预设与 prompt 均与工作树一致。Android 重建后 SHA256 保持不变，与真机当前安装包一致。build 2 及较早 build 3 的包和清单证据保留，未将旧包改记为新源码。
+- `packages/KaneoPilot-0.3.0-local-3-macos-universal.dmg`，SHA256 `b9ea810c2bc6152ac402832781a3f2eaa0ee4c70b30d71ce3b6eabda5a3a98b4`。
+- `packages/manifest.json` 与 `SHA256SUMS` 记录相同源码、版本和构建号；三项校验通过。App 中 158 份运行时源码、预设与 prompt 均与工作树一致。Android 重建后 SHA256 保持不变，重新读取真机 APK 确认一致，本次没有再次安装；证据为 `verification/android-current-package-36b4a70.json`。build 2 及较早 build 3 的包和清单证据保留，包含 `archive/packages-da1cb0c/`，未将旧包改记为新源码。
 
-用户已明确授权将 26 个既有基线提交随隔离分支上传。源码提交 `4366f2d25bd8dc47184345c13e3f6097ad66bd9e` 已推送到私有仓库的 `codex/android-console-ci`，并触发 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39556941445)。远端构建、下载和安装核验仍在进行中。原始工作区与正式数据库未参与此次提交。
+用户已明确授权将 26 个既有基线提交随隔离分支上传。初始功能提交 `4366f2d25bd8dc47184345c13e3f6097ad66bd9e` 及后续修复均已推送到私有仓库的 `codex/android-console-ci`。原始工作区与正式数据库未参与此次提交。远端构建已经完成，下载和安装核验仍受账号存储配额阻挡。
 
 首轮远端 Android Debug APK 编译、签名检查和 metadata staging 成功，但 SDK 安装步骤因 `sdkmanager` 不在 PATH 中失败，单元与 Lint 因此未执行。Mac 真实核心夹具误按地址列表排序选择了 LAN 地址；另有 Xcode 16.4 的任务概览表达式类型检查超时。这些问题正在按实际日志修复，不将后续单独成功的构建算作整项 CI 通过。
 
-后续修复明确使用 runner 的 SDK 工具路径；回环夹具固定选择 `127.0.0.1`，保留原就绪期限并补充失败诊断和 LAN 地址排首覆盖；任务概览拆分表达式，保留原布局及弹窗顺序。还按实际 `lipo` 报错改为逐项核验两种架构。本地两套手机服务夹具、Universal Release 构建、actionlint 与相关静态检查通过；远端 Xcode 16.4 仍需重跑证明。历史启动失败缺少诊断，尚不能把地址排序认定为唯一原因。
+后续修复明确使用 runner 的 SDK 工具路径；回环夹具固定选择 `127.0.0.1`，保留原就绪期限并补充失败诊断和 LAN 地址排首覆盖；任务概览拆分表达式，保留原布局及弹窗顺序。还按实际 `lipo` 报错改为逐项核验两种架构。本地两套手机服务夹具、Universal Release 构建、actionlint 与相关静态检查通过；后续远端 Xcode 16.4 也已通过。历史启动失败缺少诊断，未把地址排序认定为唯一原因。
 
 第二轮 [Actions 39558904636](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39558904636) 使用 `bc8a982`：Android SDK 安装、单元、Lint、APK 构建和签名/版本校验均成功，上传仍因配额失败。Mac Universal 的 Swift 编译成功，随后打包脚本的 `lipo` 参数顺序在 Xcode 16.4 报错；真实核心夹具在 4 秒断言时仍为 `starting=true, error=nil`，尚未达到产品已有的 15 秒启动期限。后续只修正打包参数和夹具等待终态，不放宽产品启动期限或删除失败断言。
 
@@ -85,7 +87,17 @@ macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 
 
 第四轮 [Actions 39562851317](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39562851317) 使用 `a164ecd`，仅给隔离夹具加入第 10 秒限长调用栈诊断，未改变解释器、15 秒产品期限或断言。真实 runner 栈确认卡在 Python 3.14 的 `socket.getfqdn → HTTPServer.server_bind → MobileServer.__init__`，绑定后尚未开始 listen/ready。日志与摘要为 `verification/actions-macos-job-4.log` 和 `mobile-startup-ci-diagnosis.json`。这与本地隔离实验一致。
 
-修复只在 `MobileServer.server_bind` 复用 TCP 实际绑定，并直接用已验证的数字 IPv4 设置 HTTP 元信息，去掉服务不使用的反向 DNS 查询；证书、主机名验证、鉴权和启动期限不变。新增回归先在旧实现失败，修复后在禁止 `getfqdn/gethostbyaddr` 时完成真实 TLS 配对与授权总览查询；服务及授权专项 39 passed。独立 reviewer 检查实际差异后未发现新增实质问题。红绿及回归日志为 `verification/mobile-server-dns-red.log`、`mobile-server-dns-green.log` 和 `mobile-server-access-dns-regression.log`。远端修复验证仍待完成。
+修复只在 `MobileServer.server_bind` 复用 TCP 实际绑定，并直接用已验证的数字 IPv4 设置 HTTP 元信息，去掉服务不使用的反向 DNS 查询；证书、主机名验证、鉴权和启动期限不变。新增回归先在旧实现失败，修复后在禁止 `getfqdn/gethostbyaddr` 时完成真实 TLS 配对与授权总览查询；服务及授权专项 39 passed。独立 reviewer 检查实际差异后未发现新增实质问题。主 agent 补跑 Mac 真实核心夹具，约 0.107 秒就绪，探测、配对与 owned shutdown 通过。红绿及回归日志为 `verification/mobile-server-dns-red.log`、`mobile-server-dns-green.log`、`mobile-server-access-dns-regression.log` 和 `mac-mobile-real-core-dns-fixed.log`。
+
+修复提交 `36b4a70` 已推送，第五轮 [Actions 39564661382](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39564661382) 的平台 job 已完成：
+
+| 平台 | 本轮远端结果 |
+|---|---|
+| Android | SDK 安装、单元、Lint、Debug APK、版本与签名校验及 metadata staging 全部成功；安装包和报告上传被存储配额拒绝 |
+| macOS | 全部受影响原生夹具通过，真实核心约 0.334 秒就绪，探测、配对与退出通过；Universal DMG 编译、签名、双架构、镜像校验与 metadata staging 成功；安装包和报告上传被存储配额拒绝 |
+| 完整检查 | 发布 helper 检查成功；核心检查仍在运行，集成检查尚未开始，不记为通过 |
+
+本轮原始证据为 `verification/actions-fifth-run.json`、`actions-macos-job-5.log` 和 `actions-android-job-5.log`。第五轮保持运行，不取消其完整检查。第四轮已保存平台状态及真实调用栈后取消未完成的完整检查，不能将取消的检查记为通过。没有通过隐藏上传失败来将 job 标绿。
 
 GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。已读取 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。没有删除任何产物；当前没有远端安装包下载或安装证据。
 
