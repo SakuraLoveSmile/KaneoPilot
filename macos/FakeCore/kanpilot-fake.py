@@ -1085,7 +1085,10 @@ def allowed_actions(task, requests):
         if task.get("plan_clarification"):
             return ["answer_plan_questions", "replan", "dismiss", "recheck"]
         if task.get("failure_code") == "verification_unconfirmed":
-            return ["retry_verification", "reverify", "accept_verification", "replan", "dismiss", "recheck"]
+            actions = ["retry_verification", "reverify", "replan", "dismiss", "recheck"]
+            if (task.get("execution_round") or {}).get("backend") != "codex":
+                actions.insert(2, "accept_verification")
+            return actions
         if task.get("failure_code") == "verification_environment_failure":
             return ["retry_verification", "reverify", "resume", "replan", "dismiss", "recheck"]
         if task.get("failure_code") == "verification_identity_unconfirmed":
@@ -1114,6 +1117,8 @@ def allowed_actions(task, requests):
     if status in ("running", "in_review"):
         has_held_repair = (task.get("review_repair") or {}).get("state") == "held"
         actions = ["mark_done", "recheck"] if has_active_request or has_held_repair else ["enqueue", "mark_done", "recheck"]
+        if status == "running" and (task.get("execution_round") or {}).get("backend") == "codex":
+            actions.append("stop_execution")
         if any(r["status"] == "queued" for r in task_reqs):
             actions.insert(2 if "enqueue" in actions else 1, "set-priority")
         return actions
@@ -2517,14 +2522,24 @@ EXEC_CONFIG_DEFAULTS = {
     "model": "deepseek-v4-flash",
     "reasoning_effort": "max",
     "agent_preset": "default",
+    "backend": "pi",
+    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"},
 }
 
 
 def cmd_exec_capabilities(state, payload):
     """exec-capabilities {}：v1.6 pi 形态（pi/providers/presets/checks，
     不再有 dsh/permission 字段）。"""
+    saved = state.get("exec_config") or {}
+    codex_saved = isinstance(saved.get("codex"), dict)
+    codex = dict({"available": codex_saved,
+                  "path": "/tmp/fake-codex", "version": "fake",
+                  "detail": "隔离 FakeCore 就绪" if codex_saved else "Codex 执行配置未保存"},
+                 **(state.get("codex_exec_capability_fixture") or {}))
     return {
-        "ok": True,
+        "ok": codex["available"] if saved.get("backend") == "codex" else True,
+        "codex": codex,
+        "pi_desktop": {"available": True, "detail": "隔离 FakeCore 就绪"},
         "pi": {"path": os.path.expanduser("~/.npm-global/bin/pi"),
                "version": "0.85.1",
                "home": os.path.expanduser("~/.pi")},
@@ -2561,15 +2576,48 @@ def cmd_get_exec_config(state, payload):
 
 
 def cmd_set_exec_config(state, payload):
-    fields = [k for k in EXEC_CONFIG_DEFAULTS if k in payload]
+    fields = [k for k in (*EXEC_CONFIG_DEFAULTS, "pi_desktop") if k in payload]
     if not fields:
         return fail("set-exec-config 至少提供一个字段"
                     "（provider / model / reasoning_effort / agent_preset）",
                     "bad_request")
     caps = cmd_exec_capabilities(state, payload)
     candidate = dict(state.get("exec_config") or EXEC_CONFIG_DEFAULTS)
+    if not isinstance((state.get("exec_config") or {}).get("codex"), dict):
+        candidate.pop("codex", None)
     for k in fields:
-        candidate[k] = payload[k]
+        if k in ("codex", "pi_desktop"):
+            if not isinstance(payload[k], dict):
+                return fail(k + " 必须是对象", "bad_request")
+            candidate[k] = dict(candidate.get(k) or {}, **payload[k])
+        else:
+            candidate[k] = payload[k]
+    if candidate.get("backend") not in ("pi", "pi_desktop", "codex"):
+        return fail("不支持的执行后端", "bad_request")
+    if "codex" in fields or candidate.get("backend") == "codex":
+        block = candidate.get("codex") or {}
+        if set(block) != {"model", "reasoning_effort"}:
+            return fail("codex 仅接受 model 和 reasoning_effort 完整配置", "bad_request")
+        models = planner_capabilities(state)["models"]
+        entry = next((m for m in models if m["id"] == block.get("model")), None)
+        if not entry or block.get("reasoning_effort") not in entry["reasoning_efforts"]:
+            return fail("Codex 模型或思考等级无效", "bad_request")
+    if candidate.get("backend", "pi") == "pi":
+        error = validate_fake_pi_exec(candidate, caps)
+        if error:
+            return error
+    elif candidate.get("backend") == "pi_desktop" and not candidate.get("pi_desktop"):
+        return fail("pi_desktop 配置未保存", "bad_request")
+    candidate["updated_at"] = iso(utcnow())
+
+    def apply(s):
+        s["exec_config"] = dict(candidate)
+        append_event(s, "exec_config_updated", detail=dict(candidate))
+    mutate(state, apply)
+    return {"config": dict(candidate)}
+
+
+def validate_fake_pi_exec(candidate, caps):
     provider = next(
         (p for p in caps["providers"] if p["id"] == candidate["provider"]),
         None)
@@ -2595,14 +2643,7 @@ def cmd_set_exec_config(state, payload):
     if preset.get("broken"):
         return fail("执行配置校验失败：预设不可用：%s（%s）"
                     % (preset["id"], preset["broken"]), "bad_request")
-    candidate["updated_at"] = iso(utcnow())
-
-    def apply(s):
-        s["exec_config"] = dict(candidate)
-        append_event(s, "exec_config_updated", detail={
-            k: candidate[k] for k in EXEC_CONFIG_DEFAULTS})
-    mutate(state, apply)
-    return {"config": dict(candidate)}
+    return None
 
 
 def cmd_executor_status(state, payload):

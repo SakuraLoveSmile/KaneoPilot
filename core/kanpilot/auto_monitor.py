@@ -60,13 +60,13 @@ def _read_messages(controller, task):
 
 
 def _observe(controller, task, detail):
-    if detail.get("observer_alive") is True or detail.get("backend") != "pi_desktop" or (detail.get("observer_alive") is not False
+    if detail.get("observer_alive") is True or detail.get("backend") not in ("pi_desktop", "codex") or (detail.get("observer_alive") is not False
             and not str(detail.get("detail") or "").startswith("heartbeat_failed:")):
         return None
     automation = (task.get("extra") or {}).get("automation") or {}
     return controller.call("round-observe", {"task_id": task["task_id"],
                            "run_id": task["run_id"], "executor": "kaneo-monitor",
-                           "continue_goal": bool(automation) and not automation.get("manual_takeover", False)})
+                           "continue_goal": detail.get("backend") == "pi_desktop" and bool(automation) and not automation.get("manual_takeover", False)})
 
 
 def _verification(task, messages, execution_turn_id=None, evidence_version=None):
@@ -99,7 +99,7 @@ def _commit(controller, task):
 
 
 def _record_cost(controller, task, detail):
-    if detail.get("backend") == "pi_desktop":
+    if detail.get("backend") in ("pi_desktop", "codex"):
         # Deduplicate by execution identity, so repeated monitor claims cost once.
         execution = next((attempt for attempt in task.get("attempts", [])
                           if attempt.get("stage") == "dispatch" and attempt.get("run_id") == task["run_id"]), None)
@@ -107,20 +107,21 @@ def _record_cost(controller, task, detail):
             raise util.KanpilotError("observation_blocked", "本轮派发成本身份缺失")
         identity = {"request_id": execution["request_id"], "run_id": task["run_id"]}
         controller.call("record-cost", dict(identity, task_id=task["task_id"], stage="dispatch",
-                                            cost_usd=None, source="pi_desktop"))
+                                            cost_usd=None, source=detail["backend"]))
 
 
 def _complete(controller, task, detail, expected, messages):
     mode = _engine_mode(controller, task)
     action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
-    strict = mode == "live" or action
-    if mode in ("live", "shadow") or action:
+    codex = detail.get("backend") == "codex"
+    strict = mode == "live" or action or codex
+    if mode in ("live", "shadow") or action or codex:
         lease = controller.claim["context"].get("lease_seconds", 180)
         budget = int(min(lease * 0.8, controller.deadline - controller.clock()))
-        if mode == "shadow" and not action:
+        if mode == "shadow" and not strict:
             budget = min(budget, 30, int((controller.deadline - controller.clock()) / 2))
         if budget <= 0 and strict:
-            raise util.KanpilotError("observation_blocked", "Plus 证据核验剩余时限不足")
+            raise util.KanpilotError("observation_blocked", "执行证据核验剩余时限不足")
         if budget <= 0:
             controller.log("shadow-verdict", "budget_exhausted")
             result = {"verification_ok": False}
@@ -141,7 +142,7 @@ def _complete(controller, task, detail, expected, messages):
                 code = (result.get("failure_code") or
                         ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
                 controller.report("needs_user", failure_code=code,
-                                  note=result.get("detail") or "Plus 验证证据未通过核验")
+                                  note=result.get("detail") or "执行验证证据未通过核验")
                 return
             _finish_complete(controller, task, detail, expected)
             return
@@ -217,6 +218,14 @@ def _monitor(controller):
             else:
                 controller.report("failed", note="observation_blocked")
                 return
+        if backend == "codex":
+            # Reconcile durable answer consumption and stop intents, including
+            # ordinary stops without an open question. This never resumes CLI.
+            reconciled = controller.call("reconcile-execution-question", {
+                "task_id": task["task_id"], "run_id": task["run_id"]})
+            if reconciled.get("status") == "stopped":
+                controller.report("needs_user", failure_code="execution_failed", note="Codex 执行已停止")
+                return
         if detail.get("observation_finalizing") is True and detail.get("observer_alive") is True:
             _running(controller, "执行已完成，正在收尾")
             return
@@ -235,7 +244,7 @@ def _monitor(controller):
         if failure:
             controller.report("needs_user", failure_code="execution_failed", note=terminal_detail or "执行轮次明确失败")
             return
-        messages = _read_messages(controller, task)
+        messages = [] if backend == "codex" else _read_messages(controller, task)
         if outcome == "completed" and detail.get("run_status") == "finished":
             if type(detail.get("exit_code")) is not int or detail["exit_code"] != 0:
                 controller.report("needs_user", failure_code="execution_failed", note="执行退出码不可确认")

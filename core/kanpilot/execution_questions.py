@@ -1,6 +1,6 @@
 """Durable execution input relay (§5.28): SQLite owns questions and wait time.
 
-Plus mutations occur only through RuntimeClient receipts outside write transactions.
+Runtime mutations occur only through receipted clients outside write transactions.
 Unknown deliveries freeze answers; neither polling nor reconnect resends them.
 """
 from __future__ import annotations
@@ -159,8 +159,12 @@ def view(task, now=None, conn=None):
         try:
             job,run_dir=_job(conn,task,task['run_id'])
             row=round_store.require_round(conn,task['task_id'],task['run_id'])
-            from .cmd_dispatch import _observer_pid_alive
-            q['observer_alive']=any(_observer_pid_alive(conn,task['task_id'],task['run_id'],pid,run_dir,job) for pid in (job.get('observe_pid'),row['pid']))
+            if row['backend']=='codex':
+                from .codex_execution import job_alive
+                q['observer_alive']=job_alive(job)
+            else:
+                from .cmd_dispatch import _observer_pid_alive
+                q['observer_alive']=any(_observer_pid_alive(conn,task['task_id'],task['run_id'],pid,run_dir,job) for pid in (job.get('observe_pid'),row['pid']))
         except util.KanpilotError: pass
     # Internal receipts remain available for audits but not the stable UI DTO.
     for key in ('operations','stop_operation_id','abort_operation_id','stop_requested_at','termination_reason'): q.pop(key,None)
@@ -182,12 +186,15 @@ def _job(conn, task, run_id):
     if task['run_id'] != run_id:
         raise util.KanpilotError('conflict','执行问题不属于当前轮次')
     row=round_store.require_round(conn,task['task_id'],run_id)
-    if row['backend'] != 'pi_desktop': raise util.KanpilotError('conflict','执行问题仅支持 Plus 轮次')
+    if row['backend'] not in ('pi_desktop','codex'): raise util.KanpilotError('conflict','该后端不支持执行问题')
     try: run_dir=headless.resolve_source(conn).run_dir(task['task_id'],run_id)
     except headless.HeadlessError as exc: raise util.KanpilotError('validation_failed',exc.detail)
-    job,error=dsh_events.read_job(run_dir,task['task_id'],run_id,backend='pi_desktop')
+    job,error=dsh_events.read_job(run_dir,task['task_id'],run_id,backend=row['backend'])
     if job is None or not job.get('session_id') or not job.get('turn_id'):
         raise util.KanpilotError('validation_failed','执行问题运行记录身份不可核验')
+    if row['backend']=='codex':
+        from .codex_execution import InputClient
+        job=InputClient(conn,task,run_id,read_only=True).job
     return job,run_dir
 
 
@@ -238,9 +245,16 @@ def cmd_report_execution_question(ctx,payload):
         if state not in ('open','closed','expired'): raise util.bad_request('执行问题回报状态无效')
         if q and not _match(q,payload): raise util.KanpilotError('conflict','执行问题身份不匹配')
         if state=='open':
+            if job.get('backend')=='codex':
+                pending=job.get('pending_input') or {}
+                if (job.get('status')!='waiting_input' or pending.get('requestId')!=payload['request_id']
+                        or pending.get('toolCallId')!=payload['tool_call_id'] or pending.get('turnId')!=payload['turn_id']
+                        or pending.get('questions')!=payload.get('questions')):
+                    raise util.KanpilotError('conflict','Codex 问题与持久等待记录不符')
             try:
                 questions=normalize_questions(payload.get('questions')); answerable=True; rejected=None
             except util.KanpilotError as exc:
+                if job.get('backend')=='codex': raise
                 questions=[{'id':'q0','title':'问题格式超限或无效，请在 Plus 回答','description':'','multi_select':False,'allow_custom':False,'required':False,'options':[]}]
                 answerable=False; rejected=exc.message
             if not job.get('scope_id'):
@@ -252,11 +266,13 @@ def cmd_report_execution_question(ctx,payload):
             if task['status']!='running' and not (task['status']=='needs_user' and task['failure_code'] in ('observation_blocked','execution_input_required')):
                 raise util.KanpilotError('conflict','任务当前不能接收执行问题')
             before=bool(open_records(task))
-            q={**{k:payload[k] for k in ('run_id','session_id','turn_id','request_id','tool_call_id')},'source':'plus_asktool','questions_sha256':fingerprint,'answerable':answerable,'state':'open','delivery':'none','answered_by':None,'opened_at':now,'closed_at':None,'questions':questions,'draft':[{'question_id':v['id'],'option_ids':[],'text':'','skipped':False} for v in questions],'submitted':None,'operations':[]}
+            q={**{k:payload[k] for k in ('run_id','session_id','turn_id','request_id','tool_call_id')},'source':'codex' if job.get('backend')=='codex' else 'plus_asktool','questions_sha256':fingerprint,'answerable':answerable,'state':'open','delivery':'none','answered_by':None,'opened_at':now,'closed_at':None,'questions':questions,'draft':[{'question_id':v['id'],'option_ids':[],'text':'','skipped':False} for v in questions],'submitted':None,'operations':[]}
             if rejected: q['rejection_reason']=rejected
             qs.append(q); _store(ctx.conn,task,qs,now,before=before)
             db.add_event(ctx.conn,now,'execution_question_opened',task_id=task['task_id'],actor='execution-input',detail={'request_id':q['request_id'],'run_id':q['run_id'],'questions_sha256':fingerprint,'answerable':answerable})
         elif q and q['state']=='open':
+            if job.get('backend')=='codex':
+                raise util.KanpilotError('conflict','Codex 问题须按持久答案消费或停止证据核对关闭')
             _close(ctx.conn,task,qs,q,now,('expired' if q.get('termination_reason')=='execution_question_expired' else 'stopped') if q.get('stop_operation_id') else ('answered' if state=='closed' else 'expired'),payload.get('detail'))
     return _result(ctx,payload['task_id'])
 
@@ -273,7 +289,7 @@ def cmd_save_execution_answers(ctx,payload):
     with db.write_txn(ctx.conn):
         task,qs,q=_answer_target(ctx.conn,payload)
         answers,_=normalize_answers(q,payload['answers'],draft=True)
-        if q['delivery'] in ('submitting','unknown') and (q.get('submitted') or {}).get('answers')!=answers:
+        if (q['delivery'] in ('submitting','unknown') or q.get('source')=='codex' and q['delivery']=='accepted') and (q.get('submitted') or {}).get('answers')!=answers:
             raise util.KanpilotError('conflict','送达结果未确定，冻结答案不可修改')
         q['draft']=answers; db.set_extra(ctx.conn,task,ctx.now_iso,execution_questions=qs)
     return _result(ctx,payload['task_id'])
@@ -281,6 +297,9 @@ def cmd_save_execution_answers(ctx,payload):
 
 def _client(conn,task,run_id,*,read_only,connect=True):
     job,run_dir=_job(conn,task,run_id)
+    if job.get('backend')=='codex':
+        from .codex_execution import InputClient
+        return InputClient(conn,task,run_id,read_only=read_only),job
     try: spec=util.jload((run_dir/'spec.json').read_text(encoding='utf-8'))
     except (OSError,ValueError): raise util.KanpilotError('validation_failed','缺少原执行 spec')
     if not isinstance(spec,dict) or spec.get('task_id')!=task['task_id'] or spec.get('run_id')!=run_id:
@@ -323,6 +342,8 @@ def cmd_submit_execution_answers(ctx,payload):
         if old:
             if old['answers']!=answers: raise util.KanpilotError('conflict','operation_id 已用于不同答案')
             return _result(ctx,task['task_id'],status=old['delivery'],deduplicated=True)
+        if q.get('source')=='codex' and q['delivery'] in ('submitting','unknown','accepted'):
+            raise util.KanpilotError('conflict','Codex 答案已提交或送达未知，禁止另建操作重发')
         if q['state']!='open': raise util.KanpilotError('conflict','执行问题已关闭')
         if q['delivery']=='submitting': raise util.KanpilotError('conflict','执行答案正在提交')
         if q['delivery']=='unknown' and q['submitted']['answers']!=answers:
@@ -348,17 +369,17 @@ def cmd_submit_execution_answers(ctx,payload):
             current=(target.get('submitted') or {}).get('operation_id')==operation and fresh['run_id']==expected['run_id'] and target['state']=='open'
             if current:
                 target['delivery']=delivery
-                if delivery=='accepted': _close(ctx.conn,fresh,qs,target,util.now_iso(),'answered')
+                if delivery=='accepted' and target.get('source')!='codex': _close(ctx.conn,fresh,qs,target,util.now_iso(),'answered')
                 else: db.set_extra(ctx.conn,fresh,util.now_iso(),execution_questions=qs)
             else: db.set_extra(ctx.conn,fresh,util.now_iso(),execution_questions=qs)
-    if delivery in ('not_pending','unknown'):
+    if delivery in ('not_pending','unknown') or q.get('source')=='codex':
         cmd_reconcile_execution_question(ctx,{'task_id':task['task_id'],'run_id':payload['run_id']})
     observer=ensure_observer(ctx,task['task_id'],payload['run_id'])
     return _result(ctx,task['task_id'],status=delivery,observer=observer)
 
 
 def cmd_reconcile_execution_question(ctx,payload):
-    task=db.require_task(ctx.conn,payload['task_id']); _job(ctx.conn,task,payload['run_id'])
+    task=db.require_task(ctx.conn,payload['task_id']); job,_=_job(ctx.conn,task,payload['run_id'])
     with db.write_txn(ctx.conn):
         task=db.require_task(ctx.conn,payload['task_id']); qs=copy.deepcopy(records(task))
         changed=False
@@ -369,6 +390,8 @@ def cmd_reconcile_execution_question(ctx,payload):
                     operation['delivery']='unknown'; q['delivery']='unknown'; changed=True
         if changed: db.set_extra(ctx.conn,task,util.now_iso(),execution_questions=qs)
     task=db.require_task(ctx.conn,payload['task_id']); opened=copy.deepcopy(open_records(task,payload['run_id']))
+    if job.get('backend')=='codex':
+        return _reconcile_codex(ctx,task,payload['run_id'],opened)
     if not opened: return _result(ctx,task['task_id'])
     try:
         client,job=_client(ctx.conn,task,payload['run_id'],read_only=True)
@@ -408,7 +431,122 @@ def cmd_reconcile_execution_question(ctx,payload):
     return _result(ctx,task['task_id'])
 
 
+def _codex_consumed(conn,client,q):
+    """A missing ask is never delivery proof; bind the original consumed mailbox."""
+    submitted=q.get('submitted') or {}
+    operation=submitted.get('operation_id')
+    if not operation: return False
+    record=client.turn_get(q['session_id'],q['turn_id'],require_identity=True)
+    if (record.get('sessionId')!=q['session_id'] or record.get('turnId')!=q['turn_id']
+            or record.get('source')!='codex_adapter' or record.get('inputResolution')!='answered'
+            or record.get('answerOperationId')!=operation or not util.parse_ts(record.get('answerConsumedAt'))):
+        return False
+    _,wire=normalize_answers(q,submitted['answers'])
+    payload={'scope_id':client.scope_id,'session_id':q['session_id'],'request_id':q['request_id'],
+             'tool_call_id':q['tool_call_id'],'answers':wire,'operation_id':operation}
+    receipt=runtime_operations.get_operation(conn,client.scope_id,operation)
+    return bool(receipt is not None and receipt['harness_id']=='codex'
+                and receipt['tool']=='codex_execution_input' and receipt['status']=='accepted'
+                and receipt['request_sha256']==runtime_operations.compute_request_sha256(payload)
+                and record.get('answerSha256')==util.sha256_bytes(util.jdump(payload).encode('utf-8')))
+
+
+def _codex_stop_accepted(conn,scope,stop,session_id):
+    if stop.get('session_id')!=session_id: return False
+    for field,tool in (('operation_id','kp_runtime_stop'),('abort_operation_id','kp_runtime_abort')):
+        operation=stop.get(field)
+        receipt=runtime_operations.get_operation(conn,scope,operation) if operation else None
+        payload={'scope_id':scope,'session_id':session_id,'operation_id':operation}
+        if (receipt is not None and receipt['harness_id']=='codex' and receipt['tool']==tool
+                and receipt['status']=='accepted' and receipt['session_id']==session_id
+                and receipt['request_sha256']==runtime_operations.compute_request_sha256(payload)):
+            return True
+    return False
+
+
+def _reconcile_codex(ctx,task,run_id,opened):
+    from .codex_execution import require_settled
+    try:
+        client,job=_client(ctx.conn,task,run_id,read_only=True)
+        consumed={q['request_id']:_codex_consumed(ctx.conn,client,q) for q in opened}
+        settled=False
+        try:
+            require_settled(job); settled=True
+        except util.KanpilotError: pass
+        with db.write_txn(ctx.conn):
+            fresh=db.require_task(ctx.conn,task['task_id']); current,_=_job(ctx.conn,fresh,run_id)
+            if current!=job: return _result(ctx,task['task_id'],status='unknown')
+            qs=copy.deepcopy(records(fresh))
+            stop=db.task_extra(fresh).get('execution_stop') or {}
+            stopped=settled and stop.get('run_id')==run_id and _codex_stop_accepted(ctx.conn,client.scope_id,stop,job['session_id'])
+            for expected in opened:
+                q=next((q for q in qs if _match(q,expected) and q['questions_sha256']==expected['questions_sha256'] and q['state']=='open'),None)
+                if not q: continue
+                if consumed[q['request_id']]:
+                    q['delivery']='accepted'
+                    for operation in q['operations']:
+                        if operation['operation_id']==q['submitted']['operation_id']: operation['delivery']='accepted'
+                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'answered')
+                elif settled:
+                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'stopped' if stopped else 'expired',stop.get('reason') or job.get('detail'))
+                fresh=db.require_task(ctx.conn,task['task_id'])
+            if stopped:
+                stop=dict(stop,status='stopped',confirmed_at=util.now_iso())
+                db.set_extra(ctx.conn,fresh,util.now_iso(),execution_stop=stop)
+                fresh=db.require_task(ctx.conn,task['task_id'])
+                if fresh['status']=='running' or fresh['status']=='needs_user' and fresh['failure_code']=='execution_input_required':
+                    core.block_task(ctx.conn,fresh,util.now_iso(),stop.get('reason') or 'user_stop','execution_failed','execution-input',stage='monitor')
+        return _result(ctx,task['task_id'],status='stopped' if stopped else 'observed')
+    except util.KanpilotError:
+        return _result(ctx,task['task_id'],status='unknown')
+
+
+def _stop_codex(ctx,payload):
+    abort=payload.get('abort') is True
+    op=_identity(payload['operation_id']); reason=payload.get('reason') or 'user_stop'
+    if reason not in ('user_stop','execution_question_expired'): raise util.bad_request('停止原因无效')
+    with db.write_txn(ctx.conn):
+        task=db.require_task(ctx.conn,payload['task_id']); job,_=_job(ctx.conn,task,payload['run_id'])
+        if task['status'] not in ('running','needs_user'):
+            raise util.KanpilotError('conflict','当前没有活动 Codex 执行轮次')
+        client,_=_client(ctx.conn,task,payload['run_id'],read_only=False,connect=False)
+        stop=copy.deepcopy(db.task_extra(task).get('execution_stop') or {})
+        if stop and stop.get('run_id')!=payload['run_id']: stop={}
+        if not stop and job.get('status') not in ('running','waiting_input'):
+            raise util.KanpilotError('conflict','Codex 已不在活动执行状态，请读取最终结果')
+        if abort:
+            stamp=util.parse_ts(stop.get('requested_at'))
+            receipt=runtime_operations.get_operation(ctx.conn,client.scope_id,stop.get('operation_id')) if stop else None
+            expected={'scope_id':client.scope_id,'session_id':job['session_id'],'operation_id':stop.get('operation_id')}
+            if (stamp is None or (util.now_dt()-stamp).total_seconds()<10 or receipt is None
+                    or receipt['harness_id']!='codex' or receipt['tool']!='kp_runtime_stop'
+                    or receipt['request_sha256']!=runtime_operations.compute_request_sha256(expected)
+                    or op==stop.get('operation_id')):
+                raise util.KanpilotError('conflict','停止身份或十秒宽限尚未满足，不允许 abort')
+            if stop.get('abort_operation_id') not in (None,op): raise util.KanpilotError('conflict','abort 结果未知，禁止重发')
+            stop['abort_operation_id']=op
+        else:
+            if stop and (stop.get('operation_id')!=op or stop.get('reason')!=reason):
+                raise util.KanpilotError('conflict','停止结果尚未确定，不重发')
+            if not stop: stop={'run_id':payload['run_id'],'session_id':job['session_id'],'turn_id':job['turn_id'],'operation_id':op,'requested_at':ctx.now_iso,'reason':reason,'status':'unknown'}
+        qs=copy.deepcopy(records(task))
+        for q in qs:
+            if q['run_id']==payload['run_id'] and q['state']=='open':
+                q.update(stop_operation_id=stop['operation_id'],stop_requested_at=stop['requested_at'],termination_reason=reason)
+                if abort: q['abort_operation_id']=op
+        db.set_extra(ctx.conn,task,ctx.now_iso,execution_questions=qs,execution_stop=stop)
+    try:
+        client,_=_client(ctx.conn,task,payload['run_id'],read_only=False)
+        client._write('kp_runtime_abort' if abort else 'kp_runtime_stop',op,{'session_id':job['session_id']})
+    except util.KanpilotError: pass
+    result=cmd_reconcile_execution_question(ctx,{'task_id':task['task_id'],'run_id':payload['run_id']})
+    if result.get('status')!='stopped': result['status']='unknown'
+    return result
+
+
 def cmd_stop_execution(ctx,payload):
+    row=round_store.require_round(ctx.conn,payload['task_id'],payload['run_id'])
+    if row['backend']=='codex': return _stop_codex(ctx,payload)
     abort=payload.get("abort") is True
     reason=payload.get("reason") or "user_stop"
     if reason not in ("user_stop","execution_question_expired"):

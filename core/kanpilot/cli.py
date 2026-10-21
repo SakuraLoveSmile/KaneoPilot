@@ -461,6 +461,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             # v3（§5.23.3）：任务执行后端与 PI-Desktop 分支配置块。
             "backend": (False, "str"),
             "pi_desktop": (False, "dict"),
+            "codex": (False, "dict"),
             # v4（§5.24.1）：dispatch/monitor 控制端后端（缺省 pi）。
             "controller_backend": (False, "str"),
         },

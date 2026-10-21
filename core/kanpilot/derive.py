@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
-from . import bridge, constants, db, util
+from . import bridge, constants, db, round_store, util
 
 
 def request_is_lost(request: sqlite3.Row, now) -> bool:
@@ -692,6 +692,10 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if db.task_save_state(task) == "trashed":
             actions.append("purge")
     else:
+        execution=round_store.get_round(conn,task['task_id'],task['run_id']) if task['run_id'] else None
+        if (status=='running' and task['sent']==1 and send_state=='sent'
+                and execution is not None and execution['backend']=='codex' and execution['save_state']=='active'):
+            actions.append('stop_execution')
         # 可移出看板时才提供归档/回收站（§5.15.6）。
         if archive_blocked_reason(conn, task, now) is None:
             actions.extend(["archive", "trash"])
@@ -727,6 +731,7 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             if code == "verification_unconfirmed":
                 from . import engine_claim_scope
                 if (engine_claim_scope.effective_mode(conn, task["project_id"]) != "live"
+                        and (execution is None or execution['backend']!='codex')
                         and core.review_repair_of(task).get("source_kind") != "merge_conflict"):
                     actions.append("accept_verification")
             from . import verification_recovery

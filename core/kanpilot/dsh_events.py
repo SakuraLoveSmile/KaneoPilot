@@ -353,6 +353,13 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
     # 观察进程（§5.23.7）：续接观察只用它判断「本机是否还有人在看」，不作
     # 完成/失败判定依据（完成只认 terminal + job.status + 验证证据）。
     observe_pid = job.get("observe_pid") or job.get("pid") or view.get("pid")
+    observer_alive = util.pid_alive(observe_pid)
+    if view.get("backend") == "codex":
+        from . import codex_execution
+        try:
+            observer_alive = codex_execution.job_alive(job)
+        except util.KanpilotError:
+            observer_alive = None
     finalizing = job.get("observation_finalizing") or {}
     return {
         "backend": view.get("backend"),
@@ -361,7 +368,7 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         "pid": job.get("pid") if job.get("pid") is not None
         else view.get("pid"),
         "observe_pid": observe_pid,
-        "observer_alive": util.pid_alive(observe_pid),
+        "observer_alive": observer_alive,
         "observation_finalizing": bool(
             finalizing.get("turn_id") == job.get("turn_id")
             and finalizing.get("observed_status") == "completed"),

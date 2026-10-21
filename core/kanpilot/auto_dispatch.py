@@ -114,7 +114,7 @@ def _wait_session(controller, result):
 
 def _confirm(controller, evidence, session_id):
     evidence = dict(evidence, session_id=session_id, protocol_seen=True)
-    if evidence["backend"] == "pi_desktop":
+    if evidence["backend"] in ("pi_desktop", "codex"):
         observed = controller.call("get-session", controller.task_identity())
         session = observed.get("session") or {}
         detail = observed.get("round_detail") or {}
@@ -138,7 +138,7 @@ def _fail(controller, send_state, reason):
 
 def _dispatch(controller):
     context = controller.claim["context"]
-    if context.get("backend") not in ("pi", "pi_desktop"):
+    if context.get("backend") not in ("pi", "pi_desktop", "codex"):
         controller.log("unsupported_backend", "unsupported_backend")
         return False
     evidence = {key: context[key] for key in ("session_marker", "repository", "backend")}

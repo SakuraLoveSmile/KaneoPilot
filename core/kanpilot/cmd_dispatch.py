@@ -399,7 +399,7 @@ def _validate_pi_confirm(conn, task, run_id, evidence, round_row):
         )
     check(session.get("session_id") == evidence.get("session_id"),
           "session_id 与协议会话事件不符")
-    if backend == "pi_desktop":
+    if backend in ("pi_desktop", "codex"):
         # §5.23.3：dispatch-confirm 另核 turn_id 与协议会话事件一致。
         check(session.get("turn_id") == evidence.get("turn_id"),
               "turn_id 与协议会话事件不符")
@@ -457,6 +457,8 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
     task_id, run_id = task["task_id"], payload["run_id"]
     round_row = round_store.require_round(conn, task_id, run_id)
     backend = round_row["backend"]
+    if backend == "codex":
+        return _dispatch_start_codex(ctx, task, _request, run_id, round_row)
     if backend == "pi_desktop":
         return _dispatch_start_pi_desktop(
             ctx, task, _request, run_id, round_row
@@ -610,6 +612,81 @@ def _require_session_naming_capability(conn, config_snapshot) -> None:
             "无法确认 PI-Desktop-Plus 的工作区命名能力："
             + util.redact(exc.message),
         )
+
+def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
+    """Start one identity-bound CLI worker; unknown starts are never resent."""
+    from . import execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
+    conn, now, task_id = ctx.conn, ctx.now_iso, task["task_id"]
+    config = dict(round_store.round_view(round_row).get("config") or {})
+    available, detail = exec_config.check_available(conn, config_snapshot=config)
+    if not available:
+        raise util.KanpilotError("validation_failed", detail or "Codex CLI 执行环境不可用")
+    scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
+    operation = "codex-start:" + run_id
+    with db.write_txn(conn):
+        fresh = round_store.require_round(conn, task_id, run_id)
+        if fresh["started_at"]:
+            if not fresh["pid"]:
+                raise util.KanpilotError("conflict", "Codex 轮次已有启动意图但启动结果未确认；保留现场，禁止重复启动")
+            session, _ = _pi_session_view(conn, task_id, run_id, backend="codex")
+            return {"status": "started" if session else "starting", "pid": fresh["pid"],
+                    "session_id": session, "worktree_path": fresh["worktree_path"], "deduplicated": True}
+        round_store.mark_intent(conn, task_id, run_id, now)
+        runtime_operations.begin_operation(conn, scope, operation, "codex", "codex_execution_start",
+                                           {"task_id": task_id, "run_id": run_id, "config": config}, now=now)
+    directory = None
+    try:
+        directory = _headless.resolve_source(conn).run_dir(task_id, run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        worktree, worktree_mode = _ensure_worktree(task, task_id, run_id, conn, require_isolated=True)
+        raw = Path(task["plan_path"]).read_bytes()
+        util.require(util.sha256_bytes(raw) == task["plan_sha256"], "派发前计划已变化", "validation_failed")
+        parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+        util.require(parsed["ok"] and parsed["commands"], "Codex 执行要求有效 verify 命令", "validation_failed")
+        spec = {"v": 1, "backend": "codex", "task_id": task_id, "run_id": run_id,
+                "request_id": request["request_id"], "scope_id": scope,
+                "session_marker": task["session_marker"], "session_display_name": task["title"],
+                "config": config, "cwd": str(worktree), "worktree_mode": worktree_mode,
+                "repository": task["repository"], "plan_path": task["plan_path"],
+                "plan_sha256": task["plan_sha256"], "runs_dir": str(directory),
+                "instruction": _execution_instruction(task, worktree, desktop=True, conn=conn),
+                "completion_policy": "command_verification", "required_verification_commands": parsed["commands"],
+                "timeout_seconds": round_store.round_timeout_seconds(conn), "db_path": str(ctx.db_path)}
+        if core.review_repair_of(task):
+            from . import repair_prompt
+            spec.update(repair_prompt.freeze(task))
+        execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
+        process_owner.bind_spec(spec, ctx.db_path)
+        spec_path = directory / "spec.json"
+        spec_path.write_text(util.jdump(spec), encoding="utf-8")
+        with db.write_txn(conn):
+            runtime_operations.mark_operation_unknown(conn, scope, operation)
+        env = dict(os.environ, PYTHONPATH=str(constants.core_root()))
+        with (directory / "worker.log").open("ab") as log:
+            proc = subprocess.Popen([sys.executable, "-m", "kanpilot.codex_worker", "--spec", str(spec_path)],
+                                    cwd=str(constants.core_root()), stdout=log, stderr=log,
+                                    start_new_session=True, env=env)
+        _register_started_worker(ctx, spec, proc, spec_path)
+        with db.write_txn(conn):
+            runtime_operations.complete_operation(conn, scope, operation, result={"pid": proc.pid})
+            round_store.mark_started(conn, task_id, run_id, now, pid=proc.pid, worktree_path=str(worktree))
+            db.add_event(conn, now, "round_started", task_id=task_id, request_id=request["request_id"],
+                         actor="kaneo-dispatch", detail={"run_id": run_id, "pid": proc.pid,
+                             "backend": "codex", "worktree_path": str(worktree), "worktree_mode": worktree_mode})
+    except (util.KanpilotError, OSError, subprocess.SubprocessError) as exc:
+        if isinstance(exc, process_owner.OwnerStoppedError):
+            raise
+        # A worker may already exist: preserve unknown instead of fabricating a
+        # not-sent failure that would permit another execution of this run.
+        with db.write_txn(conn):
+            db.add_event(conn, now, "round_start_failed", task_id=task_id, request_id=request["request_id"],
+                         actor="kaneo-dispatch", detail={"run_id": run_id, "backend": "codex",
+                             "reason": util.redact(str(exc)), "send_state": "unknown"})
+        raise util.KanpilotError(getattr(exc, "code", "internal"), "Codex CLI 启动未确认：" + util.redact(str(exc))) from exc
+    session = _wait_session_event(directory)
+    return {"status": "started" if session else "starting", "pid": proc.pid,
+            "session_id": session, "worktree_path": str(worktree), "deduplicated": False}
+
 
 def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
     """pi_desktop 分支 dispatch-start（§5.23.3）：连接探测 → 意图落盘 →
@@ -835,6 +912,9 @@ def _wait_observe_attach(run_dir, proc, previous_job):
 
 def _observer_pid_alive(conn, task_id, run_id, pid, run_dir, job):
     from . import process_owner
+    if job.get("backend") == "codex":
+        from . import codex_execution
+        return codex_execution.job_alive(job)
     registered = process_owner.registered_worker_alive(conn, task_id, run_id, pid)
     if registered is not None:
         return registered
@@ -915,6 +995,8 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
             "conflict", f"任务处于 {task['status']}，无需续接观察进程"
         )
     row = round_store.require_round(conn, task_id, run_id)
+    if row["backend"] == "codex":
+        return _observe_codex(conn, task, run_id, payload)
     if row["backend"] != "pi_desktop":
         if continue_only:
             return {"status": "deferred", "pid": None, "detail": "历史后端不支持目标自动续接"}
@@ -1128,6 +1210,25 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
         "status": status, "pid": proc.pid, "detail": detail,
         "run_id": run_id, "reopened": reopened,
     }
+
+
+def _observe_codex(conn, task, run_id, payload):
+    """Observe durable local evidence only; exec resume always sends new input."""
+    from . import codex_execution
+    if payload.get("recovery_turn_id"):
+        raise util.KanpilotError("validation_failed", "Codex 恢复使用新的执行轮次，不接管 Plus 后续轮次")
+    client = codex_execution.InputClient(conn, task, run_id, read_only=True)
+    job = client.job
+    if codex_execution.job_alive(job):
+        return {"status": "observing", "pid": job.get("pid"), "deduplicated": True,
+                "detail": "Codex 执行仍在运行；本次仅观察状态"}
+    try:
+        codex_execution.require_settled(job)
+    except util.KanpilotError:
+        return {"status": "deferred", "pid": None,
+                "detail": "Codex worker 已退出，终态尚未确认；保留现场，不自动续发"}
+    return {"status": job["status"], "pid": None, "deduplicated": True,
+            "detail": "Codex 轮次已结束；本次仅观察持久记录"}
 
 
 def _settled_failed_observation(ctx, task, row, job):

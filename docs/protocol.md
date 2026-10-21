@@ -1817,11 +1817,22 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 - review：材料冻结后、发送前建契约，结算及恢复时核对结果、正文、当前源码、请求与租约。信封不绕过既有修复权限或结论规则。
 - delivery：publish/sync 独立建契约，核心按真实远端观察构造信封，runner 核验后才推进。push/创建 PR/评论先记 `runtime_operations`；unknown 跨领取只读对账，明确未写入的拒绝按既有重试策略保留旧回执、登记新尝试。写入成功后的读取失败仍不能作为未写入证明。
 
-`kp-harness-v1` 按语义能力描述 `supported/unsupported/unknown` 和保证来源，不用工具名作为核心业务条件。当前可控执行仍为 Plus，Codex/Claude CLI 只提供现有规划/评审能力。既有 runtime scope 仅授权 Plus，调用参数不能切换 harness 或提升权限。Plus checks 转换后仍为 `model_declared`，不冒充宿主独立采集。
+`kp-harness-v1` 按语义能力描述 `supported/unsupported/unknown` 和保证来源，不用工具名作为核心业务条件。Plus 与 Codex CLI 分别按其真实执行机制接入；Claude CLI 仅提供现有规划/评审能力。既有 MCP runtime scope 仅授权 Plus，调用参数不能切换 harness 或提升权限。Codex CLI 受核心本机进程与运行目录控制，不借用 Plus scope。Plus checks 转换后仍为 `model_declared`，不冒充宿主独立采集。
 
 真正无契约的历史记录按原规则读取；已有或标记必需契约的记录损坏时不得回退。契约复用既有 spec/job 与交付 JSON，SQLite 仍是状态写入源，无新 schema。外部操作的先意图后发送、同参数幂等及 unknown 不重发规则继续生效；无服务端 CAS 时本地锁不消除远端竞争。
-
 
 ## 安卓远程控制台（2026-10-21）
 
 版本化 HTTPS 接口、受限设备权限、本机 CLI、配对与回执按 [安卓控制台契约 v1](mobile-console-contract.md) 冻结。每次网络请求通过 stdin JSON 启动单独核心 worker，核心复核设备授权、现有任务守卫与身份，不把现有 MCP 暴露到局域网。全局 set-paused 可选 expected_paused 在同一写事务内比较；旧调用兼容。
+
+## 5.31 Codex CLI 执行适配（2026-10-21）
+
+`exec_config.backend` 新增 `codex`，独立配置块 `codex:{model,reasoning_effort}`。轮次冻结为 `{backend:"codex",model,reasoning_effort,sandbox:"workspace-write",execution_question_max_wait_seconds}`，保存切换保留其他后端字段，不修改 Codex 全局配置，也不改变既有轮次。模型与思考等级沿规划配置目录校验；本地就绪探测不调用模型，不承诺账户可用性。新请求配置不完整或不可用时明确拒绝，不改用其他后端。
+
+核心先登记启动操作回执，复用隔离工作树、计划哈希、`execution_contract`、App worker 归属和请求心跳，再拉起 `codex_worker`。CLI 使用工作树写入沙箱、无交互审批、JSONL 及 JSON Schema；服务商解析沿 `codex_provider`，凭据只在内存/子进程环境传递。首个 session 事件须由真实 `thread.started` 与成功核心心跳共同证明。CLI 未暴露原生 turn ID 时，采用明确标注的适配器单调代次，不冒充原生身份。
+
+最终结构为 `{status:"completed|needs_input|failed",summary,checks:[{command,exit_code}],questions:[{title,options}]}`。模型声明与 CLI 命令事件分别保存；每条冻结 verify 必须在报告中通过，且有原文匹配的 `command_execution` 完成事件、独立整数退出码0和同一最终源码快照。禁止用自然语言、退出0、turn.completed、模型自报或旧代次结果独立推进。日志截断、缺报告、错身份、布尔退出码、重复矛盾记录、验证后源码变化均不放行。Pilot 不运行任务 verify。
+
+`needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。
+
+停止先持久记录，再核对受管进程出生身份与实际停止结果。取消/App 关闭须处理 CLI 子进程，不遗留可写孤儿。缺少停止证明时保留 unknown。所有新 Codex 执行无论项目引擎模式均走结构化 verdict，回执同时绑定报告/原生命令事件/spec/job/计划和当前源码；提交后恢复仍复核原证据。交付与远端副作用继续由核心命令完成。

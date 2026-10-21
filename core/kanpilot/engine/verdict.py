@@ -1,6 +1,6 @@
-"""Read-only verdict over Plus command results and the registered source tree.
+"""Read-only verdict over harness evidence and the registered source tree.
 
-Pilot never runs plan verification.  It checks trusted local Plus evidence,
+Pilot never runs plan verification.  It checks trusted local harness evidence,
 source identity and delivery binding before permitting completion.
 """
 from __future__ import annotations
@@ -217,14 +217,14 @@ def _require_snapshot(job, source_sha256):
             or job["verification_evidence_version"] != 1
             or not job.get("verification_source_sha256")):
         raise util.KanpilotError("verification_unconfirmed",
-            "Plus 验证缺少源码快照；请通过新的执行轮次补齐验证证据")
+            "执行验证缺少源码快照；请通过新的执行轮次补齐验证证据")
     if not source_sha256 or job["verification_source_sha256"] != source_sha256:
-        raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证完成后源码已变化，不能沿用旧验证")
+        raise util.KanpilotError("verification_identity_unconfirmed", "执行验证完成后源码已变化，不能沿用旧验证")
 
 
 def receipt_evidence_current(conn, task, receipt, *, deadline=None, heartbeat=None):
     """Recheck receipt evidence on retries; historical local receipts never pass."""
-    if receipt.get("evidence_source") == "goal_report":
+    if receipt.get("evidence_source") in ("goal_report", "codex_report"):
         return _goal_receipt_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") != "plus_tool_results":
         return False
@@ -350,13 +350,35 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
     return result
 
 
+def _report_reader(conn, task, source):
+    """Plus keeps its native identity gate; Codex requires its registered backend."""
+    from .. import codex_execution, verification_recovery
+    if source == "goal_report":
+        return verification_recovery.read_goal_evidence
+    if source == "codex_report":
+        row = round_store.get_round(conn, task["task_id"], task["run_id"])
+        if row is not None and row["backend"] == "codex":
+            return codex_execution.read_evidence
+    raise util.KanpilotError("verification_identity_unconfirmed", "报告来源与当前执行后端不符")
+
+
 def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=False) -> dict:
-    """Live verdict from Plus's structured Goal report; transcript tool results are never read."""
+    """Plus structured Goal report verdict; transcript tool results are never read."""
+    return _evaluate_report_task(conn, task, "goal_report", deadline=deadline, heartbeat=heartbeat, isolated=isolated)
+
+
+def evaluate_codex_task(conn, task, *, deadline=None, heartbeat=None, isolated=False) -> dict:
+    """Codex requires both its structured report and native command evidence."""
+    return _evaluate_report_task(conn, task, "codex_report", deadline=deadline, heartbeat=heartbeat, isolated=isolated)
+
+
+def _evaluate_report_task(conn, task, source, *, deadline=None, heartbeat=None, isolated=False) -> dict:
     from .. import verification_recovery
+    reader = _report_reader(conn, task, source)
     frozen = binding(conn, task, deadline=deadline, heartbeat=heartbeat)
     try:
         git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-        evidence = verification_recovery.read_goal_evidence(conn, task)
+        evidence = reader(conn, task)
         git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
     except util.KanpilotError as exc:
         if exc.code == "verification_unconfirmed":
@@ -379,18 +401,19 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
         result["verification_ok"] = False
         if not real_failure:
             result.update(kind="unconfirmed", environment_failure=False, environment_reasons=[],
-                          detail=verification_recovery.goal_coverage_detail(coverage))
+                          detail=(verification_recovery.goal_coverage_detail(coverage) if source == "goal_report" else
+                                  verification_recovery.goal_coverage_detail(coverage).replace("Plus 报告", "Codex 报告", 1).replace("需由 Plus", "需由 Codex", 1)))
     try:
         git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-        recheck = verification_recovery.read_goal_evidence(conn, db.require_task(conn, task["task_id"]))
+        recheck = reader(conn, db.require_task(conn, task["task_id"]))
     except util.KanpilotError as exc:
         raise util.KanpilotError("verification_identity_unconfirmed", util.redact(exc.message)) from exc
     if (not _evidence_unchanged(evidence["hashes"]) or recheck["hashes"] != evidence["hashes"]
             or recheck["report"]["report_sha256"] != report["report_sha256"]):
-        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间 Plus 报告或执行证据已变化")
+        raise util.KanpilotError("verification_identity_unconfirmed", "核验期间报告或执行证据已变化")
     if binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen:
         raise util.KanpilotError("verification_identity_unconfirmed", "核验期间计划、轮次或源文件已变化")
-    result.update(binding=frozen, evidence_source="goal_report", evidence_sha256=evidence["hashes"],
+    result.update(binding=frozen, evidence_source=source, evidence_sha256=evidence["hashes"],
                   execution_turn_id=report["turn_id"], report_id=report.get("report_id"),
                   report_sha256=report["report_sha256"], verification_evidence_version=1,
                   goal_check_coverage={"matched": coverage["matched"], "missing": coverage["missing"],
@@ -400,7 +423,7 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
             frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
         if (binding(conn, db.require_task(conn, task["task_id"]), deadline=deadline, heartbeat=heartbeat) != frozen
                 or not _evidence_unchanged(evidence["hashes"])):
-            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码或 Plus 证据已变化")
+            raise util.KanpilotError("verification_identity_unconfirmed", "冻结 Git 提交内容期间源码或执行证据已变化")
     if "stage_contract" in evidence["job"]:
         from .. import execution_contract
         result["stage_result"] = execution_contract.verdict_result(
@@ -410,10 +433,10 @@ def evaluate_goal_task(conn, task, *, deadline=None, heartbeat=None, isolated=Fa
 
 def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None):
     """Recheck a goal_report receipt: same run files, same report bytes, same coverage result."""
-    from .. import verification_recovery
     try:
         git_delivery._budget_timeout(deadline, heartbeat=heartbeat)
-        evidence = verification_recovery.read_goal_evidence(conn, task)
+        reader = _report_reader(conn, task, receipt.get("evidence_source"))
+        evidence = reader(conn, task)
         _require_snapshot(evidence["job"], (receipt.get("binding") or {}).get("source_sha256"))
         report = evidence["report"]
         if "stage_contract" in evidence["job"]:
@@ -434,7 +457,7 @@ def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None)
 
 def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
     """A core commit changes HEAD/status, but not the verified source bytes."""
-    if (receipt.get("evidence_source") != "goal_report"
+    if (receipt.get("evidence_source") not in ("goal_report", "codex_report")
             or receipt.get("verification_ok") is not True
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]):

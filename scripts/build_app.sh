@@ -54,6 +54,7 @@ sys.path[:0] = [str(bundled), str(bundled / "_vendor")]
 # 失败，不能靠 `cp ... || true` 把核心打包缺失吞掉。
 modules = (
     "pi_desktop_backend", "pi_desktop_worker", "pi_desktop_planner",
+    "codex_planner", "codex_provider", "codex_execution", "codex_worker",
     "pi_desktop_controller", "pi_desktop_review", "plus_interaction",
     "exec_config", "planner_config", "review_config", "cmd_config", "project_config",
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
