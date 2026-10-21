@@ -37,10 +37,24 @@ struct MobileServiceFixtures {
             precondition(!manager.running && manager.pairing == nil && manager.configuration?.enabled == false)
         } else {
             precondition(!manager.running, "enabled must not be treated as ready")
-            for _ in 0..<40 where manager.starting { try? await Task.sleep(for: .milliseconds(100)) }
-            if mode == "ready" || loopbackOnly {
+            let clock = ContinuousClock()
+            let started = clock.now
+            // Product startup has a 15s watchdog, followed by up to 5s owned
+            // shutdown. Allow 1s scheduling margin, but require a real terminal
+            // state rather than interpreting elapsed fixture time as failure.
+            let deadline = started.advanced(by: .seconds(21))
+            while manager.starting && clock.now < deadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            print("mobile manager \(mode) startup settled after \(started.duration(to: clock.now))")
+            precondition(!manager.starting, startupDiagnostic(manager, mode: mode))
+            if mode == "ready" || mode == "delayed-ready" || loopbackOnly {
                 precondition(manager.running && !manager.starting && !manager.isSimulation,
                              startupDiagnostic(manager, mode: mode))
+                if mode == "delayed-ready" {
+                    precondition(started.duration(to: clock.now) >= .seconds(4),
+                                 "delayed-ready must exercise startup beyond the old 4s fixture deadline")
+                }
                 if mode == "real-core" {
                     // Pass the probe deadline: ready cleanup must not be repeated.
                     try? await Task.sleep(for: .seconds(7))
@@ -50,6 +64,11 @@ struct MobileServiceFixtures {
                     await manager.refresh()
                     precondition(manager.running && manager.configuration?.enabled == true)
                 }
+            } else if mode == "startup-timeout" {
+                precondition(!manager.running && manager.error?.contains("15 秒") == true,
+                             startupDiagnostic(manager, mode: mode))
+                precondition(started.duration(to: clock.now) >= .seconds(15),
+                             "fixture must wait for the product startup watchdog")
             } else {
                 precondition(!manager.running && manager.error?.contains("端口") == true, manager.error ?? "missing startup failure")
             }

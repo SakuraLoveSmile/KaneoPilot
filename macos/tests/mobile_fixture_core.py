@@ -31,13 +31,15 @@ elif command == 'set-mobile-access':
     state_path.write_text(json.dumps(state))
     print(json.dumps(status()))
 elif command == 'mobile-serve':
-    if os.environ.get('KANPILOT_MOBILE_FIXTURE_MODE') == 'failure':
+    mode = os.environ.get('KANPILOT_MOBILE_FIXTURE_MODE')
+    if mode == 'failure':
         print(json.dumps({'error': '手机连接端口已被占用', 'code': 'unavailable'}), flush=True)
         sys.exit(1)
-    time.sleep(.3)
-    print(json.dumps({'ready': True, 'endpoint': status()['endpoint']}), flush=True)
     signal.signal(signal.SIGTERM, lambda *args: sys.exit(0))
     (root / 'service-started').write_text(str(os.getpid()))
+    if mode != 'startup-timeout':
+        time.sleep(5 if mode == 'delayed-ready' else .3)
+        print(json.dumps({'ready': True, 'endpoint': status()['endpoint']}), flush=True)
     while True:
         time.sleep(.1)
 else:

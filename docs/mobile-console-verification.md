@@ -39,7 +39,9 @@ Mac 正常退出后，候选进程及其所属 47831 监听子进程均退出；
 
 计划确认和问题提交在临时数据库中分别只新增一条 dispatch 与一条 plan 请求，未发生重复提交。手机暂停期间，直接核心 claim 返回 `claimed:false, reason:paused`，原模拟运行轮次与 running 状态不变。此证据不代表调用了真实模型或检验了付费执行器的持续运行；本轮没有启动真实模型。
 
-固定签名 Release 0.3.0 / versionCode 2 留在真机上，处于未配对状态。Debug 与测试包已移除；充电常亮、font_scale 和夜间模式均按测试前记录恢复为 0 / 1.0 / yes。
+真机 Compose 与 LAN 检查使用本地 build 2；后续 CI 修复未修改 Android 源码。最终固定签名 Release 0.3.0 / versionCode 3 再次覆盖安装，UID 10328 与首次安装时间保持不变，手机实际 APK SHA256 与最终本地包一致，处于未配对状态。Debug 与测试包已移除；充电常亮、font_scale 和夜间模式均按测试前记录恢复为 0 / 1.0 / yes。
+
+任务概览表达式拆分后，主 agent 从最终本地 App 复制并签名独立 bundle，使用 FakeCore 和独立目录，亲自检查任务概览、状态、详情页签与底部操作区，截图为 `verification/mac-overview-ci-fix.png`。Mac 在额外弹窗检查前自动锁屏，该项未执行；随后只停止了已确认身份的本次候选进程。原有正常退出生命周期证据保持单独记录，不把此次 SIGTERM 清理算作 Cmd+Q 验证。
 
 原生验收曾在仅有 linker 签名的临时候选启用服务时出现一次 `-11`，无崩溃栈。完整签名 Debug（LLDB）与非调试 Release 均未复现；不能把签名差异认定为已证明的唯一根因。另修正了有独立日志证据的 NW 探测重复清理。
 
@@ -59,12 +61,24 @@ Android 固定证书 SHA256：`5062db967ce58d65df2c47895649df43464bab9a6eadf135f
 
 macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 3.9+。没有替换正式 Mac App。
 
+最终本地候选来自源码 `bc8a98290ad381646d6e94cacd43c44eecfd6e08`，版本 0.3.0 / build 3：
+
+- `packages/KaneoPilot-0.3.0-local-3-android.apk`，SHA256 `5ec322b25f0550c359b7ab58f8decf25f456eb3d02ae91b71f852aa651dcc354`。
+- `packages/KaneoPilot-0.3.0-local-3-macos-universal.dmg`，SHA256 `3f575ad9d51de1d99f04e39a2c063939a2ca8ce63894457e12a2ef39daa846af`。
+- `packages/manifest.json` 与 `SHA256SUMS` 记录相同源码、版本和构建号；三项校验通过。App 中 158 份运行时源码、预设与 prompt 均与工作树一致。build 2 的包与清单证据保留，未将旧包改记为新源码。
+
 用户已明确授权将 26 个既有基线提交随隔离分支上传。源码提交 `4366f2d25bd8dc47184345c13e3f6097ad66bd9e` 已推送到私有仓库的 `codex/android-console-ci`，并触发 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39556941445)。远端构建、下载和安装核验仍在进行中。原始工作区与正式数据库未参与此次提交。
 
 首轮远端 Android Debug APK 编译、签名检查和 metadata staging 成功，但 SDK 安装步骤因 `sdkmanager` 不在 PATH 中失败，单元与 Lint 因此未执行。Mac 真实核心夹具误按地址列表排序选择了 LAN 地址；另有 Xcode 16.4 的任务概览表达式类型检查超时。这些问题正在按实际日志修复，不将后续单独成功的构建算作整项 CI 通过。
 
 后续修复明确使用 runner 的 SDK 工具路径；回环夹具固定选择 `127.0.0.1`，保留原就绪期限并补充失败诊断和 LAN 地址排首覆盖；任务概览拆分表达式，保留原布局及弹窗顺序。还按实际 `lipo` 报错改为逐项核验两种架构。本地两套手机服务夹具、Universal Release 构建、actionlint 与相关静态检查通过；远端 Xcode 16.4 仍需重跑证明。历史启动失败缺少诊断，尚不能把地址排序认定为唯一原因。
 
-GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。清单保存在 `verification/actions-artifact-inventory.json` / `.md`；当前没有远端安装包下载或安装证据。
+第二轮 [Actions 39558904636](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39558904636) 使用 `bc8a982`：Android SDK 安装、单元、Lint、APK 构建和签名/版本校验均成功，上传仍因配额失败。Mac Universal 的 Swift 编译成功，随后打包脚本的 `lipo` 参数顺序在 Xcode 16.4 报错；真实核心夹具在 4 秒断言时仍为 `starting=true, error=nil`，尚未达到产品已有的 15 秒启动期限。后续只修正打包参数和夹具等待终态，不放宽产品启动期限或删除失败断言。
+
+终态等待修复的本地实测：慢启动约 5.11 秒后就绪，永不就绪约 15.07 秒触发产品原有超时；真实核心回环 HTTPS、配对、ready 后探测与退出通过，owned 子进程均退出。夹具观察上限为 21 秒（15 秒产品启动期限、5 秒退出等待与 1 秒调度余量），仍要求明确终态。原始 tee 日志为 `verification/mac-mobile-fixtures-terminal-wait.log` 与 `mac-mobile-real-core-terminal-wait.log`。打包脚本现与工作流一致，将 `lipo` 输入文件放在参数之前，分别严格检查两种架构。
+
+为运行修复后的源码，首轮已保存平台失败日志并取消尚未完成的核心检查；不能把该次远端核心/集成检查记为通过。本地完整基线对照证据见前文。
+
+GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。已读取 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。没有删除任何产物；当前没有远端安装包下载或安装证据。
 
 本轮不创建版本标签、PR 或 GitHub Release；标签发布分支尚无实际发布证据。完整检查保留失败门槛，不能以本地包或平台构建成功冒充 Release 已发布。
