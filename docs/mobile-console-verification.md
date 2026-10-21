@@ -7,8 +7,8 @@
 | 步骤 | 状态 | 当前结果 |
 |---|---|---|
 | T1 契约与隔离 | 待体验 | 固定接口、共享 DTO、CLI 接入和隔离分支已建立 |
-| T2 核心与设备接口 | 待体验 | HTTPS、配对、撤销、事务授权、幂等回执和受限报告读取；42 项移动/暂停专项通过 |
-| T3 Mac 设置与生命周期 | 待体验 | 原生 900×600 和 1180×760 检查；真实启停、关闭窗口继续连接、正常退出只停止所属服务通过 |
+| T2 核心与设备接口 | 实现中 | 本地 HTTPS、安全、幂等与 42 项专项通过；远端真实核心启动超时正在定位 |
+| T3 Mac 设置与生命周期 | 实现中 | 原生页面与本地生命周期通过；远端真实核心启动夹具仍失败，正在采集调用栈 |
 | T4 Android 控制台 | 待体验 | 20 项单元、Lint、构建、Mi 10 的 Compose 与 LAN 检查、固定签名覆盖升级通过 |
 | T5 双平台构建与发布 | 实现中 | 工作流、固定签名及 Secrets 已配置；已推送并运行首轮 Actions，正在修复远端构建问题；产物上传另受账号存储配额阻挡 |
 | T6 联合核验 | 实现中 | 真机 LAN、本地安装和完整核心/集成基线对照完成；Actions 产物下载与安装证据仍待完成 |
@@ -39,9 +39,11 @@ Mac 正常退出后，候选进程及其所属 47831 监听子进程均退出；
 
 计划确认和问题提交在临时数据库中分别只新增一条 dispatch 与一条 plan 请求，未发生重复提交。手机暂停期间，直接核心 claim 返回 `claimed:false, reason:paused`，原模拟运行轮次与 running 状态不变。此证据不代表调用了真实模型或检验了付费执行器的持续运行；本轮没有启动真实模型。
 
+本次完整集成中的 `tests.test_queue.TestPause` 三项也全部通过：全局暂停阻止新领取、阶段暂停只阻止对应阶段、暂停后已领取请求仍可 heartbeat 并 report 成功。`verification/pause-continuation-existing-integration.json` 从已经完成的 JUnit 提取结果，没有为此重复运行检查；它证明核心的领取与回报语义，不冒充真实模型执行。
+
 真机 Compose 与 LAN 检查使用本地 build 2；后续 CI 修复未修改 Android 源码。最终固定签名 Release 0.3.0 / versionCode 3 再次覆盖安装，UID 10328 与首次安装时间保持不变，手机实际 APK SHA256 与最终本地包一致，处于未配对状态。Debug 与测试包已移除；充电常亮、font_scale 和夜间模式均按测试前记录恢复为 0 / 1.0 / yes。
 
-任务概览表达式拆分后，主 agent 从最终本地 App 复制并签名独立 bundle，使用 FakeCore 和独立目录，亲自检查任务概览、状态、详情页签与底部操作区，截图为 `verification/mac-overview-ci-fix.png`。Mac 在额外弹窗检查前自动锁屏，该项未执行；随后只停止了已确认身份的本次候选进程。原有正常退出生命周期证据保持单独记录，不把此次 SIGTERM 清理算作 Cmd+Q 验证。
+任务概览表达式拆分后，主 agent 从 `bc8a982` 的本地 build 3 App 复制并签名独立 bundle，使用 FakeCore 和独立目录，亲自检查任务概览、状态、详情页签与底部操作区，截图为 `verification/mac-overview-ci-fix.png`。其后 `da1cb0c` 只修改夹具、打包命令和核验文档，未修改产品界面或核心。Mac 在额外弹窗检查前自动锁屏，该项未执行；随后只停止了已确认身份的本次候选进程并移除临时目录。原有正常退出生命周期证据保持单独记录，不把此次 SIGTERM 清理算作 Cmd+Q 验证。
 
 原生验收曾在仅有 linker 签名的临时候选启用服务时出现一次 `-11`，无崩溃栈。完整签名 Debug（LLDB）与非调试 Release 均未复现；不能把签名差异认定为已证明的唯一根因。另修正了有独立日志证据的 NW 探测重复清理。
 
@@ -61,11 +63,11 @@ Android 固定证书 SHA256：`5062db967ce58d65df2c47895649df43464bab9a6eadf135f
 
 macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 3.9+。没有替换正式 Mac App。
 
-最终本地候选来自源码 `bc8a98290ad381646d6e94cacd43c44eecfd6e08`，版本 0.3.0 / build 3：
+最终本地候选从源码 `da1cb0c6ac6616b7f687978963ab73760f25c72a` 重新构建，版本 0.3.0 / build 3：
 
 - `packages/KaneoPilot-0.3.0-local-3-android.apk`，SHA256 `5ec322b25f0550c359b7ab58f8decf25f456eb3d02ae91b71f852aa651dcc354`。
-- `packages/KaneoPilot-0.3.0-local-3-macos-universal.dmg`，SHA256 `3f575ad9d51de1d99f04e39a2c063939a2ca8ce63894457e12a2ef39daa846af`。
-- `packages/manifest.json` 与 `SHA256SUMS` 记录相同源码、版本和构建号；三项校验通过。App 中 158 份运行时源码、预设与 prompt 均与工作树一致。build 2 的包与清单证据保留，未将旧包改记为新源码。
+- `packages/KaneoPilot-0.3.0-local-3-macos-universal.dmg`，SHA256 `e4d0389280a14557b3159cdf1d790815550262c83494d6d605eab0fe6069960c`。
+- `packages/manifest.json` 与 `SHA256SUMS` 记录相同源码、版本和构建号；三项校验通过。App 中 158 份运行时源码、预设与 prompt 均与工作树一致。Android 重建后 SHA256 保持不变，与真机当前安装包一致。build 2 及较早 build 3 的包和清单证据保留，未将旧包改记为新源码。
 
 用户已明确授权将 26 个既有基线提交随隔离分支上传。源码提交 `4366f2d25bd8dc47184345c13e3f6097ad66bd9e` 已推送到私有仓库的 `codex/android-console-ci`，并触发 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39556941445)。远端构建、下载和安装核验仍在进行中。原始工作区与正式数据库未参与此次提交。
 
@@ -78,6 +80,10 @@ macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 
 终态等待修复的本地实测：慢启动约 5.11 秒后就绪，永不就绪约 15.07 秒触发产品原有超时；真实核心回环 HTTPS、配对、ready 后探测与退出通过，owned 子进程均退出。夹具观察上限为 21 秒（15 秒产品启动期限、5 秒退出等待与 1 秒调度余量），仍要求明确终态。原始 tee 日志为 `verification/mac-mobile-fixtures-terminal-wait.log` 与 `mac-mobile-real-core-terminal-wait.log`。打包脚本现与工作流一致，将 `lipo` 输入文件放在参数之前，分别严格检查两种架构。
 
 为运行修复后的源码，首轮已保存平台失败日志并取消尚未完成的核心检查；不能把该次远端核心/集成检查记为通过。本地完整基线对照证据见前文。
+
+第三轮 [Actions 39560820072](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39560820072) 使用 `da1cb0c`：Android 单元、Lint、APK 和版本/签名校验通过；Mac Universal DMG 的编译、双架构、签名、镜像校验和 metadata staging 全部成功。两平台及报告上传仍被账号存储配额拒绝。Mac 假核心全部场景通过，真实核心服务在 15 秒产品期限内未就绪，因此 Mac job 另有夹具失败；没有因进入后续打包步骤就将该夹具记为通过。尚未完成的远端完整检查仍单独记为运行中。
+
+没有继续放宽产品超时。只读本地实验确认 `HTTPServer.server_bind → socket.getfqdn → gethostbyaddr` 的同步反向 DNS 可以阻塞 bind 后的 listen/ready，但尚不能认定是 runner 根因；下一步仅给隔离夹具加入不含 locals、argv、环境或凭据的限长调用栈诊断，再依据实际栈定位。
 
 GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。已读取 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。没有删除任何产物；当前没有远端安装包下载或安装证据。
 
