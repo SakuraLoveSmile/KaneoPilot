@@ -151,6 +151,82 @@ def test_quick_goal_completion_confirms_startup_turn(monkeypatch, tmp_path):
     assert not any(c[0] == "dispatch-fail" for c in calls)
 
 
+def pending_startup():
+    observed = session(None)
+    observed["session"]["state"] = "pending"
+    observed["connection"] = {"state": "degraded"}
+    observed["round_detail"].update(startup_turn_id=None, turn_id="execution-turn",
+                                    run_status="running")
+    return observed
+
+
+@pytest.mark.parametrize("backend", ["pi_desktop", "codex"])
+def test_confirm_rechecks_pending_startup_without_resending(monkeypatch, tmp_path, backend):
+    ready = session()
+    ready["round_detail"].update(startup_turn_id="planning-turn", turn_id="execution-turn")
+    rc, calls, _ = invoke(monkeypatch, tmp_path,
+                         {"get-session": [pending_startup(), ready]}, backend=backend)
+    assert rc == 0
+    assert [c[2] for c in calls if c[0] == "get-session"] == [0, 1]
+    evidence = next(c[1]["evidence"] for c in calls if c[0] == "dispatch-confirm")
+    assert evidence["turn_id"] == "planning-turn"
+    assert not any(c[0] == "dispatch-fail" for c in calls)
+    for command in ("dispatch-prepare", "dispatch-begin-send", "dispatch-start"):
+        assert sum(c[0] == command for c in calls) == 1
+
+
+@pytest.mark.parametrize("timeout,deadline", [(600, 300), (180, 180)])
+def test_confirm_pending_startup_timeout_keeps_unknown(monkeypatch, tmp_path, timeout, deadline):
+    rc, calls, _ = invoke(monkeypatch, tmp_path, {"get-session": pending_startup()},
+                         timeout=timeout)
+    assert rc == 0
+    reads = [c for c in calls if c[0] == "get-session"]
+    assert reads[-1][2] == deadline
+    assert len(reads) == deadline + 1
+    assert next(c[1] for c in calls if c[0] == "dispatch-fail")["send_state"] == "unknown"
+    assert not any(c[0] == "dispatch-confirm" for c in calls)
+    assert sum(c[0] == "dispatch-start" for c in calls) == 1
+    assert [c[2] for c in calls if c[0] == "heartbeat"] == list(range(60, deadline + 1, 60))
+
+
+@pytest.mark.parametrize("field,value", [("task_id", "foreign"), ("run_id", "foreign"),
+                                         ("session_id", "foreign")])
+def test_confirm_pending_with_conflicting_identity_fails_immediately(monkeypatch, tmp_path, field, value):
+    observed = pending_startup()
+    observed["session"][field] = value
+    _, calls, _ = invoke(monkeypatch, tmp_path, {"get-session": observed})
+    assert [c[2] for c in calls if c[0] == "get-session"] == [0]
+    assert not any(c[0] == "dispatch-confirm" for c in calls)
+    assert next(c[1] for c in calls if c[0] == "dispatch-fail")["send_state"] == "unknown"
+
+
+@pytest.mark.parametrize("state", ["associated", "unavailable"])
+def test_confirm_nonpending_missing_startup_fails_immediately(monkeypatch, tmp_path, state):
+    observed = pending_startup()
+    observed["session"].update(state=state, session_id="session")
+    _, calls, _ = invoke(monkeypatch, tmp_path, {"get-session": observed})
+    assert [c[2] for c in calls if c[0] == "get-session"] == [0]
+    assert not any(c[0] == "dispatch-confirm" for c in calls)
+
+
+def test_confirm_pending_unavailable_connection_fails_immediately(monkeypatch, tmp_path):
+    observed = pending_startup()
+    observed["connection"]["state"] = "unavailable"
+    _, calls, _ = invoke(monkeypatch, tmp_path, {"get-session": observed})
+    assert [c[2] for c in calls if c[0] == "get-session"] == [0]
+    assert not any(c[0] == "dispatch-confirm" for c in calls)
+
+
+@pytest.mark.parametrize("code", ["stale_run", "not_found"])
+def test_confirm_pending_heartbeat_losing_ownership_stops_all_calls(monkeypatch, tmp_path, code):
+    rc, calls, _ = invoke(monkeypatch, tmp_path, {"get-session": pending_startup(),
+        "heartbeat": util.KanpilotError(code, "taken over")})
+    assert rc == 0
+    assert calls[-1][0] == "heartbeat" and calls[-1][2] == 60
+    assert not any(c[0] in ("dispatch-confirm", "dispatch-fail") for c in calls)
+    assert sum(c[0] == "dispatch-start" for c in calls) == 1
+
+
 @pytest.mark.parametrize("startup_turn_id", [None, "", 42])
 def test_missing_startup_turn_does_not_fall_back_to_current_turn(monkeypatch, tmp_path, startup_turn_id):
     observed = session()
