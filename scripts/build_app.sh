@@ -7,11 +7,15 @@ PROJ="$ROOT/macos/KaneoPilot.xcodeproj"
 SCHEME="KaneoPilot"
 CONFIG="${CONFIG:-Release}"
 OUT="${APP_OUTPUT_DIR:-$ROOT/dist}"
-DERIVED="$ROOT/build/DerivedData"
+DERIVED="${DERIVED_DATA_DIR:-$ROOT/build/DerivedData}"
+ARCHS="${ARCHS:-arm64 x86_64}"
+BUILD_SETTINGS=("ARCHS=$ARCHS" "ONLY_ACTIVE_ARCH=NO" "CODE_SIGNING_ALLOWED=NO")
+if [ -n "${VERSION_NAME:-}" ]; then BUILD_SETTINGS+=("MARKETING_VERSION=$VERSION_NAME"); fi
+if [ -n "${BUILD_NUMBER:-}" ]; then BUILD_SETTINGS+=("CURRENT_PROJECT_VERSION=$BUILD_NUMBER"); fi
 
 echo "== xcodebuild ($CONFIG) =="
 xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration "$CONFIG" \
-  -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath "$DERIVED" "${BUILD_SETTINGS[@]}" build
 
 APP_SRC="$DERIVED/Build/Products/$CONFIG/KaneoPilot.app"
 APP_DST="$OUT/KaneoPilot.app"
@@ -54,6 +58,7 @@ modules = (
     "exec_config", "planner_config", "review_config", "cmd_config", "project_config",
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
     "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
+    "mobile_access", "mobile_server", "mobile_worker",
     "harness_plus_adapter", "runtime_operations", "runtime_client",
     "harnesses", "stage_contract", "stage_evidence", "execution_contract", "delivery_contract",
     "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
@@ -88,6 +93,20 @@ for name in ("protocol.md", "automation-contract.md", "release-contract.md", "ha
         raise SystemExit("Bundled contract differs from source: " + name)
 print("Desktop and automation backend imports and source hashes verified")
 PY
+
+echo "== verify requested application architectures =="
+EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DST/Contents/Info.plist")
+for arch in $ARCHS; do
+    lipo "$APP_DST/Contents/MacOS/$EXECUTABLE" -verify_arch "$arch"
+done
+
+echo "== verify requested application version =="
+if [ -n "${VERSION_NAME:-}" ]; then
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DST/Contents/Info.plist")" = "$VERSION_NAME" ] || { echo "ERROR: app version differs from VERSION_NAME" >&2; exit 1; }
+fi
+if [ -n "${BUILD_NUMBER:-}" ]; then
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DST/Contents/Info.plist")" = "$BUILD_NUMBER" ] || { echo "ERROR: app build differs from BUILD_NUMBER" >&2; exit 1; }
+fi
 
 echo "== sign local application bundle =="
 codesign --force --deep --sign - "$APP_DST"

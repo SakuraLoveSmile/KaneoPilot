@@ -1,0 +1,97 @@
+# 安卓控制台契约 v1
+
+本契约对应 T1–T6。Android 是局域网/已有 VPN 下的个人控制台，Mac 保持唯一调度与数据所有权。现有 MCP 回环限制不变。本文件由主 agent 唯一维护。
+
+## 连接、配对与生命周期
+
+- Android 8.0+，Kotlin/Compose/Material 3；Mac 14+。客户端只在前台每 5 秒刷新当前页面，正文不持久缓存。
+- 手机服务默认关闭，绑定用户选择的本机 IPv4（含 VPN），默认端口 47831。设置端可修改端口；占用明确报错，不静默换端口。
+- Python 标准库 HTTPS 服务，使用 `/usr/bin/openssl` 生成私钥/自签证书，SAN 含所选 IP。私钥位于 app support 的 mobile/ 内，目录 0700、文件 0600；凭据与状态通过核心管理。绑定地址变化须重新生成身份材料、使旧设备失效并提示重新配对。
+- 设备、配置和配对摘要保存到 SQLite settings（mobile.*），操作回执复用 runtime_operations，scope 为 mobile:<device_id>；无 schema 升级。设备令牌和一次性配对令牌均至少 256 位随机，只存 SHA256，恒时比较；配对有效期 300 秒且单次原子消费。
+- 二维码和复制文本均为 `kaneopilot://pair?data=<base64url(UTF8 JSON)>`，JSON 为 `{api_version:1,server_id,endpoint,certificate_der,certificate_sha256,pairing_token,expires_at}`。certificate_der 是标准 Base64 的 DER；certificate_sha256 是 DER 的小写十六进制 SHA256；endpoint 为 `https://<所选IP>:<port>`（不含路径）。
+- Android 从可信配对内容建立专用证书信任锚并校验证书摘要，保留 TLS 主机名验证；不允许明文或 trust-all。令牌用 Keystore AES-GCM 加密后持久保存，应用禁止备份连接凭据。扫描只在用户点击时申请相机权限，允许粘贴 URI。
+- 设备撤销后每次查询和每次核心写事务检查授权。手机不能取得 Kaneo、Plus 或本机 MCP 凭据。
+- AppRuntime 拥有独立 MobileServiceManager；关窗服务继续，退出只停止本实例拥有的服务。FakeCore 不启动真实服务。服务启动及每次 worker 请求先检查固定宿主 DB 已存在且 schema 当前，不创建空库或代跑 migrate。
+
+## 本机固定 CLI（仅桌面管理）
+
+下列命令都从 `kanpilot.mobile_access` 导出同名 cmd_* handler，由主 agent 注册。
+
+| 命令 | payload | 响应 |
+|---|---|---|
+| mobile-status | {} | 下述 status |
+| set-mobile-access | {enabled:bool,bind_host?:str,port?:int} | status |
+| create-mobile-pairing | {} | {pairing_uri,expires_at} |
+| revoke-mobile-device | {device_id:str} | {ok:true} |
+| mobile-serve | {} | 绑定成功先写一行无凭据 JSON `{ready:true,endpoint}` 到 stdout，然后服务至 SIGTERM |
+| mobile-request | 由 stdin worker 内部调用 | 见 HTTP 契约；不从 HTTP 接受任意核心命令 |
+| get-review-report | {task_id,review_key,expected_execution_run_id,expected_report_sha256} | {task_id,review_key,execution_run_id,report_sha256,markdown,conclusion} |
+
+status：`{api_version:1,server_id,enabled,bind_host,port,endpoint,certificate_sha256,addresses:[{address,name}],devices:[{device_id,name,created_at,revoked_at}]}`。可选值缺失时为 null；addresses 不发起网络连接；status 不返回令牌或私钥。桌面运行状态由自己拥有的子进程和 ready 行确认，不能用 enabled 冒充运行。
+
+## HTTP 与子进程
+
+固定路径 `/mobile/v1/`。除 pair 外都需要 `Authorization: Bearer <device_token>`。HTTP 服务器只做有界收发和协议校验；每次请求经固定 argv 启动 `python -m kanpilot.mobile_worker`，DB 和根路径沿用服务环境，请求 JSON 经 stdin 传入。最多 4 个并发核心 worker；超时 60 秒（提交回答 120 秒）；请求/响应大小有界，不向日志输出正文、Authorization 或配对信息。worker 调 `cli.run`，维持一次命令一个进程的恢复语义。核心 mobile-request payload 固定为 `{kind:pair|query|action|operation,token?:str,data:dict}`；token 是 bearer，经 stdin 传递。
+
+| 方法/路径 | 请求 | 成功响应 |
+|---|---|---|
+| POST pair | {pairing_token,device_name} | {api_version:1,server_id,device_id,device_token} |
+| POST query | {type,args:{}} | {api_version:1,data:<投影结果>} |
+| POST actions | {action,operation_id,args:{}} | {api_version:1,operation_id,status:accepted|rejected|unknown,data?,error?,code?} |
+| GET operations/<operation_id> | 无正文 | 同动作回执；仅当前设备自己的回执 |
+
+错误为 `{error:<中文>,code:<稳定代码>}`；bad_request=400、unauthorized=401、forbidden=403、not_found=404、conflict=409、too_large=413、unavailable/timeout=503。动作发送后发生不明确超时返回 unknown（保留 operation_id），不能把进程终止当作未执行。客户端写请求关闭自动重试；unknown 显示“结果待核实”并查询原 operation_id，不新建 ID 自动重发。
+
+### 查询白名单
+
+type 与命令同名，但只允许此表参数；其他参数拒绝。读取响应保留核心现有 envelope（如 get-task 的 task、list-tasks 的 tasks）。服务端递归去掉本机文件路径、环境配置和凭据字段，仅投影手机所需字段；保留任务身份/状态、计划/问题 hash、问题 DTO、评审身份、会话消息、事件摘要、Release 的 https 链接及允许的移动动作。正常阅读、问题与消息文本不应被误删。
+
+| type | 允许 args / 固定值 |
+|---|---|
+| overview | {} |
+| attention-list | {}；active，include_historical=false |
+| list-tasks | stage/status/board_column/needs_attention；save_state=active |
+| get-task | task_id |
+| get-plan | task_id,expected_plan_sha256（必传） |
+| list-events | task_id（必传）,before_id/stage/result/query/limit；limit 1–200 |
+| list-requests | status/limit；include_removed=false，limit 1–200 |
+| get-request | request_id |
+| list-sessions | task_id（必传）；active，include_removed=false |
+| get-session | task_id,run_id,status_only |
+| session-messages | task_id,run_id（均必传）,cursor/limit/source_version；limit 1–200 |
+| get-review-report | 与本机 CLI 相同的四个身份参数 |
+
+评审正文只读取当前登记且身份一致的评审，不自行换读最新历史。使用可信目录下逐级无符号链接的安全文件读取、UTF-8、大小上限、内容 SHA256 核对。
+
+### 动作白名单
+
+先核对当前 allowed_actions，手机不得以 UI 按钮可见作为授权；参数中 actor/by/路径等均由核心固定或拒绝。
+
+| action | args | 映射 |
+|---|---|---|
+| save-plan-answers | task_id,clarification_id,answers,supplement? | 同名核心命令 |
+| submit-plan-answers | 同上 | 注入同一 operation_id |
+| save-execution-answers | task_id,request_id,questions_sha256,answers | 同名核心命令 |
+| submit-execution-answers | task_id,run_id,request_id,questions_sha256,answers | 注入同一 operation_id；不开放 skip_all/by |
+| confirm-dispatch | task_id,expected_plan_sha256 | enqueue，kind=dispatch,confirm_plan=true,actor=user |
+| set-paused | paused:bool,expected_paused:bool | set-paused，stage=null |
+
+暂停只控制全局后续自动推进，不停止已有会话。给现有 set-paused 增加可选 expected_paused，在同一写事务内核对；旧桌面调用兼容。
+
+每个动作先在独立设备 scope 下原子预约回执，记录请求 hash 后再执行；相同 operation_id+参数不重复执行，参数不同为 conflict。事务授权 guard 与原有任务/验证 guard 组合，不能覆盖。unknown 不自行恢复重发。查询观察产生的核心索引/读取位点写入沿既有语义执行。
+
+## 安卓页面与字段
+
+- 底部导航：总览 / 任务 / 需要你 / 连接。单列列表、16dp 边距、至少 48dp 点击区，系统浅深色与文字缩放。
+- 任务详情顶部固定标题与可横向滚动的 概览 / 计划 / 执行 / 评审 / 记录。只显示核心 allowed_actions 与上表交集；其他阻塞提示到 Mac 处理。
+- 计划使用 get-plan 返回的 markdown；没有通过当前 hash 核验时禁止确认。当前任务、连接或问题身份变化时丢弃旧请求的迟到响应。
+- 执行页先 list-sessions/get-session；session-messages 用 cursor/source_version 增量合并消息。revision 可能是内容指纹，只能比较是否相同，不能按数值判定新旧；当前成功的串行响应替换同 id 正文，页面身份隔离迟到响应。工具消息默认折叠，切换轮次重置游标。当前轮次优先。
+- 规划问题来自 get-task.task.plan_clarification；执行问题来自 get-task.task.execution_question（单个当前问题组，不是数组）。保持原有题目顺序、单选/多选/自定义规则及答案字段。规划答案为 {question_id,option_id?,text?}，自定义选项 ID 为 custom；执行答案固定 {question_id,option_ids,text,skipped:false}。
+- 断线保留当前内容、更新时间和输入草稿，禁用写操作；重新读取成功后恢复。写请求结果不明须留存原 operation_id；不能因为刷新/重连重新发送。
+
+## 构建与分工
+
+- Android：AGP 8.11.1、Gradle 8.13、Kotlin/Compose compiler 2.2.21、JDK17、SDK36/min26，applicationId=com.sakurasep.kaneopilot。固定依赖版本，提交 wrapper 和校验和。
+- CI 普通分支/PR 运行隔离检查、Debug APK 与 Universal DMG；vX.Y.Z 标签注入统一版本，固定 keystore 签 APK，再集中发布两个包、SHA256SUMS、构建清单。仅发布 job 有 contents:write；包身份不一致禁止覆盖。
+- 主 agent 独占 docs、AGENTS、cli.py、cmd_queue.py（expected_paused）与集成入口；核心 worker 独占新增 mobile_*.py、mobile 专项测试；Mac worker 独占新增 Mac 移动视图/manager/DTO、SettingsView/AppRuntime/CoreLocator/FakeCore/project.pbxproj；Android worker 独占 android/；构建 worker 独占 workflows 与打包脚本。同一文件一名写入者，各专家不继续派生。
+- 全程使用隔离 DB/假执行后端验证；主 agent 负责真实界面与 LAN 集成。已有 dirty main 不覆盖。不调用付费模型、不安装替换正式 App。源代码、测试、实际 Actions、设备和发布证据分别记录。

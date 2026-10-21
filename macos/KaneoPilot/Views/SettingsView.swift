@@ -289,6 +289,7 @@ struct SettingsView: View {
                     case .connections:
                         execSection
                         mcpServiceSection
+                        MobileConnectionView()
                     case .advanced:
                         backgroundSection
                         schedulerSection
