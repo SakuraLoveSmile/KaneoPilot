@@ -263,8 +263,13 @@ def cmd_set_paused(ctx, payload: dict) -> dict:
     stage, paused = payload["stage"], payload["paused"]
     if stage is not None and stage not in constants.STAGES:
         raise util.KanpilotError("bad_request", f"invalid stage {stage}")
+    if stage is not None and "expected_paused" in payload:
+        raise util.bad_request("expected_paused 仅适用于全局自动推进开关")
     with db.write_txn(conn):
         if stage is None:
+            current = bool(db.get_setting(conn, "paused_global", False))
+            if "expected_paused" in payload and payload["expected_paused"] != current:
+                raise util.KanpilotError("conflict", "自动推进状态已变化，请刷新后重试")
             db.set_setting(conn, "paused_global", bool(paused))
         else:
             stages = db.get_setting(conn, "paused_stages", []) or []
