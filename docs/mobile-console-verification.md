@@ -10,8 +10,8 @@
 | T2 核心与设备接口 | 待体验 | HTTPS、配对、撤销、事务授权、幂等回执和受限报告读取；42 项移动/暂停专项通过 |
 | T3 Mac 设置与生命周期 | 待体验 | 原生 900×600 和 1180×760 检查；真实启停、关闭窗口继续连接、正常退出只停止所属服务通过 |
 | T4 Android 控制台 | 待体验 | 20 项单元、Lint、构建、Mi 10 的 Compose 与 LAN 检查、固定签名覆盖升级通过 |
-| T5 双平台构建与发布 | 实现中 | 工作流、固定签名及 Secrets 已配置；本地 APK/Universal DMG 已核验，尚未运行远端 Actions |
-| T6 联合核验 | 实现中 | 真机 LAN 和本地安装核验完成；完整集成对照、Actions 产物下载与安装证据仍待完成 |
+| T5 双平台构建与发布 | 实现中 | 工作流、固定签名及 Secrets 已配置；已推送并运行首轮 Actions，正在修复远端构建问题；产物上传另受账号存储配额阻挡 |
+| T6 联合核验 | 实现中 | 真机 LAN、本地安装和完整核心/集成基线对照完成；Actions 产物下载与安装证据仍待完成 |
 
 只有用户确认后才记为“已验收”。本记录中的已通过检查均为本次执行，不将模拟器结果算作真机验收。
 
@@ -45,9 +45,11 @@ Mac 正常退出后，候选进程及其所属 47831 监听子进程均退出；
 
 本机 macOS 27 的一次 DMG 创建留下了只属于本次产物的磁盘映射，造成 verify 报“资源暂时不可用”；核对映射归属后正常弹出，镜像 CRC 校验通过。没有加入无限重试或对其他磁盘操作。
 
-完整核心真实 pytest：候选版 3691 passed / 31 failed，干净基线 3654 passed / 31 failed；两边另有 1106 subtests passed。按 JUnit 的 classname 与用例名逐项对照，31 个失败完全相同，没有新增失败。最新移动安全补充另用上述 42 项专项核验。集成测试仍在运行。
+完整核心真实 pytest：候选版 3691 passed / 31 failed，干净基线 3654 passed / 31 failed；两边另有 1106 subtests passed。按 JUnit 的 classname 与用例名逐项对照，31 个失败完全相同，没有新增失败。最新移动安全补充另用上述 42 项专项核验。
 
-31 个继承失败涉及既有自动修复、规划错误归类、评审及标签一致性等路径，当前不扩展到手机功能之外修改。它们保留为失败；若远端同样失败，标签 Release 会被门槛阻止，普通分支构建产物仍可在平台构建成功时下载。
+完整集成真实 pytest：候选版与干净基线均为 368 passed / 28 failed / 5 skipped，另有 4 subtests passed；各运行约 69 分钟。28 个失败的 classname 与用例名完全相同，没有新增失败。对照结果与原始 JUnit 分别保存在 `verification/integration-baseline-comparison.json` 和 `integration.xml` / `baseline-integration-pytest.xml`。
+
+这些继承失败涉及既有自动修复、规划错误归类、评审及标签一致性等路径，当前不扩展到手机功能之外修改。它们保留为失败；若远端同样失败，标签 Release 会被门槛阻止。普通分支构建产物须在平台构建和上传均成功后才可下载。
 
 详细日志、JUnit、截图和本地安装包位于忽略目录 `build/mobile-acceptance/`。关键文件包括 `verification/android-device-lan.txt`、`android-device-lan-content-update.txt`、`android-release-upgrade.json`、`mobile-lifecycle-quit.json` 和 `core-baseline-comparison.json`。不在 Git 中保存配对 URI、设备令牌、签名密码或临时数据库。
 
@@ -57,4 +59,12 @@ Android 固定证书 SHA256：`5062db967ce58d65df2c47895649df43464bab9a6eadf135f
 
 macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 3.9+。没有替换正式 Mac App。
 
-当前还没有源代码 push、标签、PR、GitHub Release、远端 Actions 运行或从 Actions 下载并安装的证据。当前基线包含 26 个尚未推送到 origin/main 的既有提交；推送本工作分支也会上传它们，需要在本地结果可审阅后明确确认这个范围。
+用户已明确授权将 26 个既有基线提交随隔离分支上传。源码提交 `4366f2d25bd8dc47184345c13e3f6097ad66bd9e` 已推送到私有仓库的 `codex/android-console-ci`，并触发 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/39556941445)。远端构建、下载和安装核验仍在进行中。原始工作区与正式数据库未参与此次提交。
+
+首轮远端 Android Debug APK 编译、签名检查和 metadata staging 成功，但 SDK 安装步骤因 `sdkmanager` 不在 PATH 中失败，单元与 Lint 因此未执行。Mac 真实核心夹具误按地址列表排序选择了 LAN 地址；另有 Xcode 16.4 的任务概览表达式类型检查超时。这些问题正在按实际日志修复，不将后续单独成功的构建算作整项 CI 通过。
+
+后续修复明确使用 runner 的 SDK 工具路径；回环夹具固定选择 `127.0.0.1`，保留原就绪期限并补充失败诊断和 LAN 地址排首覆盖；任务概览拆分表达式，保留原布局及弹窗顺序。还按实际 `lipo` 报错改为逐项核验两种架构。本地两套手机服务夹具、Universal Release 构建、actionlint 与相关静态检查通过；远端 Xcode 16.4 仍需重跑证明。历史启动失败缺少诊断，尚不能把地址排序认定为唯一原因。
+
+GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。清单保存在 `verification/actions-artifact-inventory.json` / `.md`；当前没有远端安装包下载或安装证据。
+
+本轮不创建版本标签、PR 或 GitHub Release；标签发布分支尚无实际发布证据。完整检查保留失败门槛，不能以本地包或平台构建成功冒充 Release 已发布。

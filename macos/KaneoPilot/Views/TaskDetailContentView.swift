@@ -780,7 +780,11 @@ struct TaskOverviewTabView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-        ScrollView {
+            recordDialogs(executionDialogs(resolutionDialogs(verificationDialogs(overviewScrollView(proxy)))))
+        }
+    }
+
+    private var overviewContent: some View {
             VStack(alignment: .leading, spacing: Spacing.l) {
                 // 1. 需要你处理：阻塞、待答与待评审，仅在出现时显示
                 if let store = answerStore {
@@ -858,7 +862,10 @@ struct TaskOverviewTabView: View {
                 technicalDetailsSection
             }
             .padding(Spacing.l)
-        }
+    }
+
+    private func overviewScrollView(_ proxy: ScrollViewProxy) -> some View {
+        ScrollView { overviewContent }
         .onChange(of: answerFocusRequest) {
             withAnimation { proxy.scrollTo("plan-answers", anchor: .top) }
         }
@@ -869,6 +876,10 @@ struct TaskOverviewTabView: View {
             withAnimation { proxy.scrollTo("review-resolution", anchor: .top) }
         }
         .safeAreaInset(edge: .bottom) { actionBar }
+    }
+
+    private func verificationDialogs<Content: View>(_ content: Content) -> some View {
+        content
         .alert(supplementsVerificationReport ? "验证恢复未完成" : "重新核验未完成", isPresented: Binding(
             get: { reverifyError != nil }, set: { if !$0 { reverifyError = nil } }
         )) {
@@ -896,6 +907,10 @@ struct TaskOverviewTabView: View {
                  ? AutomationPresentation.verificationSupplementMessage
                  : "沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
         }
+    }
+
+    private func resolutionDialogs<Content: View>(_ content: Content) -> some View {
+        content
         .confirmationDialog(
             confirm?.title ?? "",
             isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
@@ -933,6 +948,10 @@ struct TaskOverviewTabView: View {
             Button("取消", role: .cancel) { revertConfirmation = nil }
         } message: { Text(AutomationPresentation.revertMessage) }
         .onChange(of: detail.taskId) { revertConfirmation = nil; revertPreparationID = nil }
+    }
+
+    private func executionDialogs<Content: View>(_ content: Content) -> some View {
+        content
         .confirmationDialog("全部跳过并继续？", isPresented: $confirmingExecutionSkip, titleVisibility: .visible) {
             Button("全部跳过并继续") {
                 guard let store = executionStore else { return }
@@ -947,6 +966,10 @@ struct TaskOverviewTabView: View {
             }
             Button("取消", role: .cancel) {}
         } message: { Text("这会结束当前执行轮次。原问题、草稿和执行记录将保留。") }
+    }
+
+    private func recordDialogs<Content: View>(_ content: Content) -> some View {
+        content
         .confirmationDialog(
             PurgeText.actionTitle,
             isPresented: $confirmingPurge,
@@ -962,7 +985,6 @@ struct TaskOverviewTabView: View {
         .sheet(isPresented: Binding(get: { model.recheckResult != nil },
                                     set: { if !$0 { model.recheckResult = nil } })) {
             RecheckResultView(result: model.recheckResult)
-        }
         }
     }
 

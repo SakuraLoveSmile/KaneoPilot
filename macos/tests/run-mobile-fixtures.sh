@@ -18,12 +18,13 @@ KANPILOT_CORE="$TASK_ROOT/macos/FakeCore/kanpilot-fake.py" \
   KANPILOT_FAKE_STATE="$TASK_FIXTURE/simulation/state.json" \
   KANPILOT_FAKE_COMMAND_LOG="$TASK_FIXTURE/simulation/commands.jsonl" \
   "$TASK_FIXTURE/fixture" simulation
-for mode in ready failure; do
+for mode in ready failure loopback-host; do
   mkdir -p "$TASK_FIXTURE/$mode"
   env -u KANPILOT_FAKE_STATE \
     KANPILOT_CORE="$TASK_ROOT/macos/tests/mobile_fixture_core.py" \
     KANPILOT_MOBILE_FIXTURE_ROOT="$TASK_FIXTURE/$mode" \
     KANPILOT_MOBILE_FIXTURE_MODE="$mode" \
+    KANPILOT_MOBILE_FIXTURE_LAN_FIRST="$([ "$mode" = loopback-host ] && echo 1 || echo 0)" \
     "$TASK_FIXTURE/fixture" "$mode"
 done
 python3 - "$TASK_FIXTURE" <<'PY'
