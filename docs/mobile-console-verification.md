@@ -10,7 +10,7 @@
 | T2 核心与设备接口 | 待体验 | HTTPS、安全、幂等与受影响回归通过；反向 DNS 修复后远端真实核心夹具通过 |
 | T3 Mac 设置与生命周期 | 待体验 | 原生页面、本地生命周期及远端全部受影响夹具通过；远端真实核心约 0.334 秒就绪 |
 | T4 Android 控制台 | 待体验 | 20 项单元、Lint、构建、Mi 10 的 Compose 与 LAN 检查、固定签名覆盖升级通过 |
-| T5 双平台构建与发布 | 实现中 | 两平台检查、打包和产物校验通过；上传受账号存储配额阻挡，完整核心/集成检查仍在运行 |
+| T5 双平台构建与发布 | 实现中 | 两平台检查、打包和产物校验通过；账号旧产物已清理，上传恢复尚待验证；远端核心失败，集成仍在运行 |
 | T6 联合核验 | 实现中 | 真机 LAN、本地安装和完整核心/集成基线对照完成；Actions 产物下载与安装证据仍待完成 |
 
 只有用户确认后才记为“已验收”。本记录中的已通过检查均为本次执行，不将模拟器结果算作真机验收。
@@ -95,10 +95,14 @@ macOS 使用本地 ad-hoc 签名，无 Apple 公证，继续要求外部 Python 
 |---|---|
 | Android | SDK 安装、单元、Lint、Debug APK、版本与签名校验及 metadata staging 全部成功；安装包和报告上传被存储配额拒绝 |
 | macOS | 全部受影响原生夹具通过，真实核心约 0.334 秒就绪，探测、配对与退出通过；Universal DMG 编译、签名、双架构、镜像校验与 metadata staging 成功；安装包和报告上传被存储配额拒绝 |
-| 完整检查 | 发布 helper 检查成功；核心检查仍在运行，集成检查尚未开始，不记为通过 |
+| 完整检查 | 发布 helper 检查成功；核心检查失败，集成检查仍在运行，不记为通过；远端失败 ID 对照尚待完整日志 |
 
 本轮原始证据为 `verification/actions-fifth-run.json`、`actions-macos-job-5.log` 和 `actions-android-job-5.log`。第五轮保持运行，不取消其完整检查。第四轮已保存平台状态及真实调用栈后取消未完成的完整检查，不能将取消的检查记为通过。没有通过隐藏上传失败来将 job 标绿。
 
-GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。本仓库当前 artifact 数为 0，无法在本仓库释放空间。用户只授权只读列出其他仓库旧产物，未授权删除或增加付费限额。已读取 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。没有删除任何产物；当前没有远端安装包下载或安装证据。
+GitHub 明确拒绝上传，错误为 `Artifact storage quota has been hit`。清理前本仓库 artifact 数为 0，无法在本仓库释放空间。初次只读清单覆盖 26 个仓库，731 份产物合计约 17.84 GiB，其中超过 30 天的 459 份约 10.01 GiB；这是 API 文件大小，不是实时计费读数。原始清单保存在 `verification/actions-artifact-inventory.json` / `.md`，每份记录 ID、日期和关联运行，未列入 Release 资产。
+
+用户随后明确授权清理旧 Actions 构建产物。本轮只删除原清单中创建于 2026-09-21 14:56:15（台北时间）之前的 459 份，共涉及 11 个仓库；2026-10-21 16:46:10（台北时间）完成。API 删除回执逐项核验成功，删除后重新列出相关仓库，459 个获批 ID 全部不存在，合计 10,751,924,823 bytes（10.01 GiB）。较新产物保留，未删除 workflow runs、日志、Release 资产或标签，未调整付费限额。审计文件为 `verification/actions-artifacts-over-30-days.json`、`actions-artifact-cleanup-journal.jsonl`、`actions-artifact-cleanup-result.json` 和按仓库汇总的 `actions-artifact-cleanup-report.md`。
+
+删除不代表实时配额已更新；GitHub 提示用量约每 6–12 小时重算。清理后仅请求一次单独重跑第五轮 Android job，API 返回 HTTP 403：`The workflow run containing this job is already running`，未启动重跑，也未取消原工作流。请求回执为 `verification/actions-after-cleanup-rerun-request.json`。因此上传是否恢复尚未验证，仍没有远端安装包下载或安装证据。
 
 本轮不创建版本标签、PR 或 GitHub Release；标签发布分支尚无实际发布证据。完整检查保留失败门槛，不能以本地包或平台构建成功冒充 Release 已发布。
