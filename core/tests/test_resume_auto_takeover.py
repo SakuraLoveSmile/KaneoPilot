@@ -23,7 +23,7 @@ from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, util  # noqa: E402
 from kanpilot.engine import loop  # noqa: E402
 
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 PROJECT_NAME = "Feedback"
 
 _PR_IDENTITY = {

@@ -81,7 +81,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from helpers import KanpilotTestCase  # noqa: E402
+from helpers import PROJECTS, WORKSPACE_ID, KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
     constants, core, db, dsh_events, git_delivery, mcp_server, mcp_scopes,
     pi_desktop_backend, pi_desktop_planner, runtime_client,
@@ -522,7 +522,7 @@ class PlusPlannerCase(KanpilotTestCase):
     def register_task(self, task_id, repo, *, plan_kind="standard",
                       title="Plus 计划任务", status="to-do"):
         """远端任务 + 本地快照（requirements/source 指纹，publish-plan 复验用）。"""
-        task = self.fake.add_task(task_id, "example-project-05",
+        task = self.fake.add_task(task_id, "fixture-project-feedback",
                                   status=status, title=title)
         source_sha, req_sha, source_path = self.make_source_snapshot(task)
         self.sync_task(task, project_name="Feedback", repository=str(repo),
@@ -663,7 +663,7 @@ class PlusPlannerCase(KanpilotTestCase):
         directory = self.plan_root / project_name
         if directory.is_dir():
             files.extend(directory.glob("*.md"))
-        pid = constants.PROJECTS.get(project_name, project_name)
+        pid = PROJECTS.get(project_name, project_name)
         proj_dir = self.plan_root / "projects" / pid
         if proj_dir.is_dir():
             files.extend(proj_dir.glob("*.md"))

@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 from . import (
-    constants, db, exec_config, pi_desktop_backend, review_config, util,
+    constants, db, exec_config, pi_desktop_backend, project_config, review_config, util,
 )
 
 # set-exec-config 允许的字段：契约四字段 + v3 后端扩展 + v4 控制器后端。
@@ -28,17 +28,26 @@ _PI_DESKTOP_THINKING_LEVELS = (
 
 
 def cmd_set_config(ctx, payload: dict) -> dict:
-    """Bounded pool configuration; shrinking never deletes existing slots."""
-    if set(payload) != {"worktree_pool_size"}:
-        raise util.bad_request("set-config 仅接受 worktree_pool_size")
-    value = payload["worktree_pool_size"]
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
-        raise util.bad_request("worktree_pool_size 必须为1–32整数")
+    """Update explicit local workspace/pool configuration atomically."""
+    if not payload or set(payload) - {"worktree_pool_size", "workspace_id"}:
+        raise util.bad_request("set-config 至少提供 worktree_pool_size 或 workspace_id")
+    if "worktree_pool_size" in payload:
+        value = payload["worktree_pool_size"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
+            raise util.bad_request("worktree_pool_size 必须为1–32整数")
+    if "workspace_id" in payload:
+        value = payload["workspace_id"]
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise util.bad_request("workspace_id 必须为非空字符串，且不能含首尾空白")
     with db.write_txn(ctx.conn):
-        db.set_setting(ctx.conn, "worktree_pool_size", value)
-        db.add_event(ctx.conn, ctx.now_iso, "config_updated", actor="user",
-                     detail={"worktree_pool_size": value})
-    return {"worktree_pool_size": value}
+        if "workspace_id" in payload:
+            _, saved_workspace, _, is_saved = project_config.load_raw_mappings(ctx.conn)
+            if is_saved and saved_workspace and saved_workspace != payload["workspace_id"]:
+                raise util.KanpilotError("conflict", "workspace_id 与已保存项目映射冲突；请勿跨工作区复用现有映射")
+        for key, value in payload.items():
+            db.set_setting(ctx.conn, key, value)
+        db.add_event(ctx.conn, ctx.now_iso, "config_updated", actor="user", detail=dict(payload))
+    return dict(payload)
 
 
 def cmd_get_exec_config(ctx, payload: dict) -> dict:

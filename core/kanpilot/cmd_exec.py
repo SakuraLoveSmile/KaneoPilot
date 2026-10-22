@@ -981,10 +981,12 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
                 "repository": manifest_task.get("repository") or task_dict.get("repository"),
             } if (manifest_task.get("project_id") or task_dict.get("project_id")) else None
         )
+        from . import project_config
         planfile.check_plan_meta(
             meta, plan_kind,
             expected_model=_publish_expected_model(req_payload),
             expected_project=expected_project,
+            configured_mappings=project_config.load_raw_mappings(ctx.conn)[2],
         )
         if meta.get("plan_kind") not in (None, plan_kind):
             raise util.KanpilotError(

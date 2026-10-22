@@ -768,6 +768,8 @@ def _settle_plan(ctx, identity, row, task, job, directory):
                                   "outcome": "needs_user", "note": "规划需要补充材料：" + plan_questions.summary(job["questions"]),
                                   "failure_code": "reported", "evidence": {"questions": job["questions"], "plan_markdown": job["plan_markdown"], "draft_path": str(draft), "evidence": job["evidence"]}}, identity, "plan", job)
     else:
+        from . import project_config
+        job["context"]["configured_project_mappings"] = project_config.load_raw_mappings(ctx.conn)[2]
         manifest = job["context"].get("payload", {}).get("manifest") or {}
         if not job.get("plan_path"):
             job["generated_at"] = util.to_iso(ctx.now)

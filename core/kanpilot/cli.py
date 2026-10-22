@@ -64,7 +64,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
          "review_key": (True, "str")},
         _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
-    "set-config": ({"worktree_pool_size": (True, "int")}, cmd_config.cmd_set_config),
+    "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str")}, cmd_config.cmd_set_config),
     "worktree-slot-release": ({"slot_id": (True, "str"), "holder_id": (True, "str"),
                                "lease_token": (True, "str"), "confirm": (True, "bool")},
                               _automation_command("worktree_pool", "cmd_worktree_slot_release")),

@@ -4,7 +4,7 @@ Local project mapping management:
 - Stored in SQLite settings key ``project_mappings``.
 - Resolves effective repository paths, Git repository kind, and mapping states.
 - Authoritative project identity is ``project_id``.
-- Provides safe legacy defaults when not configured (revision=0).
+- New installations require explicit local workspace and project configuration.
 """
 
 from __future__ import annotations
@@ -21,33 +21,35 @@ SETTINGS_KEY = "project_mappings"
 CURRENT_VERSION = 1
 
 
-def _legacy_default_items() -> dict[str, dict]:
-    """旧五项目只读默认映射字典（project_id -> dict）。"""
-    items = {}
-    for name, pid in constants.PROJECTS.items():
-        repo = str(constants.repo_path_for(name))
-        items[pid] = {
-            "project_name": name,
-            "repository": repo,
-            "enabled": True,
-            "updated_at": None,
-        }
-    return items
-
-
 def load_raw_mappings(conn: sqlite3.Connection) -> tuple[int, str, dict[str, dict], bool]:
-    """读取已存储的 project_mappings 设置。
-
-    返回 (revision, workspace_id, items_dict, is_saved)。
-    未保存时返回 (0, constants.WORKSPACE_ID, legacy_items, False)。
-    """
+    """Read saved mappings unchanged; new installations have no default projects."""
     stored = db.get_setting(conn, SETTINGS_KEY)
+    workspace_id = str(db.get_setting(conn, "workspace_id") or "")
     if isinstance(stored, dict) and isinstance(stored.get("items"), dict):
         revision = int(stored.get("revision", 0))
-        workspace_id = str(stored.get("workspace_id") or constants.WORKSPACE_ID)
-        items = dict(stored["items"])
-        return revision, workspace_id, items, True
-    return 0, constants.WORKSPACE_ID, _legacy_default_items(), False
+        workspace_id = str(stored.get("workspace_id") or workspace_id)
+        return revision, workspace_id, dict(stored["items"]), True
+    return 0, workspace_id, {}, False
+
+
+def require_workspace(conn: sqlite3.Connection) -> str:
+    workspace_id = load_raw_mappings(conn)[1]
+    if not workspace_id:
+        raise util.KanpilotError("validation_failed", "请先通过 set-config 配置 workspace_id，再获取 Kaneo 项目")
+    return workspace_id
+
+
+def project_id_from_items(items: dict, project_name: str) -> Optional[str]:
+    """Resolve legacy name-only records only when the saved name is unique."""
+    if not project_name:
+        return None
+    matches = [str(pid) for pid, item in items.items()
+               if item.get("project_name") == project_name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def project_id_for_name(conn: sqlite3.Connection, project_name: str) -> Optional[str]:
+    return project_id_from_items(load_raw_mappings(conn)[2], project_name)
 
 
 def inspect_repository_path(raw_path: Optional[str]) -> tuple[Optional[str], Optional[str], str, Optional[str]]:
@@ -197,6 +199,7 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
 
     if refresh_remote:
         try:
+            require_workspace(conn)
             client = remote.get_client()
             project_list = bridge.project_list(client, workspace_id)
             remote_status = "ok"
@@ -385,20 +388,14 @@ def set_project_mapping(
         # 确定 project_name
         project_name = existing_entry.get("project_name") if existing_entry else None
         if not project_name:
-            # 尝试从远端或本地任务获取
-            for name, pid in constants.PROJECTS.items():
-                if pid == project_id:
-                    project_name = name
-                    break
-            if not project_name:
-                t_row = conn.execute(
-                    "SELECT project_name FROM tasks WHERE project_id=? LIMIT 1",
-                    (project_id,),
-                ).fetchone()
-                if t_row and t_row[0]:
-                    project_name = t_row[0]
+            t_row = conn.execute(
+                "SELECT project_name FROM tasks WHERE project_id=? LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if t_row and t_row[0]:
+                project_name = t_row[0]
 
-        if not project_name:
+        if not project_name and workspace_id:
             # 尝试调用 remote 获取
             try:
                 client = remote.get_client()

@@ -54,14 +54,14 @@ CORE_BIN = os.environ.get("KANPILOT_CORE_BIN") or str(REPO_ROOT / "core" / "kanp
 sys.path.insert(0, str(Path(CORE_BIN).resolve().parent))
 from kanpilot import bridge as kbridge  # noqa: E402
 
-WORKSPACE_ID = "example-record-id"
+WORKSPACE_ID = "fixture-workspace"
 
 PROJECTS = {
-    "Music": "example-project-01",
-    "Library": "example-project-02",
-    "StudyTool": "example-project-03",
-    "Comic": "example-project-04",
-    "Feedback": "example-project-05",
+    "Music": "fixture-project-music",
+    "Library": "fixture-project-library",
+    "StudyTool": "fixture-project-studytool",
+    "Comic": "fixture-project-comic",
+    "Feedback": "fixture-project-feedback",
 }
 
 # fake kaneo 每个项目默认列（slug → 显示名）；远端状态写使用 slug。
@@ -199,7 +199,13 @@ class CLI:
 
 
 @pytest.fixture
-def tmp_env(tmp_path, monkeypatch):
+def seed_project_configuration():
+    """Most workflow fixtures start with an explicitly configured fake workspace."""
+    return True
+
+
+@pytest.fixture
+def tmp_env(tmp_path, monkeypatch, seed_project_configuration):
     """完整临时目录树：DB/Plan 根/五个项目仓库/应用支持/旧状态根/凭据路径/伪 HOME。"""
     home = tmp_path / "home"
     home.mkdir()
@@ -315,6 +321,17 @@ def tmp_env(tmp_path, monkeypatch):
     )
     for k, v in env.items():
         monkeypatch.setenv(k, v)
+    if seed_project_configuration:
+        from kanpilot import db as core_db
+        conn = core_db.connect(db)
+        core_db.set_setting(conn, "workspace_id", WORKSPACE_ID)
+        core_db.set_setting(conn, "project_mappings", {"version": 1, "revision": 0,
+            "workspace_id": WORKSPACE_ID, "items": {pid: {
+                "project_name": name, "repository": str(repos_root / name),
+                "enabled": True, "updated_at": None,
+            } for name, pid in PROJECTS.items()}})
+        conn.commit()
+        conn.close()
     return SimpleNamespace(
         root=tmp_path,
         home=home,

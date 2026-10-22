@@ -17,7 +17,7 @@ class ClaudePlannerTest(KanpilotTestCase):
         super().setUp()
         self.repo = self.make_repo("Feedback")
         self.task_id = "taskclaude000000000000001"
-        self.pid = "example-project-05"
+        self.pid = "fixture-project-feedback"
         self.call("set-project-mapping", {"project_id": self.pid,
             "repository": str(self.repo), "enabled": True, "expected_revision": 0})
         conn = db.connect(self.db_path)

@@ -20,7 +20,7 @@ class TestMigrate(KanpilotTestCase):
         exe = {
             "readytask000000000001": {
                 "task_id": "readytask000000000001",
-                "project_id": "example-project-05",
+                "project_id": "fixture-project-feedback",
                 "project_name": "Feedback",
                 "status": "ready",
                 "plan_path": "/plans/f.md", "plan_sha256": "aa",
@@ -30,7 +30,7 @@ class TestMigrate(KanpilotTestCase):
             },
             "runtask00000000000001": {
                 "task_id": "runtask00000000000001",
-                "project_id": "example-project-05",
+                "project_id": "fixture-project-feedback",
                 "project_name": "Feedback",
                 "status": "running",
                 "send_state": "sent", "sent": True,
@@ -39,7 +39,7 @@ class TestMigrate(KanpilotTestCase):
             },
             "disptask0000000000001": {
                 "task_id": "disptask0000000000001",
-                "project_id": "example-project-05",
+                "project_id": "fixture-project-feedback",
                 "project_name": "Feedback",
                 "status": "submitting",
                 "run_id": "run-x", "send_state": "unknown", "sent": None,
@@ -48,7 +48,7 @@ class TestMigrate(KanpilotTestCase):
             },
             "blocktask000000000001": {
                 "task_id": "blocktask000000000001",
-                "project_id": "example-project-05",
+                "project_id": "fixture-project-feedback",
                 "project_name": "Feedback",
                 "status": "needs_user",
                 "send_state": "unknown", "failure_code": "computer_locked",
@@ -65,7 +65,7 @@ class TestMigrate(KanpilotTestCase):
         pln = {
             "planonly0000000000001": {
                 "task_id": "planonly0000000000001",
-                "project_id": "example-project-02",
+                "project_id": "fixture-project-library",
                 "project_name": "Library",
                 "plan_path": "/plans/lib.md", "plan_sha256": "bb",
                 "source_sha256": "ss", "source_snapshot": "/snap/1.json",
@@ -78,7 +78,7 @@ class TestMigrate(KanpilotTestCase):
         rev = {
             "revtask00000000000001": {
                 "task_id": "revtask00000000000001",
-                "project_id": "example-project-03",
+                "project_id": "fixture-project-studytool",
                 "project_name": "StudyTool",
                 "status": "completed", "conclusion": "pass",
                 "kaneo_status": "done",

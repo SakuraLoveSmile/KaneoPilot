@@ -228,6 +228,7 @@ def review_fix_plan_task(conn, task_id: str, req_payload: dict) -> dict:
 def build_plan_meta(
     context: dict, manifest: dict, generated_at: str, task_row=None,
     model_config=None,
+    configured_mappings=None,
 ) -> dict:
     """按本轮真实输入生成计划 frontmatter 元数据（§6）。
 
@@ -238,6 +239,7 @@ def build_plan_meta(
     分支传入按 §5.24.1 解析出的发布模型对（见 ``pi_desktop_planner``）——
     模型字段恒由本进程按真实输入写入，不信模型自报。
     """
+    from . import project_config
     task = context.get("task") or {}
     req_payload = context.get("payload") or {}
     manifest_task = manifest.get("task") or {}
@@ -247,7 +249,7 @@ def build_plan_meta(
         proj_snap.get("project_id")
         or manifest_task.get("project_id")
         or task.get("project_id")
-        or constants.PROJECTS.get(manifest_task.get("project_name") or task.get("project_name") or "")
+        or project_config.project_id_from_items(configured_mappings or context.get("configured_project_mappings") or {}, manifest_task.get("project_name") or task.get("project_name") or "")
     )
     project_name = (
         proj_snap.get("project_name")
@@ -768,6 +770,8 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
 
     conn = db.connect(db_path)
     try:
+        from . import project_config
+        context["configured_project_mappings"] = project_config.load_raw_mappings(conn)[2]
         source = headless_adapter.resolve_source(conn)
         run_dir = source.run_dir(task_id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)

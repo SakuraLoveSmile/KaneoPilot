@@ -13,5 +13,6 @@ import tests.conftest as _tc
 factory = _tc.factory
 cli = _tc.cli
 tmp_env = _tc.tmp_env
+seed_project_configuration = _tc.seed_project_configuration
 fake_kaneo = _tc.fake_kaneo
 legacy_state = _tc.legacy_state

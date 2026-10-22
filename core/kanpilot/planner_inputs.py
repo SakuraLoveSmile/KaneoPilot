@@ -197,8 +197,9 @@ def _selectable(conn, task_id: str, mapping: Optional[dict]) -> tuple[bool, Opti
 
 def fetch_todos(conn: sqlite3.Connection) -> dict:
     """fetch-todos {} → {fetched_at, items[]}（§5.22.1 只读枚举）。"""
+    workspace_id = project_config.require_workspace(conn)
     client = remote.get_client()
-    projects = bridge.project_list(client, constants.WORKSPACE_ID)
+    projects = bridge.project_list(client, workspace_id)
     items = []
     for project in projects:
         project_id = str(project.get("id", ""))
@@ -822,7 +823,7 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
     manifest_project_id = (
         manifest_task.get("project_id")
         or (task["project_id"] if task and "project_id" in task_keys and task["project_id"] else None)
-        or constants.PROJECTS.get(manifest_task.get("project_name") or (task["project_name"] if task and "project_name" in task_keys else None) or "")
+        or project_config.project_id_for_name(conn, manifest_task.get("project_name") or (task["project_name"] if task and "project_name" in task_keys else None) or "")
     )
     if prepared.get("mapping_fingerprint") != util.jdump(project_config.load_raw_mappings(conn)):
         return {"task_id": task_id, "code": "conflict", "error": "项目映射在准备期间变化"}
@@ -1189,7 +1190,7 @@ def _prepare_submission(conn, item):
                         raise util.KanpilotError("conflict", "原计划或报告材料已变化")
             except util.KanpilotError as exc:
                 prepared["remediation_error"] = exc.message
-        project_id = meta.get("project_id") or (task["project_id"] if task else None) or constants.PROJECTS.get(meta.get("project_name") or (task["project_name"] if task else ""))
+        project_id = meta.get("project_id") or (task["project_id"] if task else None) or project_config.project_id_for_name(conn, meta.get("project_name") or (task["project_name"] if task else ""))
         prepared["mapping"] = project_config.get_effective_mapping(conn, project_id)
         prepared["mapping_fingerprint"] = util.jdump(project_config.load_raw_mappings(conn))
         source_path = _inputs_root(conn) / manifest["input_id"] / "source.json"

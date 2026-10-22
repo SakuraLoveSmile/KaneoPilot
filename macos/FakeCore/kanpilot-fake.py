@@ -29,11 +29,11 @@ STATE_PATH = os.environ.get(
 )
 
 PROJECTS = {
-    "Music": "example-project-01",
-    "Library": "example-project-02",
-    "StudyTool": "example-project-03",
-    "Comic": "example-project-04",
-    "Feedback": "example-project-05",
+    "Music": "fixture-project-music",
+    "Library": "fixture-project-library",
+    "StudyTool": "fixture-project-studytool",
+    "Comic": "fixture-project-comic",
+    "Feedback": "fixture-project-feedback",
 }
 PLAN_ROOT = "~/Documents/Code/Plan"
 REPOS_ROOT = "~/Documents/Code/Project/Personal Project"

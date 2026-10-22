@@ -26,7 +26,7 @@ from kanpilot import (  # noqa: E402
     constants, cmd_session, dsh_events, headless_adapter as h, session_store, util,
 )
 
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 
 
 def write_json(path: Path, document) -> None:

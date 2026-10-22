@@ -212,7 +212,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 
 `claim` 对 dispatch 请求在事务外**先**执行与旧 `kaneo_dispatch.py check+claim` 等价的校验，全部通过才提交领取；任一失败按 §4.2-5 处理（task 转 `needs_user`，`failure_code=validation_failed|remote_unavailable` 区分确定性与暂时性）：
 
-1. 计划文件存在、在 Plan 根内、无符号链接；frontmatter 含 `task_id` 匹配、`implementation_status=未开始`、`project_name` 在项目白名单、`repository` 等于注册仓库且目录存在、`source_sha256`；`plan_sha256` 重算等于登记值。
+1. 计划文件存在、在 Plan 根内、无符号链接；frontmatter 含 `task_id` 匹配、`implementation_status=未开始`、项目 ID、名称匹配请求固化快照（缺少快照的旧记录须匹配已保存项目映射）、`repository` 等于注册仓库且目录存在、`source_sha256`；`plan_sha256` 重算等于登记值。
 2. 来源快照（`tasks.source_path`）存在；规范化重算 `source_sha256` 等于计划值；`task.id`/`projectId` 一致。
 3. `requirements_sha256` 由快照重算等于计划值（无快照或不可判 → `needs_user`）。
 4. 远端 `get-task`：`projectId` 一致、普通任务 `status ∈ {to-do, todo}`、`requirements_sha256` 一致、列含当前状态与 `in-progress`。同任务修复轮及用户明确重新规划的自动交付周期按 §5.27 校验已接受的运行/Review 列；不放宽普通任务。远端不可达 → `remote_unavailable`（task 保持原状，不算阻塞）。
@@ -354,7 +354,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形态的调用按 `bad_request` 拒绝。
 
-- **事务外核验**（不占写锁）：计划文件在 Plan 根内存在、无符号链接、frontmatter `task_id` 匹配、`implementation_status=未开始`、project 白名单与 repository 一致、重算 `plan_sha256`；`planner_input_sha256` 等于本轮规划输入快照哈希（`planner_inputs` 表 `input_sha256`，与请求 payload 登记一致）；远端 `get-task` 复验任务仍为 To Do 且 `requirements_sha256` 未变——远端不可达 → `remote_unavailable`（保留产物并阻塞发布，不写本地状态）。
+- **事务外核验**（不占写锁）：计划文件在 Plan 根内存在、无符号链接、frontmatter `task_id` 匹配、`implementation_status=未开始`、项目身份与 repository 匹配固化快照（缺少快照的旧记录匹配已保存映射）、重算 `plan_sha256`；`planner_input_sha256` 等于本轮规划输入快照哈希（`planner_inputs` 表 `input_sha256`，与请求 payload 登记一致）；远端 `get-task` 复验任务仍为 To Do 且 `requirements_sha256` 未变——远端不可达 → `remote_unavailable`（保留产物并阻塞发布，不写本地状态）。
 - **事务内复核**（单 `BEGIN IMMEDIATE`）：任务活跃（`save_state='active'` 且非 `purged`）、请求为本任务当前 `claimed` 规划请求且 `run_id` 匹配、租约未过期、`planner_input_sha256` 一致；任一不符 → `conflict`/`stale_run`。
 - **同一事务**：登记计划字段（plan_path/plan_sha256/plan_kind/generated_at/planner_model/reasoning_effort/source_sha256/requirements_sha256/repository），task→`ready`，置 `extra_json.plan_execution_hold=true`（安排执行前的手动确认闸），结束请求为 `succeeded` 并闭合 attempt；写 `plan_published` event。成功路径不再额外调用 `report succeeded`。
 - **幂等**：同 `run_id`、同计划哈希的重复提交返回 `{"ok": true, "deduplicated": true, ...}`；发布事务提交后 runner 崩溃不得回退为失联或失败。
@@ -846,7 +846,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 规则：
 
-- 沿用现有项目白名单与仓库映射；未映射项目仍展示但 `selectable=false` + `blocked_reason` 说明；不新增项目配置系统。
+- 使用已保存项目映射与仓库路径；未映射项目仍展示但 `selectable=false` + `blocked_reason` 说明；不新增项目配置系统。
 - 每个 To Do 独立规划、独立产出；同一时间只领取一个规划任务。
 - 附件：图片 PNG/JPEG/WebP、日志 UTF-8 文本；单文件 ≤20 MiB、每任务材料合计 ≤100 MiB，超限明确报错（`validation_failed`），不静默截断。
 - 识别任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接及 HTML 图片；未知附件结构/格式/失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
@@ -1211,8 +1211,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 服务端无 CAS：本地 guard 只序列化本地写入，不声称阻止远端竞争。
 ## 6. 常量
 
-- `PROJECTS`：`Music→example-project-01`、`Library→example-project-02`、`StudyTool→example-project-03`、`Comic→example-project-04`、`Feedback→example-project-05`；仓库根 `~/Documents/Code/Project/Personal Project/<项目名>`。
-- `WORKSPACE_ID = example-record-id`
+- `PROJECTS = {}`、`WORKSPACE_ID = ""`：公开源码不携带部署标识。实际项目与仓库使用 §5.26 的本地配置；测试使用独立的合成标识。
 - `PLAN_ROOT = ~/Documents/Code/Plan`
 - `LEGACY_STATE_ROOT = ~/Library/Application Support/Codex`（KaneoPlanner/KaneoExecutor/KaneoReviewer）
 - `APP_SUPPORT = ~/Library/Application Support/KaneoPilot`（DB、备份、报告缓存）
@@ -1248,7 +1247,9 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - **存储与身份**：
   - 项目权威身份全链以 `project_id` 为唯一基准，显示名仅用于展示。
   - 映射保存于 SQLite `settings.project_mappings`：`{version: 1, revision: <int>, workspace_id: "<id>", items: {<project_id>: {project_name, repository, enabled, updated_at}}}`。无需升级 SQLite schema 版本（保持 v5）。
-  - 未配置键时安全提供旧五项目只读默认映射（`revision=0`）；首次配置写入持久化完整集合；停用与解除映射明确持久化状态，绝不回退至旧硬编码常量。
+  - 未配置键时返回空项目集合（`revision=0`），不生成维护者项目的隐式映射。工作区依次读取已保存 `project_mappings.workspace_id`、独立 `settings.workspace_id`；已有映射、revision 与嵌套自动化字段保留，不在读取时写库。
+  - `set-config {workspace_id?: <非空字符串>, worktree_pool_size?: <1–32整数>}` 至少提供一个字段，保留旧 pool 调用与响应。新工作区通过独立 setting 保存；若与已保存映射绑定的非空工作区不同，整次请求拒绝，包括同次 pool 修改。此入口不迁移或清空现有映射。
+  - 首次安装先用 `set-config` 配置工作区，再在项目配置页获取 Kaneo 项目、选择仓库并保存。工作区为空时，项目刷新、待办查询和在线诊断在创建远端 client 前明确提示先配置。原先仅依赖硬编码默认标识且从未保存配置的安装需配置一次。
   - 路径支持空格、中文与 `~` 展开，core 自动规范化并校验绝对路径；Git 子目录自动定位至仓库根。
 - **规划与执行链快照固化**：
   - `fetch-todos` 携带 `mapping_state`（`unmapped|available|disabled|missing|unreadable`）、`repository_kind`（`git|directory|null`）与 `blocked_reason`；未映射项目在规划列表中明确标红并阻止准备。

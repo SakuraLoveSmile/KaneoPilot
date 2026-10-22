@@ -503,7 +503,7 @@ class TestHostEnvironment(PlusCase):
     def test_wrapper_hits_isolated_database(self):
         """反向证明：包装器确实指向隔离库里的真实数据。"""
         task_id = "taskwrap00000000000000001"
-        remote = self.fake.add_task(task_id, "example-project-05")
+        remote = self.fake.add_task(task_id, "fixture-project-feedback")
         self.sync_task(remote, project_name="Feedback")
         directory = pi_desktop_controller.invocation_dir("dispatch", "inv-test-2")
         wrapper = pi_desktop_controller.write_wrapper(directory, "dispatch")
@@ -632,7 +632,7 @@ class TestDispatchControlRound(PlusCase):
     def test_completed_round_does_not_write_task_state(self):
         """控制回合 completed 只表示控制回合结束：不写任务/请求状态。"""
         remote = self.fake.add_task(
-            "taskctl000000000000000001", "example-project-05"
+            "taskctl000000000000000001", "fixture-project-feedback"
         )
         self.sync_task(remote, project_name="Feedback")
         self.server.messages = default_messages()

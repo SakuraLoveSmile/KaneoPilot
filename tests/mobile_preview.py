@@ -36,7 +36,7 @@ from test_session import pi_event, pi_job, write_json, write_jsonl  # noqa: E402
 READY_TITLE = "安卓联合验收：计划确认与长标题阅读检查"
 QUESTION_TITLE = "安卓联合验收：回答规划问题"
 QUESTION_OPTION = "沿用现有布局"
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 
 PLAN = """# 安卓控制台联合验收计划
 

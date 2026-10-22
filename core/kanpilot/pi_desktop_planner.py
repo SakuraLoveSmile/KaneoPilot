@@ -228,7 +228,8 @@ def _published_model_pair(context: dict, manifest: dict, generated_at: str,
             model_config=pair,
         )
         try:
-            planfile.check_plan_meta(meta, plan_kind, expected_model=expected, expected_project=expected_project)
+            planfile.check_plan_meta(meta, plan_kind, expected_model=expected, expected_project=expected_project,
+                                     configured_mappings=context.get("configured_project_mappings"))
             return pair, source, note
         except util.KanpilotError as exc:
             if "planner_model" not in str(exc.message):

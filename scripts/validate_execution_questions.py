@@ -52,7 +52,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[1]
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 SCENARIOS = ("core_answer", "plus_first", "race", "unknown", "engine_off", "fast_completed")
 TERMINAL_SCENARIOS = ("plus_stop", "sidecar_restart")
 VERIFY_COMMAND = "python3 verify_execution_answer.py"

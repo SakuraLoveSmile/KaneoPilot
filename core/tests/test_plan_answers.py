@@ -40,7 +40,7 @@ class PlanAnswersTest(KanpilotTestCase):
 
     def blocked(self, questions=None, legacy=False, backend="codex"):
         task_id = "clarification-task"
-        project_id = "example-project-05"
+        project_id = "fixture-project-feedback"
         self.make_repo("Feedback")
         self.fake.add_task(task_id, project_id, status="to-do", title="问题作答", description="改变按钮配色")
         original = self.root / "user-note.md"

@@ -22,7 +22,7 @@ import uuid
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))  # Existing standard-library pytest fixture shim.
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 
 
 def write_json(path, data):

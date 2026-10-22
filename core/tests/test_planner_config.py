@@ -31,7 +31,7 @@ CUSTOM2 = {"planner_model": "gpt-8-nova", "reasoning_effort": "xhigh"}
 def _meta(**overrides):
     meta = {
         "task_id": "taskmeta00000000000001",
-        "project_id": "example-project-05",
+        "project_id": "fixture-project-feedback",
         "project_name": "Feedback",
         "repository": str(constants.repo_path_for("Feedback")),
         "source_sha256": "a" * 64,
@@ -52,9 +52,14 @@ class CheckPlanMetaExpectedModel(KanpilotTestCase):
         super().setUp()
         (self.repos_root / "Feedback").mkdir()
 
+    def check_plan_meta(self, meta, kind, **kwargs):
+        baseline = _meta()
+        project = {key: baseline[key] for key in ("project_id", "project_name", "repository")}
+        return planfile.check_plan_meta(meta, kind, expected_project=project, **kwargs)
+
     def test_expected_model_match(self):
         meta = _meta(planner_model="m", reasoning_effort="r")
-        planfile.check_plan_meta(
+        self.check_plan_meta(
             meta, "standard",
             expected_model={"planner_model": "m", "reasoning_effort": "r"},
         )
@@ -62,7 +67,7 @@ class CheckPlanMetaExpectedModel(KanpilotTestCase):
     def test_expected_model_mismatch(self):
         expected = {"planner_model": "m", "reasoning_effort": "r"}
         with self.assertRaises(util.KanpilotError) as ctx:
-            planfile.check_plan_meta(
+            self.check_plan_meta(
                 _meta(planner_model="other", reasoning_effort="r"),
                 "standard", expected_model=expected,
             )
@@ -70,16 +75,16 @@ class CheckPlanMetaExpectedModel(KanpilotTestCase):
         self.assertIn("与本请求登记不符", ctx.exception.message)
         # reasoning_effort 单独不符同样拒绝。
         with self.assertRaises(util.KanpilotError):
-            planfile.check_plan_meta(
+            self.check_plan_meta(
                 _meta(planner_model="m", reasoning_effort="other"),
                 "standard", expected_model=expected,
             )
 
     def test_no_expected_model_uses_constants(self):
         # 缺省 → 历史固定常量规则（向后兼容：默认 frontmatter 通过）。
-        planfile.check_plan_meta(_meta(), "standard")
+        self.check_plan_meta(_meta(), "standard")
         with self.assertRaises(util.KanpilotError) as ctx:
-            planfile.check_plan_meta(
+            self.check_plan_meta(
                 _meta(planner_model="custom-model"), "standard"
             )
         self.assertIn("format mismatch", ctx.exception.message)
@@ -117,7 +122,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
 
     def test_start_plans_uses_saved_planner_config(self):
         task = self.fake.add_task(
-            "taskcfg00000000000001", "example-project-05")
+            "taskcfg00000000000001", "fixture-project-feedback")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         # 未保存配置 → 默认快照（与旧常量一致）。
@@ -131,14 +136,14 @@ class PlannerConfigSnapshot(KanpilotTestCase):
         self.call("set-planner-config", {
             "standard": dict(CUSTOM), "review_fix": dict(CUSTOM2)})
         task2 = self.fake.add_task(
-            "taskcfg00000000000002", "example-project-05")
+            "taskcfg00000000000002", "fixture-project-feedback")
         self.sync_task(task2, project_name="Feedback")
         info2 = self._prepare_input(task2["id"])
         result2 = self._start_plans(info2)
         payload2 = self._request_payload(result2["results"][0]["request_id"])
         self.assertEqual(payload2["model_config"], CUSTOM)
         task3 = self.fake.add_task(
-            "taskcfg00000000000003", "example-project-05")
+            "taskcfg00000000000003", "fixture-project-feedback")
         self.sync_task(task3, project_name="Feedback")
         self.set_task_status(task3["id"], "needs_plan",
                              plan_kind="review_fix")
@@ -152,7 +157,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
         """新配置只影响之后创建的请求：已排队请求的 model_config 不回写
         （幂等 deduplicated 路径也不改 payload）。"""
         task = self.fake.add_task(
-            "taskcfg00000000000004", "example-project-05")
+            "taskcfg00000000000004", "fixture-project-feedback")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         self.call("set-planner-config", {"standard": dict(CUSTOM)})
@@ -174,7 +179,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
     def test_unauthorized_reuse_writes_new_snapshot(self):
         """未授权旧请求被确认复用（等价新确认）→ 写回新快照（§5.22.2）。"""
         task = self.fake.add_task(
-            "taskcfg00000000000005", "example-project-05")
+            "taskcfg00000000000005", "fixture-project-feedback")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         conn = db.connect(self.db_path)
@@ -205,7 +210,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
                          CUSTOM["planner_model"])
         # 另一任务：请求快照是 CUSTOM，frontmatter 写默认模型 → validation_failed。
         remote = self.fake.add_task(
-            "taskcfg00000000000006", "example-project-05")
+            "taskcfg00000000000006", "fixture-project-feedback")
         self.make_repo("Feedback")
         source_sha, req_sha, source_path = self.make_source_snapshot(remote)
         self.sync_task(
@@ -336,7 +341,7 @@ class PlannerBackendConfig(PlannerConfigSnapshot):
 
     def _new_task(self, task_id):
         task = self.fake.add_task(
-            task_id, "example-project-05", status="to-do")
+            task_id, "fixture-project-feedback", status="to-do")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         return task

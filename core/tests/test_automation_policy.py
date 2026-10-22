@@ -11,6 +11,10 @@ NOW = '2026-10-05T01:00:00+00:00'
 @pytest.fixture
 def ctx(tmp_path):
     conn = db.connect(tmp_path / 'state.db')
+    db.set_setting(conn, 'project_mappings', {'revision': 0, 'items': {
+        'fixture-project-policy': {'project_name': 'Policy', 'repository': None, 'enabled': True},
+    }})
+    conn.commit()
     yield SimpleNamespace(conn=conn, now_iso=NOW, now=util.parse_ts(NOW))
     conn.close()
 

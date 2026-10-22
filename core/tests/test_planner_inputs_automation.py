@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 class TestAutomationSubmission(KanpilotTestCase):
     def prepare(self, task_id='automationtask000001'):
-        pid = 'example-project-05'
+        pid = 'fixture-project-feedback'
         remote = self.fake.add_task(task_id, pid)
         repo = self.make_repo('Feedback')
         prepared = self.call('prepare-plan-input', {'task_id':task_id})
@@ -82,7 +82,7 @@ class TestAutomationSubmission(KanpilotTestCase):
     def test_fake_kaneo_dry_preview_and_real_intake_commands(self):
         from unittest.mock import patch
         from kanpilot import auto_intake, git_delivery
-        pid = 'example-project-05'
+        pid = 'fixture-project-feedback'
         remote_task = self.fake.add_task('intakefaketask000001',pid)
         repo = self.make_repo('Feedback')
         conn = db.connect(self.db_path)

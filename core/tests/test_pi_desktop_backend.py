@@ -544,7 +544,7 @@ class PiDesktopCase(KanpilotTestCase):
             conn.close()
         if not task_exists:
             remote_task = self.fake.add_task(
-                task_id, "example-project-05",
+                task_id, "fixture-project-feedback",
                 title=f"test task {task_id}",
             )
             self.sync_task(remote_task, project_name="Feedback")

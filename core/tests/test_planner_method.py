@@ -56,7 +56,7 @@ class _MethodCase(KanpilotTestCase):
 
     def _new_task(self, task_id):
         task = self.fake.add_task(
-            task_id, "example-project-05", status="to-do")
+            task_id, "fixture-project-feedback", status="to-do")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         return task

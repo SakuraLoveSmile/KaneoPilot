@@ -18,7 +18,7 @@ from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import cli, core, db, util  # noqa: E402
 from kanpilot.engine import fallback  # noqa: E402
 
-PROJECT = "example-project-05"
+PROJECT = "fixture-project-feedback"
 _FALLBACK = {"provider_id": "707a4c67-4ee0-484d-b635-730372501eaf",
              "model_id": "google/gemini-3.7-flash"}
 

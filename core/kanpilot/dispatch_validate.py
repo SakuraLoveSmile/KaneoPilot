@@ -65,10 +65,12 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
             "project_name": task["project_name"],
             "repository": task["repository"],
         } if (task["project_id"] or task["repository"]) else None
+        from . import project_config
         planfile.check_plan_meta(
             meta, plan_kind,
             expected_model=expected_model,
             expected_project=expected_project,
+            configured_mappings=project_config.load_raw_mappings(conn)[2],
         )
     except util.KanpilotError as exc:
         raise DispatchCheckFailed(exc.message)

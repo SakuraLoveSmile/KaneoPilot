@@ -18,6 +18,10 @@ sys.path.insert(0, str(CORE / "_vendor"))
 
 import yaml  # noqa: E402
 from kanpilot import bridge, cli, constants, db, remote, util  # noqa: E402
+# Pure synthetic identities keep the unittest harness independent of pytest fixtures.
+WORKSPACE_ID = "fixture-workspace"
+PROJECTS = {name: "fixture-project-" + name.lower()
+            for name in ("Music", "Library", "StudyTool", "Comic", "Feedback")}
 
 
 
@@ -209,7 +213,7 @@ class FakeKaneoClient:
         self.tasks = {}          # task_id -> task dict
         self.projects = [
             {"id": pid, "name": name}
-            for name, pid in constants.PROJECTS.items()
+            for name, pid in PROJECTS.items()
         ]
         self.columns = [
             {"slug": "to-do"}, {"slug": "in-progress"},
@@ -300,7 +304,7 @@ class KanpilotTestCase(unittest.TestCase):
     """Base case: tempdir roots, env overrides, in-process CLI, fake remote."""
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="kanpilot-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="kanpilot-test-")).resolve()
         self.db_path = self.root / "kanpilot.db"
         self.plan_root = self.root / "Plan"
         self.repos_root = self.root / "repos"
@@ -332,6 +336,15 @@ class KanpilotTestCase(unittest.TestCase):
         self._env.update(make_codex_fixture(self.root))
         self._saved = {k: os.environ.get(k) for k in self._env}
         os.environ.update(self._env)
+        conn = db.connect(self.db_path)
+        db.set_setting(conn, "workspace_id", WORKSPACE_ID)
+        db.set_setting(conn, "project_mappings", {"version": 1, "revision": 0,
+            "workspace_id": WORKSPACE_ID, "items": {pid: {
+                "project_name": name, "repository": str((self.repos_root / name).resolve()),
+                "enabled": True, "updated_at": None,
+            } for name, pid in PROJECTS.items()}})
+        conn.commit()
+        conn.close()
         self.fake = FakeKaneoClient()
         remote.set_client_factory(lambda: self.fake)
         self.addCleanup(self._restore)
@@ -426,7 +439,7 @@ class KanpilotTestCase(unittest.TestCase):
         self,
         task_id="taskready000000000000001",
         project_name="Feedback",
-        project_id="example-project-05",
+        project_id="fixture-project-feedback",
         remote_status="to-do",
         description="",
         plan_overrides=None,

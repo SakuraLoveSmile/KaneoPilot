@@ -19,7 +19,7 @@ class TestPurge(KanpilotTestCase):
 
     def _task(self, task_id="taskpurge00000000001"):
         task = self.fake.add_task(
-            task_id, "example-project-05")
+            task_id, "fixture-project-feedback")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         return task
@@ -144,7 +144,7 @@ class TestPlanningChain(KanpilotTestCase):
     def _fetch_and_prepare(self, task_id="taskplan00000000000001",
                            title="规划甲"):
         remote_task = self.fake.add_task(
-            task_id, "example-project-05",
+            task_id, "fixture-project-feedback",
             status="to-do", title=title)
         self.make_repo("Feedback")
         fetched = self.call("fetch-todos", {})
@@ -174,7 +174,7 @@ class TestPlanningChain(KanpilotTestCase):
 
     def test_prepare_conflict_on_requirements_change(self):
         remote_task = self.fake.add_task(
-            "taskplan00000000000002", "example-project-05",
+            "taskplan00000000000002", "fixture-project-feedback",
             status="to-do")
         self.make_repo("Feedback")
         fetched = self.call("fetch-todos", {})
@@ -216,7 +216,7 @@ class TestPlanningChain(KanpilotTestCase):
 
     def test_unauthorized_plan_request_not_claimable(self):
         task = self.fake.add_task(
-            "taskplan00000000000003", "example-project-05")
+            "taskplan00000000000003", "fixture-project-feedback")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
         # 手工造一个「未授权」旧请求（payload 无 manual_authorized）。
@@ -280,7 +280,7 @@ class TestPlanningChain(KanpilotTestCase):
         """KANPILOT_CODEX_FAKE=ready：runner 端到端 claim→codex(fake)→
         publish-plan → ready + hold。"""
         remote_task = self.fake.add_task(
-            "taskplan00000000000005", "example-project-05",
+            "taskplan00000000000005", "fixture-project-feedback",
             status="to-do", title="runner 冒烟")
         self.make_repo("Feedback")
         prepared = self.call("prepare-plan-input", {
@@ -315,7 +315,7 @@ class TestPlanningChain(KanpilotTestCase):
 
     def test_planner_runner_fake_needs_input(self):
         remote_task = self.fake.add_task(
-            "taskplan00000000000006", "example-project-05",
+            "taskplan00000000000006", "fixture-project-feedback",
             status="to-do")
         self.make_repo("Feedback")
         prepared = self.call("prepare-plan-input", {

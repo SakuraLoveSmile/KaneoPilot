@@ -20,7 +20,7 @@ from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, util  # noqa: E402
 from kanpilot.engine import decide, loop, steps  # noqa: E402
 
-PROJECT = "example-project-05"
+PROJECT = "fixture-project-feedback"
 
 
 def _task(**kw):

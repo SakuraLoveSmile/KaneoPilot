@@ -29,7 +29,7 @@ class TaskWorkspaceTest(KanpilotTestCase):
         return repo
 
     def start(self, task_id="newlocaltask0001", backend="codex"):
-        self.fake.add_task(task_id, "example-project-05")
+        self.fake.add_task(task_id, "fixture-project-feedback")
         prepared = self.call("prepare-plan-input", {"task_id": task_id})
         return self.call("start-plans", {"items": [{"input_id": prepared["input_id"],
             "input_sha256": prepared["input_sha256"], "planner_backend": backend}]})["results"][0]
@@ -135,7 +135,7 @@ class TaskWorkspaceTest(KanpilotTestCase):
 
     def test_historical_authorized_plan_is_not_migrated(self):
         repo = self.make_repo("Feedback")
-        self.fake.add_task("legacytask0001", "example-project-05")
+        self.fake.add_task("legacytask0001", "fixture-project-feedback")
         prepared = self.call("prepare-plan-input", {"task_id": "legacytask0001"})
         with mock.patch.object(task_workspace, "prepare_for_submission", return_value=None):
             result = self.call("start-plans", {"items": [{"input_id": prepared["input_id"]}]})["results"][0]
@@ -206,7 +206,7 @@ class TaskWorkspaceTest(KanpilotTestCase):
             conn.commit()
         finally:
             conn.close()
-        fix = self.fake.add_task("independentfix0001", "example-project-05")
+        fix = self.fake.add_task("independentfix0001", "fixture-project-feedback")
         self.sync_task(fix)
         conn = db.connect(self.db_path)
         try:

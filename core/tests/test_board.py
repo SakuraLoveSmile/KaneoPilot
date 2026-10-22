@@ -13,7 +13,7 @@ from datetime import timedelta
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import util  # noqa: E402
 
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 
 
 class BoardCase(KanpilotTestCase):

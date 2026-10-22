@@ -66,6 +66,7 @@ def check_plan_meta(
     plan_kind: str,
     expected_model: Optional[dict] = None,
     expected_project: Optional[dict] = None,
+    configured_mappings: Optional[dict] = None,
 ) -> None:
     """Frontmatter completeness + planner/reasoning requirements (§6).
 
@@ -73,7 +74,7 @@ def check_plan_meta(
     按请求/任务登记的快照比对（v2.1 §5.22.6）；缺省时沿用历史固定常量
     （旧记录缺登记的兼容路径）。
     ``expected_project``（``{"project_id":…, "repository":…, "project_name":…}``）
-    提供时按固化的项目快照比对（T1 §5.26）；缺省时沿用历史白名单常量校验。
+    提供时按固化的项目快照比对（T1 §5.26）；缺省时按调用方提供的本地已保存映射校验。
     """
     required = (
         constants.PLAN_META_REQUIRED_REVIEW_FIX
@@ -106,15 +107,14 @@ def check_plan_meta(
                 f"plan project_name {meta.get('project_name')} != {expected_pname}",
             )
     else:
+        entry = (configured_mappings or {}).get(meta.get("project_id"))
+        util.require(bool(entry), f"unknown configured project {meta.get('project_name')}")
         util.require(
-            meta.get("project_name") in constants.PROJECTS,
-            f"unknown project {meta.get('project_name')}",
+            meta.get("project_name") == entry.get("project_name"),
+            "plan project_id does not match configured project_name",
         )
-        util.require(
-            meta.get("project_id") == constants.PROJECTS[meta["project_name"]],
-            "plan project_id does not match project_name whitelist",
-        )
-        expected_repo = str(constants.repo_path_for(meta["project_name"]))
+        expected_repo = entry.get("repository")
+        util.require(bool(expected_repo), "configured project has no repository")
         util.require(
             meta.get("repository") == expected_repo,
             f"plan repository {meta.get('repository')} != {expected_repo}",

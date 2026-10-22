@@ -153,7 +153,7 @@ class _GoalReportCase(KanpilotTestCase):
                     "session_marker, plan_path, plan_sha256, created_at, "
                     "updated_at, save_state) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active')",
-                    (TASK_ID, "example-project-05", "Feedback",
+                    (TASK_ID, "fixture-project-feedback", "Feedback",
                      "修复计划验收", str(self.repos_root / "Feedback"),
                      "monitor", status, RUN_ID, f"{TASK_ID}/{RUN_ID}",
                      str(self.plan_root / "Feedback" / "p.md"), plan_sha256,
@@ -289,7 +289,7 @@ class TestGoalReportReadStates(_GoalReportCase):
     def test_formal_envelope_read_evaluate_and_advance(self):
         self.seed_round()
         self.server.goal_report = formal_report_payload()
-        self.fake.add_task(TASK_ID, "example-project-05", status="in-progress")
+        self.fake.add_task(TASK_ID, "fixture-project-feedback", status="in-progress")
         out = self.call("get-goal-report", {"task_id": TASK_ID, "run_id": RUN_ID})
         self.assertEqual(out["state"], "ready")
         self.assertEqual(out["turn_id"], EXEC_TURN_ID)
@@ -929,7 +929,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
                           "input": {"command": "pytest"}, "exit_code": exit_code,
                           "output": "validation result"})
         events_path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
-        self.fake.add_task(TASK_ID, "example-project-05", status="in-progress")
+        self.fake.add_task(TASK_ID, "fixture-project-feedback", status="in-progress")
         return self.seed_monitor_claim()
 
     def test_automatic_command_verification_advances_without_goal_evaluation(self):
@@ -1083,7 +1083,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         out = self.record(request_id)
         # advance-task 需要远端任务存在（in-progress）。
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         result = self.call("advance-task", {
             "task_id": TASK_ID, "target": "in-review",
@@ -1128,7 +1128,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertTrue(second["deduplicated"])
         self.assertEqual(second["event_id"], first["event_id"])
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         result = self.call("advance-task", {
             "task_id": TASK_ID, "target": "in-review",
@@ -1154,7 +1154,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def test_event_without_monitor_registration_provenance_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         for field, value in (("actor", "executor"), ("request_id", None)):
             with self.subTest(field=field):
@@ -1182,7 +1182,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def test_stale_monitor_claim_is_rejected_before_remote(self):
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         conn = db.connect(self.db_path)
         try:
@@ -1203,7 +1203,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def test_old_evaluation_from_another_round_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         conn = db.connect(self.db_path)
         try:
@@ -1225,7 +1225,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def test_changed_report_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         # 报告在上次判定后被改写（hash 变化）。
         self.set_report(goal_report(), sha="9" * 64)
@@ -1237,7 +1237,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def test_non_completed_execution_terminal_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         # 执行终态被改成 failed（job 与 terminal 都改）。
         run_dir = self.runs_root / TASK_ID / RUN_ID
@@ -1269,7 +1269,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         """判定中的原 monitor_run_id 必须匹配历史登记请求。"""
         request_id, event_id = self._register()
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         conn = db.connect(self.db_path)
         try:
@@ -1301,7 +1301,7 @@ class TestPiBackendUnchanged(_GoalReportCase):
         """pi 后端轮次不要求 monitor claim/evaluation event（接口不变）。"""
         self.seed_round(backend="pi")
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         result = self.call("advance-task", {
             "task_id": TASK_ID, "target": "in-review",
@@ -1313,7 +1313,7 @@ class TestPiBackendUnchanged(_GoalReportCase):
     def test_review_precondition_preserved_for_pi(self):
         self.seed_round(backend="pi")
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         code, message = self.call_err_code("advance-task", {
             "task_id": TASK_ID, "target": "done",
@@ -1435,7 +1435,7 @@ class TestGoalDecisionVariants(_GoalReportCase):
                           reason="报告无法解释的证据缺口")
         self.assertEqual(out["decision"], "uncertain")
         self.fake.add_task(
-            TASK_ID, "example-project-05", status="in-progress"
+            TASK_ID, "fixture-project-feedback", status="in-progress"
         )
         code, message = self.call_err_code("advance-task", {
             "task_id": TASK_ID, "target": "in-review",
@@ -1690,7 +1690,7 @@ class T6Case(KanpilotTestCase):
     def seed_claimed_dispatch(self, run_id=RUN_ID):
         """登记 worker 的任务、执行轮次与 claimed dispatch 请求。"""
         remote_task = self.fake.add_task(
-            TASK_ID, "example-project-05",
+            TASK_ID, "fixture-project-feedback",
             title=f"test task {TASK_ID}",
         )
         self.sync_task(remote_task, project_name="Feedback")

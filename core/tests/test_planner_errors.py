@@ -140,7 +140,7 @@ class _RunnerCase(KanpilotTestCase):
 
     def _new_task(self, task_id):
         task = self.fake.add_task(
-            task_id, "example-project-05", status="to-do",
+            task_id, "fixture-project-feedback", status="to-do",
         )
         self.make_repo("Feedback")
         source_sha, req_sha, source_path = self.make_source_snapshot(task)

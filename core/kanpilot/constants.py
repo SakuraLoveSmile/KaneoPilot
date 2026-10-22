@@ -167,16 +167,9 @@ DEFAULT_SESSION_RUNS_ROOT = "~/Library/Application Support/KaneoPilot/runs"
 # 文件内容），associated 态由 get-session/session-messages 补齐。
 LIST_SESSIONS_LIGHT_THRESHOLD = 50
 
-# Project whitelist: name -> Kaneo project id (protocol.md §6).
-PROJECTS = {
-    "Music": "example-project-01",
-    "Library": "example-project-02",
-    "StudyTool": "example-project-03",
-    "Comic": "example-project-04",
-    "Feedback": "example-project-05",
-}
-
-WORKSPACE_ID = "example-record-id"
+# Public builds contain no service-specific identities. Configure locally.
+PROJECTS = {}
+WORKSPACE_ID = ""
 
 TODO_SLUGS = {"to-do", "todo"}
 REVIEW_SLUGS = {"in-review", "review"}

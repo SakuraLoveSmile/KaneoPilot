@@ -7,31 +7,24 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from helpers import KanpilotTestCase
+from helpers import PROJECTS, WORKSPACE_ID, KanpilotTestCase
 from kanpilot import constants, db, util
 
 
 class TestProjectMappings(KanpilotTestCase):
 
-    def test_default_legacy_mappings_when_unset(self):
-        """未保存 settings.project_mappings 时返回只读默认旧五项目 (revision=0)。"""
-        res = self.call("get-project-mappings")
-        self.assertEqual(res["version"], 1)
-        self.assertEqual(res["revision"], 0)
-        self.assertEqual(res["workspace_id"], constants.WORKSPACE_ID)
-        self.assertEqual(res["remote"]["status"], "not_requested")
-
-        items = {item["project_name"]: item for item in res["items"]}
-        for name, pid in constants.PROJECTS.items():
-            self.assertIn(name, items)
-            self.assertEqual(items[name]["project_id"], pid)
-            self.assertEqual(items[name]["origin"], "legacy")
-
-        # GET 不会隐式写入 settings
+    def test_unset_mappings_have_no_implicit_projects(self):
         conn = self._open_db()
-        stored = db.get_setting(conn, "project_mappings")
+        conn.execute("DELETE FROM settings WHERE key='project_mappings'")
+        conn.commit()
         conn.close()
-        self.assertIsNone(stored)
+        res = self.call("get-project-mappings")
+        self.assertEqual(res["revision"], 0)
+        self.assertEqual(res["workspace_id"], WORKSPACE_ID)
+        self.assertEqual(res["items"], [])
+        conn = self._open_db()
+        self.assertIsNone(db.get_setting(conn, "project_mappings"))
+        conn.close()
 
     def test_refresh_remote_merges_projects(self):
         """refresh_remote=True 时拉取远端项目列表，未映射项目以 remote_only / unmapped 展现。"""
@@ -131,7 +124,7 @@ class TestProjectMappings(KanpilotTestCase):
 
     def test_disable_and_unmap_lifecycle(self):
         """停用和解除映射明确持久化，绝不回退至旧硬编码常量。"""
-        feedback_pid = constants.PROJECTS["Feedback"]
+        feedback_pid = PROJECTS["Feedback"]
         feedback_repo = self.make_repo("Feedback")
 
         # 停用 Feedback
@@ -154,7 +147,7 @@ class TestProjectMappings(KanpilotTestCase):
         self.assertEqual(res_unmap["item"]["mapping_state"], "unmapped")
         self.assertIsNone(res_unmap["item"]["repository"])
 
-        # 再次获取 mappings：Feedback 仍然保持 unmapped，不会从 constants.PROJECTS 恢复
+        # 再次获取 mappings：Feedback 仍然保持 unmapped，不会从 PROJECTS 恢复
         mappings = self.call("get-project-mappings")
         item = next(it for it in mappings["items"] if it["project_id"] == feedback_pid)
         self.assertEqual(item["mapping_state"], "unmapped")

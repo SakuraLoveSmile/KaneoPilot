@@ -12,6 +12,14 @@ v1 库由本文件按 v1 冻结结构直接创建（不 import 核心代码）�
 
 import sqlite3
 
+import pytest
+
+
+@pytest.fixture
+def seed_project_configuration():
+    """Schema creation/migration tests own the initial database contents."""
+    return False
+
 try:
     from conftest import db_exec
 except ImportError:  # unittest discover 包上下文
@@ -137,7 +145,7 @@ def _create_v1_db(path):
             "INSERT INTO tasks(task_id, project_id, project_name, title, "
             "stage, status, send_state, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            (V1_TASK_ID, "example-project-02", "Library", "v1 旧任务",
+            (V1_TASK_ID, "fixture-project-library", "Library", "v1 旧任务",
              "dispatch", "ready", "not_sent",
              "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
         conn.execute(

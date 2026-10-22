@@ -71,7 +71,7 @@ class TestLinkImageMaterials(KanpilotTestCase):
     def prepare(self, description=DESCRIPTION, comments=None, downloader=fake_download,
                 attachments=None, local_paths=None):
         task_id = "linkimagetask0000001"
-        self.fake.add_task(task_id, "example-project-05",
+        self.fake.add_task(task_id, "fixture-project-feedback",
                            description=description, attachments=attachments or [])
         self.make_repo("Feedback")
         original_request = self.fake.request

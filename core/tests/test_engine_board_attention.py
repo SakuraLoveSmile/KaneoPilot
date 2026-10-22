@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from helpers import KanpilotTestCase  # noqa: E402
+from helpers import PROJECTS, WORKSPACE_ID, KanpilotTestCase  # noqa: E402
 from kanpilot import db, util  # noqa: E402
 from kanpilot.engine import attention  # noqa: E402
 
@@ -68,7 +68,7 @@ class TestBoardAttention(KanpilotTestCase):
 
     def test_project_engine_fields_round_trip(self):
         from kanpilot import constants
-        project_id = next(iter(constants.PROJECTS.values()))
+        project_id = next(iter(PROJECTS.values()))
         self.call("set-project-engine-mode", {"project_id": project_id, "engine_mode": "shadow"})
         self.call("set-project-verify-env", {"project_id": project_id, "verify_env": {"KP_TEST": "yes"}})
         self.call("set-project-fallback-model", {"project_id": project_id,

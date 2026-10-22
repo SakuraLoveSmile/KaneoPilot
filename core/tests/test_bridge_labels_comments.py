@@ -171,7 +171,7 @@ class TestRequirementsCompatibility(unittest.TestCase):
 class TestListLabels(KanpilotTestCase):
     def test_normalized_todos_labels_without_extra_request(self):
         labels = [{"id": "l1", "name": "Bug", "color": "red"}]
-        self.fake.add_task("tasklabels", "example-project-05", labels=labels)
+        self.fake.add_task("tasklabels", "fixture-project-feedback", labels=labels)
         result = bridge.normalize_todos(self.fake, "workspace")
         item = next(item for project in result["projects"] for item in project["tasks"])
         self.assertEqual(item["labels"], ["Bug"])
@@ -180,7 +180,7 @@ class TestListLabels(KanpilotTestCase):
 
     def test_fetch_todos_labels(self):
         self.make_repo("Feedback")
-        self.fake.add_task("tasklabels", "example-project-05",
+        self.fake.add_task("tasklabels", "fixture-project-feedback",
                            labels=[{"id": "l1", "name": "Bug", "color": "red"}])
         items = self.call("fetch-todos", {})["items"]
         self.assertEqual(items[0]["labels"], ["Bug"])

@@ -11,6 +11,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 from . import constants, core, db, derive, planfile, remote, util
 
@@ -611,13 +612,15 @@ def _probe_check(name, *, ok, detail, skipped=False, timed_out=False) -> dict:
             "skipped": bool(skipped), "timed_out": bool(timed_out)}
 
 
-def _doctor_kaneo_ping(timeout: float) -> dict:
+def _doctor_kaneo_ping(timeout: float, conn) -> dict:
     """Kaneo 连通性（§5.27.6）：HTTP 200 = 通；超时与真实失败分开。"""
+    from . import project_config
     try:
+        workspace_id = project_config.require_workspace(conn)
         client = remote.get_client()
         if hasattr(client, "timeout"):
             client.timeout = timeout  # 探测超时独立于 KANEO_TIMEOUT
-        client.request("/api/project?workspaceId=" + constants.WORKSPACE_ID)
+        client.request("/api/project?" + urlencode({"workspaceId": workspace_id}))
     except Exception as exc:
         timed_out = _probe_timed_out(exc)
         detail = str(exc) or exc.__class__.__name__
@@ -894,7 +897,7 @@ def cmd_doctor(ctx, payload: dict) -> dict:
     )
 
     if online:
-        checks.append(_doctor_kaneo_ping(timeout))
+        checks.append(_doctor_kaneo_ping(timeout, ctx.conn))
         checks.append(_doctor_gh(timeout))
         checks.append(_doctor_claude(timeout))
         from . import planner_config, review_config

@@ -37,7 +37,7 @@ from test_plus_controller import (  # noqa: E402
     SESSION_ID, TASK_ID, TURN_ID, PlusCase, assistant_json,
 )
 
-PROJECT_ID = "example-project-05"
+PROJECT_ID = "fixture-project-feedback"
 EXECUTION_RUN_ID = "runexec0000000000001"
 
 

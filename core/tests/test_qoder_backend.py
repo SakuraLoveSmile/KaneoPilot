@@ -63,7 +63,7 @@ class QoderBackendTest(KanpilotTestCase):
         super().setUp()
         self.repo = self.make_repo('Feedback')
         self.task_id = 'taskqoder000000000000001'
-        self.project_id = 'example-project-05'
+        self.project_id = 'fixture-project-feedback'
         self.call('set-project-mapping', {'project_id': self.project_id,
             'repository': str(self.repo), 'enabled': True, 'expected_revision': 0})
         self.call('set-planner-config', {'backend': 'qoder'})

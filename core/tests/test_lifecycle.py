@@ -28,7 +28,7 @@ class TestPublishPlan(KanpilotTestCase):
 
     def test_publish_plan_rejects_bad_meta(self):
         remote_task = self.fake.add_task(
-            "taskbadplan00000000001", "example-project-05"
+            "taskbadplan00000000001", "fixture-project-feedback"
         )
         self.make_repo("Feedback")
         source_sha, req_sha, source_path = self.make_source_snapshot(remote_task)
@@ -230,14 +230,14 @@ class TestTick(KanpilotTestCase):
 
     def test_tick_monitor_and_review(self):
         running = self.fake.add_task(
-            "taskrun0000000000000001", "example-project-05",
+            "taskrun0000000000000001", "fixture-project-feedback",
             status="in-progress",
         )
         self.make_repo("Feedback")
         self.sync_task(running, project_name="Feedback")
         self.set_task_status(running["id"], "running")
         reviewing = self.fake.add_task(
-            "taskrev0000000000000001", "example-project-05",
+            "taskrev0000000000000001", "fixture-project-feedback",
             status="in-review",
         )
         self.sync_task(reviewing, project_name="Feedback")
@@ -254,7 +254,7 @@ class TestTick(KanpilotTestCase):
 
     def test_monitor_cycle_respects_interval(self):
         task = self.fake.add_task(
-            "taskmon0000000000000001", "example-project-05",
+            "taskmon0000000000000001", "fixture-project-feedback",
             status="in-progress",
         )
         self.make_repo("Feedback")
@@ -289,7 +289,7 @@ class TestTick(KanpilotTestCase):
 class TestSyncTasks(KanpilotTestCase):
     def test_requirements_change_replans(self):
         task = self.fake.add_task(
-            "tasksync00000000000001", "example-project-05"
+            "tasksync00000000000001", "fixture-project-feedback"
         )
         self.make_repo("Feedback")
         source_sha, req_sha, source_path = self.make_source_snapshot(task)
@@ -312,7 +312,7 @@ class TestSyncTasks(KanpilotTestCase):
 
     def test_kaneo_done_archives_and_dispatch_untouched(self):
         done_task = self.fake.add_task(
-            "taskdone00000000000001", "example-project-05", status="done"
+            "taskdone00000000000001", "fixture-project-feedback", status="done"
         )
         self.make_repo("Feedback")
         self.sync_task(done_task, project_name="Feedback")
@@ -323,7 +323,7 @@ class TestSyncTasks(KanpilotTestCase):
         self.assertEqual(self.task(done_task["id"])["status"], "done")
 
         mid = self.fake.add_task(
-            "taskmid0000000000000001", "example-project-05",
+            "taskmid0000000000000001", "fixture-project-feedback",
             status="in-progress",
         )
         self.sync_task(mid, project_name="Feedback")

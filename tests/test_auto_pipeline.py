@@ -22,7 +22,7 @@ from kanpilot import (auto_dispatch, auto_intake, auto_monitor, automation_polic
                       db, delivery_runner, git_delivery, planner_runner, util)
 
 TASK = 'pipelinefeedback000000001'
-PROJECT = 'example-project-05'
+PROJECT = 'fixture-project-feedback'
 VERIFY = 'python3 -m unittest discover -s tests'
 
 

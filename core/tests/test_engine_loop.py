@@ -426,7 +426,7 @@ class TestSpawn(KanpilotTestCase):
                               spawn=lambda stage, db_path, iid: spawned.append(stage))
         conn = self._conn()
         try:
-            result = rec.spawn_step(conn, {"example-project-05": "live"})
+            result = rec.spawn_step(conn, {"fixture-project-feedback": "live"})
         finally:
             conn.close()
         self.assertTrue(result["executed"])
@@ -447,7 +447,7 @@ class TestSpawn(KanpilotTestCase):
                               spawn=lambda stage, db_path, iid: spawned.append(stage))
         conn = self._conn()
         try:
-            result = rec.spawn_step(conn, {"example-project-05": "live"})
+            result = rec.spawn_step(conn, {"fixture-project-feedback": "live"})
         finally:
             conn.close()
         self.assertFalse(result["executed"])

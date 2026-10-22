@@ -22,7 +22,7 @@ class DesktopConfigTests(KanpilotTestCase):
         self.assertEqual(restored["standard"], original)
 
     def test_plan_request_uses_desktop_source_and_native_skill_without_cli_probe(self):
-        remote = self.fake.add_task("desktopconfigplan00001", "example-project-05", status="to-do")
+        remote = self.fake.add_task("desktopconfigplan00001", "fixture-project-feedback", status="to-do")
         self.make_repo("Feedback")
         self.sync_task(remote, project_name="Feedback")
         info = self.make_planner_input(remote["id"], manifest_extra={

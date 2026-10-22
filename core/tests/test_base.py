@@ -76,7 +76,7 @@ class TestSchemaAndCli(KanpilotTestCase):
 class TestEnqueueClaim(KanpilotTestCase):
     def _new_task(self, status="to-do"):
         task = self.fake.add_task(
-            "task0000000000000000001", "example-project-05",
+            "task0000000000000000001", "fixture-project-feedback",
             status=status,
         )
         self.make_repo("Feedback")

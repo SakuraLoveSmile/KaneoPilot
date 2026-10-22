@@ -44,7 +44,7 @@ class DesktopQueueTests(KanpilotTestCase):
         return {key: claim[key] for key in desktop._IDENTITY}
 
     def plan(self, suffix="1", method="builtin"):
-        task = self.fake.add_task("desktopformalplan" + suffix, "example-project-05",
+        task = self.fake.add_task("desktopformalplan" + suffix, "fixture-project-feedback",
                                   status="to-do", description="需求：限制整数输入并显示平方")
         self.make_repo("Feedback")
         self.sync_task(task, project_name="Feedback")
