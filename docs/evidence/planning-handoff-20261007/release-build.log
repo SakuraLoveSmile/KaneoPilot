@@ -11,8 +11,8 @@ Build settings from configuration file '/tmp/kaneopilot-planning-handoff-release
     PRODUCT_BUNDLE_IDENTIFIER = local.kaneopilot
 
 --- xcodebuild: WARNING: Using the first of multiple matching destinations:
-{ platform:macOS, arch:arm64, id:00000000-0000000000000000, name:My Mac }
-{ platform:macOS, arch:x86_64, id:00000000-0000000000000000, name:My Mac }
+{ platform:macOS, arch:arm64, id:REDACTED-DEVICE-ID, name:My Mac }
+{ platform:macOS, arch:x86_64, id:REDACTED-DEVICE-ID, name:My Mac }
 { platform:macOS, name:Any Mac }
 ComputePackagePrebuildTargetDependencyGraph
 
