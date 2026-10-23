@@ -89,6 +89,45 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 - 规划问题来自 get-task.task.plan_clarification；执行问题来自 get-task.task.execution_question（单个当前问题组，不是数组）。保持原有题目顺序、单选/多选/自定义规则及答案字段。规划答案为 {question_id,option_id?,text?}，自定义选项 ID 为 custom；执行答案固定 {question_id,option_ids,text,skipped:false}。
 - 断线保留当前内容、更新时间和输入草稿，禁用写操作；重新读取成功后恢复。写请求结果不明须留存原 operation_id；不能因为刷新/重连重新发送。
 
+## 观测台界面增补（2026-10-22）
+
+本节为安卓观测台的规格草案，未经实现与真机核验前不视为已上线。桌面口径见 [ui-spec §4.18](ui-spec.md)。本节不新增查询或动作白名单项，不改变配对、令牌与 HTTP 契约。
+
+### 任务列表
+
+- 页面结构不变：底部导航 总览 / 任务 / 需要你 / 连接，单列，16dp 边距。任务页顶部为 chips：全部 / 需要你 / 执行中 / 已排队 / 待评审 / 已完成，每个带计数。
+- 数据：一次无过滤的 `list-tasks` 取回全部活动任务，计数与分组在客户端计算。不新增 `list-tasks` 参数；判定缺字段时以核心补充为准（见下文待投影）。
+- 分组与顺序同 ui-spec §4.18：需要你处理（失败在阻塞之前）→ 已排队 → 执行中 → 待评审 → 最近。
+- 行：标题、状态（图标 + 文字）、最近进展、项目名 · 更新时间。阻塞与失败的原因以「阻塞：」「失败：」开头。
+
+### 需要你
+
+- 数据来自既有 `attention-list`，卡片按类型显示，动作只来自上表白名单：
+  - **等待你回答**（执行问题）：题目顺序、单选/多选/自定义规则沿用既有约定；「保存草稿」调用 `save-execution-answers`，「提交回答」调用 `submit-execution-answers`，沿用同一 `operation_id`。结果不明时保留操作编号，不自动重发。
+  - **待确认执行**：仅当当前页面身份下 `get-plan` 返回且通过 `expected_plan_sha256` 核验后，才显示「确认并安排执行」（`confirm-dispatch`）；否则只显示「查看计划」。
+  - **阻塞、失败、执行端失联**：不显示动作，文字「该操作需在 Mac 上完成」。
+
+### 执行复盘
+
+- 顶部只读提示：「只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。」
+- 既有字段直接显示：`list-sessions` / `get-session` 中的轮次、`message_count`、`last_message_at`、`last_checked_at`；`get-task.task.automation` 中的 `fix_round` 与 `max_fix_rounds`（修复轮 N/M，上限取返回值，不写死）；交付状态；`session-messages` 增量合并（既有规则）。
+- 待核心投影（`get-task.task.retrospective`，protocol §5.32）：执行用时、等你处理统计、时间轴、时间分布、重点、验证 X/Y、验证执行统计。未投影时显示「未汇总」；门控关闭时执行用时与等你处理同样显示「未汇总」（protocol §5.32.5）；不得由 `list-events`（最多 200 条）或消息正文推算。
+- 时长使用核心返回的秒数，在客户端按 ui-spec §4.18 的格式化规则显示，不以手机时钟与 `started_at` 相减。
+- 工具消息默认折叠（既有规则）。
+
+### 视觉与字体（Material 3）
+
+- 颜色只用 Material 3 `colorScheme` 角色（surface、onSurface、onSurfaceVariant、outline、primary、error），不硬编码十六进制。唯一例外是执行复盘的时间轴与时间分布：使用 ui-spec §4.18「类别色」表中的扩展令牌 `observeLane.*`，在主题中统一定义（与橙色同源），视图中不写死十六进制。橙色只作阻塞与需要你的图标色，以及「等你处理」类别令牌；文字保持 onSurface 并满足 4.5:1 对比度；失败用 error 色图标配文字。浅色与深色各一遍。
+- 字体角色：页面标题 titleLarge；区段标题 titleMedium；正文 bodyMedium；辅助与时间戳 bodySmall；指标数值 titleLarge（半粗）；chips 与按钮 labelLarge。字号随系统文字缩放。
+- 列表项可用 Material 3 的 OutlinedCard 或 ListItem（系统形状与高程），不自定义阴影和圆角。点击区 ≥ 48dp；间距取 8 / 12 / 16dp。
+
+### 待核心投影（protocol §5.32，2026-10-23 冻结）
+
+1. `get-task.task.retrospective`：形状见 protocol §5.32.4，与 ui-spec §4.18 一致；不用 `review_summary`，该名已是评审结论摘要。手机投影 `mobile_access.project` 为私有键黑名单，新字段默认透传：键名含 token、password、secret、credential、private_key、apikey、api_key、access_key、environment、config 等子串，或以 `_path`、`_root`、`_file`、`_dir`、`_json` 结尾，或为 `raw`、`payload`、`spec`、`runtime` 等整键时去除；以 `/`、`~/`、`file:`、`http:` 开头的字符串置空（说明性文本字段除外）。实现时须确认 `retrospective` 的键名与值不落入这些规则（protocol §5.32.7），并以测试断言手机 `get-task` 响应含 `retrospective`。
+2. 验证 X/Y 与验证执行统计：来源为当前验证回执 `engine_verdict` 的逐条检查，并按 protocol §5.32.6 核对计划哈希、命令哈希与执行轮次。冻结 verify 每条都需有通过记录（AGENTS），源码快照排除 `.pi/**` 与交付构建产物。回执不记录耗时与用例数，因此不显示耗时。
+3. 等你处理统计与执行段：等待区间来自 `execution_input_wait_intervals`（protocol §5.32.5），不依赖事件表的 200 条截断。执行段起点为派发确认、任务进入 `running` 的时刻；派发请求须先被执行端领取（claimed）。排队与派发中的时段不计入执行用时，与「已排队 ≠ 已开始」一致。
+4. `list-tasks` 的 `attention` 与 `exception`：行内字段由 `derive.task_summary` 产出，`mobile_access.project` 不剔除这两个键，手机响应保留（2026-10-23 静态核对）。「需要你」按行内 `attention`、行内 `exception` 与收件箱 id 判定；失败仅认 `exception.severity == "failed"`，其余异常为阻塞，与桌面同口径。2026-10-23 的真实库活动行中没有非空的 exception 或行内 attention，异常行的投影仍只有静态核对。
+
 ## 构建与分工
 
 - Android：AGP 8.11.1、Gradle 8.13、Kotlin/Compose compiler 2.2.21、JDK17、SDK36/min26，applicationId=com.sakurasep.kaneopilot。固定依赖版本，提交 wrapper 和校验和。

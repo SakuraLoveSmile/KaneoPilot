@@ -378,12 +378,35 @@ struct TaskExecutionTabView: View {
     let taskID: String
     let detail: TaskDetail?
     var showsTaskTitle = true
+    @State private var retrospectiveExpanded = false
+    @State private var retrospectiveHeight: CGFloat = 0
+    @State private var sessionDigest: ExecutionSessionDigest?
+    private static let readerAnchor = "execution-session-reader"
 
     var body: some View {
-        SessionReaderView(taskID: taskID, preferredRunID: detail?.runId, showsTaskTitle: showsTaskTitle,
-                          fallbackSessionTitle: detail?.sessionTitle ?? detail?.executionRound?.sessionTitle)
-            // Detail arrives asynchronously; initialize the reader for its actual preferred round.
-            .id("\(taskID)/\(detail?.runId ?? "pending")")
+        // §4.18：复盘摘要位于阅读器之上；展开时外层滚动，阅读器保持不少于 320pt。
+        GeometryReader { container in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ExecutionRetrospectiveView(
+                            detail: detail, digest: sessionDigest,
+                            isExpanded: $retrospectiveExpanded, measuredHeight: $retrospectiveHeight,
+                            onOpenSession: {
+                                retrospectiveExpanded = false
+                                withAnimation { proxy.scrollTo(Self.readerAnchor, anchor: .top) }
+                            })
+                        Color.clear.frame(height: 0).id(Self.readerAnchor)
+                        SessionReaderView(taskID: taskID, preferredRunID: detail?.runId, showsTaskTitle: showsTaskTitle,
+                                          fallbackSessionTitle: detail?.sessionTitle ?? detail?.executionRound?.sessionTitle,
+                                          onDigestChange: { sessionDigest = $0 })
+                            // Detail arrives asynchronously; initialize the reader for its actual preferred round.
+                            .id("\(taskID)/\(detail?.runId ?? "pending")")
+                            .frame(height: max(320, container.size.height - (retrospectiveExpanded ? 0 : retrospectiveHeight)))
+                    }
+                }
+            }
+        }
     }
 
 }

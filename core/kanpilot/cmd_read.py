@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
 
-from . import constants, core, db, derive, planfile, remote, util
+from . import constants, core, db, derive, planfile, remote, retrospective, util
 
 
 def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
@@ -378,7 +378,9 @@ def cmd_list_tasks(ctx, payload: dict) -> dict:
 
 def cmd_get_task(ctx, payload: dict) -> dict:
     task = db.require_task(ctx.conn, payload["task_id"])
-    return {"task": derive.task_detail(ctx.conn, task, ctx.now)}
+    detail = derive.task_detail(ctx.conn, task, ctx.now)
+    detail["retrospective"] = retrospective.build(ctx.conn, task, ctx.now)
+    return {"task": detail}
 
 
 def cmd_get_plan(ctx, payload: dict) -> dict:

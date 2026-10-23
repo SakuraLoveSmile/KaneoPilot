@@ -651,6 +651,8 @@ struct TaskDetail: Decodable, Identifiable {
     let readOnly: Bool?
     /// §4.1（2026-10-17）：核心给出下一次 `enqueue` 的 kind；界面只显示，不据 status 推导。
     let enqueueKind: String?
+    /// §5.32：执行复盘投影（仅 `get-task`）；字段缺失或为 nil 时界面显示「未汇总」。
+    let retrospective: TaskRetrospective?
 
     var id: String { taskId }
 
@@ -668,6 +670,106 @@ struct TaskDetail: Decodable, Identifiable {
 
 struct GetTaskResponse: Decodable {
     let task: TaskDetail
+}
+
+/// §5.32 执行复盘投影（`get-task.task.retrospective`）。桌面只格式化核心数字，不据事件推导。
+/// 叶子全部可选：门控关闭或投影缺字段时只让对应区域显示「未汇总」，不能使整个任务详情解码失败。
+struct TaskRetrospective: Decodable {
+    let asOf: String?
+    let cycleStartedAt: String?
+    let endedAt: String?
+    /// running | waiting | finished
+    let state: String?
+    let elapsedSeconds: Int?
+    /// 门控关闭时为 nil。
+    let execSeconds: Int?
+    /// 门控关闭时为 nil。
+    let waiting: RetrospectiveWaiting?
+    let distribution: [RetrospectiveShare]?
+    let segments: RetrospectiveSegments?
+    let highlights: [RetrospectiveHighlight]?
+    let verify: RetrospectiveVerify?
+    let verifyRuns: RetrospectiveVerifyRuns?
+}
+
+struct RetrospectiveWaiting: Decodable {
+    let count: Int?
+    let totalSeconds: Int?
+    let longestSeconds: Int?
+    let openSince: String?
+}
+
+/// 时间分布的一行；门控关闭时 `waiting` 行的 `seconds` 与 `percent` 为 nil。
+struct RetrospectiveShare: Decodable {
+    let lane: String?
+    let seconds: Int?
+    let percent: Int?
+}
+
+struct RetrospectiveSegments: Decodable {
+    let items: [RetrospectiveSegment]?
+    let truncated: Bool?
+}
+
+struct RetrospectiveSegment: Decodable {
+    let lane: String?
+    let round: Int?
+    let startedAt: String?
+    let endedAt: String?
+    let seconds: Int?
+    let idle: Bool?
+}
+
+struct RetrospectiveHighlight: Decodable {
+    let kind: String?
+    let label: String?
+    let lane: String?
+    let at: String?
+    let seconds: Int?
+}
+
+struct RetrospectiveVerify: Decodable {
+    let total: Int?
+    let passed: Int?
+    let failed: Int?
+    let unconfirmed: Int?
+    let current: Bool?
+    let evidenceSource: String?
+}
+
+struct RetrospectiveVerifyRuns: Decodable {
+    let runs: Int?
+    let failed: Int?
+    let timedOut: Int?
+    let commandNotFound: Int?
+}
+
+/// §4.18「时长格式」与时间显示；只格式化核心给出的秒数与时间戳。
+enum RetrospectiveFormat {
+    static func duration(_ seconds: Int?) -> String? {
+        guard let seconds else { return nil }
+        let value = max(0, seconds)
+        if value < 60 { return "\(value) 秒" }
+        if value < 3600 {
+            let minutes = value / 60
+            let rest = value % 60
+            return rest == 0 ? "\(minutes) 分" : "\(minutes) 分 \(rest) 秒"
+        }
+        let hours = value / 3600
+        let minutes = value % 3600 / 60
+        return minutes == 0 ? "\(hours) 小时" : "\(hours) 小时 \(minutes) 分"
+    }
+
+    static func clock(_ iso: String?) -> String? {
+        guard let date = TimeFormat.parse(iso) else { return nil }
+        return clockFormatter.string(from: date)
+    }
+
+    private static let clockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }
 
 /// §5.2 Request
