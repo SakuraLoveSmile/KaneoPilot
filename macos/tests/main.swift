@@ -439,6 +439,26 @@ for invalidModel in ["", "  ", "-option", "model\nname", "model\u{0000}"] {
     expect(CLIModelConfig.qoderIssue(model: invalidModel, reasoningEffort: "inherit") != nil, "Qoder 拒绝非法模型标识")
 }
 expect(CLIModelConfig.qoderIssue(model: "auto", reasoningEffort: "unknown") != nil, "Qoder 拒绝未知等级")
+
+// 实时目录倍率：折扣比率不得替代当前倍率，0 倍与未知/供应商计费须分开。
+let qoderCatalogJSON = #"{"multiplier_source":"qoder_cli_live","models":[{"id":"Auto","name":"Auto","billing_type":"qoder_credits","credit_multiplier":0.5,"original_credit_multiplier":null},{"id":"Ultimate","name":"Ultimate","billing_type":"qoder_credits","credit_multiplier":0.4,"original_credit_multiplier":2},{"id":"DeepSeek-Flash","name":"DeepSeek-Flash","billing_type":"qoder_credits","credit_multiplier":0,"original_credit_multiplier":0.1},{"id":"unknown","name":"Unknown","billing_type":"qoder_credits","credit_multiplier":null,"original_credit_multiplier":null},{"id":"provider/org/model","name":"Auto","billing_type":"external","credit_multiplier":null,"original_credit_multiplier":null}]}"#
+if let catalog = decode(QoderModelCatalog.self, qoderCatalogJSON) {
+    expect(catalog.multiplierSource == "qoder_cli_live", "Qoder 倍率来源保留")
+    expect(catalog.models.map(\.consumptionSummary) == ["0.5×", "0.4× · 原 2×", "0× · 原 0.1×", "倍率未知", "供应商计费"],
+           "Qoder 普通、优惠、0、未知、外部计费显示各自含义")
+    expect(catalog.models[0].matches("auto"), "Qoder 内置默认 auto 匹配目录 Auto")
+    expect(catalog.models[4].matches("provider/org/model") && !catalog.models[4].matches("Provider/org/model"),
+           "Qoder 自定义完整 ID 精确匹配")
+    expect(!catalog.models[4].matches("Auto"), "Qoder 同名自定义模型不按显示名误匹配")
+    expect(catalog.models[4].consumptionDetail.contains("不消耗 Qoder Credits"), "Qoder 供应商计费说明不冒称免费")
+}
+if let catalog = decode(QoderModelCatalog.self, #"{"models":[{"id":"Auto","name":"Auto"}]}"#) {
+    expect(catalog.multiplierSource == nil && catalog.models[0].consumptionSummary == "倍率未知",
+           "Qoder 旧目录缺倍率不猜 1 倍")
+}
+if let candidate = decode(QoderModelCandidate.self, #"{"id":"invalid","name":"Invalid","billing_type":"qoder_credits","credit_multiplier":-1,"original_credit_multiplier":2}"#) {
+    expect(candidate.consumptionSummary == "倍率未知", "Qoder 无效负倍率不显示为优惠")
+}
 if let status = decode(ExecutorStatusResponse.self, #"{"stages":{"delivery":{"running":null,"last":null,"claimable":2}},"intake":{"running":null,"last":null},"paused":{"global":false,"stages":["plan"]},"automation":{"enabled_projects":1,"active_tasks":2,"pending_tasks":3,"max_active_tasks":2,"waiting_merge":1,"last_intake":{"started_at":"2026-10-05T00:00:00Z","projects":[{"project_id":"p","ready":false,"preflight":[{"code":"gh_missing","message":"未找到 gh"}],"adopted":[],"skipped":[]}],"errors":[]}}}"#) {
     expect(status.stages?["delivery"]?.claimable == 2, "delivery claimable 解码")
     expect(status.paused?.stages == ["plan"], "自动阶段暂停解码")
@@ -662,6 +682,12 @@ for (state, allowed) in [("blocked", true), ("dispatching", true), ("unknown", f
 }
 if let response = decode(PrepareTaskReleaseResponse.self, "{\"task_id\":\"root-a\",\"context_sha256\":\"context-a\",\"release\":\(releaseJSON)}") {
     expect(response.contextSha256 == "context-a", "准备候选固化指纹原样解码")
+}
+let blockedReleasePreparation = #"{"task_id":"root-a","context_sha256":null,"release":{"state":"blocked","title":"发布受阻","reason":"工作流不存在、未启用或路径不匹配","required":true,"channel":"prerelease","root_task_id":"root-a","member_task_ids":["root-a"],"assets":[],"blockers":[],"can_start":false,"can_reconcile":false}}"#
+if let response = decode(PrepareTaskReleaseResponse.self, blockedReleasePreparation) {
+    expect(response.contextSha256 == nil, "准备受阻的空指纹仍能解码")
+    expect(response.release.reason == "工作流不存在、未启用或路径不匹配", "发布准备保留核心真实原因")
+    expect(!response.release.canStart, "空指纹受阻响应不能取得发布资格")
 }
 if let legacy = decode(TaskSummary.self, #"{"task_id":"old","status":"done"}"#) {
     expect(legacy.release == nil, "旧任务不凭空追加发布门")

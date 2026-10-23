@@ -36,10 +36,15 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         git_input = dict(delivery, repository=task["repository"])
         title = task["title"]
         fix_round = core.automation_of(task).get("fix_round", 0)
+        if repair.get("source_kind") == "build_failure":
+            from . import review_repair
+            fix_round = review_repair._round_count(task)
 
     # Phase 2: IO outside BEGIN IMMEDIATE, including the final HEAD check.
     failure, result = None, None
     try:
+        if repair.get("source_kind") == "build_failure" and git_delivery._merge_marker(git_input["worktree_path"], "MERGE_HEAD") is not None:
+            raise git_delivery.GitDeliveryError("delivery_commit_failed", "构建修复不允许未完成合并；保留现场等待核对")
         if existing:
             result = {"sha": existing["sha"], "files": []}
         else:
@@ -48,7 +53,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             execution_round = round_store.get_round(conn, task["task_id"], execution_run_id)
             codex = execution_round is not None and execution_round["backend"] == "codex"
             strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
-                      or repair.get("source_kind") == "merge_conflict" or codex)
+                      or repair.get("source_kind") in ("merge_conflict", "build_failure") or codex)
             verified = {}
             if strict:
                 receipt = db.task_extra(task).get("engine_verdict") or {}
@@ -73,6 +78,10 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 execution_run_id=execution_run_id, fix_round=fix_round, **verified)
         git_delivery.verify_branch_worktree(
             git_input, require_clean=True, expected_head=result["sha"])
+        if repair.get("source_kind") == "build_failure":
+            parents = git_delivery._value(["show", "-s", "--format=%P", result["sha"]], git_input["worktree_path"]).split()
+            if parents != [repair["release_target_sha"]]:
+                raise git_delivery.GitDeliveryError("delivery_commit_failed", "构建修复必须是冻结构建源码的单父提交；保留现场等待核对")
     except (git_delivery.GitDeliveryError, util.KanpilotError) as exc:
         failure = exc if isinstance(exc, git_delivery.GitDeliveryError) else git_delivery.GitDeliveryError("delivery_commit_failed", exc.message)
 

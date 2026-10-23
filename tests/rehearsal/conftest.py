@@ -289,8 +289,9 @@ def make_rehearsal_git(root, faults=()):
     """构造演练 git 仓库 + 裸 remote + GitHub 形状 origin（pushInsteadOf）。
 
     ``url.<bare>.pushInsteadOf`` 只作用于推送：``git remote get-url origin``
-    仍返回 GitHub 形状 URL（automation_preflight 核验 origin 用），push 实际
-    落到本地裸 remote、不触网。``push_rejected`` → 裸 remote 装 pre-receive
+    仍返回 GitHub 形状 URL，push 实际落到本地裸 remote、不触网。严格的
+    automation_preflight 会拒绝此推送重写；只读成功探针用例须先移除它。
+    ``push_rejected`` → 裸 remote 装 pre-receive
     拒绝钩子。fixture 与显式调用（测试按需注入故障）共用。
     """
     root = Path(root)

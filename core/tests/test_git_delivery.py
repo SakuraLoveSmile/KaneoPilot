@@ -621,7 +621,7 @@ def ssh_aliases(tmp_path, monkeypatch):
         if args[0] == "ssh":
             calls.append((args, kwargs))
             assert args[1:3] == ["-G", "-oCanonicalizeHostname=no"]
-            assert 0 < kwargs["timeout"] <= 0.1
+            assert 0 < kwargs["timeout"] <= 5
             args = [args[0], "-F", str(config), *args[1:]]
         return real_run(args, **kwargs)
     monkeypatch.setattr(gd.subprocess, "run", run)
@@ -677,7 +677,7 @@ def test_invalid_aliases_rejected_before_ssh(repo, ssh_aliases, url):
 def test_ssh_expansion_failures_are_bounded_and_private(result, capsys):
     def run(args, **kwargs):
         assert args[0] == "ssh" and args[1] == "-G"
-        assert 0 < kwargs["timeout"] <= .1
+        assert 0 < kwargs["timeout"] <= 5
         if isinstance(result, Exception):
             raise result
         return result
@@ -739,6 +739,14 @@ def test_alias_pr_identity_and_push_target_preserve_original_transport(repo, ssh
     git(repo, "config", "--add", "remote.origin.pushurl", url)
     with pytest.raises(gd.GitDeliveryError, match="单一 GitHub 仓库"):
         gd._push_target(str(repo), "owner/repo")
+
+
+def test_strict_origin_resolves_real_openssh_alias_without_changing_transport(repo, ssh_aliases):
+    git(repo, "remote", "set-url", "origin", "git@github-alt:Owner/Repo.git")
+    before = (repo / ".git" / "config").read_bytes()
+    assert gd.require_github_origin(str(repo), check_push=True) == "Owner/Repo"
+    assert len(ssh_aliases) == 2
+    assert (repo / ".git" / "config").read_bytes() == before
 
 
 def test_alias_push_target_rewrite_chain_rejected(repo, ssh_aliases):

@@ -124,6 +124,10 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
                     f"{'|'.join(sorted(allowed))}, got {task['status']}",
                 )
         extra = db.task_extra(task)
+        if kind == "delivery":
+            from . import review_delivery
+            util.require(review_delivery.continuation(task) is None,
+                         "请使用继续交付，核对原评审和验证证据后恢复交付", "conflict")
         hold = bool(extra.get("plan_execution_hold"))
         confirm_plan = bool(payload.get("confirm_plan"))
         expected_sha = payload.get("expected_plan_sha256")
@@ -293,8 +297,18 @@ def _new_cycle_request(
     conn, now: str, task, kind: str, requested_by: str = "user"
 ):
     key = f"{kind}:{task['task_id']}"
+    payload = None
+    repair = core.review_repair_of(task)
+    if kind == "dispatch" and repair:
+        payload = {"review_repair_key": repair["review_key"]}
+    if kind == "delivery":
+        from . import review_delivery
+        receipt = review_delivery.continuation(task)
+        if receipt is not None:
+            util.require(review_delivery.allowed(conn, task), "手动继续交付授权已变化", "conflict")
+            payload = review_delivery.request_payload(task, receipt)
     return db.create_request(
-        conn, now, kind, key, task_id=task["task_id"], requested_by=requested_by
+        conn, now, kind, key, task_id=task["task_id"], requested_by=requested_by, payload=payload
     )
 
 
@@ -335,6 +349,8 @@ def execution_retry_candidate(conn, task, *, engine_empty=False, verification_re
     from . import round_store
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     repair = core.review_repair_of(task)
+    if repair.get("source_kind") == "build_failure":
+        return False
     merge_retry = False
     if repair.get("source_kind") == "merge_conflict":
         if not verification_retry or repair.get("repair_execution_run_id") != task["run_id"]:
@@ -476,8 +492,6 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
     if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry):
         return None
-    from pathlib import Path
-    from . import bridge, git_delivery, headless_adapter, remote
     expected = payload.get("expected_execution_run_id")
     if not expected:
         raise util.KanpilotError("conflict", "重新执行必须确认当前失败轮次")
@@ -485,6 +499,16 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("stale_run", "所选会话已不是当前失败轮次，请刷新后重试")
     if not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty, verification_retry=verification_retry):
         raise util.KanpilotError("conflict", "当前任务不能沿用计划重新执行，请先确认旧轮次和发送状态")
+    if core.review_repair_of(task) and not core.review_repair_of(task).get("source_kind"):
+        from . import review_repair
+        review_repair.verify_frozen(task)
+    return _execution_retry_materials(ctx, task, expected)
+
+
+def _execution_retry_materials(ctx, task, expected):
+    """Read terminal, remote and working-tree identity before any retry write."""
+    from pathlib import Path
+    from . import bridge, git_delivery, headless_adapter, remote
     snapshot = _resolution_snapshot(task)
     source = headless_adapter.resolve_source(ctx.conn)
     signature = source.source_signature(task["task_id"], expected)
@@ -537,6 +561,49 @@ def _prepare_execution_retry(ctx, payload):
             "worktree_sha256": worktree_sha, "verification_recovery": recovery}
 
 
+def _prepare_review_repair_retry(ctx, payload):
+    """Recover only the persisted pre-fix, unsent direct-repair retry shape."""
+    task = db.require_task(ctx.conn, payload["task_id"])
+    fix = core.review_repair_of(task)
+    retry = db.task_extra(task).get("execution_retry") or {}
+    if (payload["action"] == "retry" and fix and not fix.get("source_kind")
+            and fix.get("state") == "running" and task["status"] == "needs_user"
+            and task["stage"] == "dispatch" and task["run_id"] is not None
+            and task["send_state"] == "not_sent"):
+        # A no-intent snapshot is not a barrier to a late dispatch-start.
+        raise util.KanpilotError("conflict", "修复派发轮次已被领取，尚不能安全重新派发；请先核验原派发状态")
+    if (payload["action"] != "retry" or not fix or fix.get("source_kind")
+            or fix.get("state") != "running" or task["run_id"] is not None):
+        return None
+    util.require(payload.get("actor", "user") == "user"
+                 and task["status"] == "needs_user" and task["stage"] == "dispatch"
+                 and task["failure_stage"] in ("ready", "dispatch")
+                 and task["sent"] == 0 and task["send_state"] in (None, "not_sent")
+                 and not task["session_id"] and not task["lock_retained"]
+                 and fix.get("authorized_by") in ("user", "automation")
+                 and fix.get("authorized_at") and fix.get("queued_at")
+                 and fix.get("repair_execution_run_id")
+                 and retry.get("source_run_id") == fix["repair_execution_run_id"]
+                 and retry.get("plan_sha256") == task["plan_sha256"]
+                 and retry.get("plan_generated_at") == task["plan_generated_at"]
+                 and retry.get("review_repair_key") in (None, fix["review_key"])
+                 and db.task_schedulable(task) and not db.paused(ctx.conn, "dispatch")
+                 and not ctx.conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                          (task["task_id"],)).fetchone(),
+                 "旧修复重试的身份、发送状态或活动请求已变化", "conflict")
+    from . import review_repair
+    virtual = dict(task, run_id=retry["source_run_id"])
+    review_repair.verify_frozen(virtual)
+    review_repair.verify_source_terminal(ctx.conn, virtual, ctx.now)
+    prepared = _execution_retry_materials(ctx, virtual, retry["source_run_id"])
+    util.require(prepared["worktree"] == retry.get("worktree")
+                 and prepared["detached"] == retry.get("detached")
+                 and prepared["worktree_sha256"] == retry.get("worktree_sha256"),
+                 "重新执行确认后工作树内容已变化，请重新确认", "conflict")
+    prepared.update(snapshot=_resolution_snapshot(task), source_run_id=retry["source_run_id"])
+    return prepared
+
+
 def _engine_empty_retry(task, payload):
     fix = payload.get("engine_fix") or {}
     receipt = db.task_extra(task).get("engine_verdict") or {}
@@ -554,7 +621,7 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
     if not isinstance(fix, dict) or payload.get("actor") != "automation":
         raise util.bad_request("引擎补救必须由 automation 发起")
     task = db.require_task(ctx.conn, payload["task_id"])
-    if core.review_repair_of(task).get("source_kind") == "merge_conflict":
+    if core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure"):
         raise util.KanpilotError("conflict", "一次性 AI 处理失败后需人工确认，不能自动启动补救轮次")
     history = db.task_extra(task).get("engine_fix_rounds") or []
     rounds = [row for row in history if not row.get("reverted_at")]
@@ -699,7 +766,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             raise util.bad_request("重新执行并验证必须由用户明确发起")
         payload = dict(payload, action="resume", verification_retry=True)
         action = "resume"
-    if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") == "merge_conflict"
+    if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") in ("merge_conflict", "build_failure")
             and requested_action in ("resume", "retry", "replan")):
         raise util.KanpilotError("conflict", "一次性冲突处理不能重新实施或规划；验证受阻时请显式补齐验证报告")
     if action == "revert_engine_fix":
@@ -708,6 +775,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     if action == "recover_review":
         from . import review_recovery
         return review_recovery.recover(ctx, payload)
+    if action == "continue_delivery":
+        from . import review_delivery
+        return review_delivery.continue_delivery(ctx, payload)
     if action == "reverify":
         from . import verification_recovery
         return verification_recovery.recover(ctx, payload)
@@ -730,6 +800,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                             actor, stage="monitor")
         return {"ok": True, "task_status": "needs_user", "request": None}
     execution_retry = _prepare_execution_retry(ctx, payload)
+    repair_retry = _prepare_review_repair_retry(ctx, payload)
     accepted_remote = _accept_remote_for_resolution(ctx, payload)
     if engine_fix:
         if accepted_remote and (accepted_remote["requirements_sha256"] != db.require_task(conn, payload["task_id"])["requirements_sha256"]
@@ -759,6 +830,24 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         from . import engine_fix_revert
         fix_before = engine_fix_revert.before(task) if engine_fix else None
         status, send_state = task["status"], task["send_state"]
+
+        if repair_retry:
+            from pathlib import Path
+            from . import git_delivery, review_repair, round_store
+            old_round = round_store.get_round(conn, task["task_id"], repair_retry["source_run_id"])
+            util.require(_resolution_snapshot(task) == repair_retry["snapshot"]
+                         and old_round is not None and dict(old_round) == repair_retry["round_snapshot"]
+                         and repair_retry["source"].source_signature(task["task_id"], repair_retry["source_run_id"])
+                             == repair_retry["source_signature"]
+                         and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                              (task["task_id"],)).fetchone(),
+                         "旧修复重试的任务或执行证据已变化", "conflict")
+            review_repair.verify_frozen(dict(task, run_id=repair_retry["source_run_id"]))
+            try:
+                util.require(git_delivery.worktree_state_sha256(repair_retry["worktree"], detached=repair_retry["detached"])
+                             == repair_retry["worktree_sha256"], "重新执行确认后工作树内容已变化，请重新确认", "conflict")
+            except (OSError, git_delivery.GitDeliveryError) as exc:
+                raise util.KanpilotError("conflict", "旧修复工作树已不可核验") from exc
 
         if execution_retry:
             from pathlib import Path
@@ -811,7 +900,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 if execution is not None and execution['backend']=='codex':
                     raise util.KanpilotError('conflict','Codex 执行必须核对结构化验证证据，不能人工跳过验证')
                 if (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
-                        or core.review_repair_of(task).get("source_kind") == "merge_conflict"):
+                        or core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")):
                     raise util.KanpilotError("conflict", "Live 项目核对 Plus 验证证据；请让 Plus 重新执行并验证，不能人工跳过验证")
                 if code != "verification_unconfirmed" or not task["run_id"]:
                     raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
@@ -828,6 +917,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     "detached": execution_retry["detached"],
                     "worktree_sha256": execution_retry["worktree_sha256"],
                 }
+                repair = core.review_repair_of(task)
+                if repair and not repair.get("source_kind"):
+                    extra["fix_request"] = dict(repair, state="queued")
+                    extra["execution_retry"]["review_repair_key"] = repair["review_key"]
                 if execution_retry.get("verification_recovery"):
                     extra["fix_request"] = dict(core.review_repair_of(task), state="queued",
                                                verification_recovery=execution_retry["verification_recovery"])
@@ -891,7 +984,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             from . import plan_answers
             if plan_answers.candidate(conn, task) is not None:
                 raise util.KanpilotError("conflict", "规划正在等待用户答案，请在任务详情回答问题并继续规划")
-            target_status, kind = _retry_target(conn, task)
+            target_status, kind = ("ready", "dispatch") if repair_retry else _retry_target(conn, task)
             need(
                 status == "needs_user" and (send_state in (None, "not_sent")
                                            or (kind == "review" and send_state == "sent"
@@ -899,6 +992,13 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 "retry requires needs_user with send_state not_sent "
                 "(or a non-dispatch block)",
             )
+            if repair_retry:
+                extra = db.task_extra(task)
+                fix = core.review_repair_of(task)
+                extra["fix_request"] = dict(fix, state="queued")
+                extra["execution_retry"] = dict(extra["execution_retry"], review_repair_key=fix["review_key"])
+                db.update_task(conn, task["task_id"], now, extra_json=extra)
+                task = db.require_task(conn, task["task_id"])
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
             if kind == "review":

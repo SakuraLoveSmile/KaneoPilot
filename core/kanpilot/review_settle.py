@@ -329,12 +329,14 @@ def settle_job(*, driver, db_path, job, job_path, log, record_run) -> int:
     # identity-bound pass receipt remains authoritative after fix_request clears.
     # Refresh core facts because registration above may have created that receipt.
     action_delivery = False
+    manual_release = False
     if conclusion == "pass":
-        from . import task_ai_action
+        from . import task_ai_action, review_delivery
         current = _facts(db_path, task_id, request_id).get("task")
         if isinstance(current, dict):
             action_delivery = task_ai_action.delivery_continuation(raw_task(current), allow_paused=True) is not None
-    if conclusion == "pass" and not automated and not action_delivery:
+            manual_release = review_delivery.manual_release_review(raw_task(current))
+    if conclusion == "pass" and not automated and not action_delivery and not manual_release:
         if task.get("status") == "done":
             if _review_summary(task).get("conclusion") != "pass":
                 return _stop_no_write(

@@ -118,6 +118,13 @@ def cmd_exec_capabilities(ctx, payload: dict) -> dict:
     return caps
 
 
+def cmd_qoder_model_catalog(ctx, payload: dict) -> dict:
+    """Read the shared planning/Review model directory without changing Pilot state."""
+    from . import qoder_cli
+
+    return qoder_cli.model_catalog()
+
+
 def cmd_pi_desktop_catalog(ctx, payload: dict) -> dict:
     """Read the local Pi-Desktop-Plus provider/model catalog (protocol §5.23.6).
 

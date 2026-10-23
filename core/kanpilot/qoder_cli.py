@@ -9,6 +9,7 @@ import select
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -226,6 +227,229 @@ def capabilities(timeout=10) -> dict:
         return result
     result.update(available=True, detail="Qoder CLI 本地参数检查通过；尚未调用模型")
     return result
+
+
+def _catalog_error(detail):
+    return util.KanpilotError("validation_failed", "Qoder 模型列表读取失败：" + detail)
+
+
+def _catalog_identifier(value):
+    return (isinstance(value, str) and bool(value.strip()) and not value.startswith("-")
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value))
+
+
+def _custom_catalog(env):
+    """Project names only; do not resolve authentication or copy provider metadata."""
+    try:
+        settings = json.loads(_settings_path(env).read_text(encoding="utf-8"),
+                              parse_constant=_invalid_constant)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RuntimeError, util.KanpilotError):
+        raise _catalog_error("用户设置无效或无法读取，请检查 Qoder settings.json") from None
+    if not isinstance(settings, dict):
+        raise _catalog_error("用户设置结构无效")
+    providers = settings.get("providers", {})
+    if not isinstance(providers, dict):
+        raise _catalog_error("用户设置的 providers 结构无效")
+    models = []
+    seen = set()
+    for provider_id, provider in providers.items():
+        if (not _catalog_identifier(provider_id) or "/" in provider_id
+                or not isinstance(provider, dict)):
+            raise _catalog_error("用户设置的自定义模型结构无效")
+        if "models" not in provider:
+            continue
+        if not isinstance(provider["models"], list):
+            raise _catalog_error("用户设置的自定义模型结构无效")
+        for entry in provider["models"]:
+            if not isinstance(entry, dict) or not _catalog_identifier(entry.get("model")):
+                raise _catalog_error("用户设置的自定义模型标识无效")
+            upstream = entry["model"]
+            name = entry.get("displayName", upstream)
+            if (not isinstance(name, str) or not name.strip()
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                raise _catalog_error("用户设置的自定义模型名称无效")
+            model_id = provider_id + "/" + upstream
+            if model_id in seen:
+                raise _catalog_error("用户设置含重复的自定义模型标识")
+            seen.add(model_id)
+            models.append({"id": model_id, "name": name, "billing_type": "external",
+                           "credit_multiplier": None, "original_credit_multiplier": None})
+    return models
+
+
+_CATALOG_OUTPUT_LIMIT = 2 * 1024 * 1024
+
+
+def _catalog_stop(proc):
+    # Signal the group even after its leader exits: descendants may own pipe fds.
+    def signal_group(sig):
+        deadline = time.monotonic() + .5
+        while True:
+            try:
+                _signal_group(proc, sig)
+                return
+            except PermissionError:
+                # XNU may retain a just-terminated orphan as a zombie briefly.
+                # Recheck within a bound; a persistent permission error fails.
+                if proc.poll() is None or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.025)
+
+    signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    signal_group(signal.SIGKILL)
+    proc.wait(timeout=2)
+
+
+def _catalog_control_models(argv, env, timeout):
+    """Use two control frames only; never send a user message or inference prompt."""
+    proc = None
+    deadline = time.monotonic() + timeout
+    expected_id = "catalog-init"
+    models = None
+    completed = False
+    buffer = bytearray()
+    output_size = 0
+
+    def send(request_id, request):
+        frame = {"type": "control_request", "request_id": request_id, "request": request}
+        proc.stdin.write((json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+
+    def consume(raw):
+        nonlocal expected_id, models, deadline
+        if not raw.strip():
+            return
+        try:
+            frame = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            raise _catalog_error("CLI 控制协议格式无效") from None
+        if not isinstance(frame, dict):
+            raise _catalog_error("CLI 控制协议格式无效")
+        if frame.get("type") == "system" and frame.get("subtype") in ("init", "status", "artifacts_update"):
+            return
+        response = frame.get("response")
+        if (frame.get("type") != "control_response" or not isinstance(response, dict)
+                or response.get("request_id") != expected_id or expected_id is None):
+            raise _catalog_error("CLI 控制协议响应身份不匹配")
+        if response.get("subtype") != "success":
+            raise _catalog_error("CLI 目录查询失败，请检查 Qoder CLI 的登录状态与网络")
+        if expected_id == "catalog-init":
+            expected_id = "catalog-models"
+            send(expected_id, {"subtype": "get_models", "fetchStrategy": "live"})
+        else:
+            payload = response.get("response")
+            if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+                raise _catalog_error("CLI 模型目录结构无效")
+            models = payload["models"]
+            expected_id = None
+            proc.stdin.close()
+            deadline = min(deadline, time.monotonic() + 5)
+
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env, cwd=tempfile.gettempdir(),
+                                start_new_session=True, bufsize=0)
+        send(expected_id, {"subtype": "initialize"})
+        stdout_fd = proc.stdout.fileno()
+        readers = [stdout_fd, proc.stderr.fileno()]
+        while readers or proc.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _catalog_error("CLI 查询或退出超时，请稍后重新获取")
+            ready, _, _ = select.select(readers, [], [], min(.1, remaining))
+            for fd in ready:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    readers.remove(fd)
+                    if fd == stdout_fd and buffer:
+                        consume(bytes(buffer))
+                        buffer.clear()
+                    continue
+                output_size += len(chunk)
+                if output_size > _CATALOG_OUTPUT_LIMIT:
+                    raise _catalog_error("CLI 控制协议输出超出限制")
+                if fd == stdout_fd:
+                    buffer.extend(chunk)
+                    while b"\n" in buffer:
+                        raw, _, rest = buffer.partition(b"\n")
+                        buffer[:] = rest
+                        consume(raw)
+        if proc.wait(timeout=max(.01, deadline - time.monotonic())) != 0:
+            raise _catalog_error("CLI 目录查询失败，请检查 Qoder CLI 的登录状态与网络")
+        if models is None:
+            raise _catalog_error("CLI 控制协议缺少完整目录响应")
+        completed = True
+        return models
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise _catalog_error("CLI 无法执行或控制协议中断") from None
+    finally:
+        if proc is not None:
+            try:
+                # On errors this also stops descendants after an exited leader.
+                if not completed:
+                    _catalog_stop(proc)
+            except (OSError, subprocess.TimeoutExpired):
+                raise _catalog_error("CLI 查询进程清理失败") from None
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+
+
+def _credit_multiplier(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(value) and value >= 0 else None
+    except OverflowError:
+        return None
+
+
+def model_catalog(timeout=30) -> dict:
+    """Read the live CLI catalog and user custom names without an inference turn."""
+    path = shutil.which(constants.qoder_bin())
+    if path is None:
+        raise _catalog_error("未找到 Qoder CLI；请安装 CLI 或设置 KANPILOT_QODER_BIN")
+    env = child_env()
+    custom = _custom_catalog(env)
+    settings = {"general": {"enableAutoUpdate": False}, "disableAllHooks": True,
+                "skills": {"enabled": False, "loadFromAgentsDirectory": False}}
+    argv = [path, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+            "--no-session-persistence", "--tools", "", "--permission-mode", "dont_ask",
+            "--strict-mcp-config", "--setting-sources", "", "--settings",
+            json.dumps(settings, separators=(",", ":")), "--max-model-request-retries", "0"]
+    builtins = _catalog_control_models(argv, env, timeout)
+    models = []
+    seen = set()
+    for entry in builtins:
+        if not isinstance(entry, dict) or entry.get("source") != "system":
+            raise _catalog_error("CLI 模型来源未知，无法核对 Credits 计费")
+        name = entry.get("displayName")
+        if not _catalog_identifier(name) or name in seen:
+            raise _catalog_error("CLI 模型目录标识无效或重复")
+        seen.add(name)
+        current = _credit_multiplier(entry.get("priceFactor"))
+        promotion = entry.get("promotion")
+        original = _credit_multiplier(
+            promotion.get("before_promotion_price_factor")
+            if isinstance(promotion, dict) and promotion.get("active") is True
+            else entry.get("originalPriceFactor"))
+        if current is None or original is None or original <= current:
+            original = None
+        models.append({"id": name, "name": name, "billing_type": "qoder_credits",
+                       "credit_multiplier": current, "original_credit_multiplier": original})
+    for model in custom:
+        if model["id"] in seen:
+            raise _catalog_error("内置与自定义模型标识冲突")
+        seen.add(model["id"])
+        models.append(model)
+    return {"models": models, "multiplier_source": "qoder_cli_live"}
 
 
 def _secrets(env):

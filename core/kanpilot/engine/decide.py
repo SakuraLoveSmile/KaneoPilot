@@ -174,6 +174,10 @@ def decide(snapshot: dict) -> Decision:
         return Decision(NOOP, reason="unmapped_phase_condition",
                         params={"phase": phase, "condition": condition})
 
+    if action == SYNC_DELIVERY and not snapshot.get("delivery_sync_due", True):
+        return Decision(AWAIT, reason="delivery_sync_not_due",
+                        params={"phase": phase, "condition": condition})
+
     if action in _BUDGET_GATED and not snapshot.get("budget_ok", True):
         return Decision(BLOCK, reason="auto_budget_exceeded",
                         ladder=ladder.LADDER_NEEDS_YOU, attention=True,

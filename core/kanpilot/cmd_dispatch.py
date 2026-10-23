@@ -714,7 +714,7 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
     # 且**不得**用于去重、路径生成、权限判断或完成判定。
     workspace_display_name = task["project_name"]
     repair = core.review_repair_of(task)
-    session_display_name = (("AI 处理 · " if repair.get("source_kind") == "merge_conflict" else "Review 修复 · ")
+    session_display_name = (("AI 处理 · " if repair.get("source_kind") in ("merge_conflict", "build_failure") else "Review 修复 · ")
                             + task["title"] if repair else task["title"])
     if not workspace_display_name or not session_display_name:
         raise util.KanpilotError(
@@ -1286,6 +1286,13 @@ def _execution_instruction(task, worktree_path, *, desktop, conn=None):
 
 def _base_execution_instruction(task, worktree_path, *, desktop, conn=None):
     repair = core.review_repair_of(task)
+    if repair.get("source_kind") == "build_failure":
+        return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
+                f"这是用户确认的一次性构建修复，处理标识 {repair['action_id']}。"
+                f"仅在当前独立修复工作树 {worktree_path} 修复冻结失败日志对应的问题，保留原任务行为。"
+                "不重新规划，不重做整份原计划，不切换或新建分支，不提交、推送、合并或触发构建发布。"
+                "执行原计划全部 verify 与必要专项验证并报告真实结构化验证证据；核心提交并复审，"
+                "通过后只创建新修复 PR，合并和再次构建发布须用户另行确认。")
     if repair.get("source_kind") == "merge_conflict":
         if repair.get("verification_recovery"):
             return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
@@ -1346,7 +1353,7 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
         from . import review_repair
         frozen = review_repair.verify_frozen(task)
         review_repair.verify_source_terminal(conn, task)
-        if frozen.get("source_kind") == "merge_conflict":
+        if frozen.get("source_kind") in ("merge_conflict", "build_failure"):
             from . import task_ai_action
             recovery = frozen.get("verification_recovery")
             if recovery:
@@ -1364,17 +1371,18 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
                 task_ai_action.verify_verification_recovery(task, recovery)
                 return Path(frozen["worktree_path"]), "branch"
             return Path(task_ai_action.ensure_worktree(conn, task)), "branch"
-        delivery = dict(core.delivery_of(task), repository=task["repository"])
-        if delivery.get("workspace_version") == 1:
-            util.require(all(delivery.get(key) for key in
-                             ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")),
-                         "任务工作区登记不完整，未启动修复", "validation_failed")
-        try:
-            git_delivery.verify_branch_worktree(delivery, require_clean=True,
-                                                expected_head=frozen["head_sha"])
-        except git_delivery.GitDeliveryError as exc:
-            raise util.KanpilotError("validation_failed", exc.message) from exc
-        return Path(frozen["worktree_path"]), "branch"
+        if not review_repair.retry_of(task):
+            delivery = dict(core.delivery_of(task), repository=task["repository"])
+            if delivery.get("workspace_version") == 1:
+                util.require(all(delivery.get(key) for key in
+                                 ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")),
+                             "任务工作区登记不完整，未启动修复", "validation_failed")
+            try:
+                git_delivery.verify_branch_worktree(delivery, require_clean=True,
+                                                    expected_head=frozen["head_sha"])
+            except git_delivery.GitDeliveryError as exc:
+                raise util.KanpilotError("validation_failed", exc.message) from exc
+            return Path(frozen["worktree_path"]), "branch"
     retry = core.execution_retry_of(task)
     delivery = core.delivery_of(task)
     versioned = delivery.get("workspace_version") == 1

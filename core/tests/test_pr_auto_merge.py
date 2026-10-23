@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 import test_delivery_pr as fixture_pr
-from kanpilot import automation_policy, core, db, gh_client, project_config, remote, stage_contract, util
+from kanpilot import automation_policy, core, db, gh_client, git_delivery, project_config, remote, stage_contract, util
 
 
 @pytest.fixture
@@ -241,11 +241,78 @@ def test_success_response_does_not_establish_merge_without_observation(delivery)
 def test_origin_changed_during_read_stops_merge(delivery):
     case = delivery
     from kanpilot import git_delivery
-    with patch.object(git_delivery, 'origin_github_repo', side_effect=['owner/repo', 'other/repo']), patch.object(
+    with patch.object(git_delivery, 'require_github_origin', side_effect=['owner/repo', 'other/repo']), patch.object(
             gh_client, 'pr_view', return_value=ready(case)), patch.object(gh_client, 'pr_merge') as merge:
-        with pytest.raises(util.KanpilotError): case.sync()
+        result = case.sync()
+    assert (result['outcome'], result['failure_code']) == ('blocked', 'branch_diverged')
+    assert case.task()['status'] == 'needs_user'
     merge.assert_not_called()
     assert receipt(case) is None
+
+
+@pytest.mark.parametrize('fail_at', [2, 3])
+def test_origin_probe_timeout_at_merge_guards_backs_off_and_recovers_without_duplicate_send(delivery, fail_at):
+    case = delivery
+    original = git_delivery.require_github_origin
+    calls = 0
+    def probe(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise git_delivery.GitDeliveryError('git_probe_timeout', 'SSH 配置探测超时，稍后重试')
+        return original(*args, **kwargs)
+    before = (case.task()['run_id'], case.task()['review_key'])
+    with patch.object(git_delivery, 'require_github_origin', side_effect=probe), patch.object(
+            gh_client, 'pr_view', return_value=ready(case)), patch.object(gh_client, 'pr_merge') as merge:
+        for failures in (1, 2, 3):
+            calls = 0
+            result = case.sync()
+            if failures < 3:
+                assert (result['outcome'], result['publish_failures']) == ('retry', failures)
+                assert case.task()['status'] == 'in_review'
+            else:
+                assert (result['outcome'], result['failure_code']) == ('blocked', 'gh_timeout')
+                assert case.task()['status'] == 'needs_user'
+            assert util.parse_ts(core.delivery_of(case.task())['next_sync_at']) - case.ctx.now == timedelta(minutes=5)
+    assert (case.task()['run_id'], case.task()['review_key']) == before
+    merge.assert_not_called()
+    if fail_at == 2:
+        assert receipt(case) is None
+    else:
+        row = receipt(case)
+        assert row['status'] == 'rejected'
+        assert util.jload(row['result_json'])['not_sent'] is True
+    case._reset_delivery_stage()
+    with patch.object(gh_client, 'pr_view', side_effect=[ready(case), ready(case, 'MERGED')]), patch.object(
+            gh_client, 'pr_merge', return_value={'merged': True}) as merge:
+        assert case.sync()['outcome'] == 'merged'
+    merge.assert_called_once_with('owner/repo', 7, sha=case.delivery['head_sha'])
+    assert receipt(case)['status'] == 'accepted'
+    assert core.delivery_of(case.task())['publish_failures'] == 0
+
+
+@pytest.mark.parametrize('status', ['prepared', 'unknown'])
+def test_not_sent_marker_cannot_reopen_uncertain_merge_receipt(delivery, status):
+    case = delivery
+    original = git_delivery.require_github_origin
+    calls = 0
+    def probe(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise git_delivery.GitDeliveryError('git_probe_timeout', 'SSH 配置探测超时')
+        return original(*args, **kwargs)
+    with patch.object(git_delivery, 'require_github_origin', side_effect=probe), patch.object(
+            gh_client, 'pr_view', return_value=ready(case)), patch.object(gh_client, 'pr_merge') as merge:
+        assert case.sync()['outcome'] == 'retry'
+    merge.assert_not_called()
+    row = receipt(case)
+    db.update_runtime_operation(case.ctx.conn, row['scope_id'], row['operation_id'], case.ctx.now_iso,
+                                status=status)
+    with patch.object(gh_client, 'pr_view', return_value=ready(case)), patch.object(gh_client, 'pr_merge') as merge:
+        assert case.sync()['outcome'] == 'waiting'
+    merge.assert_not_called()
+    assert receipt(case)['status'] == status
 
 
 def test_success_recheck_with_wrong_identity_stays_unknown(delivery):

@@ -57,21 +57,55 @@ def _recode(exc, code, message):
     return GitDeliveryError(code, message + "：" + exc.message)
 
 
-def _github_ssh_alias(host, port, cwd):
+def _local_probe(args, *, timeout, label, **kwargs):
+    """Read local transport configuration without turning uncertainty into absence."""
+    if timeout <= 0:
+        raise GitDeliveryError("git_probe_timeout", label + "超时，暂时无法确认仓库")
+    try:
+        return subprocess.run(args, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise GitDeliveryError("git_probe_timeout", label + "超时，暂时无法确认仓库") from exc
+    except FileNotFoundError as exc:
+        raise GitDeliveryError("git_unavailable", label + "所需的本机程序不可用") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        # These exceptions can contain the complete command, origin URL or
+        # private SSH configuration. Persist only the failing probe stage.
+        raise GitDeliveryError("git_probe_failed", label + "失败，暂时无法确认仓库") from exc
+
+
+def _probe_git(args, cwd, *, label="Git 远端探测", missing_origin=False):
+    from .automation_policy import git_probe_timeout
+    result = _local_probe(["git", "-C", str(cwd), *args], timeout=git_probe_timeout(),
+                          label=label, capture_output=True, env=git_env())
+    if result.returncode:
+        if missing_origin and b"No such remote 'origin'" in result.stderr:
+            raise GitDeliveryError("origin_missing", "仓库未配置 origin 远端")
+        raise GitDeliveryError("git_probe_failed", label + "失败，请检查本机 Git 配置")
+    return result
+
+
+def _probe_value(args, cwd, *, label="Git 远端探测", missing_origin=False):
+    return _probe_git(args, cwd, label=label, missing_origin=missing_origin).stdout.decode(
+        "utf-8", "surrogateescape").strip()
+
+
+def _github_ssh_alias(host, port, cwd, *, strict=False):
     """Expand local OpenSSH configuration; never connect or replace the URL."""
     if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host)
             or port not in (None, 22, 443)
             or "GIT_SSH" in os.environ or "GIT_SSH_COMMAND" in os.environ):
         return False
-    deadline = time.monotonic() + 0.1
+    from .automation_policy import git_probe_timeout
+    deadline = time.monotonic() + git_probe_timeout()
     try:
         variant = os.environ.get("GIT_SSH_VARIANT")
         if cwd is not None:
-            transport = subprocess.run(["git", "-C", str(cwd), "config", "--null", "--get-regexp",
-                                        r"^(core\.sshcommand|ssh\.variant)$"],
-                                       capture_output=True, timeout=0.1, env=git_env())
+            transport = _local_probe(["git", "-C", str(cwd), "config", "--null", "--get-regexp",
+                                      r"^(core\.sshcommand|ssh\.variant)$"],
+                                     capture_output=True, timeout=deadline - time.monotonic(),
+                                     label="Git SSH 配置探测", env=git_env())
             if transport.returncode not in (0, 1):
-                return False
+                raise GitDeliveryError("git_probe_failed", "Git SSH 配置探测失败，请检查本机 Git 配置")
             config_variant = None
             for entry in transport.stdout.split(b"\0"):
                 key, _, value = entry.partition(b"\n")
@@ -87,14 +121,14 @@ def _github_ssh_alias(host, port, cwd):
         args = ["ssh", "-G", "-oCanonicalizeHostname=no", "-l", "git"]
         if port is not None:
             args += ["-p", str(port)]
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        result = subprocess.run([*args, host], cwd=cwd, capture_output=True,
-                                text=True, errors="replace", timeout=remaining)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if result.returncode:
+        result = _local_probe([*args, host], cwd=cwd, capture_output=True,
+                              text=True, errors="replace", timeout=deadline - time.monotonic(),
+                              label="SSH 别名配置探测")
+        if result.returncode:
+            raise GitDeliveryError("git_probe_failed", "SSH 别名配置探测失败，请检查本机 SSH 配置")
+    except GitDeliveryError:
+        if strict:
+            raise
         return False
     fields = {}
     for line in result.stdout.splitlines():
@@ -107,7 +141,7 @@ def _github_ssh_alias(host, port, cwd):
             and fields.get("user") == "git" and fields.get("port") in ("22", "443"))
 
 
-def github_repository(url: str, *, cwd=None) -> Optional[str]:
+def github_repository(url: str, *, cwd=None, strict=False) -> Optional[str]:
     """Parse GitHub origins, resolving SSH host aliases in their repository."""
     if not isinstance(url, str):
         return None
@@ -143,7 +177,7 @@ def github_repository(url: str, *, cwd=None) -> Optional[str]:
     if alias_host is not None:
         # urlsplit strips embedded tabs/newlines; validate the original alias
         # URL as well so normalization cannot hide an invalid SSH address.
-        if re.search(r"\s|[\x00-\x1f\x7f]", url) or not _github_ssh_alias(alias_host, alias_port, cwd):
+        if re.search(r"\s|[\x00-\x1f\x7f]", url) or not _github_ssh_alias(alias_host, alias_port, cwd, strict=strict):
             return None
     return name
 
@@ -155,17 +189,34 @@ def origin_github_repo(repo: str) -> Optional[str]:
         return None
 
 
+def require_github_origin(repo: str, *, check_push=False) -> str:
+    """Strict local-only origin check for automation boundaries.
+
+    Unlike the legacy Optional API, transient probe failures retain their
+    error category so callers can retry the same stage without rerunning work.
+    """
+    url = _probe_value(["remote", "get-url", "origin"], repo, missing_origin=True)
+    slug = github_repository(url, cwd=repo, strict=True)
+    if not slug:
+        raise GitDeliveryError("origin_not_github", "origin 不是可核验的 GitHub 仓库，请检查远端或 SSH 配置")
+    if check_push:
+        _push_target(repo, slug)
+    return slug
+
+
 def _push_target(worktree, expected_repo):
-    targets = _value(["remote", "get-url", "--push", "--all", "origin"], worktree).splitlines()
+    targets = _probe_value(["remote", "get-url", "--push", "--all", "origin"], worktree,
+                           label="Git 推送目标探测", missing_origin=True).splitlines()
     if (len(targets) != 1 or not expected_repo
-            or (github_repository(targets[0], cwd=worktree) or "").lower() != expected_repo.lower()):
+            or (github_repository(targets[0], cwd=worktree, strict=True) or "").lower() != expected_repo.lower()):
         raise GitDeliveryError("branch_diverged", "origin 推送目标必须是已核验的单一 GitHub 仓库")
     target = targets[0]
     # A resolved URL passed explicitly to push is subject to rewriting again.
     # Refuse unstable rewrite chains without removing authentication or hooks.
-    resolved = _value(["ls-remote", "--get-url", target], worktree)
+    resolved = _probe_value(["ls-remote", "--get-url", target], worktree, label="Git URL 改写探测")
     push_rewrites = []
-    for entry in _git(["config", "--null", "--list"], worktree, 10).stdout.split(b"\0"):
+    for entry in _probe_git(["config", "--null", "--list"], worktree,
+                            label="Git 推送配置探测").stdout.split(b"\0"):
         key, _, value = entry.partition(b"\n")
         name, prefix = os.fsdecode(key), os.fsdecode(value)
         if name.startswith("url.") and name.endswith(".pushinsteadof") and target.startswith(prefix):

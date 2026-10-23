@@ -24,8 +24,11 @@ def _api(path):
     return gh_client._run(_args(path), read_only=True)
 
 
-def _binary(path, max_bytes, *, accept='application/octet-stream'):
-    raw=gh_client._run(_args(path,accept=accept),read_only=True,binary=True)
+def _binary(path, max_bytes, *, accept='application/octet-stream', allow_escape_sequences=False):
+    args=_args(path,accept=accept)
+    if allow_escape_sequences:
+        args.append('--allow-escape-sequences')
+    raw=gh_client._run(args,read_only=True,binary=True)
     if len(raw)>max_bytes:
         raise gh_client.GhError('rejected','发布证据超过大小限制')
     return raw
@@ -46,9 +49,9 @@ def _pages(path,key=None):
     raise gh_client.GhError('rejected','GitHub 分页列表过大，未取得完整证据')
 
 
-def _sha(value):
+def _sha(value, *, message='GitHub SHA 身份不可确认'):
     if not isinstance(value,str) or not re.fullmatch(r'[0-9a-f]{40,64}',value):
-        raise gh_client.GhError('transient','GitHub SHA 身份不可确认')
+        raise gh_client.GhError('transient',message)
     return value
 
 
@@ -57,8 +60,11 @@ def workflow_snapshot(repo,path,ref):
     value=_api('repos/'+repo+'/actions/workflows/'+quote(path.rsplit('/',1)[-1],safe=''))
     commit=_api('repos/'+repo+'/commits/'+quote(ref,safe=''))
     if (not isinstance(value,dict) or type(value.get('id')) is not int or value['id']<=0
-            or value.get('path')!=path or value.get('state')!='active'):
-        raise gh_client.GhError('rejected','工作流不存在、未启用或路径不匹配')
+            or value.get('path')!=path):
+        raise gh_client.GhError('rejected','工作流不存在或路径不匹配')
+    if value.get('state')!='active':
+        reason='工作流已被手动停用' if value.get('state')=='disabled_manually' else '工作流未启用'
+        raise gh_client.GhError('rejected',reason+'，请先在 GitHub 启用后重新准备发布')
     return dict(id=value['id'],path=path,ref=ref,head_sha=_sha(commit.get('sha')),state='active',repository=repo)
 
 
@@ -84,6 +90,43 @@ def find_runs(repo,workflow):
 
 def jobs(repo,run_id,attempt):
     return _pages('repos/'+gh_client._repo(repo)+'/actions/runs/'+str(run_id)+'/attempts/'+str(attempt)+'/jobs','jobs')
+
+
+def _plain_log(content):
+    # Logs may contain terminal colours/hyperlinks, but never execute them in readers.
+    content=re.sub(r'(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)','',content)
+    content=re.sub(r'(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b[ -/]*[@-~]','',content)
+    content=content.replace('\r\n','\n').replace('\r','\n')
+    return re.sub(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]','',content)
+
+
+def failure_logs(repo, run_id, attempt):
+    """Read bounded logs only for failed jobs in this exact attempt; no writes."""
+    repo = gh_client._repo(repo)
+    rows = jobs(repo, run_id, attempt)
+    failed = [row for row in rows if row.get('status') == 'completed'
+              and row.get('conclusion') in ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')]
+    if not failed or len(failed) > 20:
+        raise gh_client.GhError('rejected', '本次 attempt 缺少可读取的失败 job，或失败 job 过多')
+    result, size = [], 0
+    for job in failed:
+        if (type(job.get('id')) is not int or job['id'] <= 0 or job.get('run_id') != run_id
+                or job.get('run_attempt') != attempt):
+            raise gh_client.GhError('rejected', '失败 job 与冻结运行或 attempt 不符')
+        raw = _binary('repos/'+repo+'/actions/jobs/'+str(job['id'])+'/logs', 2*1024*1024,
+                      accept='application/json',allow_escape_sequences=True)
+        size += len(raw)
+        if size > 4*1024*1024:
+            raise gh_client.GhError('rejected', '失败日志超过 4 MiB，未截断或猜测修复')
+        try:
+            content = gh_client.redact(_plain_log(raw.decode('utf-8')))
+        except UnicodeDecodeError as exc:
+            raise gh_client.GhError('rejected', '失败日志不是完整 UTF-8 文本') from exc
+        if not content.strip():
+            raise gh_client.GhError('rejected', '失败 job 日志为空或不可用')
+        result.append(dict(job_id=job['id'], name=gh_client.redact(_plain_log(str(job.get('name') or ''))),
+                           conclusion=job['conclusion'], content=content))
+    return result
 
 
 def release(repo,tag):
@@ -121,6 +164,31 @@ def tag_commit(repo,tag):
         seen.add(sha)
         obj=_api(prefix+'tags/'+sha).get('object')
     raise gh_client.GhError('rejected','Release tag 无法唯一解引用到提交')
+
+
+def release_tag(repo, tag):
+    """Return the immutable annotated tag, including its ownership message."""
+    prefix = 'repos/' + gh_client._repo(repo) + '/git/'
+    ref = _api(prefix + 'ref/tags/' + quote(tag, safe=''))
+    obj = ref.get('object') if isinstance(ref, dict) else None
+    if not isinstance(obj, dict) or obj.get('type') != 'tag':
+        raise gh_client.GhError('rejected', '发布说明修正要求原 annotated tag')
+    sha = _sha(obj.get('sha'))
+    annotation = _api(prefix + 'tags/' + sha)
+    if not isinstance(annotation, dict) or annotation.get('sha') != sha:
+        raise gh_client.GhError('rejected', '发布 tag annotation 身份不符')
+    return annotation
+
+
+def patch_release_body(repo, release_id, body):
+    """One body-only PATCH; the core caller must persist its intent first."""
+    if type(release_id) is not int or release_id <= 0 or not isinstance(body, str):
+        raise gh_client.GhError('rejected', 'Release 正文参数无效')
+    path = 'repos/' + gh_client._repo(repo) + '/releases/' + str(release_id)
+    with tempfile.TemporaryDirectory(prefix='kanpilot-release-notes-') as directory:
+        source = Path(directory) / 'body.json'
+        source.write_text(util.jdump(dict(body=body)), encoding='utf-8')
+        return gh_client._run([*_args(path), '--method', 'PATCH', '--input', str(source)])
 
 
 def provenance(repo,run_id):
@@ -161,8 +229,12 @@ def asset_bytes(repo,asset):
 
 
 def merge_commit_sha(repo,number,head):
-    value=_api('repos/'+gh_client._repo(repo)+'/pulls/'+str(number))
-    if (not isinstance(value,dict) or value.get('merged') is not True
-            or (value.get('head') or {}).get('sha')!=head):
+    repo=gh_client._repo(repo)
+    value=gh_client.pr_view(repo,number,merge_commit=True)
+    if (not isinstance(value,dict) or value.get('number')!=number
+            or value.get('url')!='https://github.com/'+repo+'/pull/'+str(number)
+            or value.get('state')!='MERGED' or value.get('headRefOid')!=head):
         raise gh_client.GhError('rejected','历史任务 PR 的最终合并身份不符')
-    return _sha(value.get('merge_commit_sha'))
+    merge=value.get('mergeCommit')
+    return _sha(merge.get('oid') if isinstance(merge,dict) else None,
+                message='GitHub PR 合并提交版本缺失或格式无效，请重新核对该 PR')

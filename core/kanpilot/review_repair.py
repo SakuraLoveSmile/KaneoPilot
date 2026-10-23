@@ -98,7 +98,7 @@ def view(conn, task, now):
     if parent_closeout.projection(conn, task, now) is not None:
         return None
     value = candidate(task)
-    if not value or value.get("source_kind") == "merge_conflict":
+    if not value or value.get("source_kind") in ("merge_conflict", "build_failure"):
         return None
     policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
     state = value.get("state", "held")
@@ -111,6 +111,16 @@ def view(conn, task, now):
         "source_execution_run_id", "repair_execution_run_id", "session_id")}, "state": state,
         "title": value.get("title"), "reason": reason, "round": value.get("fix_round", 0),
         "max_rounds": policy["max_fix_rounds"], "can_start": state == "held" and _gate(conn, task, value, now) is None}
+
+
+def retry_of(task):
+    """Only this frozen Review may reuse a previously confirmed repair retry."""
+    value = core.review_repair_of(task)
+    if isinstance(task, dict) and "extra_json" not in task:
+        task = dict(task, extra_json=util.jdump(task.get("extra") or {}))
+    retry = core.execution_retry_of(task)
+    return retry if (value and not value.get("source_kind") and value.get("review_key")
+                     and retry.get("review_repair_key") == value["review_key"]) else {}
 
 
 def verify_frozen(task):
@@ -129,6 +139,11 @@ def verify_frozen(task):
                      and retry.get("source_run_id") == recovery["source_run_id"]
                      and value.get("repair_execution_run_id") == recovery["source_run_id"],
                      "补报验证的原执行轮次已变化", "conflict")
+    elif value.get("state") == "queued" and retry_of(task):
+        retry = retry_of(task)
+        util.require(task["run_id"] is None and value.get("repair_execution_run_id")
+                     and retry["source_run_id"] == value["repair_execution_run_id"],
+                     "重试修复的原执行轮次已变化", "conflict")
     else:
         util.require(task["run_id"] == expected_run, "修复执行轮次已变化", "conflict")
     try:
@@ -137,7 +152,7 @@ def verify_frozen(task):
                      and util.sha256_file(Path(task["plan_path"])) == value["plan_sha256"], "评审报告或原计划内容已变化", "conflict")
     except (OSError, KeyError) as exc:
         raise util.KanpilotError("conflict", "评审报告或原计划不可读取") from exc
-    if value.get("source_kind") == "merge_conflict":
+    if value.get("source_kind") in ("merge_conflict", "build_failure"):
         from . import task_ai_action
         task_ai_action.verify_frozen(task, value)
     return dict(value)
@@ -149,7 +164,7 @@ def verify_source_terminal(conn, task, now=None):
     from . import cmd_queue
     value = core.review_repair_of(task) or candidate(task)
     util.require(value is not None, "没有待修复评审", "conflict")
-    if value.get("source_kind") == "merge_conflict":
+    if value.get("source_kind") in ("merge_conflict", "build_failure"):
         from . import task_ai_action
         return task_ai_action.verify_source_terminal(conn, task, value)
     current = now or util.now_dt()
@@ -180,6 +195,8 @@ def start_inline(conn, task, now, value, actor):
                  authorized_by=actor, authorized_at=now)
     value.pop("reason", None)
     extra["fix_request"] = value
+    # A new Review repair supersedes any retry of the preceding execution.
+    extra.pop("execution_retry", None)
     for key in ("review_conclusion", "review_registered_at", "registered_review_identity", "verification_override", "plan_execution_hold"):
         extra.pop(key, None)
     core.transition_task(conn, task, "ready", now, actor, detail={"via": "direct_review_repair"},
@@ -195,7 +212,7 @@ def start_inline(conn, task, now, value, actor):
 def cmd_start_review_repair(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
     value = candidate(task)
-    util.require(not value or value.get("source_kind") != "merge_conflict",
+    util.require(not value or value.get("source_kind") not in ("merge_conflict", "build_failure"),
                  "合并冲突需从任务内 AI 处理入口确认", "conflict")
     util.require(value is not None and all(payload.get(k) == value.get(v) for k, v in IDENTITY.items()), "修复材料身份已变化，请刷新后重试", "conflict")
     if value.get("state") != "held":
@@ -225,7 +242,7 @@ def try_auto_start(ctx, task_id):
     task = db.require_task(ctx.conn, task_id)
     value = core.review_repair_of(task)
     if (not core.is_automation_managed(task) or value.get("state") != "held"
-            or value.get("source_kind") == "merge_conflict"):
+            or value.get("source_kind") in ("merge_conflict", "build_failure")):
         return
     try:
         return cmd_start_review_repair(ctx, dict(task_id=task_id,

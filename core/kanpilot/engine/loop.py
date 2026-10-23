@@ -163,6 +163,18 @@ class Reconciler:
                 phase, condition = "delivery", "syncing"
             else:
                 phase, condition = "review", "reviewing"
+        # A saved poll deadline belongs to the delivery identity that wrote it.
+        # A new commit / execution / Review starts a fresh publication cycle;
+        # old contracts must not defer that cycle. Legacy rows have no contracts
+        # and retain their saved deadline until the normal delivery checks run.
+        contracts = delivery.get("stage_contracts") or {}
+        identity = {"head_sha": delivery.get("head_sha"),
+                    "execution_run_id": task["run_id"], "review_key": task["review_key"]}
+        current_contract = any(
+            all((contract.get("inputs") or {}).get(key) == value for key, value in identity.items())
+            for contract in contracts.values())
+        delivery_sync_due = (util.ts_due(delivery.get("next_sync_at"), now)
+                             or bool(contracts and not current_contract))
         policy = automation_policy.policy_for(conn, task["project_id"]) or {}
         budget = core.automation_budget(task, policy, now)
         paused_global = bool(db.get_setting(conn, "paused_global", False))
@@ -172,6 +184,7 @@ class Reconciler:
             "status": status,
             "send_state": task["send_state"],
             "phase": phase, "condition": condition,
+            "delivery_sync_due": delivery_sync_due,
             "fix_round": automation.get("fix_round", 0),
             "fix_open": (extra.get("fix_request") or {}).get("state") in ("held", "open"),
             "review_repair": core.review_repair_of(task),
@@ -277,7 +290,7 @@ class Reconciler:
         """Choose a bounded new round; resolve commits accounting + enqueue atomically."""
         from . import verdict
         extra = db.task_extra(task)
-        if core.review_repair_of(task).get("source_kind") == "merge_conflict":
+        if core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure"):
             return None
         receipt = extra.get("engine_verdict")
         if (task["status"] != "needs_user" or task["failure_code"] != "verification_unconfirmed"
@@ -434,7 +447,11 @@ class Reconciler:
                     # later, unrelated round of the same task.
                     self._clear_consumed_override(conn, task, now)
                 snap = self._snapshot(conn, task, now)
-                if (snap.get("execution_question") or {}).get("state")=="open":
+                if (snap.get("phase") == "delivery" and not snap["delivery_sync_due"]):
+                    # Saved delivery backoff also outranks a historical request's
+                    # transient retry; a later tick re-reads the durable deadline.
+                    decision = decide.decide(snap)
+                elif (snap.get("execution_question") or {}).get("state")=="open":
                     # Human input owns this round. Historical failed requests
                     # cannot take priority over its BLOCK/observer recovery.
                     decision=decide.decide(snap)

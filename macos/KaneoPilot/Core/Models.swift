@@ -636,6 +636,7 @@ struct TaskDetail: Decodable, Identifiable {
     let verificationChecks: VerificationCheckOperation?
     let planClarification: PlanClarification?
     let executionQuestion: ExecutionQuestion?
+    var releaseVerificationQuestion: ExecutionQuestion? = nil
     let failureReason: String?
     let blockedAt: String?
     let blockedSummary: String?
@@ -2460,6 +2461,48 @@ struct ReviewCapabilitiesResponse: Decodable {
     let piDesktop: PlusBackendStatus?
 }
 
+struct QoderModelCatalog: Decodable {
+    let models: [QoderModelCandidate]
+    let multiplierSource: String?
+}
+
+struct QoderModelCandidate: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let billingType: String?
+    let creditMultiplier: Double?
+    let originalCreditMultiplier: Double?
+
+    func matches(_ modelId: String) -> Bool {
+        if billingType == "qoder_credits" {
+            return id.caseInsensitiveCompare(modelId) == .orderedSame
+        }
+        return id == modelId
+    }
+
+    var consumptionSummary: String {
+        if billingType == "external" { return "供应商计费" }
+        guard billingType == "qoder_credits", let rate = creditMultiplier,
+              rate.isFinite, rate >= 0 else { return "倍率未知" }
+        let current = "\(Self.rateText(rate))×"
+        if let original = originalCreditMultiplier, original.isFinite, original > rate {
+            return "\(current) · 原 \(Self.rateText(original))×"
+        }
+        return current
+    }
+
+    var consumptionDetail: String {
+        billingType == "external"
+            ? "消耗参考：供应商计费，不消耗 Qoder Credits"
+            : "Qoder Credits 参考：\(consumptionSummary)"
+    }
+
+    private static func rateText(_ value: Double) -> String {
+        let text = String(value)
+        return text.hasSuffix(".0") ? String(text.dropLast(2)) : text
+    }
+}
+
 // MARK: - 项目与仓库映射 (T1, §5.26)
 
 struct ProjectMappingRemote: Decodable {
@@ -2628,10 +2671,14 @@ struct ReviewHistoryEntry: Decodable {
 
 /// 任务内一次性处理由核心投影；缺省兼容尚未提供此字段的核心。
 struct TaskAIActionView: Decodable {
+    let kind: String?
     let canPrepare: Bool
     let reason: String?
     let current: TaskAIActionEntry?
     let history: [TaskAIActionEntry]?
+
+    var actionKind: String { kind ?? current?.kind ?? "merge_conflict" }
+    var isBuildFailure: Bool { actionKind == "build_failure" }
 }
 
 struct TaskAIActionEntry: Decodable, Identifiable {
@@ -2648,6 +2695,8 @@ struct TaskAIActionEntry: Decodable, Identifiable {
     let headSha: String?
     let baseSha: String?
     let reason: String?
+    let sourcePrNumber: Int?
+    let sourcePrUrl: String?
     var id: String { actionId }
 }
 
@@ -2663,8 +2712,22 @@ struct TaskAIActionCandidate: Decodable {
     let headSha: String?
     let baseSha: String?
     let modelSummary: String?
+    let sourcePrNumber: Int?
+    let sourcePrUrl: String?
+    let releaseBatchId: String?
+    let releaseTag: String?
+    let workflowRunId: Int?
+    let workflowAttempt: Int?
+    let workflowUrl: String?
 
     var confirmationMessage: String {
+        if kind == "build_failure" {
+            let run = workflowRunId.map { "构建 #\($0)" } ?? "失败构建"
+            let attempt = workflowAttempt.map { " · 第 \($0) 次运行" } ?? ""
+            let source = sourcePrNumber.map { "原 PR #\($0)（已合并）" } ?? "原已合并 PR"
+            let target = baseSha.map { String($0.prefix(12)) } ?? "目标提交未提供"
+            return "修复构建失败\n\(run)\(attempt)\n版本：\(releaseTag ?? "未提供")\n\(source)\n修复分支：\(branch ?? "未提供") → \(baseBranch ?? "未提供")\n目标提交：\(target)\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。读取失败日志，只修复本次构建问题；不重新规划。验证、复审通过后创建新的修复 PR。合并与再次构建发布需另行确认，原 PR 和失败批次保留。"
+        }
         let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
         return "解决 PR 合并冲突\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。不重新规划，修复后验证并重新评审；通过后更新原 PR，并沿项目合并设置继续。"
     }
@@ -2700,8 +2763,10 @@ struct AttentionItem: Decodable, Identifiable, Sendable {
     let attentionState: String?
     let since: String?
     var id: String { attentionId }
+    var questionLabel: String { reasonCode == "release_verification_question" ? "补验证提问" : "执行中提问" }
     var notificationIdentity: String {
-        guard reasonCode == "execution_question", let requestID = questionPreview?.requestId else { return attentionId }
+        guard ["execution_question", "release_verification_question"].contains(reasonCode ?? ""),
+              let requestID = questionPreview?.requestId else { return attentionId }
         return "\(attentionId)/\(requestID)"
     }
 }
@@ -2778,6 +2843,17 @@ struct ExecutionQuestion: Decodable, Equatable {
     let submitted: Submitted?
     let detail: String?
     var rejectionReason: String? = nil
+    var verificationId: String? = nil
+    var contextSha256: String? = nil
+    var phase: String? = nil
+
+    var isReleaseVerification: Bool { verificationId != nil }
+    var answerAction: String { isReleaseVerification ? "answer_release_verification_questions" : "answer_execution_questions" }
+    var skipAction: String { isReleaseVerification ? "skip_release_verification_questions" : "skip_execution_questions" }
+    var sourceDescription: String {
+        if isReleaseVerification { return phase == "planning" ? "Plus 补验证规划" : "Plus 补验证执行" }
+        return source == "codex" ? "Codex CLI 执行会话" : "Plus 执行会话"
+    }
 
     struct Submitted: Decodable, Equatable {
         let answers: [ExecutionAnswer]
@@ -2787,7 +2863,11 @@ struct ExecutionQuestion: Decodable, Equatable {
     }
 
     // All external identities and the core fingerprint bind every async UI result.
-    var identity: [String] { [runId, sessionId, turnId, requestId, toolCallId, questionsSha256] }
+    var identity: [String] {
+        let original = [runId, sessionId, turnId, requestId, toolCallId, questionsSha256]
+        guard let verificationId else { return original }
+        return original + ["release-verification", verificationId, contextSha256 ?? "", phase ?? ""]
+    }
 }
 
 struct ExecutionQuestionCommandResponse: Decodable {
@@ -2795,6 +2875,9 @@ struct ExecutionQuestionCommandResponse: Decodable {
     let taskId: String
     let runId: String
     let executionQuestion: ExecutionQuestion?
+    var verificationId: String? = nil
+    var contextSha256: String? = nil
+    var releaseVerificationQuestion: ExecutionQuestion? = nil
 }
 
 /// §5.27.18：核心提供收尾资格与结果，桌面不从子任务状态推导。
@@ -2861,6 +2944,7 @@ struct TaskRelease: Decodable {
     let title: String
     let reason: String
     let required: Bool
+    let isHistorical: Bool?
     let channel: String
     let contextSha256: String?
     let batchId: String?
@@ -2879,7 +2963,10 @@ struct TaskRelease: Decodable {
     let canStart: Bool
     let canReconcile: Bool
     let canAbandon: Bool?
+    let canLinkExternalRepair: Bool?
+    let externalRepair: ExternalBuildRepair?
 
+    var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
     var showsStartAction: Bool { canStart && state != "unknown" }
 
@@ -2893,7 +2980,7 @@ struct TaskRelease: Decodable {
 
 struct PrepareTaskReleaseResponse: Decodable {
     let taskId: String
-    let contextSha256: String
+    let contextSha256: String?
     let release: TaskRelease
 
     var confirmationMessage: String {
@@ -2906,4 +2993,143 @@ struct PrepareTaskReleaseResponse: Decodable {
 struct TaskReleaseMutationResponse: Decodable {
     let outcome: String
     let release: TaskRelease
+}
+
+
+struct ExternalBuildRepair: Decodable {
+    let prNumber: Int
+    let prUrl: String
+    let targetSha: String
+    let sourceBatchId: String
+    let sourceTag: String
+    let contextSha256: String
+    let canPrepareVerification: Bool
+    let canSyncVerification: Bool
+    let canRestartVerification: Bool?
+    let verification: ReleaseVerification?
+}
+
+struct ExternalBuildRepairCandidate: Decodable {
+    let taskId: String
+    let prNumber: Int
+    let prUrl: String
+    let headSha: String
+    let baseBranch: String
+    let targetSha: String
+    let targetSourceSha256: String
+    let sourceBatchId: String
+    let sourceTag: String
+    let sourceTargetSha: String
+    let sourceWorkflowRunId: Int64
+    let sourceWorkflowAttempt: Int
+    let preservationKind: String
+    let contextSha256: String
+
+    var confirmationMessage: String {
+        let history = preservationKind == "files" ? "\n历史已变化，原交付文件已逐项核对；后续需要完整验证。" : ""
+        return "原失败版本：\(sourceTag)\n修复 PR：#\(prNumber)\n\(prUrl)\n新目标：\(targetSha)\(history)\n仅关联已合并修复；不调用模型，不启动构建发布。旧执行、评审与失败批次均保留。"
+    }
+}
+
+struct PrepareExternalBuildRepairResponse: Decodable {
+    let taskId: String
+    let contextSha256: String
+    let candidate: ExternalBuildRepairCandidate
+}
+
+struct AcceptExternalBuildRepairResponse: Decodable {
+    let ok: Bool
+    let repair: ExternalBuildRepair
+}
+
+struct ReleaseVerification: Decodable {
+    struct ModelSummary: Decodable {
+        let providerId: String?
+        let modelId: String?
+        let thinkingLevel: String?
+        let permissionMode: String?
+        var label: String { [providerId, modelId, thinkingLevel, permissionMode].compactMap { $0 }.joined(separator: " / ") }
+    }
+    let state: String
+    let targetSha: String?
+    let targetSourceSha256: String?
+    let verificationId: String?
+    let reason: String?
+    let failureCode: String?
+    let commands: [String]?
+    let contextSha256: String?
+    let modelSummary: ModelSummary?
+    var stateLabel: String {
+        switch state {
+        case "verified": return "完整验证已通过"
+        case "prepared": return "待确认验证"
+        case "planning": return "正在准备完整验证"
+        case "running", "executing": return "正在执行完整验证"
+        case "unknown": return "验证结果待核对"
+        case "blocked", "failed": return "验证受阻"
+        default: return "验证进行中"
+        }
+    }
+}
+
+struct PrepareReleaseVerificationResponse: Decodable {
+    let taskId: String
+    let contextSha256: String
+    let verification: ReleaseVerification
+    let expectedVerificationId: String?
+    let expectedContextSha256: String?
+    let expectedReportSha256: String?
+    var isRestart: Bool { expectedVerificationId != nil }
+    var confirmationMessage: String {
+        let commands = (verification.commands ?? []).joined(separator: "\n")
+        let restart = isRestart ? "将新建独立验证尝试；原验证报告保留，不会改写为通过。\n" : ""
+        let progression = verification.modelSummary?.permissionMode == "auto"
+            ? "\n本次费用确认后，Pilot 将自动批准精确对应的 Goal，由 Plus 执行并持续核对报告，无需到 Plus 再操作。费用授权仅限本次独立验证。" : ""
+        return "\(restart)将由独立 Plus 会话完整验证修复后的源码，覆盖原需求、计划验收与完整目标。可能产生模型费用。\(progression)\n模型：\(verification.modelSummary?.label ?? "未提供")\n目标：\(verification.targetSha ?? "未提供")\n全部验证命令：\n\(commands)\n通过后仍需另行确认新批次构建发布。"
+    }
+}
+
+struct ReleaseVerificationMutationResponse: Decodable {
+    let verificationId: String
+    let verification: ReleaseVerification
+}
+
+
+/// Recovery eligibility comes from the core summary; no state-name inference.
+enum ReleaseVerificationAction: String {
+    case prepare = "prepare_release_verification"
+    case sync = "sync_release_verification"
+    case restart = "restart_release_verification"
+
+    var label: String {
+        switch self {
+        case .prepare: return "验证修复后的源码…"
+        case .sync: return "核对验证结果"
+        case .restart: return "重新完整验证…"
+        }
+    }
+
+    func isAvailable(for detail: TaskDetail) -> Bool {
+        guard detail.readOnly != true, (detail.saveState ?? "active") == "active",
+              let repair = detail.release?.externalRepair else { return false }
+        switch self {
+        case .prepare: return repair.canPrepareVerification
+        case .sync: return repair.canSyncVerification && repair.verification?.verificationId?.isEmpty == false
+        case .restart: return repair.canRestartVerification == true
+        }
+    }
+}
+
+extension TaskDetail {
+    var currentInputQuestion: ExecutionQuestion? { releaseVerificationQuestion ?? executionQuestion }
+
+    var releaseVerificationFooterAction: String? {
+        if releaseVerificationQuestion?.state == "open" { return nil }
+        for action in [ReleaseVerificationAction.sync, .restart] {
+            if allowedActions?.contains(action.rawValue) == true, action.isAvailable(for: self) {
+                return action.rawValue
+            }
+        }
+        return nil
+    }
 }

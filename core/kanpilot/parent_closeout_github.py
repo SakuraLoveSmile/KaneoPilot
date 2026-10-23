@@ -28,7 +28,7 @@ def commit(repo, ref):
     raw = gh_client._run(['api', 'repos/' + repo + '/git/trees/' + tree + '?recursive=1'], read_only=True)
     if not isinstance(raw, dict) or raw.get('sha') != tree or raw.get('truncated') is not False or not isinstance(raw.get('tree'), list):
         raise gh_client.GhError('transient', 'GitHub 源码树不完整，不能收尾')
-    records, paths, seen = [], [], set()
+    records, all_records, paths, seen = [], [], [], set()
     for entry in raw['tree']:
         if not isinstance(entry, dict):
             raise gh_client.GhError('transient', 'GitHub 源码树条目无效')
@@ -39,16 +39,18 @@ def commit(repo, ref):
         seen.add(path)
         if entry.get('type') == 'tree':
             continue
-        if path.startswith('.pi/') or git_delivery.is_build_artifact(path):
-            continue
         if entry.get('type') != 'blob' or entry.get('mode') not in ('100644','100755','120000'):
             raise gh_client.GhError('transient', 'GitHub 源码树包含无法核验的文件类型')
-        records.append(dict(path=path, mode=entry['mode'], blob=_sha(entry.get('sha'))))
+        record=dict(path=path, mode=entry['mode'], blob=_sha(entry.get('sha')))
+        all_records.append(record)
+        if path.startswith('.pi/') or git_delivery.is_build_artifact(path):
+            continue
+        records.append(record)
         if entry['mode'] in ('100644','100755'):
             paths.append(path)
     return dict(sha=sha, tree_sha=tree,
                 source_sha256=util.sha256_text(util.jdump(sorted(records,key=lambda r:r['path']))),
-                paths=sorted(paths))
+                paths=sorted(paths), records=sorted(all_records,key=lambda r:r['path']))
 
 
 def contains(repo, base, head):

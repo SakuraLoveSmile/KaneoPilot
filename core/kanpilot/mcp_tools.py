@@ -940,7 +940,7 @@ def _goal_continuation_task_guard(conn, scope, args):
         raise util.KanpilotError("forbidden", "目标自动续接已暂停或不属于当前自动执行轮次")
 
 
-def _verification_requirements_guard(conn, scope, args):
+def _verification_requirements_guard(conn, scope, args, *, sql_only=False):
     """The scope-owned dispatch spec grants commands, never caller/model text."""
     supplied = args.get("required_verification_commands")
     harnesses.runtime_adapter_for_scope(scope, args).validate_verification_commands(supplied, args.get("action"))
@@ -948,22 +948,26 @@ def _verification_requirements_guard(conn, scope, args):
         return
     expected = []
     if scope.role == "execution":
-        if not scope.task_id or not scope.run_id:
-            raise util.KanpilotError("forbidden", "缺少验证要求所属执行轮次")
-        from . import headless_adapter, pi_desktop_worker
-        directory = headless_adapter.resolve_source(conn).run_dir(scope.task_id, scope.run_id)
-        path = directory / "spec.json"
-        if path.is_symlink() or not path.is_file():
-            raise util.KanpilotError("validation_failed", "缺少可信的冻结执行 spec，不能批准 Goal")
-        try:
-            frozen = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(frozen, dict) or frozen.get("task_id") != scope.task_id or frozen.get("run_id") != scope.run_id:
-                raise util.KanpilotError("forbidden", "验证要求不属于授权执行轮次")
-            if frozen.get("completion_policy", "goal_report") not in ("goal_report", "command_verification"):
-                raise util.KanpilotError("validation_failed", "冻结执行 spec 的完成策略无效")
-            expected = pi_desktop_worker.required_verification_commands(frozen)
-        except (OSError, ValueError, UnicodeDecodeError) as exc:
-            raise util.KanpilotError("validation_failed", "无法读取冻结验证要求") from exc
+        if not scope.task_id and not scope.run_id:
+            from . import release_verification
+            expected = release_verification.trusted_runtime_commands(conn, scope, args, sql_only=sql_only)
+        else:
+            if not scope.task_id or not scope.run_id:
+                raise util.KanpilotError("forbidden", "缺少验证要求所属执行轮次")
+            from . import headless_adapter, pi_desktop_worker
+            directory = headless_adapter.resolve_source(conn).run_dir(scope.task_id, scope.run_id)
+            path = directory / "spec.json"
+            if path.is_symlink() or not path.is_file():
+                raise util.KanpilotError("validation_failed", "缺少可信的冻结执行 spec，不能批准 Goal")
+            try:
+                frozen = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(frozen, dict) or frozen.get("task_id") != scope.task_id or frozen.get("run_id") != scope.run_id:
+                    raise util.KanpilotError("forbidden", "验证要求不属于授权执行轮次")
+                if frozen.get("completion_policy", "goal_report") not in ("goal_report", "command_verification"):
+                    raise util.KanpilotError("validation_failed", "冻结执行 spec 的完成策略无效")
+                expected = pi_desktop_worker.required_verification_commands(frozen)
+            except (OSError, ValueError, UnicodeDecodeError) as exc:
+                raise util.KanpilotError("validation_failed", "无法读取冻结验证要求") from exc
     if (supplied or expected) and supplied != expected:
         raise util.KanpilotError("forbidden", "验证命令要求与授权执行 spec 不符")
 
@@ -978,6 +982,9 @@ def _runtime_guard(conn, scope, tool, args):
         if tool == "kp_runtime_input_respond":
             from .execution_questions import validate_wire_answers
             validate_wire_answers(args["answers"], args["session_id"], args["request_id"], args["expected_tool_call_id"])
+            if not scope.task_id and not scope.run_id:
+                from .release_verification_questions import trusted_runtime_input
+                trusted_runtime_input(conn, scope, args)
     if args.get("scope_id") != scope.scope_id:
         raise util.KanpilotError("forbidden", "scope_id does not match grant")
     if tool == "kp_runtime_session_create":
@@ -1058,13 +1065,34 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         conn_file = scope.connection_file or (scope.runtime_config or {}).get("connection_file") or str(Path(constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE).expanduser())
         ctx = cli.Context(db_path)
         try:
+            # Only the built-in independent verification reservation can reuse
+            # the full source preflight. Keep its scope strings frozen while
+            # SQL authority is rechecked under the reservation lock.
+            release_scope_keys = ('scope_id', 'invocation_id', 'role', 'task_id', 'run_id',
+                                  'request_id', 'project_path', 'connection_file', 'runtime_config')
+            release_scope_snapshot = (util.jdump({key: getattr(scope, key, None) for key in release_scope_keys})
+                if tool_name in ('kp_runtime_proposal_resolve', 'kp_runtime_input_respond') and scope.role == 'execution'
+                and not scope.task_id and not scope.run_id else None)
+            def unchanged_release_scope():
+                if (release_scope_snapshot is not None and release_scope_snapshot !=
+                        util.jdump({key: getattr(scope, key, None) for key in release_scope_keys})):
+                    raise util.KanpilotError('forbidden', '独立验证 runtime 预检后作用域已变化')
             _runtime_guard(ctx.conn, scope, tool_name, arguments)
+            unchanged_release_scope()
             def authorization_guard(conn):
                 _scope_valid(scope_manager, scope)
                 if tool_name == "kp_runtime_proposal_resolve":
-                    _verification_requirements_guard(conn, scope, arguments)
+                    unchanged_release_scope()
+                    if release_scope_snapshot is not None:
+                        _verification_requirements_guard(conn, scope, arguments, sql_only=True)
+                    else:
+                        _verification_requirements_guard(conn, scope, arguments)
                 if tool_name == "kp_runtime_proposal_resolve" and arguments.get("goal_continuation"):
                     _goal_continuation_task_guard(conn, scope, arguments)
+                if tool_name == 'kp_runtime_input_respond' and release_scope_snapshot is not None:
+                    unchanged_release_scope()
+                    from .release_verification_questions import trusted_runtime_input
+                    trusted_runtime_input(conn, scope, arguments, sql_only=True)
             ctx.conn.authorization_guard = authorization_guard
             readers = {
                 "kp_runtime_capabilities": lambda: adapter.call("capabilities", conn_file),

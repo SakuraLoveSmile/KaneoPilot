@@ -28,6 +28,34 @@ struct ExecutionAnswerFixtures {
     static func response(_ value: ExecutionQuestion?) -> ExecutionQuestionCommandResponse {
         ExecutionQuestionCommandResponse(taskId: "task", runId: value?.runId ?? "run-1", executionQuestion: value)
     }
+    static func verificationQuestion(verification: String = "verification-1", context: String = "context-1",
+                                     state: String = "open", delivery: String = "none",
+                                     draft: [ExecutionAnswer] = [], submitted: ExecutionQuestion.Submitted? = nil) -> ExecutionQuestion {
+        var value: [String: Any] = [
+            "request_id": "ask-1", "run_id": "run-1", "session_id": "session", "turn_id": "turn",
+            "tool_call_id": "call", "source": "pi_desktop", "questions_sha256": "sha",
+            "answerable": true, "state": state, "delivery": delivery,
+            "opened_at": "2026-10-22T00:00:00Z", "wait_seconds": 42, "observer_alive": true, "queued": 0,
+            "verification_id": verification, "context_sha256": context, "phase": "planning",
+            "questions": [["id": "q0", "title": "冻结命令失败后如何处理？", "description": "", "multi_select": false,
+                "allow_custom": true, "required": false, "options": [["id": "o0", "label": "如实记录", "description": ""]]]],
+            "draft": draft.map(\.payload),
+        ]
+        if let submitted {
+            value["submitted"] = ["answers": submitted.answers.map(\.payload), "operation_id": submitted.operationId,
+                "at": submitted.at, "by": submitted.by]
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try! decoder.decode(ExecutionQuestion.self, from: JSONSerialization.data(withJSONObject: value))
+    }
+    static func verificationResponse(_ value: ExecutionQuestion) -> ExecutionQuestionCommandResponse {
+        var reply = response(nil)
+        reply.verificationId = value.verificationId
+        reply.contextSha256 = value.contextSha256
+        reply.releaseVerificationQuestion = value
+        return reply
+    }
     static func store(_ value: ExecutionQuestion? = nil,
                       command: @escaping (String, [String: Any]) async throws -> ExecutionQuestionCommandResponse = { _, _ in response(question()) },
                       reconnect: @escaping () async throws -> Void = {},
@@ -35,6 +63,10 @@ struct ExecutionAnswerFixtures {
         ExecutionAnswerStore(taskID: "task", question: value ?? question(), command: command, reconnect: reconnect, refresh: refresh)
     }
     static func main() async {
+        check(verificationQuestion().identity != verificationQuestion(verification: "verification-2").identity,
+              "independent verification attempts cannot share an answer form identity")
+        check(verificationQuestion().identity != verificationQuestion(context: "changed-context").identity,
+              "verification frozen context binds the answer form")
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let previewJSON = #"{"attention_id":"stable","task_id":"task","reason_code":"execution_question","question_preview":{"request_id":"ask-1","count":3,"first_title":"首题"}}"#
@@ -315,6 +347,80 @@ struct ExecutionAnswerFixtures {
                                     by: "kaneopilot"))
         check(closed.submitBlockedReason == "已回答，继续执行" && !closed.canSubmit,
               "closed record reports its status instead of a missing answer")
+        let verifyAnswers = [ExecutionAnswer(questionId: "q0", optionIds: ["o0"], text: "", skipped: false)]
+        var verificationCommands: [String] = []
+        let verification = store(verificationQuestion(), command: { name, body in
+            verificationCommands.append(name)
+            check(body["task_id"] as? String == "task" && body["verification_id"] as? String == "verification-1"
+                && body["expected_context_sha256"] as? String == "context-1"
+                && body["request_id"] as? String == "ask-1" && body["questions_sha256"] as? String == "sha"
+                && body["run_id"] == nil, "verification commands use their own frozen attempt, never execution routing")
+            if name == "save-release-verification-answers" {
+                check(body["operation_id"] == nil, "saving a verification draft never sends an answer")
+                return verificationResponse(verificationQuestion(draft: verifyAnswers))
+            }
+            check(name == "submit-release-verification-answers" && body["operation_id"] is String,
+                  "verification submission uses its dedicated command and operation")
+            return verificationResponse(verificationQuestion(state: "answered", delivery: "accepted", draft: verifyAnswers))
+        }, refresh: { verificationQuestion(state: "answered", delivery: "accepted", draft: verifyAnswers) })
+        check(!verification.canSubmit && !verification.canStop
+            && verification.question.sourceDescription == "Plus 补验证规划", "verification begins unanswered and cannot stop the original execution")
+        verification.toggleOption("o0", questionID: "q0")
+        let verificationSaved = await verification.saveNow()
+        check(verificationSaved && verificationCommands == ["save-release-verification-answers"] && !verification.dirty,
+              "verification draft saves locally without submitting")
+        await verification.submit()
+        check(verificationCommands == ["save-release-verification-answers", "submit-release-verification-answers"]
+            && verification.question.state == "answered" && verification.inputsLocked,
+              "verification answer response updates the same form without touching execution commands")
+        let switched = store(verificationQuestion())
+        check(switched.canConfirmSkip(taskID: "task", current: verificationQuestion())
+            && !switched.canConfirmSkip(taskID: "other", current: verificationQuestion())
+            && !switched.canConfirmSkip(taskID: "task", current: verificationQuestion(verification: "verification-2"))
+            && !switched.canConfirmSkip(taskID: "task", current: verificationQuestion(state: "answered")),
+              "skip confirmation is bound to its original task, attempt and still-open request")
+        switched.toggleOption("o0", questionID: "q0")
+        switched.observe(current: verificationQuestion(verification: "verification-2"), currentRunID: "run-1", readOnly: false)
+        check(switched.obsolete && switched.dirty && switched.answers == verifyAnswers,
+              "same source run with a new verification keeps the old draft read-only")
+        var verificationSends = 0, verificationReads = 0
+        let uncertainVerification = store(verificationQuestion(draft: verifyAnswers), command: { name, body in
+            if name == "submit-release-verification-answers" {
+                verificationSends += 1
+                throw CoreError.timedOut(command: name)
+            }
+            check(name == "reconcile-release-verification-answers"
+                && body["verification_id"] as? String == "verification-1" && body["answers"] == nil,
+                  "verification unknown reconciliation is a scoped read without an answer")
+            verificationReads += 1
+            return verificationResponse(verificationQuestion(delivery: "unknown", draft: verifyAnswers,
+                submitted: .init(answers: verifyAnswers, operationId: "op", at: "now", by: "kaneopilot")))
+        })
+        await uncertainVerification.submit()
+        await uncertainVerification.reconcile()
+        await uncertainVerification.stop()
+        check(verificationSends == 1 && verificationReads == 2 && uncertainVerification.unknown
+            && uncertainVerification.answers == verifyAnswers && !uncertainVerification.canStop,
+              "unknown verification answers stay frozen; reads and stop never resend or target the original run")
+        let wrongVerificationResponse = store(verificationQuestion(), command: { _, _ in
+            verificationResponse(verificationQuestion(verification: "verification-2"))
+        })
+        wrongVerificationResponse.toggleOption("o0", questionID: "q0")
+        let wrongSaved = await wrongVerificationResponse.saveNow()
+        check(!wrongSaved && wrongVerificationResponse.possiblyStale && wrongVerificationResponse.dirty,
+              "a response from another verification cannot consume the local draft")
+        await wrongVerificationResponse.reconcile()
+        check(wrongVerificationResponse.possiblyStale && wrongVerificationResponse.dirty
+            && wrongVerificationResponse.inputsLocked && wrongVerificationResponse.error != nil,
+              "reconciliation cannot clear a rejected verification response or unlock its draft")
+        let wrongSubmitResponse = store(verificationQuestion(), command: { _, _ in
+            verificationResponse(verificationQuestion(verification: "verification-2"))
+        })
+        wrongSubmitResponse.toggleOption("o0", questionID: "q0")
+        await wrongSubmitResponse.submit()
+        check(wrongSubmitResponse.possiblyStale && wrongSubmitResponse.dirty && wrongSubmitResponse.unknown
+            && wrongSubmitResponse.inputsLocked && wrongSubmitResponse.answers == verifyAnswers,
+              "submission from another verification does not confirm saving or sending the local answer")
         print("PASS execution answers:partial local drafts; single/custom exclusivity; ordered multiselect; skip; identity switch; unknown freezes and read-only reconcile; explicit same-answer retry; closed and invalid forms; read failure retention; stop no resend; observer reconnect; busy observations; late reload rejection; terminal authority; in-flight answer freeze")
     }
 }

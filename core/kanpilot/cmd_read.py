@@ -184,7 +184,9 @@ def cmd_recover_execution_goals(ctx, payload: dict) -> dict:
                 # A failed read is not permission to resend or unblock a task.
                 goal_recoveries.append({"task_id": task["task_id"],
                                         "status": "deferred", "code": exc.code})
-    return {"goal_recoveries": goal_recoveries}
+    from . import release_verification
+    return {"goal_recoveries": goal_recoveries,
+            "release_verifications": release_verification.recover_current(ctx)}
 
 
 def cmd_tick(ctx, payload: dict) -> dict:

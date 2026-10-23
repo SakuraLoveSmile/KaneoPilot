@@ -236,12 +236,16 @@ def _identity(ctx, payload):
     util.require(not core.automation_of(task).get("manual_takeover", False),
                  "任务已转为人工处理", "conflict")
     extra, delivery = db.task_extra(task), core.delivery_of(task)
+    from . import review_delivery
+    if db.request_payload(db.get_request(ctx.conn, payload["request_id"])).get("manual_review_delivery_id"):
+        util.require(review_delivery.allowed(ctx.conn, task, db.get_request(ctx.conn, payload["request_id"])),
+                     "手动继续交付的授权、评审或请求身份已变化", "conflict")
     history = extra.get("review_history") or []
     review = history[-1] if history and isinstance(history[-1], dict) else {}
     util.require(extra.get("review_conclusion") == "pass" and review.get("conclusion") == "pass"
                  and review.get("execution_run_id") == task["run_id"]
                  and review.get("head_sha") == delivery.get("head_sha")
-                 and review.get("fix_round") == core.automation_of(task).get("fix_round", 0)
+                 and review_delivery.review_round_matches(task, review)
                  and review.get("review_key") and review["review_key"] == task["review_key"]
                  and review.get("report_path") and review["report_path"] == task["review_report_path"]
                  and review.get("report_sha256") and review["report_sha256"] == task["review_report_sha256"]
@@ -283,9 +287,14 @@ def _failure(ctx, payload, task, delivery, failure):
         fresh = _fresh(ctx, payload, task, delivery)
         message = gh_client.redact(failure.message)
         code = None
+        probe_timeout = False
         if isinstance(failure, git_delivery.GitDeliveryError):
             if failure.code == "branch_diverged":
                 code = "branch_diverged"
+            elif failure.code in ("git_probe_timeout", "git_probe_failed"):
+                probe_timeout = failure.code == "git_probe_timeout"
+            elif failure.code in ("origin_missing", "origin_not_github", "git_unavailable"):
+                code = "gh_unavailable"
             elif failure.code != "push_failed":
                 code = "delivery_commit_failed"
         elif failure.kind == "auth":
@@ -302,7 +311,7 @@ def _failure(ctx, payload, task, delivery, failure):
             core.update_delivery(ctx.conn, fresh, ctx.now_iso, publish_failures=failures,
                                  next_sync_at=util.plus_seconds(300, ctx.now))
             if failures >= 3:
-                code = "gh_unavailable"
+                code = "gh_timeout" if probe_timeout else "gh_unavailable"
         if code:
             core.block_task(ctx.conn, fresh, ctx.now_iso, message, code,
                             "kaneo-delivery", stage="delivery")
@@ -341,9 +350,7 @@ def _verify_pr_identity(pr, repo, delivery, pushed_sha):
 
 
 def _repository(task, delivery):
-    repo = git_delivery.origin_github_repo(task["repository"])
-    if not repo:
-        raise gh_client.GhError("rejected", "origin 不是有效 GitHub 仓库")
+    repo = git_delivery.require_github_origin(task["repository"])
     if delivery.get("pr_url"):
         url = urlsplit(delivery["pr_url"])
         expected = "/" + repo + "/pull/" + str(delivery.get("pr_number"))
@@ -419,15 +426,24 @@ def _publish(ctx, payload, task, delivery, contract):
             _fresh(ctx, payload, task, delivery)
         boundary()
         client = remote.get_client()
-        marker = "[kaneopilot:delivery:" + task["task_id"] + "]"
+        action_id = delivery.get("build_failure_action_id")
+        marker = ("[kaneopilot:delivery:" + task["task_id"]
+                  + (":build:" + action_id + ":pr:" + str(pr["number"]) if action_id else "") + "]")
         boundary()
         comment = remote.find_marker_comment(client, task["task_id"], marker)
         content = marker + " 已创建 PR：" + pr["url"]
+        def verify_comment(value):
+            if value is not None and action_id and (not value.get("id") or value.get("content") != content):
+                raise gh_client.GhError("rejected", "构建修复 PR 回写评论与冻结 PR 地址不符")
+            return value
+        verify_comment(comment)
+        def observe_comment(_):
+            return verify_comment(remote.find_marker_comment(client, task["task_id"], marker))
         if not comment:
             boundary()
             _write_once(ctx, task, delivery, "kaneo_comment", {"content": content}, boundary,
                 lambda: remote.post_comment(client, task["task_id"], content),
-                lambda _: remote.find_marker_comment(client, task["task_id"], marker))
+                observe_comment)
         else:
             _reconcile_observed(ctx, task, delivery, "kaneo_comment", {"content": content}, comment, boundary)
     except _UnknownDelivery as exc:
@@ -504,12 +520,16 @@ def _sync(ctx, payload, task, delivery, contract):
         return _closed(ctx, payload, task, delivery, pr)
     def verify_repository():
         boundary()
-        util.require(_repository(task, delivery) == repo,
-                     "交付期间 GitHub 仓库身份已变化，未提交自动合并", "conflict")
+        if _repository(task, delivery) != repo:
+            raise git_delivery.GitDeliveryError("branch_diverged", "交付期间 GitHub 仓库身份已变化，未提交自动合并")
         boundary()
-    pr, auto_merge = pr_auto_merge.reconcile(ctx, task, delivery, repo, pr, policy, boundary,
-        lambda observed: _verify_pr_identity(observed, repo, delivery, delivery["pushed_sha"]),
-        verify_repository, lambda: pr_auto_merge.source_eligibility(task, live))
+    try:
+        pr, auto_merge = pr_auto_merge.reconcile(ctx, task, delivery, repo, pr, policy, boundary,
+            lambda observed: _verify_pr_identity(observed, repo, delivery, delivery["pushed_sha"]),
+            verify_repository, lambda: pr_auto_merge.source_eligibility(task, live))
+    except (git_delivery.GitDeliveryError, gh_client.GhError) as exc:
+        boundary()
+        return _failure(ctx, payload, task, delivery, exc)
     boundary()
     with db.write_txn(ctx.conn):
         fresh = boundary()

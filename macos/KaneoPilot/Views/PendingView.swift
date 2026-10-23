@@ -301,10 +301,20 @@ struct PendingView: View {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
-                Text(attentionReason(task))
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if let item = questionAttention(task), let preview = item.questionPreview {
+                    Text("\(item.questionLabel) · \(preview.count)题")
+                        .font(.kpSmall)
+                        .foregroundStyle(.orange)
+                    Text(preview.firstTitle)
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text(attentionReason(task))
+                        .font(.kpSmall)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
         }
         .padding(.vertical, Spacing.s)
@@ -313,7 +323,14 @@ struct PendingView: View {
         .accessibilityLabel("\(task.title ?? task.taskId)，\(attentionReason(task))，双击查看详情")
     }
 
+    private func questionAttention(_ task: TaskSummary) -> AttentionItem? {
+        model.attentionItems.first { $0.taskId == task.taskId && $0.questionPreview != nil }
+    }
+
     private func attentionReason(_ task: TaskSummary) -> String {
+        if let item = questionAttention(task), let preview = item.questionPreview {
+            return "\(item.questionLabel) · \(preview.count)题：\(preview.firstTitle)"
+        }
         if let exception = task.exception {
             return AutomationPresentation.title(exception.failureCode) ?? exception.label ?? exception.detail ?? "查看异常并决定下一步"
         }

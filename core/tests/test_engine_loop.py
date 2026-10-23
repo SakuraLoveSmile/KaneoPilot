@@ -325,6 +325,131 @@ class TestReconcile(KanpilotTestCase):
              if a["task_id"] == "taskengmanu00000000001"], [])
 
 
+class TestDeliverySyncSchedule(KanpilotTestCase):
+    """The live engine must respect the deadline written by delivery-sync."""
+
+    _automate = TestReconcile._automate
+
+    def _delivery(self, *, failures=0, contract=True):
+        now = util.now_dt()
+        tid = self._automate(uuid.uuid4().hex[:24], status="in_review")
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task = db.require_task(conn, tid)
+                db.update_task(conn, tid, util.to_iso(now), run_id="execution-1", review_key="review-1")
+                db.set_extra(conn, db.require_task(conn, tid), util.to_iso(now), review_conclusion="pass")
+                delivery = dict(mode="pr", head_sha="a" * 40, pushed_sha="a" * 40,
+                                pr_number=12, publish_failures=failures,
+                                last_sync_at=util.to_iso(now), next_sync_at=util.plus_seconds(300, now))
+                if contract:
+                    delivery["stage_contracts"] = {"sync": {"inputs": {
+                        "head_sha": "a" * 40, "execution_run_id": "execution-1", "review_key": "review-1"}}}
+                core.update_delivery(conn, task, util.to_iso(now), **delivery)
+        finally:
+            conn.close()
+        return tid, now
+
+    def _delivery_requests(self, tid):
+        return [r for r in self.requests() if r["task_id"] == tid and r["kind"] == "delivery"]
+
+    def test_waits_for_saved_deadline_then_schedules_once(self):
+        for failures in (0, 1):
+            with self.subTest(publish_failures=failures):
+                tid, now = self._delivery(failures=failures)
+                rec = loop.Reconciler(self.db_path, mode="live")
+                for seconds in (0, 60, 299):
+                    summary = rec.reconcile_once(now=now + timedelta(seconds=seconds))
+                    self.assertFalse(any(a.get("executed") for a in summary["actions"]))
+                    self.assertEqual(self._delivery_requests(tid), [])
+                rec.reconcile_once(now=now + timedelta(seconds=300))
+                rec.reconcile_once(now=now + timedelta(seconds=301))
+                requests = self._delivery_requests(tid)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["status"], "queued")
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        db.update_request(conn, requests[0]["request_id"], util.to_iso(now), status="claimed")
+                    rec.reconcile_once(now=now + timedelta(seconds=302))
+                    self.assertEqual(len(self._delivery_requests(tid)), 1)
+                finally:
+                    conn.close()
+
+    def test_terminal_request_does_not_bypass_delivery_backoff(self):
+        for outcome in ("succeeded", "failed"):
+            with self.subTest(outcome=outcome):
+                tid, now = self._delivery(failures=1)
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        request, _ = db.create_request(conn, util.to_iso(now), "delivery", "delivery:" + tid,
+                                                       task_id=tid, requested_by="scheduler")
+                        db.update_request(conn, request["request_id"], util.to_iso(now), status=outcome,
+                            result_json=util.jdump({"failure_code": "remote_unavailable"}) if outcome == "failed" else None)
+                finally:
+                    conn.close()
+                rec = loop.Reconciler(self.db_path, mode="live")
+                summary = rec.reconcile_once(now=now + timedelta(seconds=60))
+                task_actions = [a for a in summary["actions"] if a["task_id"] == tid]
+                self.assertFalse(any(a.get("executed") for a in task_actions))
+                self.assertEqual(len(self._delivery_requests(tid)), 1)
+
+    def test_matching_publish_retry_before_push_keeps_deadline(self):
+        tid, now = self._delivery(failures=1)
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task = db.require_task(conn, tid)
+                delivery = core.delivery_of(task)
+                core.update_delivery(conn, task, util.to_iso(now), pushed_sha=None, pr_number=None,
+                                     stage_contracts={"publish": delivery["stage_contracts"]["sync"]})
+        finally:
+            conn.close()
+        rec = loop.Reconciler(self.db_path, mode="live")
+        rec.reconcile_once(now=now + timedelta(seconds=60))
+        self.assertEqual(self._delivery_requests(tid), [])
+        rec.reconcile_once(now=now + timedelta(seconds=300))
+        self.assertEqual(len(self._delivery_requests(tid)), 1)
+
+    def test_user_deadline_update_is_read_on_next_tick(self):
+        tid, now = self._delivery()
+        rec = loop.Reconciler(self.db_path, mode="live")
+        rec.reconcile_once(now=now)
+        self.assertEqual(self._delivery_requests(tid), [])
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                core.update_delivery(conn, db.require_task(conn, tid), util.to_iso(now),
+                                     next_sync_at=util.to_iso(now))
+        finally:
+            conn.close()
+        rec.reconcile_once(now=now)
+        self.assertEqual(len(self._delivery_requests(tid)), 1)
+
+    def test_new_delivery_identity_does_not_inherit_previous_deadline(self):
+        for key, value in (("head_sha", "b" * 40), ("run_id", "execution-2"), ("review_key", "review-2")):
+            with self.subTest(changed=key):
+                tid, now = self._delivery()
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        task = db.require_task(conn, tid)
+                        if key == "head_sha":
+                            core.update_delivery(conn, task, util.to_iso(now), head_sha=value)
+                        else:
+                            db.update_task(conn, tid, util.to_iso(now), **{key: value})
+                    loop.Reconciler(self.db_path, mode="live").reconcile_once(now=now)
+                    self.assertEqual(len(self._delivery_requests(tid)), 1)
+                finally:
+                    conn.close()
+
+    def test_legacy_deadline_without_contract_still_waits(self):
+        tid, now = self._delivery(contract=False)
+        loop.Reconciler(self.db_path, mode="live").reconcile_once(now=now)
+        self.assertEqual(self._delivery_requests(tid), [])
+
+
 class TestRunLoop(KanpilotTestCase):
     def test_lease_lifecycle_and_release(self):
         rec = loop.Reconciler(self.db_path, mode="shadow", log=lambda m: None)

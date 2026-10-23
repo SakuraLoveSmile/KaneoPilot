@@ -210,7 +210,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     #    模型覆盖（engine/fallback.py，scenarios.md #5）在此冻结进轮次；无覆盖时
     #    与 snapshot(conn) 完全一致（旧数据零迁移），设置变更仍只影响新轮次。
     config_snapshot = (repair["action_config"]
-                       if repair and repair.get("source_kind") == "merge_conflict"
+                       if repair and repair.get("source_kind") in ("merge_conflict", "build_failure")
                        else exec_config.snapshot_with_model_override(conn, task))
     backend = config_snapshot.get("backend") or "pi"
     if backend == "pi_desktop":
@@ -227,11 +227,21 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     delivery = dict(core.delivery_of(task), repository=task["repository"])
     manual_branch = (core.automation_of(task).get("manual_takeover") is True
                      and bool(delivery.get("branch")) and bool(delivery.get("worktree_path")))
+    if core.is_pr_delivery(task) and not manual_branch:
+        try:
+            repository = git_delivery.require_github_origin(task["repository"], check_push=True)
+        except git_delivery.GitDeliveryError as exc:
+            if exc.code in ("git_probe_timeout", "git_probe_failed"):
+                raise DispatchRemoteFailed(exc.message) from exc
+            raise DispatchCheckFailed(exc.message) from exc
     user_replan = core.is_user_replan(task)
     state_sha = core.automation_of(task).get("replan_worktree_sha256")
     retry = core.execution_retry_of(task)
-    if repair:
+    if repair and not review_repair.retry_of(task):
         try:
+            if repair.get("source_kind") == "build_failure":
+                from . import task_ai_action
+                task_ai_action.ensure_worktree(conn, task)
             recovery = repair.get("verification_recovery")
             if repair.get("source_kind") == "merge_conflict" and recovery:
                 from . import cmd_queue, task_ai_action
@@ -269,6 +279,16 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
                 _require(git_delivery.worktree_state_sha256(delivery) == state_sha,
                          "重新规划后工作树内容已变化，请重新准备规划材料")
         except git_delivery.GitDeliveryError as exc:
+            raise DispatchCheckFailed(exc.message) from exc
+    if core.is_pr_delivery(task) and not manual_branch:
+        try:
+            # Build-failure actions create their frozen worktree above. Check
+            # its actual (possibly per-worktree) push configuration only now.
+            push_repository = git_delivery.require_github_origin(delivery["worktree_path"], check_push=True)
+            _require(repository.lower() == push_repository.lower(), "执行工作树与项目的 GitHub 仓库身份不一致")
+        except git_delivery.GitDeliveryError as exc:
+            if exc.code in ("git_probe_timeout", "git_probe_failed"):
+                raise DispatchRemoteFailed(exc.message) from exc
             raise DispatchCheckFailed(exc.message) from exc
     return {
         **({"review_repair": repair} if repair else {}),

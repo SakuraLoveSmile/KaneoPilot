@@ -301,7 +301,8 @@ final class AppViewModel: ObservableObject {
                     && taskResp.task.readOnly != true)
         }
         for (store, version) in executionVersions where store.generation == version {
-            store.observe(current: taskResp.task.executionQuestion, currentRunID: taskResp.task.runId,
+            store.observe(current: store.question.isReleaseVerification
+                ? taskResp.task.releaseVerificationQuestion : taskResp.task.executionQuestion, currentRunID: taskResp.task.runId,
                           readOnly: taskResp.task.readOnly == true)
         }
         return (taskResp.task, list)
@@ -413,6 +414,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil, expectedPlanSHA256: String? = nil,
+                 expectedReviewKey: String? = nil,
                  verificationReportSupplement: Bool = false,
                  onError: ((String) -> Void)? = nil) async {
         let executionRetry = (action == "resume" || action == "retry_verification") && expectedExecutionRunID != nil
@@ -426,6 +428,7 @@ final class AppViewModel: ObservableObject {
             if let note, !note.isEmpty { payload["note"] = note }
             if let expectedExecutionRunID { payload["expected_execution_run_id"] = expectedExecutionRunID }
             if let expectedPlanSHA256 { payload["expected_plan_sha256"] = expectedPlanSHA256 }
+            if let expectedReviewKey { payload["expected_review_key"] = expectedReviewKey }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
             return nil
         }
@@ -459,16 +462,16 @@ final class AppViewModel: ObservableObject {
     }
 
     /// 只读预检，不调用模型；候选指纹须原样交给用户确认后的 start。
-    func prepareTaskAIAction(taskID: String) async throws -> TaskAIActionCandidate {
+    func prepareTaskAIAction(taskID: String, kind: String = "merge_conflict") async throws -> TaskAIActionCandidate {
         guard actionInFlight == nil else {
             throw CoreError.exited(status: 1, message: "有操作正在进行，请稍后重试。", code: "conflict")
         }
-        actionInFlight = "正在核对 PR…"
+        actionInFlight = kind == "build_failure" ? "正在核对构建…" : "正在核对 PR…"
         defer { actionInFlight = nil }
         let response = try await client.run("prepare-task-ai-action", payload: [
-            "task_id": taskID, "kind": "merge_conflict"
+            "task_id": taskID, "kind": kind
         ], timeout: 120, as: PrepareTaskAIActionResponse.self)
-        guard response.candidate.taskId == taskID, response.candidate.kind == "merge_conflict" else {
+        guard response.candidate.taskId == taskID, response.candidate.kind == kind else {
             throw CoreError.exited(status: 1, message: "AI 处理候选身份不匹配，请重新核对。", code: "conflict")
         }
         return response.candidate
@@ -502,11 +505,96 @@ final class AppViewModel: ObservableObject {
         let candidate = try await client.run("prepare-task-release", payload: ["task_id": taskID],
                                             timeout: 300, as: PrepareTaskReleaseResponse.self)
         guard candidate.taskId == taskID, candidate.release.canStart,
-              candidate.release.state != "unknown", !candidate.contextSha256.isEmpty else {
+              candidate.release.state != "unknown", candidate.contextSha256?.isEmpty == false else {
             throw CoreError.exited(status: 1, message: candidate.release.reason, code: "conflict")
         }
         return candidate
     }
+
+    // BEGIN EXTERNAL BUILD REPAIR METHODS
+    func prepareExternalBuildRepair(taskID: String, prNumber: Int) async throws -> PrepareExternalBuildRepairResponse {
+        guard actionInFlight == nil else { throw CoreError.exited(status: 1, message: "有操作正在进行，请稍后重试。", code: "conflict") }
+        actionInFlight = "核对已合并修复"
+        defer { actionInFlight = nil }
+        let result = try await client.run("prepare-external-build-repair", payload: ["task_id": taskID, "pr_number": prNumber], timeout: 300, as: PrepareExternalBuildRepairResponse.self)
+        guard result.taskId == taskID, result.candidate.taskId == taskID, result.candidate.prNumber == prNumber,
+              !result.contextSha256.isEmpty, result.contextSha256 == result.candidate.contextSha256 else {
+            throw CoreError.exited(status: 1, message: "修复候选身份不匹配，请重新核对。", code: "conflict")
+        }
+        return result
+    }
+
+    func acceptExternalBuildRepair(candidate: PrepareExternalBuildRepairResponse, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，修复尚未关联。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("关联已合并修复", onError: onError) {
+            let result = try await self.client.run("accept-external-build-repair", payload: ["task_id": candidate.taskId,
+                "pr_number": candidate.candidate.prNumber, "expected_context_sha256": candidate.contextSha256, "confirm": true], timeout: 300, as: AcceptExternalBuildRepairResponse.self)
+            guard result.ok else { throw CoreError.exited(status: 1, message: "修复尚未确认关联，请刷新检查。", code: "conflict") }
+            return "已关联修复；验证与新批次尚未启动"
+        }
+    }
+
+    func prepareReleaseVerification(taskID: String, restarting: Bool = false) async throws -> PrepareReleaseVerificationResponse {
+        guard actionInFlight == nil else { throw CoreError.exited(status: 1, message: "有操作正在进行，请稍后重试。", code: "conflict") }
+        actionInFlight = "准备完整验证"
+        defer { actionInFlight = nil }
+        let result = try await client.run(restarting ? "prepare-restart-release-verification" : "prepare-release-verification", payload: ["task_id": taskID], timeout: 300, as: PrepareReleaseVerificationResponse.self)
+        guard result.taskId == taskID, !result.contextSha256.isEmpty,
+              result.verification.contextSha256 == result.contextSha256,
+              result.verification.state == "prepared", result.verification.targetSha?.isEmpty == false,
+              result.verification.commands?.isEmpty == false, result.verification.modelSummary?.label.isEmpty == false else {
+            throw CoreError.exited(status: 1, message: result.verification.reason ?? "验证候选不完整，请重新准备。", code: "conflict")
+        }
+        guard !restarting || (result.expectedVerificationId?.isEmpty == false && result.expectedContextSha256?.isEmpty == false && result.expectedReportSha256?.isEmpty == false) else {
+            throw CoreError.exited(status: 1, message: "原验证及报告身份不完整，请重新核对。", code: "conflict")
+        }
+        guard restarting == result.isRestart else {
+            throw CoreError.exited(status: 1, message: "验证操作身份不匹配，请重新核对。", code: "conflict")
+        }
+        return result
+    }
+
+    func startReleaseVerification(candidate: PrepareReleaseVerificationResponse, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，验证尚未启动。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("开始完整验证", onError: onError) {
+            var payload: [String: Any] = ["task_id": candidate.taskId, "expected_context_sha256": candidate.contextSha256]
+            if candidate.isRestart {
+                guard let verificationID = candidate.expectedVerificationId, let context = candidate.expectedContextSha256,
+                      let report = candidate.expectedReportSha256 else {
+                    throw CoreError.exited(status: 1, message: "原验证及报告身份不完整，请重新准备。", code: "conflict")
+                }
+                payload["expected_verification_id"] = verificationID
+                payload["expected_context_sha256"] = context
+                payload["expected_report_sha256"] = report
+            }
+            let result = try await self.client.run(candidate.isRestart ? "restart-release-verification" : "start-release-verification",
+                payload: payload, timeout: 300, as: ReleaseVerificationMutationResponse.self)
+            return result.verification.reason ?? (candidate.verification.modelSummary?.permissionMode == "auto"
+                ? "独立验证已安排，将自动继续验证" : "独立验证已安排，可核对验证结果")
+        }
+    }
+
+    func syncReleaseVerification(taskID: String, verificationID: String, onError: ((String) -> Void)? = nil) async {
+        guard actionInFlight == nil else {
+            let message = "有操作正在进行，尚未核对验证结果。"
+            if let onError { onError(message) } else { alertMessage = message }
+            return
+        }
+        await perform("核对验证结果", onError: onError) {
+            let result = try await self.client.run("sync-release-verification", payload: ["task_id": taskID,
+                "verification_id": verificationID], timeout: 300, as: ReleaseVerificationMutationResponse.self)
+            return result.verification.reason ?? result.verification.stateLabel
+        }
+    }
+    // END EXTERNAL BUILD REPAIR METHODS
 
     func startTaskRelease(candidate: PrepareTaskReleaseResponse, onError: ((String) -> Void)? = nil) async {
         guard actionInFlight == nil else {
@@ -514,9 +602,14 @@ final class AppViewModel: ObservableObject {
             if let onError { onError(message) } else { alertMessage = message }
             return
         }
+        guard let context = candidate.contextSha256, !context.isEmpty,
+              candidate.release.canStart, candidate.release.state != "unknown" else {
+            if let onError { onError(candidate.release.reason) } else { alertMessage = candidate.release.reason }
+            return
+        }
         await perform("构建并发布", onError: onError) {
             let response = try await self.client.run("start-task-release", payload: [
-                "task_id": candidate.taskId, "expected_context_sha256": candidate.contextSha256
+                "task_id": candidate.taskId, "expected_context_sha256": context
             ], timeout: 300, as: TaskReleaseMutationResponse.self)
             return response.release.reason
         }
@@ -1027,12 +1120,19 @@ final class AppViewModel: ObservableObject {
                 return try await self.client.run(command, payload: payload, as: ExecutionQuestionCommandResponse.self)
             }, reconnect: { [weak self] in
                 guard let self else { throw CoreError.coreMissing }
-                _ = try await self.client.run("round-observe", payload: ["task_id": taskID, "run_id": question.runId])
+                if let verificationID = question.verificationId, let context = question.contextSha256 {
+                    _ = try await self.client.run("reconcile-release-verification-answers", payload: [
+                        "task_id": taskID, "verification_id": verificationID, "expected_context_sha256": context,
+                        "request_id": question.requestId, "questions_sha256": question.questionsSha256,
+                    ])
+                } else {
+                    _ = try await self.client.run("round-observe", payload: ["task_id": taskID, "run_id": question.runId])
+                }
             }, refresh: { [weak self] in
                 guard let self else { return nil }
                 let (detail, _) = try await self.fetchDetail(taskID: taskID)
                 await self.refreshAll()
-                return detail.executionQuestion
+                return question.isReleaseVerification ? detail.releaseVerificationQuestion : detail.executionQuestion
             })
         executionAnswerDrafts[key] = store
         return store
@@ -1522,7 +1622,9 @@ final class AppViewModel: ObservableObject {
         case "retry": return "重试派发"
         case "answer_plan_questions": return "回答问题"
         case "answer_execution_questions": return "回答执行问题"
+        case "answer_release_verification_questions": return "回答补验证问题"
         case "skip_execution_questions": return "全部跳过并继续"
+        case "skip_release_verification_questions": return "全部跳过并继续"
         case "stop_execution": return "停止本轮"
         case "restore": return "恢复原任务"
         case "accept_duplicate": return "接受可能重复，重新派发"
@@ -1539,6 +1641,8 @@ final class AppViewModel: ObservableObject {
         case "recover_review": return "恢复评审阶段"
         case "recheck": return "重新校验"
         case "closeout_parent": return "校验并完成"
+        case "continue_delivery": return "继续交付"
+        case "sync_release": return "核对发布结果"
         case "archive": return "归档"
         case "trash": return "移入回收站"
         case "resume-auto": return "恢复自动推进"
@@ -2170,6 +2274,10 @@ final class ExecutionAnswerStore: ObservableObject {
     var canSubmit: Bool {
         !inputsLocked && !question.questions.isEmpty && question.questions.allSatisfy { isAnswered($0.id) }
     }
+    func canConfirmSkip(taskID: String, current: ExecutionQuestion?) -> Bool {
+        self.taskID == taskID && current?.identity == identity && current?.state == "open"
+            && current?.answerable == true && !inputsLocked
+    }
     /// 已选择、已填写自定义文字或明确跳过的题数；底栏进度与「还差第 N 题」共用这一口径。
     var answeredCount: Int { question.questions.filter { isAnswered($0.id) }.count }
     /// 底栏提交禁用的原因；可提交时为 nil。
@@ -2189,7 +2297,8 @@ final class ExecutionAnswerStore: ObservableObject {
             && !stopRequested && question.answerable && question.state == "open"
     }
     var canStop: Bool {
-        !working && !obsolete && !possiblyStale && !readOnly && !stopResultUnknown && !stopRequested && question.state == "open"
+        !question.isReleaseVerification && !working && !obsolete && !possiblyStale && !readOnly
+            && !stopResultUnknown && !stopRequested && question.state == "open"
     }
     var statusText: String {
         if obsolete || possiblyStale { return "可能已过期，草稿已保留" }
@@ -2311,17 +2420,39 @@ final class ExecutionAnswerStore: ObservableObject {
     }
 
     private var payload: [String: Any] {
-        ["task_id": taskID, "run_id": identity[0], "request_id": identity[3], "questions_sha256": identity[5]]
+        var body: [String: Any] = ["task_id": taskID, "request_id": question.requestId,
+                                   "questions_sha256": question.questionsSha256]
+        if let verificationID = question.verificationId {
+            body["verification_id"] = verificationID
+            body["expected_context_sha256"] = question.contextSha256
+        } else { body["run_id"] = question.runId }
+        return body
     }
 
-    private func accept(_ response: ExecutionQuestionCommandResponse) {
+    private func commandName(_ operation: String) -> String {
+        if question.isReleaseVerification {
+            return "\(operation)-release-verification-answers"
+        }
+        return operation == "reconcile" ? "reconcile-execution-question" : "\(operation)-execution-answers"
+    }
+
+    @discardableResult
+    private func accept(_ response: ExecutionQuestionCommandResponse) -> Bool {
         guard response.taskId == taskID, response.runId == identity[0] else {
             possiblyStale = true
             error = "返回的问题身份不匹配，草稿已保留"
-            return
+            return false
         }
-        guard let current = response.executionQuestion else { obsolete = true; return }
+        if question.isReleaseVerification,
+           response.verificationId != question.verificationId || response.contextSha256 != question.contextSha256 {
+            possiblyStale = true
+            error = "返回的补验证身份不匹配，草稿已保留"
+            return false
+        }
+        guard let current = question.isReleaseVerification
+            ? response.releaseVerificationQuestion : response.executionQuestion else { obsolete = true; return false }
         apply(current)
+        return !obsolete
     }
 
     private func finishWorking() {
@@ -2354,7 +2485,7 @@ final class ExecutionAnswerStore: ObservableObject {
             // Save is local only; protocol does not accept run_id on this command.
             body.removeValue(forKey: "run_id")
             body["answers"] = value.map(\.payload)
-            accept(try await command("save-execution-answers", body))
+            accept(try await command(commandName("save"), body))
             guard !obsolete, !possiblyStale else { return false }
             savedRevision = saved
             feedback = "草稿已保存"
@@ -2383,8 +2514,9 @@ final class ExecutionAnswerStore: ObservableObject {
         body["operation_id"] = operation!.id
         if skipAll && !retry { body["skip_all"] = true } else { body["answers"] = frozen.map(\.payload) }
         do {
-            accept(try await command("submit-execution-answers", body))
-            savedRevision = revision
+            if accept(try await command(commandName("submit"), body)) {
+                savedRevision = revision
+            } else { resultUnknown = true }
         } catch {
             if Self.uncertain(error) { resultUnknown = true }
             record(error)
@@ -2400,9 +2532,11 @@ final class ExecutionAnswerStore: ObservableObject {
         working = true; generation += 1
         defer { finishWorking() }
         do {
-            accept(try await command("reconcile-execution-question", ["task_id": taskID, "run_id": identity[0]]))
-            possiblyStale = false
-            error = nil
+            let body = question.isReleaseVerification ? payload : ["task_id": taskID, "run_id": question.runId]
+            if accept(try await command(commandName("reconcile"), body)) {
+                possiblyStale = false
+                error = nil
+            }
         } catch { self.error = error.coreMessage }
     }
 

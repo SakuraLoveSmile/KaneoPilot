@@ -45,7 +45,10 @@ def manual_review_repair(conn, request, task=None):
     if any(fix.get(k) != delivery.get(k) for k in ('branch', 'worktree_path')):
         return False
     if request['stage'] == 'dispatch':
-        return (fix.get('state') == 'queued' and task['run_id'] == fix.get('source_execution_run_id')
+        from . import review_repair
+        retry = review_repair.retry_of(task)
+        bound = (task['run_id'] is None and retry.get('source_run_id') == fix.get('repair_execution_run_id')) if retry else task['run_id'] == fix.get('source_execution_run_id')
+        return (fix.get('state') == 'queued' and bound
                 and db.request_payload(request).get('review_repair_key') == fix.get('review_key'))
     return (request['stage'] in ('monitor', 'review')
             and fix.get('state') == ('running' if request['stage'] == 'monitor' else 'awaiting_review')
@@ -54,7 +57,9 @@ def manual_review_repair(conn, request, task=None):
 
 def action_delivery_allowed(conn, task, request=None, *, allow_paused=False):
     """A completed user action authorizes only its exact reviewed PR result."""
-    from . import task_ai_action
+    from . import task_ai_action, review_delivery
+    if review_delivery.allowed(conn, task, request, allow_paused=allow_paused):
+        return True
     receipt = task_ai_action.delivery_continuation(task, allow_paused=allow_paused)
     if receipt is None:
         return False
@@ -74,7 +79,7 @@ def action_delivery_allowed(conn, task, request=None, *, allow_paused=False):
         return False
     execution = conn.execute("SELECT * FROM execution_rounds WHERE task_id=? AND run_id=?",
                              (task['task_id'], task['run_id'])).fetchone()
-    if (execution is None or execution['backend'] != 'pi_desktop'
+    if (execution is None or execution['backend'] != fix['action_config'].get('backend')
             or util.jload(execution['config_json']) != fix['action_config']
             or execution['worktree_path'] != fix['worktree_path']):
         return False

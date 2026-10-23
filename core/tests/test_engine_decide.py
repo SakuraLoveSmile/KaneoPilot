@@ -213,6 +213,14 @@ class TestDecideGuards(unittest.TestCase):
         self.assertTrue(d.is_block)
         self.assertEqual(d.reason, "auto_budget_exceeded")
 
+    def test_delivery_sync_awaits_saved_deadline(self):
+        snap = _snap(status="in_review", phase="delivery", condition="syncing", delivery_sync_due=False)
+        result = decide.decide(snap)
+        self.assertEqual((result.action, result.reason), (decide.AWAIT, "delivery_sync_not_due"))
+        self.assertEqual(decide.decide(dict(snap, delivery_sync_due=True)).action, decide.SYNC_DELIVERY)
+        del snap["delivery_sync_due"]
+        self.assertEqual(decide.decide(snap).action, decide.SYNC_DELIVERY)
+
     def test_capacity_gate_awaits_dispatch(self):
         d = decide.decide(_snap(status="dispatching", phase="dispatch",
                                 condition="confirmed", capacity_ok=False))

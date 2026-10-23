@@ -10,7 +10,6 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,6 +17,9 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+
+/** The pairing notice. It clears itself after a few seconds, see [KaneoPilotApp]. */
+internal const val PAIRED_NOTICE = "配对成功"
 
 data class PendingOperation(val id: String, val action: String, val taskId: String = "", val message: String = "结果待核实") {
     fun toJson() = json("id" to id, "action" to action, "task_id" to taskId, "message" to message)
@@ -62,7 +64,7 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
     private var api: MobileApi? = null
     private val epochs = RequestEpoch()
     private var foreground = false
-    private val refreshLock = Mutex()
+    private val refreshes = RefreshGate()
 
     init {
         try {
@@ -108,7 +110,14 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
             session = null, sessionReadError = null, hasMore = false, online = false, loading = false)
         refreshSoon()
     }
-    fun refreshSoon() { if (foreground) viewModelScope.launch { refresh() } }
+    /** User-initiated read: progress shows at once, and the read waits for any running read. */
+    fun refreshSoon() {
+        if (!foreground) return
+        state = state.copy(loading = true)
+        viewModelScope.launch { refreshes.user { load(userInitiated = true) } }
+    }
+    /** Foreground poll: skipped while any read runs, and never shows progress. */
+    suspend fun refreshInBackground() { refreshes.background { load(userInitiated = false) } }
     fun setNotice(value: String?) { state = state.copy(notice = value) }
     fun pair(uri: String) {
         if (state.writing || state.pending.isNotEmpty()) { state = state.copy(error = "请先核实待处理操作，再更换连接"); return }
@@ -125,7 +134,7 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
                 val nextApi = MobileApi(connection)
                 store.save(json("connection" to connection.toJson(), "pending" to JSONArray()))
                 api = nextApi
-                state = ConsoleState(connection = connection, destination = "总览", notice = "配对成功")
+                state = ConsoleState(connection = connection, destination = "总览", notice = PAIRED_NOTICE)
                 refreshSoon()
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (epochs.isCurrentPairing(ticket)) state = state.copy(loading = false, writing = false, error = safeError(e)) }
@@ -145,13 +154,14 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
     }
     private suspend fun query(client: MobileApi, type: String, args: JSONObject = JSONObject()) = withContext(Dispatchers.IO) { client.query(type, args) }
 
-    suspend fun refresh() {
-        val client = api ?: return
-        if (!foreground || !refreshLock.tryLock()) return
+    /** One read of the current page. Progress is shown only for user-initiated reads. */
+    private suspend fun load(userInitiated: Boolean) {
         val ticket = epochs.page
         val snapshot = state
-        state = state.copy(loading = true)
         try {
+            val client = api ?: return
+            if (!foreground) return
+            if (userInitiated) state = state.copy(loading = true)
             // Resolve writes independently of whether the current task/page remains readable.
             checkPending(client)
             if (epochs.page != ticket) return
@@ -202,14 +212,14 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
             }
             if (epochs.page == ticket) {
                 // Preserve drafts and pending writes updated while network reads were in flight.
-                state = next.copy(online = true, loading = false, error = null, updatedAt = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(Instant.now()),
+                state = next.copy(online = true, loading = state.loading, error = null, updatedAt = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(Instant.now()),
                     drafts = state.drafts, supplements = state.supplements, pending = state.pending, writing = state.writing, notice = state.notice,
                     readPlanIdentity = if (next.plan?.text("plan_sha256") == state.plan?.text("plan_sha256")) state.readPlanIdentity else next.readPlanIdentity)
                 seedDrafts()
             }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { if (epochs.page == ticket) state = state.copy(online = false, loading = false, error = safeError(e)) }
-        finally { refreshLock.unlock(); if (epochs.page == ticket) state = state.copy(loading = false) }
+        catch (e: Exception) { if (epochs.page == ticket) state = state.copy(online = false, error = safeError(e)) }
+        finally { if (userInitiated && epochs.page == ticket) state = state.copy(loading = false) }
     }
     fun markPlanRead(read: Boolean) {
         val task = state.task ?: return

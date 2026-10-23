@@ -889,7 +889,7 @@ struct TaskCardView: View {
     /// v2 §5.22.4：plan_execution_hold 在 todo 列覆盖为「待确认执行」
     ///（核心 board_substatus 词表不含 hold 态，display_status 才区分）。
     private var substatus: String {
-        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.status != "done", let release = task.release, release.showsTaskStatus { return release.title }
         if task.phase == "delivery", task.reviewSummary?.conclusion == "pass" {
             return task.delivery?.mode == "pr" && task.delivery?.prState?.uppercased() != "MERGED"
                 ? "待合并" : "待交付"
@@ -904,7 +904,7 @@ struct TaskCardView: View {
     /// §5 子状态配色：第六列按 exception.severity（failed 红 / blocked 橙），
     /// 前五列受阻类 orange、待修复 purple、已完成 green，其余列色。
     private var substatusColor: Color {
-        if task.status != "done", let release = task.release, release.required { return ReleasePresentation.color(release) }
+        if task.status != "done", let release = task.release, release.showsTaskStatus { return ReleasePresentation.color(release) }
         if column == .failed {
             return TaskBoardPresentation.isFailed(task) ? .red : .orange
         }

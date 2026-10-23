@@ -112,7 +112,7 @@ def _record_cost(controller, task, detail):
 
 def _complete(controller, task, detail, expected, messages):
     mode = _engine_mode(controller, task)
-    action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
+    action = core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")
     codex = detail.get("backend") == "codex"
     strict = mode == "live" or action or codex
     if mode in ("live", "shadow") or action or codex:

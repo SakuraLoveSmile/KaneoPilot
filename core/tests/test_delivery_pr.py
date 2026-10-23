@@ -64,7 +64,7 @@ class DeliveryPR(KanpilotTestCase):
         self.addCleanup(parser_patch.stop)
         real_git = git_delivery._git
         for module, name, result in ((git_delivery, "_git", real_git),
-            (git_delivery, "origin_github_repo", "owner/repo"), (gh_client, "pr_list", [self.pr()]),
+            (gh_client, "pr_list", [self.pr()]),
             (gh_client, "pr_create", self.pr()), (gh_client, "pr_view", self.pr()),
             (remote, "get_client", object()), (remote, "get_task", {"task": {"status": "in-review"}}),
             (remote, "find_marker_comment", lambda *_: self.comments[0] if self.comments else None),
@@ -415,13 +415,60 @@ class DeliveryPR(KanpilotTestCase):
     def test_origin_cannot_replace_registered_pr_repository(self):
         self.update(pr_number=7, pr_url="https://github.com/owner/repo/pull/7",
                     pushed_sha=self.delivery["head_sha"])
-        with patch.object(git_delivery, "origin_github_repo", return_value="other/repo"), patch.object(
+        with patch.object(git_delivery, "require_github_origin", return_value="other/repo"), patch.object(
                 git_delivery, "push_branch") as push:
             self.assertEqual(self.publish_delivery()["failure_code"], "branch_diverged")
         push.assert_not_called()
         self.assertFalse(self.posts)
         self._reset_delivery_stage()
-        with patch.object(git_delivery, "origin_github_repo", return_value="other/repo"), patch.object(
+        with patch.object(git_delivery, "require_github_origin", return_value="other/repo"), patch.object(
                 gh_client, "pr_view") as view:
             self.assertEqual(self.sync()["failure_code"], "branch_diverged")
         view.assert_not_called()
+
+    def test_origin_probe_timeout_retries_without_republishing_merged_pr(self):
+        self.update(pr_number=7, pr_url="https://github.com/owner/repo/pull/7",
+                    pushed_sha=self.delivery["head_sha"], pr_state="MERGED",
+                    merged_at=self.pr("MERGED")["mergedAt"])
+        before = dict(self.task())
+        error = git_delivery.GitDeliveryError("git_probe_timeout", "SSH 配置探测超时，稍后重试")
+        with patch.object(git_delivery, "require_github_origin", side_effect=error, create=True), patch.object(
+                git_delivery, "push_branch") as push, patch.object(gh_client, "pr_create") as create, patch.object(
+                gh_client, "pr_view") as view:
+            for failures in (1, 2):
+                result = self.sync()
+                self.assertEqual(result["outcome"], "retry")
+                self.assertEqual(result["publish_failures"], failures)
+                self.assertEqual(self.task()["status"], "in_review")
+                delivery = core.delivery_of(self.task())
+                self.assertEqual(util.parse_ts(delivery["next_sync_at"]) - self.ctx.now, timedelta(minutes=5))
+                self.assertEqual(delivery["pr_state"], "MERGED")
+                self.assertEqual(delivery["pushed_sha"], self.delivery["head_sha"])
+            result = self.sync()
+        self.assertEqual((result["outcome"], result["failure_code"]), ("blocked", "gh_timeout"))
+        self.assertEqual(self.task()["status"], "needs_user")
+        self.assertEqual((self.task()["run_id"], self.task()["review_key"]), (before["run_id"], before["review_key"]))
+        from kanpilot.cmd_queue import _AUTO_RESUME_TARGETS
+        self.assertEqual(_AUTO_RESUME_TARGETS[self.task()["failure_code"]], ("in_review", "delivery"))
+        push.assert_not_called(); create.assert_not_called(); view.assert_not_called()
+
+    def test_origin_probe_read_failure_is_retryable_before_any_write(self):
+        error = git_delivery.GitDeliveryError("git_probe_failed", "无法读取 Git 配置")
+        with patch.object(git_delivery, "require_github_origin", side_effect=error, create=True), patch.object(
+                git_delivery, "push_branch") as push, patch.object(gh_client, "pr_create") as create:
+            self.assertEqual(self.publish_delivery()["outcome"], "retry")
+            self.assertEqual(self.publish_delivery()["outcome"], "retry")
+            self.assertEqual(self.publish_delivery()["failure_code"], "gh_unavailable")
+        push.assert_not_called(); create.assert_not_called()
+        self.assertEqual(self.ctx.conn.execute("SELECT count(*) FROM runtime_operations").fetchone()[0], 0)
+
+    def test_origin_configuration_error_does_not_retry_or_return_to_execution(self):
+        for code in ("origin_missing", "origin_not_github", "git_unavailable"):
+            with self.subTest(code=code):
+                self._reset_delivery_stage()
+                self.update(publish_failures=0)
+                with patch.object(git_delivery, "require_github_origin", create=True,
+                                  side_effect=git_delivery.GitDeliveryError(code, "明确的仓库环境错误")):
+                    result = self.publish_delivery()
+                self.assertEqual(result["failure_code"], "gh_unavailable")
+                self.assertEqual(core.delivery_of(self.task())["publish_failures"], 0)

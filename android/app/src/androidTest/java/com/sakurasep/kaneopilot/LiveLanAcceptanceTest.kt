@@ -137,7 +137,7 @@ class LiveLanAcceptanceTest {
             clickTab("记录")
             awaitOnline()
             screenshot("10-records")
-            compose.onNodeWithText("返回", substring = false).performClick()
+            compose.onNodeWithContentDescription("返回", substring = false).performClick()
             awaitOnline()
         }
 

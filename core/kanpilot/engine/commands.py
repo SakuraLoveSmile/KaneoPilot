@@ -48,12 +48,17 @@ def _needs_user_views(conn, now, *, include_historical):
     states = ("active", "archived", "trashed") if include_historical else ("active",)
     placeholders = ",".join("?" * len(states))
     query = (
-        "SELECT * FROM tasks WHERE status='needs_user' "
+        "SELECT * FROM tasks WHERE (status='needs_user' OR json_extract(extra_json,'$.release_verification_ref.verification_id') IS NOT NULL) "
         f"AND save_state IN ({placeholders}) ORDER BY updated_at DESC"
     )
     views = []
     from ..execution_questions import view as question_view, preview as question_preview
+    from .. import review_delivery
+    from .. import release_verification_questions
     for row in conn.execute(query, states).fetchall():
+        verification_fields = release_verification_questions.attention_fields(conn, row, now)
+        if row['status'] != 'needs_user' and not verification_fields:
+            continue
         views.append({
             "task_id": row["task_id"],
             "project_name": row["project_name"],
@@ -73,6 +78,8 @@ def _needs_user_views(conn, now, *, include_historical):
             "evidence": _task_evidence(conn, row["task_id"],
                                        row["blocked_at"] or row["updated_at"]),
         })
+        views[-1].update(review_delivery.attention_fields(conn, row))
+        views[-1].update(verification_fields)
     return views
 
 
@@ -188,7 +195,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
 
     task = current_task()
     mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
-    action = core.review_repair_of(task).get("source_kind") == "merge_conflict"
+    action = core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")
     execution = round_store.get_round(ctx.conn, task["task_id"], task["run_id"])
     codex = execution is not None and execution["backend"] == "codex"
     strict = mode == "live" or action or codex

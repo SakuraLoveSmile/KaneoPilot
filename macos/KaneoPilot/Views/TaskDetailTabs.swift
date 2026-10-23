@@ -417,7 +417,7 @@ struct TaskRelationsView: View {
             if !task.available {
                 Text("来源任务不可用").font(.kpSmall).foregroundStyle(.secondary)
             } else if let current = model.tasks.first(where: { $0.taskId == task.taskId }) {
-                if current.status != "done", let release = current.release, release.required {
+                if current.status != "done", let release = current.release, release.showsTaskStatus {
                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                 } else {
                     StatusBadge(status: DisplayStatus.effective(current))
@@ -558,7 +558,7 @@ struct TaskReviewTabView: View {
                         }
                         DetailSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
                             HStack(spacing: Spacing.m) {
-                                if detail.status != "done", let release = detail.release, release.required {
+                                if detail.status != "done", let release = detail.release, release.showsTaskStatus {
                                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                                 } else {
                                     StatusBadge(status: DisplayStatus.effective(detail))
@@ -1025,7 +1025,7 @@ struct TaskAutomationSections: View {
                         .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let action = detail.taskAiAction {
+                if let action = detail.taskAiAction, !action.isBuildFailure || detail.release == nil {
                     TaskAIActionSection(detail: detail, action: action,
                                         onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
                 }
@@ -1034,7 +1034,8 @@ struct TaskAutomationSections: View {
                 }
                 if let release = detail.release {
                     Divider()
-                    TaskReleaseSection(detail: detail, release: release, onRefreshDetail: onRefreshDetail)
+                    TaskReleaseSection(detail: detail, release: release,
+                                       onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
                 }
                 DisclosureGroup("分支、提交与同步记录") {
                     FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
@@ -1065,7 +1066,8 @@ struct TaskAutomationSections: View {
             DetailSection(title: "交付") {
                 FieldRow("状态", "未开启")
                 if let release = detail.release {
-                    TaskReleaseSection(detail: detail, release: release, onRefreshDetail: onRefreshDetail)
+                    TaskReleaseSection(detail: detail, release: release,
+                                       onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
                 }
             }
         }
@@ -1136,6 +1138,7 @@ private struct TaskAIActionSection: View {
     var onRefreshDetail: (() -> Void)?
     @EnvironmentObject private var model: AppViewModel
     @State private var preparing = false
+    @State private var preparationID: UUID?
     @State private var starting = false
     @State private var candidate: TaskAIActionCandidate?
     @State private var errorText: String?
@@ -1148,19 +1151,27 @@ private struct TaskAIActionSection: View {
             }
             HStack(spacing: Spacing.s) {
                 if preparing || starting { ProgressView().controlSize(.small) }
-                Button(preparing ? "正在核对 PR…" : starting ? "正在安排处理…" : "AI 处理…") {
+                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
                     guard !preparing, !starting, candidate == nil else { return }
+                    let token = UUID(), taskID = detail.taskId, kind = action.actionKind
+                    preparationID = token
                     preparing = true
                     errorText = nil
                     Task {
-                        defer { preparing = false }
-                        do { candidate = try await model.prepareTaskAIAction(taskID: detail.taskId) }
-                        catch { errorText = error.coreMessage }
+                        defer { if preparationID == token { preparing = false; preparationID = nil } }
+                        do {
+                            let prepared = try await model.prepareTaskAIAction(taskID: taskID, kind: kind)
+                            guard preparationID == token else { return }
+                            candidate = prepared
+                        } catch {
+                            guard preparationID == token else { return }
+                            errorText = error.coreMessage
+                        }
                     }
                 }
                 .disabled(!action.canPrepare || detail.readOnly == true || preparing || starting
                           || candidate != nil || model.actionInFlight != nil)
-                .help(action.reason ?? "使用通用执行配置处理 PR 合并冲突")
+                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复" : "使用通用执行配置处理 PR 合并冲突"))
             }
             if !action.canPrepare, action.current == nil, let reason = action.reason, !reason.isEmpty {
                 Text(reason).font(.kpSmall).foregroundStyle(.secondary)
@@ -1196,6 +1207,12 @@ private struct TaskAIActionSection: View {
         } message: { confirmed in
             Text(confirmed.confirmationMessage)
         }
+        .onChange(of: detail.taskId) {
+            preparationID = nil
+            preparing = false
+            candidate = nil
+            errorText = nil
+        }
     }
 
     private func stateColor(_ entry: TaskAIActionEntry) -> Color {
@@ -1218,6 +1235,11 @@ private struct TaskAIActionSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             FieldRow("模型", entry.modelSummary)
+            if let source = entry.sourcePrUrl {
+                Button { Workspace.open(source) } label: {
+                    Text(verbatim: entry.sourcePrNumber.map { "查看原已合并 PR #\($0)" } ?? "查看原已合并 PR")
+                }
+            }
             if history { FieldRow("时间", TimeFormat.fullString(entry.createdAt)) }
             if let runID = entry.executionRunId, runID == detail.runId, let onOpenSession {
                 Button("查看处理会话") { onOpenSession() }
@@ -1230,6 +1252,89 @@ private struct TaskAIActionSection: View {
 }
 
 /// Release mutations always use the candidate shown in the confirmation dialog.
+/// Both the release section and footer use the same preparation and fee confirmation.
+struct ReleaseVerificationActionButton: View {
+    let detail: TaskDetail
+    let action: ReleaseVerificationAction
+    var disabled = false
+    var onRefreshDetail: (() -> Void)?
+    @EnvironmentObject private var model: AppViewModel
+    @State private var requestID: UUID?
+    @State private var candidate: PrepareReleaseVerificationResponse?
+    @State private var working = false
+    @State private var errorText: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.s) {
+                if working { ProgressView().controlSize(.small) }
+                Button(action.label) { run() }
+                    .disabled(disabled || working || candidate != nil || model.busy || !action.isAvailable(for: detail))
+            }
+            if let errorText {
+                Text(errorText).font(.kpSmall).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+        }
+        .alert("确认开始完整验证？", isPresented: Binding(
+            get: { candidate != nil }, set: { if !$0 { candidate = nil } }
+        ), presenting: candidate) { confirmed in
+            Button(confirmed.isRestart ? "重新完整验证" : "开始验证") {
+                candidate = nil
+                guard confirmed.taskId == detail.taskId, action.isAvailable(for: detail) else { return }
+                let token = UUID()
+                requestID = token; working = true; errorText = nil
+                Task {
+                    await model.startReleaseVerification(candidate: confirmed,
+                        onError: { if requestID == token { errorText = $0 } })
+                    guard requestID == token else { return }
+                    requestID = nil; working = false; onRefreshDetail?()
+                }
+            }.disabled(model.busy)
+            Button("取消", role: .cancel) { candidate = nil }
+        } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .onChange(of: detail.taskId) { invalidate() }
+        .onChange(of: detail.release?.externalRepair?.contextSha256) { invalidate() }
+        .onChange(of: detail.release?.externalRepair?.verification?.verificationId) { invalidate() }
+        .onChange(of: detail.release?.externalRepair?.verification?.contextSha256) { invalidate() }
+        .onChange(of: action.isAvailable(for: detail)) { invalidate() }
+        .onChange(of: action) { invalidate() }
+        .onDisappear { invalidate() }
+    }
+
+    private func run() {
+        guard action.isAvailable(for: detail) else { return }
+        let token = UUID(), taskID = detail.taskId
+        requestID = token; working = true; errorText = nil
+        if action == .sync {
+            guard let verificationID = detail.release?.externalRepair?.verification?.verificationId else {
+                invalidate(); return
+            }
+            Task {
+                await model.syncReleaseVerification(taskID: taskID, verificationID: verificationID,
+                    onError: { if requestID == token { errorText = $0 } })
+                guard requestID == token else { return }
+                requestID = nil; working = false; onRefreshDetail?()
+            }
+        } else {
+            Task {
+                defer { if requestID == token { working = false; requestID = nil } }
+                do {
+                    let prepared = try await model.prepareReleaseVerification(taskID: taskID, restarting: action == .restart)
+                    guard requestID == token else { return }
+                    candidate = prepared
+                } catch {
+                    if requestID == token { errorText = error.coreMessage }
+                }
+            }
+        }
+    }
+
+    private func invalidate() {
+        requestID = nil; candidate = nil; working = false; errorText = nil
+    }
+}
+
 private struct TaskReleaseSection: View {
     private struct AbandonCandidate {
         let batchID: String
@@ -1237,6 +1342,7 @@ private struct TaskReleaseSection: View {
     }
     let detail: TaskDetail
     let release: TaskRelease
+    var onOpenSession: (() -> Void)?
     var onRefreshDetail: (() -> Void)?
     @EnvironmentObject private var model: AppViewModel
     @State private var preparing = false
@@ -1245,6 +1351,10 @@ private struct TaskReleaseSection: View {
     @State private var candidate: PrepareTaskReleaseResponse?
     @State private var abandoning: AbandonCandidate?
     @State private var errorText: String?
+    @State private var showingRepairInput = false
+    @State private var repairPR = ""
+    @State private var repairCandidate: PrepareExternalBuildRepairResponse?
+    @State private var operationID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -1261,9 +1371,31 @@ private struct TaskReleaseSection: View {
             if release.state == "unknown" {
                 Text("仅核对既有发布结果，不会重新发送构建。")
                     .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } else if release.state == "failed" {
-                Text("不会自动重试。可在 Actions 中检查并重跑，再同步发布结果。")
+            } else if release.state == "failed", release.externalRepair == nil {
+                Text(release.canReconcile
+                     ? "不会自动重试。可使用 AI 处理构建问题，或在 Actions 中检查并重跑，再同步发布结果。"
+                     : "原失败记录已保留，合并与再次构建发布需另行确认。")
                     .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let repair = release.externalRepair {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Button("修复 PR #\(repair.prNumber)") { Workspace.open(repair.prUrl) }.buttonStyle(.borderless)
+                    FieldRow("新目标", repair.targetSha)
+                    FieldRow("原失败版本", repair.sourceTag)
+                    FieldRow("完整验证", repair.verification?.stateLabel ?? "尚未开始")
+                    if let reason = repair.verification?.reason {
+                        Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                    DisclosureGroup("原失败批次（只读历史）") {
+                        FieldRow("版本", repair.sourceTag)
+                        FieldRow("批次", repair.sourceBatchId)
+                    }.font(.kpSmall)
+                }
+            }
+            if release.externalRepair == nil, let action = detail.taskAiAction, action.isBuildFailure {
+                TaskAIActionSection(detail: detail, action: action,
+                                    onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
             }
             if let url = release.workflowUrl { Button("查看 Actions 构建") { Workspace.open(url) } }
             if let url = release.releaseUrl { Button("打开版本发布页") { Workspace.open(url) } }
@@ -1293,10 +1425,11 @@ private struct TaskReleaseSection: View {
                 }.font(.kpSmall)
             }
             if detail.readOnly != true {
+                externalRepairActions
                 HStack(spacing: Spacing.s) {
                     if preparing || working { ProgressView().controlSize(.small) }
                     if release.showsStartAction {
-                        Button(preparing ? "正在准备发布…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
+                        Button(preparing ? "正在准备发布…" : release.externalRepair != nil ? "准备新批次…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
                             let token = UUID(), taskID = detail.taskId
                             preparationID = token
                             preparing = true
@@ -1353,6 +1486,23 @@ private struct TaskReleaseSection: View {
             .disabled(model.busy)
             Button("取消", role: .cancel) { candidate = nil }
         } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .sheet(isPresented: $showingRepairInput) { repairInput }
+        .alert("确认关联已合并修复？", isPresented: Binding(
+            get: { repairCandidate != nil }, set: { if !$0 { repairCandidate = nil } }
+        ), presenting: repairCandidate) { confirmed in
+            Button("关联修复") {
+                repairCandidate = nil
+                guard confirmed.taskId == detail.taskId else { return }
+                let token = UUID()
+                operationID = token; working = true; errorText = nil
+                Task {
+                    await model.acceptExternalBuildRepair(candidate: confirmed, onError: { if operationID == token { errorText = $0 } })
+                    guard operationID == token else { return }
+                    operationID = nil; working = false; onRefreshDetail?()
+                }
+            }.disabled(model.busy)
+            Button("取消", role: .cancel) { repairCandidate = nil }
+        } message: { confirmed in Text(confirmed.candidate.confirmationMessage) }
         .confirmationDialog("放弃未发送批次？", isPresented: Binding(
             get: { abandoning != nil }, set: { if !$0 { abandoning = nil } }
         ), titleVisibility: .visible, presenting: abandoning) { confirmed in
@@ -1370,9 +1520,65 @@ private struct TaskReleaseSection: View {
         } message: { _ in
             Text("该批次尚未发送到 GitHub。放弃仅停止使用这份未发送批次，不取消任何 GitHub 构建；原任务和历史记录均保留。之后可按当前配置重新准备发布。")
         }
-        .onChange(of: detail.taskId) { candidate = nil; abandoning = nil; errorText = nil; preparationID = nil; preparing = false }
-        .onDisappear { candidate = nil; abandoning = nil; preparationID = nil; preparing = false }
+        .onChange(of: detail.taskId) { clearCandidates(); errorText = nil }
+        .onDisappear { clearCandidates() }
     }
 
-    private var locked: Bool { preparing || working || candidate != nil || abandoning != nil || model.busy }
+    private var locked: Bool {
+        preparing || working || candidate != nil || abandoning != nil || repairCandidate != nil || model.busy
+    }
+
+    private func clearCandidates() {
+        candidate = nil; abandoning = nil; repairCandidate = nil
+        showingRepairInput = false; repairPR = ""; preparationID = nil; operationID = nil
+        preparing = false; working = false
+    }
+
+    @ViewBuilder private var externalRepairActions: some View {
+        if release.canLinkExternalRepair == true {
+            Button("关联已合并修复…") { errorText = nil; repairPR = ""; showingRepairInput = true }.disabled(locked)
+        }
+        if let repair = release.externalRepair {
+            if repair.canPrepareVerification {
+                ReleaseVerificationActionButton(detail: detail, action: .prepare, disabled: locked, onRefreshDetail: onRefreshDetail)
+            }
+            if repair.canRestartVerification == true {
+                ReleaseVerificationActionButton(detail: detail, action: .restart, disabled: locked, onRefreshDetail: onRefreshDetail)
+            }
+            if repair.canSyncVerification {
+                ReleaseVerificationActionButton(detail: detail, action: .sync, disabled: locked, onRefreshDetail: onRefreshDetail)
+            }
+        }
+    }
+
+    private var repairInput: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("关联已合并修复").font(.kpBody.weight(.semibold))
+            Text("填写同仓库已合并的修复 PR 编号，先只读核对，再确认关联。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+            TextField("PR 编号", text: $repairPR).textFieldStyle(.roundedBorder)
+            if let errorText { Text(errorText).font(.kpSmall).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                if preparing { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("取消") { preparationID = nil; preparing = false; showingRepairInput = false }.keyboardShortcut(.cancelAction)
+                Button("核对修复 PR") {
+                    guard let number = Int(repairPR.trimmingCharacters(in: .whitespacesAndNewlines)), number > 0 else { return }
+                    let token = UUID(), taskID = detail.taskId
+                    preparationID = token; preparing = true; errorText = nil
+                    Task {
+                        defer { if preparationID == token { preparing = false; preparationID = nil } }
+                        do {
+                            let prepared = try await model.prepareExternalBuildRepair(taskID: taskID, prNumber: number)
+                            guard preparationID == token else { return }
+                            showingRepairInput = false; repairCandidate = prepared
+                        } catch {
+                            if preparationID == token { errorText = error.coreMessage }
+                        }
+                    }
+                }.disabled(preparing || model.busy || (Int(repairPR.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) <= 0)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }.padding(Spacing.l).frame(width: 460)
+    }
 }

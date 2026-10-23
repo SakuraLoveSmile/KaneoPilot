@@ -134,6 +134,52 @@ def test_auto_merge_read_requests_all_safety_fields(fake_gh):
     assert {'isDraft', 'mergeable', 'mergeStateStatus', 'reviewDecision', 'statusCheckRollup'} <= set(args[-1].split(','))
 
 
+@pytest.mark.parametrize('merge_checks', [False, True])
+def test_merge_commit_read_requests_structured_oid(fake_gh, monkeypatch, merge_checks):
+    value = dict(pr('MERGED'), mergeCommit={'oid': 'b' * 40})
+    monkeypatch.setenv('FAKE_GH_PR', json.dumps(value))
+    assert gh.pr_view('owner/repo', 7, merge_checks=merge_checks, merge_commit=True) == value
+    args = json.loads(fake_gh.read_text().splitlines()[-1])['argv']
+    fields = gh.PR_MERGE_FIELDS if merge_checks else gh.PR_FIELDS
+    assert args == ['pr', 'view', '7', '--repo', 'owner/repo', '--json', fields + ',mergeCommit']
+
+
+@pytest.mark.parametrize('options', [
+    ['--allow-escape-sequences'],
+    ['-H', 'Accept: application/json', '--allow-escape-sequences'],
+    ['--allow-escape-sequences', '--method', 'GET'],
+])
+def test_log_escape_read_captures_bytes_without_rendering(options):
+    args = ['api', 'repos/owner/repo/actions/jobs/123/logs', *options]
+    raw = b'\x1b[31mcompile failed\x1b[0m\n'
+    with patch.object(gh.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, raw, b'')) as run:
+        assert gh._run(args, read_only=True, binary=True) == raw
+    assert run.call_args.args[0][1:] == args
+    assert run.call_args.kwargs['capture_output'] is True
+    assert run.call_args.kwargs['text'] is False
+
+
+@pytest.mark.parametrize('endpoint,options', [
+    ('repos/owner/repo/actions/jobs/123/logs', ['--method', 'POST']),
+    ('repos/owner/repo/actions/jobs/123/logs', ['-X', 'DELETE']),
+    ('repos/owner/repo/actions/jobs/123/logs', ['-f', 'input=value']),
+    ('repos/owner/repo/actions/jobs/123/logs', ['--input', 'payload.json']),
+    ('repos/owner/repo/actions/jobs/123/logs', ['--allow-escape-sequences']),
+    ('repos/owner/repo/actions/jobs/123/logs', ['--method']),
+    ('repos/owner/repo/actions/jobs/123/logs/other', []),
+    ('repos/owner/repo/actions/jobs/0/logs', []),
+    ('repos/owner/repo/actions/jobs/123/logs?method=POST', []),
+    ('repos/owner/repo/actions/runs/123/rerun', []),
+    ('repos/owner/repo/releases/assets/123', []),
+])
+def test_log_escape_flag_does_not_authorize_other_commands(endpoint, options):
+    args = ['api', endpoint, '--allow-escape-sequences', *options]
+    with patch.object(gh.subprocess, 'run') as run, pytest.raises(gh.GhError) as error:
+        gh._run(args, read_only=True, binary=True)
+    assert error.value.kind == 'rejected'
+    run.assert_not_called()
+
+
 @pytest.mark.parametrize('value', [{}, {'merged': None}, {'merged': 'true'}, [], None])
 def test_merge_unconfirmed_json_stays_unknown(fake_gh, monkeypatch, value):
     monkeypatch.setenv('FAKE_GH_PR', json.dumps(value))

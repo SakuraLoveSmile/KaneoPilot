@@ -248,7 +248,7 @@ private struct TaskCompactRow: View {
 
     private var display: String { DisplayStatus.effective(task) }
     private var style: StatusStyle {
-        if task.status != "done", let release = task.release, release.required { return ReleasePresentation.style(release) }
+        if task.status != "done", let release = task.release, release.showsTaskStatus { return ReleasePresentation.style(release) }
         return DisplayStatus.style(display)
     }
     private var exceptionColor: Color {
@@ -307,7 +307,7 @@ private struct TaskCompactRow: View {
             Spacer(minLength: Spacing.s)
 
             HStack(spacing: Spacing.m) {
-                if task.status != "done", let release = task.release, release.required {
+                if task.status != "done", let release = task.release, release.showsTaskStatus {
                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                 } else {
                     StatusBadge(status: display)

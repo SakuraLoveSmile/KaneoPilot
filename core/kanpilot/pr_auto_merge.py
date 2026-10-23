@@ -12,6 +12,8 @@ HARNESS = 'github'
 
 
 def snapshot(conn, task):
+    if db.task_extra(task).get('build_failure_hold'):
+        return None
     policy = automation_policy.policy_for(conn, task['project_id']) or {}
     if not policy.get('auto_merge_pr', False):
         return None
@@ -23,6 +25,8 @@ def snapshot(conn, task):
 
 
 def check_policy(conn, task, expected):
+    util.require(not db.task_extra(task).get('build_failure_hold'),
+                 '构建修复仅授权创建新 PR，合并须用户另行确认', 'conflict')
     policy = automation_policy.policy_for(conn, task['project_id']) or {}
     _, _, mappings, _ = project_config.load_raw_mappings(conn)
     repository = (mappings.get(task['project_id']) or {}).get('repository')
@@ -97,6 +101,15 @@ def _notice(state, reason, delivery, now):
     return {'state': state, 'reason': reason, 'head_sha': delivery['head_sha'], 'updated_at': now}
 
 
+def _not_sent(row, identity):
+    if (row is None or row['status'] != 'rejected' or row['tool'] != TOOL
+            or row['harness_id'] != HARNESS
+            or row['request_sha256'] != runtime_operations.compute_request_sha256(identity)):
+        return False
+    result = util.jload(row['result_json']) or {}
+    return result.get('not_sent') is True and result.get('intent') == identity
+
+
 def _reject(ctx, scope, op_id, reason, boundary):
     with db.write_txn(ctx.conn):
         boundary()
@@ -142,7 +155,7 @@ def reconcile(ctx, task, delivery, repo, pr, policy, boundary, verify_pr, verify
                     if row or pending or policy or delivery.get('auto_merge') else None)
     if _unresolved(ctx.conn, scope):
         return pr, _notice('unknown', '已有合并请求结果待确认，继续只读核对 PR，不会重复提交', delivery, ctx.now_iso)
-    if row:
+    if row and not _not_sent(row, identity):
         if row['status'] == 'rejected':
             result = util.jload(row['result_json']) or {}
             return pr, _notice('blocked', result.get('reason') or 'GitHub 已拒绝此次合并，请到 GitHub 处理；不会自动重发', delivery, ctx.now_iso)
@@ -157,22 +170,39 @@ def reconcile(ctx, task, delivery, repo, pr, policy, boundary, verify_pr, verify
     if source:
         return pr, _notice(*source, delivery, ctx.now_iso)
     verify_repository()
-    # Only a newly inserted intent can send. An abandoned prepared receipt is
-    # conservative unknown too; policy revisions do not create a fresh identity.
+    # Only a new intent or an exactly matching, proven-not-sent local rejection
+    # can send. Abandoned prepared/unknown receipts remain read-only forever.
     with db.write_txn(ctx.conn):
         boundary()
-        if db.get_runtime_operation(ctx.conn, scope, op_id) or _unresolved(ctx.conn, scope):
+        current = db.get_runtime_operation(ctx.conn, scope, op_id)
+        if _unresolved(ctx.conn, scope) or current and not _not_sent(current, identity):
             return pr, _notice('unknown', '合并请求已有回执，继续只读核对 PR，不会重复提交', delivery, ctx.now_iso)
-        runtime_operations.begin_operation(ctx.conn, scope, op_id, HARNESS, TOOL, identity,
-                                           now=ctx.now_iso)
-        db.update_runtime_operation(ctx.conn, scope, op_id, ctx.now_iso, result_json=util.jdump(identity))
+        if current is None:
+            runtime_operations.begin_operation(ctx.conn, scope, op_id, HARNESS, TOOL, identity,
+                                               now=ctx.now_iso)
+            db.update_runtime_operation(ctx.conn, scope, op_id, ctx.now_iso, result_json=util.jdump(identity))
+        else:
+            runtime_operations.complete_operation(ctx.conn, scope, op_id, status='prepared',
+                                                   result=identity, now=ctx.now_iso)
+    # Keep the last repository I/O before reserving an uncertain downstream
+    # send. A local guard failure proves that this call never invoked pr_merge.
+    try:
+        verify_repository()
+        boundary()
+    except git_delivery.GitDeliveryError as exc:
+        with db.write_txn(ctx.conn):
+            boundary()
+            if db.get_runtime_operation(ctx.conn, scope, op_id)['status'] == 'prepared':
+                runtime_operations.complete_operation(ctx.conn, scope, op_id, status='rejected',
+                    result={'intent': identity, 'not_sent': True, 'reason': exc.message}, now=ctx.now_iso)
+        raise
     with db.write_txn(ctx.conn):
         boundary()
         if db.get_runtime_operation(ctx.conn, scope, op_id)['status'] != 'prepared':
             return pr, _notice('unknown', '合并回执已变化，继续只读核对 PR，不会重复提交', delivery, ctx.now_iso)
         runtime_operations.mark_operation_unknown(ctx.conn, scope, op_id, now=ctx.now_iso)
-    # Last check immediately before sending; GitHub itself atomically enforces sha.
-    verify_repository()
+    # The final local state guard remains after reservation; GitHub atomically
+    # enforces the reviewed head SHA when the native merge command is sent.
     boundary()
     if db.get_runtime_operation(ctx.conn, scope, op_id)['status'] != 'unknown':
         return pr, _notice('unknown', '合并回执已变化，继续只读核对 PR，不会重复提交', delivery, ctx.now_iso)

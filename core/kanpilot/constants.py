@@ -258,7 +258,7 @@ DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "retry_verification", "revert_engine_fix",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "retry_verification", "revert_engine_fix", "continue_delivery",
 )
 
 ERROR_CODES = (

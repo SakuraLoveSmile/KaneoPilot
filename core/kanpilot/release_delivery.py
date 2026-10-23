@@ -8,8 +8,8 @@ import os
 import re
 from urllib.parse import quote
 
-from . import (core, db, gh_client, git_delivery, parent_closeout as closeout,
-               process_owner, project_config, remote, runtime_operations, util)
+from . import (core, db, delivery_contract, gh_client, git_delivery, parent_closeout as closeout,
+               process_owner, project_config, remote, runtime_operations, stage_contract, util)
 from . import release_github as github
 
 DEFAULT_POLICY=dict(enabled=False,channel='prerelease',workflow_path='.github/workflows/pilot-release.yml',
@@ -135,6 +135,20 @@ def _pending(conn,project_id):
     return rows
 
 
+def _historical_build_source(conn,batch):
+    """Archived source batches remain read-only across subsequent repairs."""
+    for member in batch['members']:
+        task=db.get_task(conn,member['task_id'])
+        if task is None:
+            continue
+        extra=db.task_extra(task)
+        if ((extra.get('build_failure_hold') or {}).get('release_batch_id')==batch['batch_id']
+                or any(source.get('release_batch_id')==batch['batch_id']
+                       for source in extra.get('build_failure_sources') or [])):
+            return True
+    return False
+
+
 def _dto(batch,required=False,*,conn=None):
     state=batch['state'];titles=dict(ready='待构建发布',waiting_group='等待关联修复',dispatching='发布调度中',unknown='发布调度待确认',
         queued='构建已排队',building='构建中',publishing='发布中',blocked='发布受阻',failed='构建失败',published='已发布')
@@ -153,21 +167,104 @@ def _dto(batch,required=False,*,conn=None):
     return value
 
 
+def _last_preflight_blocker(task,delivery,member_ids):
+    """Display an accepted observation only while its delivery identity matches."""
+    try:
+        contract=delivery.get('stage_contracts',{}).get('sync')
+        result=delivery.get('stage_results',{}).get('sync')
+        if not isinstance(contract,dict) or not isinstance(result,dict):return None
+        delivery_contract.validate_current(contract,task,dict(request_id=contract['request_id'],run_id=contract['run_id']),delivery,'sync')
+        result=stage_contract.validate_result(result,contract)
+        if result['outcome']!='blocked' or len(result['evidence'])!=1:return None
+        observation=result['evidence'][0]
+        if observation.get('source')!='core_independent' or observation.get('kind')!='delivery_observation':return None
+        outcome=observation.get('result') or {};value=outcome.get('release') or {}
+        if (outcome.get('outcome')!='waiting' or value.get('state')!='blocked'
+                or value.get('root_task_id')!=task['task_id'] or value.get('member_task_ids')!=member_ids
+                or not isinstance(value.get('reason'),str) or not value['reason']
+                or not isinstance(value.get('blockers'),list) or not value['blockers']):return None
+        return value
+    except (util.KanpilotError,KeyError,TypeError,AttributeError):
+        return None
+
+
+def _build_repair_merged(task):
+    """A new reviewed PR merge permits explicit release preparation only."""
+    from . import task_ai_action
+    hold=db.task_extra(task).get('build_failure_hold') or {}
+    delivery=core.delivery_of(task)
+    receipt=task_ai_action.delivery_continuation(task,allow_paused=True)
+    action=(receipt or {}).get('action') or {}
+    return bool(hold and action.get('source_kind')=='build_failure'
+        and action.get('action_id')==hold.get('action_id')
+        and delivery.get('build_failure_action_id')==hold.get('action_id')
+        and type(delivery.get('pr_number')) is int and delivery['pr_number']!=action.get('source_pr_number')
+        and delivery.get('pr_state')=='MERGED' and delivery.get('merged_at'))
+
+
 def projection(conn,task):
     """SQL only; unrelated old done tasks acquire no automatic release intent."""
+    from . import external_build_repair as external
+    external_value=external.summary(conn,task)
+    hold=db.task_extra(task).get('build_failure_hold')
+    if hold and not _build_repair_merged(task):
+        old=_batch(conn,hold.get('release_batch_id'))
+        if old:
+            value=_dto(old,True,conn=conn)
+            value.update(is_historical=True,can_start=False,can_reconcile=False,can_abandon=False,
+                reason='原失败批次已归档；构建修复只创建新 PR，合并与再次构建发布须另行确认')
+            return value
     batch=_attached(conn,task)
     ref=db.task_extra(task).get('release_ref') or {}
     policy,_revision=_policy(conn,task)
-    required=task['status']!='done' and (policy['enabled'] or ref.get('required') is True)
+    required=task['status']!='done' and (policy['enabled'] or ref.get('required') is True
+        or bool(db.task_extra(task).get('external_build_repair_ref')))
+    if db.task_extra(task).get('external_build_repair_ref'):
+        try:
+            linked=external.accepted(conn,task)
+            _require(linked is not None,'external_repair_changed','外部修复关联回执或任务身份已变化')
+            external.require_policy(conn,task,linked)
+        except ReleaseBlocked as exc:
+            if external_value:
+                external_value.update(can_prepare_verification=False,can_sync_verification=False,can_restart_verification=False)
+            return dict(state='blocked',title='发布受阻',reason=str(exc),required=required,channel=policy['channel'],
+                root_task_id=task['task_id'],member_task_ids=[task['task_id']],assets=[],
+                blockers=[dict(code=exc.code,message=str(exc))],can_start=False,can_reconcile=False,external_repair=external_value)
     if batch:
         value=_dto(batch,required,conn=conn)
         if batch.get('dispatch_status')=='not_sent':value['can_start']=value['can_start'] and policy['enabled']
+        value['can_link_external_repair']=bool(batch['state']=='failed' and policy['enabled'] and policy['channel']=='prerelease'
+            and batch['policy']['channel']=='prerelease' and not task['review_source_task_id']
+            and not conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1',(task['task_id'],)).fetchone()
+            and not hold and external_value is None and external.locally_linkable(conn,task))
+        if external_value:value['external_repair']=external_value
         return value
+    if external_value:
+        verification=external_value.get('verification') or {}
+        stage=verification.get('state')
+        verified=stage=='verified'
+        title={'prepared':'待确认验证','planning':'验证规划中','running':'验证执行中',
+            'unknown':'验证结果待核对','blocked':'验证受阻','failed':'验证失败','verified':'待构建发布'}.get(stage,'等待完整验证')
+        reason=verification.get('reason') or ('完整验证已通过，可准备新预发布' if verified else
+            '正在规划冻结目标的完整验证' if stage=='planning' else '正在执行冻结目标的完整验证' if stage=='running' else
+            '原验证结果尚不明确，请核对原尝试' if stage=='unknown' else '外部修复已关联；完整验证与新预发布须分别确认')
+        blockers=([dict(code=verification.get('failure_code') or 'release_target_unverified',message=reason)]
+            if stage in ('blocked','failed') else [])
+        return dict(state='ready' if verified else 'blocked',title=title,
+            reason=reason,required=required,channel=policy['channel'],
+            root_task_id=task['task_id'],member_task_ids=[task['task_id']],assets=[],blockers=blockers,
+            can_start=verified and policy['enabled'],can_reconcile=False,can_link_external_repair=False,external_repair=external_value)
     old=_referenced(conn,task)
     if _unsent(conn,old):
         value=_dto(old,required,conn=conn)
         value.update(state='blocked',title='发布受阻',reason='原冻结批次的成员身份已变化；可弃用确定未发送的批次，再重新准备',can_start=False)
         return value
+    from . import review_delivery
+    if review_delivery.candidate(conn,task) is not None:
+        return dict(state='waiting_group',title='待 PR 交付',
+            reason=review_delivery.WAITING_REASON,
+            required=required,channel=policy['channel'],root_task_id=task['task_id'],
+            member_task_ids=[task['task_id']],assets=[],blockers=[],can_start=False,can_reconcile=False)
     pending=_pending(conn,task['project_id'])
     if pending:
         frozen=util.jload(pending[0]['result_json']) or {};old=_batch(conn,frozen.get('batch_id'))
@@ -195,10 +292,21 @@ def projection(conn,task):
     waiting=(bool(closeout._local(conn,root,software_ready=True)['blockers']) or any(not locally_ready(row) for row in related)
              if related else not locally_ready(root))
     state='waiting_group' if waiting else 'ready'
-    return dict(state=state,title='等待关联修复' if waiting else '待构建发布',
-        reason='等待原始任务与全部修复具备合并和验证证据' if waiting else '核对已有交付证据后构建并发布版本',
+    title='等待关联修复' if waiting else '待构建发布'
+    reason='等待原始任务与全部修复具备合并和验证证据' if waiting else '核对已有交付证据后构建并发布版本'
+    delivery=core.delivery_of(root)
+    if waiting and not related and db.task_extra(root).get('review_conclusion')=='pass' and delivery.get('mode')=='pr' and not delivery.get('merged_at'):
+        title='等待 PR 合并' if delivery.get('pr_number') else 'PR 交付中'
+        notice=delivery.get('auto_merge') or {}
+        reason=(notice.get('reason') if notice.get('head_sha')==delivery.get('head_sha') else None) or '评审已通过，正在推进 PR 交付；合并后按项目策略构建发布'
+    value=dict(state=state,title=title,reason=reason,
         required=required,channel=policy['channel'],root_task_id=root['task_id'],member_task_ids=ids,
         assets=[],blockers=[],can_start=policy['enabled'] and not waiting,can_reconcile=False)
+    blocked=_last_preflight_blocker(root,delivery,ids) if not waiting else None
+    if blocked:
+        value.update(state='blocked',title='发布受阻',reason='上次发布核对：'+blocked['reason'],
+                     blockers=blocked['blockers'],can_start=False)
+    return value
 
 
 def completion_gate(conn,task):
@@ -214,8 +322,30 @@ def completion_gate(conn,task):
     return dict(code='release_required',message=(value.get('reason') or '缺少当前交付的发布证据'))
 
 
-def _single_proof(conn,task):
-    _require(task['status'] in ('in_review','done') and db.task_is_active(task),'release_not_ready','任务尚未具备软件交付证据')
+def _verified_feed_checkpoint(repo,evidence,target):
+    """Build the verified tree itself when only existing channel feeds advanced."""
+    verified=closeout.github.commit(repo,evidence['head_sha'])
+    _require(verified['sha']==evidence['head_sha'] and verified['source_sha256']==evidence['source_sha256'],
+             'release_target_unverified','原发布检查点与正式验证源码不符')
+    if not verified.get('records') or not target.get('records'):
+        return None
+    def sources(snapshot):
+        return {row['path']:row for row in snapshot['records']
+                if not row['path'].startswith('.pi/') and not git_delivery.is_build_artifact(row['path'])}
+    before,after=sources(verified),sources(target)
+    changed={path for path in before.keys() | after.keys() if before.get(path)!=after.get(path)}
+    if (not changed or not changed<={'release/preview.json','release/latest.json'}
+            or any(path not in before or path not in after
+                   or before[path]['mode']!='100644' or after[path]['mode']!='100644' for path in changed)):
+        return None
+    return verified
+
+
+def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,external_candidate=None):
+    from . import external_build_repair as external
+    explicit_recovery=(external_candidate is not None and external.recoverable_delivery_failure(task)
+        and external.locally_linkable(conn,task))
+    _require((task['status'] in ('in_review','done') or explicit_recovery) and db.task_is_active(task),'release_not_ready','任务尚未具备软件交付证据')
     _require(not core.review_repair_of(task),'release_repair_active','任务仍有当前修复，不启动构建发布')
     _require(not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                              (task['task_id'],)).fetchone(),'release_request_active','当前任务仍有规划、执行或评审请求')
@@ -235,16 +365,52 @@ def _single_proof(conn,task):
         and d.get('pr_url')==expected and pr.get('baseRefName')==d.get('base_branch')
         and pr.get('headRefName')==d.get('branch') and pr.get('isCrossRepository') is False,
         'release_pr_mismatch','发布 PR 合并、仓库或 head/base 身份不符')
-    target=(github.merge_commit_sha(repo,d['pr_number'],d['head_sha']) if task['status']=='done'
-            else closeout.github.commit(repo,d['base_branch'])['sha'])
+    external_receipt=external.accepted(conn,task)
+    external_target=external_candidate or (external_receipt or {}).get('candidate')
+    if extra.get('external_build_repair_ref'):
+        _require(external_receipt is not None,'external_repair_changed','外部修复关联回执或任务身份已变化')
+        external.require_policy(conn,task,external_receipt)
+    current_base=closeout.github.commit(repo,d['base_branch'])['sha']
+    if external_target:
+        _require(frozen_target in (None,external_target['target_sha']),'external_repair_changed','验证目标与已关联外部修复不符')
+        frozen_target=external_target['target_sha']
+    target=frozen_target or (github.merge_commit_sha(repo,d['pr_number'],d['head_sha']) if task['status']=='done'
+            else current_base)
     commit=closeout.github.commit(repo,target)
-    _require(closeout.github.contains(repo,d['head_sha'],target)
-        and commit['source_sha256']==evidence['source_sha256'],'release_target_unverified','发布目标不是本轮已验证的完整源码')
+    if external_target:
+        _require(commit['source_sha256']==external_target['target_source_sha256']
+            and external.preservation(repo,d['pr_number'],d['head_sha'],target)==external_target['preservation_kind'],
+            'external_repair_changed','外部修复源码或原交付保留证明已变化')
+    _require((bool(external_target) or closeout.github.contains(repo,d['head_sha'],target))
+        and closeout.github.contains(repo,target,current_base),'release_target_unverified','发布目标不包含原交付或已不在目标分支历史中')
+    if (task['status']!='done' and frozen_target is None and not external_target
+            and not allow_unverified_target and not extra.get('release_verification_ref')
+            and commit['source_sha256']!=evidence['source_sha256']):
+        checkpoint=_verified_feed_checkpoint(repo,evidence,commit)
+        if checkpoint is not None:
+            # The containment check above already proves this head is in main.
+            # Keep its entire verified fingerprint, including the original feeds.
+            target,commit=checkpoint['sha'],checkpoint
+    supplemental=None
+    if (external_target or commit['source_sha256']!=evidence['source_sha256'] or extra.get('release_verification_ref')) and not allow_unverified_target:
+        from . import release_verification
+        supplemental=release_verification.verified_proof(conn,task)
+        _require(supplemental is not None,'release_target_unverified','发布目标不是本轮已验证的完整源码')
+        target=supplemental['target_sha'];commit=closeout.github.commit(repo,target)
+        _require(commit['source_sha256']==supplemental['target_source_sha256']
+            and (bool(external_target) or closeout.github.contains(repo,d['head_sha'],target))
+            and closeout.github.contains(repo,target,current_base),
+            'release_target_unverified','独立验证目标源码或包含关系已变化')
     live=remote.get_task(remote.get_client(),task['task_id'])
     _require(closeout._remote_identity(live,task) and (live.get('task') or {}).get('status') in ('in-review','done'),
         'release_source_changed','Kaneo 任务、项目、需求或评审状态已变化')
-    return dict(github_repository=repo,target_sha=target,target_source_sha256=commit['source_sha256'],
+    result=dict(github_repository=repo,target_sha=target,target_source_sha256=commit['source_sha256'],
                 evidence_sha256=hashes,reused_evidence=[evidence],required_repairs=[])
+    if external_receipt is not None:
+        result['external_build_repair']=dict(context_sha256=external_receipt['context_sha256'],**external_receipt['candidate'])
+    if supplemental is not None:
+        result['release_verification']=supplemental
+    return result
 
 
 def _software_proof(conn,root):
@@ -275,11 +441,117 @@ def _version_inventory(conn,project_id,releases):
     return sorted(set(versions)),stable
 
 
-def _stable_available(conn,project_id,policy):
+def _superseded_build_batch(conn,task,proof):
+    """Exact failed stable predecessor; never retire it or release its version."""
+    from . import task_ai_action
+    if not _build_repair_merged(task):
+        return None
+    hold=db.task_extra(task).get('build_failure_hold') or {}
+    action=task_ai_action.delivery_continuation(task,allow_paused=True)['action']
+    old=_batch(conn,hold.get('release_batch_id'))
+    if not old or old['policy']['channel']!='stable':
+        return None
+    member=next((row for row in old['members'] if row['task_id']==task['task_id']),{})
+    _require(old.get('state')=='failed' and not old.get('abandoned')
+        and old['batch_id']==action.get('release_batch_id') and old['project_id']==task['project_id']
+        and old['root_task_id']==task['task_id'] and old['repository']==proof['github_repository']==action.get('github_repo')
+        and old['context_sha256']==action.get('release_context_sha256')
+        and old['target_sha']==action.get('release_target_sha') and proof['target_sha']!=old['target_sha']
+        and old['workflow_run_id']==action.get('workflow_run_id') and old['tag']==action.get('release_tag')
+        and member.get('run_id')==action.get('source_execution_run_id')
+        and member.get('head_sha')==action.get('source_head_sha')
+        and member.get('plan_sha256')==task['plan_sha256'] and member.get('requirements_sha256')==task['requirements_sha256'],
+        'release_predecessor_mismatch','构建修复与原失败正式批次的归属或证据不符，不能排除版本占位')
+    return old['batch_id']
+
+
+def _stable_available(conn,project_id,policy,superseded_batch_id=None):
     if policy['channel']=='stable':
+        published_predecessors=_published_stable_predecessors(conn,project_id)
+        temporary=set()
+        if superseded_batch_id:
+            previous=_batch(conn,superseded_batch_id)
+            chain=_stable_predecessor_chain(conn,previous) if previous else None
+            _require(chain is not None,'release_predecessor_mismatch','失败构建的前驱链缺少可信回执或存在循环，未解除版本占位')
+            temporary={superseded_batch_id,*chain}
         _require(not any(batch['policy']['channel']=='stable' and batch['state']!='published' and not batch.get('abandoned')
+            and batch['batch_id'] not in temporary
+            and batch['batch_id'] not in published_predecessors
             for batch in _batches(conn,project_id)),'release_stable_pending',
             '项目已有未发布的正式批次；先处理原批次，避免正式版本逆序发布')
+
+
+def _trusted_stable_predecessor(conn,successor):
+    """Validate one immutable successor edge; a failed edge also needs its send receipt."""
+    context_keys=('project_id','repository','root_task_id','members','proof','policy','policy_snapshot','workflow',
+                  'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
+    project_id=successor.get('project_id')
+    old=_batch(conn,successor.get('superseded_build_batch_id'))
+    row=db.get_runtime_operation(conn,_scope(project_id),'batch:'+successor['batch_id'])
+    inputs=successor.get('inputs') or {}
+    if (successor.get('state') not in ('failed','published') or successor['policy']['channel']!='stable'
+            or not old or old['policy']['channel']!='stable' or old.get('state')!='failed' or old.get('abandoned')
+            or old['project_id']!=project_id or old['repository']!=successor['repository']
+            or old['root_task_id']!=successor['root_task_id'] or old['target_sha']==successor.get('target_sha')
+            or not _historical_build_source(conn,old)
+            or row is None or row['status'] not in ('prepared','accepted') or row['tool']!=BATCH_TOOL or row['harness_id']!='core'
+            or any(key not in successor for key in context_keys)):
+        return None
+    context={key:successor[key] for key in context_keys}
+    context_sha=util.sha256_text(util.jdump(context))
+    if (context_sha!=successor.get('context_sha256')
+            or row['request_sha256']!=runtime_operations.compute_request_sha256(dict(context_sha256=context_sha))
+            or successor.get('tag')!='v'+successor['version']):
+        return None
+    try:
+        old_version=tuple(int(part) for part in old['version'].split('.'))
+        new_version=tuple(int(part) for part in successor['version'].split('.'))
+    except (ValueError,TypeError):
+        return None
+    if len(old_version)!=3 or len(new_version)!=3 or new_version<=old_version:
+        return None
+    if successor['state']=='published':
+        proof=successor.get('publication_proof') or {}
+        if (row['status']!='accepted' or proof.get('target_sha')!=successor.get('target_sha')
+                or proof.get('workflow_run_id')!=successor.get('workflow_run_id')
+                or type(proof.get('run_attempt')) is not int or proof['run_attempt']<=0
+                or type(proof.get('release_id')) is not int or proof['release_id']<=0
+                or not isinstance(proof.get('manifest_sha256'),str) or not re.fullmatch(r'[0-9a-f]{64}',proof['manifest_sha256'])
+                or not inputs.get('task_manifest_sha256') or proof.get('task_manifest_sha256')!=inputs['task_manifest_sha256']):
+            return None
+    else:
+        dispatch=db.get_runtime_operation(conn,_scope(project_id),'dispatch:'+successor['batch_id'])
+        expected=dict(batch_id=successor['batch_id'],workflow=successor['workflow'],inputs=inputs)
+        observed=util.jload(dispatch['result_json']) or {} if dispatch is not None else {}
+        if (type(successor.get('workflow_run_id')) is not int or successor.get('dispatch_status')=='not_sent'
+                or dispatch is None or dispatch['status']!='accepted' or dispatch['tool']!=DISPATCH_TOOL
+                or dispatch['harness_id']!='github'
+                or dispatch['request_sha256']!=runtime_operations.compute_request_sha256(expected)
+                or observed.get('batch_id')!=successor['batch_id'] or observed.get('workflow_run_id')!=successor['workflow_run_id']):
+            return None
+    return old
+
+
+def _stable_predecessor_chain(conn,successor):
+    """No partial permission when any edge is damaged, cyclic or unconfirmed."""
+    result=[];seen={successor['batch_id']}
+    while successor.get('superseded_build_batch_id'):
+        old=_trusted_stable_predecessor(conn,successor)
+        if old is None or old['batch_id'] in seen:
+            return None
+        seen.add(old['batch_id']);result.append(old['batch_id']);successor=old
+    return result
+
+
+def _published_stable_predecessors(conn,project_id):
+    """A verified publication durably resolves its complete trusted failed chain."""
+    result=set()
+    for successor in _batches(conn,project_id):
+        if successor.get('state')=='published' and successor['policy']['channel']=='stable':
+            chain=_stable_predecessor_chain(conn,successor)
+            if chain is not None:
+                result.update(chain)
+    return result
 
 
 def _prepare(ctx,task_id):
@@ -292,12 +564,15 @@ def _prepare(ctx,task_id):
     rows=[root]+list(ctx.conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
     members=sorted((_identity(row) for row in rows),key=lambda row:row['task_id'])
     workflow=github.workflow_snapshot(proof['github_repository'],policy['workflow_path'],policy['workflow_ref'])
-    _stable_available(ctx.conn,root['project_id'],policy)
+    superseded=_superseded_build_batch(ctx.conn,root,proof)
+    _stable_available(ctx.conn,root['project_id'],policy,superseded)
     releases=github.list_releases(proof['github_repository']);versions,stable=_version_inventory(ctx.conn,root['project_id'],releases)
     version=('.'.join(str(part) for part in (*versions[-1][:2],versions[-1][2]+1)) if versions else policy['version_base'])
     context=dict(project_id=root['project_id'],repository=proof['github_repository'],root_task_id=root['task_id'],
         members=members,proof=proof,policy=policy,policy_snapshot=revision,workflow=workflow,
         stable_versions=[list(v) for v in versions],frozen_stable_versions=stable,version=version)
+    if superseded:
+        context['superseded_build_batch_id']=superseded
     context['context_sha256']=util.sha256_text(util.jdump(context))
     return context
 
@@ -305,7 +580,7 @@ def _prepare(ctx,task_id):
 def _save(conn,batch,now,status=None):
     # Terminal publication and abandonment cannot be undone by an older reader.
     current=_batch(conn,batch['batch_id'])
-    if current and (current.get('state')=='published' or current.get('abandoned')
+    if current and (_historical_build_source(conn,current) or current.get('state')=='published' or current.get('abandoned')
             or (current.get('workflow_run_id') and not batch.get('workflow_run_id'))):
         batch.clear();batch.update(current)
         return
@@ -315,9 +590,32 @@ def _save(conn,batch,now,status=None):
         status=status or ('accepted' if batch['state']=='published' else 'prepared'),result=batch,now=now)
 
 
-def _failure(conn,batch,now,exc,*,state='blocked'):
+def _sync_snapshot(conn,batch):
+    from . import release_dispatch_recovery as recovery
+    rows=[db.get_runtime_operation(conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id']),
+          recovery.receipt(conn,batch)]
+    return util.jdump(dict(batch=_batch(conn,batch['batch_id']),operations=[dict(row) if row is not None else None for row in rows]))
+
+
+def _newer_sync(conn,batch,snapshot):
+    if _sync_snapshot(conn,batch)!=snapshot:
+        current=_batch(conn,batch['batch_id'])
+        return dict(outcome=current['state'],release=_dto(current,True,conn=conn))
+    return None
+
+
+def _failure(conn,batch,now,exc,*,state='blocked',expected_snapshot=None):
     batch=dict(batch,state=state,reason=util.redact(str(exc)),blockers=[dict(code=getattr(exc,'code','release_evidence_unconfirmed'),message=util.redact(str(exc)))])
     with db.write_txn(conn):
+        if expected_snapshot is not None:
+            newer=_newer_sync(conn,batch,expected_snapshot)
+            if newer is not None:return newer
+        if _historical_build_source(conn,batch):
+            old=_batch(conn,batch['batch_id'])
+            value=_dto(old,True,conn=conn)
+            value.update(is_historical=True,can_start=False,can_reconcile=False,can_abandon=False,
+                reason='原失败批次已归档，保留原回执；新的验证与发布须分别确认')
+            return dict(outcome='blocked',release=value)
         _save(conn,batch,now)
     return dict(outcome=batch['state'],release=_dto(batch,True,conn=conn))
 
@@ -330,6 +628,8 @@ def cmd_prepare_task_release(ctx,payload):
         return dict(task_id=task['task_id'],context_sha256=attached['context_sha256'],release=projection(ctx.conn,task))
     try:
         context=_prepare(ctx,task['task_id']);value=projection(ctx.conn,task)
+        if value.get('state')=='blocked' and not value.get('batch_id'):
+            value.update(state='ready',title='待构建发布',reason='已核对当前交付证据，可构建并发布版本',blockers=[],can_start=True)
         value.update(context_sha256=context['context_sha256'],target_sha=context['proof']['target_sha'],version=context['version'])
         return dict(task_id=task['task_id'],context_sha256=context['context_sha256'],release=value)
     except (ReleaseBlocked,closeout._Blocked,util.KanpilotError,gh_client.GhError,git_delivery.GitDeliveryError,OSError,ValueError) as exc:
@@ -386,7 +686,10 @@ def _reserve(ctx,context):
                  'release_members_changed','发布成员身份已变化')
         _versions,stable=_version_inventory(conn,context['project_id'],[])
         _require(stable==context['frozen_stable_versions'],'release_version_changed','已有正式批次占用版本，请重新准备')
-        _stable_available(conn,context['project_id'],policy)
+        superseded=_superseded_build_batch(conn,root,context['proof'])
+        _require(superseded==context.get('superseded_build_batch_id'),
+                 'release_predecessor_mismatch','确认期间原失败正式批次的修复归属已变化')
+        _stable_available(conn,context['project_id'],policy,superseded)
         existing=_batches(conn,context['project_id'])
         seconds=int(util.parse_ts(ctx.now_iso).timestamp())
         build=max(seconds,max((batch['build_number'] for batch in existing),default=0)+1)
@@ -400,7 +703,14 @@ def _reserve(ctx,context):
         _save(conn,batch,ctx.now_iso)
         for member in batch['members']:
             task=db.require_task(conn,member['task_id'])
-            db.set_extra(conn,task,ctx.now_iso,release_ref=dict(batch_id=batch_id,required=task['status']!='done'))
+            changes=dict(release_ref=dict(batch_id=batch_id,required=task['status']!='done'))
+            hold=db.task_extra(task).get('build_failure_hold')
+            if hold:
+                _require(_build_repair_merged(task),'release_build_repair_hold',
+                    '构建修复的新 PR 尚未合并，不能确认再次构建发布')
+                changes['build_failure_hold']=dict(hold,release_authorized_batch_id=batch_id,
+                    release_authorized_at=ctx.now_iso)
+            db.set_extra(conn,task,ctx.now_iso,**changes)
     return batch
 
 
@@ -497,12 +807,16 @@ def _dispatch_reserved(ctx,batch,task):
 
 
 def _recover_writer(ctx,batch):
-    row=db.get_runtime_operation(ctx.conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id'])
-    frozen=util.jload(row['result_json']) or {} if row else {}
+    from . import release_dispatch_recovery as recovery
     held=db.get_setting(ctx.conn,'lifecycle_owner','') or ''
     if not held:
         return
-    _require(held==frozen.get('lifecycle_owner'),'release_lifecycle_busy','其他生命周期操作正在执行，请稍后核对')
+    rows=[db.get_runtime_operation(ctx.conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id']),
+          recovery.receipt(ctx.conn,batch)]
+    owners=[util.jload(row['result_json']) or {} for row in rows if row is not None]
+    owners=[value for value in owners if value.get('lifecycle_owner')==held]
+    _require(len(owners)==1,'release_lifecycle_busy','其他生命周期操作正在执行，请稍后核对')
+    frozen=owners[0]
     process=frozen.get('process_identity') or {};pid=process.get('pid')
     _require(type(pid) is int and pid>0 and all(type(process.get(k)) is int for k in ('started_seconds','started_microseconds')),
              'release_writer_unknown','原调度进程身份无法确认，不能回收锁')
@@ -571,10 +885,13 @@ def _verify_publication(batch,run):
 def cmd_sync_release_batch(ctx,payload):
     batch=_batch(ctx.conn,payload['batch_id'])
     _require(batch is not None,'release_batch_missing','发布批次不存在')
+    _require(not _historical_build_source(ctx.conn,batch),
+             'release_build_repair_hold','原失败批次已归档，不能覆盖或重发；构建修复的合并与再次发布须另行确认')
     if batch.get('abandoned'):
         return dict(outcome='abandoned',release=_dto(batch,False,conn=ctx.conn))
     if batch['state']=='published':
         return dict(outcome='published',release=_dto(batch,True,conn=ctx.conn))
+    snapshot=_sync_snapshot(ctx.conn,batch)
     try:
         _require(batch.get('dispatch_status')!='not_sent','release_not_sent','冻结批次尚未发送；可继续启动原批次，不会创建新批次')
         _require(_current(ctx.conn,batch),'release_members_changed','发布成员执行、计划、需求或评审身份已变化；保留原批次不回填')
@@ -584,15 +901,22 @@ def cmd_sync_release_batch(ctx,payload):
             matches=[run for run in runs if _run_matches(batch,run)]
             _require(len(matches)<=1,'release_run_ambiguous','找到多个相同批次 marker 的运行，不能猜测归属')
             if not matches:
-                batch.update(state='unknown',reason='尚未找到唯一调度运行；不会重复发送')
-                with db.write_txn(ctx.conn):_save(ctx.conn,batch,ctx.now_iso)
+                reason='GitHub 暂未查到本批次运行；将自动核对，暂不重新发送'
+                batch.update(state='unknown',reason=reason,read_failures=0,
+                    blockers=[dict(code='release_run_not_observed',message=reason)])
+                with db.write_txn(ctx.conn):
+                    newer=_newer_sync(ctx.conn,batch,snapshot)
+                    if newer is not None:return newer
+                    _require(not _historical_build_source(ctx.conn,batch),'release_build_repair_hold','原失败批次已归档，保留原回执')
+                    _save(ctx.conn,batch,ctx.now_iso)
                 return dict(outcome='unknown',release=_dto(batch,True,conn=ctx.conn))
             run=matches[0];batch.update(workflow_run_id=run['id'],workflow_url=run['html_url'])
         run=github.run(batch['repository'],batch['workflow_run_id'])
         _require(_run_matches(batch,run),'release_run_mismatch','Actions运行与冻结批次、工作流或ref/head不符')
+        batch['run_attempt']=run['run_attempt']
         status=run.get('status')
         if status=='completed' and run.get('conclusion')!='success':
-            batch.update(state='failed',reason='构建运行未成功；可在Actions手动重跑后同步结果')
+            batch.update(state='failed',reason='构建运行未成功；可在Actions手动重跑后同步结果',blockers=[])
         elif status=='completed':
             verified=_verify_publication(batch,run)
             latest=github.run(batch['repository'],batch['workflow_run_id'])
@@ -604,24 +928,46 @@ def cmd_sync_release_batch(ctx,payload):
         else:
             _require(status in ('queued','in_progress','waiting','pending','requested'),'release_run_status_unknown','Actions运行状态未知')
             batch.update(state='building' if status=='in_progress' else 'queued',reason='构建中' if status=='in_progress' else '等待构建运行',blockers=[])
+        batch['read_failures']=0
         with db.write_txn(ctx.conn):
+            newer=_newer_sync(ctx.conn,batch,snapshot)
+            if newer is not None:return newer
+            _require(not _historical_build_source(ctx.conn,batch),'release_build_repair_hold','原失败批次已归档，保留原回执')
             _require(_current(ctx.conn,batch),'release_members_changed','保存发布回执前成员身份已变化')
             _save(ctx.conn,batch,ctx.now_iso)
             row=db.get_runtime_operation(ctx.conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id'])
             if row is not None:
                 runtime_operations.complete_operation(ctx.conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id'],
                     result=dict(batch_id=batch['batch_id'],workflow_run_id=run['id']),now=ctx.now_iso)
+            from . import release_dispatch_recovery as recovery
+            recovery.observe(ctx.conn,batch,run['id'],ctx.now_iso)
         return dict(outcome='published' if batch['state']=='published' else 'waiting',release=_dto(batch,True,conn=ctx.conn))
     except (ReleaseBlocked,util.KanpilotError,gh_client.GhError,git_delivery.GitDeliveryError,OSError,ValueError) as exc:
-        return _failure(ctx.conn,batch,ctx.now_iso,exc,state='unknown'
-            if not batch.get('workflow_run_id') and batch.get('dispatch_status')!='not_sent' else 'blocked')
+        state=('unknown' if not batch.get('workflow_run_id') and batch.get('dispatch_status')!='not_sent' else 'blocked')
+        if isinstance(exc,gh_client.GhError) and exc.kind in ('timeout','transient'):
+            # A failed GET says nothing about a running build or accepted dispatch.
+            # Keep its last observed stage so the existing scheduler can reconcile
+            # it; never resend the workflow, and stop after three failed polls.
+            batch['read_failures']=int(batch.get('read_failures') or 0)+1
+            if batch['read_failures']<3:
+                if (batch['state'] in ('queued','building','publishing')
+                        or (batch['state']=='unknown' and batch.get('dispatch_status')=='sent_or_unknown'
+                            and any(row['operation_id']=='dispatch:'+batch['batch_id']
+                                    for row in _pending(ctx.conn,batch['project_id'])))):
+                    state=batch['state']
+                    exc=gh_client.GhError(exc.kind,'发布结果读取暂时失败，将自动核对（'
+                        +str(batch['read_failures'])+'/3）：'+exc.message)
+            else:
+                state='blocked'
+        return _failure(ctx.conn,batch,ctx.now_iso,exc,state=state,expected_snapshot=snapshot)
 
 
 def cmd_sync_release_batches(ctx,payload):
     limit=payload.get('limit',10)
     if type(limit) is not int or not 1<=limit<=50:
         raise util.bad_request('limit须为1..50整数')
-    batches=[batch for batch in _batches(ctx.conn) if batch['state']!='published' and not batch.get('abandoned')][:limit]
+    batches=[batch for batch in _batches(ctx.conn) if batch['state']!='published' and not batch.get('abandoned')
+             and not _historical_build_source(ctx.conn,batch)][:limit]
     return dict(results=[dict(batch_id=batch['batch_id'],**cmd_sync_release_batch(ctx,dict(batch_id=batch['batch_id']))) for batch in batches])
 
 
@@ -629,9 +975,14 @@ def sync_existing(ctx,project_ids=None,limit=3):
     """Bounded scheduler poll; never creates, resends or retries failed batches."""
     _require(type(limit) is int and 1<=limit<=50,'bad_request','limit须为1..50整数')
     allowed=set(project_ids) if project_ids is not None else None
-    batches=[batch for batch in _batches(ctx.conn) if batch['state'] in ('queued','building','publishing')
+    batches=[batch for batch in _batches(ctx.conn) if not batch.get('abandoned')
+        and not _historical_build_source(ctx.conn,batch)
         and (allowed is None or batch['project_id'] in allowed)
-        and (not batch.get('next_check_at') or util.parse_ts(batch['next_check_at'])<=util.parse_ts(ctx.now_iso))][:limit]
+        and (not batch.get('next_check_at') or util.parse_ts(batch['next_check_at'])<=util.parse_ts(ctx.now_iso))
+        and (batch['state'] in ('queued','building','publishing') or (batch['state']=='unknown'
+            and batch.get('dispatch_status')=='sent_or_unknown'
+            and any(row['operation_id']=='dispatch:'+batch['batch_id']
+                    for row in _pending(ctx.conn,batch['project_id']))))][:limit]
     return dict(results=[dict(batch_id=batch['batch_id'],**cmd_sync_release_batch(ctx,dict(batch_id=batch['batch_id']))) for batch in batches])
 
 
@@ -656,6 +1007,13 @@ def cmd_abandon_unsent_release(ctx,payload):
 
 def after_merge(ctx,task,payload=None):
     value=projection(ctx.conn,task)
+    if db.task_extra(task).get('external_build_repair_ref') and _attached(ctx.conn,task) is None:
+        return dict(outcome='blocked',release=value)
+    hold=db.task_extra(task).get('build_failure_hold')
+    if hold:
+        authorized=_attached(ctx.conn,task)
+        if not authorized or hold.get('release_authorized_batch_id')!=authorized['batch_id']:
+            return dict(outcome='blocked',release=value)
     if value is None:
         return dict(outcome='disabled',release=None)
     batch=_attached(ctx.conn,task)

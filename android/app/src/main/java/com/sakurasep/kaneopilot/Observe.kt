@@ -20,6 +20,14 @@ enum class ObserveGroup(val label: String) {
 /** 核心给出的整数字段；缺失或 null 返回 null，不把缺省当作 0。 */
 fun JSONObject.intOrNull(key: String): Int? = if (isNull(key) || !has(key)) null else optInt(key)
 
+internal enum class AttentionAction { Answer, Plan, MacOnly }
+
+internal fun attentionAction(item: JSONObject): AttentionAction = when {
+    actionAllowed(item, "submit-plan-answers") || actionAllowed(item, "submit-execution-answers") -> AttentionAction.Answer
+    actionAllowed(item, "confirm-dispatch") -> AttentionAction.Plan
+    else -> AttentionAction.MacOnly
+}
+
 object Observe {
     /** 行内 exception（list-tasks 每行的字段）；无异常为 null。 */
     fun exception(task: JSONObject): JSONObject? = task.optJSONObject("exception")

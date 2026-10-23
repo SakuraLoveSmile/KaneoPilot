@@ -35,7 +35,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 model.foreground(true)
-                try { while (true) { model.refresh(); delay(5000) } }
+                try { while (true) { model.refreshInBackground(); delay(5000) } }
                 finally { model.foreground(false) }
             }
         }

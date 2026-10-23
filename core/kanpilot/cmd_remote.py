@@ -419,7 +419,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         execution_round = round_store.get_round(conn, current["task_id"], current["run_id"])
         codex = execution_round is not None and execution_round["backend"] == "codex"
         if (engine_claim_scope.effective_mode(conn, current["project_id"]) == "live"
-                or core.review_repair_of(current).get("source_kind") == "merge_conflict" or codex):
+                or core.review_repair_of(current).get("source_kind") in ("merge_conflict", "build_failure") or codex):
             from .engine import verdict
             receipt = db.task_extra(current).get("engine_verdict") or {}
             frozen = receipt.get("binding") or {}

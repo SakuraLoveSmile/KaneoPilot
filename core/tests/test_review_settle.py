@@ -90,6 +90,20 @@ def test_manual_takeover_retains_legacy_pass(scene):
     assert any(c == 'advance-task' for c, _ in calls)
 
 
+def test_manual_branch_release_pass_registers_without_advance_or_block(scene):
+    task, request, calls = scene
+    task['delivery'] = {'mode': 'manual', 'workspace_version': 1}
+    task['extra']['delivery'] = task['delivery']
+    task['release'] = {'required': True, 'state': 'waiting_group'}
+    result = review_settle.settle(db_path='isolated', task=task, request=request, run_id='review1',
+        result={'conclusion': 'pass', 'report_markdown': '通过', 'fix': None},
+        backend='pi_desktop', cost_usd=None)
+    assert result['exit_code'] == 0
+    assert task['status'] == 'in_review'
+    assert request['status'] == 'succeeded'
+    assert [c for c, _ in calls if c not in ('get-task', 'get-request')] == ['register-review', 'report']
+
+
 @pytest.mark.parametrize('location', ['fix_request', 'review_history', 'review_summary'])
 def test_registered_key_recovery(location):
     job = {'review_key': 'same', 'report_sha256': 'sha', 'conclusion': 'changes_requested'}

@@ -295,11 +295,11 @@ enum DisplayStatus {
             return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "阻塞")
         case "失败":
             return StatusStyle(icon: "xmark.octagon.fill", color: .red, label: "失败")
-        case "修复会话待启动":
+        case "修复会话待启动", "AI 处理待启动":
             return StatusStyle(icon: "clock", color: .blue, label: status!)
-        case "修复中":
+        case "修复中", "AI 正在处理":
             return StatusStyle(icon: "wrench.and.screwdriver", color: .blue, label: status!)
-        case "修复后待复审":
+        case "修复后待复审", "处理后待复审":
             return StatusStyle(icon: "eye", color: .orange, label: status!)
         case "等待二级任务完成", "待收尾校验":
             return StatusStyle(icon: "checklist", color: .blue, label: status!)
@@ -333,7 +333,7 @@ enum DisplayStatus {
     }
 
     static func effective(_ task: TaskSummary) -> String {
-        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.status != "done", let release = task.release, release.showsTaskStatus { return release.title }
         if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
         if let title = task.parentCloseout?.displayTitle { return title }
         if let exception = task.exception {
@@ -346,7 +346,7 @@ enum DisplayStatus {
     }
 
     static func effective(_ task: TaskDetail) -> String {
-        if task.status != "done", let release = task.release, release.required { return release.title }
+        if task.status != "done", let release = task.release, release.showsTaskStatus { return release.title }
         if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
         if let title = task.parentCloseout?.displayTitle { return title }
         if let exception = task.exception {

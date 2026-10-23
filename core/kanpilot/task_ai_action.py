@@ -6,6 +6,7 @@ from . import (automation_policy, constants, core, db, exec_config, gh_client,
                git_delivery, project_config, runtime_operations, util)
 
 KIND = "merge_conflict"
+KINDS = (KIND, "build_failure")
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
                 "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
@@ -25,12 +26,24 @@ def _digest(value):
 
 
 def _context(fix):
-    return _digest({key: fix.get(key) for key in CONTEXT_FIELDS})
+    fields = CONTEXT_FIELDS
+    if fix.get("source_kind") == "build_failure":
+        from . import task_ai_build_failure
+        fields += ("source_kind",) + task_ai_build_failure.FIELDS
+    value = {key: fix.get(key) for key in fields}
+    if fix.get("source_kind") == "build_failure":
+        delivery = dict(fix.get("source_delivery") or {})
+        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results"):
+            delivery.pop(key, None)
+        if isinstance(delivery.get("auto_merge"), dict):
+            delivery["auto_merge"] = {key: item for key, item in delivery["auto_merge"].items() if key != "updated_at"}
+        value["source_delivery"] = delivery
+    return _digest(value)
 
 
 def _action(task):
     fix = core.review_repair_of(task)
-    return fix if fix.get("source_kind") == KIND else {}
+    return fix if fix.get("source_kind") in KINDS else {}
 
 
 def _summary(config):
@@ -99,7 +112,7 @@ def verify_source_terminal(conn, task, fix):
     detail = dsh_events.round_detail(row, job, events) or {}
     util.require(not error and not event_error and complete and events and row["backend"] == job.get("backend")
                  and row["run_status"] == "finished" and job.get("status") == "finished"
-                 and row["save_state"] == "active" and row["worktree_path"] == fix["worktree_path"]
+                 and row["save_state"] == "active" and row["worktree_path"] == fix.get("source_worktree_path", fix["worktree_path"])
                  and (detail.get("terminal") or {}).get("outcome") == "completed"
                  and detail.get("observer_alive") is False and detail.get("send_state") != "unknown",
                  "原执行尚无可信完成终态，不能启动处理会话", "conflict")
@@ -190,17 +203,31 @@ def _prepare(ctx, task):
 
 
 def _public_candidate(value):
-    return dict(task_id=value["task_id"], kind=KIND, title=TITLE, context_sha256=value["action_context_sha256"],
+    result = dict(task_id=value["task_id"], kind=value.get("source_kind", KIND), title=value.get("title", TITLE), context_sha256=value["action_context_sha256"],
                 config_sha256=value["action_config_sha256"], pr_number=value["pr_number"], branch=value["branch"],
                 base_branch=value["base_branch"], head_sha=value["head_sha"], base_sha=value["target_base_sha"],
                 model_summary=value["model_summary"])
+    if value.get("source_kind") == "build_failure":
+        from . import task_ai_build_failure
+        result.update({key: value[key] for key in task_ai_build_failure.PUBLIC})
+    return result
+
+
+def _prepare_kind(ctx, task, kind):
+    if kind == "build_failure":
+        from . import task_ai_build_failure
+        try:
+            return task_ai_build_failure.prepare(ctx, task)
+        except gh_client.GhError as exc:
+            raise util.KanpilotError("remote_unavailable", exc.message) from exc
+    return _prepare(ctx, task)
 
 
 def cmd_prepare_task_ai_action(ctx, payload):
-    util.require(payload.get("kind") == KIND, "暂不支持此 AI 处理类型", "bad_request")
+    util.require(payload.get("kind") in KINDS, "暂不支持此 AI 处理类型", "bad_request")
     task = db.require_task(ctx.conn, payload["task_id"])
     try:
-        return {"candidate": _public_candidate(_prepare(ctx, task))}
+        return {"candidate": _public_candidate(_prepare_kind(ctx, task, payload["kind"]))}
     except git_delivery.GitDeliveryError as exc:
         raise util.KanpilotError("conflict", exc.message) from exc
 
@@ -221,19 +248,19 @@ def _start_snapshot(task):
 
 
 def cmd_start_task_ai_action(ctx, payload):
-    util.require(payload.get("confirm") is True and payload.get("kind") == KIND,
+    util.require(payload.get("confirm") is True and payload.get("kind") in KINDS,
                  "需要明确确认本次 AI 处理", "bad_request")
     task = db.require_task(ctx.conn, payload["task_id"])
     # Replaying an acknowledged confirmation must not start another model turn,
     # even after the global model configuration or task state has changed.
     previous = [_action(task)] + list(_extra(task).get("ai_action_history") or [])
     for item in previous:
-        if item and item.get("action_context_sha256") == payload.get("expected_context_sha256"):
+        if item and item.get("kind", item.get("source_kind")) == payload["kind"] and item.get("action_context_sha256") == payload.get("expected_context_sha256"):
             return {"ok": True, "already_started": True, "request_id": item.get("request_id"),
                     "task_ai_action": projection(ctx.conn, task, ctx.now)}
     snapshot = _start_snapshot(task)
     try:
-        value = _prepare(ctx, task)
+        value = _prepare_kind(ctx, task, payload["kind"])
     except git_delivery.GitDeliveryError as exc:
         raise util.KanpilotError("conflict", exc.message) from exc
     util.require(value["action_context_sha256"] == payload.get("expected_context_sha256")
@@ -247,6 +274,10 @@ def cmd_start_task_ai_action(ctx, payload):
                     "task_ai_action": projection(ctx.conn, fresh, ctx.now)}
         util.require(_start_snapshot(fresh) == snapshot and _base_gate(ctx.conn, fresh) is None,
                      "准备期间任务状态已变化，请刷新后重试", "conflict")
+        if value["source_kind"] == "build_failure":
+            from . import task_ai_build_failure
+            util.require(task_ai_build_failure.gate(ctx.conn, fresh) is None,
+                         "准备期间失败构建状态已变化，请重新准备", "conflict")
         # snapshot() may resolve Plus defaults over a connection, so only compare
         # the raw persisted global setting while the writer lock is held.
         util.require(_digest(db.get_setting(ctx.conn, "exec_config")) == value["raw_config_sha256"],
@@ -261,6 +292,19 @@ def cmd_start_task_ai_action(ctx, payload):
         for key in ("review_conclusion", "review_registered_at", "registered_review_identity", "verification_override", "plan_execution_hold"):
             extra.pop(key, None)
         extra["fix_request"] = value
+        if value["source_kind"] == "build_failure":
+            archive = list(extra.get("build_failure_sources") or [])
+            archive.append({"action_id": value["action_id"], "delivery": value["source_delivery"],
+                            "release_ref": extra.get("release_ref"), "release_verification_ref": extra.get("release_verification_ref"),
+                            "release_batch_id": value["release_batch_id"]})
+            extra["build_failure_sources"] = archive
+            extra.pop("release_ref", None)
+            extra.pop("release_verification_ref", None)
+            extra.pop("task_ai_action_delivery", None)
+            extra["build_failure_hold"] = {"action_id": value["action_id"], "release_batch_id": value["release_batch_id"],
+                                          "reason": "构建修复仅授权新 PR；合并与再次构建发布须另行确认"}
+            extra["delivery"] = {"mode": "pr", "build_failure_action_id": value["action_id"], "commits": [],
+                                 **{key: value[key] for key in ("branch", "worktree_path", "head_sha", "base_branch", "base_sha")}}
         core.transition_task(ctx.conn, fresh, "ready", ctx.now_iso, "user", detail={"via": "task_ai_action", "action_id": value["action_id"]},
                              stage="dispatch", sent=0, send_state=None, sent_at=None, lock_retained=0,
                              review_report_path=None, review_report_sha256=None, review_key=None,
@@ -272,18 +316,22 @@ def cmd_start_task_ai_action(ctx, payload):
         db.set_extra(ctx.conn, fresh, ctx.now_iso, fix_request=value)
         record_progress(ctx.conn, db.require_task(ctx.conn, task["task_id"]), ctx.now_iso, "queued")
         db.add_event(ctx.conn, ctx.now_iso, "task_ai_action_started", task_id=task["task_id"], request_id=request["request_id"],
-                     actor="user", detail={"action_id": value["action_id"], "kind": KIND})
+                     actor="user", detail={"action_id": value["action_id"], "kind": value["source_kind"]})
     return {"ok": True, "request_id": request["request_id"], "task_ai_action": projection(ctx.conn, db.require_task(ctx.conn, task["task_id"]), ctx.now)}
 
 
 def verify_frozen(task, fix):
-    util.require(fix.get("source_kind") == KIND and fix.get("action_context_sha256") == _context(fix)
+    util.require(fix.get("source_kind") in KINDS and fix.get("action_context_sha256") == _context(fix)
                  and fix.get("action_config_sha256") == _digest(fix.get("action_config"))
                  and all(fix.get(key) == task[key] for key in ("task_id", "project_id", "repository", "requirements_sha256", "plan_sha256")),
                  "AI 处理的冻结上下文已变化", "conflict")
     delivery = core.delivery_of(task)
-    util.require(all(fix.get(key) and fix[key] == delivery.get(key) for key in ("branch", "base_branch", "worktree_path", "pr_number"))
-                 and fix.get("target_base_sha") != fix.get("head_sha"), "AI 处理分支或 PR 身份已变化", "conflict")
+    if fix.get("source_kind") == "build_failure":
+        from . import task_ai_build_failure
+        task_ai_build_failure.verify_frozen(task, fix)
+    else:
+        util.require(all(fix.get(key) and fix[key] == delivery.get(key) for key in ("branch", "base_branch", "worktree_path", "pr_number"))
+                     and fix.get("target_base_sha") != fix.get("head_sha"), "AI 处理分支或 PR 身份已变化", "conflict")
     _read_frozen(fix.get("report_path"), fix.get("report_sha256"), report=True)
     _read_frozen(task["plan_path"], fix.get("plan_sha256"))
     return dict(fix)
@@ -325,6 +373,9 @@ def verify_verification_recovery(task, expected):
 
 
 def ensure_worktree(conn, task):
+    if _action(task).get("source_kind") == "build_failure":
+        from . import task_ai_build_failure
+        return task_ai_build_failure.ensure_worktree(conn, task)
     fix = verify_frozen(task, _action(task))
     delivery = dict(core.delivery_of(task), repository=task["repository"], head_sha=fix["head_sha"])
     scope, operation = "task-ai-action:" + task["task_id"], "merge:" + fix["action_id"]
@@ -349,6 +400,9 @@ def ensure_worktree(conn, task):
 
 
 def prompt_body(fix, plan_path):
+    if fix.get("source_kind") == "build_failure":
+        from . import task_ai_build_failure
+        return task_ai_build_failure.prompt_body(fix, plan_path)
     from . import verify_evidence
     plan = _read_frozen(plan_path, fix.get("plan_sha256"))
     _read_frozen(fix.get("report_path"), fix.get("report_sha256"), report=True)
@@ -385,7 +439,8 @@ def _entry(fix):
     state = fix.get("state", "queued")
     return {**{key: fix.get(key) for key in ("action_id", "created_at", "model_summary", "pr_number", "head_sha", "reason",
               "action_context_sha256", "action_config_sha256", "source_execution_run_id", "request_id")},
-            "kind": KIND, "title": fix.get("title") or TITLE, "state": state, "state_title": STATE_TITLES.get(state, "状态未知"),
+            **{key: fix.get(key) for key in ("release_batch_id", "release_tag", "source_pr_number", "source_pr_url", "workflow_run_id", "workflow_attempt", "workflow_url")},
+            "kind": fix.get("source_kind", KIND), "title": fix.get("title") or TITLE, "state": state, "state_title": STATE_TITLES.get(state, "状态未知"),
             "base_sha": fix.get("target_base_sha") or fix.get("base_sha"),
             "execution_run_id": fix.get("repair_execution_run_id") or fix.get("execution_run_id"), "session_id": fix.get("session_id")}
 
@@ -414,7 +469,7 @@ def record_review_result(conn, task, now, conclusion):
 
 def register_delivery_continuation(conn, task, now, fix):
     """Bind this authorized action to its newly registered pass before clearing it."""
-    if fix.get("source_kind") != KIND:
+    if fix.get("source_kind") not in KINDS:
         return
     verify_frozen(task, fix)
     util.require(fix.get("authorized_by") == "user" and fix.get("authorized_at")
@@ -444,9 +499,10 @@ def delivery_continuation(task, *, allow_paused=False):
     receipt = extra.get("task_ai_action_delivery") or {}
     fix = receipt.get("action") or {}
     delivery = core.delivery_of(task)
-    if (fix.get("source_kind") != KIND or fix.get("authorized_by") != "user" or not fix.get("authorized_at")
+    build = fix.get("source_kind") == "build_failure"
+    if (fix.get("source_kind") not in KINDS or fix.get("authorized_by") != "user" or not fix.get("authorized_at")
             or not fix.get("action_id") or fix.get("action_context_sha256") != _context(fix)
-            or (fix.get("action_config") or {}).get("backend") != "pi_desktop"
+            or (fix.get("action_config") or {}).get("backend") not in (("pi_desktop", "codex") if build else ("pi_desktop",))
             or fix.get("action_config_sha256") != _digest(fix.get("action_config"))
             or task["status"] != "in_review" or not db.task_is_active(task)
             or (not allow_paused and db.task_auto_paused(task))
@@ -457,7 +513,8 @@ def delivery_continuation(task, *, allow_paused=False):
             or task["run_id"] != fix.get("repair_execution_run_id")
             or task["run_id"] == fix.get("source_execution_run_id")
             or any(not fix.get(key) or fix[key] != delivery.get(key) for key in
-                   ("branch", "worktree_path", "base_branch", "pr_number"))
+                   (("branch", "worktree_path", "base_branch") if build else ("branch", "worktree_path", "base_branch", "pr_number")))
+            or (build and delivery.get("build_failure_action_id") != fix.get("action_id"))
             or delivery.get("base_sha") != fix.get("target_base_sha")
             or not receipt.get("head_sha") or receipt["head_sha"] != delivery.get("head_sha")
             or receipt["head_sha"] == fix.get("head_sha")
@@ -470,7 +527,7 @@ def delivery_continuation(task, *, allow_paused=False):
             or identity.get("report_sha256") != task["review_report_sha256"]):
         return None
     if not any(item.get("action_id") == fix["action_id"] and item.get("state") == "completed"
-               and item.get("kind") == KIND and item.get("execution_run_id") == task["run_id"]
+               and item.get("kind") == fix["source_kind"] and item.get("execution_run_id") == task["run_id"]
                and item.get("action_context_sha256") == fix["action_context_sha256"]
                for item in extra.get("ai_action_history") or []):
         return None
@@ -496,4 +553,11 @@ def projection(conn, task, now):
     if current:
         history = [dict(item, **current) if item.get("action_id") == current["action_id"] else item for item in history]
     reason = _base_gate(conn, task)
-    return {"can_prepare": reason is None, "reason": reason, "current": current, "history": history}
+    from . import task_ai_build_failure, release_delivery
+    batch = release_delivery._attached(conn, task)
+    kind = (fix.get("source_kind") or ("build_failure" if batch and batch.get("state") == "failed" else KIND))
+    if kind == "build_failure" and not fix:
+        reason = reason or task_ai_build_failure.gate(conn, task)
+    if not current and kind == KIND and history and history[-1].get("kind") == "build_failure":
+        kind, reason = "build_failure", "本次构建修复已结束；合并与再次构建发布须另行确认"
+    return {"kind": kind, "can_prepare": reason is None, "reason": reason, "current": current, "history": history}

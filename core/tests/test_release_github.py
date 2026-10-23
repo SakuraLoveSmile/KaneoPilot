@@ -31,13 +31,22 @@ def media_gh(tmp_path, monkeypatch):
     payload=tmp_path/'payload.json'
     manifest=b'{"schema":1,"batch_id":"fixture-batch"}'
     zipped=archive([(github.MANIFEST_NAME,manifest)])
+    logs=b'\x1b[31mcompile error: missing symbol\x1b[0m\r\nGH_TOKEN=ghp_secretfixture\r'
+    pr=dict(number=42,url='https://github.com/example/repo/pull/42',state='MERGED',
+        headRefOid='a'*40,mergedAt='2026-10-21T19:05:53Z',baseRefName='main',
+        headRefName='kaneo/task',isCrossRepository=False,mergeCommit=dict(oid='b'*40))
+    jobs=[dict(id=101,run_id=42,run_attempt=3,name='Build Android',status='completed',conclusion='failure')]
     payload.write_text(json.dumps(dict(manifest=base64.b64encode(manifest).decode(),
-        zipped=base64.b64encode(zipped).decode())))
+        zipped=base64.b64encode(zipped).decode(),logs=base64.b64encode(logs).decode(),pr=pr,jobs=jobs)))
     executable.write_text('#!'+sys.executable+'\n'+'''import base64,json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
 with Path(os.environ['MEDIA_GH_CALLS']).open('a') as log: log.write(json.dumps(args)+'\\n')
 data=json.loads(Path(os.environ['MEDIA_GH_PAYLOAD']).read_text())
+if args[:2]==['pr','view']:
+    if args[2:6]!=['42','--repo','example/repo','--json'] or 'mergeCommit' not in args[6].split(','): sys.exit(77)
+    print(json.dumps(data['pr']))
+    sys.exit(0)
 if len(args)<2 or args[0]!='api': sys.exit(77)
 path=args[1].split('?')[0]
 headers=[args[i+1] for i,arg in enumerate(args[:-1]) if arg=='-H']
@@ -55,6 +64,17 @@ elif path=='repos/example/repo/releases/assets/2':
     if accept=='application/octet-stream': sys.stdout.buffer.write(base64.b64decode(data['manifest']))
     elif json_media: print(json.dumps({'id':2,'name':'kaneopilot-release.json'}))
     else: sys.exit(77)
+elif path=='repos/example/repo/actions/runs/42/attempts/3/jobs':
+    if not json_media: sys.exit(77)
+    print(json.dumps({'total_count':len(data['jobs']),'jobs':data['jobs']}))
+elif path=='repos/example/repo/actions/jobs/101/logs':
+    if not json_media:
+        print("gh: Unsupported 'Accept' header: '"+accept+"'. Must accept 'application/json'. (HTTP 415)",file=sys.stderr)
+        sys.exit(1)
+    if '--allow-escape-sequences' not in args:
+        print('the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway',file=sys.stderr)
+        sys.exit(1)
+    sys.stdout.buffer.write(base64.b64decode(data['logs']))
 else: sys.exit(77)
 ''')
     executable.chmod(0o755)
@@ -89,6 +109,90 @@ def test_endpoint_media_type_rejection_is_not_retried(media_gh):
     assert len(calls())==1 and delays==[]
 
 
+def update_media_payload(**updates):
+    path=Path(os.environ['MEDIA_GH_PAYLOAD'])
+    data=json.loads(path.read_text())
+    data.update(updates)
+    path.write_text(json.dumps(data))
+
+
+def test_historical_merge_uses_supported_graphql_fields_through_subprocess(media_gh):
+    _,calls,delays=media_gh
+    assert github.merge_commit_sha('example/repo',42,'a'*40)=='b'*40
+    assert len(calls())==1 and delays==[]
+    assert calls()[0][:2]==['pr','view']
+    assert 'mergeCommit' in calls()[0][-1].split(',')
+
+
+@pytest.mark.parametrize('changes',[
+    dict(number=43),dict(url='https://github.com/other/repo/pull/42'),
+    dict(state='OPEN'),dict(headRefOid='c'*40),
+])
+def test_historical_merge_refuses_different_pr_identity(media_gh,changes):
+    data=json.loads(Path(os.environ['MEDIA_GH_PAYLOAD']).read_text())
+    update_media_payload(pr=dict(data['pr'],**changes))
+    with pytest.raises(gh_client.GhError,match='合并身份不符'):
+        github.merge_commit_sha('example/repo',42,'a'*40)
+    assert len(media_gh[1]())==1
+
+
+@pytest.mark.parametrize('merge',[None,{},dict(oid=None),dict(oid='not-a-sha'),'invalid'])
+def test_historical_merge_missing_commit_has_clear_error_and_no_fallback(media_gh,merge):
+    data=json.loads(Path(os.environ['MEDIA_GH_PAYLOAD']).read_text())
+    # A deprecated field must never become an implicit fallback to a different commit.
+    update_media_payload(pr=dict(data['pr'],mergeCommit=merge,merge_commit_sha='c'*40))
+    with pytest.raises(gh_client.GhError,match='合并提交版本'):
+        github.merge_commit_sha('example/repo',42,'a'*40)
+    assert len(media_gh[1]())==1
+
+
+def test_failed_logs_use_json_and_capture_ansi_before_sanitizing(media_gh):
+    _,calls,delays=media_gh
+    raw=('\x1b[31mcompile error\x1b[0m\r\n'
+         '\x1b]8;;https://example.invalid\x1b\\details\x1b]8;;\x1b\\\r'
+         '\x9b32mGH_TOKEN=ghp_secretfixture\x9b0m\n\x00\x07\x7f\x85')
+    update_media_payload(logs=base64.b64encode(raw.encode('utf-8')).decode())
+    rows=github.failure_logs('example/repo',42,3)
+    assert len(rows)==1 and rows[0]['job_id']==101
+    assert rows[0]['content']=='compile error\ndetails\nGH_TOKEN=«redacted»\n'
+    assert rows[0]['name']=='Build Android'
+    assert len(calls())==2 and delays==[]
+    assert 'Accept: application/json' in calls()[-1]
+    assert '--allow-escape-sequences' in calls()[-1]
+
+
+@pytest.mark.parametrize('raw,message',[(b'\xff','UTF-8'),(b'','为空'),(b'\x1b[31m\x1b[0m\x07','为空')])
+def test_failed_logs_reject_invalid_or_control_only_content(media_gh,raw,message):
+    update_media_payload(logs=base64.b64encode(raw).decode())
+    with pytest.raises(gh_client.GhError,match=message):
+        github.failure_logs('example/repo',42,3)
+
+
+@pytest.mark.parametrize('changes',[dict(id=True),dict(run_id=99),dict(run_attempt=2)])
+def test_failed_logs_refuse_job_identity_before_download(media_gh,changes):
+    data=json.loads(Path(os.environ['MEDIA_GH_PAYLOAD']).read_text())
+    update_media_payload(jobs=[dict(data['jobs'][0],**changes)])
+    with pytest.raises(gh_client.GhError,match='冻结运行或 attempt'):
+        github.failure_logs('example/repo',42,3)
+    assert len(media_gh[1]())==1
+
+
+def test_failed_logs_limit_raw_bytes_before_sanitization(media_gh):
+    raw=b'\x1b[0m'*(2*1024*1024//4+1)
+    update_media_payload(logs=base64.b64encode(raw).decode())
+    with pytest.raises(gh_client.GhError,match='大小限制'):
+        github.failure_logs('example/repo',42,3)
+
+
+def test_failed_logs_keep_aggregate_limit_and_skip_successful_jobs():
+    failed=[dict(id=i,run_id=42,run_attempt=3,name='Build',status='completed',conclusion='failure') for i in range(1,4)]
+    success=dict(id=4,run_id=42,run_attempt=3,name='Passed',status='completed',conclusion='success')
+    with patch.object(github,'jobs',return_value=failed+[success]),patch.object(github,'_binary',return_value=b'x'*(2*1024*1024)) as binary:
+        with pytest.raises(gh_client.GhError,match='4 MiB'):
+            github.failure_logs('example/repo',42,3)
+        assert binary.call_count==3
+
+
 class ReleaseGithubTest(TestCase):
     def test_full_pagination_and_incomplete_total_fail_closed(self):
         with patch.object(github,'_api',side_effect=[list(range(100)),[100]]) as observed:
@@ -96,6 +200,15 @@ class ReleaseGithubTest(TestCase):
             self.assertIn('page=2',observed.call_args.args[0])
         with patch.object(github,'_api',return_value=dict(workflow_runs=[],total_count=1)):
             with self.assertRaises(gh_client.GhError):github.find_runs('example/repo',44)
+
+    def test_disabled_workflow_exposes_the_required_action_without_enabling_it(self):
+        workflow=dict(id=44,path='.github/workflows/pilot-release.yml',state='disabled_manually')
+        with patch.object(github,'_api',side_effect=[workflow,dict(sha='a'*40)]) as api:
+            with self.assertRaisesRegex(gh_client.GhError,'工作流已被手动停用.*GitHub.*启用'):
+                github.workflow_snapshot('example/repo',workflow['path'],'main')
+        self.assertEqual(api.call_count,2)
+        self.assertTrue(all('/enable' not in call.args[0] and '/dispatches' not in call.args[0]
+                            for call in api.call_args_list))
 
     def test_workflow_snapshot_binds_id_path_and_ref_head(self):
         workflow=dict(id=44,path='.github/workflows/pilot-release.yml',state='active')
@@ -170,6 +283,8 @@ class ReleaseGithubTest(TestCase):
             self.assertEqual(binary.call_count,2)
 
     def test_historical_merge_identity_must_match_frozen_pr_head(self):
-        with patch.object(github,'_api',return_value=dict(merged=True,head=dict(sha='a'*40),merge_commit_sha='b'*40)):
+        pr=dict(number=42,url='https://github.com/example/repo/pull/42',state='MERGED',
+            headRefOid='a'*40,mergeCommit=dict(oid='b'*40))
+        with patch.object(gh_client,'pr_view',return_value=pr):
             self.assertEqual(github.merge_commit_sha('example/repo',42,'a'*40),'b'*40)
             with self.assertRaises(gh_client.GhError):github.merge_commit_sha('example/repo',42,'c'*40)

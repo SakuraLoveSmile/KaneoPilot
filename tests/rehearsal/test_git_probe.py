@@ -92,6 +92,14 @@ def _map_repo(conn, repo):
                    {"items": {PID: {"repository": str(repo)}}})
 
 
+def _remove_push_redirect(git):
+    # Preflight is local-only: an unrewritten GitHub origin needs no network.
+    # Keep the redirect in delivery fixtures, where it prevents real pushes.
+    subprocess.run(["git", "-C", str(git.repo), "config", "--unset-all",
+                    f"url.{git.bare}.pushInsteadOf"], check=True,
+                   capture_output=True, timeout=30)
+
+
 def _codes(errors):
     return {e["code"] for e in errors}
 
@@ -123,6 +131,7 @@ def test_scenario_git_probe_timeout_default_and_override():
 def test_scenario_git_probe_slow_not_false_not_git_repo(
         ctx, ready, rehearsal_git, tmp_path):
     """git_slow（每条 git 0.3s）下有效仓库必须通过——旧 0.07s 超时会误报。"""
+    _remove_push_redirect(rehearsal_git)
     wrapper = _git_wrapper(tmp_path, "0.3")
     _map_repo(ctx.conn, rehearsal_git.repo)
     with env_override(PATH=wrapper + os.pathsep + os.environ.get("PATH", "")):
@@ -167,9 +176,18 @@ def test_scenario_git_probe_origin_not_github(ctx, ready, tmp_path):
 
 
 def test_scenario_git_probe_github_origin_passes(ctx, ready, rehearsal_git):
-    """无故障：GitHub 形状 origin + insteadOf 重写的本地仓库全绿。"""
+    """无故障：未改写的 GitHub origin 本地探针全绿。"""
+    _remove_push_redirect(rehearsal_git)
     _map_repo(ctx.conn, rehearsal_git.repo)
     assert policy.automation_preflight(ctx.conn, PID) == []
+
+
+def test_scenario_git_probe_local_push_redirect_is_rejected(ctx, ready, rehearsal_git):
+    """GitHub fetch URL 不掩盖改写到本地裸仓库的推送目标。"""
+    _map_repo(ctx.conn, rehearsal_git.repo)
+    errors = policy.automation_preflight(ctx.conn, PID)
+    assert "branch_diverged" in _codes(errors), errors
+    assert "origin_not_github" not in _codes(errors), errors
 
 
 def test_scenario_git_probe_push_rejected_fault(tmp_path):

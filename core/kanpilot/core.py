@@ -445,7 +445,7 @@ def automation_budget(task, policy, now):
 
 def start_fix_round_inline(conn, task, now, *, fix_request, actor="kaneo-review", new_segment=False):
     if fix_request.get("mode") == "direct":
-        util.require(fix_request.get("source_kind") != "merge_conflict",
+        util.require(fix_request.get("source_kind") not in ("merge_conflict", "build_failure"),
                      "合并冲突需从任务内 AI 处理入口确认", "conflict")
         from . import review_repair
         return review_repair.start_inline(conn, task, now, fix_request, actor)["review_repair"]

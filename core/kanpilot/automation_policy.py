@@ -23,7 +23,7 @@ def git_probe_timeout() -> float:
         value = float(raw) if raw else GIT_PROBE_TIMEOUT_SECONDS
     except ValueError:
         value = GIT_PROBE_TIMEOUT_SECONDS
-    return value if value > 0 else GIT_PROBE_TIMEOUT_SECONDS
+    return value if math.isfinite(value) and value > 0 else GIT_PROBE_TIMEOUT_SECONDS
 
 
 def policy_for(conn, project_id):
@@ -104,7 +104,7 @@ def _planner_ready(conn):
 
 
 def automation_preflight(conn, project_id):
-    from . import exec_config, review_config
+    from . import exec_config, git_delivery, review_config
     _, _, items, _ = project_config.load_raw_mappings(conn)
     repo = (items.get(project_id) or {}).get("repository")
     errors = []
@@ -122,14 +122,9 @@ def automation_preflight(conn, project_id):
                 add("not_git_repo", "仓库不是 git 仓库")
             else:
                 try:
-                    origin = subprocess.run(["git", "-C", str(repo_path), "remote", "get-url", "origin"],
-                                            capture_output=True, text=True, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    add("git_probe_timeout",
-                        f"git remote 探测超时（{timeout:g}s），无法确认 origin")
-                else:
-                    if origin.returncode or not github_repository(origin.stdout, cwd=str(repo_path)):
-                        add("origin_not_github", "origin 不是 GitHub 仓库")
+                    git_delivery.require_github_origin(str(repo_path), check_push=True)
+                except git_delivery.GitDeliveryError as exc:
+                    add(exc.code, exc.message)
         except subprocess.TimeoutExpired:
             # 探测超时 ≠ 仓库不可用：区分于 not_git_repo，避免误升级为阶梯 2。
             add("git_probe_timeout",

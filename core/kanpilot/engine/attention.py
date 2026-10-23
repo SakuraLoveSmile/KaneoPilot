@@ -48,6 +48,7 @@ BUDGET_EXCEEDED = "budget_exceeded"
 CONCURRENCY_STALLED = "concurrency_stalled"
 NEEDS_USER_OTHER = "needs_user_other"
 EXECUTION_QUESTION = "execution_question"
+RELEASE_VERIFICATION_QUESTION = "release_verification_question"
 
 # failure_code → reason_code (protocol §5.27.3 table + the codebase's actual
 # codes grouped into the same categories). Unknown codes → NEEDS_USER_OTHER.
@@ -132,7 +133,7 @@ def attention_id(task_id: Optional[str], code: str) -> str:
 
 def needs_attention(task: dict, *, include_historical: bool = False) -> bool:
     """Whether a task view is an attention source right now."""
-    if task.get("status") != "needs_user":
+    if task.get("status") != "needs_user" and not _verification_question(task):
         return False
     if _save_state(task) == "purged":
         return include_historical
@@ -172,15 +173,17 @@ def build_item(task: dict, now=None) -> Optional[dict]:
     reflects save_state). Filtering by ``include_historical`` happens in
     :func:`collect`, not here.
     """
-    if task.get("status") != "needs_user":
+    verification_question = _verification_question(task)
+    if task.get("status") != "needs_user" and not verification_question:
         return None
-    code = reason_code_for(task.get("failure_code"), status=task.get("status"),
-                           failure_stage=task.get("failure_stage"))
+    code = RELEASE_VERIFICATION_QUESTION if verification_question else reason_code_for(
+        task.get("failure_code"), status=task.get("status"), failure_stage=task.get("failure_stage"))
     actions = list(task.get("allowed_actions") or [])
     failure_code = task.get("failure_code")
     since = task.get("blocked_at") or task.get("updated_at")
     return {
-        "attention_id": attention_id(task.get("task_id"), code),
+        "attention_id": (attention_id(task.get("task_id"), code) + '_' + verification_question['verification_id']
+            + '_' + verification_question['request_id']) if verification_question else attention_id(task.get("task_id"), code),
         "task_id": task.get("task_id"),
         "project_name": task.get("project_name"),
         "title": task.get("title"),
@@ -199,6 +202,11 @@ def build_item(task: dict, now=None) -> Optional[dict]:
         "since": since,
         "question_preview":task.get("question_preview"),
     }
+
+
+def _verification_question(task):
+    q = task.get('release_verification_question')
+    return q if isinstance(q,dict) and q.get('state') == 'open' else None
 
 
 def collect(tasks: List[dict], now=None, *, include_historical: bool = False) -> List[dict]:

@@ -43,10 +43,24 @@ def _read_command(args):
         return False
     # No fields/input: gh otherwise silently switches a REST request to POST.
     options = args[2:]
-    return len(options) % 2 == 0 and all(
-        options[i] in ("-H", "--header")
-        or (options[i] in ("--method", "-X") and options[i + 1] == "GET")
-        for i in range(0, len(options), 2))
+    job_log = re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/jobs/[1-9][0-9]*/logs", args[1])
+    escape_flag = False
+    i = 0
+    while i < len(options):
+        option = options[i]
+        if option == "--allow-escape-sequences":
+            if not job_log or escape_flag:
+                return False
+            escape_flag = True
+            i += 1
+            continue
+        if i + 1 >= len(options):
+            return False
+        if option not in ("-H", "--header") and not (
+                option in ("--method", "-X") and options[i + 1] == "GET"):
+            return False
+        i += 2
+    return True
 
 
 def _connection_failure(error):
@@ -132,9 +146,12 @@ def pr_list(repo_slug, head_branch) -> list:
     return [_pr(value) for value in values]
 
 
-def pr_view(repo_slug, number, *, merge_checks=False) -> dict:
+def pr_view(repo_slug, number, *, merge_checks=False, merge_commit=False) -> dict:
+    fields = PR_MERGE_FIELDS if merge_checks else PR_FIELDS
+    if merge_commit:
+        fields += ",mergeCommit"
     return _pr(_run(["pr", "view", str(number), "--repo", _repo(repo_slug),
-                    "--json", PR_MERGE_FIELDS if merge_checks else PR_FIELDS], read_only=True))
+                    "--json", fields], read_only=True))
 
 
 def pr_merge(repo_slug, number, *, sha) -> dict:

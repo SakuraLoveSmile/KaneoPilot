@@ -96,12 +96,12 @@ struct TaskDetailContentView: View {
     private var headerStatus: some View {
         HStack(spacing: Spacing.m) {
             if let detail {
-                if detail.status != "done", let release = detail.release, release.required {
+                if detail.status != "done", let release = detail.release, release.showsTaskStatus {
                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                 } else {
                     StatusBadge(status: DisplayStatus.effective(detail))
                 }
-                if let question = detail.executionQuestion, question.state == "open", question.answerable, detail.readOnly != true {
+                if let question = detail.currentInputQuestion, question.state == "open", question.answerable, detail.readOnly != true {
                     StatusBadge(status: question.source == "codex" && question.delivery == "accepted"
                         ? "等待执行端接收" : "等待你回答")
                 }
@@ -615,7 +615,10 @@ struct TaskOverviewTabView: View {
     @State private var executionFocusRequest = 0
     @State private var confirmingExecutionSkip = false
     @State private var confirmingExecutionStop = false
+    @State private var executionSkipTarget: ExecutionAnswerStore?
+    @State private var executionStopTarget: (taskID: String, runID: String, formIdentity: [String]?)?
     @State private var executionStopOperation: (runID: String, operationID: String)?
+    @State private var deliveryConfirmation: (taskID: String, executionRunID: String, reviewKey: String)?
 
     private var reviewStore: ReviewResolutionStore? {
         guard detail.parentCloseout == nil else { return nil }
@@ -627,26 +630,27 @@ struct TaskOverviewTabView: View {
     }
 
     private var executionStore: ExecutionAnswerStore? {
-        guard let question = detail.executionQuestion else { return nil }
+        guard let question = detail.currentInputQuestion else { return nil }
         return model.executionAnswerStore(taskID: detail.taskId, question: question, readOnly: detail.readOnly == true)
     }
 
     /// 开放且可答的执行提问才由底栏提交；只读或核心未允许回答时不给提交入口。
     private var openExecutionStore: ExecutionAnswerStore? {
-        guard actions.contains("answer_execution_questions"), let store = liveExecutionStore, store.question.answerable else { return nil }
+        guard let store = liveExecutionStore, actions.contains(store.question.answerAction), store.question.answerable else { return nil }
         return store
     }
 
     /// 开放中的执行提问，无论能否在本机回答：更多操作里的停止与草稿动作都从这里取。
     private var liveExecutionStore: ExecutionAnswerStore? {
-        guard detail.readOnly != true, actions.contains("answer_execution_questions") || actions.contains("stop_execution"),
-              let store = executionStore, store.question.state == "open" else { return nil }
+        guard detail.readOnly != true, let store = executionStore, store.question.state == "open",
+              actions.contains(store.question.answerAction)
+                || (!store.question.isReleaseVerification && actions.contains("stop_execution")) else { return nil }
         return store
     }
 
     /// 开放但核心判定不可在本机回答：底栏不给回答入口，只说明去 Plus 回答。
     private var executionAwaitingPlus: Bool {
-        guard detail.readOnly != true, let question = detail.executionQuestion else { return false }
+        guard detail.readOnly != true, let question = detail.currentInputQuestion else { return false }
         return question.state == "open" && !question.answerable
     }
 
@@ -671,7 +675,8 @@ struct TaskOverviewTabView: View {
     }
 
     private var isBlocked: Bool {
-        detail.status == "needs_user" || display == "执行端失联" || display == "需人工" || detail.blockedReason != nil
+        if actions.contains("continue_delivery") { return false }
+        return detail.status == "needs_user" || display == "执行端失联" || display == "需人工" || detail.blockedReason != nil
     }
 
     private var hasPlan: Bool {
@@ -695,6 +700,12 @@ struct TaskOverviewTabView: View {
 
     private var actions: [String] {
         var list = detail.allowedActions ?? []
+        list.removeAll { [ReleaseVerificationAction.sync.rawValue, ReleaseVerificationAction.restart.rawValue].contains($0)
+            && $0 != detail.releaseVerificationFooterAction }
+        if detail.status != "done", let release = detail.release,
+           release.canReconcile, release.batchId != nil {
+            list.append("sync_release")
+        }
         if detail.sendState == "unknown" {
             list = list.filter { ["restore", "accept_duplicate", "mark_sent", "recheck"].contains($0) }
         }
@@ -717,7 +728,9 @@ struct TaskOverviewTabView: View {
         if detail.readOnly == true { return [] }
         // 动作资格由核心提供，不在界面补充恢复、自动推进或移出动作。
         // 开放但不可在本机回答的提问不给「回答」入口，停止仍由更多操作提供。
-        return executionAwaitingPlus ? actions.filter { $0 != "answer_execution_questions" } : actions
+        return executionAwaitingPlus ? actions.filter {
+            !["answer_execution_questions", "answer_release_verification_questions"].contains($0)
+        } : actions
     }
 
     private var primaryAction: String? {
@@ -727,6 +740,12 @@ struct TaskOverviewTabView: View {
             return available.contains("recheck") ? "recheck" : nil
         }
         if !isActive { return available.contains("restore") ? "restore" : nil }
+        if available.contains("answer_release_verification_questions") { return "answer_release_verification_questions" }
+        if let verificationAction = detail.releaseVerificationFooterAction, available.contains(verificationAction) {
+            return verificationAction
+        }
+        if available.contains("continue_delivery") { return "continue_delivery" }
+        if available.contains("sync_release") { return "sync_release" }
         if available.contains("closeout_parent") { return "closeout_parent" }
         if reviewPassedAwaitingDelivery {
             return available.contains("recheck") ? "recheck" : nil
@@ -741,7 +760,8 @@ struct TaskOverviewTabView: View {
     }
 
     private var secondaryActions: [String] {
-        visibleActions.filter { $0 != primaryAction && !["skip_execution_questions", "stop_execution"].contains($0) }
+        visibleActions.filter { $0 != primaryAction
+            && !["skip_execution_questions", "skip_release_verification_questions", "stop_execution"].contains($0) }
     }
 
     /// 排队请求的类别，只用于显示；kind 由核心给出，Swift 不据状态推导。
@@ -751,6 +771,7 @@ struct TaskOverviewTabView: View {
         case "dispatch": return "派发请求"
         case "monitor": return "检查请求"
         case "review": return "评审请求"
+        case "delivery": return "交付请求"
         default: return "请求"
         }
     }
@@ -760,7 +781,15 @@ struct TaskOverviewTabView: View {
         if detail.sendState == "unknown" {
             return "发送结果不明。先重新校验并查看执行证据，再通过更多操作作出裁决。"
         }
-        if let release = detail.release, release.required, detail.status != "done" { return release.reason }
+        if primaryAction == "continue_delivery" {
+            return "评审已通过。继续交付会复用已有成果，创建 PR，并按项目策略推进合并及构建发布。"
+        }
+        if let question = detail.releaseVerificationQuestion, question.state == "open" {
+            return question.answerable
+                ? "在上方回答补验证问题，用底栏「提交答案」继续本次验证；保存草稿不会发送。"
+                : "这道补验证提问需要在 Plus 中回答，回答后会继续原验证。"
+        }
+        if let release = detail.release, release.showsTaskStatus, detail.status != "done" { return release.reason }
         if let closeout = detail.parentCloseout { return closeout.reason }
         if let repair = detail.reviewRepair { return repair.reason }
         if executionAwaitingPlus { return "这道执行提问只能在 Plus 中回答，本机不提供回答入口；可在「更多操作」中停止本轮。" }
@@ -777,7 +806,8 @@ struct TaskOverviewTabView: View {
             return "评审已通过，等待交付完成；可查看交付记录或重新校验当前状态。"
         }
         switch primaryAction {
-        case "answer_execution_questions":
+        case "sync_release": return "核对已有 Actions 与发布证据，更新当前批次状态。"
+        case "answer_execution_questions", "answer_release_verification_questions":
             if openExecutionStore?.waitingForCodex == true {
                 return "答案已提交，等待执行端接收；可重新核对送达状态，或在「更多操作」中停止本轮。"
             }
@@ -831,7 +861,9 @@ struct TaskOverviewTabView: View {
                             else { model.openPlanning(focusTaskID: detail.taskId) }
                         }, onRefreshDetail: onRefreshDetail)
                         .id("review-resolution")
-                } else if detail.parentCloseout == nil, isBlocked, detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
+                } else if detail.parentCloseout == nil, isBlocked,
+                          detail.currentInputQuestion?.state != "open",
+                          detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
                     // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
                 }
@@ -851,7 +883,7 @@ struct TaskOverviewTabView: View {
                     executionAnswerCard(store)
                 }
 
-                ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.executionQuestion?.identity), id: \.formIdentity) { store in
+                ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.currentInputQuestion?.identity), id: \.formIdentity) { store in
                     ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
                 }
 
@@ -909,6 +941,26 @@ struct TaskOverviewTabView: View {
             withAnimation { proxy.scrollTo("review-resolution", anchor: .top) }
         }
         .safeAreaInset(edge: .bottom) { actionBar }
+        .confirmationDialog("继续交付？", isPresented: Binding(
+            get: { deliveryConfirmation != nil },
+            set: { if !$0 { deliveryConfirmation = nil } }
+        ), titleVisibility: .visible) {
+            if let candidate = deliveryConfirmation {
+                Button("继续交付") {
+                    deliveryConfirmation = nil
+                    Task {
+                        await model.resolve(taskID: candidate.taskID, action: "continue_delivery",
+                                            expectedExecutionRunID: candidate.executionRunID,
+                                            expectedReviewKey: candidate.reviewKey)
+                        onRefreshDetail?()
+                    }
+                }.disabled(model.busy)
+            }
+            Button("取消", role: .cancel) { deliveryConfirmation = nil }
+        } message: {
+            Text("复用已有评审和验证，推送当前任务分支并创建 PR，按项目已保存的策略继续合并和构建发布。")
+        }
+        .onChange(of: detail.taskId) { deliveryConfirmation = nil }
     }
 
     private func verificationDialogs<Content: View>(_ content: Content) -> some View {
@@ -987,16 +1039,36 @@ struct TaskOverviewTabView: View {
         content
         .confirmationDialog("全部跳过并继续？", isPresented: $confirmingExecutionSkip, titleVisibility: .visible) {
             Button("全部跳过并继续") {
-                guard let store = executionStore else { return }
+                guard let store = executionSkipTarget,
+                      store.canConfirmSkip(taskID: detail.taskId, current: detail.currentInputQuestion),
+                      actions.contains(store.question.skipAction) else {
+                    executionSkipTarget = nil
+                    reverifyError = "问题已变化，请查看当前问题后重新确认。"
+                    return
+                }
+                executionSkipTarget = nil
                 Task { await store.submit(skipAll: true); onRefreshDetail?() }
             }
-            Button("取消", role: .cancel) {}
-        } message: { Text("跳过当前这份请求的所有问题，继续同一轮次；其它排队提问仍需处理。") }
+            Button("取消", role: .cancel) { executionSkipTarget = nil }
+        } message: { Text("跳过本次确认的这份请求，继续原规划或执行；其它排队提问仍需处理。") }
         .confirmationDialog("停止本轮？", isPresented: $confirmingExecutionStop, titleVisibility: .visible) {
             Button("停止本轮", role: .destructive) {
-                if let store = liveExecutionStore {
+                guard let target = executionStopTarget, target.taskID == detail.taskId,
+                      target.runID == detail.runId, actions.contains("stop_execution"),
+                      detail.currentInputQuestion?.isReleaseVerification != true else {
+                    executionStopTarget = nil
+                    reverifyError = "执行轮次已变化，请重新确认停止对象。"
+                    return
+                }
+                executionStopTarget = nil
+                if let identity = target.formIdentity {
+                    guard let store = liveExecutionStore, store.formIdentity == identity, store.canStop else {
+                        reverifyError = "执行问题已变化，请重新确认停止对象。"
+                        return
+                    }
                     Task { await store.stop(); onRefreshDetail?() }
-                } else if let runID = detail.runId {
+                } else if liveExecutionStore == nil {
+                    let runID = target.runID
                     if executionStopOperation?.runID != runID {
                         executionStopOperation = (runID, UUID().uuidString)
                     }
@@ -1007,7 +1079,7 @@ struct TaskOverviewTabView: View {
                     }
                 }
             }
-            Button("取消", role: .cancel) {}
+            Button("取消", role: .cancel) { executionStopTarget = nil }
         } message: { Text("这会结束当前执行轮次。工作树、原问题、草稿和执行记录将保留。") }
     }
 
@@ -1074,7 +1146,7 @@ struct TaskOverviewTabView: View {
     /// 下一步说明与最近更新。头部已有状态与阶段，这里不重复，也不另设区段标题。
     private var nextStepSection: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            if detail.parentCloseout == nil && !(detail.release?.required == true && detail.status != "done") {
+            if detail.parentCloseout == nil && !(detail.release?.showsTaskStatus == true && detail.status != "done") {
                 Text(nextStepExplanation)
                     .font(.kpBody)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1209,6 +1281,8 @@ struct TaskOverviewTabView: View {
                             executionMenuItems(store)
                         } else if actions.contains("stop_execution") {
                             Button(executionStopOperation?.runID == detail.runId ? "重新核对停止结果" : "停止本轮", role: .destructive) {
+                                guard let runID = detail.runId, detail.currentInputQuestion?.isReleaseVerification != true else { return }
+                                executionStopTarget = (detail.taskId, runID, nil)
                                 confirmingExecutionStop = true
                             }
                         }
@@ -1253,13 +1327,19 @@ struct TaskOverviewTabView: View {
         if store.question.answerable {
             Button("保存草稿") { Task { _ = await store.saveNow(); onRefreshDetail?() } }
                 .disabled(store.inputsLocked || !store.dirty)
-            if actions.contains("skip_execution_questions") {
-                Button("全部跳过并继续") { confirmingExecutionSkip = true }
+            if actions.contains(store.question.skipAction) {
+                Button("全部跳过并继续") {
+                    executionSkipTarget = store
+                    confirmingExecutionSkip = true
+                }
                     .disabled(store.inputsLocked)
             }
         }
-        if actions.contains("stop_execution") {
-            Button("停止本轮", role: .destructive) { confirmingExecutionStop = true }
+        if !store.question.isReleaseVerification, actions.contains("stop_execution") {
+            Button("停止本轮", role: .destructive) {
+                executionStopTarget = (detail.taskId, store.question.runId, store.formIdentity)
+                confirmingExecutionStop = true
+            }
                 .disabled(!store.canStop)
         }
     }
@@ -1267,6 +1347,25 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func actionButton(_ action: String) -> some View {
         switch action {
+        case "continue_delivery":
+            Button("继续交付") {
+                guard let runID = detail.runId, let reviewKey = detail.reviewKey else { return }
+                deliveryConfirmation = (detail.taskId, runID, reviewKey)
+            }
+            .disabled(model.busy || detail.runId == nil || detail.reviewKey == nil)
+        case "sync_release_verification", "restart_release_verification":
+            if let verificationAction = ReleaseVerificationAction(rawValue: action) {
+                ReleaseVerificationActionButton(detail: detail, action: verificationAction, onRefreshDetail: onRefreshDetail)
+            }
+        case "sync_release":
+            Button(detail.release?.syncLabel ?? "核对发布结果") {
+                guard let batchID = detail.release?.batchId else { return }
+                Task {
+                    await model.syncReleaseBatch(batchID: batchID)
+                    onRefreshDetail?()
+                }
+            }
+            .disabled(model.busy)
         case "closeout_parent":
             Button(model.actionInFlight == "收尾校验" ? "正在核对…" : detail.parentCloseout?.actionLabel ?? "校验并完成") {
                 guard let closeout = detail.parentCloseout else { return }
@@ -1277,8 +1376,8 @@ struct TaskOverviewTabView: View {
             }
             .disabled(model.busy || detail.parentCloseout == nil)
             .help("核对已有验证、评审与合并证据；不调用模型，不重新执行验证。")
-        case "answer_execution_questions":
-            Button("回答执行问题") { executionFocusRequest += 1 }
+        case "answer_execution_questions", "answer_release_verification_questions":
+            Button(action == "answer_release_verification_questions" ? "回答补验证问题" : "回答执行问题") { executionFocusRequest += 1 }
                 .disabled(executionStore == nil)
         case "answer_plan_questions":
             Button("回答问题") { answerFocusRequest += 1 }
@@ -1545,7 +1644,7 @@ private struct ExecutionAnswerCard: View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             VStack(alignment: .leading, spacing: Spacing.s) {
                 Text("\(store.waitingForCodex ? "等待执行端接收" : "等待你回答") · \(store.question.questions.count) 题").font(.kpTitle)
-                Text("来源：\(store.question.source == "codex" ? "Codex CLI" : "Plus") 执行会话 · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
+                Text("来源：\(store.question.sourceDescription) · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
                     .font(.kpSmall).foregroundStyle(.secondary)
                 if store.question.queued > 0 {
                     Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(.secondary)

@@ -89,6 +89,47 @@ class ReleaseLifecycleTest(TestCase):
         self.start();self.assertEqual(len(self.api.sent),1)
         self.assertEqual(self.sync(batch_id)['release']['state'],'queued')
         self.api.published=True;self.assertEqual(self.sync(batch_id)['release']['state'],'published')
+    def test_scheduler_reconciles_unknown_dispatch_when_due_without_resending(self):
+        self.api.lose_reply=True;result=self.start();batch_id=result['release']['batch_id']
+        later=SimpleNamespace(conn=self.conn,now_iso=util.plus_seconds(61,self.ctx.now),now=self.ctx.now)
+        with patch.object(self.api,'find_runs',wraps=self.api.find_runs) as find:
+            self.assertEqual(delivery.sync_existing(self.ctx)['results'],[])
+            self.assertEqual(delivery.sync_existing(later,project_ids=[])['results'],[])
+            recovered=delivery.sync_existing(later,project_ids=['project'])['results']
+            self.assertEqual(len(recovered),1)
+            self.assertEqual(recovered[0]['batch_id'],batch_id)
+            self.assertEqual(recovered[0]['release']['state'],'queued')
+            self.assertEqual(recovered[0]['release']['workflow_run_id'],100)
+            self.assertEqual(recovered[0]['release']['blockers'],[])
+            self.assertEqual(find.call_count,1)
+        receipt=db.get_runtime_operation(self.conn,delivery._scope('project'),'dispatch:'+batch_id)
+        self.assertEqual(receipt['status'],'accepted')
+        self.assertEqual(len(self.api.sent),1)
+        self.assertEqual(delivery.sync_existing(later)['results'],[])
+
+    def test_unknown_zero_matches_replaces_old_transport_blocker_with_current_observation(self):
+        self.api.lose_reply=True;result=self.start();batch_id=result['release']['batch_id']
+        self.assertTrue(result['release']['blockers'])
+        original=dict(db.get_runtime_operation(self.conn,delivery._scope('project'),'dispatch:'+batch_id))
+        self.api.runs=[];observed=self.sync(batch_id)['release']
+        self.assertEqual(observed['state'],'unknown')
+        self.assertEqual(observed['reason'],'GitHub 暂未查到本批次运行；将自动核对，暂不重新发送')
+        self.assertEqual(observed['blockers'],[dict(code='release_run_not_observed',message=observed['reason'])])
+        self.assertFalse(observed['can_start']);self.assertFalse(observed['can_abandon'])
+        self.assertTrue(observed['can_reconcile'])
+        self.assertEqual(dict(db.get_runtime_operation(self.conn,delivery._scope('project'),'dispatch:'+batch_id)),original)
+        self.assertEqual(len(self.api.sent),1)
+
+    def test_unknown_recovered_failed_run_clears_old_transport_blocker(self):
+        self.api.lose_reply=True;result=self.start();batch_id=result['release']['batch_id']
+        self.assertTrue(result['release']['blockers'])
+        self.api.failed=True;observed=self.sync(batch_id)['release']
+        self.assertEqual(observed['state'],'failed')
+        self.assertEqual(observed['workflow_run_id'],100)
+        self.assertIn('构建运行未成功',observed['reason'])
+        self.assertEqual(observed['blockers'],[])
+        self.assertIsNotNone(delivery.completion_gate(self.conn,self.row()))
+        self.assertEqual(len(self.api.sent),1)
     def test_missing_or_wrong_provenance_never_opens_completion_gate(self):
         result=self.start();batch=result['release']['batch_id'];self.api.published=True
         for bad in [dict(tag='0'*40),dict(manifest=dict(target_sha='0'*40)),
@@ -196,6 +237,74 @@ class ReleaseLifecycleTest(TestCase):
             self.assertEqual(delivery.sync_existing(later)['results'],[])
             delivery.after_merge(later,self.row());self.assertEqual(observed.call_count,1)
         self.assertEqual(len(self.api.sent),1)
+
+    def test_transient_release_reads_retry_same_batch_when_due_without_dispatch(self):
+        from kanpilot import gh_client
+        batch_id=self.start()['release']['batch_id']
+        original=delivery._batch(self.conn,batch_id)
+        receipt=dict(db.get_runtime_operation(self.conn,delivery._scope('project'),'dispatch:'+batch_id))
+        with patch.object(self.api,'run',side_effect=gh_client.GhError('transient','读取连接 EOF')) as read:
+            first=self.sync(batch_id)
+            self.assertEqual(first['release']['state'],'queued')
+            self.assertIn('自动核对',first['release']['reason'])
+            self.assertEqual(delivery.sync_existing(self.ctx)['results'],[])
+            later=SimpleNamespace(conn=self.conn,now_iso=util.plus_seconds(61,self.ctx.now),now=self.ctx.now)
+            second=delivery.sync_existing(later)['results']
+            self.assertEqual(len(second),1)
+            self.assertEqual(second[0]['release']['batch_id'],batch_id)
+            self.assertEqual(read.call_count,2)
+        self.api.published=True
+        recovered=self.sync(batch_id)
+        self.assertEqual(recovered['release']['state'],'published')
+        current=delivery._batch(self.conn,batch_id)
+        self.assertEqual(current.get('read_failures'),0)
+        for key in ('batch_id','target_sha','workflow_run_id','inputs'):
+            self.assertEqual(current[key],original[key])
+        self.assertEqual(len(self.api.sent),1)
+        self.assertEqual(db.get_runtime_operation(self.conn,delivery._scope('project'),'dispatch:'+batch_id)['operation_id'],receipt['operation_id'])
+
+    def test_unknown_dispatch_matched_before_transient_read_keeps_reconciling(self):
+        from kanpilot import gh_client
+        self.api.lose_reply=True
+        batch_id=self.start()['release']['batch_id']
+        with patch.object(self.api,'run',side_effect=gh_client.GhError('transient','读取连接 EOF')):
+            result=self.sync(batch_id)
+        self.assertEqual(result['release']['state'],'unknown')
+        self.assertEqual(result['release']['workflow_run_id'],100)
+        later=SimpleNamespace(conn=self.conn,now_iso=util.plus_seconds(61,self.ctx.now),now=self.ctx.now)
+        observed=delivery.sync_existing(later)['results']
+        self.assertEqual(len(observed),1)
+        self.assertEqual(observed[0]['release']['state'],'queued')
+        self.assertEqual(len(self.api.sent),1)
+        self.assertEqual(delivery._batch(self.conn,batch_id)['read_failures'],0)
+
+    def test_existing_blocked_batch_does_not_claim_automatic_read_recovery(self):
+        from kanpilot import gh_client
+        batch_id=self.start()['release']['batch_id']
+        delivery._failure(self.conn,delivery._batch(self.conn,batch_id),self.ctx.now_iso,
+                          RuntimeError('previous evidence blocker'))
+        with patch.object(self.api,'run',side_effect=gh_client.GhError('transient','读取连接 EOF')):
+            result=self.sync(batch_id)
+        self.assertEqual(result['release']['state'],'blocked')
+        self.assertNotIn('自动核对',result['release']['reason'])
+        self.assertEqual(len(self.api.sent),1)
+
+    def test_release_read_retries_are_bounded_and_auth_is_not_retried(self):
+        from kanpilot import gh_client
+        for error_kind in ('timeout','transient','auth','not_found'):
+            with self.subTest(error_kind=error_kind):
+                batch_id=self.start()['release']['batch_id']
+                batch=delivery._batch(self.conn,batch_id)
+                batch.update(state='queued',read_failures=0)
+                delivery._save(self.conn,batch,self.ctx.now_iso)
+                with patch.object(self.api,'run',side_effect=gh_client.GhError(error_kind,'read failed')):
+                    limit=3 if error_kind in ('timeout','transient') else 1
+                    for attempt in range(limit):
+                        result=self.sync(batch_id)
+                        self.assertEqual(result['release']['state'],'blocked' if attempt==limit-1 else 'queued')
+                    later=SimpleNamespace(conn=self.conn,now_iso=util.plus_seconds(301,self.ctx.now),now=self.ctx.now)
+                    self.assertEqual(delivery.sync_existing(later)['results'],[])
+                self.assertEqual(len(self.api.sent),1)
 
     def test_reserved_group_cannot_be_reserved_twice(self):
         context=delivery._prepare(self.ctx,'parent');delivery._reserve(self.ctx,context)

@@ -81,6 +81,10 @@
 11. **摘要**：写入 settings `automation_last_intake`，形状为 `{started_at, finished_at, projects:[{project_id, ready, preflight, adopted, skipped:[{task_id, reason}]}], errors}`。
 12. **dry-run**：只做 fetch-todos、标签读取和前置检查，输出将会接收的候选；不调用 prepare-plan-input，不写任何东西。
 
+自动化接收预检和 PR 模式执行前统一进行只读 GitHub origin 核验：确认 fetch 地址身份、单一且同仓库的实际 push 目标，并拒绝重复 URL rewrite。执行前在任务工作树内复查，不因规划阶段曾成功而跳过。手动非 PR 执行不新增 GitHub 限制。
+
+SSH Host 别名通过当前仓库环境下的本机 `ssh -G` 展开，不连接远端、不更改 Git/SSH 配置或认证。Git 配置读取与 SSH 展开共用有界探测预算，默认 5 秒，沿 `KANPILOT_GIT_PROBE_TIMEOUT`；非有限值、非正值和非法值回落默认。必须区分确定的 origin 缺失/非 GitHub、Git 或 SSH 不可用、读取失败与超时；慢启动和探测超时不能解释为“不是 GitHub 仓库”。不永久缓存仓库身份，配置变化仍须被后续边界检查发现。
+
 保存显式 delivery_base 时，Git 核验全部在写事务外：origin 本地引用确认存在即保存；需要刷新时有界 fetch --prune origin，复用 git_probe_timeout；刷新成功仍不存在则 bad_request，显示真实默认分支；fetch/探测失败则允许保存并返回 delivery_base_check=unverified，不将网络失败当不存在。get-project-mappings 只读本地引用返回 origin_default_branch 与 delivery_base_exists，不确定为 null，不 fetch，不新增阻塞式 automation_preflight。resolve_base 使用相同可读不存在说明。
 
 ## 计划自动确认
@@ -227,7 +231,13 @@ exit_code 缺失或不是整数时记为 None。
 4. Kaneo 评论：先用 `find_marker_comment(task, "[kaneopilot:delivery:<task_id>]")` 查找，不存在再 `post_comment`，内容为 `[kaneopilot:delivery:<task_id>] 已创建 PR：<url>`。
 5. 第三段（事务）：写入 pushed_sha、pr_number、pr_url、pr_state、kaneo_comment_at，`publish_failures` 清零，`next_sync_at` 设为 now+5 分钟；记录事件 `delivery_pushed`、`pr_opened`、`kaneo_comment_posted`。
 
-连续 3 次 retry → blocked，failure_code=gh_unavailable。gh 的环境变量为 `GH_PROMPT_DISABLED=1`、`GH_NO_UPDATE_NOTIFIER=1`、`NO_COLOR=1`、`GH_PAGER=`，每次调用超时 60 秒。
+本地 Git/SSH 只读身份探测的瞬时超时或读取失败沿同一 `publish_failures` 退避：前两次返回 retry、`next_sync_at=now+5 分钟`，保留当前执行、Review、PR 与合并证据；第三次超时以 `gh_timeout`、其他读取失败以 `gh_unavailable` 转人工，文案保留具体探测原因。确定的 origin 配置错误立即阻断。此类错误始终属于 delivery，继续操作恢复 `in_review + delivery`，不得映射为 `delivery_commit_failed` 后重跑执行/验证。未知写回执仍只能只读对账，不因身份探测重试重发写操作。
+
+自动合并前的仓库复检同样走上述交付失败分类。最后一次只读仓库复检发生在 prepared 回执之后、标记 unknown 和实际 merge 之前；若该复检明确失败，只将当前仍 prepared、同身份的回执记为 rejected + not_sent，并保留身份和原因。下轮仅这一带未发送证明的回执允许重新取得 prepared 后复检；真实 unknown、崩溃留下的 prepared 以及 GitHub 已拒绝的合并均不得据此重发。标记 unknown 后仍复核领取、策略及回执状态，GitHub 合并继续以固定 SHA 做条件写入。
+
+实时引擎与常规 tick 均遵守持久化 `delivery.next_sync_at`，未到期不新建交付请求，历史请求失败也不能绕过间隔；到期沿 queued/claimed 去重。显式继续将时间设为 now 后可立即核对。新 head、执行轮次或 Review 与已有交付合同不匹配时开始新交付周期，不继承旧周期等待时间；无合同的旧记录仍遵守已保存时间。
+
+连续 3 次其他 retry → blocked，failure_code=gh_unavailable。gh 的环境变量为 `GH_PROMPT_DISABLED=1`、`GH_NO_UPDATE_NOTIFIER=1`、`NO_COLOR=1`、`GH_PAGER=`，每次调用超时 60 秒。
 
 **delivery-sync（包 F）：**
 

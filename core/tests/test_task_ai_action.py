@@ -73,8 +73,11 @@ class ConflictActionFixture(KanpilotTestCase):
         def remote_pr(*args, **kwargs):
             self.assertFalse(self.conn.in_transaction)
             return dict(self.pr)
+        real_parser = git_delivery.github_repository
+        def local_github(url, **kwargs):
+            return "owner/repo" if url == str(self.bare) else real_parser(url, **kwargs)
         for module, name, kw in [(gh_client, "pr_view", {"side_effect": remote_pr}),
-                                  (git_delivery, "origin_github_repo", {"return_value": "owner/repo"})]:
+                                  (git_delivery, "github_repository", {"side_effect": local_github})]:
             mock = patch.object(module, name, **kw); mock.start(); self.addCleanup(mock.stop)
 
     def task(self):

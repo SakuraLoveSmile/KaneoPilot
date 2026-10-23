@@ -116,7 +116,7 @@ struct AutomationDashboardView: View {
                             VStack(alignment: .leading, spacing: Spacing.s) {
                                 Text(item.title ?? item.taskId).font(.kpBody).lineLimit(1).foregroundStyle(.primary)
                                 if let preview = item.questionPreview {
-                                    Text("执行中提问 · \(preview.count)题").font(.kpSmall).foregroundStyle(.orange)
+                                    Text("\(item.questionLabel) · \(preview.count)题").font(.kpSmall).foregroundStyle(.orange)
                                     Text(preview.firstTitle).font(.kpSmall).foregroundStyle(.secondary).lineLimit(2)
                                 } else if let reason = item.blockedSummary ?? item.failureReason {
                                     Text(reason).font(.kpSmall).foregroundStyle(.red).lineLimit(2)

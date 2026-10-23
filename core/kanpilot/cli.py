@@ -42,15 +42,59 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {key: (True, "str") for key in (
             "task_id", "review_key", "expected_execution_run_id", "expected_report_sha256")},
         _automation_command("mobile_access", "cmd_get_review_report")),
+    "prepare-release-verification": (
+        {"task_id": (True, "str")},
+        _automation_command("release_verification", "cmd_prepare_release_verification")),
+    "start-release-verification": (
+        {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
+        _automation_command("release_verification", "cmd_start_release_verification")),
+    "restart-release-verification": (
+        {"task_id": (True, "str"), "expected_verification_id": (True, "str"),
+         "expected_context_sha256": (True, "str"), "expected_report_sha256": (True, "str")},
+        _automation_command("release_verification", "cmd_restart_release_verification")),
+    "prepare-restart-release-verification": (
+        {"task_id": (True, "str")},
+        _automation_command("release_verification", "cmd_prepare_restart_release_verification")),
+    "sync-release-verification": (
+        {"task_id": (True, "str"), "verification_id": (True, "str")},
+        _automation_command("release_verification", "cmd_sync_release_verification")),
+    "save-release-verification-answers": (
+        {**{key: (True, "str") for key in ("task_id", "verification_id", "expected_context_sha256", "request_id", "questions_sha256")},
+         "answers": (True, "list")},
+        _automation_command("release_verification_questions", "cmd_save_release_verification_answers")),
+    "submit-release-verification-answers": (
+        {**{key: (True, "str") for key in ("task_id", "verification_id", "expected_context_sha256", "request_id", "questions_sha256", "operation_id")},
+         "answers": (False, "list"), "skip_all": (False, "bool")},
+        _automation_command("release_verification_questions", "cmd_submit_release_verification_answers")),
+    "reconcile-release-verification-answers": (
+        {key: (True, "str") for key in ("task_id", "verification_id", "expected_context_sha256", "request_id", "questions_sha256")},
+        _automation_command("release_verification_questions", "cmd_reconcile_release_verification_answers")),
     "prepare-task-release": (
         {"task_id": (True, "str")},
         _automation_command("release_delivery", "cmd_prepare_task_release")),
+    "prepare-external-build-repair": (
+        {"task_id": (True, "str"), "pr_number": (True, "int")},
+        _automation_command("external_build_repair", "cmd_prepare_external_build_repair")),
+    "accept-external-build-repair": (
+        {"task_id": (True, "str"), "pr_number": (True, "int"),
+         "expected_context_sha256": (True, "str"), "confirm": (True, "bool")},
+        _automation_command("external_build_repair", "cmd_accept_external_build_repair")),
     "start-task-release": (
         {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
         _automation_command("release_delivery", "cmd_start_task_release")),
     "sync-release-batch": (
         {"batch_id": (True, "str")},
         _automation_command("release_delivery", "cmd_sync_release_batch")),
+    "repair-release-notes": (
+        {"task_id": (True, "str"), "batch_id": (True, "str"),
+         "expected_context_sha256": (True, "str"), "release_id": (True, "int"),
+         "expected_body_sha256": (True, "str"), "notes": (True, "str"), "confirm": (True, "bool")},
+        _automation_command("release_notes", "cmd_repair_release_notes")),
+    "recover-release-dispatch": (
+        {"task_id": (True, "str"), "batch_id": (True, "str"),
+         "expected_context_sha256": (True, "str"), "expected_dispatch_request_sha256": (True, "str"),
+         "confirm": (True, "bool")},
+        _automation_command("release_dispatch_recovery", "cmd_recover_release_dispatch")),
     "abandon-unsent-release": (
         {"batch_id": (True, "str"), "expected_context_sha256": (True, "str")},
         _automation_command("release_delivery", "cmd_abandon_unsent_release")),
@@ -235,6 +279,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "task_id": (True, "str"), "action": (True, "str"),
             "note": (False, "str"),
             "expected_execution_run_id": (False, "str"),
+            "expected_review_key": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
             "expected_plan_sha256": (False, "str"),
             # A14/A2：用户动作与引擎补救，缺省 user。
@@ -468,6 +513,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_config.cmd_set_exec_config,
     ),
     "exec-capabilities": ({}, cmd_config.cmd_exec_capabilities),
+    "qoder-model-catalog": ({}, cmd_config.cmd_qoder_model_catalog),
     # v3（§5.23.6）：Pi-Desktop-Plus 本地 provider/model 默认目录（只读）。
     "pi-desktop-probe": (
         {"connection_file": (False, "str")},
@@ -758,6 +804,8 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
                                    "start-plans", "dispatch-prepare", "dispatch-begin-send", "dispatch-start", "cancel-request"}:
                         from .execution_questions import guard_active
                         guard_active(db.require_task(conn, task_id))
+                        from .release_verification_questions import guard_active as verification_guard
+                        verification_guard(conn, db.require_task(conn, task_id))
                 ctx.conn.authorization_guard = command_guard
                 ctx.conn.authorization_guard(ctx.conn)
         return COMMANDS[command][1](ctx, payload)

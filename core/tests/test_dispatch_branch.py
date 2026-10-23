@@ -19,6 +19,11 @@ class DispatchBranch(KanpilotTestCase):
         self.addCleanup(self.ctx.close)
         self.delivery = branch(self.repo, self.root / "worktrees")
         self.wt = Path(self.delivery["worktree_path"])
+        real_parser = git_delivery.github_repository
+        parser = patch.object(git_delivery, "github_repository", side_effect=lambda url, **kwargs:
+            "owner/repo" if url == str(self.repo.parent / "origin.git") else real_parser(url, **kwargs))
+        parser.start()
+        self.addCleanup(parser.stop)
         with db.write_txn(self.ctx.conn):
             task = db.require_task(self.ctx.conn, "task1234")
             core.update_delivery(self.ctx.conn, task, self.ctx.now_iso, **self.delivery, mode="pr", commits=[])

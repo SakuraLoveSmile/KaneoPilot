@@ -1593,6 +1593,9 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - 自动管理任务在原 Review 请求成功结算后、项目仍启用且同分支/暂停/预算/修复次数条件均满足时直接排队修复。原 Review 仍 claimed 时不可领取新修复 run，防止旧结算被新 task.run_id 覆盖。手动任务保留 held，在原生确认费用与影响后经 `start-review-repair` 开启；未授权的历史任务不因 App 更新自动启动。
 - `start-review-repair {task_id, expected_execution_run_id, expected_review_key, expected_report_sha256, expected_plan_sha256}`：核对当前 changes_requested 或同身份 held 材料、无其他活动请求、同项目仓库和需求、原计划及报告字节、已审 head/干净工作树、可修复分支、暂停与额度；先冻结材料并保留旧报告历史，再在事务内重置本轮发送证据和当前 Review 指针并排队修复。相同身份重复操作只返回既有修复，不额外计次或创建会话；身份变化拒绝。无可用分支/材料、预算不足或暂停时保留具体原因，不生成替代计划或新子任务。
 - 启动命令、派发领取及首次发送均复核原执行已有可信终态、观察者已退出，Plus 无仍在运行/等待权限或未核对的后续轮次；不能仅凭工作树暂时干净判断可并发写。手动 direct 修复持久保存用户授权身份，legacy 引擎仅为同身份修复的 dispatch/monitor/review 提供窄领取例外，不开启项目自动化。历史 `fix_task_id` 明确指向仍在处理的同项目同仓库子任务时，父任务保留待修复并提示先收尾该子任务，避免重复启动。
+- direct 修复执行失败后的“重新执行”沿用同一修复轮、原报告和原计划，不新增二级任务或消耗新的 Review 修复次数。确认旧修复执行的可信终态及原始被评审执行的完成证据后，冻结旧修复 run、review_key、计划身份与当前工作树指纹，令修复状态回到 queued；派发请求携带同一 review_repair_key。领取时绑定唯一新 run，发送前再次核对旧终态与已确认工作树指纹，保留旧修复的未提交成果，不要求退回最初评审时的干净工作树。运行中、等待权限、发送结果不明或身份变化均不得重发。
+- 旧版本若已留下“当前 run 为空、direct 修复仍为 running、execution_retry 精确指向旧修复 run”的派发阻塞，仅用户“重试派发”入口可恢复：先核验冻结报告、计划、需求、分支、当前工作树指纹、旧执行真实终态及远端同项目任务仍为 In Progress，再在事务内重查任务与旧轮次快照，排队同一修复轮。任一材料变化、有活动请求或核验期间状态变化则拒绝；读侧不得静默修正，重复点击不得额外排队。
+- direct 修复已领取 run 但首次发送未成功时，不能仅凭 closed/not_sent 回执及暂未登记启动意图就撤回 run：迟到的启动命令尚可能继续。缺少可信退役屏障时，“重试派发”明确拒绝并提示先核验原派发状态，不排入必然再次失败的请求；不得将其当作上述当前 run 为空的历史形态恢复。
 - 修复运行期间，不能凭 Kaneo 仍处于 `in-review`/`done` 的状态提前完成本地修复；必须核对本次验证与提交。预算或次数用尽不能经旧 `resolve resume` 绕过直接修复的启动检查。
 - 修复完成后，Plus 执行验证，Pilot 只核对既有结构化证据；由核心提交本轮改动并打开新的 Review 周期。必须针对修复后的当前 run/head 复审，旧 pass、旧 PR/pushed_sha 不得跳过。通过后沿原手动或 PR 交付规则推进；仍需修改则在既有次数/预算限制内继续直接修复，受阻与执行失败继续区分。
 - TaskSummary/TaskDetail 增 `review_repair` 可选投影：`{state,title,reason,round,max_rounds,review_key,report_path,report_sha256,plan_sha256,source_execution_run_id,repair_execution_run_id,session_id,can_start}`。`can_start` 为核心权威动作依据，身份字段用于上述命令；queued 显示“修复会话待启动”，running 显示“修复中”，awaiting_review 显示“修复后待复审”。历史二级任务及报告保留，不自动删除或重跑；父任务可经 §5.27.18 的显式收尾校验完成，不能仅凭子任务 done 完成。
@@ -1613,6 +1616,10 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 #### 5.27.19 构建与版本发布交付（2026-10-19）
 
 权威共享契约见 [release-contract.md](release-contract.md)。项目显式开启后，PR 合并后的确定性交付继续执行 GitHub Actions 构建、核对固定提交与安装包来源并发布版本；父子修复共享批次。公开命令、配置、DTO、未知结果对账及全部完成门以该文件为准。旧项目默认关闭，历史 done 不自动补发，不新增模型调用，不在 Pilot 本机代跑 verify。工作流未进入远端且未真实构建时，不得声称远端交付已接通。
+
+开启发布的手动分支任务在 Review pass 后停待交付，Review 成功结算，不因尚未合并或发布误报 `review_blocked`。显式 `resolve continue_delivery` 复用当前正式 pass，经精确身份与证据核对后排队 PR 交付；历史 `release_required` 误阻塞的恢复、窄化引擎授权与重复操作规则均见发布契约，不以重新 Review 或开启项目自动化代替。
+
+Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一次写入、未知结果只对账规则，见发布契约「发布说明修正」。说明修正不能替代构建、发布或更新 feed 的验收。
 
 ### 5.28.1 发现、身份与存储
 
@@ -1712,6 +1719,41 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - 一次性处理完成但正式验证证据不足时，用户可显式确认 `resolve {action:"retry_verification",expected_execution_run_id}`，UI 称「补齐验证报告…」。仅当前 `merge_conflict`、可信已发送终态和空闲 Plus 可用；沿用原冻结计划及配置、工作树、已解决暂存结果，不创建 plan 请求、不重做 merge、不消耗 Review 修复次数。确认前冻结 `verification_recovery` 的 source run、原 run 记录目录、工作树源码/索引指纹与 MERGE_HEAD/ORIG_HEAD；事务内及 dispatch 前复核当前 run、execution_retry、修复身份、PR/head/base 和远端需求。漂移则保留现场并拒绝。新轮只核对原日志补证，无法确认时由 Plus 重新执行原验证；旧 run/报告保留。取消、旧 run、重复确认及自动 actor 均不得启动；普通 resume/retry/replan 不能绕过此门。新证据通过后沿原双父提交→新 Review→原 PR 链推进；再次缺证仅阻塞，不自动再调用模型。
 - `get-task.task_ai_action={can_prepare,reason,current,history}` 为核心投影；history 保留 action_id、类型、状态及中文 state_title、模型摘要、时间、执行轮次/会话、PR/head/base 与结果。状态区分 queued/running/awaiting_review/completed/needs_followup/blocked/failed；“已排队”不表示模型已启动。Review 修复轮额度不被冲突处理次数消耗；既有费用上限继续生效，用户启动开启新计时段。无数据库结构迁移，不直接改 Plus 数据。
 
+#### 构建失败的一次性处理（2026-10-22）
+
+新增 `kind=build_failure`，仍在原任务启动，不创建二级任务或 plan 请求。用户确认授权一次失败日志诊断、代码修复、可信验证、复审及新修复 PR；不授权自动合并、再次构建发布或失败后的新付费修复轮。已有 `merge_conflict` 的原 PR、双亲合并提交与恢复规则保持原语义。
+
+- `prepare-task-ai-action {task_id,kind:"build_failure"}` 只读核对当前失败发布批次、仓库/原已合并 PR、原计划与通过评审、旧执行可信完成终态，以及真实 Actions run、attempt、失败 job 日志。`batch.target_sha` 是软件源码基线，不能用运行工作流的 `head_sha` 替代。结果未知、运行中、身份漂移、无法取得失败日志或旧工作树不安全时明确拒绝，不猜测原因、不重发构建、不调用模型。
+- 当前要求目标分支仍指向失败批次的 target_sha，且该提交为原 PR 的真实合并提交；已前移或来自不同合并基线时明确阻塞，不能悄然混入新的源码或收养已有修复分支。当前历史已完成任务不通过此入口重新打开。
+- candidate 沿用 task_id/kind/title/context_sha256/config_sha256/model_summary；branch/base_branch/head_sha/base_sha 为新修复身份，新 head 与 base 可同为冻结源码基线。新 PR 尚未创建，`pr_number=null`；另提供 `source_pr_number/source_pr_url/release_batch_id/release_tag/workflow_run_id/workflow_attempt/workflow_url`。冻结上下文分开保存 source_worktree_path/source_head_sha/source_delivery 与新工作树身份，旧执行终态按旧路径核验。配置使用通用执行设置的实际快照，只接受具备可信报告能力的 Plus 或 Codex CLI，不静默换模型。
+- `start-task-ai-action` 使用原候选与配置指纹、confirm=true；重新读取失败 attempt、日志及全部身份，事务内再核对任务、预算、暂停和未决操作。确认重放仅返回已有处理，不增加会话。原 delivery、release_ref 与已有 release_verification_ref 完整归档，原失败批次与补验证运行证明保留；新链移除旧补验证引用，独立核验本轮代码。新分支与独立工作树从冻结目标提交创建，先保存 runtime_operations 回执再做 Git 操作；本地尚无远端合并对象不阻塞只读预检，确认后由核心抓取冻结目标分支，抓取前后核对远端仍为该提交，不移动用户分支或覆盖已有目录/用户改动，不复活原已合并 PR。
+- 新执行只修复本次失败原因及必要关联问题，日志是待核对材料，不能扩大权限。不重新实施原计划；执行端运行全部冻结 verify 及必要专项检查，Pilot 只核对证据，不代跑验证。各引擎模式均要求结构化报告、原生命令退出码和源码快照；Plus 沿 §5.27.11，Codex CLI 沿 §5.31。验证后创建普通单父提交，必须重新 Review，不使用冲突处理的双父提交规则。
+- 复审通过后，确定性交付只为同次授权、精确新执行/评审/提交创建新的修复 PR。持久保存合并/发布确认门，即使项目开启 auto_merge_pr、后台轮询或应用重启也不得自动合并；用户之后手工合并，也不得据此自动开启新构建。再次发布走独立的发布预检与确认，不能把旧失败批次当成新批次重发。复审要求修改、验证失败、基线变化或结果未知均保留现场与历史，等待用户处理，不自动转换成普通 Review 付费修复。
+- 同次修复的新 PR 真实合并后，界面才允许单独准备并确认新发布；明确启动新批次后才能跟进该批次状态。正式版的 pending 守卫仅可在完整新交付证据成立时，排除该 action 精确绑定、被本次修复替代的原 failed 批次；其他未发布正式批次仍阻塞。连续失败仅沿逐条可信、同一项目/仓库/根任务且版本递增的修复前驱链解除历史占位，每个新失败批次仍须用户另行确认 AI 处理和发布。后继批次可信 published 后，核对其已接受回执、冻结上下文与发布证明，持续解除其可信前驱链的占位，允许其他任务正常准备后续正式版；后续普通任务不可凭尚未发布的后继或伪造关联解除占位。旧批次不改写、不弃用，旧版本/tag 不复用，新版本按现有历史与远端 inventory 递增并在确认中显示。
+- `get-task.task_ai_action.kind` 决定显示位置与预检类型；旧投影缺字段时界面按 merge_conflict 解释。构建修复的 current/history 沿同一状态词与会话入口；原已合并 PR 和失败构建仍可查看。旧批次在修复后作为历史证据，不允许同步操作以新任务身份改写原批次，投影 can_reconcile=false、is_historical=true；批量同步跳过所有已归档修复来源批次，继续处理当前运行批次。历史标记仅避免旧失败覆盖当前修复/复审/新 PR 状态，required=true 的发布完成门保留。无 schema migration，不改真实 Plus/Codex 数据。
+
+#### 外部构建修复的关联
+
+原失败预发布可显式关联 Pilot 外已合并的同仓库修复 PR，沿 `release-contract.md`「外部修复已合并后的显式衔接」核对并保存独立人工接纳回执。不得借此伪造新的执行/正式评审，或放宽普通发布的原交付保留、完整目标补验证和单独发布确认。原失败批次保留为只读历史；关联、启动 Plus 补验证、启动新发布分别确认。
+
+独立验证的新提示契约为 v3：每条命令引用 `tool_result` 及真实调用 ID，shell 名称或 `commandShellId` 不是证据身份。v1/v2 的已存提示及哈希原样保留。Plus 提交报告时的原生证据核验与纠正不得替代 Pilot 对正式报告、精确审批、源码和原生整数退出码的检查；已完成报告不改写，不因仅有转录成功记录而推进验证通过。
+
+Plus 重启丢失内存 `currentTurnId` 时，只有 `blocked/release_verification_report` 且保存完整报告的当前尝试可走显式重启恢复核对。prepare 与最终 restart 共用同一守卫：会话空闲且当前轮次缺省/null，完整持久转录只有原冻结 prompt、唯一原 SubmitGoal 和原 planning/execution 归属，末条属于原 execution；双键持久 turn 为 completed 且 endedAt 有效；原精确审批回执或已保存历史观察、报告身份与 SHA/正文 SHA/raw 均不变。任何追加输入、其他/无归属消息、分页不完整、非空其他当前轮次或错误类型均拒绝。待批/待答、未知写入、暂停、源码和事务内预约复核保持原样。此路径只用于重启资格，不授予验证通过、不自动启动新尝试，也不声称能枚举无消息的孤立 turn。
+
+#### 独立补验证中的提问（2026-10-22）
+
+Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。当前尝试的同步在批准 Goal 或读取完成报告前核对待答请求，绑定当前 `release_verification_ref`、冻结 context、原 session、对应 planning/execution turn、request、tool call 和规范化问题指纹。等待时不自动选择答案、跳过、重发 prompt 或新建验证；回答后继续原尝试。原任务保持原状态及 Review 归属，不将 verification_id 伪装为 run_id，也不复用原执行问题的阻塞/恢复、观察或停止命令。
+
+问题、草稿、提交快照和送达操作保存在该独立验证的核心回执内，不进入冻结 context 或原 `execution_questions`。详情/列表新增 `release_verification_question`，沿 §5.28 的问答 DTO，额外包含 `verification_id/context_sha256/phase`（planning 或 execution）；`run_id` 只表示冻结来源的真实原执行轮次。当前开放问题同时进入共用 attention 投影，reason_code=`release_verification_question`，不依赖 task.status=needs_user。开放问题不得被归档等移出操作掩盖。Mac 按核心资格提供 `answer_release_verification_questions` 和 `skip_release_verification_questions`；手机尚未开放这两个动作。
+
+| 核心命令 | 输入与效果 |
+| --- | --- |
+| `save-release-verification-answers` | `task_id,verification_id,expected_context_sha256,request_id,questions_sha256,answers`；仅保存草稿 |
+| `submit-release-verification-answers` | 同一身份，加 `operation_id`、`answers` 或 `skip_all:true`；重新核对实时原请求后，经独立 runtime scope 的持久回执发送 |
+| `reconcile-release-verification-answers` | 同一身份，不收答案；只核对原问题及送达，不自动重发 |
+
+返回 `{task_id,run_id,verification_id,context_sha256,release_verification_question,status?}`。目标 session/turn/tool 均由可信记录取得，不接受调用方任意替换；尝试、上下文、内容或工具身份漂移拒绝。未知送达冻结原答案，核对不重发；用户显式重试只允许相同答案和新的操作 ID。待答消失本身不证明提交成功；原生回答回执或精确原工具结果才可确认。并发同步不得覆盖已保存草稿、提交快照或送达结果，已接受的完成验证仍保持不可变。
+
 ## 5.29 规划/评审槽位池与历史目录回收（schema 6）
 
 ### 5.29.1 范围与租约
@@ -1806,6 +1848,12 @@ Qoder 只读运行在核心准备的规划/Review 快照中，沿用请求身份
 所选 provider 的 API key 仅在启动时从本机配置或其环境变量引用解析，放入该次子进程的专用环境变量；`--settings` 中只放环境引用，实际凭据不得进入 argv、请求快照、job、日志或 Pilot 创建的文件。Qoder 自身可能把内联 settings 写成临时文件，该文件只能包含认证引用；返回文本和事件按实际选中凭据脱敏。加载既有配置不修改原 Qoder 设置。模型身份由完整 ID 确定，是否免费由用户选择与上游实际计费决定，未知美元费用仍为 `null`。
 
 本机可执行文件由 `KANPILOT_QODER_BIN` 覆盖，缺省按 PATH 发现 `qoder`（兼容历史独立 CLI 名 `qodercli`）；Finder 启动时 PATH 可能不含用户安装目录，再依次检查可执行文件 `~/.qoder/entry/qoder` 与 `~/.local/bin/qodercli`。不得将 Qoder IDE 主程序当作 headless CLI。能力查询只做本地版本/帮助参数探测，不发模型请求、不安装、不登录；就绪仅表示 CLI 接口可用，认证与模型未实测。每次运行记录 `source=qoder` 的费用回执；CLI 未提供可核对美元费用时记录 `null`，不得填 0 冒充免费。中断无已保存结果不重发，保留现有身份与结算守卫。
+
+`qoder-model-catalog {}` 是由设置页「模型列表」显式触发的只读目录命令，返回 `{models:[{id,name,billing_type,credit_multiplier,original_credit_multiplier}],multiplier_source:"qoder_cli_live"}`，供规划与 Review 共用。内置候选经本机 CLI SDK 的 stream-json 控制协议读取：仅发送 `initialize` 与 `get_models {fetchStrategy:"live"}`，要求匹配 request_id 的成功响应，30 秒有界，不发送 user/query/prompt，不调用模型。关闭 hooks、MCP、skills、项目设置、自动更新、会话持久化与全部工具，固定在系统临时目录查询；读取后关闭 stdin 并有界等待退出，异常清理进程组。CLI `--list-models` 丢失倍率、会截断自定义标识，不再作为完整目录来源。内置候选继续使用 CLI 接受的 `displayName` 作为 `id` 与 `name`，保留既有已存名称及手动输入的兼容性。
+
+内置 `billing_type="qoder_credits"`，只投影 CLI `priceFactor` 为 Credits 消耗参考倍率 `credit_multiplier`；仅接受有限非负数字（拒绝布尔、字符串、负数及非有限数），包括明确的 `0`，缺失/非法为 `null`，不按 `isFree` 或旧文档猜测。`original_credit_multiplier` 优先取 active promotion 的 `before_promotion_price_factor`，否则取 `originalPriceFactor`；仅在当前倍率有效且原倍率有效、大于当前时提供，否则为 `null`。`promotion.discount_factor` 是折扣比率，不当作消耗倍率。倍率随账号、时段、优惠变化，仅表示本次读取结果，不折算美元，不写入费用回执或冻结运行配置；未知美元费用仍为 `null`。
+
+自定义候选只投影 Qoder 用户设置中 `providers.<provider_id>.models[]` 的 `model` 和 `displayName`，`id` 为完整 `<provider_id>/<model>`，保留 upstream ID 自带的 `/`；`billing_type="external"`、两个倍率均为 `null`，表示按供应商规则计费、不适用 Qoder Credits 倍率，不冒称免费。查询不解析认证引用，不返回端点、凭据或完整设置，不安装或登录，不修改 Pilot/Qoder 配置；Qoder 自身可能刷新认证、目录缓存或日志。CLI 缺失、失败、超时、控制协议不符或设置无效时返回明确错误，不退回旧缓存/硬编码倍率或仅自定义目录伪造成功；空目录返回 `models:[]`。目录不证明模型认证、远端可用性或思考等级；已有手动填写、离线保存与执行前校验规则保留。
 
 macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPERM。Qoder 清理仅在有界等待回收 leader 后重新发组信号、确认进程组不存在时，将其视为已经退出；leader 已退出不代表后代已停止，持续权限错误必须明确失败，不得忽略仍存活的进程组。
 

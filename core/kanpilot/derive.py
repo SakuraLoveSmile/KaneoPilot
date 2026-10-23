@@ -78,7 +78,9 @@ def _repair_status(task):
     if task["status"] in ("needs_user", "done"):
         return None
     repair = core.review_repair_of(task)
-    if repair.get("source_kind") == "merge_conflict":
+    if repair.get("source_kind") in ("merge_conflict", "build_failure"):
+        if repair.get("state") in ("needs_followup", "blocked", "failed"):
+            return {"needs_followup": "需要后续处理", "blocked": "AI 处理受阻", "failed": "AI 处理失败"}[repair["state"]]
         return ("处理后待复审" if repair.get("state") == "awaiting_review"
                 else "AI 正在处理" if task["status"] == "running"
                 else "AI 处理待启动")
@@ -105,6 +107,8 @@ def _release_display(conn, task):
     if task["status"] != "in_review":
         return None
     value = _release(conn, task)
+    if value and value.get("is_historical"):
+        return None
     from . import core
     if value and value.get("required") and (
             value.get("batch_id") or value.get("can_start")
@@ -117,6 +121,9 @@ def task_display_status(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> str:
     status = task["status"]
+    from . import review_delivery
+    if review_delivery.candidate(conn, task) is not None:
+        return "待 PR 交付"
     if status == "needs_user":
         return "需人工"
     release = _release_display(conn, task)
@@ -243,6 +250,10 @@ def task_board_column(
     正常列不再混入异常卡片。传入 conn/now 时检测失联（规则 3）；仅传 task
     行时只做行内派生（needs_user、评审未通过、status 直映射）。"""
     status = task["status"]
+    if conn is not None:
+        from . import review_delivery
+        if review_delivery.candidate(conn, task) is not None:
+            return "in_review"
     if status == "needs_user":
         return "failed"
     if conn is not None and _release_display(conn, task):
@@ -272,6 +283,9 @@ def task_exception_kind(
     review_blocked、failure_code∈失败集→failed、其余→manual_block。无异常 None。"""
     if lost_request_for_task(conn, task["task_id"], now) is not None:
         return "executor_lost"
+    from . import review_delivery
+    if review_delivery.candidate(conn, task) is not None:
+        return None
     status = task["status"]
     release = _release_display(conn, task)
     if release:
@@ -356,6 +370,8 @@ def archive_blocked_reason(
     send_state='unknown' 或存在 claimed 请求（执行端已领取）任一即禁用（返回中文原因）。"""
     from .execution_questions import open_records
     if open_records(task): return "执行轮次正在等待回答，暂不能移出看板"
+    from .release_verification_questions import open_question
+    if open_question(conn, task, now): return "补验证正在等待回答，暂不能移出看板"
     status = task["status"]
     if status in constants.ARCHIVE_BLOCKED_STATUSES:
         return f"任务正在{_SAVE_STATUS_CN.get(status, status)}中，暂不能移出看板"
@@ -393,6 +409,9 @@ def task_board_substatus(
     第六列（failed）取 exception.label；前五列维持 v1.2 词表。"""
     if column == "failed":
         return exception["label"] if exception else "失败"
+    from . import review_delivery
+    if review_delivery.candidate(conn, task) is not None:
+        return "待 PR 交付"
     release = _release_display(conn, task)
     if release:
         return release["title"]
@@ -569,8 +588,11 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
     from .execution_questions import view as question_view, preview as question_preview
     question = question_view(task,now,conn)
+    from . import release_verification_questions
+    verification_question = release_verification_questions.view(conn, task, now)
     view = {
         "execution_question": question,
+        "release_verification_question": verification_question,
         "question_preview": question_preview(question),
         "automation": automation or None,
         "review_repair": review_repair.view(conn, task, now),
@@ -620,16 +642,18 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     # the automation state machine in Swift. The attention item uses precisely
     # the same evidence/actions builder as attention-list.
     from .engine import decide, attention
+    from . import review_delivery
     phase, condition = decide.phase_condition(task["status"]) or (None, None)
     repair = core.review_repair_of(task)
     repair_state = repair.get("state")
-    if _release_display(conn, task):
+    manual_delivery = review_delivery.candidate(conn, task) is not None
+    if manual_delivery or _release_display(conn, task):
         phase, condition = "delivery", "syncing"
     elif (view["parent_closeout"] and task["status"] != "done"
             and view["parent_closeout"]["state"] in _CLOSEOUT_LABELS):
         phase, condition = "delivery", "syncing"
-    elif _repair_status(task) and repair.get("source_kind") == "merge_conflict":
-        if repair_state == "awaiting_review":
+    elif _repair_status(task) and repair.get("source_kind") in ("merge_conflict", "build_failure"):
+        if repair_state in ("awaiting_review", "needs_followup", "blocked", "failed"):
             phase, condition = "review", "reviewing"
         elif task["status"] == "running":
             phase, condition = "observe", "running"
@@ -643,7 +667,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             or core.delivery_of(task).get("pushed_sha")):
         phase, condition = "delivery", "syncing"
     view.update(phase=phase, condition=condition, attention=None)
-    if task["status"] == "needs_user" and db.task_is_active(task):
+    if (task["status"] == "needs_user" or verification_question and verification_question['state'] == 'open') and db.task_is_active(task):
         from .engine.commands import _task_evidence
         source = dict(view, failure_code=task["failure_code"],
                       failure_stage=task["failure_stage"],
@@ -653,6 +677,9 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
                       allowed_actions=allowed_actions(conn, task, now),
                       evidence=_task_evidence(conn, task["task_id"],
                                               task["blocked_at"] or task["updated_at"]))
+        if manual_delivery:
+            source.update(review_delivery.attention_fields(conn, task))
+        source.update(release_verification_questions.attention_fields(conn, task, now))
         view["attention"] = attention.build_item(source, util.to_iso(now))
     if db.task_is_purged(task) and not view["blocked_reason"]:
         view["blocked_reason"] = "任务已永久从列表移除（只读审计）"
@@ -685,6 +712,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
     from .execution_questions import open_records
     if open_records(task):
         return ["answer_execution_questions", "skip_execution_questions", "stop_execution"]
+    from .release_verification_questions import open_question
+    verification_question = open_question(conn, task, now)
+    if verification_question and db.task_is_active(task):
+        return (["answer_release_verification_questions", "skip_release_verification_questions"]
+            if verification_question['answerable'] else []) + ["sync_release_verification"]
     actions = ["recheck"]
     if not db.task_is_active(task):
         # 归档任务：仅提供恢复（§5.15.6）；回收站任务追加永久移除（v2）。
@@ -692,6 +724,13 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if db.task_save_state(task) == "trashed":
             actions.append("purge")
     else:
+        from . import external_build_repair
+        external_repair = external_build_repair.summary(conn, task)
+        if external_repair:
+            if external_repair.get('can_sync_verification'):
+                actions.append('sync_release_verification')
+            if external_repair.get('can_restart_verification'):
+                actions.append('restart_release_verification')
         execution=round_store.get_round(conn,task['task_id'],task['run_id']) if task['run_id'] else None
         if (status=='running' and task['sent']==1 and send_state=='sent'
                 and execution is not None and execution['backend']=='codex' and execution['save_state']=='active'):
@@ -732,7 +771,7 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 from . import engine_claim_scope
                 if (engine_claim_scope.effective_mode(conn, task["project_id"]) != "live"
                         and (execution is None or execution['backend']!='codex')
-                        and core.review_repair_of(task).get("source_kind") != "merge_conflict"):
+                        and core.review_repair_of(task).get("source_kind") not in ("merge_conflict", "build_failure")):
                     actions.append("accept_verification")
             from . import verification_recovery
             if verification_recovery.candidate(conn, task):
@@ -790,6 +829,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         actions = [action for action in actions if action not in ("mark_done", "closeout_parent")]
     if _release_display(conn, task):
         actions = [action for action in actions if action != "enqueue"]
+    from . import review_delivery
+    if review_delivery.candidate(conn, task) is not None:
+        actions = [action for action in actions if action not in
+                   ("retry", "enqueue", "recover_review", "resolve_review_blocker", "mark_done")]
+        actions.insert(0, "continue_delivery")
     return actions
 
 

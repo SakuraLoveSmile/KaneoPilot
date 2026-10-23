@@ -566,7 +566,7 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
             sent_at=None, session_id=None, session_title=None,
             **core.clear_block_fields(),
         )
-        if repair.get("source_kind") == "merge_conflict":
+        if repair.get("source_kind") in ("merge_conflict", "build_failure"):
             from . import task_ai_action
             task_ai_action.record_progress(conn, db.require_task(conn, task_id), util.to_iso(now),
                                            "running", execution_run_id=run_id)
@@ -844,7 +844,12 @@ def cmd_report(ctx, payload: dict) -> dict:
         # legacy/shadow engines; its pass receipt survives fix_request cleanup.
         if task is not None and outcome == "succeeded" and request["kind"] in ("review", "delivery"):
             current = db.require_task(conn, task["task_id"])
-            if engine_claim_scope.action_delivery_allowed(conn, current, allow_paused=True):
+            from . import review_delivery
+            if review_delivery.allowed(conn, current, allow_paused=True):
+                if request["kind"] == "delivery" and review_delivery.allowed(conn, current, request, allow_paused=True):
+                    review_delivery.enqueue(conn, current, now_iso,
+                        not_before=core.delivery_of(current).get("next_sync_at"))
+            elif engine_claim_scope.action_delivery_allowed(conn, current, allow_paused=True):
                 from . import task_ai_action
                 continuation = task_ai_action.delivery_continuation(current, allow_paused=True)
                 expected_review = continuation["review_identity"]
@@ -1164,9 +1169,10 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                 raise util.KanpilotError("bad_request", "非修复结论不能带 fix")
             entry = {"review_key": payload["review_key"], "conclusion": conclusion,
                      "report_path": str(report), "report_sha256": report_sha,
+                     "plan_sha256": task["plan_sha256"],
                      "execution_run_id": task["run_id"], "head_sha": core.delivery_of(task).get("head_sha"),
-                     "registered_at": ctx.now_iso, "fix_round": (core.automation_of(task).get("fix_round", 0)
-                         if core.is_automation_managed(task) else db.task_extra(task).get("review_repair_round", 0)), "fix": fix}
+                     "registered_at": ctx.now_iso, "fix_round": max(int(core.automation_of(task).get("fix_round", 0)),
+                         int(db.task_extra(task).get("review_repair_round", 0))), "fix": fix}
             entry.update({key: core.delivery_of(task).get(key)
                           for key in ("branch", "base_branch", "base_sha", "worktree_path")})
             history.append(entry)
@@ -1179,6 +1185,9 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                     requirements_sha256=task["requirements_sha256"], plan_sha256=task["plan_sha256"],
                     created_at=ctx.now_iso, state="held")
                 # Never replace task.run_id while this Review remains claimed.
+                if action_fix.get("source_kind") == "build_failure":
+                    fix_request = dict(core.review_repair_of(task), state="needs_followup",
+                                       reason="构建修复复审未通过，保留本轮记录；后续处理须用户另行确认")
                 db.set_extra(conn, task, ctx.now_iso, fix_request=fix_request)
             if conclusion == "pass":
                 db.set_extra(conn, task, ctx.now_iso, fix_request=None)
@@ -1189,11 +1198,12 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             if not any(entry.get("review_key") == key for entry in history):
                 entry = {"review_key": key, "conclusion": conclusion,
                                 "report_path": str(report), "report_sha256": report_sha,
+                                "plan_sha256": task["plan_sha256"],
                                 **core.branch_review_snapshot(task),
                                 "registered_at": ctx.now_iso,
                                 "fix_task_id": payload.get("fix_task_id")}
-                if action_fix.get("source_kind") == "merge_conflict":
-                    entry["fix_round"] = core.automation_of(task).get("fix_round", 0)
+                from . import review_repair
+                entry["fix_round"] = review_repair._round_count(task)
                 history.append(entry)
                 db.set_extra(conn, task, ctx.now_iso, review_history=history[-20:])
             payload = dict(payload, review_key=key)
@@ -1231,7 +1241,7 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             conn, db.require_task(conn, task["task_id"]), ctx.now_iso,
             **extra_entries,
         )
-        if conclusion == "pass" and action_fix.get("source_kind") == "merge_conflict":
+        if conclusion == "pass" and action_fix.get("source_kind") in ("merge_conflict", "build_failure"):
             task_ai_action.register_delivery_continuation(conn, db.require_task(conn, task["task_id"]),
                                                           ctx.now_iso, action_fix)
         db.add_event(

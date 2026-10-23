@@ -62,6 +62,36 @@ def test_global_setting(ctx):
     assert policy.global_settings(ctx.conn)['max_active_tasks'] == 5
 
 
+@pytest.mark.parametrize('value', ['nan', 'inf', '-inf', '0', '-1', 'invalid'])
+def test_probe_timeout_rejects_unbounded_or_invalid_environment(monkeypatch, value):
+    monkeypatch.setenv('KANPILOT_GIT_PROBE_TIMEOUT', value)
+    assert policy.git_probe_timeout() == 5.0
+
+
+@pytest.mark.parametrize('targets', [
+    ['git@github.com:other/repo.git'],
+    ['git@github.com:owner/repo.git', 'git@github.com:owner/repo.git'],
+])
+def test_preflight_rejects_unsafe_push_targets_before_adoption(ctx, tmp_path, monkeypatch, targets):
+    repo = tmp_path / 'repo'
+    subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin',
+                    'git@github.com:owner/repo.git'], check=True)
+    for target in targets:
+        subprocess.run(['git', '-C', str(repo), 'config', '--add', 'remote.origin.pushurl', target], check=True)
+    pid = 'project00001'
+    db.set_setting(ctx.conn, 'project_mappings', {'items': {pid: {'repository': str(repo)}}})
+    monkeypatch.setattr(policy, '_planner_ready', lambda conn: True)
+    monkeypatch.setattr(policy, '_executable', lambda binary: True)
+    monkeypatch.setattr(review_config, 'load', lambda conn: {'backend': 'codex'})
+    monkeypatch.setattr(exec_config, 'load', lambda conn: {'backend': 'pi_desktop',
+                        'pi_desktop': {'permission_mode': 'auto'}})
+    before = ctx.conn.total_changes
+    errors = policy.automation_preflight(ctx.conn, pid)
+    assert {item['code'] for item in errors} == {'branch_diverged'}
+    assert ctx.conn.total_changes == before
+
+
 def test_preflight_codes_and_local_only(ctx, tmp_path, monkeypatch):
     pid = 'project00001'
     def mapping(repo):
@@ -123,10 +153,10 @@ def test_preflight_resolves_ssh_alias_in_repository(ctx, tmp_path, monkeypatch):
         return real_run(args, **kwargs)
     monkeypatch.setattr(policy.subprocess, 'run', run)
     assert policy.automation_preflight(ctx.conn, pid) == []
-    assert len(calls) == 1
+    assert len(calls) == 2  # Fetch identity and the effective push target are both checked.
     include.write_text('Host github-alt\n  HostName example.invalid\n  Port 443\n')
     assert {e['code'] for e in policy.automation_preflight(ctx.conn, pid)} == {'origin_not_github'}
-    assert len(calls) == 2  # No cross-check cache hides an SSH configuration change.
+    assert len(calls) == 3  # No cross-check cache hides an SSH configuration change.
 
 
 def _task_request(ctx):

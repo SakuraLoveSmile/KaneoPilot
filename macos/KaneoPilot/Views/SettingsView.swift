@@ -1656,8 +1656,8 @@ struct SettingsView: View {
                 } else if plannerBackend == "pi_desktop" {
                     plannerPlusBlock
                 } else if plannerBackend == "qoder" {
-                    cliModelEditor("Qoder 规划", model: $plannerQoderModel, effort: $plannerQoderEffort,
-                                   efforts: CLIModelConfig.qoderEfforts)
+                    QoderModelEditor(title: "Qoder 规划", modelId: $plannerQoderModel,
+                                     effort: $plannerQoderEffort)
                     qoderModelHint
                     FieldRow("Qoder 就绪态", qoderReadinessText(model.plannerCapabilities?.backends?.qoder))
                 } else if plannerBackend == "claude" {
@@ -2137,8 +2137,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if reviewBackend == "qoder" {
-                    cliModelEditor("Qoder Review", model: $reviewQoderModel, effort: $reviewQoderEffort,
-                                   efforts: CLIModelConfig.qoderEfforts)
+                    QoderModelEditor(title: "Qoder Review", modelId: $reviewQoderModel,
+                                     effort: $reviewQoderEffort)
                     qoderModelHint
                     FieldRow("Qoder 就绪态", qoderReadinessText(model.reviewCapabilities?.qoder))
                 } else if reviewBackend == "claude" {
@@ -2493,7 +2493,7 @@ struct SettingsView: View {
     }
 
     private var qoderModelHint: some View {
-        Text("可输入 Qoder CLI 支持的模型标识；inherit 继承 Qoder 默认思考等级。具体模型支持的等级以 CLI 为准；保存不调用模型。")
+        Text("点击模型列表搜索并选择，也可手动输入；inherit 继承 Qoder 默认思考等级。目录读取不调用模型，具体模型支持的等级以 CLI 为准。")
             .font(.kpSmall).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -2680,6 +2680,169 @@ private struct PathRow: View {
                 .help(path == nil ? "无路径" : "在 Finder 中打开")
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct QoderModelEditor: View {
+    let title: String
+    @Binding var modelId: String
+    @Binding var effort: String
+    @EnvironmentObject private var model: AppViewModel
+    @State private var catalog: QoderModelCatalog?
+    @State private var loading = false
+    @State private var errorText: String?
+    @State private var search = ""
+    @State private var showCatalog = false
+
+    private var filteredModels: [QoderModelCandidate] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = catalog?.models ?? []
+        guard !query.isEmpty else { return candidates }
+        return candidates.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.id.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var consumptionDetail: String {
+        guard let catalog else { return "消耗倍率：打开模型列表读取" }
+        let detail = catalog.models.first(where: { $0.matches(modelId) })?.consumptionDetail
+            ?? "消耗倍率：目录未提供，倍率未知"
+        return errorText == nil ? detail : "上次读取 · \(detail)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text(title).font(.kpBody)
+            HStack(spacing: Spacing.s) {
+                TextField("模型", text: $modelId)
+                    .font(.kpBody)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("\(title)模型")
+                Button {
+                    search = ""
+                    showCatalog = true
+                } label: {
+                    Label("模型列表", systemImage: "list.bullet")
+                }
+                .buttonStyle(.borderless)
+                .help("读取 Qoder 模型列表并搜索；不调用模型")
+                .accessibilityLabel("\(title)模型列表")
+                .popover(isPresented: $showCatalog) {
+                    catalogPopover
+                        .task {
+                            if catalog == nil { await loadCatalog() }
+                        }
+                }
+            }
+            Text(consumptionDetail)
+                .font(.kpSmall)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("\(title)消耗参考：\(consumptionDetail)")
+            Picker("思考等级", selection: $effort) {
+                if !CLIModelConfig.qoderEfforts.contains(effort) {
+                    Text(effort).tag(effort)
+                }
+                ForEach(CLIModelConfig.qoderEfforts, id: \.self) { level in
+                    Text(level).tag(level)
+                }
+            }
+            .font(.kpBody)
+            .accessibilityLabel("\(title)思考等级")
+        }
+    }
+
+    private var catalogPopover: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            TextField("搜索模型", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("\(title)搜索模型")
+            if loading {
+                HStack(spacing: Spacing.s) {
+                    ProgressView().controlSize(.small)
+                    Text("正在读取模型列表…").font(.kpSmall)
+                }
+            }
+            if let errorText {
+                Text(errorText)
+                    .font(.kpSmall)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let catalog {
+                if errorText != nil {
+                    Text("更新失败，以下为上次读取结果")
+                        .font(.kpSmall)
+                        .foregroundStyle(.orange)
+                }
+                if filteredModels.isEmpty {
+                    Text(catalog.models.isEmpty ? "未读取到可用模型" : "没有匹配的模型")
+                        .font(.kpBody)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 80)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(filteredModels) { candidate in
+                                Button {
+                                    modelId = candidate.id
+                                    showCatalog = false
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                                            Text(candidate.name).font(.kpBody)
+                                            Spacer(minLength: Spacing.s)
+                                            Text(candidate.consumptionSummary)
+                                                .font(.kpSmall)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Text(candidate.id)
+                                            .font(.kpSmall)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("\(candidate.id)\n\(candidate.consumptionDetail)")
+                                .padding(.vertical, 5)
+                            }
+                        }
+                    }
+                    .frame(height: 240)
+                }
+                Text("已读取 \(catalog.models.count) 个模型；认证与模型可用性尚未验证")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                Text(catalog.multiplierSource == "qoder_cli_live"
+                     ? "来源：Qoder CLI 本次目录。倍率随优惠变化，实际扣费以 Qoder 为准。"
+                     : "目录未提供倍率来源。")
+                    .font(.kpSmall)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("重新读取") { Task { await loadCatalog() } }
+                .disabled(loading)
+                .accessibilityLabel("重新读取\(title)模型列表")
+        }
+        .frame(width: 360)
+        .padding(Spacing.m)
+    }
+
+    @MainActor
+    private func loadCatalog() async {
+        guard !loading else { return }
+        loading = true
+        errorText = nil
+        defer { loading = false }
+        do {
+            catalog = try await model.client.run("qoder-model-catalog", timeout: 40,
+                                                 as: QoderModelCatalog.self)
+        } catch {
+            errorText = error.coreMessage
+        }
     }
 }
 

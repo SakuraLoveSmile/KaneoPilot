@@ -984,9 +984,22 @@ def merged_tasks(state):
                     and notice.get("state") == "merged" and delivery.get("head_sha")
                     and notice.get("head_sha") == delivery["head_sha"]):
                 task["delivery"] = dict(delivery, auto_merge=dict(notice, reason="PR 已合并，任务已完成"))
-    apply_task_ai_action_fixture(state, tasks)
+    build_ai = (state.get("task_ai_action_fixture") or {}).get("kind") == "build_failure"
+    if not build_ai:
+        apply_task_ai_action_fixture(state, tasks)
     apply_parent_closeout_fixture(state, tasks)
     apply_release_fixture(state, tasks)
+    if build_ai:
+        apply_task_ai_action_fixture(state, tasks)
+    apply_external_build_repair_fixture(state, tasks)
+    for task in tasks.values():
+        if task.get("_delivery_continuation"):
+            task.update(display_status="待 PR 交付", phase="delivery", condition="syncing",
+                        board_column="in_review", lifecycle_column="in_review",
+                        exception=None, blocked_reason=None, attention=None)
+            if task.get("release"):
+                task["release"] = dict(task["release"], title="待 PR 交付",
+                    reason="评审已通过；继续交付会复用已有成果，创建 PR，并按项目策略推进合并及构建发布。")
     return list(tasks.values())
 
 def merged_requests(state):
@@ -1054,11 +1067,18 @@ def allowed_actions(task, requests):
             actions.insert(1, "resume-auto")
         return actions
     status = task.get("status")
+    if task.get("_delivery_continuation"):
+        return ["continue_delivery", "recheck"]
     closeout = task.get("parent_closeout")
     if closeout and status != "done":
         return (["closeout_parent"] if closeout.get("can_complete") else []) + ["recheck"]
     release = task.get("release")
     if release and release.get("required") and release.get("state") != "published":
+        repair = release.get("external_repair") or {}
+        if repair.get("can_sync_verification") and (repair.get("verification") or {}).get("verification_id"):
+            return ["sync_release_verification", "recheck"]
+        if repair.get("can_restart_verification"):
+            return ["restart_release_verification", "recheck"]
         return ["recheck"]
     current_ai_action = (task.get("task_ai_action") or {}).get("current")
     if current_ai_action:
@@ -1709,6 +1729,11 @@ def cmd_resolve(state, payload):
     scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
     if scenario.get("resolve_error"):
         return fail(str(scenario["resolve_error"]), "conflict")
+    if action == "continue_delivery":
+        if (not task.get("_delivery_continuation")
+                or payload.get("expected_execution_run_id") != task.get("run_id")
+                or payload.get("expected_review_key") != task.get("review_key")):
+            return fail("交付候选已变化，请刷新后重试", "conflict")
     if action == "revert_engine_fix":
         if not payload.get("expected_execution_run_id") or not payload.get("expected_plan_sha256"):
             return fail("撤回需要执行轮次与计划摘要", "bad_request")
@@ -1736,7 +1761,17 @@ def cmd_resolve(state, payload):
         clear = ["failure_code", "failure_reason", "failure_stage",
                  "blocked_at", "blocked_reason", "blocked_summary",
                  "manual_recovery_required", "lock_retained"]
-        if action == "revert_engine_fix":
+        if action == "continue_delivery":
+            for k in clear:
+                ov[k] = None
+            ov.update(status="in_review", stage="delivery", display_status="交付中",
+                      _delivery_continuation=False, _automation_allowed=None,
+                      delivery=dict(task.get("delivery") or {}, mode="pr"))
+            enqueue_request(s, tid, "delivery")
+            append_event(s, "delivery_continued", task_id=tid, actor="user",
+                         detail={"execution_run_id": payload["expected_execution_run_id"],
+                                 "review_key": payload["expected_review_key"]})
+        elif action == "revert_engine_fix":
             ov.update({"status": "needs_user", "stage": "monitor", "failure_stage": "monitor",
                        "failure_code": "verification_environment_failure", "display_status": "需人工",
                        "failure_reason": "验证所需 JDK 版本不符：请核对 Plus 原轮次证据或让 Plus 重新执行并验证",
@@ -1868,7 +1903,7 @@ def enqueue_request(state, tid, kind):
         "request_id": "req-" + uuid.uuid4().hex[:8],
         "idempotency_key": "%s:%s" % (kind, tid), "task_id": tid,
         "stage": {"plan": "plan", "dispatch": "dispatch",
-                  "monitor": "monitor", "review": "review"}[kind],
+                  "monitor": "monitor", "review": "review", "delivery": "delivery"}[kind],
         "kind": kind, "status": "queued", "priority": 100,
         "requested_by": "user", "attempt_no": 0,
         "created_at": iso(utcnow()), "updated_at": iso(utcnow()),
@@ -3395,6 +3430,25 @@ def qoder_capability(state):
                 **(state.get("qoder_capability_fixture") or {}))
 
 
+def qoder_model_catalog(state, payload):
+    if state.get("qoder_catalog_delay_ms"):
+        time.sleep(min(float(state["qoder_catalog_delay_ms"]) / 1000, 5))
+    if state.get("qoder_catalog_error"):
+        return fail(str(state["qoder_catalog_error"]), "validation_failed")
+    return state.get("qoder_catalog_fixture", {"multiplier_source": "qoder_cli_live", "models": [
+        {"id": "Auto", "name": "Auto", "billing_type": "qoder_credits",
+         "credit_multiplier": 0.5, "original_credit_multiplier": None},
+        {"id": "Ultimate", "name": "Ultimate", "billing_type": "qoder_credits",
+         "credit_multiplier": 0.4, "original_credit_multiplier": 2},
+        {"id": "DeepSeek-Flash", "name": "DeepSeek-Flash", "billing_type": "qoder_credits",
+         "credit_multiplier": 0, "original_credit_multiplier": 0.1},
+        {"id": "Unknown-Rate", "name": "Unknown Rate", "billing_type": "qoder_credits",
+         "credit_multiplier": None, "original_credit_multiplier": None},
+        {"id": "qoder-custom-fixture/deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash",
+         "billing_type": "external", "credit_multiplier": None, "original_credit_multiplier": None},
+    ]})
+
+
 def review_capabilities(state):
     result = {key: {"available": True, "detail": "隔离 FakeCore 就绪"}
               for key in ("pi", "pi_desktop", "claude", "codex")}
@@ -3442,11 +3496,25 @@ def cmd_session_request_start(state, payload):
 
 
 def cmd_recover_execution_goals_fixture(state, payload):
-    """A bounded sleeping process for supervisor ownership/latency fixtures only."""
+    """Isolated owned recovery: preserve normal goals and opt-in release progress."""
     delay = state.get("recovery_fixture_delay_seconds", 0)
     if delay:
         time.sleep(min(max(float(delay), 0), 60))
-    return {"goal_recoveries": []}
+    results = []
+    config = state.get("external_build_repair_fixture") or {}
+    if (config.get("auto_progress_fixture") and config.get("permission_mode") == "auto"
+            and config.get("accepted") and config.get("verification_starts")):
+        task = release_fixture_task(state)
+        verification = external_verification_view(state)
+        # Only a confirmed, current attempt progresses. Unknowns are observed;
+        # this fixture never creates a prompt, attempt or approval to recover one.
+        if (task and task.get("save_state") == "active"
+                and config.get("confirmed_verification_id") == verification["verification_id"]
+                and verification["state"] in ("planning", "running", "unknown")):
+            result = cmd_sync_release_verification_fixture(state, {"task_id": task["task_id"],
+                "verification_id": verification["verification_id"]})
+            results.append(dict(result, task_id=task["task_id"]))
+    return {"goal_recoveries": [], "release_verifications": results}
 
 
 def cmd_execution_answers(state, payload, mode):
@@ -3581,11 +3649,200 @@ def release_fixture_task(state):
     return next((task for task in merged_tasks(state) if task["task_id"] == config.get("task_id", "auto-long-pr")), None)
 
 
+# Opt-in external repair fixture. State is isolated by KANPILOT_FAKE_STATE.
+# Seed release_fixture.scenario=failed plus external_build_repair_fixture={}.
+def external_repair_candidate(state, task_id):
+    config = state.get("external_build_repair_fixture") or {}
+    context = sha("external-repair-%s" % config.get("revision", 0))
+    return {"task_id": task_id, "pr_number": config.get("pr_number", 11),
+            "pr_url": "https://github.com/example/music/pull/%s" % config.get("pr_number", 11),
+            "head_sha": sha("external-head", 40), "base_branch": "main", "target_sha": sha("external-target", 40),
+            "target_source_sha256": sha("external-source"), "source_batch_id": "fixture-release-batch",
+            "source_tag": "v0.1.0-pilot.1792396800", "source_target_sha": sha("release-target", 40),
+            "source_workflow_run_id": 12345, "source_workflow_attempt": 1,
+            "preservation_kind": config.get("preservation_kind", "ancestor"), "context_sha256": context}
+
+
+def external_verification_view(state):
+    config = state["external_build_repair_fixture"]
+    status = config.get("verification_state", "prepared")
+    attempt = config.get("verification_restarts", 0)
+    context_seed = "external-verification-%s" % config.get("revision", 0)
+    if attempt:
+        context_seed += "-attempt-%s" % attempt
+    verification_id = "fixture-external-verification" + ("-%s" % (attempt + 1) if attempt else "")
+    reason = {"prepared": "尚未调用模型，等待确认完整验证。", "planning": "独立 Plus 验证已安排。",
+              "running": "Pilot 已批准本轮 Goal，Plus 正在执行，报告将持续自动核对。", "executing": "正在执行完整验证。", "verified": "原需求、计划验收与全部命令均已核对通过。",
+              "blocked": "完整验证尚未通过，不能准备发布。"}.get(status, "等待核对验证结果。")
+    failure_code = "release_verification_report" if status == "blocked" and config.get("report_failure") else None
+    if config.get("continuation_scenario") == "completed_goal_missing_receipt" and not attempt:
+        if config.get("goal_observed"):
+            reason = "验证证据不足：四条检查未确认，13 条引用未解析；原报告保留，需显式重新完整验证。"
+        else:
+            reason = "Plus 中的原 Goal 已完成，Pilot 尚未核对原会话与报告。"
+    return {"state": status, "target_sha": sha("external-target", 40), "target_source_sha256": sha("external-source"),
+            "context_sha256": sha(context_seed),
+            "verification_id": verification_id if config.get("verification_starts") else None,
+            "commands": ["python3 -m pytest tests -q", "./gradlew :app:assembleDebug"],
+            "model_summary": {"provider_id": "fixture", "model_id": "fixture-model", "thinking_level": "high", "permission_mode": config.get("permission_mode", "default")},
+            "reason": reason, "failure_code": failure_code,
+            "report_goal_status": "met" if config.get("goal_observed") else None}
+
+
+def apply_external_build_repair_fixture(state, tasks):
+    config = state.get("external_build_repair_fixture")
+    if not isinstance(config, dict):
+        return
+    task = tasks.get(config.get("task_id", "auto-long-pr"))
+    if not task or not task.get("release"):
+        return
+    release = task["release"]
+    release["can_link_external_repair"] = not config.get("accepted", False) and release["state"] == "failed"
+    if not config.get("accepted"):
+        return
+    candidate = external_repair_candidate(state, task["task_id"])
+    verified = config.get("verification_state") == "verified"
+    repair = {key: candidate[key] for key in ("pr_number", "pr_url", "target_sha", "source_batch_id", "source_tag", "context_sha256")}
+    repair.update(can_prepare_verification=not config.get("verification_starts"),
+                  can_sync_verification=bool(config.get("verification_starts")) and (config.get("verification_state") not in ("verified", "blocked", "failed") or bool(config.get("recovery_pending"))),
+                  can_restart_verification=config.get("verification_state") == "blocked" and bool(config.get("report_failure")) and not config.get("recovery_pending"),
+                  verification=external_verification_view(state) if config.get("verification_starts") else None)
+    release.update(external_repair=repair, can_reconcile=bool(config.get("batch_started")), can_abandon=False,
+                   can_start=verified and not config.get("batch_started"), is_historical=False,
+                   target_sha=candidate["target_sha"], context_sha256=sha("external-release-%s" % config.get("revision", 0)))
+    if not config.get("batch_started"):
+        verification = repair.get("verification") or {}
+        status = verification.get("state")
+        title = {"planning": "核对原验证" if config.get("continuation_scenario") and not config.get("goal_observed") else "验证规划中",
+                 "running": "验证执行中", "executing": "完整验证中", "unknown": "验证结果待确认",
+                 "blocked": "验证证据不足" if config.get("report_failure") else "完整验证受阻",
+                 "failed": "完整验证失败"}.get(status, "待完整验证")
+        release.update(state="ready" if verified else "blocked", title="待新批次发布" if verified else title,
+                       reason="修复目标完整验证已通过，可以准备新批次。" if verified else verification.get("reason") or "已关联外部修复，需独立完整验证后再准备新批次。",
+                       batch_id=None, tag=None, workflow_run_id=None, workflow_url=None)
+    else:
+        release.update(batch_id="fixture-external-new-batch", tag="v0.1.0-pilot.1792396900")
+    task.update(task_ai_action=None, display_status=release["title"], board_substatus=release["title"],
+                last_progress=release["reason"], exception=None, blocked_reason=None)
+
+
+def cmd_prepare_external_build_repair_fixture(state, payload):
+    config = state.get("external_build_repair_fixture")
+    task = release_fixture_task(state)
+    if not isinstance(config, dict) or not task or task["task_id"] != payload.get("task_id"):
+        return fail("外部修复任务不匹配", "conflict")
+    if config.get("prepare_error"):
+        return fail(config["prepare_error"], "conflict")
+    candidate = external_repair_candidate(state, task["task_id"])
+    if payload.get("pr_number") != candidate["pr_number"]:
+        return fail("修复 PR 未合并或不属于同一仓库", "conflict")
+    if not config.get("accepted") and not task["release"].get("can_link_external_repair"):
+        return fail("当前失败批次不允许关联", "conflict")
+    return {"task_id": task["task_id"], "context_sha256": candidate["context_sha256"], "candidate": candidate}
+
+
+def cmd_accept_external_build_repair_fixture(state, payload):
+    prepared = cmd_prepare_external_build_repair_fixture(state, payload)
+    if payload.get("confirm") is not True or payload.get("expected_context_sha256") != prepared["context_sha256"]:
+        return fail("修复候选已变化，请重新核对", "conflict")
+    config = state["external_build_repair_fixture"]
+    if not config.get("accepted"):
+        config["accepted"] = True
+        config["accepts"] = config.get("accepts", 0) + 1
+        save_state(state)
+    return {"ok": True, "repair": release_fixture_task(state)["release"]["external_repair"]}
+
+
+def cmd_prepare_release_verification_fixture(state, payload):
+    task = release_fixture_task(state)
+    repair = ((task or {}).get("release") or {}).get("external_repair") or {}
+    if not task or task["task_id"] != payload.get("task_id") or not repair.get("can_prepare_verification"):
+        return fail("当前不可准备完整验证", "conflict")
+    verification = external_verification_view(state)
+    return {"task_id": task["task_id"], "context_sha256": verification["context_sha256"], "verification": verification}
+
+
+def cmd_start_release_verification_fixture(state, payload):
+    config = state.get("external_build_repair_fixture") or {}
+    if not config.get("accepted"):
+        return fail("尚未关联修复，不能启动完整验证", "conflict")
+    task = release_fixture_task(state)
+    verification = external_verification_view(state)
+    if not task or task["task_id"] != payload.get("task_id") or not config.get("accepted") or payload.get("expected_context_sha256") != verification["context_sha256"]:
+        return fail("验证候选已变化，请重新准备", "conflict")
+    if not config.get("verification_starts"):
+        config.update(verification_starts=1, verification_state="planning")
+        if config.get("auto_progress_fixture"):
+            config["confirmed_verification_id"] = external_verification_view(state)["verification_id"]
+            config["prompts"] = config.get("prompts", 0) + 1
+        save_state(state)
+    return {"verification_id": external_verification_view(state)["verification_id"], "verification": external_verification_view(state)}
+
+
+def cmd_sync_release_verification_fixture(state, payload):
+    config = state.get("external_build_repair_fixture") or {}
+    task = release_fixture_task(state)
+    if not task or task["task_id"] != payload.get("task_id") or not config.get("verification_starts") or payload.get("verification_id") != external_verification_view(state)["verification_id"]:
+        return fail("验证会话身份不匹配", "conflict")
+    config["verification_syncs"] = config.get("verification_syncs", 0) + 1
+    if config.get("auto_progress_fixture") and config.get("permission_mode") == "auto":
+        if config.get("verification_state") == "planning":
+            config["goal_approvals"] = config.get("goal_approvals", 0) + 1
+            config["verification_state"] = "running"
+        elif config.get("verification_state") == "running":
+            config["verification_state"] = config.get("sync_result", "verified")
+        # unknown is a read-only observation, never another approval or prompt.
+    elif config.get("continuation_scenario") == "completed_goal_missing_receipt" and not config.get("verification_restarts"):
+        config.update(verification_state="blocked", report_failure=True, goal_observed=True)
+    else:
+        config["verification_state"] = config.get("sync_result", "verified")
+    save_state(state)
+    return {"verification_id": external_verification_view(state)["verification_id"], "verification": external_verification_view(state)}
+
+
+def cmd_prepare_restart_release_verification_fixture(state, payload):
+    config = state.get("external_build_repair_fixture") or {}
+    task = release_fixture_task(state)
+    repair = ((task or {}).get("release") or {}).get("external_repair") or {}
+    if not task or task["task_id"] != payload.get("task_id") or not repair.get("can_restart_verification"):
+        return fail("当前原报告不允许重启，请先核对已有验证结果", "conflict")
+    old = external_verification_view(state)
+    attempt = config.get("verification_restarts", 0) + 1
+    context = sha("external-verification-%s-attempt-%s" % (config.get("revision", 0), attempt))
+    verification = dict(old, state="prepared", context_sha256=context, verification_id=None,
+                        reason="仅准备新的独立尝试，原报告保留；确认后可能产生模型费用。")
+    return {"task_id": task["task_id"], "context_sha256": context, "verification": verification,
+            "expected_verification_id": old["verification_id"], "expected_context_sha256": old["context_sha256"],
+            "expected_report_sha256": sha("external-report-%s-%s" % (config.get("revision", 0), attempt - 1))}
+
+
+def cmd_restart_release_verification_fixture(state, payload):
+    config = state.get("external_build_repair_fixture") or {}
+    identity = {key: payload.get(key) for key in ("task_id", "expected_verification_id", "expected_context_sha256", "expected_report_sha256")}
+    if config.get("restart_receipt") == identity:
+        verification = external_verification_view(state)
+        return {"verification_id": verification["verification_id"], "verification": verification}
+    prepared = cmd_prepare_restart_release_verification_fixture(state, payload)
+    if any(payload.get(key) != prepared[key] for key in ("expected_verification_id", "expected_context_sha256", "expected_report_sha256")):
+        return fail("原验证或报告已变化，请重新准备", "conflict")
+    config["verification_restarts"] = config.get("verification_restarts", 0) + 1
+    config["verification_starts"] = config.get("verification_starts", 0) + 1
+    config.update(verification_state="planning", restart_receipt=identity)
+    if config.get("auto_progress_fixture"):
+        config["confirmed_verification_id"] = external_verification_view(state)["verification_id"]
+        config["prompts"] = config.get("prompts", 0) + 1
+    save_state(state)
+    verification = external_verification_view(state)
+    return {"verification_id": verification["verification_id"], "verification": verification}
+
+
 def cmd_prepare_task_release_fixture(state, payload):
     task = release_fixture_task(state)
-    if not task or task["task_id"] != payload.get("task_id") or not task.get("release", {}).get("can_start"):
+    if not task or task["task_id"] != payload.get("task_id"):
         return fail("当前发布候选不可启动，请刷新核对", "conflict")
     release = copy.deepcopy(task["release"])
+    if not release["can_start"]:
+        return {"task_id": task["task_id"], "context_sha256": None, "release": release}
     return {"task_id": task["task_id"], "context_sha256": release["context_sha256"], "release": release}
 
 
@@ -3596,6 +3853,8 @@ def cmd_start_task_release_fixture(state, payload):
         return fail("发布候选身份已变化，请重新准备", "conflict")
     if not release.get("can_start"):
         return {"outcome": release["state"], "release": release}
+    if state.get("external_build_repair_fixture", {}).get("accepted"):
+        state["external_build_repair_fixture"]["batch_started"] = True
     config = state["release_fixture"]
     config["dispatches"] = config.get("dispatches", 0) + 1
     config["not_sent"] = False
@@ -3724,29 +3983,35 @@ def apply_task_ai_action_fixture(state, tasks):
     if not task:
         return
     scenario = fixture.get("scenario", "candidate")
-    delivery = dict(task["delivery"], pr_state="OPEN", head_sha=sha("ai-fixture-head", 40))
-    delivery["auto_merge"] = {"state": "blocked", "reason": "PR 存在合并冲突，需处理后重新校验",
-                              "head_sha": delivery["head_sha"], "updated_at": past(minutes=1)}
-    task.update(title="一次性 AI 处理 · PR 合并冲突（隔离示例）", delivery=delivery,
+    kind = fixture.get("kind", "merge_conflict")
+    build = kind == "build_failure"
+    delivery = dict(task["delivery"], pr_state="MERGED" if build else "OPEN", head_sha=sha("ai-fixture-head", 40))
+    delivery["auto_merge"] = None if build else {"state": "blocked", "reason": "PR 存在合并冲突，需处理后重新校验",
+                                               "head_sha": delivery["head_sha"], "updated_at": past(minutes=1)}
+    task.update(title="一次性 AI 处理 · 构建失败（隔离示例）" if build else "一次性 AI 处理 · PR 合并冲突（隔离示例）", delivery=delivery,
                 run_id="run-ai-source", review_repair=None, review_conclusion="pass",
                 review_summary={"conclusion": "pass"}, phase="delivery", condition="syncing",
-                status="in_review", display_status="评审通过 · 待合并", board_substatus="评审通过 · 待合并")
+                status="in_review", display_status="构建失败" if build else "评审通过 · 待合并",
+                board_substatus="构建失败" if build else "评审通过 · 待合并")
     saved = fixture.get("started")
     current = copy.deepcopy(saved.get("entry")) if saved else None
     titles = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
               "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
 
     def entry(key, action_state):
-        return {"action_id": key, "kind": "merge_conflict", "title": "解决 PR 合并冲突",
+        return {"action_id": key, "kind": kind, "title": "修复构建失败" if build else "解决 PR 合并冲突",
                 "state": action_state, "state_title": titles[action_state], "created_at": "2026-10-19T02:00:00+00:00",
                 "execution_run_id": "run-" + key, "session_id": "session-" + key if action_state != "queued" else None,
                 "model_summary": "隔离通用执行配置 · fake-model / high（无模型调用）", "pr_number": 12345,
+                "source_pr_number": 12345 if build else None,
+                "source_pr_url": "https://github.com/example/music/pull/12345" if build else None,
                 "head_sha": delivery["head_sha"], "base_sha": sha("ai-fixture-base", 40), "reason": None}
 
     if scenario in titles:
         current = entry("ai-fixture-current", scenario)
         if scenario in ("blocked", "failed", "needs_followup"):
-            current["reason"] = "隔离示例：目标分支已变化，请核对保留的冲突现场与执行记录后再处理。"
+            current["reason"] = ("隔离示例：构建 attempt 已变化，请重新核对失败日志。" if build else
+                                 "隔离示例：目标分支已变化，请核对保留的冲突现场与执行记录后再处理。")
     if scenario == "verification_unconfirmed":
         current = entry("ai-fixture-current", "blocked")
         current["reason"] = "正式报告缺少全部 5 条冻结验证命令的检查记录（checks 为空）；请补齐验证及正式报告。"
@@ -3776,13 +4041,16 @@ def apply_task_ai_action_fixture(state, tasks):
     history = [entry("ai-fixture-history", "completed")] if scenario == "history" or fixture.get("with_history") else []
     if current:
         history.append(current)
+    if build and current and task.get("release"):
+        task["release"] = dict(task["release"], can_reconcile=False, is_historical=True)
     readonly = scenario == "readonly"
     if readonly:
         task["save_state"] = "purged"
     can_prepare = current is None and not readonly
-    task["task_ai_action"] = {"can_prepare": can_prepare,
+    task["task_ai_action"] = {"kind": kind, "can_prepare": can_prepare,
                               "reason": "只读任务不可启动 AI 处理" if readonly else
-                                        "已有处理记录，请先查看当前状态" if current else "使用通用执行配置处理 PR 合并冲突",
+                                        "已有处理记录，请先查看当前状态" if current else
+                                        "读取失败构建日志并安排一次修复" if build else "使用通用执行配置处理 PR 合并冲突",
                               "current": current, "history": history}
 
 
@@ -3791,7 +4059,9 @@ def cmd_task_ai_action_fixture(state, payload, start=False):
     task = next((t for t in merged_tasks(state) if t["task_id"] == payload.get("task_id")), None)
     if not isinstance(fixture, dict) or not task or not task.get("task_ai_action"):
         return fail("未启用隔离 AI 处理场景", "conflict")
-    if payload.get("kind") != "merge_conflict":
+    kind = fixture.get("kind", "merge_conflict")
+    build = kind == "build_failure"
+    if payload.get("kind") != kind:
         return fail("处理类型不支持", "bad_request")
     if fixture.get("start_error" if start else "prepare_error"):
         return fail(str(fixture["start_error" if start else "prepare_error"]), "conflict")
@@ -3808,17 +4078,26 @@ def cmd_task_ai_action_fixture(state, payload, start=False):
         return fail(task["task_ai_action"]["reason"], "conflict")
     if not start:
         time.sleep(min(3, max(0, float(fixture.get("prepare_delay", 0)))))
-        return {"candidate": {"task_id": task["task_id"], "kind": "merge_conflict", "title": "解决 PR 合并冲突",
-                              "context_sha256": context, "config_sha256": config, "pr_number": 12345,
-                              "branch": task["delivery"]["branch"], "base_branch": "main",
+        return {"candidate": {"task_id": task["task_id"], "kind": kind,
+                              "title": "修复构建失败" if build else "解决 PR 合并冲突",
+                              "context_sha256": context, "config_sha256": config, "pr_number": None if build else 12345,
+                              "branch": "kaneo/auto-long-pr/build-fix-12345-1" if build else task["delivery"]["branch"], "base_branch": "main",
                               "head_sha": task["delivery"]["head_sha"], "base_sha": sha("ai-fixture-base", 40),
+                              "source_pr_number": 12345 if build else None,
+                              "source_pr_url": "https://github.com/example/music/pull/12345" if build else None,
+                              "release_batch_id": "fixture-release-batch" if build else None,
+                              "release_tag": (task.get("release") or {}).get("tag") if build else None,
+                              "workflow_run_id": 12345 if build else None, "workflow_attempt": 1 if build else None,
+                              "workflow_url": "https://github.com/example/music/actions/runs/12345" if build else None,
                               "model_summary": "隔离通用执行配置 · fake-model / high（无模型调用）"}}
     rid = "req-ai-fixture-dispatch"
     fixture["started"] = {"request_id": rid, "entry": {
-        "action_id": "ai-fixture-started", "kind": "merge_conflict", "title": "解决 PR 合并冲突",
+        "action_id": "ai-fixture-started", "kind": kind, "title": "修复构建失败" if build else "解决 PR 合并冲突",
         "state": "queued", "state_title": "AI 处理待启动", "created_at": iso(utcnow()),
         "execution_run_id": "run-ai-fixture-started", "session_id": None,
         "model_summary": "隔离通用执行配置 · fake-model / high（无模型调用）", "pr_number": 12345,
+        "source_pr_number": 12345 if build else None,
+        "source_pr_url": "https://github.com/example/music/pull/12345" if build else None,
         "head_sha": task["delivery"]["head_sha"], "base_sha": sha("ai-fixture-base", 40), "reason": None}}
     state.setdefault("extra_requests", []).append({"request_id": rid, "task_id": task["task_id"],
         "kind": "dispatch", "stage": "dispatch", "status": "queued", "priority": 100, "attempt_no": 1,
@@ -4027,6 +4306,7 @@ COMMANDS = {
     "get-review-config": lambda s, p: fake_config(s, p, "review"),
     "set-review-config": lambda s, p: fake_config(s, p, "review", True),
     "review-capabilities": lambda s, p: review_capabilities(s),
+    "qoder-model-catalog": qoder_model_catalog,
     "set-project-automation": lambda s, p: cmd_set_project_automation(s, p),
     "set-automation-global": lambda s, p: mutate(s, lambda state: state.update({"automation_global": p}) or {"ok": True}),
     "doctor": lambda s, p: cmd_doctor(p),
@@ -4043,6 +4323,13 @@ COMMANDS = {
     "save-plan-answers": lambda s, p: cmd_plan_answers(s, p),
     "submit-plan-answers": lambda s, p: cmd_plan_answers(s, p, submit=True),
     "abandon-unsent-release": cmd_abandon_unsent_release_fixture,
+    "prepare-external-build-repair": cmd_prepare_external_build_repair_fixture,
+    "accept-external-build-repair": cmd_accept_external_build_repair_fixture,
+    "prepare-restart-release-verification": cmd_prepare_restart_release_verification_fixture,
+    "restart-release-verification": cmd_restart_release_verification_fixture,
+    "prepare-release-verification": cmd_prepare_release_verification_fixture,
+    "start-release-verification": cmd_start_release_verification_fixture,
+    "sync-release-verification": cmd_sync_release_verification_fixture,
     "prepare-task-release": cmd_prepare_task_release_fixture,
     "start-task-release": cmd_start_task_release_fixture,
     "sync-release-batch": cmd_sync_release_fixture,
