@@ -2,6 +2,7 @@ package com.sakurasep.kaneopilot
 
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -12,10 +13,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -57,7 +65,7 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                 else when (s.destination) {
                     "连接" -> ConnectionScreen(model, onScan)
                     "总览" -> OverviewScreen(model)
-                    "任务" -> TaskList(s.tasks, "暂无活跃任务", model::openTask)
+                    "任务" -> ObserveTaskList(s.tasks, s.attention.map { it.text("task_id") }.toSet(), model::openTask)
                     "需要你" -> AttentionList(s.attention, model::openTask)
                 }
             }
@@ -81,27 +89,11 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
     SelectionContainer { Text(value, style = MaterialTheme.typography.bodyMedium) }
 } }
 private fun status(task: JSONObject): String = Labels.taskStatus(task.text("display_status").ifBlank { task.text("status", "状态未知") })
-@Composable private fun TaskCard(task: JSONObject, onClick: () -> Unit) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(task.text("title").ifBlank { task.text("task_id") }, style = MaterialTheme.typography.titleMedium)
-            Text(listOf(task.text("project_name"), status(task)).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-            val detail = task.text("blocked_summary").ifBlank { task.text("failure_reason").ifBlank { task.text("last_progress") } }
-            if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-}
-@Composable private fun TaskList(tasks: List<JSONObject>, empty: String, onOpen: (String) -> Unit) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (tasks.isEmpty()) item { Empty(empty) }
-        items(tasks, key = { it.text("task_id") }) { task -> TaskCard(task) { onOpen(task.text("task_id")) } }
-    }
-}
 @Composable private fun AttentionList(items: List<JSONObject>, onOpen: (String) -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (items.isEmpty()) item { Empty("当前没有需要你处理的事项") }
-        items(items, key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { task ->
-            TaskCard(task) { onOpen(task.text("task_id")) }
+        items(items, key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item ->
+            AttentionCard(item) { onOpen(item.text("task_id")) }
         }
     }
 }
@@ -128,7 +120,7 @@ private fun status(task: JSONObject): String = Labels.taskStatus(task.text("disp
         } } }
         item { Text("需要你 · ${s.attention.size}", style = MaterialTheme.typography.titleLarge) }
         if (s.attention.isEmpty()) item { Empty(if (s.connection == null) "先到「连接」配对你的 Mac" else "当前没有待处理事项") }
-        items(s.attention.take(8), key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { task -> TaskCard(task) { model.openTask(task.text("task_id")) } }
+        items(s.attention.take(8), key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item -> AttentionCard(item) { model.openTask(item.text("task_id")) } }
     }
 }
 @Composable private fun ConnectionScreen(model: ConsoleModel, onScan: () -> Unit) {
@@ -240,6 +232,7 @@ private fun status(task: JSONObject): String = Labels.taskStatus(task.text("disp
     val s = model.state
     val task = s.task ?: return
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { RetrospectiveSection(task) }
         if (task.optJSONObject("execution_question") != null) item { QuestionsEditor(model, true) }
         if (s.sessions.isNotEmpty()) item { Section("执行轮次") {
             s.sessions.forEach { session ->
@@ -357,4 +350,238 @@ private fun status(task: JSONObject): String = Labels.taskStatus(task.text("disp
             view.tag = fontScale
             Markwon.create(view.context).setMarkdown(view, text)
         })
+}
+
+// MARK: 观测台：任务页 chips 与分组、需要你卡片、执行复盘（ui-spec §4.18，安卓契约「观测台界面增补」）
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable private fun ObserveTaskList(tasks: List<JSONObject>, attentionIds: Set<String>, onOpen: (String) -> Unit) {
+    var chip by remember { mutableStateOf(ObserveChip.All) }
+    val groups = Observe.grouped(tasks, chip, attentionIds)
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (tasks.isEmpty()) item { Empty("暂无活跃任务") } else {
+            item {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ObserveChip.values().forEach { option ->
+                        FilterChip(selected = chip == option, onClick = { chip = option },
+                            label = { Text("${option.label} ${Observe.count(option, tasks, attentionIds)}") },
+                            modifier = Modifier.heightIn(min = 48.dp))
+                    }
+                }
+            }
+            if (groups.isEmpty()) item { Empty("当前没有符合「${chip.label}」的任务") }
+            groups.forEach { (group, members) ->
+                item(key = "group-${group.name}") {
+                    Text("${group.label} · ${members.size}", style = MaterialTheme.typography.labelLarge,
+                        color = if (group == ObserveGroup.NeedsYou) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                items(members, key = { it.text("task_id") }) { task -> ObserveTaskRow(task) { onOpen(task.text("task_id")) } }
+            }
+        }
+    }
+}
+
+@Composable private fun ObserveTaskRow(task: JSONObject, onClick: () -> Unit) {
+    val failed = Observe.failed(task)
+    val blocked = !failed && Observe.exception(task) != null
+    // 原因与 macOS 一致：先 blocked_reason，其次 exception.detail；原因文字统一为正文色，颜色只作用于图标。
+    val cause = task.text("blocked_reason").ifBlank { Observe.exception(task)?.optString("detail").orEmpty() }
+    val reason = when {
+        failed -> if (cause.isBlank()) "失败" else "失败：$cause"
+        blocked -> if (cause.isBlank()) "阻塞" else "阻塞：$cause"
+        else -> task.text("last_progress").ifBlank { null }
+    }
+    val glyph = when { failed -> "✕"; blocked -> "▲"; else -> "●" }
+    val glyphColor = when {
+        failed -> MaterialTheme.colorScheme.error
+        blocked -> observeLanes().waiting
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Card(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = onClick)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(task.text("title").ifBlank { task.text("task_id") }, style = MaterialTheme.typography.titleMedium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(glyph, style = MaterialTheme.typography.labelLarge, color = glyphColor)
+                Text(status(task), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+            }
+            reason?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            Text(listOfNotNull(task.text("project_name").ifBlank { null }, RetroFormat.dayTime(task.text("updated_at"))).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+private enum class AttentionAction { Answer, Plan, MacOnly }
+
+private fun attentionAction(item: JSONObject): AttentionAction = when {
+    item.text("reason_code") == "execution_question" -> AttentionAction.Answer
+    item.text("recommended") == "confirm-dispatch" -> AttentionAction.Plan
+    else -> AttentionAction.MacOnly
+}
+
+/** 需要你卡片：按类型显示；仅回答与查看计划可在手机打开任务，其余只读并提示到 Mac 处理。 */
+@Composable private fun AttentionCard(item: JSONObject, onOpen: () -> Unit) {
+    val action = attentionAction(item)
+    val label = when {
+        action == AttentionAction.Answer -> "等待你回答"
+        action == AttentionAction.Plan -> "待确认执行"
+        item.text("failure_reason").isNotBlank() -> "失败"
+        else -> "阻塞或执行端失联"
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(item.text("title").ifBlank { item.text("task_id") }, style = MaterialTheme.typography.titleMedium)
+            Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+            val detail = item.text("question_preview").ifBlank { item.text("failure_reason").ifBlank { item.text("blocked_summary") } }
+            if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodyMedium)
+            when (action) {
+                AttentionAction.MacOnly -> Text("该操作需在 Mac 上完成", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                AttentionAction.Answer -> OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开回答") }
+                AttentionAction.Plan -> OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看计划") }
+            }
+        }
+    }
+}
+
+@Composable private fun RetrospectiveSection(task: JSONObject) {
+    val retro = task.optJSONObject("retrospective")
+    Section("执行复盘") {
+        Text("只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。", style = MaterialTheme.typography.bodySmall)
+        LabelValue("已用时", RetroFormat.duration(retro?.intOrNull("elapsed_seconds")) ?: "未汇总")
+        LabelValue("执行用时", executionValue(task, retro))
+        LabelValue("等你处理", waitingValue(retro))
+        task.optJSONObject("automation")?.let { automation ->
+            automation.intOrNull("fix_round")?.let { fix ->
+                LabelValue("修复轮", "$fix" + (automation.intOrNull("max_fix_rounds")?.let { "/$it" } ?: ""))
+            }
+        }
+        if (retro == null) {
+            Empty("复盘数据未汇总")
+        } else {
+            LaneTimeline(retro)
+            Distribution(retro)
+            Highlights(retro)
+            Verify(retro)
+        }
+    }
+}
+
+/** 派发阶段尚未进入 running，不显示执行用时；门控关闭时核心给出 null，显示「未汇总」。 */
+private fun executionValue(task: JSONObject, retro: JSONObject?): String = when (task.text("status")) {
+    "dispatching", "prepared", "submitting" -> "派发中"
+    "needs_plan", "planning", "ready" -> "未开始"
+    else -> RetroFormat.duration(retro?.intOrNull("exec_seconds")) ?: "未汇总"
+}
+
+private fun waitingValue(retro: JSONObject?): String {
+    val waiting = retro?.optJSONObject("waiting") ?: return "未汇总"
+    val total = RetroFormat.duration(waiting.intOrNull("total_seconds"))
+    return "${waiting.intOrNull("count") ?: 0} 次" + (total?.let { " · 合计 $it" } ?: "")
+}
+
+private data class TimelineSegment(val lane: String, val start: Long, val end: Long, val idle: Boolean)
+
+@Composable private fun LaneTimeline(retro: JSONObject) {
+    val palette = observeLanes()
+    val track = MaterialTheme.colorScheme.outlineVariant
+    val cycleStart = RetroFormat.epochMillis(retro.text("cycle_started_at"))
+    val windowEnd = RetroFormat.epochMillis(retro.text("ended_at")) ?: RetroFormat.epochMillis(retro.text("as_of"))
+    if (cycleStart == null || windowEnd == null) {
+        Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    val segments = retro.optJSONObject("segments")?.rows("items").orEmpty().mapNotNull { segment ->
+        val start = RetroFormat.epochMillis(segment.text("started_at")) ?: return@mapNotNull null
+        val end = RetroFormat.epochMillis(segment.text("ended_at")) ?: windowEnd
+        TimelineSegment(segment.text("lane"), start, end, segment.optBoolean("idle"))
+    }
+    val span = (windowEnd - cycleStart).coerceAtLeast(1L).toFloat()
+    val gated = retro.optJSONObject("waiting") == null
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf("plan", "dispatch", "execute", "waiting", "repair", "review").forEach { lane ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(RetroFormat.laneLabel(lane), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(64.dp))
+                if (lane == "waiting" && gated) {
+                    // 门控关闭时不画空泳道，直接标注「未汇总」。
+                    Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Canvas(Modifier.weight(1f).height(16.dp)) {
+                        val y = size.height / 2
+                        drawLine(track, Offset(0f, y), Offset(size.width, y), strokeWidth = 2f)
+                        segments.filter { it.lane == lane }.forEach { segment ->
+                            val x0 = ((segment.start - cycleStart) / span * size.width).coerceIn(0f, size.width)
+                            val x1 = ((segment.end - cycleStart) / span * size.width).coerceAtLeast(x0 + 2f).coerceAtMost(size.width)
+                            val box = Size(x1 - x0, size.height)
+                            if (segment.idle) {
+                                drawRoundRect(palette.of(lane), Offset(x0, 0f), box, CornerRadius(4f),
+                                    style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))))
+                            } else {
+                                drawRoundRect(palette.of(lane), Offset(x0, 0f), box, CornerRadius(4f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun Distribution(retro: JSONObject) {
+    val palette = observeLanes()
+    val rows = retro.rows("distribution")
+    if (rows.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("时间分布", style = MaterialTheme.typography.titleSmall)
+        rows.forEach { row ->
+            val lane = row.text("lane")
+            val seconds = row.intOrNull("seconds")
+            val percent = row.intOrNull("percent") ?: 0
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(RetroFormat.laneLabel(lane), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(64.dp))
+                LinearProgressIndicator(progress = { percent / 100f }, color = palette.of(lane), modifier = Modifier.weight(1f))
+                Text(if (seconds == null) "未汇总" else "${RetroFormat.duration(seconds)} · $percent%",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable private fun Highlights(retro: JSONObject) {
+    val items = retro.rows("highlights")
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("重点", style = MaterialTheme.typography.titleSmall)
+        if (items.isEmpty()) {
+            Text("暂无需要特别关注的阶段", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items.forEach { item ->
+            val duration = RetroFormat.duration(item.intOrNull("seconds"))?.let { " · $it" }.orEmpty()
+            Text(item.text("label").ifBlank { item.text("kind") } + duration, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable private fun Verify(retro: JSONObject) {
+    val verify = retro.optJSONObject("verify")
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("验证与检查", style = MaterialTheme.typography.titleSmall)
+        if (verify == null) {
+            Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            val unconfirmed = verify.intOrNull("unconfirmed") ?: 0
+            val suffix = if (unconfirmed > 0) " · 未核验 $unconfirmed" else ""
+            Text("计划 verify 通过 ${verify.intOrNull("passed") ?: 0} / ${verify.intOrNull("total") ?: 0}$suffix",
+                style = MaterialTheme.typography.bodyMedium)
+            retro.optJSONObject("verify_runs")?.let { runs ->
+                Text("验证执行 ${runs.intOrNull("runs") ?: 0} 次 · 失败 ${runs.intOrNull("failed") ?: 0} · " +
+                    "超时 ${runs.intOrNull("timed_out") ?: 0} · 命令未找到 ${runs.intOrNull("command_not_found") ?: 0}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }

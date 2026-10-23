@@ -2,6 +2,7 @@ package com.sakurasep.kaneopilot
 
 import okhttp3.tls.HeldCertificate
 import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.Instant
@@ -118,5 +119,27 @@ class ProtocolTest {
         assertTrue(actionAllowed(task, "submit-plan-answers")); assertTrue(actionAllowed(task, "confirm-dispatch"))
         assertFalse(actionAllowed(task, "submit-execution-answers")); assertFalse(actionAllowed(task, "retry"))
         assertFalse(actionAllowed(null, "confirm-dispatch"))
+    }
+    /** Core `get-task` responses captured by the CLI; the same files back macos/tests/retrospective_main.swift. */
+    private fun retrospectiveFixture(name: String): JSONObject =
+        JSONObject(java.io.File("../../tests/fixtures/retrospective/$name.json").readText()).getJSONObject("task")
+    @Test fun retrospectiveFixturesDecodeToCoreShape() {
+        val finished = retrospectiveFixture("finished").getJSONObject("retrospective")
+        assertEquals("finished", finished.getString("state"))
+        assertEquals(400, finished.getInt("elapsed_seconds"))
+        assertTrue(finished.isNull("exec_seconds"))
+        assertTrue(finished.isNull("waiting"))
+        val lanes = finished.getJSONArray("distribution")
+        assertEquals(7, lanes.length())
+        assertEquals("waiting", lanes.getJSONObject(3).getString("lane"))
+        assertTrue(lanes.getJSONObject(3).isNull("seconds"))
+        var total = 0
+        for (index in 0 until lanes.length()) total += lanes.getJSONObject(index).optInt("seconds", 0)
+        assertEquals(400, total)
+        val verify = retrospectiveFixture("verify_current").getJSONObject("retrospective").getJSONObject("verify")
+        assertTrue(verify.getBoolean("current"))
+        assertEquals("goal_report", verify.getString("evidence_source"))
+        assertEquals(1, verify.getInt("passed"))
+        assertEquals(2, verify.getInt("total"))
     }
 }

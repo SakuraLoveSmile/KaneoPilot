@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// 紧凑列表视图（T2，ui-spec §4.13）。
-/// 按相同六列状态分组，在窄窗口（<840pt / 900×600）下提供免横滚浏览体验；
-/// 共用搜索、过滤、排序、批量选择与详情打开逻辑。
+/// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
+/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你处理、已排队、执行中、待评审、最近），空组隐藏。
+/// 共用搜索、阶段筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
-    let tasksByColumn: [BoardColumn: [TaskSummary]]
-    let filtering: Bool
+    /// 已套用搜索与阶段筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
+    let tasks: [TaskSummary]
+    @Binding var chip: ObserveChip
     @Binding var focused: String?
     let isBatchMode: Bool
     @Binding var selectedTaskIDs: Set<String>
@@ -15,46 +16,71 @@ struct TaskCompactListView: View {
     let onToggleSelect: (String) -> Void
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            LazyVStack(spacing: Spacing.m, pinnedViews: [.sectionHeaders]) {
-                ForEach(BoardColumn.allCases) { column in
-                    let items = tasksByColumn[column] ?? []
-                    if !items.isEmpty || !filtering {
+        let sections = ObserveScope.sections(tasks, chip: chip)
+        VStack(alignment: .leading, spacing: 0) {
+            chipBar
+                .padding(.horizontal, Spacing.m)
+                .padding(.top, Spacing.m)
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: Spacing.m, pinnedViews: [.sectionHeaders]) {
+                    ForEach(sections) { section in
                         Section {
-                            if items.isEmpty {
-                                emptyColumnRow(column)
-                            } else {
-                                if column == .failed {
-                                    exceptionGroup(items, failed: false)
-                                    exceptionGroup(items, failed: true)
-                                } else {
-                                    taskGroups(items, column: column)
-                                }
-                            }
+                            taskGroups(section.groups)
                         } header: {
-                            sectionHeader(column, count: items.count)
+                            groupHeader(section.group, count: section.count)
                         }
                     }
+                    if sections.isEmpty {
+                        emptyRow
+                    }
                 }
+                .padding(Spacing.m)
             }
-            .padding(Spacing.m)
         }
         .background(Color.kpWindow)
     }
 
-    private func exceptionGroup(_ items: [TaskSummary], failed: Bool) -> some View {
-        let matching = items.filter { TaskBoardPresentation.isFailed($0) == failed }
-        return VStack(alignment: .leading, spacing: Spacing.s) {
-            TaskExceptionGroupHeader(failed: failed, count: matching.count)
-                .padding(.horizontal, Spacing.m)
-            taskGroups(matching, column: .failed)
+    private func count(_ option: ObserveChip) -> Int {
+        ObserveScope.count(option, in: tasks)
+    }
+
+    // MARK: - chips
+
+    private var chipBar: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: Spacing.s, alignment: .leading)],
+                  alignment: .leading, spacing: Spacing.s) {
+            ForEach(ObserveChip.allCases) { option in
+                Button {
+                    chip = option
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(option.title)
+                        Text("\(count(option))").monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    .font(.kpSmall)
+                    .padding(.horizontal, Spacing.s)
+                    .padding(.vertical, 4)
+                    .background(chip == option ? Color.accentColor.opacity(0.18) : Color.kpControl, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(chip == option ? AccessibilityTraits.isSelected : [])
+            }
         }
     }
 
-    private func taskGroups(_ items: [TaskSummary], column: BoardColumn) -> some View {
-        // LazyVStack flattens section content; sibling columns can share a parent.
-        // Keep their group identities distinct so SwiftUI never reuses another child.
-        ForEach(TaskBoardPresentation.groups(items, scope: "\(column.rawValue):\(items.first.map { TaskBoardPresentation.isFailed($0) } ?? false)")) { group in
+    private var emptyRow: some View {
+        HStack {
+            Text("当前没有符合「\(chip.title)」的任务")
+                .font(.kpSmall)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.horizontal, Spacing.m)
+        .padding(.vertical, Spacing.s)
+    }
+
+    private func taskGroups(_ groups: [TaskBoardGroup]) -> some View {
+        ForEach(groups) { group in
             VStack(alignment: .leading, spacing: Spacing.s) {
                 if group.needsSourceContext, let parent = group.parent {
                     TaskSourceContext(parent: parent, onOpen: onOpenRelated)
@@ -64,7 +90,7 @@ struct TaskCompactListView: View {
                     TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
                         TaskCompactRow(
                             task: task,
-                            column: column,
+                            column: BoardColumn(rawValue: task.boardColumn ?? "") ?? .todo,
                             isFocused: focused == task.taskId,
                             isBatchMode: isBatchMode,
                             isSelected: selectedTaskIDs.contains(task.taskId),
@@ -81,16 +107,13 @@ struct TaskCompactListView: View {
 
     // MARK: - 分组头部
 
-    private func sectionHeader(_ column: BoardColumn, count: Int) -> some View {
+    private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
         HStack(spacing: Spacing.s) {
-            Circle()
-                .fill(column.color)
-                .frame(width: 8, height: 8)
-            Text(column.title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(column.titleColor)
+            Text(group.title)
+                .font(.kpSmall.weight(.semibold))
+                .foregroundStyle(group == .needsYou ? Color.orange : Color.secondary)
             Text("\(count)")
-                .font(.system(size: 11, weight: .medium))
+                .font(.kpSmall.weight(.medium))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
@@ -101,17 +124,113 @@ struct TaskCompactListView: View {
         .padding(.vertical, Spacing.s)
         .background(Color.kpWindow.opacity(0.95))
     }
+}
 
-    private func emptyColumnRow(_ column: BoardColumn) -> some View {
-        HStack {
-            Text("无\(column.title)任务")
-                .font(.kpSmall)
-                .foregroundStyle(.tertiary)
-            Spacer()
+/// 观测 chips（§4.18）：「全部」计活动任务，其余按各自口径重叠计数。
+enum ObserveChip: String, CaseIterable, Identifiable {
+    case all, needsYou, running, queued, review, done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "全部"
+        case .needsYou: return "需要你"
+        case .running: return "执行中"
+        case .queued: return "已排队"
+        case .review: return "待评审"
+        case .done: return "已完成"
         }
-        .padding(.horizontal, Spacing.m)
-        .padding(.vertical, Spacing.s)
     }
+
+    func matches(_ task: TaskSummary) -> Bool {
+        switch self {
+        case .all: return true
+        case .needsYou: return ObserveGroup.needsYou.contains(task)
+        case .running: return task.displayStatus == "执行中"
+        case .queued: return task.displayStatus == "已排队"
+        case .review: return task.boardColumn == BoardColumn.inReview.rawValue
+        case .done: return task.boardColumn == BoardColumn.done.rawValue
+        }
+    }
+}
+
+/// 观测分组（§4.18）：固定顺序，每个任务只落入第一个命中的组。
+enum ObserveGroup: String, CaseIterable, Identifiable {
+    case needsYou, queued, running, review, recent
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .needsYou: return "需要你处理"
+        case .queued: return "已排队"
+        case .running: return "执行中"
+        case .review: return "待评审"
+        case .recent: return "最近"
+        }
+    }
+
+    /// 收件箱项，以及阻塞、失败的任务。
+    func contains(_ task: TaskSummary) -> Bool {
+        task.attention != nil || task.exception != nil
+    }
+
+    static func group(for task: TaskSummary) -> ObserveGroup {
+        if needsYou.contains(task) { return .needsYou }
+        if task.displayStatus == "已排队" { return .queued }
+        if task.displayStatus == "执行中" { return .running }
+        if task.boardColumn == BoardColumn.inReview.rawValue { return .review }
+        return .recent
+    }
+
+    /// 组内顺序：需要你处理先失败后阻塞；已排队按 priority 与创建时间；其余按 updated_at 倒序。
+    func sorted(_ items: [TaskSummary]) -> [TaskSummary] {
+        switch self {
+        case .needsYou:
+            return items.filter { TaskBoardPresentation.isFailed($0) } + items.filter { !TaskBoardPresentation.isFailed($0) }
+        case .queued:
+            return items.sorted { ($0.priority ?? Int.max, $0.createdAt ?? "") < ($1.priority ?? Int.max, $1.createdAt ?? "") }
+        case .running, .review, .recent:
+            return items.sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+        }
+    }
+}
+
+/// 观测口径的统一入口（§4.18）：chip 过滤、计数与分组。
+/// 紧凑列表的渲染与批量可见范围共用同一过滤与分组，保证屏幕所见即批量作用的范围。
+enum ObserveScope {
+    /// 「全部」计活动任务（非已完成），其余 chip 按各自口径重叠计数。
+    static func count(_ chip: ObserveChip, in tasks: [TaskSummary]) -> Int {
+        chip == .all
+            ? tasks.filter { $0.boardColumn != BoardColumn.done.rawValue }.count
+            : tasks.filter { chip.matches($0) }.count
+    }
+
+    static func visible(_ tasks: [TaskSummary], chip: ObserveChip) -> [TaskSummary] {
+        tasks.filter { chip.matches($0) }
+    }
+
+    /// 空组省略。组内先按 `ObserveGroup.sorted` 排序，再经 TaskBoardPresentation 保持父子邻接。
+    static func sections(_ tasks: [TaskSummary], chip: ObserveChip) -> [ObserveSection] {
+        let shown = visible(tasks, chip: chip)
+        return ObserveGroup.allCases.compactMap { group in
+            let members = group.sorted(shown.filter { ObserveGroup.group(for: $0) == group })
+            guard !members.isEmpty else { return nil }
+            // scope 使各分区的分组身份互不重叠。
+            return ObserveSection(group: group, groups: TaskBoardPresentation.groups(members, scope: group.rawValue))
+        }
+    }
+
+}
+
+/// 一个观测分组在列表中的内容。
+struct ObserveSection: Identifiable {
+    let group: ObserveGroup
+    let groups: [TaskBoardGroup]
+
+    var id: String { group.rawValue }
+    var count: Int { groups.reduce(0) { $0 + $1.tasks.count } }
 }
 
 // MARK: - 紧凑行
@@ -169,9 +288,10 @@ private struct TaskCompactRow: View {
                 taskTitleView
 
                 if let reason = exceptionReason {
+                    // §4.18：阻塞与失败的原因文字统一为 primary；颜色只作用于图标与分组标题。
                     Text(reason)
                         .font(.kpSmall)
-                        .foregroundStyle(exceptionColor)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                 } else if let release = task.release {
                     Text("\(release.title) · \(release.reason)")

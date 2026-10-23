@@ -140,11 +140,17 @@ def cmd_reconnect_task(ctx, payload: dict) -> dict:
             "requirements_sha256", "repository", "plan_kind",
         )})
         previous["delivery"] = core.delivery_of(task)
+        old_status = task["status"]
         db.update_task(
             conn, task_id, now, **pointers, save_state="active", saved_at=None,
             status="needs_plan", stage="plan", auto_advance_paused=1,
             kaneo_status=remote_task["status"], kaneo_checked_at=now,
         )
+        if old_status != "needs_plan":
+            db.add_event(
+                conn, now, "status_change", task_id=task_id, actor="user",
+                detail={"from": old_status, "to": "needs_plan", "actor": "user"},
+            )
         db.set_extra(
             conn, db.require_task(conn, task_id), now,
             reconnect={"awaiting_plan": True, "reconnected_at": now},

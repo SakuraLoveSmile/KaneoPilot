@@ -1838,25 +1838,26 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 停止先持久记录，再核对受管进程出生身份与实际停止结果。取消/App 关闭须处理 CLI 子进程，不遗留可写孤儿。缺少停止证明时保留 unknown。所有新 Codex 执行无论项目引擎模式均走结构化 verdict，回执同时绑定报告/原生命令事件/spec/job/计划和当前源码；提交后恢复仍复核原证据。交付与远端副作用继续由核心命令完成。
 
-## 5.32 观测复盘投影（2026-10-22，草案）
+## 5.32 观测复盘投影（2026-10-22 草案，2026-10-23 冻结）
 
-本节为规格草案：未冻结，接口与核心实现均未落地。合入前不得据此宣称观测台或复盘数字可用；执行期等待统计依赖 §5.28 的等待区间写入路径落地。桌面口径见 ui-spec §4.18，安卓口径见 mobile-console-contract 的「观测台界面增补（2026-10-22）」。
+本节 2026-10-23 冻结：字段、判定、阈值与验收以本节为准。核心投影与两端界面按 `docs/plans/观测台施工计划_20261023.plan.md` 实施；实现合入并通过验收前，不得宣称复盘数字可用。桌面口径见 ui-spec §4.18，安卓口径见 mobile-console-contract 的「观测台界面增补（2026-10-22）」。
 
 ### 5.32.1 范围与边界
 
 - `get-task` 的 `TaskDetail` 增加只读可选字段 `retrospective`，仅在 `cmd_get_task` 命令边界附加；`derive.task_detail` 的其他调用方（归档、放弃等返回体）不附加。`TaskSummary` 与 `list-tasks` 不变。
 - 字段名不用 `review_summary`：该名已是 `TaskSummary` 的评审结论摘要（§2、§5.2）。
-- 派生只读：不写 SQLite、不写 `runtime_operations`、不调用引擎与远端、不读写工作树。数据直接读取任务扩展字段、状态事件、等待区间、执行轮次与验证回执，不经 `list-events`，因此不受其 200 条上限影响。
+- 派生只读：不写 SQLite、不写 `runtime_operations`、不调用引擎与远端、不读写工作树。数据直接读取任务扩展字段、本任务事件、全局暂停事件、执行轮次与验证回执，不经 `list-events`，因此不受其 200 条上限影响。
 - 不新增命令，不改变既有字段含义，不做 schema 升级。`purged` 任务返回 `retrospective: null`。
 
 ### 5.32.2 周期、时间基准与分段重放
 
-- **周期起点**：最近一次 `requirements_changed` 之后（无则自任务创建起算）的首个 `enqueued` 事件时刻，不论 `kind`（规划请求也计入）；仍无则 `retrospective: null`。规划排队期间 `status` 仍为 `needs_plan`，计入「其他」。
-- **周期止点**：`status` 为 `done` 时取最近一次进入 `done` 的 `status_change` 时刻；否则为 `as_of`。
+- **周期起点**：最近一次 `requirements_changed` 之后（无则自任务创建起算）的首个 `enqueued` 事件时刻，不论 `kind`（规划请求也计入）；仍无则 `retrospective: null`。`requirements_changed` 由同步在 Kaneo 需求指纹变化时写入（`cmd_queue.py`）；`requirements_accepted` 是处置步骤，不作锚点。规划排队期间 `status` 仍为 `needs_plan`，计入「其他」。
+- **周期止点**：`status` 为 `done` 时取最近一次进入 `done` 的 `status_change` 时刻；周期内无此登记时（迁移导入的历史 done 任务），取任务 `updated_at` 限制在 `[周期起点, as_of]` 内，并视为近似。其余情况为 `as_of`。
 - `as_of`：本次查询的核心时间（UTC ISO 8601）。开放区间统一计算到 `as_of`。时间点先向下取整到秒再分段，保证各泳道秒数合计等于 `elapsed_seconds`。
-- 分段由一次按事件 id 升序的重放得到，只读取以下事件：`status_change`（`detail.from/to`）、`enqueued`（仅 `detail.kind=dispatch` 参与 `dispatch_queued` 标志）、`dispatch_sent`、`dispatch_failed`、`request_cancelled`、`review_registered`、`requirements_changed`，以及 `task.extra.execution_input_wait_intervals`。不读取 `heartbeat` 等高频事件。周期起点的状态取周期内首个 `status_change.from`；周期内无状态变化时取当前 `status`。
+- 分段由一次按事件 id 升序的重放得到，只读取以下事件：`status_change`（`detail.from/to`）、`enqueued`（仅 `detail.kind=dispatch` 参与 `dispatch_queued` 标志）、`dispatch_sent`、`dispatch_failed`、`request_cancelled`、`review_registered`、`requirements_changed`，以及全局暂停事件（`paused` / `unpaused`，`task_id` 为空，见 §5.32.3）。不读取 `heartbeat` 等高频事件。周期起点的状态取周期内首个 `status_change.from`；周期内无状态变化时取当前 `status`。
+- **直接写状态的登记**（§5.32.8 第 1 项）：凡改变泳道判定的状态变化都须有 `status_change`。claim 回滚（`task_workspace.py`，`planning → needs_plan`）与重新规划的 reconnect（`cmd_archive.py`，改为 `needs_plan`）须补登记。派发准备与开始发送（`cmd_dispatch.py` 的 `dispatching → prepared → submitting`）属派发泳道内转移，不影响判定，不登记。迁移导入（`cmd_migrate.py`，`actor=migration`）不在本版保证范围内。
 - 重放维护三个派生标志，周期起点清零：
-  - `dispatch_queued`：遇 `enqueued(dispatch)` 置位；遇 `dispatch_sent`、`dispatch_failed`，或 `request_cancelled`（其 `request_id` 与最近一次派发入队相同）清零。
+  - `dispatch_queued`：遇 `enqueued(dispatch)` 置位并记下其 `request_id`；遇 `dispatch_sent`、`dispatch_failed`，或 `request_cancelled`（其 `request_id` 与最近一次派发入队相同）清零。
   - `review_pending`：进入 `in_review` 置位；遇 `review_registered` 清零。
   - `repair_window`：遇 `review_registered` 且 `conclusion=changes_requested` 置位；进入 `running` 清零。
 
@@ -1864,7 +1865,7 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 在 `[周期起点, 周期止点)` 上，每一时刻恰好归属一条泳道。判定顺序如下：
 
-1. **等你处理（waiting）**：位于等待区间并集内（§5.32.5）。
+1. **等你处理（waiting）**：位于等待区间并集内（§5.32.5）。门控关闭时本步不生效。
 2. **修复（repair）**：`repair_window` 为真。
 3. 否则按状态：
    - `planning` → 规划（plan）；
@@ -1873,12 +1874,15 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
    - `running` → 执行（execute）；
    - `in_review` 且 `review_pending` → 评审（review）；
    - 其余（`ready` 无排队请求或处于计划确认、`needs_user` 非等待、`in_review` 已登记结论后的交付或合并等待、`needs_plan`）→ 其他（other）。
+4. **暂停改写**：第 3 步得到派发（dispatch）且时刻落在暂停窗口内，改为其他（other）。
+   - 全局窗口：`paused`（`task_id` 为空、`detail.stage` 为空）开始，至下一个同类 `unpaused` 结束。
+   - 派发窗口：`paused` / `unpaused` 且 `detail.stage=dispatch` 的一对事件界定。
+   - 开放窗口计算到 `as_of`。其他阶段的暂停不改变判定。暂停不改变状态，只改变该段的归类（§5.32.8 第 2 项）。
 
 约定：
 
 - 执行段自派发确认（`status` 进入 `running`，即 `dispatch_sent` 之后）开始；排队与领取不计入执行，保持「已排队 ≠ 已开始」。
 - 相邻同泳道时段合并为一段。`idle` 为真的段：泳道为派发或其他，且时长 ≥ 120 秒。
-- 暂停（`paused`）不改变状态，暂停期间的排队计入派发（已知近似，见 5.32.8）。
 
 ### 5.32.4 DTO
 
@@ -1887,11 +1891,11 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
   "as_of": "2026-10-22T10:42:00Z",
   "cycle_started_at": "2026-10-22T07:40:00Z",
   "ended_at": null,
-  "state": "running|waiting|finished",
+  "state": "running|finished",
   "elapsed_seconds": 0,
-  "exec_seconds": 0,
-  "waiting": {"count": 0, "total_seconds": 0, "longest_seconds": 0, "open_since": null},
-  "distribution": [{"lane": "plan", "seconds": 0, "percent": 0}],
+  "exec_seconds": null,
+  "waiting": null,
+  "distribution": [{"lane": "plan", "seconds": 0, "percent": 0}, {"lane": "waiting", "seconds": null, "percent": null}],
   "segments": {
     "items": [{"lane": "execute", "round": 1, "started_at": "…", "ended_at": null, "seconds": 0, "idle": false}],
     "truncated": false
@@ -1902,18 +1906,19 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 }
 ```
 
-- `distribution` 固定 7 项，顺序为 plan、dispatch、execute、waiting、repair、review、other。秒数合计等于 `elapsed_seconds`；百分比用最大余数法取整，合计 100（`elapsed_seconds` 为 0 时全为 0）。
-- `exec_seconds` 等于 `execute` 泳道秒数。
-- `state`：`finished`（周期止点为 `done`）；`waiting`（存在开放等待区间）；其余为 `running`。阻塞与失败不在此重复，由 `display_status`、`board_column`、`exception` 表达。
-- `segments.items` 最多 200 段；超出时保留最近 200 段并置 `truncated: true`。`distribution`、`waiting`、`highlights`、`exec_seconds` 始终基于全部段计算。
+- `distribution` 固定 7 项，顺序为 plan、dispatch、execute、waiting、repair、review、other。门控关闭时 `waiting` 项的 `seconds` 与 `percent` 为 `null`，其余六项的秒数合计等于 `elapsed_seconds`（等待时段仍计入其所在泳道）；百分比用最大余数法取整，合计 100（`elapsed_seconds` 为 0 时全为 0）。门控开启时七项全部计算，合计等于 `elapsed_seconds`。
+- `exec_seconds`：门控关闭时为 `null`；开启时等于执行泳道秒数（等待区间已在第 1 步归入等你处理，不重复扣除）。
+- `state`：`finished`（周期止点为 `done`，含回退取值）；门控开启且存在开放等待区间时为 `waiting`；其余为 `running`。阻塞与失败不在此重复，由 `display_status`、`board_column`、`exception` 表达。
+- `segments.items` 最多 200 段；超出时保留最近 200 段并置 `truncated: true`。`distribution`、`waiting`、`highlights`、`exec_seconds` 始终基于全部段计算。开放段的 `ended_at` 为 `null`。
 - `segments.items[].round`：同一任务 `execution_rounds` 按 `started_at` 升序的 1 起序号，取段起点时已开始的最近一轮；无则 `null`。
 - `verify` 与 `verify_runs` 在 `plan_verify` 缺失或含 `error` 时均为 `null`。
 
-### 5.32.5 等你处理
+### 5.32.5 等你处理与门控
 
-- 数据源：`task.extra.execution_input_wait_intervals`，每项为 `{run_id, start, end}`，`end` 为空表示开放（§5.28.5 的区间语义）。
-- 按周期裁剪后取并集：`count` 为并集的连通分量数，`total_seconds` 为并集总长，`longest_seconds` 为最长分量，`open_since` 为开放区间的起点（无则 `null`）。重叠区间不相加。
-- 规划澄清（`plan_clarification`）目前只有 `saved_at`、`blocked_at` 等字段，没有等待起止时间：本版不计入等你处理（见 5.32.8）。
+- 数据源：`task.extra.execution_input_wait_intervals`，每项为 `{run_id, start, end}`，`end` 为空表示开放（§5.28.5 的区间语义）。写入点已存在于 `execution_questions._store`，但 §5.28 整体仍在实现中，故以门控关闭。
+- **未汇总门控**：核心常量 `WAIT_SOURCE_READY`，2026-10-23 为 `false`，仅在 §5.28 验收通过后翻转为 `true`。门控关闭时：`waiting` 为 `null`；`exec_seconds` 为 `null`；时间轴不出现等你处理段；`distribution` 中 `waiting` 项为 `null`（§5.32.4）；`state` 不为 `waiting`；`highlights` 不出现 `long_wait`；时段仍按状态归入执行或派发等泳道。客户端显示「未汇总」。
+- 门控开启时：按周期裁剪后取并集。`count` 为并集的连通分量数，`total_seconds` 为并集总长，`longest_seconds` 为最长分量，`open_since` 为开放区间的起点（无则 `null`）。重叠区间不相加。
+- 规划澄清（`plan_clarification`）目前只有 `saved_at`、`blocked_at` 等字段，没有等待起止时间：本版不计入等你处理（§5.32.8 第 3 项）。
 
 ### 5.32.6 验证与验证执行统计
 
@@ -1927,7 +1932,7 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
   此处只做身份比对，不读取工作树或源码指纹；源码身份由 `engine-verdict` 写入回执时核验（§5.18.6）。`plus_tool_results` 与旧 `verification_checks` 只用于历史审计，不计入。
 - 计数（仅 `current` 为真时），按回执来源分别定义：
   - `goal_report`（Plus）：`passed = len(goal_check_coverage.matched)`；`failed` 为不在 `matched` 中、且存在 `exit_code` 为非零整数检查记录的冻结命令数。Goal 结构化报告是唯一结果来源（§5.18.6）。
-  - `codex_report`：只计 `provenance = harness_observed` 的原生检查记录（§5.31），`model_declared` 不计。`passed` 为存在原生、`exit_code = 0` 检查记录的冻结命令数；`failed` 为其余存在原生、非零整数 `exit_code` 记录的冻结命令数。不以 `goal_check_coverage.matched` 计数，因双通道覆盖选择可能回落到模型通道（见 5.32.8 第 6 项）。
+  - `codex_report`：只计 `provenance = harness_observed` 的原生检查记录（§5.31），`model_declared` 不计。`passed` 为存在原生、`exit_code = 0` 检查记录的冻结命令数；`failed` 为其余存在原生、非零整数 `exit_code` 记录的冻结命令数。不以 `goal_check_coverage.matched` 计数，因双通道覆盖选择可能回落到模型通道（§5.32.8 第 6 项）。
   - `unconfirmed = total − passed − failed`，即其余冻结命令。
 - 非 `current` 时：`passed = 0`、`failed = 0`、`unconfirmed = total`，`verify_runs` 为 `null`，避免旧回执显示为通过。
 - `verify_runs`（仅 `current` 为真）：`runs = len(checks)`，`failed` 为 `exit_code≠0` 的记录数，`timed_out` 与 `command_not_found` 为对应标记数。不含耗时，不解析测试框架输出；用例数不在本版范围。
@@ -1938,31 +1943,35 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 - 字段名须通过手机投影的私有键规则（`mobile_access.project`：子串 token、password、secret、credential、private_key、apikey、api_key、access_key、environment、config；后缀 `_path`、`_root`、`_file`、`_dir`、`_json`；精确键 `raw`、`spec`、`runtime`、`payload`、`repository` 等）。实现须以测试断言手机 `get-task` 响应保留 `retrospective`。
 - 阈值（2026-10-23 已确认）：空闲段 120 秒；等你处理较久为单个等待分量 ≥ 600 秒；执行过长为单段执行 ≥ 3600 秒。
 - `highlights` 最多 3 条，按 `repair_exhausted` > `review_not_passed` > `long_wait` > `long_execute` 排序，同类按时间倒序：
-  - `repair_exhausted`：`automation.fix_round ≥ automation.max_fix_rounds`，上限取项目策略，不写死；
-  - `review_not_passed`：周期内最近一次 `review_registered` 的 `conclusion ≠ pass`；
-  - `long_wait`、`long_execute`：分别对应上面的阈值。
+  - `repair_exhausted`：`automation.fix_round ≥ automation.max_fix_rounds`，上限取项目策略，不写死；标签「修复轮已用完」；
+  - `review_not_passed`：周期内最近一次 `review_registered` 的 `conclusion ≠ pass`；标签「评审未通过」；
+  - `long_wait`：仅门控开启时产生，标签「等你处理较久」；
+  - `long_execute`：单段执行 ≥ 3600 秒（开放段计算到 `as_of`），标签「单段执行过长」，`at` 为该段开始时刻。
 
   `at` 为触发事件时刻，无明确时刻时为 `null`；`label` 由核心按固定模板生成。
 
-### 5.32.8 已知缺口与待决
+### 5.32.8 决定与依赖（2026-10-23 冻结）
 
-1. 直接写 `status` 而不经状态写入函数的路径（如 `task_workspace.py` 的 claim 回滚）不产生 `status_change`，会使分段漏记。实现时须补登记，并以测试覆盖。
-2. 暂停不改变状态，暂停期间的排队计入派发。是否按全局 `paused`/`unpaused` 事件剔除，待决。
-3. 规划澄清没有等待起止时间。是否新增 `plan_input_wait_intervals` 记录，待决。
-4. 回执不记录耗时与用例数，`verify_runs` 因此无耗时。若需要，须在检查记录新增 `duration_ms` 并由引擎写入，属引擎变更，待决。
-5. 投影依赖 §5.28 等待区间写入路径落地；§5.28 当前为实现中。
-6. Codex 双通道覆盖（`codex_execution.py` 中 `coverage` 的选择）：原生通过而模型未通过时，回执 `checks` 只保留模型行，原生通过计为未核验。是否在回执保留原生行，待决。
-7. 修复轮另起任务（`fix_task_id`）时，父任务可能不再进入 `running`，`repair_window` 将保持到 `done` 前，其间时段都计入修复。是否改由修复任务的周期统计承接，待决。
-8. 「已运行」标签与刷新：`elapsed_seconds` 以 `as_of` 为终点，不随本机时钟走，刷新前不增长；标签含规划与排队时段。是否改为「已用时」并约定刷新方式，属冻结前界面决定，待决。
+1. **直接写状态的登记**：claim 回滚（`task_workspace.py`）与 reconnect（`cmd_archive.py`）补登记 `status_change`（§5.32.2），并以测试覆盖。派发准备与发送的泳道内转移不登记。迁移导入不在本版范围。
+2. **暂停**：全局与派发阶段的 `paused` / `unpaused` 窗口内，派发泳道改归其他（§5.32.3）。查询经 `task_id IS NULL` 条件读取，不读取心跳。
+3. **规划澄清**：本版不新增 `plan_input_wait_intervals`，规划澄清不计入等你处理。
+4. **耗时**：回执与 `verify_runs` 不含耗时，界面不显示耗时，本版不改引擎。若日后需要，须在检查记录新增 `duration_ms` 并由引擎写入，另立计划。
+5. **§5.28 依赖**：投影读取 §5.28 的等待区间。门控关闭期间，等你处理、执行用时与「等你处理较久」重点不生效，界面显示「未汇总」。§5.28 验收后翻转门控，并同步验收等待统计。
+6. **Codex 双通道**：回执保持现状，只保留模型行；原生通过而模型未通过时，原生通过计为未核验。不改 `codex_execution.py` 的覆盖选择。投影按 §5.32.6 只计 `harness_observed` 的原生记录。
+7. **修复窗口**：另起修复任务（`fix_task_id`）时父任务不进入 `running`，`repair_window` 保持到 `done` 前，其间时段计入修复。v1 保持现状；界面修复泳道的说明文字须写明此口径。
+8. **「已运行」→「已用时」**：`elapsed_seconds` 以 `as_of` 为终点，不随本机时钟走。标签改为「已用时」。界面仅在打开页面与手动刷新时请求，刷新前不增长，不做本地计时器。
 
 ### 5.32.9 验收（实现前的隔离测试清单）
 
-- 等待区间：重叠区间按并集计，不相加；开放区间计算到 `as_of`；按周期裁剪。
-- 分布守恒：`distribution` 秒数合计等于 `elapsed_seconds`，百分比合计为 100。
-- 状态分段：答复后回到 `running` 时执行段恢复；等待期间不计入执行。
-- 事件量：同一任务注入 ≥ 5000 条 `heartbeat` 事件，结果与无心跳时一致，且查询不读取心跳行。
+- 等待区间：门控关闭时 `waiting`、`exec_seconds` 为 `null`，且不读取等待区间字段；门控开启时重叠区间按并集计，不相加；开放区间计算到 `as_of`；按周期裁剪。
+- 分布守恒：`distribution` 中六个计算泳道（门控关闭）或七个泳道（门控开启）的秒数合计等于 `elapsed_seconds`；百分比合计为 100。
+- 状态分段：答复后回到 `running` 时执行段恢复；等待期间不计入执行（门控开启时）。
+- 状态登记：每条改变泳道判定的 `status` 写入路径都产生 `status_change`，含 claim 回滚与 reconnect；派发准备与发送的泳道内转移不要求登记，但不得改变判定。
+- 暂停：全局暂停窗口内的派发段改归其他；派发阶段窗口同理；其他阶段暂停不改变判定；开放窗口计算到 `as_of`。
+- 查询计划：全局暂停事件查询经 `EXPLAIN QUERY PLAN` 使用 `events_task` 索引（`task_id IS NULL` 条件）；心跳行不返回应用层。
+- 事件量：同一任务注入 ≥ 5000 条 `heartbeat` 事件，结果与无心跳时一致。
 - 截断：段数超过 200 时 `truncated: true`，合计与重点不变。
 - 回执身份：`plan_sha256`、`commands_sha256`、`execution_run_id` 任一不符，或来源为 `plus_tool_results` → `current: false`；Codex 的 `model_declared` 不计为通过。
+- 完成回退：`status=done` 且周期内无 done 登记时，`state=finished`，`ended_at` 取限制后的 `updated_at`。
 - 只读：投影期间不产生写事务，不写 `runtime_operations`。
-- 隐私：输出不含路径、哈希与命令原文；手机 `get-task` 保留该字段。
-- 状态登记：每条 `status` 写入路径都产生 `status_change`（含 5.32.8 第 1 项的修复）。
+- 隐私：输出不含路径、哈希与命令原文；手机 `get-task` 保留该字段，键名不触发私有键规则。

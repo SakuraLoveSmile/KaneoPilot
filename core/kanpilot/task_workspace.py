@@ -408,7 +408,10 @@ def pool_wait(conn, request_id, run_id, waiting):
         if request["kind"] == "plan" and request["task_id"]:
             task = db.require_task(conn, request["task_id"])
             if task["status"] == "planning":
-                db.update_task(conn, task["task_id"], now, status=payload.get("task_status_at_claim") or "needs_plan")
+                core.transition_task(
+                    conn, task, payload.get("task_status_at_claim") or "needs_plan", now,
+                    actor="worktree-pool", keep_stage=True,
+                )
         db.add_event(conn, now, "worktree_pool_waiting", task_id=request["task_id"],
                      request_id=request_id, detail=dict(waiting, run_id=run_id))
 

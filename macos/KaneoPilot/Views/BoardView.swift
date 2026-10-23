@@ -80,6 +80,10 @@ struct BoardView: View {
     @State private var isBatchMode = false
     @State private var selectedTaskIDs: Set<String> = []
     @State private var pendingConfirmAction: BatchAction? = nil
+    /// 紧凑列表的观测 chip；只在紧凑列表中生效（看板不套用）。
+    @State private var observeChip: ObserveChip = .all
+    /// 紧凑列表当前在屏幕上：批量选择、全选与键盘上下移动据此取可见范围。
+    @State private var compactListShown = false
 
     /// 键盘焦点：当前聚焦卡片 task_id，只驱动 2pt 描边；真正的键事件入口
     /// 是看板容器（boardFocused），避免逐卡 AppKit 焦点在浮层关闭后丢失。
@@ -99,6 +103,11 @@ struct BoardView: View {
 
     private var allFilteredTasks: [TaskSummary] {
         model.tasks.filter { matches($0) }
+    }
+
+    /// 批量选择与全选的可见范围：紧凑列表套用当前 chip，看板为全部搜索结果。
+    private var selectableTasks: [TaskSummary] {
+        compactListShown ? ObserveScope.visible(allFilteredTasks, chip: observeChip) : allFilteredTasks
     }
 
     private func tasks(in column: BoardColumn) -> [TaskSummary] {
@@ -151,7 +160,7 @@ struct BoardView: View {
                 if isBatchMode {
                     BatchActionBar(
                         selectedCount: selectedTaskIDs.count,
-                        allFilteredCount: allFilteredTasks.count,
+                        allFilteredCount: selectableTasks.count,
                         isProcessing: model.batchInProgress,
                         progressText: model.batchProgressText,
                         onSelectAll: selectAllFiltered,
@@ -260,14 +269,19 @@ struct BoardView: View {
         .onChange(of: columnFilter) {
             if isBatchMode { selectedTaskIDs.removeAll() }
         }
+        .onChange(of: observeChip) {
+            // 换 chip 后隐藏的任务不再保留勾选，批量操作只作用于当前可见任务
+            if isBatchMode { selectedTaskIDs.formIntersection(selectableTasks.map(\.taskId)) }
+            if let id = focusedTaskID, !isNavigable(id) { focusedTaskID = nil }
+        }
         .onChange(of: model.tasks.map(\.taskId)) {
             // 自动刷新按任务 ID 保留仍可见的选择，跨列移动不会丢失勾选 (T2)
             if isBatchMode {
-                let currentVisible = Set(allFilteredTasks.map(\.taskId))
+                let currentVisible = Set(selectableTasks.map(\.taskId))
                 selectedTaskIDs = selectedTaskIDs.intersection(currentVisible)
             }
-            // 刷新后焦点任务消失（删除/核心移出）→ 清焦点
-            if let id = focusedTaskID, column(containing: id) == nil {
+            // 刷新后焦点任务消失（删除/核心移出/被 chip 隐藏）→ 清焦点
+            if let id = focusedTaskID, !isNavigable(id) {
                 focusedTaskID = nil
             }
         }
@@ -281,14 +295,6 @@ struct BoardView: View {
 
     // MARK: 六列整板
 
-    private var tasksByColumnMap: [BoardColumn: [TaskSummary]] {
-        var map: [BoardColumn: [TaskSummary]] = [:]
-        for col in BoardColumn.allCases {
-            map[col] = tasks(in: col)
-        }
-        return map
-    }
-
     private var board: some View {
         GeometryReader { geo in
             let effectiveMode: BoardDisplayMode = {
@@ -298,8 +304,8 @@ struct BoardView: View {
 
             if effectiveMode == .compactList {
                 TaskCompactListView(
-                    tasksByColumn: tasksByColumnMap,
-                    filtering: filtering,
+                    tasks: allFilteredTasks,
+                    chip: $observeChip,
                     focused: $focusedTaskID,
                     isBatchMode: isBatchMode,
                     selectedTaskIDs: $selectedTaskIDs,
@@ -308,6 +314,8 @@ struct BoardView: View {
                     onOpenSession: openSession,
                     onToggleSelect: toggleSelection
                 )
+                .onAppear { compactListShown = true }
+                .onDisappear { compactListShown = false }
             } else {
                 boardGrid(geo: geo)
             }
@@ -442,7 +450,7 @@ struct BoardView: View {
 
     private func selectAllFiltered() {
         guard !model.batchInProgress else { return }
-        let ids = allFilteredTasks.map(\.taskId)
+        let ids = selectableTasks.map(\.taskId)
         selectedTaskIDs = Set(ids)
     }
 
@@ -490,6 +498,11 @@ struct BoardView: View {
         BoardColumn.allCases.first { column in
             tasks(in: column).contains { $0.taskId == taskID }
         }
+    }
+
+    /// 键盘焦点能否落在当前可见的任务上：紧凑列表按 chip，看板按列。
+    private func isNavigable(_ taskID: String) -> Bool {
+        compactListShown ? selectableTasks.contains { $0.taskId == taskID } : column(containing: taskID) != nil
     }
 
     /// ↑↓：列内移动（首尾停住）。

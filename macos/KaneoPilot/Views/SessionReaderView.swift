@@ -10,6 +10,8 @@ struct SessionReaderView: View {
     let preferredRunID: String?
     let showsTaskTitle: Bool
     let fallbackSessionTitle: String?
+    /// §4.18：把当前会话摘要上报给执行页复盘头部（轮次、消息数、最近检查）。
+    let onDigestChange: ((ExecutionSessionDigest?) -> Void)?
 
     @EnvironmentObject private var model: AppViewModel
     @StateObject private var store: SessionReaderStore
@@ -22,11 +24,13 @@ struct SessionReaderView: View {
     @State private var retryConfirmationRunID: String?
     @FocusState private var focusedControl: String?
     @State private var availableWidth: CGFloat = 900
-    init(taskID: String?, preferredRunID: String? = nil, showsTaskTitle: Bool = true, fallbackSessionTitle: String? = nil) {
+    init(taskID: String?, preferredRunID: String? = nil, showsTaskTitle: Bool = true, fallbackSessionTitle: String? = nil,
+         onDigestChange: ((ExecutionSessionDigest?) -> Void)? = nil) {
         self.taskID = taskID
         self.preferredRunID = preferredRunID
         self.showsTaskTitle = showsTaskTitle
         self.fallbackSessionTitle = fallbackSessionTitle
+        self.onDigestChange = onDigestChange
         _store = StateObject(wrappedValue: SessionReaderStore(taskID: taskID,
                                                               preferredRunID: preferredRunID,
                                                               statusOnly: true))
@@ -38,6 +42,21 @@ struct SessionReaderView: View {
 
     private var connectionDisplay: SessionConnectionDisplay {
         SessionConnectionDisplay(connection: store.connection, interrupted: store.interrupted)
+    }
+
+    /// §4.18：执行页复盘头部使用的会话摘要；尚无会话记录时为 nil。
+    private var executionDigest: ExecutionSessionDigest? {
+        guard !store.sessions.isEmpty else { return nil }
+        let ordered = store.sessions.sorted { ($0.startedAt ?? "") < ($1.startedAt ?? "") }
+        let selected = store.session
+        let index = selected.flatMap { current in ordered.firstIndex { $0.runId == current.runId } } ?? (ordered.count - 1)
+        let runStatus = store.roundDetail?.runStatus ?? selected?.runStatus
+        return ExecutionSessionDigest(
+            roundIndex: index + 1,
+            roundCount: ordered.count,
+            roundState: runStatus.map { ["finished", "failed"].contains($0) ? "已结束" : "进行中" },
+            messageCount: selected?.messageCount,
+            lastCheckedAt: store.lastStatusCheckedAt ?? selected?.lastCheckedAt)
     }
 
     /// §5.15.5 会话状态中文（pending = 等待会话记录）。
@@ -68,6 +87,8 @@ struct SessionReaderView: View {
         .onAppear { SessionReaderPerformance.shared.record("reader_view_appeared", ["width": availableWidth]) }
         .task { await store.start(client: model.client) }
         .onDisappear { store.stop() }
+        .onAppear { onDigestChange?(executionDigest) }
+        .onChange(of: executionDigest) { _, digest in onDigestChange?(digest) }
         .confirmationDialog("强制删除残留会话？", isPresented: $confirmingForcePurge,
                             titleVisibility: .visible) {
             Button("强制删除", role: .destructive) {

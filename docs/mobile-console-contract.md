@@ -111,7 +111,7 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 
 - 顶部只读提示：「只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。」
 - 既有字段直接显示：`list-sessions` / `get-session` 中的轮次、`message_count`、`last_message_at`、`last_checked_at`；`get-task.task.automation` 中的 `fix_round` 与 `max_fix_rounds`（修复轮 N/M，上限取返回值，不写死）；交付状态；`session-messages` 增量合并（既有规则）。
-- 待核心投影（`get-task.task.retrospective`，protocol §5.32）：执行用时、等你处理统计、时间轴、时间分布、重点、验证 X/Y、验证执行统计。未投影时显示「未汇总」；不得由 `list-events`（最多 200 条）或消息正文推算。
+- 待核心投影（`get-task.task.retrospective`，protocol §5.32）：执行用时、等你处理统计、时间轴、时间分布、重点、验证 X/Y、验证执行统计。未投影时显示「未汇总」；门控关闭时执行用时与等你处理同样显示「未汇总」（protocol §5.32.5）；不得由 `list-events`（最多 200 条）或消息正文推算。
 - 时长使用核心返回的秒数，在客户端按 ui-spec §4.18 的格式化规则显示，不以手机时钟与 `started_at` 相减。
 - 工具消息默认折叠（既有规则）。
 
@@ -121,12 +121,12 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 - 字体角色：页面标题 titleLarge；区段标题 titleMedium；正文 bodyMedium；辅助与时间戳 bodySmall；指标数值 titleLarge（半粗）；chips 与按钮 labelLarge。字号随系统文字缩放。
 - 列表项可用 Material 3 的 OutlinedCard 或 ListItem（系统形状与高程），不自定义阴影和圆角。点击区 ≥ 48dp；间距取 8 / 12 / 16dp。
 
-### 待核心投影（协议草案：protocol §5.32）
+### 待核心投影（protocol §5.32，2026-10-23 冻结）
 
 1. `get-task.task.retrospective`：形状见 protocol §5.32.4，与 ui-spec §4.18 一致；不用 `review_summary`，该名已是评审结论摘要。手机投影 `mobile_access.project` 为私有键黑名单，新字段默认透传：键名含 token、password、secret、credential、private_key、apikey、api_key、access_key、environment、config 等子串，或以 `_path`、`_root`、`_file`、`_dir`、`_json` 结尾，或为 `raw`、`payload`、`spec`、`runtime` 等整键时去除；以 `/`、`~/`、`file:`、`http:` 开头的字符串置空（说明性文本字段除外）。实现时须确认 `retrospective` 的键名与值不落入这些规则（protocol §5.32.7），并以测试断言手机 `get-task` 响应含 `retrospective`。
 2. 验证 X/Y 与验证执行统计：来源为当前验证回执 `engine_verdict` 的逐条检查，并按 protocol §5.32.6 核对计划哈希、命令哈希与执行轮次。冻结 verify 每条都需有通过记录（AGENTS），源码快照排除 `.pi/**` 与交付构建产物。回执不记录耗时与用例数，因此不显示耗时。
 3. 等你处理统计与执行段：等待区间来自 `execution_input_wait_intervals`（protocol §5.32.5），不依赖事件表的 200 条截断。执行段起点为派发确认、任务进入 `running` 的时刻；派发请求须先被执行端领取（claimed）。排队与派发中的时段不计入执行用时，与「已排队 ≠ 已开始」一致。
-4. `list-tasks` 的 `attention`：本契约只写明 envelope 保留 `tasks`，实现前需核对手机响应是否同时保留 `attention`；未保留则需补充，「需要你」计数才能与桌面一致。
+4. `list-tasks` 的 `attention` 与 `exception`：行内字段由 `derive.task_summary` 产出，`mobile_access.project` 不剔除这两个键，手机响应保留（2026-10-23 静态核对）。「需要你」按行内 `attention`、行内 `exception` 与收件箱 id 判定；失败仅认 `exception.severity == "failed"`，其余异常为阻塞，与桌面同口径。2026-10-23 的真实库活动行中没有非空的 exception 或行内 attention，异常行的投影仍只有静态核对。
 
 ## 构建与分工
 
