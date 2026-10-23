@@ -11,8 +11,10 @@ import tempfile
 
 def main():
     root = Path(__file__).resolve().parent.parent
+    if subprocess.call(["sh", str(root / "scripts/require_actions.sh")]):
+        raise SystemExit(1)
     preview = Path(tempfile.mkdtemp(prefix="kp-verification-checks-preview-"))
-    derived = root / "build/verification-checks/DerivedData"
+    derived = preview / "DerivedData"
     with (preview / "build.log").open("w") as log:
         built = subprocess.run([
             "xcodebuild", "-project", str(root / "macos/KaneoPilot.xcodeproj"),

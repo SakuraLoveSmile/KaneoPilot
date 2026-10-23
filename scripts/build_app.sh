@@ -1,13 +1,14 @@
 #!/bin/bash
-# Build KaneoPilot.app into dist/ — xcodebuild + bundle the python core into Resources.
+# Build KaneoPilot.app on GitHub Actions and bundle the Python core into Resources.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+sh "$ROOT/scripts/require_actions.sh"
 PROJ="$ROOT/macos/KaneoPilot.xcodeproj"
 SCHEME="KaneoPilot"
 CONFIG="${CONFIG:-Release}"
-OUT="${APP_OUTPUT_DIR:-$ROOT/dist}"
-DERIVED="${DERIVED_DATA_DIR:-$ROOT/build/DerivedData}"
+OUT="${APP_OUTPUT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/macos-build}"
+DERIVED="${DERIVED_DATA_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/KaneoPilotDerivedData}"
 ARCHS="${ARCHS:-arm64 x86_64}"
 BUILD_SETTINGS=("ARCHS=$ARCHS" "ONLY_ACTIVE_ARCH=NO" "CODE_SIGNING_ALLOWED=NO")
 if [ -n "${VERSION_NAME:-}" ]; then BUILD_SETTINGS+=("MARKETING_VERSION=$VERSION_NAME"); fi

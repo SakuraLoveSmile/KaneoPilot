@@ -1,7 +1,10 @@
 """Isolated GitHub-release crash/retry and identity contract checks. No network."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -20,7 +23,11 @@ class FakeGitHub:
     repository = "test/private"
 
     def __init__(self):
-        self.tag = {"type": "commit", "sha": SHA}
+        self.tag = {"type": "tag", "sha": "d" * 40}
+        self.annotation = {"tag": TAG, "object": {"type": "commit", "sha": SHA},
+                           "message": "修复连接问题\n\n改进发布流程。"}
+        self.latest = None
+        self.latest_reads = []
         self.release = None
         self.assets = []
         self.content = {}
@@ -39,6 +46,12 @@ class FakeGitHub:
             self.writes.append((method, path))
         if method == "GET" and "/git/ref/" in path:
             return {"object": self.tag}
+        if method == "GET" and "/git/tags/" in path:
+            return self.annotation
+        if method == "GET" and path.endswith("/releases/latest"):
+            if self.latest_reads:
+                return self.latest_reads.pop(0)
+            return self.latest
         if method == "GET" and "/releases/tags/" in path:
             return None if self.hide_draft_from_tag and self.release and self.release["draft"] else self.release
         if method == "GET" and "/releases?" in path:
@@ -90,6 +103,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(self.api.release["draft"])
         self.assertEqual(len(self.api.assets), 4)
         self.assertEqual(self.api.writes[-1][0], "PATCH")
+        self.assertIn(self.api.annotation["message"], self.api.release["body"])
+        self.assertEqual(self.api.release["make_latest"], "true")
         sums = (self.root / "SHA256SUMS").read_text()
         self.assertIn("manifest.json", sums)
         manifest = json.loads((self.root / "manifest.json").read_text())
@@ -132,10 +147,89 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.api.writes, [])
 
     def test_moved_remote_tag_aborts_before_writes(self):
-        self.api.tag["sha"] = "c" * 40
+        self.api.annotation["object"]["sha"] = "c" * 40
         with self.assertRaisesRegex(ValueError, "tag no longer"):
             self.publish()
         self.assertEqual(self.api.writes, [])
+
+    def test_remote_lightweight_or_nested_tag_rejected_before_writes(self):
+        self.api.tag = {"type": "commit", "sha": SHA}
+        with self.assertRaisesRegex(ValueError, "annotated tag"):
+            self.publish()
+        self.assertEqual(self.api.writes, [])
+        self.api.tag = {"type": "tag", "sha": "d" * 40}
+        self.api.annotation["object"] = {"type": "tag", "sha": "e" * 40}
+        with self.assertRaisesRegex(ValueError, "tag no longer"):
+            self.publish()
+        self.assertEqual(self.api.writes, [])
+
+    def test_empty_annotation_rejected_before_writes(self):
+        self.api.annotation["message"] = " \n"
+        with self.assertRaisesRegex(ValueError, "release notes"):
+            self.publish()
+        self.assertEqual(self.api.writes, [])
+
+    def test_newer_stable_version_becomes_latest(self):
+        self.api.latest = {"tag_name": "v1.2.2", "draft": False, "prerelease": False}
+        self.publish()
+        self.assertEqual(self.api.release["make_latest"], "true")
+
+    def test_older_or_equal_version_does_not_replace_latest(self):
+        for latest in ("v1.2.3", "v1.2.10", "v1.3.0", "v2.0.0"):
+            with self.subTest(latest=latest):
+                self.api = FakeGitHub()
+                self.api.latest = {"tag_name": latest, "draft": False, "prerelease": False}
+                self.publish()
+                self.assertEqual(self.api.release["make_latest"], "false")
+
+    def test_latest_is_rechecked_immediately_before_publication(self):
+        self.api.latest_reads = [
+            {"tag_name": "v1.2.2", "draft": False, "prerelease": False},
+            {"tag_name": "v1.3.0", "draft": False, "prerelease": False},
+        ]
+        self.publish()
+        self.assertEqual(self.api.release["make_latest"], "false")
+
+    def test_unknown_latest_identity_aborts_before_any_write(self):
+        for latest in ("nightly", "v1.3.0-rc.1", "v01.3.0"):
+            with self.subTest(latest=latest):
+                self.api = FakeGitHub()
+                self.api.latest = {"tag_name": latest, "draft": False, "prerelease": False}
+                with self.assertRaisesRegex(ValueError, "recognizable stable"):
+                    self.publish()
+                self.assertEqual(self.api.writes, [])
+
+    def test_existing_release_channel_or_tag_mismatch_aborts_before_writes(self):
+        self.publish()
+        for changes in ({"prerelease": True}, {"tag_name": "v1.2.4"}):
+            with self.subTest(changes=changes):
+                previous = self.api.release.copy()
+                self.api.release.update(changes)
+                self.api.writes.clear()
+                with self.assertRaisesRegex(ValueError, "channel mismatch"):
+                    self.publish()
+                self.assertEqual(self.api.writes, [])
+                self.api.release = previous
+
+    def test_published_rerun_does_not_consult_or_change_latest(self):
+        self.publish()
+        self.api.latest = {"tag_name": "unknown"}
+        self.api.writes.clear()
+        self.publish()
+        self.assertEqual(self.api.writes, [])
+
+    def test_local_and_self_hosted_publish_cli_rejected_before_accessing_assets(self):
+        for github_actions, runner in (("", ""), ("true", "self-hosted")):
+            with self.subTest(runner=runner):
+                env = dict(os.environ, GITHUB_ACTIONS=github_actions, RUNNER_ENVIRONMENT=runner,
+                           GITHUB_TOKEN="unused-fixture-token", PYTHONDONTWRITEBYTECODE="1")
+                result = subprocess.run([
+                    sys.executable, str(SPEC.origin), "publish", "--directory", str(self.root / "does-not-exist"),
+                    "--tag", TAG, "--source-sha", SHA, "--build-number", str(BUILD),
+                ], env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("only supported in GitHub-hosted Actions", result.stderr)
+                self.assertNotIn("FileNotFoundError", result.stderr)
 
     def test_source_content_change_rejected_before_network_writes(self):
         next(self.root.glob("*.apk")).write_bytes(b"changed")

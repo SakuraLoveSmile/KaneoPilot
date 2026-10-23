@@ -2,6 +2,7 @@
 # Isolated local Release candidate; never install over the production app.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+sh "$ROOT/scripts/require_actions.sh"
 SHAPE=lines
 COUNT=400
 BYTES=4096

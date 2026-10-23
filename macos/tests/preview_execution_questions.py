@@ -136,8 +136,10 @@ def main():
     parser.add_argument("--open-task", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
+    if subprocess.call(["sh", str(root / "scripts/require_actions.sh")]):
+        raise SystemExit(1)
     preview = Path(tempfile.mkdtemp(prefix="kp-execution-questions-preview-"))
-    derived = root / "macos/build/execution-questions-preview"
+    derived = preview / "DerivedData"
     with (preview / "build.log").open("w") as log:
         built = subprocess.run(["xcodebuild", "-project", str(root / "macos/KaneoPilot.xcodeproj"),
                                 "-scheme", "KaneoPilot", "-configuration", "Debug", "-derivedDataPath", str(derived),

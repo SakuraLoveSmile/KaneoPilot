@@ -2,13 +2,11 @@
 
 原生 SwiftUI 工作台「Kaneo 调度台」。数据全部经核心 CLI（`kanpilot`，JSON 进出）获取与变更，不直接读写 SQLite。
 
-## 构建
+## 云端构建
 
-```bash
-xcodebuild -project macos/KaneoPilot.xcodeproj -scheme KaneoPilot -configuration Debug build
-```
+使用 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建和下载 Universal DMG，本机不再使用 Xcode 或编译型预览脚本生成 App。分支构建提供测试包，正式版本从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载；完整操作见 [构建与 Release 规范](../docs/build-release.md)。
 
-产物在默认 DerivedData 下（`…/Build/Products/Debug/KaneoPilot.app`）。也可直接用 Xcode 打开 `macos/KaneoPilot.xcodeproj` 运行。
+云端构建脚本将产物和 DerivedData 放入 runner 临时目录。App / DMG 为 ad-hoc 签名、未公证，不包含 Python 运行时。
 
 - deployment target：macOS 14
 - bundle id：`local.kaneopilot`
@@ -47,7 +45,7 @@ dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分；
 ```bash
 # 方式一：环境变量
 KANPILOT_CORE=$PWD/macos/FakeCore/kanpilot-fake.py \
-  open .../Build/Products/Debug/KaneoPilot.app
+  open /path/to/downloaded/KaneoPilot.app
 
 # 方式二：命令行直接体验协议
 python3 macos/FakeCore/kanpilot-fake.py list-tasks
@@ -114,17 +112,11 @@ FakeCore/
 
 默认首页为自动化总览；需要用户决定的事项优先展示，任务默认用列表阅读，保留看板切换。详情突出一个当前主操作，其余放入“更多操作”。确认执行先进入核验计划页；手动规划为选择任务、核对材料并开始两步。
 
-隔离体验当前构建（只使用 FakeCore，不安装或覆盖正式应用）：
-
-```bash
-bash scripts/preview_automation_ui.sh 1180x760 light
-# 退出预览后可检查小窗口深色外观
-bash scripts/preview_automation_ui.sh 900x600 dark
-```
+以下保留历史隔离预览的设计说明。`scripts/preview_automation_ui.sh` 包含编译步骤，仅允许云端 runner 执行；本地使用已下载的 Actions 产物进行体验，不重新编译。
 
 预览使用独立 bundle ID 和 build/ui-simplification/fixture 存储；缺少隔离环境时核心不可用，不回落到正式核心。计划正文为静态演练响应，不代表真实计划文件已核验。
 
-模型与材料状态检查：
+以下 Swift 夹具检查在云端执行：
 
 ```bash
 bash macos/tests/run-fixtures.sh
@@ -137,15 +129,10 @@ bash macos/tests/run-planning-input-fixtures.sh
 
 `EngineSupervisor` 只拉起 `engine-run`，进程默认 `legacy`，由项目配置决定是否自动推进。关闭窗口保留后台引擎；退出只停止本实例，不结束 Plus 会话。手动规划保留核心显式授权队列。`ExecutorScheduler.swift` 与其历史夹具保留作旧路径参考，不再编入 App 的调度所有权。通知许可只能由「高级 → 允许需要你通知」显式请求；FakeCore 不请求通知、不启动真实 MCP 或真实服务。
 
-```bash
-xcodebuild -project macos/KaneoPilot.xcodeproj -scheme KaneoPilot -configuration Debug \
-  -derivedDataPath /tmp/kp-stage-b-ui-build \
-  PRODUCT_BUNDLE_IDENTIFIER=local.kaneopilot.ui-engine-check CODE_SIGNING_ALLOWED=NO build
-bash macos/tests/launch-engine-ui-check.sh /tmp/kp-stage-b-ui-build/Build/Products/Debug/KaneoPilot.app 1180x760
-```
+`macos/tests/launch-engine-ui-check.sh` 只消费已准备好的隔离候选 App，不负责编译。需要特殊 bundle ID 的候选必须先在云端生成；默认 Packages 安装包不能冒充该隔离候选。
 
 启动脚本要求独立 bundle id，创建临时 HOME、FakeCore 状态和全部数据根。可将最后参数改为 `900x600` 验证最小窗口，关闭窗口后从菜单栏重开，再用应用退出完成引擎收尾。不要以此假数据体验代替真实项目验收。
 
 走查清单：默认总览区块顺序、需要你数量与菜单栏一致；搜索与阶段筛选、↑↓/回车打开五段详情；进行中阶段仅突出核心提供值；设置四页可达、项目模式/验证环境/备用模型保存与回读；拒绝凭据环境键且保留草稿；关闭窗口后菜单栏仍在；退出不结束其他引擎或 Plus。
 
-验证入口：`bash macos/tests/run-engine-fixtures.sh`（健康启动、外部实例、失败退避、同源收件箱、默认模式、CAS 与凭据环境拒绝）以及既有 `run-fixtures.sh`、规划材料、回答、评审决议、验证回执与会话夹具。
+云端验证入口：`bash macos/tests/run-engine-fixtures.sh`（健康启动、外部实例、失败退避、同源收件箱、默认模式、CAS 与凭据环境拒绝）以及既有 `run-fixtures.sh`、规划材料、回答、评审决议、验证回执与会话夹具。

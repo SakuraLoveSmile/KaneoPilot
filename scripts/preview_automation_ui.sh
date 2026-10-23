@@ -2,7 +2,8 @@
 # Isolated UI preview: FakeCore only, a separate bundle ID and storage roots.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/build/ui-simplification"
+sh "$ROOT/scripts/require_actions.sh"
+OUT="${RUNNER_TEMP:?RUNNER_TEMP is required}/ui-simplification"
 SIZE="${1:-1180x760}"
 APPEARANCE="${2:-light}"
 case "$SIZE" in 900x600|1180x760|1440x900) ;; *) echo '窗口尺寸须为 900x600、1180x760 或 1440x900' >&2; exit 2 ;; esac

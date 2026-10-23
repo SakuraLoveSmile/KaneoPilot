@@ -4,6 +4,9 @@ macOS 调度工作台与 Android 前台控制台。Mac 保存数据、仓库和�
 
 - [手机连接、安装与构建](docs/mobile-console-guide.md)
 - [移动接口与安全契约](docs/mobile-console-contract.md)
+- [云端构建与 Release 规范](docs/build-release.md)
+
+安装包统一由 [GitHub Actions → Packages](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建，本机不再编译打包。测试包选择分支运行 workflow；正式版本按 annotated `vX.Y.Z` 标签发布，下载入口为 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases)。
 
 ## 首次配置 Kaneo 项目
 

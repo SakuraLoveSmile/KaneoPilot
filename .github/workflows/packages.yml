@@ -5,6 +5,7 @@ on:
     branches: ['**']
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,22 +26,12 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Resolve immutable build identity
         id: identity
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os, re, subprocess
-          release = os.environ['GITHUB_REF_TYPE'] == 'tag'
-          tag = os.environ['GITHUB_REF_NAME']
-          if release and not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
-              raise SystemExit('Only stable vX.Y.Z tags are supported')
-          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f'release={str(release).lower()}\nversion={tag[1:] if release else "0.0.0"}\nsha={sha}\n')
-          PY
+        run: python3 scripts/release_bundle.py identity
 
   checks:
     needs: identity
@@ -72,7 +63,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-reports"
           python3 -m unittest discover -s scripts/tests -v 2>&1 | tee "$RUNNER_TEMP/test-reports/packaging.log"
-          bash -n scripts/build_app.sh scripts/build_dmg.sh 2>&1 | tee -a "$RUNNER_TEMP/test-reports/packaging.log"
+          bash -n scripts/require_actions.sh scripts/build_app.sh scripts/build_dmg.sh 2>&1 | tee -a "$RUNNER_TEMP/test-reports/packaging.log"
           git diff --check 2>&1 | tee -a "$RUNNER_TEMP/test-reports/packaging.log"
       - name: Core isolated tests
         if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
@@ -99,13 +90,13 @@ jobs:
           retention-days: 14
 
   android:
-    needs: identity
+    needs: [identity, checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
@@ -126,7 +117,7 @@ jobs:
         run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" --continue testDebugUnitTest lintDebug
       - name: Build debug APK
         id: debug-build
-        if: ${{ !cancelled() }}
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
         working-directory: android
         env:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
@@ -134,7 +125,7 @@ jobs:
         run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug
       - name: Restore release signing key
         id: signing-key
-        if: ${{ !cancelled() && needs.identity.outputs.release == 'true' }}
+        if: ${{ success() && needs.identity.outputs.release == 'true' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -148,7 +139,7 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kaneopilot-release.keystore"
       - name: Signed release APK
         id: release-build
-        if: ${{ !cancelled() && needs.identity.outputs.release == 'true' && steps.signing-key.outcome == 'success' }}
+        if: ${{ success() && needs.identity.outputs.release == 'true' && steps.signing-key.outcome == 'success' }}
         working-directory: android
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/kaneopilot-release.keystore
@@ -160,7 +151,7 @@ jobs:
         run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleRelease
       - name: Stage verified Android artifact
         id: android-package
-        if: ${{ !cancelled() && ((needs.identity.outputs.release == 'true' && steps.release-build.outcome == 'success') || (needs.identity.outputs.release == 'false' && steps.debug-build.outcome == 'success')) }}
+        if: ${{ success() && ((needs.identity.outputs.release == 'true' && steps.release-build.outcome == 'success') || (needs.identity.outputs.release == 'false' && steps.debug-build.outcome == 'success')) }}
         env:
           RELEASE: ${{ needs.identity.outputs.release }}
           VERSION_NAME: ${{ needs.identity.outputs.version }}
@@ -191,7 +182,7 @@ jobs:
           cp "$apk" "$RUNNER_TEMP/android-package/$name"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/android-package/$name" --platform android --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures any --output "$RUNNER_TEMP/android-package/android-metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ !cancelled() && steps.android-package.outcome == 'success' }}
+        if: ${{ success() && steps.android-package.outcome == 'success' }}
         with:
           name: android-${{ needs.identity.outputs.release == 'true' && 'release-signed' || 'debug' }}-${{ github.run_number }}
           path: ${{ runner.temp }}/android-package/*
@@ -214,13 +205,13 @@ jobs:
         run: rm -f "$RUNNER_TEMP/kaneopilot-release.keystore"
 
   macos:
-    needs: identity
+    needs: [identity, checks]
     runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -241,7 +232,6 @@ jobs:
           exit "$result"
       - name: Build and verify Universal DMG
         id: macos-package
-        if: ${{ !cancelled() }}
         env:
           ARCHS: arm64 x86_64
           VERSION_NAME: ${{ needs.identity.outputs.version }}
@@ -271,7 +261,7 @@ jobs:
           cp "$APP_OUTPUT_DIR/$DMG_NAME" "$RUNNER_TEMP/macos-package/"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/macos-package/$DMG_NAME" --platform macos --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures arm64,x86_64 --output "$RUNNER_TEMP/macos-package/macos-metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ !cancelled() && steps.macos-package.outcome == 'success' }}
+        if: ${{ success() && steps.macos-package.outcome == 'success' }}
         with:
           name: macos-universal-local-signed-${{ github.run_number }}
           path: ${{ runner.temp }}/macos-package/*
@@ -292,12 +282,15 @@ jobs:
     needs: [identity, checks, android, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: kaneopilot-stable-release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.identity.outputs.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

@@ -2,30 +2,13 @@
 
 Android 8.0+ 前台远程控制台。Mac 是唯一数据和执行端；本应用只连接用户配对的 HTTPS Mac，不包含 Kaneo/Plus 凭据。
 
-## 构建
+## 云端构建
 
-使用 JDK 17、Android SDK 36。首次构建需要联网获取固定版本依赖，Gradle 8.13 wrapper 和分发包均带 SHA256。SDK 通过 `ANDROID_HOME` 或本地、未提交的 `local.properties` 指定。
+Android 编译、单元测试、lint 和打包统一在 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 执行；本机 Gradle wrapper 和项目配置会拒绝本地构建。
 
-```sh
-./gradlew testDebugUnitTest lintDebug assembleDebug
-./gradlew assembleDebugAndroidTest
-# 仅在没有真实连接凭据的隔离模拟器上运行：
-./gradlew connectedDebugAndroidTest
-```
+选择分支运行 workflow 可下载 Debug APK；正式安装与覆盖升级使用 [Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 中固定密钥签名的 APK。Debug 与正式版证书不同，不能用于验证正式版升级。
 
-构建输出 `app/build/outputs/apk/debug/app-debug.apk`。普通 Debug 使用 Android 标准 debug key；其签名不同于正式版，不能用于验证正式版升级。
-
-统一版本参数：`-PversionName=1.2.3 -PversionCode=123`，versionCode 必须为正整数。
-
-Release 使用固定 keystore，缺失配置时明确失败，不自动生成密钥：
-
-```sh
-ANDROID_KEYSTORE_PATH=/absolute/path/release.jks \
-ANDROID_KEYSTORE_PASSWORD='…' ANDROID_KEY_ALIAS='…' ANDROID_KEY_PASSWORD='…' \
-./gradlew assembleRelease -PversionName=1.2.3 -PversionCode=123
-```
-
-请通过 CI Secrets 或安全的任务环境传递密码，不写入 Git、Gradle 参数或日志。固定密钥备份和 GitHub Secrets 由发布流程管理。
+云端固定 JDK 17、Android SDK / Build Tools 36、Gradle 8.13；wrapper 和分发包均核验 SHA256。版本由 workflow 注入。签名 Secrets、版本标签、产物核验及恢复规则统一见 [构建与 Release 规范](../docs/build-release.md)，不再提供本地签名构建入口。
 
 ## 使用
 

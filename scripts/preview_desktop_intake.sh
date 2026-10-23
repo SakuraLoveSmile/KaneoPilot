@@ -2,6 +2,7 @@
 # Build and launch an isolated acceptance app; preserve the installed scheduler.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+sh "$ROOT/scripts/require_actions.sh"
 PREVIEW="$(mktemp -d "${TMPDIR:-/tmp}/kaneopilot-desktop-intake.XXXXXX")"
 mkdir -p "$PREVIEW/support" "$PREVIEW/legacy" "$PREVIEW/plans" "$PREVIEW/repos" "$PREVIEW/reports"
 printf '{}\n' > "$PREVIEW/credentials.json"

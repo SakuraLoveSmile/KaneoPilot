@@ -17,6 +17,13 @@
 @rem
 
 @if "%DEBUG%"=="" @echo off
+@if not "%GITHUB_ACTIONS%"=="true" goto requireActions
+@if not "%RUNNER_ENVIRONMENT%"=="github-hosted" goto requireActions
+@goto actionsAllowed
+:requireActions
+@echo KaneoPilot builds run only in GitHub-hosted Actions. Use Packages: https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml 1>&2
+@exit /b 1
+:actionsAllowed
 @rem ##########################################################################
 @rem
 @rem  Gradle startup script for Windows

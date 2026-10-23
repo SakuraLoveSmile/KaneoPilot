@@ -1,9 +1,10 @@
 #!/bin/bash
-# Build KaneoPilot.dmg into dist/ using hdiutil.
+# Build KaneoPilot.dmg on GitHub Actions using hdiutil.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${APP_OUTPUT_DIR:-$ROOT/dist}"
+sh "$ROOT/scripts/require_actions.sh"
+OUT="${APP_OUTPUT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/macos-build}"
 APP="$OUT/KaneoPilot.app"
 DMG="$OUT/${DMG_NAME:-KaneoPilot.dmg}"
 VOLNAME="KaneoPilot"

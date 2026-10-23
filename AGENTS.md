@@ -28,7 +28,7 @@
  - 核心隔离测试：`cd core && python3 -m pytest tests -q`（或 unittest，随实现）。
  - 集成测试：`python3 -m pytest tests -q`。
  - 调度台集成演练：`python3 -m pytest tests/rehearsal -q`。
- - 构建 app：`scripts/build_app.sh` → `dist/KaneoPilot.app`。
+ - 构建与发布：仅使用 GitHub 托管 Actions 的 `Packages` 工作流；分支手动构建用 `gh workflow run packages.yml --ref <branch>`，正式 Release 按 `docs/build-release.md` 的 annotated 稳定标签流程。
  - 自动接收：`cd core && python3 -m kanpilot.auto_intake`；只读预览加 `--dry-run`。调度每 20 秒检查，intake 每 300 秒。
  - 引擎长驻：`engine run`（DB 级单实例租约+心跳+退避重启，见 protocol §5.27）。
  - 引擎状态：`engine status`（只读，见 protocol §5.27）。
@@ -39,6 +39,8 @@
  
  ## 约束
  
+ - KaneoPilot 自身软件的编译、签名、打包与 Swift/Android 编译检查均在云端 Actions 执行，不在本地运行 Xcode、Gradle 或会自动编译的预览脚本。本地允许无需编译的 Python 隔离测试、静态检查及下载包核验；不要伪造 Actions 环境绕过脚本约束。构建成功、真实安装/设备验证、发布分别报告。
+ - 本地缓存清理仅限无活动引用、可再生成的明确路径；`build/` 内的证据、备份、DB及嵌套仓库，`dist/` 的交付/恢复包，以及已安装软件和用户数据均保留。不得把整个忽略目录当缓存删除。
  - Python 3.9+ 标准库；第三方依赖只 vendored（沿用 pyyaml `_vendor` 模式）。
  - 远端 Kaneo 写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
  - 不输出/不持久化 Kaneo 凭据 token。

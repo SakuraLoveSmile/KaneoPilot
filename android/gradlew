@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Refuse before starting Java or downloading a Gradle distribution.
+sh "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/scripts/require_actions.sh" || exit $?
+
 #
 # Copyright © 2015-2021 the original authors.
 #
