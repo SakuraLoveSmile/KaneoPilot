@@ -63,6 +63,9 @@ def require_policy(conn, task, value):
 def _source_snapshot(batch, run_attempt=None):
     value={key:item for key,item in batch.items() if key not in ('checked_at','next_check_at')}
     value['run_attempt']=batch.get('run_attempt',run_attempt)
+    # A successful poll fills these defaults even when the failed run is unchanged.
+    value.setdefault('read_failures',0)
+    value.setdefault('blockers',[])
     return value
 
 

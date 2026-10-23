@@ -229,6 +229,21 @@ class ExternalBuildRepairTest(TestCase):
         repair.cmd_accept_external_build_repair(self.ctx,dict(task_id='parent',pr_number=9,
             expected_context_sha256=c['context_sha256'],confirm=True))
 
+    def test_failed_batch_diagnostic_drift_expires_confirmation(self):
+        for changes in (dict(read_failures=1),
+                dict(blockers=[dict(code='release_read_failed',message='new failure')])):
+            with self.subTest(changes=changes):
+                release._save(self.conn,deepcopy(self.batch),self.ctx.now_iso)
+                c=self.candidate()
+                batch=release._batch(self.conn,'failed-external')
+                batch.update(changes)
+                release._save(self.conn,batch,self.ctx.now_iso)
+                with self.assertRaises(util.KanpilotError) as error:
+                    repair.cmd_accept_external_build_repair(self.ctx,dict(task_id='parent',pr_number=9,
+                        expected_context_sha256=c['context_sha256'],confirm=True))
+                self.assertEqual(error.exception.code,'external_repair_changed')
+                self.assertNotIn('external_build_repair_ref',db.task_extra(self.task()))
+
     def test_inflight_sync_cannot_write_archived_source_even_on_error(self):
         for error in (False,True):
             with self.subTest(error=error):
