@@ -173,9 +173,11 @@ class SoftwareUpdateSystemAcceptanceTest {
                 phase = realModel.state.phase.name
             }
             compose.onNode(hasText("连接", substring = false) and hasClickAction()).performClick()
+            compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("软件更新"))
             compose.onNodeWithText("软件更新").performScrollTo().assertIsDisplayed()
             screenshot("10-after-upgrade-real-software-update-page")
             val versionText = "KaneoPilot ${fixture.newer.getString("version_name")} (${fixture.newer.getLong("version_code")})"
+            compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(versionText))
             compose.onNodeWithText(versionText).performScrollTo().assertIsDisplayed()
             screenshot("11-after-upgrade-real-version")
             assertEquals(lastCheck, preferences.getLong("last_check", 0))
