@@ -170,10 +170,11 @@ class SoftwareUpdatesTest {
 
     @Test fun apkMustMatchReleaseAndInstalledPackageSignatureAndIncreasingCode() {
         val release = release()
-        val installed = UpdateApkIdentity("com.sakurasep.kaneopilot", "0.2.9", 122, setOf(certificate))
+        val installed = UpdateApkIdentity(BuildConfig.UPDATE_PACKAGE_NAME, "0.2.9", 122, setOf(certificate))
         val archive = installed.copy(versionName = release.version, versionCode = release.buildNumber)
         validateUpdateApk(release, archive, installed)
         rejects { validateUpdateApk(release, archive.copy(packageName = "other.app"), installed) }
+        rejects { validateUpdateApk(release, archive.copy(packageName = "other.app"), installed.copy(packageName = "other.app")) }
         rejects { validateUpdateApk(release, archive.copy(versionName = "0.3.0"), installed) }
         rejects { validateUpdateApk(release, archive.copy(versionCode = 124), installed) }
         rejects { validateUpdateApk(release, archive.copy(certificates = setOf("c".repeat(64))), installed) }

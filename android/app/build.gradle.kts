@@ -6,6 +6,8 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.sakurasep.kaneopilot"
+        buildConfigField("String", "UPDATE_PACKAGE_NAME", "\"com.sakurasep.kaneopilot\"")
+        resValue("string", "app_name", "KaneoPilot")
         minSdk = 26
         targetSdk = 36
         versionCode = providers.gradleProperty("versionCode").orElse("1").get().toInt().also { require(it > 0) }
@@ -22,6 +24,9 @@ android {
         getByName("release") { if (hasReleaseKeys) signingConfig = signingConfigs.getByName("release"); isMinifyEnabled = false }
         create("updateAcceptance") {
             initWith(getByName("release"))
+            applicationIdSuffix = ".updateacceptance"
+            buildConfigField("String", "UPDATE_PACKAGE_NAME", "\"com.sakurasep.kaneopilot.updateacceptance\"")
+            resValue("string", "app_name", "KaneoPilot 更新验证")
             signingConfig = signingConfigs.getByName("debug")
             isDebuggable = false
             matchingFallbacks += listOf("release")

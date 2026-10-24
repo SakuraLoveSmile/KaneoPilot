@@ -262,7 +262,7 @@ internal fun verifiedUpdateFile(release: UpdateRelease, file: File): Boolean {
 internal data class UpdateApkIdentity(val packageName: String, val versionName: String, val versionCode: Long, val certificates: Set<String>)
 
 internal fun validateUpdateApk(release: UpdateRelease, archive: UpdateApkIdentity, installed: UpdateApkIdentity) {
-    require(archive.packageName == installed.packageName && archive.packageName == "com.sakurasep.kaneopilot") { "更新包不属于 KaneoPilot" }
+    require(archive.packageName == installed.packageName && archive.packageName == BuildConfig.UPDATE_PACKAGE_NAME) { "更新包不属于 KaneoPilot" }
     require(archive.versionName == release.version && archive.versionCode == release.buildNumber) { "APK 版本与发布清单不一致" }
     val installedVersion = UpdateVersion.parse(installed.versionName) ?: throw IOException("已安装版本无法安全比较，请查看发布页")
     require(UpdateVersion.parse(archive.versionName)!! > installedVersion && archive.versionCode > installed.versionCode) { "APK 版本或构建编号没有递增，不能覆盖安装" }

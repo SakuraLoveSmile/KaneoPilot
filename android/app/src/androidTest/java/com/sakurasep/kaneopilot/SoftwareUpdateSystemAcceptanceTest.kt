@@ -52,7 +52,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Explicit opt-in, emulator-only system checks against same-key cloud-built APKs. The sole injected
+ * Explicit opt-in system checks in the separate acceptance App against same-key cloud-built APKs. The sole injected
  * object supplies metadata and real APK response bytes; all production validation stays enabled.
  * Run each named method separately. The actual-upgrade method intentionally never reports a JUnit
  * success: Android kills the updated target process, and the caller must verify the new package.
@@ -65,8 +65,7 @@ class SoftwareUpdateSystemAcceptanceTest {
     private val explicitOptIn = TestRule { base, _ -> object : Statement() {
         override fun evaluate() {
             assumeTrue("未显式启用隔离更新系统检查，跳过", args.getString("update_acceptance") == "true")
-            check(Build.HARDWARE in setOf("ranchu", "goldfish")) { "系统更新检查只允许隔离 Android Emulator" }
-            check(app.packageName == "com.sakurasep.kaneopilot") { "不是 KaneoPilot 测试目标" }
+            check(app.packageName == "com.sakurasep.kaneopilot.updateacceptance" && BuildConfig.UPDATE_PACKAGE_NAME == app.packageName) { "系统更新检查只允许独立的 KaneoPilot 更新验证 App" }
             check(app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) { "必须使用非 debuggable 的 updateAcceptance 包，不能绕过预览门槛" }
             check(!app.getSharedPreferences("mobile_secure", 0).contains("sealed")) { "系统更新检查不允许已保存手机配对的安装对象" }
             base.evaluate()
@@ -263,13 +262,13 @@ class SoftwareUpdateSystemAcceptanceTest {
     private inner class Fixture(val manifest: JSONObject, val baseline: JSONObject, val newer: JSONObject, val newerApk: File) {
         val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
         fun facts() = json("source_sha" to manifest.getString("source_sha"), "build_number" to manifest.getLong("build_number"),
-            "baseline" to baseline, "newer" to newer, "captured_at_ms" to System.currentTimeMillis(), "scope" to "isolated emulator acceptance; not a public Release")
+            "package_name" to app.packageName, "baseline" to baseline, "newer" to newer, "captured_at_ms" to System.currentTimeMillis(), "scope" to "separate acceptance App; not a public Release")
         fun transport(): UpdateTransport {
             val version = newer.getString("version_name")
             val tag = "v$version"
             val name = "KaneoPilot-$version-android.apk"
             val latest = json("tag_name" to tag, "html_url" to UpdateUrls.release(tag), "draft" to false, "prerelease" to false,
-                "body" to "隔离模拟器更新验收包；未发布到 GitHub Release。", "assets" to JSONArray(listOf(
+                "body" to "独立 App 更新验收包；未发布到 GitHub Release。", "assets" to JSONArray(listOf(
                     json("name" to "manifest.json", "browser_download_url" to UpdateUrls.asset(tag, "manifest.json")),
                     json("name" to name, "browser_download_url" to UpdateUrls.asset(tag, name)))))
             val releaseManifest = json("version" to version, "tag" to tag, "source_sha" to manifest.getString("source_sha"),
@@ -299,6 +298,7 @@ class SoftwareUpdateSystemAcceptanceTest {
         check(manifest.getString("package_name") == app.packageName && manifest.getString("source_sha").matches(Regex("[0-9a-f]{40}")))
         val baseline = manifest.getJSONObject("artifacts").getJSONObject("baseline")
         val newer = manifest.getJSONObject("artifacts").getJSONObject("newer")
+        check(baseline.getString("package_name") == app.packageName && newer.getString("package_name") == app.packageName)
         check(baseline.getString("version_name") == "0.2.9" && newer.getString("version_name") == "0.2.10")
         check(baseline.getLong("version_code") == manifest.getLong("build_number") * 100 + 10)
         check(newer.getLong("version_code") == baseline.getLong("version_code") + 1)
@@ -316,6 +316,7 @@ class SoftwareUpdateSystemAcceptanceTest {
     }
 
     private fun assertMatches(identity: UpdateApkIdentity, artifact: JSONObject) {
+        assertEquals(app.packageName, artifact.getString("package_name"))
         assertEquals(app.packageName, identity.packageName)
         assertEquals(artifact.getString("version_name"), identity.versionName)
         assertEquals(artifact.getLong("version_code"), identity.versionCode)
@@ -332,7 +333,7 @@ class SoftwareUpdateSystemAcceptanceTest {
     }
     private fun sourceSettings() = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${app.packageName}"))
     private fun awaitSettings() = await("应打开 KaneoPilot 的真实来源安装授权页") { currentWindowPackage() == "com.android.settings" }
-    private val installerPackages = setOf("com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.permissioncontroller", "com.google.android.permissioncontroller")
+    private val installerPackages = setOf("com.android.packageinstaller", "com.google.android.packageinstaller", "com.miui.packageinstaller", "com.android.permissioncontroller", "com.google.android.permissioncontroller")
     private fun awaitInstaller() = await("应打开真实 Android 安装器") { currentWindowPackage() in installerPackages }
     @Suppress("DEPRECATION")
     private fun currentWindowPackage(): String? {

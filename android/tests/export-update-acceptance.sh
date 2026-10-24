@@ -1,5 +1,5 @@
 #!/bin/bash
-# Non-published, same-key APKs for a single isolated emulator upgrade. Builds run only on hosted Actions.
+# Non-published, same-key APKs for the separate acceptance App. Builds run only on hosted Actions.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 sh "$ROOT/scripts/require_actions.sh"
@@ -29,6 +29,9 @@ NEWER_CODE=$((BUILD_NUMBER * 100 + 11))
 cd "$ROOT/android"
 
 # Copy each APK before the next version changes generated BuildConfig and merged manifests.
+bash ./gradlew --no-daemon --stacktrace -PupdateAcceptanceTests=true -PversionName=0.0.0 -PversionCode="$BUILD_NUMBER" assembleUpdateAcceptance assembleUpdateAcceptanceAndroidTest
+cp app/build/outputs/apk/updateAcceptance/app-updateAcceptance.apk "$OUTPUT/preview.apk"
+cp app/build/outputs/apk/androidTest/updateAcceptance/app-updateAcceptance-androidTest.apk "$OUTPUT/preview-test.apk"
 bash ./gradlew --no-daemon --stacktrace -PupdateAcceptanceTests=true -PversionName=0.2.10 -PversionCode="$NEWER_CODE" assembleUpdateAcceptance
 cp app/build/outputs/apk/updateAcceptance/app-updateAcceptance.apk "$OUTPUT/newer.apk"
 bash ./gradlew --no-daemon --stacktrace -PupdateAcceptanceTests=true -PversionName=0.2.9 -PversionCode="$BASELINE_CODE" assembleUpdateAcceptance assembleUpdateAcceptanceAndroidTest
@@ -42,6 +45,10 @@ reports = pathlib.Path(os.environ['KANPILOT_ANDROID_UPDATE_REPORTS'])
 sdk = pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools' / '36.0.0'
 apkanalyzer = pathlib.Path(os.environ['ANDROID_HOME']) / 'cmdline-tools' / 'latest' / 'bin' / 'apkanalyzer'
 number = int(os.environ['BUILD_NUMBER'])
+package_name = 'com.sakurasep.kaneopilot.updateacceptance'
+roles = ('preview', 'preview-test', 'baseline', 'newer', 'test')
+test_roles = ('preview-test', 'test')
+expected_versions = {'preview': ('0.0.0', number), 'baseline': ('0.2.9', number * 100 + 10), 'newer': ('0.2.10', number * 100 + 11)}
 
 def capture_report(command, name):
     report = reports / name
@@ -57,20 +64,22 @@ def capture_report(command, name):
     return result
 
 tool_results = {}
-for role in ('baseline', 'newer', 'test'):
+for role in roles:
     path = output / (role + '.apk')
     tool_results[role] = (
         capture_report([str(sdk / 'aapt'), 'dump', 'badging', str(path)], role + '-badging.txt'),
         capture_report([str(sdk / 'apksigner'), 'verify', '--verbose', '--print-certs', str(path)], role + '-signature.txt'),
     )
-test_manifest = capture_report([str(apkanalyzer), 'manifest', 'print', str(output / 'test.apk')], 'test-manifest.xml')
+test_manifests = {role: capture_report([str(apkanalyzer), 'manifest', 'print', str(output / (role + '.apk'))], role + '-manifest.xml')
+                  for role in test_roles}
 for results in tool_results.values():
     for result in results:
         result.check_returncode()
-test_manifest.check_returncode()
+for result in test_manifests.values():
+    result.check_returncode()
 
 records = {}
-for role in ('baseline', 'newer', 'test'):
+for role in roles:
     path = output / (role + '.apk')
     badging, signature = (result.stdout for result in tool_results[role])
     package = re.search(r"^package: name='([^']+)' versionCode='([^']*)' versionName='([^']*)'", badging, re.M)
@@ -78,7 +87,7 @@ for role in ('baseline', 'newer', 'test'):
     certs = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', signature, re.M)
     assert len(certs) == 1, role + ': expected one verified signing certificate'
     raw_version_code = package[2]
-    if role == 'test':
+    if role in test_roles:
         assert raw_version_code == '' or re.fullmatch(r'[0-9]+', raw_version_code), 'Acceptance test versionCode is not numeric'
         version_code = int(raw_version_code) if raw_version_code else None
     else:
@@ -87,30 +96,30 @@ for role in ('baseline', 'newer', 'test'):
     record = {'name': path.name, 'package_name': package[1], 'version_name': package[3], 'version_code': version_code,
               'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size,
               'certificate_sha256': certs[0].lower(), 'source_sha': os.environ['SOURCE_SHA'].lower()}
-    if role == 'test':
-        assert package[1] == 'com.sakurasep.kaneopilot.test', 'Acceptance test APK has another package name'
-        manifest_root = ET.fromstring(test_manifest.stdout)
+    if role in test_roles:
+        assert package[1] == package_name + '.test', role + ': acceptance test APK has another package name'
+        manifest_root = ET.fromstring(test_manifests[role].stdout)
         instrumentation = list(manifest_root.iter('instrumentation'))
         assert manifest_root.tag == 'manifest' and len(instrumentation) == 1 and instrumentation[0] in list(manifest_root), 'Acceptance APK must declare exactly one instrumentation'
         android = '{http://schemas.android.com/apk/res/android}'
         runner = instrumentation[0].get(android + 'name')
         target_package = instrumentation[0].get(android + 'targetPackage')
         assert runner == 'androidx.test.runner.AndroidJUnitRunner', 'Acceptance test runner missing'
-        assert target_package == 'com.sakurasep.kaneopilot', 'Acceptance instrumentation targets another package'
+        assert target_package == package_name, 'Acceptance instrumentation targets another package'
         record['target_package'] = target_package
         record['runner'] = runner
     else:
-        assert package[1] == 'com.sakurasep.kaneopilot', role + ': wrong target package'
-        expected_version, expected_code = ('0.2.9', number * 100 + 10) if role == 'baseline' else ('0.2.10', number * 100 + 11)
+        assert package[1] == package_name, role + ': wrong target package'
+        expected_version, expected_code = expected_versions[role]
         assert package[3] == expected_version and version_code == expected_code, role + ': version identity drift'
         assert not re.search(r'^application-debuggable(?:\s|$)', badging, re.M), role + ': preview guard would be bypassed by a debuggable build'
     records[role] = record
 assert len({entry['certificate_sha256'] for entry in records.values()}) == 1, 'Acceptance APKs were not signed by the same key'
 manifest = {'schema_version': 1, 'purpose': 'isolated-android-update-acceptance-not-a-release',
             'source_sha': os.environ['SOURCE_SHA'].lower(), 'build_number': number,
-            'package_name': 'com.sakurasep.kaneopilot', 'artifacts': records}
+            'package_name': package_name, 'artifacts': records}
 (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 (output / 'SHA256SUMS').write_text(''.join(hashlib.sha256((output / name).read_bytes()).hexdigest() + '  ' + name + '\n'
-                                        for name in ('baseline.apk', 'newer.apk', 'test.apk', 'manifest.json')), encoding='utf-8')
+                                        for name in tuple(role + '.apk' for role in roles) + ('manifest.json',)), encoding='utf-8')
 print('Exported non-published update acceptance APKs, metadata and checksums:', output)
 PY

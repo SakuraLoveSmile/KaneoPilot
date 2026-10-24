@@ -90,6 +90,8 @@ Mac 点击「安装并重新启动」后先复核包及 DMG 签名、只读挂�
 
 Android 下载后先核对 APK 包名、版本、`versionCode`、发布证书指纹以及当前安装包签名；版本号须更高，`versionCode` 须递增，签名须一致。Debug 包不支持覆盖正式签名包，明确报告原因，不通过卸载绕过。安装仅在用户点击后请求「允许安装此来源」并交给 Android 系统安装器确认，使用只读 FileProvider URI，保留配对、Keystore 和应用数据。取消安装后仍可再次安装，返回 App 时重新核对已安装版本。
 
+分支构建的 `update-acceptance/` 仅用于授权后的真机隔离验收：独立包名 `com.sakurasep.kaneopilot.updateacceptance`、显示名「KaneoPilot 更新验证」，正式主包的包名与身份规则保持固定。预览/跨版本包及匹配测试 APK 由同一 job 生成，不加入正式 Release；不通过卸载现有主包或复用其数据来取得测试通过。任务记录给出各包身份、执行入口和实际设备结果。
+
 ## 缓存清理
 
 GitHub 托管 runner 使用临时工作区；当前流程不持久化 Xcode DerivedData 或 Gradle 构建输出缓存。App/DMG 默认输出和 DerivedData 放在 `RUNNER_TEMP`，本机不再生成 `build/DerivedData` 或 `dist`。

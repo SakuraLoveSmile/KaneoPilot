@@ -132,3 +132,16 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - 保留每 job 锁，新增按规范化目标路径共享、位于交换 bundle 之外的稳定文件锁。父进程退出与 commit 核验后、目标快照检查前非阻塞取得，覆盖交换、启动、失败恢复及回执，最终关闭但不删除锁文件。冲突在允许重开 App 之前以 `update_busy` 拒绝，目标已变化也不额外启动 App；拒绝符号链接和非普通锁文件。
 - 原回归现通过：重叠任务被拒绝，只交换/启动 1 次，原目标备份保持；另一个事先准备的旧任务在锁释放后可取得锁，但因目标身份变化拒绝，未额外启动。绿测日志为 `macos-target-lock-after-fix.log`。全部 67 项本地 Python 隔离检查通过，见 `python-tests-macos-target-lock.log`；独立复核无未解决确定发现。
 - 本次改动为 Python 安装助手、该缺陷的隔离回归及共享安装规则/任务记录；Swift 与 Android 功能源码未改。run 27 继续提供对应 Android 候选，Mac 的最终安装助手必须由新提交重新经 Packages 打包并核对内嵌源码；既有 Mac UI/下载证据不代表新助手已完成云端验证。
+- 修复提交 `3ad44f15a51fd9c3ce9ce112d00426a0e4505f45` 已推送，自动触发 [Packages run 28](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40086987301)，按分支串行规则等待 run 27 结束。源码快照为 `build/evidence/kp-u01/source-3ad44f1.json`（36 文件，内容指纹 `7b15e9e2eb3f9e9b2e118b23dbe58a2000c6ec161a17b8b63a176603b34a2039`）。`android-source-equivalence-3ad44f1.json` 确认 Android 全部源码及 job 与 run 27 相同；Android 产物的版本、构建号及哈希仍分别绑定原 run，不能冒充新 run 的实际设备结果。
+
+### 用户更正 Android 测试设备与真机隔离方案
+
+- 用户明确要求 Android 已有真机，后续不要启动模拟器测试，并要求记住。已保存该约束；模拟器测试立即停止，确认 `kp_u01` / `emulator-5584` 无运行进程。AVD、已下载包和更正前的 4 项交互测试证据保留为历史，不能计为真机验收；来源仍是 run 27 / `efa2777`，系统权限、安装器取消/完成和跨版本升级未执行。
+- 只读核对已连接 Mi 10（Android API 36）：当前 `com.sakurasep.kaneopilot` 为 `0.1.0` / code 1，签名 `766b6a19522b4da7a46729ee552ec0b16ca9a6fedf3d6e9affd4acd6a92cad98` 与 run 27 验证包不同。未安装、启动或卸载真机 App，未读取配对或用户数据；证据为 `build/evidence/kp-u01/android-real-device/installed-identity.json`。
+- 后续验证包固定独立 ID `com.sakurasep.kaneopilot.updateacceptance`、显示名「KaneoPilot 更新验证」，沿现有非调试 `updateAcceptance` 变体隔离 UID、偏好、缓存、FileProvider 与 Keystore。正式/debug 主包的固定包名与更新身份规则保留；仅该验证变体的编译常量指向独立 ID，仍严格核对当前 App/下载包、版本/code、证书和 SHA256，不增加运行时绕过。
+- 同一云端 job 导出预览 `0.0.0`（code=run number）及匹配 test APK、baseline `0.2.9`（code=run number×100+10）、newer `0.2.10`（code=run number×100+11）及匹配 baseline test APK，全部同签名。导出器严格验证五份 APK 与两个真实 instrumentation XML，保存诊断后才写 manifest/checksums；这些验证包不进入正式 Release。
+- Android worker 独占 `android/**` 完成此验证支持，主 agent 维护 `scripts/tests/test_android_update_export.py`、workflow 和记录；不并行写同一文件。预览包承接既有 4 项交互及真实 MainActivity 公网检查；另加显式 opt-in 的生产客户端公网检查/下载隔离用例，记录冻结 Release、实际大小/哈希和真实 APK 身份，不触发安装，不改变预览保护。baseline/newer 承接既定系统安装流程及外部核对。
+- 本轮只先完成代码、隔离检查、审查和已授权任务分支云端构建，使真机操作具体可检查。真机安装独立验证 App、来源授权和系统安装交接另行取得具体授权；不卸载或覆盖当前主包，也不擅自上传其私钥来解决签名差异。任务仍“实现中”。
+- 已实现上述独立变体、五 APK 导出和显式公网用例；主包默认编译身份仍为 `com.sakurasep.kaneopilot`。根据用户设备约束，将系统用例原有 emulator 硬件限制替换为严格独立包名/无配对/非调试检查，保留所有真实权限、版本、证书、哈希和结果断言。单测增加“下载包与已装包都换成其他包仍拒绝”的检查；不是通过放行签名不符或删除同版本拒绝来适配真机。
+- 真机只读 resolver 确认安装器是 `com.miui.packageinstaller/com.miui.packageInstaller.InstallStart`，来源权限页仍 `com.android.settings`；系统用例只将该已确认包名加入固定安装器集合，未扩大任意窗口或按钮点选。五角色导出回归 7 项通过，全部本地 Python 隔离检查 68 项通过，见 `android-isolated-package-export-tests.log`、`python-tests-real-device-support.log`。Shell、两段 Python 3.9 AST、Manifest XML、workflow YAML、差异检查通过；独立 Sol 复核未发现确定缺陷。未本地编译，未操作真机 App 或权限。
+- 将以包含该验证支持的新候选接替 run 28，旧 run 保留其实际局部结果，不能计为新源码完整通过。新候选必须经 Packages 完整检查、编译及产物身份核验后，才提供真机安装确认的具体包与操作范围。
