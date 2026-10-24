@@ -18,6 +18,8 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 - 未知命令、payload 缺必填字段、含未知字段均报 `bad_request`。
 - 每个命令是独立进程调用；调用方不得假设进程存活等于操作存活（见心跳/失联语义）。
 
+软件自身更新独立于调度命令：原生更新器读取固定 GitHub Release 元数据、校验包并提供系统安装入口；Mac 随资源打包的 `app_update_installer.py` 仅在现有 App 安全退出门控后替换 App。更新器及助手均不读写调度 SQLite、任务或凭据，也不增加手机调度接口。规则见 [build-release.md](build-release.md#app-内获取更新)。
+
 ## 2. 概念模型
 
 - **task**：一个被跟踪的 Kaneo 任务。`task_id` 是 Kaneo 任务 ID。

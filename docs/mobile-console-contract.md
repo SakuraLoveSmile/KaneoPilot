@@ -13,6 +13,10 @@
 - 设备撤销后每次查询和每次核心写事务检查授权。手机不能取得 Kaneo、Plus 或本机 MCP 凭据。
 - AppRuntime 拥有独立 MobileServiceManager；关窗服务继续，退出只停止本实例拥有的服务。FakeCore 不启动真实服务。服务启动及每次 worker 请求先检查固定宿主 DB 已存在且 schema 当前，不创建空库或代跑 migrate。
 
+## 软件自身更新（KP-U01）
+
+Android「连接」页在底部版本信息前增加沿用现有 Section 卡片的「软件更新」，显示自动检查/下载开关、手动检查、状态和进度、错误/重试及系统安装入口，按钮沿用至少 48dp 触控高度。保持原配对、任务、待核实操作和导航。独立更新器仅从固定 GitHub Release 获取本软件安装包，不经手机服务、不读取配对令牌、不操作 Mac 调度数据；无 Mac 配对也可检查。业务规则、包身份和安装校验统一见 [build-release.md](build-release.md#app-内获取更新)。系统安装权限只在用户点击安装时申请，取消后保留已校验包供重试。
+
 ## 本机固定 CLI（仅桌面管理）
 
 下列命令都从 `kanpilot.mobile_access` 导出同名 cmd_* handler，由主 agent 注册。

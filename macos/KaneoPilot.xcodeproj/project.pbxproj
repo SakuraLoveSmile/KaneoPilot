@@ -43,6 +43,9 @@
 		BA5E00000000000000001170 /* MobileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001070 /* MobileModels.swift */; };
 		BA5E00000000000000001171 /* MobileServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001071 /* MobileServiceManager.swift */; };
 		BA5E00000000000000001172 /* MobileConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001072 /* MobileConnectionView.swift */; };
+		BA5E00000000000000001174 /* SoftwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001074 /* SoftwareUpdate.swift */; };
+		BA5E00000000000000001175 /* SoftwareUpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001075 /* SoftwareUpdateManager.swift */; };
+		BA5E00000000000000001176 /* SoftwareUpdateSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001076 /* SoftwareUpdateSection.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -85,6 +88,9 @@
 		BA5E00000000000000001070 /* MobileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModels.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001071 /* MobileServiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileServiceManager.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001072 /* MobileConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileConnectionView.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001074 /* SoftwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdate.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001075 /* SoftwareUpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateManager.swift; sourceTree = "<group>"; };
+		BA5E00000000000000001076 /* SoftwareUpdateSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateSection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,6 +145,8 @@
 				BA5E00000000000000001042 /* LoginItem.swift */,
 				BA5E00000000000000001041 /* SchedulerDecision.swift */,
 				BA5E00000000000000001040 /* AppRuntime.swift */,
+				BA5E00000000000000001074 /* SoftwareUpdate.swift */,
+				BA5E00000000000000001075 /* SoftwareUpdateManager.swift */,
 				BA5E00000000000000001016 /* EngineSupervisor.swift */,
 				BA5E00000000000000001032 /* MCPServiceManager.swift */,
 			);
@@ -158,6 +166,7 @@
 				BA5E00000000000000001010 /* RunsView.swift */,
 				BA5E00000000000000001011 /* SettingsView.swift */,
 				BA5E00000000000000001072 /* MobileConnectionView.swift */,
+				BA5E00000000000000001076 /* SoftwareUpdateSection.swift */,
 				BA5E00000000000000001012 /* Components.swift */,
 				BA5E00000000000000001060 /* SessionReaderStore.swift */,
 				BA5E00000000000000001061 /* SessionMessagePresentation.swift */,
@@ -265,6 +274,9 @@
 				BA5E00000000000000001142 /* LoginItem.swift in Sources */,
 				BA5E00000000000000001141 /* SchedulerDecision.swift in Sources */,
 				BA5E00000000000000001140 /* AppRuntime.swift in Sources */,
+				BA5E00000000000000001174 /* SoftwareUpdate.swift in Sources */,
+				BA5E00000000000000001175 /* SoftwareUpdateManager.swift in Sources */,
+				BA5E00000000000000001176 /* SoftwareUpdateSection.swift in Sources */,
 				BA5E00000000000000001105 /* AppViewModel.swift in Sources */,
 				BA5E00000000000000001106 /* RootView.swift in Sources */,
 				BA5E00000000000000001181 /* AutomationDashboardView.swift in Sources */,

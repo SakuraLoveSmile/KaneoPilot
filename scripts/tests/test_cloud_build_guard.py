@@ -19,6 +19,7 @@ ENTRIES = (
     ("python", "scripts/preview_verification_checks.py"),
     ("python", "scripts/preview_plan_questions.py"),
     ("python", "macos/tests/preview_execution_questions.py"),
+    ("bash", "macos/tests/run-software-update-fixtures.sh"),
     ("sh", "android/gradlew"),
 )
 
@@ -38,7 +39,7 @@ class CloudBuildGuardTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "unexpected-build-tools.log"
-        for name in ("xcodebuild", "java", "mktemp", "mkdir", "codesign", "hdiutil"):
+        for name in ("xcodebuild", "swiftc", "java", "mktemp", "mkdir", "codesign", "hdiutil"):
             command = self.bin / name
             command.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$STUB_LOG"\nexit 99\n')
             command.chmod(0o755)

@@ -5,6 +5,7 @@ import AppKit
 @MainActor
 private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var windowCloseObserver: NSObjectProtocol?
+    private var terminationInProgress = false
     weak var model: AppViewModel?
     var openMainWindow: (() -> Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -12,6 +13,7 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate, UNUs
             UNUserNotificationCenter.current().delegate = self
         }
         AppRuntime.shared.start()
+        SoftwareUpdateManager.shared.start()
         // Explicit local acceptance override also defeats restored/ideal window sizes.
         // Production launch has no override and retains normal macOS restoration.
         if let size = ProcessInfo.processInfo.environment["KANPILOT_WINDOW_SIZE"],
@@ -48,10 +50,14 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate, UNUs
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationInProgress else { return .terminateLater }
+        terminationInProgress = true
         Task { @MainActor in
             do {
                 try await model?.flushPlanAnswerDrafts()
             } catch {
+                terminationInProgress = false
+                SoftwareUpdateManager.shared.cancelInstallation("回答草稿尚未保存，已取消安装")
                 sender.reply(toApplicationShouldTerminate: false)
                 let alert = NSAlert()
                 alert.messageText = "回答草稿尚未保存"
@@ -61,19 +67,33 @@ private final class KaneoPilotAppDelegate: NSObject, NSApplicationDelegate, UNUs
                 return
             }
             AppRuntime.shared.stop { successful in
-                sender.reply(toApplicationShouldTerminate: successful)
-                if !successful {
-                    let alert = NSAlert()
-                    alert.messageText = "后台进程清理尚未完成"
-                    alert.informativeText = "已停止调度并保留现场。请恢复核心连接后重试退出；Plus 会话不会被结束。"
-                    alert.addButton(withTitle: "好")
-                    alert.runModal()
+                Task { @MainActor in
+                    if successful {
+                        let ready = await SoftwareUpdateManager.shared.launchPreparedInstallationAfterShutdown()
+                        if !ready {
+                            self.terminationInProgress = false
+                            AppRuntime.shared.start()
+                        }
+                        sender.reply(toApplicationShouldTerminate: ready)
+                    } else {
+                        self.terminationInProgress = false
+                        SoftwareUpdateManager.shared.cancelInstallation("后台进程尚未安全停止，已取消安装")
+                        sender.reply(toApplicationShouldTerminate: false)
+                        let alert = NSAlert()
+                        alert.messageText = "后台进程清理尚未完成"
+                        alert.informativeText = "已停止调度并保留现场。请恢复核心连接后重试退出；Plus 会话不会被结束。"
+                        alert.addButton(withTitle: "好")
+                        alert.runModal()
+                    }
                 }
             }
         }
         return .terminateLater
     }
-    func applicationWillTerminate(_ notification: Notification) { AppRuntime.shared.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        SoftwareUpdateManager.shared.stop()
+        AppRuntime.shared.stop()
+    }
 }
 
 @main
