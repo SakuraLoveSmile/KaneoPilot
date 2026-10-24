@@ -96,3 +96,7 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - 本节支持代码已写齐，云端入口保护扩至全部新增脚本；本次重新运行 60 项 Python 隔离检查全部通过，日志为 `build/evidence/kp-u01/python-tests-acceptance-support.log`。Shell、嵌入 Python、YAML 和差异检查通过。独立审查发现的 OkHttp `File.asResponseBody` 调用已改为真实文件 `source().buffer()` 流式响应；其余未发现确定缺陷。Swift/Gradle 编译与系统/界面执行仍待新候选 Packages，不能凭这些静态结果记通过。
 - Android 系统用例分开运行 `permissionDenialGrantAndInstallerCancelRemainRetryable`、`actualUpgradeHandoffRequiresExternalVerification`、`afterUpgradeReadsInstalledIdentityAndRestoresTheRealApp`，共同显式参数 `update_acceptance=true`，实际安装另加 `allow_update_install=true`。最后一项须在手动首次启动新版前运行，才能证明真实 model 将 `known_update` 从存在改为清除。固定传输系统用例不证明公网 TLS/重定向；真实下载另行验证。
 - 生产安装、真实手机、正式签名升级、合并与 Release 均不由隔离验证代替，仍分别记录授权及结果。
+
+### 云端首轮编译反馈
+
+- `2487159` 已提交并推送隔离验收支持，等待分支 Packages。run 21 的 Python 核心/集成及 Android 单测/lint 已通过，但 instrumentation 编译失败：`SoftwareUpdateInteractionTest.kt` 把 Compose 的成员方法 `assertDoesNotExist` 作为顶层扩展导入。已仅移除错误导入，两处实际拒绝断言保留，不修改预期或检查强度。原始日志保留于 `build/evidence/kp-u01/run21-android-failed.log`；必须用修正后的云端候选重新编译，不能将该失败记作通过。
