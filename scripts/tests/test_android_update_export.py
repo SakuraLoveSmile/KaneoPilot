@@ -21,10 +21,15 @@ class AndroidUpdateExportTests(unittest.TestCase):
         self.output.mkdir()
         self.sdk = self.root / "sdk" / "build-tools" / "36.0.0"
         self.sdk.mkdir(parents=True)
+        self.analyzer = self.root / "sdk" / "cmdline-tools" / "latest" / "bin"
+        self.analyzer.mkdir(parents=True)
+        self.reports = self.root / "reports"
+        self.reports.mkdir()
         self.environment = dict(os.environ, ANDROID_HOME=str(self.root / "sdk"),
                                 BUILD_NUMBER="25", SOURCE_SHA="a" * 40,
-                                KANPILOT_ANDROID_UPDATE_OUTPUT=str(self.output))
-        # Only aapt/apksigner are replaced. The exporter itself is read from source and executed.
+                                KANPILOT_ANDROID_UPDATE_OUTPUT=str(self.output),
+                                KANPILOT_ANDROID_UPDATE_REPORTS=str(self.reports))
+        # Only SDK tools are replaced. The exporter itself is read from source and executed.
         stub = ("#!/usr/bin/env python3\n"
                 "from pathlib import Path\nimport sys\n"
                 "tool = Path(__file__)\nrole = Path(sys.argv[-1]).stem\n"
@@ -33,20 +38,28 @@ class AndroidUpdateExportTests(unittest.TestCase):
             path = self.sdk / tool
             path.write_text(stub)
             path.chmod(0o700)
+        analyzer = self.analyzer / "apkanalyzer"
+        analyzer.write_text(stub)
+        analyzer.chmod(0o700)
         for role, version, code in (("baseline", "0.2.9", "2510"),
                                     ("newer", "0.2.10", "2511"), ("test", "", "")):
             (self.output / (role + ".apk")).write_bytes(("isolated " + role).encode())
             package = "com.sakurasep.kaneopilot" + (".test" if role == "test" else "")
             badging = "package: name='%s' versionCode='%s' versionName='%s'\n" % (package, code, version)
-            if role == "test":
-                badging += ("instrumentation: name='androidx.test.runner.AndroidJUnitRunner' "
-                            "targetPackage='com.sakurasep.kaneopilot'\n")
+            # aapt badging does not supply the instrumentation declaration.
             (self.sdk / ("aapt-" + role + ".txt")).write_text(badging)
             (self.sdk / ("apksigner-" + role + ".txt")).write_text(
                 "Signer #1 certificate SHA-256 digest: " + "b" * 64 + "\n")
+        self.manifest = ("<?xml version='1.0' encoding='utf-8'?>\n"
+                         "<manifest xmlns:android='http://schemas.android.com/apk/res/android' "
+                         "package='com.sakurasep.kaneopilot.test'>\n"
+                         "  <instrumentation android:name='androidx.test.runner.AndroidJUnitRunner' "
+                         "android:targetPackage='com.sakurasep.kaneopilot'/>\n</manifest>\n")
+        (self.analyzer / "apkanalyzer-test.txt").write_text(self.manifest)
 
-    def export(self):
-        script = (ROOT / "android/tests/export-update-acceptance.sh").read_text()
+    def export(self, script=None):
+        if script is None:
+            script = (ROOT / "android/tests/export-update-acceptance.sh").read_text()
         marker = "python3 - <<'PY'\n"
         self.assertEqual(script.count(marker), 1)
         body = script.split(marker, 1)[1].rsplit("\nPY", 1)[0]
@@ -63,6 +76,8 @@ class AndroidUpdateExportTests(unittest.TestCase):
         self.assertEqual(manifest["artifacts"]["baseline"]["version_code"], 2510)
         self.assertEqual(manifest["artifacts"]["newer"]["version_code"], 2511)
         self.assertEqual(manifest["artifacts"]["test"]["target_package"], "com.sakurasep.kaneopilot")
+        self.assertEqual(manifest["artifacts"]["test"]["runner"], "androidx.test.runner.AndroidJUnitRunner")
+        self.assertEqual((self.reports / "test-manifest.xml").read_text(), self.manifest)
         self.assertTrue(manifest_path.read_bytes().endswith(b"\n"))
         checksums = (self.output / "SHA256SUMS").read_text().splitlines()
         self.assertEqual(len(checksums), 4)
@@ -85,6 +100,37 @@ class AndroidUpdateExportTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Acceptance APKs were not signed by the same key", result.stderr)
         self.assertFalse((self.output / "manifest.json").exists())
+
+    def test_wrong_instrumentation_target_is_rejected_with_manifest_evidence(self):
+        changed = self.manifest.replace("targetPackage='com.sakurasep.kaneopilot'",
+                                        "targetPackage='com.example.other'")
+        (self.analyzer / "apkanalyzer-test.txt").write_text(changed)
+        result = self.export()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Acceptance instrumentation targets another package", result.stderr)
+        self.assertFalse((self.output / "manifest.json").exists())
+        self.assertEqual((self.reports / "test-manifest.xml").read_text(), changed)
+
+    def test_wrong_instrumentation_runner_is_rejected_with_manifest_evidence(self):
+        changed = self.manifest.replace("androidx.test.runner.AndroidJUnitRunner", "com.example.OtherRunner")
+        (self.analyzer / "apkanalyzer-test.txt").write_text(changed)
+        result = self.export()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Acceptance test runner missing", result.stderr)
+        self.assertFalse((self.output / "manifest.json").exists())
+        self.assertEqual((self.reports / "test-manifest.xml").read_text(), changed)
+
+    def test_missing_or_duplicate_instrumentation_is_rejected(self):
+        declaration = ("<instrumentation android:name='androidx.test.runner.AndroidJUnitRunner' "
+                       "android:targetPackage='com.sakurasep.kaneopilot'/>")
+        for count in (0, 2):
+            with self.subTest(instrumentation_count=count):
+                changed = self.manifest.replace(declaration, declaration * count)
+                (self.analyzer / "apkanalyzer-test.txt").write_text(changed)
+                result = self.export()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.output / "manifest.json").exists())
+                self.assertEqual((self.reports / "test-manifest.xml").read_text(), changed)
 
 
 if __name__ == "__main__":

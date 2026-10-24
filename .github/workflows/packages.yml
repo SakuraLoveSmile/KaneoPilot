@@ -157,6 +157,7 @@ jobs:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
           BUILD_NUMBER: ${{ github.run_number }}
+          KANPILOT_ANDROID_UPDATE_REPORTS: ${{ runner.temp }}/android-update-export-reports
         shell: bash
         run: |
           set -euo pipefail
@@ -205,6 +206,14 @@ jobs:
             android/app/build/reports/tests/
             android/app/build/test-results/
             android/app/build/reports/lint-results-*
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve update export diagnostics
+        if: ${{ always() && needs.identity.outputs.release == 'false' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-update-export-reports-${{ github.run_number }}
+          path: ${{ runner.temp }}/android-update-export-reports/
           if-no-files-found: warn
           retention-days: 14
       - name: Remove temporary signing material
