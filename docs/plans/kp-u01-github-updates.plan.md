@@ -80,3 +80,8 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 ### 2026-10-24 授权后继续
 
 用户通过已有确认项明确授权“允许提交、推送并运行云端构建”。已重新核对主目录、任务分支、HEAD、未提交内容与工作树归属，按本节从候选提交与分支构建继续；此前的授权阻塞已解除。
+
+- 功能提交 `f7a7992965ae0f2e900bb927a13b632fe1d6d83e` 已推送至本任务分支；同步的用户 `AGENTS.md` 未纳入提交。推送自动触发 [Packages run 20](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40073548512)，没有额外重复 dispatch。2026-10-24 15:33 台北查询：identity、打包检查及核心隔离测试通过，集成测试运行中；两端编译尚待后续 job。
+- 为检查实际云端产物，新增仅分支构建导出的 Android instrumentation APK、Mac 更新夹具二进制和独立 bundle `local.kaneopilot.software-update-check` 的 UI 包；正式 Release 资产与门禁未变。Mac 夹具默认继续完全隔离，只有显式 `--live-download <绝对缓存目录>` 才调用生产下载服务读取正式 Release。Android 新增真实已安装 APK 的 PackageManager 身份、SHA256 及相同版本拒绝检查，并保存交互截图。
+- 本次验证支持改动已通过 workflow YAML、嵌入 Python 语法与实际换行、Shell 语法、差异空白检查及 4 项云端编译保护检查；没有在本地运行编译器。该修改尚需下一次 Packages 云端编译与产物验证，不能沿用 run 20 的结果。
+- 独立 Android 模拟器 `emulator-5584`（API 36 ARM64）已启动；只允许对该 serial 操作，不触碰连接中的真实手机。AVD、日志与后续截图保留在 `build/evidence/kp-u01/android-avd/`。Mac 验证使用完整隔离路径与 FakeCore，不覆盖 HOME、不访问生产 DB 或现有 App。

@@ -115,14 +115,14 @@ jobs:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" --continue testDebugUnitTest lintDebug
-      - name: Build debug APK
+      - name: Build debug APK and isolated instrumentation APK
         id: debug-build
         if: ${{ success() && needs.identity.outputs.release == 'false' }}
         working-directory: android
         env:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
-        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug
+        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug assembleDebugAndroidTest
       - name: Restore release signing key
         id: signing-key
         if: ${{ success() && needs.identity.outputs.release == 'true' }}
@@ -181,6 +181,13 @@ jobs:
           fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-verification.txt" | tr 'A-F' 'a-f')
           cp "$apk" "$RUNNER_TEMP/android-package/$name"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/android-package/$name" --platform android --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures any --output "$RUNNER_TEMP/android-package/android-metadata.json"
+          if [ "$RELEASE" = false ]; then
+            test_apk=android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$test_apk" > "$RUNNER_TEMP/test-apk-verification.txt"
+            test_fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/test-apk-verification.txt" | tr 'A-F' 'a-f')
+            [ "$test_fingerprint" = "$fingerprint" ] || { echo 'Instrumentation APK signer differs from target APK' >&2; exit 1; }
+            cp "$test_apk" "$RUNNER_TEMP/android-package/KaneoPilot-ci-$BUILD_NUMBER-android-test.apk"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.android-package.outcome == 'success' }}
         with:
@@ -217,6 +224,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Affected desktop fixtures
+        id: desktop-fixtures
+        env:
+          KANPILOT_UPDATE_FIXTURE_OUTPUT: ${{ runner.temp }}/macos-update-fixture
         shell: bash
         run: |
           set -euo pipefail
@@ -260,6 +270,46 @@ jobs:
           mkdir -p "$RUNNER_TEMP/macos-package"
           cp "$APP_OUTPUT_DIR/$DMG_NAME" "$RUNNER_TEMP/macos-package/"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/macos-package/$DMG_NAME" --platform macos --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures arm64,x86_64 --output "$RUNNER_TEMP/macos-package/macos-metadata.json"
+      - name: Stage isolated macOS update UI
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        env:
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/macos-update-ui"
+          preview="$RUNNER_TEMP/update-ui-preview/KaneoPilot Update Check.app"
+          mkdir -p "$(dirname "$preview")"
+          ditto "$RUNNER_TEMP/macos-build/KaneoPilot.app" "$preview"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.kaneopilot.software-update-check' "$preview/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName KaneoPilot Update Check' "$preview/Contents/Info.plist"
+          codesign --force --deep --sign - "$preview"
+          codesign --verify --deep --strict "$preview"
+          ditto -c -k --keepParent --sequesterRsrc "$preview" "$RUNNER_TEMP/macos-update-ui/KaneoPilot-update-ui.zip"
+          python3 - <<'PYUI'
+          import hashlib, json, os, pathlib
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'macos-update-ui'
+          package = directory / 'KaneoPilot-update-ui.zip'
+          metadata = {'source_sha': os.environ['SOURCE_SHA'], 'build_number': int(os.environ['BUILD_NUMBER']),
+                      'bundle_identifier': 'local.kaneopilot.software-update-check',
+                      'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size}
+          (directory / 'ui-metadata.json').write_text(json.dumps(metadata, sort_keys=True, indent=2) + '\n')
+          PYUI
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        with:
+          name: macos-update-ui-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-update-ui/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && needs.identity.outputs.release == 'false' && steps.desktop-fixtures.outcome == 'success' }}
+        with:
+          name: macos-update-fixture-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-update-fixture/*
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.macos-package.outcome == 'success' }}
         with:

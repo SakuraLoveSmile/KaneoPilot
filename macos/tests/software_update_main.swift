@@ -32,6 +32,22 @@ private func fixtureObjects(_ release: SoftwareRelease) -> ([String: Any], [Stri
 
 private func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
 
+/// Only the explicit live-download CLI uses the real GitHub transport.
+/// Keep progress off stdout so the final evidence remains one JSON object.
+private final class LiveDownloadProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastPercent = -1
+
+    func report(_ value: Double) {
+        let percent = max(0, min(100, Int(value * 100)))
+        lock.lock()
+        guard percent != lastPercent else { lock.unlock(); return }
+        lastPercent = percent
+        FileHandle.standardError.write(Data("GitHub Release download: \(percent)%\n".utf8))
+        lock.unlock()
+    }
+}
+
 private final class FixtureTransport: SoftwareUpdateTransport, @unchecked Sendable {
     let release: SoftwareRelease
     var bytes: Data
@@ -405,6 +421,26 @@ private actor DelayedProgressService: SoftwareUpdateServing {
     }
 
     @MainActor static func main() async throws {
+        let arguments = CommandLine.arguments
+        if arguments.count > 1 {
+            guard arguments.count == 3, arguments[1] == "--live-download", arguments[2].hasPrefix("/") else {
+                throw SoftwareUpdateError.invalid("用法：software-update-fixture --live-download <绝对缓存目录>")
+            }
+            let cache = URL(fileURLWithPath: arguments[2], isDirectory: true).standardizedFileURL
+            let service = GitHubSoftwareUpdateService()
+            let selected = try await service.latest()
+            let progress = LiveDownloadProgress()
+            let package = try await service.download(selected, cacheDirectory: cache) { progress.report($0) }
+            let evidence: [String: Any] = ["version": selected.version, "tag": selected.tag,
+                "source_sha": selected.sourceSHA, "build_number": selected.buildNumber,
+                "size": selected.size, "sha256": selected.sha256,
+                "package_path": package.path, "download_url": selected.downloadURL.absoluteString,
+                "size_verified": true, "sha256_verified": true]
+            FileHandle.standardError.write(Data("GitHub Release package size and SHA256 verified.\n".utf8))
+            FileHandle.standardOutput.write(try json(evidence))
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            return
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("kp-update-fixtures-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
