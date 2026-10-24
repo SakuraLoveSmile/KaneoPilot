@@ -18,7 +18,16 @@ android {
         keyAlias = System.getenv("ANDROID_KEY_ALIAS")
         keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
     }
-    buildTypes { getByName("release") { if (hasReleaseKeys) signingConfig = signingConfigs.getByName("release"); isMinifyEnabled = false } }
+    buildTypes {
+        getByName("release") { if (hasReleaseKeys) signingConfig = signingConfigs.getByName("release"); isMinifyEnabled = false }
+        create("updateAcceptance") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
+            matchingFallbacks += listOf("release")
+        }
+    }
+    testBuildType = if (providers.gradleProperty("updateAcceptanceTests").orNull == "true") "updateAcceptance" else "debug"
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
@@ -54,4 +63,5 @@ dependencies {
     // Keep this explicit: older transitive Espresso versions can stall on a concurrent MessageQueue.
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    add("updateAcceptanceImplementation", "androidx.compose.ui:ui-test-manifest")
 }

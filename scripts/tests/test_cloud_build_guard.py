@@ -20,6 +20,9 @@ ENTRIES = (
     ("python", "scripts/preview_plan_questions.py"),
     ("python", "macos/tests/preview_execution_questions.py"),
     ("bash", "macos/tests/run-software-update-fixtures.sh"),
+    ("bash", "macos/tests/run-software-update-ui-fixtures.sh"),
+    ("bash", "macos/tests/run-software-update-termination-fixtures.sh"),
+    ("bash", "android/tests/export-update-acceptance.sh"),
     ("sh", "android/gradlew"),
 )
 

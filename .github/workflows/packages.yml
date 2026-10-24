@@ -187,6 +187,7 @@ jobs:
             test_fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/test-apk-verification.txt" | tr 'A-F' 'a-f')
             [ "$test_fingerprint" = "$fingerprint" ] || { echo 'Instrumentation APK signer differs from target APK' >&2; exit 1; }
             cp "$test_apk" "$RUNNER_TEMP/android-package/KaneoPilot-ci-$BUILD_NUMBER-android-test.apk"
+            KANPILOT_ANDROID_UPDATE_OUTPUT="$RUNNER_TEMP/android-package/update-acceptance" bash android/tests/export-update-acceptance.sh
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.android-package.outcome == 'success' }}
@@ -227,12 +228,13 @@ jobs:
         id: desktop-fixtures
         env:
           KANPILOT_UPDATE_FIXTURE_OUTPUT: ${{ runner.temp }}/macos-update-fixture
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/macos-reports"
           result=0
-          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures run-software-update-fixtures; do
+          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures run-software-update-fixtures run-software-update-termination-fixtures run-software-update-ui-fixtures; do
             if bash "macos/tests/$fixture.sh" 2>&1 | tee "$RUNNER_TEMP/macos-reports/$fixture.log"; then
               echo "$fixture passed"
             else

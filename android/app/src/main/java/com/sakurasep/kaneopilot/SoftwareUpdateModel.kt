@@ -34,10 +34,15 @@ internal data class SoftwareUpdateState(
 }
 
 /** Software downloads have no access to ConsoleModel, paired-Mac tokens, or scheduling state. */
-class SoftwareUpdateModel(application: Application) : AndroidViewModel(application) {
+class SoftwareUpdateModel private constructor(application: Application, private val client: GitHubUpdateClient) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, GitHubUpdateClient())
+
+    // Test transport substitutes response bytes only. Version, preview, digest, APK, signature,
+    // FileProvider and platform-permission checks all remain on the production path.
+    internal constructor(application: Application, transport: UpdateTransport) : this(application, GitHubUpdateClient(transport))
+
     private val app = application
     private val preferences = app.getSharedPreferences("software_updates", 0)
-    private val client = GitHubUpdateClient()
     private val directory = File(app.cacheDir, "updates")
     internal val preview = UpdatePolicy.preview(BuildConfig.VERSION_NAME, BuildConfig.DEBUG)
     internal var state by mutableStateOf(SoftwareUpdateState(

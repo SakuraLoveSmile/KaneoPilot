@@ -85,3 +85,14 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - 为检查实际云端产物，新增仅分支构建导出的 Android instrumentation APK、Mac 更新夹具二进制和独立 bundle `local.kaneopilot.software-update-check` 的 UI 包；正式 Release 资产与门禁未变。Mac 夹具默认继续完全隔离，只有显式 `--live-download <绝对缓存目录>` 才调用生产下载服务读取正式 Release。Android 新增真实已安装 APK 的 PackageManager 身份、SHA256 及相同版本拒绝检查，并保存交互截图。
 - 本次验证支持改动已通过 workflow YAML、嵌入 Python 语法与实际换行、Shell 语法、差异空白检查及 4 项云端编译保护检查；没有在本地运行编译器。该修改尚需下一次 Packages 云端编译与产物验证，不能沿用 run 20 的结果。
 - 独立 Android 模拟器 `emulator-5584`（API 36 ARM64）已启动；只允许对该 serial 操作，不触碰连接中的真实手机。AVD、日志与后续截图保留在 `build/evidence/kp-u01/android-avd/`。Mac 验证使用完整隔离路径与 FakeCore，不覆盖 HOME、不访问生产 DB 或现有 App。
+
+### 隔离验收补齐与构建候选
+
+- 验证支持提交 `f070c6a81726c70ddb4b6e02a7708f411ce4760f` 已推送，自动触发 [Packages run 21](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40074672567)。功能文件指纹（28 文件，排除计划及用户指南）为 `9104b983308bcc9139e07193021b202ece96790693c33786671dfc054c240553`，记录在 `build/evidence/kp-u01/source-f070c6a.json`。run 20 因被该候选取代，由本任务主动取消以释放分支队列；它只保留已完成的局部结果，不能记完整通过。
+- 独立只读核对确认原有证据缺口：禁用网络的完整 Mac 预览包只能证明设置布局，不能点通更新状态；manager 夹具没有经过 AppDelegate；Android Compose 确认及同版本 APK 拒绝没有经过真实权限页、安装器与安装完成。保留原 T4 范围，不将这些缺口改标通过。
+- Mac worker 继续独占四份 `macos/tests/software_update_{ui,termination}_main.swift` / `run-software-update-{ui,termination}-fixtures.sh`：直接复用生产 Section/manager 的原生 UI 壳注入隔离服务；真实 AppDelegate 类由源码提取后，在边界替身中核对草稿、停止、助手握手、退出答复的顺序及失败分支。UI 壳只截获退出请求，不执行安装；退出夹具不声称完整 App 真实退出。
+- Android worker 继续独占 `android/**`：保留生产 Application 单参数构造，仅注入下载 transport；新增显式启用的 `updateAcceptance` 非调试验证变体，使用同一云端 job 的测试签名生成 `0.2.9` / `0.2.10` 与递增 code。真实 PackageManager、SHA256、证书、版本和系统权限校验全部保留；仅固定传输数据，不注入“已校验成功”。脚本导出两份 APK、匹配 baseline 的 instrumentation APK 和身份清单。不会将验证包加入正式 Release。
+- 主 agent 独占 workflow、云端入口保护检查和记录。Packages 仅非 Release 阶段导出验证 APK；桌面夹具增加上述两个入口。模拟器验收先检查权限拒绝/返回、授权/返回、安装取消与重试，再单独发起跨版本安装。系统安装将结束旧 instrumentation，不能把其断开记作 JUnit 通过；升级结果必须由外部 adb 对唯一隔离 serial 核对新版本/code/证书及重启结果。
+- 本节支持代码已写齐，云端入口保护扩至全部新增脚本；本次重新运行 60 项 Python 隔离检查全部通过，日志为 `build/evidence/kp-u01/python-tests-acceptance-support.log`。Shell、嵌入 Python、YAML 和差异检查通过。独立审查发现的 OkHttp `File.asResponseBody` 调用已改为真实文件 `source().buffer()` 流式响应；其余未发现确定缺陷。Swift/Gradle 编译与系统/界面执行仍待新候选 Packages，不能凭这些静态结果记通过。
+- Android 系统用例分开运行 `permissionDenialGrantAndInstallerCancelRemainRetryable`、`actualUpgradeHandoffRequiresExternalVerification`、`afterUpgradeReadsInstalledIdentityAndRestoresTheRealApp`，共同显式参数 `update_acceptance=true`，实际安装另加 `allow_update_install=true`。最后一项须在手动首次启动新版前运行，才能证明真实 model 将 `known_update` 从存在改为清除。固定传输系统用例不证明公网 TLS/重定向；真实下载另行验证。
+- 生产安装、真实手机、正式签名升级、合并与 Release 均不由隔离验证代替，仍分别记录授权及结果。
