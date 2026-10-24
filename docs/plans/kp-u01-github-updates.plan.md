@@ -123,3 +123,12 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - 校验前保存三份 APK 的实际 badging、签名 stdout/stderr 和测试 APK manifest XML；任一工具失败或身份不符均不生成候选 manifest，Actions 只另外上传文本诊断。版本/code、非调试、包名、单证书/同签名、大小与哈希门禁保留。正式 Release 不导出这些验证包。
 - 在 SDK 替身输出中移除虚构的 badging instrumentation 行，旧 `d66862e` 导出器复现相同失败，基线为 `android-export-xml-before-fix.log`。修复后的 66 项 Python 隔离检查全部通过，包含错误 runner/target 和缺失/重复 instrumentation 拒绝；日志为 `python-tests-android-export-xml.log`。Shell、内嵌 Python、workflow YAML 与差异检查通过；独立 Sol 只读复核未发现确定缺陷。实际 SDK XML 兼容与 Android 系统安装流程仍须下一候选的云端产物验证。
 - 本次修复仅变动 Android 验证导出器、其回归、workflow 的诊断目录/上传步骤及本记录；Mac/core 功能源码和 Mac 构建步骤未改。上述真实 Mac UI/下载证据继续对应同一功能源码，不声称整个 workflow 文件未变。未触碰生产 App、DB 或真实手机，任务保持“实现中”。
+- 修复提交 `efa2777777546b85c3d1c97263eaf3b65a5a3307` 已推送，自动触发 [Packages run 27](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40084759430)，未额外 dispatch。源码快照为 `build/evidence/kp-u01/source-efa2777.json`（36 文件，内容指纹 `c202e1af3ca1c78c4a8672d4648abad65d26a2b51bbf0fcff1b51920cfae8e1c`）；实际云端结果与 Android 系统验证待续。`macos-source-equivalence-efa2777.json` 进一步核实 run 25 的 Mac/core 功能、打包脚本及 Mac job 均与此候选相同。
+
+### Mac 不同安装任务争用同一目标的修复
+
+- 等待 run 27 时复核安装边界，发现每 job 的 `install.lock` 无法互斥两个独立任务。两者可在交换前同时通过同一旧目标的快照及进程检查，后执行者仍会替换已启动的新版，并将前一候选误作旧版备份。Sol reviewer 独立确认 P1；项目未禁止 App 多实例，准备前的一次进程检查也不能排除此顺序。
+- 先在临时 bundle、明确的系统工具替身和可控交换函数中复现：基线 `efa2777` 实际发生 2 次交换、2 次启动，第一任务备份版本变成新版 `1.2.3`，未保留该任务原目标。红测日志为 `build/evidence/kp-u01/macos-target-lock-before-fix.log`；没有触碰生产 App 或运行编译器。
+- 保留每 job 锁，新增按规范化目标路径共享、位于交换 bundle 之外的稳定文件锁。父进程退出与 commit 核验后、目标快照检查前非阻塞取得，覆盖交换、启动、失败恢复及回执，最终关闭但不删除锁文件。冲突在允许重开 App 之前以 `update_busy` 拒绝，目标已变化也不额外启动 App；拒绝符号链接和非普通锁文件。
+- 原回归现通过：重叠任务被拒绝，只交换/启动 1 次，原目标备份保持；另一个事先准备的旧任务在锁释放后可取得锁，但因目标身份变化拒绝，未额外启动。绿测日志为 `macos-target-lock-after-fix.log`。全部 67 项本地 Python 隔离检查通过，见 `python-tests-macos-target-lock.log`；独立复核无未解决确定发现。
+- 本次改动为 Python 安装助手、该缺陷的隔离回归及共享安装规则/任务记录；Swift 与 Android 功能源码未改。run 27 继续提供对应 Android 候选，Mac 的最终安装助手必须由新提交重新经 Packages 打包并核对内嵌源码；既有 Mac UI/下载证据不代表新助手已完成云端验证。

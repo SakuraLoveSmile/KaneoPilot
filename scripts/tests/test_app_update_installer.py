@@ -139,6 +139,49 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("-nobrowse", attach)
         self.assertTrue(any("detach" in argv for argv in self.tools.calls))
 
+    def test_distinct_jobs_cannot_exchange_the_same_target_concurrently(self):
+        first, overlapping, stale = (self.prepare() for _ in range(3))
+        for job in (first, overlapping, stale):
+            self.commit(job)
+        exchanges = []
+        conflicts = []
+
+        def recorded_exchange(left, right):
+            exchanges.append(str(right))
+            portable_exchange(left, right)
+
+        def exchange_while_another_helper_attempts_install(left, right):
+            # Both jobs were prepared from the same original bundle. The second
+            # helper runs exactly after the first has checked identity/processes,
+            # but before its exchange. No thread timing or production App is used.
+            try:
+                updater.install(Path(overlapping["job_path"]), 1234567, runner=self.tools,
+                                alive=lambda _: False, exchange=recorded_exchange)
+            except updater.UpdateError as error:
+                conflicts.append(error.code)
+            recorded_exchange(left, right)
+
+        result = updater.install(Path(first["job_path"]), 1234567, runner=self.tools,
+                                 alive=lambda _: False, exchange=exchange_while_another_helper_attempts_install)
+        opens = [call for call in self.tools.calls if Path(call[0]).name == "open"]
+        facts = {"conflicts": conflicts, "exchanges": len(exchanges), "launches": len(opens),
+                 "first_backup_version": updater.bundle_info(Path(first["backup_path"]))["CFBundleShortVersionString"]}
+        self.assertEqual(conflicts, ["update_busy"], json.dumps(facts, sort_keys=True))
+        self.assertEqual(result["status"], "launch_requested")
+        self.assertEqual(len(exchanges), 1)
+        self.assertEqual(len(opens), 1)
+        self.assertEqual(updater.target_snapshot(Path(first["backup_path"])), self.original)
+        self.assertEqual(self.result(overlapping)["status"], "failed")
+        self.assertEqual(updater.bundle_info(Path(overlapping["backup_path"]))["CFBundleShortVersionString"], "1.2.3")
+
+        # The target lock must be released after launch. A later old job acquires
+        # it, rejects its stale target identity, and never reopens the new App.
+        with self.assertRaisesRegex(updater.UpdateError, "目标发生变化"):
+            updater.install(Path(stale["job_path"]), 1234567, runner=self.tools,
+                            alive=lambda _: False, exchange=recorded_exchange)
+        self.assertEqual(len(exchanges), 1)
+        self.assertEqual(len([call for call in self.tools.calls if Path(call[0]).name == "open"]), 1)
+
     def test_corrupt_or_truncated_download_never_mounts(self):
         for key, value in (("size", self.payload["size"] - 1), ("sha256", "c" * 64)):
             with self.subTest(key=key):

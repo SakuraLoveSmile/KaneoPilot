@@ -225,6 +225,26 @@ def app_running(path, runner):
     return False
 
 
+def acquire_target_lock(target):
+    import fcntl
+
+    # Keep this stable file outside both exchanged bundles. Never unlink it:
+    # another helper may already have opened the same inode to acquire its lock.
+    identity = hashlib.sha256(os.fsencode(target)).hexdigest()
+    path = target.parent / (".KaneoPilot-update-" + identity + ".lock")
+    lock = os.fdopen(os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "r+")
+    try:
+        require(stat.S_ISREG(os.fstat(lock.fileno()).st_mode), "更新目标锁不是普通文件")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise UpdateError("此安装目录的更新正在执行", "update_busy")
+    except BaseException:
+        lock.close()
+        raise
+    return lock
+
+
 def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange=exchange_bundles,
             wait_seconds=120):
     import fcntl
@@ -251,6 +271,7 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
         swapped = False
         may_reopen = False
         launch_attempted = False
+        target_lock = None
         try:
             write_json(result_path, {"status": "waiting_for_exit", "version": job["version"]})
             deadline = time.monotonic() + wait_seconds
@@ -263,6 +284,7 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
             commit = json.loads(regular_path(str(commit_path)).read_text(encoding="utf-8"))
             require(commit == {"parent_pid": parent_pid, "job_path": str(path)},
                     "本次安装确认身份不一致，未替换软件", "update_cancelled")
+            target_lock = acquire_target_lock(target)
             require(target_snapshot(target) == job["original"], "退出期间安装目标发生变化，未替换软件")
             # Other copies using this exact bundle must have exited as well.
             require(not app_running(target, runner),
@@ -315,6 +337,9 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
                 except Exception:
                     pass  # The durable result retains the installation failure.
             raise
+        finally:
+            if target_lock is not None:
+                target_lock.close()
 
 
 def main():
