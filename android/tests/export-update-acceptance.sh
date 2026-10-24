@@ -43,7 +43,14 @@ for role in ('baseline', 'newer', 'test'):
     signature = subprocess.check_output([str(sdk / 'apksigner'), 'verify', '--verbose', '--print-certs', str(path)], text=True)
     certs = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', signature, re.M)
     assert len(certs) == 1, role + ': expected one verified signing certificate'
-    record = {'name': path.name, 'package_name': package[1], 'version_name': package[3], 'version_code': int(package[2]),
+    raw_version_code = package[2]
+    if role == 'test':
+        assert raw_version_code == '' or re.fullmatch(r'[0-9]+', raw_version_code), 'Acceptance test versionCode is not numeric'
+        version_code = int(raw_version_code) if raw_version_code else None
+    else:
+        assert re.fullmatch(r'[1-9][0-9]*', raw_version_code), role + ': versionCode must be a positive integer'
+        version_code = int(raw_version_code)
+    record = {'name': path.name, 'package_name': package[1], 'version_name': package[3], 'version_code': version_code,
               'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size,
               'certificate_sha256': certs[0].lower(), 'source_sha': os.environ['SOURCE_SHA'].lower()}
     if role == 'test':
@@ -56,7 +63,7 @@ for role in ('baseline', 'newer', 'test'):
     else:
         assert package[1] == 'com.sakurasep.kaneopilot', role + ': wrong target package'
         expected_version, expected_code = ('0.2.9', number * 100 + 10) if role == 'baseline' else ('0.2.10', number * 100 + 11)
-        assert package[3] == expected_version and int(package[2]) == expected_code, role + ': version identity drift'
+        assert package[3] == expected_version and version_code == expected_code, role + ': version identity drift'
         assert not re.search(r'^application-debuggable(?:\s|$)', badging, re.M), role + ': preview guard would be bypassed by a debuggable build'
     records[role] = record
 assert len({entry['certificate_sha256'] for entry in records.values()}) == 1, 'Acceptance APKs were not signed by the same key'

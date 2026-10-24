@@ -102,3 +102,9 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - `2487159` 已提交并推送隔离验收支持，等待分支 Packages。run 21 的 Python 核心/集成及 Android 单测/lint 已通过，但 instrumentation 编译失败：`SoftwareUpdateInteractionTest.kt` 把 Compose 的成员方法 `assertDoesNotExist` 作为顶层扩展导入。已仅移除错误导入，两处实际拒绝断言保留，不修改预期或检查强度。原始日志保留于 `build/evidence/kp-u01/run21-android-failed.log`；必须用修正后的云端候选重新编译，不能将该失败记作通过。
 - run 21 的 Mac 更新夹具已成功编译，但在 helper-failure 用例红测：成功 handoff 后仍复用等待退出的 manager，第二次准备被 `canInstall` 正确拒绝，导致从未调用故障 helper。已保留并补强成功交接后的防重入断言，另建独立 defaults/service/installer/cache 的失败场景，先证明已准备并请求退出，再断言 launch 抛错后回到 ready、清除 pending，最后实际重试准备和成功交接。**仅修正夹具前提，不修改生产状态或降低失败恢复要求**。原始日志为 `build/evidence/kp-u01/run21-macos-failed.log`；修正后须云端重跑。
 - Android 升级后验收按既有 `LiveLanAcceptanceTest` 的方式用 `hasScrollToIndexAction().performScrollToNode` 显式加载真实连接页 LazyColumn 中的软件更新和版本项，再保留原来的可见断言；避免对尚未组合的离屏项直接查找。仅调整测试操作，不修改界面或验收预期。
+
+### run 25 结果与导出器修复
+
+- [Packages run 25](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40078361785) 绑定 `f365a5208450a62eebc355264f4cb6f5fc69dfdd`：identity、checks、macos 成功，android 失败，publish 按分支条件跳过。核心 4,203 项通过 / 2 项条件跳过，集成 402 项通过 / 6 项既有跳过；完整跳过原因保存在 `build/evidence/kp-u01/run25-checks/summary.json`。
+- Mac 已通过全部桌面夹具、双架构编译、签名校验及 DMG 打包；隔离原生 UI 包和 AppDelegate 顺序证据已导出，仍须下载核验及实际交互。Android 单测、lint、debug 与 instrumentation、两份非调试跨版本验证 APK 均编译成功；最终整理时把无版本的 instrumentation APK 的空 `versionCode` 强转整数，导致退出，未生成可用候选 artifact。原始日志：`build/evidence/kp-u01/run25-android-job.log`。
+- 修复仅涉及验证包导出器：测试 APK 缺失版本码时诚实记 `null`；baseline/newer 仍要求正整数及冻结版本/code，包名、runner、target、签名、大小与哈希校验全部保留。新增无编译回归直接执行生产导出器的 Python 段，复现相同的空版本码错误，并核验修复后的真实 JSON/校验行和身份错配拒绝；失败基线为 `build/evidence/kp-u01/android-export-before-fix.log`。测试系统工具使用明确替身，此结果不代替真实 APK 导出与模拟器验证。
