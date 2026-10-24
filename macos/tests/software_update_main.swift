@@ -264,10 +264,44 @@ private actor DelayedProgressService: SoftwareUpdateServing {
         check(launched && installer.launches == 1 && manager.pendingInstallation == nil,
               "successful lifecycle handoff launches installer once")
         await manager.installAndRestart()
-        installer.failsLaunch = true
-        let failedLaunch = await manager.launchPreparedInstallationAfterShutdown()
-        check(!failedLaunch && manager.phase == .ready && manager.pendingInstallation == nil,
+        check(manager.phase == .waitingForExit && !manager.canInstall && installer.preparations == 2
+              && requestsTermination == 2 && installer.launches == 1,
+              "successful handoff cannot prepare another installation while App exit is pending")
+
+        // A successful handoff is terminal for this App lifetime. Establish the failure
+        // case independently rather than attempting to reuse that completed lifecycle.
+        let failureSuite = "\(suite).helper-launch-failure"
+        let failureDefaults = UserDefaults(suiteName: failureSuite)!
+        defer { failureDefaults.removePersistentDomain(forName: failureSuite) }
+        let failureService = FixtureService(), failureInstaller = FixtureInstaller()
+        failureInstaller.failsLaunch = true
+        var failureTerminationRequests = 0
+        let failureManager = SoftwareUpdateManager(service: failureService, installer: failureInstaller,
+            defaults: failureDefaults, currentVersion: "0.1.0", currentBuild: "2026102101",
+            targetURL: root.appendingPathComponent("helper-failure/KaneoPilot.app"),
+            cacheURL: root.appendingPathComponent("manager-helper-failure"), allowsNetwork: true,
+            requestTermination: { failureTerminationRequests += 1 })
+        await failureManager.check()
+        check(failureService.checks == 1 && failureService.downloads == 1 && failureManager.canInstall,
+              "helper failure fixture independently reaches install-ready")
+        await failureManager.installAndRestart()
+        check(failureInstaller.preparations == 1 && failureTerminationRequests == 1
+              && failureManager.phase == .waitingForExit && failureManager.pendingInstallation != nil,
+              "helper failure fixture actually prepares and requests termination")
+        let failedLaunch = await failureManager.launchPreparedInstallationAfterShutdown()
+        check(!failedLaunch && failureInstaller.launches == 1 && failureManager.phase == .ready
+              && failureManager.pendingInstallation == nil && failureManager.canInstall
+              && failureManager.errorMessage != nil,
               "helper failure cancels termination and permits retry")
+        failureInstaller.failsLaunch = false
+        await failureManager.installAndRestart()
+        check(failureInstaller.preparations == 2 && failureTerminationRequests == 2
+              && failureManager.pendingInstallation != nil,
+              "failed helper can actually prepare another installation")
+        let retryLaunched = await failureManager.launchPreparedInstallationAfterShutdown()
+        check(retryLaunched && failureInstaller.launches == 2 && failureManager.pendingInstallation == nil
+              && failureManager.phase == .waitingForExit,
+              "helper launch retry succeeds and returns to pending App exit")
 
         manager.automaticallyChecks = false
         manager.automaticallyDownloads = false
@@ -305,7 +339,7 @@ private actor DelayedProgressService: SoftwareUpdateServing {
             currentVersion: "0.1.0", cacheURL: root.appendingPathComponent("isolated"), allowsNetwork: false)
         isolated.start(); await isolated.check(); await isolated.checkIfDue(); isolated.stop()
         check(isolatedService.checks == 0, "FakeCore/isolated bundle never calls production network")
-        manager.stop(); disabled.stop(); preview.stop()
+        manager.stop(); failureManager.stop(); disabled.stop(); preview.stop()
     }
 
     @MainActor static func cacheAndProgressChecks(root: URL) async throws {

@@ -100,3 +100,4 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 ### 云端首轮编译反馈
 
 - `2487159` 已提交并推送隔离验收支持，等待分支 Packages。run 21 的 Python 核心/集成及 Android 单测/lint 已通过，但 instrumentation 编译失败：`SoftwareUpdateInteractionTest.kt` 把 Compose 的成员方法 `assertDoesNotExist` 作为顶层扩展导入。已仅移除错误导入，两处实际拒绝断言保留，不修改预期或检查强度。原始日志保留于 `build/evidence/kp-u01/run21-android-failed.log`；必须用修正后的云端候选重新编译，不能将该失败记作通过。
+- run 21 的 Mac 更新夹具已成功编译，但在 helper-failure 用例红测：成功 handoff 后仍复用等待退出的 manager，第二次准备被 `canInstall` 正确拒绝，导致从未调用故障 helper。已保留并补强成功交接后的防重入断言，另建独立 defaults/service/installer/cache 的失败场景，先证明已准备并请求退出，再断言 launch 抛错后回到 ready、清除 pending，最后实际重试准备和成功交接。**仅修正夹具前提，不修改生产状态或降低失败恢复要求**。原始日志为 `build/evidence/kp-u01/run21-macos-failed.log`；修正后须云端重跑。
