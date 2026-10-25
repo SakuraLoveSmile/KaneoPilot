@@ -116,6 +116,53 @@ def test_legacy_json_with_marker_in_report_remains_compatible():
     assert parse(json.dumps(expected)) == (expected, None)
 
 
+@pytest.mark.parametrize("report", [
+    "Python 交互示例：\n>>> print(1)\n1",
+    "运算符原文：<<< 与 >>>",
+    "协议示例原文：<<<REPORT>>>",
+])
+def test_wrapped_legacy_json_preserves_marker_literals_in_report(report):
+    expected = {"conclusion": "pass", "report_markdown": report, "fix": None}
+    text = "评审完成。\n```json\n" + json.dumps(expected) + "\n```\n以上为结果。"
+    normalizations, metadata = [], {}
+    result, error = pi_desktop_review.parse_result([
+        {"role": "assistant", "content": text},
+    ], normalizations=normalizations, metadata=metadata)
+    assert error is None
+    assert result == expected
+    assert normalizations == ["removed_fence_commentary"]
+    assert metadata == {"result_format": "json"}
+
+
+def test_incident_fragment_reports_incomplete_review_without_using_thinking():
+    fragment = "<<<KANEPILOT_REVIEW_V1>>>\n<<<KANEPILOT_REVIEW_V1>>>"
+    result, error = pi_desktop_review.parse_result([
+        {"role": "assistant", "content": envelope("pass", "no-priority", title="", description="")},
+        {"role": "assistant", "content": fragment,
+         "thinking": envelope("pass", "no-priority", title="", description="")},
+    ])
+    assert result is None
+    assert "评审结果不完整" in error
+    assert "JSON" not in error
+
+
+@pytest.mark.parametrize("fragment", [
+    "<<<KANEPILOT_REVIEW_V1>>>",
+    "<<<KANPILOT_REVIE",
+    "KANEPILOT_REVIEW_V1>>>",
+])
+def test_misspelled_or_partial_frame_never_promotes_fenced_json_example(fragment):
+    example = json.dumps({"conclusion": "pass", "report_markdown": "报告中的示例", "fix": None})
+    normalizations, metadata = [], {}
+    result, error = pi_desktop_review.parse_result([
+        {"role": "assistant", "content": fragment + "\n```json\n" + example + "\n```"},
+    ], normalizations=normalizations, metadata=metadata)
+    assert result is None
+    assert "评审结果不完整" in error
+    assert normalizations == []
+    assert metadata == {}
+
+
 @pytest.mark.parametrize("damage", [
     lambda text: text.replace("<<<KANPILOT_REVIEW_V1>>>", ""),
     lambda text: text.replace("<<<KANPILOT_REVIEW_V1>>>", "<<<KANPILOT_REVIEW_V2>>>"),

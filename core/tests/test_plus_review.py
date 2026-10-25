@@ -643,6 +643,34 @@ class TestReviewNeverWritesPass(ReviewCase):
         self.assertEqual(request["result"]["outcome"], "needs_user")
         self.assertEqual(request["status"], "failed")
 
+    def test_misspelled_incomplete_review_preserves_evidence_without_resending(self):
+        self.make_scene()
+        fragment = "<<<KANEPILOT_REVIEW_V1>>>\n<<<KANEPILOT_REVIEW_V1>>>"
+        final = {"id": "incident-final", "role": "assistant", "content": fragment,
+                 "thinking": json.dumps({"conclusion": "pass", "report_markdown": "仅为思考草稿", "fix": None}),
+                 "timestamp": "2026-09-20T00:00:00Z"}
+        self.server.messages = [final]
+        self.record_core_calls()
+        self.assertEqual(self.run_review(), 1)
+        self.assertNotIn("register-review", self.commands())
+        self.assertNotIn("advance-task", self.commands())
+        self.assertNotIn("create-review-fix", self.commands())
+        task = self.task(TASK_ID)
+        self.assertIsNone(task["review_summary"])
+        self.assertEqual(task["status"], "needs_user")
+        self.assertEqual(task["failure_code"], "review_blocked")
+        self.assertIn("评审结果不完整", task["failure_reason"])
+        self.assertIn("请重新 Review", task["failure_reason"])
+        self.assertNotIn("不是合法 JSON", task["failure_reason"])
+        job = self.review_job()
+        request = self.request_by_id(job["request_id"])
+        self.assertEqual(request["result"]["outcome"], "needs_user")
+        self.assertEqual(request["status"], "failed")
+        transcript = json.loads((Path(job["invocation_dir"]) / "transcript.json").read_text())
+        self.assertIs(transcript["complete"], True)
+        self.assertEqual(transcript["messages"][-1], final)
+        self.assertEqual(sum(name == "pi_agent_prompt" for name, _ in self.server.calls), 1)
+
     def test_incomplete_conclusion_json_never_registers(self):
         """fix 字段不合冻结枚举 → 不合规（不写 pass）。"""
         self.make_scene()
