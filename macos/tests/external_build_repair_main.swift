@@ -37,7 +37,8 @@ struct ExternalBuildRepairFixtures {
     }
     static func footerFixture(actions: [String]?, canSync: Bool, canRestart: Bool = false,
                               verificationID: String = "original", readOnly: Bool = false,
-                              saveState: String = "active") throws -> TaskDetail {
+                              saveState: String = "active", ordinary: Bool = false,
+                              canPrepare: Bool = false) throws -> TaskDetail {
         var object: [String: Any] = ["task_id": "footer-fixture", "status": "in_review",
             "read_only": readOnly, "save_state": saveState,
             "release": ["state": "blocked", "title": "真实核心阶段", "reason": "真实核心原因", "required": true,
@@ -48,7 +49,75 @@ struct ExternalBuildRepairFixtures {
                     "can_prepare_verification": false, "can_sync_verification": canSync, "can_restart_verification": canRestart,
                     "verification": ["state": "blocked", "verification_id": verificationID]]]]
         if let actions { object["allowed_actions"] = actions }
+        if ordinary {
+            var release = object["release"] as! [String: Any]
+            let repair = release.removeValue(forKey: "external_repair") as! [String: Any]
+            for key in ["can_sync_verification", "can_restart_verification", "verification"] {
+                release[key] = repair[key]
+            }
+            release["can_prepare_verification"] = canPrepare
+            object["release"] = release
+        }
         return try JSONDecoder.kaneo.decode(TaskDetail.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    static func ordinaryVerificationFlow(_ model: AppViewModel) async throws {
+        try JSONSerialization.data(withJSONObject: ["release_fixture": ["scenario": "blocked"],
+            "external_build_repair_fixture": ["ordinary": true, "permission_mode": "auto"]]).write(to: stateURL)
+        let initial = try await detail(model)
+        check(initial.release?.externalRepair == nil, "ordinary verification has no external repair association")
+        check(initial.releaseVerificationFooterAction == "prepare_release_verification", "ordinary blocker exposes preparation in footer")
+        check(ReleaseVerificationAction.prepare.isAvailable(for: initial), "section and footer share ordinary preparation eligibility")
+        check(ReleaseVerificationAction.prepare.label(for: initial) == "验证合并后的源码…", "ordinary action identifies merged source")
+        check(initial.release?.batchId == nil && initial.release?.canStart == false, "unverified target has no batch and cannot publish")
+
+        let before = try Data(contentsOf: stateURL)
+        let candidate = try await model.prepareReleaseVerification(taskID: taskID)
+        check(try Data(contentsOf: stateURL) == before && config("verification_starts") == 0, "ordinary preparation and cancellation do not start a model")
+        check(candidate.confirmationMessage.contains("模型费用") && candidate.confirmationMessage.contains("仅授权验证"), "ordinary confirmation preserves fee and authorization boundary")
+        check(candidate.confirmationMessage.contains(candidate.verification.targetSha!) && candidate.verification.commands!.allSatisfy { candidate.confirmationMessage.contains($0) }, "ordinary confirmation includes frozen source and every command")
+        await model.startReleaseVerification(candidate: candidate)
+        await model.startReleaseVerification(candidate: candidate)
+        let planning = try await detail(model)
+        let verificationID = planning.release?.currentVerification?.verificationId ?? ""
+        check(!verificationID.isEmpty && planning.release?.currentVerification?.state == "planning", "ordinary state displays the original planning attempt")
+        check(planning.releaseVerificationFooterAction == "sync_release_verification", "ordinary planning offers original-session reconciliation")
+        check(!ReleaseVerificationAction.prepare.isAvailable(for: planning), "ordinary planning cannot start another attempt")
+        check(try config("verification_starts") == 1, "duplicate ordinary confirmation does not create another model attempt")
+        await model.syncReleaseVerification(taskID: taskID, verificationID: verificationID)
+        let verified = try await detail(model)
+        check(verified.release?.currentVerification?.state == "verified" && verified.release?.canStart == true, "verified ordinary source can continue existing release preparation")
+        check(verified.releaseVerificationFooterAction == nil && verified.status != "done", "verification is not task completion or another paid attempt")
+        check(try config("dispatches", in: "release_fixture") == 0, "verification commands do not directly dispatch a release")
+
+        for (readOnly, saveState) in [(true, "active"), (false, "archived")] {
+            let unavailable = try footerFixture(actions: ["prepare_release_verification"], canSync: false,
+                readOnly: readOnly, saveState: saveState, ordinary: true, canPrepare: true)
+            check(!ReleaseVerificationAction.prepare.isAvailable(for: unavailable) && unavailable.releaseVerificationFooterAction == nil,
+                  "read-only or archived ordinary task never offers paid preparation")
+        }
+        check(try footerFixture(actions: nil, canSync: false, ordinary: true, canPrepare: true).releaseVerificationFooterAction == nil, "ordinary action requires core allowed_actions")
+        check(try footerFixture(actions: ["prepare_release_verification"], canSync: false, ordinary: true).releaseVerificationFooterAction == nil, "core action alone does not bypass ordinary summary eligibility")
+        check(try footerFixture(actions: ["sync_release_verification"], canSync: true, verificationID: "", ordinary: true).releaseVerificationFooterAction == nil, "ordinary sync requires an existing verification identity")
+
+        try JSONSerialization.data(withJSONObject: ["release_fixture": ["scenario": "blocked"],
+            "external_build_repair_fixture": ["ordinary": true, "verification_starts": 1,
+                "verification_state": "unknown"]]).write(to: stateURL)
+        let unknown = try await detail(model)
+        check(unknown.releaseVerificationFooterAction == "sync_release_verification" && !ReleaseVerificationAction.restart.isAvailable(for: unknown), "unknown ordinary verification only reconciles")
+
+        try JSONSerialization.data(withJSONObject: ["release_fixture": ["scenario": "blocked"],
+            "external_build_repair_fixture": ["ordinary": true, "verification_starts": 1,
+                "verification_state": "blocked", "report_failure": true]]).write(to: stateURL)
+        let blocked = try await detail(model)
+        check(blocked.releaseVerificationFooterAction == "restart_release_verification", "eligible ordinary failed report offers explicit restart")
+        let oldID = blocked.release?.currentVerification?.verificationId
+        let blockedBytes = try Data(contentsOf: stateURL)
+        let restart = try await model.prepareReleaseVerification(taskID: taskID, restarting: true)
+        check(try Data(contentsOf: stateURL) == blockedBytes, "ordinary restart preparation preserves the old report")
+        await model.startReleaseVerification(candidate: restart)
+        let restarted = try await detail(model)
+        check(restarted.release?.currentVerification?.verificationId != oldID && restarted.releaseVerificationFooterAction == "sync_release_verification", "ordinary confirmed restart returns to a distinct original-session recovery identity")
     }
 
     static func main() async throws {
@@ -304,6 +373,7 @@ struct ExternalBuildRepairFixtures {
         check(releaseStarts.allSatisfy { (($0["payload"] as? [String: Any])?["task_id"] as? String) == taskID }, "new batch is scoped to the selected task")
         let restarts = records.filter { $0["command"] as? String == "restart-release-verification" }
         check(restarts.contains { (($0["payload"] as? [String: Any])?["expected_report_sha256"] as? String) == restart.expectedReportSha256 && (($0["payload"] as? [String: Any])?["expected_verification_id"] as? String) == restart.expectedVerificationId }, "restart freezes original report and verification identities")
-        print("External build repair fixtures: \(checks) checks passed")
+        try await ordinaryVerificationFlow(model)
+        print("Release verification and external build repair fixtures: \(checks) checks passed")
     }
 }

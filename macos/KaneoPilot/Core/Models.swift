@@ -2965,6 +2965,20 @@ struct TaskRelease: Decodable {
     let canAbandon: Bool?
     let canLinkExternalRepair: Bool?
     let externalRepair: ExternalBuildRepair?
+    let canPrepareVerification: Bool?
+    let canSyncVerification: Bool?
+    let canRestartVerification: Bool?
+    let verification: ReleaseVerification?
+
+    // External repair keeps its original DTO; ordinary merged tasks use the
+    // same verification controls through the optional release-level fields.
+    var currentVerification: ReleaseVerification? { externalRepair?.verification ?? verification }
+    var allowsVerificationPreparation: Bool { externalRepair?.canPrepareVerification ?? (canPrepareVerification == true) }
+    var allowsVerificationSync: Bool { externalRepair?.canSyncVerification ?? (canSyncVerification == true) }
+    var allowsVerificationRestart: Bool {
+        if let repair = externalRepair { return repair.canRestartVerification == true }
+        return canRestartVerification == true
+    }
 
     var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
@@ -3085,7 +3099,7 @@ struct PrepareReleaseVerificationResponse: Decodable {
         let restart = isRestart ? "将新建独立验证尝试；原验证报告保留，不会改写为通过。\n" : ""
         let progression = verification.modelSummary?.permissionMode == "auto"
             ? "\n本次费用确认后，Pilot 将自动批准精确对应的 Goal，由 Plus 执行并持续核对报告，无需到 Plus 再操作。费用授权仅限本次独立验证。" : ""
-        return "\(restart)将由独立 Plus 会话完整验证修复后的源码，覆盖原需求、计划验收与完整目标。可能产生模型费用。\(progression)\n模型：\(verification.modelSummary?.label ?? "未提供")\n目标：\(verification.targetSha ?? "未提供")\n全部验证命令：\n\(commands)\n通过后仍需另行确认新批次构建发布。"
+        return "\(restart)将由独立 Plus 会话验证发布目标的完整源码，沿用原需求与计划的验证要求。可能产生模型费用。\(progression)\n模型：\(verification.modelSummary?.label ?? "未提供")\n目标：\(verification.targetSha ?? "未提供")\n全部验证命令：\n\(commands)\n本次确认仅授权验证；后续构建发布沿用项目原有策略和确认要求。"
     }
 }
 
@@ -3109,13 +3123,18 @@ enum ReleaseVerificationAction: String {
         }
     }
 
+    func label(for detail: TaskDetail) -> String {
+        self == .prepare && detail.release?.externalRepair == nil ? "验证合并后的源码…" : label
+    }
+
     func isAvailable(for detail: TaskDetail) -> Bool {
         guard detail.readOnly != true, (detail.saveState ?? "active") == "active",
-              let repair = detail.release?.externalRepair else { return false }
+              let release = detail.release, release.isHistorical != true else { return false }
+        if release.externalRepair == nil, detail.allowedActions?.contains(rawValue) != true { return false }
         switch self {
-        case .prepare: return repair.canPrepareVerification
-        case .sync: return repair.canSyncVerification && repair.verification?.verificationId?.isEmpty == false
-        case .restart: return repair.canRestartVerification == true
+        case .prepare: return release.allowsVerificationPreparation
+        case .sync: return release.allowsVerificationSync && release.currentVerification?.verificationId?.isEmpty == false
+        case .restart: return release.allowsVerificationRestart
         }
     }
 }
@@ -3125,7 +3144,7 @@ extension TaskDetail {
 
     var releaseVerificationFooterAction: String? {
         if releaseVerificationQuestion?.state == "open" { return nil }
-        for action in [ReleaseVerificationAction.sync, .restart] {
+        for action in [ReleaseVerificationAction.sync, .restart, .prepare] {
             if allowedActions?.contains(action.rawValue) == true, action.isAvailable(for: self) {
                 return action.rawValue
             }

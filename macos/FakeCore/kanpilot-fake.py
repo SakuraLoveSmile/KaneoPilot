@@ -1074,11 +1074,13 @@ def allowed_actions(task, requests):
         return (["closeout_parent"] if closeout.get("can_complete") else []) + ["recheck"]
     release = task.get("release")
     if release and release.get("required") and release.get("state") != "published":
-        repair = release.get("external_repair") or {}
+        repair = release.get("external_repair") or release
         if repair.get("can_sync_verification") and (repair.get("verification") or {}).get("verification_id"):
             return ["sync_release_verification", "recheck"]
         if repair.get("can_restart_verification"):
             return ["restart_release_verification", "recheck"]
+        if release.get("can_prepare_verification"):
+            return ["prepare_release_verification", "recheck"]
         return ["recheck"]
     current_ai_action = (task.get("task_ai_action") or {}).get("current")
     if current_ai_action:
@@ -3697,6 +3699,29 @@ def apply_external_build_repair_fixture(state, tasks):
     if not task or not task.get("release"):
         return
     release = task["release"]
+    # Ordinary merged tasks reuse the isolated verification command fixtures,
+    # without presenting an external repair association or an old failed batch.
+    if config.get("ordinary"):
+        if config.get("batch_started"):
+            return
+        verification = external_verification_view(state) if config.get("verification_starts") else None
+        status = (verification or {}).get("state")
+        verified = status == "verified"
+        reason = (verification or {}).get("reason") or "发布目标不是本轮已验证的完整源码"
+        title = {"planning": "验证规划中", "running": "验证执行中", "unknown": "验证结果待核对",
+                 "blocked": "验证受阻", "failed": "验证失败", "verified": "待构建发布"}.get(status, "发布受阻")
+        release.update(state="ready" if verified else "blocked", title=title, reason=reason,
+            can_start=verified, can_reconcile=False, can_abandon=False, can_link_external_repair=False,
+            batch_id=None, tag=None, version=None, build_number=None, workflow_run_id=None, workflow_url=None,
+            target_sha=(verification or {}).get("target_sha"), external_repair=None, verification=verification,
+            can_prepare_verification=not bool(verification),
+            can_sync_verification=bool(verification) and (status not in ("verified", "blocked", "failed") or bool(config.get("recovery_pending"))),
+            can_restart_verification=status == "blocked" and bool(config.get("report_failure")) and not config.get("recovery_pending"),
+            blockers=[] if status and status not in ("blocked", "failed") else [dict(
+                code=(verification or {}).get("failure_code") or "release_target_unverified", message=reason)])
+        task.update(title="普通任务 · 验证合并后的源码", task_ai_action=None, display_status=title,
+            board_substatus=title, last_progress=reason, exception=None, blocked_reason=reason if not verified else None)
+        return
     release["can_link_external_repair"] = not config.get("accepted", False) and release["state"] == "failed"
     if not config.get("accepted"):
         return
@@ -3755,7 +3780,8 @@ def cmd_accept_external_build_repair_fixture(state, payload):
 
 def cmd_prepare_release_verification_fixture(state, payload):
     task = release_fixture_task(state)
-    repair = ((task or {}).get("release") or {}).get("external_repair") or {}
+    release = (task or {}).get("release") or {}
+    repair = release.get("external_repair") or release
     if not task or task["task_id"] != payload.get("task_id") or not repair.get("can_prepare_verification"):
         return fail("当前不可准备完整验证", "conflict")
     verification = external_verification_view(state)
@@ -3764,11 +3790,12 @@ def cmd_prepare_release_verification_fixture(state, payload):
 
 def cmd_start_release_verification_fixture(state, payload):
     config = state.get("external_build_repair_fixture") or {}
-    if not config.get("accepted"):
+    eligible = config.get("accepted") or config.get("ordinary")
+    if not eligible:
         return fail("尚未关联修复，不能启动完整验证", "conflict")
     task = release_fixture_task(state)
     verification = external_verification_view(state)
-    if not task or task["task_id"] != payload.get("task_id") or not config.get("accepted") or payload.get("expected_context_sha256") != verification["context_sha256"]:
+    if not task or task["task_id"] != payload.get("task_id") or payload.get("expected_context_sha256") != verification["context_sha256"]:
         return fail("验证候选已变化，请重新准备", "conflict")
     if not config.get("verification_starts"):
         config.update(verification_starts=1, verification_state="planning")
@@ -3803,7 +3830,8 @@ def cmd_sync_release_verification_fixture(state, payload):
 def cmd_prepare_restart_release_verification_fixture(state, payload):
     config = state.get("external_build_repair_fixture") or {}
     task = release_fixture_task(state)
-    repair = ((task or {}).get("release") or {}).get("external_repair") or {}
+    release = (task or {}).get("release") or {}
+    repair = release.get("external_repair") or release
     if not task or task["task_id"] != payload.get("task_id") or not repair.get("can_restart_verification"):
         return fail("当前原报告不允许重启，请先核对已有验证结果", "conflict")
     old = external_verification_view(state)
@@ -3853,7 +3881,7 @@ def cmd_start_task_release_fixture(state, payload):
         return fail("发布候选身份已变化，请重新准备", "conflict")
     if not release.get("can_start"):
         return {"outcome": release["state"], "release": release}
-    if state.get("external_build_repair_fixture", {}).get("accepted"):
+    if state.get("external_build_repair_fixture", {}).get("accepted") or state.get("external_build_repair_fixture", {}).get("ordinary"):
         state["external_build_repair_fixture"]["batch_started"] = True
     config = state["release_fixture"]
     config["dispatches"] = config.get("dispatches", 0) + 1

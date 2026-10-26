@@ -306,6 +306,25 @@ def projection(conn,task):
     if blocked:
         value.update(state='blocked',title='发布受阻',reason='上次发布核对：'+blocked['reason'],
                      blockers=blocked['blockers'],can_start=False)
+    if not related:
+        from . import release_verification
+        verification=release_verification.ordinary_summary(conn,root,blocked)
+        if verification:
+            value.update(verification)
+            attempt=verification.get('verification') or {}
+            stage=attempt.get('state')
+            if stage:
+                verified=stage=='verified'
+                reason=attempt.get('reason') or ('完整验证已通过，可继续构建发布' if verified else
+                    '正在规划合并后源码的完整验证' if stage=='planning' else
+                    '正在执行合并后源码的完整验证' if stage=='running' else
+                    '原验证结果尚不明确，请核对原尝试')
+                value.update(state='ready' if verified else 'blocked',
+                    title={'planning':'验证规划中','running':'验证执行中','unknown':'验证结果待核对',
+                        'blocked':'验证受阻','failed':'验证失败','verified':'待构建发布'}.get(stage,'等待完整验证'),
+                    reason=reason,can_start=verified,
+                    blockers=([dict(code=attempt.get('failure_code') or 'release_target_unverified',message=reason)]
+                        if stage in ('blocked','failed') else []))
     return value
 
 

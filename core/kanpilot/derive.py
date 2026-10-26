@@ -724,12 +724,15 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if db.task_save_state(task) == "trashed":
             actions.append("purge")
     else:
-        from . import external_build_repair
-        external_repair = external_build_repair.summary(conn, task)
-        if external_repair:
-            if external_repair.get('can_sync_verification'):
+        from . import release_delivery
+        release = release_delivery.projection(conn, task) or {}
+        verification = release.get('external_repair') or release
+        if verification:
+            if verification.get('can_prepare_verification'):
+                actions.append('prepare_release_verification')
+            if verification.get('can_sync_verification'):
                 actions.append('sync_release_verification')
-            if external_repair.get('can_restart_verification'):
+            if verification.get('can_restart_verification'):
                 actions.append('restart_release_verification')
         execution=round_store.get_round(conn,task['task_id'],task['run_id']) if task['run_id'] else None
         if (status=='running' and task['sent']==1 and send_state=='sent'

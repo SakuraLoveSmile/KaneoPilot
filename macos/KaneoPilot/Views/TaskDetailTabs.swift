@@ -1268,7 +1268,7 @@ struct ReleaseVerificationActionButton: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
                 if working { ProgressView().controlSize(.small) }
-                Button(action.label) { run() }
+                Button(action.label(for: detail)) { run() }
                     .disabled(disabled || working || candidate != nil || model.busy || !action.isAvailable(for: detail))
             }
             if let errorText {
@@ -1294,9 +1294,14 @@ struct ReleaseVerificationActionButton: View {
             Button("取消", role: .cancel) { candidate = nil }
         } message: { confirmed in Text(confirmed.confirmationMessage) }
         .onChange(of: detail.taskId) { invalidate() }
+        .onChange(of: detail.runId) { invalidate() }
+        .onChange(of: detail.planSha256) { invalidate() }
+        .onChange(of: detail.reviewKey) { invalidate() }
+        .onChange(of: detail.delivery?.headSha) { invalidate() }
+        .onChange(of: detail.release?.targetSha) { invalidate() }
         .onChange(of: detail.release?.externalRepair?.contextSha256) { invalidate() }
-        .onChange(of: detail.release?.externalRepair?.verification?.verificationId) { invalidate() }
-        .onChange(of: detail.release?.externalRepair?.verification?.contextSha256) { invalidate() }
+        .onChange(of: detail.release?.currentVerification?.verificationId) { invalidate() }
+        .onChange(of: detail.release?.currentVerification?.contextSha256) { invalidate() }
         .onChange(of: action.isAvailable(for: detail)) { invalidate() }
         .onChange(of: action) { invalidate() }
         .onDisappear { invalidate() }
@@ -1307,7 +1312,7 @@ struct ReleaseVerificationActionButton: View {
         let token = UUID(), taskID = detail.taskId
         requestID = token; working = true; errorText = nil
         if action == .sync {
-            guard let verificationID = detail.release?.externalRepair?.verification?.verificationId else {
+            guard let verificationID = detail.release?.currentVerification?.verificationId else {
                 invalidate(); return
             }
             Task {
@@ -1392,6 +1397,17 @@ private struct TaskReleaseSection: View {
                         FieldRow("批次", repair.sourceBatchId)
                     }.font(.kpSmall)
                 }
+            } else if let verification = release.currentVerification {
+                FieldRow("验证目标", verification.targetSha)
+                FieldRow("完整验证", verification.stateLabel)
+                if let reason = verification.reason, reason != release.reason {
+                    Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            } else if ReleaseVerificationAction.prepare.isAvailable(for: detail) {
+                Text("合并后的源码包含原验证之外的改动，需要先完整验证。准备时会展示目标、验证命令和模型费用，确认后才开始。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if release.externalRepair == nil, let action = detail.taskAiAction, action.isBuildFailure {
                 TaskAIActionSection(detail: detail, action: action,
@@ -1425,7 +1441,7 @@ private struct TaskReleaseSection: View {
                 }.font(.kpSmall)
             }
             if detail.readOnly != true {
-                externalRepairActions
+                verificationActions
                 HStack(spacing: Spacing.s) {
                     if preparing || working { ProgressView().controlSize(.small) }
                     if release.showsStartAction {
@@ -1534,19 +1550,13 @@ private struct TaskReleaseSection: View {
         preparing = false; working = false
     }
 
-    @ViewBuilder private var externalRepairActions: some View {
+    @ViewBuilder private var verificationActions: some View {
         if release.canLinkExternalRepair == true {
             Button("关联已合并修复…") { errorText = nil; repairPR = ""; showingRepairInput = true }.disabled(locked)
         }
-        if let repair = release.externalRepair {
-            if repair.canPrepareVerification {
-                ReleaseVerificationActionButton(detail: detail, action: .prepare, disabled: locked, onRefreshDetail: onRefreshDetail)
-            }
-            if repair.canRestartVerification == true {
-                ReleaseVerificationActionButton(detail: detail, action: .restart, disabled: locked, onRefreshDetail: onRefreshDetail)
-            }
-            if repair.canSyncVerification {
-                ReleaseVerificationActionButton(detail: detail, action: .sync, disabled: locked, onRefreshDetail: onRefreshDetail)
+        ForEach([ReleaseVerificationAction.prepare, .sync, .restart], id: \.rawValue) { action in
+            if action.isAvailable(for: detail) {
+                ReleaseVerificationActionButton(detail: detail, action: action, disabled: locked, onRefreshDetail: onRefreshDetail)
             }
         }
     }

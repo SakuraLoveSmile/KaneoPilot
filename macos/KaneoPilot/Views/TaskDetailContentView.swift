@@ -700,7 +700,7 @@ struct TaskOverviewTabView: View {
 
     private var actions: [String] {
         var list = detail.allowedActions ?? []
-        list.removeAll { [ReleaseVerificationAction.sync.rawValue, ReleaseVerificationAction.restart.rawValue].contains($0)
+        list.removeAll { [ReleaseVerificationAction.prepare.rawValue, ReleaseVerificationAction.sync.rawValue, ReleaseVerificationAction.restart.rawValue].contains($0)
             && $0 != detail.releaseVerificationFooterAction }
         if detail.status != "done", let release = detail.release,
            release.canReconcile, release.batchId != nil {
@@ -1353,7 +1353,7 @@ struct TaskOverviewTabView: View {
                 deliveryConfirmation = (detail.taskId, runID, reviewKey)
             }
             .disabled(model.busy || detail.runId == nil || detail.reviewKey == nil)
-        case "sync_release_verification", "restart_release_verification":
+        case "prepare_release_verification", "sync_release_verification", "restart_release_verification":
             if let verificationAction = ReleaseVerificationAction(rawValue: action) {
                 ReleaseVerificationActionButton(detail: detail, action: verificationAction, onRefreshDetail: onRefreshDetail)
             }
