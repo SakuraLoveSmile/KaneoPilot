@@ -54,7 +54,7 @@ struct SessionMessageDetailView: View {
                     .keyboardShortcut(focusedControl == "close" ? KeyboardShortcut(.return, modifiers: []) : .cancelAction)
             }.padding(Spacing.l)
             if let match = row.match {
-                Text("\(match.field)命中\(highlight == nil || mode == "阅读" ? "" : " · 已定位实际文字")").font(.kpSmall).foregroundStyle(.secondary)
+                Text("\(match.field)命中\(highlight == nil || mode == "阅读" ? "" : " · 已定位实际文字")").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
             }
             if mode == "输出" {

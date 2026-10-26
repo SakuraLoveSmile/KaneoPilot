@@ -25,12 +25,12 @@ enum BoardColumn: String, CaseIterable, Identifiable {
 
     var color: Color {
         switch self {
-        case .needsPlan: return .gray
-        case .todo: return .blue
-        case .inProgress: return .orange
-        case .inReview: return .purple
-        case .done: return .green
-        case .failed: return .gray
+        case .needsPlan: return .kpGray
+        case .todo: return .kpGray
+        case .inProgress: return .kpBlue
+        case .inReview: return .kpOrange
+        case .done: return .kpGreen
+        case .failed: return .kpOrange
         }
     }
 
@@ -93,7 +93,7 @@ struct BoardView: View {
 
     private var filtering: Bool { columnFilter != nil || !search.isEmpty }
 
-    /// 搜索（标题/项目/task_id）+ 阶段筛选命中判定。
+    /// 搜索（标题/项目/task_id）+ 看板列筛选命中判定。
     private func matches(_ task: TaskSummary) -> Bool {
         if let columnFilter, task.boardColumn != columnFilter.rawValue { return false }
         if search.isEmpty { return true }
@@ -185,7 +185,7 @@ struct BoardView: View {
             .navigationTitle("任务")
             .searchable(text: $search, placement: .toolbar, prompt: "搜索标题、项目或任务 ID")
             .toolbar {
-                // 任务组（ui-spec §4.13）：规划待办 → 看板/列表 → 阶段筛选 → 更多（批量选择）
+                // 任务组（ui-spec §4.13）：规划待办 → 看板/列表 → 看板列筛选 → 更多（批量选择）
                 // v2 §4.7：规划面板入口（手动规划链路），从待办开始。
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -229,9 +229,9 @@ struct BoardView: View {
                             }
                         }
                     } label: {
-                        Label("更多", systemImage: "ellipsis.circle")
+                        Image(systemName: "ellipsis.circle")
                     }
-                    .labelStyle(.titleAndIcon)
+                    .labelStyle(.iconOnly)
                     .help("更多操作")
                     .accessibilityLabel("更多")
                 }
@@ -312,7 +312,8 @@ struct BoardView: View {
                     onOpen: openDetail,
                     onOpenRelated: openRelatedDetail,
                     onOpenSession: openSession,
-                    onToggleSelect: toggleSelection
+                    onToggleSelect: toggleSelection,
+                    listFocused: $boardFocused
                 )
                 .onAppear { compactListShown = true }
                 .onDisappear { compactListShown = false }
@@ -395,7 +396,7 @@ struct BoardView: View {
         .focusEffectDisabled()
     }
 
-    // MARK: 阶段筛选菜单（§4.1 过滤）
+    // MARK: 看板列筛选菜单（§4.1 过滤）
 
     private var filterMenu: some View {
         Menu {
@@ -426,13 +427,13 @@ struct BoardView: View {
         .labelStyle(.titleAndIcon)
         .tint(columnFilter == nil ? nil : Color.accentColor)
         .help("按看板列筛选，当前：\(columnFilter?.title ?? "全部")")
-        .accessibilityLabel("阶段筛选")
+        .accessibilityLabel("看板列筛选")
         .accessibilityValue(filterTitle)
     }
 
-    /// 顶栏标签显示当前阶段，避免筛选生效时看不出看板已被过滤。
+    /// 顶栏标签显示当前看板列，避免筛选生效时看不出看板已被过滤。
     private var filterTitle: String {
-        "阶段：\(columnFilter?.title ?? "全部")"
+        "看板列：\(columnFilter?.title ?? "全部")"
     }
 
     // MARK: 批量整理动作 (T2)
@@ -622,10 +623,13 @@ struct TaskExceptionGroupHeader: View {
 
     var body: some View {
         HStack(spacing: Spacing.s) {
-            Label(failed ? "失败" : "阻塞",
-                  systemImage: failed ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(failed ? Color.red : Color.orange)
-            Text("\(count)").foregroundStyle(.secondary)
+            Label {
+                Text(failed ? "失败" : "阻塞").foregroundStyle(.primary)
+            } icon: {
+                Image(systemName: failed ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(failed ? Color.kpRed : Color.kpOrange)
+            }
+            Text("\(count)").foregroundStyle(Color.kpSecondary)
             Spacer(minLength: 0)
         }
         .font(.kpSmall)
@@ -647,7 +651,7 @@ struct TaskSourceContext: View {
                 Spacer(minLength: 0)
             }
             .font(.kpSmall)
-            .foregroundStyle(parent.available ? Color.accentColor : Color.secondary)
+            .foregroundStyle(parent.available ? Color.accentColor : Color.kpSecondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -664,20 +668,20 @@ struct TaskHierarchyLabel: View {
 
     var body: some View {
         // 旧核心缺少关系投影时不推断来源或层级。
-        if let relations = task.taskRelations {
+        if let relations = task.taskRelations, relations.parent != nil || !relations.children.isEmpty {
             HStack(spacing: Spacing.s) {
                 if let parent = relations.parent {
                     Text("二级任务 · 评审修复")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Spacer(minLength: 0)
                     Button("来源") { onOpenRelated(parent) }
                         .buttonStyle(.borderless)
                         .disabled(!parent.available)
                         .help("查看原始任务：\(parent.title ?? parent.taskId)")
                 } else {
-                    Text("原始任务").foregroundStyle(.secondary)
+                    Text("原始任务").foregroundStyle(Color.kpSecondary)
                     if !relations.children.isEmpty {
-                        Text("\(relations.children.count) 个二级任务").foregroundStyle(.secondary)
+                        Text("\(relations.children.count) 个二级任务").foregroundStyle(Color.kpSecondary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -696,8 +700,9 @@ struct TaskHierarchyInset<Content: View>: View {
             if isChild {
                 Rectangle().fill(Color.kpSeparator)
                     .frame(width: 1)
+                    // 1pt 引导线 + 3pt 前距 + 8pt 后距合计 12pt，保留层级缩进。
                     .padding(.leading, 3)
-                    .padding(.trailing, 8)
+                    .padding(.trailing, Spacing.s)
                     .accessibilityHidden(true)
             }
             content()
@@ -761,7 +766,7 @@ struct BoardColumnView: View {
             if tasks.isEmpty {
                 Text(filtering ? "没有匹配任务" : "这个状态还没有任务")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(Spacing.m)
@@ -832,7 +837,7 @@ struct BoardColumnView: View {
                                 .foregroundStyle(Color.accentColor)
                         case .unchecked:
                             Image(systemName: "square")
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.kpSecondary)
                         }
                     }
                     .font(.system(size: 13))
@@ -854,9 +859,9 @@ struct BoardColumnView: View {
             Spacer(minLength: 0)
             Text("\(tasks.count)")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
+                .foregroundStyle(Color.kpSecondary)
+                .padding(.horizontal, Spacing.xs)
+                .padding(.vertical, Spacing.xs)
                 .background(Color.kpWindow, in: Capsule())
         }
         .padding(.horizontal, Spacing.m)
@@ -901,20 +906,20 @@ struct TaskCardView: View {
         return task.boardSubstatus ?? DisplayStatus.effective(task)
     }
 
-    /// §5 子状态配色：第六列按 exception.severity（failed 红 / blocked 橙），
-    /// 前五列受阻类 orange、待修复 purple、已完成 green，其余列色。
+    /// §5 子状态图标配色：第六列消费核心异常样式；
+    /// 前五列沿共享状态色，待合并/待交付保留蓝色短写法。
     private var substatusColor: Color {
         if task.status != "done", let release = task.release, release.showsTaskStatus { return ReleasePresentation.color(release) }
         if column == .failed {
-            return TaskBoardPresentation.isFailed(task) ? .red : .orange
+            return DisplayStatus.badge(for: task).style.color
         }
         switch substatus {
-        case "待合并", "待交付": return .blue
-        case "规划受阻", "派发受阻", "执行受阻", "评审受阻": return .orange
-        case "规划失败", "派发失败", "执行失败", "失败": return .red
-        case "待修复": return .purple
-        case "已完成": return .green
-        default: return column.color
+        case "待合并", "待交付": return .kpBlue
+        case "规划受阻", "派发受阻", "执行受阻", "评审受阻": return .kpOrange
+        case "规划失败", "派发失败", "执行失败", "失败": return .kpRed
+        case "待修复": return .kpOrange
+        case "就绪", "待确认执行", "已完成": return .kpGreen
+        default: return DisplayStatus.badge(for: task).style.color
         }
     }
 
@@ -952,14 +957,14 @@ struct TaskCardView: View {
     private var progressLine: some View {
         if let release = task.release {
             Text("\(release.title) · \(release.reason)")
-                .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
+                .font(.kpSmall).foregroundStyle(.primary).lineLimit(2)
         } else if let notice = task.delivery?.autoMergeNotice {
             Text(notice.reason)
                 .font(.kpSmall)
-                .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
+                .foregroundStyle(.primary)
                 .lineLimit(2)
         } else if let progress = task.lastProgress, !progress.isEmpty {
-            Text(progress).font(.kpSmall).foregroundStyle(.secondary).lineLimit(1)
+            Text(progress).font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
         }
     }
 
@@ -977,24 +982,30 @@ struct TaskCardView: View {
                     if isBatchMode {
                         Image(systemName: isSelected ? "checkmark.square.fill" : "square")
                             .font(.system(size: 13))
-                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.kpSecondary)
                     }
 
                     Text(task.projectName ?? "—")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(Color.kpSecondary)
+                        .padding(.horizontal, Spacing.xs)
+                        .padding(.vertical, Spacing.xs)
+                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
                         .lineLimit(1)
                     if AutomationPresentation.active(task.automation) {
-                        Text("自动").font(.kpSmall).foregroundStyle(.blue)
+                        Label {
+                            Text("自动").foregroundStyle(.primary)
+                        } icon: {
+                            Image(systemName: "bolt.fill").foregroundStyle(Color.kpBlue)
+                        }.font(.kpSmall)
                     }
                     Spacer(minLength: 0)
-                    Text(badgeText)
-                        .font(.kpSmall)
-                        .foregroundStyle(substatusColor)
-                        .lineLimit(1)
+                    Label {
+                        Text(badgeText).foregroundStyle(.primary).lineLimit(1)
+                    } icon: {
+                        Image(systemName: DisplayStatus.badge(for: task).style.icon)
+                            .foregroundStyle(substatusColor)
+                    }.font(.kpSmall)
                 }
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
@@ -1005,7 +1016,7 @@ struct TaskCardView: View {
                 progressLine
                 if let automation = task.automation, AutomationPresentation.active(automation),
                    let round = automation.fixRound, round > 0 {
-                    Text("修复 \(round)/\(automation.maxFixRounds ?? 2)").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("修复 \(round)/\(automation.maxFixRounds ?? 2)").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
                 supplement
                 if column == .inProgress {
@@ -1020,7 +1031,7 @@ struct TaskCardView: View {
                     }
                 }
             }
-            .lineSpacing(3)
+            .lineSpacing(Spacing.xs)
             .padding(Spacing.m)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
@@ -1051,10 +1062,13 @@ struct TaskCardView: View {
     @ViewBuilder
     private var supplement: some View {
         if let blocked = blockedText {
-            Label(blocked, systemImage: TaskBoardPresentation.isFailed(task)
-                  ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+            Label {
+                Text(blocked).foregroundStyle(.primary)
+            } icon: {
+                Image(systemName: TaskBoardPresentation.isFailed(task) ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.kpRed : Color.kpOrange)
+            }
                 .font(.kpSmall)
-                .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.red : Color.orange)
                 .lineLimit(2)
                 .accessibilityLabel("阻塞：\(blocked)")
         } else {
@@ -1062,20 +1076,20 @@ struct TaskCardView: View {
             case .inProgress:
                 Text("最近检查 \(lastCheckedLabel)")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .lineLimit(1)
             case .inReview:
                 if task.release == nil, task.delivery?.autoMergeNotice == nil, let conclusion = task.reviewSummary?.conclusion {
                     Text(conclusion == "pass" && task.delivery?.mode == "pr" && task.delivery?.prState?.uppercased() != "MERGED" ? "等待 PR 合并" : "本轮结论 \(reviewConclusionText(conclusion))")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .lineLimit(1)
                 }
             case .todo:
                 if let next = TimeFormat.eta(task.nextClaimAt) {
                     Text("预计 \(next) 派发")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .lineLimit(1)
                 }
             default:
@@ -1144,11 +1158,11 @@ struct BatchActionBar: View {
                 .foregroundStyle(.primary)
 
             if isProcessing, let progress = progressText {
-                HStack(spacing: 4) {
+                HStack(spacing: Spacing.xs) {
                     ProgressView().controlSize(.small)
                     Text(progress)
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                 }
             } else {
                 Button("全选当前结果 (\(allFilteredCount))") { onSelectAll() }
@@ -1269,31 +1283,33 @@ struct BatchConfirmSheet: View {
                         .foregroundStyle(.primary)
                     Text("跳过 \(skippedCount) 项")
                         .font(.kpBody)
-                        .foregroundStyle(skippedCount > 0 ? Color.orange : Color.secondary)
+                        .foregroundStyle(.primary)
                 }
 
                 if hasQueuedRequest {
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: Spacing.xs) {
                         Image(systemName: "exclamationmark.circle")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.kpOrange)
                         Text("这些任务尚未领取的排队请求将被取消。")
                             .font(.kpSmall)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.kpSecondary)
                     }
                 }
 
-                HStack(alignment: .top, spacing: 6) {
+                HStack(alignment: .top, spacing: Spacing.xs) {
                     Image(systemName: "shield")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Text("不删除 Kaneo 任务、计划、报告或会话。")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                 }
 
                 if eligibleCount == 0 {
-                    Text("当前所选项全部受限，无法执行本次操作。")
-                        .font(.kpSmall)
-                        .foregroundStyle(.red)
+                    Label {
+                        Text("当前所选项全部受限，无法执行本次操作。").foregroundStyle(.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.kpRed)
+                    }.font(.kpSmall)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1308,36 +1324,36 @@ struct BatchConfirmSheet: View {
                     ForEach(analyzedTasks, id: \.id) { (item: CategorizedTask) in
                         HStack(alignment: .top, spacing: Spacing.s) {
                             Image(systemName: item.isEligible ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundStyle(item.isEligible ? Color.green : Color.orange)
+                                .foregroundStyle(item.isEligible ? Color.kpGreen : Color.kpOrange)
                                 .font(.kpBody)
-                                .padding(.top, 2)
+                                .padding(.top, Spacing.xs)
 
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: Spacing.xs) {
                                 Text(item.task.title ?? item.task.taskId)
                                     .font(.kpBody)
                                     .lineLimit(2)
-                                    .lineSpacing(3)
+                                    .lineSpacing(Spacing.xs)
                                     .foregroundStyle(.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
 
                                 HStack(spacing: Spacing.s) {
                                     Text(item.task.projectName ?? "—")
                                         .font(.kpSmall)
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 3))
+                                        .foregroundStyle(Color.kpSecondary)
+                                        .padding(.horizontal, Spacing.xs)
+                                        .padding(.vertical, Spacing.xs)
+                                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
 
                                     Text(item.reason)
                                         .font(.kpSmall)
-                                        .foregroundStyle(item.isEligible ? Color.secondary : Color.orange)
+                                        .foregroundStyle(.primary)
                                 }
                             }
                             Spacer(minLength: 0)
                         }
                         .padding(Spacing.s)
-                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.kpSeparator, lineWidth: 1))
+                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.control))
+                        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
                     }
                 }
                 .padding(.horizontal, Spacing.l)
@@ -1393,18 +1409,18 @@ struct BatchReportSheet: View {
 
             // 统计徽标行
             HStack(spacing: Spacing.m) {
-                statBadge(title: "成功", count: report.succeededCount, color: .green)
+                statBadge(title: "成功", count: report.succeededCount, color: .kpGreen)
                 if report.skippedCount > 0 {
-                    statBadge(title: "跳过", count: report.skippedCount, color: .orange)
+                    statBadge(title: "跳过", count: report.skippedCount, color: .kpOrange)
                 }
                 if report.failedCount > 0 {
-                    statBadge(title: "失败", count: report.failedCount, color: .red)
+                    statBadge(title: "失败", count: report.failedCount, color: .kpRed)
                 }
                 if report.unconfirmedCount > 0 {
-                    statBadge(title: "未确认", count: report.unconfirmedCount, color: .purple)
+                    statBadge(title: "未确认", count: report.unconfirmedCount, color: .kpOrange)
                 }
                 if report.unexecutedCount > 0 {
-                    statBadge(title: "未执行", count: report.unexecutedCount, color: .gray)
+                    statBadge(title: "未执行", count: report.unexecutedCount, color: .kpGray)
                 }
                 Spacer(minLength: 0)
             }
@@ -1414,14 +1430,14 @@ struct BatchReportSheet: View {
             if let refreshError = report.refreshFailedMessage {
                 HStack(spacing: Spacing.s) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(Color.kpOrange)
                     Text("提示：\(refreshError)")
                         .font(.kpSmall)
                         .foregroundStyle(.primary)
                 }
                 .padding(Spacing.s)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                .background(Color.kpOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
                 .padding(.horizontal, Spacing.l)
                 .padding(.bottom, Spacing.s)
             }
@@ -1432,23 +1448,23 @@ struct BatchReportSheet: View {
                     ForEach(report.items) { item in
                         HStack(alignment: .top, spacing: Spacing.s) {
                             statusIcon(for: item.outcome)
-                                .padding(.top, 2)
+                                .padding(.top, Spacing.xs)
 
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: Spacing.xs) {
                                 Text(item.title)
                                     .font(.kpBody)
                                     .lineLimit(2)
-                                    .lineSpacing(3)
+                                    .lineSpacing(Spacing.xs)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Text(item.outcome.displayText)
                                     .font(.kpSmall)
-                                    .foregroundStyle(color(for: item.outcome))
+                                    .foregroundStyle(.primary)
                             }
                             Spacer(minLength: 0)
                         }
                         .padding(Spacing.s)
-                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.kpSeparator, lineWidth: 1))
+                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.control))
+                        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
                     }
                 }
                 .padding(.horizontal, Spacing.l)
@@ -1472,44 +1488,37 @@ struct BatchReportSheet: View {
     }
 
     private func statBadge(title: String, count: Int, color: Color) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Spacing.xs) {
             Text(title)
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
+            Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
             Text("\(count)")
                 .font(.kpBody.weight(.semibold))
-                .foregroundStyle(color)
+                .foregroundStyle(.primary)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
+        .padding(.vertical, Spacing.xs)
+        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
     }
 
     @ViewBuilder
     private func statusIcon(for outcome: BatchItemOutcome) -> some View {
         switch outcome {
         case .succeeded:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.kpGreen)
         case .skipped:
-            Image(systemName: "arrow.right.circle.fill").foregroundStyle(Color.orange)
+            Image(systemName: "arrow.right.circle.fill").foregroundStyle(Color.kpOrange)
         case .failed:
-            Image(systemName: "xmark.circle.fill").foregroundStyle(Color.red)
+            Image(systemName: "xmark.circle.fill").foregroundStyle(Color.kpRed)
         case .unconfirmed:
-            Image(systemName: "questionmark.circle.fill").foregroundStyle(Color.purple)
+            Image(systemName: "questionmark.circle.fill").foregroundStyle(Color.kpOrange)
         case .unexecuted:
-            Image(systemName: "minus.circle.fill").foregroundStyle(Color.gray)
+            Image(systemName: "minus.circle.fill").foregroundStyle(Color.kpGray)
         }
     }
 
-    private func color(for outcome: BatchItemOutcome) -> Color {
-        switch outcome {
-        case .succeeded: return .green
-        case .skipped: return .orange
-        case .failed: return .red
-        case .unconfirmed: return .purple
-        case .unexecuted: return .secondary
-        }
-    }
+
 }
 
 // MARK: - 详情浮层容器（§4.1 T4 五段式）

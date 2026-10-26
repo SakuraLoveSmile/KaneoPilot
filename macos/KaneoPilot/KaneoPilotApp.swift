@@ -113,6 +113,13 @@ struct KaneoPilotApp: App {
         }
         .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
         .windowResizability(.automatic)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("刷新") { Task { await model.refreshAll() } }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.busy)
+            }
+        }
         MenuBarExtra("需要你 \(model.attentionCount)", systemImage: "arrow.triangle.branch") { MenuBarView().environmentObject(model) }
     }
 }

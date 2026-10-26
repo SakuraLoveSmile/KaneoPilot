@@ -1,10 +1,10 @@
 import SwiftUI
 
 /// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
-/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你处理、已排队、执行中、待评审、最近），空组隐藏。
-/// 共用搜索、阶段筛选、批量选择与详情打开逻辑。
+/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你、已排队、执行中、待评审、最近），空组隐藏。
+/// 共用搜索、看板列筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
-    /// 已套用搜索与阶段筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
+    /// 已套用搜索与看板列筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
     let tasks: [TaskSummary]
     @Binding var chip: ObserveChip
     @Binding var focused: String?
@@ -14,6 +14,7 @@ struct TaskCompactListView: View {
     let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: (TaskSummary) -> Void
     let onToggleSelect: (String) -> Void
+    @FocusState.Binding var listFocused: Bool
 
     var body: some View {
         let sections = ObserveScope.sections(tasks, chip: chip)
@@ -21,23 +22,52 @@ struct TaskCompactListView: View {
             chipBar
                 .padding(.horizontal, Spacing.m)
                 .padding(.top, Spacing.m)
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: Spacing.m, pinnedViews: [.sectionHeaders]) {
-                    ForEach(sections) { section in
-                        Section {
-                            taskGroups(section.groups)
-                        } header: {
-                            groupHeader(section.group, count: section.count)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        ForEach(sections) { section in
+                            Section {
+                                taskGroups(section.groups)
+                            } header: {
+                                groupHeader(section.group, count: section.count)
+                            }
                         }
+                        if sections.isEmpty { emptyRow }
                     }
-                    if sections.isEmpty {
-                        emptyRow
+                    .padding(Spacing.m)
+                    .focusable()
+                    .focused($listFocused)
+                    .focusEffectDisabled()
+                    .onKeyPress(.upArrow) { moveFocus(-1) }
+                    .onKeyPress(.downArrow) { moveFocus(1) }
+                    .onKeyPress(.return) {
+                        guard let task = visibleTasks.first(where: { $0.taskId == focused }) else { return .ignored }
+                        onOpen(task)
+                        return .handled
+                    }
+                    .onKeyPress(.space) {
+                        guard isBatchMode, let focused, visibleTasks.contains(where: { $0.taskId == focused }) else { return .ignored }
+                        onToggleSelect(focused)
+                        return .handled
                     }
                 }
-                .padding(Spacing.m)
+                .onChange(of: focused) { _, id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
+                }
             }
         }
         .background(Color.kpWindow)
+    }
+
+    private var visibleTasks: [TaskSummary] {
+        ObserveScope.sections(tasks, chip: chip).flatMap { $0.groups.flatMap(\.tasks) }
+    }
+
+    private func moveFocus(_ step: Int) -> KeyPress.Result {
+        guard !(NSApp.keyWindow?.firstResponder is NSTextView), !visibleTasks.isEmpty else { return .ignored }
+        let old = visibleTasks.firstIndex { $0.taskId == focused } ?? (step > 0 ? -1 : visibleTasks.count)
+        focused = visibleTasks[min(max(old + step, 0), visibleTasks.count - 1)].taskId
+        return .handled
     }
 
     private func count(_ option: ObserveChip) -> Int {
@@ -53,13 +83,13 @@ struct TaskCompactListView: View {
                 Button {
                     chip = option
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: Spacing.xs) {
                         Text(option.title)
-                        Text("\(count(option))").monospacedDigit().foregroundStyle(.secondary)
+                        Text("\(count(option))").monospacedDigit().foregroundStyle(Color.kpSecondary)
                     }
-                    .font(.kpSmall)
-                    .padding(.horizontal, Spacing.s)
-                    .padding(.vertical, 4)
+                    .font(.kpLabel)
+                    .padding(.horizontal, Spacing.m)
+                    .padding(.vertical, Spacing.xs)
                     .background(chip == option ? Color.accentColor.opacity(0.18) : Color.kpControl, in: Capsule())
                 }
                 .buttonStyle(.plain)
@@ -72,7 +102,7 @@ struct TaskCompactListView: View {
         HStack {
             Text("当前没有符合「\(chip.title)」的任务")
                 .font(.kpSmall)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color.kpSecondary)
             Spacer()
         }
         .padding(.horizontal, Spacing.m)
@@ -81,7 +111,7 @@ struct TaskCompactListView: View {
 
     private func taskGroups(_ groups: [TaskBoardGroup]) -> some View {
         ForEach(groups) { group in
-            VStack(alignment: .leading, spacing: Spacing.s) {
+            VStack(alignment: .leading, spacing: 0) {
                 if group.needsSourceContext, let parent = group.parent {
                     TaskSourceContext(parent: parent, onOpen: onOpenRelated)
                         .padding(.horizontal, Spacing.m)
@@ -90,16 +120,17 @@ struct TaskCompactListView: View {
                     TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
                         TaskCompactRow(
                             task: task,
-                            column: BoardColumn(rawValue: task.boardColumn ?? "") ?? .todo,
                             isFocused: focused == task.taskId,
                             isBatchMode: isBatchMode,
                             isSelected: selectedTaskIDs.contains(task.taskId),
                             onOpen: { onOpen(task) },
                             onOpenRelated: onOpenRelated,
                             onOpenSession: { onOpenSession(task) },
-                            onToggleSelect: { onToggleSelect(task.taskId) }
+                            onToggleSelect: { onToggleSelect(task.taskId) },
+                            onFocus: { focused = task.taskId }
                         )
                     }
+                    .id(task.taskId)
                 }
             }
         }
@@ -109,14 +140,17 @@ struct TaskCompactListView: View {
 
     private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
         HStack(spacing: Spacing.s) {
+            if group == .needsYou {
+                Circle().fill(Color.kpOrange).frame(width: 8, height: 8).accessibilityHidden(true)
+            }
             Text(group.title)
                 .font(.kpSmall.weight(.semibold))
-                .foregroundStyle(group == .needsYou ? Color.orange : Color.secondary)
+                .foregroundStyle(.primary)
             Text("\(count)")
                 .font(.kpSmall.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 1)
+                .foregroundStyle(Color.kpSecondary)
+                .padding(.horizontal, Spacing.s)
+                .padding(.vertical, Spacing.xs)
                 .background(Color.kpControl, in: Capsule())
             Spacer()
         }
@@ -163,7 +197,7 @@ enum ObserveGroup: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .needsYou: return "需要你处理"
+        case .needsYou: return "需要你"
         case .queued: return "已排队"
         case .running: return "执行中"
         case .review: return "待评审"
@@ -237,7 +271,6 @@ struct ObserveSection: Identifiable {
 
 private struct TaskCompactRow: View {
     let task: TaskSummary
-    let column: BoardColumn
     let isFocused: Bool
     let isBatchMode: Bool
     let isSelected: Bool
@@ -245,130 +278,102 @@ private struct TaskCompactRow: View {
     let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: () -> Void
     let onToggleSelect: () -> Void
+    let onFocus: () -> Void
+    @State private var isHovered = false
+    @FocusState private var sessionFocused: Bool
+    @AccessibilityFocusState private var rowAccessibilityFocused: Bool
+    @AccessibilityFocusState private var sessionAccessibilityFocused: Bool
 
-    private var display: String { DisplayStatus.effective(task) }
-    private var style: StatusStyle {
-        if task.status != "done", let release = task.release, release.showsTaskStatus { return ReleasePresentation.style(release) }
-        return DisplayStatus.style(display)
-    }
-    private var exceptionColor: Color {
-        TaskBoardPresentation.isFailed(task) ? .red : .orange
-    }
     private var exceptionReason: String? {
         if let reason = task.blockedReason, !reason.isEmpty { return reason }
         if let detail = task.exception?.detail, !detail.isEmpty { return detail }
         return nil
     }
+    private var secondaryText: String? {
+        if let reason = exceptionReason { return reason }
+        if let release = task.release { return "\(release.title) · \(release.reason)" }
+        return task.delivery?.autoMergeNotice?.reason
+    }
+    private var hasHierarchy: Bool {
+        guard let relations = task.taskRelations else { return false }
+        return relations.parent != nil || !relations.children.isEmpty
+    }
+    private var hasSecondLine: Bool { secondaryText != nil || hasHierarchy }
     private var canOpenSession: Bool {
         task.status == "running" || task.activeRequest != nil || task.boardColumn == "in_progress"
+    }
+    private var showsSession: Bool {
+        isHovered || isFocused || sessionFocused || rowAccessibilityFocused || sessionAccessibilityFocused
     }
 
     var body: some View {
         HStack(spacing: Spacing.m) {
             if isBatchMode {
-                Toggle(isOn: Binding(
-                    get: { isSelected },
-                    set: { _ in onToggleSelect() }
-                )) {
+                Toggle(isOn: Binding(get: { isSelected }, set: { _ in onToggleSelect() })) {
                     EmptyView()
                 }
                 .toggleStyle(.checkbox)
                 .labelsHidden()
+                .accessibilityLabel("选择任务：\(task.title ?? task.taskId)")
             }
-
-            Image(systemName: column == .failed
-                  ? (TaskBoardPresentation.isFailed(task) ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                  : style.icon)
-                .foregroundStyle(column == .failed ? exceptionColor : style.color)
-                .font(.system(size: 13))
-                .frame(width: 16)
-
-            VStack(alignment: .leading, spacing: 2) {
-                TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
-                taskTitleView
-
-                if let reason = exceptionReason {
-                    // §4.18：阻塞与失败的原因文字统一为 primary；颜色只作用于图标与分组标题。
-                    Text(reason)
-                        .font(.kpSmall)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                } else if let release = task.release {
-                    Text("\(release.title) · \(release.reason)")
-                        .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
-                } else if let notice = task.delivery?.autoMergeNotice {
-                    Text(notice.reason)
-                        .font(.kpSmall)
-                        .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
-                        .lineLimit(2)
-                }
-            }
-
-            Spacer(minLength: Spacing.s)
-
-            HStack(spacing: Spacing.m) {
-                if task.status != "done", let release = task.release, release.showsTaskStatus {
-                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
-                } else {
-                    StatusBadge(status: display)
-                }
-
-                if canOpenSession {
-                    Button {
-                        onOpenSession()
-                    } label: {
-                        Label("会话", systemImage: "bubble.left.and.bubble.right")
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.s) {
+                    Text(task.title ?? task.taskId)
+                        .font(.kpBody).lineLimit(1).foregroundStyle(.primary).layoutPriority(1)
+                    if let project = task.projectName {
+                        Text(project).font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
                     }
-                    .buttonStyle(.borderless)
-                    .font(.kpSmall)
-                    .help("查看执行会话")
+                    Spacer(minLength: 0)
+                    StatusBadge(task: task)
+                    Text(TimeFormat.short(task.updatedAt))
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        .frame(width: 44, alignment: .trailing)
                 }
-
-                Text(TimeFormat.short(task.updatedAt))
-                    .font(.kpSmall)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .trailing)
+                if hasSecondLine {
+                    HStack(spacing: Spacing.m) {
+                        if let text = secondaryText {
+                            Text(text).font(.kpLabel).foregroundStyle(.primary).lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if hasHierarchy {
+                            TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if canOpenSession {
+                Button { onOpenSession() } label: {
+                    Label("会话", systemImage: "bubble.left.and.bubble.right")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.kpLabel)
+                .help("查看执行会话")
+                .focused($sessionFocused)
+                .accessibilityFocused($sessionAccessibilityFocused)
+                .opacity(showsSession ? 1 : 0)
+                // 保留 Tab 与 VoiceOver 入口；获得焦点即显露，不因鼠标悬停状态丢失。
+                .accessibilityHidden(false)
             }
         }
         .padding(.horizontal, Spacing.m)
-        .padding(.vertical, Spacing.s)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isFocused ? Color.accentColor.opacity(0.1) : Color.kpWindow)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(isFocused ? Color.accentColor : Color.kpSeparator.opacity(0.4), lineWidth: isFocused ? 1.5 : 1)
-        )
+        .padding(.vertical, Spacing.xs)
+        .frame(minHeight: hasSecondLine ? RowHeight.preferredTwoLine : RowHeight.interactive)
+        .background(isFocused || isSelected || sessionFocused ? Color.accentColor.opacity(0.1) : Color.clear)
+        .overlay(alignment: .bottom) { Divider().padding(.leading, Spacing.m) }
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .onTapGesture {
-            if isBatchMode {
-                onToggleSelect()
-            } else {
-                onOpen()
-            }
+            onFocus()
+            if isBatchMode { onToggleSelect() } else { onOpen() }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityFocused($rowAccessibilityFocused)
+        .accessibilityAction(named: Text("打开详情")) { onOpen() }
         .contextMenu {
             Button("打开详情") { onOpen() }
-            if canOpenSession {
-                Button("查看执行会话") { onOpenSession() }
-            }
-        }
-    }
-    private var taskTitleView: some View {
-        HStack(spacing: Spacing.s) {
-            if let project = task.projectName {
-                Text(project)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 3))
-            }
-            Text(task.title ?? task.taskId)
-                .font(.kpBody)
-                .lineLimit(1)
-                .foregroundStyle(.primary)
+            if canOpenSession { Button("查看执行会话") { onOpenSession() } }
         }
     }
 }

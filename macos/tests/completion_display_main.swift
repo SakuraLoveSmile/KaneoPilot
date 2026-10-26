@@ -31,7 +31,7 @@ for (state, title) in [("blocked", "收尾校验受阻"), ("unknown", "完成同
     let json = closeoutSource.replacingOccurrences(of: #""state":"ready""#, with: "\"state\":\"\(state)\"")
     let task = try decoder.decode(TaskDetail.self, from: Data(json.utf8))
     precondition(DisplayStatus.effective(task) == title, "收尾受阻/未知不冒充待修复或失败")
-    precondition(DisplayStatus.style(title).color == .orange, "收尾受阻/未知使用阻塞色")
+    precondition(DisplayStatus.style(title).tone == .orange, "收尾受阻/未知使用阻塞色")
     if state == "unknown" { precondition(task.parentCloseout?.actionLabel == "核对完成结果", "未知送达只读核对") }
 }
 let closed = closeoutSource.replacingOccurrences(of: #""status":"in_review""#, with: #""status":"done""#).replacingOccurrences(of: #""state":"ready""#, with: #""state":"completed""#)
@@ -44,7 +44,7 @@ for state in ["failed", "blocked", "unknown", "published"] {
     let json = releaseProjection.replacingOccurrences(of: #""state":"building""#, with: "\"state\":\"\(state)\"")
     let task = try decoder.decode(TaskSummary.self, from: Data(json.utf8))
     let release = task.release!
-    precondition(ReleasePresentation.color(release) == (state == "failed" ? Color.red : ["blocked", "unknown"].contains(state) ? Color.orange : Color.green), "构建失败、发布阻塞及发布通过颜色分开")
+    precondition(ReleasePresentation.style(release).tone == (state == "failed" ? StatusTone.red : ["blocked", "unknown"].contains(state) ? StatusTone.orange : StatusTone.green), "构建失败、发布阻塞及发布通过颜色分开")
     precondition(task.status == "in_review", "发布状态不在 UI 伪造任务完成")
 }
 let historicalRelease = releaseProjection.replacingOccurrences(of: #""status":"in_review""#, with: #""status":"done","display_status":"已完成""#)
@@ -64,4 +64,92 @@ let repairedPRSummary = try decoder.decode(TaskSummary.self, from: Data(repaired
 let repairedPRDetail = try decoder.decode(TaskDetail.self, from: Data(repairedPR.utf8))
 precondition(DisplayStatus.effective(repairedPRSummary) == "评审通过 · 待合并", "看板显示新修复 PR 待合并")
 precondition(DisplayStatus.effective(repairedPRDetail) == "评审通过 · 待合并", "详情显示新修复 PR 待合并")
-print("36 completion display fixture checks passed")
+// Mac 视觉调整：异常标签来自核心，样式由 severity/kind 决定。
+func taskProjection(exception: [String: Any], question: [String: Any]? = nil) throws -> Data {
+    var task: [String: Any] = ["task_id": "visual-status", "status": "needs_user", "display_status": "阻塞", "exception": exception]
+    if let question { task["execution_question"] = question }
+    return try JSONSerialization.data(withJSONObject: task)
+}
+
+let exceptionCases: [(String, String, String, StatusTone, String)] = [
+    ("review_blocked", "评审受阻", "blocked", .orange, "exclamationmark.triangle"),
+    ("executor_lost", "执行端失联", "blocked", .red, "exclamationmark.triangle.fill"),
+    ("send_unknown", "发送不明", "blocked", .orange, "exclamationmark.triangle"),
+    ("observation_blocked", "监控异常", "blocked", .orange, "exclamationmark.triangle"),
+    ("manual_block", "需人工处理", "blocked", .orange, "exclamationmark.triangle"),
+    ("failed", "规划失败", "failed", .red, "xmark.octagon.fill"),
+    ("failed", "派发失败", "failed", .red, "xmark.octagon.fill"),
+    ("failed", "执行失败", "failed", .red, "xmark.octagon.fill"),
+    ("future_blocked", "核心新增的受阻说明", "blocked", .orange, "exclamationmark.triangle"),
+    ("future_failed", "核心新增的失败说明", "failed", .red, "xmark.octagon.fill"),
+    ("release_failed", "新的发布失败说明", "failed", .red, "xmark.octagon.fill"),
+    ("release_blocked", "新的发布受阻说明", "blocked", .orange, "exclamationmark.triangle"),
+    ("parent_closeout_blocked", "新的收尾受阻说明", "blocked", .orange, "exclamationmark.triangle")
+]
+for (kind, label, severity, tone, icon) in exceptionCases {
+    let data = try taskProjection(exception: ["kind": kind, "label": label, "severity": severity])
+    let row = try decoder.decode(TaskSummary.self, from: data)
+    let detail = try decoder.decode(TaskDetail.self, from: data)
+    for badge in [DisplayStatus.badge(for: row), DisplayStatus.badge(for: detail)] {
+        precondition(badge.text == label, "列表和详情直接显示核心异常标签")
+        precondition(badge.style.tone == tone && badge.style.icon == icon, "未知标签仍按 severity/kind 决定样式")
+    }
+}
+let rejectedData = try taskProjection(exception: ["kind": "review_rejected", "label": "评审未通过·待修复", "severity": "blocked"])
+let rejected = try decoder.decode(TaskSummary.self, from: rejectedData)
+precondition(DisplayStatus.badge(for: rejected).text == "待修复", "评审未通过保留既有短写法")
+precondition(DisplayStatus.badge(for: rejected).style.tone == .orange, "待修复属于受阻，不是正在修复")
+for severity in ["blocked", "failed"] {
+    for label in [nil, ""] as [String?] {
+        var exception: [String: Any] = ["kind": "legacy", "severity": severity]
+        if let label { exception["label"] = label }
+        let data = try taskProjection(exception: exception)
+        let row = try decoder.decode(TaskSummary.self, from: data)
+        let detail = try decoder.decode(TaskDetail.self, from: data)
+        let fallback = severity == "failed" ? "失败" : "阻塞"
+        precondition(DisplayStatus.effective(row) == fallback && DisplayStatus.effective(detail) == fallback,
+                     "旧核心缺失或空标签保持异常兜底")
+    }
+}
+let manualException: [String: Any] = ["kind": "manual_block", "label": "需人工处理", "severity": "blocked"]
+for (answerable, label) in [(true, "等待你回答"), (false, "等待你在 Plus 中回答")] {
+    let data = try taskProjection(exception: manualException, question: ["state": "open", "answerable": answerable])
+    let row = try decoder.decode(TaskSummary.self, from: data)
+    precondition(row.executionQuestion?.state == "open" && row.executionQuestion?.answerable == answerable,
+                 "列表提问只需简要字段即可解码")
+    precondition(DisplayStatus.badge(for: row).text == label, "列表区分本机可答与 Plus 中回答")
+    precondition(DisplayStatus.badge(for: row).style.tone == .orange, "开放提问保留人工处理色")
+}
+for question in [["state": "closed", "answerable": false] as [String: Any], [:], ["state": "open"]] {
+    let row = try decoder.decode(TaskSummary.self, from: taskProjection(exception: manualException, question: question))
+    precondition(DisplayStatus.effective(row) == (question["state"] as? String == "open" ? "等待你回答" : "需人工处理"),
+                 "非开放提问不改变状态，旧核心缺 answerable 不拖垮列表")
+}
+let questionOnOtherException = try decoder.decode(TaskSummary.self, from: taskProjection(
+    exception: ["kind": "send_unknown", "label": "发送不明", "severity": "blocked"],
+    question: ["state": "open", "answerable": true]))
+precondition(DisplayStatus.effective(questionOnOtherException) == "发送不明", "开放提问不能遮盖非人工异常")
+
+var detailQuestion: [String: Any] = [
+    "request_id": "q-1", "run_id": "run-1", "session_id": "session-1", "turn_id": "turn-1",
+    "tool_call_id": "call-1", "source": "plus", "questions_sha256": "questions-hash",
+    "answerable": true, "state": "open", "delivery": "pending", "opened_at": "2026-10-26T00:00:00Z",
+    "wait_seconds": 120, "observer_alive": true, "queued": 0, "questions": [], "draft": []
+]
+for (source, answerable, delivery, label) in [
+    ("plus", true, "pending", "等待你回答"),
+    ("plus", false, "pending", "等待你在 Plus 中回答"),
+    ("codex", true, "accepted", "等待执行端接收")
+] {
+    detailQuestion["source"] = source
+    detailQuestion["answerable"] = answerable
+    detailQuestion["delivery"] = delivery
+    let detail = try decoder.decode(TaskDetail.self, from: taskProjection(exception: manualException, question: detailQuestion))
+    precondition(DisplayStatus.badge(for: detail).text == label, "详情统一提问状态，已提交不叠加第二个徽标")
+}
+detailQuestion["state"] = "closed"
+let answered = try decoder.decode(TaskDetail.self, from: taskProjection(exception: manualException, question: detailQuestion))
+precondition(DisplayStatus.effective(answered) == "需人工处理", "关闭提问不延续等待状态")
+precondition(DisplayStatus.style("等待你在 Plus 中回答").tone == .orange, "只有文字的徽标也识别 Plus 回答状态")
+precondition(StatusStyle(icon: "clock", color: .blue, label: "旧入口").tone == .blue, "既有颜色初始化入口保留且统一令牌")
+print("completion display fixtures: ok")

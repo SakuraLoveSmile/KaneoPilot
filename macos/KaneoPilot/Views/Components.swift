@@ -1,12 +1,15 @@
 import SwiftUI
 import AppKit
 
-// MARK: - 冻结度量（ui-spec §3）
+// MARK: - 共享度量（ui-spec §3，2026-10-26）
 
 extension Font {
     static let kpBody = Font.system(size: 13)
     static let kpTitle = Font.system(size: 18, weight: .semibold)
     static let kpSmall = Font.system(size: 11)
+    static let kpLabel = Font.system(size: 12)
+    static let kpSection = Font.system(size: 15, weight: .semibold)
+    static let kpMetric = Font.system(size: 22, weight: .semibold).monospacedDigit()
 }
 
 extension Color {
@@ -16,9 +19,23 @@ extension Color {
 }
 
 enum Spacing {
+    static let xs: CGFloat = 4
     static let s: CGFloat = 8
     static let m: CGFloat = 12
     static let l: CGFloat = 16
+    static let xl: CGFloat = 24
+}
+
+enum Radius {
+    static let control: CGFloat = 6
+    static let group: CGFloat = 10
+}
+
+enum RowHeight {
+    static let interactive: CGFloat = 40
+    static let twoLine: CGFloat = 48
+    static let preferredTwoLine: CGFloat = 52
+    static let data: CGFloat = 30
 }
 
 // MARK: - 中文映射
@@ -263,6 +280,49 @@ struct StatusStyle {
     let icon: String
     let color: Color
     let label: String
+    let tone: StatusTone
+
+    init(icon: String, tone: StatusTone, label: String) {
+        self.icon = icon
+        self.color = tone.color
+        self.label = label
+        self.tone = tone
+    }
+
+    /// 保留已有只有颜色的调用入口，并统一到命名色板。
+    init(icon: String, color: Color, label: String) {
+        let tone: StatusTone
+        if color == .red || color == .kpRed { tone = .red }
+        else if color == .orange || color == .kpOrange { tone = .orange }
+        else if color == .green || color == .kpGreen { tone = .green }
+        else if color == .blue || color == .kpBlue { tone = .blue }
+        else { tone = .gray }
+        self.init(icon: icon, tone: tone, label: label)
+    }
+}
+
+// 此切片同时供 headless 展示夹具使用，保留命名色与 tone 在同一范围。
+extension Color {
+    static let kpBlue = Color("kpBlue")
+    static let kpOrange = Color("kpOrange")
+    static let kpRed = Color("kpRed")
+    static let kpGreen = Color("kpGreen")
+    static let kpGray = Color("kpGray")
+    static let kpSecondary = Color("kpSecondary")
+}
+
+enum StatusTone: String {
+    case blue, orange, red, green, gray
+
+    var color: Color {
+        switch self {
+        case .blue: return .kpBlue
+        case .orange: return .kpOrange
+        case .red: return .kpRed
+        case .green: return .kpGreen
+        case .gray: return .kpGray
+        }
+    }
 }
 
 enum DisplayStatus {
@@ -270,60 +330,57 @@ enum DisplayStatus {
     static func style(_ status: String?) -> StatusStyle {
         switch status {
         case "待规划", "needs_plan":
-            return StatusStyle(icon: "doc.badge.plus", color: .secondary, label: "待规划")
+            return StatusStyle(icon: "doc.badge.plus", tone: .gray, label: "待规划")
+        case "待办":
+            return StatusStyle(icon: "list.bullet", tone: .gray, label: "待办")
         case "规划中", "planning":
-            return StatusStyle(icon: "doc.text.magnifyingglass", color: .blue, label: "规划中")
+            return StatusStyle(icon: "doc.text.magnifyingglass", tone: .blue, label: "规划中")
         case "就绪", "ready":
-            return StatusStyle(icon: "checkmark.circle", color: .green, label: "就绪")
-        // v2 §5：计划已发布但未授权执行（文字必须为「待确认执行」）。
+            return StatusStyle(icon: "checkmark.circle", tone: .green, label: "就绪")
         case "待确认执行":
-            return StatusStyle(icon: "checkmark.circle", color: .green, label: "待确认执行")
-        // v2 §5：旧未授权 plan 请求（kind=plan 且无 manual_authorized）。
+            return StatusStyle(icon: "checkmark.circle", tone: .green, label: "待确认执行")
         case "等待确认材料":
-            return StatusStyle(icon: "doc.badge.questionmark", color: .orange, label: "等待确认材料")
+            return StatusStyle(icon: "doc.badge.questionmark", tone: .orange, label: "等待确认材料")
         case "已排队", "queued":
-            return StatusStyle(icon: "clock", color: .blue, label: "已排队")
+            return StatusStyle(icon: "clock", tone: .blue, label: "已排队")
         case "派发中", "dispatching", "prepared", "submitting":
-            return StatusStyle(icon: "paperplane", color: .blue, label: "派发中")
+            return StatusStyle(icon: "paperplane", tone: .blue, label: "派发中")
         case "执行中", "running":
-            return StatusStyle(icon: "play.circle", color: .blue, label: "执行中")
+            return StatusStyle(icon: "play.circle", tone: .blue, label: "执行中")
         case "待评审":
-            return StatusStyle(icon: "clock", color: .orange, label: "待评审")
+            return StatusStyle(icon: "clock", tone: .orange, label: "待评审")
         case "评审中", "in_review":
-            return StatusStyle(icon: "eye", color: .orange, label: "评审中")
-        case "阻塞":
-            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "阻塞")
-        case "失败":
-            return StatusStyle(icon: "xmark.octagon.fill", color: .red, label: "失败")
+            return StatusStyle(icon: "eye", tone: .orange, label: "评审中")
+        case "阻塞", "评审受阻", "发送不明", "监控异常", "需人工处理":
+            return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: status!)
+        case "失败", "规划失败", "派发失败", "执行失败":
+            return StatusStyle(icon: "xmark.octagon.fill", tone: .red, label: status!)
         case "修复会话待启动", "AI 处理待启动":
-            return StatusStyle(icon: "clock", color: .blue, label: status!)
+            return StatusStyle(icon: "clock", tone: .blue, label: status!)
         case "修复中", "AI 正在处理":
-            return StatusStyle(icon: "wrench.and.screwdriver", color: .blue, label: status!)
+            return StatusStyle(icon: "wrench.and.screwdriver", tone: .blue, label: status!)
         case "修复后待复审", "处理后待复审":
-            return StatusStyle(icon: "eye", color: .orange, label: status!)
+            return StatusStyle(icon: "eye", tone: .orange, label: status!)
         case "等待二级任务完成", "待收尾校验":
-            return StatusStyle(icon: "checklist", color: .blue, label: status!)
-        case "收尾校验受阻", "完成同步待确认":
-            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: status!)
-        case "待修复":
-            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "待修复")
+            return StatusStyle(icon: "checklist", tone: .blue, label: status!)
+        case "收尾校验受阻", "完成同步待确认", "待修复":
+            return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: status!)
         case "评审通过 · 待合并", "评审通过 · 待交付", "交付中":
-            return StatusStyle(icon: "checkmark.circle", color: .blue, label: status!)
+            return StatusStyle(icon: "checkmark.circle", tone: .blue, label: status!)
         case "需人工", "needs_user":
-            return StatusStyle(icon: "exclamationmark.triangle", color: .orange, label: "需人工")
-        // 执行期提问分别显示等待回答与已提交等待接收。
-        case "等待你回答":
-            return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "等待你回答")
+            return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: "需人工")
+        case "等待你回答", "等待你在 Plus 中回答":
+            return StatusStyle(icon: "exclamationmark.circle", tone: .orange, label: status!)
         case "等待执行端接收":
-            return StatusStyle(icon: "clock", color: .blue, label: "等待执行端接收")
+            return StatusStyle(icon: "clock", tone: .blue, label: "等待执行端接收")
         case "执行端失联", "lost":
-            return StatusStyle(icon: "exclamationmark.triangle.fill", color: .red, label: "执行端失联")
+            return StatusStyle(icon: "exclamationmark.triangle.fill", tone: .red, label: "执行端失联")
         case "已完成", "done":
-            return StatusStyle(icon: "checkmark.circle", color: .green, label: "已完成")
+            return StatusStyle(icon: "checkmark.circle", tone: .green, label: "已完成")
         case "已归档":
-            return StatusStyle(icon: "archivebox", color: .gray, label: "已归档")
+            return StatusStyle(icon: "archivebox", tone: .gray, label: "已归档")
         default:
-            return StatusStyle(icon: "questionmark.circle", color: .secondary, label: status ?? "未知")
+            return StatusStyle(icon: "questionmark.circle", tone: .gray, label: status ?? "未知")
         }
     }
 
@@ -332,12 +389,28 @@ enum DisplayStatus {
         displayStatus ?? "未提供"
     }
 
+    static func waitingLabel(for task: TaskSummary) -> String? {
+        guard task.exception?.kind == "manual_block", let question = task.executionQuestion,
+              question.state == "open" else { return nil }
+        return question.answerable == false ? "等待你在 Plus 中回答" : "等待你回答"
+    }
+
+    static func waitingLabel(for task: TaskDetail) -> String? {
+        guard task.exception?.kind == "manual_block", let question = task.currentInputQuestion,
+              question.state == "open" else { return nil }
+        if !question.answerable { return "等待你在 Plus 中回答" }
+        return question.source == "codex" && question.delivery == "accepted" ? "等待执行端接收" : "等待你回答"
+    }
+
     static func effective(_ task: TaskSummary) -> String {
         if task.status != "done", let release = task.release, release.showsTaskStatus { return release.title }
         if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
         if let title = task.parentCloseout?.displayTitle { return title }
         if let exception = task.exception {
-            return exception.isFailed ? "失败" : (exception.kind == "review_rejected" ? "待修复" : "阻塞")
+            if exception.kind == "review_rejected" { return "待修复" }
+            if let waiting = waitingLabel(for: task) { return waiting }
+            if let label = exception.label, !label.isEmpty { return label }
+            return exception.isFailed ? "失败" : "阻塞"
         }
         if task.status == "done" { return task.displayStatus ?? "已完成" }
         if let delivery = deliveryStatus(phase: task.phase, conclusion: task.reviewSummary?.conclusion,
@@ -350,12 +423,46 @@ enum DisplayStatus {
         if task.status == "done", task.parentCloseout?.state == "completed" { return "已完成" }
         if let title = task.parentCloseout?.displayTitle { return title }
         if let exception = task.exception {
-            return exception.isFailed ? "失败" : (exception.kind == "review_rejected" ? "待修复" : "阻塞")
+            if exception.kind == "review_rejected" { return "待修复" }
+            if let waiting = waitingLabel(for: task) { return waiting }
+            if let label = exception.label, !label.isEmpty { return label }
+            return exception.isFailed ? "失败" : "阻塞"
         }
         if task.status == "done" { return task.displayStatus ?? "已完成" }
         if let delivery = deliveryStatus(phase: task.phase, conclusion: task.reviewSummary?.conclusion,
                                          delivery: task.delivery) { return delivery }
         return effective(status: task.status, displayStatus: task.displayStatus, activeRequest: task.activeRequest)
+    }
+
+    static func badge(for task: TaskSummary) -> (text: String, style: StatusStyle) {
+        let text = effective(task)
+        if task.status != "done", let release = task.release, release.showsTaskStatus {
+            return (text, ReleasePresentation.style(release))
+        }
+        if task.parentCloseout?.displayTitle != nil || (task.status == "done" && task.parentCloseout?.state == "completed") {
+            return (text, style(text))
+        }
+        return (text, task.exception.map { exceptionStyle($0, text: text) } ?? style(text))
+    }
+
+    static func badge(for task: TaskDetail) -> (text: String, style: StatusStyle) {
+        let text = effective(task)
+        if task.status != "done", let release = task.release, release.showsTaskStatus {
+            return (text, ReleasePresentation.style(release))
+        }
+        if task.parentCloseout?.displayTitle != nil || (task.status == "done" && task.parentCloseout?.state == "completed") {
+            return (text, style(text))
+        }
+        return (text, task.exception.map { exceptionStyle($0, text: text) } ?? style(text))
+    }
+
+    /// 异常样式只取核心 severity/kind；新标签不需要在桌面登记。
+    private static func exceptionStyle(_ exception: TaskException, text: String) -> StatusStyle {
+        if exception.isFailed { return StatusStyle(icon: "xmark.octagon.fill", tone: .red, label: text) }
+        if exception.kind == "executor_lost" {
+            return StatusStyle(icon: "exclamationmark.triangle.fill", tone: .red, label: text)
+        }
+        return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: text)
     }
 
     private static func deliveryStatus(phase: String?, conclusion: String?, delivery: TaskDeliveryView?) -> String? {
@@ -368,14 +475,15 @@ enum DisplayStatus {
 }
 
 enum ReleasePresentation {
-    static func color(_ release: TaskRelease) -> Color {
+    static func tone(_ release: TaskRelease) -> StatusTone {
         if release.isFailed { return .red }
         if release.isBlocked { return .orange }
         return release.isPublished ? .green : .blue
     }
+    static func color(_ release: TaskRelease) -> Color { tone(release).color }
     static func style(_ release: TaskRelease) -> StatusStyle {
         let icon = release.isFailed ? "xmark.octagon.fill" : release.isBlocked ? "exclamationmark.triangle" : release.isPublished ? "checkmark.circle" : "shippingbox"
-        return StatusStyle(icon: icon, color: color(release), label: release.title)
+        return StatusStyle(icon: icon, tone: tone(release), label: release.title)
     }
 }
 
@@ -384,6 +492,7 @@ enum ReleasePresentation {
 struct StatusBadge: View {
     let text: String
     let style: StatusStyle
+    @Environment(\.colorScheme) private var colorScheme
 
     init(status: String?) {
         let s = DisplayStatus.style(status)
@@ -395,11 +504,28 @@ struct StatusBadge: View {
         self.style = style
     }
 
+    init(task: TaskSummary) {
+        let badge = DisplayStatus.badge(for: task)
+        self.init(text: badge.text, style: badge.style)
+    }
+
+    init(task: TaskDetail) {
+        let badge = DisplayStatus.badge(for: task)
+        self.init(text: badge.text, style: badge.style)
+    }
+
     var body: some View {
-        Label(text, systemImage: style.icon)
-            .font(.kpSmall)
-            .foregroundStyle(style.color)
-            .accessibilityLabel("状态：\(text)")
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: style.icon).foregroundStyle(style.color)
+            Text(text).foregroundStyle(.primary)
+        }
+        .font(.kpSmall)
+        .padding(.horizontal, Spacing.s)
+        .padding(.vertical, Spacing.xs)
+        .background(style.color.opacity(colorScheme == .dark ? 0.20 : 0.14),
+                    in: RoundedRectangle(cornerRadius: Radius.control))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("状态：\(text)")
     }
 }
 
@@ -421,7 +547,7 @@ struct KindBadge: View {
     var body: some View {
         Label(Labels.kind(kind), systemImage: icon)
             .font(.kpSmall)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.kpSecondary)
             .accessibilityLabel("类型：\(Labels.kind(kind))")
     }
 }
@@ -441,7 +567,7 @@ struct BannerView: View {
     var body: some View {
         HStack(spacing: Spacing.m) {
             Image(systemName: isOffline ? "wifi.slash" : "exclamationmark.triangle.fill")
-                .foregroundStyle(isOffline ? Color.orange : Color.red)
+                .foregroundStyle(isOffline ? Color.kpOrange : Color.kpRed)
                 .accessibilityHidden(true)
             Text(banner.message)
                 .font(.kpBody)
@@ -449,7 +575,7 @@ struct BannerView: View {
             if stale {
                 Text("可能已过期")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
             Spacer()
             Button("重试", action: onRetry)
@@ -480,7 +606,7 @@ struct ToastView: View {
 
 // MARK: - 详情分组区块
 
-/// 区段标题 18pt semibold（ui-spec §3），区块内间距 8/12。
+/// 区段标题 15pt semibold（ui-spec §3），页面标题仍使用 kpTitle。
 struct DetailSection<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
@@ -488,12 +614,25 @@ struct DetailSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             Text(title)
-                .font(.kpTitle)
+                .font(.kpSection)
             VStack(alignment: .leading, spacing: Spacing.s) {
                 content
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 只包围成组的字段数据；调用方在字段之间显式放 Divider。
+struct FieldGroup<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) { content }
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
     }
 }
 
@@ -511,13 +650,14 @@ struct FieldRow: View {
         HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
             Text(label)
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
                 .frame(width: 96, alignment: .trailing)
             Text(value)
                 .font(.kpBody)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
         }
+        .frame(minHeight: RowHeight.data)
         .accessibilityElement(children: .combine)
     }
 }
@@ -530,7 +670,7 @@ struct LoadingView: View {
             ProgressView()
             Text("正在读取…")
                 .font(.kpBody)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
@@ -724,13 +864,13 @@ enum AttentionState {
     static func style(_ state: String?) -> StatusStyle {
         switch state {
         case "actionable":
-            return StatusStyle(icon: "exclamationmark.circle", color: .orange, label: "需处理")
+            return StatusStyle(icon: "exclamationmark.circle", tone: .orange, label: "需处理")
         case "historical":
-            return StatusStyle(icon: "clock", color: .secondary, label: "历史")
+            return StatusStyle(icon: "clock", tone: .gray, label: "历史")
         case "informational":
-            return StatusStyle(icon: "info.circle", color: .secondary, label: "记录")
+            return StatusStyle(icon: "info.circle", tone: .gray, label: "记录")
         default:
-            return StatusStyle(icon: "questionmark.circle", color: .secondary, label: state ?? "—")
+            return StatusStyle(icon: "questionmark.circle", tone: .gray, label: state ?? "—")
         }
     }
 }
@@ -866,6 +1006,19 @@ struct PhaseStepperView: View {
     let condition: String?
     /// 概览只需要步进高亮，条件由调用方按需显示；自动化工作台保持默认的说明行。
     var showsCaption = true
+    var failureStage: String? = nil
+
+    private var highlightedPhase: String? {
+        guard phase == "needs-you" else { return phase }
+        switch failureStage {
+        case "plan": return "plan"
+        case "dispatch": return "dispatch"
+        case "monitor": return "observe"
+        case "review": return "review"
+        case "delivery": return "delivery"
+        default: return nil
+        }
+    }
     static func title(_ phase: String) -> String {
         switch phase {
         case "plan": return "规划"
@@ -905,14 +1058,21 @@ struct PhaseStepperView: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
                 ForEach(["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"], id: \.self) { step in
-                    Text(Self.title(step))
-                        .font(.kpSmall.weight(phase == step ? .semibold : .regular))
-                        .foregroundStyle(phase == step ? Color.accentColor : Color.secondary)
+                    HStack(spacing: Spacing.xs) {
+                        if phase == "needs-you" && highlightedPhase == step {
+                            Circle().fill(Color.kpOrange).frame(width: Spacing.xs, height: Spacing.xs)
+                        }
+                        Text(Self.title(step))
+                            .font(.kpSmall.weight(highlightedPhase == step ? .semibold : .regular))
+                            .foregroundStyle(highlightedPhase == step ? Color.primary : Color.kpSecondary)
+                    }
                 }
             }
             if showsCaption {
-                Text("阶段：\(phase.map(Self.title) ?? "未提供") · 条件：\(condition.map(Self.conditionTitle) ?? "未提供")")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                let phaseTitle = phase.map(Self.title) ?? "未提供"
+                let conditionTitle = condition.map(Self.conditionTitle)
+                Text("阶段：\(phaseTitle)" + (conditionTitle == nil || conditionTitle == phaseTitle ? "" : " · 条件：\(conditionTitle!)"))
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
         .accessibilityElement(children: .combine)
@@ -932,7 +1092,7 @@ struct RecheckResultView: View {
             if let result {
                 HStack(spacing: Spacing.s) {
                     Image(systemName: result.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(result.ok == false ? Color.red : Color.green)
+                        .foregroundStyle(result.ok == false ? Color.kpRed : Color.kpGreen)
                     Text(result.ok == false ? "存在未通过项" : "全部通过")
                         .font(.kpBody)
                 }
@@ -940,14 +1100,14 @@ struct RecheckResultView: View {
                     ForEach(checks) { check in
                         HStack(spacing: Spacing.m) {
                             Image(systemName: check.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
-                                .foregroundStyle(check.ok == false ? Color.red : Color.green)
+                                .foregroundStyle(check.ok == false ? Color.kpRed : Color.kpGreen)
                                 .accessibilityLabel(check.ok == false ? "未通过" : "通过")
                             Text(check.name ?? "—")
                                 .font(.kpBody)
                             Spacer(minLength: 0)
                             Text(check.detail ?? "")
                                 .font(.kpSmall)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.kpSecondary)
                                 .lineLimit(1)
                         }
                     }
@@ -958,7 +1118,7 @@ struct RecheckResultView: View {
             } else {
                 Text("无结果")
                     .font(.kpBody)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
             HStack {
                 Spacer()

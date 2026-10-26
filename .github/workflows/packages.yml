@@ -222,7 +222,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/macos-reports"
           result=0
-          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures; do
+          for fixture in run-fixtures run-completion-display-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures; do
             if bash "macos/tests/$fixture.sh" 2>&1 | tee "$RUNNER_TEMP/macos-reports/$fixture.log"; then
               echo "$fixture passed"
             else
@@ -260,6 +260,28 @@ jobs:
           mkdir -p "$RUNNER_TEMP/macos-package"
           cp "$APP_OUTPUT_DIR/$DMG_NAME" "$RUNNER_TEMP/macos-package/"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/macos-package/$DMG_NAME" --platform macos --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures arm64,x86_64 --output "$RUNNER_TEMP/macos-package/macos-metadata.json"
+      - name: Prepare isolated native UI acceptance app
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/macos-ui-check"
+          candidate="$RUNNER_TEMP/KaneoPilot UI Check.app"
+          ditto "$RUNNER_TEMP/macos-build/KaneoPilot.app" "$candidate"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.kaneopilot.ui-engine-check' "$candidate/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName KaneoPilot UI Check' "$candidate/Contents/Info.plist"
+          codesign --force --deep --sign - "$candidate"
+          codesign --verify --deep --strict "$candidate"
+          ditto -c -k --sequesterRsrc --keepParent "$candidate" "$RUNNER_TEMP/macos-ui-check/KaneoPilot-UI-Check.zip"
+          cp "$RUNNER_TEMP/macos-package/macos-metadata.json" "$RUNNER_TEMP/macos-ui-check/source-build.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        with:
+          name: macos-ui-check-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-ui-check/*
+          if-no-files-found: error
+          retention-days: 14
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.macos-package.outcome == 'success' }}
         with:

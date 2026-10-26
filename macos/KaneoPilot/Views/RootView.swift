@@ -3,6 +3,8 @@ import SwiftUI
 /// 工作台优先，记录与配置保留在次级分组。
 struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
+    @ObservedObject private var scheduler = AppRuntime.shared.scheduler
+    @Environment(\.colorScheme) private var colorScheme
     @State private var section: AppViewModel.Section = .dashboard
     @State private var settingsSegment: SettingsSegment = .projects
 
@@ -23,6 +25,7 @@ struct RootView: View {
                 Section("配置") { sidebarItem(.settings) }
             }
             .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom, spacing: 0) { automationStatus }
             .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
         } detail: {
             VStack(spacing: 0) {
@@ -79,7 +82,11 @@ struct RootView: View {
             Label(item.title, systemImage: item.icon)
             if item == .pending && model.attentionCount > 0 {
                 Spacer(minLength: Spacing.s)
-                Text("\(model.attentionCount)").font(.kpSmall).foregroundStyle(.secondary)
+                Text("\(model.attentionCount)")
+                    .font(.kpSmall).monospacedDigit()
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, Spacing.s).padding(.vertical, Spacing.xs)
+                    .background(Color.kpOrange.opacity(colorScheme == .dark ? 0.20 : 0.14), in: Capsule())
             }
         }
         .tag(item)
@@ -147,55 +154,81 @@ struct RootView: View {
                     }
                 }
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
                 .lineLimit(1)
             }
         }
-        if section != .dashboard {
+        if model.globalPaused {
             ToolbarItem(placement: .primaryAction) {
-                // 全局自动推进：状态写进按钮文字（ui-spec §2 / §4.1）
                 Button {
                     Task { await model.toggleGlobalPause() }
                 } label: {
-                    if model.globalPaused {
-                        Label("已暂停 · 恢复自动推进", systemImage: "play.fill")
-                    } else {
-                        Label("暂停自动推进", systemImage: "pause.fill")
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "play.fill").foregroundStyle(Color.kpOrange)
+                        Text("已暂停 · 恢复").foregroundStyle(.primary)
                     }
+                    .font(.kpLabel)
+                    .padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
+                    .background(Color.kpOrange.opacity(colorScheme == .dark ? 0.20 : 0.14), in: Capsule())
                 }
-                .labelStyle(.titleAndIcon)
-                .tint(model.globalPaused ? Color.orange : nil)
-                .help(model.globalPaused
-                      ? "全局已暂停：不再自动领取新任务。点击恢复自动推进"
-                      : "全局：暂停后不再自动领取新任务，已在执行的任务不受影响")
-                .accessibilityLabel(model.globalPaused ? "已暂停，恢复自动推进" : "暂停自动推进")
-                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
+                .buttonStyle(.plain)
+                .help("全局已暂停：不再自动领取新任务。点击恢复自动推进")
+                .accessibilityLabel("已暂停，恢复自动推进")
+                .disabled(pauseDisabled)
             }
         }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task { await model.refreshAll() }
-            } label: {
-                Label(refreshTitle, systemImage: "arrow.clockwise")
+    }
+
+    private var pauseDisabled: Bool {
+        model.busy || !model.coreFound || model.overview == nil || model.banner != nil
+    }
+
+    private var automationStatus: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("自动推进").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            HStack(spacing: Spacing.xs) {
+                Circle().fill(scheduler.presentation.tone.color).frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(scheduler.presentation.text).font(.kpBody)
+                    .help(scheduler.error ?? scheduler.presentation.text)
             }
-            .labelStyle(.titleAndIcon)
-            .help(refreshHelp)
-            .accessibilityLabel("刷新")
-            .accessibilityValue(lastRefreshFull ?? "")
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.busy)
+            if let error = scheduler.error {
+                Text(error).font(.kpLabel).foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+            Text(scheduler.status?.paused?.global == true
+                 ? "不再领取新任务，在途 \(scheduler.status?.automation?.activeTasks ?? 0) 个照常"
+                 : "在途 \(scheduler.status?.automation?.activeTasks ?? 0) · \(lastRefreshClock) 更新")
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Spacing.s) {
+                Button(model.globalPaused ? "恢复" : "暂停") {
+                    Task { await model.toggleGlobalPause() }
+                }
+                .disabled(pauseDisabled)
+                .help(model.globalPaused ? "恢复自动推进" : "暂停后不再自动领取新任务，已在执行的任务不受影响")
+                .accessibilityLabel(model.globalPaused ? "恢复自动推进" : "暂停自动推进")
+                Button {
+                    Task { await model.refreshAll() }
+                } label: { Label("刷新", systemImage: "arrow.clockwise") }
+                .disabled(model.busy)
+                .help(refreshHelp)
+                .accessibilityValue(lastRefreshFull ?? "")
+            }
+            .font(.kpLabel).controlSize(.small)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Spacing.m)
+        .background(Color.kpControl)
+    }
+
+    private var lastRefreshClock: String {
+        model.lastRefreshAt.map { Self.clockFormatter.string(from: $0) } ?? "尚未"
     }
 
     /// 上次刷新的完整时间（提示与无障碍值）；从未刷新时为 nil。
     private var lastRefreshFull: String? {
         model.lastRefreshAt.map { TimeFormat.fullString(ISO8601DateFormatter().string(from: $0)) }
-    }
-
-    /// 刷新按钮文字：有刷新记录时附带 HH:mm，让用户看到数据停在何时。
-    private var refreshTitle: String {
-        guard let at = model.lastRefreshAt else { return "刷新" }
-        return "刷新 \(Self.clockFormatter.string(from: at))"
     }
 
     private var refreshHelp: String {
