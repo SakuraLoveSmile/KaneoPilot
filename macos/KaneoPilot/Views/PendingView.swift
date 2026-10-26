@@ -64,11 +64,11 @@ struct PendingView: View {
                     emptyState
                 } else {
                     List {
-                        Section("需要你处理") {
+                        Section("需要你") {
                             if needsUserTasks.isEmpty && attentionRequests.isEmpty {
                                 Text("暂无需要你处理的事项。下方可查看正常队列与历史失败记录。")
                                     .font(.kpSmall)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.kpSecondary)
                             } else {
                                 ForEach(needsUserTasks) { task in
                                     NavigationLink(value: PendingRoute.task(task.taskId)) {
@@ -85,7 +85,7 @@ struct PendingView: View {
                                 DisclosureGroup("正常队列（\(normalRequests.count)）", isExpanded: $queueExpanded) {
                                     Text("已排队的请求尚未开始；执行端领取后才会进入进行中。")
                                         .font(.kpSmall)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.kpSecondary)
                                     ForEach(normalRequests) { request in
                                         requestRow(request)
                                     }
@@ -98,7 +98,7 @@ struct PendingView: View {
                                     HStack {
                                         Text("保留最近 10 条详情入口；历史和执行证据始终保留。")
                                             .font(.kpSmall)
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(Color.kpSecondary)
                                         Spacer()
                                         Button("清空失败记录") {
                                             confirmDismissIDs = recentFailed.map(\.requestId)
@@ -108,7 +108,7 @@ struct PendingView: View {
                                     ForEach(Array(recentFailed.prefix(10))) { request in
                                         requestRow(request)
                                             .contextMenu {
-                                                Button("从待处理移除") { confirmDismissIDs = [request.requestId] }
+                                                Button("从「需要你」移除") { confirmDismissIDs = [request.requestId] }
                                                     .disabled(model.busy)
                                             }
                                     }
@@ -118,7 +118,7 @@ struct PendingView: View {
                     }
                 }
             }
-            .navigationTitle("需要处理")
+            .navigationTitle("需要你")
             .navigationDestination(for: PendingRoute.self) { route in
                 switch route {
                 case .task(let taskID):
@@ -128,7 +128,7 @@ struct PendingView: View {
                 }
             }
         }
-        .confirmationDialog("从待处理移除失败记录",
+        .confirmationDialog("从「需要你」移除失败记录",
                             isPresented: Binding(get: { !confirmDismissIDs.isEmpty },
                                                  set: { if !$0 { confirmDismissIDs = [] } }),
                             titleVisibility: .visible) {
@@ -139,7 +139,7 @@ struct PendingView: View {
             }
             Button("取消", role: .cancel) { confirmDismissIDs = [] }
         } message: {
-            Text("仅从待处理列表隐藏，历史和执行证据保留在运行记录中，不影响当前任务。")
+            Text("仅从「需要你」列表隐藏，历史和执行证据保留在运行记录中，不影响当前任务。")
         }
         .confirmationDialog(
             "释放失联请求",
@@ -162,7 +162,7 @@ struct PendingView: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("暂无需要处理的事项", systemImage: "tray")
+            Label("暂无需要你处理的事项", systemImage: "tray")
         } description: {
             Text("没有排队、进行中、失联或阻塞的任务。")
         } actions: {
@@ -188,7 +188,7 @@ struct PendingView: View {
         HStack(alignment: .center, spacing: Spacing.m) {
             KindBadge(kind: request.kind)
                 .frame(width: 76, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
                 Text(model.taskTitle(for: request.taskId))
                     .font(.kpBody)
                     .lineLimit(1)
@@ -197,7 +197,7 @@ struct PendingView: View {
                     if let claimedBy = request.claimedBy {
                         Text(claimedBy)
                             .font(.kpSmall)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.kpSecondary)
                     }
                 }
             }
@@ -215,31 +215,31 @@ struct PendingView: View {
         if request.isLost {
             Label("失联", systemImage: "exclamationmark.triangle.fill")
                 .font(.kpSmall)
-                .foregroundStyle(.red)
+                .foregroundStyle(Color.kpRed)
                 .accessibilityLabel("状态：失联")
         } else if request.status == "queued", request.isUnauthorizedPlan {
             // v2 §5.22.2：旧未授权 plan 请求 → 等待确认材料。
             Label("等待确认材料", systemImage: "doc.badge.questionmark")
                 .font(.kpSmall)
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.kpOrange)
                 .accessibilityLabel("状态：等待确认材料")
         } else if request.status == "queued", request.kind == "plan" {
             // v2 §4.7：已授权排队中的规划请求。
             Text("已排队等待规划 \(TimeFormat.waited(since: request.createdAt) ?? "")")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         } else if request.status == "queued" {
             Text("已排队 \(TimeFormat.waited(since: request.createdAt) ?? "")")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         } else if request.status == "failed" {
             Text("失败")
                 .font(.kpSmall)
-                .foregroundStyle(.red)
+                .foregroundStyle(Color.kpRed)
         } else {
             Text(Labels.requestStatus(request.status))
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -248,15 +248,15 @@ struct PendingView: View {
         if request.isLost, let hb = TimeFormat.ago(request.heartbeatAt) {
             Text("心跳 \(hb)")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         } else if request.status == "claimed", let waited = TimeFormat.waited(since: request.claimedAt) {
             Text("已进行 \(waited)")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         } else if request.status == "failed", let ago = TimeFormat.ago(request.updatedAt) {
             Text(ago)
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -264,7 +264,7 @@ struct PendingView: View {
     private func actions(_ request: RequestItem) -> some View {
         if request.status == "failed" {
             Button("移除") { confirmDismissIDs = [request.requestId] }
-                .help("仅从待处理隐藏，保留历史和执行证据")
+                .help("仅从「需要你」隐藏，保留历史和执行证据")
                 .disabled(model.busy)
         } else if request.isLost, request.taskId != nil {
             Button("释放失联请求") { release(request) }
@@ -295,24 +295,24 @@ struct PendingView: View {
     private func NeedsUserRow(task: TaskSummary) -> some View {
         HStack(spacing: Spacing.m) {
             Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.kpOrange)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
                 if let item = questionAttention(task), let preview = item.questionPreview {
                     Text("\(item.questionLabel) · \(preview.count)题")
                         .font(.kpSmall)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.kpOrange)
                     Text(preview.firstTitle)
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .lineLimit(2)
                 } else {
                     Text(attentionReason(task))
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .lineLimit(1)
                 }
             }
@@ -565,7 +565,7 @@ struct RequestDetailView: View {
                    let title = AutomationPresentation.title(code) {
                     DetailSection(title: title) {
                         Text(AutomationPresentation.explanation(code) ?? detail.task?.blockedReason ?? "")
-                            .font(.kpBody).foregroundStyle(.secondary)
+                            .font(.kpBody).foregroundStyle(Color.kpSecondary)
                     }
                 }
                 attemptsSection(detail)
@@ -681,7 +681,7 @@ struct RequestDetailView: View {
             if detail.readOnly == true {
                 Label("只读", systemImage: "lock.fill")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .accessibilityLabel("只读")
             }
             Spacer(minLength: 0)
@@ -732,7 +732,7 @@ struct RequestDetailView: View {
             } else {
                 Text("无关联任务")
                     .font(.kpBody)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
         }
     }
@@ -756,14 +756,14 @@ struct RequestDetailView: View {
                             if let evidence = attempt.evidence, !evidence.isNull {
                                 Text("证据")
                                     .font(.kpSmall)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.kpSecondary)
                                 Text(evidence.pretty)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.kpSmall.monospaced())
                                     .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(Spacing.s)
                                     .background(Color.kpControl,
-                                                in: RoundedRectangle(cornerRadius: 6))
+                                                in: RoundedRectangle(cornerRadius: Radius.control))
                             }
                         }
                         .padding(.top, Spacing.s)
@@ -773,18 +773,18 @@ struct RequestDetailView: View {
                                 .font(.kpBody)
                             Text(Labels.kind(attempt.kind))
                                 .font(.kpSmall)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.kpSecondary)
                             Text(Labels.outcome(attempt.outcome))
                                 .font(.kpSmall)
                                 .foregroundStyle(attempt.outcome == "succeeded"
-                                                 ? Color.green : Color.orange)
+                                                 ? Color.kpGreen : Color.kpOrange)
                         }
                     }
                 }
             } else {
                 Text("暂无尝试记录")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
         }
     }
@@ -810,10 +810,10 @@ struct RequestDetailView: View {
                 HStack(spacing: Spacing.s) {
                     Label("只读", systemImage: "lock.fill")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Text(detail.blockedReason ?? "该请求为终态或关联已移除，仅可查看")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Spacer(minLength: 0)
                 }
                 .padding(Spacing.m)
@@ -840,7 +840,7 @@ struct RequestDetailView: View {
                 Divider()
                 Text(reason)
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .padding(.horizontal, Spacing.l)
                     .padding(.vertical, Spacing.s)
                     .frame(maxWidth: .infinity, alignment: .leading)

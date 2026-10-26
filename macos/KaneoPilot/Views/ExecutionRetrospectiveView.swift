@@ -31,13 +31,10 @@ enum RetrospectiveLane: String, CaseIterable {
 
     var color: Color {
         switch self {
-        case .plan: return .blue
-        case .dispatch: return .gray
-        case .execute: return .purple
-        case .waiting: return .orange
-        case .repair: return .brown
-        case .review: return .teal
-        case .other: return .kpSeparator
+        // 计划 S7 §6：规划、派发、执行、修复为蓝；评审、等你处理为橙；其他为灰。青、紫、棕不再使用。
+        case .plan, .dispatch, .execute, .repair: return Color.kpBlue
+        case .waiting, .review: return Color.kpOrange
+        case .other: return Color.kpGray
         }
     }
 }
@@ -51,6 +48,7 @@ struct ExecutionRetrospectiveView: View {
     @Binding var measuredHeight: CGFloat
     let onOpenSession: () -> Void
     @State private var availableWidth: CGFloat = 900
+    @State private var segmentsExpanded = false
 
     /// 派发阶段尚未进入 running：不显示执行用时（§4.18 状态与空态）。
     private static let dispatchStatuses: Set<String> = ["dispatching", "prepared", "submitting"]
@@ -99,14 +97,14 @@ struct ExecutionRetrospectiveView: View {
                 HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .accessibilityHidden(true)
                     Text("复盘").font(.kpBody.weight(.semibold))
                     Text("已用时 \(elapsedText)")
-                        .font(.kpSmall).monospacedDigit().foregroundStyle(.secondary)
+                        .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
                     if !isExpanded, !collapsedSummary.isEmpty {
                         Text(collapsedSummary)
-                            .font(.kpSmall).foregroundStyle(.secondary).lineLimit(1)
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
                     }
                 }
                 .contentShape(Rectangle())
@@ -118,14 +116,18 @@ struct ExecutionRetrospectiveView: View {
 
             Spacer(minLength: 0)
             if digest == nil {
-                Text("尚无执行会话").font(.kpSmall).foregroundStyle(.secondary)
+                Text("尚无执行会话").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
             Button("打开会话", action: onOpenSession)
-                .buttonStyle(.borderless)
+                .buttonStyle(.bordered)
                 .font(.kpSmall)
                 .disabled(digest == nil)
                 .help(digest == nil ? "尚无执行会话" : "定位到执行会话阅读器（当前轮次）")
         }
+        // 收起态为 44pt 分组行（计划 S7 §1）：摘要与「打开会话」同一行。
+        .padding(.horizontal, Spacing.m)
+        .frame(minHeight: 44)
+        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
     }
 
     private var elapsedText: String {
@@ -151,9 +153,24 @@ struct ExecutionRetrospectiveView: View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             metricGrid
             timeline
-            highlights
-            distribution
-            verification
+            reviewPair
+        }
+    }
+
+    /// 重点与验证：宽度 ≥640pt 并排，否则上下排（计划 S7 §5）。
+    private var reviewPair: some View {
+        Group {
+            if availableWidth >= 640 {
+                HStack(alignment: .top, spacing: Spacing.xl) {
+                    highlights.frame(maxWidth: .infinity, alignment: .leading)
+                    verification.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    highlights
+                    verification
+                }
+            }
         }
     }
 
@@ -164,43 +181,65 @@ struct ExecutionRetrospectiveView: View {
         var id: String { label }
     }
 
-    private var metrics: [RetroMetric] {
+    /// 四项关键指标（执行用时、验证、修复轮、等你处理，计划 S7 §2）；无修复轮数据时该项省略。
+    private var keyMetrics: [RetroMetric] {
         var items = [
             RetroMetric(label: "执行用时", value: executionValue,
                         note: retrospective?.execSeconds == nil ? nil : "不含等你处理"),
-            RetroMetric(label: "轮次", value: digest.map { "第 \($0.roundIndex) / \($0.roundCount) 轮" } ?? "—",
-                        note: digest?.roundState),
-            RetroMetric(label: "会话消息", value: digest?.messageCount.map(String.init) ?? "—", note: nil),
+            RetroMetric(label: "验证", value: verifyValue, note: verifyNote),
         ]
         if let automation = detail?.automation, let fix = automation.fixRound {
             let limit = automation.maxFixRounds.map { "/\($0)" } ?? ""
             items.append(RetroMetric(label: "修复轮", value: "\(fix)\(limit)", note: "不含自动补救轮"))
         }
-        items += [
-            RetroMetric(label: "验证", value: verifyValue, note: verifyNote),
+        items.append(RetroMetric(label: "等你处理", value: waitingValue, note: waitingNote))
+        return items
+    }
+
+    /// 「更多指标」折叠内的其余项。
+    private var moreMetrics: [RetroMetric] {
+        [
+            RetroMetric(label: "轮次", value: digest.map { "第 \($0.roundIndex) / \($0.roundCount) 轮" } ?? "—",
+                        note: digest?.roundState),
+            RetroMetric(label: "会话消息", value: digest?.messageCount.map(String.init) ?? "—", note: nil),
             RetroMetric(label: "交付", value: deliveryValue, note: nil),
-            RetroMetric(label: "等你处理", value: waitingValue, note: waitingNote),
             RetroMetric(label: "最近检查", value: lastCheckedValue, note: nil),
         ]
-        return items
     }
 
     private var metricGrid: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: Spacing.m, alignment: .topLeading),
                             count: availableWidth >= 640 ? 4 : 2)
-        return LazyVGrid(columns: columns, alignment: .leading, spacing: Spacing.m) {
-            ForEach(metrics) { metric in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(metric.label).font(.kpSmall).foregroundStyle(.secondary)
-                    Text(metric.value).font(.kpTitle).lineLimit(1)
-                    if let note = metric.note {
-                        Text(note).font(.kpSmall).foregroundStyle(.secondary).lineLimit(1)
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: Spacing.m) {
+                ForEach(keyMetrics) { metric in
+                    metricCell(metric, large: true)
+                }
+            }
+            DisclosureGroup("更多指标") {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: Spacing.m) {
+                    ForEach(moreMetrics) { metric in
+                        metricCell(metric, large: false)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
+                .padding(.top, Spacing.s)
+            }
+            .font(.kpSmall)
+            .foregroundStyle(Color.kpSecondary)
+        }
+    }
+
+    /// 指标格：关键指标用 22pt 数字（kpMetric），其余用正文字号。
+    private func metricCell(_ metric: RetroMetric, large: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(metric.label).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            Text(metric.value).font(large ? Font.kpMetric : Font.kpBody).lineLimit(1)
+            if let note = metric.note {
+                Text(note).font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     private var executionValue: String {
@@ -260,15 +299,19 @@ struct ExecutionRetrospectiveView: View {
                 ForEach(Self.timelineLanes, id: \.self) { lane in
                     laneRow(lane, window: window)
                 }
+                if let other = retrospective?.distribution?.first(where: { $0.lane == RetrospectiveLane.other.rawValue }) {
+                    Text("其他 \(distributionText(other))")
+                        .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
+                }
                 HStack {
                     Text(RetrospectiveFormat.clock(retrospective?.cycleStartedAt) ?? "")
                     Spacer(minLength: 0)
                     Text(RetrospectiveFormat.clock(retrospective?.endedAt ?? retrospective?.asOf) ?? "")
                 }
-                .font(.kpSmall).monospacedDigit().foregroundStyle(.secondary)
+                .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
                 .padding(.leading, 64)
             } else {
-                Text("未汇总").font(.kpSmall).foregroundStyle(.secondary)
+                Text("未汇总").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
             segmentList
         }
@@ -281,7 +324,7 @@ struct ExecutionRetrospectiveView: View {
         let gated = lane == .waiting && retrospective?.waiting == nil
         return HStack(spacing: Spacing.s) {
             Text(lane.label)
-                .font(.kpSmall).foregroundStyle(.secondary)
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 .frame(width: 56, alignment: .trailing)
             ZStack(alignment: .leading) {
                 Canvas { context, size in
@@ -306,42 +349,55 @@ struct ExecutionRetrospectiveView: View {
                 // 图形对 VoiceOver 隐藏；段列表为文字等价物。
                 .accessibilityHidden(true)
                 if gated {
-                    Text("未汇总").font(.kpSmall).foregroundStyle(.secondary).padding(.leading, 4)
+                    Text("未汇总").font(.kpSmall).foregroundStyle(Color.kpSecondary).padding(.leading, Spacing.xs)
                 }
             }
             .frame(height: 16)
+            Text(laneShare(lane) ?? "")
+                .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
+                .frame(width: 150, alignment: .trailing)
         }
     }
 
-    /// 文字等价物：泳道 · 开始 · 时长 · 状态，每段一行。
+    /// 泳道右侧「N 分钟 · n%」，口径与分布行一致（计划 S7 §3）。
+    private func laneShare(_ lane: RetrospectiveLane) -> String? {
+        guard let row = retrospective?.distribution?.first(where: { $0.lane == lane.rawValue }) else { return nil }
+        return distributionText(row)
+    }
+
+    /// 文字等价物：泳道 · 开始 · 时长 · 状态，每段一行；默认折叠（计划 S7 §4）。
     private var segmentList: some View {
         let items = retrospective?.segments?.items ?? []
-        return VStack(alignment: .leading, spacing: Spacing.s) {
-            if retrospective?.segments?.truncated == true {
-                Text("仅显示最近 \(items.count) 段").font(.kpSmall).foregroundStyle(.secondary)
-            }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        HStack(spacing: Spacing.m) {
-                            Text(RetrospectiveLane(rawValue: item.lane ?? "")?.label ?? "其他")
-                                .frame(width: 64, alignment: .leading)
-                            Text(RetrospectiveFormat.clock(item.startedAt) ?? "—")
-                                .frame(width: 72, alignment: .leading)
-                            Text(RetrospectiveFormat.duration(item.seconds) ?? "—")
-                            Spacer(minLength: 0)
-                            Text(item.endedAt == nil ? "进行中" : (item.idle == true ? "空闲" : "已结束"))
-                                .foregroundStyle(.secondary)
+        return DisclosureGroup("分段明细 · \(items.count) 段", isExpanded: $segmentsExpanded) {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                if retrospective?.segments?.truncated == true {
+                    Text("仅显示最近 \(items.count) 段").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                            HStack(spacing: Spacing.m) {
+                                Text(RetrospectiveLane(rawValue: item.lane ?? "")?.label ?? "其他")
+                                    .frame(width: 64, alignment: .leading)
+                                Text(RetrospectiveFormat.clock(item.startedAt) ?? "—")
+                                    .frame(width: 72, alignment: .leading)
+                                Text(RetrospectiveFormat.duration(item.seconds) ?? "—")
+                                Spacer(minLength: 0)
+                                Text(item.endedAt == nil ? "进行中" : (item.idle == true ? "空闲" : "已结束"))
+                                    .foregroundStyle(Color.kpSecondary)
+                            }
+                            .font(.kpSmall)
+                            .monospacedDigit()
+                            .frame(minHeight: RowHeight.data, alignment: .leading)
+                            .accessibilityElement(children: .combine)
                         }
-                        .font(.kpSmall)
-                        .monospacedDigit()
-                        .frame(minHeight: 40, alignment: .leading)
-                        .accessibilityElement(children: .combine)
                     }
                 }
+                .frame(maxHeight: 240)
             }
-            .frame(maxHeight: 240)
         }
+        .font(.kpSmall)
+        .foregroundStyle(Color.kpSecondary)
     }
 
     // MARK: 重点、分布与验证
@@ -350,58 +406,26 @@ struct ExecutionRetrospectiveView: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             sectionTitle("重点")
             if retrospective == nil {
-                Text("未汇总").font(.kpSmall).foregroundStyle(.secondary)
+                Text("未汇总").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             } else if let items = retrospective?.highlights, !items.isEmpty {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(spacing: Spacing.s) {
                         Image(systemName: "flag")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.kpSecondary)
                             .accessibilityHidden(true)
                         Text(item.label ?? item.kind ?? "重点").font(.kpBody)
                         Spacer(minLength: 0)
                         Text(RetrospectiveFormat.duration(item.seconds) ?? "")
-                            .font(.kpSmall).monospacedDigit().foregroundStyle(.secondary)
+                            .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
                     }
                 }
             } else {
-                Text("暂无需要特别关注的阶段").font(.kpSmall).foregroundStyle(.secondary)
+                Text("暂无需要特别关注的阶段").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
     }
 
-    private var distribution: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            sectionTitle("时间分布")
-            if let rows = retrospective?.distribution, !rows.isEmpty {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    distributionRow(row)
-                }
-            } else {
-                Text("未汇总").font(.kpSmall).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func distributionRow(_ row: RetrospectiveShare) -> some View {
-        let lane = RetrospectiveLane(rawValue: row.lane ?? "") ?? .other
-        let fraction = CGFloat(min(max(row.percent ?? 0, 0), 100)) / 100
-        return HStack(spacing: Spacing.s) {
-            Text(lane.label)
-                .font(.kpSmall).foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.kpSeparator.opacity(0.3))
-                    Capsule().fill(lane.color).frame(width: proxy.size.width * fraction)
-                }
-            }
-            .frame(height: 8)
-            Text(distributionText(row))
-                .font(.kpSmall).monospacedDigit().foregroundStyle(.secondary)
-                .frame(width: 150, alignment: .trailing)
-        }
-    }
-
+    /// 分布口径「N 分钟 · n%」：并入泳道行与「其他」行，不再单独成块（计划 S7 §3）。
     private func distributionText(_ row: RetrospectiveShare) -> String {
         guard let seconds = row.seconds else { return "未汇总" }
         return "\(RetrospectiveFormat.duration(seconds) ?? "0 秒") · \(row.percent ?? 0)%"
@@ -414,10 +438,10 @@ struct ExecutionRetrospectiveView: View {
                 Text(verifyLine(verify)).font(.kpBody)
                 if let runs = retrospective?.verifyRuns {
                     Text("验证执行 \(runs.runs ?? 0) 次 · 失败 \(runs.failed ?? 0) · 超时 \(runs.timedOut ?? 0) · 命令未找到 \(runs.commandNotFound ?? 0)")
-                        .font(.kpSmall).monospacedDigit().foregroundStyle(.secondary)
+                        .font(.kpSmall).monospacedDigit().foregroundStyle(Color.kpSecondary)
                 }
             } else {
-                Text("未汇总").font(.kpSmall).foregroundStyle(.secondary)
+                Text("未汇总").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
     }
@@ -431,6 +455,6 @@ struct ExecutionRetrospectiveView: View {
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text).font(.kpSmall.weight(.semibold)).foregroundStyle(.secondary)
+        Text(text).font(.kpSmall.weight(.semibold)).foregroundStyle(Color.kpSecondary)
     }
 }
