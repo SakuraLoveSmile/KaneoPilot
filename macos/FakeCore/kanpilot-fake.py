@@ -754,7 +754,7 @@ SUMMARY_KEYS = [
     "active_request", "kaneo_status", "kaneo_checked_at", "priority",
     "plan_path", "created_at", "updated_at",
     "save_state", "saved_at", "auto_advance_paused",
-    "plan_execution_hold",
+    "plan_execution_hold", "execution_question",
     "move_out_eligibility", "automation", "delivery", "review_history", "parent_closeout", "task_relations", "release",
 ]
 

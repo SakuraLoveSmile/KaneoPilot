@@ -270,6 +270,12 @@ struct SettingsView: View {
     @State private var executorGeneration = 0
 
     var body: some View {
+        settingsDisclosureObservers
+    }
+
+    // Keep each builder and observer group behind its own opaque View boundary.
+    // State stays on SettingsView so changing pages or collapsing editors retains drafts.
+    private var settingsLayout: some View {
         VStack(spacing: 0) {
             Picker("设置分组", selection: $segment) {
                 ForEach(SettingsSegment.allCases) { s in
@@ -281,31 +287,43 @@ struct SettingsView: View {
             .padding(.horizontal, Spacing.l)
             .padding(.vertical, Spacing.m)
             .accessibilityLabel("设置分组：\(segment.title)")
-            if segment == .projects {
-                ProjectMappingsView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Form {
-                    switch segment {
-                    case .projects:
-                        EmptyView()
-                    case .planning:
-                        plannerSection
-                        reviewSection
-                        desktopQueueSection
-                    case .connections:
-                        execSection
-                        mcpServiceSection
-                        MobileConnectionView()
-                    case .advanced:
-                        backgroundSection
-                        automationSection
-                        diagnosticsSection
-                    }
-                }
-                .formStyle(.grouped)
-            }
+            settingsPage
         }
+    }
+
+    @ViewBuilder
+    private var settingsPage: some View {
+        if segment == .projects {
+            ProjectMappingsView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Form { settingsFormSections }
+                .formStyle(.grouped)
+        }
+    }
+
+    @ViewBuilder
+    private var settingsFormSections: some View {
+        switch segment {
+        case .projects:
+            EmptyView()
+        case .planning:
+            plannerSection
+            reviewSection
+            desktopQueueSection
+        case .connections:
+            execSection
+            mcpServiceSection
+            MobileConnectionView()
+        case .advanced:
+            backgroundSection
+            automationSection
+            diagnosticsSection
+        }
+    }
+
+    private var settingsLifecycle: some View {
+        settingsLayout
         .onAppear { segment = initialSegment }
         .task {
             await model.refreshDesktopAutomation()
@@ -326,6 +344,10 @@ struct SettingsView: View {
                 await model.refreshDesktopQueue()
             }
         }
+    }
+
+    private var settingsBackendObservers: some View {
+        settingsLifecycle
         .onChange(of: plannerBackend) { _, backend in
             guard backend == "pi_desktop" else { return }
             Task { await model.refreshPlannerConfig() }
@@ -358,6 +380,10 @@ struct SettingsView: View {
                 Task { await refreshPiDesktopCatalog() }
             }
         }
+    }
+
+    private var settingsDraftObservers: some View {
+        settingsBackendObservers
         .onChange(of: pdConnectionFile) { _, _ in
             piDesktopProbeControlText = nil
             if settingDefaultConnectionFile {
@@ -373,6 +399,10 @@ struct SettingsView: View {
         }
         .onChange(of: pdModelId) { _, _ in invalidatePiDesktopCatalog(clear: false) }
         .onChange(of: pdThinkingLevel) { _, _ in invalidatePiDesktopCatalog(clear: false) }
+    }
+
+    private var settingsDisclosureObservers: some View {
+        settingsDraftObservers
         .onChange(of: diagnosticFailures.map(\.name), initial: true) { _, failures in
             if !failures.isEmpty { diagnosticsExpanded = true }
         }
@@ -382,7 +412,7 @@ struct SettingsView: View {
         .onChange(of: intakeIssueKeys, initial: true) { _, issues in
             if !issues.isEmpty { intakeExpanded = true }
         }
-        .onChange(of: (execCaps?.checks ?? []).filter { $0.ok == false }.map(\.name), initial: true) { _, failures in
+        .onChange(of: piCheckFailureNames, initial: true) { _, failures in
             if !failures.isEmpty { piChecksExpanded = true }
         }
         .onChange(of: pausedStages, initial: true) { _, stages in
@@ -579,6 +609,10 @@ struct SettingsView: View {
 
     private var piChecksNeedExpansion: Bool {
         execLoaded && (selBackend == "pi" || (execCaps?.checks ?? []).contains { $0.ok == false })
+    }
+
+    private var piCheckFailureNames: [String] {
+        (execCaps?.checks ?? []).filter { $0.ok == false }.map(\.name)
     }
 
     private var diagnosticsSection: some View {

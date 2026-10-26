@@ -915,7 +915,7 @@ private struct EventRow: View {
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
                     Text(detailText)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.kpLabel.monospaced())
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
