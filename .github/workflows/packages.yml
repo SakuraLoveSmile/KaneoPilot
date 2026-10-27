@@ -37,7 +37,11 @@ jobs:
   checks:
     needs: identity
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -58,7 +62,7 @@ jobs:
           print('Real pytest:', pytest.__version__, module)
           PY
       - name: Release recovery and packaging checks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,22 +74,34 @@ jobs:
         if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
         working-directory: core
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-reports"
-          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/core.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/core.log"
+          files=$(python3 ../scripts/pytest_shards.py core --shard "$SHARD" --shards "$SHARDS")
+          selected=()
+          while IFS= read -r file; do selected+=("$file"); done <<< "$files"
+          python3 -I -m pytest "${selected[@]}" -q --junitxml="$RUNNER_TEMP/test-reports/core-shard-$SHARD.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/core-shard-$SHARD.log"
       - name: Integration fixture tests
         if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-reports"
-          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/integration.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/integration.log"
+          files=$(python3 scripts/pytest_shards.py integration --shard "$SHARD" --shards "$SHARDS")
+          selected=()
+          while IFS= read -r file; do selected+=("$file"); done <<< "$files"
+          python3 -I -m pytest "${selected[@]}" -q --junitxml="$RUNNER_TEMP/test-reports/integration-shard-$SHARD.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/integration-shard-$SHARD.log"
       - name: Preserve isolated check reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: isolated-check-reports-${{ github.run_number }}
+          name: isolated-check-reports-${{ github.run_number }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-reports/
           if-no-files-found: warn
           retention-days: 14
