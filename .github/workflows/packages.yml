@@ -7,11 +7,6 @@ on:
     paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:
-    inputs:
-      probe_unwired:
-        description: 测量未接入 CI 的 10 个 macOS 夹具（不参与发布门禁）
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -235,9 +230,9 @@ jobs:
       matrix:
         include:
           - group: a
-            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures run-session-fulltext-fixtures
           - group: b
-            fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures
+            fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures run-engine-fix-revert-fixtures
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -324,43 +319,6 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-check-reports-${{ github.run_number }}-package
-          path: ${{ runner.temp }}/macos-reports/
-          if-no-files-found: warn
-          retention-days: 14
-
-  macos-unwired-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_unwired }}
-    needs: identity
-    runs-on: macos-15
-    timeout-minutes: 45
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ needs.identity.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.11'
-      - name: Measure unwired desktop fixtures
-        shell: bash
-        run: |
-          set -uo pipefail
-          mkdir -p "$RUNNER_TEMP/macos-reports"
-          for fixture in run-engine-fix-revert-fixtures run-session-fulltext-fixtures; do
-            started=$(date +%s)
-            if bash "macos/tests/$fixture.sh" > "$RUNNER_TEMP/macos-reports/$fixture.log" 2>&1; then
-              outcome=passed
-            else
-              outcome=failed
-            fi
-            echo "$fixture $outcome $(( $(date +%s) - started ))s" | tee -a "$RUNNER_TEMP/macos-reports/summary.txt"
-          done
-      - name: Preserve unwired fixture measurements
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: macos-unwired-probe-reports-${{ github.run_number }}
           path: ${{ runner.temp }}/macos-reports/
           if-no-files-found: warn
           retention-days: 14

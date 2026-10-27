@@ -15,21 +15,15 @@ WIRED_FIXTURES = (
     "run-completion-display-fixtures", "run-build-ai-action-fixtures", "run-external-build-repair-fixtures",
     "run-ai-verification-recovery-fixtures", "run-planning-input-fixtures", "run-recovery-supervisor-fixtures",
     "run-review-resolution-fixtures", "run-scheduler-fixtures", "run-session-reader-fixtures",
-    "run-session-search-input-fixtures", "run-verification-check-fixtures",
+    "run-session-search-input-fixtures", "run-verification-check-fixtures", "run-session-fulltext-fixtures",
+    "run-engine-fix-revert-fixtures",
 )
-# Stale compile set or title text: kept out of the gate, measured by the manual probe only.
-UNWIRED_FIXTURES = ("run-engine-fix-revert-fixtures", "run-session-fulltext-fixtures")
 UPLOAD = "actions/upload-artifact"
 
 
 def needs_of(job):
     needs = job.get("needs", [])
     return [needs] if isinstance(needs, str) else list(needs)
-
-
-def fixture_list(job, step_name):
-    run = next(step["run"] for step in job["steps"] if step.get("name") == step_name)
-    return re.search(r"for fixture in (.+?); do", run).group(1).split()
 
 
 def shard_fixtures(job):
@@ -39,9 +33,7 @@ def shard_fixtures(job):
 class PackagesWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-        cls.jobs = document["jobs"]
-        cls.dispatch_inputs = document[True]["workflow_dispatch"]["inputs"]  # YAML 1.1 reads `on:` as True
+        cls.jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
 
     def uploads(self, job):
         return [step["with"]["name"] for step in self.jobs[job].get("steps", []) if step.get("uses", "").startswith(UPLOAD)]
@@ -68,19 +60,13 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(sorted(shard_fixtures(job)), sorted(WIRED_FIXTURES))
 
+    def test_every_desktop_fixture_script_is_wired(self):
+        scripts = sorted(path.stem for path in (REPO / "macos" / "tests").glob("run-*fixtures.sh"))
+        self.assertEqual(scripts, sorted(WIRED_FIXTURES))
+
     def test_artifact_names_are_unique_within_a_run(self):
         names = [name for job in self.jobs for name in self.uploads(job)]
         self.assertEqual(len(names), len(set(names)), names)
-
-    def test_unwired_probe_is_manual_opt_in_and_never_gates_publish(self):
-        probe = self.jobs["macos-unwired-probe"]
-        self.assertIn("workflow_dispatch", probe["if"])
-        self.assertIn("probe_unwired", probe["if"])
-        self.assertNotIn("macos-unwired-probe", needs_of(self.jobs["publish"]))
-        self.assertIs(self.dispatch_inputs["probe_unwired"]["default"], False)
-        probe_list = fixture_list(probe, "Measure unwired desktop fixtures")
-        self.assertEqual(sorted(probe_list), sorted(UNWIRED_FIXTURES))
-        self.assertFalse(set(probe_list) & set(WIRED_FIXTURES))
 
 
 if __name__ == "__main__":
