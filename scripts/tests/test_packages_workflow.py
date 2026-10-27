@@ -13,7 +13,12 @@ WIRED_FIXTURES = (
     "run-fixtures", "run-engine-fixtures", "run-plan-answer-fixtures", "run-execution-answer-fixtures",
     "run-owner-fixtures", "run-mobile-fixtures", "run-mobile-real-core-fixtures", "run-retrospective-fixtures",
     "run-completion-display-fixtures", "run-build-ai-action-fixtures", "run-external-build-repair-fixtures",
+    "run-ai-verification-recovery-fixtures", "run-planning-input-fixtures", "run-recovery-supervisor-fixtures",
+    "run-review-resolution-fixtures", "run-scheduler-fixtures", "run-session-reader-fixtures",
+    "run-session-search-input-fixtures", "run-verification-check-fixtures",
 )
+# Stale compile set or title text: kept out of the gate, measured by the manual probe only.
+UNWIRED_FIXTURES = ("run-engine-fix-revert-fixtures", "run-session-fulltext-fixtures")
 UPLOAD = "actions/upload-artifact"
 
 
@@ -25,6 +30,10 @@ def needs_of(job):
 def fixture_list(job, step_name):
     run = next(step["run"] for step in job["steps"] if step.get("name") == step_name)
     return re.search(r"for fixture in (.+?); do", run).group(1).split()
+
+
+def shard_fixtures(job):
+    return [name for entry in job["strategy"]["matrix"]["include"] for name in entry["fixtures"].split()]
 
 
 class PackagesWorkflowTests(unittest.TestCase):
@@ -53,8 +62,11 @@ class PackagesWorkflowTests(unittest.TestCase):
         for job in ("android", "macos-fixtures", "macos-package"):
             self.assertEqual(needs_of(self.jobs[job]), ["identity"], job)
 
-    def test_wired_fixture_list_is_exactly_the_eleven(self):
-        self.assertEqual(sorted(fixture_list(self.jobs["macos-fixtures"], "Affected desktop fixtures")), sorted(WIRED_FIXTURES))
+    def test_wired_fixtures_run_once_each_across_two_shards(self):
+        job = self.jobs["macos-fixtures"]
+        self.assertEqual(len(job["strategy"]["matrix"]["include"]), 2)
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        self.assertEqual(sorted(shard_fixtures(job)), sorted(WIRED_FIXTURES))
 
     def test_artifact_names_are_unique_within_a_run(self):
         names = [name for job in self.jobs for name in self.uploads(job)]
@@ -67,8 +79,8 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertNotIn("macos-unwired-probe", needs_of(self.jobs["publish"]))
         self.assertIs(self.dispatch_inputs["probe_unwired"]["default"], False)
         probe_list = fixture_list(probe, "Measure unwired desktop fixtures")
+        self.assertEqual(sorted(probe_list), sorted(UNWIRED_FIXTURES))
         self.assertFalse(set(probe_list) & set(WIRED_FIXTURES))
-        self.assertEqual(len(probe_list), 10)
 
 
 if __name__ == "__main__":

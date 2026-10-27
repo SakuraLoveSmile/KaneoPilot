@@ -230,6 +230,14 @@ jobs:
     needs: identity
     runs-on: macos-15
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: a
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures
+          - group: b
+            fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -244,7 +252,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/macos-reports"
           result=0
-          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-completion-display-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures; do
+          for fixture in ${{ matrix.fixtures }}; do
             if bash "macos/tests/$fixture.sh" 2>&1 | tee "$RUNNER_TEMP/macos-reports/$fixture.log"; then
               echo "$fixture passed"
             else
@@ -256,7 +264,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: macos-check-reports-${{ github.run_number }}-fixtures
+          name: macos-check-reports-${{ github.run_number }}-fixtures-${{ matrix.group }}
           path: ${{ runner.temp }}/macos-reports/
           if-no-files-found: warn
           retention-days: 14
@@ -339,7 +347,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/macos-reports"
-          for fixture in run-ai-verification-recovery-fixtures run-engine-fix-revert-fixtures run-planning-input-fixtures run-recovery-supervisor-fixtures run-review-resolution-fixtures run-scheduler-fixtures run-session-fulltext-fixtures run-session-reader-fixtures run-session-search-input-fixtures run-verification-check-fixtures; do
+          for fixture in run-engine-fix-revert-fixtures run-session-fulltext-fixtures; do
             started=$(date +%s)
             if bash "macos/tests/$fixture.sh" > "$RUNNER_TEMP/macos-reports/$fixture.log" 2>&1; then
               outcome=passed
