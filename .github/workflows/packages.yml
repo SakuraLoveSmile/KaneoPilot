@@ -4,6 +4,7 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
+    paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +13,7 @@ permissions:
 
 concurrency:
   group: packages-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   identity:
@@ -205,7 +206,7 @@ jobs:
         run: rm -f "$RUNNER_TEMP/kaneopilot-release.keystore"
 
   macos:
-    needs: [identity, checks]
+    needs: identity
     runs-on: macos-15
     timeout-minutes: 45
     steps:
