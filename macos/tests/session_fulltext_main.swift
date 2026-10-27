@@ -14,10 +14,64 @@ final class SessionReaderPerformance: @unchecked Sendable {
     private var events: [[String: Any]] = []
     func record(_ kind: String, _ fields: [String: Any] = [:]) {
         lock.lock(); defer { lock.unlock() }
-        var event = fields; event["kind"] = kind; events.append(event)
+        var event = fields; event["kind"] = kind; event["t_ms"] = Diagnostics.now(); events.append(event)
     }
     func snapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return events }
 }
+
+// Diagnostic-only timing for the stall investigation. It adds no product code, and its lock
+// never waits on AppKit, so recording cannot itself block the main thread.
+final class Diagnostics: @unchecked Sendable {
+    struct OpStat { var count = 0; var maximum = 0.0; var total = 0.0 }
+    static let shared = Diagnostics()
+    static let base = DispatchTime.now().uptimeNanoseconds
+    static func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - base) / 1_000_000 }
+    private let lock = NSLock()
+    private var step = "空载"
+    private var running = true
+    private var ops: [String: OpStat] = [:]
+    private var longOps: [[String: Any]] = []
+    private var overshoots: [[String: Any]] = []
+    func setStep(_ value: String) { lock.lock(); step = value; lock.unlock() }
+    func currentStep() -> String { lock.lock(); defer { lock.unlock() }; return step }
+    func recordOp(_ label: String, start: Double, duration: Double) {
+        lock.lock(); defer { lock.unlock() }
+        var stat = ops[label] ?? OpStat()
+        stat.count += 1; stat.maximum = max(stat.maximum, duration); stat.total += duration
+        ops[label] = stat
+        if duration >= 20 { longOps.append(["label": label, "start_ms": start, "duration_ms": duration]) }
+    }
+    func recordOvershoot(start: Double, overshoot: Double) {
+        lock.lock(); defer { lock.unlock() }
+        overshoots.append(["start_ms": start, "overshoot_ms": overshoot])
+    }
+    func keepsWatching() -> Bool { lock.lock(); defer { lock.unlock() }; return running }
+    func stopWatching() { lock.lock(); running = false; lock.unlock() }
+    func opSummary() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        var summary: [String: Any] = [:]
+        for (label, stat) in ops {
+            let entry: [String: Any] = ["count": stat.count, "max_ms": stat.maximum, "total_ms": stat.total]
+            summary[label] = entry
+        }
+        return summary
+    }
+    func longOpSnapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return longOps }
+    func overshootSnapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return overshoots }
+    func startWatchdog() {
+        let thread = Thread { [self] in
+            while self.keepsWatching() {
+                let before = Diagnostics.now()
+                _ = usleep(5_000)
+                let overshoot = Diagnostics.now() - before - 5
+                if overshoot >= 50 { self.recordOvershoot(start: before, overshoot: overshoot) }
+            }
+        }
+        thread.start()
+    }
+}
+
+struct ProbeSample { let fire: Double; let step: String; let delay: Double }
 
 final class ReaderState: ObservableObject {
     @Published var text = ""
@@ -44,6 +98,12 @@ struct FixtureReader: View {
         }
     }
     @MainActor static func pause(_ milliseconds: UInt64) async { try? await Task.sleep(nanoseconds: milliseconds * 1_000_000) }
+    @MainActor static func timed<T>(_ label: String, _ work: () -> T) -> T {
+        let started = Diagnostics.now()
+        let value = work()
+        Diagnostics.shared.recordOp(label, start: started, duration: Diagnostics.now() - started)
+        return value
+    }
     @MainActor static func findHost(_ view: NSView) -> SessionPlainTextReader.Host? {
         if let host = view as? SessionPlainTextReader.Host { return host }
         return view.subviews.lazy.compactMap { findHost($0) }.first
@@ -64,7 +124,7 @@ struct FixtureReader: View {
     }
     @MainActor static func wait(_ reason: String, condition: () -> Bool) async {
         let timeout = Date().addingTimeInterval(8)
-        while !condition(), Date() < timeout { await pause(10) }
+        while !timed("waitCondition", condition), Date() < timeout { await pause(10) }
         if !condition() {
             for window in NSApplication.shared.windows {
                 if let root = window.contentView, let host = findHost(root) { print("ROOT \(root.frame) HOST \(host.frame) SCROLL \(host.scroll.frame) CONTENT \(host.scroll.contentSize) textlen \(host.textView?.string.utf16.count ?? -1)") }
@@ -77,9 +137,72 @@ struct FixtureReader: View {
         Task { await run() }
         app.run()
     }
+    static func episodes(in samples: [ProbeSample]) -> [[String: Any]] {
+        var groups: [[ProbeSample]] = []
+        var current: [ProbeSample] = []
+        var lastExecution = -Double.infinity
+        for sample in samples.sorted(by: { $0.fire + $0.delay < $1.fire + $1.delay }) {
+            let execution = sample.fire + sample.delay
+            // Samples queued during one stall run back-to-back when the main thread resumes.
+            if execution - lastExecution > 20, !current.isEmpty { groups.append(current); current = [] }
+            current.append(sample)
+            lastExecution = execution
+        }
+        if !current.isEmpty { groups.append(current) }
+        return groups.compactMap { group -> [String: Any]? in
+            guard let longest = group.max(by: { $0.delay < $1.delay }), longest.delay >= 200,
+                  let earliest = group.min(by: { $0.fire < $1.fire }) else { return nil }
+            let entry: [String: Any] = ["start_ms": earliest.fire, "duration_ms": longest.delay,
+                                        "start_step": earliest.step, "samples": group.count]
+            return entry
+        }
+    }
+    static func slowSamples(_ samples: [ProbeSample]) -> [[String: Any]] {
+        samples.filter { $0.delay >= 200 }.map { sample -> [String: Any] in
+            ["fire_ms": sample.fire, "delay_ms": sample.delay, "step": sample.step]
+        }
+    }
+    static func runnerEnvironment() -> [String: Any] {
+        var loads = [Double](repeating: 0, count: 3)
+        _ = getloadavg(&loads, 3)
+        let environment: [String: Any] = ["active_processors": ProcessInfo.processInfo.activeProcessorCount,
+                                          "load_average": loads,
+                                          "system_uptime_s": ProcessInfo.processInfo.systemUptime]
+        return environment
+    }
+    @MainActor static func finish(mode: String, samples: [ProbeSample], single: Int, unicode: Int,
+                                  window: NSWindow, timer: DispatchSourceTimer) -> Never {
+        timer.cancel()
+        Diagnostics.shared.stopWatching()
+        let delays = samples.map { $0.delay }.sorted()
+        let maximum = delays.last ?? 0
+        let p95 = delays.isEmpty ? 0 : delays[Int(Double(delays.count - 1) * 0.95)]
+        let report: [String: Any] = [
+            "mode": mode,
+            "result": maximum < 250 ? "PASS" : "FAIL",
+            "probe_max_ms": maximum,
+            "probe_p95_ms": p95,
+            "probe_samples": samples.count,
+            "episodes": episodes(in: samples),
+            "slow_samples": slowSamples(samples),
+            "ops": Diagnostics.shared.opSummary(),
+            "long_ops": Diagnostics.shared.longOpSnapshot(),
+            "watchdog": Diagnostics.shared.overshootSnapshot(),
+            "environment": runnerEnvironment(),
+            "events": SessionReaderPerformance.shared.snapshot(),
+            "single_utf16": single,
+            "unicode_utf16": unicode,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])) ?? Data()
+        print("KANPILOT_PROBE_REPORT " + String(decoding: data, as: UTF8.self))
+        window.close()
+        exit(0)
+    }
     @MainActor static func run() async {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        let mode = ProcessInfo.processInfo.environment["KANPILOT_PROBE_MODE"] ?? "full"
+        _ = Diagnostics.base
         let state = ReaderState()
         let single = String(repeating: "x", count: 1_048_576) + "TAILNEEDLE"
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 560),
@@ -88,67 +211,89 @@ struct FixtureReader: View {
         hosting.sizingOptions = []
         window.contentView = hosting
         window.makeKeyAndOrderFront(nil)
-        var probes: [Double] = []
-        var probeStage = "textkit"
-        var stagedProbes: [[String: Any]] = []
+        var samples: [ProbeSample] = []
         let probeQueue = DispatchQueue(label: "session-fulltext-fixture-probe")
         let timer = DispatchSource.makeTimerSource(queue: probeQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(10))
         timer.setEventHandler {
             let started = DispatchTime.now().uptimeNanoseconds
+            let fired = Diagnostics.now()
+            let step = Diagnostics.shared.currentStep()
             DispatchQueue.main.async {
                 let delay = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-                probes.append(delay); stagedProbes.append(["stage": probeStage, "milliseconds": delay])
+                samples.append(ProbeSample(fire: fired, step: step, delay: delay))
             }
         }
         timer.resume()
+        Diagnostics.shared.startWatchdog()
+        if mode == "idle" {
+            // Same clock, timer and watchdog without any reader: a baseline for the runner itself.
+            await pause(6_000)
+            finish(mode: mode, samples: samples, single: 0, unicode: 0, window: window, timer: timer)
+        }
+        Diagnostics.shared.setStep("载入")
         state.text = single; state.highlight = NSRange(location: 1_048_576, length: 10)
         await wait("complete single line must be displayed") {
             findHost(window.contentView!)?.textView?.textStorage?.length == single.utf16.count
         }
         await pause(300)
+        if mode == "attach" {
+            finish(mode: mode, samples: samples, single: single.utf16.count, unicode: 0, window: window, timer: timer)
+        }
         let host = findHost(window.contentView!)!
         check(host.textView?.selectedRange() == NSRange(location: 1_048_576, length: 10), "UTF16 tail selection")
-        check((host.textView!.string as NSString).substring(with: host.textView!.selectedRange()) == "TAILNEEDLE", "actual selected characters")
+        let tail = timed("string+substring@112") { (host.textView!.string as NSString).substring(with: host.textView!.selectedRange()) }
+        check(tail == "TAILNEEDLE", "actual selected characters")
         check(host.scroll.contentView.bounds.origin.y > 1000, "tail is physically visible")
-        check(exactText(host.textView!.string, single), "full original UTF16 characters")
-        check(exactText(host.textView!.accessibilityValue(), single), "AX full original characters")
+        let fullText = timed("exactText@114") { exactText(host.textView!.string, single) }
+        check(fullText, "full original UTF16 characters")
+        let accessibleText = timed("accessibilityValue@115") { exactText(host.textView!.accessibilityValue(), single) }
+        check(accessibleText, "AX full original characters")
         let originalSelection = NSRange(location: 500_000, length: 20)
-        host.textView!.setSelectedRange(originalSelection)
-        host.textView!.scrollRangeToVisible(originalSelection)
+        timed("setSelectedRange@117") { host.textView!.setSelectedRange(originalSelection) }
+        timed("scrollRange@118") { host.textView!.scrollRangeToVisible(originalSelection) }
         await pause(100)
         let beforeResize = host.scroll.contentView.bounds.origin.y
-        window.setContentSize(NSSize(width: 600, height: 400))
+        Diagnostics.shared.setStep("缩放")
+        timed("setContentSize@121") { window.setContentSize(NSSize(width: 600, height: 400)) }
         await wait("resize must install new prepared graph") {
             guard let host = findHost(window.contentView!), let container = host.textView?.textContainer else { return false }
             return abs(container.containerSize.width - (host.textWidth - 32)) < 0.5 && host.textWidth < 700
         }
         await pause(250)
         let resized = findHost(window.contentView!)!
-        check(exactText(resized.textView!.string, single) && resized.textView!.selectedRange() == originalSelection, "resize preserves full text and selection")
+        let resizedText = timed("exactText@128") { exactText(resized.textView!.string, single) }
+        check(resizedText && resized.textView!.selectedRange() == originalSelection, "resize preserves full text and selection")
         check(resized.scroll.contentView.bounds.origin.y > beforeResize, "resize keeps reading character, rather than absolute y (before \(beforeResize), after \(resized.scroll.contentView.bounds.origin.y))")
         // Two rapidly superseded layouts and a closing view must not publish into the replacement.
+        Diagnostics.shared.setStep("陈旧代次")
         state.text = single + "OLD"
         await pause(30)
         state.visible = false
         await pause(30)
-        state.text = "新视图\n中文🙂边界 TAILNEEDLE"; state.highlight = (state.text as NSString).range(of: "中文🙂"); state.visible = true
+        state.text = "新视图\n中文🙂边界 TAILNEEDLE"
+        state.highlight = timed("range@135") { (state.text as NSString).range(of: "中文🙂") }
+        state.visible = true
         await wait("old background completion must not replace reopened content") {
             findHost(window.contentView!)?.textView?.textStorage?.length == state.text.utf16.count
         }
         await pause(500)
-        check(exactText(findHost(window.contentView!)?.textView?.string, state.text), "stale generation discarded")
+        let staleText = timed("exactText@140") { exactText(findHost(window.contentView!)?.textView?.string, state.text) }
+        check(staleText, "stale generation discarded")
         check(findHost(window.contentView!)?.textView?.selectedRange() == state.highlight, "short Unicode search boundary")
         // A large document with real line breaks and Unicode retains exact UTF16 mapping.
+        Diagnostics.shared.setStep("Unicode")
         let unicode = String(repeating: "中文🙂\n", count: 35_000) + "尾部🙂TAILNEEDLE"
         state.text = unicode
-        let range = (unicode as NSString).range(of: "尾部🙂TAILNEEDLE")
+        let range = timed("range@145") { (unicode as NSString).range(of: "尾部🙂TAILNEEDLE") }
         state.highlight = range
         await wait("large Unicode/real lines") { findHost(window.contentView!)?.textView?.textStorage?.length == unicode.utf16.count }
         await pause(200)
-        check(exactText(findHost(window.contentView!)?.textView?.string, unicode), "complete Unicode original UTF16")
+        let unicodeText = timed("exactText@149") { exactText(findHost(window.contentView!)?.textView?.string, unicode) }
+        check(unicodeText, "complete Unicode original UTF16")
         check(findHost(window.contentView!)?.textView?.selectedRange() == range, "Unicode UTF16 boundary")
         // Markdown uses the actual shared renderer on the same background graph.
+        Diagnostics.shared.setStep("Markdown")
         state.highlight = nil
         state.text = "# 标题\n\n" + single + "\n\n**尾部**"
         state.markdown = true
@@ -158,9 +303,11 @@ struct FixtureReader: View {
             findHost(window.contentView!)?.textView?.textStorage?.length == expected.utf16.count
         }
         await pause(100)
-        check(exactText(findHost(window.contentView!)?.textView?.string, expected), "complete actual Markdown rendered text")
+        let markdownText = timed("exactText@161") { exactText(findHost(window.contentView!)?.textView?.string, expected) }
+        check(markdownText, "complete actual Markdown rendered text")
         check(findHost(window.contentView!)?.textView?.isRichText == true, "large reading remains rich text")
         // Superseded mode preparation must never install over the latest raw request.
+        Diagnostics.shared.setStep("模式切换")
         state.markdown = false
         await pause(30)
         state.markdown = true
@@ -168,13 +315,16 @@ struct FixtureReader: View {
         state.markdown = false
         await wait("latest raw mode wins") { findHost(window.contentView!)?.textView?.textStorage?.length == markdown.utf16.count }
         await pause(300)
-        check(exactText(findHost(window.contentView!)?.textView?.string, markdown), "obsolete rendered result cannot override raw mode")
+        let rawText = timed("exactText@171") { exactText(findHost(window.contentView!)?.textView?.string, markdown) }
+        check(rawText, "obsolete rendered result cannot override raw mode")
         // A query changed while a resize graph is pending must win over its captured anchor.
+        Diagnostics.shared.setStep("缩放")
         state.highlight = NSRange(location: 100, length: 20)
         await pause(30)
-        window.setContentSize(NSSize(width: 720, height: 500))
+        timed("setContentSize@175") { window.setContentSize(NSSize(width: 720, height: 500)) }
         await pause(30)
-        let latestMatch = NSRange(location: (markdown as NSString).length - 6, length: 2)
+        let markdownLength = timed("length@177") { (markdown as NSString).length }
+        let latestMatch = NSRange(location: markdownLength - 6, length: 2)
         state.highlight = latestMatch
         await wait("newest query must survive pending resize") {
             guard let host = findHost(window.contentView!), let container = host.textView?.textContainer else { return false }
@@ -185,37 +335,43 @@ struct FixtureReader: View {
         check(findHost(window.contentView!)?.textView?.selectedRange() == latestMatch, "captured old selection must not replace newest query")
         // The old graph remains interactive during preparation: latest scroll, selection,
         // and keyboard ownership must survive the replacement, rather than the start anchor.
+        Diagnostics.shared.setStep("交互")
         state.highlight = nil
         await pause(30)
         let interactive = findHost(window.contentView!)!
-        check(window.makeFirstResponder(interactive.textView), "reader accepts keyboard focus")
-        interactive.textView!.setSelectedRange(NSRange(location: 100_000, length: 10))
-        interactive.textView!.scrollRangeToVisible(interactive.textView!.selectedRange())
-        window.setContentSize(NSSize(width: 640, height: 460))
+        let focused = timed("makeFirstResponder@191") { window.makeFirstResponder(interactive.textView) }
+        check(focused, "reader accepts keyboard focus")
+        timed("setSelectedRange@192") { interactive.textView!.setSelectedRange(NSRange(location: 100_000, length: 10)) }
+        timed("scrollRange@193") { interactive.textView!.scrollRangeToVisible(interactive.textView!.selectedRange()) }
+        timed("setContentSize@194") { window.setContentSize(NSSize(width: 640, height: 460)) }
         await pause(70)
         let oldView = interactive.textView!
         check(oldView.textContainer!.containerSize.width > interactive.textWidth - 32,
               "native input occurs while replacement preparation is still pending")
         let activeSelection = NSRange(location: 800_000, length: 22)
-        oldView.setSelectedRange(activeSelection)
-        oldView.scrollRangeToVisible(activeSelection)
-        let activeCharacter = topCharacter(interactive)
+        timed("setSelectedRange@200") { oldView.setSelectedRange(activeSelection) }
+        timed("scrollRange@201") { oldView.scrollRangeToVisible(activeSelection) }
+        let activeCharacter = timed("topCharacter@202") { topCharacter(interactive) }
         await wait("pending resize preserves latest selection and scroll") {
             interactive.textView !== oldView &&
             abs(interactive.textView!.textContainer!.containerSize.width - (interactive.textWidth - 32)) < 0.5
         }
         check(interactive.textView!.selectedRange() == activeSelection, "latest native selection is retained")
-        check(abs(topCharacter(interactive) - activeCharacter) < 100, "latest reading character is retained")
+        let currentCharacter = timed("topCharacter@208") { topCharacter(interactive) }
+        check(abs(currentCharacter - activeCharacter) < 100, "latest reading character is retained")
         check(window.firstResponder === interactive.textView, "resize retains keyboard responder")
-        interactive.textView!.moveRightAndModifySelection(nil)
+        timed("keyboard@210") { interactive.textView!.moveRightAndModifySelection(nil) }
         let keyboardSelection = interactive.textView!.selectedRange()
         check(keyboardSelection == NSRange(location: activeSelection.location, length: activeSelection.length + 1),
               "native keyboard selection continues after resize")
-        let privateBoard = NSPasteboard.withUniqueName()
-        check(interactive.textView!.writeSelection(to: privateBoard, types: interactive.textView!.writablePasteboardTypes), "native copy accepts retained selection")
-        check(privateBoard.string(forType: .string) == (markdown as NSString).substring(with: keyboardSelection),
-              "native selected copy contains exact characters")
+        Diagnostics.shared.setStep("剪贴板")
+        let privateBoard = timed("pasteboard@214") { NSPasteboard.withUniqueName() }
+        let wrote = timed("writeSelection@215") { interactive.textView!.writeSelection(to: privateBoard, types: interactive.textView!.writablePasteboardTypes) }
+        check(wrote, "native copy accepts retained selection")
+        let copied = timed("copyCompare@216") { privateBoard.string(forType: .string) == (markdown as NSString).substring(with: keyboardSelection) }
+        check(copied, "native selected copy contains exact characters")
         privateBoard.releaseGlobally()
+        Diagnostics.shared.setStep("面板")
         state.visible = false
         await pause(300)
         // Exercise the actual nonmodal full-text presenter, not a sheet substitute.
@@ -226,20 +382,21 @@ struct FixtureReader: View {
         let row = SessionMessageRowData(message: message, presentation: presentation, match: nil)
         let presenter = SessionMessageDetailPresenter()
         presenter.setParentWindow(window)
-        probeStage = "panel"
         var closures = 0
         presenter.present(row: row, openRaw: true, size: CGSize(width: 840, height: 560)) { closures += 1 }
         let first = presenter.panel!
         check(!first.isSheet && !first.canBecomeMain && first.parent === window && first.animationBehavior == .none, "panel is modeless, nonmain, local and unanimated")
         await wait("actual panel must display complete original") { findHost(first.contentView!)?.textView?.textStorage?.length == single.utf16.count }
-        check(exactText(findHost(first.contentView!)?.textView?.string, single), "panel complete original UTF16")
+        let firstText = timed("exactText@235") { exactText(findHost(first.contentView!)?.textView?.string, single) }
+        check(firstText, "panel complete original UTF16")
         // Reopening uses one window and releases the replaced hosting graph immediately.
         presenter.present(row: row, openRaw: true, size: CGSize(width: 720, height: 500)) { closures += 1 }
         check(presenter.panel !== first && first.contentView == nil && !first.isVisible, "one panel per reader; replaced raw graph released")
         check(closures == 0, "replacement must not restore an obsolete parent anchor")
         let second = presenter.panel!
         await wait("replacement panel must display complete original") { findHost(second.contentView!)?.textView?.textStorage?.length == single.utf16.count }
-        check(exactText(findHost(second.contentView!)?.textView?.string, single), "replacement panel complete original UTF16")
+        let secondText = timed("exactText@242") { exactText(findHost(second.contentView!)?.textView?.string, single) }
+        check(secondText, "replacement panel complete original UTF16")
         check(second.makeFirstResponder(findHost(second.contentView!)!.textView), "panel text accepts keyboard focus")
         let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: second.windowNumber,
@@ -259,21 +416,9 @@ struct FixtureReader: View {
         closingParent.close()
         check(presenter.panel == nil && closingChild.contentView == nil && closures == 1, "closing actual parent releases child without restoring departed reader")
         await pause(300)
-        timer.cancel()
         let events = SessionReaderPerformance.shared.snapshot()
         let preparations = events.filter { $0["kind"] as? String == "fulltext_prepare" }
         check(preparations.count >= 3 && preparations.allSatisfy { $0["main_thread"] as? Bool == false }, "large preparation is exclusively background")
-        let sorted = probes.sorted()
-        let maximum = sorted.last ?? 0
-        let p95 = sorted.isEmpty ? 0 : sorted[Int(Double(sorted.count - 1) * 0.95)]
-        if maximum >= 250 { print("slow probes", stagedProbes.filter { ($0["milliseconds"] as! Double) >= 200 }) }
-        check(maximum < 250, "all-stage main thread latency must remain below 250 ms (got \(maximum))")
-        let object: [String: Any] = ["result": "PASS", "probe_samples": probes.count, "probe_max_ms": maximum,
-                                   "probe_p95_ms": p95, "single_utf16": single.utf16.count,
-                                   "unicode_utf16": unicode.utf16.count, "events": events]
-        let data = try! JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-        print(String(data: data, encoding: .utf8)!)
-        window.close()
-        exit(0)
+        finish(mode: mode, samples: samples, single: single.utf16.count, unicode: unicode.utf16.count, window: window, timer: timer)
     }
 }
