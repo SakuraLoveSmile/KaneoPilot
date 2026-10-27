@@ -15,9 +15,10 @@ WIRED_FIXTURES = (
     "run-completion-display-fixtures", "run-build-ai-action-fixtures", "run-external-build-repair-fixtures",
     "run-ai-verification-recovery-fixtures", "run-planning-input-fixtures", "run-recovery-supervisor-fixtures",
     "run-review-resolution-fixtures", "run-scheduler-fixtures", "run-session-reader-fixtures",
-    "run-session-search-input-fixtures", "run-verification-check-fixtures", "run-session-fulltext-fixtures",
-    "run-engine-fix-revert-fixtures",
+    "run-session-search-input-fixtures", "run-verification-check-fixtures", "run-engine-fix-revert-fixtures",
 )
+# Manual probe only (workflow_dispatch input): its main-thread latency assertion fails on hosted runners.
+UNGATED_FIXTURES = ("run-session-fulltext-fixtures",)
 UPLOAD = "actions/upload-artifact"
 
 
@@ -33,7 +34,9 @@ def shard_fixtures(job):
 class PackagesWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        cls.jobs = document["jobs"]
+        cls.dispatch_inputs = document[True]["workflow_dispatch"]["inputs"]  # YAML 1.1 reads `on:` as True
 
     def uploads(self, job):
         return [step["with"]["name"] for step in self.jobs[job].get("steps", []) if step.get("uses", "").startswith(UPLOAD)]
@@ -60,9 +63,21 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(sorted(shard_fixtures(job)), sorted(WIRED_FIXTURES))
 
-    def test_every_desktop_fixture_script_is_wired(self):
+    def test_every_desktop_fixture_script_is_wired_or_probed(self):
         scripts = sorted(path.stem for path in (REPO / "macos" / "tests").glob("run-*fixtures.sh"))
-        self.assertEqual(scripts, sorted(WIRED_FIXTURES))
+        self.assertEqual(scripts, sorted(WIRED_FIXTURES + UNGATED_FIXTURES))
+
+    def test_session_fulltext_probe_is_manual_opt_in_and_never_gates_publish(self):
+        probe = self.jobs["macos-session-fulltext-probe"]
+        self.assertIn("workflow_dispatch", probe["if"])
+        self.assertIn("probe_session_fulltext", probe["if"])
+        self.assertIs(self.dispatch_inputs["probe_session_fulltext"]["default"], False)
+        self.assertIs(probe["continue-on-error"], True)
+        self.assertNotIn("macos-session-fulltext-probe", needs_of(self.jobs["publish"]))
+        runs = "\n".join(step.get("run", "") for step in probe["steps"])
+        for name in UNGATED_FIXTURES:
+            self.assertIn(f"macos/tests/{name}.sh", runs)
+        self.assertFalse(set(UNGATED_FIXTURES) & set(shard_fixtures(self.jobs["macos-fixtures"])))
 
     def test_artifact_names_are_unique_within_a_run(self):
         names = [name for job in self.jobs for name in self.uploads(job)]

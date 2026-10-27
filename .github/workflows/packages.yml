@@ -7,6 +7,11 @@ on:
     paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      probe_session_fulltext:
+        description: 手动运行会话全文夹具探针（不参与门禁与发布）
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -230,7 +235,7 @@ jobs:
       matrix:
         include:
           - group: a
-            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures run-session-fulltext-fixtures
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures
           - group: b
             fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures run-engine-fix-revert-fixtures
     steps:
@@ -319,6 +324,35 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-check-reports-${{ github.run_number }}-package
+          path: ${{ runner.temp }}/macos-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-session-fulltext-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_session_fulltext }}
+    needs: identity
+    runs-on: macos-15
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Probe session full-text fixture (not gating)
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/macos-reports"
+          bash macos/tests/run-session-fulltext-fixtures.sh 2>&1 | tee "$RUNNER_TEMP/macos-reports/run-session-fulltext-fixtures.log"
+      - name: Preserve session full-text probe report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-session-fulltext-probe-${{ github.run_number }}
           path: ${{ runner.temp }}/macos-reports/
           if-no-files-found: warn
           retention-days: 14
