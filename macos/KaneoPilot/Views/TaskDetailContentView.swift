@@ -116,13 +116,19 @@ struct TaskDetailContentView: View {
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
                     StatusBadge(status: "待确认执行")
                 }
-                if executionQuestionsOpen, let store = executionStore {
+                if let question = openExecutionQuestion {
                     Text("·")
-                    Text("已等待 \(RetrospectiveFormat.duration(Int(store.question.waitSeconds)) ?? "0 秒")")
+                    Text("已等待 \(RetrospectiveFormat.duration(Int(question.waitSeconds)) ?? "0 秒")")
                 }
             }
         }
         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+    }
+
+    /// 头部「已等待」只读开放中的执行提问的等待时长（`ExecutionQuestion.waitSeconds`），不经过概览页的草稿 store。
+    private var openExecutionQuestion: ExecutionQuestion? {
+        guard let question = detail?.currentInputQuestion, question.state == "open" else { return nil }
+        return question
     }
 
     /// 第三行：280×28 的五段分段控件。

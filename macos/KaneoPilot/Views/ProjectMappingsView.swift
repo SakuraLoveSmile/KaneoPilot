@@ -642,7 +642,7 @@ struct ProjectMappingsView: View {
         }
     }
 
-    private func mappingStatus(_ state: String) -> (label: String, tone: Color) {
+    private func mappingStatus(_ state: String?) -> (label: String, tone: Color) {
         switch state {
         case "available": return ("可用", Color.kpGreen)
         case "disabled": return ("已停用", Color.kpGray)
