@@ -130,6 +130,52 @@ struct FixtureReader: View {
     }
 }
 
+// Plain AppKit control for the stall investigation. The graph and view settings are copied from the
+// product's background path, but no product type, SwiftUI or install/locate step is involved.
+final class BareGraph: @unchecked Sendable {
+    let storage: NSTextStorage
+    let layout: NSLayoutManager
+    let container: NSTextContainer
+    let usedRect: NSRect
+    init(text: String, width: CGFloat) {
+        storage = NSTextStorage(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        layout = NSLayoutManager()
+        layout.backgroundLayoutEnabled = false
+        layout.allowsNonContiguousLayout = false
+        container = NSTextContainer(containerSize: NSSize(width: max(1, width - 2 * Spacing.l),
+                                                           height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+        layout.ensureLayout(for: container)
+        usedRect = layout.usedRect(for: container)
+    }
+}
+
+final class BareGraphBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var graph: BareGraph?
+    func set(_ value: BareGraph) { lock.lock(); graph = value; lock.unlock() }
+    func get() -> BareGraph? { lock.lock(); defer { lock.unlock() }; return graph }
+}
+
+final class BareTextView: NSTextView {
+    var firstDrawStarted: UInt64?
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if let firstDrawStarted {
+            self.firstDrawStarted = nil
+            SessionReaderPerformance.shared.record("bare_first_draw", [
+                "milliseconds": Double(DispatchTime.now().uptimeNanoseconds - firstDrawStarted) / 1_000_000,
+            ])
+        }
+    }
+}
+
 @main struct SessionFulltextFixtures {
     @MainActor static func check(_ value: @autoclosure () -> Bool, _ reason: String) {
         guard value() else {
@@ -240,6 +286,59 @@ struct FixtureReader: View {
         window.close()
         exit(0)
     }
+    // Plain AppKit with the background path's graph and view settings: no SwiftUI, no product types, no install or locate.
+    @MainActor static func runBare(window: NSWindow, text: String, highlight: NSRange) async {
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: NSSize(width: 840, height: 560)))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.scrollerStyle = .overlay
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        window.contentView = scroll
+        let width = scroll.contentSize.width
+        let box = BareGraphBox()
+        DispatchQueue(label: "bare-fulltext-prepare").async { box.set(BareGraph(text: text, width: width)) }
+        await wait("bare graph must prepare") { box.get() != nil }
+        let graph = box.get()!
+        let size = NSSize(width: width, height: max(scroll.contentSize.height, graph.usedRect.maxY + 2 * Spacing.l))
+        let view = BareTextView(frame: NSRect(origin: .zero, size: size), textContainer: graph.container)
+        view.firstDrawStarted = DispatchTime.now().uptimeNanoseconds
+        view.isEditable = false
+        view.isSelectable = true
+        view.isRichText = false
+        view.importsGraphics = false
+        view.allowsUndo = false
+        view.isAutomaticLinkDetectionEnabled = false
+        view.isAutomaticDataDetectionEnabled = false
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticSpellingCorrectionEnabled = false
+        view.isContinuousSpellCheckingEnabled = false
+        view.isGrammarCheckingEnabled = false
+        view.usesFindBar = true
+        view.drawsBackground = false
+        view.unregisterDraggedTypes()
+        view.textContainerInset = NSSize(width: Spacing.l, height: Spacing.l)
+        view.textContainer?.lineFragmentPadding = 0
+        view.layoutManager?.backgroundLayoutEnabled = false
+        view.minSize = .zero
+        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        view.isVerticallyResizable = false
+        view.isHorizontallyResizable = false
+        scroll.documentView = view
+        SessionReaderPerformance.shared.record("bare_attach", ["utf16_length": graph.storage.length])
+        view.layoutManager?.addTemporaryAttribute(.backgroundColor, value: NSColor.findHighlightColor, forCharacterRange: highlight)
+        view.setSelectedRange(highlight)
+        DispatchQueue.main.async {
+            let started = DispatchTime.now().uptimeNanoseconds
+            view.scrollRangeToVisible(highlight)
+            SessionReaderPerformance.shared.record("bare_locate", [
+                "milliseconds": Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000,
+            ])
+        }
+        await wait("bare complete single line must be displayed") { view.textStorage?.length == text.utf16.count }
+        await pause(300)
+    }
+
     @MainActor static func run() async {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -257,11 +356,15 @@ struct FixtureReader: View {
         let tailMarker = "TAILNEEDLE"
         let tailLocation = bytes - tailMarker.utf16.count
         let single = String(repeating: "x", count: tailLocation) + tailMarker
+        let variant = environment["KANPILOT_PROBE_VARIANT"] ?? "product"
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 560),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        let hosting = NSHostingView(rootView: FixtureReader(state: state).frame(minWidth: 480, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity))
-        hosting.sizingOptions = []
-        window.contentView = hosting
+        // The bare control never creates SwiftUI, so its first-use state is not shared with the product path.
+        if variant == "product" {
+            let hosting = NSHostingView(rootView: FixtureReader(state: state).frame(minWidth: 480, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity))
+            hosting.sizingOptions = []
+            window.contentView = hosting
+        }
         window.makeKeyAndOrderFront(nil)
         var samples: [ProbeSample] = []
         let probeQueue = DispatchQueue(label: "session-fulltext-fixture-probe")
@@ -279,6 +382,11 @@ struct FixtureReader: View {
         timer.resume()
         Diagnostics.shared.adoptMainThread(mach_thread_self())
         Diagnostics.shared.startWatchdog()
+        if variant == "bare" {
+            Diagnostics.shared.setStep("载入")
+            await runBare(window: window, text: single, highlight: NSRange(location: tailLocation, length: 10))
+            finish(mode: "bare-attach", samples: samples, single: single.utf16.count, unicode: 0, window: window, timer: timer)
+        }
         if mode == "idle" {
             // Same clock, timer and watchdog without any reader: a baseline for the runner itself.
             await pause(6_000)
