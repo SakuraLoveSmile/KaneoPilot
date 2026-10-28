@@ -13,17 +13,17 @@ swiftc -O -whole-module-optimization -parse-as-library \
  "$HERE/session_fulltext_main.swift" -o "$FIXTURE/fixture"
 # Diagnostic branch only. No sampler: `sample` suspends the target and distorts the timing it measures.
 # The fixture reads the main thread's state from its own watchdog instead. Latency is reported, not gated.
-# The first mode rotates with the run attempt.
+# Stage 2 C size comparison: attach mode only, 65 537 and 262 144 bytes, 3 runs each per attempt.
+# Only the first text install on a runner is cold, so the first size rotates with the run attempt.
 case "${GITHUB_RUN_ATTEMPT:-1}" in
- 2) ORDER="attach full idle" ;;
- 3) ORDER="idle full attach" ;;
- *) ORDER="full attach idle" ;;
+ 2|4|6) ORDER="262144 65537" ;;
+ *) ORDER="65537 262144" ;;
 esac
 REPORTS="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/macos-reports"
 mkdir -p "$REPORTS"
-for mode in $ORDER; do
+for bytes in $ORDER; do
  for run in 1 2 3; do
-  echo "PROBE_RUN mode=$mode run=$run attempt=${GITHUB_RUN_ATTEMPT:-1}"
-  KANPILOT_PROBE_MODE="$mode" "$FIXTURE/fixture" | tee "$REPORTS/attempt-${GITHUB_RUN_ATTEMPT:-1}-$mode-$run.txt"
+  echo "PROBE_RUN mode=attach run=$run attempt=${GITHUB_RUN_ATTEMPT:-1} bytes=$bytes"
+  KANPILOT_PROBE_MODE=attach KANPILOT_PROBE_BYTES="$bytes" "$FIXTURE/fixture" | tee "$REPORTS/attempt-${GITHUB_RUN_ATTEMPT:-1}-$bytes-$run.txt"
  done
 done

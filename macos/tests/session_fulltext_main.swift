@@ -243,10 +243,20 @@ struct FixtureReader: View {
     @MainActor static func run() async {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let mode = ProcessInfo.processInfo.environment["KANPILOT_PROBE_MODE"] ?? "full"
+        let environment = ProcessInfo.processInfo.environment
+        let mode = environment["KANPILOT_PROBE_MODE"] ?? "full"
+        // Diagnostic-only size for the stage 2 size comparison: total UTF-8 bytes, including the needle.
+        // Text of 64 KiB or less takes the synchronous path (no fulltext_prepare or fulltext_attach), so
+        // sizes must be above that bound to exercise the background install that the probe measures.
+        let defaultBytes = 1_048_586
+        let bytes = Int(environment["KANPILOT_PROBE_BYTES"] ?? "") ?? defaultBytes
+        // Only attach mode stops before the checks that use fixed UTF16 offsets (500_000, 800_000, ...).
+        check(bytes == defaultBytes || mode == "attach", "size override is attach-only")
         _ = Diagnostics.base
         let state = ReaderState()
-        let single = String(repeating: "x", count: 1_048_576) + "TAILNEEDLE"
+        let tailMarker = "TAILNEEDLE"
+        let tailLocation = bytes - tailMarker.utf16.count
+        let single = String(repeating: "x", count: tailLocation) + tailMarker
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 560),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         let hosting = NSHostingView(rootView: FixtureReader(state: state).frame(minWidth: 480, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity))
@@ -275,7 +285,7 @@ struct FixtureReader: View {
             finish(mode: mode, samples: samples, single: 0, unicode: 0, window: window, timer: timer)
         }
         Diagnostics.shared.setStep("载入")
-        state.text = single; state.highlight = NSRange(location: 1_048_576, length: 10)
+        state.text = single; state.highlight = NSRange(location: tailLocation, length: 10)
         await wait("complete single line must be displayed") {
             findHost(window.contentView!)?.textView?.textStorage?.length == single.utf16.count
         }
@@ -284,7 +294,7 @@ struct FixtureReader: View {
             finish(mode: mode, samples: samples, single: single.utf16.count, unicode: 0, window: window, timer: timer)
         }
         let host = findHost(window.contentView!)!
-        check(host.textView?.selectedRange() == NSRange(location: 1_048_576, length: 10), "UTF16 tail selection")
+        check(host.textView?.selectedRange() == NSRange(location: tailLocation, length: 10), "UTF16 tail selection")
         let tail = timed("string+substring@112") { (host.textView!.string as NSString).substring(with: host.textView!.selectedRange()) }
         check(tail == "TAILNEEDLE", "actual selected characters")
         check(host.scroll.contentView.bounds.origin.y > 1000, "tail is physically visible")
