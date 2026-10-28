@@ -355,7 +355,12 @@ final class BareTextView: NSTextView {
         let state = ReaderState()
         let tailMarker = "TAILNEEDLE"
         let tailLocation = bytes - tailMarker.utf16.count
-        let single = String(repeating: "x", count: tailLocation) + tailMarker
+        // Text-shape control (KANPILOT_PROBE_TEXT=natural): ASCII prose with spaces and newlines, same byte count.
+        let naturalLine = "The reader wraps long answers at word boundaries, so line breaks follow spaces.\n"
+        let filler = environment["KANPILOT_PROBE_TEXT"] == "natural"
+            ? String(String(repeating: naturalLine, count: tailLocation / naturalLine.utf8.count + 1).prefix(tailLocation))
+            : String(repeating: "x", count: tailLocation)
+        let single = filler + tailMarker
         let variant = environment["KANPILOT_PROBE_VARIANT"] ?? "product"
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 560),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
