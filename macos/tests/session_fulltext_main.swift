@@ -20,7 +20,8 @@ final class SessionReaderPerformance: @unchecked Sendable {
 }
 
 // Diagnostic-only timing for the stall investigation. It adds no product code, and its lock
-// never waits on AppKit, so recording cannot itself block the main thread.
+// never waits on AppKit, so recording cannot itself block the main thread. The watchdog also reads
+// the main thread's CPU time and run state through thread_info, which never suspends the thread.
 final class Diagnostics: @unchecked Sendable {
     struct OpStat { var count = 0; var maximum = 0.0; var total = 0.0 }
     static let shared = Diagnostics()
@@ -58,13 +59,52 @@ final class Diagnostics: @unchecked Sendable {
     }
     func longOpSnapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return longOps }
     func overshootSnapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return overshoots }
+    private var mainPort: mach_port_t = 0
+    private var ticks: [[Double]] = []
+    func adoptMainThread(_ port: mach_port_t) { lock.lock(); mainPort = port; lock.unlock() }
+    func tickSnapshot() -> [[Double]] { lock.lock(); defer { lock.unlock() }; return ticks }
+    func recordTick(at time: Double) {
+        lock.lock(); let port = mainPort; lock.unlock()
+        guard port != 0, let thread = Diagnostics.threadState(port), let task = Diagnostics.taskCounters() else { return }
+        let row = [(time * 10).rounded() / 10, Double(thread.user), Double(thread.system), Double(thread.state),
+                   Double(task.pageins), Double(task.csw), Double(task.messages)]
+        lock.lock(); ticks.append(row); lock.unlock()
+    }
+    // thread_info and task_info read counters without stopping the target, unlike `sample`.
+    static func threadState(_ port: mach_port_t) -> (user: Int, system: Int, state: Int)? {
+        var info = thread_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { integers in
+                thread_info(port, thread_flavor_t(THREAD_BASIC_INFO), integers, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let user = Int(info.user_time.seconds) * 1_000_000 + Int(info.user_time.microseconds)
+        let system = Int(info.system_time.seconds) * 1_000_000 + Int(info.system_time.microseconds)
+        return (user: user, system: system, state: Int(info.run_state))
+    }
+    static func taskCounters() -> (pageins: Int, csw: Int, messages: Int)? {
+        var events = task_events_info()
+        var count = mach_msg_type_number_t(MemoryLayout<task_events_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &events) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { integers in
+                task_info(mach_task_self_, task_flavor_t(TASK_EVENTS_INFO), integers, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return (pageins: Int(events.pageins), csw: Int(events.csw),
+                messages: Int(events.messages_sent) + Int(events.messages_received))
+    }
     func startWatchdog() {
         let thread = Thread { [self] in
             while self.keepsWatching() {
                 let before = Diagnostics.now()
                 _ = usleep(5_000)
-                let overshoot = Diagnostics.now() - before - 5
+                let after = Diagnostics.now()
+                let overshoot = after - before - 5
                 if overshoot >= 50 { self.recordOvershoot(start: before, overshoot: overshoot) }
+                self.recordTick(at: after)
             }
         }
         thread.start()
@@ -188,6 +228,8 @@ struct FixtureReader: View {
             "ops": Diagnostics.shared.opSummary(),
             "long_ops": Diagnostics.shared.longOpSnapshot(),
             "watchdog": Diagnostics.shared.overshootSnapshot(),
+            "main_thread_fields": ["t_ms", "user_us", "system_us", "run_state", "pageins", "csw", "messages"],
+            "main_thread_ticks": Diagnostics.shared.tickSnapshot(),
             "environment": runnerEnvironment(),
             "events": SessionReaderPerformance.shared.snapshot(),
             "single_utf16": single,
@@ -225,6 +267,7 @@ struct FixtureReader: View {
             }
         }
         timer.resume()
+        Diagnostics.shared.adoptMainThread(mach_thread_self())
         Diagnostics.shared.startWatchdog()
         if mode == "idle" {
             // Same clock, timer and watchdog without any reader: a baseline for the runner itself.
