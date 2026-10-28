@@ -257,8 +257,8 @@ final class BareTextView: NSTextView {
         return environment
     }
     @MainActor static func finish(mode: String, samples: [ProbeSample], single: Int, unicode: Int,
-                                  window: NSWindow, timer: DispatchSourceTimer) -> Never {
-        timer.cancel()
+                                  window: NSWindow, timer: DispatchSourceTimer?) -> Never {
+        timer?.cancel()
         Diagnostics.shared.stopWatching()
         let delays = samples.map { $0.delay }.sorted()
         let maximum = delays.last ?? 0
@@ -372,21 +372,26 @@ final class BareTextView: NSTextView {
         }
         window.makeKeyAndOrderFront(nil)
         var samples: [ProbeSample] = []
-        let probeQueue = DispatchQueue(label: "session-fulltext-fixture-probe")
-        let timer = DispatchSource.makeTimerSource(queue: probeQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
-        timer.setEventHandler {
-            let started = DispatchTime.now().uptimeNanoseconds
-            let fired = Diagnostics.now()
-            let step = Diagnostics.shared.currentStep()
-            DispatchQueue.main.async {
-                let delay = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-                samples.append(ProbeSample(fire: fired, step: step, delay: delay))
+        // The bare control runs without the sampler (KANPILOT_PROBE_SAMPLER=off, set by the script). Product keeps it.
+        var timer: DispatchSourceTimer?
+        if environment["KANPILOT_PROBE_SAMPLER"] != "off" {
+            let probeQueue = DispatchQueue(label: "session-fulltext-fixture-probe")
+            let source = DispatchSource.makeTimerSource(queue: probeQueue)
+            source.schedule(deadline: .now(), repeating: .milliseconds(10))
+            source.setEventHandler {
+                let started = DispatchTime.now().uptimeNanoseconds
+                let fired = Diagnostics.now()
+                let step = Diagnostics.shared.currentStep()
+                DispatchQueue.main.async {
+                    let delay = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+                    samples.append(ProbeSample(fire: fired, step: step, delay: delay))
+                }
             }
+            source.resume()
+            timer = source
+            Diagnostics.shared.adoptMainThread(mach_thread_self())
+            Diagnostics.shared.startWatchdog()
         }
-        timer.resume()
-        Diagnostics.shared.adoptMainThread(mach_thread_self())
-        Diagnostics.shared.startWatchdog()
         if variant == "bare" {
             Diagnostics.shared.setStep("载入")
             await runBare(window: window, text: single, highlight: NSRange(location: tailLocation, length: 10))
