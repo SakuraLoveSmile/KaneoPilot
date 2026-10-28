@@ -2561,7 +2561,7 @@ struct SettingsView: View {
                 SettingsFieldRow("上次接收", "\(TimeFormat.fullString(intake.finishedAt ?? intake.startedAt)) · \(projects.count) 个项目 · 接收 \(adopted) 个 · 错误 \(intake.errors?.count ?? 0) 个")
                 DisclosureGroup("接收详情 · \(projects.count) 个项目" + (intakeIssueCount > 0 ? " · \(intakeIssueCount) 项异常" : ""), isExpanded: $intakeDetailOpen) {
                     ForEach(Array(projects.enumerated()), id: \.offset) { _, project in
-                        DisclosureGroup(project.projectId ?? "项目") {
+                        DisclosureGroup(intakeProjectTitle(project.projectId)) {
                             ForEach(Array((project.preflight ?? []).enumerated()), id: \.offset) { _, issue in
                                 Label {
                                     Text(issue.message).font(.kpLabel).foregroundStyle(Color.primary)
@@ -2594,6 +2594,13 @@ struct SettingsView: View {
             Text("关闭主窗口后仍在菜单栏运行；退出应用后停止调度。")
                 .font(.kpLabel).foregroundStyle(Color.kpSecondary)
         }
+    }
+
+    /// 接收详情的项目标题：已加载的任务里有项目名则用名称，否则用项目 ID（不新增核心调用）。
+    private func intakeProjectTitle(_ projectId: String?) -> String {
+        guard let projectId else { return "项目" }
+        let name = model.tasks.first { $0.projectId == projectId }?.projectName
+        return name?.isEmpty == false ? name! : projectId
     }
 
     /// 最近一次接收的异常数（预检问题 + 接收错误）：标题计数，并在首次出现时展开接收详情。
@@ -2652,7 +2659,7 @@ struct SettingsView: View {
             Toggle("全局自动推进", isOn: globalBinding)
                 .font(.kpBody)
                 .disabled(model.busy)
-            DisclosureGroup(pausedStageCount == 0 ? "全部运行" : "\(pausedStageCount) 个阶段已暂停", isExpanded: $stagesOpen) {
+            DisclosureGroup(pausedStageCount == 0 ? "按阶段暂停与恢复 · 全部运行" : "按阶段暂停与恢复 · \(pausedStageCount) 个阶段已暂停", isExpanded: $stagesOpen) {
                 ForEach(Self.stageKeys, id: \.self) { stage in
                     Toggle("\(Labels.stage(stage))阶段", isOn: stageBinding(stage))
                         .font(.kpBody)

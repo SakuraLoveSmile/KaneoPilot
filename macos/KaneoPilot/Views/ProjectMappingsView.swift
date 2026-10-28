@@ -509,14 +509,13 @@ struct ProjectMappingsView: View {
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
-                Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text("成本上限（美元，留空不限）")
-                        .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                    TextField("0.5–100", text: draftBinding(id, \.cost))
-                        .textFieldStyle(.roundedBorder).font(.kpBody)
-                        .accessibilityLabel("成本上限，美元，留空不限")
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: Spacing.l) {
+                        budgetControls(id, draft)
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        budgetControls(id, draft)
+                    }
                 }
                 if !draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    Double(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines)).map({ (0.5...100).contains($0) }) != true {
@@ -576,6 +575,20 @@ struct ProjectMappingsView: View {
             TextField(placeholder, text: text, axis: multiline ? .vertical : .horizontal)
                 .textFieldStyle(.roundedBorder).font(.kpBody).accessibilityLabel(title)
                 .lineLimit(multiline ? 2...6 : 1...1)
+        }
+    }
+
+    /// 自动处理的预算三项（修复轮、时长、成本）：同一行，放不下时竖排（见 `automationEditor`）。
+    @ViewBuilder private func budgetControls(_ id: String, _ draft: AutomationDraft) -> some View {
+        Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
+        Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("成本上限（美元，留空不限）")
+                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+            TextField("0.5–100", text: draftBinding(id, \.cost))
+                .textFieldStyle(.roundedBorder).font(.kpBody)
+                .frame(width: 120)
+                .accessibilityLabel("成本上限，美元，留空不限")
         }
     }
 

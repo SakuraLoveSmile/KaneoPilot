@@ -379,28 +379,44 @@ private struct RawMarkdownView: NSViewRepresentable {
 struct TaskRelationsView: View {
     let relations: TaskRelations
     var onOpenTask: ((String) -> Void)? = nil
+    /// 任务信息分组内：层级由分组的字段行给出（见 `levelText`），这里只留关联任务的按钮与提示。
+    var inTaskInfo = false
     @EnvironmentObject private var model: AppViewModel
 
     var body: some View {
-        DetailSection(title: "任务层级") {
-            if let parent = relations.parent {
-                Label("二级任务 · 评审修复", systemImage: "arrow.turn.down.right")
-                    .font(.kpBody)
-                Text("来源原始任务").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                relatedRow(parent)
-            } else {
-                Label("原始任务", systemImage: "doc.text")
-                    .font(.kpBody)
+        if inTaskInfo {
+            relationActions
+        } else {
+            DetailSection(title: "任务层级") {
+                levelLabel
+                relationActions
             }
-            if !relations.children.isEmpty {
-                Text("关联二级任务（\(relations.children.count)）")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                ForEach(relations.children) { child in
-                    relatedRow(child).padding(.leading, Spacing.m)
-                }
-            } else if relations.parent == nil {
-                Text("暂未生成二级任务").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+        }
+    }
+
+    /// 任务信息分组的「层级」字段值。
+    static func levelText(_ relations: TaskRelations) -> String {
+        relations.parent == nil ? "原始任务" : "二级任务 · 评审修复"
+    }
+
+    private var levelLabel: some View {
+        Label(Self.levelText(relations), systemImage: relations.parent == nil ? "doc.text" : "arrow.turn.down.right")
+            .font(.kpBody)
+    }
+
+    @ViewBuilder private var relationActions: some View {
+        if let parent = relations.parent {
+            Text("来源原始任务").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            relatedRow(parent)
+        }
+        if !relations.children.isEmpty {
+            Text("关联二级任务（\(relations.children.count)）")
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            ForEach(relations.children) { child in
+                relatedRow(child).padding(.leading, Spacing.m)
             }
+        } else if relations.parent == nil {
+            Text("暂未生成二级任务").font(.kpSmall).foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -1021,6 +1037,41 @@ struct FlowRow: Layout {
     }
 }
 
+/// 任务信息分组里的交付与自动处理字段行；按钮、通知与折叠记录留在 `TaskAutomationSections`。
+struct TaskAutomationFieldRows: View {
+    let detail: TaskDetail
+
+    var body: some View {
+        if let delivery = detail.delivery {
+            FieldRow("交付状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
+        } else {
+            FieldRow("交付状态", "未开启")
+        }
+        if let automation = detail.automation {
+            FieldRow("自动处理状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
+            FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
+            if let summary = detail.engineFixSummary {
+                FieldRow("自动补救轮", "\(summary.used)/\(summary.max)")
+            }
+            if let reason = automation.lastSkip?.reason {
+                FieldRow("上次跳过原因", reason)
+            }
+        } else {
+            FieldRow("自动处理状态", "未开启")
+        }
+    }
+
+    private func deliveryState(_ state: String?) -> String {
+        switch state?.lowercased() {
+        case "open": return "PR 已创建"
+        case "merged": return "已合并"
+        case "closed": return "PR 已关闭"
+        case nil: return "尚未创建 PR"
+        default: return state ?? "—"
+        }
+    }
+}
+
 // 自动处理与交付放在既有概览页，保持五段导航不变。
 struct TaskAutomationSections: View {
     let detail: TaskDetail
@@ -1028,10 +1079,7 @@ struct TaskAutomationSections: View {
     var onRefreshDetail: (() -> Void)? = nil
     var body: some View {
         if let delivery = detail.delivery {
-            DetailSection(title: "交付") {
-                FieldGroup {
-                    FieldRow("状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
-                }
+            Group {
                 if let notice = delivery.autoMergeNotice {
                     Label {
                         Text(notice.reason)
@@ -1080,29 +1128,12 @@ struct TaskAutomationSections: View {
                     FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
                 }.font(.kpSmall)
             }
-        } else {
-            DetailSection(title: "交付") {
-                FieldGroup {
-                    FieldRow("状态", "未开启")
-                }
-                if let release = detail.release {
-                    TaskReleaseSection(detail: detail, release: release,
-                                       onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
-                }
-            }
+        } else if let release = detail.release {
+            TaskReleaseSection(detail: detail, release: release,
+                               onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
         }
         if let automation = detail.automation {
-            DetailSection(title: "自动处理") {
-                FieldGroup {
-                    FieldRow("状态", automation.manualTakeover == true ? "已转为人工处理" : "自动处理")
-                    FieldRow("修复轮", "\(automation.fixRound ?? 0)/\(automation.maxFixRounds ?? 2)")
-                    if let summary = detail.engineFixSummary {
-                        FieldRow("自动补救轮", "\(summary.used)/\(summary.max)")
-                    }
-                    if let reason = automation.lastSkip?.reason {
-                        FieldRow("上次跳过原因", reason)
-                    }
-                }
+            Group {
                 DisclosureGroup("预算与运行详情") {
                     FieldRow("接收时间", TimeFormat.fullString(automation.adoptedAt))
                     FieldRow("本段开始", TimeFormat.fullString(automation.segmentStartedAt))
@@ -1130,17 +1161,6 @@ struct TaskAutomationSections: View {
                     }.font(.kpSmall)
                 }
             }
-        } else {
-            DetailSection(title: "自动处理") { FieldGroup { FieldRow("状态", "未开启") } }
-        }
-    }
-    private func deliveryState(_ state: String?) -> String {
-        switch state?.lowercased() {
-        case "open": return "PR 已创建"
-        case "merged": return "已合并"
-        case "closed": return "PR 已关闭"
-        case nil: return "尚未创建 PR"
-        default: return state ?? "—"
         }
     }
     private func elapsed(_ at: String?) -> String? {

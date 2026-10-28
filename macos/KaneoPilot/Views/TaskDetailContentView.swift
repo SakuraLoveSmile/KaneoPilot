@@ -969,18 +969,8 @@ struct TaskOverviewTabView: View {
                     stageShortcutsSection
                 }
 
-                if let relations = detail.taskRelations {
-                    TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
-                }
-
-                // 4. Kaneo 关联信息
-                if hasKaneo {
-                    kaneoSection
-                }
-
-                TaskAutomationSections(detail: detail,
-                    onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
-                    onRefreshDetail: onRefreshDetail)
+                // 4. 任务信息：字段行并入一个分组容器，含按钮的操作区留在容器之外
+                taskInfoSection
 
                 // 5. 技术详情与长路径（可折叠）
                 technicalDetailsSection
@@ -1263,17 +1253,36 @@ struct TaskOverviewTabView: View {
         }
     }
 
-    private var kaneoSection: some View {
-        DetailSection(title: "Kaneo 关联") {
+    /// 概览的「任务信息」：字段行并入一个分组容器，含按钮的操作区留在容器之外。
+    private var taskInfoSection: some View {
+        DetailSection(title: "任务信息") {
             FieldGroup {
-                FieldRow("远端状态", detail.kaneoStatus.map(Self.kaneoStatusTitle))
-                FieldRow("最后核验", TimeFormat.fullString(detail.kaneoCheckedAt))
+                FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
+                if let relations = detail.taskRelations {
+                    FieldRow("层级", TaskRelationsView.levelText(relations))
+                }
+                if hasKaneo {
+                    kaneoFieldRows
+                }
+                TaskAutomationFieldRows(detail: detail)
+            }
+            if let relations = detail.taskRelations {
+                TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
             }
             if let url = detail.links?.kaneoTaskUrl, !url.isEmpty {
                 Button("打开 Kaneo 任务页面") { Workspace.open(url) }
                     .font(.kpSmall)
             }
+            TaskAutomationSections(detail: detail,
+                onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
+                onRefreshDetail: onRefreshDetail)
         }
+    }
+
+    /// 任务信息分组里的 Kaneo 字段行；「打开 Kaneo 任务页面」按钮留在分组之外（见 `taskInfoSection`）。
+    @ViewBuilder private var kaneoFieldRows: some View {
+        FieldRow("远端状态", detail.kaneoStatus.map(Self.kaneoStatusTitle))
+        FieldRow("最后核验", TimeFormat.fullString(detail.kaneoCheckedAt))
     }
 
     // MARK: - 技术详情（折叠区）
