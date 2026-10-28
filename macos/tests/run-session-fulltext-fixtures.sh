@@ -13,11 +13,11 @@ swiftc -O -whole-module-optimization -parse-as-library \
  "$HERE/session_fulltext_main.swift" -o "$FIXTURE/fixture"
 # Diagnostic branch only. No sampler: `sample` suspends the target and distorts the timing it measures.
 # The fixture reads the main thread's state from its own watchdog instead. Latency is reported, not gated.
-# Stage 2 C size comparison: attach mode only, 65 537 and 262 144 bytes, 3 runs each per attempt.
-# Only the first text install on a runner is cold, so the first size rotates with the run attempt.
+# Minimal text control: attach mode only, 1 024 and 1 048 586 bytes, 3 runs each per attempt.
+# Only the first process with text on a runner is cold, so the first size rotates with the run attempt.
 case "${GITHUB_RUN_ATTEMPT:-1}" in
- 2|4|6) ORDER="262144 65537" ;;
- *) ORDER="65537 262144" ;;
+ 2|4|6) ORDER="1048586 1024" ;;
+ *) ORDER="1024 1048586" ;;
 esac
 REPORTS="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/macos-reports"
 mkdir -p "$REPORTS"
