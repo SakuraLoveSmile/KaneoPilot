@@ -777,11 +777,16 @@ struct SessionConnectionBadge: View {
     var detail: String?
 
     var body: some View {
-        Label(display.label, systemImage: display.icon)
-            .font(.kpSmall)
-            .foregroundStyle(display.color)
-            .help(detail ?? display.label)
-            .accessibilityLabel("连接状态：\(display.label)")
+        Label {
+            Text(display.label)
+                .foregroundStyle(Color.primary)
+        } icon: {
+            Image(systemName: display.icon)
+                .foregroundStyle(display.color)
+        }
+        .font(.kpSmall)
+        .help(detail ?? display.label)
+        .accessibilityLabel("连接状态：\(display.label)")
     }
 }
 

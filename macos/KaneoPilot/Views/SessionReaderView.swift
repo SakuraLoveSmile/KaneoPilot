@@ -249,9 +249,15 @@ struct SessionReaderView: View {
 
     private var readingStatus: some View {
         let unavailable = store.interrupted || store.connection?.isUnavailable == true || store.session?.isUnavailable == true
-        return Label(store.selectedRunID == nil ? "未选择会话" : unavailable ? "读取不可用" : store.readFailure != nil ? "读取失败" : "定时读取 · 每 \(store.pollIntervalText) 秒",
-                     systemImage: unavailable ? "exclamationmark.circle" : store.readFailure != nil ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
-            .font(.kpSmall).foregroundStyle(unavailable ? Color.kpRed : store.readFailure != nil ? Color.kpOrange : Color.kpSecondary)
+        let failed = store.readFailure != nil
+        return Label {
+            Text(store.selectedRunID == nil ? "未选择会话" : unavailable ? "读取不可用" : failed ? "读取失败" : "定时读取 · 每 \(store.pollIntervalText) 秒")
+                .foregroundStyle(unavailable || failed ? Color.primary : Color.kpSecondary)
+        } icon: {
+            Image(systemName: unavailable ? "exclamationmark.circle" : failed ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
+                .foregroundStyle(unavailable ? Color.kpRed : failed ? Color.kpOrange : Color.kpSecondary)
+        }
+        .font(.kpSmall)
     }
 
     private var saveActionMenu: some View {
@@ -362,9 +368,14 @@ struct SessionReaderView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Spacing.l) {
                     DetailSection(title: "会话状态") {
-                        Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
-                            .font(.kpTitle)
-                            .foregroundStyle(statusColor)
+                        Label {
+                            Text(statusLabel(store.session))
+                                .foregroundStyle(Color.primary)
+                        } icon: {
+                            Image(systemName: store.displayStatusIcon)
+                                .foregroundStyle(statusColor)
+                        }
+                        .font(.kpTitle)
                         if let failure = store.displayFailureText {
                             Text(failure).font(.kpBody).lineLimit(3).help(failure)
                         } else if let detail = store.displayStatusDetail {
@@ -883,7 +894,7 @@ struct SessionMessageRow: View {
                     Text(summary)
                         .font(.kpLabel.monospaced()).textSelection(.enabled)
                 }
-                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.kpSecondary : Color.kpOrange } ?? Color.kpSecondary)
+                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.kpSecondary : Color.primary } ?? Color.kpSecondary)
                 if presentation.rawResult {
                     Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }

@@ -777,7 +777,7 @@ struct BoardColumnView: View {
             }
         }
         .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.kpSeparator, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.title)，\(tasks.count) 项任务")
     }
@@ -948,11 +948,11 @@ struct TaskCardView: View {
     private var progressLine: some View {
         if let release = task.release {
             Text("\(release.title) · \(release.reason)")
-                .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
+                .font(.kpSmall).foregroundStyle(Color.primary).lineLimit(2)
         } else if let notice = task.delivery?.autoMergeNotice {
             Text(notice.reason)
                 .font(.kpSmall)
-                .foregroundStyle(notice.needsAttention ? Color.kpOrange : Color.kpSecondary)
+                .foregroundStyle(notice.needsAttention ? Color.primary : Color.kpSecondary)
                 .lineLimit(2)
         } else if let progress = task.lastProgress, !progress.isEmpty {
             Text(progress).font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
@@ -984,13 +984,18 @@ struct TaskCardView: View {
                         .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
                         .lineLimit(1)
                     if AutomationPresentation.active(task.automation) {
-                        Text("自动").font(.kpSmall).foregroundStyle(Color.kpBlue)
+                        Text("自动").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     }
                     Spacer(minLength: 0)
-                    Text(badgeText)
-                        .font(.kpSmall)
-                        .foregroundStyle(substatusColor)
-                        .lineLimit(1)
+                    Label {
+                        Text(badgeText)
+                            .foregroundStyle(Color.primary)
+                            .lineLimit(1)
+                    } icon: {
+                        Image(systemName: "circle.fill")
+                            .foregroundStyle(substatusColor)
+                    }
+                    .font(.kpSmall)
                 }
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
@@ -1021,10 +1026,10 @@ struct TaskCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 isSelected ? Color.accentColor.opacity(0.10) : Color.kpWindow,
-                in: RoundedRectangle(cornerRadius: 8)
+                in: RoundedRectangle(cornerRadius: Radius.control)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: Radius.control)
                     .stroke(isFocused ? Color.accentColor : Color.kpSeparator,
                             lineWidth: isFocused ? 2 : 1)
             )
@@ -1047,12 +1052,17 @@ struct TaskCardView: View {
     @ViewBuilder
     private var supplement: some View {
         if let blocked = blockedText {
-            Label(blocked, systemImage: TaskBoardPresentation.isFailed(task)
-                  ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                .font(.kpSmall)
-                .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.kpRed : Color.kpOrange)
-                .lineLimit(2)
-                .accessibilityLabel("阻塞：\(blocked)")
+            Label {
+                Text(blocked)
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: TaskBoardPresentation.isFailed(task)
+                      ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.kpRed : Color.kpOrange)
+            }
+            .font(.kpSmall)
+            .lineLimit(2)
+            .accessibilityLabel("阻塞：\(blocked)")
         } else {
             switch column {
             case .inProgress:
@@ -1265,7 +1275,7 @@ struct BatchConfirmSheet: View {
                         .foregroundStyle(.primary)
                     Text("跳过 \(skippedCount) 项")
                         .font(.kpBody)
-                        .foregroundStyle(skippedCount > 0 ? Color.kpOrange : Color.kpSecondary)
+                        .foregroundStyle(skippedCount > 0 ? Color.primary : Color.kpSecondary)
                 }
 
                 if hasQueuedRequest {
@@ -1287,9 +1297,14 @@ struct BatchConfirmSheet: View {
                 }
 
                 if eligibleCount == 0 {
-                    Text("当前所选项全部受限，无法执行本次操作。")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpRed)
+                    Label {
+                        Text("当前所选项全部受限，无法执行本次操作。")
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundStyle(Color.kpRed)
+                    }
+                    .font(.kpSmall)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1326,7 +1341,7 @@ struct BatchConfirmSheet: View {
 
                                     Text(item.reason)
                                         .font(.kpSmall)
-                                        .foregroundStyle(item.isEligible ? Color.kpSecondary : Color.kpOrange)
+                                        .foregroundStyle(item.isEligible ? Color.kpSecondary : Color.primary)
                                 }
                             }
                             Spacer(minLength: 0)
@@ -1438,7 +1453,7 @@ struct BatchReportSheet: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Text(item.outcome.displayText)
                                     .font(.kpSmall)
-                                    .foregroundStyle(color(for: item.outcome))
+                                    .foregroundStyle(Color.primary)
                             }
                             Spacer(minLength: 0)
                         }
@@ -1469,12 +1484,16 @@ struct BatchReportSheet: View {
 
     private func statBadge(title: String, count: Int, color: Color) -> some View {
         HStack(spacing: Spacing.xs) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
             Text(title)
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
             Text("\(count)")
                 .font(.kpBody.weight(.semibold))
-                .foregroundStyle(color)
+                .foregroundStyle(Color.primary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, Spacing.xs)
@@ -1494,16 +1513,6 @@ struct BatchReportSheet: View {
             Image(systemName: "questionmark.circle.fill").foregroundStyle(Color.kpGray)
         case .unexecuted:
             Image(systemName: "minus.circle.fill").foregroundStyle(Color.kpGray)
-        }
-    }
-
-    private func color(for outcome: BatchItemOutcome) -> Color {
-        switch outcome {
-        case .succeeded: return Color.kpGreen
-        case .skipped: return Color.kpOrange
-        case .failed: return Color.kpRed
-        case .unconfirmed: return Color.kpGray
-        case .unexecuted: return Color.kpSecondary
         }
     }
 }

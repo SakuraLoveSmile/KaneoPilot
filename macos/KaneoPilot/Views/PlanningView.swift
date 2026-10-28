@@ -504,11 +504,16 @@ struct PlanningView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else if effectiveMethod == "spec_plan" {
-                Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
-                     + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpOrange)
-                    .fixedSize(horizontal: false, vertical: true)
+                Label {
+                    Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
+                         + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -702,14 +707,23 @@ struct PlanningView: View {
     private func resultBadge(for taskID: String) -> some View {
         if let result = startResults?.first(where: { $0.taskId == taskID }) {
             if result.succeeded {
-                Label(desktopSelected ? "已排队，等待 Desktop 领取" : (result.deduplicated == true ? "已在队列" : "已排队"),
-                      systemImage: result.deduplicated == true ? "clock" : "checkmark.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(result.deduplicated == true ? Color.kpOrange : Color.kpGreen)
+                Label {
+                    Text(desktopSelected ? "已排队，等待 Desktop 领取" : (result.deduplicated == true ? "已在队列" : "已排队"))
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: result.deduplicated == true ? "clock" : "checkmark.circle")
+                        .foregroundStyle(result.deduplicated == true ? Color.kpOrange : Color.kpGreen)
+                }
+                .font(.kpSmall)
             } else {
-                Label(result.code ?? "失败", systemImage: "xmark.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpRed)
+                Label {
+                    Text(result.code ?? "失败")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "xmark.circle")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
             }
         }
     }
@@ -723,9 +737,15 @@ struct PlanningView: View {
                 resultBadge(for: result.taskId ?? "")
             }
             if let error = result.error {
-                Text(error)
-                    .font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .textSelection(.enabled)
             }
             if let reason = result.waitingReason {
                 Text(reason)
@@ -844,9 +864,14 @@ private struct TodoRow: View {
                     }
                 }
                 if !item.isSelectable, let reason = item.blockedReason {
-                    Text(reason)
-                        .font(.kpSmall)
-                        .foregroundStyle(item.needsRepositoryConfiguration ? Color.kpRed : Color.kpOrange)
+                    Label {
+                        Text(reason)
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: item.needsRepositoryConfiguration ? "exclamationmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(item.needsRepositoryConfiguration ? Color.kpRed : Color.kpOrange)
+                    }
+                    .font(.kpSmall)
                 }
             }
             Spacer(minLength: 0)
@@ -894,12 +919,24 @@ private struct PrepareRow: View {
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             } else if let error = preparation.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .textSelection(.enabled)
             } else if preparation.needsPreparation {
-                Label("材料已变更，请重新准备后开始。", systemImage: "arrow.clockwise.circle")
-                    .font(.kpSmall).foregroundStyle(Color.kpOrange)
+                Label {
+                    Text("材料已变更，请重新准备后开始。")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
                 if !preparation.previousIssues.isEmpty {
                     Text("上次核验的问题（重新准备后更新）")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -920,11 +957,15 @@ private struct PrepareRow: View {
                 .font(.kpBody).lineLimit(1)
             Spacer()
             if let response = preparation.response {
-                Label(preparation.canStart ? "材料就绪" : "待处理问题",
-                      systemImage: preparation.canStart
-                        ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.kpSmall)
-                    .foregroundStyle(preparation.canStart ? Color.kpGreen : Color.kpOrange)
+                Label {
+                    Text(preparation.canStart ? "材料就绪" : "待处理问题")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: preparation.canStart
+                          ? "checkmark.circle" : "exclamationmark.triangle")
+                        .foregroundStyle(preparation.canStart ? Color.kpGreen : Color.kpOrange)
+                }
+                .font(.kpSmall)
                 if let sha = response.inputSha256 {
                     Text("材料 \(String(sha.prefix(12)))…")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -972,7 +1013,7 @@ private struct PrepareRow: View {
                         .foregroundStyle(Color.kpRed)
                     Text(issue.text)
                         .font(.kpSmall)
-                        .foregroundStyle(Color.kpRed)
+                        .foregroundStyle(Color.primary)
                     Spacer()
                     if let key = issue.exclusionKey {
                         Toggle("排除", isOn: Binding(

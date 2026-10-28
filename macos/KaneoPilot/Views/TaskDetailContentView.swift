@@ -241,8 +241,14 @@ private struct PlanAnswerCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Label("规划需要你确认", systemImage: "exclamationmark.triangle.fill")
-                .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpOrange)
+            Label {
+                Text("规划需要你确认")
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.kpOrange)
+            }
             ForEach(Array(store.clarification.questions.enumerated()), id: \.element.id) { index, question in
                 VStack(alignment: .leading, spacing: Spacing.s) {
                     Text("\(index + 1). \(question.title)\(question.required ? "（必答）" : "（可选）")")
@@ -286,8 +292,15 @@ private struct PlanAnswerCard: View {
                 .disabled(store.inputsLocked)
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 if store.isStale && !store.awaitingReceipt {
                     Text("问题或任务材料已经变化。原答案保留在此，请先复制；载入新问题会放弃这份过期草稿。")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -439,8 +452,14 @@ private struct ReviewResolutionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Label("Review 受阻", systemImage: "exclamationmark.triangle.fill")
-                .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpOrange)
+            Label {
+                Text("Review 受阻")
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.kpOrange)
+            }
             Text(store.resolution.summary).font(.kpBody)
                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             Button("查看完整评审报告") { onViewReport?() }
@@ -469,8 +488,15 @@ private struct ReviewResolutionCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }.font(.kpSmall)
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 Button("刷新任务状态") { Task { await store.reload() } }
                     .font(.kpSmall).disabled(store.submitting || store.preparing)
                 if store.isStale && !store.awaitingReceipt && !store.awaitingPreparationReceipt {
@@ -568,8 +594,15 @@ private struct ReviewEvidenceSheet: View {
                 }.frame(maxHeight: 140)
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 if store.isStale && !store.awaitingReceipt {
                     Text("此报告已失效，原输入保留。关闭并刷新任务，查看当前报告后再处理。")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -1147,7 +1180,7 @@ struct TaskOverviewTabView: View {
                     .foregroundStyle(detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange)
                 Text(detail.exception?.isFailed == true ? (detail.exception?.label ?? "任务失败") : (AutomationPresentation.title(detail.failureCode) ?? detail.exception?.label ?? "任务当前处于阻塞状态"))
                     .font(.kpBody.weight(.semibold))
-                    .foregroundStyle(detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange)
+                    .foregroundStyle(Color.primary)
             }
             if let reason = detail.blockedReason {
                 Text(reason)
@@ -1806,8 +1839,15 @@ private struct ExecutionAnswerCard: View {
                 }
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(Color.kpRed)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
             if let feedback = store.feedback {
                 Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -1833,7 +1873,14 @@ private struct ExecutionAnswerCard: View {
             }
             if store.question.state == "open" && !store.question.observerAlive {
                 HStack(spacing: Spacing.m) {
-                    Text("观察已中断").font(.kpSmall).foregroundStyle(Color.kpOrange)
+                    Label {
+                        Text("观察已中断")
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.kpOrange)
+                    }
+                    .font(.kpSmall)
                     Button("重新连接") { run { await store.reconnectObserver() } }
                         .font(.kpSmall).disabled(store.working || store.obsolete)
                 }

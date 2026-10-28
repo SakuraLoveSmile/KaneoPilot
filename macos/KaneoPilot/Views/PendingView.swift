@@ -213,16 +213,26 @@ struct PendingView: View {
     @ViewBuilder
     private func statusText(_ request: RequestItem) -> some View {
         if request.isLost {
-            Label("失联", systemImage: "exclamationmark.triangle.fill")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpRed)
-                .accessibilityLabel("状态：失联")
+            Label {
+                Text("失联")
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.kpRed)
+            }
+            .font(.kpSmall)
+            .accessibilityLabel("状态：失联")
         } else if request.status == "queued", request.isUnauthorizedPlan {
             // v2 §5.22.2：旧未授权 plan 请求 → 等待确认材料。
-            Label("等待确认材料", systemImage: "doc.badge.questionmark")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpOrange)
-                .accessibilityLabel("状态：等待确认材料")
+            Label {
+                Text("等待确认材料")
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "doc.badge.questionmark")
+                    .foregroundStyle(Color.kpOrange)
+            }
+            .font(.kpSmall)
+            .accessibilityLabel("状态：等待确认材料")
         } else if request.status == "queued", request.kind == "plan" {
             // v2 §4.7：已授权排队中的规划请求。
             Text("已排队等待规划 \(TimeFormat.waited(since: request.createdAt) ?? "")")
@@ -233,9 +243,14 @@ struct PendingView: View {
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
         } else if request.status == "failed" {
-            Text("失败")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpRed)
+            Label {
+                Text("失败")
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "xmark.octagon.fill")
+                    .foregroundStyle(Color.kpRed)
+            }
+            .font(.kpSmall)
         } else {
             Text(Labels.requestStatus(request.status))
                 .font(.kpSmall)
@@ -304,7 +319,7 @@ struct PendingView: View {
                 if let item = questionAttention(task), let preview = item.questionPreview {
                     Text("\(item.questionLabel) · \(preview.count)题")
                         .font(.kpSmall)
-                        .foregroundStyle(Color.kpOrange)
+                        .foregroundStyle(Color.primary)
                     Text(preview.firstTitle)
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)

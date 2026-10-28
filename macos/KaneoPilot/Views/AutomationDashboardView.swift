@@ -253,15 +253,20 @@ struct AutomationDashboardView: View {
                     VStack(alignment: .leading, spacing: Spacing.s) {
                         ForEach(doctorChecks) { check in
                             HStack(alignment: .top, spacing: Spacing.m) {
-                                Label(Labels.doctorCheck(check.name), systemImage: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
-                                    .frame(width: 148, alignment: .leading)
+                                Label {
+                                    Text(Labels.doctorCheck(check.name))
+                                } icon: {
+                                    Image(systemName: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
+                                        .foregroundStyle(check.skipped != true && check.ok != true ? Color.kpOrange : Color.kpSecondary)
+                                }
+                                .frame(width: 148, alignment: .leading)
                                 Text(check.skipped == true ? "未检查" : check.ok == true ? "通过" : check.ok == false ? "未通过" : "未确认")
                                     .frame(width: 44, alignment: .leading)
                                 Text(check.detail ?? "未提供详情")
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
                             }
-                            .foregroundStyle(check.skipped != true && check.ok != true ? Color.kpOrange : Color.kpSecondary)
+                            .foregroundStyle(check.skipped != true && check.ok != true ? Color.primary : Color.kpSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }.font(.kpSmall).padding(.top, Spacing.s)
@@ -273,7 +278,7 @@ struct AutomationDashboardView: View {
                         ForEach(engineRecords) { instance in
                             HStack(alignment: .top, spacing: Spacing.m) {
                                 Text(engineRecordTitle(instance)).frame(width: 100, alignment: .leading)
-                                    .foregroundStyle(instance.active == true ? Color.kpGreen : Color.kpSecondary)
+                                    .foregroundStyle(instance.active == true ? Color.primary : Color.kpSecondary)
                                 Text("PID \(instance.pid.map(String.init) ?? "—")")
                                     .monospacedDigit().frame(width: 96, alignment: .leading)
                                 Text("启动 \(TimeFormat.short(instance.startedAt)) · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")

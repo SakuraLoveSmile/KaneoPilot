@@ -105,12 +105,17 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.m) {
-            Label(stateLabel, systemImage: stateIcon)
-                .font(.kpSmall)
-                .foregroundStyle(stateColor)
-                .frame(width: 118, alignment: .leading)
-                .accessibilityLabel("会话状态：\(stateLabel)")
-                .help(session.isUnavailable ? "当前会话状态读取失败，不表示任务执行失败；打开会话后可刷新检查。" : stateLabel)
+            Label {
+                Text(stateLabel)
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: stateIcon)
+                    .foregroundStyle(stateColor)
+            }
+            .font(.kpSmall)
+            .frame(width: 118, alignment: .leading)
+            .accessibilityLabel("会话状态：\(stateLabel)")
+            .help(session.isUnavailable ? "当前会话状态读取失败，不表示任务执行失败；打开会话后可刷新检查。" : stateLabel)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.taskTitle(for: session.taskId))
                     .font(.kpBody)
@@ -452,10 +457,15 @@ struct SavedTaskRow: View {
             }
             Spacer(minLength: 0)
             if task.autoAdvancePaused == 1 {
-                Label("自动推进已暂停", systemImage: "pause.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpOrange)
-                    .accessibilityLabel("自动推进已暂停")
+                Label {
+                    Text("自动推进已暂停")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "pause.circle")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
+                .accessibilityLabel("自动推进已暂停")
             }
             Button("恢复") { confirmRestore() }
                 .disabled(model.busy)
@@ -494,10 +504,15 @@ struct TrashedSessionRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.m) {
-            Label(Labels.sessionState(session.state), systemImage: "trash")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpOrange)
-                .frame(width: 88, alignment: .leading)
+            Label {
+                Text(Labels.sessionState(session.state))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "trash")
+                    .foregroundStyle(Color.kpOrange)
+            }
+            .font(.kpSmall)
+            .frame(width: 88, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.taskTitle(for: session.taskId))
                     .font(.kpBody)

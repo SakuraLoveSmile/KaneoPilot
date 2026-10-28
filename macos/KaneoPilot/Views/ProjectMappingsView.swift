@@ -420,7 +420,7 @@ struct ProjectMappingsView: View {
                                             showUnmapConfirm = true
                                         }
                                         .buttonStyle(.bordered)
-                                        .foregroundStyle(Color.kpRed)
+                                        .foregroundStyle(Color.primary)
                                         .disabled(isSaving)
                                     }
 

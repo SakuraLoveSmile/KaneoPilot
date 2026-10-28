@@ -990,9 +990,6 @@ struct SettingsView: View {
             .font(.kpLabel)
             .foregroundStyle(Color.kpSecondary)
             .fixedSize(horizontal: false, vertical: true)
-        Text(execStatusText)
-            .font(.kpLabel)
-            .foregroundStyle(Color.kpSecondary)
     }
 
     /// pi_desktop 就绪态行（旧核心未返回 → 「未上报」）。
@@ -1317,10 +1314,6 @@ struct SettingsView: View {
             }
         }
         .accessibilityLabel("预设")
-
-        Text(execStatusText)
-            .font(.kpLabel)
-            .foregroundStyle(Color.kpSecondary)
     }
 
     @ViewBuilder
@@ -1357,6 +1350,9 @@ struct SettingsView: View {
             if savingExec {
                 ProgressView().controlSize(.small)
             }
+            Text(execStatusText)
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
             Spacer(minLength: 0)
         }
         .frame(minHeight: 40)
@@ -3044,7 +3040,7 @@ private struct PlusRoleEditor: View {
                         }
                     }
             } label: {
-                Text("高级设置（连接文件路径）")
+                Text("高级设置 · 连接文件路径（随\(roleName)配置保存）")
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
             }
@@ -3159,10 +3155,22 @@ private struct PlusRoleEditor: View {
                 .help("只读 pi-desktop-catalog：读取 provider/模型候选与 Plus 明确默认值；"
                       + "不写配置、不调用模型")
                 .accessibilityLabel("重新获取 \(roleName) Plus 列表")
-                Text(statusText)
+                if notice == nil {
+                    Text(statusText)
+                        .font(.kpSmall)
+                        .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Label {
+                        Text(statusText)
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.kpOrange)
+                    }
                     .font(.kpSmall)
-                    .foregroundStyle(notice == nil ? Color.kpSecondary : Color.kpOrange)
                     .fixedSize(horizontal: false, vertical: true)
+                }
                 Spacer(minLength: 0)
             }
         }
