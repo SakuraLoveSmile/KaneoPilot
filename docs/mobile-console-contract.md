@@ -95,10 +95,11 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 
 ### 任务列表
 
-- 页面结构不变：底部导航 总览 / 任务 / 需要你 / 连接，单列，16dp 边距。任务页顶部为 chips：全部 / 需要你 / 执行中 / 已排队 / 待评审 / 已完成，每个带计数。
+- 页面结构不变：底部导航 总览 / 任务 / 需要你 / 连接，单列，16dp 边距。任务页顶部为 chips：全部 / 需要你 / 执行中 / 已排队 / 待评审 / 已完成，每个带计数；chips 单行横向滚动（不换行），视觉高 32dp，点击区 ≥ 48dp。
 - 数据：一次无过滤的 `list-tasks` 取回全部活动任务，计数与分组在客户端计算。不新增 `list-tasks` 参数；判定缺字段时以核心补充为准（见下文待投影）。
 - 分组与顺序同 ui-spec §4.18：需要你处理（失败在阻塞之前）→ 已排队 → 执行中 → 待评审 → 最近。
-- 行：标题、状态（图标 + 文字）、最近进展、项目名 · 更新时间。阻塞与失败的原因以「阻塞：」「失败：」开头。
+- 行（扁平，不用卡片，行间为 outlineVariant 分隔线，上下内边距 12dp）：第一行为标题（左）与更新时间（右，`MM-dd HH:mm`）；第二行为状态徽标（24dp，与全站同一个 `StatusChip`）加项目名；第三行为原因，最多 2 行，取 `blocked_reason`，其次 `exception.detail`，再次 `last_progress`。阻塞与失败不再加「阻塞：」「失败：」前缀，徽标已说明类别。
+- 分组标题用 onSurfaceVariant 文字；「需要你处理」前加 8dp 的 tertiary 圆点，不用红字。
 
 ### 需要你
 
@@ -106,20 +107,25 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
   - **等待你回答**（执行问题）：题目顺序、单选/多选/自定义规则沿用既有约定；「保存草稿」调用 `save-execution-answers`，「提交回答」调用 `submit-execution-answers`，沿用同一 `operation_id`。结果不明时保留操作编号，不自动重发。
   - **待确认执行**：仅当当前页面身份下 `get-plan` 返回且通过 `expected_plan_sha256` 核验后，才显示「确认并安排执行」（`confirm-dispatch`）；否则只显示「查看计划」。
   - **阻塞、失败、执行端失联**：不显示动作，文字「该操作需在 Mac 上完成」。
+- 卡片徽标与等待时间：可回答按「等待你回答」，待确认执行按「待确认执行」；其余取同一任务在 `list-tasks` 中的行，按「状态词与徽标」条款显示（取 `exception.label`）；找不到该行时写「需人工处理」。卡片含项目名与「等待」时长（手机时钟减 `since`，下限 0，与复盘同一时长写法，如「等待 10 分钟」；无法解析时省略；只是显示提示，不属于复盘时长）。
+- 卡片版式（总览与「需要你」页共用）：第一行为徽标与「项目 · 等待」时长，第二行为任务标题（titleMedium），第三行为原因（bodyMedium，依次取 `question_preview`、`failure_reason`、`blocked_summary` 中第一个非空值），最后一行为动作。
 
 ### 执行复盘
 
 - 顶部只读提示：「只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。」
 - 既有字段直接显示：`list-sessions` / `get-session` 中的轮次、`message_count`、`last_message_at`、`last_checked_at`；`get-task.task.automation` 中的 `fix_round` 与 `max_fix_rounds`（修复轮 N/M，上限取返回值，不写死）；交付状态；`session-messages` 增量合并（既有规则）。
 - 待核心投影（`get-task.task.retrospective`，protocol §5.32）：执行用时、等你处理统计、时间轴、时间分布、重点、验证 X/Y、验证执行统计。未投影时显示「未汇总」；门控关闭时执行用时与等你处理同样显示「未汇总」（protocol §5.32.5）；不得由 `list-events`（最多 200 条）或消息正文推算。
-- 时长使用核心返回的秒数，在客户端按 ui-spec §4.18 的格式化规则显示，不以手机时钟与 `started_at` 相减。
+- 时长使用核心返回的秒数，在客户端按 ui-spec §4.18 的格式化规则显示，不以手机时钟与 `started_at` 相减。卡片的等待时长是手机时钟与 `since` 之差的显示提示，不属于复盘时长。
+- 关键指标（两列两行）：执行用时（附「不含等你处理」）、验证 X/Y（附「未核验 N 条」）、修复轮 N/M（无 `automation.fix_round` 时省略）、等你处理（「N 次」，附「合计 N 分钟」）；数值 titleLarge 半粗，标签 labelMedium。
+- 泳道：规划、派发、执行、等你处理、修复、评审六条，右侧写「N 分钟 · n%」；分布中「其他」秒数大于 0 时，在泳道之后追加「其他 N 分钟 · n%」一行（没有轨道）。不再单列「时间分布」块。时间窗（`cycle_started_at` 与 `ended_at`，缺 `ended_at` 时用 `as_of`）缺失时不画轨道，先写一行「时间轴未汇总」，右侧数字照常显示。
+- 顺序：标题行（「执行复盘」与右侧「已用时 N」）→ 关键指标 → 泳道 → 重点 → 验证与检查。
 - 工具消息默认折叠（既有规则）。
 
 ### 视觉与字体（Material 3）
 
-- 颜色只用 Material 3 `colorScheme` 角色（surface、onSurface、onSurfaceVariant、outline、primary、error），不硬编码十六进制。唯一例外是执行复盘的时间轴与时间分布：使用 ui-spec §4.18「类别色」表中的扩展令牌 `observeLane.*`，在主题中统一定义（与橙色同源），视图中不写死十六进制。橙色只作阻塞与需要你的图标色，以及「等你处理」类别令牌；文字保持 onSurface 并满足 4.5:1 对比度；失败用 error 色图标配文字。浅色与深色各一遍。
+- 颜色只用 Material 3 `colorScheme` 角色（surface、onSurface、onSurfaceVariant、outline、primary、tertiary、error）以及 success 扩展色，不硬编码十六进制，不使用 `observeLane.*` 令牌。执行复盘泳道按角色上色：规划、派发、执行、修复取 primary，等你处理、评审取 tertiary，其他取 outline；同色泳道靠标签、位置与右侧数字区分，不靠色相。橙色（tertiary）用于阻塞、需要你、等你处理与评审；文字保持 onSurface 并满足 4.5:1 对比度；失败用 error 色图标配文字。浅色与深色各一遍。
 - 字体角色：页面标题 titleLarge；区段标题 titleMedium；正文 bodyMedium；辅助与时间戳 bodySmall；指标数值 titleLarge（半粗）；chips 与按钮 labelLarge。字号随系统文字缩放。
-- 列表项可用 Material 3 的 OutlinedCard 或 ListItem（系统形状与高程），不自定义阴影和圆角。点击区 ≥ 48dp；间距取 8 / 12 / 16dp。
+- 需要你卡片用 Material 3 的 OutlinedCard，问题选项分组用 12dp 圆角的 Surface（1dp `outlineVariant` 描边），均沿用系统形状与高程，不自定义阴影和圆角；任务列表行不用卡片（见「任务列表」）。点击区 ≥ 48dp；间距取 8 / 12 / 16dp。
 
 ### 待核心投影（protocol §5.32，2026-10-23 冻结）
 
@@ -130,13 +136,30 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 
 ## 视觉与状态
 
-本节只补充视觉与状态表示，不改上文条款。任务列表、需要你卡片与执行复盘遵循上文「观测台界面增补」；本节的状态徽标用于详情状态与总览计数。实现位于 `android/app/src/main/java/com/sakurasep/kaneopilot/` 的 `Theme.kt`、`StatusStyle.kt`、`Timestamps.kt`、`RefreshGate.kt`、`ConsoleModel.kt` 与 `ConsoleUi.kt`，改动须同步本节。
+本节只补充视觉与状态表示，不改上文条款。任务列表、需要你卡片与执行复盘遵循上文「观测台界面增补」；本节的状态徽标用于详情状态与总览计数。实现位于 `android/app/src/main/java/com/sakurasep/kaneopilot/` 的 `Theme.kt`、`StatusStyle.kt`、`Observe.kt`、`Timestamps.kt`、`RefreshGate.kt`、`ConsoleModel.kt`、`Protocol.kt` 与 `ConsoleUi.kt`，改动须同步本节。
 
 - 主题：浅色与深色跟随系统（第 85 行）。Material 3 颜色角色（含 1.4 的 fixed 角色）逐项显式给出，不依赖基线回填；不使用动态取色。品牌色为墨蓝：浅色 primary `#2456A8`，深色 `#A9C6FF`。窗口背景随主题（`values/` 与 `values-night/`）。
-- 语义色：蓝（primary）= 执行中、已排队、规划中、派发中；橙（tertiary）= 需人工、评审中、阻塞、等待你回答、结果待核实；红（error）= 失败、执行端失联、离线；绿（success，扩展色）= 已完成、就绪、待确认执行；中性（onSurfaceVariant 配 surfaceVariant）= 待规划、已归档、未知值。状态徽标底色取对应容器色（primaryContainer、tertiaryContainer、errorContainer、successContainer、surfaceVariant），文字取对应 on 色，图标按下文「状态徽标」条款取色。颜色之外必须有文字与图标。
-- 异常：`exception.severity == "failed"` 显示为失败（红）。`exception` 与顶层 `plan_execution_hold` 已由 `list-tasks` 与 `get-task` 透出（`derive.task_summary` / `task_detail` 经 `project()` 原样保留），Android 只读，不自行推导。判定顺序：`severity == "failed"` 的异常为失败（红）。其余异常时，若 `display_status` 为「需人工」「执行端失联」或「阻塞」，保留该文字与颜色（需人工橙、执行端失联红、阻塞橙）；其他状态一律显示为「阻塞」（橙）。无异常时先看开放提问，再看 `display_status`。依据：`ui-spec.md` §4 详情状态牌优先展示核心异常语义，§5 为需人工、执行端失联另定颜色。
+- 语义色：蓝（primary）= 执行中、已排队、规划中、派发中；橙（tertiary）= 阻塞类（需人工处理、评审受阻、发送不明、监控异常、待修复、阻塞）、评审中、等待你回答、结果待核实；红（error）= 失败、执行端失联、离线；绿（success，扩展色）= 已完成、就绪、待确认执行；中性（onSurfaceVariant 配 surfaceVariant）= 待规划、已归档、未知值。状态徽标底色取对应容器色（primaryContainer、tertiaryContainer、errorContainer、successContainer、surfaceVariant），文字取对应 on 色，图标按下文「状态徽标」条款取色。颜色之外必须有文字与图标。
+- 异常：`exception.severity == "failed"` 显示为失败（红）。`exception` 与顶层 `plan_execution_hold` 已由 `list-tasks` 与 `get-task` 透出（`derive.task_summary` / `task_detail` 经 `project()` 原样保留），Android 只读，不自行推导。文字与颜色按下文「状态词与徽标」表取值：`severity == "failed"` 为失败（红）；其余异常取 `exception.label`，`label` 为空（旧核心）时回到「阻塞」（橙）；`executor_lost` 为执行端失联（红）。无异常时先看开放提问，再看 `display_status`。依据：`ui-spec.md` §4 详情状态牌优先展示核心异常语义，§5 为需人工、执行端失联另定颜色。
 - 待确认执行：核心 `display_status` 为「待确认执行」（ready 且 `plan_execution_hold` 为真，`derive.py`）。
-- 等待你回答：`execution_question.state` 为 `open` 时显示「等待你回答」，位于 `exception` 之后、`display_status` 之前；已答复或已关闭的提问不改变状态。
+- 等待你回答：`execution_question.state` 为 `open` 时，异常 `kind` 为 `manual_block` 的任务按 `answerable` 显示「等待你回答」或「等待你在 Plus 中回答」，取代「需人工处理」；无异常的任务显示「等待你回答」。其他异常（如评审受阻）仍显示自身的 `label`。已答复或已关闭的提问不改变状态。
+- 状态词与徽标（自上而下取第一条命中的规则；图标与颜色由 `severity`、`kind` 决定，不靠标签文字反查）：
+
+| 来源 | 文字 | 图标 / 颜色 |
+|---|---|---|
+| `severity == "failed"` | `exception.label`，为空时「失败」 | failed / 红 |
+| `kind == "manual_block"`，`execution_question.state == "open"` 且 `answerable` | 等待你回答 | alert / 橙 |
+| 同上，`answerable` 为假 | 等待你在 Plus 中回答 | alert / 橙 |
+| `kind == "manual_block"` 其他 | 需人工处理 | blocked / 橙 |
+| `review_blocked` | 评审受阻 | blocked / 橙 |
+| `send_unknown` | 发送不明 | blocked / 橙 |
+| `observation_blocked` | 监控异常 | blocked / 橙 |
+| `review_rejected` | 待修复 | blocked / 橙 |
+| `executor_lost` | 执行端失联 | blocked / 红 |
+| 其他 `kind`（如 `release_blocked`、`parent_closeout_blocked`，label 由核心动态给出） | `exception.label`，为空时「阻塞」 | blocked / 橙 |
+| 无异常，开放提问 | 等待你回答 | alert / 橙 |
+| 无异常，无开放提问 | 按下方映射表取 `display_status` | 按映射表 |
+
 - 状态映射（镜像 `ui-spec.md` §5；键为核心 `display_status`，缺失时用 `status`）：
 
 | 键 | 文字 | 图标 | 颜色 |
@@ -155,29 +178,31 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 | 已完成 / done、completed | 已完成 | done | 绿 |
 | 就绪 / ready | 就绪 | done | 绿 |
 | 待确认执行 | 待确认执行 | done | 绿 |
-| 开放执行提问（`execution_question`） | 等待你回答 | alert | 橙 |
+| 开放执行提问（`execution_question`，见「状态词与徽标」） | 等待你回答 | alert | 橙 |
 | 已归档（核心 `display_status`，`done` 且 `save_state=archived`） | 已归档 | idle | 中性 |
 | 其他非空值 | 原值显示 | unknown | 中性 |
 
 - 图标：自绘矢量（`res/drawable`，VectorDrawable，仅 path），导航 4 个、状态 9 个、操作 2 个（返回、刷新），24dp 视口，2dp 线宽，圆角端点，单色着色。不引入图标字体或新依赖（第 94 行）。
 - 底栏：选中项为 primaryContainer 胶囊。「需要你」标签旁以徽标显示条数，0 时不显示，徽标不并入标签文字。任务详情中高亮来源页（打开详情前所在的底栏项）。
-- 顶栏：列表页为「KaneoPilot」，边距 16dp；详情页小字「任务详情」，大字为任务标题（2 行省略），返回按钮在左（边距 4dp），连接行缩进 60dp 与标题对齐。返回与刷新为图标按钮，内容描述分别为「返回」「刷新」。顶栏为 surface 色；列表页加底线，详情页不加（页签行已有分隔线）。不用 tonal 提色。
+- 顶栏：列表页标题为页面名（总览、任务、需要你、连接），边距 16dp，标题加 heading 语义；应用名只留在「连接」页底部的版本行；详情页小字「任务详情」，大字为任务标题（2 行省略），返回按钮在左（边距 4dp），连接行缩进 60dp 与标题对齐。返回与刷新为图标按钮，内容描述分别为「返回」「刷新」。顶栏为 surface 色；列表页加底线，详情页不加（页签行已有分隔线）。不用 tonal 提色。
 - 页签：可横向滚动；选中项为主色文字加 3dp 下划线，仍为可点击文字（第 86 行）。
 - 连接状态行：在线为绿色圆点加「已连接 · 更新于 HH:mm:ss」；离线（已有错误原因）为红色圆叉图标（16dp，error 色，复用 `ic_status_failed`）加「离线 · 写操作已停用 · 更新于 …」；导航切换后、尚无结果时为中性灰点（outline 色）加「正在读取…」（有更新时间时后缀「· 更新于 …」），不显示离线。
-- 横幅：离线（errorContainer，20dp 圆叉图标，显示原因，附「重试」）在上；结果待核实（tertiaryContainer，20dp 圆感叹图标，附「查看」跳到连接页）在下，两者可同时显示；其他错误为 errorContainer，通知为 primaryContainer，这两类均无图标。「配对成功」通知 5 秒后自动消失；其他通知不自动消失。
+- 横幅：离线（errorContainer，20dp 圆叉图标，显示原因，附「重试」）在上；结果待核实（tertiaryContainer，20dp 圆感叹图标，附「查看」跳到连接页）在下，两者可同时显示；其他错误为 errorContainer，通知为 primaryContainer，这两类均无图标。「配对成功」通知 5 秒后自动消失；其他通知不自动消失。总览页在自动推进已暂停时另显示一条横幅：tertiaryContainer 底，20dp 图标 `ic_status_alert`，标题「自动推进已暂停」，说明「运行中的会话继续执行。」，右侧文字按钮「恢复自动推进」（启用条件与页尾按钮相同）；横幅只在总览页出现，位于离线与结果待核实横幅之后。
 - 刷新：前台每 5 秒的后台轮询不显示加载态；遇到进行中的刷新则跳过。用户动作等待当前刷新结束后执行，同一时刻最多排队一次，连续请求合并。仅用户动作显示加载进度，位于顶栏底边 2dp，不占布局。
 - 返回键：详情页返回列表；非总览返回总览；总览交还系统默认。写操作进行中不拦截。
 - 哈希：等宽字体，每 8 位空格分组，允许断行；显示全量值，「复制」取原值。
 - 未知状态中性显示核心原值（与 `Labels.kt` 的兜底一致）。
-- 状态徽标：文字 12sp（labelMedium），圆角 8dp，图标 16dp。文字取 on 色；图标按语义取色（中性 outline、蓝 primary、橙 tertiary、红 error、绿 success）。列表卡高 24dp；详情「任务状态」与总览计数高 28dp。
+- 状态徽标：文字 12sp（labelMedium），圆角 8dp，图标 16dp。文字取 on 色；图标按语义取色（中性 onSurfaceVariant、蓝 primary、橙 tertiary、红 error、绿 success）。任务列表行的徽标高 24dp；详情状态行与总览计数高 28dp。
 - 任务列表与需要你卡片的结构、状态表示及动作范围按上文「观测台界面增补」；总览中的需要你卡片采用同一组件。
-- 任务总览按看板、任务、请求分组（组名 12sp，组内徽标换行，间距 8dp）。计数映射（取自画布 after-overview）：待规划、待办为中性、idle；进行中（看板与请求）、规划中、执行中为蓝、running；待评审为橙、review；需人工为橙、blocked；「阻塞 / 失败」（看板汇总）为橙、blocked，汇总项的颜色与单个状态「失败」的红色不同；失败为红、failed；成功为绿、done；失联为红、blocked，与「执行端失联」一致（设计板未示）；已取消为中性、idle（设计板未示）；其余未知值为中性、unknown。看板计数按核心看板列统计，任务计数按核心任务 `status` 统计；移动端不按异常改写计数。任务卡片徽标含异常（见「异常」条款），两者可不一致。
-- 自动推进区：标题 16sp，说明 12sp，按钮在右（48dp 高，「暂停自动推进」或「恢复自动推进」）。说明：已开启为「已开启：暂停后，运行中的会话继续执行。」；已暂停为「已暂停：运行中的会话继续执行。」（设计板未示）。未连接时说明为 16sp「连接后查看状态」，按钮满宽并禁用。
+- 总览顺序：已暂停横幅 →「需要你 · N」（最多 8 张，卡片版式见「需要你」）→「看板」一行 →「更多统计」（折叠）→ 自动推进（页尾）。
+- 任务总览：「看板」一行常显；「任务」「请求」两组折叠为「更多统计：任务状态 N 类 · 请求状态 N 类」（N 取返回的键数）。展开后按看板、任务、请求分组（组名 12sp，组内徽标换行，间距 8dp）；折叠行的展开或收起状态用 `stateDescription` 报给 TalkBack。计数映射（取自画布 after-overview）：待规划、待办为中性、idle；进行中（看板与请求）、规划中、执行中为蓝、running；待评审为橙、review；需人工为橙、blocked；「阻塞 / 失败」（看板汇总）为橙、blocked，汇总项的颜色与单个状态「失败」的红色不同；失败为红、failed；成功为绿、done；失联为红、blocked，与「执行端失联」一致（设计板未示）；已取消为中性、idle（设计板未示）；其余未知值为中性、unknown。看板计数按核心看板列统计，任务计数按核心任务 `status` 统计；移动端不按异常改写计数。任务卡片徽标含异常（见「异常」条款），两者可不一致。
+- 自动推进区：位于总览页尾，标题 16sp，说明 12sp，按钮在右（48dp 高，描边按钮 `OutlinedButton`，「暂停自动推进」或「恢复自动推进」）。说明：已开启为「已开启：暂停后，运行中的会话继续执行。」；已暂停为「已暂停：运行中的会话继续执行。」（设计板未示）。未连接时说明为 16sp「连接后查看状态」，按钮满宽并禁用。
 - 对话框：宽 320dp（设计板为 328dp，采用 320dp），容器为 surfaceContainerHigh，圆角 28dp；取消类与确认类按钮同为文字按钮，右对齐。破坏性确认（移除本机连接）的确认按钮用 error 色。
 - 执行轮次：当前轮次为 primaryContainer 填充按钮，前缀「● 」；其余为描边按钮，文字 onSurface。「加载更多消息」为描边按钮。「移除本机连接」为描边按钮，文字 error 色，不满宽。
 - 执行记录：当前会话状态为运行中时，状态文字为主色；工具消息的退出码，0 为 success 色，非 0 为 error 色（设计板只示 0，非 0 为本契约的选择）。消息正文为空的非工具消息显示「（无正文）」占位（次要色文字）。
 - 时间：详情概览的「更新于」与记录的「时间」按手机本地时区显示为 `yyyy-MM-dd HH:mm:ss`，源值为核心返回的带偏移 ISO 8601；无法解析时原样显示。顶栏「更新于」仍为 `HH:mm:ss`。
 - 详情概览：「当前进度」与「等待原因」文字相同时只显示「等待原因」一行。
+- 详情概览（有开放问答时）：状态行加「项目 · 已等待」时长（与复盘同一写法；执行问题取 `execution_question.wait_seconds`，不用手机时钟；规划问题没有该字段，只写项目）。标题行为「回答 N 个问题」与右侧「已答 X/N」（规划问题标题仍为「规划待回答」）。每题的选项收进 12dp 圆角分组，单选用单选按钮、多选用复选框，无选项的题（自由回答）不显示「单选 / 多选」标记；「自定义回答」为分组最后一行，单选题选中该行才展开输入框；「清除此题答案」放在题标题行右侧，只在该题已有答案时出现。表单末尾为一行 bodySmall 提示（「还差第 N 题 · 断线后可继续填写草稿，恢复连接后再提交」，全部答完时只留后半句），其下并排「保存草稿到 Mac」（描边）与「提交答案」（实心），各占一半宽。之后是「任务信息」卡（项目、任务编号、更新于）。按钮文字、启用条件与确认对话框不变。
 
 ## 构建与分工
 

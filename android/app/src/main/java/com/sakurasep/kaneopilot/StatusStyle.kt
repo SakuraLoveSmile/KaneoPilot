@@ -10,35 +10,52 @@ internal enum class StatusIcon { Idle, Running, Queued, Review, Blocked, Alert, 
 
 internal data class StatusStyle(val label: String, val icon: StatusIcon, val tone: StatusTone)
 
-/** Labels that already name the block. A blocked exception keeps them, and any other label reads 阻塞. */
-private val BLOCK_LABELS = setOf("需人工", "阻塞", "执行端失联")
-
 /**
- * Badge for a task summary, following contract 「视觉与状态」. A core exception decides first: failed severity is 失败,
- * and any other exception keeps a block label (需人工, 执行端失联, 阻塞) or else reads 阻塞. Without an exception, an open
- * execution question comes next, then the core `display_status`, falling back to the raw `status`.
+ * Badge for a task summary, following contract 「视觉与状态」「状态词与徽标」. A core exception decides first, by its
+ * severity, kind and label. With no exception, an open execution question reads 等待你回答; the core `display_status`
+ * comes last and falls back to the raw `status`.
  */
 internal fun taskStatusStyle(task: JSONObject): StatusStyle {
+    val question = task.optJSONObject("execution_question")
+    task.optJSONObject("exception")?.let { return exceptionStatusStyle(it, question) }
+    if (question?.text("state") == "open") return StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
     val label = Labels.taskStatus(task.text("display_status").ifBlank { task.text("status", "状态未知") })
-    task.optJSONObject("exception")?.let { exception ->
-        if (exception.text("severity") == "failed") return StatusStyle("失败", StatusIcon.Failed, StatusTone.Danger)
-        val named = knownStatusStyle(label)?.takeIf { label in BLOCK_LABELS }
-        return named ?: StatusStyle("阻塞", StatusIcon.Blocked, StatusTone.Warning)
-    }
-    if (task.optJSONObject("execution_question")?.text("state") == "open") {
-        return StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
-    }
     return knownStatusStyle(label) ?: StatusStyle(label, StatusIcon.Unknown, StatusTone.Neutral)
 }
 
 /**
- * Attention items are core `needs_user` tasks, so they read 需人工, as core `display_status` does. An item carries
- * no exception severity, so a needs_user task with a failed exception also reads 需人工 here, while the task list shows
- * 失败. An open execution question keeps its own label.
+ * Severity decides failed. A manual block turns into a question while its execution question is open, and the other
+ * kinds read the words the contract fixes. A kind the contract does not name keeps the core label, or reads 阻塞 when
+ * the core sent none.
  */
-internal fun attentionStatusStyle(item: JSONObject): StatusStyle =
-    if (item.text("reason_code") == "execution_question") StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
-    else StatusStyle("需人工", StatusIcon.Blocked, StatusTone.Warning)
+private fun exceptionStatusStyle(exception: JSONObject, question: JSONObject?): StatusStyle {
+    val label = exception.text("label")
+    val kind = exception.text("kind")
+    val open = question?.text("state") == "open"
+    val answerable = question?.optBoolean("answerable") == true
+    return when {
+        exception.text("severity") == "failed" -> StatusStyle(label.ifBlank { "失败" }, StatusIcon.Failed, StatusTone.Danger)
+        kind == "manual_block" && open && answerable -> StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
+        kind == "manual_block" && open -> StatusStyle("等待你在 Plus 中回答", StatusIcon.Alert, StatusTone.Warning)
+        kind == "manual_block" -> StatusStyle("需人工处理", StatusIcon.Blocked, StatusTone.Warning)
+        kind == "review_blocked" -> StatusStyle("评审受阻", StatusIcon.Blocked, StatusTone.Warning)
+        kind == "send_unknown" -> StatusStyle("发送不明", StatusIcon.Blocked, StatusTone.Warning)
+        kind == "observation_blocked" -> StatusStyle("监控异常", StatusIcon.Blocked, StatusTone.Warning)
+        kind == "review_rejected" -> StatusStyle("待修复", StatusIcon.Blocked, StatusTone.Warning)
+        kind == "executor_lost" -> StatusStyle("执行端失联", StatusIcon.Blocked, StatusTone.Danger)
+        else -> StatusStyle(label.ifBlank { "阻塞" }, StatusIcon.Blocked, StatusTone.Warning)
+    }
+}
+
+/**
+ * Badge for an attention row. An answer or a plan confirmation keeps its own label, which the row's actions decide. Any
+ * other row reads the same task from `list-tasks`, and reads 需人工处理 while that row is not loaded.
+ */
+internal fun attentionStatusStyle(item: JSONObject, task: JSONObject?): StatusStyle = when (attentionAction(item)) {
+    AttentionAction.Answer -> StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
+    AttentionAction.Plan -> StatusStyle("待确认执行", StatusIcon.Done, StatusTone.Success)
+    AttentionAction.MacOnly -> task?.let { taskStatusStyle(it) } ?: StatusStyle("需人工处理", StatusIcon.Blocked, StatusTone.Warning)
+}
 
 /**
  * Badge for an overview count, keyed by the text [Labels.count] returns. The status labels reuse [knownStatusStyle].

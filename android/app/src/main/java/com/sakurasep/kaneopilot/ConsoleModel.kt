@@ -29,6 +29,7 @@ data class ConsoleState(
     val connection: Connection? = null, val online: Boolean = false, val loading: Boolean = false,
     val error: String? = null, val notice: String? = null, val updatedAt: String? = null,
     val overview: JSONObject? = null, val tasks: List<JSONObject> = emptyList(), val attention: List<JSONObject> = emptyList(),
+    val attentionTasks: List<JSONObject> = emptyList(),
     val task: JSONObject? = null, val plan: JSONObject? = null, val review: JSONObject? = null,
     val sessions: List<JSONObject> = emptyList(), val session: JSONObject? = null,
     val sessionReadError: String? = null,
@@ -154,6 +155,17 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
     }
     private suspend fun query(client: MobileApi, type: String, args: JSONObject = JSONObject()) = withContext(Dispatchers.IO) { client.query(type, args) }
 
+    /**
+     * Attention rows carry no exception, so their cards read the same tasks from `list-tasks` into their own field.
+     * `tasks` belongs to the 任务 page, so a skipped or failed read here cannot empty it. A failed read leaves the cards on their fallback.
+     */
+    private suspend fun readAttentionTasks(client: MobileApi, attention: List<JSONObject>): List<JSONObject> {
+        if (attention.isEmpty()) return emptyList()
+        return try { query(client, "list-tasks").rows("tasks") }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { emptyList() }
+    }
+
     /** One read of the current page. Progress is shown only for user-initiated reads. */
     private suspend fun load(userInitiated: Boolean) {
         val ticket = epochs.page
@@ -205,9 +217,16 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
                     "记录" -> next = next.copy(events = query(client, "list-events", json("task_id" to snapshot.taskId, "limit" to 100)).rows("events"))
                 }
             } else when (snapshot.destination) {
-                "总览" -> next = next.copy(overview = query(client, "overview"), attention = query(client, "attention-list").rows("items"))
+                "总览" -> {
+                    val overview = query(client, "overview")
+                    val attention = query(client, "attention-list").rows("items")
+                    next = next.copy(overview = overview, attention = attention, attentionTasks = readAttentionTasks(client, attention))
+                }
                 "任务" -> next = next.copy(tasks = query(client, "list-tasks").rows("tasks"))
-                "需要你" -> next = next.copy(attention = query(client, "attention-list").rows("items"))
+                "需要你" -> {
+                    val attention = query(client, "attention-list").rows("items")
+                    next = next.copy(attention = attention, attentionTasks = readAttentionTasks(client, attention))
+                }
                 "连接" -> query(client, "overview")
             }
             if (epochs.page == ticket) {

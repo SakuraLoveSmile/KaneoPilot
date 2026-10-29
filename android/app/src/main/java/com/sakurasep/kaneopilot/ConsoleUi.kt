@@ -6,11 +6,13 @@ import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -34,7 +36,11 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -66,6 +72,9 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                 if (s.pending.isNotEmpty()) Banner("结果待核实：${s.pending.size} 项操作", colors.tertiaryContainer, colors.onTertiaryContainer,
                     detail = "将查询原回执，不会自动重发；核实前暂不可再次操作。", action = "查看" to { model.navigate("连接") }, icon = R.drawable.ic_status_alert)
                 s.notice?.let { Banner(it, colors.primaryContainer, colors.onPrimaryContainer) }
+                if (s.taskId == null && s.destination == "总览" && autoAdvancePaused(s.overview) == true) Banner("自动推进已暂停", colors.tertiaryContainer, colors.onTertiaryContainer,
+                    detail = "运行中的会话继续执行。", action = "恢复自动推进" to { model.setPaused() }, icon = R.drawable.ic_status_alert,
+                    actionEnabled = s.online && !s.writing && s.pending.isEmpty())
                 val notice = s.notice
                 LaunchedEffect(notice) {
                     if (notice == PAIRED_NOTICE) { delay(PAIRED_NOTICE_MS); model.setNotice(null) }
@@ -75,7 +84,7 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                     "连接" -> ConnectionScreen(model, onScan)
                     "总览" -> OverviewScreen(model)
                     "任务" -> ObserveTaskList(s.tasks, s.attention.map { it.text("task_id") }.toSet(), model::openTask)
-                    "需要你" -> AttentionList(s.attention, model::openTask)
+                    "需要你" -> AttentionList(s.attention, s.attentionTasks, model::openTask)
                 }
             }
         }
@@ -103,8 +112,9 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                 }
                 Column(Modifier.weight(1f).padding(start = if (detail) 8.dp else 0.dp, top = if (detail) 4.dp else 0.dp, bottom = 8.dp)) {
                     if (detail) Text("任务详情", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                    Text(if (detail) (s.task?.let { it.text("title").ifBlank { it.text("task_id") } } ?: "任务") else "KaneoPilot",
-                        style = MaterialTheme.typography.titleLarge, maxLines = if (detail) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (detail) (s.task?.let { it.text("title").ifBlank { it.text("task_id") } } ?: "任务") else s.destination,
+                        style = MaterialTheme.typography.titleLarge, maxLines = if (detail) 2 else 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.semantics { heading() })
                 }
                 IconButton(onClick = { model.refreshSoon() }, enabled = s.connection != null && !s.loading) {
                     Icon(painterResource(R.drawable.ic_action_refresh), contentDescription = "刷新")
@@ -144,7 +154,7 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
     }
 }
 
-@Composable private fun Banner(text: String, container: Color, content: Color, detail: String? = null, action: Pair<String, () -> Unit>? = null, icon: Int? = null) {
+@Composable private fun Banner(text: String, container: Color, content: Color, detail: String? = null, action: Pair<String, () -> Unit>? = null, icon: Int? = null, actionEnabled: Boolean = true) {
     Surface(color = container, contentColor = content) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             icon?.let {
@@ -156,16 +166,21 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                 detail?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             }
             action?.let { (label, onClick) ->
-                TextButton(onClick = onClick, colors = ButtonDefaults.textButtonColors(contentColor = content), modifier = Modifier.heightIn(min = 48.dp)) { Text(label) }
+                TextButton(onClick = onClick, enabled = actionEnabled, colors = ButtonDefaults.textButtonColors(contentColor = content), modifier = Modifier.heightIn(min = 48.dp)) { Text(label) }
             }
         }
     }
 }
 @Composable private fun Empty(message: String, modifier: Modifier = Modifier) { Text(message, modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-@Composable private fun Section(title: String, spacing: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
+@Composable private fun Section(title: String, spacing: Dp = 8.dp, trailing: String? = null, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(spacing)) {
-            Text(title, style = MaterialTheme.typography.titleMedium); content()
+            if (trailing == null) Text(title, style = MaterialTheme.typography.titleMedium)
+            else Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(trailing, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            content()
         }
     }
 }
@@ -183,7 +198,6 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
         CopyButton(value)
     }
 } }
-private fun status(task: JSONObject): String = taskStatusStyle(task).label
 @Composable private fun CopyButton(value: String) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -194,7 +208,7 @@ private fun status(task: JSONObject): String = taskStatusStyle(task).label
     val colors = MaterialTheme.colorScheme
     val status = LocalKaneoStatusColors.current
     val (container, content, iconTint) = when (style.tone) {
-        StatusTone.Neutral -> Triple(colors.surfaceVariant, colors.onSurfaceVariant, colors.outline)
+        StatusTone.Neutral -> Triple(colors.surfaceVariant, colors.onSurfaceVariant, colors.onSurfaceVariant)
         StatusTone.Info -> Triple(colors.primaryContainer, colors.onPrimaryContainer, colors.primary)
         StatusTone.Warning -> Triple(colors.tertiaryContainer, colors.onTertiaryContainer, colors.tertiary)
         StatusTone.Danger -> Triple(colors.errorContainer, colors.onErrorContainer, colors.error)
@@ -218,57 +232,80 @@ private fun StatusIcon.drawable(): Int = when (this) {
     StatusIcon.Done -> R.drawable.ic_status_done
     StatusIcon.Unknown -> R.drawable.ic_status_unknown
 }
-@Composable private fun AttentionList(items: List<JSONObject>, onOpen: (String) -> Unit) {
+@Composable private fun AttentionList(items: List<JSONObject>, tasks: List<JSONObject>, onOpen: (String) -> Unit) {
+    val byId = remember(tasks) { tasks.associateBy { it.text("task_id") } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("需要你 · ${items.size}", style = MaterialTheme.typography.titleLarge) }
         if (items.isEmpty()) item { Empty("当前没有需要你处理的事项") }
         items(items, key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item ->
-            AttentionCard(item) { onOpen(item.text("task_id")) }
+            AttentionCard(item, byId[item.text("task_id")]) { onOpen(item.text("task_id")) }
         }
     }
 }
-/** Auto-advance control. Connected: title and state on the left, toggle on the right. Before the first read: offline copy. */
+/** 自动推进（总览页尾）：连接后左侧为标题与状态，右侧为描边按钮；读到状态前为禁用按钮与离线说明。 */
 @Composable private fun AutoAdvanceCard(paused: Boolean?, enabled: Boolean, onToggle: () -> Unit) {
     val toggleLabel = if (paused == true) "恢复自动推进" else "暂停自动推进"
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         if (paused == null) Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("自动推进", style = MaterialTheme.typography.titleMedium)
             Text("连接后查看状态", style = MaterialTheme.typography.bodyLarge)
-            Button(onClick = onToggle, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(toggleLabel) }
+            OutlinedButton(onClick = onToggle, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("auto-advance-toggle")) { Text(toggleLabel) }
         } else Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f)) {
                 Text("自动推进", style = MaterialTheme.typography.titleMedium)
                 Text(if (paused) "已暂停：运行中的会话继续执行。" else "已开启：暂停后，运行中的会话继续执行。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Button(onClick = onToggle, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text(toggleLabel) }
+            OutlinedButton(onClick = onToggle, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("auto-advance-toggle")) { Text(toggleLabel) }
         }
     }
 }
+/** 总览（契约「总览」）：需要你在前（最多 8 张），看板一行，更多统计折叠，自动推进在页尾。暂停横幅见 KaneoPilotApp。 */
 @Composable private fun OverviewScreen(model: ConsoleModel) {
     val s = model.state
-    val paused = s.overview?.optJSONObject("paused")?.opt("global") as? Boolean
+    val paused = autoAdvancePaused(s.overview)
+    val byId = remember(s.attentionTasks) { s.attentionTasks.associateBy { it.text("task_id") } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { AutoAdvanceCard(paused, enabled = s.online && paused != null && !s.writing && s.pending.isEmpty(), onToggle = model::setPaused) }
-        s.overview?.optJSONObject("counts")?.let { counts -> item { Section("任务总览", spacing = 12.dp) {
-            listOf("board" to "看板", "tasks" to "任务", "requests" to "请求").forEach { (key, label) ->
-                counts.optJSONObject(key)?.let { values ->
-                    val names = values.keys().asSequence().toList()
-                    if (names.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            names.forEach { name ->
-                                val text = Labels.count(key, name)
-                                StatusChip(countStatusStyle(text).copy(label = "$text ${values.optInt(name)}"), large = true)
-                            }
-                        }
-                    }
-                }
-            }
-        } } }
         item { Text("需要你 · ${s.attention.size}", style = MaterialTheme.typography.titleLarge) }
         if (s.attention.isEmpty()) item { Empty(if (s.connection == null) "先到「连接」配对你的 Mac" else "当前没有待处理事项") }
-        items(s.attention.take(8), key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item -> AttentionCard(item) { model.openTask(item.text("task_id")) } }
+        items(s.attention.take(8), key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item ->
+            AttentionCard(item, byId[item.text("task_id")]) { model.openTask(item.text("task_id")) }
+        }
+        s.overview?.optJSONObject("counts")?.let { counts -> item { BoardCounts(counts) } }
+        item { AutoAdvanceCard(paused, enabled = s.online && paused != null && !s.writing && s.pending.isEmpty(), onToggle = model::setPaused) }
+    }
+}
+
+/** 已暂停状态（overview.paused.global）；未读到时为 null。 */
+private fun autoAdvancePaused(overview: JSONObject?): Boolean? = overview?.optJSONObject("paused")?.opt("global") as? Boolean
+
+/** 任务总览：「看板」一行；「任务」「请求」折叠在「更多统计」后面，展开状态用 stateDescription 报出。 */
+@Composable private fun BoardCounts(counts: JSONObject) {
+    var expanded by remember { mutableStateOf(false) }
+    Section("任务总览", spacing = 12.dp) {
+        CountRow("看板", "board", counts.optJSONObject("board"))
+        TextButton(onClick = { expanded = !expanded }, modifier = Modifier.heightIn(min = 48.dp).semantics { stateDescription = if (expanded) "已展开" else "已收起" }) {
+            Text("更多统计：任务状态 ${counts.optJSONObject("tasks")?.length() ?: 0} 类 · 请求状态 ${counts.optJSONObject("requests")?.length() ?: 0} 类")
+        }
+        if (expanded) {
+            CountRow("任务", "tasks", counts.optJSONObject("tasks"))
+            CountRow("请求", "requests", counts.optJSONObject("requests"))
+        }
+    }
+}
+
+/** 一组计数徽标（看板、任务、请求）；没有数据时整组不显示。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable private fun CountRow(label: String, kind: String, values: JSONObject?) {
+    val names = values?.keys()?.asSequence()?.toList().orEmpty()
+    if (values != null && names.isNotEmpty()) Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            names.forEach { name ->
+                val text = Labels.count(kind, name)
+                StatusChip(countStatusStyle(text).copy(label = "$text ${values.optInt(name)}"), large = true)
+            }
+        }
     }
 }
 @Composable private fun ConnectionScreen(model: ConsoleModel, onScan: () -> Unit) {
@@ -336,21 +373,50 @@ private fun StatusIcon.drawable(): Int = when (this) {
         Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) colors.primary else colors.onSurfaceVariant)
     }
 }
+/** 任务详情概览（契约「任务详情概览」）：状态行与进度；有开放问答时表单接在状态行之后；最后是任务信息。 */
 @Composable private fun TaskOverview(model: ConsoleModel) {
     val task = model.state.task ?: return
+    val execution = task.optJSONObject("execution_question")
+    val planning = task.optJSONObject("plan_clarification")
+    val asking = execution != null || planning != null
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { Section("任务状态") {
-            Column { Text("状态", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant); StatusChip(taskStatusStyle(task), large = true) }
-            LabelValue("项目", task.text("project_name")); LabelValue("任务编号", task.text("task_id"))
-            val progress = task.text("last_progress")
-            val blocked = task.text("blocked_summary").ifBlank { task.text("blocked_reason") }
-            if (progress != blocked) LabelValue("当前进度", progress)
-            LabelValue("等待原因", blocked)
-            LabelValue("失败原因", task.text("failure_reason")); LabelValue("更新于", localStamp(task.text("updated_at")))
-            if (!task.optBoolean("read_only") && (task.optJSONArray("allowed_actions")?.length() ?: 0) > 0) Text("手机仅开放回答问题、确认执行；其他操作请在 Mac 处理。", style = MaterialTheme.typography.bodySmall)
-        } }
-        if (task.optJSONObject("plan_clarification") != null) item { QuestionsEditor(model, false) }
-        if (task.optJSONObject("execution_question") != null) item { QuestionsEditor(model, true) }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TaskStatusLine(task, execution?.intOrNull("wait_seconds"))
+                TaskProgress(task, showWaiting = !asking)
+            }
+        }
+        if (planning != null) item { QuestionsEditor(model, false) }
+        if (execution != null) item { QuestionsEditor(model, true) }
+        item { TaskInfoCard(task) }
+    }
+}
+
+/** 状态行：徽标加「项目 · 已等待 N 分钟」；执行问题的等待秒数取核心 wait_seconds，不用手机时钟。 */
+@Composable private fun TaskStatusLine(task: JSONObject, waitSeconds: Int?) {
+    val waited = RetroFormat.duration(waitSeconds)?.let { "已等待 $it" }
+    val detail = listOfNotNull(task.text("project_name").ifBlank { null }, waited).joinToString(" · ")
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        StatusChip(taskStatusStyle(task), large = true)
+        if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** 状态行之后的进度：当前进度（与等待原因相同时省略）、等待原因（表单显示时由问题预览代替）、失败原因。 */
+@Composable private fun TaskProgress(task: JSONObject, showWaiting: Boolean) {
+    val blocked = task.text("blocked_summary").ifBlank { task.text("blocked_reason") }
+    val progress = task.text("last_progress")
+    if (progress != blocked) LabelValue("当前进度", progress)
+    if (showWaiting) LabelValue("等待原因", blocked)
+    LabelValue("失败原因", task.text("failure_reason"))
+}
+
+/** 任务信息卡：项目、任务编号、更新于，以及手机只开放回答与确认的边界提示。 */
+@Composable private fun TaskInfoCard(task: JSONObject) {
+    Section("任务信息") {
+        LabelValue("项目", task.text("project_name")); LabelValue("任务编号", task.text("task_id"))
+        LabelValue("更新于", localStamp(task.text("updated_at")))
+        if (!task.optBoolean("read_only") && (task.optJSONArray("allowed_actions")?.length() ?: 0) > 0) Text("手机仅开放回答问题、确认执行；其他操作请在 Mac 处理。", style = MaterialTheme.typography.bodySmall)
     }
 }
 @Composable private fun PlanScreen(model: ConsoleModel) {
@@ -463,51 +529,96 @@ private fun StatusIcon.drawable(): Int = when (this) {
     val locked = s.writing || s.pending.isNotEmpty() || !active
     val drafts = s.drafts[key].orEmpty()
     val questions = block.rows("questions")
+    val answered = questions.count { question ->
+        val answer = drafts[question.text("id")] ?: AnswerDraft()
+        (answer.optionIds.isNotEmpty() || answer.text.isNotBlank()) && questionComplete(question, answer, execution)
+    }
+    val firstIncomplete = questions.indexOfFirst { question -> !questionComplete(question, drafts[question.text("id")] ?: AnswerDraft(), execution) }
     var confirm by remember(key) { mutableStateOf(false) }
-    Section(if (execution) "执行中提问" else "规划待回答") {
+    Section(if (execution) "回答 ${questions.size} 个问题" else "规划待回答", spacing = 16.dp, trailing = "已答 $answered/${questions.size}") {
         if (!active) Text(block.text("detail").ifBlank { "当前问题不可提交，请在 Mac 核对状态" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
         questions.forEachIndexed { index, question ->
             val id = question.text("id")
-            val answer = drafts[id] ?: AnswerDraft()
-            val options = question.rows("options")
-            val multi = execution && question.optBoolean("multi_select")
-            val allowCustom = question.optBoolean("allow_custom", execution)
-            Text("${index + 1}. ${question.text("title")}${if (question.optBoolean("required")) " *" else ""}", style = MaterialTheme.typography.titleSmall)
-            question.text("description").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            options.forEach { option ->
-                val optionId = option.text("id")
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = !locked) {
-                    val next = if (multi) { if (optionId in answer.optionIds) answer.optionIds - optionId else answer.optionIds + optionId } else setOf(optionId)
-                    model.updateAnswer(key, id, answer.copy(optionIds = next, text = if (execution && !multi) "" else answer.text))
-                }) {
-                    if (multi) Checkbox(checked = optionId in answer.optionIds, onCheckedChange = null, enabled = !locked)
-                    else RadioButton(selected = optionId in answer.optionIds, onClick = null, enabled = !locked)
-                    Column(Modifier.weight(1f).padding(vertical = 12.dp)) {
-                        Text(option.text("label")); option.text("description").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
-            }
-            if (!execution && options.isNotEmpty() && allowCustom) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = !locked) {
-                model.updateAnswer(key, id, answer.copy(optionIds = setOf("custom")))
-            }) { RadioButton(selected = "custom" in answer.optionIds, onClick = null, enabled = !locked); Text("自定义方案", Modifier.padding(vertical = 12.dp)) }
-            if (options.isEmpty() || allowCustom && (execution || "custom" in answer.optionIds)) {
-                OutlinedTextField(value = answer.text, onValueChange = { text -> model.updateAnswer(key, id, answer.copy(text = text,
-                    optionIds = if (execution && !multi && text.isNotBlank()) emptySet() else answer.optionIds)) },
-                    enabled = !locked, label = { Text(if (options.isEmpty()) "你的回答" else "自定义回答") }, minLines = 2, modifier = Modifier.fillMaxWidth())
-            }
-            if (answer.optionIds.isNotEmpty() || answer.text.isNotBlank()) TextButton(onClick = { model.updateAnswer(key, id, AnswerDraft()) }, enabled = !locked) { Text("清除此题答案") }
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            QuestionBlock(question, index, drafts[id] ?: AnswerDraft(), execution, locked, key) { model.updateAnswer(key, id, it) }
         }
         if (!execution) OutlinedTextField(value = s.supplements[key].orEmpty(), onValueChange = { model.updateSupplement(key, it) }, enabled = !locked,
             label = { Text("补充说明（选填）") }, minLines = 2, modifier = Modifier.fillMaxWidth())
         if (active) {
-            Text("断线后可继续填写草稿，恢复连接后再提交。草稿在当前运行内存中保留。", style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { model.answer(execution, false) }, enabled = !locked && s.online, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存草稿到 Mac") }
-            Button(onClick = { confirm = true }, enabled = !locked && s.online && answersComplete(questions, drafts, execution), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("提交答案") }
+            val lead = if (firstIncomplete >= 0) "还差第 ${firstIncomplete + 1} 题 · " else ""
+            Text("${lead}断线后可继续填写草稿，恢复连接后再提交。草稿在当前运行内存中保留。", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { model.answer(execution, false) }, enabled = !locked && s.online, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存草稿到 Mac") }
+                Button(onClick = { confirm = true }, enabled = !locked && s.online && answersComplete(questions, drafts, execution), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("提交答案") }
+            }
         }
     }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false }, modifier = Modifier.width(DialogWidth), title = { Text("提交当前答案？") }, text = { Text(if (execution) "答案将交给当前执行轮次继续处理。" else "答案和补充说明将用于继续规划。") },
         confirmButton = { TextButton(onClick = { confirm = false; model.answer(execution, true) }) { Text("提交") } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text("取消") } })
+}
+
+/** 一道题（契约「任务详情概览」3–5 条）：标题、必答、单选 / 多选（有选项时）；说明；选项分组；自定义回答。有答案时标题行右侧可清除。 */
+@Composable private fun QuestionBlock(question: JSONObject, index: Int, answer: AnswerDraft, execution: Boolean, locked: Boolean, draftKey: String, onAnswer: (AnswerDraft) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val id = question.text("id")
+    val options = question.rows("options")
+    val multi = execution && question.optBoolean("multi_select")
+    val allowCustom = question.optBoolean("allow_custom", execution)
+    // 执行题的自定义回答不写入选项 id（服务端只认选项 id），选中状态只在本地记住。
+    var customOpen by remember(draftKey, id) { mutableStateOf(false) }
+    val customRow = allowCustom && options.isNotEmpty() && !multi
+    val customSelected = if (execution) customOpen || (answer.optionIds.isEmpty() && answer.text.isNotBlank()) else "custom" in answer.optionIds
+    val textVisible = options.isEmpty() || allowCustom && (multi || customSelected)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${index + 1}. ${question.text("title")}${if (question.optBoolean("required")) " *" else ""}",
+                style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            if (options.isNotEmpty()) Text(if (multi) "多选" else "单选", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            if (answer.optionIds.isNotEmpty() || answer.text.isNotBlank()) TextButton(onClick = { customOpen = false; onAnswer(AnswerDraft()) },
+                enabled = !locked, modifier = Modifier.heightIn(min = 48.dp)) { Text("清除此题答案") }
+        }
+        question.text("description").takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        if (options.isNotEmpty()) Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(colors.surface).border(1.dp, colors.outlineVariant, RoundedCornerShape(12.dp))) {
+            options.forEachIndexed { position, option ->
+                val optionId = option.text("id")
+                if (position > 0) HorizontalDivider(color = colors.outlineVariant)
+                ChoiceRow(option.text("label"), option.text("description").takeIf { it.isNotBlank() }, selected = optionId in answer.optionIds, multi = multi, enabled = !locked) {
+                    customOpen = false
+                    val next = if (multi) { if (optionId in answer.optionIds) answer.optionIds - optionId else answer.optionIds + optionId } else setOf(optionId)
+                    onAnswer(answer.copy(optionIds = next, text = if (execution && !multi) "" else answer.text))
+                }
+            }
+            if (customRow) {
+                HorizontalDivider(color = colors.outlineVariant)
+                ChoiceRow(if (execution) "自定义回答" else "自定义方案", null, selected = customSelected, multi = false, enabled = !locked) {
+                    if (execution) {
+                        customOpen = true
+                        onAnswer(answer.copy(optionIds = emptySet()))
+                    } else onAnswer(answer.copy(optionIds = setOf("custom")))
+                }
+            }
+        }
+        if (textVisible) OutlinedTextField(value = answer.text, enabled = !locked, minLines = 2, modifier = Modifier.fillMaxWidth(),
+            onValueChange = { text -> onAnswer(answer.copy(text = text, optionIds = if (execution && !multi && text.isNotBlank()) emptySet() else answer.optionIds)) },
+            label = { Text(if (options.isEmpty()) "你的回答" else "自定义回答") })
+    }
+}
+
+/** 选项行：整行可点，最小高 48dp；选中用 secondaryContainer 底；单选为 RadioButton，多选为 Checkbox。 */
+@Composable private fun ChoiceRow(label: String, description: String?, selected: Boolean, multi: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .selectable(selected = selected, enabled = enabled, role = if (multi) Role.Checkbox else Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (multi) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+        else RadioButton(selected = selected, onClick = null, enabled = enabled)
+        Column(Modifier.weight(1f).padding(start = 4.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            description?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
 }
 
 @Composable private fun Markdown(text: String) {
@@ -526,81 +637,74 @@ private fun StatusIcon.drawable(): Int = when (this) {
 
 // MARK: 观测台：任务页 chips 与分组、需要你卡片、执行复盘（ui-spec §4.18，安卓契约「观测台界面增补」）
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable private fun ObserveTaskList(tasks: List<JSONObject>, attentionIds: Set<String>, onOpen: (String) -> Unit) {
     var chip by remember { mutableStateOf(ObserveChip.All) }
     val groups = Observe.grouped(tasks, chip, attentionIds)
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
         if (tasks.isEmpty()) item { Empty("暂无活跃任务") } else {
             item {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     ObserveChip.values().forEach { option ->
                         FilterChip(selected = chip == option, onClick = { chip = option },
-                            label = { Text("${option.label} ${Observe.count(option, tasks, attentionIds)}") },
-                            modifier = Modifier.heightIn(min = 48.dp))
+                            label = { Text("${option.label} ${Observe.count(option, tasks, attentionIds)}") })
                     }
                 }
             }
             if (groups.isEmpty()) item { Empty("当前没有符合「${chip.label}」的任务") }
             groups.forEach { (group, members) ->
                 item(key = "group-${group.name}") {
-                    Text("${group.label} · ${members.size}", style = MaterialTheme.typography.labelLarge,
-                        color = if (group == ObserveGroup.NeedsYou) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (group == ObserveGroup.NeedsYou) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary))
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("${group.label} · ${members.size}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                items(members, key = { it.text("task_id") }) { task -> ObserveTaskRow(task) { onOpen(task.text("task_id")) } }
+                itemsIndexed(members, key = { _, task -> task.text("task_id") }) { index, task ->
+                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ObserveTaskRow(task) { onOpen(task.text("task_id")) }
+                }
             }
         }
     }
 }
 
+/** 任务页的一行：扁平，行间分隔线由列表画。第一行标题与更新时间，第二行状态徽标与项目，第三行原因（最多 2 行，不加「阻塞：」「失败：」前缀）。 */
 @Composable private fun ObserveTaskRow(task: JSONObject, onClick: () -> Unit) {
-    val failed = Observe.failed(task)
-    val blocked = !failed && Observe.exception(task) != null
-    // 原因与 macOS 一致：先 blocked_reason，其次 exception.detail；原因文字统一为正文色，颜色只作用于图标。
-    val cause = task.text("blocked_reason").ifBlank { Observe.exception(task)?.optString("detail").orEmpty() }
-    val reason = when {
-        failed -> if (cause.isBlank()) "失败" else "失败：$cause"
-        blocked -> if (cause.isBlank()) "阻塞" else "阻塞：$cause"
-        else -> task.text("last_progress").ifBlank { null }
-    }
-    val glyph = when { failed -> "✕"; blocked -> "▲"; else -> "●" }
-    val glyphColor = when {
-        failed -> MaterialTheme.colorScheme.error
-        blocked -> observeLanes().waiting
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Card(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = onClick)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    // 原因与 macOS 一致：先 blocked_reason，其次 exception.detail，再次 last_progress。
+    val reason = task.text("blocked_reason").ifBlank { Observe.exception(task)?.text("detail").orEmpty() }.ifBlank { task.text("last_progress") }
+    val project = task.text("project_name")
+    Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(task.text("title").ifBlank { task.text("task_id") }, style = MaterialTheme.typography.titleMedium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(glyph, style = MaterialTheme.typography.labelLarge, color = glyphColor)
-                Text(status(task), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-            }
-            reason?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            Text(listOfNotNull(task.text("project_name").ifBlank { null }, RetroFormat.dayTime(task.text("updated_at"))).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            RetroFormat.dayTime(task.text("updated_at"))?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusChip(taskStatusStyle(task))
+            if (project.isNotBlank()) Text(project, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
 /** 需要你卡片：按类型显示；仅回答与查看计划可在手机打开任务，其余只读并提示到 Mac 处理。 */
-@Composable private fun AttentionCard(item: JSONObject, onOpen: () -> Unit) {
+@Composable private fun AttentionCard(item: JSONObject, task: JSONObject?, onOpen: () -> Unit) {
     val action = attentionAction(item)
-    val label = when {
-        action == AttentionAction.Answer -> "等待你回答"
-        action == AttentionAction.Plan -> "待确认执行"
-        item.text("failure_reason").isNotBlank() -> "失败"
-        else -> "阻塞或执行端失联"
-    }
+    val project = item.text("project_name").ifBlank { task?.text("project_name").orEmpty() }
+    val waited = RetroFormat.waitedSeconds(item.text("since"))?.let { RetroFormat.duration(it) }?.let { "等待 $it" }
+    val detail = item.text("question_preview").ifBlank { item.text("failure_reason").ifBlank { item.text("blocked_summary") } }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(item.text("title").ifBlank { item.text("task_id") }, style = MaterialTheme.typography.titleMedium)
-            Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-            val detail = item.text("question_preview").ifBlank { item.text("failure_reason").ifBlank { item.text("blocked_summary") } }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusChip(attentionStatusStyle(item, task))
+                val meta = listOfNotNull(project.ifBlank { null }, waited).joinToString(" · ")
+                if (meta.isNotBlank()) Text(meta, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(item.text("title").ifBlank { task?.text("title").orEmpty() }.ifBlank { item.text("task_id") }, style = MaterialTheme.typography.titleMedium)
             if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodyMedium)
             when (action) {
                 AttentionAction.MacOnly -> Text("该操作需在 Mac 上完成", style = MaterialTheme.typography.bodySmall,
@@ -612,27 +716,66 @@ private fun StatusIcon.drawable(): Int = when (this) {
     }
 }
 
+/** 执行复盘（契约「执行复盘」）：标题行带已用时；关键指标 4 项；泳道（右侧写时长与占比）；重点；验证执行统计。只读。 */
 @Composable private fun RetrospectiveSection(task: JSONObject) {
     val retro = task.optJSONObject("retrospective")
-    Section("执行复盘") {
+    Section("执行复盘", trailing = "已用时 ${RetroFormat.duration(retro?.intOrNull("elapsed_seconds")) ?: "未汇总"}") {
         Text("只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。", style = MaterialTheme.typography.bodySmall)
-        LabelValue("已用时", RetroFormat.duration(retro?.intOrNull("elapsed_seconds")) ?: "未汇总")
-        LabelValue("执行用时", executionValue(task, retro))
-        LabelValue("等你处理", waitingValue(retro))
-        task.optJSONObject("automation")?.let { automation ->
-            automation.intOrNull("fix_round")?.let { fix ->
-                LabelValue("修复轮", "$fix" + (automation.intOrNull("max_fix_rounds")?.let { "/$it" } ?: ""))
-            }
-        }
+        KeyMetrics(task, retro)
         if (retro == null) {
             Empty("复盘数据未汇总")
         } else {
             LaneTimeline(retro)
-            Distribution(retro)
             Highlights(retro)
             Verify(retro)
         }
     }
+}
+
+/** 关键指标，两列排列：执行用时、验证、修复轮（没有 fix_round 时整项省略）、等你处理。没有数据写「未汇总」。 */
+@Composable private fun KeyMetrics(task: JSONObject, retro: JSONObject?) {
+    val metrics = listOfNotNull(
+        KeyMetric("执行用时", executionValue(task, retro), "不含等你处理"),
+        verifyMetric(retro),
+        fixMetric(task),
+        waitingMetric(retro),
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        metrics.chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                pair.forEach { metric -> KeyMetricCell(metric, Modifier.weight(1f)) }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable private fun KeyMetricCell(metric: KeyMetric, modifier: Modifier) {
+    Column(modifier) {
+        Text(metric.label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(metric.value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        metric.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+}
+
+private data class KeyMetric(val label: String, val value: String, val note: String? = null)
+
+private fun verifyMetric(retro: JSONObject?): KeyMetric {
+    val verify = retro?.optJSONObject("verify") ?: return KeyMetric("验证", "未汇总")
+    return KeyMetric("验证", "${verify.intOrNull("passed") ?: 0}/${verify.intOrNull("total") ?: 0}", "未核验 ${verify.intOrNull("unconfirmed") ?: 0} 条")
+}
+
+private fun fixMetric(task: JSONObject): KeyMetric? {
+    val automation = task.optJSONObject("automation") ?: return null
+    val fix = automation.intOrNull("fix_round") ?: return null
+    return KeyMetric("修复轮", "$fix" + (automation.intOrNull("max_fix_rounds")?.let { "/$it" }.orEmpty()))
+}
+
+/** 等你处理：门控关闭（没有 waiting 对象）写「未汇总」；否则 N 次，附合计时长。 */
+private fun waitingMetric(retro: JSONObject?): KeyMetric {
+    val waiting = retro?.optJSONObject("waiting") ?: return KeyMetric("等你处理", "未汇总")
+    val total = RetroFormat.duration(waiting.intOrNull("total_seconds"))
+    return KeyMetric("等你处理", "${waiting.intOrNull("count") ?: 0} 次", total?.let { "合计 $it" })
 }
 
 /** 派发阶段尚未进入 running，不显示执行用时；门控关闭时核心给出 null，显示「未汇总」。 */
@@ -642,78 +785,80 @@ private fun executionValue(task: JSONObject, retro: JSONObject?): String = when 
     else -> RetroFormat.duration(retro?.intOrNull("exec_seconds")) ?: "未汇总"
 }
 
-private fun waitingValue(retro: JSONObject?): String {
-    val waiting = retro?.optJSONObject("waiting") ?: return "未汇总"
-    val total = RetroFormat.duration(waiting.intOrNull("total_seconds"))
-    return "${waiting.intOrNull("count") ?: 0} 次" + (total?.let { " · 合计 $it" } ?: "")
-}
-
 private data class TimelineSegment(val lane: String, val start: Long, val end: Long, val idle: Boolean)
 
+/** 泳道：规划、派发、执行、等你处理、修复、评审六条，右侧写「N 分钟 · n%」；「其他」有时长时追加一行文字（没有轨道）。 */
 @Composable private fun LaneTimeline(retro: JSONObject) {
-    val palette = observeLanes()
     val track = MaterialTheme.colorScheme.outlineVariant
     val cycleStart = RetroFormat.epochMillis(retro.text("cycle_started_at"))
     val windowEnd = RetroFormat.epochMillis(retro.text("ended_at")) ?: RetroFormat.epochMillis(retro.text("as_of"))
-    if (cycleStart == null || windowEnd == null) {
-        Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        return
+    val origin = cycleStart ?: 0L
+    val span = ((windowEnd ?: origin) - origin).coerceAtLeast(1L).toFloat()
+    val segments = timelineSegments(retro, cycleStart, windowEnd)
+    val rows = retro.rows("distribution")
+    val gated = retro.optJSONObject("waiting") == null
+    val timed = cycleStart != null && windowEnd != null
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // 时间窗缺失时不画轨道，只写一行「时间轴未汇总」；右侧数字照常显示。
+        if (!timed) Text("时间轴未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        listOf("plan", "dispatch", "execute", "waiting", "repair", "review").forEach { lane ->
+            val color = laneColor(lane)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(RetroFormat.laneLabel(lane), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(64.dp))
+                // 时间窗缺失或门控关闭时不画空轨道，右侧数字照常标注（门控关闭的等你处理写「未汇总」）。
+                if (!timed || (lane == "waiting" && gated)) Spacer(Modifier.weight(1f))
+                else Canvas(Modifier.weight(1f).height(16.dp)) {
+                    val y = size.height / 2
+                    drawLine(track, Offset(0f, y), Offset(size.width, y), strokeWidth = 2f)
+                    segments.filter { it.lane == lane }.forEach { segment ->
+                        val x0 = ((segment.start - origin) / span * size.width).coerceIn(0f, size.width)
+                        val x1 = ((segment.end - origin) / span * size.width).coerceAtLeast(x0 + 2f).coerceAtMost(size.width)
+                        val box = Size(x1 - x0, size.height)
+                        if (segment.idle) {
+                            drawRoundRect(color, Offset(x0, 0f), box, CornerRadius(4f),
+                                style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))))
+                        } else {
+                            drawRoundRect(color, Offset(x0, 0f), box, CornerRadius(4f))
+                        }
+                    }
+                }
+                Text(laneShare(rows.firstOrNull { it.text("lane") == lane }), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(min = 112.dp).padding(start = 8.dp))
+            }
+        }
+        rows.firstOrNull { it.text("lane") == "other" && (it.intOrNull("seconds") ?: 0) > 0 }?.let { other ->
+            Text("其他 ${laneShare(other)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
-    val segments = retro.optJSONObject("segments")?.rows("items").orEmpty().mapNotNull { segment ->
+}
+
+/** 泳道色块：起止时间都能解析时才画；时间轴缺失时返回空列表，右侧数字照常显示。 */
+private fun timelineSegments(retro: JSONObject, cycleStart: Long?, windowEnd: Long?): List<TimelineSegment> {
+    if (cycleStart == null || windowEnd == null) return emptyList()
+    return retro.optJSONObject("segments")?.rows("items").orEmpty().mapNotNull { segment ->
         val start = RetroFormat.epochMillis(segment.text("started_at")) ?: return@mapNotNull null
         val end = RetroFormat.epochMillis(segment.text("ended_at")) ?: windowEnd
         TimelineSegment(segment.text("lane"), start, end, segment.optBoolean("idle"))
     }
-    val span = (windowEnd - cycleStart).coerceAtLeast(1L).toFloat()
-    val gated = retro.optJSONObject("waiting") == null
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        listOf("plan", "dispatch", "execute", "waiting", "repair", "review").forEach { lane ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(RetroFormat.laneLabel(lane), style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(64.dp))
-                if (lane == "waiting" && gated) {
-                    // 门控关闭时不画空泳道，直接标注「未汇总」。
-                    Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Canvas(Modifier.weight(1f).height(16.dp)) {
-                        val y = size.height / 2
-                        drawLine(track, Offset(0f, y), Offset(size.width, y), strokeWidth = 2f)
-                        segments.filter { it.lane == lane }.forEach { segment ->
-                            val x0 = ((segment.start - cycleStart) / span * size.width).coerceIn(0f, size.width)
-                            val x1 = ((segment.end - cycleStart) / span * size.width).coerceAtLeast(x0 + 2f).coerceAtMost(size.width)
-                            val box = Size(x1 - x0, size.height)
-                            if (segment.idle) {
-                                drawRoundRect(palette.of(lane), Offset(x0, 0f), box, CornerRadius(4f),
-                                    style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))))
-                            } else {
-                                drawRoundRect(palette.of(lane), Offset(x0, 0f), box, CornerRadius(4f))
-                            }
-                        }
-                    }
-                }
-            }
-        }
+}
+
+/** 泳道色按角色取 Material 3 颜色（契约「视觉与字体」）：推进用 primary，等你与评审用 tertiary，其他用 outline。 */
+@Composable private fun laneColor(lane: String): Color {
+    val colors = MaterialTheme.colorScheme
+    return when (laneRole(lane)) {
+        LaneRole.Primary -> colors.primary
+        LaneRole.Tertiary -> colors.tertiary
+        LaneRole.Outline -> colors.outline
     }
 }
 
-@Composable private fun Distribution(retro: JSONObject) {
-    val palette = observeLanes()
-    val rows = retro.rows("distribution")
-    if (rows.isEmpty()) return
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("时间分布", style = MaterialTheme.typography.titleSmall)
-        rows.forEach { row ->
-            val lane = row.text("lane")
-            val seconds = row.intOrNull("seconds")
-            val percent = row.intOrNull("percent") ?: 0
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(RetroFormat.laneLabel(lane), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(64.dp))
-                LinearProgressIndicator(progress = { percent / 100f }, color = palette.of(lane), modifier = Modifier.weight(1f))
-                Text(if (seconds == null) "未汇总" else "${RetroFormat.duration(seconds)} · $percent%",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
+/** 泳道右侧文字：「N 分钟 · n%」；没有秒数（门控关闭或未汇总）写「未汇总」。 */
+private fun laneShare(row: JSONObject?): String {
+    if (row == null) return "未汇总"
+    val seconds = row.intOrNull("seconds") ?: return "未汇总"
+    val percent = row.intOrNull("percent")
+    return (RetroFormat.duration(seconds) ?: "未汇总") + (percent?.let { " · $it%" }.orEmpty())
 }
 
 @Composable private fun Highlights(retro: JSONObject) {
@@ -730,22 +875,14 @@ private data class TimelineSegment(val lane: String, val start: Long, val end: L
     }
 }
 
+/** 验证与检查：计划 verify 的通过数已放进关键指标，这里只保留验证执行统计一行。 */
 @Composable private fun Verify(retro: JSONObject) {
-    val verify = retro.optJSONObject("verify")
+    val runs = retro.optJSONObject("verify_runs")
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("验证与检查", style = MaterialTheme.typography.titleSmall)
-        if (verify == null) {
-            Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            val unconfirmed = verify.intOrNull("unconfirmed") ?: 0
-            val suffix = if (unconfirmed > 0) " · 未核验 $unconfirmed" else ""
-            Text("计划 verify 通过 ${verify.intOrNull("passed") ?: 0} / ${verify.intOrNull("total") ?: 0}$suffix",
-                style = MaterialTheme.typography.bodyMedium)
-            retro.optJSONObject("verify_runs")?.let { runs ->
-                Text("验证执行 ${runs.intOrNull("runs") ?: 0} 次 · 失败 ${runs.intOrNull("failed") ?: 0} · " +
-                    "超时 ${runs.intOrNull("timed_out") ?: 0} · 命令未找到 ${runs.intOrNull("command_not_found") ?: 0}",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+        if (runs == null) Text("未汇总", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        else Text("验证执行 ${runs.intOrNull("runs") ?: 0} 次 · 失败 ${runs.intOrNull("failed") ?: 0} · " +
+            "超时 ${runs.intOrNull("timed_out") ?: 0} · 命令未找到 ${runs.intOrNull("command_not_found") ?: 0}",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

@@ -93,21 +93,26 @@ fun answerPayload(questions: List<JSONObject>, drafts: Map<String, AnswerDraft>,
         })
     }
 }
-fun answersComplete(questions: List<JSONObject>, drafts: Map<String, AnswerDraft>, execution: Boolean): Boolean = questions.all { q ->
-    val a = drafts[q.text("id")] ?: AnswerDraft()
-    val options = q.rows("options")
+fun answersComplete(questions: List<JSONObject>, drafts: Map<String, AnswerDraft>, execution: Boolean): Boolean =
+    questions.all { questionComplete(it, drafts[it.text("id")] ?: AnswerDraft(), execution) }
+
+/** One question under the submit rules: chosen options exist, custom text needs allow_custom, and a required question needs an answer. */
+fun questionComplete(question: JSONObject, answer: AnswerDraft, execution: Boolean): Boolean {
+    val options = question.rows("options")
     val ids = options.map { it.text("id") }.toSet()
-    val custom = "custom" in a.optionIds
-    val hasText = a.text.isNotBlank()
-    if (!ids.containsAll(a.optionIds - "custom")) false
-    else if (execution) {
-        a.optionIds.size <= (if (q.optBoolean("multi_select")) 100 else 1) &&
-            (!hasText || q.optBoolean("allow_custom", true)) &&
-            (q.optBoolean("multi_select") || !hasText || a.optionIds.isEmpty()) &&
-            (a.optionIds.isNotEmpty() || hasText)
-    } else if (custom) q.optBoolean("allow_custom") && hasText
-    else if (options.isNotEmpty()) (!q.optBoolean("required") || a.optionIds.isNotEmpty()) && (!hasText || a.optionIds.isNotEmpty())
-    else !q.optBoolean("required") || hasText
+    val custom = "custom" in answer.optionIds
+    val hasText = answer.text.isNotBlank()
+    val multi = question.optBoolean("multi_select")
+    return when {
+        !ids.containsAll(answer.optionIds - "custom") -> false
+        execution -> answer.optionIds.size <= (if (multi) 100 else 1) &&
+            (!hasText || question.optBoolean("allow_custom", true)) &&
+            (multi || !hasText || answer.optionIds.isEmpty()) &&
+            (answer.optionIds.isNotEmpty() || hasText)
+        custom -> question.optBoolean("allow_custom") && hasText
+        options.isNotEmpty() -> (!question.optBoolean("required") || answer.optionIds.isNotEmpty()) && (!hasText || answer.optionIds.isNotEmpty())
+        else -> !question.optBoolean("required") || hasText
+    }
 }
 
 val mobileActions = setOf("save-plan-answers", "submit-plan-answers", "save-execution-answers", "submit-execution-answers", "confirm-dispatch", "set-paused")

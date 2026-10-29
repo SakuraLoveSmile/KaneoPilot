@@ -68,6 +68,14 @@ class ProtocolTest {
         question.put("required", false)
         assertTrue(answersComplete(listOf(question), emptyMap(), false))
     }
+    @Test fun questionCompleteReadsOneQuestionUnderTheSameRules() {
+        val single = json("id" to "q", "options" to JSONArray(listOf(json("id" to "o0"), json("id" to "o1"))), "required" to true, "multi_select" to false, "allow_custom" to true)
+        assertFalse(questionComplete(single, AnswerDraft(), true))
+        assertTrue(questionComplete(single, AnswerDraft(setOf("o1")), true))
+        assertFalse(questionComplete(single, AnswerDraft(setOf("o0", "o1")), true))
+        assertTrue(questionComplete(single, AnswerDraft(emptySet(), "自由回答"), true))
+        assertFalse(questionComplete(single, AnswerDraft(setOf("custom")), false))
+    }
     @Test fun currentReviewDoesNotFollowNewerUnrelatedHistory() {
         val task = json("task_id" to "t", "run_id" to "run-correct", "review_key" to "current", "review_report_sha256" to "hash", "review_history" to JSONArray(listOf(
             json("review_key" to "current", "report_sha256" to "hash", "execution_run_id" to "run-correct"),
