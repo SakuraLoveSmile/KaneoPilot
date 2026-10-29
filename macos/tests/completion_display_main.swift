@@ -31,7 +31,7 @@ for (state, title) in [("blocked", "收尾校验受阻"), ("unknown", "完成同
     let json = closeoutSource.replacingOccurrences(of: #""state":"ready""#, with: "\"state\":\"\(state)\"")
     let task = try decoder.decode(TaskDetail.self, from: Data(json.utf8))
     precondition(DisplayStatus.effective(task) == title, "收尾受阻/未知不冒充待修复或失败")
-    precondition(DisplayStatus.style(title).color == .orange, "收尾受阻/未知使用阻塞色")
+    precondition(DisplayStatus.style(title).tone == .orange, "收尾受阻/未知使用阻塞色")
     if state == "unknown" { precondition(task.parentCloseout?.actionLabel == "核对完成结果", "未知送达只读核对") }
 }
 let closed = closeoutSource.replacingOccurrences(of: #""status":"in_review""#, with: #""status":"done""#).replacingOccurrences(of: #""state":"ready""#, with: #""state":"completed""#)
@@ -44,7 +44,7 @@ for state in ["failed", "blocked", "unknown", "published"] {
     let json = releaseProjection.replacingOccurrences(of: #""state":"building""#, with: "\"state\":\"\(state)\"")
     let task = try decoder.decode(TaskSummary.self, from: Data(json.utf8))
     let release = task.release!
-    precondition(ReleasePresentation.color(release) == (state == "failed" ? Color.red : ["blocked", "unknown"].contains(state) ? Color.orange : Color.green), "构建失败、发布阻塞及发布通过颜色分开")
+    precondition(ReleasePresentation.tone(release) == (state == "failed" ? StatusTone.red : ["blocked", "unknown"].contains(state) ? StatusTone.orange : StatusTone.green), "构建失败、发布阻塞及发布通过颜色分开")
     precondition(task.status == "in_review", "发布状态不在 UI 伪造任务完成")
 }
 let historicalRelease = releaseProjection.replacingOccurrences(of: #""status":"in_review""#, with: #""status":"done","display_status":"已完成""#)
@@ -64,4 +64,40 @@ let repairedPRSummary = try decoder.decode(TaskSummary.self, from: Data(repaired
 let repairedPRDetail = try decoder.decode(TaskDetail.self, from: Data(repairedPR.utf8))
 precondition(DisplayStatus.effective(repairedPRSummary) == "评审通过 · 待合并", "看板显示新修复 PR 待合并")
 precondition(DisplayStatus.effective(repairedPRDetail) == "评审通过 · 待合并", "详情显示新修复 PR 待合并")
-print("36 completion display fixture checks passed")
+// 异常标签（S2）：核心 exception.label 直接显示；颜色只看 kind（executor_lost 红，其余阻塞类橙）。
+let exceptionKinds = [
+    ("review_blocked", "评审受阻"),
+    ("executor_lost", "执行端失联"),
+    ("send_unknown", "发送不明"),
+    ("observation_blocked", "监控异常"),
+    ("manual_block", "需人工处理"),
+]
+for (kind, label) in exceptionKinds {
+    let json = #"{"task_id":"blocked","status":"in_review","exception":{"kind":"\#(kind)","severity":"blocked","label":"\#(label)"}}"#
+    let summary = try decoder.decode(TaskSummary.self, from: Data(json.utf8))
+    let detail = try decoder.decode(TaskDetail.self, from: Data(json.utf8))
+    precondition(DisplayStatus.effective(summary) == label, "列表显示核心标签：\(label)")
+    precondition(DisplayStatus.effective(detail) == label, "详情显示核心标签：\(label)")
+    let tone: StatusTone = kind == "executor_lost" ? .red : .orange
+    precondition(DisplayStatus.badge(for: summary).style.tone == tone, "\(label) 徽标颜色按 kind 决定")
+}
+// 开放提问：只在 manual_block 时覆盖异常文字；列表读 execution_question，详情读 execution_question（ExecutionQuestion）。
+let openListJSON = #"{"task_id":"asking","status":"in_review","exception":{"kind":"manual_block","severity":"blocked","label":"需人工处理"},"execution_question":{"state":"open","answerable":true}}"#
+let listOpen = try decoder.decode(TaskSummary.self, from: Data(openListJSON.utf8))
+precondition(DisplayStatus.effective(listOpen) == "等待你回答", "列表开放提问显示等待你回答")
+precondition(DisplayStatus.badge(for: listOpen).style.tone == .orange, "开放提问使用橙色")
+let listPlus = try decoder.decode(TaskSummary.self, from: Data(openListJSON.replacingOccurrences(of: #""answerable":true"#, with: #""answerable":false"#).utf8))
+precondition(DisplayStatus.effective(listPlus) == "等待你在 Plus 中回答", "列表不可答提问显示在 Plus 中回答")
+let listAnswered = try decoder.decode(TaskSummary.self, from: Data(openListJSON.replacingOccurrences(of: #""state":"open""#, with: #""state":"answered""#).utf8))
+precondition(DisplayStatus.effective(listAnswered) == "需人工处理", "提问已答后回落核心标签")
+let detailQuestion = #""execution_question":{"request_id":"req-1","run_id":"run-1","session_id":"sess-1","turn_id":"turn-1","tool_call_id":"call-1","source":"plus","questions_sha256":"hash","answerable":true,"state":"open","delivery":"pending","opened_at":"2026-10-26T00:00:00Z","wait_seconds":90,"observer_alive":true,"queued":0,"questions":[],"draft":[]}"#
+let detailOpenJSON = #"{"task_id":"asking","status":"in_review","exception":{"kind":"manual_block","severity":"blocked","label":"需人工处理"},\#(detailQuestion)}"#
+let detailOpen = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.utf8))
+precondition(DisplayStatus.effective(detailOpen) == "等待你回答", "详情开放提问显示等待你回答")
+let detailPlus = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.replacingOccurrences(of: #""answerable":true"#, with: #""answerable":false"#).utf8))
+precondition(DisplayStatus.effective(detailPlus) == "等待你在 Plus 中回答", "详情不可答提问显示在 Plus 中回答")
+let detailCodex = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.replacingOccurrences(of: #""source":"plus""#, with: #""source":"codex""#).replacingOccurrences(of: #""delivery":"pending""#, with: #""delivery":"accepted""#).utf8))
+precondition(DisplayStatus.effective(detailCodex) == "等待执行端接收", "已提交给 Codex 的提问显示等待执行端接收")
+let detailAnswered = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.replacingOccurrences(of: #""state":"open""#, with: #""state":"answered""#).utf8))
+precondition(DisplayStatus.effective(detailAnswered) == "需人工处理", "详情提问已答后回落核心标签")
+print("completion display fixture checks passed")

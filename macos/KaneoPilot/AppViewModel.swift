@@ -15,7 +15,7 @@ final class AppViewModel: ObservableObject {
             case .dashboard: return "总览"
             case .tasks: return "任务"
             case .sessions: return "执行会话"
-            case .pending: return "需要处理"
+            case .pending: return "需要你"
             case .archive: return "归档"
             case .trash: return "回收站"
             case .runs: return "运行记录"
@@ -409,7 +409,7 @@ final class AppViewModel: ObservableObject {
             _ = try await self.client.run("dismiss-failed-requests",
                                           payload: ["request_ids": requestIDs],
                                           as: OkResponse.self)
-            return "已从待处理移除，历史保留在运行记录中"
+            return "已从「需要你」移除，历史保留在运行记录中"
         }
     }
 
@@ -1245,7 +1245,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    /// 设置页「重新读取本机配置」：并发拉取 get-planner-config +
+    /// 设置页「重新读取」：并发拉取 get-planner-config +
     /// planner-capabilities；失败保留已有内容并给错误原文。
     func refreshPlannerConfig() async {
         guard !plannerLoading else { return }

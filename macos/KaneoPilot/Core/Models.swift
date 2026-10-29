@@ -353,6 +353,8 @@ struct TaskSummary: Decodable, Identifiable {
     let lifecycleColumn: String?
     /// §5.15.4 异常信息（needs_user/评审未通过/失联；无异常为 null）。
     let exception: TaskException?
+    /// 列表行的开放提问小结（state、answerable）；无提问为 null。
+    let executionQuestion: ExecutionQuestionBrief?
     let boardSubstatus: String?
     let lastCheckedAt: String?
     let reviewSummary: ReviewSummary?
@@ -747,18 +749,21 @@ struct RetrospectiveVerifyRuns: Decodable {
 
 /// §4.18「时长格式」与时间显示；只格式化核心给出的秒数与时间戳。
 enum RetrospectiveFormat {
+    /// 全 App 统一写法（ui-spec「时长格式」）：不足 1 分钟「N 秒」；1–59 分钟「N 分钟」（舍去秒）；
+    /// 1–23 小时「H 小时 M 分钟」（M 为 0 时省略）；24 小时及以上「D 天 H 小时」（H 为 0 时省略）。
     static func duration(_ seconds: Int?) -> String? {
         guard let seconds else { return nil }
         let value = max(0, seconds)
         if value < 60 { return "\(value) 秒" }
-        if value < 3600 {
-            let minutes = value / 60
-            let rest = value % 60
-            return rest == 0 ? "\(minutes) 分" : "\(minutes) 分 \(rest) 秒"
+        if value < 3600 { return "\(value / 60) 分钟" }
+        if value < 86_400 {
+            let hours = value / 3600
+            let minutes = value % 3600 / 60
+            return minutes == 0 ? "\(hours) 小时" : "\(hours) 小时 \(minutes) 分钟"
         }
-        let hours = value / 3600
-        let minutes = value % 3600 / 60
-        return minutes == 0 ? "\(hours) 小时" : "\(hours) 小时 \(minutes) 分"
+        let days = value / 86_400
+        let hours = value % 86_400 / 3600
+        return hours == 0 ? "\(days) 天" : "\(days) 天 \(hours) 小时"
     }
 
     static func clock(_ iso: String?) -> String? {
@@ -1855,16 +1860,13 @@ enum TimeFormat {
         return "\(hours / 24) 天前"
     }
 
-    /// 已等待/排队时长：now - since，「x 分钟」/「x 小时 x 分」。
+    /// 已等待/排队时长：now - since；按统一时长写法输出，实时等待不显示秒。
     static func waited(since string: String?) -> String? {
         guard let date = parse(string) else { return nil }
         let delta = max(0, -date.timeIntervalSinceNow)
         let minutes = Int(delta / 60)
         if minutes < 1 { return "不足 1 分钟" }
-        if minutes < 60 { return "\(minutes) 分钟" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours) 小时 \(minutes % 60) 分" }
-        return "\(hours / 24) 天 \(hours % 24) 小时"
+        return RetrospectiveFormat.duration(minutes * 60)
     }
 }
 
@@ -2819,6 +2821,12 @@ struct ExecutionAnswer: Decodable, Equatable {
     var payload: [String: Any] {
         ["question_id": questionId, "option_ids": optionIds, "text": text, "skipped": skipped]
     }
+}
+
+/// 列表行用的开放提问小结：只取 state 与 answerable，避免整份 ExecutionQuestion（16 个必填字段）拖垮任务列表解码。
+struct ExecutionQuestionBrief: Decodable, Equatable {
+    let state: String?
+    let answerable: Bool?
 }
 
 struct ExecutionQuestion: Decodable, Equatable {

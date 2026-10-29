@@ -4,15 +4,21 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
+    paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      probe_session_fulltext:
+        description: 手动运行会话全文夹具探针（不参与门禁与发布）
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: packages-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   identity:
@@ -36,7 +42,11 @@ jobs:
   checks:
     needs: identity
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -57,7 +67,7 @@ jobs:
           print('Real pytest:', pytest.__version__, module)
           PY
       - name: Release recovery and packaging checks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -69,28 +79,40 @@ jobs:
         if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
         working-directory: core
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-reports"
-          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/core.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/core.log"
+          files=$(python3 ../scripts/pytest_shards.py core --shard "$SHARD" --shards "$SHARDS")
+          selected=()
+          while IFS= read -r file; do selected+=("$file"); done <<< "$files"
+          python3 -I -m pytest "${selected[@]}" -q --junitxml="$RUNNER_TEMP/test-reports/core-shard-$SHARD.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/core-shard-$SHARD.log"
       - name: Integration fixture tests
         if: ${{ !cancelled() && steps.pytest.outcome == 'success' }}
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/test-reports"
-          python3 -I -m pytest tests -q --junitxml="$RUNNER_TEMP/test-reports/integration.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/integration.log"
+          files=$(python3 scripts/pytest_shards.py integration --shard "$SHARD" --shards "$SHARDS")
+          selected=()
+          while IFS= read -r file; do selected+=("$file"); done <<< "$files"
+          python3 -I -m pytest "${selected[@]}" -q --junitxml="$RUNNER_TEMP/test-reports/integration-shard-$SHARD.xml" 2>&1 | tee "$RUNNER_TEMP/test-reports/integration-shard-$SHARD.log"
       - name: Preserve isolated check reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: isolated-check-reports-${{ github.run_number }}
+          name: isolated-check-reports-${{ github.run_number }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-reports/
           if-no-files-found: warn
           retention-days: 14
 
   android:
-    needs: [identity, checks]
+    needs: identity
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -204,10 +226,18 @@ jobs:
         shell: bash
         run: rm -f "$RUNNER_TEMP/kaneopilot-release.keystore"
 
-  macos:
-    needs: [identity, checks]
+  macos-fixtures:
+    needs: identity
     runs-on: macos-15
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: a
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures
+          - group: b
+            fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures run-engine-fix-revert-fixtures
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -222,7 +252,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/macos-reports"
           result=0
-          for fixture in run-fixtures run-engine-fixtures run-plan-answer-fixtures run-execution-answer-fixtures run-owner-fixtures run-mobile-fixtures run-mobile-real-core-fixtures run-retrospective-fixtures run-build-ai-action-fixtures run-external-build-repair-fixtures; do
+          for fixture in ${{ matrix.fixtures }}; do
             if bash "macos/tests/$fixture.sh" 2>&1 | tee "$RUNNER_TEMP/macos-reports/$fixture.log"; then
               echo "$fixture passed"
             else
@@ -230,6 +260,27 @@ jobs:
             fi
           done
           exit "$result"
+      - name: Preserve desktop fixture reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-check-reports-${{ github.run_number }}-fixtures-${{ matrix.group }}
+          path: ${{ runner.temp }}/macos-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-package:
+    needs: identity
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
       - name: Build and verify Universal DMG
         id: macos-package
         env:
@@ -268,18 +319,47 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Preserve desktop check and packaging reports
+      - name: Preserve packaging reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: macos-check-reports-${{ github.run_number }}
+          name: macos-check-reports-${{ github.run_number }}-package
+          path: ${{ runner.temp }}/macos-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-session-fulltext-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_session_fulltext }}
+    needs: identity
+    runs-on: macos-15
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Probe session full-text fixture (not gating)
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/macos-reports"
+          bash macos/tests/run-session-fulltext-fixtures.sh 2>&1 | tee "$RUNNER_TEMP/macos-reports/run-session-fulltext-fixtures.log"
+      - name: Preserve session full-text probe report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-session-fulltext-probe-${{ github.run_number }}
           path: ${{ runner.temp }}/macos-reports/
           if-no-files-found: warn
           retention-days: 14
 
   publish:
-    if: ${{ needs.identity.outputs.release == 'true' && needs.checks.result == 'success' && needs.android.result == 'success' && needs.macos.result == 'success' }}
-    needs: [identity, checks, android, macos]
+    if: ${{ needs.identity.outputs.release == 'true' && needs.checks.result == 'success' && needs.android.result == 'success' && needs.macos-fixtures.result == 'success' && needs.macos-package.result == 'success' }}
+    needs: [identity, checks, android, macos-fixtures, macos-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:

@@ -44,7 +44,7 @@
  - Python 3.9+ 标准库；第三方依赖只 vendored（沿用 pyyaml `_vendor` 模式）。
  - 远端 Kaneo 写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
  - 不输出/不持久化 Kaneo 凭据 token。
- - SwiftUI 遵循 docs/ui-spec.md 的冻结度量（13/18/11pt、8/12/16 间距、1180×760/900×600）。
+ - SwiftUI 遵循 docs/ui-spec.md §3 度量刻度（字号 11/12/13/15/18/22pt，间距 4/8/12/16/24，窗口 1180×760/900×600）。
  
  ## Worktree 位置与合并后的清理
  

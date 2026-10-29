@@ -5,6 +5,8 @@ struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var section: AppViewModel.Section = .dashboard
     @State private var settingsSegment: SettingsSegment = .projects
+    @ObservedObject private var scheduler = AppRuntime.shared.scheduler
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationSplitView {
@@ -24,6 +26,7 @@ struct RootView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
+            .safeAreaInset(edge: .bottom) { automationBlock }
         } detail: {
             VStack(spacing: 0) {
                 if let banner = model.banner {
@@ -79,7 +82,11 @@ struct RootView: View {
             Label(item.title, systemImage: item.icon)
             if item == .pending && model.attentionCount > 0 {
                 Spacer(minLength: Spacing.s)
-                Text("\(model.attentionCount)").font(.kpSmall).foregroundStyle(.secondary)
+                Text("\(model.attentionCount)")
+                    .font(.kpSmall)
+                    .padding(.horizontal, Spacing.s)
+                    .padding(.vertical, Spacing.xs)
+                    .background(Color.kpOrange.opacity(colorScheme == .dark ? 0.20 : 0.14), in: Capsule())
             }
         }
         .tag(item)
@@ -147,43 +154,33 @@ struct RootView: View {
                     }
                 }
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
                 .lineLimit(1)
             }
         }
-        if section != .dashboard {
+        // 全局暂停只在工具栏留一个状态胶囊（ui-spec §2）；暂停与刷新入口在侧栏底部，⌘R 在 App 菜单。
+        if model.globalPaused {
             ToolbarItem(placement: .primaryAction) {
-                // 全局自动推进：状态写进按钮文字（ui-spec §2 / §4.1）
                 Button {
                     Task { await model.toggleGlobalPause() }
                 } label: {
-                    if model.globalPaused {
-                        Label("已暂停 · 恢复自动推进", systemImage: "play.fill")
-                    } else {
-                        Label("暂停自动推进", systemImage: "pause.fill")
+                    Label {
+                        Text("已暂停 · 恢复")
+                            .foregroundStyle(.primary)
+                    } icon: {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(Color.kpOrange)
                     }
+                    .font(.kpSmall)
+                    .padding(.horizontal, Spacing.s)
+                    .padding(.vertical, Spacing.xs)
+                    .background(Color.kpOrange.opacity(colorScheme == .dark ? 0.20 : 0.14), in: Capsule())
                 }
-                .labelStyle(.titleAndIcon)
-                .tint(model.globalPaused ? Color.orange : nil)
-                .help(model.globalPaused
-                      ? "全局已暂停：不再自动领取新任务。点击恢复自动推进"
-                      : "全局：暂停后不再自动领取新任务，已在执行的任务不受影响")
-                .accessibilityLabel(model.globalPaused ? "已暂停，恢复自动推进" : "暂停自动推进")
+                .buttonStyle(.plain)
+                .help("全局已暂停：不再自动领取新任务。点击恢复自动推进")
+                .accessibilityLabel("已暂停，恢复自动推进")
                 .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
             }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task { await model.refreshAll() }
-            } label: {
-                Label(refreshTitle, systemImage: "arrow.clockwise")
-            }
-            .labelStyle(.titleAndIcon)
-            .help(refreshHelp)
-            .accessibilityLabel("刷新")
-            .accessibilityValue(lastRefreshFull ?? "")
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.busy)
         }
     }
 
@@ -192,10 +189,46 @@ struct RootView: View {
         model.lastRefreshAt.map { TimeFormat.fullString(ISO8601DateFormatter().string(from: $0)) }
     }
 
-    /// 刷新按钮文字：有刷新记录时附带 HH:mm，让用户看到数据停在何时。
-    private var refreshTitle: String {
-        guard let at = model.lastRefreshAt else { return "刷新" }
-        return "刷新 \(Self.clockFormatter.string(from: at))"
+    /// 侧栏底部「自动推进」状态块（ui-spec §2）：状态词与菜单栏同源；按钮沿用工具栏原有的禁用条件。
+    private var automationBlock: some View {
+        let headline = scheduler.automationHeadline
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            Label {
+                Text(headline.text)
+                    .font(.kpLabel)
+                    .foregroundStyle(.primary)
+            } icon: {
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(headline.tone.color)
+            }
+            Text(automationDetail)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .lineLimit(1)
+            HStack(spacing: Spacing.s) {
+                Button(model.globalPaused ? "恢复" : "暂停") {
+                    Task { await model.toggleGlobalPause() }
+                }
+                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
+                Button("刷新") {
+                    Task { await model.refreshAll() }
+                }
+                .help(refreshHelp)
+                .disabled(model.busy)
+            }
+            .controlSize(.small)
+        }
+        .padding(Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    /// 在途数与最近刷新时间；已暂停时说明不再领取新任务。
+    private var automationDetail: String {
+        let active = scheduler.status?.automation?.activeTasks ?? 0
+        if model.globalPaused { return "不再领取新任务，在途 \(active) 个照常" }
+        guard let at = model.lastRefreshAt else { return "在途 \(active)" }
+        return "在途 \(active) · \(Self.clockFormatter.string(from: at)) 更新"
     }
 
     private var refreshHelp: String {

@@ -26,20 +26,20 @@ struct MobileConnectionView: View {
         Section("手机连接") {
             VStack(alignment: .leading, spacing: Spacing.m) {
                 HStack(spacing: Spacing.s) {
-                    Text("服务状态").font(.kpSmall).foregroundStyle(.secondary)
+                    Circle().fill(manager.running ? Color.kpGreen : Color.kpGray).frame(width: 6, height: 6)
                     if manager.starting { ProgressView().controlSize(.small) }
                     Text(manager.starting ? "正在启动…" : manager.running
                          ? (manager.isSimulation ? "运行中（隔离模拟，无网络监听）" : "运行中")
                          : (enabled ? "已启用，服务未运行" : "已关闭"))
                         .font(.kpBody)
-                        .foregroundStyle(manager.running ? Color.green : Color.secondary)
+                        .foregroundStyle(manager.running ? Color.primary : Color.kpSecondary)
                     Spacer()
                     Button("刷新") { Task { await manager.refresh(); seedDraft() } }
                         .disabled(manager.busy)
                         .accessibilityLabel("刷新手机连接状态")
                 }
                 Text("通过局域网或已有 VPN 连接安卓手机。Mac 保留数据和执行器；关闭窗口后仍可连接，退出 App 后停止。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: Spacing.m) {
                     Picker("本机地址", selection: $host) {
@@ -58,11 +58,11 @@ struct MobileConnectionView: View {
                 .disabled(enabled || manager.busy || manager.starting)
                 if manager.configuration != nil && addresses.isEmpty {
                     Text("未发现可用的本机 IPv4 地址，请先连接局域网或 VPN 后刷新。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 }
                 if enabled {
                     Text("更换地址或端口前请先停用。地址变化将使旧设备失效，需要重新配对。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 }
                 HStack(spacing: Spacing.s) {
                     if enabled {
@@ -98,7 +98,7 @@ struct MobileConnectionView: View {
                         .accessibilityLabel("手机连接地址 \(endpoint)")
                 }
                 if let error = manager.error {
-                    Text(error).font(.kpSmall).foregroundStyle(.red)
+                    SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: Color.kpRed)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("手机连接错误：\(error)")
                 }
@@ -116,7 +116,7 @@ struct MobileConnectionView: View {
                                     Text("在安卓端扫描，或复制配对内容后粘贴。配对内容包含一次性凭证，请仅交给自己的手机。")
                                         .font(.kpBody).fixedSize(horizontal: false, vertical: true)
                                     Text("剩余 \(max(0, Int(pairing.expiration!.timeIntervalSince(context.date)))) 秒；成功配对后失效")
-                                        .font(.kpSmall).foregroundStyle(.secondary)
+                                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                                     Button(copied ? "已复制配对内容" : "复制配对内容") {
                                         guard pairing.isValid() else { return }
                                         NSPasteboard.general.clearContents()
@@ -127,7 +127,7 @@ struct MobileConnectionView: View {
                             }
                         } else {
                             Text("配对码已到期，请重新生成。")
-                                .font(.kpSmall).foregroundStyle(.secondary)
+                                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                         }
                     }
                 }
@@ -135,13 +135,13 @@ struct MobileConnectionView: View {
                 Text("已配对设备").font(.kpBody)
                 let devices = manager.configuration?.devices.filter { $0.revokedAt == nil } ?? []
                 if devices.isEmpty {
-                    Text("尚无已配对设备").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("尚无已配对设备").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 }
                 ForEach(devices) { device in
                     HStack(spacing: Spacing.m) {
                         VStack(alignment: .leading, spacing: Spacing.s) {
                             Text(device.name).font(.kpBody)
-                            Text("配对时间：\(device.createdAt)").font(.kpSmall).foregroundStyle(.secondary)
+                            Text("配对时间：\(device.createdAt)").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                         }
                         Spacer()
                         Button("撤销设备") { Task { await manager.revoke(device) } }
