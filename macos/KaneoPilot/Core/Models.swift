@@ -776,6 +776,18 @@ enum RetrospectiveFormat {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+
+    /// 时间轴首尾刻度：只到分钟（ui-spec §4.18，对齐画板）；分段明细仍用带秒的 `clock`。
+    static func clockMinutes(_ iso: String?) -> String? {
+        guard let date = TimeFormat.parse(iso) else { return nil }
+        return clockMinutesFormatter.string(from: date)
+    }
+
+    private static let clockMinutesFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 }
 
 /// §5.2 Request

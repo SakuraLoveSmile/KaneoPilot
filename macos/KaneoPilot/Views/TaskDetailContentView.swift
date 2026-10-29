@@ -62,8 +62,8 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
-    /// 五段共用同一顶栏（§4.1，目标形态见 Mac 界面计划 · 任务详情浮层）：第一行标题与关闭图标，
-    /// 第二行一行元信息（项目 · 状态徽标），第三行分段控件。切换分段不改变顶栏高度与导航位置。
+    /// 五段共用同一顶栏（§4.1、§4.12，对齐画板 detail-after）：第一行标题与圆形关闭图标，
+    /// 第二行左侧一行元信息（项目 · 状态），右侧五段分段控件。切换分段不改变顶栏高度与导航位置。
     private var headerBar: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .top, spacing: Spacing.s) {
@@ -71,6 +71,10 @@ struct TaskDetailContentView: View {
                 if let onDismiss {
                     Button { onDismiss() } label: {
                         Image(systemName: "xmark")
+                            .font(.kpLabel.weight(.semibold))
+                            .foregroundStyle(Color.kpSecondary)
+                            .frame(width: 24, height: 24)
+                            .background(Color.primary.opacity(0.1), in: Circle())
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.cancelAction)
@@ -78,10 +82,14 @@ struct TaskDetailContentView: View {
                     .accessibilityLabel("关闭")
                 }
             }
-            headerMeta
-            headerNavigation
+            HStack(spacing: Spacing.m) {
+                headerMeta.frame(maxWidth: .infinity, alignment: .leading)
+                headerNavigation
+            }
         }
-        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        .padding(.horizontal, Spacing.l)
+        .padding(.top, Spacing.l)
+        .padding(.bottom, Spacing.m)
     }
 
     private var headerTitle: some View {
@@ -101,12 +109,12 @@ struct TaskDetailContentView: View {
     }
 
     /// 第二行元信息「项目 · 状态标签」：状态只出现一次（开放提问的词已并入 `DisplayStatus.effective`），阶段不在头部重复。
-    /// 状态标签无底色，图标着色加半粗文字（ui-spec §3）。
+    /// 状态标签无底色，图标着色加半粗文字（ui-spec §3）；项之间用 3pt 圆点分隔，放不下时单行截断。
     private var headerMeta: some View {
         HStack(spacing: Spacing.s) {
             if let project = detail?.projectName {
                 Text(project).lineLimit(1)
-                Text("·")
+                metaDot
             }
             if let detail {
                 if detail.status != "done", let release = detail.release, release.showsTaskStatus {
@@ -118,12 +126,16 @@ struct TaskDetailContentView: View {
                     StatusLabel(status: "待确认执行", emphasized: true)
                 }
                 if let question = openExecutionQuestion {
-                    Text("·")
-                    Text("已等待 \(RetrospectiveFormat.duration(Int(question.waitSeconds)) ?? "0 秒")")
+                    metaDot
+                    Text("已等待 \(RetrospectiveFormat.duration(Int(question.waitSeconds)) ?? "0 秒")").lineLimit(1)
                 }
             }
         }
         .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+    }
+
+    private var metaDot: some View {
+        Circle().fill(Color.kpSecondary.opacity(0.6)).frame(width: 3, height: 3).accessibilityHidden(true)
     }
 
     /// 头部「已等待」只读开放中的执行提问的等待时长（`ExecutionQuestion.waitSeconds`），不经过概览页的草稿 store。
@@ -132,7 +144,7 @@ struct TaskDetailContentView: View {
         return question
     }
 
-    /// 第三行：280×28 的五段分段控件。
+    /// 第二行右侧：宽 280pt 的五段分段控件，保持宽度，元信息放不下时截断元信息。
     private var headerNavigation: some View {
         Picker("详情分段", selection: $tab) {
             ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
@@ -1197,9 +1209,12 @@ struct TaskOverviewTabView: View {
     private var nextStepSection: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             if detail.parentCloseout == nil && !(detail.release?.showsTaskStatus == true && detail.status != "done") {
-                Text(nextStepExplanation)
-                    .font(.kpBody)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                    Image(systemName: "arrow.right.circle").foregroundStyle(Color.kpBlue).accessibilityHidden(true)
+                    Text(nextStepExplanation)
+                        .font(.kpBody)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if !statusFacts.isEmpty {
                 Text(statusFacts.joined(separator: " · "))
@@ -1340,7 +1355,7 @@ struct TaskOverviewTabView: View {
                 if let store = openExecutionStore {
                     executionSubmitControls(store)
                 } else if executionAwaitingPlus {
-                    Text("等待你在 Plus 中回答").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    Text("等待你在 Plus 中回答").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 } else if let primaryAction {
                     actionButton(primaryAction)
                         .buttonStyle(.borderedProminent)
@@ -1388,8 +1403,10 @@ struct TaskOverviewTabView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!store.canSubmit)
             }
-            Text(store.submitBlockedReason ?? "已答 \(store.answeredCount)/\(store.question.questions.count)")
-                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            // 「已答 a/b」在表单头部；底栏只在不能提交时写原因（如「还差第 N 题」）。
+            if let reason = store.submitBlockedReason {
+                Text(reason).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            }
         }
     }
 
@@ -1710,65 +1727,105 @@ private struct ExecutionAnswerCard: View {
         } message: { Text("原提交可能仍在处理中。本次仅重送冻结的相同答案，不能撤销原调用，也不会修改答案。") }
     }
 
-    /// 开放可答：完整表单。提交与保存在详情底栏，这里只负责选择。
+    /// 开放可答：完整表单（ui-spec §4.17，对齐画板 detail-after）。提交与保存在详情底栏，这里只负责选择。
     private var answerForm: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("回答 \(store.question.questions.count) 个问题").font(.kpSection)
-                Text("\(store.waitingForCodex ? "等待执行端接收" : "等待你回答") · 来源：\(store.question.sourceDescription) · 已答\(store.answeredCount)/\(store.question.questions.count)")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                if store.question.queued > 0 {
-                    Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            answerFormHeader
+            // 题与题之间 16pt，不用分隔线。
+            VStack(alignment: .leading, spacing: Spacing.l) {
+                ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
+                    questionBlock(index: index, question: question)
                 }
             }
-            // 题与题之间用间距分隔，不用分隔线（ui-spec §4.17）。
-            VStack(alignment: .leading, spacing: Spacing.xl) {
-                ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-                            Text("\(index + 1). \(question.title)\(question.multiSelect ? "（多选）" : "（单选）")")
-                                .font(.kpBody).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                            Spacer(minLength: Spacing.s)
-                            Toggle("跳过此题", isOn: Binding(
-                                get: { store.answer(question.id)?.skipped == true },
-                                set: { store.setSkipped($0, questionID: question.id) }
-                            ))
-                            .toggleStyle(.checkbox).font(.kpSmall)
-                            .accessibilityLabel("\(question.title)，跳过此题")
-                            .disabled(store.inputsLocked)
-                        }
-                        if let description = question.description, !description.isEmpty {
-                            Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                        }
-                        // 选项为分组列表：圆角 10、选中项淡蓝底；「自定义回答」为最后一行。
-                        if !question.options.isEmpty || question.allowCustom {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(question.options) { option in
-                                    optionButton(question, label: option.label, description: option.description,
-                                        selected: store.answer(question.id)?.optionIds.contains(option.id) == true) {
-                                            store.toggleOption(option.id, questionID: question.id)
-                                        }
-                                }
-                                if question.allowCustom && !question.options.isEmpty {
-                                    optionButton(question, label: "自定义回答", description: nil,
-                                                 selected: store.customQuestionIDs.contains(question.id)) {
-                                        store.selectCustom(questionID: question.id)
-                                    }
-                                }
-                            }
-                            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
-                        }
-                        if question.allowCustom, question.options.isEmpty || store.customQuestionIDs.contains(question.id) {
-                            TextField("填写自定义回答", text: Binding(
-                                get: { store.answer(question.id)?.text ?? "" },
-                                set: { store.setText($0, questionID: question.id) }
-                            ), axis: .vertical)
-                            .textFieldStyle(.roundedBorder).font(.kpBody).lineLimit(2...8)
-                            .accessibilityLabel("\(question.title)，填写自定义回答")
-                            .disabled(store.inputsLocked)
-                        }
-                    }
+        }
+    }
+
+    /// 表单头一行：「回答 N 个问题」、来源，行尾「已答 a/b」；还有排队的提问时另起一行。
+    private var answerFormHeader: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                Text("回答 \(store.question.questions.count) 个问题").font(.kpSection)
+                Text("\(store.waitingForCodex ? "等待执行端接收 · " : "")来源：\(store.question.sourceDescription)")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                Spacer(minLength: Spacing.s)
+                Text("已答 \(store.answeredCount)/\(store.question.questions.count)")
+                    .font(.kpLabel).monospacedDigit().foregroundStyle(Color.kpSecondary)
+            }
+            if store.question.queued > 0 {
+                Text("还有 \(store.question.queued) 份提问").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            }
+        }
+    }
+
+    /// 一题：序号圆、题目、单选/多选胶囊、行尾「跳过此题」；其下说明、选项分组面板与自定义输入。
+    private func questionBlock(index: Int, question: ExecutionQuestionItem) -> some View {
+        let skipped = store.answer(question.id)?.skipped == true
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                    Text("\(index + 1)")
+                        .font(.kpLabel.weight(.semibold))
+                        .frame(width: 20, height: 20)
+                        .background(Color.primary.opacity(0.1), in: Circle())
+                        .accessibilityHidden(true)
+                    Text(question.title)
+                        .font(.kpBody.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    Text(question.multiSelect ? "多选" : "单选")
+                        .font(.kpSmall)
+                        .padding(.horizontal, 6).frame(height: 18)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
+                    Spacer(minLength: Spacing.s)
+                    skipButton(question, skipped: skipped)
+                }
+                if let description = question.description, !description.isEmpty {
+                    Text(description).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            }
+            if !question.options.isEmpty {
+                optionGroup(question).opacity(skipped ? 0.45 : 1)
+            }
+            if question.allowCustom, question.options.isEmpty || store.customQuestionIDs.contains(question.id) {
+                TextField("填写自定义回答", text: Binding(
+                    get: { store.answer(question.id)?.text ?? "" },
+                    set: { store.setText($0, questionID: question.id) }
+                ), axis: .vertical)
+                .textFieldStyle(.roundedBorder).font(.kpBody).lineLimit(2...8)
+                .accessibilityLabel("\(question.title)，填写自定义回答")
+                .disabled(store.inputsLocked)
+            }
+        }
+    }
+
+    /// 「跳过此题」是强调色文字按钮；已跳过时改写为「已跳过 · 撤销」，该题选项置灰（选项仍可点，点选即取消跳过）。
+    private func skipButton(_ question: ExecutionQuestionItem, skipped: Bool) -> some View {
+        Button(skipped ? "已跳过 · 撤销" : "跳过此题") {
+            store.setSkipped(!skipped, questionID: question.id)
+        }
+        .buttonStyle(.plain)
+        .font(.kpLabel)
+        .foregroundStyle(Color.accentColor)
+        .opacity(store.inputsLocked ? 0.5 : 1)
+        .accessibilityLabel("\(question.title)，\(skipped ? "撤销跳过" : "跳过此题")")
+        .disabled(store.inputsLocked)
+    }
+
+    /// 选项是一块分组面板，选项之间 1pt 细线；「自定义回答」为最后一行。
+    private func optionGroup(_ question: ExecutionQuestionItem) -> some View {
+        GroupPanel {
+            ForEach(Array(question.options.enumerated()), id: \.element.id) { index, option in
+                if index > 0 { ListRule() }
+                optionButton(question, label: option.label, description: option.description,
+                             selected: store.answer(question.id)?.optionIds.contains(option.id) == true) {
+                    store.toggleOption(option.id, questionID: question.id)
+                }
+            }
+            if question.allowCustom {
+                ListRule()
+                optionButton(question, label: "自定义回答", description: nil,
+                             selected: store.customQuestionIDs.contains(question.id)) {
+                    store.selectCustom(questionID: question.id)
                 }
             }
         }
@@ -1929,22 +1986,20 @@ private struct ExecutionAnswerCard: View {
 
     private func optionButton(_ question: ExecutionQuestionItem, label: String, description: String?,
                               selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: Spacing.s) {
-                Image(systemName: question.multiSelect
-                      ? (selected ? "checkmark.square.fill" : "square")
-                      : (selected ? "largecircle.fill.circle" : "circle"))
-                    .foregroundStyle(selected ? Color.accentColor : Color.kpSecondary).padding(.top, 2)
-                VStack(alignment: .leading, spacing: 3) {
+        let hasDescription = description?.isEmpty == false
+        return Button(action: action) {
+            HStack(spacing: Spacing.m) {
+                optionMark(multiSelect: question.multiSelect, selected: selected)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(label).font(.kpBody).foregroundStyle(.primary).textSelection(.enabled)
                     if let description, !description.isEmpty {
-                        Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+                        Text(description).font(.kpLabel).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
                     }
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
-            .frame(maxWidth: .infinity, minHeight: RowHeight.twoLine, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: hasDescription ? RowHeight.twoLine : RowHeight.interactive, alignment: .leading)
             .background(selected ? Color.accentColor.opacity(0.14) : Color.clear)
             .contentShape(Rectangle())
         }
@@ -1952,5 +2007,23 @@ private struct ExecutionAnswerCard: View {
         .accessibilityLabel("\(question.title)，\(label)")
         .accessibilityValue(selected ? "已选择" : "未选择")
         .disabled(store.inputsLocked)
+    }
+
+    /// 单选为 16pt 圆（选中时蓝色实心加白点），多选沿用系统勾选框图标。
+    @ViewBuilder
+    private func optionMark(multiSelect: Bool, selected: Bool) -> some View {
+        if multiSelect {
+            Image(systemName: selected ? "checkmark.square.fill" : "square")
+                .foregroundStyle(selected ? Color.accentColor : Color.kpSecondary)
+        } else {
+            ZStack {
+                Circle().strokeBorder(selected ? Color.accentColor : Color.kpSecondary, lineWidth: 1.5)
+                if selected {
+                    Circle().fill(Color.accentColor)
+                    Circle().fill(Color.white).frame(width: 6, height: 6)
+                }
+            }
+            .frame(width: 16, height: 16)
+        }
     }
 }

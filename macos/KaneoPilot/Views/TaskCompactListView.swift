@@ -309,7 +309,7 @@ private struct TaskCompactRow: View {
 
     private var rowBackground: Color {
         if isFocused || (isBatchMode && isSelected) { return Color.accentColor.opacity(0.1) }
-        return isHovering ? Color.primary.opacity(0.04) : Color.clear
+        return isHovering ? Color.kpBlue.opacity(0.06) : Color.clear
     }
 
     // 右侧三栏宽度固定，各行对齐（ui-spec §4.18）。时间列要容纳「MM-dd HH:mm」。

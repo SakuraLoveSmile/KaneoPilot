@@ -233,7 +233,7 @@ struct ProjectMappingsView: View {
                 Text("项目与仓库配置")
                     .font(.kpSection)
                 if let fetched = remoteFetchedAt {
-                    Text("最近获取：\(formatTime(fetched)) · 当前版本 r\(revision)")
+                    Text("最近获取：\(formatTime(fetched)) · 映射版本 r\(revision)")
                         .font(.kpLabel)
                         .foregroundStyle(Color.kpSecondary)
                 } else {
@@ -297,7 +297,7 @@ struct ProjectMappingsView: View {
                                   requestCount > 0 ? "\(requestCount) 个活动请求" : nil].compactMap { $0 }
                     if !counts.isEmpty {
                         Text(counts.joined(separator: " · "))
-                            .font(.kpSmall)
+                            .font(.kpLabel)
                             .foregroundStyle(Color.kpSecondary)
                     }
                 }
@@ -320,111 +320,97 @@ struct ProjectMappingsView: View {
             if let item = selectedItem {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Spacing.l) {
-                        // 基础信息（标题区，不在卡片内）
-                        VStack(alignment: .leading, spacing: Spacing.s) {
+                        // 基础信息（标题区，不在卡片内）：名称、状态、项目 ID 同一行
+                        HStack(spacing: Spacing.m) {
                             Text(item.displayName)
                                 .font(.kpTitle)
-
-                            HStack(spacing: Spacing.s) {
-                                Text("项目 ID：\(item.projectId)")
-                                    .font(.kpSmall.monospaced())
+                            statusBadge(for: item)
+                            Spacer(minLength: Spacing.m)
+                            Text(item.projectId)
+                                .font(.kpLabel.monospaced())
+                                .foregroundStyle(Color.kpSecondary)
+                                .textSelection(.enabled)
+                                .accessibilityLabel("项目 ID \(item.projectId)")
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(item.projectId, forType: .string)
+                                successMessage = "已复制项目 ID"
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.kpLabel)
                                     .foregroundStyle(Color.kpSecondary)
-
-                                Button {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(item.projectId, forType: .string)
-                                    successMessage = "已复制项目 ID"
-                                } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .font(.kpSmall)
-                                }
-                                .buttonStyle(.plain)
-                                .help("复制项目 ID")
                             }
+                            .buttonStyle(.plain)
+                            .help("复制项目 ID")
+                            .accessibilityLabel("复制项目 ID")
                         }
 
                         SettingsCard(title: "仓库映射") {
-                            VStack(alignment: .leading, spacing: Spacing.m) {
-                                // 仓库路径选择
-                                VStack(alignment: .leading, spacing: Spacing.s) {
-                                    Text("本地仓库目录")
-                                        .font(.kpBody.weight(.medium))
-
-                                    HStack(spacing: Spacing.s) {
-                                        TextField("输入或选择仓库绝对路径…", text: $editRepository)
-                                            .textFieldStyle(.roundedBorder)
-                                            .font(.kpLabel.monospaced())
-
-                                        Button("选择目录…") {
-                                            chooseDirectory()
-                                        }
-                                        .buttonStyle(.bordered)
-                                    }
-
+                            ProjectFormRow(title: "本地仓库目录") {
+                                HStack(spacing: Spacing.s) {
                                     if let kind = item.repositoryKind {
-                                        HStack(spacing: Spacing.xs) {
-                                            Image(systemName: kind == "git" ? "arrow.triangle.branch" : "folder")
-                                                .font(.kpSmall)
-                                            Text(kind == "git" ? "Git 仓库" : "普通目录")
-                                                .font(.kpSmall)
-                                        }
-                                        .foregroundStyle(Color.kpSecondary)
-                                    }
-                                }
-
-                                // 开关选项
-                                VStack(alignment: .leading, spacing: Spacing.s) {
-                                    Toggle("启用新规划（允许从此项目创建规划请求）", isOn: $editEnabled)
-                                        .font(.kpBody)
-                                        .toggleStyle(.switch)
-
-                                    Text("停用仅阻止新建规划；已排队或执行中的任务继续使用原快照。")
-                                        .font(.kpLabel)
-                                        .foregroundStyle(Color.kpSecondary)
-                                }
-
-                                // 影响说明：紧挨路径
-                                if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
-                                    VStack(alignment: .leading, spacing: Spacing.xs) {
-                                        Text("影响说明：")
-                                            .font(.kpSmall.weight(.medium))
-                                            .foregroundStyle(Color.kpSecondary)
-                                        Text("当前项目有 \(item.activeTaskCount ?? 0) 个未完成任务、\(item.activeRequestCount ?? 0) 个活动请求。修改仓库仅用于之后新建的规划输入，不会改变已有排队或执行轮次的快照。")
+                                        Label(kind == "git" ? "Git 仓库" : "普通目录",
+                                              systemImage: kind == "git" ? "arrow.triangle.branch" : "folder")
                                             .font(.kpLabel)
                                             .foregroundStyle(Color.kpSecondary)
                                     }
-                                    .padding(Spacing.m)
-                                    .background(Color(nsColor: .controlBackgroundColor))
-                                    .cornerRadius(Radius.control)
+                                    TextField("输入或选择仓库绝对路径…", text: $editRepository)
+                                        .labelsHidden()
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.kpLabel.monospaced())
+                                        .frame(minWidth: 180, idealWidth: 260, maxWidth: 320)
+                                        .accessibilityLabel("本地仓库目录")
+                                    Button("选择目录…") {
+                                        chooseDirectory()
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-
-                                // 操作行
-                                HStack(spacing: Spacing.m) {
-                                    Button {
-                                        Task { await saveCurrentMapping() }
-                                    } label: {
-                                        if isSaving {
-                                            HStack(spacing: Spacing.xs) {
-                                                ProgressView().controlSize(.small)
-                                                Text("保存中…")
-                                            }
-                                        } else {
-                                            Text("保存配置")
-                                        }
+                            }
+                            ListRule()
+                            ProjectFormRow(title: "启用新规划",
+                                           detail: "允许从此项目创建规划请求。停用仅阻止新建规划；已排队或执行中的任务继续使用原快照。") {
+                                Toggle("启用新规划", isOn: $editEnabled)
+                                    .labelsHidden()
+                                    .toggleStyle(.switch)
+                            }
+                            // 影响说明：紧挨路径与开关，独立一行
+                            if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
+                                ListRule()
+                                ProjectPlainRow {
+                                    Label {
+                                        Text("当前项目有 \(item.activeTaskCount ?? 0) 个未完成任务、\(item.activeRequestCount ?? 0) 个活动请求。修改仓库仅用于之后新建的规划输入，不会改变已有排队或执行轮次的快照。")
+                                            .font(.kpLabel)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    } icon: {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundStyle(Color.kpOrange)
                                     }
-                                    .buttonStyle(.borderedProminent)
-                                    .disabled(isSaving || editRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                                    if item.repository != nil {
-                                        Button("解除映射…") {
-                                            showUnmapConfirm = true
+                                }
+                            }
+                            ListRule()
+                            ProjectPlainRow {
+                                Button {
+                                    Task { await saveCurrentMapping() }
+                                } label: {
+                                    if isSaving {
+                                        HStack(spacing: Spacing.xs) {
+                                            ProgressView().controlSize(.small)
+                                            Text("保存中…")
                                         }
-                                        .buttonStyle(.bordered)
-                                        .foregroundStyle(Color.primary)
-                                        .disabled(isSaving)
+                                    } else {
+                                        Text("保存配置")
                                     }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isSaving || editRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                                    Spacer()
+                                if item.repository != nil {
+                                    Button("解除映射…") {
+                                        showUnmapConfirm = true
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .foregroundStyle(Color.primary)
+                                    .disabled(isSaving)
                                 }
                             }
                         }
@@ -469,88 +455,119 @@ struct ProjectMappingsView: View {
     private func automationEditor(_ item: ProjectMappingItem) -> some View {
         let id = item.projectId
         let draft = automationDrafts[id] ?? AutomationDraft(item.automation)
-        return SettingsCard(title: "自动处理", trailing: "策略 r\(draft.revision)") {
-            VStack(alignment: .leading, spacing: Spacing.m) {
-                Toggle("自动接收并处理此项目", isOn: draftBinding(id, \.enabled)).font(.kpBody).toggleStyle(.switch)
-                Text("关闭后停止新的自动接收、确认与修复规划；进行中的检查、Review 和交付继续。")
-                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            SettingsCard(title: "自动处理", trailing: "策略版本 r\(draft.revision)") {
+                ProjectFormRow(title: "自动接收并处理此项目",
+                               detail: "关闭后停止新的自动接收、确认与修复规划；进行中的检查、Review 和交付继续。") {
+                    Toggle("自动接收并处理此项目", isOn: draftBinding(id, \.enabled)).labelsHidden().toggleStyle(.switch)
+                }
                 ForEach(item.automationPreflight ?? []) { issue in
-                    SettingsNotice(text: issue.message, icon: "exclamationmark.triangle", tone: Color.kpOrange)
+                    ListRule()
+                    ProjectPlainRow {
+                        SettingsNotice(text: issue.message, icon: "exclamationmark.triangle", tone: Color.kpOrange)
+                    }
                 }
-                Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).font(.kpBody).toggleStyle(.switch)
-                Toggle("自动合并 PR", isOn: draftBinding(id, \.autoMerge)).font(.kpBody).toggleStyle(.switch)
-                Text("开启后，当前及后续待交付任务在评审、GitHub 检查通过且无冲突时自动合并。使用 merge commit，遵守分支保护，无需额外模型费用；独立于新任务接收开关。")
-                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Toggle("合并后构建并发布", isOn: draftBinding(id, \.releaseEnabled)).font(.kpBody).toggleStyle(.switch)
-                Text("保存只更新策略，不启动 Actions。开启后，新交付须完成发布；历史已完成任务仅可手动补发。关闭不取消已发送的构建。")
-                    .font(.kpLabel).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
+                ListRule()
+                ProjectFormRow(title: "自动确认计划") {
+                    Toggle("自动确认计划", isOn: draftBinding(id, \.confirm)).labelsHidden().toggleStyle(.switch)
+                }
+                ListRule()
+                ProjectFormRow(title: "自动合并 PR",
+                               detail: "开启后，当前及后续待交付任务在评审、GitHub 检查通过且无冲突时自动合并。使用 merge commit，遵守分支保护，无需额外模型费用；独立于新任务接收开关。") {
+                    Toggle("自动合并 PR", isOn: draftBinding(id, \.autoMerge)).labelsHidden().toggleStyle(.switch)
+                }
+                ListRule()
+                ProjectFormRow(title: "合并后构建并发布",
+                               detail: "保存只更新策略，不启动 Actions。开启后，新交付须完成发布；历史已完成任务仅可手动补发。关闭不取消已发送的构建。") {
+                    Toggle("合并后构建并发布", isOn: draftBinding(id, \.releaseEnabled)).labelsHidden().toggleStyle(.switch)
+                }
                 if draft.releaseEnabled {
-                    Picker("发布渠道", selection: draftBinding(id, \.releaseChannel)) {
-                        Text("预发布").tag("prerelease")
-                        Text("正式版").tag("stable")
-                    }.font(.kpBody)
-                    DisclosureGroup("构建发布配置") {
-                        VStack(alignment: .leading, spacing: Spacing.m) {
-                            releaseTextField("工作流文件", placeholder: ".github/workflows/pilot-release.yml", text: draftBinding(id, \.releaseWorkflowPath))
-                            releaseTextField("工作流分支或标签", placeholder: "main", text: draftBinding(id, \.releaseWorkflowRef))
-                            Text("工作流从此 ref 运行，构建内容使用批次冻结的目标提交。")
-                                .font(.kpLabel).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
-                            releaseTextField("初始版本", placeholder: "0.1.0", text: draftBinding(id, \.releaseVersionBase))
-                            releaseTextField("必需安装包（每行一个精确文件名）", placeholder: "Music-android.apk", text: draftBinding(id, \.releaseAssets), multiline: true)
-                            releaseTextField("必需工作流任务（每行一个显示名，可留空）", placeholder: "Android", text: draftBinding(id, \.releaseJobs), multiline: true)
-                        }.padding(.top, Spacing.s)
-                    }.font(.kpBody)
+                    ListRule()
+                    ProjectFormRow(title: "发布渠道") {
+                        Picker("发布渠道", selection: draftBinding(id, \.releaseChannel)) {
+                            Text("预发布").tag("prerelease")
+                            Text("正式版").tag("stable")
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    ListRule()
+                    ProjectPlainRow {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: Spacing.m) {
+                                releaseTextField("工作流文件", placeholder: ".github/workflows/pilot-release.yml", text: draftBinding(id, \.releaseWorkflowPath))
+                                releaseTextField("工作流分支或标签", placeholder: "main", text: draftBinding(id, \.releaseWorkflowRef))
+                                Text("工作流从此 ref 运行，构建内容使用批次冻结的目标提交。")
+                                    .font(.kpLabel).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
+                                releaseTextField("初始版本", placeholder: "0.1.0", text: draftBinding(id, \.releaseVersionBase))
+                                releaseTextField("必需安装包（每行一个精确文件名）", placeholder: "Music-android.apk", text: draftBinding(id, \.releaseAssets), multiline: true)
+                                releaseTextField("必需工作流任务（每行一个显示名，可留空）", placeholder: "Android", text: draftBinding(id, \.releaseJobs), multiline: true)
+                            }.padding(.top, Spacing.s)
+                        } label: {
+                            SettingsDisclosureLabel("构建发布配置")
+                        }
+                    }
                     if let issue = draft.releaseValidation {
-                        SettingsNotice(text: issue, icon: "exclamationmark.triangle.fill", tone: Color.kpOrange).fixedSize(horizontal: false, vertical: true)
+                        ListRule()
+                        ProjectPlainRow {
+                            SettingsNotice(text: issue, icon: "exclamationmark.triangle.fill", tone: Color.kpOrange).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-                Text("预算：最多修复 \(draft.fixRounds) 轮 · \(draft.minutes) 分钟 · \(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "成本不限" : "成本上限 $\(draft.cost)")")
-                    .font(.kpLabel)
-                    .foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: Spacing.l) {
-                        budgetControls(id, draft)
-                    }
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        budgetControls(id, draft)
+                ListRule()
+                ProjectFormRow(title: "预算") {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .center, spacing: Spacing.l) {
+                            budgetControls(id, draft)
+                        }
+                        VStack(alignment: .trailing, spacing: Spacing.s) {
+                            budgetControls(id, draft)
+                        }
                     }
                 }
                 if !draft.cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    Double(draft.cost.trimmingCharacters(in: .whitespacesAndNewlines)).map({ (0.5...100).contains($0) }) != true {
-                    SettingsNotice(text: "成本需为 0.5–100 美元，或留空。", icon: "exclamationmark.circle.fill", tone: Color.kpRed)
-                }
-                Text(automationAdvancedSummary(draft))
-                    .font(.kpLabel)
-                    .foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup("高级选项：标签与 PR 分支") {
-                    VStack(alignment: .leading, spacing: Spacing.m) {
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            Text("标签过滤（逗号分隔，留空接收全部）")
-                                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                            TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
-                                .textFieldStyle(.roundedBorder).font(.kpBody)
-                                .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
-                        }
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            Text("PR 目标分支（留空使用默认分支）")
-                                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                            TextField(item.originDefaultBranch.map { "留空使用默认分支 \($0)" } ?? "留空使用默认分支", text: draftBinding(id, \.base))
-                                .textFieldStyle(.roundedBorder).font(.kpBody)
-                                .accessibilityLabel("PR 目标分支，留空使用默认分支")
-                            if item.deliveryBaseExists == false, draft.base == (item.automation?.deliveryBase ?? "") {
-                                SettingsNotice(text: "origin 上不存在该分支", icon: "exclamationmark.circle.fill", tone: Color.kpRed)
-                            }
-                            if let notice = deliveryBaseNotice[id] {
-                                Text(notice).font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                    ListRule()
+                    ProjectPlainRow {
+                        SettingsNotice(text: "成本需为 0.5–100 美元，或留空。", icon: "exclamationmark.circle.fill", tone: Color.kpRed)
                     }
                 }
-                HStack(spacing: Spacing.m) {
+                ListRule()
+                ProjectPlainRow {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: Spacing.m) {
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                Text("标签过滤（逗号分隔，留空接收全部）")
+                                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                                TextField("例如 feedback, bug", text: draftBinding(id, \.labels))
+                                    .textFieldStyle(.roundedBorder).font(.kpBody)
+                                    .accessibilityLabel("标签过滤，逗号分隔，留空接收全部")
+                            }
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                Text("PR 目标分支（留空使用默认分支）")
+                                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                                TextField(item.originDefaultBranch.map { "留空使用默认分支 \($0)" } ?? "留空使用默认分支", text: draftBinding(id, \.base))
+                                    .textFieldStyle(.roundedBorder).font(.kpBody)
+                                    .accessibilityLabel("PR 目标分支，留空使用默认分支")
+                                if item.deliveryBaseExists == false, draft.base == (item.automation?.deliveryBase ?? "") {
+                                    SettingsNotice(text: "origin 上不存在该分支", icon: "exclamationmark.circle.fill", tone: Color.kpRed)
+                                }
+                                if let notice = deliveryBaseNotice[id] {
+                                    Text(notice).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        .padding(.top, Spacing.s)
+                    } label: {
+                        SettingsDisclosureLabel("高级选项：标签与 PR 分支", summary: automationAdvancedSummary(draft))
+                    }
+                }
+                ListRule()
+                ProjectPlainRow {
+                    Button("保存自动处理设置") { requestAutomationSave(item) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSaving || model.busy || !draft.valid)
                     Button("重新读取策略") {
                         Task {
                             await loadMappings(refreshRemote: false, resetAutomationFor: id)
@@ -558,14 +575,12 @@ struct ProjectMappingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(isSaving || isLoading)
-                    Button("保存自动处理设置") { requestAutomationSave(item) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSaving || model.busy || !draft.valid)
                 }
-                Text("保存冲突时保留草稿，重新读取会替换当前策略草稿。")
-                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
             }
             .disabled(isSaving || isLoading)
+            Text("保存冲突时保留草稿，重新读取会替换当前策略草稿。")
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                .padding(.horizontal, Spacing.xs)
         }
     }
 
@@ -582,20 +597,22 @@ struct ProjectMappingsView: View {
     @ViewBuilder private func budgetControls(_ id: String, _ draft: AutomationDraft) -> some View {
         Stepper("最多修复 \(draft.fixRounds) 轮", value: draftBinding(id, \.fixRounds), in: 0...2).font(.kpBody)
         Stepper("时长上限：\(draft.minutes) 分钟", value: draftBinding(id, \.minutes), in: 30...1440, step: 30).font(.kpBody)
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            Text("成本上限（美元，留空不限）")
-                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: Spacing.s) {
+            Text("成本上限 $")
+                .font(.kpBody)
             TextField("0.5–100", text: draftBinding(id, \.cost))
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder).font(.kpBody)
-                .frame(width: 120)
+                .frame(width: 80)
                 .accessibilityLabel("成本上限，美元，留空不限")
         }
     }
 
+    /// 高级选项折叠行右侧的摘要：标签过滤与 PR 目标分支。
     private func automationAdvancedSummary(_ draft: AutomationDraft) -> String {
         let labels = draft.labels.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = draft.base.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "标签：\(labels.isEmpty ? "全部任务" : labels) · PR 目标：\(base.isEmpty ? "默认分支" : base)"
+        return "\(labels.isEmpty ? "全部任务" : labels) · \(base.isEmpty ? "默认分支" : base)"
     }
 
     private func requestAutomationSave(_ item: ProjectMappingItem) {
@@ -648,7 +665,7 @@ struct ProjectMappingsView: View {
         return HStack(spacing: Spacing.xs) {
             Circle()
                 .fill(status.tone)
-                .frame(width: 6, height: 6)
+                .frame(width: 8, height: 8)
             Text(status.label)
                 .font(.kpLabel)
                 .foregroundStyle(Color.primary)
@@ -814,17 +831,18 @@ struct ProjectMappingsView: View {
     }
 }
 
-/// 项目详情卡片（plan §S10 项目页）：标题行（右侧可放一句说明）+ 内容；kpControl 底，圆角 Radius.group，无阴影。
+/// 项目详情卡片（ui-spec §4.11，对齐设计画板）：区段标题在面板外（右侧可放一句说明），
+/// 内容是分组面板里一行行的字段，行与行之间由调用方放 `ListRule`。
 private struct SettingsCard<Content: View>: View {
     let title: String
     var trailing: String? = nil
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
+        VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
                 Text(title)
-                    .font(.kpSection)
+                    .font(.kpBody.weight(.semibold))
                 Spacer(minLength: Spacing.s)
                 if let trailing {
                     Text(trailing)
@@ -832,11 +850,44 @@ private struct SettingsCard<Content: View>: View {
                         .foregroundStyle(Color.kpSecondary)
                 }
             }
-            content()
+            .padding(.horizontal, Spacing.xs)
+            GroupPanel {
+                content()
+            }
         }
-        .padding(Spacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
+    }
+}
+
+/// 卡片里的字段行：左侧标题加可选 12pt 说明，右侧放控件；行高不低于 40pt。
+private struct ProjectFormRow<Control: View>: View {
+    let title: String
+    var detail: String? = nil
+    @ViewBuilder let control: () -> Control
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Spacing.m) {
+            SettingsRowLabel(title: title, detail: detail)
+            Spacer(minLength: Spacing.m)
+            control()
+        }
+        .padding(.horizontal, Spacing.m)
+        .padding(.vertical, Spacing.s)
+        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+    }
+}
+
+/// 卡片里没有左侧标题的一行（提示、折叠、按钮行）：内容靠左，行高不低于 40pt。
+private struct ProjectPlainRow<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        HStack(spacing: Spacing.m) {
+            content()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Spacing.m)
+        .padding(.vertical, Spacing.s)
+        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
     }
 }
 
@@ -856,53 +907,88 @@ private struct ProjectEngineEditor: View {
     @State private var message: String?
     @State private var confirmingLive = false
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Picker("引擎模式", selection: $mode) {
-                Text("Legacy · 旧 CLI 路径").tag("legacy")
-                Text("Shadow · 只记录对比").tag("shadow")
-                Text("Live · 自动推进").tag("live")
-            }.font(.kpBody)
-            Text("Live 会接收并推进已开启自动处理的项目；Shadow 仅记录对比。新 App 不自动驱动 Legacy 项目，旧 CLI 路径保留；显式手动规划不受影响。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-            Button("保存引擎模式") {
-                if mode == "live", item.engineMode != "live" { confirmingLive = true }
-                else { Task { await save("set-project-engine-mode", field: "engine_mode", value: mode) } }
-            }
-            DisclosureGroup("历史兼容验证环境：仅为历史兼容保留，不用于当前 Plus 验证") {
-                Text("历史兼容验证环境（JSON 字符串字典）").font(.kpBody)
-                TextEditor(text: $verifyJSON).font(.kpBody.monospaced())
-                    .frame(minHeight: 80, maxHeight: 120)
-                    .accessibilityLabel("项目 verify_env")
-                Text("此配置仅为历史兼容保留，不用于当前 Plus 验证；验证环境由 Plus 执行端管理。凭据放在凭据文件；TOKEN / SECRET / AUTHORIZATION 等键会被核心拒绝。")
-                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                Button("保存历史兼容配置") {
-                    do {
-                        guard let data = verifyJSON.data(using: .utf8),
-                              let object = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
-                            error = "验证环境必须为字符串→字符串字典"; return
-                        }
-                        Task { await save("set-project-verify-env", field: "verify_env", value: object) }
-                    } catch { self.error = "验证环境 JSON 无效：\(error.localizedDescription)" }
+        VStack(alignment: .leading, spacing: 0) {
+            ProjectFormRow(title: "引擎模式",
+                           detail: "Live 会接收并推进已开启自动处理的项目；Shadow 仅记录对比。新 App 不自动驱动 Legacy 项目，旧 CLI 路径保留；显式手动规划不受影响。") {
+                HStack(spacing: Spacing.s) {
+                    Picker("引擎模式", selection: $mode) {
+                        Text("Legacy · 旧 CLI 路径").tag("legacy")
+                        Text("Shadow · 只记录对比").tag("shadow")
+                        Text("Live · 自动推进").tag("live")
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Button("保存") {
+                        if mode == "live", item.engineMode != "live" { confirmingLive = true }
+                        else { Task { await save("set-project-engine-mode", field: "engine_mode", value: mode) } }
+                    }
+                    .accessibilityLabel("保存引擎模式")
                 }
             }
-            Text("备用模型").font(.kpBody)
-            TextField("服务商", text: $provider).textFieldStyle(.roundedBorder)
-                .accessibilityLabel("备用模型 服务商").help("provider_id")
-            TextField("模型", text: $fallback).textFieldStyle(.roundedBorder)
-                .accessibilityLabel("备用模型 模型").help("model_id")
-            Text("留空两项可清除；使用前核心会检查 Plus 本地模型缓存，不会静默改模型。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-            Button("保存备用模型") {
-                let p = provider.trimmingCharacters(in: .whitespacesAndNewlines)
-                let m = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard p.isEmpty == m.isEmpty else { error = "请同时填写服务商和模型，或同时留空"; return }
-                Task { await save("set-project-fallback-model", field: "fallback_model", value: p.isEmpty ? NSNull() : ["provider_id": p, "model_id": m]) }
+            ListRule()
+            ProjectFormRow(title: "备用模型",
+                           detail: "留空两项可清除；使用前核心会检查 Plus 本地模型缓存，不会静默改模型。") {
+                HStack(spacing: Spacing.s) {
+                    TextField("服务商", text: $provider).labelsHidden().textFieldStyle(.roundedBorder)
+                        .frame(width: 110)
+                        .accessibilityLabel("备用模型 服务商").help("provider_id")
+                    TextField("模型", text: $fallback).labelsHidden().textFieldStyle(.roundedBorder)
+                        .frame(width: 130)
+                        .accessibilityLabel("备用模型 模型").help("model_id")
+                    Button("保存") {
+                        let p = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let m = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard p.isEmpty == m.isEmpty else { error = "请同时填写服务商和模型，或同时留空"; return }
+                        Task { await save("set-project-fallback-model", field: "fallback_model", value: p.isEmpty ? NSNull() : ["provider_id": p, "model_id": m]) }
+                    }
+                    .accessibilityLabel("保存备用模型")
+                }
             }
-            if let error { SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: Color.kpRed) }
-            if let message { Text(message).font(.kpLabel).foregroundStyle(Color.kpSecondary) }
-            Button("重新读取引擎设置") { seed(); error = nil; message = nil }
-            Text("冲突时保留草稿；重新读取项目后，再点「重新读取引擎设置」。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            ListRule()
+            ProjectPlainRow {
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Text("历史兼容验证环境（JSON 字符串字典）").font(.kpBody)
+                        TextEditor(text: $verifyJSON).font(.kpBody.monospaced())
+                            .frame(minHeight: 80, maxHeight: 120)
+                            .accessibilityLabel("项目 verify_env")
+                        Text("此配置仅为历史兼容保留，不用于当前 Plus 验证；验证环境由 Plus 执行端管理。凭据放在凭据文件；TOKEN / SECRET / AUTHORIZATION 等键会被核心拒绝。")
+                            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("保存历史兼容配置") {
+                            do {
+                                guard let data = verifyJSON.data(using: .utf8),
+                                      let object = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+                                    error = "验证环境必须为字符串→字符串字典"; return
+                                }
+                                Task { await save("set-project-verify-env", field: "verify_env", value: object) }
+                            } catch { self.error = "验证环境 JSON 无效：\(error.localizedDescription)" }
+                        }
+                    }
+                    .padding(.top, Spacing.s)
+                } label: {
+                    SettingsDisclosureLabel("历史兼容验证环境", summary: "仅为历史兼容保留，不用于当前 Plus 验证")
+                }
+            }
+            if let error {
+                ListRule()
+                ProjectPlainRow {
+                    SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: Color.kpRed)
+                }
+            }
+            if let message {
+                ListRule()
+                ProjectPlainRow {
+                    Text(message).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
+            }
+            ListRule()
+            ProjectPlainRow {
+                Button("重新读取引擎设置") { seed(); error = nil; message = nil }
+                Text("冲突时保留草稿；重新读取项目后，再点「重新读取引擎设置」。")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }.disabled(saving || model.busy)
         .onAppear { if !loaded { seed(); loaded = true } }
         .confirmationDialog("启用此项目 Live 自动推进？", isPresented: $confirmingLive) {

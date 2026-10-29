@@ -76,7 +76,7 @@ final class EngineSupervisor: ObservableObject {
                 error = recoveryError
                 restartFailures = 0
             } else if process?.isRunning == true, let launchedAt, Date().timeIntervalSince(launchedAt) > 15 {
-                error = "引擎心跳未确认，请检查环境健康与运行记录"
+                error = "引擎心跳未确认，请检查总览的「环境」与运行记录"
             }
             if (r.automation?.activeTasks ?? 0) > 0, activity == nil {
                 activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "KaneoPilot 自动化任务进行中")

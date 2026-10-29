@@ -195,11 +195,12 @@ struct RootView: View {
         return VStack(alignment: .leading, spacing: Spacing.s) {
             Label {
                 Text(headline.text)
-                    .font(.kpLabel)
+                    .font(.kpBody.weight(.semibold))
                     .foregroundStyle(.primary)
             } icon: {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(headline.tone.color)
+                Circle()
+                    .fill(headline.tone.color)
+                    .frame(width: 8, height: 8)
             }
             Text(automationDetail)
                 .font(.kpSmall)

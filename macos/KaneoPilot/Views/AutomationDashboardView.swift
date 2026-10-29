@@ -1,6 +1,7 @@
 import SwiftUI
 
 /// Inbox is the default route; every automation fact comes from core JSON.
+/// 版式对齐设计画板 dash-after（ui-spec §4.15）：区段标题在分组面板外面，面板内行间一条 1pt 细线。
 struct AutomationDashboardView: View {
     @EnvironmentObject private var model: AppViewModel
     @ObservedObject private var engine = AppRuntime.shared.scheduler
@@ -15,8 +16,9 @@ struct AutomationDashboardView: View {
     @State private var appliedQuery = ""
     @State private var phase = ""
     @State private var selectedID: String?
-    @State private var healthChecksExpanded = false
-    @State private var engineRecordsExpanded = false
+    @State private var healthDetailsExpanded = false
+    private static let attentionRowMinHeight: CGFloat = 60
+    private static let dataRowHeight: CGFloat = 36
     private var inbox: [AttentionItem] {
         model.attentionItems.filter { item in
             (appliedQuery.isEmpty || [item.title, item.projectName].compactMap { $0 }.joined(separator: " ").localizedCaseInsensitiveContains(appliedQuery))
@@ -30,13 +32,15 @@ struct AutomationDashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.xl) {
-                sectionBox { attentionSection }
-                sectionBox { flowSection }
-                sectionBox { progressingSection }
-                sectionBox { projectsSection }
-                sectionBox { healthSection }
+                attentionSection
+                flowSection
+                progressingSection
+                HStack(alignment: .top, spacing: Spacing.l) {
+                    projectsSection.frame(maxWidth: .infinity, alignment: .topLeading)
+                    healthSection.frame(maxWidth: .infinity, alignment: .topLeading)
+                }
             }
-            .padding(Spacing.l)
+            .padding(Spacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.kpWindow)
@@ -77,234 +81,454 @@ struct AutomationDashboardView: View {
         }
     }
 
-    /// 区段分组容器：圆角 10、控件底色，代替分隔线（ui-spec §3 容器规则）。
-    private func sectionBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: Spacing.m, content: content)
-            .padding(Spacing.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
-    }
+    // MARK: - 需要你
 
+    /// 页面标题「需要你 · N」18pt 在面板外面，右侧阶段菜单与「查看全部 ›」（ui-spec §4.15）。
     private var attentionSection: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            HStack(spacing: Spacing.s) {
-                Text("需要你 · \(model.attentionCount)").font(.kpSection)
-                Spacer()
-                Picker("按阶段筛选", selection: $phase) {
-                    Text("全部阶段").tag("")
-                    ForEach(["plan", "dispatch", "monitor", "review", "delivery"], id: \.self) {
-                        Text(Labels.stage($0)).tag($0)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 160)
-                Button("查看请求") { onPending() }.font(.kpBody)
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
+                Text("需要你 · \(model.attentionCount)").font(.kpTitle)
+                Spacer(minLength: Spacing.m)
+                phaseMenu
+                Button { onPending() } label: { Text("查看全部 ›").font(.kpBody) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
             }
-            if !engine.attentionLoaded, let error = engine.error {
+            GroupPanel { attentionContent }
+        }
+    }
+
+    private var phaseMenu: some View {
+        Menu {
+            Picker("按阶段筛选", selection: $phase) {
+                Text("全部阶段").tag("")
+                ForEach(["plan", "dispatch", "monitor", "review", "delivery"], id: \.self) {
+                    Text(Labels.stage($0)).tag($0)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            Text(phase.isEmpty ? "全部阶段" : Labels.stage(phase)).font(.kpLabel)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityLabel("按阶段筛选")
+    }
+
+    @ViewBuilder
+    private var attentionContent: some View {
+        if !engine.attentionLoaded, let error = engine.error {
+            panelMessage {
                 errorLine(error)
                 Button("重试读取") { Task { await model.refreshAll() } }
-            } else if !engine.attentionLoaded {
-                HStack { ProgressView().controlSize(.small); Text("正在读取…").font(.kpBody) }
-            } else if inbox.isEmpty {
+            }
+        } else if !engine.attentionLoaded {
+            panelMessage {
+                HStack(spacing: Spacing.s) { ProgressView().controlSize(.small); Text("正在读取…").font(.kpBody) }
+            }
+        } else if inbox.isEmpty {
+            panelMessage {
                 Text("暂无需要你处理的事项").font(.kpBody)
                 Text(appliedQuery.isEmpty && phase.isEmpty ? "自动化会继续推进；需要你决定时会显示在这里。" : "没有匹配的项目或阶段。")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 Button("刷新") { Task { await model.refreshAll() } }
-            } else {
-                ForEach(inbox) { item in
-                    attentionRow(item)
-                    Divider()
-                }
+            }
+        } else {
+            ForEach(Array(inbox.enumerated()), id: \.element.id) { index, item in
+                if index > 0 { ListRule() }
+                attentionRow(item)
             }
         }
     }
 
-    /// 「需要你」两行行（ui-spec §4.15）：第一行标题与原因，第二行「项目 · 阶段 · 自 HH:mm」；
-    /// 右侧一个按钮取核心推荐动作，两者都打开任务详情。
+    private func panelMessage<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s, content: content)
+            .padding(Spacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 「需要你」一行四栏（ui-spec §4.15）：16pt 图标、标题与原因两行、「项目 · 阶段 · 自 HH:mm」、核心推荐动作按钮；
+    /// 左侧文字区与右侧按钮都打开任务详情。
     private func attentionRow(_ item: AttentionItem) -> some View {
-        let reason: String? = item.questionPreview.map { "\(item.questionLabel) · \($0.count)题" } ?? item.blockedSummary ?? item.failureReason
         let stage = item.failureStage.map { Labels.stage($0) } ?? "未提供阶段"
         let actionTitle = item.recommended.map { Labels.action($0) } ?? "查看详情"
-        let title = Text([item.title ?? item.taskId, reason].compactMap { $0 }.joined(separator: " · "))
-            .font(.kpBody)
-            .foregroundStyle(.primary)
-            .lineLimit(1)
+        let icon = attentionIcon(item)
+        let reason = attentionReason(item)
         return HStack(spacing: Spacing.m) {
             Button {
                 selectedID = item.taskId
                 open(item.taskId)
             } label: {
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    if item.questionPreview != nil {
-                        Label {
-                            title
-                        } icon: {
-                            Image(systemName: "exclamationmark.circle").foregroundStyle(Color.kpOrange)
+                HStack(spacing: Spacing.m) {
+                    Image(systemName: icon.name)
+                        .foregroundStyle(icon.color)
+                        .frame(width: Spacing.l)
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text(item.title ?? item.taskId)
+                            .font(.kpBody)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if let reason {
+                            Text(reason)
+                                .font(.kpLabel)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
                         }
-                    } else {
-                        title
                     }
-                    Text("\(item.projectName ?? "未提供项目") · \(stage) · 自 \(TimeFormat.short(item.since))")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            Text("\(item.projectName ?? "未提供项目") · \(stage) · 自 \(TimeFormat.short(item.since))")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .lineLimit(1)
+                .layoutPriority(1)
             Button(actionTitle) {
                 selectedID = item.taskId
                 open(item.taskId)
             }
-            .controlSize(.small)
+            .buttonStyle(.bordered)
+            .controlSize(.large)
         }
-        .frame(minHeight: RowHeight.preferredTwoLine)
-        .padding(.horizontal, Spacing.s)
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+        .frame(minHeight: Self.attentionRowMinHeight)
         .background(selectedID == item.taskId ? Color.accentColor.opacity(0.08) : Color.clear)
     }
 
+    /// 开放执行问题为橙色感叹圆圈，执行端失联为红色三角，其余阻塞为橙色三角（ui-spec §5）。
+    private func attentionIcon(_ item: AttentionItem) -> (name: String, color: Color) {
+        if item.questionPreview != nil { return ("exclamationmark.circle", Color.kpOrange) }
+        if item.reasonCode == "concurrency_stalled" { return ("exclamationmark.triangle.fill", Color.kpRed) }
+        return ("exclamationmark.triangle.fill", Color.kpOrange)
+    }
+
+    private func attentionReason(_ item: AttentionItem) -> String? {
+        if let preview = item.questionPreview {
+            let head = "\(item.questionLabel) · \(preview.count)题"
+            return preview.firstTitle.isEmpty ? head : "\(head)：\(preview.firstTitle)"
+        }
+        return item.blockedSummary ?? item.failureReason
+    }
+
+    // MARK: - 流水线
+
     private var flowSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Text("流水线").font(.kpSection)
-            HStack(spacing: Spacing.m) {
-                ForEach(BoardColumn.allCases.filter { $0 != .failed }) { column in
-                    Button { onTasks(column) } label: {
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            Text(column.title).font(.kpBody)
-                            Text(model.overview?.counts?.board?[column.rawValue].map(String.init) ?? "—").font(.kpMetric)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }.buttonStyle(.bordered)
-                }
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                Text("流水线").font(.kpSection)
+                Spacer(minLength: Spacing.m)
+                Text("已排队不等于已开始，执行端领取后才开始；开启构建发布的项目在版本发布后完成交付。")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text("已排队不等于已开始，执行端领取后才开始；开启构建发布的项目在版本发布后完成交付。")
-                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            GroupPanel {
+                HStack(spacing: 0) {
+                    ForEach(Array(flowColumns.enumerated()), id: \.element.id) { index, column in
+                        if index > 0 { VerticalRule() }
+                        flowCell(column)
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
+
+    /// 流水线五格：看板六列去掉「阻塞 / 失败」（它们在「需要你」里）。
+    private var flowColumns: [BoardColumn] { BoardColumn.allCases.filter { $0 != .failed } }
+
+    /// 一格：圆点加名称，下面 22pt 数字；整格可点，进入任务页对应列。
+    private func flowCell(_ column: BoardColumn) -> some View {
+        Button { onTasks(column) } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Circle().fill(column.color).frame(width: 8, height: 8)
+                    Text(column.title).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
+                Text(model.overview?.counts?.board?[column.rawValue].map(String.init) ?? "—")
+                    .font(.kpMetric)
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - 正在推进
 
     private var progressingSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            HStack { Text("正在推进").font(.kpSection); Spacer(); Button("全部任务 ›") { onTasks(nil) } }
-            if progressing.isEmpty { Text("当前没有进行中任务").font(.kpSmall).foregroundStyle(Color.kpSecondary) }
-            ForEach(progressing) { task in
-                Button { open(task.taskId) } label: {
-                    HStack(spacing: Spacing.m) {
-                        Text([task.projectName, task.title ?? task.taskId].compactMap { $0 }.joined(separator: " · "))
-                            .font(.kpBody).foregroundStyle(.primary).lineLimit(1)
-                        Spacer(minLength: Spacing.s)
-                        Text(stageAndCondition(task))
-                            .font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                Text("正在推进 · \(progressing.count)").font(.kpSection)
+                Spacer(minLength: Spacing.m)
+                Button { onTasks(nil) } label: { Text("全部任务 ›").font(.kpBody) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+            GroupPanel {
+                if progressing.isEmpty {
+                    panelMessage {
+                        Text("当前没有进行中任务").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                     }
-                    .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
-                    .contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                Divider()
+                } else {
+                    ForEach(Array(progressing.enumerated()), id: \.element.id) { index, task in
+                        if index > 0 { ListRule() }
+                        progressingRow(task)
+                    }
+                }
             }
         }
     }
 
-    /// 右侧「阶段 · 条件」，如「执行 · 执行中」；8 步进度条不在总览出现（ui-spec §4.16）。
+    /// 左侧标题与项目名两行；右侧 8 段迷你进度条加「阶段 · 条件」（ui-spec §4.15）。
+    private func progressingRow(_ task: TaskSummary) -> some View {
+        Button { open(task.taskId) } label: {
+            HStack(spacing: Spacing.l) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(task.title ?? task.taskId)
+                        .font(.kpBody)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(task.projectName ?? "未提供项目")
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: Spacing.s) {
+                    PhaseMiniBar(phase: task.phase)
+                    Text(stageAndCondition(task))
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, minHeight: RowHeight.twoLine, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 右侧「阶段 · 条件」，如「执行 · 执行中」；阶段与条件都取核心 phase / condition。
     private func stageAndCondition(_ task: TaskSummary) -> String {
         let stage = task.phase.map(PhaseStepperView.title) ?? "未提供"
         let condition = task.condition.map(PhaseStepperView.conditionTitle) ?? "未提供"
         return "\(stage) · \(condition)"
     }
 
+    // MARK: - 项目自动化
+
     private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            HStack { Text("项目自动化").font(.kpSection); Spacer(); Button("项目设置") { onSettings(.projects) } }
-            if let projectsError { errorLine(projectsError) }
-            if projects.isEmpty { Text("尚无项目配置").font(.kpSmall).foregroundStyle(Color.kpSecondary) }
-            ForEach(projects) { project in
-                HStack(spacing: Spacing.m) {
-                    Text(project.displayName).font(.kpBody).frame(maxWidth: .infinity, alignment: .leading)
-                    Text(project.automation?.enabled == true ? "自动处理已开" : "自动处理已关").font(.kpSmall)
-                    Text(project.engineMode ?? "未提供模式").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                }.frame(minHeight: RowHeight.interactive)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("项目自动化").font(.kpSection)
+            GroupPanel {
+                if let projectsError {
+                    errorLine(projectsError).padding(Spacing.m)
+                    ListRule()
+                }
+                if projects.isEmpty {
+                    Text("尚无项目配置")
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .padding(.horizontal, Spacing.l)
+                        .frame(height: Self.dataRowHeight)
+                    ListRule()
+                }
+                ForEach(projects) { project in
+                    projectRow(project)
+                    ListRule()
+                }
+                Button { onSettings(.projects) } label: {
+                    HStack {
+                        Text("项目设置").font(.kpBody)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.kpSmall).accessibilityHidden(true)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, Spacing.l)
+                    .frame(height: Self.dataRowHeight)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
     }
 
+    /// 项目名 ｜ 色点加自动处理开关 ｜ 等宽胶囊写引擎模式。
+    private func projectRow(_ project: ProjectMappingItem) -> some View {
+        let enabled = project.automation?.enabled == true
+        return HStack(spacing: Spacing.m) {
+            Text(project.displayName)
+                .font(.kpBody)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 6) {
+                Circle().fill(enabled ? Color.kpGreen : Color.kpGray).frame(width: 8, height: 8)
+                Text(enabled ? "自动处理已开" : "自动处理已关")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+            }
+            Text(project.engineMode ?? "未提供模式")
+                .font(.kpSmall.monospaced())
+                .padding(.horizontal, Spacing.s)
+                .frame(height: 20)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+        }
+        .padding(.horizontal, Spacing.l)
+        .frame(height: Self.dataRowHeight)
+    }
+
+    // MARK: - 环境
+
+    /// 区段标题「环境」；引擎心跳、诊断摘要两行，其下是未通过项，最后一行折叠「详情 · 诊断 N 项 · 引擎记录 M 条」。
     private var healthSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            HStack {
-                Text("环境健康").font(.kpSection)
-                Spacer()
-                Button(model.doctorRunning ? "检测中…" : "在线诊断") { Task { await model.runDoctorOnline() } }
-                    .disabled(model.doctorRunning || model.busy)
-            }
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                statusLine(engineHealthTitle, icon: engineHealthIcon,
-                           color: engine.engineStatus == nil ? Color.kpSecondary : engineHealthy ? Color.kpGreen : Color.kpOrange)
-                statusLine(doctorHealthTitle, icon: doctorHealthIcon,
-                           color: doctorNeedsAttention ? Color.kpOrange : Color.kpSecondary)
-            }.font(.kpBody)
-            if let error = engine.error { errorLine(error) }
-            ForEach(doctorIssues) { check in
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    statusLine(Labels.doctorCheck(check.name), icon: "exclamationmark.triangle", color: Color.kpOrange)
-                    Text(check.detail ?? "未提供检查结果，请重新诊断。")
-                        .foregroundStyle(Color.kpSecondary)
-                        .textSelection(.enabled)
-                }.font(.kpSmall)
-            }
-            if !doctorChecks.isEmpty {
-                DisclosureGroup("诊断详情（\(doctorChecks.count) 项）", isExpanded: $healthChecksExpanded) {
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        ForEach(doctorChecks) { check in
-                            HStack(alignment: .top, spacing: Spacing.m) {
-                                Label {
-                                    Text(Labels.doctorCheck(check.name))
-                                } icon: {
-                                    Image(systemName: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
-                                        .foregroundStyle(check.skipped != true && check.ok != true ? Color.kpOrange : Color.kpSecondary)
-                                }
-                                .frame(width: 148, alignment: .leading)
-                                Text(check.skipped == true ? "未检查" : check.ok == true ? "通过" : check.ok == false ? "未通过" : "未确认")
-                                    .frame(width: 44, alignment: .leading)
-                                Text(check.detail ?? "未提供详情")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
-                            .foregroundStyle(check.skipped != true && check.ok != true ? Color.primary : Color.kpSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("环境").font(.kpSection)
+            GroupPanel {
+                healthRow {
+                    Image(systemName: engineHealthIcon)
+                        .foregroundStyle(engine.engineStatus == nil ? Color.kpSecondary : engineHealthy ? Color.kpGreen : Color.kpOrange)
+                    Text(engineHealthTitle).foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                }
+                ListRule()
+                healthRow {
+                    Image(systemName: doctorHealthIcon)
+                        .foregroundStyle(doctorNeedsAttention ? Color.kpOrange : Color.kpSecondary)
+                    Text(doctorHealthTitle)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button(model.doctorRunning ? "检测中…" : "在线诊断") { Task { await model.runDoctorOnline() } }
+                        .font(.kpLabel)
+                        .controlSize(.small)
+                        .disabled(model.doctorRunning || model.busy)
+                }
+                if let error = engine.error {
+                    ListRule()
+                    errorLine(error).padding(Spacing.m)
+                }
+                ForEach(doctorIssues) { check in
+                    ListRule()
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Label {
+                            Text(Labels.doctorCheck(check.name)).foregroundStyle(.primary)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle").foregroundStyle(Color.kpOrange)
                         }
-                    }.font(.kpSmall).padding(.top, Spacing.s)
-                }.font(.kpSmall).foregroundStyle(Color.kpSecondary)
-            }
-            if !engineRecords.isEmpty {
-                DisclosureGroup("引擎记录（\(engineRecords.count) 条）", isExpanded: $engineRecordsExpanded) {
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        ForEach(engineRecords) { instance in
-                            HStack(alignment: .top, spacing: Spacing.m) {
-                                Text(engineRecordTitle(instance)).frame(width: 100, alignment: .leading)
-                                    .foregroundStyle(instance.active == true ? Color.primary : Color.kpSecondary)
-                                Text("PID \(instance.pid.map(String.init) ?? "—")")
-                                    .monospacedDigit().frame(width: 96, alignment: .leading)
-                                Text("启动 \(TimeFormat.short(instance.startedAt)) · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }.fixedSize(horizontal: false, vertical: true)
-                        }
-                    }.font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled).padding(.top, Spacing.s)
-                }.font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        Text(check.detail ?? "未提供检查结果，请重新诊断。")
+                            .foregroundStyle(Color.kpSecondary)
+                            .textSelection(.enabled)
+                    }
+                    .font(.kpLabel)
+                    .padding(Spacing.m)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if !doctorChecks.isEmpty || !engineRecords.isEmpty {
+                    ListRule()
+                    healthDetailsToggle
+                    if healthDetailsExpanded {
+                        ListRule()
+                        healthDetails
+                    }
+                }
             }
         }
+    }
+
+    private func healthRow<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: Spacing.s, content: content)
+            .font(.kpBody)
+            .padding(.horizontal, Spacing.l)
+            .frame(minHeight: Self.dataRowHeight)
+    }
+
+    private var healthDetailsTitle: String {
+        var parts = ["详情"]
+        if !doctorChecks.isEmpty { parts.append("诊断 \(doctorChecks.count) 项") }
+        if !engineRecords.isEmpty { parts.append("引擎记录 \(engineRecords.count) 条") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var healthDetailsToggle: some View {
+        Button { healthDetailsExpanded.toggle() } label: {
+            HStack(spacing: Spacing.s) {
+                Text(healthDetailsTitle).font(.kpBody)
+                Spacer(minLength: 0)
+                Image(systemName: healthDetailsExpanded ? "chevron.down" : "chevron.right")
+                    .font(.kpSmall)
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(Color.kpSecondary)
+            .padding(.horizontal, Spacing.l)
+            .frame(minHeight: Self.dataRowHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(healthDetailsExpanded ? "已展开" : "已折叠")
+    }
+
+    /// 展开内容：先「诊断详情」再「引擎记录」；名称与状态一行，详情在下一行并可换行、可复制。
+    private var healthDetails: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            if !doctorChecks.isEmpty {
+                Text("诊断详情").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
+                ForEach(doctorChecks) { check in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: Spacing.s) {
+                            Label {
+                                Text(Labels.doctorCheck(check.name))
+                            } icon: {
+                                Image(systemName: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
+                                    .foregroundStyle(check.skipped != true && check.ok != true ? Color.kpOrange : Color.kpSecondary)
+                            }
+                            Spacer(minLength: Spacing.s)
+                            Text(check.skipped == true ? "未检查" : check.ok == true ? "通过" : check.ok == false ? "未通过" : "未确认")
+                        }
+                        Text(check.detail ?? "未提供详情")
+                            .foregroundStyle(Color.kpSecondary)
+                            .textSelection(.enabled)
+                    }
+                    .foregroundStyle(check.skipped != true && check.ok != true ? Color.primary : Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !engineRecords.isEmpty {
+                Text("引擎记录").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
+                ForEach(engineRecords) { instance in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: Spacing.s) {
+                            Text(engineRecordTitle(instance))
+                                .foregroundStyle(instance.active == true ? Color.primary : Color.kpSecondary)
+                            Spacer(minLength: Spacing.s)
+                            Text("PID \(instance.pid.map(String.init) ?? "—")").monospacedDigit()
+                        }
+                        Text("启动 \(TimeFormat.short(instance.startedAt)) · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
+                            .foregroundStyle(Color.kpSecondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.kpLabel)
+        .textSelection(.enabled)
+        .padding(Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 错误行：文字用主色，错误由红色图标表达（ui-spec §3：彩色只作图标与徽标）。
     private func errorLine(_ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.kpRed)
-            Text(text).font(.kpSmall)
-        }
-    }
-
-    /// 状态行：图标着色，文字用主色。
-    private func statusLine(_ title: String, icon: String, color: Color) -> some View {
-        Label {
-            Text(title).foregroundStyle(.primary)
-        } icon: {
-            Image(systemName: icon).foregroundStyle(color)
+            Text(text).font(.kpLabel)
         }
     }
 
@@ -359,5 +583,22 @@ struct AutomationDashboardView: View {
         let old = inbox.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : inbox.count)
         selectedID = inbox[min(max(old + step, 0), inbox.count - 1)].taskId
         return .handled
+    }
+}
+
+/// 8 段迷你进度条（ui-spec §4.15）：每段 16×4pt、间距 2pt；当前阶段着蓝色，其余用分隔灰。
+/// 阶段只取核心给出的 `phase`，Swift 不推断已完成的阶段；不在八步之内的阶段全部为灰。
+private struct PhaseMiniBar: View {
+    let phase: String?
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(PhaseStepperView.steps, id: \.self) { step in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(step == phase ? Color.kpBlue : Color.kpSeparator)
+                    .frame(width: 16, height: 4)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
