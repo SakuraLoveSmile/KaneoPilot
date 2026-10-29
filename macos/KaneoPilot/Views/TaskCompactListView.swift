@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
-/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你、已排队、执行中、待评审、最近），空组隐藏。
+/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需关注、已排队、执行中、待评审、最近），空组隐藏。
 /// 共用搜索、看板列筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
     /// 已套用搜索与看板列筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
@@ -111,7 +111,7 @@ struct TaskCompactListView: View {
 
     // MARK: - 分组头部
 
-    /// 通栏浅灰带（高 28pt）：标题 12pt 半粗，计数是同行纯文字；「需要你」前有橙色感叹圆圈图标（ui-spec §4.18）。
+    /// 通栏浅灰带（高 28pt）：标题 12pt 半粗，计数是同行纯文字；「需关注」前有橙色感叹圆圈图标（ui-spec §4.18）。
     /// 分组头随列表置顶，所以底色必须不透明：先铺页面底色，再叠半透明灰。
     /// 带的上沿由上一行（或 chips 条）的下分隔线充当，这里只画下沿，避免两条线叠成 2pt。
     private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
@@ -152,7 +152,7 @@ enum ObserveChip: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .all: return "全部"
-        case .needsYou: return "需要你"
+        case .needsYou: return "需关注"
         case .running: return "执行中"
         case .queued: return "已排队"
         case .review: return "待评审"
@@ -180,7 +180,7 @@ enum ObserveGroup: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .needsYou: return "需要你"
+        case .needsYou: return "需关注"
         case .queued: return "已排队"
         case .running: return "执行中"
         case .review: return "待评审"
@@ -188,7 +188,8 @@ enum ObserveGroup: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 收件箱项，以及阻塞、失败的任务。
+    /// 收件箱项，以及阻塞、失败的任务。显示名不用「需要你」：那个词只指收件箱（侧栏、菜单栏、总览），
+    /// 这里口径更宽，数字可以大于侧栏徽标（ui-spec §4.18）；case 名与 rawValue 不变。
     func contains(_ task: TaskSummary) -> Bool {
         task.attention != nil || task.exception != nil
     }
@@ -201,7 +202,7 @@ enum ObserveGroup: String, CaseIterable, Identifiable {
         return .recent
     }
 
-    /// 组内顺序：需要你处理先失败后阻塞；已排队按 priority 与创建时间；其余按 updated_at 倒序。
+    /// 组内顺序：需关注先失败后阻塞；已排队按 priority 与创建时间；其余按 updated_at 倒序。
     func sorted(_ items: [TaskSummary]) -> [TaskSummary] {
         switch self {
         case .needsYou:
