@@ -205,13 +205,21 @@ struct RootView: View {
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
                 .lineLimit(1)
+            // 两个等宽按钮撑满侧栏宽度，各带图标（ui-spec §2）。
             HStack(spacing: Spacing.s) {
-                Button(model.globalPaused ? "恢复" : "暂停") {
+                Button {
                     Task { await model.toggleGlobalPause() }
+                } label: {
+                    Label(model.globalPaused ? "恢复" : "暂停",
+                          systemImage: model.globalPaused ? "play.fill" : "pause.fill")
+                        .frame(maxWidth: .infinity)
                 }
                 .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
-                Button("刷新") {
+                Button {
                     Task { await model.refreshAll() }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
                 }
                 .help(refreshHelp)
                 .disabled(model.busy)

@@ -231,6 +231,7 @@ struct BoardView: View {
                         Label("更多", systemImage: "ellipsis.circle")
                     }
                     .labelStyle(.iconOnly)
+                    .menuIndicator(.hidden)
                     .help("更多操作")
                     .accessibilityLabel("更多")
                 }

@@ -100,7 +100,8 @@ struct TaskDetailContentView: View {
         }
     }
 
-    /// 第二行元信息「项目 · 状态徽标」：状态只出现一次（开放提问的词已并入 `DisplayStatus.effective`），阶段不在头部重复。
+    /// 第二行元信息「项目 · 状态标签」：状态只出现一次（开放提问的词已并入 `DisplayStatus.effective`），阶段不在头部重复。
+    /// 状态标签无底色，图标着色加半粗文字（ui-spec §3）。
     private var headerMeta: some View {
         HStack(spacing: Spacing.s) {
             if let project = detail?.projectName {
@@ -109,12 +110,12 @@ struct TaskDetailContentView: View {
             }
             if let detail {
                 if detail.status != "done", let release = detail.release, release.showsTaskStatus {
-                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+                    StatusLabel(text: release.title, style: ReleasePresentation.style(release), emphasized: true)
                 } else {
-                    StatusBadge(task: detail)
+                    StatusLabel(task: detail, emphasized: true)
                 }
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
-                    StatusBadge(status: "待确认执行")
+                    StatusLabel(status: "待确认执行", emphasized: true)
                 }
                 if let question = openExecutionQuestion {
                     Text("·")
@@ -122,7 +123,7 @@ struct TaskDetailContentView: View {
                 }
             }
         }
-        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
     }
 
     /// 头部「已等待」只读开放中的执行提问的等待时长（`ExecutionQuestion.waitSeconds`），不经过概览页的草稿 store。

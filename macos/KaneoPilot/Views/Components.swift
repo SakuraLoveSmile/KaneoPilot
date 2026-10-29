@@ -539,6 +539,42 @@ struct StatusBadge: View {
     }
 }
 
+/// 无底色的状态标签（ui-spec §3）：图标着令牌色，文字 `.primary`。
+/// 只用于详情头部；任务列表行把图标与文字拆成两列，直接取 `DisplayStatus.badge`。其余处仍用 `StatusBadge`。
+struct StatusLabel: View {
+    let text: String
+    let style: StatusStyle
+    let emphasized: Bool
+
+    init(text: String, style: StatusStyle, emphasized: Bool = false) {
+        self.text = text
+        self.style = style
+        self.emphasized = emphasized
+    }
+
+    init(status: String?, emphasized: Bool = false) {
+        let s = DisplayStatus.style(status)
+        self.init(text: s.label, style: s, emphasized: emphasized)
+    }
+
+    init(task: TaskDetail, emphasized: Bool = false) {
+        let badge = DisplayStatus.badge(for: task)
+        self.init(text: badge.text, style: badge.style, emphasized: emphasized)
+    }
+
+    var body: some View {
+        Label {
+            Text(text)
+                .font(emphasized ? Font.kpLabel.weight(.semibold) : Font.kpLabel)
+                .foregroundStyle(.primary)
+        } icon: {
+            Image(systemName: style.icon)
+                .foregroundStyle(style.color)
+        }
+        .accessibilityLabel("状态：\(text)")
+    }
+}
+
 /// 请求 kind 图标（协议未规定，取语义化 SF Symbols）。
 struct KindBadge: View {
     let kind: String?

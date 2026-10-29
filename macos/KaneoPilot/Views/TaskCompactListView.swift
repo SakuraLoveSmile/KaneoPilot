@@ -1,10 +1,10 @@
 import SwiftUI
 
 /// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
-/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你处理、已排队、执行中、待评审、最近），空组隐藏。
-/// 共用搜索、阶段筛选、批量选择与详情打开逻辑。
+/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需要你、已排队、执行中、待评审、最近），空组隐藏。
+/// 共用搜索、看板列筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
-    /// 已套用搜索与阶段筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
+    /// 已套用搜索与看板列筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
     let tasks: [TaskSummary]
     @Binding var chip: ObserveChip
     @Binding var focused: String?
@@ -19,8 +19,7 @@ struct TaskCompactListView: View {
         let sections = ObserveScope.sections(tasks, chip: chip)
         VStack(alignment: .leading, spacing: 0) {
             chipBar
-                .padding(.horizontal, Spacing.m)
-                .padding(.top, Spacing.m)
+            // 行与分组头通栏，左右边距由各自的内边距承担。
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(sections) { section in
@@ -34,10 +33,9 @@ struct TaskCompactListView: View {
                         emptyRow
                     }
                 }
-                .padding(Spacing.m)
             }
         }
-        .background(Color.kpWindow)
+        .background(Color.kpControl)
     }
 
     private func count(_ option: ObserveChip) -> Int {
@@ -46,9 +44,9 @@ struct TaskCompactListView: View {
 
     // MARK: - chips
 
+    /// chips 紧凑排成一行（ui-spec §4.18）：宽度不足时换行，不拉伸成等距网格；下方一条通栏分隔线。
     private var chipBar: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: Spacing.s, alignment: .leading)],
-                  alignment: .leading, spacing: Spacing.s) {
+        FlowRow(spacing: Spacing.s, lineSpacing: Spacing.s) {
             ForEach(ObserveChip.allCases) { option in
                 Button {
                     chip = option
@@ -58,14 +56,18 @@ struct TaskCompactListView: View {
                         Text("\(count(option))").monospacedDigit().foregroundStyle(Color.kpSecondary)
                     }
                     .font(.kpLabel)
-                    .padding(.horizontal, Spacing.s)
+                    .padding(.horizontal, Spacing.m)
                     .padding(.vertical, Spacing.xs)
-                    .background(chip == option ? Color.accentColor.opacity(0.14) : Color.kpControl, in: Capsule())
+                    .background(chip == option ? Color.accentColor.opacity(0.14) : Color.kpWindow, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(chip == option ? AccessibilityTraits.isSelected : [])
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+        .overlay(alignment: .bottom) { ListRule() }
     }
 
     private var emptyRow: some View {
@@ -75,16 +77,17 @@ struct TaskCompactListView: View {
                 .foregroundStyle(.tertiary)
             Spacer()
         }
-        .padding(.horizontal, Spacing.m)
+        .padding(.horizontal, Spacing.l)
         .padding(.vertical, Spacing.s)
     }
 
     private func taskGroups(_ groups: [TaskBoardGroup]) -> some View {
         ForEach(groups) { group in
-            VStack(alignment: .leading, spacing: Spacing.s) {
+            VStack(alignment: .leading, spacing: 0) {
                 if group.needsSourceContext, let parent = group.parent {
                     TaskSourceContext(parent: parent, onOpen: onOpenRelated)
-                        .padding(.horizontal, Spacing.m)
+                        .padding(.horizontal, Spacing.l)
+                        .padding(.vertical, Spacing.xs)
                 }
                 ForEach(group.tasks) { task in
                     TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
@@ -99,6 +102,8 @@ struct TaskCompactListView: View {
                             onToggleSelect: { onToggleSelect(task.taskId) }
                         )
                     }
+                    // 行间通栏 1pt 细线（ui-spec §4.18）。画在缩进容器外，二级任务的线也从最左边起。
+                    .overlay(alignment: .bottom) { ListRule() }
                 }
             }
         }
@@ -106,28 +111,35 @@ struct TaskCompactListView: View {
 
     // MARK: - 分组头部
 
+    /// 通栏浅灰带（高 28pt）：标题 12pt 半粗，计数是同行纯文字；「需要你」前有橙色感叹圆圈图标（ui-spec §4.18）。
+    /// 分组头随列表置顶，所以底色必须不透明：先铺页面底色，再叠半透明灰。
+    /// 带的上沿由上一行（或 chips 条）的下分隔线充当，这里只画下沿，避免两条线叠成 2pt。
     private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
         HStack(spacing: Spacing.s) {
             if group == .needsYou {
-                Circle()
-                    .fill(Color.kpOrange)
-                    .frame(width: 6, height: 6)
+                Image(systemName: "exclamationmark.circle")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpOrange)
                     .accessibilityHidden(true)
             }
             Text(group.title)
-                .font(.kpSmall.weight(.semibold))
+                .font(.kpLabel.weight(.semibold))
                 .foregroundStyle(.primary)
             Text("\(count)")
-                .font(.kpSmall.weight(.medium))
+                .font(.kpLabel)
+                .monospacedDigit()
                 .foregroundStyle(Color.kpSecondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 1)
-                .background(Color.kpControl, in: Capsule())
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, Spacing.m)
-        .padding(.vertical, Spacing.s)
-        .background(Color.kpWindow.opacity(0.95))
+        .padding(.horizontal, Spacing.l)
+        .frame(maxWidth: .infinity, minHeight: RowHeight.data, alignment: .leading)
+        .background {
+            ZStack {
+                Color.kpControl
+                Color.kpWindow.opacity(0.5)
+            }
+        }
+        .overlay(alignment: .bottom) { ListRule() }
     }
 }
 
@@ -260,6 +272,51 @@ private struct TaskCompactRow: View {
         task.status == "running" || task.activeRequest != nil || task.boardColumn == "in_progress"
     }
 
+    /// 状态列显示发布状态时的那条发布；此时第二行不再重复发布标题。
+    private var statusRelease: TaskRelease? {
+        guard task.status != "done", let release = task.release, release.showsTaskStatus else { return nil }
+        return release
+    }
+
+    /// 行首图标与右侧状态文字同源：发布状态优先，否则取 DisplayStatus.badge。
+    private var status: (text: String, style: StatusStyle) {
+        if let release = statusRelease {
+            return (release.title, ReleasePresentation.style(release))
+        }
+        return DisplayStatus.badge(for: task)
+    }
+
+    private var projectName: String? {
+        guard let name = task.projectName, !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// 第二行项目名之后的原因：异常或等待原因，其次发布原因，其次自动合并提示；都没有时只有项目名。
+    /// 发布标题已在状态列时只写原因，否则写「标题 · 原因」。
+    private var reasonText: String? {
+        if let reason = exceptionReason { return reason }
+        if let release = task.release {
+            return statusRelease == nil ? "\(release.title) · \(release.reason)" : release.reason
+        }
+        if let notice = task.delivery?.autoMergeNotice { return notice.reason }
+        return nil
+    }
+
+    private var hasHierarchy: Bool {
+        guard let relations = task.taskRelations else { return false }
+        return relations.parent != nil || !relations.children.isEmpty
+    }
+
+    private var rowBackground: Color {
+        if isFocused || (isBatchMode && isSelected) { return Color.accentColor.opacity(0.1) }
+        return isHovering ? Color.primary.opacity(0.04) : Color.clear
+    }
+
+    // 右侧三栏宽度固定，各行对齐（ui-spec §4.18）。时间列要容纳「MM-dd HH:mm」。
+    private static let sessionColumnWidth: CGFloat = 72
+    private static let statusColumnWidth: CGFloat = 120
+    private static let timeColumnWidth: CGFloat = 72
+
     var body: some View {
         HStack(spacing: Spacing.m) {
             if isBatchMode {
@@ -273,63 +330,43 @@ private struct TaskCompactRow: View {
                 .labelsHidden()
             }
 
+            // 行首状态图标：颜色承担状态；状态文字在右侧状态列。
+            Image(systemName: status.style.icon)
+                .font(.kpBody)
+                .foregroundStyle(status.style.color)
+                .frame(width: Spacing.l)
+                .accessibilityHidden(true)
+
             VStack(alignment: .leading, spacing: 2) {
-                TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
-                taskTitleView
-
-                if let reason = exceptionReason {
-                    // §4.18：阻塞、失败与等待原因统一为 12pt primary；颜色只作用于图标与徽标。
-                    Text(reason)
-                        .font(.kpLabel)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                } else if let release = task.release {
-                    Text("\(release.title) · \(release.reason)")
-                        .font(.kpLabel).foregroundStyle(.primary).lineLimit(2)
-                } else if let notice = task.delivery?.autoMergeNotice {
-                    Text(notice.reason)
-                        .font(.kpLabel)
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                }
+                Text(task.title ?? task.taskId)
+                    .font(.kpBody)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                summaryLine
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: Spacing.s)
+            sessionSlot
 
-            HStack(spacing: Spacing.m) {
-                if task.status != "done", let release = task.release, release.showsTaskStatus {
-                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
-                } else {
-                    StatusBadge(task: task)
-                }
+            Text(status.text)
+                .font(.kpLabel)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .frame(width: Self.statusColumnWidth, alignment: .leading)
+                .help(status.text)
+                .accessibilityLabel("状态：\(status.text)")
 
-                if canOpenSession {
-                    Button {
-                        onOpenSession()
-                    } label: {
-                        Label("会话", systemImage: "bubble.left.and.bubble.right")
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.kpSmall)
-                    .help("查看执行会话")
-                    // 仅悬停或聚焦时显示；用透明度代替移除，避免徽标随悬停跳动。
-                    .opacity(isHovering || isFocused ? 1 : 0)
-                }
-
-                Text(TimeFormat.short(task.updatedAt))
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .frame(width: 44, alignment: .trailing)
-            }
+            Text(TimeFormat.short(task.updatedAt))
+                .font(.kpLabel)
+                .monospacedDigit()
+                .foregroundStyle(Color.kpSecondary)
+                .lineLimit(1)
+                .frame(width: Self.timeColumnWidth, alignment: .trailing)
         }
-        .padding(.horizontal, Spacing.m)
+        .padding(.horizontal, Spacing.l)
         .padding(.vertical, Spacing.s)
-        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
-        .background(isFocused || (isBatchMode && isSelected) ? Color.accentColor.opacity(0.1) : Color.clear)
-        // 扁平行：缩进分隔线代替卡片描边（ui-spec §4.13）。
-        .overlay(alignment: .bottom) {
-            Divider().padding(.leading, Spacing.m)
-        }
+        .frame(maxWidth: .infinity, minHeight: RowHeight.preferredTwoLine, alignment: .leading)
+        .background(rowBackground)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture {
@@ -346,18 +383,61 @@ private struct TaskCompactRow: View {
             }
         }
     }
-    private var taskTitleView: some View {
+
+    /// 第二行：项目名（次要色）加「 · 」加原因（`.primary`，单行截断）；有层级时层级标签靠右。
+    /// 原因直接写核心给出的文字，不加「阻塞：」「失败：」前缀，颜色只在行首图标上。
+    private var summaryLine: some View {
         HStack(spacing: Spacing.s) {
-            if let project = task.projectName {
-                Text(project)
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .lineLimit(1)
+            HStack(spacing: 0) {
+                if let project = projectName {
+                    Text(project)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                if let reason = reasonText {
+                    Text(projectName == nil ? reason : " · \(reason)")
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .help(reason)
+                }
             }
-            Text(task.title ?? task.taskId)
-                .font(.kpBody)
-                .lineLimit(1)
-                .foregroundStyle(.primary)
+            .font(.kpLabel)
+            Spacer(minLength: 0)
+            if hasHierarchy {
+                TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
         }
+    }
+
+    /// 「会话」入口只在悬停或聚焦时出现。占位宽度固定且每行都有，所以显隐不会挤动右侧状态列。
+    private var sessionSlot: some View {
+        ZStack(alignment: .trailing) {
+            if canOpenSession && (isHovering || isFocused) {
+                Button {
+                    onOpenSession()
+                } label: {
+                    Label("会话", systemImage: "bubble.left.and.bubble.right")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.kpSmall)
+                .help("查看执行会话")
+            }
+        }
+        .frame(width: Self.sessionColumnWidth, alignment: .trailing)
+    }
+}
+
+// MARK: - 通栏分隔线
+
+/// 通栏 1pt 分隔线。不用 `Divider()`：它的方向随外层栈而定，叠在 HStack 里的 overlay 会画成竖线。
+struct ListRule: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.kpSeparator)
+            .frame(height: 1)
+            .accessibilityHidden(true)
     }
 }
