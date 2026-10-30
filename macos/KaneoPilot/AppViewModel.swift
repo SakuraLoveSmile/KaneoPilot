@@ -24,9 +24,9 @@ final class AppViewModel: ObservableObject {
         }
         var icon: String {
             switch self {
-            case .dashboard: return "rectangle.3.group"
+            case .dashboard: return "square.grid.2x2"
             case .tasks: return "list.bullet.rectangle"
-            case .sessions: return "bubble.left.and.bubble.right"
+            case .sessions: return "bubble.left"
             case .pending: return "tray.full"
             case .archive: return "archivebox"
             case .trash: return "trash"

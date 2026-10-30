@@ -333,7 +333,7 @@ struct AutomationDashboardView: View {
             Text("项目自动化").font(.kpSection)
             GroupPanel {
                 if let projectsError {
-                    errorLine(projectsError).padding(Spacing.m)
+                    panelMessage { errorLine(projectsError) }
                     ListRule()
                 }
                 if projects.isEmpty {
@@ -377,14 +377,23 @@ struct AutomationDashboardView: View {
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
             }
-            Text(project.engineMode ?? "未提供模式")
-                .font(.kpSmall.monospaced())
-                .padding(.horizontal, Spacing.s)
-                .frame(height: 20)
-                .background(Color.primary.opacity(0.06), in: Capsule())
+            modeChip(project.engineMode)
         }
         .padding(.horizontal, Spacing.l)
         .frame(height: Self.dataRowHeight)
+    }
+
+    /// 引擎模式胶囊。看不见的 `legacy` 占住最长模式的宽度（`shadow` 同为 6 个等宽字符），各行胶囊同宽，
+    /// 左边的状态列才对得齐；核心没给模式时的「未提供模式」更宽，只有那一行自己撑开。
+    private func modeChip(_ mode: String?) -> some View {
+        ZStack {
+            Text("legacy").hidden()
+            Text(mode ?? "未提供模式")
+        }
+        .font(.kpSmall.monospaced())
+        .padding(.horizontal, Spacing.s)
+        .frame(height: 20)
+        .background(Color.primary.opacity(0.06), in: Capsule())
     }
 
     // MARK: - 环境
@@ -395,15 +404,13 @@ struct AutomationDashboardView: View {
             Text("环境").font(.kpSection)
             GroupPanel {
                 healthRow {
-                    Image(systemName: engineHealthIcon)
-                        .foregroundStyle(engine.engineStatus == nil ? Color.kpSecondary : engineHealthy ? Color.kpGreen : Color.kpOrange)
+                    healthIcon(engineHealthIcon, engineHealthColor)
                     Text(engineHealthTitle).foregroundStyle(.primary)
                     Spacer(minLength: 0)
                 }
                 ListRule()
                 healthRow {
-                    Image(systemName: doctorHealthIcon)
-                        .foregroundStyle(doctorNeedsAttention ? Color.kpOrange : Color.kpSecondary)
+                    healthIcon(doctorHealthIcon, doctorNeedsAttention ? Color.kpOrange : Color.kpSecondary)
                     Text(doctorHealthTitle)
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -414,23 +421,11 @@ struct AutomationDashboardView: View {
                 }
                 if let error = engine.error {
                     ListRule()
-                    errorLine(error).padding(Spacing.m)
+                    panelMessage { errorLine(error) }
                 }
                 ForEach(doctorIssues) { check in
                     ListRule()
-                    VStack(alignment: .leading, spacing: Spacing.xs) {
-                        Label {
-                            Text(Labels.doctorCheck(check.name)).foregroundStyle(.primary)
-                        } icon: {
-                            Image(systemName: "exclamationmark.triangle").foregroundStyle(Color.kpOrange)
-                        }
-                        Text(check.detail ?? "未提供检查结果，请重新诊断。")
-                            .foregroundStyle(Color.kpSecondary)
-                            .textSelection(.enabled)
-                    }
-                    .font(.kpLabel)
-                    .padding(Spacing.m)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    healthIssueRow(check)
                 }
                 if !doctorChecks.isEmpty || !engineRecords.isEmpty {
                     ListRule()
@@ -449,6 +444,33 @@ struct AutomationDashboardView: View {
             .font(.kpBody)
             .padding(.horizontal, Spacing.l)
             .frame(minHeight: Self.dataRowHeight)
+    }
+
+    /// 环境面板的图标列：固定 16pt 宽（同 `attentionRow`）。SF Symbol 的字形宽度各不相同，不定宽的话
+    /// 各行文字的左缘会随图标错开几个点。
+    private func healthIcon(_ name: String, _ color: Color) -> some View {
+        Image(systemName: name)
+            .foregroundStyle(color)
+            .frame(width: Spacing.l)
+    }
+
+    /// 未通过的检查：图标列加两行文字，名称 13pt，原因 12pt 次要色缩进到名称下面；左右 16pt 与其他行一致。
+    private func healthIssueRow(_ check: DoctorCheck) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            healthIcon("exclamationmark.triangle", Color.kpOrange)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(Labels.doctorCheck(check.name))
+                    .font(.kpBody)
+                    .foregroundStyle(.primary)
+                Text(check.detail ?? "未提供检查结果，请重新诊断。")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
     }
 
     private var healthDetailsTitle: String {
@@ -482,23 +504,7 @@ struct AutomationDashboardView: View {
             if !doctorChecks.isEmpty {
                 Text("诊断详情").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
                 ForEach(doctorChecks) { check in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: Spacing.s) {
-                            Label {
-                                Text(Labels.doctorCheck(check.name))
-                            } icon: {
-                                Image(systemName: check.skipped == true ? "minus.circle" : check.ok == true ? "checkmark.circle" : "exclamationmark.triangle")
-                                    .foregroundStyle(check.skipped != true && check.ok != true ? Color.kpOrange : Color.kpSecondary)
-                            }
-                            Spacer(minLength: Spacing.s)
-                            Text(check.skipped == true ? "未检查" : check.ok == true ? "通过" : check.ok == false ? "未通过" : "未确认")
-                        }
-                        Text(check.detail ?? "未提供详情")
-                            .foregroundStyle(Color.kpSecondary)
-                            .textSelection(.enabled)
-                    }
-                    .foregroundStyle(check.skipped != true && check.ok != true ? Color.primary : Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    diagnosticRow(check)
                 }
             }
             if !engineRecords.isEmpty {
@@ -520,8 +526,40 @@ struct AutomationDashboardView: View {
         }
         .font(.kpLabel)
         .textSelection(.enabled)
-        .padding(Spacing.m)
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 展开后的诊断逐项：与未通过项同一版式——图标列，名称与结果一行，详情缩进到名称下面。
+    private func diagnosticRow(_ check: DoctorCheck) -> some View {
+        let unresolved = check.skipped != true && check.ok != true
+        return HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            healthIcon(diagnosticIcon(check), unresolved ? Color.kpOrange : Color.kpSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: Spacing.s) {
+                    Text(Labels.doctorCheck(check.name))
+                    Spacer(minLength: Spacing.s)
+                    Text(diagnosticResult(check))
+                }
+                Text(check.detail ?? "未提供详情")
+                    .foregroundStyle(Color.kpSecondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .foregroundStyle(unresolved ? Color.primary : Color.kpSecondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func diagnosticIcon(_ check: DoctorCheck) -> String {
+        if check.skipped == true { return "minus.circle" }
+        return check.ok == true ? "checkmark.circle" : "exclamationmark.triangle"
+    }
+
+    private func diagnosticResult(_ check: DoctorCheck) -> String {
+        if check.skipped == true { return "未检查" }
+        if check.ok == true { return "通过" }
+        return check.ok == false ? "未通过" : "未确认"
     }
 
     /// 错误行：文字用主色，错误由红色图标表达（ui-spec §3：彩色只作图标与徽标）。
@@ -540,6 +578,10 @@ struct AutomationDashboardView: View {
     }
     private var engineHealthIcon: String {
         engine.engineStatus == nil ? "clock" : engineHealthy ? "checkmark.circle" : "exclamationmark.triangle"
+    }
+    private var engineHealthColor: Color {
+        if engine.engineStatus == nil { return Color.kpSecondary }
+        return engineHealthy ? Color.kpGreen : Color.kpOrange
     }
     private var doctorChecks: [DoctorCheck] { model.doctor?.checks ?? [] }
     private var doctorIssues: [DoctorCheck] { doctorChecks.filter { $0.skipped != true && $0.ok != true } }
