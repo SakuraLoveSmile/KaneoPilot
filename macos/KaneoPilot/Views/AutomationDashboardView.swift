@@ -55,6 +55,7 @@ struct AutomationDashboardView: View {
         }
         .task {
             if let id = model.attentionTaskToOpen { open(id); model.attentionTaskToOpen = nil }
+            await model.runInitialDoctorIfNeeded()
         }
         .onChange(of: model.attentionTaskToOpen) { _, id in
             if let id { open(id); model.attentionTaskToOpen = nil }

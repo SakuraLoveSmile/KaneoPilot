@@ -4,7 +4,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var section: AppViewModel.Section = .dashboard
-    @State private var settingsSegment: SettingsSegment = .projects
+    @State private var settingsSegment: SettingsSegment = .roles
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.colorScheme) private var colorScheme
 

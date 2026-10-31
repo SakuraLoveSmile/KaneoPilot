@@ -158,8 +158,8 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func setAutomationGlobal(maxActiveTasks: Int) async {
-        await perform("保存自动处理并发上限") {
+    func setAutomationGlobal(maxActiveTasks: Int, onError: ((String) -> Void)? = nil) async {
+        await perform("保存自动处理并发上限", onError: onError) {
             _ = try await self.client.run("set-automation-global", payload: ["max_active_tasks": maxActiveTasks])
             return "已保存并发上限"
         }
@@ -343,20 +343,30 @@ final class AppViewModel: ObservableObject {
         await runDoctor()
     }
 
-    func runDoctor() async {
+    /// 总览首次出现时的静默离线诊断（KP-UI03 P3）：仅在从未诊断、没有诊断在跑且本次启动还没试过时跑一次；
+    /// 不占全局忙碌状态，失败不弹窗，总览摘要停在「尚未诊断」，用户点「在线诊断」重试。
+    private var initialDoctorAttempted = false
+    func runInitialDoctorIfNeeded() async {
+        guard doctor == nil, !doctorRunning, !initialDoctorAttempted else { return }
+        initialDoctorAttempted = true
+        await runDoctor(quiet: true)
+    }
+
+    /// `quiet` 时不置 `actionInFlight`、失败不写 `alertMessage`；默认（含「在线诊断」）行为不变。
+    func runDoctor(quiet: Bool = false) async {
         guard !doctorRunning else { return }
         doctorRunning = true
         defer { doctorRunning = false }
         let online = doctorOnline
-        actionInFlight = "诊断中"
-        defer { actionInFlight = nil }
+        if !quiet { actionInFlight = "诊断中" }
+        defer { if !quiet { actionInFlight = nil } }
         do {
             doctor = try await client.run("doctor",
                                           payload: ["online": online],
                                           timeout: 120,
                                           as: DoctorResponse.self)
         } catch {
-            alertMessage = error.coreMessage
+            if !quiet { alertMessage = error.coreMessage }
         }
     }
 
@@ -1245,7 +1255,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    /// 设置页「重新读取」：并发拉取 get-planner-config +
+    /// 运行端页读取与「编辑 · 规划」面板重试：并发拉取 get-planner-config +
     /// planner-capabilities；失败保留已有内容并给错误原文。
     func refreshPlannerConfig() async {
         guard !plannerLoading else { return }

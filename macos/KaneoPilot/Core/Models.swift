@@ -216,8 +216,8 @@ struct DesktopAutomationStatusResponse: Decodable {
 
         var statusText: String {
             switch status {
-            case "ACTIVE": return "已开启"
-            case "PAUSED": return "已关闭"
+            case "ACTIVE": return "运行中"
+            case "PAUSED": return "已暂停"
             default: return "不可控制"
             }
         }
