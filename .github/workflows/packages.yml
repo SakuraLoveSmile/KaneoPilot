@@ -3,15 +3,32 @@ name: Packages
 on:
   push:
     branches: ['**']
-    tags: ['v*']
+    tags: ['v*', '!v*-test.*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: 'preview builds only artifacts; test publishes a pre-release for the in-app test channel'
+        type: choice
+        options: [preview, test]
+        default: preview
+      base_version:
+        description: 'channel=test only: stable X.Y.Z this test heads for (empty: next version above the latest stable and published test bases)'
+        type: string
+        required: false
+        default: ''
+      notes:
+        description: 'channel=test only: public release notes (required)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: packages-${{ github.ref }}
+  # The event name keeps a later push from replacing a pending manual publish run.
+  group: packages-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -22,6 +39,8 @@ jobs:
       release: ${{ steps.identity.outputs.release }}
       version: ${{ steps.identity.outputs.version }}
       sha: ${{ steps.identity.outputs.sha }}
+      channel: ${{ steps.identity.outputs.channel }}
+      tag: ${{ steps.identity.outputs.tag }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -31,6 +50,13 @@ jobs:
       - name: Resolve immutable build identity
         id: identity
         shell: bash
+        # Read-only token: a manual test build compares against the published releases.
+        # Free-text inputs reach the script only through the environment.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_BASE_VERSION: ${{ inputs.base_version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
         run: python3 scripts/release_bundle.py identity
 
   checks:
@@ -364,9 +390,16 @@ jobs:
       - name: Assemble checksums and immutable manifest
         env:
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
-        run: python3 scripts/release_bundle.py prepare --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
+          RELEASE_TAG: ${{ needs.identity.outputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel || 'stable' }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: python3 scripts/release_bundle.py prepare --directory release --tag "$RELEASE_TAG" --channel "$RELEASE_CHANNEL" --branch "$RELEASE_BRANCH" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
       - name: Publish or verify this build's release
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
-        run: python3 scripts/release_bundle.py publish --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
+          RELEASE_TAG: ${{ needs.identity.outputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel || 'stable' }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: python3 scripts/release_bundle.py publish --directory release --tag "$RELEASE_TAG" --channel "$RELEASE_CHANNEL" --branch "$RELEASE_BRANCH" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"

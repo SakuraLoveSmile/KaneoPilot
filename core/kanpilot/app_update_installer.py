@@ -24,7 +24,11 @@ BUNDLE_ID = "local.kaneopilot"
 MAX_PACKAGE_SIZE = 1024 ** 3
 FIELDS = {"package_path", "target_path", "cache_path", "version", "build_number",
           "source_sha", "sha256", "size", "signature_sha256"}
-VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+# One version grammar for every platform (docs/build-release.md and the shared vectors in
+# scripts/tests/fixtures/update-version-vectors.json): X.Y.Z, or X.Y.Z-test.B for a test build.
+NUMBER = r"(?:0|[1-9][0-9]{0,8})"
+VERSION = re.compile(r"(%s)\.(%s)\.(%s)(?:-test\.([1-9][0-9]{0,8}))?\Z" % (NUMBER, NUMBER, NUMBER))
+BUILD = re.compile(r"[0-9]{1,18}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -39,9 +43,31 @@ def require(condition, message, code="update_invalid_package"):
         raise UpdateError(message, code)
 
 
-def version_tuple(value):
-    require(isinstance(value, str) and VERSION.fullmatch(value), "版本格式无效")
-    return tuple(int(part) for part in value.split("."))
+def version_key(value):
+    """Sort key: a test build sorts below the stable version it is a candidate for."""
+    match = VERSION.fullmatch(value) if isinstance(value, str) else None
+    require(match, "版本格式无效")
+    major, minor, patch, serial = match.groups()
+    numbers = (int(major), int(minor), int(patch))
+    return numbers + (1, 0) if serial is None else numbers + (0, int(serial))
+
+
+def is_test_version(value):
+    return version_key(value)[3] == 0
+
+
+def build_value(value):
+    return int(value) if isinstance(value, (str, int)) and not isinstance(value, bool) and BUILD.fullmatch(str(value)) else None
+
+
+def update_allowed(installed, installed_build, candidate, candidate_build):
+    """A strictly higher version. A test version on either side also needs a strictly newer integer build."""
+    if version_key(candidate) <= version_key(installed):
+        return False
+    if is_test_version(installed) or is_test_version(candidate):
+        current, offered = build_value(installed_build), build_value(candidate_build)
+        return current is not None and offered is not None and offered > current
+    return True
 
 
 def regular_path(value, directory=False):
@@ -67,7 +93,7 @@ def bundle_info(path):
     with info_path.open("rb") as stream:
         info = plistlib.load(stream)
     require(info.get("CFBundleIdentifier") == BUNDLE_ID, "安装目标不是 KaneoPilot")
-    version_tuple(info.get("CFBundleShortVersionString"))
+    version_key(info.get("CFBundleShortVersionString"))
     executable = info.get("CFBundleExecutable")
     require(isinstance(executable, str) and executable and Path(executable).name == executable,
             "App 可执行文件字段无效")
@@ -115,7 +141,7 @@ def verify_app(path, version, build_number, runner):
 def prepare(payload, runner=run_tool):
     require(isinstance(payload, dict) and set(payload) == FIELDS, "安装参数缺失或含未知字段")
     version = payload["version"]
-    version_tuple(version)
+    version_key(version)
     require(type(payload["build_number"]) is int and payload["build_number"] > 0, "构建编号无效")
     require(type(payload["size"]) is int and 0 < payload["size"] <= MAX_PACKAGE_SIZE, "安装包大小无效")
     for key in ("sha256", "signature_sha256"):
@@ -129,7 +155,8 @@ def prepare(payload, runner=run_tool):
             "请先将 KaneoPilot 安装到可写的应用程序目录", "update_target_readonly")
     snapshot = target_snapshot(target)
     require(snapshot["version"] != "0.0.0", "开发预览版本不支持原位更新", "update_preview")
-    require(version_tuple(version) > version_tuple(snapshot["version"]), "只能安装更高的正式版本")
+    require(update_allowed(snapshot["version"], snapshot["build"], version, payload["build_number"]),
+            "只能安装更高的版本（涉及测试版时构建编号也须更高）")
     require(os.access(target.parent, os.W_OK | os.X_OK), "当前 App 目录不可写，请手动安装", "update_target_readonly")
     require(package.name == "KaneoPilot-" + version + "-macos-universal.dmg", "安装包文件名与版本不一致")
     require(package.stat().st_size == payload["size"] and digest(package) == payload["sha256"],

@@ -213,6 +213,70 @@ class InstallerTests(unittest.TestCase):
                     self.prepare()
         self.assertFalse(self.tools.calls)
 
+    def use_installed(self, version, build):
+        info_path = self.target / "Contents/Info.plist"
+        info = plistlib.loads(info_path.read_bytes())
+        info["CFBundleShortVersionString"], info["CFBundleVersion"] = version, build
+        info_path.write_bytes(plistlib.dumps(info))
+        self.original = updater.target_snapshot(self.target)
+
+    def use_candidate(self, version, build):
+        package = self.root / ("KaneoPilot-%s-macos-universal.dmg" % version)
+        package.write_bytes(("isolated DMG fixture " + version).encode())
+        self.payload.update(package_path=str(package), version=version, build_number=build,
+                            sha256=updater.digest(package), size=package.stat().st_size)
+        self.tools.mounted_version, self.tools.mounted_build = version, str(build)
+
+    def test_test_builds_can_replace_stable_and_test_builds_and_be_replaced_by_stable(self):
+        cases = (("1.2.2", "40", "1.2.3-test.41", 41), ("1.2.3-test.41", "41", "1.2.3-test.42", 42),
+                 ("1.2.3-test.41", "41", "1.2.3", 43), ("1.2.2", "abc", "1.2.3", 44))
+        for installed, installed_build, candidate, build in cases:
+            with self.subTest(installed=installed, candidate=candidate):
+                self.tools = Tools()
+                self.use_installed(installed, installed_build)
+                self.use_candidate(candidate, build)
+                job = self.prepare()
+                self.assertEqual(updater.bundle_info(Path(job["backup_path"]))["CFBundleShortVersionString"], candidate)
+                self.assertEqual(updater.target_snapshot(self.target), self.original)
+
+    def test_update_between_test_builds_installs_and_keeps_the_previous_build(self):
+        self.use_installed("1.2.3-test.41", "41")
+        self.use_candidate("1.2.3-test.42", 42)
+        job = self.prepare()
+        result = self.install(job)
+        self.assertEqual(result["status"], "launch_requested")
+        self.assertEqual(updater.bundle_info(self.target)["CFBundleShortVersionString"], "1.2.3-test.42")
+        self.assertEqual(updater.target_snapshot(Path(job["backup_path"])), self.original)
+
+    def test_equal_lower_or_build_regressed_test_builds_are_rejected_before_mounting(self):
+        cases = (("1.2.3-test.41", "41", "1.2.3-test.41", 41), ("1.2.3-test.42", "42", "1.2.3-test.41", 41),
+                 ("1.2.3", "50", "1.2.3-test.60", 60), ("1.2.2", "90", "1.2.3-test.41", 41),
+                 ("1.2.3-test.41", "41", "1.2.3", 40), ("1.2.3-test.41", "abc", "1.2.3-test.42", 42),
+                 ("1.2.3-test.41", "41", "1.2.3-test.42", 41))
+        for installed, installed_build, candidate, build in cases:
+            with self.subTest(installed=installed, installed_build=installed_build, candidate=candidate, build=build):
+                self.tools = Tools()
+                self.use_installed(installed, installed_build)
+                self.use_candidate(candidate, build)
+                with self.assertRaisesRegex(updater.UpdateError, "更高"):
+                    self.prepare()
+                self.assertFalse(self.tools.calls)
+                self.assertEqual(updater.target_snapshot(self.target), self.original)
+
+    def test_malformed_test_versions_are_rejected_before_any_tools(self):
+        for version in ("1.2.3-test", "1.2.3-test.0", "1.2.3-test.01", "1.2.3-rc.1", "1.2.3-TEST.5", "1.2.3-test.5+x", "1.2.3-test.1000000000"):
+            with self.subTest(version=version), self.assertRaisesRegex(updater.UpdateError, "版本格式无效"):
+                updater.prepare(dict(self.payload, version=version), runner=self.tools)
+        self.assertFalse(self.tools.calls)
+
+    def test_installed_test_build_is_a_valid_install_target_but_not_a_preview(self):
+        self.use_installed("1.2.3-test.41", "41")
+        self.assertEqual(updater.bundle_info(self.target)["CFBundleShortVersionString"], "1.2.3-test.41")
+        self.use_installed("0.0.0", "41")
+        with self.assertRaises(updater.UpdateError) as caught:
+            self.prepare()
+        self.assertEqual(caught.exception.code, "update_preview")
+
     def test_symlink_target_and_package_are_rejected(self):
         for key in ("target_path", "package_path"):
             with self.subTest(key=key):

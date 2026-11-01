@@ -152,6 +152,8 @@ final class SoftwareUpdateManager: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var installationResult: String?
+    /// Explains why a pending test build disappeared when the test channel was closed.
+    @Published private(set) var channelNotice: String?
     @Published var automaticallyChecks: Bool {
         didSet {
             defaults.set(automaticallyChecks, forKey: Keys.checks)
@@ -163,6 +165,22 @@ final class SoftwareUpdateManager: ObservableObject {
             defaults.set(automaticallyDownloads, forKey: Keys.downloads)
             if automaticallyDownloads && phase == .available && !isPreview {
                 Task { await download() }
+            }
+        }
+    }
+    /// Opt-in for test pre-releases (default off). A development preview ignores it.
+    @Published var receivesTestBuilds: Bool {
+        didSet {
+            guard receivesTestBuilds != oldValue else { return }
+            defaults.set(receivesTestBuilds, forKey: Keys.testBuilds)
+            channelEpoch += 1
+            if receivesTestBuilds {
+                // The last answer only covered stable releases; look again as soon as possible.
+                channelNotice = nil
+                forgetLastAttempt()
+                if automaticallyChecks && !isPreview { Task { await check() } }
+            } else {
+                discardTestCandidate()
             }
         }
     }
@@ -181,11 +199,15 @@ final class SoftwareUpdateManager: ObservableObject {
     private var timer: Timer?
     private var started = false
     private var downloadGeneration = 0
+    private var downloadTask: Task<URL, Error>?
+    /// Bumped whenever the test channel is switched, so answers to older requests can be recognised.
+    private var channelEpoch = 0
     private(set) var pendingInstallation: PreparedSoftwareUpdate?
 
     private enum Keys {
         static let checks = "softwareUpdate.automaticallyChecks"
         static let downloads = "softwareUpdate.automaticallyDownloads"
+        static let testBuilds = "softwareUpdate.receivesTestBuilds"
         static let checked = "softwareUpdate.lastCheckedAt"
         static let attempted = "softwareUpdate.lastAttemptAt"
         static let release = "softwareUpdate.release"
@@ -208,27 +230,47 @@ final class SoftwareUpdateManager: ObservableObject {
         self.currentVersion = currentVersion; self.currentBuild = currentBuild
         self.targetURL = targetURL; self.cacheURL = cacheURL; self.allowsNetwork = allowsNetwork
         self.now = now; self.requestTermination = requestTermination
-        defaults.register(defaults: [Keys.checks: true, Keys.downloads: true])
+        defaults.register(defaults: [Keys.checks: true, Keys.downloads: true, Keys.testBuilds: false])
         automaticallyChecks = defaults.bool(forKey: Keys.checks)
         automaticallyDownloads = defaults.bool(forKey: Keys.downloads)
+        receivesTestBuilds = defaults.bool(forKey: Keys.testBuilds)
         lastCheckedAt = defaults.object(forKey: Keys.checked) as? Date
         lastAttemptAt = defaults.object(forKey: Keys.attempted) as? Date
     }
 
     var isPreview: Bool { currentVersion == "0.0.0" }
+    /// Whether test pre-releases take part in checking, downloading and installing.
+    var testChannelActive: Bool { receivesTestBuilds && !isPreview }
+    /// The switch is locked while a request or the installation hand-off is running.
+    var canChangeTestChannel: Bool {
+        allowsNetwork && !isPreview && ![Phase.checking, .preparing, .waitingForExit].contains(phase)
+    }
+    var installedIsTestBuild: Bool { (try? SoftwareVersion(currentVersion))?.isTest == true }
     var isBusy: Bool { [Phase.checking, .downloading, .preparing, .waitingForExit].contains(phase) }
-    var canDownload: Bool { allowsNetwork && !isPreview && release != nil && !isBusy && phase != .ready }
-    var canInstall: Bool { allowsNetwork && !isPreview && phase == .ready && downloadedPackage != nil }
+    /// A test candidate is only usable while the test channel is on.
+    private var candidateAllowed: Bool { release?.isTest != true || testChannelActive }
+    var canDownload: Bool {
+        allowsNetwork && !isPreview && release != nil && !isBusy && phase != .ready && candidateAllowed
+    }
+    var canInstall: Bool {
+        allowsNetwork && !isPreview && phase == .ready && downloadedPackage != nil && candidateAllowed
+    }
 
     var statusText: String {
         if !allowsNetwork { return "隔离预览中，软件更新未启动" }
+        if phase == .idle, let channelNotice { return channelNotice }
         switch phase {
         case .idle: return isPreview ? "开发预览版，可手动查看正式发布" : "尚未检查更新"
         case .checking: return "正在检查 GitHub Release…"
         case .current: return "当前已是最新正式版，或当前版本高于已发布版本"
-        case .available: return isPreview ? "发现正式版 \(release?.version ?? "")；开发预览版请从发布页手动选择" : "发现新版本 \(release?.version ?? "")"
+        case .available:
+            let version = release?.version ?? ""
+            if release?.isTest == true { return "发现测试版 \(version)" }
+            return isPreview ? "发现正式版 \(version)；开发预览版请从发布页手动选择" : "发现新版本 \(version)"
         case .downloading: return "正在下载更新 \(Int(progress * 100))%"
-        case .ready: return "更新已下载并校验，等待安装"
+        case .ready:
+            if let release, release.isTest { return "\(release.version)（测试版）已下载并校验" }
+            return "更新已下载并校验，等待安装"
         case .preparing: return "正在校验并准备安装…"
         case .waitingForExit: return "正在保存草稿并安全退出，随后安装并重新启动"
         }
@@ -263,22 +305,35 @@ final class SoftwareUpdateManager: ObservableObject {
     func check() async {
         guard allowsNetwork, !isBusy else { return }
         let prior = phase
-        phase = .checking; errorMessage = nil
+        let epoch = channelEpoch
+        let includesTestBuilds = testChannelActive
+        phase = .checking; errorMessage = nil; channelNotice = nil
         lastAttemptAt = now(); defaults.set(lastAttemptAt, forKey: Keys.attempted)
         do {
-            let candidate = try await service.latest()
+            let candidate = try await service.latest(includingTestBuilds: includesTestBuilds)
+            guard epoch == channelEpoch else {
+                // The channel was switched while this request ran, so its answer no longer applies.
+                phase = settledPhase(); forgetLastAttempt()
+                return
+            }
             try candidate.validate()
+            guard includesTestBuilds || !candidate.isTest else {
+                throw SoftwareUpdateError.invalid("未开启接收测试版，却收到了测试版")
+            }
             let installed = try SoftwareVersion(currentVersion)
             let newer = try SoftwareVersion(candidate.version)
             lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
-            if newer <= installed {
+            guard SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
+                                           candidate: newer, candidateBuild: candidate.buildNumber) else {
                 release = nil; downloadedPackage = nil; phase = .current
                 defaults.removeObject(forKey: Keys.release)
+                pruneUpdateCache()
                 return
             }
             let same = release == candidate
             release = candidate
             defaults.set(try JSONEncoder().encode(candidate), forKey: Keys.release)
+            pruneUpdateCache()
             if same && downloadedPackage != nil {
                 phase = .ready
             } else {
@@ -286,7 +341,7 @@ final class SoftwareUpdateManager: ObservableObject {
                 if automaticallyDownloads && !isPreview { await download() }
             }
         } catch {
-            phase = prior
+            phase = epoch == channelEpoch ? prior : settledPhase()
             errorMessage = "检查更新失败：\(error.localizedDescription)"
         }
     }
@@ -296,15 +351,29 @@ final class SoftwareUpdateManager: ObservableObject {
         downloadGeneration += 1
         let generation = downloadGeneration
         phase = .downloading; errorMessage = nil; progress = 0
-        do {
-            let package = try await service.download(selected, cacheDirectory: cacheURL) { [weak self] value in
+        // Kept so that closing the test channel can stop a running download of a test build.
+        let task: Task<URL, Error> = Task { [service, cacheURL] in
+            try await service.download(selected, cacheDirectory: cacheURL) { [weak self] value in
                 Task { @MainActor [weak self] in
                     guard self?.phase == .downloading, self?.downloadGeneration == generation else { return }
                     self?.progress = max(0, min(1, value))
                 }
             }
+        }
+        downloadTask = task
+        do {
+            let package = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            // Closing the test channel ended this download; whatever it produced is not wanted any more.
+            guard generation == downloadGeneration else { removeCachedPackage(for: selected); return }
+            downloadTask = nil
             downloadedPackage = package; progress = 1; phase = .ready
         } catch {
+            guard generation == downloadGeneration else { return }
+            downloadTask = nil
             downloadedPackage = nil; phase = .available
             errorMessage = "下载更新失败：\(error.localizedDescription)"
         }
@@ -320,11 +389,17 @@ final class SoftwareUpdateManager: ObservableObject {
                 throw SoftwareUpdateError.installation("还有另一个 KaneoPilot 实例正在运行，请先退出该实例后再安装")
             }
             let prepared = try await installer.prepare(release: selected, package: package, target: targetURL, cache: cacheURL)
+            guard release == selected, downloadedPackage == package, candidateAllowed else {
+                // The candidate was withdrawn while the helper prepared it, for example by closing the test channel.
+                phase = settledPhase()
+                return
+            }
             pendingInstallation = prepared
             phase = .waitingForExit
             requestTermination()
         } catch {
             let reason = error.localizedDescription
+            guard release == selected else { phase = settledPhase(); return }
             do {
                 try await GitHubSoftwareUpdateService.verifyPackage(at: package, release: selected)
                 phase = .ready
@@ -366,22 +441,87 @@ final class SoftwareUpdateManager: ObservableObject {
         errorMessage = reason
     }
 
-    private func restoreCachedRelease() async {
+    /// Brings back the candidate saved by the last check, unless it is a test build and the test channel is off.
+    func restoreCachedRelease() async {
         guard !isBusy, let data = defaults.data(forKey: Keys.release),
               let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data),
-              (try? cached.validate()) != nil,
-              let installed = try? SoftwareVersion(currentVersion),
-              let candidate = try? SoftwareVersion(cached.version), candidate > installed else { return }
+              (try? cached.validate()) != nil else { return }
+        guard !cached.isTest || testChannelActive else {
+            // A test build saved while the channel was on must not outlive it.
+            defaults.removeObject(forKey: Keys.release)
+            removeCachedPackage(for: cached)
+            return
+        }
+        guard let installed = try? SoftwareVersion(currentVersion),
+              let candidate = try? SoftwareVersion(cached.version),
+              SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
+                                       candidate: candidate, candidateBuild: cached.buildNumber) else { return }
         release = cached; phase = .available
         let package = cached.packageURL(in: cacheURL)
         if FileManager.default.fileExists(atPath: package.path), !isPreview {
             phase = .checking
             do {
                 try await GitHubSoftwareUpdateService.verifyPackage(at: package, release: cached)
+                guard release == cached else { phase = settledPhase(); return }
                 downloadedPackage = package; phase = .ready
             } catch {
+                guard release == cached else { phase = settledPhase(); return }
                 phase = .available; errorMessage = "已有更新包校验失败，请重新下载"
             }
+        }
+    }
+
+    /// Closing the test channel removes everything that exists only for a test candidate: the candidate,
+    /// its cached package, a running download of it, the saved record and the install entry. A stable
+    /// candidate and the installed build are not touched.
+    private func discardTestCandidate() {
+        guard let candidate = release, candidate.isTest else { return }
+        downloadGeneration += 1
+        downloadTask?.cancel(); downloadTask = nil
+        if pendingInstallation != nil || phase == .waitingForExit {
+            cancelInstallation("已关闭接收测试版，已取消测试版安装")
+        }
+        removeCachedPackage(for: candidate)
+        defaults.removeObject(forKey: Keys.release)
+        release = nil; downloadedPackage = nil; progress = 0; errorMessage = nil
+        // A check or hand-off that is still running settles the phase itself when it returns.
+        if phase != .checking && phase != .preparing { phase = .idle }
+        channelNotice = "已关闭接收测试版，已移除待安装的测试版。"
+        // The stable candidate was not stored, so look for it again at the next due check.
+        forgetLastAttempt()
+    }
+
+    /// The phase that matches the stored candidate, for when a request ends without an applicable answer.
+    private func settledPhase() -> Phase {
+        guard release != nil else { return .idle }
+        return downloadedPackage == nil ? .available : .ready
+    }
+
+    private func forgetLastAttempt() {
+        lastAttemptAt = nil
+        defaults.removeObject(forKey: Keys.attempted)
+    }
+
+    private func removeCachedPackage(for release: SoftwareRelease) {
+        removePackageFolder(release.packageURL(in: cacheURL).deletingLastPathComponent())
+    }
+
+    /// Deletes one downloader folder (`<tag>-<sha256>`) that sits directly inside the update cache and is
+    /// a real directory; anything else, including install jobs and receipts, is left alone.
+    private func removePackageFolder(_ folder: URL) {
+        let fm = FileManager.default
+        guard folder.deletingLastPathComponent().standardizedFileURL.path == cacheURL.standardizedFileURL.path,
+              SoftwareUpdateSource.isPackageFolder(folder.lastPathComponent),
+              (try? fm.attributesOfItem(atPath: folder.path))?[.type] as? FileAttributeType == .typeDirectory else { return }
+        try? fm.removeItem(at: folder)
+    }
+
+    /// After a successful check, packages that are installed or superseded are not needed any more.
+    private func pruneUpdateCache() {
+        let keep = release?.packageURL(in: cacheURL).deletingLastPathComponent().lastPathComponent
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: cacheURL.path) else { return }
+        for name in names where name != keep {
+            removePackageFolder(cacheURL.appendingPathComponent(name, isDirectory: true))
         }
     }
 

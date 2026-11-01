@@ -14,7 +14,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -33,6 +36,10 @@ class SoftwareUpdateInteractionTest {
     private val release = UpdateRelease("0.2.10", "v0.2.10", "a".repeat(40), 123,
         UpdateUrls.release("v0.2.10"), "", "KaneoPilot-0.2.10-android.apk",
         UpdateUrls.asset("v0.2.10", "KaneoPilot-0.2.10-android.apk"), "b".repeat(64), 1234, "c".repeat(64))
+    private val testRelease = UpdateRelease("0.2.12-test.81", "v0.2.12-test.81", "a".repeat(40), 81,
+        UpdateUrls.release("v0.2.12-test.81"), "", "KaneoPilot-0.2.12-test.81-android.apk",
+        UpdateUrls.asset("v0.2.12-test.81", "KaneoPilot-0.2.12-test.81-android.apk"), "b".repeat(64), 1234, "c".repeat(64),
+        UPDATE_TEST_CHANNEL, "feat/20261101-kp-u02-test-update-channel")
 
     @Test fun cancelingConfirmationDoesNotInstallAndTheSameReadyUpdateCanBeRetried() {
         var installs = 0
@@ -82,6 +89,101 @@ class SoftwareUpdateInteractionTest {
         compose.onNodeWithText("继续安装").assertIsNotEnabled()
         compose.runOnIdle { assertEquals(0, installs) }
         screenshot("04-version-change-disabled")
+    }
+
+    @Test fun theTestBuildsSwitchStartsOffReportsTheChoiceAndExplainsTheFrequency() {
+        val choices = mutableListOf<Boolean>()
+        var state by mutableStateOf(SoftwareUpdateState(onReceivesTestBuilds = { choices += it }))
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(state, false, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithText("在前台每 6 小时检查 GitHub 正式版").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithContentDescription("接收测试版").performScrollTo().assertIsOff().assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(listOf(true), choices) }
+        compose.runOnIdle { state = state.copy(receivesTestBuilds = true) }
+        compose.onNodeWithContentDescription("接收测试版").assertIsOn()
+        compose.onNodeWithText("在前台每 6 小时检查 GitHub 正式版和测试版").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun aPreviewKeepsTheTestBuildsSwitchOffAndDisabledWhateverWasStored() {
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(SoftwareUpdateState(receivesTestBuilds = true, installedVersion = "0.0.0"), true, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithContentDescription("接收测试版").performScrollTo().assertIsOff().assertIsNotEnabled()
+        compose.onNodeWithText("开发预览包与 Debug 包不接收测试版。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("在前台每 6 小时检查 GitHub 正式版").assertExists()
+    }
+
+    @Test fun theSwitchIsLockedWhileACheckOrInstallationIsRunningButNotWhileDownloading() {
+        var state by mutableStateOf(SoftwareUpdateState(phase = SoftwareUpdatePhase.DOWNLOADING, release = testRelease, receivesTestBuilds = true))
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(state, false, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithContentDescription("接收测试版").performScrollTo().assertIsEnabled()
+        listOf(SoftwareUpdatePhase.CHECKING, SoftwareUpdatePhase.VERIFYING, SoftwareUpdatePhase.PERMISSION, SoftwareUpdatePhase.INSTALLING).forEach { phase ->
+            compose.runOnIdle { state = state.copy(phase = phase) }
+            compose.onNodeWithContentDescription("接收测试版").assertIsNotEnabled()
+        }
+    }
+
+    @Test fun aTestCandidateNamesItsBranchAndWarnsBeforeInstalling() {
+        var installs = 0
+        var state by mutableStateOf(SoftwareUpdateState(phase = SoftwareUpdatePhase.AVAILABLE, release = testRelease, receivesTestBuilds = true))
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(state, false, {}, {}, {}, {}, { installs++ }, {})
+            }
+        } }
+        compose.onNodeWithText("发现测试版 0.2.12-test.81").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("来源分支：feat/20261101-kp-u02-test-update-channel").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { state = state.copy(phase = SoftwareUpdatePhase.READY) }
+        compose.onNodeWithText("0.2.12-test.81（测试版）已下载并校验").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("安装更新").performScrollTo().performClick()
+        compose.onNodeWithText("这是测试版：可能不稳定，也可能升级数据库，无法在 App 内降级。", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("继续安装").performClick()
+        compose.runOnIdle { assertEquals(1, installs) }
+    }
+
+    @Test fun aStableCandidateShowsNoTestLabelOrWarning() {
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(SoftwareUpdateState(phase = SoftwareUpdatePhase.READY, release = release), false, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithText("安装更新").performScrollTo().performClick()
+        compose.onNodeWithText("安装 ${release.version}？").assertIsDisplayed()
+        compose.onNodeWithText("这是测试版", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("来源分支", substring = true).assertDoesNotExist()
+    }
+
+    @Test fun anInstalledTestBuildGetsAHintOnlyWhileTheChannelIsOff() {
+        val hint = "当前是测试版。开启「接收测试版」可获取后续测试构建；关闭时只在出现更高的正式版时提示。"
+        var state by mutableStateOf(SoftwareUpdateState(installedVersion = "0.2.12-test.81"))
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(state, false, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithText(hint).performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { state = state.copy(receivesTestBuilds = true) }
+        compose.onNodeWithText(hint).assertDoesNotExist()
+    }
+
+    @Test fun theNoticeAboutAClosedChannelIsShownOnceInPlaceOfTheStatus() {
+        val notice = "已关闭接收测试版，已移除待安装的测试版。"
+        compose.setContent { KaneoTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SoftwareUpdateSection(SoftwareUpdateState(phase = SoftwareUpdatePhase.IDLE, message = notice), false, {}, {}, {}, {}, {}, {})
+            }
+        } }
+        compose.onNodeWithText(notice).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("尚未检查更新").assertDoesNotExist()
     }
 
     @Suppress("DEPRECATION")

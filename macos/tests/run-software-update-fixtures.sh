@@ -11,6 +11,10 @@ if [ -n "$TASK_FIXTURE_OUTPUT" ]; then
     *) printf '%s\n' 'KANPILOT_UPDATE_FIXTURE_OUTPUT must be an absolute directory' >&2; exit 1 ;;
   esac
 fi
+# The version grammar, ordering and update rule are shared with the Python tools and the Android client.
+KANPILOT_UPDATE_VECTORS="$TASK_ROOT/scripts/tests/fixtures/update-version-vectors.json"
+[ -f "$KANPILOT_UPDATE_VECTORS" ] || { printf '%s\n' "missing shared version vectors: $KANPILOT_UPDATE_VECTORS" >&2; exit 1; }
+export KANPILOT_UPDATE_VECTORS
 TASK_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/kp-software-update.XXXXXX")"
 trap 'rm -rf "$TASK_FIXTURE"' EXIT
 swiftc -target "$(uname -m)-apple-macos14" -parse-as-library \

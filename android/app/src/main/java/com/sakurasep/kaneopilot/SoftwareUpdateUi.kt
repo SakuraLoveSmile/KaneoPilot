@@ -32,11 +32,14 @@ import java.time.format.DateTimeFormatter
 ) {
     val uriHandler = LocalUriHandler.current
     var confirmInstall by remember { mutableStateOf<UpdateRelease?>(null) }
+    // A development preview never receives test builds, whatever was saved before.
+    val testChannelActive = UpdatePolicy.testChannelActive(state.receivesTestBuilds, preview)
     Section("软件更新") {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("自动检查新版")
-                Text("在前台每 6 小时检查 GitHub 正式版", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (testChannelActive) "在前台每 6 小时检查 GitHub 正式版和测试版" else "在前台每 6 小时检查 GitHub 正式版",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(checked = state.automaticCheck, onCheckedChange = onAutomaticCheck, enabled = !preview,
                 modifier = Modifier.semantics { contentDescription = "自动检查新版" })
@@ -49,25 +52,43 @@ import java.time.format.DateTimeFormatter
             Switch(checked = state.automaticDownload, onCheckedChange = onAutomaticDownload, enabled = !preview,
                 modifier = Modifier.semantics { contentDescription = "自动下载安装包" })
         }
-        if (preview) Text("开发预览包仅支持手动检查和查看发布页，不在 App 内下载或覆盖安装正式版。Debug 包与正式版签名不同，不能直接覆盖升级。", style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("接收测试版")
+                Text("开启后，也会检查并提供来自开发分支的测试构建；测试构建可能不稳定，也可能升级数据库，无法在 App 内降级。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = testChannelActive, onCheckedChange = state.onReceivesTestBuilds, enabled = !preview && state.canChangeTestChannel,
+                modifier = Modifier.semantics { contentDescription = "接收测试版" })
+        }
+        if (preview) {
+            Text("开发预览包仅支持手动检查和查看发布页，不在 App 内下载或覆盖安装正式版。Debug 包与正式版签名不同，不能直接覆盖升级。", style = MaterialTheme.typography.bodySmall)
+            Text("开发预览包与 Debug 包不接收测试版。", style = MaterialTheme.typography.bodySmall)
+        }
+        if (!preview && state.installedIsTestBuild && !testChannelActive) {
+            Text("当前是测试版。开启「接收测试版」可获取后续测试构建；关闭时只在出现更高的正式版时提示。", style = MaterialTheme.typography.bodySmall)
+        }
         val status = when (state.phase) {
-            SoftwareUpdatePhase.IDLE -> "尚未检查更新"
+            SoftwareUpdatePhase.IDLE -> state.message ?: "尚未检查更新"
             SoftwareUpdatePhase.CHECKING -> "正在检查新版…"
             SoftwareUpdatePhase.UP_TO_DATE -> state.message ?: "当前已是最新版本"
-            SoftwareUpdatePhase.AVAILABLE -> "发现正式版 ${state.release?.version}"
+            SoftwareUpdatePhase.AVAILABLE -> if (state.release?.isTest == true) "发现测试版 ${state.release?.version}" else "发现正式版 ${state.release?.version}"
             SoftwareUpdatePhase.DOWNLOADING -> "正在下载 ${state.release?.version}（${state.progress}%）"
             SoftwareUpdatePhase.VERIFYING -> "正在校验安装包…"
-            SoftwareUpdatePhase.READY -> "${state.release?.version} 已下载并校验"
+            SoftwareUpdatePhase.READY -> if (state.release?.isTest == true) "${state.release?.version}（测试版）已下载并校验" else "${state.release?.version} 已下载并校验"
             SoftwareUpdatePhase.PERMISSION -> "等待允许安装此来源"
             SoftwareUpdatePhase.INSTALLING -> "已交给系统安装器确认"
             SoftwareUpdatePhase.FAILED -> "更新尚未完成"
         }
         Text(status, style = MaterialTheme.typography.bodyMedium)
+        state.release?.takeIf { it.isTest }?.branch?.let { branch ->
+            Text("来源分支：$branch", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (state.phase == SoftwareUpdatePhase.DOWNLOADING) LinearProgressIndicator(progress = { state.progress / 100f }, modifier = Modifier.fillMaxWidth())
         else if (state.phase in setOf(SoftwareUpdatePhase.CHECKING, SoftwareUpdatePhase.VERIFYING)) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (state.lastCheck > 0) Text("最近检查：${DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(state.lastCheck))}",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (state.phase != SoftwareUpdatePhase.UP_TO_DATE) state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        if (state.phase != SoftwareUpdatePhase.UP_TO_DATE && state.phase != SoftwareUpdatePhase.IDLE) state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         state.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         OutlinedButton(onClick = onCheck, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("检查更新") }
         state.release?.let { release ->
@@ -89,7 +110,10 @@ import java.time.format.DateTimeFormatter
     }
     confirmInstall?.let { confirmed -> AlertDialog(onDismissRequest = { confirmInstall = null }, modifier = Modifier.width(320.dp),
         title = { Text("安装 ${confirmed.version}？") },
-        text = { Text("将交给 Android 系统安装器确认。配对和应用数据会保留；取消后可以再次安装。") },
+        text = {
+            val base = "将交给 Android 系统安装器确认。配对和应用数据会保留；取消后可以再次安装。"
+            Text(if (confirmed.isTest) base + "这是测试版：可能不稳定，也可能升级数据库，无法在 App 内降级。" else base)
+        },
         confirmButton = { TextButton(onClick = { confirmInstall = null; onInstall() }, enabled = state.phase == SoftwareUpdatePhase.READY && state.release == confirmed) { Text("继续安装") } },
         dismissButton = { TextButton(onClick = { confirmInstall = null }) { Text("取消") } }) }
 }

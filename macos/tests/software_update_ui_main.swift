@@ -6,6 +6,10 @@ import SwiftUI
 
 private enum UpdateUIScenario: String {
     case ready, downloadFailure = "download-failure", downloading
+    /// The switch is on and a test build is the newest release.
+    case testCandidate = "test-candidate"
+    /// The App is a test build; turning the switch on offers the next test build.
+    case installedTest = "installed-test"
 }
 
 private final class UpdateUIEventLog: @unchecked Sendable {
@@ -46,15 +50,18 @@ private final class UpdateUIEventLog: @unchecked Sendable {
 
 private let updateUIPackage = Data("KaneoPilot isolated update UI package; never install".utf8)
 
-private func updateUIRelease() -> SoftwareRelease {
-    let version = "0.2.0", tag = "v0.2.0", name = "KaneoPilot-0.2.0-macos-universal.dmg"
+/// The stable fixture release, or a test build when `version` ends in `-test.B` (then `build` is B).
+private func updateUIRelease(version: String = "0.2.0", build: Int = 10) -> SoftwareRelease {
+    let tag = "v\(version)", name = "KaneoPilot-\(version)-macos-universal.dmg"
+    let isTest = version.contains("-test.")
     let digest = SHA256.hash(data: updateUIPackage).map { String(format: "%02x", $0) }.joined()
     return SoftwareRelease(version: version, tag: tag, sourceSHA: String(repeating: "a", count: 40),
-        buildNumber: 10, name: name, size: Int64(updateUIPackage.count), sha256: digest,
+        buildNumber: build, name: name, size: Int64(updateUIPackage.count), sha256: digest,
         signatureSHA256: String(repeating: "b", count: 64),
         downloadURL: SoftwareUpdateSource.assetURL(tag: tag, name: name),
         pageURL: SoftwareUpdateSource.pageURL(tag: tag),
-        notes: "隔离夹具更新说明：复用生产设置组件核对下载、失败重试与安装确认。此内容不是实际 Release。")
+        notes: "隔离夹具更新说明：复用生产设置组件核对下载、失败重试与安装确认。此内容不是实际 Release。",
+        channel: isTest ? "test" : nil, branch: isTest ? "feat/update-channel" : nil)
 }
 
 private actor UpdateUIService: SoftwareUpdateServing {
@@ -64,10 +71,17 @@ private actor UpdateUIService: SoftwareUpdateServing {
 
     init(scenario: UpdateUIScenario, log: UpdateUIEventLog) { self.scenario = scenario; self.log = log }
 
-    func latest() async throws -> SoftwareRelease {
-        log.record("latest_requested", ["network_used": false])
+    func latest() async throws -> SoftwareRelease { try await latest(includingTestBuilds: false) }
+
+    func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease {
+        log.record("latest_requested", ["network_used": false, "includes_test_builds": includingTestBuilds])
         try await Task.sleep(nanoseconds: 250_000_000)
-        return updateUIRelease()
+        guard includingTestBuilds else { return updateUIRelease() }
+        switch scenario {
+        case .testCandidate: return updateUIRelease(version: "0.2.1-test.70", build: 70)
+        case .installedTest: return updateUIRelease(version: "0.2.1-test.71", build: 71)
+        case .ready, .downloadFailure, .downloading: return updateUIRelease()
+        }
     }
 
     func download(_ release: SoftwareRelease, cacheDirectory: URL,
@@ -168,7 +182,7 @@ private final class UpdateUIController: ObservableObject {
         }
         let scenarioText = argument("--scenario") ?? ProcessInfo.processInfo.environment["KANPILOT_UPDATE_UI_SCENARIO"] ?? "ready"
         guard let scenario = UpdateUIScenario(rawValue: scenarioText) else {
-            throw SoftwareUpdateError.invalid("场景必须为 ready、download-failure 或 downloading")
+            throw SoftwareUpdateError.invalid("场景必须为 ready、download-failure、downloading、test-candidate 或 installed-test")
         }
         let fixtureRoot: URL
         if let explicit = argument("--fixture-root") {
@@ -188,8 +202,12 @@ private final class UpdateUIController: ObservableObject {
         self.installer = installer
         let termination = UpdateUITerminationBridge(log: log)
         self.termination = termination
+        // The switch starts on in the test-candidate scenario; every other scenario starts with the default (off).
+        if scenario == .testCandidate { defaults.set(true, forKey: "softwareUpdate.receivesTestBuilds") }
+        let installedTest = scenario == .installedTest
         updater = SoftwareUpdateManager(service: UpdateUIService(scenario: scenario, log: log), installer: installer,
-            defaults: defaults, currentVersion: "0.1.0", currentBuild: "1",
+            defaults: defaults, currentVersion: installedTest ? "0.2.1-test.70" : "0.1.0",
+            currentBuild: installedTest ? "70" : "1",
             targetURL: fixtureRoot.appendingPathComponent("uninstalled/KaneoPilot.app"),
             cacheURL: fixtureRoot.appendingPathComponent("cache"), allowsNetwork: true,
             requestTermination: { termination.intercept() })
@@ -220,6 +238,11 @@ private final class UpdateUIController: ObservableObject {
             "status": updater.statusText, "progress": updater.progress,
             "error": updater.errorMessage ?? "", "can_check": !updater.isBusy,
             "can_download": updater.canDownload, "can_install": updater.canInstall,
+            "receives_test_builds": updater.receivesTestBuilds, "test_channel_active": updater.testChannelActive,
+            "can_change_test_channel": updater.canChangeTestChannel,
+            "installed_is_test_build": updater.installedIsTestBuild,
+            "release_version": updater.release?.version ?? "", "release_is_test": updater.release?.isTest ?? false,
+            "release_branch": updater.release?.branch ?? "",
             "installer_prepare_count": counts.0, "helper_launch_count": counts.1,
             "termination_intercepted_count": termination.requests,
             "network_used": false, "production_core_used": false, "actual_installation": false]

@@ -11,7 +11,8 @@
 | 触发方式 | 检查与产物 | 发布行为 |
 | --- | --- | --- |
 | 分支 push / PR | Python 隔离检查通过后，两端分别检查并生成 Debug APK、Universal DMG | 不创建 Release |
-| Actions → Packages → Run workflow，选择分支 | 与分支构建相同；版本为 `0.0.0`，build 为 run number | 不创建 Release；手动选择标签会被拒绝 |
+| Actions → Packages → Run workflow，选择分支（`channel=preview`，默认） | 与分支构建相同；版本为 `0.0.0`，build 为 run number | 不创建 Release；手动选择标签会被拒绝 |
+| Actions → Packages → Run workflow，选择已推送的任务分支，`channel=test` | 固定密钥签名 APK、Universal DMG，版本为 `X.Y.Z-test.<run number>` | 全部必需 job 成功后创建注释标签并发布 **GitHub 预发布**（测试版），不会成为 latest；见[测试版通道](#测试版通道) |
 | 推送合规的 annotated `vX.Y.Z` 标签 | 固定密钥签名 APK、Universal DMG，版本由标签注入 | 全部必需 job 成功后发布正式 Release |
 
 也可使用 GitHub CLI 请求分支构建：
@@ -28,7 +29,7 @@ gh run download <run-id> --dir /path/to/downloads
 ## 正式版本规则
 
 1. 发布源码必须是远端 `main` 已包含的完整提交。先审查并合并变更，确认该提交的云端检查通过；不从本地脏目录或未合并分支发布。
-2. 版本使用严格稳定格式 `vMAJOR.MINOR.PATCH`，各段无多余前导零；当前流程不支持 RC、beta 或其他预发布标签。版本号由维护者明确决定，不自动猜测下一版。
+2. 版本使用严格稳定格式 `vMAJOR.MINOR.PATCH`，各段无多余前导零；正式流程不支持 RC、beta 等预发布标签，唯一的预发布形态是下文的测试版，且只能由手动构建创建。版本号由维护者明确决定，不自动猜测下一版。
 3. 使用直接指向该提交的 **annotated tag**。轻量标签、嵌套标签、空注释均拒绝；标签注释就是该版本的发布说明，写明用户可见变化、修复和升级注意事项。
 4. 标签和已发布安装包均不可覆盖。标签创建后不得移动或复用；需要改变源码或安装包时创建新版本。稳定版本一次发布一个，等前一版本完成后再推下一个标签。
 
@@ -41,11 +42,59 @@ git tag -a v1.2.3 <release-sha> -F /path/to/release-notes.md
 git push origin refs/tags/v1.2.3
 ```
 
-推送标签会触发正式发布，不是预览。普通分支推送及手动构建不会发布版本。
+推送标签会触发正式发布，不是预览。普通分支推送及手动预览构建不会发布版本。
+
+## 测试版通道
+
+测试版是 GitHub **预发布**，让本地完成任务后的分支构建能在 Mac 与 Android 的 App 内更新，不再手动下载 Actions 产物。它不是正式版：不会成为 latest，只请求 latest 的客户端（包括已部署的正式版客户端）看不到它；只有在 App 内开启「接收测试版」才会被提供。
+
+### 版本与排序规范（唯一规范）
+
+```text
+版本   := 稳定 | 测试
+稳定   := N "." N "." N           N := 0 | [1-9][0-9]{0,8}      每段至多 9 位
+测试   := 稳定 "-test." B          B := [1-9][0-9]{0,8}          B 就是该次 Actions run number
+tag    := "v" 版本
+排序键 := (major, minor, patch, 稳定 ? 1 : 0, B)                元组逐项按数值比较
+```
+
+- 其它形式一律无效：`-rc.N`、`-beta.N`、缺 B 的 `-test`、`-test.0`、前导零、`+build`、空白、非 ASCII 数字、超过 9 位的数字段。排序例：`0.2.0 < 0.2.1-test.9 < 0.2.1-test.70 < 0.2.1 < 0.3.0-test.1 < 0.3.0`（B 按数值比较，不是字符串）。「每段至多 9 位」是对旧 Kotlin 端宽松解析的有意收紧：三端一致，且 B 必须放得进 `versionCode`。
+- 提供更新当且仅当候选排序键严格大于已装版本。候选或已装任一方是测试版时，另要求构建号严格增大（Android 是 `versionCode`，Mac 是 `CFBundleVersion`，必须是整数），防止「基础版更高但源码更旧」的测试构建被装上去。两个正式版之间只比版本，同版本不因 build 变化更新。
+- 测试版的 B 等于 `build_number`、Android `versionCode`、Mac `CFBundleVersion`。每次构建有自己的 B，所以同一源码重复发布也是不同的测试版。
+- **SemVer 陷阱**：`X.Y.Z-任何后缀` 都小于 `X.Y.Z`。基础版若不高于最新正式版，该版本的用户永远收不到，所以发布时强制基础版严格高于最新正式版。
+- 共享向量文件 `scripts/tests/fixtures/update-version-vectors.json`（有效/无效字符串、升序序列和更新判定）由 Python 测试、macOS 夹具、Android 单测共同读取。规则变化先改这里和本节，不得三份实现各改各的。
+
+### 发布测试版
+
+测试版只由手动构建创建，从**已推送的任务分支**发布，不要求提交已合入 `main`，也不随 push 或 `main` 自动发布。每次发布都是对外副作用，须在当次对话中确认分支、提交、基础版本和说明。
+
+```sh
+git push origin <task-branch>
+gh workflow run packages.yml --ref <task-branch> -f channel=test -f base_version=0.2.1 -f notes="本次测试要点"
+# 长说明：把输入组成 JSON，经标准输入传入
+jq -n --rawfile notes notes.md '{channel: "test", base_version: "0.2.1", notes: $notes}' | gh workflow run packages.yml --ref <task-branch> --json
+```
+
+- `base_version` 可空：为空时取「最新正式版 patch+1」与「已发布测试版的最高基础版」中较高者，无法确定时失败并要求显式填写。显式填写必须严格高于最新正式版（也高于 `0.0.0`），且不低于已发布测试版的最高基础版，否则新构建会排在已装测试版之下而永远不被提供。同一基础版可继续递增 B。
+- `notes` 必填，最多 4000 字符，是公开文本，不得含本地路径、凭据或内部数据。说明文字只经环境变量进入脚本，不插值进 shell。
+- 版本为 `<base>-test.<run number>`。发布 job 随后创建指向构建提交的 annotated tag `v<base>-test.<run number>`，标签说明为 `notes` 加来源行（通道、分支、提交、构建号、run 地址）。不要手动推送测试标签：`vX.Y.Z-test.N` 标签不会触发工作流，也会被构建身份检查拒绝。
+- `channel` 默认 `preview`。`preview` 带 `base_version` 或 `notes`、非手动事件选择通道、从标签引用手动构建，均直接失败。
+- 检查与打包同正式版：Android 用 `assembleRelease` 和固定正式密钥签名（同一证书、同一包名 `com.sakurasep.kaneopilot`），macOS 仍是 ad-hoc 未公证；版本串写入 `versionName` 与 `MARKETING_VERSION`。云端 Debug 包每次 run 的签名证书都不同，不能用于测试通道。
+
+测试 Release：`tag_name=vX.Y.Z-test.B`，`prerelease=true`，非 draft，资产同样四项：`KaneoPilot-X.Y.Z-test.B-android.apk`、`KaneoPilot-X.Y.Z-test.B-macos-universal.dmg`、`manifest.json`、`SHA256SUMS`（文件名必须与此完全一致）。测试版 manifest 沿用正式字段，另含 `channel:"test"`、`base_version` 和仅供显示的 `branch`（不超过 100 个可打印 ASCII 字符，权威来源是注释标签）；正式版 manifest 不含 `channel`，保持原样。
+
+发布 job 与正式版共用并发锁，一次只有一个发布 job 写 Release。它依次：复核产物与 manifest（含 B 等于 `build_number`）；幂等创建注释标签（已存在则必须是指向构建提交的注释标签，否则用 API 创建标签对象与引用）；查找或创建自己的 draft 预发布（正文带 `kaneopilot-ci:<sha>:<run>` 标记）；逐个核验或上传四个资产并读回哈希；最后 `PATCH {draft:false, prerelease:true}` 公开。不带 `make_latest`，也不读取 latest。他人的 draft、同名异包、被移动的标签、轻量或嵌套标签、空说明都在任何写入前中止；已公开的预发布缺资产不静默修补。
+
+保留策略：测试预发布与标签全部保留，不自动删除；清理须单独授权。
+
+### 离开测试通道与数据
+
+- 测试版若升级 SQLite schema，旧正式版核心会 fail closed 拒绝新库（`migration_needed`）。核心在每个升级步骤前自动整库备份到 `~/Library/Application Support/KaneoPilot/backups/schema-<UTC>-vN-to-vN+1/`。
+- App 内不提供降级。离开测试通道有两条路：等更高的正式版（App 内更新）；或手动安装旧包，并在 App 与 Plus 会话全部退出后，先另存当前 `kanpilot.db`（及 `-wal`、`-shm`），再把备份目录里的同名文件复制回 `~/Library/Application Support/KaneoPilot/`。发布测试版的说明里应人工标注是否含 schema 变更。
 
 ## 签名、产物与发布门
 
-Android 固定使用 JDK 17、SDK / Build Tools 36、仓库校验过的 Gradle wrapper。正式 APK 永久复用既有签名证书，缺少签名配置直接失败；Debug APK 的证书与正式版不同，不能用于验证正式版覆盖升级。`versionCode` 使用递增的工作流 run number。
+Android 固定使用 JDK 17、SDK / Build Tools 36、仓库校验过的 Gradle wrapper。正式 APK 永久复用既有签名证书，缺少签名配置直接失败；Debug APK 的证书与正式版不同（云端每次 run 的 Debug 证书也互不相同），不能用于验证正式版覆盖升级。测试版 APK 同样用该证书和同一包名，因此测试版与正式版之间可原位互相覆盖，并保留配对与数据。`versionCode` 使用递增的工作流 run number。
 
 仓库发布 Secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。密钥保存在可恢复的离线保管库；不能提交到 Git、参数或日志。Runner 结束时删除临时 keystore。
 
@@ -70,6 +119,7 @@ macOS 使用 GitHub 托管 macOS runner 构建 arm64 / x86_64 Universal DMG，�
 - 不要为同一个标签手动创建新 run：新的构建编号与旧 Release 身份不同。也不要删除标签、Release 或资产来绕过身份检查。
 - 若原产物已过期，或重建后的字节不同，保留原现场并发布新版本；不要声称重复构建一定产生逐字节相同的 DMG。
 - 已发布版本再次核对保持只读；缺失或内容冲突明确失败，不悄悄修补。
+- 测试版发布失败或被取消：draft 对客户端不可见。重跑原 run 中失败或被取消的发布 job，复用原产物；原产物已过期或字节不同，就前滚发布新的测试版（新的 run number）。不要为同一个 run 另建标签，也不要删除标签、Release 或资产来绕过身份检查。
 
 下载正式包后，在下载目录运行 `shasum -a 256 -c SHA256SUMS`，并对照 `manifest.json` 的源码 SHA、版本和签名身份。构建成功、安装验证、真机验收和正式发布分别记录。
 
@@ -79,7 +129,7 @@ macOS「设置 → 高级 → 软件更新」与 Android「连接 → 软件更�
 
 共享获取规则：
 
-- 只接受固定仓库最新的非 draft、非 prerelease 的严格 `vMAJOR.MINOR.PATCH` 正式版，按三段整数比较；版本相同或较旧不升级。同版本不因 build 变化更新。版本为 `0.0.0` 的云端开发包以及 Android Debug 包可以手动查看正式版，但不会自动检查、下载或安装，以免把候选源码换回旧正式版或让自动测试访问真实网络。
+- 默认（未开启「接收测试版」）只接受固定仓库最新的非 draft、非 prerelease 的严格 `vMAJOR.MINOR.PATCH` 正式版，按三段整数比较；版本相同或较旧不升级。同版本不因 build 变化更新。开启测试版通道后的规则见下文「测试版通道（客户端）」。版本为 `0.0.0` 的云端开发包以及 Android Debug 包可以手动查看正式版，但不会自动检查、下载或安装，以免把候选源码换回旧正式版或让自动测试访问真实网络。
 - 一次检查冻结 Release 的 tag、发布页、资产名和下载 URL。`manifest.json` 来自该 Release 的唯一同名资产；目标包名固定为 `KaneoPilot-X.Y.Z-macos-universal.dmg` / `KaneoPilot-X.Y.Z-android.apk`。下载不能重新走 latest 别名。所有元数据 URL 和初始下载 URL 均须是固定仓库的 HTTPS URL；资产下载仅允许重定向至 GitHub 的 HTTPS 资产 CDN，不发送凭据。
 - manifest 顶层 `version/tag/source_sha/build_number` 与目标 artifact 的同名身份一致；目标平台唯一、文件名一致、SHA256 为 64 位十六进制、大小为正整数且不超过 1 GiB，源码为 40 位十六进制，build 为正整数。元数据读取最多 2 MiB。包实际字节数和 SHA256 均通过后才进入可安装状态；中断、超长、哈希不符或网络失败给出明确重试入口，不把部分文件当完整包。重复点击不创建并发的检查/下载/安装。
 - macOS `signature_type=codedirectory-sha256` 是 **DMG** 的 CodeDirectory 指纹；Android `certificate-sha256` 是 APK 证书指纹。SHA256 与这些发布元数据来自同一个 HTTPS 发布来源，不代表独立签名认证；macOS 仍为 ad-hoc、未公证。
@@ -89,6 +139,20 @@ Mac 点击「安装并重新启动」后先复核包及 DMG 签名、只读挂�
 安装助手按规范化安装目标共享一把非阻塞文件锁：父进程退出且安装确认匹配后、目标快照检查前取得，持续覆盖交换、启动和失败恢复。不同 job 争用同一目标时，后到者报告更新忙碌，不替换或额外启动 App；锁释放后，旧 job 仍须重新通过目标身份检查。锁文件位于 App 之外并保留，避免删除后出现不同锁 inode。
 
 Android 下载后先核对 APK 包名、版本、`versionCode`、发布证书指纹以及当前安装包签名；版本号须更高，`versionCode` 须递增，签名须一致。Debug 包不支持覆盖正式签名包，明确报告原因，不通过卸载绕过。安装仅在用户点击后请求「允许安装此来源」并交给 Android 系统安装器确认，使用只读 FileProvider URI，保留配对、Keystore 和应用数据。取消安装后仍可再次安装，返回 App 时重新核对已安装版本。
+
+### 测试版通道（客户端）
+
+- 偏好：Mac `softwareUpdate.receivesTestBuilds`（UserDefaults），Android `receives_test_builds`（SharedPreferences）；默认关闭。开发预览版（`0.0.0`）与 Android Debug 包上开关置灰且视为关闭，不检查、下载或安装测试版。
+- 通道关闭：与上文完全相同，只请求 `/releases/latest`。
+- 通道开启：**正式候选与通道关闭时完全相同**，仍取自 `/releases/latest`；测试候选取自 `GET /repos/SakuraLoveSmile/KaneoPilot/releases?per_page=100`，只保留 `prerelease=true`、非 draft、tag 为测试版语法且标志与 tag 形态一致的条目，并自行排序（GitHub 列表按提交日期而非发布日期排序，且只取前 100 条）。两个候选中取排序键更高、且严格大于已装版本的一个（涉及测试版时另要求构建号递增，构建号不是整数则不提供）；对胜出候选读取其 `manifest.json`（来自 github.com，不占 API 额度）并严格校验。胜出候选校验失败就是错误，不退回另一个。
+- 每次检查的 API 请求：通道关 1 次，通道开 2 次；通道开时任一请求失败，整次检查失败并给出重试提示，不用部分结果。客户端没有 GitHub 凭据，ETag 条件请求帮不上忙。
+- 测试候选的 manifest 另须 `channel="test"`，`version`/`tag` 为测试版语法，`base_version` 等于版本去掉 `-test.B` 的部分，`build_number` 等于 B，`branch` 为不超过 100 个可打印 ASCII 字符（仅显示）。tag 形态、GitHub `prerelease` 标志与发布页三者不一致的列表条目，在选择候选前就被忽略；manifest 的 `channel` 与它们不一致，则属于胜出候选的校验失败，按上一条是错误、不退回另一个。正式版 manifest 缺 `channel` 视为正式（写 `stable` 也接受），写 `test` 或其他值则拒绝。
+- 传输白名单：精确放行 latest、上述列表 URL，以及 `…/releases/download/vX.Y.Z[-test.B]/<manifest.json 或对应安装包>`，其余拒绝；重定向规则不变。目标包名为 `KaneoPilot-X.Y.Z[-test.B]-macos-universal.dmg` / `KaneoPilot-X.Y.Z[-test.B]-android.apk`。
+- 自动下载仅在「通道开启 + 自动下载开启」时进行，Android 另需非计费网络；安装前仍需用户确认，界面显示「测试版」标记和来源分支。
+- 关闭通道：待安装的测试候选清除、已缓存的测试包删除、进行中的测试下载取消、持久化的测试候选记录丢弃、安装入口失效；正式候选不受影响；已装测试版保持不动，等待更高的正式版。已装测试版而开关关闭时，设置区提示当前是测试版。
+- 缓存：每次成功检查或安装后，清理已安装或被取代的更新包，只限 App 自己的更新缓存目录。
+- 测试版 Mac App 的 `CFBundleShortVersionString` 是 `X.Y.Z-test.B`、`CFBundleVersion` 是 B；安装助手按同一排序规范只安装更高的版本，涉及测试版时构建号也须更高，其余校验、挂载、原子交换、备份和回滚不变。
+- 首次进入测试通道，两端都要手动安装一次：Mac 的 `0.0.0` 开发预览没有更新器；Android 云端 Debug 包的证书与正式密钥不同，不能覆盖，需先卸载（会丢失配对，之后重新配对）。真实的「正式版 ↔ 测试版」更新要等出现带更新器的正式版才能实机验证。
 
 分支构建的 `update-acceptance/` 仅用于授权后的真机隔离验收：独立包名 `com.sakurasep.kaneopilot.updateacceptance`、显示名「KaneoPilot 更新验证」，正式主包的包名与身份规则保持固定。预览/跨版本包及匹配测试 APK 由同一 job 生成，不加入正式 Release；不通过卸载现有主包或复用其数据来取得测试通过。任务记录给出各包身份、执行入口和实际设备结果。
 
