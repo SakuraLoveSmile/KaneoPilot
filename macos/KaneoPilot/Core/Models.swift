@@ -1882,6 +1882,179 @@ enum TimeFormat {
     }
 }
 
+// MARK: - 总览状态与摘要（KP-UI04，ui-spec §4.15）
+
+/// 总览状态标题。输入是视图已有属性的快照，输出只有语气、SF Symbol 名与标题；颜色由视图按语气映射。
+/// 只依赖 Foundation：Models.swift 会被各个夹具单独编译，这里不能引用视图层的类型。
+enum DashboardHeadline {
+    enum Tone: Equatable {
+        /// 绿：一切正常。
+        case ok
+        /// 橙：有需要你的项、有环境告警或已暂停。
+        case caution
+        /// 红：需要你里有执行端失联的项。
+        case critical
+        /// 次要色：某个状态还没确认。
+        case neutral
+    }
+
+    /// 默认值就是「一切正常」所需的全部条件：调用方只改动要说明的那一项。
+    struct Input: Equatable {
+        var coreFound = true
+        var hasBanner = false
+        var attentionLoaded = true
+        var attentionCount = 0
+        /// 收件箱里 `reason_code == "concurrency_stalled"`（执行端失联）的条数。
+        var stalledCount = 0
+        var environmentIssueCount = 0
+        var globalPaused = false
+        var engineStatusKnown = true
+        var doctorRunning = false
+        var doctorKnown = true
+        /// 诊断里 `skipped != true && ok == true` 的项数。
+        var doctorPassedCount = 1
+    }
+
+    struct Display: Equatable {
+        let tone: Tone
+        let symbol: String
+        let title: String
+    }
+
+    /// 从上到下第一条命中的生效：有告警 → 已暂停 → 任一状态未确认 → 一切正常。
+    /// 绿色「一切正常」只留给最后一条：缺失结果不称正常（ui-spec §4.16）。
+    static func make(_ input: Input) -> Display {
+        let attention = max(0, input.attentionCount)
+        let issues = max(0, input.environmentIssueCount)
+        if attention > 0 || issues > 0 {
+            var parts: [String] = []
+            if attention > 0 { parts.append("\(attention) 项需要你") }
+            if issues > 0 { parts.append("\(issues) 项环境告警") }
+            let tone: Tone = (attention > 0 && input.stalledCount > 0) ? .critical : .caution
+            return Display(tone: tone, symbol: "exclamationmark.triangle.fill", title: parts.joined(separator: " · "))
+        }
+        if input.globalPaused {
+            return Display(tone: .caution, symbol: "pause.circle.fill", title: "自动推进已暂停")
+        }
+        if let title = unconfirmedTitle(input) {
+            return Display(tone: .neutral, symbol: "questionmark.circle", title: title)
+        }
+        return Display(tone: .ok, symbol: "checkmark.circle", title: "一切正常")
+    }
+
+    private static func unconfirmedTitle(_ input: Input) -> String? {
+        if !input.coreFound { return "未找到调度核心" }
+        if input.hasBanner { return "状态可能已过期" }
+        if !input.attentionLoaded { return "正在读取…" }
+        if !input.engineStatusKnown { return "正在读取引擎状态…" }
+        if input.doctorRunning { return "正在诊断…" }
+        if !input.doctorKnown { return "尚未诊断" }
+        if input.doctorPassedCount == 0 { return "诊断项均未检查" }
+        return nil
+    }
+
+    /// 环境告警数 E：引擎读取错误 1 + 引擎状态已读到但心跳未确认 1 + 未通过的检查项数
+    /// + 诊断结果未确认且没有未通过项 1。每一项在「环境」区段里占一行。
+    static func environmentIssueCount(engineError: Bool, engineStatusKnown: Bool, engineHealthy: Bool,
+                                      doctorIssueCount: Int, doctorNeedsAttention: Bool) -> Int {
+        let issues = max(0, doctorIssueCount)
+        var count = issues
+        if engineError { count += 1 }
+        if engineStatusKnown && !engineHealthy { count += 1 }
+        if doctorNeedsAttention && issues == 0 { count += 1 }
+        return count
+    }
+}
+
+/// 核心 `worktree_pool` 检查原因的中文译文。
+enum WorktreePoolText {
+    private static let keys = ["free", "leased", "quarantined", "unconfirmed", "waiting"]
+
+    /// 核心原文 `free: a, leased: b, quarantined: c, unconfirmed: d, waiting: e`（core/kanpilot/cmd_read.py）
+    /// 译成「隔离 c · 占用 b（待确认 d）· 空闲 a · 排队 e」：零值省略，d 为 0 时不带括号，全零写「没有工作树记录」。
+    /// `unconfirmed` 是 `leased` 的一部分（core/kanpilot/worktree_status.py），所以放在占用后的括号里。
+    /// 键名、顺序、分隔符必须与核心完全一致，数字只收 ASCII 数字；对不上或 `unconfirmed` 大于 `leased` 时
+    /// 返回 nil，调用方回落到核心原文。
+    static func summary(_ detail: String?) -> String? {
+        guard let detail else { return nil }
+        let parts = detail.components(separatedBy: ", ")
+        guard parts.count == keys.count else { return nil }
+        var numbers: [Int] = []
+        for (index, part) in parts.enumerated() {
+            let pair = part.components(separatedBy: ": ")
+            guard pair.count == 2, pair[0] == keys[index], let number = integer(pair[1]) else { return nil }
+            numbers.append(number)
+        }
+        let idle = numbers[0], leased = numbers[1], quarantined = numbers[2]
+        let unconfirmed = numbers[3], waiting = numbers[4]
+        guard unconfirmed <= leased else { return nil }
+        var items: [String] = []
+        if quarantined > 0 { items.append("隔离 \(quarantined)") }
+        if leased > 0 { items.append(unconfirmed > 0 ? "占用 \(leased)（待确认 \(unconfirmed)）" : "占用 \(leased)") }
+        if idle > 0 { items.append("空闲 \(idle)") }
+        if waiting > 0 { items.append("排队 \(waiting)") }
+        return items.isEmpty ? "没有工作树记录" : items.joined(separator: " · ")
+    }
+
+    /// 只收 1–6 位 ASCII 数字：拒绝空串、正负号、小数点、空白与溢出。
+    private static func integer(_ text: String) -> Int? {
+        guard !text.isEmpty, text.utf8.count <= 6, text.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+        return Int(text)
+    }
+}
+
+/// 总览摘要面板「项目」行的文字。
+enum DashboardProjectSummary {
+    /// 「N 个项目 · M 个自动处理已开 · live a · shadow s · legacy b · 其他 k」：模式计数为 0 的项省略；
+    /// 核心没给或不认识的模式并入「其他」。没有项目写「尚无项目配置」。
+    static func text(total: Int, automationOn: Int, modes: [String?]) -> String {
+        guard total > 0 else { return "尚无项目配置" }
+        var live = 0, shadow = 0, legacy = 0, other = 0
+        for mode in modes {
+            switch mode ?? "" {
+            case "live": live += 1
+            case "shadow": shadow += 1
+            case "legacy": legacy += 1
+            default: other += 1
+            }
+        }
+        var parts = ["\(total) 个项目", "\(max(0, automationOn)) 个自动处理已开"]
+        if live > 0 { parts.append("live \(live)") }
+        if shadow > 0 { parts.append("shadow \(shadow)") }
+        if legacy > 0 { parts.append("legacy \(legacy)") }
+        if other > 0 { parts.append("其他 \(other)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// 总览各列表的条数上限与「查看全部」链接文字。
+enum DashboardLimits {
+    static let attention = 3
+    static let progressing = 5
+
+    /// 多于上限时带总数：「查看全部 (12) ›」；不多于时不带：「查看全部 ›」。
+    static func linkTitle(_ base: String, total: Int, limit: Int) -> String {
+        total > limit ? "\(base) (\(total)) ›" : "\(base) ›"
+    }
+
+    static func head<T>(_ items: [T], limit: Int) -> [T] {
+        Array(items.prefix(max(0, limit)))
+    }
+}
+
+/// 总览行里拼出来的文字；核心没给的项统一写法。
+enum DashboardRowText {
+    /// 「需要你」行右栏：「项目 · 阶段 · 已等 N」。
+    static func attentionMeta(project: String?, stage: String?, waited: String?) -> String {
+        "\(project ?? "未提供项目") · \(stage ?? "未提供阶段") · 已等 \(waited ?? "—")"
+    }
+
+    /// 「正在推进」行右栏：「看板列 · 条件」。
+    static func progressState(column: String?, condition: String?) -> String {
+        "\(column ?? "未提供") · \(condition ?? "未提供")"
+    }
+}
+
 // MARK: - T1 批量整理资格与批量操作模型
 
 public struct MoveOutEligibility: Decodable, Equatable {
