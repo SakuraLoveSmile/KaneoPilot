@@ -26,7 +26,7 @@ struct EngineFixRevertFixtures {
         check(legacy.engineFixSummary == nil && legacy.engineFixRevert == nil, "older core remains decodable")
         let legacyMapping = try decoder.decode(ProjectMappingItem.self, from: Data(#"{"project_id":"old"}"#.utf8))
         check(legacyMapping.originDefaultBranch == nil && legacyMapping.deliveryBaseExists == nil, "unknown default stays unknown")
-        for (code, title) in [("verification_environment_failure", "验证环境未就绪"), ("fix_branch_unavailable", "无法同分支修复"),
+        for (code, title) in [("verification_environment_failure", "Plus 验证环境未就绪"), ("fix_branch_unavailable", "无法同分支修复"),
                               ("branch_exists", "任务分支已存在"), ("delivery_base_unknown", "PR 目标分支不存在")] {
             check(AutomationPresentation.title(code) == title, "four failure titles remain distinct")
         }

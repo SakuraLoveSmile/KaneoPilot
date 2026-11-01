@@ -5,6 +5,7 @@ import Foundation
 // Presentation-only dependencies; the production TextKit bridge is compiled unchanged.
 extension Labels { static func messageType(_ value: String?) -> String { value ?? "消息" } }
 extension Font { static let kpTitle = Font.system(size: 18, weight: .semibold); static let kpSmall = Font.system(size: 11) }
+extension Color { static let kpSecondary = Color.secondary }
 enum Spacing { static let s: CGFloat = 8; static let m: CGFloat = 12; static let l: CGFloat = 16 }
 enum Workspace { static func copy(_ text: String) {} }
 final class SessionReaderPerformance: @unchecked Sendable {

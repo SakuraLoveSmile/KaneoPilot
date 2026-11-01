@@ -195,11 +195,11 @@ struct SessionReaderView: View {
                         .help(taskTitle).frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityLabel("任务：\(taskTitle)")
                 } else {
-                    Text(sessionStateLabel).font(.kpSmall).foregroundStyle(.secondary)
+                    Text(sessionStateLabel).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 VStack(alignment: .trailing, spacing: Spacing.s) {
-                    if showsTaskTitle { Text(sessionStateLabel).font(.kpSmall).foregroundStyle(.secondary) }
+                    if showsTaskTitle { Text(sessionStateLabel).font(.kpSmall).foregroundStyle(Color.kpSecondary) }
                     if store.session?.isTrashed == true { Label("回收站", systemImage: "trash").font(.kpSmall) }
                     if store.session?.readOnly == true { Label("只读", systemImage: "eye").font(.kpSmall) }
                     readingStatus
@@ -249,9 +249,15 @@ struct SessionReaderView: View {
 
     private var readingStatus: some View {
         let unavailable = store.interrupted || store.connection?.isUnavailable == true || store.session?.isUnavailable == true
-        return Label(store.selectedRunID == nil ? "未选择会话" : unavailable ? "读取不可用" : store.readFailure != nil ? "读取失败" : "定时读取 · 每 \(store.pollIntervalText) 秒",
-                     systemImage: unavailable ? "exclamationmark.circle" : store.readFailure != nil ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
-            .font(.kpSmall).foregroundStyle(unavailable ? Color.red : store.readFailure != nil ? Color.orange : Color.secondary)
+        let failed = store.readFailure != nil
+        return Label {
+            Text(store.selectedRunID == nil ? "未选择会话" : unavailable ? "读取不可用" : failed ? "读取失败" : "定时读取 · 每 \(store.pollIntervalText) 秒")
+                .foregroundStyle(unavailable || failed ? Color.primary : Color.kpSecondary)
+        } icon: {
+            Image(systemName: unavailable ? "exclamationmark.circle" : failed ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
+                .foregroundStyle(unavailable ? Color.kpRed : failed ? Color.kpOrange : Color.kpSecondary)
+        }
+        .font(.kpSmall)
     }
 
     private var saveActionMenu: some View {
@@ -362,13 +368,18 @@ struct SessionReaderView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Spacing.l) {
                     DetailSection(title: "会话状态") {
-                        Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
-                            .font(.kpTitle)
-                            .foregroundStyle(statusColor)
+                        Label {
+                            Text(statusLabel(store.session))
+                                .foregroundStyle(Color.primary)
+                        } icon: {
+                            Image(systemName: store.displayStatusIcon)
+                                .foregroundStyle(statusColor)
+                        }
+                        .font(.kpTitle)
                         if let failure = store.displayFailureText {
                             Text(failure).font(.kpBody).lineLimit(3).help(failure)
                         } else if let detail = store.displayStatusDetail {
-                            Text(detail).font(.kpBody).foregroundStyle(.secondary).lineLimit(3).help(detail)
+                            Text(detail).font(.kpBody).foregroundStyle(Color.kpSecondary).lineLimit(3).help(detail)
                         }
                         FieldRow("运行软件", RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
                         if let request = model.requests.first(where: { $0.taskId == store.session?.taskId && $0.runId == store.selectedRunID }) {
@@ -385,7 +396,7 @@ struct SessionReaderView: View {
                     }
                     if let failure = store.previousFailureText {
                         DisclosureGroup("此前失败记录") {
-                            Text(failure).font(.kpBody).foregroundStyle(.secondary).textSelection(.enabled)
+                            Text(failure).font(.kpBody).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
                             if let endedAt = store.previousFailureEndedAt {
                                 FieldRow("此前结束时间", TimeFormat.fullString(endedAt))
                             }
@@ -410,13 +421,13 @@ struct SessionReaderView: View {
                             if store.controlLoading || store.requestingStart || store.acting { ProgressView().controlSize(.small) }
                         }
                         if let reason = store.retryBlockedReason {
-                            Text(reason).font(.kpSmall).foregroundStyle(.secondary).help(reason)
+                            Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary).help(reason)
                         }
                     }
                     Divider()
                     DetailSection(title: "查看详细内容") {
                         Text(isPlus ? "详细对话请在 Pi-Desktop-Plus 中查看。打开软件后，可用会话 ID 查找对应会话。" : "详细内容请到对应运行端查看。")
-                            .font(.kpBody).foregroundStyle(.secondary)
+                            .font(.kpBody).foregroundStyle(Color.kpSecondary)
                         HStack(spacing: Spacing.m) {
                             if isPlus { Button("打开 Pi-Desktop-Plus") { openPlus() } }
                             Button("复制会话 ID") {
@@ -434,11 +445,11 @@ struct SessionReaderView: View {
 
     private var statusColor: Color {
         switch store.displayStatusTone {
-        case "red": return .red
-        case "orange": return .orange
-        case "green": return .green
-        case "blue": return .blue
-        default: return .secondary
+        case "red": return Color.kpRed
+        case "orange": return Color.kpOrange
+        case "green": return Color.kpGreen
+        case "blue": return Color.kpBlue
+        default: return Color.kpSecondary
         }
     }
 
@@ -462,7 +473,7 @@ private struct SessionSearchField: View {
         return
         HStack(spacing: Spacing.s) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
                 .accessibilityHidden(true)
             TextField("搜索消息内容", text: Binding(get: { inputState.text }, set: { store.search = $0 }))
                 .textFieldStyle(.roundedBorder)
@@ -815,7 +826,7 @@ struct SessionBanner: View {
     var body: some View {
         HStack(spacing: Spacing.m) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.kpOrange)
                 .accessibilityHidden(true)
             Text(text)
                 .font(.kpSmall)
@@ -824,7 +835,7 @@ struct SessionBanner: View {
             if stale {
                 Text("可能已过期")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
             Spacer(minLength: 0)
             if retry {
@@ -859,8 +870,8 @@ struct SessionMessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
-                Text(Labels.messageType(message.type)).font(.kpSmall).foregroundStyle(.secondary)
-                Text(TimeFormat.short(message.sourceAt)).font(.kpSmall).foregroundStyle(.secondary)
+                Text(Labels.messageType(message.type)).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                Text(TimeFormat.short(message.sourceAt)).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 Spacer(minLength: 0)
                 if presentation.requiresDetail {
                     Button("查看全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
@@ -881,16 +892,16 @@ struct SessionMessageRow: View {
                 Text(presentation.toolName ?? "工具结果").font(.kpBody).fontWeight(.semibold)
                 if let summary = presentation.commandSummary, !summary.isEmpty {
                     Text(summary)
-                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .font(.kpLabel.monospaced()).textSelection(.enabled)
                 }
-                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.secondary : Color.orange } ?? .secondary)
+                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.kpSecondary : Color.primary } ?? Color.kpSecondary)
                 if presentation.rawResult {
-                    Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             if let match = row.match {
                 HStack {
-                    Text("\(match.field)命中").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("\(match.field)命中").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Button("定位全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
                         .focused($focusedControl, equals: "locate")
                     .keyboardShortcut(focusedControl == "locate" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
@@ -904,7 +915,7 @@ struct SessionMessageRow: View {
             }
             if presentation.hasOtherContent {
                 HStack {
-                    Text("另有原始内容").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("另有原始内容").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Button("查看原文", action: onRaw).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
                     .focused($focusedControl, equals: "raw")
                     .keyboardShortcut(focusedControl == "raw" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
@@ -922,7 +933,7 @@ struct SessionMessageRow: View {
 
     private func messageText(_ text: String) -> some View {
         Text(highlighted(text, query: query))
-            .font(message.isMonospaced ? .system(size: 12, design: .monospaced) : .kpBody)
+            .font(message.isMonospaced ? Font.kpLabel.monospaced() : .kpBody)
             .lineSpacing(3).textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -939,7 +950,7 @@ struct SessionMessageRow: View {
     private func section(_ title: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack {
-                Text(title).font(.kpSmall).foregroundStyle(.secondary)
+                Text(title).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 Button("复制\(title)") { Workspace.copy(text) }.font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
                     .focused($focusedControl, equals: "copy-section:\(title)")
                     .keyboardShortcut(focusedControl == "copy-section:\(title)" && true ? KeyboardShortcut(.return, modifiers: []) : nil)

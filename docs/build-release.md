@@ -15,6 +15,8 @@
 | Actions → Packages → Run workflow，选择已推送的任务分支，`channel=test` | 固定密钥签名 APK、Universal DMG，版本为 `X.Y.Z-test.<run number>` | 全部必需 job 成功后创建注释标签并发布 **GitHub 预发布**（测试版），不会成为 latest；见[测试版通道](#测试版通道) |
 | 推送合规的 annotated `vX.Y.Z` 标签 | 固定密钥签名 APK、Universal DMG，版本由标签注入 | 全部必需 job 成功后发布正式 Release |
 
+同一分支较新的 push 会取消较旧的 push 运行（PR 同理）；手动运行（可能正在发布测试版）和标签运行从不被取消。只改 `docs/plans/**` 的分支 push 不启动运行，手动运行与标签推送不受这条过滤影响。
+
 也可使用 GitHub CLI 请求分支构建：
 
 ```sh
@@ -113,7 +115,7 @@ macOS 使用 GitHub 托管 macOS runner 构建 arm64 / x86_64 Universal DMG，�
 
 ## 失败与恢复
 
-- 检查或打包失败：查看同一 run 上传的 `isolated-check-reports-*`、`android-check-reports-*`、`macos-check-reports-*`；修复源码后走新提交和新版本。
+- 检查或打包失败：查看同一 run 上传的 `isolated-check-reports-*`、`android-check-reports-*`、`macos-check-reports-*`（macOS 分 `-fixtures` 夹具日志与 `-package` 打包日志）；修复源码后走新提交和新版本。
 - 上传中断且已有自己的 draft：优先重跑原 run 的失败发布 job，复用原 run 的产物。只补缺失资产，禁止覆盖已有异包。
 - 如果发布 job 因并发等待被取消，等当前发布结束后重跑原 run 中被取消的 job，复用原产物；不要为恢复另推标签或创建新 run。
 - 不要为同一个标签手动创建新 run：新的构建编号与旧 Release 身份不同。也不要删除标签、Release 或资产来绕过身份检查。

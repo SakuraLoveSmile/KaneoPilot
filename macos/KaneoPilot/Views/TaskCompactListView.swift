@@ -22,7 +22,7 @@ struct TaskCompactListView: View {
                 .padding(.horizontal, Spacing.m)
                 .padding(.top, Spacing.m)
             ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: Spacing.m, pinnedViews: [.sectionHeaders]) {
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(sections) { section in
                         Section {
                             taskGroups(section.groups)
@@ -53,14 +53,14 @@ struct TaskCompactListView: View {
                 Button {
                     chip = option
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: Spacing.xs) {
                         Text(option.title)
-                        Text("\(count(option))").monospacedDigit().foregroundStyle(.secondary)
+                        Text("\(count(option))").monospacedDigit().foregroundStyle(Color.kpSecondary)
                     }
-                    .font(.kpSmall)
+                    .font(.kpLabel)
                     .padding(.horizontal, Spacing.s)
-                    .padding(.vertical, 4)
-                    .background(chip == option ? Color.accentColor.opacity(0.18) : Color.kpControl, in: Capsule())
+                    .padding(.vertical, Spacing.xs)
+                    .background(chip == option ? Color.accentColor.opacity(0.14) : Color.kpControl, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(chip == option ? AccessibilityTraits.isSelected : [])
@@ -90,7 +90,6 @@ struct TaskCompactListView: View {
                     TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
                         TaskCompactRow(
                             task: task,
-                            column: BoardColumn(rawValue: task.boardColumn ?? "") ?? .todo,
                             isFocused: focused == task.taskId,
                             isBatchMode: isBatchMode,
                             isSelected: selectedTaskIDs.contains(task.taskId),
@@ -109,12 +108,18 @@ struct TaskCompactListView: View {
 
     private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
         HStack(spacing: Spacing.s) {
+            if group == .needsYou {
+                Circle()
+                    .fill(Color.kpOrange)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+            }
             Text(group.title)
                 .font(.kpSmall.weight(.semibold))
-                .foregroundStyle(group == .needsYou ? Color.orange : Color.secondary)
+                .foregroundStyle(.primary)
             Text("\(count)")
                 .font(.kpSmall.weight(.medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
                 .background(Color.kpControl, in: Capsule())
@@ -163,7 +168,7 @@ enum ObserveGroup: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .needsYou: return "需要你处理"
+        case .needsYou: return "需要你"
         case .queued: return "已排队"
         case .running: return "执行中"
         case .review: return "待评审"
@@ -237,7 +242,6 @@ struct ObserveSection: Identifiable {
 
 private struct TaskCompactRow: View {
     let task: TaskSummary
-    let column: BoardColumn
     let isFocused: Bool
     let isBatchMode: Bool
     let isSelected: Bool
@@ -245,15 +249,8 @@ private struct TaskCompactRow: View {
     let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: () -> Void
     let onToggleSelect: () -> Void
+    @State private var isHovering = false
 
-    private var display: String { DisplayStatus.effective(task) }
-    private var style: StatusStyle {
-        if task.status != "done", let release = task.release, release.showsTaskStatus { return ReleasePresentation.style(release) }
-        return DisplayStatus.style(display)
-    }
-    private var exceptionColor: Color {
-        TaskBoardPresentation.isFailed(task) ? .red : .orange
-    }
     private var exceptionReason: String? {
         if let reason = task.blockedReason, !reason.isEmpty { return reason }
         if let detail = task.exception?.detail, !detail.isEmpty { return detail }
@@ -276,30 +273,23 @@ private struct TaskCompactRow: View {
                 .labelsHidden()
             }
 
-            Image(systemName: column == .failed
-                  ? (TaskBoardPresentation.isFailed(task) ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                  : style.icon)
-                .foregroundStyle(column == .failed ? exceptionColor : style.color)
-                .font(.system(size: 13))
-                .frame(width: 16)
-
             VStack(alignment: .leading, spacing: 2) {
                 TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
                 taskTitleView
 
                 if let reason = exceptionReason {
-                    // §4.18：阻塞与失败的原因文字统一为 primary；颜色只作用于图标与分组标题。
+                    // §4.18：阻塞、失败与等待原因统一为 12pt primary；颜色只作用于图标与徽标。
                     Text(reason)
-                        .font(.kpSmall)
+                        .font(.kpLabel)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                 } else if let release = task.release {
                     Text("\(release.title) · \(release.reason)")
-                        .font(.kpSmall).foregroundStyle(ReleasePresentation.color(release)).lineLimit(2)
+                        .font(.kpLabel).foregroundStyle(.primary).lineLimit(2)
                 } else if let notice = task.delivery?.autoMergeNotice {
                     Text(notice.reason)
-                        .font(.kpSmall)
-                        .foregroundStyle(notice.needsAttention ? Color.orange : Color.secondary)
+                        .font(.kpLabel)
+                        .foregroundStyle(.primary)
                         .lineLimit(2)
                 }
             }
@@ -310,7 +300,7 @@ private struct TaskCompactRow: View {
                 if task.status != "done", let release = task.release, release.showsTaskStatus {
                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                 } else {
-                    StatusBadge(status: display)
+                    StatusBadge(task: task)
                 }
 
                 if canOpenSession {
@@ -322,25 +312,26 @@ private struct TaskCompactRow: View {
                     .buttonStyle(.borderless)
                     .font(.kpSmall)
                     .help("查看执行会话")
+                    // 仅悬停或聚焦时显示；用透明度代替移除，避免徽标随悬停跳动。
+                    .opacity(isHovering || isFocused ? 1 : 0)
                 }
 
                 Text(TimeFormat.short(task.updatedAt))
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .frame(width: 44, alignment: .trailing)
             }
         }
         .padding(.horizontal, Spacing.m)
         .padding(.vertical, Spacing.s)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isFocused ? Color.accentColor.opacity(0.1) : Color.kpWindow)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(isFocused ? Color.accentColor : Color.kpSeparator.opacity(0.4), lineWidth: isFocused ? 1.5 : 1)
-        )
+        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+        .background(isFocused || (isBatchMode && isSelected) ? Color.accentColor.opacity(0.1) : Color.clear)
+        // 扁平行：缩进分隔线代替卡片描边（ui-spec §4.13）。
+        .overlay(alignment: .bottom) {
+            Divider().padding(.leading, Spacing.m)
+        }
         .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .onTapGesture {
             if isBatchMode {
                 onToggleSelect()
@@ -359,11 +350,9 @@ private struct TaskCompactRow: View {
         HStack(spacing: Spacing.s) {
             if let project = task.projectName {
                 Text(project)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 3))
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                    .lineLimit(1)
             }
             Text(task.title ?? task.taskId)
                 .font(.kpBody)

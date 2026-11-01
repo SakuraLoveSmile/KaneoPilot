@@ -63,7 +63,7 @@ struct RunsView: View {
                     .controlSize(.small)
                 Text("正在加载更多")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             } else {
                 Button {
                     Task { await model.loadMoreEvents() }
@@ -179,18 +179,18 @@ private struct EventRow: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .frame(width: 12)
                     Text(TimeFormat.short(event.at))
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .frame(width: 88, alignment: .leading)
                     Text(Labels.eventKind(event.kind))
                         .font(.kpSmall)
@@ -204,7 +204,7 @@ private struct EventRow: View {
                             if let project = event.projectName {
                                 Text(project)
                                     .font(.kpSmall)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.kpSecondary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(Color.kpControl,
@@ -213,18 +213,18 @@ private struct EventRow: View {
                             if let stage = event.stage {
                                 Text(Labels.stage(stage))
                                     .font(.kpSmall)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.kpSecondary)
                             }
                             if let result = event.result {
                                 Text(Labels.outcome(result))
                                     .font(.kpSmall)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.kpSecondary)
                             }
                         }
                         if let summary = event.summary, !summary.isEmpty {
                             Text(summary)
                                 .font(.kpSmall)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.kpSecondary)
                                 .lineLimit(1)
                         }
                     }
@@ -249,37 +249,37 @@ private struct EventRow: View {
                  verticalSpacing: 4) {
                 GridRow {
                     Text("事件 ID")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Text(event.id.map(String.init) ?? "—")
                         .font(.kpSmall).textSelection(.enabled)
                 }
                 GridRow {
                     Text("任务 ID")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Text(event.taskId ?? "—")
                         .font(.kpSmall).textSelection(.enabled)
                 }
                 GridRow {
                     Text("请求 ID")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Text(event.requestId ?? "—")
                         .font(.kpSmall).textSelection(.enabled)
                 }
                 GridRow {
                     Text("执行者")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     Text(event.actor ?? "—")
                         .font(.kpSmall).textSelection(.enabled)
                 }
             }
             if let detail = event.detail, !detail.isNull {
                 Text(detail.pretty)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.kpSmall.monospaced())
+                    .foregroundStyle(Color.kpSecondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(Spacing.s)
-                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 6))
+                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
             }
             if let taskID = event.taskId {
                 NavigationLink(value: taskID) {
@@ -289,6 +289,6 @@ private struct EventRow: View {
             }
         }
         .padding(.leading, 12 + Spacing.m)
-        .padding(.top, 4)
+        .padding(.top, Spacing.xs)
     }
 }

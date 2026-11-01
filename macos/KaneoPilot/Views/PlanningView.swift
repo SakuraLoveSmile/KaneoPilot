@@ -143,7 +143,7 @@ struct PlanningView: View {
     private var plannerConfigSummary: some View {
         Text("本次规划：\(RoleBackend.shortLabel(batchBackend)) · \(methodLabel) · \(batchModelSummary)")
             .font(.kpSmall)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.kpSecondary)
             .lineLimit(1)
             .truncationMode(.tail)
             .padding(.horizontal, Spacing.l)
@@ -158,7 +158,7 @@ struct PlanningView: View {
             Text("规划")
                 .font(.kpTitle)
             stepBadge(1, "选择任务")
-            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            Image(systemName: "chevron.right").foregroundStyle(Color.kpSecondary)
             stepBadge(2, "核对材料并开始")
             Spacer()
             Button {
@@ -177,7 +177,7 @@ struct PlanningView: View {
     private func stepBadge(_ index: Int, _ title: String) -> some View {
         Label(title, systemImage: step == index ? "\(index).circle.fill" : "\(index).circle")
             .font(.kpSmall)
-            .foregroundStyle(step == index ? Color.accentColor : Color.secondary)
+            .foregroundStyle(step == index ? Color.accentColor : Color.kpSecondary)
             .accessibilityLabel("第 \(index) 步：\(title)")
     }
 
@@ -236,7 +236,7 @@ struct PlanningView: View {
              ? "已选择 \(checked.count) 项；核对材料不会启动规划。"
              : startableReason)
             .font(.kpSmall)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.kpSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -258,7 +258,7 @@ struct PlanningView: View {
                 .help("fetch-todos：只读枚举 To Do，不导入任务")
                 if let fetchedAt {
                     Text("获取于 \(TimeFormat.short(fetchedAt))")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
                 Spacer()
             }
@@ -272,7 +272,7 @@ struct PlanningView: View {
             } else if hasUnavailableMappings {
                 HStack(spacing: Spacing.m) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.kpOrange)
                     Text("存在未关联有效本地仓库的项目，请配置仓库后再进行规划。")
                         .font(.kpBody)
                         .lineLimit(2)
@@ -284,7 +284,7 @@ struct PlanningView: View {
                 }
                 .padding(.horizontal, Spacing.l)
                 .padding(.vertical, Spacing.s)
-                .background(Color.orange.opacity(0.12))
+                .background(Color.kpOrange.opacity(0.12))
                 .overlay(alignment: .bottom) { Divider() }
             }
             ScrollViewReader { proxy in
@@ -293,7 +293,7 @@ struct PlanningView: View {
                     Section(header: Text("Kaneo To Do").font(.kpSmall)) {
                         if todos.isEmpty && !fetchLoading {
                             Text(fetchError == nil ? "没有可枚举的 To Do" : "—")
-                                .font(.kpSmall).foregroundStyle(.secondary)
+                                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                         }
                         ForEach(todos) { item in
                             TodoRow(
@@ -334,7 +334,7 @@ struct PlanningView: View {
                         StatusBadge(text: request.isUnauthorizedPlan ? "等待确认材料" : (request.isDesktopWaiting ? "已排队，等待 Desktop 领取" : "已排队等待规划"),
                                     style: request.isUnauthorizedPlan
                                         ? DisplayStatus.style("等待确认材料")
-                                        : StatusStyle(icon: "clock", color: .blue, label: "已排队等待规划"))
+                                        : StatusStyle(icon: "clock", tone: .blue, label: "已排队等待规划"))
                         Text(model.taskTitle(for: request.taskId))
                             .font(.kpBody)
                             .lineLimit(1)
@@ -472,43 +472,48 @@ struct PlanningView: View {
             if qoderSelected {
                 Text("Qoder CLI 只支持内置规划。")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if plusSelected {
                 Text("Plus 运行端只支持内置规划：Spec Planner 是 Codex 插件运行方式，"
                      + "不会在 Plus 下运行。")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if !desktopSelected, spec?.available == false, let reason = spec?.reason {
                 // 能力不可用原因（未选中也展示）；旧核心未上报 → 能力未知说明。
                 Text("Spec Planner 插件不可用：\(reason)")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if !desktopSelected && plannerMethod == "spec_plan" && spec == nil {
                 Text("planner_methods 能力未知（核心未上报）；"
                      + "排队时将按所选方式提交，核心核验失败会明确报错。")
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // §4.7 冻结边界说明（spec_plan 选中时展示）。
             if desktopSelected {
                 Text("提交后等待 Desktop 领取；模型与权限继承对应会话/自动任务。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if effectiveMethod == "spec_plan" {
                     Text("Desktop 领取后使用施工规划技能，请确保对应会话/自动任务可使用该技能。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else if effectiveMethod == "spec_plan" {
-                Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
-                     + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
-                    .font(.kpSmall)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                Label {
+                    Text("该方式经 Codex 插件技能执行，可能加载本机用户配置中的"
+                         + "其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -535,7 +540,7 @@ struct PlanningView: View {
                 Section("开始前确认") {
                     Text("点击“开始规划”后，仅提交材料就绪的 \(startableTasks.count) 项任务，并使用上方配置启动规划。其他任务保留在此，处理问题并重新准备后再开始。")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -702,14 +707,23 @@ struct PlanningView: View {
     private func resultBadge(for taskID: String) -> some View {
         if let result = startResults?.first(where: { $0.taskId == taskID }) {
             if result.succeeded {
-                Label(desktopSelected ? "已排队，等待 Desktop 领取" : (result.deduplicated == true ? "已在队列" : "已排队"),
-                      systemImage: result.deduplicated == true ? "clock" : "checkmark.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(result.deduplicated == true ? Color.orange : Color.green)
+                Label {
+                    Text(desktopSelected ? "已排队，等待 Desktop 领取" : (result.deduplicated == true ? "已在队列" : "已排队"))
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: result.deduplicated == true ? "clock" : "checkmark.circle")
+                        .foregroundStyle(result.deduplicated == true ? Color.kpOrange : Color.kpGreen)
+                }
+                .font(.kpSmall)
             } else {
-                Label(result.code ?? "失败", systemImage: "xmark.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(.red)
+                Label {
+                    Text(result.code ?? "失败")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "xmark.circle")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
             }
         }
     }
@@ -723,13 +737,19 @@ struct PlanningView: View {
                 resultBadge(for: result.taskId ?? "")
             }
             if let error = result.error {
-                Text(error)
-                    .font(.kpSmall).foregroundStyle(.red)
-                    .textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .textSelection(.enabled)
             }
             if let reason = result.waitingReason {
                 Text(reason)
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
         .padding(.vertical, Spacing.s)
@@ -823,12 +843,12 @@ private struct TodoRow: View {
                 Text(item.title ?? item.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
-                    .foregroundStyle(item.isSelectable ? .primary : .secondary)
+                    .foregroundStyle(item.isSelectable ? Color.primary : Color.kpSecondary)
                 HStack(spacing: Spacing.s) {
                     if let project = item.projectName {
                         Text(project)
                             .font(.kpSmall)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.kpSecondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Color.kpControl,
@@ -836,17 +856,22 @@ private struct TodoRow: View {
                     }
                     Text(automaticPlanningLabel ?? item.localStatus ?? "未导入")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     if item.attachmentCount > 0 {
                         Label("附件 \(item.attachmentCount)", systemImage: "paperclip")
                             .font(.kpSmall)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.kpSecondary)
                     }
                 }
                 if !item.isSelectable, let reason = item.blockedReason {
-                    Text(reason)
-                        .font(.kpSmall)
-                        .foregroundStyle(item.needsRepositoryConfiguration ? .red : .orange)
+                    Label {
+                        Text(reason)
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: item.needsRepositoryConfiguration ? "exclamationmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(item.needsRepositoryConfiguration ? Color.kpRed : Color.kpOrange)
+                    }
+                    .font(.kpSmall)
                 }
             }
             Spacer(minLength: 0)
@@ -891,18 +916,30 @@ private struct PrepareRow: View {
                 HStack(spacing: Spacing.s) {
                     ProgressView().controlSize(.small)
                     Text("正在准备材料…")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             } else if let error = preparation.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.kpSmall).foregroundStyle(.red)
-                    .textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .textSelection(.enabled)
             } else if preparation.needsPreparation {
-                Label("材料已变更，请重新准备后开始。", systemImage: "arrow.clockwise.circle")
-                    .font(.kpSmall).foregroundStyle(.orange)
+                Label {
+                    Text("材料已变更，请重新准备后开始。")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
                 if !preparation.previousIssues.isEmpty {
                     Text("上次核验的问题（重新准备后更新）")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     issuesList(preparation.previousIssues, cannotStart: true)
                 }
             } else if let response = preparation.response {
@@ -920,14 +957,18 @@ private struct PrepareRow: View {
                 .font(.kpBody).lineLimit(1)
             Spacer()
             if let response = preparation.response {
-                Label(preparation.canStart ? "材料就绪" : "待处理问题",
-                      systemImage: preparation.canStart
-                        ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.kpSmall)
-                    .foregroundStyle(preparation.canStart ? Color.green : Color.orange)
+                Label {
+                    Text(preparation.canStart ? "材料就绪" : "待处理问题")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: preparation.canStart
+                          ? "checkmark.circle" : "exclamationmark.triangle")
+                        .foregroundStyle(preparation.canStart ? Color.kpGreen : Color.kpOrange)
+                }
+                .font(.kpSmall)
                 if let sha = response.inputSha256 {
                     Text("材料 \(String(sha.prefix(12)))…")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             Button {
@@ -942,21 +983,21 @@ private struct PrepareRow: View {
     }
 
     private func filesList(_ response: PreparePlanInputResponse) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
             Text("材料文件（\(response.files?.count ?? 0)）")
-                .font(.kpSmall).foregroundStyle(.secondary)
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
             ForEach(response.files ?? []) { file in
                 HStack(spacing: Spacing.s) {
                     Image(systemName: "doc")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Text(file.name ?? "—")
                         .font(.kpSmall).lineLimit(1)
                     Text(file.source ?? "")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     if let size = file.size {
                         Text(ByteCountFormatter.string(fromByteCount: Int64(size),
                                                        countStyle: .file))
-                            .font(.kpSmall).foregroundStyle(.secondary)
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     }
                 }
             }
@@ -965,14 +1006,14 @@ private struct PrepareRow: View {
 
     /// issues[]：红图标+文字；可排除项给「排除后重备」勾选。
     private func issuesList(_ issues: [PlanInputIssue], cannotStart: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
             ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
                 HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.kpRed)
                     Text(issue.text)
                         .font(.kpSmall)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.primary)
                     Spacer()
                     if let key = issue.exclusionKey {
                         Toggle("排除", isOn: Binding(
@@ -989,7 +1030,7 @@ private struct PrepareRow: View {
             }
             if cannotStart {
                 Text("处理问题或勾选排除后，重新准备再开始。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
     }
@@ -998,7 +1039,7 @@ private struct PrepareRow: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
                 Text("补充说明")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 TextField("给规划模型的补充说明（可选）", text: $supplement)
                     .font(.kpSmall)
                     .textFieldStyle(.roundedBorder)
@@ -1012,16 +1053,16 @@ private struct PrepareRow: View {
                 .font(.kpSmall)
                 if !paths.isEmpty {
                     Text("\(paths.count) 个本地文件")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             if !excluded.isEmpty {
                 Text("已排除材料（\(excluded.count)）")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 ForEach(excluded.sorted(), id: \.self) { key in
                     HStack(spacing: Spacing.s) {
                         Text(key)
-                            .font(.kpSmall).foregroundStyle(.secondary)
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                             .lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Button("恢复") { excluded.remove(key) }
@@ -1034,7 +1075,7 @@ private struct PrepareRow: View {
                 ForEach(paths, id: \.self) { path in
                     HStack(spacing: Spacing.s) {
                         Text(path)
-                            .font(.kpSmall).foregroundStyle(.secondary)
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                             .lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Button("移除") { paths.removeAll { $0 == path } }

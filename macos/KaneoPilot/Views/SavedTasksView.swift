@@ -87,10 +87,10 @@ struct SessionRow: View {
 
     private var stateColor: Color {
         switch stateLabel {
-        case "已结束": return .green
-        case "运行中": return .blue
-        case "失败", "状态读取失败": return .red
-        default: return .orange
+        case "已结束": return Color.kpGreen
+        case "运行中": return Color.kpBlue
+        case "失败", "状态读取失败": return Color.kpRed
+        default: return Color.kpOrange
         }
     }
 
@@ -105,25 +105,30 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.m) {
-            Label(stateLabel, systemImage: stateIcon)
-                .font(.kpSmall)
-                .foregroundStyle(stateColor)
-                .frame(width: 118, alignment: .leading)
-                .accessibilityLabel("会话状态：\(stateLabel)")
-                .help(session.isUnavailable ? "当前会话状态读取失败，不表示任务执行失败；打开会话后可刷新检查。" : stateLabel)
+            Label {
+                Text(stateLabel)
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: stateIcon)
+                    .foregroundStyle(stateColor)
+            }
+            .font(.kpSmall)
+            .frame(width: 118, alignment: .leading)
+            .accessibilityLabel("会话状态：\(stateLabel)")
+            .help(session.isUnavailable ? "当前会话状态读取失败，不表示任务执行失败；打开会话后可刷新检查。" : stateLabel)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.taskTitle(for: session.taskId))
                     .font(.kpBody)
                     .lineLimit(1)
                 Text(session.sessionTitle ?? session.markerLabel)
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
             Text(TimeFormat.short(session.updatedAt))
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
             // §4.5 v2：行尾「…」菜单（与右键菜单同动作），入口可见。
             Menu {
                 if session.canForcePurge {
@@ -147,7 +152,7 @@ struct SessionRow: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -431,31 +436,36 @@ struct SavedTaskRow: View {
             Image(systemName: DisplayStatus.style(task.status).icon)
                 .foregroundStyle(DisplayStatus.style(task.status).color)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
                     .lineLimit(1)
                 HStack(spacing: Spacing.s) {
                     Text(task.projectName ?? "—")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
                     Text(originalStage)
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                     Text("移出时间 \(TimeFormat.short(task.savedAt))")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                 }
             }
             Spacer(minLength: 0)
             if task.autoAdvancePaused == 1 {
-                Label("自动推进已暂停", systemImage: "pause.circle")
-                    .font(.kpSmall)
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("自动推进已暂停")
+                Label {
+                    Text("自动推进已暂停")
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "pause.circle")
+                        .foregroundStyle(Color.kpOrange)
+                }
+                .font(.kpSmall)
+                .accessibilityLabel("自动推进已暂停")
             }
             Button("恢复") { confirmRestore() }
                 .disabled(model.busy)
@@ -494,23 +504,28 @@ struct TrashedSessionRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.m) {
-            Label(Labels.sessionState(session.state), systemImage: "trash")
-                .font(.kpSmall)
-                .foregroundStyle(.orange)
-                .frame(width: 88, alignment: .leading)
+            Label {
+                Text(Labels.sessionState(session.state))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "trash")
+                    .foregroundStyle(Color.kpOrange)
+            }
+            .font(.kpSmall)
+            .frame(width: 88, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.taskTitle(for: session.taskId))
                     .font(.kpBody)
                     .lineLimit(1)
                 Text(session.sessionTitle ?? session.markerLabel)
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
             Text(TimeFormat.short(session.savedAt ?? session.updatedAt))
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
             Button("恢复") {
                 if let taskID = session.taskId, let runID = session.runId {
                     Task { await model.restoreSession(taskID: taskID, runID: runID) }
@@ -537,7 +552,7 @@ struct TrashedSessionRow: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)

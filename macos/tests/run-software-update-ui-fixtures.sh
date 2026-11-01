@@ -35,8 +35,10 @@ def declaration(marker):
         if depth == 0:
             return source[start:position + 1]
     raise SystemExit('Cannot extract actual design component: ' + marker)
-components = 'import SwiftUI\nimport AppKit\n\n' + '\n\n'.join(declaration(marker) for marker in (
-    'extension Font {', 'enum Spacing {', 'struct FieldRow: View {')) + '\n'
+# swiftc has no asset catalog, so the one palette token FieldRow reads maps to the system secondary colour.
+palette = 'extension Color {\n    static let kpSecondary = Color.secondary\n}'
+components = 'import SwiftUI\nimport AppKit\n\n' + '\n\n'.join([declaration(marker) for marker in (
+    'extension Font {', 'enum Spacing {', 'struct FieldRow: View {')] + [palette]) + '\n'
 (fixture / 'FixtureComponents.swift').write_text(components)
 identity_variable = 'SOURCE_SHA' if os.environ.get('SOURCE_SHA') else 'GITHUB_SHA'
 sha = os.environ[identity_variable]

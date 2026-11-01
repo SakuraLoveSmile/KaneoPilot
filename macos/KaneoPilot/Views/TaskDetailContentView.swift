@@ -62,12 +62,24 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
-    /// 五段共用同一顶栏（§4.1）：第一行项目与标题（最多两行），第二行状态、五段导航与关闭。
-    /// 切换分段不改变顶栏高度与导航位置。
+    /// 五段共用同一顶栏（§4.1，目标形态见 Mac 界面计划 · 任务详情浮层）：第一行标题与关闭图标，
+    /// 第二行一行元信息（项目 · 状态徽标），第三行分段控件。切换分段不改变顶栏高度与导航位置。
     private var headerBar: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            headerTitle
-            HStack(spacing: Spacing.m) { headerStatus; Spacer(minLength: 0); headerNavigation }
+            HStack(alignment: .top, spacing: Spacing.s) {
+                headerTitle
+                if let onDismiss {
+                    Button { onDismiss() } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .help("关闭")
+                    .accessibilityLabel("关闭")
+                }
+            }
+            headerMeta
+            headerNavigation
         }
         .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
     }
@@ -80,11 +92,6 @@ struct TaskDetailContentView: View {
                 }
                 .buttonStyle(.borderless).font(.kpSmall)
             }
-            if let project = detail?.projectName {
-                Text(project).font(.kpSmall).lineLimit(1).foregroundStyle(.secondary)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
-            }
             Text(detail?.title ?? currentTaskID).font(.kpTitle)
                 .lineLimit(2).truncationMode(.tail)
                 .textSelection(.enabled).help(detail?.title ?? currentTaskID)
@@ -93,38 +100,44 @@ struct TaskDetailContentView: View {
         }
     }
 
-    private var headerStatus: some View {
-        HStack(spacing: Spacing.m) {
+    /// 第二行元信息「项目 · 状态徽标」：状态只出现一次（开放提问的词已并入 `DisplayStatus.effective`），阶段不在头部重复。
+    private var headerMeta: some View {
+        HStack(spacing: Spacing.s) {
+            if let project = detail?.projectName {
+                Text(project).lineLimit(1)
+                Text("·")
+            }
             if let detail {
                 if detail.status != "done", let release = detail.release, release.showsTaskStatus {
                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
                 } else {
-                    StatusBadge(status: DisplayStatus.effective(detail))
+                    StatusBadge(task: detail)
                 }
-                if let question = detail.currentInputQuestion, question.state == "open", question.answerable, detail.readOnly != true {
-                    StatusBadge(status: question.source == "codex" && question.delivery == "accepted"
-                        ? "等待执行端接收" : "等待你回答")
-                }
-                Text("阶段：\(detail.phase.map(PhaseStepperView.title) ?? "未提供")")
                 if detail.planExecutionHold == true && DisplayStatus.effective(detail) != "待确认执行" {
                     StatusBadge(status: "待确认执行")
                 }
-            }
-        }.font(.kpSmall).foregroundStyle(.secondary)
-    }
-
-    private var headerNavigation: some View {
-        HStack(spacing: Spacing.m) {
-            Picker("详情分段", selection: $tab) {
-                ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
-            }
-            .pickerStyle(.segmented).labelsHidden().frame(width: 280)
-            .fixedSize(horizontal: true, vertical: false).accessibilityLabel("详情分段切换")
-            if let onDismiss {
-                Button("关闭") { onDismiss() }.buttonStyle(.plain).font(.kpSmall)
-                    .padding(.leading, Spacing.s)
+                if let question = openExecutionQuestion {
+                    Text("·")
+                    Text("已等待 \(RetrospectiveFormat.duration(Int(question.waitSeconds)) ?? "0 秒")")
+                }
             }
         }
+        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+    }
+
+    /// 头部「已等待」只读开放中的执行提问的等待时长（`ExecutionQuestion.waitSeconds`），不经过概览页的草稿 store。
+    private var openExecutionQuestion: ExecutionQuestion? {
+        guard let question = detail?.currentInputQuestion, question.state == "open" else { return nil }
+        return question
+    }
+
+    /// 第三行：280×28 的五段分段控件。
+    private var headerNavigation: some View {
+        Picker("详情分段", selection: $tab) {
+            ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
+        }
+        .pickerStyle(.segmented).labelsHidden().frame(width: 280)
+        .fixedSize(horizontal: true, vertical: false).accessibilityLabel("详情分段切换")
     }
 
     // MARK: - 分段内容
@@ -228,15 +241,21 @@ private struct PlanAnswerCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Label("规划需要你确认", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.orange)
+            Label {
+                Text("规划需要你确认")
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.kpOrange)
+            }
             ForEach(Array(store.clarification.questions.enumerated()), id: \.element.id) { index, question in
                 VStack(alignment: .leading, spacing: Spacing.s) {
                     Text("\(index + 1). \(question.title)\(question.required ? "（必答）" : "（可选）")")
                         .font(.kpBody).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                     if let description = question.description, !description.isEmpty {
-                        Text(description).font(.kpSmall).foregroundStyle(.secondary)
+                        Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                             .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     }
                     if question.options.isEmpty {
@@ -264,7 +283,7 @@ private struct PlanAnswerCard: View {
                 if index < store.clarification.questions.count - 1 { Divider() }
             }
             VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("补充说明（可选）").font(.kpSmall).foregroundStyle(.secondary)
+                Text("补充说明（可选）").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 TextField("补充你的要求或参考", text: Binding(
                     get: { store.snapshot.supplement }, set: { store.setSupplement($0) }
                 ), axis: .vertical)
@@ -273,11 +292,18 @@ private struct PlanAnswerCard: View {
                 .disabled(store.inputsLocked)
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 if store.isStale && !store.awaitingReceipt {
                     Text("问题或任务材料已经变化。原答案保留在此，请先复制；载入新问题会放弃这份过期草稿。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: Spacing.m) {
                         Button("复制原答案") { copyAnswers() }
@@ -289,9 +315,9 @@ private struct PlanAnswerCard: View {
                 }
             }
             if let feedback = store.feedback {
-                Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
+                Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
             } else if let at = store.clarification.savedAt {
-                Text("草稿保存于 \(TimeFormat.fullString(at))").font(.kpSmall).foregroundStyle(.secondary)
+                Text("草稿保存于 \(TimeFormat.fullString(at))").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
             HStack(spacing: Spacing.m) {
                 Button(store.awaitingReceipt ? "重试确认提交结果" : "提交并继续规划") { store.submit() }
@@ -301,12 +327,12 @@ private struct PlanAnswerCard: View {
                 if store.submitting || store.saving || reloading {
                     ProgressView().controlSize(.small)
                     Text(store.submitting ? "正在提交…" : (reloading ? "正在读取…" : "正在保存…"))
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }.font(.kpSmall)
         }
         .padding(Spacing.m).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.kpOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
         .onDisappear { Task { _ = await store.saveNow() } }
         .confirmationDialog("载入新问题并放弃旧草稿？", isPresented: $confirmingDiscard, titleVisibility: .visible) {
             Button("放弃旧草稿并载入", role: .destructive) {
@@ -339,13 +365,13 @@ private struct PlanAnswerCard: View {
         return Button { store.setOption(optionID, questionID: question.id) } label: {
             HStack(alignment: .top, spacing: Spacing.s) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(selected ? Color.accentColor : Color.kpSecondary)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(label + (recommended ? "（推荐）" : ""))
                         .font(.kpBody).foregroundStyle(.primary)
                     if let description, !description.isEmpty {
-                        Text(description).font(.kpSmall).foregroundStyle(.secondary)
+                        Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     }
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
@@ -426,8 +452,14 @@ private struct ReviewResolutionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            Label("Review 受阻", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.orange)
+            Label {
+                Text("Review 受阻")
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.kpOrange)
+            }
             Text(store.resolution.summary).font(.kpBody)
                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             Button("查看完整评审报告") { onViewReport?() }
@@ -444,7 +476,7 @@ private struct ReviewResolutionCard: View {
                 }
                 .disabled(model.busy || !store.canPrepare)
                 Text("保留当前成果与报告，打开修复规划材料；不会自动调用模型或执行。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button(store.awaitingReceipt ? "确认补充证据提交结果" : "补充证据并重新评审") {
                     showingEvidence = true
@@ -452,17 +484,24 @@ private struct ReviewResolutionCard: View {
                 .disabled(model.busy || (!store.awaitingReceipt &&
                     (store.inputsLocked || !store.resolution.canAddEvidence)))
                 Text("补充说明或本地文件，按当前评审配置发起新一轮；材料将交由评审核验。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }.font(.kpSmall)
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 Button("刷新任务状态") { Task { await store.reload() } }
                     .font(.kpSmall).disabled(store.submitting || store.preparing)
                 if store.isStale && !store.awaitingReceipt && !store.awaitingPreparationReceipt {
                     Text("本次操作未完成，补充材料保留在此。请先复制；载入当前评审会清空这份输入。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     HStack(spacing: Spacing.m) {
                         Button("复制补充材料") { copyEvidence() }
                         Button("载入当前评审") { confirmingDiscard = true }.disabled(model.busy)
@@ -470,22 +509,22 @@ private struct ReviewResolutionCard: View {
                 }
             }
             if let feedback = store.feedback {
-                Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
+                Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if store.preparing || store.submitting {
                 HStack(spacing: Spacing.s) {
                     ProgressView().controlSize(.small)
                     Text(store.preparing ? "正在准备修复材料…" : "正在提交证据…")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             Text("单纯重试只重新评审现有成果，不会修改代码；可在“更多操作”中使用。")
-                .font(.kpSmall).foregroundStyle(.secondary)
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(Spacing.m).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.kpOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
         .sheet(isPresented: $showingEvidence) {
             ReviewEvidenceSheet(store: store, onSubmitted: onRefreshDetail)
         }
@@ -525,14 +564,14 @@ private struct ReviewEvidenceSheet: View {
             Text("补充证据并重新评审").font(.kpTitle)
             Text("填写说明或选择本地文件。按当前评审配置发起新一轮；用户材料需经评审核验，原报告保留。")
                 .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-            Text("补充说明").font(.kpSmall).foregroundStyle(.secondary)
+            Text("补充说明").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             TextEditor(text: Binding(get: { store.snapshot.text }, set: { store.setText($0) }))
                 .font(.kpBody).frame(height: 140)
-                .border(Color.secondary.opacity(0.3))
+                .border(Color.kpSecondary.opacity(0.3))
                 .accessibilityLabel("评审补充说明")
                 .disabled(store.inputsLocked)
             HStack {
-                Text("本地文件（\(store.snapshot.localPaths.count)）").font(.kpSmall).foregroundStyle(.secondary)
+                Text("本地文件（\(store.snapshot.localPaths.count)）").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 Spacer()
                 Button("选择文件…") { pickFiles() }.disabled(store.inputsLocked)
             }
@@ -543,7 +582,7 @@ private struct ReviewEvidenceSheet: View {
                             HStack(alignment: .top, spacing: Spacing.s) {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(URL(fileURLWithPath: path).lastPathComponent).font(.kpBody)
-                                    Text(path).font(.kpSmall).foregroundStyle(.secondary)
+                                    Text(path).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                                         .textSelection(.enabled)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                                 Button("移除") { store.removePath(path) }
@@ -555,15 +594,22 @@ private struct ReviewEvidenceSheet: View {
                 }.frame(maxHeight: 140)
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 if store.isStale && !store.awaitingReceipt {
                     Text("此报告已失效，原输入保留。关闭并刷新任务，查看当前报告后再处理。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             if let feedback = store.feedback {
-                Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
+                Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: Spacing.m) {
@@ -811,7 +857,10 @@ struct TaskOverviewTabView: View {
             if openExecutionStore?.waitingForCodex == true {
                 return "答案已提交，等待执行端接收；可重新核对送达状态，或在「更多操作」中停止本轮。"
             }
-            return "在上方选择答案，用底栏「提交答案」继续同一轮次；保存草稿不会提交给执行端。"
+            if let count = openExecutionStore?.question.questions.count, count > 0 {
+                return "回答下面 \(count) 个问题后点『提交答案』，执行会在同一轮次继续；保存草稿不会提交给执行端。"
+            }
+            return "回答下面的问题后点『提交答案』，执行会在同一轮次继续；保存草稿不会提交给执行端。"
         case "answer_plan_questions": return "在上方回答待确认问题，提交后继续规划；执行仍按原确认规则安排。"
         case "resolve_review_blocker": return "查看上方报告摘要，选择准备修复或补充证据；原成果与报告保留。"
         case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
@@ -847,6 +896,12 @@ struct TaskOverviewTabView: View {
         }
     }
 
+    /// 开放的执行提问：下一步说明与问答表单提到概览最前（目标形态 · 任务详情浮层）。
+    private var executionQuestionsOpen: Bool {
+        if let store = executionStore { return executionNeedsAttention(store) }
+        return false
+    }
+
     private var overviewContent: some View {
             VStack(alignment: .leading, spacing: Spacing.l) {
                 // 1. 需要你处理：阻塞、待答与待评审，仅在出现时显示
@@ -868,6 +923,12 @@ struct TaskOverviewTabView: View {
                     blockedBanner
                 }
 
+                // 开放的执行提问：下一步说明在前，随后是问答表单；阻塞证据与其余内容顺延。
+                if executionQuestionsOpen {
+                    nextStepSection
+                    if let store = executionStore { executionAnswerCard(store) }
+                }
+
                 if detail.parentCloseout == nil, let evidence = detail.attention?.evidence, !evidence.isEmpty {
                     DisclosureGroup("阻塞证据") {
                         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -879,16 +940,14 @@ struct TaskOverviewTabView: View {
                     }
                 }
 
-                if let store = executionStore, executionNeedsAttention(store) {
-                    executionAnswerCard(store)
-                }
-
                 ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.currentInputQuestion?.identity), id: \.formIdentity) { store in
                     ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
                 }
 
-                // 2. 状态与下一步安全动作
-                nextStepSection
+                // 2. 状态与下一步安全动作（开放的执行提问时已在上方）
+                if !executionQuestionsOpen {
+                    nextStepSection
+                }
 
                 if let closeout = detail.parentCloseout {
                     ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
@@ -900,9 +959,9 @@ struct TaskOverviewTabView: View {
 
                 // 3. 进展：阶段步进、已结束的问答与直达入口
                 VStack(alignment: .leading, spacing: Spacing.m) {
-                    PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false)
+                    PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false, failureStage: detail.failureStage)
                     if let condition = conditionDifferingFromStatus {
-                        Text("条件：\(condition)").font(.kpSmall).foregroundStyle(.secondary)
+                        Text("条件：\(condition)").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     }
                     if let store = executionStore, !executionNeedsAttention(store) {
                         executionAnswerCard(store)
@@ -910,18 +969,8 @@ struct TaskOverviewTabView: View {
                     stageShortcutsSection
                 }
 
-                if let relations = detail.taskRelations {
-                    TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
-                }
-
-                // 4. Kaneo 关联信息
-                if hasKaneo {
-                    kaneoSection
-                }
-
-                TaskAutomationSections(detail: detail,
-                    onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
-                    onRefreshDetail: onRefreshDetail)
+                // 4. 任务信息：字段行并入一个分组容器，含按钮的操作区留在容器之外
+                taskInfoSection
 
                 // 5. 技术详情与长路径（可折叠）
                 technicalDetailsSection
@@ -1118,10 +1167,10 @@ struct TaskOverviewTabView: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
                 Image(systemName: detail.exception?.isFailed == true ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(detail.exception?.isFailed == true ? Color.red : .orange)
+                    .foregroundStyle(detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange)
                 Text(detail.exception?.isFailed == true ? (detail.exception?.label ?? "任务失败") : (AutomationPresentation.title(detail.failureCode) ?? detail.exception?.label ?? "任务当前处于阻塞状态"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(detail.exception?.isFailed == true ? Color.red : .orange)
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(Color.primary)
             }
             if let reason = detail.blockedReason {
                 Text(reason)
@@ -1132,13 +1181,13 @@ struct TaskOverviewTabView: View {
             if let explanation = AutomationPresentation.explanation(detail.failureCode) {
                 Text(explanation)
                     .font(.kpSmall)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background((detail.exception?.isFailed == true ? Color.red : .orange).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background((detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange).opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
     }
 
     // MARK: - 下一步安全动作与状态
@@ -1153,7 +1202,7 @@ struct TaskOverviewTabView: View {
             }
             if !statusFacts.isEmpty {
                 Text(statusFacts.joined(separator: " · "))
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1204,15 +1253,36 @@ struct TaskOverviewTabView: View {
         }
     }
 
-    private var kaneoSection: some View {
-        DetailSection(title: "Kaneo 关联") {
-            FieldRow("远端状态", detail.kaneoStatus.map(Self.kaneoStatusTitle))
-            FieldRow("最后核验", TimeFormat.fullString(detail.kaneoCheckedAt))
+    /// 概览的「任务信息」：字段行并入一个分组容器，含按钮的操作区留在容器之外。
+    private var taskInfoSection: some View {
+        DetailSection(title: "任务信息") {
+            FieldGroup {
+                FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
+                if let relations = detail.taskRelations {
+                    FieldRow("层级", TaskRelationsView.levelText(relations))
+                }
+                if hasKaneo {
+                    kaneoFieldRows
+                }
+                TaskAutomationFieldRows(detail: detail)
+            }
+            if let relations = detail.taskRelations {
+                TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
+            }
             if let url = detail.links?.kaneoTaskUrl, !url.isEmpty {
                 Button("打开 Kaneo 任务页面") { Workspace.open(url) }
                     .font(.kpSmall)
             }
+            TaskAutomationSections(detail: detail,
+                onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
+                onRefreshDetail: onRefreshDetail)
         }
+    }
+
+    /// 任务信息分组里的 Kaneo 字段行；「打开 Kaneo 任务页面」按钮留在分组之外（见 `taskInfoSection`）。
+    @ViewBuilder private var kaneoFieldRows: some View {
+        FieldRow("远端状态", detail.kaneoStatus.map(Self.kaneoStatusTitle))
+        FieldRow("最后核验", TimeFormat.fullString(detail.kaneoCheckedAt))
     }
 
     // MARK: - 技术详情（折叠区）
@@ -1256,7 +1326,7 @@ struct TaskOverviewTabView: View {
         } label: {
             Text("技术详情与路径")
                 .font(.kpSmall)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -1269,7 +1339,7 @@ struct TaskOverviewTabView: View {
                 if let store = openExecutionStore {
                     executionSubmitControls(store)
                 } else if executionAwaitingPlus {
-                    Text("等待你在 Plus 中回答").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("等待你在 Plus 中回答").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 } else if let primaryAction {
                     actionButton(primaryAction)
                         .buttonStyle(.borderedProminent)
@@ -1295,7 +1365,7 @@ struct TaskOverviewTabView: View {
                 if detail.readOnly == true {
                     Label("只读模式", systemImage: "lock.fill")
                         .font(.kpSmall)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.kpSecondary)
                 }
             }
             .padding(.horizontal, Spacing.l)
@@ -1318,7 +1388,7 @@ struct TaskOverviewTabView: View {
                     .disabled(!store.canSubmit)
             }
             Text(store.submitBlockedReason ?? "已答 \(store.answeredCount)/\(store.question.questions.count)")
-                .font(.kpSmall).foregroundStyle(.secondary)
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -1643,35 +1713,52 @@ private struct ExecutionAnswerCard: View {
     private var answerForm: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("\(store.waitingForCodex ? "等待执行端接收" : "等待你回答") · \(store.question.questions.count) 题").font(.kpTitle)
-                Text("来源：\(store.question.sourceDescription) · 已等待 \(waitText) · 已答 \(store.answeredCount)/\(store.question.questions.count)")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+                Text("回答 \(store.question.questions.count) 个问题").font(.kpSection)
+                Text("\(store.waitingForCodex ? "等待执行端接收" : "等待你回答") · 来源：\(store.question.sourceDescription) · 已答\(store.answeredCount)/\(store.question.questions.count)")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 if store.question.queued > 0 {
-                    Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("还有 \(store.question.queued) 份提问").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
-            ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text("\(index + 1). \(question.title)\(question.multiSelect ? "（多选）" : "（单选）")")
-                        .font(.kpBody).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    if let description = question.description, !description.isEmpty {
-                        Text(description).font(.kpSmall).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    }
-                    ForEach(question.options) { option in
-                        optionButton(question, label: option.label, description: option.description,
-                            selected: store.answer(question.id)?.optionIds.contains(option.id) == true) {
-                                store.toggleOption(option.id, questionID: question.id)
-                            }
-                    }
-                    if question.allowCustom {
-                        if !question.options.isEmpty {
-                            optionButton(question, label: "自定义回答", description: nil,
-                                         selected: store.customQuestionIDs.contains(question.id)) {
-                                store.selectCustom(questionID: question.id)
-                            }
+            // 题与题之间用间距分隔，不用分隔线（ui-spec §4.17）。
+            VStack(alignment: .leading, spacing: Spacing.xl) {
+                ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                            Text("\(index + 1). \(question.title)\(question.multiSelect ? "（多选）" : "（单选）")")
+                                .font(.kpBody).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                            Spacer(minLength: Spacing.s)
+                            Toggle("跳过此题", isOn: Binding(
+                                get: { store.answer(question.id)?.skipped == true },
+                                set: { store.setSkipped($0, questionID: question.id) }
+                            ))
+                            .toggleStyle(.checkbox).font(.kpSmall)
+                            .accessibilityLabel("\(question.title)，跳过此题")
+                            .disabled(store.inputsLocked)
                         }
-                        if question.options.isEmpty || store.customQuestionIDs.contains(question.id) {
+                        if let description = question.description, !description.isEmpty {
+                            Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        }
+                        // 选项为分组列表：圆角 10、选中项淡蓝底；「自定义回答」为最后一行。
+                        if !question.options.isEmpty || question.allowCustom {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(question.options) { option in
+                                    optionButton(question, label: option.label, description: option.description,
+                                        selected: store.answer(question.id)?.optionIds.contains(option.id) == true) {
+                                            store.toggleOption(option.id, questionID: question.id)
+                                        }
+                                }
+                                if question.allowCustom && !question.options.isEmpty {
+                                    optionButton(question, label: "自定义回答", description: nil,
+                                                 selected: store.customQuestionIDs.contains(question.id)) {
+                                        store.selectCustom(questionID: question.id)
+                                    }
+                                }
+                            }
+                            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
+                        }
+                        if question.allowCustom, question.options.isEmpty || store.customQuestionIDs.contains(question.id) {
                             TextField("填写自定义回答", text: Binding(
                                 get: { store.answer(question.id)?.text ?? "" },
                                 set: { store.setText($0, questionID: question.id) }
@@ -1681,15 +1768,7 @@ private struct ExecutionAnswerCard: View {
                             .disabled(store.inputsLocked)
                         }
                     }
-                    Toggle("跳过此题", isOn: Binding(
-                        get: { store.answer(question.id)?.skipped == true },
-                        set: { store.setSkipped($0, questionID: question.id) }
-                    ))
-                    .toggleStyle(.checkbox).font(.kpSmall)
-                    .accessibilityLabel("\(question.title)，跳过此题")
-                    .disabled(store.inputsLocked)
                 }
-                if index < store.question.questions.count - 1 { Divider() }
             }
         }
     }
@@ -1707,11 +1786,11 @@ private struct ExecutionAnswerCard: View {
                         // accessibility does not retain the previous status label.
                         .id(store.statusText)
                     Spacer(minLength: 0)
-                    Text("查看问题与回答").font(.kpSmall).foregroundStyle(.secondary)
+                    Text("查看问题与回答").font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             if let reason = closedReason {
-                Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
         }
@@ -1736,12 +1815,12 @@ private struct ExecutionAnswerCard: View {
 
     private var recordList: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            Text("共等待 \(waitText)").font(.kpSmall).foregroundStyle(.secondary)
+            Text("共等待 \(waitText)").font(.kpSmall).foregroundStyle(Color.kpSecondary)
             ForEach(Array(store.question.questions.enumerated()), id: \.element.id) { index, question in
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(index + 1). \(question.title)").font(.kpSmall).fontWeight(.medium)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    Text(recordLine(for: question)).font(.kpBody).foregroundStyle(.secondary)
+                    Text(recordLine(for: question)).font(.kpBody).foregroundStyle(Color.kpSecondary)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }
@@ -1759,21 +1838,28 @@ private struct ExecutionAnswerCard: View {
                     .id(store.statusText)
             }
             if isAnswering, let detail = terminalReason ?? store.question.detail {
-                Text(detail).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
+                Text(detail).font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
             }
             if store.working {
                 HStack(spacing: Spacing.s) {
                     ProgressView().controlSize(.small)
                     Text(store.saving ? "正在保存…" : store.submitting ? "正在提交…" : "正在核对…")
-                        .font(.kpSmall).foregroundStyle(.secondary)
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
             }
             if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Label {
+                    Text(error)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(Color.kpRed)
+                }
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
             if let feedback = store.feedback {
-                Text(feedback).font(.kpSmall).foregroundStyle(.secondary)
+                Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
             if !reconcileInBar, store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
                 Button("重新核对") { run { await store.reconcile() } }
@@ -1785,7 +1871,7 @@ private struct ExecutionAnswerCard: View {
             }
             if store.canDiscardUnsaved {
                 Text("本机未保存的编辑保留在此。请先复制，再确认放弃；不会修改核心问题与历史。")
-                    .font(.kpSmall).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: Spacing.m) {
                     Button("复制原答案") { copyAnswers() }
                     Button("放弃未保存的本机编辑", role: .destructive) { confirmingDiscard = true }
@@ -1796,7 +1882,14 @@ private struct ExecutionAnswerCard: View {
             }
             if store.question.state == "open" && !store.question.observerAlive {
                 HStack(spacing: Spacing.m) {
-                    Text("观察已中断").font(.kpSmall).foregroundStyle(.orange)
+                    Label {
+                        Text("观察已中断")
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.kpOrange)
+                    }
+                    .font(.kpSmall)
                     Button("重新连接") { run { await store.reconnectObserver() } }
                         .font(.kpSmall).disabled(store.working || store.obsolete)
                 }
@@ -1824,9 +1917,9 @@ private struct ExecutionAnswerCard: View {
         NSPasteboard.general.setString(lines.joined(separator: "\n\n"), forType: .string)
     }
 
+    /// 与全 App 时长写法一致（ui-spec「时长格式」）。
     private var waitText: String {
-        let seconds = max(0, Int(store.question.waitSeconds))
-        return seconds >= 3600 ? "\(seconds / 3600)小时\((seconds % 3600) / 60)分钟" : seconds >= 60 ? "\(seconds / 60)分钟" : "\(seconds)秒"
+        RetrospectiveFormat.duration(Int(store.question.waitSeconds)) ?? "0 秒"
     }
 
     private func run(_ operation: @escaping () async -> Void) {
@@ -1840,16 +1933,19 @@ private struct ExecutionAnswerCard: View {
                 Image(systemName: question.multiSelect
                       ? (selected ? "checkmark.square.fill" : "square")
                       : (selected ? "largecircle.fill.circle" : "circle"))
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary).padding(.top, 2)
+                    .foregroundStyle(selected ? Color.accentColor : Color.kpSecondary).padding(.top, 2)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(label).font(.kpBody).foregroundStyle(.primary).textSelection(.enabled)
                     if let description, !description.isEmpty {
-                        Text(description).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text(description).font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
                     }
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+            .padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, minHeight: RowHeight.twoLine, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.14) : Color.clear)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(question.title)，\(label)")
