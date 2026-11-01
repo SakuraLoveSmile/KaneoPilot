@@ -539,6 +539,42 @@ struct StatusBadge: View {
     }
 }
 
+/// 无底色的状态标签（ui-spec §3）：图标着令牌色，文字 `.primary`。
+/// 只用于详情头部；任务列表行把图标与文字拆成两列，直接取 `DisplayStatus.badge`。其余处仍用 `StatusBadge`。
+struct StatusLabel: View {
+    let text: String
+    let style: StatusStyle
+    let emphasized: Bool
+
+    init(text: String, style: StatusStyle, emphasized: Bool = false) {
+        self.text = text
+        self.style = style
+        self.emphasized = emphasized
+    }
+
+    init(status: String?, emphasized: Bool = false) {
+        let s = DisplayStatus.style(status)
+        self.init(text: s.label, style: s, emphasized: emphasized)
+    }
+
+    init(task: TaskDetail, emphasized: Bool = false) {
+        let badge = DisplayStatus.badge(for: task)
+        self.init(text: badge.text, style: badge.style, emphasized: emphasized)
+    }
+
+    var body: some View {
+        Label {
+            Text(text)
+                .font(emphasized ? Font.kpLabel.weight(.semibold) : Font.kpLabel)
+                .foregroundStyle(.primary)
+        } icon: {
+            Image(systemName: style.icon)
+                .foregroundStyle(style.color)
+        }
+        .accessibilityLabel("状态：\(text)")
+    }
+}
+
 /// 请求 kind 图标（协议未规定，取语义化 SF Symbols）。
 struct KindBadge: View {
     let kind: String?
@@ -644,6 +680,32 @@ struct FieldGroup<Content: View>: View {
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
+    }
+}
+
+/// 分组面板（ui-spec §3，对齐设计画板）：控件底、1pt 描边、圆角 10。区段标题放在面板外面；
+/// 行与行之间的细线由调用方在两行之间放 `ListRule`（最后一行之后不放）。总览、复盘、项目页与问答选项共用。
+struct GroupPanel<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.kpControl)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.group))
+        .overlay(RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator, lineWidth: 1))
+    }
+}
+
+/// 通栏竖向 1pt 细线，用于面板内的分格（显式宽度，不依赖外层栈方向）。
+struct VerticalRule: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.kpSeparator)
+            .frame(width: 1)
+            .accessibilityHidden(true)
     }
 }
 
@@ -1024,6 +1086,9 @@ struct PhaseStepperView: View {
     /// 核心 failure_stage（plan|dispatch|monitor|review|delivery）；仅 needs-you 时用于高亮。
     var failureStage: String? = nil
 
+    /// 流水线八步，顺序固定；总览的迷你进度条与下面的步进共用。
+    static let steps = ["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"]
+
     /// 高亮步骤：needs-you 按 failure_stage 映射到流水线步骤；其余阶段高亮同名步骤；无 failure_stage 时不高亮。
     private var highlightedStep: String? {
         guard phase == "needs-you" else { return phase }
@@ -1075,7 +1140,7 @@ struct PhaseStepperView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
-                ForEach(["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"], id: \.self) { step in
+                ForEach(Self.steps, id: \.self) { step in
                     HStack(spacing: Spacing.xs) {
                         Text(Self.title(step))
                             .font(.kpSmall.weight(highlightedStep == step ? .semibold : .regular))
