@@ -2,6 +2,18 @@ import Foundation
 import AppKit
 import Combine
 
+/// Carries the main-actor quit closures into the run-loop block below. The block is created and
+/// runs on the main thread only; the unchecked conformance records that this is safe.
+private final class DeferredTerminationRequest: @unchecked Sendable {
+    let isPending: @MainActor () -> Bool
+    let terminate: @MainActor () -> Void
+
+    init(isPending: @escaping @MainActor () -> Bool, terminate: @escaping @MainActor () -> Void) {
+        self.isPending = isPending
+        self.terminate = terminate
+    }
+}
+
 struct PreparedSoftwareUpdate: Decodable, Sendable {
     let jobPath: String
     let helperPath: String
@@ -140,6 +152,31 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
 final class SoftwareUpdateManager: ObservableObject {
     static let shared = SoftwareUpdateManager()
     static let checkInterval: TimeInterval = 6 * 60 * 60
+    /// How long the install flow waits for the App to actually leave the exit hand-off.
+    static let defaultExitHandshakeTimeout: TimeInterval = 120
+
+    /// Requests App exit on a later default-mode run-loop turn.
+    ///
+    /// AppKit answers a programmatic `terminate` by waiting in a nested run loop for the
+    /// delegate's `.terminateLater` reply, and that reply is produced by a `Task { @MainActor }`.
+    /// When `terminate` is called from inside a Swift concurrency MainActor job — a GCD
+    /// main-queue callout — the nested loop never drains the GCD main queue, so the cleanup
+    /// task and its reply never start and the App hangs in `waitingForExit` (2026-11-02 实机
+    /// 反馈). Scheduling the request on a default-mode run-loop turn runs it outside that
+    /// callout; ordinary Cmd+Q already arrives from a run-loop event callout.
+    @MainActor
+    static func requestTerminationAfterPendingInstall(
+        isPending: @escaping @MainActor () -> Bool = { SoftwareUpdateManager.shared.hasPendingInstallation },
+        terminate: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
+    ) {
+        let request = DeferredTerminationRequest(isPending: isPending, terminate: terminate)
+        RunLoop.main.perform(inModes: [.default]) {
+            MainActor.assumeIsolated {
+                guard request.isPending() else { return }
+                request.terminate()
+            }
+        }
+    }
 
     enum Phase: Equatable {
         case idle, checking, current, available, downloading, ready, preparing, waitingForExit
@@ -203,6 +240,11 @@ final class SoftwareUpdateManager: ObservableObject {
     /// Bumped whenever the test channel is switched, so answers to older requests can be recognised.
     private var channelEpoch = 0
     private(set) var pendingInstallation: PreparedSoftwareUpdate?
+    private let exitHandshakeTimeout: TimeInterval
+    private var exitWatchdog: Task<Void, Never>?
+    /// A prepared installation that still has to be handed to the helper; read by the
+    /// default termination request when its run-loop turn arrives.
+    var hasPendingInstallation: Bool { pendingInstallation != nil }
 
     private enum Keys {
         static let checks = "softwareUpdate.automaticallyChecks"
@@ -225,11 +267,13 @@ final class SoftwareUpdateManager: ObservableObject {
          allowsNetwork: Bool = Bundle.main.bundleIdentifier == "local.kaneopilot"
             && ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] == nil,
          now: @escaping @Sendable () -> Date = { Date() },
-         requestTermination: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }) {
+         requestTermination: @escaping @MainActor () -> Void = { SoftwareUpdateManager.requestTerminationAfterPendingInstall() },
+         exitHandshakeTimeout: TimeInterval = SoftwareUpdateManager.defaultExitHandshakeTimeout) {
         self.service = service; self.installer = installer; self.defaults = defaults
         self.currentVersion = currentVersion; self.currentBuild = currentBuild
         self.targetURL = targetURL; self.cacheURL = cacheURL; self.allowsNetwork = allowsNetwork
         self.now = now; self.requestTermination = requestTermination
+        self.exitHandshakeTimeout = exitHandshakeTimeout
         defaults.register(defaults: [Keys.checks: true, Keys.downloads: true, Keys.testBuilds: false])
         automaticallyChecks = defaults.bool(forKey: Keys.checks)
         automaticallyDownloads = defaults.bool(forKey: Keys.downloads)
@@ -294,7 +338,7 @@ final class SoftwareUpdateManager: ObservableObject {
         }
     }
 
-    func stop() { timer?.invalidate(); timer = nil; started = false }
+    func stop() { timer?.invalidate(); timer = nil; started = false; stopExitWatchdog() }
 
     func checkIfDue() async {
         guard allowsNetwork, automaticallyChecks, !isPreview, !isBusy,
@@ -397,6 +441,7 @@ final class SoftwareUpdateManager: ObservableObject {
             pendingInstallation = prepared
             phase = .waitingForExit
             requestTermination()
+            startExitWatchdog()
         } catch {
             let reason = error.localizedDescription
             guard release == selected else { phase = settledPhase(); return }
@@ -423,6 +468,7 @@ final class SoftwareUpdateManager: ObservableObject {
             }
             defaults.set(prepared.jobPath, forKey: Keys.installJob)
             pendingInstallation = nil
+            stopExitWatchdog()
             return true
         } catch {
             cancelInstallation("无法启动安装助手，已取消更新：\(error.localizedDescription)")
@@ -432,6 +478,7 @@ final class SoftwareUpdateManager: ObservableObject {
 
     func cancelInstallation(_ reason: String) {
         guard pendingInstallation != nil || phase == .waitingForExit else { return }
+        stopExitWatchdog()
         if let pendingInstallation {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: pendingInstallation.jobPath)
                 .deletingLastPathComponent().appendingPathComponent("commit.json"))
@@ -439,6 +486,26 @@ final class SoftwareUpdateManager: ObservableObject {
         pendingInstallation = nil
         phase = downloadedPackage == nil ? .available : .ready
         errorMessage = reason
+    }
+
+    /// A quit hand-off that never answers must not leave the update section spinning forever.
+    /// The watchdog runs on the main actor: once AppKit waits for the `.terminateLater` reply the
+    /// main queue keeps draining (the request itself is outside any main-queue callout), so this
+    /// task can cancel a hand-off that never produces a reply.
+    private func startExitWatchdog() {
+        stopExitWatchdog()
+        let timeout = exitHandshakeTimeout
+        exitWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled, let self,
+                  self.phase == .waitingForExit, self.pendingInstallation != nil else { return }
+            self.cancelInstallation("退出交接超时，已取消安装。请重试更新；如果仍无法退出，请手动退出后重新打开。")
+        }
+    }
+
+    private func stopExitWatchdog() {
+        exitWatchdog?.cancel()
+        exitWatchdog = nil
     }
 
     /// Brings back the candidate saved by the last check, unless it is a test build and the test channel is off.

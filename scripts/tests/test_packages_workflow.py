@@ -20,6 +20,7 @@ JOBS = WORKFLOW["jobs"]
 
 UPDATE_FIXTURES = (
     "run-software-update-fixtures", "run-software-update-termination-fixtures", "run-software-update-ui-fixtures",
+    "run-software-update-appkit-termination-fixtures",
 )
 WIRED_FIXTURES = (
     "run-fixtures", "run-engine-fixtures", "run-plan-answer-fixtures", "run-execution-answer-fixtures",
