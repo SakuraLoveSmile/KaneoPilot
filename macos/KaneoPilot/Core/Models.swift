@@ -1993,7 +1993,17 @@ enum WorktreePoolText {
         if leased > 0 { items.append(unconfirmed > 0 ? "占用 \(leased)（待确认 \(unconfirmed)）" : "占用 \(leased)") }
         if idle > 0 { items.append("空闲 \(idle)") }
         if waiting > 0 { items.append("排队 \(waiting)") }
-        return items.isEmpty ? "没有工作树记录" : items.joined(separator: " · ")
+        return items.isEmpty ? "没有工作树记录" : join(items)
+    }
+
+    /// 项之间写「 · 」；上一项以全角「）」结尾时，「）」自带右侧空白，不再补前导空格：「占用 2（待确认 2）· 空闲 1」。
+    private static func join(_ items: [String]) -> String {
+        var text = ""
+        for (index, item) in items.enumerated() {
+            if index > 0 { text += text.hasSuffix("）") ? "· " : " · " }
+            text += item
+        }
+        return text
     }
 
     /// 只收 1–6 位 ASCII 数字：拒绝空串、正负号、小数点、空白与溢出。

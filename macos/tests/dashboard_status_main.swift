@@ -4,11 +4,11 @@ import Foundation
 // DashboardProjectSummary、DashboardLimits、DashboardRowText）；不读文件，不依赖时间与区域设置。
 // 运行入口：macos/tests/run-dashboard-status-fixtures.sh。
 
+/// 夹具只在云端运行，一次运行要尽量暴露全部问题：断言失败先记下，最后一起报告并以非 0 退出。
+var failures: [String] = []
+
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
-    if !condition() {
-        FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8))
-        exit(1)
-    }
+    if !condition() { failures.append(message) }
 }
 
 /// 默认入参就是「一切正常」；每个用例只改动要说明的那一项。
@@ -107,6 +107,10 @@ expect(dashIssues(doctor: -2) == 0, "E: negative failed-check count clamps")
 
 let realPool = "free: 1, leased: 2, quarantined: 0, unconfirmed: 2, waiting: 0"
 expect(WorktreePoolText.summary(realPool) == "占用 2（待确认 2）· 空闲 1", "pool: real core string")
+expect(WorktreePoolText.summary("free: 4, leased: 3, quarantined: 1, unconfirmed: 1, waiting: 2")
+       == "隔离 1 · 占用 3（待确认 1）· 空闲 4 · 排队 2", "pool: all five parts, no space before the dot after a full-width bracket")
+expect(WorktreePoolText.summary("free: 0, leased: 2, quarantined: 0, unconfirmed: 1, waiting: 0") == "占用 2（待确认 1）",
+       "pool: bracketed leased item alone")
 expect(WorktreePoolText.summary("free: 0, leased: 3, quarantined: 1, unconfirmed: 0, waiting: 2") == "隔离 1 · 占用 3 · 排队 2",
        "pool: quarantine first, no brackets when nothing unconfirmed, zeros omitted")
 expect(WorktreePoolText.summary("free: 0, leased: 0, quarantined: 0, unconfirmed: 0, waiting: 0") == "没有工作树记录",
@@ -180,4 +184,9 @@ expect(DashboardRowText.progressState(column: "待评审", condition: "同步交
 expect(DashboardRowText.progressState(column: nil, condition: nil) == "未提供 · 未提供", "row: progress state fallbacks")
 expect(DashboardRowText.progressState(column: "进行中", condition: nil) == "进行中 · 未提供", "row: progress condition missing")
 
+if !failures.isEmpty {
+    let report = failures.map { "FAIL: " + $0 }.joined(separator: "\n")
+    FileHandle.standardError.write(Data((report + "\n").utf8))
+    exit(1)
+}
 print("dashboard status fixtures passed")
