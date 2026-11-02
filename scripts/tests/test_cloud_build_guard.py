@@ -25,6 +25,7 @@ ENTRIES = (
     ("bash", "macos/tests/run-software-update-fixtures.sh"),
     ("bash", "macos/tests/run-software-update-ui-fixtures.sh"),
     ("bash", "macos/tests/run-software-update-termination-fixtures.sh"),
+    ("bash", "macos/tests/run-software-update-appkit-termination-fixtures.sh"),
     ("bash", "android/tests/export-update-acceptance.sh"),
     ("sh", "android/gradlew"),
 )

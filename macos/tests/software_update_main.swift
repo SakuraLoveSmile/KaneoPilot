@@ -1541,6 +1541,55 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         } catch { check(error.localizedDescription == PythonRuntime.missingMessage, "prepare reports the missing runtime") }
     }
 
+    /// The install flow hands the App exit to a later default-mode run-loop turn. AppKit's
+    /// `.terminateLater` reply is produced by a main-actor task; a terminate started inside a
+    /// main-queue callout starves that task in the nested termination loop (2026-11-02 实机卡死).
+    @MainActor static func terminationSchedulingChecks() async throws {
+        var terminated = 0
+        var pending = true
+        SoftwareUpdateManager.requestTerminationAfterPendingInstall(
+            isPending: { pending }, terminate: { terminated += 1 })
+        check(terminated == 0, "exit request is deferred out of the caller's main-queue turn")
+        drainMainRunLoop { terminated > 0 }
+        check(terminated == 1, "exit request reaches a later default-mode run-loop turn")
+
+        pending = false
+        SoftwareUpdateManager.requestTerminationAfterPendingInstall(
+            isPending: { pending }, terminate: { terminated += 1 })
+        drainMainRunLoop(seconds: 0.2) { false }
+        check(terminated == 1, "a cancelled installation never quits the App on the deferred turn")
+    }
+
+    /// An exit hand-off that never answers must cancel instead of leaving the spinner forever.
+    @MainActor static func exitWatchdogChecks(root: URL) async throws {
+        let suite = "local.kaneopilot.update-fixtures.watchdog.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = FixtureService(), installer = FixtureInstaller()
+        let manager = SoftwareUpdateManager(service: service, installer: installer, defaults: defaults,
+            currentVersion: "0.1.0", currentBuild: "2026102101",
+            targetURL: root.appendingPathComponent("KaneoPilot.app"),
+            cacheURL: root.appendingPathComponent("watchdog"), allowsNetwork: true,
+            requestTermination: { }, exitHandshakeTimeout: 0.05)
+        await manager.check()
+        check(manager.phase == .ready && manager.canInstall, "watchdog fixture reaches install-ready")
+        await manager.installAndRestart()
+        check(manager.phase == .waitingForExit && manager.hasPendingInstallation,
+              "silent exit request leaves the hand-off pending")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        check(manager.phase == .ready && !manager.hasPendingInstallation
+              && (manager.errorMessage ?? "").contains("退出交接超时"),
+              "unanswered exit hand-off cancels the installation instead of spinning forever")
+    }
+
+    /// Runs the main run loop until `until` is true or the deadline passes.
+    @MainActor private static func drainMainRunLoop(seconds: TimeInterval = 2, until: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !until(), Date() < deadline {
+            _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+    }
+
     @MainActor static func main() async throws {
         let arguments = CommandLine.arguments
         if arguments.count > 1 {
@@ -1577,6 +1626,8 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         try await versionFirstManagerChecks(root: root)
         try await cacheAndProgressChecks(root: root)
         try await installerHandshakeChecks(root: root)
+        try await terminationSchedulingChecks()
+        try await exitWatchdogChecks(root: root)
         print("software update fixtures: \(assertions) assertions passed")
     }
 }

@@ -4,7 +4,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var section: AppViewModel.Section = .dashboard
-    @State private var settingsSegment: SettingsSegment = .projects
+    @State private var settingsSegment: SettingsSegment = .roles
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.colorScheme) private var colorScheme
 
@@ -195,23 +195,32 @@ struct RootView: View {
         return VStack(alignment: .leading, spacing: Spacing.s) {
             Label {
                 Text(headline.text)
-                    .font(.kpLabel)
+                    .font(.kpBody.weight(.semibold))
                     .foregroundStyle(.primary)
             } icon: {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(headline.tone.color)
+                Circle()
+                    .fill(headline.tone.color)
+                    .frame(width: 8, height: 8)
             }
             Text(automationDetail)
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
                 .lineLimit(1)
+            // 两个等宽按钮撑满侧栏宽度，各带图标（ui-spec §2）。
             HStack(spacing: Spacing.s) {
-                Button(model.globalPaused ? "恢复" : "暂停") {
+                Button {
                     Task { await model.toggleGlobalPause() }
+                } label: {
+                    Label(model.globalPaused ? "恢复" : "暂停",
+                          systemImage: model.globalPaused ? "play.fill" : "pause.fill")
+                        .frame(maxWidth: .infinity)
                 }
                 .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
-                Button("刷新") {
+                Button {
                     Task { await model.refreshAll() }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
                 }
                 .help(refreshHelp)
                 .disabled(model.busy)
