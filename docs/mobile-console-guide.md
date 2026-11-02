@@ -1,6 +1,6 @@
 # 手机连接与安装包
 
-Android 8.0+；Mac 需要 macOS 14+ 和外部 Python 3.9+。Git、Plus 和各执行后端继续使用 Mac 原有配置。手机不运行模型或执行器，Mac 必须保持在线。
+Android 8.0+；Mac 需要 macOS 14+ 的 Apple Silicon（M 系列）机器，App 已内置 Python 运行时，不再需要另装 Python。Git、Plus 和各执行后端继续使用 Mac 原有配置。手机不运行模型或执行器，Mac 必须保持在线。
 
 ## 连接手机
 
@@ -19,9 +19,9 @@ Mac 可以撤销单个设备。移除手机本机连接只删除手机保存的�
 
 ## 云端构建与下载
 
-安装包统一由 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建，本机不再运行 Xcode 或 Gradle。分支 push、PR 和手动分支构建生成 Debug APK 与 Universal DMG，产物保留十四天；正式版从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载。
+安装包统一由 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建，本机不再运行 Xcode 或 Gradle。分支 push、PR 和手动分支构建生成 Debug APK 与 Apple Silicon（arm64）DMG，产物保留十四天；正式版从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载。
 
-正式发布使用 main 已包含提交上的 annotated 稳定标签；固定签名、发布说明、资产校验与失败恢复统一见 [构建与 Release 规范](build-release.md)。Android Debug 签名与正式版不同；macOS DMG 为 ad-hoc 签名、未公证，需要外部 Python 3.9+。
+正式发布使用 main 已包含提交上的 annotated 稳定标签；固定签名、发布说明、资产校验与失败恢复统一见 [构建与 Release 规范](build-release.md)。Android Debug 签名与正式版不同；macOS DMG 仅含 Apple Silicon（arm64），内置 Python 运行时，ad-hoc 签名、未公证。
 
 ## 隔离联合核验
 

@@ -4,9 +4,9 @@
 
 ## 云端构建
 
-使用 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建和下载 Universal DMG，本机不再使用 Xcode 或编译型预览脚本生成 App。分支构建提供测试包，正式版本从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载；完整操作见 [构建与 Release 规范](../docs/build-release.md)。
+使用 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建和下载 Apple Silicon（arm64）DMG，本机不再使用 Xcode 或编译型预览脚本生成 App。分支构建提供测试包，正式版本从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载；完整操作见 [构建与 Release 规范](../docs/build-release.md)。
 
-云端构建脚本将产物和 DerivedData 放入 runner 临时目录。App / DMG 为 ad-hoc 签名、未公证，不包含 Python 运行时。
+云端构建脚本将产物和 DerivedData 放入 runner 临时目录。App / DMG 为 ad-hoc 签名、未公证，仅含 arm64，并内置固定版本的 Python 运行时（锁定、签名与校验见 [构建与 Release 规范](../docs/build-release.md) 的「内置 Python 运行时与架构」）。
 
 - deployment target：macOS 14
 - bundle id：`local.kaneopilot`
@@ -21,10 +21,17 @@
 2. `<App bundle>/Resources/core/kanpilot.py`（或 `kanpilot`）
 3. repo 相对 `../core/kanpilot.py`（由源码位置推导，另扫 bundle 祖先目录兜底）
 
+Python 解释器按以下顺序解析（`Core/CoreLocator.swift` 的 `PythonRuntime`）：
+
+1. 环境变量 `KANPILOT_PYTHON`（须存在且可执行；夹具与开发用）
+2. `<App bundle>/Contents/Resources/python/bin/python3`
+
+两者都没有就报错「内置 Python 缺失，请重新安装 KaneoPilot」，**不回退**到 `PATH` 里的 `python3`，也不经 `/usr/bin/env`。App 直接执行解释器本身（保持「直属 Python 子进程」语义，`KANPILOT_SCHEDULER_PID` 只设在这一层）。子进程环境清除继承的 `PYTHONHOME`、`PYTHONPATH`、`PYTHONSTARTUP`、`PYTHONUSERBASE`，设置 `PYTHONNOUSERSITE=1` 与 `PYTHONDONTWRITEBYTECODE=1`（任何写进 App 包的字节码都会破坏签名封印）；`PATH` 仍前置 `~/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin`，供 Git 与执行后端使用。
+
 调用形态（`Core/CoreClient.swift`）：
 
 ```
-python3 <corePath> <command> --json '<payload>'     # .py / 无执行位
+<解释器> <corePath> <command> --json '<payload>'    # .py / 无执行位
 <corePath> <command> --json '<payload>'             # 可执行 shim
 ```
 
@@ -34,7 +41,7 @@ python3 <corePath> <command> --json '<payload>'     # .py / 无执行位
 
 执行后端为 pi CLI，四个执行端（plan/dispatch/monitor/review）由 App 内置
 `ExecutorScheduler`（`Core/ExecutorScheduler.swift`）按错开分钟拉起
-`python3 -m kanpilot.executor_runner --stage <s>`（plan 0/15/30/45、
+`<解释器> -m kanpilot.executor_runner --stage <s>`（plan 0/15/30/45、
 dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分；
 每次触发先 `executor-status` 查单飞）。**仅 App 运行期间触发**，App 退出后
 不再拉起（替代旧 Codex automation 定时执行端）。开关与各阶段状态在

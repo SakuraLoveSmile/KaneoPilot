@@ -33,7 +33,7 @@
 以下保留旧 CLI / 旧 App 行为记录；新版 App 不启动这套定时器，自动驱动仅限 live 项目。显式用户授权的手动规划由引擎消费，见 protocol §5.27.14。
 
 - 四个执行端（plan/dispatch/monitor/review/delivery）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57、delivery 按 `next_sync_at` 动态）。
-- 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
+- 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（`python3` 为简写：App 内是内置解释器，见 protocol §1；core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
 - **常驻菜单栏**：关窗后继续调度，登录项可启用；退出 App 停止调度与本实例 MCP 服务，但不结束 Plus 会话。
 - executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
 - runner 自己把运行记录写 `settings.executor_runs[stage]`（`pid/started_at/log/exit_code/finished_at`）——`executor-status` 读取的唯一数据源。
@@ -41,7 +41,7 @@
 
 ## 自动接收（intake）
 
-入口：`python3 -m kanpilot.auto_intake [--dry-run]`，由调度器每 300 秒或菜单「立即检查」拉起。
+入口：`python3 -m kanpilot.auto_intake [--dry-run]`（`python3` 为简写，同上），由调度器每 300 秒或菜单「立即检查」拉起。
 
 1. **单飞**：`executor_runs["intake"]` 记录的 pid 仍存活 → 直接退出。
 2. **暂停检查**：全局暂停，或 `paused_stages` 包含 plan → 写摘要后退出。
