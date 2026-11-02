@@ -129,8 +129,45 @@ class PackagesWorkflowTests(unittest.TestCase):
     def test_release_artifacts_are_named_from_the_identity_version(self):
         text = WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn('name="KaneoPilot-$VERSION_NAME-android.apk"', text)
-        self.assertIn('export DMG_NAME="KaneoPilot-$VERSION_NAME-macos-universal.dmg"', text)
+        self.assertIn('export DMG_NAME="KaneoPilot-$VERSION_NAME-macos-arm64.dmg"', text)
         self.assertIn("VERSION_NAME: ${{ needs.identity.outputs.version }}", text)
+
+    def test_the_mac_package_is_apple_silicon_only(self):
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("universal", text.lower())
+        self.assertNotIn("x86_64", text)
+        step = steps_by_name("macos-package")["Build and verify Apple Silicon DMG"]
+        self.assertEqual(step["env"]["ARCHS"], "arm64")
+        self.assertIn('[ "$(uname -m)" = arm64 ]', step["run"])
+        self.assertIn("--architectures arm64 --output", step["run"])
+        self.assertIn('KaneoPilot-ci-$BUILD_NUMBER-macos-arm64-local-signed.dmg', step["run"])
+
+    def test_the_mac_package_fetches_the_pinned_runtime_first_and_smokes_the_dmg_it_built(self):
+        steps = steps_by_name("macos-package")
+        order = [step.get("name") for step in JOBS["macos-package"]["steps"]]
+        fetch, build, smoke = ("Fetch the pinned Python runtime", "Build and verify Apple Silicon DMG",
+                               "Smoke the bundled Python in the built DMG")
+        self.assertLess(order.index(fetch), order.index(build))
+        self.assertLess(order.index(build), order.index(smoke))
+        self.assertIn('scripts/fetch_python_runtime.py --output "$RUNNER_TEMP/python-runtime"', steps[fetch]["run"])
+        # The fetch step exports PYTHON_RUNTIME_DIR; the build step must not point it anywhere else.
+        self.assertNotIn("PYTHON_RUNTIME_DIR", json.dumps(steps[build]))
+        # The smoke runs after an earlier failure too (one run, all signals), but only on a package that was built.
+        self.assertEqual(steps[smoke]["if"], "${{ !cancelled() && steps.macos-package.outcome == 'success' }}")
+        self.assertIn('bash scripts/smoke_bundled_python.sh "${dmgs[0]}"', steps[smoke]["run"])
+        # Its logs travel with the packaging reports.
+        self.assertIn("macos-reports/bundled-python-smoke.log", steps[smoke]["run"])
+        self.assertIn("macos-reports/python-runtime-fetch.log", steps[fetch]["run"])
+
+    def test_the_syntax_check_reads_each_shell_script_of_the_mac_package_on_its_own(self):
+        run = steps_by_name("checks")["Release recovery and packaging checks"]["run"]
+        loop = re.search(r"for script in ([^;]+); do\n\s+bash -n \"\$script\"", run)
+        self.assertIsNotNone(loop, "bash -n takes one script; a list after it is only arguments")
+        checked = set(loop.group(1).split())
+        self.assertEqual(checked, {"scripts/require_actions.sh", "scripts/build_app.sh", "scripts/build_dmg.sh",
+                                   "scripts/smoke_bundled_python.sh"})
+        for script in checked:
+            self.assertTrue((ROOT / script).is_file(), script)
 
     def test_publish_waits_for_every_job_its_condition_names(self):
         publish = JOBS["publish"]
@@ -144,7 +181,9 @@ class PackagesWorkflowTests(unittest.TestCase):
         needs = needs_of(JOBS["publish"])
         self.assertIn("android", needs)
         self.assertIn("macos-package", needs)
-        self.assertIn("macos-universal-local-signed-${{ github.run_number }}", uploads("macos-package"))
+        self.assertIn("macos-arm64-local-signed-${{ github.run_number }}", uploads("macos-package"))
+        downloads = [step["with"]["name"] for step in JOBS["publish"]["steps"] if step.get("uses", "").startswith("actions/download-artifact")]
+        self.assertIn("macos-arm64-local-signed-${{ github.run_number }}", downloads)
 
     def test_fixtures_and_packaging_start_together_after_identity(self):
         for job in ("android", "macos-fixtures", "macos-package"):

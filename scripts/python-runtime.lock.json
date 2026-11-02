@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "source": "python-build-standalone",
+  "repository": "astral-sh/python-build-standalone",
+  "release_tag": "20261026",
+  "python_version": "3.13.18",
+  "asset": "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
+  "size": 25265774,
+  "sha256": "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405",
+  "archs": ["arm64"],
+  "minos_max": "14.0"
+}

@@ -61,13 +61,13 @@ class FakeTestChannelGitHub(stable_tests.FakeGitHub):
 
 
 def build_bundle(root, version, tag, build, branch="", macos_name=None):
-    for platform, name in (("android", "android.apk"), ("macos", macos_name or "macos-universal.dmg")):
+    for platform, name in (("android", "android.apk"), ("macos", macos_name or "macos-arm64.dmg")):
         package = root / ("KaneoPilot-%s-%s" % (version, name))
         package.write_bytes((platform + " signed fixture").encode())
         release_bundle.metadata(types.SimpleNamespace(
             package=package, platform=platform, fingerprint="b" * 64, version=version,
             source_sha=SHA, build_number=build,
-            architectures="any" if platform == "android" else "arm64,x86_64",
+            architectures="any" if platform == "android" else "arm64",
             output=root / (platform + "-metadata.json")))
     return release_bundle.prepare(root, tag, SHA, build, branch)
 
@@ -220,8 +220,10 @@ class TestChannelPublishTests(unittest.TestCase):
             build_bundle(self.root, VERSION, TAG, BUILD + 1)
 
     def test_a_test_build_must_use_the_exact_package_names_the_app_accepts(self):
-        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, "Unexpected artifact name"):
-            build_bundle(Path(directory), VERSION, TAG, BUILD, BRANCH, macos_name="macos.dmg")
+        for macos_name in ("macos.dmg", "macos-universal.dmg"):
+            with self.subTest(macos_name=macos_name), tempfile.TemporaryDirectory() as directory, \
+                    self.assertRaisesRegex(ValueError, "Unexpected artifact name"):
+                build_bundle(Path(directory), VERSION, TAG, BUILD, BRANCH, macos_name=macos_name)
 
     def test_the_branch_is_printable_ascii_text_of_bounded_length(self):
         cleaned = release_bundle.clean_branch("feat/中文-" + "x" * 200)
