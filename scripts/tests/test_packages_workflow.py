@@ -170,6 +170,34 @@ class PackagesWorkflowTests(unittest.TestCase):
         for script in checked:
             self.assertTrue((ROOT / script).is_file(), script)
 
+    def test_core_tests_run_on_the_bundled_python_and_on_the_oldest_supported_one(self):
+        job = JOBS["checks"]
+        matrix = job["strategy"]["matrix"]
+        self.assertEqual(matrix["python"], ["3.11", "3.13"])
+        setups = [step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-python")]
+        self.assertEqual([step["with"]["python-version"] for step in setups], ["${{ matrix.python }}"])
+        # Shards are split by the shard count; the job count also multiplies by the Python versions.
+        self.assertNotIn("strategy.job-total", WORKFLOW_PATH.read_text(encoding="utf-8"))
+        for name in ("Core isolated tests", "Integration fixture tests"):
+            self.assertEqual(int(steps_by_name("checks")[name]["env"]["SHARDS"]), len(matrix["shard"]), name)
+        # Packaging checks run per Python (they cover the tools on both); every cell keeps its own report.
+        self.assertEqual(steps_by_name("checks")["Release recovery and packaging checks"]["if"],
+                         "${{ !cancelled() && matrix.shard == 1 }}")
+        self.assertIn("-py${{ matrix.python }}", uploads("checks")[0])
+
+    def test_desktop_fixtures_name_the_interpreter_they_run_the_core_with(self):
+        for name in ("macos-fixtures", "macos-session-fulltext-probe"):
+            steps = JOBS[name]["steps"]
+            names = [step.get("name") for step in steps]
+            setup = next(index for index, step in enumerate(steps) if step.get("uses", "").startswith("actions/setup-python"))
+            export = names.index("Name the interpreter the fixtures run the core with")
+            running = next(index for index, step in enumerate(steps)
+                           if "matrix.fixtures" in step.get("run", "") or "macos/tests/run-" in step.get("run", ""))
+            self.assertEqual(steps[setup]["with"]["python-version"], "3.13", name)
+            self.assertLess(setup, export, name)
+            self.assertLess(export, running, name)
+            self.assertIn('echo "KANPILOT_PYTHON=$python" >> "$GITHUB_ENV"', steps[export]["run"], name)
+
     def test_publish_waits_for_every_job_its_condition_names(self):
         publish = JOBS["publish"]
         gates = set(re.findall(r"needs\.([\w-]+)\.result", publish["if"]))

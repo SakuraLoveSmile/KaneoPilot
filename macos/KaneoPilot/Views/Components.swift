@@ -254,6 +254,7 @@ enum Labels {
     static func doctorCheck(_ name: String) -> String {
         switch name {
         case "python": return "Python"
+        case "python_runtime": return "内置 Python 运行时"
         case "db_writable": return "数据库可写"
         case "credentials": return "Kaneo 凭据"
         case "plan_root": return "Plan 根目录"

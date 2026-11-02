@@ -852,6 +852,38 @@ def _doctor_business_tick(ctx) -> dict:
     return dict(check, detail=f"业务 tick 已过去 {age:.0f} 秒")
 
 
+def _doctor_python_runtime() -> dict:
+    """§5.1 ``python_runtime``：解释器来源与系统证书路径；离线，只读文件。
+
+    来源只是信息。仅当解释器是 App 内置运行时、而证书文件与证书目录都不可用时
+    才失败（内置解释器不带 CA 包，TLS 全靠系统证书）；外置解释器（开发 CLI、
+    Linux CI、宿主登记的 MCP 服务）一律通过，不让无关环境翻转顶层 ``ok``。
+    """
+    executable = sys.executable or ""
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    bundled = ".app/Contents/Resources/python/" in executable
+    try:
+        import ssl
+
+        paths = ssl.get_default_verify_paths()
+        cafile, capath = paths.cafile, paths.capath
+    except Exception:  # pragma: no cover - ssl 模块缺失或损坏
+        cafile = capath = None
+    cafile_ok = bool(cafile) and os.path.isfile(cafile)
+    capath_ok = bool(capath) and os.path.isdir(capath)
+    parts = [
+        "%s %s %s" % (version, "bundled" if bundled else "external", executable or "unknown"),
+        "cafile %s (%s)" % (cafile or "none", "exists" if cafile_ok else "missing"),
+    ]
+    if capath:
+        parts.append("capath %s (%s)" % (capath, "exists" if capath_ok else "missing"))
+    ok = not (bundled and not cafile_ok and not capath_ok)
+    if not ok:
+        parts.append("系统证书文件与证书目录都缺失，内置 Python 无法校验 HTTPS；"
+                     "请修复系统证书或重新安装 KaneoPilot")
+    return {"name": "python_runtime", "ok": ok, "detail": "; ".join(parts)}
+
+
 def cmd_doctor(ctx, payload: dict) -> dict:
     # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
     online = bool(payload.get("online") or payload.get("live"))
@@ -863,6 +895,7 @@ def cmd_doctor(ctx, payload: dict) -> dict:
         "ok": sys.version_info >= (3, 9),
         "detail": ".".join(str(part) for part in sys.version_info[:3]),
     })
+    checks.append(_doctor_python_runtime())
 
     try:
         ctx.conn.execute("SELECT 1").fetchone()

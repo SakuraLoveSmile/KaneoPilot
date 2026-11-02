@@ -149,9 +149,36 @@ class PromptRenderingContractTests(unittest.TestCase):
         for stage in ("dispatch", "monitor", "review"):
             prompt = self.executor_runner.render_prompt(stage)
             self.assertNotIn("{PREAMBLE}", prompt, stage)
+            self.assertNotIn("{PYTHON}", prompt, stage)
             self.assertNotIn("{KANPILOT}", prompt, stage)
             self.assertIn("## 固定助手", prompt, stage)
             self.assertIn("KANPILOT_DB", prompt, stage)
+
+    def test_core_command_uses_the_cores_own_interpreter(self):
+        import shlex
+        import sys
+        from unittest import mock
+
+        core_script = str(self.executor_runner.constants.core_root() / "kanpilot.py")
+        for executable in (sys.executable,
+                           "/Applications/Kaneo Pilot.app/Contents/Resources/python/bin/python3"):
+            with mock.patch.object(sys, "executable", executable):
+                prompt = self.executor_runner.render_prompt("dispatch")
+            command = f"{shlex.quote(executable)} {core_script} <command>"
+            self.assertIn(command, prompt, executable)
+        # 路径含空格时必须带引号，否则执行端 shell 会把它拆成两个词。
+        self.assertIn("'/Applications/Kaneo Pilot.app/", prompt)
+
+    def test_core_command_never_falls_back_to_path_python(self):
+        import sys
+        from unittest import mock
+
+        for empty in ("", None):
+            with mock.patch.object(sys, "executable", empty):
+                with self.assertRaises(self.executor_runner.util.KanpilotError) as ctx:
+                    self.executor_runner.render_prompt("dispatch")
+            self.assertEqual(ctx.exception.code, "validation_failed")
+        self.assertNotIn("python3 {KANPILOT}", read("_preamble.md"))
 
 
 if __name__ == "__main__":
