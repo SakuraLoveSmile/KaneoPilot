@@ -284,7 +284,7 @@ jobs:
       matrix:
         include:
           - group: a
-            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures run-software-update-fixtures run-software-update-termination-fixtures run-software-update-ui-fixtures run-software-update-appkit-termination-fixtures
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures run-software-update-fixtures run-software-update-termination-fixtures run-software-update-ui-fixtures run-software-update-appkit-termination-fixtures run-dashboard-status-fixtures
           - group: b
             fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures run-engine-fix-revert-fixtures run-python-runtime-fixtures
     steps:

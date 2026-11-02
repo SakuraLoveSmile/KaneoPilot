@@ -1087,7 +1087,7 @@ struct PhaseStepperView: View {
     /// 核心 failure_stage（plan|dispatch|monitor|review|delivery）；仅 needs-you 时用于高亮。
     var failureStage: String? = nil
 
-    /// 流水线八步，顺序固定；总览的迷你进度条与下面的步进共用。
+    /// 流水线八步，顺序固定（2026-11-01 起总览不再画迷你进度条，只剩下面的步进使用）。
     static let steps = ["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"]
 
     /// 高亮步骤：needs-you 按 failure_stage 映射到流水线步骤；其余阶段高亮同名步骤；无 failure_stage 时不高亮。
