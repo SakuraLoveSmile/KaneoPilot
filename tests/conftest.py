@@ -754,7 +754,15 @@ def write_plan_file(plan_root, *, task_id, project_id, project_name, repository,
     project_dir.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^\w一-鿿-]+", "-", (title or task_id))[:40].strip("-")
     path = project_dir / f"{slug}_{int(time.time()*1000)}.md"
-    lines = ["---"] + [f"{k}: {v}" for k, v in fm.items()] + [
+    # `task_id` 必须加引号：`_new_task_id()` 是 `uuid4().hex[:24]`，24 个十六进制字符
+    # 恰好全是数字时（概率 (10/16)^24 ≈ 1.3e-5）YAML 会解析成 int，与 payload 里的 str
+    # 比较不相等，报出两边打印完全相同的 "plan task_id X != X"。真实计划由执行端写出、
+    # task_id 是字符串，这里按同样形态落盘。其余被比较的字段（project_id、repository、
+    # project_name、planner_model、reasoning_effort、implementation_status）都含字母，
+    # 不会被 YAML 解析成数字。
+    lines = ["---"] + [
+        f'{k}: "{v}"' if k == "task_id" else f"{k}: {v}" for k, v in fm.items()
+    ] + [
         "---", "", body or f"# {title or task_id}\n\n## 实施步骤\n\n1. 读取需求\n2. 实现\n3. 验证\n"]
     path.write_text("\n".join(lines), encoding="utf-8")
     return SimpleNamespace(path=path, sha256=sha256_file(path), frontmatter=fm)
