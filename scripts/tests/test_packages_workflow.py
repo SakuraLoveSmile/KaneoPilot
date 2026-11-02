@@ -28,6 +28,7 @@ WIRED_FIXTURES = (
     "run-ai-verification-recovery-fixtures", "run-planning-input-fixtures", "run-recovery-supervisor-fixtures",
     "run-review-resolution-fixtures", "run-scheduler-fixtures", "run-session-reader-fixtures",
     "run-session-search-input-fixtures", "run-verification-check-fixtures", "run-engine-fix-revert-fixtures",
+    "run-python-runtime-fixtures",
 ) + UPDATE_FIXTURES
 # Manual probe only (workflow_dispatch input): its main-thread latency assertion fails on hosted runners.
 UNGATED_FIXTURES = ("run-session-fulltext-fixtures",)

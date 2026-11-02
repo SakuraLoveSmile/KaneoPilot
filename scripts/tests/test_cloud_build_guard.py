@@ -21,6 +21,7 @@ ENTRIES = (
     ("python", "macos/tests/preview_execution_questions.py"),
     ("python", "scripts/fetch_python_runtime.py"),
     ("python", "scripts/prepare_python_runtime.py"),
+    ("bash", "macos/tests/run-python-runtime-fixtures.sh"),
     ("bash", "macos/tests/run-software-update-fixtures.sh"),
     ("bash", "macos/tests/run-software-update-ui-fixtures.sh"),
     ("bash", "macos/tests/run-software-update-termination-fixtures.sh"),

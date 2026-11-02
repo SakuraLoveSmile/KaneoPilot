@@ -93,17 +93,15 @@ final class EngineSupervisor: ObservableObject {
         // A live external holder keeps ownership; do not start a competing child.
         guard engineStatus != nil, engineStatus?.instances.contains(where: { $0.active == true }) != true else { return }
         guard let location = client.location else { error = CoreError.coreMissing.coreMessage; return }
-        let child = Process()
         let payload = "{\"mode\":\"legacy\",\"intake\":true,\"spawn\":true}"
-        if location.usesPython {
-            child.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            child.arguments = ["python3", location.path, "engine-run", "--json", payload]
-        } else {
-            child.executableURL = URL(fileURLWithPath: location.path)
-            child.arguments = ["engine-run", "--json", payload]
+        guard let invocation = location.invocation(["engine-run", "--json", payload]) else {
+            recordFailure("无法启动引擎：\(PythonRuntime.missingMessage)")
+            return
         }
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        let child = Process()
+        child.executableURL = invocation.executable
+        child.arguments = invocation.arguments
+        var environment = PythonRuntime.environment()
         environment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
         child.environment = environment
         // Engine logs may contain verifier output; never persist unredacted output in UI.
@@ -140,16 +138,17 @@ final class EngineSupervisor: ObservableObject {
             guard allowsFakeRecovery,
                   URL(fileURLWithPath: location.path).lastPathComponent == "kanpilot-fake.py" else { return }
         }
-        let child = Process()
-        if location.usesPython {
-            child.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            child.arguments = ["python3", location.path, "recover-execution-goals", "--json", "{}"]
-        } else {
-            child.executableURL = URL(fileURLWithPath: location.path)
-            child.arguments = ["recover-execution-goals", "--json", "{}"]
+        guard let invocation = location.invocation(["recover-execution-goals", "--json", "{}"]) else {
+            // One attempt per interval, as for any failed launch below.
+            recoveryCheckAt = Date().addingTimeInterval(20)
+            recoveryError = "无法启动观察恢复检查：\(PythonRuntime.missingMessage)"
+            self.error = recoveryError
+            return
         }
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        let child = Process()
+        child.executableURL = invocation.executable
+        child.arguments = invocation.arguments
+        var environment = PythonRuntime.environment()
         environment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
         child.environment = environment
         child.standardOutput = FileHandle.nullDevice

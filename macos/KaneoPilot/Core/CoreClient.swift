@@ -108,19 +108,15 @@ struct CoreClient: Sendable {
                                 command: String,
                                 payloadJSON: String,
                                 timeout: TimeInterval) throws -> [String: Any] {
-        let process = Process()
-        if location.usesPython {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["python3", location.path, command, "--json", payloadJSON]
-        } else {
-            process.executableURL = URL(fileURLWithPath: location.path)
-            process.arguments = [command, "--json", payloadJSON]
+        guard let invocation = location.invocation([command, "--json", payloadJSON]) else {
+            throw CoreError.launchFailed(PythonRuntime.missingMessage)
         }
-        // Finder 启动的 app PATH 极简（/usr/bin:/bin…），`python3` 会落到系统
-        // 3.9.6（无 certifi → 远端 HTTPS 证书校验失败）。前置用户 bin 目录，让
-        // `python3` 解析到带 certifi 的安装（/usr/local 或 ~/.npm-global 等）。
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        let process = Process()
+        process.executableURL = invocation.executable
+        process.arguments = invocation.arguments
+        // Finder 启动的 app PATH 极简（/usr/bin:/bin…）。前置用户 bin 目录，让核心找到 pi、codex、gh 等
+        // 命令行工具；核心自己的 Python 是内置运行时，不经 PATH。
+        var env = PythonRuntime.environment()
         // Only a direct Python child has this App as its scheduler parent.
         // Executable shims keep conservative ownership.
         env.removeValue(forKey: "KANPILOT_SCHEDULER_PID")
