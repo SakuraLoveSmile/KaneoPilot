@@ -137,7 +137,7 @@ private final class UpdateUIInstaller: SoftwareUpdateInstalling, @unchecked Send
         let job = jobRoot.appendingPathComponent("job.json")
         try Data("{\"fixture_only\":true}".utf8).write(to: job)
         return PreparedSoftwareUpdate(jobPath: job.path, helperPath: jobRoot.appendingPathComponent("no-helper.py").path,
-            version: release.version, backupPath: jobRoot.appendingPathComponent("no-backup.app").path)
+            pythonPath: "/usr/bin/true", version: release.version, backupPath: jobRoot.appendingPathComponent("no-backup.app").path)
     }
 
     func launch(_ prepared: PreparedSoftwareUpdate, parentPID: Int32) async throws {

@@ -18,6 +18,7 @@ export KANPILOT_UPDATE_VECTORS
 TASK_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/kp-software-update.XXXXXX")"
 trap 'rm -rf "$TASK_FIXTURE"' EXIT
 swiftc -target "$(uname -m)-apple-macos14" -parse-as-library \
+  "$TASK_ROOT/macos/KaneoPilot/Core/CoreLocator.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdate.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdateManager.swift" \
   "$TASK_ROOT/macos/tests/software_update_main.swift" \

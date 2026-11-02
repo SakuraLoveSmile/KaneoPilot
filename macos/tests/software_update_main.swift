@@ -139,7 +139,7 @@ private final class FixtureInstaller: SoftwareUpdateInstalling, @unchecked Senda
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return PreparedSoftwareUpdate(jobPath: root.appendingPathComponent("job.json").path,
             helperPath: root.appendingPathComponent("installer.py").path,
-            version: release.version, backupPath: target.path + ".backup")
+            pythonPath: "/usr/bin/true", version: release.version, backupPath: target.path + ".backup")
     }
     func launch(_ prepared: PreparedSoftwareUpdate, parentPID: Int32) async throws {
         launches += 1
@@ -337,7 +337,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return PreparedSoftwareUpdate(jobPath: root.appendingPathComponent("job.json").path,
             helperPath: root.appendingPathComponent("installer.py").path,
-            version: release.version, backupPath: target.path + ".backup")
+            pythonPath: "/usr/bin/true", version: release.version, backupPath: target.path + ".backup")
     }
 
     func launch(_ prepared: PreparedSoftwareUpdate, parentPID: Int32) async throws { }
@@ -1443,7 +1443,11 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
             time.sleep(0.02)
         sys.exit(3)
         """
-        let installer = BundledSoftwareUpdateInstaller(helperURL: nil)
+        guard let realPython = PythonRuntime.resolve() else {
+            throw SoftwareUpdateError.invalid("夹具需要 KANPILOT_PYTHON 指向一个 Python 解释器")
+        }
+        func quoted(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let installer = BundledSoftwareUpdateInstaller(helperURL: nil, pythonURL: nil)
         let pid = ProcessInfo.processInfo.processIdentifier
         for mode in ["ready", "fail", "cancel"] {
             let folder = root.appendingPathComponent("handshake-\(mode)")
@@ -1452,8 +1456,20 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
             let job = folder.appendingPathComponent("job.json")
             try Data(helperSource.utf8).write(to: helper)
             try json(["mode": mode]).write(to: job)
+            // The prepared interpreter records how it was started, then becomes the real one (same PID,
+            // so cancellation still reaches the helper).
+            let interpreter = folder.appendingPathComponent("python-under-test")
+            let wrapper = """
+            #!/bin/sh
+            printf '%s\\n' "$@" > \(quoted(folder.appendingPathComponent("interpreter-args").path))
+            env > \(quoted(folder.appendingPathComponent("interpreter-env").path))
+            exec \(quoted(realPython.path)) "$@"
+            """
+            try Data(wrapper.utf8).write(to: interpreter)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: interpreter.path)
             let prepared = PreparedSoftwareUpdate(jobPath: job.path, helperPath: helper.path,
-                version: "0.2.0", backupPath: folder.appendingPathComponent("backup.app").path)
+                pythonPath: interpreter.path, version: "0.2.0",
+                backupPath: folder.appendingPathComponent("backup.app").path)
             if mode == "ready" {
                 try await installer.launch(prepared, parentPID: pid)
                 let deadline = Date().addingTimeInterval(5)
@@ -1461,6 +1477,15 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
                 while !FileManager.default.fileExists(atPath: observed.path), Date() < deadline {
                     try await Task.sleep(nanoseconds: 20_000_000)
                 }
+                let arguments = try String(contentsOf: folder.appendingPathComponent("interpreter-args"), encoding: .utf8)
+                    .split(separator: "\n").map(String.init)
+                check(arguments == [helper.path, "install", "--job", job.path, "--parent-pid", String(pid)],
+                      "the helper runs on the prepared interpreter, with the script as its first argument")
+                let environment = try String(contentsOf: folder.appendingPathComponent("interpreter-env"), encoding: .utf8)
+                    .split(separator: "\n").map(String.init)
+                check(environment.contains("PYTHONNOUSERSITE=1") && environment.contains("PYTHONDONTWRITEBYTECODE=1")
+                      && !environment.contains { $0.hasPrefix("PYTHONHOME=") || $0.hasPrefix("PYTHONPATH=") },
+                      "the helper environment is the sanitized runtime environment")
                 let data = try Data(contentsOf: observed)
                 let commit = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 check(commit["parent_pid"] as? Int == Int(pid) && commit["job_path"] as? String == job.path,
@@ -1491,6 +1516,29 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
                       "cancelled handoff leaves no commit")
             }
         }
+
+        // An interpreter that has vanished since `prepare` is refused before anything starts or is committed.
+        let vanished = root.appendingPathComponent("handshake-vanished")
+        try FileManager.default.createDirectory(at: vanished, withIntermediateDirectories: true)
+        let vanishedJob = vanished.appendingPathComponent("job.json")
+        try json(["mode": "ready"]).write(to: vanishedJob)
+        let orphan = PreparedSoftwareUpdate(jobPath: vanishedJob.path,
+            helperPath: vanished.appendingPathComponent("installer.py").path,
+            pythonPath: vanished.appendingPathComponent("no-python").path, version: "0.2.0",
+            backupPath: vanished.appendingPathComponent("backup.app").path)
+        do { try await installer.launch(orphan, parentPID: pid); check(false, "a missing interpreter refuses the handoff") }
+        catch { check(error.localizedDescription.contains("Python"), "the refusal names the missing Python runtime") }
+        check(!FileManager.default.fileExists(atPath: vanished.appendingPathComponent("commit.json").path)
+              && !FileManager.default.fileExists(atPath: vanished.appendingPathComponent("installer.log").path),
+              "a missing interpreter leaves no commit and starts no helper")
+
+        // Without a bundled runtime nothing is prepared, and nothing falls back to PATH.
+        let lonely = BundledSoftwareUpdateInstaller(helperURL: URL(fileURLWithPath: "/usr/bin/true"), pythonURL: nil)
+        do {
+            _ = try await lonely.prepare(release: fixtureRelease(), package: vanished.appendingPathComponent("p.dmg"),
+                                         target: vanished, cache: vanished)
+            check(false, "prepare needs the bundled interpreter")
+        } catch { check(error.localizedDescription == PythonRuntime.missingMessage, "prepare reports the missing runtime") }
     }
 
     @MainActor static func main() async throws {

@@ -3,6 +3,8 @@
 The current app prepares a verified, same-volume copy. Only after its normal
 shutdown succeeds does it launch the copied helper, which waits for that app to
 exit before atomically exchanging the bundles. The old app remains as a backup.
+The helper runs on a clone of the app's bundled Python made next to the job, so
+the directory it swaps never holds the interpreter it is running on.
 """
 import argparse
 import ctypes
@@ -30,6 +32,13 @@ NUMBER = r"(?:0|[1-9][0-9]{0,8})"
 VERSION = re.compile(r"(%s)\.(%s)\.(%s)(?:-test\.([1-9][0-9]{0,8}))?\Z" % (NUMBER, NUMBER, NUMBER))
 BUILD = re.compile(r"[0-9]{1,18}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+# How long install() waits for leftovers of the old app (detached workers still shutting down) before refusing.
+BUSY_WAIT_SECONDS = 20
+# What the cloned interpreter must manage before the app is asked to quit: the helper imports these lazily
+# and swaps the bundles through libSystem's renamex_np.
+RUNTIME_PROBE = "import ctypes, fcntl, hashlib, json, plistlib, subprocess; ctypes.CDLL(None).renamex_np"
+# Job states after which nothing runs from the job's runtime clone any more.
+FINISHED_STATUSES = {"launch_requested", "launch_unconfirmed", "recovery_required", "failed"}
 
 
 class UpdateError(Exception):
@@ -138,7 +147,45 @@ def verify_app(path, version, build_number, runner):
     runner(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path)])
 
 
-def prepare(payload, runner=run_tool):
+def stage_interpreter(target, job_root, runner, interpreter):
+    """The interpreter that will run the helper.
+
+    The helper swaps the app directory, so it must not run from inside it. A bundled runtime is cloned
+    next to the job (copy-on-write on APFS; ``cp -c`` itself falls back to a plain copy elsewhere) and
+    shown to start while the old app is still running. Any other interpreter (development, fixtures, CI)
+    lives outside the app being replaced and is used as is.
+    """
+    runtime = target / "Contents/Resources/python"
+    entry = None
+    for candidate in (interpreter, os.path.realpath(interpreter)):
+        try:
+            entry = Path(candidate).relative_to(runtime)
+            break
+        except ValueError:
+            continue
+    if entry is None:
+        return interpreter
+    clone = job_root / "runtime"
+    runner(["/bin/cp", "-c", "-p", "-R", str(runtime), str(clone)])
+    python = str(clone / entry)
+    runner([python, "-c", RUNTIME_PROBE])
+    return python
+
+
+def drop_used_runtimes(cache, keep):
+    """Best effort: remove the runtime clone of every job that has already run (or failed)."""
+    for runtime in cache.glob("install-*/runtime"):
+        if runtime.parent == keep:
+            continue
+        try:
+            status = json.loads((runtime.parent / "result.json").read_text(encoding="utf-8")).get("status")
+            if status in FINISHED_STATUSES:
+                shutil.rmtree(runtime)
+        except (OSError, ValueError, AttributeError):
+            continue
+
+
+def prepare(payload, runner=run_tool, interpreter=None):
     require(isinstance(payload, dict) and set(payload) == FIELDS, "安装参数缺失或含未知字段")
     version = payload["version"]
     version_key(version)
@@ -171,6 +218,7 @@ def prepare(payload, runner=run_tool):
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     regular_path(str(cache), directory=True)
     job_root = Path(tempfile.mkdtemp(prefix="install-", dir=str(cache)))
+    drop_used_runtimes(cache, job_root)
     # This directory becomes the retained backup after the atomic exchange.
     stage_root = None
     attached = False
@@ -194,15 +242,17 @@ def prepare(payload, runner=run_tool):
         helper = job_root / "installer.py"
         shutil.copyfile(__file__, helper)
         os.chmod(helper, 0o600)
+        python_path = stage_interpreter(target, job_root, runner, interpreter or sys.executable)
         job_path = job_root / "job.json"
         job = {"schema": 1, "target_path": str(target), "staged_path": str(staged),
                "backup_path": str(staged), "version": version, "build_number": payload["build_number"],
                "source_sha": payload["source_sha"], "original": snapshot}
         write_json(job_path, job)
         write_json(job_root / "result.json", {"status": "prepared", "version": version})
-        return {"job_path": str(job_path), "helper_path": str(helper), "version": version,
-                "backup_path": str(staged)}
+        return {"job_path": str(job_path), "helper_path": str(helper), "python_path": python_path,
+                "version": version, "backup_path": str(staged)}
     except BaseException as error:
+        shutil.rmtree(job_root / "runtime", ignore_errors=True)
         cleanup_errors = []
         if attached:
             # Never recursively remove a possibly mounted image.
@@ -252,6 +302,29 @@ def app_running(path, runner):
     return False
 
 
+def bundle_processes(path, runner, own_pid=None):
+    """PIDs of processes, other than this helper, whose executable lives inside the bundle at ``path``."""
+    own_pid = os.getpid() if own_pid is None else own_pid
+    processes, _ = runner(["/bin/ps", "-axo", "pid=,comm="])
+    prefix = str(path) + "/"
+    found = []
+    for line in processes.decode("utf-8", errors="replace").splitlines():
+        values = line.strip().split(None, 1)
+        if len(values) == 2 and values[0].isdigit() and int(values[0]) != own_pid and values[1].startswith(prefix):
+            found.append(int(values[0]))
+    return found
+
+
+def wait_for_bundle_exit(path, runner, seconds, sleep, clock, own_pid=None):
+    """Processes still running from inside the bundle after waiting up to ``seconds`` for them to exit."""
+    deadline = clock() + seconds
+    while True:
+        running = bundle_processes(path, runner, own_pid)
+        if not running or clock() >= deadline:
+            return running
+        sleep(0.5)
+
+
 def acquire_target_lock(target):
     import fcntl
 
@@ -273,9 +346,11 @@ def acquire_target_lock(target):
 
 
 def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange=exchange_bundles,
-            wait_seconds=120):
+            wait_seconds=120, busy_wait_seconds=BUSY_WAIT_SECONDS, sleep=None, clock=None):
     import fcntl
 
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
     require(type(parent_pid) is int and parent_pid > 1 and parent_pid != os.getpid(), "待退出进程身份无效")
     path = regular_path(str(job_path))
     require(path.name == "job.json", "安装任务文件名无效")
@@ -299,13 +374,18 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
         may_reopen = False
         launch_attempted = False
         target_lock = None
+
+        def record(**fields):
+            # ``python`` names the interpreter that ran the helper: the job's runtime clone, not the app being replaced.
+            write_json(result_path, dict(fields, python=sys.executable))
+
         try:
-            write_json(result_path, {"status": "waiting_for_exit", "version": job["version"]})
-            deadline = time.monotonic() + wait_seconds
+            record(status="waiting_for_exit", version=job["version"])
+            deadline = clock() + wait_seconds
             while alive(parent_pid):
-                if time.monotonic() >= deadline:
+                if clock() >= deadline:
                     raise UpdateError("旧版 App 尚未退出，未替换软件", "update_exit_timeout")
-                time.sleep(0.1)
+                sleep(0.1)
             commit_path = path.parent / "commit.json"
             require(commit_path.is_file(), "本次安装未确认，未替换软件", "update_cancelled")
             commit = json.loads(regular_path(str(commit_path)).read_text(encoding="utf-8"))
@@ -313,17 +393,24 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
                     "本次安装确认身份不一致，未替换软件", "update_cancelled")
             target_lock = acquire_target_lock(target)
             require(target_snapshot(target) == job["original"], "退出期间安装目标发生变化，未替换软件")
-            # Other copies using this exact bundle must have exited as well.
-            require(not app_running(target, runner),
-                    "还有 KaneoPilot 实例使用此安装目录，请先退出后重试", "update_busy")
+            # No process may run from inside the bundle: other copies of the app, or workers of the old app
+            # that are still shutting down. Give them a bounded time, then refuse instead of swapping the
+            # directory away under them.
+            running = wait_for_bundle_exit(target, runner, busy_wait_seconds, sleep, clock)
+            if running:
+                # Only leftovers, no app instance: put the old app back rather than leave nothing running.
+                may_reopen = not app_running(target, runner)
+                raise UpdateError("还有 KaneoPilot 进程仍在使用此安装目录（进程 "
+                                  + ", ".join(str(pid) for pid in running[:5]) + "），请先退出后重试", "update_busy")
             may_reopen = True
             verify_app(staged, job["version"], job["build_number"], runner)
-            write_json(result_path, {"status": "installing", "version": job["version"], "backup_path": str(staged)})
+            record(status="installing", version=job["version"], backup_path=str(staged))
             exchange(target, staged)
             swapped = True
             launch_attempted = True
             runner(["/usr/bin/open", "-n", str(target)])
-            result = {"status": "launch_requested", "version": job["version"], "backup_path": str(staged)}
+            result = {"status": "launch_requested", "version": job["version"], "backup_path": str(staged),
+                      "python": sys.executable}
             # LaunchServices may already be running the new app. Receipt failure
             # after this boundary must never exchange a live bundle backwards.
             try:
@@ -343,8 +430,8 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
                 if launch_unknown:
                     detail = "新版启动结果待核实，未回滚正在启动的软件；旧版备份：" + str(staged)
                     try:
-                        write_json(result_path, {"status": "launch_unconfirmed", "error": str(error),
-                                               "backup_path": str(staged), "version": job["version"]})
+                        record(status="launch_unconfirmed", error=str(error), backup_path=str(staged),
+                               version=job["version"])
                     except OSError as receipt_error:
                         detail += "；状态回执写入失败：" + str(receipt_error)
                     raise UpdateError(detail, "update_launch_unconfirmed") from error
@@ -352,12 +439,11 @@ def install(job_path, parent_pid, runner=run_tool, alive=process_alive, exchange
                     exchange(target, staged)
                     restored = True
                 except Exception as rollback_error:
-                    write_json(result_path, {"status": "recovery_required", "error": str(error),
-                                           "recovery_error": str(rollback_error), "backup_path": str(staged)})
+                    record(status="recovery_required", error=str(error), recovery_error=str(rollback_error),
+                           backup_path=str(staged))
                     raise UpdateError("安装失败，需从备份恢复：" + str(staged)) from error
             # Save recovery facts before asking LaunchServices to reopen the old app.
-            write_json(result_path, {"status": "failed", "error": str(error), "restored": restored,
-                                    "backup_path": str(staged)})
+            record(status="failed", error=str(error), restored=restored, backup_path=str(staged))
             if restored or may_reopen:
                 try:
                     runner(["/usr/bin/open", "-n", str(target)])
