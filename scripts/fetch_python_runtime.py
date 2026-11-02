@@ -23,7 +23,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOCK = ROOT / "scripts" / "python-runtime.lock.json"
 LOCK_FIELDS = {"schema", "source", "repository", "release_tag", "python_version", "asset", "url",
-               "size", "sha256", "archs", "minos_max"}
+               "size", "sha256", "archs", "minos_max", "licenses_release"}
 # The release page, then the signed CDN hosts GitHub redirects its release downloads to.
 DOWNLOAD_HOSTS = ("github.com",)
 REDIRECT_HOSTS = ("release-assets.githubusercontent.com", "objects.githubusercontent.com")

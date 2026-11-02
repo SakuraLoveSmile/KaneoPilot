@@ -9,5 +9,6 @@
   "size": 25265774,
   "sha256": "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405",
   "archs": ["arm64"],
-  "minos_max": "14.0"
+  "minos_max": "14.0",
+  "licenses_release": "20261026"
 }

@@ -57,6 +57,20 @@ EXPECTED_PYTHON=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]
 BUNDLED_PYTHON=$("$RUNTIME_DST/bin/python3" -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
 [ "$BUNDLED_PYTHON" = "$EXPECTED_PYTHON" ] || { echo "ERROR: the bundled Python is $BUNDLED_PYTHON, the lock file says $EXPECTED_PYTHON" >&2; exit 1; }
 
+echo "== bundle the Python runtime's license texts into Resources =="
+# The runtime statically links OpenSSL, SQLite, libffi, expat, mpdecimal, bzip2, xz,
+# ncurses, readline, libuuid and Tcl/Tk; a public release has to carry their notices
+# (docs/build-release.md). The `install_only_stripped` archive itself only ships the PSF
+# text, so the texts come from the same release's `full` archive and are checked in.
+LICENSE_SRC="$ROOT/scripts/licenses/python"
+LICENSE_DST="$APP_DST/Contents/Resources/licenses/python"
+[ -d "$LICENSE_SRC" ] || { echo "ERROR: $LICENSE_SRC is missing (the Python runtime's license texts)" >&2; exit 1; }
+rm -rf "$LICENSE_DST"
+ditto "$LICENSE_SRC" "$LICENSE_DST"
+LICENSE_COUNT=$(find "$LICENSE_DST" -type f | wc -l | tr -d ' ')
+[ "$LICENSE_COUNT" -gt 0 ] || { echo "ERROR: no license text reached $LICENSE_DST" >&2; exit 1; }
+echo "bundled $LICENSE_COUNT license texts into $LICENSE_DST"
+
 echo "== verify bundled desktop backend and source hashes (with the bundled Python) =="
 # -I keeps the runner's environment out; -B keeps bytecode out of the bundle, which is not signed yet but must stay as copied.
 "$RUNTIME_DST/bin/python3" -I -B - "$ROOT/core" "$RES" <<'PY'
