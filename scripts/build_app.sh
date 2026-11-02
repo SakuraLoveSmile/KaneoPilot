@@ -52,6 +52,29 @@ RUNTIME_DST="$APP_DST/Contents/Resources/python"
 [ -x "$RUNTIME_SRC/bin/python3" ] || { echo "ERROR: $RUNTIME_SRC has no bin/python3" >&2; exit 1; }
 rm -rf "$RUNTIME_DST"
 ditto "$RUNTIME_SRC" "$RUNTIME_DST"
+
+echo "== trim the bundled runtime's unused and build-time files =="
+# The App only ever runs `bin/python3` as a subprocess. Verified against the pinned
+# `install_only_stripped` archive (docs/build-release.md): `otool -L bin/python3.13` does not
+# reference libpython3.13.dylib, and across the runtime's nine Mach-O images the only one that
+# names it is itself. C headers, the config-3.13-darwin build directory and _pyrepl are
+# build-time or interactive-only. Every entry here was re-checked by importing the cloud smoke
+# set and all 95 core modules with the trimmed runtime; removing them costs no capability the
+# App or the core uses, and keeps every online update ~20 MB smaller. Anything that changes
+# what the bundled interpreter can do belongs in a separate decision, not in this list.
+TRIM_PATHS=(
+  "lib/libpython3.13.dylib"
+  "include"
+  "lib/python3.13/config-3.13-darwin"
+  "lib/python3.13/_pyrepl"
+)
+for relative in "${TRIM_PATHS[@]}"; do
+  target="$RUNTIME_DST/$relative"
+  [ -e "$target" ] || [ -L "$target" ] || { echo "ERROR: expected $relative in the bundled runtime" >&2; exit 1; }
+  rm -rf "$target"
+  echo "trimmed $relative"
+done
+
 python3 "$ROOT/scripts/prepare_python_runtime.py" "$RUNTIME_DST"
 EXPECTED_PYTHON=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["python_version"])' "$ROOT/scripts/python-runtime.lock.json")
 BUNDLED_PYTHON=$("$RUNTIME_DST/bin/python3" -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
