@@ -97,7 +97,7 @@ struct PythonRuntimeFixtures {
         check(direct?.executable.path == "/core/kanpilot" && direct?.arguments == ["ping"],
               "an executable core runs directly and needs no interpreter")
         check(shim.displayString == "/core/kanpilot", "an executable core is shown by its path")
-        check(core.displayString.hasSuffix(" /core/kanpilot") && !core.displayString.hasPrefix("python3 "),
+        check(core.displayString.hasSuffix(" " + core.path) && !core.displayString.hasPrefix("python3 "),
               "a Python core is shown with the interpreter it runs on")
     }
 
