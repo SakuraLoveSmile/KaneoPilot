@@ -52,7 +52,7 @@ private let updateUIPackage = Data("KaneoPilot isolated update UI package; never
 
 /// The stable fixture release, or a test build when `version` ends in `-test.B` (then `build` is B).
 private func updateUIRelease(version: String = "0.2.0", build: Int = 10) -> SoftwareRelease {
-    let tag = "v\(version)", name = "KaneoPilot-\(version)-macos-universal.dmg"
+    let tag = "v\(version)", name = SoftwareUpdateSource.macPackageName(version: version)
     let isTest = version.contains("-test.")
     let digest = SHA256.hash(data: updateUIPackage).map { String(format: "%02x", $0) }.joined()
     return SoftwareRelease(version: version, tag: tag, sourceSHA: String(repeating: "a", count: 40),

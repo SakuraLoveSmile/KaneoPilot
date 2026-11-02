@@ -310,24 +310,30 @@ final class SoftwareUpdateManager: ObservableObject {
         phase = .checking; errorMessage = nil; channelNotice = nil
         lastAttemptAt = now(); defaults.set(lastAttemptAt, forKey: Keys.attempted)
         do {
-            let candidate = try await service.latest(includingTestBuilds: includesTestBuilds)
+            let installed = try SoftwareVersion(currentVersion)
+            // Asked for "newer than the installed version" first: a release that is not newer is no update
+            // whatever its package looks like, so the Universal releases of the retired scheme (v0.2.0 and
+            // the older test builds) end in `.current` instead of an error about their package.
+            let answer = try await service.latestUpdate(includingTestBuilds: includesTestBuilds, newerThan: installed)
             guard epoch == channelEpoch else {
                 // The channel was switched while this request ran, so its answer no longer applies.
                 phase = settledPhase(); forgetLastAttempt()
+                return
+            }
+            guard let candidate = answer else {
+                lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
+                settleAsCurrent()
                 return
             }
             try candidate.validate()
             guard includesTestBuilds || !candidate.isTest else {
                 throw SoftwareUpdateError.invalid("未开启接收测试版，却收到了测试版")
             }
-            let installed = try SoftwareVersion(currentVersion)
             let newer = try SoftwareVersion(candidate.version)
             lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
             guard SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
                                            candidate: newer, candidateBuild: candidate.buildNumber) else {
-                release = nil; downloadedPackage = nil; phase = .current
-                defaults.removeObject(forKey: Keys.release)
-                pruneUpdateCache()
+                settleAsCurrent()
                 return
             }
             let same = release == candidate
@@ -443,19 +449,27 @@ final class SoftwareUpdateManager: ObservableObject {
 
     /// Brings back the candidate saved by the last check, unless it is a test build and the test channel is off.
     func restoreCachedRelease() async {
+        // A saved record that cannot be offered any more is dropped quietly with its package: a Universal package
+        // of the retired scheme, a record that the installed version has caught up with, or a test build while the
+        // test channel is off.
         guard !isBusy, let data = defaults.data(forKey: Keys.release),
-              let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data),
-              (try? cached.validate()) != nil else { return }
+              let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data) else { return }
+        guard (try? cached.validate()) != nil else {
+            discardCachedRelease(cached)
+            return
+        }
         guard !cached.isTest || testChannelActive else {
             // A test build saved while the channel was on must not outlive it.
-            defaults.removeObject(forKey: Keys.release)
-            removeCachedPackage(for: cached)
+            discardCachedRelease(cached)
             return
         }
         guard let installed = try? SoftwareVersion(currentVersion),
-              let candidate = try? SoftwareVersion(cached.version),
-              SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
-                                       candidate: candidate, candidateBuild: cached.buildNumber) else { return }
+              let candidate = try? SoftwareVersion(cached.version) else { return }
+        guard SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
+                                       candidate: candidate, candidateBuild: cached.buildNumber) else {
+            discardCachedRelease(cached)
+            return
+        }
         release = cached; phase = .available
         let package = cached.packageURL(in: cacheURL)
         if FileManager.default.fileExists(atPath: package.path), !isPreview {
@@ -489,6 +503,19 @@ final class SoftwareUpdateManager: ObservableObject {
         channelNotice = "已关闭接收测试版，已移除待安装的测试版。"
         // The stable candidate was not stored, so look for it again at the next due check.
         forgetLastAttempt()
+    }
+
+    /// The check found nothing to install: no candidate, no saved record, and no package of an installed or
+    /// superseded version.
+    private func settleAsCurrent() {
+        release = nil; downloadedPackage = nil; phase = .current
+        defaults.removeObject(forKey: Keys.release)
+        pruneUpdateCache()
+    }
+
+    private func discardCachedRelease(_ cached: SoftwareRelease) {
+        defaults.removeObject(forKey: Keys.release)
+        removeCachedPackage(for: cached)
     }
 
     /// The phase that matches the stored candidate, for when a request ends without an applicable answer.

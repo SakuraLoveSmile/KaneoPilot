@@ -98,7 +98,7 @@ class InstallerTests(unittest.TestCase):
         self.data.mkdir()
         (self.data / "kanpilot.db").write_bytes(b"do not migrate or open this DB")
         (self.data / "pairing").write_bytes(b"keep pairing")
-        package = self.root / "KaneoPilot-1.2.3-macos-universal.dmg"
+        package = self.root / "KaneoPilot-1.2.3-macos-arm64.dmg"
         package.write_bytes(b"isolated DMG fixture")
         self.payload = {"package_path": str(package), "target_path": str(self.target),
                         "cache_path": str(self.root / "cache"), "version": "1.2.3", "build_number": 41,
@@ -202,6 +202,20 @@ class InstallerTests(unittest.TestCase):
             updater.prepare(dict(self.payload, unexpected=True), runner=self.tools)
         self.assertFalse(self.tools.calls)
 
+    def test_only_the_arm64_package_of_the_same_version_is_installable(self):
+        # The Universal package of the retired scheme, another version's package and a bare name never mount.
+        for name in ("KaneoPilot-1.2.3-macos-universal.dmg", "KaneoPilot-1.2.4-macos-arm64.dmg",
+                     "KaneoPilot-1.2.3-macos.dmg"):
+            with self.subTest(name=name):
+                package = self.root / name
+                package.write_bytes(b"isolated DMG fixture")
+                request = dict(self.payload, package_path=str(package), sha256=updater.digest(package),
+                               size=package.stat().st_size)
+                with self.assertRaisesRegex(updater.UpdateError, "文件名"):
+                    updater.prepare(request, runner=self.tools)
+                self.assertFalse(self.tools.calls)
+                self.assertEqual(updater.target_snapshot(self.target), self.original)
+
     def test_old_same_and_preview_versions_cannot_replace_app(self):
         for installed in ("1.2.3", "1.2.10", "0.0.0"):
             with self.subTest(installed=installed):
@@ -221,7 +235,7 @@ class InstallerTests(unittest.TestCase):
         self.original = updater.target_snapshot(self.target)
 
     def use_candidate(self, version, build):
-        package = self.root / ("KaneoPilot-%s-macos-universal.dmg" % version)
+        package = self.root / ("KaneoPilot-%s-macos-arm64.dmg" % version)
         package.write_bytes(("isolated DMG fixture " + version).encode())
         self.payload.update(package_path=str(package), version=version, build_number=build,
                             sha256=updater.digest(package), size=package.stat().st_size)

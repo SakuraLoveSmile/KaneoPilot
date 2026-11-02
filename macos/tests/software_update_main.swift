@@ -7,7 +7,7 @@ private func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String
 /// A stable release, or a test build when `version` ends in `-test.B` (then `build` should equal B).
 private func fixtureRelease(version: String = "0.2.0", bytes: Data = packageBytes,
                             build: Int = 10, branch: String = "feat/update-channel") -> SoftwareRelease {
-    let tag = "v\(version)", name = "KaneoPilot-\(version)-macos-universal.dmg"
+    let tag = "v\(version)", name = SoftwareUpdateSource.macPackageName(version: version)
     let isTest = version.contains("-test.")
     return SoftwareRelease(version: version, tag: tag, sourceSHA: String(repeating: "a", count: 40),
         buildNumber: build, name: name, size: Int64(bytes.count), sha256: hash(bytes),
@@ -27,7 +27,7 @@ private func fixtureObjects(_ release: SoftwareRelease) -> ([String: Any], [Stri
     let artifact: [String: Any] = ["platform": "macos", "name": release.name, "version": release.version,
         "source_sha": release.sourceSHA, "build_number": release.buildNumber, "size": release.size,
         "sha256": release.sha256, "signature_sha256": release.signatureSHA256,
-        "signature_type": "codedirectory-sha256", "architectures": ["arm64", "x86_64"]]
+        "signature_type": "codedirectory-sha256", "architectures": SoftwareUpdateSource.macArchitectures]
     var manifest: [String: Any] = ["version": release.version, "tag": release.tag,
         "source_sha": release.sourceSHA, "build_number": release.buildNumber,
         "artifacts": [artifact], "macos_requirements": "macOS 14+"]
@@ -213,6 +213,44 @@ private final class ChannelTransport: SoftwareUpdateTransport, @unchecked Sendab
     }
 }
 
+// MARK: - Apple Silicon package (KP-B01)
+
+private func universalName(_ version: String) -> String { "KaneoPilot-\(version)-macos-universal.dmg" }
+
+/// The release as the retired Universal scheme published it (`v0.2.0` and the test builds up to
+/// `0.3.0-test.75`): the Universal package on the release page and in the manifest, with both architectures.
+private func retiredUniversalObjects(_ release: SoftwareRelease) -> ([String: Any], [String: Any]) {
+    let name = universalName(release.version)
+    var (github, manifest) = fixtureObjects(release)
+    var assets = github["assets"] as! [[String: Any]]
+    assets[1]["name"] = name
+    assets[1]["browser_download_url"] = SoftwareUpdateSource.assetURL(tag: release.tag, name: name).absoluteString
+    github["assets"] = assets
+    var artifacts = manifest["artifacts"] as! [[String: Any]]
+    artifacts[0]["name"] = name
+    artifacts[0]["architectures"] = ["arm64", "x86_64"]
+    manifest["artifacts"] = artifacts
+    return (github, manifest)
+}
+
+/// A saved update record of the retired scheme: the same release, named after the Universal package.
+private func retiredUniversalRecord(_ release: SoftwareRelease) -> SoftwareRelease {
+    let name = universalName(release.version)
+    return SoftwareRelease(version: release.version, tag: release.tag, sourceSHA: release.sourceSHA,
+        buildNumber: release.buildNumber, name: name, size: release.size, sha256: release.sha256,
+        signatureSHA256: release.signatureSHA256,
+        downloadURL: SoftwareUpdateSource.assetURL(tag: release.tag, name: name),
+        pageURL: release.pageURL, notes: release.notes, channel: release.channel, branch: release.branch)
+}
+
+/// Makes `transport` serve `release` as a Universal release: as the latest stable release, or as the
+/// entry `listIndex` of the release list.
+private func serveRetired(_ release: SoftwareRelease, in transport: ChannelTransport, listIndex: Int? = nil) throws {
+    let (github, manifest) = retiredUniversalObjects(release)
+    if let listIndex { transport.listEntries[listIndex] = github } else { transport.latestObject = github }
+    transport.manifests[SoftwareUpdateSource.assetURL(tag: release.tag, name: "manifest.json")] = try json(manifest)
+}
+
 /// Answers like the real service: with the channel off the stable release, with it on the newer of
 /// the stable and the test release. `flags` records what each check asked for.
 private final class ChannelService: SoftwareUpdateServing, @unchecked Sendable {
@@ -375,7 +413,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         // The release list and the files of a test build are on the whitelist, with nothing around them.
         let repository = "https://github.com/SakuraLoveSmile/KaneoPilot/releases/download"
         let api = "https://api.github.com/repos/SakuraLoveSmile/KaneoPilot/releases"
-        let testPackage = "KaneoPilot-0.2.1-test.70-macos-universal.dmg"
+        let testPackage = "KaneoPilot-0.2.1-test.70-macos-arm64.dmg"
         for allowed in [SoftwareUpdateSource.releaseListURL,
                         SoftwareUpdateSource.assetURL(tag: "v0.2.1-test.70", name: "manifest.json"),
                         SoftwareUpdateSource.assetURL(tag: "v0.2.1-test.70", name: testPackage),
@@ -391,9 +429,12 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
                           repository + "/v0.2.1-rc.1/manifest.json", repository + "/0.2.1-test.70/manifest.json",
                           repository + "/v0.2.1-test.70/other.json", repository + "/v0.2.1-test.70/manifest.json?x=1",
                           repository + "/v0.2.1-test.70/sub/manifest.json", repository + "/v0.2.1-test.70",
-                          repository + "/v0.2.1-test.70/KaneoPilot-0.2.1-test.71-macos-universal.dmg",
+                          repository + "/v0.2.1-test.70/KaneoPilot-0.2.1-test.71-macos-arm64.dmg",
                           repository + "/v0.2.1-test.70/KaneoPilot-0.2.1-test.70-android.apk",
-                          repository + "/v0.2.0/KaneoPilot-0.2.1-macos-universal.dmg"] {
+                          repository + "/v0.2.0/KaneoPilot-0.2.1-macos-arm64.dmg",
+                          // The Universal package of the retired scheme is no longer a package to fetch.
+                          repository + "/v0.2.1-test.70/KaneoPilot-0.2.1-test.70-macos-universal.dmg",
+                          repository + "/v0.2.0/KaneoPilot-0.2.0-macos-universal.dmg"] {
             check(!SoftwareUpdateSource.isTransportURLAllowed(URL(string: forbidden)!), "forbidden test channel transport \(forbidden)")
         }
     }
@@ -843,6 +884,208 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         await rejectsAsync("a test build as the latest stable release, channel off") { _ = try await wrongLatestService.latest(includingTestBuilds: false) }
     }
 
+    /// KP-B01: the Mac package is Apple Silicon only. The Universal package of the retired scheme is no package
+    /// for this App, whether a release page, a manifest, a saved record or the architecture list names it.
+    static func armPackageChecks() throws {
+        check(SoftwareUpdateSource.macArchitectures == ["arm64"], "the Mac architecture set is arm64 only")
+        check(SoftwareUpdateSource.macPackageName(version: "0.3.0") == "KaneoPilot-0.3.0-macos-arm64.dmg"
+              && SoftwareUpdateSource.macPackageName(version: "0.3.0-test.80") == "KaneoPilot-0.3.0-test.80-macos-arm64.dmg",
+              "the Mac package carries the arm64 suffix")
+        for version in ["0.2.0", "0.3.0-test.80"] {
+            let isTest = version.contains("-test.")
+            let expected = fixtureRelease(version: version, build: isTest ? 80 : 10)
+            check(expected.name == "KaneoPilot-\(version)-macos-arm64.dmg", "the fixture names the arm64 package: \(version)")
+            try expected.validate()
+            let (release, manifest) = fixtureObjects(expected)
+            let parsed = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest), allowsTest: isTest)
+            check(parsed == expected, "an arm64 release parses: \(version)")
+
+            rejects("a Universal record: \(version)") { try retiredUniversalRecord(expected).validate() }
+            let (universalRelease, universalManifest) = retiredUniversalObjects(expected)
+            rejects("a Universal release: \(version)") {
+                _ = try SoftwareReleaseParser.parse(releaseData: json(universalRelease), manifestData: json(universalManifest), allowsTest: isTest)
+            }
+            var onlyUniversalAsset = release
+            onlyUniversalAsset["assets"] = universalRelease["assets"]
+            rejects("only the Universal package on the release page: \(version)") {
+                _ = try SoftwareReleaseParser.parse(releaseData: json(onlyUniversalAsset), manifestData: json(manifest), allowsTest: isTest)
+            }
+            var universalNamed = manifest
+            universalNamed["artifacts"] = universalManifest["artifacts"]
+            rejects("a Universal package named in the manifest: \(version)") {
+                _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(universalNamed), allowsTest: isTest)
+            }
+            for architectures in [["arm64", "x86_64"], ["x86_64", "arm64"], ["x86_64"], ["arm64", "arm64"], ["ARM64"], [String]()] {
+                var changed = manifest
+                var artifacts = changed["artifacts"] as! [[String: Any]]
+                artifacts[0]["architectures"] = architectures; changed["artifacts"] = artifacts
+                rejects("architectures \(architectures): \(version)") {
+                    _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(changed), allowsTest: isTest)
+                }
+            }
+        }
+    }
+
+    /// KP-B01: a release that is not newer than the installed build is no update, whatever its package looks
+    /// like, so the retired Universal releases never turn a check into an error and are never read.
+    static func versionFirstServiceChecks() async throws {
+        let retired = fixtureRelease(version: "0.2.0", build: 10)
+        let retiredTest = fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel")
+        let test80 = fixtureRelease(version: "0.3.0-test.80", build: 80, branch: "feat/update-channel")
+        let release030 = fixtureRelease(version: "0.3.0", build: 90)
+        let latestURL = SoftwareUpdateSource.latestURL, listURL = SoftwareUpdateSource.releaseListURL
+        func manifestURL(_ release: SoftwareRelease) -> URL {
+            SoftwareUpdateSource.assetURL(tag: release.tag, name: "manifest.json")
+        }
+        let installed = try SoftwareVersion("0.3.0-test.76")
+
+        // The latest stable release is the Universal v0.2.0, older than the installed build: no update, manifest unread.
+        let stableOnly = try ChannelTransport(stable: retired, listed: [])
+        try serveRetired(retired, in: stableOnly)
+        let stableService = GitHubSoftwareUpdateService(transport: stableOnly)
+        let olderStable = try await stableService.latestUpdate(includingTestBuilds: false, newerThan: installed)
+        check(olderStable == nil && stableOnly.requested == [latestURL],
+              "an older Universal stable release is no update and its manifest is not read")
+        await rejectsAsync("a Universal release read as the candidate itself") { _ = try await stableService.latest() }
+
+        // With the test channel on, the newest test build is a Universal one that is not newer either.
+        let channelOn = try ChannelTransport(stable: retired, listed: [retiredTest])
+        try serveRetired(retired, in: channelOn)
+        try serveRetired(retiredTest, in: channelOn, listIndex: 0)
+        let olderBuilds = try await GitHubSoftwareUpdateService(transport: channelOn)
+            .latestUpdate(includingTestBuilds: true, newerThan: installed)
+        check(olderBuilds == nil && channelOn.requested == [latestURL, listURL],
+              "channel on: older Universal builds are no update and no manifest is read")
+
+        // A newer arm64 test build is offered; only the winner's manifest is read.
+        let newer = try ChannelTransport(stable: retired, listed: [retiredTest, test80])
+        try serveRetired(retired, in: newer)
+        try serveRetired(retiredTest, in: newer, listIndex: 0)
+        let offered = try await GitHubSoftwareUpdateService(transport: newer)
+            .latestUpdate(includingTestBuilds: true, newerThan: installed)
+        check(offered == test80 && newer.requested == [latestURL, listURL, manifestURL(test80)],
+              "channel on: a newer arm64 test build is offered and the Universal manifests stay unread")
+        check(newer.requested.allSatisfy { SoftwareUpdateSource.isTransportURLAllowed($0) }, "every request is on the transport whitelist")
+
+        // The stable release of the same base sits above the installed test build.
+        let stableUp = try ChannelTransport(stable: release030, listed: [])
+        let stableUpAnswer = try await GitHubSoftwareUpdateService(transport: stableUp)
+            .latestUpdate(includingTestBuilds: false, newerThan: installed)
+        check(stableUpAnswer == release030 && stableUp.requested == [latestURL, manifestURL(release030)],
+              "the stable release of the same base is above the installed test build")
+
+        // Equal is no update; a Universal release that is newer than the installed build is an error, never an offer.
+        let same = try ChannelTransport(stable: retired, listed: [])
+        let sameService = GitHubSoftwareUpdateService(transport: same)
+        let sameVersion = try SoftwareVersion("0.2.0"), belowVersion = try SoftwareVersion("0.1.9")
+        let sameAnswer = try await sameService.latestUpdate(includingTestBuilds: false, newerThan: sameVersion)
+        check(sameAnswer == nil && same.requested == [latestURL], "the installed version itself is no update")
+        let belowAnswer = try await sameService.latestUpdate(includingTestBuilds: false, newerThan: belowVersion)
+        check(belowAnswer == retired && same.requested == [latestURL, latestURL, manifestURL(retired)],
+              "an arm64 release above the installed version is read and returned")
+        let newerUniversal = try ChannelTransport(stable: retired, listed: [])
+        try serveRetired(retired, in: newerUniversal)
+        let newerUniversalService = GitHubSoftwareUpdateService(transport: newerUniversal)
+        await rejectsAsync("a newer Universal release is never offered") {
+            _ = try await newerUniversalService.latestUpdate(includingTestBuilds: false, newerThan: belowVersion)
+        }
+        check(newerUniversal.requested == [latestURL, manifestURL(retired)], "a newer release is judged by its manifest")
+    }
+
+    /// KP-B01: an installed arm64 build stays current next to the retired Universal releases, and the saved
+    /// candidate of the old line is dropped quietly instead of being offered or reported.
+    @MainActor static func versionFirstManagerChecks(root: URL) async throws {
+        let releaseKey = "softwareUpdate.release", channelKey = "softwareUpdate.receivesTestBuilds"
+        let retired = fixtureRelease(version: "0.2.0", build: 10)
+        let retiredTest = fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel")
+        let test80 = fixtureRelease(version: "0.3.0-test.80", build: 80, branch: "feat/update-channel")
+        let latestURL = SoftwareUpdateSource.latestURL, listURL = SoftwareUpdateSource.releaseListURL
+        let fm = FileManager.default
+
+        var suites: [String] = []
+        defer { for suite in suites { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) } }
+        func freshDefaults(testBuilds: Bool) -> UserDefaults {
+            let suite = "local.kaneopilot.update-arm-fixtures.\(UUID().uuidString)"
+            suites.append(suite)
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.set(testBuilds, forKey: channelKey)
+            return defaults
+        }
+        /// The installed build is the first arm64 test build, `0.3.0-test.76`, unless said otherwise.
+        @MainActor func makeManager(_ name: String, _ service: any SoftwareUpdateServing,
+                                    defaults: UserDefaults) -> SoftwareUpdateManager {
+            SoftwareUpdateManager(service: service, installer: FixtureInstaller(), defaults: defaults,
+                currentVersion: "0.3.0-test.76", currentBuild: "76",
+                targetURL: root.appendingPathComponent("arm-target-\(name)/KaneoPilot.app"),
+                cacheURL: root.appendingPathComponent("arm-\(name)", isDirectory: true),
+                allowsNetwork: true, requestTermination: { })
+        }
+        func save(_ record: SoftwareRelease, in defaults: UserDefaults, cache: URL) throws -> URL {
+            try defaults.set(JSONEncoder().encode(record), forKey: releaseKey)
+            let package = record.packageURL(in: cache)
+            try fm.createDirectory(at: package.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try packageBytes.write(to: package)
+            return package.deletingLastPathComponent()
+        }
+
+        // The latest stable release is the Universal v0.2.0: current, no error, nothing read.
+        let stableTransport = try ChannelTransport(stable: retired, listed: [])
+        try serveRetired(retired, in: stableTransport)
+        let off = makeManager("stable", GitHubSoftwareUpdateService(transport: stableTransport), defaults: freshDefaults(testBuilds: false))
+        await off.check()
+        check(off.phase == .current && off.release == nil && off.errorMessage == nil && off.lastCheckedAt != nil,
+              "an installed arm64 build is current next to the retired Universal stable release")
+        check(stableTransport.requested == [latestURL], "the retired stable release's manifest is not read")
+        check(off.statusText == "当前已是最新正式版，或当前版本高于已发布版本", "the current status is shown, not an error")
+
+        // The same for a test channel whose newest test build is Universal: the first check after the hand-made
+        // install finds the saved candidate of the old line, drops it with its package, and is current.
+        let oldLine = try ChannelTransport(stable: retired, listed: [retiredTest])
+        try serveRetired(retired, in: oldLine)
+        try serveRetired(retiredTest, in: oldLine, listIndex: 0)
+        let oldDefaults = freshDefaults(testBuilds: true)
+        let old = makeManager("old-line", GitHubSoftwareUpdateService(transport: oldLine), defaults: oldDefaults)
+        let universalFolder = try save(retiredUniversalRecord(retiredTest), in: oldDefaults, cache: old.cacheURL)
+        await old.restoreCachedRelease()
+        check(old.release == nil && old.phase == .idle && old.errorMessage == nil && old.downloadedPackage == nil
+              && oldDefaults.data(forKey: releaseKey) == nil && !fm.fileExists(atPath: universalFolder.path),
+              "a saved Universal candidate is dropped quietly with its package")
+        await old.check()
+        check(old.phase == .current && old.release == nil && old.errorMessage == nil && oldLine.requested == [latestURL, listURL],
+              "channel on: the retired Universal builds leave the installed arm64 build current")
+
+        // A saved arm64 candidate that the installed build has caught up with is dropped the same way.
+        let caughtDefaults = freshDefaults(testBuilds: true)
+        let caught = makeManager("caught-up", ChannelService(stable: retired), defaults: caughtDefaults)
+        let caughtFolder = try save(fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel"),
+                                    in: caughtDefaults, cache: caught.cacheURL)
+        await caught.restoreCachedRelease()
+        check(caught.release == nil && caught.phase == .idle && caught.errorMessage == nil
+              && caughtDefaults.data(forKey: releaseKey) == nil && !fm.fileExists(atPath: caughtFolder.path),
+              "a saved candidate that is not newer than the installed build is dropped with its package")
+
+        // A saved arm64 candidate above the installed build still comes back verified.
+        let keptDefaults = freshDefaults(testBuilds: true)
+        let kept = makeManager("kept", ChannelService(stable: retired), defaults: keptDefaults)
+        let keptFolder = try save(test80, in: keptDefaults, cache: kept.cacheURL)
+        await kept.restoreCachedRelease()
+        check(kept.release == test80 && kept.phase == .ready && kept.downloadedPackage == test80.packageURL(in: kept.cacheURL)
+              && fm.fileExists(atPath: keptFolder.path) && keptDefaults.data(forKey: releaseKey) != nil,
+              "a saved arm64 candidate above the installed build is restored and verified")
+
+        // A newer arm64 test build is offered next to the Universal ones.
+        let offer = try ChannelTransport(stable: retired, listed: [retiredTest, test80])
+        try serveRetired(retired, in: offer)
+        try serveRetired(retiredTest, in: offer, listIndex: 0)
+        let offering = makeManager("offer", GitHubSoftwareUpdateService(transport: offer), defaults: freshDefaults(testBuilds: true))
+        offering.automaticallyDownloads = false
+        await offering.check()
+        check(offering.phase == .available && offering.release == test80 && offering.errorMessage == nil
+              && offer.requested == [latestURL, listURL, SoftwareUpdateSource.assetURL(tag: test80.tag, name: "manifest.json")],
+              "a newer arm64 test build is offered next to the retired Universal builds")
+        offering.stop(); off.stop(); old.stop(); caught.stop(); kept.stop()
+    }
+
     /// KP-U02: the opt-in switch, its effect on checking, downloading and installing, and the races around it.
     @MainActor static func channelManagerChecks(root: URL) async throws {
         let releaseKey = "softwareUpdate.release", channelKey = "softwareUpdate.receivesTestBuilds"
@@ -1279,8 +1522,11 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         try testReleaseParserChecks()
         try await serviceChecks(root: root)
         try await channelServiceChecks()
+        try armPackageChecks()
+        try await versionFirstServiceChecks()
         try await managerChecks(root: root)
         try await channelManagerChecks(root: root)
+        try await versionFirstManagerChecks(root: root)
         try await cacheAndProgressChecks(root: root)
         try await installerHandshakeChecks(root: root)
         print("software update fixtures: \(assertions) assertions passed")

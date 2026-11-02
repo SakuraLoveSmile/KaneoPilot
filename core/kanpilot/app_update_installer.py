@@ -158,7 +158,7 @@ def prepare(payload, runner=run_tool):
     require(update_allowed(snapshot["version"], snapshot["build"], version, payload["build_number"]),
             "只能安装更高的版本（涉及测试版时构建编号也须更高）")
     require(os.access(target.parent, os.W_OK | os.X_OK), "当前 App 目录不可写，请手动安装", "update_target_readonly")
-    require(package.name == "KaneoPilot-" + version + "-macos-universal.dmg", "安装包文件名与版本不一致")
+    require(package.name == "KaneoPilot-" + version + "-macos-arm64.dmg", "安装包文件名与版本不一致")
     require(package.stat().st_size == payload["size"] and digest(package) == payload["sha256"],
             "安装包损坏，请重新下载")
     runner(["/usr/bin/codesign", "--verify", "--strict", str(package)])
