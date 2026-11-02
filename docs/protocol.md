@@ -1837,6 +1837,20 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为pool下精确slot路径。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在槽位；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。
 
 
+### 5.29.5 离线迁移 worktree 管理根
+
+`worktree-relocate {source_root,destination_root,backup_dir,operation_id,dry_run?:true,confirm?:false,expected_audit_sha256?}` 是整体迁移管理根的本地维护命令；不领取、发送、恢复或重新执行任务，不合并或删除工作树。预览返回实际 Git 登记、内容/索引身份、当前槽位及其必要定位 DTO 的指纹。执行要求 `dry_run:false,confirm:true` 和匹配的预览指纹；这是调用凭据，不要求已授权迁移逐批重新请示。
+
+源须为当前配置的真实目录，目标为同卷不存在的真实路径，不能互相嵌套、覆盖或通过不可信链接逃逸。迁移前确认无实际进程占用、存活 owner 或运行引擎；旧的 `owner_state=unknown` 不推导为已停止或交还。临时暂停调度并保留原暂停值。使用 SQLite backup API 和原始文件/索引/路径登记保存可恢复备份；文件系统副作用先登记 runtime_operations 意图。整体 rename 保留包含未跟踪和忽略文件的全部内容，Git 登记通过 `git worktree repair` 指向新真实路径；不使用 reset、clean、force 或 stash。失败须恢复本次变更的路径、登记及状态，并保留失败证据，不覆盖并发新增成果。
+
+`paused_global` 不能阻止全部已安装核心写入口。离线迁移在持久化意图后，以同一连接的 SQLite `BEGIN IMMEDIATE` 写保留锁覆盖二次核对、目录改名、Git repair、定位文件更新、状态更新及派生投影，完成回执与原暂停值最后一并提交，排除所有其它 SQLite 写者。失败时在写保留期内补偿本次文件变化，再回滚未提交状态并记录失败；未知文件变化不覆盖。该维护命令是 Git 不在普通业务事务中运行的明确例外；正常池分配、释放与调度仍遵守 §5.29.1，不依赖新标记或外部写者未实现的文件锁。
+
+成功后 `settings.worktrees_root` 及各槽位 `path/worktrees_root` 使用新 canonical 根，旧根仅保留历史访问别名。pool 校验只能使用新根中的真实路径；别名不作为池登记或新建工作树根。既有 `tasks.extra_json`、`execution_rounds`、冻结合同、验证回执、spec、manifest、事件和历史操作结果不改写，旧路径访问经别名继续有效，delivery 与轮次身份仍一致。
+
+唯一定位 DTO 迁移例外为当前 leased 代次：其 request 与唯一同身份终态 job 的 `pool_lease.path/worktrees_root` 同步新位置；job 的 `material_dir/managed_material_paths` 若位于旧根也按精确前缀同步，避免产物保全的相对路径校验失败。须保存原始字节、前后哈希和映射；其余结构化字段完全不变，尤其 slot/holder/token、状态、owner、reason、`stage_contract/stage_result` 及合同哈希。拒绝未知身份、重复作业、非终态作业或缺少必需证据，不批量替换历史租约或正文字符串。重建派生槽位投影，并核对 Git 身份、索引、内容及旧证据可读；同 operation 的成功重放只核验并返回已有结果。
+
+该维护入口不放宽 §5.29.1–5.29.3 的停止证明、归档或清理条件。任务完成后必须按 AGENTS.md 在同一任务收尾中清理符合安全条件的临时工作树；不能用迁移或别名宣称仍被引用的目录已经可删。
+
 ## Qoder CLI 规划与 Review（2026-10-20）
 
 规划与 Review 后端词表新增 `qoder`；任务执行仍沿用既有 Plus Goal 报告与验证契约。`planner_config.qoder`、`review_config.qoder` 均为 `{model, reasoning_effort}`，默认 `{model:"auto", reasoning_effort:"inherit"}`。模型为非空、无控制字符且不以 `-` 开头的标识；`inherit` 不向 CLI 传思考等级，其余接受官方等级 `disabled/off/none/low/medium/high/xhigh/max`，实际模型支持由 CLI 报告，不静默换模型或等级。各后端配置共存，离线可保存，只影响新建请求；规划请求固化为既有 `model_config {planner_model, reasoning_effort}`，claim、job、会话索引均保留 `backend=qoder` 与本轮模型。仅支持 `builtin`，`spec_plan` 明确拒绝。
