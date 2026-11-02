@@ -216,8 +216,8 @@ struct DesktopAutomationStatusResponse: Decodable {
 
         var statusText: String {
             switch status {
-            case "ACTIVE": return "已开启"
-            case "PAUSED": return "已关闭"
+            case "ACTIVE": return "运行中"
+            case "PAUSED": return "已暂停"
             default: return "不可控制"
             }
         }
@@ -774,6 +774,18 @@ enum RetrospectiveFormat {
     private static let clockFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// 时间轴首尾刻度：只到分钟（ui-spec §4.18，对齐画板）；分段明细仍用带秒的 `clock`。
+    static func clockMinutes(_ iso: String?) -> String? {
+        guard let date = TimeFormat.parse(iso) else { return nil }
+        return clockMinutesFormatter.string(from: date)
+    }
+
+    private static let clockMinutesFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
         return formatter
     }()
 }

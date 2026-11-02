@@ -3,11 +3,26 @@ name: Packages
 on:
   push:
     branches: ['**']
-    tags: ['v*']
+    tags: ['v*', '!v*-test.*']
     paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:
     inputs:
+      channel:
+        description: 'preview builds only artifacts; test publishes a pre-release for the in-app test channel'
+        type: choice
+        options: [preview, test]
+        default: preview
+      base_version:
+        description: 'channel=test only: stable X.Y.Z this test heads for (empty: next version above the latest stable and published test bases)'
+        type: string
+        required: false
+        default: ''
+      notes:
+        description: 'channel=test only: public release notes (required)'
+        type: string
+        required: false
+        default: ''
       probe_session_fulltext:
         description: 手动运行会话全文夹具探针（不参与门禁与发布）
         type: boolean
@@ -17,8 +32,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: packages-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # The event name keeps a later push from replacing a pending manual publish run.
+  group: packages-${{ github.event_name }}-${{ github.ref }}
+  # Only a superseded branch push or pull-request run is cancelled; a manual run (it may be publishing) and a tag run always finish.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   identity:
@@ -28,6 +45,8 @@ jobs:
       release: ${{ steps.identity.outputs.release }}
       version: ${{ steps.identity.outputs.version }}
       sha: ${{ steps.identity.outputs.sha }}
+      channel: ${{ steps.identity.outputs.channel }}
+      tag: ${{ steps.identity.outputs.tag }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -37,6 +56,13 @@ jobs:
       - name: Resolve immutable build identity
         id: identity
         shell: bash
+        # Read-only token: a manual test build compares against the published releases.
+        # Free-text inputs reach the script only through the environment.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_BASE_VERSION: ${{ inputs.base_version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
         run: python3 scripts/release_bundle.py identity
 
   checks:
@@ -137,14 +163,14 @@ jobs:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" --continue testDebugUnitTest lintDebug
-      - name: Build debug APK
+      - name: Build debug APK and isolated instrumentation APK
         id: debug-build
         if: ${{ success() && needs.identity.outputs.release == 'false' }}
         working-directory: android
         env:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
-        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug
+        run: bash ./gradlew --no-daemon --stacktrace -PversionName="$VERSION_NAME" -PversionCode="$BUILD_NUMBER" assembleDebug assembleDebugAndroidTest
       - name: Restore release signing key
         id: signing-key
         if: ${{ success() && needs.identity.outputs.release == 'true' }}
@@ -179,6 +205,7 @@ jobs:
           VERSION_NAME: ${{ needs.identity.outputs.version }}
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
           BUILD_NUMBER: ${{ github.run_number }}
+          KANPILOT_ANDROID_UPDATE_REPORTS: ${{ runner.temp }}/android-update-export-reports
         shell: bash
         run: |
           set -euo pipefail
@@ -203,6 +230,14 @@ jobs:
           fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-verification.txt" | tr 'A-F' 'a-f')
           cp "$apk" "$RUNNER_TEMP/android-package/$name"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/android-package/$name" --platform android --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures any --output "$RUNNER_TEMP/android-package/android-metadata.json"
+          if [ "$RELEASE" = false ]; then
+            test_apk=android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$test_apk" > "$RUNNER_TEMP/test-apk-verification.txt"
+            test_fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/test-apk-verification.txt" | tr 'A-F' 'a-f')
+            [ "$test_fingerprint" = "$fingerprint" ] || { echo 'Instrumentation APK signer differs from target APK' >&2; exit 1; }
+            cp "$test_apk" "$RUNNER_TEMP/android-package/KaneoPilot-ci-$BUILD_NUMBER-android-test.apk"
+            KANPILOT_ANDROID_UPDATE_OUTPUT="$RUNNER_TEMP/android-package/update-acceptance" bash android/tests/export-update-acceptance.sh
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.android-package.outcome == 'success' }}
         with:
@@ -221,6 +256,14 @@ jobs:
             android/app/build/reports/lint-results-*
           if-no-files-found: warn
           retention-days: 14
+      - name: Preserve update export diagnostics
+        if: ${{ always() && needs.identity.outputs.release == 'false' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-update-export-reports-${{ github.run_number }}
+          path: ${{ runner.temp }}/android-update-export-reports/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Remove temporary signing material
         if: always()
         shell: bash
@@ -235,7 +278,7 @@ jobs:
       matrix:
         include:
           - group: a
-            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures
+            fixtures: run-session-reader-fixtures run-recovery-supervisor-fixtures run-ai-verification-recovery-fixtures run-external-build-repair-fixtures run-planning-input-fixtures run-review-resolution-fixtures run-retrospective-fixtures run-mobile-real-core-fixtures run-session-search-input-fixtures run-completion-display-fixtures run-software-update-fixtures run-software-update-termination-fixtures run-software-update-ui-fixtures run-software-update-appkit-termination-fixtures
           - group: b
             fixtures: run-owner-fixtures run-mobile-fixtures run-engine-fixtures run-verification-check-fixtures run-fixtures run-build-ai-action-fixtures run-scheduler-fixtures run-execution-answer-fixtures run-plan-answer-fixtures run-engine-fix-revert-fixtures
     steps:
@@ -247,6 +290,10 @@ jobs:
         with:
           python-version: '3.11'
       - name: Affected desktop fixtures
+        id: desktop-fixtures
+        env:
+          KANPILOT_UPDATE_FIXTURE_OUTPUT: ${{ runner.temp }}/macos-update-fixture
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -260,6 +307,14 @@ jobs:
             fi
           done
           exit "$result"
+      - name: Preserve macOS update fixture evidence
+        if: ${{ !cancelled() && needs.identity.outputs.release == 'false' && matrix.group == 'a' && steps.desktop-fixtures.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-update-fixture-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-update-fixture/*
+          if-no-files-found: error
+          retention-days: 14
       - name: Preserve desktop fixture reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -311,6 +366,39 @@ jobs:
           mkdir -p "$RUNNER_TEMP/macos-package"
           cp "$APP_OUTPUT_DIR/$DMG_NAME" "$RUNNER_TEMP/macos-package/"
           python3 scripts/release_bundle.py metadata --package "$RUNNER_TEMP/macos-package/$DMG_NAME" --platform macos --version "$VERSION_NAME" --source-sha "$SOURCE_SHA" --build-number "$BUILD_NUMBER" --fingerprint "$fingerprint" --architectures arm64,x86_64 --output "$RUNNER_TEMP/macos-package/macos-metadata.json"
+      - name: Stage isolated macOS update UI
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        env:
+          SOURCE_SHA: ${{ needs.identity.outputs.sha }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/macos-update-ui"
+          preview="$RUNNER_TEMP/update-ui-preview/KaneoPilot Update Check.app"
+          mkdir -p "$(dirname "$preview")"
+          ditto "$RUNNER_TEMP/macos-build/KaneoPilot.app" "$preview"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.kaneopilot.software-update-check' "$preview/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName KaneoPilot Update Check' "$preview/Contents/Info.plist"
+          codesign --force --deep --sign - "$preview"
+          codesign --verify --deep --strict "$preview"
+          ditto -c -k --keepParent --sequesterRsrc "$preview" "$RUNNER_TEMP/macos-update-ui/KaneoPilot-update-ui.zip"
+          python3 - <<'PYUI'
+          import hashlib, json, os, pathlib
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'macos-update-ui'
+          package = directory / 'KaneoPilot-update-ui.zip'
+          metadata = {'source_sha': os.environ['SOURCE_SHA'], 'build_number': int(os.environ['BUILD_NUMBER']),
+                      'bundle_identifier': 'local.kaneopilot.software-update-check',
+                      'sha256': hashlib.sha256(package.read_bytes()).hexdigest(), 'size': package.stat().st_size}
+          (directory / 'ui-metadata.json').write_text(json.dumps(metadata, sort_keys=True, indent=2) + '\n')
+          PYUI
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ success() && needs.identity.outputs.release == 'false' }}
+        with:
+          name: macos-update-ui-${{ github.run_number }}
+          path: ${{ runner.temp }}/macos-update-ui/*
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ success() && steps.macos-package.outcome == 'success' }}
         with:
@@ -383,9 +471,16 @@ jobs:
       - name: Assemble checksums and immutable manifest
         env:
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
-        run: python3 scripts/release_bundle.py prepare --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
+          RELEASE_TAG: ${{ needs.identity.outputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel || 'stable' }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: python3 scripts/release_bundle.py prepare --directory release --tag "$RELEASE_TAG" --channel "$RELEASE_CHANNEL" --branch "$RELEASE_BRANCH" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
       - name: Publish or verify this build's release
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.identity.outputs.sha }}
-        run: python3 scripts/release_bundle.py publish --directory release --tag "$GITHUB_REF_NAME" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"
+          RELEASE_TAG: ${{ needs.identity.outputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel || 'stable' }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: python3 scripts/release_bundle.py publish --directory release --tag "$RELEASE_TAG" --channel "$RELEASE_CHANNEL" --branch "$RELEASE_BRANCH" --source-sha "$SOURCE_SHA" --build-number "$GITHUB_RUN_NUMBER"

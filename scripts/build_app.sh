@@ -60,7 +60,7 @@ modules = (
     "exec_config", "planner_config", "review_config", "cmd_config", "project_config",
     "cmd_dispatch", "executor_runner", "planner_runner", "cli",
     "mcp_scopes", "mcp_server", "mcp_tools", "mcp_stdio", "mcp_client",
-    "mobile_access", "mobile_server", "mobile_worker",
+    "mobile_access", "mobile_server", "mobile_worker", "app_update_installer",
     "harness_plus_adapter", "runtime_operations", "runtime_client",
     "harnesses", "stage_contract", "stage_evidence", "execution_contract", "delivery_contract",
     "auto_dispatch", "auto_monitor", "verify_evidence", "automation_policy", "auto_intake",
