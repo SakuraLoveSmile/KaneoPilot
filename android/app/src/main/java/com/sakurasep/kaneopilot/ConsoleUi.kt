@@ -51,7 +51,7 @@ private val DialogWidth = 320.dp
 private const val PAIRED_NOTICE_MS = 5_000L
 
 @Composable
-fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
+fun KaneoPilotApp(model: ConsoleModel, updater: SoftwareUpdateModel? = null, onInstallUpdate: () -> Unit = {}, onScan: () -> Unit) {
     val s = model.state
     BackHandler(enabled = !s.writing && (s.taskId != null || s.destination != "总览")) {
         model.navigate(if (s.taskId != null) s.destination else "总览")
@@ -66,13 +66,17 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
                 if (s.pending.isNotEmpty()) Banner("结果待核实：${s.pending.size} 项操作", colors.tertiaryContainer, colors.onTertiaryContainer,
                     detail = "将查询原回执，不会自动重发；核实前暂不可再次操作。", action = "查看" to { model.navigate("连接") }, icon = R.drawable.ic_status_alert)
                 s.notice?.let { Banner(it, colors.primaryContainer, colors.onPrimaryContainer) }
+                if (updater?.state?.phase == SoftwareUpdatePhase.READY && s.destination != "连接") {
+                    Banner("新版本 ${updater.state.release?.version} 已准备好", colors.primaryContainer, colors.onPrimaryContainer,
+                        action = "查看更新" to { model.navigate("连接") })
+                }
                 val notice = s.notice
                 LaunchedEffect(notice) {
                     if (notice == PAIRED_NOTICE) { delay(PAIRED_NOTICE_MS); model.setNotice(null) }
                 }
                 if (s.taskId != null) TaskDetail(model)
                 else when (s.destination) {
-                    "连接" -> ConnectionScreen(model, onScan)
+                    "连接" -> ConnectionScreen(model, updater, onInstallUpdate, onScan)
                     "总览" -> OverviewScreen(model)
                     "任务" -> ObserveTaskList(s.tasks, s.attention.map { it.text("task_id") }.toSet(), model::openTask)
                     "需要你" -> AttentionList(s.attention, model::openTask)
@@ -162,7 +166,7 @@ fun KaneoPilotApp(model: ConsoleModel, onScan: () -> Unit) {
     }
 }
 @Composable private fun Empty(message: String, modifier: Modifier = Modifier) { Text(message, modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-@Composable private fun Section(title: String, spacing: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
+@Composable internal fun Section(title: String, spacing: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(spacing)) {
             Text(title, style = MaterialTheme.typography.titleMedium); content()
@@ -271,7 +275,7 @@ private fun StatusIcon.drawable(): Int = when (this) {
         items(s.attention.take(8), key = { it.text("attention_id").ifBlank { it.text("task_id") } }) { item -> AttentionCard(item) { model.openTask(item.text("task_id")) } }
     }
 }
-@Composable private fun ConnectionScreen(model: ConsoleModel, onScan: () -> Unit) {
+@Composable private fun ConnectionScreen(model: ConsoleModel, updater: SoftwareUpdateModel?, onInstallUpdate: () -> Unit, onScan: () -> Unit) {
     val s = model.state
     var pasted by remember { mutableStateOf("") }
     var confirmForget by remember { mutableStateOf(false) }
@@ -295,6 +299,10 @@ private fun StatusIcon.drawable(): Int = when (this) {
         items(s.pending, key = { it.id }) { op -> Section("结果待核实") {
             LabelValue("操作", op.action); LabelValue("操作编号", op.id); Text(op.message)
             OutlinedButton(onClick = { resolveOperation = op.id }, enabled = !s.writing, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("已在 Mac 核实，结束待核实记录") }
+        } }
+        updater?.let { updates -> item {
+            SoftwareUpdateSection(updates.state, updates.preview, updates::setAutomaticCheck, updates::setAutomaticDownload,
+                updates::check, { updates.download() }, onInstallUpdate, updates::showError)
         } }
         item { Text("KaneoPilot ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall) }
     }

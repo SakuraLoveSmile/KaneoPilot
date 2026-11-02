@@ -305,6 +305,7 @@ struct SettingsView: View {
                         mcpServiceSection
                         MobileConnectionView()
                     case .advanced:
+                        SoftwareUpdateSection()
                         schedulerSection
                         diagnosticsDataSection
                     }

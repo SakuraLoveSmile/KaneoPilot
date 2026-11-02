@@ -6,6 +6,8 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.sakurasep.kaneopilot"
+        buildConfigField("String", "UPDATE_PACKAGE_NAME", "\"com.sakurasep.kaneopilot\"")
+        resValue("string", "app_name", "KaneoPilot")
         minSdk = 26
         targetSdk = 36
         versionCode = providers.gradleProperty("versionCode").orElse("1").get().toInt().also { require(it > 0) }
@@ -18,7 +20,19 @@ android {
         keyAlias = System.getenv("ANDROID_KEY_ALIAS")
         keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
     }
-    buildTypes { getByName("release") { if (hasReleaseKeys) signingConfig = signingConfigs.getByName("release"); isMinifyEnabled = false } }
+    buildTypes {
+        getByName("release") { if (hasReleaseKeys) signingConfig = signingConfigs.getByName("release"); isMinifyEnabled = false }
+        create("updateAcceptance") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".updateacceptance"
+            buildConfigField("String", "UPDATE_PACKAGE_NAME", "\"com.sakurasep.kaneopilot.updateacceptance\"")
+            resValue("string", "app_name", "KaneoPilot 更新验证")
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
+            matchingFallbacks += listOf("release")
+        }
+    }
+    testBuildType = if (providers.gradleProperty("updateAcceptanceTests").orNull == "true") "updateAcceptance" else "debug"
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
@@ -54,4 +68,5 @@ dependencies {
     // Keep this explicit: older transitive Espresso versions can stall on a concurrent MessageQueue.
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    add("updateAcceptanceImplementation", "androidx.compose.ui:ui-test-manifest")
 }

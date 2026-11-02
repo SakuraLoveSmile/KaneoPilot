@@ -10,6 +10,11 @@ extension Error { var coreMessage: String { localizedDescription } }
         if !value { FileHandle.standardError.write(Data("FAIL: \(reason)\n".utf8)); exit(1) }
     }
     @MainActor static func pause(_ ms: UInt64) async { try? await Task.sleep(nanoseconds: ms * 1_000_000) }
+    /// Polls on the main actor so debounced commits can land under CI load; the caller's check still asserts the result.
+    @MainActor static func waitUntil(_ timeoutMs: UInt64, _ done: () -> Bool) async {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutMs * 1_000_000
+        while !done() && DispatchTime.now().uptimeNanoseconds < deadline { await pause(10) }
+    }
     @MainActor static func main() async {
         _ = NSApplication.shared
         let store = SessionReaderStore(taskID: nil)
@@ -29,7 +34,7 @@ extension Error { var coreMessage: String { localizedDescription } }
         check(inputPublications == 2 && readerPublications == 0 && messagePublications == 0,
               "rapid input remains isolated before 300ms")
         check(store.committedQuery.isEmpty, "debounce still applies")
-        await pause(290)
+        await waitUntil(3_000) { store.committedQuery == "beta" && readerPublications > 0 && messagePublications > 0 }
         check(store.committedQuery == "beta" && readerPublications > 0 && messagePublications > 0,
               "latest submitted query publishes normal reader/result state")
         store.search = "cancelled"

@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "description": "Shared by the Python release/installer tests, the macOS update fixtures and the Android unit tests. The rules are written in docs/build-release.md; do not change a rule in one implementation only.",
+  "versions": {
+    "valid": [
+      "0.0.0",
+      "0.2.0",
+      "1.2.3",
+      "10.20.30",
+      "999999999.999999999.999999999",
+      "0.2.1-test.1",
+      "0.2.1-test.70",
+      "1.0.0-test.999999999"
+    ],
+    "invalid": [
+      "",
+      " ",
+      "1",
+      "1.2",
+      "1.2.3.4",
+      "01.2.3",
+      "1.02.3",
+      "1.2.03",
+      "00.0.0",
+      "v1.2.3",
+      "V1.2.3",
+      "1.2.3-rc.1",
+      "1.2.3-beta.1",
+      "1.2.3-alpha",
+      "1.2.3-test",
+      "1.2.3-test.",
+      "1.2.3-test.0",
+      "1.2.3-test.01",
+      "1.2.3-test.-1",
+      "1.2.3-test.1.2",
+      "1.2.3-TEST.1",
+      "1.2.3-test.1+build",
+      "1.2.3+build",
+      "1.2.3-",
+      " 1.2.3",
+      "1.2.3 ",
+      "1.2.3\n",
+      "1. 2.3",
+      "１.２.３",
+      "1.2.٣",
+      "1.2.3-test.٣",
+      "1000000000.0.0",
+      "0.1000000000.0",
+      "0.0.1000000000",
+      "1.2.3-test.1000000000",
+      "-1.2.3",
+      "1.-2.3"
+    ]
+  },
+  "tags": {
+    "description": "A tag is the letter v followed by a valid version; these strings are invalid for other reasons.",
+    "invalid": [
+      "1.2.3",
+      "V1.2.3",
+      "vv1.2.3",
+      "v",
+      "v1.2.3\n"
+    ]
+  },
+  "ordering": {
+    "description": "Each list is strictly ascending: every earlier entry sorts below every later entry.",
+    "ascending": [
+      ["0.2.0", "0.2.1-test.9", "0.2.1-test.70", "0.2.1", "0.3.0-test.1", "0.3.0"],
+      ["0.9.9", "0.10.0-test.1", "0.10.0"],
+      ["1.9.9", "1.10.0"],
+      ["0.0.0", "0.0.1-test.1", "0.0.1"],
+      ["2.0.0-test.5", "2.0.0-test.10", "2.0.0-test.100"],
+      ["1.0.0-test.999999999", "1.0.0"],
+      ["999999998.999999999.999999999", "999999999.0.0-test.1", "999999999.0.0"]
+    ]
+  },
+  "offers": {
+    "description": "Whether an installed build is offered the candidate. Two stable versions compare by version only; when either side is a test version the build number must also strictly increase. installed_build is the app's CFBundleVersion / versionCode as text. Entries with platforms apply only to those implementations.",
+    "cases": [
+      {"name": "stable to higher stable ignores build numbers", "installed": "0.2.0", "installed_build": "10", "candidate": "0.3.0", "candidate_build": 5, "offered": true},
+      {"name": "same stable version is not an update even with a newer build", "installed": "0.2.0", "installed_build": "10", "candidate": "0.2.0", "candidate_build": 99, "offered": false},
+      {"name": "lower stable version", "installed": "0.3.0", "installed_build": "10", "candidate": "0.2.0", "candidate_build": 99, "offered": false},
+      {"name": "stable to test of a higher base", "installed": "0.2.0", "installed_build": "10", "candidate": "0.2.1-test.70", "candidate_build": 70, "offered": true},
+      {"name": "test sorts below the stable of the same base", "installed": "0.2.1", "installed_build": "60", "candidate": "0.2.1-test.70", "candidate_build": 70, "offered": false},
+      {"name": "stable to test whose build is older", "installed": "0.2.0", "installed_build": "80", "candidate": "0.2.1-test.70", "candidate_build": 70, "offered": false},
+      {"name": "test to next test of the same base", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.2.1-test.71", "candidate_build": 71, "offered": true},
+      {"name": "test to the same test", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.2.1-test.70", "candidate_build": 70, "offered": false},
+      {"name": "test to a lower test", "installed": "0.2.1-test.71", "installed_build": "71", "candidate": "0.2.1-test.70", "candidate_build": 70, "offered": false},
+      {"name": "test to a higher base with an older build", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.3.0-test.5", "candidate_build": 5, "offered": false},
+      {"name": "test to a higher base with a newer build", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.3.0-test.80", "candidate_build": 80, "offered": true},
+      {"name": "test to the stable of the same base", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.2.1", "candidate_build": 75, "offered": true},
+      {"name": "test to the stable of the same base built earlier", "installed": "0.2.1-test.70", "installed_build": "70", "candidate": "0.2.1", "candidate_build": 60, "offered": false},
+      {"name": "test to a lower stable", "installed": "0.3.0-test.70", "installed_build": "70", "candidate": "0.2.9", "candidate_build": 80, "offered": false},
+      {"name": "installed build that is not an integer", "installed": "0.2.1-test.70", "installed_build": "abc", "candidate": "0.2.1-test.71", "candidate_build": 71, "offered": false, "platforms": ["python", "macos"]}
+    ]
+  }
+}
