@@ -19,6 +19,7 @@ fi
 TASK_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/kp-update-appkit.XXXXXX")"
 trap 'rm -rf "$TASK_FIXTURE"' EXIT
 swiftc -target "$(uname -m)-apple-macos14" -parse-as-library \
+  "$TASK_ROOT/macos/KaneoPilot/Core/CoreLocator.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdate.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdateManager.swift" \
   "$TASK_ROOT/macos/tests/software_update_appkit_termination_main.swift" \
