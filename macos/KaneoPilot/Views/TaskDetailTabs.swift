@@ -65,10 +65,11 @@ struct PlanReaderView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Divider().overlay(Color.kpSeparator).opacity(0.5)
             body(for: plan)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Color.kpControl)
         // §4.8：底栏执行确认（confirm_dispatch）在核心核验通过前保持禁用——
         // 不把不可信正文当作已批准计划展示。
         .safeAreaInset(edge: .bottom) { confirmBar }
@@ -107,35 +108,21 @@ struct PlanReaderView: View {
 
             actionRow
         }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 元数据区：状态 / 类型 / 时间 / 哈希前缀 + 中间截断的可复制路径。
     private var metadata: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            HStack(spacing: Spacing.m) {
-                // §4.8/§5：plan_execution_hold → 「待确认执行」图标+文字。
-                if detail?.planExecutionHold == true, showsHeaderInfo {
-                    StatusBadge(status: "待确认执行")
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    planMetadataItems
                 }
-                if let kind = plan?.planKind ?? detail?.planKind {
-                    Text("类型：\(Labels.planKind(kind))")
-                }
-                if let at = plan?.generatedAt ?? detail?.planGeneratedAt {
-                    Text("生成于 \(TimeFormat.fullString(at))")
-                }
-                if let sha = plan?.planSha256 ?? detail?.planSha256 {
-                    Button {
-                        Workspace.copy(sha)
-                    } label: {
-                        Label(String(sha.prefix(12)), systemImage: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.kpSmall)
-                    .help("复制完整 plan_sha256")
-                    .accessibilityLabel("复制计划哈希")
+                .fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    planMetadataItems
                 }
             }
             .font(.kpSmall)
@@ -153,21 +140,62 @@ struct PlanReaderView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(spacing: Spacing.m) {
-                if let method = plan?.meta?.plannerMethod {
-                    Text("方法 \(method)")
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    plannerMetadataItems
                 }
-                if let plannerModel = plan?.meta?.plannerModel ?? detail?.plannerModel {
-                    Text("模型 \(plannerModel)")
-                }
-                if let effort = plan?.meta?.reasoningEffort ?? detail?.reasoningEffort {
-                    Text("思考 \(effort)")
+                .fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    plannerMetadataItems
                 }
             }
             .font(.kpSmall)
             .foregroundStyle(Color.kpSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var planMetadataItems: some View {
+        // §4.8/§5：plan_execution_hold → 「待确认执行」图标+文字。
+        if detail?.planExecutionHold == true, showsHeaderInfo {
+            StatusBadge(status: "待确认执行")
+        }
+        if let kind = plan?.planKind ?? detail?.planKind {
+            Text("类型：\(Labels.planKind(kind))")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let at = plan?.generatedAt ?? detail?.planGeneratedAt {
+            Text("生成于 \(TimeFormat.fullString(at))")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let sha = plan?.planSha256 ?? detail?.planSha256 {
+            Button {
+                Workspace.copy(sha)
+            } label: {
+                Label(String(sha.prefix(12)), systemImage: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .font(.kpSmall)
+            .help("复制完整计划哈希")
+            .accessibilityLabel("复制计划哈希")
+        }
+    }
+
+    @ViewBuilder
+    private var plannerMetadataItems: some View {
+        if let method = plan?.meta?.plannerMethod {
+            Text("方法 \(method)")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let plannerModel = plan?.meta?.plannerModel ?? detail?.plannerModel {
+            Text("模型 \(plannerModel)")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let effort = plan?.meta?.reasoningEffort ?? detail?.reasoningEffort {
+            Text("思考 \(effort)")
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// 独立操作行：模式分段 + 打开/定位。宽度不足时**换行**（不是裁切），
@@ -244,7 +272,7 @@ struct PlanReaderView: View {
         case .rendered:
             // §4.8 渲染模式：Foundation `.full` 的 PresentationIntent 语义结构
             // → 原生块级 AppKit 排版（标题/列表/引用/代码/表格）。
-            MarkdownReaderView(markdown: plan.markdown ?? "")
+            MarkdownReaderView(markdown: plan.markdown ?? "", textInset: Spacing.xl)
         case .raw:
             // 原文模式：逐字显示（含所有字符，不折叠/不重排），可选中复制。
             RawMarkdownView(text: plan.markdown ?? "")
@@ -259,14 +287,14 @@ struct PlanReaderView: View {
             let verified = isVerified
             let allowed = detail?.allowedActions?.contains("confirm_dispatch") == true
             VStack(spacing: 0) {
-                Divider()
+                Divider().overlay(Color.kpSeparator).opacity(0.5)
                 HStack(spacing: Spacing.m) {
                     if !verified {
-                        Text("计划正文未通过核心核验，暂不可确认执行")
+                        Text("计划正文尚未核验通过，暂不可确认执行")
                             .font(.kpSmall)
                             .foregroundStyle(Color.kpSecondary)
                     } else if !allowed {
-                        Text("核心当前不允许确认执行")
+                        Text("当前任务状态暂不可确认执行")
                             .font(.kpSmall)
                             .foregroundStyle(Color.kpSecondary)
                     }
@@ -280,14 +308,14 @@ struct PlanReaderView: View {
                     }
                     .disabled(!verified || !allowed || model.busy)
                     .help(verified
-                          ? "按已核验计划安排派发；哈希由核心同事务复核"
-                          : "等待核心核验计划正文")
+                          ? "按已核验的计划安排执行，执行前会再次确认计划未变更"
+                          : "等待计划正文核验通过")
                     .accessibilityLabel("确认并安排执行")
                 }
-                .padding(.horizontal, Spacing.l)
-                .padding(.vertical, Spacing.s)
+                .padding(.horizontal, Spacing.xl)
+                .padding(.vertical, Spacing.l)
             }
-            .background(Color.kpWindow)
+            .background(Color.kpControl)
         }
     }
 
@@ -333,7 +361,7 @@ private struct RawMarkdownView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.delegate = context.coordinator
         textView.unregisterDraggedTypes()
-        textView.textContainerInset = NSSize(width: Spacing.l, height: Spacing.l)
+        textView.textContainerInset = NSSize(width: Spacing.xl, height: Spacing.xl)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
         textView.isVerticallyResizable = true
@@ -374,6 +402,26 @@ private struct RawMarkdownView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 }
 
+/// 详情内页的局部分组：标题在面板外，内容沿用现有字段与操作。
+private struct TaskDetailTabSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text(title)
+                .font(.kpBody.weight(.semibold))
+            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    content
+                }
+                .padding(Spacing.l)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - 评审页（ui-spec §4.1 T4：结论/报告路径/fix_task_id/打开报告）
 
 struct TaskRelationsView: View {
@@ -387,7 +435,7 @@ struct TaskRelationsView: View {
         if inTaskInfo {
             relationActions
         } else {
-            DetailSection(title: "任务层级") {
+            TaskDetailTabSection(title: "任务层级") {
                 levelLabel
                 relationActions
             }
@@ -453,7 +501,7 @@ struct ParentCloseoutSection: View {
     var onOpenTask: ((String) -> Void)? = nil
 
     var body: some View {
-        DetailSection(title: "收尾校验") {
+        TaskDetailTabSection(title: "收尾校验") {
             StatusBadge(status: closeout.state == "completed" ? "已完成" : closeout.displayTitle ?? closeout.title)
             Text("二级任务 \(closeout.completedChildren)/\(closeout.requiredChildren) 已完成")
                 .font(.kpBody)
@@ -498,7 +546,7 @@ struct ReviewRepairSection: View {
     @State private var loadingCandidate = false
 
     var body: some View {
-        DetailSection(title: "修复会话") {
+        TaskDetailTabSection(title: "修复会话") {
             FieldRow("状态", repair.stateTitle)
             FieldRow("本轮问题", repair.title)
             FieldRow("修复轮", "\(repair.round)/\(repair.maxRounds)")
@@ -568,7 +616,7 @@ struct TaskReviewTabView: View {
         Group {
             if hasReview {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: Spacing.l) {
+                    VStack(alignment: .leading, spacing: Spacing.xl) {
                         if let relations = detail.taskRelations {
                             TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
                         }
@@ -578,7 +626,7 @@ struct TaskReviewTabView: View {
                             ReviewRepairSection(taskID: detail.taskId, repair: repair,
                                                 readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
                         }
-                        DetailSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
+                        TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
                             HStack(spacing: Spacing.m) {
                                 if detail.status != "done", let release = detail.release, release.showsTaskStatus {
                                     StatusBadge(text: release.title, style: ReleasePresentation.style(release))
@@ -592,7 +640,7 @@ struct TaskReviewTabView: View {
                                 }
                             }
                         }
-                        DetailSection(title: detail.parentCloseout == nil ? "评审结论" : "历史评审") {
+                        TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审结论" : "历史评审") {
                             if detail.parentCloseout != nil {
                                 Text("以下为收尾前的评审记录，当前结果以上方收尾校验为准。")
                                     .font(.kpSmall).foregroundStyle(Color.kpSecondary)
@@ -602,7 +650,7 @@ struct TaskReviewTabView: View {
                                 ($0 as NSString).lastPathComponent
                             })
                             if let fixTaskID { FieldRow("历史修复任务", fixTaskID) }
-                            FieldRow("review_key",
+                            FieldRow("评审标识",
                                      detail.reviewKey ?? detail.reviewSummary?.reviewKey)
                             FieldRow("报告哈希", detail.reviewReportSha256.map {
                                 String($0.prefix(12))
@@ -614,7 +662,8 @@ struct TaskReviewTabView: View {
                             }
                         }
                     }
-                    .padding(Spacing.l)
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.l)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollBounceBehavior(.basedOnSize)
@@ -630,6 +679,7 @@ struct TaskReviewTabView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.kpControl)
     }
 }
 
@@ -644,24 +694,26 @@ struct TaskLogTabView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Spacing.l) {
+            VStack(alignment: .leading, spacing: Spacing.xl) {
                 Text("最近记录")
                     .font(.kpTitle)
                 stageBackendSection
                 AttemptSection(attempts: detail.attempts ?? [])
                 EventTimelineSection(events: events)
             }
-            .padding(Spacing.l)
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.l)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.kpControl)
     }
 
     @ViewBuilder
     private var stageBackendSection: some View {
         let rows = stageRows
         if !rows.isEmpty {
-            DetailSection(title: "运行端与身份") {
+            TaskDetailTabSection(title: "运行端与身份") {
                 ForEach(rows, id: \.label) { row in
                     FieldRow(row.label, row.value)
                 }
@@ -681,7 +733,7 @@ struct TaskLogTabView: View {
                 rows.append(("会话 ID", session))
             }
             if let turn = round.turnId {
-                rows.append(("turn_id", turn))
+                rows.append(("轮次 ID", turn))
             }
             if let send = round.sendState {
                 rows.append(("发送状态", Labels.sendState(send)))
@@ -718,15 +770,14 @@ private struct LogSectionHeader: View {
     }
 }
 
-/// 「尝试记录」：时间 / 阶段 / 结果（图标+文字）/ 说明四列，
-/// 行按内容自然撑高（行高 ≥40pt），说明不截断为单行。
+/// 「尝试记录」：结果图标、完整说明、阶段与结果，以及右侧时间。
 struct AttemptSection: View {
     let attempts: [Attempt]
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             LogSectionHeader(title: "尝试记录",
-                             note: "来自 get-task.attempts，最近的在最下方。")
+                             note: "按发生顺序排列，最近的在最下方。")
             if attempts.isEmpty {
                 Text("暂无尝试记录")
                     .font(.kpSmall)
@@ -734,14 +785,12 @@ struct AttemptSection: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Spacing.s)
             } else {
-                VStack(spacing: 0) {
+                GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
                     ForEach(Array(attempts.enumerated()), id: \.element.id) { index, attempt in
-                        if index > 0 { Divider() }
+                        if index > 0 { Divider().overlay(Color.kpSeparator).opacity(0.5) }
                         AttemptRow(attempt: attempt)
                     }
                 }
-                .overlay(RoundedRectangle(cornerRadius: Radius.control)
-                    .stroke(Color.kpSeparator))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -771,58 +820,52 @@ private struct AttemptRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Spacing.m) {
-            // 时间
-            Text(TimeFormat.short(attempt.startedAt))
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
-                .frame(width: 96, alignment: .leading)
-                .textSelection(.enabled)
-            // 阶段
-            Text(Labels.kind(attempt.kind))
-                .font(.kpSmall)
-                .frame(width: 64, alignment: .leading)
-            // 结果：图标 + 文字（双编码，不单靠颜色）
-            Label {
-                Text(outcome.label)
-                    .foregroundStyle(Color.primary)
-            } icon: {
-                Image(systemName: outcome.icon)
-                    .foregroundStyle(outcome.color)
-            }
-            .font(.kpSmall)
-            .frame(width: 84, alignment: .leading)
-            .accessibilityLabel("结果：\(outcome.label)")
-            // 说明：自然撑高，不截断
-            VStack(alignment: .leading, spacing: 2) {
-                if let note = attempt.note, !note.isEmpty {
-                    Text(note)
-                        .font(.kpSmall)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("—")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
+            Image(systemName: outcome.icon)
+                .font(.kpBody)
+                .foregroundStyle(outcome.color)
+                .frame(width: 32, height: 32)
+                .background(outcome.color.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Radius.control)
+                        .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
                 }
-                if let attemptNo = attempt.sendState, attempt.sendState != "sent" {
-                    Label("发送状态：\(Labels.sendState(attemptNo))", systemImage: "paperplane")
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(attempt.note.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
+                    .font(.kpBody)
+                    .fontWeight(.medium)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text([attempt.stage.map { Labels.stage($0) }, Labels.kind(attempt.kind), outcome.label]
+                    .compactMap { $0 }.joined(separator: " · "))
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let sendState = attempt.sendState, attempt.sendState != "sent" {
+                    Label("发送状态：\(Labels.sendState(sendState))", systemImage: "paperplane")
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            Text(TimeFormat.ago(attempt.startedAt) ?? TimeFormat.short(attempt.startedAt))
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .monospacedDigit()
+                .frame(width: 88, alignment: .trailing)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .help(TimeFormat.fullString(attempt.startedAt))
         }
-        .padding(.horizontal, Spacing.m)
-        .padding(.vertical, Spacing.s)
-        .frame(minHeight: 40, alignment: .top)
+        .padding(Spacing.l)
+        .frame(minHeight: RowHeight.preferredTwoLine, alignment: .top)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// 「事件时间线」：时间 / 类型 / 摘要三列，行高 ≥40pt；
-/// 默认显示核心 `EventItem.summary` 中文一句话，点击行展开完整 note/evidence
-/// 或结构化 `detail` 原文（可复制）。
+/// 「事件时间线」：完整摘要与次要元信息，独立按钮展开原始内容并复制。
 struct EventTimelineSection: View {
     let events: [EventItem]
     @State private var expanded: Set<String> = []
@@ -830,7 +873,7 @@ struct EventTimelineSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             LogSectionHeader(title: "事件时间线",
-                             note: "最近最多 200 条（list-events）；点击一行展开完整内容。")
+                             note: "显示最近最多 200 条；点「展开」查看完整内容并复制。")
             if events.isEmpty {
                 Text("暂无事件记录")
                     .font(.kpSmall)
@@ -838,17 +881,15 @@ struct EventTimelineSection: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Spacing.s)
             } else {
-                VStack(spacing: 0) {
+                GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
                     ForEach(Array(events.enumerated()), id: \.element.listID) { index, event in
-                        if index > 0 { Divider() }
+                        if index > 0 { Divider().overlay(Color.kpSeparator).opacity(0.5) }
                         EventRow(event: event,
                                  isExpanded: expanded.contains(event.listID)) {
                             toggle(event.listID)
                         }
                     }
                 }
-                .overlay(RoundedRectangle(cornerRadius: Radius.control)
-                    .stroke(Color.kpSeparator))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -874,7 +915,7 @@ private struct EventRow: View {
     }
 
     private var detailText: String {
-        guard let detail = event.detail, !detail.isNull else { return "无 detail" }
+        guard let detail = event.detail, !detail.isNull else { return "无详细内容" }
         switch detail {
         case .string, .number, .bool, .null:
             return detail.text
@@ -883,29 +924,62 @@ private struct EventRow: View {
         }
     }
 
+    private var resultColor: Color {
+        switch event.result {
+        case "succeeded": return .kpGreen
+        case "failed": return .kpRed
+        case "needs_user": return .kpOrange
+        case "cancelled": return .kpGray
+        default: return .kpBlue
+        }
+    }
+
+    private var resultIcon: String {
+        switch event.result {
+        case "succeeded": return "checkmark.circle"
+        case "failed": return "xmark.circle"
+        case "needs_user": return "exclamationmark.triangle"
+        case "cancelled": return "minus.circle"
+        default: return "clock.arrow.circlepath"
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
+        VStack(alignment: .leading, spacing: Spacing.m) {
             HStack(alignment: .top, spacing: Spacing.m) {
-                // 时间
-                Text(TimeFormat.short(event.at))
+                Image(systemName: resultIcon)
+                    .font(.kpBody)
+                    .foregroundStyle(resultColor)
+                    .frame(width: 32, height: 32)
+                    .background(resultColor.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Radius.control)
+                            .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
+                    }
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(summary)
+                        .font(.kpBody)
+                        .fontWeight(.medium)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text([kindLabel, event.stage.map { Labels.stage($0) },
+                          event.result.map { Labels.outcome($0) }]
+                        .compactMap { $0 }.joined(separator: " · "))
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(event.kind ?? "")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(TimeFormat.ago(event.at) ?? TimeFormat.short(event.at))
                     .font(.kpSmall)
                     .foregroundStyle(Color.kpSecondary)
-                    .frame(width: 96, alignment: .leading)
-                // 类型：固定宽度，不折断 round_observe 等标识
-                Text(kindLabel)
-                    .font(.kpSmall)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .frame(width: 104, alignment: .leading)
-                    .help(event.kind ?? "")
-                    .accessibilityLabel("类型：\(kindLabel)")
-                // 摘要：默认一句话；超出时可完整展开
-                Text(summary)
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .monospacedDigit()
+                    .frame(width: 88, alignment: .trailing)
                     .fixedSize(horizontal: false, vertical: true)
-                // 展开/收起入口：独立按钮，避免与摘要文本选择手势冲突。
+                    .help(TimeFormat.fullString(event.at))
+                // 独立按钮保留原展开行为，不与正文选择手势混用。
                 Button(action: onToggle) {
                     HStack(spacing: Spacing.xs) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -915,7 +989,8 @@ private struct EventRow: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.kpSecondary)
-                .help(isExpanded ? "收起完整内容" : "展开完整 note/detail")
+                .fixedSize()
+                .help(isExpanded ? "收起完整内容" : "展开完整记录")
                 .accessibilityLabel(isExpanded ? "收起完整内容" : "展开完整内容")
             }
             if isExpanded {
@@ -928,7 +1003,7 @@ private struct EventRow: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("原始 detail")
+                    Text("原始详情")
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
                     Text(detailText)
@@ -936,31 +1011,31 @@ private struct EventRow: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: Spacing.m) {
-                        Button("复制原始 detail") { Workspace.copy(detailText) }
+                    FlowRow(spacing: Spacing.m, lineSpacing: Spacing.s) {
+                        Button("复制原始详情") { Workspace.copy(detailText) }
                         Button("复制摘要") { Workspace.copy(summary) }
                         if let taskId = event.taskId {
-                            Button("复制 task_id") { Workspace.copy(taskId) }
+                            Button("复制任务 ID") { Workspace.copy(taskId) }
                         }
-                        if let actor = event.actor, !actor.isEmpty {
-                            Text("actor \(actor)")
-                                .font(.kpSmall)
-                                .foregroundStyle(Color.kpSecondary)
-                                .textSelection(.enabled)
-                        }
-                        Spacer(minLength: 0)
                     }
                     .font(.kpSmall)
                     .controlSize(.small)
+                    if let actor = event.actor, !actor.isEmpty {
+                        Text("操作来源 \(actor)")
+                            .font(.kpSmall)
+                            .foregroundStyle(Color.kpSecondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-                .padding(Spacing.m)
+                .padding(Spacing.l)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.control))
+                .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
             }
         }
-        .padding(.horizontal, Spacing.m)
-        .padding(.vertical, Spacing.s)
-        .frame(minHeight: 40, alignment: .top)
+        .padding(Spacing.l)
+        .frame(minHeight: RowHeight.preferredTwoLine, alignment: .top)
     }
 }
 
@@ -973,7 +1048,7 @@ struct TaskHistoryView: View {
     let events: [EventItem]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.l) {
+        VStack(alignment: .leading, spacing: Spacing.xl) {
             AttemptSection(attempts: attempts ?? [])
             EventTimelineSection(events: events)
         }

@@ -39,6 +39,61 @@ enum RowHeight {
     static let preferredTwoLine: CGFloat = 52
 }
 
+/// 列表状态筛选共用外观；各页负责分类语义与查询范围。
+struct StatusFilterOption: Identifiable {
+    let id: String
+    let title: String
+    var count: Int? = nil
+}
+
+struct StatusFilterBar: View {
+    @Binding var selection: String
+    let options: [StatusFilterOption]
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: Spacing.s) {
+                ForEach(options) { option in
+                    let selected = selection == option.id
+                    Button {
+                        selection = option.id
+                    } label: {
+                        HStack(spacing: Spacing.xs) {
+                            Text(option.title)
+                            if let count = option.count {
+                                Text("\(count)").monospacedDigit()
+                            }
+                        }
+                        .font(.kpLabel)
+                        .foregroundStyle(selected ? Color.kpBlue : Color.kpSecondary)
+                        .padding(.horizontal, Spacing.m)
+                        .frame(minHeight: 32)
+                        .background(selected ? Color.kpBlue.opacity(0.1) : .clear,
+                                    in: RoundedRectangle(cornerRadius: Radius.control))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: Radius.control)
+                                .strokeBorder(selected ? Color.kpBlue.opacity(0.3) : .clear, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .accessibilityLabel(option.title + (option.count.map { "，\($0) 项" } ?? ""))
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, Spacing.xl)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.vertical, Spacing.s)
+        .background(Color.kpControl)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.kpSeparator.opacity(0.5)).frame(height: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("状态分类")
+    }
+}
+
 // MARK: - 中文映射
 
 enum Labels {
@@ -687,16 +742,25 @@ struct FieldGroup<Content: View>: View {
 /// 分组面板（ui-spec §3，对齐设计画板）：控件底、1pt 描边、圆角 10。区段标题放在面板外面；
 /// 行与行之间的细线由调用方在两行之间放 `ListRule`（最后一行之后不放）。总览、复盘、项目页与问答选项共用。
 struct GroupPanel<Content: View>: View {
-    @ViewBuilder let content: Content
+    private let background: Color
+    private let border: Color
+    private let content: Content
+
+    init(background: Color = .kpControl, border: Color = .kpSeparator,
+         @ViewBuilder content: () -> Content) {
+        self.background = background
+        self.border = border
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.kpControl)
+        .background(background)
         .clipShape(RoundedRectangle(cornerRadius: Radius.group))
-        .overlay(RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Radius.group).strokeBorder(border, lineWidth: 1))
     }
 }
 

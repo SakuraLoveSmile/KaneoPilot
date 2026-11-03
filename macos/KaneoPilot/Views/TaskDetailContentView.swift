@@ -24,11 +24,13 @@ struct TaskDetailContentView: View {
         VStack(spacing: 0) {
             if showsHeader {
                 headerBar
-                Divider()
+                Rectangle().fill(Color.kpSeparator.opacity(0.5)).frame(height: 1)
             }
             content.id(currentTaskID)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         }
-        .background(Color.kpWindow)
+        .background(Color.kpControl)
         .focusable()
         .focusEffectDisabled()
         // 让原生阅读器与分段控件直接暴露各自的可访问性节点。
@@ -62,8 +64,7 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
-    /// 五段共用同一顶栏（§4.1、§4.12，对齐画板 detail-after）：第一行标题与圆形关闭图标，
-    /// 第二行左侧一行元信息（项目 · 状态），右侧五段分段控件。切换分段不改变顶栏高度与导航位置。
+    /// 五段共用顶栏；元信息与导航放不下时分行，切段不改变导航位置。
     private var headerBar: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .top, spacing: Spacing.s) {
@@ -74,7 +75,8 @@ struct TaskDetailContentView: View {
                             .font(.kpLabel.weight(.semibold))
                             .foregroundStyle(Color.kpSecondary)
                             .frame(width: 24, height: 24)
-                            .background(Color.primary.opacity(0.1), in: Circle())
+                            .background(Color.kpWindow.opacity(0.5), in: Circle())
+                            .overlay(Circle().strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.cancelAction)
@@ -82,38 +84,62 @@ struct TaskDetailContentView: View {
                     .accessibilityLabel("关闭")
                 }
             }
-            HStack(spacing: Spacing.m) {
-                headerMeta.frame(maxWidth: .infinity, alignment: .leading)
-                headerNavigation
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Spacing.l) {
+                    headerMeta.fixedSize()
+                    Spacer(minLength: 0)
+                    headerNavigation
+                }
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    headerMeta
+                    headerNavigation
+                }
             }
         }
-        .padding(.horizontal, Spacing.l)
+        .padding(.horizontal, Spacing.xl)
         .padding(.top, Spacing.l)
-        .padding(.bottom, Spacing.m)
+        .padding(.bottom, Spacing.l)
     }
 
     private var headerTitle: some View {
-        HStack(spacing: Spacing.s) {
+        HStack(alignment: .top, spacing: Spacing.m) {
             if !taskPath.isEmpty {
                 Button { taskPath.removeLast() } label: {
                     Label("返回上一级", systemImage: "chevron.left")
                 }
                 .buttonStyle(.borderless).font(.kpSmall)
             }
+            Image(systemName: detail == nil ? "doc.text" : headerStatus.icon)
+                .font(.kpBody)
+                .foregroundStyle(detail == nil ? Color.kpSecondary : headerStatus.color)
+                .frame(width: 32, height: 32)
+                .background(headerStatus.color.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Radius.control)
+                        .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
+                }
+                .accessibilityHidden(true)
             Text(detail?.title ?? currentTaskID).font(.kpTitle)
-                .lineLimit(2).truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled).help(detail?.title ?? currentTaskID)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityAddTraits(.isHeader)
         }
     }
 
-    /// 第二行元信息「项目 · 状态标签」：状态只出现一次（开放提问的词已并入 `DisplayStatus.effective`），阶段不在头部重复。
-    /// 状态标签无底色，图标着色加半粗文字（ui-spec §3）；项之间用 3pt 圆点分隔，放不下时单行截断。
+    private var headerStatus: StatusStyle {
+        guard let detail else { return DisplayStatus.style("unknown") }
+        if detail.status != "done", let release = detail.release, release.showsTaskStatus {
+            return ReleasePresentation.style(release)
+        }
+        return DisplayStatus.badge(for: detail).style
+    }
+
+    /// 项目与原状态沿用同一口径，长项目名换行，不与分段控件争宽。
     private var headerMeta: some View {
-        HStack(spacing: Spacing.s) {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
             if let project = detail?.projectName {
-                Text(project).lineLimit(1)
+                Text(project).fixedSize(horizontal: false, vertical: true)
                 metaDot
             }
             if let detail {
@@ -144,7 +170,7 @@ struct TaskDetailContentView: View {
         return question
     }
 
-    /// 第二行右侧：宽 280pt 的五段分段控件，保持宽度，元信息放不下时截断元信息。
+    /// 五段原生分段控件保持 280pt，宽度不足时由顶栏移到下一行。
     private var headerNavigation: some View {
         Picker("详情分段", selection: $tab) {
             ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
@@ -443,7 +469,9 @@ struct TaskExecutionTabView: View {
                             .id("\(taskID)/\(detail?.runId ?? "pending")")
                             .frame(height: max(320, container.size.height - (retrospectiveExpanded ? 0 : retrospectiveHeight)))
                     }
+                    .padding(.horizontal, Spacing.s)
                 }
+                .clipped()
             }
         }
     }
@@ -916,7 +944,7 @@ struct TaskOverviewTabView: View {
     }
 
     private var overviewContent: some View {
-            VStack(alignment: .leading, spacing: Spacing.l) {
+            VStack(alignment: .leading, spacing: Spacing.xl) {
                 // 1. 需要你处理：阻塞、待答与待评审，仅在出现时显示
                 if let store = answerStore {
                     PlanAnswerCard(taskID: detail.taskId, store: store)
@@ -988,11 +1016,13 @@ struct TaskOverviewTabView: View {
                 // 5. 技术详情与长路径（可折叠）
                 technicalDetailsSection
             }
-            .padding(Spacing.l)
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.l)
     }
 
     private func overviewScrollView(_ proxy: ScrollViewProxy) -> some View {
         ScrollView { overviewContent }
+        .clipped()
         .onChange(of: answerFocusRequest) {
             withAnimation { proxy.scrollTo("plan-answers", anchor: .top) }
         }
@@ -1272,15 +1302,18 @@ struct TaskOverviewTabView: View {
     /// 概览的「任务信息」：字段行并入一个分组容器，含按钮的操作区留在容器之外。
     private var taskInfoSection: some View {
         DetailSection(title: "任务信息") {
-            FieldGroup {
-                FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
-                if let relations = detail.taskRelations {
-                    FieldRow("层级", TaskRelationsView.levelText(relations))
+            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
+                    if let relations = detail.taskRelations {
+                        FieldRow("层级", TaskRelationsView.levelText(relations))
+                    }
+                    if hasKaneo {
+                        kaneoFieldRows
+                    }
+                    TaskAutomationFieldRows(detail: detail)
                 }
-                if hasKaneo {
-                    kaneoFieldRows
-                }
-                TaskAutomationFieldRows(detail: detail)
+                .padding(Spacing.l)
             }
             if let relations = detail.taskRelations {
                 TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
@@ -1338,7 +1371,13 @@ struct TaskOverviewTabView: View {
                     FieldRow("评审报告路径", rep)
                 }
             }
-            .padding(.top, Spacing.s)
+            .padding(Spacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.kpWindow.opacity(0.5), in: RoundedRectangle(cornerRadius: Radius.group))
+            .overlay {
+                RoundedRectangle(cornerRadius: Radius.group)
+                    .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
+            }
         } label: {
             Text("技术详情与路径")
                 .font(.kpSmall)
@@ -1350,7 +1389,7 @@ struct TaskOverviewTabView: View {
 
     private var actionBar: some View {
         VStack(spacing: 0) {
-            Divider()
+            Rectangle().fill(Color.kpSeparator.opacity(0.5)).frame(height: 1)
             HStack(spacing: Spacing.m) {
                 if let store = openExecutionStore {
                     executionSubmitControls(store)
@@ -1384,10 +1423,10 @@ struct TaskOverviewTabView: View {
                         .foregroundStyle(Color.kpSecondary)
                 }
             }
-            .padding(.horizontal, Spacing.l)
+            .padding(.horizontal, Spacing.xl)
             .padding(.vertical, Spacing.s)
         }
-        .background(Color.kpWindow)
+        .background(Color.kpControl)
     }
 
     /// 开放提问的提交入口：与问答卡片共用同一个 store；禁用原因写在按钮旁边。

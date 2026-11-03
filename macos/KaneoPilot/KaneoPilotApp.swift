@@ -132,6 +132,7 @@ struct KaneoPilotApp: App {
                 }
         }
         .defaultSize(width: initialWindowSize.width, height: initialWindowSize.height)
+        .windowToolbarStyle(.unified)
         .windowResizability(.automatic)
         .commands {
             CommandGroup(after: .sidebar) {

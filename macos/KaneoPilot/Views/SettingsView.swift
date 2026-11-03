@@ -311,8 +311,11 @@ struct SettingsView: View {
                     }
                 }
                 .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(Color.kpControl)
             }
         }
+        .background(Color.kpControl)
         .onAppear { segment = initialSegment }
         .sheet(item: $activeSheet) { sheet in
             roleSheetContent(sheet)
@@ -2101,20 +2104,42 @@ struct SettingsView: View {
         return "Codex CLI \(version) · \(auth)"
     }
 
-    /// 单组草稿编辑，一组一行：标题在左，右侧模型 TextField + 思考等级 + 目录元数据提示
-    /// （目录已知 → Picker；未知 → TextField + 标题下「能力未验证」提示）。
+    /// 单组草稿：模型从目录选择，保留目录外的当前值；主动选择才联动思考等级。
     private func plannerGroupEditor(title: String,
                                     model: Binding<String>,
                                     effort: Binding<String>) -> some View {
+        let models = (self.model.plannerCapabilities?.models ?? [])
+            .filter { !($0.id ?? "").isEmpty }
         let efforts = plannerPickerEfforts(for: model.wrappedValue,
                                            current: effort.wrappedValue)
+        let modelSelection = Binding<String>(
+            get: { model.wrappedValue },
+            set: { value in
+                model.wrappedValue = value
+                let supported = plannerEffortOptions(for: value)
+                if let first = supported.first, !supported.contains(effort.wrappedValue) {
+                    effort.wrappedValue = first
+                }
+            })
         return LabeledContent {
             HStack(spacing: Spacing.s) {
-                TextField("模型", text: model)
+                Picker("模型", selection: modelSelection) {
+                    if !models.contains(where: { $0.id == model.wrappedValue }) {
+                        Text(model.wrappedValue.isEmpty ? "请选择模型" : model.wrappedValue)
+                            .tag(model.wrappedValue)
+                            .disabled(model.wrappedValue.isEmpty)
+                    }
+                    ForEach(models) { item in
+                        if let id = item.id {
+                            Text(item.name ?? id).tag(id)
+                        }
+                    }
+                }
                     .labelsHidden()
+                    .pickerStyle(.menu)
                     .font(.kpBody)
-                    .textFieldStyle(.roundedBorder)
                     .frame(minWidth: 150, maxWidth: 220)
+                    .disabled(models.isEmpty)
                     .accessibilityLabel("\(title)模型")
                 if !efforts.isEmpty {
                     Picker("思考等级", selection: effort) {
@@ -2142,7 +2167,8 @@ struct SettingsView: View {
             }
         } label: {
             SettingsRowLabel(title: title,
-                             detail: efforts.isEmpty ? "能力未验证：思考等级按原样提交" : nil)
+                             detail: models.isEmpty ? "暂无模型目录，保留当前模型"
+                                : (efforts.isEmpty ? "能力未验证：思考等级按原样提交" : nil))
         }
     }
     /// v3 §5.23.2 + v4 §5.24.3：默认规划方式预选（default_method）与
@@ -2311,6 +2337,7 @@ struct SettingsView: View {
     /// 当前草稿的思考等级（供 Picker 列表补当前值用；modelID → 当前 effort）。
     private func plannerPickerEfforts(for modelID: String, current: String) -> [String] {
         var efforts = plannerEffortOptions(for: modelID)
+        guard !efforts.isEmpty else { return [] }
         if !current.isEmpty && !efforts.contains(current) {
             efforts.append(current)
         }
@@ -3241,12 +3268,15 @@ struct SettingsEditSheet<Content: View>: View {
             SettingsSheetHeader(title: title, scope: scope)
             Form { content }
                 .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(Color.kpControl)
                 .disabled(loading)
             Divider()
             footer
         }
         .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity,
                minHeight: 360, idealHeight: idealHeight, maxHeight: .infinity)
+        .background(Color.kpControl)
         .interactiveDismissDisabled(saving)
     }
 
@@ -3334,6 +3364,8 @@ struct SettingsManageSheet<Content: View>: View {
             SettingsSheetHeader(title: title, scope: scope)
             Form { content }
                 .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(Color.kpControl)
             Divider()
             HStack(spacing: Spacing.s) {
                 Spacer(minLength: 0)
@@ -3346,6 +3378,7 @@ struct SettingsManageSheet<Content: View>: View {
         }
         .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity,
                minHeight: 360, idealHeight: idealHeight, maxHeight: .infinity)
+        .background(Color.kpControl)
     }
 }
 
