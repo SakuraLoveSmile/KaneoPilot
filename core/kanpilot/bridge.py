@@ -155,8 +155,25 @@ def stable(value: Any) -> Any:
     return value
 
 
-def project_list(client: Client, workspace_id: str) -> list[dict[str, Any]]:
+def project_list(client: Client, workspace_id: str, *, require_complete: bool = False) -> list[dict[str, Any]]:
     value = client.request("/api/project?" + urlencode({"workspaceId": workspace_id}))
+    if require_complete:
+        # This endpoint returns the complete workspace list, without pagination.
+        # Never interpret an error envelope, partial page or malformed row as deletion.
+        rows = value
+        if isinstance(value, dict):
+            if any(value.get(key) for key in ("pagination", "nextCursor", "hasMore")):
+                raise BridgeError("Kaneo 项目目录不是完整列表，保留上次获取结果")
+            rows = value.get("data") if "data" in value else value.get("projects")
+        if not isinstance(rows, list):
+            raise BridgeError("Kaneo 项目目录格式无效，保留上次获取结果")
+        seen = set()
+        for item in rows:
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("id"), str) or not item["id"].strip()
+                    or not isinstance(item.get("name"), str) or item["id"] in seen):
+                raise BridgeError("Kaneo 项目目录格式无效，保留上次获取结果")
+            seen.add(item["id"])
     return [
         item
         for item in as_list(value, "data", "projects")

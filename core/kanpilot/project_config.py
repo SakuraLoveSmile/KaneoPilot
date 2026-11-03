@@ -18,6 +18,7 @@ from typing import Optional
 from . import bridge, constants, db, remote, util
 
 SETTINGS_KEY = "project_mappings"
+CATALOG_SETTINGS_KEY = "project_catalog"
 CURRENT_VERSION = 1
 
 
@@ -188,43 +189,55 @@ def get_effective_mapping(conn: sqlite3.Connection, project_id: Optional[str]) -
     }
 
 
-def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = False) -> dict:
+def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = False,
+                         current_only: bool = False) -> dict:
     """实现 get-project-mappings 命令。"""
     revision, workspace_id, saved_items, is_saved = load_raw_mappings(conn)
 
     remote_status = "not_requested"
     remote_fetched_at = None
     remote_error = None
-    remote_projects: dict[str, str] = {}  # project_id -> project_name
+    # None means no successful directory; an empty dict is an authoritative empty list.
+    remote_projects: Optional[dict[str, str]] = None
+    catalog = db.get_setting(conn, CATALOG_SETTINGS_KEY)
+    if (isinstance(catalog, dict) and catalog.get("workspace_id") == workspace_id
+            and isinstance(catalog.get("projects"), dict)
+            and isinstance(catalog.get("fetched_at"), str)):
+        remote_projects = catalog["projects"]
+        remote_fetched_at = catalog["fetched_at"]
 
     if refresh_remote:
         try:
             require_workspace(conn)
             client = remote.get_client()
-            project_list = bridge.project_list(client, workspace_id)
+            project_list = bridge.project_list(client, workspace_id, require_complete=True)
+            projects = {p["id"]: p["name"] for p in project_list}
+            fetched_at = util.now_iso()
+            with db.write_txn(conn):
+                if load_raw_mappings(conn)[1] != workspace_id:
+                    raise util.KanpilotError("conflict", "获取期间工作区已变更，请重新获取 Kaneo 项目")
+                db.set_setting(conn, CATALOG_SETTINGS_KEY, {
+                    "workspace_id": workspace_id, "fetched_at": fetched_at,
+                    "projects": projects,
+                })
+            remote_projects = projects
             remote_status = "ok"
-            remote_fetched_at = util.now_iso()
-            for p in project_list:
-                pid = str(p.get("id") or "")
-                pname = str(p.get("name") or "")
-                if pid:
-                    remote_projects[pid] = pname
+            remote_fetched_at = fetched_at
         except Exception as exc:
             remote_status = "error"
             remote_error = str(exc)
 
-    all_pids = list(saved_items.keys())
-    for rpid in remote_projects:
-        if rpid not in all_pids:
-            all_pids.append(rpid)
+    all_pids = sorted(remote_projects) if current_only and remote_projects is not None else list(saved_items)
+    # Existing execution consumers must retain saved projects and their effective modes.
+    remote_projects = (remote_projects or {}) if current_only or remote_status == "ok" else {}
+    if not current_only:
+        all_pids.extend(pid for pid in remote_projects if pid not in saved_items)
 
     from . import automation_policy, engine_claim_scope
 
     items_output = []
     for pid in all_pids:
         in_saved = pid in saved_items
-        in_remote = pid in remote_projects
-
         entry = saved_items.get(pid) or {}
         if in_saved:
             pname = remote_projects.get(pid) or entry.get("project_name") or ""
@@ -471,7 +484,8 @@ def set_project_mapping(
 
 def cmd_get_project_mappings(ctx, payload: dict) -> dict:
     refresh_remote = bool((payload or {}).get("refresh_remote", False))
-    return get_project_mappings(ctx.conn, refresh_remote=refresh_remote)
+    return get_project_mappings(ctx.conn, refresh_remote=refresh_remote,
+                                current_only=(payload or {}).get("current_only") is True)
 
 
 def cmd_set_project_mapping(ctx, payload: dict) -> dict:

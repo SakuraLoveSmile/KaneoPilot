@@ -651,7 +651,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     ),
     # T1（§5.26）：项目与本地仓库映射配置。
     "get-project-mappings": (
-        {"refresh_remote": (False, "bool")},
+        {"refresh_remote": (False, "bool"), "current_only": (False, "bool")},
         lambda ctx, payload: __import__("kanpilot.project_config", fromlist=["cmd_get_project_mappings"]).cmd_get_project_mappings(ctx, payload),
     ),
     "set-project-mapping": (

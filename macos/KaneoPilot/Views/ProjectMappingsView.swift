@@ -372,7 +372,7 @@ struct ProjectMappingsView: View {
         .background(Color.kpControl)
         .task {
             await loadMappings(refreshRemote: false)
-            if let target = targetProjectId, !target.isEmpty {
+            if let target = targetProjectId, items.contains(where: { $0.projectId == target }) {
                 selectProject(target)
             } else if selectedProjectId == nil, let first = items.first {
                 selectProject(first.projectId)
@@ -630,7 +630,7 @@ struct ProjectMappingsView: View {
                     Image(systemName: "folder.badge.gearshape")
                         .font(.system(size: 36))
                         .foregroundStyle(Color.kpSecondary)
-                    Text("请在左侧选择一个项目进行仓库配置")
+                    Text(items.isEmpty ? "暂无可配置项目，可点击「获取 Kaneo 项目」刷新" : "请在左侧选择一个项目进行仓库配置")
                         .font(.kpBody)
                         .foregroundStyle(Color.kpSecondary)
                 }
@@ -989,7 +989,7 @@ struct ProjectMappingsView: View {
             let client = CoreClient()
             let resp = try await client.run(
                 "get-project-mappings",
-                payload: ["refresh_remote": refreshRemote],
+                payload: ["refresh_remote": refreshRemote, "current_only": true],
                 as: ProjectMappingsResponse.self
             )
             guard generation == mappingGeneration else { return false }
@@ -1002,10 +1002,16 @@ struct ProjectMappingsView: View {
                 remoteStatus = rem.status ?? "not_requested"
                 remoteFetchedAt = rem.fetchedAt
                 remoteError = rem.error
+                if remoteStatus == "error" {
+                    errorMessage = "获取 Kaneo 项目失败：\(remoteError ?? "请稍后重试")"
+                }
             }
 
-            if selectedItem == nil, let first = items.first {
-                selectProject(first.projectId)
+            if selectedItem == nil {
+                selectedProjectId = nil
+                if let first = items.first {
+                    selectProject(first.projectId)
+                }
             }
             loaded = true
         } catch {
