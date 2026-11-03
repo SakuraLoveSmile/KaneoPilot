@@ -3170,6 +3170,7 @@ private struct AutoArchiveSettingsRows: View {
             SettingsRow("完成后保留天数", detail: "1–3650 天；停止输入后保存，可先设置天数再开启。") {
                 HStack(spacing: Spacing.s) {
                     TextField("天数", text: $daysText)
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 80)
                         .accessibilityLabel("自动归档保留天数")

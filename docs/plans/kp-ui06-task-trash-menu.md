@@ -14,7 +14,7 @@
 
 - 分支：`feat/20261104-kp-ui06-task-trash-menu`；工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-feat-kp-ui06-task-trash-menu`；基线：`845f9aaeacd4b00ec249d8255e0d467c2c6c3561`，拟合入 `main`。追加范围沿用已有目录/分支，不另建重复工作树。主工作区原有 AGENTS.md 改动和 KP-B01 计划保留。
 - 本次用户提供的 AGENTS.md 明确 Swift 编译仅在云端 Actions，优先于基线内历史本地编译许可。本次未运行本地编译/预览，也未操作用户 DB、生产服务或付费执行端。
-- 用户已于 2026-11-04 回复「允许 构建新版本吧」，授权提交、推送本任务分支并运行云端预览构建；随后要求先修 T4，再一起构建。尚未授权合并 main、正式 Release 或覆盖安装正式 App。当前代码尚未提交/推送。
+- 用户已于 2026-11-04 回复「允许 构建新版本吧」，授权提交、推送本任务分支并运行云端预览构建；随后要求先修 T4，再一起构建。尚未授权合并 main、正式 Release 或覆盖安装正式 App。实现提交 `52d3a37b4472a42600a53add9ddf5af60ad7dd85` 已推送任务分支并完成 Packages #97。
 
 ## 实施与分工
 
@@ -40,5 +40,7 @@
 - 组合态验证（2026-11-04，主 agent，本机 Python 3.14）：在本工作树 `core/` 执行 `PYTHONPATH=tests python3 -m unittest -q test_auto_archive test_archive test_engine_business_tick test_engine_claim_scope`，66 项通过（22.505 秒）。其中新增自动归档 14 项、既有归档恢复 24 项，另有后台调度与领取范围回归。均用临时 SQLite、FakeKaneoClient、fake workers；新测试的发布同步显式 stub，未访问真实发布服务。原 pytest 入口因本机未安装 pytest 不可用，改用测试原生 unittest，无测试预期、跳过或门禁降低。
 - 静态检查：`git diff --check`、fixture Shell 语法、修改的 Python AST，以及 Swift fixture 的真实源码提取边界和色板依赖检查通过。Swift 夹具只补代码，未运行；静态检查不替代编译或原生 UI 证据。
 - 代码绑定：基线 `845f9aaeacd4b00ec249d8255e0d467c2c6c3561` 加本工作树未提交差异；原 T1–T3 源码快照为 `7f50419a37e6af16a402eff8a81203dc11cbd120114e915f22af40cc8f433c52`，上面的 Python 隔离验证对应其中未再修改的核心。加入 T4 后，16 个变更的 `core/`、`macos/` 源码/夹具文件（包括未跟踪的新模块与测试）按路径排序，以 `路径 + NUL + 文件内容 + NUL` 拼接的 SHA-256 为 `4b3cc0cfd9172ca2c38c73ae164ef61febd187a5ddcaa1b35a632f57d7ed547a`。T4 未改变核心或模型默认配置；最新差异检查、Python AST 和 fixture Shell 语法检查通过，Swift 编译及新菜单交互仍待云端候选。
-- 必要后续：按已获授权提交并推送任务分支，由 Packages 自动构建；绑定提交/运行身份，检查全部必需 job，下载核对同一运行的产物，并用隔离副本核验原生菜单、项目折叠和设置交互。未通过这些验证前保持「实现中」。
+- 云端 #97：[Packages 41692107092](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41692107092)，源码 `52d3a37b4472a42600a53add9ddf5af60ad7dd85`，15 个必需 job 成功；正式发布及可选全文探针按预期跳过。含 Python 3.11/3.13 全部分片、两组 Swift 夹具、Android 检查/打包与 Mac arm64 打包/内置 Python 冒烟。本地下载的 DMG 和隔离 UI ZIP 与同运行 metadata 的大小、SHA-256、源码、构建号一致；App/DMG 签名验证及 DMG 校验和通过。
+- 原生 #97 隔离验证：使用云端原样签名的 `local.kaneopilot.software-update-check` 副本、FakeCore、独立 DB/状态/目录、空凭据和关闭的本机引擎，不覆盖正式 App。T1 已核验取消无写入、确认移入、回收站出现与恢复；命令日志只有一次 trash-task 与一次 resume_auto=false 的 restore-task。T2 已核验项目折叠、搜索临时展开、清空恢复、全选排除折叠的 Comic 4 项（47 条中仅选择 43 条；原「全部」活动计数仍排除 1 条已完成）。T3 已核验默认关闭/7 天、0 天阻止保存、关闭时可保存 30 天、开/关持久化；日志只提交合法 30 天。T4 已核验目录外 gpt-5.6-sol/xhigh 保留、菜单展开并选 gpt-6.1-sol、支持的 xhigh 保留、取消无写入、自定义不支持等级在主动选择后改为 low、保存后设置摘要及 FakeCore 重读一致。原生结果不能替代真实服务/模型连通性验证，本次未调用模型。
+- 原生检查发现天数输入旁重复显示「天数」标签，已加 labelsHidden；此唯一后续源码修改后的整体 SHA-256 为 `4e3dbbe2c3fc2ec6edd8475446c86b79dfed4fbc58ddde5f5ec9fc52acdb279e`（沿上述算法）。必要后续：推送此修正，重新完成云端预览构建、下载校验和受影响设置界面核验，并补目录缺失/窄窗检查；完成前保持「实现中」。
 - 工作树保留原因：成果未合入，尚有云端与界面验证；合入约定目标且适用验证通过后按规则清理本任务工作树与已合并本地分支。
