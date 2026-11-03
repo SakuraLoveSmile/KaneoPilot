@@ -303,10 +303,14 @@
 
 ## 提交与正式发布收尾（2026-11-04，实现中）
 
-- 用户已确认本轮界面，授权提交本任务全部累积改动并发布新版本；“全部”指本工作树的 24 个已确认路径，不包含其他任务或主工作区的未提交工作。以远端 main 为集成目标，保留 a67f647 的内置 Python 基线。正式版本号依 build-release.md 须由维护者明确决定，已建议 v0.4.1，确认前不创建标签。
+- 用户已确认本轮界面，授权提交本任务全部累积改动并发布新版本；“全部”指本工作树的 24 个已确认路径，不包含其他任务或主工作区的未提交工作。以远端 main 为集成目标，保留 a67f647 的内置 Python 基线。维护者已在本会话明确确认正式版本 `v0.4.1`。
 - 开始时 HEAD=a67f6475f5cb411ee9f3db7fb16f8886ce70edcf，索引为空；fetch 后 origin/main=eb0a7806dc717ba8d2e05e096470cc761f1ad288，且为 HEAD 的祖先。主工作区仍为 main=9cf1fdd50651763b412a054f8187fe7cdde7f1e4，只有原 AGENTS.md 与未跟踪 KP-B01 计划，保持原样。
 - 已在 `/Users/sakurasep/Documents/Code/Project/KaneoPilot-archives/kp-ui05-release-20261104-003948` 备份本任务 24 个路径与主工作区 2 个路径的内容、模式、SHA-256、原始状态和 binary patch；独有构建/界面证据须在移除工作树前归档并核验。任何清理只针对本任务，不删除远端来源分支。
 - T1 主 agent 独占任务记录、Git 索引/提交、PR/集成、版本标签、云端发布与资产核验。T2 Sol/high reviewer 只读审查整轮未提交差异，未发现新增实质缺陷；导航、筛选与状态口径、动作资格/确认、Android/DMG/发布门禁保持。T3 Luna/medium tester 独立核实测试隔离并运行既有 scripts/tests，共 221 项通过（Python 3.14.7）；日志 `build/local-macos/release-preflight-script-tests.log`。本次 Bash/sh 语法与 diff --check 通过，没有真实 DB/Kaneo/付费端访问。T2/T3 与主 agent 的备份和 Git 准备可并行，无共享文件写入。
 - 本轮发布前未修改 UI/构建代码，20 文件需与 detail-style-source.json 保持一致；此前本机最终组合态 Debug/Release、原生两尺寸配色和完整运行时/签名核验是对应源码证据。云端旧 SDK、两版 Python 隔离套件、Android 与正式 DMG 仍待本次 Actions 验证，不能沿用历史 run 宣称当前通过。
 - 本地构建支持已提交为 `20bbacf`，仅包含 10 个构建入口/门禁测试/相关说明文件；界面、规格与本权威记录作为同一界面功能提交，推送前核对全部剩余 14 路径及空索引收尾。
 - 下一步：核对索引提交全部授权改动，推送并经 PR 集成；当前组合提交云端检查通过后，使用已确认的直接 annotated 稳定标签触发 Packages。完成后下载四项公开资产核对版本/源码/构建号/SHA-256，再保存发布结果并收尾本任务 worktree；发布不自动安装或替换本机正式 App。
+- 已提交：本地构建 `20bbacf`、界面与规格 `742906795264e3be5664d3ab9a0a4805598fcfdd`，24 路径全部进入提交，索引与普通工作区清洁。PR #9 已合并到远端 main，合并提交 `7abeafeb485d8a45164bd86af7d71875b3d72117`，两者文件树均为 `3fe930bf94ca846c7eeabcfc2bb9b4265d7c4256`。分支 run 41677098411、PR run 41677241489、main run 41679052416 的 15 项必需检查分别全部成功；可选全文探针及普通构建的 publish 按条件跳过，完整 job 记录保存在外部归档的 branch-ci.json/pr-ci.json/main-ci.json。
+- 正式标签 `v0.4.1` 已创建并推送，tag object=`8275c5e5ddab3b4f30f372a77e70f3ac5497e69d`，直接指向上述 main 合并提交；本机 Git 配置自动附带 GPG 签名，verify-tag 退出 0，移除已核验签名后的说明正文与 release-notes.md 完全一致。未移动或复用标签。正式 Packages run=`41681085918`、build=`95`，当前等待本次正式构建与发布结果。
+- 升级路径补核：实际已发布 v0.4.0 的 manifest 及旧更新器源码仍为 Universal；修正 build-release.md 误写“v0.2.0 最后一个 Universal”的历史描述，公开说明明确旧 Universal 安装版本须手动安装 arm64 包一次。该修正只涉及文档，不更改已冻结的发布源码与标签。为保留原 PR 来源分支，当前在同一 worktree 的 main 合并提交上使用 detached HEAD 记录发布文档，主工作区原分支/HEAD/两处文件保持原样。
+- 本任务预览 PID 9446 已退出；原预览残留的两个 FakeCore 心跳进程 21643/97166 已按完整可执行/脚本路径核实并停止，真实 App PID 7818 保留。首轮归档发现心跳快照变化，保留初始归档后停止子进程并重新归档；第二份 `build-local-macos.tar.gz` 共 11,945 个文件/符号链接逐项哈希/模式或目标核验通过，大小 514,508,717 字节，SHA-256=`312febef04f19c263e0fb2103195cb53d11e30f894a4230213162f952e7e5568`。原业务 state SHA-256 仍为 fbcc7ed78a33dca1bcdceb333c0af4f4a9c4b7640b4577a5c4ed3f60ece88ce5；完整保全清单、Git bundle 和进程记录在同一外部归档。

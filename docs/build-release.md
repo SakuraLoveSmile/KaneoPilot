@@ -131,7 +131,7 @@ macOS 使用 GitHub 托管 macOS runner（Apple Silicon）构建仅含 arm64 的
 
 ### 内置 Python 运行时与架构
 
-Mac 只发布和更新 Apple Silicon（arm64）。`v0.2.0` 是最后一个 Universal 包，仍留在发布页，但不再是任何更新器的候选；Intel Mac 不再有新版本。App 自带固定版本的 CPython，不再依赖机器上的 `python3`：Homebrew、pyenv、python.org 以及 Xcode 命令行工具的占位程序都不会被用到。
+Mac 只发布和更新 Apple Silicon（arm64）。`v0.4.0` 是最后一个 Universal 正式包，旧包仍留在发布页；Intel Mac 不再有新版本。App 自带固定版本的 CPython，不再依赖机器上的 `python3`：Homebrew、pyenv、python.org 以及 Xcode 命令行工具的占位程序都不会被用到。
 
 - **包与清单**：文件名 `KaneoPilot-X.Y.Z[-test.B]-macos-arm64.dmg`，清单里 macOS 条目的 `architectures` 恰为 `["arm64"]`。Mac 更新器、安装助手与发布脚本只接受这个名字和这组架构，不接受 Universal 包名，也不接受 `arm64` 之外的任何架构集合；稳定通道和测试通道都要求精确包名。预览构建的 DMG 为 `KaneoPilot-ci-<run>-macos-arm64-local-signed.dmg`，artifact 为 `macos-arm64-local-signed-<run>`。
 - **锁定**：`scripts/python-runtime.lock.json` 记录 python-build-standalone 的发布标签、归档名（`aarch64-apple-darwin`、`install_only_stripped`、GIL 版）、下载 URL、字节数、SHA-256、`archs=["arm64"]`、允许的最高 `minos`，以及许可文本来自的发布（`licenses_release`）。仓库不提交解释器二进制。它是构建输入，不是 Python 包依赖；Python 包依赖仍只允许 vendored（`core/_vendor`）。
@@ -145,7 +145,7 @@ Mac 只发布和更新 Apple Silicon（arm64）。`v0.2.0` 是最后一个 Unive
 - **运行**：App 拉起的所有 Python 进程（核心命令、引擎、执行端调度、手机服务、MCP 服务、更新助手）都直接执行内置解释器，不经 shell 脚本中转，不查 `PATH`；找不到时给出明确错误，不回退到系统 `python3`。唯一的覆盖是环境变量 `KANPILOT_PYTHON`（须存在且可执行，供夹具与开发使用）。子进程环境清除继承的 `PYTHONHOME`、`PYTHONPATH`、`PYTHONSTARTUP`、`PYTHONUSERBASE`，设置 `PYTHONNOUSERSITE=1` 与 `PYTHONDONTWRITEBYTECODE=1`。核心源码继续保持 Python 3.9+ 兼容，并在 3.11 与 3.13 上都通过检查；开发 CLI 和宿主里手工登记的 MCP 服务仍可使用外部 Python。目标项目的 verify 命令由执行端自己的环境解释，不用内置解释器。
 - **TLS**：内置解释器使用系统证书文件（macOS 的 `/private/etc/ssl/cert.pem`），不内置 CA 包；`doctor` 的 `python_runtime` 项报告其可用性，包内运行时找不到证书时失败。
 - **更新助手**：助手会原子交换新旧 App 目录，所以不能让正在运行的解释器位于被换走的目录里。`prepare` 在当前解释器位于目标 App 的 `Contents/Resources/python/` 之内时，把整个内置运行时用 `/bin/cp -c -p -R` 克隆到更新任务目录的 `runtime/`（APFS 上是写时复制；目标卷不支持克隆时 `cp` 自己退回普通复制，不另设 `ditto` 分支），再用克隆出的解释器做一次导入自检（`ctypes`、`fcntl`、`plistlib` 等与 `renamex_np`）。克隆或自检失败则 `prepare` 失败、清掉暂存包，更新不会开始：问题在 App 仍完整可用时就以明确错误暴露。第二道关是 `launch` 的 10 秒握手——助手 10 秒内没有写出 `waiting_for_exit` 就取消退出，旧 App 继续运行。解释器不在目标 App 内（开发、夹具、云端检查）时原样使用。`prepare` 在结果里返回 `python_path`；`launch` 用这个解释器运行助手，助手在 `result.json` 的每次写入里记录自己的 `sys.executable`（`python` 字段），真机验收据此确认助手确实跑在克隆上。已经执行过的旧任务（`launch_requested`、`launch_unconfirmed`、`recovery_required`、`failed`）的 `runtime/` 在下一次 `prepare` 时删除，只删克隆，不删任务记录。交换前助手最多等待 20 秒，直到没有任何可执行文件位于目标 App 包内的进程（助手自身除外；按 `ps` 的 `comm` 取包路径前缀匹配）。到期仍有则以 `update_busy` 拒绝并给出进程号；此时若没有 App 主程序在运行，重新打开旧版 App，避免用户什么都不剩。
-- **从通用包迁移**：`0.3.0-test.75` 及更早的测试包（以及 `v0.2.0`）是 Universal 包，它们的更新器只认通用包名和 `["arm64","x86_64"]`，看不到 arm64 包。第一个 arm64 + 内置 Python 的测试版需要手动安装一次：退出 App，把新的 `KaneoPilot.app` 换进 `/Applications`，浏览器下载的 DMG 再执行 `xattr -dr com.apple.quarantine /Applications/KaneoPilot.app`；之后全部在线更新。
+- **从通用包迁移**：旧 Universal 版本（包括 `v0.4.0`、`v0.2.0` 和 `0.3.0-test.75` 及更早的测试包）的更新器只认通用包名和 `["arm64","x86_64"]`，看不到 arm64 包。首次迁移到 arm64 + 内置 Python 的正式版或测试版需要手动安装一次：退出 App，把新的 `KaneoPilot.app` 换进 `/Applications`，浏览器下载的 DMG 再执行 `xattr -dr com.apple.quarantine /Applications/KaneoPilot.app`；之后使用应用内更新。
 
 ## 失败与恢复
 
@@ -189,7 +189,7 @@ Android 下载后先核对 APK 包名、版本、`versionCode`、发布证书指
 - 关闭通道：待安装的测试候选清除、已缓存的测试包删除、进行中的测试下载取消、持久化的测试候选记录丢弃、安装入口失效；正式候选不受影响；已装测试版保持不动，等待更高的正式版。已装测试版而开关关闭时，设置区提示当前是测试版。
 - 缓存：每次成功检查或安装后，清理已安装或被取代的更新包，只限 App 自己的更新缓存目录。
 - 测试版 Mac App 的 `CFBundleShortVersionString` 是 `X.Y.Z-test.B`、`CFBundleVersion` 是 B；安装助手按同一排序规范只安装更高的版本，涉及测试版时构建号也须更高，其余校验、挂载、原子交换、备份和回滚不变。
-- 首次进入测试通道，两端都要手动安装一次：Mac 的 `0.0.0` 开发预览没有更新器；Android 云端 Debug 包的证书与正式密钥不同，不能覆盖，需先卸载（会丢失配对，之后重新配对）。真实的「正式版 ↔ 测试版」更新要等出现带更新器的正式版才能实机验证。Mac 从 Universal 测试包迁到 arm64 包同样要手动安装一次，见[内置 Python 运行时与架构](#内置-python-运行时与架构)。
+- 首次进入测试通道，两端都要手动安装一次：Mac 的 `0.0.0` 开发预览没有更新器；Android 云端 Debug 包的证书与正式密钥不同，不能覆盖，需先卸载（会丢失配对，之后重新配对）。真实的「正式版 ↔ 测试版」更新要等出现带更新器的正式版才能实机验证。Mac 从 Universal 安装版本（包括 `v0.4.0`）迁到 arm64 包同样要手动安装一次，见[内置 Python 运行时与架构](#内置-python-运行时与架构)。
 
 分支构建的 `update-acceptance/` 仅用于授权后的真机隔离验收：独立包名 `com.sakurasep.kaneopilot.updateacceptance`、显示名「KaneoPilot 更新验证」，正式主包的包名与身份规则保持固定。预览/跨版本包及匹配测试 APK 由同一 job 生成，不加入正式 Release；不通过卸载现有主包或复用其数据来取得测试通过。任务记录给出各包身份、执行入口和实际设备结果。
 
