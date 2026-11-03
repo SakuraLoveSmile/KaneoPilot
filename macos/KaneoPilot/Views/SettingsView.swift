@@ -3608,16 +3608,14 @@ struct UnsavedChangesBar: View {
                         Text(rowNames.joined(separator: " · "))
                             .font(.kpLabel)
                             .foregroundStyle(Color.kpSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let blockReason, !blockReason.isEmpty {
                         SettingsNotice(text: "保存不可用：\(blockReason)",
                                        icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .combine)
-                Spacer(minLength: Spacing.m)
                 if saving {
                     ProgressView().controlSize(.small)
                 }

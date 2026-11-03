@@ -1,6 +1,6 @@
 # KP-UI06 任务整理：回收站、项目折叠与自动归档
 
-状态：待体验。T1–T5 已实现，包含已删除云端项目过滤的预览包 #99 已通过全部必需云端检查与适用原生隔离核验；尚未由用户验收。
+状态：实现中。T1–T5 已实现并由预览包 #99 验证；追加 T6 修复项目设置多项开关使窗口被撑高、底部被挡住的问题，尚未由用户验收。
 
 ## 目标与已确认决定
 
@@ -9,6 +9,7 @@
 - T3：用户于 2026-11-04 明确选择全局设置：完成后 N 天自动归档，默认关闭。保留天数缺省 7，支持 1–3650 的整数天。在「设置 → 高级 → 诊断与数据」设置，沿核心固定 JSON 命令保存。
 - T4：用户在构建前要求先修正「编辑 · 评审」中 Codex 缺少模型选择入口；在原输入框旁增加「模型列表」，复用规划页本机目录，保留手动输入、目录外当前值与离线保存。主动选择时才按已验证目录联动思考等级，保存/取消语义不变。
 - T5：云端 Kaneo 已删除的项目不再出现在项目映射设置。仅完整成功同步后更新工作区绑定的目录快照；失败沿用上次结果，首次无快照保留原列表。旧映射与任务历史保留，后续本地重读/解除映射/重开页面不会使已删除项目复活。规则权威源为 protocol §5.26、ui-spec §4.11。
+- T6：项目设置开启多个开关及发布校验后，窗口保持原尺寸，保存栏和按钮可见、提示完整、正文可独立滚动；保留原样式、校验、草稿与保存/放弃/确认规则。规则集中在 ui-spec §4.11。
 - 规则权威源：`docs/ui-spec.md` §4.9/§4.18，自动归档接口与计时、安全、恢复语义集中于 `docs/protocol.md` §5.15.7。配置存 SQLite settings，完成计时辅助信息用既有 extra_json，无 schema、依赖或生命周期变化。
 
 ## 工作区与授权边界
@@ -25,6 +26,7 @@
 4. 主 agent 独占规格、记录、SettingsView、Models、FakeCore 与配置解码夹具，并承担整合核查；Sol worker 独占 T2 的 TaskCompactListView、BoardView、completion_display 夹具及提取脚本；另一 Sol worker 独占 core 自动归档、共享归档 helper、tick/CLI、db 取消事件 actor 参数及新测试。没有同文件并发写入。只读 analyst 定位完成计时与后台入口；只读 reviewer 检查实际 macOS 改动。原子任务没有再分派。
 5. T4 主 agent 自行完成 SettingsView 中已有 CLI 编辑器的小范围接入；只读 Sol analyst 核实 Review/Planner 能力与目录来源，无核心接口或 DTO 变化。沿用原行、字体、间距和输入控件，只增加原生菜单。
 6. T5 主 agent 实现目录快照、CLI 可选过滤参数、原生选择/空态/错误呈现与 FakeCore 同契约夹具，Sol analyst 只读核实 API 与原始配置消费者，Sol reviewer 独立审查。核实本机 Kaneo fork `9190e61a6196013d60c95d9ed26e659073f100ed` 的 project/schema.ts、index.ts、controllers/get-projects.ts 与 response.ts：项目接口返回工作区完整非归档数组，无分页；不据此声称真实服务已验证。审查发现 auto_monitor 也通过列表读取有效模式，已将 `current_only:true` 限于映射设置，缺省保留原消费者行为；未改执行链或删除配置。
+7. T6：主 agent 在云端 #99 原样签名副本、全新 `build/kp-ui06-layout-baseline-99/` 隔离状态中复现；1180×760 初始视口，未映射 MediaPlayer 输入路径并依次启用新规划、自动接收、自动合并、构建发布，最后出现缺少必需安装包提示后，窗口截图实际为 2360×2458 像素、底栏落在屏幕外，详情失去滚动动作。Sol analyst 只读核实保存栏理想尺寸传播链；根窗口已有外框最小尺寸，不改全局窗口策略。主 agent 独占 ProjectMappingsView/SettingsView/规格/记录的修复，后续 Sol reviewer 独立审查，主 agent 负责云端包与相同原生场景验证。T1–T5 和核心保持原行为。
 
 ## 验收场景
 
@@ -33,9 +35,11 @@
 - T3：默认关闭；保存/重读全局配置、非法天数、保存失败保留输入；精确到期期限、同步不重置完成时间、重复周期幂等；未知历史、再次完成及真实恢复后的完整保留期；当前执行/发布/交付/验证事项不被隐藏，领取竞争不中断其他候选；归档列表可查且能恢复。关闭引擎或全局暂停时不执行自动周期。
 - T4：Codex Review 显示已有模型与思考等级；菜单可选择目录模型，主动选择才联动不支持的等级；手动输入与目录外值保留；目录缺失明确提示且可离线编辑；取消不写入，保存后重读一致。
 - T5：有效完整目录只显示现存项目，成功空目录清空列表与详情；本地重读和页面重开保持结果；离线、异常响应和不完整目录不误藏项目；工作区隔离；旧映射、revision、自动化策略和任务/审计不变，同 ID 重现恢复配置。主 agent 实现并核验组合态，Sol analyst 只读核实 API/消费者，Sol reviewer 独立审查实际差异；不调用真实服务或模型。
+- T6：同一五项改动及缺安装包校验在默认/最小窗口均不改变窗口尺寸；完整改动名称、阻塞提示和保存/放弃按钮可见，正文滚动能到引擎/备用模型末项；发布配置展开/收起、合法与非法值切换不使底栏越界，放弃重置草稿且不写设置。规划页「配置仓库」浮层补测 600×480 最小尺寸及保存中状态。只用隔离 FakeCore，不启用真实自动化、模型、合并或发布。
 
 ## 验证与剩余工作
 
+- T6 首版修复：ProjectMappingsView 通过 bottom safeAreaInset 放置保存栏，GeometryReader 正文允许收缩并裁剪；UnsavedChangesBar 摘要按剩余宽度换行，移除纵向 fixedSize。保存、放弃、校验与确认逻辑不变。两个 Swift 文件按「排序路径 + NUL + 内容 + NUL」拼接的 SHA-256 为 `ff9f909f8b4b1107e00dd4d76dc5784c9a8fd6b80defe4967ac69be578c767cc`，`git diff --check` 通过。Sol reviewer 独立只读审查未发现实质问题，提示必须原生核验完整文本及最小浮层。尚待新云端构建和同序列原生复测，不把静态审查视为修复通过。
 - T5 当前组合态本地验证（Python 3.14，HEAD `24141ac` 加本次差异）：`cd core && PYTHONPATH=tests python3 -m unittest -q test_project_mappings test_auto_archive test_archive test_engine_business_tick test_engine_claim_scope test_bridge_labels_comments`，97 项通过（25.775 秒）。其中映射 17 项覆盖完整/空目录、删除与本地重读/解除映射、格式错误/不完整目录、工作区与慢响应、旧映射/任务/请求/审计保全、同 ID 重现，以及隐藏项目的 live/shadow 模式与 monitor 严格 engine-verdict 门。沿用临时 SQLite 和 FakeKaneoClient，无真实服务/模型调用。首次检查发现远端返回顺序与 SQLite JSON 排序不同，已固定当前目录列表顺序；追加参数时遗漏 CLI schema 的检查失败已补齐后通过，未改预期或降低门禁。误将 pytest 专用 `test_automation_policy` 加到 unittest 曾因本机缺 pytest 导入失败，该模块留待云端，未在本地冒称通过。
 - T5 FakeCore 目录冒烟通过：刷新、重读、离线、成功空目录、默认消费者兼容和状态文件持久化；使用临时路径并固定夹具策略时间，原先全对象比较因动态策略时间不同失败，不涉及真实配置。最终 Python AST 与 `git diff --check` 通过。T5 变更的 core/macOS 源码及测试按「路径 + NUL + 内容 + NUL」排序拼接 SHA-256 为 `e8f992b1ebcf492efffc2231f0b814f20f060e867570ff8aabf019b76200e5de`。最终独立只读审查未发现剩余实质问题；云端编译与原生效果见下述 #99 记录。
 - T1 第一轮既有隔离测试 24 项通过；该记录只适用于当时的右键入口候选，不能代替本次组合态结果。

@@ -332,6 +332,8 @@ struct ProjectMappingsView: View {
                         }
                     }
                 }
+                .frame(minHeight: 0, maxHeight: .infinity)
+                .clipped()
             }
 
             if let error = errorMessage {
@@ -366,9 +368,9 @@ struct ProjectMappingsView: View {
                 .padding(.vertical, Spacing.s)
                 .background(Color.kpGreen.opacity(0.1))
             }
-
-            saveBar
         }
+        // 按页面实际宽度测量保存栏，正文只占剩余视口，避免长提示撑高窗口。
+        .safeAreaInset(edge: .bottom, spacing: 0) { saveBar }
         .background(Color.kpControl)
         .task {
             await loadMappings(refreshRemote: false)
