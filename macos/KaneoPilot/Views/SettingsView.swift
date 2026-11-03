@@ -2473,7 +2473,8 @@ struct SettingsView: View {
                                    efforts: ["low", "medium", "high", "max"])
                 } else if reviewBackend == "codex" {
                     cliModelEditor("Codex Review", model: $reviewCodexModel, effort: $reviewCodexEffort,
-                                   efforts: model.plannerCapabilities?.efforts(for: reviewCodexModel) ?? [])
+                                   efforts: plannerEffortOptions(for: reviewCodexModel),
+                                   models: model.plannerCapabilities?.models ?? [])
                 } else {
                     LabeledContent {
                         Picker("Review 配置方式", selection: $selReviewMode) {
@@ -2952,14 +2953,35 @@ struct SettingsView: View {
         return state + (detail.map { "：\($0)" } ?? "") + "；认证与模型尚未实测"
     }
 
-    private func cliModelEditor(_ title: String, model: Binding<String>, effort: Binding<String>, efforts: [String]) -> some View {
-        LabeledContent {
+    private func cliModelEditor(_ title: String, model: Binding<String>, effort: Binding<String>,
+                                efforts: [String], models: [PlannerModelEntry]? = nil) -> some View {
+        let choices = models?.filter { !($0.id ?? "").isEmpty }
+        return LabeledContent {
             HStack(spacing: Spacing.s) {
                 TextField("模型", text: model)
                     .labelsHidden()
                     .font(.kpBody).textFieldStyle(.roundedBorder)
                     .frame(minWidth: 150, maxWidth: 220)
                     .accessibilityLabel("\(title)模型")
+                if let choices {
+                    Menu("模型列表") {
+                        ForEach(choices) { item in
+                            if let id = item.id {
+                                Button(item.name ?? id) {
+                                    model.wrappedValue = id
+                                    let supported = plannerEffortOptions(for: id)
+                                    if let first = supported.first, !supported.contains(effort.wrappedValue) {
+                                        effort.wrappedValue = first
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .fixedSize()
+                    .disabled(choices.isEmpty)
+                    .help("从本机 Codex 模型目录选择，也可手动输入模型标识")
+                    .accessibilityLabel("\(title)模型列表")
+                }
                 if efforts.isEmpty {
                     TextField("思考等级", text: effort)
                         .labelsHidden()
@@ -2979,7 +3001,8 @@ struct SettingsView: View {
             }
         } label: {
             SettingsRowLabel(title: title,
-                             detail: efforts.isEmpty ? "能力未验证；按原样提交，由核心校验。" : nil)
+                             detail: choices?.isEmpty == true ? "暂无模型目录，可手动输入"
+                                : (efforts.isEmpty ? "能力未验证；按原样提交，由核心校验。" : nil))
         }
     }
 
@@ -2987,6 +3010,7 @@ struct SettingsView: View {
 
     private var diagnosticsDataSection: some View {
         Section {
+            AutoArchiveSettingsRows()
             SettingsRow("复制诊断信息", detail: "引擎状态、检查结果、路径、调度参数与迁移记录；不含凭据。") {
                 Button("复制") { Task { await copyDiagnostics() } }
                     .accessibilityLabel("复制诊断信息")
@@ -3105,6 +3129,133 @@ private struct SettingsFieldRow: View {
         } label: {
             Text(label)
                 .font(.kpBody)
+        }
+    }
+}
+
+/// 全局归档偏好经固定核心命令保存；关闭时也可先设置保留天数。
+private struct AutoArchiveSettingsRows: View {
+    @EnvironmentObject private var model: AppViewModel
+    @State private var config: AutoArchiveConfig?
+    @State private var daysText = "7"
+    @State private var loading = false
+    @State private var saving = false
+    @State private var loadError: String?
+    @State private var saveError: String?
+    @State private var pendingSave: Task<Void, Never>?
+
+    private var days: Int? {
+        guard let value = Int(daysText), (1...3650).contains(value) else { return nil }
+        return value
+    }
+
+    private var controlsDisabled: Bool { loading || saving || config == nil || model.busy }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Toggle(isOn: Binding(
+                get: { config?.enabled ?? false },
+                set: { enabled in
+                    pendingSave?.cancel()
+                    guard let current = config else { return }
+                    let retention = days ?? current.afterDays
+                    Task { await save(enabled: enabled, afterDays: retention) }
+                }
+            )) {
+                SettingsRowLabel(title: "已完成任务自动归档",
+                                 detail: "全局生效；到期后移入归档，保留记录，可随时恢复。")
+            }
+            .disabled(controlsDisabled || (config?.enabled != true && days == nil))
+
+            SettingsRow("完成后保留天数", detail: "1–3650 天；停止输入后保存，可先设置天数再开启。") {
+                HStack(spacing: Spacing.s) {
+                    TextField("天数", text: $daysText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .accessibilityLabel("自动归档保留天数")
+                        .onChange(of: daysText) { _, _ in scheduleSave() }
+                        .onSubmit { commitDays() }
+                    Text("天").font(.kpBody)
+                }
+                .disabled(controlsDisabled)
+            }
+
+            if loading || saving {
+                HStack(spacing: Spacing.s) {
+                    ProgressView().controlSize(.small)
+                    Text(saving ? "正在保存自动归档设置…" : "正在读取自动归档设置…")
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
+            }
+            if config != nil && days == nil {
+                SettingsNotice(text: "请输入 1 到 3650 的整数天数。",
+                               icon: "exclamationmark.circle.fill", tone: Color.kpRed)
+            }
+            if let error = loadError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                Button("重试读取自动归档设置") { Task { await load() } }
+                    .disabled(loading || saving)
+            }
+            if let error = saveError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+            }
+            Text("启用本机引擎、调度台运行且未全局暂停时自动检查；已超过期限的任务将在下次检查归档。恢复后重新保留设定天数；历史任务没有完成时间时，从首次检查起计时。")
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .task { await load() }
+        .onDisappear { pendingSave?.cancel() }
+    }
+
+    private func load() async {
+        guard !loading && !saving else { return }
+        loading = true
+        loadError = nil
+        defer { loading = false }
+        do {
+            let response = try await model.client.run("get-auto-archive-config", payload: [:],
+                                                      as: AutoArchiveConfigResponse.self)
+            guard !Task.isCancelled else { return }
+            config = response.config
+            daysText = String(response.config.afterDays)
+        } catch {
+            guard !Task.isCancelled else { return }
+            loadError = error.coreMessage
+        }
+    }
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        guard let current = config, let days, days != current.afterDays, !saving else { return }
+        pendingSave = Task {
+            do { try await Task.sleep(nanoseconds: 600_000_000) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            await save(enabled: current.enabled, afterDays: days)
+        }
+    }
+
+    private func commitDays() {
+        pendingSave?.cancel()
+        guard let current = config, let days else { return }
+        Task { await save(enabled: current.enabled, afterDays: days) }
+    }
+
+    private func save(enabled: Bool, afterDays: Int) async {
+        guard !saving && !loading, let current = config,
+              current.enabled != enabled || current.afterDays != afterDays else { return }
+        saving = true
+        saveError = nil
+        defer { saving = false }
+        do {
+            let response = try await model.client.run(
+                "set-auto-archive-config", payload: ["enabled": enabled, "after_days": afterDays],
+                as: AutoArchiveConfigResponse.self)
+            config = response.config
+            daysText = String(response.config.afterDays)
+            model.showToast("已保存自动归档设置")
+        } catch {
+            saveError = error.coreMessage
         }
     }
 }

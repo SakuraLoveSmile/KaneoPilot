@@ -81,6 +81,8 @@ struct BoardView: View {
     @State private var pendingConfirmAction: BatchAction? = nil
     /// 紧凑列表的观测 chip；只在紧凑列表中生效（看板不套用）。
     @State private var observeChip: ObserveChip = .all
+    /// 项目折叠仅影响本机列表；搜索期间临时展开，不更改保存的偏好。
+    @AppStorage("tasks.collapsedProjectIDs") private var collapsedProjectIDsData = Data()
     /// 紧凑列表当前在屏幕上：批量选择、全选与键盘上下移动据此取可见范围。
     @State private var compactListShown = false
 
@@ -104,9 +106,16 @@ struct BoardView: View {
         model.tasks.filter { matches($0) }
     }
 
-    /// 批量选择与全选的可见范围：紧凑列表套用当前 chip，看板为全部搜索结果。
+    private var collapsedProjectIDs: Set<String> {
+        Set((try? JSONDecoder().decode([String].self, from: collapsedProjectIDsData)) ?? [])
+    }
+
+    /// 批量选择与全选的可见范围：列表只包括展开项目中的当前 chip，看板为全部搜索结果。
     private var selectableTasks: [TaskSummary] {
-        compactListShown ? ObserveScope.visible(allFilteredTasks, chip: observeChip) : allFilteredTasks
+        compactListShown
+            ? ObserveScope.visible(allFilteredTasks, chip: observeChip,
+                                   collapsedProjectIDs: collapsedProjectIDs, isSearching: !search.isEmpty)
+            : allFilteredTasks
     }
 
     private func tasks(in column: BoardColumn) -> [TaskSummary] {
@@ -123,7 +132,7 @@ struct BoardView: View {
 
     /// 选中的任务集合（全量实体）
     private var selectedTasks: [TaskSummary] {
-        model.tasks.filter { selectedTaskIDs.contains($0.taskId) }
+        selectableTasks.filter { selectedTaskIDs.contains($0.taskId) }
     }
 
     /// 阻塞/失联：blocked_reason 非空，或按 §2 本地派生执行端失联。
@@ -274,8 +283,8 @@ struct BoardView: View {
             if isBatchMode { selectedTaskIDs.formIntersection(selectableTasks.map(\.taskId)) }
             if let id = focusedTaskID, !isNavigable(id) { focusedTaskID = nil }
         }
-        .onChange(of: model.tasks.map(\.taskId)) {
-            // 自动刷新按任务 ID 保留仍可见的选择，跨列移动不会丢失勾选 (T2)
+        .onChange(of: selectableTasks.map(\.taskId)) {
+            // 折叠、模式切换与自动刷新均只保留当前可见选择；隐藏任务不会进入批量确认。
             if isBatchMode {
                 let currentVisible = Set(selectableTasks.map(\.taskId))
                 selectedTaskIDs = selectedTaskIDs.intersection(currentVisible)
@@ -308,11 +317,15 @@ struct BoardView: View {
                     chip: $observeChip,
                     focused: $focusedTaskID,
                     isBatchMode: isBatchMode,
+                    collapsedProjectIDs: collapsedProjectIDs,
+                    isSearching: !search.isEmpty,
+                    isBatchInProgress: model.batchInProgress,
                     selectedTaskIDs: $selectedTaskIDs,
                     onOpen: openDetail,
                     onOpenRelated: openRelatedDetail,
                     onOpenSession: openSession,
-                    onToggleSelect: toggleSelection
+                    onToggleSelect: toggleSelection,
+                    onToggleProject: toggleProject
                 )
                 .onAppear { compactListShown = true }
                 .onDisappear { compactListShown = false }
@@ -444,6 +457,19 @@ struct BoardView: View {
     }
 
     // MARK: 批量整理动作 (T2)
+
+    private func toggleProject(_ projectID: String) {
+        guard search.isEmpty, !model.batchInProgress else { return }
+        var collapsed = collapsedProjectIDs
+        if collapsed.contains(projectID) {
+            collapsed.remove(projectID)
+        } else {
+            collapsed.insert(projectID)
+        }
+        if let data = try? JSONEncoder().encode(collapsed.sorted()) {
+            collapsedProjectIDsData = data
+        }
+    }
 
     private func enterBatchMode() {
         isBatchMode = true

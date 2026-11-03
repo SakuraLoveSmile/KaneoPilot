@@ -22,6 +22,15 @@ func decode<T: Decodable>(_ type: T.Type, _ json: String) -> T? {
 
 // MARK: - Plus readiness probe snake_case response
 
+if let archive = decode(AutoArchiveConfigResponse.self, #"{"config":{"enabled":false,"after_days":7}}"#) {
+    expect(!archive.config.enabled && archive.config.afterDays == 7,
+           "自动归档设置解码核心默认关闭与保留天数")
+}
+if let archive = decode(AutoArchiveConfigResponse.self, #"{"config":{"enabled":true,"after_days":30}}"#) {
+    expect(archive.config.enabled && archive.config.afterDays == 30,
+           "自动归档设置保留已启用的全局配置")
+}
+
 let plusProbeJSON = #"{"connected":true,"available":true,"tools_ok":true,"detail":"控制面就绪","attachment_supported":true,"supported_operations":["pi_session_attach_mcp","pi_desktop_invoke"],"version":"1.2.3"}"#
 if let probe = decode(PiDesktopProbeResponse.self, plusProbeJSON) {
     expect(probe.connected, "Plus probe connected 应解码")

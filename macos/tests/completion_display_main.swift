@@ -100,4 +100,57 @@ let detailCodex = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.
 precondition(DisplayStatus.effective(detailCodex) == "等待执行端接收", "已提交给 Codex 的提问显示等待执行端接收")
 let detailAnswered = try decoder.decode(TaskDetail.self, from: Data(detailOpenJSON.replacingOccurrences(of: #""state":"open""#, with: #""state":"answered""#).utf8))
 precondition(DisplayStatus.effective(detailAnswered) == "需人工处理", "详情提问已答后回落核心标签")
-print("completion display fixture checks passed")
+// 项目折叠：真实 DTO 与投影共同决定屏幕内容和批量范围。
+func projectTask(_ id: String, projectID: String? = nil, projectName: String? = nil,
+                 status: String = "done", displayStatus: String = "已完成", column: String = "done",
+                 priority: Int = 100, updatedAt: String = "2026-11-04T00:00:00Z",
+                 parentID: String? = nil, needsAttention: Bool = false) throws -> TaskSummary {
+    var json: [String: Any] = ["task_id": id, "status": status, "display_status": displayStatus,
+                               "board_column": column, "priority": priority, "updated_at": updatedAt]
+    if let projectID { json["project_id"] = projectID }
+    if let projectName { json["project_name"] = projectName }
+    if let parentID {
+        json["task_relations"] = ["parent": ["task_id": parentID, "available": true], "children": []]
+    }
+    if needsAttention { json["exception"] = ["kind": "manual_block", "severity": "blocked"] }
+    return try decoder.decode(TaskSummary.self, from: JSONSerialization.data(withJSONObject: json))
+}
+let projectTasks = [
+    try projectTask("music-done", projectID: "music", projectName: "Music"),
+    try projectTask("music-running", projectID: "music", projectName: "Music", status: "running", displayStatus: "执行中", column: "in_progress"),
+    try projectTask("feedback-needs", projectID: "feedback", projectName: "Feedback", status: "needs_user", displayStatus: "需人工处理", column: "failed", needsAttention: true),
+    try projectTask("music-queued-low", projectID: "music", projectName: "Music", status: "ready", displayStatus: "已排队", column: "todo", priority: 200),
+    try projectTask("music-queued-high", projectID: "music", projectName: "Music", status: "ready", displayStatus: "已排队", column: "todo", priority: 10),
+]
+let projectSections = ObserveScope.projects(projectTasks, chip: .all)
+precondition(projectSections.map(\.title) == ["Feedback", "Music"], "项目按名称排序，任务不跨项目分组")
+precondition(projectSections.map(\.count) == [1, 4], "项目标题计数包含当前 chip 的全部任务")
+precondition(projectSections[0].needsAttentionCount == 1, "项目收起时仍可显示需关注计数")
+precondition(projectSections[1].sections.map(\.group) == [.queued, .running, .recent], "项目内保留观测状态组顺序")
+precondition(projectSections[1].tasks.map(\.taskId) == ["music-queued-high", "music-queued-low", "music-running", "music-done"], "排队优先级与状态顺序用于展示和批量范围")
+let collapsedMusic: Set<String> = ["id:music"]
+precondition(ObserveScope.visible(projectTasks, chip: .all, collapsedProjectIDs: collapsedMusic).map(\.taskId) == ["feedback-needs"], "折叠项目任务排除于全选和批量确认")
+let allCollapsed = Set(projectSections.map(\.id))
+precondition(ObserveScope.visible(projectTasks, chip: .all, collapsedProjectIDs: allCollapsed).isEmpty, "项目全部折叠时没有可批量操作的隐藏任务")
+let searchVisible = ObserveScope.visible(projectTasks, chip: .all, collapsedProjectIDs: allCollapsed, isSearching: true)
+precondition(Set(searchVisible.map(\.taskId)) == Set(projectTasks.map(\.taskId)), "搜索临时展开所有匹配项目")
+precondition(ObserveScope.visible(projectTasks, chip: .all, collapsedProjectIDs: allCollapsed).isEmpty, "清空搜索后使用原折叠偏好")
+precondition(ObserveScope.count(.done, in: projectTasks) == 1, "折叠不改变完成 chip 的计数")
+precondition(ObserveScope.projects(projectTasks, chip: .done).map(\.id) == ["id:music"], "chip 仍过滤项目与任务")
+let sameName = [try projectTask("same-b", projectID: "b", projectName: "同名项目"),
+                try projectTask("same-a", projectID: "a", projectName: "同名项目")]
+precondition(ObserveScope.projects(sameName, chip: .all).map(\.id) == ["id:a", "id:b"], "同名不同 ID 的项目独立折叠且顺序稳定")
+let missingProjects = [try projectTask("fallback", projectName: "Music"),
+                       try projectTask("unassigned"),
+                       try projectTask("blank", projectID: " ", projectName: " ")]
+let missingSections = ObserveScope.projects(missingProjects, chip: .all)
+precondition(Set(missingSections.map(\.id)) == ["name:Music", "unassigned"], "缺少项目 ID 时按名称分组，缺少全部信息时归入未归属项目")
+precondition(missingSections.first { $0.id == "unassigned" }?.count == 2, "未归属项目保留全部任务")
+let naturalOrder = [try projectTask("ten", projectID: "10", projectName: "项目 10"),
+                    try projectTask("two", projectID: "2", projectName: "项目 2")]
+precondition(ObserveScope.projects(naturalOrder, chip: .all).map(\.id) == ["id:2", "id:10"], "项目名称使用自然数字顺序")
+let family = [try projectTask("child", projectID: "music", projectName: "Music", parentID: "parent"),
+              try projectTask("other", projectID: "music", projectName: "Music"),
+              try projectTask("parent", projectID: "music", projectName: "Music", updatedAt: "2026-11-03T00:00:00Z")]
+precondition(ObserveScope.visible(family, chip: .all).map(\.taskId) == ["parent", "child", "other"], "项目内仍保持父任务在前与子任务邻接")
+print("completion display and project folding fixture checks passed")

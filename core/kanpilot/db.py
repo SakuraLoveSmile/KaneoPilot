@@ -538,7 +538,7 @@ def task_schedulable(row: sqlite3.Row) -> bool:
 
 
 def cancel_queued_requests(
-    conn: sqlite3.Connection, task_id: str, now: str
+    conn: sqlite3.Connection, task_id: str, now: str, *, actor: str = "user"
 ) -> list:
     """Cancel this task's queued requests inside the caller's write txn.
 
@@ -560,7 +560,7 @@ def cancel_queued_requests(
         )
         add_event(
             conn, now, "request_cancelled", task_id=task_id,
-            request_id=row["request_id"], actor="user",
+            request_id=row["request_id"], actor=actor,
             detail={"reason": "task_saved", "kind": row["kind"]},
         )
         cancelled.append(row["request_id"])

@@ -455,7 +455,7 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 
 - 库内列：`tasks.save_state TEXT NOT NULL DEFAULT 'active'`、`tasks.saved_at TEXT`（移出时间）、`tasks.auto_advance_paused INTEGER NOT NULL DEFAULT 0`（恢复后默认暂停自动推进）。
 - 归档/回收站**只影响调度台**：不删除 Kaneo 任务、计划文件、报告或执行端会话； Kaneo 状态不被本地异常分类或归档动作修改。
-- **已完成（board_column=done）与已归档（save_state=archived）是两个概念**：归档不等于标记完成，完成任务不自动归档。
+- **已完成（board_column=done）与已归档（save_state=archived）是两个概念**：归档不等于标记完成；默认不自动归档，显式启用全局自动归档时按 §5.15.7 执行。
 
 ### 5.15.2 archive-task / trash-task / restore-task
 
@@ -576,6 +576,14 @@ UI **仅在当前来源版本的分页全部读取完成（`has_more=false`）�
 `archive`（可归档时）、`trash`（可移入回收站时）、`restore`（`save_state != active` 时）、`resume-auto`（`auto_advance_paused=1` **或** `automation.manual_takeover` 为真时）。禁用原因由 `blocked_reason`/命令错误原文提供。
 
 > `resume-auto` 的第二个条件不可省：`resolve {action:"dismiss"}` 只在 review 阻塞时置 `auto_advance_paused=1`，非 review 路径的接管落在 `ready` 且不暂停——若只按暂停露出，那些任务的「交回自动化」入口在桌面端永不出现，D4 的单向门只关了一半。
+
+### 5.15.7 已完成任务自动归档（KP-UI06，2026-11-04）
+
+- 全局配置命令：`get-auto-archive-config {}` 与 `set-auto-archive-config {enabled: bool, after_days: int}`，均返回 `{config: {enabled, after_days}}`。缺省为 `{enabled:false, after_days:7}`；`after_days` 必须是 1–3650 的整数，布尔值不作为整数接受，非法值返回 `bad_request`。配置保存在既有 SQLite `settings.auto_archive_config`，读取默认值不产生写入；实际变更写 `auto_archive_config_changed` 审计事件，保存配置不立即归档。
+- `tick` 的通用维护周期在 legacy/shadow/live 均适用，按当前配置对 `save_state=active`、`status=done` 且核心最终 `board_column=done` 的任务检查。归档计时使用稳定完成时间，不能取同步会改写的 `updated_at`：优先最近一次进入 done 的 `status_change` 事件；无可信完成时间的历史任务从首次检查起计时并持久化起点。重新开始后再次完成按新的完成时间计时。实际 `archived/trashed → active` 恢复后重新保留完整 N 天，active 幂等恢复不重置期限。
+- 到达 `起点 + after_days × 24小时` 后，复用 §5.15.2 的事务内资格复核、领取竞争检查、queued 取消、保存状态更新和 `task_archived` 事件，actor 为 `scheduler` 并记录自动归档来源。存在活动发布/交付、执行领取、失联、发送不明或验证占用的任务跳过，不能藏起待处理事项；单项资格冲突不得中断其他候选。
+- 全局暂停自动推进时暂停自动归档，恢复后按实际时间检查。任务级 `auto_advance_paused` 与保存状态整理独立；关闭自动归档仅停止后续处理，不自动恢复已归档项。自动检查依赖调度台运行并启用本机引擎；退出或关闭引擎期间不执行自动周期，重新运行后的周期补做已到期任务。显式核心 tick/claim 仍走同一维护规则；不需要模型、远端 Kaneo 写或文件删除。
+- 沿用现有归档恢复入口与事件审计，无新增 task status 或 schema。完成/恢复计时辅助信息可保存在 `extra_json`，不影响旧客户端读取。
 
 ## 5.16 执行轮次索引与会话回收站（v1.5）
 

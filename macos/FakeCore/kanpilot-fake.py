@@ -4278,7 +4278,21 @@ def cmd_revoke_mobile_device(state, payload):
     return fail("设备不存在", "not_found")
 
 
+def cmd_auto_archive_config(state, payload, save=False):
+    if save:
+        if type(payload.get("enabled")) is not bool:
+            return fail("enabled 必须是布尔值", "bad_request")
+        days = payload.get("after_days")
+        if type(days) is not int or not 1 <= days <= 3650:
+            return fail("after_days 必须是 1 到 3650 的整数", "bad_request")
+        state["auto_archive_config"] = {"enabled": payload["enabled"], "after_days": days}
+        save_state(state)
+    return {"config": state.get("auto_archive_config", {"enabled": False, "after_days": 7})}
+
+
 COMMANDS = {
+    "get-auto-archive-config": lambda s, p: cmd_auto_archive_config(s, p),
+    "set-auto-archive-config": lambda s, p: cmd_auto_archive_config(s, p, save=True),
     "mobile-status": cmd_mobile_status,
     "set-mobile-access": cmd_set_mobile_access,
     "create-mobile-pairing": cmd_create_mobile_pairing,

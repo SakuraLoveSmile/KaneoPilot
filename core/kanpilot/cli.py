@@ -27,6 +27,10 @@ def _automation_command(module, name):
 
 # field spec: name -> (required, kind); kind: str|int|bool|dict|list|any|str|null
 COMMANDS: dict[str, tuple[dict, Callable]] = {
+    "get-auto-archive-config": ({}, _automation_command("auto_archive", "cmd_get_auto_archive_config")),
+    "set-auto-archive-config": (
+        {"enabled": (True, "bool"), "after_days": (True, "int")},
+        _automation_command("auto_archive", "cmd_set_auto_archive_config")),
     "mobile-status": ({}, _automation_command("mobile_access", "cmd_mobile_status")),
     "set-mobile-access": (
         {"enabled": (True, "bool"), "bind_host": (False, "str"), "port": (False, "int")},

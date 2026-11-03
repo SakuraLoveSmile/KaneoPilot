@@ -212,6 +212,7 @@ enum Labels {
         case "request_cancelled": return "请求取消"
         case "failed_request_dismissed": return "失败记录已移除"
         case "task_archived": return "任务归档"
+        case "auto_archive_config_changed": return "自动归档设置已更新"
         case "task_trashed": return "任务移入回收站"
         case "task_restored": return "任务恢复"
         case "review_stage_recovered": return "评审阶段已恢复"
