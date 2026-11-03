@@ -1,6 +1,6 @@
 # KP-UI05：窗口对齐、页面配色与本地 macOS 构建
 
-- 状态：实现中（2026-11-04，提交与正式发布收尾）。用户以“好的 提交所有改动 然后发布新版本吧”确认本轮界面并授权提交、集成和发布；界面范围已验收，发布检查及交付仍须完成。
+- 状态：待体验（2026-11-04，v0.4.1 正式版已发布并通过公开资产复核）。用户以“好的 提交所有改动 然后发布新版本吧”确认本轮界面并授权提交、集成和发布；此前界面范围已验收，新正式包尚未在本机安装或进行设备体验。
 - 范围：修复两处窗口对齐，统一总览/看板/列表/需要你页面背景层级，以及设置四分组与编辑/管理面板配色，优化看板与需要你页面的文字排布，并将执行会话、运行记录、归档、回收站入口列表统一为已确认的留白样式，优化任务详情的概览/计划/执行/评审/记录五段，为需要你、执行会话、运行记录、归档增加状态分类；修复总览滚动正文遮挡工具栏标题，将普通规划与评审修复规划的模型输入改为目录下拉选择；保留导航、字号、分组、状态来源/颜色与业务行为；补可重复使用的本地 macOS 构建/隔离预览入口。2026-11-04 追加本任务全部改动的提交、合入 main 与正式发布；Android、DMG 与发布仍走云端。
 - 基线：安装版本 `0.4.1-test.91` / build `91`，源码 tag `v0.4.1-test.91` = `a67f6475f5cb411ee9f3db7fb16f8886ce70edcf`。开始时获取的 `origin/main=eb0a780` 尚未包含该版本的内置 Python，不能用它替换当前安装版本。
 - 分支：`fix/20261102-kp-ui05-window-alignment`；工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261102-fix-kp-ui05-window-alignment`；合入目标：远端 `main`。必须保留已安装测试版基线的 bundled Python，正式发布只从已合入并通过云端检查的提交创建版本标签。
@@ -314,3 +314,21 @@
 - 正式标签 `v0.4.1` 已创建并推送，tag object=`8275c5e5ddab3b4f30f372a77e70f3ac5497e69d`，直接指向上述 main 合并提交；本机 Git 配置自动附带 GPG 签名，verify-tag 退出 0，移除已核验签名后的说明正文与 release-notes.md 完全一致。未移动或复用标签。正式 Packages run=`41681085918`、build=`95`，当前等待本次正式构建与发布结果。
 - 升级路径补核：实际已发布 v0.4.0 的 manifest 及旧更新器源码仍为 Universal；修正 build-release.md 误写“v0.2.0 最后一个 Universal”的历史描述，公开说明明确旧 Universal 安装版本须手动安装 arm64 包一次。该修正只涉及文档，不更改已冻结的发布源码与标签。为保留原 PR 来源分支，当前在同一 worktree 的 main 合并提交上使用 detached HEAD 记录发布文档，主工作区原分支/HEAD/两处文件保持原样。
 - 本任务预览 PID 9446 已退出；原预览残留的两个 FakeCore 心跳进程 21643/97166 已按完整可执行/脚本路径核实并停止，真实 App PID 7818 保留。首轮归档发现心跳快照变化，保留初始归档后停止子进程并重新归档；第二份 `build-local-macos.tar.gz` 共 11,945 个文件/符号链接逐项哈希/模式或目标核验通过，大小 514,508,717 字节，SHA-256=`312febef04f19c263e0fb2103195cb53d11e30f894a4230213162f952e7e5568`。原业务 state SHA-256 仍为 fbcc7ed78a33dca1bcdceb333c0af4f4a9c4b7640b4577a5c4ed3f60ece88ce5；完整保全清单、Git bundle 和进程记录在同一外部归档。
+
+### 正式发布与公开包复核结果
+
+- [v0.4.1 正式 Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.1) 已公开并成为 latest，非 draft、非 prerelease。源码固定 `7abeafeb485d8a45164bd86af7d71875b3d72117`，build 95；[正式 Packages run 41681085918](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41681085918) 的 15 项检查及 publish 共 16 项成功，可选全文探针按条件跳过。标签远端对象及 GitHub GPG 验证再次确认一致，未重建、覆盖或复用发布资产。
+- 公开四项资产已独立下载到外部归档 `published-assets/`，GitHub digest、SHA256SUMS、manifest 的版本/源码/构建号/平台/大小和哈希全部一致。实际包身份见下表，原始 API/CI/哈希与签名输出见 release-api.json、latest-api.json、release-ci.json、published-assets-verification.json 和各 inspection/log 文件。
+
+| 公开资产 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| KaneoPilot-0.4.1-android.apk | 8,541,300 | 3dc2c4e17c6bd309eb01f657558cf493cc221587966b4734c82b47b36a4e4f95 |
+| KaneoPilot-0.4.1-macos-arm64.dmg | 39,066,108 | 1c0d560b5901ffe3422dfb08b634165db6b037cde03e22039f55d599d93d7175 |
+| manifest.json | 1,285 | 9975f0d02ae171730f831c90e262572943af6b92e818400d8da3cd93e11eefd5 |
+| SHA256SUMS | 274 | 11ec50891211347beb0276b12eb1cf790e7672582f762d7df14417a81698424d |
+
+- APK 使用本机已有 JDK17 / Build Tools36 执行 apksigner verify 与 aapt2 dump badging，均退出 0；包名 com.sakurasep.kaneopilot、versionName=0.4.1、versionCode=95。实际证书 SHA-256=`5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`，与 manifest 及 v0.4.0 正式证书一致。未安装到 Android 设备。
+- DMG 的 UDIF 与严格签名验证退出 0，实际 CodeDirectory SHA-256=`4c2d2fdca967922b97ef14ff3370a538eb51ad4508710bd1f7f834f32b4cb149` 与 manifest 一致。只读挂载后，内部 App 的 bundle ID=local.kaneopilot、版本0.4.1/build95、最低 macOS14.0；严格深层签名与 10 个仅 arm64 Mach-O 审计通过，内置 Python 可执行文件及20份许可存在。云端包 SDK=macosx15.5、Xcode=1640；复核后已卸载镜像，未启动或安装该 App。
+- 升级文档更正提交 `b77114c25d3ee0b6ff82aa656d3b3cb8fdf74735` 已推送远端 main；对应 [run 41681926473](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41681926473) 的15项必需检查也全部成功。后续此任务只补发布/清理记录，实际业务和构建代码与正式发布源码一致，不移动已发布标签。
+- 本任务已满足清理条件：已合入远端 main、公开发布与适用检查完成、独有源码/证据已提交或在外部核验归档、预览及 FakeCore 进程已停止。该记录提交后从工作树外正常移除本任务 worktree 及已合并本地来源分支；执行结果、移除后的 worktree 列表、远端 main 与主工作区保全复核保存在同一外部归档 `cleanup-verification.json`。远端来源分支和其他工作树保留。
+- 用户下一步可下载或在已支持 arm64 更新器的安装版本中检查 v0.4.1；旧 Universal 安装版本按公开说明手动安装一次。本机正式 App 未替换，真实 Kaneo/付费执行/数据库操作及安装后真实服务、Android真机、其他macOS系统体验仍未执行；本次完成的是源码提交/集成、界面对应源码验证、云端正式发布与公开资产核验。
