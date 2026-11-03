@@ -16,7 +16,7 @@ class TestLiveManualVerification(KanpilotTestCase):
         return self.call('get-task', {'task_id': self.task_id})['task']
 
     def mode(self, value):
-        self.call('set-project-engine-mode', {'project_id': self.project_id, 'engine_mode': value})
+        self.seed_engine_mode(self.project_id, value)
 
     def test_live_hides_and_rejects_without_state_or_event_changes(self):
         self.mode('live')
@@ -36,18 +36,19 @@ class TestLiveManualVerification(KanpilotTestCase):
         finally:
             conn.close()
 
-    def test_legacy_manual_acceptance_is_preserved(self):
-        self.mode('legacy')
-        self.assertIn('accept_verification', self.view()['allowed_actions'])
-        self.call('resolve', {'task_id': self.task_id, 'action': 'accept_verification'})
-        self.assertEqual(self.view()['status'], 'running')
-        self.assertEqual(self.view()['extra']['verification_override']['execution_run_id'], 'frozen-run')
+    def test_historical_modes_hide_and_reject_manual_acceptance(self):
+        for mode in ('legacy', 'shadow'):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                self.assertNotIn('accept_verification', self.view()['allowed_actions'])
+                self.assertEqual(self.call_err('resolve', {'task_id': self.task_id, 'action': 'accept_verification'}).code, 'conflict')
+                self.assertEqual(self.view()['status'], 'needs_user')
+                self.assertNotIn('verification_override', self.view()['extra'])
 
-    def test_shadow_manual_acceptance_is_preserved(self):
-        self.mode('shadow')
-        self.assertIn('accept_verification', self.view()['allowed_actions'])
-        self.call('resolve', {'task_id': self.task_id, 'action': 'accept_verification'})
-        self.assertEqual(self.view()['status'], 'running')
+    def test_diagnostic_context_cannot_enable_manual_acceptance(self):
+        with engine_claim_scope.command_mode('shadow', True):
+            self.assertNotIn('accept_verification', self.view()['allowed_actions'])
+            self.assertEqual(self.call_err('resolve', {'task_id': self.task_id, 'action': 'accept_verification'}).code, 'conflict')
 
     def test_forced_live_uses_the_same_effective_policy(self):
         self.mode('legacy')

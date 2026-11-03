@@ -69,13 +69,13 @@ class TestBoardAttention(KanpilotTestCase):
     def test_project_engine_fields_round_trip(self):
         from kanpilot import constants
         project_id = next(iter(PROJECTS.values()))
-        self.call("set-project-engine-mode", {"project_id": project_id, "engine_mode": "shadow"})
+        self.seed_engine_mode(project_id, "shadow")
         self.call("set-project-verify-env", {"project_id": project_id, "verify_env": {"KP_TEST": "yes"}})
         self.call("set-project-fallback-model", {"project_id": project_id,
             "fallback_model": {"provider_id": "fake", "model_id": "model"}})
         item = next(x for x in self.call("get-project-mappings", {})["items"]
                     if x["project_id"] == project_id)
-        self.assertEqual(item["engine_mode"], "shadow")
+        self.assertEqual(item["engine_mode"], "live")
         self.assertEqual(item["verify_env"], {"KP_TEST": "yes"})
         self.assertEqual(item["fallback_model"], {"provider_id": "fake", "model_id": "model"})
 

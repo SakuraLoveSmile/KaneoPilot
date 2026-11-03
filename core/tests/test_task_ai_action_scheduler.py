@@ -131,7 +131,7 @@ class TaskAIActionScheduler(fixtures.ConflictActionFixture):
         request = self.queued_delivery()
         assert request is not None
         assert engine_claim_scope.manual_review_repair(self.conn, request)
-        assert loop.Reconciler(self.db_path, mode="legacy")._queued_stages(self.conn, {}) == {"delivery": 1}
+        assert loop.Reconciler(self.db_path, mode="live")._queued_stages(self.conn, {}) == {"delivery": 1}
         with patch.dict(os.environ, self.engine_env()):
             claimed = self.call("claim", {"stage": "delivery", "executor": "kaneo-delivery"})
         assert claimed["claimed"], claimed

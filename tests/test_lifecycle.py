@@ -75,10 +75,9 @@ class TestHappyPath:
         assert factory.get_task(tid)["status"] == "dispatching"
 
         # 5) prepare → prepared；begin-send → submitting（远端 in-progress）
-        ev = ui_evidence(
-            session_marker=d["context"]["session_marker"],
-            repository=d["context"]["repository"],
-            attachment_name=d["context"]["attachment_name"])
+        ev = {"backend": "codex", "config": d["context"]["exec_config"],
+              "session_marker": d["context"]["session_marker"],
+              "repository": d["context"]["repository"]}
         assert cli("dispatch-prepare", {"task_id": tid, "run_id": d["run_id"],
                                         "evidence": ev})["status"] == "prepared"
         assert cli("dispatch-begin-send", {"task_id": tid,
@@ -86,10 +85,7 @@ class TestHappyPath:
         assert factory.kaneo.get_task(tid)["status"] == "in-progress"
 
         # 6) confirm → running + monitor 请求
-        ev2 = dict(ev, message_visible=True, session_title="E2E",
-                   session_id="sess-e2e")
-        assert cli("dispatch-confirm", {"task_id": tid, "run_id": d["run_id"],
-                                        "evidence": ev2})["status"] == "running"
+        factory.start_dispatch(task, d, prepared=True)
         t = factory.get_task(tid)
         assert t["status"] == "running"
         assert t["display_status"] == "执行中"
@@ -102,15 +98,8 @@ class TestHappyPath:
         hb = cli("heartbeat", {"request_id": m["request_id"],
                                "run_id": m["run_id"], "progress": "执行顺利"})
         assert hb["ok"] is True
-        # §5.9 分支评审前置（claim→snapshot→commit→register）：任务工作区由
-        # start-plans 登记为 workspace_version=1，推进 in-review 前必须先有
-        # 本轮执行的核心本地提交（core.require_committed_review 要求
-        # delivery.commits 中存在 execution_run_id==本轮执行 run 且
-        # sha==delivery.head_sha 的登记）。这里沿用 tests/conftest.py
-        # TaskFactory.make_in_review 的既有正确生命周期模式：在 tmp_env 的
-        # 临时本地仓库工作树里造一处真实改动，再经核心命令 delivery-commit
-        # （monitor 领取身份 + expected_execution_run_id=派发 run_id）由核心
-        # 完成提交与登记——不手写 delivery 证据、不弱化守卫、不触真实远端。
+        # Branch review requires the real worker's report, native verify exit,
+        # source snapshot and the core-recorded commit for this execution run.
         delivery = factory.get_task(tid).get("delivery") or {}
         assert (delivery.get("mode") == "pr"
                 or delivery.get("workspace_version") == 1) and all(
@@ -118,8 +107,7 @@ class TestHappyPath:
                                               "base_sha", "head_sha",
                                               "worktree_path")), (
             f"{tid} 应已登记完整分支评审工作区：{delivery}")
-        (Path(delivery["worktree_path"]) / "lifecycle-feature.py").write_text(
-            "VALUE = 1\n", encoding="utf-8")
+        factory.verify_execution(tid, m, d["run_id"])
         committed = cli("delivery-commit", {
             "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
             "expected_execution_run_id": d["run_id"]})
@@ -425,14 +413,10 @@ class TestAdvanceAndRecheck:
         tid = running.task.task_id
         mreq = factory.find_request(tid, "monitor")
         m = factory.claim("monitor", request_id=mreq["request_id"])
-        # §5.9：advance target=in-review 先过 core.require_committed_review
-        # 才到远端比较（cmd_remote.cmd_advance_task）——make_running 的任务已被
-        # start-plans 登记 workspace_version=1 分支工作区，按本文件 e2e 与
-        # conftest.make_in_review 既有模式先完成真实 delivery-commit 再篡改
-        # 远端，保留原篡改与 remote_conflict 断言不变。
+        # Verify and commit the actual worker result first, so this assertion
+        # reaches the remote-conflict boundary with valid local evidence.
         delivery = factory.get_task(tid).get("delivery") or {}
-        (Path(delivery["worktree_path"]) / "lifecycle-conflict.py").write_text(
-            "VALUE = 1\n", encoding="utf-8")
+        factory.verify_execution(tid, m, running.dispatch_run_id)
         committed = cli("delivery-commit", {
             "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
             "expected_execution_run_id": running.dispatch_run_id})

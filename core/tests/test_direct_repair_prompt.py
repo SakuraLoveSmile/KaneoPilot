@@ -127,6 +127,7 @@ class DirectRepairWorktree(KanpilotTestCase):
         self.repo = make_repo(self.repos_root)
         self.repo = self.repo.rename(self.repos_root / 'Feedback')
         self.make_ready_task(task_id='task1234')
+        self.configure_codex_execution()
         self.ctx = cli.Context(self.db_path)
         self.addCleanup(self.ctx.close)
         self.delivery = branch(self.repo, self.root / 'worktrees')

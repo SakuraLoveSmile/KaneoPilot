@@ -23,6 +23,7 @@ class MonitorIntervalTests(KanpilotTestCase):
                 self.assertEqual(self.call("overview", {})["settings"]["monitor_interval_seconds"], expected)
 
     def test_first_monitor_uses_legacy_interpretation(self):
+        self.configure_codex_execution()
         conn = db.connect(self.db_path)
         try:
             db.set_setting(conn, "monitor_interval_seconds", 900)

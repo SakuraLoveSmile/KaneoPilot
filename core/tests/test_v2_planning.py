@@ -243,6 +243,8 @@ class TestPlanningChain(KanpilotTestCase):
         self.assertEqual(result["reason"], "empty")
 
     def test_dispatch_hold_gate(self):
+        self.call("set-exec-config", {"backend": "codex", "codex": {
+            "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
         fixture = self.make_ready_task()
         task_id = fixture["remote"]["id"]
         # publish 后 hold：不带确认直接 enqueue dispatch → conflict。

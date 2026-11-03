@@ -763,7 +763,7 @@ def write_plan_file(plan_root, *, task_id, project_id, project_name, repository,
     lines = ["---"] + [
         f'{k}: "{v}"' if k == "task_id" else f"{k}: {v}" for k, v in fm.items()
     ] + [
-        "---", "", body or f"# {title or task_id}\n\n## 实施步骤\n\n1. 读取需求\n2. 实现\n3. 验证\n"]
+        "---", "", body or f"# {title or task_id}\n\n## 实施步骤\n\n1. 读取需求\n2. 实现\n3. 验证\n\n```verify\ngit diff --check\n```\n"]
     path.write_text("\n".join(lines), encoding="utf-8")
     return SimpleNamespace(path=path, sha256=sha256_file(path), frontmatter=fm)
 
@@ -1030,23 +1030,88 @@ class TaskFactory:
         c = self.claim("dispatch", request_id=req["request_id"])
         assert c["claimed"] is True, f"dispatch claim 失败：{c}"
         run_id, req_id = c["run_id"], c["request_id"]
-        ev = ui_evidence(
-            session_marker=c["context"]["session_marker"],
-            repository=c["context"]["repository"],
-            attachment_name=c["context"]["attachment_name"])
-        self.cli("dispatch-prepare",
-                 {"task_id": task.task_id, "run_id": run_id, "evidence": ev})
-        self.cli("dispatch-begin-send",
-                 {"task_id": task.task_id, "run_id": run_id})
-        ev2 = dict(ev, message_visible=True,
-                   session_title=f"会话 {task.task_id}",
-                   session_id=f"sess-{task.task_id[:8]}")
-        self.cli("dispatch-confirm",
-                 {"task_id": task.task_id, "run_id": run_id, "evidence": ev2})
+        ev2 = self.start_dispatch(task, c)
         return SimpleNamespace(task=task, plan=ready.plan,
                                dispatch_request_id=req_id, dispatch_run_id=run_id,
                                session_marker=c["context"]["session_marker"],
                                evidence=ev2)
+
+    def start_dispatch(self, task, claim, prepared=False):
+        """Run the isolated Codex worker, including its native verify/report transport."""
+        c = claim
+        run_id = c["run_id"]
+        ev = {"backend": "codex", "config": c["context"]["exec_config"],
+              "session_marker": c["context"]["session_marker"],
+              "repository": c["context"]["repository"]}
+        if not prepared:
+            self.cli("dispatch-prepare",
+                     {"task_id": task.task_id, "run_id": run_id, "evidence": ev})
+            self.cli("dispatch-begin-send",
+                     {"task_id": task.task_id, "run_id": run_id})
+        started = self.cli("dispatch-start", {"task_id": task.task_id, "run_id": run_id})
+        directory = Path(self.cli("overview", {})["paths"]["session_runs_root"]) / task.task_id / run_id
+        from kanpilot import codex_execution
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            job = json.loads((directory / "job.json").read_text())
+            if job["status"] == "finished" and not codex_execution.job_alive(job):
+                break
+            assert job["status"] not in ("failed", "aborted"), job
+            time.sleep(.03)
+        else:
+            raise AssertionError((directory / "worker.log").read_text())
+        ev2 = dict(ev, session_id=started["session_id"], turn_id=job["turn_id"], protocol_seen=True)
+        self.cli("dispatch-confirm",
+                 {"task_id": task.task_id, "run_id": run_id, "evidence": ev2})
+        return ev2
+
+    def verify_execution(self, task_id, claim, execution_run_id):
+        task = self.get_task(task_id)
+        verdict = self.cli("engine-verdict", {
+            "task_id": task_id, "request_id": claim["request_id"], "run_id": claim["run_id"],
+            "expected_execution_run_id": execution_run_id,
+            "expected_plan_sha256": task["plan_sha256"], "budget_seconds": 20,
+            "operation_id": "fixture-verdict:" + claim["request_id"]})
+        assert verdict["verification_ok"] is True, verdict
+        return verdict
+
+    def make_historical_running(self, **kw):
+        """Seed an already-sent pre-upgrade pi round, without invoking execution.
+
+        Reader tests intentionally have no run artifacts until their individual
+        fixtures supply them. This is persisted historical state, not a new pi
+        dispatch that bypasses the execution-capability guard.
+        """
+        ready = self.make_ready(**kw)
+        task = ready.task
+        self.enqueue_dispatch(task.task_id)
+        req = self.find_request(task.task_id, "dispatch")
+        claim = self.claim("dispatch", request_id=req["request_id"])
+        assert claim["claimed"], claim
+        from kanpilot import db
+        now = iso_now()
+        config = {"backend": "pi", "provider": "CloseAI", "model": "deepseek-flash",
+                  "reasoning_effort": "xhigh", "agent_preset": "default"}
+        conn = db.connect(self.env.db)
+        try:
+            with db.write_txn(conn):
+                conn.execute("UPDATE execution_rounds SET backend='pi', config_json=?, run_status='running', started_at=?, pid=424242 WHERE task_id=? AND run_id=?",
+                             (json.dumps(config), now, task.task_id, claim["run_id"]))
+                db.update_task(conn, task.task_id, now, status="running", stage="monitor",
+                    sent=1, send_state="sent", sent_at=now, kaneo_status="in-progress",
+                    transition_started_at=now, transition_verified_at=now,
+                    session_id="sess-" + task.task_id[:8], dispatch_lease_expires_at=None, lock_retained=0)
+                conn.execute("UPDATE requests SET status='succeeded', finished_at=?, updated_at=? WHERE request_id=?",
+                             (now, now, claim["request_id"]))
+                db.create_request(conn, now, "monitor", "monitor:" + task.task_id,
+                                  task_id=task.task_id, requested_by="scheduler")
+        finally:
+            conn.close()
+        self.kaneo.tasks[task.task_id]["status"] = "in-progress"
+        return SimpleNamespace(task=task, plan=ready.plan, ready=ready,
+            dispatch_request_id=claim["request_id"], dispatch_run_id=claim["run_id"],
+            session_marker=claim["context"]["session_marker"], evidence={},
+            context={**claim["context"], "backend": "pi", "exec_config": config})
 
     def make_in_review(self, **kw):
         """running → monitor claim → advance-task in-review → report → in_review。"""
@@ -1055,10 +1120,10 @@ class TaskFactory:
         req = self.active_request(task.task_id, kind="monitor")
         c = self.claim("monitor", request_id=req["request_id"])
         assert c["claimed"] is True, f"monitor claim 失败：{c}"
+        self.verify_execution(task.task_id, c, running.dispatch_run_id)
         current = self.get_task(task.task_id)
         delivery = current.get("delivery") or {}
         if delivery.get("workspace_version") == 1:
-            (Path(delivery["worktree_path"]) / "fixture-feature.py").write_text("VALUE = 42\n")
             committed = self.cli("delivery-commit", {
                 "task_id": task.task_id, "request_id": c["request_id"], "run_id": c["run_id"],
                 "expected_execution_run_id": running.dispatch_run_id})
@@ -1124,8 +1189,41 @@ class TaskFactory:
         return None
 
 
+def install_fixture_codex(env):
+    """Synthetic model transport; edits and frozen verify run in the real worker."""
+    env.codex_bin.write_text("#!" + sys.executable + "\n" + r'''
+import json, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+if '--version' in args:
+    print('codex-cli fixture'); sys.exit(0)
+sys.stdin.read()
+def emit(event): print(json.dumps(event), flush=True)
+emit({'type':'thread.started','thread_id':'fixture-thread'})
+emit({'type':'turn.started'})
+Path('fixture-feature.py').write_text('VALUE = 42\n')
+emit({'type':'item.completed','item':{'id':'edit','type':'file_change','status':'completed','changes':[]}})
+item = {'id':'verify','type':'command_execution','command':'git diff --check','status':'in_progress'}
+emit({'type':'item.started','item':dict(item)})
+result = subprocess.run('git diff --check', shell=True, capture_output=True, text=True)
+item.update(status='completed', exit_code=result.returncode, aggregated_output=result.stdout + result.stderr)
+emit({'type':'item.completed','item':item})
+report = {'status':'completed','summary':'Fixture task','checks':[{'command':'git diff --check','exit_code':result.returncode}],'questions':[]}
+emit({'type':'item.completed','item':{'id':'response','type':'agent_message','text':json.dumps(report)}})
+Path(args[args.index('-o')+1]).write_text(json.dumps(report))
+emit({'type':'turn.completed','usage':{}})
+''')
+    env.codex_bin.chmod(0o755)
+
+
 @pytest.fixture
 def factory(cli, tmp_env, fake_kaneo):
+    # Ordinary state fixtures use a supported, entirely local execution backend.
+    # Tests of pi defaults do not request this fixture; historical pi fixtures
+    # explicitly seed pre-upgrade state instead of sending a new pi execution.
+    cli("set-exec-config", {"backend": "codex", "codex": {
+        "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
+    install_fixture_codex(tmp_env)
     return TaskFactory(cli, tmp_env, fake_kaneo)
 
 

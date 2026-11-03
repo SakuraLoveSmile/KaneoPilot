@@ -9,9 +9,10 @@ import sqlite3
 import unittest
 from collections import Counter
 from datetime import timedelta
+from pathlib import Path
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import util  # noqa: E402
+from kanpilot import core, db, util  # noqa: E402
 
 PROJECT_ID = "fixture-project-feedback"
 
@@ -390,20 +391,75 @@ class TestAdvanceReviewGuard(BoardCase):
         self.assertEqual(result["task_status"], "done")
 
     def test_new_review_cycle_clears_conclusion(self):
-        task_id = self.running_task("taskadv-cycle0001")
+        task_id = "taskadvcycle0001"
+        from test_git_delivery import branch, make_repo
+        make_repo(self.root / "board-repo").rename(self.repos_root / "Feedback")
+        fixture = self.make_ready_task(task_id=task_id, publish=False)
+        plan = self.write_plan("Feedback", fixture["remote"], {
+            "source_sha256": fixture["source_sha256"],
+            "requirements_sha256": fixture["requirements_sha256"]},
+            body="# Review cycle fixture\n```verify\ntrue\n```\n")
+        self.publish(task_id, plan, source_sha256=fixture["source_sha256"],
+                     requirements_sha256=fixture["requirements_sha256"])
+        delivery = branch(self.repos_root / "Feedback", self.root / "worktrees", task_id=task_id,
+                          base="main")
+        conn = db.connect(self.db_path)
+        try:
+            core.update_delivery(conn, db.require_task(conn, task_id), util.now_iso(),
+                                 **delivery, mode="manual", workspace_version=1)
+        finally:
+            conn.close()
+        self.configure_codex_execution()
+        self.enqueue_dispatch(task_id)
+        dispatch = self.call("claim", {"stage": "dispatch", "executor": "kaneo-dispatch"})
+        self.assertTrue(dispatch["claimed"], dispatch)
+        identity = {"task_id": task_id, "run_id": dispatch["run_id"]}
+        evidence = self.valid_evidence(dispatch["context"], plan)
+        self.call("dispatch-prepare", dict(identity, evidence=evidence))
+        self.call("dispatch-begin-send", identity)
+        self.call("dispatch-confirm", dict(identity, evidence=dict(
+            evidence, message_visible=True, session_id="fixture-session", session_title="Codex fixture")))
+        view = self.task(task_id)
+        execution = Path(view["delivery"]["worktree_path"])
+        (execution / "feature.py").write_text("VALUE = 42\n")
+        self.seed_codex_report(task_id, dispatch["request_id"], execution)
+        queued = next(row for row in self.call("list-requests", {})["requests"]
+                      if row["task_id"] == task_id and row["kind"] == "monitor" and row["status"] == "queued")
+        monitor = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                                      "request_id": queued["request_id"]})
+        self.assertTrue(monitor["claimed"], monitor)
+        verification = {"task_id": task_id, "request_id": monitor["request_id"],
+                        "run_id": monitor["run_id"], "expected_execution_run_id": dispatch["run_id"]}
+        verdict = self.call("engine-verdict", dict(verification, expected_plan_sha256=view["plan_sha256"]))
+        self.assertTrue(verdict["verification_ok"], verdict)
+        self.assertEqual(self.call("delivery-commit", verification)["outcome"], "committed")
+        self.call("set-review-config", {"backend": "codex"})
         # 第一周期：进入评审并登记 changes_requested
         self.call(
             "advance-task",
-            {"task_id": task_id, "target": "in-review",
+            {"task_id": task_id, "run_id": monitor["run_id"], "target": "in-review",
              "expected_current": "in-progress"},
         )
+        self.call("report", {"request_id": monitor["request_id"], "run_id": monitor["run_id"],
+                             "outcome": "succeeded"})
+        queued = self.call("enqueue", {"task_id": task_id, "kind": "review"})["request"]
+        review = self.call("claim", {"stage": "review", "executor": "kaneo-review",
+                                     "request_id": queued["request_id"]})
+        self.assertTrue(review["claimed"], review)
+        review_identity = {"request_id": review["request_id"], "run_id": review["run_id"],
+                           "expected_execution_run_id": dispatch["run_id"]}
+        fix_task_id = self.call("create-review-fix", dict(review_identity,
+            source_task_id=task_id, title="Fix review findings", description="Bounded fix",
+            priority="high", dedupe_key="rk-2"))["fix_task_id"]
         report = self.write_report(task_id)
         self.call(
             "register-review",
-            {"task_id": task_id, "report_path": str(report),
+            {**review_identity, "task_id": task_id, "report_path": str(report),
              "conclusion": "changes_requested",
-             "fix_task_id": "fixtask000000000002", "review_key": "rk-2"},
+             "fix_task_id": fix_task_id, "review_key": "rk-2"},
         )
+        self.call("report", {"request_id": review["request_id"], "run_id": review["run_id"],
+                             "outcome": "succeeded"})
         view = self.task(task_id)
         self.assertEqual(
             view["review_summary"]["conclusion"], "changes_requested"
@@ -414,9 +470,13 @@ class TestAdvanceReviewGuard(BoardCase):
         # 修复后回到 running，再进新一轮 in-review
         self.fake.tasks[task_id]["status"] = "in-progress"
         self.set_task_status(task_id, "running")
+        queued = self.call("enqueue", {"task_id": task_id, "kind": "monitor"})["request"]
+        monitor = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                                      "request_id": queued["request_id"]})
+        self.assertTrue(monitor["claimed"], monitor)
         self.call(
             "advance-task",
-            {"task_id": task_id, "target": "in-review",
+            {"task_id": task_id, "run_id": monitor["run_id"], "target": "in-review",
              "expected_current": "in-progress"},
         )
         view = self.task(task_id)
@@ -425,7 +485,7 @@ class TestAdvanceReviewGuard(BoardCase):
         self.assertIsNone(view["review_report_path"])
         self.assertEqual(view["board_substatus"], "评审中")
         # fix_task_id / review_key 历史关联保留
-        self.assertEqual(view["fix_task_id"], "fixtask000000000002")
+        self.assertEqual(view["fix_task_id"], fix_task_id)
         self.assertEqual(view["review_key"], "rk-2")
 
 

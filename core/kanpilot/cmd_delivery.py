@@ -52,7 +52,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             from .engine import verdict
             execution_round = round_store.get_round(conn, task["task_id"], execution_run_id)
             codex = execution_round is not None and execution_round["backend"] == "codex"
-            strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
+            strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) in ("live", "shadow")
                       or repair.get("source_kind") in ("merge_conflict", "build_failure") or codex)
             verified = {}
             if strict:

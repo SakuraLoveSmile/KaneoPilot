@@ -117,20 +117,18 @@ def cmd_engine_status(ctx, payload: dict) -> dict:
 def cmd_engine_run(ctx, payload: dict) -> dict:
     """``engine run {stage?, executor_id?, lease_seconds?, mode?, intake?, spawn?, tick?, force?}`` (§5.27.1).
 
-    Long-lived foreground process: single-instance lease + heartbeat +
-    exponential backoff until SIGTERM/SIGINT. ``mode`` is the **process
-    default** engine_mode (缺省 legacy, the strangler-safe default); a project
-    with an explicit ``engine_mode`` overrides it, and ``force=true`` makes every
-    project use ``mode`` (drills/debug).
+    All projects run live by default. The only alternative is an explicit
+    process-wide shadow diagnostic (mode=shadow, force=true); it does not
+    migrate settings, issue business commands or launch workers.
     """
     import signal
     import threading
 
     from .loop import Reconciler
 
-    mode = payload.get("mode") or "legacy"
-    if mode not in ("legacy", "shadow", "live"):
-        raise util.bad_request("mode 必须为 legacy|shadow|live")
+    mode = payload.get("mode") or "live"
+    if mode not in ("shadow", "live") or (mode == "shadow" and payload.get("force") is not True):
+        raise util.bad_request("引擎仅支持 live；只读诊断须使用 mode=shadow 和 force=true")
     stop = threading.Event()
 
     def _stop(signum, frame):
@@ -162,18 +160,6 @@ def cmd_engine_run(ctx, payload: dict) -> dict:
                 pass
 
 
-def _goal_comparison(conn, task, *, deadline=None, heartbeat=None) -> dict:
-    """Shadow-only report-path verdict, kept beside the transcript result that still decides."""
-    from . import verdict
-    try:
-        goal = verdict.evaluate_goal_task(conn, task, deadline=deadline, heartbeat=heartbeat, isolated=True)
-    except (util.KanpilotError, OSError, ValueError, TypeError, KeyError, verdict.git_delivery.GitDeliveryError) as exc:
-        return {"verification_ok": False, "kind": "unconfirmed",
-                "failure_code": exc.code if isinstance(exc, util.KanpilotError) else "verification_identity_unconfirmed",
-                "detail": util.redact(getattr(exc, "message", str(exc)))}
-    return {key: goal.get(key) for key in ("verification_ok", "kind", "detail", "report_sha256", "execution_turn_id")}
-
-
 def cmd_engine_verdict(ctx, payload: dict) -> dict:
     """``engine-verdict {task_id, expected_execution_run_id, expected_plan_sha256, operation_id?}``
 
@@ -194,12 +180,11 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
         return task
 
     task = current_task()
-    mode = engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
-    action = core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")
+    engine_claim_scope.effective_mode(ctx.conn, task["project_id"])
     execution = round_store.get_round(ctx.conn, task["task_id"], task["run_id"])
     codex = execution is not None and execution["backend"] == "codex"
-    strict = mode == "live" or action or codex
-    receipt_key = "engine_verdict_shadow" if mode == "shadow" and not strict else "engine_verdict"
+    # Diagnostic mode must never weaken actual execution evidence.
+    receipt_key = "engine_verdict"
     operation_id = payload.get("operation_id") or util.new_uuid()
     prior = db.task_extra(task).get(receipt_key) or {}
     lease = constants.DEFAULT_LEASE_SECONDS
@@ -226,7 +211,8 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
             cmd_exec.cmd_heartbeat(ctx, {"request_id": payload["request_id"], "run_id": payload["run_id"]})
 
     try:
-        if (strict and prior.get("verification_ok") is True
+        if (prior.get("evidence_source") == ("codex_report" if codex else "goal_report")
+                and prior.get("verification_ok") is True
                 and prior.get("execution_run_id") == task["run_id"]
                 and prior.get("plan_sha256") == task["plan_sha256"]):
             if verdict.valid_committed_receipt(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat):
@@ -234,8 +220,8 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
                 # DB phase 3, so engine-verdict must preserve this passed receipt
                 # until delivery-commit registers the already frozen commit.
                 return dict(prior, ok=True, deduplicated=True)
-        # Live retries reuse only Plus report receipts; transcript receipts are audit data.
-        source = "codex_report" if codex else "goal_report" if strict else "plus_tool_results"
+        # Retries reuse only structured report receipts; transcript receipts are audit data.
+        source = "codex_report" if codex else "goal_report"
         if (prior.get("evidence_source") == source
                 and prior.get("operation_id") == operation_id
                 and verdict.receipt_evidence_current(ctx.conn, task, prior, deadline=deadline, heartbeat=heartbeat)):
@@ -247,13 +233,8 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
 
         if codex:
             result = verdict.evaluate_codex_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
-        elif strict:
-            result = verdict.evaluate_goal_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
         else:
-            result = verdict.evaluate_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat, isolated=mode == "shadow")
-        if mode == "shadow" and not strict:
-            # Shadow keeps the transcript verdict as the decider; the report verdict is recorded beside it.
-            result["goal_report_comparison"] = _goal_comparison(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
+            result = verdict.evaluate_goal_task(ctx.conn, task, deadline=deadline, heartbeat=heartbeat)
     except (util.KanpilotError, OSError, verdict.git_delivery.GitDeliveryError) as exc:
         if isinstance(exc, util.KanpilotError) and exc.code not in ("verification_identity_unconfirmed", "verification_unconfirmed"):
             raise
@@ -265,7 +246,7 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
         result["evidence_source"] = "codex_report"
     current = current_task()
     receipt = dict(result, operation_id=operation_id, execution_run_id=task["run_id"],
-                   plan_sha256=task["plan_sha256"], completed_at=util.now_iso(), engine_mode=mode)
+                   plan_sha256=task["plan_sha256"], completed_at=util.now_iso(), engine_mode="live")
     with db.write_txn(ctx.conn):
         current = current_task()
         db.set_extra(ctx.conn, current, receipt["completed_at"], **{receipt_key: receipt})
@@ -338,15 +319,9 @@ def cmd_session_view(ctx, payload: dict) -> dict:
 def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
     """``set-project-engine-mode {project_id, engine_mode, expected_revision?}`` (A12).
 
-    Persist a project's ``engine_mode`` (legacy|shadow|live, default legacy) at
-    the **mapping entry level** — ``project_mappings.items[pid].engine_mode`` —
-    *not* inside ``automation``. ``set-project-automation`` rebuilds the
-    ``automation`` sub-dict from a fixed key whitelist (``validate_automation``),
-    so anything stored inside it is silently dropped on the next automation
-    write. Entry-level keys survive both ``set-project-mapping`` (it spreads
-    ``existing_entry``) and ``set-project-automation`` (it only replaces the
-    ``automation`` key). No new column, no schema bump; reversible — old rows
-    lack the key and fall back to the process default.
+    Compatibility command: only live is accepted, with mapping revision CAS.
+    Historical saved modes are normalized on reads and migrated atomically
+    before the first live engine tick. Retired modes cannot be written back.
     """
     from .. import project_config
 
@@ -354,9 +329,9 @@ def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
     if not isinstance(project_id, str) or not project_id.strip():
         raise util.bad_request("project_id 必须为非空字符串")
     project_id = project_id.strip()
-    mode = payload.get("engine_mode", "legacy")
-    if mode not in ("legacy", "shadow", "live"):
-        raise util.bad_request("engine_mode 必须为 legacy|shadow|live")
+    mode = payload.get("engine_mode", "live")
+    if mode != "live":
+        raise util.bad_request("项目统一使用 live；legacy/shadow 项目模式已退役")
     expected = payload.get("expected_revision")
     if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int) or expected < 0):
         raise util.bad_request("expected_revision 须为非负整数")
@@ -368,6 +343,9 @@ def cmd_set_project_engine_mode(ctx, payload: dict) -> dict:
             raise util.KanpilotError("conflict", "project_mappings revision 不符")
         entry = dict(items[project_id])
         entry["engine_mode"] = mode
+        if isinstance(entry.get("automation"), dict) and "engine_mode" in entry["automation"]:
+            entry["automation"] = {key: value for key, value in entry["automation"].items()
+                                   if key != "engine_mode"}
         entry["updated_at"] = ctx.now_iso
         items[project_id] = entry
         db.set_setting(ctx.conn, project_config.SETTINGS_KEY,

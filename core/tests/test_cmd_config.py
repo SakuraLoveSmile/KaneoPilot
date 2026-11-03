@@ -216,6 +216,7 @@ class ExecConfigCommands(KanpilotTestCase):
 
     def test_set_does_not_affect_claimed_round_snapshot(self):
         fixture = self.make_ready_task()
+        block = self.configure_codex_execution()
         task_id = fixture["remote"]["id"]
         # v2 §5.22.4：发布后 hold → dispatch 排队须 confirm_plan。
         self.enqueue_dispatch(task_id)
@@ -224,13 +225,15 @@ class ExecConfigCommands(KanpilotTestCase):
         )
         self.assertTrue(claim["claimed"])
         run_id = claim["run_id"]
-        # v3（§5.23.3）：快照含 backend 字段。
-        self.assertEqual(claim["context"]["exec_config"],
-                         {"backend": "pi", **DEFAULTS})
-        self.assertEqual(claim["context"]["backend"], "pi")
+        # 新执行须使用支持结构化报告的后端；历史 pi 仍可读写配置。
+        frozen_at_claim = claim["context"]["exec_config"]
+        self.assertEqual(frozen_at_claim, {"backend": "codex", **block,
+            "sandbox": "workspace-write",
+            "execution_question_max_wait_seconds": constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS})
+        self.assertEqual(claim["context"]["backend"], "codex")
 
         # claim 后改配置（只影响新轮次）。
-        saved = self.call("set-exec-config", {"reasoning_effort": "low"})
+        saved = self.call("set-exec-config", {"backend": "pi", "reasoning_effort": "low"})
         self.assertEqual(saved["config"]["reasoning_effort"], "low")
 
         conn = sqlite3.connect(str(self.db_path))
@@ -241,8 +244,8 @@ class ExecConfigCommands(KanpilotTestCase):
             frozen = util.jload(row["config_json"])
         finally:
             conn.close()
-        # v3（§5.23.3）：pi 分支固化快照含 backend:"pi"。
-        self.assertEqual(frozen, {"backend": "pi", **DEFAULTS})  # 旧轮次快照仍是旧值
+        self.assertEqual(frozen, frozen_at_claim)
+        self.assertEqual(frozen["backend"], "codex")
         got = self.call("get-exec-config", {})
         self.assertEqual(got["config"]["reasoning_effort"], "low")
 

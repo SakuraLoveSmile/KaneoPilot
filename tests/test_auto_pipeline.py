@@ -383,16 +383,22 @@ class TestAutoPipeline(PiDesktopCase):
         self.assertEqual(self.primary,(git(self.repo,'rev-parse','HEAD'),git(self.repo,'status','--porcelain')))
         self.assertTrue(Path(value['delivery']['worktree_path']).exists())
 
-    def test_missing_verification_user_accepts_then_review(self):
-        self._adopt_and_plan();self.omit_exit=True;self._execute()
+    def test_missing_verification_cannot_be_manually_accepted(self):
+        self._adopt_and_plan(); self.omit_exit=True; self._execute()
         self._monitor_until(failure_code='verification_unconfirmed')
         value=self.task(TASK)
         self.assertEqual(value['failure_code'],'verification_unconfirmed')
-        self.assertIn('accept_verification',value['allowed_actions'])
-        self.call('resolve',{'task_id':TASK,'action':'accept_verification','note':'checked separately'})
-        self._monitor()
-        self.assertEqual(self.task(TASK)['status'],'in_review',self.task(TASK))
-        self.assertEqual(len(self.task(TASK)['delivery']['commits']),1)
+        self.assertNotIn('accept_verification',value['allowed_actions'])
+        before = dict(value['delivery'])
+        with self.assertRaises(util.KanpilotError) as rejected:
+            self.call('resolve',{'task_id':TASK,'action':'accept_verification','note':'checked separately'})
+        self.assertEqual(rejected.exception.code, 'conflict')
+        after = self.task(TASK)
+        self.assertEqual(after['status'], 'needs_user')
+        self.assertEqual(after['run_id'], value['run_id'])
+        self.assertEqual(after['delivery'], before)
+        self.assertTrue(Path(before['worktree_path']).exists())
+
 
     def test_fix_round_limit_and_manual_takeover(self):
         self.call('set-project-automation',{'project_id':PROJECT,'automation':{'enabled':True,'max_fix_rounds':0}})

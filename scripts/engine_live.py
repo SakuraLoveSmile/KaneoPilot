@@ -14,11 +14,13 @@ Usage::
     python3 scripts/engine_live.py --db /path/kaneo.db \\
         --project-id <kaneo-project-id> --repository /path/to/local/repo \\
         [--max-active-tasks 2] [--lease-seconds 1200] \\
-        [--configure-only] [--no-spawn] [--mode live|shadow]
+        [--configure-only] [--no-spawn] [--engine-mode live]
 
 ``--configure-only`` applies mapping/automation/global + prints the preflight
 without starting the long-lived loop. ``--no-spawn`` schedules but never spawns
-workers (rely on an external App scheduler). ``--mode shadow`` previews only.
+workers (rely on an external App scheduler). This launcher configures live
+automation. For diagnostics without configuration writes, use the core command
+``engine run --json '{"mode":"shadow","force":true}'`` directly.
 """
 from __future__ import annotations
 
@@ -60,7 +62,7 @@ def configure(db_path, project_id, repository, max_active, engine_mode):
     }
     _run("set-project-automation", {"project_id": project_id, "automation": automation}, db_path)
     steps.append(f"automation enabled for {project_id} (auto_confirm_plan=true, fix_rounds<=2)")
-    # A12: per-project engine_mode (legacy|shadow|live; the engine drives only live).
+    # Compatibility command; ordinary projects always use the live engine.
     _run("set-project-engine-mode", {"project_id": project_id, "engine_mode": engine_mode}, db_path)
     steps.append(f"engine_mode = {engine_mode} for {project_id}")
     return steps
@@ -87,7 +89,7 @@ def main(argv=None):
     parser.add_argument("--repository", required=True)
     parser.add_argument("--max-active-tasks", type=int, default=2)
     parser.add_argument("--lease-seconds", type=int, default=1200)
-    parser.add_argument("--engine-mode", choices=("legacy", "shadow", "live"), default="live")
+    parser.add_argument("--engine-mode", choices=("live",), default="live")
     parser.add_argument("--configure-only", action="store_true")
     parser.add_argument("--no-spawn", action="store_true")
     args = parser.parse_args(argv)

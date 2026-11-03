@@ -18,6 +18,7 @@ Run: ``cd core && python3 -m pytest tests/test_resume_auto_takeover.py -q``.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, util  # noqa: E402
@@ -244,17 +245,20 @@ class TestResumeAutoEngineClosure(ResumeAutoCase):
 
     def test_engine_drives_the_task_again_after_resume(self):
         task_id = "taskresumeauto00007"
-        self._managed(task_id)
+        self.make_ready_task(task_id=task_id)
+        self.seed_auto_confirmation(task_id)
         self._live()
         self._take_over(task_id)
         self.assertEqual(self._actions(task_id), [])
 
         self.call("restore-task", {"task_id": task_id, "resume_auto": True})
-        actions = self._actions(task_id)
+        with patch("kanpilot.automation_policy.automation_preflight", return_value=[]):
+            actions = self._actions(task_id)
         # 交回后引擎重新驱动：ready + 计划就绪 → 确认并安排执行（enqueue dispatch）。
         self.assertTrue(actions, actions)
         self.assertTrue(any(a["action"] == "confirm_plan" for a in actions), actions)
-        self.assertTrue(any(a.get("command") == "enqueue" for a in actions), actions)
+        self.assertTrue(any(a.get("command") == "enqueue" and a.get("executed") for a in actions), actions)
+        self.assertEqual(len(self._dispatch_requests(task_id)), 1)
 
     def test_dismiss_then_resume_roundtrip(self):
         """经真实 resolve {action:"dismiss"} 写入，再 resume_auto 交回。"""

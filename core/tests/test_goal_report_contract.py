@@ -16,7 +16,9 @@
   与租约，再只读重取报告核 hash；`decision=complete` 时确定性核对报告
   底线（status/integrity/execution/verdict、审查项非空且 ID 唯一且全
   `met`、引用 ID 存在）；`advance-task in-progress -> in-review` 对
-  `pi_desktop` 硬闸（绕过 monitor/旧判定/报告变化 → conflict，远端不动）。
+  当前公共推进须先经真实 Plus 报告与 `engine-verdict`，核对冻结计划、执行
+  工作树和源码；旧 Goal evaluation 归属矩阵直接核验保留的历史审计函数。
+  缺严格回执、报告变化、计划或源码漂移均不得触碰远端。
   幂等：同签名不重复登记。`execution_run_id` 与 `monitor_run_id` 不可互换。
 - **T5-D 没有可用报告就没有完成**：`ready+fallback` 等同没有报告；
   `pending` 宽限与过期；报告不可读/损坏 → 原因区别于「已验证失败」；
@@ -36,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -243,6 +246,77 @@ class _GoalReportCase(KanpilotTestCase):
         exc = self.call_err(command, payload)
         return exc.code, str(exc.message)
 
+    def freeze_verifiable_round(self):
+        """Freeze real plan/tree/run evidence for the current Plus report gate."""
+        from kanpilot import git_delivery
+        repo = self.repos_root / "Feedback"
+        repo.mkdir(parents=True, exist_ok=True)
+        for args in (("init", "-b", "main"), ("config", "user.name", "Goal Test"),
+                     ("config", "user.email", "goal@example.invalid"),
+                     ("commit", "--allow-empty", "-m", "baseline")):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        worktree = self.root / "goal-worktree"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree)],
+                       check=True, capture_output=True)
+        (worktree / "feature.py").write_text("VALUE = 1\n")
+        remote_task = self.fake.tasks.get(TASK_ID) or self.fake.add_task(
+            TASK_ID, "fixture-project-feedback", status="in-progress")
+        _, requirements_sha, _ = self.make_source_snapshot(remote_task)
+        plan = self.plan_root / "Feedback" / "p.md"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text("---\ntask_id: " + TASK_ID + "\nproject_id: fixture-project-feedback\n"
+                        "repository: " + str(repo) + "\nrequirements_sha256: " + requirements_sha
+                        + "\n---\n# Plan\n```verify\npytest\n```\n")
+        self.plan_sha = util.sha256_file(plan)
+        run_dir = self.runs_root / TASK_ID / RUN_ID
+        job = json.loads((run_dir / "job.json").read_text())
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                row = round_store.require_round(conn, TASK_ID, RUN_ID)
+                config = util.jload(row["config_json"])
+                backend = row["backend"]
+                db.update_task(conn, TASK_ID, util.now_iso(), plan_sha256=self.plan_sha,
+                               requirements_sha256=requirements_sha, session_id=SESSION_ID,
+                               sent=1, send_state="sent")
+                db.set_extra(conn, db.require_task(conn, TASK_ID), util.now_iso(),
+                             plan_verify={"plan_sha256": self.plan_sha, "commands": ["pytest"]})
+                round_store.mark_started(conn, TASK_ID, RUN_ID, util.now_iso(),
+                                         worktree_path=str(worktree))
+                round_store.upsert_discovered(conn, TASK_ID, RUN_ID, util.now_iso(),
+                                               backend=backend, session_id=SESSION_ID)
+        finally:
+            conn.close()
+        job.update(backend=backend, config=config, completion_policy="command_verification", plan_sha256=self.plan_sha,
+                   turn_id=EXEC_TURN_ID, verification_evidence_version=1,
+                   verification_source_sha256=git_delivery.source_state_sha256(worktree))
+        spec = {**job, "plan_path": str(plan), "repository": str(repo),
+                "cwd": str(worktree), "runs_dir": str(run_dir)}
+        (run_dir / "job.json").write_text(json.dumps(job))
+        (run_dir / "spec.json").write_text(json.dumps(spec))
+        self.server.is_running = False
+        self.server.current_turn = EXEC_TURN_ID
+        self.server.turn_status = "completed"
+        return worktree
+
+    def verify_report(self):
+        return self.call("engine-verdict", {"task_id": TASK_ID,
+            "expected_execution_run_id": RUN_ID, "expected_plan_sha256": self.plan_sha})
+
+    def verification_report(self, exit_code=0):
+        return goal_report(checks=[{"id": "k1", "command": "pytest", "exitCode": exit_code,
+                                    "result": "passed" if exit_code == 0 else "failed"}],
+                           verdict="met" if exit_code == 0 else "partial")
+
+    def historical_goal_gate(self, payload):
+        """Audit retired Goal evaluation provenance; public advance now needs a strict receipt first."""
+        from kanpilot import cli, cmd_remote
+        ctx = cli.Context(self.db_path)
+        try:
+            cmd_remote._require_goal_gate(ctx, payload, db.require_task(ctx.conn, TASK_ID))
+        finally:
+            ctx.close()
+
     # ------------------------------------------------------- record 助手
     def record(self, request_id, *, decision="complete", reviews=None,
                reason="计划验收逐项通过", **overrides):
@@ -251,7 +325,7 @@ class _GoalReportCase(KanpilotTestCase):
             "execution_run_id": RUN_ID,
             "monitor_request_id": request_id,
             "monitor_run_id": MONITOR_RUN_ID,
-            "plan_sha256": PLAN_SHA,
+            "plan_sha256": getattr(self, "plan_sha", PLAN_SHA),
             "report_id": "report-1",
             "report_sha256": REPORT_SHA,
             "decision": decision,
@@ -288,7 +362,8 @@ def _goal_server():
 class TestGoalReportReadStates(_GoalReportCase):
     def test_formal_envelope_read_evaluate_and_advance(self):
         self.seed_round()
-        self.server.goal_report = formal_report_payload()
+        self.freeze_verifiable_round()
+        self.server.goal_report = formal_report_payload(checks=self.verification_report()["checks"])
         self.fake.add_task(TASK_ID, "fixture-project-feedback", status="in-progress")
         out = self.call("get-goal-report", {"task_id": TASK_ID, "run_id": RUN_ID})
         self.assertEqual(out["state"], "ready")
@@ -298,6 +373,7 @@ class TestGoalReportReadStates(_GoalReportCase):
         self.assertEqual(pi_desktop_backend.report_identity(out["report"])["contract_hash"], CONTRACT_HASH)
         request = self.seed_monitor_claim()
         evaluation = self.record(request)
+        self.assertTrue(self.verify_report()["verification_ok"])
         advanced = self.call("advance-task", {
             "task_id": TASK_ID, "target": "in-review", "expected_current": "in-progress",
             "monitor_request_id": request, "monitor_run_id": MONITOR_RUN_ID,
@@ -883,7 +959,7 @@ class TestGoalEvaluationIdempotency(_GoalReportCase):
 # ==================================================== 推进硬闸（T5-C）
 
 class TestAdvanceTaskGoalGate(_GoalReportCase):
-    """`advance-task in-progress -> in-review` 对 pi_desktop 的硬闸。"""
+    """Current strict-report advance plus explicit audit of the retired Goal evaluation gate."""
 
     def _advance(self, event_id, request_id, **overrides):
         payload = {
@@ -894,7 +970,9 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
             "evaluation_event_id": event_id,
         }
         payload.update(overrides)
-        return self.call_err_code("advance-task", payload)
+        with self.assertRaises(util.KanpilotError) as caught:
+            self.historical_goal_gate(payload)
+        return caught.exception.code, caught.exception.message
 
     def _register(self):
         self.seed_round()
@@ -906,128 +984,174 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
     def _automation_task(self, *, manual_takeover=False, managed=True,
                          completion_policy="command_verification", exit_code=0):
         run_dir, _ = self.seed_round()
+        self.freeze_verifiable_round()
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
                 db.set_extra(conn, db.require_task(conn, TASK_ID), util.now_iso(),
                              automation=({"authorized_by": "automation",
                                           "manual_takeover": manual_takeover} if managed else {}),
-                             plan_verify={"plan_sha256": PLAN_SHA,
+                             plan_verify={"plan_sha256": self.plan_sha,
                                           "commands": ["pytest"]})
         finally:
             conn.close()
         if completion_policy is not None:
             job_path = run_dir / dsh_events.JOB_NAME
             job = json.loads(job_path.read_text(encoding="utf-8"))
-            job.update(completion_policy=completion_policy, plan_sha256=PLAN_SHA)
+            job.update(completion_policy=completion_policy, plan_sha256=self.plan_sha)
             job_path.write_text(json.dumps(job), encoding="utf-8")
         events_path = run_dir / dsh_events.EVENT_LOG_NAME
         events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
         events[-1]["seq"] = 4
         events.insert(-1, {"v": 1, "seq": 3, "ts": util.now_iso(),
-                          "type": "command_output", "name": "Bash",
+                          "type": "command_output", "name": "Bash", "turn_id": EXEC_TURN_ID,
                           "input": {"command": "pytest"}, "exit_code": exit_code,
                           "output": "validation result"})
         events_path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        if completion_policy is None:
+            job_path = run_dir / dsh_events.JOB_NAME
+            job = json.loads(job_path.read_text())
+            job.pop("completion_policy", None)
+            job_path.write_text(json.dumps(job))
+        self.set_report(self.verification_report(exit_code))
         self.fake.add_task(TASK_ID, "fixture-project-feedback", status="in-progress")
         return self.seed_monitor_claim()
 
-    def test_automatic_command_verification_advances_without_goal_evaluation(self):
-        """自动 monitor 核命令后推进，不能被旧手动 Goal 门挡死。"""
-        from kanpilot import auto_monitor
-        request_id = self._automation_task()
-        task = self.call("get-task", {"task_id": TASK_ID})["task"]
-        task["attempts"] = [{"stage": "dispatch", "request_id": "execution-request",
-                             "run_id": RUN_ID}]
+    def _controller(self, request_id):
+        import time
         case = self
-
         class Controller:
-            claim = {"request_id": request_id, "run_id": MONITOR_RUN_ID}
+            claim = {"request_id": request_id, "run_id": MONITOR_RUN_ID,
+                     "context": {"lease_seconds": 180}}
+            clock = staticmethod(time.monotonic)
+            deadline = time.monotonic() + 60
+
+            def identity(self):
+                return {"request_id": request_id, "run_id": MONITOR_RUN_ID}
+
+            def heartbeat(self, **_):
+                return case.call("heartbeat", self.identity())
 
             def call(self, command, payload):
-                # 成本采样不参与本次命令验证/推进验收，其他路径均走真实核心。
                 return {} if command == "record-cost" else case.call(command, payload)
 
             def report(self, outcome, **payload):
-                return case.call("report", dict(self.claim, outcome=outcome, **payload))
+                return case.call("report", dict(self.identity(), outcome=outcome, **payload))
+        return Controller()
 
-        auto_monitor._complete(Controller(), task, {"backend": "pi_desktop"},
-                               "in-progress", [{"id": "verify-1", "seq": 1,
-                               "type": "command_output", "tool": {
-                                   "input": {"command": "pytest"}, "exit_code": 0}}])
-        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
-        self.assertEqual(self.server.goal_report_calls, [])
-
-    def test_automatic_failed_command_cannot_advance_without_goal_evaluation(self):
+    def test_automatic_structured_report_advances_without_goal_evaluation(self):
         from kanpilot import auto_monitor
         request_id = self._automation_task()
         task = self.call("get-task", {"task_id": TASK_ID})["task"]
-        case = self
+        task["attempts"] = [{"stage": "dispatch", "request_id": "execution-request", "run_id": RUN_ID}]
+        auto_monitor._complete(self._controller(request_id), task, {"backend": "pi_desktop"},
+                               "in-progress", [])
+        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
+        self.assertTrue(self.server.goal_report_calls)
 
-        class Controller:
-            def call(self, command, payload):
-                return case.call(command, payload)
-
-            def report(self, outcome, **payload):
-                return case.call("report", dict(request_id=request_id,
-                    run_id=MONITOR_RUN_ID, outcome=outcome, **payload))
-
-        auto_monitor._complete(Controller(), task, {"backend": "pi_desktop"},
-                               "in-progress", [{"id": "verify-1", "seq": 1,
-                               "type": "command_output", "tool": {
-                                   "input": {"command": "pytest"}, "exit_code": 1}}])
+    def test_automatic_failed_report_cannot_advance_despite_passing_transcript(self):
+        from kanpilot import auto_monitor
+        request_id = self._automation_task(exit_code=1)
+        task = self.call("get-task", {"task_id": TASK_ID})["task"]
+        auto_monitor._complete(self._controller(request_id), task, {"backend": "pi_desktop"},
+                               "in-progress", [{"type": "command_output", "tool": {
+                                   "input": {"command": "pytest"}, "exit_code": 0}}])
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
         self.assertEqual(self.call("get-task", {"task_id": TASK_ID})["task"]["failure_code"],
                          "verification_unconfirmed")
 
     def test_automatic_progress_without_current_monitor_claim_is_rejected(self):
         self._automation_task()
+        self.assertTrue(self.verify_report()["verification_ok"])
         code, _ = self.call_err_code("advance-task", {
             "task_id": TASK_ID, "target": "in-review", "expected_current": "in-progress",
         })
         self.assertEqual(code, "stale_run")
         self.assertEqual(self.fake.requests_log, [])
 
-    def test_historical_no_policy_keeps_goal_report_gate(self):
+    def test_historical_audit_no_policy_keeps_goal_report_gate(self):
         self._automation_task(manual_takeover=True, completion_policy=None)
-        code, message = self.call_err_code("advance-task", {
-            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
-            "target": "in-review", "expected_current": "in-progress",
-        })
-        self.assertEqual(code, "conflict")
-        self.assertIn("绕过 monitor", message)
+        with self.assertRaises(util.KanpilotError) as caught:
+            self.historical_goal_gate({"task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+                "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertIn("绕过 monitor", caught.exception.message)
         self.assertEqual(self.fake.requests_log, [])
 
-    def test_new_nonmanaged_round_uses_command_gate_without_goal_report(self):
+    def test_new_nonmanaged_round_requires_structured_report(self):
         self._automation_task(managed=False)
+        self.assertTrue(self.verify_report()["verification_ok"])
         result = self.call("advance-task", {
             "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
             "target": "in-review", "expected_current": "in-progress",
         })
         self.assertEqual(result["task_status"], "in_review")
-        self.assertEqual(self.server.goal_report_calls, [])
+        self.assertTrue(self.server.goal_report_calls)
 
     def test_command_policy_does_not_change_after_manual_takeover(self):
         self._automation_task(manual_takeover=True)
+        self.assertTrue(self.verify_report()["verification_ok"])
         result = self.call("advance-task", {
             "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
             "target": "in-review", "expected_current": "in-progress",
         })
         self.assertEqual(result["task_status"], "in_review")
-        self.assertEqual(self.server.goal_report_calls, [])
+        self.assertTrue(self.server.goal_report_calls)
+
+    def test_report_without_current_core_verdict_cannot_advance(self):
+        self._automation_task(managed=False)
+        code, message = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(code, "conflict")
+        self.assertIn("核心判定", message)
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_passing_transcript_cannot_replace_missing_structured_report(self):
+        self._automation_task(managed=False)
+        self.set_report(None)
+        verdict = self.verify_report()
+        self.assertFalse(verdict["verification_ok"])
+        self.assertEqual(verdict["failure_code"], "verification_unconfirmed")
+        code, _ = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(code, "conflict")
+        self.assertEqual(self.fake.requests_log, [])
+
+    def test_plan_or_source_drift_invalidates_passed_report_verdict(self):
+        self._automation_task(managed=False)
+        verdict = self.verify_report()
+        self.assertTrue(verdict["verification_ok"])
+        plan = self.plan_root / "Feedback" / "p.md"
+        original = plan.read_text()
+        plan.write_text(original + "\nChanged frozen plan\n")
+        code, _ = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(code, "verification_identity_unconfirmed")
+        plan.write_text(original)
+        (Path(verdict["binding"]["worktree_path"]) / "feature.py").write_text("VALUE = 2\n")
+        code, _ = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
+            "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(code, "conflict")
+        self.assertEqual(self.fake.requests_log, [])
 
     def test_core_command_gate_rejects_failed_persisted_verification(self):
         self._automation_task(managed=False, exit_code=1)
+        self.assertFalse(self.verify_report()["verification_ok"])
         code, message = self.call_err_code("advance-task", {
             "task_id": TASK_ID, "run_id": MONITOR_RUN_ID,
             "target": "in-review", "expected_current": "in-progress",
         })
         self.assertEqual(code, "conflict")
-        self.assertIn("验证命令", message)
+        self.assertIn("核心判定", message)
         self.assertEqual(self.fake.requests_log, [])
 
     def test_core_command_gate_rejects_changed_plan_snapshot(self):
         self._automation_task(managed=False)
+        self.assertTrue(self.verify_report()["verification_ok"])
         job_path = self.runs_root / TASK_ID / RUN_ID / dsh_events.JOB_NAME
         job = json.loads(job_path.read_text(encoding="utf-8"))
         job["plan_sha256"] = "different-plan"
@@ -1037,11 +1161,12 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
             "target": "in-review", "expected_current": "in-progress",
         })
         self.assertEqual(code, "conflict")
-        self.assertIn("计划哈希", message)
+        self.assertIn("核心判定", message)
         self.assertEqual(self.fake.requests_log, [])
 
     def test_command_gate_rejects_foreign_session_and_round_evidence(self):
         self._automation_task(managed=False)
+        self.assertTrue(self.verify_report()["verification_ok"])
         path = self.runs_root / TASK_ID / RUN_ID / dsh_events.EVENT_LOG_NAME
         original = path.read_text(encoding="utf-8")
         for index, field, value in ((0, "session_id", "foreign-session"),
@@ -1056,31 +1181,35 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
                     "target": "in-review", "expected_current": "in-progress",
                 })
                 self.assertEqual(code, "conflict")
-                self.assertIn("身份不符", message)
+                self.assertIn("核心判定", message)
                 self.assertEqual(self.fake.requests_log, [])
         path.write_text(original, encoding="utf-8")
 
     def test_direct_call_without_monitor_material_is_rejected(self):
         self.seed_round()
-        self.set_report(goal_report())
+        self.freeze_verifiable_round()
+        self.set_report(self.verification_report())
+        self.assertTrue(self.verify_report()["verification_ok"])
         code, message = self.call_err_code(
             "advance-task",
             {"task_id": TASK_ID, "target": "in-review",
              "expected_current": "in-progress"},
         )
-        self.assertEqual(code, "conflict")
-        self.assertIn("绕过 monitor", message)
+        self.assertEqual(code, "stale_run")
+        self.assertIn("monitor", message)
         # 远端未动。
         self.assertEqual(
             self.fake.tasks.get(TASK_ID)["status"]
-            if TASK_ID in self.fake.tasks else None, None
+            if TASK_ID in self.fake.tasks else None, "in-progress"
         )
 
     def test_valid_material_passes_and_touches_remote_once(self):
         self.seed_round()
-        self.set_report(goal_report())
+        self.freeze_verifiable_round()
+        self.set_report(self.verification_report())
         request_id = self.seed_monitor_claim()
         out = self.record(request_id)
+        self.assertTrue(self.verify_report()["verification_ok"])
         # advance-task 需要远端任务存在（in-progress）。
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1127,6 +1256,14 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
                              monitor_run_id=second_claim["run_id"])
         self.assertTrue(second["deduplicated"])
         self.assertEqual(second["event_id"], first["event_id"])
+        # Audit adoption under the retired policy before entering the new
+        # public completion path with a freshly verified structured report.
+        self.historical_goal_gate({"task_id": TASK_ID,
+            "monitor_request_id": second_request, "monitor_run_id": second_claim["run_id"],
+            "evaluation_event_id": second["event_id"]})
+        self.freeze_verifiable_round()
+        self.set_report(self.verification_report())
+        self.assertTrue(self.verify_report()["verification_ok"])
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
         )
@@ -1151,7 +1288,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertEqual(adoption[0]["monitor_request_id"], second_request)
         self.assertEqual(adoption[0]["monitor_run_id"], second_claim["run_id"])
 
-    def test_event_without_monitor_registration_provenance_is_rejected(self):
+    def test_historical_audit_event_without_monitor_registration_provenance_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1179,7 +1316,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
                         )
                     conn.close()
 
-    def test_stale_monitor_claim_is_rejected_before_remote(self):
+    def test_historical_audit_stale_monitor_claim_is_rejected_before_remote(self):
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1200,7 +1337,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertEqual(code, "stale_run")
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
-    def test_old_evaluation_from_another_round_is_rejected(self):
+    def test_historical_audit_old_evaluation_from_another_round_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1222,7 +1359,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertEqual(code, "conflict")
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
-    def test_changed_report_is_rejected(self):
+    def test_historical_audit_changed_report_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1234,7 +1371,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertIn("report_sha256", message)
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
-    def test_non_completed_execution_terminal_is_rejected(self):
+    def test_historical_audit_non_completed_execution_terminal_is_rejected(self):
         request_id, event_id = self._register()
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
@@ -1265,7 +1402,7 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
         self.assertIn("终态", message)
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
-    def test_event_from_another_monitor_claim_is_rejected(self):
+    def test_historical_audit_event_from_another_monitor_claim_is_rejected(self):
         """判定中的原 monitor_run_id 必须匹配历史登记请求。"""
         request_id, event_id = self._register()
         self.fake.add_task(
@@ -1296,19 +1433,17 @@ class TestAdvanceTaskGoalGate(_GoalReportCase):
 
 # ==================================================== 旧后端不变（pi）
 
-class TestPiBackendUnchanged(_GoalReportCase):
-    def test_pi_round_advance_keeps_old_interface(self):
-        """pi 后端轮次不要求 monitor claim/evaluation event（接口不变）。"""
+class TestHistoricalPiBackendBoundaries(_GoalReportCase):
+    def test_historical_pi_round_cannot_advance_without_strict_report(self):
         self.seed_round(backend="pi")
-        self.fake.add_task(
-            TASK_ID, "fixture-project-feedback", status="in-progress"
-        )
-        result = self.call("advance-task", {
-            "task_id": TASK_ID, "target": "in-review",
-            "expected_current": "in-progress",
-        })
-        self.assertEqual(result["kaneo_status"], "in-review")
-        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-review")
+        self.freeze_verifiable_round()
+        self.fake.add_task(TASK_ID, "fixture-project-feedback", status="in-progress")
+        code, message = self.call_err_code("advance-task", {
+            "task_id": TASK_ID, "target": "in-review", "expected_current": "in-progress"})
+        self.assertEqual(code, "conflict")
+        self.assertIn("核心判定", message)
+        self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
+        self.assertEqual(self.fake.requests_log, [])
 
     def test_review_precondition_preserved_for_pi(self):
         self.seed_round(backend="pi")
@@ -1425,7 +1560,7 @@ class TestGoalDecisionVariants(_GoalReportCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["decision"], "uncertain")
 
-    def test_ai_uncertain_is_never_a_completion(self):
+    def test_historical_audit_ai_uncertain_is_never_a_completion(self):
         """AI uncertain 不得被硬闸当完成放行（进入 in-review 必须 complete）。"""
         self.seed_round()
         self.set_report(goal_report())
@@ -1437,15 +1572,16 @@ class TestGoalDecisionVariants(_GoalReportCase):
         self.fake.add_task(
             TASK_ID, "fixture-project-feedback", status="in-progress"
         )
-        code, message = self.call_err_code("advance-task", {
+        with self.assertRaises(util.KanpilotError) as caught:
+            self.historical_goal_gate({
             "task_id": TASK_ID, "target": "in-review",
             "expected_current": "in-progress",
             "monitor_request_id": request_id,
             "monitor_run_id": MONITOR_RUN_ID,
             "evaluation_event_id": out["event_id"],
-        })
-        self.assertEqual(code, "conflict")
-        self.assertIn("decision", message)
+            })
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertIn("decision", caught.exception.message)
         self.assertEqual(self.fake.tasks[TASK_ID]["status"], "in-progress")
 
     def test_display_names_never_used_for_identity_or_completion(self):

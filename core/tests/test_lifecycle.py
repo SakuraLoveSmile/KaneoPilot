@@ -10,7 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import util  # noqa: E402
+from kanpilot import core, db, util  # noqa: E402
 
 
 class TestPublishPlan(KanpilotTestCase):
@@ -92,6 +92,53 @@ class TestPublishPlan(KanpilotTestCase):
 
 
 class TestReviewAndAdvance(KanpilotTestCase):
+    def _verified_running_task(self):
+        from test_git_delivery import branch, make_repo
+        make_repo(self.root / "lifecycle-repo").rename(self.repos_root / "Feedback")
+        fixture = self.make_ready_task(publish=False)
+        task_id = fixture["remote"]["id"]
+        plan = self.write_plan("Feedback", fixture["remote"], {
+            "source_sha256": fixture["source_sha256"],
+            "requirements_sha256": fixture["requirements_sha256"]},
+            body="# Lifecycle fixture\n```verify\ntrue\n```\n")
+        self.publish(task_id, plan, source_sha256=fixture["source_sha256"],
+                     requirements_sha256=fixture["requirements_sha256"])
+        delivery = branch(self.repos_root / "Feedback", self.root / "worktrees",
+                          task_id=task_id, base="main")
+        conn = db.connect(self.db_path)
+        try:
+            core.update_delivery(conn, db.require_task(conn, task_id), util.now_iso(),
+                                 **delivery, mode="manual", workspace_version=1)
+        finally:
+            conn.close()
+        self.configure_codex_execution()
+        self.enqueue_dispatch(task_id)
+        dispatch = self.call("claim", {"stage": "dispatch", "executor": "kaneo-dispatch"})
+        self.assertTrue(dispatch["claimed"], dispatch)
+        identity = {"task_id": task_id, "run_id": dispatch["run_id"]}
+        evidence = self.valid_evidence(dispatch["context"], plan)
+        self.call("dispatch-prepare", dict(identity, evidence=evidence))
+        self.call("dispatch-begin-send", identity)
+        self.call("dispatch-confirm", dict(identity, evidence=dict(evidence,
+            message_visible=True, session_id="fixture-session", session_title="Codex fixture")))
+        view = self.task(task_id)
+        execution = Path(view["delivery"]["worktree_path"])
+        (execution / "feature.py").write_text("VALUE = 42\n")
+        self.seed_codex_report(task_id, dispatch["request_id"], execution)
+        queued = next(row for row in self.requests(status="queued")
+                      if row["task_id"] == task_id and row["kind"] == "monitor")
+        monitor = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                                      "request_id": queued["request_id"]})
+        self.assertTrue(monitor["claimed"], monitor)
+        verification = {"task_id": task_id, "request_id": monitor["request_id"],
+                        "run_id": monitor["run_id"], "expected_execution_run_id": dispatch["run_id"]}
+        verdict = self.call("engine-verdict", dict(verification, expected_plan_sha256=view["plan_sha256"]))
+        self.assertTrue(verdict["verification_ok"], verdict)
+        self.assertEqual(self.call("delivery-commit", verification)["outcome"], "committed")
+        self.call("set-review-config", {"backend": "codex"})
+        fixture["monitor"] = monitor
+        return fixture
+
     def _running_task(self):
         fixture = self.make_ready_task()
         task_id = fixture["remote"]["id"]
@@ -103,12 +150,13 @@ class TestReviewAndAdvance(KanpilotTestCase):
         return fixture
 
     def test_advance_to_review_then_done(self):
-        fixture = self._running_task()
+        fixture = self._verified_running_task()
         task_id = fixture["remote"]["id"]
+        monitor = fixture["monitor"]
         result = self.call(
             "advance-task",
             {"task_id": task_id, "target": "in-review",
-             "expected_current": "in-progress"},
+             "run_id": monitor["run_id"], "expected_current": "in-progress"},
         )
         self.assertEqual(result["task_status"], "in_review")
         self.assertEqual(result["kaneo_status"], "in-review")
@@ -118,6 +166,8 @@ class TestReviewAndAdvance(KanpilotTestCase):
         reqs = [r for r in self.requests(status="queued")
                 if r["kind"] == "review" and r["task_id"] == task_id]
         self.assertEqual(len(reqs), 1)
+        self.call("report", {"request_id": monitor["request_id"],
+                             "run_id": monitor["run_id"], "outcome": "succeeded"})
         # then done
         self.fake.tasks[task_id]["status"] = "in-review"
         result = self.call(
@@ -128,13 +178,13 @@ class TestReviewAndAdvance(KanpilotTestCase):
         self.assertEqual(result["task_status"], "done")
 
     def test_advance_remote_conflict_blocks(self):
-        fixture = self._running_task()
+        fixture = self._verified_running_task()
         task_id = fixture["remote"]["id"]
         self.fake.tasks[task_id]["status"] = "done"  # unexpected
         exc = self.call_err(
             "advance-task",
             {"task_id": task_id, "target": "in-review",
-             "expected_current": "in-progress"},
+             "run_id": fixture["monitor"]["run_id"], "expected_current": "in-progress"},
         )
         self.assertEqual(exc.code, "remote_conflict")
         view = self.task(task_id)

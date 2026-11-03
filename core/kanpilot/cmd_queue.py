@@ -51,13 +51,19 @@ def clear_review_result_inline(conn, task, now, actor="user"):
     return db.require_task(conn, task["task_id"])
 
 
-def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=None):
+def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=None, preflight=None):
     if not db.task_schedulable(task) or task["status"] != "ready":
         raise util.KanpilotError("conflict", "任务当前不可确认执行")
     _require_current_plan(task)
     _require_unsent_dispatch(task)
     if expected_plan_sha256 != task["plan_sha256"]:
         raise util.KanpilotError("conflict", "计划哈希与当前登记版本不符，请重新查看计划")
+    if actor == "automation":
+        from . import automation_policy
+        reason = automation_policy.auto_confirm_skip_reason(
+            conn, task, util.parse_ts(now), preflight=preflight)
+        if reason:
+            raise util.KanpilotError("conflict", "自动确认执行未获授权：" + reason)
     row, created = db.create_request(conn, now, "dispatch", f"dispatch:{task['task_id']}",
                                     task_id=task["task_id"], payload={"note": note} if note else None,
                                     requested_by=actor)
@@ -76,6 +82,11 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
     guard_active(initial)
     if (payload.get("kind") or constants.ENQUEUE_INFER.get(initial["status"])) == "review":
         core.require_committed_review(initial)
+    confirmation_preflight = None
+    if (payload.get("actor") == "automation" and initial["status"] == "ready"
+            and (payload.get("kind") or constants.ENQUEUE_INFER.get(initial["status"])) == "dispatch"):
+        from . import automation_policy
+        confirmation_preflight = automation_policy.automation_preflight(conn, initial["project_id"])
     with db.write_txn(conn):
         task = db.require_task(conn, payload["task_id"])
         guard_active(task)
@@ -139,13 +150,27 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
         actor = payload.get("actor", "user")
         if actor not in ("user", "automation"):
             raise util.bad_request("actor 必须为 user 或 automation")
+        if kind == "monitor" and actor == "automation":
+            retry = core.monitor_retry_state(conn, task)
+            if retry is not None:
+                from .engine import ladder
+                deadline = util.plus_seconds(ladder.backoff_seconds(retry["spent"]),
+                    util.parse_ts(retry["finished_at"]) or ctx.now)
+                if (retry["exhausted"]
+                        or type(payload.get("retry_base")) is not int
+                        or payload["retry_base"] != retry["spent"] + 1
+                        or util.parse_ts(payload.get("not_before")) is None
+                        or util.ts_before(payload["not_before"], deadline)):
+                    raise util.KanpilotError("conflict", "观察重试必须沿用当前阶段的退避与次数上限")
         if kind == "dispatch":
             _require_current_plan(task)
             _require_unsent_dispatch(task)
             if hold and not confirm_plan:
                 raise util.KanpilotError("conflict", "计划已发布但尚未确认执行（需要 confirm_plan:true）")
-            if hold or expected_sha is not None:
-                row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=expected_sha, actor=actor, note=payload.get("note"))
+            automatic_ready = actor == "automation" and task["status"] == "ready"
+            if hold or expected_sha is not None or automatic_ready:
+                confirmation_sha = task["plan_sha256"] if automatic_ready and expected_sha is None else expected_sha
+                row, created = confirm_plan_inline(conn, task, now, expected_plan_sha256=confirmation_sha, actor=actor, note=payload.get("note"), preflight=confirmation_preflight)
                 return {"request": derive.request_view(row, ctx.now), "deduplicated": not created}
         key = f"{kind}:{task['task_id']}"
         # 阶梯 1 退避重试的「已花费次数」必须随请求落库：commands_for(RETRY)
@@ -895,17 +920,11 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             code = task["failure_code"]
             from . import automation_policy, review_config
             if action == "accept_verification":
-                from . import engine_claim_scope, round_store
+                from . import round_store
                 execution=round_store.get_round(conn,task['task_id'],task['run_id'])
                 if execution is not None and execution['backend']=='codex':
                     raise util.KanpilotError('conflict','Codex 执行必须核对结构化验证证据，不能人工跳过验证')
-                if (engine_claim_scope.effective_mode(conn, task["project_id"]) == "live"
-                        or core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")):
-                    raise util.KanpilotError("conflict", "Live 项目核对 Plus 验证证据；请让 Plus 重新执行并验证，不能人工跳过验证")
-                if code != "verification_unconfirmed" or not task["run_id"]:
-                    raise util.KanpilotError("conflict", "仅待确认验证的当前执行轮次可接受")
-                db.set_extra(conn, task, now, verification_override={"execution_run_id": task["run_id"], "actor": "user", "at": now, "note": note})
-                target, kind = "running", "monitor"
+                raise util.KanpilotError("conflict", "Live 项目核对结构化验证证据；请重新执行并验证，不能人工跳过验证")
             elif execution_retry:
                 target, kind = "ready", "dispatch"
                 extra = db.task_extra(task)

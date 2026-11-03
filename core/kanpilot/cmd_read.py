@@ -51,6 +51,11 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
                 {"kind": "monitor", "task_id": task["task_id"], "reason": "active"}
             )
             continue
+        retry = core.monitor_retry_state(conn, task)
+        if retry is not None:
+            skipped.append({"kind": "monitor", "task_id": task["task_id"],
+                            "reason": "transient_exhausted" if retry["exhausted"] else "transient_retry_pending"})
+            continue
         last = conn.execute(
             "SELECT finished_at FROM requests WHERE task_id=? AND "
             "kind='monitor' AND status IN ('succeeded','failed','cancelled') "
@@ -122,22 +127,14 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
                 db.add_event(conn, now_iso, "lost_request_released", task_id=task["task_id"], request_id=req["request_id"], actor="scheduler")
         extra = db.task_extra(task)
         if task["status"] == "ready" and extra.get("plan_execution_hold") and preflight_by_project is not None:
-            policy = automation_policy.policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
-            verify = extra.get("plan_verify") or {}
-            reason = None
-            if not policy.get("enabled"): reason = "disabled"
-            elif not policy.get("auto_confirm_plan"): reason = "auto_confirm_off"
-            elif preflight_by_project.get(task["project_id"], ["unchecked"]): reason = "preflight"
-            elif not verify.get("commands"): reason = "verify_missing"
-            elif verify.get("plan_sha256") != task["plan_sha256"]: reason = "verify_mismatch"
-            elif not core.automation_budget(task, policy, now)["ok"]: reason = "budget"
-            elif db.paused(conn, "dispatch"): reason = "paused"
+            reason = automation_policy.auto_confirm_skip_reason(
+                conn, task, now, preflight=preflight_by_project.get(task["project_id"]))
             if reason:
                 if (a.get("last_skip") or {}).get("reason") != reason:
                     core.update_automation(conn, task, now_iso, last_skip={"reason": reason, "at": now_iso})
                     db.add_event(conn, now_iso, "auto_confirm_skipped", task_id=task["task_id"], actor="automation", detail={"reason": reason})
             else:
-                row, made = cmd_queue.confirm_plan_inline(conn, task, now_iso, expected_plan_sha256=task["plan_sha256"], actor="automation", note="auto")
+                row, made = cmd_queue.confirm_plan_inline(conn, task, now_iso, expected_plan_sha256=task["plan_sha256"], actor="automation", note="auto", preflight=preflight_by_project.get(task["project_id"]))
                 if made: created.append({"request_id": row["request_id"], "kind": "dispatch", "task_id": task["task_id"]})
         history = extra.get("review_history") or []
         d = core.delivery_of(task)

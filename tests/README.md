@@ -1,6 +1,6 @@
 # KaneoPilot 集成测试套件
 
-对 `core/kanpilot.py` 的**契约级**集成测试：全部经 `subprocess` 调 CLI（JSON 进出、断言退出码与字段级行为），不 import 核心代码、不直接写业务状态。唯一例外是 `conftest.db_exec` 系列**时间旅行后门**（把租约/完成时间 UPDATE 到过去），只用于表达 CLI 无法表达的时间流逝；schema 依据 state-model §1 冻结表结构。
+对 `core/kanpilot.py` 的**契约级**集成测试：普通业务流程经 `subprocess` 调 CLI（JSON 进出、断言退出码与字段级行为）。引擎演练也可在进程内调用同一核心，仍使用隔离 DB 与假服务。时间旅行后门用于表达 CLI 无法表达的时间流逝；升级兼容夹具可以直接构造现行 CLI 已禁止创建的历史模式/pi 轮次，随后行为断言仍走公开入口，不以历史夹具绕过新派发或验证门禁。
 
 ## 运行
 
@@ -23,10 +23,13 @@ cd <repo 根> && python3 -m unittest discover -s tests -v
   执行；每个 `test_*.py` 末尾的 `load_tests` 钩子是接入口。若环境装有真实
   pytest，`import pytest` 命中真模块、桩不生效，`python3 -m pytest tests -q`
   亦可跑同套件。
-- 测试绝不访问真实 Kaneo、真实 home 与真实 pi：全部在 `tmp_path` 临时目录，
+- 测试绝不访问真实 Kaneo、真实 home 与真实模型：全部在 `tmp_path` 临时目录，
   `HOME` 被替换为伪目录，远端由 `fake_kaneo` 内存 stub 提供，执行后端走
-  `KANPILOT_PI_*` 隔离夹具（伪 pi-bin 桩 `--version`/`auth check`，
-  `KANPILOT_PI_FAKE` 四模式 worker）。
+  隔离 Codex/Plus。KP-E01 起普通 `factory` 显式保存假 Codex 配置；成功路径由
+  实际托管 worker 运行冻结 verify 并提供结构化报告，只有模型传输被假实现替代。
+  会话读取测试使用 `make_historical_running` 表达升级前已发送的 pi 轮次，不启动
+  pi worker。`test_pi_dispatch.py` 单独验证新 pi 拒绝与历史身份保留；现有
+  `KANPILOT_PI_*` 夹具仍供配置与历史读取检查。
 
 ## 环境变量约定
 
@@ -74,6 +77,12 @@ set_description/fail_next/fail_route` 编程与 `requests_to` 请求日志。
 
 ## DB 后门使用规则
 
+KP-E01 的历史例外：`conftest.TaskFactory.make_historical_running`、
+`test_pi_dispatch._historical_claim` 只构造升级前的已领取/已发送 pi 状态；
+`test_codex_dispatch` 的旧模式输入只构造原始 Legacy/Shadow 映射。
+现行 CLI 故意禁止创建这些状态，不能先通过新能力门再假称完成了新 pi 派发。
+普通完成场景必须经过结构化报告核对与真实交付命令。
+
 只读/写冻结 schema 的以下字段做时间操控：`requests.lease_expires_at`、
 `requests.finished_at`、`tasks.send_state/sent`（构造 send 冲突）、
 `settings`。**不用于绕过业务流程造状态**——一切业务状态经 CLI 命令流转。
@@ -93,7 +102,7 @@ v1.3 新增三个后门（均在 `conftest.py`，各带文档说明为何 CLI �
 
 ## 会话数据源接缝（v1.6，测试约定）
 
-v1.6 起唯一后端为 pi：会话读取数据源是运行目录下的 `events.jsonl` +
+v1.6 的历史 pi 会话读取数据源是运行目录下的 `events.jsonl` +
 `job.json`（`session_runs_root` 缺省 `~/Library/Application Support/KaneoPilot/runs`，
 测试经 env 指向隔离目录）。夹具直接在工作区临时目录写 run 目录
 （job.json + events.jsonl，首事件恒为 session）；worker 可用

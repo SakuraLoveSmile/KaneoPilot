@@ -49,7 +49,7 @@ class DeliveryCommit(KanpilotTestCase):
         with patch.object(git_delivery, "_git", side_effect=checked):
             return cmd_delivery.cmd_delivery_commit(self.ctx, payload or self.payload)
 
-    def live_verdict(self):
+    def live_verdict(self, expected_ok=True):
         task = db.require_task(self.ctx.conn, "task1234")
         self.call("set-project-mapping", {"project_id": task["project_id"], "repository": str(self.repo), "enabled": True,
                                          "expected_revision": self.call("get-project-mappings")["revision"]})
@@ -87,7 +87,7 @@ class DeliveryCommit(KanpilotTestCase):
                   {"seq": 3, "type": "terminal", "outcome": "completed"}]
         (directory / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
         result = self.call("engine-verdict", dict(self.payload, expected_plan_sha256=sha))
-        self.assertTrue(result["verification_ok"], result)
+        self.assertIs(result["verification_ok"], expected_ok, result)
         return result
 
     def test_live_source_change_after_verdict_never_commits(self):
@@ -172,6 +172,7 @@ class DeliveryCommit(KanpilotTestCase):
 
     def test_commit_idempotent_and_event(self):
         (self.wt / "change").touch()
+        self.live_verdict()
         result = self.call_commit()
         self.assertEqual(result["outcome"], "committed")
         second = self.call_commit()
@@ -183,24 +184,30 @@ class DeliveryCommit(KanpilotTestCase):
 
     def test_crash_recovery(self):
         (self.wt / "change").touch()
+        self.live_verdict()
         result = commit(self.delivery, run="exec1")
         self.assertEqual(self.call_commit()["sha"], result["sha"])
 
     def test_head_drift_blocks(self):
         (self.wt / "change").touch()
+        self.live_verdict()
         commit(self.delivery, run="other-run")
         result = self.call_commit()
         self.assertEqual(result["failure_code"], "delivery_commit_failed")
-        self.assertIn("分支被执行端或他人改动", result["message"])
+        self.assertIn("未登记提交不是本轮核心提交", result["message"])
+        self.assertEqual(core.delivery_of(db.require_task(self.ctx.conn, "task1234"))["commits"], [])
         self.assertEqual(db.require_task(self.ctx.conn, "task1234")["status"], "needs_user")
 
     def test_no_changes_blocks(self):
+        receipt = self.live_verdict(expected_ok=False)
+        self.assertTrue(receipt["empty_diff"])
         result = self.call_commit()
-        self.assertEqual(result["failure_code"], "no_changes")
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
         self.assertEqual(db.require_task(self.ctx.conn, "task1234")["status"], "needs_user")
 
     def test_secret_blocks(self):
         (self.wt / ".env").touch()
+        self.live_verdict()
         self.assertEqual(self.call_commit()["files"], [".env"])
 
     def test_identity_required_and_stage_checked(self):
@@ -218,6 +225,7 @@ class DeliveryCommit(KanpilotTestCase):
 
     def test_concurrent_delivery_change_not_overwritten(self):
         (self.wt / "change").touch()
+        self.live_verdict()
         original = git_delivery.commit_worktree
         def concurrent(*args, **kwargs):
             result = original(*args, **kwargs)
@@ -233,6 +241,7 @@ class DeliveryCommit(KanpilotTestCase):
 
     def test_lease_loss_during_commit_not_registered(self):
         (self.wt / "change").touch()
+        self.live_verdict()
         original = git_delivery.commit_worktree
         def expired(*args, **kwargs):
             result = original(*args, **kwargs)

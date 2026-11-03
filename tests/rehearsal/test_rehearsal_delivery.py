@@ -60,7 +60,7 @@ _COVERED_NOTE = ('已由 tests/test_auto_pipeline.py 覆盖；本文件只跑交
 _COVERED_BY_AUTO_PIPELINE = (
     'test_failed_execution_replan_preserves_partial_work',
     'test_full_feedback_two_rounds_to_pr_merge',
-    'test_missing_verification_user_accepts_then_review',
+    'test_missing_verification_cannot_be_manually_accepted',
     'test_fix_round_limit_and_manual_takeover',
     'test_review_failure_manual_takeover_preserves_branch',
     'test_closed_pr_enters_pending_without_completing_kaneo',
@@ -321,7 +321,7 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
                          json.loads(self.gh_state.read_text(encoding='utf-8'))['mergedAt'])
 
     # ------------------------------------------- 继承用例：已在父模块覆盖
-    # TestAutoPipeline 自带的 5 个用例由 ``tests/test_auto_pipeline.py`` 按
+    # TestAutoPipeline 自带的 6 个用例由 ``tests/test_auto_pipeline.py`` 按
     # 原顺序覆盖；在本文件按新顺序重跑会触发该夹具的顺序相关竞态——上一用例
     # 的真 ``pi_desktop_worker`` 结束后仍常驻轮询（源码注释即「测试负责终止
     # 该进程」），新用例的假 Plus 服务常复用同一临时端口，常驻 worker 于是
@@ -334,7 +334,7 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
     def test_full_feedback_two_rounds_to_pr_merge(self):
         self.skipTest(_COVERED_NOTE)
 
-    def test_missing_verification_user_accepts_then_review(self):
+    def test_missing_verification_cannot_be_manually_accepted(self):
         self.skipTest(_COVERED_NOTE)
 
     def test_fix_round_limit_and_manual_takeover(self):

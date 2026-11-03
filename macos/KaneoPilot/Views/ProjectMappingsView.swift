@@ -50,7 +50,6 @@ struct ProjectMappingsView: View {
     private enum SaveStep: Int, CaseIterable {
         case mapping
         case automation
-        case engineMode
         case fallbackModel
         case verifyEnv
     }
@@ -72,7 +71,6 @@ struct ProjectMappingsView: View {
         static let releaseConfig = "构建发布配置"
         static let budget = "预算"
         static let advanced = "标签与 PR 分支"
-        static let engineMode = "引擎模式"
         static let fallbackModel = "备用模型"
         static let verifyEnv = "历史兼容验证环境"
     }
@@ -202,12 +200,11 @@ struct ProjectMappingsView: View {
         }
     }
 
-    /// 一个项目全部可编辑项的草稿：仓库映射、自动处理策略、引擎模式、备用模型、历史兼容验证环境。
+    /// 一个项目全部可编辑项的草稿：仓库映射、自动处理策略、备用模型、历史兼容验证环境。
     private struct ProjectDraft {
         var repository = ""
         var enabled = true
         var automation = AutomationDraft(nil)
-        var engineMode = "legacy"
         var fallbackProvider = ""
         var fallbackModel = ""
         var verifyEnvJSON = "{}"
@@ -216,7 +213,6 @@ struct ProjectMappingsView: View {
             repository = item?.repository ?? ""
             enabled = item?.enabled ?? true
             automation = AutomationDraft(item?.automation)
-            engineMode = item?.engineMode ?? "legacy"
             fallbackProvider = item?.fallbackModel?.providerId ?? ""
             fallbackModel = item?.fallbackModel?.modelId ?? ""
             verifyEnvJSON = Self.verifyEnvText(item?.verifyEnv ?? [:])
@@ -255,10 +251,6 @@ struct ProjectMappingsView: View {
             automation.changedRows(from: other.automation)
         }
 
-        func engineModeDiffers(from other: ProjectDraft) -> Bool {
-            engineMode != other.engineMode
-        }
-
         func fallbackDiffers(from other: ProjectDraft) -> Bool {
             if trimmedValue(fallbackProvider) != trimmedValue(other.fallbackProvider) { return true }
             return trimmedValue(fallbackModel) != trimmedValue(other.fallbackModel)
@@ -280,7 +272,7 @@ struct ProjectMappingsView: View {
         })
     }
 
-    /// 项目草稿的绑定（仓库、开关、引擎模式、备用模型、验证环境）。
+    /// 项目草稿的绑定（仓库、开关、备用模型、验证环境）。
     private func projectBinding<Value>(_ id: String, _ key: WritableKeyPath<ProjectDraft, Value>) -> Binding<Value> {
         Binding(get: {
             currentDraft(id)[keyPath: key]
@@ -780,23 +772,10 @@ struct ProjectMappingsView: View {
         }
     }
 
-    /// 引擎卡：引擎模式、备用模型，以及仅在项目已有旧值时出现的历史兼容验证环境；卡内没有保存按钮。
+    /// 引擎卡：备用模型，以及仅在项目已有旧值时出现的历史兼容验证环境；卡内没有保存按钮。
     private func engineEditor(_ item: ProjectMappingItem, changed: Set<String>) -> some View {
         let id = item.projectId
         return VStack(alignment: .leading, spacing: 0) {
-            ProjectFormRow(title: RowName.engineMode,
-                           detail: "Live 会接收并推进已开启自动处理的项目；Shadow 仅记录对比。新 App 不自动驱动 Legacy 项目，旧 CLI 路径保留；显式手动规划不受影响。",
-                           changed: changed.contains(RowName.engineMode)) {
-                Picker("引擎模式", selection: projectBinding(id, \.engineMode)) {
-                    Text("Legacy · 旧 CLI 路径").tag("legacy")
-                    Text("Shadow · 只记录对比").tag("shadow")
-                    Text("Live · 自动推进").tag("live")
-                }
-                .labelsHidden()
-                .fixedSize()
-            }
-            stepErrorRow(id, .engineMode)
-            ListRule()
             ProjectFormRow(title: RowName.fallbackModel,
                            detail: "留空两项可清除；使用前核心会检查 Plus 本地模型缓存，不会静默改模型。",
                            changed: changed.contains(RowName.fallbackModel)) {
@@ -879,7 +858,6 @@ struct ProjectMappingsView: View {
         if trimmedValue(draft.repository) != trimmedValue(saved.repository) { rows.append(RowName.repository) }
         if draft.enabled != saved.enabled { rows.append(RowName.planning) }
         rows.append(contentsOf: draft.automationRows(from: saved))
-        if draft.engineModeDiffers(from: saved) { rows.append(RowName.engineMode) }
         if draft.fallbackDiffers(from: saved) { rows.append(RowName.fallbackModel) }
         if hasLegacyVerifyEnv(item), draft.verifyEnvDiffers(from: saved) { rows.append(RowName.verifyEnv) }
         return rows
@@ -892,7 +870,6 @@ struct ProjectMappingsView: View {
         var steps: [SaveStep] = []
         if draft.mappingDiffers(from: saved) { steps.append(.mapping) }
         if !draft.automationRows(from: saved).isEmpty { steps.append(.automation) }
-        if draft.engineModeDiffers(from: saved) { steps.append(.engineMode) }
         if draft.fallbackDiffers(from: saved) { steps.append(.fallbackModel) }
         if hasLegacyVerifyEnv(item), draft.verifyEnvDiffers(from: saved) { steps.append(.verifyEnv) }
         return steps
@@ -1042,9 +1019,6 @@ struct ProjectMappingsView: View {
             if draft.automationRows(from: base).isEmpty {
                 next.automation = fresh.automation
             }
-            if !draft.engineModeDiffers(from: base) {
-                next.engineMode = fresh.engineMode
-            }
             if !draft.fallbackDiffers(from: base) {
                 next.fallbackProvider = fresh.fallbackProvider
                 next.fallbackModel = fresh.fallbackModel
@@ -1057,7 +1031,7 @@ struct ProjectMappingsView: View {
         drafts = merged
     }
 
-    /// 点保存栏「保存」：需要确认的项（开启自动合并 PR、开启 / 切换构建发布、启用 Live）在第一条命令前一次问完，
+    /// 点保存栏「保存」：需要确认的项（开启自动合并 PR、开启 / 切换构建发布）在第一条命令前一次问完，
     /// 任一取消则一条命令也不发；确认文字沿用原文，多项合并成同一弹窗的多段说明。
     private func requestSave() {
         guard !isSaving, let item = selectedItem, let draft = drafts[item.projectId] else { return }
@@ -1067,7 +1041,6 @@ struct ProjectMappingsView: View {
         let enablingMerge = automation.autoMerge && savedPolicy?.autoMergePr != true
         let enablingRelease = automation.releaseEnabled && savedPolicy?.release?.enabled != true
         let switchingStable = automation.releaseEnabled && automation.releaseChannel == "stable" && savedPolicy?.release?.channel != "stable"
-        let enablingLive = draft.engineMode == "live" && item.engineMode != "live"
 
         var policyImpacts: [String] = []
         if enablingMerge {
@@ -1081,19 +1054,12 @@ struct ProjectMappingsView: View {
         if !policyImpacts.isEmpty {
             sections.append("项目「\(item.displayName)」\n" + policyImpacts.joined(separator: "\n") + "\n不调用模型。")
         }
-        if enablingLive {
-            sections.append("常驻引擎会按已保存策略接收、规划、执行、评审和交付此项目的新任务。")
-        }
         guard !sections.isEmpty else {
             Task { await commitProject(item.projectId) }
             return
         }
         let title: String
-        if !policyImpacts.isEmpty && enablingLive {
-            title = "开启以下设置？"
-        } else if enablingLive {
-            title = "启用此项目 Live 自动推进？"
-        } else if enablingRelease || switchingStable {
+        if enablingRelease || switchingStable {
             title = "开启构建发布策略？"
         } else {
             title = "开启自动合并 PR？"
@@ -1101,10 +1067,10 @@ struct ProjectMappingsView: View {
         pendingSave = PendingProjectSave(projectID: item.projectId,
                                          title: title,
                                          message: sections.joined(separator: "\n\n"),
-                                         confirmLabel: policyImpacts.isEmpty ? "启用 Live" : "确认并保存")
+                                         confirmLabel: "确认并保存")
     }
 
-    /// 一次保存：按「仓库映射 → 自动处理策略 → 引擎模式 → 备用模型 → 历史兼容验证环境」逐条提交现有核心命令。
+    /// 一次保存：按「仓库映射 → 自动处理策略 → 备用模型 → 历史兼容验证环境」逐条提交现有核心命令。
     /// 共用的映射版本号每条成功后沿响应推进；遇到失败即停止，已成功的不回滚，其余草稿保留，再点「保存」只提交剩余项。
     private func commitProject(_ id: String) async {
         guard !isSaving, let item = items.first(where: { $0.projectId == id }) else { return }
@@ -1175,10 +1141,6 @@ struct ProjectMappingsView: View {
             let core = model.alertMessage ?? ""
             model.alertMessage = nil
             return "保存失败，草稿已保留。策略冲突时请点「放弃」读回最新策略后再改。\n" + core
-        case .engineMode:
-            guard let text = await runRevisionCommand("set-project-engine-mode", projectID: id,
-                                                      fields: ["engine_mode": draft.engineMode]) else { return nil }
-            return "\(text)；草稿已保留"
         case .fallbackModel:
             let provider = trimmedValue(draft.fallbackProvider)
             let modelId = trimmedValue(draft.fallbackModel)
@@ -1229,8 +1191,6 @@ struct ProjectMappingsView: View {
                 } else {
                     draft.automation = fresh.automation
                 }
-            case .engineMode:
-                draft.engineMode = fresh.engineMode
             case .fallbackModel:
                 draft.fallbackProvider = fresh.fallbackProvider
                 draft.fallbackModel = fresh.fallbackModel
@@ -1246,7 +1206,7 @@ struct ProjectMappingsView: View {
         switch step {
         case .mapping: card = "仓库映射"
         case .automation: card = "自动处理"
-        case .engineMode, .fallbackModel, .verifyEnv: card = "引擎"
+        case .fallbackModel, .verifyEnv: card = "引擎"
         }
         let tail = savedSteps > 0 ? "前面已保存的 \(savedSteps) 步不回滚，其余草稿已保留" : "草稿已保留"
         return "「\(card)」保存失败，\(tail)；错误原文在该卡片内。"

@@ -690,7 +690,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "status_only": (False, "bool")},
         _automation_command("engine.commands", "cmd_session_view"),
     ),
-    # v6 引擎（A12）：按项目持久化 engine_mode（legacy|shadow|live，缺省 legacy）。
+    # KP-E01：项目统一 live；保留兼容写入入口和映射版本校验。
     # 写在映射**条目层**（items[pid].engine_mode）而非 automation 内——
     # validate_automation 会按固定键白名单重建 automation，静默丢弃未知键。
     "set-project-engine-mode": (

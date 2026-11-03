@@ -17,7 +17,7 @@ class TestEngineClaimScope(KanpilotTestCase):
         finally:
             conn.close()
         patch = mock.patch.dict(os.environ, {
-            engine_claim_scope.WORKER_ENV: '1', engine_claim_scope.MODE_ENV: 'legacy',
+            engine_claim_scope.WORKER_ENV: '1', engine_claim_scope.MODE_ENV: 'live',
             engine_claim_scope.FORCE_ENV: '0', process_owner.INSTANCE_ENV: self.instance})
         patch.start()
         self.addCleanup(patch.stop)
@@ -34,37 +34,37 @@ class TestEngineClaimScope(KanpilotTestCase):
             self.call('set-project-mapping', {'project_id': project_id,
                 'repository': task['repository'], 'enabled': True,
                 'expected_revision': self.call('get-project-mappings', {})['revision']})
-            self.call('set-project-engine-mode', {'project_id': project_id, 'engine_mode': mode})
+            self.seed_engine_mode(project_id, mode)
             request, _ = db.create_request(conn, util.now_iso(), stage,
                 'scope:' + stage + ':' + mode, task_id=task_id,
                 payload={'manual_authorized': True}, requested_by='automation')
             result.append(db.get_request(conn, request['request_id']))
         return result
 
-    def test_all_five_stages_select_only_live_and_pin_obeys_scope(self):
+    def test_all_five_stages_claim_historical_projects_as_live(self):
         conn = db.connect(self.db_path)
         try:
             for stage in ('plan', 'dispatch', 'monitor', 'review', 'delivery'):
                 with self.subTest(stage=stage):
                     requests = self._requests(conn, stage)
-                    for request in requests[:2]:
-                        self.assertIsNone(cmd_exec._select_candidate(conn, stage, request['request_id'], util.now_dt()))
-                    self.assertEqual(cmd_exec._select_candidate(conn, stage, None, util.now_dt())['request_id'], requests[2]['request_id'])
+                    for request in requests:
+                        self.assertEqual(cmd_exec._select_candidate(conn, stage, request['request_id'], util.now_dt())['request_id'],
+                                         request['request_id'])
+                    self.assertIsNotNone(cmd_exec._select_candidate(conn, stage, None, util.now_dt()))
         finally:
             conn.close()
 
-    def test_manual_planning_remains_explicit_and_can_run_in_legacy(self):
+    def test_shadow_diagnostic_cannot_claim_even_manual_planning(self):
         conn = db.connect(self.db_path)
         try:
             request = self._requests(conn, 'plan')[0]
-            self.assertFalse(engine_claim_scope.allows(conn, request, util.now_dt()))
+            self.assertTrue(engine_claim_scope.allows(conn, request, util.now_dt()))
             conn.execute("UPDATE requests SET requested_by='user' WHERE request_id=?", (request['request_id'],))
             request = db.get_request(conn, request['request_id'])
-            self.assertTrue(engine_claim_scope.allows(conn, request, util.now_dt()))
-            counts = loop.Reconciler(self.db_path, mode='legacy')._queued_stages(conn, {})
-            self.assertEqual(counts, {'plan': 1})
-            db.merge_request_payload(conn, request['request_id'], util.now_iso(), manual_authorized=False)
-            self.assertFalse(engine_claim_scope.allows(conn, db.get_request(conn, request['request_id']), util.now_dt()))
+            with mock.patch.dict(os.environ, {engine_claim_scope.MODE_ENV: 'shadow', engine_claim_scope.FORCE_ENV: '1'}):
+                self.assertFalse(engine_claim_scope.allows(conn, request, util.now_dt()))
+                self.assertIsNone(cmd_exec._select_candidate(conn, 'plan', request['request_id'], util.now_dt()))
+            self.assertEqual(loop.Reconciler(self.db_path, mode='shadow', force_mode=True)._queued_stages(conn, {}), {})
         finally:
             conn.close()
 
@@ -73,8 +73,8 @@ class TestEngineClaimScope(KanpilotTestCase):
         try:
             request = self._requests(conn, 'monitor')[2]
             self.assertTrue(engine_claim_scope.allows(conn, request, util.now_dt()))
-            self.call('set-project-engine-mode', {'project_id': 'scope-project-2', 'engine_mode': 'shadow'})
-            self.assertFalse(engine_claim_scope.allows(conn, request, util.now_dt()))
+            self.seed_engine_mode('scope-project-2', 'shadow')
+            self.assertTrue(engine_claim_scope.allows(conn, request, util.now_dt()))
             with mock.patch.dict(os.environ, {engine_claim_scope.FORCE_ENV: '1', engine_claim_scope.MODE_ENV: 'live'}):
                 self.assertTrue(engine_claim_scope.allows(conn, request, util.now_dt()))
             health.release_lease(conn, util.now_iso(), instance_id=self.instance)
@@ -98,7 +98,7 @@ class TestEngineClaimScope(KanpilotTestCase):
             previous = dict(os.environ)
             with engine_claim_scope.command_mode('live', True):
                 self.assertEqual(engine_claim_scope.effective_mode(conn, 'scope-project-0'), 'live')
-            self.assertEqual(engine_claim_scope.effective_mode(conn, 'scope-project-0'), 'legacy')
+            self.assertEqual(engine_claim_scope.effective_mode(conn, 'scope-project-0'), 'live')
             self.assertEqual(dict(os.environ), previous)
         finally:
             conn.close()

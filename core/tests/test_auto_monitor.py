@@ -53,6 +53,8 @@ def invoke(monkeypatch, tmp_path, *, task_value=None, round_value=None, response
         if command == "session-messages":
             return {"messages": messages if messages is not None else [message()], "has_more": False,
                     "session": {"run_id": "execution", "state": "associated"}}
+        if command == "engine-verdict":
+            return {"verification_ok": True, "evidence_source": "goal_report"}
         if command == "delivery-commit":
             return {"outcome": "committed"}
         return {}
@@ -119,13 +121,13 @@ def test_live_untrusted_binding_enters_attention(monkeypatch, tmp_path):
     assert not any(c == "advance-task" for c, _ in calls)
 
 
-def test_shadow_retains_legacy_outcome(monkeypatch, tmp_path):
+def test_historical_shadow_uses_core_report_instead_of_transcript(monkeypatch, tmp_path):
     value = dict(task(), project_id="p")
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[message(code=7)], responses={
         "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "shadow"}]},
         "engine-verdict": {"verification_ok": True},
     })
-    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert report(calls)["outcome"] == "succeeded"
     assert any(c == "engine-verdict" for c, _ in calls)
 
 
@@ -146,19 +148,20 @@ def test_task_action_requires_bound_verdict_in_every_mode(monkeypatch, tmp_path,
     assert report(calls)["outcome"] == ("succeeded" if passed else "needs_user")
 
 
-def test_shadow_comparison_error_keeps_passing_legacy_result(monkeypatch, tmp_path):
+def test_historical_shadow_cannot_ignore_core_report_error(monkeypatch, tmp_path):
     value = dict(task(), project_id="p")
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, responses={
         "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": "shadow"}]},
         "engine-verdict": util.KanpilotError("verification_identity_unconfirmed", "副本验证失败"),
     })
-    assert report(calls)["outcome"] == "succeeded"
+    assert report(calls)["failure_code"] == "verification_identity_unconfirmed"
+    assert not any(c == "advance-task" for c, _ in calls)
 
 
 @pytest.mark.parametrize("mode", ["legacy", "shadow"])
 @pytest.mark.parametrize("boundary", ["turn", "start", "request", "unknown"])
 @pytest.mark.parametrize("has_execution_result", [False, True])
-def test_goal_drafting_verification_is_not_execution_verification(
+def test_historical_parser_distinguishes_goal_drafting_and_execution(
         monkeypatch, tmp_path, mode, boundary, has_execution_result):
     value = dict(task(), project_id="p")
     baseline = dict(message(seq=3), turn_id="planning", source_at="2026-10-07T12:59:59Z")
@@ -174,17 +177,11 @@ def test_goal_drafting_verification_is_not_execution_verification(
         elif boundary != "unknown":
             actual["source_at"] = "2026-10-07T13:00:00Z"
         messages.append(actual)
-    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=messages, responses={
-        "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
-        "engine-verdict": {"verification_ok": True},
-    })
+    verification = auto_monitor._verification(value, messages)
     passed = has_execution_result and boundary != "unknown"
-    assert (report(calls)["outcome"] == "succeeded") == passed
-    if not passed:
-        assert report(calls)["failure_code"] == "verification_unconfirmed"
-        assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+    assert verification["ok"] == passed
     if boundary == "unknown":
-        assert "whole_round" in report(calls)["note"]
+        assert "whole_round" in verification["note"]
 
 
 def test_monitor_continuation_scopes_verification_to_bound_current_turn(monkeypatch, tmp_path):
@@ -208,7 +205,7 @@ def test_continued_turn_cannot_reuse_unlabelled_initial_verification(monkeypatch
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
         round_value=dict(detail(), turn_id="continued"), messages=messages, responses={
             "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
-            "engine-verdict": {"verification_ok": True},
+            "engine-verdict": {"verification_ok": False},
         })
     assert report(calls)["failure_code"] == "verification_unconfirmed"
     assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
@@ -226,13 +223,11 @@ def test_running_and_superseded_terminal(monkeypatch, tmp_path):
 @pytest.mark.parametrize("messages,passed", [([], False), ([message(code=1)], False),
     ([message(code=1), message(code=0, seq=2)], True), ([message(), message(code=1, seq=2)], False),
     ([message("cd repo && pytest")], True), ([message(code=None)], False)])
-def test_verification_evidence(monkeypatch, tmp_path, messages, passed):
-    rc, calls, _ = invoke(monkeypatch, tmp_path, messages=messages)
-    assert rc == 0
-    assert (report(calls)["outcome"] == "succeeded") == passed
+def test_historical_transcript_verification_evidence(monkeypatch, tmp_path, messages, passed):
+    verification = auto_monitor._verification(task(), messages)
+    assert verification["ok"] == passed
     if not passed:
-        assert report(calls)["failure_code"] == "verification_unconfirmed"
-        assert report(calls)["note"]
+        assert verification["note"]
 
 
 def test_path_prefixed_checks_advance_with_original_execution_identity(monkeypatch, tmp_path):
@@ -256,22 +251,18 @@ def test_path_prefixed_checks_advance_with_original_execution_identity(monkeypat
     ('export PATH="$PATH:/bin"\npytest || true', 0),
     ('export PATH="$HOME:/bin"\npytest', 0),
 ])
-def test_unknown_verification_note_is_not_reported_as_command_failure(monkeypatch, tmp_path, command, code):
+def test_historical_parser_unknown_verification_note_is_not_reported_as_command_failure(monkeypatch, tmp_path, command, code):
     value = task()
     value["extra"]["delivery"] = {"mode": "pr"}
-    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
-                        messages=[message(), message(command, code=code, seq=2)])
-    outcome = report(calls)
-    assert outcome["outcome"] == "needs_user"
-    assert outcome["failure_code"] == "verification_unconfirmed"
-    assert "证据无法确认：pytest" in outcome["note"]
-    assert "exit_code=None" not in outcome["note"] and "失败：" not in outcome["note"]
-    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+    verification = auto_monitor._verification(value, [message(), message(command, code=code, seq=2)])
+    assert not verification["ok"]
+    assert "证据无法确认：pytest" in verification["note"]
+    assert "exit_code=None" not in verification["note"] and "失败：" not in verification["note"]
 
 
 def test_exact_verification_failure_keeps_real_exit_code(monkeypatch, tmp_path):
-    _, calls, _ = invoke(monkeypatch, tmp_path, messages=[message(code=7)])
-    assert "失败：pytest（exit_code=7）" == report(calls)["note"]
+    verification = auto_monitor._verification(task(), [message(code=7)])
+    assert "失败：pytest（exit_code=7）" == verification["note"]
 
 
 def test_path_wrapped_evidence_from_other_round_cannot_advance(monkeypatch, tmp_path):
@@ -294,18 +285,15 @@ def test_path_wrapped_evidence_from_other_round_cannot_advance(monkeypatch, tmp_
     for previous_pass in (False, True)
     if not (previous_pass and command.startswith("printf"))
 ])
-def test_ambiguous_shell_success_does_not_commit_or_advance(monkeypatch, tmp_path,
+def test_historical_parser_rejects_ambiguous_shell_success(monkeypatch, tmp_path,
                                                           command, verification, previous_pass):
     value = task()
     value["extra"]["plan_verify"]["commands"] = [verification]
     value["extra"]["delivery"] = {"mode": "pr"}
     messages = [message(verification)] if previous_pass else []
     messages.append(message(command, seq=2))
-    rc, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=messages)
-    assert rc == 0
-    assert report(calls)["outcome"] == "needs_user"
-    assert report(calls)["failure_code"] == "verification_unconfirmed"
-    assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+    verification_result = auto_monitor._verification(value, messages)
+    assert verification_result["ok"] is False
 
 
 def test_literal_operator_argument_keeps_independent_previous_verification(monkeypatch, tmp_path):
@@ -318,12 +306,14 @@ def test_literal_operator_argument_keeps_independent_previous_verification(monke
     assert any(c == "advance-task" for c, _ in calls)
 
 
-@pytest.mark.parametrize("execution_run_id,passed", [("execution", True), ("old", False)])
-def test_override_scoped_to_execution(monkeypatch, tmp_path, execution_run_id, passed):
+@pytest.mark.parametrize("execution_run_id", ["execution", "old"])
+def test_historical_override_cannot_replace_core_report(monkeypatch, tmp_path, execution_run_id):
     value = task()
     value["extra"] = {"verification_override": {"execution_run_id": execution_run_id}}
-    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[])
-    assert (report(calls)["outcome"] == "succeeded") == passed
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[],
+        responses={"engine-verdict": {"verification_ok": False}})
+    assert report(calls)["failure_code"] == "verification_unconfirmed"
+    assert not any(c == "advance-task" for c, _ in calls)
 
 
 def test_override_does_not_bypass_exit_code(monkeypatch, tmp_path):
@@ -516,7 +506,8 @@ def test_legacy_round_detected_when_detail_missing(monkeypatch, tmp_path):
 def test_plan_verification_hash_mismatch(monkeypatch, tmp_path):
     value = task()
     value["extra"]["plan_verify"]["plan_sha256"] = "old"
-    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value)
+    _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value,
+        responses={"engine-verdict": {"verification_ok": False}})
     assert report(calls)["failure_code"] == "verification_unconfirmed"
 
 
@@ -526,6 +517,7 @@ def test_legacy_core_manual_receipt_cannot_override_plus_failure(monkeypatch, tm
         "binding": {"execution_run_id": "execution"}}
     _, calls, _ = invoke(monkeypatch, tmp_path, task_value=value, messages=[message(code=3)], responses={
         "get-verification-check-status": {"state": "completed", "verification_ok": True},
+        "engine-verdict": {"verification_ok": False},
     })
     assert report(calls)["failure_code"] == "verification_unconfirmed"
     assert not any(c in ("get-verification-check-status", "delivery-commit", "advance-task") for c, _ in calls)
@@ -549,7 +541,7 @@ def test_versioned_legacy_and_shadow_require_current_plus_turn(monkeypatch, tmp_
         round_value=dict(detail(), turn_id="current", verification_evidence_version=1),
         messages=[dict(message(), turn_id="planning")], responses={
             "get-project-mappings": {"items": [{"project_id": "p", "engine_mode": mode}]},
-            "engine-verdict": {"verification_ok": True}})
+            "engine-verdict": {"verification_ok": False}})
     assert report(calls)["failure_code"] == "verification_unconfirmed"
     assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
 

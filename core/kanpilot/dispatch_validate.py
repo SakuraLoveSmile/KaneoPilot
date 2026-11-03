@@ -213,6 +213,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
                        if repair and repair.get("source_kind") in ("merge_conflict", "build_failure")
                        else exec_config.snapshot_with_model_override(conn, task))
     backend = config_snapshot.get("backend") or "pi"
+    from . import harnesses
+    _require(harnesses.supports_role(backend, "execution"),
+             "执行端缺少受约束执行与结构化验证报告能力，请选择 Plus 或 Codex CLI", "exec_backend_not_plus")
     if backend == "pi_desktop":
         try:
             service = mcp_client.MCPClient.from_server_file(

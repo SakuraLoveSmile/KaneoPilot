@@ -178,18 +178,30 @@ class ReviewDeliveryTest(TestCase):
         core.update_delivery(self.conn, self.task(), self.ctx.now_iso, head_sha='d'*40)
         self.assertEqual(release_delivery.projection(self.conn, self.task())['state'], 'ready')
 
-    def test_narrow_legacy_delivery_receipt_claim_and_success_report_continue_observation(self):
+    def test_historical_delivery_receipt_runs_live_and_shadow_only_observes(self):
         result = self.resolve()
         request = db.get_request(self.conn, result['request']['request_id'])
         self.assertTrue(engine_claim_scope.manual_review_repair(self.conn, request, self.task()))
         self.assertTrue(engine_claim_scope.action_delivery_allowed(self.conn, self.task(), request))
         health.acquire_or_renew_lease(self.conn, util.now_iso(), instance_id='manual-delivery-engine',
             stage=None, pid=os.getpid(), lease_seconds=1200)
-        with patch.dict(os.environ, {engine_claim_scope.WORKER_ENV:'1', engine_claim_scope.MODE_ENV:'legacy',
+        before = dict(self.task())
+        requests_before = [dict(row) for row in self.conn.execute('SELECT * FROM requests ORDER BY rowid')]
+        with patch.dict(os.environ, {engine_claim_scope.WORKER_ENV:'1', engine_claim_scope.MODE_ENV:'shadow',
+                engine_claim_scope.FORCE_ENV:'1', process_owner.INSTANCE_ENV:'manual-delivery-engine'}):
+            diagnostic = loop.Reconciler(self.fixture.db_path, mode='shadow', force_mode=True,
+                enable_spawn=True, enable_tick=True, enable_intake=True,
+                run_command=lambda *args: self.fail('shadow issued a business command'),
+                spawn=lambda *args: self.fail('shadow spawned a worker'))
+            self.assertEqual(diagnostic._queued_stages(self.conn, {}), {})
+            self.assertFalse(engine_claim_scope.allows(self.conn, request, util.now_dt()))
+            diagnostic.reconcile_once()
+            self.assertEqual(dict(self.task()), before)
+            self.assertEqual([dict(row) for row in self.conn.execute('SELECT * FROM requests ORDER BY rowid')], requests_before)
+        with patch.dict(os.environ, {engine_claim_scope.WORKER_ENV:'1', engine_claim_scope.MODE_ENV:'live',
                 engine_claim_scope.FORCE_ENV:'0', process_owner.INSTANCE_ENV:'manual-delivery-engine'}):
-            for mode in ('legacy', 'shadow'):
-                self.assertEqual(loop.Reconciler(self.fixture.db_path, mode=mode)._queued_stages(self.conn, {}), {'delivery':1})
-                self.assertTrue(engine_claim_scope.allows(self.conn, request, util.now_dt()))
+            self.assertEqual(loop.Reconciler(self.fixture.db_path)._queued_stages(self.conn, {}), {'delivery':1})
+            self.assertTrue(engine_claim_scope.allows(self.conn, request, util.now_dt()))
             claim = cli.run('claim', dict(stage='delivery', executor='kaneo-delivery', request_id=request['request_id']), self.fixture.db_path)
             self.assertTrue(claim['claimed'])
             claimed = db.get_request(self.conn,request['request_id'])

@@ -89,22 +89,18 @@ class EngineBusinessTickTests(KanpilotTestCase):
             due = self._tick_action(rec.reconcile_once())
         self.assertEqual(due["created"], 1)
 
-    def test_three_modes_only_live_is_topped_up(self):
+    def test_historical_modes_all_get_live_observation_top_up(self):
         tids = {}
         for mode in ("legacy", "shadow", "live"):
             tids[mode] = self._task("tasktick" + mode + "000001",
                 project_id="projecttick" + mode, managed=True)
         self._clear_observations()
         self._mapping({"projecttick" + mode: mode for mode in tids})
-        summary = self._rec(mode="legacy").reconcile_once()
+        summary = self._rec().reconcile_once()
         action = self._tick_action(summary)
-        self.assertEqual(action["project_ids"], ["projectticklive"])
-        self.assertEqual([r["task_id"] for r in action["created_requests"]], [tids["live"]])
-        shadow = [a for a in summary["actions"] if a.get("task_id") == tids["shadow"]]
-        self.assertTrue(shadow)
-        self.assertTrue(all(a["engine_mode"] == "shadow" and not a.get("executed")
-                            for a in shadow))
-        self.assertFalse(any(a.get("task_id") == tids["legacy"] for a in summary["actions"]))
+        self.assertEqual(action["project_ids"], sorted("projecttick" + mode for mode in tids))
+        self.assertEqual({r["task_id"] for r in action["created_requests"]}, set(tids.values()))
+        self.assertTrue(all(a["engine_mode"] == "live" for a in summary["actions"] if a.get("task_id")))
 
     def test_manual_takeover_keeps_observations_but_not_confirmation(self):
         running = self._task("tasktickmanualrun001", manual=True)
@@ -192,15 +188,13 @@ class EngineBusinessTickTests(KanpilotTestCase):
                     self.call("engine-run", payload)
                 self.assertIs(constructor.call_args.kwargs["enable_tick"], expected)
 
-    def test_no_live_projects_skips_core_command(self):
+    def test_shadow_diagnostic_skips_core_command(self):
+        from unittest.mock import Mock
         self._task()
-        for mode in ("legacy", "shadow"):
-            with self.subTest(mode=mode):
-                from unittest.mock import Mock
-                command = Mock()
-                summary = self._rec(mode=mode, run_command=command).reconcile_once()
-                self.assertEqual(self._tick_action(summary)["reason"], "no_live_projects")
-                command.assert_not_called()
+        command = Mock()
+        summary = self._rec(mode="shadow", force_mode=True, run_command=command).reconcile_once()
+        self.assertEqual(self._tick_action(summary)["reason"], "no_live_projects")
+        command.assert_not_called()
 
     def test_archived_tasks_do_not_provide_scope_or_get_observations(self):
         archived = self._task(save_state="archived")
@@ -212,18 +206,15 @@ class EngineBusinessTickTests(KanpilotTestCase):
         self.assertEqual(action["created"], 1)
         self.assertFalse(any(r["task_id"] == archived for r in action["created_requests"]))
 
-    def test_process_default_and_force_match_claim_scope(self):
+    def test_historical_mapping_and_process_diagnostic_match_claim_scope(self):
         self._task()
-        # Unmapped projects use the process default; no preflight gates observation.
-        self.assertEqual(self._tick_action(self._rec(mode="live").reconcile_once())["created"], 1)
+        self.assertEqual(self._tick_action(self._rec().reconcile_once())["created"], 1)
         self._clear_observations()
         self._mapping({"businessproject00001": "legacy"})
-        self.assertEqual(self._tick_action(self._rec(mode="live").reconcile_once())["reason"],
-                         "no_live_projects")
-        self.assertEqual(self._tick_action(self._rec(mode="live", force_mode=True).reconcile_once())["created"], 1)
+        self.assertEqual(self._tick_action(self._rec().reconcile_once())["created"], 1)
         self._clear_observations()
         self._mapping({"businessproject00001": "live"})
-        self.assertEqual(self._tick_action(self._rec(mode="legacy", force_mode=True).reconcile_once())["reason"],
+        self.assertEqual(self._tick_action(self._rec(mode="shadow", force_mode=True).reconcile_once())["reason"],
                          "no_live_projects")
 
     def test_failed_tick_still_renews_lease_without_backoff(self):
@@ -349,20 +340,21 @@ class BusinessTickFreshnessTests(KanpilotTestCase):
 
     def test_effective_mode_uses_instance_default_mapping_and_force(self):
         self._seed_task()
-        scenarios = ((None, "legacy", False, True),
+        scenarios = ((None, "legacy", False, False),
                      (None, "live", False, False),
                      ("live", "legacy", False, False),
-                     ("legacy", "live", False, True),
+                     ("legacy", "live", False, False),
                      ("legacy", "live", True, False),
-                     ("live", "legacy", True, True),
-                     ("shadow", "live", False, True))
+                     ("live", "legacy", True, False),
+                     ("shadow", "live", False, False),
+                     ("live", "shadow", True, True))
         for mapping, mode, force, expected in scenarios:
             with self.subTest(mapping=mapping, mode=mode, force=force):
                 self._mapping(mapping)
                 self._lease(mode=mode, force=force)
                 self.assertIs(self._check()["ok"], expected)
 
-    def test_legacy_lease_defaults_to_legacy_without_force(self):
+    def test_old_lease_without_mode_uses_live_observation_policy(self):
         self._seed_task()
         self._lease()
         conn = db.connect(self.db_path)
@@ -372,7 +364,7 @@ class BusinessTickFreshnessTests(KanpilotTestCase):
                 instances["tick-health"].pop("mode")
                 instances["tick-health"].pop("force")
                 db.set_setting(conn, process_owner.SETTING, instances)
-            self.assertTrue(self._check()["ok"])
+            self.assertFalse(self._check()["ok"])
             self._mapping("live")
             self.assertFalse(self._check()["ok"])
         finally:

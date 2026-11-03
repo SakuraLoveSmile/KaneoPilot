@@ -4,7 +4,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import cli, cmd_delivery, cmd_exec, cmd_queue, cmd_remote, core, db, git_delivery, util
+from kanpilot import cli, cmd_delivery, cmd_exec, cmd_queue, cmd_remote, core, db, git_delivery, round_store, util
+from kanpilot.engine import commands as engine_commands
 from kanpilot import pi_desktop_review as review
 
 
@@ -49,6 +50,17 @@ class TaskBranchReview(KanpilotTestCase):
                           lease_expires_at=util.plus_seconds(3600, self.ctx.now))
         self.payload = dict(task_id="task1234", request_id=request["request_id"], run_id="monitor1",
                             expected_execution_run_id="exec1")
+        self.execution_config = self.configure_codex_execution()
+        self.execution_requests = {}
+        plan = self.write_plan("Fixture", {"id": "task1234", "projectId": "fixture-project"},
+            {"repository": str(self.repo), "requirements_sha256": "a" * 64,
+             "source_sha256": "b" * 64},
+            body="# Frozen task branch fixture\n```verify\ntrue\n```\n")
+        plan_sha = util.sha256_file(plan)
+        db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso,
+                       plan_path=str(plan), plan_sha256=plan_sha, requirements_sha256="a" * 64)
+        db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
+                     plan_verify={"commands": ["true"], "plan_sha256": plan_sha})
 
     def task(self):
         return db.require_task(self.ctx.conn, "task1234")
@@ -59,7 +71,25 @@ class TaskBranchReview(KanpilotTestCase):
 
     def commit(self, filename="app.py", body="new feature\n"):
         (self.worktree / filename).write_text(body)
+        verdict = self.verify_execution()
+        self.assertTrue(verdict["verification_ok"], verdict)
         return cmd_delivery.cmd_delivery_commit(self.ctx, self.payload)
+
+    def verify_execution(self):
+        """Seed executor identity/files; run the actual report/source verdict gate."""
+        run_id = self.task()["run_id"]
+        round_store.upsert_on_claim(self.ctx.conn, "task1234", run_id,
+                                   self.execution_config, util.now_iso(), backend="codex")
+        if run_id not in self.execution_requests:
+            request, _ = db.create_request(self.ctx.conn, util.now_iso(), "dispatch",
+                "fixture-dispatch-" + run_id, task_id="task1234")
+            db.update_request(self.ctx.conn, request["request_id"], util.now_iso(),
+                status="succeeded", run_id=run_id, claimed_by="kaneo-dispatch",
+                claimed_at=util.now_iso(), finished_at=util.now_iso())
+            self.execution_requests[run_id] = request["request_id"]
+        self.seed_codex_report("task1234", self.execution_requests[run_id], self.worktree)
+        return engine_commands.cmd_engine_verdict(self.ctx, dict(
+            self.payload, expected_plan_sha256=self.task()["plan_sha256"]))
 
     def claim_review(self):
         db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, status="in_review", stage="review")
@@ -94,12 +124,24 @@ class TaskBranchReview(KanpilotTestCase):
         self.assertIn("KaneoPilot-Run: exec1", self.git(self.worktree, "log", "-1", "--format=%B"))
 
     def test_no_changes_and_unsafe_files_cannot_be_committed(self):
-        self.assertEqual(cmd_delivery.cmd_delivery_commit(self.ctx, self.payload)["failure_code"], "no_changes")
+        empty = self.verify_execution()
+        self.assertTrue(empty["empty_diff"])
+        self.assertFalse(empty["verification_ok"])
+        # Empty results cannot produce a passed strict-verdict receipt, so the
+        # core refuses them before reaching Git's old no_changes branch.
+        self.assertEqual(cmd_delivery.cmd_delivery_commit(self.ctx, self.payload)["failure_code"], "delivery_commit_failed")
+        self.assertEqual(self.git(self.worktree, "rev-parse", "HEAD"), self.delivery["base_sha"])
+        self.assertEqual(self.git(self.worktree, "diff", "--cached"), "")
+        self.assertEqual(core.delivery_of(self.task())["commits"], [])
         db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, status="running", **core.clear_block_fields())
-        result = self.commit(".env", "API_KEY=fixture-secret")
+        (self.worktree / ".env").write_text("API_KEY=fixture-secret")
+        unsafe = self.verify_execution()
+        self.assertTrue(unsafe["verification_ok"], unsafe)
+        result = cmd_delivery.cmd_delivery_commit(self.ctx, self.payload)
         self.assertEqual(result["failure_code"], "delivery_blocked_files")
         self.assertEqual(self.git(self.worktree, "rev-parse", "HEAD"), self.delivery["base_sha"])
         self.assertEqual(self.git(self.worktree, "diff", "--cached"), "")
+        self.assertEqual(core.delivery_of(self.task())["commits"], [])
 
     def test_same_run_registration_during_commit_is_deduplicated(self):
         original = git_delivery.commit_worktree

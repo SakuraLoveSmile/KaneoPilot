@@ -135,6 +135,18 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         return self.call("engine-verdict", {"task_id": task_id, "expected_execution_run_id": "run-" + task_id,
                          "expected_plan_sha256": sha, **fields})
 
+    def transcript_verdict(self, task_id):
+        # The historical parser remains testable, but is no longer a command completion path.
+        conn = db.connect(self.db_path)
+        try:
+            try:
+                return verdict.evaluate_task(conn, db.require_task(conn, task_id))
+            except util.KanpilotError as exc:
+                self.assertEqual(exc.code, "verification_identity_unconfirmed")
+                return {"kind": "unconfirmed", "verification_ok": False, "failure_code": exc.code}
+        finally:
+            conn.close()
+
     def _row(self, tid):
         conn = db.connect(self.db_path)
         try:
@@ -146,7 +158,7 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         row = self._row(tid)
         self.call("set-project-mapping", {"project_id": row["project_id"], "repository": row["repository"], "enabled": True,
             "expected_revision": self.call("get-project-mappings")["revision"]})
-        self.call("set-project-engine-mode", {"project_id": row["project_id"], "engine_mode": mode})
+        self.seed_engine_mode(row["project_id"], mode)
 
     def test_plus_success_never_runs_pilot_verification_in_live_or_shadow(self):
         for mode in ("live", "shadow"):
@@ -154,17 +166,16 @@ class TestEngineVerdictCommand(KanpilotTestCase):
             row = self._row(tid)
             self.call("set-project-mapping", {"project_id": row["project_id"], "repository": row["repository"], "enabled": True,
                 "expected_revision": self.call("get-project-mappings")["revision"]})
-            self.call("set-project-engine-mode", {"project_id": row["project_id"], "engine_mode": mode})
+            self.seed_engine_mode(row["project_id"], mode)
             with patch.object(verdict, "run_verify_commands", side_effect=AssertionError("Pilot must not verify")), \
                     patch.object(verdict, "project_verify_env", side_effect=AssertionError("Pilot env must not be read")):
                 result = self.verdict(tid, sha)
             self.assertTrue(result["verification_ok"])
-            self.assertEqual(result["evidence_source"], "goal_report" if mode == "live" else "plus_tool_results")
-            if mode == "shadow":
-                self.assertTrue(result["goal_report_comparison"]["verification_ok"])
+            self.assertEqual(result["evidence_source"], "goal_report")
+            self.assertNotIn("goal_report_comparison", result)
             self.assertEqual(result["checks"][0]["exit_code"], 0)
 
-    def test_real_failure_unknown_missing_and_wrong_turn_cannot_pass(self):
+    def test_historical_transcript_real_failure_unknown_missing_and_wrong_turn_cannot_pass(self):
         for label, fields, kind in (("failure", {"exit_code": 7}, "verify_failed"),
                                     ("unknown", {"exit_code": None}, "unconfirmed"),
                                     ("oldturn", {"turn_id": "planning"}, "unconfirmed"),
@@ -172,7 +183,7 @@ class TestEngineVerdictCommand(KanpilotTestCase):
             tid, sha = self._running_task_with_repo(label, commands=["pytest"])
             self.events[1].update(fields)
             self.write_evidence()
-            result = self.verdict(tid, sha)
+            result = self.transcript_verdict(tid)
             self.assertFalse(result["verification_ok"])
             self.assertEqual(result["kind"], kind)
 
@@ -202,27 +213,28 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.assertTrue(self.verdict(tid, sha, operation_id="same")["verification_ok"])
         self.assertTrue(self.verdict(tid, sha, operation_id="same")["deduplicated"])
         self.events[1]["exit_code"] = 1
+        self.goal["checks"][0].update(exitCode=1, result="failed")
         self.write_evidence()
         result = self.verdict(tid, sha, operation_id="same")
         self.assertFalse(result["verification_ok"])
 
-    def test_wrong_tool_cwd_and_cd_prefix_cannot_pass(self):
+    def test_historical_transcript_wrong_tool_cwd_and_cd_prefix_cannot_pass(self):
         for label, arguments in (("cwd", {"command": "pytest", "cwd": "/tmp"}),
                                  ("workdir", {"command": "pytest", "workdir": ".."}),
                                  ("cd", {"command": "cd /tmp && pytest"})):
             tid, sha = self._running_task_with_repo(label, commands=["pytest"])
             self.events[1]["input"] = json.dumps(arguments)
             self.write_evidence()
-            self.assertEqual(self.verdict(tid, sha)["kind"], "unconfirmed")
+            self.assertEqual(self.transcript_verdict(tid)["kind"], "unconfirmed")
 
-    def test_conflicting_cwd_and_workdir_rejected_in_both_orders(self):
+    def test_historical_transcript_conflicting_cwd_and_workdir_rejected_in_both_orders(self):
         for label, reverse in (("cwd-root-first", False), ("cwd-child-first", True)):
             tid, sha = self._running_task_with_repo(label, commands=["pytest"])
             root, child = str(self.worktree), str(self.worktree / "core")
             self.events[1]["input"] = json.dumps({"command": "pytest",
                 "cwd": child if reverse else root, "workdir": root if reverse else child})
             self.write_evidence()
-            result = self.verdict(tid, sha)
+            result = self.transcript_verdict(tid)
             self.assertEqual(result["kind"], "unconfirmed")
             self.assertEqual(result["failure_code"], "verification_identity_unconfirmed")
 
@@ -257,12 +269,12 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.plus_status_mock.side_effect = [dict(self.plus_state), dict(self.plus_state, current_turn_id="new-turn")]
         self.assertEqual(self.verdict(tid, sha)["kind"], "unconfirmed")
 
-    def test_cd_separator_allows_inside_worktree_but_rejects_escape(self):
+    def test_historical_transcript_cd_separator_allows_inside_worktree_but_rejects_escape(self):
         for label, directory, passed in (("cd-safe", "-- core", True), ("cd-escape", "-- /tmp", False)):
             tid, sha = self._running_task_with_repo(label, commands=["pytest"])
             self.events[1]["input"] = json.dumps({"command": "cd " + directory + " && pytest"})
             self.write_evidence()
-            result = self.verdict(tid, sha)
+            result = self.transcript_verdict(tid)
             self.assertEqual(result["verification_ok"], passed)
             if not passed:
                 self.assertEqual(result["failure_code"], "verification_identity_unconfirmed")
@@ -272,6 +284,7 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         self.assertEqual(self.verdict(tid, sha)["kind"], "empty_diff")
         tid, sha = self._running_task_with_repo("java", commands=["pytest"])
         self.events[1].update(exit_code=1, output="This build uses a Java 8 JVM")
+        self.goal["checks"][0].update(exitCode=1, result="failed", detail="This build uses a Java 8 JVM")
         self.write_evidence()
         result = self.verdict(tid, sha)
         self.assertEqual(result["kind"], "environment_failure")
@@ -307,12 +320,13 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         for label, mutate in (("source-race", lambda: (self.worktree / "raced.py").write_text("new")),
                               ("evidence-race", lambda: (self.directory / "events.jsonl").write_text("changed"))):
             tid, sha = self._running_task_with_repo(label, commands=["pytest"])
-            original = verdict._plus_checks
+            from kanpilot import verification_recovery
+            original = verification_recovery.read_goal_evidence
             def changing(*args, **kwargs):
                 result = original(*args, **kwargs)
                 mutate()
                 return result
-            with patch.object(verdict, "_plus_checks", side_effect=changing):
+            with patch.object(verification_recovery, "read_goal_evidence", side_effect=changing):
                 self.assertEqual(self.verdict(tid, sha)["kind"], "unconfirmed")
 
     def test_changed_plan_missing_registered_worktree_and_exhausted_budget_are_unconfirmed(self):
@@ -431,20 +445,30 @@ class TestEngineVerdictCommand(KanpilotTestCase):
         finally:
             conn.close()
 
-    def test_shadow_records_the_report_verdict_beside_the_transcript_decision(self):
-        tid, sha = self._running_task_with_repo("shadow-compare", commands=["pytest"])
-        self._set_mode(tid, "shadow")
-        self.goal["checks"] = [dict(self.goal["checks"][0], exitCode=1, result="failed")]
-        result = self.verdict(tid, sha)
-        self.assertTrue(result["verification_ok"])  # the transcript still decides in shadow
-        self.assertEqual(result["evidence_source"], "plus_tool_results")
-        self.assertFalse(result["goal_report_comparison"]["verification_ok"])
-        self.assertEqual(result["goal_report_comparison"]["kind"], "verify_failed")
-        tid, sha = self._running_task_with_repo("shadow-pending", commands=["pytest"])
+    def test_historical_modes_cannot_fall_back_to_passing_transcript(self):
+        for mode in ("legacy", "shadow"):
+            with self.subTest(mode=mode):
+                tid, sha = self._running_task_with_repo(mode + "-strict-report", commands=["pytest"])
+                self._set_mode(tid, mode)
+                self.goal["checks"][0].update(exitCode=1, result="failed")
+                result = self.verdict(tid, sha)
+                self.assertFalse(result["verification_ok"])
+                self.assertEqual(result["evidence_source"], "goal_report")
+                self.assertEqual(result["kind"], "verify_failed")
+                self.goal["state"] = "pending"
+                self.assertFalse(self.verdict(tid, sha)["verification_ok"])
+
+    def test_old_transcript_receipt_is_never_reused_as_report_proof(self):
+        tid, sha = self._running_task_with_repo("old-transcript-receipt", commands=["pytest"])
+        with db.connect(self.db_path) as conn:
+            db.set_extra(conn, db.require_task(conn, tid), util.now_iso(), engine_verdict={
+                "verification_ok": True, "evidence_source": "plus_tool_results",
+                "execution_run_id": "run-" + tid, "plan_sha256": sha})
         self.goal["state"] = "pending"
-        result = self.verdict(tid, sha)
-        self.assertTrue(result["verification_ok"])
-        self.assertEqual(result["goal_report_comparison"]["kind"], "unconfirmed")
+        with patch.object(verdict, "valid_committed_receipt", side_effect=AssertionError("old receipt reused")):
+            result = self.verdict(tid, sha)
+        self.assertFalse(result["verification_ok"])
+
 
 
 class TestEnvironmentClassification(unittest.TestCase):

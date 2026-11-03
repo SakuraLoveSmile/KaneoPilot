@@ -1,21 +1,8 @@
-"""pi 完整会话闭环集成测试（protocol §5.16.1 / §5.15.5 / §5.18，v1.6）。
+"""历史 pi 会话读取集成测试（protocol §5.16.1 / §5.15.5 / §5.18，v1.6）。
 
-T2 验收（集成，conftest 的 factory/cli 夹具；无真实模型调用、绝不启动真 pi）：
-- 完整闭环：factory.make_ready → enqueue+claim（backend=pi）→
-  dispatch-prepare（pi 证据，config 取 context.exec_config）→
-  dispatch-begin-send → dispatch-start（断言 worktree/worktree_mode、
-  deduplicated 幂等二次调用不创建第二个进程）→ dispatch-confirm
-  （session_id 来自启动返回且与 events 首事件一致）→ running；
-- get-session 的 round_detail（terminal/exit_code/backend/run_status）；
-- session-messages 经 dsh_events 产出 §5.15.5 形状的
-  user/assistant/tool_call/tool_result/command_output/system 消息；
-- 轮次隔离：构造第二个轮次目录写不同事件 → 第一个轮次读取不受影响；
-- 旧轮次迟到事件：向已完成轮次目录追加事件 → 另一轮次读取结果不变。
-
-隔离：tmp_env 的 KANPILOT_PI_FAKE 清空 + KANPILOT_PI_BIN 指向本文件自写的
-伪 pi（`pi -p --mode json` 事件流假端，--version/auth check 兼容 §5.17
-能力门）——worker 走 run_real 全链路（spec 渲染 → 拉起子进程 → JSONL 消费
-→ events.jsonl），模型调用零发生。
+覆盖升级前已发送 pi 轮次的快照、启动幂等、会话正文、身份和轮次隔离。
+历史任务/轮次及旧 JSONL 明确由测试夹具恢复；不会派发新的 pi 执行，
+不会调用真实模型或访问生产数据。普通新执行的成功路径由 Codex 契约覆盖。
 """
 
 from __future__ import annotations
@@ -162,61 +149,78 @@ def _pi_evidence(ctx, **extra) -> dict:
 
 
 def _to_running(factory, cli, tmp_env, mode="ok") -> SimpleNamespace:
-    """完整派发闭环到 running（§5.18.3），返回断言所需上下文。"""
-    _prepare_env(cli, tmp_env, mode)
-    ready = factory.make_ready()
-    task_id = ready.task.task_id
+    """Restore a pre-upgrade, already-sent pi round and its immutable artifacts.
 
-    factory.enqueue_dispatch(task_id)
-    req = factory.find_request(task_id, "dispatch")
-    claim = factory.claim("dispatch", request_id=req["request_id"])
-    assert claim["claimed"] is True, claim
-    ctx = claim["context"]
-    run_id = claim["run_id"]
-    assert ctx["backend"] == "pi"
-    assert set(ctx["exec_config"]) == {
-        "backend", "provider", "model", "reasoning_effort", "agent_preset",
-    }
-
-    prep = cli("dispatch-prepare", {
-        "task_id": task_id, "run_id": run_id,
-        "evidence": _pi_evidence(ctx),
-    })
-    assert prep["status"] == "prepared"
-    sent = cli("dispatch-begin-send",
-               {"task_id": task_id, "run_id": run_id})
-    assert sent["status"] == "submitting"
-
-    started = cli("dispatch-start", {"task_id": task_id, "run_id": run_id})
-    assert started["deduplicated"] is False
-    assert started["status"] == "started", started
-    assert started["pid"] and started["pid"] > 0
-    assert started["session_id"], "伪 pi 应已产出 session 事件"
-
-    # §5.18.3 幂等：同一轮次重复 dispatch-start 绝不创建第二个进程。
-    again = cli("dispatch-start", {"task_id": task_id, "run_id": run_id})
-    assert again["deduplicated"] is True
-    assert again["pid"] == started["pid"]
-    assert again["session_id"] == started["session_id"]
-
-    confirm = cli("dispatch-confirm", {
-        "task_id": task_id, "run_id": run_id,
-        "evidence": _pi_evidence(
-            ctx, session_id=started["session_id"], protocol_seen=True
-        ),
-    })
-    assert confirm["status"] == "running"
-
+    New pi execution is rejected. These files model old on-disk transport for
+    the reader/identity/isolation contract; no dispatch worker is launched.
+    """
+    import subprocess
+    import sys
+    from kanpilot import db, pi_backend
+    fake = _prepare_env(cli, tmp_env, mode)
+    running = factory.make_historical_running()
+    ready = running.ready
+    task_id, run_id = running.task.task_id, running.dispatch_run_id
+    ctx = running.context
     task = factory.get_task(task_id)
-    assert task["status"] == "running"
-    assert task["send_state"] == "sent"
-
-    run_dir = _runs_root(cli) / task_id / run_id
-    job = _wait_job_terminal(run_dir)
-    return SimpleNamespace(
-        ready=ready, task_id=task_id, run_id=run_id, ctx=ctx,
-        started=started, run_dir=run_dir, job=job,
-    )
+    directory = _runs_root(cli) / task_id / run_id
+    directory.mkdir(parents=True)
+    worktree = task["delivery"]["worktree_path"]
+    spec = {"v": 1, "task_id": task_id, "run_id": run_id, "backend": "pi",
+            "worktree_mode": "branch", "cwd": worktree, "runs_dir": str(directory),
+            "config": ctx["exec_config"], "pi_home": tmp_env.env["KANPILOT_PI_HOME"],
+            "agent_md": str(Path(tmp_env.env["KANPILOT_AGENTS_DIR"]) / "default.md"),
+            "timeout_seconds": 120, "plan_path": str(ready.plan.path),
+            "instruction": "Historical execution plan: " + str(ready.plan.path)}
+    (directory / "spec.json").write_text(json.dumps(spec))
+    raw = subprocess.run([sys.executable, str(fake), "--session-dir",
+        str(directory / "pi-sessions"), spec["instruction"]], capture_output=True,
+        text=True, check=True, cwd=worktree, env=cli.env)
+    events = []
+    for line in raw.stdout.splitlines():
+        try:
+            mapped = pi_backend.map_event(json.loads(line))
+        except ValueError:
+            continue
+        if mapped is None or mapped[0] == "turn_end":
+            continue
+        kind, timestamp, fields = mapped
+        events.append({"v": 1, "seq": len(events)+1, "ts": timestamp,
+                       "type": kind, **fields})
+    events.append({"v": 1, "seq": len(events)+1, "ts": "2026-01-01T00:01:00+00:00",
+                   "type": "terminal", "outcome": "completed", "reason": "completed"})
+    (directory / "events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events))
+    session_id = events[0]["session_id"]
+    job = {"task_id": task_id, "run_id": run_id, "backend": "pi", "config": ctx["exec_config"],
+           "session_id": session_id, "session_title": "Fake pi", "pid": 424242,
+           "status": "finished", "exit_code": 0, "detail": None,
+           "worktree_path": worktree, "started_at": "2026-01-01T00:00:00+00:00",
+           "ended_at": "2026-01-01T00:01:00+00:00"}
+    (directory / "job.json").write_text(json.dumps(job))
+    conn = db.connect(tmp_env.db)
+    try:
+        conn.execute("UPDATE execution_rounds SET worktree_path=?, session_id=?, session_title='Fake pi', run_status='finished' WHERE task_id=? AND run_id=?",
+                     (worktree, session_id, task_id, run_id))
+        # Reconstruct the old crash window before confirm, then verify the
+        # persisted startup identity remains idempotent without spawning pi.
+        conn.execute("UPDATE tasks SET status='submitting' WHERE task_id=?", (task_id,))
+        conn.execute("UPDATE requests SET status='claimed' WHERE request_id=?", (running.dispatch_request_id,))
+    finally:
+        conn.close()
+    before = (directory / "job.json").read_bytes()
+    again = cli("dispatch-start", {"task_id": task_id, "run_id": run_id})
+    assert again["deduplicated"] is True and again["pid"] == job["pid"]
+    assert again["session_id"] == session_id
+    assert (directory / "job.json").read_bytes() == before
+    conn = db.connect(tmp_env.db)
+    try:
+        conn.execute("UPDATE tasks SET status='running', session_id=?, session_title='Fake pi' WHERE task_id=?", (session_id, task_id))
+        conn.execute("UPDATE requests SET status='succeeded' WHERE request_id=?", (running.dispatch_request_id,))
+    finally:
+        conn.close()
+    return SimpleNamespace(ready=ready, task_id=task_id, run_id=run_id, ctx=ctx,
+        started={"pid": job["pid"], "session_id": session_id, "worktree_path": worktree},
+        run_dir=directory, job=job)
 
 
 def _write_second_round(runs_root: Path, task_id: str) -> Path:

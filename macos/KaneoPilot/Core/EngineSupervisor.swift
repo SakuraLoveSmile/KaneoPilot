@@ -93,7 +93,7 @@ final class EngineSupervisor: ObservableObject {
         // A live external holder keeps ownership; do not start a competing child.
         guard engineStatus != nil, engineStatus?.instances.contains(where: { $0.active == true }) != true else { return }
         guard let location = client.location else { error = CoreError.coreMissing.coreMessage; return }
-        let payload = "{\"mode\":\"legacy\",\"intake\":true,\"spawn\":true}"
+        let payload = "{\"mode\":\"live\",\"intake\":true,\"spawn\":true}"
         guard let invocation = location.invocation(["engine-run", "--json", payload]) else {
             recordFailure("无法启动引擎：\(PythonRuntime.missingMessage)")
             return

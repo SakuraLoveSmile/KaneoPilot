@@ -182,6 +182,9 @@ def decide(snapshot: dict) -> Decision:
         return Decision(BLOCK, reason="auto_budget_exceeded",
                         ladder=ladder.LADDER_NEEDS_YOU, attention=True,
                         params={"phase": phase, "condition": condition})
+    if action == CONFIRM_PLAN and snapshot.get("auto_confirm_skip_reason"):
+        return Decision(AWAIT, reason=snapshot["auto_confirm_skip_reason"],
+                        params={"phase": phase, "condition": condition})
     if action in _CAPACITY_GATED and not snapshot.get("capacity_ok", True):
         return Decision(AWAIT, reason="capacity_full",
                         params={"phase": phase, "condition": condition})

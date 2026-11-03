@@ -1,11 +1,8 @@
 """New scheduling engine (protocol §5.27 / state-model §7–§10).
 
-Strangler phase (AGENTS.md): ``engine_mode`` is switched per project through
-``legacy | shadow | live``. This package is **additive** — no existing module
-is removed and all state writes still go through core commands (SQLite stays
-the single source of truth). Nothing here imports a submodule at package load
-time, so a partially-landed engine never breaks ``import kanpilot.engine`` or
-the CLI command registry (the rehearsal "engine gate" relies on this).
+All ordinary projects use live scheduling. Explicit process-wide shadow mode
+is diagnostic only. Existing per-stage runners remain shared, and all state
+writes still go through core commands (SQLite is the single source of truth).
 
 Layout:
 - ``ladder``    — four failure ladders + exponential backoff (state-model §8)
@@ -21,13 +18,12 @@ Layout:
 """
 from __future__ import annotations
 
-# engine_mode vocabulary (strangler three-state switch, per project).
-ENGINE_MODE_LEGACY = "legacy"
+# Live scheduling plus the explicit process-wide diagnostic mode.
 ENGINE_MODE_SHADOW = "shadow"
 ENGINE_MODE_LIVE = "live"
-ENGINE_MODES = (ENGINE_MODE_LEGACY, ENGINE_MODE_SHADOW, ENGINE_MODE_LIVE)
+ENGINE_MODES = (ENGINE_MODE_SHADOW, ENGINE_MODE_LIVE)
 
 __all__ = [
-    "ENGINE_MODE_LEGACY", "ENGINE_MODE_SHADOW", "ENGINE_MODE_LIVE",
+    "ENGINE_MODE_SHADOW", "ENGINE_MODE_LIVE",
     "ENGINE_MODES",
 ]

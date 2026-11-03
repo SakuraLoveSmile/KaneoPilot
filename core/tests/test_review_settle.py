@@ -145,8 +145,11 @@ def test_identity_lease_failure_never_registers(scene):
     assert [cmd for cmd, _ in calls] == ['get-task', 'get-request']
 
 
-@pytest.mark.parametrize('conclusion', ['pass', 'changes_requested', 'blocked'])
-def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusion):
+@pytest.mark.parametrize(('conclusion', 'source_terminal'), [
+    ('pass', True), ('changes_requested', True), ('blocked', True),
+    ('changes_requested', False),
+])
+def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusion, source_terminal):
     from types import SimpleNamespace
     from kanpilot import automation_policy, cli, core, db
     conn = db.connect(tmp_env.db)
@@ -172,20 +175,52 @@ def test_real_core_automatic_settlement_and_recovery(factory, tmp_env, conclusio
     assert claim['claimed']
     task = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
     request = cli.run('get-request', {'request_id': claim['request_id']}, tmp_env.db)['request']
+    if not source_terminal:
+        # Simulate historical/incomplete durable transport evidence after Review began.
+        directory = Path(cli.run('overview', {}, tmp_env.db)['paths']['session_runs_root']) / task_id / task['run_id']
+        job_path = directory / 'job.json'
+        job = json.loads(job_path.read_text())
+        job['cli_terminal'] = False
+        job_path.write_text(util.jdump(job))
     kwargs = dict(db_path=tmp_env.db, task=task, request=request, run_id=claim['run_id'], backend='codex', cost_usd=None,
                   result={'conclusion': conclusion, 'report_markdown': '实际核心结算证据',
                           'fix': {'title': '修复缺口', 'description': '回归覆盖', 'priority': 'high'} if conclusion == 'changes_requested' else None})
     assert review_settle.settle(**kwargs)['exit_code'] == 0
     updated = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
-    assert updated['status'] == {'pass': 'in_review', 'changes_requested': 'in_review', 'blocked': 'needs_user'}[conclusion]
+    auto_repair = conclusion == 'changes_requested' and source_terminal
+    assert updated['status'] == ('ready' if auto_repair else {
+        'pass': 'in_review', 'changes_requested': 'in_review', 'blocked': 'needs_user'}[conclusion])
     assert len(updated['review_history']) == 1
     if conclusion == 'changes_requested':
-        assert updated['extra']['fix_request']['state'] == 'held'
-        assert updated['automation']['fix_round'] == 0
-        assert updated['review_report_sha256']
-        assert '终态' in updated['extra']['fix_request']['reason']
+        fix = updated['extra']['fix_request']
+        history = updated['review_history'][0]
+        assert fix['state'] == ('queued' if auto_repair else 'held')
+        assert updated['automation']['fix_round'] == int(auto_repair)
+        assert fix['source_execution_run_id'] == task['run_id'] == updated['run_id']
+        assert fix['plan_sha256'] == task['plan_sha256'] == updated['plan_sha256']
+        assert fix['report_sha256'] == history['report_sha256'] == util.sha256_file(Path(fix['report_path']))
+        assert fix['review_key'] == history['review_key']
+        for key in ('branch', 'base_branch', 'base_sha', 'head_sha', 'worktree_path'):
+            assert fix[key] == task['delivery'][key] == updated['delivery'][key]
+        if auto_repair:
+            assert updated['review_report_sha256'] is None
+            assert fix['authorized_by'] == 'automation'
+        else:
+            assert updated['review_report_sha256'] == fix['report_sha256']
+            assert '终态' in fix['reason']
+    requests_before = cli.run('list-requests', {}, tmp_env.db)['requests']
+    queued_repairs = [r for r in requests_before if r['task_id'] == task_id
+                      and r['kind'] == 'dispatch' and r['status'] == 'queued']
+    assert len(queued_repairs) == int(auto_repair)
+    if auto_repair:
+        queued = cli.run('get-request', {'request_id': queued_repairs[0]['request_id']}, tmp_env.db)
+        assert queued['payload']['review_repair_key'] == fix['review_key']
     assert review_settle.settle(**kwargs)['exit_code'] == 0
-    assert len(cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']['review_history']) == 1
+    recovered = cli.run('get-task', {'task_id': task_id}, tmp_env.db)['task']
+    assert recovered['review_history'] == updated['review_history']
+    assert recovered['automation']['fix_round'] == updated['automation']['fix_round']
+    assert recovered['extra'].get('fix_request') == updated['extra'].get('fix_request')
+    assert cli.run('list-requests', {}, tmp_env.db)['requests'] == requests_before
 
 
 def test_real_dismiss_takeover_restores_manual_pass(factory, tmp_env):

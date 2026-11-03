@@ -141,6 +141,7 @@ class CodexInputsTests(HeadlessCase):
         self.assertEqual(self.call_err('reconcile-execution-question',{'task_id':'t','run_id':'r'}).code,'conflict')
 
     def test_retry_requires_terminal_birth_evidence_and_preserves_worktree_in_new_run(self):
+        self.configure_codex_execution()
         self.settle()
         db.update_task(self.ctx.conn,'t',self.ctx.now_iso,status='needs_user',failure_code='execution_failed',failure_stage='running')
         payload={'task_id':'t','action':'resume','expected_execution_run_id':'r'}
@@ -188,7 +189,7 @@ class CodexInputsTests(HeadlessCase):
         db.update_task(self.ctx.conn,'t',self.ctx.now_iso,status='needs_user',failure_code='verification_unconfirmed',failure_stage='monitor')
         for mode in ('legacy','shadow'):
             with self.subTest(mode=mode):
-                self.call('set-project-engine-mode',{'project_id':self.task()['project_id'],'engine_mode':mode})
+                self.seed_engine_mode(self.task()['project_id'], mode)
                 before=dict(self.task())
                 count=self.ctx.conn.execute('SELECT COUNT(*) FROM requests').fetchone()[0]
                 self.assertNotIn('accept_verification',derive.allowed_actions(self.ctx.conn,self.task(),self.ctx.now))

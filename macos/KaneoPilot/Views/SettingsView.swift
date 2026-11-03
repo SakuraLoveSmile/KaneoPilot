@@ -205,6 +205,7 @@ struct SettingsView: View {
     @State private var piDesktopProbeControlText: String?
 
     private static let piDesktopThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    private static let historicalPiExecutionIssue = "pi 不支持新引擎的结构化验证，请选择 Plus 或 Codex CLI 后再执行"
 
     // MARK: Codex 规划配置状态（§4.4 / protocol §5.22.6 + v3 §5.23.2）
     @State private var plannerLoaded = false
@@ -1039,7 +1040,7 @@ struct SettingsView: View {
                 // ① 任务执行后端（§5.23.3）：轮次执行的模型来源。
                 LabeledContent {
                     Picker("任务执行后端", selection: $selBackend) {
-                        Text("pi").tag("pi")
+                        Text("pi（仅历史配置）").tag("pi").disabled(true)
                         Text("Codex CLI").tag("codex")
                         Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                     }
@@ -1049,6 +1050,10 @@ struct SettingsView: View {
                     .accessibilityLabel("任务执行后端")
                 } label: {
                     SettingsRowLabel(title: "任务执行后端", detail: taskExecEffectiveText)
+                }
+                if selBackend == "pi" {
+                    SettingsNotice(text: Self.historicalPiExecutionIssue,
+                                   icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
                 }
                 if selBackend == "pi_desktop" {
                     piDesktopBlock(caps)
@@ -1798,9 +1803,9 @@ struct SettingsView: View {
     /// 保存禁用判定（§4.10）：两个选择各自校验，不互相推断。
     /// - Plus 五字段：只要页面上存在 Plus 块（执行或控制端为 Plus）就校验
     ///   结构与权限显式选择；不受 PI CLI 顶层 ok 阻挡（T3.3）。
-    /// - PI CLI：任务执行仍为 pi 时沿用原环境门（ok + 组合校验）；两个角色里
-    ///   已有 Plus 时，CLI 草稿按原样提交，真实错误由核心返回。
+    /// - PI CLI：任务执行为 pi 时只保留历史配置读取，须显式改选 Plus 或 Codex CLI。
     private func execIssue(_ caps: ExecCapabilitiesResponse?) -> String? {
+        if selBackend == "pi" { return Self.historicalPiExecutionIssue }
         guard let caps else { return "执行配置能力未加载" }
         if selBackend == "codex" {
             if emptyToNil(execCodexModel) == nil { return "Codex 模型不能为空" }
@@ -1813,10 +1818,6 @@ struct SettingsView: View {
         }
         if plusBlockInPlay {
             if let plusIssue = piDesktopDraftIssue { return plusIssue }
-            if selBackend == "pi", caps.ok != false,
-               let cliIssue = cliCombinationIssue(caps) {
-                return cliIssue
-            }
             return nil
         }
         if (caps.checks ?? []).contains(where: { $0.ok == false }) {
@@ -2811,7 +2812,7 @@ struct SettingsView: View {
             Toggle(isOn: $executorEnabled) {
                 SettingsRowLabel(
                     title: "启用本机引擎",
-                    detail: "App 监督 engine run；核心按项目的 legacy / shadow / live 设置处理任务。关闭窗口后仍在菜单栏运行；退出 App 后停止。")
+                    detail: "App 监督自动调度引擎，按各项目的自动处理策略推进任务。关闭窗口后仍在菜单栏运行；退出 App 后停止。")
             }
             .onChange(of: executorEnabled) { _, value in model.executorScheduler?.setEnabled(value) }
             // 步进后 0.6 秒内无新操作才提交（commitMaxActiveTasks）；没有单独的保存按钮。

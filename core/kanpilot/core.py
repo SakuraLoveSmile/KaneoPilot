@@ -317,6 +317,48 @@ def is_automation_managed(task) -> bool:
     return bool(value) and not value.get("manual_takeover", False)
 
 
+def monitor_retry_state(conn, task):
+    """Current managed execution's latest transient monitor failure, if any.
+
+    Observation top-ups must share the existing stage retry budget instead of
+    opening a new chain. Success, explicit user recovery or a new execution
+    supersedes it; a cancelled retry still consumed its retry allowance.
+    """
+    if task["status"] != "running" or not is_automation_managed(task):
+        return None
+    rows = conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='monitor' "
+        "ORDER BY COALESCE(claimed_at, created_at) DESC, rowid DESC",
+        (task["task_id"],)).fetchall()
+    execution = conn.execute(
+        "SELECT created_at FROM execution_rounds WHERE task_id=? AND run_id=?",
+        (task["task_id"], task["run_id"])).fetchone()
+    # A round can be discovered/backfilled after a monitor already failed.
+    # The actual confirmed send is the stronger execution boundary.
+    boundary = task["sent_at"] or (execution["created_at"] if execution else None)
+    from .engine import ladder
+    spent = 0
+    latest_finished = None
+    for row in rows:
+        if boundary and util.ts_before(row["claimed_at"] or row["created_at"], boundary):
+            return None
+        base = db.request_payload(row).get("retry_base")
+        base = base if type(base) is int and base >= 0 else 0
+        latest_finished = latest_finished or row["finished_at"] or row["updated_at"]
+        if row["status"] == "cancelled" and base > 0 and row["requested_by"] != "user":
+            spent = max(spent, base)
+            continue
+        if row["status"] != "failed":
+            return None
+        code = (util.jload(row["result_json"]) or {}).get("failure_code")
+        if ladder.classify(code) != ladder.LADDER_TRANSIENT:
+            return None
+        spent = max(spent, base)
+        return {"failure_code": code, "spent": spent, "finished_at": latest_finished,
+                "exhausted": ladder.retries_exhausted(ladder.LADDER_TRANSIENT, spent)}
+    return None
+
+
 def is_pr_delivery(task) -> bool:
     return delivery_of(task).get("mode") == "pr"
 
