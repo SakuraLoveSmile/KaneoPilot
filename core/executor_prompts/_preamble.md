@@ -10,9 +10,12 @@ runner 承担，不经本 prompt）。v1.6：执行轮次由 pi CLI 启动（pro
 
 ## 固定助手
 
-- 调度核心：`python3 {KANPILOT} <command> --json '<payload>'`（下称
+- 调度核心：`{PYTHON} {KANPILOT} <command> --json '<payload>'`（下称
   `kanpilot`）。所有命令单 JSON 输出；非零退出即失败，读 `error`/`code`
   字段。
+  - `{PYTHON}` 是 runner 渲染本 prompt 时填入的核心解释器绝对路径（App 内即
+    内置运行时）；照抄即可，**不要**改成 PATH 里的 `python3`（可能是别的版本
+    或系统存根）。
   - **Plus 控制轮**：runner 已把 `{KANPILOT}` 替换为**本控制轮固定的本地包装
     器**路径，该包装器只做一件事——显式注入本轮固定的 `KANPILOT_DB`、
     `KANPILOT_APP_SUPPORT`、`KANPILOT_PLAN_ROOT`、`KANPILOT_REPOS_ROOT`、
@@ -20,7 +23,8 @@ runner 承担，不经本 prompt）。v1.6：执行轮次由 pi CLI 启动（pro
     CLI（Plus 的 shell 工具在宿主进程执行，**不继承** runner 环境）。
     因此：一律经 `{KANPILOT}` 调用，不要另行 export/覆盖环境、不要改用宿主
     默认数据库、不要猜测或改写路径、不要读取或打印任何凭据值。
-- Kaneo 只读桥（批量枚举用）：`python3 {BRIDGE}`（沿用，仅只读命令）。
+- Kaneo 只读桥（批量枚举用）：`python3 {BRIDGE}`（沿用，仅只读命令；桥脚本是
+  用户自己安装的外部文件，仍按 PATH 里的 `python3` 解释）。
 - 冻结契约文档：`{DOCS}/protocol.md`、`{DOCS}/automation-contract.md`。
   语义冲突以文档为准，不现场发明。
 

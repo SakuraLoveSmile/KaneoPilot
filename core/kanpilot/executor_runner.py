@@ -7,7 +7,7 @@ CLI：``python -m kanpilot.executor_runner --stage <dispatch|monitor|review>``
 
 职责：
 1. 渲染 ``core/executor_prompts/<stage>.md`` 为本次 prompt（{PREAMBLE}
-   展开为 _preamble.md；{KANPILOT}/{BRIDGE}/{CORE_ROOT}/{DOCS}/
+   展开为 _preamble.md；{PYTHON}/{KANPILOT}/{BRIDGE}/{CORE_ROOT}/{DOCS}/
 2. 拉起 ``pi -p --mode json --session-dir <app_support>/executor-sessions/
    <stage>/ --no-extensions --no-context-files``，stdin 关闭，stdout 落
    日志文件（事件流不进本进程 stdout）；``--stage review`` 且
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -39,7 +40,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import constants, db, review_config
+from . import constants, db, review_config, util
 
 # v2（§5.22.3）：plan 改由 codex planner_runner 承担，不再经 pi executor。
 STAGES = ("dispatch", "monitor", "review", "delivery")
@@ -48,6 +49,19 @@ DEFAULT_TIMEOUT_SECONDS = 1800  # 30min：一轮领取循环上限
 
 def _kanpilot_path() -> str:
     return str(constants.core_root() / "kanpilot.py")
+
+
+def _python_path() -> str:
+    """Prompt 里 ``{PYTHON}`` 的值：核心自己的解释器绝对路径（shell 引用）。
+
+    执行端模型的 shell 按自己的 PATH 解释 ``python3``，可能是 pyenv，或没装命令
+    行工具时的系统存根；App 内的核心跑在内置运行时上，这里把同一个解释器交给它。
+    """
+    executable = getattr(sys, "executable", None)
+    if not isinstance(executable, str) or not executable:
+        raise util.KanpilotError(
+            "validation_failed", "无法确定核心的 Python 解释器路径（sys.executable 为空）")
+    return shlex.quote(executable)
 
 
 def _bridge_path() -> str:
@@ -68,7 +82,8 @@ def render_prompt(stage: str) -> str:
     text = (base / f"{stage}.md").read_text(encoding="utf-8")
     preamble = (base / "_preamble.md").read_text(encoding="utf-8")
     text = text.replace("{PREAMBLE}", preamble)
-    return text.replace("{KANPILOT}", _kanpilot_path()) \
+    return text.replace("{PYTHON}", _python_path()) \
+               .replace("{KANPILOT}", _kanpilot_path()) \
                .replace("{BRIDGE}", _bridge_path()) \
                .replace("{CORE_ROOT}", str(constants.core_root())) \
                .replace("{DOCS}", str(constants.core_root().parent / "docs")) \

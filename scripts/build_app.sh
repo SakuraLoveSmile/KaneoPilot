@@ -1,16 +1,24 @@
 #!/bin/bash
-# Build KaneoPilot.app on GitHub Actions and bundle the Python core into Resources.
+# Build KaneoPilot.app and bundle the Python core and pinned runtime into Resources.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-sh "$ROOT/scripts/require_actions.sh"
+sh "$ROOT/scripts/require_actions.sh" --allow-local-macos
 PROJ="$ROOT/macos/KaneoPilot.xcodeproj"
 SCHEME="KaneoPilot"
 CONFIG="${CONFIG:-Release}"
-OUT="${APP_OUTPUT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/macos-build}"
-DERIVED="${DERIVED_DATA_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/KaneoPilotDerivedData}"
-ARCHS="${ARCHS:-arm64 x86_64}"
+if [ "${KANPILOT_LOCAL_BUILD:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" != true ]; then
+    BUILD_ROOT="${LOCAL_BUILD_ROOT:-$ROOT/build/local-macos}"
+else
+    BUILD_ROOT="${RUNNER_TEMP:?RUNNER_TEMP is required}"
+fi
+OUT="${APP_OUTPUT_DIR:-$BUILD_ROOT/macos-build}"
+DERIVED="${DERIVED_DATA_DIR:-$BUILD_ROOT/KaneoPilotDerivedData}"
+ARCHS="${ARCHS:-arm64}"
+# KaneoPilot ships Apple Silicon only (docs/build-release.md): refuse any other request before building.
+[ "$ARCHS" = "arm64" ] || { echo "ERROR: KaneoPilot builds arm64 only, got ARCHS=$ARCHS" >&2; exit 1; }
 BUILD_SETTINGS=("ARCHS=$ARCHS" "ONLY_ACTIVE_ARCH=NO" "CODE_SIGNING_ALLOWED=NO")
+if [ -n "${KANPILOT_MACOS_SDK:-}" ]; then BUILD_SETTINGS+=("SDKROOT=$KANPILOT_MACOS_SDK"); fi
 if [ -n "${VERSION_NAME:-}" ]; then BUILD_SETTINGS+=("MARKETING_VERSION=$VERSION_NAME"); fi
 if [ -n "${BUILD_NUMBER:-}" ]; then BUILD_SETTINGS+=("CURRENT_PROJECT_VERSION=$BUILD_NUMBER"); fi
 
@@ -23,6 +31,9 @@ APP_DST="$OUT/KaneoPilot.app"
 mkdir -p "$OUT"
 rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
+if [ "${KANPILOT_LOCAL_BUILD:-}" = 1 ] && [ "${KANPILOT_COMPATIBILITY_UI:-}" = 1 ]; then
+    /usr/libexec/PlistBuddy -c 'Add :UIDesignRequiresCompatibility bool true' "$APP_DST/Contents/Info.plist"
+fi
 
 echo "== bundle core into Resources =="
 RES="$APP_DST/Contents/Resources/core"
@@ -42,8 +53,59 @@ echo "== verify executor_prompts / agents bundled =="
 [ -d "$RES/executor_prompts" ] || { echo "ERROR: executor_prompts 未打入 Resources" >&2; exit 1; }
 [ -d "$RES/agents" ] || { echo "ERROR: agents 未打入 Resources" >&2; exit 1; }
 
-echo "== verify bundled desktop backend and source hashes =="
-PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/core" "$RES" <<'PY'
+echo "== bundle the pinned Python runtime into Resources =="
+# The one native file in core/_vendor is a PyYAML extension built for another Python; the bundled interpreter uses the pure-Python fallback.
+find "$RES/_vendor" -name "*.so" -type f -delete
+RUNTIME_SRC="${PYTHON_RUNTIME_DIR:?PYTHON_RUNTIME_DIR is required (scripts/fetch_python_runtime.py sets it)}"
+RUNTIME_DST="$APP_DST/Contents/Resources/python"
+[ -x "$RUNTIME_SRC/bin/python3" ] || { echo "ERROR: $RUNTIME_SRC has no bin/python3" >&2; exit 1; }
+rm -rf "$RUNTIME_DST"
+ditto "$RUNTIME_SRC" "$RUNTIME_DST"
+
+echo "== trim the bundled runtime's unused and build-time files =="
+# The App only ever runs `bin/python3` as a subprocess. Verified against the pinned
+# `install_only_stripped` archive (docs/build-release.md): `otool -L bin/python3.13` does not
+# reference libpython3.13.dylib, and across the runtime's nine Mach-O images the only one that
+# names it is itself. C headers, the config-3.13-darwin build directory and _pyrepl are
+# build-time or interactive-only. Every entry here was re-checked by importing the cloud smoke
+# set and all 95 core modules with the trimmed runtime; removing them costs no capability the
+# App or the core uses, and keeps every online update ~20 MB smaller. Anything that changes
+# what the bundled interpreter can do belongs in a separate decision, not in this list.
+TRIM_PATHS=(
+  "lib/libpython3.13.dylib"
+  "include"
+  "lib/python3.13/config-3.13-darwin"
+  "lib/python3.13/_pyrepl"
+)
+for relative in "${TRIM_PATHS[@]}"; do
+  target="$RUNTIME_DST/$relative"
+  [ -e "$target" ] || [ -L "$target" ] || { echo "ERROR: expected $relative in the bundled runtime" >&2; exit 1; }
+  rm -rf "$target"
+  echo "trimmed $relative"
+done
+
+python3 "$ROOT/scripts/prepare_python_runtime.py" "$RUNTIME_DST"
+EXPECTED_PYTHON=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["python_version"])' "$ROOT/scripts/python-runtime.lock.json")
+BUNDLED_PYTHON=$("$RUNTIME_DST/bin/python3" -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
+[ "$BUNDLED_PYTHON" = "$EXPECTED_PYTHON" ] || { echo "ERROR: the bundled Python is $BUNDLED_PYTHON, the lock file says $EXPECTED_PYTHON" >&2; exit 1; }
+
+echo "== bundle the Python runtime's license texts into Resources =="
+# The runtime statically links OpenSSL, SQLite, libffi, expat, mpdecimal, bzip2, xz,
+# ncurses, readline, libuuid and Tcl/Tk; a public release has to carry their notices
+# (docs/build-release.md). The `install_only_stripped` archive itself only ships the PSF
+# text, so the texts come from the same release's `full` archive and are checked in.
+LICENSE_SRC="$ROOT/scripts/licenses/python"
+LICENSE_DST="$APP_DST/Contents/Resources/licenses/python"
+[ -d "$LICENSE_SRC" ] || { echo "ERROR: $LICENSE_SRC is missing (the Python runtime's license texts)" >&2; exit 1; }
+rm -rf "$LICENSE_DST"
+ditto "$LICENSE_SRC" "$LICENSE_DST"
+LICENSE_COUNT=$(find "$LICENSE_DST" -type f | wc -l | tr -d ' ')
+[ "$LICENSE_COUNT" -gt 0 ] || { echo "ERROR: no license text reached $LICENSE_DST" >&2; exit 1; }
+echo "bundled $LICENSE_COUNT license texts into $LICENSE_DST"
+
+echo "== verify bundled desktop backend and source hashes (with the bundled Python) =="
+# -I keeps the runner's environment out; -B keeps bytecode out of the bundle, which is not signed yet but must stay as copied.
+"$RUNTIME_DST/bin/python3" -I -B - "$ROOT/core" "$RES" <<'PY'
 import hashlib
 import importlib
 import sys
@@ -93,14 +155,13 @@ for relative in (Path("executor_prompts/review_cli.md"), Path("executor_prompts/
 for name in ("protocol.md", "automation-contract.md", "release-contract.md", "harness-contract.md"):
     if (source.parent / "docs" / name).read_bytes() != (bundled.parent / "docs" / name).read_bytes():
         raise SystemExit("Bundled contract differs from source: " + name)
-print("Desktop and automation backend imports and source hashes verified")
+print("Desktop and automation backend imports and source hashes verified with Python", ".".join(map(str, sys.version_info[:3])))
 PY
 
-echo "== verify requested application architectures =="
+echo "== verify application architecture (arm64 only) =="
 EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DST/Contents/Info.plist")
-for arch in $ARCHS; do
-    lipo "$APP_DST/Contents/MacOS/$EXECUTABLE" -verify_arch "$arch"
-done
+lipo "$APP_DST/Contents/MacOS/$EXECUTABLE" -verify_arch arm64
+[ "$(lipo -archs "$APP_DST/Contents/MacOS/$EXECUTABLE")" = "arm64" ] || { echo "ERROR: app executable is not arm64-only" >&2; exit 1; }
 
 echo "== verify requested application version =="
 if [ -n "${VERSION_NAME:-}" ]; then

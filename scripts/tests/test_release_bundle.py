@@ -82,13 +82,13 @@ class ReleaseTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.api = FakeGitHub()
-        for platform, extension in (("android", "apk"), ("macos", "dmg")):
-            package = self.root / ("KaneoPilot-1.2.3-" + platform + "." + extension)
+        for platform, name in (("android", "android.apk"), ("macos", "macos-arm64.dmg")):
+            package = self.root / ("KaneoPilot-1.2.3-" + name)
             package.write_bytes((platform + " signed fixture").encode())
             release_bundle.metadata(types.SimpleNamespace(
                 package=package, platform=platform, fingerprint="b" * 64,
                 version="1.2.3", source_sha=SHA, build_number=BUILD,
-                architectures="any" if platform == "android" else "arm64,x86_64",
+                architectures="any" if platform == "android" else "arm64",
                 output=self.root / (platform + "-metadata.json")))
         release_bundle.prepare(self.root, TAG, SHA, BUILD)
 
@@ -108,7 +108,13 @@ class ReleaseTests(unittest.TestCase):
         sums = (self.root / "SHA256SUMS").read_text()
         self.assertIn("manifest.json", sums)
         manifest = json.loads((self.root / "manifest.json").read_text())
-        self.assertEqual(manifest["artifacts"][1]["architectures"], ["arm64", "x86_64"])
+        self.assertEqual(manifest["artifacts"][1]["architectures"], ["arm64"])
+        self.assertEqual(manifest["artifacts"][1]["name"], "KaneoPilot-1.2.3-macos-arm64.dmg")
+        self.assertIn("Apple Silicon only", manifest["macos_requirements"])
+        self.assertNotIn("Python 3.9", manifest["macos_requirements"])
+        self.assertIn("Apple Silicon", self.api.release["body"])
+        self.assertNotIn("Intel", self.api.release["body"])
+        self.assertNotIn("外部 Python", self.api.release["body"])
 
     def test_completed_release_rerun_is_read_only(self):
         self.publish()
@@ -244,6 +250,38 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             self.publish()
         self.assertEqual(self.api.writes, [])
+
+    def test_macos_metadata_is_apple_silicon_only(self):
+        package = self.root / "KaneoPilot-1.2.3-macos-arm64.dmg"
+        output = self.root / "other-metadata.json"
+        for architectures in ("arm64,x86_64", "x86_64", "any", "arm64,arm64"):
+            with self.subTest(architectures=architectures), self.assertRaisesRegex(ValueError, "arm64"):
+                release_bundle.metadata(types.SimpleNamespace(
+                    package=package, platform="macos", fingerprint="b" * 64, version="1.2.3",
+                    source_sha=SHA, build_number=BUILD, architectures=architectures, output=output))
+        self.assertFalse(output.exists())
+
+    def test_stable_release_requires_the_exact_package_names_the_apps_accept(self):
+        # A Universal-named (or otherwise misnamed) Mac package must not publish, stable channel included.
+        for name in ("KaneoPilot-1.2.3-macos-universal.dmg", "KaneoPilot-1.2.3-macos.dmg"):
+            with self.subTest(name=name):
+                package = self.root / name
+                package.write_bytes(b"macos signed fixture")
+                release_bundle.metadata(types.SimpleNamespace(
+                    package=package, platform="macos", fingerprint="b" * 64, version="1.2.3",
+                    source_sha=SHA, build_number=BUILD, architectures="arm64",
+                    output=self.root / "macos-metadata.json"))
+                with self.assertRaisesRegex(ValueError, "Unexpected artifact name"):
+                    release_bundle.prepare(self.root, TAG, SHA, BUILD)
+
+    def test_manifest_inputs_with_other_macos_architectures_are_rejected(self):
+        path = self.root / "macos-metadata.json"
+        metadata = json.loads(path.read_text())
+        for architectures in (["arm64", "x86_64"], ["x86_64"], ["any"], []):
+            with self.subTest(architectures=architectures):
+                path.write_text(json.dumps(dict(metadata, architectures=architectures)))
+                with self.assertRaisesRegex(ValueError, "macOS architectures"):
+                    release_bundle.prepare(self.root, TAG, SHA, BUILD)
 
     def test_other_platform_version_mismatch_is_rejected(self):
         path = self.root / "macos-metadata.json"

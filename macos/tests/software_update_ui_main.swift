@@ -52,7 +52,7 @@ private let updateUIPackage = Data("KaneoPilot isolated update UI package; never
 
 /// The stable fixture release, or a test build when `version` ends in `-test.B` (then `build` is B).
 private func updateUIRelease(version: String = "0.2.0", build: Int = 10) -> SoftwareRelease {
-    let tag = "v\(version)", name = "KaneoPilot-\(version)-macos-universal.dmg"
+    let tag = "v\(version)", name = SoftwareUpdateSource.macPackageName(version: version)
     let isTest = version.contains("-test.")
     let digest = SHA256.hash(data: updateUIPackage).map { String(format: "%02x", $0) }.joined()
     return SoftwareRelease(version: version, tag: tag, sourceSHA: String(repeating: "a", count: 40),
@@ -137,7 +137,7 @@ private final class UpdateUIInstaller: SoftwareUpdateInstalling, @unchecked Send
         let job = jobRoot.appendingPathComponent("job.json")
         try Data("{\"fixture_only\":true}".utf8).write(to: job)
         return PreparedSoftwareUpdate(jobPath: job.path, helperPath: jobRoot.appendingPathComponent("no-helper.py").path,
-            version: release.version, backupPath: jobRoot.appendingPathComponent("no-backup.app").path)
+            pythonPath: "/usr/bin/true", version: release.version, backupPath: jobRoot.appendingPathComponent("no-backup.app").path)
     }
 
     func launch(_ prepared: PreparedSoftwareUpdate, parentPID: Int32) async throws {

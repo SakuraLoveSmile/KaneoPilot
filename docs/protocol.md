@@ -4,7 +4,7 @@
 
 ## 1. 调用方式
 
-核心是本地 CLI：`kanpilot`（实质为 `python3 <core>/kanpilot.py`）。所有命令：
+核心是本地 CLI：`kanpilot`（实质为 `python3 <core>/kanpilot.py`）。文中的 `python3 …` 是进程形态的简写：核心及其拉起的子进程使用同一个解释器（`sys.executable`）。Mac App 内就是 App 内置的 Python 运行时（`Contents/Resources/python/bin/python3`，不查 `PATH`，见 [build-release.md](build-release.md)「内置 Python 运行时与架构」），开发与夹具可用环境变量 `KANPILOT_PYTHON` 指定；开发 CLI 直接用 `python3`。所有命令：
 
 ```
 kanpilot <command> [--json '<payload>'] [--db <path>]
@@ -303,6 +303,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 ```json
 {"ok": true, "checks": [
   {"name": "python", "ok": true, "detail": "3.10.10"},
+  {"name": "python_runtime", "ok": true, "detail": "3.13.18 bundled /Applications/KaneoPilot.app/Contents/Resources/python/bin/python3; cafile /private/etc/ssl/cert.pem (exists)"},
   {"name": "db_writable", "ok": true, "detail": "<db path>"},
   {"name": "credentials", "ok": true, "detail": "present, baseUrl https://…"},
   {"name": "plan_root", "ok": true, "detail": "<path>"},
@@ -312,6 +313,8 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 ```
 
 `online` 缺省 false → `kaneo_ping` `skipped:true`。凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
+
+`python_runtime`（离线，只读文件，不联网）：detail 含解释器路径、版本、来源（`sys.executable` 位于 App 包 `Contents/Resources/python/` 之下为 `bundled`，否则 `external`）以及 `ssl.get_default_verify_paths()` 的 cafile / capath 及其是否存在。来源只是信息，不影响 `ok`；仅当来源为 `bundled` 且证书文件与证书目录都不可用时 `ok:false`，detail 给出修复项。外置解释器（开发 CLI、Linux CI、宿主登记的 MCP 服务）一律 `ok:true`。现有 `python` 项（版本 ≥ 3.9）不变。
 
 ### 5.2 tick / overview / list / get
 
@@ -764,7 +767,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - 四个执行端（plan/dispatch/monitor/review）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57 分，与旧 automation 契约一致）。
 - 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
 - **常驻菜单栏**：关窗后继续调度，登录项可启用；退出 App 停止调度与本实例 MCP 服务，但不结束 Plus 会话。详见 §5.27。
-- executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
+- executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换；核心命令写成 `{PYTHON} {KANPILOT} <command>`，`{PYTHON}` 是核心自己的 `sys.executable`（shell 引用），不依赖执行端 shell 的 `PATH` 里有哪个 `python3`；`sys.executable` 为空时渲染失败，不猜解释器）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
 - runner 自己把运行记录写 `settings.executor_runs[stage]`（`pid/started_at/log/exit_code/finished_at`）——`executor-status` 读取的唯一数据源。
 - `executor-status {}` → `{"stages": {"<stage>": {"running": <entry>|null, "last": <entry>|null}}}`；`running` = entry.pid 存活探测通过。
 - **本地网络/代理**：macOS 本地网络隐私会拦截未授权 app 对 LAN（如模型端 `192.168.0.0/16`）的直连，pi 报 `Connection error`。调度器拉起子进程时探测系统 HTTP 代理（`CFNetworkCopySystemProxySettings`）并注入 `HTTP(S)_PROXY`（`NO_PROXY` 仅 localhost/127.0.0.1/::1），让 pi 经 loopback 代理转发到 LAN；模型在公网/localhost 时同样无害。
@@ -1400,6 +1403,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    ```json
    {"ok": true, "checks": [
      {"name": "python", "ok": true, "detail": "3.10.10"},
+     {"name": "python_runtime", "ok": true, "detail": "3.13.18 bundled /Applications/KaneoPilot.app/Contents/Resources/python/bin/python3; cafile /private/etc/ssl/cert.pem (exists)"},
      {"name": "db_writable", "ok": true, "detail": "<db path>"},
      {"name": "credentials", "ok": true, "detail": "present, baseUrl https://…"},
      {"name": "plan_root", "ok": true, "detail": "<path>"},
@@ -1413,6 +1417,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `online` 缺省 false → `kaneo_ping` `skipped:true`；`--live`/`--online` 任一强制包含连通性检查。
  - 凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
  - 新增 `engine_lease`（当前活跃实例数与健康状态）与 `attention_backlog`（attention-list 聚合计数）检查项。
+ - `python_runtime` 检查项的语义同 §5.1（离线，来源仅为信息，仅 `bundled` 且无可用证书时失败）。
  - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式包含租约的进程默认与 force（旧条目 legacy/false），不使用带 enabled/preflight 门的 intake 范围。
 
  **探针超时与失败区分（A8）：**

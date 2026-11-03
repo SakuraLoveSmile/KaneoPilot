@@ -58,10 +58,10 @@ enum BoardDisplayMode: String, CaseIterable, Identifiable {
 
 // MARK: - 看板（§4.1 v2 + 批量整理优化 T1-T3）
 
-/// 任务节：六列等宽整高看板。列宽 ≥160pt，可用宽度 <1044pt 整板横滚；
+/// 任务节：六列等宽整高看板。列宽 ≥240pt，可用宽度 <1524pt 整板横滚；
 /// 支持普通模式与批量模式；快捷键在看板持焦时生效。
 struct BoardView: View {
-    private static let columnWidth: CGFloat = 160
+    private static let columnWidth: CGFloat = 240
     private static let columnSpacing: CGFloat = 12
     private static let boardMargin: CGFloat = 12
 
@@ -180,7 +180,7 @@ struct BoardView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .background(Color.kpWindow)
+            .background(Color.kpControl)
             .navigationTitle("任务")
             .searchable(text: $search, placement: .toolbar, prompt: "搜索标题、项目或任务 ID")
             .toolbar {
@@ -331,68 +331,76 @@ struct BoardView: View {
         let width = max(Self.columnWidth,
                         (geo.size.width - 2 * Self.boardMargin
                          - 5 * Self.columnSpacing) / 6)
-        return ScrollView(.horizontal, showsIndicators: true) {
-            HStack(alignment: .top, spacing: Self.columnSpacing) {
-                ForEach(BoardColumn.allCases) { column in
-                    BoardColumnView(
-                        column: column,
-                        tasks: tasks(in: column),
-                        filtering: filtering,
-                        focused: $focusedTaskID,
-                        isBatchMode: isBatchMode,
-                        selectedTaskIDs: $selectedTaskIDs,
-                        onOpen: openDetail,
-                        onOpenRelated: openRelatedDetail,
-                        onOpenSession: openSession,
-                        onToggleSelect: toggleSelection
-                    )
-                    .frame(width: width,
-                           height: max(0, geo.size.height - 2 * Self.boardMargin))
+        return ScrollViewReader { scrollProxy in
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(alignment: .top, spacing: Self.columnSpacing) {
+                    ForEach(BoardColumn.allCases) { column in
+                        BoardColumnView(
+                            column: column,
+                            tasks: tasks(in: column),
+                            filtering: filtering,
+                            focused: $focusedTaskID,
+                            isBatchMode: isBatchMode,
+                            selectedTaskIDs: $selectedTaskIDs,
+                            onOpen: openDetail,
+                            onOpenRelated: openRelatedDetail,
+                            onOpenSession: openSession,
+                            onToggleSelect: toggleSelection
+                        )
+                        .frame(width: width,
+                               height: max(0, geo.size.height - 2 * Self.boardMargin))
+                        .id(column.id)
+                    }
+                }
+                .padding(Self.boardMargin)
+                // 键盘入口放在 ScrollView 内容层：持焦视图自身就是处理者时，
+                // ←/→ 才会先走看板导航而不是被横向 ScrollView 当滚动键吃掉。
+                .focusable()
+                .focused($boardFocused)
+                // 容器获焦只作为键盘导航入口；关闭系统默认高亮（整板蓝框），
+                // 卡片焦点可见性由 2pt 描边承担。
+                .focusEffectDisabled()
+                .onKeyPress(.upArrow) { moveRow(-1); return .handled }
+                .onKeyPress(.downArrow) { moveRow(1); return .handled }
+                .onKeyPress(.leftArrow) { moveColumn(-1); return .handled }
+                .onKeyPress(.rightArrow) { moveColumn(1); return .handled }
+                .onKeyPress(.return) {
+                    if detailItem == nil, let id = focusedTaskID {
+                        let task = model.tasks.first { $0.taskId == id }
+                        detailItem = TaskSheetItem(
+                            id: id, startTab: Self.startTab(for: task))
+                    }
+                    return .handled
+                }
+                .onKeyPress(.space) {
+                    if isBatchMode, let id = focusedTaskID {
+                        toggleSelection(id)
+                        return .handled
+                    }
+                    return .ignored
+                }
+                .onKeyPress(.escape) {
+                    if isBatchMode {
+                        exitBatchMode()
+                        return .handled
+                    }
+                    return .ignored
+                }
+                .onKeyPress { press in
+                    if isBatchMode && press.modifiers.contains(.command) && press.characters == "a" {
+                        selectAllFiltered()
+                        return .handled
+                    }
+                    return .ignored
                 }
             }
-            .padding(Self.boardMargin)
-            // 键盘入口放在 ScrollView 内容层：持焦视图自身就是处理者时，
-            // ←/→ 才会先走看板导航而不是被横向 ScrollView 当滚动键吃掉。
-            .focusable()
-            .focused($boardFocused)
-            // 容器获焦只作为键盘导航入口；关闭系统默认高亮（整板蓝框），
-            // 卡片焦点可见性由 2pt 描边承担。
+            .onChange(of: focusedTaskID, initial: true) { _, taskID in
+                if let taskID, let column = column(containing: taskID) {
+                    scrollProxy.scrollTo(column.id)
+                }
+            }
             .focusEffectDisabled()
-            .onKeyPress(.upArrow) { moveRow(-1); return .handled }
-            .onKeyPress(.downArrow) { moveRow(1); return .handled }
-            .onKeyPress(.leftArrow) { moveColumn(-1); return .handled }
-            .onKeyPress(.rightArrow) { moveColumn(1); return .handled }
-            .onKeyPress(.return) {
-                if detailItem == nil, let id = focusedTaskID {
-                    let task = model.tasks.first { $0.taskId == id }
-                    detailItem = TaskSheetItem(
-                        id: id, startTab: Self.startTab(for: task))
-                }
-                return .handled
-            }
-            .onKeyPress(.space) {
-                if isBatchMode, let id = focusedTaskID {
-                    toggleSelection(id)
-                    return .handled
-                }
-                return .ignored
-            }
-            .onKeyPress(.escape) {
-                if isBatchMode {
-                    exitBatchMode()
-                    return .handled
-                }
-                return .ignored
-            }
-            .onKeyPress { press in
-                if isBatchMode && press.modifiers.contains(.command) && press.characters == "a" {
-                    selectAllFiltered()
-                    return .handled
-                }
-                return .ignored
-            }
         }
-        .focusEffectDisabled()
     }
 
     // MARK: 阶段筛选菜单（§4.1 过滤）
@@ -719,7 +727,7 @@ enum CheckboxState: CustomStringConvertible {
 
 // MARK: - 单列容器
 
-/// 列容器（§4.1）：整高，kpControl 底 + kpSeparator 1pt 边 + 8pt 圆角、无阴影；
+/// 列容器（§4.1）：整高，融入页面底色，不额外描边或添加阴影；
 /// 列头固定（三态全选/圆点+列名+筛选后数量），列内独立纵滚；空列保留容器。
 struct BoardColumnView: View {
     let column: BoardColumn
@@ -732,6 +740,50 @@ struct BoardColumnView: View {
     let onOpenRelated: (RelatedTask) -> Void
     var onOpenSession: ((TaskSummary) -> Void)?
     let onToggleSelect: (String) -> Void
+
+    /// 每张卡片直接作为懒加载列表的一行，屏外任务也能通过稳定 ID 定位。
+    private enum Row: Identifiable {
+        enum ID: Hashable {
+            case exception(Bool)
+            case source(String)
+            case task(String)
+        }
+
+        case exception(failed: Bool, count: Int)
+        case source(groupID: String, parent: RelatedTask)
+        case task(TaskSummary)
+
+        var id: ID {
+            switch self {
+            case .exception(let failed, _): return .exception(failed)
+            case .source(let groupID, _): return .source(groupID)
+            case .task(let task): return .task(task.taskId)
+            }
+        }
+    }
+
+    private var rows: [Row] {
+        if column == .failed {
+            return [false, true].flatMap { failed -> [Row] in
+                let items = tasks.filter { TaskBoardPresentation.isFailed($0) == failed }
+                return [.exception(failed: failed, count: items.count)]
+                    + taskRows(items, scope: failed ? "failed" : "blocked")
+            }
+        }
+        return taskRows(tasks)
+    }
+
+    private func taskRows(_ items: [TaskSummary], scope: String = "") -> [Row] {
+        TaskBoardPresentation.groups(items, scope: scope).flatMap { group -> [Row] in
+            let context: [Row]
+            if group.needsSourceContext, let parent = group.parent {
+                context = [.source(groupID: group.id, parent: parent)]
+            } else {
+                context = []
+            }
+            return context + group.tasks.map { .task($0) }
+        }
+    }
 
     private var columnCheckState: CheckboxState {
         let colTaskIDs = tasks.map(\.taskId)
@@ -764,54 +816,47 @@ struct BoardColumnView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(Spacing.m)
             } else {
-                ScrollView(.vertical, showsIndicators: true) {
-                    LazyVStack(spacing: Spacing.s) {
-                        if column == .failed {
-                            exceptionGroup(failed: false)
-                            exceptionGroup(failed: true)
-                        } else {
-                            taskGroups(tasks)
+                ScrollViewReader { scrollProxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(spacing: Spacing.s) {
+                            ForEach(rows) { row in
+                                rowView(row)
+                            }
+                        }
+                        .padding(Spacing.m)
+                    }
+                    .onChange(of: focused.wrappedValue, initial: true) { _, taskID in
+                        if let taskID, tasks.contains(where: { $0.taskId == taskID }) {
+                            scrollProxy.scrollTo(Row.ID.task(taskID))
                         }
                     }
-                    .padding(Spacing.m)
                 }
             }
         }
-        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.title)，\(tasks.count) 项任务")
     }
 
-    private func exceptionGroup(failed: Bool) -> some View {
-        let items = tasks.filter { TaskBoardPresentation.isFailed($0) == failed }
-        return VStack(alignment: .leading, spacing: Spacing.s) {
-            TaskExceptionGroupHeader(failed: failed, count: items.count)
-            taskGroups(items)
-        }
-    }
-
-    private func taskGroups(_ items: [TaskSummary]) -> some View {
-        ForEach(TaskBoardPresentation.groups(items)) { group in
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                if group.needsSourceContext, let parent = group.parent {
-                    TaskSourceContext(parent: parent, onOpen: onOpenRelated)
-                }
-                ForEach(group.tasks) { task in
-                    TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
-                        TaskCardView(
-                            task: task,
-                            column: column,
-                            focused: focused,
-                            isBatchMode: isBatchMode,
-                            isSelected: selectedTaskIDs.contains(task.taskId),
-                            onOpen: onOpen,
-                            onOpenRelated: onOpenRelated,
-                            onOpenSession: onOpenSession,
-                            onToggleSelect: onToggleSelect
-                        )
-                    }
-                }
+    @ViewBuilder
+    private func rowView(_ row: Row) -> some View {
+        switch row {
+        case .exception(let failed, let count):
+            TaskExceptionGroupHeader(failed: failed, count: count)
+        case .source(_, let parent):
+            TaskSourceContext(parent: parent, onOpen: onOpenRelated)
+        case .task(let task):
+            TaskHierarchyInset(isChild: task.taskRelations?.parent != nil) {
+                TaskCardView(
+                    task: task,
+                    column: column,
+                    focused: focused,
+                    isBatchMode: isBatchMode,
+                    isSelected: selectedTaskIDs.contains(task.taskId),
+                    onOpen: onOpen,
+                    onOpenRelated: onOpenRelated,
+                    onOpenSession: onOpenSession,
+                    onToggleSelect: onToggleSelect
+                )
             }
         }
     }
@@ -855,7 +900,7 @@ struct BoardColumnView: View {
                 .foregroundStyle(Color.kpSecondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.kpWindow, in: Capsule())
+                .background(Color.kpWindow.opacity(0.5), in: Capsule())
         }
         .padding(.horizontal, Spacing.m)
         .padding(.vertical, Spacing.s)
@@ -865,7 +910,7 @@ struct BoardColumnView: View {
 // MARK: - 任务卡
 
 /// 卡片（§4.1 + T2/T3）：12pt 内边距、8pt 元素间距、行距 3pt、8pt 圆角、
-/// kpWindow 底 + kpSeparator 边；选中卡片 10% 强调色底色，获焦显示 2pt 强调色描边。
+/// 与列表分组共用轻量底色和弱分隔；选中卡片 10% 强调色底色，获焦显示 2pt 强调色描边。
 struct TaskCardView: View {
     let task: TaskSummary
     let column: BoardColumn
@@ -949,14 +994,13 @@ struct TaskCardView: View {
     private var progressLine: some View {
         if let release = task.release {
             Text("\(release.title) · \(release.reason)")
-                .font(.kpSmall).foregroundStyle(Color.primary).lineLimit(2)
+                .font(.kpSmall).foregroundStyle(Color.primary)
         } else if let notice = task.delivery?.autoMergeNotice {
             Text(notice.reason)
                 .font(.kpSmall)
                 .foregroundStyle(notice.needsAttention ? Color.primary : Color.kpSecondary)
-                .lineLimit(2)
         } else if let progress = task.lastProgress, !progress.isEmpty {
-            Text(progress).font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
+            Text(progress).font(.kpSmall).foregroundStyle(Color.kpSecondary)
         }
     }
 
@@ -970,7 +1014,7 @@ struct TaskCardView: View {
         } label: {
             VStack(alignment: .leading, spacing: Spacing.s) {
                 TaskHierarchyLabel(task: task, onOpenRelated: onOpenRelated)
-                HStack(spacing: Spacing.s) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
                     if isBatchMode {
                         Image(systemName: isSelected ? "checkmark.square.fill" : "square")
                             .font(.kpBody)
@@ -980,30 +1024,31 @@ struct TaskCardView: View {
                     Text(task.projectName ?? "—")
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
-                        .lineLimit(1)
-                    if AutomationPresentation.active(task.automation) {
-                        Text("自动").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    }
+                        .background(Color.kpSecondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
                     Spacer(minLength: 0)
-                    Label {
-                        Text(badgeText)
-                            .foregroundStyle(Color.primary)
-                            .lineLimit(1)
-                    } icon: {
-                        Image(systemName: "circle.fill")
-                            .foregroundStyle(substatusColor)
+                    if AutomationPresentation.active(task.automation) {
+                        Text("自动")
+                            .font(.kpSmall)
+                            .foregroundStyle(Color.kpSecondary)
+                            .fixedSize()
                     }
-                    .font(.kpSmall)
                 }
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                Label {
+                    Text(badgeText)
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "circle.fill")
+                        .foregroundStyle(substatusColor)
+                }
+                .font(.kpSmall)
                 progressLine
                 if let automation = task.automation, AutomationPresentation.active(automation),
                    let round = automation.fixRound, round > 0 {
@@ -1022,16 +1067,18 @@ struct TaskCardView: View {
                     }
                 }
             }
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
             .lineSpacing(3)
             .padding(Spacing.m)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                isSelected ? Color.accentColor.opacity(0.10) : Color.kpWindow,
+                isSelected ? Color.accentColor.opacity(0.10) : Color.kpWindow.opacity(0.5),
                 in: RoundedRectangle(cornerRadius: Radius.control)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Radius.control)
-                    .stroke(isFocused ? Color.accentColor : Color.kpSeparator,
+                    .stroke(isFocused ? Color.accentColor : Color.kpSeparator.opacity(0.5),
                             lineWidth: isFocused ? 2 : 1)
             )
             .contentShape(RoundedRectangle(cornerRadius: Radius.control))
@@ -1062,7 +1109,6 @@ struct TaskCardView: View {
                     .foregroundStyle(TaskBoardPresentation.isFailed(task) ? Color.kpRed : Color.kpOrange)
             }
             .font(.kpSmall)
-            .lineLimit(2)
             .accessibilityLabel("阻塞：\(blocked)")
         } else {
             switch column {
@@ -1070,20 +1116,17 @@ struct TaskCardView: View {
                 Text("最近检查 \(lastCheckedLabel)")
                     .font(.kpSmall)
                     .foregroundStyle(Color.kpSecondary)
-                    .lineLimit(1)
             case .inReview:
                 if task.release == nil, task.delivery?.autoMergeNotice == nil, let conclusion = task.reviewSummary?.conclusion {
                     Text(conclusion == "pass" && task.delivery?.mode == "pr" && task.delivery?.prState?.uppercased() != "MERGED" ? "等待 PR 合并" : "本轮结论 \(reviewConclusionText(conclusion))")
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
                 }
             case .todo:
                 if let next = TimeFormat.eta(task.nextClaimAt) {
                     Text("预计 \(next) 派发")
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
                 }
             default:
                 EmptyView()

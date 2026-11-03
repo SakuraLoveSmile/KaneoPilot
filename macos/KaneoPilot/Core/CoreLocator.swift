@@ -1,13 +1,55 @@
 import Foundation
 
-/// 解析到的核心位置。`usesPython == true` 时经 `python3 <path>` 调用，
+/// 解析到的核心位置。`usesPython == true` 时经内置 Python 解释器调用（`PythonRuntime`），
 /// 否则作为可执行 shim 直接调用。
 struct CoreLocation {
     let path: String
     let usesPython: Bool
 
     var displayString: String {
-        usesPython ? "python3 \(path)" : path
+        guard usesPython else { return path }
+        return "\(PythonRuntime.resolve()?.path ?? PythonRuntime.missingMessage) \(path)"
+    }
+
+    /// 经本核心位置运行 `arguments` 的可执行文件与完整参数。需要 Python 而内置运行时缺失时返回 nil：
+    /// 调用方给出自己的错误，不回退到 `PATH` 里的 `python3`。
+    func invocation(_ arguments: [String],
+                    environment: [String: String] = ProcessInfo.processInfo.environment)
+        -> (executable: URL, arguments: [String])? {
+        guard usesPython else { return (URL(fileURLWithPath: path), arguments) }
+        guard let interpreter = PythonRuntime.resolve(environment: environment) else { return nil }
+        return (interpreter, [path] + arguments)
+    }
+}
+
+/// App 内置 Python 运行时（docs/build-release.md「内置 Python 运行时与架构」）。
+/// 解析顺序：环境变量 `KANPILOT_PYTHON`（须存在且可执行，供夹具与开发使用）→
+/// `<App>/Contents/Resources/python/bin/python3`。**不**查 `PATH`，也不回退到系统 `python3`。
+enum PythonRuntime {
+    static let missingMessage = "内置 Python 运行时缺失，请重新安装 KaneoPilot"
+
+    static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment,
+                        resourceURL: URL? = Bundle.main.resourceURL) -> URL? {
+        let fm = FileManager.default
+        if let override = environment["KANPILOT_PYTHON"], !override.isEmpty,
+           fm.isExecutableFile(atPath: override) {
+            return URL(fileURLWithPath: override)
+        }
+        guard let bundled = resourceURL?.appendingPathComponent("python/bin/python3"),
+              fm.isExecutableFile(atPath: bundled.path) else { return nil }
+        return bundled
+    }
+
+    /// Python 子进程的环境：去掉会把解释器指向别处的继承变量，不加载用户站点包，也不往 App 包里写字节码。
+    /// 各调用方自己的 PATH 前缀、代理与实例标识照旧在此之后设置。
+    static func environment(_ base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var env = base
+        for key in ["PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"] {
+            env.removeValue(forKey: key)
+        }
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return env
     }
 }
 
@@ -90,7 +132,7 @@ enum CoreLocator {
         return out
     }
 
-    /// `.py` 或无执行位 → 经 python3 调用；可执行且非 .py → 直接调用。
+    /// `.py` 或无执行位 → 经内置 Python 调用（`PythonRuntime`）；可执行且非 .py → 直接调用。
     static func needsPython(_ path: String) -> Bool {
         if (path as NSString).pathExtension == "py" { return true }
         return !FileManager.default.isExecutableFile(atPath: path)

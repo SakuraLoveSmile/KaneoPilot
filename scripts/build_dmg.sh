@@ -27,11 +27,15 @@ ln -s /Applications "$STAGING/Applications"
 
 echo "== Creating DMG =="
 rm -f "$DMG"
+# zlib-level=9: `man hdiutil` documents UDZO as defaulting to level 1 (fastest). The bundled
+# Python runtime is ~81 MB of highly compressible bytecode and text, so the default level
+# leaves most of the win on the table for every download of an online update.
 hdiutil create \
     -volname "$VOLNAME" \
     -srcfolder "$STAGING" \
     -ov \
     -format UDZO \
+    -imagekey zlib-level=9 \
     "$DMG"
 
 echo "== Sign local disk image =="

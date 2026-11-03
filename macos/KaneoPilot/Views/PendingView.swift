@@ -8,6 +8,8 @@ struct PendingView: View {
     @State private var confirmDismissIDs: [String] = []
     @State private var queueExpanded = false
     @State private var failedExpanded = false
+    @State private var statusFilter = "all"
+    private let rowInsets = EdgeInsets(top: 0, leading: Spacing.xl, bottom: 0, trailing: Spacing.xl)
 
     /// 待处理节内导航目标：任务详情与请求详情。
     enum PendingRoute: Hashable {
@@ -55,69 +57,46 @@ struct PendingView: View {
         activeRequests.isEmpty && needsUserTasks.isEmpty && recentFailed.isEmpty
     }
 
+    private var statusOptions: [StatusFilterOption] {
+        [StatusFilterOption(id: "all", title: "全部"),
+         StatusFilterOption(id: "attention", title: "需处理"),
+         StatusFilterOption(id: "queued", title: "排队中"),
+         StatusFilterOption(id: "claimed", title: "进行中"),
+         StatusFilterOption(id: "failed", title: "历史失败")]
+    }
+
+    private var visibleNormalRequests: [RequestItem] {
+        statusFilter == "all" ? normalRequests : normalRequests.filter { $0.status == statusFilter }
+    }
+
+    private var filteredIsEmpty: Bool {
+        switch statusFilter {
+        case "attention": return needsUserTasks.isEmpty && attentionRequests.isEmpty
+        case "queued", "claimed": return visibleNormalRequests.isEmpty
+        case "failed": return recentFailed.isEmpty
+        default: return isEmpty
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            Group {
-                if model.isLoading && model.requests.isEmpty {
-                    LoadingView()
-                } else if isEmpty {
-                    emptyState
-                } else {
-                    List {
-                        Section("需要你") {
-                            if needsUserTasks.isEmpty && attentionRequests.isEmpty {
-                                Text("暂无需要你处理的事项。下方可查看正常队列与历史失败记录。")
-                                    .font(.kpSmall)
-                                    .foregroundStyle(Color.kpSecondary)
-                            } else {
-                                ForEach(needsUserTasks) { task in
-                                    NavigationLink(value: PendingRoute.task(task.taskId)) {
-                                        NeedsUserRow(task: task)
-                                    }
-                                }
-                                ForEach(attentionRequests) { request in
-                                    requestRow(request)
-                                }
-                            }
-                        }
-                        if !normalRequests.isEmpty {
-                            Section {
-                                DisclosureGroup("正常队列（\(normalRequests.count)）", isExpanded: $queueExpanded) {
-                                    Text("已排队的请求尚未开始；执行端领取后才会进入进行中。")
-                                        .font(.kpSmall)
-                                        .foregroundStyle(Color.kpSecondary)
-                                    ForEach(normalRequests) { request in
-                                        requestRow(request)
-                                    }
-                                }
-                            }
-                        }
-                        if !recentFailed.isEmpty {
-                            Section {
-                                DisclosureGroup("历史失败记录（\(recentFailed.count)）", isExpanded: $failedExpanded) {
-                                    HStack {
-                                        Text("保留最近 10 条详情入口；历史和执行证据始终保留。")
-                                            .font(.kpSmall)
-                                            .foregroundStyle(Color.kpSecondary)
-                                        Spacer()
-                                        Button("清空失败记录") {
-                                            confirmDismissIDs = recentFailed.map(\.requestId)
-                                        }
-                                        .disabled(model.busy)
-                                    }
-                                    ForEach(Array(recentFailed.prefix(10))) { request in
-                                        requestRow(request)
-                                            .contextMenu {
-                                                Button("从「需要你」移除") { confirmDismissIDs = [request.requestId] }
-                                                    .disabled(model.busy)
-                                            }
-                                    }
-                                }
-                            }
-                        }
+            VStack(spacing: 0) {
+                StatusFilterBar(selection: $statusFilter, options: statusOptions)
+                Group {
+                    if model.isLoading && model.requests.isEmpty {
+                        LoadingView()
+                    } else if statusFilter != "all" && filteredIsEmpty {
+                        filteredEmptyState
+                    } else if isEmpty {
+                        emptyState
+                    } else {
+                        contentList
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.kpControl)
             .navigationTitle("需要你")
             .navigationDestination(for: PendingRoute.self) { route in
                 switch route {
@@ -160,6 +139,138 @@ struct PendingView: View {
         }
     }
 
+    private var contentList: some View {
+        List {
+            Section {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
+                    Spacer(minLength: 0)
+                    Text("\(model.attentionCount) 项需要你")
+                        .font(.kpSmall)
+                        .monospacedDigit()
+                }
+                .foregroundStyle(Color.kpSecondary)
+                .padding(.bottom, Spacing.s)
+                .listRowInsets(rowInsets)
+                .listRowSeparator(.hidden)
+                if statusFilter == "all" || statusFilter == "attention" {
+                    attentionRows
+                }
+            }
+            .listRowBackground(Color.clear)
+            if (statusFilter == "all" || statusFilter == "queued" || statusFilter == "claimed"),
+               !visibleNormalRequests.isEmpty {
+                Section {
+                    if statusFilter == "all" {
+                        DisclosureGroup(isExpanded: $queueExpanded) {
+                            normalQueueRows
+                        } label: {
+                            foldLabel("正常队列", count: normalRequests.count, caption: "正常推进，无需处理")
+                        }
+                        .listRowInsets(rowInsets)
+                        .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+                    } else {
+                        foldLabel(statusFilter == "queued" ? "排队中" : "进行中",
+                                  count: visibleNormalRequests.count, caption: "正常推进，无需处理")
+                            .listRowInsets(rowInsets)
+                        normalQueueRows
+                    }
+                }
+                .listRowBackground(Color.kpWindow.opacity(0.5))
+            }
+            if (statusFilter == "all" || statusFilter == "failed"), !recentFailed.isEmpty {
+                Section {
+                    if statusFilter == "all" {
+                        DisclosureGroup(isExpanded: $failedExpanded) {
+                            failedRows
+                        } label: {
+                            foldLabel("历史失败记录", count: recentFailed.count, caption: "历史和执行证据保留")
+                        }
+                        .listRowInsets(rowInsets)
+                        .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+                    } else {
+                        foldLabel("历史失败记录", count: recentFailed.count, caption: "历史和执行证据保留")
+                            .listRowInsets(rowInsets)
+                        failedRows
+                    }
+                }
+                .listRowBackground(Color.kpWindow.opacity(0.5))
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .contentMargins(.top, Spacing.l, for: .scrollContent)
+        .contentMargins(.horizontal, 0, for: .scrollContent)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private var attentionRows: some View {
+        if needsUserTasks.isEmpty && attentionRequests.isEmpty {
+            Text("暂无需要你处理的事项。下方可查看正常队列与历史失败记录。")
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .listRowInsets(rowInsets)
+        } else {
+            ForEach(needsUserTasks) { task in
+                NavigationLink(value: PendingRoute.task(task.taskId)) {
+                    NeedsUserRow(task: task)
+                }
+                .listRowInsets(rowInsets)
+                .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+            }
+            ForEach(attentionRequests) { request in
+                requestRow(request)
+            }
+        }
+    }
+
+    private var normalQueueRows: some View {
+        Group {
+            Text("已排队的请求尚未开始；执行端领取后才会进入进行中。")
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .listRowInsets(rowInsets)
+            ForEach(visibleNormalRequests) { request in
+                requestRow(request)
+            }
+        }
+    }
+
+    private var failedRows: some View {
+        Group {
+            HStack {
+                Text("保留最近 10 条详情入口；历史和执行证据始终保留。")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                Spacer()
+                Button("清空失败记录") {
+                    confirmDismissIDs = recentFailed.map(\.requestId)
+                }
+                .disabled(model.busy)
+            }
+            .accessibilityElement(children: .contain)
+            .listRowInsets(rowInsets)
+            ForEach(Array(recentFailed.prefix(10))) { request in
+                requestRow(request)
+                    .contextMenu {
+                        Button("从「需要你」移除") { confirmDismissIDs = [request.requestId] }
+                            .disabled(model.busy)
+                    }
+            }
+        }
+    }
+
+    private var filteredEmptyState: some View {
+        ContentUnavailableView {
+            Label("此分类暂无事项", systemImage: "tray")
+        } description: {
+            Text("当前没有“\(statusOptions.first { $0.id == statusFilter }?.title ?? "")”事项。")
+        } actions: {
+            Button("查看全部") { statusFilter = "all" }
+            Button("刷新") { Task { await model.refreshAll() } }
+        }
+    }
+
     private var emptyState: some View {
         ContentUnavailableView {
             Label("暂无需要你处理的事项", systemImage: "tray")
@@ -176,38 +287,106 @@ struct PendingView: View {
 
     // MARK: - 行
 
+    private func foldLabel(_ title: String, count: Int, caption: String) -> some View {
+        HStack(spacing: Spacing.s) {
+            Text(title)
+                .font(.kpLabel)
+            Text("\(count)")
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .monospacedDigit()
+            Spacer(minLength: Spacing.m)
+            Text(caption)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, Spacing.s)
+    }
+
+    private func rowIcon(_ name: String, color: Color) -> some View {
+        Image(systemName: name)
+            .font(.kpBody)
+            .foregroundStyle(color)
+            .frame(width: 32, height: 32)
+            .background(color.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
+            .overlay {
+                RoundedRectangle(cornerRadius: Radius.control)
+                    .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
+            }
+            .accessibilityHidden(true)
+    }
+
     /// 请求行：点击进入请求详情页（v2 §4.2/§5.21.1）。
     private func requestRow(_ request: RequestItem) -> some View {
-        NavigationLink(value: PendingRoute.request(request.requestId)) {
-            RequestRow(request: request)
+        HStack(spacing: Spacing.m) {
+            NavigationLink(value: PendingRoute.request(request.requestId)) {
+                RequestRow(request: request)
+            }
+            .accessibilityHint("打开请求详情")
+            VStack(alignment: .trailing, spacing: Spacing.s) {
+                waitText(request)
+                    .monospacedDigit()
+                actions(request)
+            }
+            .frame(minWidth: 88, alignment: .trailing)
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.vertical, Spacing.l)
+        .frame(minHeight: RowHeight.preferredTwoLine)
+        .accessibilityElement(children: .contain)
+        .listRowInsets(rowInsets)
+        .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
     }
 
     @ViewBuilder
     private func RequestRow(request: RequestItem) -> some View {
         HStack(alignment: .center, spacing: Spacing.m) {
-            KindBadge(kind: request.kind)
-                .frame(width: 76, alignment: .leading)
+            if request.isLost {
+                rowIcon("exclamationmark.triangle", color: .kpRed)
+            } else if request.status == "failed" {
+                rowIcon("xmark.circle", color: .kpRed)
+            } else if request.status == "queued", request.isUnauthorizedPlan {
+                rowIcon("doc.badge.questionmark", color: .kpOrange)
+            } else {
+                rowIcon("clock", color: .kpBlue)
+            }
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 Text(model.taskTitle(for: request.taskId))
                     .font(.kpBody)
-                    .lineLimit(1)
-                HStack(spacing: Spacing.s) {
-                    statusText(request)
-                    if let claimedBy = request.claimedBy {
-                        Text(claimedBy)
-                            .font(.kpSmall)
-                            .foregroundStyle(Color.kpSecondary)
+                    .fontWeight(.medium)
+                    .fixedSize(horizontal: false, vertical: true)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Spacing.s) {
+                        requestMetadata(request)
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        requestMetadata(request)
                     }
                 }
             }
-            Spacer(minLength: 0)
-            waitText(request)
-            actions(request)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, Spacing.s)
-        .frame(minHeight: 40)
         .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func requestMetadata(_ request: RequestItem) -> some View {
+        if let task = (model.tasks + model.archivedTasks + model.trashedTasks).first(where: { $0.taskId == request.taskId }),
+           let project = task.projectName, !project.isEmpty {
+            Text(project)
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        KindBadge(kind: request.kind)
+        statusText(request)
+        if let claimedBy = request.claimedBy {
+            Text(claimedBy)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     @ViewBuilder
@@ -235,11 +414,11 @@ struct PendingView: View {
             .accessibilityLabel("状态：等待确认材料")
         } else if request.status == "queued", request.kind == "plan" {
             // v2 §4.7：已授权排队中的规划请求。
-            Text("已排队等待规划 \(TimeFormat.waited(since: request.createdAt) ?? "")")
+            Text("已排队等待规划")
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
         } else if request.status == "queued" {
-            Text("已排队 \(TimeFormat.waited(since: request.createdAt) ?? "")")
+            Text("已排队")
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
         } else if request.status == "failed" {
@@ -270,6 +449,10 @@ struct PendingView: View {
                 .foregroundStyle(Color.kpSecondary)
         } else if request.status == "failed", let ago = TimeFormat.ago(request.updatedAt) {
             Text(ago)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+        } else if request.status == "queued" {
+            Text(TimeFormat.waited(since: request.createdAt).map { "已等 \($0)" } ?? "等待领取")
                 .font(.kpSmall)
                 .foregroundStyle(Color.kpSecondary)
         }
@@ -308,34 +491,51 @@ struct PendingView: View {
     }
 
     private func NeedsUserRow(task: TaskSummary) -> some View {
-        HStack(spacing: Spacing.m) {
-            Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(Color.kpOrange)
-                .accessibilityHidden(true)
+        let project = task.projectName?.isEmpty == false ? task.projectName : nil
+        let updated = TimeFormat.ago(task.updatedAt)
+        return HStack(spacing: Spacing.m) {
+            rowIcon("exclamationmark.triangle", color: .kpOrange)
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 Text(task.title ?? task.taskId)
                     .font(.kpBody)
-                    .lineLimit(1)
+                    .fontWeight(.medium)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let item = questionAttention(task), let preview = item.questionPreview {
-                    Text("\(item.questionLabel) · \(preview.count)题")
-                        .font(.kpSmall)
+                    Text([project, "\(item.questionLabel) · \(preview.count)题"].compactMap { $0 }.joined(separator: " · "))
+                        .font(.kpLabel)
                         .foregroundStyle(Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(preview.firstTitle)
                         .font(.kpSmall)
                         .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text(attentionReason(task))
-                        .font(.kpSmall)
+                    Text([project, attentionReason(task)].compactMap { $0 }.joined(separator: " · "))
+                        .font(.kpLabel)
                         .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let updated {
+                Text(updated)
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                    .monospacedDigit()
+                    .frame(width: 88, alignment: .trailing)
+                    .fixedSize()
+                    .help(TimeFormat.fullString(task.updatedAt))
+            }
+            Image(systemName: "chevron.right")
+                .font(.kpSmall)
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
         }
-        .padding(.vertical, Spacing.s)
-        .frame(minHeight: 40)
+        .padding(.vertical, Spacing.l)
+        .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(task.title ?? task.taskId)，\(attentionReason(task))，双击查看详情")
+        .accessibilityLabel([task.title ?? task.taskId, project, attentionReason(task), updated.map { "更新于\($0)" }].compactMap { $0 }.joined(separator: "，"))
+        .accessibilityHint("打开任务详情")
     }
 
     private func questionAttention(_ task: TaskSummary) -> AttentionItem? {

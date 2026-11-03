@@ -137,6 +137,11 @@ final class MCPServiceManager: ObservableObject {
             status.error = "未找到核心解释器与脚本"
             return
         }
+        guard let invocation = location.invocation(["mcp-serve", "--transport", "http"]) else {
+            setEnabled(false)
+            status.error = "启动 MCP 服务失败：\(PythonRuntime.missingMessage)"
+            return
+        }
 
         startGeneration += 1
         let generation = startGeneration
@@ -145,15 +150,9 @@ final class MCPServiceManager: ObservableObject {
         status.error = nil
 
         let proc = Process()
-        if location.usesPython {
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["python3", location.path, "mcp-serve", "--transport", "http"]
-        } else {
-            proc.executableURL = URL(fileURLWithPath: location.path)
-            proc.arguments = ["mcp-serve", "--transport", "http"]
-        }
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        proc.executableURL = invocation.executable
+        proc.arguments = invocation.arguments
+        var env = PythonRuntime.environment()
         let npmBin = (NSHomeDirectory() as NSString).appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"
         env["PATH"] = env["PATH"].map { "\(extraPath):\($0)" } ?? extraPath

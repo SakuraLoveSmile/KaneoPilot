@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -110,7 +111,10 @@ def _shell_quote(value: str) -> str:
 
 def _python_bin() -> str:
     executable = getattr(sys, "executable", None)
-    return executable if isinstance(executable, str) and executable else "python3"
+    if not isinstance(executable, str) or not executable:
+        raise util.KanpilotError(
+            "validation_failed", "无法确定核心的 Python 解释器路径（sys.executable 为空）")
+    return executable
 
 
 def write_wrapper(directory: Path, stage: str) -> Path:
@@ -176,12 +180,15 @@ def host_environment_block(wrapper: Path, invocation_dir: Path,
 def point_cli_at_wrapper(prompt: str, wrapper: Path) -> str:
     """把 prompt 里记录的调度核心脚本路径换成固定包装器路径。
 
-    角色 prompt 由 ``executor_runner.render_prompt`` 渲染时已把 ``{KANPILOT}``
-    展开为 ``<core>/kanpilot.py``；控制轮改为指向包装器，模型便**总是**经包装器
-    取得本轮固定宿主环境，而不是依赖 Plus 宿主进程继承的环境。
+    角色 prompt 由 ``executor_runner.render_prompt`` 渲染时已把 ``{PYTHON}
+    {KANPILOT}`` 展开为 ``<解释器> <core>/kanpilot.py``；控制轮改为指向包装器
+    （包装器自己 exec 同一解释器，所以解释器前缀一并去掉），模型便**总是**经
+    包装器取得本轮固定宿主环境，而不是依赖 Plus 宿主进程继承的环境。
     """
     core_script = str(constants.core_root() / "kanpilot.py")
-    return prompt.replace(core_script, str(wrapper))
+    interpreter = shlex.quote(_python_bin())
+    return prompt.replace(f"{interpreter} {core_script}", str(wrapper)) \
+                 .replace(core_script, str(wrapper))
 
 
 def render_mcp_prompt(stage: str, invocation_id: str) -> str:

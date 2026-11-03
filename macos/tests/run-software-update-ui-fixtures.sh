@@ -47,7 +47,8 @@ if not re.fullmatch(r'[0-9a-f]{40}', sha):
 checkout = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
 if sha != checkout:
     raise SystemExit('UI fixture checkout does not match the source identity')
-inputs = ['macos/KaneoPilot/Core/SoftwareUpdate.swift', 'macos/KaneoPilot/Core/SoftwareUpdateManager.swift',
+inputs = ['macos/KaneoPilot/Core/CoreLocator.swift', 'macos/KaneoPilot/Core/SoftwareUpdate.swift',
+          'macos/KaneoPilot/Core/SoftwareUpdateManager.swift',
           'macos/KaneoPilot/Views/SoftwareUpdateSection.swift', 'macos/KaneoPilot/Views/Components.swift',
           'macos/tests/software_update_ui_main.swift', 'macos/tests/run-software-update-ui-fixtures.sh']
 identity = {'kind': 'isolated-native-update-ui', 'source_sha': sha, 'checkout_sha': checkout,
@@ -67,6 +68,7 @@ with (app / 'Contents/Info.plist').open('wb') as stream:
                   'NSPrincipalClass': 'NSApplication'}, stream)
 PY
 swiftc -target "$(uname -m)-apple-macos14" -parse-as-library \
+  "$TASK_ROOT/macos/KaneoPilot/Core/CoreLocator.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdate.swift" \
   "$TASK_ROOT/macos/KaneoPilot/Core/SoftwareUpdateManager.swift" \
   "$TASK_FIXTURE/FixtureComponents.swift" \

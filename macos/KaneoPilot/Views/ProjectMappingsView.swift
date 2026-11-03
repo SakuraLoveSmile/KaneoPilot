@@ -369,6 +369,7 @@ struct ProjectMappingsView: View {
 
             saveBar
         }
+        .background(Color.kpControl)
         .task {
             await loadMappings(refreshRemote: false)
             if let target = targetProjectId, !target.isEmpty {
@@ -503,6 +504,7 @@ struct ProjectMappingsView: View {
             }
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollContentBackground(.hidden)
         .onChange(of: selectedProjectId) { _, newId in
             if let id = newId {
                 selectProject(id)
@@ -1343,7 +1345,8 @@ private struct SettingsCard<Content: View>: View {
                 }
             }
             .padding(.horizontal, Spacing.xs)
-            GroupPanel {
+            GroupPanel(background: Color.kpWindow.opacity(0.5),
+                       border: Color.kpSeparator.opacity(0.5)) {
                 content()
             }
         }

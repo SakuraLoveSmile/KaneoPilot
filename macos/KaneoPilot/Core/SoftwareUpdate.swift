@@ -110,6 +110,13 @@ enum SoftwareUpdateSource {
     /// One hundred releases with their assets are far larger than a single release.
     static let releaseListLimit = 8 * 1024 * 1024
     static let packageLimit: Int64 = 1024 * 1024 * 1024
+    /// The only Mac package is Apple Silicon (docs/build-release.md): a release names exactly this package
+    /// and this architecture set, so a Universal package is not an update this App can install.
+    static let macArchitectures = ["arm64"]
+
+    static func macPackageName(version: String) -> String {
+        "KaneoPilot-\(version)-macos-arm64.dmg"
+    }
 
     static func pageURL(tag: String) -> URL {
         URL(string: "https://github.com/\(repository)/releases/tag/\(tag)")!
@@ -134,7 +141,7 @@ enum SoftwareUpdateSource {
             guard components.count == 2, (try? SoftwareVersion(tag: String(components[0]))) != nil else { return false }
             // Only a release's manifest and its macOS package are ever fetched from the release page.
             let version = String(components[0].dropFirst()), file = String(components[1])
-            return file == "manifest.json" || file == "KaneoPilot-\(version)-macos-universal.dmg"
+            return file == "manifest.json" || file == macPackageName(version: version)
         case "release-assets.githubusercontent.com":
             return url.path.hasPrefix("/github-production-release-asset/")
         case "objects.githubusercontent.com":
@@ -189,7 +196,7 @@ struct SoftwareRelease: Codable, Equatable, Sendable {
 
     func validate() throws {
         let parsed = try SoftwareVersion(version)
-        guard tag == "v\(version)", name == "KaneoPilot-\(version)-macos-universal.dmg",
+        guard tag == "v\(version)", name == SoftwareUpdateSource.macPackageName(version: version),
               size > 0, size <= SoftwareUpdateSource.packageLimit, buildNumber > 0,
               SoftwareUpdateSource.isHex(sourceSHA, length: 40),
               SoftwareUpdateSource.isHex(sha256, length: 64),
@@ -289,7 +296,7 @@ enum SoftwareReleaseParser {
         let manifest = try JSONDecoder().decode(SoftwareManifest.self, from: manifestData)
         let version = String(release.tag_name.dropFirst())
         let artifacts = manifest.artifacts.filter { $0.platform == "macos" }
-        let packageName = "KaneoPilot-\(version)-macos-universal.dmg"
+        let packageName = SoftwareUpdateSource.macPackageName(version: version)
         let assets = release.assets.filter { $0.name == packageName }
         guard artifacts.count == 1, let artifact = artifacts.first,
               assets.count == 1, let asset = assets.first,
@@ -298,8 +305,7 @@ enum SoftwareReleaseParser {
               artifact.build_number == manifest.build_number,
               artifact.name == packageName, asset.size == artifact.size,
               artifact.signature_type == "codedirectory-sha256",
-              Set(artifact.architectures) == Set(["arm64", "x86_64"]),
-              artifact.architectures.count == 2,
+              artifact.architectures == SoftwareUpdateSource.macArchitectures,
               hasConsistentChannel(manifest, version: parsed) else {
             throw SoftwareUpdateError.invalid("更新清单与 Release 的版本、平台或安装包身份不一致")
         }
@@ -533,12 +539,21 @@ protocol SoftwareUpdateServing: Sendable {
     /// stable release and the newest test pre-release (two API requests); a service that only knows
     /// stable releases keeps the default.
     func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease
+    /// The newest release the user follows, or nil when it is not newer than `installed`. Newer is decided
+    /// by the release tag alone, so the manifest of a release that is not newer is never read or judged:
+    /// the Universal releases of the retired scheme (docs/build-release.md) stay on the release page and
+    /// must not turn a check into an error. A service that does not see tags keeps the default and leaves
+    /// the whole decision to the caller.
+    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease?
     func download(_ release: SoftwareRelease, cacheDirectory: URL,
                   progress: @escaping @Sendable (Double) -> Void) async throws -> URL
 }
 
 extension SoftwareUpdateServing {
     func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease { try await latest() }
+    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
+        try await latest(includingTestBuilds: includingTestBuilds)
+    }
 }
 
 struct GitHubSoftwareUpdateService: SoftwareUpdateServing {
@@ -547,21 +562,33 @@ struct GitHubSoftwareUpdateService: SoftwareUpdateServing {
     init(transport: any SoftwareUpdateTransport = GitHubSoftwareUpdateTransport()) { self.transport = transport }
 
     func latest() async throws -> SoftwareRelease {
-        let release = try await transport.data(from: SoftwareUpdateSource.latestURL, maximumSize: SoftwareUpdateSource.metadataLimit)
-        let manifestURL = try SoftwareReleaseParser.manifestURL(releaseData: release)
-        let manifest = try await transport.data(from: manifestURL, maximumSize: SoftwareUpdateSource.metadataLimit)
-        return try SoftwareReleaseParser.parse(releaseData: release, manifestData: manifest)
+        try await latest(includingTestBuilds: false)
     }
 
     func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease {
-        guard includingTestBuilds else { return try await latest() }
-        // The stable candidate is read exactly as with the channel off. Any failing request fails the whole
-        // check, so a missing stable answer never lets an older test build pass for the newest release.
+        let newest = try await newestRelease(includingTestBuilds: includingTestBuilds)
+        return try await parsedRelease(of: newest)
+    }
+
+    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
+        let newest = try await newestRelease(includingTestBuilds: includingTestBuilds)
+        guard let version = SoftwareReleaseParser.identity(of: newest), version > installed else { return nil }
+        return try await parsedRelease(of: newest)
+    }
+
+    /// The release the user follows. With the channel off that is the latest stable release; with it on, the
+    /// newer of that and the newest test pre-release. Any failing request fails the whole check, so a missing
+    /// stable answer never lets an older test build pass for the newest release.
+    private func newestRelease(includingTestBuilds: Bool) async throws -> GitHubSoftwareRelease {
         let stableData = try await transport.data(from: SoftwareUpdateSource.latestURL, maximumSize: SoftwareUpdateSource.metadataLimit)
+        guard includingTestBuilds else { return try SoftwareReleaseParser.decodeRelease(stableData, allowsTest: false) }
         let listData = try await transport.data(from: SoftwareUpdateSource.releaseListURL, maximumSize: SoftwareUpdateSource.releaseListLimit)
         let stable = try SoftwareReleaseParser.decodeRelease(stableData, allowsTest: false)
-        // Only the winner's manifest is read and a bad one is an error: there is no fallback to the other candidate.
-        let winner = try SoftwareReleaseParser.newest(stable: stable, listData: listData)
+        return try SoftwareReleaseParser.newest(stable: stable, listData: listData)
+    }
+
+    /// Only the winner's manifest is read and a bad one is an error: there is no fallback to the other candidate.
+    private func parsedRelease(of winner: GitHubSoftwareRelease) async throws -> SoftwareRelease {
         let manifestURL = try SoftwareReleaseParser.manifestURL(release: winner)
         let manifest = try await transport.data(from: manifestURL, maximumSize: SoftwareUpdateSource.metadataLimit)
         return try SoftwareReleaseParser.parse(release: winner, manifestData: manifest)

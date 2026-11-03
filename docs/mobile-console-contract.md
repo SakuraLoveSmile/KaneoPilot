@@ -188,6 +188,6 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
 ## 构建与分工
 
 - Android：AGP 8.11.1、Gradle 8.13、Kotlin/Compose compiler 2.2.21、JDK17、SDK36/min26，applicationId=com.sakurasep.kaneopilot。固定依赖版本，提交 wrapper 和校验和。
-- CI 普通分支/PR 运行隔离检查、Debug APK 与 Universal DMG；vX.Y.Z 标签注入统一版本，固定 keystore 签 APK，再集中发布两个包、SHA256SUMS、构建清单。仅发布 job 有 contents:write；包身份不一致禁止覆盖。
+- CI 普通分支/PR 运行隔离检查、Debug APK 与 arm64 DMG；vX.Y.Z 标签注入统一版本，固定 keystore 签 APK，再集中发布两个包、SHA256SUMS、构建清单。仅发布 job 有 contents:write；包身份不一致禁止覆盖。
 - 主 agent 独占 docs、AGENTS、cli.py、cmd_queue.py（expected_paused）与集成入口；核心 worker 独占新增 mobile_*.py、mobile 专项测试；Mac worker 独占新增 Mac 移动视图/manager/DTO、SettingsView/AppRuntime/CoreLocator/FakeCore/project.pbxproj；Android worker 独占 android/；构建 worker 独占 workflows 与打包脚本。同一文件一名写入者，各专家不继续派生。
 - 全程使用隔离 DB/假执行后端验证；主 agent 负责真实界面与 LAN 集成。已有 dirty main 不覆盖。不调用付费模型、不安装替换正式 App。源代码、测试、实际 Actions、设备和发布证据分别记录。

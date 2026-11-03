@@ -120,9 +120,11 @@ def test_scenario_doctor_offline_skips_probes(cli, fake_kaneo):
     out = cli("doctor", {"online": False})
     assert out["ok"] is True
     names = {c["name"] for c in out["checks"]}
-    assert {"python", "db_writable", "credentials", "plan_root", "repos_root",
-            "state_root", "kaneo_ping", "gh", "plus", "engine_lease",
+    assert {"python", "python_runtime", "db_writable", "credentials", "plan_root",
+            "repos_root", "state_root", "kaneo_ping", "gh", "plus", "engine_lease",
             "attention_backlog"} <= names
+    runtime = _check(out, "python_runtime")
+    assert runtime["ok"] is True and "external" in runtime["detail"], runtime
     for name in ("kaneo_ping", "gh", "plus"):
         check = _check(out, name)
         assert check["skipped"] is True and check["ok"] is True, check

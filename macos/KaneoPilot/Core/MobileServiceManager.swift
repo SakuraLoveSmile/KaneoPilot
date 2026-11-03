@@ -125,18 +125,16 @@ final class MobileServiceManager: ObservableObject {
         // FakeCore has no listener: explicitly label it as a simulated state in UI.
         if isSimulation { running = true; starting = false; return }
         guard let location = client.location else { error = CoreError.coreMissing.localizedDescription; return }
+        guard let invocation = location.invocation(["mobile-serve", "--json", "{}"]) else {
+            error = "手机连接启动失败：\(PythonRuntime.missingMessage)"
+            return
+        }
         generation += 1
         let current = generation
         let child = Process()
-        if location.usesPython {
-            child.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            child.arguments = ["python3", location.path, "mobile-serve", "--json", "{}"]
-        } else {
-            child.executableURL = URL(fileURLWithPath: location.path)
-            child.arguments = ["mobile-serve", "--json", "{}"]
-        }
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        child.executableURL = invocation.executable
+        child.arguments = invocation.arguments
+        var environment = PythonRuntime.environment()
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PATH"] = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
         child.environment = environment
@@ -161,7 +159,7 @@ final class MobileServiceManager: ObservableObject {
                 self.running = false
                 self.starting = false
                 self.pairing = nil
-                self.error = self.pendingFailure ?? "手机连接服务已退出（exit \(child.terminationStatus)）；请检查 Python、所选地址与端口占用"
+                self.error = self.pendingFailure ?? "手机连接服务已退出（exit \(child.terminationStatus)）；请检查所选地址、端口占用与内置 Python 运行时"
             }
         }
         starting = true
@@ -171,13 +169,13 @@ final class MobileServiceManager: ObservableObject {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(15))
                 guard let self, self.generation == current, self.starting else { return }
-                self.error = "手机连接服务未在 15 秒内就绪；请检查 Python、本地网络授权与端口占用"
+                self.error = "手机连接服务未在 15 秒内就绪；请检查本地网络授权、端口占用与内置 Python 运行时"
                 _ = await self.stopOwnedService()
             }
         } catch {
             output.fileHandleForReading.readabilityHandler = nil
             starting = false
-            self.error = "手机连接启动失败，请确认 Python 已安装：\(error.localizedDescription)"
+            self.error = "手机连接启动失败：\(error.localizedDescription)"
         }
     }
 

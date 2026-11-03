@@ -52,6 +52,9 @@ class Tools:
         self.open_timeout = False
         self.open_attempted = False
         self.running_after_failure = False
+        self.process_outputs = None  # successive `ps` outputs; the last one repeats
+        self.fail_clone = False
+        self.fail_runtime_probe = False
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -76,7 +79,18 @@ class Tools:
         if tool == "ps":
             if self.running_after_failure and self.open_attempted:
                 return ("5720 " + self.calls[-2][-1] + "/Contents/MacOS/KaneoPilot\n").encode(), b""
+            if self.process_outputs:
+                return (self.process_outputs.pop(0) if len(self.process_outputs) > 1 else self.process_outputs[0]), b""
             return self.processes, b""
+        if tool == "cp":
+            if self.fail_clone:
+                raise updater.UpdateError("clone failed")
+            shutil.copytree(argv[-2], argv[-1], symlinks=True)
+            return b"", b""
+        if argv[1:2] == ["-c"]:  # the interpreter probe of a cloned runtime
+            if self.fail_runtime_probe:
+                raise updater.UpdateError("clone does not start")
+            return b"", b""
         if tool == "open":
             self.open_attempted = True
             if self.open_timeout:
@@ -98,7 +112,7 @@ class InstallerTests(unittest.TestCase):
         self.data.mkdir()
         (self.data / "kanpilot.db").write_bytes(b"do not migrate or open this DB")
         (self.data / "pairing").write_bytes(b"keep pairing")
-        package = self.root / "KaneoPilot-1.2.3-macos-universal.dmg"
+        package = self.root / "KaneoPilot-1.2.3-macos-arm64.dmg"
         package.write_bytes(b"isolated DMG fixture")
         self.payload = {"package_path": str(package), "target_path": str(self.target),
                         "cache_path": str(self.root / "cache"), "version": "1.2.3", "build_number": 41,
@@ -202,6 +216,20 @@ class InstallerTests(unittest.TestCase):
             updater.prepare(dict(self.payload, unexpected=True), runner=self.tools)
         self.assertFalse(self.tools.calls)
 
+    def test_only_the_arm64_package_of_the_same_version_is_installable(self):
+        # The Universal package of the retired scheme, another version's package and a bare name never mount.
+        for name in ("KaneoPilot-1.2.3-macos-universal.dmg", "KaneoPilot-1.2.4-macos-arm64.dmg",
+                     "KaneoPilot-1.2.3-macos.dmg"):
+            with self.subTest(name=name):
+                package = self.root / name
+                package.write_bytes(b"isolated DMG fixture")
+                request = dict(self.payload, package_path=str(package), sha256=updater.digest(package),
+                               size=package.stat().st_size)
+                with self.assertRaisesRegex(updater.UpdateError, "文件名"):
+                    updater.prepare(request, runner=self.tools)
+                self.assertFalse(self.tools.calls)
+                self.assertEqual(updater.target_snapshot(self.target), self.original)
+
     def test_old_same_and_preview_versions_cannot_replace_app(self):
         for installed in ("1.2.3", "1.2.10", "0.0.0"):
             with self.subTest(installed=installed):
@@ -221,7 +249,7 @@ class InstallerTests(unittest.TestCase):
         self.original = updater.target_snapshot(self.target)
 
     def use_candidate(self, version, build):
-        package = self.root / ("KaneoPilot-%s-macos-universal.dmg" % version)
+        package = self.root / ("KaneoPilot-%s-macos-arm64.dmg" % version)
         package.write_bytes(("isolated DMG fixture " + version).encode())
         self.payload.update(package_path=str(package), version=version, build_number=build,
                             sha256=updater.digest(package), size=package.stat().st_size)
@@ -369,9 +397,130 @@ class InstallerTests(unittest.TestCase):
         job = self.prepare()
         self.tools.processes = ("4820 " + str(self.target / "Contents/MacOS/KaneoPilot") + "\n").encode()
         with self.assertRaisesRegex(updater.UpdateError, "还有 KaneoPilot"):
-            self.install(job)
+            self.install(job, busy_wait_seconds=0)
         self.assertEqual(updater.target_snapshot(self.target), self.original)
         self.assertFalse(any(Path(argv[0]).name == "open" for argv in self.tools.calls))
+
+    def add_runtime(self):
+        """A stand-in for the app's bundled Python; returns the interpreter entry inside the target."""
+        runtime = self.target / "Contents/Resources/python"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "lib").mkdir()
+        (runtime / "lib/stdlib.py").write_text("value = 1\n")
+        (runtime / "bin/python3.13").write_bytes(b"#!/bin/sh\nexit 0\n")
+        (runtime / "bin/python3.13").chmod(0o755)
+        (runtime / "bin/python3").symlink_to("python3.13")
+        return runtime / "bin/python3"
+
+    def prepare_bundled(self, interpreter):
+        return updater.prepare(self.payload, runner=self.tools, interpreter=str(interpreter))
+
+    def test_bundled_interpreter_is_cloned_next_to_the_job_and_proven_to_start(self):
+        interpreter = self.add_runtime()
+        job = self.prepare_bundled(interpreter)
+        clone = Path(job["job_path"]).parent / "runtime"
+        clone_command = ["/bin/cp", "-c", "-p", "-R", str(self.target / "Contents/Resources/python"), str(clone)]
+        probe = [job["python_path"], "-c", updater.RUNTIME_PROBE]
+        self.assertEqual(job["python_path"], str(clone / "bin/python3"))
+        self.assertEqual(os.readlink(clone / "bin/python3"), "python3.13")
+        self.assertEqual((clone / "lib/stdlib.py").read_text(), "value = 1\n")
+        self.assertIn(clone_command, self.tools.calls)
+        self.assertIn(probe, self.tools.calls)
+        self.assertLess(self.tools.calls.index(clone_command), self.tools.calls.index(probe))
+        # The helper never runs from inside the app directory it is going to swap away.
+        self.assertFalse(job["python_path"].startswith(str(self.target) + "/"))
+        self.assertEqual(updater.target_snapshot(self.target), self.original)
+        self.assertEqual(updater.bundle_info(Path(job["backup_path"]))["CFBundleShortVersionString"], "1.2.3")
+
+    def test_interpreter_outside_the_target_is_used_as_is(self):
+        job = self.prepare()
+        self.assertEqual(job["python_path"], sys.executable)
+        self.assertFalse(any(Path(argv[0]).name == "cp" for argv in self.tools.calls))
+        self.assertFalse((Path(job["job_path"]).parent / "runtime").exists())
+
+    def test_interpreter_reached_through_a_symlink_into_the_runtime_is_still_cloned(self):
+        self.add_runtime()
+        outside = self.root / "elsewhere"
+        outside.mkdir()
+        (outside / "python3").symlink_to(self.target / "Contents/Resources/python/bin/python3.13")
+        job = self.prepare_bundled(outside / "python3")
+        self.assertEqual(job["python_path"], str(Path(job["job_path"]).parent / "runtime/bin/python3.13"))
+
+    def test_failed_clone_or_probe_stops_prepare_before_the_app_quits(self):
+        interpreter = self.add_runtime()
+        for attribute in ("fail_clone", "fail_runtime_probe"):
+            with self.subTest(attribute=attribute):
+                self.tools = Tools()
+                setattr(self.tools, attribute, True)
+                with self.assertRaises(updater.UpdateError):
+                    self.prepare_bundled(interpreter)
+                self.assertEqual(updater.target_snapshot(self.target), self.original)
+                self.assertFalse(list(self.root.glob(".KaneoPilot-backup-*")))
+                self.assertFalse(list((self.root / "cache").glob("install-*/runtime")))
+
+    def test_next_prepare_drops_runtime_clones_of_jobs_that_have_already_run(self):
+        interpreter = self.add_runtime()
+        statuses = ("prepared", "waiting_for_exit", "installing", "launch_requested", "failed",
+                    "launch_unconfirmed", "recovery_required")
+        jobs = {status: Path(self.prepare_bundled(interpreter)["job_path"]).parent for status in statuses}
+        unreadable = Path(self.prepare_bundled(interpreter)["job_path"]).parent
+        for status, root in jobs.items():
+            updater.write_json(root / "result.json", {"status": status})
+        (unreadable / "result.json").write_text("not json")
+        latest = Path(self.prepare_bundled(interpreter)["job_path"]).parent
+        for status, root in jobs.items():
+            self.assertEqual((root / "runtime").exists(), status in ("prepared", "waiting_for_exit", "installing"), status)
+            self.assertTrue((root / "result.json").is_file(), status)  # only the clone goes, never the record
+        self.assertTrue((unreadable / "runtime").exists())
+        self.assertTrue((latest / "runtime").exists())
+
+    def leftover(self, pid=4821):
+        return (str(pid) + " " + str(self.target / "Contents/Resources/python/bin/python3") + "\n").encode()
+
+    @staticmethod
+    def fake_time():
+        now = [0.0]
+        return now, (lambda seconds: now.__setitem__(0, now[0] + seconds)), (lambda: now[0])
+
+    def test_leftover_worker_gets_a_bounded_time_to_exit_before_the_swap(self):
+        job = self.prepare()
+        self.tools.process_outputs = [self.leftover(), self.leftover(), b""]
+        now, sleep, clock = self.fake_time()
+        result = self.install(job, busy_wait_seconds=20, sleep=sleep, clock=clock)
+        self.assertEqual(result["status"], "launch_requested")
+        self.assertEqual(updater.bundle_info(self.target)["CFBundleShortVersionString"], "1.2.3")
+        self.assertTrue(0 < now[0] < 20, now[0])
+
+    def test_leftover_worker_that_stays_is_refused_after_the_wait_and_the_old_app_is_reopened(self):
+        job = self.prepare()
+        self.tools.processes = self.leftover()
+        now, sleep, clock = self.fake_time()
+        with self.assertRaisesRegex(updater.UpdateError, "还有 KaneoPilot.*4821") as caught:
+            self.install(job, busy_wait_seconds=20, sleep=sleep, clock=clock)
+        self.assertEqual(caught.exception.code, "update_busy")
+        self.assertTrue(20 <= now[0] < 21, now[0])  # waited the whole period, and not longer
+        self.assertEqual(updater.target_snapshot(self.target), self.original)
+        self.assertEqual([argv for argv in self.tools.calls if Path(argv[0]).name == "open"],
+                         [["/usr/bin/open", "-n", str(self.target)]])
+        recorded = self.result(job)
+        self.assertEqual((recorded["status"], recorded["restored"]), ("failed", False))
+        self.assertEqual(recorded["python"], sys.executable)
+
+    def test_bundle_processes_match_the_bundle_prefix_and_skip_the_helper(self):
+        lines = ["100 %s/Contents/MacOS/KaneoPilot" % self.target,
+                 "200 %s/Contents/Resources/python/bin/python3" % self.target,
+                 "%d %s/Contents/Resources/python/bin/python3" % (os.getpid(), self.target),
+                 "300 %s.backup/Contents/MacOS/KaneoPilot" % self.target,  # same prefix, another directory
+                 "400 /usr/bin/python3",
+                 "x500 %s/Contents/MacOS/KaneoPilot" % self.target]
+        output = ("\n".join(lines) + "\n").encode()
+        self.assertEqual(updater.bundle_processes(self.target, lambda argv: (output, b"")), [100, 200])
+
+    def test_results_record_which_interpreter_ran_the_helper(self):
+        job = self.prepare()
+        result = self.install(job)
+        self.assertEqual(result["python"], sys.executable)
+        self.assertEqual(self.result(job)["python"], sys.executable)
 
     def test_launch_failure_restores_old_app_and_requests_its_relaunch(self):
         job = self.prepare()
@@ -484,6 +633,7 @@ class InstallerTests(unittest.TestCase):
             while self.result(job)["status"] == "prepared" and time.monotonic() < deadline and helper.poll() is None:
                 time.sleep(0.02)
             self.assertEqual(self.result(job)["status"], "waiting_for_exit")
+            self.assertEqual(self.result(job)["python"], sys.executable)
             self.assertEqual(updater.target_snapshot(self.target), self.original)
             parent.terminate()
             parent.wait(timeout=5)

@@ -25,8 +25,8 @@ struct RootView: View {
                 Section("配置") { sidebarItem(.settings) }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
             .safeAreaInset(edge: .bottom) { automationBlock }
+            .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
         } detail: {
             VStack(spacing: 0) {
                 if let banner = model.banner {
@@ -48,6 +48,8 @@ struct RootView: View {
             }
             .animation(.easeInOut(duration: 0.2), value: model.toast)
         }
+        // 让整列背景直接延伸到标题栏，避免系统工具栏另绘的分界偏左 2pt。
+        .toolbarBackground(.hidden, for: .windowToolbar)
         // 由窗口根呈现：需要处理的导航详情也能打开，避免列内 presenter 被 push 页面占用。
         .sheet(isPresented: $model.planningPresented) {
             PlanningView()

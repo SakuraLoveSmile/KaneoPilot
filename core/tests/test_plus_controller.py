@@ -25,6 +25,7 @@ import http.server
 import json
 import os
 import subprocess
+import sys
 import threading
 import unittest
 from pathlib import Path
@@ -548,6 +549,24 @@ class TestHostEnvironment(PlusCase):
         rewritten = pi_desktop_controller.point_cli_at_wrapper(prompt, wrapper)
         self.assertIn(str(wrapper), rewritten)
         self.assertNotIn(str(constants.core_root() / "kanpilot.py"), rewritten)
+        # 包装器自己 exec 解释器；prompt 里不能留下「解释器 包装器」这种错误形态。
+        self.assertNotIn(f"{sys.executable} {wrapper}", rewritten)
+        self.assertIn(f"{wrapper} <command> --json", rewritten)
+
+    def test_wrapper_execs_the_cores_own_interpreter(self):
+        directory = pi_desktop_controller.invocation_dir("dispatch", "inv-test-py")
+        wrapper = pi_desktop_controller.write_wrapper(directory, "dispatch")
+        text = wrapper.read_text(encoding="utf-8")
+        self.assertIn(f"exec '{sys.executable}' '", text)
+        self.assertNotIn("python3 ", text)
+        self.assertNotIn("/usr/bin/env", text)
+
+    def test_python_bin_refuses_to_guess_when_interpreter_is_unknown(self):
+        for empty in ("", None):
+            with mock.patch.object(sys, "executable", empty):
+                with self.assertRaises(util.KanpilotError) as ctx:
+                    pi_desktop_controller._python_bin()
+            self.assertEqual(ctx.exception.code, "validation_failed")
 
 
 # ------------------------------------------------------------ dispatch 控制轮

@@ -33,8 +33,11 @@ struct AutomationDashboardView: View {
             .padding(Spacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color.kpWindow)
+        // 背景延伸到工具栏，滚动内容仅绘制在正文区域。
+        .clipped()
+        .background(Color.kpControl)
         .navigationTitle("总览")
+        .modifier(DashboardToolbarTitle())
         .focusable().focusEffectDisabled()
         .onKeyPress(.downArrow) { moveSelection(1) }
         .onKeyPress(.upArrow) { moveSelection(-1) }
@@ -178,7 +181,9 @@ struct AutomationDashboardView: View {
                     .foregroundStyle(Color.accentColor)
                 }
             }
-            GroupPanel { attentionContent }
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
+                attentionContent
+            }
         }
     }
 
@@ -357,7 +362,7 @@ struct AutomationDashboardView: View {
                 Spacer(minLength: Spacing.m)
                 diagnoseButton
             }
-            GroupPanel {
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
                 ForEach(Array(environmentAlerts.enumerated()), id: \.element.id) { index, alert in
                     if index > 0 { ListRule() }
                     environmentAlertRow(alert)
@@ -411,7 +416,7 @@ struct AutomationDashboardView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
             }
-            GroupPanel {
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
                 if all.isEmpty {
                     panelMessage {
                         Text("当前没有进行中任务").font(.kpLabel).foregroundStyle(Color.kpSecondary)
@@ -472,7 +477,7 @@ struct AutomationDashboardView: View {
 
     /// 一块无标题的分组面板：环境行（只在没有告警时）和项目行，行高 40pt。
     private var summarySection: some View {
-        GroupPanel {
+        GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
             if environmentIssueCount == 0 {
                 summaryEnvironmentRow
                 if healthDetailsExpanded && hasHealthDetails {
@@ -751,5 +756,41 @@ struct AutomationDashboardView: View {
         let old = rows.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : rows.count)
         selectedID = rows[min(max(old + step, 0), rows.count - 1)].taskId
         return .handled
+    }
+}
+
+/// 保留原生窗口标题，只替换可见的工具栏标题。macOS 14 沿用系统标题，
+/// 15 起可移除默认项，让标题与正文的 24pt 页边距对齐，不修改内容宽度。
+private struct DashboardToolbarTitle: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content
+                .toolbar(removing: .title)
+                .toolbar {
+                    // Xcode 16 的 SDK 没有此 API；26 起明确保持文字标题无按钮背景。
+                    #if compiler(>=6.2)
+                    if #available(macOS 26, *) {
+                        titleItem.sharedBackgroundVisibility(.hidden)
+                    } else {
+                        titleItem
+                    }
+                    #else
+                    titleItem
+                    #endif
+                }
+        } else {
+            content
+        }
+    }
+
+    private var titleItem: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Text("总览")
+                .font(.kpSection)
+                // 系统工具栏已有 8pt 内边距；扣除正文的 1pt 分栏线。
+                .padding(.leading, Spacing.l - 1)
+                .accessibilityAddTraits(.isHeader)
+        }
     }
 }

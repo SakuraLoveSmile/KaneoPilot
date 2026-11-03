@@ -182,19 +182,21 @@ final class ExecutorScheduler: ObservableObject {
         let coreDir = URL(fileURLWithPath: location.path).deletingLastPathComponent()
         // FakeCore 旁没有 runner 包，保持原有夹具隔离行为。
         guard FileManager.default.fileExists(atPath: coreDir.appendingPathComponent("kanpilot").path) else { return }
+        guard let interpreter = PythonRuntime.resolve() else {
+            throw CoreError.launchFailed(PythonRuntime.missingMessage)
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.executableURL = interpreter
         switch kind {
-        case "plan": process.arguments = ["python3", "-m", "kanpilot.planner_runner"]
-        case "intake": process.arguments = ["python3", "-m", "kanpilot.auto_intake"]
+        case "plan": process.arguments = ["-m", "kanpilot.planner_runner"]
+        case "intake": process.arguments = ["-m", "kanpilot.auto_intake"]
         case "goal-recovery":
-            process.arguments = ["python3", coreDir.appendingPathComponent("kanpilot.py").path,
+            process.arguments = [coreDir.appendingPathComponent("kanpilot.py").path,
                                  "recover-execution-goals", "--json", "{}"]
-        default: process.arguments = ["python3", "-m", "kanpilot.executor_runner", "--stage", kind]
+        default: process.arguments = ["-m", "kanpilot.executor_runner", "--stage", kind]
         }
         process.currentDirectoryURL = coreDir
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        var env = PythonRuntime.environment()
         env["KANPILOT_EXECUTOR_INSTANCE_ID"] = instanceID
         let npmBin = (NSHomeDirectory() as NSString).appendingPathComponent(".npm-global/bin")
         let extraPath = "\(npmBin):/usr/local/bin:/opt/homebrew/bin"

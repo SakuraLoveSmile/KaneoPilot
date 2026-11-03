@@ -29,6 +29,10 @@ TEST_TAG = re.compile("v" + _STABLE + r"-test\.(%s)" % SERIAL)
 MAX_NOTES = 4000
 MAX_BRANCH = 100
 TAGGER = {"name": "github-actions[bot]", "email": "41898282+github-actions[bot]@users.noreply.github.com"}
+# The only Mac package is Apple Silicon. Both in-app updaters accept exactly this name and architecture set
+# (docs/build-release.md, "内置 Python 运行时与架构").
+MACOS_PACKAGE_SUFFIX = "macos-arm64.dmg"
+MACOS_ARCHITECTURES = ["arm64"]
 
 
 def parse_version(text):
@@ -187,12 +191,15 @@ def metadata(args):
     serial = parse_version(args.version)[3]
     if serial is not None and serial != int(args.build_number):
         raise ValueError("Test version serial must equal the build number")
+    architectures = args.architectures.split(",")
+    if args.platform == "macos" and architectures != MACOS_ARCHITECTURES:
+        raise ValueError("macOS packages are Apple Silicon (arm64) only")
     write_json(args.output, {
         "platform": args.platform, "name": path.name,
         "sha256": sha256(path), "size": path.stat().st_size,
         "signature_sha256": args.fingerprint, "version": args.version,
         "source_sha": args.source_sha, "build_number": int(args.build_number),
-        "architectures": args.architectures.split(","),
+        "architectures": architectures,
         "signature_type": "certificate-sha256" if args.platform == "android" else "codedirectory-sha256",
     })
 
@@ -211,9 +218,11 @@ def prepare(directory, tag, source_sha, build_number, branch=""):
         suffix = ".apk" if platform == "android" else ".dmg"
         if Path(name).name != name or not name.startswith("KaneoPilot-") or not name.endswith(suffix):
             raise ValueError("Unexpected artifact name")
-        if channel == "test" and name != "KaneoPilot-%s-%s" % (tag[1:], "android.apk" if platform == "android" else "macos-universal.dmg"):
-            # The in-app updater only accepts these exact names, so a misnamed test build must not publish.
+        if name != "KaneoPilot-%s-%s" % (tag[1:], "android.apk" if platform == "android" else MACOS_PACKAGE_SUFFIX):
+            # The in-app updaters only accept these exact names, so a misnamed build, stable or test, must not publish.
             raise ValueError("Unexpected artifact name")
+        if platform == "macos" and record.get("architectures") != MACOS_ARCHITECTURES:
+            raise ValueError("Unexpected macOS architectures")
         if not re.fullmatch(r"[0-9a-f]{64}", record.get("signature_sha256", "")):
             raise ValueError("Missing signature fingerprint")
         package = root / name
@@ -222,7 +231,7 @@ def prepare(directory, tag, source_sha, build_number, branch=""):
         artifacts.append(record)
     manifest = {"version": tag[1:], "tag": tag, "source_sha": source_sha,
                 "build_number": int(build_number), "artifacts": artifacts,
-                "macos_requirements": "macOS 14+; compatible external Python 3.9+; Git/Plus as configured; ad-hoc signed, not notarized"}
+                "macos_requirements": "macOS 14+, Apple Silicon only; bundled Python runtime; Git/Plus as configured; ad-hoc signed, not notarized"}
     if channel == "test":
         # Stable manifests keep their exact historical shape: no channel key.
         manifest.update({"channel": "test", "base_version": tag[1:].split("-", 1)[0], "branch": clean_branch(branch)})
@@ -377,7 +386,7 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
         release = api.request("POST", prefix + "/releases", {
             "tag_name": tag, "target_commitish": source_sha, "name": "KaneoPilot " + tag,
             "draft": True, "prerelease": prerelease,
-            "body": marker + "\n\n" + notes + "\n\n" + install + "\n\nmacOS 14+：Intel / Apple Silicon 通用 DMG，本地签名，未公证。需要外部 Python 3.9+；执行任务仍需配置 Git、Plus 等现有环境。\n\n文件完整性见 SHA256SUMS；构建与签名身份见 manifest.json。"})
+            "body": marker + "\n\n" + notes + "\n\n" + install + "\n\nmacOS 14+（仅 Apple Silicon）：DMG 内置 Python 运行时，本地签名，未公证；执行任务仍需配置 Git、Plus 等现有环境。\n\n文件完整性见 SHA256SUMS；构建与签名身份见 manifest.json。"})
     release_path = prefix + "/releases/" + str(release["id"])
     # GitHub paginates assets. Preserve unrelated assets and inspect every page.
     assets = []

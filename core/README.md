@@ -1,6 +1,8 @@
 # KaneoPilot core (`kanpilot`)
 
-Python 3.9+ scheduling core for the KaneoPilot workbench. SQLite is the only
+Python 3.9+ scheduling core for the KaneoPilot workbench. The macOS app runs
+it on its own bundled CPython (3.13; see `../docs/build-release.md`), so the
+source stays 3.9+ compatible but must also pass on 3.13. SQLite is the only
 state write source; the desktop app and executors interact exclusively through
 the fixed JSON command interface implemented here. The frozen contracts live in
 `../docs/protocol.md` and `../docs/state-model.md` — this directory contains

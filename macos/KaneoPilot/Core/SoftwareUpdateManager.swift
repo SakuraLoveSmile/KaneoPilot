@@ -17,11 +17,15 @@ private final class DeferredTerminationRequest: @unchecked Sendable {
 struct PreparedSoftwareUpdate: Decodable, Sendable {
     let jobPath: String
     let helperPath: String
+    /// The interpreter that runs the helper: a clone of the bundled runtime next to the job, never one inside
+    /// the app directory the helper is going to swap away.
+    let pythonPath: String
     let version: String
     let backupPath: String
 
     enum CodingKeys: String, CodingKey {
-        case jobPath = "job_path", helperPath = "helper_path", version, backupPath = "backup_path"
+        case jobPath = "job_path", helperPath = "helper_path", pythonPath = "python_path", version,
+             backupPath = "backup_path"
     }
 }
 
@@ -32,18 +36,20 @@ protocol SoftwareUpdateInstalling: Sendable {
 
 struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
     let helperURL: URL?
+    let pythonURL: URL?
 
-    init(helperURL: URL? = Bundle.main.resourceURL?.appendingPathComponent("core/kanpilot/app_update_installer.py")) {
+    init(helperURL: URL? = Bundle.main.resourceURL?.appendingPathComponent("core/kanpilot/app_update_installer.py"),
+         pythonURL: URL? = PythonRuntime.resolve()) {
         self.helperURL = helperURL
+        self.pythonURL = pythonURL
     }
 
-    private static func pythonProcess() -> Process {
+    private static func pythonProcess(_ interpreter: URL) -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        var environment = ProcessInfo.processInfo.environment
+        process.executableURL = interpreter
+        var environment = PythonRuntime.environment()
         let extra = "\(NSHomeDirectory())/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin"
         environment["PATH"] = environment["PATH"].map { "\(extra):\($0)" } ?? extra
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         process.environment = environment
         return process
     }
@@ -51,6 +57,9 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
     func prepare(release: SoftwareRelease, package: URL, target: URL, cache: URL) async throws -> PreparedSoftwareUpdate {
         guard let helperURL, FileManager.default.fileExists(atPath: helperURL.path) else {
             throw SoftwareUpdateError.installation("当前软件缺少更新安装助手，请从发布页下载安装")
+        }
+        guard let pythonURL else {
+            throw SoftwareUpdateError.installation(PythonRuntime.missingMessage)
         }
         guard (try target.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else {
             throw SoftwareUpdateError.installation("当前 App 是符号链接，请从真实安装目录运行后再更新")
@@ -64,8 +73,8 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
         let encoded = try JSONSerialization.data(withJSONObject: payload)
         let json = String(decoding: encoded, as: UTF8.self)
         return try await Task.detached(priority: .userInitiated) {
-            let process = Self.pythonProcess()
-            process.arguments = ["python3", helperURL.standardizedFileURL.resolvingSymlinksInPath().path, "prepare", "--json", json]
+            let process = Self.pythonProcess(pythonURL)
+            process.arguments = [helperURL.standardizedFileURL.resolvingSymlinksInPath().path, "prepare", "--json", json]
             let output = Pipe()
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
@@ -85,12 +94,16 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
             let prepared = try JSONDecoder().decode(PreparedSoftwareUpdate.self, from: data)
             let jobURL = URL(fileURLWithPath: prepared.jobPath).standardizedFileURL
             let helper = URL(fileURLWithPath: prepared.helperPath).standardizedFileURL
+            let python = URL(fileURLWithPath: prepared.pythonPath).standardizedFileURL
             let cacheRoot = cache.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+            let appRoot = target.standardizedFileURL.resolvingSymlinksInPath().path + "/"
             guard jobURL.resolvingSymlinksInPath().path.hasPrefix(cacheRoot),
                   helper.deletingLastPathComponent() == jobURL.deletingLastPathComponent(),
                   jobURL.lastPathComponent == "job.json", prepared.version == release.version,
                   FileManager.default.fileExists(atPath: helper.path),
-                  FileManager.default.fileExists(atPath: jobURL.path) else {
+                  FileManager.default.fileExists(atPath: jobURL.path),
+                  prepared.pythonPath.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: python.path),
+                  !python.resolvingSymlinksInPath().path.hasPrefix(appRoot) else {
                 throw SoftwareUpdateError.installation("安装助手返回了无效的安装任务")
             }
             return prepared
@@ -98,7 +111,11 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
     }
 
     func launch(_ prepared: PreparedSoftwareUpdate, parentPID: Int32) async throws {
-        let process = Self.pythonProcess()
+        let python = URL(fileURLWithPath: prepared.pythonPath)
+        guard FileManager.default.isExecutableFile(atPath: python.path) else {
+            throw SoftwareUpdateError.installation("更新助手使用的 Python 运行时已不存在，已取消退出，请重新检查更新")
+        }
+        let process = Self.pythonProcess(python)
         let jobURL = URL(fileURLWithPath: prepared.jobPath)
         let logURL = jobURL.deletingLastPathComponent().appendingPathComponent("installer.log")
         if !FileManager.default.fileExists(atPath: logURL.path) {
@@ -109,7 +126,7 @@ struct BundledSoftwareUpdateInstaller: SoftwareUpdateInstalling {
         let log = try FileHandle(forWritingTo: logURL)
         defer { try? log.close() }
         try log.seekToEnd()
-        process.arguments = ["python3", prepared.helperPath, "install", "--job", prepared.jobPath,
+        process.arguments = [prepared.helperPath, "install", "--job", prepared.jobPath,
                              "--parent-pid", String(parentPID)]
         process.currentDirectoryURL = jobURL.deletingLastPathComponent()
         process.standardInput = FileHandle.nullDevice
@@ -354,24 +371,30 @@ final class SoftwareUpdateManager: ObservableObject {
         phase = .checking; errorMessage = nil; channelNotice = nil
         lastAttemptAt = now(); defaults.set(lastAttemptAt, forKey: Keys.attempted)
         do {
-            let candidate = try await service.latest(includingTestBuilds: includesTestBuilds)
+            let installed = try SoftwareVersion(currentVersion)
+            // Asked for "newer than the installed version" first: a release that is not newer is no update
+            // whatever its package looks like, so the Universal releases of the retired scheme (v0.2.0 and
+            // the older test builds) end in `.current` instead of an error about their package.
+            let answer = try await service.latestUpdate(includingTestBuilds: includesTestBuilds, newerThan: installed)
             guard epoch == channelEpoch else {
                 // The channel was switched while this request ran, so its answer no longer applies.
                 phase = settledPhase(); forgetLastAttempt()
+                return
+            }
+            guard let candidate = answer else {
+                lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
+                settleAsCurrent()
                 return
             }
             try candidate.validate()
             guard includesTestBuilds || !candidate.isTest else {
                 throw SoftwareUpdateError.invalid("未开启接收测试版，却收到了测试版")
             }
-            let installed = try SoftwareVersion(currentVersion)
             let newer = try SoftwareVersion(candidate.version)
             lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
             guard SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
                                            candidate: newer, candidateBuild: candidate.buildNumber) else {
-                release = nil; downloadedPackage = nil; phase = .current
-                defaults.removeObject(forKey: Keys.release)
-                pruneUpdateCache()
+                settleAsCurrent()
                 return
             }
             let same = release == candidate
@@ -510,19 +533,27 @@ final class SoftwareUpdateManager: ObservableObject {
 
     /// Brings back the candidate saved by the last check, unless it is a test build and the test channel is off.
     func restoreCachedRelease() async {
+        // A saved record that cannot be offered any more is dropped quietly with its package: a Universal package
+        // of the retired scheme, a record that the installed version has caught up with, or a test build while the
+        // test channel is off.
         guard !isBusy, let data = defaults.data(forKey: Keys.release),
-              let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data),
-              (try? cached.validate()) != nil else { return }
+              let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data) else { return }
+        guard (try? cached.validate()) != nil else {
+            discardCachedRelease(cached)
+            return
+        }
         guard !cached.isTest || testChannelActive else {
             // A test build saved while the channel was on must not outlive it.
-            defaults.removeObject(forKey: Keys.release)
-            removeCachedPackage(for: cached)
+            discardCachedRelease(cached)
             return
         }
         guard let installed = try? SoftwareVersion(currentVersion),
-              let candidate = try? SoftwareVersion(cached.version),
-              SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
-                                       candidate: candidate, candidateBuild: cached.buildNumber) else { return }
+              let candidate = try? SoftwareVersion(cached.version) else { return }
+        guard SoftwareVersion.isUpdate(installed: installed, installedBuild: currentBuild,
+                                       candidate: candidate, candidateBuild: cached.buildNumber) else {
+            discardCachedRelease(cached)
+            return
+        }
         release = cached; phase = .available
         let package = cached.packageURL(in: cacheURL)
         if FileManager.default.fileExists(atPath: package.path), !isPreview {
@@ -556,6 +587,19 @@ final class SoftwareUpdateManager: ObservableObject {
         channelNotice = "已关闭接收测试版，已移除待安装的测试版。"
         // The stable candidate was not stored, so look for it again at the next due check.
         forgetLastAttempt()
+    }
+
+    /// The check found nothing to install: no candidate, no saved record, and no package of an installed or
+    /// superseded version.
+    private func settleAsCurrent() {
+        release = nil; downloadedPackage = nil; phase = .current
+        defaults.removeObject(forKey: Keys.release)
+        pruneUpdateCache()
+    }
+
+    private func discardCachedRelease(_ cached: SoftwareRelease) {
+        defaults.removeObject(forKey: Keys.release)
+        removeCachedPackage(for: cached)
     }
 
     /// The phase that matches the stored candidate, for when a request ends without an applicable answer.

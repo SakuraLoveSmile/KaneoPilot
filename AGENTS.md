@@ -1,6 +1,13 @@
  # KaneoPilot agent guide
  
  Kaneo 调度台：macOS 工作台与 Android 远程控制台。SwiftUI 桌面 + Python 调度核心 + SQLite；Android Kotlin/Compose 通过局域网或已有 VPN 连接 Mac。集中查看 Kaneo 任务进度、失败原因、计划文件和执行证据，并安排下一步。正常流程自动推进，异常集中处理。
+
+```text
+Project-ID: personal-kaneopilot
+Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot
+```
+
+统一开发流程沿用户全局约定与 `/Users/sakurasep/.codex/guidance/development-workflow.md`；一任务一份权威记录，保留既有改动，验证绑定实际代码与环境。状态只用未开始、实现中、待体验、已验收，用户明确确认才是已验收。
  
  ## 边界
  
@@ -28,7 +35,8 @@
  - 核心隔离测试：`cd core && python3 -m pytest tests -q`（或 unittest，随实现）。
  - 集成测试：`python3 -m pytest tests -q`。
  - 调度台集成演练：`python3 -m pytest tests/rehearsal -q`。
- - 构建与发布：仅使用 GitHub 托管 Actions 的 `Packages` 工作流；分支手动构建用 `gh workflow run packages.yml --ref <branch>`，正式 Release 按 `docs/build-release.md` 的 annotated 稳定标签流程。
+ - 本地 macOS 构建检查：`bash scripts/build_local_macos.sh --check`；构建：`bash scripts/build_local_macos.sh`；隔离界面：`bash scripts/build_local_macos.sh --preview 1180x760 dark`。用户于 2026-11-02 授权本地构建测试及补齐环境。
+ - 云端构建与发布：使用 GitHub 托管 Actions 的 `Packages` 工作流；分支手动构建用 `gh workflow run packages.yml --ref <branch>`，正式 Release 按 `docs/build-release.md` 的 annotated 稳定标签流程。
  - 自动接收：`cd core && python3 -m kanpilot.auto_intake`；只读预览加 `--dry-run`。调度每 20 秒检查，intake 每 300 秒。
  - 引擎长驻：`engine run`（DB 级单实例租约+心跳+退避重启，见 protocol §5.27）。
  - 引擎状态：`engine status`（只读，见 protocol §5.27）。
@@ -39,7 +47,7 @@
  
  ## 约束
  
- - KaneoPilot 自身软件的编译、签名、打包与 Swift/Android 编译检查均在云端 Actions 执行，不在本地运行 Xcode、Gradle 或会自动编译的预览脚本。本地允许无需编译的 Python 隔离测试、静态检查及下载包核验；不要伪造 Actions 环境绕过脚本约束。构建成功、真实安装/设备验证、发布分别报告。
+ - 允许通过显式本地 macOS 入口编译、ad-hoc 签名及隔离预览；使用独立构建/数据目录，不伪造 Actions 环境。Android、DMG 与正式发布仍沿云端 Packages 门禁。构建成功、真实安装/设备验证、发布分别报告。
  - 本地缓存清理仅限无活动引用、可再生成的明确路径；`build/` 内的证据、备份、DB及嵌套仓库，`dist/` 的交付/恢复包，以及已安装软件和用户数据均保留。不得把整个忽略目录当缓存删除。
  - Python 3.9+ 标准库；第三方依赖只 vendored（沿用 pyyaml `_vendor` 模式）。
  - 远端 Kaneo 写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
@@ -48,6 +56,6 @@
  
  ## Worktree 位置与合并后的清理
  
- - 所有新 worktree（包括子 agent、临时验证和集成工作树）统一放在 `$HOME/Documents/Code/Project/Project Worktree/KaneoPilot/<任务标识>/`；工具不能指定位置时使用展开 `$HOME` 后的绝对路径调用 `git worktree add`，不再使用同级、仓库内部或工具默认目录。创建前检查工作区、`git worktree list` 和任务归属。
+ - 所有新 worktree 统一放在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/<YYYYMMDD>-<type>-<task-id>-<slug>/`；分支为 `<type>/<YYYYMMDD>-<task-id>-<slug>`，日期取创建时台北日期。已有资源不迁移、不改名。创建前检查工作区、`git worktree list` 和任务归属。
  - PR 或来源分支确认已合入约定目标且适用验证通过后，在同一任务内及时清理本任务已完成的临时工作树和已合并本地任务分支，无需再次确认。删除前核对目标已包含来源提交或等效改动，保留 `main` 等目标分支；无未保存或独有成果，无运行任务、服务或仍需保留的路径引用。需保留的未跟踪、忽略文件先迁出或建立可核验、可恢复的备份；无法确认安全时保留并报告具体路径与原因，不强制删除。
  - 从工作树之外先执行 `git worktree remove`，再按授权删除已合并本地分支，核对工作树列表、本地分支与实际目录并报告清理结果。保留主工作区、其他任务、共享目录和恢复归档。远端来源分支删除须有明确授权，不与本地 worktree 收尾自动绑定。
