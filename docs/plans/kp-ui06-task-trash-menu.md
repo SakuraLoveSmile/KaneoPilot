@@ -1,6 +1,6 @@
 # KP-UI06 任务整理：回收站、项目折叠与自动归档
 
-状态：实现中。T1–T4 已实现，云端预览包 #98 全部必需检查和适用原生隔离核验通过；追加 T5 修复云端已删除项目仍要求映射的问题，尚未由用户验收。
+状态：待体验。T1–T5 已实现，包含已删除云端项目过滤的预览包 #99 已通过全部必需云端检查与适用原生隔离核验；尚未由用户验收。
 
 ## 目标与已确认决定
 
@@ -37,7 +37,7 @@
 ## 验证与剩余工作
 
 - T5 当前组合态本地验证（Python 3.14，HEAD `24141ac` 加本次差异）：`cd core && PYTHONPATH=tests python3 -m unittest -q test_project_mappings test_auto_archive test_archive test_engine_business_tick test_engine_claim_scope test_bridge_labels_comments`，97 项通过（25.775 秒）。其中映射 17 项覆盖完整/空目录、删除与本地重读/解除映射、格式错误/不完整目录、工作区与慢响应、旧映射/任务/请求/审计保全、同 ID 重现，以及隐藏项目的 live/shadow 模式与 monitor 严格 engine-verdict 门。沿用临时 SQLite 和 FakeKaneoClient，无真实服务/模型调用。首次检查发现远端返回顺序与 SQLite JSON 排序不同，已固定当前目录列表顺序；追加参数时遗漏 CLI schema 的检查失败已补齐后通过，未改预期或降低门禁。误将 pytest 专用 `test_automation_policy` 加到 unittest 曾因本机缺 pytest 导入失败，该模块留待云端，未在本地冒称通过。
-- T5 FakeCore 目录冒烟通过：刷新、重读、离线、成功空目录、默认消费者兼容和状态文件持久化；使用临时路径并固定夹具策略时间，原先全对象比较因动态策略时间不同失败，不涉及真实配置。最终 Python AST 与 `git diff --check` 通过。T5 变更的 core/macOS 源码及测试按「路径 + NUL + 内容 + NUL」排序拼接 SHA-256 为 `e8f992b1ebcf492efffc2231f0b814f20f060e867570ff8aabf019b76200e5de`。最终独立只读审查未发现剩余实质问题；云端编译与原生效果尚待本轮预览构建核验。
+- T5 FakeCore 目录冒烟通过：刷新、重读、离线、成功空目录、默认消费者兼容和状态文件持久化；使用临时路径并固定夹具策略时间，原先全对象比较因动态策略时间不同失败，不涉及真实配置。最终 Python AST 与 `git diff --check` 通过。T5 变更的 core/macOS 源码及测试按「路径 + NUL + 内容 + NUL」排序拼接 SHA-256 为 `e8f992b1ebcf492efffc2231f0b814f20f060e867570ff8aabf019b76200e5de`。最终独立只读审查未发现剩余实质问题；云端编译与原生效果见下述 #99 记录。
 - T1 第一轮既有隔离测试 24 项通过；该记录只适用于当时的右键入口候选，不能代替本次组合态结果。
 - macOS 独立审查未发现实质问题，核对项目 ID/搜索/批量可见范围、设置单飞与防抖、DTO/FakeCore 契约；核心独立审查也未发现实质问题，核对稳定计时、恢复宽限、全局暂停、当前发布/交付保护、领取/验证占用、逐项 savepoint 和冲突隔离。原生界面与 Swift 编译证据见后续云端及隔离记录。
 - T4 的独立只读审查未发现实质问题：保留输入与提交路径、空目录可手输、仅主动选择按已验证能力联动等级；审查提出的原生菜单和取消/保存核验已在后续完成。
@@ -53,3 +53,7 @@
 - 最终 #98 原生隔离核验：同样使用云端签名的独立副本和 FakeCore，在 900×600 浅色窗口重新展开 Codex Review 模型列表、选择 gpt-6.1-sol 并保存；摘要与状态文件为 gpt-6.1-sol/xhigh。自动归档输入旁只显示一个「天」单位，保留已存 30 天，改成 14 天后保存成功且仍关闭；命令日志分别只有相应 set-review-config 和合法 set-auto-archive-config。#97 已验证的 T1/T2 与核心在 #98 无源码变化，受影响的设置区域已在最新包重新核验。
 - 交付文件：`dist/kp-ui06-preview-98/KaneoPilot-ci-98-macos-arm64-local-signed.dmg`（Apple Silicon，预览版本 0.0.0 / build 98），SHA-256 `e36dfc40f4507f9513686525f410668167ab454df3fe401a58212c7a1d435822`。DMG 与隔离 UI ZIP 的大小/哈希/源码/构建号均与 #98 metadata 一致，DMG 校验和及 App/DMG 签名核验通过。此为云端 ad-hoc 签名预览包，非正式 Release；尚未覆盖安装正式 App，也未验证真实 Kaneo/模型调用、真实任务保留多日及手机实机。
 - 资源与收尾：两轮隔离 App 及构建跟进进程均已结束，夹具、命令日志、云端结果和下载产物保留。工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-feat-kp-ui06-task-trash-menu` 保留原因是成果尚未合入 main、预览包待用户体验；下一步沿已有授权提供包与入口，合入目标并验证后按规则清理本任务工作树与已合并本地分支。未动主工作区、其他任务工作树、正式 App 或用户数据。
+- T5 云端 #99：[Packages 41699300739](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41699300739)，源码 `61e90733e49e904647ea728092c9e952a51f1c18`。15 个必需 job 全部成功，正式发布及可选全文探针按预期跳过；包含 Python 3.11/3.13 全部分片、两组 Swift 夹具、Android 检查/打包、Mac arm64 打包与内置 Python 冒烟。完整结论保存在 `build/kp-ui06-native-preview-99/cloud-result.json`，构建跟进进程已结束。
+- T5 #99 原生隔离核验：使用云端原样签名的 `local.kaneopilot.software-update-check` 副本、FakeCore、独立目录/状态/空凭据和关闭的引擎。1180×760 深色下先选中本地保存的 Sandbox 并编辑草稿，成功获取不含它的云端目录后，该项目行、旧详情和保存栏均消失，首个现存项目接续显示；现存的未映射项目仍可配置。解除现存 Comic 映射后的本地重读，以及离开/返回设置页，均未使 Sandbox 复活。获取失败显示明确错误，列表/最近成功时间保留，状态文件中的目录与配置完全不变；成功空目录后列表、详情和保存栏清空。900×600 浅色重启后仍为空，空态及失败文字完整显示。命令日志只有一次对 Comic 的 set-project-mapping，Sandbox 草稿未保存；保存配置中的 Sandbox 条目仍在。T1–T4 源码与 #98 无变化，组合态云端检查通过。原生结果不替代真实 Kaneo/模型或手机实机验证。
+- 最新交付：`dist/kp-ui06-preview-99/KaneoPilot-ci-99-macos-arm64-local-signed.dmg`，Apple Silicon 预览版本 0.0.0 / build 99，41,562,260 字节，SHA-256 `3be6a688069596bea4e9cddfd131d2b46724ecb9efa7af0afc15b8feb03ee1fb`。DMG/隔离 UI ZIP 的大小、哈希、源码与构建号匹配同 run metadata，DMG CodeDirectory 哈希匹配 metadata，App/DMG 签名及 DMG 校验和通过。此为云端 ad-hoc 签名预览包，未覆盖安装正式 App、未合并 main 或正式发布。
+- #99 资源收尾：隔离 App 进程已精确停止并核实退出，云端/原生结果、目录阶段快照和命令日志留在 `build/kp-ui06-native-preview-99/`；三个版本的下载包均保留。工作树继续因未合入 main 和待体验保留，下一步由用户体验预览包；获得合入授权并完成集成验证后清理本任务工作树。无需也未改动其他会话资源或用户数据。
