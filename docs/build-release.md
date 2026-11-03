@@ -2,11 +2,27 @@
 
 本文管理 KaneoPilot 自身的 Android / macOS 安装包。Pilot 为其他项目调度发布的业务契约仍见 [release-contract.md](release-contract.md)。
 
-## 唯一构建入口
+## 构建入口
 
-软件编译、签名和打包统一使用仓库的 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml)。本机编辑源码、运行无需编译的 Python 隔离测试、下载与核验安装包，不再运行 Xcode、Gradle 或编译型预览脚本。
+交付包与发布统一使用仓库的 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml)。2026-11-02 起允许在 Apple Silicon Mac 上进行本地 macOS 构建、ad-hoc 签名和隔离界面测试。
 
-维护的构建入口在启动编译器、JVM或创建构建目录之前核对 `GITHUB_ACTIONS=true` 和 `RUNNER_ENVIRONMENT=github-hosted`。这是一项执行约定，不是凭据或安全隔离边界；不要伪造环境变量绕过。本地没有构建豁免参数。
+Android、DMG 与发布入口在启动编译器、JVM 或创建构建目录之前核对 `GITHUB_ACTIONS=true` 和 `RUNNER_ENVIRONMENT=github-hosted`。macOS App、运行时准备与总览隔离预览另有显式本地入口；不用伪造 Actions 环境。这是执行约定，不是凭据或安全隔离边界。
+
+### 本地 macOS 开发
+
+需要完整 Xcode（含 macOS SDK，完成首次启动组件安装）和 Python 3.9+；工程已包含共享 Scheme，无须 xcodegen。选择开发目录后先运行 `xcodebuild -runFirstLaunch` 完成缺失组件，再执行：
+
+```sh
+bash scripts/build_local_macos.sh --check
+bash scripts/build_local_macos.sh
+bash scripts/build_local_macos.sh --preview 1180x760 dark
+```
+
+默认产物与 DerivedData 在当前工作区的 `build/local-macos/`；可用 `LOCAL_BUILD_ROOT` 指定独立目录。首次下载约 25.3 MB 的锁定 CPython 运行时，大小与 SHA-256 均核验；复用缓存也核验锁与归档。完整 App 继续执行云端同源的运行时裁剪、许可拷贝、后端源码哈希与签名检查，输出 `macos-build/KaneoPilot.app`。
+
+`--preview` 使用 FakeCore、独立 bundle ID 与数据目录，不连接真实 Kaneo 或启动真实调度；支持 900×600、1180×760、1440×900 以及 light/dark。预览有自己的解释器路径，不能因为未复制内置 Python 而回落到正式核心。退出预览后可重新运行，不覆盖 `/Applications/KaneoPilot.app`。本地产物不代表已发布，也不替代正式发布前的云端检查。
+
+`KANPILOT_MACOS_SDK` 可指定已注册的 SDK 名或绝对路径，环境检查核对的就是该 SDK。对照旧版系统外观时，可在 SDK 26 构建中加 `KANPILOT_COMPATIBILITY_UI=1`（只向本地 App 的 Info.plist 写入 Boolean `UIDesignRequiresCompatibility`）；SDK 27 起系统忽略该键，须另做原生外观核验，不能把它当作通用的旧外观开关。本机 KP-UI05 对照命令为 `KANPILOT_MACOS_SDK=macosx26.5 KANPILOT_COMPATIBILITY_UI=1 bash scripts/build_local_macos.sh --preview 1180x760 dark`。
 
 | 触发方式 | 检查与产物 | 发布行为 |
 | --- | --- | --- |

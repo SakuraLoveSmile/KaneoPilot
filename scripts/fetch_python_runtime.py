@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download and unpack the pinned python-build-standalone runtime for the Mac App (GitHub Actions only).
+"""Download and unpack the pinned python-build-standalone runtime for the Mac App.
 
 scripts/python-runtime.lock.json names one release asset by URL, size and SHA-256. Nothing else is
 accepted: another host, a redirect off the allowed hosts, a size or hash that differs, or an archive
@@ -191,8 +191,8 @@ def fetch(lock, output, opener=None, sleep=time.sleep):
 
 
 def main(argv=None):
-    # The Actions gate comes first, before any argument is looked at or any file is created.
-    if subprocess.call(["sh", str(ROOT / "scripts/require_actions.sh")]):
+    # Check the build context before parsing arguments or creating files.
+    if subprocess.call(["sh", str(ROOT / "scripts/require_actions.sh"), "--allow-local-macos"]):
         return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lock", default=str(DEFAULT_LOCK))

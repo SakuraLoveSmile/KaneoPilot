@@ -2,9 +2,9 @@
 
 原生 SwiftUI 工作台「Kaneo 调度台」。数据全部经核心 CLI（`kanpilot`，JSON 进出）获取与变更，不直接读写 SQLite。
 
-## 云端构建
+## 构建
 
-使用 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml) 构建和下载 Apple Silicon（arm64）DMG，本机不再使用 Xcode 或编译型预览脚本生成 App。分支构建提供测试包，正式版本从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载；完整操作见 [构建与 Release 规范](../docs/build-release.md)。
+交付 DMG 使用 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml)，正式版本从 [Releases](https://github.com/SakuraLoveSmile/KaneoPilot/releases) 下载。本地 macOS 开发可用 `bash scripts/build_local_macos.sh --check` 检查环境、`bash scripts/build_local_macos.sh` 构建 App；完整操作见 [构建与 Release 规范](../docs/build-release.md)。
 
 云端构建脚本将产物和 DerivedData 放入 runner 临时目录。App / DMG 为 ad-hoc 签名、未公证，仅含 arm64，并内置固定版本的 Python 运行时（锁定、签名与校验见 [构建与 Release 规范](../docs/build-release.md) 的「内置 Python 运行时与架构」）。
 
@@ -119,9 +119,9 @@ FakeCore/
 
 默认首页为自动化总览；需要用户决定的事项优先展示，任务默认用列表阅读，保留看板切换。详情突出一个当前主操作，其余放入“更多操作”。确认执行先进入核验计划页；手动规划为选择任务、核对材料并开始两步。
 
-以下保留历史隔离预览的设计说明。`scripts/preview_automation_ui.sh` 包含编译步骤，仅允许云端 runner 执行；本地使用已下载的 Actions 产物进行体验，不重新编译。
+本地隔离预览使用 `bash scripts/build_local_macos.sh --preview 1180x760 dark`（也支持 900x600、1440x900、light）。入口自动准备锁定解释器并传给 FakeCore；旧的其他编译夹具仍按云端规则执行。
 
-预览使用独立 bundle ID 和 build/ui-simplification/fixture 存储；缺少隔离环境时核心不可用，不回落到正式核心。计划正文为静态演练响应，不代表真实计划文件已核验。
+预览使用独立 bundle ID 和当前工作区 `build/local-macos/ui-preview/fixture` 存储；缺少隔离环境时核心不可用，不回落到正式核心。计划正文为静态演练响应，不代表真实计划文件已核验。
 
 以下 Swift 夹具检查在云端执行：
 

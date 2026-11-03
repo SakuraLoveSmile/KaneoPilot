@@ -106,8 +106,8 @@ def notice_report(runtime, depth=NOTICE_DEPTH):
 
 
 def main(argv=None):
-    # The Actions gate comes first: signing a bundle is a build step.
-    if subprocess.call(["sh", str(ROOT / "scripts/require_actions.sh")]):
+    # Check the build context first: signing a bundle is a build step.
+    if subprocess.call(["sh", str(ROOT / "scripts/require_actions.sh"), "--allow-local-macos"]):
         return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runtime", help="Contents/Resources/python of the app being built")

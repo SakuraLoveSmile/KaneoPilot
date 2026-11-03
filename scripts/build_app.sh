@@ -1,18 +1,24 @@
 #!/bin/bash
-# Build KaneoPilot.app on GitHub Actions and bundle the Python core into Resources.
+# Build KaneoPilot.app and bundle the Python core and pinned runtime into Resources.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-sh "$ROOT/scripts/require_actions.sh"
+sh "$ROOT/scripts/require_actions.sh" --allow-local-macos
 PROJ="$ROOT/macos/KaneoPilot.xcodeproj"
 SCHEME="KaneoPilot"
 CONFIG="${CONFIG:-Release}"
-OUT="${APP_OUTPUT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/macos-build}"
-DERIVED="${DERIVED_DATA_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/KaneoPilotDerivedData}"
+if [ "${KANPILOT_LOCAL_BUILD:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" != true ]; then
+    BUILD_ROOT="${LOCAL_BUILD_ROOT:-$ROOT/build/local-macos}"
+else
+    BUILD_ROOT="${RUNNER_TEMP:?RUNNER_TEMP is required}"
+fi
+OUT="${APP_OUTPUT_DIR:-$BUILD_ROOT/macos-build}"
+DERIVED="${DERIVED_DATA_DIR:-$BUILD_ROOT/KaneoPilotDerivedData}"
 ARCHS="${ARCHS:-arm64}"
 # KaneoPilot ships Apple Silicon only (docs/build-release.md): refuse any other request before building.
 [ "$ARCHS" = "arm64" ] || { echo "ERROR: KaneoPilot builds arm64 only, got ARCHS=$ARCHS" >&2; exit 1; }
 BUILD_SETTINGS=("ARCHS=$ARCHS" "ONLY_ACTIVE_ARCH=NO" "CODE_SIGNING_ALLOWED=NO")
+if [ -n "${KANPILOT_MACOS_SDK:-}" ]; then BUILD_SETTINGS+=("SDKROOT=$KANPILOT_MACOS_SDK"); fi
 if [ -n "${VERSION_NAME:-}" ]; then BUILD_SETTINGS+=("MARKETING_VERSION=$VERSION_NAME"); fi
 if [ -n "${BUILD_NUMBER:-}" ]; then BUILD_SETTINGS+=("CURRENT_PROJECT_VERSION=$BUILD_NUMBER"); fi
 
@@ -25,6 +31,9 @@ APP_DST="$OUT/KaneoPilot.app"
 mkdir -p "$OUT"
 rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
+if [ "${KANPILOT_LOCAL_BUILD:-}" = 1 ] && [ "${KANPILOT_COMPATIBILITY_UI:-}" = 1 ]; then
+    /usr/libexec/PlistBuddy -c 'Add :UIDesignRequiresCompatibility bool true' "$APP_DST/Contents/Info.plist"
+fi
 
 echo "== bundle core into Resources =="
 RES="$APP_DST/Contents/Resources/core"
