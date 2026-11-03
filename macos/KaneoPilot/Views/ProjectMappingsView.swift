@@ -532,6 +532,8 @@ struct ProjectMappingsView: View {
         .listStyle(.inset(alternatesRowBackgrounds: true))
         .scrollContentBackground(.hidden)
         .onChange(of: selectedProjectId) { _, newId in
+            // List 已先写入 selection，不能再靠 selectProject 内的新旧 ID 比较清理候选。
+            invalidateReleaseAssist()
             if let id = newId {
                 selectProject(id)
             }
