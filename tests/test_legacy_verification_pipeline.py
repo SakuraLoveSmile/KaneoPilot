@@ -1,7 +1,7 @@
 """Step 15-G: manual legacy execution through real runner/core boundaries.
 
-The conftest Kaneo service is loopback only. Pi execution and Codex Review use
-isolated fake executables; no installed model or production database is used.
+The conftest Kaneo service is loopback only. Codex execution uses
+an isolated fake executable; no installed model or production database is used.
 """
 import json
 import sys
@@ -94,7 +94,7 @@ def legacy_execution(factory, cli, tmp_env, monkeypatch):
         conn.close()
     task = factory.get_task(tid)
     assert_legacy(task)
-    # The real subprocess fake Pi worker records the round through core commands.
+    # The managed Codex worker records native commands and the structured report.
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         detail = cli('get-session', {'task_id': tid, 'run_id': task['run_id']}).get('round_detail') or {}
@@ -106,92 +106,60 @@ def legacy_execution(factory, cli, tmp_env, monkeypatch):
     return tid, task['run_id']
 
 
-def test_legacy_user_acceptance_reaches_real_codex_review(legacy_execution, factory, cli, tmp_env, monkeypatch):
+def test_legacy_manual_acceptance_is_retired_and_preserves_result(legacy_execution, factory, cli, tmp_env):
     tid, execution_run = legacy_execution
-    # 任务28B（配置时序）：review 请求按入队时冻结后端快照——db.create_request
-    # 把 review_backend/review_config 写进请求 payload，进入 in_review 后再改配置
-    # 不生效。codex fake 与 set-review-config 必须移到进入 in_review（第二次
-    # monitor 推进）之前；该接口只改 role=review 独立配置，不触碰
-    # planner/exec，规划与派发已在 legacy_execution 夹具内完成，用例开头即是
-    # 不影响任何前段的最早安全点。
-    codex = tmp_env.root / 'codex-review'
-    codex.write_text('#!' + sys.executable + '\nimport json,pathlib,sys\n'
-        'if "--version" in sys.argv: print("codex fake"); sys.exit(0)\n'
-        'sys.stdin.read()\n'
-        'out=sys.argv[sys.argv.index("-o")+1]\n'
-        'pathlib.Path(out).write_text(json.dumps({"conclusion":"pass","report_markdown":"# Review\\nLegacy result accepted; code checked.","fix":None}))\n'
-        'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
-    codex.chmod(0o755)
-    monkeypatch.setenv('KANPILOT_CODEX_BIN', str(codex))
-    # CLI fixture subprocesses retain their isolated env snapshot.
-    cli.env['KANPILOT_CODEX_BIN'] = str(codex)
-    cli('set-review-config', {'backend': 'codex', 'codex': {'model':'gpt-6.1-sol', 'reasoning_effort':'medium'}})
     monitor(auto_monitor, tmp_env)
     task = factory.get_task(tid)
     assert task['status'] == 'needs_user', task
-    assert task['failure_code'] == 'verification_unconfirmed', task
-    assert 'accept_verification' in task['allowed_actions']
+    assert task['failure_code'] == 'verification_identity_unconfirmed', task
+    assert 'accept_verification' not in task['allowed_actions']
     assert_legacy(task)
-    cli('resolve', {'task_id': tid, 'action': 'accept_verification', 'note': 'User checked legacy result'})
-    accepted = factory.get_task(tid)
-    assert accepted['status'] == 'running'
-    assert accepted['extra']['verification_override']['execution_run_id'] == execution_run
-    # 任务28A（真实改动前提）：workspace_version=1 → auto_monitor._finish_complete
-    # 验证通过后必须先 delivery-commit；隔离工作树无改动时 git_delivery.
-    # commit_worktree 抛 no_changes，cmd_delivery_commit 返回 blocked 并阻塞 →
-    # needs_user，进不了 in_review。参照 conftest make_in_review：在第二次
-    # monitor 完成提交前，从权威 delivery.worktree_path 写一个非产物文件
-    # （untracked 计真实改动：status --untracked-files=all）。
-    delivery = accepted.get('delivery') or {}
-    assert delivery.get('worktree_path'), delivery
-    (Path(delivery['worktree_path']) / 'legacy-manual-result.py').write_text(
-        'VALUE = 1\n', encoding='utf-8')
-    monitor(auto_monitor, tmp_env)
-    assert factory.get_task(tid)['status'] == 'in_review', factory.get_task(tid)
-    stage(cli_review, 'review', tmp_env)
-    task = factory.get_task(tid)
-    assert task['status'] == 'done', task
-    assert task['extra']['review_conclusion'] == 'pass', task
-    assert factory.kaneo.get_task(tid)['status'] == 'done'
-    assert_legacy(task, reviewed=True)
-    conn = db.connect(tmp_env.db)
-    try:
-        # schema 版本只引用核心权威常量 constants.SCHEMA_VERSION（不作硬编码
-        # 字面量）：db._init_schema/_upgrade_schema 的收敛终点即该常量，
-        # _UPGRADES 链 1→…→6 由提交 13713b9（worktree slots，_upgrade_v5_to_v6）
-        # 推进到 6；后续核心再升版本时本断言随常量前进，不再重复漂移。
-        assert conn.execute('SELECT version FROM schema_meta').fetchone()[0] \
-            == constants.SCHEMA_VERSION
-    finally:
-        conn.close()
+    delivery = dict(task['delivery'])
+    worktree = Path(delivery['worktree_path'])
+    result = (worktree / 'fixture-feature.py').read_bytes()
+    rejected = cli('resolve', {'task_id': tid, 'action': 'accept_verification',
+        'note': 'User checked legacy result'}, expect=1)
+    assert rejected['code'] == 'conflict'
+    after = factory.get_task(tid)
+    assert after['status'] == 'needs_user'
+    assert after['run_id'] == execution_run
+    assert after['delivery'] == delivery
+    assert (worktree / 'fixture-feature.py').read_bytes() == result
+    assert factory.kaneo.get_task(tid)['status'] == 'in-progress'
+    assert_legacy(after)
 
 
 @pytest.mark.parametrize('current_override,exit_code,expected', [
-    (False, 0, 'verification_unconfirmed'), (True, 2, 'execution_failed'),
-    (True, None, 'execution_failed'),
+    (False, 0, 'verification_identity_unconfirmed'), (True, 2, 'execution_failed'),
+    (True, None, None),
 ])
-def test_legacy_override_identity_and_execution_gate(legacy_execution, factory, cli, tmp_env,
-                                                       monkeypatch, current_override, exit_code, expected):
+def test_persisted_legacy_override_cannot_bypass_report_or_exit_gate(
+        legacy_execution, factory, cli, tmp_env, current_override, exit_code, expected):
     tid, execution_run = legacy_execution
-    monitor(auto_monitor, tmp_env)
-    cli('resolve', {'task_id': tid, 'action': 'accept_verification', 'note': 'User checked result'})
-    # Fake observation boundary only. All monitor state changes, remote recheck,
-    # report/advance/claim and the persisted override stay actual core commands.
-    real_run = auto_dispatch.cli.run
-    observed = []
-    def observation(command, payload, db_path):
-        result = real_run(command, payload, db_path)
-        if command == 'get-task' and payload.get('task_id') == tid and not current_override:
-            result['task']['extra']['verification_override']['execution_run_id'] = 'previous-execution'
-        if command == 'get-session':
-            observed.append(payload['run_id'])
-            result['round_detail']['exit_code'] = exit_code
-        return result
-    monkeypatch.setattr(auto_dispatch.cli, 'run', observation)
+    task = factory.get_task(tid)
+    # Restore the obsolete override as persisted upgrade input. No new command
+    # can create it, and it must never authorize verification or a commit.
+    extra = dict(task['extra'])
+    extra['verification_override'] = {'execution_run_id': execution_run if current_override else 'previous-execution'}
+    conn = db.connect(tmp_env.db)
+    try:
+        conn.execute('UPDATE tasks SET extra_json=? WHERE task_id=?', (json.dumps(extra), tid))
+    finally:
+        conn.close()
+    directory = Path(cli('overview', {})['paths']['session_runs_root']) / tid / execution_run
+    job_path = directory / 'job.json'
+    job = json.loads(job_path.read_text())
+    job['exit_code'] = exit_code
+    job_path.write_text(json.dumps(job))
     monitor(auto_monitor, tmp_env)
     task = factory.get_task(tid)
-    assert task['status'] == 'needs_user', task
+    # An absent native exit remains an unsettled observation;
+    # a nonzero exit or missing identity is a settled verification failure.
+    assert task['status'] == ('running' if exit_code is None else 'needs_user'), task
     assert task['failure_code'] == expected, task
-    assert observed == [execution_run]
+    if exit_code is None:
+        requests = cli('list-requests', {})['requests']
+        assert any(r['task_id'] == tid and r['kind'] == 'monitor' and r['status'] == 'failed' for r in requests)
+    assert 'accept_verification' not in task['allowed_actions']
     assert factory.kaneo.get_task(tid)['status'] == 'in-progress'
     assert_legacy(task)

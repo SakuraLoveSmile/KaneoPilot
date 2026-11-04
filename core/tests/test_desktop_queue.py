@@ -516,34 +516,43 @@ class DesktopQueueTests(KanpilotTestCase):
 
     def test_new_task_desktop_review_reads_only_committed_branch_snapshot(self):
         task, _ = self.plan("branch")
+        source_sha, requirements_sha, source_path = self.make_source_snapshot(task)
+        self.sync_task(task, project_name="Feedback", source_sha256=source_sha,
+                       requirements_sha256=requirements_sha, source_path=source_path)
         plan_claim = self.claim()
-        self.submit_plan(plan_claim)
+        self.submit_plan(plan_claim, plan_markdown="# 规划\n实现 feature.py。\n```verify\ntrue\n```\n")
+        self.configure_codex_execution()
+        self.enqueue_dispatch(task["id"])
+        dispatch = self.call("claim", {"stage": "dispatch", "executor": "kaneo-dispatch"})
+        self.assertTrue(dispatch["claimed"], dispatch)
+        execution_run = dispatch["run_id"]
+        identity = {"task_id": task["id"], "run_id": execution_run}
+        evidence = self.valid_evidence(dispatch["context"], dispatch["context"]["plan_path"])
+        self.call("dispatch-prepare", dict(identity, evidence=evidence))
+        self.call("dispatch-begin-send", identity)
+        self.call("dispatch-confirm", dict(identity, evidence=dict(
+            evidence, message_visible=True, session_id="fixture-session", session_title="Codex fixture")))
         with closing(db.connect(self.db_path)) as conn:
             row = db.require_task(conn, task["id"])
             delivery = db.task_extra(row)["delivery"]
             execution = Path(delivery["worktree_path"])
             self.assertEqual(delivery["workspace_version"], 1)
             (execution / "feature.py").write_text("def feature():\n    return 42\n")
-            now = util.now_iso()
-            db.update_task(conn, task["id"], now, status="running", stage="monitor", run_id="execbranch")
-            round_store.upsert_on_claim(conn, task["id"], "execbranch", {"backend": "pi"}, now, backend="pi")
-            conn.execute("UPDATE execution_rounds SET worktree_path=?,run_status='finished' WHERE task_id=? AND run_id=?",
-                         (str(execution), task["id"], "execbranch"))
-            directory = headless_adapter.resolve_source(conn).run_dir(task["id"], "execbranch")
-            directory.mkdir(parents=True)
-            (directory / "job.json").write_text(json.dumps({"task_id": task["id"], "run_id": "execbranch",
-                                                            "backend": "pi", "status": "finished", "exit_code": 0}))
-            (directory / "events.jsonl").write_text('{"type":"terminal","outcome":"completed"}\n')
-            monitor, _ = db.create_request(conn, now, "monitor", "monitor:" + task["id"], task_id=task["id"])
-            conn.commit()
-        self.fake.tasks[task["id"]]["status"] = "in-progress"
-        claimed = self.call("claim", {"stage": "monitor", "request_id": monitor["request_id"], "executor": "fixture"})
-        committed = self.call("delivery-commit", {"task_id": task["id"], "request_id": monitor["request_id"],
-                                                   "run_id": claimed["run_id"], "expected_execution_run_id": "execbranch"})
+        self.seed_codex_report(task["id"], dispatch["request_id"], execution)
+        queued = next(row for row in self.call("list-requests", {})["requests"]
+                      if row["task_id"] == task["id"] and row["kind"] == "monitor" and row["status"] == "queued")
+        claimed = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                                      "request_id": queued["request_id"]})
+        self.assertTrue(claimed["claimed"], claimed)
+        monitor = {"task_id": task["id"], "request_id": claimed["request_id"],
+                   "run_id": claimed["run_id"], "expected_execution_run_id": execution_run}
+        verdict = self.call("engine-verdict", dict(monitor, expected_plan_sha256=row["plan_sha256"]))
+        self.assertTrue(verdict["verification_ok"], verdict)
+        committed = self.call("delivery-commit", monitor)
         self.assertEqual(committed["outcome"], "committed")
         self.call("advance-task", {"task_id": task["id"], "run_id": claimed["run_id"],
                                    "target": "in-review", "expected_current": "in-progress"})
-        self.call("report", {"request_id": monitor["request_id"], "run_id": claimed["run_id"], "outcome": "succeeded"})
+        self.call("report", {"request_id": claimed["request_id"], "run_id": claimed["run_id"], "outcome": "succeeded"})
         review_claim = self.claim("review", "reviewbranch")
         job = self.read_job(review_claim)
         root = Path(review_claim["context"]["review_root"])

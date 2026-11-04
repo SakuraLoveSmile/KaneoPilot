@@ -2015,25 +2015,10 @@ enum WorktreePoolText {
 
 /// 总览摘要面板「项目」行的文字。
 enum DashboardProjectSummary {
-    /// 「N 个项目 · M 个自动处理已开 · live a · shadow s · legacy b · 其他 k」：模式计数为 0 的项省略；
-    /// 核心没给或不认识的模式并入「其他」。没有项目写「尚无项目配置」。
-    static func text(total: Int, automationOn: Int, modes: [String?]) -> String {
+    /// 「N 个项目 · M 个自动处理已开」；没有项目写「尚无项目配置」。
+    static func text(total: Int, automationOn: Int) -> String {
         guard total > 0 else { return "尚无项目配置" }
-        var live = 0, shadow = 0, legacy = 0, other = 0
-        for mode in modes {
-            switch mode ?? "" {
-            case "live": live += 1
-            case "shadow": shadow += 1
-            case "legacy": legacy += 1
-            default: other += 1
-            }
-        }
-        var parts = ["\(total) 个项目", "\(max(0, automationOn)) 个自动处理已开"]
-        if live > 0 { parts.append("live \(live)") }
-        if shadow > 0 { parts.append("shadow \(shadow)") }
-        if legacy > 0 { parts.append("legacy \(legacy)") }
-        if other > 0 { parts.append("其他 \(other)") }
-        return parts.joined(separator: " · ")
+        return "\(total) 个项目 · \(max(0, automationOn)) 个自动处理已开"
     }
 }
 
@@ -2760,7 +2745,7 @@ struct AutomationIntakeSummary: Decodable {
     let projects: [AutomationIntakeProject]?; let errors: [JSONValue]?
 }
 struct AutomationIntakeProject: Decodable {
-    let projectId: String?; let ready: Bool?; let preflight: [AutomationPreflightIssue]?
+    let projectId: String?; let projectName: String?; let ready: Bool?; let preflight: [AutomationPreflightIssue]?
     let adopted: [String]?; let skipped: [AutomationIntakeSkipped]?
 }
 struct AutomationIntakeSkipped: Decodable { let taskId: String?; let reason: String? }

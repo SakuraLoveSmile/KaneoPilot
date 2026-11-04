@@ -29,7 +29,7 @@ import unittest.mock
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import (  # noqa: E402
     cli, cmd_config, constants, db, exec_config, executor_runner,
-    review_config, util,
+    review_config, round_store, util,
 )
 
 DEFAULTS = {
@@ -409,17 +409,36 @@ class ExecBackendConfig(_ReviewCommandsCase):
         finally:
             conn.close()
 
-    def test_claim_freezes_pi_snapshot_with_backend(self):
+    def test_historical_pi_snapshot_stays_frozen_and_new_claim_is_rejected(self):
         fixture = self.make_ready_task()
-        self.enqueue_dispatch(fixture["remote"]["id"])
+        task_id = fixture["remote"]["id"]
+        # Persist a pre-upgrade round explicitly; current claims may not create pi rounds.
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                round_store.upsert_on_claim(conn, task_id, "historical-pi",
+                    exec_config.snapshot(conn), util.now_iso(), backend="pi")
+            before = dict(round_store.require_round(conn, task_id, "historical-pi"))
+            self.assertEqual(before["backend"], "pi")
+            self.assertEqual(util.jload(before["config_json"]), {"backend": "pi", **DEFAULTS})
+            rounds_before = [dict(row) for row in conn.execute(
+                "SELECT * FROM execution_rounds WHERE task_id=? ORDER BY run_id", (task_id,))]
+        finally:
+            conn.close()
+        self.call("set-exec-config", {"reasoning_effort": "low"})
+        self.enqueue_dispatch(task_id)
         claim = self.call(
             "claim", {"stage": "dispatch", "executor": "kaneo-dispatch"}
         )
-        self.assertTrue(claim["claimed"])
-        self.assertEqual(claim["context"]["backend"], "pi")
-        self.assertEqual(
-            claim["context"]["exec_config"], {"backend": "pi", **DEFAULTS}
-        )
+        self.assertFalse(claim["claimed"])
+        self.assertEqual(claim["code"], "exec_backend_not_plus")
+        conn = db.connect(self.db_path)
+        try:
+            self.assertEqual(dict(round_store.require_round(conn, task_id, "historical-pi")), before)
+            self.assertEqual([dict(row) for row in conn.execute(
+                "SELECT * FROM execution_rounds WHERE task_id=? ORDER BY run_id", (task_id,))], rounds_before)
+        finally:
+            conn.close()
 
     def test_capabilities_uses_pi_round_snapshot_when_current_is_valid(self):
         """当前配置 A 有效、轮次快照 B 无效时必须检查 B。"""

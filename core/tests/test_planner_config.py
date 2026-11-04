@@ -242,6 +242,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
         """dispatch claim 按任务登记的 planner_model/reasoning_effort 比对：
         frontmatter 与登记一致 → 通过；不一致 → validation_failed 且不影响
         其他任务登记值的领取（§4.5/§5.22.6）。"""
+        self.configure_codex_execution()
         fixture = self.make_ready_task(plan_overrides=dict(CUSTOM))
         task_id = fixture["remote"]["id"]
         # 发布后把 frontmatter 模型改成非登记值（登记哈希随文件同步变化）。
@@ -273,6 +274,7 @@ class PlannerConfigSnapshot(KanpilotTestCase):
     def test_legacy_task_without_registration_falls_back(self):
         """旧任务 planner_model=NULL → 回落历史常量规则，默认 frontmatter
         照常通过派发校验。"""
+        self.configure_codex_execution()
         fixture = self.make_ready_task()
         task_id = fixture["remote"]["id"]
         self.set_task_status(task_id, "ready",

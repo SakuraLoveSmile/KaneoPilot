@@ -300,7 +300,7 @@ T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩�
 
 ## 全自动流水线 v5 增量
 
-以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan，accept_verification 仅回到 running；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。
+以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan；accept_verification 已退役，不能绕过当前轮次结构化验证；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。
 
 ## Desktop 正式队列补充（2026-10-08）
 
@@ -410,15 +410,15 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  - confirm：手动任务由用户「确认并安排执行」解除 hold；live 自动任务遵循策略自动确认。
  - dispatch：派发请求 claimed → dispatch-prepare → dispatch-begin-send → dispatch-start → dispatch-confirm → running。
  - observe：worker 执行中；观察者缺席时只读续接（round-observe），不重发 prompt。
- - verdict：live monitor 读取可信终态，排除 `.pi/**` 与构建产物后核心亲跑 verify；legacy 保留转录匹配，shadow 在隔离副本比较、不改旧判定。
+ - verdict：所有普通项目统一由 monitor 核对执行端的结构化报告、退出码、当前轮次与源码指纹，排除 `.pi/**` 与构建产物；Pilot 不代跑 verify，旧模式与人工 override 不绕过证据门禁（protocol §5.27.7/11）。
  - commit：受 PR 交付管理的任务先 delivery-commit，再进入 review。
  - review：评审通过只登记，PR 交付继续等待合并；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮，与引擎质量补救分别记账）。
  - delivery：PR 已开 → delivery-sync 按 protocol §5.27.16 的项目开关检查并自动合并，或被动轮询合并状态；合并确认后 advance-task done。
  - done：任务归档，保留全部历史与文件。
  
- ## 10. 8 个用户动作清单
+ ## 10. 用户动作清单
  
- 以下 8 个动作是用户可从 attention inbox 或任务详情触发的核心人工干预：
+ 以下动作是用户可从 attention inbox 或任务详情触发的核心人工干预（完整契约见 protocol §5.27.4）：
  
  | 动作 | 触发条件 | 效果 | 对应 resolve action |
  |---|---|---|---|
@@ -428,7 +428,6 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  | retry | dispatch 类未发送/执行失败 | 创建新 dispatch 请求 | retry / resume（执行失败） |
  | replan | 需求变化或修复轮已用完 | 重新规划 | replan |
  | resolve | 失联/发送不明/观察异常 | 释放失联/确认发送/恢复观察 | release_lost / mark_sent / restore |
- | accept_verification | verification_unconfirmed | 人工接受验证结果，回到 running | accept_verification |
  | review_recovery | review_blocked 历史误退 | 恢复评审阶段，重新排队 review | recover_review |
  
  **动作约束：**

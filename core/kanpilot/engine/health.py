@@ -175,7 +175,7 @@ def business_tick_status(conn, now) -> dict:
 def has_live_observation_tasks(conn, now) -> bool:
     """Whether any active engine owns live running/review observations.
 
-    Old lease entries use legacy/false. Reuse command scope resolution so a
+    Old lease entries normalize to live. Reuse command scope resolution so a
     process default or force override has the same meaning as a worker claim.
     """
     from .. import engine_claim_scope
@@ -185,7 +185,7 @@ def has_live_observation_tasks(conn, now) -> bool:
     for entry in _instances(conn).values():
         if not _entry_active(entry, now):
             continue
-        with engine_claim_scope.command_mode(entry.get("mode", "legacy"),
+        with engine_claim_scope.command_mode(entry.get("mode", "live"),
                                              entry.get("force", False)):
             if any(engine_claim_scope.effective_mode(conn, pid) == "live"
                    for pid in projects):

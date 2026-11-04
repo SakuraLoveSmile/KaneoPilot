@@ -10,8 +10,14 @@ from test_git_delivery import make_repo, branch, git
 
 
 class DispatchBranch(KanpilotTestCase):
+    def write_plan(self, project_name, task, meta_overrides=None, body="# plan\n"):
+        return super().write_plan(project_name, task, meta_overrides,
+                                  body + "\n```verify\ngit diff --check\n```\n")
+
     def setUp(self):
         super().setUp()
+        self.call("set-exec-config", {"backend": "codex", "codex": {
+            "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
         self.repo = make_repo(self.repos_root)
         self.repo = self.repo.rename(self.repos_root / "Feedback")
         self.fixture = self.make_ready_task(task_id="task1234")
@@ -90,7 +96,7 @@ class DispatchBranch(KanpilotTestCase):
         self.assertTrue(claim["claimed"])
         task = db.require_task(self.ctx.conn, "task1234")
         config = round_store.round_view(round_store.require_round(self.ctx.conn, "task1234", claim["run_id"]))["config"]
-        evidence = {"backend": "pi", "repository": str(self.repo),
+        evidence = {"backend": "codex", "repository": str(self.repo),
                     "session_marker": task["session_marker"], "config": config}
         payload = {"task_id": "task1234", "run_id": claim["run_id"]}
         self.call("dispatch-prepare", dict(payload, evidence=evidence))
@@ -101,7 +107,8 @@ class DispatchBranch(KanpilotTestCase):
             specs.append(spec)
             (Path(spec["runs_dir"]) / "events.jsonl").write_text(json.dumps({
                 "v": 1, "seq": 1, "ts": self.ctx.now_iso, "type": "session",
-                "session_id": "manual-session", "session_title": "Manual execution"}) + "\n")
+                "session_id": "manual-session", "turn_id": "manual-turn",
+                "session_title": "Manual execution"}) + "\n")
             return Mock(pid=42424)
         isolated_process = SimpleNamespace(Popen=spawn, SubprocessError=subprocess.SubprocessError)
         with patch.object(cmd_dispatch, "subprocess", isolated_process):
@@ -117,7 +124,8 @@ class DispatchBranch(KanpilotTestCase):
             self.assertIn("不要新建 worktree 或分支", specs[0]["instruction"])
             self.assertIn("提交与推送由调度台完成", specs[0]["instruction"])
         result = self.call("dispatch-confirm", dict(payload, evidence={
-            **evidence, "protocol_seen": True, "session_id": "manual-session"}))
+            **evidence, "protocol_seen": True, "session_id": "manual-session",
+            "turn_id": "manual-turn"}))
         self.assertEqual(result["status"], "running")
         self.assertEqual(before, (git(self.wt, "rev-parse", "HEAD"), git(self.wt, "status", "--porcelain")))
         row = round_store.require_round(self.ctx.conn, "task1234", claim["run_id"])

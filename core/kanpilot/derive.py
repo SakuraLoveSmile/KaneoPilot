@@ -767,12 +767,6 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         if status == "needs_user":
             from . import core, cmd_queue
             code = task["failure_code"]
-            if code == "verification_unconfirmed":
-                from . import engine_claim_scope
-                if (engine_claim_scope.effective_mode(conn, task["project_id"]) != "live"
-                        and (execution is None or execution['backend']!='codex')
-                        and core.review_repair_of(task).get("source_kind") not in ("merge_conflict", "build_failure")):
-                    actions.append("accept_verification")
             from . import verification_recovery
             if verification_recovery.candidate(conn, task):
                 actions.append("reverify")

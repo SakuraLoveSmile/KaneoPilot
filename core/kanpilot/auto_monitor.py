@@ -111,44 +111,22 @@ def _record_cost(controller, task, detail):
 
 
 def _complete(controller, task, detail, expected, messages):
-    mode = _engine_mode(controller, task)
-    action = core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure")
-    codex = detail.get("backend") == "codex"
-    strict = mode == "live" or action or codex
-    if mode in ("live", "shadow") or action or codex:
-        lease = controller.claim["context"].get("lease_seconds", 180)
-        budget = int(min(lease * 0.8, controller.deadline - controller.clock()))
-        if mode == "shadow" and not strict:
-            budget = min(budget, 30, int((controller.deadline - controller.clock()) / 2))
-        if budget <= 0 and strict:
-            raise util.KanpilotError("observation_blocked", "执行证据核验剩余时限不足")
-        if budget <= 0:
-            controller.log("shadow-verdict", "budget_exhausted")
-            result = {"verification_ok": False}
-        else:
-            controller.heartbeat(force=True)
-            try:
-                result = controller.call("engine-verdict", dict(controller.identity(),
-                    task_id=task["task_id"], expected_execution_run_id=task["run_id"],
-                    expected_plan_sha256=task["plan_sha256"], budget_seconds=budget,
-                    operation_id="monitor-verdict:" + controller.claim["request_id"]))
-            except util.KanpilotError as exc:
-                if strict or exc.code in ("stale_run", "not_found"):
-                    raise
-                controller.log("shadow-verdict", exc.code)
-                result = {"verification_ok": False}
-        if strict:
-            if result.get("verification_ok") is not True:
-                code = (result.get("failure_code") or
-                        ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
-                controller.report("needs_user", failure_code=code,
-                                  note=result.get("detail") or "执行验证证据未通过核验")
-                return
-            _finish_complete(controller, task, detail, expected)
-            return
-    verification = _verification(task, messages, detail.get("turn_id"), detail.get("verification_evidence_version"))
-    if not verification["ok"]:
-        controller.report("needs_user", failure_code="verification_unconfirmed", note=verification["note"])
+    _engine_mode(controller, task)
+    # Every execution now requires the structured report, including historical projects.
+    lease = controller.claim["context"].get("lease_seconds", 180)
+    budget = int(min(lease * 0.8, controller.deadline - controller.clock()))
+    if budget <= 0:
+        raise util.KanpilotError("observation_blocked", "执行证据核验剩余时限不足")
+    controller.heartbeat(force=True)
+    result = controller.call("engine-verdict", dict(controller.identity(),
+        task_id=task["task_id"], expected_execution_run_id=task["run_id"],
+        expected_plan_sha256=task["plan_sha256"], budget_seconds=budget,
+        operation_id="monitor-verdict:" + controller.claim["request_id"]))
+    if result.get("verification_ok") is not True:
+        code = (result.get("failure_code") or
+                ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
+        controller.report("needs_user", failure_code=code,
+                          note=result.get("detail") or "执行验证证据未通过核验")
         return
     _finish_complete(controller, task, detail, expected)
 
@@ -157,7 +135,8 @@ def _engine_mode(controller, task):
     mappings = controller.call("get-project-mappings", {})
     entry = next((item for item in mappings.get("items", [])
                   if item.get("project_id") == task.get("project_id")), {})
-    return entry.get("effective_engine_mode") or entry.get("engine_mode", "legacy")
+    from . import engine_claim_scope
+    return engine_claim_scope.project_mode(entry, task.get("project_id", ""))
 
 
 def _finish_complete(controller, task, detail, expected):

@@ -144,15 +144,13 @@ for (name, detail) in notTranslated {
 
 // MARK: 项目摘要（P10）
 
-let liveAndLegacy: [String?] = ["live", "live", "live", "legacy", "legacy", "legacy", "legacy", "legacy"]
-expect(DashboardProjectSummary.text(total: 8, automationOn: 5, modes: liveAndLegacy)
-       == "8 个项目 · 5 个自动处理已开 · live 3 · legacy 5", "projects: live and legacy")
-expect(DashboardProjectSummary.text(total: 0, automationOn: 0, modes: []) == "尚无项目配置", "projects: none")
-let mixedModes: [String?] = ["live", "shadow", nil, "weird", "legacy"]
-expect(DashboardProjectSummary.text(total: 5, automationOn: 2, modes: mixedModes)
-       == "5 个项目 · 2 个自动处理已开 · live 1 · shadow 1 · legacy 1 · 其他 2", "projects: shadow and other")
-expect(DashboardProjectSummary.text(total: 2, automationOn: 0, modes: ["live", "live"])
-       == "2 个项目 · 0 个自动处理已开 · live 2", "projects: zero counts omitted, zero automation kept")
+expect(DashboardProjectSummary.text(total: 8, automationOn: 5)
+       == "8 个项目 · 5 个自动处理已开", "projects: configured and enabled counts")
+expect(DashboardProjectSummary.text(total: 0, automationOn: 0) == "尚无项目配置", "projects: none")
+expect(DashboardProjectSummary.text(total: 2, automationOn: 0)
+       == "2 个项目 · 0 个自动处理已开", "projects: zero automation kept")
+expect(DashboardProjectSummary.text(total: 2, automationOn: -1)
+       == "2 个项目 · 0 个自动处理已开", "projects: negative automation count clamped")
 
 // MARK: 条数上限与链接（P4）
 

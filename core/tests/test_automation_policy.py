@@ -100,7 +100,7 @@ def test_preflight_codes_and_local_only(ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(policy, '_planner_ready', lambda conn: False)
     monkeypatch.setattr(policy, '_executable', lambda binary: False)
     codes = {e['code'] for e in policy.automation_preflight(ctx.conn, pid)}
-    assert codes == {'repository_missing','gh_missing','planner_unconfigured','review_backend_unsupported','exec_backend_not_plus','exec_permission_not_auto'}
+    assert codes == {'repository_missing','gh_missing','planner_unconfigured','review_backend_unsupported','exec_backend_not_plus'}
     repo = tmp_path / 'repo'; repo.mkdir(); mapping(str(repo))
     assert 'not_git_repo' in {e['code'] for e in policy.automation_preflight(ctx.conn, pid)}
     subprocess.run(['git','init',str(repo)], check=True, capture_output=True)

@@ -16,6 +16,10 @@ from test_session import HeadlessCase, pi_event, pi_job, write_json
 class TestExecutionRetry(HeadlessCase):
     def setUp(self):
         super().setUp()
+        # The failed historical Plus round remains observable; its retry uses
+        # the current structured-report-capable executor instead of legacy pi.
+        self.call("set-exec-config", {"backend": "codex", "codex": {
+            "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
         self.task_id, self.run_id = "retry-task", "failed-run"
         fixture = self.make_ready_task(task_id=self.task_id)
         self.repo = Path(self.repos_root / "Feedback")

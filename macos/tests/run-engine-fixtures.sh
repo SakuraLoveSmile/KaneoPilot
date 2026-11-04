@@ -27,15 +27,42 @@ for mode in ('healthy', 'external', 'failure'):
     assert not forbidden.intersection(item['command'] for item in commands)
     if mode != 'external':
         engines = [item for item in commands if item['command'] == 'engine-run']
-        assert engines and all(item['payload']['mode'] == 'legacy' for item in engines)
+        assert engines and all(item['payload']['mode'] == 'live' for item in engines)
     if mode == 'external':
         assert len([item for item in commands if item['command'] == 'engine-run']) == 1
-print('engine ownership, default mode, and no legacy spawning: passed')
-import importlib.util, hashlib, os
+print('engine ownership, live default, and no legacy spawning: passed')
+import copy, importlib.util, hashlib, os
 os.environ['KANPILOT_FAKE_STATE'] = str(root / 'expiry-state.json')
 spec = importlib.util.spec_from_file_location('engine_contract_fake', sys.argv[2])
 fake = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fake)
+mode_state = {'project_mappings': {'revision': 4, 'items': {
+    'fixture-mode': {'engine_mode': 'legacy', 'automation': {
+        'engine_mode': 'shadow', 'enabled': False, 'max_cost_usd': 3.5}}}}}
+original = copy.deepcopy(mode_state)
+for old_mode in (None, '', 'legacy', 'shadow', 'live'):
+    for field in ('entry', 'nested'):
+        candidate = copy.deepcopy(original)
+        entry = candidate['project_mappings']['items']['fixture-mode']
+        target = entry if field == 'entry' else entry['automation']
+        target['engine_mode'] = old_mode
+        projected = fake.cmd_get_project_mappings(candidate, {})
+        assert projected['items'][0]['engine_mode'] == projected['items'][0]['effective_engine_mode'] == 'live'
+        assert target['engine_mode'] == old_mode, 'mode projection must remain read-only'
+for field in ('entry', 'nested'):
+    candidate = copy.deepcopy(original)
+    entry = candidate['project_mappings']['items']['fixture-mode']
+    target = entry if field == 'entry' else entry['automation']
+    target['engine_mode'] = 'invalid-mode'
+    rejected = fake.cmd_get_project_mappings(candidate, {})
+    assert rejected['__code__'] == 'validation_failed'
+    assert target['engine_mode'] == 'invalid-mode', 'invalid mode must not be silently activated'
+saved = fake.cmd_engine_project_setting(mode_state, {'project_id': 'fixture-mode', 'expected_revision': 4}, 'engine_mode')
+assert saved['engine_mode'] == 'live' and saved['revision'] == 5
+entry = mode_state['project_mappings']['items']['fixture-mode']
+assert entry['engine_mode'] == 'live'
+assert entry['automation'] == {'enabled': False, 'max_cost_usd': 3.5}, 'only the nested mode is removed'
+print('project mode projection, invalid-mode refusal, and nested-mode cleanup: passed')
 task = fake.cmd_get_task({}, {'task_id': 'auto-verification_unconfirmed'})['task']
 plan = fake.cmd_get_plan({}, {'task_id': task['task_id'], 'expected_plan_sha256': task['plan_sha256']})
 assert hashlib.sha256(plan['markdown'].encode()).hexdigest() == task['plan_sha256']

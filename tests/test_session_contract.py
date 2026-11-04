@@ -266,7 +266,7 @@ class TestPayloadValidation:
 
 class TestNoDataSource:
     def test_messages_unavailable_shape(self, factory, cli):
-        running = factory.make_running(title="无源-消息")
+        running = factory.make_historical_running(title="无源-消息")
         out = read_messages(cli, running.task.task_id, env=NO_SOURCE)
         assert set(out) >= {"session", "messages", "next_cursor", "has_more",
                             "connection"}
@@ -280,7 +280,7 @@ class TestNoDataSource:
         assert "session_runs_root" in detail, "机制性失败须引导配置设置项"
 
     def test_get_session_unavailable_shape(self, factory, cli):
-        running = factory.make_running(title="无源-详情")
+        running = factory.make_historical_running(title="无源-详情")
         out = cli("get-session", {"task_id": running.task.task_id,
                                   "run_id": running.dispatch_run_id},
                   env_extra=NO_SOURCE)
@@ -288,8 +288,8 @@ class TestNoDataSource:
         assert out["connection"]["state"] == "unavailable"
 
     def test_list_sessions_shape_and_filter(self, factory, cli):
-        a = factory.make_running(title="无源-列表A")
-        b = factory.make_running(project="Music", title="无源-列表B")
+        a = factory.make_historical_running(title="无源-列表A")
+        b = factory.make_historical_running(project="Music", title="无源-列表B")
         out = cli("list-sessions", {}, env_extra=NO_SOURCE)
         assert isinstance(out["sessions"], list)
         for s in out["sessions"]:
@@ -316,7 +316,7 @@ class TestNoDataSource:
 
     def test_reads_do_not_mutate_task_or_events(self, factory, cli):
         """只读边界：会话命令不改 task 行、不写事件、不发请求、不写 Kaneo。"""
-        running = factory.make_running(title="无源-只读")
+        running = factory.make_historical_running(title="无源-只读")
         tid = running.task.task_id
         before = factory.get_task(tid)
         events_before = cli("list-events", {"task_id": tid})["events"]
@@ -350,7 +350,7 @@ class TestNoDataSource:
 class TestFullHistoryAndShape:
     def test_first_load_full_history_and_shape(self, factory, cli, tmp_env,
                                                runs):
-        running = factory.make_running(title="会话全文")
+        running = factory.make_historical_running(title="会话全文")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [
             pi_event(1, "session", session_id="sess-pi-int",
@@ -398,7 +398,7 @@ class TestFullHistoryAndShape:
         assert out["session"]["last_checked_at"] is not None
 
     def test_long_output_not_truncated(self, factory, cli, tmp_env, runs):
-        running = factory.make_running(title="会话长输出")
+        running = factory.make_historical_running(title="会话长输出")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [
             pi_event(1, "session", session_id="s1"),
@@ -413,7 +413,7 @@ class TestFullHistoryAndShape:
         assert by_id["round:2"]["type"] == "command_output"
 
     def test_limit_paginates_and_has_more(self, factory, cli, tmp_env, runs):
-        running = factory.make_running(title="会话分页")
+        running = factory.make_historical_running(title="会话分页")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [pi_event(i, "assistant_message",
                                       content=f"m{i}")
@@ -442,8 +442,8 @@ class TestFullHistoryAndShape:
 
 class TestIsolationAndRounds:
     def test_multi_task_isolation(self, factory, cli, tmp_env, runs):
-        a = factory.make_running(title="会话隔离A")
-        b = factory.make_running(project="Music", title="会话隔离B")
+        a = factory.make_historical_running(title="会话隔离A")
+        b = factory.make_historical_running(project="Music", title="会话隔离B")
         runs.make(a.task.task_id, a.dispatch_run_id,
                   [pi_event(1, "user", content="A only")])
         runs.make(b.task.task_id, b.dispatch_run_id,
@@ -469,7 +469,7 @@ class TestIsolationAndRounds:
 
     def test_round_switching(self, factory, cli, tmp_env, runs):
         """缺省 run_id 取当前轮次；显式 run_id 切到历史轮次；互不串线。"""
-        running = factory.make_running(title="会话轮次")
+        running = factory.make_historical_running(title="会话轮次")
         tid = running.task.task_id
         current, previous = running.dispatch_run_id, "run-previous-0001"
         runs.make(tid, previous, [pi_event(1, "user", content="上一轮")])
@@ -502,7 +502,7 @@ class TestIsolationAndRounds:
 class TestStatesAndFailures:
     def test_pending_when_events_missing(self, factory, cli, tmp_env, runs):
         """目录 + job.json 有效但 events.jsonl 尚未生成 → pending。"""
-        running = factory.make_running(title="会话待导出")
+        running = factory.make_historical_running(title="会话待导出")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, write_events=False)
         use_runs_root(tmp_env, runs.path)
@@ -516,7 +516,7 @@ class TestStatesAndFailures:
             self, factory, cli, tmp_env, runs):
         """零有效行（首行即截断）且无上一份（跨进程必然无缓存）→ pending +
         detail 说明，绝不以「空会话 associated」掩盖解析失败。"""
-        running = factory.make_running(title="会话半写入")
+        running = factory.make_historical_running(title="会话半写入")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, raw='{"v": 1, "seq": 1, "type": "session", "s截断')
         use_runs_root(tmp_env, runs.path)
@@ -530,7 +530,7 @@ class TestStatesAndFailures:
             self, factory, cli, tmp_env, runs):
         """先成功读取，再整文件截断：新进程无缓存也保留上一份有效快照（跨进程
         持久于 settings）+ degraded detail；位点不回退；恢复后补齐。"""
-        running = factory.make_running(title="会话半写入位点")
+        running = factory.make_historical_running(title="会话半写入位点")
         tid, run = running.task.task_id, running.dispatch_run_id
         events = [pi_event(1, "session", session_id="s1"),
                   pi_event(2, "user", content="a"),
@@ -568,7 +568,7 @@ class TestStatesAndFailures:
         assert [m["id"] for m in filled["messages"]] == ["round:4"]
 
     def test_missing_run_dir_is_unavailable(self, factory, cli, tmp_env, runs):
-        running = factory.make_running(title="会话无目录")
+        running = factory.make_historical_running(title="会话无目录")
         use_runs_root(tmp_env, runs.path)
         out = read_messages(cli, running.task.task_id)
         assert out["session"]["state"] == "unavailable"
@@ -578,7 +578,7 @@ class TestStatesAndFailures:
                                               runs):
         """job.json 的 task_id/run_id 与目录名不符 → unavailable + 原因，
         不按标题猜测、不读取该会话内容。"""
-        running = factory.make_running(title="会话身份不符")
+        running = factory.make_historical_running(title="会话身份不符")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, job=job_document("other-task", run),
                   events=[pi_event(1, "user", content="x")])
@@ -590,7 +590,7 @@ class TestStatesAndFailures:
 
     def test_backend_field_missing_is_unavailable(self, factory, cli, tmp_env,
                                                   runs):
-        running = factory.make_running(title="会话缺backend")
+        running = factory.make_historical_running(title="会话缺backend")
         tid, run = running.task.task_id, running.dispatch_run_id
         job = job_document(tid, run)
         job.pop("backend")
@@ -602,7 +602,7 @@ class TestStatesAndFailures:
         assert "backend" in (out["connection"]["detail"] or "")
 
     def test_illegal_run_id_rejected(self, factory, cli, tmp_env, runs):
-        running = factory.make_running(title="会话非法标识")
+        running = factory.make_historical_running(title="会话非法标识")
         tid = running.task.task_id
         use_runs_root(tmp_env, runs.path)
         for bad in ("../escape", "a/b", "with space", ""):
@@ -614,7 +614,7 @@ class TestStatesAndFailures:
                                      tmp_path):
         """run 目录是指向 root 外的符号链接：realpath 越界 → unavailable，
         绝不读取他目录内容。"""
-        running = factory.make_running(title="会话符号链接")
+        running = factory.make_historical_running(title="会话符号链接")
         tid, run = running.task.task_id, running.dispatch_run_id
         outside = tmp_path / "outside"
         write_json(outside / "job.json", job_document(tid, run))
@@ -638,7 +638,7 @@ class TestStatesAndFailures:
 
 class TestCursorAndReconnect:
     def test_incremental_after_cursor(self, factory, cli, tmp_env, runs):
-        running = factory.make_running(title="会话游标")
+        running = factory.make_historical_running(title="会话游标")
         tid, run = running.task.task_id, running.dispatch_run_id
         marker = f"{tid}/{run}"
         events = [pi_event(1, "session", session_id="s1"),
@@ -668,7 +668,7 @@ class TestCursorAndReconnect:
             self, factory, cli, tmp_env, runs):
         """重开（payload 无 cursor）恒返回完整历史（不隐式套用已存位点）；
         断线重连由调用方带最后 cursor 补齐，不重复已读。"""
-        running = factory.make_running(title="会话重连")
+        running = factory.make_historical_running(title="会话重连")
         tid, run = running.task.task_id, running.dispatch_run_id
         events = [pi_event(i, "assistant_message", content=f"m{i}")
                   for i in range(1, 4)]
@@ -691,7 +691,7 @@ class TestCursorAndReconnect:
                                                 runs):
         """尾部进行中事件内容更新：seq<=cursor 但 revision 与已存快照不同 →
         增量读取透出（全新进程、无缓存依赖）。"""
-        running = factory.make_running(title="会话修订透出")
+        running = factory.make_historical_running(title="会话修订透出")
         tid, run = running.task.task_id, running.dispatch_run_id
         marker = f"{tid}/{run}"
         events = [pi_event(1, "session", session_id="s1"),
@@ -724,7 +724,7 @@ class TestCursorAndReconnect:
 
     def test_unavailable_keeps_read_position(self, factory, cli, tmp_env, runs):
         """root 换成不存在路径：messages 空、位点不被覆盖（断线补齐用）。"""
-        running = factory.make_running(title="会话不可用")
+        running = factory.make_historical_running(title="会话不可用")
         tid, run = running.task.task_id, running.dispatch_run_id
         marker = f"{tid}/{run}"
         events = [pi_event(1, "session", session_id="s1"),
@@ -761,7 +761,7 @@ class TestCursorAndReconnect:
 class TestConnectionAndSettings:
     def test_degraded_always(self, factory, cli, tmp_env, runs):
         """运行记录无推送订阅 → connection 恒 degraded + poll_seconds。"""
-        running = factory.make_running(title="连接-降级")
+        running = factory.make_historical_running(title="连接-降级")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [pi_event(1, "user", content="x")])
         use_runs_root(tmp_env, runs.path)
@@ -774,7 +774,7 @@ class TestConnectionAndSettings:
 
     def test_poll_seconds_setting(self, factory, cli, tmp_env, runs):
         """session_poll_seconds 经 settings 可调；overview 与会话双路下发。"""
-        running = factory.make_running(title="连接-轮询")
+        running = factory.make_historical_running(title="连接-轮询")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [pi_event(1, "user", content="x")])
         use_runs_root(tmp_env, runs.path)
@@ -788,7 +788,7 @@ class TestConnectionAndSettings:
                                              runs, tmp_path):
         """优先级 payload > settings > 默认；payload 覆盖不持久化；
         空串 = 未提供。"""
-        running = factory.make_running(title="覆盖-优先级")
+        running = factory.make_historical_running(title="覆盖-优先级")
         tid, run = running.task.task_id, running.dispatch_run_id
         other = tmp_path / "other-runs"
         runs.make(tid, run, [pi_event(1, "user", content="real")])
@@ -812,7 +812,7 @@ class TestConnectionAndSettings:
                                                    runs):
         """运行记录目录数超阈值：list-sessions 缺省模式轻量核验（不读文件），
         associated 由 get-session/session-messages 补齐。"""
-        running = factory.make_running(title="轻量列表")
+        running = factory.make_historical_running(title="轻量列表")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [pi_event(1, "user", content="x")])
         for i in range(51):
@@ -834,7 +834,7 @@ class TestSessionDoesNotAdvanceLifecycle:
     def test_reading_session_keeps_exception(self, factory, cli, tmp_env,
                                              runs):
         """收到新会话日志不解除任何异常（§5.15.4）。"""
-        running = factory.make_running(title="会话不解除异常")
+        running = factory.make_historical_running(title="会话不解除异常")
         tid = running.task.task_id
         runs.make(tid, running.dispatch_run_id, [
             pi_event(1, "assistant_message", content="我已经修好了"),
@@ -978,7 +978,7 @@ class TestSessionTrashGuards:
     def test_running_task_round_blocked(self, factory, cli, tmp_env, runs):
         """当前轮次任务执行中 → conflict + 中文原因；list-sessions 同轮
         blocked_reason 同文案、allowed_actions 为空（§5.16.2）。"""
-        running = factory.make_running(title="回收站禁止-执行中")
+        running = factory.make_historical_running(title="回收站禁止-执行中")
         tid, run = running.task.task_id, running.dispatch_run_id
         runs.make(tid, run, [pi_event(1, "user", content="x")])
         use_runs_root(tmp_env, runs.path)

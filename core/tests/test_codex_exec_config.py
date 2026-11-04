@@ -1,10 +1,11 @@
 """Codex execution configuration, isolated DB/CLI/provider fixtures only."""
 import json
 import os
+import subprocess
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import codex_execution, constants, db, exec_config
+from kanpilot import automation_policy, codex_execution, constants, db, exec_config
 
 
 class CodexExecutionConfigTests(KanpilotTestCase):
@@ -97,3 +98,37 @@ class CodexExecutionConfigTests(KanpilotTestCase):
         available, reason = exec_config.check_available(conn, config_snapshot=snapshot)
         self.assertFalse(available)
         self.assertIn("workspace-write", reason)
+
+
+    def test_real_codex_preflight_and_automatic_confirmation_do_not_require_plus_permission(self):
+        info = self.make_ready_task(task_id="codex-auto-confirm")
+        tid = info["remote"]["id"]
+        self.seed_auto_confirmation(tid)
+        self.call("set-exec-config", {"backend": "codex", "codex": self.block})
+        repo = self.repos_root / "Feedback"
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                        "git@github.com:fixture/repo.git"], check=True, capture_output=True)
+        conn = self.connection()
+        db.set_setting(conn, "planner_config", {"backend": "codex"})
+        db.set_setting(conn, "review_config", {"backend": "codex"})
+        gh = self.root / "gh-fixture"
+        gh.write_text("#!/bin/sh\nexit 0\n")
+        gh.chmod(0o755)
+        with patch.dict(os.environ, {"KANPILOT_GH_BIN": str(gh)}):
+            before = conn.total_changes
+            self.assertEqual(automation_policy.automation_preflight(conn, self.task(tid)["project_id"]), [])
+            self.assertEqual(conn.total_changes, before)
+            result = self.call("enqueue", {"task_id": tid, "kind": "dispatch",
+                "confirm_plan": True, "expected_plan_sha256": self.task(tid)["plan_sha256"],
+                "actor": "automation"})
+        self.assertEqual(result["request"]["kind"], "dispatch")
+        self.assertIsNone(exec_config.load(conn)["pi_desktop"])
+
+    def test_plus_permission_remains_required_for_automatic_preflight(self):
+        self.make_repo("Feedback")
+        block = {"model_source": "custom", "connection_file": "/tmp/fixture-plus.json",
+                 "provider_id": "p", "model_id": "m", "thinking_level": "high", "permission_mode": "ask"}
+        self.call("set-exec-config", {"backend": "pi_desktop", "pi_desktop": block})
+        conn = self.connection()
+        errors = automation_policy.automation_preflight(conn, "fixture-project-feedback")
+        self.assertIn("exec_permission_not_auto", {error["code"] for error in errors})

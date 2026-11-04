@@ -32,6 +32,40 @@ def load_raw_mappings(conn: sqlite3.Connection) -> tuple[int, str, dict[str, dic
     return 0, workspace_id, {}, False
 
 
+def migrate_engine_modes(conn: sqlite3.Connection, now_iso: str) -> dict:
+    """Atomically retire saved project modes before a live engine's first tick."""
+    from . import engine_claim_scope
+    with db.write_txn(conn):
+        revision, _, items, saved = load_raw_mappings(conn)
+        changes = {}
+        for project_id, entry in items.items():
+            engine_claim_scope.project_mode(entry, project_id)
+            automation = entry.get("automation") or {}
+            if entry.get("engine_mode") == "live" and "engine_mode" not in automation:
+                continue
+            changes[project_id] = {
+                "engine_mode_present": "engine_mode" in entry,
+                "engine_mode": entry.get("engine_mode"),
+                "automation_engine_mode_present": "engine_mode" in automation,
+                "automation_engine_mode": automation.get("engine_mode"),
+            }
+            updated = dict(entry, engine_mode="live")
+            if "engine_mode" in automation:
+                updated["automation"] = {key: value for key, value in automation.items()
+                                         if key != "engine_mode"}
+            items[project_id] = updated
+        if not saved or not changes:
+            return {"migrated": False, "revision": revision}
+        receipt = {"at": now_iso, "from_revision": revision,
+                   "to_revision": revision + 1, "projects": changes}
+        stored = db.get_setting(conn, SETTINGS_KEY)
+        db.set_setting(conn, SETTINGS_KEY, dict(stored, revision=revision + 1, items=items))
+        db.set_setting(conn, "engine_mode_migration", receipt)
+        db.add_event(conn, now_iso, "project_engine_modes_migrated", actor="engine",
+                     detail=receipt)
+    return {"migrated": True, "revision": revision + 1, "projects": sorted(changes)}
+
+
 def require_workspace(conn: sqlite3.Connection) -> str:
     workspace_id = load_raw_mappings(conn)[1]
     if not workspace_id:
@@ -225,7 +259,8 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
         in_saved = pid in saved_items
         in_remote = pid in remote_projects
 
-        entry = saved_items.get(pid) or {}
+        entry = saved_items.get(pid, {})
+        engine_claim_scope.project_mode(entry, pid)
         if in_saved:
             pname = remote_projects.get(pid) or entry.get("project_name") or ""
             raw_repo = entry.get("repository")
@@ -261,7 +296,7 @@ def get_project_mappings(conn: sqlite3.Connection, *, refresh_remote: bool = Fal
             "active_task_count": task_count,
             "active_request_count": req_count,
             "updated_at": updated_at,
-            "engine_mode": entry.get("engine_mode") or (entry.get("automation") or {}).get("engine_mode") or "legacy",
+            "engine_mode": engine_claim_scope.project_mode(entry, pid),
             "effective_engine_mode": engine_claim_scope.effective_mode(conn, pid),
             "verify_env": entry.get("verify_env") or {},
             "fallback_model": entry.get("fallback_model"),
@@ -413,6 +448,7 @@ def set_project_mapping(
         # 更新条目
         items[project_id] = {
             **(existing_entry or {}),
+            "engine_mode": "live",
             "project_name": project_name,
             "repository": canonical_repo,
             "enabled": enabled,

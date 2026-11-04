@@ -54,6 +54,11 @@ def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
 def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
     task, _request = _entry(ctx, payload, ("prepared",))
+    from . import harnesses
+    execution = round_store.require_round(conn, task["task_id"], payload["run_id"])
+    if not harnesses.supports_role(execution["backend"], "execution"):
+        raise util.KanpilotError(
+            "exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力，不能发送新执行；请选择 Plus 或 Codex CLI")
     if (core.is_pr_delivery(task) or _manual_branch_delivery(task)
             or core.execution_retry_of(task) or core.review_repair_of(task)):
         # Recheck outside the transaction before any remote status mutation.
@@ -468,105 +473,14 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
             "conflict", "该执行轮次不是 pi/pi_desktop 后端，不能 dispatch-start"
         )
 
-    # 1. 可用性复核先行（失败不落意图、不启动进程）。
-    available, reason = exec_config.check_available(conn)
-    if not available:
-        raise util.KanpilotError("validation_failed", reason or "pi 执行环境不可用")
-
-    # 2. 意图先落盘（单事务；非空 → 幂等返回，绝不创建第二个进程）。
-    with db.write_txn(conn):
-        fresh = round_store.require_round(conn, task_id, run_id)
-        if fresh["started_at"]:
-            session_id, _title = _pi_session_view(conn, task_id, run_id)
-            return {
-                "status": "started", "pid": fresh["pid"],
-                "session_id": session_id,
-                "worktree_path": fresh["worktree_path"],
-                "deduplicated": True,
-            }
-        round_store.mark_intent(conn, task_id, run_id, now)
-        config_snapshot = dict(
-            round_store.round_view(round_store.require_round(conn, task_id, run_id))
-            ["config"] or {}
-        )
-
-    # 3. worktree + spec + 拉起 worker（事务外进程操作）。
-    worktree_path, worktree_mode = _ensure_worktree(task, task_id, run_id, conn)
-    source = _headless.resolve_source(conn)
-    try:
-        run_dir = source.run_dir(task_id, run_id)
-    except _headless.HeadlessError as exc:
-        raise util.KanpilotError("validation_failed", exc.detail)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    spec = {
-        "v": 1,
-        "task_id": task_id,
-        "run_id": run_id,
-        "session_marker": task["session_marker"],
-        "config": config_snapshot,
-        "cwd": str(worktree_path),
-        "worktree_mode": worktree_mode,
-        "repository": task["repository"],
-        "plan_path": task["plan_path"],
-        "plan_sha256": task["plan_sha256"],
-        "instruction": _execution_instruction(task, worktree_path, desktop=False, conn=conn),
-        "runs_dir": str(run_dir),
-        "pi_home": str(constants.pi_home()),
-        "agent_md": _agent_md_path(conn, config_snapshot),
-        "timeout_seconds": round_store.round_timeout_seconds(conn),
-    }
-    if core.review_repair_of(task):
-        from . import repair_prompt
-        spec.update(repair_prompt.freeze(task))
-        spec["session_display_name"] = "Review 修复 · " + task["title"]
-    spec_path = run_dir / "spec.json"
-    from . import process_owner
-    process_owner.bind_spec(spec, ctx.db_path)
-    spec_path.write_text(
-        util.jdump(spec), encoding="utf-8"
-    )
-    log_path = run_dir / "worker.log"
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(constants.core_root())
-    try:
-        with open(log_path, "ab") as log:
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "kanpilot.pi_worker",
-                    "--spec", str(spec_path),
-                ],
-                cwd=str(constants.core_root()),
-                stdout=log, stderr=log,
-                start_new_session=True, env=env,
-            )
-    except OSError as exc:
-        raise util.KanpilotError("internal", f"worker 拉起失败：{exc}")
-
-    _register_started_worker(ctx, spec, proc, spec_path)
-
-    # 4. 记 pid/worktree + event（意图已落盘，此处只是补记进程信息）。
-    with db.write_txn(conn):
-        round_store.mark_started(
-            conn, task_id, run_id, now, pid=proc.pid,
-            worktree_path=str(worktree_path),
-        )
-        db.add_event(
-            conn, now, "round_started", task_id=task_id,
-            request_id=_request["request_id"], actor="kaneo-dispatch",
-            detail={"run_id": run_id, "pid": proc.pid,
-                    "worktree_path": str(worktree_path),
-                    "worktree_mode": worktree_mode},
-        )
-
-    # 5. 等首个 session 事件（超时 → starting/session_id=null）。
-    session_id = _wait_session_event(run_dir)
-    return {
-        "status": "started" if session_id else "starting",
-        "pid": proc.pid,
-        "session_id": session_id,
-        "worktree_path": str(worktree_path),
-        "deduplicated": False,
-    }
+    # Historical running pi rounds remain observable; no new worker or send.
+    if round_row["started_at"]:
+        session_id, _title = _pi_session_view(conn, task_id, run_id)
+        return {"status": "started", "pid": round_row["pid"],
+                "session_id": session_id, "worktree_path": round_row["worktree_path"],
+                "deduplicated": True}
+    raise util.KanpilotError(
+        "exec_backend_not_plus", "pi 执行端缺少结构化验证报告能力，不能启动新执行；请选择 Plus 或 Codex CLI")
 
 
 def _agent_md_path(conn, config_snapshot) -> str:
@@ -1272,11 +1186,10 @@ def _manual_branch_delivery(task):
 
 
 def branch_instruction(conn, task):
-    from . import engine_claim_scope
     if conn is not None:
-        if engine_claim_scope.effective_mode(conn, task["project_id"]) == "live":
-            return constants.DISPATCH_INSTRUCTION_BRANCH_LIVE
-    return constants.DISPATCH_INSTRUCTION_BRANCH
+        from . import engine_claim_scope
+        engine_claim_scope.effective_mode(conn, task["project_id"])
+    return constants.DISPATCH_INSTRUCTION_BRANCH_LIVE
 
 
 def _execution_instruction(task, worktree_path, *, desktop, conn=None):

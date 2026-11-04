@@ -11,6 +11,11 @@ from kanpilot import bridge, util  # noqa: E402
 
 
 class DispatchFlow(KanpilotTestCase):
+    def setUp(self):
+        super().setUp()
+        self.call("set-exec-config", {"backend": "codex", "codex": {
+            "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
+
     def _queue(self):
         fixture = self.make_ready_task()
         # v2 §5.22.4：发布后 plan_execution_hold → 安排执行须 confirm_plan。

@@ -14,6 +14,9 @@ class DirectReviewRepairTest(KanpilotTestCase):
     def setUp(self):
         super().setUp()
         self.fixture = self.make_ready_task(task_id=self.task_id)
+        self.configure_codex_execution()
+        plan = self.fixture["plan_path"]
+        plan.write_text(plan.read_text() + "\n```verify\ntrue\n```\n")
         self.fake.tasks[self.task_id]["status"] = "in-review"
         self.repo = self.repos_root / "Feedback"
         self.head = git(self.repo, "rev-parse", "HEAD")
@@ -28,6 +31,9 @@ class DirectReviewRepairTest(KanpilotTestCase):
         self.report.write_text("# Review\nFix only the bounded download.\n")
         self.conn = db.connect(self.db_path)
         self.now = util.now_iso()
+        db.update_task(self.conn, self.task_id, self.now, plan_sha256=util.sha256_file(plan))
+        db.set_extra(self.conn, db.require_task(self.conn, self.task_id), self.now,
+                     plan_verify={"commands": ["true"], "plan_sha256": util.sha256_file(plan)})
         db.update_task(self.conn, self.task_id, self.now, status="in_review", stage="review", run_id="exec1",
             sent=1, send_state="sent", kaneo_status="in-review")
         self.conn.execute("INSERT INTO execution_rounds(task_id,run_id,backend,run_status,worktree_path,config_json,created_at,updated_at) VALUES(?,?,'pi','finished',?,'{}',?,?)", (self.task_id, "exec1", str(self.worktree), self.now, self.now))
@@ -188,7 +194,7 @@ class DirectReviewRepairTest(KanpilotTestCase):
         from kanpilot.engine import health
         self.register(); self.finish_review()
         self.call("start-review-repair", self.payload())
-        reconciler = loop.Reconciler(self.db_path, mode="legacy")
+        reconciler = loop.Reconciler(self.db_path, mode="live")
         assert reconciler._queued_stages(self.conn, {}) == {"dispatch": 1}
         health.acquire_or_renew_lease(self.conn, util.now_iso(), instance_id="direct-engine",
             stage=None, pid=os.getpid(), lease_seconds=1200)
@@ -246,6 +252,11 @@ class DirectReviewRepairTest(KanpilotTestCase):
         (self.worktree / "bounded.py").write_text("MAX_BYTES = 1024\n")
         monitor = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor"})
         assert monitor["claimed"]
+        self.seed_codex_report(self.task_id, claimed["request_id"], self.worktree)
+        receipt = self.call("engine-verdict", {"task_id": self.task_id, "request_id": monitor["request_id"],
+            "run_id": monitor["run_id"], "expected_execution_run_id": execution,
+            "expected_plan_sha256": self.task()["plan_sha256"]})
+        assert receipt["verification_ok"], receipt
         self.call("delivery-commit", {"task_id": self.task_id, "request_id": monitor["request_id"],
             "run_id": monitor["run_id"], "expected_execution_run_id": execution})
         assert core.delivery_of(self.task())["head_sha"] != self.head

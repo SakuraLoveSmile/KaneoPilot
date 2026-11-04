@@ -25,7 +25,7 @@ from ... import constants, process_owner
 _EXECUTOR_STAGES = ("dispatch", "monitor", "review", "delivery")
 
 
-def _child_env(db_path, instance_id, mode="legacy", force=False):
+def _child_env(db_path, instance_id, mode="live", force=False):
     env = dict(os.environ)
     env["KANPILOT_DB"] = str(db_path)
     env["KANPILOT_ENGINE_WORKER"] = "1"
@@ -36,7 +36,7 @@ def _child_env(db_path, instance_id, mode="legacy", force=False):
     return env
 
 
-def spawn_stage(stage, db_path, *, instance_id=None, resume=False, mode="legacy", force=False) -> subprocess.Popen:
+def spawn_stage(stage, db_path, *, instance_id=None, resume=False, mode="live", force=False) -> subprocess.Popen:
     """Launch ``executor_runner`` for a deterministic/Plus stage."""
     if stage not in _EXECUTOR_STAGES:
         raise ValueError(f"spawn_stage: unsupported stage {stage!r}")
@@ -48,7 +48,7 @@ def spawn_stage(stage, db_path, *, instance_id=None, resume=False, mode="legacy"
         stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def spawn_planner(db_path, *, instance_id=None, mode="legacy", force=False) -> subprocess.Popen:
+def spawn_planner(db_path, *, instance_id=None, mode="live", force=False) -> subprocess.Popen:
     """Launch ``planner_runner`` (planning stage)."""
     return subprocess.Popen(
         [sys.executable, "-m", "kanpilot.planner_runner"],
@@ -56,7 +56,7 @@ def spawn_planner(db_path, *, instance_id=None, mode="legacy", force=False) -> s
         stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def spawn(stage, db_path, *, instance_id=None, resume=False, mode="legacy", force=False) -> subprocess.Popen:
+def spawn(stage, db_path, *, instance_id=None, resume=False, mode="live", force=False) -> subprocess.Popen:
     """Dispatch to the right runner for a stage."""
     if stage == "plan":
         return spawn_planner(db_path, instance_id=instance_id, mode=mode, force=force)

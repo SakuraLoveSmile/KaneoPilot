@@ -64,6 +64,15 @@ def _connect(db_path):
     return kdb.connect(Path(db_path))
 
 
+@pytest.fixture(autouse=True)
+def supported_execution_config(cli, tmp_env):
+    # These scenarios exercise scheduling, not the retired pi execution path.
+    if tmp_env.codex_bin.read_text(encoding="utf-8") == "#!/bin/sh\nexit 0\n":
+        tmp_env.codex_bin.write_text("#!/bin/sh\nprintf 'codex-cli fixture\\n'\n", encoding="utf-8")
+    cli("set-exec-config", {"backend": "codex", "codex": {
+        "model": "gpt-6.1-sol", "reasoning_effort": "high"}})
+
+
 def _adopt(db_path, task_id, **fields):
     """把任务标记为自动化管理（引擎只驱动 automation-managed 任务）。"""
     conn = _connect(db_path)
@@ -248,7 +257,7 @@ def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
     assert live_mine[0]["action"] == kdecide.BLOCK, live_mine
     assert live_mine[0]["command"] is None, live_mine
     assert live_mine[0].get("explain"), live_mine
-    shadow = kloop.Reconciler(tmp_env.db, mode="shadow").reconcile_once()
+    shadow = kloop.Reconciler(tmp_env.db, mode="shadow", force_mode=True).reconcile_once()
     assert all(a.get("executed") is not True for a in shadow["actions"]), shadow
     assert _count_requests(tmp_env.db, btid, "dispatch",
                            ("queued", "claimed")) == before
@@ -259,7 +268,7 @@ def test_scenario_transient_backoff_capped_then_escalate(cli, factory, tmp_env):
 # ---------------------------------------------------------------------------
 
 
-def test_scenario_engine_killed_at_step_no_duplicate_effects(factory, tmp_env):
+def test_scenario_engine_killed_at_step_no_duplicate_effects(factory, tmp_env, cli, monkeypatch):
     """回执幂等 + 引擎重启不重复副作用（协议 §5.27.1 / runtime_operations）。"""
     scope, op = "scope-a", str(uuid.uuid4())
     payload = {"kind": "dispatch", "task_id": "t1"}
@@ -284,8 +293,19 @@ def test_scenario_engine_killed_at_step_no_duplicate_effects(factory, tmp_env):
         conn.close()
 
     # 引擎杀裂恢复：ready 自动化任务，两个 run 各 1 tick，第二次入队 skipped。
-    ready = factory.make_ready()
-    tid = ready.task.task_id
+    from tests.conftest import write_plan_file
+    from kanpilot import automation_policy
+    task = factory.sync_task()
+    plan = write_plan_file(
+        tmp_env.plan_root, task_id=task.task_id, project_id=task.project_id,
+        project_name=task.project_name, repository=task.repository,
+        source_sha256=task.source_sha256, requirements_sha256=task.requirements_sha256,
+        body="# Reconciliation fixture\n```verify\ngit diff --check\n```\n")
+    factory.publish(task, plan_file=plan)
+    tid = task.task_id
+    cli("set-project-automation", {"project_id": task.project_id,
+        "automation": {"enabled": True, "auto_confirm_plan": True}})
+    monkeypatch.setattr(automation_policy, "automation_preflight", lambda *args: [])
     _adopt(tmp_env.db, tid)
     conn = _connect(tmp_env.db)
     try:
@@ -794,6 +814,17 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
     _adopt(tmp_env.db, tid, manual_takeover=variant == "manual_takeover")
     cli("set-project-automation", {"project_id": task.project_id,
                                    "automation": {"enabled": True}})
+    if variant == "legacy":
+        # A pre-upgrade project must now finish via the same live path,
+        # without issuing another dispatch for its already-sent execution.
+        conn = _connect(tmp_env.db)
+        try:
+            with kdb.write_txn(conn):
+                mappings = kdb.get_setting(conn, "project_mappings")
+                mappings["items"][task.project_id]["engine_mode"] = "legacy"
+                kdb.set_setting(conn, "project_mappings", mappings)
+        finally:
+            conn.close()
 
     current = factory.get_task(tid)
     if recovery_variant and variant != "branch_quality":
@@ -942,17 +973,9 @@ def test_scenario_drained_round_reaches_review_via_engine_cycles(
             raise AssertionError("演练不允许执行其他阶段：" + stage)
 
     rec = kloop.Reconciler(
-        tmp_env.db, mode="legacy" if variant == "legacy" else "live",
+        tmp_env.db, mode="live",
         enable_tick=True, enable_intake=True, enable_spawn=True, spawn=spawn)
     first = rec.reconcile_once()
-    if variant == "legacy":
-        rec.reconcile_once()
-        assert factory.get_task(tid)["status"] == "running"
-        assert spawned == []
-        assert not (worktree / "verify-ran.pyc").exists()
-        assert _count_requests(tmp_env.db, tid, "monitor", ("queued", "claimed")) == 0
-        assert _count_requests(tmp_env.db, tid, "review", ("queued", "claimed")) == 0
-        return
 
     value = factory.get_task(tid)
     assert value.get("failure_code") != "verification_identity_unconfirmed", value.get("failure_reason")

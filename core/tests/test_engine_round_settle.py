@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import timedelta
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import core, db, dsh_events, round_store, util  # noqa: E402
+from kanpilot import cmd_read, core, db, dsh_events, round_store, util  # noqa: E402
 from kanpilot.engine import decide, loop, rounds  # noqa: E402
 
 # A pid that is certainly not alive on this machine (never recycled by the
@@ -206,6 +207,153 @@ class RoundSettleReconcileTest(KanpilotTestCase):
     def _actions(self, tid, summary):
         return [a for a in summary["actions"] if a.get("task_id") == tid]
 
+    def _failed_monitor(self, tid, spent=0, code="remote_unavailable"):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                now = util.now_iso()
+                row, _ = db.create_request(conn, now, "monitor", f"monitor:{tid}",
+                    task_id=tid, payload={"retry_base": spent}, requested_by="automation")
+                db.update_request(conn, row["request_id"], now, status="failed",
+                    finished_at=now, result_json=util.jdump({"failure_code": code}))
+                return row["request_id"]
+        finally:
+            conn.close()
+
+    def _due_tick(self, tid):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                return cmd_read.tick_inline(conn, util.now_dt() + timedelta(days=1))
+        finally:
+            conn.close()
+
+    def test_transient_monitor_cap_cannot_reopen_via_settle_or_tick(self):
+        tid = self._stuck("tasksettleretrycap001")
+        self._failed_monitor(tid, spent=2)
+        rec = loop.Reconciler(self.db_path, mode="live", enable_tick=True)
+        for _ in range(2):
+            summary = rec.reconcile_once()
+            action = self._actions(tid, summary)[0]
+            self.assertEqual((action["action"], action["reason"], action["ladder"]),
+                             (decide.BLOCK, "transient_exhausted", 2))
+            self.assertTrue(action["attention"])
+            self.assertEqual(self._monitor_requests(tid), [])
+            self.assertNotIn(loop.ROUND_SETTLE_KEY, self.task(tid)["extra"])
+        tick = self._due_tick(tid)
+        self.assertIn({"kind": "monitor", "task_id": tid,
+                       "reason": "transient_exhausted"}, tick["skipped"])
+        self.assertEqual(self._monitor_requests(tid), [])
+
+    def test_transient_monitor_retry_owns_backoff_before_settle_and_tick(self):
+        tid = self._stuck("tasksettleretrydue001")
+        self._failed_monitor(tid, spent=1)
+        tick = self._due_tick(tid)
+        self.assertIn({"kind": "monitor", "task_id": tid,
+                       "reason": "transient_retry_pending"}, tick["skipped"])
+        summary = loop.Reconciler(self.db_path, mode="live", enable_tick=True).reconcile_once()
+        action = self._actions(tid, summary)[0]
+        self.assertEqual(action["action"], decide.RETRY)
+        self.assertTrue(action["executed"])
+        requests = self._monitor_requests(tid)
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(util.ts_before(util.now_iso(), requests[0]["not_before"]))
+        conn = db.connect(self.db_path)
+        try:
+            row = db.get_request(conn, requests[0]["request_id"])
+            self.assertEqual(db.request_payload(row)["retry_base"], 2)
+        finally:
+            conn.close()
+        self.assertNotIn(loop.ROUND_SETTLE_KEY, self.task(tid)["extra"])
+
+    def test_automatic_enqueue_cannot_reset_monitor_retry_chain(self):
+        tid = self._stuck("tasksettleretryenq001")
+        self._failed_monitor(tid, spent=1)
+        for extra in ({}, {"retry_base": 0}, {"retry_base": 1}, {"retry_base": 2},
+                      {"retry_base": 2, "not_before": "2020-01-01T00:00:00+00:00"}):
+            payload = {"task_id": tid, "kind": "monitor", "actor": "automation", **extra}
+            self.assertEqual(self.call_err("enqueue", payload).code, "conflict")
+        self.assertEqual(self.call_err("enqueue", {"task_id": tid, "kind": "monitor",
+            "actor": "automation", "retry_base": True}).code, "bad_request")
+        # An explicit user observation remains available for recovery.
+        self.call("enqueue", {"task_id": tid, "kind": "monitor"})
+        self.assertEqual(len(self._monitor_requests(tid)), 1)
+
+    def test_cancelled_lost_retry_does_not_restore_monitor_allowance(self):
+        tid = self._stuck("tasksettleretrylost01")
+        self._failed_monitor(tid, spent=1)
+        retry = self.call("enqueue", {"task_id": tid, "kind": "monitor",
+            "actor": "automation", "retry_base": 2,
+            "not_before": util.plus_seconds(60)})["request"]
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                # A claimed retry whose owner vanished is released by the
+                # ordinary lost-request recovery as cancelled.
+                db.update_request(conn, retry["request_id"], util.now_iso(),
+                    status="claimed", claimed_at=util.now_iso(), lease_expires_at="2020-01-01T00:00:00+00:00")
+        finally:
+            conn.close()
+        self._due_tick(tid)  # lost claim is cancelled after the monitor top-up pass
+        self._due_tick(tid)
+        self.assertEqual(self._monitor_requests(tid), [])
+        summary = loop.Reconciler(self.db_path, mode="live", enable_tick=True).reconcile_once()
+        self.assertEqual(self._actions(tid, summary)[0]["reason"], "transient_exhausted")
+
+    def test_late_round_discovery_does_not_supersede_current_failure(self):
+        tid = self._stuck("tasksettleretrylate01")
+        self._failed_monitor(tid, spent=2)
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                conn.execute("UPDATE tasks SET sent_at=? WHERE task_id=?",
+                    ("2020-01-01T00:00:00+00:00", tid))
+                conn.execute("UPDATE execution_rounds SET created_at=? WHERE task_id=?",
+                    ("2099-01-01T00:00:00+00:00", tid))
+        finally:
+            conn.close()
+        summary = loop.Reconciler(self.db_path, mode="live", enable_tick=True).reconcile_once()
+        self.assertEqual(self._actions(tid, summary)[0]["reason"], "transient_exhausted")
+        self.assertEqual(self._monitor_requests(tid), [])
+
+    def test_new_execution_and_successful_monitor_supersede_old_failure(self):
+        for later in ("execution", "success"):
+            tid = self._stuck("tasksettleretry" + later)
+            failed = self._failed_monitor(tid, spent=2)
+            conn = db.connect(self.db_path)
+            try:
+                with db.write_txn(conn):
+                    if later == "execution":
+                        # The previous monitor predates this execution's identity.
+                        conn.execute("UPDATE requests SET created_at=? WHERE request_id=?",
+                            ("2020-01-01T00:00:00+00:00", failed))
+                    else:
+                        now = util.now_iso()
+                        row, _ = db.create_request(conn, now, "monitor", f"monitor:{tid}", task_id=tid)
+                        db.update_request(conn, row["request_id"], now, status="succeeded", finished_at=now)
+                self.assertIsNone(core.monitor_retry_state(conn, db.require_task(conn, tid)))
+            finally:
+                conn.close()
+            summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
+            self.assertEqual(self._actions(tid, summary)[0]["action"], decide.SETTLE_ROUND)
+            self.assertEqual(len(self._monitor_requests(tid)), 1)
+
+    def test_nontransient_failure_and_manual_takeover_keep_observation_topups(self):
+        for kind in ("unknown", "verification_unconfirmed", "manual"):
+            tid = self._stuck("tasksettleretry" + kind)
+            self._failed_monitor(tid, spent=2,
+                code="remote_unavailable" if kind == "manual" else kind)
+            if kind == "manual":
+                conn = db.connect(self.db_path)
+                try:
+                    with db.write_txn(conn):
+                        core.update_automation(conn, db.require_task(conn, tid),
+                                               util.now_iso(), manual_takeover=True)
+                finally:
+                    conn.close()
+            self._due_tick(tid)
+            self.assertEqual(len(self._monitor_requests(tid)), 1)
+
     def test_clean_exit_pushes_the_round_to_verdict(self):
         tid = self._stuck("tasksettleclean000001")
         summary = loop.Reconciler(self.db_path, mode="live").reconcile_once()
@@ -326,7 +474,7 @@ class RoundSettleReconcileTest(KanpilotTestCase):
 
     def test_shadow_mode_computes_but_writes_nothing(self):
         tid = self._stuck("tasksettleshdw000001")
-        summary = loop.Reconciler(self.db_path, mode="shadow").reconcile_once()
+        summary = loop.Reconciler(self.db_path, mode="shadow", force_mode=True).reconcile_once()
         action = self._actions(tid, summary)[0]
         self.assertEqual(action["action"], decide.SETTLE_ROUND)
         self.assertIs(action["executed"], False)

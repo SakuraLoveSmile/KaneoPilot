@@ -361,6 +361,116 @@ class KanpilotTestCase(unittest.TestCase):
 
     # ------------------------------------------------------------- helpers
 
+    def seed_engine_mode(self, project_id, mode, *, nested=False):
+        """Create a saved pre-KP-E01 mode; the retired public setter rejects it."""
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                mappings = db.get_setting(conn, "project_mappings")
+                entry = mappings["items"][project_id]
+                if nested:
+                    entry.setdefault("automation", {})["engine_mode"] = mode
+                    entry.pop("engine_mode", None)
+                else:
+                    entry["engine_mode"] = mode
+                db.set_setting(conn, "project_mappings", mappings)
+        finally:
+            conn.close()
+
+    def configure_codex_execution(self):
+        """Save an explicit supported execution config using only local fixtures."""
+        from kanpilot import codex_execution
+        block = dict(codex_execution.DEFAULT_CONFIG)
+        home = constants.codex_home()
+        catalog = home / "execution-models.json"
+        catalog.write_text(util.jdump({"models": [{"slug": block["model"],
+            "supported_reasoning_levels": [{"effort": block["reasoning_effort"]}]}]}))
+        config = home / "config.toml"
+        if "model_catalog_json =" not in config.read_text():
+            config.write_text("model_catalog_json = " + util.jdump(str(catalog)) + "\n" + config.read_text())
+        self.call("set-exec-config", {"backend": "codex", "codex": block})
+        return block
+
+    def seed_codex_report(self, task_id, dispatch_request_id, worktree):
+        """Persist fake executor output; exercise real report/source validation."""
+        from kanpilot import execution_contract, git_delivery, round_store, runtime_client
+        conn = db.connect(self.db_path)
+        try:
+            task = db.require_task(conn, task_id)
+            run = task["run_id"]
+            commands = db.task_extra(task)["plan_verify"]["commands"]
+            row = round_store.require_round(conn, task_id, run)
+            config = util.jload(row["config_json"])
+            directory = self.runs_root / task_id / run
+            directory.mkdir(parents=True, exist_ok=True)
+            turn, session = "codex:" + run + ":1", "fixture-session"
+            spec = {"v": 1, "task_id": task_id, "request_id": dispatch_request_id,
+                "run_id": run, "backend": "codex", "config": config,
+                "scope_id": runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run),
+                "cwd": str(worktree), "repository": task["repository"],
+                "plan_path": task["plan_path"], "plan_sha256": task["plan_sha256"],
+                "completion_policy": "command_verification", "required_verification_commands": commands,
+                "instruction": "Implement the frozen repair only", "runs_dir": str(directory)}
+            execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
+            job = execution_contract.attach_to_job(spec, {**spec, "status": "finished", "exit_code": 0,
+                "session_id": session, "turn_id": turn, "send_state": "sent", "pid": 1073741823,
+                "worker_birth": {"started_seconds": 1, "started_microseconds": 0},
+                "cli_terminal": True, "ended_at": util.now_iso(), "report_id": "report:" + run,
+                "verification_evidence_version": 1,
+                "verification_source_sha256": git_delivery.source_state_sha256(worktree)})
+            report = {"status": "completed", "summary": "bounded repair completed",
+                "checks": [{"command": command, "exit_code": 0} for command in commands], "questions": []}
+            native = [{"type": "thread.started", "thread_id": session}]
+            for index, command in enumerate(commands, 1):
+                item = {"id": "check-" + str(index), "type": "command_execution", "command": command}
+                native.extend([{"type": "item.started", "item": dict(item, status="in_progress")},
+                    {"type": "item.completed", "item": dict(item, status="completed", exit_code=0)}])
+            native.append({"type": "turn.completed"})
+            native_path, output_path = directory / "codex-native.jsonl", directory / "codex-output.json"
+            native_path.write_text("".join(util.jdump({"seq": index, "turn_id": turn, "event": event,
+                "source_sha256": job["verification_source_sha256"]}) + "\n" for index, event in enumerate(native, 1)))
+            output_path.write_text(util.jdump(report))
+            job["turns"] = [{"turn_id": turn, "source": "codex_adapter", "session_id": session,
+                "pid": 1073741822, "birth": {"started_seconds": 1, "started_microseconds": 0},
+                "status": "completed", "exit_code": 0, "cli_terminal": True, "ended_at": util.now_iso(),
+                "events_file": native_path.name, "output_file": output_path.name,
+                "native_sha256": util.sha256_file(native_path), "output_sha256": util.sha256_file(output_path)}]
+            envelope = {key: job[key] for key in ("task_id", "run_id", "session_id", "turn_id", "plan_sha256",
+                "verification_source_sha256", "report_id")}
+            envelope.update(report=report, native_sha256=job["turns"][0]["native_sha256"])
+            (directory / "codex-report.json").write_text(util.jdump(envelope))
+            (directory / "spec.json").write_text(util.jdump(spec))
+            job["spec_sha256"] = util.sha256_file(directory / "spec.json")
+            (directory / "job.json").write_text(util.jdump(job))
+            events = [{"seq": 1, "type": "session", "session_id": session, "turn_id": turn},
+                      {"seq": 2, "type": "terminal", "outcome": "completed"}]
+            (directory / "events.jsonl").write_text("".join(util.jdump(event) + "\n" for event in events))
+            with db.write_txn(conn):
+                round_store.mark_started(conn, task_id, run, util.now_iso(), pid=job["pid"], worktree_path=str(worktree))
+                round_store.upsert_discovered(conn, task_id, run, util.now_iso(), backend="codex",
+                    session_id=session, run_status="finished")
+                db.update_task(conn, task_id, util.now_iso(), session_id=session, sent=1, send_state="sent")
+        finally:
+            conn.close()
+
+    def seed_auto_confirmation(self, task_id):
+        """Explicit enabled policy and frozen verification for automatic fixtures."""
+        from kanpilot import core
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                task = db.require_task(conn, task_id)
+                mappings = db.get_setting(conn, "project_mappings")
+                mappings["items"][task["project_id"]]["automation"] = dict(
+                    dict(constants.AUTOMATION_DEFAULTS, **(mappings["items"][task["project_id"]].get("automation") or {})), enabled=True)
+                db.set_setting(conn, "project_mappings", mappings)
+                core.update_automation(conn, task, util.now_iso(), adopted_at=util.now_iso())
+                db.set_extra(conn, db.require_task(conn, task_id), util.now_iso(),
+                    plan_verify={"commands": ["python3 -m unittest"],
+                                 "plan_sha256": task["plan_sha256"]})
+        finally:
+            conn.close()
+
     def call(self, command, payload=None):
         result = cli.run(command, payload or {}, self.db_path)
         return result

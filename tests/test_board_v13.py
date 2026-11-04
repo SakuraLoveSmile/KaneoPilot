@@ -644,11 +644,16 @@ class TestReviewFixChain:
         assert t["fix_task_id"] == fix_id
         assert t["review_key"] == "RK-V13-ROUND"
 
-        # 推进新一轮 in-review（run_id 可选：§5.9 advance-task 契约）
+        # Even a retained valid receipt requires a current monitor identity.
+        cli("enqueue", {"task_id": src, "kind": "monitor"})
+        monitor = claim_request(factory, src, "monitor")
         adv = cli("advance-task", {"task_id": src, "target": "in-review",
+                                   "run_id": monitor["run_id"],
                                    "expected_current": "in-progress"})
         assert adv["ok"] is True
         assert adv["task_status"] == "in_review"
+        cli("report", {"request_id": monitor["request_id"], "run_id": monitor["run_id"],
+                       "outcome": "succeeded"})
 
         # 新一轮 in-review 起始即清空上一周期结论 → 异常消失、回待评审列
         t = assert_normal(factory, cli, src, "in_review", "评审中")

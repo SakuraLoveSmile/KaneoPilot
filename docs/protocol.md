@@ -288,7 +288,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 | `mark_done` | `in_review`/`needs_user`/`running`（非 dispatch 中途） | task→`done` |
 | `dismiss` | `needs_user` | 清阻塞字段，task→`ready`（不自动建请求） |
 
-自动化与验证恢复动作（resume、accept_verification、recover_review、reverify、revert_engine_fix）见 §5.27.4；撤回必须同时提供两个 expected 字段。所有 resolve 写 `event kind=resolved`（actor、action、note）。
+自动化与验证恢复动作（resume、recover_review、reverify、revert_engine_fix；accept_verification 已退役并明确拒绝）见 §5.27.4；撤回必须同时提供两个 expected 字段。所有 resolve 写 `event kind=resolved`（actor、action、note）。
 
 ### 4.11 错误码（稳定值）
 
@@ -633,6 +633,8 @@ UI **仅在当前来源版本的分页全部读取完成（`has_more=false`）�
 
 ## 5.17 PI 执行配置与能力查询（v1.6）
 
+KP-E01 起，`pi` 执行配置仅用于历史读取；设置命令仍兼容保存旧字段，但不能据此启动新执行。新派发的能力门与 Plus/Codex 配置以 §5.27.7、§5.23、§5.31 为准。
+
 ### 5.17.1 配置对象
 
 settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展字段，见 §5.23.3——缺省按 `backend:"pi"` 解释）：
@@ -682,6 +684,8 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 - 能力检查反映**当前进程环境**（pi auth 状态即执行端环境）；执行端环境缺凭据即阻止派发。
 
 ## 5.18 PI 执行接入（backend=pi，v1.6）
+
+本节的 `backend=pi` 启动流程作为历史协议保留。KP-E01 起不再创建 pi 执行轮次，也不发送或启动未开始的旧 pi 轮次；已启动轮次的读取、会话身份核对和幂等回执继续可用。完成判定统一使用 §5.27.11 的结构化报告门，旧转录与人工接受不能放行。
 
 ### 5.18.1 后端、进程与 worktree
 
@@ -735,9 +739,9 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ```
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
-- **legacy/shadow 的 Goal 验证证据窗口**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
-- **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进 legacy/live 交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
-- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（本轮工具事件中，计划 verify 块的每条命令最后一次匹配的整数退出码为 0；缺失转 verification_unconfirmed，用户可接受验证结果）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
+- **历史 Goal 转录证据的审计窗口（不作为新引擎完成凭据）**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
+- **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
+- **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（结构化报告覆盖冻结计划每条 verify，绑定原生命令整数退出码 0、当前轮次与源码；缺失转 verification_unconfirmed，不能人工接受绕过）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
 - **明确异常**（→ `run_status=failed`，detail 记原因；monitor `report needs_user` + `failure_code=execution_failed`）：崩溃（进程非 0 退出/信号）、超时（超过 `pi_round_timeout_seconds`，默认 14400，settings 兼容旧键 `dsh_round_timeout_seconds` 回退）、日志截断（events.jsonl 尾部不完整且无 terminal）、身份不符（job.json/事件身份与目录不符）。**不自动重新提交、不自动重建轮次**。
  - **单独条件不得推动完成**：子 agent 结束、进程正常退出、模型自称完成——任一单独出现都不满足 (a)(b)(c)，任务保持 `running` 或按异常处置。
 
@@ -1273,12 +1277,12 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  长驻进程：DB 级单实例租约 + 心跳 + 退避重启。
  
  ```json
- engine run {stage?: string, executor_id?: string, lease_seconds?: int, mode?: legacy|shadow|live, intake?: bool, spawn?: bool, tick?: bool, force?: bool}
+ engine run {stage?: string, executor_id?: string, lease_seconds?: int, mode?: live|shadow, intake?: bool, spawn?: bool, tick?: bool, force?: bool}
  ```
  
  - `stage` 缺省时读取 `settings.executor_runs` 当前未暂停且可领取的阶段。
  - **单实例租约**：在 `BEGIN IMMEDIATE` 事务内写入 `settings.executor_instances`（`instance_id, started_at, pid, stage, lease_expires_at`）；重复调用同一 `instance_id` 幂等续租。条目同时记录持有者进程启动时间（birth，`started_seconds`/`started_microseconds`，与 worker 登记同口径）。
- - 每循环在 intake 之后、spawn 之前执行业务 tick（§5.27.15）；`tick` 缺省同 `spawn`，`intake`/`spawn` 缺省 true。进程 `mode` 缺省 legacy，项目配置覆盖进程默认；`force=true` 时一律采用进程模式。租约附记 `mode`/`force` 供独立 doctor 重建有效模式；旧条目缺省 legacy/false，不新增 setting 或 schema。
+ - 每循环在 intake 之后、spawn 之前执行业务 tick（§5.27.15）；`tick` 缺省同 `spawn`，`intake`/`spawn` 缺省 true。进程 `mode` 缺省 `live`，普通项目均为 `live`。仅 `mode:"shadow",force:true` 可用于整进程诊断，不迁移配置或推进业务；`legacy`、缺少 force 的 shadow 明确 `bad_request`。租约附记 `mode`/`force` 供独立 doctor 重建有效模式，历史租约模式归一规则同 §5.27.7。
  - **失联持有者接管**：另一引擎条目除「未过期」外，还须「持有进程存活」才阻止第二个长驻引擎。持有条目的 pid 经 birth 核验已不存在（进程退出且启动时间无法匹配）→ 该条目失联，`acquire_or_renew_lease` 放行接管，并把失联条目标记 `state=stopped`（附 `stopped_reason=holder_dead`），不得仅因 `lease_expires_at` 未到就无限期拒绝恢复。pid 复用由 birth 核验防混淆；`engine status` 与活动实例计数同口径（pid 已死不计为活动）。
  - **心跳**：启动后每 `min(lease_seconds/3, 60)` 秒刷新 `lease_expires_at`；租约过期前 60 秒主动续约。
  - **退避重启**：非零退出或信号终止时，按指数退避（1s → 2s → 4s → … → 上限 60s）重试；连续失败 5 次后进入 backoff 状态，由 `engine status` 展示。
@@ -1362,7 +1366,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  | retry | resolve {action:"retry"} | send_state=not_sent 或非 dispatch 阻塞 | 创建新 dispatch/plan/monitor/review 请求 |
  | replan | resolve {action:"replan"} | 任意 needs_user | needs_plan + plan_wanted，开新段 |
  | resolve | resolve {action:"release_lost"/"mark_sent"/"restore"/"accept_duplicate"} | 失联/发送不明/unknown | 释放失联/确认发送/恢复原任务 |
- | accept_verification | resolve {action:"accept_verification"} | verification_unconfirmed | 写入 verification_override，回到 running + monitor |
+ | accept_verification（已退役） | resolve {action:"accept_verification"} | 不再提供 | conflict，不写入任何 override 或请求 |
  | review_recovery | resolve {action:"recover_review"} | review_blocked 历史误退 | 恢复 in_review + 新 review 请求 |
  | revert_engine_fix | resolve {action:"revert_engine_fix", expected_execution_run_id, expected_plan_sha256} | §5.27.12 候选成立 | needs_user/monitor，退还一次自动补救；不重新执行、不改工作树 |
  | 重新验证本轮 | resolve {action:"resume"} | failure_stage=monitor，verification_environment_failure（不限托管）或 fix_branch_unavailable | 原 run/plan/worktree → running + 可领取 monitor 请求，不重新 dispatch |
@@ -1418,7 +1422,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
  - 新增 `engine_lease`（当前活跃实例数与健康状态）与 `attention_backlog`（attention-list 聚合计数）检查项。
  - `python_runtime` 检查项的语义同 §5.1（离线，来源仅为信息，仅 `bundled` 且无可用证书时失败）。
- - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式包含租约的进程默认与 force（旧条目 legacy/false），不使用带 enabled/preflight 门的 intake 范围。
+ - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式按 §5.27.7 统一解析，仅显式 shadow+force 为诊断，不使用带 enabled/preflight 门的 intake 范围。
 
  **探针超时与失败区分（A8）：**
 
@@ -1442,30 +1446,19 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 目录是 `source=cache` 的本地快照，可能随 Plus 升级或账号变更过期，因此需要可复跑；
    本项就是该复跑入口，不替代引擎侧探针。
 
-#### 5.27.7 set-project-engine-mode（A12 按项目三态）
+#### 5.27.7 统一新引擎与历史模式迁移（KP-E01）
 
  ```json
- set-project-engine-mode {project_id, engine_mode?: "legacy"|"shadow"|"live", expected_revision?: int}
+ set-project-engine-mode {project_id, engine_mode?: "live", expected_revision?: int}
  ```
 
- - 写入 `project_mappings.items[project_id].engine_mode`（**映射条目层**，不是 `automation` 内），带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。
- - **为什么在条目层**：`set-project-automation` 会用固定键白名单重建 `automation` 子字典（`validate_automation`），存在它里面的 `engine_mode` 会被下一次 automation 写入静默丢弃（已在生产库实测复现）。条目层键同时经受 `set-project-mapping`（它展开 `existing_entry`）与 `set-project-automation`（它只替换 `automation` 键）。
+ - 普通项目统一使用 `live`。历史条目层或嵌套 `automation.engine_mode` 的 `legacy`、`shadow`、`live`、空值/缺省均归一为 `live`；未知非法值明确拒绝，不静默激活。统一解析供调度、领取、健康检查和证据守卫使用，读取不写库。
+ - 兼容命令只允许 `live`（缺省也是 live）；旧模式与未知输入返回 `bad_request`，说明已退役。写入 `project_mappings.items[project_id].engine_mode`（**映射条目层**），清除嵌套旧 mode；带 revision CAS（`expected_revision` 提供时校验，冲突 → `conflict`）。新建映射直接保存 live。
  - 配套 `set-project-verify-env {project_id, verify_env, expected_revision?}` 同样写在条目层（`items[pid].verify_env`），仅保留历史配置兼容，不再注入 Pilot 验证进程；`verify_env` 必须是扁平字符串→字符串字典，**凭据类键（`TOKEN`/`SECRET`/`AUTHORIZATION`/`KANEO_TOKEN`/`PI_DESKTOP_TOKEN` 等）一律拒绝**——凭据走凭据文件，不进 `verify_env`。
- - `engine_mode` 缺省或省略 → `legacy`（strangler 安全默认：旧项目行为不变，引擎不驱动）。
- - 非法值 → `bad_request`；命令独立于 `set-project-automation`（后者不改动、不校验该键，读侧 `automation_policy.policy_for` 原样透出）。
- - 不新增 schema 列、不升版本；旧数据（无该键）可回退。
-
- **按项目解析规则（`engine run` 的 Reconciler）：**
-
- | 项目 `engine_mode` | 引擎行为 |
- |---|---|
- | `legacy` | 该项目的任务候选在 decide 之前被过滤，引擎完全不驱动；由旧调度链路处理 |
- | `shadow` | 只算决策 + 计划命令 + `explain()`，全部落 `summary.actions` 日志；**零写入**（不下发命令、不 intake、不 spawn） |
- | `live` | 照常执行前向命令 + intake（只采纳 live 项目）+ spawn（只处理 live 项目的 queued 请求） |
-
- - 一个 `engine run` 进程可同时服务三种模式的项目；三态并存是 strangler 的核心，不得互相干扰。
- - `engine run {mode}` 改为**进程默认模式**（缺省 `legacy`）：项目显式配置优先，未配置回落进程默认；`force=true` 时所有项目强制使用进程 `mode`（演练/调试用）。
- - `engine-mode` 决策与旧调度的差异在 shadow 模式下全部落日志且带 `explain()` 解释（A12）。
+ - Live 引擎取得单实例租约后、首次业务循环之前，在核心 `BEGIN IMMEDIATE` 事务内重读全部映射，校验后写为条目层 live 并清除嵌套 mode；整批只增加一次映射 revision，并保存迁移时间、原 revision 和各条目原模式（含是否缺省）的回执。重复启动无额外迁移写入；迁移失败整体回滚并释放本实例租约。不新增 schema 列或升版本。
+ - 迁移不改自动化策略及其 revision、仓库、模型、预算、暂停、人工接管、任务、请求或执行轮次，不重发已有执行。开启自动处理的项目由新引擎接收/确认/补救；关闭自动处理仍阻止这些新动作，已授权观察、Review、交付按原规则继续。
+ - Shadow 只保留 §5.27.1 的显式 CLI 诊断：整进程只计算决策、命令与 `explain()`，不迁移、不下发命令、不 intake/tick/spawn、不写补救或结算记录。允许实例租约/心跳等运行记录；真实执行的结构化验证要求不因诊断降级。
+ - 新执行必须使用能提供当前结构化报告的后端（Plus 或 Codex CLI）。历史 `pi` 执行配置及轮次继续保留和读取，但新派发必须在启动执行端/发送前明确拒绝，提示显式选择支持的后端；不静默切换、不先执行后才发现报告不支持。已有轮次缺少有效报告时保留成果并转人工处置，不补发执行或人工伪造通过。
 
 #### 5.27.8 set-project-fallback-model（场景 5 备用执行模型）
 
@@ -1524,7 +1517,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 #### 5.27.11 live monitor 核心判定（Plus 结构化报告）
 
-- live 调用 engine-verdict 核对 §5.18.6 的 Plus 结构化报告（`evidence_source=goal_report`）。shadow 同时记录转录路径与报告路径的对比收据，结果仍以旧路径为准；legacy 保留历史 Goal/command_verification 完成策略。三种模式均不在 Pilot 执行 verify。
+- 所有实际执行调用 engine-verdict 核对 §5.18.6 的 Plus 结构化报告（`evidence_source=goal_report`）；历史模式、旧转录、人工 override 与 shadow 旁路回执均不能作为完成凭据。Pilot 不执行 verify。
 - 核心只读取冻结且哈希匹配的计划、可信本机 spec/job 与登记工作树，并经 `read_goal_report` 读取报告；拒绝 payload 自带的伪造检查。核对失败不得退回仓库根目录执行或让助手文字代替报告。
 - 证据读取、Git 指纹与逐阶段核对受 monitor 租约和 runner 剩余时限约束，在 SQLite 写锁外进行，期间保留心跳与前后身份复校。
 - 有效 diff 非空且 Plus 报告覆盖全部冻结命令并通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 报告门。
@@ -1547,7 +1540,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 恢复显式写 needs_user、stage=monitor、failure_stage=monitor；统一分类器重判原检查，恢复 verification_environment_failure 或 verification_unconfirmed 及说明；sent=1/send_state=sent，sent_at/lock_retained 取 before。存量无 before 时，sent_at 必须来自本轮 dispatch_sent，lock_retained=0；binding.branch=HEAD 时完整 delivery 恢复 manual；其他情况须有充分归属证据并通过 binding，禁止猜测。
 - delivery 用 db.set_extra 整体替换；automation 恢复 plan_attempts、关闭 plan_wanted、清理 replan_requested_at/replan_remote_status/replan_worktree_sha256/last_skip。所有 extra 修改基于事务内新鲜行一次合并写入。补救行仅加 reverted_at/reverted_by，不删除，engine_verdict 不改。被舍弃分支路径仅记 orphaned_branch，不操作磁盘；事件 engine_fix_reverted 含执行轮、计划摘要、恢复失败码、environment_reasons、orphaned_branch，另记 resolved。
 - 桌面详情契约：托管任务持续提供 engine_fix_summary={used:int,max:int}（未撤回行数、硬上限与项目上限较小值），非托管为 null；engine_fix_revert 仅候选时为 {execution_run_id,plan_sha256,expected_failure_code}，否则 null；仅候选时 allowed_actions 含 revert_engine_fix。撤回后 candidate 消失，summary 仍提供退额证据。
-- shadow 只计算决策、不下补救命令、不写补救计数；legacy 不接管。
+- 显式 shadow 诊断只计算决策、不下补救命令、不写补救计数；历史 Legacy 配置按 §5.27.7 统一接管。
 
 #### 5.27.13 评审与探针（A3）
 
@@ -1557,26 +1550,29 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 #### 5.27.14 原生读侧共享字段（B4/B5）
 
-get-project-mappings.items 增加 engine_mode（legacy缺省）、verify_env（字典）、fallback_model（{provider_id,model_id}|null），从映射条目层回读，不改变既有 automation 投影。get-task.task 与 list-tasks.tasks 各项增加 phase/condition（state-model §7；Review通过或PR存在为delivery/syncing）以及 attention（当前active需人工项，形状与attention-list同一项逐字段相等，否则null）。纯读取，无新schema或状态写入。
+get-project-mappings.items 提供 engine_mode（按 §5.27.7 归一 live）、effective_engine_mode（仅显式整进程诊断可为 shadow）、verify_env（字典）、fallback_model（{provider_id,model_id}|null）；不改变既有 automation 投影。get-task.task 与 list-tasks.tasks 各项增加 phase/condition（state-model §7；Review通过或PR存在为delivery/syncing）以及 attention（当前active需人工项，形状与attention-list同一项逐字段相等，否则null）。纯读取，无新schema或状态写入。
+
+`executor-status.automation.last_intake.projects[]` 可选提供 `project_name:string|null`：优先读取当前已保存项目映射中的非空名称，再取历史接收记录中的名称。未接收过任务的项目同样能显示名称；确实无名称时返回 null。此投影不读取远端、不写回历史接收记录或其他设置；旧客户端可忽略字段，新客户端兼容旧响应缺字段。
 
 engine-verdict 可选 request_id/run_id（monitor租约身份）、budget_seconds:int（正数）；resolve 可选 engine_fix:dict 为引擎事务内补救参数，必须核验 automation actor 与绑定失败回执，不允许借其绕过发送守卫。
 
 
-A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命令中的凭据；交付提交使用私有 Git index 与冻结源码/tree 对照，保留仓库 hooks。hook 或并发变化导致最终提交 tree 与通过验证的 tree 不同则阻塞，不登记交付、不进入Review、不发布；异常本地提交保留以便恢复，不自动reset工作树。shadow只读核对同一 Plus 证据，不代跑命令或创建验证副本；失败和异常不改变旧 monitor 判定或工作树。
+A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命令中的凭据；交付提交使用私有 Git index 与冻结源码/tree 对照，保留仓库 hooks。hook 或并发变化导致最终提交 tree 与通过验证的 tree 不同则阻塞，不登记交付、不进入Review、不发布；异常本地提交保留以便恢复，不自动reset工作树。历史 shadow 收据仅留审计；显式诊断不执行 monitor 或创建验证副本。
 
 
-三态与手动规划兼容：engine-owned worker 携带进程默认mode/force与实例身份，核心在候选选择、定点领取及dispatch验证后的事务再次校验当前项目模式与活动引擎租约；自动请求仅可领live项目，旧CLI/App runner不套用此限制。唯一手动例外是用户通过start-plans明确授权的plan请求（requested_by=user、manual_authorized=true），可由引擎代原App拉起，领取后仍走核心单飞和原后端守卫；这不授权该项目后续自动派发，也不改变legacy/shadow设置。
+统一引擎与手动规划兼容：engine-owned worker 携带进程 mode/force 与实例身份，核心在候选选择、定点领取及 dispatch 验证后的事务再次校验有效模式与活动引擎租约。普通项目全部 live；诊断不启动或领取 worker。用户通过 start-plans 明确授权的 plan 请求仍走核心单飞和原后端守卫，不据此开启项目自动处理。
 
 
-Live 手动处置边界：核心验证不读取人工verification_override，因此live不得提供无效的accept_verification入口；allowed_actions隐藏该动作，直接resolve同样在任何写入前明确拒绝。可重新运行验证检查、修复/重规划，或使用其他核心允许的处置；legacy/shadow保留原人工接受行为。此约束不改变发送恢复或手动重新执行。
+手动处置边界：核心验证不读取人工 verification_override；所有普通项目的 allowed_actions 隐藏 accept_verification，直接 resolve 同样在任何写入前明确拒绝。可只读重新核对验证证据、修复/重规划，或使用其他核心允许的处置；历史模式不保留人工接受旁路。此约束不改变发送恢复或手动重新执行。
 
 #### 5.27.15 运行中轮次的补给与收尾兜底
 
-- 引擎对 `save_state=active AND status!=done` 任务所在项目取有效模式（项目配置优先进程默认，force 时采用进程模式），只为 live 项目执行业务 tick；不要求 enabled/preflight，以免已运行任务因临时环境失败而失去观察。legacy/shadow 不调用 tick、不新增请求。
+- 引擎对 `save_state=active AND status!=done` 任务所在项目按 §5.27.7 取有效模式，普通项目均执行业务 tick；不要求 enabled/preflight，以免已运行任务因临时环境失败而失去观察。显式 shadow 诊断不调用 tick、不新增请求。
 - `Reconciler(enable_tick=False)` 默认关闭；`engine run` 的 `tick` 缺省同 spawn。开启时每循环在 intake 后、spawn 前，经核心 `tick {project_ids: sorted(pids)}` 补给，同循环可拉起新 monitor/review worker。空范围记录 `business_tick` / `executed=false` / `reason=no_live_projects`。
 - 每循环 `min(lease_seconds/3,60)` 秒（默认 60 秒）；monitor 仍遵守有效默认 120 秒的间隔门，通常约 2–3 分钟观察一次。action 记录 created/skipped 计数和 created 明细；范围查询、命令或结果处理异常均以脱敏错误记 action/日志，继续 spawn 与续租，不持有包裹核心命令的外层写事务。
 - 人工接管只停止自动化决策，不停止观察、收尾与评审：tick 的 monitor/review 覆盖普通及接管任务；托管的丢失租约释放、自动确认与 PR 交付补建仍跳过接管任务。
 - `_round_settle` 仅对仍在 observe/running、无活动请求的托管任务生效：job.json 身份可信且含 ended_at/exit_code 即可补 monitor，不因 run_status 已为 finished/failed 跳过。每轮最多 2 次 settle，shadow 只计算不写；run_status/terminal_recorded 仅诊断。任务离开 observe/running 即不再 settle。
+- 监控瞬时失败的次数与退避由当前执行共享：tick 与 round-settle 不能另开次数链；自动取消失联重试仍保留已用次数。绑定优先使用当前 `sent_at`，避免晚回填轮次时间误判为新执行。自动 `enqueue monitor` 必须提交恰好递增的 `retry_base`，且 `not_before` 不早于最近失败/取消终态时间加该次指数退避；缺省、回退、封顶或过早均拒绝。新执行、成功观察、明确人工观察恢复可开始新链，人工接管和非瞬时错误继续沿既有观察规则。
 - settle 在业务 tick 前入队；两者共用 `monitor:<task>` 活动 key 去重。2 次预算只限制 settle，不限制 tick 按间隔继续观察。观察者恢复与本节收尾职责分离。
 
 #### 5.27.16 项目自动合并 PR（2026-10-18）
@@ -1599,7 +1595,7 @@ Live 手动处置边界：核心验证不读取人工verification_override，因
 - `fix_request` 增加 `mode:"direct"`，冻结 review_key、report_path/report_sha256、plan_sha256、source_execution_run_id、head_sha/branch/worktree_path、fix 标题与描述；状态为 `held|queued|running|awaiting_review`。不以累计修复轮数或历史 PR 字段判断当前修复状态。修复指令只要求处理本报告、保留现有功能并执行原计划验证及必要修复专项；不得把原计划全文作为“重新实现计划”的指令。新 run 固化修复正文和身份，恢复路径核对同一正文及身份，发送不明不得重发。
 - 自动管理任务在原 Review 请求成功结算后、项目仍启用且同分支/暂停/预算/修复次数条件均满足时直接排队修复。原 Review 仍 claimed 时不可领取新修复 run，防止旧结算被新 task.run_id 覆盖。手动任务保留 held，在原生确认费用与影响后经 `start-review-repair` 开启；未授权的历史任务不因 App 更新自动启动。
 - `start-review-repair {task_id, expected_execution_run_id, expected_review_key, expected_report_sha256, expected_plan_sha256}`：核对当前 changes_requested 或同身份 held 材料、无其他活动请求、同项目仓库和需求、原计划及报告字节、已审 head/干净工作树、可修复分支、暂停与额度；先冻结材料并保留旧报告历史，再在事务内重置本轮发送证据和当前 Review 指针并排队修复。相同身份重复操作只返回既有修复，不额外计次或创建会话；身份变化拒绝。无可用分支/材料、预算不足或暂停时保留具体原因，不生成替代计划或新子任务。
-- 启动命令、派发领取及首次发送均复核原执行已有可信终态、观察者已退出，Plus 无仍在运行/等待权限或未核对的后续轮次；不能仅凭工作树暂时干净判断可并发写。手动 direct 修复持久保存用户授权身份，legacy 引擎仅为同身份修复的 dispatch/monitor/review 提供窄领取例外，不开启项目自动化。历史 `fix_task_id` 明确指向仍在处理的同项目同仓库子任务时，父任务保留待修复并提示先收尾该子任务，避免重复启动。
+- 启动命令、派发领取及首次发送均复核原执行已有可信终态、观察者已退出，Plus 无仍在运行/等待权限或未核对的后续轮次；不能仅凭工作树暂时干净判断可并发写。手动 direct 修复持久保存用户授权身份，引擎仅将此授权用于同身份修复的 dispatch/monitor/review，不开启项目自动化。历史 `fix_task_id` 明确指向仍在处理的同项目同仓库子任务时，父任务保留待修复并提示先收尾该子任务，避免重复启动。
 - direct 修复执行失败后的“重新执行”沿用同一修复轮、原报告和原计划，不新增二级任务或消耗新的 Review 修复次数。确认旧修复执行的可信终态及原始被评审执行的完成证据后，冻结旧修复 run、review_key、计划身份与当前工作树指纹，令修复状态回到 queued；派发请求携带同一 review_repair_key。领取时绑定唯一新 run，发送前再次核对旧终态与已确认工作树指纹，保留旧修复的未提交成果，不要求退回最初评审时的干净工作树。运行中、等待权限、发送结果不明或身份变化均不得重发。
 - 旧版本若已留下“当前 run 为空、direct 修复仍为 running、execution_retry 精确指向旧修复 run”的派发阻塞，仅用户“重试派发”入口可恢复：先核验冻结报告、计划、需求、分支、当前工作树指纹、旧执行真实终态及远端同项目任务仍为 In Progress，再在事务内重查任务与旧轮次快照，排队同一修复轮。任一材料变化、有活动请求或核验期间状态变化则拒绝；读侧不得静默修正，重复点击不得额外排队。
 - direct 修复已领取 run 但首次发送未成功时，不能仅凭 closed/not_sent 回执及暂未登记启动意图就撤回 run：迟到的启动命令尚可能继续。缺少可信退役屏障时，“重试派发”明确拒绝并提示先核验原派发状态，不排入必然再次失败的请求；不得将其当作上述当前 run 为空的历史形态恢复。
@@ -1701,7 +1697,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - pending 检测先于 deadline 判断，包括 resume 第一轮与 Goal 契约轮。有开放问题不得因普通时限 stop/abort。最长等待达到后，经核心停止操作收据执行 stop；十秒后未见终态才 abort，原因 execution_question_expired，不扩大只读 client 的写权限。
 - Plus graceful stop 预期关闭 ordinary waiter 并 completed；abort 是 aborted。P1 必须先红验证 spec17 的 stop 跳过规则（当前 runtime graceful stop 的 waiter 关闭尚缺实现），修复时保留 Team 与 preserveRunningTools 边界。worker 不得用 runtime idle 冒充成功完成。
 - 观察续接保持同 task/run/session；只读接管活跃 ask，不传 continue_goal_only。continue_goal 状态门可接受该 run 的 execution_input_required，但不绕过 Goal 精确审批授权，也不获得回答/停止写权限。
-- 提交后、App 后台恢复入口及任务详情“重新连接”汇入同一只读 observer ensure。engine 可发恢复意图，但 legacy/shadow 或 engine关闭时仍有已有 recover-execution-goals 本机入口；不依赖 desktop_queue 领取。该 run 有问答历史、任务 running 且观察者缺席时，后台恢复继续检查；开放问题走普通只读观察，已答契约轮完成后仅沿既有精确 continue_goal_only 审批门续接。多路恢复必须有原子 launch reservation，PID检查只作存活核实，不能单靠检查后spawn宣称并发去重。
+- 提交后、App 后台恢复入口及任务详情“重新连接”汇入同一只读 observer ensure。engine 可发恢复意图，但 engine 关闭或正在诊断时仍有既有 recover-execution-goals 本机入口；不依赖 desktop_queue 领取。该 run 有问答历史、任务 running 且观察者缺席时，后台恢复继续检查；开放问题走普通只读观察，已答契约轮完成后仅沿既有精确 continue_goal_only 审批门续接。多路恢复必须有原子 launch reservation，PID检查只作存活核实，不能单靠检查后spawn宣称并发去重。
 - scope 到期按 §5.25 同身份重新注册，新token替代旧token，accepted create收据仍证明session归属。只对可确认的授权过期恢复，不把全部forbidden作为可重试；只读重连允许身份一致且正在等答的running turn，保留原有历史恢复错误门。
 
 ### 5.28.6 runtime 工具、能力门与验收
@@ -1716,13 +1712,13 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 
 首个处理类型为 `merge_conflict`，只由用户在原任务内显式启动，使用全局 `exec_config` 的脱敏配置快照；不创建 Kaneo 子任务或 plan 请求。启动确认授权一次处理会话及其正常验证、复审、交付链，不授权失败后无限重试。配置变更不改变已确认的轮次；原计划、执行及评审报告保留。
 
-首版要求通用执行配置的后端为 Plus（`pi_desktop`），以获取可信结构化验证报告与源码快照；`pi` 缺少此证据能力时在只读预检明确拒绝，不自动切换后端或模型。该动作在 legacy/shadow/live 三种项目模式均强制核对 Goal 报告并将完整验证树存入 `engine_verdict`，不沿用旧转录判定或 shadow 的旁路回执。
+首版要求通用执行配置的后端为 Plus（`pi_desktop`），以获取可信结构化验证报告与源码快照；`pi` 缺少此证据能力时在只读预检明确拒绝，不自动切换后端或模型。该动作统一强制核对 Goal 报告并将完整验证树存入 `engine_verdict`，不沿用旧模式的转录判定或 shadow 旁路回执。
 
 - `prepare-task-ai-action {task_id,kind:"merge_conflict"}` 只读核对任务、旧执行可信终态、原计划/评审哈希、干净任务分支、项目映射、Kaneo 来源及真实 GitHub PR。必须为同仓库 OPEN/CONFLICTING PR，远端 head 等于已评审提交，并取得真实 `baseRefOid`，不能使用旧 `delivery.base_sha` 替代。返回 `{candidate:{task_id,kind,title,context_sha256,config_sha256,pr_number,branch,base_branch,head_sha,base_sha,model_summary}}`；不调用模型、不改变分支或任务状态。
 - `start-task-ai-action {task_id,kind,expected_context_sha256,expected_config_sha256,confirm:true}` 重新核对同一候选，变化则 conflict；同一 task/原执行/PR/head/base 幂等，只创建一条 dispatch。冻结为 `fix_request.mode=direct,source_kind=merge_conflict`，保留原评审身份，另存 action_id、target_base_sha、github_repo、action_config、action_context_sha256。新 run/session 直接修复、不重新规划；当前有效 pass 清除，旧 pass 留在历史。
 - 仅核心在原任务工作树合入冻结 base：先写 runtime_operations，再 fetch/核对远端分支并准备 `merge --no-commit --no-ff`。不覆盖脏工作树、不 reset/clean、不 rebase/强推。结果未知时核对同一 MERGE_HEAD/ORIG_HEAD/HEAD；无法证明归属则保留现场并阻塞。AI 仅解决冲突、暂存解决后的文件、运行原计划全部 verify 和必要专项验证；禁止自行提交、推送、合并 PR 或另建分支。
 - 沿用现有 Plus Goal 报告与源码快照验证底线；核心提交严格绑定父提交 `[原 head,冻结 base]`、同执行轮次及已验证树，崩溃恢复也核对双父身份。新提交必须重新 Review；已有 PR/pushed_sha 不得跳过复审。通过后正常推送原 PR 分支、重新核对远端检查并沿现有项目自动合并策略推进。失败、base/head 漂移或结果未知不自动启动新的 AI 处理。
-- 复审通过时，保存 `extra.task_ai_action_delivery` 的同次授权、当前执行/计划/需求/新 head/PR 与精确 Review 身份；清除 fix_request 后仍只允许此结果的确定性交付及检查轮询。Review report 成功创建幂等 delivery 请求，未合并时按 next_sync_at 继续核对，合并后正常同步完成；legacy/shadow 只放行匹配该回执的请求，不扩大项目自动化范围。身份变化、人工接管或暂停后不继续。验证失败不自动新增质量修复轮，不允许人工跳过验证或从旧冲突身份重新派发；可只读重核已有证据。
+- 复审通过时，保存 `extra.task_ai_action_delivery` 的同次授权、当前执行/计划/需求/新 head/PR 与精确 Review 身份；清除 fix_request 后仍只允许此结果的确定性交付及检查轮询。Review report 成功创建幂等 delivery 请求，未合并时按 next_sync_at 继续核对，合并后正常同步完成；仅放行匹配该回执的请求，不扩大项目自动化范围。身份变化、人工接管或暂停后不继续。验证失败不自动新增质量修复轮，不允许人工跳过验证或从旧冲突身份重新派发；可只读重核已有证据。
 - 一次性处理完成但正式验证证据不足时，用户可显式确认 `resolve {action:"retry_verification",expected_execution_run_id}`，UI 称「补齐验证报告…」。仅当前 `merge_conflict`、可信已发送终态和空闲 Plus 可用；沿用原冻结计划及配置、工作树、已解决暂存结果，不创建 plan 请求、不重做 merge、不消耗 Review 修复次数。确认前冻结 `verification_recovery` 的 source run、原 run 记录目录、工作树源码/索引指纹与 MERGE_HEAD/ORIG_HEAD；事务内及 dispatch 前复核当前 run、execution_retry、修复身份、PR/head/base 和远端需求。漂移则保留现场并拒绝。新轮只核对原日志补证，无法确认时由 Plus 重新执行原验证；旧 run/报告保留。取消、旧 run、重复确认及自动 actor 均不得启动；普通 resume/retry/replan 不能绕过此门。新证据通过后沿原双父提交→新 Review→原 PR 链推进；再次缺证仅阻塞，不自动再调用模型。
 - `get-task.task_ai_action={can_prepare,reason,current,history}` 为核心投影；history 保留 action_id、类型、状态及中文 state_title、模型摘要、时间、执行轮次/会话、PR/head/base 与结果。状态区分 queued/running/awaiting_review/completed/needs_followup/blocked/failed；“已排队”不表示模型已启动。Review 修复轮额度不被冲突处理次数消耗；既有费用上限继续生效，用户启动开启新计时段。无数据库结构迁移，不直接改 Plus 数据。
 

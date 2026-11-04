@@ -1,26 +1,9 @@
-"""Long-lived reconciler (protocol §5.27.1, A12 per-project engine_mode).
+"""Long-lived live reconciler (protocol §5.27).
 
-Each tick: read a snapshot of automation-managed tasks → :func:`decide.decide`
-→ execute the forward intents from :mod:`kanpilot.engine.steps` through
-``cli.run`` (so every write still goes through the core command surface).
-Crash recovery is by lease + world probe: a lost request is only *derived*
-lost (never auto-released), and external side effects are idempotent via
-``runtime_operations`` inside the core commands themselves.
-
-``engine_mode`` is resolved **per project** (strangler three-state, A12):
-- ``live``   — execute the decided forward commands + intake + spawn.
-- ``shadow`` — compute decisions + planned commands + ``explain()``, log them,
-  write **nothing** (no intake, no spawn, no commands).
-- ``legacy`` — the engine does not drive the task at all (filtered before
-  ``decide``); the legacy scheduler链路 handles it.
-
-A project's effective mode = its ``project_mappings.items[pid].automation.
-engine_mode`` when set, else the process default (``engine run --mode``);
-``force_mode`` makes every project use the process default (drills/debug). One
-process can serve legacy + shadow + live projects simultaneously.
-
-Single-instance lease + heartbeat + exponential backoff live in
-:mod:`kanpilot.engine.health`.
+All historical project modes normalize to live. An explicit process-wide
+shadow diagnostic computes decisions without issuing business commands or
+starting workers. State writes and external side effects remain owned by core
+commands; runtime_operations supplies their existing idempotency receipts.
 """
 from __future__ import annotations
 
@@ -33,8 +16,8 @@ from .. import cli, core, db, derive, util
 from . import decide, fallback, health, ladder, rounds, steps
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
-# Valid per-project engine modes (state-model §strangler).
-ENGINE_MODES = ("legacy", "shadow", "live")
+# Ordinary scheduling and explicit process-wide diagnostic mode.
+ENGINE_MODES = ("shadow", "live")
 # Task-wide remediation accounting, retained across replans (at most two).
 FIX_ROUNDS_KEY = "engine_fix_rounds"
 # extra key where the engine records the rounds it settled after a missed
@@ -75,7 +58,7 @@ def plan_spawns(queued_stages, live_stages, *, foreign_active: bool,
 
 
 class Reconciler:
-    """Decision-driven scheduler over automation-managed tasks (per-project mode)."""
+    """Live scheduler over automation-managed tasks, with explicit diagnostics."""
 
     def __init__(self, db_path, *, mode: str = "live",
                  executor_id: str = "kaneo-engine", log: Optional[Callable] = None,
@@ -84,9 +67,11 @@ class Reconciler:
                  enable_spawn: bool = False, enable_tick: bool = False,
                  instance_id: Optional[str] = None,
                  spawn: Optional[Callable] = None, force_mode: bool = False):
+        if mode not in ENGINE_MODES or (mode == "shadow" and not force_mode):
+            raise util.bad_request("引擎仅支持 live；只读诊断须使用 mode=shadow 和 force=true")
         self.db_path = Path(db_path)
-        self.mode = mode                      # process default engine_mode
-        self.force_mode = force_mode          # True => every project uses self.mode
+        self.mode = mode                      # live or explicit shadow diagnostic
+        self.force_mode = force_mode          # required for a shadow diagnostic
         self.executor_id = executor_id
         self.log = log or (lambda msg: None)
         self.run_command = run_command or (
@@ -105,26 +90,14 @@ class Reconciler:
 
     # ------------------------------------------------------------- modes (A12)
     def _project_modes(self, conn) -> dict:
-        """Effective engine_mode per project (entry-level config > process default).
-
-        ``engine_mode`` lives at the mapping **entry** level
-        (``items[pid].engine_mode``), not inside ``automation``:
-        ``validate_automation`` rebuilds that sub-dict from a fixed key
-        whitelist and would silently drop it.
-        """
-        from .. import project_config
+        """Use the same historical-mode normalization as core claim boundaries."""
+        from .. import project_config, engine_claim_scope
         _, _, items, _ = project_config.load_raw_mappings(conn)
         modes = {}
         for pid in items:
-            if self.force_mode:
-                modes[pid] = self.mode
-                continue
-            entry = items.get(pid) or {}
-            configured = entry.get("engine_mode")
-            if configured not in ("legacy", "shadow", "live"):
-                configured = (entry.get("automation") or {}).get("engine_mode")
-            modes[pid] = (configured if configured in ("legacy", "shadow", "live")
-                          else self.mode)
+            entry = items[pid]
+            configured = engine_claim_scope.project_mode(entry, pid)
+            modes[pid] = "shadow" if self.mode == "shadow" else configured
         return modes
 
     def _live_project_ids(self, conn, modes) -> set:
@@ -178,6 +151,11 @@ class Reconciler:
         policy = automation_policy.policy_for(conn, task["project_id"]) or {}
         budget = core.automation_budget(task, policy, now)
         paused_global = bool(db.get_setting(conn, "paused_global", False))
+        confirm_skip = None
+        if status == "ready":
+            confirm_skip = automation_policy.auto_confirm_skip_reason(
+                conn, task, now,
+                preflight=automation_policy.automation_preflight(conn, task["project_id"]))
         from ..execution_questions import view as question_view
         return {
             "task_id": task["task_id"],
@@ -192,6 +170,7 @@ class Reconciler:
             "manual_takeover": automation.get("manual_takeover", False),
             "paused": paused_global,
             "budget_ok": budget.get("ok", True),
+            "auto_confirm_skip_reason": confirm_skip,
             # Capacity is enforced at intake adoption + the dispatch claim
             # serial; an already-adopted task already holds its slot.
             "capacity_ok": True,
@@ -235,6 +214,11 @@ class Reconciler:
         if ladder.classify(code) != ladder.LADDER_TRANSIENT:
             return None
         kind = row["kind"]
+        monitor_retry = core.monitor_retry_state(conn, task) if kind == "monitor" else None
+        if kind == "monitor":
+            if monitor_retry is None:
+                return None
+            code = monitor_retry["failure_code"]
         if kind == "dispatch" and task["send_state"] in ("sent", "unknown"):
             return None
         if self._has_active_request(conn, task["task_id"], kind):
@@ -243,7 +227,8 @@ class Reconciler:
         # 它的 attempt_no 从零开始，所以已花费的重试次数随 payload 的 retry_base
         # 传递。只读失败请求自身的 attempt_no 会让上限永远达不到（无限退避）。
         base = db.request_payload(row).get("retry_base")
-        spent = base if isinstance(base, int) and base >= 0 else 0
+        spent = (monitor_retry["spent"] if monitor_retry is not None else
+                 base if type(base) is int and base >= 0 else 0)
         fd = decide.failure_decision(code, attempt_no=spent)
         if fd.action != decide.RETRY:
             return None
@@ -383,6 +368,11 @@ class Reconciler:
             return None
         if derive.active_request_for_task(conn, task["task_id"]) is not None:
             return None
+        retry = core.monitor_retry_state(conn, task)
+        if retry is not None:
+            if retry["exhausted"]:
+                return decide.failure_decision(retry["failure_code"], attempt_no=retry["spent"])
+            return None  # The transient-retry path owns backoff and accounting.
         run_id = task["run_id"]
         world = rounds.round_exit(conn, task["task_id"], run_id)
         if not world.get("exited"):
@@ -439,9 +429,6 @@ class Reconciler:
             modes = self._project_modes(conn)
             for task in self._candidate_tasks(conn):
                 pmode = modes.get(task["project_id"], self.mode)
-                if pmode == "legacy":
-                    # The engine does not drive legacy projects at all.
-                    continue
                 if pmode == "live":
                     # A consumed one-shot model override must not leak into a
                     # later, unrelated round of the same task.
@@ -583,6 +570,8 @@ class Reconciler:
 
     def _queued_stages(self, conn, modes):
         """Live automation plus explicitly user-authorized manual planning."""
+        if self.mode == "shadow":
+            return {}
         from .. import engine_claim_scope
         counts = {}
         rows = conn.execute(
@@ -621,6 +610,9 @@ class Reconciler:
         Lifecycle-serial stages (dispatch/monitor/delivery) are deferred while
         another owner holds ``lifecycle_owner`` — see :data:`LIFECYCLE_SERIAL_STAGES`.
         """
+        if self.mode == "shadow":
+            return {"action": "spawn", "executed": False,
+                    "reason": "shadow_diagnostic", "spawned": []}
         if self.foreign_scheduler_active(conn):
             return {"action": "spawn", "executed": False,
                     "reason": "app_scheduler_active", "spawned": []}
@@ -678,6 +670,13 @@ class Reconciler:
         interval = min(lease / 3.0, 60.0)
         backoff, failures, ticks = 1.0, 0, 0
         try:
+            if self.mode == "live":
+                from .. import project_config
+                migration = db.connect(self.db_path)
+                try:
+                    project_config.migrate_engine_modes(migration, util.now_iso())
+                finally:
+                    migration.close()
             while True:
                 if stop_event is not None and stop_event.is_set():
                     break

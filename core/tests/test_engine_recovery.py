@@ -145,8 +145,10 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
 
     def test_shadow_and_stale_receipts_cannot_authorize_retry(self):
         payload = self.quality_failure()
-        self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "shadow"})
-        self.assertEqual(self.call_err("resolve", payload).code, "conflict")
+        self.seed_engine_mode(self.task()["project_id"], "shadow")
+        from kanpilot import engine_claim_scope
+        with engine_claim_scope.command_mode("shadow", True):
+            self.assertEqual(self.call_err("resolve", payload).code, "conflict")
         self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "live"})
         payload["engine_fix"]["execution_run_id"] = "stale"
         self.assertEqual(self.call_err("resolve", payload).code, "conflict")
@@ -160,7 +162,7 @@ class TestEngineRecovery(retry_fixture.TestExecutionRetry):
 
     def test_force_live_resolves_quality_failure_on_legacy_mapping(self):
         self.quality_failure()
-        self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "legacy"})
+        self.seed_engine_mode(self.task()["project_id"], "legacy")
         actions = loop.Reconciler(self.db_path, mode="live", force_mode=True).reconcile_once()["actions"]
         self.assertTrue(any(a.get("command") == "resolve" and a.get("executed") for a in actions), actions)
         self.assertEqual(self.task()["status"], "ready")

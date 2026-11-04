@@ -230,9 +230,9 @@ class TestQualityRetryLoop(recovery_fixture.TestEngineRecovery):
     def test_shadow_computes_without_writing(self):
         tid = self._adopt()
         self._empty_verdict(tid)
-        self.call("set-project-engine-mode", {"project_id": self.task()["project_id"], "engine_mode": "shadow"})
         before = self._extra(tid)
-        actions = self._actions(tid)
+        actions = [a for a in loop.Reconciler(self.db_path, mode="shadow", force_mode=True).reconcile_once()["actions"]
+                   if a.get("task_id") == tid]
         self.assertTrue(all(not a.get("executed") for a in actions))
         self.assertEqual(self._extra(tid), before)
 

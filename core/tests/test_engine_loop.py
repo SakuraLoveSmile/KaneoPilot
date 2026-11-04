@@ -274,6 +274,10 @@ class TestReconcile(KanpilotTestCase):
                                  (status, tid))
         finally:
             conn.close()
+        self.seed_auto_confirmation(tid)
+        mocked = patch("kanpilot.automation_policy.automation_preflight", return_value=[])
+        mocked.start()
+        self.addCleanup(mocked.stop)
         return tid
 
     def test_ready_task_confirms_dispatch(self):
@@ -299,7 +303,7 @@ class TestReconcile(KanpilotTestCase):
 
     def test_shadow_mode_writes_nothing(self):
         tid = self._automate("taskengshdw00000000001")
-        summary = loop.Reconciler(self.db_path, mode="shadow").reconcile_once()
+        summary = loop.Reconciler(self.db_path, mode="shadow", force_mode=True).reconcile_once()
         self.assertTrue(any(a["task_id"] == tid and a["executed"] is False
                             for a in summary["actions"]))
         self.assertEqual([r for r in self.requests(status="queued")
@@ -452,7 +456,7 @@ class TestDeliverySyncSchedule(KanpilotTestCase):
 
 class TestRunLoop(KanpilotTestCase):
     def test_lease_lifecycle_and_release(self):
-        rec = loop.Reconciler(self.db_path, mode="shadow", log=lambda m: None)
+        rec = loop.Reconciler(self.db_path, mode="shadow", force_mode=True, log=lambda m: None)
         result = rec.run(instance_id=_iid(), max_ticks=2, sleeper=lambda s: None)
         self.assertEqual(result["ticks"], 2)
         conn = db.connect(self.db_path)
@@ -466,7 +470,7 @@ class TestRunLoop(KanpilotTestCase):
             def reconcile_once(self, now=None):
                 raise RuntimeError("boom")
 
-        rec = Boom(self.db_path, mode="shadow", log=lambda m: None)
+        rec = Boom(self.db_path, mode="shadow", force_mode=True, log=lambda m: None)
         sleeps = []
         result = rec.run(instance_id=_iid(), max_ticks=2, sleeper=sleeps.append)
         self.assertEqual(result["failures"], 2)
@@ -491,14 +495,14 @@ class TestIntake(KanpilotTestCase):
         self.assertEqual(intake[0]["adopted"], 0)
 
     def test_intake_shadow_is_preview_only(self):
-        rec = loop.Reconciler(self.db_path, mode="shadow", enable_intake=True)
+        rec = loop.Reconciler(self.db_path, mode="shadow", force_mode=True, enable_intake=True)
         summary = rec.reconcile_once()
         intake = [a for a in summary["actions"] if a.get("action") == "intake"]
         self.assertEqual(len(intake), 1)
         self.assertFalse(intake[0]["executed"])   # shadow => dry preview
 
     def test_intake_throttled_within_interval(self):
-        rec = loop.Reconciler(self.db_path, mode="shadow", enable_intake=True,
+        rec = loop.Reconciler(self.db_path, mode="shadow", force_mode=True, enable_intake=True,
                               intake_interval_seconds=300)
         first = rec.reconcile_once()
         second = rec.reconcile_once()  # immediate second tick
@@ -592,7 +596,7 @@ class TestSpawn(KanpilotTestCase):
                              "scheduler_started_seconds": 100,
                              "scheduler_started_microseconds": 200, "workers": []}})
             spawned = []
-            rec = loop.Reconciler(self.db_path, mode="legacy",
+            rec = loop.Reconciler(self.db_path, mode="live",
                                   spawn=lambda stage, *_: spawned.append(stage))
             # Both a dead PID and a reused PID must unblock this exact manual request.
             for birth in (None, {"started_seconds": 101, "started_microseconds": 200}):

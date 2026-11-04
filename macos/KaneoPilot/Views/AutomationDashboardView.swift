@@ -524,7 +524,7 @@ struct AutomationDashboardView: View {
         engine.engineStatus == nil ? "clock" : doctorHealthIcon
     }
 
-    /// 图标｜标签｜「N 个项目 · M 个自动处理已开 · live a · legacy b」｜项目设置 ›；读取失败显示核心原文。
+    /// 图标｜标签｜「N 个项目 · M 个自动处理已开」｜项目设置 ›；读取失败显示核心原文。
     private var summaryProjectRow: some View {
         HStack(spacing: Spacing.m) {
             healthIcon("folder", Color.kpSecondary)
@@ -554,8 +554,7 @@ struct AutomationDashboardView: View {
     private var projectSummary: String {
         DashboardProjectSummary.text(
             total: projects.count,
-            automationOn: projects.filter { $0.automation?.enabled == true }.count,
-            modes: projects.map { $0.engineMode })
+            automationOn: projects.filter { $0.automation?.enabled == true }.count)
     }
 
     // MARK: - 环境详情（告警区段与摘要行共用）

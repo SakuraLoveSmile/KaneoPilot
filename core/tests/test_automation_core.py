@@ -325,13 +325,15 @@ def test_resume_restores_correct_step(state, code,target,kind):
     else: assert core.automation_of(state.task())['plan_wanted']
 
 
-def test_accept_verification_requires_correct_reason_and_round(state):
-    state.update(status='needs_user',failure_code='verification_unconfirmed',failure_stage='monitor')
-    cmd_queue.cmd_resolve(state.ctx,{'task_id':TASK,'action':'accept_verification','note':'checked'})
-    assert state.task()['status']=='running'
-    assert db.task_extra(state.task())['verification_override']['execution_run_id']=='execution1'
-    state.update(status='needs_user',failure_code='execution_failed')
-    with pytest.raises(util.KanpilotError): cmd_queue.cmd_resolve(state.ctx,{'task_id':TASK,'action':'accept_verification'})
+def test_accept_verification_never_overrides_strict_evidence(state):
+    for reason in ('verification_unconfirmed', 'execution_failed'):
+        state.update(status='needs_user', failure_code=reason, failure_stage='monitor')
+        before = dict(state.task())
+        with pytest.raises(util.KanpilotError) as error:
+            cmd_queue.cmd_resolve(state.ctx, {'task_id': TASK, 'action': 'accept_verification', 'note': 'checked'})
+        assert error.value.code == 'conflict'
+        assert dict(state.task()) == before
+        assert 'verification_override' not in db.task_extra(state.task())
 
 
 def test_resume_cannot_bypass_direct_fix_budget_or_round_limit(state):
@@ -476,6 +478,7 @@ def test_remote_read_invalidation_prevents_status_write(state, monkeypatch, iden
         state.update(status='running', stage='monitor')
         state.live['task']['status'] = 'in-progress'
         claim = state.claim('monitor', 'monitor1')
+        db.update_request(state.conn, claim['request_id'], NOW, claimed_by='kaneo-monitor')
         payload = {'task_id': TASK, 'run_id': claim['run_id'],
                    'target': 'in-review', 'expected_current': 'in-progress'}
         if identity == 'legacy_monitor':
@@ -483,6 +486,17 @@ def test_remote_read_invalidation_prevents_status_write(state, monkeypatch, iden
             payload.pop('run_id')
             payload.update(monitor_request_id=claim['request_id'], monitor_run_id=claim['run_id'])
         original_status = 'running'
+        # This test isolates claim invalidation after a successful evidence gate;
+        # strict report/source failures are covered by engine_verdict tests.
+        from kanpilot.engine import verdict
+        binding = {'head_sha': 'head1', 'worktree_path': core.delivery_of(state.task())['worktree_path']}
+        state.extra(engine_verdict={'evidence_source': 'goal_report', 'verification_ok': True,
+            'execution_run_id': state.task()['run_id'], 'plan_sha256': state.task()['plan_sha256'],
+            'binding': binding, 'index_source_sha256': 'verified-tree'})
+        monkeypatch.setattr(verdict, 'binding', lambda *a, **k: binding)
+        monkeypatch.setattr(verdict, 'receipt_evidence_current', lambda *a: True)
+        monkeypatch.setattr(git_delivery, 'tree_source_sha256', lambda *a: 'verified-tree')
+        monkeypatch.setattr(cmd_remote, '_require_goal_gate', lambda *a: None)
     clock = [0.0]
     monkeypatch.setattr(cmd_remote.time, 'monotonic', lambda: clock[0])
     reads, writes = [], []
@@ -650,3 +664,79 @@ def test_historical_verdict_binding_does_not_block_current_review_branch(state):
     assert core.automation_of(state.task())['fix_round'] == 1
     assert core.review_repair_of(state.task())['state'] == 'queued'
     assert not state.conn.execute("SELECT 1 FROM requests WHERE kind='plan'").fetchone()
+
+
+@pytest.mark.parametrize('hold', [True, False, None])
+@pytest.mark.parametrize('reason', ['disabled', 'auto_confirm_off', 'preflight',
+                                   'verify_missing', 'verify_mismatch', 'budget', 'paused'])
+def test_direct_automatic_confirm_and_reconciler_preserve_original_gates(state, monkeypatch, reason, hold):
+    from kanpilot.engine import decide, loop
+    state.update(plan_path=str(state.ctx.db_path.parent / 'plan.md'))
+    state.extra(plan_execution_hold=hold,
+                plan_verify={'plan_sha256': 'plan', 'commands': ['python -m unittest']})
+    if hold is None:
+        extra = db.task_extra(state.task())
+        extra.pop('plan_execution_hold', None)
+        db.update_task(state.conn, TASK, NOW, extra_json=extra)
+    if reason == 'disabled': state.policy(enabled=False)
+    elif reason == 'auto_confirm_off': state.policy(auto_confirm_plan=False)
+    elif reason == 'preflight': monkeypatch.setattr(automation_policy, 'automation_preflight', lambda *a: [{'code': 'bad'}])
+    elif reason == 'verify_missing': state.extra(plan_verify={})
+    elif reason == 'verify_mismatch': state.extra(plan_verify={'plan_sha256': 'other', 'commands': ['test']})
+    elif reason == 'budget': core.update_automation(state.conn, state.task(), NOW, cost_usd=10)
+    elif reason == 'paused': db.set_setting(state.conn, 'paused_stages', ['dispatch'])
+    rec = loop.Reconciler(state.ctx.db_path)
+    snap = rec._snapshot(state.conn, state.task(), state.ctx.now)
+    decision = decide.decide(snap)
+    assert decision.action != decide.CONFIRM_PLAN
+    assert snap['auto_confirm_skip_reason'] == reason
+    before = dict(state.task())
+    with pytest.raises(util.KanpilotError) as error:
+        payload = {'task_id': TASK, 'actor': 'automation'}
+        if hold:
+            payload.update(kind='dispatch', confirm_plan=True, expected_plan_sha256='plan')
+        cmd_queue.cmd_enqueue(state.ctx, payload)
+    assert error.value.code == 'conflict'
+    assert dict(state.task()) == before
+    assert db.task_extra(state.task()).get('plan_execution_hold') is hold
+    assert state.conn.execute("SELECT COUNT(*) FROM requests WHERE kind='dispatch'").fetchone()[0] == 0
+    # The same task still permits explicit user confirmation.
+    result = cmd_queue.cmd_enqueue(state.ctx, {'task_id': TASK, 'kind': 'dispatch',
+        'confirm_plan': True, 'expected_plan_sha256': 'plan', 'actor': 'user'})
+    assert result['request']['kind'] == 'dispatch'
+    assert not db.task_extra(state.task()).get('plan_execution_hold')
+
+
+@pytest.mark.parametrize('changed', ['disabled', 'auto_confirm_off', 'verify_mismatch', 'paused'])
+def test_automatic_confirm_rechecks_local_permission_after_preflight(state, monkeypatch, changed):
+    state.update(plan_path=str(state.ctx.db_path.parent / 'plan.md'))
+    state.extra(plan_execution_hold=True,
+                plan_verify={'plan_sha256': 'plan', 'commands': ['test']})
+    def preflight(conn, project_id):
+        assert not conn.in_transaction
+        if changed == 'disabled': state.policy(enabled=False)
+        elif changed == 'auto_confirm_off': state.policy(auto_confirm_plan=False)
+        elif changed == 'verify_mismatch': state.extra(plan_verify={'plan_sha256': 'changed', 'commands': ['test']})
+        else: db.set_setting(conn, 'paused_stages', ['dispatch'])
+        return []
+    monkeypatch.setattr(automation_policy, 'automation_preflight', preflight)
+    with pytest.raises(util.KanpilotError) as error:
+        cmd_queue.cmd_enqueue(state.ctx, {'task_id': TASK, 'kind': 'dispatch',
+            'confirm_plan': True, 'expected_plan_sha256': 'plan', 'actor': 'automation'})
+    assert error.value.code == 'conflict'
+    assert db.task_extra(state.task())['plan_execution_hold'] is True
+    assert state.conn.execute("SELECT COUNT(*) FROM requests WHERE kind='dispatch'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('hold', [False, None])
+def test_authorized_automatic_ready_enqueue_still_rechecks_frozen_plan(state, hold):
+    state.update(plan_path=str(state.ctx.db_path.parent / 'plan.md'))
+    state.extra(plan_execution_hold=hold,
+                plan_verify={'plan_sha256': 'plan', 'commands': ['test']})
+    result = cmd_queue.cmd_enqueue(state.ctx, {'task_id': TASK, 'actor': 'automation'})
+    assert result['request']['kind'] == 'dispatch'
+    assert result['request']['requested_by'] == 'automation'
+    repeated = cmd_queue.cmd_enqueue(state.ctx, {'task_id': TASK, 'actor': 'automation'})
+    assert repeated['deduplicated'] is True
+    assert repeated['request']['request_id'] == result['request']['request_id']
+    assert state.conn.execute("SELECT COUNT(*) FROM requests WHERE kind='dispatch'").fetchone()[0] == 1

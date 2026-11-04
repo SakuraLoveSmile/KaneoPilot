@@ -145,10 +145,41 @@ def automation_preflight(conn, project_id):
     execution = exec_config.load(conn)
     from . import harnesses
     if not harnesses.supports_role(execution.get("backend"), "execution"):
-        add("exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力")
-    if (execution.get("pi_desktop") or {}).get("permission_mode") != "auto":
+        add("exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力，请选择 Plus 或 Codex CLI")
+    if (execution.get("backend") == "pi_desktop"
+            and (execution.get("pi_desktop") or {}).get("permission_mode") != "auto"):
         add("exec_permission_not_auto", "Plus 执行权限需为 auto")
     return errors
+
+
+def auto_confirm_skip_reason(conn, task, now, *, preflight=None):
+    """One guard for scheduler and direct automated plan confirmation.
+
+    Callers prepare external preflight checks before taking the writer lock.
+    Policy, task evidence, budget and pause are always checked on current rows.
+    """
+    from . import core
+    policy = policy_for(conn, task["project_id"]) or constants.AUTOMATION_DEFAULTS
+    verify = db.task_extra(task).get("plan_verify") or {}
+    if not core.is_automation_managed(task):
+        return "not_automation_managed"
+    if not db.task_schedulable(task):
+        return "task_saved"
+    if not policy.get("enabled"):
+        return "disabled"
+    if not policy.get("auto_confirm_plan"):
+        return "auto_confirm_off"
+    if preflight is None or preflight:
+        return "preflight"
+    if not verify.get("commands"):
+        return "verify_missing"
+    if verify.get("plan_sha256") != task["plan_sha256"]:
+        return "verify_mismatch"
+    if not core.automation_budget(task, policy, now)["ok"]:
+        return "budget"
+    if db.paused(conn, "dispatch"):
+        return "paused"
+    return None
 
 
 def cmd_set_project_automation(ctx, payload):

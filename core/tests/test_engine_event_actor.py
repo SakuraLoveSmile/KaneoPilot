@@ -15,6 +15,7 @@ Run: ``cd core && python3 -m pytest tests/test_engine_event_actor.py -q``.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from helpers import KanpilotTestCase  # noqa: E402
 from kanpilot import core, db, util  # noqa: E402
@@ -85,6 +86,10 @@ class TestEnqueueActor(KanpilotTestCase):
 
     def test_automation_actor_recorded(self):
         tid, sha = self._ready()
+        self.seed_auto_confirmation(tid)
+        mocked = patch("kanpilot.automation_policy.automation_preflight", return_value=[])
+        mocked.start()
+        self.addCleanup(mocked.stop)
         self.call("enqueue", {"task_id": tid, "kind": "dispatch",
                               "confirm_plan": True, "expected_plan_sha256": sha,
                               "actor": "automation"})
@@ -127,6 +132,10 @@ class TestEnqueueActor(KanpilotTestCase):
     def test_confirm_plan_records_automation(self):
         """引擎的 CONFIRM_PLAN 走 confirm_plan_inline：enqueued + resolved 都记 automation。"""
         tid, sha = self._ready("taskactor000000000005")
+        self.seed_auto_confirmation(tid)
+        mocked = patch("kanpilot.automation_policy.automation_preflight", return_value=[])
+        mocked.start()
+        self.addCleanup(mocked.stop)
         self.call("enqueue", {"task_id": tid, "kind": "dispatch",
                               "confirm_plan": True, "expected_plan_sha256": sha,
                               "actor": "automation"})
@@ -213,7 +222,9 @@ class TestReconcilerLeavesNoUserTrail(KanpilotTestCase):
         finally:
             conn.close()
 
-        loop.Reconciler(self.db_path, mode="live").reconcile_once()
+        self.seed_auto_confirmation(tid)
+        with patch("kanpilot.automation_policy.automation_preflight", return_value=[]):
+            loop.Reconciler(self.db_path, mode="live").reconcile_once()
 
         events = self.call("list-events", {"task_id": tid, "limit": 300})["events"]
         # A14: the engine created no ``actor=user`` trail of its own. Task

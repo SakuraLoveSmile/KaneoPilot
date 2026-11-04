@@ -158,10 +158,9 @@ class TestBoardDirectMapping:
         # dispatching / prepared / submitting → todo/派发中
         d = claim_request(factory, tid, "dispatch")
         assert_board(factory, tid, "todo", "派发中")
-        ev = ui_evidence(
-            session_marker=d["context"]["session_marker"],
-            repository=d["context"]["repository"],
-            attachment_name=d["context"]["attachment_name"])
+        ev = {"backend": "codex", "config": d["context"]["exec_config"],
+              "session_marker": d["context"]["session_marker"],
+              "repository": d["context"]["repository"]}
         cli("dispatch-prepare", {"task_id": tid, "run_id": d["run_id"],
                                  "evidence": ev})
         assert_board(factory, tid, "todo", "派发中")
@@ -169,22 +168,12 @@ class TestBoardDirectMapping:
         assert_board(factory, tid, "todo", "派发中")
 
         # running → in_progress/执行中
-        ev2 = dict(ev, message_visible=True, session_title="看板矩阵",
-                   session_id=f"sess-{tid[:8]}")
-        cli("dispatch-confirm", {"task_id": tid, "run_id": d["run_id"],
-                                 "evidence": ev2})
+        factory.start_dispatch(task, d, prepared=True)
         assert_board(factory, tid, "in_progress", "执行中")
 
         # in_review → in_review/评审中
-        # §5.9 分支评审前置：core.require_committed_review 要求
-        # delivery.commits 中存在 execution_run_id==本轮执行 run_id 且
-        # sha==delivery.head_sha 的登记，缺证据即 validation_failed
-        # （「本轮执行尚未完成核心本地提交，不能进入分支评审」）。这里沿用
-        # tests/conftest.py TaskFactory.make_in_review 的既有正确生命周期模式：
-        # 在 tmp_env 的临时本地仓库工作树里造一处真实改动，再调用核心命令
-        # delivery-commit（monitor 请求身份 + expected_execution_run_id=派发
-        # run_id）由核心完成本地提交并登记证据——不手工写入 delivery 证据、
-        # 不弱化守卫、本用例仍走 in-review（pr/分支）路径，不触真实远端。
+        # Real worker evidence must pass the engine before its source snapshot
+        # can be committed for branch review.
         m = claim_request(factory, tid, "monitor")
         delivery = factory.get_task(tid).get("delivery") or {}
         assert (delivery.get("mode") == "pr"
@@ -192,8 +181,7 @@ class TestBoardDirectMapping:
             delivery.get(key) for key in ("branch", "base_branch", "base_sha",
                                           "head_sha", "worktree_path")), (
             f"{tid} 应已登记完整分支评审工作区：{delivery}")
-        (Path(delivery["worktree_path"]) / "board-lifecycle-feature.py").write_text(
-            "VALUE = 1\n", encoding="utf-8")
+        factory.verify_execution(tid, m, d["run_id"])
         committed = cli("delivery-commit", {
             "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
             "expected_execution_run_id": d["run_id"]})

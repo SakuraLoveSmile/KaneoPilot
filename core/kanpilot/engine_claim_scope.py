@@ -101,19 +101,33 @@ def action_delivery_allowed(conn, task, request=None, *, allow_paused=False):
     return True
 
 
+def project_mode(mapping, project_id=""):
+    """Read historical project modes as live without changing saved settings."""
+    if not isinstance(mapping, dict):
+        raise util.KanpilotError('validation_failed', '项目 %s 的引擎配置无效' % project_id)
+    automation = mapping.get('automation')
+    if automation is not None and not isinstance(automation, dict):
+        raise util.KanpilotError('validation_failed', '项目 %s 的引擎配置无效' % project_id)
+    automation = automation or {}
+    for mode in (mapping.get('engine_mode'), automation.get('engine_mode')):
+        if mode not in (None, '', 'legacy', 'shadow', 'live'):
+            raise util.KanpilotError('validation_failed',
+                '项目 %s 的引擎模式无效' % project_id)
+    return 'live'
+
+
 def effective_mode(conn, project_id):
-    """Project setting wins, except an explicit engine process force override."""
+    """All projects run live; only an explicit process-wide diagnostic is shadow."""
     owned = os.environ.get(WORKER_ENV) == '1'
     context = _COMMAND_MODE.get()
-    default = context[0] if context is not None else (os.environ.get(MODE_ENV, 'legacy') if owned else 'legacy')
+    default = context[0] if context is not None else (os.environ.get(MODE_ENV, 'live') if owned else 'live')
     if default not in ('legacy', 'shadow', 'live'):
-        return None
+        raise util.KanpilotError('validation_failed', '引擎进程模式无效')
     _, _, items, _ = project_config.load_raw_mappings(conn)
-    mapping = items.get(project_id) or {}
-    mode = mapping.get('engine_mode') or (mapping.get('automation') or {}).get('engine_mode') or default
-    if (context is not None and context[1]) or (context is None and owned and os.environ.get(FORCE_ENV) == '1'):
-        mode = default
-    return mode if mode in ('legacy', 'shadow', 'live') else None
+    mapping = items.get(project_id, {})
+    mode = project_mode(mapping, project_id)
+    forced = (context is not None and context[1]) or (context is None and owned and os.environ.get(FORCE_ENV) == '1')
+    return 'shadow' if forced and default == 'shadow' else mode
 
 
 def allows(conn, request, now):
@@ -127,6 +141,8 @@ def allows(conn, request, now):
     task = db.get_task(conn, request['task_id']) if request['task_id'] else None
     if task is None:
         return False
+    if effective_mode(conn, task['project_id']) != 'live':
+        return False  # Diagnostic mode may not claim even explicitly manual work.
     if manual_plan(request) or manual_review_repair(conn, request, task):
         return True  # Explicit user authorization; never autonomous intake.
     return effective_mode(conn, task['project_id']) == 'live'

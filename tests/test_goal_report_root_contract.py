@@ -436,38 +436,37 @@ def test_fake_ai_cannot_bypass_the_core_bottom_line(cli, tmp_env, fake_plus):
     assert "structured" in out["error"]
 
 
-def test_advance_task_gate_requires_monitor_material(
-    cli, tmp_env, fake_plus
-):
-    """绕过 monitor 直接推进 pi_desktop 轮次 → conflict，远端不动。"""
-    conn_file = write_connection(tmp_env.root, fake_plus)
-    task_id, run_id, _run_dir = seed_goal_round(tmp_env, conn_file)
-    set_session_runs_root(tmp_env, tmp_env.app_support / "runs")
-    # 远端任务在 in-progress：硬闸应在任何远端写之前拒绝。
+def test_advance_task_gate_requires_monitor_material(factory, cli):
+    """Valid execution artifacts alone cannot authorize a direct advance."""
+    running = factory.make_running(title="Direct advance needs core verdict")
+    task_id = running.task.task_id
     out = cli("advance-task", {
         "task_id": task_id, "target": "in-review",
         "expected_current": "in-progress",
     }, expect=1)
     assert out["code"] == "conflict"
-    assert "绕过 monitor" in out["error"]
-    # 本地状态未改（远端从未被触碰）。
-    assert cli("get-task", {"task_id": task_id})["task"]["status"] == "running"
+    assert "核心判定" in out["error"]
+    assert factory.get_task(task_id)["status"] == "running"
+    assert factory.kaneo.get_task(task_id)["status"] == "in-progress"
 
 
-def test_pi_round_is_not_blocked_by_the_goal_gate(cli, tmp_env, fake_plus):
-    """pi 后端轮次不受 T5 硬闸影响（§5.18.4 旧接口不变）。"""
-    conn_file = write_connection(tmp_env.root, fake_plus)
-    task_id, run_id, _run_dir = seed_goal_round(
-        tmp_env, conn_file, backend="pi", run_id="runpiroot00000001",
-    )
-    set_session_runs_root(tmp_env, tmp_env.app_support / "runs")
+def test_historical_pi_round_requires_live_engine_verification(factory, cli, tmp_env):
+    """Historical pi remains readable but cannot bypass Live verification."""
+    import sqlite3
+    running = factory.make_historical_running(title="Historical pi needs core verdict")
+    task_id = running.task.task_id
+    task = factory.get_task(task_id)
+    with sqlite3.connect(tmp_env.db) as conn:
+        conn.execute("UPDATE execution_rounds SET worktree_path=? WHERE task_id=? AND run_id=?",
+                     (task["delivery"]["worktree_path"], task_id, running.dispatch_run_id))
     out = cli("advance-task", {
         "task_id": task_id, "target": "in-review",
         "expected_current": "in-progress",
     }, expect=1)
-    # 只有远端/凭据相关失败，绝不出现 T5 硬闸的「绕过 monitor」拒绝。
-    assert "绕过 monitor" not in out["error"]
-    assert "evaluation_event_id" not in out["error"]
+    assert out["code"] == "conflict"
+    assert "核心判定" in out["error"]
+    assert factory.get_task(task_id)["status"] == "running"
+    assert factory.kaneo.get_task(task_id)["status"] == "in-progress"
 
 
 # ------------------------------------------------------------ T6 兼容门

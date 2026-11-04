@@ -256,14 +256,9 @@ class TestArchiveTrash:
         tid = running.task.task_id
         mreq = factory.find_request(tid, "monitor")
         m = factory.claim("monitor", request_id=mreq["request_id"])
-        # §5.9：advance target=in-review 先过 core.require_committed_review 才到
-        # 远端比较（cmd_remote.cmd_advance_task）；make_running 的任务已被
-        # start-plans 登记 workspace_version=1 分支工作区，须按 conftest.
-        # make_in_review 既有模式先完成真实 delivery-commit 再篡改远端，
-        # 保留本用例 remote_conflict 原意。
-        delivery = factory.get_task(tid).get("delivery") or {}
-        (Path(delivery["worktree_path"]) / "save-state-conflict.py").write_text(
-            "VALUE = 1\n", encoding="utf-8")
+        # The retained worker result must be verified and committed before
+        # advance reaches the remote-conflict boundary used by this scenario.
+        factory.verify_execution(tid, m, running.dispatch_run_id)
         committed = cli("delivery-commit", {
             "task_id": tid, "request_id": m["request_id"], "run_id": m["run_id"],
             "expected_execution_run_id": running.dispatch_run_id})

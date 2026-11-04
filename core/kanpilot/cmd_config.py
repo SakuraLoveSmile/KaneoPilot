@@ -477,6 +477,12 @@ def cmd_executor_status(ctx, payload: dict) -> dict:
     result["paused"] = {"global": db.get_setting(ctx.conn, "paused_global", False),
                         "stages": db.get_setting(ctx.conn, "paused_stages", []) or []}
     _, _, items, _ = project_config.load_raw_mappings(ctx.conn)
+    last_intake = db.get_setting(ctx.conn, "automation_last_intake")
+    # Resolve names without requiring a task or rewriting the saved intake record.
+    for project in (last_intake or {}).get("projects", []):
+        mapping = items.get(project.get("project_id")) or {}
+        project["project_name"] = ((mapping.get("project_name") or "").strip()
+                                   or (project.get("project_name") or "").strip() or None)
     managed = [t for t in ctx.conn.execute("SELECT * FROM tasks").fetchall()
                if core.is_automation_managed(t) and db.task_schedulable(t)]
     waiting = [t for t in managed if t["status"] == "in_review" and db.task_extra(t).get("review_conclusion") == "pass"]
@@ -485,7 +491,7 @@ def cmd_executor_status(ctx, payload: dict) -> dict:
         "active_tasks": sum(t["status"] not in ("done", "needs_user") and t not in waiting for t in managed),
         "max_active_tasks": automation_policy.global_settings(ctx.conn)["max_active_tasks"],
         "waiting_merge": len(waiting),
-        "pending_tasks": ctx.conn.execute("SELECT COUNT(*) FROM tasks WHERE status='needs_user' AND save_state='active'").fetchone()[0], "last_intake": db.get_setting(ctx.conn, "automation_last_intake"),
+        "pending_tasks": ctx.conn.execute("SELECT COUNT(*) FROM tasks WHERE status='needs_user' AND save_state='active'").fetchone()[0], "last_intake": last_intake,
     }
     if "instance_id" in payload:
         from . import process_owner

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from kanpilot import auto_monitor, codex_execution, db, pi_desktop_review
+from kanpilot.engine import loop
 
 try:
     from conftest import make_due, write_plan_file
@@ -111,7 +112,39 @@ def test_managed_codex_dispatch_to_verified_delivery_and_review(factory, cli, tm
     job = wait_for(lambda: finished(directory), directory)
     cli("set-project-mapping", {"project_id": task.project_id, "repository": str(task.repository),
         "enabled": True, "expected_revision": cli("get-project-mappings", {})["revision"]})
-    cli("set-project-engine-mode", {"project_id": task.project_id, "engine_mode": mode})
+    # Seed a pre-upgrade mapping: the retired modes must receive the same
+    # strict report checks and delivery behavior without invoking their setter.
+    conn = db.connect(tmp_env.db)
+    try:
+        with db.write_txn(conn):
+            mappings = db.get_setting(conn, "project_mappings")
+            mappings["items"][task.project_id]["engine_mode"] = mode
+            db.set_setting(conn, "project_mappings", mappings)
+    finally:
+        conn.close()
+    mappings = cli("get-project-mappings", {})
+    assert next(item for item in mappings["items"] if item["project_id"] == task.project_id)["engine_mode"] == "live"
+    # Starting the new engine migrates saved modes without changing this
+    # already-sent execution. It must still finish from its one original job.
+    conn = db.connect(tmp_env.db)
+    try:
+        before_task = dict(db.require_task(conn, task.task_id))
+        before_requests = [dict(row) for row in conn.execute(
+            "SELECT * FROM requests WHERE task_id=? ORDER BY request_id", (task.task_id,))]
+    finally:
+        conn.close()
+    loop.Reconciler(tmp_env.db).run(max_ticks=0, instance_id="upgrade-" + mode)
+    revision = cli("get-project-mappings", {})["revision"]
+    loop.Reconciler(tmp_env.db).run(max_ticks=0, instance_id="upgrade-again-" + mode)
+    assert cli("get-project-mappings", {})["revision"] == revision
+    conn = db.connect(tmp_env.db)
+    try:
+        assert db.get_setting(conn, "project_mappings")["items"][task.project_id]["engine_mode"] == "live"
+        assert dict(db.require_task(conn, task.task_id)) == before_task
+        assert [dict(row) for row in conn.execute(
+            "SELECT * FROM requests WHERE task_id=? ORDER BY request_id", (task.task_id,))] == before_requests
+    finally:
+        conn.close()
     assert job["verification_evidence_version"] == 1
     refused = cli("advance-task", {"task_id": task.task_id, "target": "in-review", "expected_current": "in-progress"}, expect=1)
     assert refused["code"] == "conflict" and "核心判定" in refused["error"]

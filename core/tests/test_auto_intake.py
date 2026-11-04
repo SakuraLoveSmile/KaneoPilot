@@ -71,6 +71,26 @@ def test_intake_sorted_max_three_and_atomic_adoption(intake):
     assert core.delivery_of(row)['mode'] == 'pr'
 
 
+def test_status_resolves_project_names_without_tasks_or_rewriting_history(intake, monkeypatch):
+    monkeypatch.setattr('kanpilot.remote.get_client',
+                        lambda: pytest.fail('intake status must not fetch remote projects'))
+    summary = {'started_at': NOW, 'finished_at': NOW, 'errors': [], 'projects': [
+        {'project_id': 'project1', 'project_name': 'Old name', 'preflight': [], 'skipped': []},
+        {'project_id': 'removed', 'project_name': 'Archived project', 'preflight': [], 'skipped': []},
+        {'project_id': 'unknown', 'preflight': [], 'skipped': []},
+    ]}
+    db.set_setting(intake.conn, 'automation_last_intake', summary)
+    settings_before = [tuple(row) for row in intake.conn.execute('SELECT * FROM settings ORDER BY key')]
+    assert intake.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+
+    status = cli.run('executor-status', {}, intake.path)
+
+    assert [project['project_name'] for project in status['automation']['last_intake']['projects']] == [
+        'Test', 'Archived project', None]
+    assert db.get_setting(intake.conn, 'automation_last_intake') == summary
+    assert [tuple(row) for row in intake.conn.execute('SELECT * FROM settings ORDER BY key')] == settings_before
+
+
 def test_capacity_waiting_merge_and_wanted_priority(intake):
     for n in range(1,5): intake.task(n,'running',automation={})
     intake.task(5,'in_review',automation={},delivery={'mode':'pr'},extra={'review_conclusion':'pass'})

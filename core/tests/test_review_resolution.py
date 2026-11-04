@@ -319,6 +319,7 @@ class ReviewResolutionTest(KanpilotTestCase):
             conn.close()
 
     def test_confirmed_plan_runs_and_still_requires_execution_confirmation(self):
+        self.configure_codex_execution()
         prepared, result = self.prepare_and_queue()
         with patch.dict(os.environ, {"KANPILOT_CODEX_FAKE": "ready"}):
             self.assertTrue(planner_runner.run_one(self.db_path, result["request_id"]))
@@ -355,12 +356,20 @@ class ReviewResolutionTest(KanpilotTestCase):
         # A new remediation plan is not a substitute for the original
         # acceptance scope in the subsequent fixed-branch Review.
         delivery = core.delivery_of(task)
-        commit = git_delivery.commit_worktree(dict(delivery, repository=task["repository"]),
-            task_id=self.task_id, title="repair fixture", execution_run_id=claim["run_id"], fix_round=0)
+        self.seed_codex_report(self.task_id, claim["request_id"], Path(delivery["worktree_path"]))
+        pending = next(request for request in self.requests(status="queued")
+                       if request["task_id"] == self.task_id and request["kind"] == "monitor")
+        monitor = self.call("claim", {"stage": "monitor", "executor": "kaneo-monitor",
+                                      "request_id": pending["request_id"]})
+        self.assertTrue(monitor["claimed"], monitor)
+        verification = {"task_id": self.task_id, "request_id": monitor["request_id"],
+                        "run_id": monitor["run_id"], "expected_execution_run_id": claim["run_id"]}
+        verdict = self.call("engine-verdict", dict(verification, expected_plan_sha256=task["plan_sha256"]))
+        self.assertTrue(verdict["verification_ok"], verdict)
+        committed = self.call("delivery-commit", verification)
+        self.assertEqual(committed["outcome"], "committed", committed)
         conn = db.connect(self.db_path)
         try:
-            core.update_delivery(conn, db.require_task(conn, self.task_id), util.now_iso(), head_sha=commit["sha"],
-                commits=[{"execution_run_id": claim["run_id"], "sha": commit["sha"]}])
             dto = dict(db.require_task(conn, self.task_id))
             files = pi_desktop_review.collect_materials(db_path=self.db_path, conn=conn,
                 materials=self.root / "post-repair-review", task=dto,

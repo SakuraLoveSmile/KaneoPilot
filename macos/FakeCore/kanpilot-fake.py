@@ -2700,7 +2700,7 @@ def cmd_executor_status(state, payload):
                        "max_active_tasks": state.get("automation_global", {}).get("max_active_tasks", 2),
                        "waiting_merge": 1, "pending_tasks": 16,
                        "last_intake": {"started_at": past(minutes=5), "finished_at": past(minutes=4),
-                           "projects": [{"project_id": PROJECTS["Music"], "ready": True,
+                           "projects": [{"project_id": PROJECTS["Music"], "project_name": "Music", "ready": True,
                                          "adopted": ["auto-waiting-plan"], "preflight": [],
                            "skipped": [{"task_id": "auto-long-pr", "reason": "active_task_exists"}]}], "errors": []}}}
 
@@ -3164,6 +3164,10 @@ def cmd_get_project_mappings(state, payload):
     mappings = fake_project_mappings(state)
     items_list = []
     for pid, item in (mappings.get("items") or {}).items():
+        automation = item.get("automation") or {}
+        for mode in (item.get("engine_mode"), automation.get("engine_mode")):
+            if mode not in (None, "", "legacy", "shadow", "live"):
+                return fail("项目 %s 的引擎模式无效：%s" % (pid, mode), "validation_failed")
         effective = effective_fake_mapping(mappings, pid)
         items_list.append({
             "project_id": pid,
@@ -3171,7 +3175,8 @@ def cmd_get_project_mappings(state, payload):
             "repository": effective["repository"] or "",
             "enabled": item.get("enabled", True),
             "updated_at": item.get("updated_at", iso(utcnow())),
-            "engine_mode": item.get("engine_mode", "legacy"),
+            "engine_mode": "live",
+            "effective_engine_mode": "live",
             "origin_default_branch": item.get("origin_default_branch", "master"),
             "delivery_base_exists": None if item.get("delivery_base_unverified") else ((item.get("automation") or {}).get("delivery_base") in (None, "", "master", "develop")),
             "verify_env": item.get("verify_env", {}),
@@ -4209,9 +4214,9 @@ def cmd_engine_project_setting(state, payload, key):
         return fail("项目映射版本已变化", "conflict")
     pid = payload.get("project_id")
     if pid not in mappings.get("items", {}): return fail("项目不存在", "not_found")
-    value = payload.get(key)
-    if key == "engine_mode" and value not in ("legacy", "shadow", "live"):
-        return fail("引擎模式无效", "bad_request")
+    value = payload.get(key, "live" if key == "engine_mode" else None)
+    if key == "engine_mode" and value != "live":
+        return fail("项目统一使用新引擎，仅支持 live；请使用自动处理开关控制任务接收", "bad_request")
     if key == "verify_env":
         forbidden = {"TOKEN", "ACCESS_TOKEN", "ACCESSTOKEN", "REFRESH_TOKEN", "API_KEY", "APIKEY", "SECRET", "PASSWORD", "CREDENTIALS", "AUTHORIZATION", "KANEO_TOKEN", "KANEO_ACCESS_TOKEN", "PI_DESKTOP_TOKEN"}
         if not isinstance(value, dict) or len(value) > 64 or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or k.strip().upper() in forbidden for k, v in value.items()):
@@ -4220,6 +4225,11 @@ def cmd_engine_project_setting(state, payload, key):
         if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ("provider_id", "model_id")):
             return fail("备用模型必须含 provider_id/model_id", "bad_request")
     mappings["items"][pid][key] = value
+    if key == "engine_mode":
+        automation = mappings["items"][pid].get("automation") or {}
+        if "engine_mode" in automation:
+            mappings["items"][pid]["automation"] = {field: setting for field, setting in automation.items()
+                                                     if field != "engine_mode"}
     mappings["revision"] = mappings.get("revision", 0) + 1
     return mutate(state, lambda s: s.update(project_mappings=mappings) or {"project_id": pid, key: value, "revision": mappings["revision"]})
 

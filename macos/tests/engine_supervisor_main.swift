@@ -74,9 +74,17 @@ struct EngineSupervisorFixtures {
             }
             let mappings = try await client.run("get-project-mappings", as: ProjectMappingsResponse.self)
             let project = mappings.items!.first!
-            let saved = try await client.run("set-project-engine-mode", payload: ["project_id": project.projectId, "engine_mode": "shadow", "expected_revision": mappings.revision])
+            precondition(mappings.items?.allSatisfy { $0.engineMode == "live" } == true,
+                         "all projects use the new engine")
+            let saved = try await client.run("set-project-engine-mode", payload: ["project_id": project.projectId, "expected_revision": mappings.revision])
             let updated = try await client.run("get-project-mappings", as: ProjectMappingsResponse.self)
-            precondition(updated.items?.first(where: { $0.projectId == project.projectId })?.engineMode == "shadow")
+            precondition(updated.items?.first(where: { $0.projectId == project.projectId })?.engineMode == "live")
+            for retiredMode in ["legacy", "shadow"] {
+                do {
+                    _ = try await client.run("set-project-engine-mode", payload: ["project_id": project.projectId, "engine_mode": retiredMode, "expected_revision": saved["revision"]!])
+                    preconditionFailure("retired project mode must be rejected")
+                } catch CoreError.exited(_, _, let code) { precondition(code == "bad_request") }
+            }
             do {
                 _ = try await client.run("set-project-engine-mode", payload: ["project_id": project.projectId, "engine_mode": "live", "expected_revision": mappings.revision])
                 preconditionFailure("stale config revision must fail")

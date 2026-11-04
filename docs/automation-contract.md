@@ -13,7 +13,7 @@
 本节覆盖当前生效行为；完整接口、载荷和失败语义见 protocol §5.27。
 
 - **dispatch/monitor** 不再调用模型，不看 controller_backend，经 `cli.run` 驱动确定性流程；monitor 使用 `task.run_id` 观察执行，`advance-task` 不传 `request_id`，被动同步 `in-review`/`in-review` 与 `done`/`done` 均允许。
-- legacy 验证缺失或最后一次失败进入 `verification_unconfirmed`；live 以核心 verdict 与已验证提交树为判定源，质量失败自动补救，身份不明与环境失败分别进入 attention，见 protocol §5.27.11–12。
+- 所有普通项目统一使用新引擎，以核心结构化 verdict 与已验证提交树为判定源；质量失败自动补救，身份不明与环境失败分别进入 attention，旧模式不绕过验证，见 protocol §5.27.7/11–12。
 - intake 每 300 秒，只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
 - Review 统一结算：手动任务保留跨任务修复，自动化任务 `changes_requested` 在同任务分支最多修复 2 轮并受段预算约束，`pass` 只登记。
 - delivery 提交后 Review，pass 后推送/开 PR/评论，合并才 done，不自动 merge。
@@ -144,9 +144,9 @@ publish-plan:629 和 dispatch_validate:111 都改用它。begin-send 依靠 clai
 
 **sync-tasks（主控）：** 受自动化管理的任务只更新元数据、kaneo_status 和事件，不做任何状态转移，也不改 requirements_sha256。这样需求变化会由 advance-task 和 dispatch_validate 的既有指纹校验拦下，停给用户处理。
 
-## 执行验证证据（legacy / shadow 兼容路径）
+## 执行验证证据与历史材料
 
-验证执行归 Plus，Pilot 只监控和核对工具证据。Live 按 protocol §5.18.6 / §5.27.11 校验当前 turn、终态源码指纹及提交树；不接受助手文字、旧本机验证回执或人工 override 绕过。以下格式与严格工具匹配仍复用，历史 Goal/legacy 保留原完成策略。
+验证执行归 Plus，Pilot 只监控和核对工具证据。Live 按 protocol §5.18.6 / §5.27.11 校验当前 turn、终态源码指纹及提交树；不接受助手文字、旧本机验证回执或人工 override 绕过。以下格式与严格工具匹配可用于读取历史材料；历史 Goal/转录不能取代当前轮次的结构化报告。
 
 **计划格式：**
 
@@ -178,8 +178,8 @@ exit_code 缺失或不是整数时记为 None。
 **判定：**
 
 - 有任一声明命令缺失、最后一次失败或 exit_code=None → `verification_unconfirmed`。
-- 用户选 `accept_verification` → 写入 `verification_override{execution_run_id: task.run_id, actor:"user", at, note}`，任务回到 running，并新建 monitor 请求；monitor 仍要核验终态和退出码。
-- 手动任务同样适用此规则；计划里没有 verify 块的旧任务完成后，由用户「接受验证结果」。
+- `accept_verification` 已退役：界面不提供，核心直接调用返回 conflict；历史 verification_override 仅留审计，不作为报告通过凭据。
+- 手动与历史任务同样核对结构化报告；缺少冻结验证声明或可信报告时提供重新核证、重新验证或重规划，不以人工确认代替验证。
 - 不做任何猜测：不从最终消息文字中推断「已验证」。Plus 工具事件如果不带 exit_code，停下汇报。
 
 ## 交付：提交、推送、PR 与合并
@@ -395,7 +395,7 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
 字段规则：
 
 - **数量上限：** `cost_log` ≤50 条，`review_history` ≤20 条，超出时丢最旧的。
-- **无人值守段：** `segment_*` 记录当前无人值守段的起点。时长按 `now - segment_started_at` 计，成本按 `cost_usd - segment_cost_base_usd` 计。用户执行 resume、replan 或 accept_verification 时开启新段。
+- **无人值守段：** `segment_*` 记录当前无人值守段的起点。时长按 `now - segment_started_at` 计，成本按 `cost_usd - segment_cost_base_usd` 计。用户执行 resume 或 replan 时开启新段。
 - **plan_verify：** 每个任务都写，不限自动化任务。
 - **delivery.mode：** 只有 `pr` 或 `manual` 两个值；转为人工处理时改为 `manual`。
 - **术语：**「受自动化管理」= 有 automation 对象且 `manual_takeover=false`；「受 PR 交付管理」= `delivery.mode=="pr"`。
@@ -410,7 +410,7 @@ diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查�
   3. 启动调度循环。
 - 退出时沿用 `stopOwnedProcessForAppExit()`。
 
-**当前调度：** EngineSupervisor 监督常驻 `engine run {mode:legacy,intake:true,spawn:true}`，退出退避重启，并每 20 秒调用一次 `recover-execution-goals` 恢复观察者。周期 tick 由引擎执行，不由 App 定时器执行；每循环（默认 60 秒）在 intake 后、spawn 前对有效 live 项目补给 monitor/review，同循环可领取，详见 protocol §5.27.15。CLI 独立引擎同样适用。
+**当前调度：** EngineSupervisor 监督常驻 `engine run {mode:live,intake:true,spawn:true}`，退出退避重启，并每 20 秒调用一次 `recover-execution-goals` 恢复观察者。周期 tick 由引擎执行，不由 App 定时器执行；每循环（默认 60 秒）在 intake 后、spawn 前对有效 live 项目补给 monitor/review，同循环可领取，详见 protocol §5.27.15。CLI 独立引擎同样适用。
 
 ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调用周期 tick；其清理不在本次范围。子进程环境与路径沿用现有 CoreLocator/CoreClient 及核心 runner。
 
@@ -433,7 +433,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 
 | failure_code | 来源 | 自动化任务可用动作 |
 |---|---|---|
-| verification_unconfirmed | monitor | 材料可信时 reverify 只读核证；身份完整时 retry_verification 沿用计划和原工作树让 Plus 新轮次执行验证；legacy/shadow可accept_verification；replan、mark_done、dismiss |
+| verification_unconfirmed | monitor | 材料可信时 reverify 只读核证；身份完整时 retry_verification 沿用计划和原工作树让 Plus 新轮次执行验证；不提供人工 accept_verification 旁路；replan、mark_done、dismiss |
 | execution_failed | monitor | resume（沿用确认计划 → ready + 新 dispatch 请求）、replan、mark_done、dismiss |
 | fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
 | auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
@@ -454,7 +454,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 
 **处置规则：**
 
-- **resume / accept_verification：** 只对上表列出的原因可用，derive/resolve 同时核对 failure_code 和 failure_stage。verification_environment_failure 的 monitor resume 不要求托管，非托管不写 automation 段字段；创建可领取 monitor 请求，不能重新 dispatch。
+- **resume：** 只对上表列出的原因可用，derive/resolve 同时核对 failure_code 和 failure_stage。verification_environment_failure 的 monitor resume 不要求托管，非托管不写 automation 段字段；创建可领取 monitor 请求，不能重新 dispatch。
 - **revert_engine_fix：** 候选、before 全快照、两个 expected、事务外远端/binding 校验、事务内快照比较与恢复，以 protocol §5.27.12 为唯一共享契约；拒绝零任务写入，不修改原收据，不操作分支磁盘，不修改评审 automation.fix_round。全历史用于去重，未撤回行用于全部额度和两处 empty_diff 规则。engine_fix_summary 在撤回后仍显示退额。
 - **remote_conflict 的 resume：** 走三段式。
   1. 读取远端任务（不在事务内）。
@@ -494,7 +494,7 @@ unknown不自动重发、冻结答案，只读pending仍在不能判为not_appli
 晚返回不能覆盖新的run/请求/operation状态。停止接受不等于持久终态。
 
 引擎模式不影响提问报告、送达或核心结算。提交、App后台恢复与详情重连共同确保同身份只读observer；
-legacy/shadow和engine关闭同样覆盖，恢复启动用原子占位去重。只读worker不取得回答或通用停止写权限；
+显式诊断和 engine 关闭同样覆盖，恢复启动用原子占位去重。只读worker不取得回答或通用停止写权限；
 到期走专用核心操作。scope到期仅以同身份重注册，旧token失效且不得进入job、事件、SQLite或日志。
 
 failure_code=execution_input_required映射reason_code=execution_question（阶梯3），
