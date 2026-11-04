@@ -1,6 +1,6 @@
 # KP-UI08：已结束评审任务的回收资格与历史工作目录核验
 
-- 状态：实现中（核心验证通过，待云端编译与原生界面核验）。
+- 状态：待体验（核心、最终云端与原生隔离交互验证已通过，尚无用户验收确认）。
 - 用户目标：截图中的 Music 歌词任务可正常移入本地回收站；用户补充该任务已完成且修复版本已发布。
 - 基线：`origin/main` / `264bda03a6078ee917f51c138a0ad9293198db98`。
 - 分支：`fix/20261104-kp-ui08-completed-task-trash`。
@@ -34,7 +34,6 @@
 - 真实历史证据：候选 `verification_recovery._read_run_evidence` 通过，4 个证据文件、job=finished/0、198 个完整事件、4 条冻结 verify 声明；原 spec/job/合同与哈希未改写。这里只读取记录，没有重新执行 verify 或模型。
 - 独立 Sol reviewer 审查未发现重大问题；复核了发布预留/领取事务、陈旧 Review、未决批次/验证及历史路径边界。主 agent 已检查最终组合 diff，`git diff --check` 退出 0。
 - 证据绑定：基线仍为上述 `264bda0` 加本次未提交差异。源码 SHA256：`derive.py=08aeaff6814c588cafe707a04306fbdf6b53efd7a5309f426e0d8b772234710d`、`execution_contract.py=682db14d5ec38df50fb6dfa1e67fbb061738865c4e9c363c40e08d455b20e9d0`、`release_delivery.py=db505a6638dd589b6c8c3aa480d0f30df496838fd76e86056bb5392c87e6bd53`、`TaskCompactListView.swift=de82c976b339b561d131ef93525f8e7d52023cf14b17ec9a37137e253c4926ac`。
-- 未验证：新 Swift 代码云端编译、原生菜单的显示和实际点选确认/取消；未安装或替换 `/Applications/KaneoPilot.app`。项目禁止本地编译；后续直接在 KP-REL02 最终组合源码运行云端 Packages 并核验。
+- 最终组合验证（KP-REL02，2026-11-04）：源码 `31327e655954525865bf8746259f85fac214f3e2` 已合入远端 main，[Packages #110](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41804180339) 全部必需 job 通过。主 agent 使用该次原样云端 App，在独立 bundle ID/空凭据/FakeCore 中实测：1180×760 dark 已结束评审菜单启用，取消保留、确认移入、回收站恢复且默认暂停自动推进；执行中任务禁用并直接显示原因；900×600 light 菜单启用且布局完整。命令日志恰好一次 trash、一次 resume_auto=false 的 restore，两个预览均正常退出。FakeCore 只证明 UI 交互，核心资格与历史路径规则由上述隔离测试及真实记录只读核验支持。没有本地编译或替换 `/Applications/KaneoPilot.app`。
 - 当前真实任务生命周期仍为 in_review，外部 v0.3.3 已核证，但现有完成门只认自身 accepted published batch；本次没有认领外部 Release、伪造 batch、标记 done 或移动真实任务。核心修复使该任务可沿原确认流程回收，回收与完成状态仍正交。
-- 下一步：随已授权的 KP-REL02 整合和正式发布完成云端/原生核验，避免重新为已发布的 Music 修复发起构建。生产安装与真实任务变更不由发布授权推定。
-- worktree 尚有本次独有未提交成果且未合入，保留上述路径；合入及适用验证通过后按约定清理。临时测试 venv 无服务进程，随本任务保留，收尾时按可再生成路径处理。
+- 发布和收尾由 [KP-REL02](kp-rel02-release-integration.plan.md) 统一记录：[v0.4.3](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.3)（源码 `31327e6`、build 111）已正式发布，#111 必需 job 和公开资产核验通过；来源成果已合入并保全，来源 worktree 与本地分支已清理，当前入口为主工作区 main。生产安装与真实任务变更未执行，用户体验反馈另记。
