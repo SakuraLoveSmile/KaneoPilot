@@ -199,7 +199,10 @@ def _text_result(text: str, *, normalizations: Optional[list] = None
     markers = [(i, line) for i, line in enumerate(plain) if line in REVIEW_TEXT_MARKERS]
     if ([line for _i, line in markers] != list(REVIEW_TEXT_MARKERS)
             or markers[1][0] != markers[0][0] + 3):
-        return None, "review_text_v1 标记缺失、重复、乱序或混入额外文字"
+        return None, (
+            "review_text_v1 评审结果不完整或格式错误："
+            "分段标记缺失、重复、乱序、拼写错误或混入额外文字"
+        )
     start, end = markers[0][0], markers[-1][0]
     before, after = lines[:start], lines[end + 1:]
     # One fence immediately enclosing the frame is transport decoration. Do
@@ -242,14 +245,6 @@ def parse_result(messages: list, *, normalizations: Optional[list] = None,
     applied = []
     result_format = "json"
     value, error = pi_desktop_controller.strict_json_object(text)
-    if (error is not None and isinstance(text, str)
-            and (any(marker in text for marker in REVIEW_TEXT_MARKERS)
-                 or "<<<KANPILOT_REVIEW_" in text
-                 or "<<<END_KANPILOT_REVIEW_" in text)):
-        value, error = _text_result(text, normalizations=applied)
-        if error is not None:
-            return None, error
-        result_format = "review_text_v1"
     if error is not None and isinstance(text, str):
         # Never search for arbitrary braces or an older assistant answer. Only
         # one explicitly delimited object in the final answer is eligible.
@@ -258,10 +253,24 @@ def parse_result(messages: list, *, normalizations: Optional[list] = None,
             r"^```(?:json)?[ \t]*\r?\n(.*?)^```[ \t]*(?=\r?$)",
             text, re.MULTILINE | re.DOTALL,
         )
-        if block is not None and len(fences) == 2:
-            outside = text[:block.start()] + text[block.end():]
+        wrapped = block is not None and len(fences) == 2
+        outside = text[:block.start()] + text[block.end():] if wrapped else text
+        wrapped_value, wrapped_error = (
+            pi_desktop_controller.strict_json_object(block.group(1))
+            if wrapped else (None, error)
+        )
+        # Marker literals inside a decoded JSON object are report data. Any
+        # framing outside it (including misspelled/partial markers) must still
+        # pass text validation; a report's JSON example is never a fallback.
+        framing = outside if wrapped_error is None else text
+        if any(delimiter in framing for delimiter in ("<<<", ">>>")):
+            value, error = _text_result(text, normalizations=applied)
+            if error is not None:
+                return None, error
+            result_format = "review_text_v1"
+        elif wrapped:
             if not any(marker in outside for marker in ("```", "{", "}", "[", "]")):
-                value, error = pi_desktop_controller.strict_json_object(block.group(1))
+                value, error = wrapped_value, wrapped_error
                 if error is None:
                     applied.append("removed_fence_commentary")
     if error is not None:
@@ -935,7 +944,10 @@ def _attach_round(*, db_path, client, job: dict, log, timeout: float,
     normalizations, metadata = [], {}
     result, error = parse_result(messages, normalizations=normalizations, metadata=metadata)
     if result is None:
-        return {"kind": "blocked", "detail": f"review_result_invalid: {error}"}
+        return {"kind": "blocked", "detail": (
+            f"review_result_invalid: {error}；未登记结论，请重新 Review"
+            "（原始答复见 transcript.json）"
+        )}
     job.update(metadata)
     log.emit("system", util.now_iso(), content="Review 结果格式：" + metadata["result_format"])
     if normalizations:
