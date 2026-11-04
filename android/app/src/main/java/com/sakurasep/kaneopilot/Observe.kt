@@ -1,6 +1,8 @@
 package com.sakurasep.kaneopilot
 
 import org.json.JSONObject
+import java.time.Duration
+import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -26,6 +28,15 @@ internal fun attentionAction(item: JSONObject): AttentionAction = when {
     actionAllowed(item, "submit-plan-answers") || actionAllowed(item, "submit-execution-answers") -> AttentionAction.Answer
     actionAllowed(item, "confirm-dispatch") -> AttentionAction.Plan
     else -> AttentionAction.MacOnly
+}
+
+/** 泳道色的角色（契约「视觉与字体」）：推进用 primary，等你处理与评审用 tertiary，其余用 outline。 */
+internal enum class LaneRole { Primary, Tertiary, Outline }
+
+internal fun laneRole(lane: String): LaneRole = when (lane) {
+    "plan", "dispatch", "execute", "repair" -> LaneRole.Primary
+    "waiting", "review" -> LaneRole.Tertiary
+    else -> LaneRole.Outline
 }
 
 object Observe {
@@ -83,22 +94,28 @@ object RetroFormat {
     private val clockFormat = DateTimeFormatter.ofPattern("HH:mm:ss")
     private val dayTimeFormat = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
+    /** 时长写法（ui-spec §4.18，与 Mac 同表）：不足 1 分钟「N 秒」；1–59 分钟「N 分钟」；1–23 小时「H 小时 M 分钟」（M 为 0 时省略）；1 天起「D 天 H 小时」（H 为 0 时省略）。 */
     fun duration(seconds: Int?): String? {
         if (seconds == null) return null
         val value = seconds.coerceAtLeast(0)
         return when {
             value < 60 -> "$value 秒"
-            value < 3600 -> {
-                val minutes = value / 60
-                val rest = value % 60
-                if (rest == 0) "$minutes 分" else "$minutes 分 $rest 秒"
+            value < 3600 -> "${value / 60} 分钟"
+            value < 86400 -> {
+                val minutes = value % 3600 / 60
+                if (minutes == 0) "${value / 3600} 小时" else "${value / 3600} 小时 $minutes 分钟"
             }
             else -> {
-                val hours = value / 3600
-                val minutes = value % 3600 / 60
-                if (minutes == 0) "$hours 小时" else "$hours 小时 $minutes 分"
+                val hours = value % 86400 / 3600
+                if (hours == 0) "${value / 86400} 天" else "${value / 86400} 天 $hours 小时"
             }
         }
+    }
+
+    /** 需要你条目的等待秒数：手机时钟减核心 `since`，下限 0；无法解析时返回 null。只作显示提示，不属于复盘时长。 */
+    fun waitedSeconds(sinceIso: String, now: Instant = Instant.now()): Int? {
+        val since = parse(sinceIso)?.toInstant() ?: return null
+        return Duration.between(since, now).seconds.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
     }
 
     /** ISO 时间戳转本机时分秒；无法解析时返回 null。 */

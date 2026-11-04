@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -100,6 +101,7 @@ class MobilePreview:
         self.case.call("migrate")
         self._ready("mobile-preview-ready", READY_TITLE)
         self._questions()
+        self._exceptions()
         self._session("mobile-preview-session", "安卓联合验收：执行会话与工具消息", running=True)
         self._session("mobile-preview-review", "安卓联合验收：当前评审报告", running=False)
         self._review()
@@ -160,6 +162,37 @@ class MobilePreview:
                              "failure_code": "reported", "note": "等待用户回答规划问题",
                              "evidence": {"questions": [question], "plan_markdown": PLAN}})
         self.tasks[task_id] = {"task_id": task_id, "title": QUESTION_TITLE, "option_label": QUESTION_OPTION}
+
+    def _exceptions(self):
+        # Seeded before the running session: the monitor claim below may only take this task's request.
+        lost = "mobile-preview-lost"
+        self._ready(lost, "安卓联合验收：执行端失联")
+        self.case.fake.tasks[lost]["status"] = "in-progress"
+        self.case.set_task_status(lost, "running", sent=1, send_state="sent", session_marker=f"{lost}/run-1")
+        claim = self.case.call("claim", {"stage": "monitor", "executor": "kaneo-monitor"})
+        if not claim.get("claimed"):
+            raise RuntimeError("无法创建隔离的监控请求")
+        self._expire_lease(claim["request_id"])
+        self._blocked("mobile-preview-review-blocked", "安卓联合验收：评审受阻", "in-review",
+                      failure_code="review_blocked", failure_stage="in_review",
+                      failure_reason="演示材料：评审受阻", blocked_summary="演示材料：评审受阻")
+        self._blocked("mobile-preview-failed", "安卓联合验收：执行失败", "in-progress",
+                      failure_code="execution_failed", failure_stage="running",
+                      failure_reason="演示材料：执行失败", blocked_summary="演示材料：执行失败")
+
+    def _blocked(self, task_id, title, remote_status, **fields):
+        self._ready(task_id, title)
+        self.case.fake.tasks[task_id]["status"] = remote_status
+        self.case.set_task_status(task_id, "needs_user", send_state="sent", **fields)
+
+    def _expire_lease(self, request_id):
+        connection = db.connect(self.case.db_path)
+        try:
+            with db.write_txn(connection):
+                connection.execute("UPDATE requests SET lease_expires_at=? WHERE request_id=?",
+                                   ((util.now_dt() - timedelta(seconds=60)).isoformat(), request_id))
+        finally:
+            connection.close()
 
     def _session(self, task_id, title, *, running):
         self._ready(task_id, title)
@@ -280,10 +313,14 @@ raise SystemExit(cli.main())
         report = mobile("query", {"type": "get-review-report", "args": {"task_id": review["task_id"], "review_key": review["review_key"],
                     "expected_execution_run_id": review["run_id"], "expected_report_sha256": review["review_report_sha256"]}})["data"]
         assert "当前评审报告" in report["markdown"]
+        rows = {row["task_id"]: row for row in mobile("query", {"type": "list-tasks", "args": {}})["data"]["tasks"]}
+        assert rows["mobile-preview-lost"]["exception"]["kind"] == "executor_lost", rows.get("mobile-preview-lost")
+        assert rows["mobile-preview-review-blocked"]["exception"]["label"] == "评审受阻", rows.get("mobile-preview-review-blocked")
+        assert rows["mobile-preview-failed"]["exception"]["label"] == "执行失败", rows.get("mobile-preview-failed")
         denied = subprocess.run([sys.executable, self.environment["KANPILOT_CORE"], "engine-run"],
                                 capture_output=True, env=dict(os.environ, **self.environment), timeout=10)
         assert denied.returncode != 0 and json.loads(denied.stdout)["code"] == "forbidden"
-        return {"fixture_only": True, "self_test": "passed", "checks": ["independent subprocess writes", "plan confirmation", "planning answers via HTTP FakeKaneo", "session messages", "current review", "executor blocked"]}
+        return {"fixture_only": True, "self_test": "passed", "checks": ["independent subprocess writes", "plan confirmation", "planning answers via HTTP FakeKaneo", "session messages", "current review", "exception samples", "executor blocked"]}
 
     def close(self):
         if self.kaneo:

@@ -1,5 +1,6 @@
 package com.sakurasep.kaneopilot
 
+import java.time.Instant
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -26,10 +27,31 @@ class ObserveTest {
         assertNull(RetroFormat.duration(null))
         assertEquals("0 秒", RetroFormat.duration(0))
         assertEquals("59 秒", RetroFormat.duration(59))
-        assertEquals("1 分", RetroFormat.duration(60))
-        assertEquals("2 分 5 秒", RetroFormat.duration(125))
+        assertEquals("1 分钟", RetroFormat.duration(60))
+        assertEquals("2 分钟", RetroFormat.duration(125))
+        assertEquals("59 分钟", RetroFormat.duration(3599))
         assertEquals("1 小时", RetroFormat.duration(3600))
-        assertEquals("1 小时 2 分", RetroFormat.duration(3725))
+        assertEquals("1 小时 2 分钟", RetroFormat.duration(3725))
+        assertEquals("1 天", RetroFormat.duration(86400))
+        assertEquals("1 天 1 小时", RetroFormat.duration(90000))
+    }
+
+    @Test fun waitedSecondsFloorsAtZeroAndRejectsUnreadableTimes() {
+        val now = Instant.parse("2026-10-22T08:10:30Z")
+        assertEquals(630, RetroFormat.waitedSeconds("2026-10-22T08:00:00Z", now))
+        assertEquals(0, RetroFormat.waitedSeconds("2026-10-22T08:20:00Z", now))
+        assertNull(RetroFormat.waitedSeconds("", now))
+        assertNull(RetroFormat.waitedSeconds("not a time", now))
+    }
+
+    @Test fun laneRolesStayWithinThreeColourRoles() {
+        assertEquals(LaneRole.Primary, laneRole("plan"))
+        assertEquals(LaneRole.Primary, laneRole("dispatch"))
+        assertEquals(LaneRole.Primary, laneRole("execute"))
+        assertEquals(LaneRole.Primary, laneRole("repair"))
+        assertEquals(LaneRole.Tertiary, laneRole("waiting"))
+        assertEquals(LaneRole.Tertiary, laneRole("review"))
+        assertEquals(LaneRole.Outline, laneRole("other"))
     }
 
     @Test fun nullIntegersStayNullInsteadOfZero() {

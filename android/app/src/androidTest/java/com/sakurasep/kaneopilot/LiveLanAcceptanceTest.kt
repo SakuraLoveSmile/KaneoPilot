@@ -81,6 +81,8 @@ class LiveLanAcceptanceTest {
         }
         awaitText("配对成功")
         awaitOnline()
+        // The auto-advance card sits at the end of the overview; scroll to it before asserting.
+        scrollToText("自动推进")
         compose.onNodeWithText("自动推进", substring = false).assertIsDisplayed()
         screenshot("01-paired-overview")
 
@@ -88,10 +90,10 @@ class LiveLanAcceptanceTest {
         val initiallyPaused = exists("恢复自动推进")
         val firstAction = if (initiallyPaused) "恢复自动推进" else "暂停自动推进"
         val reverseAction = if (initiallyPaused) "暂停自动推进" else "恢复自动推进"
-        compose.onNodeWithText(firstAction).assertIsEnabled().performClick()
+        autoAdvanceToggle(firstAction).assertIsEnabled().performClick()
         awaitText(reverseAction)
         awaitOnline()
-        compose.onNodeWithText(reverseAction).assertIsEnabled()
+        autoAdvanceToggle(reverseAction).assertIsEnabled()
         screenshot("02-global-pause-first-transition")
         if (!initiallyPaused && args.getString("coordinate_pause") == "true") {
             marker("paused-check")
@@ -99,10 +101,10 @@ class LiveLanAcceptanceTest {
                 File(evidenceDirectory(), "stage.txt").readText(Charsets.UTF_8).trim() == "pause-checked"
             }
         }
-        compose.onNodeWithText(reverseAction).performClick()
+        autoAdvanceToggle(reverseAction).performClick()
         awaitText(firstAction)
         awaitOnline()
-        compose.onNodeWithText(firstAction).assertIsEnabled()
+        autoAdvanceToggle(firstAction).assertIsEnabled()
         screenshot("03-global-pause-restored")
 
         clickNavigation("任务")
@@ -111,8 +113,10 @@ class LiveLanAcceptanceTest {
 
         if (readyTitle.isNotBlank()) {
             openTask(readyTitle)
-            awaitText("任务状态")
             screenshot("05-task-overview")
+            // The task card is the last item of a lazy list; scroll to it instead of waiting for an uncomposed item.
+            scrollToText("任务信息")
+            compose.onNodeWithText("任务信息").assertIsDisplayed()
             clickTab("计划")
             awaitText("计划 SHA256")
             scrollToText("确认执行此计划")
@@ -277,6 +281,12 @@ class LiveLanAcceptanceTest {
         screenshot("15-connection-certificate")
     }
 
+    /** The paused banner repeats the resume label, so the card's button is matched by its test tag as well. */
+    private fun autoAdvanceToggle(label: String): SemanticsNodeInteraction {
+        val matcher = hasTestTag("auto-advance-toggle") and hasText(label, substring = false)
+        scrollToMatcher(matcher)
+        return compose.onNode(matcher)
+    }
     private fun clickNavigation(label: String) {
         compose.onNode(hasText(label, substring = false) and hasClickAction()).performClick()
     }
