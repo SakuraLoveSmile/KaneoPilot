@@ -2,6 +2,16 @@
 
 本文件是 protocol §5.27.19 的共享契约。主 agent 唯一维护。第一版在项目显式开启后，由确定性核心调度 GitHub Actions，获取实际安装包与 Release，再完成任务；不调用模型，不在 Pilot 本机代跑项目 verify。未发布的本地工作流不能声称已接通远端。
 
+## 发布配置 AI 辅助（KP-R02，2026-11-04）
+
+配置辅助是用户显式发起的独立只读分析，不属于确定性发布调度。它使用规划环境 `standard` 组的 Codex CLI 模型/思考设置，即使当前主规划后端为其他后端也明确展示 Codex CLI，不修改规划配置。准备不调用模型；开始前展示模型和可能费用。只根据有界本地材料给建议，不改仓库、策略、发布渠道或开关，不创建任务、不运行 verify、不触发 Actions。建议不是远端工作流或安装包已核验的证据。
+
+- `prepare-project-release-assist {project_id,repository?}` → `{project_id,repository,context_sha256,model,reasoning_effort,source_paths:[str],warnings:[str]}`。项目必须存在于有效映射中；repository 可用页面未保存的仓库草稿，省略则取已保存映射。只读检查 Git 仓库，收集 `.github/workflows`、直接引用的发布脚本及常见版本文件/发布文档的有界文本，拒绝越界/符号链接和凭据文件；不抓取远端或读取凭据正文。上下文哈希绑定项目、规范路径、资料字节、可用 ref 和模型设置。
+- `analyze-project-release-assist {project_id,repository?,expected_context_sha256,operation_id,confirm:true}` → `{project_id,context_sha256,operation_id,suggestion}`。重新准备并核对哈希；调用前通过 `runtime_operations` 为同项目/operation 原子预约 unknown 回执，只有预约者可启动一次。accepted 原样重放结果，unknown/rejected 不自动重发；再次分析必须由用户重新开始。使用现有 Codex `read-only` / `ephemeral` / `ignore-user-config` 启动器及 JSON Schema，临时材料目录不含真实仓库指令；超时终止本次进程组。失败保留错误，不回退其他模型。
+- `suggestion` 为 `{workflow_path:str|null,workflow_ref:str|null,version_base:str|null,required_assets:[str],required_jobs:[str],summary:str,evidence:[str],warnings:[str]}`。空值/空数组表示尚未确认，不能以占位值填满。workflow_path 必须是已收集的实际工作流；ref 必须有本地 Git 证据；版本和精确文件名沿现有发布校验。evidence 引用已收集文件；动态文件名、matrix job 或不支持 Pilot 五个输入、run marker、provenance 的普通工作流要说明缺口，不声称可直接发布。
+
+桌面在「合并后构建并发布」开启时、手动「构建发布配置」折叠前提供「AI 辅助填写…」。准备完成后用户确认开始；结果就地列出建议、依据、缺项及「采用建议」。仅采用非空建议到五项配置草稿，保留其余字段，用户再用现有保存栏保存。结果须绑定项目/仓库与分析前的配置草稿；项目切换、仓库变化、放弃或分析期间编辑后不能套用旧结果。沿用原有校验和开启/切正式版确认，分析失败保留手填入口。
+
 ## T1 项目策略与完成门
 
 `automation.release` 为对象，旧配置等同关闭：

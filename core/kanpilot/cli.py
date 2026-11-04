@@ -663,6 +663,17 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         },
         lambda ctx, payload: __import__("kanpilot.project_config", fromlist=["cmd_set_project_mapping"]).cmd_set_project_mapping(ctx, payload),
     ),
+    # KP-R02：准备只读；分析须单独确认模型费用，只返回发布配置建议。
+    "prepare-project-release-assist": (
+        {"project_id": (True, "str"), "repository": (False, "str")},
+        _automation_command("release_config_assist", "cmd_prepare_project_release_assist"),
+    ),
+    "analyze-project-release-assist": (
+        {"project_id": (True, "str"), "repository": (False, "str"),
+         "expected_context_sha256": (True, "str"), "operation_id": (True, "str"),
+         "confirm": (True, "bool")},
+        _automation_command("release_config_assist", "cmd_analyze_project_release_assist"),
+    ),
     # v6 引擎（protocol §5.27）：待处理收件箱（只读聚合）。惰性 import，引擎
     # 子模块未就绪时只在调用时报错，不影响注册/导入期（rehearsal 引擎门控依赖此点）。
     "attention-list": (

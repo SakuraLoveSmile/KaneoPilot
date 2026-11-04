@@ -1630,6 +1630,8 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 
 权威共享契约见 [release-contract.md](release-contract.md)。项目显式开启后，PR 合并后的确定性交付继续执行 GitHub Actions 构建、核对固定提交与安装包来源并发布版本；父子修复共享批次。公开命令、配置、DTO、未知结果对账及全部完成门以该文件为准。旧项目默认关闭，历史 done 不自动补发，不新增模型调用，不在 Pilot 本机代跑 verify。工作流未进入远端且未真实构建时，不得声称远端交付已接通。
 
+发布前配置另提供用户显式启动的 AI 辅助（KP-R02），命令和草稿规则见同一契约「发布配置 AI 辅助」。`ProjectMappingsView` 经核心收集有界本地材料，以独立只读 Codex CLI 分析并返回建议；调用先持久化 runtime operation，用户采纳后仍须沿原策略命令保存。这不是发布调度步骤，不修改任务或发布完成门，也不隐式调用模型。
+
 开启发布的手动分支任务在 Review pass 后停待交付，Review 成功结算，不因尚未合并或发布误报 `review_blocked`。显式 `resolve continue_delivery` 复用当前正式 pass，经精确身份与证据核对后排队 PR 交付；历史 `release_required` 误阻塞的恢复、窄化引擎授权与重复操作规则均见发布契约，不以重新 Review 或开启项目自动化代替。
 
 Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一次写入、未知结果只对账规则，见发布契约「发布说明修正」。说明修正不能替代构建、发布或更新 feed 的验收。

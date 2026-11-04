@@ -35,6 +35,27 @@ struct ProjectMappingsView: View {
     @State private var pendingSave: PendingProjectSave?
     /// 仓库映射已提交、但整次保存尚未全部成功：先不回调 `onSaved`（回调会关掉承载本页的面板）。
     @State private var mappingSavedAwaitingNotify = false
+    @State private var releaseConfigExpanded = false
+    @State private var releaseAssistPreparation: ProjectReleaseAssistPreparation?
+    @State private var releaseAssistResult: ProjectReleaseAssistResponse?
+    @State private var releaseAssistOrigin: ReleaseAssistDraftSnapshot?
+    @State private var releaseAssistGeneration = 0
+    @State private var releaseAssistBusy = false
+    @State private var releaseAssistProgress = ""
+    @State private var releaseAssistError: String?
+
+    /// 绑定分析发起时的项目及发布草稿，避免慢响应覆盖之后的手动编辑。
+    private struct ReleaseAssistDraftSnapshot: Equatable {
+        let projectID: String
+        let repository: String
+        let enabled: Bool
+        let channel: String
+        let workflowPath: String
+        let workflowRef: String
+        let versionBase: String
+        let assets: String
+        let jobs: String
+    }
 
     /// 目标分支暂时无法核验（`delivery_base_check=unverified`）时的就地提示尾句：设置已保存，下次保存策略时再核验。
     private static let baseUnverifiedTail = "暂时无法确认 origin 上的目标分支，下次保存自动处理设置时会再次核验。"
@@ -266,9 +287,11 @@ struct ProjectMappingsView: View {
         Binding(get: {
             currentDraft(id).automation[keyPath: key]
         }, set: { value in
+            let before = releaseAssistSnapshot(id)
             var draft = currentDraft(id)
             draft.automation[keyPath: key] = value
             drafts[id] = draft
+            if releaseAssistSnapshot(id) != before { invalidateReleaseAssist() }
         })
     }
 
@@ -277,9 +300,11 @@ struct ProjectMappingsView: View {
         Binding(get: {
             currentDraft(id)[keyPath: key]
         }, set: { value in
+            let before = releaseAssistSnapshot(id)
             var draft = currentDraft(id)
             draft[keyPath: key] = value
             drafts[id] = draft
+            if releaseAssistSnapshot(id) != before { invalidateReleaseAssist() }
         })
     }
 
@@ -384,6 +409,7 @@ struct ProjectMappingsView: View {
         } message: { pending in
             Text(pending.message)
         }
+        .onDisappear { invalidateReleaseAssist() }
     }
 
     // MARK: - 顶栏
@@ -500,6 +526,8 @@ struct ProjectMappingsView: View {
         .listStyle(.inset(alternatesRowBackgrounds: true))
         .scrollContentBackground(.hidden)
         .onChange(of: selectedProjectId) { _, newId in
+            // List 已先写入 selection，不能再靠 selectProject 内的新旧 ID 比较清理候选。
+            invalidateReleaseAssist()
             if let id = newId {
                 selectProject(id)
             }
@@ -699,8 +727,12 @@ struct ProjectMappingsView: View {
                     .fixedSize()
                 }
                 ListRule()
+                ProjectPlainRow {
+                    releaseAssistEditor(item)
+                }
+                ListRule()
                 ProjectPlainRow(changed: changed.contains(RowName.releaseConfig)) {
-                    DisclosureGroup {
+                    DisclosureGroup(isExpanded: $releaseConfigExpanded) {
                         VStack(alignment: .leading, spacing: Spacing.m) {
                             releaseTextField("工作流文件", placeholder: ".github/workflows/pilot-release.yml", text: draftBinding(id, \.releaseWorkflowPath))
                             releaseTextField("工作流分支或标签", placeholder: "main", text: draftBinding(id, \.releaseWorkflowRef))
@@ -811,6 +843,246 @@ struct ProjectMappingsView: View {
                 }
                 stepErrorRow(id, .verifyEnv)
             }
+        }
+    }
+
+    private func releaseAssistEditor(_ item: ProjectMappingItem) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Spacing.m) {
+                    releaseAssistButton(item.projectId)
+                    releaseAssistDescription
+                }
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    releaseAssistButton(item.projectId)
+                    releaseAssistDescription
+                }
+            }
+            if releaseAssistBusy {
+                HStack(spacing: Spacing.s) {
+                    ProgressView().controlSize(.small)
+                    Text(releaseAssistOrigin == nil ? "正在完成上一次分析，当前草稿可继续手动编辑。" : releaseAssistProgress)
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let error = releaseAssistError {
+                SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if let prepared = releaseAssistPreparation, releaseAssistResult == nil {
+                releaseAssistConfirmation(prepared, projectID: item.projectId)
+            }
+            if let result = releaseAssistResult, result.projectId == item.projectId {
+                releaseSuggestionPreview(result.suggestion, projectID: item.projectId)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func releaseAssistButton(_ id: String) -> some View {
+        Button {
+            Task { await prepareReleaseAssist(id) }
+        } label: {
+            Label("AI 辅助填写…", systemImage: "sparkles")
+        }
+        .buttonStyle(.bordered)
+        .disabled(releaseAssistBusy || isRefreshingRemote || trimmedValue(currentDraft(id).repository).isEmpty)
+        .help("根据当前仓库提供建议，先展示模型与费用说明")
+    }
+
+    private var releaseAssistDescription: some View {
+        Text("根据仓库建议工作流、版本和安装包，检查后再采用。")
+            .font(.kpLabel)
+            .foregroundStyle(Color.kpSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func releaseAssistConfirmation(_ prepared: ProjectReleaseAssistPreparation, projectID id: String) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("本次使用 Codex CLI · \(prepared.model) · \(prepared.reasoningEffort)")
+                .font(.kpBody)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("将分析 \(prepared.sourcePaths.count) 份仓库资料，可能产生模型费用。只提供配置建议；采用后还需保存，不会启动构建或发布。")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            releaseAssistWarnings(prepared.warnings)
+            HStack(spacing: Spacing.s) {
+                Button("开始 AI 分析") { Task { await analyzeReleaseAssist(id) } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(releaseAssistBusy)
+                Button("取消") { invalidateReleaseAssist() }
+                    .buttonStyle(.bordered)
+                    .disabled(releaseAssistBusy)
+            }
+        }
+    }
+
+    private func releaseSuggestionPreview(_ suggestion: ProjectReleaseSuggestion, projectID id: String) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("AI 建议")
+                .font(.kpBody.weight(.semibold))
+            Text(suggestion.summary)
+                .font(.kpLabel)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                releaseSuggestionValue("工作流文件", suggestion.workflowPath)
+                releaseSuggestionValue("工作流分支或标签", suggestion.workflowRef)
+                releaseSuggestionValue("初始版本", suggestion.versionBase)
+                releaseSuggestionValue("必需安装包", suggestion.requiredAssets.isEmpty ? nil : suggestion.requiredAssets.joined(separator: "\n"))
+                releaseSuggestionValue("必需工作流任务", suggestion.requiredJobs.isEmpty ? "未建议，可留空" : suggestion.requiredJobs.joined(separator: "\n"))
+            }
+            releaseAssistWarnings(suggestion.warnings)
+            if !suggestion.evidence.isEmpty {
+                DisclosureGroup("建议依据（\(suggestion.evidence.count)）") {
+                    Text(suggestion.evidence.joined(separator: "\n"))
+                        .font(.kpLabel.monospaced())
+                        .foregroundStyle(Color.kpSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .font(.kpLabel)
+            }
+            Text("建议尚未保存，也不代表工作流已可发布。未确认的项目请继续补充。")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Spacing.s) {
+                Button("采用建议") { Task { await adoptReleaseSuggestion(id) } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(releaseAssistBusy || !suggestion.hasValues)
+                Button("取消") { invalidateReleaseAssist() }
+                    .buttonStyle(.bordered)
+                    .disabled(releaseAssistBusy)
+            }
+        }
+    }
+
+    private func releaseSuggestionValue(_ title: String, _ value: String?) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(title).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            Text(value ?? "尚未确认")
+                .font(.kpBody)
+                .foregroundStyle(Color.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func releaseAssistWarnings(_ warnings: [String]) -> some View {
+        ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
+            SettingsNotice(text: warning, icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func releaseAssistSnapshot(_ id: String) -> ReleaseAssistDraftSnapshot {
+        let draft = currentDraft(id)
+        let automation = draft.automation
+        return ReleaseAssistDraftSnapshot(projectID: id, repository: draft.repository,
+                                          enabled: automation.releaseEnabled, channel: automation.releaseChannel,
+                                          workflowPath: automation.releaseWorkflowPath, workflowRef: automation.releaseWorkflowRef,
+                                          versionBase: automation.releaseVersionBase, assets: automation.releaseAssets,
+                                          jobs: automation.releaseJobs)
+    }
+
+    private func invalidateReleaseAssist() {
+        releaseAssistGeneration += 1
+        releaseAssistPreparation = nil
+        releaseAssistResult = nil
+        releaseAssistOrigin = nil
+        releaseAssistError = nil
+    }
+
+    private func releaseAssistIsCurrent(_ id: String, generation: Int) -> Bool {
+        generation == releaseAssistGeneration && selectedProjectId == id
+            && releaseAssistOrigin == releaseAssistSnapshot(id)
+    }
+
+    private func prepareReleaseAssist(_ id: String) async {
+        guard !releaseAssistBusy, !isSaving else { return }
+        invalidateReleaseAssist()
+        releaseAssistOrigin = releaseAssistSnapshot(id)
+        let generation = releaseAssistGeneration
+        releaseAssistBusy = true
+        releaseAssistProgress = "正在读取仓库资料…"
+        defer { releaseAssistBusy = false }
+        do {
+            let prepared = try await model.client.run("prepare-project-release-assist",
+                payload: ["project_id": id, "repository": trimmedValue(currentDraft(id).repository)],
+                as: ProjectReleaseAssistPreparation.self)
+            guard releaseAssistIsCurrent(id, generation: generation), prepared.projectId == id else { return }
+            releaseAssistPreparation = prepared
+        } catch {
+            guard releaseAssistIsCurrent(id, generation: generation) else { return }
+            releaseAssistError = "无法准备 AI 辅助：\(error.coreMessage)"
+        }
+    }
+
+    private func analyzeReleaseAssist(_ id: String) async {
+        guard !releaseAssistBusy, !isSaving, let prepared = releaseAssistPreparation,
+              releaseAssistIsCurrent(id, generation: releaseAssistGeneration) else { return }
+        let generation = releaseAssistGeneration
+        let operationID = UUID().uuidString.lowercased()
+        releaseAssistBusy = true
+        releaseAssistProgress = "AI 正在分析发布配置…"
+        releaseAssistError = nil
+        defer { releaseAssistBusy = false }
+        do {
+            let result = try await model.client.run("analyze-project-release-assist",
+                payload: ["project_id": id, "repository": prepared.repository,
+                          "expected_context_sha256": prepared.contextSha256,
+                          "operation_id": operationID, "confirm": true],
+                timeout: 180, as: ProjectReleaseAssistResponse.self)
+            guard releaseAssistIsCurrent(id, generation: generation) else { return }
+            guard result.projectId == id, result.contextSha256 == prepared.contextSha256,
+                  result.operationId == operationID else {
+                throw CoreError.badOutput("AI 建议与本次项目或分析不符")
+            }
+            releaseAssistResult = result
+        } catch {
+            guard releaseAssistIsCurrent(id, generation: generation) else { return }
+            releaseAssistPreparation = nil
+            releaseAssistError = "AI 分析未完成：\(error.coreMessage)；当前配置草稿已保留。"
+        }
+    }
+
+    private func adoptReleaseSuggestion(_ id: String) async {
+        guard !releaseAssistBusy, !isSaving, let result = releaseAssistResult,
+              releaseAssistIsCurrent(id, generation: releaseAssistGeneration) else { return }
+        let generation = releaseAssistGeneration
+        releaseAssistBusy = true
+        releaseAssistProgress = "正在核对建议依据…"
+        defer { releaseAssistBusy = false }
+        do {
+            let prepared = try await model.client.run("prepare-project-release-assist",
+                payload: ["project_id": id, "repository": trimmedValue(currentDraft(id).repository)],
+                as: ProjectReleaseAssistPreparation.self)
+            guard releaseAssistIsCurrent(id, generation: generation) else { return }
+            guard prepared.projectId == id, prepared.contextSha256 == result.contextSha256 else {
+                invalidateReleaseAssist()
+                releaseAssistError = "仓库资料或模型设置已变化，请重新分析。当前配置草稿已保留。"
+                return
+            }
+            var draft = currentDraft(id)
+            let suggestion = result.suggestion
+            if let path = suggestion.workflowPath, !path.isEmpty { draft.automation.releaseWorkflowPath = path }
+            if let ref = suggestion.workflowRef, !ref.isEmpty { draft.automation.releaseWorkflowRef = ref }
+            if let version = suggestion.versionBase, !version.isEmpty { draft.automation.releaseVersionBase = version }
+            if !suggestion.requiredAssets.isEmpty { draft.automation.releaseAssets = suggestion.requiredAssets.joined(separator: "\n") }
+            if !suggestion.requiredJobs.isEmpty { draft.automation.releaseJobs = suggestion.requiredJobs.joined(separator: "\n") }
+            drafts[id] = draft
+            invalidateReleaseAssist()
+            releaseConfigExpanded = true
+            successMessage = "已采用 AI 建议，请检查配置后保存。"
+        } catch {
+            guard releaseAssistIsCurrent(id, generation: generation) else { return }
+            releaseAssistError = "暂时无法核对建议：\(error.coreMessage)；当前配置草稿已保留。"
         }
     }
 
@@ -926,6 +1198,7 @@ struct ProjectMappingsView: View {
     // MARK: - 业务逻辑
 
     private func selectProject(_ id: String) {
+        if selectedProjectId != id { invalidateReleaseAssist() }
         selectedProjectId = id
         if drafts[id] == nil, let item = items.first(where: { $0.projectId == id }) {
             drafts[id] = ProjectDraft(item)
@@ -946,6 +1219,7 @@ struct ProjectMappingsView: View {
         }
 
         if panel.runModal() == .OK, let url = panel.url {
+            invalidateReleaseAssist()
             var draft = currentDraft(id)
             draft.repository = url.path
             drafts[id] = draft
@@ -954,6 +1228,7 @@ struct ProjectMappingsView: View {
 
     @discardableResult
     private func loadMappings(refreshRemote: Bool) async -> Bool {
+        invalidateReleaseAssist()
         mappingGeneration += 1
         let generation = mappingGeneration
         if refreshRemote {
@@ -1084,6 +1359,7 @@ struct ProjectMappingsView: View {
         guard !isSaving, let item = items.first(where: { $0.projectId == id }) else { return }
         let steps = neededSteps(for: item)
         guard !steps.isEmpty else { return }
+        invalidateReleaseAssist()
         let total = changedRows(for: item).count
         isSaving = true
         errorMessage = nil
@@ -1222,6 +1498,7 @@ struct ProjectMappingsView: View {
 
     /// 「放弃」：只丢弃尚未保存的草稿并读回，已保存的项不回滚。
     private func discardChanges(_ id: String) async {
+        invalidateReleaseAssist()
         drafts[id] = nil
         deliveryBaseNotice[id] = nil
         for step in SaveStep.allCases {

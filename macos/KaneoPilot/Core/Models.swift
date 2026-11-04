@@ -2738,6 +2738,40 @@ struct ProjectMappingsResponse: Decodable {
     let remote: ProjectMappingRemote?
 }
 
+/// KP-R02：只读准备与建议，不代表项目策略已保存或远端工作流已可用。
+struct ProjectReleaseAssistPreparation: Decodable {
+    let projectId: String
+    let repository: String
+    let contextSha256: String
+    let model: String
+    let reasoningEffort: String
+    let sourcePaths: [String]
+    let warnings: [String]
+}
+
+struct ProjectReleaseAssistResponse: Decodable {
+    let projectId: String
+    let contextSha256: String
+    let operationId: String
+    let suggestion: ProjectReleaseSuggestion
+}
+
+struct ProjectReleaseSuggestion: Decodable {
+    let workflowPath: String?
+    let workflowRef: String?
+    let versionBase: String?
+    let requiredAssets: [String]
+    let requiredJobs: [String]
+    let summary: String
+    let evidence: [String]
+    let warnings: [String]
+
+    var hasValues: Bool {
+        [workflowPath, workflowRef, versionBase].contains { $0?.isEmpty == false }
+            || !requiredAssets.isEmpty || !requiredJobs.isEmpty
+    }
+}
+
 struct SetProjectMappingResponse: Decodable {
     let revision: Int
     let deduplicated: Bool?

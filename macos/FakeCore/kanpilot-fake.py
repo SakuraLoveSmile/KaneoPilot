@@ -3228,6 +3228,54 @@ def cmd_get_project_mappings(state, payload):
     }
 
 
+def cmd_prepare_project_release_assist(state, payload):
+    """KP-R02 隔离界面材料；不读取真实仓库或调用模型。"""
+    pid = payload.get("project_id")
+    mapping = (fake_project_mappings(state).get("items") or {}).get(pid)
+    if not mapping:
+        return {"__error__": "项目不存在", "__code__": "not_found"}
+    repository = payload.get("repository") or mapping.get("repository")
+    fixture = state.get("release_assist_fixture", "ready")
+    context = sha(json.dumps([pid, repository, fixture]))
+    return {"project_id": pid, "repository": repository, "context_sha256": context,
+            "model": "fake-codex-model", "reasoning_effort": "medium",
+            "source_paths": [] if fixture == "missing_workflow" else [".github/workflows/pilot-release.yml", "pubspec.yaml"],
+            "warnings": ["隔离演示资料，不调用真实模型。"]}
+
+
+def cmd_analyze_project_release_assist(state, payload):
+    prepared = cmd_prepare_project_release_assist(state, payload)
+    if prepared.get("__error__"):
+        return prepared
+    if payload.get("confirm") is not True:
+        return {"__error__": "请先确认模型费用", "__code__": "bad_request"}
+    if payload.get("expected_context_sha256") != prepared["context_sha256"]:
+        return {"__error__": "仓库资料已变化，请重新准备", "__code__": "conflict"}
+    operation_id = payload.get("operation_id")
+    if not operation_id:
+        return {"__error__": "缺少 operation_id", "__code__": "bad_request"}
+    if state.get("release_assist_fixture") == "failed":
+        return {"__error__": "演示分析失败；未改动配置，也未自动重试", "__code__": "validation_failed"}
+    previous = (state.get("release_assist_results") or {}).get(operation_id)
+    if previous:
+        if previous["project_id"] != prepared["project_id"] or previous["context_sha256"] != prepared["context_sha256"]:
+            return {"__error__": "分析编号已用于其他资料", "__code__": "conflict"}
+        return previous
+    missing = state.get("release_assist_fixture") == "missing_workflow"
+    name = (fake_project_mappings(state)["items"][prepared["project_id"]].get("project_name") or "Example")
+    result = {"project_id": prepared["project_id"], "context_sha256": prepared["context_sha256"],
+              "operation_id": operation_id,
+              "suggestion": {"workflow_path": None if missing else ".github/workflows/pilot-release.yml",
+                             "workflow_ref": None if missing else "master", "version_base": None if missing else "0.1.0",
+                             "required_assets": [] if missing else [name + "-android.apk"],
+                             "required_jobs": [] if missing else ["Android"],
+                             "summary": "隔离演示：未找到兼容发布工作流。" if missing else "隔离演示：从工作流得到发布配置建议。",
+                             "evidence": [] if missing else prepared["source_paths"],
+                             "warnings": ["请先补齐支持 Pilot 的工作流和精确包名。"] if missing else ["示例建议，尚未保存或核验远端工作流。"]}}
+    mutate(state, lambda s: s.setdefault("release_assist_results", {}).__setitem__(operation_id, result))
+    return result
+
+
 def cmd_set_project_mapping(state, payload):
     pid = payload.get("project_id")
     if not pid:
@@ -4422,6 +4470,8 @@ COMMANDS = {
     "prepare-plan-input": lambda s, p: cmd_prepare_plan_input(s, p),
     "start-plans": lambda s, p: cmd_start_plans(s, p),
     "get-project-mappings": lambda s, p: cmd_get_project_mappings(s, p),
+    "prepare-project-release-assist": lambda s, p: cmd_prepare_project_release_assist(s, p),
+    "analyze-project-release-assist": lambda s, p: cmd_analyze_project_release_assist(s, p),
     "set-project-mapping": lambda s, p: cmd_set_project_mapping(s, p),
     "migrate": lambda s, p: {"ok": True, "backup_path": "(fake)",
                              "imported": {"tasks": 0, "requests": 0, "events": 0},
