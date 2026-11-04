@@ -80,23 +80,7 @@ def summary(conn, task, value=None):
     result.update(can_prepare_verification=not bool(ref),can_sync_verification=bool(ref))
     if ref:
         from . import release_verification as verification
-        try:
-            attempt=verification._load(conn,task['task_id'],ref['verification_id'])
-            result['verification']=verification._view(attempt)
-            result['can_sync_verification']=(attempt['state'] not in ('verified','blocked','failed')
-                or verification._known_unsent_guard_block(conn,attempt) or verification._history_recoverable(conn,attempt))
-            row=db.get_runtime_operation(conn,verification._scope(task['task_id']),verification._op(attempt['verification_id']))
-            bound=bool(row['harness_id']=='core' and row['request_sha256']==verification._hash(attempt['context'])
-                and ref==dict(verification_id=attempt['verification_id'],context_sha256=attempt['context']['context_sha256']))
-            result['can_sync_verification']=bool(result['can_sync_verification'] and bound)
-            result['can_restart_verification']=bool(bound and attempt['state']=='blocked'
-                and attempt.get('failure_code')=='release_verification_report' and row['status']=='rejected'
-                and attempt.get('session_id') and attempt.get('execution_turn_id')
-                and not conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? AND status IN ('prepared','unknown') LIMIT 1",
-                    (verification._approval_operation(attempt)[0],)).fetchone())
-        except (util.KanpilotError,KeyError,TypeError):
-            result['can_sync_verification']=False
-            result['can_restart_verification']=False
+        result.update(verification.attempt_summary(conn,task))
     return result
 
 

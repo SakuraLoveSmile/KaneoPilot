@@ -114,6 +114,87 @@ def _result(value):
     return dict(verification_id=value['verification_id'], verification=_view(value))
 
 
+def attempt_summary(conn, task):
+    """SQL-only presentation of the exact current core-owned attempt."""
+    result = dict(can_prepare_verification=False, can_sync_verification=False,
+                  can_restart_verification=False)
+    ref = db.task_extra(task).get('release_verification_ref') or {}
+    if not ref:
+        return result
+    try:
+        attempt = _load(conn, task['task_id'], ref['verification_id'])
+        context = attempt['context']
+        row = db.get_runtime_operation(conn, _scope(task['task_id']), _op(attempt['verification_id']))
+        bound = (row['harness_id'] == 'core' and row['request_sha256'] == _hash(context)
+            and context['identity'] == release._identity(task)
+            and ref == dict(verification_id=attempt['verification_id'], context_sha256=context['context_sha256'])
+            and row['status'] == ('accepted' if attempt['state'] == 'verified' else
+                                 'rejected' if attempt['state'] in ('blocked', 'failed') else 'unknown'))
+        if not bound:
+            return result
+        result['verification'] = _view(attempt)
+        result['can_sync_verification'] = (attempt['state'] not in ('verified', 'blocked', 'failed')
+            or _known_unsent_guard_block(conn, attempt) or _history_recoverable(conn, attempt))
+        result['can_restart_verification'] = bool(attempt['state'] == 'blocked'
+            and attempt.get('failure_code') == 'release_verification_report'
+            and attempt.get('session_id') and attempt.get('execution_turn_id')
+            and not conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? AND status IN ('prepared','unknown') LIMIT 1",
+                (_approval_operation(attempt)[0],)).fetchone())
+    except (util.KanpilotError, KeyError, TypeError):
+        pass
+    return result
+
+
+def ordinary_summary(conn, task, blocked):
+    """Local eligibility only; preparation still verifies the complete target."""
+    extra = db.task_extra(task)
+    delivery = core.delivery_of(task)
+    history = extra.get('review_history') or []
+    review = history[-1] if history else {}
+    policy, mapping = release._policy(conn, task)
+    execution = round_store.get_round(conn, task['task_id'], task['run_id'])
+    config = util.jload(execution['config_json']) if execution is not None else {}
+    commands = (extra.get('plan_verify') or {}).get('commands')
+    if (not db.task_is_active(task) or task['status'] != 'in_review'
+            or task['manual_recovery_required'] or task['review_source_task_id']
+            or extra.get('external_build_repair_ref') or extra.get('build_failure_hold')
+            or core.review_repair_of(task)
+            or conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1', (task['task_id'],)).fetchone()
+            or not policy['enabled'] or mapping['repository'] != task['repository']
+            or db.paused(conn, 'delivery') or db.task_auto_paused(task)
+            or core.automation_of(task).get('manual_takeover')
+            or conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
+                            (task['task_id'],)).fetchone()
+            or execution is None or execution['backend'] != 'pi_desktop'
+            or execution['save_state'] != 'active' or execution['run_status'] != 'finished'
+            or not config or not config.get('connection_file')
+            or config.get('permission_mode') not in constants.EXEC_PERMISSION_MODES
+            or not isinstance(commands, list) or not commands
+            or not all(isinstance(command, str) and command.strip() for command in commands)
+            or delivery.get('mode') != 'pr' or delivery.get('pr_state') != 'MERGED'
+            or type(delivery.get('pr_number')) is not int or not delivery.get('merged_at')
+            or extra.get('review_conclusion') != 'pass' or review.get('conclusion') != 'pass'
+            or not all(review.get(key) == task[column] for key, column in
+                (('execution_run_id', 'run_id'), ('review_key', 'review_key'),
+                 ('report_sha256', 'review_report_sha256'), ('report_path', 'review_report_path')))
+            or review.get('head_sha') != delivery.get('head_sha')):
+        return None
+    ref = extra.get('release_verification_ref') or {}
+    if ref:
+        result = attempt_summary(conn, task)
+        attempt = result.get('verification')
+        if attempt:
+            stored = _load(conn, task['task_id'], ref['verification_id'])['context']
+            if stored.get('runtime_config') != config or stored.get('commands') != commands:
+                return None
+        return result
+    blockers = (blocked or {}).get('blockers') or []
+    if not blockers or any(row.get('code') != 'release_target_unverified' for row in blockers):
+        return None
+    return dict(can_prepare_verification=True, can_sync_verification=False,
+                can_restart_verification=False)
+
+
 def _unchanged(conn, task, value):
     context = _context(conn, task, value['context']['target_sha'], restart=value['context'].get('restart'))
     _require(context == value['context'], 'release_verification_changed',
