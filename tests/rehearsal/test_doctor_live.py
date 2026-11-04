@@ -59,9 +59,15 @@ def _fake_gh_env(tmp_path):
             "KANPILOT_CLAUDE_BIN": str(claude)}
 
 
-def _write_connection_file(home, plus):
+def _write_connection_file(home, plus, cli):
     path = os.path.join(str(home), CONNECTION_PATH)
     plus.write_connection_file(path)
+    # A saved connection alone is not a runtime dependency. These network
+    # scenarios explicitly select Plus so their original assertions still test it.
+    cli("set-exec-config", {"backend": "pi_desktop", "pi_desktop": {
+        "connection_file": str(path), "permission_mode": "auto",
+        "model_source": "custom", "provider_id": "p", "model_id": "m",
+        "thinking_level": "medium"}})
     return path
 
 
@@ -161,7 +167,7 @@ def test_scenario_doctor_live_flag_is_online_alias(cli, fake_kaneo):
 def test_scenario_doctor_live_all_green(cli, tmp_env, fake_kaneo):
     plus = FakePlus().start()
     try:
-        _write_connection_file(tmp_env.home, plus)
+        _write_connection_file(tmp_env.home, plus, cli)
         env = dict(FAST_PROBE)
         env.update(_fake_gh_env(tmp_env.root))
         out = cli("doctor", {"live": True}, env_extra=env)
@@ -237,7 +243,7 @@ def test_scenario_doctor_live_plus_unreachable_no_token(cli, tmp_env,
     """Plus 不可达 → ok=false 真实失败（不可达 ≠ 超时）；detail 不泄露 token。"""
     plus = FakePlus(faults=["plus_unreachable"]).start()
     try:
-        _write_connection_file(tmp_env.home, plus)
+        _write_connection_file(tmp_env.home, plus, cli)
         out = cli("doctor", {"live": True}, env_extra=FAST_PROBE)
         check = _check(out, "plus")
         assert out["ok"] is False
@@ -254,7 +260,7 @@ def test_scenario_doctor_live_plus_timeout(cli, tmp_env, fake_kaneo):
     """Plus 挂起 → timed_out=true 且探针按超时收身。"""
     plus = FakePlus(faults=["plus_timeout"]).start()
     try:
-        _write_connection_file(tmp_env.home, plus)
+        _write_connection_file(tmp_env.home, plus, cli)
         started = time.monotonic()
         out = cli("doctor", {"live": True}, env_extra=FAST_PROBE)
         elapsed = time.monotonic() - started
@@ -268,7 +274,7 @@ def test_scenario_doctor_live_plus_timeout(cli, tmp_env, fake_kaneo):
 
 def test_scenario_doctor_live_plus_skipped_without_connection_file(
         cli, fake_kaneo, tmp_env):
-    """执行后端为 pi 且无连接文件 → skipped（Plus 非当前执行路径）。"""
+    """未选择 Plus 且无连接文件 → skipped（Plus 非当前运行路径）。"""
     path = tmp_env.home / CONNECTION_PATH
     if path.exists():
         path.unlink()
@@ -296,7 +302,7 @@ def test_scenario_doctor_live_no_token_leak(cli, tmp_env, fake_kaneo):
     """凭据/探针详情绝不输出 token（Kaneo 与 Plus 两侧）。"""
     plus = FakePlus().start()
     try:
-        _write_connection_file(tmp_env.home, plus)
+        _write_connection_file(tmp_env.home, plus, cli)
         env = dict(FAST_PROBE)
         env.update(_fake_gh_env(tmp_env.root))
         out = cli("doctor", {"live": True}, env_extra=env)

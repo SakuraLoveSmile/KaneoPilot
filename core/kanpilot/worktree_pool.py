@@ -422,9 +422,18 @@ def consumer_returned(conn, row):
                     ("slot_id", "holder_id", "holder_stage", "lease_token", "path")))
 
 
-def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_not_started=False):
+def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_not_started=False,
+            expected_owner=None, expected_request=None):
     with db.write_txn(conn):
         row = _owned(conn, slot_id, holder_id, lease_token)
+        if expected_owner is not None:
+            util.require(all(row[key] == value for key, value in expected_owner.items()),
+                         "槽位持有者状态已变化，未释放", "conflict")
+        if expected_request is not None:
+            current = db.get_request(conn, expected_request["request_id"])
+            util.require(current is not None and all(current[key] == expected_request[key] for key in
+                         ("task_id", "run_id", "stage", "status", "payload_json")),
+                         "原请求身份或冻结输入已变化，未释放", "conflict")
         if row["state"] != "leased" or row["reason"] == "release_in_progress":
             return _result(row)
         if only_not_started and row["owner_state"] != "not_started":

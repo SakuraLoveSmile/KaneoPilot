@@ -122,6 +122,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "worktree-slot-release": ({"slot_id": (True, "str"), "holder_id": (True, "str"),
                                "lease_token": (True, "str"), "confirm": (True, "bool")},
                               _automation_command("worktree_pool", "cmd_worktree_slot_release")),
+    "worktree-slot-recover": (
+        {key: (True, "str") for key in
+         ("slot_id", "holder_id", "lease_token", "operation_id", "backup_dir", "reason")}
+        | {"dry_run": (False, "bool"), "confirm": (False, "bool")},
+        _automation_command("worktree_recovery", "cmd_worktree_slot_recover")),
     "worktree-audit": ({"retention_days": (False, "int")},
                        _automation_command("cmd_worktree", "cmd_worktree_audit")),
     "worktree-gc": ({"dry_run": (False, "bool"), "retention_days": (False, "int"),

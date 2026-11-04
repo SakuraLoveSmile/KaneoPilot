@@ -64,11 +64,24 @@ class TestDoctorFallbackCheck(KanpilotTestCase):
         connection_file.write_text(json.dumps({
             "url": "http://127.0.0.1:1/mcp", "token": "fixture-token",
         }), encoding="utf-8")
+        credentials = mock.patch("kanpilot.bridge.load_credentials",
+                                 return_value=("http://fixture.invalid", "fixture-token"))
+        credentials.start()
+        self.addCleanup(credentials.stop)
+        for name in ("kaneo_ping", "gh", "claude"):
+            local = mock.patch("kanpilot.cmd_read._doctor_" + name,
+                               return_value={"name": name, "ok": True,
+                                             "detail": "isolated fixture",
+                                             "skipped": False, "timed_out": False})
+            local.start()
+            self.addCleanup(local.stop)
         probe = mock.patch("kanpilot.pi_desktop_backend.probe_connection",
                            return_value={"ok": True, "detail": "fixture"})
         probe.start()
         self.addCleanup(probe.stop)
-        self.call("set-exec-config", {"pi_desktop": {
+        # The live Plus/redaction assertions require an explicitly selected
+        # Plus runtime; an unused saved connection is now correctly skipped.
+        self.call("set-exec-config", {"backend": "pi_desktop", "pi_desktop": {
             "connection_file": str(connection_file),
             "provider_id": "fixture-provider", "model_id": "fixture-model",
             "thinking_level": "medium", "permission_mode": "auto",

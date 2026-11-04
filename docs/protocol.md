@@ -1434,6 +1434,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - 凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
  - 新增 `engine_lease`（当前活跃实例数与健康状态）与 `attention_backlog`（attention-list 聚合计数）检查项。
  - `python_runtime` 检查项的语义同 §5.1（离线，来源仅为信息，仅 `bundled` 且无可用证书时失败）。
+ - `plus` 仅核对实际依赖的连接（KP-ENV01）：当前规划、执行、评审中选用 `pi_desktop` 的角色，各自使用已保存的 `connection_file`（未填沿用既有默认路径）；仍需 Plus 的活动固化请求与执行轮次继续按自身快照核对，不因全局后端切换而隐藏。不同连接路径去重后全部检查，任一必需连接缺失、未启用、不可达或超时仍失败；终态历史轮次、仅保留的未选用 Plus 配置和已弃用 `controller_backend` 不形成依赖。没有依赖时返回 `ok:true, skipped:true`，明确「当前未使用 Plus」，即使历史连接文件存在也不探测。此规则不改变独立的 `plus_fallback_model` 模型目录核验。
  - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式按 §5.27.7 统一解析，仅显式 shadow+force 为诊断，不使用带 enabled/preflight 门的 intake 范围。
 
  **探针超时与失败区分（A8）：**
@@ -1780,6 +1781,8 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 核心在 BEGIN IMMEDIATE 内分配 free 槽位，登记 stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，防止并发超过上限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确属于本池，实际顶层与git common dir须匹配，且为detached；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`，不覆盖忽略文件，不使用force/reset/clean。
 
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
+
+**人工恢复旧 Plus 租约（KP-ENV01，2026-11-04 用户明确授权）**：原 Plus 轮次记录已丢失且无法恢复时，可由运维显式调用 `worktree-slot-recover {slot_id,holder_id,lease_token,operation_id,backup_dir,reason,dry_run?:bool,confirm?:bool}`；默认只读预检，实际操作必须 `dry_run:false,confirm:true` 并记录人工授权原因。仅限同代的 `leased/unknown`、已终态的 Plus 规划/评审请求，冻结租约与可信原 job 身份、原 PID/会话/轮次必须一致，本机原进程必须已不存在，且关联操作均已确认。完整备份的清单、归档 SHA 与当前文件内容须核对，保全规划附件及持久 job 路径后才可复用既有释放；未知文件不删除，未知改动仍保留隔离。核心先登记人工恢复回执，再实施文件/租约变化，结果可按同一 operation_id 查询。回执明确为人工恢复且 Plus 终态仍未知，不改写原 job 的 `owner_stopped`，不伪造远端终态，也不进入自动回收路径。未取得该次人工确认不得调用执行模式；自动回收、隔离和 Desktop 交还门槛保持原样。
 
 **Desktop 显式交还（2026-10-16 用户授权）**：新增 `kp_desktop_return_slot {request_id,run_id,claim_token,confirm:true}`。消费者必须先完成所有目录读取、经submit/fail持久提交正文/失败记录并等核心结算为请求终态，再调用本接口；交还以后禁止继续读取或写入槽位，包括原生会话仍存活的情形。submit成功、MCP短进程退出、租约到期都不自动视为交还。这是协作协议证明，不是原生进程退出证明，不能写 `owner_stopped=true` 冒充。
 

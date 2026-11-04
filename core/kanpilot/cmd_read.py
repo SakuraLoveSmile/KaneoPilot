@@ -672,39 +672,86 @@ def _doctor_claude(timeout: float) -> dict:
     return _probe_check("claude", ok=True, detail=lines[0] if lines else "claude 可用")
 
 
-def _doctor_plus(ctx, timeout: float) -> dict:
-    """Plus（PI-Desktop）控制面探测：连接文件校验 + MCP 握手；绝不输出 token。
+def _doctor_plus_connections(conn) -> dict:
+    """Only selected roles and unfinished frozen Plus runs require a control plane."""
+    from . import exec_config, planner_config, review_config
 
-    执行后端为 pi 且未配置连接文件 → skipped（Plus 非当前执行路径）；
-    backend=pi_desktop 却缺连接文件 → 真实失败（自动化就绪条件不满足）。
-    """
+    connections = {}
+
+    def add(role, config):
+        block = config if isinstance(config, dict) else {}
+        if isinstance(block.get("pi_desktop"), dict):
+            block = block["pi_desktop"]
+        path = Path(str(block.get("connection_file") or
+                        constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE)).expanduser()
+        roles = connections.setdefault(path, [])
+        if role not in roles:
+            roles.append(role)
+
+    execution = exec_config.load(conn)
+    planning = planner_config.merged(conn)
+    review = review_config.load(conn) or {}
+    for role, config in (("执行", execution), ("规划", planning), ("评审", review)):
+        if config.get("backend") == "pi_desktop":
+            add(role, config.get("pi_desktop"))
+
+    # Changing global settings only affects new requests. Queued/claimed work
+    # continues to use its frozen runtime configuration.
+    for row in conn.execute("SELECT * FROM requests WHERE status IN ('queued','claimed') "
+                            "AND stage IN ('plan','review')"):
+        payload = db.request_payload(row)
+        if row["stage"] == "plan" and payload.get("planner_backend") == "pi_desktop":
+            add("待处理规划", payload.get("runtime_config"))
+        elif row["stage"] == "review" and review_config.backend_for_request(conn, payload) == "pi_desktop":
+            add("待处理评审", review_config.for_request(conn, payload))
+
+    for row in conn.execute("SELECT * FROM execution_rounds WHERE backend='pi_desktop' "
+                            "AND run_status NOT IN ('finished','failed','cancelled')"):
+        config = util.jload(row["config_json"]) or {}
+        if not isinstance(config, dict):
+            config = {}
+        stage = "plan" if "planner" in config else "review" if "review" in config else None
+        requests = conn.execute("SELECT status FROM requests WHERE task_id=? AND run_id=? "
+                                "AND stage IN ('plan','review')",
+                                (row["task_id"], row["run_id"])).fetchall()
+        # Old planning/review rows also used flat configs. Match the run's
+        # request identity rather than inferring its role from config shape.
+        # Dispatch/monitor completion does not prove execution has finished.
+        if requests and all(request["status"] in ("succeeded", "failed", "cancelled")
+                            for request in requests):
+            continue
+        add("未结束轮次", config.get("planner") if stage == "plan" else
+            config.get("review") if stage == "review" else config)
+    return connections
+
+
+def _doctor_plus(ctx, timeout: float) -> dict:
+    """Probe required Plus connections without inspecting unused saved branches."""
+    from . import pi_desktop_backend
+
     try:
-        from . import exec_config, pi_desktop_backend
-    except Exception as exc:  # pragma: no cover - defensive
-        return _probe_check("plus", ok=False, detail=f"Plus 模块缺失：{exc}")
-    try:
-        config = exec_config.load(ctx.conn)
+        connections = _doctor_plus_connections(ctx.conn)
     except Exception as exc:
-        return _probe_check("plus", ok=False, detail=f"执行配置不可读：{exc}")
-    backend = config.get("backend") or "pi"
-    block = config.get("pi_desktop") or {}
-    conn_file = block.get("connection_file") or constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
-    path = Path(str(conn_file)).expanduser()
-    if not path.is_file():
-        if backend == "pi_desktop":
-            return _probe_check("plus", ok=False,
-                                detail=f"Plus 连接文件不存在：{path}")
-        return _probe_check("plus", ok=True,
-                            detail=f"未配置 Plus 连接文件（执行后端 {backend}）",
-                            skipped=True)
-    try:
-        probe = pi_desktop_backend.probe_connection(path, timeout=timeout)
-    except Exception as exc:  # pragma: no cover - defensive
-        return _probe_check("plus", ok=False, detail=f"Plus 探测异常：{exc}")
-    detail = probe.get("detail") or (
-        "Plus 控制面就绪" if probe.get("ok") else "Plus 控制面不可用")
-    return _probe_check("plus", ok=probe.get("ok"), detail=detail,
-                        timed_out=_probe_timed_out(detail))
+        return _probe_check("plus", ok=False, detail=f"Plus 运行配置不可读：{exc}")
+    if not connections:
+        return _probe_check("plus", ok=True, skipped=True,
+                            detail="当前规划、执行与评审未使用 Plus，且没有未结束的 Plus 轮次")
+
+    details, ok, timed_out = [], True, False
+    for path, roles in connections.items():
+        if not path.is_file():
+            probe = {"ok": False, "detail": f"Plus 连接文件不存在：{path}"}
+        else:
+            try:
+                probe = pi_desktop_backend.probe_connection(path, timeout=timeout)
+            except Exception as exc:  # pragma: no cover - defensive
+                probe = {"ok": False, "detail": f"Plus 探测异常：{exc}"}
+        detail = probe.get("detail") or (
+            "Plus 控制面就绪" if probe.get("ok") else "Plus 控制面不可用")
+        details.append(f"{'、'.join(roles)}（{path}）：{detail}")
+        ok = ok and bool(probe.get("ok"))
+        timed_out = timed_out or _probe_timed_out(detail)
+    return _probe_check("plus", ok=ok, detail="；".join(details), timed_out=timed_out)
 
 
 def _doctor_plus_fallback_model(ctx, timeout: float) -> dict:
