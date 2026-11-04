@@ -25,5 +25,7 @@
 - 主 agent 在 `845f9aa` 加本任务未提交差异上实测：隔离 Python 3.14.7 / pytest 8.4.2，`python -I -m pytest core/tests/test_mobile_access.py core/tests/test_mobile_server.py -q`：**40 passed in 13.60s**。包括真实回环 HTTPS / 独立 worker、原子单次、失效/撤销、两种码身份一致、密度上限和令牌不存明文。Python AST 与 `git diff --check` 通过。
 - 密度测量仅用临时 DB/临时 RSA2048 证书、回环地址，不启动正式服务、不打印 URI 或令牌。相同测试批次：v1 1837 bytes / QR byte-mode M 级 version36 / 161×161 模块；v2 283 bytes / version12 / 65×65 模块，减少 84.6%，300pt 中每模块整数 4pt、静区至少四模块。测量使用独立临时工具 qrcode 8.2；未给项目增加第三方依赖。这是参考编码测量，不冒充 CoreImage 运行截图或手机实扫。
 - 独立 reviewer 已只读检查整体安全、兼容、生命周期、Swift 绘制及 Kotlin 夹具，未发现实质问题；核实 MockWebServer 4.12 的仅握手连接不消耗 HTTP 响应队列。Android 新增解析/TLS/主机名/丢响应专项用例，Mac 既有服务夹具补充短码响应检查；按用户规则均未本地编译或运行，不计为通过。
-- 尚待：云端 Swift/Kotlin 编译与 Android 用例、包含本次代码的原生页面和手机实扫。当前已安装 App 未更新，不能据源码和 Python 检查声称手机识别率已实测提升。
-- 下一步：提交并推送本项改动，沿分支 push 自动触发一次 Packages 普通预览，核对源码 SHA、全部必需 job 与产物；不重复手动派发同一构建。未合入前保留本任务工作树；合入且适用验证通过后清理。
+- 首轮云端：源码 `3074226b7db2738abfc47a85ab37fefb864c9ef1`，Packages [41777462192 / #103](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41777462192)，15 个必需 job 全部成功。Android JUnit 实际 94 项、失败/错误/跳过均 0，包含 compact 解析 2 项及 TLS 4 项新增用例；lint 27 warning、0 error。未改门禁，publish 与可选全文探针按普通预览跳过。原始 job、artifact 与测试报告保存在 `build/kp-m02-cloud-103/`。
+- 首轮原生：已核对预览包 SHA-256、大小、源码 SHA、构建号、arm64 和云端签名，使用独立 FakeCore/空凭据/数据/偏好目录运行，无网络监听。1180×760 深色可见 300pt 白底紧凑码、静区及兼容说明；但宽区仍落入上下排列，右侧留白。主 agent 保存截图后查明说明区域无有限理想宽度，现为其补充 240pt 理想宽度，保留 180pt 最小宽及可扩展/换行；独立 reviewer 静态确认这个最小修正。该修正仍需新云端产物复测。
+- 尚待：布局修正的云端检查及原生页面复测、手机实扫。当前已安装 App 未更新，不能据源码和 Python/Android 夹具声称手机识别率已实测提升。
+- 下一步：推送布局修正，沿分支 push 自动触发一次 Packages 普通预览；核对源码 SHA、全部必需 job 与产物，不重复手动派发同一构建。未合入前保留本任务工作树；合入且适用验证通过后清理。

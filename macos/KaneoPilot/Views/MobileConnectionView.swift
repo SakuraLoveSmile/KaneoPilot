@@ -199,7 +199,7 @@ struct MobileConnectionView: View {
                 copied = true
             }.accessibilityLabel("复制手机配对内容")
         }
-        .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 180, idealWidth: 240, maxWidth: .infinity, alignment: .leading)
     }
 
     static func qrImage(_ value: String) -> NSImage? {
