@@ -104,6 +104,23 @@ class ReleaseVerificationProjectionTest(TestCase):
         self.assertEqual(self.case.sync(first['verification_id'])['verification']['state'], 'unknown')
         self.assertEqual((self.case.plus.created, self.case.plus.prompts), (1, 0))
 
+    def test_verified_attempt_preserves_later_unrelated_release_blockers(self):
+        first = self.case.start()
+        self.assertEqual(self.case.sync(first['verification_id'])['verification']['state'], 'verified')
+        for code in ('workflow_unavailable', 'release_target_changed'):
+            with self.subTest(code=code):
+                self.record_blocker(code)
+                view = self.view()
+                self.assertEqual(view['verification']['state'], 'verified')
+                self.assertEqual(view['state'], 'blocked')
+                self.assertEqual(view['title'], '发布受阻')
+                self.assertTrue(view['reason'].startswith('上次发布核对：'))
+                self.assertEqual([item['code'] for item in view['blockers']], [code])
+                self.assertFalse(view['can_start'])
+        self.record_blocker()
+        self.assertEqual(self.view()['state'], 'ready')
+        self.assertTrue(self.view()['can_start'])
+
     def test_completed_insufficient_report_can_only_explicitly_restart(self):
         old, payload = self.case.partial_report()
         view = self.view()

@@ -42,3 +42,9 @@
 - UI01 的界面实现已明确撤回，不复活；早期 Mac 设计文档不覆盖后续记录；全文 stall 分支为诊断实验，保留在其专用分支。archive/codex refs 与 stash 是恢复快照，不批量重放。
 
 T3：最终组合态的专项隔离检查和独立只读 review 进行中；尚未推送或触发本次云端构建。
+
+### T3 本地组合验证与审查修正
+
+- 整合后打包/发布脚本隔离检查：221 项全部通过（Python 3.14，日志 `build/kp-rel02/checks/packaging.log`）；16 个变更 Python 文件按 3.9 语法解析与完整差异空白检查通过。
+- Sol reviewer 对 UI08/V01 守卫、R01、Android 合并及迁移命令做独立只读审查，发现普通补验证 verified 会覆盖后续非验证发布阻塞。先增加回归，旧实现对 `workflow_unavailable`、`release_target_changed` 均实测失败；现仅解除 `release_target_unverified`，保留其他/混合阻塞与已通过的验证面板。修正后 reviewer 复核未发现新增实质问题；未降低门禁或修改原测试预期。
+- 初次核心专项检查开始于源码指纹 `127c99251a530f9247261e311188ab4cd5638948fcdd32a85dca863045341ecc`（669 文件，`source-before-review-fix.json`）；运行期间只增加上述小修正及回归，其结果作为补充检查，最终组合证据以随后同一提交的云端全量检查为准。修正后的 projection/release_delivery 专项已独立通过，准确统计见日志与 XML；原生与正式发布尚未进行。

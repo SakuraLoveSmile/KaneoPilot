@@ -313,7 +313,8 @@ def projection(conn,task):
             value.update(verification)
             attempt=verification.get('verification') or {}
             stage=attempt.get('state')
-            if stage:
+            if stage and not (stage=='verified' and blocked and any(
+                    item.get('code')!='release_target_unverified' for item in blocked['blockers'])):
                 verified=stage=='verified'
                 reason=attempt.get('reason') or ('完整验证已通过，可继续构建发布' if verified else
                     '正在规划合并后源码的完整验证' if stage=='planning' else
