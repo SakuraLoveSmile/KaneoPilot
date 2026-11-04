@@ -113,6 +113,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "review_key": (True, "str")},
         _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
     "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str")}, cmd_config.cmd_set_config),
+    "worktree-relocate": (
+        {"source_root": (True, "str"), "destination_root": (True, "str"),
+         "backup_dir": (True, "str"), "operation_id": (True, "str"),
+         "dry_run": (False, "bool"), "confirm": (False, "bool"),
+         "expected_audit_sha256": (False, "str")},
+        _automation_command("cmd_worktree_relocate", "cmd_worktree_relocate")),
     "worktree-slot-release": ({"slot_id": (True, "str"), "holder_id": (True, "str"),
                                "lease_token": (True, "str"), "confirm": (True, "bool")},
                               _automation_command("worktree_pool", "cmd_worktree_slot_release")),
