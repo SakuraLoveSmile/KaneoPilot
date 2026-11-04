@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：待体验（代码、隔离验证、云端构建及安装包核验完成，尚未安装，现用安装版未更新）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”。
+状态：实现中（修复源码、隔离验证及预览包核验完成；用户已选正式 v0.4.5，正在合入 main 并执行正式发布，尚未安装）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -45,3 +45,17 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - Android 本地核验退出 0：APK SHA-256 `8f5945946301e647d6a2778c1ec853bbbc7b3c55f770fff3eaaf01f937c32f57`，ZIP 完整性、aapt 应用标识/版本/构建号及 apksigner 签名通过，证书指纹与云端 metadata 相符。预览 Debug APK 的证书和正式版不同。
 - 可复查脚本与原始核验结果保存在上述归档的 `verify-macos.py` / `macos-verification.json`、`verify-android.py` / `android-verification.json`，完整包哈希见 `SHA256SUMS`，修复阶段隔离证据另存 `source-verification/`。本机仅核验下载包，未编译或安装应用；原任务未重试。
 - 构建源固定为 `a2022389c66c04e1d5bae552d353c02ea9302235`；后续仅补充本记录的文档提交不改变该包的源码身份，不作为已构建的新版本。分支尚未合入 `main`，工作树保留以便体验后集成，包与证据已独立归档。
+
+## 0.4.x 版本纠正
+
+- 用户指出交付版本应沿用 `0.4.x`。上面的 `0.0.0` 是误选默认 preview 通道的产物，不作为本次版本交付完成依据。
+- 重新查询 GitHub：当前 latest 为 `v0.4.4`，`origin/main` 仍为 `50aa7e26372a65976f434d1873546823bdae91c7`；本次补丁候选基础版本为 `0.4.5`。任务分支已推送提交 `d48a7f085705abbf2335c47755910222299adb40`，与已核验构建源码仅有任务记录差异。
+- 已准备用户可见修复说明 `build/kp-c02-evidence/release-notes-0.4.5.md`，包含 Flutter 缓存权限、失败收尾和 Codex 报告提示；本次没有数据库 schema 变更，旧失败轮次不会自动重试。
+- 现有流程的 `0.4.x` 包均伴随 Release：正式 `v0.4.5` 需先合入 `main`；测试版 `0.4.5-test.<build>` 可使用任务分支但会公开 GitHub 预发布。用户已明确选择“正式 v0.4.5：合入 main，发布正式更新”，本轮按该选择继续，不再使用 preview 或测试通道。
+
+## 正式 v0.4.5 发布
+
+- 正式说明为 `docs/releases/v0.4.5.md`，包含三项修复、无 schema 变更、旧轮次需显式重试和已有异常终止限制。用户已授权合入 main 与公开正式 Release；没有安装或真实模型执行授权。
+- 发布前再次核对主工作区 main 仅有无关未跟踪 `.local/`，远端 main 仍为原基线，latest 仍为 v0.4.4。业务源码、测试与已核验的 `a2022389` 相同；新增内容仅为版本纠正记录和正式更新说明。
+- 后续顺序：提交发布文档、快进合入并推送 main；等待该完整提交的 Packages 必需检查成功；创建直接指向它的 annotated 签名 `v0.4.5` 标签并推送；等待正式 Packages、核验公开四项资产和 latest，保全证据后清理本任务 worktree 与已合并本地分支。远端任务分支保留。
+- 正式构建和核验材料独立保存在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261104-kp-c02-release-0.4.5/`，不纳入公开 Git。
