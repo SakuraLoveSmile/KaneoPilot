@@ -354,7 +354,7 @@ struct AutomationDashboardView: View {
         return alerts
     }
 
-    /// 区段标题「环境 · E 项需处理」，右侧「在线诊断」；每个告警一行，最后一行折叠「详情 · 诊断 N 项 · 引擎记录 M 条」。
+    /// 区段标题「环境 · E 项需处理」，右侧「在线诊断」；每个告警一行，最后一行折叠「详情 · 诊断 N 项」。
     private var environmentSection: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
@@ -605,14 +605,9 @@ struct AutomationDashboardView: View {
         return check.detail ?? "未提供检查结果，请重新诊断。"
     }
 
-    private var hasHealthDetails: Bool { !doctorChecks.isEmpty || !engineRecords.isEmpty }
+    private var hasHealthDetails: Bool { !doctorChecks.isEmpty }
 
-    private var healthDetailsTitle: String {
-        var parts = ["详情"]
-        if !doctorChecks.isEmpty { parts.append("诊断 \(doctorChecks.count) 项") }
-        if !engineRecords.isEmpty { parts.append("引擎记录 \(engineRecords.count) 条") }
-        return parts.joined(separator: " · ")
-    }
+    private var healthDetailsTitle: String { "详情 · 诊断 \(doctorChecks.count) 项" }
 
     private var healthDetailsToggle: some View {
         Button { healthDetailsExpanded.toggle() } label: {
@@ -632,29 +627,13 @@ struct AutomationDashboardView: View {
         .accessibilityValue(healthDetailsExpanded ? "已展开" : "已折叠")
     }
 
-    /// 展开内容：先「诊断详情」再「引擎记录」；名称与状态一行，详情在下一行并可换行、可复制。
+    /// 展开诊断详情：名称与结果一行，详情在下一行并可换行、可复制。
     private var healthDetails: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             if !doctorChecks.isEmpty {
                 Text("诊断详情").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
                 ForEach(doctorChecks) { check in
                     diagnosticRow(check)
-                }
-            }
-            if !engineRecords.isEmpty {
-                Text("引擎记录").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
-                ForEach(engineRecords) { instance in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: Spacing.s) {
-                            Text(engineRecordTitle(instance))
-                                .foregroundStyle(instance.active == true ? Color.primary : Color.kpSecondary)
-                            Spacer(minLength: Spacing.s)
-                            Text("PID \(instance.pid.map(String.init) ?? "—")").monospacedDigit()
-                        }
-                        Text("启动 \(TimeFormat.short(instance.startedAt)) · 租约至 \(TimeFormat.short(instance.leaseExpiresAt))")
-                            .foregroundStyle(Color.kpSecondary)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -730,21 +709,6 @@ struct AutomationDashboardView: View {
         if model.doctor == nil { return "stethoscope" }
         if doctorNeedsAttention { return "exclamationmark.triangle" }
         return doctorChecks.contains { $0.skipped != true && $0.ok == true } ? "checkmark.circle" : "minus.circle"
-    }
-    private var engineRecords: [EngineStatusResponse.Instance] {
-        (engine.engineStatus?.instances ?? []).sorted {
-            if ($0.active == true) != ($1.active == true) { return $0.active == true }
-            return (TimeFormat.parse($0.startedAt) ?? .distantPast) > (TimeFormat.parse($1.startedAt) ?? .distantPast)
-        }
-    }
-    private func engineRecordTitle(_ instance: EngineStatusResponse.Instance) -> String {
-        if instance.active == true { return "运行中" }
-        switch instance.state {
-        case "stopped": return "已停止"
-        case "released": return "已释放"
-        case "active": return "心跳未确认"
-        default: return instance.state ?? "未提供状态"
-        }
     }
     private func open(_ id: String) { detailItem = TaskSheetItem(id: id, startTab: .overview) }
 
