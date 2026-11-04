@@ -171,60 +171,65 @@ def cmd_reconnect_task(ctx, payload: dict) -> dict:
         return {"ok": True, "task": derive.task_detail(conn, db.require_task(conn, task_id), ctx.now)}
 
 
+def save_task_inline(conn, task_id: str, now, target_state: str, event_kind: str,
+                     *, expected_save_state=None, actor="user", event_detail=None) -> dict:
+    """Archive/trash in the caller's write transaction, including scheduler use."""
+    from . import verification_checks
+    now_iso = util.to_iso(now)
+    task = db.require_task(conn, task_id)
+    current = db.task_save_state(task)
+    # v2 §5.20.1：purged 终态——不可归档/回收/恢复，一律 conflict。
+    if current == "purged":
+        raise util.KanpilotError(
+            "conflict", "任务已永久从列表移除（终态），不能再变更保存状态"
+        )
+    # 幂等：已在目标 save_state，不重复写事件（§5.15.2）。
+    if current == target_state:
+        return {"ok": True, "deduplicated": True}
+    # 保存状态冲突核验：期望保存状态与当前不符则报告冲突。
+    if expected_save_state is not None and current != expected_save_state:
+        raise util.KanpilotError(
+            "conflict",
+            f"任务保存状态冲突（期望 {expected_save_state}，实际为 {current}）",
+        )
+    # 前置复核（事务内）：禁用条件 → conflict + 中文原因。
+    # 失联判定用 datetime，DB 写入用 ISO 串。
+    verification_checks.require_not_running(conn, task_id)
+    reason = derive.archive_blocked_reason(conn, task, now)
+    if reason is not None:
+        raise util.KanpilotError("conflict", reason)
+    # 排队取消与领取竞争：事务内复核，已被 claimed（执行端已领取）→ 中止，
+    # 不取消、不改保存状态（§5.15.2）。
+    claimed = conn.execute(
+        "SELECT 1 FROM requests WHERE task_id=? AND status='claimed' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if claimed is not None:
+        raise util.KanpilotError(
+            "conflict", "任务已被执行端领取，暂不能移出看板"
+        )
+    # 取消该任务 queued 请求（同事务）。
+    cancelled = db.cancel_queued_requests(conn, task_id, now_iso, actor=actor)
+    db.update_task(conn, task_id, now_iso, save_state=target_state, saved_at=now_iso)
+    db.add_event(
+        conn, now_iso, event_kind, task_id=task_id, actor=actor,
+        detail={**(event_detail or {}), "from": current, "to": target_state,
+                "cancelled_requests": cancelled},
+    )
+    return {"ok": True, "deduplicated": False, "cancelled_requests": cancelled}
+
+
 def _save_task(ctx, payload: dict, target_state: str, event_kind: str) -> dict:
     """archive-task / trash-task 共用：单事务内前置复核 + 取消排队 + 改状态。"""
-    conn, now = ctx.conn, ctx.now_iso
-    task_id = payload["task_id"]
-    expected_save_state = payload.get("expected_save_state")
-    with db.write_txn(conn):
-        task = db.require_task(conn, task_id)
-        current = db.task_save_state(task)
-        # v2 §5.20.1：purged 终态——不可归档/回收/恢复，一律 conflict。
-        if current == "purged":
-            raise util.KanpilotError(
-                "conflict", "任务已永久从列表移除（终态），不能再变更保存状态"
-            )
-        # 幂等：已在目标 save_state，不重复写事件（§5.15.2）。
-        if current == target_state:
-            return {
-                "ok": True, "deduplicated": True,
-                "task": derive.task_detail(conn, task, ctx.now),
-            }
-        # 保存状态冲突核验：期望保存状态与当前不符则报告冲突
-        if expected_save_state is not None and current != expected_save_state:
-            raise util.KanpilotError(
-                "conflict",
-                f"任务保存状态冲突（期望 {expected_save_state}，实际为 {current}）",
-            )
-        # 前置复核（事务内）：禁用条件 → conflict + 中文原因。
-        # derive 侧失联判定需要 datetime（ctx.now），DB 写入用 ISO 串（now）。
-        reason = derive.archive_blocked_reason(conn, task, ctx.now)
-        if reason is not None:
-            raise util.KanpilotError("conflict", reason)
-        # 排队取消与领取竞争：事务内复核，已被 claimed（执行端已领取）→ 中止，
-        # 不取消、不改保存状态（§5.15.2）。
-        claimed = conn.execute(
-            "SELECT 1 FROM requests WHERE task_id=? AND status='claimed' LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if claimed is not None:
-            raise util.KanpilotError(
-                "conflict", "任务已被执行端领取，暂不能移出看板"
-            )
-        # 取消该任务 queued 请求（同事务）。
-        cancelled = db.cancel_queued_requests(conn, task_id, now)
-        db.update_task(conn, task_id, now, save_state=target_state, saved_at=now)
-        db.add_event(
-            conn, now, event_kind, task_id=task_id, actor="user",
-            detail={"from": current, "to": target_state,
-                    "cancelled_requests": cancelled},
+    with db.write_txn(ctx.conn):
+        result = save_task_inline(
+            ctx.conn, payload["task_id"], ctx.now, target_state, event_kind,
+            expected_save_state=payload.get("expected_save_state"),
         )
-        fresh = db.require_task(conn, task_id)
-        return {
-            "ok": True, "deduplicated": False,
-            "cancelled_requests": cancelled,
-            "task": derive.task_detail(conn, fresh, ctx.now),
-        }
+        result["task"] = derive.task_detail(
+            ctx.conn, db.require_task(ctx.conn, payload["task_id"]), ctx.now,
+        )
+        return result
 
 
 def cmd_archive_task(ctx, payload: dict) -> dict:

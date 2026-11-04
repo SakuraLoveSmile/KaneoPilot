@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
-/// 顶部 chips 按观测口径筛选并计数；分组固定为五组（需关注、已排队、执行中、待评审、最近），空组隐藏。
+/// 顶部 chips 按观测口径筛选并计数；项目可折叠，项目内保留五个观测分组，空组隐藏。
 /// 共用搜索、看板列筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
     /// 已套用搜索与看板列筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
@@ -9,27 +9,36 @@ struct TaskCompactListView: View {
     @Binding var chip: ObserveChip
     @Binding var focused: String?
     let isBatchMode: Bool
+    let collapsedProjectIDs: Set<String>
+    let isSearching: Bool
+    let isBatchInProgress: Bool
     @Binding var selectedTaskIDs: Set<String>
     let onOpen: (TaskSummary) -> Void
     let onOpenRelated: (RelatedTask) -> Void
     let onOpenSession: (TaskSummary) -> Void
     let onToggleSelect: (String) -> Void
+    let onToggleProject: (String) -> Void
 
     var body: some View {
-        let sections = ObserveScope.sections(tasks, chip: chip)
+        let projects = ObserveScope.projects(tasks, chip: chip)
         VStack(alignment: .leading, spacing: 0) {
             chipBar
             // 行与分组头通栏，左右边距由各自的内边距承担。
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    ForEach(sections) { section in
+                    ForEach(projects) { project in
                         Section {
-                            taskGroups(section.groups)
+                            if isExpanded(project.id) {
+                                ForEach(project.sections) { section in
+                                    groupHeader(section.group, count: section.count)
+                                    taskGroups(section.groups)
+                                }
+                            }
                         } header: {
-                            groupHeader(section.group, count: section.count)
+                            projectHeader(project)
                         }
                     }
-                    if sections.isEmpty {
+                    if projects.isEmpty {
                         emptyRow
                     }
                 }
@@ -111,8 +120,59 @@ struct TaskCompactListView: View {
 
     // MARK: - 分组头部
 
+    private func isExpanded(_ projectID: String) -> Bool {
+        isSearching || !collapsedProjectIDs.contains(projectID)
+    }
+
+    /// 只有项目标题置顶；搜索临时展开结果，不改写用户保存的折叠偏好。
+    private func projectHeader(_ project: ObserveProjectSection) -> some View {
+        let expanded = isExpanded(project.id)
+        return Button {
+            onToggleProject(project.id)
+        } label: {
+            HStack(spacing: Spacing.s) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.kpSmall.weight(.semibold))
+                    .foregroundStyle(Color.kpSecondary)
+                    .frame(width: 12)
+                    .accessibilityHidden(true)
+                Text(project.title)
+                    .font(.kpBody.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text("\(project.count)")
+                    .font(.kpLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(Color.kpSecondary)
+                Spacer(minLength: Spacing.s)
+                if project.needsAttentionCount > 0 {
+                    Label("需关注 \(project.needsAttentionCount)", systemImage: "exclamationmark.circle")
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpOrange)
+                        .fixedSize()
+                }
+            }
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isSearching || isBatchInProgress)
+        .help(isSearching ? "搜索结果已展开，清空搜索后恢复折叠状态" : "\(expanded ? "折叠" : "展开")项目：\(project.title)")
+        .accessibilityLabel("\(project.title)，\(project.count) 个任务\(project.needsAttentionCount > 0 ? "，需关注 \(project.needsAttentionCount)" : "")")
+        .accessibilityValue(expanded ? "已展开" : "已折叠")
+        .background {
+            ZStack {
+                Color.kpControl
+                Color.kpWindow.opacity(0.5)
+            }
+        }
+        .overlay(alignment: .bottom) { ListRule() }
+    }
+
     /// 通栏浅灰带（高 28pt）：标题 12pt 半粗，计数是同行纯文字；「需关注」前有橙色感叹圆圈图标（ui-spec §4.18）。
-    /// 分组头随列表置顶，所以底色必须不透明：先铺页面底色，再叠半透明灰。
+    /// 项目内的状态分组沿用原底色和度量，不再单独置顶。
     /// 带的上沿由上一行（或 chips 条）的下分隔线充当，这里只画下沿，避免两条线叠成 2pt。
     private func groupHeader(_ group: ObserveGroup, count: Int) -> some View {
         HStack(spacing: Spacing.s) {
@@ -225,18 +285,47 @@ enum ObserveScope {
             : tasks.filter { chip.matches($0) }.count
     }
 
-    static func visible(_ tasks: [TaskSummary], chip: ObserveChip) -> [TaskSummary] {
-        tasks.filter { chip.matches($0) }
+    static func visible(_ tasks: [TaskSummary], chip: ObserveChip,
+                        collapsedProjectIDs: Set<String> = [], isSearching: Bool = false) -> [TaskSummary] {
+        projects(tasks, chip: chip)
+            .filter { isSearching || !collapsedProjectIDs.contains($0.id) }
+            .flatMap(\.tasks)
+    }
+
+    /// 项目标识优先用核心 ID；同名但 ID 不同的项目不会合并。
+    static func projectID(for task: TaskSummary) -> String {
+        if let id = nonempty(task.projectId) { return "id:\(id)" }
+        if let name = nonempty(task.projectName) { return "name:\(name)" }
+        return "unassigned"
+    }
+
+    static func projects(_ tasks: [TaskSummary], chip: ObserveChip) -> [ObserveProjectSection] {
+        let grouped = Dictionary(grouping: tasks.filter { chip.matches($0) }, by: projectID)
+        return grouped.map { id, members in
+            let names = members.compactMap { nonempty($0.projectName) }
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            let title = names.first ?? members.compactMap { nonempty($0.projectId) }.first ?? "未归属项目"
+            return ObserveProjectSection(id: id, title: title,
+                                         sections: sections(members, chip: chip, scope: id))
+        }.sorted { lhs, rhs in
+            let order = lhs.title.localizedStandardCompare(rhs.title)
+            return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+        }
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
     }
 
     /// 空组省略。组内先按 `ObserveGroup.sorted` 排序，再经 TaskBoardPresentation 保持父子邻接。
-    static func sections(_ tasks: [TaskSummary], chip: ObserveChip) -> [ObserveSection] {
-        let shown = visible(tasks, chip: chip)
+    static func sections(_ tasks: [TaskSummary], chip: ObserveChip, scope: String = "") -> [ObserveSection] {
+        let shown = tasks.filter { chip.matches($0) }
         return ObserveGroup.allCases.compactMap { group in
             let members = group.sorted(shown.filter { ObserveGroup.group(for: $0) == group })
             guard !members.isEmpty else { return nil }
             // scope 使各分区的分组身份互不重叠。
-            return ObserveSection(group: group, groups: TaskBoardPresentation.groups(members, scope: group.rawValue))
+            return ObserveSection(group: group, groups: TaskBoardPresentation.groups(members, scope: "\(scope):\(group.rawValue)"))
         }
     }
 
@@ -251,9 +340,21 @@ struct ObserveSection: Identifiable {
     var count: Int { groups.reduce(0) { $0 + $1.tasks.count } }
 }
 
+/// 每个项目保存同一份状态与层级投影，列表渲染和批量可见范围共同使用。
+struct ObserveProjectSection: Identifiable {
+    let id: String
+    let title: String
+    let sections: [ObserveSection]
+
+    var tasks: [TaskSummary] { sections.flatMap { $0.groups.flatMap(\.tasks) } }
+    var count: Int { sections.reduce(0) { $0 + $1.count } }
+    var needsAttentionCount: Int { sections.first { $0.group == .needsYou }?.count ?? 0 }
+}
+
 // MARK: - 紧凑行
 
 private struct TaskCompactRow: View {
+    @EnvironmentObject private var model: AppViewModel
     let task: TaskSummary
     let isFocused: Bool
     let isBatchMode: Bool
@@ -271,6 +372,13 @@ private struct TaskCompactRow: View {
     }
     private var canOpenSession: Bool {
         task.status == "running" || task.activeRequest != nil || task.boardColumn == "in_progress"
+    }
+
+    private var trashBlockedReason: String? {
+        guard let eligibility = task.moveOutEligibility else {
+            return "暂无法判断，请更新核心"
+        }
+        return eligibility.allowed ? nil : (eligibility.reason ?? "当前任务暂不可移入回收站")
     }
 
     /// 状态列显示发布状态时的那条发布；此时第二行不再重复发布标题。
@@ -382,6 +490,16 @@ private struct TaskCompactRow: View {
             if canOpenSession {
                 Button("查看执行会话") { onOpenSession() }
             }
+            Divider()
+            Button(role: .destructive) {
+                Alerts.confirmTrash(title: "移入回收站") {
+                    Task { await model.trashTask(taskID: task.taskId) }
+                }
+            } label: {
+                Label("移入回收站", systemImage: "trash")
+            }
+            .disabled(model.busy || trashBlockedReason != nil)
+            .help(trashBlockedReason ?? "移入本地回收站，不影响 Kaneo，可随时恢复")
         }
     }
 

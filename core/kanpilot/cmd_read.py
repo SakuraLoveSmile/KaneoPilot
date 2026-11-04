@@ -145,8 +145,11 @@ def tick_inline(conn: sqlite3.Connection, now, preflight_by_project=None,
             row, made = db.create_request(conn, now_iso, "delivery", f"delivery:{task['task_id']}", task_id=task["task_id"], requested_by="scheduler")
             if made: created.append({"request_id": row["request_id"], "kind": "delivery", "task_id": task["task_id"]})
 
+    from . import auto_archive
+    archived = auto_archive.archive_due_inline(conn, now, project_ids=project_ids)
+    skipped.extend(archived["skipped"])
     db.set_setting(conn, "last_tick_at", now_iso)
-    return {"created": created, "skipped": skipped}
+    return {"created": created, "skipped": skipped, "auto_archived": archived["archived"]}
 
 
 def cmd_recover_execution_goals(ctx, payload: dict) -> dict:

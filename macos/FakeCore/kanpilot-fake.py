@@ -3162,8 +3162,35 @@ def cmd_start_plans(state, payload):
 
 def cmd_get_project_mappings(state, payload):
     mappings = fake_project_mappings(state)
+    workspace_id = mappings.get("workspace_id", "ws-fake-001")
+    remote_status = "not_requested"
+    remote_error = None
+    if payload.get("refresh_remote"):
+        remote_error = state.get("remote_projects_error")
+        if remote_error:
+            remote_status = "error"
+        else:
+            projects = state.get("remote_projects", [
+                {"id": pid, "name": item.get("project_name", "")}
+                for pid, item in (mappings.get("items") or {}).items()
+            ])
+            catalog = {"workspace_id": workspace_id, "fetched_at": iso(utcnow()),
+                       "projects": {p["id"]: p["name"] for p in projects
+                                    if not (p.get("isArchived") or p.get("archived") or p.get("archivedAt"))}}
+            mutate(state, lambda s: s.update(project_catalog=catalog))
+            remote_status = "ok"
+    catalog = state.get("project_catalog")
+    if not isinstance(catalog, dict) or catalog.get("workspace_id") != workspace_id:
+        catalog = None
+    saved = mappings.get("items") or {}
+    current_only = payload.get("current_only") is True
+    projects = catalog["projects"] if catalog is not None and (current_only or remote_status == "ok") else None
+    project_ids = sorted(projects) if current_only and projects is not None else list(saved)
+    if not current_only and projects is not None:
+        project_ids.extend(pid for pid in projects if pid not in saved)
     items_list = []
-    for pid, item in (mappings.get("items") or {}).items():
+    for pid in project_ids:
+        item = saved.get(pid) or {}
         automation = item.get("automation") or {}
         for mode in (item.get("engine_mode"), automation.get("engine_mode")):
             if mode not in (None, "", "legacy", "shadow", "live"):
@@ -3171,9 +3198,10 @@ def cmd_get_project_mappings(state, payload):
         effective = effective_fake_mapping(mappings, pid)
         items_list.append({
             "project_id": pid,
-            "project_name": item.get("project_name", ""),
+            "project_name": (projects or {}).get(pid) or item.get("project_name", ""),
             "repository": effective["repository"] or "",
-            "enabled": item.get("enabled", True),
+            "enabled": effective["enabled"],
+            "origin": "saved" if pid in saved else "remote_only",
             "updated_at": item.get("updated_at", iso(utcnow())),
             "engine_mode": "live",
             "effective_engine_mode": "live",
@@ -3193,9 +3221,10 @@ def cmd_get_project_mappings(state, payload):
         })
     return {
         "revision": mappings.get("revision", 0),
-        "workspace_id": mappings.get("workspace_id", "ws-fake-001"),
+        "workspace_id": workspace_id,
         "items": items_list,
-        "remote_projects_status": "not_requested",
+        "remote": {"status": remote_status, "fetched_at": catalog["fetched_at"] if catalog else None,
+                   "error": remote_error},
     }
 
 
@@ -4288,7 +4317,21 @@ def cmd_revoke_mobile_device(state, payload):
     return fail("设备不存在", "not_found")
 
 
+def cmd_auto_archive_config(state, payload, save=False):
+    if save:
+        if type(payload.get("enabled")) is not bool:
+            return fail("enabled 必须是布尔值", "bad_request")
+        days = payload.get("after_days")
+        if type(days) is not int or not 1 <= days <= 3650:
+            return fail("after_days 必须是 1 到 3650 的整数", "bad_request")
+        state["auto_archive_config"] = {"enabled": payload["enabled"], "after_days": days}
+        save_state(state)
+    return {"config": state.get("auto_archive_config", {"enabled": False, "after_days": 7})}
+
+
 COMMANDS = {
+    "get-auto-archive-config": lambda s, p: cmd_auto_archive_config(s, p),
+    "set-auto-archive-config": lambda s, p: cmd_auto_archive_config(s, p, save=True),
     "mobile-status": cmd_mobile_status,
     "set-mobile-access": cmd_set_mobile_access,
     "create-mobile-pairing": cmd_create_mobile_pairing,

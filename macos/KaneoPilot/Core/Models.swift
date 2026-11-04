@@ -2052,6 +2052,16 @@ enum DashboardRowText {
 
 // MARK: - T1 批量整理资格与批量操作模型
 
+/// §5.15.7：全局已完成任务自动归档设置。
+struct AutoArchiveConfig: Decodable, Equatable {
+    let enabled: Bool
+    let afterDays: Int
+}
+
+struct AutoArchiveConfigResponse: Decodable {
+    let config: AutoArchiveConfig
+}
+
 public struct MoveOutEligibility: Decodable, Equatable {
     public let allowed: Bool
     public let reason: String?

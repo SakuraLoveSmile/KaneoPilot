@@ -151,7 +151,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `get-plan` | 桌面 | 只读：已发布计划的核验正文（v3，§5.23.1） |
 | `get-review-config` | 桌面 | 只读：Review 环境配置（v3，§5.23.4） |
 | `set-review-config` | 桌面 | 写 settings.review_config（v3，§5.23.4；仅影响新 review 轮次） |
-| `get-project-mappings` | 桌面 | 只读：项目与本地仓库映射列表及状态（T1，§5.26） |
+| `get-project-mappings` | 桌面 | 项目与本地仓库映射列表及状态；显式刷新成功时更新云端项目目录快照（T1，§5.26） |
 | `set-project-mapping` | 桌面 | 写 settings.project_mappings（T1，§5.26；保存/停用/解除仓库映射） |
 | `set-project-automation` | 桌面 | 更新项目自动处理策略与 revision（§5.27） |
 | `set-automation-global` | 桌面 | 更新全局自动任务并发上限（§5.27） |
@@ -455,7 +455,7 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 
 - 库内列：`tasks.save_state TEXT NOT NULL DEFAULT 'active'`、`tasks.saved_at TEXT`（移出时间）、`tasks.auto_advance_paused INTEGER NOT NULL DEFAULT 0`（恢复后默认暂停自动推进）。
 - 归档/回收站**只影响调度台**：不删除 Kaneo 任务、计划文件、报告或执行端会话； Kaneo 状态不被本地异常分类或归档动作修改。
-- **已完成（board_column=done）与已归档（save_state=archived）是两个概念**：归档不等于标记完成，完成任务不自动归档。
+- **已完成（board_column=done）与已归档（save_state=archived）是两个概念**：归档不等于标记完成；默认不自动归档，显式启用全局自动归档时按 §5.15.7 执行。
 
 ### 5.15.2 archive-task / trash-task / restore-task
 
@@ -576,6 +576,14 @@ UI **仅在当前来源版本的分页全部读取完成（`has_more=false`）�
 `archive`（可归档时）、`trash`（可移入回收站时）、`restore`（`save_state != active` 时）、`resume-auto`（`auto_advance_paused=1` **或** `automation.manual_takeover` 为真时）。禁用原因由 `blocked_reason`/命令错误原文提供。
 
 > `resume-auto` 的第二个条件不可省：`resolve {action:"dismiss"}` 只在 review 阻塞时置 `auto_advance_paused=1`，非 review 路径的接管落在 `ready` 且不暂停——若只按暂停露出，那些任务的「交回自动化」入口在桌面端永不出现，D4 的单向门只关了一半。
+
+### 5.15.7 已完成任务自动归档（KP-UI06，2026-11-04）
+
+- 全局配置命令：`get-auto-archive-config {}` 与 `set-auto-archive-config {enabled: bool, after_days: int}`，均返回 `{config: {enabled, after_days}}`。缺省为 `{enabled:false, after_days:7}`；`after_days` 必须是 1–3650 的整数，布尔值不作为整数接受，非法值返回 `bad_request`。配置保存在既有 SQLite `settings.auto_archive_config`，读取默认值不产生写入；实际变更写 `auto_archive_config_changed` 审计事件，保存配置不立即归档。
+- `tick` 的通用维护周期在 legacy/shadow/live 均适用，按当前配置对 `save_state=active`、`status=done` 且核心最终 `board_column=done` 的任务检查。归档计时使用稳定完成时间，不能取同步会改写的 `updated_at`：优先最近一次进入 done 的 `status_change` 事件；无可信完成时间的历史任务从首次检查起计时并持久化起点。重新开始后再次完成按新的完成时间计时。实际 `archived/trashed → active` 恢复后重新保留完整 N 天，active 幂等恢复不重置期限。
+- 到达 `起点 + after_days × 24小时` 后，复用 §5.15.2 的事务内资格复核、领取竞争检查、queued 取消、保存状态更新和 `task_archived` 事件，actor 为 `scheduler` 并记录自动归档来源。存在活动发布/交付、执行领取、失联、发送不明或验证占用的任务跳过，不能藏起待处理事项；单项资格冲突不得中断其他候选。
+- 全局暂停自动推进时暂停自动归档，恢复后按实际时间检查。任务级 `auto_advance_paused` 与保存状态整理独立；关闭自动归档仅停止后续处理，不自动恢复已归档项。自动检查依赖调度台运行并启用本机引擎；退出或关闭引擎期间不执行自动周期，重新运行后的周期补做已到期任务。显式核心 tick/claim 仍走同一维护规则；不需要模型、远端 Kaneo 写或文件删除。
+- 沿用现有归档恢复入口与事件审计，无新增 task status 或 schema。完成/恢复计时辅助信息可保存在 `extra_json`，不影响旧客户端读取。
 
 ## 5.16 执行轮次索引与会话回收站（v1.5）
 
@@ -1257,6 +1265,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   - 项目权威身份全链以 `project_id` 为唯一基准，显示名仅用于展示。
   - 映射保存于 SQLite `settings.project_mappings`：`{version: 1, revision: <int>, workspace_id: "<id>", items: {<project_id>: {project_name, repository, enabled, updated_at}}}`。无需升级 SQLite schema 版本（保持 v5）。
   - 未配置键时返回空项目集合（`revision=0`），不生成维护者项目的隐式映射。工作区依次读取已保存 `project_mappings.workspace_id`、独立 `settings.workspace_id`；已有映射、revision 与嵌套自动化字段保留，不在读取时写库。
+  - `get-project-mappings {refresh_remote?: bool, current_only?: bool}` 默认仅本地读取。显式刷新须取得完整、格式有效的 Kaneo 非归档项目列表，成功后仅写 `settings.project_catalog`：`{workspace_id, fetched_at, projects: {<project_id>: <name>}}`。设置页显式传 `current_only:true`，列表以同工作区最近成功目录为准，云端已删除或归档的项目不再显示，未映射的现存项目继续可配置。成功的空列表也是有效目录；刷新失败或格式无效不覆盖快照，无快照时保留原本地项目列表。不同工作区不得复用目录。`current_only` 缺省 false，保留原有保存项目与本次成功获取项目的并集，供执行端/总览读取原有效引擎模式，不受设置列表过滤影响。
+  - 目录快照只决定设置列表；不删除或停用保存的映射，不改变映射 revision、自动化策略、历史任务/请求/审计或执行快照。同 ID 项目重现后恢复展示原配置。后续本地读取、解除映射后的重读及重开页面沿用快照，不使已删除项目重新出现。`remote.status` 保留 `not_requested|ok|error`，`fetched_at` 返回最近成功目录时间；刷新错误由界面明确显示。
   - `set-config {workspace_id?: <非空字符串>, worktree_pool_size?: <1–32整数>}` 至少提供一个字段，保留旧 pool 调用与响应。新工作区通过独立 setting 保存；若与已保存映射绑定的非空工作区不同，整次请求拒绝，包括同次 pool 修改。此入口不迁移或清空现有映射。
   - 首次安装先用 `set-config` 配置工作区，再在项目配置页获取 Kaneo 项目、选择仓库并保存。工作区为空时，项目刷新、待办查询和在线诊断在创建远端 client 前明确提示先配置。原先仅依赖硬编码默认标识且从未保存配置的安装需配置一次。
   - 路径支持空格、中文与 `~` 展开，core 自动规范化并校验绝对路径；Git 子目录自动定位至仓库根。

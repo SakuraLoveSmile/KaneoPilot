@@ -1160,6 +1160,7 @@ _EVENT_KIND_CN = {
     "request_cancelled": "请求取消",
     "failed_request_dismissed": "失败记录已移除",
     "task_archived": "任务归档",
+    "auto_archive_config_changed": "自动归档设置已更新",
     "task_trashed": "任务移入回收站",
     "task_restored": "任务恢复",
     "review_stage_recovered": "评审阶段已恢复",

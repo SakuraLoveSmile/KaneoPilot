@@ -13,11 +13,19 @@ start = source.index('struct StatusStyle {')
 end = source.index('// MARK: - 状态徽章', start)
 (fixture / 'DisplayStatus.swift').write_text('import SwiftUI\n' + source[start:end])
 board = (root / 'macos/KaneoPilot/Views/BoardView.swift').read_text()
+start = board.index('enum BoardColumn:')
+end = board.index('/// 视图呈现模式', start)
+(fixture / 'BoardColumn.swift').write_text('import SwiftUI\n' + board[start:end])
 start = board.index('struct TaskBoardGroup:')
 end = board.index('struct TaskExceptionGroupHeader:', start)
 (fixture / 'TaskGroups.swift').write_text('import Foundation\n' + board[start:end])
+compact = (root / 'macos/KaneoPilot/Views/TaskCompactListView.swift').read_text()
+start = compact.index('enum ObserveChip:')
+end = compact.index('// MARK: - 紧凑行', start)
+(fixture / 'ObserveScope.swift').write_text('import Foundation\n' + compact[start:end])
 (fixture / 'main.swift').write_bytes((root / 'macos/tests/completion_display_main.swift').read_bytes())
 PY
 swiftc "$TASK_ROOT/macos/KaneoPilot/Core/Models.swift" "$TASK_ROOT/macos/tests/LabelsStub.swift" \
-  "$TASK_FIXTURE/DisplayStatus.swift" "$TASK_FIXTURE/TaskGroups.swift" "$TASK_FIXTURE/main.swift" -o "$TASK_FIXTURE/checks"
+  "$TASK_FIXTURE/DisplayStatus.swift" "$TASK_FIXTURE/BoardColumn.swift" "$TASK_FIXTURE/TaskGroups.swift" \
+  "$TASK_FIXTURE/ObserveScope.swift" "$TASK_FIXTURE/main.swift" -o "$TASK_FIXTURE/checks"
 "$TASK_FIXTURE/checks"
