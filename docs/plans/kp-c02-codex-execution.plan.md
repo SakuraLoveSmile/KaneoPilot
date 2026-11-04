@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：实现中（修复源码、隔离验证及预览包核验完成；用户已选正式 v0.4.5，正在合入 main 并执行正式发布，尚未安装）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
+状态：实现中（修复已合入 main；正式 v0.4.5 等待云端 macOS runner，尚未发布或安装）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -32,7 +32,7 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 对原生产 spec/job **只读**运行新代码的 `execution_contract.validate_spec` 通过，旧 spec 没有新增权限；从原冻结命令计算的新轮次候选精确为 `/Users/sakurasep/devsdk/flutter/bin/cache`。没有回写旧 spec、报告、任务状态或重试模型。
 - 独立 reviewer（gpt-6.1-sol/high）只读审查实际业务差异，未发现实质性问题；其结论不替代上述实测。`git diff --check` 通过。最终代码/测试差异摘要及哈希另存 `build/kp-c02-evidence/verification-summary.json`。
 - 当前 `/Applications/KaneoPilot.app` 未更新，生产旧任务仍需修复版本的监控重新核对；原 MediaPlayer 改动与冻结记录保留。未运行原任务 verify，未在本机编译 KaneoPilot、未安装、未调用真实付费模型、未发布。恢复执行应使用既有显式新轮次重试；旧轮次不会因新代码自动获得写权限。
-- 后续体验：安装修复版本后核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。尚未合入，因此保留本任务工作树和证据；合入目标并完成适用验证后按项目约定清理。
+- 后续体验：安装修复版本后核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。修复已合入 main，正式发布仍等待适用云端检查，因此暂保留本任务工作树；检查与发布完成后按项目约定清理。
 
 ## 2026-11-04 云端构建
 
@@ -44,7 +44,7 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - Mac 本地核验退出 0：DMG SHA-256 `47eda26059acb6f90c5a6ca1f9eb9fd22572f8b26178c475bacef3b6149c01a2`，镜像完整性、DMG/App 严格签名、arm64-only、版本/构建号通过；6 个关键内置核心文件与构建提交逐字节一致，只读挂载已卸载。
 - Android 本地核验退出 0：APK SHA-256 `8f5945946301e647d6a2778c1ec853bbbc7b3c55f770fff3eaaf01f937c32f57`，ZIP 完整性、aapt 应用标识/版本/构建号及 apksigner 签名通过，证书指纹与云端 metadata 相符。预览 Debug APK 的证书和正式版不同。
 - 可复查脚本与原始核验结果保存在上述归档的 `verify-macos.py` / `macos-verification.json`、`verify-android.py` / `android-verification.json`，完整包哈希见 `SHA256SUMS`，修复阶段隔离证据另存 `source-verification/`。本机仅核验下载包，未编译或安装应用；原任务未重试。
-- 构建源固定为 `a2022389c66c04e1d5bae552d353c02ea9302235`；后续仅补充本记录的文档提交不改变该包的源码身份，不作为已构建的新版本。分支尚未合入 `main`，工作树保留以便体验后集成，包与证据已独立归档。
+- 构建源固定为 `a2022389c66c04e1d5bae552d353c02ea9302235`；后续仅补充本记录的文档提交不改变该包的源码身份，不作为已构建的新版本。当时分支尚未合入 `main`，包与证据已独立归档；后续正式集成见下节。
 
 ## 0.4.x 版本纠正
 
@@ -59,3 +59,9 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 发布前再次核对主工作区 main 仅有无关未跟踪 `.local/`，远端 main 仍为原基线，latest 仍为 v0.4.4。业务源码、测试与已核验的 `a2022389` 相同；新增内容仅为版本纠正记录和正式更新说明。
 - 后续顺序：提交发布文档、快进合入并推送 main；等待该完整提交的 Packages 必需检查成功；创建直接指向它的 annotated 签名 `v0.4.5` 标签并推送；等待正式 Packages、核验公开四项资产和 latest，保全证据后清理本任务 worktree 与已合并本地分支。远端任务分支保留。
 - 正式构建和核验材料独立保存在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261104-kp-c02-release-0.4.5/`，不纳入公开 Git。
+- 发布文档签名提交为 `f65be9451cb75eb547f8d8c1251565b6976713f3`（本机签名状态 G），已从原 main 快进合入并推送；主仓无关 `.local/` 保留。该完整提交的 main Packages 为 **#115 / 41856959659**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41856959659`。正式标签将固定同一源码提交，先等待本次 main 检查。
+- #115 attempt 1：12 个非 macOS job 成功；3 个 macOS job 没有启动任何步骤，排队 15 分钟后 cancelled，整体 failure。GitHub 注释明确 `The job was not acquired by Runner of type hosted even after multiple attempts`，并提示 macOS arm64 capacity constraints；不是源码或检查失败。完整 run/job/注释已保存为 `cloud-main-attempt-1.json`。基于该基础设施故障请求 `rerun-failed-jobs`，保持相同 SHA 和全部门禁；首次 CLI 读 run 的 EOF 未发起重跑，确认 attempt 仍为 1 后改用 REST POST，已成功受理。
+- #115 attempt 2：只重跑三个未完成的 macOS job，其余 12 个成功结果沿用。三个 job 自 `2026-11-04T15:40:59Z` 排队，超过 20 分钟后仍没有 runner、步骤或终态；最后只读快照为 `cloud-main-attempt-2-checkpoint.json`。云端队列保留，不再次提交相同重跑请求，不更换构建平台或降低门禁。
+- 当前 latest 仍为 `v0.4.4`。尚未创建/推送 `v0.4.5` 标签或 Release；正式发布源码保持 `f65be9451cb75eb547f8d8c1251565b6976713f3`，本节证据文档更新不冒充已构建版本。本机未安装、未重试原任务或调用模型。
+- 保留工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-c02-codex-execution`：修复虽已合入，但适用云端检查尚未完成，仍需继续正式发布。7 个非缓存忽略文件已逐一核对 SHA-256 并备份到独立归档的 `worktree-evidence/`，清单为 `worktree-evidence-manifest.json`；其余 147 个忽略文件是可再生成的 Python/pytest 缓存。未清理其他任务或主工作区 `.local/`。
+- 下一步沿本轮已有授权继续：先读取 #115 当前状态。若成功，核对同一 SHA、15 个必需 job 成功及正常跳过项，保存完整最终回执；再用 `docs/releases/v0.4.5.md` 创建直接指向该提交的 annotated 签名标签并推送，等待正式 Packages 的 16 个必需 job、核验公开 APK/DMG/manifest/SHA256SUMS 和 latest 后收尾。若仍排队则保留队列；若失败先读取该次 GitHub 回执，依据新证据决定恢复方式。安装和真实模型执行仍未授权。
