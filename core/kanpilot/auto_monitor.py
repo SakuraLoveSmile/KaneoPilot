@@ -189,7 +189,10 @@ def _monitor(controller):
             if observed.get("status") in ("deferred", "exited", "starting"):
                 controller.report("failed", note="observation_blocked")
                 return
-            if observed.get("status") in ("observing", "finished", "settled", "finalizing"):
+            if (observed.get("status") in ("observing", "finished", "settled", "finalizing")
+                    or (backend == "codex" and observed.get("status") in ("failed", "aborted"))):
+                # Codex observation returns its durable failed/aborted job status.
+                # Re-read the terminal evidence before reporting execution failure.
                 detail = _get_session(controller, task).get("round_detail")
                 if not isinstance(detail, dict):
                     controller.report("failed", note="observation_blocked")

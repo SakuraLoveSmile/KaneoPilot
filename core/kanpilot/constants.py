@@ -474,13 +474,21 @@ DISPATCH_INSTRUCTION_BRANCH = (
 )
 # 所有引擎模式由执行端完成验证，调度台仅核对执行端提交的 Goal 报告。
 DISPATCH_INSTRUCTION_BRANCH_LIVE = DISPATCH_INSTRUCTION_BRANCH
-EXECUTION_VERIFICATION_INSTRUCTION = (
+EXECUTION_VERIFICATION_COMMON_INSTRUCTION = (
     "验证由你在当前任务工作树执行，调度台不会替你运行检查。"
     "完成全部代码修改后，逐条执行计划 verify 块的命令，每条使用独立终端工具调用并保留真实退出码；"
     "不要合并多项检查或用 echo/文字总结替代工具结果。验证结束后不要再修改源码或文件，如需修改请重新逐条验证。"
+)
+EXECUTION_VERIFICATION_INSTRUCTION = EXECUTION_VERIFICATION_COMMON_INSTRUCTION + (
     "最后调用 SubmitGoalReport 提交结构化 Goal 报告，在 checks 中为每条冻结 verify 命令各写一条记录："
     "command 为计划中的命令原文，exitCode 为真实退出码，result 为 passed 或 failed。"
     "调度台以该报告为唯一结果来源，文字总结不能替代报告。环境缺失或失败请如实报告，最终答复逐条列出命令、退出码与剩余问题。"
+)
+CODEX_EXECUTION_VERIFICATION_INSTRUCTION = EXECUTION_VERIFICATION_COMMON_INSTRUCTION + (
+    "最终答复只返回符合本轮 JSON Schema 的 JSON 对象：status、summary、checks、questions。"
+    "checks 为每条冻结 verify 命令各写一条记录，command 为命令原文，exit_code 为真实整数退出码。"
+    "全部工作和检查完成才返回 completed；执行或环境失败返回 failed 并在 summary 中说明原因；"
+    "需要用户决定时返回 needs_input 并填写 questions。报告由 Codex CLI 输出文件接收，调度台会同时核对原生命令退出码和源码快照。"
 )
 
 AUTOMATION_FAILURE_STAGES = {

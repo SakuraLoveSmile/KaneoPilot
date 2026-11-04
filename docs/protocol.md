@@ -1915,6 +1915,8 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 核心先登记启动操作回执，复用隔离工作树、计划哈希、`execution_contract`、App worker 归属和请求心跳，再拉起 `codex_worker`。CLI 使用工作树写入沙箱、无交互审批、JSONL 及 JSON Schema；服务商解析沿 `codex_provider`，凭据只在内存/子进程环境传递。首个 session 事件须由真实 `thread.started` 与成功核心心跳共同证明。CLI 未暴露原生 turn ID 时，采用明确标注的适配器单调代次，不冒充原生身份。
 
+KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，将规范化后仍位于该 SDK 下的现存 `bin/cache` 作为 `sandbox_writable_roots` 写入 spec 和阶段契约；启动时重新核对，再用 `--add-dir` 传给 CLI。仅补充工具缓存写入，保持 workspace-write、无交互审批与网络限制，不开放 SDK 源码或用户主目录；符号链接逃逸不授予权限。旧 spec 缺少该字段时不自动补充或改变历史权限。其他工具的环境缺失继续如实失败。Codex 指令仅要求下述最终 JSON，不要求 Plus 的 SubmitGoalReport。已结束的 failed/aborted 观察结果继续核对终态并转 needs_user/execution_failed，保留实际失败原因，不归入 observation_blocked，也不隐式续发模型。
+
 最终结构为 `{status:"completed|needs_input|failed",summary,checks:[{command,exit_code}],questions:[{title,options}]}`。模型声明与 CLI 命令事件分别保存；每条冻结 verify 必须在报告中通过，且有原文匹配的 `command_execution` 完成事件、独立整数退出码0和同一最终源码快照。禁止用自然语言、退出0、turn.completed、模型自报或旧代次结果独立推进。日志截断、缺报告、错身份、布尔退出码、重复矛盾记录、验证后源码变化均不放行。Pilot 不运行任务 verify。
 
 `needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。

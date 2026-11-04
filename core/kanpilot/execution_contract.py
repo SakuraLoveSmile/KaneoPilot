@@ -19,7 +19,7 @@ def _inputs(spec, initial_source_sha256, requirements_sha256):
         body = repair_prompt.execution_body(spec)
     except (OSError, UnicodeError, ValueError) as exc:
         raise util.KanpilotError("verification_identity_unconfirmed", "执行正文不可核验") from exc
-    return {
+    inputs = {
         "repository": spec["repository"], "plan_path": spec["plan_path"],
         "plan_sha256": spec["plan_sha256"],
         "requirements_sha256": requirements_sha256,
@@ -30,6 +30,10 @@ def _inputs(spec, initial_source_sha256, requirements_sha256):
         "prompt_sha256": util.sha256_text(instruction.rstrip() + "\n\n" + body),
         "repair_identity_sha256": (spec.get("repair_prompt") or {}).get("identity_sha256"),
     }
+    # Omission preserves historical contracts; new grants are frozen inputs.
+    if "sandbox_writable_roots" in spec:
+        inputs["sandbox_writable_roots"] = spec["sandbox_writable_roots"]
+    return inputs
 
 
 def freeze_spec(spec, *, requirements_sha256):

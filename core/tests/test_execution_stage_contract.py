@@ -154,6 +154,20 @@ class ExecutionStageContracts(unittest.TestCase):
                     pi_desktop_worker._run_real(spec, False, SimpleNamespace(check=lambda: None))
                 native.assert_not_called()
 
+    def test_tool_cache_grants_are_frozen_and_cannot_be_removed_or_widened(self):
+        spec = copy.deepcopy(self.spec)
+        spec['sandbox_writable_roots'] = [str(self.root / 'sdk/bin/cache')]
+        execution_contract.freeze_spec(spec, requirements_sha256='a' * 64)
+        execution_contract.validate_spec(spec)
+        for roots in (None, [], [str(self.root)]):
+            changed = copy.deepcopy(spec)
+            if roots is None:
+                changed.pop('sandbox_writable_roots')
+            else:
+                changed['sandbox_writable_roots'] = roots
+            with self.subTest(roots=roots), self.assertRaises(util.KanpilotError):
+                execution_contract.validate_spec(changed)
+
     def test_prompt_identity_binds_the_body_and_repair_lineage(self):
         with patch("kanpilot.repair_prompt.execution_body", return_value="frozen repair body"):
             repair = copy.deepcopy(self.spec)

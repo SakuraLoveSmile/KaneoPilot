@@ -529,7 +529,7 @@ def _require_session_naming_capability(conn, config_snapshot) -> None:
 
 def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
     """Start one identity-bound CLI worker; unknown starts are never resent."""
-    from . import execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
+    from . import codex_execution, execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
     conn, now, task_id = ctx.conn, ctx.now_iso, task["task_id"]
     config = dict(round_store.round_view(round_row).get("config") or {})
     available, detail = exec_config.check_available(conn, config_snapshot=config)
@@ -563,9 +563,10 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
                 "config": config, "cwd": str(worktree), "worktree_mode": worktree_mode,
                 "repository": task["repository"], "plan_path": task["plan_path"],
                 "plan_sha256": task["plan_sha256"], "runs_dir": str(directory),
-                "instruction": _execution_instruction(task, worktree, desktop=True, conn=conn),
+                "instruction": _execution_instruction(task, worktree, desktop=True, conn=conn, backend="codex"),
                 "completion_policy": "command_verification", "required_verification_commands": parsed["commands"],
                 "timeout_seconds": round_store.round_timeout_seconds(conn), "db_path": str(ctx.db_path)}
+        spec["sandbox_writable_roots"] = codex_execution.verification_writable_roots(parsed["commands"], worktree)
         if core.review_repair_of(task):
             from . import repair_prompt
             spec.update(repair_prompt.freeze(task))
@@ -1192,9 +1193,11 @@ def branch_instruction(conn, task):
     return constants.DISPATCH_INSTRUCTION_BRANCH_LIVE
 
 
-def _execution_instruction(task, worktree_path, *, desktop, conn=None):
+def _execution_instruction(task, worktree_path, *, desktop, conn=None, backend="pi_desktop"):
+    verification = (constants.CODEX_EXECUTION_VERIFICATION_INSTRUCTION if backend == "codex"
+                    else constants.EXECUTION_VERIFICATION_INSTRUCTION)
     return (_base_execution_instruction(task, worktree_path, desktop=desktop, conn=conn)
-            + constants.EXECUTION_VERIFICATION_INSTRUCTION)
+            + verification)
 
 
 def _base_execution_instruction(task, worktree_path, *, desktop, conn=None):

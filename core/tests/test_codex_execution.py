@@ -2,6 +2,7 @@
 import contextlib
 import json
 import os
+import shlex
 from pathlib import Path
 import signal
 import subprocess
@@ -112,6 +113,74 @@ emit({'type':'turn.completed','usage':{}})
         self.assertIsNone(adapter.exact_command(None))
         self.assertEqual(adapter.exact_command('/bin/zsh -lc "python3 -V"'),'python3 -V')
         self.assertEqual(adapter.exact_command('cd x && python3 -V'),'cd x && python3 -V')
+
+    def flutter_sdk(self):
+        sdk = self.root / 'Flutter SDK'
+        (sdk / 'bin/internal').mkdir(parents=True)
+        (sdk / 'bin/cache').mkdir()
+        (sdk / 'bin/internal/shared.sh').write_text('# fixture\n')
+        binary = sdk / 'bin/flutter'
+        binary.write_text('#!/bin/sh\nexit 0\n')
+        binary.chmod(0o755)
+        return sdk, shlex.quote(str(binary))
+
+    def test_flutter_verification_grants_only_its_cache_and_deduplicates(self):
+        sdk, command = self.flutter_sdk()
+        commands = [command + ' analyze --no-pub', command + ' test --no-pub',
+                    'LANG=en_US.UTF-8 ' + command + ' build macos --debug --no-pub']
+        roots = adapter.verification_writable_roots(commands, self.repo)
+        self.assertEqual(roots, [str((sdk / 'bin/cache').resolve())])
+        self.spec.update(required_verification_commands=commands, sandbox_writable_roots=roots)
+        argv = adapter.launcher_argv(self.spec, 'schema', 'out', mock.Mock(config_args=[]), 'thread')
+        index = argv.index('--add-dir')
+        self.assertEqual(argv[index+1], roots[0])
+        self.assertEqual(argv.count('--add-dir'), 1)
+        self.assertIn('approval_policy="never"', argv)
+        self.assertIn('sandbox_mode="workspace-write"', argv)
+        self.assertIn('resume', argv)
+
+    def test_non_flutter_commands_and_environment_overrides_do_not_grant_paths(self):
+        _, command = self.flutter_sdk()
+        for check in ['echo ' + command, 'PATH=/other ' + command + ' test',
+                      'FLUTTER_ROOT=/other ' + command + ' test', 'python3 -V',
+                      '"unterminated', str(self.root / 'missing/bin/flutter') + ' test']:
+            with self.subTest(command=check):
+                self.assertEqual(adapter.verification_writable_roots([check], self.repo), [])
+
+    def test_flutter_cache_symlink_cannot_grant_external_or_sdk_source_writes(self):
+        sdk, command = self.flutter_sdk()
+        cache = sdk / 'bin/cache'
+        cache.rmdir()
+        external = self.root / 'private-data'
+        external.mkdir()
+        for target in [external, sdk, sdk / 'bin']:
+            with self.subTest(target=target):
+                cache.symlink_to(target, target_is_directory=True)
+                try:
+                    self.assertEqual(adapter.verification_writable_roots([command + ' test'], self.repo), [])
+                    self.spec.update(required_verification_commands=[command + ' test'],
+                                     sandbox_writable_roots=[str(cache)])
+                    with self.assertRaises(util.KanpilotError):
+                        adapter.launcher_argv(self.spec, 'schema', 'out', mock.Mock(config_args=[]))
+                finally:
+                    cache.unlink()
+
+    def test_historical_specs_do_not_gain_implicit_sdk_permissions(self):
+        _, command = self.flutter_sdk()
+        self.spec['required_verification_commands'] = [command + ' test']
+        argv = adapter.launcher_argv(self.spec, 'schema', 'out', mock.Mock(config_args=[]))
+        self.assertNotIn('--add-dir', argv)
+
+    def test_sdk_cache_replacement_after_freeze_cannot_launch_with_old_permissions(self):
+        sdk, command = self.flutter_sdk()
+        self.spec['required_verification_commands'] = [command + ' test']
+        self.spec['sandbox_writable_roots'] = adapter.verification_writable_roots(
+            self.spec['required_verification_commands'], self.repo)
+        cache = sdk / 'bin/cache'
+        cache.rmdir()
+        cache.symlink_to(sdk, target_is_directory=True)
+        with self.assertRaises(util.KanpilotError):
+            adapter.launcher_argv(self.spec, 'schema', 'out', mock.Mock(config_args=[]))
 
     def test_worker_records_native_commands_and_real_thread_after_heartbeat(self):
         self.stub()

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -118,6 +120,12 @@ def validate_report(report):
 def launcher_argv(spec, schema_path, out_path, provider, session_id=None):
     config = spec["config"]
     argv = [constants.codex_bin(), "exec", "-s", "workspace-write", "-C", spec["cwd"]]
+    if "sandbox_writable_roots" in spec:
+        roots = spec["sandbox_writable_roots"]
+        if type(roots) is not list or roots != verification_writable_roots(spec["required_verification_commands"], spec["cwd"]):
+            _fail("Codex 工具缓存写入范围已变化", "verification_identity_unconfirmed")
+        for root in roots:
+            argv += ["--add-dir", root]
     if session_id:
         argv += ["resume"]
     argv += ["--ignore-user-config", "--json", "--skip-git-repo-check", "--output-schema", str(schema_path), "-o", str(out_path)]
@@ -142,6 +150,42 @@ def exact_command(command):
     if len(words) == 3 and words[0] in ("sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh") and words[1] in ("-c", "-lc"):
         return words[2]
     return command
+
+
+def verification_writable_roots(commands, cwd):
+    """Grant only an existing Flutter SDK's own cache, without running a shell."""
+    roots = set()
+    for command in commands:
+        try:
+            words = shlex.split(exact_command(command) or "")
+        except ValueError:
+            continue
+        while words and re.fullmatch(r"(?:LANG|LC_[A-Z_]+)=.*", words[0]):
+            words.pop(0)
+        if not words:
+            continue
+        program = words[0]
+        if program == "flutter":
+            program = shutil.which(program)
+        if not program or Path(program).name != "flutter":
+            continue
+        try:
+            executable = Path(program).expanduser()
+            if not executable.is_absolute():
+                executable = Path(cwd) / executable
+            executable = executable.resolve(strict=True)
+            if executable.parent.name != "bin" or not executable.is_file():
+                continue
+            sdk = executable.parent.parent
+            if not (sdk / "bin/internal/shared.sh").is_file():
+                continue
+            cache_path = sdk / "bin/cache"
+            cache = cache_path.resolve(strict=True)
+            if cache == cache_path and cache.is_dir():
+                roots.add(str(cache))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return sorted(roots)
 
 
 def _alive(pid, birth):

@@ -392,6 +392,52 @@ def test_observer_resume(monkeypatch, tmp_path, status, reopened, outcome):
         assert not any(c == "advance-task" for c, _ in calls)
 
 
+@pytest.mark.parametrize("status,reason", [("failed", "Flutter SDK 缓存写入被拒绝"),
+    ("aborted", "user_stop")])
+def test_codex_settled_failure_enters_attention_with_terminal_reason(monkeypatch, tmp_path, status, reason):
+    initial = dict(detail(), backend="codex", observer_alive=False, run_status="running",
+                   terminal=None, exit_code=None)
+    settled = dict(initial, run_status=status, terminal={"outcome": status, "reason": reason}, exit_code=3)
+    rc, calls, _ = invoke(monkeypatch, tmp_path, responses={
+        "get-session": [{"session": {"run_id": "execution"}, "round_detail": initial},
+                        {"session": {"run_id": "execution"}, "round_detail": settled}],
+        "round-observe": {"status": status, "pid": None},
+    })
+    assert rc == 0
+    assert sum(c == "get-session" for c, _ in calls) == 2
+    assert next(p for c, p in calls if c == "round-observe")["continue_goal"] is False
+    assert next(p for c, p in calls if c == "reconcile-execution-question")["run_id"] == "execution"
+    result = report(calls)
+    assert result["outcome"] == "needs_user"
+    assert result["failure_code"] == "execution_failed"
+    assert result["note"] == reason
+    assert not any(c in ("session-messages", "engine-verdict", "delivery-commit", "advance-task", "record-cost")
+                   for c, _ in calls)
+
+
+@pytest.mark.parametrize("status", ["observing", "finished"])
+def test_codex_observation_preserves_running_and_success_paths(monkeypatch, tmp_path, status):
+    value = dict(detail(), backend="codex", observer_alive=False)
+    if status == "observing":
+        value.update(run_status="running", terminal=None, exit_code=None)
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value,
+                        responses={"round-observe": {"status": status, "pid": None}})
+    assert report(calls)["outcome"] == "succeeded"
+    assert any(c == "advance-task" for c, _ in calls) == (status == "finished")
+    assert any(c == "engine-verdict" for c, _ in calls) == (status == "finished")
+    assert not any(c == "session-messages" for c, _ in calls)
+
+
+def test_codex_deferred_observation_remains_retryable(monkeypatch, tmp_path):
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=dict(detail(), backend="codex", observer_alive=False),
+                        responses={"round-observe": {"status": "deferred", "pid": None}})
+    assert report(calls)["outcome"] == "failed"
+    assert report(calls)["note"] == "observation_blocked"
+    assert sum(c == "get-session" for c, _ in calls) == 1
+    assert not any(c in ("reconcile-execution-question", "engine-verdict", "delivery-commit", "advance-task")
+                   for c, _ in calls)
+
+
 def test_unmanaged_observer_resume_stays_readonly(monkeypatch, tmp_path):
     _, calls, _ = invoke(monkeypatch, tmp_path, round_value=dict(detail(), observer_alive=False),
         responses={"round-observe": {"status": "deferred"}})
