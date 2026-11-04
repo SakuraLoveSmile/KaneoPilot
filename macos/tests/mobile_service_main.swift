@@ -27,6 +27,9 @@ struct MobileServiceFixtures {
             await manager.createPairing()
             precondition(manager.pairing?.isValid() == true)
             precondition(manager.pairing?.pairingUri.hasPrefix("kaneopilot://pair?data=") == true)
+            precondition(manager.pairing?.qrUri?.hasPrefix("kaneopilot://pair?data=") == true)
+            precondition(manager.pairing?.scannableUri != manager.pairing?.pairingUri,
+                         "QR must use compact data while clipboard keeps the legacy content")
             let device = manager.configuration!.devices.first!
             precondition(device.revokedAt == nil)
             await manager.revoke(device)

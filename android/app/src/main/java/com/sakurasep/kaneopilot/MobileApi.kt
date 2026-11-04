@@ -7,14 +7,54 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.net.InetSocketAddress
 import java.security.KeyStore
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 class ApiException(val code: String, message: String, val status: Int) : IOException(message)
+
+/** A compact QR pins the exact leaf before it becomes a trust anchor. This
+ * socket sends only TLS, never HTTP or credentials; MobileApi then performs
+ * its existing chain, SPKI and hostname checks before sending the pair token. */
+fun resolvePairingCertificate(pairing: Pairing): Pairing {
+    require(Instant.parse(pairing.expiresAt).isAfter(Instant.now())) { "配对码已过期，请在 Mac 重新生成" }
+    if (pairing.certificateDer.isNotBlank()) return pairing
+    val origin = validateEndpoint(pairing.endpoint)
+    require(pairing.certificateSha256.matches(Regex("[0-9a-f]{64}"))) { "配对证书指纹无效" }
+    val trust = object : X509TrustManager {
+        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+            throw CertificateException("不接受客户端证书")
+        }
+        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+            if (chain.isEmpty() || sha256(chain.first().encoded) != pairing.certificateSha256)
+                throw CertificateException("配对证书指纹不一致")
+            chain.first().checkValidity()
+        }
+    }
+    val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
+    val der = (ssl.socketFactory.createSocket() as SSLSocket).use { socket ->
+        socket.soTimeout = 12_000
+        socket.connect(InetSocketAddress(origin.host, origin.port), 12_000)
+        socket.startHandshake()
+        val leaf = socket.session.peerCertificates.firstOrNull() as? X509Certificate
+            ?: throw CertificateException("Mac 未提供配对证书")
+        Base64.getEncoder().encodeToString(leaf.encoded).also {
+            verifiedCertificate(it, pairing.certificateSha256)
+        }
+    }
+    require(Instant.parse(pairing.expiresAt).isAfter(Instant.now())) { "配对码已过期，请在 Mac 重新生成" }
+    return pairing.copy(certificateDer = der)
+}
+
 class MobileApi(val connection: Connection) {
     private val origin = validateEndpoint(connection.endpoint)
     private val certificate = verifiedCertificate(connection.certificateDer, connection.certificateSha256)

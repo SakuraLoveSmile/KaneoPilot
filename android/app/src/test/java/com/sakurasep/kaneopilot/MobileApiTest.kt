@@ -7,6 +7,7 @@ import okhttp3.tls.HeldCertificate
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.IOException
+import java.security.cert.CertificateException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
@@ -16,6 +17,71 @@ class MobileApiTest {
     private fun server(certificate: HeldCertificate) = MockWebServer().apply {
         useHttps(HandshakeCertificates.Builder().heldCertificate(certificate).build().sslSocketFactory(), false)
         start()
+    }
+    private fun compactPairing(server: MockWebServer, certificate: HeldCertificate) = Pairing(
+        "https://127.0.0.1:${server.port}", "test-mac", "", sha256(certificate.certificate.encoded),
+        Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { it.toByte() }), "2099-01-01T00:00:00Z")
+    private fun rejectsConnection(block: () -> Unit) {
+        try { block(); fail("Untrusted pairing accepted") }
+        catch (_: IOException) {}
+        catch (_: CertificateException) {}
+        catch (_: IllegalArgumentException) {}
+    }
+    @Test fun compactBootstrapSendsNoHttpAndPairingPreservesCompleteConnection() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build()
+        server(certificate).use { server ->
+            val original = compactPairing(server, certificate)
+            val resolved = resolvePairingCertificate(original)
+            assertEquals(0, server.requestCount)
+            assertEquals(Base64.getEncoder().encodeToString(certificate.certificate.encoded), resolved.certificateDer)
+            server.enqueue(MockResponse().setBody("""{"api_version":1,"server_id":"test-mac","device_id":"new-device","device_token":"${"b".repeat(43)}"}"""))
+            val paired = MobileApi(resolved.unpairedConnection()).pair(resolved, "test-phone")
+            assertEquals(resolved.certificateDer, paired.certificateDer)
+            assertEquals(original.certificateSha256, paired.certificateSha256)
+            assertEquals("new-device", paired.deviceId)
+            assertEquals(paired, Connection.fromJson(paired.toJson()))
+            assertEquals(1, server.requestCount)
+            val request = server.takeRequest()
+            assertEquals("/mobile/v1/pair", request.path)
+            assertNull(request.getHeader("Authorization"))
+            assertEquals(original.token, org.json.JSONObject(request.body.readUtf8()).text("pairing_token"))
+        }
+    }
+    @Test fun compactWrongFingerprintAndExpiredCertificateSendNoHttp() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build()
+        server(certificate).use { server ->
+            rejectsConnection { resolvePairingCertificate(compactPairing(server, certificate).copy(certificateSha256 = "0".repeat(64))) }
+            assertEquals(0, server.requestCount)
+            rejectsConnection { resolvePairingCertificate(compactPairing(server, certificate).copy(expiresAt = "2020-01-01T00:00:00Z")) }
+            assertEquals(0, server.requestCount)
+        }
+        val now = System.currentTimeMillis()
+        val expired = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1")
+            .validityInterval(now - TimeUnit.DAYS.toMillis(2), now - TimeUnit.DAYS.toMillis(1)).build()
+        server(expired).use { server ->
+            rejectsConnection { resolvePairingCertificate(compactPairing(server, expired)) }
+            assertEquals(0, server.requestCount)
+        }
+    }
+    @Test fun compactPairingKeepsHostnameValidationBeforeSendingToken() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("192.168.2.12").build()
+        server(certificate).use { server ->
+            val resolved = resolvePairingCertificate(compactPairing(server, certificate))
+            server.enqueue(MockResponse().setBody("""{"api_version":1,"server_id":"test-mac","device_id":"d","device_token":"${"b".repeat(43)}"}"""))
+            rejectsConnection { MobileApi(resolved.unpairedConnection()).pair(resolved, "test-phone") }
+            assertEquals(0, server.requestCount)
+        }
+    }
+    @Test fun compactPairingLostResponseDoesNotResendOneTimeToken() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build()
+        server(certificate).use { server ->
+            val resolved = resolvePairingCertificate(compactPairing(server, certificate))
+            server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            rejectsConnection { MobileApi(resolved.unpairedConnection()).pair(resolved, "test-phone") }
+            assertEquals(1, server.requestCount)
+            assertEquals(resolved.token, org.json.JSONObject(server.takeRequest().body.readUtf8()).text("pairing_token"))
+            assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        }
     }
     @Test fun preservesCoreEnvelopeAndDoesNotFollowRedirects() {
         val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build()

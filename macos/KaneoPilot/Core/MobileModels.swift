@@ -28,7 +28,16 @@ struct MobileAccessStatus: Decodable {
 
 struct MobilePairing: Decodable {
     let pairingUri: String
+    let qrUri: String?
     let expiresAt: String
+
+    init(pairingUri: String, expiresAt: String, qrUri: String? = nil) {
+        self.pairingUri = pairingUri
+        self.qrUri = qrUri
+        self.expiresAt = expiresAt
+    }
+
+    var scannableUri: String { qrUri ?? pairingUri }
 
     var expiration: Date? {
         let formatter = ISO8601DateFormatter()

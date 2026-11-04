@@ -4350,10 +4350,15 @@ def cmd_create_mobile_pairing(state, payload):
     body = {"api_version": 1, "server_id": status["server_id"],
             "endpoint": status["endpoint"], "certificate_der": "Zml4dHVyZQ==",
             "certificate_sha256": status["certificate_sha256"],
-            "pairing_token": "isolated-fixture-only-" + uuid.uuid4().hex,
+            "pairing_token": base64.urlsafe_b64encode(uuid.uuid4().bytes + uuid.uuid4().bytes).decode().rstrip("="),
             "expires_at": expires}
     encoded = base64.urlsafe_b64encode(json.dumps(body).encode()).decode().rstrip("=")
-    return {"pairing_uri": "kaneopilot://pair?data=" + encoded, "expires_at": expires}
+    compact = {"v": 2, "s": body["server_id"], "e": body["endpoint"],
+               "f": base64.urlsafe_b64encode(bytes.fromhex(body["certificate_sha256"])).decode().rstrip("="),
+               "t": body["pairing_token"], "x": int(datetime.fromisoformat(expires).timestamp())}
+    qr = base64.urlsafe_b64encode(json.dumps(compact, separators=(",", ":")).encode()).decode().rstrip("=")
+    return {"pairing_uri": "kaneopilot://pair?data=" + encoded,
+            "qr_uri": "kaneopilot://pair?data=" + qr, "expires_at": expires}
 
 
 def cmd_revoke_mobile_device(state, payload):

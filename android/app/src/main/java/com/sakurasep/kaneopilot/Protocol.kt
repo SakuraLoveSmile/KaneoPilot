@@ -7,6 +7,7 @@ import java.net.URLDecoder
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.time.DateTimeException
 import java.time.Instant
 import java.util.Base64
 
@@ -39,7 +40,10 @@ data class Connection(val endpoint: String, val serverId: String, val certificat
 
 data class Pairing(val endpoint: String, val serverId: String, val certificateDer: String,
                    val certificateSha256: String, val token: String, val expiresAt: String) {
-    fun unpairedConnection() = Connection(endpoint, serverId, certificateDer, certificateSha256, "", "")
+    fun unpairedConnection(): Connection {
+        require(certificateDer.isNotBlank()) { "请先核对配对证书" }
+        return Connection(endpoint, serverId, certificateDer, certificateSha256, "", "")
+    }
     companion object {
         fun parse(raw: String, now: Instant = Instant.now()): Pairing {
             require(raw.length <= 65536) { "配对内容过长" }
@@ -49,6 +53,7 @@ data class Pairing(val endpoint: String, val serverId: String, val certificateDe
             require(parts.size == 1 && parts.single().startsWith("data=")) { "配对参数无效" }
             val encoded = URLDecoder.decode(parts.single().substringAfter('='), "UTF-8")
             val obj = JSONObject(String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8))
+            if (obj.has("v")) return parseCompact(obj, now)
             require(obj.getInt("api_version") == 1) { "不支持此配对版本" }
             validateEndpoint(obj.getString("endpoint"))
             require(Instant.parse(obj.getString("expires_at")).isAfter(now)) { "配对码已过期，请在 Mac 重新生成" }
@@ -57,6 +62,34 @@ data class Pairing(val endpoint: String, val serverId: String, val certificateDe
             verifiedCertificate(obj.getString("certificate_der"), obj.getString("certificate_sha256"))
             return Pairing(obj.getString("endpoint"), obj.getString("server_id"), obj.getString("certificate_der"),
                 obj.getString("certificate_sha256"), token, obj.getString("expires_at"))
+        }
+
+        private fun parseCompact(obj: JSONObject, now: Instant): Pairing {
+            require(obj.opt("v") == 2) { "不支持此配对版本" }
+            require(obj.keys().asSequence().toSet() == setOf("v", "s", "e", "f", "t", "x")) { "配对字段无效" }
+            fun text(key: String, maximum: Int): String {
+                val value = obj.opt(key)
+                require(value is String && value.isNotBlank() && value.length <= maximum && value.none { it.code < 32 }) { "配对身份无效" }
+                return value
+            }
+            fun bytes(key: String): ByteArray {
+                val value = text(key, 43)
+                require(value.matches(Regex("[A-Za-z0-9_-]{43}"))) { "配对凭证格式无效" }
+                val decoded = Base64.getUrlDecoder().decode(value)
+                require(decoded.size == 32 && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == value) { "配对凭证格式无效" }
+                return decoded
+            }
+            val endpoint = text("e", 128)
+            validateEndpoint(endpoint)
+            val serverId = text("s", 128)
+            val fingerprint = bytes("f").joinToString("") { "%02x".format(it) }
+            bytes("t")
+            val seconds = obj.opt("x")
+            require(seconds is Int || seconds is Long) { "配对有效期无效" }
+            val expires = try { Instant.ofEpochSecond((seconds as Number).toLong()) }
+            catch (_: DateTimeException) { throw IllegalArgumentException("配对有效期无效") }
+            require(expires.isAfter(now)) { "配对码已过期，请在 Mac 重新生成" }
+            return Pairing(endpoint, serverId, "", fingerprint, obj.getString("t"), expires.toString())
         }
     }
 }

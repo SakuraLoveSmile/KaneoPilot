@@ -97,7 +97,8 @@ final class MobileServiceManager: ObservableObject {
         defer { busy = false }
         do {
             let response = try await client.run("create-mobile-pairing", timeout: 10, as: MobilePairing.self)
-            guard response.isValid(), response.pairingUri.hasPrefix("kaneopilot://pair?data=") else {
+            guard response.isValid(), response.pairingUri.hasPrefix("kaneopilot://pair?data="),
+                  response.scannableUri.hasPrefix("kaneopilot://pair?data=") else {
                 throw CoreError.badOutput("配对内容或有效期不符合协议")
             }
             pairing = response

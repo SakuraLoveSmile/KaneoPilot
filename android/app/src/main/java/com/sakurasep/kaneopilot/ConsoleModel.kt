@@ -127,7 +127,7 @@ class ConsoleModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val connection = withContext(Dispatchers.IO) {
-                    val pairing = Pairing.parse(uri)
+                    val pairing = resolvePairingCertificate(Pairing.parse(uri))
                     MobileApi(pairing.unpairedConnection()).pair(pairing, Build.MODEL.take(80))
                 }
                 if (!epochs.isCurrentPairing(ticket)) return@launch
