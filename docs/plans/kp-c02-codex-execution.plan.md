@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：实现中（代码与隔离验证完成，正在云端构建修复包，现用安装版未更新）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”。
+状态：待体验（代码、隔离验证、云端构建及安装包核验完成，尚未安装，现用安装版未更新）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -31,11 +31,17 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 探针准备时先发现新版 CLI 不再使用 `sandbox macos` 子命令，随后旧 sandbox 配置调用提示需要 `--permission-profile`；按当前 help 与官方 permissions 文档改用独立临时命名策略后通过。这些准备失败没有修改业务代码或用户配置，不记为验收通过。
 - 对原生产 spec/job **只读**运行新代码的 `execution_contract.validate_spec` 通过，旧 spec 没有新增权限；从原冻结命令计算的新轮次候选精确为 `/Users/sakurasep/devsdk/flutter/bin/cache`。没有回写旧 spec、报告、任务状态或重试模型。
 - 独立 reviewer（gpt-6.1-sol/high）只读审查实际业务差异，未发现实质性问题；其结论不替代上述实测。`git diff --check` 通过。最终代码/测试差异摘要及哈希另存 `build/kp-c02-evidence/verification-summary.json`。
-- 当前 `/Applications/KaneoPilot.app` 未更新，生产旧任务仍需修复版本的监控重新核对；原 MediaPlayer 改动与冻结记录保留。未运行原任务 verify，未编译 KaneoPilot、未安装、未调用真实付费模型、未发布。恢复执行应使用既有显式新轮次重试；旧轮次不会因新代码自动获得写权限。
-- 后续交付：按云端 Packages 流程构建并安装修复版本，再核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。尚未合入，因此保留本任务工作树和证据；合入目标并完成适用验证后按项目约定清理。
+- 当前 `/Applications/KaneoPilot.app` 未更新，生产旧任务仍需修复版本的监控重新核对；原 MediaPlayer 改动与冻结记录保留。未运行原任务 verify，未在本机编译 KaneoPilot、未安装、未调用真实付费模型、未发布。恢复执行应使用既有显式新轮次重试；旧轮次不会因新代码自动获得写权限。
+- 后续体验：安装修复版本后核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。尚未合入，因此保留本任务工作树和证据；合入目标并完成适用验证后按项目约定清理。
 
 ## 2026-11-04 云端构建
 
 - 用户要求构建新版本，提交、推送当前修复分支以触发 Packages。使用默认 preview 通道，产物为 Android Debug APK 与 macOS arm64 DMG，预览版本按工作流为 `0.0.0`，build 为 Actions run number。正式版本号、Release、合入和安装不在本次构建操作中。
 - 构建前重新 fetch `origin/main`，基线仍为 `50aa7e26372a65976f434d1873546823bdae91c7`，与本地 HEAD 无分歧。代码/测试快照仍为 `1aac2a0f928967db625f9a32313dbbc48c34404f565aeb9a99bd5d26f3386e7e`，没有新增源码修改，因此沿用同一候选的隔离验证证据。
-- 下一步：核对索引范围后提交并推送；等待该源码 SHA 的 Packages 全部必需 job 完成，下载并校验产物、内置核心与构建身份。构建结果在完成后追加。
+- 已核对索引并创建签名提交 `a2022389c66c04e1d5bae552d353c02ea9302235`（本机签名状态 G），推送至同名任务分支。Packages push run **41852259905 / build 114**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41852259905`，源码 SHA 与该提交一致。
+- Packages 于 2026-11-04 23:09:18（台北时间）整体完成，结论 **success**；identity、android、macos-package、两组 macos-fixtures 及 Python 3.11/3.13 的全部检查分片共 **15 个必需 job 成功**。按 preview 规则跳过 `publish` 和未显式启用的 `macos-session-fulltext-probe`，共 2 个正常跳过项。完整 run、job 和 artifact 记录为归档中的 `cloud-run.json`，watch 命令退出 0，日志为 `packages-114-watch.log`。
+- 产物归档：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261104-kp-c02-packages-114`。主包：`macos/KaneoPilot-ci-114-macos-arm64-local-signed.dmg`、`android/KaneoPilot-ci-114-android-debug.apk`。两者均为预览 `0.0.0` / build `114`。
+- Mac 本地核验退出 0：DMG SHA-256 `47eda26059acb6f90c5a6ca1f9eb9fd22572f8b26178c475bacef3b6149c01a2`，镜像完整性、DMG/App 严格签名、arm64-only、版本/构建号通过；6 个关键内置核心文件与构建提交逐字节一致，只读挂载已卸载。
+- Android 本地核验退出 0：APK SHA-256 `8f5945946301e647d6a2778c1ec853bbbc7b3c55f770fff3eaaf01f937c32f57`，ZIP 完整性、aapt 应用标识/版本/构建号及 apksigner 签名通过，证书指纹与云端 metadata 相符。预览 Debug APK 的证书和正式版不同。
+- 可复查脚本与原始核验结果保存在上述归档的 `verify-macos.py` / `macos-verification.json`、`verify-android.py` / `android-verification.json`，完整包哈希见 `SHA256SUMS`，修复阶段隔离证据另存 `source-verification/`。本机仅核验下载包，未编译或安装应用；原任务未重试。
+- 构建源固定为 `a2022389c66c04e1d5bae552d353c02ea9302235`；后续仅补充本记录的文档提交不改变该包的源码身份，不作为已构建的新版本。分支尚未合入 `main`，工作树保留以便体验后集成，包与证据已独立归档。
