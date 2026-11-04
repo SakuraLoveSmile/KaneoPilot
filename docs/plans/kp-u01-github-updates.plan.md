@@ -1,10 +1,13 @@
 # KP-U01：从 GitHub Release 自动获取更新
 
+> 2026-11-04 KP-REL02 整合说明：用户本次已明确授权将全部本地有效改动整合到 main 并发布 v0.4.3。本文件此前的授权边界、未合入与安装状态保留为当时记录；本次源码、验证、发布及工作树保全结果统一见 [KP-REL02](kp-rel02-release-integration.plan.md)。本次不替代原任务尚缺的设备或用户验收。
+
 - 状态：实现中。目标：Mac 与 Android 能自动检查正式版、下载并校验安装包，用户确认后完成平台安装交接；Mac 支持安全退出后原位替换并重启。
-- 用户授权：实现与适用的隔离验证；用户已明确回复“允许提交、推送并运行云端构建”，范围为本任务分支与候选构建。PR、合并、正式发布及替换当前安装的软件仍须沿相应授权处理。
+- 用户授权：实现与适用的隔离验证；用户已明确回复“允许提交、推送并运行云端构建”，范围为本任务分支与候选构建。后续又明确选择“安装本次候选到 Mac 和 Mi 10”，并允许卸载 Android 旧主包、清除该 App 数据后安装；本次已按该范围完成两端候选安装与启动核验，见文末最新记录。PR、合并及正式发布未获授权。
 - 基线：`main` / `9cf1fdd50651763b412a054f8187fe7cdde7f1e4`；原工作区只有用户的 `AGENTS.md` 修改，已保留。任务工作树同步该指南以遵守新约定。
 - 分支：`feat/20261024-kp-u01-github-updates`；工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261024-feat-kp-u01-github-updates`；预期合入目标：`main`，本轮不擅自合并。
 - 权威业务与发布规则：[build-release.md](../build-release.md#app-内获取更新)。不增加更新服务器、依赖库、Kaneo API 或数据库迁移。
+- 当前候选：`129b4defeacfc8bd437afa5fc1b9b6fe87cfac64`，已推送本任务分支；[Packages run 29](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40089379286) 全部检查与两端打包成功，分支构建不发布。下载产物的 GitHub 压缩包哈希、五份独立 Android APK 及 Mac 新助手均已本地复核。用户已确认“允许真机验证，完成后清理验证包”，范围为 Mi 10 上独立验证 App 与测试包、该包的来源安装授权、系统取消/重试与跨版本升级，以及导出证据后的验证包清理；现有主包与数据保留。真机执行期间保持“实现中”。旧 UI 记录仍按相同源码与原环境标注，不能冒充当前 run 的实机重测。
 
 ## 交付与检查方法
 
@@ -12,7 +15,7 @@
 2. 用高于当前版本的固定 Release 夹具，验证自动检查 → 下载 → 校验 → 等待安装；关闭开关、旧版、相同版、预览、网络失败、重复操作均有确定结果。
 3. 下载冻结的版本，发布期间 latest 改变也不换包；损坏、超长、身份错配与非仓库 URL 被拒绝。
 4. Mac 更新时保存草稿并安全停止本实例资源，退出失败不替换；独立助手在旧进程退出后替换，保留恢复备份，失败恢复。Android 包名/版本码/证书全部匹配后交系统确认，取消可重试。
-5. Swift/Android 编译和 UI 实机检查依赖候选云端包。仅有源码与 Python 结果不能记为完成；当前安装版不包含本次改动。
+5. Swift/Android 编译和 UI 实机检查依赖候选云端包。仅有源码与 Python 结果不能记为完成；两端当前已安装含本次改动的 run 29 预览候选，安装及功能验收范围分别见执行记录。
 
 ## 实施步骤与唯一写入者
 
@@ -145,6 +148,44 @@ manager 安装请求必须与现有 AppDelegate 草稿保存和 AppRuntime.stop 
 - 已实现上述独立变体、五 APK 导出和显式公网用例；主包默认编译身份仍为 `com.sakurasep.kaneopilot`。根据用户设备约束，将系统用例原有 emulator 硬件限制替换为严格独立包名/无配对/非调试检查，保留所有真实权限、版本、证书、哈希和结果断言。单测增加“下载包与已装包都换成其他包仍拒绝”的检查；不是通过放行签名不符或删除同版本拒绝来适配真机。
 - 真机只读 resolver 确认安装器是 `com.miui.packageinstaller/com.miui.packageInstaller.InstallStart`，来源权限页仍 `com.android.settings`；系统用例只将该已确认包名加入固定安装器集合，未扩大任意窗口或按钮点选。五角色导出回归 7 项通过，全部本地 Python 隔离检查 68 项通过，见 `android-isolated-package-export-tests.log`、`python-tests-real-device-support.log`。Shell、两段 Python 3.9 AST、Manifest XML、workflow YAML、差异检查通过；独立 Sol 复核未发现确定缺陷。未本地编译，未操作真机 App 或权限。
 - 将以包含该验证支持的新候选接替 run 28，旧 run 保留其实际局部结果，不能计为新源码完整通过。新候选必须经 Packages 完整检查、编译及产物身份核验后，才提供真机安装确认的具体包与操作范围。
+
+### run 29 候选与当前验证边界
+
+- 真机隔离支持提交 `129b4defeacfc8bd437afa5fc1b9b6fe87cfac64` 已推送，自动触发 [Packages run 29](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/40089379286)，没有额外 dispatch。源码快照为 `build/evidence/kp-u01/source-129b4de.json`（37 文件，内容指纹 `11914f87eecac07e4349e62458d7219f233d626286e21cadebf9e0c15d5129b2`），逐一核对当前工作副本与提交内容相同；同步的用户 `AGENTS.md` 未提交。
+- run 28 因被新候选替代而主动取消，最终 `cancelled`：identity、打包检查及核心隔离测试成功，集成测试被取消，Android/Mac job 未执行；事实保存于 `build/evidence/kp-u01/run28-final.json`，不能记为编译失败或完整通过。run 29 已于 11:20 UTC 开始，identity 与打包检查成功，其余仍待最终结果。
+- `macos-source-equivalence-129b4de.json` 核实 run 25 的 Swift、Mac 构建入口与当前候选相同；既有原生 UI、退出顺序边界夹具与公网下载证据仍只覆盖这些相同源码。Python 安装助手已改变，须从 run 29 成功包重新核验内嵌源码与当前提交一致。
+- Android 后续只使用 Mi 10 真机 `8085d06e`，不启动模拟器。当前未向真机安装任何候选、未更改来源权限；独立验证包准备完成后，再取得安装、来源授权、跨版本系统交接及验证包清理的具体授权。原主包及其数据保持保留。
+
+### run 29 完成与产物复核
+
+- `129b4de` 的 run 29 最终 `success`：identity、checks、android、macos 均成功，publish 按分支规则跳过；原始结果为 `build/evidence/kp-u01/run29-final.json`。核心 4,203 项通过 / 2 项原有条件跳过，集成 402 项通过 / 6 项原有跳过；打包检查运行 68 项 / 1 项 macOS 条件跳过。Android 64 项单测通过、无跳过，lint 无 Error/Fatal、23 项 Warning。完整报告与跳过原因在 `run29-artifacts/isolated-check-reports-29/content/summary.json`、`run29-artifacts/android-check-reports-29/content/summary.json`。
+- 八组 artifact 均完整下载并核对 GitHub API 的压缩包大小和 SHA256，逐组保留 `download-verification.json`。单连接约 26 KiB/s，默认与直连 1 MiB 探测均约 40 秒；按服务端实际支持的 Range 并行读取，完整合并后仍核对 GitHub 全包哈希。Mac 首轮分段各一段网络失败，保留其余完整段，仅补缺段后通过；重复的整包连接主动停止，残包标记为 `.partial.zip`，未执行或安装。没有修改系统代理。
+- 五份 APK 清单为 `run29-artifacts/android-debug-29/content/update-acceptance/manifest.json`：独立包名 `com.sakurasep.kaneopilot.updateacceptance`，preview `0.0.0` / code 29，baseline `0.2.9` / code 2910，newer `0.2.10` / code 2911，另有两份匹配的测试 APK。主 agent 独立复算五包大小/SHA256并核对两个真实 SDK XML；tester 用本地 aapt/apksigner 逐份复核六行 SHA256SUMS、包名、版本、非 debuggable、唯一 runner/target 及同证书，全部通过。该 run 的证书为 `9cffc1ef91634ac07120f9082c30fd95e91fa9a12829c4e9bea3183c54fda3d2`；不能沿用 run 27 的测试证书。主 debug APK 的独立元数据检查亦通过，详见 `run29-android-independent-package-check.json` 与工具原始输出目录 `run29-android-local-verification/`。没有执行 adb 安装或设备测试。
+- Mac 当前 DMG 为 12,400,598 bytes / SHA256 `2637887799e3b56567b6b940fbc48f0c51678f1681fccb8f239e9d93357593be`，源码 `129b4de`、预览版 `0.0.0` / build 29。大小/哈希、DMG 签名指纹、hdiutil verify、只读挂载内 App 签名、arm64/x86_64、版本和 bundle ID 均通过；已卸载挂载卷。DMG 内 App 及独立完整 UI App 的 Python 安装助手均与当前提交逐字节一致，SHA256 `f2b1aac688683ebb26d8108507a89dcca4cdd7bbcccf2c99c16c94a020e098c5`。本地初始多架构 lipo 命令参数被工具拒绝，保留诊断后改为与云端相同的逐架构核对，两项均保留并通过；未修改产物或降低检查。
+- Mac 85 项更新夹具断言及五个真实生产 AppDelegate 类的隔离顺序场景通过；主 agent 再核对当前源码、提取类、编译输入和 UI archive 哈希。原生 UI、真实公网下载仍引用 run 25 的相同 Swift 源码证据；不是 run 29 的重复实机执行，也不声称完整 App 已实际更新退出。新助手的云端打包缺口已补齐，证据在对应 Mac artifact 的 `local-verification.json` 及 `macos-source-equivalence-129b4de.json`。
+- 只读核对 `/Applications/KaneoPilot.app` 仍为 `0.2.2 (2026102306)`，没有新助手、manager 或更新偏好标识；未启动或修改该 App。本节记录的是安装授权前的产物检查，后续真机授权和执行见下节。未创建 PR、合并、发布 Release 或替换生产 App；证据记录保留在任务工作树，不为文档状态单独触发新构建。
+
+### run 29 Mi 10 真机验证与当前剩余项
+
+- 用户明确授权独立验证 App、测试包、仅该包的来源安装授权、取消/重试、`0.2.9 (2910) → 0.2.10 (2911)` 系统升级，以及导出证据后清理验证包。仅操作 `8085d06e`，不启动模拟器，不安装或卸载 `com.sakurasep.kaneopilot` 主包，不读取其配对数据。授权和全部设备原始记录保存在 `build/evidence/kp-u01/android-real-device-run29/`。
+- preview 与匹配测试包安装成功，四项原交互检查在真机通过（`interaction-shell-assisted.log`，`OK (4 tests)`）。主 agent 已查看更新就绪、安装确认、预览门槛、确认期间版本改变后禁止继续的四张实际截图，并核对 PackageManager 身份证据。MIUI 拦截测试 App 启动测试宿主，使用原 runner、shell 精确启动独立宿主和“本次允许”后完成；未启用“始终允许”。先前主动 force-stop 的启动阻塞日志保留，不记为产品崩溃。
+- 未注入的生产 `GitHubUpdateClient()` 公网用例最初执行两次，均在 latest 请求收到映射为 HTTP 403/429 的限制错误，尚未读取 manifest 或下载 APK；没有安装尝试。有效手机 shell 对照为 HTTP 200，但不是相同 UID/协议/出口的 App 请求，不能据此记公网验收通过或断言 GitHub 额度耗尽。原日志、各轮 `result.json` 和有效/无效探测分别保留。
+- baseline 与匹配测试包通过 adb 安装；真实 newer APK 和云端 manifest 仅上传至独立验证包目录。系统用例首轮走通来源拒绝返回，随后在 MIUI 额外风险确认等待超时，保留失败记录。系统事件明确记录撤销 `REQUEST_INSTALL_PACKAGES` 会以该原因为由结束测试进程；以已拒绝的权限作为前置恢复测试后，清除阻挡宿主的残留设置页，按已授权范围完成仅该包的 MIUI 风险确认。原用例最终 `OK (1 test)`：权限返回 2 次、系统安装器启动/取消返回各 2 次、保持 baseline code 2910、最终 READY 且可重试。证据为 `system-permission-clean-precondition.log`、`system-permission-external-verification.json`。部分用例内截图早于系统过场动画完成，不能按文件名当成实际权限/安装器页面截图；实际包窗口和 PackageManager 断言、外部录屏/稳定截图分别保留。
+- 实际升级原自动用例被 MIUI 的第三方安装提示、ICP 提示及“继续更新”界面阻挡，两个原始失败日志保持失败，未修改或放宽固定按钮断言。主 agent 在同一次 App FileProvider → MIUI 安装器交接中，按已授权范围手动完成这些 OEM 确认，稳定界面明确显示「KaneoPilot 更新验证」「0.2.9 -> 0.2.10」「安装来源：KaneoPilot 更新验证」。没有执行 `adb install newer.apk`。外部 adb 拉取已装 APK，aapt/apksigner、版本 `0.2.10 (2911)`、大小 8,541,551、SHA256 `33f15bdf99e6d062eeac8ef3100e199fee47a1be4ac4c7fb75f842f58bc1f2b6` 和本 run 证书均与 newer 候选一致。证据为 `actual-upgrade-external-verification.json`、`miui-actual-install-manual.json`、原录屏及稳定截图；这是独立实测的升级完成，不冒充原 JUnit 通过。
+- 在手动首次启动新版 MainActivity 之前运行原恢复用例，结果 `OK (1 test)`，生产 model 清除已安装同版本的 `known_update`，保持 `last_check`，状态 `UP_TO_DATE`，未配对，真实连接页显示 `KaneoPilot 0.2.10 (2911)`。主 agent 已查看两张真实页面截图并复核 `after-upgrade.json`，见 `system-after-upgrade.log`、`system-final-evidence/`、`system-final-export-verification.json`。
+- 公网只读诊断发现 Android 默认 Wi-Fi 网络存在 HTTP 代理，不能只凭全局 `http_proxy=null` 判断直连。显式代理和直连的手机 curl HTTP/1.1 对照均 200；同一代理的 Mac curl HTTP/2 + gzip 对照实际返回 GitHub 403、`X-RateLimit-Remaining: 0`、正文 `API rate limit exceeded`，重置时间为 2026-10-24 13:37:17 UTC（台北 21:37:17）。没有修改系统代理、VPN、认证或下载安全规则。此证据支持代理 HTTP/2 出口限流，但不是 App 本身的原始响应头，保留该区别。
+- 在显式 Wi-Fi 代理 200 的新证据后，先完整导出升级证据，再仅清理独立验证包并换回 preview/匹配测试包，通过 adb 第三次运行原生产公网用例；仍在 latest 请求失败。停止原样重试，完整保留 `live-download-after-proxy-probe.log` 与对应 `result.json`。**Android 公网 latest → manifest → APK 下载仍未通过，任务保持“实现中”**；待该 App 所用网络出口恢复后补测，不能用 shell 或夹具下载替代。
+- 已按授权导出全部真机证据并卸载 `com.sakurasep.kaneopilot.updateacceptance.test`、`com.sakurasep.kaneopilot.updateacceptance`，清理本次两个临时 UI XML，确认两包已消失。主包仍为 `0.1.0 (1)`，安装路径、APK SHA256 `d81b8c1c76e9680a710743b89e28b5df6486cc501112bb3ece070c6746b65ab2` 与原证书均未变；没有读取其配对或私有数据。证据为 `cleanup-verification.json`、`main-package-readonly-final.json`。未创建 PR、合并、正式 Release 或替换生产 Mac App；本任务工作树继续保留。
+
+### 2026-10-24 用户选择候选后的两端主应用安装
+
+- 用户在“更新最新版”后明确选择“安装本次候选到 Mac 和 Mi 10”，并回复“允许卸载旧主包并清除该 App 数据后安装”。本节为此后新增的主应用安装授权与结果，不改变上节独立验证结束时主包未变的历史事实。候选固定为 `129b4de` / Packages run 29 的 `0.0.0 (29)`；正式 Release、PR 与合并仍未执行。授权、安装与启动证据统一保存在 `build/evidence/kp-u01/latest-update-request/`。
+- Mac：重新核验云端完整 DMG 的大小、SHA256、签名、版本和内嵌源码；只读挂载后用 `ditto` 暂存并卸载卷。确认主 App 未运行，取得目标路径共享锁，以真实 `renamex_np(RENAME_SWAP)` 手动原子交换 `/Applications/KaneoPilot.app`；新 App 为 `0.0.0` / build `29`，可执行文件 SHA256 为 `b7f03c5d7b3d411a1e47a879eb89739a4578eec144bbffff33d8df4efb28f93a`。这是用户授权的手动候选安装，没有绕过生产更新器的正式版升级门槛调用其 prepare/install。
+- Mac 旧版 `0.2.2 (2026102306)` 已保留在 `/Applications/.KaneoPilot-backup-kp-u01-o68f4lwc/KaneoPilot.app`，版本、签名和旧可执行文件 SHA256 均复核成功；新旧 core 的 SQLite schema 均为 `6`。安装器未修改用户数据目录，其他聊天既有 MCP 进程未停止，目标共享锁文件保留。正常启动后 App 按现有配置恢复运行服务，不能把安装器未改数据描述为整个 App 启动期间没有状态写入。
+- Mi 10：仅使用物理设备 `8085d06e`，未启动模拟器。按明确授权用 adb 卸载 `com.sakurasep.kaneopilot`，清除该 App 旧数据后安装 run 29 canonical debug APK。已从设备拉回 APK，包名、`0.0.0` / versionCode `29`、SHA256 `9755803b6877c94142fed717774d0964fa19367d1ce690eb548130a15cddea67`、证书 `9cffc1ef91634ac07120f9082c30fd95e91fa9a12829c4e9bea3183c54fda3d2` 与云端产物一致。原主包签名与候选不同，未尝试强行覆盖或绕过系统签名校验；独立验证包未重新安装。
+- 两端首次启动检查于台北 21:37–21:39 完成：Mac 正常打开真实主 App，设置 → 高级显示 `0.0.0（29）` 和软件更新区，原有项目映射仍可见；预览提示明确不会自动切换到正式版。Mi 10 的 adb `am start -W` 返回 `Status: ok` / COLD / 1250 ms，MainActivity 为 resumed，进程存活，实际主界面截图显示未配对状态。没有代用户重新配对或修改权限、网络和更新开关。
+- 安装和启动证据：`authorization.json`、`macos-staging.json`、`macos-install-result.json`、`macos-first-launch-settings.ax.txt` / `.png`、`android-install-operations.json`、`android-install-result.json`、`android-launch-command.json`、`android-first-launch-state.json`、`android-first-launch.png` 及 `installation-acceptance-summary.json`。本次只是已验证云端产物的安装与正常启动，没有本地编译、改功能源码或另起构建。
+- 本轮安装交付已完成，手机需重新配对，Mac 旧包备份保留。**KP-U01 整体仍为“实现中”**：Android 生产公网 latest → manifest → APK 下载尚未通过，本轮没有把已安装主包的预览门槛或 shell 探测当作该链路验收。没有创建新标签或正式 Release，也没有合并、清理任务工作树或为状态文档单独提交/推送。
 
 ### 2026-11-02 安装卡死的实机问题与修复
 
