@@ -1,9 +1,9 @@
 # KP-ENV01：消除未使用 Plus 的误告警并恢复历史槽位
 
-- 状态：实现中（发布）；用户要求修复总览的 Plus 连接和工作树池两项告警。槽位已在实际环境恢复，Plus 修复已在候选核心中验证；用户已授权发布新版本，正式包与云端核验正在进行。已安装版尚未更新。
+- 状态：待体验；两项修复已集成并正式发布为 latest **v0.4.4 / build 113**，云端及公开安装包核验完成。两个旧槽位已在实际环境恢复；本机已安装版仍为 0.4.3，未自动替换。尚无用户体验验收确认。
 - 基线：`main` / `ce4ddc208d8e3a89952a967c65a11cf4a912a7e4`；分支 `fix/20261104-kp-env01-diagnostics-pool`。
-- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-env01-diagnostics-pool`。集成目标 `main`；2026-11-04 用户明确要求「发布新版本吧」，授权本次修复集成与正式发布。按当前 latest v0.4.3 及补丁范围选择 v0.4.4，不包含其他任务改动。
-- 当前事实：全局规划、执行、评审均为 Codex；默认 Plus 连接 `active=false`。两个 `leased/unknown` 历史槽位分别关联已失败的 Plus 规划、评审；不能用请求失败或本机 PID 消失代替远端轮次停止证明。
+- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-env01-diagnostics-pool`（已合入并清理）；后续入口为主工作区 `main`。2026-11-04 用户明确要求「发布新版本吧」，授权本次修复集成与正式发布。按当时 latest v0.4.3 及补丁范围选择 v0.4.4，不包含其他任务改动。
+- 初始现场：全局规划、执行、评审均为 Codex；默认 Plus 连接 `active=false`。两个 `leased/unknown` 历史槽位分别关联已失败的 Plus 规划、评审；不能用请求失败或本机 PID 消失代替远端轮次停止证明。
 
 ## 范围与验收
 
@@ -35,6 +35,20 @@
 - T2 保全复查：slot-1 的 4 个规划附件已迁至原 run 的 `plan-materials`；其余 420 个文件（含 `.dart_tool`）和 slot-2 的 398 个文件逐一对照归档，内容未变；两个原 request 全字段未变，原 job 的 owner_stopped 字段未变。工作树池现为 **free=3, leased=0, quarantined=0, unconfirmed=0**。结果和复查分别位于保全目录 `recovery-results.json` / `recovery-verification.json`。
 - T3 原生核验：复用已有云端 build 107 原生检查壳（source `856dbeb13ea275424ab274eac2492d70f6a30eab`，原签名核验通过），经主仓库 `build/kp-env01-native-check/core_readonly.py` 调用本次完整候选核心，只以 SQLite `mode=ro,uri=true` 读取实际状态；调度在该检查实例禁用，全部写命令拒绝，正式引擎继续运行。在线诊断先从 2 项降为仅工作树池，恢复后总览显示「一切正常」「15 项检查通过 · 2 项未检查」。这是旧云端原生壳 + 本次 Python 候选的实测，不能称为本次完整安装包或正式发布。检查实例已退出。
 - T3 最终组合回归：主 agent 在包含 T1、T2 全部改动的当前工作树运行真实 pytest，合并上述两组文件及 `tests/rehearsal/test_doctor_live.py` 一次检查，结果 **175 passed，24 subtests passed，151.89s**；退出 0，`git diff --check` 通过。未降低原测试门槛；代码未再变化。
-- T3 已安装版：`/Applications/KaneoPilot.app` 仍为 0.4.3 / build 111，未替换 App；在线诊断实测工作树池告警已消失，首页从 2 项变为只剩原 Plus 告警，Plus 诊断代码需纳入后续 App 更新。未在本地编译/签名/打包，未提交、推送、合入或正式发布。
+- T3 发布前已安装版：`/Applications/KaneoPilot.app` 仍为 0.4.3 / build 111，未替换 App；在线诊断实测工作树池告警已消失，首页从 2 项变为只剩原 Plus 告警，Plus 诊断代码需纳入后续 App 更新。当时未在本地编译/签名/打包，尚未提交、推送、合入或正式发布。
 - 发布准备：已重新 fetch `origin main --tags`，远端 main 仍为基线 ce4ddc2，latest 为 v0.4.3；本次四个业务源码 SHA 与最终 175 项组合回归一致。主工作区新出现的未跟踪 `.local/state/gh/device-id` 不属于本任务，不暂存或清理。正式发布说明为 `docs/releases/v0.4.4.md`；编译、签名和打包继续只走云端 Packages，先验证 main 同一提交，再推 annotated 稳定标签。
-- 下一步：提交本次修复并集成 main，跟踪同 SHA 云端检查与正式发布，核对公开资产后清理本任务 worktree 和已合入本地分支。保留其他 worktree、本次保全目录和已安装 App。已完成的原生检查实例没有继续使用该工作树的进程。
+- 下一步：用户可从 App「设置 → 高级 → 软件更新」或 v0.4.4 发布页安装新版并体验。发布、适用核验及本任务工作树收尾已完成；其他 worktree、本次保全目录和已安装 App 保留。
+
+## 正式发布与资源收尾
+
+- 本次修复、测试、规格及 v0.4.4 说明一起提交为 `6540aaacd6fe64afa7e43e0606c5aa696b12234f`，已快进合入并推送远端 main。四个业务源码哈希与最终本地组合回归一致；发布前独立复核未发现源码阻断、凭据、备份或生产附件混入提交。
+- [main Packages #112](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41820871705) 同 SHA 的 15 个必需 job 全部成功：Python 3.11/3.13 各五个分片、两组 macOS 原生夹具、两端构建及身份检查。可选全文探针与非标签 publish 按条件跳过，无失败或重跑。完整回执 `build/kp-env01-release-044/cloud-main-final.json`。
+- 用 `docs/releases/v0.4.4.md` 创建直接指向上述已验证提交的 annotated 签名标签，保留既有 `tag.gpgsign=true`；`git verify-tag v0.4.4` 成功，GitHub 也核验为 valid。标签对象 `0e86fcf797be9b167bbe11845925643d89df265c`；远端 ref、直接指向的 commit 和发布说明内容一致，回执 `remote-tag.json`。Git 默认清理去掉 Markdown 的 `#` 标题行，但全部条目保留。
+- [正式 Packages #113](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41822387007) 同 SHA 的 **16 个必需 job 全部成功**，无失败或重跑；仅可选全文探针按条件跳过。2026-11-04 11:46:21 UTC，[v0.4.4](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.4) 已公开为非 draft、非 prerelease 的 latest。完整回执 `cloud-release-final.json`、`release.json`、`latest.json`。
+- 下载全部四项公开资产并交叉核对 GitHub digest/大小、manifest 身份/哈希和 SHA256SUMS，全部一致：APK 8,557,684 bytes / SHA256 `44ff43bc9ffc8ff2b848072cae154269dc96ba838dabe9e727bac4fa29adf161`；DMG 43,520,992 bytes / SHA256 `151c78730bc923e1319612095f094f613d0b1c7b9555b0ece2e36fd6f4cb45bf`；manifest SHA256 `675a24bd868e4585d244d2c76eeb0cb8ae2224efec519d4e46c923d00c82f6ec`；SHA256SUMS 自身 SHA256 `f05999f9aebc639948ec074afba47d5416ad086c991f8f67e083fa7add036c09`。回执 `release-asset-verification.json`。
+- APK `apksigner verify` 通过，包名 `com.sakurasep.kaneopilot`、0.4.4 / versionCode 113，沿用证书 SHA256 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`。首次本地脚本命中损坏的 jenv Java shim，未能启动验签；保存诊断后改用已安装 JDK 17 的绝对 java 路径调用同一 apksigner.jar 完成只读核验，没有改系统配置或在本地构建。
+- DMG 完整性与签名通过，CodeDirectory SHA256 `e5de889b931f2b4b3d6316929017a8783de2ea76f5630cce88f16a2fa5b23ec6`。只读挂载 App 的 bundle ID `local.kaneopilot`、0.4.4 (113)、严格深度签名通过；10 个 Mach-O 均为 arm64、minos ≤14.0，依赖无违规。全部 153 个内嵌 Python 文件逐字节匹配发布提交。正式包自带 Python 3.13.18 在 SQLite `mode=ro` 下检查实际数据，Plus 为 `ok:true,skipped:true`，槽位池 `free=3`。未启动/安装正式 App，镜像已正常卸载；回执 `release-package-verification.json` / `package-verification-log.json`。
+- 公开 Release 正文已恢复原 Markdown 标题并移除发布脚本原样带入的 PGP signature 数据；保留原变更与已知限制、CI marker 和安装说明，读回逐字一致。签名标签、四项资产和 manifest 未改动，回执 `release-after-notes.json`。
+- 收尾：main 同 SHA 云端验证通过后，再次确认本任务 worktree tracked/untracked 干净、HEAD 已在 main，忽略文件仅 223 个可再生成 Python/pytest 缓存，`lsof +D` 无输出/警告，进程参数无目录引用。正常 `git worktree remove` 和 `git branch -d` 已移除本任务工作树与本地分支；目录、分支和列表核对一致，未使用 force，未处理远端分支或其他任务。前置清单及回执为 `worktree-cleanup-preflight.json` / `worktree-cleanup-receipt.json`。
+- 检查壳 PID 20271 已确认不存在；原 `active-preview.json` 原样保留为 `build/kp-env01-native-check/completed-preview.json`，另有 completion 回执，历史源路径只作证据，无活跃资源依赖已删除工作树。完整恢复目录仍在主仓库 `build/kp-env01-recovery-20261104/`，不随发布或工作树清理删除。
+- 本机安装版本只读复核仍为 `/Applications/KaneoPilot.app` 0.4.3 (111)，未替换或重启；本轮不执行真实模型调用、Android 真机或安装后的生产流程验收。发布与备份核验材料均位于主仓库忽略目录 `build/kp-env01-release-044/`，不纳入公开 Git 提交。
