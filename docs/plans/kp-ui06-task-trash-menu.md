@@ -1,6 +1,6 @@
 # KP-UI06 任务整理：回收站、项目折叠与自动归档
 
-状态：实现中。T1–T5 已实现并由预览包 #99 验证；追加 T6 修复项目设置多项开关使窗口被撑高、底部被挡住的问题，尚未由用户验收。
+状态：实现中。T1–T5 已实现；T6 原遮挡场景已由预览包 #102 在默认/最小窗口及实际 600×560 配置浮层复测通过。补充的 600×480 浮层原生检查尚未覆盖，工具拖动未能改变实际尺寸；#102 可供体验，尚未由用户验收。
 
 ## 目标与已确认决定
 
@@ -42,6 +42,9 @@
 - T6 首版修复：ProjectMappingsView 通过 bottom safeAreaInset 放置保存栏，GeometryReader 正文允许收缩并裁剪；UnsavedChangesBar 摘要按剩余宽度换行，移除纵向 fixedSize。保存、放弃、校验与确认逻辑不变。两个 Swift 文件按「排序路径 + NUL + 内容 + NUL」拼接的 SHA-256 为 `ff9f909f8b4b1107e00dd4d76dc5784c9a8fd6b80defe4967ac69be578c767cc`，`git diff --check` 通过。Sol reviewer 独立只读审查未发现实质问题，提示必须原生核验完整文本及最小浮层。尚待新云端构建和同序列原生复测，不把静态审查视为修复通过。
 - T6 云端 #102：[Packages 41704041730](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41704041730)，源码 `6fb53d263bb3d7c8b5a20b01148b5ace87f9a1bf`，15 个必需 job 全部成功，正式发布及可选全文探针按预期跳过；完整结果保存在 `build/kp-ui06-native-preview-102/cloud-result.json`，构建跟进进程已退出。DMG 与隔离 UI ZIP 的源码、构建号、大小和 SHA-256 均匹配同运行 metadata，App/DMG 签名、DMG CodeDirectory 指纹及镜像校验和通过。DMG 为 `dist/kp-ui06-preview-102/KaneoPilot-ci-102-macos-arm64-local-signed.dmg`，40,665,111 字节，SHA-256 `c63af70eebb673a67139b871d3f28c6c92b252cb3c92e9dc67948cc97cd6d3db`。原生隔离副本已准备，但首次 CUA 连接报告 Mac 锁屏且无法自动解锁；已请用户手动解锁，尚未复测 T6，整体仍为实现中。下一步用同目录 launch.py 重现五项编辑，完成默认/最小窗口与规划浮层核验后再交付确认。
 - #102 等待解锁收尾：隔离 App PID 26402 已按 manifest 与实际可执行路径精确匹配后停止，并核实退出；无 set-* 夹具设置写入。`native-result.json` 明确记录阻塞和未验证状态，不沿用 #99 的原生通过记录。下载包和隔离环境保留，工作树未合入 main，保留现场等待继续；未改动正式 App、用户数据或其他任务。
+- T6 #102 解锁后原生复测（2026-11-04）：使用同一云端原样签名隔离 App，1180×760 深色与 900×600 浅色分别按截图输入 MediaPlayer 仓库并开启新规划、自动接收、自动合并、构建发布；出现缺安装包提示后截图仍分别为 2360×1520 与 1800×1200 像素。完整改动名称、阻塞文字、放弃及禁用保存均可见，详情保留滚动并能到引擎/备用模型末项。两种窗口下展开/收起发布配置、合法文件名解除保存阻塞、非法路径/通配符恢复完整提示均通过；放弃清空草稿，读回映射与初始状态完全相同，之前无 set-* 命令。
+- T6 规划页配置浮层：实际显示 600×560（1200×1120 像素），五/六项改动名称自然换行、校验全文、按钮与详情末项可达；隔离 set-project-mapping 延迟 8 秒后，保存中进度指示和两个禁用按钮仍完整可见。首次保存发现自建 MediaPlayer 仅加入映射状态、未登记 FakeCore 命令项目目录，导致自动处理步骤返回 fixture not_found；失败横幅、卡片错误、保留草稿和底栏均可见。仅在 `build/` 的隔离 wrapper 补登记后重试成功，浮层返回规划页；状态文件验证仓库、四个开关和必需安装包精确保存，其他项目不变。日志为一次成功映射、一次夹具拒绝及一次成功自动处理保存；没有模型、真实 Kaneo、合并或发布调用。未修改受跟踪 FakeCore 或应用源码，不能把第一次失败当作成功。
+- T6 剩余与收尾：工具针对浮层边角的拖动未能将实际 600×560 改为 600×480，停止继续试探，600×480 原生场景保留为未实测，未删除验收目标或冒称全部界面通过。主要遮挡修复已在新包默认/最小窗口验证，可体验 #102；后续补齐可控最小浮层环境或人工尺寸验证。两个解锁后隔离 App PID 28202、29687 均按可执行路径精确停止并核实退出，`build/kp-ui06-native-preview-102/native-result.json`、阶段状态和命令日志保留。任务工作树继续因未合入 main 和此验证缺口保留；未覆盖安装正式 App，未合并或正式发布。
 - T5 当前组合态本地验证（Python 3.14，HEAD `24141ac` 加本次差异）：`cd core && PYTHONPATH=tests python3 -m unittest -q test_project_mappings test_auto_archive test_archive test_engine_business_tick test_engine_claim_scope test_bridge_labels_comments`，97 项通过（25.775 秒）。其中映射 17 项覆盖完整/空目录、删除与本地重读/解除映射、格式错误/不完整目录、工作区与慢响应、旧映射/任务/请求/审计保全、同 ID 重现，以及隐藏项目的 live/shadow 模式与 monitor 严格 engine-verdict 门。沿用临时 SQLite 和 FakeKaneoClient，无真实服务/模型调用。首次检查发现远端返回顺序与 SQLite JSON 排序不同，已固定当前目录列表顺序；追加参数时遗漏 CLI schema 的检查失败已补齐后通过，未改预期或降低门禁。误将 pytest 专用 `test_automation_policy` 加到 unittest 曾因本机缺 pytest 导入失败，该模块留待云端，未在本地冒称通过。
 - T5 FakeCore 目录冒烟通过：刷新、重读、离线、成功空目录、默认消费者兼容和状态文件持久化；使用临时路径并固定夹具策略时间，原先全对象比较因动态策略时间不同失败，不涉及真实配置。最终 Python AST 与 `git diff --check` 通过。T5 变更的 core/macOS 源码及测试按「路径 + NUL + 内容 + NUL」排序拼接 SHA-256 为 `e8f992b1ebcf492efffc2231f0b814f20f060e867570ff8aabf019b76200e5de`。最终独立只读审查未发现剩余实质问题；云端编译与原生效果见下述 #99 记录。
 - T1 第一轮既有隔离测试 24 项通过；该记录只适用于当时的右键入口候选，不能代替本次组合态结果。
