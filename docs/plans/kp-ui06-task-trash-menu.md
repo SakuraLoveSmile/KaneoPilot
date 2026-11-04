@@ -1,6 +1,6 @@
 # KP-UI06 任务整理：回收站、项目折叠与自动归档
 
-状态：实现中。T1–T5 已实现；T6 原遮挡场景已由预览包 #102 在默认/最小窗口及实际 600×560 配置浮层复测通过。补充的 600×480 浮层原生检查尚未覆盖，工具拖动未能改变实际尺寸；#102 可供体验，尚未由用户验收。
+状态：实现中。T1–T5 已实现；T6 原遮挡场景已由预览包 #102 在默认/最小窗口及实际 600×560 配置浮层复测通过。补充的 600×480 浮层原生检查尚未覆盖，工具拖动未能改变实际尺寸；同应用源码的新云端预览包 #106 已构建并核验，可供体验，尚未由用户验收。
 
 ## 目标与已确认决定
 
@@ -39,6 +39,8 @@
 
 ## 验证与剩余工作
 
+- 用户于 2026-11-04 再次要求「云端构建新版本」。已从远端任务分支 `5198dc73b4d72e2236f1979f807d3bad9e6a28fd` 手动完成预览构建 [Packages #106 / 41780476151](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41780476151)，15 个必需 job 全部成功，正式发布及可选全文探针按预期跳过。生成版本 `0.0.0 / build 106` 的 Mac/Android 包，未选择会创建预发布的 test 渠道。与 #102 源码 `6fb53d263bb3d7c8b5a20b01148b5ace87f9a1bf` 的差异仅在本计划，core/macOS/Android/构建脚本/工作流均一致；本轮不重复原生/设备测试，#102 原生证据仍标注其对应包，600×480 缺口保留。请求、完整 job 结果及包校验记录保存在 `build/kp-ui06-cloud-preview-106/`，构建跟进进程已结束。
+- #106 下载交付：`dist/kp-ui06-preview-106/KaneoPilot-ci-106-macos-arm64-local-signed.dmg`（42,574,265 字节，SHA-256 `d11ce9eb7a395c0f5653600b7cf122a3b8138cf32e1304f34cede57edb34b640`）与 `KaneoPilot-ci-106-android-debug.apk`（12,431,226 字节，SHA-256 `4c0ec3e83dd5f87e82cb6f9a8f62b175dac128c641fcd63f74887c06e2b61106`）均匹配同 run metadata 的源码、版本、构建号、大小和哈希。Mac 签名、CodeDirectory 指纹及镜像校验和本地通过；Android 包身份、版本和证书签名由本轮云端 job 验证通过，本地核对下载字节。仅生成并下载预览包，未安装、合并 main 或创建 Release。工作树与之前证据继续保留，沿既有未合入原因与 600×480 缺口收尾规则处理。
 - T6 首版修复：ProjectMappingsView 通过 bottom safeAreaInset 放置保存栏，GeometryReader 正文允许收缩并裁剪；UnsavedChangesBar 摘要按剩余宽度换行，移除纵向 fixedSize。保存、放弃、校验与确认逻辑不变。两个 Swift 文件按「排序路径 + NUL + 内容 + NUL」拼接的 SHA-256 为 `ff9f909f8b4b1107e00dd4d76dc5784c9a8fd6b80defe4967ac69be578c767cc`，`git diff --check` 通过。Sol reviewer 独立只读审查未发现实质问题，提示必须原生核验完整文本及最小浮层。尚待新云端构建和同序列原生复测，不把静态审查视为修复通过。
 - T6 云端 #102：[Packages 41704041730](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41704041730)，源码 `6fb53d263bb3d7c8b5a20b01148b5ace87f9a1bf`，15 个必需 job 全部成功，正式发布及可选全文探针按预期跳过；完整结果保存在 `build/kp-ui06-native-preview-102/cloud-result.json`，构建跟进进程已退出。DMG 与隔离 UI ZIP 的源码、构建号、大小和 SHA-256 均匹配同运行 metadata，App/DMG 签名、DMG CodeDirectory 指纹及镜像校验和通过。DMG 为 `dist/kp-ui06-preview-102/KaneoPilot-ci-102-macos-arm64-local-signed.dmg`，40,665,111 字节，SHA-256 `c63af70eebb673a67139b871d3f28c6c92b252cb3c92e9dc67948cc97cd6d3db`。原生隔离副本已准备，但首次 CUA 连接报告 Mac 锁屏且无法自动解锁；已请用户手动解锁，尚未复测 T6，整体仍为实现中。下一步用同目录 launch.py 重现五项编辑，完成默认/最小窗口与规划浮层核验后再交付确认。
 - #102 等待解锁收尾：隔离 App PID 26402 已按 manifest 与实际可执行路径精确匹配后停止，并核实退出；无 set-* 夹具设置写入。`native-result.json` 明确记录阻塞和未验证状态，不沿用 #99 的原生通过记录。下载包和隔离环境保留，工作树未合入 main，保留现场等待继续；未改动正式 App、用户数据或其他任务。
