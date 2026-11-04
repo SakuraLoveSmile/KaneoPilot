@@ -2745,7 +2745,7 @@ struct AutomationIntakeSummary: Decodable {
     let projects: [AutomationIntakeProject]?; let errors: [JSONValue]?
 }
 struct AutomationIntakeProject: Decodable {
-    let projectId: String?; let ready: Bool?; let preflight: [AutomationPreflightIssue]?
+    let projectId: String?; let projectName: String?; let ready: Bool?; let preflight: [AutomationPreflightIssue]?
     let adopted: [String]?; let skipped: [AutomationIntakeSkipped]?
 }
 struct AutomationIntakeSkipped: Decodable { let taskId: String?; let reason: String? }

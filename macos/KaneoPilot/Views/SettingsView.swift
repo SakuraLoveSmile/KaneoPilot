@@ -2839,8 +2839,17 @@ struct SettingsView: View {
             if let intake = executorStatus?.automation?.lastIntake {
                 let projects = intake.projects ?? []
                 DisclosureGroup(isExpanded: $intakeDetailOpen) {
+                    Text("查看最近一次从 Kaneo To Do 接收任务的结果，以及任务被跳过的原因。")
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     ForEach(Array(projects.enumerated()), id: \.offset) { _, project in
-                        DisclosureGroup(intakeProjectTitle(project.projectId)) {
+                        DisclosureGroup(intakeProjectTitle(project)) {
+                            if let projectId = project.projectId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !projectId.isEmpty {
+                                Text("项目 ID：\(projectId)")
+                                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                                    .textSelection(.enabled)
+                            }
                             ForEach(Array((project.preflight ?? []).enumerated()), id: \.offset) { _, issue in
                                 Label {
                                     Text(issue.message).font(.kpLabel).foregroundStyle(Color.primary)
@@ -2867,7 +2876,7 @@ struct SettingsView: View {
                         }
                     }
                 } label: {
-                    SettingsDisclosureLabel("接收详情", summary: "\(projects.count) 个项目" + (intakeIssueCount > 0 ? " · \(intakeIssueCount) 项异常" : ""))
+                    SettingsDisclosureLabel("自动接收记录", summary: "\(projects.count) 个项目" + (intakeIssueCount > 0 ? " · \(intakeIssueCount) 项异常" : ""))
                 }
             }
             SettingsRow("通知", detail: "通知使用与总览、菜单栏相同的收件箱；仅在新增需要你处理的事项时提醒。") {
@@ -2884,14 +2893,16 @@ struct SettingsView: View {
         return "上次接收 \(TimeFormat.fullString(intake.finishedAt ?? intake.startedAt)) · \(projects.count) 个项目 · 接收 \(adopted) 个 · 错误 \(intake.errors?.count ?? 0) 个"
     }
 
-    /// 接收详情的项目标题：已加载的任务里有项目名则用名称，否则用项目 ID（不新增核心调用）。
-    private func intakeProjectTitle(_ projectId: String?) -> String {
-        guard let projectId else { return "项目" }
-        let name = model.tasks.first { $0.projectId == projectId }?.projectName
-        return name?.isEmpty == false ? name! : projectId
+    /// 优先使用接收记录的项目名；旧核心兼容已加载任务，不新增读取。
+    private func intakeProjectTitle(_ project: AutomationIntakeProject) -> String {
+        let names = [project.projectName] + model.tasks
+            .filter { project.projectId != nil && $0.projectId == project.projectId }
+            .map(\.projectName)
+        return names.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "项目名称暂不可用"
     }
 
-    /// 最近一次接收的异常数（预检问题 + 接收错误）：标题计数，并在首次出现时展开接收详情。
+    /// 最近一次接收的异常数（预检问题 + 接收错误）：标题计数，并在首次出现时展开自动接收记录。
     private var intakeIssueCount: Int {
         guard let intake = executorStatus?.automation?.lastIntake else { return 0 }
         let preflight = (intake.projects ?? []).reduce(0) { $0 + ($1.preflight?.count ?? 0) }

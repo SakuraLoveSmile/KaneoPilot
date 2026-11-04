@@ -464,6 +464,10 @@ if let status = decode(ExecutorStatusResponse.self, #"{"stages":{"delivery":{"ru
     expect(status.paused?.stages == ["plan"], "自动阶段暂停解码")
     expect(status.automation?.pendingTasks == 3, "待处理数不等于可领取请求数")
     expect(status.automation?.lastIntake?.projects?.first?.preflight?.first?.message == "未找到 gh", "intake 前置检查解码")
+    expect(status.automation?.lastIntake?.projects?.first?.projectName == nil, "旧接收记录缺项目名仍可解码")
+}
+if let project = decode(AutomationIntakeProject.self, #"{"project_id":"music-project","project_name":"Music","ready":true,"preflight":[],"adopted":[],"skipped":[]}"#) {
+    expect(project.projectId == "music-project" && project.projectName == "Music", "接收记录项目名解码")
 }
 if let config = decode(PlannerStoredConfig.self, #"{"backend":"claude","claude":{"model":"sonnet","effort":"high"}}"#) {
     expect(config.effectiveBackend == "claude" && config.claude?.effort == "high", "Claude 规划配置解码")

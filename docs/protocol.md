@@ -1552,6 +1552,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 get-project-mappings.items 提供 engine_mode（按 §5.27.7 归一 live）、effective_engine_mode（仅显式整进程诊断可为 shadow）、verify_env（字典）、fallback_model（{provider_id,model_id}|null）；不改变既有 automation 投影。get-task.task 与 list-tasks.tasks 各项增加 phase/condition（state-model §7；Review通过或PR存在为delivery/syncing）以及 attention（当前active需人工项，形状与attention-list同一项逐字段相等，否则null）。纯读取，无新schema或状态写入。
 
+`executor-status.automation.last_intake.projects[]` 可选提供 `project_name:string|null`：优先读取当前已保存项目映射中的非空名称，再取历史接收记录中的名称。未接收过任务的项目同样能显示名称；确实无名称时返回 null。此投影不读取远端、不写回历史接收记录或其他设置；旧客户端可忽略字段，新客户端兼容旧响应缺字段。
+
 engine-verdict 可选 request_id/run_id（monitor租约身份）、budget_seconds:int（正数）；resolve 可选 engine_fix:dict 为引擎事务内补救参数，必须核验 automation actor 与绑定失败回执，不允许借其绕过发送守卫。
 
 

@@ -2700,7 +2700,7 @@ def cmd_executor_status(state, payload):
                        "max_active_tasks": state.get("automation_global", {}).get("max_active_tasks", 2),
                        "waiting_merge": 1, "pending_tasks": 16,
                        "last_intake": {"started_at": past(minutes=5), "finished_at": past(minutes=4),
-                           "projects": [{"project_id": PROJECTS["Music"], "ready": True,
+                           "projects": [{"project_id": PROJECTS["Music"], "project_name": "Music", "ready": True,
                                          "adopted": ["auto-waiting-plan"], "preflight": [],
                            "skipped": [{"task_id": "auto-long-pr", "reason": "active_task_exists"}]}], "errors": []}}}
 
