@@ -64,6 +64,74 @@ class ExecutionStageContracts(unittest.TestCase):
         self.assertEqual(job["request_id"], self.spec["request_id"])
         self.assertEqual(execution_contract.validate_spec(self.spec, job=job), self.contract)
 
+    def migrated_branch(self):
+        old_root = self.root / "managed"
+        new_root = self.root / "relocated"
+        old_path = old_root / self.spec["task_id"] / "branch"
+        new_path = new_root / self.spec["task_id"] / "branch"
+        old_path.parent.mkdir(parents=True)
+        new_path.parent.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-b", "kaneo/task", str(old_path)],
+                       check=True, capture_output=True)
+        self.spec.update(cwd=str(old_path), worktree_mode="branch")
+        self.contract = execution_contract.freeze_spec(self.spec, requirements_sha256="a" * 64)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "move", str(old_path), str(new_path)],
+                       check=True, capture_output=True)
+        old_path.parent.rmdir()
+        old_root.rmdir()
+        old_root.symlink_to(new_root, target_is_directory=True)
+        return old_root, new_root
+
+    def test_moved_branch_alias_preserves_frozen_spec_and_job_for_observation(self):
+        self.migrated_branch()
+        job = self.job()
+        before = copy.deepcopy((self.spec, job))
+        self.assertNotEqual(str(Path(self.spec["cwd"]).resolve()), self.contract["workspace"])
+        self.assertEqual(execution_contract.validate_spec(self.spec, job=job), self.contract)
+        self.assertEqual((self.spec, job), before)
+        # Observing the old terminal result does not authorize a native restart
+        # under the changed canonical path.
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(self.spec, job=job, starting=True)
+
+    def test_moved_alias_rejects_other_task_branch_and_other_repository(self):
+        old_root, _ = self.migrated_branch()
+        wrong_root = self.root / "other-task"
+        wrong_path = wrong_root / self.spec["task_id"] / "branch"
+        wrong_path.parent.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-b", "kaneo/other", str(wrong_path)],
+                       check=True, capture_output=True)
+        old_root.unlink()
+        old_root.symlink_to(wrong_root, target_is_directory=True)
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(self.spec, job=self.job())
+
+        foreign_root = self.root / "other-repository"
+        foreign_path = foreign_root / self.spec["task_id"] / "branch"
+        foreign_path.parent.mkdir(parents=True)
+        subprocess.run(["git", "clone", str(self.repo), str(foreign_path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(foreign_path), "checkout", "-b", "kaneo/task"],
+                       check=True, capture_output=True)
+        old_root.unlink()
+        old_root.symlink_to(foreign_root, target_is_directory=True)
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(self.spec, job=self.job())
+
+    def test_moved_alias_rejects_missing_target_changed_cwd_and_damaged_contract(self):
+        old_root, _ = self.migrated_branch()
+        changed = copy.deepcopy(self.spec)
+        changed["cwd"] = str(self.repo)
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(changed, job=self.job())
+        damaged = self.job()
+        damaged["stage_contract"]["contract_sha256"] = "f" * 64
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(self.spec, job=damaged)
+        old_root.unlink()
+        old_root.symlink_to(self.root / "missing", target_is_directory=True)
+        with self.assertRaises(util.KanpilotError):
+            execution_contract.validate_spec(self.spec, job=self.job())
+
     def test_legacy_absence_is_distinct_from_missing_required_contract(self):
         legacy = {key: value for key, value in self.spec.items()
                   if key not in ("stage_contract", "stage_contract_required")}

@@ -466,6 +466,7 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 | `restore-task` | `{task_id, resume_auto?: bool=false}` | save_state→`active`、清 `saved_at`；`auto_advance_paused = resume_auto ? 0 : 1`；本地重算计划/来源哈希并尝试远端 `get-task` 观察（远端不可达→warning 不阻断）；按核验后状态重新归列；event `task_restored` |
 
 - **禁用条件**（`conflict` + 中文原因，UI 展示）：`task.status ∈ {planning, dispatching, prepared, submitting, running, in_review}`（正在规划/派发/执行/评审）、存在**未解除失联**请求（`claimed` 且租约过期）、`send_state='unknown'`（发送不明），或存在 `claimed` 请求（已被执行端领取）。其余状态（含 `needs_user` 其他阻塞、`needs_plan`、`ready`、`done`）允许移出。核心统一在任务摘要输出 `move_out_eligibility: {allowed, reason}`。
+- **已结束评审的整理例外（KP-UI08）**：`in_review` 但最新正式 Review pass 精确绑定当前执行、计划、报告路径/哈希、提交及修复轮，登记的 Review 请求已成功结束，执行轮次 `finished`，且当前 PR 已合并并无当前修复时，可归档/移入回收站。等待回答、失联、发送不明及 claimed 仍禁止。关联发布批次须已弃用，或为有核心 accepted 回执及 publication_proof 的 published；未发送、未知、读取受阻等未结清批次先处理原批次。当前独立补验证未核证通过时仍禁止。资格只读且命令在写事务中重新核对；回收不等于标记完成，不补造发布证明，也不触发新构建。
 - **排队取消与领取竞争**：取消在单个 `BEGIN IMMEDIATE` 事务内对该任务 `status='queued'` 的请求执行 `cancelled`；事务内复核状态，若已被 `claimed`（执行端已领取）→ 中止并返回 `conflict`（原因：任务已被执行端领取，暂不能移出看板），不取消、不改保存状态。
 - **保存状态冲突核验**：`archive-task` 与 `trash-task` 支持可选 `expected_save_state`；已处于目标状态按幂等成功处理；若当前保存状态与 `expected_save_state` 不符（且不是目标状态）则返回 `conflict`。
 - **幂等**：对已处于目标 save_state 的任务返回 `{"ok": true, "deduplicated": true}`，不重复写事件。
@@ -1878,6 +1879,7 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 - plan：分流前核对完整输入 manifest，真实槽位准备后、发送前冻结实际工作树及配置；Plus、Codex、Claude 共用严格结果格式。恢复核对父轮契约、实际槽位及配置；已完成新记录缺包不能补造成功。
 - execution：新 spec/job 绑定计划、需求、源码起点、配置、指令/实际正文及完整 prompt 摘要、修复来源与原文验收命令。开始前复核，核证时再次核对真实 dispatch request。执行端运行验证；Pilot 核对报告及当前源码，既有 live/shadow/手动入口不在本地代跑 verify。
+- 历史 execution 工作目录别名（KP-UI08）：只读核证时，冻结 workspace 与 `spec.cwd` 可在严格解析为同一存在目录、并核实 Git toplevel、所属仓库 common-dir 与 `kaneo/<task_id>` 分支后兼容根目录迁移留下的符号链接。旧 spec/job/合同及指纹不改写，其他冻结字段仍逐项校验。新执行启动继续要求原 canonical workspace 和初始源码指纹一致；不同任务/仓库、缺失目录、损坏合同或 job 不一致均拒绝。
 - review：材料冻结后、发送前建契约，结算及恢复时核对结果、正文、当前源码、请求与租约。信封不绕过既有修复权限或结论规则。
 - delivery：publish/sync 独立建契约，核心按真实远端观察构造信封，runner 核验后才推进。push/创建 PR/评论先记 `runtime_operations`；unknown 跨领取只读对账，明确未写入的拒绝按既有重试策略保留旧回执、登记新尝试。写入成功后的读取失败仍不能作为未写入证明。
 

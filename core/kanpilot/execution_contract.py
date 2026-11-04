@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from . import git_delivery, stage_contract, util
+from . import constants, git_delivery, stage_contract, util
 
 
 def _inputs(spec, initial_source_sha256, requirements_sha256):
@@ -48,6 +48,25 @@ def freeze_spec(spec, *, requirements_sha256):
     return contract
 
 
+def _workspace(spec, contract, *, starting):
+    workspace = str(Path(spec["cwd"]).resolve())
+    if workspace == contract["workspace"] or starting or spec.get("worktree_mode") != "branch":
+        return workspace
+    # A managed root may have moved while its old path remains as an alias.
+    # Preserve the frozen bytes, and accept that alias only for observing the
+    # original task's registered branch worktree, never for a new native start.
+    try:
+        if Path(contract["workspace"]).resolve(strict=True) != Path(spec["cwd"]).resolve(strict=True):
+            return workspace
+        git_delivery.verify_branch_worktree({
+            "repository": spec["repository"], "worktree_path": spec["cwd"],
+            "branch": constants.DELIVERY_BRANCH_PREFIX + spec["task_id"],
+        }, require_clean=False, expected_head=None)
+    except (OSError, RuntimeError, git_delivery.GitDeliveryError):
+        return workspace
+    return contract["workspace"]
+
+
 def validate_spec(spec, *, job=None, starting=False):
     """Legacy absence is explicit; a present or required contract cannot vanish."""
     present = "stage_contract" in spec
@@ -63,7 +82,7 @@ def validate_spec(spec, *, job=None, starting=False):
     stage_contract.validate_contract(contract, expected={
         "stage": "execution", "task_id": spec["task_id"],
         "request_id": spec["request_id"], "run_id": spec["run_id"],
-        "harness_id": spec["backend"], "workspace": str(Path(spec["cwd"]).resolve()),
+        "harness_id": spec["backend"], "workspace": _workspace(spec, contract, starting=starting),
         "inputs": _inputs(spec, inputs.get("initial_source_sha256"),
                           inputs.get("requirements_sha256")),
         "config": spec["config"],

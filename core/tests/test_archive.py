@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from copy import deepcopy
 from datetime import timedelta
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import util  # noqa: E402
+from kanpilot import core, db, derive, release_delivery, release_verification, util  # noqa: E402
 
 PROJECT_ID = "fixture-project-feedback"
 
@@ -133,6 +134,132 @@ class TestArchivePreconditions(ArchiveCase):
             self.assertEqual(
                 self.save_state(task_id)["save_state"], "archived", task_id
             )
+
+
+class TestCompletedReviewRemoval(ArchiveCase):
+    def setUp(self):
+        super().setUp()
+        self.task_id = self.add_task("taskarc-completed-review")
+        self.conn = db.connect(self.db_path)
+        self.addCleanup(self.conn.close)
+        self.now = util.now_dt()
+        self.now_iso = util.to_iso(self.now)
+        with db.write_txn(self.conn):
+            db.update_task(self.conn, self.task_id, self.now_iso, status="in_review", stage="review",
+                run_id="execution-finished", plan_sha256="a" * 64, review_key="current-pass",
+                review_report_path="/isolated/review.md", review_report_sha256="b" * 64,
+                sent=1, send_state="sent")
+            request, _ = db.create_request(self.conn, self.now_iso, "review", "completed-review",
+                                           task_id=self.task_id)
+            db.update_request(self.conn, request["request_id"], self.now_iso, status="succeeded",
+                run_id="review-finished", finished_at=self.now_iso, result_json={"outcome": "succeeded"})
+            self.extra = dict(review_conclusion="pass", delivery=dict(mode="pr", branch="kaneo/" + self.task_id,
+                head_sha="c" * 40, pr_number=14, pr_state="MERGED", merged_at=self.now_iso,
+                worktree_path="/isolated/branch", commits=[dict(execution_run_id="execution-finished", sha="c" * 40)]),
+                review_history=[dict(conclusion="pass", execution_run_id="execution-finished",
+                    plan_sha256="a" * 64, review_key="current-pass", report_path="/isolated/review.md",
+                    report_sha256="b" * 64, head_sha="c" * 40, fix_round=0)],
+                registered_review_identity=dict(request_id=request["request_id"], run_id="review-finished",
+                    execution_run_id="execution-finished", plan_sha256="a" * 64, report_sha256="b" * 64))
+            self.set_extra(self.extra)
+            self.conn.execute("INSERT INTO execution_rounds(task_id,run_id,run_status,worktree_path,created_at,updated_at) "
+                "VALUES (?,?,'finished',?,?,?)", (self.task_id, "execution-finished", "/isolated/branch", self.now_iso, self.now_iso))
+
+    def set_extra(self, extra):
+        db.update_task(self.conn, self.task_id, self.now_iso, extra_json=util.jdump(extra))
+
+    def eligibility(self):
+        return derive.move_out_eligibility(self.conn, db.require_task(self.conn, self.task_id), self.now)
+
+    def receipt(self, scope, operation, tool, value, status="accepted"):
+        self.conn.execute("DELETE FROM runtime_operations WHERE scope_id=? AND operation_id=?", (scope, operation))
+        db.insert_runtime_operation(self.conn, scope, operation, "core", tool, "d" * 64,
+                                    status, self.now_iso)
+        db.update_runtime_operation(self.conn, scope, operation, self.now_iso, result_json=util.jdump(value))
+
+    def test_finished_merged_review_can_be_archived_restored_and_trashed(self):
+        self.assertEqual(self.eligibility(), dict(allowed=True, reason=None))
+        self.assertTrue(self.task(self.task_id)["move_out_eligibility"]["allowed"])
+        for command, state in (("archive-task", "archived"), ("trash-task", "trashed")):
+            result = self.call(command, dict(task_id=self.task_id, expected_save_state="active"))
+            self.assertEqual(result["task"]["save_state"], state)
+            self.assertEqual(result["task"]["status"], "in_review")
+            self.assertEqual(db.task_extra(db.require_task(self.conn, self.task_id)), self.extra)
+            if state == "archived":
+                self.call("restore-task", dict(task_id=self.task_id))
+
+    def test_stale_review_identity_or_unmerged_pr_remains_blocked(self):
+        for field in ("execution_run_id", "plan_sha256", "review_key", "report_path", "report_sha256", "head_sha", "fix_round"):
+            with self.subTest(field=field):
+                extra = deepcopy(self.extra)
+                extra["review_history"][-1][field] = "stale"
+                self.set_extra(extra)
+                self.assertFalse(self.eligibility()["allowed"])
+        for change in (dict(pr_state="OPEN"), dict(merged_at=None), dict(head_sha="e" * 40)):
+            with self.subTest(change=change):
+                extra = deepcopy(self.extra); extra["delivery"].update(change)
+                self.set_extra(extra)
+                self.assertFalse(self.eligibility()["allowed"])
+        self.set_extra(self.extra)
+        self.conn.execute("UPDATE execution_rounds SET run_status='running' WHERE task_id=?", (self.task_id,))
+        self.assertFalse(self.eligibility()["allowed"])
+
+    def test_new_review_does_not_reuse_old_pass(self):
+        db.create_request(self.conn, self.now_iso, "review", "new-review", task_id=self.task_id)
+        self.assertFalse(self.eligibility()["allowed"])
+        self.assertEqual(self.call_err("trash-task", dict(task_id=self.task_id)).code, "conflict")
+
+    def test_claim_and_lost_protection_survive_finished_review(self):
+        self.assertTrue(self.eligibility()["allowed"])
+        request_id = self.insert_claimed_request(self.task_id, kind="delivery")
+        self.assertIn("领取", self.eligibility()["reason"])
+        self.assertEqual(self.call_err("trash-task", dict(task_id=self.task_id)).code, "conflict")
+        db.update_request(self.conn, request_id, self.now_iso, lease_expires_at=util.to_iso(self.now - timedelta(seconds=60)))
+        self.assertIn("失联", self.eligibility()["reason"])
+
+    def test_send_unknown_protection_survives_finished_review(self):
+        db.update_task(self.conn, self.task_id, self.now_iso, send_state="unknown")
+        self.assertIn("发送结果不明", self.eligibility()["reason"])
+
+    def test_queued_delivery_is_cancelled_and_tick_does_not_recreate_it(self):
+        request, _ = db.create_request(self.conn, self.now_iso, "delivery", "queued-delivery", task_id=self.task_id)
+        result = self.call("trash-task", dict(task_id=self.task_id))
+        self.assertIn(request["request_id"], result["cancelled_requests"])
+        self.call("tick")
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                          (self.task_id,)).fetchone())
+
+    def test_uncleared_batch_blocks_even_without_reference_or_after_read_failure(self):
+        scope = release_delivery._scope(PROJECT_ID)
+        for state in ("dispatching", "queued", "building", "publishing", "unknown", "blocked", "failed"):
+            with self.subTest(state=state):
+                batch = dict(batch_id="batch", state=state, members=[dict(task_id=self.task_id)])
+                self.receipt(scope, "batch:batch", release_delivery.BATCH_TOOL, batch)
+                self.assertIn("发布批次", self.eligibility()["reason"])
+                self.assertEqual(self.call_err("trash-task", dict(task_id=self.task_id)).code, "conflict")
+        batch.update(state="published", publication_proof={"release_id": 14})
+        self.receipt(scope, "batch:batch", release_delivery.BATCH_TOOL, batch)
+        self.assertTrue(self.eligibility()["allowed"])
+        self.receipt(scope, "dispatch:batch", release_delivery.DISPATCH_TOOL, {}, status="unknown")
+        self.assertFalse(self.eligibility()["allowed"])
+        batch["abandoned"] = True
+        self.receipt(scope, "batch:batch", release_delivery.BATCH_TOOL, batch)
+        self.assertTrue(self.eligibility()["allowed"])
+
+    def test_unfinished_supplemental_verification_remains_blocked(self):
+        extra = deepcopy(self.extra)
+        extra["release_verification_ref"] = dict(verification_id="verify", context_sha256="f" * 64)
+        self.set_extra(extra)
+        scope = release_verification._scope(self.task_id)
+        value = dict(verification_id="verify", context=dict(context_sha256="f" * 64, identity=dict(task_id=self.task_id)))
+        for state in ("planning", "running", "unknown", "blocked", "failed"):
+            with self.subTest(state=state):
+                value["state"] = state
+                self.receipt(scope, "verification:verify", release_verification.TOOL, value)
+                self.assertIn("补验证", self.eligibility()["reason"])
+        value["state"] = "verified"
+        self.receipt(scope, "verification:verify", release_verification.TOOL, value)
+        self.assertTrue(self.eligibility()["allowed"])
 
 
 class TestArchiveTrashRestore(ArchiveCase):
