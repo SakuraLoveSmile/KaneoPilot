@@ -79,7 +79,7 @@ class TestProjectMappings(KanpilotTestCase):
         item = next(p for p in restored["items"] if p["project_id"] == pid)
         self.assertEqual(item["project_name"], "Feedback Restored")
         self.assertEqual(item["repository"], effective["repository"])
-        self.assertEqual(item["engine_mode"], "shadow")
+        self.assertEqual(item["engine_mode"], "live")
 
     def test_unmapping_and_local_reload_do_not_restore_deleted_projects(self):
         deleted = PROJECTS["Feedback"]
@@ -187,11 +187,11 @@ class TestProjectMappings(KanpilotTestCase):
         conn.close()
         self.assertEqual(self.current_mappings()["items"], [])
 
-    def test_hidden_project_keeps_monitor_mode_and_live_verification_gate(self):
+    def test_hidden_project_normalizes_live_and_keeps_verification_gate(self):
         pid = PROJECTS["Feedback"]
         self.fake.projects = []
         self.current_mappings(refresh_remote=True)
-        for mode in ("shadow", "live"):
+        for mode in ("legacy", "shadow", "live"):
             conn = self._open_db()
             saved = db.get_setting(conn, "project_mappings")
             saved["items"][pid]["engine_mode"] = mode
@@ -200,8 +200,12 @@ class TestProjectMappings(KanpilotTestCase):
             conn.close()
             self.assertEqual(self.current_mappings()["items"], [])
             item = next(p for p in self.call("get-project-mappings")["items"] if p["project_id"] == pid)
-            self.assertEqual(item["effective_engine_mode"], mode)
-            self.assertEqual(auto_monitor._engine_mode(SimpleNamespace(call=self.call), {"project_id": pid}), mode)
+            self.assertEqual(item["engine_mode"], "live")
+            self.assertEqual(item["effective_engine_mode"], "live")
+            self.assertEqual(auto_monitor._engine_mode(SimpleNamespace(call=self.call), {"project_id": pid}), "live")
+            conn = self._open_db()
+            self.assertEqual(db.get_setting(conn, "project_mappings"), saved)
+            conn.close()
 
         calls = []
         def monitor_call(command, payload):

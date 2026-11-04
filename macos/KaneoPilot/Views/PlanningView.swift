@@ -79,7 +79,16 @@ struct PlanningView: View {
                 Task { await fetchTodos(auto: true) }
             }
             .frame(minWidth: 600, idealWidth: 760, minHeight: 480, idealHeight: 560)
+            .frame(width: minimumMappingSheetPreview ? 600 : nil,
+                   height: minimumMappingSheetPreview ? 480 : nil)
         }
+    }
+
+    // 云端独立预览用真实配置视图核验最小尺寸；正常 App 不覆盖 sheet 布局。
+    private var minimumMappingSheetPreview: Bool {
+        Bundle.main.bundleIdentifier == "local.kaneopilot.software-update-check"
+            && ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"] != nil
+            && ProcessInfo.processInfo.environment["KANPILOT_MAPPING_SHEET_SIZE"] == "600x480"
     }
 
     // MARK: §5.24.3 本批次运行端与方式
