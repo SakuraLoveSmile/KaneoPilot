@@ -1,6 +1,6 @@
 # KP-R02 发布配置 AI 辅助填写
 
-- 状态：实现中（云端检查已通过，最后原生复测受 Mac 锁屏阻挡）。目标：用户在项目「构建发布配置」中调用 AI，根据仓库资料查看工作流、运行分支、初始版本、安装包及 job 建议，再采纳至未保存草稿。
+- 状态：待体验（云端检查及隔离原生复测完成；未调用真实模型）。目标：用户在项目「构建发布配置」中调用 AI，根据仓库资料查看工作流、运行分支、初始版本、安装包及 job 建议，再采纳至未保存草稿。
 - 基线：`origin/main` / `845f9aa`；分支 `feat/20261104-kp-r02-release-config-assist`；工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-feat-kp-r02-release-config-assist`；拟合入 `main`。主工作区的 AGENTS.md 和 KP-B01 计划原有改动保留。
 - 当前授权实现及隔离验证；用户于 2026-11-04 明确同意提交、推送本功能、运行普通云端预览构建并用产物进行隔离界面验证。不包含真实模型调用、合并、正式安装或发布。二维码改动属于独立 KP-M02 分支，不混入本次提交。本次用户给出的规则要求 Swift/Android 编译只在云端；不沿用基线 AGENTS.md 的本地编译例外。
 
@@ -38,5 +38,7 @@
 - 当前云端证据：`91d2973efa2f122f1c1194703b15cd28e6b76fca`，Packages [41703762957 / #101](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41703762957) 成功，15 个必需 job 全部通过（10 个 Python 分片、Android、2 组桌面夹具、macOS 打包、identity）；可选全文探针及 publish 按预览条件跳过，未降低门禁。原始 job 结论及 19 项 artifact 元数据保存于 `build/kp-r02-native-preview-101/actions-run.json`、`actions-artifacts.json`。
 - 当前产物：artifact `macos-update-ui-101` / `13263608087`，云端 ZIP 的 SHA-256 为 `b9936d2332d8d4f6ee5a4593112df9fab76a4fbb65ac9e550aab55448e40c7ef`、大小 31,378,044 字节；已对照元数据核对源码 SHA 和构建号，并通过本地只读 `codesign --verify --deep --strict` 与 arm64 架构核验。未在本地编译、签名或修改 App 包。
 - 原生复测阻塞：新产物已用独立 FakeCore、数据、凭据空夹具与偏好目录启动（`build/kp-r02-native-preview-101/`，PID 7916；启动前需重新核对 PID 归属），但 CUA 返回「The Mac is locked and automatic unlock could not unlock it」。已请用户手动解锁；未绕过锁屏。新 App 尚未完成最后的切项目/完整采纳保存复测，900×600 尚未检查，不能沿用 #100 的界面证据覆盖该修正。
-- 下一步：用户解锁后，通过新产物绝对路径绑定 CUA，复测切项目清空确认、迟到结果不显示、完整采纳保存及 900×600 换行/滚动/按钮可达；适用检查完成才改为待体验。继续使用现有 `launch-preview.py` 及全部隔离环境，不运行会编译的 preview 脚本，不重复请求已经批准的提交、推送和普通预览授权。真实 Codex 服务未验证，也未获准调用；未合并、正式安装或发布，已安装 App 尚未包含本次功能。
+- 2026-11-04 恢复复测：Mac 已解锁，按 #101 App 的完整绝对路径绑定 CUA，并核对预览进程归属，未操作正式 App 或 KP-UI06 预览。1180×760 深色通过完整确认→分析→依据→采纳→原发布确认→保存回读；FakeCore 日志证实采纳前未发生设置写入，确认保存后仅调用一次 `set-project-automation`。延迟 8 秒分析期间切到 Library，旧确认立即清空，迟到结果未进入 Library，Music 草稿仍保留。截图与 AX 记录在同一 `build/kp-r02-native-preview-101/`。
+- 最小窗口：900×600 浅色通过费用确认、建议区滚动及采用/取消按钮可达，已保存 `900-light-confirmation.png`、`900-light-suggestions-actions.png`；采用后手动改版本为 0.2.0，保存/放弃均可达，放弃恢复 0.1.0。手动编辑阶段窗口自动增高到 900×720，证据命名为 `900-width-manual-draft.png`，不将其计作精确 900×600 保存栏截图；未为此改变全局窗口行为。
+- 下一步：用户体验与后续集成。真实 Codex 服务未验证，也未获准调用；未合并、正式安装或发布，已安装 App 尚未包含本次功能。继续使用云端产物及全部隔离环境，不运行会编译的 preview 脚本，不重复请求已批准的提交、推送和普通预览授权。
 - 收尾：尚未合入，工作树及两个构建证据目录保留用于最后界面验证和后续集成；合入且适用验证通过后清理本任务工作树，不清理其他任务或已安装 App。
