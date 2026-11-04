@@ -362,6 +362,42 @@ def task_exception(
     }
 
 
+def _completed_pr_review(conn, task) -> bool:
+    """SQL-only proof that in_review now means delivery, not an active review."""
+    from . import core, review_delivery
+    extra, delivery = db.task_extra(task), core.delivery_of(task)
+    history = extra.get("review_history") or []
+    review = history[-1] if history else {}
+    identity = extra.get("registered_review_identity") or {}
+    if (extra.get("review_conclusion") != "pass" or review.get("conclusion") != "pass"
+            or core.review_repair_of(task) or delivery.get("mode") != "pr"
+            or delivery.get("pr_state") != "MERGED" or not delivery.get("merged_at")
+            or not delivery.get("head_sha") or not delivery.get("pr_number")
+            or not all(task[key] for key in ("run_id", "plan_sha256", "review_key",
+                                             "review_report_path", "review_report_sha256"))
+            or any(review.get(key) != task[column] for key, column in (
+                ("execution_run_id", "run_id"), ("plan_sha256", "plan_sha256"),
+                ("review_key", "review_key"), ("report_path", "review_report_path"),
+                ("report_sha256", "review_report_sha256")))
+            or review.get("head_sha") != delivery["head_sha"]
+            or not review_delivery.review_round_matches(task, review)
+            or not identity.get("request_id") or not identity.get("run_id")
+            or any(identity.get(key) != task[column] for key, column in (
+                ("execution_run_id", "run_id"), ("plan_sha256", "plan_sha256"),
+                ("report_sha256", "review_report_sha256")))
+            or not any(commit.get("execution_run_id") == task["run_id"]
+                       and commit.get("sha") == delivery["head_sha"]
+                       for commit in delivery.get("commits") or [])):
+        return False
+    request = review_delivery._review_request(conn, task, identity)
+    if (request is None or request["status"] != "succeeded"
+            or (util.jload(request["result_json"]) or {}).get("outcome") != "succeeded"):
+        return False
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    return bool(row is not None and row["run_status"] == "finished"
+                and row["worktree_path"] == delivery.get("worktree_path"))
+
+
 def archive_blocked_reason(
     conn: sqlite3.Connection, task: sqlite3.Row, now
 ) -> Optional[str]:
@@ -373,7 +409,8 @@ def archive_blocked_reason(
     from .release_verification_questions import open_question
     if open_question(conn, task, now): return "补验证正在等待回答，暂不能移出看板"
     status = task["status"]
-    if status in constants.ARCHIVE_BLOCKED_STATUSES:
+    completed_review = status == "in_review" and _completed_pr_review(conn, task)
+    if status in constants.ARCHIVE_BLOCKED_STATUSES and not completed_review:
         return f"任务正在{_SAVE_STATUS_CN.get(status, status)}中，暂不能移出看板"
     if lost_request_for_task(conn, task["task_id"], now) is not None:
         return "存在未解除的执行端失联请求，请先处理失联后再移出看板"
@@ -385,6 +422,9 @@ def archive_blocked_reason(
     ).fetchone()
     if claimed is not None:
         return "任务已被执行端领取，暂不能移出看板"
+    if completed_review:
+        from . import release_delivery
+        return release_delivery.move_out_blocked_reason(conn, task)
     return None
 
 

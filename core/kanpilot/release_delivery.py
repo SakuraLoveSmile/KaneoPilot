@@ -309,6 +309,32 @@ def projection(conn,task):
     return value
 
 
+def move_out_blocked_reason(conn,task):
+    """SQL-only removal guard; a blocked observation can hide a live workflow."""
+    from . import release_verification
+    ref=db.task_extra(task).get('release_verification_ref') or {}
+    if ref:
+        verification_id=ref.get('verification_id')
+        row=(db.get_runtime_operation(conn,release_verification._scope(task['task_id']),
+            release_verification._op(verification_id)) if isinstance(verification_id,str) else None)
+        value=util.jload(row['result_json']) if row and row['result_json'] else {}
+        if (row is None or row['tool']!=release_verification.TOOL or row['status']!='accepted'
+                or value.get('state')!='verified' or value.get('verification_id')!=verification_id
+                or (value.get('context') or {}).get('identity',{}).get('task_id')!=task['task_id']
+                or ref.get('context_sha256')!=(value.get('context') or {}).get('context_sha256')):
+            return '当前补验证尚未确认结束，请先核对验证结果后再移出看板'
+    for batch in _batches(conn,task['project_id']):
+        if batch.get('abandoned') or not any(member['task_id']==task['task_id'] for member in batch['members']):
+            continue
+        row=db.get_runtime_operation(conn,_scope(task['project_id']),'batch:'+batch['batch_id'])
+        dispatch=db.get_runtime_operation(conn,_scope(task['project_id']),'dispatch:'+batch['batch_id'])
+        if (batch['state']=='published' and row['status']=='accepted' and batch.get('publication_proof')
+                and (dispatch is None or dispatch['status'] not in ('prepared','unknown'))):
+            continue
+        return ('关联发布批次尚未结清，请先核对发布结果；确定未发送的批次可先弃用，再移出看板')
+    return None
+
+
 def completion_gate(conn,task):
     """No network or files; only a core-accepted same-identity batch opens done."""
     value=projection(conn,task)

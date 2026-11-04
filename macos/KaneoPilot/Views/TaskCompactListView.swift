@@ -500,6 +500,10 @@ private struct TaskCompactRow: View {
             }
             .disabled(model.busy || trashBlockedReason != nil)
             .help(trashBlockedReason ?? "移入本地回收站，不影响 Kaneo，可随时恢复")
+            if let reason = trashBlockedReason {
+                Text(reason)
+                    .disabled(true)
+            }
         }
     }
 
