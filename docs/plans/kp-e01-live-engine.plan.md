@@ -1,6 +1,6 @@
 # KP-E01：所有项目统一使用新引擎
 
-状态：实现中（本地代码与 Python 检查完成，待云端编译和原生核验）。用户于 2026-11-04 确认“全面使用新引擎”。
+状态：待体验（候选 `fb7b81b` 已推送，云端 Packages #105 与两个尺寸的隔离原生界面核验通过；未合入、发布或安装）。用户于 2026-11-04 确认“全面使用新引擎”。
 
 ## 目标与范围
 
@@ -53,7 +53,7 @@
 
 ## 实际验证与下一步
 
-候选实现保存在上述任务分支，基于 `845f9aa`；尚未推送、合并、云端构建或安装。生产配置和正在运行的 App 未改变。T1/T2 已实现，T3 的 Python 隔离回归、完整失败收口与独立审查已完成；Swift 编译、原生界面和运行安装仍未验证，因此状态仍为“实现中”。
+候选实现保存在上述任务分支，基于 `845f9aa`。当前推送、云端与原生结果以 T5 为准；以下保留本地候选阶段绑定代码版本的证据。T1/T2 已实现，T3 的 Python 隔离回归、完整失败收口与独立审查已完成。本任务未操作生产配置或安装中的 App。
 
 实现检查额外修正了两条实际旁路：自动 `enqueue`（包括历史 ready 记录缺少 hold/confirm/hash 的形状）与调度 tick 共用完整授权守卫，事务内复核自动处理、自动确认、冻结 verify、预算和暂停，不能因为归一 live 而解除手动确认；Codex 预检不再误套 Plus 的 `permission_mode=auto` 条件。独立审查已复核自动确认和 pi 启动边界，未发现新的实质问题；审查不能替代执行测试。
 
@@ -83,7 +83,7 @@
 
 最终独立审查覆盖运行实现与上述测试适配，未发现剩余可行动问题。`git diff --check`、76 个变更 Python 文件 AST、相关 shell 语法，以及启动脚本非法旧模式参数在写库前拒绝已通过。主工作区的用户 AGENTS.md 改动和未跟踪 KP-B01 记录保持原状。
 
-剩余：取得推送任务分支的授权后，利用 push 触发的云端 Packages 预览构建检查 Swift/Android 与原生编译夹具，再核验真实设置界面。尚未执行云端编译、原生界面、安装、真实模型/服务验收或生产配置迁移；构建、安装和上线分别记录。合入、正式发布与安装沿后续已有授权执行。任务工作树因候选尚未合入而保留，下一步为该分支的云端检查；不得清理本工作树或其他任务成果。
+本地候选阶段待办的授权推送、云端 Packages 和原生设置界面核验，已在 T5 落实。安装、真实模型/服务验收、生产配置迁移及合入/发布尚未执行，继续沿后续明确授权。任务工作树因候选尚未合入而保留，不清理本工作树或其他任务成果。
 
 ## T4：自动接收记录的名称与说明（2026-11-04）
 
@@ -92,3 +92,28 @@
 界面已改名并补一句用途说明；项目名称优先取已保存映射，未有任务也可显示。旧响应仍兼容，未知名称明确提示，项目 ID 在展开后可复制。新增隔离场景核验无任务、无远端读取时的名称、历史名称兼容和读取不改库。
 
 本次在同一临时 Python 3.13.15 / 真实 pytest 8.4.2 下执行 `cd core && <临时解释器> -I -m pytest tests/test_auto_intake.py tests/test_process_owner.py -q`：**78 passed**（82.33 秒），日志/JUnit 为上述证据目录中的 `intake-record-v1.log` / `intake-record-v1.xml`；FakeCore 状态调用、变更 Python AST 与 `git diff --check` 通过。Swift 新旧字段解码断言已更新，未编译。上节 4265/402 项证据对应 `d6fedc7` 引擎候选，不作为本次新增源码的完整重跑声明。本次仍未做本地编译、原生界面、云端构建或安装，当前 App 不会立即显示此次修改。任务分支与工作树继续保留，等待同一候选的云端检查。
+
+## T5：授权推送与云端核验（2026-11-04）
+
+用户明确回复“ok 允许”，授权推送新引擎与 T4 界面改动并触发云端构建。已推送 `d6fedc7` 与 `fb7b81b64ee0e76ee5d5940e7fb839aee25cc776` 到任务分支；push 自动启动 [Packages #105](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41780402684)，run ID `41780402684`，源码锁定后者。此次为分支预览，不包含合入、正式或测试版发布、安装与生产数据操作。
+
+云端结论为 **success**：15 个必需 job 成功；`macos-session-fulltext-probe` 为未请求的可选探针，`publish` 因分支预览均按工作流跳过。所有结果绑定同一源码 `fb7b81b64ee0e76ee5d5940e7fb839aee25cc776`。
+
+| 检查 | 本次实际结果 |
+| --- | --- |
+| Python 3.11，5 分片 | core：4264 passed、2 skipped；integration：402 passed、6 skipped |
+| Python 3.13，5 分片 | core：4264 passed、2 skipped；integration：402 passed、6 skipped |
+| macOS | 两组共 26 个桌面编译/执行夹具、arm64 DMG 编译打包、签名核验、内置 Python 冒烟均通过 |
+| Android | 88 项单测、lint、Debug APK 与隔离 instrumentation APK 构建通过；未运行设备 instrumentation |
+
+每个 Python 版本的 core 两个 skip 分别因 runner 无本机 `~/.codex/models.json`、Linux 不运行 macOS `/var` 别名夹具；对应测试文件相对基线未修改。集成六项仍是既有重复继承演练，不新增 skip、不降低门禁。与本地 macOS 的收集/通过数分别记录，不将不同环境结果混算。
+
+已下载 macOS DMG、独立 UI zip、Android Debug APK，以及 Python JUnit、26 份桌面夹具日志、Android 测试和 lint 报告。三份包的来源 SHA、build 105、字节数和 SHA-256 与云端元数据相符；本地只做下载包核验，未编译或重新签名。DMG 与解包的独立 App 签名核验通过；独立 App 内 20 个变更核心 Python 文件逐一与该 Git 提交内容核对一致。
+
+原生界面使用云端已签名的 `KaneoPilot Update Check.app`（独立 bundle ID `local.kaneopilot.software-update-check`），确认另一任务释放该预览标识后才启动。使用本工作树 FakeCore、每次独立 HOME/数据根和空凭据；启动器为 `build/kp-e01-cloud-105/launch.py`，不调用编译器、不安装、不运行真实模型或服务。通过本会话 CUA 的 AX 与原生截图，实际核对 **1180×760 深色**（截图 2360×1520）与 **900×600 浅色**（1800×1200）：
+
+- 项目设置中没有引擎模式选择，保留自动处理、自动确认、预算和备用模型；小窗口可滚动到引擎区块。
+- 高级页为「自动接收记录」，项目标题为 Music；说明完整显示，项目 ID 仅在项目展开后出现，编号文字可选中；折叠与滚动正常。
+- 两次 FakeCore 启动日志均为 `engine-run {mode:live,intake:true,spawn:true}`；界面走查没有发送项目模式写入、派发或任务推进命令。两次预览均正常退出，退出后核对进程已结束。未做剪贴板内容回读，不能把选中文字当成已核验剪贴板写入。
+
+全部构建与下载证据保存在本工作树 `build/kp-e01-cloud-105/`，包含 `run-status.json`、`cloud-test-summary.json`、`artifact-verification.json`、`bundled-source-verification.json`、`native-ui-evidence.json`、`reports/` 和两次隔离夹具目录。属于需保留的验收材料，不作为缓存清理。当前为待体验，未声称真实任务、生产迁移、设备、安装或发布已验收。工作树继续保留候选、包和证据，下一步为用户体验；合入、发布、安装需沿后续明确授权。
