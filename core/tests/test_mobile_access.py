@@ -115,6 +115,37 @@ def test_pairing_is_atomic_single_use_and_only_hashes_are_stored(mobile_env):
     assert accepted[0]["device_token"] not in stored
 
 
+def test_compact_qr_preserves_identity_and_single_use_with_smaller_payload(mobile_env):
+    enable(mobile_env)
+    result = run(mobile_env, "create-mobile-pairing")
+
+    def decode(uri):
+        raw = parse_qs(urlparse(uri).query)["data"][0]
+        return json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+
+    original, compact = decode(result["pairing_uri"]), decode(result["qr_uri"])
+    assert set(compact) == {"v", "s", "e", "f", "t", "x"}
+    assert compact["v"] == 2 and original["api_version"] == 1
+    assert compact["s"] == original["server_id"]
+    assert compact["e"] == original["endpoint"]
+    assert compact["t"] == original["pairing_token"]
+    fingerprint = base64.urlsafe_b64decode(compact["f"] + "=" * (-len(compact["f"]) % 4))
+    assert len(fingerprint) == 32 and fingerprint.hex() == original["certificate_sha256"]
+    assert hashlib.sha256(base64.b64decode(original["certificate_der"])).digest() == fingerprint
+    assert compact["x"] == int(util.parse_ts(original["expires_at"]).timestamp())
+    assert len(result["qr_uri"].encode("utf-8")) <= 360
+    assert len(result["qr_uri"]) < len(result["pairing_uri"]) / 3
+    phone = request(mobile_env, "pair", {"pairing_token": compact["t"], "device_name": "短码手机"})
+    assert phone["server_id"] == compact["s"]
+    with pytest.raises(util.KanpilotError) as error:
+        request(mobile_env, "pair", {"pairing_token": original["pairing_token"], "device_name": "旧码重放"})
+    assert error.value.code == "unauthorized"
+    conn = db.connect(mobile_env)
+    stored = json.dumps([dict(row) for row in conn.execute("SELECT * FROM settings WHERE key LIKE 'mobile.%'")])
+    conn.close()
+    assert compact["t"] not in stored and phone["device_token"] not in stored
+
+
 def test_expired_pairing_and_replaced_qr_cannot_pair(mobile_env):
     enable(mobile_env)
     old = pairing(mobile_env)

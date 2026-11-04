@@ -196,7 +196,15 @@ def cmd_create_mobile_pairing(ctx, payload):
     value = {key: config[key] for key in ("server_id", "endpoint", "certificate_der", "certificate_sha256")}
     value.update(api_version=API_VERSION, pairing_token=token, expires_at=expires)
     encoded = base64.urlsafe_b64encode(util.jdump(value).encode("utf-8")).decode("ascii").rstrip("=")
-    return {"pairing_uri": "kaneopilot://pair?data=" + quote(encoded, safe=""), "expires_at": expires}
+    # Keep the full certificate in the clipboard format for older Android
+    # clients. The QR only needs its fingerprint: new clients fetch the leaf
+    # through a pinned TLS handshake before sending any pairing credential.
+    compact = {"v": 2, "s": config["server_id"], "e": config["endpoint"],
+               "f": base64.urlsafe_b64encode(bytes.fromhex(config["certificate_sha256"])).decode("ascii").rstrip("="),
+               "t": token, "x": int(util.parse_ts(expires).timestamp())}
+    qr = base64.urlsafe_b64encode(util.jdump(compact).encode("utf-8")).decode("ascii").rstrip("=")
+    return {"pairing_uri": "kaneopilot://pair?data=" + quote(encoded, safe=""),
+            "qr_uri": "kaneopilot://pair?data=" + qr, "expires_at": expires}
 
 
 def cmd_revoke_mobile_device(ctx, payload):

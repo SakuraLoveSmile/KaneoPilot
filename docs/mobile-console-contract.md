@@ -8,7 +8,9 @@
 - 手机服务默认关闭，绑定用户选择的本机 IPv4（含 VPN），默认端口 47831。设置端可修改端口；占用明确报错，不静默换端口。
 - Python 标准库 HTTPS 服务，使用 `/usr/bin/openssl` 生成私钥/自签证书，SAN 含所选 IP。私钥位于 app support 的 mobile/ 内，目录 0700、文件 0600；凭据与状态通过核心管理。绑定地址变化须重新生成身份材料、使旧设备失效并提示重新配对。
 - 设备、配置和配对摘要保存到 SQLite settings（mobile.*），操作回执复用 runtime_operations，scope 为 mobile:<device_id>；无 schema 升级。设备令牌和一次性配对令牌均至少 256 位随机，只存 SHA256，恒时比较；配对有效期 300 秒且单次原子消费。
-- 二维码和复制文本均为 `kaneopilot://pair?data=<base64url(UTF8 JSON)>`，JSON 为 `{api_version:1,server_id,endpoint,certificate_der,certificate_sha256,pairing_token,expires_at}`。certificate_der 是标准 Base64 的 DER；certificate_sha256 是 DER 的小写十六进制 SHA256；endpoint 为 `https://<所选IP>:<port>`（不含路径）。
+- 配对 URI 均为 `kaneopilot://pair?data=<base64url(UTF8 JSON)>`。复制文本保留 v1 完整 JSON：`{api_version:1,server_id,endpoint,certificate_der,certificate_sha256,pairing_token,expires_at}`，旧版 Android 仍可粘贴。certificate_der 是标准 Base64 的 DER；certificate_sha256 是 DER 的小写十六进制 SHA256；endpoint 为 `https://<所选IP>:<port>`（不含路径）。
+- **紧凑二维码（KP-M02）**：新增响应 `qr_uri`，承载 `{v:2,s:server_id,e:endpoint,f:base64url(SHA256 DER原始32字节),t:pairing_token,x:到期UTC整秒}`（Base64url 均不带 padding）。不嵌入整张证书；与同次 v1 使用同一服务器、地址、证书指纹、令牌和有效期，不另发令牌或改变原子消费。`v=2` 只表示配对编码版本，HTTP API 仍为 1。Android 同时解析 v1/v2，拒绝不支持的版本、非法指纹/地址/令牌及到期内容。桌面优先显示 qr_uri，缺省兼容旧 pairing_uri；复制始终使用 v1。界面告知旧版安卓可粘贴配对内容或更新后扫码。
+- Android 读取 v2 后，先对固定 endpoint 做一次**仅 TLS 握手**的有界证书读取，不发送 HTTP、配对令牌或设备令牌，不跟随重定向；握手 leaf 的完整 DER SHA256 必须与二维码一致，并核验证书有效期。不匹配即拒绝，不允许 trust-all。得到 DER 后复用原 MobileApi 的专用 TrustStore、精确证书检查、SPKI pin 及默认主机名验证，成功完成 TLS 后才发送 pair。配对成功仍保存原 Connection 的完整 DER/指纹格式，旧连接无需重配。页面切换不得丢失已消费的一次配对响应，失败不自动重发 pair。
 - Android 从可信配对内容建立专用证书信任锚并校验证书摘要，保留 TLS 主机名验证；不允许明文或 trust-all。令牌用 Keystore AES-GCM 加密后持久保存，应用禁止备份连接凭据。扫描只在用户点击时申请相机权限，允许粘贴 URI。
 - 设备撤销后每次查询和每次核心写事务检查授权。手机不能取得 Kaneo、Plus 或本机 MCP 凭据。
 - AppRuntime 拥有独立 MobileServiceManager；关窗服务继续，退出只停止本实例拥有的服务。FakeCore 不启动真实服务。服务启动及每次 worker 请求先检查固定宿主 DB 已存在且 schema 当前，不创建空库或代跑 migrate。
@@ -27,7 +29,7 @@ KP-U02：同一「软件更新」卡片内增加「接收测试版」开关（�
 |---|---|---|
 | mobile-status | {} | 下述 status |
 | set-mobile-access | {enabled:bool,bind_host?:str,port?:int} | status |
-| create-mobile-pairing | {} | {pairing_uri,expires_at} |
+| create-mobile-pairing | {} | {pairing_uri,qr_uri,expires_at}；qr_uri 为可选的 v2 紧凑码，pairing_uri 保留 v1 |
 | revoke-mobile-device | {device_id:str} | {ok:true} |
 | mobile-serve | {} | 绑定成功先写一行无凭据 JSON `{ready:true,endpoint}` 到 stdout，然后服务至 SIGTERM |
 | mobile-request | 由 stdin worker 内部调用 | 见 HTTP 契约；不从 HTTP 接受任意核心命令 |

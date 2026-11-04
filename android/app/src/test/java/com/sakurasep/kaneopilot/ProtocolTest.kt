@@ -25,6 +25,37 @@ class ProtocolTest {
         content.put("certificate_sha256", sha256(cert)).put("expires_at", "2020-01-01T00:00:00Z"); rejects { Pairing.parse(uri(), Instant.parse("2026-01-01T00:00:00Z")) }
         content.put("expires_at", "2099-01-01T00:00:00Z").put("api_version", 2); rejects { Pairing.parse(uri()) }
     }
+    @Test fun compactPairingDecodesTheSameIdentityWithoutEmbeddingCertificate() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build().certificate.encoded
+        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { it.toByte() })
+        val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(certificate)
+        val content = json("v" to 2, "s" to "mac-compact", "e" to "https://127.0.0.1:47831",
+            "f" to Base64.getUrlEncoder().withoutPadding().encodeToString(fingerprint), "t" to token,
+            "x" to Instant.parse("2099-01-01T00:00:00Z").epochSecond)
+        val uri = "kaneopilot://pair?data=" + Base64.getUrlEncoder().withoutPadding().encodeToString(content.toString().toByteArray())
+        val pairing = Pairing.parse(uri)
+        assertEquals("mac-compact", pairing.serverId)
+        assertEquals("https://127.0.0.1:47831", pairing.endpoint)
+        assertEquals(sha256(certificate), pairing.certificateSha256)
+        assertEquals(token, pairing.token)
+        assertEquals("2099-01-01T00:00:00Z", pairing.expiresAt)
+        assertEquals("", pairing.certificateDer)
+        rejects { pairing.unpairedConnection() }
+    }
+    @Test fun compactPairingRejectsUnsupportedMalformedAndExpiredValues() {
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32))
+        val original = json("v" to 2, "s" to "mac-compact", "e" to "https://127.0.0.1:47831",
+            "f" to encoded, "t" to encoded, "x" to Instant.parse("2099-01-01T00:00:00Z").epochSecond)
+        fun uri(content: JSONObject) = "kaneopilot://pair?data=" + Base64.getUrlEncoder().withoutPadding().encodeToString(content.toString().toByteArray())
+        listOf("v" to 3, "v" to "2", "s" to " ", "e" to "http://127.0.0.1:47831",
+            "f" to "0".repeat(64), "f" to ("A".repeat(42) + "B"), "t" to "a".repeat(32),
+            "t" to ("A".repeat(42) + "B"), "x" to "4070908800", "x" to 1L,
+            "x" to Long.MAX_VALUE, "unexpected" to true).forEach { (key, value) ->
+            rejects { Pairing.parse(uri(JSONObject(original.toString()).put(key, value))) }
+        }
+        val missing = JSONObject(original.toString()).apply { remove("f") }
+        rejects { Pairing.parse(uri(missing)) }
+    }
     @Test fun latestSuccessfulResponseReplacesContentFingerprintAndKeepsStableOrdering() {
         fun message(id: String, revision: Int, seq: Int) = json("id" to id, "revision" to revision, "seq" to seq)
         val merged = mergeMessages(listOf(message("b", 9, 2)), listOf(message("a", 1, 1), message("b", 3, 2)))

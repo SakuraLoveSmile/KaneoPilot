@@ -114,24 +114,14 @@ struct MobileConnectionView: View {
             if let pairing = manager.pairing, manager.running {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     if pairing.isValid(at: context.date) {
-                        HStack(alignment: .top, spacing: Spacing.l) {
-                            if let image = Self.qrImage(pairing.pairingUri) {
-                                Image(nsImage: image).interpolation(.none).resizable()
-                                    .frame(width: 220, height: 220)
-                                    .padding(Spacing.s).background(.white)
-                                    .accessibilityLabel("手机配对二维码，五分钟内有效")
+                        ViewThatFits(in: .horizontal) {
+                            HStack(alignment: .top, spacing: Spacing.l) {
+                                pairingCode(pairing)
+                                pairingInstructions(pairing, at: context.date)
                             }
-                            VStack(alignment: .leading, spacing: Spacing.s) {
-                                Text("在安卓端扫描，或复制配对内容后粘贴。配对内容包含一次性凭证，请仅交给自己的手机。")
-                                    .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                                Text("剩余 \(max(0, Int(pairing.expiration!.timeIntervalSince(context.date)))) 秒；成功配对后失效")
-                                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                                Button(copied ? "已复制配对内容" : "复制配对内容") {
-                                    guard pairing.isValid() else { return }
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(pairing.pairingUri, forType: .string)
-                                    copied = true
-                                }.accessibilityLabel("复制手机配对内容")
+                            VStack(alignment: .leading, spacing: Spacing.m) {
+                                pairingCode(pairing)
+                                pairingInstructions(pairing, at: context.date)
                             }
                         }
                     } else {
@@ -178,12 +168,61 @@ struct MobileConnectionView: View {
         Task { await manager.configure(enabled: true, host: host, port: value) }
     }
 
+    @ViewBuilder
+    private func pairingCode(_ pairing: MobilePairing) -> some View {
+        if let image = Self.qrImage(pairing.scannableUri) {
+            // qrImage already draws at an integer number of pixels per
+            // module, including a white quiet zone; don't rescale this image.
+            Image(nsImage: image).interpolation(.none)
+                .frame(width: 300, height: 300)
+                .background(.white)
+                .accessibilityLabel("手机配对二维码，五分钟内有效")
+        } else {
+            Text("二维码暂时无法生成，请复制配对内容后在安卓端粘贴。")
+                .font(.kpLabel).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func pairingInstructions(_ pairing: MobilePairing, at date: Date) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("在安卓端扫描，或复制配对内容后粘贴。配对内容包含一次性凭证，请仅交给自己的手机。")
+                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+            Text("旧版安卓无法识别时，可粘贴配对内容，或更新安卓端后扫码。")
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("剩余 \(max(0, Int(pairing.expiration!.timeIntervalSince(date)))) 秒；成功配对后失效")
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            Button(copied ? "已复制配对内容" : "复制配对内容") {
+                guard pairing.isValid() else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pairing.pairingUri, forType: .string)
+                copied = true
+            }.accessibilityLabel("复制手机配对内容")
+        }
+        .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+    }
+
     static func qrImage(_ value: String) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(value.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage,
-              let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
+              let source = CIContext().createCGImage(output, from: output.extent) else { return nil }
+        let side = 300
+        let modules = source.width
+        let scale = side / (modules + 8) // At least four white modules on every side.
+        guard scale > 0 else { return nil }
+        let offset = (side - modules * scale) / 2
+        guard let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side, space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side)))
+        context.interpolationQuality = .none
+        context.setShouldAntialias(false)
+        context.draw(source, in: CGRect(x: CGFloat(offset), y: CGFloat(offset),
+                                       width: CGFloat(modules * scale), height: CGFloat(modules * scale)))
+        guard let image = context.makeImage() else { return nil }
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 }
