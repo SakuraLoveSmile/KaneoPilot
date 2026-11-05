@@ -1915,7 +1915,9 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 核心先登记启动操作回执，复用隔离工作树、计划哈希、`execution_contract`、App worker 归属和请求心跳，再拉起 `codex_worker`。CLI 使用工作树写入沙箱、无交互审批、JSONL 及 JSON Schema；服务商解析沿 `codex_provider`，凭据只在内存/子进程环境传递。首个 session 事件须由真实 `thread.started` 与成功核心心跳共同证明。CLI 未暴露原生 turn ID 时，采用明确标注的适配器单调代次，不冒充原生身份。
 
-KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，将规范化后仍位于该 SDK 下的现存 `bin/cache` 作为 `sandbox_writable_roots` 写入 spec 和阶段契约；启动时重新核对，再用 `--add-dir` 传给 CLI。仅补充工具缓存写入，保持 workspace-write、无交互审批与网络限制，不开放 SDK 源码或用户主目录；符号链接逃逸不授予权限。旧 spec 缺少该字段时不自动补充或改变历史权限。其他工具的环境缺失继续如实失败。Codex 指令仅要求下述最终 JSON，不要求 Plus 的 SubmitGoalReport。已结束的 failed/aborted 观察结果继续核对终态并转 needs_user/execution_failed，保留实际失败原因，不归入 observation_blocked，也不隐式续发模型。
+KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，将规范化后仍位于该 SDK 下的现存 `bin/cache` 作为 `sandbox_writable_roots` 写入 spec 和阶段契约；启动时重新核对。新 Flutter spec 同时冻结 `tool_environment`（`v:1`）：`XDG_CONFIG_HOME`、`TMPDIR` 分别指向工作区 `.pi/kanpilot/codex/<run_id>/config`、`tmp`，`FLUTTER_SUPPRESS_ANALYTICS="true"`。通过每轮独立命名的权限 profile 保持全盘只读、工作区和冻结 SDK 缓存可写，显式保护 `.git`、`.codex`、`.agents`；不开放整个 SDK 或用户主目录。profile 名由新轮次 UUID 与工作区路径的哈希派生，避免复用已有静态 profile 的递归合并规则，resume 使用同名策略。启用受限网络代理，允许本地绑定和回环通信，固定 `mode="limited"`、`allow_upstream_proxy=false`、空 `domains`，限制非回环流量。空表本身不清除已有 profile 的域名规则。底层允许通配 bind，不承诺 `bind(0.0.0.0)` 失败。
+
+`codex_environment` 负责环境冻结、校验和无模型预检。首次模型启动及每次显式 resume 前重新核对 spec/阶段契约、SDK 缓存及环境目录；用不跟随符号链接的目录描述符准备本轮目录，以同一权限运行 `codex sandbox`，确认配置/临时文件可写、IPv4/IPv6 回环收发、公网直连和代理请求均被拒绝。成功回执保存为 `codex-environment-<代次>.json`，失败持久化原因且不启动模型。工具状态位于已有源码快照排除的 `.pi/**`。历史 spec 缺少 `tool_environment` 时沿用原 `workspace-write` / `--add-dir` 与环境，不隐式扩权；其他工具的环境缺失继续如实失败。Codex 指令仅要求下述最终 JSON，不要求 Plus 的 SubmitGoalReport。已结束的 failed/aborted 观察结果继续核对终态并转 needs_user/execution_failed，保留实际失败原因，不归入 observation_blocked，也不隐式续发模型。
 
 最终结构为 `{status:"completed|needs_input|failed",summary,checks:[{command,exit_code}],questions:[{title,options}]}`。模型声明与 CLI 命令事件分别保存；每条冻结 verify 必须在报告中通过，且有原文匹配的 `command_execution` 完成事件、独立整数退出码0和同一最终源码快照。禁止用自然语言、退出0、turn.completed、模型自报或旧代次结果独立推进。日志截断、缺报告、错身份、布尔退出码、重复矛盾记录、验证后源码变化均不放行。Pilot 不运行任务 verify。
 

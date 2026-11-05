@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (cli, codex_execution as adapter, codex_planner, codex_provider, constants,
+from . import (cli, codex_environment, codex_execution as adapter, codex_planner, codex_provider, constants,
                execution_contract, git_delivery, process_owner, repair_prompt,
                runtime_client, runtime_operations, util)
 from .pi_worker import _EventLog
@@ -173,6 +173,12 @@ def run_real(spec):
             while True:
                 owner.check(); stop_requested()
                 index = len(job["turns"]) + 1
+                execution_contract.validate_spec(spec, job=job)
+                child_env = codex_environment.child_env(spec, codex_planner.child_env(provider))
+                preflight = codex_environment.preflight(spec, child_env)
+                if preflight is not None:
+                    adapter.atomic_json(run_dir / ("codex-environment-" + str(index) + ".json"), preflight)
+                owner.check(); stop_requested()
                 turn_id = "codex:" + spec["run_id"] + ":" + str(index)
                 native_path = run_dir / ("codex-turn-" + str(index) + ".jsonl")
                 output_path = run_dir / ("codex-final-" + str(index) + ".json")
@@ -185,7 +191,7 @@ def run_real(spec):
                 stderr_path = run_dir / ("codex-stderr-" + str(index) + ".log")
                 with stderr_path.open("xb") as stderr:
                     proc = subprocess.Popen(adapter.launcher_argv(spec, schema, output_path, provider, job["session_id"]),
-                        cwd=spec["cwd"], env=codex_planner.child_env(provider), stdin=subprocess.PIPE,
+                        cwd=spec["cwd"], env=child_env, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
                     turn.update(pid=proc.pid, birth=process_owner.process_birth(proc.pid))
                     if turn["birth"] is None:

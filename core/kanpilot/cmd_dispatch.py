@@ -529,7 +529,7 @@ def _require_session_naming_capability(conn, config_snapshot) -> None:
 
 def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
     """Start one identity-bound CLI worker; unknown starts are never resent."""
-    from . import codex_execution, execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
+    from . import codex_environment, codex_execution, execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
     conn, now, task_id = ctx.conn, ctx.now_iso, task["task_id"]
     config = dict(round_store.round_view(round_row).get("config") or {})
     available, detail = exec_config.check_available(conn, config_snapshot=config)
@@ -567,6 +567,7 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
                 "completion_policy": "command_verification", "required_verification_commands": parsed["commands"],
                 "timeout_seconds": round_store.round_timeout_seconds(conn), "db_path": str(ctx.db_path)}
         spec["sandbox_writable_roots"] = codex_execution.verification_writable_roots(parsed["commands"], worktree)
+        codex_environment.freeze(spec)
         if core.review_repair_of(task):
             from . import repair_prompt
             spec.update(repair_prompt.freeze(task))

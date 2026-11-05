@@ -106,9 +106,19 @@ def _wait_session(controller, result):
     deadline = min(controller.deadline, controller.clock() + 300)
     while controller.clock() < deadline:
         controller.wait(min(30, deadline - controller.clock()))
-        session = controller.call("get-session", controller.task_identity()).get("session") or {}
+        observed = controller.call("get-session", controller.task_identity())
+        session = observed.get("session") or {}
         if session.get("session_id"):
             return session["session_id"]
+        detail = observed.get("round_detail") or {}
+        if (controller.claim["context"].get("backend") == "codex"
+                and session.get("task_id") == controller.task_identity()["task_id"]
+                and session.get("run_id") == controller.claim["run_id"]
+                and detail.get("observer_alive") is False and detail.get("ended_at")
+                and detail.get("send_state") == "not_sent"
+                and type(detail.get("exit_code")) is int and detail["exit_code"] != 0
+                and (detail.get("terminal") or {}).get("outcome") == "failed"):
+            raise util.KanpilotError("execution_failed", detail.get("detail") or "Codex 启动前环境检查失败")
     raise util.KanpilotError("validation_failed", "worker 会话未建立")
 
 

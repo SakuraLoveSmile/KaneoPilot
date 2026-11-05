@@ -33,6 +33,8 @@ def _inputs(spec, initial_source_sha256, requirements_sha256):
     # Omission preserves historical contracts; new grants are frozen inputs.
     if "sandbox_writable_roots" in spec:
         inputs["sandbox_writable_roots"] = spec["sandbox_writable_roots"]
+    if "tool_environment" in spec:
+        inputs["tool_environment"] = spec["tool_environment"]
     return inputs
 
 

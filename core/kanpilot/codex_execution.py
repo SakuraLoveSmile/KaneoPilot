@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import (codex_planner, codex_provider, constants, db, execution_contract,
+from . import (codex_environment, codex_planner, codex_provider, constants, db, execution_contract,
                git_delivery, planner_config, process_owner, round_store,
                runtime_client, runtime_operations, stage_evidence, util)
 
@@ -119,21 +119,29 @@ def validate_report(report):
 
 def launcher_argv(spec, schema_path, out_path, provider, session_id=None):
     config = spec["config"]
-    argv = [constants.codex_bin(), "exec", "-s", "workspace-write", "-C", spec["cwd"]]
+    environment = codex_environment.validate(spec)
+    argv = [constants.codex_bin(), "exec", "-C", spec["cwd"]]
+    if environment is None:
+        argv += ["-s", "workspace-write"]
     if "sandbox_writable_roots" in spec:
         roots = spec["sandbox_writable_roots"]
         if type(roots) is not list or roots != verification_writable_roots(spec["required_verification_commands"], spec["cwd"]):
             _fail("Codex 工具缓存写入范围已变化", "verification_identity_unconfirmed")
-        for root in roots:
-            argv += ["--add-dir", root]
+        if environment is None:
+            for root in roots:
+                argv += ["--add-dir", root]
     if session_id:
         argv += ["resume"]
     argv += ["--ignore-user-config", "--json", "--skip-git-repo-check", "--output-schema", str(schema_path), "-o", str(out_path)]
     for value in provider.config_args:
         argv += ["-c", value]
-    for key, value in (("model", config["model"]), ("model_reasoning_effort", config["reasoning_effort"]),
-                       ("sandbox_mode", "workspace-write"), ("approval_policy", "never")):
+    settings = [("model", config["model"]), ("model_reasoning_effort", config["reasoning_effort"]),
+                ("approval_policy", "never")]
+    if environment is None:
+        settings.append(("sandbox_mode", "workspace-write"))
+    for key, value in settings:
         argv += ["-c", key + "=" + json.dumps(value)]
+    argv += codex_environment.launcher_config(spec)
     if session_id:
         argv.append(session_id)
     return argv + ["-"]

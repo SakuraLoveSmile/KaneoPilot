@@ -1,8 +1,8 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：待体验（修复已合入 main，正式 v0.4.5 已发布并完成下载包核验；尚未安装、重试原任务或进行真实模型验收）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
+状态：待体验（v0.4.5 已发布；2026-11-06 后续源码修复与适用验证已完成，安装版仍为 0.4.5，待后续新版本交付后体验，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
 
-- 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
+- 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
 - 基线：`main` / `50aa7e26372a65976f434d1873546823bdae91c7`。分支 `fix/20261104-kp-c02-codex-execution`；工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-c02-codex-execution`；集成目标 `main`。修复阶段先完成代码与隔离验证；本次构建使用该任务分支提交，后续构建证据见下节。
 - 生产证据只读：任务 `csim4lhdf81m1k7wib615fdv`，run `872fd957-3f0d-4b31-9ea5-8277d92fef0f`。Flutter 四条命令均因 `engine.stamp.tmp.*` / `engine.realm` 无写权限退出 1；CLI 正常退出 0，最终 JSON 为 failed，worker 退出 3；轮次 failed 而任务总状态仍 running，监控反复 observation_blocked。原任务工作树保留。
@@ -82,3 +82,36 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 既有工作流将签名标签的 PGP armor 带入公开正文；仅删除正文中的这一签名文本并读回核对，保留原版本说明、CI marker 和安装要求，四项资产的 ID、digest、大小保持一致；未移动标签或替换资产。回执为 `release-body-cleanup.json`。
 - 本次修复、合入、云端检查和正式发布均已完成。Android 真机、真实模型执行、安装后的原失败任务恢复仍待体验；只有用户明确确认后才标已验收。现用 App、原业务任务和原成果保留。
 - 资源收尾已完成：7 个非缓存忽略文件已独立归档并再次核对哈希；确认工作树没有活动文件引用、来源提交已在 main、最终记录已完整迁回 main 后，正常移除本任务临时工作树并删除已合并本地分支。远端任务分支及其余 6 个工作树保留，主工作区无关 `.local/` 与缓存清理计划均未暂存。实际清理回执为 `cleanup-receipt.json`，记录迁移补丁与核对为 `closeout-plan.patch`、`record-transfer.json`。
+
+## 2026-11-06 Flutter 验证环境补齐
+
+- 用户明确要求修复会话 `01a1ac35-5a49-79e1-a919-77f3e872aaa9` 暴露的问题。只读证据对应同一业务任务、新 run `3b1f97fc-622b-4cb8-bffb-a392391b7bd4`；安装版确认为 `0.4.5` / `116`，相关核心源码与本仓基线一致。SDK 缓存已在冻结可写范围内；四项 Flutter 验证均因 `~/.config/flutter/tool_state` 不可写退出 1；使用任务临时 XDG 配置后的局部 Flutter 测试又被 server socket 限制阻断，adb 监听同样受限。会话正常报告 failed，任务已进入 needs_user，原改动保留。
+- 本次基线为本地 main `3896b8e07411cf11d7cbfedfecfcfcf3926a0199`。工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261106-fix-kp-c02-flutter-sandbox`，分支 `fix/20261106-kp-c02-flutter-sandbox`，目标本地 main。远端 fetch 当前因 TLS 连接失败受阻，不把本地 origin/main 当成本次远端核验。
+- 保留原业务工作树、冻结计划、历史权限、生产 DB 与已发布 v0.4.5。继续修复不代表安装、续跑付费模型、移动既有标签或发布一个未确认的新版本。KaneoPilot 原生编译仍仅走云端。
+
+T5（主 agent，权限能力由只读 analyst / gpt-6.1-sol high 并行核查）：根据当前 CLI 的实际能力冻结 Flutter 工具环境；配置放入本轮工作区独占目录，SDK 仅缓存可写；允许本机测试所需回环通信并保持公网连接限制，不开放整个用户目录。新环境随 spec 和阶段契约绑定，启动及 resume 重新核对；旧 spec 不自动扩权。先验证配置、监听与外部拒绝，再接入启动链。主 agent 唯一维护业务代码和 docs，analyst 不改文件、不启动模型或沙箱探针。
+
+T6（worker / gpt-6.1-sol high，已完成）：独占新的环境回归测试文件；覆盖任务专属配置、非 Flutter 与历史兼容、权限/环境字段篡改、目录链接逃逸、启动前失败不调用模型及恢复语义。共享接口由主 agent 写在本节，测试与实现并行；不修改已有断言来掩盖不满足的门禁。
+
+T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受管 stub dispatch，再通过不调用模型的真实 Codex sandbox 检查配置写入、IPv4/IPv6 回环通信及外部写入/公网拒绝。使用独立最小 Flutter 夹具核验真实工具启动与测试路径，不在 Pilot 本地代跑原任务 verify、不操作原任务数据、不编译 KaneoPilot Swift/Android。独立 reviewer 复核权限和历史兼容；实测与未验证项分别记录，适用检查完成后再标待体验。
+
+### 本次共享接口与权限决定
+
+- 当前 CLI 0.164.0 的初始真实探针表明：`network.enabled=false` 会拒绝本地监听；单独改 true 会放开公网，不能采用。在未继承域名规则的 profile 下，显式启用 `features.network_proxy=true`、`network.enabled=true`、`mode="limited"`、`allow_local_binding=true` 和空 `domains`，可同时通过回环通信、直接公网 EPERM 和代理请求 403。后续冲突对照发现空表会递归合并，不能清除已有规则，因此最终采用下述每轮独立命名。底层可能允许通配 bind，承诺范围是限制非回环流量，不声称 bind(0.0.0.0) 必定失败。初始三组实测为 `build/kp-c02-environment-evidence/*probe.json`。
+- 新增 `core/kanpilot/codex_environment.py`，主 agent 唯一写入。`freeze(spec)` 仅对冻结命令识别的 Flutter SDK 缓存非空的新执行写入 `tool_environment`；`validate(spec)` 重新推导并核对完整字段；`launcher_config(spec)` 返回命名权限、受限代理和显式 shell 环境配置的 `-c` 参数；`child_env(spec, base_env)` 返回只覆盖冻结工具环境变量的副本；`preflight(spec, env)` 准备本轮私有目录并用 `codex sandbox` 检查配置/临时写入、回环收发和禁外网，失败不得启动模型。
+- `tool_environment` 固定 `v: 1`：`environment` 只含 `XDG_CONFIG_HOME`、`TMPDIR`、`FLUTTER_SUPPRESS_ANALYTICS`；前两者位于 `<cwd>/.pi/kanpilot/codex/<run_id>/config`、`tmp`，后者为字符串 `"true"`。`network` 固定上述受限代理字段、`allow_upstream_proxy=false`、`domains={}`。spec/阶段契约绑定整个对象；启动前拒绝字段、路径、符号链接或 SDK 缓存的变化。旧 spec 没有对象时保留原 sandbox 和环境，Plus 不受影响。
+- `preflight` 返回仅含安全结果的回执：`v: 1`、`checks`（各检查名到布尔结果）、`status: "passed"`；失败抛出 `KanpilotError("codex_environment_unavailable", ...)`。worker 将成功回执写入本轮证据并在每次初次启动/resume 前重做，失败终态保留原因，不发送模型输入。
+- 新 profile 的文件系统保留全盘只读、工作区和冻结 SDK 缓存可写，并显式保护工作区 `.git`、`.codex`、`.agents`。命名 profile 与旧 `sandbox_mode` 互斥，所以新分支不再同时传 `-s workspace-write` 或 `sandbox_mode`；不切换到无沙箱。目录准备使用不跟随符号链接的逐级创建，主机用户配置不写入。
+- `permission_profile(spec)` 由新 run UUID 与 cwd 派生 `kanpilot_flutter_<sha256前24位>`，避免复用已有静态 profile 的域名/文件系统表；launcher 与 sandbox 统一调用，resume 同名。真实对照中原固定 profile 会继承 `example.com=allow`，独立 profile 则返回 CONNECT 403；不把空表形状当作已清空规则的证据。预检使用真实公网域名 `https://example.com/`，只接受 HTTPS CONNECT 阶段的代理 403，不接受目标站点 HTTP 403、保留 IP 被拦或普通网络失败。`--ignore-user-config` 并非 sandbox 的可用参数，未使用该无效方案，也未修改宿主 Codex 配置。
+- T6 由 worker 独占 `core/tests/test_codex_environment.py`；只读新模块和既有 adapter/worker/阶段契约，其他所有文件由主 agent 写入。测试按上述接口并行准备，可在模块尚未实现时保留失败；不改变共享接口、不修改旧测试，不启动真实模型或生产服务。双方临时 Git/HOME/SDK/DB 均在各自临时目录，真实沙箱探针只由主 agent 执行。
+
+### 本轮结果与验证（2026-11-06）
+
+- T5/T6/T7 完成：Flutter 专属环境随阶段契约冻结；每次首次启动/resume 都先核对并做无模型环境预检。配置/临时目录通过描述符创建、不跟随符号链接；SDK 仍仅缓存可写，历史 spec 不自动获得新权限。CLI 全局配置未修改，Plus 路径保持原逻辑。预检失败无模型调用，`auto_dispatch` 从已退出、同 task/run、not_sent、failed 的持久终态保留具体原因，进入需要处理；送达状态仍保守保留 unknown，不自动重发。
+- 主 agent 最终核心组合使用 `/Users/sakurasep/.pyenv/versions/3.10.10/bin/python -m pytest`，范围为 `core/tests/test_codex_environment.py`、`test_codex_execution.py`、`test_execution_stage_contract.py`、`test_codex_exec_config.py`、`test_codex_inputs.py`、`test_codex_verdict.py`、`test_auto_monitor.py`、`test_auto_dispatch.py`，退出 0，**282 passed、110 subtests passed**，32.36 秒。最终受管组合 `tests/test_codex_dispatch.py tests/test_pi_dispatch.py -q`，退出 0，**15 passed**，64.60 秒。HOME/SDK/Git/DB/CLI 均为隔离夹具；集成覆盖新环境完整传递、预检失败无 session/零模型、具体原因进入 needs_user、重复启动去重。CLI 与模型决策是 stub，不冒充真实模型证据。
+- 最终实现/测试文件指纹为 `83dc08704fe5e5c41c84f5dac732eabd2c0795c5e8513c542ac84ef40edbb7ce`，逐文件哈希与运行范围见独立归档 `verification-summary.json`；规格/计划文档不计入该代码指纹。测试加强了新 profile 全量边界断言，没有删除、跳过或降低旧权限门禁。
+- 原生 Codex CLI **0.164.0** 的最终代码配置实测：配置/临时文件可写；IPv4/IPv6 回环收发成功；直接公网连接 EPERM；真实公网域名在 HTTPS CONNECT 阶段被代理 403 拒绝。项目元数据 `.git/.codex/.agents`、SDK 源码及其他私人目录写入 EPERM。静态 profile 继承域名放行与新轮次 profile 拒绝的对照见 `profile-isolation.json`。同 Mac 经主非回环 IP 访问监听端口未能收发，回环正对照成功；此证据不代替实体局域网设备入站验证。通配 bind 实际允许，不宣称被拒绝。
+- 独立最小 Flutter 工程使用真实 **Flutter 3.47.7 / Dart 3.13.5**：最终代码生成 profile 后，`flutter --version`、夹具离线依赖准备、`flutter analyze --no-pub`、`flutter test --no-pub` 全部退出 0，测试实际 **1 passed**，`tool_state` 仅生成在本轮 `.pi/.../config`。离线依赖准备使用工作区独占 PUB_CACHE 元数据和只读现存包源；最终 analyze/test 使用宿主默认环境加冻结的三个环境变量。没有在 Pilot 代跑原业务 verify，也没有编译 KaneoPilot Swift/Android。
+- 早期探针的失败与局限保留：直接对默认 pub cache 做离线 pub get 因 `active_roots` 不可写退出 66，正式修复范围仍为原冻结的 `--no-pub` 命令，不据此开放整个 pub cache。最初保留 IP 的代理拒绝不足以证明域名策略；补充真实域名对照后发现递归合并，已改为独立 profile。空表不清除旧规则；全局 `*=deny` 为 CLI 无效语法，未采用。`domain-conflict-control.json` 的项目配置对照未证明配置加载，因此不作为清空规则证据。最终通过证据以 `final-native-verification.json`、`profile-isolation.json` 为准。
+- 独立 reviewer（gpt-6.1-sol/high）只读审查指出无 session 原因丢失和站点 403 误判，两项均已修复并纳入最终回归；收口复核未发现未解决的实质性问题。只读核验原生产 spec/job 的阶段契约通过、环境字段仍缺省；原任务未重试、未写生产 DB、未调用模型。安装版仍 **0.4.5 / 116**，未安装、构建或发布后续版本，macOS/APK 业务构建缓存、真实模型和实体设备仍未验证。
+- 本轮交付目标仅为本地 main；不推送、不创建标签、不覆盖 v0.4.5 或选择未确认的新版本号。证据与本地集成/资源收尾回执保存在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-flutter-sandbox/`。该目录保全全部非缓存探针材料；本次临时工作树与已合并本地分支按工作约定收尾，其他工作树、主仓无关文件与原业务工作树保留。

@@ -4,10 +4,11 @@ from pathlib import Path
 import shlex
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from kanpilot import auto_monitor, codex_execution, db, pi_desktop_review
+from kanpilot import auto_dispatch, auto_monitor, codex_execution, db, pi_desktop_review, util
 from kanpilot.engine import loop
 
 try:
@@ -19,7 +20,7 @@ except ImportError:
 VERIFY = "git diff --check"
 
 
-def install_cli(env, mode, verification=VERIFY):
+def install_cli(env, mode, verification=VERIFY, *, preflight_ok=True):
     # This child really edits the isolated tree and runs the frozen verify;
     # only the language model's decisions and JSONL transport are simulated.
     env.codex_bin.write_text("#!" + sys.executable + "\n" + r'''
@@ -28,6 +29,13 @@ from pathlib import Path
 args = sys.argv[1:]
 if '--version' in args:
     print('codex-cli fixture'); sys.exit(0)
+if args and args[0] == 'sandbox':
+    with Path(PREFLIGHTS).open('a') as stream:
+        stream.write(json.dumps(args) + '\n')
+    checks = dict.fromkeys(('config_write','temp_write','ipv4','ipv6','direct_denied','proxy_active','proxy_denied'), True)
+    checks['ipv4'] = PREFLIGHT_OK
+    print(json.dumps({'v':1,'status':'passed' if all(checks.values()) else 'failed','checks':checks}))
+    sys.exit(0)
 prompt = sys.stdin.read()
 Path(args[args.index('-o')+1] + '.prompt').write_text(prompt)
 with Path(INVOCATIONS).open('a') as stream:
@@ -51,7 +59,9 @@ report = {'status':'needs_input' if needs else ('failed' if MODE == 'failed' els
 emit({'type':'item.completed','item':{'id':'response','type':'agent_message','text':json.dumps(report)}})
 Path(args[args.index('-o')+1]).write_text(json.dumps(report))
 emit({'type':'turn.completed','usage':{}})
-'''.replace("INVOCATIONS", repr(str(env.root / "codex-invocations.jsonl"))).replace("MODE", repr(mode)).replace("VERIFY_COMMAND", repr(verification)))
+'''.replace("INVOCATIONS", repr(str(env.root / "codex-invocations.jsonl")))
+   .replace("PREFLIGHTS", repr(str(env.root / "codex-preflights.jsonl")))
+   .replace("PREFLIGHT_OK", repr(preflight_ok)).replace("MODE", repr(mode)).replace("VERIFY_COMMAND", repr(verification)))
     env.codex_bin.chmod(0o755)
 
 
@@ -66,8 +76,8 @@ def wait_for(predicate, directory, seconds=12):
     raise AssertionError("Worker did not reach expected state: " + (log.read_text() if log.exists() else "no log"))
 
 
-def prepare(factory, cli, tmp_env, mode="completed", verification=VERIFY):
-    install_cli(tmp_env, mode, verification)
+def prepare(factory, cli, tmp_env, mode="completed", verification=VERIFY, *, preflight_ok=True):
+    install_cli(tmp_env, mode, verification, preflight_ok=preflight_ok)
     cli("set-exec-config", {"backend": "codex", "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"}})
     task = factory.sync_task(title="Codex isolated execution")
     plan = write_plan_file(tmp_env.plan_root, task_id=task.task_id, project_id=task.project_id,
@@ -86,7 +96,7 @@ def prepare(factory, cli, tmp_env, mode="completed", verification=VERIFY):
     cli("dispatch-prepare", {**identity, "evidence": evidence})
     cli("dispatch-begin-send", identity)
     started = cli("dispatch-start", identity)
-    assert started["status"] == "started", started
+    assert started["status"] == ("started" if preflight_ok else "starting"), started
     directory = Path(cli("overview", {})["paths"]["session_runs_root"]) / task.task_id / claim["run_id"]
     return task, identity, evidence, started, directory
 
@@ -105,7 +115,7 @@ def finished(directory):
     return job if job["status"] == "finished" and not codex_execution.job_alive(job) else None
 
 
-def test_dispatch_freezes_and_passes_only_flutter_cache_to_native_worker(factory, cli, tmp_env):
+def flutter_fixture(tmp_env):
     sdk = tmp_env.root / 'Flutter SDK'
     (sdk / 'bin/cache').mkdir(parents=True)
     (sdk / 'bin/internal').mkdir()
@@ -115,6 +125,11 @@ def test_dispatch_freezes_and_passes_only_flutter_cache_to_native_worker(factory
                       'Path(__file__).parent.joinpath("cache/engine.realm").write_text("fixture")\n')
     binary.chmod(0o755)
     verification = 'LANG=en_US.UTF-8 ' + shlex.quote(str(binary)) + ' test --no-pub'
+    return sdk, verification
+
+
+def test_dispatch_freezes_and_passes_only_flutter_cache_to_native_worker(factory, cli, tmp_env):
+    sdk, verification = flutter_fixture(tmp_env)
     task, identity, evidence, started, directory = prepare(factory, cli, tmp_env, verification=verification)
     confirm(cli, identity, evidence, started, directory)
     wait_for(lambda: finished(directory), directory)
@@ -125,13 +140,56 @@ def test_dispatch_freezes_and_passes_only_flutter_cache_to_native_worker(factory
     invocations = [json.loads(line) for line in (tmp_env.root / 'codex-invocations.jsonl').read_text().splitlines()]
     assert len(invocations) == 1
     argv = invocations[0]
-    assert argv.count('--add-dir') == 1
-    assert argv[argv.index('--add-dir') + 1] == roots[0]
-    assert 'sandbox_mode="workspace-write"' in argv
+    # New Flutter runs use the complete named permission profile; old specs
+    # retain --add-dir. Check the full boundary instead of weakening it.
+    from kanpilot import codex_environment, codex_provider
+    assert '--add-dir' not in argv and '-s' not in argv
+    assert not any(arg.startswith('sandbox_mode=') for arg in argv)
+    config = codex_provider.tomllib.loads('\n'.join(
+        argv[index + 1] for index, argument in enumerate(argv) if argument == '-c'))
+    profile_name = codex_environment.permission_profile(spec)
+    profile = config['permissions'][profile_name]
+    assert profile['filesystem'] == {'/':'read',spec['cwd']:'write',roots[0]:'write',
+        **{str(Path(spec['cwd']) / name):'read' for name in ('.git','.codex','.agents')}}
+    assert profile['network'] == {'enabled':True,'mode':'limited','allow_local_binding':True,
+                                  'allow_upstream_proxy':False,'domains':{}}
+    assert config['features']['network_proxy'] is True
+    assert config['default_permissions'] == profile_name
+    assert config['shell_environment_policy']['set'] == spec['tool_environment']['environment']
+    assert spec['stage_contract']['inputs']['tool_environment'] == spec['tool_environment']
+    assert json.loads((directory / 'codex-environment-1.json').read_text())['status'] == 'passed'
+    assert len((tmp_env.root / 'codex-preflights.jsonl').read_text().splitlines()) == 1
     assert 'approval_policy="never"' in argv
     assert (sdk / 'bin/cache/engine.realm').read_text() == 'fixture'
     report = json.loads((directory / 'codex-final-1.json').read_text())
     assert report['checks'] == [{'command': verification, 'exit_code': 0}]
+
+
+def test_preflight_failure_reaches_attention_before_any_model_session(factory, cli, tmp_env):
+    sdk, verification = flutter_fixture(tmp_env)
+    task, identity, evidence, started, directory = prepare(factory, cli, tmp_env,
+        verification=verification, preflight_ok=False)
+    def failed():
+        job = json.loads((directory / 'job.json').read_text())
+        return job if job['status'] == 'failed' and not codex_execution.job_alive(job) else None
+    job = wait_for(failed, directory)
+    assert job['turns'] == [] and job['session_id'] is None and job['send_state'] == 'not_sent'
+    assert job['exit_code'] == 3 and 'ipv4' in job['detail']
+    controller = SimpleNamespace(deadline=time.monotonic() + 10, clock=time.monotonic,
+        wait=lambda seconds: None, task_identity=lambda: identity,
+        call=lambda command, payload: cli(command, payload),
+        claim={'run_id':identity['run_id'],'context':{'backend':'codex'}})
+    with pytest.raises(util.KanpilotError) as caught:
+        auto_dispatch._wait_session(controller, started)
+    assert caught.value.code == 'execution_failed' and 'ipv4' in caught.value.message
+    duplicate = cli('dispatch-start', identity)
+    assert duplicate['deduplicated'] and duplicate['pid'] == started['pid']
+    cli('dispatch-fail', {**identity,'send_state':'unknown','reason':caught.value.message})
+    detail = factory.get_task(task.task_id)
+    assert detail['status'] == 'needs_user' and 'ipv4' in detail['failure_reason']
+    assert not (tmp_env.root / 'codex-invocations.jsonl').exists()
+    assert len((tmp_env.root / 'codex-preflights.jsonl').read_text().splitlines()) == 1
+    assert not (sdk / 'bin/cache/engine.realm').exists()
 
 
 def test_failed_codex_worker_moves_task_to_attention_without_resending(factory, cli, tmp_env):

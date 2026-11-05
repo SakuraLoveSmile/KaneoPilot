@@ -86,6 +86,34 @@ def test_wait_timeout_unknown(monkeypatch, tmp_path):
     assert [c[2] for c in calls if c[0] == "heartbeat"] == [60, 120, 180, 240, 300]
 
 
+def test_codex_preflight_failure_preserves_reason_without_waiting_for_session(monkeypatch, tmp_path):
+    observed = session(None)
+    observed['round_detail'].update(observer_alive=False, ended_at='2026-11-06T00:00:00Z',
+        send_state='not_sent', exit_code=3, terminal={'outcome':'failed'},
+        detail='Codex 工具环境预检失败：ipv4')
+    rc, calls, _ = invoke(monkeypatch, tmp_path, {'dispatch-start':{'status':'starting'},
+        'get-session':observed}, backend='codex')
+    assert rc == 0
+    fail = next(c for c in calls if c[0] == 'dispatch-fail')
+    assert fail[2] == 30 and fail[1]['send_state'] == 'unknown'
+    assert 'Codex 工具环境预检失败：ipv4' in fail[1]['reason']
+    assert sum(c[0] == 'dispatch-start' for c in calls) == 1
+    assert not any(c[0] == 'dispatch-confirm' for c in calls)
+
+
+@pytest.mark.parametrize('field,value', [('observer_alive',True),('send_state','unknown'),
+    ('exit_code',0),('ended_at',None),('terminal',{'outcome':'completed'})])
+def test_codex_incomplete_startup_failure_keeps_waiting(monkeypatch, tmp_path, field, value):
+    observed = session(None)
+    observed['round_detail'].update(observer_alive=False, ended_at='2026-11-06T00:00:00Z',
+        send_state='not_sent', exit_code=3, terminal={'outcome':'failed'}, detail='preflight failed')
+    observed['round_detail'][field] = value
+    _, calls, _ = invoke(monkeypatch, tmp_path, {'dispatch-start':{'status':'starting'},
+        'get-session':observed}, backend='codex')
+    fail = next(c for c in calls if c[0] == 'dispatch-fail')
+    assert fail[2] == 300 and 'worker 会话未建立' in fail[1]['reason']
+
+
 @pytest.mark.parametrize("command,code,send_state", [("dispatch-prepare", "validation_failed", "not_sent"),
     ("dispatch-begin-send", "remote_conflict", "unknown"), ("dispatch-start", "validation_failed", "unknown"),
     ("dispatch-confirm", "validation_failed", "unknown")])
