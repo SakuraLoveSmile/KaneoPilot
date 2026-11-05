@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：待体验（v0.4.5 已发布；2026-11-06 后续源码修复与适用验证已完成，安装版仍为 0.4.5，待后续新版本交付后体验，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
+状态：实现中（v0.4.5 已发布；2026-11-06 后续源码修复、云端检查与两端包核验已完成，本轮正式版本号等待维护者确认；安装版仍为 0.4.5，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -115,3 +115,12 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 - 早期探针的失败与局限保留：直接对默认 pub cache 做离线 pub get 因 `active_roots` 不可写退出 66，正式修复范围仍为原冻结的 `--no-pub` 命令，不据此开放整个 pub cache。最初保留 IP 的代理拒绝不足以证明域名策略；补充真实域名对照后发现递归合并，已改为独立 profile。空表不清除旧规则；全局 `*=deny` 为 CLI 无效语法，未采用。`domain-conflict-control.json` 的项目配置对照未证明配置加载，因此不作为清空规则证据。最终通过证据以 `final-native-verification.json`、`profile-isolation.json` 为准。
 - 独立 reviewer（gpt-6.1-sol/high）只读审查指出无 session 原因丢失和站点 403 误判，两项均已修复并纳入最终回归；收口复核未发现未解决的实质性问题。只读核验原生产 spec/job 的阶段契约通过、环境字段仍缺省；原任务未重试、未写生产 DB、未调用模型。安装版仍 **0.4.5 / 116**，未安装、构建或发布后续版本，macOS/APK 业务构建缓存、真实模型和实体设备仍未验证。
 - 本轮交付目标仅为本地 main；不推送、不创建标签、不覆盖 v0.4.5 或选择未确认的新版本号。证据与本地集成/资源收尾回执保存在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-flutter-sandbox/`。该目录保全全部非缓存探针材料；本次临时工作树与已合并本地分支按工作约定收尾，其他工作树、主仓无关文件与原业务工作树保留。
+
+## 2026-11-06 后续云端版本构建
+
+- 用户随后明确要求“构建新版本”，授权将已合入本地 main 的修复送入既有 Packages 云端流程。重新 fetch 核对远端 main 为 `3896b8e07411cf11d7cbfedfecfcfcf3926a0199`，本地仅领先修复提交 `9f9e07444149f872633b9951090f48c1fd103569`；实现/测试文件仍与前述指纹逐一一致，无新增源码变化。已将该修复提交推送 main，保留无关 `.local/` 和缓存清理计划。
+- 当前 latest 实时确认为 `v0.4.5`。候选正式版 `v0.4.6` 的发布说明及独立核验脚本已准备在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-release-0.4.6/`，均为待确认材料。`docs/build-release.md` 要求“版本号由维护者明确决定，不自动猜测下一版”；已向用户请求确认正式 v0.4.6，未以历史 v0.4.5 的授权代替本轮版本选择，也未覆盖既有标签或资产。
+- main 推送触发 Packages **#117 / 42080508694**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42080508694`。源码为 `9f9e07444149f872633b9951090f48c1fd103569`，attempt 1 整体 **success**；15 个必需 job 成功，仅 `publish` 与可选全文探针正常 skipped。三个 macOS job 均实际分配 runner 并完成，没有重现此前容量排队。GitHub CLI 状态查询期间出现 EOF；改用 REST 只读核对取得完整终态，没有据此重跑构建或降低门禁。完整回执为 `cloud-main-final.json`。
+- 本次 main 检查包按工作流采用内部版本 `0.0.0` / build `117`，仅用于正式发布前源码门禁，不作为用户所要求的新 0.4.x 版本交付。已独立下载并核验两个包：DMG SHA-256 `c40b3b171d04fefa1a45e38037dca0d786d24ab032080375a304257acdcc1a97`，APK SHA-256 `dcc14817e021be077246df85d85df5b166ed902128e3f53e84f91ab727144ff4`。两者的源码/版本/构建号、metadata 大小与哈希一致；DMG 完整性及 DMG/App 严格签名、arm64-only、8 个关键内置核心模块逐字节匹配通过；APK ZIP 完整性、包名、版本/构建号和签名与 metadata 相符。Debug APK 不是正式签名包。回执为 `main-macos-verification.json`、`main-android-verification.json`，只读镜像已卸载。
+- APK 初次本地核验被现有损坏的 jenv Java shim 阻断；改为显式调用现有 JDK 17 和 apksigner.jar 后通过，没有修改用户 Java 配置或安装依赖。这是本地核验入口问题，不是云端构建失败，原始情况见 `main-android-local-check-attempt-1.json`。
+- 下一步仅待维护者确认正式版本号；确认后核对版本/标签未占用、远端 main 包含该已通过源码，再创建直接指向它的 annotated 稳定标签，继续正式 Packages 与四项公开资产核验。此检查点未创建新标签或 Release，未安装、未重试原业务任务、未调用模型；也未新增临时工作树。源码修复状态与版本交付状态分别记录。
