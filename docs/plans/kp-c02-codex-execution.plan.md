@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：实现中（修复已合入 main；正式 v0.4.5 等待云端 macOS runner，尚未发布或安装）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
+状态：待体验（修复已合入 main，正式 v0.4.5 已发布并完成下载包核验；尚未安装、重试原任务或进行真实模型验收）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -31,8 +31,8 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 探针准备时先发现新版 CLI 不再使用 `sandbox macos` 子命令，随后旧 sandbox 配置调用提示需要 `--permission-profile`；按当前 help 与官方 permissions 文档改用独立临时命名策略后通过。这些准备失败没有修改业务代码或用户配置，不记为验收通过。
 - 对原生产 spec/job **只读**运行新代码的 `execution_contract.validate_spec` 通过，旧 spec 没有新增权限；从原冻结命令计算的新轮次候选精确为 `/Users/sakurasep/devsdk/flutter/bin/cache`。没有回写旧 spec、报告、任务状态或重试模型。
 - 独立 reviewer（gpt-6.1-sol/high）只读审查实际业务差异，未发现实质性问题；其结论不替代上述实测。`git diff --check` 通过。最终代码/测试差异摘要及哈希另存 `build/kp-c02-evidence/verification-summary.json`。
-- 当前 `/Applications/KaneoPilot.app` 未更新，生产旧任务仍需修复版本的监控重新核对；原 MediaPlayer 改动与冻结记录保留。未运行原任务 verify，未在本机编译 KaneoPilot、未安装、未调用真实付费模型、未发布。恢复执行应使用既有显式新轮次重试；旧轮次不会因新代码自动获得写权限。
-- 后续体验：安装修复版本后核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。修复已合入 main，正式发布仍等待适用云端检查，因此暂保留本任务工作树；检查与发布完成后按项目约定清理。
+- 修复阶段 `/Applications/KaneoPilot.app` 未更新，生产旧任务仍需修复版本的监控重新核对；原 MediaPlayer 改动与冻结记录保留。当时未运行原任务 verify、未在本机编译 KaneoPilot、未安装、未调用真实付费模型或发布。恢复执行应使用既有显式新轮次重试；旧轮次不会因新代码自动获得写权限。后续正式发布见文末记录。
+- 后续体验：安装修复版本后核对原失败任务的实际状态收尾；如需继续原任务，显式启动新执行轮次。正式发布、下载包核验与本任务资源收尾见文末记录；原任务工作树和现用 App 保留。
 
 ## 2026-11-04 云端构建
 
@@ -61,7 +61,24 @@ T4（主 agent）：运行 Codex 配置/worker/契约/问答/verdict/监控及�
 - 正式构建和核验材料独立保存在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261104-kp-c02-release-0.4.5/`，不纳入公开 Git。
 - 发布文档签名提交为 `f65be9451cb75eb547f8d8c1251565b6976713f3`（本机签名状态 G），已从原 main 快进合入并推送；主仓无关 `.local/` 保留。该完整提交的 main Packages 为 **#115 / 41856959659**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41856959659`。正式标签将固定同一源码提交，先等待本次 main 检查。
 - #115 attempt 1：12 个非 macOS job 成功；3 个 macOS job 没有启动任何步骤，排队 15 分钟后 cancelled，整体 failure。GitHub 注释明确 `The job was not acquired by Runner of type hosted even after multiple attempts`，并提示 macOS arm64 capacity constraints；不是源码或检查失败。完整 run/job/注释已保存为 `cloud-main-attempt-1.json`。基于该基础设施故障请求 `rerun-failed-jobs`，保持相同 SHA 和全部门禁；首次 CLI 读 run 的 EOF 未发起重跑，确认 attempt 仍为 1 后改用 REST POST，已成功受理。
-- #115 attempt 2：只重跑三个未完成的 macOS job，其余 12 个成功结果沿用。三个 job 自 `2026-11-04T15:40:59Z` 排队，超过 20 分钟后仍没有 runner、步骤或终态；最后只读快照为 `cloud-main-attempt-2-checkpoint.json`。云端队列保留，不再次提交相同重跑请求，不更换构建平台或降低门禁。
-- 当前 latest 仍为 `v0.4.4`。尚未创建/推送 `v0.4.5` 标签或 Release；正式发布源码保持 `f65be9451cb75eb547f8d8c1251565b6976713f3`，本节证据文档更新不冒充已构建版本。本机未安装、未重试原任务或调用模型。
-- 保留工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-c02-codex-execution`：修复虽已合入，但适用云端检查尚未完成，仍需继续正式发布。7 个非缓存忽略文件已逐一核对 SHA-256 并备份到独立归档的 `worktree-evidence/`，清单为 `worktree-evidence-manifest.json`；其余 147 个忽略文件是可再生成的 Python/pytest 缓存。未清理其他任务或主工作区 `.local/`。
-- 下一步沿本轮已有授权继续：先读取 #115 当前状态。若成功，核对同一 SHA、15 个必需 job 成功及正常跳过项，保存完整最终回执；再用 `docs/releases/v0.4.5.md` 创建直接指向该提交的 annotated 签名标签并推送，等待正式 Packages 的 16 个必需 job、核验公开 APK/DMG/manifest/SHA256SUMS 和 latest 后收尾。若仍排队则保留队列；若失败先读取该次 GitHub 回执，依据新证据决定恢复方式。安装和真实模型执行仍未授权。
+- #115 attempt 2：只重跑三个未完成的 macOS job，其余 12 个成功结果沿用。初次只读快照仍显示排队；2026-11-05 恢复时确认三项最终均 cancelled、没有执行步骤、runner_id 为 0，GitHub 再次回执 `The job was not acquired by Runner of type hosted even after multiple attempts` 及 arm64 容量提示。完整终态和注释为 `cloud-main-attempt-2-final.json`，不能将旧排队快照当作当前状态。
+- 截至 2026-11-04 的检查点，latest 为 `v0.4.4`，尚未创建/推送 `v0.4.5` 标签或 Release；正式发布源码保持 `f65be9451cb75eb547f8d8c1251565b6976713f3`，证据文档更新不冒充已构建版本。本机未安装、未重试原任务或调用模型。
+- 当时保留工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261104-fix-kp-c02-codex-execution`：修复虽已合入，但适用云端检查尚未完成，仍需继续正式发布。7 个非缓存忽略文件已逐一核对 SHA-256 并备份到独立归档的 `worktree-evidence/`，清单为 `worktree-evidence-manifest.json`；其余 147 个忽略文件是可再生成的 Python/pytest 缓存。未清理其他任务或主工作区 `.local/`。
+- 当时冻结的后续顺序：读取 #115 当前状态，成功后核对同一 SHA、15 个必需 job 与正常跳过项；保存完整回执；创建直接指向发布源码的 annotated 签名标签；等待正式 Packages 的 16 个必需 job，核验公开 APK/DMG/manifest/SHA256SUMS 和 latest 后收尾。安装和真实模型执行仍未授权。
+
+## 2026-11-05 云端恢复
+
+- GitHub Status 重新查询为 Actions operational、无未解决事故；Actions/Pages 事故于台北 01:01、后续 Actions 事故于 02:16 标记 resolved，官方根因报告尚待发布。这是恢复重跑的新依据，不把官方泛化事故当作本任务容量故障的已确认根因。原始状态与事故回执为 `github-status-recovery-20261105.json`。
+- 对原 #115 请求一次 `rerun-failed-jobs`，已确认 attempt 3 受理；源码仍为 `f65be9451cb75eb547f8d8c1251565b6976713f3`。三个 macOS job 均已分配执行机并开始实际桌面检查和 DMG 打包，其余 12 项成功沿用。保留同一 run 和全部门禁；未换平台、未本地编译。
+- main #115 attempt 3 已整体 success：同一源码的 15 个必需 job 成功，仅 `publish` 与可选全文探针正常 skipped；完整扁平回执为 `cloud-main-final.json`。
+- 再次 fetch 并核对远端 main 包含发布源码、latest 仍为 v0.4.4、远端与本地均未占用 v0.4.5 后，创建并核验签名 annotated 标签。标签对象 `1eb51dbc9f229d709c1c84eae454ee5f7cc5a4bf`，直接指向 `f65be9451cb75eb547f8d8c1251565b6976713f3`，本机 `git verify-tag` 为 Good signature，已推送。
+- 正式标签触发 Packages **#116 / 41963965432**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/41963965432`，源码与标签一致，整体 **success**；16 个必需 job 成功，仅可选全文探针 skipped。标签与完整构建回执分别为 `tag-publication.json`、`cloud-release-final.json`。
+
+## 正式交付与剩余体验
+
+- `v0.4.5` 于 **2026-11-05 11:58:29（台北）**公开发布，非 draft、非 prerelease，latest 已指向它：`https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.5`。正式版本 `0.4.5` / build `116`，源码固定为 `f65be9451cb75eb547f8d8c1251565b6976713f3`；后续任务记录提交不改变该源码身份。
+- 四项公开资产完整：`KaneoPilot-0.4.5-android.apk`、`KaneoPilot-0.4.5-macos-arm64.dmg`、`manifest.json`、`SHA256SUMS`。下载后的字节数、GitHub digest、SHA256SUMS 与 manifest 逐一一致；APK SHA-256 `03eb488c498bdb9712e3a19a160534a5d26f9638078d185137fba096c760ff6d`，DMG SHA-256 `4764bf54c0c6f0982140ca30a747a2a49eaf96a72edd857133ae81afdac98914`。原始 Release、latest 和独立核验为 `release.json`、`latest.json`、`release-asset-verification.json`。
+- 下载包核验通过：Android 包名 `com.sakurasep.kaneopilot`、版本/构建号正确，签名证书继续为 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`。DMG 完整性及 DMG/App 严格签名通过；10 个 Mach-O 全部仅 arm64、最低系统要求均不高于 14.0、无依赖越界；内置 **153 个 Python 源文件**与发布提交逐字节一致。详见 `release-package-verification.json`、`package-verification-log.json`。只读镜像已卸载，未启动或安装 App，未读取生产 DB。
+- 既有工作流将签名标签的 PGP armor 带入公开正文；仅删除正文中的这一签名文本并读回核对，保留原版本说明、CI marker 和安装要求，四项资产的 ID、digest、大小保持一致；未移动标签或替换资产。回执为 `release-body-cleanup.json`。
+- 本次修复、合入、云端检查和正式发布均已完成。Android 真机、真实模型执行、安装后的原失败任务恢复仍待体验；只有用户明确确认后才标已验收。现用 App、原业务任务和原成果保留。
+- 资源收尾已完成：7 个非缓存忽略文件已独立归档并再次核对哈希；确认工作树没有活动文件引用、来源提交已在 main、最终记录已完整迁回 main 后，正常移除本任务临时工作树并删除已合并本地分支。远端任务分支及其余 6 个工作树保留，主工作区无关 `.local/` 与缓存清理计划均未暂存。实际清理回执为 `cleanup-receipt.json`，记录迁移补丁与核对为 `closeout-plan.patch`、`record-transfer.json`。
