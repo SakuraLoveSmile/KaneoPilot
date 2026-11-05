@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：实现中（v0.4.5 已发布；2026-11-06 后续源码修复、云端检查与两端包核验已完成，本轮正式版本号等待维护者确认；安装版仍为 0.4.5，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”。
+状态：待体验（2026-11-06 正式 v0.4.6 / build 118 已发布，云端门禁与公开两端安装包核验通过；未安装或重试原任务，安装版仍为 0.4.5，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -119,8 +119,19 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 ## 2026-11-06 后续云端版本构建
 
 - 用户随后明确要求“构建新版本”，授权将已合入本地 main 的修复送入既有 Packages 云端流程。重新 fetch 核对远端 main 为 `3896b8e07411cf11d7cbfedfecfcfcf3926a0199`，本地仅领先修复提交 `9f9e07444149f872633b9951090f48c1fd103569`；实现/测试文件仍与前述指纹逐一一致，无新增源码变化。已将该修复提交推送 main，保留无关 `.local/` 和缓存清理计划。
-- 当前 latest 实时确认为 `v0.4.5`。候选正式版 `v0.4.6` 的发布说明及独立核验脚本已准备在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-release-0.4.6/`，均为待确认材料。`docs/build-release.md` 要求“版本号由维护者明确决定，不自动猜测下一版”；已向用户请求确认正式 v0.4.6，未以历史 v0.4.5 的授权代替本轮版本选择，也未覆盖既有标签或资产。
+- 构建前 latest 实时确认为 `v0.4.5`。正式版 `v0.4.6` 的发布说明及独立核验脚本已准备在 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-release-0.4.6/`。`docs/build-release.md` 要求“版本号由维护者明确决定，不自动猜测下一版”；用户随后明确回复“确认，发布正式 v0.4.6”，本轮版本与公开正式 Release 已获授权；不覆盖既有标签或资产。
 - main 推送触发 Packages **#117 / 42080508694**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42080508694`。源码为 `9f9e07444149f872633b9951090f48c1fd103569`，attempt 1 整体 **success**；15 个必需 job 成功，仅 `publish` 与可选全文探针正常 skipped。三个 macOS job 均实际分配 runner 并完成，没有重现此前容量排队。GitHub CLI 状态查询期间出现 EOF；改用 REST 只读核对取得完整终态，没有据此重跑构建或降低门禁。完整回执为 `cloud-main-final.json`。
 - 本次 main 检查包按工作流采用内部版本 `0.0.0` / build `117`，仅用于正式发布前源码门禁，不作为用户所要求的新 0.4.x 版本交付。已独立下载并核验两个包：DMG SHA-256 `c40b3b171d04fefa1a45e38037dca0d786d24ab032080375a304257acdcc1a97`，APK SHA-256 `dcc14817e021be077246df85d85df5b166ed902128e3f53e84f91ab727144ff4`。两者的源码/版本/构建号、metadata 大小与哈希一致；DMG 完整性及 DMG/App 严格签名、arm64-only、8 个关键内置核心模块逐字节匹配通过；APK ZIP 完整性、包名、版本/构建号和签名与 metadata 相符。Debug APK 不是正式签名包。回执为 `main-macos-verification.json`、`main-android-verification.json`，只读镜像已卸载。
 - APK 初次本地核验被现有损坏的 jenv Java shim 阻断；改为显式调用现有 JDK 17 和 apksigner.jar 后通过，没有修改用户 Java 配置或安装依赖。这是本地核验入口问题，不是云端构建失败，原始情况见 `main-android-local-check-attempt-1.json`。
-- 下一步仅待维护者确认正式版本号；确认后核对版本/标签未占用、远端 main 包含该已通过源码，再创建直接指向它的 annotated 稳定标签，继续正式 Packages 与四项公开资产核验。此检查点未创建新标签或 Release，未安装、未重试原业务任务、未调用模型；也未新增临时工作树。源码修复状态与版本交付状态分别记录。
+- main 门禁与独立包核验完成后创建记录提交 `abb7d76dae16698a695c30051cd327db162c73d7` 并推送；它仅更新任务文档，产品源码仍固定为已检查的 `9f9e07444149f872633b9951090f48c1fd103569`。本轮没有新增临时工作树，原修复工作树和已合并本地分支已安全清理；主工作区、其他任务和恢复归档保留。
+
+## 正式 v0.4.6 发布
+
+- 用户明确确认正式 `v0.4.6` 后，重新核对远端 main 包含已通过的发布源码、版本与标签未占用，创建直接指向 `9f9e07444149f872633b9951090f48c1fd103569` 的签名 annotated 标签。标签对象 `06d9b1fdfea38df52f9f8f49467b51eacfc9a3cd`，本机 `git verify-tag v0.4.6` 为 Good signature；已推送并读回相同远端 ref，未移动或复用标签。标签正文与 Git 默认去注释处理后的发布说明一致；正式公开正文使用完整 Markdown 排版，并保留工作流安装说明与来源标记。
+- 正式 Packages **#118 / 42086214147**：`https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42086214147`，attempt 1 整体 **success**，源码与标签一致；16 个必需 job 全部成功，仅可选 `macos-session-fulltext-probe` 正常 skipped。三个 macOS job 均实际执行，无容量排队失败；未重跑、换平台或降低门禁。完整回执为 `cloud-release-final.json`。
+- 正式 Release 于 **2026-11-06 02:49:01（台北）**公开，非 draft、非 prerelease，latest 已指向 `v0.4.6`：`https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.6`。两端版本均为 **0.4.6 / build 118**，源码固定为 `9f9e07444149f872633b9951090f48c1fd103569`；后续任务记录提交不改变已发布包的源码身份。
+- 四项公开资产已独立下载，字节数、GitHub digest、SHA256SUMS 与 manifest 逐一一致：APK SHA-256 `51e432aee0825c6a4bf22ca5e49a2479627c3ecd177fa4c89fc1f164ad1a30cf`，DMG SHA-256 `87a0bf47c922d87c0b59d0055edd65172144c971d69fb0058516c0f839cc06fa`，`manifest.json` SHA-256 `3caad3403ef094f095d334880c90bb0d892e4bcd5b7355f758ea1665e3e60c95`，`SHA256SUMS` 自身 SHA-256 `3ccfa2efa456e41f45d1912c1d0839bd41de8fe6eef9b959710c734801970ecf`。回执为 `release.json`、`latest.json`、`release-asset-verification.json`。
+- 独立 tester 使用现成只读脚本核验，主 agent 检查输出与发布组合身份：DMG 完整性、DMG/App 严格签名通过，10 个 Mach-O 均符合 arm64 与 macOS 14 边界；全部 **154 个**内置 Python 文件与固定源码逐字节一致。APK ZIP 完整性、包名、版本和构建号通过，正式证书 SHA-256 仍为 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`。本机仅检查已下载的包，没有编译、签名、安装或启动 App；只读镜像已卸载。回执为 `release-package-verification.json`、`package-verification-log.json`、`android-zip-verification.json`。
+- 公开说明已移除 Git 标签签名 armor 并恢复 Markdown 标题，保留原版本说明、来源 marker 与工作流安装要求；读回确认 Release 身份、四项资产 ID/大小/digest、latest、标签对象和目标源码均不变。只改发布正文，未覆盖标签或资产；回执为 `release-body-cleanup.json`。
+- 本轮发布不包含安装、重试原业务任务、真实模型调用或生产 DB 写入；原业务工作树与已安装 `0.4.5 / 116` 保留。
+- 后续体验：安装正式包后核对环境预检和失败原因；如需继续原任务，显式发起新轮次。原业务 verify、真实模型、macOS/APK 业务构建及实体设备仍未重跑，本记录不将云端或最小 Flutter 工程检查等同于这些验收。临时修复工作树和已合并本地分支已在前述收尾中移除，本次发布未新增工作树；其他任务、主仓无关文件及独立归档保留。
