@@ -72,14 +72,17 @@ def sha256(path):
 
 def xcode_defaults_support(developer):
     """Check the pinned Xcode implementation before using its private defaults."""
-    frameworks = developer.parent / "SharedFrameworks"
+    contents = developer.parent.resolve(strict=True)
     required = {
-        frameworks / "Xcode3Core.framework/Versions/A/Xcode3Core": b"XCODE_USER_DEFAULTS_FILE",
-        frameworks / "SwiftPM.framework/Versions/A/SwiftPM": b"IDEPackageSupportDisableManifestSandbox",
+        contents / "Frameworks/Xcode3Core.framework/Xcode3Core": b"XCODE_USER_DEFAULTS_FILE",
+        contents / "SharedFrameworks/SwiftPM.framework/SwiftPM": b"IDEPackageSupportDisableManifestSandbox",
     }
     records = []
-    for binary, marker in required.items():
-        require(binary.is_file(), "Pinned Xcode compatibility binary is missing: " + str(binary))
+    for entry, marker in required.items():
+        require(entry.is_file(), "Pinned Xcode compatibility binary is missing: " + str(entry))
+        # Follow the framework's version link, but remain in the selected bundle.
+        binary = entry.resolve(strict=True)
+        require(contents in binary.parents, "Pinned Xcode compatibility binary escapes its bundle")
         tail, found = b"", False
         with binary.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):

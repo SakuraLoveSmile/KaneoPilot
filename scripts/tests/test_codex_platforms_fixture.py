@@ -19,6 +19,34 @@ SPEC.loader.exec_module(fixture)
 
 
 class CodexPlatformFixtureTests(unittest.TestCase):
+    def test_xcode_private_entries_are_found_in_selected_bundle_and_remain_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            contents = Path(temporary) / "Pinned.app/Contents"
+            developer = contents / "Developer"
+            developer.mkdir(parents=True)
+            core = contents / "Frameworks/Xcode3Core.framework/Versions/A/Xcode3Core"
+            swiftpm = contents / "SharedFrameworks/SwiftPM.framework/Versions/A/SwiftPM"
+            core.parent.mkdir(parents=True)
+            swiftpm.parent.mkdir(parents=True)
+            core_entry = core.parents[2] / "Xcode3Core"
+            swiftpm_entry = swiftpm.parents[2] / "SwiftPM"
+            core_entry.symlink_to("Versions/A/Xcode3Core")
+            swiftpm_entry.symlink_to("Versions/A/SwiftPM")
+            # Include an entry split across the streaming read boundary.
+            core.write_bytes(b"x" * (1024 * 1024 - 4) + b"XCODE_USER_DEFAULTS_FILE")
+            swiftpm.write_bytes(b"IDEPackageSupportDisableManifestSandbox")
+            found = fixture.xcode_defaults_support(developer)
+            self.assertEqual({item["binary"] for item in found}, {str(core.resolve()), str(swiftpm.resolve())})
+            swiftpm.write_bytes(b"missing compatibility entry")
+            with self.assertRaisesRegex(AssertionError, "lacks the required"):
+                fixture.xcode_defaults_support(developer)
+            swiftpm.unlink()
+            outside = Path(temporary) / "SwiftPM"
+            outside.write_bytes(b"IDEPackageSupportDisableManifestSandbox")
+            swiftpm.symlink_to(outside)
+            with self.assertRaisesRegex(AssertionError, "escapes its bundle"):
+                fixture.xcode_defaults_support(developer)
+
     def test_machine_output_keeps_stderr_diagnostics_out_of_strict_json(self):
         with tempfile.TemporaryDirectory() as temporary:
             evidence = Path(temporary)
