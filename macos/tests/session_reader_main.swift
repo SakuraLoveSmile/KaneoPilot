@@ -203,6 +203,9 @@ struct SessionReaderFixtures {
             session["session_marker"] = "\(taskID)/\(newRunID)"
             session["run_status"] = "running"
             entry["session"] = session
+            var connection = entry["connection"] as! [String: Any]
+            connection["poll_seconds"] = 3600
+            entry["connection"] = connection
             seeded["\(taskID)/\(newRunID)"] = entry
             state["session_fixture_seed"] = seeded
         }
@@ -211,6 +214,11 @@ struct SessionReaderFixtures {
         check(store.selectedRunID == newRunID && store.roundDetail?.runStatus == "running",
               "manual status refresh loads and selects the newly created execution round")
         check(store.sessions.contains { $0.runId == runID }, "manual refresh retains the old failed round in the picker")
+        // refresh schedules the new Plus check asynchronously. Settle it before sharing
+        // the command log with the Codex fixture; stop alone cannot join a detached CLI.
+        await waitFor { store.controlStatus?.runId == newRunID && !store.controlLoading }
+        check(store.controlStatus?.runId == newRunID && !store.controlLoading,
+              "the final Plus control request settles before the next backend fixture")
         store.stop()
         print("failed-execution retry Store fixtures passed: current/history/trash, stale confirmation, rejection, merged clicks, queue and retained history")
     }
@@ -280,7 +288,11 @@ struct SessionReaderFixtures {
               "core-authorized Codex preflight failure exposes retry despite unknown task send state")
         check(store.roundDetail?.turnId == nil && store.session?.sessionId == nil,
               "preflight retry requires no invented CLI session or turn in the UI fixture")
-        check(try count("session-control-status") == beforeControl, "Codex preflight retry never requests Plus control")
+        let controlRequests = try loggedRequests(commandLog).filter { $0["command"] as? String == "session-control-status" }
+        if controlRequests.count != beforeControl {
+            print("unexpected Plus control requests during Codex preflight: \(controlRequests.dropFirst(beforeControl))")
+        }
+        check(controlRequests.count == beforeControl, "Codex preflight retry never requests Plus control")
         check(try count("resolve") == beforeResolve, "reading a retry option never submits the confirmation")
         let planSHA = store.retryTask?.planSha256
 

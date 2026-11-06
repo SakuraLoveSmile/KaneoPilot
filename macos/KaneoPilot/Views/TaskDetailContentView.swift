@@ -869,6 +869,9 @@ struct TaskOverviewTabView: View {
     private var nextStepExplanation: String {
         if detail.readOnly == true { return "此任务为只读记录，可查看计划、会话和历史证据。" }
         if detail.sendState == "unknown" {
+            if detail.canRetryExecution {
+                return "已确认原轮次在模型调用前失败。可沿用计划和原工作树重新执行，新轮次使用当前执行设置，已有改动与失败记录保留。"
+            }
             return "发送结果不明。先重新校验并查看执行证据，再通过更多操作作出裁决。"
         }
         if primaryAction == "continue_delivery" {
