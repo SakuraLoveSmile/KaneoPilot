@@ -233,6 +233,162 @@ def metadata_denials(output):
     return matches
 
 
+METADATA_URL = "http://169.254.169.254/metadata/instance"
+BOT_DETECTOR_PROBE = r'''
+import 'dart:convert';
+import 'dart:io' as io;
+import 'package:file/local.dart';
+import 'package:flutter_tools/src/base/bot_detector.dart';
+import 'package:flutter_tools/src/base/config.dart';
+import 'package:flutter_tools/src/base/logger.dart';
+import 'package:flutter_tools/src/base/platform.dart';
+import 'package:flutter_tools/src/persistent_tool_state.dart';
+const signals = <String>__SIGNALS__;
+const metadataUrl = '__METADATA_URL__';
+final class ObservedHttpClient implements io.HttpClient {
+  ObservedHttpClient(this.delegate, this.attempts);
+  final io.HttpClient delegate;
+  final List<Map<String, Object?>> attempts;
+  @override Duration? get connectionTimeout => delegate.connectionTimeout;
+  @override set connectionTimeout(Duration? value) { delegate.connectionTimeout = value; }
+  @override Future<io.HttpClientRequest> getUrl(Uri url) async {
+    final row = <String, Object?>{'url': url.toString(), 'outcome': 'pending'};
+    attempts.add(row);
+    try {
+      final request = await delegate.getUrl(url);
+      row['outcome'] = 'connected';
+      return request;
+    } on io.SocketException catch (error) {
+      final code = error.osError?.errorCode;
+      row.addAll({'outcome': 'socket_exception', 'errno': code,
+        'address': error.address?.address, 'port': error.port});
+      if (url.toString() == metadataUrl && (code == 1 || code == 13)) {
+        io.stderr.writeln('metadata request transport permission denied url=$url errno=$code '
+          'address=${error.address?.address} port=${error.port}');
+      }
+      rethrow;
+    }
+  }
+  @override void close({bool force = false}) { delegate.close(force: force); }
+  @override Never noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected HttpClient member: ${invocation.memberName}');
+  }
+}
+Future<void> main(List<String> args) async {
+  if (args.length != 1) throw ArgumentError('new XDG directory required');
+  const fs = LocalFileSystem();
+  const platform = LocalPlatform();
+  final logger = BufferLogger.test();
+  final home = platform.environment['HOME'];
+  if (home == null || fs.file(fs.path.join(home, '.flutter_tool_state')).existsSync()) {
+    throw StateError('legacy HOME state is not allowed');
+  }
+  if (platform.environment['XDG_CONFIG_HOME'] != args.single) {
+    throw StateError('controlled XDG directory was not selected');
+  }
+  final directory = fs.directory(args.single);
+  if (directory.existsSync()) throw StateError('XDG state directory is not cold');
+  directory.createSync(recursive: true);
+  final config = Config('tool_state', fileSystem: fs, logger: logger, platform: platform);
+  final expectedPath = fs.path.join(args.single, 'tool_state');
+  if (config.configPath != expectedPath) throw StateError('tool state escaped controlled XDG');
+  final initialExists = fs.file(config.configPath).existsSync();
+  if (initialExists) throw StateError('tool state file is not cold');
+  final state = PersistentToolState(fileSystem: fs, logger: logger, platform: platform);
+  final before = state.isRunningOnBot;
+  if (before != null) throw StateError('bot state was already cached');
+  final clients = <ObservedHttpClient>[];
+  final attempts = <Map<String, Object?>>[];
+  final detector = BotDetector(
+    httpClientFactory: () {
+      final client = ObservedHttpClient(io.HttpClient(), attempts);
+      clients.add(client);
+      return client;
+    }, platform: platform, persistentToolState: state);
+  try {
+    final result = await detector.isRunningOnBot;
+    print(jsonEncode({'config_path': config.configPath,
+      'initial_config_exists': initialExists,
+      'persisted_config_exists': fs.file(config.configPath).existsSync(),
+      'initial_state': before, 'is_bot': result, 'persisted_state': state.isRunningOnBot,
+      'http_client_count': clients.length, 'http_attempts': attempts,
+      'present_signals': signals.where(io.Platform.environment.containsKey).toList()..sort()}));
+  } finally {
+    for (final client in clients) { client.close(force: true); }
+  }
+}
+'''.replace("__SIGNALS__", json.dumps(list(BOT_DETECTOR_SIGNALS))).replace("__METADATA_URL__", METADATA_URL)
+
+
+def bot_detector_command(flutter, source, state):
+    sdk = flutter.parent.parent
+    dart = sdk / "bin/cache/dart-sdk/bin/dart"
+    packages = sdk / "packages/flutter_tools/.dart_tool/package_config.json"
+    require(dart.is_file() and packages.is_file(), "Pinned Flutter Dart runtime/package configuration is missing")
+    require(not state.exists() and not state.is_symlink(), "BotDetector state directory is not cold")
+    return ["XDG_CONFIG_HOME=" + str(state), str(dart), "--packages=" + str(packages), str(source), str(state)], packages
+
+
+def parse_bot_detector_receipt(output, *, bot, state):
+    receipt = json.loads(output)
+    expected = {"config_path": str(state / "tool_state"), "initial_config_exists": False,
+                "persisted_config_exists": True, "initial_state": None,
+                "is_bot": bot, "persisted_state": bot,
+                "http_client_count": 0 if bot else 1, "present_signals": ["BOT"] if bot else []}
+    require(type(receipt) is dict and set(receipt) == set(expected) | {"http_attempts"},
+            "Explicit SDK BotDetector getter receipt fields differ")
+    # JSON comparison also rejects integer booleans and boolean client counts.
+    require(json.dumps({key: receipt[key] for key in expected}, sort_keys=True) == json.dumps(expected, sort_keys=True),
+            "Explicit SDK BotDetector getter receipt differs from the cold expected path")
+    attempts = receipt["http_attempts"]
+    if bot:
+        require(attempts == [], "BOT positive control made an HTTP request")
+    else:
+        require(type(attempts) is list and len(attempts) == 1 and type(attempts[0]) is dict,
+                "No-BOT control did not make exactly one metadata request")
+        row = attempts[0]
+        require(set(row) == {"url", "outcome", "errno", "address", "port"}
+                and row["url"] == METADATA_URL and row["outcome"] == "socket_exception"
+                and type(row["errno"]) is int and row["errno"] in (1, 13)
+                and (row["address"] is None or type(row["address"]) is str)
+                and (row["port"] is None or type(row["port"]) is int),
+                "No-BOT control lacks a real metadata request with a permission errno")
+    return receipt
+
+
+def snapshot_flutter_tool_state(private_config, evidence, *, label="restricted", bot=True):
+    source = private_config / "tool_state"
+    require(source.is_file() and not source.is_symlink(), "Frozen XDG tool_state was not created by real Flutter verification")
+    values = json.loads(source.read_text(encoding="utf-8"))
+    require(type(values) is dict and values.get("is-bot") is bot,
+            "Real Flutter did not persist the expected BOT value in its frozen XDG tool_state")
+    artifact = evidence / (label + "-flutter-tool-state.json")
+    shutil.copyfile(source, artifact)
+    return {"source_path": str(source), "artifact": artifact.name, "sha256": sha256(artifact),
+            "bytes": artifact.stat().st_size, "is_bot": values["is-bot"]}
+
+
+def bot_detector_probe(flutter, source, state, spec, environment, constants, child_env,
+                       evidence, *, label, bot):
+    command, packages = bot_detector_command(flutter, source, state)
+    argv = native_argv(environment, constants, spec, without_ci_signals(command, remove_bot=not bot),
+                       log_denials=True)
+    output = run(argv, cwd=spec["cwd"], env=child_env, evidence=evidence, label=label,
+                 timeout=300, separate_stderr=True)
+    record = json.loads((evidence / (label + ".json")).read_text(encoding="utf-8"))
+    receipt = parse_bot_detector_receipt(output.read_text(encoding="utf-8"), bot=bot, state=state)
+    result = {"kind": "explicit_sdk_bot_detector_getter", "state_directory": str(state),
+              "source": source.name, "source_sha256": sha256(source),
+              "package_config": str(packages), "package_config_sha256": sha256(packages),
+              "receipt": receipt, "tool_state": snapshot_flutter_tool_state(state, evidence, label=label, bot=bot),
+              **record}
+    denied = metadata_denials(output.read_text(encoding="utf-8") + "\n"
+                             + (evidence / record["stderr_log"]).read_text(encoding="utf-8"))
+    if not bot:
+        require(denied, "No-BOT counterexample lacks a specific 169.254.169.254 denial")
+    return result, denied
+
+
 def git(cwd, *args):
     result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
                             cwd=cwd, text=True, capture_output=True, timeout=30)
@@ -781,16 +937,19 @@ def validate(args):
                 require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(), "Private analyzer identity missing")
                 require(host_analyzer.read_text() == "unchanged\n", "Host analyzer sentinel changed")
                 restricted["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_write_denied": True}
-                no_bot_config = private_config.parent / "no-bot-config"
-                require(not no_bot_config.exists(), "No-BOT counterexample is already warm")
-                no_bot_config.mkdir()
-                no_bot_argv = native_argv(environment, constants, spec, without_ci_signals(
-                    ["XDG_CONFIG_HOME=" + str(no_bot_config), str(flutter), "test", "--no-pub", "--verbose"],
-                    remove_bot=True), log_denials=True)
-                output = run(no_bot_argv, cwd=app, env=child_env, evidence=evidence,
-                             label="cold-without-bot", timeout=900, check=False)
-                denied = metadata_denials(output.read_text(encoding="utf-8"))
-                require(denied, "No-BOT counterexample lacks a specific 169.254.169.254 denial")
+                restricted["flutter_tool_state"] = snapshot_flutter_tool_state(private_config, evidence)
+                # This explicit SDK getter diagnostic isolates the metadata
+                # branch and default XDG state from the business verification.
+                bot_source = evidence / "bot-detector-probe.dart"
+                bot_source.write_text(BOT_DETECTOR_PROBE, encoding="utf-8")
+                positive, _ = bot_detector_probe(flutter, bot_source,
+                    private_config.parent / "bot-detector-positive-state", spec, environment, constants,
+                    child_env, evidence, label="cold-with-bot", bot=True)
+                restricted["bot_detector_positive"] = positive
+                negative, denied = bot_detector_probe(flutter, bot_source,
+                    private_config.parent / "bot-detector-without-bot-state", spec, environment, constants,
+                    child_env, evidence, label="cold-without-bot", bot=False)
+                restricted["bot_detector_without_bot"] = negative
                 restricted["without_bot_metadata_denials"] = denied
                 resumed = environment.preflight(spec, base)
                 write_json(evidence / "restricted-resume-preflight.json", resumed)

@@ -19,6 +19,15 @@ fixture = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fixture)
 
 
+def bot_receipt(bot, state, *, permission_errno=1):
+    return {"config_path": str(state / "tool_state"), "initial_config_exists": False,
+            "persisted_config_exists": True, "initial_state": None, "is_bot": bot,
+            "persisted_state": bot, "http_client_count": 0 if bot else 1,
+            "present_signals": ["BOT"] if bot else [],
+            "http_attempts": [] if bot else [{"url": fixture.METADATA_URL, "outcome": "socket_exception",
+                                             "errno": permission_errno, "address": "169.254.169.254", "port": 80}]}
+
+
 class CodexPlatformFixtureTests(unittest.TestCase):
     def test_no_sandbox_runs_directly_and_never_uses_the_sandbox_subcommand(self):
         environment = mock.Mock()
@@ -441,6 +450,117 @@ class CodexPlatformFixtureTests(unittest.TestCase):
         self.assertEqual(fixture.metadata_denials("Permission denied\nContacting 169.254.169.254"), [])
         self.assertTrue(fixture.metadata_denials("Sandbox: dart deny(1) network-outbound 169.254.169.254:80"))
         self.assertTrue(fixture.metadata_denials("SocketException: Operation not permitted, address = 169.254.169.254"))
+
+    def test_explicit_bot_detector_receipts_require_the_complete_cold_paths(self):
+        state = Path("/controlled/xdg")
+        for bot in (True, False):
+            expected = bot_receipt(bot, state)
+            self.assertEqual(fixture.parse_bot_detector_receipt(json.dumps(expected), bot=bot, state=state), expected)
+            mutations = [{**expected, "initial_state": bot}, {**expected, "is_bot": int(bot)},
+                         {**expected, "persisted_state": not bot}, {**expected, "http_client_count": bot},
+                         {**expected, "present_signals": ["CI"]}, {**expected, "config_path": "/home/tool_state"},
+                         {**expected, "initial_config_exists": True}, {**expected, "persisted_config_exists": False}]
+            for changed in mutations:
+                with self.subTest(bot=bot, changed=changed), self.assertRaisesRegex(AssertionError, "receipt differs"):
+                    fixture.parse_bot_detector_receipt(json.dumps(changed), bot=bot, state=state)
+            with self.assertRaisesRegex(AssertionError, "fields differ"):
+                fixture.parse_bot_detector_receipt(json.dumps({**expected, "extra": True}), bot=bot, state=state)
+        with self.assertRaises(json.JSONDecodeError):
+            fixture.parse_bot_detector_receipt("bootstrap on stdout\n{}", bot=False, state=state)
+        for code in (None, True, 0, 8, 60, 61, 65, 403):
+            with self.subTest(errno=code), self.assertRaisesRegex(AssertionError, "permission errno"):
+                fixture.parse_bot_detector_receipt(json.dumps(bot_receipt(False, state, permission_errno=code)),
+                                                   bot=False, state=state)
+        fixture.parse_bot_detector_receipt(json.dumps(bot_receipt(False, state, permission_errno=13)), bot=False, state=state)
+        for updates in ({"url": "http://192.0.2.1/metadata/instance"}, {"outcome": "connected"}):
+            changed = bot_receipt(False, state)
+            changed["http_attempts"][0].update(updates)
+            with self.assertRaisesRegex(AssertionError, "permission errno"):
+                fixture.parse_bot_detector_receipt(json.dumps(changed), bot=False, state=state)
+
+    def test_explicit_getter_uses_pinned_sdk_packages_same_profile_and_separate_cold_states(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            flutter = root / "sdk/bin/flutter"
+            dart = root / "sdk/bin/cache/dart-sdk/bin/dart"
+            packages = root / "sdk/packages/flutter_tools/.dart_tool/package_config.json"
+            dart.parent.mkdir(parents=True)
+            packages.parent.mkdir(parents=True)
+            dart.write_text("never executed")
+            packages.write_text('{"packages": []}')
+            source = evidence / "bot-detector-probe.dart"
+            source.write_text(fixture.BOT_DETECTOR_PROBE)
+            spec = {"cwd": str(root), "config": {}}
+            environment = SimpleNamespace(permission_profile=lambda spec: "frozen-analysis", launcher_config=lambda spec: [])
+            constants = SimpleNamespace(codex_bin=lambda: "/pinned/codex")
+            captured = []
+            include_denial = True
+            def run(argv, **kwargs):
+                captured.append(argv)
+                state = Path(argv[-1])
+                self.assertFalse(state.exists())
+                state.mkdir()
+                bot = kwargs["label"] == "cold-with-bot"
+                receipt = bot_receipt(bot, state)
+                (state / "tool_state").write_text(json.dumps({"is-bot": bot}))
+                log = evidence / (kwargs["label"] + ".log")
+                errors = evidence / (kwargs["label"] + ".stderr.log")
+                log.write_text(json.dumps(receipt) + "\n")
+                errors.write_text("Sandbox: dart deny(1) network-outbound 169.254.169.254:80\n"
+                                  if not bot and include_denial else "")
+                fixture.write_json(evidence / (kwargs["label"] + ".json"),
+                    {"argv": argv, "exit_code": 0, "log": log.name, "log_sha256": fixture.sha256(log),
+                     "stderr_log": errors.name, "stderr_sha256": fixture.sha256(errors)})
+                return log
+            with mock.patch.object(fixture, "run", side_effect=run) as process:
+                positive, _ = fixture.bot_detector_probe(flutter, source, root / "positive", spec,
+                    environment, constants, {"BOT": "true"}, evidence, label="cold-with-bot", bot=True)
+                negative, denied = fixture.bot_detector_probe(flutter, source, root / "negative", spec,
+                    environment, constants, {"BOT": "true"}, evidence, label="cold-without-bot", bot=False)
+                self.assertEqual(positive["receipt"]["http_client_count"], 0)
+                self.assertEqual(negative["receipt"]["http_client_count"], 1)
+                self.assertTrue(denied)
+                self.assertEqual(positive["source_sha256"], fixture.sha256(source))
+                self.assertEqual(negative["package_config_sha256"], fixture.sha256(packages))
+                self.assertNotEqual(positive["state_directory"], negative["state_directory"])
+                for argv in captured:
+                    self.assertEqual(argv[:6], ["/pinned/codex", "sandbox", "-P", "frozen-analysis", "-C", str(root)])
+                    self.assertIn("--log-denials", argv)
+                    self.assertEqual(argv[-4:-1], [str(dart), "--packages=" + str(packages), str(source)])
+                    self.assertIn("XDG_CONFIG_HOME=" + argv[-1], argv)
+                    self.assertNotIn("test", argv)
+                self.assertNotIn("BOT", captured[0])
+                self.assertIn("BOT", captured[1])
+                with self.assertRaisesRegex(AssertionError, "not cold"):
+                    fixture.bot_detector_probe(flutter, source, root / "negative", spec,
+                        environment, constants, {}, evidence, label="warm", bot=False)
+                self.assertEqual(process.call_count, 2)
+                include_denial = False
+                with self.assertRaisesRegex(AssertionError, "specific 169.254.169.254 denial"):
+                    fixture.bot_detector_probe(flutter, source, root / "no-denial", spec,
+                        environment, constants, {}, evidence, label="missing-denial", bot=False)
+
+    def test_real_flutter_tool_state_snapshot_binds_only_the_frozen_task_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, evidence = root / "frozen-xdg", root / "evidence"
+            config.mkdir()
+            evidence.mkdir()
+            state = config / "tool_state"
+            state.write_text('{"is-bot": true, "task-owned": "sentinel"}\n')
+            result = fixture.snapshot_flutter_tool_state(config, evidence)
+            self.assertEqual(result["source_path"], str(state))
+            self.assertTrue(result["is_bot"])
+            self.assertEqual((evidence / result["artifact"]).read_bytes(), state.read_bytes())
+            self.assertEqual(result["sha256"], fixture.sha256(evidence / result["artifact"]))
+            state.write_text('{"is-bot": false}')
+            with self.assertRaisesRegex(AssertionError, "expected BOT"):
+                fixture.snapshot_flutter_tool_state(config, evidence)
+            state.unlink()
+            with self.assertRaisesRegex(AssertionError, "not created"):
+                fixture.snapshot_flutter_tool_state(config, evidence)
 
     def test_local_entry_refuses_before_creating_directories_or_starting_tools(self):
         with tempfile.TemporaryDirectory() as temporary:
