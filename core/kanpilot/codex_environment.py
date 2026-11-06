@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
+import shlex
 import stat
 import subprocess
 import sys
+from xml.parsers.expat import ExpatError
 from pathlib import Path
 
 from . import constants, util
@@ -70,6 +73,27 @@ def _flutter_settings():
     return result
 
 
+def _check_java_ipv4_override():
+    # HotSpot parses _JAVA_OPTIONS after command-line arguments. Its quotes
+    # group values, but backslashes are literal rather than shell escapes.
+    options = os.environ.get("_JAVA_OPTIONS", "")
+    if not options:
+        return
+    lexer = shlex.shlex(options, posix=True)
+    lexer.whitespace_split = True
+    lexer.whitespace = " \t\r\n\v\f"
+    lexer.commenters = ""
+    lexer.escape = ""
+    try:
+        for argument in lexer:
+            key, separator, value = argument.partition("=")
+            if key == "-Djava.net.preferIPv4Stack":
+                _require(bool(separator) and value.lower() == "true",
+                         "Android 受限构建要求 IPv4；请先移除 _JAVA_OPTIONS 中冲突的同名 JVM 参数")
+    except ValueError as exc:
+        raise util.KanpilotError("codex_environment_unavailable", "Android _JAVA_OPTIONS 引号格式无效，无法核对 IPv4 参数") from exc
+
+
 def _expected_v2(spec):
     from .codex_execution import verification_flutter_commands
     result = _expected(spec)
@@ -94,6 +118,11 @@ def _expected_v2(spec):
         setup["flutter_settings"] = _flutter_settings()
         result["environment"]["PUB_CACHE"] = str(root / "pub-cache")
     if setup["android"]:
+        _check_java_ipv4_override()
+        java_options = "-Djava.net.preferIPv4Stack=true"
+        _require(not os.environ.get("JDK_JAVA_OPTIONS") or os.environ["JDK_JAVA_OPTIONS"] == java_options,
+                 "Android 受限构建要求固定 JDK_JAVA_OPTIONS；请先移除冲突的宿主 JVM 参数")
+        result["environment"]["JDK_JAVA_OPTIONS"] = java_options
         setup["gradle_cache_source"] = _cache_source("GRADLE_USER_HOME", Path.home() / ".gradle")
         result["environment"]["GRADLE_USER_HOME"] = str(root / "gradle")
         # Gradle's documented read-only dependency cache does not contain user
@@ -109,6 +138,11 @@ def _expected_v2(spec):
             result["environment"]["ANDROID_SDK_ROOT"] = result["environment"]["ANDROID_HOME"]
     if "macos" in platforms:
         _require(sys.platform == "darwin", "冻结的 macOS 构建需要 macOS 执行端")
+        # Xcode's private compatibility setting avoids nesting SwiftPM's
+        # manifest sandbox inside the already restricted Codex process.
+        # Its availability must be checked with each supported Xcode version.
+        result["environment"]["XCODE_USER_DEFAULTS_FILE"] = str(root / "config/xcode-user-defaults.plist")
+        setup["xcode_user_defaults"] = {"IDEPackageSupportDisableManifestSandbox": True}
         # Foundation NSTemporaryDirectory uses confstr, even with TMPDIR set.
         system_tmp = os.confstr(65537)  # _CS_DARWIN_USER_TEMP_DIR (Darwin ABI)
         _require(bool(system_tmp), "无法确定 macOS 系统用户临时目录")
@@ -219,6 +253,28 @@ def _prepare_settings(spec):
         else:
             with os.fdopen(target, "w", encoding="utf-8") as stream:
                 stream.write(util.jdump(expected))
+        if "xcode_user_defaults" in environment["setup"]:
+            expected = environment["setup"]["xcode_user_defaults"]
+            try:
+                target = os.open("xcode-user-defaults.plist", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=fd)
+            except FileExistsError:
+                target = os.open("xcode-user-defaults.plist", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=fd)
+                with os.fdopen(target, "rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    _require(stat.S_ISREG(info.st_mode) and info.st_size <= 65536,
+                             "本轮 Xcode 构建设置被特殊文件替换或过大")
+                    try:
+                        actual = plistlib.loads(stream.read(65537))
+                    except (ValueError, ExpatError) as exc:
+                        raise util.KanpilotError("codex_environment_unavailable", "本轮 Xcode 构建设置不是有效 plist") from exc
+                _require(type(actual) is dict and set(actual) == set(expected)
+                         and all(type(actual[key]) is type(value) and actual[key] == value
+                                 for key, value in expected.items()), "本轮冻结的 Xcode 构建设置已变化")
+            else:
+                with os.fdopen(target, "wb") as stream:
+                    plistlib.dump(expected, stream)
     finally:
         os.close(fd)
 
@@ -270,6 +326,8 @@ def launcher_config(spec):
     filesystem.update({path: "write" for path in spec["sandbox_writable_roots"]})
     filesystem.update({path: "write" for path in environment.get("writable_roots", [])})
     filesystem.update({str(Path(spec["cwd"]) / name): "read" for name in (".git", ".codex", ".agents")})
+    if "XCODE_USER_DEFAULTS_FILE" in environment["environment"]:
+        filesystem[environment["environment"]["XCODE_USER_DEFAULTS_FILE"]] = "read"
     profile = permission_profile(spec)
     values = {"default_permissions": profile, "features.network_proxy": True,
               "permissions." + profile + ".filesystem": filesystem,

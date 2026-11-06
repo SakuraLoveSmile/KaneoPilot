@@ -58,6 +58,7 @@ def owner_response(conn, owner):
 
 
 def worker():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # exercise bounded escalation
     owner = os.environ["KANPILOT_EXECUTOR_INSTANCE_ID"]
     entry = identity(os.getpid())
     conn = connect()
@@ -69,7 +70,6 @@ def worker():
     conn.execute("INSERT INTO workers VALUES (?,?)", (owner, json.dumps(entry)))
     conn.commit()
     (ROOT / "worker.json").write_text(json.dumps(entry))
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # exercise bounded escalation
     time.sleep(60)
 
 
@@ -78,6 +78,14 @@ def stage():
     conn = connect()
     row = conn.execute("SELECT state FROM owners WHERE id=?", (owner,)).fetchone()
     assert row and row[0] == "active", "stage started before registration"
+    running = (ROOT / "running-stage").exists()
+    if running:
+        def stopped(_signum, _frame):
+            conn = connect()
+            state = conn.execute("SELECT state FROM owners WHERE id=?", (owner,)).fetchone()[0]
+            (ROOT / "stage-stop-state").write_text(state)
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, stopped)
     (ROOT / "stage.json").write_text(json.dumps({"owner": owner, "pid": os.getpid()}))
     subprocess.Popen([sys.executable, str(ROOT / "core.py"), "worker"],
                      start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -85,13 +93,7 @@ def stage():
         if (ROOT / "worker.json").exists():
             break
         time.sleep(.02)
-    if (ROOT / "running-stage").exists():
-        def stopped(_signum, _frame):
-            conn = connect()
-            state = conn.execute("SELECT state FROM owners WHERE id=?", (owner,)).fetchone()[0]
-            (ROOT / "stage-stop-state").write_text(state)
-            sys.exit(0)
-        signal.signal(signal.SIGTERM, stopped)
+    if running:
         time.sleep(60)
     else:
         time.sleep(.1)

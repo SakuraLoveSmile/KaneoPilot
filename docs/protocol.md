@@ -1925,6 +1925,10 @@ KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，�
 
 macOS 原生能力额外冻结 `~/Library/Developer/Xcode/DerivedData`、Darwin `confstr(_CS_DARWIN_USER_TEMP_DIR)` 与 `~/Library/Caches/org.swift.swiftpm/manifests` 三个规范写根。Xcode 的 SPM 预取与 `-list` 没有 scheme，不能统一注入 `-derivedDataPath`；Foundation 的临时目录也不保证遵循 TMPDIR。因此第二根是明确的**宿主共享临时目录能力**，与本轮私有 TMPDIR 分别记录。第三根对应真实受限构建中 SwiftPM manifest 编译的 `.dia`、`manifest.db` 与其伴随文件，不扩大为整个 SwiftPM 缓存、HOME、Library、系统用户缓存或 SwiftPM 信任/配置目录；路径含符号链接时拒绝。
 
+macOS v2 另冻结 `XCODE_USER_DEFAULTS_FILE=<本轮根>/config/xcode-user-defaults.plist`，内容仅为 Boolean `IDEPackageSupportDisableManifestSandbox=true`，避免 SwiftPM manifest 的内层 Seatbelt 与 Codex 外层沙箱冲突。该项是 Xcode 实现配置，不是公开稳定 API；云端固定 Xcode 16.4，检查实现入口并运行原文构建，工具版本变化必须重新验证。文件以 NOFOLLOW/独占创建，仅接受不超过 64 KiB 的普通 plist 与精确键值类型，首次与 resume 都复核；沙箱显式将该文件设为只读，其他外层权限与公网限制继续生效，不写宿主 Xcode defaults。
+
+Android v2 冻结 `JDK_JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true`，使 Java 的 Gradle 本地监听使用 IPv4 socket，避免默认双栈路径被受限网络策略拒绝。宿主该变量为空或已是同一精确值才允许冻结与启动，其他非空值明确报环境冲突且不输出原值；`_JAVA_OPTIONS` 在 OpenJDK 17 中后于命令行解析，显式同名属性非 true 时同样拒绝。其余 JVM 参数、`JAVA_TOOL_OPTIONS` 和项目 Gradle 设置保留，不把全部参数持久化到 spec。云端同一 profile 对照 Java 默认/IPv4 回环收发，并以原 APK 命令验收，不能用独立 Python 回环检查代替。
+
 基础安全预检成功后，执行端用**同一冻结沙箱、无模型**运行 `flutter pub get --offline --enforce-lockfile` 作为平台准备；它不是业务 verify 回执。准备前后源码快照必须一致，锁定依赖不能变；项目引用 FlutterGeneratedPluginSwiftPackage 时核对 Package.swift 已生成。缺失 wrapper/依赖、准备非零退出、平台生成物仍缺失均给出具体错误并在模型前终止，不静默允许公网下载。成功环境回执分开记录基础检查、实际写根及准备命令/退出码/缓存种子计数；准备不替代随后每条原文 verify 的原生命令退出码。
 
 failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门禁核对。核对后将脱敏、限长的 summary（4096 字符）与最多 20 条非零 checks（每命令 1024 字符，保留整数退出码及省略数）记入 job.failure_report；终态说明上限 8192 字符。不生成成功专属 codex-report.json、不自动重试。monitor 在判定完整原始失败标记后去重和限长，避免重复通用文字或截断削弱失败门禁。

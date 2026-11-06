@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import os
+import plistlib
 import socket
 import subprocess
 import unittest
@@ -38,6 +39,8 @@ class CodexEnvironmentTests(unittest.TestCase):
         os.environ.update(XDG_CONFIG_HOME=str(self.root / "host-xdg-config"),
                           PUB_CACHE=str(self.root / ".pub-cache"),
                           GRADLE_USER_HOME=str(self.root / ".gradle"))
+        os.environ.pop("JDK_JAVA_OPTIONS", None)
+        os.environ.pop("_JAVA_OPTIONS", None)
 
     def freeze_flutter(self):
         sdk, binary = self.flutter_sdk()
@@ -479,6 +482,9 @@ class CodexEnvironmentTests(unittest.TestCase):
         before = copy.deepcopy(self.spec)
         self.assertEqual(environment.validate(self.spec), legacy)
         self.assertNotIn("BOT", environment.child_env(self.spec, {}))
+        self.assertNotIn("XCODE_USER_DEFAULTS_FILE", environment.child_env(self.spec, {}))
+        self.assertNotIn("JDK_JAVA_OPTIONS", environment.child_env(self.spec, {}))
+        self.assertNotIn("setup", legacy)
         checks = {name: True for name in environment.CHECKS}
         native = subprocess.CompletedProcess([], 0, json.dumps({"v": 1, "status": "passed", "checks": checks}), "")
         with mock.patch.object(environment.subprocess, "run", return_value=native), mock.patch(
@@ -509,7 +515,10 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertEqual(frozen["environment"]["JAVA_HOME"], str(self.root / "jdk17"))
         self.assertEqual(frozen["environment"]["ANDROID_HOME"], str(self.root / "android-sdk"))
         self.assertEqual(frozen["environment"]["ANDROID_SDK_ROOT"], str(self.root / "android-sdk"))
+        self.assertEqual(frozen["environment"]["JDK_JAVA_OPTIONS"], "-Djava.net.preferIPv4Stack=true")
         self.assertEqual(frozen["setup"]["flutter_settings"], allowed_settings)
+        self.assertNotIn("xcode_user_defaults", frozen["setup"])
+        self.assertNotIn("XCODE_USER_DEFAULTS_FILE", frozen["environment"])
         self.assertNotIn("api_key", frozen["setup"]["flutter_settings"])
         profile = self.configs(environment.launcher_config(self.spec))
         filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
@@ -517,6 +526,111 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertNotIn(str(self.root / ".pub-cache"), filesystem)
         self.persist_contract()
         self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"], frozen)
+
+    def test_android_ipv4_option_is_fixed_and_preserves_other_jvm_configuration(self):
+        fixed = "-Djava.net.preferIPv4Stack=true"
+        (self.repo / "android").mkdir()
+        properties = self.repo / "android/gradle.properties"
+        properties.write_text("org.gradle.jvmargs=-Xmx4G -Dfile.encoding=UTF-8\n")
+        before = properties.read_bytes()
+        with mock.patch.dict(os.environ, JAVA_TOOL_OPTIONS="-Dfixture.tool=true", _JAVA_OPTIONS="-Xmx64m"):
+            self.freeze_native()
+            for inherited in ("", fixed):
+                with self.subTest(inherited=inherited), mock.patch.dict(os.environ, JDK_JAVA_OPTIONS=inherited):
+                    environment.freeze(self.spec)
+                    self.assertEqual(environment.validate(self.spec)["environment"]["JDK_JAVA_OPTIONS"], fixed)
+                    actual = environment.child_env(self.spec, dict(os.environ))
+                    self.assertEqual(actual["JDK_JAVA_OPTIONS"], fixed)
+                    self.assertEqual(actual["JAVA_TOOL_OPTIONS"], "-Dfixture.tool=true")
+                    self.assertEqual(actual["_JAVA_OPTIONS"], "-Xmx64m")
+            self.assertEqual(properties.read_bytes(), before)
+            self.persist_contract()
+            self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"]["environment"]["JDK_JAVA_OPTIONS"], fixed)
+
+    def test_android_conflicting_jdk_options_fail_without_exposing_host_parameters(self):
+        self.freeze_native()
+        for conflicting in (" ", "-Djava.net.preferIPv4Stack=false", "-Dpassword=fixture-private-secret"):
+            with self.subTest(conflicting=conflicting), mock.patch.dict(os.environ, JDK_JAVA_OPTIONS=conflicting):
+                for operation in (environment.freeze, environment.validate):
+                    with self.subTest(operation=operation.__name__), self.assertRaises(util.KanpilotError) as caught:
+                        operation(copy.deepcopy(self.spec))
+                    self.assertEqual(caught.exception.code, "codex_environment_unavailable")
+                    self.assertIn("固定 JDK_JAVA_OPTIONS", caught.exception.message)
+                    self.assertNotIn("fixture-private-secret", caught.exception.message)
+                    self.assertNotIn("preferIPv4Stack=false", caught.exception.message)
+
+    def test_ipv4_java_option_does_not_change_non_android_or_legacy_specs(self):
+        with mock.patch.dict(os.environ, JDK_JAVA_OPTIONS="-Dfixture.keep=true"):
+            self.freeze_flutter()
+            self.assertNotIn("JDK_JAVA_OPTIONS", self.spec["tool_environment"]["environment"])
+            self.assertEqual(environment.child_env(self.spec, dict(os.environ))["JDK_JAVA_OPTIONS"], "-Dfixture.keep=true")
+        self.spec["required_verification_commands"] = [
+            self.spec["required_verification_commands"][0].replace(" test --no-pub", " build apk --no-pub")]
+        self.spec["tool_environment"] = environment._expected(self.spec)
+        legacy = copy.deepcopy(self.spec)
+        with mock.patch.dict(os.environ, JDK_JAVA_OPTIONS="-Dfixture.keep=true"):
+            self.assertEqual(environment.validate(self.spec), legacy["tool_environment"])
+            self.assertNotIn("JDK_JAVA_OPTIONS", self.spec["tool_environment"]["environment"])
+            self.assertEqual(environment.child_env(self.spec, dict(os.environ))["JDK_JAVA_OPTIONS"], "-Dfixture.keep=true")
+        self.assertEqual(self.spec, legacy)
+
+    def test_android_java_options_allow_true_and_preserve_unrelated_options_verbatim(self):
+        self.freeze_native()
+        accepted = [
+            "-Xmx64m -Dfixture.private=do-not-freeze",
+            '-Djava.net.preferIPv4Stack="true" -Dfixture.path="C:\\tools"',
+            "-Djava.net.preferIPv4Stack='TRUE' -Xmx64m",
+            '-Djava.net.preferIPv4Stack=tr""ue',
+            '-Djava.net."preferIPv4Stack"=true',
+            "-Dfixture.value=-Djava.net.preferIPv4Stack=false",
+            "-Djava.net.preferIPv4StackOther=false",
+        ]
+        for value in accepted:
+            with self.subTest(value=value), mock.patch.dict(os.environ, _JAVA_OPTIONS=value,
+                    JAVA_TOOL_OPTIONS="-Djava.net.preferIPv4Stack=false -Dfixture.private=do-not-freeze"):
+                environment.freeze(self.spec)
+                actual = environment.child_env(self.spec, dict(os.environ))
+                self.assertEqual(actual["_JAVA_OPTIONS"], value)
+                self.assertEqual(actual["JAVA_TOOL_OPTIONS"], os.environ["JAVA_TOOL_OPTIONS"])
+                self.assertEqual(actual["JDK_JAVA_OPTIONS"], "-Djava.net.preferIPv4Stack=true")
+                self.assertNotIn("do-not-freeze", util.jdump(self.spec["tool_environment"]))
+
+    def test_android_java_options_reject_conflicting_property_without_shell_unescaping_or_leaks(self):
+        self.freeze_native()
+        rejected = [
+            "-Djava.net.preferIPv4Stack=false",
+            '-Djava.net."preferIPv4Stack"=false',
+            '-Djava.net.preferIPv4"Stack"=false',
+            '-Djava.net.preferIPv4Stack="false" -Dpassword=fixture-private-secret',
+            "-Djava.net.preferIPv4Stack='false'",
+            "-Djava.net.preferIPv4Stack",
+            "-Djava.net.preferIPv4Stack=",
+            '-Djava.net.preferIPv4Stack=""',
+            r"-Djava.net.preferIPv4Stack=tr\ue",
+            "-Djava.net.preferIPv4Stack=true -Djava.net.preferIPv4Stack=false",
+            '-Djava.net.preferIPv4Stack="true -Dpassword=fixture-private-secret',
+            '-Dfixture.unrelated="unterminated',
+        ]
+        for value in rejected:
+            with self.subTest(value=value), mock.patch.dict(os.environ, _JAVA_OPTIONS=value):
+                for operation in (environment.freeze, environment.validate):
+                    with self.subTest(operation=operation.__name__), self.assertRaises(util.KanpilotError) as caught:
+                        operation(copy.deepcopy(self.spec))
+                    self.assertEqual(caught.exception.code, "codex_environment_unavailable")
+                    self.assertIn("_JAVA_OPTIONS", caught.exception.message)
+                    self.assertNotIn("fixture-private-secret", caught.exception.message)
+                    self.assertNotIn("preferIPv4Stack=false", caught.exception.message)
+
+    def test_java_options_ipv4_guard_does_not_apply_to_non_android_or_v1(self):
+        value = "-Djava.net.preferIPv4Stack=false"
+        with mock.patch.dict(os.environ, _JAVA_OPTIONS=value):
+            self.freeze_flutter()
+            self.assertEqual(environment.child_env(self.spec, dict(os.environ))["_JAVA_OPTIONS"], value)
+            self.spec["required_verification_commands"] = [
+                self.spec["required_verification_commands"][0].replace(" test --no-pub", " build apk --no-pub")]
+            self.spec["tool_environment"] = environment._expected(self.spec)
+            self.assertEqual(environment.validate(self.spec)["v"], 1)
+            self.assertEqual(environment.child_env(self.spec, dict(os.environ))["_JAVA_OPTIONS"], value)
 
     def test_default_flutter_settings_without_xdg_are_consistent_on_linux_and_macos(self):
         settings = self.root / ".config/flutter/settings"
@@ -574,6 +688,109 @@ class CodexEnvironmentTests(unittest.TestCase):
                             environment.validate(self.spec)
                     finally:
                         replaced.unlink()
+
+    @contextlib.contextmanager
+    def macos_environment(self):
+        host_tmp = self.root / "system-temp"
+        host_tmp.mkdir(exist_ok=True)
+        with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
+                environment.os, "confstr", return_value=str(host_tmp), create=True):
+            yield
+
+    def test_macos_manifest_defaults_are_private_frozen_and_readonly_in_both_launches(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            frozen = self.spec["tool_environment"]
+            private = self.repo / ".pi/kanpilot/codex/r"
+            target = private / "config/xcode-user-defaults.plist"
+            expected = {"IDEPackageSupportDisableManifestSandbox": True}
+            self.assertEqual(frozen["environment"]["XCODE_USER_DEFAULTS_FILE"], str(target))
+            self.assertEqual(frozen["setup"]["xcode_user_defaults"], expected)
+            self.assertNotIn("JDK_JAVA_OPTIONS", frozen["environment"])
+            self.assertNotIn(str(target), frozen["writable_roots"])
+            environment._directory(self.spec, create=True)
+            environment._prepare_settings(self.spec)
+            contents = target.read_bytes()
+            self.assertEqual(plistlib.loads(contents), expected)
+            self.assertIn(b"<true/>", contents)
+            environment._prepare_settings(self.spec)
+            self.assertEqual(target.read_bytes(), contents)
+            self.assertEqual(json.loads((target.parent / "settings").read_text()), {})
+            provider = mock.Mock(config_args=[])
+            for session in (None, "same-thread"):
+                with self.subTest(session=session):
+                    config = self.configs(adapter.launcher_argv(self.spec, "schema", "output", provider, session))
+                    filesystem = config["permissions"][config["default_permissions"]]["filesystem"]
+                    self.assertEqual(filesystem[str(self.repo)], "write")
+                    self.assertEqual(filesystem[str(target)], "read")
+                    self.assertNotIn(str(target.parent), filesystem)
+                    self.assertEqual(config["shell_environment_policy"]["set"]["XCODE_USER_DEFAULTS_FILE"], str(target))
+            self.persist_contract()
+            self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"], frozen)
+
+    def test_macos_manifest_defaults_path_dictionary_and_value_types_cannot_change(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            changes = [
+                lambda value: value["environment"].update(XCODE_USER_DEFAULTS_FILE=str(self.root / "outside.plist")),
+                lambda value: value["environment"].pop("XCODE_USER_DEFAULTS_FILE"),
+                lambda value: value["setup"].pop("xcode_user_defaults"),
+                lambda value: value["setup"].update(xcode_user_defaults={"IDEPackageSupportDisableManifestSandbox": False}),
+                lambda value: value["setup"].update(xcode_user_defaults={"IDEPackageSupportDisableManifestSandbox": 1}),
+                lambda value: value["setup"]["xcode_user_defaults"].update(extra=True),
+            ]
+            for index, mutate in enumerate(changes):
+                changed = copy.deepcopy(self.spec)
+                mutate(changed["tool_environment"])
+                with self.subTest(index=index), self.assertRaises(util.KanpilotError):
+                    environment.validate(changed)
+
+    def test_macos_manifest_defaults_reject_replaced_or_oversized_files_before_sandbox(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            environment._directory(self.spec, create=True)
+            target = Path(self.spec["tool_environment"]["environment"]["XCODE_USER_DEFAULTS_FILE"])
+            outside = self.root / "outside.plist"
+            outside.write_bytes(b"untouched")
+            replacements = [
+                ("symlink", lambda: target.symlink_to(outside)),
+                ("fifo", lambda: os.mkfifo(target)),
+                ("directory", lambda: target.mkdir()),
+                ("oversized", lambda: target.write_bytes(b"x" * 65537)),
+                ("invalid", lambda: target.write_bytes(b"invalid plist")),
+                ("invalid XML", lambda: target.write_bytes(b'<?xml version="1.0"?><plist><dict>')),
+            ]
+            for name, replace in replacements:
+                replace()
+                try:
+                    with self.subTest(name=name), mock.patch.object(environment.subprocess, "run") as run:
+                        with self.assertRaises(util.KanpilotError):
+                            environment.preflight(self.spec, {})
+                        run.assert_not_called()
+                    self.assertEqual(outside.read_bytes(), b"untouched")
+                finally:
+                    if target.is_dir() and not target.is_symlink():
+                        target.rmdir()
+                    else:
+                        target.unlink()
+
+    def test_resume_rechecks_macos_manifest_defaults_contents_before_sandbox(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+            prepared = subprocess.CompletedProcess([], 0, "offline dependencies ready", "")
+            with self.native_runs([probe, prepared]), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+                self.assertEqual(environment.preflight(self.spec, {})["status"], "passed")
+            target = Path(self.spec["tool_environment"]["environment"]["XCODE_USER_DEFAULTS_FILE"])
+            for changed in ({"IDEPackageSupportDisableManifestSandbox": False},
+                            {"IDEPackageSupportDisableManifestSandbox": 1},
+                            {"IDEPackageSupportDisableManifestSandbox": True, "extra": True}):
+                target.write_bytes(plistlib.dumps(changed))
+                with self.subTest(changed=changed), mock.patch.object(environment.subprocess, "run") as run:
+                    with self.assertRaises(util.KanpilotError) as caught:
+                        environment.preflight(self.spec, {})
+                    run.assert_not_called()
+                    self.assertIn("冻结的 Xcode 构建设置已变化", caught.exception.message)
 
     def test_native_preparation_uses_same_sandbox_and_does_not_run_verify(self):
         self.freeze_native()

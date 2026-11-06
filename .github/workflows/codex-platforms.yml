@@ -21,6 +21,8 @@ jobs:
   native-platforms:
     runs-on: macos-15
     timeout-minutes: 75
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

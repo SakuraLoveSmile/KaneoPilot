@@ -70,6 +70,59 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def xcode_defaults_support(developer):
+    """Check the pinned Xcode implementation before using its private defaults."""
+    frameworks = developer.parent / "SharedFrameworks"
+    required = {
+        frameworks / "Xcode3Core.framework/Versions/A/Xcode3Core": b"XCODE_USER_DEFAULTS_FILE",
+        frameworks / "SwiftPM.framework/Versions/A/SwiftPM": b"IDEPackageSupportDisableManifestSandbox",
+    }
+    records = []
+    for binary, marker in required.items():
+        require(binary.is_file(), "Pinned Xcode compatibility binary is missing: " + str(binary))
+        tail, found = b"", False
+        with binary.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                combined = tail + chunk
+                if marker in combined:
+                    found = True
+                    break
+                tail = combined[-len(marker):]
+        require(found, "Pinned Xcode lacks the required private defaults entry: " + marker.decode())
+        records.append({"binary": str(binary), "marker": marker.decode(), "present": True})
+    return records
+
+
+JAVA_LOOPBACK_PROBE = r'''
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+public class LoopbackProbe {
+  public static void main(String[] args) {
+    try (ServerSocketChannel server = ServerSocketChannel.open()) {
+      server.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
+      try (SocketChannel client = SocketChannel.open(server.getLocalAddress());
+           SocketChannel accepted = server.accept()) {
+        client.write(ByteBuffer.wrap(new byte[] {42}));
+        ByteBuffer received = ByteBuffer.allocate(1);
+        accepted.read(received);
+        if (received.position() != 1 || received.array()[0] != 42) throw new AssertionError("roundtrip");
+        System.out.println("{\"passed\":true,\"prefer_ipv4\":"
+          + Boolean.getBoolean("java.net.preferIPv4Stack") + "}");
+      }
+    } catch (Throwable error) {
+      System.out.println("{\"passed\":false,\"prefer_ipv4\":"
+        + Boolean.getBoolean("java.net.preferIPv4Stack") + "}");
+      error.printStackTrace(System.err);
+      System.exit(1);
+    }
+  }
+}
+'''
+
+
 def _log_tail(path, limit=12000):
     with path.open("rb") as stream:
         stream.seek(0, os.SEEK_END)
@@ -295,6 +348,18 @@ def validate(args):
                    XDG_CONFIG_HOME=str(root / "host-config"), CODEX_HOME=str(root / "codex-home"))
         for name in ("PUB_CACHE", "GRADLE_USER_HOME", "XDG_CONFIG_HOME", "CODEX_HOME"):
             Path(env[name]).mkdir()
+        developer = Path(env["DEVELOPER_DIR"]).resolve(strict=True)
+        report["xcode_private_defaults_support"] = xcode_defaults_support(developer)
+        xcode_version = run(["/usr/bin/xcrun", "xcodebuild", "-version"], cwd=root, env=env,
+                            evidence=evidence, label="tool-xcode-version", separate_stderr=True).read_text()
+        require(xcode_version.startswith("Xcode 16.4\n"), "Pinned Xcode version differs")
+        java = Path(env["JAVA_HOME"]) / "bin/java"
+        java_classes = root / "java-probe-classes"
+        java_classes.mkdir()
+        java_source = evidence / "LoopbackProbe.java"
+        java_source.write_text(JAVA_LOOPBACK_PROBE, encoding="utf-8")
+        run([str(java.with_name("javac")), "-d", str(java_classes), str(java_source)],
+            cwd=root, env=env, evidence=evidence, label="online-java-probe-compile")
         # shared.sh bootstraps the tool on first invocation. Its Dart download
         # helper redirects curl progress to stdout, even for --machine. Finish
         # that explicit online preparation before requesting strict JSON.
@@ -311,7 +376,8 @@ def validate(args):
                             label="tool-codex-version", separate_stderr=True).read_text(encoding="utf-8")
         require(codex_version.strip() == "codex-cli " + CODEX_VERSION, "Codex CLI version differs")
         report["tools"] = {"flutter": version, "codex": codex_version.strip(), "python": sys.version,
-                           "macos": platform.mac_ver(), "machine": platform.machine()}
+                           "macos": platform.mac_ver(), "machine": platform.machine(),
+                           "xcode": xcode_version.strip()}
         report["kotlin_compilation"] = {"online_warm_strategy": "in-process",
                                         "restricted_strategy": "project default; no environment override"}
         app = build_fixture(flutter, root, evidence, env)
@@ -375,12 +441,30 @@ def validate(args):
             targets = {"sdk_source_denied": str(flutter.parent.parent / "packages/flutter_tools/lib/src/base/bot_detector.dart"),
                        "host_config_denied": str(host_sentinel), "host_analyzer_denied": str(host_analyzer),
                        "swiftpm_non_manifest_denied": str(host_swiftpm),
+                       "xcode_defaults_readonly": spec["tool_environment"]["environment"]["XCODE_USER_DEFAULTS_FILE"],
                        "other_directory_denied": str(sentinel)}
             output = run(sandbox_argv(environment, constants, spec,
                                      without_ci_signals([sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])),
                          cwd=app, env=child_env, evidence=evidence, label="sandbox-denials", separate_stderr=True)
             report["permission_checks"] = json.loads(output.read_text(encoding="utf-8"))
             report["checks"].append("readonly_boundaries_and_preflight_network_denials")
+            java_probes = {}
+            for mode in ("default", "ipv4"):
+                remove = []
+                if mode == "default":
+                    remove += ["-u", "JDK_JAVA_OPTIONS"]
+                java_command = ["/usr/bin/env", *remove, str(java), "-cp", str(java_classes), "LoopbackProbe"]
+                label = "java-loopback-" + mode
+                probe_log = run(sandbox_argv(environment, constants, spec, without_ci_signals(java_command)),
+                                cwd=app, env=child_env, evidence=evidence, label=label,
+                                separate_stderr=True, timeout=30, check=False)
+                probe_record = json.loads((evidence / (label + ".json")).read_text())
+                try:
+                    probe_output = json.loads(probe_log.read_text())
+                except ValueError:
+                    probe_output = None
+                java_probes[mode] = {"exit_code": probe_record["exit_code"], "result": probe_output}
+            report["java_loopback"] = java_probes
             native_results = []
             for index, command in enumerate(spec["required_verification_commands"], 1):
                 contract.validate_spec(spec)
@@ -392,6 +476,8 @@ def validate(args):
             report["native_commands"] = native_results
             failures = [item["log"] for item in native_results if item["exit_code"] != 0]
             require(not failures, "Restricted native commands failed; see " + ", ".join(failures))
+            require(java_probes["ipv4"] == {"exit_code": 0, "result": {"passed": True, "prefer_ipv4": True}},
+                    "Frozen Java IPv4 loopback roundtrip failed")
             require(git_delivery.source_state_sha256(app) == before, "Verification changed fixture source")
             analyzer_uuid = private_analyzer / ".instrumentation/uuid.txt"
             require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(),
