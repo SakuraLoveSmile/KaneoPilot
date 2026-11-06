@@ -1,10 +1,10 @@
 # KP-C03：执行缺材料或决定时显示阻塞
 
-状态：待体验（修复、本地隔离检查、Packages #140 全部必需检查、两端包核验及 Build 140 隔离原生界面实测完成；尚未合并、正式发布、安装或更正原业务记录）。
+状态：实现中（修复及 Build 140 适用验证完成；用户已明确指定 v0.4.9，继续正式合入、云端发布、包核验与工作树收尾。安装及原业务记录更正尚未执行）。
 
 - 用户目标：缺少隔离设备、授权测试会话或人工验收时，任务等待补充材料或决定，不计为执行失败，也不提前宣称完成。
 - 起点：2026-11-07，主仓 `main` / `ecb313a7278806da2a91d3bb3a44d2e90c7f3c20`。主仓无关 `.local/` 与 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 未跟踪，保留原样。
-- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c03-execution-input-classification`；分支 `fix/20261107-kp-c03-execution-input-classification`；预期合入 `main`。用户随后要求“构建新版本”，承接本会话提交/推送修复分支并运行 Packages 的具体请求；按项目默认生成分支预览产物，正式版本号、合入、发布、安装及付费重跑沿后续明确授权。
+- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c03-execution-input-classification`；分支 `fix/20261107-kp-c03-execution-input-classification`；合入目标 `main`。用户先要求“构建新版本”，已完成分支预览；随后明确“对 我需要你发 0.4.9”，现已授权必要的合入、正式 v0.4.9 云端构建与公开 Release。安装、业务数据更正及付费重跑仍沿各自授权，不把正式发布自动等同于这些操作。
 - 只读核实截图任务 `csim4lhdf81m1k7wib615fdv` / run `52044e49-bee9-4d69-a746-e184061dc89f`：当前 `needs_user / monitor / execution_failed`，摘要明确五项检查通过，缺隔离设备及授权 Emby 会话，真实播放验收未完成。原轮次已经结束，不能伪造仍在等待回答的执行问题。
 
 ## 确定行为与验收
@@ -29,7 +29,7 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 最终组合本地实测（Python 3.10.10；基线 HEAD + 本任务未提交差异）：`python -m pytest core/tests/test_execution_followup.py core/tests/test_codex_execution.py core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_codex_inputs.py core/tests/test_codex_verdict.py core/tests/test_auto_monitor.py core/tests/test_board.py core/tests/test_engine_board_attention.py -q`，退出 0，**282 passed + 68 subtests**，73.20 秒。受管进程组合 `python -m pytest tests/test_codex_dispatch.py -q`，退出 0，**7 passed**，43.82 秒。均为隔离 Git/DB/HOME/CLI/Kaneo 夹具，无真实模型、业务 verify 或生产服务访问。最终 `git diff --check` 通过。
 - 主 agent 经原生 UI 只读核实现用 `/Applications/KaneoPilot.app` 为 **v0.4.8 / build 138**：截图任务仍显示失败 1 / 阻塞 0，原因与原报告一致。该安装版本的核心和 Swift 均不识别新原因码的恢复语义，因此**当前原记录保持原样，待兼容版本可用后再更正**；不将候选代码中的恢复通过误当成已安装版本可继续。原任务成果与全部旧证据保留。
 - 候选源码/测试/协议指纹保存于 `build/kp-c03-evidence/source-snapshot.json`；该目录归本任务，保留用于后续云端对照。修复已签名提交并推送，尚无合并/发布/安装，工作树保留继续本任务。
-- 当前下一步：用户体验 Build 140 预览包；正式版本号、合并/发布/安装沿后续明确授权。原业务记录继续保留，待兼容版本成为实际使用版本后，再经核心 `resolve await_input` 更正。工作树尚未合入 `main`，保留源码、隔离夹具与证据继续本任务，不清理其他 worktree。
+- 当前下一步：完成已授权的 v0.4.9 正式发布及工作树收尾。原业务记录继续保留，待兼容版本成为实际使用版本后，再经核心 `resolve await_input` 更正。仅清理本任务已完成的工作树与合并本地分支，保全全部必要证据，不清理其他任务或远端来源分支。
 
 ## 2026-11-07 云端构建
 
@@ -50,3 +50,10 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 最终包下载曾遇 GitHub 连接 EOF；用同一 artifact 的 HTTPS Range 续传，完成后 ZIP 校验、内包哈希及签名全部通过，未交付残缺文件。安装包放在 `/Users/sakurasep/Downloads/KaneoPilot-build-140/`，附 `SHA256SUMS` 和 `build-info.json`；交付目录运行 `shasum -a 256 -c SHA256SUMS`，两包均 OK。APK 为 Debug 签名，不作为正式签名覆盖升级证据。
 - Build 140 最终原生实测：以同一真实核心隔离投影和只读 FakeCore adapter 启动云端独立 App；看板 **阻塞 1 / 失败 0**，列表/详情为“待补充材料或决定”与具体设备/会话缺口，“重新执行（沿用计划）”确认文案说明保留计划/原工作树/已有改动/原执行记录且会新调用模型。已取消确认，命令日志无 resolve/入队/模型启动；仅停止本任务 App PID 33484。观察与命令日志保存在 `build/kp-c03-evidence/ui-fixture/native-observation-140.json`、`commands-140.jsonl`。生产 App、原业务 DB 和全部旧证据保持原样。
 - 本次构建范围已完成，状态为“待体验”。没有创建 PR、合并、正式 Release、安装或付费重跑；未把隔离界面验证当成原 MediaPlayer 的真实播放验收。任务工作树尚未合并，继续保留；安装包已独立交付到下载目录，不依赖后续保留该工作树。
+
+## 2026-11-07 正式发布 v0.4.9
+
+- 用户明确指定版本并授权正式发布。恢复时核对主仓 main / origin/main 均为 `ecb313a7278806da2a91d3bb3a44d2e90c7f3c20`，任务树为 `2fbdb94e0a272ed7945addff324f114d2402d929`，工作区清洁；主仓无关未跟踪文件保留。远端 v0.4.9 标签尚不存在，latest 为 v0.4.8。
+- 发布源码固定为已通过完整 Packages #140 的 `c09da5a67ac7a24267f456b6cd9bcc0a4d6716d1`，后续提交仅为本权威记录。先将完整任务历史 fast-forward 合入 main 并推送，再创建直接指向上述已验证、且由远端 main 包含源码提交的签名 annotated `v0.4.9`；不移动或覆盖标签、包及资产。正式标签将再次运行全部必需门禁及 publish。
+- 独立 reviewer（gpt-6.1-sol / high）发布核查通过：全部改动属 KP-C03，SQLite schema 仍为 6，无迁移/依赖/构建门禁变化。公开说明保留：历史记录不会自动更正；更正不等于验收完成、不生成成功证据或自动重跑；再次调用模型仍需用户确认；更正后继续使用支持新原因码的新版。既有成功验证门禁不变，隔离验证不替代原业务真实播放或 Android 实机验收。
+- 待办：正式构建/publish 全通过后核对公开 Release、latest、四项资产、manifest/SHA256、两端版本/源码/签名；保全工作树证据及必要夹具后移除本任务 worktree 和已合并本地分支。用户体验状态仅在用户明确确认后才为“已验收”。
