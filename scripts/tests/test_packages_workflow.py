@@ -210,7 +210,7 @@ class PackagesWorkflowTests(unittest.TestCase):
 
     def test_codex_native_platform_fixture_gates_the_exact_source_release(self):
         job = JOBS["codex-platforms"]
-        self.assertEqual(needs_of(job), ["identity", "checks"])
+        self.assertEqual(needs_of(job), ["identity"])
         self.assertEqual(job["uses"], "./.github/workflows/codex-platforms.yml")
         self.assertEqual(job["with"]["source_sha"], "${{ needs.identity.outputs.sha }}")
         self.assertIn("codex-platforms", needs_of(JOBS["publish"]))

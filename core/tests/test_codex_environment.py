@@ -647,6 +647,23 @@ class CodexEnvironmentTests(unittest.TestCase):
                     environment.preflight(self.spec, {})
             self.assertIn("macOS 平台生成包仍缺失", caught.exception.message)
 
+    def test_unconfirmed_setup_cleanup_detail_reaches_durable_job_before_model(self):
+        self.freeze_native()
+        self.persist_contract()
+        self.stub()
+        probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        error = RuntimeError("Codex 离线准备进程组清理未确认")
+        with self.guards(), self.native_runs([probe, error]), mock.patch(
+                "kanpilot.codex_tool_setup.seed_caches", return_value={}):
+            self.assertEqual(worker.run_real(self.spec), 3)
+        job = self.job()
+        self.assertEqual(job["status"], "failed")
+        self.assertTrue(job["cli_terminal"])
+        self.assertIsNone(job["session_id"])
+        self.assertIn("进程组清理未确认", job["detail"])
+        self.assertFalse(list(self.run_dir.glob("codex-final-*.json.argv")))
+        self.assertFalse((self.run_dir / adapter.REPORT_NAME).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,7 +161,7 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 
 ## 2026-11-06 平台构建环境修复与下一正式版（实现中）
 
-- 用户已授权修复并发布新正式版本；当前 latest 为 v0.4.6，新版 v0.4.7 等待维护者明确选择。修复、验证、集成先继续，标签依赖版本答复；不安装 App、不重试原业务轮次、不调用付费模型。
+- 用户已授权修复并发布新正式版本，随后明确选择正式 **v0.4.7**；当前 latest 为 v0.4.6。继续完成修复、验证、集成与签名标签正式发布；不安装 App、不重试原业务轮次、不调用付费模型。
 - 任务沿用 KP-C02。基线 main/origin/main 为 `20696271f16bf399b2010f63bce8a64e6299206c`；工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261106-fix-kp-c02-platform-build-environment`，分支 `fix/20261106-kp-c02-platform-build-environment`，合入目标 main。诊断文档变更已核对备份并转入此树；主仓无关 `.local/` 和缓存清理计划、其他任务工作树及 MediaPlayer 成果保留。
 - T8 环境契约：新轮次 v2 按直接冻结 Flutter 命令选择能力，使用 `BOT=true` 避免冷启动 metadata 探测；历史缺省/v1 不变。native 构建先在同一受限沙箱离线执行 `flutter pub get --offline --enforce-lockfile` 准备生成物，不改变锁定依赖、不代跑 verify。Pub/Gradle 私有写目录和只读缓存来源冻结；仅复制必要 wrapper 分发，禁止复制宿主凭据、Gradle properties/init.d。macOS 明确冻结 DerivedData 与系统用户临时目录必要宿主写能力，不将共享系统临时目录称为私有 tmp；其他宿主路径保持只读与禁公网。
 - T9 失败说明：只有完整核对身份、原生终态/hash、源码快照后的 failed report 才保留摘要及非零 checks；脱敏和限长、不生成成功 envelope、不自动重试。monitor 去重同时保持原失败门禁。

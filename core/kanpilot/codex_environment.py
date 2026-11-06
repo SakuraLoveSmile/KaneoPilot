@@ -388,6 +388,9 @@ def preflight(spec, env, *, check=None):
                 except subprocess.TimeoutExpired as exc:
                     raise util.KanpilotError("codex_environment_unavailable",
                                              "Flutter 离线平台依赖准备超时；准备进程组已终止，未调用模型") from exc
+                except RuntimeError as exc:
+                    raise util.KanpilotError("codex_environment_unavailable",
+                                             "Flutter 离线平台依赖准备未完成：" + util.redact(str(exc))) from exc
                 # Setup may write only ignored generation/cache files. A lock
                 # or tracked project migration must not pass as preparation.
                 _require(git_delivery.source_state_sha256(spec["cwd"]) == before,

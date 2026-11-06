@@ -483,7 +483,7 @@ jobs:
           retention-days: 14
 
   codex-platforms:
-    needs: [identity, checks]
+    needs: identity
     uses: ./.github/workflows/codex-platforms.yml
     with:
       source_sha: ${{ needs.identity.outputs.sha }}
