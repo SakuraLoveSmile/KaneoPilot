@@ -327,6 +327,34 @@ emit({'type':'turn.completed','usage':{}})
         self.assertEqual(job['turns'][0]['answer_operation_id'],'answer-op')
 
 
+    def test_explicit_unrestricted_first_and_resume_use_frozen_permission(self):
+        self.spec['config']['sandbox'] = 'danger-full-access'
+        execution_contract.freeze_spec(self.spec, requirements_sha256='a'*64)
+        (self.run_dir/'spec.json').write_text(util.jdump(self.spec))
+        self.stub('questions')
+        def callback(command,payload,*args):
+            if command=='report-execution-question':
+                job=self.job(); pending=job['pending_input']
+                self.assertEqual(job['status'],'waiting_input')
+                answer={'scope_id':self.spec['scope_id'],'session_id':job['session_id'],'request_id':pending['requestId'],'tool_call_id':pending['toolCallId'],'answers':[['A']],'operation_id':'answer-op'}
+                (self.run_dir/('answer-'+util.sha256_text(pending['requestId'])+'.json')).write_text(util.jdump(answer))
+        with self.guards(callback): self.assertEqual(worker.run_real(self.spec),0)
+        job=self.job(); self.assertEqual(len(job['turns']),2)
+        self.assertEqual(job['turns'][0]['input_resolution'],'answered')
+        argv=json.loads((self.run_dir/'codex-final-2.json.argv').read_text())
+        self.assertIn('resume',argv); self.assertEqual(argv[-2: ],['thread-1','-'])
+        self.assertEqual(job['turns'][0]['answer_operation_id'],'answer-op')
+
+        for number in (1, 2):
+            args = json.loads((self.run_dir / ('codex-final-' + str(number) + '.json.argv')).read_text())
+            self.assertEqual(args[args.index('-s') + 1], 'danger-full-access')
+            self.assertIn('sandbox_mode="danger-full-access"', args)
+            self.assertIn('approval_policy="never"', args)
+            self.assertNotIn('--add-dir', args)
+            self.assertFalse(any('permissions.' in value or 'default_permissions=' in value
+                                 or 'network_proxy' in value for value in args))
+
+
     def test_fast_question_waits_for_dispatch_confirm_without_new_model_call(self):
         self.stub('questions')
         reports=[]

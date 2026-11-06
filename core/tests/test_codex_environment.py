@@ -23,7 +23,6 @@ from kanpilot import execution_contract, git_delivery, util
 class CodexEnvironmentTests(unittest.TestCase):
     # Reuse only the isolated fixture, not the older test methods.
     tearDown = execution_fixtures.CodexExecutionTests.tearDown
-    flutter_sdk = execution_fixtures.CodexExecutionTests.flutter_sdk
     stub = execution_fixtures.CodexExecutionTests.stub
     guards = execution_fixtures.CodexExecutionTests.guards
     job = execution_fixtures.CodexExecutionTests.job
@@ -41,6 +40,14 @@ class CodexEnvironmentTests(unittest.TestCase):
                           GRADLE_USER_HOME=str(self.root / ".gradle"))
         os.environ.pop("JDK_JAVA_OPTIONS", None)
         os.environ.pop("_JAVA_OPTIONS", None)
+
+    def flutter_sdk(self):
+        sdk, binary = execution_fixtures.CodexExecutionTests.flutter_sdk(self)
+        plugin = sdk / "packages/flutter_tools/gradle"
+        (plugin / "src/main/kotlin").mkdir(parents=True)
+        (plugin / "build.gradle.kts").write_text("// fixture plugin build source\n")
+        (plugin / "src/main/kotlin/FlutterPlugin.kt").write_text("// fixture plugin source\n")
+        return sdk, binary
 
     def freeze_flutter(self):
         sdk, binary = self.flutter_sdk()
@@ -457,7 +464,8 @@ class CodexEnvironmentTests(unittest.TestCase):
         roots = frozen["writable_roots"] + [frozen["environment"][key]
                  for key in ("ANALYZER_STATE_LOCATION_OVERRIDE", "PUB_CACHE", "GRADLE_USER_HOME")
                  if key in frozen["environment"]]
-        return {"v": 1, "status": "passed", "checks": {name: True for name in environment.CHECKS},
+        names = environment.CHECKS + (("workspace_uti",) if frozen["v"] == 2 and "macos" in frozen["platforms"] else ())
+        return {"v": 1, "status": "passed", "checks": {name: True for name in names},
                 "writable_roots": {path: True for path in roots}}
 
     @contextlib.contextmanager
@@ -497,6 +505,9 @@ class CodexEnvironmentTests(unittest.TestCase):
     def test_android_capability_uses_private_homes_and_only_readonly_dependency_cache(self):
         modules = self.root / ".gradle/caches/modules-2"
         modules.mkdir(parents=True)
+        artifact = modules / "files-2.1/fixture/1.0/hash/library.jar"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"cached dependency")
         settings = Path(os.environ["XDG_CONFIG_HOME"]) / "settings"
         settings.parent.mkdir(parents=True)
         allowed_settings = {"jdk-dir": str(self.root / "jdk17"),
@@ -504,14 +515,17 @@ class CodexEnvironmentTests(unittest.TestCase):
                             "android-studio-dir": str(self.root / "android-studio"),
                             "enable-swift-package-manager": False, "enable-macos-desktop": True}
         settings.write_text(json.dumps({**allowed_settings, "api_key": "do-not-copy"}))
-        self.freeze_native()
+        sdk = self.freeze_native()
         frozen = self.spec["tool_environment"]
         private = self.repo / ".pi/kanpilot/codex/r"
         self.assertEqual(frozen["platforms"], ["android"])
-        self.assertEqual(frozen["writable_roots"], [])
+        plugin = sdk / "packages/flutter_tools/gradle"
+        self.assertEqual(frozen["writable_roots"], [str(plugin / ".gradle"), str(plugin / "build")])
         self.assertEqual(frozen["environment"]["GRADLE_USER_HOME"], str(private / "gradle"))
         self.assertEqual(frozen["environment"]["PUB_CACHE"], str(private / "pub-cache"))
-        self.assertEqual(frozen["environment"]["GRADLE_RO_DEP_CACHE"], str(modules))
+        self.assertEqual(frozen["environment"]["GRADLE_RO_DEP_CACHE"], str(modules.parent))
+        gradle_lookup = Path(frozen["environment"]["GRADLE_RO_DEP_CACHE"]) / "modules-2" / artifact.relative_to(modules)
+        self.assertEqual(gradle_lookup.read_bytes(), b"cached dependency")
         self.assertEqual(frozen["environment"]["JAVA_HOME"], str(self.root / "jdk17"))
         self.assertEqual(frozen["environment"]["ANDROID_HOME"], str(self.root / "android-sdk"))
         self.assertEqual(frozen["environment"]["ANDROID_SDK_ROOT"], str(self.root / "android-sdk"))
@@ -524,6 +538,7 @@ class CodexEnvironmentTests(unittest.TestCase):
         filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
         self.assertNotIn(str(self.root / ".gradle"), filesystem)
         self.assertNotIn(str(self.root / ".pub-cache"), filesystem)
+        self.assertNotIn(str(modules.parent), filesystem)
         self.persist_contract()
         self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"], frozen)
 
@@ -546,6 +561,119 @@ class CodexEnvironmentTests(unittest.TestCase):
             self.assertEqual(properties.read_bytes(), before)
             self.persist_contract()
             self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"]["environment"]["JDK_JAVA_OPTIONS"], fixed)
+
+    def test_android_plugin_outputs_are_prepared_but_sdk_sources_stay_readonly(self):
+        sdk = self.freeze_native()
+        plugin = sdk / "packages/flutter_tools/gradle"
+        outputs = [plugin / ".gradle", plugin / "build"]
+        self.assertTrue(all(not path.exists() for path in outputs))
+        policy = self.configs(environment.launcher_config(self.spec))
+        filesystem = policy["permissions"][policy["default_permissions"]]["filesystem"]
+
+        def access(path):
+            matching = [root for root in filesystem if Path(root) == path or Path(root) in path.parents]
+            return filesystem[max(matching, key=len)]
+
+        sources = [plugin / "build.gradle.kts", plugin / "src/main/kotlin/FlutterPlugin.kt",
+                   sdk / "bin/internal/shared.sh"]
+        before = {str(path): path.read_bytes() for path in sources}
+        self.assertTrue(all(access(path) == "read" for path in sources))
+        self.assertEqual(access(plugin / ".gradle/buildOutputCleanup/cache.properties.lock"), "write")
+        self.assertEqual(access(plugin / "build/classes/kotlin/main/FlutterPlugin.class"), "write")
+        self.assertEqual(access(plugin / "settings.gradle.kts"), "read")
+        self.assertNotIn(str(plugin), filesystem)
+        probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        prepared = subprocess.CompletedProcess([], 0, "offline dependencies ready", "")
+        with self.native_runs([probe, prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+            environment.preflight(self.spec, {})
+        self.assertTrue(all(path.is_dir() for path in outputs))
+        self.assertEqual({str(path): path.read_bytes() for path in sources}, before)
+        roots = json.loads(run.call_args_list[0].kwargs["env"]["KANPILOT_PROBE_WRITABLE_ROOTS"])
+        self.assertTrue(all(str(path) in roots for path in outputs))
+        for path in outputs:
+            failed = self.probe_receipt()
+            failed["writable_roots"][str(path)] = False
+            result = subprocess.CompletedProcess([], 0, json.dumps(failed), "")
+            with self.subTest(unwritable=str(path)), mock.patch.object(environment.subprocess, "run", return_value=result), mock.patch(
+                    "kanpilot.codex_tool_setup.seed_caches") as seed:
+                with self.assertRaises(util.KanpilotError):
+                    environment.preflight(self.spec, {})
+                seed.assert_not_called()
+
+    def test_android_plugin_missing_or_replaced_paths_fail_before_sandbox(self):
+        sdk = self.freeze_native()
+        plugin = sdk / "packages/flutter_tools/gradle"
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "sentinel").write_text("untouched")
+        for name in (".gradle", "build"):
+            path = plugin / name
+            path.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.subTest(name=name), mock.patch.object(environment.subprocess, "run") as run:
+                    with self.assertRaises(util.KanpilotError):
+                        environment.preflight(self.spec, {})
+                    run.assert_not_called()
+            finally:
+                path.unlink()
+        saved = plugin.with_name("saved-plugin")
+        plugin.rename(saved)
+        try:
+            with self.assertRaises(util.KanpilotError):
+                environment.validate(self.spec)
+            plugin.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.assertRaises(util.KanpilotError):
+                    environment.freeze(copy.deepcopy(self.spec))
+            finally:
+                plugin.unlink()
+        finally:
+            saved.rename(plugin)
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), ["sentinel"])
+        self.assertEqual((outside / "sentinel").read_text(), "untouched")
+
+    def test_android_plugin_and_readonly_cache_scope_cannot_be_widened_or_replaced(self):
+        modules = self.root / ".gradle/caches/modules-2"
+        modules.mkdir(parents=True)
+        sdk = self.freeze_native()
+        plugin = sdk / "packages/flutter_tools/gradle"
+        for key, value in (("GRADLE_RO_DEP_CACHE", str(modules)),
+                           ("GRADLE_RO_DEP_CACHE", str(self.root)),
+                           ("writable_roots", [str(plugin)])):
+            changed = copy.deepcopy(self.spec)
+            target = changed["tool_environment"] if key == "writable_roots" else changed["tool_environment"]["environment"]
+            target[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(util.KanpilotError):
+                environment.validate(changed)
+        outside = self.root / "outside"
+        outside.mkdir()
+        for path in (modules, modules.parent):
+            saved = path.with_name(path.name + "-saved")
+            path.rename(saved)
+            path.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.subTest(replaced=str(path)), self.assertRaises(util.KanpilotError):
+                    environment.validate(self.spec)
+                with self.assertRaises(util.KanpilotError):
+                    environment.freeze(copy.deepcopy(self.spec))
+            finally:
+                path.unlink()
+                saved.rename(path)
+
+    def test_non_android_and_v1_do_not_gain_plugin_output_writes(self):
+        sdk = self.freeze_flutter()
+        plugin = sdk / "packages/flutter_tools/gradle"
+        self.assertEqual(self.spec["tool_environment"]["writable_roots"], [])
+        command = self.spec["required_verification_commands"][0].replace(" test --no-pub", " build apk --no-pub")
+        self.spec["required_verification_commands"] = [command]
+        self.spec["tool_environment"] = environment._expected(self.spec)
+        before = copy.deepcopy(self.spec)
+        self.assertEqual(environment.validate(self.spec), before["tool_environment"])
+        policy = self.configs(environment.launcher_config(self.spec))
+        filesystem = policy["permissions"][policy["default_permissions"]]["filesystem"]
+        self.assertTrue(all(str(plugin / name) not in filesystem for name in (".gradle", "build")))
+        self.assertNotIn("GRADLE_RO_DEP_CACHE", self.spec["tool_environment"]["environment"])
+        self.assertEqual(self.spec, before)
 
     def test_android_conflicting_jdk_options_fail_without_exposing_host_parameters(self):
         self.freeze_native()
@@ -669,11 +797,13 @@ class CodexEnvironmentTests(unittest.TestCase):
         host_tmp.mkdir()
         with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
                 environment.os, "confstr", return_value=str(host_tmp), create=True):
-            self.freeze_native("macos")
+            sdk = self.freeze_native("macos")
             roots = self.spec["tool_environment"]["writable_roots"]
             derived = self.root / "Library/Developer/Xcode/DerivedData"
             manifests = self.root / "Library/Caches/org.swift.swiftpm/manifests"
             self.assertEqual(roots, [str(derived), str(host_tmp), str(manifests)])
+            self.assertTrue(all(str(sdk / "packages/flutter_tools/gradle" / name) not in roots
+                                for name in (".gradle", "build")))
             profile = self.configs(environment.launcher_config(self.spec))
             filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
             self.assertTrue(all(filesystem[path] == "write" for path in roots))
@@ -696,6 +826,26 @@ class CodexEnvironmentTests(unittest.TestCase):
         with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
                 environment.os, "confstr", return_value=str(host_tmp), create=True):
             yield
+
+    def test_android_and_macos_generated_roots_are_combined_and_all_preflighted(self):
+        with self.macos_environment():
+            sdk = self.freeze_native()
+            command = self.spec["required_verification_commands"][0]
+            self.spec["required_verification_commands"].append(command.replace(" build apk ", " build macos "))
+            environment.freeze(self.spec)
+            frozen = self.spec["tool_environment"]
+            plugin = sdk / "packages/flutter_tools/gradle"
+            expected = [plugin / ".gradle", plugin / "build", self.root / "Library/Developer/Xcode/DerivedData",
+                        self.root / "system-temp", self.root / "Library/Caches/org.swift.swiftpm/manifests"]
+            self.assertEqual(frozen["platforms"], ["android", "macos"])
+            self.assertEqual(frozen["writable_roots"], [str(path) for path in expected])
+            probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+            prepared = subprocess.CompletedProcess([], 0, "offline dependencies ready", "")
+            with self.native_runs([probe, prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+                environment.preflight(self.spec, {})
+            self.assertTrue(all(path.is_dir() for path in expected))
+            roots = json.loads(run.call_args_list[0].kwargs["env"]["KANPILOT_PROBE_WRITABLE_ROOTS"])
+            self.assertTrue(all(str(path) in roots for path in expected))
 
     def test_macos_manifest_defaults_are_private_frozen_and_readonly_in_both_launches(self):
         with self.macos_environment():
@@ -916,6 +1066,194 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertIn("进程组清理未确认", job["detail"])
         self.assertFalse(list(self.run_dir.glob("codex-final-*.json.argv")))
         self.assertFalse((self.run_dir / adapter.REPORT_NAME).exists())
+
+
+    def test_unrestricted_flutter_freezes_private_state_without_permission_profile(self):
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        self.freeze_flutter()
+        frozen = self.spec["tool_environment"]
+        self.assertEqual(frozen["v"], 3)
+        self.assertEqual(frozen["isolation"], "none")
+        self.assertEqual(frozen["network"], {"mode": "unrestricted"})
+        self.assertEqual(frozen["writable_roots"], [])
+        self.assertEqual(frozen["environment"]["BOT"], "true")
+        self.assertIn("ANALYZER_STATE_LOCATION_OVERRIDE", frozen["environment"])
+        for session in (None, "thread-1"):
+            argv = adapter.launcher_argv(self.spec, "schema", "out", mock.Mock(config_args=[]), session)
+            config = self.configs(argv)
+            self.assertEqual(argv[argv.index("-s") + 1], "danger-full-access")
+            self.assertEqual(config["sandbox_mode"], "danger-full-access")
+            self.assertEqual(config["approval_policy"], "never")
+            self.assertEqual(config["shell_environment_policy"]["set"], frozen["environment"])
+            self.assertNotIn("--add-dir", argv)
+            self.assertNotIn("permissions", config)
+            self.assertNotIn("default_permissions", config)
+            self.assertNotIn("features", config)
+        with mock.patch.object(environment.subprocess, "run", side_effect=AssertionError("sandbox or network probe forbidden")):
+            receipt = environment.preflight(self.spec, {})
+        self.assertEqual(receipt["isolation"], "none")
+        self.assertEqual(receipt["network"], {"mode": "unrestricted"})
+        self.assertEqual(receipt["checks"], {"config_write": True, "temp_write": True})
+
+    def test_old_frozen_modes_cannot_be_widened_and_v3_cannot_be_downgraded(self):
+        self.freeze_flutter()
+        for version in (1, 2):
+            old = copy.deepcopy(self.spec)
+            if version == 1:
+                old["tool_environment"] = environment._expected(old)
+                old["config"].pop("sandbox")
+            execution_contract.freeze_spec(old, requirements_sha256="a" * 64)
+            self.assertIsNotNone(environment.validate(old))
+            old["config"]["sandbox"] = "danger-full-access"
+            with self.subTest(version=version), self.assertRaises(util.KanpilotError):
+                environment.validate(old)
+            with self.assertRaises(util.KanpilotError):
+                execution_contract.validate_spec(old)
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        environment.freeze(self.spec)
+        for mutate in (lambda value: value["config"].update(sandbox="workspace-write"),
+                       lambda value: value["tool_environment"].update(isolation="sandbox"),
+                       lambda value: value["tool_environment"]["network"].update(mode="limited")):
+            changed = copy.deepcopy(self.spec)
+            mutate(changed)
+            with self.assertRaises(util.KanpilotError):
+                environment.validate(changed)
+
+    def test_unrestricted_native_setup_runs_directly_with_private_cache_and_lifecycle(self):
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        with mock.patch.dict(os.environ, JDK_JAVA_OPTIONS="-Djava.net.preferIPv4Stack=false",
+                             _JAVA_OPTIONS="-Djava.net.preferIPv4Stack=false"):
+            self.freeze_native()
+            frozen = self.spec["tool_environment"]
+            self.assertNotIn("JDK_JAVA_OPTIONS", frozen["environment"])
+            self.assertEqual(frozen["writable_roots"], [])
+            self.assertIn("GRADLE_USER_HOME", frozen["environment"])
+            self.assertIn("PUB_CACHE", frozen["environment"])
+            prepared = subprocess.CompletedProcess([], 0, "ok", "")
+            check = mock.Mock()
+            # Real isolated Git snapshots remain available; no Codex process.
+            with self.native_runs([prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={"pub_packages": 1}) as seed:
+                first = environment.preflight(self.spec, os.environ.copy(), check=check)
+            self.assertEqual(run.call_args.args[0], [frozen["setup"]["flutter"], "pub", "get", "--offline", "--enforce-lockfile"])
+            self.assertIs(run.call_args.kwargs["check"], check)
+            self.assertEqual(run.call_args.kwargs["env"]["JDK_JAVA_OPTIONS"], "-Djava.net.preferIPv4Stack=false")
+            self.assertGreaterEqual(check.call_count, 2)
+            seed.assert_called_once_with(self.spec)
+            self.assertEqual(first["setup"]["exit_code"], 0)
+            # Resume uses the same direct managed setup and stable receipt.
+            with self.native_runs([prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={"pub_packages": 1}):
+                self.assertEqual(environment.preflight(self.spec, os.environ.copy()), first)
+            self.assertNotIn("sandbox", run.call_args.args[0])
+
+    def test_unrestricted_setup_retains_exit_source_timeout_and_stop_guards(self):
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        self.freeze_native()
+        for result, message in ((subprocess.CompletedProcess([], 7, "failed", ""), "退出码 7"),
+                                (subprocess.TimeoutExpired("fixture", 180), "超时"),
+                                (RuntimeError("进程组清理未确认"), "进程组清理未确认")):
+            with self.subTest(message=message), self.native_runs([result]), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+                with self.assertRaises(util.KanpilotError) as caught:
+                    environment.preflight(self.spec, {})
+            self.assertIn(message, caught.exception.message)
+        def mutate(argv, **kwargs):
+            (self.repo / "pubspec.lock").write_text("changed\n")
+            return subprocess.CompletedProcess([], 0, "ok", "")
+        with self.native_runs(mutate), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+            with self.assertRaises(util.KanpilotError) as caught:
+                environment.preflight(self.spec, {})
+        self.assertIn("改动了源码或锁文件", caught.exception.message)
+        stop = util.KanpilotError("conflict", "fixture stop")
+        with mock.patch("kanpilot.codex_tool_setup.seed_caches") as seed:
+            with self.assertRaises(util.KanpilotError) as caught:
+                environment.preflight(self.spec, {}, check=mock.Mock(side_effect=stop))
+            seed.assert_not_called()
+        self.assertIs(caught.exception, stop)
+
+    def test_unrestricted_macos_avoids_restricted_xcode_settings_and_host_roots(self):
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(environment.os, "confstr", side_effect=AssertionError("restricted host root lookup"), create=True):
+            self.freeze_native("macos")
+            frozen = self.spec["tool_environment"]
+            self.assertNotIn("XCODE_USER_DEFAULTS_FILE", frozen["environment"])
+            self.assertNotIn("xcode_user_defaults", frozen["setup"])
+            self.assertEqual(frozen["writable_roots"], [])
+            with self.native_runs([subprocess.CompletedProcess([], 0, "ok", "")]), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}):
+                receipt = environment.preflight(self.spec, {})
+            self.assertNotIn("workspace_uti", receipt["checks"])
+            self.assertFalse((Path(frozen["environment"]["XDG_CONFIG_HOME"]) / "xcode-user-defaults.plist").exists())
+
+    def test_shared_workspace_uti_probe_requires_identifier_and_package_conformance(self):
+        import ctypes
+        namespace = {}
+        exec(environment.MACOS_WORKSPACE_UTI_PROBE, namespace)
+        for identifier, conforms, preferred, expected in (
+                (b"com.apple.dt.document.workspace", True, 5, True),
+                (b"dyn.invalid", True, 5, False),
+                (b"com.apple.dt.document.workspace", False, 5, False),
+                (b"com.apple.dt.document.workspace", True, 0, False)):
+            cf, cs = mock.Mock(), mock.Mock()
+            cf.CFStringCreateWithCString.side_effect = [1, 2, 3, 4]
+            def output(pointer, buffer, length, encoding):
+                buffer.value = identifier
+                return True
+            cf.CFStringGetCString.side_effect = output
+            cs.UTTypeCreatePreferredIdentifierForTag.return_value = preferred
+            cs.UTTypeConformsTo.return_value = conforms
+            with self.subTest(identifier=identifier, conforms=conforms, preferred=preferred), mock.patch.object(
+                    ctypes, "CDLL", side_effect=[cf, cs]):
+                self.assertIs(namespace["workspace_uti"](), expected)
+            self.assertEqual(cf.CFRelease.call_args_list, [mock.call(value) for value in ([5, 4, 3, 2, 1] if preferred else [4, 3, 2, 1])])
+            if preferred:
+                self.assertEqual(cf.CFStringGetCString.call_args.args[0], 5)
+            if expected:
+                cs.UTTypeConformsTo.assert_called_once_with(3, 4)
+
+    def test_restricted_macos_uti_failure_blocks_setup_and_model_with_actionable_detail(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            self.persist_contract()
+            self.stub()
+            receipt = self.probe_receipt()
+            receipt["checks"]["workspace_uti"] = False
+            with self.guards(), self.native_runs([subprocess.CompletedProcess([], 0, json.dumps(receipt), "")]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches") as seed:
+                self.assertEqual(worker.run_real(self.spec), 3)
+            seed.assert_not_called()
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.kwargs["env"]["KANPILOT_PROBE_WORKSPACE_UTI"], "1")
+            job = self.job()
+            self.assertEqual(job["status"], "failed")
+            self.assertIsNone(job["session_id"])
+            self.assertIn("设置→运行端→执行→Codex CLI", job["detail"])
+            self.assertIn("新轮次", job["detail"])
+            self.assertFalse(list(self.run_dir.glob("codex-final-*.json.argv")))
+
+    def test_restricted_macos_resume_rechecks_uti_before_second_model(self):
+        with self.macos_environment():
+            self.freeze_native("macos")
+            self.persist_contract()
+            self.stub("questions")
+            good = self.probe_receipt()
+            failed = copy.deepcopy(good)
+            failed["checks"]["workspace_uti"] = False
+            results = [subprocess.CompletedProcess([], 0, json.dumps(good), ""),
+                       subprocess.CompletedProcess([], 0, "ok", ""),
+                       subprocess.CompletedProcess([], 0, json.dumps(failed), "")]
+            def answer(command, payload, *args):
+                if command == "report-execution-question":
+                    job = self.job()
+                    pending = job["pending_input"]
+                    value = {"scope_id": self.spec["scope_id"], "session_id": job["session_id"],
+                             "request_id": pending["requestId"], "tool_call_id": pending["toolCallId"],
+                             "answers": [["A"]], "operation_id": "answer-op"}
+                    (self.run_dir / ("answer-" + util.sha256_text(pending["requestId"]) + ".json")).write_text(util.jdump(value))
+            with self.guards(answer), self.native_runs(results) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}) as seed:
+                self.assertEqual(worker.run_real(self.spec), 3)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(seed.call_count, 1)
+            self.assertEqual(self.job()["session_id"], "thread-1")
+            self.assertIn("workspace 类型", self.job()["detail"])
+            self.assertTrue((self.run_dir / "codex-final-1.json.argv").exists())
+            self.assertFalse((self.run_dir / "codex-final-2.json.argv").exists())
 
 
 if __name__ == "__main__":

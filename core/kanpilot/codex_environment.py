@@ -9,6 +9,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from xml.parsers.expat import ExpatError
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def _check_java_ipv4_override():
         raise util.KanpilotError("codex_environment_unavailable", "Android _JAVA_OPTIONS 引号格式无效，无法核对 IPv4 参数") from exc
 
 
-def _expected_v2(spec):
+def _expected_v2(spec, *, restricted=True):
     from .codex_execution import verification_flutter_commands
     result = _expected(spec)
     commands = verification_flutter_commands(spec["required_verification_commands"], spec["cwd"])
@@ -117,20 +118,35 @@ def _expected_v2(spec):
         setup["pub_cache_source"] = _cache_source("PUB_CACHE", Path.home() / ".pub-cache")
         setup["flutter_settings"] = _flutter_settings()
         result["environment"]["PUB_CACHE"] = str(root / "pub-cache")
-    if setup["android"]:
+    if setup["android"] and restricted:
         _check_java_ipv4_override()
         java_options = "-Djava.net.preferIPv4Stack=true"
         _require(not os.environ.get("JDK_JAVA_OPTIONS") or os.environ["JDK_JAVA_OPTIONS"] == java_options,
                  "Android 受限构建要求固定 JDK_JAVA_OPTIONS；请先移除冲突的宿主 JVM 参数")
         result["environment"]["JDK_JAVA_OPTIONS"] = java_options
+        plugin = Path(setup["flutter"]).parent.parent / "packages/flutter_tools/gradle"
+        _require(plugin.is_dir() and plugin.resolve(strict=True) == plugin,
+                 "Flutter Gradle 插件目录缺失或含符号链接")
+        # The included SDK plugin owns its build-local Gradle state and
+        # compilation outputs; its scripts and src tree remain read-only.
+        for name in (".gradle", "build"):
+            generated = plugin / name
+            _require(not generated.is_symlink() and generated.resolve() == generated,
+                     "Flutter Gradle 生成目录含符号链接")
+            result["writable_roots"].append(str(generated))
+    if setup["android"]:
         setup["gradle_cache_source"] = _cache_source("GRADLE_USER_HOME", Path.home() / ".gradle")
         result["environment"]["GRADLE_USER_HOME"] = str(root / "gradle")
         # Gradle's documented read-only dependency cache does not contain user
         # properties, init scripts, credentials or wrapper lock files.
-        dependencies = Path(setup["gradle_cache_source"]) / "caches/modules-2"
+        cache_root = Path(setup["gradle_cache_source"]) / "caches"
+        dependencies = cache_root / "modules-2"
+        _require(not cache_root.is_symlink() and not dependencies.is_symlink()
+                 and cache_root.resolve() == cache_root and dependencies.resolve() == dependencies,
+                 "Gradle 只读依赖缓存含符号链接")
         if dependencies.is_dir():
-            _require(dependencies.resolve() == dependencies, "Gradle 只读依赖缓存含符号链接")
-            result["environment"]["GRADLE_RO_DEP_CACHE"] = str(dependencies)
+            # Gradle appends modules-2 to this configured cache base itself.
+            result["environment"]["GRADLE_RO_DEP_CACHE"] = str(cache_root)
         for key, variable in (("jdk-dir", "JAVA_HOME"), ("android-sdk", "ANDROID_HOME")):
             if key in setup["flutter_settings"]:
                 result["environment"][variable] = setup["flutter_settings"][key]
@@ -138,21 +154,28 @@ def _expected_v2(spec):
             result["environment"]["ANDROID_SDK_ROOT"] = result["environment"]["ANDROID_HOME"]
     if "macos" in platforms:
         _require(sys.platform == "darwin", "冻结的 macOS 构建需要 macOS 执行端")
-        # Xcode's private compatibility setting avoids nesting SwiftPM's
-        # manifest sandbox inside the already restricted Codex process.
-        # Its availability must be checked with each supported Xcode version.
-        result["environment"]["XCODE_USER_DEFAULTS_FILE"] = str(root / "config/xcode-user-defaults.plist")
-        setup["xcode_user_defaults"] = {"IDEPackageSupportDisableManifestSandbox": True}
-        # Foundation NSTemporaryDirectory uses confstr, even with TMPDIR set.
-        system_tmp = os.confstr(65537)  # _CS_DARWIN_USER_TEMP_DIR (Darwin ABI)
-        _require(bool(system_tmp), "无法确定 macOS 系统用户临时目录")
-        manifests = Path.home().resolve() / "Library/Caches/org.swift.swiftpm/manifests"
-        _require(manifests.resolve() == manifests, "SwiftPM manifest 缓存路径含符号链接")
-        result["writable_roots"] = [
-            str((Path.home() / "Library/Developer/Xcode/DerivedData").resolve()),
-            str(Path(system_tmp).resolve(strict=True)), str(manifests)]
+        if restricted:
+            _macos_restricted_settings(result, setup, root)
     result["setup"] = setup
+    if not restricted:
+        result.update(v=3, isolation="none", network={"mode": "unrestricted"})
     return result
+
+
+def _macos_restricted_settings(result, setup, root):
+    # Xcode's private compatibility setting avoids nesting SwiftPM's
+    # manifest sandbox inside the already restricted Codex process.
+    # Its availability must be checked with each supported Xcode version.
+    result["environment"]["XCODE_USER_DEFAULTS_FILE"] = str(root / "config/xcode-user-defaults.plist")
+    setup["xcode_user_defaults"] = {"IDEPackageSupportDisableManifestSandbox": True}
+    # Foundation NSTemporaryDirectory uses confstr, even with TMPDIR set.
+    system_tmp = os.confstr(65537)  # _CS_DARWIN_USER_TEMP_DIR (Darwin ABI)
+    _require(bool(system_tmp), "无法确定 macOS 系统用户临时目录")
+    manifests = Path.home().resolve() / "Library/Caches/org.swift.swiftpm/manifests"
+    _require(manifests.resolve() == manifests, "SwiftPM manifest 缓存路径含符号链接")
+    result["writable_roots"].extend([
+        str((Path.home() / "Library/Developer/Xcode/DerivedData").resolve()),
+        str(Path(system_tmp).resolve(strict=True)), str(manifests)])
 
 
 def _directory(spec, *, create=False):
@@ -175,7 +198,7 @@ def _directory(spec, *, create=False):
             os.close(fd)
             fd = child
         names = ["config", "tmp"]
-        if (spec.get("tool_environment") or {}).get("v") == 2:
+        if (spec.get("tool_environment") or {}).get("v") in (2, 3):
             names.append("analyzer")
             setup = spec["tool_environment"]["setup"]
             if setup["pub_offline"]:
@@ -224,7 +247,7 @@ def _walk_directory(path, *, create=False):
 
 def _prepare_settings(spec):
     environment = spec["tool_environment"]
-    if environment["v"] != 2:
+    if environment["v"] not in (2, 3):
         return
     _require(not (Path.home() / ".flutter_tool_state").exists(),
              "Flutter 旧式 .flutter_tool_state 会绕过私有状态目录；请先迁移为 XDG Flutter 状态")
@@ -283,7 +306,8 @@ def freeze(spec):
     """Opt in only new Flutter executions with an explicitly frozen SDK cache."""
     if spec.get("backend") != "codex" or not spec.get("sandbox_writable_roots"):
         return None
-    spec["tool_environment"] = _expected_v2(spec)
+    spec["tool_environment"] = _expected_v2(
+        spec, restricted=spec.get("config", {}).get("sandbox", "workspace-write") != "danger-full-access")
     return validate(spec)
 
 
@@ -293,8 +317,11 @@ def validate(spec):
     try:
         actual = spec["tool_environment"]
         _require(type(actual) is dict and type(actual.get("v")) is int
-                 and actual["v"] in (1, 2), "Codex 工具环境版本无效")
-        expected = _expected(spec) if actual["v"] == 1 else _expected_v2(spec)
+                 and actual["v"] in (1, 2, 3), "Codex 工具环境版本无效")
+        sandbox = spec.get("config", {}).get("sandbox", "workspace-write")
+        _require(sandbox == ("danger-full-access" if actual["v"] == 3 else "workspace-write"),
+                 "Codex 工具环境与冻结沙箱模式不符；旧轮次不能通过设置变更扩大权限")
+        expected = _expected(spec) if actual["v"] == 1 else _expected_v2(spec, restricted=actual["v"] == 2)
         # JSON comparison distinguishes bool from int, unlike dict equality.
         _require(type(actual) is dict and util.jdump(actual) == util.jdump(expected),
                  "Codex 冻结的工具环境或网络权限不符")
@@ -322,6 +349,8 @@ def launcher_config(spec):
     environment = validate(spec)
     if environment is None:
         return []
+    if environment["v"] == 3:
+        return ["-c", "shell_environment_policy.set=" + _toml(environment["environment"])]
     filesystem = {"/": "read", spec["cwd"]: "write"}
     filesystem.update({path: "write" for path in spec["sandbox_writable_roots"]})
     filesystem.update({path: "write" for path in environment.get("writable_roots", [])})
@@ -346,7 +375,44 @@ def child_env(spec, base_env):
 
 # Run with the exact permission configuration used by exec, with no model call,
 # no task command, no host configuration writes and no secrets in the receipt.
-_PROBE = r'''
+MACOS_WORKSPACE_UTI_PROBE = r'''
+def workspace_uti():
+    import ctypes as C
+    cf = C.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+    cs = C.CDLL('/System/Library/Frameworks/CoreServices.framework/CoreServices')
+    cf.CFStringCreateWithCString.argtypes = [C.c_void_p, C.c_char_p, C.c_uint32]
+    cf.CFStringCreateWithCString.restype = C.c_void_p
+    cf.CFStringGetCString.argtypes = [C.c_void_p, C.c_char_p, C.c_long, C.c_uint32]
+    cf.CFStringGetCString.restype = C.c_bool
+    cf.CFRelease.argtypes = [C.c_void_p]
+    cf.CFRelease.restype = None
+    cs.UTTypeConformsTo.argtypes = [C.c_void_p, C.c_void_p]
+    cs.UTTypeConformsTo.restype = C.c_bool
+    cs.UTTypeCreatePreferredIdentifierForTag.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p]
+    cs.UTTypeCreatePreferredIdentifierForTag.restype = C.c_void_p
+    pointers = []
+    try:
+        for text in ('public.filename-extension', 'xcworkspace',
+                     'com.apple.dt.document.workspace', 'com.apple.package'):
+            pointer = cf.CFStringCreateWithCString(None, text.encode(), 0x08000100)
+            if not pointer:
+                return False
+            pointers.append(pointer)
+        preferred = cs.UTTypeCreatePreferredIdentifierForTag(pointers[0], pointers[1], None)
+        if not preferred:
+            return False
+        pointers.append(preferred)
+        buffer = C.create_string_buffer(4096)
+        return (bool(cf.CFStringGetCString(preferred, buffer, len(buffer), 0x08000100))
+                and buffer.value == b'com.apple.dt.document.workspace'
+                and bool(cs.UTTypeConformsTo(pointers[2], pointers[3])))
+    finally:
+        for pointer in reversed(pointers):
+            cf.CFRelease(pointer)
+'''
+
+
+_PROBE = MACOS_WORKSPACE_UTI_PROBE + r'''
 import errno, json, os, socket, tempfile, urllib.error, urllib.request
 checks = {}
 for name, variable in (("config_write", "XDG_CONFIG_HOME"), ("temp_write", "TMPDIR")):
@@ -388,6 +454,8 @@ except urllib.error.URLError as exc:
                               and str(exc.reason).startswith("Tunnel connection failed: 403 "))
 except OSError:
     pass
+if os.environ.get("KANPILOT_PROBE_WORKSPACE_UTI") == "1":
+    checks["workspace_uti"] = workspace_uti()
 roots = {}
 for path in json.loads(os.environ.get("KANPILOT_PROBE_WRITABLE_ROOTS", "[]")):
     try:
@@ -420,27 +488,51 @@ def preflight(spec, env, *, check=None):
                                    ("ANALYZER_STATE_LOCATION_OVERRIDE", "PUB_CACHE", "GRADLE_USER_HOME")
                                    if key in private]
         _prepare_settings(spec)
-        argv = [constants.codex_bin(), "sandbox", "-P", permission_profile(spec), "-C", spec["cwd"]]
-        argv += launcher_config(spec) + ["--", sys.executable, "-c", _PROBE]
-        probe_env = child_env(spec, env)
-        probe_env["KANPILOT_PROBE_WRITABLE_ROOTS"] = json.dumps(probe_roots)
-        probe = subprocess.run(argv, cwd=spec["cwd"], env=probe_env,
-                               capture_output=True, text=True, timeout=20)
-        _require(probe.returncode == 0, "Codex 工具环境沙箱预检未成功启动")
-        result = json.loads(probe.stdout)
-        _require(type(result) is dict, "Codex 工具环境预检回执不是对象")
-        checks = result.get("checks")
-        _require(type(result.get("v")) is int and result["v"] == 1 and result.get("status") == "passed"
-                 and type(checks) is dict and set(checks) == set(CHECKS)
-                 and all(value is True for value in checks.values()),
-                 "Codex 工具环境预检失败：" + ", ".join(name for name in CHECKS if not isinstance(checks, dict) or checks.get(name) is not True))
-        if probe_roots:
-            _require(result.get("writable_roots") == {path: True for path in probe_roots},
-                     "Codex 工具状态、原生构建缓存或宿主临时目录不可写")
-        receipt = {"v": environment["v"], "status": "passed", "checks": checks}
-        if probe_roots:
-            receipt["writable_roots"] = result["writable_roots"]
-        if environment["v"] == 2:
+        if environment["v"] == 3:
+            checks = {}
+            writable = {}
+            for name, path in ([("config_write", private["XDG_CONFIG_HOME"]),
+                                ("temp_write", private["TMPDIR"])]
+                               + [(path, path) for path in probe_roots]):
+                with tempfile.TemporaryFile(dir=path) as stream:
+                    stream.write(b"kanpilot")
+                    stream.seek(0)
+                    _require(stream.read() == b"kanpilot", "Codex 私有工具目录不可写")
+                (writable if name in probe_roots else checks)[name] = True
+            receipt = {"v": 3, "status": "passed", "isolation": "none",
+                       "network": {"mode": "unrestricted"}, "checks": checks}
+            if probe_roots:
+                receipt["writable_roots"] = writable
+        else:
+            argv = [constants.codex_bin(), "sandbox", "-P", permission_profile(spec), "-C", spec["cwd"]]
+            argv += launcher_config(spec) + ["--", sys.executable, "-c", _PROBE]
+            probe_env = child_env(spec, env)
+            probe_env["KANPILOT_PROBE_WRITABLE_ROOTS"] = json.dumps(probe_roots)
+            macos_uti = environment["v"] == 2 and "macos" in environment["platforms"]
+            expected_checks = CHECKS + (("workspace_uti",) if macos_uti else ())
+            probe_env.pop("KANPILOT_PROBE_WORKSPACE_UTI", None)
+            if macos_uti:
+                probe_env["KANPILOT_PROBE_WORKSPACE_UTI"] = "1"
+            probe = subprocess.run(argv, cwd=spec["cwd"], env=probe_env,
+                                   capture_output=True, text=True, timeout=20)
+            _require(probe.returncode == 0, "Codex 工具环境沙箱预检未成功启动")
+            result = json.loads(probe.stdout)
+            _require(type(result) is dict, "Codex 工具环境预检回执不是对象")
+            checks = result.get("checks")
+            if macos_uti:
+                _require(type(checks) is dict and checks.get("workspace_uti") is True,
+                         "当前 Codex 受限沙箱无法识别 Xcode workspace 类型；请在设置→运行端→执行→Codex CLI 选择无沙箱，并创建新轮次")
+            _require(type(result.get("v")) is int and result["v"] == 1 and result.get("status") == "passed"
+                     and type(checks) is dict and set(checks) == set(expected_checks)
+                     and all(value is True for value in checks.values()),
+                     "Codex 工具环境预检失败：" + ", ".join(name for name in expected_checks if not isinstance(checks, dict) or checks.get(name) is not True))
+            if probe_roots:
+                _require(result.get("writable_roots") == {path: True for path in probe_roots},
+                         "Codex 工具状态、原生构建缓存或宿主临时目录不可写")
+            receipt = {"v": environment["v"], "status": "passed", "checks": checks}
+            if probe_roots:
+                receipt["writable_roots"] = result["writable_roots"]
+        if environment["v"] in (2, 3):
             from . import codex_setup_process, codex_tool_setup, git_delivery
             if check:
                 check()
@@ -448,7 +540,7 @@ def preflight(spec, env, *, check=None):
             command = codex_tool_setup.setup_argv(spec)
             if command:
                 before = git_delivery.source_state_sha256(spec["cwd"])
-                setup_argv = argv[:argv.index("--") + 1] + command
+                setup_argv = command if environment["v"] == 3 else argv[:argv.index("--") + 1] + command
                 try:
                     setup = codex_setup_process.run(setup_argv, cwd=spec["cwd"], env=child_env(spec, env),
                                                     timeout=180, check=check)
@@ -476,4 +568,4 @@ def preflight(spec, env, *, check=None):
                                     "exit_code": setup.returncode, "cache_seed": counts}
         return receipt
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-        raise util.KanpilotError("codex_environment_unavailable", "Codex 工具环境沙箱预检不可用；未调用模型") from exc
+        raise util.KanpilotError("codex_environment_unavailable", "Codex 工具环境预检不可用；未调用模型") from exc

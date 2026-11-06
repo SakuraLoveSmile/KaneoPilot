@@ -139,6 +139,34 @@ if let legacy = decode(ExecConfig.self, #"{"provider":"closeai","model":"m"}"#) 
     expect(legacy.piDesktop == nil, "旧配置无桌面块")
 }
 
+// Codex 执行权限：旧配置保持受限，保存显式选择；未知值不能静默扩大权限。
+if let legacyCodex = decode(ExecCodexConfig.self, #"{"model":"gpt-6","reasoning_effort":"high"}"#) {
+    expect(legacyCodex.effectiveSandbox == "workspace-write", "旧 Codex 配置缺 sandbox 时默认受限")
+    expect(legacyCodex.sandboxLabel == "受限沙箱", "旧 Codex 配置显示受限沙箱")
+    expect(legacyCodex.fields == ["model": "gpt-6", "reasoning_effort": "high", "sandbox": "workspace-write"],
+           "保存旧 Codex 配置显式携带受限权限并保留模型与思考等级")
+}
+for mode in ExecCodexConfig.sandboxModes {
+    let configJSON = """
+    {"backend":"codex","codex":{"model":"gpt-6","reasoning_effort":"high","sandbox":"\(mode)"}}
+    """
+    if let config = decode(ExecConfig.self, configJSON), let codex = config.codex {
+        expect(codex.effectiveSandbox == mode, "Codex 配置解码显式权限 \(mode)")
+        expect(codex.fields["sandbox"] == mode, "Codex 保存字段保留显式权限 \(mode)")
+        expect(codex.fields["model"] == "gpt-6" && codex.fields["reasoning_effort"] == "high",
+               "Codex 保存权限同时保留模型与思考等级 \(mode)")
+        expect(codex.sandboxLabel == (mode == "workspace-write" ? "受限沙箱" : "无沙箱"),
+               "Codex 配置显示对应权限标签 \(mode)")
+    } else {
+        expect(false, "Codex 显式权限配置应完整解码 \(mode)")
+    }
+}
+if let unknownCodex = decode(ExecCodexConfig.self, #"{"sandbox":"future-mode"}"#) {
+    expect(unknownCodex.effectiveSandbox == "future-mode", "未知 Codex 权限保留原值供界面校验")
+    expect(!ExecCodexConfig.sandboxModes.contains(unknownCodex.effectiveSandbox), "未知 Codex 权限不属于允许选项")
+    expect(unknownCodex.sandboxLabel == "未知权限（future-mode）", "未知 Codex 权限不显示为无沙箱")
+}
+
 // MARK: - 夹具 3：planner_config / review_config 新增字段（§5.24.1）
 
 let plannerConfigJSON = """

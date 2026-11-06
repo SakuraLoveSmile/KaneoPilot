@@ -108,6 +108,18 @@ class CodexToolSetupTests(unittest.TestCase):
                        os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
                       for path in root.rglob("*"))
 
+    def test_unrestricted_v3_keeps_private_seed_and_offline_setup_contract(self):
+        self.spec["tool_environment"]["v"] = 3
+        package = self.hosted()
+        self.gradle_distribution()
+        before = (self.fingerprint(self.pub), self.fingerprint(self.gradle))
+        receipt = setup.seed_caches(self.spec)
+        self.assertEqual(receipt, {"pub_packages": 1, "git_checkouts": 0, "gradle_distributions": 1})
+        self.assertEqual((self.private / "pub-cache/hosted/pub.dev/needed-1.2.3").resolve(), package)
+        self.assertEqual(setup.setup_argv(self.spec), [self.spec["tool_environment"]["setup"]["flutter"],
+                                                    "pub", "get", "--offline", "--enforce-lockfile"])
+        self.assertEqual((self.fingerprint(self.pub), self.fingerprint(self.gradle)), before)
+
     def test_only_locked_hosted_packages_are_linked_and_metadata_is_private(self):
         package = self.hosted()
         unrelated = package.parent / "unrelated-9.0.0"

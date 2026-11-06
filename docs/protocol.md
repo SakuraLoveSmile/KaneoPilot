@@ -1911,25 +1911,31 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 ## 5.31 Codex CLI 执行适配（2026-10-21）
 
-`exec_config.backend` 新增 `codex`，独立配置块 `codex:{model,reasoning_effort}`。轮次冻结为 `{backend:"codex",model,reasoning_effort,sandbox:"workspace-write",execution_question_max_wait_seconds}`，保存切换保留其他后端字段，不修改 Codex 全局配置，也不改变既有轮次。模型与思考等级沿规划配置目录校验；本地就绪探测不调用模型，不承诺账户可用性。新请求配置不完整或不可用时明确拒绝，不改用其他后端。
+`exec_config.backend` 新增 `codex`，独立配置块 `codex:{model,reasoning_effort,sandbox}`。`sandbox` 由设置→运行端→执行的“执行权限”选择：`workspace-write`（受限沙箱，缺字段时的默认值）或 `danger-full-access`（无沙箱）。保存后仅影响新轮次；轮次冻结为 `{backend:"codex",model,reasoning_effort,sandbox,execution_question_max_wait_seconds}`。保留其他后端字段，不修改 Codex 全局配置、不内置或替换系统 CLI，也不改变既有轮次。模型与思考等级沿规划配置目录校验；本地就绪探测不调用模型，不承诺账户可用性。新请求配置不完整或不可用时明确拒绝，不改用其他后端。
 
-核心先登记启动操作回执，复用隔离工作树、计划哈希、`execution_contract`、App worker 归属和请求心跳，再拉起 `codex_worker`。CLI 使用工作树写入沙箱、无交互审批、JSONL 及 JSON Schema；服务商解析沿 `codex_provider`，凭据只在内存/子进程环境传递。首个 session 事件须由真实 `thread.started` 与成功核心心跳共同证明。CLI 未暴露原生 turn ID 时，采用明确标注的适配器单调代次，不冒充原生身份。
+核心先登记启动操作回执，复用隔离工作树、计划哈希、`execution_contract`、App worker 归属和请求心跳，再拉起 `codex_worker`。CLI 首次执行和 resume 都使用本轮冻结的权限、无交互审批、JSONL 及 JSON Schema；服务商解析沿 `codex_provider`，凭据只在内存/子进程环境传递。首个 session 事件须由真实 `thread.started` 与成功核心心跳共同证明。CLI 未暴露原生 turn ID 时，采用明确标注的适配器单调代次，不冒充原生身份。
 
 KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，将规范化后仍位于该 SDK 下的现存 `bin/cache` 作为 `sandbox_writable_roots` 写入 spec 和阶段契约；启动时重新核对。新 Flutter spec 同时冻结 `tool_environment`（`v:1`）：`XDG_CONFIG_HOME`、`TMPDIR` 分别指向工作区 `.pi/kanpilot/codex/<run_id>/config`、`tmp`，`FLUTTER_SUPPRESS_ANALYTICS="true"`。通过每轮独立命名的权限 profile 保持全盘只读、工作区和冻结 SDK 缓存可写，显式保护 `.git`、`.codex`、`.agents`；不开放整个 SDK 或用户主目录。profile 名由新轮次 UUID 与工作区路径的哈希派生，避免复用已有静态 profile 的递归合并规则，resume 使用同名策略。启用受限网络代理，允许本地绑定和回环通信，固定 `mode="limited"`、`allow_upstream_proxy=false`、空 `domains`，限制非回环流量。空表本身不清除已有 profile 的域名规则。底层允许通配 bind，不承诺 `bind(0.0.0.0)` 失败。
 
 `codex_environment` 负责环境冻结、校验和无模型预检。首次模型启动及每次显式 resume 前重新核对 spec/阶段契约、SDK 缓存及环境目录；用不跟随符号链接的目录描述符准备本轮目录，以同一权限运行 `codex sandbox`，确认配置/临时文件可写、IPv4/IPv6 回环收发、公网直连和代理请求均被拒绝。成功回执保存为 `codex-environment-<代次>.json`，失败持久化原因且不启动模型。工具状态位于已有源码快照排除的 `.pi/**`。历史 spec 缺少 `tool_environment` 时沿用原 `workspace-write` / `--add-dir` 与环境，不隐式扩权；其他工具的环境缺失继续如实失败。Codex 指令仅要求下述最终 JSON，不要求 Plus 的 SubmitGoalReport。已结束的 failed/aborted 观察结果继续核对终态并转 needs_user/execution_failed，保留实际失败原因，不归入 observation_blocked，也不隐式续发模型。
 
-2026-11-06 起新 Flutter 轮次冻结 `tool_environment.v=2`，既有 v1 字段与权限不变。v2 增加 `BOT="true"`，避免空 tool_state 下的云主机 metadata 探测；不是全局开启 CI。Dart 分析器通过官方 `ANALYZER_STATE_LOCATION_OVERRIDE` 定向本轮 `.pi/kanpilot/codex/<run_id>/analyzer`，同样按描述符创建、拒绝符号链接并核对可写；不开放宿主 `~/.dartServer`。只从冻结 verify 的直接、字面 Flutter `build macos/apk/appbundle` 命令识别原生平台能力，其他命令不因此获得平台目录。所有能力、来源、构建设置及写根一起绑定原阶段契约，首次和 resume 重新核对。
+2026-11-06 起，选择受限沙箱的新 Flutter 轮次冻结 `tool_environment.v=2`，既有 v1 字段与权限不变。v2 增加 `BOT="true"`，避免空 tool_state 下的云主机 metadata 探测；不是全局开启 CI。Dart 分析器通过官方 `ANALYZER_STATE_LOCATION_OVERRIDE` 定向本轮 `.pi/kanpilot/codex/<run_id>/analyzer`，同样按描述符创建、拒绝符号链接并核对可写；不开放宿主 `~/.dartServer`。只从冻结 verify 的直接、字面 Flutter `build macos/apk/appbundle` 命令识别原生平台能力，其他命令不因此获得平台目录。所有能力、来源、构建设置及写根一起绑定原阶段契约，首次和 resume 重新核对。
 
-原生轮次将 `PUB_CACHE` 定向本轮 `pub-cache`，Android 将 `GRADLE_USER_HOME` 定向本轮 `gradle`；均位于已有 `.pi/kanpilot/codex/<run_id>`。`codex_tool_setup` 仅从锁文件选择宿主已缓存的 hosted/Git 依赖，依赖源码保持宿主只读，元数据与必要 Git 对象为私有副本；不复制凭据、hooks 或任意 Git 配置。Gradle 仅复制 wrapper 配置指向的现成分发运行文件并新建私有锁，不复制宿主 properties/init.d；存在时仅用 `GRADLE_RO_DEP_CACHE` 读取宿主 `caches/modules-2`。保留宿主 Flutter 的必要路径/功能白名单（JDK、Android SDK/Studio、macOS/SPM 开关）为冻结的私有 `<XDG_CONFIG_HOME>/settings`，不复制认证/analytics。旧式 `.flutter_settings` / `.flutter_tool_state` 分别优先于 XDG；v2 状态预检及原生设置准备检测到对应旧式文件时明确拒绝并要求迁移，不假称已被重定向。
+原生轮次将 `PUB_CACHE` 定向本轮 `pub-cache`，Android 将 `GRADLE_USER_HOME` 定向本轮 `gradle`；均位于已有 `.pi/kanpilot/codex/<run_id>`。`codex_tool_setup` 仅从锁文件选择宿主已缓存的 hosted/Git 依赖，元数据与必要 Git 对象为私有副本；不复制凭据、hooks 或任意 Git 配置。Gradle 仅复制 wrapper 配置指向的现成分发运行文件并新建私有锁，不复制宿主 properties/init.d；宿主依赖缓存存在时，`GRADLE_RO_DEP_CACHE` 指向 `caches`，由 Gradle 追加 `modules-2`，不得重复追加。保留宿主 Flutter 的必要路径/功能白名单（JDK、Android SDK/Studio、macOS/SPM 开关）为冻结的私有 `<XDG_CONFIG_HOME>/settings`，不复制认证/analytics。旧式 `.flutter_settings` / `.flutter_tool_state` 分别优先于 XDG；v2/v3 状态预检及原生设置准备检测到对应旧式文件时明确拒绝并要求迁移，不假称已被重定向。
 
 macOS 原生能力额外冻结 `~/Library/Developer/Xcode/DerivedData`、Darwin `confstr(_CS_DARWIN_USER_TEMP_DIR)` 与 `~/Library/Caches/org.swift.swiftpm/manifests` 三个规范写根。Xcode 的 SPM 预取与 `-list` 没有 scheme，不能统一注入 `-derivedDataPath`；Foundation 的临时目录也不保证遵循 TMPDIR。因此第二根是明确的**宿主共享临时目录能力**，与本轮私有 TMPDIR 分别记录。第三根对应真实受限构建中 SwiftPM manifest 编译的 `.dia`、`manifest.db` 与其伴随文件，不扩大为整个 SwiftPM 缓存、HOME、Library、系统用户缓存或 SwiftPM 信任/配置目录；路径含符号链接时拒绝。
 
 macOS v2 另冻结 `XCODE_USER_DEFAULTS_FILE=<本轮根>/config/xcode-user-defaults.plist`，内容仅为 Boolean `IDEPackageSupportDisableManifestSandbox=true`，避免 SwiftPM manifest 的内层 Seatbelt 与 Codex 外层沙箱冲突。该项是 Xcode 实现配置，不是公开稳定 API；云端固定 Xcode 16.4，检查实现入口并运行原文构建，工具版本变化必须重新验证。文件以 NOFOLLOW/独占创建，仅接受不超过 64 KiB 的普通 plist 与精确键值类型，首次与 resume 都复核；沙箱显式将该文件设为只读，其他外层权限与公网限制继续生效，不写宿主 Xcode defaults。
 
+macOS v2 在模型调用前以同一受限 profile 查询 workspace UTI，要求首选扩展标识为 `com.apple.dt.document.workspace` 且继承 `com.apple.package`。Codex CLI 0.164.0 的基础沙箱拒绝该系统类型查询时，明确返回 `codex_environment_unavailable`，提示在设置中选择无沙箱并创建新轮次；不自动扩大权限。探针按实际能力判断，不按 CLI 版本号硬拒；v1 不新增此检查。查询源 `MACOS_WORKSPACE_UTI_PROBE` 由核心与云端夹具共用。
+
 Android v2 冻结 `JDK_JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true`，使 Java 的 Gradle 本地监听使用 IPv4 socket，避免默认双栈路径被受限网络策略拒绝。宿主该变量为空或已是同一精确值才允许冻结与启动，其他非空值明确报环境冲突且不输出原值；`_JAVA_OPTIONS` 在 OpenJDK 17 中后于命令行解析，显式同名属性非 true 时同样拒绝。其余 JVM 参数、`JAVA_TOOL_OPTIONS` 和项目 Gradle 设置保留，不把全部参数持久化到 spec。云端同一 profile 对照 Java 默认/IPv4 回环收发，并以原 APK 命令验收，不能用独立 Python 回环检查代替。
 
+Android v2 仅追加 Flutter SDK 插件的 `packages/flutter_tools/gradle/.gradle` 与 `build` 两个生成写根，解决 included build 不继承主工程 `project-cache-dir` 的限制。目录按既有 NOFOLLOW 流程创建和预检，拒绝符号链接；插件 `src`、Gradle 构建脚本及父目录继续只读。双平台轮次合并两端所需根，不相互覆盖。
+
 基础安全预检成功后，执行端用**同一冻结沙箱、无模型**运行 `flutter pub get --offline --enforce-lockfile` 作为平台准备；它不是业务 verify 回执。准备前后源码快照必须一致，锁定依赖不能变；项目引用 FlutterGeneratedPluginSwiftPackage 时核对 Package.swift 已生成。缺失 wrapper/依赖、准备非零退出、平台生成物仍缺失均给出具体错误并在模型前终止，不静默允许公网下载。成功环境回执分开记录基础检查、实际写根及准备命令/退出码/缓存种子计数；准备不替代随后每条原文 verify 的原生命令退出码。
+
+用户明确保存无沙箱时，新 Flutter 轮次冻结 `tool_environment.v=3`、`isolation="none"`、`network={mode:"unrestricted"}` 与空额外写根。CLI 的 exec/resume 均显式使用 `-s danger-full-access`、`sandbox_mode="danger-full-access"`、`approval_policy="never"`；不注入受限 profile、网络代理、`--add-dir`、Xcode 内层沙箱兼容 plist 或 Java IPv4 覆盖，保留宿主代理/JVM 环境。v3 仍保留 BOT、私有分析器/Pub/Gradle、必要 Flutter 设置白名单和锁定离线准备；预检直接检查私有目录，准备由受管子进程直接运行。该模式使用当前账户的文件与网络权限，不承诺宿主路径只读或禁公网；源码快照、进程清理、结构化报告与原生命令退出码门禁仍相同。v1/v2 与无沙箱配置不匹配时拒绝，设置保存不能扩大历史轮次权限。
 
 failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门禁核对。核对后将脱敏、限长的 summary（4096 字符）与最多 20 条非零 checks（每命令 1024 字符，保留整数退出码及省略数）记入 job.failure_report；终态说明上限 8192 字符。不生成成功专属 codex-report.json、不自动重试。monitor 在判定完整原始失败标记后去重和限长，避免重复通用文字或截断削弱失败门禁。
 

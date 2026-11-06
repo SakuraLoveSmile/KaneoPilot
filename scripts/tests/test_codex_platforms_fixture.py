@@ -19,6 +19,113 @@ SPEC.loader.exec_module(fixture)
 
 
 class CodexPlatformFixtureTests(unittest.TestCase):
+    def test_no_sandbox_runs_directly_and_never_uses_the_sandbox_subcommand(self):
+        environment = mock.Mock()
+        constants = mock.Mock()
+        command = ["/bin/sh", "-c", "flutter analyze --no-pub"]
+        spec = {"config": {"sandbox": "danger-full-access"},
+                "tool_environment": {"v": 3, "isolation": "none"}}
+        self.assertEqual(fixture.native_argv(environment, constants, spec, command, log_denials=True), command)
+        environment.assert_not_called()
+        environment.launcher_config.assert_not_called()
+        constants.codex_bin.assert_not_called()
+        with self.assertRaisesRegex(AssertionError, "cannot represent"):
+            fixture.sandbox_argv(environment, constants, spec, command)
+        spec["tool_environment"]["v"] = 2
+        with self.assertRaisesRegex(AssertionError, "requires v3"):
+            fixture.native_argv(environment, constants, spec, command)
+
+    def test_default_mode_keeps_real_sandbox_and_original_command_sets(self):
+        environment = SimpleNamespace(permission_profile=lambda spec: "frozen", launcher_config=lambda spec: ["-c", "test=1"])
+        constants = SimpleNamespace(codex_bin=lambda: "/codex")
+        spec = {"config": {}, "cwd": "/fixture"}
+        self.assertEqual(fixture.native_argv(environment, constants, spec, ["/tool"], log_denials=True),
+                         ["/codex", "sandbox", "-P", "frozen", "-C", "/fixture", "-c", "test=1",
+                          "--log-denials", "--", "/tool"])
+        full = fixture.verification_commands(Path("/a b/flutter"))
+        self.assertEqual(full, ["'/a b/flutter' analyze --no-pub", "'/a b/flutter' test --no-pub",
+                                "LANG=en_US.UTF-8 '/a b/flutter' build macos --debug --no-pub",
+                                "'/a b/flutter' build apk --debug --no-pub"])
+        self.assertEqual(fixture.verification_commands(Path("/a b/flutter"), macos=False),
+                         [full[0], full[1], full[3]])
+
+    def test_macos_preflight_records_actual_uti_block_or_support_without_fallback(self):
+        class EnvironmentError(Exception):
+            code = "codex_environment_unavailable"
+        util = SimpleNamespace(KanpilotError=EnvironmentError, redact=lambda value: value)
+        error = EnvironmentError("当前受限沙箱无法识别 Xcode workspace；请在设置选择无沙箱")
+        environment = SimpleNamespace(preflight=mock.Mock(side_effect=error))
+        uti = {"outside": {"workspace_uti": True}, "inside": {"workspace_uti": False}}
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            result = fixture.restricted_macos_preflight({}, environment, {}, uti, util, evidence)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["detail"], str(error))
+            self.assertEqual(result["model_calls"], 0)
+            self.assertEqual(result["uti"], uti)
+            environment.preflight.assert_called_once_with({}, {})
+            environment.preflight = mock.Mock(return_value={"status": "passed", "checks": {"workspace_uti": True}})
+            with self.assertRaisesRegex(AssertionError, "disagrees"):
+                fixture.restricted_macos_preflight({}, environment, {}, uti, util, evidence)
+            uti["inside"]["workspace_uti"] = True
+            self.assertEqual(fixture.restricted_macos_preflight({}, environment, {}, uti, util, evidence)["status"],
+                             "supported")
+            environment.preflight = mock.Mock(side_effect=EnvironmentError("unrelated Gradle failure"))
+            with self.assertRaisesRegex(AssertionError, "specific UTI"):
+                fixture.restricted_macos_preflight({}, environment, {}, uti, util, evidence)
+
+    def test_diagnostic_success_cannot_replace_original_verify_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            spec = {"config": {"sandbox": "danger-full-access"}, "cwd": str(evidence),
+                    "tool_environment": {"v": 3, "isolation": "none"},
+                    "required_verification_commands": ["original verify"]}
+            def run(argv, **kwargs):
+                label = kwargs["label"]
+                fixture.write_json(evidence / (label + ".json"),
+                                   {"exit_code": 7 if label == "free-verify-1" else 0, "log": label + ".log"})
+            with mock.patch.object(fixture, "run", side_effect=run) as process:
+                with self.assertRaisesRegex(AssertionError, "original native commands failed"):
+                    fixture.verify_native(spec, mock.Mock(), mock.Mock(), mock.Mock(), {}, evidence, label="free")
+            records = json.loads((evidence / "free-native-results.json").read_text())
+            self.assertEqual(records[0]["exit_code"], 7)
+            self.assertEqual(records[0]["command"], "original verify")
+            self.assertEqual(process.call_count, 2)
+
+    def test_launcher_receipts_reject_restricted_parameters_for_exec_and_resume(self):
+        def launcher(spec, schema, output, provider, session_id=None):
+            return ["codex", "exec", "-s", "danger-full-access", 'approval_policy="never"',
+                    *(["resume", session_id] if session_id else []), "-"]
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            adapter = SimpleNamespace(launcher_argv=mock.Mock(side_effect=launcher))
+            receipt = fixture.launcher_evidence({}, adapter, evidence)
+            self.assertEqual(set(receipt), {"exec", "resume"})
+            self.assertIn("fixture-session-no-model", receipt["resume"])
+            self.assertNotIn("resume", receipt["exec"])
+            self.assertEqual(adapter.launcher_argv.call_count, 2)
+            adapter.launcher_argv = lambda *args, **kwargs: [*launcher(*args, **kwargs), "--add-dir", "/cache"]
+            with self.assertRaisesRegex(AssertionError, "retained restricted"):
+                fixture.launcher_evidence({}, adapter, evidence)
+
+    def test_sdk_plugin_reset_only_removes_its_two_generated_roots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            sdk = Path(temporary)
+            flutter = sdk / "bin/flutter"
+            plugin = sdk / "packages/flutter_tools/gradle"
+            for name in (".gradle", "build", "src"):
+                (plugin / name).mkdir(parents=True)
+                (plugin / name / "sentinel").write_text(name)
+            (plugin / "build.gradle.kts").write_text("source")
+            fixture.reset_sdk_plugin_generated(flutter)
+            self.assertFalse((plugin / ".gradle").exists())
+            self.assertFalse((plugin / "build").exists())
+            self.assertEqual((plugin / "src/sentinel").read_text(), "src")
+            self.assertEqual((plugin / "build.gradle.kts").read_text(), "source")
+            (plugin / "build").symlink_to(plugin / "src", target_is_directory=True)
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                fixture.reset_sdk_plugin_generated(flutter)
+
     def test_xcode_private_entries_are_found_in_selected_bundle_and_remain_required(self):
         with tempfile.TemporaryDirectory() as temporary:
             contents = Path(temporary) / "Pinned.app/Contents"

@@ -162,7 +162,7 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
         error = codex_execution.validate_config(block)
         if error:
             raise util.KanpilotError("validation_failed", f"Codex 执行配置无效：{error}")
-        return {"backend": "codex", **block, "sandbox": "workspace-write",
+        return {"backend": "codex", **block, "sandbox": block.get("sandbox", "workspace-write"),
                 "execution_question_max_wait_seconds": config.get("execution_question_max_wait_seconds", constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)}
     if backend == "pi_desktop":
         block = config.get("pi_desktop")

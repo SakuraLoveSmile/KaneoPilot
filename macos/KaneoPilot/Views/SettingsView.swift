@@ -183,6 +183,7 @@ struct SettingsView: View {
     @State private var selBackend = "pi"
     @State private var execCodexModel = ""
     @State private var execCodexEffort = ""
+    @State private var execCodexSandbox = "workspace-write"
     @State private var pdModelSource = "custom"
     @State private var pdAdvancedExpanded = false
     @State private var pdConnectionFile = ""
@@ -523,7 +524,7 @@ struct SettingsView: View {
         case "pi_desktop":
             return plusSummary(base.piDesktop)
         case "codex":
-            return "Codex CLI · \(base.codex?.model ?? "—") · \(base.codex?.reasoningEffort ?? "—")"
+            return "Codex CLI · \(base.codex?.model ?? "—") · \(base.codex?.reasoningEffort ?? "—") · \(base.codex?.sandboxLabel ?? ExecCodexConfig.sandboxLabel(for: "workspace-write"))"
         default:
             return "Pi CLI · \(base.provider ?? "—") / \(base.model ?? "—") · \(base.reasoningEffort ?? "—")"
         }
@@ -851,7 +852,7 @@ struct SettingsView: View {
     private var execSheet: some View {
         SettingsEditSheet(
             title: "编辑 · 执行",
-            scope: "任务执行后端与模型；仅影响新轮次。",
+            scope: "任务执行后端、模型与权限；仅影响新轮次。",
             cancelAccessibilityLabel: "取消编辑执行",
             saveAccessibilityLabel: "保存执行配置",
             idealHeight: 540,
@@ -1118,10 +1119,22 @@ struct SettingsView: View {
                     ForEach(efforts, id: \.self) { Text($0).tag($0) }
                 }
             }
+            Picker("执行权限", selection: $execCodexSandbox) {
+                if !ExecCodexConfig.sandboxModes.contains(execCodexSandbox) {
+                    Text(ExecCodexConfig.sandboxLabel(for: execCodexSandbox)).tag(execCodexSandbox)
+                }
+                ForEach(ExecCodexConfig.sandboxModes, id: \.self) { mode in
+                    Text(ExecCodexConfig.sandboxLabel(for: mode)).tag(mode)
+                }
+            }
+            .accessibilityLabel("Codex 执行权限")
+            Text(execCodexSandbox == "danger-full-access"
+                 ? "无沙箱使用当前账户的文件与网络权限，可用于原生构建；仅影响新轮次。"
+                 : "受限沙箱限制文件写入与网络访问；原生构建需要系统权限时，可选择无沙箱。仅影响新轮次。")
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
             SettingsFieldRow("Codex CLI", caps.codex.map { "\($0.path ?? "未找到")（\($0.version ?? "未知")）" } ?? "未上报")
             SettingsFieldRow("已保存配置就绪态", caps.codex?.detail ?? "未检测")
-            Text("执行权限固定为工作树写入；配置仅影响新轮次。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
             Button("检测已保存配置") { Task { await refreshExecCapabilities() } }
                 .disabled(execLoading || savingExec)
         }
@@ -1542,6 +1555,7 @@ struct SettingsView: View {
         selBackend = base.effectiveBackend
         execCodexModel = base.codex?.model ?? execDefaults?.codex?.model ?? ""
         execCodexEffort = base.codex?.reasoningEffort ?? execDefaults?.codex?.reasoningEffort ?? ""
+        execCodexSandbox = base.codex?.effectiveSandbox ?? execDefaults?.codex?.effectiveSandbox ?? "workspace-write"
         // v4 §5.24.1：派发与监控运行端（旧核心未返回 → pi）。
         selControllerBackend = base.effectiveControllerBackend
         // pi_desktop 五字段草稿（旧核心未返回 → 全空）。
@@ -1721,7 +1735,7 @@ struct SettingsView: View {
                 // 桌面保存只提交桌面五字段；CLI 草稿由核心保留。
                 payload["pi_desktop"] = piDesktopDraft.fields
             } else if selBackend == "codex" {
-                payload["codex"] = ["model": execCodexModel, "reasoning_effort": execCodexEffort]
+                payload["codex"] = codexExecDraft.fields
             } else {
                 // CLI 保存不携带空桌面块；核心保留已保存的桌面分支。
                 payload["provider"] = selProvider
@@ -1810,6 +1824,7 @@ struct SettingsView: View {
         if selBackend == "codex" {
             if emptyToNil(execCodexModel) == nil { return "Codex 模型不能为空" }
             if emptyToNil(execCodexEffort) == nil { return "Codex 思考等级不能为空" }
+            if !ExecCodexConfig.sandboxModes.contains(execCodexSandbox) { return "请选择 Codex 执行权限" }
             if let efforts = model.plannerCapabilities?.efforts(for: execCodexModel),
                !efforts.isEmpty, !efforts.contains(execCodexEffort) {
                 return "模型 \(execCodexModel) 不支持思考等级「\(execCodexEffort)」"
@@ -1880,10 +1895,27 @@ struct SettingsView: View {
         return "\(path)（\(version)）"
     }
 
+    private var codexExecDraft: ExecCodexConfig {
+        ExecCodexConfig(model: execCodexModel, reasoningEffort: execCodexEffort,
+                        sandbox: execCodexSandbox)
+    }
+
+    private var codexExecDraftDirty: Bool {
+        guard execDraftSeeded, selBackend == "codex", let base = execBase else { return false }
+        return base.effectiveBackend != "codex"
+            || execCodexModel != (base.codex?.model ?? execDefaults?.codex?.model ?? "")
+            || execCodexEffort != (base.codex?.reasoningEffort ?? execDefaults?.codex?.reasoningEffort ?? "")
+            || execCodexSandbox != (base.codex?.effectiveSandbox ?? execDefaults?.codex?.effectiveSandbox ?? "workspace-write")
+    }
+
     private var execStatusText: String {
-        guard let config = execConfig else { return "当前：默认（未保存）" }
-        guard config.updatedAt != nil else { return "已保存" }
-        return "已保存 · \(TimeFormat.fullString(config.updatedAt))"
+        let saved: String
+        if let config = execConfig {
+            saved = config.updatedAt == nil ? "已保存" : "已保存 · \(TimeFormat.fullString(config.updatedAt))"
+        } else {
+            saved = "当前：默认（未保存）"
+        }
+        return saved + (codexExecDraftDirty ? " · 有未保存改动" : "")
     }
 
     private var piDesktopDetectionText: String {

@@ -2560,7 +2560,8 @@ EXEC_CONFIG_DEFAULTS = {
     "reasoning_effort": "max",
     "agent_preset": "default",
     "backend": "pi",
-    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"},
+    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high",
+              "sandbox": "workspace-write"},
 }
 
 
@@ -2608,7 +2609,10 @@ def cmd_exec_capabilities(state, payload):
 
 
 def cmd_get_exec_config(state, payload):
-    return {"config": state.get("exec_config"),
+    config = copy.deepcopy(state.get("exec_config"))
+    if isinstance(config, dict) and isinstance(config.get("codex"), dict):
+        config["codex"].setdefault("sandbox", "workspace-write")
+    return {"config": config,
             "defaults": dict(EXEC_CONFIG_DEFAULTS)}
 
 
@@ -2633,8 +2637,11 @@ def cmd_set_exec_config(state, payload):
         return fail("不支持的执行后端", "bad_request")
     if "codex" in fields or candidate.get("backend") == "codex":
         block = candidate.get("codex") or {}
-        if set(block) != {"model", "reasoning_effort"}:
-            return fail("codex 仅接受 model 和 reasoning_effort 完整配置", "bad_request")
+        if not {"model", "reasoning_effort"}.issubset(block) or set(block) - {"model", "reasoning_effort", "sandbox"}:
+            return fail("codex 仅接受 model、reasoning_effort 和 sandbox 配置", "bad_request")
+        block.setdefault("sandbox", "workspace-write")
+        if block["sandbox"] not in ("workspace-write", "danger-full-access"):
+            return fail("Codex 执行权限无效", "bad_request")
         models = planner_capabilities(state)["models"]
         entry = next((m for m in models if m["id"] == block.get("model")), None)
         if not entry or block.get("reasoning_effort") not in entry["reasoning_efforts"]:

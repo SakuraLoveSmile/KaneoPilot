@@ -1072,6 +1072,28 @@ struct PlusBackendStatus: Decodable {
 struct ExecCodexConfig: Decodable, Equatable {
     let model: String?
     let reasoningEffort: String?
+    let sandbox: String?
+
+    static let sandboxModes = ["workspace-write", "danger-full-access"]
+
+    var effectiveSandbox: String { sandbox ?? "workspace-write" }
+
+    static func sandboxLabel(for value: String) -> String {
+        switch value {
+        case "workspace-write": return "受限沙箱"
+        case "danger-full-access": return "无沙箱"
+        default: return "未知权限（\(value)）"
+        }
+    }
+
+    var sandboxLabel: String { Self.sandboxLabel(for: effectiveSandbox) }
+
+    var fields: [String: String] {
+        var result = ["sandbox": effectiveSandbox]
+        if let model { result["model"] = model }
+        if let reasoningEffort { result["reasoning_effort"] = reasoningEffort }
+        return result
+    }
 }
 
 struct ExecCodexInfo: Decodable {

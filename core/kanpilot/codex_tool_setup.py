@@ -412,7 +412,7 @@ def seed_caches(spec):
     """Populate only frozen private cache targets from read-only host seeds."""
     receipt = {"pub_packages": 0, "git_checkouts": 0, "gradle_distributions": 0}
     environment = spec.get("tool_environment")
-    if not isinstance(environment, dict) or environment.get("v") != 2:
+    if not isinstance(environment, dict) or environment.get("v") not in (2, 3):
         return receipt
     setup = environment["setup"]
     if not setup["pub_offline"] and not setup["android"]:
@@ -430,9 +430,9 @@ def seed_caches(spec):
 
 
 def setup_argv(spec):
-    """Return setup only; caller supplies the frozen sandbox and captures output."""
+    """Return setup only; caller supplies the frozen launcher and captures output."""
     environment = spec.get("tool_environment")
-    if not isinstance(environment, dict) or environment.get("v") != 2:
+    if not isinstance(environment, dict) or environment.get("v") not in (2, 3):
         return None
     setup = environment["setup"]
     return [setup["flutter"], "pub", "get", "--offline", "--enforce-lockfile"] if setup["pub_offline"] else None

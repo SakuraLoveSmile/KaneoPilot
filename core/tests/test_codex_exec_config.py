@@ -70,7 +70,7 @@ class CodexExecutionConfigTests(KanpilotTestCase):
         self.assertEqual(self.call("set-exec-config", {"backend": "codex"})["config"]["codex"], self.block)
 
     def test_invalid_blocks_are_rejected_atomically(self):
-        for block in (None, [], "bad", {**self.block, "sandbox": "danger-full-access"},
+        for block in (None, [], "bad", {**self.block, "sandbox": "unsupported"},
                       {**self.block, "unexpected": True}, {"model": "missing", "reasoning_effort": "high"},
                       {**self.block, "reasoning_effort": "ultra"}):
             with self.subTest(block=block):
@@ -92,12 +92,24 @@ class CodexExecutionConfigTests(KanpilotTestCase):
             self.assertEqual(exec_config.check_available(conn, config_snapshot=snapshot), (True, None))
         self.assertEqual(probe.call_args.args[0]["reasoning_effort"], "high")
 
-    def test_snapshot_cannot_widen_sandbox(self):
+    def test_explicit_sandbox_save_affects_only_new_snapshots(self):
+        self.call("set-exec-config", {"backend": "codex", "codex": self.block})
         conn = self.connection()
-        snapshot = {"backend": "codex", **self.block, "sandbox": "danger-full-access"}
-        available, reason = exec_config.check_available(conn, config_snapshot=snapshot)
-        self.assertFalse(available)
-        self.assertIn("workspace-write", reason)
+        original = exec_config.snapshot(conn)
+        self.call("set-exec-config", {"codex": {"sandbox": "danger-full-access"}})
+        current = exec_config.snapshot(conn)
+        self.assertEqual(original["sandbox"], "workspace-write")
+        self.assertEqual(current["sandbox"], "danger-full-access")
+        self.assertEqual(exec_config.snapshot(conn, config_override=original), original)
+        self.assertEqual(exec_config.snapshot(conn, config_override=current), current)
+        legacy = {key: value for key, value in original.items() if key != "sandbox"}
+        self.assertEqual(exec_config.snapshot(conn, config_override=legacy)["sandbox"], "workspace-write")
+        for snapshot in (original, current, legacy):
+            with self.subTest(snapshot=snapshot), patch.object(codex_execution, "capabilities", return_value={"available": True}) as probe:
+                self.assertEqual(exec_config.check_available(conn, config_snapshot=snapshot), (True, None))
+                self.assertEqual(probe.call_args.args[0].get("sandbox", "workspace-write"), snapshot.get("sandbox", "workspace-write"))
+        self.call("set-exec-config", {"codex": {"sandbox": "workspace-write"}})
+        self.assertEqual(exec_config.snapshot(conn)["sandbox"], "workspace-write")
 
 
     def test_real_codex_preflight_and_automatic_confirmation_do_not_require_plus_permission(self):

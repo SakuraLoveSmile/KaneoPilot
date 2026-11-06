@@ -13,7 +13,7 @@ from . import (codex_environment, codex_planner, codex_provider, constants, db, 
                git_delivery, planner_config, process_owner, round_store,
                runtime_client, runtime_operations, stage_evidence, util)
 
-DEFAULT_CONFIG = {"model": "gpt-6.1-sol", "reasoning_effort": "high"}
+DEFAULT_CONFIG = {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "workspace-write"}
 REPORT_NAME = "codex-report.json"
 
 
@@ -42,8 +42,8 @@ def validate_config(block):
         return "Codex 执行配置未保存"
     if set(block) - {"backend", "model", "reasoning_effort", "sandbox", "execution_question_max_wait_seconds"}:
         return "Codex 执行配置包含未知字段"
-    if block.get("backend", "codex") != "codex" or block.get("sandbox", "workspace-write") != "workspace-write":
-        return "Codex 执行仅支持 workspace-write 沙箱"
+    if block.get("backend", "codex") != "codex" or block.get("sandbox", "workspace-write") not in ("workspace-write", "danger-full-access"):
+        return "Codex 执行沙箱必须为 workspace-write 或 danger-full-access"
     if "execution_question_max_wait_seconds" in block and (type(block["execution_question_max_wait_seconds"]) is not int or block["execution_question_max_wait_seconds"] < 0):
         return "执行问题等待时间必须是非负整数"
     try:
@@ -120,14 +120,18 @@ def validate_report(report):
 def launcher_argv(spec, schema_path, out_path, provider, session_id=None):
     config = spec["config"]
     environment = codex_environment.validate(spec)
+    sandbox = config.get("sandbox", "workspace-write")
+    if sandbox not in ("workspace-write", "danger-full-access"):
+        _fail("Codex 冻结的沙箱模式无效")
+    unrestricted = sandbox == "danger-full-access"
     argv = [constants.codex_bin(), "exec", "-C", spec["cwd"]]
-    if environment is None:
-        argv += ["-s", "workspace-write"]
+    if environment is None or unrestricted:
+        argv += ["-s", sandbox]
     if "sandbox_writable_roots" in spec:
         roots = spec["sandbox_writable_roots"]
         if type(roots) is not list or roots != verification_writable_roots(spec["required_verification_commands"], spec["cwd"]):
             _fail("Codex 工具缓存写入范围已变化", "verification_identity_unconfirmed")
-        if environment is None:
+        if environment is None and not unrestricted:
             for root in roots:
                 argv += ["--add-dir", root]
     if session_id:
@@ -137,8 +141,8 @@ def launcher_argv(spec, schema_path, out_path, provider, session_id=None):
         argv += ["-c", value]
     settings = [("model", config["model"]), ("model_reasoning_effort", config["reasoning_effort"]),
                 ("approval_policy", "never")]
-    if environment is None:
-        settings.append(("sandbox_mode", "workspace-write"))
+    if environment is None or unrestricted:
+        settings.append(("sandbox_mode", sandbox))
     for key, value in settings:
         argv += ["-c", key + "=" + json.dumps(value)]
     argv += codex_environment.launcher_config(spec)

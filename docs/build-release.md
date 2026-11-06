@@ -4,11 +4,13 @@
 
 ## 构建入口
 
-交付包与发布统一使用仓库的 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml)。2026-11-02 起允许在 Apple Silicon Mac 上进行本地 macOS 构建、ad-hoc 签名和隔离界面测试。
+编译、签名、打包与 Swift/Android 编译检查统一使用仓库的 [Packages Actions](https://github.com/SakuraLoveSmile/KaneoPilot/actions/workflows/packages.yml)，沿维护者当前约定不在本地执行。本地只运行无需编译的 Python 隔离检查、包核验，以及下载云端独立身份 App 后的隔离界面测试。
 
 Android、DMG 与发布入口在启动编译器、JVM 或创建构建目录之前核对 `GITHUB_ACTIONS=true` 和 `RUNNER_ENVIRONMENT=github-hosted`。macOS App、运行时准备与总览隔离预览另有显式本地入口；不用伪造 Actions 环境。这是执行约定，不是凭据或安全隔离边界。
 
-### 本地 macOS 开发
+### 本地 macOS 开发（历史入口）
+
+以下保留已有脚本的使用说明；当前云端流程不执行这些本地编译/签名入口。界面核验复用 Packages 生成的 `macos-update-ui-<run>` 独立签名 App，并以 FakeCore 和独立数据目录启动，无须本地编译或重签名。
 
 需要完整 Xcode（含 macOS SDK，完成首次启动组件安装）和 Python 3.9+；工程已包含共享 Scheme，无须 xcodegen。选择开发目录后先运行 `xcodebuild -runFirstLaunch` 完成缺失组件，再执行：
 
@@ -127,7 +129,7 @@ macOS 使用 GitHub 托管 macOS runner（Apple Silicon）构建仅含 arm64 的
 
 只有发布 job 获得 `contents: write`。发布前再次核对远端 annotated tag 的提交和注释，以固定构建身份创建或继续自己的 draft；已有文件必须逐一哈希相同，缺失文件上传后读回验证，全部完成才去掉 draft。发布正文保留版本说明和真实安装要求。
 
-`codex-platforms` 是 Packages 的必需发布门禁：在固定工具版本的 GitHub-hosted macOS arm64 runner 上，用专用含 SwiftPM 插件的 Flutter 工程验证实际 Codex 沙箱的冷启动、离线平台准备、analyze/test、macOS/APK 构建、只读权限反例及 resume。该夹具不调用模型或生产 DB；其通过证明所列工具/夹具范围，不能代替用户业务任务或实体设备验收。日志、冻结 spec、原生命令退出码和产物指纹作为 `codex-platforms-<run>-<attempt>` artifact 保留；失败阻止 Release，不以 KaneoPilot 自身打包通过代替。
+`codex-platforms` 是 Packages 的必需发布门禁：在固定工具版本的 GitHub-hosted macOS arm64 runner 上，用专用含 SwiftPM 插件的 Flutter 工程分别验证用户可选择的两种权限。默认受限模式覆盖冷启动、离线准备、analyze/test/APK、只读及禁公网反例和 resume；macOS 以共享 UTI 探针核对模型前明确阻断与设置指引，不自动降级。显式无沙箱模式冻结 v3，核对真实 exec/resume 启动参数，并直接运行原文 analyze/test/macOS/APK 四条命令，要求全部退出 0、两端产物完整及源码指纹不变；`codex sandbox` 不能模拟无沙箱。两模式均检查缺缓存准确失败。该夹具不调用模型或生产 DB；其通过证明所列工具/夹具范围，不能代替用户业务任务或实体设备验收。日志、冻结 spec、原生命令退出码和产物指纹作为 `codex-platforms-<run>-<attempt>` artifact 保留；失败阻止 Release，不以 KaneoPilot 自身打包通过代替。
 
 本工作流只有最终 `publish` job 使用共享并发锁，避免两次发布同时修改 latest；检查和构建仍按各自标签运行。GitHub concurrency 不是可靠队列，新的等待 job 可能替换原等待 job，因此仍须遵守一次发布一个版本。只有比当前 latest 稳定版本更高的版本才设为 latest；补发旧版本不会将稳定下载入口降级。无法识别当前 latest 版本时明确受阻，需维护者核对，不能猜测。
 
