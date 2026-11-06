@@ -131,7 +131,7 @@ macOS 使用 GitHub 托管 macOS runner（Apple Silicon）构建仅含 arm64 的
 
 `codex-platforms` 是 Packages 的必需发布门禁：在固定工具版本的 GitHub-hosted macOS arm64 runner 上，用专用含 SwiftPM 插件的 Flutter 工程分别验证用户可选择的两种权限。默认受限模式覆盖冷配置下的 analyze/test、锁定离线依赖准备、只读及禁公网反例和 resume；macOS 以共享 UTI 探针核对模型前阻断与设置指引，Android 则以实际 Gradle 版本和同沙箱的 SDK 项目根可写探针核对模型前兼容限制。受限原生不兼容时记录 blocked 与零模型调用；实际支持时对应原文构建必须退出 0，不自动降级。显式无沙箱模式冻结 v3，核对真实 exec/resume 启动参数，并直接运行原文 analyze/test/macOS/APK 四条命令，要求全部退出 0、两端产物完整及源码指纹不变；`codex sandbox` 不能模拟无沙箱。两模式均检查缺缓存准确失败。该夹具不调用模型或生产 DB；其通过证明所列工具/夹具范围，不能代替用户业务任务或实体设备验收。日志、冻结 spec、原生命令退出码和产物指纹作为 `codex-platforms-<run>-<attempt>` artifact 保留；失败阻止 Release，不以 KaneoPilot 自身打包通过代替。
 
-BOT 正反对照直接调用固定 SDK 的真实检测器，分别使用全新 XDG 目录及默认状态构造，核对实际 `tool_state` 路径和落盘结果。负向证据必须包含真实 metadata 请求的传输权限错误及操作系统权限拒绝码；普通网络故障或 HTTP 响应不能冒充权限拒绝。正常 Flutter 命令的冻结 XDG 状态也单独保存；诊断探针不替代业务 verify。
+BOT 正反对照直接调用固定 SDK 的真实检测器，分别使用全新 XDG 目录及默认状态构造，核对实际 `tool_state` 路径和落盘结果。负向证据必须包含真实 metadata 请求的拒绝：操作系统权限错误码，或 Codex 代理在上游连接前返回的 HTTP 403、专用 `x-proxy-error: blocked-by-allowlist` 响应头与目标、原因、决策、策略来源均精确匹配的拒绝 JSON。普通网络故障、普通 403 或其他 HTTP 响应一律拒绝。固定 Flutter SDK 会将任何完成的 HTTP 响应判为 bot，故代理拒绝分支核对真实的 `true` 持久状态，系统权限错误分支核对 `false`；不伪造 SDK 结果。响应正文在真实 getter 完成后另行有限读取，不改变 SDK 的请求路径。正常 Flutter 命令的冻结 XDG 状态也单独保存；诊断探针不替代业务 verify。
 
 本工作流只有最终 `publish` job 使用共享并发锁，避免两次发布同时修改 latest；检查和构建仍按各自标签运行。GitHub concurrency 不是可靠队列，新的等待 job 可能替换原等待 job，因此仍须遵守一次发布一个版本。只有比当前 latest 稳定版本更高的版本才设为 latest；补发旧版本不会将稳定下载入口降级。无法识别当前 latest 版本时明确受阻，需维护者核对，不能猜测。
 

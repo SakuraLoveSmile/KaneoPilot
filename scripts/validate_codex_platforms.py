@@ -234,6 +234,9 @@ def metadata_denials(output):
 
 
 METADATA_URL = "http://169.254.169.254/metadata/instance"
+PROXY_DENY_BODY = {"status": "blocked", "host": "169.254.169.254", "reason": "not_allowed",
+                   "decision": "deny", "source": "baseline_policy", "protocol": "http", "port": 80,
+                   "message": "Domain not in allowlist."}
 BOT_DETECTOR_PROBE = r'''
 import 'dart:convert';
 import 'dart:io' as io;
@@ -245,10 +248,43 @@ import 'package:flutter_tools/src/base/platform.dart';
 import 'package:flutter_tools/src/persistent_tool_state.dart';
 const signals = <String>__SIGNALS__;
 const metadataUrl = '__METADATA_URL__';
+void recordSocketFailure(Map<String, Object?> row, io.SocketException error) {
+  final code = error.osError?.errorCode;
+  row.addAll({'outcome': 'socket_exception', 'errno': code,
+    'address': error.address?.address, 'port': error.port});
+  if (row['url'] == metadataUrl && (code == 1 || code == 13)) {
+    io.stderr.writeln('metadata request transport permission denied url=${row['url']} '
+      'errno=$code address=${error.address?.address} port=${error.port}');
+  }
+}
+final class ObservedRequest implements io.HttpClientRequest {
+  ObservedRequest(this.delegate, this.row, this.responses);
+  final io.HttpClientRequest delegate;
+  final Map<String, Object?> row;
+  final List<MapEntry<io.HttpClientResponse, Map<String, Object?>>> responses;
+  @override io.HttpHeaders get headers => delegate.headers;
+  @override Future<io.HttpClientResponse> close() async {
+    try {
+      final response = await delegate.close();
+      row.addAll({'outcome': 'http_response', 'status_code': response.statusCode,
+        'content_type': response.headers.value(io.HttpHeaders.contentTypeHeader),
+        'proxy_error': response.headers.value('x-proxy-error')});
+      responses.add(MapEntry(response, row));
+      return response;
+    } on io.SocketException catch (error) {
+      recordSocketFailure(row, error);
+      rethrow;
+    }
+  }
+  @override Never noSuchMethod(Invocation invocation) {
+    throw UnsupportedError('Unexpected HttpClientRequest member: ${invocation.memberName}');
+  }
+}
 final class ObservedHttpClient implements io.HttpClient {
-  ObservedHttpClient(this.delegate, this.attempts);
+  ObservedHttpClient(this.delegate, this.attempts, this.responses);
   final io.HttpClient delegate;
   final List<Map<String, Object?>> attempts;
+  final List<MapEntry<io.HttpClientResponse, Map<String, Object?>>> responses;
   @override Duration? get connectionTimeout => delegate.connectionTimeout;
   @override set connectionTimeout(Duration? value) { delegate.connectionTimeout = value; }
   @override Future<io.HttpClientRequest> getUrl(Uri url) async {
@@ -257,21 +293,42 @@ final class ObservedHttpClient implements io.HttpClient {
     try {
       final request = await delegate.getUrl(url);
       row['outcome'] = 'connected';
-      return request;
+      return ObservedRequest(request, row, responses);
     } on io.SocketException catch (error) {
-      final code = error.osError?.errorCode;
-      row.addAll({'outcome': 'socket_exception', 'errno': code,
-        'address': error.address?.address, 'port': error.port});
-      if (url.toString() == metadataUrl && (code == 1 || code == 13)) {
-        io.stderr.writeln('metadata request transport permission denied url=$url errno=$code '
-          'address=${error.address?.address} port=${error.port}');
-      }
+      recordSocketFailure(row, error);
       rethrow;
     }
   }
   @override void close({bool force = false}) { delegate.close(force: force); }
   @override Never noSuchMethod(Invocation invocation) {
     throw UnsupportedError('Unexpected HttpClient member: ${invocation.memberName}');
+  }
+}
+Future<void> observeResponse(io.HttpClientResponse response, Map<String, Object?> row) async {
+  var exceeded = false;
+  try {
+    final bytes = await response.fold<List<int>>(<int>[], (buffer, chunk) {
+      if (buffer.length + chunk.length > 4096) {
+        exceeded = true;
+        throw StateError('response body exceeds 4096 bytes');
+      }
+      buffer.addAll(chunk);
+      return buffer;
+    }).timeout(const Duration(seconds: 3));
+    final body = utf8.decode(bytes);
+    row.addAll({'body': body, 'body_bytes': bytes.length,
+      'body_complete': true, 'body_truncated': false});
+    final decoded = jsonDecode(body);
+    final expected = <String, Object?>__PROXY_DENY_BODY__;
+    if (row['url'] == metadataUrl && row['status_code'] == 403 &&
+        row['content_type'] == 'application/json' && row['proxy_error'] == 'blocked-by-allowlist' &&
+        decoded is Map<String, dynamic> && decoded.length == expected.length &&
+        expected.entries.every((entry) => decoded[entry.key] == entry.value)) {
+      io.stderr.writeln('metadata request Codex proxy denied url=${row['url']} '
+        'status=403 source=baseline_policy decision=deny');
+    }
+  } catch (error) {
+    row.addAll({'body_complete': false, 'body_truncated': exceeded, 'body_error': error.toString()});
   }
 }
 Future<void> main(List<String> args) async {
@@ -299,14 +356,16 @@ Future<void> main(List<String> args) async {
   if (before != null) throw StateError('bot state was already cached');
   final clients = <ObservedHttpClient>[];
   final attempts = <Map<String, Object?>>[];
+  final responses = <MapEntry<io.HttpClientResponse, Map<String, Object?>>>[];
   final detector = BotDetector(
     httpClientFactory: () {
-      final client = ObservedHttpClient(io.HttpClient(), attempts);
+      final client = ObservedHttpClient(io.HttpClient(), attempts, responses);
       clients.add(client);
       return client;
     }, platform: platform, persistentToolState: state);
   try {
     final result = await detector.isRunningOnBot;
+    for (final observed in responses) { await observeResponse(observed.key, observed.value); }
     print(jsonEncode({'config_path': config.configPath,
       'initial_config_exists': initialExists,
       'persisted_config_exists': fs.file(config.configPath).existsSync(),
@@ -317,7 +376,7 @@ Future<void> main(List<String> args) async {
     for (final client in clients) { client.close(force: true); }
   }
 }
-'''.replace("__SIGNALS__", json.dumps(list(BOT_DETECTOR_SIGNALS))).replace("__METADATA_URL__", METADATA_URL)
+'''.replace("__SIGNALS__", json.dumps(list(BOT_DETECTOR_SIGNALS))).replace("__METADATA_URL__", METADATA_URL).replace("__PROXY_DENY_BODY__", json.dumps(PROXY_DENY_BODY))
 
 
 def bot_detector_command(flutter, source, state):
@@ -329,30 +388,55 @@ def bot_detector_command(flutter, source, state):
     return ["XDG_CONFIG_HOME=" + str(state), str(dart), "--packages=" + str(packages), str(source), str(state)], packages
 
 
+def bot_denial_kind(row):
+    socket_fields = {"url", "outcome", "errno", "address", "port"}
+    if (set(row) == socket_fields and row["url"] == METADATA_URL and row["outcome"] == "socket_exception"
+            and type(row["errno"]) is int and row["errno"] in (1, 13)
+            and (row["address"] is None or type(row["address"]) is str)
+            and (row["port"] is None or type(row["port"]) is int)):
+        return "os_permission_denied"
+    response_fields = {"url", "outcome", "status_code", "content_type", "proxy_error", "body",
+                       "body_bytes", "body_complete", "body_truncated"}
+    if (set(row) == response_fields and row["url"] == METADATA_URL and row["outcome"] == "http_response"
+            and type(row["status_code"]) is int and row["status_code"] == 403
+            and row["content_type"] == "application/json" and row["proxy_error"] == "blocked-by-allowlist"
+            and type(row["body"]) is str and type(row["body_bytes"]) is int
+            and row["body_bytes"] == len(row["body"].encode("utf-8")) <= 4096
+            and row["body_complete"] is True and row["body_truncated"] is False):
+        def unique_object(pairs):
+            if len({key for key, value in pairs}) != len(pairs):
+                raise ValueError("Duplicate proxy-deny JSON field")
+            return dict(pairs)
+        try:
+            body = json.loads(row["body"], object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError):
+            pass
+        else:
+            if json.dumps(body, sort_keys=True) == json.dumps(PROXY_DENY_BODY, sort_keys=True):
+                return "codex_proxy_denied"
+    raise AssertionError("No-BOT control lacks a permission errno or exact Codex proxy deny response")
+
+
 def parse_bot_detector_receipt(output, *, bot, state):
     receipt = json.loads(output)
-    expected = {"config_path": str(state / "tool_state"), "initial_config_exists": False,
-                "persisted_config_exists": True, "initial_state": None,
-                "is_bot": bot, "persisted_state": bot,
-                "http_client_count": 0 if bot else 1, "present_signals": ["BOT"] if bot else []}
-    require(type(receipt) is dict and set(receipt) == set(expected) | {"http_attempts"},
+    expected_keys = {"config_path", "initial_config_exists", "persisted_config_exists", "initial_state",
+                     "is_bot", "persisted_state", "http_client_count", "present_signals", "http_attempts"}
+    require(type(receipt) is dict and set(receipt) == expected_keys,
             "Explicit SDK BotDetector getter receipt fields differ")
-    # JSON comparison also rejects integer booleans and boolean client counts.
-    require(json.dumps({key: receipt[key] for key in expected}, sort_keys=True) == json.dumps(expected, sort_keys=True),
-            "Explicit SDK BotDetector getter receipt differs from the cold expected path")
     attempts = receipt["http_attempts"]
     if bot:
         require(attempts == [], "BOT positive control made an HTTP request")
+        actual_bot = True
     else:
         require(type(attempts) is list and len(attempts) == 1 and type(attempts[0]) is dict,
                 "No-BOT control did not make exactly one metadata request")
-        row = attempts[0]
-        require(set(row) == {"url", "outcome", "errno", "address", "port"}
-                and row["url"] == METADATA_URL and row["outcome"] == "socket_exception"
-                and type(row["errno"]) is int and row["errno"] in (1, 13)
-                and (row["address"] is None or type(row["address"]) is str)
-                and (row["port"] is None or type(row["port"]) is int),
-                "No-BOT control lacks a real metadata request with a permission errno")
+        actual_bot = bot_denial_kind(attempts[0]) == "codex_proxy_denied"
+    expected = {"config_path": str(state / "tool_state"), "initial_config_exists": False,
+                "persisted_config_exists": True, "initial_state": None,
+                "is_bot": actual_bot, "persisted_state": actual_bot,
+                "http_client_count": 0 if bot else 1, "present_signals": ["BOT"] if bot else []}
+    require(json.dumps({key: receipt[key] for key in expected}, sort_keys=True) == json.dumps(expected, sort_keys=True),
+            "Explicit SDK BotDetector getter receipt differs from the cold expected path")
     return receipt
 
 
@@ -380,7 +464,8 @@ def bot_detector_probe(flutter, source, state, spec, environment, constants, chi
     result = {"kind": "explicit_sdk_bot_detector_getter", "state_directory": str(state),
               "source": source.name, "source_sha256": sha256(source),
               "package_config": str(packages), "package_config_sha256": sha256(packages),
-              "receipt": receipt, "tool_state": snapshot_flutter_tool_state(state, evidence, label=label, bot=bot),
+              "receipt": receipt, "denial_kind": "not_requested" if bot else bot_denial_kind(receipt["http_attempts"][0]),
+              "tool_state": snapshot_flutter_tool_state(state, evidence, label=label, bot=receipt["is_bot"]),
               **record}
     denied = metadata_denials(output.read_text(encoding="utf-8") + "\n"
                              + (evidence / record["stderr_log"]).read_text(encoding="utf-8"))

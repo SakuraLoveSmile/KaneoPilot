@@ -28,6 +28,16 @@ def bot_receipt(bot, state, *, permission_errno=1):
                                              "errno": permission_errno, "address": "169.254.169.254", "port": 80}]}
 
 
+def proxy_bot_receipt(state, *, body=None):
+    receipt = bot_receipt(False, state)
+    raw = json.dumps(fixture.PROXY_DENY_BODY if body is None else body)
+    receipt.update(is_bot=True, persisted_state=True, http_attempts=[{
+        "url": fixture.METADATA_URL, "outcome": "http_response", "status_code": 403,
+        "content_type": "application/json", "proxy_error": "blocked-by-allowlist", "body": raw,
+        "body_bytes": len(raw.encode("utf-8")), "body_complete": True, "body_truncated": False}])
+    return receipt
+
+
 class CodexPlatformFixtureTests(unittest.TestCase):
     def test_no_sandbox_runs_directly_and_never_uses_the_sandbox_subcommand(self):
         environment = mock.Mock()
@@ -478,6 +488,40 @@ class CodexPlatformFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "permission errno"):
                 fixture.parse_bot_detector_receipt(json.dumps(changed), bot=False, state=state)
 
+    def test_proxy_denial_requires_exact_real_target_headers_and_complete_bounded_body(self):
+        state = Path("/controlled/negative-xdg")
+        valid = proxy_bot_receipt(state)
+        self.assertEqual(fixture.parse_bot_detector_receipt(json.dumps(valid), bot=False, state=state), valid)
+        self.assertEqual(fixture.bot_denial_kind(valid["http_attempts"][0]), "codex_proxy_denied")
+        row_changes = [{"status_code": 200}, {"status_code": "403"}, {"content_type": "text/html"},
+                       {"proxy_error": None}, {"proxy_error": "other"}, {"body_complete": False},
+                       {"body_truncated": True}, {"body_bytes": 1}, {"body_bytes": True},
+                       {"outcome": "connected"}, {"url": "http://192.0.2.1/metadata/instance"},
+                       {"body_error": "TimeoutException"}]
+        for update in row_changes:
+            changed = proxy_bot_receipt(state)
+            changed["http_attempts"][0].update(update)
+            with self.subTest(update=update), self.assertRaisesRegex(AssertionError, "exact Codex proxy deny"):
+                fixture.parse_bot_detector_receipt(json.dumps(changed), bot=False, state=state)
+        for body in ({"message": "ordinary HTTP 403"},
+                     {**fixture.PROXY_DENY_BODY, "host": "192.0.2.1"},
+                     {**fixture.PROXY_DENY_BODY, "reason": "blocked"},
+                     {**fixture.PROXY_DENY_BODY, "decision": "allow"},
+                     {**fixture.PROXY_DENY_BODY, "source": "upstream"},
+                     {**fixture.PROXY_DENY_BODY, "port": "80"},
+                     {**fixture.PROXY_DENY_BODY, "extra": True}):
+            with self.subTest(body=body), self.assertRaisesRegex(AssertionError, "exact Codex proxy deny"):
+                fixture.parse_bot_detector_receipt(json.dumps(proxy_bot_receipt(state, body=body)), bot=False, state=state)
+        for body in ("not json", "x" * 4097, '{"host":"wrong",' + json.dumps(fixture.PROXY_DENY_BODY)[1:]):
+            changed = proxy_bot_receipt(state)
+            changed["http_attempts"][0].update(body=body, body_bytes=len(body.encode("utf-8")))
+            with self.subTest(body=body[:40]), self.assertRaisesRegex(AssertionError, "exact Codex proxy deny"):
+                fixture.parse_bot_detector_receipt(json.dumps(changed), bot=False, state=state)
+        changed = proxy_bot_receipt(state)
+        changed.update(is_bot=False, persisted_state=False)
+        with self.assertRaisesRegex(AssertionError, "receipt differs"):
+            fixture.parse_bot_detector_receipt(json.dumps(changed), bot=False, state=state)
+
     def test_explicit_getter_uses_pinned_sdk_packages_same_profile_and_separate_cold_states(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -497,18 +541,20 @@ class CodexPlatformFixtureTests(unittest.TestCase):
             constants = SimpleNamespace(codex_bin=lambda: "/pinned/codex")
             captured = []
             include_denial = True
+            use_proxy = False
             def run(argv, **kwargs):
                 captured.append(argv)
                 state = Path(argv[-1])
                 self.assertFalse(state.exists())
                 state.mkdir()
                 bot = kwargs["label"] == "cold-with-bot"
-                receipt = bot_receipt(bot, state)
-                (state / "tool_state").write_text(json.dumps({"is-bot": bot}))
+                receipt = proxy_bot_receipt(state) if use_proxy else bot_receipt(bot, state)
+                (state / "tool_state").write_text(json.dumps({"is-bot": receipt["is_bot"]}))
                 log = evidence / (kwargs["label"] + ".log")
                 errors = evidence / (kwargs["label"] + ".stderr.log")
                 log.write_text(json.dumps(receipt) + "\n")
-                errors.write_text("Sandbox: dart deny(1) network-outbound 169.254.169.254:80\n"
+                errors.write_text(("metadata request Codex proxy denied url=" + fixture.METADATA_URL + "\n"
+                                   if use_proxy else "Sandbox: dart deny(1) network-outbound 169.254.169.254:80\n")
                                   if not bot and include_denial else "")
                 fixture.write_json(evidence / (kwargs["label"] + ".json"),
                     {"argv": argv, "exit_code": 0, "log": log.name, "log_sha256": fixture.sha256(log),
@@ -541,6 +587,14 @@ class CodexPlatformFixtureTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "specific 169.254.169.254 denial"):
                     fixture.bot_detector_probe(flutter, source, root / "no-denial", spec,
                         environment, constants, {}, evidence, label="missing-denial", bot=False)
+                include_denial = True
+                use_proxy = True
+                proxy, denied = fixture.bot_detector_probe(flutter, source, root / "proxy-denied", spec,
+                    environment, constants, {}, evidence, label="proxy-denied", bot=False)
+                self.assertTrue(denied)
+                self.assertEqual(proxy["denial_kind"], "codex_proxy_denied")
+                self.assertTrue(proxy["tool_state"]["is_bot"])
+                self.assertTrue(proxy["receipt"]["persisted_state"])
 
     def test_real_flutter_tool_state_snapshot_binds_only_the_frozen_task_file(self):
         with tempfile.TemporaryDirectory() as temporary:
