@@ -1,6 +1,6 @@
 # KP-C03：执行缺材料或决定时显示阻塞
 
-状态：实现中（代码及本地隔离验证完成；用户已授权构建，继续云端编译、原生夹具及候选界面核验）。
+状态：待体验（修复、本地隔离检查、Packages #140 全部必需检查、两端包核验及 Build 140 隔离原生界面实测完成；尚未合并、正式发布、安装或更正原业务记录）。
 
 - 用户目标：缺少隔离设备、授权测试会话或人工验收时，任务等待补充材料或决定，不计为执行失败，也不提前宣称完成。
 - 起点：2026-11-07，主仓 `main` / `ecb313a7278806da2a91d3bb3a44d2e90c7f3c20`。主仓无关 `.local/` 与 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 未跟踪，保留原样。
@@ -29,7 +29,7 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 最终组合本地实测（Python 3.10.10；基线 HEAD + 本任务未提交差异）：`python -m pytest core/tests/test_execution_followup.py core/tests/test_codex_execution.py core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_codex_inputs.py core/tests/test_codex_verdict.py core/tests/test_auto_monitor.py core/tests/test_board.py core/tests/test_engine_board_attention.py -q`，退出 0，**282 passed + 68 subtests**，73.20 秒。受管进程组合 `python -m pytest tests/test_codex_dispatch.py -q`，退出 0，**7 passed**，43.82 秒。均为隔离 Git/DB/HOME/CLI/Kaneo 夹具，无真实模型、业务 verify 或生产服务访问。最终 `git diff --check` 通过。
 - 主 agent 经原生 UI 只读核实现用 `/Applications/KaneoPilot.app` 为 **v0.4.8 / build 138**：截图任务仍显示失败 1 / 阻塞 0，原因与原报告一致。该安装版本的核心和 Swift 均不识别新原因码的恢复语义，因此**当前原记录保持原样，待兼容版本可用后再更正**；不将候选代码中的恢复通过误当成已安装版本可继续。原任务成果与全部旧证据保留。
 - 候选源码/测试/协议指纹保存于 `build/kp-c03-evidence/source-snapshot.json`；该目录归本任务，保留用于后续云端对照。修复已签名提交并推送，尚无合并/发布/安装，工作树保留继续本任务。
-- 下一步：完成已获授权的 Packages 预览验证，云端完成 Swift 编译及既有原生夹具后，用精确候选包核验“阻塞、待补充材料或决定、沿用计划重新执行”路径。正式发布/安装沿后续明确授权，兼容版本可用后再经核心命令更正原记录。必要验证尚未完成，维持“实现中”。
+- 当前下一步：用户体验 Build 140 预览包；正式版本号、合并/发布/安装沿后续明确授权。原业务记录继续保留，待兼容版本成为实际使用版本后，再经核心 `resolve await_input` 更正。工作树尚未合入 `main`，保留源码、隔离夹具与证据继续本任务，不清理其他 worktree。
 
 ## 2026-11-07 云端构建
 
@@ -40,4 +40,13 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - #139 云端独立签名 App（`local.kaneopilot.software-update-check` / `0.0.0` / `139`）的 ZIP 源码身份、大小、SHA256、App 签名及 6 个相关 bundled core 文件与候选一致。以真实核心隔离夹具经 `resolve await_input` 得到的投影，配合既有 FakeCore 和独立根目录实测：看板 **阻塞 1 / 失败 0**；任务列表、需要你、详情均显示“待补充材料或决定”和具体设备/授权会话缺口；“重新执行（沿用计划）”确认说明保留原成果、工作树和执行记录，并明确会再次调用模型。已取消确认；命令日志无 `resolve/enqueue/session-request-start/start-task-ai-action`，只停止本任务预览进程 PID 28070。未改现用 App/业务 DB、未调用模型。
 - #139 DMG 与 APK 已下载到 `build/kp-c03-evidence/packages-139/`，元数据源码/build/版本、大小、SHA256 均匹配；DMG 签名指纹匹配。它们仅作失败构建诊断证据，最终交付等待修正后的全绿候选。
 - 补齐事件映射后本地运行 `python -m pytest core/tests/test_event_kind_labels.py -q`（Python 3.10.10），**5 passed**；`git diff --check` 通过。重推后继续完整 Packages，最终证据绑定新提交与新 run，#139 的界面观察仅保留为此前候选实测。
-- 下一步：等待全部必需 job，通过后下载并核验两端产物，使用同 run 的独立签名 App 进行隔离原生界面检查。
+- 修正签名提交 `c09da5a67ac7a24267f456b6cd9bcc0a4d6716d1`（`G`）已推送；自动触发 [Packages #140](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42265110995)，run ID `42265110995`，preview `0.0.0` / build `140`。#139 已由工作流的后续 push 规则取消剩余 native job，保留原失败证据。独立 reviewer 静态复核确认本补丁事件名称与中文均同核心一致，未修改测试/预期/工作流门禁。
+- #140 attempt 1：全部 10 组核心检查步骤通过（Python 3.11 / 3.13），Android job 成功；macOS 编译、源码哈希核对及签名完成后，`hdiutil create` 报 `Resource busy`，导致 macos-package job 失败。日志已保存于 `build/kp-c03-evidence/packages-140/reports/package-attempt1/`。这是当前 runner 的 DMG 创建错误，源码不变；GitHub 拒绝在整轮尚运行时重跑单个 job，待本轮其余检查完成后仅重跑该 job 及其依赖后续，不重复已通过的检查或降低门禁。
+- #140 的 10 组 Python job、2 组 Swift 夹具、Android 和 native-platforms 最终均成功（15 项必需 job）；取得 native 冷构建/权限证据后，已按同一 run / 同一源码重跑唯一失败的 macos-package（attempt 2，新 job `128062650803`），未重复已通过的检查。
+- 为避免 upload-artifact v4 的同名诊断报告冲突，先核验本任务 attempt 1 临时报告 artifact `13527166908` 确属 run #140 / c09da5a，下载 ZIP 与服务端大小一致且 ZIP 校验通过，保留工作树副本并另备份至主仓 `build/recovery/kp-c03-build-140/package-reports-attempt1.zip`（SHA256 `d2b364daab37a280f0c95435aeb72c8d562a34b41d4b145989194f00ca76f461`、6157 bytes，附原 artifact 元数据与 SHA256SUMS），再清理该临时远端诊断 artifact，让重跑上传新报告。未删除其他 artifact、安装包、Release 或标签，旧诊断内容可完整恢复。
+- Android #140 主包 `com.sakurasep.kaneopilot / 0.0.0 / 140` 下载后以 aapt 和 apksigner 只核验包；SHA256 `2696023031b6f7d2fe04b51b85a23e41ed4486a9e99bd52d14600ce285baab37`，证书 SHA256 `10837ec7648b454d6b693db9a4fe474508da5fcdc00f4a441c306dc6d347eee6`，均与源码绑定的元数据一致。未安装到 Android 设备。
+- 最终云端结果：#140 / attempt 2 / 源码 `c09da5a67ac7a24267f456b6cd9bcc0a4d6716d1`，顶层 `completed / success`。已核对完整 18 个最新 job：identity、10 组 Python 3.11/3.13 核心+集成检查、2 组 Swift 夹具、Android、macos-package、native-platforms 共 **16 项必需 job 全成功**；publish 与非必需 fulltext probe 为预期 skipped。原始 run/jobs JSON 保存在 `build/kp-c03-evidence/packages-140/{run-final,jobs-final}.json`。native `result.json` 的源码一致、status=passed、model_calls=0、production_access=false，前后源码快照相同。
+- 最终产物：`KaneoPilot-ci-140-macos-arm64-local-signed.dmg`（arm64 / local.kaneopilot / 0.0.0 / 140），SHA256 `79afcda4380073b5e367e9f8b04dc1eb4438d8fb9dd57f052bee1377cff51419`；DMG CodeDirectory SHA256 `70981b8d199d205bc1c4594f354a402303a902e217d6c0bce232d179f7bc04d4`。下载 ZIP 校验、元数据身份/大小/哈希、DMG 与 App 签名、只读挂载后的 App 身份/arm64 架构，以及 6 个相关 bundled core 文件与当前源码全部一致，已正常卸载卷。独立 UI ZIP 同样核对源码/哈希/大小/签名/版本与 bundled core；本机未编译或重签。
+- 最终包下载曾遇 GitHub 连接 EOF；用同一 artifact 的 HTTPS Range 续传，完成后 ZIP 校验、内包哈希及签名全部通过，未交付残缺文件。安装包放在 `/Users/sakurasep/Downloads/KaneoPilot-build-140/`，附 `SHA256SUMS` 和 `build-info.json`；交付目录运行 `shasum -a 256 -c SHA256SUMS`，两包均 OK。APK 为 Debug 签名，不作为正式签名覆盖升级证据。
+- Build 140 最终原生实测：以同一真实核心隔离投影和只读 FakeCore adapter 启动云端独立 App；看板 **阻塞 1 / 失败 0**，列表/详情为“待补充材料或决定”与具体设备/会话缺口，“重新执行（沿用计划）”确认文案说明保留计划/原工作树/已有改动/原执行记录且会新调用模型。已取消确认，命令日志无 resolve/入队/模型启动；仅停止本任务 App PID 33484。观察与命令日志保存在 `build/kp-c03-evidence/ui-fixture/native-observation-140.json`、`commands-140.jsonl`。生产 App、原业务 DB 和全部旧证据保持原样。
+- 本次构建范围已完成，状态为“待体验”。没有创建 PR、合并、正式 Release、安装或付费重跑；未把隔离界面验证当成原 MediaPlayer 的真实播放验收。任务工作树尚未合并，继续保留；安装包已独立交付到下载目录，不依赖后续保留该工作树。
