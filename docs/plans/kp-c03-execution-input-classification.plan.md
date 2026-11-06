@@ -1,6 +1,6 @@
 # KP-C03：执行缺材料或决定时显示阻塞
 
-状态：实现中（修复及 Build 140 适用验证完成；用户已明确指定 v0.4.9，继续正式合入、云端发布、包核验与工作树收尾。安装及原业务记录更正尚未执行）。
+状态：待体验（v0.4.9 / build 142 已正式发布并成为 latest；云端必需检查和公开安装包核验完成，本任务工作树及已合并本地分支已清理，完整归档保留。未执行安装及原业务记录更正）。
 
 - 用户目标：缺少隔离设备、授权测试会话或人工验收时，任务等待补充材料或决定，不计为执行失败，也不提前宣称完成。
 - 起点：2026-11-07，主仓 `main` / `ecb313a7278806da2a91d3bb3a44d2e90c7f3c20`。主仓无关 `.local/` 与 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 未跟踪，保留原样。
@@ -29,7 +29,7 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 最终组合本地实测（Python 3.10.10；基线 HEAD + 本任务未提交差异）：`python -m pytest core/tests/test_execution_followup.py core/tests/test_codex_execution.py core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_codex_inputs.py core/tests/test_codex_verdict.py core/tests/test_auto_monitor.py core/tests/test_board.py core/tests/test_engine_board_attention.py -q`，退出 0，**282 passed + 68 subtests**，73.20 秒。受管进程组合 `python -m pytest tests/test_codex_dispatch.py -q`，退出 0，**7 passed**，43.82 秒。均为隔离 Git/DB/HOME/CLI/Kaneo 夹具，无真实模型、业务 verify 或生产服务访问。最终 `git diff --check` 通过。
 - 主 agent 经原生 UI 只读核实现用 `/Applications/KaneoPilot.app` 为 **v0.4.8 / build 138**：截图任务仍显示失败 1 / 阻塞 0，原因与原报告一致。该安装版本的核心和 Swift 均不识别新原因码的恢复语义，因此**当前原记录保持原样，待兼容版本可用后再更正**；不将候选代码中的恢复通过误当成已安装版本可继续。原任务成果与全部旧证据保留。
 - 候选源码/测试/协议指纹保存于 `build/kp-c03-evidence/source-snapshot.json`；该目录归本任务，保留用于后续云端对照。修复已签名提交并推送，尚无合并/发布/安装，工作树保留继续本任务。
-- 当前下一步：完成已授权的 v0.4.9 正式发布及工作树收尾。原业务记录继续保留，待兼容版本成为实际使用版本后，再经核心 `resolve await_input` 更正。仅清理本任务已完成的工作树与合并本地分支，保全全部必要证据，不清理其他任务或远端来源分支。
+- 当前下一步：用户安装并体验正式 v0.4.9，可经应用内软件更新或正式 Release 获取。原业务记录继续保留；待兼容版本成为实际使用版本后，再经核心 `resolve await_input` 更正。原 MediaPlayer 的真实播放验收、原记录更正及模型重跑均未执行，不将本次发布当作这些操作已经完成。
 
 ## 2026-11-07 云端构建
 
@@ -56,4 +56,18 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 用户明确指定版本并授权正式发布。恢复时核对主仓 main / origin/main 均为 `ecb313a7278806da2a91d3bb3a44d2e90c7f3c20`，任务树为 `2fbdb94e0a272ed7945addff324f114d2402d929`，工作区清洁；主仓无关未跟踪文件保留。远端 v0.4.9 标签尚不存在，latest 为 v0.4.8。
 - 发布源码固定为已通过完整 Packages #140 的 `c09da5a67ac7a24267f456b6cd9bcc0a4d6716d1`，后续提交仅为本权威记录。先将完整任务历史 fast-forward 合入 main 并推送，再创建直接指向上述已验证、且由远端 main 包含源码提交的签名 annotated `v0.4.9`；不移动或覆盖标签、包及资产。正式标签将再次运行全部必需门禁及 publish。
 - 独立 reviewer（gpt-6.1-sol / high）发布核查通过：全部改动属 KP-C03，SQLite schema 仍为 6，无迁移/依赖/构建门禁变化。公开说明保留：历史记录不会自动更正；更正不等于验收完成、不生成成功证据或自动重跑；再次调用模型仍需用户确认；更正后继续使用支持新原因码的新版。既有成功验证门禁不变，隔离验证不替代原业务真实播放或 Android 实机验收。
-- 待办：正式构建/publish 全通过后核对公开 Release、latest、四项资产、manifest/SHA256、两端版本/源码/签名；保全工作树证据及必要夹具后移除本任务 worktree 和已合并本地分支。用户体验状态仅在用户明确确认后才为“已验收”。
+- 发布验收：正式构建/publish、公开 Release/latest、四项资产、manifest/SHA256、两端版本/源码/签名及工作树收尾均已完成，证据见下方最终记录。用户体验状态仅在用户明确确认后才为“已验收”。
+- 已 fast-forward 合入并非强推远端 main 至 `e02c680df655cb20118b8c82d9e23fefc3e9943a`；相较发布源码 c09da5a 仅多任务记录。main 自动预览 [Packages #141](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42271605273)。本任务未创建额外 PR，先前独立审查与组合态证据已确认。
+- 签名 annotated `v0.4.9` 对象 `2915f57f2a544bb9b5122d9a869ada7ef651e261` 直接指向 c09da5a，`git verify-tag` 成功，远端已核对 type=tag；已推送并触发唯一正式 [Packages #142](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42271707104)（run `42271707104`）。未重复 dispatch 同一标签，正式构建不复用预览安装包。发布证据与公开说明保存在主仓 `build/recovery/kp-c03-v0.4.9/`，从该处继续记录，不再依赖任务工作树写入。
+- main #141 与已通过 #140 的产品代码完全一致，仅多本权威记录；为释放排队中的正式 Mac runner，已停止重复 main 预览 #141。正式 #142 的全部 Python/Swift/Android/macOS/native-platforms 与 publish 门禁保留且完整运行，不以取消的预览充当通过证据。
+- 工作树收尾准备：完整保全至主仓 `build/recovery/kp-c03-v0.4.9/worktree-archive/`，6295 文件 / 641,564,353 bytes / 18 符号链接。来源前后与归档逐路径内容 SHA256、大小、类型、权限及链接目标全部一致，两份独立签名 App 的归档签名仍通过；保留源分支和 v0.4.9 的可核验 Git bundle。清单 SHA256 `1d9e5d9ce581a9b908b3639ae207d0f4190040af1d2388a31be14dc73017a753`，bundle SHA256 `d2b86636815e5ea45c4c3d90bd920f951919fab8f1cef3ea2168b067ceeab917`，详见 `backup-receipt.json`。仅根 `.git` 指针由独立 bundle 代替，其余包含全部忽略/未跟踪的缓存、证据与安装包，尚未删除工作树。
+- 正式 #142 attempt 1 的 `checks (1, 3.11)`：核心 **888 passed / 1 failed / 1 skipped**，集成 **77 passed**。唯一失败 `TestDispatchPiDesktop.test_round_observe_keeps_other_blocks` 在测试主动 SIGKILL 观察者后，`round-observe` 读取 `job.json` 时报告半写入或损坏，尚未执行保留 `review_failed` 的行为断言。两端正式打包、其余 Python 组和两组 Swift 夹具均已成功；等待 native-platforms 完成后，仅在原 run 重跑该失败 job 及其发布依赖，保留全部门禁与既有安装包。
+- 独立 reviewer 只读复核：相关测试、`pi_desktop_worker.py`、`cmd_dispatch.py`、`dsh_events.py` 相对基线完全未改。测试 SIGKILL 与 worker 观察循环经 `_write_json` 非原子截断重写、读取层单次解析共同提供偶发崩溃窗口的直接依据；日志未保留损坏文件，不能断言具体中断字节。此为既有 P2 数据完整性风险，生产 worker 亦使用该写法，不能称纯 CI 环境问题。本次固定标签源码不改；后续应单独改为同目录临时文件加原子替换，并验证强杀后旧/新完整记录可读。原失败报告 artifact `13531191620` 已按 run/源码/大小/ZIP 完整性及解压副本逐字节核验并保全（31617 bytes，SHA256 `d79271d9a9658cfcb187dcc2b929114156f451f801d19aaf109a11ad8188e3be`），存于主仓发布证据根。
+- 正式 #142 attempt 1 最终其余 **15 项必需 job 成功**，仅上述一组失败，publish 与非必需 fulltext 为 skipped；完整 run/jobs 原始回执已保存。为避免 upload-artifact v4 同名报告冲突，再次核验备份 ZIP 后仅删除该临时诊断 artifact `13531191620`，随后在原 run / 原源码上请求重跑失败 job `128077723358` 及其后续发布依赖（attempt 2）。已通过的原生、两端打包及其产物继续保留，不重复运行或降低门禁。
+- 正式 native-platforms 报告已保存于 `build/recovery/kp-c03-v0.4.9/native-evidence/`，`result.json` 核对源码 c09da5a、status=passed、model_calls=0、production_access=false，前后源码快照相同；restricted/unrestricted 两模式通过，实际原生命令退出码为 0，所引用 stdout/stderr 日志 SHA256 均一致。验证只发生于云端，未在本机编译。
+- 正式 #142 attempt 2 最终 `completed / success`，源码仍为 c09da5a，版本 **0.4.9 / build 142**。重跑组核心 **889 passed / 1 skipped**，集成 **77 passed**，原行为断言亦通过；未改源码、预期或门禁。最新完整 18 个 job 中 **17 项必需 job 全成功**，唯一正常 skipped 为非必需 fulltext probe。完整 run/jobs 与重跑报告保存在主仓发布证据根。
+- [v0.4.9 正式 Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.4.9) 已公开（release ID `436875254`），non-draft / non-prerelease，`releases/latest` 已指向该版本；包含唯一四项资产：macOS arm64 DMG、Android APK、`manifest.json`、`SHA256SUMS`。公开正文仅移除签名标签被原样带入的 PGP 签名块；CI marker、用户说明和安装要求保留，资产对象和签名标签逐项核对未变，回执见 `release-notes-normalization.json`。
+- 公开四项资产已下载到 `/Users/sakurasep/Downloads/KaneoPilot-v0.4.9/`。`shasum -a 256 -c SHA256SUMS` 全通过；manifest、公开资产对象与实际文件的版本 0.4.9 / build 142、源码 c09da5a、大小与 SHA256 一致。APK SHA256 `0c25146bf27c47c32fca8b445f940fe13f065c17f5796ec7501bb94ab3a00a6b`；DMG SHA256 `72f08f08b270fea676aa112e80bc1a46ea5450d4c4cf3cd3654954894de0b66a`。发布证据根 `package-verification.json` 记录完整核验。
+- Android：`apksigner verify --verbose --print-certs` 通过，包名 `com.sakurasep.kaneopilot`、versionName 0.4.9 / versionCode 142；证书 SHA256 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada` 与公开 v0.4.8 完全一致。本机默认 jenv Java shim 已损坏，本次仅用已有 `/opt/homebrew/opt/openjdk@17/bin/java` 直接运行原 SDK 的 apksigner.jar，未修改系统配置或进行编译。macOS：DMG 与内部 App 严格签名核验通过；DMG CodeDirectory SHA256 `1fe35704ca0a980f9e85e60f79509594d25e2ea1f64f82fa8c5f0a6c2e820e4d` 匹配 manifest；只读挂载核对 App `local.kaneopilot / 0.4.9 / 142`、架构恰为 arm64，6 个相关 bundled core 文件与 c09da5a 逐字节一致，核验后已正常卸载卷，未启动正式包。
+- 工作树收尾已完成：再次核验来源清洁、e02c680 由本地与远端 main 包含，来源和完整归档均与原清单逐路径一致，Git bundle 有效，`lsof +D` 无活动引用。从主仓正常 `git worktree remove` 移除本任务目录，再以 `git branch -d` 删除已合并本地来源分支；复核注册和目录均消失，远端来源分支仍保留在 e02c680，其他工作树、主仓无关文件与完整归档保留。回执见 `worktree-cleanup-{precheck,final}.json`。
+- 交付范围完成，状态“待体验”：可在 Mac「设置 → 高级 → 软件更新」或 Android「连接 → 软件更新」获取，亦可使用上述正式下载目录。未替用户安装、访问真实播放服务、更正原任务或调用模型。独立复核发现的既有 SIGKILL / 非原子 job 写入风险已在本记录保留，属于后续独立修复事项，不把本次重跑通过当作该旧风险已经修复。
