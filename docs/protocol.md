@@ -1923,7 +1923,7 @@ KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，�
 
 原生轮次将 `PUB_CACHE` 定向本轮 `pub-cache`，Android 将 `GRADLE_USER_HOME` 定向本轮 `gradle`；均位于已有 `.pi/kanpilot/codex/<run_id>`。`codex_tool_setup` 仅从锁文件选择宿主已缓存的 hosted/Git 依赖，依赖源码保持宿主只读，元数据与必要 Git 对象为私有副本；不复制凭据、hooks 或任意 Git 配置。Gradle 仅复制 wrapper 配置指向的现成分发运行文件并新建私有锁，不复制宿主 properties/init.d；存在时仅用 `GRADLE_RO_DEP_CACHE` 读取宿主 `caches/modules-2`。保留宿主 Flutter 的必要路径/功能白名单（JDK、Android SDK/Studio、macOS/SPM 开关）为冻结的私有 `<XDG_CONFIG_HOME>/settings`，不复制认证/analytics。旧式 `.flutter_settings` / `.flutter_tool_state` 分别优先于 XDG；v2 状态预检及原生设置准备检测到对应旧式文件时明确拒绝并要求迁移，不假称已被重定向。
 
-macOS 原生能力额外冻结 `~/Library/Developer/Xcode/DerivedData` 与 Darwin `confstr(_CS_DARWIN_USER_TEMP_DIR)` 的规范写根。Xcode 的 SPM 预取与 `-list` 没有 scheme，不能统一注入 `-derivedDataPath`；Foundation 的临时目录也不保证遵循 TMPDIR。因此第二根是明确的**宿主共享临时目录能力**，与本轮私有 TMPDIR 分别记录，不扩大为整个 HOME、Library、系统用户缓存或 SwiftPM 信任/配置目录。
+macOS 原生能力额外冻结 `~/Library/Developer/Xcode/DerivedData`、Darwin `confstr(_CS_DARWIN_USER_TEMP_DIR)` 与 `~/Library/Caches/org.swift.swiftpm/manifests` 三个规范写根。Xcode 的 SPM 预取与 `-list` 没有 scheme，不能统一注入 `-derivedDataPath`；Foundation 的临时目录也不保证遵循 TMPDIR。因此第二根是明确的**宿主共享临时目录能力**，与本轮私有 TMPDIR 分别记录。第三根对应真实受限构建中 SwiftPM manifest 编译的 `.dia`、`manifest.db` 与其伴随文件，不扩大为整个 SwiftPM 缓存、HOME、Library、系统用户缓存或 SwiftPM 信任/配置目录；路径含符号链接时拒绝。
 
 基础安全预检成功后，执行端用**同一冻结沙箱、无模型**运行 `flutter pub get --offline --enforce-lockfile` 作为平台准备；它不是业务 verify 回执。准备前后源码快照必须一致，锁定依赖不能变；项目引用 FlutterGeneratedPluginSwiftPackage 时核对 Package.swift 已生成。缺失 wrapper/依赖、准备非零退出、平台生成物仍缺失均给出具体错误并在模型前终止，不静默允许公网下载。成功环境回执分开记录基础检查、实际写根及准备命令/退出码/缓存种子计数；准备不替代随后每条原文 verify 的原生命令退出码。
 

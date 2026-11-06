@@ -370,18 +370,28 @@ def validate(args):
             host_analyzer = Path.home() / ".dartServer/kanpilot-fixture-sentinel"
             host_analyzer.parent.mkdir(parents=True, exist_ok=True)
             host_analyzer.write_text("unchanged\n", encoding="utf-8")
+            host_swiftpm = Path.home() / "Library/Caches/org.swift.swiftpm/kanpilot-fixture-sentinel"
+            host_swiftpm.write_text("unchanged\n", encoding="utf-8")
             targets = {"sdk_source_denied": str(flutter.parent.parent / "packages/flutter_tools/lib/src/base/bot_detector.dart"),
                        "host_config_denied": str(host_sentinel), "host_analyzer_denied": str(host_analyzer),
+                       "swiftpm_non_manifest_denied": str(host_swiftpm),
                        "other_directory_denied": str(sentinel)}
             output = run(sandbox_argv(environment, constants, spec,
                                      without_ci_signals([sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])),
                          cwd=app, env=child_env, evidence=evidence, label="sandbox-denials", separate_stderr=True)
             report["permission_checks"] = json.loads(output.read_text(encoding="utf-8"))
             report["checks"].append("readonly_boundaries_and_preflight_network_denials")
+            native_results = []
             for index, command in enumerate(spec["required_verification_commands"], 1):
                 contract.validate_spec(spec)
+                label = "restricted-verify-" + str(index)
                 run(sandbox_argv(environment, constants, spec, without_ci_signals(["/bin/sh", "-c", command])),
-                    cwd=app, env=child_env, evidence=evidence, label="restricted-verify-" + str(index), timeout=1800)
+                    cwd=app, env=child_env, evidence=evidence, label=label, timeout=1800, check=False)
+                record = json.loads((evidence / (label + ".json")).read_text(encoding="utf-8"))
+                native_results.append({"command": command, "exit_code": record["exit_code"], "log": record["log"]})
+            report["native_commands"] = native_results
+            failures = [item["log"] for item in native_results if item["exit_code"] != 0]
+            require(not failures, "Restricted native commands failed; see " + ", ".join(failures))
             require(git_delivery.source_state_sha256(app) == before, "Verification changed fixture source")
             analyzer_uuid = private_analyzer / ".instrumentation/uuid.txt"
             require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(),

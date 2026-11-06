@@ -112,9 +112,11 @@ def _expected_v2(spec):
         # Foundation NSTemporaryDirectory uses confstr, even with TMPDIR set.
         system_tmp = os.confstr(65537)  # _CS_DARWIN_USER_TEMP_DIR (Darwin ABI)
         _require(bool(system_tmp), "无法确定 macOS 系统用户临时目录")
+        manifests = Path.home().resolve() / "Library/Caches/org.swift.swiftpm/manifests"
+        _require(manifests.resolve() == manifests, "SwiftPM manifest 缓存路径含符号链接")
         result["writable_roots"] = [
             str((Path.home() / "Library/Developer/Xcode/DerivedData").resolve()),
-            str(Path(system_tmp).resolve(strict=True))]
+            str(Path(system_tmp).resolve(strict=True)), str(manifests)]
     result["setup"] = setup
     return result
 

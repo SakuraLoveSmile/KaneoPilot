@@ -558,15 +558,22 @@ class CodexEnvironmentTests(unittest.TestCase):
             self.freeze_native("macos")
             roots = self.spec["tool_environment"]["writable_roots"]
             derived = self.root / "Library/Developer/Xcode/DerivedData"
-            self.assertEqual(roots, [str(derived), str(host_tmp)])
+            manifests = self.root / "Library/Caches/org.swift.swiftpm/manifests"
+            self.assertEqual(roots, [str(derived), str(host_tmp), str(manifests)])
             profile = self.configs(environment.launcher_config(self.spec))
             filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
             self.assertTrue(all(filesystem[path] == "write" for path in roots))
             self.assertNotIn(str(self.root / "Library"), filesystem)
-            derived.parent.mkdir(parents=True)
-            derived.symlink_to(host_tmp, target_is_directory=True)
-            with self.assertRaises(util.KanpilotError):
-                environment.validate(self.spec)
+            self.assertNotIn(str(manifests.parent), filesystem)
+            for replaced in (derived, manifests):
+                with self.subTest(replaced=str(replaced)):
+                    replaced.parent.mkdir(parents=True, exist_ok=True)
+                    replaced.symlink_to(host_tmp, target_is_directory=True)
+                    try:
+                        with self.assertRaises(util.KanpilotError):
+                            environment.validate(self.spec)
+                    finally:
+                        replaced.unlink()
 
     def test_native_preparation_uses_same_sandbox_and_does_not_run_verify(self):
         self.freeze_native()
