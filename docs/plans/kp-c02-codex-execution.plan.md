@@ -173,3 +173,6 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 - 本次本地隔离验证：Python 3.10.10 的 environment/execution/monitor/cache-setup/dispatch 组合 **229 passed + 79 subtests**；setup 真实后代/超时/取消/输出/清理失败等 **15 passed**；脚本静态门禁及夹具定向 **32 tests OK**，完整脚本集此前 **226 tests OK**（后续新增 3 个夹具反例，仅由上述定向结果覆盖）；git diff --check 通过。这些为 Python/模拟执行链和真实 Python 子进程检查，没有本地 Flutter/Xcode/Gradle 编译。
 - 原失败 spec 的只读重校验：`2b4c51faadf139238edd1c78f82e5367f648cb16821294be2ed65583bddb8530` 未变；当前实现对其 v1 工具环境及 stage contract 校验均通过，没有扩权、模型调用或业务 verify。
 - 独立 reviewer 找到并已修正：复合命令派发兼容、settings FIFO 阻塞、Flutter 自定义 XDG 实际 settings 路径、准备后代进程生命周期。云端夹具另移除 BotDetector 全部 16 个 CI 信号，验证仅冻结 BOT=true，并以新 config/noBOT 真实 metadata 拒绝作为反例，防止 Actions 自带 CI 状态掩盖冷启动缺陷。
+
+- 候选 `c061104` 的 Packages #119 / 42166020491 被后续分支 push 按既有并发规则取消，不是代码门禁失败。独立审查后补齐“准备进程组清理未确认”的持久错误路径与 v0.4.7 说明，提交 `6aa3457`；定向 environment/setup 共 45 passed + 55 subtests，workflow 25 tests OK。原生夹具改为与其他检查并行，publish 仍等待所有检查，未降低门禁。
+- #120 / 42166798545 的 native job 127725446372 实际获 runner，12 秒内在 SDK 准备失败；原生日志明确请求 `commandlinetools-mac-15859902_latest.zip` 返回404，未进入 Flutter 安装或平台构建。这是新增夹具选错下载编号，非业务任务验证失败或 macOS runner 容量。按同一 runner 回执中的已安装 command-line tools 16.0 改为直接核对并使用该工具，SDK36/build-tools36/NDK28.2 仍固定。原始回执/日志在任务独立归档 cloud-120-jobs.json / cloud-120-native.log；新源码继续完整云端门禁。

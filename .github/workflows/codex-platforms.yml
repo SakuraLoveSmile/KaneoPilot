@@ -36,11 +36,26 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-        with:
-          cmdline-tools-version: '15859902'
-          log-accepted-android-sdk-licenses: false
-          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
+      - name: Prepare the runner's fixed Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_sdk_root="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+          fixture_sdkmanager="$fixture_sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$fixture_sdkmanager"
+          python3 - "$fixture_sdkmanager" "$fixture_sdk_root" <<'PY'
+          from pathlib import Path
+          import subprocess, sys
+          manager, sdk = sys.argv[1:]
+          properties = Path(manager).parent.parent / 'source.properties'
+          values = dict(line.split('=', 1) for line in properties.read_text().splitlines() if '=' in line)
+          assert values.get('Pkg.Revision') == '16.0', 'Runner Android command-line tools differ from fixed 16.0'
+          subprocess.run([manager, '--sdk_root=' + sdk, '--licenses'], input='y\n' * 100,
+                         text=True, stdout=subprocess.DEVNULL, check=True)
+          PY
+          "$fixture_sdkmanager" --sdk_root="$fixture_sdk_root" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "ANDROID_HOME=$fixture_sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$fixture_sdk_root" >> "$GITHUB_ENV"
       - name: Install pinned Flutter source and Codex CLI
         shell: bash
         run: |
