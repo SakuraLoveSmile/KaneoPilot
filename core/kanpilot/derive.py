@@ -815,7 +815,8 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 actions.append("reverify")
             if cmd_queue.verification_retry_candidate(conn, task):
                 actions.append("retry_verification")
-            if cmd_queue.execution_retry_candidate(conn, task):
+            if (cmd_queue.execution_retry_candidate(conn, task)
+                    or cmd_queue.codex_preflight_retry_candidate(conn, task)):
                 actions.append("resume")
             monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
                               and task["failure_stage"] == "monitor")
@@ -1015,7 +1016,15 @@ def request_allowed_actions(
             actions.append("prepare_plan")
         if task is not None and task["status"] == "needs_user":
             send_state = task["send_state"]
-            from . import verification_recovery
+            from . import cmd_queue, verification_recovery
+            if (kind == "dispatch" and request["run_id"] == task["run_id"]
+                    and cmd_queue.codex_preflight_retry_candidate(conn, task)):
+                try:
+                    _row, detail = cmd_queue._require_codex_preflight_terminal(conn, task, task["run_id"])
+                    if detail["preflight_proof"]["request_id"] == request["request_id"]:
+                        actions.append("resume")
+                except util.KanpilotError:
+                    pass  # Evidence can change between the two read-only checks.
             if verification_recovery.request_candidate(conn, task, request):
                 actions.append("reverify")
             if send_state in (None, "not_sent") and kind != "plan":

@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：待体验（正式 v0.4.7 / build 134 已公开发布，修复已合入 main；云端完整检查、真实平台两权限门禁、原生设置 UI 与下载包核验完成。本机安装、原业务任务恢复及实体设备验收仍待体验，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”和“发布正式 v0.4.7”。
+状态：实现中（正式 v0.4.7 / build 134 已公开发布；2026-11-06 维护者截图及主 agent 实机复现确认，模型前环境失败后被保守标记为发送不明，缺少可见且安全的沿用计划重试入口。补齐 T12–T15，已发布 v0.4.7 不覆盖，原业务任务和成果保持原样，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”和“发布正式 v0.4.7”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -235,3 +235,17 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 - 既有发布脚本将签名标签的 PGP armor 带入公开正文；仅删除这一个签名文本块，保留全部版本说明与 `kaneopilot-ci` marker。独立读回 Release/latest，四项资产 ID、digest、大小及发布身份均保持不变，未改 tag 或替换资产；回执为 `release-body-cleanup.json`。
 - 本任务资源收尾完成：刷新并逐项核对 **406 个**忽略文件，全部为哈希未变的可再生成 Python/pytest 缓存，无非缓存成果；最终 `lsof` 查出隔离预览的 orphan FakeCore 引擎仍以任务树为 cwd。已核对归档内 fake 脚本、PID `17561` 与无子进程，仅对该进程发送 SIGTERM 并确认退出；随后工作树无进程/打开文件引用。确认发布源码和任务记录均已在 main 后，正常移除 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261106-fix-kp-c02-platform-build-environment` 与已合并本地分支。远端任务分支、其余工作树、主仓原有 `.local/` 和缓存清理计划全部保留。完整证据与下载包保留于 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-platform-build-environment/`，收尾回执为 `cleanup-receipt.json`、`preview-fake-engine-cleanup.json`、`worktree-cleanup-inventory-final.json`。
 - T8–T11 已完成，状态为“待体验”；本段仅补交付记录，不改变已发布包的源码身份。升级后可在“设置 → 运行端 → 执行 → Codex 执行权限”选择受限或无沙箱，默认受限，仅作用于新轮次。原业务任务、历史冻结权限与原成果保留；没有替换系统 CLI、自动重试、调用付费模型或进行实体设备验收，不能据此标记用户已验收。
+
+## 2026-11-06 模型前失败后的新轮次入口（T12–T15）
+
+- 维护者指出执行页没有创建新轮次按钮。主 agent 在正式安装版 **0.4.7 / 134** 实机复现同一任务、run **`88b0607d-8799-4cac-bd1a-d5d091c8a842`**：会话失败、无重试按钮；概览仅“恢复原任务／接受可能重复／登记已发出”。核心只读 `get-task` 确认 `needs_user / dispatch / dispatch_failed / submitting / send_state=unknown`，当前任务无 review_repair。只读核对同 spec/job 哈希、同 run 身份，job 为 failed/3、`not_sent`、session/turn 空、`turns=[]`、cli_terminal=true，精确进程身份已停止。当前设置已经是 `danger-full-access`，旧轮次仍冻结 `workspace-write`。未点恢复/重新派发，未写生产状态、改权限或调用模型。
+- 机制：`auto_dispatch._wait_session` 已识别 Codex 的模型前 not_sent 失败，但 dispatch-begin-send 后异常统一保留 unknown，`dispatch-fail` 写为 dispatch_failed；既有 `execution_retry_candidate` 与 Swift `retryEligible` 只支持已发送、monitor 阶段 execution_failed，入口因此隐藏。通用 restore 也不提供原工作树和已领取修复轮次的专用冻结检查，不能只把按钮放开或把所有 unknown 改成 not_sent。
+- 本次工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261106-fix-kp-c02-preflight-retry`，分支 `fix/20261106-kp-c02-preflight-retry`，基线 main `3575ddf2cd43894d583a087b82865cdf6a21358b`，合入目标 main。继续使用 KP-C02 权威记录；本次只补同一修复的恢复缺口，不覆盖正式标签或安装包，新正式版本尚未选择。
+- 共享契约以 protocol §5.31 本次补充为准：复用 `resolve {action:"resume", expected_execution_run_id}`，只有核心核实当前 Codex 模型前失败的同 run/spec/job/config/计划及实际停止证据后才提供 `resume`。确认时再核对远端需求、计划、原工作树内容快照和原派发身份；事务内复核后清空当前 run、保留旧证据与改动、登记有来源类型的 execution_retry 并重新排队。领取新 UUID，采用当前执行设置；普通 unknown、活动 worker、已启动 CLI、篡改、过期确认、特殊 merge/build repair 不得借此放行。既有 sent/monitor、Plus 和历史恢复规则保持原门禁。
+- T12 核心恢复由 Sol worker 独占 `core/kanpilot/cmd_queue.py`、`derive.py`、必要的 `codex_execution.py` / `core.py` 内部恢复支持及对应 Python 测试；自行完成，不继续派生。复用已有执行重试的远端、工作树与竞态校验。隔离 DB/HOME/Git/job/remote stub 验证预检失败→确认重试→新 run 当前配置→原目录/改动保留，并覆盖重复确认、旧启动、活进程、身份篡改、一般 unknown 及普通 review 修复。不得改生产任务或弱化已有测试。
+- T13 原生入口由主 agent 独占 Swift 会话 store、任务详情/待处理入口、模型局部展示规则、确认文案与 docs；Sol worker `preflight_retry_ui_fixtures` 独占 FakeCore、`session_reader_main.swift` 及对应 Python 测试，按已冻结接口准备真实 store 的隔离回归，不编译本地 Swift、不派生下级。沿已复现页面的布局、字体、间距和现有 `.borderedProminent` 重试按钮，只扩展它的合法显示场景，不重新设计页面。会话页与概览入口都绑定当前失败 run 与核心 allowed_actions；确认说明新轮次采用当前设置并会再次调用模型，取消不产生请求，历史选中/一般 unknown 不露出可用重试。
+- T12 与 T13 按上述接口并行；各自文件单一写入者，无共享端口或生产 DB。T14 主 agent 在最终组合态运行必要 Python 隔离检查与云端 Packages；独立 Sol reviewer 只读审身份、终态、工作树保留、重复派发及配置冻结边界。Swift 编译、KaneoPilot 包构建只在云端。
+- T15 主 agent 下载云端独立身份 App + FakeCore，在原生界面复现当前失败形状并核验按钮、取消、确认与新轮次摘要；模型为隔离 fake，覆盖必要窗口尺寸。合入、正式发布、安装和原业务重试分别记录；本次不自动续跑原任务或调用付费模型，未完成云端/UI 检查不能标待体验。
+- T12–T13 源码已完成候选：同 spec/request/accepted `codex-start` 回执与精确进程终态的严格候选、事务和排队后来源指纹复核、普通 Review 修复状态恢复，以及会话页／概览／待处理三处绑定 run 的确认入口。复用 `TaskDetail.canRetryExecution` 局部计算属性，无新增公共 JSON 字段。原 Plus 断言和普通 unknown 门禁保留；不修改生产任务或历史配置。
+- 主 agent 在最终组合态实际运行 Python 3.10.10：新 preflight、Codex inputs/execution、旧 execution/review retry、dispatch/auto_dispatch 共 **180 passed + 33 subtests**；真实受管 fake Codex dispatch 与 queue 集成共 **48 passed**。测试均使用隔离临时 DB/HOME/Git 和假远端／CLI，未调用模型或生产服务。Changed Python AST 与 `git diff --check` 通过。对应 JUnit 保存在本次归档 `core-combination-junit.xml` / `integration-combination-junit.xml`。Sol reviewer 对最终实际差异只读审查无实质发现；Swift 编译和原生检查仍未完成。
+- 当前真实任务另以 SQLite `mode=ro` + `query_only` 连接调用新源码 `get-task`：原 run 与失败状态未变，已返回 `resume`，且 `execution_round` 为同 run 的 Codex failed，确认候选并非仅在合成夹具成立。最小回执为本次归档 `current-source-readonly-candidate.json`；没有执行 `resolve`、重跑任务或修改权限。下一步提交本候选并运行完整 Packages，再下载新源码的独立 App 实测；未选择新正式版本，不复用 v0.4.7 标签或资产。

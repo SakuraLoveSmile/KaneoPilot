@@ -1793,7 +1793,16 @@ def cmd_resolve(state, payload):
         elif action in ("resume", "retry_verification", "accept_verification"):
             if action not in allowed_actions(task, requests):
                 return fail_action("核心未允许此动作")
-            failed_execution = (action == "resume" and task.get("failure_code") == "execution_failed") or action == "retry_verification"
+            execution = task.get("execution_round") or {}
+            # The fixture models core's explicit retry authority; it does not
+            # infer the real worker/spec proof from this display-only shape.
+            preflight_failure = (task.get("failure_code") == "dispatch_failed"
+                                 and task.get("stage") == "dispatch"
+                                 and execution.get("backend") == "codex"
+                                 and execution.get("run_status") == "failed"
+                                 and execution.get("run_id") == task.get("run_id"))
+            failed_execution = (action == "resume" and (
+                task.get("failure_code") == "execution_failed" or preflight_failure)) or action == "retry_verification"
             if "expected_execution_run_id" in payload and not failed_execution:
                 return fail_action("失败执行状态已变化，请刷新后重新操作")
             if failed_execution and (not payload.get("expected_execution_run_id") or

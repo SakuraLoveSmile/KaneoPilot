@@ -413,6 +413,89 @@ def verification_retry_candidate(conn, task):
                 and task["session_id"] and row["session_id"] == task["session_id"])
 
 
+def _require_codex_preflight_terminal(conn, task, expected):
+    """Prove a stopped worker never reached the durable CLI-start checkpoint."""
+    from . import codex_execution, dsh_events, execution_contract, headless_adapter, repair_prompt, round_store, runtime_client, runtime_operations
+    source = headless_adapter.resolve_source(conn)
+    signature = source.source_signature(task["task_id"], expected)
+    row = round_store.require_round(conn, task["task_id"], expected)
+    try:
+        directory = source.run_dir(task["task_id"], expected)
+        spec_path = directory / "spec.json"
+        raw = spec_path.read_bytes()
+        spec = util.jload(raw.decode("utf-8"))
+        job, _error = dsh_events.read_job(directory, task["task_id"], expected, backend="codex")
+        if not isinstance(spec, dict) or not isinstance(job, dict):
+            raise ValueError("missing records")
+        contract = execution_contract.validate_spec(spec, job=job)
+        request = db.get_request(conn, spec.get("request_id"))
+        scope = runtime_client.stable_scope_id("execution", task_id=task["task_id"], run_id=expected)
+        operation = runtime_operations.get_operation(conn, scope, "codex-start:" + expected)
+        config = util.jload(row["config_json"])
+        repair = core.review_repair_of(task)
+        if (repair.get("source_kind") or (bool(repair) != bool(spec.get("review_repair")))
+                or (repair and (spec.get("repair_prompt") or {}).get("identity_sha256")
+                    != repair_prompt._identity(dict(repair, repair_execution_run_id=expected)))):
+            raise ValueError("repair identity mismatch")
+        if (row["save_state"] != "active" or row["backend"] != "codex"
+                or not row["started_at"] or not row["pid"] or row["session_id"]
+                or spec.get("stage_contract_required") is not True or spec.get("backend") != "codex"
+                or spec.get("task_id") != task["task_id"] or spec.get("run_id") != expected
+                or spec.get("repository") != task["repository"] or spec.get("cwd") != row["worktree_path"]
+                or not row["worktree_path"] or spec.get("runs_dir") != str(directory)
+                or job.get("runs_dir") != str(directory)
+                or spec.get("scope_id") != scope or job.get("scope_id") != scope
+                or spec.get("config") != config or job.get("config") != config
+                or spec.get("plan_path") != task["plan_path"] or spec.get("plan_sha256") != task["plan_sha256"]
+                or job.get("plan_sha256") != task["plan_sha256"]
+                or not contract or contract["inputs"].get("requirements_sha256") != task["requirements_sha256"]
+                or job.get("spec_sha256") != util.sha256_bytes(raw)
+                or job.get("status") != "failed" or type(job.get("exit_code")) is not int or job["exit_code"] == 0
+                or job.get("send_state") != "not_sent" or job.get("session_id") is not None
+                or job.get("turn_id") is not None or job.get("turns") != [] or job.get("pending_input")
+                or job.get("pid") != row["pid"]
+                or request is None or request["task_id"] != task["task_id"] or request["run_id"] != expected
+                or request["kind"] != "dispatch" or request["stage"] != "dispatch" or request["status"] != "failed"
+                or operation is None or operation["status"] != "accepted"
+                or operation["harness_id"] != "codex" or operation["tool"] != "codex_execution_start"
+                or operation["request_sha256"] != runtime_operations.compute_request_sha256(
+                    {"task_id": task["task_id"], "run_id": expected, "config": config})
+                or util.jload(operation["result_json"]) != {"pid": job.get("pid")}):
+            raise ValueError("identity mismatch")
+        codex_execution.require_settled(job)
+        if (not signature or source.source_signature(task["task_id"], expected) != signature
+                or spec_path.read_bytes() != raw):
+            raise ValueError("evidence changed")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError,
+            headless_adapter.HeadlessError, util.KanpilotError) as exc:
+        raise util.KanpilotError("conflict", "旧 Codex 模型前失败的派发身份、证据或进程终态不可核验，不能重新执行") from exc
+    return row, {"worktree_path": row["worktree_path"], "preflight_proof": {
+        "spec_sha256": util.sha256_bytes(raw), "source_sha256": util.sha256_text(util.jdump(signature)),
+        "request_id": request["request_id"], "request_sha256": util.sha256_text(util.jdump(dict(request))),
+        "operation_sha256": util.sha256_text(util.jdump(dict(operation)))}}
+
+
+def codex_preflight_retry_candidate(conn, task):
+    """Read-only UI gate; unknown alone never proves an unsent execution."""
+    repair = core.review_repair_of(task)
+    if (not db.task_is_active(task) or task["status"] != "needs_user" or task["stage"] != "dispatch"
+            or task["failure_code"] != "dispatch_failed" or task["failure_stage"] != "submitting"
+            or task["sent"] not in (None, 0) or task["send_state"] not in ("unknown", "not_sent")
+            or not task["run_id"] or task["session_id"] or not task["plan_path"] or not task["plan_sha256"]
+            or db.task_extra(task).get("plan_execution_hold") or repair.get("source_kind")
+            or conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') LIMIT 1",
+                            (task["task_id"],)).fetchone()):
+        return False
+    try:
+        _require_codex_preflight_terminal(conn, task, task["run_id"])
+        if repair:
+            from . import review_repair
+            review_repair.verify_frozen(task)
+    except (util.KanpilotError, OSError, ValueError, TypeError):
+        return False
+    return True
+
+
 def _require_settled_continuation(ctx, task, expected, status, connection_file):
     """Accept a later Plus turn only when it is a verified, settled manual continuation."""
     from . import session_control
@@ -502,42 +585,51 @@ def verify_execution_retry_terminal(conn, task, now=None):
     retry = core.execution_retry_of(task)
     if retry:
         current = now or util.now_dt()
-        _require_execution_terminal(SimpleNamespace(conn=conn, now=current, now_iso=util.to_iso(current)),
-                                    task, retry["source_run_id"], allow_settled_continuation=True)
+        if retry.get("source_kind") == "codex_preflight":
+            _row, detail = _require_codex_preflight_terminal(conn, task, retry["source_run_id"])
+            util.require(detail["preflight_proof"] == retry.get("source_proof"),
+                         "模型前失败的原派发证据已变化，不能重新执行", "conflict")
+        else:
+            _require_execution_terminal(SimpleNamespace(conn=conn, now=current, now_iso=util.to_iso(current)),
+                                        task, retry["source_run_id"], allow_settled_continuation=True)
 
 
 def _prepare_execution_retry(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
     engine_empty = _engine_empty_retry(task, payload)
     verification_retry = payload.get("verification_retry") is True
+    preflight = codex_preflight_retry_candidate(ctx.conn, task)
     if verification_retry and not verification_retry_candidate(ctx.conn, task):
         raise util.KanpilotError("conflict", "当前验证身份或发送状态不明，不能重新执行；请先重新核验验证证据")
     if (payload["action"] == "resume" and payload.get("expected_execution_run_id")
-            and task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry):
+            and task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry and not preflight):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
-    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry):
+    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry and not preflight):
         return None
     expected = payload.get("expected_execution_run_id")
     if not expected:
         raise util.KanpilotError("conflict", "重新执行必须确认当前失败轮次")
     if expected != task["run_id"]:
         raise util.KanpilotError("stale_run", "所选会话已不是当前失败轮次，请刷新后重试")
-    if not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty, verification_retry=verification_retry):
+    if preflight:
+        util.require(payload.get("actor", "user") == "user", "模型前失败仅允许用户确认新轮次", "conflict")
+    if not preflight and not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty, verification_retry=verification_retry):
         raise util.KanpilotError("conflict", "当前任务不能沿用计划重新执行，请先确认旧轮次和发送状态")
     if core.review_repair_of(task) and not core.review_repair_of(task).get("source_kind"):
         from . import review_repair
         review_repair.verify_frozen(task)
-    return _execution_retry_materials(ctx, task, expected)
+    return _execution_retry_materials(ctx, task, expected, preflight=preflight)
 
 
-def _execution_retry_materials(ctx, task, expected):
+def _execution_retry_materials(ctx, task, expected, *, preflight=False):
     """Read terminal, remote and working-tree identity before any retry write."""
     from pathlib import Path
     from . import bridge, git_delivery, headless_adapter, remote
     snapshot = _resolution_snapshot(task)
     source = headless_adapter.resolve_source(ctx.conn)
     signature = source.source_signature(task["task_id"], expected)
-    row, detail = _require_execution_terminal(ctx, task, expected, allow_settled_continuation=True)
+    row, detail = (_require_codex_preflight_terminal(ctx.conn, task, expected) if preflight else
+                   _require_execution_terminal(ctx, task, expected, allow_settled_continuation=True))
     if not task["requirements_sha256"]:
         raise util.KanpilotError("conflict", "旧计划需求身份缺失，请重新规划")
     try:
@@ -583,7 +675,9 @@ def _execution_retry_materials(ctx, task, expected):
                         requested_at=ctx.now_iso, source_records_dir=str(source.run_dir(task["task_id"], expected)))
     return {"snapshot": snapshot, "round_snapshot": dict(row), "source_signature": signature,
             "source": source, "worktree": delivery, "detached": not bool(branch_delivery),
-            "worktree_sha256": worktree_sha, "verification_recovery": recovery}
+            "worktree_sha256": worktree_sha, "verification_recovery": recovery,
+            "source_kind": "codex_preflight" if preflight else None,
+            "source_proof": detail.get("preflight_proof")}
 
 
 def _prepare_review_repair_retry(ctx, payload):
@@ -878,13 +972,19 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             from pathlib import Path
             from . import git_delivery, round_store
             old_round = round_store.get_round(conn, task["task_id"], task["run_id"])
+            preflight = execution_retry.get("source_kind") == "codex_preflight"
             if (execution_retry["snapshot"] != _resolution_snapshot(task)
-                    or not execution_retry_candidate(conn, task, engine_empty=_engine_empty_retry(task, payload),
-                                                         verification_retry=payload.get("verification_retry") is True)
+                    or not (codex_preflight_retry_candidate(conn, task) if preflight else
+                            execution_retry_candidate(conn, task, engine_empty=_engine_empty_retry(task, payload),
+                                                      verification_retry=payload.get("verification_retry") is True))
                     or old_round is None or dict(old_round) != execution_retry["round_snapshot"]
                     or execution_retry["source"].source_signature(task["task_id"], task["run_id"])
                     != execution_retry["source_signature"]):
                 raise util.KanpilotError("conflict", "当前失败轮次或处置状态已变化，请刷新后重试")
+            if preflight:
+                _row, detail = _require_codex_preflight_terminal(conn, task, task["run_id"])
+                util.require(detail["preflight_proof"] == execution_retry["source_proof"],
+                             "模型前失败的原派发证据已变化，请重新确认", "conflict")
             try:
                 if (util.sha256_file(Path(task["plan_path"])) != task["plan_sha256"]
                         or git_delivery.worktree_state_sha256(execution_retry["worktree"], detached=execution_retry["detached"])
@@ -936,6 +1036,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     "detached": execution_retry["detached"],
                     "worktree_sha256": execution_retry["worktree_sha256"],
                 }
+                if execution_retry.get("source_kind") == "codex_preflight":
+                    extra["execution_retry"].update(source_kind="codex_preflight",
+                                                     source_proof=execution_retry["source_proof"])
                 repair = core.review_repair_of(task)
                 if repair and not repair.get("source_kind"):
                     extra["fix_request"] = dict(repair, state="queued")

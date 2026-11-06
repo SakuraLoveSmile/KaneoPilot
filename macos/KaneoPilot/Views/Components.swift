@@ -1126,11 +1126,12 @@ enum AutomationPresentation {
         default: return nil
         }
     }
-    static func resumeLabel(_ code: String?) -> String {
+    static func resumeLabel(_ code: String?, stage: String? = nil) -> String {
         switch code {
         case "verification_environment_failure": return "重新核对原轮次证据"
         case "fix_branch_unavailable": return "重新验证本轮"
         case "execution_failed": return "重新执行（沿用计划）"
+        case "dispatch_failed" where stage == "dispatch": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"
         case "delivery_blocked_files", "delivery_commit_failed": return "重新提交"

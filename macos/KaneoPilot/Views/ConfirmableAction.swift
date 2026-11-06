@@ -46,7 +46,7 @@ enum ConfirmableAction: Identifiable {
             case .replanBranchUnavailable:
                 return "将从目标分支新建工作树，本轮改动不会带入"
             case .retryExecution:
-                return "沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。"
+                return "沿用已确认计划和原工作树重新排队执行，保留已有改动和原失败记录。新轮次使用当前执行设置，领取后会再次调用模型。"
             }
         }
         var destructive: Bool {

@@ -721,7 +721,7 @@ struct RequestDetailView: View {
         do {
             let task = try await model.client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
             guard owner == generation, detail?.request?.taskId == taskID else { return }
-            guard task.failureCode == "execution_failed", task.allowedActions?.contains("resume") == true,
+            guard task.canRetryExecution,
                   let runID = task.runId else {
                 model.alertMessage = "该失败轮次已不能重新执行，请刷新任务状态。"
                 return
@@ -1125,11 +1125,12 @@ struct RequestDetailView: View {
                 Task { await prepareRevert(taskID: taskID) }
             }.disabled(model.busy || preparingRevert || taskID == nil)
         case "resume", "accept_verification", "dismiss":
-            Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode)
+            Button(action == "resume" ? AutomationPresentation.resumeLabel(detail.task?.exception?.failureCode, stage: detail.task?.stage)
                    : action == "accept_verification" ? "接受验证结果"
                    : AutomationPresentation.dismissLabel(stage: detail.task?.stage, failureCode: detail.task?.exception?.failureCode, automatic: AutomationPresentation.active(detail.task?.automation))) {
                 guard let taskID else { return }
-                if action == "resume", detail.task?.exception?.failureCode == "execution_failed" {
+                if action == "resume", detail.task?.exception?.failureCode == "execution_failed"
+                    || (detail.task?.exception?.failureCode == "dispatch_failed" && detail.task?.stage == "dispatch") {
                     Task { await prepareExecutionRetry(taskID: taskID) }
                 } else {
                     Task { await model.resolve(taskID: taskID, action: action) }

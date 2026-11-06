@@ -1943,6 +1943,8 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
 
 最终结构为 `{status:"completed|needs_input|failed",summary,checks:[{command,exit_code}],questions:[{title,options}]}`。模型声明与 CLI 命令事件分别保存；每条冻结 verify 必须在报告中通过，且有原文匹配的 `command_execution` 完成事件、独立整数退出码0和同一最终源码快照。禁止用自然语言、退出0、turn.completed、模型自报或旧代次结果独立推进。日志截断、缺报告、错身份、布尔退出码、重复矛盾记录、验证后源码变化均不放行。Pilot 不运行任务 verify。
 
+**模型前失败后的显式新轮次（KP-C02）**：Codex 已领取派发但在环境预检失败时，任务可能仍为 `needs_user / dispatch / dispatch_failed / send_state=unknown`；这不等于模型已经收到输入。核心只对同当前 run、同 request/spec/job 哈希、冻结配置/计划/工作树身份一致，且 job 为持久 failed 非零退出、`send_state=not_sent`、session/turn 为空、`turns=[]`、精确 worker 出生身份确认已退出的情况提供 `resume`。界面复用“重新执行（沿用计划）”，提交 `resolve {action:"resume",expected_execution_run_id}`，不按失败文案推断安全性。用户确认才核对远端需求与状态、计划内容和原工作树快照；事务内重验原派发和证据，保留旧 run/成果，登记来源类型明确的 `execution_retry`，清空当前派发身份并重新排队。新领取使用新 UUID 和当前执行配置，历史权限不修改；晚到旧启动及重复确认不得生成第二次模型调用。普通 review 修复仍须冻结身份核验及 queued/running 转移；特殊 merge_conflict/build_failure 的既有恢复规则不由此放宽。一般 unknown、活动 worker、出现过 CLI turn、证据或材料变化均拒绝该入口，不自动重发、不调用模型补证。确认弹窗说明当前设置生效于新轮次、保留改动并会再次调用模型；取消不写请求。
+
 `needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。
 
 停止先持久记录，再核对受管进程出生身份与实际停止结果。取消/App 关闭须处理 CLI 子进程，不遗留可写孤儿。缺少停止证明时保留 unknown。所有新 Codex 执行无论项目引擎模式均走结构化 verdict，回执同时绑定报告/原生命令事件/spec/job/计划和当前源码；提交后恢复仍复核原证据。交付与远端副作用继续由核心命令完成。

@@ -214,6 +214,147 @@ struct SessionReaderFixtures {
         store.stop()
         print("failed-execution retry Store fixtures passed: current/history/trash, stale confirmation, rejection, merged clicks, queue and retained history")
     }
+    @MainActor static func preflightRetryFixtures(client: CoreClient) async throws {
+        let path = ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"]!
+        let commandLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_COMMAND_LOG"]!
+        let stateURL = URL(fileURLWithPath: path)
+        let original = try Data(contentsOf: stateURL)
+        let taskID = "auto-execution_failed", runID = "run-codex-preflight-failed"
+        let marker = "\(taskID)/\(runID)", worktree = "/tmp/fixture-codex-preflight-worktree"
+        let frozenConfig: [String: Any] = ["backend": "codex", "model": "fixture-frozen-model",
+                                           "reasoning_effort": "max", "sandbox": "workspace-write"]
+        var execution: [String: Any] = ["task_id": taskID, "run_id": runID, "backend": "codex",
+                                        "run_status": "failed", "save_state": "active", "session_id": NSNull(),
+                                        "turn_id": NSNull(), "send_state": "not_sent", "worktree_path": worktree,
+                                        "config": frozenConfig]
+        var failure: [String: Any] = ["backend": "codex", "session_id": NSNull(), "round_status": "failed",
+                                      "round_detail": ["turn_id": NSNull(), "send_state": "not_sent", "exit_code": 3,
+                                                       "ended_at": "2026-11-06T12:17:34Z", "worktree_path": worktree,
+                                                       "detail": "Codex 模型前环境检查失败", "config": frozenConfig]]
+        func mutate(_ change: (inout [String: Any]) -> Void) throws {
+            var state = try JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as! [String: Any]
+            change(&state)
+            try JSONSerialization.data(withJSONObject: state).write(to: stateURL, options: .atomic)
+        }
+        func patchTask(_ patch: [String: Any]) throws {
+            try mutate { state in
+                var overrides = state["task_overrides"] as? [String: Any] ?? [:]
+                var task = overrides[taskID] as? [String: Any] ?? [:]
+                task.merge(patch) { _, next in next }
+                overrides[taskID] = task
+                state["task_overrides"] = overrides
+            }
+        }
+        func count(_ command: String) throws -> Int {
+            try loggedRequests(commandLog).filter { $0["command"] as? String == command }.count
+        }
+        func setFailure(_ scenario: [String: Any]) throws {
+            try mutate { $0["session_scenarios"] = [marker: scenario] }
+        }
+        try mutate { state in
+            var seed = state["session_fixture_seed"] as! [String: Any]
+            var entry = seed["\(taskID)/run-auto-execution-failed"] as! [String: Any]
+            var session = entry["session"] as! [String: Any]
+            session.merge(["run_id": runID, "session_marker": marker, "backend": "codex",
+                           "session_id": NSNull(), "run_status": "failed", "allowed_actions": []]) { _, next in next }
+            entry["session"] = session
+            entry["messages"] = []
+            seed[marker] = entry
+            state["session_fixture_seed"] = seed
+            state["session_scenarios"] = [marker: failure]
+            var overrides = state["task_overrides"] as? [String: Any] ?? [:]
+            overrides[taskID] = ["status": "needs_user", "stage": "dispatch", "failure_code": "dispatch_failed",
+                                "failure_stage": "submitting", "send_state": "unknown", "sent": NSNull(),
+                                "run_id": runID, "session_id": NSNull(), "execution_round": execution,
+                                "_automation_allowed": ["resume", "restore", "recheck"]]
+            state["task_overrides"] = overrides
+            state["extra_requests"] = (state["extra_requests"] as? [[String: Any]] ?? []).filter {
+                $0["task_id"] as? String != taskID
+            }
+        }
+        let store = SessionReaderStore(taskID: taskID, preferredRunID: runID, statusOnly: true)
+        defer { store.stop(); try? original.write(to: stateURL, options: .atomic) }
+        let beforeControl = try count("session-control-status"), beforeResolve = try count("resolve")
+        await store.start(client: client)
+        check(store.canRetryExecution && store.retryTask?.canRetryExecution == true,
+              "core-authorized Codex preflight failure exposes retry despite unknown task send state")
+        check(store.roundDetail?.turnId == nil && store.session?.sessionId == nil,
+              "preflight retry requires no invented CLI session or turn in the UI fixture")
+        check(try count("session-control-status") == beforeControl, "Codex preflight retry never requests Plus control")
+        check(try count("resolve") == beforeResolve, "reading a retry option never submits the confirmation")
+        let planSHA = store.retryTask?.planSha256
+
+        try patchTask(["_automation_allowed": ["restore", "recheck"]])
+        check(!(await store.retryExecution(expectedRunID: runID)), "confirmation re-reads revoked core retry authority")
+        check(try count("resolve") == beforeResolve, "revoked authority cannot submit resolve")
+        await store.refresh()
+        check(!store.canRetryExecution, "ordinary unknown send state has no retry without core authority")
+        failure["round_detail"] = ["turn_id": "already-started-cli", "worktree_path": worktree, "config": frozenConfig]
+        try setFailure(failure)
+        await store.refresh()
+        check(!store.canRetryExecution, "a CLI-bearing failure without core authority cannot expose preflight retry")
+        failure["round_detail"] = ["turn_id": NSNull(), "send_state": "not_sent", "exit_code": 3,
+                                   "ended_at": "2026-11-06T12:17:34Z", "worktree_path": worktree, "config": frozenConfig]
+        try setFailure(failure)
+        try patchTask(["_automation_allowed": ["resume", "restore", "recheck"]])
+        await store.refresh()
+        check(store.canRetryExecution, "refresh restores the core-authorized preflight action")
+        try patchTask(["run_id": "run-replaced-before-confirmation"])
+        check(!(await store.retryExecution(expectedRunID: runID)), "preflight confirmation rejects a replaced current run")
+        check(try count("resolve") == beforeResolve, "stale preflight confirmation submits no resolve")
+        try patchTask(["run_id": runID])
+        await store.refresh()
+        let first = Task { await store.retryExecution(expectedRunID: runID) }
+        let second = Task { await store.retryExecution(expectedRunID: runID) }
+        let accepted = await [first.value, second.value]
+        let afterResolve = try count("resolve")
+        check(accepted.filter { $0 }.count == 1 && afterResolve == beforeResolve + 1,
+              "overlapping preflight confirmations queue exactly one retry")
+        let lastResolve = try loggedRequests(commandLog).last { $0["command"] as? String == "resolve" }
+        let payload = lastResolve?["payload"] as? [String: Any]
+        check(payload?["action"] as? String == "resume" && payload?["expected_execution_run_id"] as? String == runID,
+              "preflight resolve carries the confirmed old run identity")
+        let queued = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
+        check(queued.status == "ready" && queued.runId == nil && queued.stage == "dispatch" && queued.planSha256 == planSHA,
+              "preflight retry preserves the plan and queues rather than starting")
+        check(!store.canRetryExecution && store.roundDetail?.runStatus == "failed", "queueing keeps the old failed record read-only")
+        let requests = try await client.run("list-requests", payload: [:], as: ListRequestsResponse.self)
+        check(requests.requests?.filter { $0.taskId == taskID && $0.kind == "dispatch" && $0.status == "queued" }.count == 1,
+              "preflight retry creates one queued dispatch request")
+
+        let newRunID = "run-codex-preflight-current-settings", newMarker = "\(taskID)/\(newRunID)"
+        let currentConfig: [String: Any] = ["backend": "codex", "model": "fixture-current-model",
+                                           "reasoning_effort": "max", "sandbox": "danger-full-access"]
+        try mutate { state in
+            var seed = state["session_fixture_seed"] as! [String: Any]
+            var entry = seed[marker] as! [String: Any]
+            var session = entry["session"] as! [String: Any]
+            session.merge(["run_id": newRunID, "session_marker": newMarker, "run_status": "running",
+                           "session_id": "fixture-new-codex-session"]) { _, next in next }
+            entry["session"] = session
+            seed[newMarker] = entry
+            state["session_fixture_seed"] = seed
+            state["session_scenarios"] = [marker: failure, newMarker: [
+                "backend": "codex", "session_id": "fixture-new-codex-session", "round_status": "running",
+                "round_detail": ["turn_id": "fixture-new-turn", "worktree_path": worktree, "config": currentConfig]]]
+        }
+        execution.merge(["run_id": newRunID, "run_status": "running", "config": currentConfig]) { _, next in next }
+        try patchTask(["status": "running", "stage": "monitor", "run_id": newRunID, "execution_round": execution])
+        await store.refresh()
+        check(store.selectedRunID == newRunID && store.roundDetail?.config?.model == "fixture-current-model"
+              && store.roundDetail?.worktreePath == worktree, "new run reads current settings on the original worktree")
+        check(store.sessions.contains { $0.runId == runID }, "new preflight retry retains the old failed round in history")
+        await store.select(runID: runID)
+        check(!store.canRetryExecution && store.roundDetail?.config?.model == "fixture-frozen-model",
+              "selecting the historical preflight failure retains frozen settings without retry authority")
+        let old = try await client.run("get-session", payload: ["task_id": taskID, "run_id": runID])
+        let new = try await client.run("get-session", payload: ["task_id": taskID, "run_id": newRunID])
+        let oldConfig = (old["round_detail"] as? [String: Any])?["config"] as? [String: Any]
+        let newConfig = (new["round_detail"] as? [String: Any])?["config"] as? [String: Any]
+        check(oldConfig?["sandbox"] as? String == "workspace-write" && newConfig?["sandbox"] as? String == "danger-full-access",
+              "new fake run exposes current permission while the old permission remains frozen")
+        print("Codex preflight retry Store fixtures passed: authority, no Plus control, stale/revoked confirmation, one queue and frozen history")
+    }
     @MainActor static func statusOnlyFixtures(client: CoreClient) async throws {
         let messageLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_REQUEST_LOG"]!
         let commandLog = messageLog + ".commands"
@@ -342,6 +483,7 @@ struct SessionReaderFixtures {
         }, "every status-mode get-session request must select the lightweight core path")
         store.stop()
         try await retryExecutionFixtures(client: client)
+        try await preflightRetryFixtures(client: client)
         _ = loadingToken
         print("status-only Store fixtures passed: initial/manual/poll/select/save, no message requests or body preparation")
     }

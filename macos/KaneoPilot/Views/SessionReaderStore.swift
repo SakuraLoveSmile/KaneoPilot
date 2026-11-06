@@ -588,9 +588,7 @@ final class SessionReaderStore: ObservableObject {
               ["failed", "finished"].contains(roundDetail?.runStatus ?? session?.runStatus ?? ""),
               let task = retryTask else { return false }
         return task.runId == runID && task.taskId == session?.taskId
-            && task.failureCode == "execution_failed"
-            && task.allowedActions?.contains("resume") == true
-            && task.readOnly != true && task.saveState == "active"
+            && task.canRetryExecution
     }
 
     /// 非空即禁用「重新执行」并说明原因。Plus 轮次须先由核心确认当前空闲；

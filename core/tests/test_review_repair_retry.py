@@ -102,6 +102,20 @@ class ReviewRepairRetryTest(direct.DirectReviewRepairTest):
         assert core.automation_of(self.task())["fix_round"] == 1
         self.claim_retry(result)
 
+    def test_codex_preflight_repair_retry_preserves_review_and_fix_round(self):
+        from test_codex_preflight_retry import seed_preflight
+        from kanpilot import derive
+        self.failed_repair(managed=True)
+        dispatch = next(row for row in self.requests() if row["kind"] == "dispatch" and row["run_id"] == self.failed_run)
+        seed_preflight(self.conn, self.task(), self.runs_root / self.task_id / self.failed_run,
+                       self.worktree, self.now, request_id=dispatch["request_id"])
+        self.assertIn("resume", derive.allowed_actions(self.conn, self.task(), util.now_dt()))
+        result = self.call("resolve", self.retry_payload)
+        self.assertEqual(core.review_repair_of(self.task())["state"], "queued")
+        self.assertEqual(core.automation_of(self.task())["fix_round"], 1)
+        review_repair.verify_frozen(self.task())
+        self.claim_retry(result)
+
     def test_existing_broken_retry_shape_recovers_through_same_retry_button(self):
         self.legacy_block()
         result = self.call("resolve", dict(task_id=self.task_id, action="retry"))

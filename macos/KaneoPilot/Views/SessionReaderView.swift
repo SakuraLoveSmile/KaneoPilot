@@ -121,8 +121,8 @@ struct SessionReaderView: View {
             Button("取消", role: .cancel) { retryConfirmationRunID = nil }
         } message: { _ in
             Text(store.hasManualContinuation
-                 ? "沿用已确认计划重新排队执行，保留已有改动、Plus 手动继续留下的改动和原失败记录。执行端领取后会再次调用模型。"
-                 : "沿用已确认计划重新排队执行，保留已有改动和原失败记录。执行端领取后会再次调用模型。")
+                 ? "沿用已确认计划和原工作树重新排队执行，保留已有改动、Plus 手动继续留下的改动和原失败记录。新轮次使用当前执行设置，领取后会再次调用模型。"
+                 : "沿用已确认计划和原工作树重新排队执行，保留已有改动和原失败记录。新轮次使用当前执行设置，领取后会再次调用模型。")
         }
         .confirmationDialog("向 Plus \(startConfirmation?.startLabel ?? "请求开始")？", isPresented: Binding(
             get: { startConfirmation != nil },

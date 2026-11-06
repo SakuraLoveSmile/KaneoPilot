@@ -794,7 +794,9 @@ struct TaskOverviewTabView: View {
             list.append("sync_release")
         }
         if detail.sendState == "unknown" {
-            list = list.filter { ["restore", "accept_duplicate", "mark_sent", "recheck"].contains($0) }
+            let recoveryActions = ["restore", "accept_duplicate", "mark_sent", "recheck"]
+                + (detail.canRetryExecution ? ["resume"] : [])
+            list = list.filter { recoveryActions.contains($0) }
         }
         return list
     }
@@ -822,8 +824,9 @@ struct TaskOverviewTabView: View {
 
     private var primaryAction: String? {
         let available = visibleActions
-        // 发送不明仅推荐校验；恢复原任务、接受重复、登记发送必须由用户裁决。
+        // 核心已核验的模型前失败可显式重试；一般发送不明仍仅推荐校验。
         if detail.sendState == "unknown" {
+            if detail.canRetryExecution && available.contains("resume") { return "resume" }
             return available.contains("recheck") ? "recheck" : nil
         }
         if !isActive { return available.contains("restore") ? "restore" : nil }
@@ -1544,8 +1547,8 @@ struct TaskOverviewTabView: View {
                 }
             }.disabled(model.busy || revertPreparationID != nil)
         case "resume", "accept_verification":
-            Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode)) {
-                if action == "resume", detail.failureCode == "execution_failed", let runID = detail.runId {
+            Button(action == "accept_verification" ? "接受验证结果" : AutomationPresentation.resumeLabel(detail.failureCode, stage: detail.stage)) {
+                if action == "resume", detail.canRetryExecution, let runID = detail.runId {
                     confirm = .retryExecution(runID: runID)
                 } else {
                     Task { await model.resolve(taskID: detail.taskId, action: action) }

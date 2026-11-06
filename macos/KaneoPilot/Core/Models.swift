@@ -659,6 +659,16 @@ struct TaskDetail: Decodable, Identifiable {
 
     var id: String { taskId }
 
+    /// 核心的 resume 授权决定入口；模型前失败必须对应当前 Codex 失败轮次。
+    var canRetryExecution: Bool {
+        guard status == "needs_user", saveState == "active", readOnly != true,
+              runId?.isEmpty == false, allowedActions?.contains("resume") == true else { return false }
+        if failureCode == "execution_failed" { return true }
+        return failureCode == "dispatch_failed" && stage == "dispatch"
+            && executionRound?.backend == "codex" && executionRound?.runStatus == "failed"
+            && executionRound?.runId == runId
+    }
+
     /// §4.1：`enqueue` 主按钮按核心给出的 kind 变文案；缺省或未知保持通用文案。
     var enqueueActionLabel: String {
         switch enqueueKind {
