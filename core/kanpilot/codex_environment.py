@@ -472,6 +472,39 @@ print(json.dumps(result))
 '''
 
 
+GRADLE_SDK_WRITE_PROBE = r'''
+import json, os, sys
+path = sys.argv[1]
+print(json.dumps({"exists": os.path.exists(path), "is_directory": os.path.isdir(path),
+                  "writable": os.access(path, os.W_OK)}))
+'''
+
+
+def _preflight_android_gradle_sdk(spec, env, argv, *, check=None):
+    from . import codex_tool_setup
+    requirement = codex_tool_setup.android_gradle_sdk_requirement(spec)
+    if requirement is None:
+        return None
+    if check:
+        check()
+    root = requirement["project_root"]
+    identity = "Gradle " + requirement["gradle_version"] + " 的 Flutter SDK 插件项目根 " + root
+    hint = "请在设置→运行端→执行→Codex CLI 选择无沙箱，并创建新轮次"
+    compatibility_argv = argv[:argv.index("--") + 1] + [sys.executable, "-c", GRADLE_SDK_WRITE_PROBE, root]
+    try:
+        probe = subprocess.run(compatibility_argv, cwd=spec["cwd"], env=child_env(spec, env),
+                               capture_output=True, text=True, timeout=20)
+        _require(probe.returncode == 0, identity + " 兼容预检未成功启动；未调用模型；" + hint)
+        result = json.loads(probe.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise util.KanpilotError("codex_environment_unavailable", identity + " 兼容预检不可用；未调用模型；" + hint) from exc
+    _require(type(result) is dict and set(result) == {"exists", "is_directory", "writable"}
+             and all(type(value) is bool for value in result.values()), identity + " 预检回执无效；未调用模型；" + hint)
+    _require(result["exists"] and result["is_directory"], identity + " 缺失或不是目录；未调用模型")
+    _require(result["writable"], identity + " 在受限沙箱中不可写，Gradle 9 起要求项目根可写；" + hint)
+    return {**requirement, **result}
+
+
 def preflight(spec, env, *, check=None):
     environment = validate(spec)
     if environment is None:
@@ -537,6 +570,10 @@ def preflight(spec, env, *, check=None):
             if check:
                 check()
             counts = codex_tool_setup.seed_caches(spec)
+            if environment["v"] == 2:
+                compatibility = _preflight_android_gradle_sdk(spec, env, argv, check=check)
+                if compatibility is not None:
+                    receipt["android_gradle_sdk"] = compatibility
             command = codex_tool_setup.setup_argv(spec)
             if command:
                 before = git_delivery.source_state_sha256(spec["cwd"])
@@ -564,6 +601,13 @@ def preflight(spec, env, *, check=None):
                     if project.is_file() and "FlutterGeneratedPluginSwiftPackage" in project.read_text(encoding="utf-8"):
                         generated = Path(spec["cwd"]) / "macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
                         _require(generated.is_file(), "Flutter macOS 平台生成包仍缺失：" + str(generated))
+                # A cold worktree may gain ignored local.properties during
+                # pub get. Re-identify the actual SDK/runtime after successful
+                # source-preserving setup before allowing any model turn.
+                if environment["v"] == 2:
+                    compatibility = _preflight_android_gradle_sdk(spec, env, argv, check=check)
+                    if compatibility is not None:
+                        receipt["android_gradle_sdk"] = compatibility
                 receipt["setup"] = {"status": "passed", "command": command,
                                     "exit_code": setup.returncode, "cache_seed": counts}
         return receipt

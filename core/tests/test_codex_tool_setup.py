@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from kanpilot import codex_tool_setup as setup, util
@@ -119,6 +120,165 @@ class CodexToolSetupTests(unittest.TestCase):
         self.assertEqual(setup.setup_argv(self.spec), [self.spec["tool_environment"]["setup"]["flutter"],
                                                     "pub", "get", "--offline", "--enforce-lockfile"])
         self.assertEqual((self.fingerprint(self.pub), self.fingerprint(self.gradle)), before)
+
+    def gradle_compatibility_fixture(self, version="9.3.1"):
+        cached = self.gradle_distribution()
+        sdk = self.root / "flutter"
+        plugin = sdk / "packages/flutter_tools/gradle"
+        plugin.mkdir(parents=True)
+        android = self.cwd / "android"
+        (android / "local.properties").write_text("flutter.sdk=" + str(sdk) + "\n")
+        (android / "settings.gradle.kts").write_text('''
+pluginManagement {
+    val flutterSdkPath = run {
+        val properties = java.util.Properties()
+        file("local.properties").inputStream().use { properties.load(it) }
+        val flutterSdkPath = properties.getProperty("flutter.sdk")
+        require(flutterSdkPath != null) { "flutter.sdk not set in local.properties" }
+        flutterSdkPath
+    }
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+    repositories { google() mavenCentral() gradlePluginPortal() }
+}
+plugins {
+    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+    id("com.android.application") version "8.11.1" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+}
+include(":app")
+''')
+        jar = cached / "gradle-9.3.1/lib/gradle-base-services-9.3.1.jar"
+        with zipfile.ZipFile(jar, "w") as archive:
+            archive.writestr("org/gradle/build-receipt.properties", "versionNumber=" + version + "\n")
+        setup.seed_caches(self.spec)
+        private_jar = self.private / "gradle" / jar.relative_to(self.gradle)
+        return plugin, private_jar
+
+    def test_gradle_sdk_requirement_uses_selected_jar_receipt_not_distribution_name(self):
+        plugin, jar = self.gradle_compatibility_fixture()
+        expected = {"gradle_version": "9.3.1", "project_root": str(plugin)}
+        self.assertEqual(setup.android_gradle_sdk_requirement(self.spec), expected)
+        for version, applicable in (("8.14", False), ("8.14.5", False), ("9.0.0", True),
+                                    ("10.0.1", True), ("9.0.0-rc-1", False),
+                                    ("9.3.1-SNAPSHOT", False), ("unknown", False)):
+            with zipfile.ZipFile(jar, "w") as archive:
+                archive.writestr("org/gradle/build-receipt.properties", "versionNumber=" + version + "\n")
+            with self.subTest(version=version):
+                actual = setup.android_gradle_sdk_requirement(self.spec)
+                self.assertEqual(actual, {**expected, "gradle_version": version} if applicable else None)
+        # A missing/invalid receipt is unknown, even though the URL says 9.3.1.
+        jar.write_bytes(b"not a ZIP")
+        self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+
+    def test_gradle_sdk_requirement_confirms_standard_settings_and_matching_sdk(self):
+        plugin, jar = self.gradle_compatibility_fixture()
+        path = self.cwd / "android/settings.gradle.kts"
+        original = path.read_text()
+        for source in ("// " + original.replace("\n", "\n// "),
+                       original + '\nflutterSdkPath = "different"\n',
+                       original.replace('includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")',
+                                        '// includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")'),
+                       original.replace('file("local.properties")', 'file("other.properties")')):
+            path.write_text(source)
+            with self.subTest(source=source):
+                self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+        path.write_text("// Standard Flutter project\n" + original)
+        self.assertIsNotNone(setup.android_gradle_sdk_requirement(self.spec))
+        local = self.cwd / "android/local.properties"
+        local.write_text("flutter.sdk=/other/sdk\n")
+        self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+        local.unlink()
+        self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+        for version in (1, 3):
+            self.spec["tool_environment"]["v"] = version
+            self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+
+    def test_gradle_sdk_requirement_supports_standard_groovy_without_custom_logic(self):
+        plugin, jar = self.gradle_compatibility_fixture()
+        (self.cwd / "android/settings.gradle.kts").unlink()
+        (self.cwd / "android/settings.gradle").write_text('''
+pluginManagement {
+    def flutterSdkPath = {
+        def properties = new Properties()
+        file("local.properties").withInputStream { properties.load(it) }
+        def flutterSdkPath = properties.getProperty("flutter.sdk")
+        assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+        return flutterSdkPath
+    }()
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+    repositories { google() mavenCentral() gradlePluginPortal() }
+}
+plugins {
+    id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+    id "com.android.application" version "8.11.1" apply false
+    id "org.jetbrains.kotlin.android" version "2.2.20" apply false
+}
+include ":app"
+''')
+        self.assertEqual(setup.android_gradle_sdk_requirement(self.spec),
+                         {"gradle_version": "9.3.1", "project_root": str(plugin)})
+
+    def test_ambiguous_or_duplicate_gradle_versions_remain_unknown(self):
+        plugin, jar = self.gradle_compatibility_fixture()
+        other = jar.with_name("gradle-base-services-other.jar")
+        with zipfile.ZipFile(other, "w") as archive:
+            archive.writestr("org/gradle/build-receipt.properties", "versionNumber=8.14\n")
+        self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+        other.unlink()
+        with zipfile.ZipFile(jar, "w") as archive:
+            archive.writestr("org/gradle/build-receipt.properties", "versionNumber=9.3.1\nversionNumber=8.14\n")
+        self.assertIsNone(setup.android_gradle_sdk_requirement(self.spec))
+
+    def test_standard_settings_and_local_properties_are_bounded_regular_files(self):
+        self.gradle_compatibility_fixture()
+        for name in ("settings.gradle.kts", "local.properties"):
+            path = self.cwd / "android" / name
+            saved = path.with_suffix(path.suffix + ".saved")
+            path.rename(saved)
+            path.symlink_to(saved)
+            try:
+                with self.subTest(name=name), self.assertRaises(util.KanpilotError):
+                    setup.android_gradle_sdk_requirement(self.spec)
+            finally:
+                path.unlink()
+            path.write_bytes(b"x" * 65537)
+            with self.subTest(name=name, oversized=True), self.assertRaises(util.KanpilotError):
+                setup.android_gradle_sdk_requirement(self.spec)
+            path.unlink()
+            saved.rename(path)
+
+    def test_gradle_version_receipt_rejects_symlink_special_and_oversized_metadata(self):
+        plugin, jar = self.gradle_compatibility_fixture()
+        saved = jar.with_suffix(".saved")
+        jar.rename(saved)
+        jar.symlink_to(saved)
+        try:
+            with self.assertRaises(util.KanpilotError):
+                setup.android_gradle_sdk_requirement(self.spec)
+        finally:
+            jar.unlink()
+        os.mkfifo(jar)
+        try:
+            with self.assertRaises(util.KanpilotError):
+                setup.android_gradle_sdk_requirement(self.spec)
+        finally:
+            jar.unlink()
+        for size in (65537,):
+            with zipfile.ZipFile(jar, "w") as archive:
+                archive.writestr("org/gradle/build-receipt.properties", b"x" * size)
+            with self.assertRaises(util.KanpilotError):
+                setup.android_gradle_sdk_requirement(self.spec)
+        with zipfile.ZipFile(jar, "w") as archive:
+            entry = zipfile.ZipInfo("org/gradle/build-receipt.properties")
+            entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(entry, "versionNumber=9.3.1\n")
+        with self.assertRaises(util.KanpilotError):
+            setup.android_gradle_sdk_requirement(self.spec)
+        jar.write_bytes(b"x")
+        with jar.open("r+b") as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+        with self.assertRaises(util.KanpilotError):
+            setup.android_gradle_sdk_requirement(self.spec)
 
     def test_only_locked_hosted_packages_are_linked_and_metadata_is_private(self):
         package = self.hosted()

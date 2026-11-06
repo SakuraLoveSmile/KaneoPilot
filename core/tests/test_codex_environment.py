@@ -10,7 +10,9 @@ import socket
 import subprocess
 import unittest
 import urllib.error
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import test_codex_execution as execution_fixtures
@@ -18,6 +20,7 @@ import test_codex_execution as execution_fixtures
 from kanpilot import codex_environment as environment
 from kanpilot import codex_execution as adapter, codex_provider, codex_worker as worker
 from kanpilot import execution_contract, git_delivery, util
+from kanpilot import codex_tool_setup
 
 
 class CodexEnvironmentTests(unittest.TestCase):
@@ -823,7 +826,11 @@ class CodexEnvironmentTests(unittest.TestCase):
     def macos_environment(self):
         host_tmp = self.root / "system-temp"
         host_tmp.mkdir(exist_ok=True)
-        with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
+        # Mock this module's tool-platform view only. Mutating sys.platform on
+        # the shared sys module makes Linux worker PID checks load Darwin's
+        # libproc and fail before reaching the intended sandbox/UTI checks.
+        tool_sys = SimpleNamespace(platform="darwin", executable=environment.sys.executable)
+        with mock.patch.object(environment, "sys", tool_sys), mock.patch.object(
                 environment.os, "confstr", return_value=str(host_tmp), create=True):
             yield
 
@@ -1218,9 +1225,10 @@ class CodexEnvironmentTests(unittest.TestCase):
             with self.guards(), self.native_runs([subprocess.CompletedProcess([], 0, json.dumps(receipt), "")]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches") as seed:
                 self.assertEqual(worker.run_real(self.spec), 3)
             seed.assert_not_called()
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.kwargs["env"]["KANPILOT_PROBE_WORKSPACE_UTI"], "1")
             job = self.job()
+            self.assertIn("workspace 类型", job["detail"])
+            self.assertEqual(run.call_count, 1, job["detail"])
+            self.assertEqual(run.call_args.kwargs["env"]["KANPILOT_PROBE_WORKSPACE_UTI"], "1")
             self.assertEqual(job["status"], "failed")
             self.assertIsNone(job["session_id"])
             self.assertIn("设置→运行端→执行→Codex CLI", job["detail"])
@@ -1248,12 +1256,215 @@ class CodexEnvironmentTests(unittest.TestCase):
                     (self.run_dir / ("answer-" + util.sha256_text(pending["requestId"]) + ".json")).write_text(util.jdump(value))
             with self.guards(answer), self.native_runs(results) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}) as seed:
                 self.assertEqual(worker.run_real(self.spec), 3)
-            self.assertEqual(run.call_count, 3)
+            job = self.job()
+            self.assertIn("workspace 类型", job["detail"])
+            self.assertEqual(run.call_count, 3, job["detail"])
             self.assertEqual(seed.call_count, 1)
-            self.assertEqual(self.job()["session_id"], "thread-1")
-            self.assertIn("workspace 类型", self.job()["detail"])
+            self.assertEqual(job["session_id"], "thread-1")
             self.assertTrue((self.run_dir / "codex-final-1.json.argv").exists())
             self.assertFalse((self.run_dir / "codex-final-2.json.argv").exists())
+
+    def gradle_requirement(self, version="9.3.1"):
+        sdk = Path(self.spec["tool_environment"]["setup"]["flutter"]).parent.parent
+        return {"gradle_version": version, "project_root": str(sdk / "packages/flutter_tools/gradle")}
+
+    def test_gradle9_readonly_sdk_root_blocks_before_setup_and_model(self):
+        self.freeze_native()
+        self.persist_contract()
+        self.stub()
+        requirement = self.gradle_requirement()
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        denied = subprocess.CompletedProcess([], 0, json.dumps({"exists": True, "is_directory": True, "writable": False}), "")
+        with self.guards(), self.native_runs([basic, denied]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=requirement):
+            self.assertEqual(worker.run_real(self.spec), 3)
+        job = self.job()
+        self.assertIn("Gradle 9.3.1", job["detail"])
+        self.assertIn(requirement["project_root"], job["detail"])
+        self.assertIn("无沙箱", job["detail"])
+        self.assertIn("新轮次", job["detail"])
+        self.assertEqual(run.call_count, 2)
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(first[:first.index("--")], second[:second.index("--")])
+        self.assertEqual(second[second.index("--") + 1:], [environment.sys.executable, "-c", environment.GRADLE_SDK_WRITE_PROBE, requirement["project_root"]])
+        self.assertIsNone(job["session_id"])
+        self.assertFalse(list(self.run_dir.glob("codex-final-*.json.argv")))
+
+    def test_gradle_sdk_probe_validates_three_booleans_and_reports_missing_directory_accurately(self):
+        self.freeze_native()
+        requirement = self.gradle_requirement()
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        cases = [(dict(exists=False, is_directory=False, writable=False), "缺失或不是目录"),
+                 (dict(exists=True, is_directory=False, writable=True), "缺失或不是目录"),
+                 (dict(exists=1, is_directory=True, writable=True), "回执无效"),
+                 (dict(exists=True, writable=True), "回执无效")]
+        for data, message in cases:
+            probe = subprocess.CompletedProcess([], 0, json.dumps(data), "")
+            with self.subTest(data=data), self.native_runs([basic, probe]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=requirement):
+                with self.assertRaises(util.KanpilotError) as caught:
+                    environment.preflight(self.spec, {})
+            self.assertIn(message, caught.exception.message)
+            self.assertEqual(run.call_count, 2)
+            if message == "缺失或不是目录":
+                self.assertIn("Gradle 9.3.1", caught.exception.message)
+                self.assertNotIn("在受限沙箱中不可写", caught.exception.message)
+        for failure in (subprocess.CompletedProcess([], 1, "", "failed"),
+                        subprocess.CompletedProcess([], 0, "not JSON", ""),
+                        subprocess.TimeoutExpired("isolated probe", 20)):
+            with self.subTest(failure=type(failure).__name__), self.native_runs([basic, failure]), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=requirement):
+                with self.assertRaises(util.KanpilotError) as caught:
+                    environment.preflight(self.spec, {})
+            self.assertIn("Gradle 9.3.1", caught.exception.message)
+            self.assertIn(requirement["project_root"], caught.exception.message)
+            self.assertIn("新轮次", caught.exception.message)
+        allowed = dict(exists=True, is_directory=True, writable=True)
+        with self.native_runs([basic, subprocess.CompletedProcess([], 0, json.dumps(allowed), ""), subprocess.CompletedProcess([], 0, "ok", ""), subprocess.CompletedProcess([], 0, json.dumps(allowed), "")]), mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=requirement):
+            receipt = environment.preflight(self.spec, {})
+        self.assertEqual(receipt["android_gradle_sdk"], {**requirement, **allowed})
+
+    def test_old_unknown_custom_and_unrestricted_gradle_do_not_run_sdk_root_probe(self):
+        self.freeze_native()
+        # The helper separately proves old/unknown/custom cases return None.
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        prepared = subprocess.CompletedProcess([], 0, "ok", "")
+        with self.native_runs([basic, prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=None):
+            self.assertNotIn("android_gradle_sdk", environment.preflight(self.spec, {}))
+        self.assertEqual(run.call_count, 2)
+        self.spec["config"]["sandbox"] = "danger-full-access"
+        environment.freeze(self.spec)
+        with self.native_runs([prepared]) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}), mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement") as requirement:
+            self.assertNotIn("android_gradle_sdk", environment.preflight(self.spec, {}))
+            requirement.assert_not_called()
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("sandbox", run.call_args.args[0])
+        self.spec["config"]["sandbox"] = "workspace-write"
+        self.spec["tool_environment"] = environment._expected(self.spec)
+        basic = {"v": 1, "status": "passed", "checks": {name: True for name in environment.CHECKS}}
+        with self.native_runs([subprocess.CompletedProcess([], 0, json.dumps(basic), "")]) as run, mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement") as requirement:
+            self.assertNotIn("android_gradle_sdk", environment.preflight(self.spec, {}))
+            requirement.assert_not_called()
+        self.assertEqual(run.call_count, 1)
+
+    def test_gradle9_resume_rechecks_sdk_root_before_second_model(self):
+        self.freeze_native()
+        self.persist_contract()
+        self.stub("questions")
+        requirement = self.gradle_requirement()
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        allowed = subprocess.CompletedProcess([], 0, json.dumps({"exists": True, "is_directory": True, "writable": True}), "")
+        denied = subprocess.CompletedProcess([], 0, json.dumps({"exists": True, "is_directory": True, "writable": False}), "")
+        results = [basic, allowed, subprocess.CompletedProcess([], 0, "ok", ""), allowed, basic, denied]
+        def answer(command, payload, *args):
+            if command == "report-execution-question":
+                job = self.job()
+                pending = job["pending_input"]
+                value = {"scope_id": self.spec["scope_id"], "session_id": job["session_id"],
+                         "request_id": pending["requestId"], "tool_call_id": pending["toolCallId"],
+                         "answers": [["A"]], "operation_id": "answer-op"}
+                (self.run_dir / ("answer-" + util.sha256_text(pending["requestId"]) + ".json")).write_text(util.jdump(value))
+        with self.guards(answer), self.native_runs(results) as run, mock.patch("kanpilot.codex_tool_setup.seed_caches", return_value={}) as seed, mock.patch("kanpilot.codex_tool_setup.android_gradle_sdk_requirement", return_value=requirement):
+            self.assertEqual(worker.run_real(self.spec), 3)
+        self.assertEqual(run.call_count, 6)
+        self.assertEqual(seed.call_count, 2)
+        self.assertEqual(self.job()["session_id"], "thread-1")
+        self.assertIn("Gradle 9.3.1", self.job()["detail"])
+        self.assertTrue((self.run_dir / "codex-final-1.json.argv").exists())
+        self.assertFalse((self.run_dir / "codex-final-2.json.argv").exists())
+
+    def cold_gradle9_workspace(self):
+        sdk = self.freeze_native()
+        android = self.repo / "android"
+        wrapper = android / "gradle/wrapper"
+        wrapper.mkdir(parents=True)
+        (wrapper / "gradle-wrapper.properties").write_text(
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-all.zip\n")
+        # Matching is covered independently; this fixture tests the lifecycle
+        # when Flutter generates a genuinely ignored properties file.
+        settings = codex_tool_setup._FLUTTER_KOTLIN_SETTINGS.replace("{{agpVersion}}", "8.11.1").replace("{{kotlinVersion}}", "2.2.20")
+        (android / "settings.gradle.kts").write_text(settings)
+        with (self.repo / ".gitignore").open("a") as stream:
+            stream.write("android/local.properties\n")
+        cached = self.root / ".gradle/wrapper/dists/gradle-9.3.1-all/9ot9r568e8zfvvd4mn8rbu1j0"
+        runtime = cached / "gradle-9.3.1"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "bin/gradle").write_text("#!/bin/sh\n")
+        (runtime / "lib").mkdir()
+        (runtime / "lib/gradle-launcher-9.3.1.jar").write_bytes(b"synthetic runtime")
+        with zipfile.ZipFile(runtime / "lib/gradle-base-services-9.3.1.jar", "w") as archive:
+            archive.writestr("org/gradle/build-receipt.properties", "versionNumber=9.3.1\n")
+        (cached / "gradle-9.3.1-all.zip.ok").write_bytes(b"")
+        local = android / "local.properties"
+        self.assertFalse(local.exists())
+        subprocess.run(["git", "-C", str(self.repo), "check-ignore", "--quiet", "android/local.properties"], check=True)
+        return sdk, local
+
+    def test_cold_gradle9_generated_local_properties_blocks_before_any_model(self):
+        sdk, local = self.cold_gradle9_workspace()
+        self.persist_contract()
+        self.stub()
+        source_before = git_delivery.source_state_sha256(self.repo)
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        identified = []
+        real_requirement = codex_tool_setup.android_gradle_sdk_requirement
+        def requirement(spec):
+            result = real_requirement(spec)
+            identified.append(result)
+            return result
+        def native(argv, **kwargs):
+            if environment.GRADLE_SDK_WRITE_PROBE in argv:
+                self.assertTrue(local.exists())
+                return subprocess.CompletedProcess([], 0, json.dumps({"exists": True, "is_directory": True, "writable": False}), "")
+            if "pub" in argv:
+                self.assertFalse(local.exists())
+                local.write_text("flutter.sdk=" + str(sdk) + "\n")
+                return subprocess.CompletedProcess([], 0, "generated ignored local.properties", "")
+            self.assertIn(environment._PROBE, argv)
+            return basic
+        with self.guards(), self.native_runs(native) as run, mock.patch.object(codex_tool_setup, "android_gradle_sdk_requirement", side_effect=requirement):
+            self.assertEqual(worker.run_real(self.spec), 3)
+        self.assertEqual(identified, [None, self.gradle_requirement()])
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(git_delivery.source_state_sha256(self.repo), source_before)
+        self.assertIn("Gradle 9.3.1", self.job()["detail"])
+        self.assertNotIn("改动了源码或锁文件", self.job()["detail"])
+        self.assertIsNone(self.job()["session_id"])
+        self.assertFalse(list(self.run_dir.glob("codex-final-*.json.argv")))
+
+    def test_cold_gradle9_resume_rechecks_after_properties_are_regenerated(self):
+        sdk, local = self.cold_gradle9_workspace()
+        self.persist_contract()
+        self.stub("questions")
+        source_before = git_delivery.source_state_sha256(self.repo)
+        basic = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        probes = []
+        def native(argv, **kwargs):
+            if environment.GRADLE_SDK_WRITE_PROBE in argv:
+                self.assertTrue(local.exists())
+                probes.append(argv)
+                return subprocess.CompletedProcess([], 0, json.dumps({"exists": True, "is_directory": True, "writable": len(probes) == 1}), "")
+            if "pub" in argv:
+                self.assertFalse(local.exists())
+                local.write_text("flutter.sdk=" + str(sdk) + "\n")
+                return subprocess.CompletedProcess([], 0, "generated ignored local.properties", "")
+            self.assertIn(environment._PROBE, argv)
+            return basic
+        def answer(command, payload, *args):
+            if command == "report-execution-question":
+                local.unlink()
+                job = self.job()
+                pending = job["pending_input"]
+                value = {"scope_id": self.spec["scope_id"], "session_id": job["session_id"],
+                         "request_id": pending["requestId"], "tool_call_id": pending["toolCallId"],
+                         "answers": [["A"]], "operation_id": "answer-op"}
+                (self.run_dir / ("answer-" + util.sha256_text(pending["requestId"]) + ".json")).write_text(util.jdump(value))
+        with self.guards(answer), self.native_runs(native) as run:
+            self.assertEqual(worker.run_real(self.spec), 3)
+        self.assertEqual(run.call_count, 6)
+        self.assertEqual(len(probes), 2)
+        self.assertEqual(git_delivery.source_state_sha256(self.repo), source_before)
+        self.assertIn("Gradle 9.3.1", self.job()["detail"])
+        self.assertEqual(self.job()["session_id"], "thread-1")
+        self.assertTrue((self.run_dir / "codex-final-1.json.argv").exists())
+        self.assertFalse((self.run_dir / "codex-final-2.json.argv").exists())
 
 
 if __name__ == "__main__":

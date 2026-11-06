@@ -41,7 +41,7 @@ BOT_DETECTOR_SIGNALS = (
 GENERATED_PACKAGE = "macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
 GENERATED_PATHS = (
     ".dart_tool", "build", ".flutter-plugins", ".flutter-plugins-dependencies",
-    "macos/Flutter/ephemeral", "macos/Pods", "android/.gradle",
+    "macos/Flutter/ephemeral", "macos/Pods", "android/.gradle", "android/local.properties",
 )
 
 
@@ -133,22 +133,60 @@ def _log_tail(path, limit=12000):
         return stream.read().decode("utf-8", errors="replace")
 
 
+def freeze_timeout_log(path, evidence, limit=4 * 1024 * 1024):
+    """Detach the inherited log inode, then hash only a bounded snapshot."""
+    live = evidence.parent / "unconfirmed-live-logs"
+    require(not live.is_symlink(), "Unconfirmed log directory is a symlink")
+    live.mkdir(exist_ok=True)
+    raw = live / path.name
+    require(not raw.exists() and not raw.is_symlink(), "Unconfirmed raw log already exists")
+    path.rename(raw)
+    with raw.open("rb") as source:
+        observed = os.fstat(source.fileno()).st_size
+        offset = max(0, observed - limit)
+        source.seek(offset)
+        snapshot = source.read(min(observed, limit))
+    with path.open("xb") as target:
+        target.write(snapshot)
+    return {"kind": "bounded_tail_snapshot", "max_bytes": limit,
+            "raw_bytes_observed": observed, "snapshot_bytes": len(snapshot),
+            "truncated": offset > 0, "raw_path": str(raw.relative_to(evidence.parent)),
+            "raw_may_still_be_written": True}
+
+
 def run(argv, *, cwd, env, evidence, label, timeout=900, check=True, separate_stderr=False):
     """Stream native output to evidence files; never buffer full build output."""
     print("Starting " + label, flush=True)
     log = evidence / (label + ".log")
     error_log = evidence / (label + ".stderr.log") if separate_stderr else None
+    timeout_error = None
     with contextlib.ExitStack() as streams:
         output = streams.enter_context(log.open("w", encoding="utf-8"))
         errors = (streams.enter_context(error_log.open("w", encoding="utf-8"))
                   if error_log else subprocess.STDOUT)
-        result = subprocess.run(argv, cwd=cwd, env=env, stdout=output,
-                                stderr=errors, text=True, timeout=timeout)
-    record = {"argv": [str(arg) for arg in argv], "exit_code": result.returncode,
-              "log": log.name, "log_sha256": sha256(log)}
+        try:
+            result = subprocess.run(argv, cwd=cwd, env=env, stdout=output,
+                                    stderr=errors, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            timeout_error = exc
+    snapshots = {}
+    if timeout_error:
+        # ExitStack has closed the parent's streams. Descendants may still
+        # write their inherited descriptors, which now follow the moved inode
+        # outside uploaded evidence rather than changing these new snapshots.
+        snapshots["log_snapshot"] = freeze_timeout_log(log, evidence)
+        if error_log:
+            snapshots["stderr_snapshot"] = freeze_timeout_log(error_log, evidence)
+    record = {"argv": [str(arg) for arg in argv], "exit_code": None if timeout_error else result.returncode,
+              "log": log.name, "log_sha256": sha256(log), **snapshots}
+    if timeout_error:
+        record.update(timed_out=True, timeout_seconds=timeout, descendant_cleanup="unconfirmed")
     if error_log:
         record.update(stderr_log=error_log.name, stderr_sha256=sha256(error_log))
     write_json(evidence / (label + ".json"), record)
+    if timeout_error:
+        print("Timed out " + label + "; shared fixture resources cannot be reused", flush=True)
+        raise timeout_error
     print("Finished " + label + ": exit " + str(result.returncode), flush=True)
     if result.returncode:
         print(_log_tail(log), file=sys.stderr)
@@ -278,6 +316,7 @@ def build_fixture(flutter, root, evidence, env):
     commit_fixture(app)
     reset_generated(app)
     require(not (app / GENERATED_PACKAGE).exists(), "Platform fixture was not reset")
+    require(not (app / "android/local.properties").exists(), "Android fixture retained warm local.properties")
     return app
 
 
@@ -301,12 +340,14 @@ def native_argv(environment, constants, spec, command, *, log_denials=False):
     return argv
 
 
-def verification_commands(flutter, *, macos=True):
+def verification_commands(flutter, *, macos=True, android=True):
     binary = shlex.quote(str(flutter))
     commands = [binary + " analyze --no-pub", binary + " test --no-pub"]
     if macos:
         commands.append("LANG=en_US.UTF-8 " + binary + " build macos --debug --no-pub")
-    return [*commands, binary + " build apk --debug --no-pub"]
+    if android:
+        commands.append(binary + " build apk --debug --no-pub")
+    return commands
 
 
 def reset_sdk_plugin_generated(flutter):
@@ -322,8 +363,8 @@ def reset_sdk_plugin_generated(flutter):
 
 
 def make_spec(app, flutter, plan, adapter, environment, contract, util, *, suffix,
-              sandbox="workspace-write", macos=True):
-    commands = verification_commands(flutter, macos=macos)
+              sandbox="workspace-write", macos=True, android=True, commands=None):
+    commands = commands if commands is not None else verification_commands(flutter, macos=macos, android=android)
     spec = {"v": 1, "backend": "codex", "cwd": str(app), "repository": str(app),
             "run_id": "fixture-" + suffix + "-" + uuid.uuid4().hex,
             "task_id": "fixture-codex-platforms", "request_id": "fixture-request",
@@ -350,10 +391,17 @@ def verify_native(spec, environment, constants, contract, child_env, evidence, *
         name = label + "-verify-" + str(index)
         argv = native_argv(environment, constants, spec,
                            without_ci_signals(["/bin/sh", "-c", command]), log_denials=True)
-        run(argv, cwd=spec["cwd"], env=child_env, evidence=evidence, label=name,
-            timeout=1800, check=False, separate_stderr=True)
+        try:
+            run(argv, cwd=spec["cwd"], env=child_env, evidence=evidence, label=name,
+                timeout=1800, check=False, separate_stderr=True)
+        except subprocess.TimeoutExpired:
+            record = json.loads((evidence / (name + ".json")).read_text(encoding="utf-8"))
+            results.append({"command": command, **record})
+            write_json(evidence / (label + "-native-results.json"), results)
+            raise
         record = json.loads((evidence / (name + ".json")).read_text(encoding="utf-8"))
         results.append({"command": command, **record})
+        write_json(evidence / (label + "-native-results.json"), results)
     # Store original outcomes before running any diagnostics or asserting.
     write_json(evidence / (label + "-native-results.json"), results)
     for index, item in enumerate(results, 1):
@@ -362,13 +410,43 @@ def verify_native(spec, environment, constants, contract, child_env, evidence, *
         argv = native_argv(environment, constants, spec,
                            without_ci_signals(["/bin/sh", "-c", item["command"] + " --verbose"]),
                            log_denials=True)
-        try:
-            run(argv, cwd=spec["cwd"], env=child_env, evidence=evidence,
-                label=label + "-diagnostic-verbose-" + str(index), timeout=300, check=False)
-        except subprocess.TimeoutExpired:
-            pass  # The original command's nonzero exit still determines verdict.
+        run(argv, cwd=spec["cwd"], env=child_env, evidence=evidence,
+            label=label + "-diagnostic-verbose-" + str(index), timeout=300, check=False)
     require(all(item["exit_code"] == 0 for item in results), label + " original native commands failed")
     return results
+
+
+@contextlib.contextmanager
+def mode_attempt(report, name, evidence):
+    """Preserve a mode's failure while allowing the other mode to run."""
+    report[name] = {"status": "failed", "model_calls": 0}
+    try:
+        yield
+    except Exception as exc:
+        result = report[name]
+        result.update(status="failed", error=str(exc), error_type=type(exc).__name__)
+        if isinstance(exc, subprocess.TimeoutExpired):
+            result["shared_resource_reuse"] = "blocked_descendant_cleanup_unconfirmed"
+        native_results = evidence / (name + "-native-results.json")
+        if native_results.is_file():
+            result["native_commands"] = json.loads(native_results.read_text(encoding="utf-8"))
+        if name == "restricted":
+            for child, label in (("restricted_android", "restricted-android"), ("restricted_macos", "restricted-macos")):
+                records = evidence / (label + "-native-results.json")
+                if child in report and records.is_file():
+                    report[child]["native_commands"] = json.loads(records.read_text(encoding="utf-8"))
+                    report[child]["native_status"] = ("passed" if all(
+                        item["exit_code"] == 0 for item in report[child]["native_commands"]) else "failed")
+        write_json(evidence / (name + "-failure.json"), result)
+        traceback.print_exc()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise  # subprocess.run cannot confirm that every descendant stopped.
+
+
+def require_modes_passed(report):
+    failures = [name for name in ("restricted", "unrestricted")
+                if report.get(name, {}).get("status") != "passed"]
+    require(not failures, "Native execution mode acceptance failed: " + ", ".join(failures))
 
 
 def launcher_evidence(spec, adapter, evidence):
@@ -406,6 +484,46 @@ def restricted_macos_preflight(spec, environment, base, uti, util, evidence):
                 "Restricted macOS preflight disagrees with the UTI probe")
         write_json(evidence / "restricted-macos-preflight.json", receipt)
         result["status"] = "supported"
+    return result
+
+
+def restricted_android_preflight(spec, environment, base, requirement, probe, util, evidence,
+                                 *, label="restricted-android", capability=None):
+    result = {"status": "failed", "model_calls": 0,
+              "initial_gradle_sdk_requirement": requirement,
+              "native_execution_performed": False, "native_status": "not_run", "native_commands": []}
+
+    def refresh():
+        actual, actual_probe = capability() if capability else (requirement, probe)
+        if actual is not None:
+            require(type(actual_probe) is dict and set(actual_probe) == {"exists", "is_directory", "writable"}
+                    and all(type(value) is bool for value in actual_probe.values()), "Android SDK capability probe is invalid")
+        result.update(gradle_sdk_requirement=actual, sdk_write_probe=actual_probe)
+        denied = actual is not None and actual_probe == {"exists": True, "is_directory": True, "writable": False}
+        return actual, actual_probe, denied
+
+    try:
+        receipt = environment.preflight(spec, base)
+    except util.KanpilotError as exc:
+        # Offline setup may create local.properties. Read the real helper and
+        # probe again after production preflight, including its failure path.
+        actual, actual_probe, blocked = refresh()
+        require(blocked and exc.code == "codex_environment_unavailable"
+                and all(text in str(exc) for text in
+                        (actual["gradle_version"], actual["project_root"], "SDK", "设置", "无沙箱", "新轮次")),
+                "Restricted Android did not fail with its specific Gradle SDK/settings explanation")
+        result.update(status="blocked", code=exc.code, detail=util.redact(str(exc)))
+        write_json(evidence / (label + "-preflight.json"), result)
+    else:
+        actual, actual_probe, blocked = refresh()
+        require(not blocked and receipt["status"] == "passed",
+                "Restricted Android preflight disagrees with the same-profile SDK write probe")
+        if actual is not None:
+            expected = {**actual, **actual_probe}
+            require(receipt.get("android_gradle_sdk") == expected,
+                    "Android preflight receipt does not bind its actual Gradle version and SDK capability")
+        result.update(status="supported", preflight=receipt)
+        write_json(evidence / (label + "-preflight.json"), receipt)
     return result
 
 
@@ -489,7 +607,7 @@ def validate(args):
         # Import only after the cloud guard and isolated cache environment exist.
         sys.path.insert(0, str(REPOSITORY / "core"))
         from kanpilot import codex_environment as environment, codex_execution as adapter
-        from kanpilot import constants, execution_contract as contract, git_delivery, util
+        from kanpilot import constants, codex_tool_setup, execution_contract as contract, git_delivery, util
         plan = evidence / "frozen-plan.md"
         plan.write_text("Disposable native platform verification fixture.\n", encoding="utf-8")
         previous = dict(os.environ)
@@ -498,182 +616,248 @@ def validate(args):
             base = restricted_environment(env)
             before = git_delivery.source_state_sha256(app)
             lock_before = sha256(app / "pubspec.lock")
-            # Probe the exact same OS API used by production preflight, both
-            # outside and inside the selected restricted policy.
-            macos_spec = make_spec(app, flutter, plan, adapter, environment, contract, util,
-                                   suffix="restricted-macos")
-            write_json(evidence / "restricted-macos-spec.json", macos_spec)
-            uti_command = [sys.executable, "-c", environment.MACOS_WORKSPACE_UTI_PROBE
-                           + "\nimport json; print(json.dumps({'workspace_uti': workspace_uti()}))"]
-            uti = {}
-            for label, argv in (("outside", uti_command),
-                                ("inside", sandbox_argv(environment, constants, macos_spec, uti_command))):
-                output = run(argv, cwd=app, env=environment.child_env(macos_spec, base), evidence=evidence,
-                             label="workspace-uti-" + label, separate_stderr=True)
-                uti[label] = json.loads(output.read_text(encoding="utf-8"))
-            macos_result = restricted_macos_preflight(macos_spec, environment, base, uti, util, evidence)
-            macos_result["spec_sha256"] = sha256(evidence / "restricted-macos-spec.json")
-            report["restricted_macos"] = macos_result
-            if macos_result["status"] == "supported":
-                macos_result["native_commands"] = verify_native(
-                    macos_spec, environment, constants, contract, environment.child_env(macos_spec, base),
-                    evidence, label="restricted-macos")
+            with mode_attempt(report, "restricted", evidence):
+                # Probe the exact same OS API used by production preflight, both
+                # outside and inside the selected restricted policy.
+                macos_spec = make_spec(app, flutter, plan, adapter, environment, contract, util,
+                                       suffix="restricted-macos", commands=[verification_commands(flutter)[2]])
+                write_json(evidence / "restricted-macos-spec.json", macos_spec)
+                uti_command = [sys.executable, "-c", environment.MACOS_WORKSPACE_UTI_PROBE
+                               + "\nimport json; print(json.dumps({'workspace_uti': workspace_uti()}))"]
+                uti = {}
+                for label, argv in (("outside", uti_command),
+                                    ("inside", sandbox_argv(environment, constants, macos_spec, uti_command))):
+                    output = run(argv, cwd=app, env=environment.child_env(macos_spec, base), evidence=evidence,
+                                 label="workspace-uti-" + label, separate_stderr=True)
+                    uti[label] = json.loads(output.read_text(encoding="utf-8"))
+                macos_result = restricted_macos_preflight(macos_spec, environment, base, uti, util, evidence)
+                macos_result["spec_sha256"] = sha256(evidence / "restricted-macos-spec.json")
+                report["restricted_macos"] = macos_result
+                if macos_result["status"] == "supported":
+                    macos_result["native_commands"] = verify_native(
+                        macos_spec, environment, constants, contract, environment.child_env(macos_spec, base),
+                        evidence, label="restricted-macos")
+                    reset_generated(app)
+                report["checks"].append("restricted_macos_uti_matches_preflight_without_fallback")
+
+                # A separate default-mode run validates the repair which does not
+                # need Xcode's unsupported type registry access.
+                reset_sdk_plugin_generated(flutter)
+                spec = make_spec(app, flutter, plan, adapter, environment, contract, util,
+                                 suffix="restricted", macos=False, android=False)
+                write_json(evidence / "restricted-spec.json", spec)
+                restricted = {"status": "failed", "spec": "restricted-spec.json",
+                              "spec_sha256": sha256(evidence / "restricted-spec.json"),
+                              "execution_kind": "codex_sandbox", "model_calls": 0,
+                              "source_snapshot_before": git_delivery.source_state_sha256(app)}
+                report["restricted"] = restricted
+                private = spec["tool_environment"]["environment"]
+                private_config = Path(private["XDG_CONFIG_HOME"])
+                private_analyzer = Path(private["ANALYZER_STATE_LOCATION_OVERRIDE"])
+                require(not private_config.exists() and not private_analyzer.exists(), "Restricted tool state is not cold")
+                child_env = environment.child_env(spec, base)
+                bot_log = run(sandbox_argv(environment, constants, spec, without_ci_signals(
+                    [sys.executable, "-c", _BOT_ENV_PROBE, json.dumps(BOT_DETECTOR_SIGNALS)])),
+                    cwd=app, env=child_env, evidence=evidence, label="cold-bot-environment", separate_stderr=True)
+                restricted["bot_environment"] = json.loads(bot_log.read_text(encoding="utf-8"))
+                require(not private_config.exists(), "Environment probe warmed Flutter configuration")
+                receipt = environment.preflight(spec, base)
+                write_json(evidence / "restricted-cold-preflight.json", receipt)
+                require(receipt["status"] == "passed", "Restricted preparation failed")
+                require(sha256(app / "pubspec.lock") == lock_before
+                        and git_delivery.source_state_sha256(app) == before, "Preparation changed fixture source/lock")
+                # Native Android has its own APK-only contract. Seed only its
+                # private caches, then compare the production admission result
+                # with a real SDK capability probe under that same profile.
+                android_spec = make_spec(app, flutter, plan, adapter, environment, contract, util,
+                                         suffix="restricted-android", commands=[verification_commands(flutter)[-1]])
+                write_json(evidence / "restricted-android-spec.json", android_spec)
+                cache_seed = codex_tool_setup.seed_caches(android_spec)
+                requirement = codex_tool_setup.android_gradle_sdk_requirement(android_spec)
+                local_properties = app / "android/local.properties"
+                require(not local_properties.exists(), "Cold Android preflight retained warm local.properties")
+                android_private = android_spec["tool_environment"]["environment"]
+                android_env = environment.child_env(android_spec, base)
+
+                def android_capability(label="restricted-android-sdk-write-probe"):
+                    actual = codex_tool_setup.android_gradle_sdk_requirement(android_spec)
+                    if actual is None:
+                        return None, None
+                    output = run(sandbox_argv(environment, constants, android_spec,
+                        [sys.executable, "-c", environment.GRADLE_SDK_WRITE_PROBE, actual["project_root"]]),
+                        cwd=app, env=android_env, evidence=evidence, label=label, separate_stderr=True)
+                    return actual, json.loads(output.read_text(encoding="utf-8"))
+
+                android_result = restricted_android_preflight(android_spec, environment, base,
+                    requirement, None, util, evidence, capability=android_capability)
+                require(local_properties.is_file(), "Offline preparation did not generate Android local.properties")
+                android_result.update(local_properties_before_preflight={"exists": False},
+                                      local_properties_after_preflight={"exists": True, "sha256": sha256(local_properties)})
+                requirement = android_result["gradle_sdk_requirement"]
+                sdk_probe = android_result["sdk_write_probe"]
+                android_result.update(spec="restricted-android-spec.json",
+                                      spec_sha256=sha256(evidence / "restricted-android-spec.json"),
+                                      cache_seed=cache_seed)
+                report["restricted_android"] = android_result
+                if android_result["status"] == "supported":
+                    android_result["native_execution_performed"] = True
+                    android_result["native_status"] = "failed"
+                    android_result["native_commands"] = verify_native(android_spec, environment, constants, contract,
+                        android_env, evidence, label="restricted-android")
+                    android_result["native_status"] = "passed"
+                else:
+                    # Analysis-only fixture preparation never admits the blocked
+                    # native execution or invokes a model. Keep its own receipt.
+                    preparation = codex_tool_setup.setup_argv(android_spec)
+                    run(sandbox_argv(environment, constants, android_spec, without_ci_signals(preparation)),
+                        cwd=app, env=android_env, evidence=evidence, label="restricted-analysis-offline-preparation",
+                        timeout=180, separate_stderr=True)
+                    android_result["analysis_only_preparation"] = json.loads(
+                        (evidence / "restricted-analysis-offline-preparation.json").read_text(encoding="utf-8"))
+                require((app / ".dart_tool/package_config.json").is_file(), "Analysis fixture dependencies were not prepared")
+                require(sha256(app / "pubspec.lock") == lock_before
+                        and git_delivery.source_state_sha256(app) == before, "Offline analysis preparation changed source/lock")
+                private_pub = Path(android_private["PUB_CACHE"])
+                require(any((private_pub / "hosted").glob("*/collection-1.19.1"))
+                        and any((private_pub / "git").glob("fixture_git-*")), "Private locked dependency cache is incomplete")
+                restricted["private_dependency_cache"] = {"hosted_collection": True, "git_checkout": True,
+                                                          "spec": "restricted-android-spec.json"}
+                require(android_private["GRADLE_RO_DEP_CACHE"] == str(Path(env["GRADLE_USER_HOME"]) / "caches"),
+                        "Read-only Gradle cache must be its caches base, without a duplicate modules-2")
+                restricted["gradle_ro_dep_cache"] = android_private["GRADLE_RO_DEP_CACHE"]
+                child_env = environment.child_env(spec, dict(base, PUB_CACHE=str(private_pub)))
+                sentinel = root / "readonly-sentinel"
+                sentinel.write_text("unchanged\n", encoding="utf-8")
+                host_config = Path.home() / ".config/kanpilot-codex-platform-fixture"
+                host_config.mkdir(parents=True, exist_ok=True)
+                host_sentinel = host_config / "sentinel"
+                host_sentinel.write_text("unchanged\n", encoding="utf-8")
+                host_analyzer = Path.home() / ".dartServer/kanpilot-fixture-sentinel"
+                host_analyzer.parent.mkdir(parents=True, exist_ok=True)
+                host_analyzer.write_text("unchanged\n", encoding="utf-8")
+                plugin = flutter.parent.parent / "packages/flutter_tools/gradle"
+                targets = {"sdk_source_denied": str(flutter.parent.parent / "packages/flutter_tools/lib/src/base/bot_detector.dart"),
+                           "sdk_plugin_source_denied": str(plugin / "src/main/kotlin/FlutterPlugin.kt"),
+                           "sdk_plugin_script_denied": str(plugin / "build.gradle.kts"),
+                           "host_config_denied": str(host_sentinel), "host_analyzer_denied": str(host_analyzer),
+                           "other_directory_denied": str(sentinel)}
+                output = run(sandbox_argv(environment, constants, android_spec, without_ci_signals(
+                    [sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])), cwd=app, env=android_env,
+                    evidence=evidence, label="restricted-denials", separate_stderr=True)
+                restricted["permission_checks"] = json.loads(output.read_text(encoding="utf-8"))
+                java_probes = {}
+                for mode in ("default", "ipv4"):
+                    remove = ["-u", "JDK_JAVA_OPTIONS"] if mode == "default" else []
+                    command = ["/usr/bin/env", *remove, str(java), "-cp", str(java_classes), "LoopbackProbe"]
+                    label = "java-loopback-" + mode
+                    output = run(sandbox_argv(environment, constants, android_spec, without_ci_signals(command)),
+                                 cwd=app, env=android_env, evidence=evidence, label=label, separate_stderr=True,
+                                 timeout=30, check=False)
+                    record = json.loads((evidence / (label + ".json")).read_text())
+                    try:
+                        probe_result = json.loads(output.read_text())
+                    except ValueError:
+                        probe_result = None
+                    java_probes[mode] = {"exit_code": record["exit_code"], "result": probe_result}
+                restricted["java_loopback"] = java_probes
+                require(java_probes["ipv4"] == {"exit_code": 0, "result": {"passed": True, "prefer_ipv4": True}},
+                        "Frozen Java IPv4 loopback roundtrip failed")
+                restricted["native_commands"] = verify_native(spec, environment, constants, contract,
+                                                               child_env, evidence, label="restricted")
+                gradle_fixture = app / ".pi/kanpilot/gradle-cache-diagnostic"
+                gradle_fixture.mkdir(parents=True)
+                (gradle_fixture / "settings.gradle.kts").write_text('rootProject.name = "cache-diagnostic"\n', encoding="utf-8")
+                # Gradle exposes activation at info level. This is diagnostic cache
+                # evidence only; it cannot replace any original verify command.
+                gradle_log = run(sandbox_argv(environment, constants, android_spec, without_ci_signals(
+                    ["/bin/sh", "-c", "cd " + shlex.quote(str(gradle_fixture))
+                     + " && " + shlex.quote(str(app / "android/gradlew")) + " --offline --no-daemon --info help"])),
+                    cwd=app / "android", env=android_env, evidence=evidence, label="restricted-gradle-cache-info", timeout=300)
+                cache_text = gradle_log.read_text(encoding="utf-8")
+                require(re.search(r"read.only dependency cache.*enabled", cache_text, re.IGNORECASE),
+                        "Gradle did not report its read-only dependency cache enabled")
+                restricted["gradle_ro_cache_enabled"] = True
+                analyzer_uuid = private_analyzer / ".instrumentation/uuid.txt"
+                require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(), "Private analyzer identity missing")
+                require(host_analyzer.read_text() == "unchanged\n", "Host analyzer sentinel changed")
+                restricted["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_write_denied": True}
+                no_bot_config = private_config.parent / "no-bot-config"
+                require(not no_bot_config.exists(), "No-BOT counterexample is already warm")
+                no_bot_config.mkdir()
+                no_bot_argv = native_argv(environment, constants, spec, without_ci_signals(
+                    ["XDG_CONFIG_HOME=" + str(no_bot_config), str(flutter), "test", "--no-pub", "--verbose"],
+                    remove_bot=True), log_denials=True)
+                output = run(no_bot_argv, cwd=app, env=child_env, evidence=evidence,
+                             label="cold-without-bot", timeout=900, check=False)
+                denied = metadata_denials(output.read_text(encoding="utf-8"))
+                require(denied, "No-BOT counterexample lacks a specific 169.254.169.254 denial")
+                restricted["without_bot_metadata_denials"] = denied
+                resumed = environment.preflight(spec, base)
+                write_json(evidence / "restricted-resume-preflight.json", resumed)
+                require(resumed["status"] == "passed", "Restricted analysis resume preflight failed")
+                restricted["resume_native_commands"] = verify_native(spec, environment, constants, contract,
+                    child_env, evidence, label="restricted-resume")
+                restricted["resume_reprepared"] = False
+                restricted["resume_rechecked"] = True
+                android_resume = restricted_android_preflight(android_spec, environment, base,
+                    requirement, sdk_probe, util, evidence, label="restricted-android-resume",
+                    capability=lambda: android_capability("restricted-android-resume-sdk-write-probe"))
+                require(android_resume["status"] == android_result["status"], "Android resume changed capability admission")
+                android_result["resume_preflight"] = android_resume
+                restricted["source_snapshot_after"] = git_delivery.source_state_sha256(app)
+                require(restricted["source_snapshot_after"] == before, "Restricted verification changed source")
+                restricted["status"] = "passed"
+                report["checks"].append("restricted_two_frozen_commands_and_native_capability_admission_passed")
+
+            with mode_attempt(report, "unrestricted", evidence):
                 reset_generated(app)
-            report["checks"].append("restricted_macos_uti_matches_preflight_without_fallback")
-
-            # A separate default-mode run validates the repair which does not
-            # need Xcode's unsupported type registry access.
-            reset_sdk_plugin_generated(flutter)
-            spec = make_spec(app, flutter, plan, adapter, environment, contract, util,
-                             suffix="restricted", macos=False)
-            write_json(evidence / "restricted-spec.json", spec)
-            restricted = {"status": "failed", "spec": "restricted-spec.json",
-                          "spec_sha256": sha256(evidence / "restricted-spec.json"),
-                          "execution_kind": "codex_sandbox", "model_calls": 0,
-                          "source_snapshot_before": git_delivery.source_state_sha256(app)}
-            report["restricted"] = restricted
-            private = spec["tool_environment"]["environment"]
-            private_config = Path(private["XDG_CONFIG_HOME"])
-            private_analyzer = Path(private["ANALYZER_STATE_LOCATION_OVERRIDE"])
-            require(not private_config.exists() and not private_analyzer.exists(), "Restricted tool state is not cold")
-            child_env = environment.child_env(spec, base)
-            bot_log = run(sandbox_argv(environment, constants, spec, without_ci_signals(
-                [sys.executable, "-c", _BOT_ENV_PROBE, json.dumps(BOT_DETECTOR_SIGNALS)])),
-                cwd=app, env=child_env, evidence=evidence, label="cold-bot-environment", separate_stderr=True)
-            restricted["bot_environment"] = json.loads(bot_log.read_text(encoding="utf-8"))
-            require(not private_config.exists(), "Environment probe warmed Flutter configuration")
-            receipt = environment.preflight(spec, base)
-            write_json(evidence / "restricted-cold-preflight.json", receipt)
-            require(receipt["status"] == "passed", "Restricted preparation failed")
-            require(sha256(app / "pubspec.lock") == lock_before
-                    and git_delivery.source_state_sha256(app) == before, "Preparation changed fixture source/lock")
-            private_pub = Path(private["PUB_CACHE"])
-            require(any((private_pub / "hosted").glob("*/collection-1.19.1"))
-                    and any((private_pub / "git").glob("fixture_git-*")), "Private locked dependency cache is incomplete")
-            restricted["private_dependency_cache"] = {"hosted_collection": True, "git_checkout": True}
-            require(private["GRADLE_RO_DEP_CACHE"] == str(Path(env["GRADLE_USER_HOME"]) / "caches"),
-                    "Read-only Gradle cache must be its caches base, without a duplicate modules-2")
-            restricted["gradle_ro_dep_cache"] = private["GRADLE_RO_DEP_CACHE"]
-            child_env = environment.child_env(spec, base)
-            sentinel = root / "readonly-sentinel"
-            sentinel.write_text("unchanged\n", encoding="utf-8")
-            host_config = Path.home() / ".config/kanpilot-codex-platform-fixture"
-            host_config.mkdir(parents=True, exist_ok=True)
-            host_sentinel = host_config / "sentinel"
-            host_sentinel.write_text("unchanged\n", encoding="utf-8")
-            host_analyzer = Path.home() / ".dartServer/kanpilot-fixture-sentinel"
-            host_analyzer.parent.mkdir(parents=True, exist_ok=True)
-            host_analyzer.write_text("unchanged\n", encoding="utf-8")
-            plugin = flutter.parent.parent / "packages/flutter_tools/gradle"
-            targets = {"sdk_source_denied": str(flutter.parent.parent / "packages/flutter_tools/lib/src/base/bot_detector.dart"),
-                       "sdk_plugin_source_denied": str(plugin / "src/main/kotlin/FlutterPlugin.kt"),
-                       "sdk_plugin_script_denied": str(plugin / "build.gradle.kts"),
-                       "host_config_denied": str(host_sentinel), "host_analyzer_denied": str(host_analyzer),
-                       "other_directory_denied": str(sentinel)}
-            output = run(sandbox_argv(environment, constants, spec, without_ci_signals(
-                [sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])), cwd=app, env=child_env,
-                evidence=evidence, label="restricted-denials", separate_stderr=True)
-            restricted["permission_checks"] = json.loads(output.read_text(encoding="utf-8"))
-            java_probes = {}
-            for mode in ("default", "ipv4"):
-                remove = ["-u", "JDK_JAVA_OPTIONS"] if mode == "default" else []
-                command = ["/usr/bin/env", *remove, str(java), "-cp", str(java_classes), "LoopbackProbe"]
-                label = "java-loopback-" + mode
-                output = run(sandbox_argv(environment, constants, spec, without_ci_signals(command)),
-                             cwd=app, env=child_env, evidence=evidence, label=label, separate_stderr=True,
-                             timeout=30, check=False)
-                record = json.loads((evidence / (label + ".json")).read_text())
-                try:
-                    probe_result = json.loads(output.read_text())
-                except ValueError:
-                    probe_result = None
-                java_probes[mode] = {"exit_code": record["exit_code"], "result": probe_result}
-            restricted["java_loopback"] = java_probes
-            require(java_probes["ipv4"] == {"exit_code": 0, "result": {"passed": True, "prefer_ipv4": True}},
-                    "Frozen Java IPv4 loopback roundtrip failed")
-            restricted["native_commands"] = verify_native(spec, environment, constants, contract,
-                                                           child_env, evidence, label="restricted")
-            # Gradle exposes activation at info level. This is diagnostic cache
-            # evidence only; it cannot replace any original verify command.
-            gradle_log = run(sandbox_argv(environment, constants, spec, without_ci_signals(
-                ["/bin/sh", "-c", "cd " + shlex.quote(str(app / "android"))
-                 + " && ./gradlew --offline --no-daemon --info help"])),
-                cwd=app / "android", env=child_env, evidence=evidence, label="restricted-gradle-cache-info", timeout=300)
-            cache_text = gradle_log.read_text(encoding="utf-8")
-            require(re.search(r"read.only dependency cache.*enabled", cache_text, re.IGNORECASE),
-                    "Gradle did not report its read-only dependency cache enabled")
-            restricted["gradle_ro_cache_enabled"] = True
-            analyzer_uuid = private_analyzer / ".instrumentation/uuid.txt"
-            require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(), "Private analyzer identity missing")
-            require(host_analyzer.read_text() == "unchanged\n", "Host analyzer sentinel changed")
-            restricted["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_write_denied": True}
-            no_bot_config = private_config.parent / "no-bot-config"
-            require(not no_bot_config.exists(), "No-BOT counterexample is already warm")
-            no_bot_config.mkdir()
-            no_bot_argv = native_argv(environment, constants, spec, without_ci_signals(
-                ["XDG_CONFIG_HOME=" + str(no_bot_config), str(flutter), "test", "--no-pub", "--verbose"],
-                remove_bot=True), log_denials=True)
-            output = run(no_bot_argv, cwd=app, env=child_env, evidence=evidence,
-                         label="cold-without-bot", timeout=900, check=False)
-            denied = metadata_denials(output.read_text(encoding="utf-8"))
-            require(denied, "No-BOT counterexample lacks a specific 169.254.169.254 denial")
-            restricted["without_bot_metadata_denials"] = denied
-            (app / ".dart_tool/package_config.json").unlink()
-            resumed = environment.preflight(spec, base)
-            write_json(evidence / "restricted-resume-preflight.json", resumed)
-            require(resumed["status"] == "passed" and (app / ".dart_tool/package_config.json").is_file(),
-                    "Restricted resume did not restore generated package configuration")
-            restricted["resume_reprepared"] = True
-            restricted["source_snapshot_after"] = git_delivery.source_state_sha256(app)
-            require(restricted["source_snapshot_after"] == before, "Restricted verification changed source")
-            restricted["status"] = "passed"
-            report["checks"].append("restricted_three_frozen_commands_and_isolation_passed")
-
-            reset_generated(app)
-            unrestricted = make_spec(app, flutter, plan, adapter, environment, contract, util,
-                                     suffix="unrestricted", sandbox="danger-full-access")
-            write_json(evidence / "spec.json", unrestricted)
-            free = {"status": "failed", "spec": "spec.json", "execution_kind": "direct_unrestricted",
-                    "spec_sha256": sha256(evidence / "spec.json"),
-                    "model_calls": 0, "launchers": launcher_evidence(unrestricted, adapter, evidence),
-                    "source_snapshot_before": git_delivery.source_state_sha256(app)}
-            report["unrestricted"] = free
-            frozen = unrestricted["tool_environment"]
-            require(frozen["isolation"] == "none" and frozen["network"] == {"mode": "unrestricted"}
-                    and frozen["writable_roots"] == [], "Explicit v3 permission contract differs")
-            require("XCODE_USER_DEFAULTS_FILE" not in frozen["environment"]
-                    and "JDK_JAVA_OPTIONS" not in frozen["environment"], "Unrestricted mode retained sandbox workarounds")
-            require(not Path(frozen["environment"]["XDG_CONFIG_HOME"]).exists(), "Unrestricted tool state is not cold")
-            free_child = environment.child_env(unrestricted, base)
-            bot_log = run(native_argv(environment, constants, unrestricted, without_ci_signals(
-                [sys.executable, "-c", _BOT_ENV_PROBE, json.dumps(BOT_DETECTOR_SIGNALS)])),
-                cwd=app, env=free_child, evidence=evidence, label="unrestricted-bot-environment", separate_stderr=True)
-            free["bot_environment"] = json.loads(bot_log.read_text(encoding="utf-8"))
-            receipt = environment.preflight(unrestricted, base)
-            write_json(evidence / "unrestricted-cold-preflight.json", receipt)
-            require(receipt["status"] == "passed" and receipt["isolation"] == "none", "Unrestricted preparation failed")
-            require((app / GENERATED_PACKAGE).is_file()
-                    and "fixture_plugin" in (app / GENERATED_PACKAGE).read_text(), "Offline Swift package was not generated")
-            free["native_commands"] = verify_native(unrestricted, environment, constants, contract,
-                free_child, evidence, label="unrestricted")
-            free_analyzer = Path(frozen["environment"]["ANALYZER_STATE_LOCATION_OVERRIDE"]) / ".instrumentation/uuid.txt"
-            require(free_analyzer.is_file() and free_analyzer.read_text().strip(), "Unrestricted private analyzer identity missing")
-            require(host_analyzer.read_text() == "unchanged\n", "Unrestricted analysis changed host analyzer state")
-            free["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_unchanged": True}
-            products = [app / "build/macos/Build/Products/Debug/fixture_app.app/Contents/MacOS/fixture_app",
-                        app / "build/app/outputs/flutter-apk/app-debug.apk"]
-            free["products"] = [{"path": str(path.relative_to(app)), "bytes": path.stat().st_size,
-                                  "sha256": sha256(path)} for path in products]
-            shutil.rmtree(app / "macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage")
-            resumed = environment.preflight(unrestricted, base)
-            write_json(evidence / "unrestricted-resume-preflight.json", resumed)
-            require(resumed["status"] == "passed" and (app / GENERATED_PACKAGE).is_file(),
-                    "Unrestricted resume did not restore its generated Swift package")
-            free["resume_reprepared"] = True
-            free["source_snapshot_after"] = git_delivery.source_state_sha256(app)
-            require(free["source_snapshot_after"] == before, "Unrestricted verification changed source")
-            free["status"] = "passed"
-            report["checks"].append("unrestricted_four_frozen_native_commands_exit_zero")
+                unrestricted = make_spec(app, flutter, plan, adapter, environment, contract, util,
+                                         suffix="unrestricted", sandbox="danger-full-access")
+                write_json(evidence / "spec.json", unrestricted)
+                free = {"status": "failed", "spec": "spec.json", "execution_kind": "direct_unrestricted",
+                        "spec_sha256": sha256(evidence / "spec.json"),
+                        "model_calls": 0, "launchers": launcher_evidence(unrestricted, adapter, evidence),
+                        "source_snapshot_before": git_delivery.source_state_sha256(app)}
+                report["unrestricted"] = free
+                free_host_analyzer = Path.home() / ".dartServer/kanpilot-unrestricted-fixture-sentinel"
+                free_host_analyzer.parent.mkdir(parents=True, exist_ok=True)
+                free_host_analyzer.write_text("unchanged\n", encoding="utf-8")
+                frozen = unrestricted["tool_environment"]
+                require(frozen["isolation"] == "none" and frozen["network"] == {"mode": "unrestricted"}
+                        and frozen["writable_roots"] == [], "Explicit v3 permission contract differs")
+                require("XCODE_USER_DEFAULTS_FILE" not in frozen["environment"]
+                        and "JDK_JAVA_OPTIONS" not in frozen["environment"], "Unrestricted mode retained sandbox workarounds")
+                require(not Path(frozen["environment"]["XDG_CONFIG_HOME"]).exists(), "Unrestricted tool state is not cold")
+                free_child = environment.child_env(unrestricted, base)
+                bot_log = run(native_argv(environment, constants, unrestricted, without_ci_signals(
+                    [sys.executable, "-c", _BOT_ENV_PROBE, json.dumps(BOT_DETECTOR_SIGNALS)])),
+                    cwd=app, env=free_child, evidence=evidence, label="unrestricted-bot-environment", separate_stderr=True)
+                free["bot_environment"] = json.loads(bot_log.read_text(encoding="utf-8"))
+                receipt = environment.preflight(unrestricted, base)
+                write_json(evidence / "unrestricted-cold-preflight.json", receipt)
+                require(receipt["status"] == "passed" and receipt["isolation"] == "none", "Unrestricted preparation failed")
+                require((app / GENERATED_PACKAGE).is_file()
+                        and "fixture_plugin" in (app / GENERATED_PACKAGE).read_text(), "Offline Swift package was not generated")
+                free["native_commands"] = verify_native(unrestricted, environment, constants, contract,
+                    free_child, evidence, label="unrestricted")
+                free_analyzer = Path(frozen["environment"]["ANALYZER_STATE_LOCATION_OVERRIDE"]) / ".instrumentation/uuid.txt"
+                require(free_analyzer.is_file() and free_analyzer.read_text().strip(), "Unrestricted private analyzer identity missing")
+                require(free_host_analyzer.read_text() == "unchanged\n", "Unrestricted analysis changed host analyzer state")
+                free["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_unchanged": True}
+                products = [app / "build/macos/Build/Products/Debug/fixture_app.app/Contents/MacOS/fixture_app",
+                            app / "build/app/outputs/flutter-apk/app-debug.apk"]
+                free["products"] = [{"path": str(path.relative_to(app)), "bytes": path.stat().st_size,
+                                      "sha256": sha256(path)} for path in products]
+                shutil.rmtree(app / "macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage")
+                resumed = environment.preflight(unrestricted, base)
+                write_json(evidence / "unrestricted-resume-preflight.json", resumed)
+                require(resumed["status"] == "passed" and (app / GENERATED_PACKAGE).is_file(),
+                        "Unrestricted resume did not restore its generated Swift package")
+                free["resume_reprepared"] = True
+                free["source_snapshot_after"] = git_delivery.source_state_sha256(app)
+                require(free["source_snapshot_after"] == before, "Unrestricted verification changed source")
+                free["status"] = "passed"
+                report["checks"].append("unrestricted_four_frozen_native_commands_exit_zero")
             empty_gradle = root / "missing-gradle-cache"
             empty_gradle.mkdir()
             os.environ["GRADLE_USER_HOME"] = str(empty_gradle)
@@ -695,6 +879,7 @@ def validate(args):
             report["source_snapshot_after"] = git_delivery.source_state_sha256(app)
             require(report["source_snapshot_after"] == before and sha256(app / "pubspec.lock") == lock_before,
                     "Final fixture source/lock differs")
+            require_modes_passed(report)
             report["status"] = "passed"
         finally:
             os.environ.clear()

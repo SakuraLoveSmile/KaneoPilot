@@ -1933,6 +1933,8 @@ Android v2 冻结 `JDK_JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true`，使 Java 
 
 Android v2 仅追加 Flutter SDK 插件的 `packages/flutter_tools/gradle/.gradle` 与 `build` 两个生成写根，解决 included build 不继承主工程 `project-cache-dir` 的限制。目录按既有 NOFOLLOW 流程创建和预检，拒绝符号链接；插件 `src`、Gradle 构建脚本及父目录继续只读。双平台轮次合并两端所需根，不相互覆盖。
 
+Gradle 9.0.0 起严格要求每个项目根可写，与 SDK 插件项目根只读的受限模式存在已证实的冲突。v2 在模型前，对确认使用 Flutter SDK included build 的标准设置，从本轮实际选中的缓存分发 `lib/gradle-base-services-*.jar` 读取 `org/gradle/build-receipt.properties` 的真实版本，再以同一受限 profile 检查该项目目录及 `os.access(path, os.W_OK)`。只有稳定版本 ≥9 且目录存在但不可写时，返回 `codex_environment_unavailable`，说明 Gradle/SDK 根的限制，提示设置选择无沙箱并创建新轮次；不放开 SDK 项目根。Gradle 8 只警告，不能按此拒绝；未识别的自定义 included-build 布局或版本不能冒充已证实的不兼容。v1 不新增此门禁。已有 `android/local.properties` 时，在私有缓存准备后提前检查；全新工作树缺此生成文件时，锁定离线平台准备成功、源码快照不变后再次检查，避免首次执行绕过模型前阻断。该检查不启动 Java、编译或调用模型。
+
 基础安全预检成功后，执行端用**同一冻结沙箱、无模型**运行 `flutter pub get --offline --enforce-lockfile` 作为平台准备；它不是业务 verify 回执。准备前后源码快照必须一致，锁定依赖不能变；项目引用 FlutterGeneratedPluginSwiftPackage 时核对 Package.swift 已生成。缺失 wrapper/依赖、准备非零退出、平台生成物仍缺失均给出具体错误并在模型前终止，不静默允许公网下载。成功环境回执分开记录基础检查、实际写根及准备命令/退出码/缓存种子计数；准备不替代随后每条原文 verify 的原生命令退出码。
 
 用户明确保存无沙箱时，新 Flutter 轮次冻结 `tool_environment.v=3`、`isolation="none"`、`network={mode:"unrestricted"}` 与空额外写根。CLI 的 exec/resume 均显式使用 `-s danger-full-access`、`sandbox_mode="danger-full-access"`、`approval_policy="never"`；不注入受限 profile、网络代理、`--add-dir`、Xcode 内层沙箱兼容 plist 或 Java IPv4 覆盖，保留宿主代理/JVM 环境。v3 仍保留 BOT、私有分析器/Pub/Gradle、必要 Flutter 设置白名单和锁定离线准备；预检直接检查私有目录，准备由受管子进程直接运行。该模式使用当前账户的文件与网络权限，不承诺宿主路径只读或禁公网；源码快照、进程清理、结构化报告与原生命令退出码门禁仍相同。v1/v2 与无沙箱配置不匹配时拒绝，设置保存不能扩大历史轮次权限。

@@ -25,7 +25,7 @@ DEFAULTS = {
     "model": "deepseek-flash",
     "reasoning_effort": "xhigh",
     "agent_preset": "default",
-    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high"},
+    "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "workspace-write"},
 }
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
 # v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。

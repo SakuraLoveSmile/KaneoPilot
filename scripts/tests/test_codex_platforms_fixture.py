@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import tempfile
 import subprocess
 import sys
@@ -48,6 +49,67 @@ class CodexPlatformFixtureTests(unittest.TestCase):
                                 "'/a b/flutter' build apk --debug --no-pub"])
         self.assertEqual(fixture.verification_commands(Path("/a b/flutter"), macos=False),
                          [full[0], full[1], full[3]])
+        self.assertEqual(fixture.verification_commands(Path("/a b/flutter"), macos=False, android=False), full[:2])
+
+    def test_android_admission_uses_actual_sdk_capability_and_preserves_blocking_error(self):
+        class EnvironmentError(Exception):
+            code = "codex_environment_unavailable"
+        util = SimpleNamespace(KanpilotError=EnvironmentError, redact=lambda value: value)
+        requirement = {"gradle_version": "9.3.1", "project_root": "/fixture/sdk/gradle"}
+        denied = {"exists": True, "is_directory": True, "writable": False}
+        error = EnvironmentError("Gradle 9.3.1 Flutter SDK /fixture/sdk/gradle 不可写；请在设置选择无沙箱并创建新轮次")
+        environment = SimpleNamespace(preflight=mock.Mock(side_effect=error))
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            result = fixture.restricted_android_preflight({}, environment, {}, requirement, denied, util, evidence)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["detail"], str(error))
+            self.assertEqual(result["native_commands"], [])
+            self.assertFalse(result["native_execution_performed"])
+            self.assertEqual(result["native_status"], "not_run")
+            self.assertEqual(result["model_calls"], 0)
+            environment.preflight = mock.Mock(return_value={"status": "passed"})
+            with self.assertRaisesRegex(AssertionError, "disagrees"):
+                fixture.restricted_android_preflight({}, environment, {}, requirement, denied, util, evidence)
+            allowed = {**denied, "writable": True}
+            environment.preflight.return_value = {"status": "passed", "android_gradle_sdk": {**requirement, **allowed}}
+            result = fixture.restricted_android_preflight({}, environment, {}, requirement, allowed, util, evidence)
+            self.assertEqual(result["status"], "supported")
+            self.assertFalse(result["native_execution_performed"])
+            environment.preflight.return_value = {"status": "passed"}
+            self.assertEqual(fixture.restricted_android_preflight({}, environment, {}, None, None, util, evidence)["status"],
+                             "supported")
+            environment.preflight.side_effect = EnvironmentError("Gradle cache missing")
+            with self.assertRaisesRegex(AssertionError, "specific Gradle SDK"):
+                fixture.restricted_android_preflight({}, environment, {}, requirement, denied, util, evidence)
+            with self.assertRaisesRegex(AssertionError, "probe is invalid"):
+                fixture.restricted_android_preflight({}, environment, {}, requirement, {**denied, "writable": 0}, util, evidence)
+
+    def test_cold_android_refreshes_actual_generated_capability_after_preflight_blocks(self):
+        class EnvironmentError(Exception):
+            code = "codex_environment_unavailable"
+        util = SimpleNamespace(KanpilotError=EnvironmentError, redact=lambda value: value)
+        requirement = {"gradle_version": "9.3.1", "project_root": "/fixture/sdk/gradle"}
+        denied = {"exists": True, "is_directory": True, "writable": False}
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            local = evidence / "android/local.properties"
+            def preflight(spec, base):
+                self.assertFalse(local.exists())
+                local.parent.mkdir()
+                local.write_text("flutter.sdk=/fixture/sdk\n")
+                raise EnvironmentError("Gradle 9.3.1 Flutter SDK /fixture/sdk/gradle 不可写；请在设置选择无沙箱并创建新轮次")
+            def capability():
+                self.assertEqual(local.read_text(), "flutter.sdk=/fixture/sdk\n")
+                return requirement, denied
+            result = fixture.restricted_android_preflight({}, SimpleNamespace(preflight=preflight), {}, None, None,
+                util, evidence, capability=capability)
+            self.assertEqual(result["status"], "blocked")
+            self.assertIsNone(result["initial_gradle_sdk_requirement"])
+            self.assertEqual(result["gradle_sdk_requirement"], requirement)
+            self.assertEqual(result["sdk_write_probe"], denied)
+            self.assertFalse(result["native_execution_performed"])
+            self.assertEqual(result["native_commands"], [])
 
     def test_macos_preflight_records_actual_uti_block_or_support_without_fallback(self):
         class EnvironmentError(Exception):
@@ -91,6 +153,158 @@ class CodexPlatformFixtureTests(unittest.TestCase):
             self.assertEqual(records[0]["exit_code"], 7)
             self.assertEqual(records[0]["command"], "original verify")
             self.assertEqual(process.call_count, 2)
+
+    def test_restricted_failure_keeps_native_results_and_runs_all_unrestricted_commands(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            report = {"status": "failed"}
+            shell_python = shlex.quote(sys.executable)
+            restricted = {"cwd": str(evidence), "required_verification_commands":
+                          [shell_python + " -c 'raise SystemExit(7)'"]}
+            unrestricted = {"cwd": str(evidence), "required_verification_commands":
+                            [shell_python + " -c 'print(" + str(index) + ")'" for index in range(4)]}
+            # Exercise real isolated Python processes; replacing only the
+            # platform sandbox wrapper avoids invoking installed tools.
+            with mock.patch.object(fixture, "native_argv", side_effect=lambda env, constants, spec, command, **kw: command), \
+                    mock.patch.object(fixture.sys, "stderr", io.StringIO()):
+                with fixture.mode_attempt(report, "restricted", evidence):
+                    report["restricted"]["native_commands"] = fixture.verify_native(
+                        restricted, mock.Mock(), mock.Mock(), mock.Mock(), os.environ.copy(), evidence, label="restricted")
+                    report["restricted"]["status"] = "passed"
+                with fixture.mode_attempt(report, "unrestricted", evidence):
+                    report["unrestricted"]["native_commands"] = fixture.verify_native(
+                        unrestricted, mock.Mock(), mock.Mock(), mock.Mock(), os.environ.copy(), evidence, label="unrestricted")
+                    report["unrestricted"]["status"] = "passed"
+            self.assertEqual(report["restricted"]["status"], "failed")
+            self.assertEqual(report["restricted"]["native_commands"][0]["exit_code"], 7)
+            self.assertIn("original native commands failed", report["restricted"]["error"])
+            self.assertEqual(report["unrestricted"]["status"], "passed")
+            self.assertEqual([item["exit_code"] for item in report["unrestricted"]["native_commands"]], [0] * 4)
+            self.assertEqual(json.loads((evidence / "restricted-failure.json").read_text()), report["restricted"])
+            with self.assertRaisesRegex(AssertionError, "acceptance failed: restricted"):
+                fixture.require_modes_passed(report)
+            self.assertEqual(report["status"], "failed")
+
+    def test_native_timeout_preserves_partial_logs_and_prevents_shared_resource_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary) / "evidence"
+            evidence.mkdir()
+            report = {"status": "failed"}
+            spec = {"cwd": str(evidence), "required_verification_commands": ["native verify"]}
+            second_mode = mock.Mock()
+            def timeout(argv, **kwargs):
+                kwargs["stdout"].write("partial native output\n")
+                kwargs["stderr"].write("partial native error\n")
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            with mock.patch.object(fixture.subprocess, "run", side_effect=timeout), \
+                    mock.patch.object(fixture, "native_argv", side_effect=lambda env, constants, spec, command, **kw: command), \
+                    mock.patch.object(fixture.sys, "stderr", io.StringIO()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    with fixture.mode_attempt(report, "restricted", evidence):
+                        fixture.verify_native(spec, mock.Mock(), mock.Mock(), mock.Mock(), {}, evidence, label="restricted")
+                    with fixture.mode_attempt(report, "unrestricted", evidence):
+                        second_mode()
+            second_mode.assert_not_called()
+            self.assertNotIn("unrestricted", report)
+            failure = json.loads((evidence / "restricted-failure.json").read_text())
+            self.assertEqual(failure["status"], "failed")
+            self.assertEqual(failure["shared_resource_reuse"], "blocked_descendant_cleanup_unconfirmed")
+            native = failure["native_commands"][0]
+            self.assertEqual(native["command"], "native verify")
+            self.assertIsNone(native["exit_code"])
+            self.assertTrue(native["timed_out"])
+            self.assertEqual(native["descendant_cleanup"], "unconfirmed")
+            self.assertEqual((evidence / native["log"]).read_text(), "partial native output\n")
+            self.assertEqual((evidence / native["stderr_log"]).read_text(), "partial native error\n")
+            self.assertEqual(native["log_sha256"], fixture.sha256(evidence / native["log"]))
+
+    def test_timeout_snapshots_stay_stable_when_inherited_log_descriptors_keep_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            descriptors = []
+            limit = 4 * 1024 * 1024
+            def timeout(argv, **kwargs):
+                for name, data in (("stdout", "prefix" + "x" * limit + "tail"),
+                                   ("stderr", "initial stderr\n")):
+                    stream = kwargs[name]
+                    stream.write(data)
+                    stream.flush()
+                    descriptors.append(os.dup(stream.fileno()))
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            try:
+                with mock.patch.object(fixture.subprocess, "run", side_effect=timeout):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        fixture.run(["never-started"], cwd=root, env={}, evidence=evidence,
+                                    label="inherited", separate_stderr=True)
+                record = json.loads((evidence / "inherited.json").read_text())
+                snapshots = {}
+                for log_key, hash_key, snapshot_key in (("log", "log_sha256", "log_snapshot"),
+                                                       ("stderr_log", "stderr_sha256", "stderr_snapshot")):
+                    path = evidence / record[log_key]
+                    snapshots[log_key] = path.read_bytes()
+                    self.assertEqual(record[hash_key], fixture.sha256(path))
+                    metadata = record[snapshot_key]
+                    self.assertEqual(metadata["kind"], "bounded_tail_snapshot")
+                    self.assertEqual(metadata["max_bytes"], limit)
+                    self.assertEqual(metadata["snapshot_bytes"], len(snapshots[log_key]))
+                    self.assertTrue(metadata["raw_may_still_be_written"])
+                    self.assertEqual((root / metadata["raw_path"]).parent, root / "unconfirmed-live-logs")
+                self.assertTrue(record["log_snapshot"]["truncated"])
+                self.assertEqual(len(snapshots["log"]), limit)
+                self.assertTrue(snapshots["log"].endswith(b"tail"))
+                self.assertFalse(record["stderr_snapshot"]["truncated"])
+                for descriptor in descriptors:
+                    os.write(descriptor, b"late descendant output\n")
+                for log_key, hash_key, snapshot_key in (("log", "log_sha256", "log_snapshot"),
+                                                       ("stderr_log", "stderr_sha256", "stderr_snapshot")):
+                    self.assertEqual((evidence / record[log_key]).read_bytes(), snapshots[log_key])
+                    self.assertEqual(fixture.sha256(evidence / record[log_key]), record[hash_key])
+                    self.assertTrue((root / record[snapshot_key]["raw_path"]).read_bytes().endswith(b"late descendant output\n"))
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+    def test_diagnostic_timeout_also_stops_shared_resource_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            report = {"status": "failed"}
+            spec = {"cwd": str(evidence), "required_verification_commands": ["native verify"]}
+            def run(argv, **kwargs):
+                label = kwargs["label"]
+                if "diagnostic" in label:
+                    raise subprocess.TimeoutExpired(argv, 300)
+                fixture.write_json(evidence / (label + ".json"), {"exit_code": 7, "log": "original.log"})
+            with mock.patch.object(fixture, "run", side_effect=run), \
+                    mock.patch.object(fixture, "native_argv", side_effect=lambda env, constants, spec, command, **kw: command), \
+                    mock.patch.object(fixture.sys, "stderr", io.StringIO()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    with fixture.mode_attempt(report, "restricted", evidence):
+                        fixture.verify_native(spec, mock.Mock(), mock.Mock(), mock.Mock(), {}, evidence, label="restricted")
+            self.assertEqual(report["restricted"]["native_commands"][0]["exit_code"], 7)
+            self.assertEqual(report["restricted"]["shared_resource_reuse"], "blocked_descendant_cleanup_unconfirmed")
+
+    def test_mode_error_before_native_commands_does_not_skip_other_mode_or_allow_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            report = {"status": "failed"}
+            with mock.patch.object(fixture.sys, "stderr", io.StringIO()):
+                with fixture.mode_attempt(report, "restricted", evidence):
+                    raise RuntimeError("preflight unavailable")
+                with fixture.mode_attempt(report, "unrestricted", evidence):
+                    report["unrestricted"]["status"] = "passed"
+            self.assertEqual(report["restricted"]["error"], "preflight unavailable")
+            self.assertEqual(report["restricted"]["error_type"], "RuntimeError")
+            self.assertNotIn("native_commands", report["restricted"])
+            with self.assertRaisesRegex(AssertionError, "restricted"):
+                fixture.require_modes_passed(report)
+            report["restricted"]["status"] = "passed"
+            report["unrestricted"]["status"] = "failed"
+            with self.assertRaisesRegex(AssertionError, "unrestricted"):
+                fixture.require_modes_passed(report)
+            report["unrestricted"]["status"] = "passed"
+            fixture.require_modes_passed(report)
 
     def test_launcher_receipts_reject_restricted_parameters_for_exec_and_resume(self):
         def launcher(spec, schema, output, provider, session_id=None):
@@ -269,6 +483,9 @@ class CodexPlatformFixtureTests(unittest.TestCase):
             (external / "sentinel").write_text("preserve")
             (app / ".kanpilot-codex-platform-fixture").write_text("owned")
             (app / "pubspec.lock").write_text("locked")
+            (app / "android").mkdir()
+            (app / "android/local.properties").write_text("generated warm paths")
+            (app / "android/settings.gradle.kts").write_text("source settings")
             (app / "lib").mkdir()
             (app / "lib/main.dart").write_text("source")
             (app / "build").symlink_to(external, target_is_directory=True)
@@ -282,6 +499,8 @@ class CodexPlatformFixtureTests(unittest.TestCase):
             self.assertFalse((app / "build").exists())
             self.assertEqual((app / "pubspec.lock").read_text(), "locked")
             self.assertEqual((app / "lib/main.dart").read_text(), "source")
+            self.assertFalse((app / "android/local.properties").exists())
+            self.assertEqual((app / "android/settings.gradle.kts").read_text(), "source settings")
 
 
 if __name__ == "__main__":

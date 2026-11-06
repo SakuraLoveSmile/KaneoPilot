@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import os
 import re
 import stat
 import uuid
+import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -340,7 +342,7 @@ def _seed_pub(spec, root, source):
 def _properties(path):
     _require(path.is_file() and not path.is_symlink(), "Android Gradle wrapper 配置缺失或含符号链接")
     result = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_small_regular(path, 65536).decode("utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith(("#", "!")):
             continue
@@ -358,7 +360,7 @@ def _base36(number):
     return result or "0"
 
 
-def _seed_gradle(spec, root, source):
+def _gradle_distribution(spec, source):
     properties = _properties(Path(spec["cwd"]) / "android/gradle/wrapper/gradle-wrapper.properties")
     url = properties.get("distributionUrl", "")
     parsed = urlsplit(url)
@@ -383,6 +385,12 @@ def _seed_gradle(spec, root, source):
              and (cached / marker).is_file(),
              "Android 离线 Gradle 分发缓存缺失：" + distribution + "；请先在受信任环境准备该版本")
     _require(cached.resolve(strict=True) == cached, "Android Gradle 分发缓存目录含符号链接")
+    return cached, expanded, filename, distribution, url_hash, version
+
+
+def _seed_gradle(spec, root, source):
+    cached, expanded, filename, distribution, url_hash, version = _gradle_distribution(spec, source)
+    marker = filename + ".ok"
     target = _open_directory(root, "gradle")
     try:
         for part in ("wrapper", "dists", distribution, url_hash):
@@ -406,6 +414,143 @@ def _seed_gradle(spec, root, source):
     finally:
         os.close(target)
     return 1
+
+
+# Exact standard Flutter app settings. Anything with custom SDK selection,
+# include-build logic or extra evaluation remains unconfirmed, not incompatible.
+_FLUTTER_KOTLIN_SETTINGS = '''
+pluginManagement {
+    val flutterSdkPath = run {
+        val properties = java.util.Properties()
+        file("local.properties").inputStream().use { properties.load(it) }
+        val flutterSdkPath = properties.getProperty("flutter.sdk")
+        require(flutterSdkPath != null) { "flutter.sdk not set in local.properties" }
+        flutterSdkPath
+    }
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+    repositories { google() mavenCentral() gradlePluginPortal() }
+}
+plugins {
+    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+    id("com.android.application") version "{{agpVersion}}" apply false
+    id("org.jetbrains.kotlin.android") version "{{kotlinVersion}}" apply false
+}
+include(":app")
+'''
+_FLUTTER_GROOVY_SETTINGS = '''
+pluginManagement {
+    def flutterSdkPath = {
+        def properties = new Properties()
+        file("local.properties").withInputStream { properties.load(it) }
+        def flutterSdkPath = properties.getProperty("flutter.sdk")
+        assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+        return flutterSdkPath
+    }()
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+    repositories { google() mavenCentral() gradlePluginPortal() }
+}
+plugins {
+    id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+    id "com.android.application" version "{{agpVersion}}" apply false
+    id "org.jetbrains.kotlin.android" version "{{kotlinVersion}}" apply false
+}
+include ":app"
+'''
+
+
+def _read_small_regular(path, limit):
+    _require(path.resolve(strict=True) == path, "Gradle 兼容检查路径含符号链接")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        _require(stat.S_ISREG(info.st_mode) and info.st_size <= limit,
+                 "Gradle 兼容检查文件不是普通文件或超过读取上限")
+        result = stream.read(limit + 1)
+        _require(len(result) <= limit, "Gradle 兼容检查文件超过读取上限")
+        return result
+
+
+def _compact_gradle(source):
+    # Preserve string contents, remove whitespace outside strings and full-line
+    # comments only. A comment containing includeBuild cannot become code.
+    source = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("//"))
+    return "".join(re.findall(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]''', source))
+
+
+def _standard_flutter_settings(spec):
+    android = Path(spec["cwd"]) / "android"
+    paths = [android / name for name in ("settings.gradle", "settings.gradle.kts")
+             if (android / name).exists() or (android / name).is_symlink()]
+    if len(paths) != 1:
+        return False
+    source = _compact_gradle(_read_small_regular(paths[0], 65536).decode("utf-8"))
+    template = _FLUTTER_KOTLIN_SETTINGS if paths[0].suffix == ".kts" else _FLUTTER_GROOVY_SETTINGS
+    pattern = re.escape(_compact_gradle(template))
+    for placeholder in ("{{agpVersion}}", "{{kotlinVersion}}"):
+        pattern = pattern.replace(re.escape(placeholder), r"[0-9][0-9A-Za-z.+_-]{0,63}")
+    if not re.fullmatch(pattern, source):
+        return False
+    local = android / "local.properties"
+    if not local.exists() and not local.is_symlink():
+        return False
+    sdk = _properties(local).get("flutter.sdk")
+    expected = Path(spec["tool_environment"]["setup"]["flutter"]).parent.parent
+    return bool(sdk) and Path(sdk) == expected
+
+
+def _gradle_runtime_version(expanded):
+    versions = []
+    for path in sorted((expanded / "lib").glob("gradle-base-services-*.jar")):
+        # Bounds cover the official runtime JAR, not arbitrary ZIP payloads.
+        jar = _read_small_regular(path, 16 * 1024 * 1024)
+        try:
+            with zipfile.ZipFile(io.BytesIO(jar)) as archive:
+                entries = [entry for entry in archive.infolist()
+                           if entry.filename == "org/gradle/build-receipt.properties"]
+                if len(entries) != 1:
+                    continue
+                entry = entries[0]
+                _require(not entry.is_dir() and entry.file_size <= 65536
+                         and stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG),
+                         "Gradle 版本回执不是普通文件或超过读取上限")
+                with archive.open(entry) as stream:
+                    content = stream.read(65537)
+                _require(len(content) <= 65536, "Gradle 版本回执超过读取上限")
+                text = content.decode("utf-8")
+        except (zipfile.BadZipFile, KeyError, UnicodeError):
+            continue
+        values = re.findall(r"(?m)^versionNumber\s*=\s*([^\r\n]*)$", text)
+        if len(values) == 1:
+            versions.append(values[0].strip())
+    if len(versions) != 1 or not re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?", versions[0]):
+        return None
+    return versions[0]
+
+
+def android_gradle_sdk_requirement(spec):
+    """Identify only a confirmed standard Flutter/Gradle >=9 SDK-root check.
+
+    The version comes from the actual selected private runtime after seeding,
+    never from a wrapper URL or JAR filename. Unknown/custom layouts return
+    None rather than asserting an incompatibility that was not established.
+    """
+    environment = spec.get("tool_environment") or {}
+    if environment.get("v") != 2 or not environment.get("setup", {}).get("android"):
+        return None
+    try:
+        if not _standard_flutter_settings(spec):
+            return None
+        source = Path(environment["environment"]["GRADLE_USER_HOME"])
+        _, expanded, _, _, _, _ = _gradle_distribution(spec, source)
+        version = _gradle_runtime_version(expanded)
+        if version is None or int(version.split(".")[0]) < 9:
+            return None
+        plugin = Path(environment["setup"]["flutter"]).parent.parent / "packages/flutter_tools/gradle"
+        _require(plugin.resolve(strict=True) == plugin and plugin.is_dir(),
+                 "Flutter Gradle SDK 插件项目根缺失或含符号链接")
+        return {"gradle_version": version, "project_root": str(plugin)}
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        raise util.KanpilotError("codex_environment_unavailable", "Gradle SDK 兼容检查文件不可读或路径无效") from exc
 
 
 def seed_caches(spec):
