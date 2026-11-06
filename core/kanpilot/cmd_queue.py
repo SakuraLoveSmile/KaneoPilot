@@ -388,7 +388,7 @@ def execution_retry_candidate(conn, task, *, engine_empty=False, verification_re
             return False
     return bool((repair.get("source_kind") != "merge_conflict" or merge_retry)
                 and db.task_is_active(task) and task["status"] == "needs_user"
-                and task["stage"] == "monitor" and (task["failure_code"] == "execution_failed"
+                and task["stage"] == "monitor" and (task["failure_code"] in ("execution_failed", "execution_followup_required")
                      or (engine_empty and task["failure_code"] == "verification_unconfirmed")
                      or (verification_retry and task["failure_code"] in
                          ("verification_unconfirmed", "verification_environment_failure")))
@@ -596,15 +596,18 @@ def verify_execution_retry_terminal(conn, task, now=None):
 
 def _prepare_execution_retry(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
+    if payload["action"] == "resume" and task["failure_code"] == "execution_followup_required":
+        util.require(payload.get("actor", "user") == "user",
+                     "等待材料或决定的任务仅允许用户确认新轮次", "conflict")
     engine_empty = _engine_empty_retry(task, payload)
     verification_retry = payload.get("verification_retry") is True
     preflight = codex_preflight_retry_candidate(ctx.conn, task)
     if verification_retry and not verification_retry_candidate(ctx.conn, task):
         raise util.KanpilotError("conflict", "当前验证身份或发送状态不明，不能重新执行；请先重新核验验证证据")
     if (payload["action"] == "resume" and payload.get("expected_execution_run_id")
-            and task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry and not preflight):
+            and task["failure_code"] not in ("execution_failed", "execution_followup_required") and not engine_empty and not verification_retry and not preflight):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
-    if payload["action"] != "resume" or (task["failure_code"] != "execution_failed" and not engine_empty and not verification_retry and not preflight):
+    if payload["action"] != "resume" or (task["failure_code"] not in ("execution_failed", "execution_followup_required") and not engine_empty and not verification_retry and not preflight):
         return None
     expected = payload.get("expected_execution_run_id")
     if not expected:
@@ -888,6 +891,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") in ("merge_conflict", "build_failure")
             and requested_action in ("resume", "retry", "replan")):
         raise util.KanpilotError("conflict", "一次性冲突处理不能重新实施或规划；验证受阻时请显式补齐验证报告")
+    if action == "await_input":
+        from . import execution_followup
+        return execution_followup.resolve(ctx, payload)
     if action == "revert_engine_fix":
         from . import engine_fix_revert
         return engine_fix_revert.revert(ctx, payload)

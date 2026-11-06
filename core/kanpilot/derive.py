@@ -348,6 +348,8 @@ def task_exception(
         label = _release(conn, task)["title"]
     elif kind == "parent_closeout_blocked":
         label = _CLOSEOUT_LABELS[_parent_closeout(conn, task, now)["state"]]
+    elif kind == "manual_block" and failure_code == "execution_followup_required":
+        label = "待补充材料或决定"
     elif kind == "failed":
         label = _FAILED_SUBSTATUS.get(failure_code, "失败")
     else:
@@ -1180,6 +1182,7 @@ _EVENT_KIND_CN = {
     "pr_merged": "PR 已合并", "pr_closed": "PR 已关闭", "cost_recorded": "运行成本登记",
     "requirements_accepted": "已接受远端需求", "automation_stopped": "自动处理已停止",
     "execution_retry_requested": "已确认沿用计划重新执行",
+    "execution_classification_corrected": "执行分类已更正",
     "engine_fix_started": "自动补救轮开始",
     "engine_fix_reverted": "自动补救已撤回",
     "branch_worktree_adopted": "已收养任务分支工作树",
@@ -1261,6 +1264,8 @@ def _event_summary(kind: str, detail) -> str:
     label = _EVENT_KIND_CN.get(kind)
     if label is None:
         return f"未识别事件（{kind}）"
+    if kind == "execution_classification_corrected":
+        return "执行分类已更正为待补充材料或决定：" + str(detail.get("note") or "")
     if kind == "status_change":
         return f"任务状态：{detail.get('from')} → {detail.get('to')}"
     if kind == "enqueued":

@@ -31,6 +31,10 @@ struct EngineFixRevertFixtures {
             check(AutomationPresentation.title(code) == title, "four failure titles remain distinct")
         }
         check(AutomationPresentation.resumeLabel("fix_branch_unavailable") == "重新验证本轮", "monitor recovery label")
+        check(AutomationPresentation.title("execution_followup_required") == "待补充材料或决定",
+              "materials and decisions are shown as a block")
+        check(AutomationPresentation.resumeLabel("execution_followup_required") == "重新执行（沿用计划）",
+              "materials block retains an explicit retry label")
         let model = AppViewModel(), client = model.client, taskID = "auto-branch_exists"
         let candidate = try await model.currentEngineFixRevert(taskID: taskID)
         check(try commands("resolve").isEmpty, "opening then cancelling confirmation never sends resolve")

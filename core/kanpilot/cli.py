@@ -294,6 +294,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "task_id": (True, "str"), "action": (True, "str"),
             "note": (False, "str"),
             "expected_execution_run_id": (False, "str"),
+            "expected_job_sha256": (False, "str"),
             "expected_review_key": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
             "expected_plan_sha256": (False, "str"),

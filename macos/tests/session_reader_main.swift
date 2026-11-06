@@ -296,6 +296,17 @@ struct SessionReaderFixtures {
         check(try count("resolve") == beforeResolve, "reading a retry option never submits the confirmation")
         let planSHA = store.retryTask?.planSha256
 
+        try patchTask(["failure_code": "execution_followup_required", "stage": "monitor",
+                       "failure_stage": "running", "send_state": "sent"])
+        await store.refresh()
+        check(store.canRetryExecution && store.retryTask?.canRetryExecution == true,
+              "waiting for materials or a decision preserves the core-authorized current-round retry")
+        check(try count("resolve") == beforeResolve,
+              "reading a materials block never starts or resumes a model")
+        try patchTask(["failure_code": "dispatch_failed", "stage": "dispatch",
+                       "failure_stage": "submitting", "send_state": "unknown"])
+        await store.refresh()
+
         try patchTask(["_automation_allowed": ["restore", "recheck"]])
         check(!(await store.retryExecution(expectedRunID: runID)), "confirmation re-reads revoked core retry authority")
         check(try count("resolve") == beforeResolve, "revoked authority cannot submit resolve")

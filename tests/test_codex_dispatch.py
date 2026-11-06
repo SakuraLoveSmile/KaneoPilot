@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from kanpilot import auto_dispatch, auto_monitor, codex_execution, db, pi_desktop_review, util
+from kanpilot import auto_dispatch, auto_monitor, codex_execution, constants, db, pi_desktop_review, util
 from kanpilot.engine import loop
 
 try:
@@ -236,9 +236,11 @@ def test_managed_codex_dispatch_to_verified_delivery_and_review(factory, cli, tm
     assert spec['stage_contract']['inputs']['sandbox_writable_roots'] == []
     assert 'SubmitGoalReport' not in spec['instruction']
     assert 'exit_code' in spec['instruction']
+    assert constants.CODEX_EXECUTION_REPORT_INSTRUCTION in spec['instruction']
     prompt = (directory / 'codex-final-1.json.prompt').read_text()
     assert 'SubmitGoalReport' not in prompt
     assert spec['instruction'] in prompt
+    assert constants.CODEX_EXECUTION_REPORT_INSTRUCTION in prompt
     duplicate = cli("dispatch-start", identity)
     assert duplicate["deduplicated"] and duplicate["pid"] == started["pid"]
     confirm(cli, identity, evidence, started, directory)

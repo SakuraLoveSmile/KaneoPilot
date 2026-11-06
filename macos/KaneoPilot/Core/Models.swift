@@ -663,7 +663,7 @@ struct TaskDetail: Decodable, Identifiable {
     var canRetryExecution: Bool {
         guard status == "needs_user", saveState == "active", readOnly != true,
               runId?.isEmpty == false, allowedActions?.contains("resume") == true else { return false }
-        if failureCode == "execution_failed" { return true }
+        if ["execution_failed", "execution_followup_required"].contains(failureCode ?? "") { return true }
         return failureCode == "dispatch_failed" && stage == "dispatch"
             && executionRound?.backend == "codex" && executionRound?.runStatus == "failed"
             && executionRound?.runId == runId

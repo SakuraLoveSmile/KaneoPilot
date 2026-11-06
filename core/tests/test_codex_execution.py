@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from kanpilot import codex_execution as adapter, codex_worker as worker
-from kanpilot import execution_contract, git_delivery, process_owner, runtime_client, util
+from kanpilot import constants, execution_contract, git_delivery, process_owner, runtime_client, util
 from helpers import make_codex_fixture
 
 
@@ -60,6 +60,7 @@ if '--version' in args: print('codex-cli test'); sys.exit(0)
 prompt=sys.stdin.read()
 out=Path(args[args.index('-o')+1])
 Path(str(out)+'.argv').write_text(json.dumps(args))
+Path(str(out)+'.prompt').write_text(prompt)
 mode='''+repr(mode)+'''
 def emit(e): print(json.dumps(e),flush=True)
 emit({'type':'thread.started','thread_id':'thread-1'})
@@ -70,8 +71,11 @@ if mode=='hang':
     time.sleep(120)
 if mode=='partial':
     sys.stdout.write('{"type":'); sys.stdout.flush(); sys.exit(0)
-needs=mode=='questions' and 'resume' not in args
+needs=mode in ('questions','material_questions') and 'resume' not in args
 report={'status':'needs_input' if needs else 'completed','summary':'Fixture result','checks':[{'command':'python3 -V','exit_code':0}], 'questions':[{'title':'Choose','options':['A','B']}] if needs else []}
+if needs and mode=='material_questions':
+    report.update(summary='缺隔离设备和授权测试会话，检查和真实播放验收尚未运行。',checks=[],
+        questions=[{'title':'请提供隔离设备及授权 Emby 测试会话，完成真实播放验收后提供结果以继续。','options':[]}])
 override=json.loads('''+repr(json.dumps(report))+''')
 if override is not None: report=override
 if mode!='no_command' and not needs:
@@ -269,6 +273,16 @@ emit({'type':'turn.completed','usage':{}})
         self.assertTrue(job['detail'].endswith('…（已截断）'))
         self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
 
+    def test_failed_report_with_passing_checks_is_not_automatically_reclassified(self):
+        self.stub(report={'status':'failed','summary':'命令检查通过，但功能仍出现错误。',
+            'checks':[{'command':'python3 -V','exit_code':0}],'questions':[]})
+        with self.guards():
+            self.assertEqual(worker.run_real(self.spec),3)
+        job=self.job()
+        self.assertEqual(job['status'],'failed')
+        self.assertIsNone(job['pending_input'])
+        self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
+
     def test_failed_report_diagnostics_still_require_final_message_identity(self):
         self.stub('mismatched_report',report={'status':'failed','summary':'Untrusted diagnostic',
             'checks':[{'command':'python3 -V','exit_code':1}], 'questions':[]})
@@ -325,6 +339,37 @@ emit({'type':'turn.completed','usage':{}})
         argv=json.loads((self.run_dir/'codex-final-2.json.argv').read_text())
         self.assertIn('resume',argv); self.assertEqual(argv[-2: ],['thread-1','-'])
         self.assertEqual(job['turns'][0]['answer_operation_id'],'answer-op')
+
+    def test_missing_device_and_authorized_session_waits_for_materials_before_resume(self):
+        self.stub('material_questions')
+        questions=[]
+        def callback(command,payload,*args):
+            if command=='report-execution-question':
+                questions.append(payload)
+                job=self.job(); pending=job['pending_input']
+                self.assertEqual(job['status'],'waiting_input')
+                self.assertIn('隔离设备',payload['questions'][0]['title'])
+                self.assertEqual(payload['questions'][0]['options'],[])
+                first_report=json.loads((self.run_dir/'codex-final-1.json').read_text())
+                self.assertEqual(first_report['checks'],[])
+                self.assertEqual(len(job['turns']),1)
+                self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
+                self.assertFalse((self.run_dir/'codex-final-2.json').exists())
+                answer={'scope_id':self.spec['scope_id'],'session_id':job['session_id'],
+                    'request_id':pending['requestId'],'tool_call_id':pending['toolCallId'],
+                    'answers':[['已补充隔离设备及授权会话，继续验收。']],'operation_id':'materials-answer'}
+                (self.run_dir/('answer-'+util.sha256_text(pending['requestId'])+'.json')).write_text(util.jdump(answer))
+        with self.guards(callback):
+            self.assertEqual(worker.run_real(self.spec),0)
+        self.assertEqual(len(questions),1)
+        job=self.job()
+        self.assertEqual(len(job['turns']),2)
+        self.assertEqual(job['turns'][0]['input_resolution'],'answered')
+        self.assertEqual(job['turns'][0]['answer_operation_id'],'materials-answer')
+        for index in (1,2):
+            prompt=(self.run_dir/('codex-final-'+str(index)+'.json.prompt')).read_text()
+            self.assertIn(constants.CODEX_EXECUTION_REPORT_INSTRUCTION,prompt)
+        self.assertIn('授权会话', (self.run_dir/'codex-final-2.json.prompt').read_text())
 
 
     def test_explicit_unrestricted_first_and_resume_use_frozen_permission(self):

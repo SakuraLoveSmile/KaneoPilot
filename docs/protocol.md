@@ -1945,7 +1945,11 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
 
 **模型前失败后的显式新轮次（KP-C02）**：Codex 已领取派发但在环境预检失败时，任务可能仍为 `needs_user / dispatch / dispatch_failed / send_state=unknown`；这不等于模型已经收到输入。核心只对同当前 run、同 request/spec/job 哈希、冻结配置/计划/工作树身份一致，且 job 为持久 failed 非零退出、`send_state=not_sent`、session/turn 为空、`turns=[]`、精确 worker 出生身份确认已退出的情况提供 `resume`。界面复用“重新执行（沿用计划）”，提交 `resolve {action:"resume",expected_execution_run_id}`，不按失败文案推断安全性。用户确认才核对远端需求与状态、计划内容和原工作树快照；事务内重验原派发和证据，保留旧 run/成果，登记来源类型明确的 `execution_retry`，清空当前派发身份并重新排队。新领取使用新 UUID 和当前执行配置，历史权限不修改；晚到旧启动及重复确认不得生成第二次模型调用。普通 review 修复仍须冻结身份核验及 queued/running 转移；特殊 merge_conflict/build_failure 的既有恢复规则不由此放宽。一般 unknown、活动 worker、出现过 CLI turn、证据或材料变化均拒绝该入口，不自动重发、不调用模型补证。确认弹窗说明当前设置生效于新轮次、保留改动并会再次调用模型；取消不写请求。
 
+`needs_input` 用于需要用户补充材料、设备、权限/授权测试会话、人工操作/验收或作出决定的情形；问题须写明具体缺口、可执行下一步及解除条件。命令检查全部通过但真实验收尚缺上述条件时仍是等待输入，不得因此宣称 `completed` 或笼统报告 `failed`。明确的执行/检查失败继续如实 `failed`；不以摘要关键词或 checks 全为 0 自动猜测分类。该要求同时用于首次执行与回答后的续接。
+
 `needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。
+
+**已结束报告的显式分类更正（KP-C03）**：`resolve {action:"await_input",task_id,expected_execution_run_id,expected_job_sha256,note,actor?:"user"}` 只接受用户明确指出缺材料或决定的当前活跃任务。任务须为 `needs_user / monitor / execution_failed`、发送已确认、精确 Codex 轮次已结束且无活动请求/开放问题；核心核对原 job/spec/轮次/会话身份、进程出生与退出证明、所选 job 指纹，以及 failed 最终报告内每条冻结检查的整数退出码 0 和匹配的末次原生命令证据（同调用开始/结束、整数退出码 0、原报告最终源码快照）。允许原轮次修复后的重复检查；此项只核对分类依据，不替代成功 verdict 对完整验证窗口和后续工具事件的更严格要求。`note` 为 1–4096 字符的具体缺口及下一步。读证据后在事务内再核任务、轮次、请求、进程与文件指纹。成功只将当前任务原因改为 `execution_followup_required`、说明改为 note，保持 `needs_user / monitor`，派生 `manual_block / severity=blocked`，标签“待补充材料或决定”；保留旧失败详情与原证据指纹的审计，同参数重放幂等。原 job、报告、事件流和执行轮次索引不改，不伪造开放问题/等待者，不创建请求、模型调用、验证通过或成功报告。补齐后 `resume` 继续适用既有新轮次的终态、远端需求、计划/工作树核验及显式授权门禁。真正失败不自动改类，分类更正不代表验收完成。
 
 停止先持久记录，再核对受管进程出生身份与实际停止结果。取消/App 关闭须处理 CLI 子进程，不遗留可写孤儿。缺少停止证明时保留 unknown。所有新 Codex 执行无论项目引擎模式均走结构化 verdict，回执同时绑定报告/原生命令事件/spec/job/计划和当前源码；提交后恢复仍复核原证据。交付与远端副作用继续由核心命令完成。
 

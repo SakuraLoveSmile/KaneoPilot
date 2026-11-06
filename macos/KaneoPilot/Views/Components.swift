@@ -1103,11 +1103,13 @@ enum AutomationPresentation {
         case "no_changes": return "执行未产生改动"
         case "remote_conflict": return "远端需求或状态已变化"
         case "execution_failed": return "执行失败"
+        case "execution_followup_required": return "待补充材料或决定"
         default: return nil
         }
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
+        case "execution_followup_required": return "请先补齐所列材料、测试条件或决定。已有成果和原执行记录会保留；需要模型继续时，再确认沿用计划重新执行。"
         case "verification_unconfirmed": return "Plus 验证证据尚未完整确认。已有证据可重新核验；报告缺项时，需由 Plus 补齐验证及正式报告。请按当前可用操作继续。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
         case "auto_budget_exceeded": return "自动处理的时长或成本已达上限；再修一轮将开启新的预算段。"
@@ -1130,7 +1132,7 @@ enum AutomationPresentation {
         switch code {
         case "verification_environment_failure": return "重新核对原轮次证据"
         case "fix_branch_unavailable": return "重新验证本轮"
-        case "execution_failed": return "重新执行（沿用计划）"
+        case "execution_failed", "execution_followup_required": return "重新执行（沿用计划）"
         case "dispatch_failed" where stage == "dispatch": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"

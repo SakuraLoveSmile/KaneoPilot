@@ -1129,7 +1129,7 @@ struct RequestDetailView: View {
                    : action == "accept_verification" ? "接受验证结果"
                    : AutomationPresentation.dismissLabel(stage: detail.task?.stage, failureCode: detail.task?.exception?.failureCode, automatic: AutomationPresentation.active(detail.task?.automation))) {
                 guard let taskID else { return }
-                if action == "resume", detail.task?.exception?.failureCode == "execution_failed"
+                if action == "resume", ["execution_failed", "execution_followup_required"].contains(detail.task?.exception?.failureCode ?? "")
                     || (detail.task?.exception?.failureCode == "dispatch_failed" && detail.task?.stage == "dispatch") {
                     Task { await prepareExecutionRetry(taskID: taskID) }
                 } else {

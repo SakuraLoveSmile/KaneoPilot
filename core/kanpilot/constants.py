@@ -258,7 +258,7 @@ DEFAULT_PLAN_SCAN_ANCHOR = "09:00 Asia/Shanghai"
 
 VALID_RESOLVE_ACTIONS = (
     "retry", "restore", "accept_duplicate", "mark_sent",
-    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "retry_verification", "revert_engine_fix", "continue_delivery",
+    "replan", "release_lost", "mark_done", "dismiss", "resume", "accept_verification", "recover_review", "reverify", "retry_verification", "revert_engine_fix", "continue_delivery", "await_input",
 )
 
 ERROR_CODES = (
@@ -484,12 +484,17 @@ EXECUTION_VERIFICATION_INSTRUCTION = EXECUTION_VERIFICATION_COMMON_INSTRUCTION +
     "command 为计划中的命令原文，exitCode 为真实退出码，result 为 passed 或 failed。"
     "调度台以该报告为唯一结果来源，文字总结不能替代报告。环境缺失或失败请如实报告，最终答复逐条列出命令、退出码与剩余问题。"
 )
-CODEX_EXECUTION_VERIFICATION_INSTRUCTION = EXECUTION_VERIFICATION_COMMON_INSTRUCTION + (
+CODEX_EXECUTION_REPORT_INSTRUCTION = (
     "最终答复只返回符合本轮 JSON Schema 的 JSON 对象：status、summary、checks、questions。"
-    "checks 为每条冻结 verify 命令各写一条记录，command 为命令原文，exit_code 为真实整数退出码。"
-    "全部工作和检查完成才返回 completed；执行或环境失败返回 failed 并在 summary 中说明原因；"
-    "需要用户决定时返回 needs_input 并填写 questions。报告由 Codex CLI 输出文件接收，调度台会同时核对原生命令退出码和源码快照。"
+    "checks 只记录实际执行过的冻结 verify 命令，command 为命令原文，exit_code 为真实整数退出码；"
+    "completed 必须逐条覆盖全部冻结命令，needs_input 或 failed 可只列实际已运行项，未运行项及原因写入 summary 或 questions。"
+    "全部工作、检查和计划要求的真实验收均完成才返回 completed；明确的执行或检查失败返回 failed 并在 summary 中说明原因。"
+    "需要用户补充材料、测试设备、权限或授权测试会话、完成人工操作或真实验收、作出决定时，返回 needs_input 并填写 questions。"
+    "每个问题写明具体缺口、可执行下一步和解除条件，保留现有成果并等待回答。"
+    "检查全部通过或产物已生成，但仍缺上述验收条件时，属于等待补充材料或决定，不要报告 failed，也不能提前报告 completed。"
+    "不得编造未运行检查的退出码。报告由 Codex CLI 输出文件接收，调度台会同时核对原生命令退出码和源码快照。"
 )
+CODEX_EXECUTION_VERIFICATION_INSTRUCTION = EXECUTION_VERIFICATION_COMMON_INSTRUCTION + CODEX_EXECUTION_REPORT_INSTRUCTION
 
 AUTOMATION_FAILURE_STAGES = {
     "verification_environment_failure": "monitor", "fix_branch_unavailable": "monitor",

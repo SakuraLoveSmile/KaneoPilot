@@ -1205,7 +1205,8 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func executionAnswerCard(_ store: ExecutionAnswerStore) -> some View {
         ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail,
-            terminalReason: detail.failureCode == "execution_failed" ? (detail.failureReason ?? detail.blockedSummary) : nil,
+            terminalReason: ["execution_failed", "execution_followup_required"].contains(detail.failureCode ?? "")
+                ? (detail.failureReason ?? detail.blockedSummary) : nil,
             reconcileInBar: openExecutionStore != nil)
             .id("execution-answers")
     }

@@ -196,8 +196,7 @@ def run_real(spec):
         prompt = ((spec.get("instruction") or "").rstrip() + "\n\n" + repair_prompt.execution_body(spec)
                   + "\n\nYou are executing this frozen task. Do not push, merge, release, or change the plan. "
                   "Run every frozen verification command exactly as written after the final source edit. "
-                  "Return only the required JSON. If you need a user decision, return needs_input with questions; do not guess. "
-                  "checks must list exact commands and actual integer exit codes.\nFrozen verification commands:\n"
+                  + constants.CODEX_EXECUTION_REPORT_INSTRUCTION + "\nFrozen verification commands:\n"
                   + json.dumps(spec["required_verification_commands"], ensure_ascii=False))
         with process_owner.WorkerOwner(spec) as owner:
             last_heartbeat = time.monotonic()
@@ -408,7 +407,10 @@ def run_real(spec):
                         job.update(pending_input=None)
                         save()
                         _reconcile(spec)
-                        prompt = "User answers to the pending questions (same order):\n" + json.dumps(answer["answers"], ensure_ascii=False) + "\nContinue only this frozen task. Re-run every frozen verification command after final edits and return the required JSON."
+                        prompt = ("User answers to the pending questions (same order):\n"
+                                  + json.dumps(answer["answers"], ensure_ascii=False)
+                                  + "\nContinue only this frozen task. Re-run every frozen verification command after final edits.\n"
+                                  + constants.CODEX_EXECUTION_REPORT_INSTRUCTION)
                         break
                     if heartbeat_active and time.monotonic() - last_heartbeat >= 10:
                         try:
