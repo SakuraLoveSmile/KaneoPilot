@@ -133,10 +133,19 @@ def command():
             sys.exit(1)
         response = owner_response(conn, owner)
         claimable = 0 if (ROOT / "stage.json").exists() else 1
+        # This case isolates failed dispatch-exit ownership reads. The fake has
+        # no goal-recovery entry point, whose unrelated quick exit would add a
+        # successful ownership refresh before the intended failure.
+        paused_stages = ["monitor"] if (ROOT / "fail-stage-exit-status-once").exists() else []
         print(json.dumps({"stages": {"dispatch": {"claimable": claimable}},
-                          "paused": {"global": False, "stages": []},
+                          "paused": {"global": False, "stages": paused_stages},
                           "automation": {"enabled_projects": 0},
                           "owned_workers": response["owned_workers"]}))
+    elif command == "fixture-diagnostics":
+        markers = ("stage.json", "worker.json", "fail-stage-exit-status-once",
+                   "fail-next-executor-status", "stage-exit-status-failed")
+        print(json.dumps({"markers": {name: (ROOT / name).exists() for name in markers},
+                          "calls": [list(row) for row in conn.execute("SELECT command, owner, action FROM calls ORDER BY rowid")]}))
     else:
         print("{}")
 

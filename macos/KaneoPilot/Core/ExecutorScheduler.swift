@@ -5,6 +5,32 @@ import Darwin
 import Foundation
 import Network
 
+/// 只允许在最近一次退出或读取失败之后发起的状态读取确认归属。
+struct ExecutorOwnershipReadState {
+    private(set) var isUncertain = false
+    private var revision = 0
+
+    func captureRead() -> Int { revision }
+
+    mutating func markUncertain() {
+        revision += 1
+        isUncertain = true
+    }
+
+    mutating func failRead() { markUncertain() }
+
+    mutating func acceptSuccess(_ observedRevision: Int) -> Bool {
+        guard observedRevision == revision else { return false }
+        isUncertain = false
+        return true
+    }
+
+    mutating func reset(uncertain: Bool = false) {
+        revision += 1
+        isUncertain = uncertain
+    }
+}
+
 /// App 常驻调度：核心 tick → 状态 → 纯决策。所有启动只来自核心可领取事实。
 @MainActor
 final class ExecutorScheduler: ObservableObject {
@@ -28,7 +54,7 @@ final class ExecutorScheduler: ObservableObject {
     private var registration: Task<ExecutorInstanceResponse, Error>?
     private var ownerRefresh: Task<Void, Never>?
     private var ownerRefreshPending = false
-    private var ownershipUncertain = false
+    private var ownershipReads = ExecutorOwnershipReadState()
     private var ownedWorkers: [ExecutorOwnedWorkerDTO] = []
     private var registered = false
     private var stopping = false
@@ -62,7 +88,7 @@ final class ExecutorScheduler: ObservableObject {
             registration = nil
             registered = false
             ownedWorkers = []
-            ownershipUncertain = false
+            ownershipReads.reset()
             cleanupComplete = false
         }
         stopped = false
@@ -91,17 +117,29 @@ final class ExecutorScheduler: ObservableObject {
 
     func setPaused(_ paused: Bool) async {
         guard !stopped, pauseUpdate == nil else { return }
+        let expected = generation
         let task = Task { [weak self] in
             guard let self else { return }
             do {
                 _ = try await self.client.run("set-paused", payload: ["stage": NSNull(), "paused": paused], timeout: 10)
-                guard !self.stopped else { return }
-                let current = try await self.client.run("executor-status", payload: ["instance_id": self.instanceID], timeout: 10, as: ExecutorStatusDTO.self)
-                guard !self.stopped else { return }
-                self.applyStatus(current)
-                self.error = nil
+                guard !self.stopped, self.generation == expected else { return }
+                let observedRevision = self.ownershipReads.captureRead()
+                let current: ExecutorStatusDTO
+                do {
+                    current = try await self.client.run("executor-status", payload: ["instance_id": self.instanceID], timeout: 10, as: ExecutorStatusDTO.self)
+                } catch {
+                    guard !self.stopped, self.generation == expected else { return }
+                    self.ownershipReads.failRead()
+                    self.updateActivity()
+                    throw error
+                }
+                guard !self.stopped, self.generation == expected else { return }
+                if self.applyStatus(current, observedRevision: observedRevision) { self.error = nil }
                 if !paused { self.requestCheck(manual: true) }
-            } catch { self.error = error.localizedDescription }
+            } catch {
+                guard !self.stopped, self.generation == expected else { return }
+                self.error = error.localizedDescription
+            }
         }
         pauseUpdate = task
         await task.value
@@ -112,7 +150,7 @@ final class ExecutorScheduler: ObservableObject {
         guard !stopped, client.location != nil else { return }
         if !Self.isEnabled && !manual {
             // 开发开关只阻止自动推进；已启动 worker 的归属与防休眠仍需收尾。
-            if !ownedWorkers.isEmpty || !children.isEmpty || ownershipUncertain { refreshOwnershipAfterStageExit() }
+            if !ownedWorkers.isEmpty || !children.isEmpty || ownershipReads.isUncertain { refreshOwnershipAfterStageExit() }
             return
         }
         pendingForced.formUnion(forced)
@@ -142,12 +180,20 @@ final class ExecutorScheduler: ObservableObject {
             registered = true
             _ = try await client.run("tick", timeout: 10)
             guard !stopped, generation == expected else { return }
-            let current = try await client.run("executor-status", payload: ["instance_id": instanceID], timeout: 10, as: ExecutorStatusDTO.self)
+            let observedRevision = ownershipReads.captureRead()
+            let current: ExecutorStatusDTO
+            do {
+                current = try await client.run("executor-status", payload: ["instance_id": instanceID], timeout: 10, as: ExecutorStatusDTO.self)
+            } catch {
+                guard !stopped, generation == expected else { return }
+                ownershipReads.failRead()
+                updateActivity()
+                throw error
+            }
             guard !stopped, generation == expected else { return }
             let hasExitedStage = children.values.contains(where: { !$0.isRunning })
             if hasExitedStage { refreshOwnershipAfterStageExit() }
-            applyStatus(current)
-            error = nil
+            if applyStatus(current, observedRevision: observedRevision) { error = nil }
             children = children.filter { $0.value.isRunning }
             updateActivity()
             // 核心上次 intake 在重启后仍可用于 300 秒间隔；本次启动时间避免登记延迟重复。
@@ -167,6 +213,7 @@ final class ExecutorScheduler: ObservableObject {
                 try spawn(kind: "goal-recovery")
             }
         } catch {
+            guard !stopped, generation == expected else { return }
             if !registered, !stopped, generation == expected {
                 // 初次数据库初始化可能短暂失败。留给下一次正常检查幂等登记，
                 // 不在本轮重试，也不更换 UUID 或复活已关闭实例。
@@ -223,7 +270,7 @@ final class ExecutorScheduler: ObservableObject {
     private func updateActivity() {
         if children.values.contains(where: { $0.isRunning })
             || ownedWorkers.contains(where: { Self.workerIsAlive($0) })
-            || ownershipUncertain || ownerRefresh != nil || (stopping && activity != nil) {
+            || ownershipReads.isUncertain || ownerRefresh != nil || (stopping && activity != nil) {
             if activity == nil {
                 activity = ProcessInfo.processInfo.beginActivity(
                     options: .idleSystemSleepDisabled, reason: "KaneoPilot 正在处理任务")
@@ -244,7 +291,7 @@ final class ExecutorScheduler: ObservableObject {
         }
     }
 
-    private func applyStatus(_ current: ExecutorStatusDTO) {
+    private func applyStatus(_ current: ExecutorStatusDTO, observedRevision: Int) -> Bool {
         status = current
         // 并发状态读取可能晚到；已经确认仍存活的本实例登记不能被旧快照清掉。
         var workers = current.ownedWorkers ?? []
@@ -255,13 +302,14 @@ final class ExecutorScheduler: ObservableObject {
             }) { workers.append(previous) }
         }
         ownedWorkers = workers
-        ownershipUncertain = false
+        let fresh = ownershipReads.acceptSuccess(observedRevision)
         updateActivity()
+        return fresh
     }
 
     /// runner 可能先于 detached worker 退出；读完登记前不能释放防休眠。
     private func refreshOwnershipAfterStageExit() {
-        ownershipUncertain = true
+        ownershipReads.markUncertain()
         ownerRefreshPending = true
         guard ownerRefresh == nil else { return }
         let expected = generation
@@ -270,13 +318,17 @@ final class ExecutorScheduler: ObservableObject {
             guard let self else { return }
             repeat {
                 self.ownerRefreshPending = false
+                let observedRevision = self.ownershipReads.captureRead()
                 do {
                     let current = try await self.client.run("executor-status", payload: ["instance_id": id],
                                                             timeout: 10, as: ExecutorStatusDTO.self)
                     guard !self.stopped, self.generation == expected else { break }
-                    self.applyStatus(current)
-                    self.error = nil
-                } catch { self.error = error.localizedDescription }
+                    if self.applyStatus(current, observedRevision: observedRevision) { self.error = nil }
+                } catch {
+                    guard !self.stopped, self.generation == expected else { break }
+                    self.ownershipReads.failRead()
+                    self.error = error.localizedDescription
+                }
             } while !self.stopped && self.ownerRefreshPending
             self.ownerRefresh = nil
             self.updateActivity()
@@ -356,7 +408,7 @@ final class ExecutorScheduler: ObservableObject {
             cleanupComplete = ownerClosed && finalRead && stagesExited && workersExited
             ownedWorkers = workers.filter { Self.workerIsAlive($0) }
             children = ownedStages.filter { $0.value.isRunning }
-            ownershipUncertain = !cleanupComplete && !finalRead
+            ownershipReads.reset(uncertain: !cleanupComplete && !finalRead)
             stopping = false
             error = cleanupComplete ? nil : "退出清理未完成：" + failures.joined(separator: "；") + "。请再次退出以重试。"
             updateActivity()

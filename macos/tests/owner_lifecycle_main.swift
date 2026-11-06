@@ -7,6 +7,7 @@ struct OwnerLifecycleFixtures {
     @MainActor static func main() async throws {
         let root = ProcessInfo.processInfo.environment["KANPILOT_OWNER_FIXTURE_ROOT"]!
         let mode = CommandLine.arguments[1]
+        if mode == "detached" { ownershipReadOrdering() }
         if mode == "real-core" {
             let path = ProcessInfo.processInfo.environment["KANPILOT_OWNER_REAL_CORE"]!
             let client = CoreClient(location: CoreLocation(path: path, usesPython: true))
@@ -125,8 +126,20 @@ struct OwnerLifecycleFixtures {
                 if !alive(stagePID) && scheduler.error?.contains("fixture stage-exit status unavailable") == true { break }
                 try await Task.sleep(nanoseconds: 20_000_000)
             }
-            guard !alive(stagePID), scheduler.error?.contains("fixture stage-exit status unavailable") == true,
-                  scheduler.status?.ownedWorkers?.isEmpty == true, scheduler.preventsIdleSleep else {
+            let stageExited = !alive(stagePID)
+            let failedRead = scheduler.error?.contains("fixture stage-exit status unavailable") == true
+            let knownOwnershipEmpty = scheduler.status?.ownedWorkers?.isEmpty == true
+            let sleepRetained = scheduler.preventsIdleSleep
+            guard stageExited, failedRead, knownOwnershipEmpty, sleepRetained else {
+                var details: [String: Any] = ["stage_exited": stageExited, "failed_read": failedRead,
+                                            "known_ownership_empty": knownOwnershipEmpty, "sleep_retained": sleepRetained,
+                                            "error": scheduler.error ?? ""]
+                if let fixture = try? await client.run("fixture-diagnostics", timeout: 2) { details["fixture"] = fixture }
+                if let data = try? JSONSerialization.data(withJSONObject: details, options: [.sortedKeys]) {
+                    FileHandle.standardError.write(Data("owner disabled-maintenance failure: ".utf8))
+                    FileHandle.standardError.write(data)
+                    FileHandle.standardError.write(Data("\n".utf8))
+                }
                 fatalError("failed exit read must retain sleep activity with empty known ownership")
             }
             // The one-shot failure has cleared. Only the disabled automatic maintenance
@@ -184,6 +197,46 @@ struct OwnerLifecycleFixtures {
             guard try String(contentsOfFile: root + "/stage-stop-state") == "stopped" else { fatalError("stage terminated before owner closed") }
         }
         print("owner lifecycle \(mode): passed")
+    }
+
+    static func ownershipReadOrdering() {
+        var reads = ExecutorOwnershipReadState()
+        let oldRound = reads.captureRead()
+        let oldPause = reads.captureRead()
+        reads.markUncertain()
+        let refresh = reads.captureRead()
+        reads.failRead()
+        guard !reads.acceptSuccess(oldRound), !reads.acceptSuccess(oldPause),
+              !reads.acceptSuccess(refresh), reads.isUncertain else {
+            fatalError("old round, pause or refresh success must not clear a newer ownership failure")
+        }
+        let recovered = reads.captureRead()
+        guard reads.acceptSuccess(recovered), !reads.isUncertain else {
+            fatalError("a new successful ownership read must recover uncertainty")
+        }
+
+        reads.markUncertain()
+        let firstRefresh = reads.captureRead()
+        reads.markUncertain()
+        guard !reads.acceptSuccess(firstRefresh), reads.isUncertain else {
+            fatalError("a second stage exit must invalidate the first in-flight refresh")
+        }
+        let pendingRefresh = reads.captureRead()
+        reads.failRead()
+        guard reads.isUncertain, !reads.acceptSuccess(pendingRefresh) else {
+            fatalError("a failed pending refresh must retain uncertain ownership")
+        }
+        let nextRead = reads.captureRead()
+        guard reads.acceptSuccess(nextRead), !reads.isUncertain else {
+            fatalError("subsequent maintenance must recover failed pending ownership")
+        }
+
+        let beforeReset = reads.captureRead()
+        reads.reset()
+        guard !reads.acceptSuccess(beforeReset), !reads.isUncertain else {
+            fatalError("an earlier lifecycle must not confirm the reset ownership state")
+        }
+        print("owner ownership-read ordering: passed")
     }
 
     @MainActor static func stop(_ scheduler: ExecutorScheduler) async -> Bool {
