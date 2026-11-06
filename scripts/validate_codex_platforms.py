@@ -472,12 +472,62 @@ def validate(args):
             for index, command in enumerate(spec["required_verification_commands"], 1):
                 contract.validate_spec(spec)
                 label = "restricted-verify-" + str(index)
-                run(sandbox_argv(environment, constants, spec, without_ci_signals(["/bin/sh", "-c", command])),
+                native_argv = sandbox_argv(environment, constants, spec,
+                                           without_ci_signals(["/bin/sh", "-c", command]))
+                native_argv.insert(native_argv.index("--"), "--log-denials")
+                run(native_argv,
                     cwd=app, env=child_env, evidence=evidence, label=label, timeout=1800, check=False)
                 record = json.loads((evidence / (label + ".json")).read_text(encoding="utf-8"))
                 native_results.append({"command": command, "exit_code": record["exit_code"], "log": record["log"]})
             report["native_commands"] = native_results
             failures = [item["log"] for item in native_results if item["exit_code"] != 0]
+            if failures:
+                # These are diagnostic attempts only. They never replace the
+                # original frozen commands or change the failing verdict.
+                diagnostics = []
+                for index, item in enumerate(native_results, 1):
+                    if index < 3 or item["exit_code"] == 0:
+                        continue
+                    label = "diagnostic-verbose-" + str(index)
+                    command = item["command"] + " --verbose"
+                    argv = sandbox_argv(environment, constants, spec,
+                                        without_ci_signals(["/bin/sh", "-c", command]))
+                    argv.insert(argv.index("--"), "--log-denials")
+                    try:
+                        run(argv, cwd=app, env=child_env, evidence=evidence,
+                            label=label, timeout=300, check=False)
+                        record = json.loads((evidence / (label + ".json")).read_text())
+                        diagnostics.append({"label": label, "exit_code": record["exit_code"]})
+                    except subprocess.TimeoutExpired:
+                        diagnostics.append({"label": label, "timed_out": True})
+                if native_results[2]["exit_code"] != 0:
+                    workspace = app / "macos/Runner.xcworkspace/contents.xcworkspacedata"
+                    if workspace.is_file():
+                        shutil.copyfile(workspace, evidence / "workspace.xml")
+                        write_json(evidence / "workspace-stat.json", {
+                            "directory": str(workspace.parent), "directory_mode": workspace.parent.stat().st_mode,
+                            "xml_bytes": workspace.stat().st_size, "xml_sha256": sha256(workspace)})
+                    for kind, path, remove_defaults in (("project", "macos/Runner.xcodeproj", False),
+                                                        ("workspace", "macos/Runner.xcworkspace", False),
+                                                        ("workspace", "macos/Runner.xcworkspace", True)):
+                        command = ["/usr/bin/xcrun", "xcodebuild", "-list", "-json", "-" + kind, path]
+                        if remove_defaults:
+                            command = ["/usr/bin/env", "-u", "XCODE_USER_DEFAULTS_FILE", *command]
+                        argv = sandbox_argv(environment, constants, spec, without_ci_signals(command))
+                        argv.insert(argv.index("--"), "--log-denials")
+                        label = "diagnostic-xcode-" + kind + ("-without-defaults" if remove_defaults else "")
+                        try:
+                            run(argv, cwd=app, env=child_env, evidence=evidence,
+                                label=label, timeout=120, check=False, separate_stderr=True)
+                        except subprocess.TimeoutExpired:
+                            diagnostics.append({"label": label, "timed_out": True})
+                gradle = Path(spec["tool_environment"]["environment"]["GRADLE_USER_HOME"])
+                for index, log in enumerate(sorted((gradle / "daemon").glob("*/daemon-*.out.log"))):
+                    if index >= 4 or not log.is_file() or log.is_symlink():
+                        continue
+                    (evidence / ("diagnostic-gradle-daemon-" + str(index) + ".log")).write_text(
+                        _log_tail(log, limit=4 * 1024 * 1024), encoding="utf-8")
+                report["diagnostic_attempts"] = diagnostics
             require(not failures, "Restricted native commands failed; see " + ", ".join(failures))
             require(java_probes["ipv4"] == {"exit_code": 0, "result": {"passed": True, "prefer_ipv4": True}},
                     "Frozen Java IPv4 loopback roundtrip failed")
