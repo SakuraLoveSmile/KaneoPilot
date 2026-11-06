@@ -34,7 +34,11 @@ if args and args[0] == 'sandbox':
         stream.write(json.dumps(args) + '\n')
     checks = dict.fromkeys(('config_write','temp_write','ipv4','ipv6','direct_denied','proxy_active','proxy_denied'), True)
     checks['ipv4'] = PREFLIGHT_OK
-    print(json.dumps({'v':1,'status':'passed' if all(checks.values()) else 'failed','checks':checks}))
+    receipt = {'v':1,'status':'passed' if all(checks.values()) else 'failed','checks':checks}
+    roots = json.loads(os.environ.get('KANPILOT_PROBE_WRITABLE_ROOTS', '[]'))
+    if roots:
+        receipt['writable_roots'] = dict.fromkeys(roots, True)
+    print(json.dumps(receipt))
     sys.exit(0)
 prompt = sys.stdin.read()
 Path(args[args.index('-o')+1] + '.prompt').write_text(prompt)
@@ -157,7 +161,11 @@ def test_dispatch_freezes_and_passes_only_flutter_cache_to_native_worker(factory
     assert config['default_permissions'] == profile_name
     assert config['shell_environment_policy']['set'] == spec['tool_environment']['environment']
     assert spec['stage_contract']['inputs']['tool_environment'] == spec['tool_environment']
-    assert json.loads((directory / 'codex-environment-1.json').read_text())['status'] == 'passed'
+    receipt = json.loads((directory / 'codex-environment-1.json').read_text())
+    assert receipt['status'] == 'passed'
+    analyzer = str(Path(spec['cwd']) / '.pi/kanpilot/codex' / identity['run_id'] / 'analyzer')
+    assert spec['tool_environment']['environment']['ANALYZER_STATE_LOCATION_OVERRIDE'] == analyzer
+    assert receipt['writable_roots'] == {analyzer: True}
     assert len((tmp_env.root / 'codex-preflights.jsonl').read_text().splitlines()) == 1
     assert 'approval_policy="never"' in argv
     assert (sdk / 'bin/cache/engine.realm').read_text() == 'fixture'

@@ -331,7 +331,9 @@ def validate(args):
             spec = make_spec(app, flutter, plan, adapter, environment, contract, util, suffix="cold")
             write_json(evidence / "spec.json", spec)
             private_config = Path(spec["tool_environment"]["environment"]["XDG_CONFIG_HOME"])
+            private_analyzer = Path(spec["tool_environment"]["environment"]["ANALYZER_STATE_LOCATION_OVERRIDE"])
             require(not private_config.exists(), "First Flutter invocation is not a cold configuration")
+            require(not private_analyzer.exists(), "First analyzer invocation is not a cold state")
             before = git_delivery.source_state_sha256(app)
             lock_before = sha256(app / "pubspec.lock")
             child_env = environment.child_env(spec, restricted_base)
@@ -365,8 +367,12 @@ def validate(args):
             host_config.mkdir(parents=True, exist_ok=True)
             host_sentinel = host_config / "sentinel"
             host_sentinel.write_text("unchanged\n", encoding="utf-8")
+            host_analyzer = Path.home() / ".dartServer/kanpilot-fixture-sentinel"
+            host_analyzer.parent.mkdir(parents=True, exist_ok=True)
+            host_analyzer.write_text("unchanged\n", encoding="utf-8")
             targets = {"sdk_source_denied": str(flutter.parent.parent / "packages/flutter_tools/lib/src/base/bot_detector.dart"),
-                       "host_config_denied": str(host_sentinel), "other_directory_denied": str(sentinel)}
+                       "host_config_denied": str(host_sentinel), "host_analyzer_denied": str(host_analyzer),
+                       "other_directory_denied": str(sentinel)}
             output = run(sandbox_argv(environment, constants, spec,
                                      without_ci_signals([sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])),
                          cwd=app, env=child_env, evidence=evidence, label="sandbox-denials", separate_stderr=True)
@@ -377,6 +383,11 @@ def validate(args):
                 run(sandbox_argv(environment, constants, spec, without_ci_signals(["/bin/sh", "-c", command])),
                     cwd=app, env=child_env, evidence=evidence, label="restricted-verify-" + str(index), timeout=1800)
             require(git_delivery.source_state_sha256(app) == before, "Verification changed fixture source")
+            analyzer_uuid = private_analyzer / ".instrumentation/uuid.txt"
+            require(analyzer_uuid.is_file() and analyzer_uuid.read_text().strip(),
+                    "Analysis server did not persist its identity in the frozen private directory")
+            require(host_analyzer.read_text() == "unchanged\n", "Verification changed the host analyzer sentinel")
+            report["private_analyzer_state"] = {"uuid_created": True, "host_analyzer_write_denied": True}
             report["checks"].append("all_four_frozen_native_commands_exit_zero")
             products = [app / "build/macos/Build/Products/Debug/fixture_app.app/Contents/MacOS/fixture_app",
                         app / "build/app/outputs/flutter-apk/app-debug.apk"]

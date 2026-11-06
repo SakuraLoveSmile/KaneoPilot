@@ -80,6 +80,9 @@ def _expected_v2(spec):
     root = Path(result["environment"]["TMPDIR"]).parent
     result.update(v=2, platforms=platforms, writable_roots=[])
     result["environment"]["BOT"] = "true"
+    # The Dart analyzer otherwise writes ~/.dartServer even when Flutter's
+    # own configuration has been redirected with XDG_CONFIG_HOME.
+    result["environment"]["ANALYZER_STATE_LOCATION_OVERRIDE"] = str(root / "analyzer")
     native = bool(platforms)
     binaries = {binary for binary, _ in commands}
     _require(not native or len(binaries) == 1, "同轮原生构建必须使用同一个冻结 Flutter SDK")
@@ -137,6 +140,7 @@ def _directory(spec, *, create=False):
             fd = child
         names = ["config", "tmp"]
         if (spec.get("tool_environment") or {}).get("v") == 2:
+            names.append("analyzer")
             setup = spec["tool_environment"]["setup"]
             if setup["pub_offline"]:
                 names.append("pub-cache")
@@ -327,9 +331,10 @@ except OSError:
 roots = {}
 for path in json.loads(os.environ.get("KANPILOT_PROBE_WRITABLE_ROOTS", "[]")):
     try:
-        with tempfile.TemporaryFile(dir=path) as stream:
-            stream.write(b"kanpilot"); stream.seek(0)
-            roots[path] = stream.read() == b"kanpilot"
+        with tempfile.TemporaryDirectory(dir=path) as nested:
+            with tempfile.TemporaryFile(dir=nested) as stream:
+                stream.write(b"kanpilot"); stream.seek(0)
+                roots[path] = stream.read() == b"kanpilot"
     except OSError:
         roots[path] = False
 result = {"v": 1, "status": "passed" if all(checks.values()) and all(roots.values()) else "failed", "checks": checks}
@@ -351,7 +356,9 @@ def preflight(spec, env, *, check=None):
         for path in roots:
             _walk_directory(path, create=True)
         private = environment["environment"]
-        probe_roots = list(roots) + [private[key] for key in ("PUB_CACHE", "GRADLE_USER_HOME") if key in private]
+        probe_roots = list(roots) + [private[key] for key in
+                                   ("ANALYZER_STATE_LOCATION_OVERRIDE", "PUB_CACHE", "GRADLE_USER_HOME")
+                                   if key in private]
         _prepare_settings(spec)
         argv = [constants.codex_bin(), "sandbox", "-P", permission_profile(spec), "-C", spec["cwd"]]
         argv += launcher_config(spec) + ["--", sys.executable, "-c", _PROBE]
@@ -369,7 +376,7 @@ def preflight(spec, env, *, check=None):
                  "Codex 工具环境预检失败：" + ", ".join(name for name in CHECKS if not isinstance(checks, dict) or checks.get(name) is not True))
         if probe_roots:
             _require(result.get("writable_roots") == {path: True for path in probe_roots},
-                     "Codex 原生构建缓存或宿主临时目录不可写")
+                     "Codex 工具状态、原生构建缓存或宿主临时目录不可写")
         receipt = {"v": environment["v"], "status": "passed", "checks": checks}
         if probe_roots:
             receipt["writable_roots"] = result["writable_roots"]

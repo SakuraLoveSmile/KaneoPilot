@@ -33,6 +33,11 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.root = self.root.resolve()
         self.repo = self.repo.resolve()
         self.spec.update(cwd=str(self.repo), repository=str(self.repo))
+        # The base fixture restores this environment at teardown, but retains
+        # ambient tool overrides unless they are explicitly isolated here.
+        os.environ.update(XDG_CONFIG_HOME=str(self.root / "host-xdg-config"),
+                          PUB_CACHE=str(self.root / ".pub-cache"),
+                          GRADLE_USER_HOME=str(self.root / ".gradle"))
 
     def freeze_flutter(self):
         sdk, binary = self.flutter_sdk()
@@ -63,6 +68,7 @@ class CodexEnvironmentTests(unittest.TestCase):
                 "TMPDIR": str(root / "tmp"),
                 "FLUTTER_SUPPRESS_ANALYTICS": "true",
                 "BOT": "true",
+                "ANALYZER_STATE_LOCATION_OVERRIDE": str(root / "analyzer"),
             },
             "network": {"enabled": True, "mode": "limited", "allow_local_binding": True,
                         "allow_upstream_proxy": False, "domains": {}},
@@ -115,6 +121,7 @@ class CodexEnvironmentTests(unittest.TestCase):
             ("extra key", lambda value: value.update(extra=True)),
             ("host config", lambda value: value["environment"].update(XDG_CONFIG_HOME=str(self.root))),
             ("temporary directory", lambda value: value["environment"].update(TMPDIR="/tmp")),
+            ("analyzer state", lambda value: value["environment"].update(ANALYZER_STATE_LOCATION_OVERRIDE=str(self.root))),
             ("analytics", lambda value: value["environment"].update(FLUTTER_SUPPRESS_ANALYTICS=False)),
             ("extra environment", lambda value: value["environment"].update(HOME=str(self.root))),
             ("network mode", lambda value: value["network"].update(mode="unrestricted")),
@@ -165,7 +172,7 @@ class CodexEnvironmentTests(unittest.TestCase):
         (external / "sentinel").write_text("unchanged")
         for component in (".pi", ".pi/kanpilot", ".pi/kanpilot/codex",
                           ".pi/kanpilot/codex/r", ".pi/kanpilot/codex/r/config",
-                          ".pi/kanpilot/codex/r/tmp"):
+                          ".pi/kanpilot/codex/r/tmp", ".pi/kanpilot/codex/r/analyzer"):
             path = self.repo / component
             path.parent.mkdir(parents=True, exist_ok=True)
             path.symlink_to(external, target_is_directory=True)
@@ -247,7 +254,7 @@ class CodexEnvironmentTests(unittest.TestCase):
     def test_private_runtime_files_do_not_change_verification_source_snapshot(self):
         self.freeze_flutter()
         before = git_delivery.source_state_sha256(self.repo)
-        for key in ("XDG_CONFIG_HOME", "TMPDIR"):
+        for key in ("XDG_CONFIG_HOME", "TMPDIR", "ANALYZER_STATE_LOCATION_OVERRIDE"):
             path = Path(self.spec["tool_environment"]["environment"][key])
             path.mkdir(parents=True, exist_ok=True)
             (path / "tool-state").write_text("runtime only")
@@ -272,7 +279,7 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.freeze_flutter()
         checks = {name: True for name in ("config_write", "temp_write", "ipv4", "ipv6",
                                           "direct_denied", "proxy_active", "proxy_denied")}
-        receipt = {"v": 1, "status": "passed", "checks": checks}
+        receipt = self.probe_receipt()
         result = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
         base = {"KEEP": "keep", "XDG_CONFIG_HOME": "/host/config"}
         with mock.patch.object(environment.subprocess, "run", return_value=result) as probe:
@@ -284,10 +291,10 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-P") + 1], environment.permission_profile(self.spec))
         self.assertEqual(self.configs(argv)["default_permissions"], environment.permission_profile(self.spec))
         self.assertEqual(kwargs["env"], {**environment.child_env(self.spec, base),
-                                       "KANPILOT_PROBE_WRITABLE_ROOTS": "[]"})
+                                       "KANPILOT_PROBE_WRITABLE_ROOTS": json.dumps(list(receipt["writable_roots"]))})
         self.assertTrue(kwargs["capture_output"])
         self.assertLessEqual(kwargs["timeout"], 30)
-        for key in ("XDG_CONFIG_HOME", "TMPDIR"):
+        for key in ("XDG_CONFIG_HOME", "TMPDIR", "ANALYZER_STATE_LOCATION_OVERRIDE"):
             self.assertTrue(Path(self.spec["tool_environment"]["environment"][key]).is_dir())
         damaged = []
         for name in checks:
@@ -300,6 +307,11 @@ class CodexEnvironmentTests(unittest.TestCase):
         numeric = copy.deepcopy(receipt)
         numeric["checks"]["direct_denied"] = 1
         damaged.append(numeric)
+        analyzer = self.spec["tool_environment"]["environment"]["ANALYZER_STATE_LOCATION_OVERRIDE"]
+        for writable_roots in ({}, {analyzer: False}):
+            value = copy.deepcopy(receipt)
+            value["writable_roots"] = writable_roots
+            damaged.append(value)
         for value in damaged:
             result = subprocess.CompletedProcess([], 0, json.dumps(value), "")
             with self.subTest(checks=value["checks"]), mock.patch.object(environment.subprocess, "run", return_value=result):
@@ -440,7 +452,8 @@ class CodexEnvironmentTests(unittest.TestCase):
     def probe_receipt(self):
         frozen = self.spec["tool_environment"]
         roots = frozen["writable_roots"] + [frozen["environment"][key]
-                 for key in ("PUB_CACHE", "GRADLE_USER_HOME") if key in frozen["environment"]]
+                 for key in ("ANALYZER_STATE_LOCATION_OVERRIDE", "PUB_CACHE", "GRADLE_USER_HOME")
+                 if key in frozen["environment"]]
         return {"v": 1, "status": "passed", "checks": {name: True for name in environment.CHECKS},
                 "writable_roots": {path: True for path in roots}}
 
@@ -478,11 +491,13 @@ class CodexEnvironmentTests(unittest.TestCase):
     def test_android_capability_uses_private_homes_and_only_readonly_dependency_cache(self):
         modules = self.root / ".gradle/caches/modules-2"
         modules.mkdir(parents=True)
-        settings = self.root / ".config/flutter/settings"
+        settings = Path(os.environ["XDG_CONFIG_HOME"]) / "settings"
         settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps({"jdk-dir": str(self.root / "jdk17"),
-                                        "android-sdk": str(self.root / "android-sdk"),
-                                        "api_key": "do-not-copy"}))
+        allowed_settings = {"jdk-dir": str(self.root / "jdk17"),
+                            "android-sdk": str(self.root / "android-sdk"),
+                            "android-studio-dir": str(self.root / "android-studio"),
+                            "enable-swift-package-manager": False, "enable-macos-desktop": True}
+        settings.write_text(json.dumps({**allowed_settings, "api_key": "do-not-copy"}))
         self.freeze_native()
         frozen = self.spec["tool_environment"]
         private = self.repo / ".pi/kanpilot/codex/r"
@@ -492,6 +507,9 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertEqual(frozen["environment"]["PUB_CACHE"], str(private / "pub-cache"))
         self.assertEqual(frozen["environment"]["GRADLE_RO_DEP_CACHE"], str(modules))
         self.assertEqual(frozen["environment"]["JAVA_HOME"], str(self.root / "jdk17"))
+        self.assertEqual(frozen["environment"]["ANDROID_HOME"], str(self.root / "android-sdk"))
+        self.assertEqual(frozen["environment"]["ANDROID_SDK_ROOT"], str(self.root / "android-sdk"))
+        self.assertEqual(frozen["setup"]["flutter_settings"], allowed_settings)
         self.assertNotIn("api_key", frozen["setup"]["flutter_settings"])
         profile = self.configs(environment.launcher_config(self.spec))
         filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
@@ -499,6 +517,17 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertNotIn(str(self.root / ".pub-cache"), filesystem)
         self.persist_contract()
         self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"], frozen)
+
+    def test_default_flutter_settings_without_xdg_are_consistent_on_linux_and_macos(self):
+        settings = self.root / ".config/flutter/settings"
+        settings.parent.mkdir(parents=True)
+        allowed = {"jdk-dir": str(self.root / "default-jdk"), "enable-macos-desktop": True}
+        settings.write_text(json.dumps({**allowed, "token": "do-not-copy"}))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            for platform in ("linux", "darwin"):
+                with self.subTest(platform=platform), mock.patch.object(environment.sys, "platform", platform):
+                    self.assertEqual(environment._flutter_settings(), allowed)
 
     def test_platform_capability_recognizes_only_direct_literal_build_commands(self):
         _, binary = self.flutter_sdk()
