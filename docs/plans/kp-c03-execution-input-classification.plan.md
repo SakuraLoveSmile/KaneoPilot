@@ -28,11 +28,16 @@ T3（主 agent）：检查组合态的 blocked 标签、计数、具体缺口、
 - 独立 reviewer（gpt-6.1-sol / high）发现并修正三项：新原因码须接入 Swift 现有重试资格/确认路由，防止遗漏当前 run；新原因码的 `resume` 须仅由用户明确发起，自动化在材料准备或远端读取前拒绝；缺材料导致 verify 未运行时 `needs_input` 允许只列已运行项，不能编造退出码。定点复核后未发现新的实质问题。主 agent 完成必要 Swift 小改与既有夹具断言，不改变布局或成功门禁。
 - 最终组合本地实测（Python 3.10.10；基线 HEAD + 本任务未提交差异）：`python -m pytest core/tests/test_execution_followup.py core/tests/test_codex_execution.py core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_codex_inputs.py core/tests/test_codex_verdict.py core/tests/test_auto_monitor.py core/tests/test_board.py core/tests/test_engine_board_attention.py -q`，退出 0，**282 passed + 68 subtests**，73.20 秒。受管进程组合 `python -m pytest tests/test_codex_dispatch.py -q`，退出 0，**7 passed**，43.82 秒。均为隔离 Git/DB/HOME/CLI/Kaneo 夹具，无真实模型、业务 verify 或生产服务访问。最终 `git diff --check` 通过。
 - 主 agent 经原生 UI 只读核实现用 `/Applications/KaneoPilot.app` 为 **v0.4.8 / build 138**：截图任务仍显示失败 1 / 阻塞 0，原因与原报告一致。该安装版本的核心和 Swift 均不识别新原因码的恢复语义，因此**当前原记录保持原样，待兼容版本可用后再更正**；不将候选代码中的恢复通过误当成已安装版本可继续。原任务成果与全部旧证据保留。
-- 候选源码/测试/协议指纹保存于 `build/kp-c03-evidence/source-snapshot.json`；该目录归本任务，保留用于后续云端对照。尚无提交/推送/合并/发布/安装，工作树保留继续本任务。
-- 下一步：取得提交并推送任务分支、运行 Packages 预览验证的授权；云端完成 Swift 编译及既有原生夹具，再用精确候选包核验“阻塞、待补充材料或决定、沿用计划重新执行”路径。正式发布/安装沿后续明确授权，兼容版本可用后再经核心命令更正原记录。必要验证尚未完成，维持“实现中”。
+- 候选源码/测试/协议指纹保存于 `build/kp-c03-evidence/source-snapshot.json`；该目录归本任务，保留用于后续云端对照。修复已签名提交并推送，尚无合并/发布/安装，工作树保留继续本任务。
+- 下一步：完成已获授权的 Packages 预览验证，云端完成 Swift 编译及既有原生夹具后，用精确候选包核验“阻塞、待补充材料或决定、沿用计划重新执行”路径。正式发布/安装沿后续明确授权，兼容版本可用后再经核心命令更正原记录。必要验证尚未完成，维持“实现中”。
 
 ## 2026-11-07 云端构建
 
 - 用户要求“构建新版本”，授权提交并推送当前修复分支，执行 Packages 默认 preview。分支构建产物版本为 `0.0.0`，build 取 Actions run number；正式 latest 当前为 `v0.4.8`。本次先完成可检查的两端构建及原生验收，不猜测稳定版本号。
 - 恢复时已核对路径、分支、HEAD、索引、未提交差异与全部 worktree；主仓无关文件仍保留。17 个源码/测试/协议文件与已测候选指纹 `9eabd1f83e8e076eff287eeff947a821e06d412ed550161ce8758915b065dc0f` 全部一致，因此沿用该精确差异的本地 282 tests + 68 subtests 和 7 项受管进程回归证据。
-- 下一步：记录提交与云端 run 身份，等待全部必需 job，通过后下载并核验两端产物，使用同 run 的独立签名 App 进行隔离原生界面检查。
+- 签名提交：`d147b66467c20245337adf59c0ea43adc1f19059`（Git 签名核验 `G`），已推送任务分支。push 自动触发 [Packages #139](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42263073806)，run ID `42263073806`，源码绑定同一提交，preview 版本 `0.0.0` / build `139`。未重复启动构建。
+- #139 两端打包与两组 Swift 夹具成功，但 `checks (4, 3.11)` / `checks (4, 3.13)` 的同一核心检查 `EventKindLabelParityTests.test_swift_map_matches_core_exactly` 失败：本次新增核心审计事件 `execution_classification_corrected`，遗漏 Swift 记录页的同名中文映射。已补齐“执行分类已更正”；不改测试预期或门禁。#139 不能作为完整通过交付。
+- #139 云端独立签名 App（`local.kaneopilot.software-update-check` / `0.0.0` / `139`）的 ZIP 源码身份、大小、SHA256、App 签名及 6 个相关 bundled core 文件与候选一致。以真实核心隔离夹具经 `resolve await_input` 得到的投影，配合既有 FakeCore 和独立根目录实测：看板 **阻塞 1 / 失败 0**；任务列表、需要你、详情均显示“待补充材料或决定”和具体设备/授权会话缺口；“重新执行（沿用计划）”确认说明保留原成果、工作树和执行记录，并明确会再次调用模型。已取消确认；命令日志无 `resolve/enqueue/session-request-start/start-task-ai-action`，只停止本任务预览进程 PID 28070。未改现用 App/业务 DB、未调用模型。
+- #139 DMG 与 APK 已下载到 `build/kp-c03-evidence/packages-139/`，元数据源码/build/版本、大小、SHA256 均匹配；DMG 签名指纹匹配。它们仅作失败构建诊断证据，最终交付等待修正后的全绿候选。
+- 补齐事件映射后本地运行 `python -m pytest core/tests/test_event_kind_labels.py -q`（Python 3.10.10），**5 passed**；`git diff --check` 通过。重推后继续完整 Packages，最终证据绑定新提交与新 run，#139 的界面观察仅保留为此前候选实测。
+- 下一步：等待全部必需 job，通过后下载并核验两端产物，使用同 run 的独立签名 App 进行隔离原生界面检查。

@@ -226,6 +226,7 @@ enum Labels {
         case "execution_question_opened": return "执行中提问"
         case "execution_question_answered": return "执行问题已回答"
         case "execution_question_closed": return "执行问题已关闭"
+        case "execution_classification_corrected": return "执行分类已更正"
         case "plan_started": return "规划已排队"
         case "plan_ready": return "规划产出就绪"
         case "plan_needs_input": return "规划需要补充输入"
