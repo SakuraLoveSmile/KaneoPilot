@@ -9,6 +9,7 @@ installed KaneoPilot, provider credentials, or business worktree is used.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -69,24 +70,44 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def run(argv, *, cwd, env, evidence, label, timeout=900, check=True):
+def _log_tail(path, limit=12000):
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - limit))
+        return stream.read().decode("utf-8", errors="replace")
+
+
+def run(argv, *, cwd, env, evidence, label, timeout=900, check=True, separate_stderr=False):
+    """Stream native output to evidence files; never buffer full build output."""
+    print("Starting " + label, flush=True)
     log = evidence / (label + ".log")
-    with log.open("w", encoding="utf-8") as output:
+    error_log = evidence / (label + ".stderr.log") if separate_stderr else None
+    with contextlib.ExitStack() as streams:
+        output = streams.enter_context(log.open("w", encoding="utf-8"))
+        errors = (streams.enter_context(error_log.open("w", encoding="utf-8"))
+                  if error_log else subprocess.STDOUT)
         result = subprocess.run(argv, cwd=cwd, env=env, stdout=output,
-                                stderr=subprocess.STDOUT, text=True, timeout=timeout)
+                                stderr=errors, text=True, timeout=timeout)
     record = {"argv": [str(arg) for arg in argv], "exit_code": result.returncode,
               "log": log.name, "log_sha256": sha256(log)}
+    if error_log:
+        record.update(stderr_log=error_log.name, stderr_sha256=sha256(error_log))
     write_json(evidence / (label + ".json"), record)
+    print("Finished " + label + ": exit " + str(result.returncode), flush=True)
     if result.returncode:
-        print(log.read_text(encoding="utf-8", errors="replace")[-12000:], file=sys.stderr)
+        print(_log_tail(log), file=sys.stderr)
+        if error_log:
+            print(_log_tail(error_log), file=sys.stderr)
     if check:
         require(result.returncode == 0, label + " failed; see " + log.name)
-    return log.read_text(encoding="utf-8")
+    return log
 
 
 def restricted_environment(base):
     """Keep cloud control signals out of the actual restricted tool process."""
-    return {key: value for key, value in base.items() if key not in BOT_DETECTOR_SIGNALS}
+    return {key: value for key, value in base.items()
+            if key not in BOT_DETECTOR_SIGNALS
+            and key != "ORG_GRADLE_PROJECT_kotlin.compiler.execution.strategy"}
 
 
 def without_ci_signals(command, *, remove_bot=False):
@@ -191,7 +212,11 @@ def build_fixture(flutter, root, evidence, env):
     run([str(flutter), "pub", "get"], cwd=app, env=env, evidence=evidence, label="online-pub-get")
     run([str(flutter), "build", "macos", "--debug", "--no-pub"], cwd=app, env=env,
         evidence=evidence, label="online-warm-macos", timeout=1800)
-    run([str(flutter), "build", "apk", "--debug", "--no-pub"], cwd=app, env=env,
+    # Warm dependencies without leaving an unrestricted Kotlin daemon that
+    # could service the subsequent restricted build. Keep its default strategy
+    # for the restricted phase so native sandbox requirements remain visible.
+    warm_android_env = {**env, "ORG_GRADLE_PROJECT_kotlin.compiler.execution.strategy": "in-process"}
+    run([str(flutter), "build", "apk", "--debug", "--no-pub"], cwd=app, env=warm_android_env,
         evidence=evidence, label="online-warm-android", timeout=1800)
     require((app / GENERATED_PACKAGE).is_file(), "Warm build did not generate the SwiftPM package")
     commit_fixture(app)
@@ -270,18 +295,25 @@ def validate(args):
                    XDG_CONFIG_HOME=str(root / "host-config"), CODEX_HOME=str(root / "codex-home"))
         for name in ("PUB_CACHE", "GRADLE_USER_HOME", "XDG_CONFIG_HOME", "CODEX_HOME"):
             Path(env[name]).mkdir()
-        version = json.loads(run([str(flutter), "--version", "--machine"], cwd=root, env=env,
-                                 evidence=evidence, label="tool-flutter-version"))
+        # shared.sh bootstraps the tool on first invocation. Its Dart download
+        # helper redirects curl progress to stdout, even for --machine. Finish
+        # that explicit online preparation before requesting strict JSON.
+        run([str(flutter), "precache", "--android", "--macos"], cwd=root, env=env,
+            evidence=evidence, label="online-precache", timeout=1800)
+        version_log = run([str(flutter), "--version", "--machine"], cwd=root, env=env,
+                          evidence=evidence, label="tool-flutter-version", separate_stderr=True)
+        version = json.loads(version_log.read_text(encoding="utf-8"))
         require(version["frameworkVersion"] == FLUTTER_VERSION
                 and version["dartSdkVersion"] == DART_VERSION, "Flutter/Dart version differs")
         codex = shutil.which("codex")
         require(codex, "Codex CLI is unavailable")
-        codex_version = run([codex, "--version"], cwd=root, env=env, evidence=evidence, label="tool-codex-version")
+        codex_version = run([codex, "--version"], cwd=root, env=env, evidence=evidence,
+                            label="tool-codex-version", separate_stderr=True).read_text(encoding="utf-8")
         require(codex_version.strip() == "codex-cli " + CODEX_VERSION, "Codex CLI version differs")
         report["tools"] = {"flutter": version, "codex": codex_version.strip(), "python": sys.version,
                            "macos": platform.mac_ver(), "machine": platform.machine()}
-        run([str(flutter), "precache", "--android", "--macos"], cwd=root, env=env,
-            evidence=evidence, label="online-precache", timeout=1800)
+        report["kotlin_compilation"] = {"online_warm_strategy": "in-process",
+                                        "restricted_strategy": "project default; no environment override"}
         app = build_fixture(flutter, root, evidence, env)
         # Import only after the cloud guard and isolated cache environment exist.
         sys.path.insert(0, str(REPOSITORY / "core"))
@@ -306,8 +338,9 @@ def validate(args):
             bot_environment = run(sandbox_argv(environment, constants, spec,
                                               without_ci_signals([sys.executable, "-c", _BOT_ENV_PROBE,
                                                                   json.dumps(BOT_DETECTOR_SIGNALS)])),
-                                  cwd=app, env=child_env, evidence=evidence, label="cold-bot-environment")
-            report["bot_detector"]["actual_sandbox_environment"] = json.loads(bot_environment)
+                                  cwd=app, env=child_env, evidence=evidence, label="cold-bot-environment",
+                                  separate_stderr=True)
+            report["bot_detector"]["actual_sandbox_environment"] = json.loads(bot_environment.read_text(encoding="utf-8"))
             require(not private_config.exists(), "Environment probe unexpectedly warmed Flutter configuration")
             receipt = environment.preflight(spec, restricted_base)
             write_json(evidence / "cold-preflight.json", receipt)
@@ -336,8 +369,8 @@ def validate(args):
                        "host_config_denied": str(host_sentinel), "other_directory_denied": str(sentinel)}
             output = run(sandbox_argv(environment, constants, spec,
                                      without_ci_signals([sys.executable, "-c", _PERMISSION_PROBE, json.dumps(targets)])),
-                         cwd=app, env=child_env, evidence=evidence, label="sandbox-denials")
-            report["permission_checks"] = json.loads(output)
+                         cwd=app, env=child_env, evidence=evidence, label="sandbox-denials", separate_stderr=True)
+            report["permission_checks"] = json.loads(output.read_text(encoding="utf-8"))
             report["checks"].append("readonly_boundaries_and_preflight_network_denials")
             for index, command in enumerate(spec["required_verification_commands"], 1):
                 contract.validate_spec(spec)
@@ -363,7 +396,7 @@ def validate(args):
             no_bot_argv.insert(no_bot_argv.index("--"), "--log-denials")
             no_bot_output = run(no_bot_argv, cwd=app, env=child_env, evidence=evidence,
                                 label="cold-without-bot", timeout=900, check=False)
-            denied = metadata_denials(no_bot_output)
+            denied = metadata_denials(no_bot_output.read_text(encoding="utf-8"))
             require(bool(denied), "No-BOT counterexample did not capture a specific 169.254.169.254 denial")
             report["bot_detector"]["without_bot_metadata_denials"] = denied
             report["checks"].append("no_bot_cold_counterexample_attempts_denied_metadata")

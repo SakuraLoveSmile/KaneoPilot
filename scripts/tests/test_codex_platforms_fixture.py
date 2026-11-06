@@ -1,5 +1,6 @@
 """Fixture guard and reset checks; never download tools or start a compiler."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -18,9 +19,51 @@ SPEC.loader.exec_module(fixture)
 
 
 class CodexPlatformFixtureTests(unittest.TestCase):
+    def test_machine_output_keeps_stderr_diagnostics_out_of_strict_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            command = [sys.executable, "-c", "import json,sys; "
+                       "print('Building flutter tool...',file=sys.stderr); "
+                       "print('Resolving tool dependencies...',file=sys.stderr); "
+                       "print(json.dumps({'frameworkVersion':'3.47.7'}))"]
+            log = fixture.run(command, cwd=evidence, env=os.environ.copy(), evidence=evidence,
+                              label="machine", separate_stderr=True)
+            self.assertEqual(json.loads(log.read_text()), {"frameworkVersion": "3.47.7"})
+            errors = evidence / "machine.stderr.log"
+            self.assertEqual(errors.read_text(), "Building flutter tool...\nResolving tool dependencies...\n")
+            record = json.loads((evidence / "machine.json").read_text())
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["stderr_log"], errors.name)
+            self.assertEqual(record["stderr_sha256"], fixture.sha256(errors))
+
+    def test_machine_output_does_not_filter_non_json_stdout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            log = fixture.run([sys.executable, "-c", "print('bootstrap on stdout'); print('{}')"],
+                              cwd=evidence, env=os.environ.copy(), evidence=evidence, label="polluted",
+                              separate_stderr=True)
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(log.read_text())
+            self.assertEqual(log.read_text(), "bootstrap on stdout\n{}\n")
+
+    def test_native_build_output_stays_in_files_and_actual_exit_code_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary)
+            diagnostic = io.StringIO()
+            with mock.patch.object(Path, "read_text", side_effect=AssertionError("must not read full native log")), \
+                    mock.patch.object(fixture.sys, "stderr", diagnostic):
+                log = fixture.run([sys.executable, "-c", "import sys; sys.stdout.write('x'*200000); sys.exit(7)"],
+                                  cwd=evidence, env=os.environ.copy(), evidence=evidence, label="native", check=False)
+            self.assertEqual(log.stat().st_size, 200000)
+            self.assertEqual(len(diagnostic.getvalue()), 12001)
+            record = json.loads((evidence / "native.json").read_text())
+            self.assertEqual(record["exit_code"], 7)
+            self.assertNotIn("stderr_log", record)
+
     def test_restricted_base_removes_every_bot_signal_without_changing_tool_paths(self):
         original = {name: "false" for name in fixture.BOT_DETECTOR_SIGNALS}
         original.update(PUB_CACHE="/fixture/pub", GRADLE_USER_HOME="/fixture/gradle", JAVA_HOME="/fixture/java")
+        original["ORG_GRADLE_PROJECT_kotlin.compiler.execution.strategy"] = "in-process"
         actual = fixture.restricted_environment(original)
         self.assertEqual(actual, {"PUB_CACHE": "/fixture/pub", "GRADLE_USER_HOME": "/fixture/gradle",
                                   "JAVA_HOME": "/fixture/java"})

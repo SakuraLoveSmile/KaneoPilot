@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：实现中（正式 v0.4.6 / build 118 已发布，本机已安装该版本；2026-11-06 真实新轮次暴露平台构建前置条件和诊断信息遗漏。本次彻查已完成，尚未实施后续修复，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”。
+状态：实现中（正式 v0.4.6 / build 118 已发布，本机已安装该版本；2026-11-06 真实新轮次暴露平台构建前置条件和诊断信息遗漏。本次修复已实现，云端真实平台验收与正式 v0.4.7 发布进行中，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”和“发布正式 v0.4.7”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -176,3 +176,5 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 
 - 候选 `c061104` 的 Packages #119 / 42166020491 被后续分支 push 按既有并发规则取消，不是代码门禁失败。独立审查后补齐“准备进程组清理未确认”的持久错误路径与 v0.4.7 说明，提交 `6aa3457`；定向 environment/setup 共 45 passed + 55 subtests，workflow 25 tests OK。原生夹具改为与其他检查并行，publish 仍等待所有检查，未降低门禁。
 - #120 / 42166798545 的 native job 127725446372 实际获 runner，12 秒内在 SDK 准备失败；原生日志明确请求 `commandlinetools-mac-15859902_latest.zip` 返回404，未进入 Flutter 安装或平台构建。这是新增夹具选错下载编号，非业务任务验证失败或 macOS runner 容量。按同一 runner 回执中的已安装 command-line tools 16.0 改为直接核对并使用该工具，SDK36/build-tools36/NDK28.2 仍固定。原始回执/日志在任务独立归档 cloud-120-jobs.json / cloud-120-native.log；新源码继续完整云端门禁。
+- #121 / 42167442864（`074d187`）的 Android SDK 和 Flutter/Codex 安装已成功；native job 127727260951 首次 Flutter 版本命令退出 0，但 SDK bootstrap/curl 进度混入 stdout，使严格 JSON 解析失败，尚未进入平台构建。归档 `cloud-121-native-evidence.zip` 保留原始日志，确认版本为 Flutter 3.47.7 / Dart 3.13.5。现将既有 online precache 提前完成 bootstrap，结构化命令分开保存 stdout/stderr 与各自哈希，仍严格解析完整 stdout；build 日志流式写文件，失败只展示末 12KB，保留实际退出码，阶段开始/结束实时输出。
+- 夹具审查另核实 Kotlin 默认 daemon 可能复用；`org.gradle.daemon=false` 仅关闭 Gradle daemon，不足以证明 Kotlin 编译隔离。仅 online warm APK 通过 Gradle project 环境键使用 in-process，restricted base 显式移除此覆盖并保持项目默认策略，不改生产能力、不处理未知 PID。该风险由 Gradle 9.3.1/Kotlin 2.4.0 源码和官方文档确认，不宣称旧 run 已发生沙箱外编译。当前 fixture 隔离检查 **10 passed + 5 subtests**，diff check 通过；实际平台结果以新候选云端为准。
