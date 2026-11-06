@@ -1,0 +1,87 @@
+name: Codex native platform sandbox
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Immutable source commit selected by Packages identity
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-platforms-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-platforms:
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          cmdline-tools-version: '15859902'
+          log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
+      - name: Install pinned Flutter source and Codex CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          flutter_root="$RUNNER_TEMP/flutter-3.47.7"
+          git init --quiet "$flutter_root"
+          git -C "$flutter_root" remote add origin https://github.com/flutter/flutter.git
+          git -C "$flutter_root" fetch --depth=1 origin refs/tags/3.47.7:refs/tags/3.47.7
+          test "$(git -C "$flutter_root" rev-parse refs/tags/3.47.7)" = abaf9c523780a608bd46686fd5e53740a07077f8
+          git -C "$flutter_root" checkout --quiet --detach refs/tags/3.47.7
+          echo "FLUTTER_FIXTURE_BIN=$flutter_root/bin/flutter" >> "$GITHUB_ENV"
+          codex_root="$RUNNER_TEMP/codex-0.164.0"
+          mkdir "$codex_root"
+          cd "$codex_root"
+          echo '{"private":true,"dependencies":{"@openai/codex":"0.164.0"}}' > package.json
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          packages = json.loads(Path('package-lock.json').read_text())['packages']
+          expected = {
+              'node_modules/@openai/codex': 'sha512-TWj7UGyPRe3Pj/A3ddNAxs1te3a/W/xAd+J0LHrrFTmsSfahGMOLF/vn88D3QCIgAT3B1rm1y/Z3NYE0rx6cZQ==',
+              'node_modules/@openai/codex-darwin-arm64': 'sha512-pDizgOUAtq3/k3AbUFHbaU19WpYKCja+oFpNSTLKrDQj4lTUNSDuTPJip4uQVn2/1EipQdpQrGMOQBVuI1znAA==',
+          }
+          for name, integrity in expected.items():
+              assert packages[name]['integrity'] == integrity, 'Pinned npm integrity differs: ' + name
+          PY
+          npm ci --ignore-scripts --no-audit --no-fund
+          echo "$codex_root/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Verify cold native builds and denied permissions without a model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_codex_platforms.py --flutter "$FLUTTER_FIXTURE_BIN" --output "$RUNNER_TEMP/codex-platforms"
+      - name: Preserve native command and permission evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-platforms-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-platforms/evidence
+          if-no-files-found: warn
+          retention-days: 14

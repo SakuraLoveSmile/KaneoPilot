@@ -12,6 +12,17 @@ _OLD_BACKENDS = ("dsh", "headless", "atif", "ATIF")
 _GOAL_FAILURES = ("goal_contract_missing", "goal_approval_failed", "goal_execution_unstarted")
 
 
+def _terminal_detail(detail, terminal):
+    parts = []
+    for value in (terminal.get("detail"), terminal.get("reason"), detail.get("detail")):
+        value = util.redact(str(value)).strip() if value else ""
+        if not value or any(value in existing for existing in parts):
+            continue
+        parts = [existing for existing in parts if existing not in value]
+        parts.append(value)
+    return "；".join(parts)
+
+
 def _get_task(controller):
     return controller.call("get-task", {"task_id": controller.claim["context"]["task_id"]})["task"]
 
@@ -212,19 +223,26 @@ def _monitor(controller):
             _running(controller, "执行已完成，正在收尾")
             return
         terminal = detail.get("terminal") or {}
-        terminal_detail = "；".join(str(value) for value in
-                                   (terminal.get("detail"), terminal.get("reason"), detail.get("detail")) if value)
+        # Preserve the existing failure gates even if redaction removes a marker.
+        failure_text = "\n".join(str(value) for value in
+                                 (terminal.get("detail"), terminal.get("reason"), detail.get("detail")) if value)
+        terminal_detail = _terminal_detail(detail, terminal)
         outcome = terminal.get("outcome")
-        failure = (any(code in terminal_detail for code in _GOAL_FAILURES)
+        failure = (any(code in failure_text for code in _GOAL_FAILURES)
                    or outcome in ("failed", "error", "aborted", "timeout", "truncated")
                    or detail.get("run_status") in ("failed", "timeout", "truncated")
                    or detail.get("send_state") == "unknown"
-                   or any(marker in terminal_detail for marker in
+                   or any(marker in failure_text for marker in
                           ("transcript_incomplete", "turn_identity_mismatch", "identity_mismatch", "截断", "超时"))
                    or (type(detail.get("exit_code")) is int and detail["exit_code"] != 0)
                    or terminal.get("truncated") is True or detail.get("truncated") is True)
         if failure:
-            controller.report("needs_user", failure_code="execution_failed", note=terminal_detail or "执行轮次明确失败")
+            # Evaluate failure markers before clipping historical unbounded notes.
+            suffix = "…（已截断）"
+            note = terminal_detail or "执行轮次明确失败"
+            if len(note) > 8192:
+                note = note[:8192 - len(suffix)] + suffix
+            controller.report("needs_user", failure_code="execution_failed", note=note)
             return
         messages = [] if backend == "codex" else _read_messages(controller, task)
         if outcome == "completed" and detail.get("run_status") == "finished":

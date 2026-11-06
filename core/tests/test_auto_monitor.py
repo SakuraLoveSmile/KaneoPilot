@@ -415,6 +415,53 @@ def test_codex_settled_failure_enters_attention_with_terminal_reason(monkeypatch
                    for c, _ in calls)
 
 
+@pytest.mark.parametrize("generic", [False, True])
+def test_codex_failure_note_deduplicates_terminal_and_job_details(monkeypatch, tmp_path, generic):
+    reason = "Codex 报告执行失败"
+    specific = reason if generic else reason + "；Flutter 构建缺少临时目录权限；flutter build macos（exit_code=1）"
+    value = dict(detail(), backend="codex", run_status="failed", exit_code=3,
+        terminal={"outcome":"failed", "detail":reason, "reason":specific}, detail="  " + specific + "  ")
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value)
+    result = report(calls)
+    assert result["outcome"] == "needs_user"
+    assert result["failure_code"] == "execution_failed"
+    assert result["note"] == specific
+    assert not any(c in ("engine-verdict", "delivery-commit", "advance-task") for c, _ in calls)
+
+
+def test_codex_failure_note_redacts_and_retains_distinct_details(monkeypatch, tmp_path):
+    value = dict(detail(), backend="codex", run_status="failed", exit_code=3,
+        terminal={"outcome":"failed", "detail":"Flutter 临时文件写入被拒绝",
+                  "reason":"token=credential-private-value flutter build macos（exit_code=7）"},
+        detail="token=credential-private-value flutter build macos（exit_code=7）")
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value)
+    note = report(calls)["note"]
+    assert note == "Flutter 临时文件写入被拒绝；token=«redacted» flutter build macos（exit_code=7）"
+    assert "credential-private-value" not in note
+
+
+def test_failure_note_limit_does_not_hide_late_failure_gate(monkeypatch, tmp_path):
+    value = dict(detail(), backend="codex", detail="x"*9000 + " goal_contract_missing token=private-credential-value")
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value)
+    result = report(calls)
+    assert result["outcome"] == "needs_user"
+    assert result["failure_code"] == "execution_failed"
+    assert len(result["note"]) <= 8192
+    assert result["note"].endswith("…（已截断）")
+    assert "private-credential-value" not in result["note"]
+    assert not any(c in ("engine-verdict", "advance-task") for c, _ in calls)
+
+
+def test_failure_note_redaction_does_not_remove_existing_failure_gate(monkeypatch, tmp_path):
+    value = dict(detail(), backend="codex", detail="token=goal_contract_missing_private_value")
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value)
+    result = report(calls)
+    assert result["outcome"] == "needs_user"
+    assert result["failure_code"] == "execution_failed"
+    assert result["note"] == "token=«redacted»"
+    assert not any(c in ("engine-verdict", "advance-task") for c, _ in calls)
+
+
 @pytest.mark.parametrize("status", ["observing", "finished"])
 def test_codex_observation_preserves_running_and_success_paths(monkeypatch, tmp_path, status):
     value = dict(detail(), backend="codex", observer_alive=False)

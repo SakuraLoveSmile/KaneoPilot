@@ -206,7 +206,14 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertTrue(gates <= set(needs_of(publish)), gates)
         self.assertTrue(set(needs_of(publish)) <= set(JOBS), needs_of(publish))
         # Every shard of a matrix job reports through that job's single aggregate result.
-        self.assertEqual(gates, {"checks", "android", "macos-fixtures", "macos-package"})
+        self.assertEqual(gates, {"checks", "android", "macos-fixtures", "macos-package", "codex-platforms"})
+
+    def test_codex_native_platform_fixture_gates_the_exact_source_release(self):
+        job = JOBS["codex-platforms"]
+        self.assertEqual(needs_of(job), ["identity", "checks"])
+        self.assertEqual(job["uses"], "./.github/workflows/codex-platforms.yml")
+        self.assertEqual(job["with"]["source_sha"], "${{ needs.identity.outputs.sha }}")
+        self.assertIn("codex-platforms", needs_of(JOBS["publish"]))
 
     def test_publish_waits_for_the_jobs_that_feed_release_artifacts(self):
         needs = needs_of(JOBS["publish"])

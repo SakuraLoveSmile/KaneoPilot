@@ -127,6 +127,8 @@ macOS 使用 GitHub 托管 macOS runner（Apple Silicon）构建仅含 arm64 的
 
 只有发布 job 获得 `contents: write`。发布前再次核对远端 annotated tag 的提交和注释，以固定构建身份创建或继续自己的 draft；已有文件必须逐一哈希相同，缺失文件上传后读回验证，全部完成才去掉 draft。发布正文保留版本说明和真实安装要求。
 
+`codex-platforms` 是 Packages 的必需发布门禁：在固定工具版本的 GitHub-hosted macOS arm64 runner 上，用专用含 SwiftPM 插件的 Flutter 工程验证实际 Codex 沙箱的冷启动、离线平台准备、analyze/test、macOS/APK 构建、只读权限反例及 resume。该夹具不调用模型或生产 DB；其通过证明所列工具/夹具范围，不能代替用户业务任务或实体设备验收。日志、冻结 spec、原生命令退出码和产物指纹作为 `codex-platforms-<run>-<attempt>` artifact 保留；失败阻止 Release，不以 KaneoPilot 自身打包通过代替。
+
 本工作流只有最终 `publish` job 使用共享并发锁，避免两次发布同时修改 latest；检查和构建仍按各自标签运行。GitHub concurrency 不是可靠队列，新的等待 job 可能替换原等待 job，因此仍须遵守一次发布一个版本。只有比当前 latest 稳定版本更高的版本才设为 latest；补发旧版本不会将稳定下载入口降级。无法识别当前 latest 版本时明确受阻，需维护者核对，不能猜测。
 
 ### 内置 Python 运行时与架构

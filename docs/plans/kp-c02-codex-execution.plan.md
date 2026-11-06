@@ -1,6 +1,6 @@
 # KP-C02：Codex 执行权限与失败收尾修复
 
-状态：待体验（2026-11-06 正式 v0.4.6 / build 118 已发布，云端门禁与公开两端安装包核验通过；未安装或重试原任务，安装版仍为 0.4.5，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”。
+状态：实现中（正式 v0.4.6 / build 118 已发布，本机已安装该版本；2026-11-06 真实新轮次暴露平台构建前置条件和诊断信息遗漏。本次彻查已完成，尚未实施后续修复，详见文末）。用户于 2026-11-04 要求修复会话 `01a1a6cc-2c36-7bd1-a606-c65cf2ce2f33` 暴露的问题，随后要求“构建新版本”，并明确选择“正式 v0.4.5：合入 main，发布正式更新”；后续修复版本已明确确认“发布正式 v0.4.6”。
 
 - 目标：冻结 verify 中直接调用的 Flutter 能写入自身 SDK 缓存及本轮工具配置、使用本地测试所需回环通信，同时限制工作区外写入与公网；Codex 收到正确的 JSON 报告要求；失败轮次进入需要处理状态，保留原始原因和未提交成果。
 - 范围：KaneoPilot 核心和隔离回归测试。不改 MediaPlayer 源码、冻结计划或旧执行证据，不代跑其 verify，不发起付费模型执行。
@@ -135,3 +135,41 @@ T7（主 agent）：在最终组合态运行适用的 Python 隔离检查和受�
 - 公开说明已移除 Git 标签签名 armor 并恢复 Markdown 标题，保留原版本说明、来源 marker 与工作流安装要求；读回确认 Release 身份、四项资产 ID/大小/digest、latest、标签对象和目标源码均不变。只改发布正文，未覆盖标签或资产；回执为 `release-body-cleanup.json`。
 - 本轮发布不包含安装、重试原业务任务、真实模型调用或生产 DB 写入；原业务工作树与已安装 `0.4.5 / 116` 保留。
 - 后续体验：安装正式包后核对环境预检和失败原因；如需继续原任务，显式发起新轮次。原业务 verify、真实模型、macOS/APK 业务构建及实体设备仍未重跑，本记录不将云端或最小 Flutter 工程检查等同于这些验收。临时修复工作树和已合并本地分支已在前述收尾中移除，本次发布未新增工作树；其他任务、主仓无关文件及独立归档保留。
+
+## 2026-11-06 真实任务再次失败：只读彻查
+
+- 用户要求“任务又执行失败了，需要你彻查原因”。本轮以只读核心命令和已落盘原生证据调查，不修改业务源码、冻结计划、生产任务状态或原始证据，不发起模型、构建、verify 或重试；仅补充本权威记录与独立诊断证据。主 agent 核对版本、逐条原生命令退出码、证据指纹与失败信息传递；两名 analyst（gpt-6.1-sol/high）分别只读核查平台构建环境/验收覆盖和 macOS 生成物/工作树准备链，无文件写入者冲突。
+- 当前安装版实测 **0.4.6 / 118**；五个关键核心模块与主仓 `20696271f16bf399b2010f63bce8a64e6299206c` 一致。失败任务仍为 `csim4lhdf81m1k7wib615fdv`（MediaPlayer，“希望能够正常观看剧集”），本轮 run **`43875508-417f-4483-9df0-699ed0e8b031`**，会话 **`01a1aeef-4a14-71e1-91c6-3a8e8dd7ed24`**，实际执行时间台北 **11:37:59–11:47:11**。只读状态为 `needs_user / execution_failed`，没有重现旧监控一直 running 的问题；`last_progress` 仍是历史“本轮仍在运行”，不作为当前状态依据。
+- 原始证据根目录为 `/Users/sakurasep/Library/Application Support/KaneoPilot/runs/csim4lhdf81m1k7wib615fdv/43875508-417f-4483-9df0-699ed0e8b031/`。`execution_contract.validate_spec(spec, job=job)` 只读校验通过；spec、原生事件和最终 JSON 的哈希逐一匹配 job。CLI 正常退出 **0** 并明确返回 `status: failed`，受管 worker 因该报告退出 **3**；不是 CLI 崩溃、服务商断线或没有生成最终报告。
+
+| 最终冻结命令 | 原生退出码与结果 | 原生 JSONL 行 |
+| --- | --- | --- |
+| `./tool/check_layering.sh` | 0，layering ok | 137 |
+| `~/devsdk/flutter/bin/flutter analyze --no-pub` | 0，No issues found | 139 |
+| `~/devsdk/flutter/bin/flutter test --no-pub` | 0，363 tests passed | 141 |
+| `LANG=en_US.UTF-8 ~/devsdk/flutter/bin/flutter build macos --debug --no-pub` | 1，SPM 本地生成包缺失，且 Xcode 宿主写路径被拒 | 143 |
+| `~/devsdk/flutter/bin/flutter build apk --debug --no-pub` | 1，Gradle wrapper 锁文件写入 EPERM | 145 |
+
+- **确定根因一：构建所需权限/目录没有进入冻结环境。** 当前 `codex_environment.py` 只定向本轮 XDG_CONFIG_HOME/TMPDIR/analytics，额外可写根只有 Flutter `bin/cache`。Android 仍使用宿主 `~/.gradle/wrapper/dists/gradle-9.3.1-all/9ot9r568e8zfvvd4mn8rbu1j0/gradle-9.3.1-all.zip.lck`，在 `ExclusiveFileAccessManager` 以写方式打开时即 `Operation not permitted`。只读确认该分发包、解包目录和锁文件均已存在；Flutter 随后的“downloading artifacts”是泛化提示，不能据此归因为网络下载失败。macOS 的 SPM/项目预取阶段仍向 `~/Library/Developer/Xcode/DerivedData/Runner-…/Logs/*` 写入并报权限 513；错误结果包又写宿主 `/var/folders/…/T` 并被拒。Python 临时文件可写不证明 Xcode 的各子阶段已实际采用冻结 TMPDIR，具体临时目录路由仍需隔离验证。
+- **确定根因二：`--no-pub` 的平台生成物前置条件未满足。** 致命错误是 `macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage` 不存在，不是 `resource_bundle_accessor.swift` 缺失。该目录位于可写工作区，追加宿主权限不能生成它。Flutter 3.47.7 的 `runner/flutter_command.dart:2020–2025,2056–2059` 在 `--no-pub` 时跳过 pub 与平台工具再生成；正常链为 `refreshPluginsList → injectPlugins → DarwinDependencyManagement.setUp → generatePluginsSwiftPackage`。当前仅 Dart package_config/package_graph 存在，`.flutter-plugins-dependencies`、macOS ephemeral 与 Pods 均缺失。本轮没有执行 pub get/upgrade/clean；KaneoPilot 的 `task_workspace.py:217–225`、`git_delivery.py:338–361` 只创建/校验 Git 工作树，没有保证 Flutter 平台依赖准备完成。已有 package_config 的最初来源不能从本轮证据确定。
+- **冷启动遗漏：** 原生行 66 的首次定向 Flutter test 被 `169.254.169.254` 网络策略拒绝（工具退出 -1）；关闭 analytics 没有阻止 Flutter 的 Azure bot 检测。SDK `base/bot_detector.dart:40–77,91–107` 在未设置 bot/CI 标志且本轮 tool_state 没缓存时探测该地址，版本检查也会调用它。执行端在行 91 临时使用 `CI=true` 后进入实际测试，并留下本轮 `tool_state.is-bot=true`；后续原文 analyze/test 才顺利启动。这是新轮次冷状态的确定覆盖缺口，不能把后续暖状态通过等同于首次启动可靠。中间还出现过一项业务测试失败，随后定向及两次全量 363 运行通过；它不是最终两端构建失败的直接原因。
+- **诊断信息丢失：** `codex-final-1.json` 已包含两端具体原因，但 `codex_worker.py:292–294` 将 `status: failed` 统一转换成“Codex 报告执行失败”，只把通用字符串写入 job/terminal；`auto_monitor.py:215–217` 又拼接相同 terminal/detail，最终界面显示重复的“Codex 报告执行失败；Codex 报告执行失败”。这不改变真实失败结论，但隐藏了可操作原因，属于独立缺陷。
+- **为何 v0.4.6 未发现：** 既有真实 Flutter 夹具只包含 lib/test，执行 --version、离线 pub get、analyze/test，没有 macOS/Android 平台工程；受管集成使用 CLI/Flutter stub。它们验证了沙箱基础边界、契约传递与失败收尾，未覆盖空配置直接首次启动，也未覆盖 Xcode/Gradle 真实完整构建。Packages #118 检查的是 KaneoPilot 自身，而 MediaPlayer 的冻结计划要求两端构建；发布门禁成功不能补足该验收缺口。前次记录虽列出未验证范围，实际修复对完整原任务的支持仍不充分。
+- **已排除及保留未知：** 本次没有安装版本或证据轮次错配；MediaPlayer 的 macos/pubspec/lock/metadata 跟踪文件没有本轮差异，插件声明的隐私资源存在，当前日志还没有进入 Swift 编译。media_kit 的 SPM 不支持提示当前只是警告；CoreSimulator/XPC/FSEvents 异常未证明为最终致命原因。不能保证修复上述前置条件后就一定完成所有平台编译或真实播放验收。
+- **后续修复范围（未实施）：** 保留旧缺省/v1 spec 行为，为新轮次版本化冻结按命令所需的工具能力；定向并核验 Gradle、Xcode 各阶段必要写目录及缓存，不开放整个 HOME/公网；独立处理 Flutter 冷 bot 检测和平台依赖准备；区分基础安全预检与完整命令就绪；持久保留失败报告摘要及原生命令原因，消除重复通用提示。验收应覆盖冷配置直接启动、含插件的 macOS/Android 真实受限构建、缺缓存/缺生成物的模型前准确失败、resume、旧 spec/Plus 兼容，以及现有只读目录和禁公网反例。Pilot 仍不代跑业务 verify，实际业务验证由执行端运行。
+- 诊断归档为 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/.archives/20261106-kp-c02-build-failure-43875508/`，包含五项最终原生命令输出、冷启动/临时 CI 证据、来源文件指纹与 `diagnostic-evidence.json`，哈希清单为 `SHA256SUMS`。原业务 lib/test 指纹仍为报告中的 `b309ce0fc5eb9836d7fb33ae8f8fd49f88a8bf32025d84be4b455f539eaaf05c`；本次未修改或清理其成果，未创建临时工作树，未提交、推送或发布后续版本。
+
+## 2026-11-06 平台构建环境修复与下一正式版（实现中）
+
+- 用户已授权修复并发布新正式版本；当前 latest 为 v0.4.6，新版 v0.4.7 等待维护者明确选择。修复、验证、集成先继续，标签依赖版本答复；不安装 App、不重试原业务轮次、不调用付费模型。
+- 任务沿用 KP-C02。基线 main/origin/main 为 `20696271f16bf399b2010f63bce8a64e6299206c`；工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261106-fix-kp-c02-platform-build-environment`，分支 `fix/20261106-kp-c02-platform-build-environment`，合入目标 main。诊断文档变更已核对备份并转入此树；主仓无关 `.local/` 和缓存清理计划、其他任务工作树及 MediaPlayer 成果保留。
+- T8 环境契约：新轮次 v2 按直接冻结 Flutter 命令选择能力，使用 `BOT=true` 避免冷启动 metadata 探测；历史缺省/v1 不变。native 构建先在同一受限沙箱离线执行 `flutter pub get --offline --enforce-lockfile` 准备生成物，不改变锁定依赖、不代跑 verify。Pub/Gradle 私有写目录和只读缓存来源冻结；仅复制必要 wrapper 分发，禁止复制宿主凭据、Gradle properties/init.d。macOS 明确冻结 DerivedData 与系统用户临时目录必要宿主写能力，不将共享系统临时目录称为私有 tmp；其他宿主路径保持只读与禁公网。
+- T9 失败说明：只有完整核对身份、原生终态/hash、源码快照后的 failed report 才保留摘要及非零 checks；脱敏和限长、不生成成功 envelope、不自动重试。monitor 去重同时保持原失败门禁。
+- T10 实际验收：云端固定 Flutter/Codex 版本、含原生插件的专用 macOS/Android 工程，使用实际命名沙箱与冷配置，覆盖离线准备后 analyze/test/两端原文构建、权限反例、缺缓存、首次和 resume；隔离检查覆盖旧 spec/Plus 与阶段契约。编译只在 GitHub-hosted 云端，非原业务任务。
+- 文件归属：主 agent 独占环境/能力识别/规格/组合验证与发布；Sol worker `platform_cache_setup` 独占新缓存准备模块及对应测试；Sol worker `platform_cloud_fixture` 独占云端平台夹具脚本/独立 workflow/其静态测试；Sol worker `preserve_failure_details` 独占 worker/monitor 及对应测试，已回报定向 29+149 passed、15 subtests（待主 agent 组合核验）。只读 analyst 核实 Xcode 各调用及临时目录机制；完成实现后独立 reviewer 审实际差异。共享接口是 v2 tool_environment，所有 agent 同一任务树、无生产 DB/端口/业务进程。
+- T11 发布收尾：通过完整修复和云端真实平台验收，合 main 并检查精确源码，再创建维护者确认版本的签名 annotated 标签；等待正式 Packages，独立核对公开四资产/源码/签名/latest，保存证据并安全移除本任务工作树与已合并本地分支。构建、发布、安装、原任务重试和用户验收分别记录。
+
+- 本轮实现已完成候选：v2、锁定离线依赖种子与平台准备、必要宿主写根、真实子进程组清理、失败诊断保留与去重；全部仍为“实现中”，真实云端平台门禁未通过前不称完成。复合非原生 Flutter 命令维持基础能力兼容。
+- 本次本地隔离验证：Python 3.10.10 的 environment/execution/monitor/cache-setup/dispatch 组合 **229 passed + 79 subtests**；setup 真实后代/超时/取消/输出/清理失败等 **15 passed**；脚本静态门禁及夹具定向 **32 tests OK**，完整脚本集此前 **226 tests OK**（后续新增 3 个夹具反例，仅由上述定向结果覆盖）；git diff --check 通过。这些为 Python/模拟执行链和真实 Python 子进程检查，没有本地 Flutter/Xcode/Gradle 编译。
+- 原失败 spec 的只读重校验：`2b4c51faadf139238edd1c78f82e5367f648cb16821294be2ed65583bddb8530` 未变；当前实现对其 v1 工具环境及 stage contract 校验均通过，没有扩权、模型调用或业务 verify。
+- 独立 reviewer 找到并已修正：复合命令派发兼容、settings FIFO 阻塞、Flutter 自定义 XDG 实际 settings 路径、准备后代进程生命周期。云端夹具另移除 BotDetector 全部 16 个 CI 信号，验证仅冻结 BOT=true，并以新 config/noBOT 真实 metadata 拒绝作为反例，防止 Actions 自带 CI 状态掩盖冷启动缺陷。

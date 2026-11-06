@@ -22,6 +22,35 @@ class Stopped(BaseException):
     pass
 
 
+def _diagnostic_text(text, limit, secrets=()):
+    # Redact before clipping so a cut credential cannot escape pattern matching.
+    text = util.redact(text, secrets).strip()
+    suffix = "…（已截断）"
+    return text if len(text) <= limit else text[:limit - len(suffix)] + suffix
+
+
+def _failed_report(report, source, secrets):
+    """Bounded diagnostic data only; never a successful verification envelope."""
+    failed = [check for check in report["checks"] if check["exit_code"] != 0]
+    diagnostic = {
+        "summary": _diagnostic_text(report["summary"], 4096, secrets),
+        "checks": [{"command": _diagnostic_text(check["command"], 1024, secrets),
+                    "exit_code": check["exit_code"]} for check in failed[:20]],
+        "checks_omitted": max(0, len(failed) - 20),
+        "source_sha256": source,
+    }
+    parts = ["Codex 报告执行失败"]
+    if diagnostic["summary"]:
+        parts.append(diagnostic["summary"])
+    parts.extend("失败命令（exit_code=" + str(check["exit_code"]) + "）：" + check["command"]
+                 for check in diagnostic["checks"])
+    if diagnostic["checks_omitted"]:
+        parts.append("另有 " + str(diagnostic["checks_omitted"]) + " 条失败命令未展示")
+    # Whitespace separates fields even when a credential ends the prior field;
+    # subsequent redaction must not consume the following command or exit code.
+    return diagnostic, _diagnostic_text("\n".join(parts), 8192, secrets)
+
+
 def _signal(signum, frame):
     raise Stopped("signal:" + str(signum))
 
@@ -125,6 +154,7 @@ def run_real(spec):
     log = _EventLog(run_dir / "events.jsonl")
     proc = None
     previous = {}
+    diagnostic_secrets = ()
 
     def save():
         adapter.atomic_json(run_dir / "job.json", job)
@@ -156,6 +186,8 @@ def run_real(spec):
             adapter._fail("Codex worker 进程出生身份不可读")
         _start_authorized(spec)
         provider = codex_provider.resolve_provider(constants.codex_home())
+        diagnostic_secrets = tuple(provider.env.values()) + (
+            os.environ.get(provider.env_key, "") if provider.env_key else "",)
         ok, detail = codex_planner.check_available()
         if not ok:
             adapter._fail(detail)
@@ -170,12 +202,26 @@ def run_real(spec):
         with process_owner.WorkerOwner(spec) as owner:
             last_heartbeat = time.monotonic()
             heartbeat_active = True
+
+            def check_environment():
+                nonlocal last_heartbeat, heartbeat_active
+                owner.check(); stop_requested()
+                if heartbeat_active and time.monotonic() - last_heartbeat >= 10:
+                    try:
+                        _heartbeat(spec)
+                    except util.KanpilotError as exc:
+                        if index > 1 and exc.code in ("stale_run", "not_found"):
+                            heartbeat_active = False
+                        else:
+                            raise
+                    last_heartbeat = time.monotonic()
+
             while True:
                 owner.check(); stop_requested()
                 index = len(job["turns"]) + 1
                 execution_contract.validate_spec(spec, job=job)
                 child_env = codex_environment.child_env(spec, codex_planner.child_env(provider))
-                preflight = codex_environment.preflight(spec, child_env)
+                preflight = codex_environment.preflight(spec, child_env, check=check_environment)
                 if preflight is not None:
                     adapter.atomic_json(run_dir / ("codex-environment-" + str(index) + ".json"), preflight)
                 owner.check(); stop_requested()
@@ -291,7 +337,9 @@ def run_real(spec):
                 save()
                 if report["status"] != "needs_input":
                     if report["status"] != "completed":
-                        adapter._fail("Codex 报告执行失败", "verification_unconfirmed")
+                        diagnostic, detail = _failed_report(report, source, diagnostic_secrets)
+                        job["failure_report"] = diagnostic
+                        adapter._fail(detail, "verification_unconfirmed")
                     report_id = "codex-report:" + spec["run_id"] + ":" + str(index)
                     job.update(report_id=report_id, verification_source_sha256=source, verification_evidence_version=1)
                     envelope = {key: job[key] for key in ("task_id", "run_id", "session_id", "turn_id", "plan_sha256", "verification_source_sha256", "report_id")}
@@ -384,7 +432,7 @@ def run_real(spec):
             job["turns"][-1]["cli_terminal"] = True
             if type(job["turns"][-1].get("exit_code")) is not int:
                 job["turns"][-1]["exit_code"] = proc.returncode if proc and proc.returncode is not None else 3
-        job.update(status="aborted" if isinstance(exc, (Stopped, process_owner.OwnerClosed)) else "failed", exit_code=3, ended_at=util.now_iso(), cli_terminal=True, detail=util.redact(str(exc)), pending_input=None)
+        job.update(status="aborted" if isinstance(exc, (Stopped, process_owner.OwnerClosed)) else "failed", exit_code=3, ended_at=util.now_iso(), cli_terminal=True, detail=_diagnostic_text(str(exc), 8192, diagnostic_secrets), pending_input=None)
         save(); log.emit("terminal", util.now_iso(), outcome="failed", reason=job["detail"])
         if job.get("session_id"):
             _reconcile(spec)

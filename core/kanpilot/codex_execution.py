@@ -196,6 +196,36 @@ def verification_writable_roots(commands, cwd):
     return sorted(roots)
 
 
+def verification_flutter_commands(commands, cwd):
+    """Recognize literal, direct Flutter commands; never interpret shell code."""
+    result = []
+    for command in commands:
+        try:
+            words = shlex.split(exact_command(command) or "")
+        except ValueError:
+            continue
+        while words and re.fullmatch(r"(?:LANG|LC_[A-Z_]+)=.*", words[0]):
+            words.pop(0)
+        if not words or any(word in (";", "&&", "||", "|", "&", ">", ">>", "<")
+                            or any(char in word for char in ("$", "`", "\n")) for word in words):
+            continue
+        program = shutil.which("flutter") if words[0] == "flutter" else words[0]
+        if not program or Path(program).name != "flutter":
+            continue
+        try:
+            executable = Path(program).expanduser()
+            if not executable.is_absolute():
+                executable = Path(cwd) / executable
+            executable = executable.resolve(strict=True)
+            if (executable.parent.name == "bin" and executable.is_file()
+                    and (executable.parent / "internal/shared.sh").is_file()
+                    and str(executable.parent / "cache") in verification_writable_roots([command], cwd)):
+                result.append((str(executable), words[1:]))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return result
+
+
 def _alive(pid, birth):
     if type(pid) is not int or not isinstance(birth, dict) or set(birth) != {"started_seconds", "started_microseconds"} or any(type(v) is not int for v in birth.values()):
         _fail("Codex 进程出生身份缺失")

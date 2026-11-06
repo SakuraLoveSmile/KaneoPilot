@@ -202,7 +202,9 @@ def test_failed_codex_worker_moves_task_to_attention_without_resending(factory, 
         return job if job['status'] == 'failed' and not codex_execution.job_alive(job) else None
     job = wait_for(failed, directory)
     assert job['exit_code'] == 3
-    assert job['detail'] == 'Codex 报告执行失败'
+    assert job['detail'].startswith('Codex 报告执行失败\nFixture task\n')
+    assert 'exit_code=1' in job['detail'] and verification in job['detail']
+    assert job['failure_report']['checks'] == [{'command': verification, 'exit_code': 1}]
     assert cli('round-observe', identity)['status'] == 'failed'
     cli('set-project-mapping', {'project_id': task.project_id, 'repository': str(task.repository),
         'enabled': True, 'expected_revision': cli('get-project-mappings', {})['revision']})

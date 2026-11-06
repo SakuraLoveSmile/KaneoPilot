@@ -1919,6 +1919,16 @@ KP-C02：新执行从冻结 verify 的直接 Flutter 调用静态定位 SDK，�
 
 `codex_environment` 负责环境冻结、校验和无模型预检。首次模型启动及每次显式 resume 前重新核对 spec/阶段契约、SDK 缓存及环境目录；用不跟随符号链接的目录描述符准备本轮目录，以同一权限运行 `codex sandbox`，确认配置/临时文件可写、IPv4/IPv6 回环收发、公网直连和代理请求均被拒绝。成功回执保存为 `codex-environment-<代次>.json`，失败持久化原因且不启动模型。工具状态位于已有源码快照排除的 `.pi/**`。历史 spec 缺少 `tool_environment` 时沿用原 `workspace-write` / `--add-dir` 与环境，不隐式扩权；其他工具的环境缺失继续如实失败。Codex 指令仅要求下述最终 JSON，不要求 Plus 的 SubmitGoalReport。已结束的 failed/aborted 观察结果继续核对终态并转 needs_user/execution_failed，保留实际失败原因，不归入 observation_blocked，也不隐式续发模型。
 
+2026-11-06 起新 Flutter 轮次冻结 `tool_environment.v=2`，既有 v1 字段与权限不变。v2 增加 `BOT="true"`，避免空 tool_state 下的云主机 metadata 探测；不是全局开启 CI。只从冻结 verify 的直接、字面 Flutter `build macos/apk/appbundle` 命令识别原生平台能力，其他命令不因此获得平台目录。所有能力、来源、构建设置及写根一起绑定原阶段契约，首次和 resume 重新核对。
+
+原生轮次将 `PUB_CACHE` 定向本轮 `pub-cache`，Android 将 `GRADLE_USER_HOME` 定向本轮 `gradle`；均位于已有 `.pi/kanpilot/codex/<run_id>`。`codex_tool_setup` 仅从锁文件选择宿主已缓存的 hosted/Git 依赖，依赖源码保持宿主只读，元数据与必要 Git 对象为私有副本；不复制凭据、hooks 或任意 Git 配置。Gradle 仅复制 wrapper 配置指向的现成分发运行文件并新建私有锁，不复制宿主 properties/init.d；存在时仅用 `GRADLE_RO_DEP_CACHE` 读取宿主 `caches/modules-2`。保留宿主 Flutter 的必要路径/功能白名单（JDK、Android SDK/Studio、macOS/SPM 开关）为冻结的私有 `<XDG_CONFIG_HOME>/settings`，不复制认证/analytics。旧式 `.flutter_settings` / `.flutter_tool_state` 分别优先于 XDG；v2 状态预检及原生设置准备检测到对应旧式文件时明确拒绝并要求迁移，不假称已被重定向。
+
+macOS 原生能力额外冻结 `~/Library/Developer/Xcode/DerivedData` 与 Darwin `confstr(_CS_DARWIN_USER_TEMP_DIR)` 的规范写根。Xcode 的 SPM 预取与 `-list` 没有 scheme，不能统一注入 `-derivedDataPath`；Foundation 的临时目录也不保证遵循 TMPDIR。因此第二根是明确的**宿主共享临时目录能力**，与本轮私有 TMPDIR 分别记录，不扩大为整个 HOME、Library、系统用户缓存或 SwiftPM 信任/配置目录。
+
+基础安全预检成功后，执行端用**同一冻结沙箱、无模型**运行 `flutter pub get --offline --enforce-lockfile` 作为平台准备；它不是业务 verify 回执。准备前后源码快照必须一致，锁定依赖不能变；项目引用 FlutterGeneratedPluginSwiftPackage 时核对 Package.swift 已生成。缺失 wrapper/依赖、准备非零退出、平台生成物仍缺失均给出具体错误并在模型前终止，不静默允许公网下载。成功环境回执分开记录基础检查、实际写根及准备命令/退出码/缓存种子计数；准备不替代随后每条原文 verify 的原生命令退出码。
+
+failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门禁核对。核对后将脱敏、限长的 summary（4096 字符）与最多 20 条非零 checks（每命令 1024 字符，保留整数退出码及省略数）记入 job.failure_report；终态说明上限 8192 字符。不生成成功专属 codex-report.json、不自动重试。monitor 在判定完整原始失败标记后去重和限长，避免重复通用文字或截断削弱失败门禁。
+
 最终结构为 `{status:"completed|needs_input|failed",summary,checks:[{command,exit_code}],questions:[{title,options}]}`。模型声明与 CLI 命令事件分别保存；每条冻结 verify 必须在报告中通过，且有原文匹配的 `command_execution` 完成事件、独立整数退出码0和同一最终源码快照。禁止用自然语言、退出0、turn.completed、模型自报或旧代次结果独立推进。日志截断、缺报告、错身份、布尔退出码、重复矛盾记录、验证后源码变化均不放行。Pilot 不运行任务 verify。
 
 `needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。

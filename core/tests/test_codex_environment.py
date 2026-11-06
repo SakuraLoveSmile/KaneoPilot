@@ -53,18 +53,23 @@ class CodexEnvironmentTests(unittest.TestCase):
         return codex_provider.tomllib.loads("\n".join(values))
 
     def test_freeze_is_run_scoped_and_does_not_write_host_configuration(self):
-        self.freeze_flutter()
+        sdk = self.freeze_flutter()
         frozen = self.spec["tool_environment"]
         root = self.repo / ".pi/kanpilot/codex" / self.spec["run_id"]
         self.assertEqual(frozen, {
-            "v": 1,
+            "v": 2,
             "environment": {
                 "XDG_CONFIG_HOME": str(root / "config"),
                 "TMPDIR": str(root / "tmp"),
                 "FLUTTER_SUPPRESS_ANALYTICS": "true",
+                "BOT": "true",
             },
             "network": {"enabled": True, "mode": "limited", "allow_local_binding": True,
                         "allow_upstream_proxy": False, "domains": {}},
+            "platforms": [], "writable_roots": [],
+            "setup": {"flutter": str(sdk / "bin/flutter"), "pub_offline": False,
+                      "android": False, "pub_cache_source": None,
+                      "gradle_cache_source": None, "flutter_settings": {}},
         })
         self.assertEqual(environment.validate(self.spec), frozen)
         self.assertFalse((self.root / ".config/flutter/tool_state").exists())
@@ -105,7 +110,7 @@ class CodexEnvironmentTests(unittest.TestCase):
     def test_full_environment_shape_and_values_cannot_be_tampered_with(self):
         self.freeze_flutter()
         replacements = [
-            ("version", lambda value: value.update(v=2)),
+            ("version", lambda value: value.update(v=3)),
             ("boolean version", lambda value: value.update(v=True)),
             ("extra key", lambda value: value.update(extra=True)),
             ("host config", lambda value: value["environment"].update(XDG_CONFIG_HOME=str(self.root))),
@@ -230,7 +235,7 @@ class CodexEnvironmentTests(unittest.TestCase):
         contract = self.spec["stage_contract"]
         self.assertEqual(contract["inputs"]["tool_environment"], self.spec["tool_environment"])
         self.assertEqual(execution_contract.validate_spec(self.spec, starting=True), contract)
-        for value in (None, {}, {"v": 1}, {**self.spec["tool_environment"], "v": 2}):
+        for value in (None, {}, {"v": 1}, {**self.spec["tool_environment"], "v": 1}):
             changed = copy.deepcopy(self.spec)
             if value is None:
                 changed.pop("tool_environment")
@@ -271,14 +276,15 @@ class CodexEnvironmentTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
         base = {"KEEP": "keep", "XDG_CONFIG_HOME": "/host/config"}
         with mock.patch.object(environment.subprocess, "run", return_value=result) as probe:
-            self.assertEqual(environment.preflight(self.spec, base), receipt)
+            self.assertEqual(environment.preflight(self.spec, base), {**receipt, "v": 2})
         kwargs = probe.call_args.kwargs
         argv = probe.call_args.args[0]
         self.assertEqual(argv[1], "sandbox")
         self.assertEqual(argv[argv.index("-C") + 1], str(self.repo))
         self.assertEqual(argv[argv.index("-P") + 1], environment.permission_profile(self.spec))
         self.assertEqual(self.configs(argv)["default_permissions"], environment.permission_profile(self.spec))
-        self.assertEqual(kwargs["env"], environment.child_env(self.spec, base))
+        self.assertEqual(kwargs["env"], {**environment.child_env(self.spec, base),
+                                       "KANPILOT_PROBE_WRITABLE_ROOTS": "[]"})
         self.assertTrue(kwargs["capture_output"])
         self.assertLessEqual(kwargs["timeout"], 30)
         for key in ("XDG_CONFIG_HOME", "TMPDIR"):
@@ -419,6 +425,227 @@ class CodexEnvironmentTests(unittest.TestCase):
         self.assertTrue((self.run_dir / "codex-final-1.json.argv").exists())
         self.assertFalse((self.run_dir / "codex-final-2.json.argv").exists())
         self.assertEqual(list(external.iterdir()), [])
+
+    def freeze_native(self, platform="apk"):
+        sdk, binary = self.flutter_sdk()
+        self.spec["required_verification_commands"] = [binary + " build " + platform + " --debug --no-pub"]
+        self.spec["sandbox_writable_roots"] = adapter.verification_writable_roots(
+            self.spec["required_verification_commands"], self.spec["cwd"])
+        (self.repo / "pubspec.yaml").write_text("name: fixture\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n")
+        (self.repo / "pubspec.lock").write_text("packages: {}\n")
+        (self.repo / ".gitignore").write_text(".dart_tool/\n.flutter-plugins-dependencies\nmacos/Flutter/ephemeral/\n")
+        environment.freeze(self.spec)
+        return sdk
+
+    def probe_receipt(self):
+        frozen = self.spec["tool_environment"]
+        roots = frozen["writable_roots"] + [frozen["environment"][key]
+                 for key in ("PUB_CACHE", "GRADLE_USER_HOME") if key in frozen["environment"]]
+        return {"v": 1, "status": "passed", "checks": {name: True for name in environment.CHECKS},
+                "writable_roots": {path: True for path in roots}}
+
+    @contextlib.contextmanager
+    def native_runs(self, results):
+        # The sandbox is synthetic; source snapshots still run real isolated Git.
+        original = subprocess.run
+        native = mock.Mock(side_effect=results)
+
+        def run(argv, **kwargs):
+            if len(argv) > 1 and argv[1] == "sandbox":
+                return native(argv, **kwargs)
+            return original(argv, **kwargs)
+
+        with mock.patch.object(environment.subprocess, "run", side_effect=run), mock.patch(
+                "kanpilot.codex_setup_process.run", side_effect=native):
+            yield native
+
+    def test_v1_frozen_spec_remains_byte_compatible_without_new_capabilities(self):
+        self.freeze_flutter()
+        legacy = environment._expected(self.spec)
+        self.spec["tool_environment"] = legacy
+        before = copy.deepcopy(self.spec)
+        self.assertEqual(environment.validate(self.spec), legacy)
+        self.assertNotIn("BOT", environment.child_env(self.spec, {}))
+        checks = {name: True for name in environment.CHECKS}
+        native = subprocess.CompletedProcess([], 0, json.dumps({"v": 1, "status": "passed", "checks": checks}), "")
+        with mock.patch.object(environment.subprocess, "run", return_value=native), mock.patch(
+                "kanpilot.codex_tool_setup.seed_caches") as seed:
+            receipt = environment.preflight(self.spec, {})
+        self.assertEqual(receipt, {"v": 1, "status": "passed", "checks": checks})
+        seed.assert_not_called()
+        self.assertEqual(self.spec, before)
+
+    def test_android_capability_uses_private_homes_and_only_readonly_dependency_cache(self):
+        modules = self.root / ".gradle/caches/modules-2"
+        modules.mkdir(parents=True)
+        settings = self.root / ".config/flutter/settings"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"jdk-dir": str(self.root / "jdk17"),
+                                        "android-sdk": str(self.root / "android-sdk"),
+                                        "api_key": "do-not-copy"}))
+        self.freeze_native()
+        frozen = self.spec["tool_environment"]
+        private = self.repo / ".pi/kanpilot/codex/r"
+        self.assertEqual(frozen["platforms"], ["android"])
+        self.assertEqual(frozen["writable_roots"], [])
+        self.assertEqual(frozen["environment"]["GRADLE_USER_HOME"], str(private / "gradle"))
+        self.assertEqual(frozen["environment"]["PUB_CACHE"], str(private / "pub-cache"))
+        self.assertEqual(frozen["environment"]["GRADLE_RO_DEP_CACHE"], str(modules))
+        self.assertEqual(frozen["environment"]["JAVA_HOME"], str(self.root / "jdk17"))
+        self.assertNotIn("api_key", frozen["setup"]["flutter_settings"])
+        profile = self.configs(environment.launcher_config(self.spec))
+        filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
+        self.assertNotIn(str(self.root / ".gradle"), filesystem)
+        self.assertNotIn(str(self.root / ".pub-cache"), filesystem)
+        self.persist_contract()
+        self.assertEqual(self.spec["stage_contract"]["inputs"]["tool_environment"], frozen)
+
+    def test_platform_capability_recognizes_only_direct_literal_build_commands(self):
+        _, binary = self.flutter_sdk()
+        commands = [binary + " test --no-pub", binary + " build apk --debug --no-pub && echo x",
+                    "echo " + binary + " build macos", binary + " build $PLATFORM"]
+        self.spec["required_verification_commands"] = commands
+        self.spec["sandbox_writable_roots"] = adapter.verification_writable_roots(commands, self.repo)
+        environment.freeze(self.spec)
+        self.assertEqual(self.spec["tool_environment"]["platforms"], [])
+        self.assertFalse(self.spec["tool_environment"]["setup"]["pub_offline"])
+
+    def test_previously_supported_compound_flutter_commands_keep_basic_environment(self):
+        _, binary = self.flutter_sdk()
+        self.spec["required_verification_commands"] = [binary + " analyze --no-pub && true"]
+        self.spec["sandbox_writable_roots"] = adapter.verification_writable_roots(
+            self.spec["required_verification_commands"], self.repo)
+        environment.freeze(self.spec)
+        frozen = environment.validate(self.spec)
+        self.assertEqual(frozen["platforms"], [])
+        self.assertEqual(frozen["environment"]["BOT"], "true")
+        self.assertFalse(frozen["setup"]["pub_offline"])
+
+    def test_macos_host_roots_are_frozen_and_a_replaced_root_is_rejected(self):
+        host_tmp = self.root / "system-temp"
+        host_tmp.mkdir()
+        with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
+                environment.os, "confstr", return_value=str(host_tmp), create=True):
+            self.freeze_native("macos")
+            roots = self.spec["tool_environment"]["writable_roots"]
+            derived = self.root / "Library/Developer/Xcode/DerivedData"
+            self.assertEqual(roots, [str(derived), str(host_tmp)])
+            profile = self.configs(environment.launcher_config(self.spec))
+            filesystem = profile["permissions"][profile["default_permissions"]]["filesystem"]
+            self.assertTrue(all(filesystem[path] == "write" for path in roots))
+            self.assertNotIn(str(self.root / "Library"), filesystem)
+            derived.parent.mkdir(parents=True)
+            derived.symlink_to(host_tmp, target_is_directory=True)
+            with self.assertRaises(util.KanpilotError):
+                environment.validate(self.spec)
+
+    def test_native_preparation_uses_same_sandbox_and_does_not_run_verify(self):
+        self.freeze_native()
+        frozen = self.spec["tool_environment"]
+        probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        prepared = subprocess.CompletedProcess([], 0, "offline dependencies ready", "")
+        with self.native_runs([probe, prepared]) as run, mock.patch(
+                "kanpilot.codex_tool_setup.seed_caches", return_value={"pub_packages": 1}) as seed:
+            receipt = environment.preflight(self.spec, {})
+        self.assertEqual(run.call_count, 2)
+        seed.assert_called_once_with(self.spec)
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(first[:first.index("--")], second[:second.index("--")])
+        self.assertEqual(second[second.index("--") + 1:],
+                         [frozen["setup"]["flutter"], "pub", "get", "--offline", "--enforce-lockfile"])
+        self.assertEqual(receipt["setup"]["exit_code"], 0)
+        self.assertEqual(receipt["v"], 2)
+        config = Path(frozen["environment"]["XDG_CONFIG_HOME"])
+        self.assertEqual(json.loads((config / "settings").read_text()), {})
+        self.assertFalse((config / "tool_state").exists())
+
+    def test_native_setup_fails_with_specific_redacted_exit_detail_and_source_guard(self):
+        self.freeze_native()
+        probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+        secret = "fixture-private-token-12345"
+        failed = subprocess.CompletedProcess([], 69, "Missing locked package token=" + secret, "")
+        with self.native_runs([probe, failed]), mock.patch(
+                "kanpilot.codex_tool_setup.seed_caches", return_value={}):
+            with self.assertRaises(util.KanpilotError) as caught:
+                environment.preflight(self.spec, {"MY_API_KEY": secret})
+        self.assertIn("退出码 69", caught.exception.message)
+        self.assertIn("Missing locked package", caught.exception.message)
+        self.assertNotIn(secret, caught.exception.message)
+
+        def mutate(argv, **kwargs):
+            if "pub" in argv:
+                (self.repo / "pubspec.lock").write_text("changed lock\n")
+                return subprocess.CompletedProcess([], 0, "ok", "")
+            return probe
+
+        with self.native_runs(mutate), mock.patch(
+                "kanpilot.codex_tool_setup.seed_caches", return_value={}):
+            with self.assertRaises(util.KanpilotError) as caught:
+                environment.preflight(self.spec, {})
+        self.assertIn("改动了源码或锁文件", caught.exception.message)
+
+    def test_replaced_native_settings_fifo_or_directory_fails_before_sandbox(self):
+        self.freeze_native()
+        config = Path(self.spec["tool_environment"]["environment"]["XDG_CONFIG_HOME"])
+        config.mkdir(parents=True)
+        settings = config / "settings"
+        os.mkfifo(settings)
+        try:
+            with mock.patch.object(environment.subprocess, "run") as run:
+                with self.assertRaises(util.KanpilotError) as caught:
+                    environment.preflight(self.spec, {})
+            run.assert_not_called()
+            self.assertIn("特殊文件", caught.exception.message)
+        finally:
+            settings.unlink()
+        settings.mkdir()
+        with mock.patch.object(environment.subprocess, "run") as run:
+            with self.assertRaises(util.KanpilotError):
+                environment.preflight(self.spec, {})
+        run.assert_not_called()
+
+    def test_custom_xdg_settings_use_flutter_actual_path_and_preserve_feature_flags(self):
+        config = self.root / "custom-xdg"
+        config.mkdir()
+        (config / "settings").write_text(json.dumps({"enable-swift-package-manager": False,
+                                                     "android-studio-dir": str(self.root / "studio"),
+                                                     "token": "never-copy"}))
+        with mock.patch.dict(os.environ, XDG_CONFIG_HOME=str(config)):
+            self.freeze_native()
+            frozen = self.spec["tool_environment"]
+            self.assertEqual(frozen["setup"]["flutter_settings"], {
+                "enable-swift-package-manager": False, "android-studio-dir": str(self.root / "studio")})
+            environment._directory(self.spec, create=True)
+            environment._prepare_settings(self.spec)
+            settings = Path(frozen["environment"]["XDG_CONFIG_HOME"]) / "settings"
+            self.assertEqual(json.loads(settings.read_text()), frozen["setup"]["flutter_settings"])
+            self.assertFalse((settings.parent / "flutter/settings").exists())
+
+    def test_legacy_tool_state_is_an_actionable_error_before_any_model(self):
+        self.freeze_flutter()
+        (self.root / ".flutter_tool_state").write_text("{}")
+        with mock.patch.object(environment.subprocess, "run") as run:
+            with self.assertRaises(util.KanpilotError) as caught:
+                environment.preflight(self.spec, {})
+        run.assert_not_called()
+        self.assertIn(".flutter_tool_state", caught.exception.message)
+
+    def test_missing_generated_spm_package_is_not_a_successful_preparation(self):
+        host_tmp = self.root / "system-temp"
+        host_tmp.mkdir()
+        with mock.patch.object(environment.sys, "platform", "darwin"), mock.patch.object(
+                environment.os, "confstr", return_value=str(host_tmp), create=True):
+            self.freeze_native("macos")
+            project = self.repo / "macos/Runner.xcodeproj/project.pbxproj"
+            project.parent.mkdir(parents=True)
+            project.write_text("FlutterGeneratedPluginSwiftPackage")
+            probe = subprocess.CompletedProcess([], 0, json.dumps(self.probe_receipt()), "")
+            prepared = subprocess.CompletedProcess([], 0, "ok", "")
+            with self.native_runs([probe, prepared]), mock.patch(
+                    "kanpilot.codex_tool_setup.seed_caches", return_value={}):
+                with self.assertRaises(util.KanpilotError) as caught:
+                    environment.preflight(self.spec, {})
+            self.assertIn("macOS 平台生成包仍缺失", caught.exception.message)
 
 
 if __name__ == "__main__":

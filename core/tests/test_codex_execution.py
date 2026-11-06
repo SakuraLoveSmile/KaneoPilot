@@ -51,7 +51,7 @@ class CodexExecutionTests(unittest.TestCase):
     def tearDown(self):
         self.env_patch.stop(); self.temp.cleanup()
 
-    def stub(self, mode='completed'):
+    def stub(self, mode='completed', report=None):
         # The executable is a real subprocess, with protocol-shaped synthetic model events.
         self.bin.write_text('#!'+sys.executable+'\n'+'''import json,os,sys,time,subprocess
 from pathlib import Path
@@ -72,14 +72,19 @@ if mode=='partial':
     sys.stdout.write('{"type":'); sys.stdout.flush(); sys.exit(0)
 needs=mode=='questions' and 'resume' not in args
 report={'status':'needs_input' if needs else 'completed','summary':'Fixture result','checks':[{'command':'python3 -V','exit_code':0}], 'questions':[{'title':'Choose','options':['A','B']}] if needs else []}
+override=json.loads('''+repr(json.dumps(report))+''')
+if override is not None: report=override
 if mode!='no_command' and not needs:
-    emit({'type':'item.started','item':{'id':'command-1','type':'command_execution','status':'in_progress','command':"/bin/zsh -lc 'python3 -V'"}})
-    emit({'type':'item.completed','item':{'id':'command-1','type':'command_execution','status':'completed','command':"/bin/zsh -lc 'python3 -V'",'exit_code':0,'aggregated_output':'Python fixture'}})
+    checks=report['checks'] if override is not None else [{'command':"/bin/zsh -lc 'python3 -V'",'exit_code':0}]
+    for index,check in enumerate(checks,1):
+        item={'id':'command-'+str(index),'type':'command_execution','command':check['command']}
+        emit({'type':'item.started','item':dict(item,status='in_progress')})
+        emit({'type':'item.completed','item':dict(item,status='completed',exit_code=check['exit_code'],aggregated_output='Fixture output')})
 if mode=='change_after_check':
     emit({'type':'item.started','item':{'id':'write-1','type':'command_execution','status':'in_progress','command':"python3 -c 'write_source()'"}})
     Path('main.txt').write_text('after verification')
     emit({'type':'item.completed','item':{'id':'write-1','type':'command_execution','status':'completed','command':"python3 -c 'write_source()'",'exit_code':0}})
-emit({'type':'item.completed','item':{'id':'message-1','type':'agent_message','text':json.dumps(report)}})
+emit({'type':'item.completed','item':{'id':'message-1','type':'agent_message','text':json.dumps(dict(report,summary='Different fixture') if mode=='mismatched_report' else report)}})
 if mode!='no_report': out.write_text(json.dumps(report))
 emit({'type':'turn.completed','usage':{}})
 ''')
@@ -205,6 +210,75 @@ emit({'type':'turn.completed','usage':{}})
         self.assertIsNone(process_owner.process_birth(job['codex_cli_pid']))
         events=[json.loads(line) for line in (self.run_dir/'events.jsonl').read_text().splitlines()]
         self.assertFalse(any(e['type']=='session' for e in events))
+
+    def test_failed_report_preserves_redacted_diagnostics_without_success_evidence(self):
+        injected_secret = 'provider-private-credential'
+        referenced_secret = 'referenced-private-credential'
+        pattern_secret = 'pattern-private-credential'
+        provider = worker.codex_provider.resolve_provider(Path(self.env['CODEX_HOME']))
+        provider.env = {'TEST_PROVIDER_CREDENTIAL': injected_secret}
+        provider.env_key = 'TEST_REFERENCED_CREDENTIAL'
+        self.stub(report={'status':'failed',
+            'summary':'Flutter macOS 构建无法创建临时文件：' + injected_secret
+                + ' ' + referenced_secret + ' token=' + pattern_secret,
+            'checks':[{'command':'python3 -V','exit_code':0},
+                {'command':'flutter build macos --token=' + pattern_secret,'exit_code':7},
+                {'command':'flutter build apk','exit_code':1}], 'questions':[]})
+        with self.guards(), mock.patch.object(worker.codex_provider,'resolve_provider',return_value=provider), mock.patch.dict(os.environ, {'TEST_REFERENCED_CREDENTIAL':referenced_secret}):
+            self.assertEqual(worker.run_real(self.spec),3)
+        job = self.job()
+        self.assertEqual(job['status'],'failed')
+        self.assertEqual(job['exit_code'],3)
+        diagnostic = job['failure_report']
+        self.assertIn('无法创建临时文件',diagnostic['summary'])
+        self.assertEqual([check['exit_code'] for check in diagnostic['checks']],[7,1])
+        self.assertEqual(diagnostic['checks_omitted'],0)
+        self.assertEqual(diagnostic['source_sha256'],git_delivery.source_state_sha256(self.repo))
+        self.assertIn('flutter build macos',job['detail'])
+        self.assertIn('exit_code=7',job['detail'])
+        turn = job['turns'][-1]
+        self.assertEqual(turn['native_sha256'],util.sha256_file(self.run_dir/turn['events_file']))
+        self.assertEqual(turn['output_sha256'],util.sha256_file(self.run_dir/turn['output_file']))
+        self.assertEqual([check['exit_code'] for check in adapter._native_checks(self.run_dir,turn,{})],[0,7,1])
+        terminal = json.loads((self.run_dir/'events.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(terminal['outcome'],'failed')
+        self.assertEqual(terminal['reason'],job['detail'])
+        for secret in (injected_secret,referenced_secret,pattern_secret):
+            self.assertNotIn(secret,util.jdump(job))
+            self.assertNotIn(secret,util.jdump(terminal))
+        self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
+        self.assertNotIn('verification_evidence_version',job)
+        with self.assertRaises(util.KanpilotError):
+            adapter.require_terminal(job)
+        self.assertEqual(worker.run_real(self.spec),3)
+        self.assertEqual(len(self.job()['turns']),1)
+
+    def test_failed_report_diagnostic_size_limits(self):
+        self.stub(report={'status':'failed','summary':'构建环境失败 ' + 'x'*6000,
+            'checks':[{'command':'flutter build ' + str(index) + 'x'*1200,'exit_code':index+1}
+                      for index in range(25)], 'questions':[]})
+        with self.guards():
+            self.assertEqual(worker.run_real(self.spec),3)
+        job = self.job()
+        diagnostic = job['failure_report']
+        self.assertLessEqual(len(diagnostic['summary']),4096)
+        self.assertEqual(len(diagnostic['checks']),20)
+        self.assertEqual(diagnostic['checks_omitted'],5)
+        self.assertTrue(all(len(check['command'])<=1024 for check in diagnostic['checks']))
+        self.assertLessEqual(len(job['detail']),8192)
+        self.assertTrue(job['detail'].endswith('…（已截断）'))
+        self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
+
+    def test_failed_report_diagnostics_still_require_final_message_identity(self):
+        self.stub('mismatched_report',report={'status':'failed','summary':'Untrusted diagnostic',
+            'checks':[{'command':'python3 -V','exit_code':1}], 'questions':[]})
+        with self.guards():
+            self.assertEqual(worker.run_real(self.spec),3)
+        job = self.job()
+        self.assertNotIn('failure_report',job)
+        self.assertNotIn('Untrusted diagnostic',job['detail'])
+        self.assertIn('最后消息与落盘 JSON 不一致',job['detail'])
+        self.assertFalse((self.run_dir/adapter.REPORT_NAME).exists())
 
     def test_missing_report_and_partial_native_stream_fail_closed(self):
         for mode in ('no_report','partial'):
