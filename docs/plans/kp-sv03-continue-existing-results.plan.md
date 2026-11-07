@@ -30,4 +30,8 @@
 - 主 agent 第一轮组合态 248 tests、255 subtests 通过（112.41s，隔离 DB/Git/fake MCP），Python 3.9 AST、diff check 与 FakeCore 正常/缺证/重复/无模型/显式意图 smoke 通过；记录在主工作区 build/recovery/kp-sv03-v0.5.4/evidence。此为并发修正前的候选，后续必要影响集另跑。
 - 独立 reviewer 已发现并修正/跟进：补验证资格失效必须拒绝降级；续接观察不得先解除阻塞以免 scheduler 抢先 monitor 丢补证入口；Plus 真实发送分支须实际发送验证专用正文。另补齐保留范围内的“需要修改时沿用计划重试”，采用 true/false 显式用途和独立确认，缺省兼容旧调用。
 - 独立审查收尾：两项 P1 与用途入口已修复，reviewer 只读复核最终组合态未发现剩余实质缺陷。主 agent 捕获真实 fake Plus 指令的新用例 1 passed，源码快照24项已记录；新增用例曾因缺少现代能力夹具而在发送前失败，仅为该用例补全现代工具与能力，生产门禁和旧夹具默认未改。
-- 最终组合态八模块隔离回归仍在运行；编译、打包和原生 UI 尚未通过。提交任务分支以启动云端 Packages，待全部必要检查及界面核验完成后才正式发布。
+- 主 agent 最终影响集 149 tests、45 subtests 通过（127.72s）；另真实 Plus prompt 用例 1 passed。中间八模块运行因已收集的旧版新增夹具失败 1 项，其余238 tests/57 subtests通过；只修新用例的现代能力前置，最终影响集已重跑通过。完整源指纹与每次 JUnit 保存在 local-verification.json 对应归档中，不把失败记录改为通过。
+- 实现提交 `c768b40c2d98f77e679b0c981db687caa2f79212` 已推送任务分支；[Packages #164](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42397666249) 绑定该源。macOS 打包已通过，其他必要 job 仍进行，正在下载其独立 App；原生 UI 尚未通过，全部必要检查及界面核验完成后才正式发布。
+
+- #164 的 macOS package/两组 Swift fixtures 与 Android 通过；Python 两类失败阻止发布：普通观察给旧回调多传默认 keyword，及原有 GitHub 夹具全局替换 time.sleep 导致 POSIX subprocess 的0.001等待误记为API重试。前者只在专用True路径传kw以保留旧调用，后者沿已有正确模式只替换gh_client.time引用；所有旧断言、生产下载/重试代码与门禁未降级。主 agent 修正后组合态118 tests/39 subtests通过（36.48s，含原失败模块与continuation/roundterminal），独立reviewer复核无剩余问题；新源摘要25项已保存。新增夹具重复ZIP成员的warning为原负向场景，不是跳过。
+- 原生工具报告 Mac 锁定，已请求用户手动解锁；等待期间推进云端修正，尚未声称原生通过或正式发布。

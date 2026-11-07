@@ -4,7 +4,6 @@ import json
 import base64
 import os
 import sys
-import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,7 +85,8 @@ else: sys.exit(77)
     monkeypatch.setenv('MEDIA_GH_CALLS',str(calls))
     monkeypatch.setenv('MEDIA_GH_PAYLOAD',str(payload))
     delays=[]
-    monkeypatch.setattr(time,'sleep',delays.append)
+    # subprocess also sleeps while waiting on POSIX; observe only gh retries.
+    monkeypatch.setattr(gh_client,'time',SimpleNamespace(sleep=delays.append))
     return manifest,lambda:[json.loads(line) for line in calls.read_text().splitlines()],delays
 
 

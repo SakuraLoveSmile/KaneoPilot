@@ -875,7 +875,9 @@ def cmd_round_observe(ctx, payload: dict, *, preserve_execution_failure=False) -
         db.set_extra(ctx.conn,task,ctx.now_iso,observer_launch={"run_id":run_id,"token":token,
             "expires_at":util.to_iso(util.now_dt()+datetime.timedelta(seconds=120))})
     try:
-        return _round_observe_reserved(ctx,payload, preserve_execution_failure=preserve_execution_failure)
+        if preserve_execution_failure:
+            return _round_observe_reserved(ctx,payload, preserve_execution_failure=True)
+        return _round_observe_reserved(ctx,payload)
     finally:
         with db.write_txn(ctx.conn):
             task=db.require_task(ctx.conn,task_id)
