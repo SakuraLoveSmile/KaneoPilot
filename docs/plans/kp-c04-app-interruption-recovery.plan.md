@@ -1,6 +1,6 @@
 # KP-C04：App 重启后的执行中断与问题收尾
 
-状态：实现中。用户于 2026-11-07 要求修复任务详情中“App 实例已关闭，停止本机观察”被显示为执行失败、旧问题在提交后才过期的问题。
+状态：待体验。用户于 2026-11-07 要求修复任务详情中“App 实例已关闭，停止本机观察”被显示为执行失败、旧问题在提交后才过期的问题。修复已合入 main，v0.5.1 已正式发布，适用验证及 worktree 收尾完成。
 
 ## 目标与现场
 
@@ -46,10 +46,17 @@
 - 新增 Swift/Kotlin 回归使用现有夹具，未降低或跳过原断言；本地未运行 Swift、Xcode 或 Gradle。最后 `git diff --check` 和 14 个变更 Python 文件 AST 解析通过；基线及 28 个变更 tracked 文件的 SHA256 记录于 `build/evidence/kp-c04/source-snapshot.json`，不把旧广域通过数量说成最终候选全量重跑。
 - Packages #154 的 macOS 打包、两组桌面回归及 Android 单测/lint/打包通过；Python shard 4 在两解释器均由 `test_event_kind_labels` 发现本次新增事件的核心中文表漏登记。补齐 `derive._EVENT_KIND_CN`，不改门禁或测试预期；本地真实 pytest 重跑现有 5 项标签检查通过，JUnit 为 `build/evidence/kp-c04/event-kind-labels.xml`。最终候选需重新通过云端门禁，#154 的部分成功不作为整体通过。
 - 原生核验：下载 #154 的云端独立身份 App，GitHub artifact digest、ZIP 大小/哈希、来源 SHA/build、严格深度签名及 11 个包内核心模块与提交逐字节核验通过。使用 FakeCore、空凭据、独立 HOME/目录、关闭引擎，在 1180×760 dark 下实测橙色中断卡、未接收/已接收两种闭合问题、展开原答案、复制入口、无无效重发按钮、沿用计划恢复的模型调用说明及取消。未验证剪贴板实际内容；未确认恢复、未调用模型，业务操作命令为 0。证据在主仓 `build/kp-c04/{cloud-154,native}/`；两预览已按独占 PID 退出。最终追加仅为核心事件名称表，UI 源码未变，不把 FakeCore 结果当真实业务执行验收。
+- 最终候选 `ab53d28f12bada2abd2113652526e07b8b7ed03c` 的 [Packages #155](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42362495755) **16 个必需 job 全部成功**，可选全文探针和预览的 publish 按条件跳过。检查覆盖 Python 3.11/3.13 核心与集成、两组 Swift 桌面夹具、Android 单测/lint/打包、arm64 DMG/内置运行时及无模型原生平台门禁；实际 CI 结论和报告保存在主仓 `build/kp-c04/cloud-155/`。最终独立 UI ZIP 的来源/build、GitHub digest 和包内 11 个核心模块逐字节核验通过，UI 源码与原生已验候选一致，见 `native/source-binding.json`。
+- 最终候选已 fast-forward 合入并推送远端 `main`；签名 annotated `v0.5.1` 直接指向该提交，GPG 验证通过，已推送触发 [正式 Packages #157](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42363677386)，build 157。同源码自动触发的 main 预览 #156 已取消以避免重复占用构建资源；正式 #157 独立运行全部发布门禁，未降低检查。
+- worktree 收尾已完成：来源提交已在远端 main，工作树干净、全部 agent 完成、无活动进程/打开文件引用。144 个忽略文件（包括本地 JUnit、日志及源码指纹）已归档到主仓 `build/kp-c04/worktree-ignored-snapshot.tar.gz`，逐项哈希核验通过；正常移除本任务 worktree 及已合并本地分支，原目录和本地引用均不存在。远端来源分支、其他工作树、主仓原有两项未跟踪文件保留；证据为 `worktree-ignored-snapshot.json`、`worktree-cleanup-preflight.json` 和 `worktree-cleanup.json`。
+- 正式发布完成：[Packages #157](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42363677386) 的 16 个必需检查和 publish 全部成功，可选全文探针按条件跳过。公开 [v0.5.1 Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.1)（ID `437506281`）为非 draft、非 prerelease 的 latest，发布于 `2026-11-07T10:37:53Z`。产品源码 `ab53d28f12bada2abd2113652526e07b8b7ed03c`，build 157；签名 annotated 标签对象 `4fc251c02994eef07d940f9dd1c6be560aa00bbf` 直接指向该提交，GPG 验证通过。完整 CI 结论、检查报告及无模型原生平台证据在主仓 `build/kp-c04/cloud-157/`。
+- 公开四项资产已完整下载并通过 GitHub digest、SHA256SUMS、manifest、来源/版本/build/latest 一致性核验。DMG 42,967,797 bytes，SHA256 `64ebe6c47e3c0cdb46443ec2cec944577d52ed5cee7c8b6339cf8d2e43501604`；APK 8,557,680 bytes，SHA256 `1d3945f658f94167d86cdd54d47f19f73266fc8d793e2ffbd0901b15a86b8244`。原包、清单及 `verification.json` 保存在主仓 `build/kp-c04/release-0.5.1/`。
+- 安装包只读核验：DMG 完整性、DMG/内部 App 严格签名、`local.kaneopilot`、0.5.1/build157、arm64 正确；包内 11 个受影响核心模块与发布提交逐字节一致，只读挂载已卸载。Android 包名 `com.sakurasep.kaneopilot`、0.5.1/versionCode157、APK 签名通过，证书 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada` 延续既有正式签名。结果和命令日志为同目录 `package-verification.json` 及对应日志；未安装覆盖正式 App、未做 Android 实机或真实业务模型验收。
+- 公开发布说明仅移除签名标签注释带入的 PGP 签名块，保留功能说明、安装要求和 `kaneopilot-ci:<sha>:157` 标记；读回确认 Release 身份和全部资产未变，前后正文证据保存在公开包目录。未移动标签或覆盖资产。
 
 ## 剩余工作与下一步
 
-- 状态保持“实现中”：本地源码、适用 Python 检查及受影响原生界面检查完成，最终候选云端全量检查待通过，当前安装版仍未更新。
-- 用户已授权发布 v0.5.1；提交/推送事件名称补齐及本记录，最终源码云端门禁通过后合入 `main`，创建签名 annotated v0.5.1 标签并发布，核验正式四项资产；本次未授权更改真实任务或重跑业务模型。
-- 真实 MediaPlayer 任务未更改、未重跑；不修改已安装 App 或直接改库。未来安装候选后可经核心“重新核对”严格修正当前旧记录，证据不足仍保留原分类。
-- 任务尚未合入，因此本任务工作树与 `build/evidence/kp-c04/` 继续保留；只有约定目标合入并通过适用验证后，按保全要求收尾清理。主工作区、其他任务和共享根目录保留。
+- 适用验证、正式发布和本任务收尾已完成，状态为“待体验”；用户明确确认后才改为“已验收”。本次没有数据库 schema 变更。
+- 体验入口：macOS“设置 → 高级 → 软件更新”，Android“连接 → 软件更新”，或下载公开 v0.5.1。升级后在原任务点“重新核对”，完整证据满足时更正旧中断/问题分类；如需继续，再确认“重新执行（沿用计划）”，保留原工作树并由新轮次调用模型。
+- 真实 MediaPlayer 任务未更改、未重跑；未修改已安装 App 或直接改库。安装 v0.5.1 后可经核心“重新核对”严格修正当前旧记录，证据不足仍保留原分类。
+- 本任务工作树与已合并本地分支已清理，本地证据以可恢复归档保全在主仓 `build/kp-c04/`；主工作区、其他任务、共享根目录及远端来源分支保留。
