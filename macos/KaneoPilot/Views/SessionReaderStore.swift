@@ -21,8 +21,8 @@ final class SessionReaderStore: ObservableObject {
     let performanceReaderID = UUID().uuidString
     /// 打开阅读器时定位的轮次（详情浮层「查看实时会话」传入）。
     let preferredRunID: String?
-    /// 状态页只读取轮次概况与 Plus 状态，不读取或准备消息正文。
-    let statusOnly: Bool
+    /// 状态页暂停正文读取；返回内容页时沿用已加载消息与增量游标。
+    @Published private(set) var statusOnly: Bool
 
     @Published var sessions: [SessionInfo] = []
     @Published var selectedRunID: String?
@@ -86,6 +86,8 @@ final class SessionReaderStore: ObservableObject {
     var collapsed: Set<String> { get { messageState.collapsed } set { if messageState.collapsed != newValue { messageState.collapsed = newValue } } }
     /// 自动跟随底部。
     var following: Bool { get { messageState.following } set { if messageState.following != newValue { messageState.following = newValue } } }
+    /// 按钮显式暂停时，布局产生的贴底通知不得恢复跟随。
+    private var explicitlyPausedFollowing = false
     /// 暂停跟随时有新内容。
     var hasNewContent: Bool { get { messageState.hasNewContent } set { if messageState.hasNewContent != newValue { messageState.hasNewContent = newValue } } }
     @Published var hasMore = false
@@ -127,6 +129,24 @@ final class SessionReaderStore: ObservableObject {
     }
 
     // MARK: 加载
+
+    /// 切换阅读模式使在途响应失效，但保留正文、搜索输入与用户阅读位置。
+    func setStatusOnly(_ value: Bool) async {
+        guard value != statusOnly else { return }
+        cancelWork()
+        generation += 1
+        statusOnly = value
+        loading = false
+        if !value {
+            if !following, committedQuery.isEmpty { restoreAnchor = readingAnchor }
+            resumeCurrentSearch()
+        }
+        if selectedRunID == nil {
+            await loadSessions(preferredRunID: preferredRunID)
+        } else {
+            await loadSession(generation: generation)
+        }
+    }
 
     func start(client: CoreClient) async {
         SessionReaderPerformance.shared.record("reader_start")
@@ -182,6 +202,7 @@ final class SessionReaderStore: ObservableObject {
         interrupted = false
         hasMore = false
         hasNewContent = false
+        explicitlyPausedFollowing = false
         following = true
     }
 
@@ -488,6 +509,7 @@ final class SessionReaderStore: ObservableObject {
         hasMore = false
         hasNewContent = false
         // 切换轮次即重新定位：新会话从最新消息开始跟随（用户随后上滚仍会停下）。
+        explicitlyPausedFollowing = false
         following = true
         roundDetail = nil
         retryTask = nil
@@ -501,6 +523,10 @@ final class SessionReaderStore: ObservableObject {
     /// 手动重试（读取失败 / 连接中断横幅、失败态「重试」按钮）。
     /// 未选定轮次时重跑 list-sessions；已有消息时不清空，按 cursor 增量补齐。
     func refresh() async {
+        await refresh(selectCurrentRun: statusOnly)
+    }
+
+    private func refresh(selectCurrentRun: Bool) async {
         guard !refreshing else { return }
         cancelWork()
         controlStatus = nil
@@ -510,7 +536,7 @@ final class SessionReaderStore: ObservableObject {
         refreshing = true
         defer { if generation == self.generation { refreshing = false } }
         resumeCurrentSearch()
-        if statusOnly {
+        if selectCurrentRun {
             var currentRunID: String?
             if let client, let taskID = taskID ?? session?.taskId {
                 currentRunID = try? await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task.runId
@@ -527,17 +553,16 @@ final class SessionReaderStore: ObservableObject {
     private func loadSession(generation: Int, forceReload: Bool = false,
                              schedulePolling: Bool = true) async {
         guard let client, let runID = selectedRunID, let taskID = taskID ?? sessions.first(where: { $0.runId == runID })?.taskId else { return }
-        if statusOnly ? (schedulePolling && session == nil) : messages.isEmpty { loading = true }
+        if schedulePolling && (statusOnly ? session == nil : messages.isEmpty) { loading = true }
         defer {
             if generation == self.generation {
                 loading = false
-                // 状态模式读取失败仍保留最近状态，并允许下一次轮询恢复。
-                if statusOnly && schedulePolling { restartPolling(generation: generation) }
+                // 两种模式的瞬时读取失败都保留最近内容，并允许下一次轮询恢复。
+                if schedulePolling { restartPolling(generation: generation) }
             }
         }
         do {
-            var payload: [String: Any] = ["task_id": taskID, "run_id": runID]
-            if statusOnly { payload["status_only"] = true }
+            let payload: [String: Any] = ["task_id": taskID, "run_id": runID, "status_only": true]
             let response = try await client.run(
                 "get-session",
                 payload: payload,
@@ -559,14 +584,11 @@ final class SessionReaderStore: ObservableObject {
             error = nil
             await loadRetryTask(generation: generation, taskID: taskID, runID: runID)
             guard generation == self.generation, !Task.isCancelled else { return }
-            if statusOnly {
-                let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                lastStatusCheckedAt = formatter.string(from: Date())
-            }
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            lastStatusCheckedAt = formatter.string(from: Date())
             if !statusOnly { await loadMessages(generation: generation, forceReload: forceReload) }
             guard generation == self.generation else { return }
-            if !statusOnly && schedulePolling { restartPolling(generation: generation) }
             if roundDetail?.backend == "pi_desktop" || session?.backend == "pi_desktop" {
                 // 轮询只静默核验（不显示检查中、不禁用按钮）；其它入口仍可见地检查。
                 controlTask = Task { await checkControlStatus(silent: !schedulePolling) }
@@ -582,7 +604,7 @@ final class SessionReaderStore: ObservableObject {
 
     /// 选中轮次是否属于「重新执行（沿用计划）」入口（不含 Plus 状态确认）。
     var retryEligible: Bool {
-        guard statusOnly, saveFilter == "active", session?.isTrashed != true,
+        guard saveFilter == "active", session?.isTrashed != true,
               session?.readOnly != true, readFailure == nil,
               let runID = selectedRunID, session?.runId == runID,
               ["failed", "finished"].contains(roundDetail?.runStatus ?? session?.runStatus ?? ""),
@@ -630,7 +652,7 @@ final class SessionReaderStore: ObservableObject {
     var hasManualContinuation: Bool { continuedStatus != nil }
 
     private func loadRetryTask(generation: Int, taskID: String, runID: String) async {
-        guard statusOnly, saveFilter == "active", session?.isTrashed != true,
+        guard saveFilter == "active", session?.isTrashed != true,
               ["failed", "finished"].contains(roundDetail?.runStatus ?? session?.runStatus ?? ""), let client else {
             retryTask = nil
             return
@@ -664,7 +686,7 @@ final class SessionReaderStore: ObservableObject {
             if owner == generation, selectedRunID == expectedRunID {
                 retryTask = nil
                 actionError = nil
-                await refresh()
+                await refresh(selectCurrentRun: true)
             }
             return true
         } catch {
@@ -724,14 +746,16 @@ final class SessionReaderStore: ObservableObject {
                     return
                 }
                 let previousCursor = cursor
-                cursor = response.nextCursor ?? cursor
+                let nextCursor = response.nextCursor ?? cursor
                 hasMore = response.hasMore ?? false
                 interrupted = false
                 error = nil
                 await applyMessages(response.messages ?? [], generation: generation)
                 guard generation == self.generation, !Task.isCancelled else { return }
+                // 模式切换可能在后台准备正文时使本页失效；仅在消息落地后提交游标。
+                cursor = nextCursor
                 if let status = session?.runStatus, roundDetail?.runStatus != status {
-                    let details = try await client.run("get-session", payload: ["task_id": taskID, "run_id": requestedRunID], as: GetSessionResponse.self)
+                    let details = try await client.run("get-session", payload: ["task_id": taskID, "run_id": requestedRunID, "status_only": true], as: GetSessionResponse.self)
                     guard generation == self.generation, !Task.isCancelled, selectedRunID == requestedRunID else { return }
                     roundDetail = details.roundDetail
                 }
@@ -859,11 +883,7 @@ final class SessionReaderStore: ObservableObject {
                 let interval = self.connection?.pollInterval ?? 2
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
-                if self.statusOnly {
-                    await self.loadSession(generation: generation, schedulePolling: false)
-                } else {
-                    await self.loadMessages(generation: generation)
-                }
+                await self.loadSession(generation: generation, schedulePolling: false)
             }
         }
     }
@@ -913,7 +933,7 @@ final class SessionReaderStore: ObservableObject {
     func updateDistanceFromBottom(_ distance: CGFloat) {
         guard !loading, !hasMore, !settlingToBottom, !layoutChanging else { return }
         if distance < 48 {
-            if committedQuery.isEmpty { following = true; hasNewContent = false }
+            if committedQuery.isEmpty && !explicitlyPausedFollowing { following = true; hasNewContent = false }
         } else {
             following = false
             cancelPosition()
@@ -926,6 +946,7 @@ final class SessionReaderStore: ObservableObject {
     }
 
     func userScrolled() {
+        explicitlyPausedFollowing = false
         if SessionReaderPerformance.shared.enabled {
             SessionReaderPerformance.shared.nativeEvent("scroll", readerID: performanceReaderID, expectation: .scroll)
         }
@@ -948,9 +969,16 @@ final class SessionReaderStore: ObservableObject {
     }
 
     func jumpToLatest() {
+        explicitlyPausedFollowing = false
         following = true
         hasNewContent = false
         if !committedQuery.isEmpty { searchFollowing = true; searchAnchor = nil; search = "" }
+    }
+
+    func pauseFollowing() {
+        explicitlyPausedFollowing = true
+        following = false
+        cancelPosition()
     }
 
     /// 静默核验只供轮询使用：不清空上一次可信结果，也不显示检查中；手动检查才显示进度。
@@ -1086,7 +1114,7 @@ final class SessionReaderStore: ObservableObject {
             let wasSearching = !self.committedQuery.isEmpty
             self.committedQuery = normalized
             if wasSearching && normalized.isEmpty {
-                self.following = self.searchFollowing
+                self.following = self.searchFollowing && !self.explicitlyPausedFollowing
                 self.restoreAnchor = self.searchFollowing ? nil : self.searchAnchor
             } else if !normalized.isEmpty { self.following = false }
             await self.computeSearch(generation: gen, queryVersion: version, messageVersion: self.messageVersion)

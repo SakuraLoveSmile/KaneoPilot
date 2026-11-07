@@ -32,8 +32,7 @@ struct SessionReaderView: View {
         self.fallbackSessionTitle = fallbackSessionTitle
         self.onDigestChange = onDigestChange
         _store = StateObject(wrappedValue: SessionReaderStore(taskID: taskID,
-                                                              preferredRunID: preferredRunID,
-                                                              statusOnly: true))
+                                                              preferredRunID: preferredRunID))
     }
 
     private var taskTitle: String {
@@ -75,12 +74,13 @@ struct SessionReaderView: View {
             header
             Divider()
             if let failure = store.readFailure {
-                SessionBanner(text: "状态读取失败：\(failure)", stale: store.session != nil) {
+                SessionBanner(text: "会话读取失败：\(failure)", stale: store.session != nil) {
                     Task { await store.refresh() }
                 }
             }
-            statusContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if store.statusOnly { statusContent } else { messageContent }
+            }.frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(GeometryReader { geometry in Color.clear.onAppear { availableWidth = geometry.size.width }.onChange(of: geometry.size.width) { _, width in availableWidth = width } })
@@ -217,6 +217,13 @@ struct SessionReaderView: View {
                 HStack(spacing: Spacing.s) { selectors; Spacer(minLength: 0) }
                 HStack { Spacer(minLength: 0); saveActionMenu }
             }
+            Picker("会话视图", selection: Binding(get: { store.statusOnly }, set: { value in
+                Task { await store.setStatusOnly(value) }
+            })) {
+                Text("会话内容").tag(false)
+                Text("会话状态").tag(true)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 210)
+                .accessibilityLabel("会话视图")
         }
         .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
     }
@@ -340,7 +347,7 @@ struct SessionReaderView: View {
         }
     }
 
-    // MARK: 当前轮次状态（详细对话在运行软件查看）
+    // MARK: 会话内容与当前轮次状态
 
     private var isPlus: Bool {
         store.isPlus
@@ -353,6 +360,58 @@ struct SessionReaderView: View {
 
     private func statusLabel(_ session: SessionInfo?, selected: Bool = true) -> String {
         store.displayStatusLabel(session, selected: selected)
+    }
+
+    @ViewBuilder
+    private var messageContent: some View {
+        if store.session == nil {
+            statusContent
+        } else {
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: Spacing.m) {
+                    Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
+                        .foregroundStyle(statusColor)
+                    Spacer(minLength: 0)
+                    Text(RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
+                        .foregroundStyle(Color.kpSecondary)
+                }.font(.kpSmall)
+                    .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+                if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        Label("此会话尚未导出对话内容", systemImage: "bubble.left.and.bubble.right")
+                            .font(.kpBody)
+                        Text("Codex Desktop 的原生对话请在 Desktop 中查看，可复制会话 ID 查找。")
+                            .font(.kpBody).foregroundStyle(Color.kpSecondary)
+                        copySessionIDButton
+                    }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    SessionContentToolbar(store: store, state: store.messageState)
+                    SessionSearchField(store: store, inputState: store.searchInputState)
+                    Divider()
+                    if store.loadedCount == 0 {
+                        VStack(spacing: Spacing.m) {
+                            if store.loading { ProgressView() }
+                            Text(store.loading ? "正在读取会话内容" : "等待会话内容")
+                                .font(.kpBody)
+                            Text("内容随运行端记录更新，消息完成后显示。")
+                                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        SessionMessageList(store: store, state: store.messageState,
+                                           query: store.committedQuery, hasMore: store.hasMore,
+                                           loading: store.loading, restoreAnchor: store.restoreAnchor,
+                                           detailSize: CGSize(width: max(640, min(availableWidth, 960)), height: 600))
+                    }
+                }
+            }
+        }
+    }
+
+    private var copySessionIDButton: some View {
+        Button("复制会话 ID") {
+            Workspace.copy(externalSessionID)
+            model.showToast("已复制会话 ID")
+        }.disabled(externalSessionID == nil)
     }
 
     @ViewBuilder
@@ -425,15 +484,13 @@ struct SessionReaderView: View {
                         }
                     }
                     Divider()
-                    DetailSection(title: "查看详细内容") {
-                        Text(isPlus ? "详细对话请在 Pi-Desktop-Plus 中查看。打开软件后，可用会话 ID 查找对应会话。" : "详细内容请到对应运行端查看。")
+                    DetailSection(title: "会话内容") {
+                        Text("切换到会话内容，查看本轮已导出的对话与运行记录。")
                             .font(.kpBody).foregroundStyle(Color.kpSecondary)
                         HStack(spacing: Spacing.m) {
+                            Button("查看会话内容") { Task { await store.setStatusOnly(false) } }
                             if isPlus { Button("打开 Pi-Desktop-Plus") { openPlus() } }
-                            Button("复制会话 ID") {
-                                Workspace.copy(externalSessionID)
-                                model.showToast("已复制会话 ID")
-                            }.disabled(externalSessionID == nil)
+                            copySessionIDButton
                         }
                     }
                 }
@@ -462,6 +519,27 @@ struct SessionReaderView: View {
     }
 }
 
+
+private struct SessionContentToolbar: View {
+    @ObservedObject var store: SessionReaderStore
+    @ObservedObject var state: SessionReaderMessageState
+
+    var body: some View {
+        HStack(spacing: Spacing.m) {
+            Text("已加载 \(store.loadedCount) 条\(store.hasMore ? " · 读取中" : "")")
+                .foregroundStyle(Color.kpSecondary)
+            Spacer(minLength: 0)
+            Button(state.following ? "暂停跟随" : "回到最新") {
+                if state.following {
+                    store.pauseFollowing()
+                } else {
+                    store.jumpToLatest()
+                }
+            }.accessibilityLabel(state.following ? "暂停跟随最新消息" : "回到最新消息并继续跟随")
+        }.font(.kpSmall).controlSize(.small)
+            .padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
+    }
+}
 
 private struct SessionSearchField: View {
     let store: SessionReaderStore
@@ -551,6 +629,7 @@ private struct SessionMessageList: View {
                     .background(GeometryReader { geo in Color.clear.preference(key: SessionContentHeightKey.self, value: geo.size.height) })
                     .background(ScrollMetricsObserver(readerID: store.performanceReaderID, onDistance: { store.updateDistanceFromBottom($0) }, onManualScroll: { store.userScrolled() }))
                 }
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .coordinateSpace(name: "session-reader-scroll")
                 .background(GeometryReader { geo in Color.clear.preference(key: SessionScrollHeightKey.self, value: geo.size.height) })
                 .overlay(alignment: .bottom) {
@@ -573,7 +652,7 @@ private struct SessionMessageList: View {
                 .onChange(of: state.following) { _, following in if following { follow(proxy) } }
                 .onAppear {
                     if loading || hasMore { store.beginInitialLayout() }
-                    follow(proxy)
+                    if !restore(proxy) { follow(proxy) }
                 }
                 .onPreferenceChange(SessionRowFramesKey.self) { frames in
                     if let first = frames.filter({ $0.value.maxY > 0 && $0.value.minY < store.visibleHeight }).min(by: { $0.value.minY < $1.value.minY }) {
@@ -830,8 +909,12 @@ struct SessionBanner: View {
                 .accessibilityHidden(true)
             Text(text)
                 .font(.kpSmall)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
                 .textSelection(.enabled)
+                .help(text)
+                .contextMenu {
+                    Button("复制错误详情") { Workspace.copy(text) }
+                }
             if stale {
                 Text("可能已过期")
                     .font(.kpSmall)

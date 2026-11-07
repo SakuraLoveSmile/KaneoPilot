@@ -1399,6 +1399,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  ```
  
  - `status_only=true` 时不请求 `session-messages`，仅返回状态摘要。
+ - KP-SV01 桌面阅读器复用 §5.15.5 命令：状态与内容模式均以 `get-session(status_only:true)` 刷新轻量状态；仅内容模式再通过 `session-messages` 的 cursor/source_version 增量读取已导出消息。内容模式也持续核验 Plus 状态与恢复权限；切换为状态模式停止正文读取，返回时续读。无新增命令或 schema，读取不改变调度状态、运行进程或模型授权。内容可见时机取决于运行端事件导出，不承诺逐 token；Codex Desktop 只有领取/终态回执、尚无原生聊天桥接，界面须明确说明。
  - 返回形状：
    ```json
    {"session": {"task_id", "run_id", "backend", "run_status", "session_id", "turn_id", "save_state", "state", "connection": {"state": "ok|degraded|unavailable", "detail"}, "allowed_actions": [...], "blocked_reason"?, "execution_question": null}}
