@@ -5,7 +5,7 @@
 ## 目标与现场
 
 - 截图任务 `csim4lhdf81m1k7wib615fdv`，执行 run `b6f88006-64dc-4a84-a981-91d6455e9509`。本次只读核查：旧 worker 在台北 17:00:22 因所属 App 实例停止结束；现 App 17:00:24 启动；17:05:47 提交原答案后问题被关闭为 expired / execution_failed。job 为 aborted，worker 已退出，第四轮答案未见消费证明；原问题、草稿及工作树仍保留。
-- 基线 `aa436b582c7e7b206c97ab58a0a722120df2374e`，来源 `main`；任务分支 `fix/20261107-kp-c04-app-interruption-recovery`，工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c04-app-interruption-recovery`；合入目标 `main`。用户随后明确要求“发布新版本”，已授权提交、推送、必要合入及正式发布；发布版本号待用户明确确认，确认前继续云端检查和原生核验。
+- 基线 `aa436b582c7e7b206c97ab58a0a722120df2374e`，来源 `main`；任务分支 `fix/20261107-kp-c04-app-interruption-recovery`，工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c04-app-interruption-recovery`；合入目标 `main`。用户随后明确要求“发布新版本”，已授权提交、推送、必要合入及正式发布，并明确确认正式版本号 **v0.5.1**。
 - 主工作区原有未跟踪 `.local/` 与 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 保留。真实业务 DB、执行目录和当前安装 App 不作为测试夹具，不直接更改；不自动重跑 MediaPlayer 或调用模型。
 
 ## 已确认范围与规则
@@ -37,17 +37,19 @@
 
 ## 本次实现与验证（2026-11-07）
 
-- T1–T3 源码已完成：结构化关闭原因、既有观察入口主动收尾、历史记录严格更正与所有权证据保全、已结束轮次索引同步、当前 run 的用户显式重试、两端中断标签和 macOS 闭合答案说明。当前 11 个核心模块、3 个核心回归文件及 macOS/Android 对应实现/夹具均在本工作树，尚未提交。
+- T1–T3 源码已完成：结构化关闭原因、既有观察入口主动收尾、历史记录严格更正与所有权证据保全、已结束轮次索引同步、当前 run 的用户显式重试、两端中断标签和 macOS 闭合答案说明。11 个核心模块、3 个核心回归文件及 macOS/Android 对应实现/夹具已签名提交为 `1a6e44bfbef2b801cd470df30f98cd5cf83c9e62`，推送触发 Packages #154。
 - T4 独立审查检查实际组合差异，发现并修正旧 expired 已有完整消费证明却不能在已打开卡片纠正为 answered 的 P2；补核心 `answered / termination_reason=app_closed`、原状态审计/时间保留，以及 UI 对带标记终态的纠正、同状态迟到回复不得抹去标记。最终复核无剩余实质发现。UI 审查未编译、未运行原生界面，不冒充界面验收。
 - 验证解释器：`/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`，Python 3.11 / 真实 pytest 9.1.1（site-packages）。均为临时 DB/Git/假 Kaneo 与本地 CLI 协议替身，真实业务模型调用和生产访问为 0。默认 `python3` 的 Python 3.14 没有 pytest，未用仓库 shim 回落执行。
 - 独立核心 worker 在 P2 修正前候选运行：`<解释器> -I -m pytest core/tests/test_codex_inputs.py core/tests/test_codex_execution.py core/tests/test_auto_monitor.py -q` → **203 passed，32 subtests passed**，17.00 秒；`<解释器> -I -m pytest core/tests/test_process_owner.py core/tests/test_execution_questions.py core/tests/test_session.py -q` → **150 passed，11 subtests passed**，103.97 秒。两次完整命令以当前工作树为 cwd，仅有工具回执，没有日志/JUnit文件。
 - 主 agent 组合态运行：`PYTHONDONTWRITEBYTECODE=1 <解释器> -I -m pytest tests/test_codex_dispatch.py -q --junitxml=build/evidence/kp-c04/codex-dispatch.xml` → **7 passed**，40.92 秒。实际托管 worker 与假 Codex CLI 验证派发、问答续接、失败及正常完成，不连接真实模型；这轮在审查 P2 的局部修正前，普通派发路径未受该修正影响。
 - P2 最终修正后只重跑受影响输入/恢复模块：`<解释器> -I -m pytest core/tests/test_codex_inputs.py -q --junitxml=build/evidence/kp-c04/codex-inputs-review-fix.xml` → **20 passed，14 subtests passed**，9.56 秒，exit 0；日志为同目录 `codex-inputs-review-fix.log`。主 agent 已读取日志和两份 JUnit，均 0 failures / 0 errors；覆盖新 App 登记→旧问题更正→显式恢复保留改动、已消费/未消费/矛盾消费、并发完成/归档/其他阻塞、幂等及原文件字节保全。
 - 新增 Swift/Kotlin 回归使用现有夹具，未降低或跳过原断言；本地未运行 Swift、Xcode 或 Gradle。最后 `git diff --check` 和 14 个变更 Python 文件 AST 解析通过；基线及 28 个变更 tracked 文件的 SHA256 记录于 `build/evidence/kp-c04/source-snapshot.json`，不把旧广域通过数量说成最终候选全量重跑。
+- Packages #154 的 macOS 打包、两组桌面回归及 Android 单测/lint/打包通过；Python shard 4 在两解释器均由 `test_event_kind_labels` 发现本次新增事件的核心中文表漏登记。补齐 `derive._EVENT_KIND_CN`，不改门禁或测试预期；本地真实 pytest 重跑现有 5 项标签检查通过，JUnit 为 `build/evidence/kp-c04/event-kind-labels.xml`。最终候选需重新通过云端门禁，#154 的部分成功不作为整体通过。
+- 原生核验：下载 #154 的云端独立身份 App，GitHub artifact digest、ZIP 大小/哈希、来源 SHA/build、严格深度签名及 11 个包内核心模块与提交逐字节核验通过。使用 FakeCore、空凭据、独立 HOME/目录、关闭引擎，在 1180×760 dark 下实测橙色中断卡、未接收/已接收两种闭合问题、展开原答案、复制入口、无无效重发按钮、沿用计划恢复的模型调用说明及取消。未验证剪贴板实际内容；未确认恢复、未调用模型，业务操作命令为 0。证据在主仓 `build/kp-c04/{cloud-154,native}/`；两预览已按独占 PID 退出。最终追加仅为核心事件名称表，UI 源码未变，不把 FakeCore 结果当真实业务执行验收。
 
 ## 剩余工作与下一步
 
-- 状态保持“实现中”：本地源码及适用 Python 检查完成，云端 Swift/Android 编译和实际原生界面检查仍未完成，当前安装版仍未更新。
-- 用户已授权发布新版本；继续提交/推送任务分支，运行云端 Packages 预览检查，下载同 SHA 独立身份 App，以 FakeCore/独立目录核验任务详情与关闭问题状态。源码/云端门禁和原生核验通过后合入 `main`，以用户确认的正式版本号创建 annotated tag 并发布；本次未授权更改真实任务或重跑业务模型。
+- 状态保持“实现中”：本地源码、适用 Python 检查及受影响原生界面检查完成，最终候选云端全量检查待通过，当前安装版仍未更新。
+- 用户已授权发布 v0.5.1；提交/推送事件名称补齐及本记录，最终源码云端门禁通过后合入 `main`，创建签名 annotated v0.5.1 标签并发布，核验正式四项资产；本次未授权更改真实任务或重跑业务模型。
 - 真实 MediaPlayer 任务未更改、未重跑；不修改已安装 App 或直接改库。未来安装候选后可经核心“重新核对”严格修正当前旧记录，证据不足仍保留原分类。
 - 任务尚未合入，因此本任务工作树与 `build/evidence/kp-c04/` 继续保留；只有约定目标合入并通过适用验证后，按保全要求收尾清理。主工作区、其他任务和共享根目录保留。

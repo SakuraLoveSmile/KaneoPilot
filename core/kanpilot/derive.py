@@ -1178,6 +1178,7 @@ _EVENT_KIND_CN = {
     "execution_question_opened":"执行中提问",
     "execution_question_answered":"执行问题已回答",
     "execution_question_closed":"执行问题已关闭",
+    "execution_interruption_classified":"执行中断状态已核对",
     "automation_adopted": "自动接收任务", "auto_confirm_skipped": "跳过自动确认",
     "fix_round_started": "同任务修复轮开始", "delivery_committed": "分支改动已提交",
     "delivery_pushed": "交付分支已推送", "pr_opened": "PR 已创建", "kaneo_comment_posted": "PR 链接已回写",
