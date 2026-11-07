@@ -1,6 +1,6 @@
 # KP-C04：App 重启后的执行中断与问题收尾
 
-状态：实现中。首轮中断识别修复已合入 main 并发布 v0.5.1；用户升级后反馈“计划或工作树内容已变化，请重新确认后再执行”，正在修复受管工具后台日志导致恢复被拒绝的后续问题。
+状态：待体验。首轮中断识别修复已发布 v0.5.1；升级后发现的后台日志恢复误判已修复并发布 v0.5.2。适用验证、公开包核验及两轮 worktree 收尾完成；真实业务执行仍需用户在 App 内确认。
 
 ## 目标与现场
 
@@ -56,10 +56,10 @@
 
 ## 剩余工作与下一步
 
-- v0.5.1 的适用验证、正式发布和首轮 worktree 收尾已完成；后续恢复问题完成前整项任务保持“实现中”。本次没有数据库 schema 变更。
-- 体验入口：macOS“设置 → 高级 → 软件更新”，Android“连接 → 软件更新”，或下载公开 v0.5.1。升级后在原任务点“重新核对”，完整证据满足时更正旧中断/问题分类；如需继续，再确认“重新执行（沿用计划）”，保留原工作树并由新轮次调用模型。
-- 真实 MediaPlayer 任务未更改、未重跑；未修改已安装 App 或直接改库。安装 v0.5.1 后可经核心“重新核对”严格修正当前旧记录，证据不足仍保留原分类。
-- 本任务工作树与已合并本地分支已清理，本地证据以可恢复归档保全在主仓 `build/kp-c04/`；主工作区、其他任务、共享根目录及远端来源分支保留。
+- 最新正式版为 [v0.5.2](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.2)，适用检查、发布核验和收尾完成，状态“待体验”；用户明确确认体验后才改为“已验收”。本次没有数据库 schema 变更。
+- 体验入口：macOS“设置 → 高级 → 软件更新”，Android“连接 → 软件更新”，或下载公开 v0.5.2。升级后在原任务的“执行已中断”提示中选择“重新执行（沿用计划）”，确认后才创建新轮次并调用模型，保留原计划、原工作树和已有改动。
+- 本次未重跑真实 MediaPlayer 任务、未直接改业务 DB、未安装覆盖正式 App、未停止 Gradle daemon 或 MediaPlayer。`2026-11-07T11:47:20Z` 只读投影确认原 run 仍为 `needs_user / monitor / execution_interrupted`，已安装版本 0.5.1/build157；该投影不代表用户之后的操作结果，证据为主仓 `build/kp-c04/post-release/current-projection.json`。
+- 两轮任务 worktree 与已合并本地分支均已清理，可恢复证据归档在主仓 `build/kp-c04/`；主工作区、其他任务、共享根目录及远端来源分支保留。
 
 ## 升级后的恢复阻塞（2026-11-07）
 
@@ -68,12 +68,21 @@
 - 后续基线 `1acbe9ad0b54f9a8a00ea658ede0001e681ccf54`，分支 `fix/20261107-kp-c04-retry-runtime-state`，工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c04-retry-runtime-state`，合入目标 `main`。唯一业务契约更新在 protocol §5.27.12，使用显式版本的新重试指纹及窄范围运行文件排除；旧 queued 保持旧算法。
 - T5：主 agent 维护协议/本记录、独立复核实际用户路径及云端发布；既有 Sol analyst 只读核对排除边界和全部消费者；Sol worker 独占 `git_delivery.py`、`cmd_queue.py`、`cmd_dispatch.py`、`dispatch_validate.py` 及对应核心测试，贯通新旧算法选择和回归；完成后 Sol reviewer 只读独立审查。共享分支/目录，不另开 agent 工作树；只用临时 DB/Git/假服务，原任务和生产模型不作为夹具。
 - 后续验收：日志内容变化、合格运行文件增删可跨准备/事务/领取/派发；源码、计划、分支/HEAD、mode 与索引 blob 变化仍拒绝；tracked/staged 内部路径、非 UUID、其他 `.pi` 和 symlink 不豁免，no-follow 核验中祖先替换拒绝且不读外部；旧 queued/旧 direct 修复恢复保持 v1，未知版本拒绝；现有显式用户确认、新 UUID、成果保全及零自动重发断言继续通过。
-- 正式发布授权沿用；用户明确决定的版本号仅 v0.5.1，新正式版本号待具体修复和验证结果可审查后确认。必要本地检查后推送云端，不在本地编译平台代码；完成后安全收尾后续工作树。
+- 正式发布授权沿用；用户在具体修复与本地验证可审查后，进一步明确确认新正式版本号 **v0.5.2**，不复用 v0.5.1。必要本地检查后推送云端，不在本地编译平台代码；完成后安全收尾后续工作树。
 
-- 首次后续回归发现 3 个新用例构造/预期问题：Git 不枚举未跟踪 FIFO，故将该新增特殊文件用例改用真实 tracked 候选 FIFO；协议明确指纹沿 Git 枚举边界，不新增全目录特殊节点扫描。另两项 legacy direct 修复恢复用例漏计原流程会回填 `review_repair_key`，保留原行为并精确校正新断言。没有删/跳过用例或降低已有门禁；暂存候选特殊类型仍须拒绝。独立审查另发现特殊 verification_recovery 提前返回路径漏验新版本号，已在共用终态核验入口补齐，并保留其独立源码/索引/合并快照守卫；最终结果待重跑。
+- 首次后续回归发现 3 个新用例构造/预期问题：Git 不枚举未跟踪 FIFO，故将该新增特殊文件用例改用真实 tracked 候选 FIFO；协议明确指纹沿 Git 枚举边界，不新增全目录特殊节点扫描。另两项 legacy direct 修复恢复用例漏计原流程会回填 `review_repair_key`，保留原行为并精确校正新断言。没有删/跳过用例或降低已有门禁；暂存候选特殊类型仍须拒绝。独立审查另发现特殊 verification_recovery 提前返回路径漏验新版本号，已在共用终态核验入口补齐，并保留其独立源码/索引/合并快照守卫；最终重跑结果见下文。
 
 - 后续最终源码由 4 个核心模块及 4 个核心测试文件组成；新指纹及版本传播、旧记录兼容、索引 blob 证据和 no-follow 目录证明已完成。目录 fd 缓存最多 32 个，取样后复验已观察目录身份；通用 v1 默认语义未变。独立 Sol reviewer 复核源码后无剩余实质问题；特殊恢复测试的缺失 MCP 夹具已按原成功路径补齐，只调整测试环境，不改生产门禁。
 - 最终本地验证使用 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -I -m pytest`：`core/tests/test_git_delivery.py -q` → **149 passed**，93.94 秒；`core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_review_repair_retry.py core/tests/test_task_ai_action_verification_recovery.py -q` → **92 passed、24 subtests passed**，114.41 秒。完整日志/JUnit 为后续 worktree `build/evidence/kp-c04/retry-fingerprint-final.*` 与 `retry-lifecycle-verified.*`；JUnit 将子用例计入 116 项，均 0 failures/errors/skips。首轮及中间失败记录保留，未跳过、删除或放宽原检查。
 - 主 agent 在同一最终组合源码运行 `tests/test_codex_dispatch.py -q` → **7 passed**，41.98 秒，真实受管 worker + 假 Codex CLI/临时 DB/Git/本地假 Kaneo，日志/JUnit 为同目录 `retry-codex-dispatch.*`。真实模型和生产 DB 写入为 0，平台代码未本地编译。
 - 主 agent 在真实原工作树只读连续计算最终 v2 指纹：日志大小 **1,136,746→1,137,812 bytes** 且 SHA 改变，新指纹两次均 `5e9ca6897bb4fc51796fadf0119f27555fcd6fa1c168f9207bcf837fd22ffd41`，计划 SHA 一致，每次约 5.6–5.7 秒。证据为主仓 `build/kp-c04/post-release/retry-state-verification.json`，其中 4 个模块 SHA 已与最终源码逐项比对。没有 resolve、任务启动、真实 DB 写入或模型调用。
-- `git diff --check`、受影响 Python AST 与最终源码快照核验通过；后续候选尚待云端 Packages 全部门禁。新正式版本号仍等待维护者明确决定（已异步提出 v0.5.2），不复用或覆盖 v0.5.1。
+- `git diff --check`、受影响 Python AST 与最终源码快照核验通过；后续候选 `d0706e4586f673d6541baf6891f937f43c798db2` 已通过 [Packages #158](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42367731380) 全部 16 项必需门禁；用户已明确确认 v0.5.2，不复用或覆盖 v0.5.1。
+
+- 候选 #158 的源码身份与全部 job 结论已独立核验，14 组平台/隔离报告目录、无模型原生平台证据已下载到主仓 `build/kp-c04/cloud-158/`；原生 `result.json` 为 passed、source SHA 相同、model_calls=0、production_access=false，107 项 SHA256SUMS 逐项一致。可选全文探针与 preview publish 按条件 skipped，不能说成执行通过。
+- 修复已 fast-forward 合入并推送远端 main；签名 annotated `v0.5.2` 直接指向 `d0706e4586f673d6541baf6891f937f43c798db2`，标签对象 `2dd962324be266ed9a057d0a9c34ac7097f29d10`，GPG 验证通过。推送触发[正式 Packages #160](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42368821705)，build 160；同源码 main 预览 #159 已确认 cancelled，避免重复占用构建资源，正式 run 独立执行全部门禁。
+- 后续 worktree 与已合并本地分支已安全清理。153 个忽略文件归档至主仓 `build/kp-c04/retry-worktree-ignored-snapshot.tar.gz`（2,064,204 bytes），逐项哈希核验，归档 SHA256 `08e5afc241795f45dc0fdb14bcb09ac41d6d7956a3ab565acb5eaca1a2fc7733`。删除前确认源码已在远端 main、tracked 干净、全部 ignored 字节仍与归档相同且无打开文件/活动进程引用；正常移除 worktree 和本地分支后复核目录/引用不存在，远端来源分支及主仓两项原有未跟踪文件保留。证据为 `retry-worktree-ignored-snapshot.json`、`retry-worktree-cleanup-preflight.json`、`retry-worktree-cleanup.json`。
+
+- **v0.5.2 正式发布与核验完成**：[Packages #160](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42368821705) 全部 16 项必需门禁及 publish 成功，可选全文探针按条件 skipped。公开 [v0.5.2 Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.2)（ID `437541193`）为非 draft、非 prerelease 的 latest，发布于 `2026-11-07T11:47:40Z`（台北 19:47:40）；源码 `d0706e4586f673d6541baf6891f937f43c798db2`、build 160。远端 signed annotated 标签对象/直接源码均与本地验证一致，未移动标签或替换资产。
+- 公开四资产完整下载，GitHub digest、SHA256SUMS、manifest、版本/build/source/latest 一致性核验通过。DMG **40,928,463 bytes**，SHA256 `d2b995c7978a73dbcec6191cf5c2bdf1057c32eec15d36ed0294b01bb5b57698`；APK **8,557,684 bytes**，SHA256 `77b72bdb4d232d6a0d124c845d1a2838bff9de20b2d29074d11436f7378e27b0`。清单及完整结果保存在主仓 `build/kp-c04/release-0.5.2/verification.json` 与同目录四资产。
+- DMG 完整性、DMG/内部 App 严格签名、bundle ID `local.kaneopilot`、0.5.2/build160、arm64 均通过；包内本轮及首轮共 13 个相关核心模块与发布提交逐字节一致，只读挂载已卸载。Android 包名 `com.sakurasep.kaneopilot`、0.5.2/versionCode160、APK 签名及沿用的固定证书 SHA256 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada` 核验通过。Mac 继续 ad-hoc、未公证；没有本地平台编译、安装覆盖或 Android 实机/真实模型验收。证据为同目录 `package-verification.json` 和命令日志。
+- 正式 run 的全部 job 与 15 组报告目录已下载到主仓 `build/kp-c04/cloud-160/`；原生平台报告 passed、source 一致、model_calls=0、production_access=false，107 项 SHA256SUMS 一致。公开正文只剥离签名标签注释中的 PGP 签名块，保留安装要求与 `kaneopilot-ci:<sha>:160` 来源标记，读回确认 Release 身份和四资产均未变；前后正文及 `body-cleanup-verification.json` 保存在公开包目录。
