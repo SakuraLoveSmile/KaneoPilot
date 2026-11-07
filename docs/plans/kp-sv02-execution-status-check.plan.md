@@ -1,12 +1,12 @@
 # KP-SV02：概览核验真实执行状态
 
-状态：实现中（核心、180 项本地隔离检查和 Packages #161 已通过；官方预览包已完整核对，原生界面核验中，当前等待 Mac 解锁）。2026-11-07 用户提供 MediaPlayer 的 `NETWORK_ERROR` 任务概览截图，要求增加校验，并明确选择“核验真实执行状态”。
+状态：待体验（已合入 main，180 项隔离检查、原生核验和正式 Packages #163 通过；2026-11-08 已公开发布 v0.5.3 并确认为 latest）。2026-11-07 用户提供 MediaPlayer 的 `NETWORK_ERROR` 任务概览截图，要求增加校验，并明确选择“核验真实执行状态”。
 
 目标：在概览直接核对当前执行是否仍在运行、已结束、失败或无法确认，并显示检查依据、时间和下一步建议。保留原报错，校验不重跑、不调用模型、不改变任务或远端状态。
 
 - 基线：`main@f1c1cea0552ce3439322e379bf821ee9474f486a`。
-- 分支：`feat/20261107-kp-sv02-execution-status-check`。
-- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-feat-kp-sv02-execution-status-check`；合入目标 main；用户于 2026-11-07 先授权提交、推送与云端预览，后明确“发布吧”，现已授权合入与正式发布；核对当前 latest 为 v0.5.2 后，按补丁版本 v0.5.3 推进。
+- 分支：`feat/20261107-kp-sv02-execution-status-check`；已合入 main，本地分支已清理，远端来源分支保留。
+- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-feat-kp-sv02-execution-status-check`；已于 2026-11-08 安全移除。用户于 2026-11-07 先授权提交、推送与云端预览，后明确“发布吧”，授权合入与正式发布；发布前核对 latest 为 v0.5.2，按补丁版本 v0.5.3 交付。
 - 主工作区已有 `.local/` 和 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 未跟踪内容，保留不动；其他 worktree 不属于本任务。
 
 ## 已确认决定与实施
@@ -20,7 +20,7 @@
 | T3 | 主 agent 独占 macOS Models、TaskDetailContentView、Components、FakeCore、CLI 及规范。 | 概览入口与只读结果面板，核验期间禁重复点击，切换任务/轮次丢弃旧结果；可重试和查看执行会话。保留整页布局与原恢复权限。 |
 | T4 | 主 agent 组合核验与收尾；必要时 reviewer（Sol/high）只读审查。 | 临时 DB/文件及 fake Plus 的 Python 检查；Swift 编译仅云端 Packages；最新云端独立 App 配 FakeCore 核对正常、未知/冲突、重复点击和窄窗口。 |
 
-所有测试使用本任务临时目录和随机 loopback 端口，无真实 Kaneo、模型或业务任务写入。主 agent 核对最终组合态。原生界面需要新云端产物；本地实现与检查已完成，用户已允许提交、推送本分支并运行云端预览构建及原生核验，后追加正式发布授权；发布前补齐原生核验。
+所有测试使用本任务临时目录和随机 loopback 端口，无真实 Kaneo、模型或业务任务写入。主 agent 已核对最终组合态，并使用新云端独立 App 完成原生界面核验；正式发布绑定同一产品源码。
 
 ## 可检查场景
 
@@ -32,14 +32,18 @@
 
 ## 本次证据与剩余工作
 
-- T1–T3 代码已完成；T4 本地组合态及云端构建通过，原生交互尚未完成，因此仍为“实现中”。提交前的候选绑定上述基线与 `build/kp-sv02/local-verification.json` 内 10 个实际源码/测试文件 SHA256。
+- T1–T4 已完成：本地组合态、分支与主线云端构建、原生交互及正式发布检查通过；用户尚未确认真实业务体验，因此为“待体验”。提交前的候选绑定上述基线与 `build/recovery/kp-sv02-v0.5.3/evidence/local-verification.json` 内 10 个实际源码/测试文件 SHA256；正式发布源的这 10 个文件已再次核对一致。
 - 主 agent 在当前组合态运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests python3 -m unittest -q test_execution_status test_session test_session_status test_session_control test_execution_retry`（cwd `core`）：**180 tests / 59.917s / exit 0**。包含新增 26 项与原会话、状态、Plus 控制、沿用计划恢复回归；没有改旧测试预期或降低门禁。
 - 新回归经 CLI 入口，以 SQLite `query_only` 拒绝写入并核对 DB dump/文件字节；覆盖旧 running + 死亡/未知进程、当前 Plus 活动与后续轮次、Goal 等待批准、半写/身份错误/换轮、缺实时 turn、核验期间终态证据变化、PID 复用、历史读取的原回填行为及脱敏。
 - FakeCore 新命令本地 smoke 通过：响应绑定 task/run，原 NETWORK_ERROR 保留，夹具文件字节不变，命令日志只有 check-execution-status；没有恢复或模型请求。6 个受影响 Python 文件 AST 检查、`git diff --check` 通过。
 - reviewer（Sol/high）只读审查发现并已修复三项边界：实时 turn 缺失时不能借用历史 turn；新只读命令须跳过 CLI 写动作守卫；普通 PID 存活不代表本轮进程归属。复核当前组合态未发现剩余实质缺陷。主 agent 亲自运行上述组合态测试，不将子 agent 自报当最终证据。
-- 已提交并推送 `cb17e5a6d8410a1b88dc00041758cee3bf4c2e7e`。Packages [#161](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42381158937) 绑定该 SHA：16 个必需 job 全部 success（Python 3.11/3.13 五分片、Swift 两组夹具、macOS/Android 打包及平台检查），2 个预期 skipped（非本次启用的全文探针、publish）。证据在 `build/kp-sv02/cloud-161/run-final.json`、`jobs-final.json` 与 `artifacts.json`。
-- 下载阻塞已解除：重新取得 #161 官方 `macos-update-ui-161` 完整制品（30,914,872 bytes；SHA256 `ba87880d69b1f0c58ec7e883900f79c4e26ef6f631b1ff26632d232e25c5632b`），内层 31,776,905 bytes / SHA256 `6df541eb22b2f2d924f7dc7f67eabb08bf891a51dd542e442ecdb3b34a9d35cd`；元数据 source_sha=cb17e5a、build=161、bundle=`local.kaneopilot.software-update-check`。云端 App 的 `codesign --verify --deep --strict` exit 0；未本地编译或重签名。
-- 原生核验使用该独立身份 App、FakeCore、独立 support/DB/凭据空文件等目录，并禁用执行调度。900×600 dark 已观察概览入口、未知/运行中/结束/失败结果，原 NETWORK_ERROR 保留，滚动可查看下一步，结束状态保留验证与评审提示；截图与 AX 在 `build/kp-sv02/native/screenshots/`。剩余读取错误、加载/重复点击、关闭/切轮、会话跳转与 1180×760 light。途中界面工具报告 Mac 锁定，已请求用户解锁；不把已观察的局部结果当成全项通过。
-- 发布准备：远端 main 仍为 f1c1cea，v0.5.2 源码为 d0706e4，二者之间仅有旧任务的发布证据文档。候选 v0.5.3 只增加本任务功能；公开说明草稿在 `build/kp-sv02/release-notes-draft.md`，无 schema 变化。当前未合并、创建标签或发布。
-- 下一步：解锁后完成上述剩余原生场景及命令日志核对；通过后更新为“待体验”，合入 main 并核对该提交云端检查，再按正式 annotated 标签流程发布 v0.5.3、核验四项资产及 latest，归档本任务证据并安全清理本任务 worktree。未操作真实运行端/MediaPlayer/设备任务。
-- 本任务尚未合入，worktree 保留供评审与构建；主工作区和其他 worktree 不变。合入且适用验证通过后再按保全规则收尾本任务目录。
+- 已提交并推送 `cb17e5a6d8410a1b88dc00041758cee3bf4c2e7e`。Packages [#161](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42381158937) 绑定该 SHA：16 个必需 job 全部 success（Python 3.11/3.13 五分片、Swift 两组夹具、macOS/Android 打包及平台检查），2 个预期 skipped（非本次启用的全文探针、publish）。证据在 `build/recovery/kp-sv02-v0.5.3/evidence/cloud-161/run-final.json`、`jobs-final.json` 与 `artifacts.json`。
+- 下载阻塞已解除：#161 官方 `macos-update-ui-161` 完整制品 30,914,872 bytes / SHA256 `ba87880d69b1f0c58ec7e883900f79c4e26ef6f631b1ff26632d232e25c5632b`；内层 31,776,905 bytes / SHA256 `6df541eb22b2f2d924f7dc7f67eabb08bf891a51dd542e442ecdb3b34a9d35cd`。元数据 source_sha=cb17e5a、build=161、独立 bundle=`local.kaneopilot.software-update-check`；云端 App `codesign --verify --deep --strict` exit 0。未本地编译或重签名。测试的 10 个源码/测试文件摘要与合入 main 的 578b68a 完全相同，差异仅为任务记录。
+- 原生场景和命令审计共 15 项通过：900×600 dark 的概览入口、未知/运行中/结束/失败、读取错误、错轮响应拒绝、长证据滚动、会话跳转、连续点击；1180×760 light 的无阻塞入口与面板、加载禁重复核验、关闭后重开和切轮后的在途响应失效。原 NETWORK_ERROR 保留，结束状态保留验证/评审提示。延迟夹具冻结原响应 20 秒；分别于 5.142 秒关闭、12.275 秒刷新切轮，返回后仍显示新结果且没有旧响应哨兵。AX、截图及其摘要见归档 `native/`、`cloud-161/verification.json`。
+- 原生核验使用 FakeCore 和独立 support/DB/计划/报告/凭据空文件；命令日志只有读取入口，没有 enqueue、resolve、恢复、执行或模型请求。菜单退出后仍存活的本任务独立测试 App 已核对可执行文件与 PID 后用 SIGTERM 收尾；正式 App、Plus 和真实 MediaPlayer/设备任务未操作。该隔离核验不代表真实业务需求验收或正式安装。
+- 已合入并推送 `main@578b68ab929cc8e259405edbdff3b8d04846e73a`；[Packages #162](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42386989891) 绑定该提交，16 个必需 job success、2 个预期 skipped。源码与本地检查及原生 App 再次核对一致，无 schema 变化。
+- 已创建并推送直指该 main 提交的 annotated `v0.5.3`；完整说明在该标签注释及归档 `release-notes-v0.5.3.md`。[正式 Packages #163](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42389313834) 完成：17 个 job success，1 个预期 skipped（可选全文探针）；publish success。发布源固定为 `578b68ab929cc8e259405edbdff3b8d04846e73a`、build=163，后续任务记录提交不改变发布源码。
+- [v0.5.3 正式 Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.3) 于 2026-11-08 00:21:24（台北）公开；API 核对非 draft、非 prerelease，latest 同为 release 437689193，正文构建标记绑定上述源码与 build。四项资产 APK、arm64 DMG、manifest.json、SHA256SUMS 均 uploaded，名称、大小与完整 SHA256 已记录在 `release-163/verification.json`。
+- 云端发布 job 在公开前重新生成并核对 manifest 的版本、源码、build、架构及签名指纹，读回四项上传资产并逐一比对字节 SHA256；全部成功后才公开。本机补充下载因网络/TLS 中断及 API 二进制重定向解析失败未完成，已停止重试；未声称本地独立复验 #163 包字节、签名或 manifest。正式发布完整性证据来自已通过的云端读回门禁，公开资产元数据与 latest 已在本机核对。
+- 证据已迁至主工作区 `build/recovery/kp-sv02-v0.5.3/evidence/`，截图/AX 摘要搬迁后逐一核对通过；本任务 110 个 `.pyc` 也保存在同级 `bytecode-cache/`。本任务测试进程已退出，移除前核对 worktree 无暂存、未暂存、未跟踪或忽略成果，无打开文件或活动进程引用，来源提交已在 main。已正常移除该 worktree 及已合入本地分支，复核目录和分支不存在；`release-163/cleanup.json` 记录结果。远端来源分支、主工作区原有 `.local/`、缓存清理计划及其他 worktree 保留。
+- 体验入口：更新至 v0.5.3，任务概览 →“核验执行状态”。下一步由用户体验真实业务；未正式安装、未重跑 MediaPlayer、未调用真实模型或操作设备，执行状态核验不等于业务需求已验收。
