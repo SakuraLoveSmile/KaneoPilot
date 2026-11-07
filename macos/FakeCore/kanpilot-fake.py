@@ -3583,6 +3583,22 @@ def cmd_session_control_status(state, payload):
                  "start_label": "请求开始"}, **configured)
 
 
+def cmd_check_execution_status(state, payload):
+    marker = "%s/%s" % (payload.get("task_id"), payload.get("run_id"))
+    fixture = (state.get("execution_status_checks") or {}).get(marker) or {}
+    if fixture.get("delay_ms"):
+        time.sleep(min(float(fixture["delay_ms"]) / 1000, 5))
+    if fixture.get("error"):
+        return fail(str(fixture["error"]), "stale_run")
+    return dict({"task_id": payload.get("task_id"), "run_id": payload.get("run_id"),
+                 "backend": "pi_desktop", "checked_at": iso(utcnow()), "state": "unknown",
+                 "label": "状态未确认", "summary": "隔离预览：尚未配置本轮实时核验结果。",
+                 "next_step": "查看执行会话，确认运行端与执行记录。", "original_failure": None,
+                 "checks": [{"name": "record", "label": "执行记录", "state": "unknown",
+                             "detail": "隔离 FakeCore，不连接真实任务或运行端。"}]},
+                **{key: value for key, value in fixture.items() if key not in ("delay_ms", "error")})
+
+
 def cmd_session_request_start(state, payload):
     status = cmd_session_control_status(state, payload)
     if not status["can_start"] or payload.get("request_id") != status["request_id"]:
@@ -4449,6 +4465,7 @@ COMMANDS = {
     "set-desktop-automation": lambda s, p: desktop_automation_status(s, p, "enabled"),
     "set-desktop-automation-schedule": lambda s, p: desktop_automation_status(s, p, "schedule"),
     "session-control-status": cmd_session_control_status,
+    "check-execution-status": cmd_check_execution_status,
     "session-request-start": cmd_session_request_start,
     "get-planner-config": lambda s, p: fake_config(s, p, "planner"),
     "set-planner-config": lambda s, p: fake_config(s, p, "planner", True),

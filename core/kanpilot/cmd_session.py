@@ -959,8 +959,8 @@ def _status_force_signature(conn, source, task_id: str, run_id: str) -> Optional
         return None
 
 
-def _get_session_status(ctx, payload: dict) -> dict:
-    """Small cross-process status cache; no reader positions or transcript requests."""
+def _get_session_status(ctx, payload: dict, *, persist: bool = True) -> dict:
+    """Small status view; ``persist=False`` also disables discovery/cache writes."""
     conn = ctx.conn
     task = db.require_task(conn, payload["task_id"])
     task_id = task["task_id"]
@@ -1044,7 +1044,7 @@ def _get_session_status(ctx, payload: dict) -> dict:
     row = round_store.get_round(conn, task_id, run_id)
     # Discovery uses authenticated job identity even before events exist, just
     # like the legacy get-session path. It never changes save_state.
-    if job is not None and _refresh_needed(row, job):
+    if persist and job is not None and _refresh_needed(row, job):
         with db.write_txn(conn):
             row = _backfill_from_job(conn, task_id, run_id, ctx.now_iso, job)
     file_reason = _UNCHECKED
@@ -1072,7 +1072,7 @@ def _get_session_status(ctx, payload: dict) -> dict:
         snapshot.pop("force_file_reason", None)
         if proof_signature is not None:
             snapshot.update(force_signature=proof_signature, force_file_reason=file_reason)
-        if snapshot != cached:
+        if persist and snapshot != cached:
             with db.write_txn(conn):
                 conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
                              (_STATUS_SNAPSHOT_PREFIX + marker,

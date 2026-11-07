@@ -1822,6 +1822,39 @@ struct RecheckResponse: Decodable {
     let ok: Bool?
 }
 
+/// KP-SV02：当前执行轮次的只读事实核验；不代表需求或验证通过。
+struct ExecutionStatusCheckResponse: Decodable {
+    let taskId: String
+    let runId: String
+    let backend: String?
+    let checkedAt: String
+    let state: String
+    let label: String
+    let summary: String
+    let nextStep: String
+    let originalFailure: String?
+    let checks: [ExecutionStatusCheckItem]
+
+    var symbol: String {
+        switch state {
+        case "running": return "play.circle.fill"
+        case "waiting_permission": return "hand.raised.fill"
+        case "finished": return "checkmark.circle.fill"
+        case "failed", "aborted": return "exclamationmark.circle.fill"
+        case "not_started": return "clock.fill"
+        default: return "questionmark.circle.fill"
+        }
+    }
+}
+
+struct ExecutionStatusCheckItem: Decodable, Identifiable {
+    let name: String
+    let label: String
+    let state: String
+    let detail: String
+    var id: String { name }
+}
+
 // MARK: - 时间解析
 
 enum TimeFormat {

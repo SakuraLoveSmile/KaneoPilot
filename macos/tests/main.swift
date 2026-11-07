@@ -22,6 +22,14 @@ func decode<T: Decodable>(_ type: T.Type, _ json: String) -> T? {
 
 // MARK: - Plus readiness probe snake_case response
 
+// KP-SV02：真实核心契约的字段解码，不把 finished 解释为需求验收完成。
+if let result = decode(ExecutionStatusCheckResponse.self, #"{"task_id":"status-task","run_id":"status-run","backend":"pi_desktop","checked_at":"2026-11-07T14:00:00Z","state":"unknown","label":"状态未确认","summary":"Plus 已空闲，执行记录尚未收尾。","next_step":"查看执行会话，保留原轮次。","original_failure":"turn error: NETWORK_ERROR","checks":[{"name":"plus","label":"Plus 当前状态","state":"confirmed","detail":"同一会话当前空闲"}]}"#) {
+    expect(result.taskId == "status-task" && result.runId == "status-run", "执行核验绑定任务和轮次")
+    expect(result.checkedAt == "2026-11-07T14:00:00Z" && result.state == "unknown", "执行核验保留未知状态及检查时间")
+    expect(result.originalFailure == "turn error: NETWORK_ERROR" && result.checks.first?.id == "plus", "执行核验保留原失败及独立检查依据")
+    expect(result.symbol == "questionmark.circle.fill", "未知状态不显示通过标记")
+}
+
 if let archive = decode(AutoArchiveConfigResponse.self, #"{"config":{"enabled":false,"after_days":7}}"#) {
     expect(!archive.config.enabled && archive.config.afterDays == 7,
            "自动归档设置解码核心默认关闭与保留天数")

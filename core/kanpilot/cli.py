@@ -471,6 +471,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "run_id": (True, "str")},
         _automation_command("session_control", "cmd_session_control_status"),
     ),
+    "check-execution-status": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("execution_status", "cmd_check_execution_status"),
+    ),
     "session-request-start": (
         {"task_id": (True, "str"), "run_id": (True, "str"), "request_id": (True, "str")},
         _automation_command("session_control", "cmd_session_request_start"),
@@ -818,7 +822,7 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
     try:
         # Check inside each write transaction as well as before a mutating
         # command, so a task cannot be replanned/overridden during its checks.
-        if command != "run-verification-checks" and not command.startswith(("get-", "list-", "session-")):
+        if command not in {"run-verification-checks", "check-execution-status"} and not command.startswith(("get-", "list-", "session-")):
             task_id = payload.get("task_id")
             if not task_id and payload.get("request_id"):
                 request = db.get_request(ctx.conn, payload["request_id"])

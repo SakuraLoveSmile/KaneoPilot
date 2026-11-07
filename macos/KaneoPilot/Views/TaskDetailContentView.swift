@@ -706,6 +706,7 @@ struct TaskOverviewTabView: View {
     @State private var executionStopTarget: (taskID: String, runID: String, formIdentity: [String]?)?
     @State private var executionStopOperation: (runID: String, operationID: String)?
     @State private var deliveryConfirmation: (taskID: String, executionRunID: String, reviewKey: String)?
+    @State private var executionStatusTarget: ExecutionStatusCheckTarget?
 
     private var reviewStore: ReviewResolutionStore? {
         guard detail.parentCloseout == nil else { return nil }
@@ -764,6 +765,27 @@ struct TaskOverviewTabView: View {
     private var isBlocked: Bool {
         if actions.contains("continue_delivery") { return false }
         return detail.status == "needs_user" || display == "执行端失联" || display == "需人工" || detail.blockedReason != nil
+    }
+
+    /// 与概览横幅的展示条件一致，确保每个轮次只有一个直接核验入口。
+    private var showsBlockedBanner: Bool {
+        answerStore == nil && reviewStore == nil && detail.parentCloseout == nil && isBlocked
+            && detail.currentInputQuestion?.state != "open"
+            && (detail.failureCode != "execution_input_required" || detail.executionQuestion == nil)
+    }
+
+    @ViewBuilder
+    private var executionStatusCheckButton: some View {
+        if let runID = detail.runId, !runID.isEmpty {
+            Button {
+                executionStatusTarget = ExecutionStatusCheckTarget(taskID: detail.taskId, runID: runID)
+            } label: {
+                Label("核验执行状态", systemImage: "checkmark.magnifyingglass")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("核对本轮执行记录与当前运行状态，保留原报错，不会重新执行。")
+        }
     }
 
     private var hasPlan: Bool {
@@ -963,9 +985,7 @@ struct TaskOverviewTabView: View {
                             else { model.openPlanning(focusTaskID: detail.taskId) }
                         }, onRefreshDetail: onRefreshDetail)
                         .id("review-resolution")
-                } else if detail.parentCloseout == nil, isBlocked,
-                          detail.currentInputQuestion?.state != "open",
-                          detail.failureCode != "execution_input_required" || detail.executionQuestion == nil {
+                } else if showsBlockedBanner {
                     // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
                 }
@@ -1014,6 +1034,7 @@ struct TaskOverviewTabView: View {
                         executionAnswerCard(store)
                     }
                     stageShortcutsSection
+                    if !showsBlockedBanner { executionStatusCheckButton }
                 }
 
                 // 4. 任务信息：字段行并入一个分组容器，含按钮的操作区留在容器之外
@@ -1199,6 +1220,13 @@ struct TaskOverviewTabView: View {
                                     set: { if !$0 { model.recheckResult = nil } })) {
             RecheckResultView(result: model.recheckResult)
         }
+        .sheet(item: $executionStatusTarget) { target in
+            ExecutionStatusCheckView(target: target, onViewSession: onSwitchTab.map { callback in
+                { executionStatusTarget = nil; callback(.execution) }
+            })
+        }
+        .onChange(of: detail.taskId) { executionStatusTarget = nil }
+        .onChange(of: detail.runId) { executionStatusTarget = nil }
     }
 
     /// 执行问答卡片的唯一构造处。两个位置（需要你处理、进展）互斥渲染，因此 `execution-answers` 锚点只出现一次。
@@ -1234,6 +1262,7 @@ struct TaskOverviewTabView: View {
                     .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            executionStatusCheckButton
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)

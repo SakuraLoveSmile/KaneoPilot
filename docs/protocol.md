@@ -511,9 +511,14 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 
 ### 5.15.5 会话适配（本机运行记录）与会话命令
 
-- 会话页 Plus 控制入口（2026-10-07）：`session-control-status {task_id,run_id}` 只读返回 `{task_id,run_id,request_id?,backend?,state,detail,connected,session_id?,turn_id?,can_start,blocked_reason?,start_label}`；按已核验 job 中固化的连接读取 Plus 状态，不返回凭据、原始状态或权限请求正文。`state` 为 `unavailable|not_started|running|waiting_permission|idle|disconnected|executor_lost|unsupported`，错误原因脱敏。
+- 会话页 Plus 控制入口（2026-10-07）：`session-control-status {task_id,run_id}` 只读返回 `{task_id,run_id,request_id?,backend?,state,detail,connected,session_id?,turn_id?,observed_turn_id?,can_start,blocked_reason?,start_label}`；按已核验 job 中固化的连接读取 Plus 状态，不返回凭据、原始状态或权限请求正文。`state` 为 `unavailable|not_started|running|waiting_permission|idle|disconnected|executor_lost|unsupported`，错误原因脱敏。`observed_turn_id` 只取本次实时响应明确提供的当前 turn，缺失为 null；保留既有 `turn_id` 的历史回退兼容含义，新的真实状态核验只采信 `observed_turn_id`。
 - `session-request-start {task_id,run_id,request_id}` 仅恢复同一已授权的 Plus 规划请求。活跃、未过期领取与存活原进程禁止重排；身份、当前轮次、活跃保存状态、暂停与材料授权必须再次核验。仅旧进程已退出且租约过期、尚未发送的轮次（无 session/turn/send_state）可将**同一 request**重新排队，保留原 payload 与 attempts，恢复领取前任务状态；队列中的重复请求幂等。已发送或发送未知不重发、不创建第二会话，按钮提供原因。返回 `{request_id,stage:"plan",queued:true,deduplicated:bool}`，App唤起原有单飞规划调度器；点击才启动，不因读取状态自动开始。该入口不直接调用 Plus prompt，不修改历史 job。
 - Plus规划进程捕获意外内部异常时，对仍持有有效请求/轮次/租约的自身现场记录明确失败和terminal；失去归属不覆盖新领取。异常输出仅固定说明与异常类型，不持久化可能含凭据的原始异常文本，不自动重试或重发。
+
+- **概览执行核验（KP-SV02）**：桌面 `check-execution-status {task_id,run_id}` 只检查任务当前绑定的执行轮次；调用前后核对 task/run/session 身份，切轮或绑定变化返回 `stale_run`，不展示旧结果。返回 `{task_id,run_id,backend?,checked_at,state,label,summary,next_step,original_failure?,checks:[{name,label,state,detail}]}`；顶层 state 为 `running|waiting_permission|finished|failed|aborted|not_started|unknown`，检查项 state 为 `confirmed|attention|unknown`。label/summary/next_step/检查项文字为可展示的脱敏中文。这里只读运行记录及绑定的 Plus 控制状态，不调用 Kaneo、模型、验证命令或任何恢复操作，不写 SQLite（含索引/缓存）、job、spec、事件或业务日志，不更新原失败记录。
+  - 复用 `get-session(status_only)` 的来源/文件签名和进程身份核验，专用内部读取模式禁用其索引回填与缓存写入；缺失、半写、身份不符、过期缓存或冲突不能当作成功。原 job 终态及 terminal 必须相容，执行进程已退出才称原轮次结束；单独的超时派生失败不足以确认失败。
+  - Plus 核对同 task/run/session 的实时 `session-control-status`；有后续 turn 时只接受该接口已核实的 continued 字段。Plus 空闲而原轮次仍 running 显示 unknown，不能当成完成；当前仍运行或等待权限如实展示，原失败作为单独历史证据保留。断连/无效或缺少当前 turn 身份显示 unknown。
+  - Codex 仅在本轮记录 running 且 `observer_alive=true`（已有 worker/CLI 出生身份检查）时显示执行进程仍在运行；false/未知显示 unknown。历史 pi 的普通 PID 存活不足以确认身份，最多作为证据。未支持后端显示 unknown。finished 只表示执行轮次已结束，不能证明需求、验证、评审或人工验收完成。重复核验不创建请求；恢复仍走原显式确认入口。
 
 - 正常等待事件日志（文件尚未生成或为空）返回 `session.state=pending`，不将等待说明写入表示读取错误的 `connection.detail`；界面按状态展示等待说明。真实读取/解析失败即使无快照而回退为 `pending`，仍保留 `connection.detail`；调用方不得仅凭 `pending` 隐藏错误。
 

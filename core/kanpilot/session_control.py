@@ -365,6 +365,7 @@ def cmd_session_control_status(ctx, payload):
               "backend": job.get("backend") if job else None,
               "state": "unavailable", "detail": "会话身份或来源不可用",
               "connected": False, "session_id": None, "turn_id": None,
+              "observed_turn_id": None,
               "can_start": False, "blocked_reason": reason,
               "continued_state": None, "continued_turn_id": None,
               "continued_ended_at": None, "continued_detail": None,
@@ -405,8 +406,9 @@ def cmd_session_control_status(ctx, payload):
             result.update(state=state, connected=True,
                           detail={"waiting_permission": "Plus 正在等待权限确认，请在 Plus 中处理",
                                   "running": "Plus 正在运行", "idle": "Plus 当前空闲"}[state])
-            if isinstance(view.get("current_turn_id"), str):
+            if isinstance(view.get("current_turn_id"), str) and view["current_turn_id"]:
                 result["turn_id"] = view["current_turn_id"]
+                result["observed_turn_id"] = view["current_turn_id"]
             result.update(_continued_status(job, view, connection_file))
         else:
             view = harness_plus_adapter.plus_capabilities(connection_file, timeout=_PLUS_TIMEOUT)

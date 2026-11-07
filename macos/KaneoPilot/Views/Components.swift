@@ -1235,6 +1235,140 @@ struct PhaseStepperView: View {
 
 // MARK: - recheck 结果
 
+struct ExecutionStatusCheckTarget: Identifiable {
+    let taskID: String
+    let runID: String
+    var id: String { "\(taskID)/\(runID)" }
+}
+
+/// 只读核验面板；结果绑定打开时的任务与轮次，关闭后在途响应失效。
+struct ExecutionStatusCheckView: View {
+    let target: ExecutionStatusCheckTarget
+    var onViewSession: (() -> Void)?
+    @EnvironmentObject private var model: AppViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var result: ExecutionStatusCheckResponse?
+    @State private var error: String?
+    @State private var checking = false
+    @State private var requestID = UUID()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            Text("执行状态核验").font(.kpTitle)
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.l) {
+                    if checking {
+                        HStack(spacing: Spacing.s) {
+                            ProgressView().controlSize(.small)
+                            Text("正在核对执行记录与当前状态…").font(.kpBody)
+                        }
+                    } else if let error {
+                        Label("状态未确认", systemImage: "exclamationmark.triangle.fill")
+                            .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpOrange)
+                        Text(error).font(.kpSmall).textSelection(.enabled)
+                        Text("可重新核验，或查看执行会话中的记录与运行端状态。")
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    } else if let result {
+                        resultContent(result)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, Spacing.s)
+            }
+            HStack(spacing: Spacing.s) {
+                Button("重新核验") { Task { await check() } }
+                    .disabled(checking)
+                if let onViewSession {
+                    Button("查看执行会话") { dismiss(); onViewSession() }
+                }
+                Spacer(minLength: 0)
+                Button("关闭") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(Spacing.l)
+        .frame(width: 520, height: 440)
+        .task(id: target.id) { await check() }
+        .onDisappear { requestID = UUID() }
+    }
+
+    private func resultContent(_ result: ExecutionStatusCheckResponse) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Label(result.label, systemImage: result.symbol)
+                    .font(.kpBody.weight(.semibold)).foregroundStyle(statusColor(result.state))
+                Text(result.summary).font(.kpBody).textSelection(.enabled)
+                Text("核验时间 \(TimeFormat.fullString(result.checkedAt))")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                if result.state == "finished" {
+                    Text("执行轮次已结束；需求是否完成仍以验证与评审结果为准。")
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: Spacing.m) {
+                ForEach(result.checks) { item in
+                    HStack(alignment: .top, spacing: Spacing.s) {
+                        Image(systemName: item.state == "confirmed" ? "checkmark.circle" : "exclamationmark.circle")
+                            .foregroundStyle(item.state == "confirmed" ? Color.kpSecondary : Color.kpOrange)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text(item.label).font(.kpBody)
+                            Text(item.detail).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            if let failure = result.originalFailure, !failure.isEmpty {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Text("原失败记录").font(.kpBody.weight(.semibold))
+                    Text(failure).font(.kpSmall).textSelection(.enabled)
+                }
+                .padding(Spacing.m)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.kpSecondary.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.control))
+            }
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Text("下一步").font(.kpBody.weight(.semibold))
+                Text(result.nextStep).font(.kpBody).textSelection(.enabled)
+            }
+        }
+    }
+
+    private func statusColor(_ state: String) -> Color {
+        switch state {
+        case "running": return .kpBlue
+        case "finished": return .kpGreen
+        case "failed", "aborted": return .kpRed
+        case "not_started": return .kpSecondary
+        default: return .kpOrange
+        }
+    }
+
+    @MainActor
+    private func check() async {
+        guard !checking else { return }
+        let request = UUID()
+        requestID = request
+        checking = true
+        result = nil
+        error = nil
+        defer { if requestID == request { checking = false } }
+        do {
+            let response = try await model.client.run("check-execution-status",
+                payload: ["task_id": target.taskID, "run_id": target.runID], timeout: 30,
+                as: ExecutionStatusCheckResponse.self)
+            guard !Task.isCancelled, requestID == request else { return }
+            guard response.taskId == target.taskID, response.runId == target.runID else {
+                throw CoreError.badOutput("核验结果与当前任务或轮次不匹配，请关闭面板并刷新任务。")
+            }
+            result = response
+        } catch {
+            guard !Task.isCancelled, requestID == request else { return }
+            self.error = error.coreMessage
+        }
+    }
+}
+
 struct RecheckResultView: View {
     let result: RecheckResponse?
     @Environment(\.dismiss) private var dismiss
