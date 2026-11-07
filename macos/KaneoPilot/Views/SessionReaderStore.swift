@@ -49,7 +49,10 @@ final class SessionReaderStore: ObservableObject {
     private var refreshing = false
     private var positionTask: Task<Void, Never>?
     private var positionGeneration = 0
+    private var positioning = false
     var readingAnchor: String?
+    private var readingRowFrames: [String: CGRect] = [:]
+    private var readingViewport: CGRect?
     private var searchAnchor: String?
     private var searchFollowing = true
     @Published private(set) var restoreAnchor: String?
@@ -528,7 +531,8 @@ final class SessionReaderStore: ObservableObject {
 
     private func refresh(selectCurrentRun: Bool) async {
         guard !refreshing else { return }
-        cancelWork()
+        // 同一内容页刷新未必重新布局；保留稳定行框供后续原生滚动使用。
+        cancelWork(resetReadingGeometry: false)
         controlStatus = nil
         controlError = nil
         generation += 1
@@ -557,6 +561,7 @@ final class SessionReaderStore: ObservableObject {
         defer {
             if generation == self.generation {
                 loading = false
+                updateReadingAnchor()
                 // 两种模式的瞬时读取失败都保留最近内容，并允许下一次轮询恢复。
                 if schedulePolling { restartPolling(generation: generation) }
             }
@@ -910,6 +915,7 @@ final class SessionReaderStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 320_000_000)
             guard !Task.isCancelled else { return }
             self?.layoutChanging = false
+            self?.updateReadingAnchor()
         }
     }
 
@@ -917,6 +923,44 @@ final class SessionReaderStore: ObservableObject {
     func updateHeights(visibleHeight: CGFloat, contentHeight: CGFloat) {
         self.visibleHeight = visibleHeight
         self.contentHeight = contentHeight
+    }
+
+    /// 行框使用内容左上为原点的稳定坐标；原生滚动只需更新 viewport。
+    func updateReadingRowFrames(_ frames: [String: CGRect]) {
+        guard !statusOnly else { return }
+        let rowIDs = Set(messageState.rows.map { $0.message.id ?? $0.id })
+        readingRowFrames = frames.filter {
+            rowIDs.contains($0.key) && validReadingRect($0.value)
+        }
+        updateReadingAnchor()
+    }
+
+    func updateReadingViewport(_ viewport: CGRect) {
+        guard !statusOnly, validReadingRect(viewport) else { return }
+        readingViewport = viewport
+        updateReadingAnchor()
+    }
+
+    private func validReadingRect(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.origin.x.isFinite && rect.origin.y.isFinite
+            && rect.width.isFinite && rect.height.isFinite
+    }
+
+    private func updateReadingAnchor() {
+        guard !statusOnly, !loading, !hasMore, !layoutChanging, !positioning,
+              !settlingToBottom, restoreAnchor == nil, committedQuery.isEmpty,
+              search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let viewport = readingViewport else { return }
+        if let first = readingRowFrames.filter({ !$0.value.intersection(viewport).isEmpty })
+            .min(by: { lhs, rhs in
+                lhs.value.minY == rhs.value.minY ? lhs.key < rhs.key : lhs.value.minY < rhs.value.minY
+            }), readingAnchor != first.key {
+            readingAnchor = first.key
+            SessionReaderPerformance.shared.record("reading_anchor", [
+                "reader_id": performanceReaderID, "message_id": first.key,
+                "viewport_min_y": viewport.minY, "viewport_height": viewport.height,
+                "row_min_y": first.value.minY])
+        }
     }
 
     /// 视图回传（原生滚动几何实测的距底距离，§4.5）：距底 <48pt 视为贴底。
@@ -931,7 +975,8 @@ final class SessionReaderStore: ObservableObject {
     /// 折叠/展开与搜索过滤的重排（layoutChanging）同理会把中间态算成贴底，
     /// 期间一并忽略。
     func updateDistanceFromBottom(_ distance: CGFloat) {
-        guard !loading, !hasMore, !settlingToBottom, !layoutChanging else { return }
+        guard !statusOnly, !loading, !hasMore, !positioning, !settlingToBottom,
+              !layoutChanging, restoreAnchor == nil else { return }
         if distance < 48 {
             if committedQuery.isEmpty && !explicitlyPausedFollowing { following = true; hasNewContent = false }
         } else {
@@ -947,6 +992,7 @@ final class SessionReaderStore: ObservableObject {
 
     func userScrolled() {
         explicitlyPausedFollowing = false
+        restoreAnchor = nil
         if SessionReaderPerformance.shared.enabled {
             SessionReaderPerformance.shared.nativeEvent("scroll", readerID: performanceReaderID, expectation: .scroll)
         }
@@ -954,6 +1000,7 @@ final class SessionReaderStore: ObservableObject {
         layoutChangeTask?.cancel(); layoutChangeTask = nil; layoutChanging = false
         cancelPosition()
         if loading || hasMore { following = false }
+        updateReadingAnchor()
     }
 
     /// 开始一次「滚到底 + 二次纠正」：返回批次号，落地后回传 didAutoScroll。
@@ -965,11 +1012,15 @@ final class SessionReaderStore: ObservableObject {
 
     /// 该批次落地（仅最新批次可清除 settling 标记）。
     func didAutoScroll(_ token: Int) {
-        if token == autoScrollGeneration { settlingToBottom = false }
+        if token == autoScrollGeneration {
+            settlingToBottom = false
+            updateReadingAnchor()
+        }
     }
 
     func jumpToLatest() {
         explicitlyPausedFollowing = false
+        restoreAnchor = nil
         following = true
         hasNewContent = false
         if !committedQuery.isEmpty { searchFollowing = true; searchAnchor = nil; search = "" }
@@ -979,6 +1030,7 @@ final class SessionReaderStore: ObservableObject {
         explicitlyPausedFollowing = true
         following = false
         cancelPosition()
+        updateReadingAnchor()
     }
 
     /// 静默核验只供轮询使用：不清空上一次可信结果，也不显示检查中；手动检查才显示进度。
@@ -1035,7 +1087,7 @@ final class SessionReaderStore: ObservableObject {
         }
     }
 
-    private func cancelWork() {
+    private func cancelWork(resetReadingGeometry: Bool = true) {
         controlTask?.cancel(); controlTask = nil
         controlRequest = UUID()
         controlLoading = false
@@ -1049,6 +1101,10 @@ final class SessionReaderStore: ObservableObject {
         cancelPosition()
         layoutChangeTask?.cancel(); layoutChanging = false
         settlingToBottom = false
+        if resetReadingGeometry {
+            readingRowFrames = [:]
+            readingViewport = nil
+        }
     }
 
     func consumeRestoreAnchor() { restoreAnchor = nil }
@@ -1056,6 +1112,7 @@ final class SessionReaderStore: ObservableObject {
     func cancelPosition() {
         positionTask?.cancel(); positionTask = nil
         positionGeneration += 1
+        positioning = false
         settlingToBottom = false
     }
 
@@ -1063,10 +1120,19 @@ final class SessionReaderStore: ObservableObject {
     func position(id: String, bottom: Bool, scroll: @escaping (String, Bool) -> Void) {
         cancelPosition()
         let batch = positionGeneration, gen = generation, run = selectedRunID
+        positioning = true
         if bottom { settlingToBottom = true }
         diagnostics.positionBatches += 1
         SessionReaderPerformance.shared.record("position", ["bottom": bottom])
         positionTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, batch == self.positionGeneration {
+                    self.positionTask = nil
+                    self.positioning = false
+                    self.settlingToBottom = false
+                    self.updateReadingAnchor()
+                }
+            }
             await Task.yield()
             for delay: UInt64 in [0, 80_000_000, 220_000_000] {
                 if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
@@ -1076,7 +1142,6 @@ final class SessionReaderStore: ObservableObject {
                 scroll(id, bottom)
             }
             if let self, batch == self.positionGeneration {
-                self.settlingToBottom = false
                 SessionReaderPerformance.shared.record("position_complete", ["bottom": bottom])
             }
         }
