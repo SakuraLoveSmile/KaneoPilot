@@ -378,6 +378,80 @@ struct SessionReaderFixtures {
               "new fake run exposes current permission while the old permission remains frozen")
         print("Codex preflight retry Store fixtures passed: authority, no Plus control, stale/revoked confirmation, one queue and frozen history")
     }
+    @MainActor static func readingGeometryFixtures() async throws {
+        let store = SessionReaderStore(taskID: "reading-geometry")
+        let ids = ["geometry-first", "geometry-second", "geometry-third"]
+        store.messageState.rows = try ids.enumerated().map { index, id in
+            let object: [String: Any] = ["id": id, "seq": index + 1, "type": "assistant",
+                                        "run_id": "geometry", "revision": 1, "content": id]
+            let source = try JSONDecoder.kaneo.decode(SessionMessage.self, from: JSONSerialization.data(withJSONObject: object))
+            return SessionMessageRowData(message: source, presentation: SessionMessagePresentation.prepare(source), match: nil)
+        }
+        let frames = Dictionary(uniqueKeysWithValues: ids.enumerated().map { index, id in
+            (id, CGRect(x: 0, y: CGFloat(index * 100), width: 200, height: 80))
+        })
+        func viewport(_ y: CGFloat) -> CGRect { CGRect(x: 0, y: y, width: 200, height: 90) }
+        store.updateReadingRowFrames(frames)
+        store.updateReadingViewport(viewport(0))
+        check(store.readingAnchor == ids[0], "initial geometry records the first visible message")
+        store.updateReadingViewport(viewport(120))
+        check(store.readingAnchor == ids[1], "native viewport scrolling updates the anchor without new row frames")
+        store.updateReadingViewport(.null)
+        store.updateReadingViewport(.zero)
+        check(store.readingAnchor == ids[1], "empty and null viewport reports do not erase a valid anchor")
+        store.loading = true
+        store.updateReadingViewport(viewport(0))
+        check(store.readingAnchor == ids[1], "initial loading geometry cannot replace the saved anchor")
+        store.loading = false
+        store.hasMore = true
+        store.updateReadingRowFrames(frames)
+        check(store.readingAnchor == ids[1], "partial history layout cannot replace the saved anchor")
+        store.hasMore = false
+        store.updateReadingViewport(viewport(120))
+        store.beginLayoutChange()
+        store.updateReadingViewport(viewport(0))
+        check(store.readingAnchor == ids[1], "intermediate reflow geometry retains the saved anchor")
+        await pause(350)
+        check(store.readingAnchor == ids[0], "settled layout adopts the latest visible geometry")
+
+        store.pauseFollowing()
+        var restoreCallbacks = 0
+        store.position(id: "geometry-second-1", bottom: false) { _, _ in
+            restoreCallbacks += 1
+            store.updateDistanceFromBottom(200)
+            store.updateReadingViewport(viewport(120))
+            check(store.readingAnchor == ids[0], "restoration geometry cannot replace the anchor before the positioning batch settles")
+        }
+        await waitFor { restoreCallbacks == 3 && store.readingAnchor == ids[1] }
+        check(restoreCallbacks == 3 && store.readingAnchor == ids[1] && !store.following,
+              "restoring a row survives its own far-from-bottom notifications and adopts final geometry")
+        var interruptedCallbacks = 0
+        store.position(id: "geometry-third-1", bottom: false) { _, _ in
+            interruptedCallbacks += 1
+            store.updateReadingViewport(viewport(220))
+        }
+        await waitFor { interruptedCallbacks > 0 }
+        store.userScrolled()
+        store.updateDistanceFromBottom(200)
+        store.updateReadingViewport(viewport(0))
+        let callbacksAfterUserInput = interruptedCallbacks
+        await pause(350)
+        check(interruptedCallbacks == callbacksAfterUserInput && store.readingAnchor == ids[0],
+              "real user scrolling cancels restoration corrections and controls the reading anchor")
+        store.jumpToLatest()
+        var bottomCallbacks = 0
+        store.position(id: "bottom", bottom: true) { _, _ in
+            bottomCallbacks += 1
+            store.updateReadingViewport(viewport(220))
+            store.updateDistanceFromBottom(0)
+        }
+        await waitFor { bottomCallbacks == 3 && store.readingAnchor == ids[2] }
+        check(bottomCallbacks == 3 && store.readingAnchor == ids[2],
+              "automatic bottom positioning updates the anchor after its final correction")
+        store.stop()
+        print("reading geometry fixtures passed: stable frames/native viewport, invalid and intermediate geometry, restore guards, user override and final positioning")
+    }
+
     @MainActor static func liveContentFixtures(client: CoreClient) async throws {
         let messageLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_REQUEST_LOG"]!
         let commandLog = messageLog + ".content.commands"
@@ -405,11 +479,20 @@ struct SessionReaderFixtures {
         store.updateDistanceFromBottom(0)
         check(!store.following, "explicit pause survives a short list's bottom geometry notification")
         let anchor = store.messages[10].id!
-        store.readingAnchor = anchor
+        let preceding = store.messages[9].id!
+        let following = store.messages[11].id!
+        let readingFrames = [preceding: CGRect(x: 0, y: 0, width: 200, height: 80),
+                             anchor: CGRect(x: 0, y: 100, width: 200, height: 80),
+                             following: CGRect(x: 0, y: 200, width: 200, height: 80)]
+        store.updateReadingRowFrames(readingFrames)
+        store.updateReadingViewport(CGRect(x: 0, y: 120, width: 200, height: 90))
+        check(store.readingAnchor == anchor, "the live reader records the native viewport's first visible message")
         store.search = "MODE-NEW"
         let beforeModeChange = store.diagnostics
         await store.setStatusOnly(true)
         store.updateDistanceFromBottom(0)
+        store.updateReadingRowFrames(readingFrames)
+        store.updateReadingViewport(CGRect(x: 0, y: 0, width: 200, height: 90))
         let pausedRequests = try loggedRequests(messageLog).count
         let checkedBeforePoll = store.lastStatusCheckedAt
         await waitFor { store.lastStatusCheckedAt != checkedBeforePoll }
@@ -445,9 +528,28 @@ struct SessionReaderFixtures {
         await waitFor { store.committedQuery.isEmpty && store.messageState.rows.count == count + 1 }
         check(!store.following && store.restoreAnchor == anchor,
               "clearing the resumed search restores the prior reading anchor")
+        store.updateReadingRowFrames(readingFrames)
+        store.updateReadingViewport(CGRect(x: 0, y: 0, width: 200, height: 90))
+        check(store.readingAnchor == anchor, "the content view's initial geometry cannot overwrite a pending restore anchor")
+        var modeRestoreCallbacks = 0
+        store.position(id: store.messages[10].listID, bottom: false) { _, _ in
+            modeRestoreCallbacks += 1
+            store.updateDistanceFromBottom(200)
+            store.updateReadingViewport(CGRect(x: 0, y: 120, width: 200, height: 90))
+        }
+        store.consumeRestoreAnchor()
+        await waitFor { modeRestoreCallbacks == 3 }
+        check(modeRestoreCallbacks == 3 && store.readingAnchor == anchor && !store.following,
+              "mode and search restoration preserve the native reading anchor through all correction callbacks")
+        store.userScrolled()
+        store.updateDistanceFromBottom(200)
         let publicationsBeforeRoundTrip = store.diagnostics.messagePublications
         await store.setStatusOnly(true)
         await store.setStatusOnly(false)
+        store.updateDistanceFromBottom(0)
+        check(store.restoreAnchor == anchor && !store.following,
+              "a pending restore protects real manual scrolling intent from an early attach-at-bottom notification")
+        store.pauseFollowing()
         check(store.diagnostics.messagePublications == publicationsBeforeRoundTrip,
               "a mode round trip does not republish unchanged message content")
         changed["round_status"] = "running"
@@ -798,6 +900,7 @@ struct SessionReaderFixtures {
             try await statusOnlyFixtures(client: CoreClient())
             return
         }
+        try await readingGeometryFixtures()
         let waitingStore = SessionReaderStore(taskID: "waiting")
         waitingStore.session = try JSONDecoder.kaneo.decode(SessionInfo.self, from: Data(#"{"state":"pending"}"#.utf8))
         waitingStore.connection = try JSONDecoder.kaneo.decode(SessionConnection.self, from: Data(#"{"state":"degraded","detail":null,"poll_seconds":2}"#.utf8))

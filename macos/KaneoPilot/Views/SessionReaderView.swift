@@ -617,7 +617,7 @@ private struct SessionMessageList: View {
                                 .id(row.id)
                                 .background(GeometryReader { geometry in
                                     Color.clear.preference(key: SessionRowFramesKey.self,
-                                                           value: [row.message.id ?? row.id: geometry.frame(in: .named("session-reader-scroll"))])
+                                                           value: [row.message.id ?? row.id: geometry.frame(in: .named("session-reader-content"))])
                                 })
                             Divider()
                         }
@@ -626,11 +626,14 @@ private struct SessionMessageList: View {
                     .frame(maxWidth: 960, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(Spacing.l)
+                    .coordinateSpace(name: "session-reader-content")
                     .background(GeometryReader { geo in Color.clear.preference(key: SessionContentHeightKey.self, value: geo.size.height) })
-                    .background(ScrollMetricsObserver(readerID: store.performanceReaderID, onDistance: { store.updateDistanceFromBottom($0) }, onManualScroll: { store.userScrolled() }))
+                    .background(ScrollMetricsObserver(readerID: store.performanceReaderID,
+                                                      onDistance: { store.updateDistanceFromBottom($0) },
+                                                      onViewport: { store.updateReadingViewport($0) },
+                                                      onManualScroll: { store.userScrolled() }))
                 }
                 .frame(minHeight: 0, maxHeight: .infinity)
-                .coordinateSpace(name: "session-reader-scroll")
                 .background(GeometryReader { geo in Color.clear.preference(key: SessionScrollHeightKey.self, value: geo.size.height) })
                 .overlay(alignment: .bottom) {
                     if !state.following && state.hasNewContent {
@@ -654,11 +657,7 @@ private struct SessionMessageList: View {
                     if loading || hasMore { store.beginInitialLayout() }
                     if !restore(proxy) { follow(proxy) }
                 }
-                .onPreferenceChange(SessionRowFramesKey.self) { frames in
-                    if let first = frames.filter({ $0.value.maxY > 0 && $0.value.minY < store.visibleHeight }).min(by: { $0.value.minY < $1.value.minY }) {
-                        store.readingAnchor = first.key
-                    }
-                }
+                .onPreferenceChange(SessionRowFramesKey.self) { store.updateReadingRowFrames($0) }
                 .onPreferenceChange(SessionScrollHeightKey.self) { height in store.updateHeights(visibleHeight: height, contentHeight: store.contentHeight) }
                 .onPreferenceChange(SessionContentHeightKey.self) { height in
                     let grew = height > store.contentHeight + 0.5
@@ -733,12 +732,15 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
     let readerID: String
     /// 距底距离（pt）：0 = 贴底。
     let onDistance: (CGFloat) -> Void
+    /// 内容左上为原点的真实可见区域；行布局不变时也随原生滚动更新。
+    let onViewport: (CGRect) -> Void
     let onManualScroll: () -> Void
 
     func makeNSView(context: Context) -> ObserverView {
         let view = ObserverView()
         view.readerID = readerID
         view.onDistance = onDistance
+        view.onViewport = onViewport
         view.onManualScroll = onManualScroll
         return view
     }
@@ -746,16 +748,19 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
     func updateNSView(_ nsView: ObserverView, context: Context) {
         nsView.readerID = readerID
         nsView.onDistance = onDistance
+        nsView.onViewport = onViewport
         nsView.onManualScroll = onManualScroll
         nsView.ensureAttached()
     }
 
     final class ObserverView: NSView {
+        override var isFlipped: Bool { true }
         var readerID = ""
         private var lastBoundsOrigin: NSPoint?
         private var diagnosticDrawCount = 0
         private var diagnosticConfirmedAt: UInt64?
         var onDistance: ((CGFloat) -> Void)?
+        var onViewport: ((CGRect) -> Void)?
         var onManualScroll: (() -> Void)?
         private var scrollMonitor: Any?
         private var tokens: [NSObjectProtocol] = []
@@ -825,6 +830,7 @@ private struct ScrollMetricsObserver: NSViewRepresentable {
             let offset = clip.bounds.origin.y
             let maxOffset = max(0, documentHeight - visibleHeight)
             onDistance?(max(0, maxOffset - offset))
+            onViewport?(convert(clip.bounds, from: clip).intersection(bounds))
             if SessionReaderPerformance.shared.enabled, scrollBoundsChanged {
                 let origin = clip.bounds.origin
                 let changed = lastBoundsOrigin != nil && lastBoundsOrigin != origin
