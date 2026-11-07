@@ -1,12 +1,12 @@
 # KP-SV02：概览核验真实执行状态
 
-状态：实现中（核心与界面代码已完成，180 项本地隔离检查与精确源码 SHA 的云端 Packages 已通过；原生界面核验受制品下载中断阻塞）。2026-11-07 用户提供 MediaPlayer 的 `NETWORK_ERROR` 任务概览截图，要求增加校验，并明确选择“核验真实执行状态”。
+状态：实现中（核心、180 项本地隔离检查和 Packages #161 已通过；官方预览包已完整核对，原生界面核验中，当前等待 Mac 解锁）。2026-11-07 用户提供 MediaPlayer 的 `NETWORK_ERROR` 任务概览截图，要求增加校验，并明确选择“核验真实执行状态”。
 
 目标：在概览直接核对当前执行是否仍在运行、已结束、失败或无法确认，并显示检查依据、时间和下一步建议。保留原报错，校验不重跑、不调用模型、不改变任务或远端状态。
 
 - 基线：`main@f1c1cea0552ce3439322e379bf821ee9474f486a`。
 - 分支：`feat/20261107-kp-sv02-execution-status-check`。
-- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-feat-kp-sv02-execution-status-check`；合入目标 main；用户于 2026-11-07 明确允许提交、推送任务分支并完成云端预览与原生界面核验，未授权合并或发布。
+- 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-feat-kp-sv02-execution-status-check`；合入目标 main；用户于 2026-11-07 先授权提交、推送与云端预览，后明确“发布吧”，现已授权合入与正式发布；核对当前 latest 为 v0.5.2 后，按补丁版本 v0.5.3 推进。
 - 主工作区已有 `.local/` 和 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 未跟踪内容，保留不动；其他 worktree 不属于本任务。
 
 ## 已确认决定与实施
@@ -20,7 +20,7 @@
 | T3 | 主 agent 独占 macOS Models、TaskDetailContentView、Components、FakeCore、CLI 及规范。 | 概览入口与只读结果面板，核验期间禁重复点击，切换任务/轮次丢弃旧结果；可重试和查看执行会话。保留整页布局与原恢复权限。 |
 | T4 | 主 agent 组合核验与收尾；必要时 reviewer（Sol/high）只读审查。 | 临时 DB/文件及 fake Plus 的 Python 检查；Swift 编译仅云端 Packages；最新云端独立 App 配 FakeCore 核对正常、未知/冲突、重复点击和窄窗口。 |
 
-所有测试使用本任务临时目录和随机 loopback 端口，无真实 Kaneo、模型或业务任务写入。主 agent 核对最终组合态。原生界面需要新云端产物；本地实现与检查已完成，用户已允许提交、推送本分支并运行云端预览构建及原生核验；不发布版本。
+所有测试使用本任务临时目录和随机 loopback 端口，无真实 Kaneo、模型或业务任务写入。主 agent 核对最终组合态。原生界面需要新云端产物；本地实现与检查已完成，用户已允许提交、推送本分支并运行云端预览构建及原生核验，后追加正式发布授权；发布前补齐原生核验。
 
 ## 可检查场景
 
@@ -38,6 +38,8 @@
 - FakeCore 新命令本地 smoke 通过：响应绑定 task/run，原 NETWORK_ERROR 保留，夹具文件字节不变，命令日志只有 check-execution-status；没有恢复或模型请求。6 个受影响 Python 文件 AST 检查、`git diff --check` 通过。
 - reviewer（Sol/high）只读审查发现并已修复三项边界：实时 turn 缺失时不能借用历史 turn；新只读命令须跳过 CLI 写动作守卫；普通 PID 存活不代表本轮进程归属。复核当前组合态未发现剩余实质缺陷。主 agent 亲自运行上述组合态测试，不将子 agent 自报当最终证据。
 - 已提交并推送 `cb17e5a6d8410a1b88dc00041758cee3bf4c2e7e`。Packages [#161](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42381158937) 绑定该 SHA：16 个必需 job 全部 success（Python 3.11/3.13 五分片、Swift 两组夹具、macOS/Android 打包及平台检查），2 个预期 skipped（非本次启用的全文探针、publish）。证据在 `build/kp-sv02/cloud-161/run-final.json`、`jobs-final.json` 与 `artifacts.json`。
-- **未完成 / 阻塞**：900×600/1180×760 原生面板与交互核验。官方 `macos-update-ui-161` 预期 30,914,872 bytes、SHA256 `ba87880d69b1f0c58ec7e883900f79c4e26ef6f631b1ff26632d232e25c5632b`；现有代理与制品存储直连均发生 TLS EOF，完整及分段下载只能取得 5,763,909 bytes。首段 SHA256 不匹配，已将残件改名 `build/kp-sv02/cloud-161/ui-artifact.zip.partial`，未解压或启动。保持证书校验，未修改系统网络设置；停止重复下载。核对记录见 `build/kp-sv02/cloud-161/verification.json`。真实运行端/MediaPlayer/设备任务未操作，未合并或发布。
-- 下一步：网络路径可稳定下载后，继续取得 #161 官方完整制品并核对摘要、内层源码/构建元数据及签名；使用已准备的独立身份 App、全套隔离环境和 FakeCore 核验入口、加载、已确认/未知/失败、长文字、关闭/切轮和重复点击，检查命令日志无恢复/执行请求。该门槛未完成前不标“待体验”，不以云端编译或静态检查替代原生核验。未改变用户真实任务或正在运行的软件。
+- 下载阻塞已解除：重新取得 #161 官方 `macos-update-ui-161` 完整制品（30,914,872 bytes；SHA256 `ba87880d69b1f0c58ec7e883900f79c4e26ef6f631b1ff26632d232e25c5632b`），内层 31,776,905 bytes / SHA256 `6df541eb22b2f2d924f7dc7f67eabb08bf891a51dd542e442ecdb3b34a9d35cd`；元数据 source_sha=cb17e5a、build=161、bundle=`local.kaneopilot.software-update-check`。云端 App 的 `codesign --verify --deep --strict` exit 0；未本地编译或重签名。
+- 原生核验使用该独立身份 App、FakeCore、独立 support/DB/凭据空文件等目录，并禁用执行调度。900×600 dark 已观察概览入口、未知/运行中/结束/失败结果，原 NETWORK_ERROR 保留，滚动可查看下一步，结束状态保留验证与评审提示；截图与 AX 在 `build/kp-sv02/native/screenshots/`。剩余读取错误、加载/重复点击、关闭/切轮、会话跳转与 1180×760 light。途中界面工具报告 Mac 锁定，已请求用户解锁；不把已观察的局部结果当成全项通过。
+- 发布准备：远端 main 仍为 f1c1cea，v0.5.2 源码为 d0706e4，二者之间仅有旧任务的发布证据文档。候选 v0.5.3 只增加本任务功能；公开说明草稿在 `build/kp-sv02/release-notes-draft.md`，无 schema 变化。当前未合并、创建标签或发布。
+- 下一步：解锁后完成上述剩余原生场景及命令日志核对；通过后更新为“待体验”，合入 main 并核对该提交云端检查，再按正式 annotated 标签流程发布 v0.5.3、核验四项资产及 latest，归档本任务证据并安全清理本任务 worktree。未操作真实运行端/MediaPlayer/设备任务。
 - 本任务尚未合入，worktree 保留供评审与构建；主工作区和其他 worktree 不变。合入且适用验证通过后再按保全规则收尾本任务目录。
