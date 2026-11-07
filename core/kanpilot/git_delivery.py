@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -710,16 +711,17 @@ def _budget_timeout(deadline, ceiling=10, heartbeat=None):
     return ceiling
 
 
-def _candidate_state(worktree, relative_path, *, deadline=None, heartbeat=None):
+def _candidate_state(worktree, relative_path, *, deadline=None, heartbeat=None, _parent_fd=None):
     """Read a candidate through directory descriptors, never following a link."""
     relative = Path(relative_path)
     _budget_timeout(deadline, heartbeat=heartbeat)
     parts = relative.parts
     if relative.is_absolute() or not parts or any(x in (".", "..") for x in parts):
         raise GitDeliveryError("worktree_invalid", "工作树候选路径无效")
-    directory = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = (os.dup(_parent_fd) if _parent_fd is not None else
+                 os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
     try:
-        for part in parts[:-1]:
+        for part in (() if _parent_fd is not None else parts[:-1]):
             try:
                 entry = os.stat(part, dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
@@ -798,6 +800,178 @@ def worktree_state_sha256(delivery, *, detached=False) -> str:
         return hashlib.sha256(encoded).hexdigest()
     except (OSError, GitDeliveryError) as exc:
         raise GitDeliveryError("worktree_invalid", "工作树状态核验失败") from exc
+
+
+class _RetryDirectorySample:
+    """Cache no-follow directory proofs, with a bounded number of open fds."""
+
+    def __init__(self, worktree):
+        self.worktree = worktree
+        self.root = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.identities = {(): self.identity(os.fstat(self.root))}
+        self.opened = OrderedDict()
+
+    @staticmethod
+    def identity(info):
+        return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+    def close(self):
+        for fd in self.opened.values():
+            os.close(fd)
+        self.opened.clear()
+        os.close(self.root)
+
+    def parent(self, parts):
+        """Return a borrowed parent fd or a protected missing/link state."""
+        parent = tuple(parts[:-1])
+        if parent in self.opened:
+            self.opened.move_to_end(parent)
+            return self.opened[parent], None
+        prefix = parent
+        while prefix and prefix not in self.opened:
+            prefix = prefix[:-1]
+        directory = os.dup(self.opened[prefix] if prefix else self.root)
+        try:
+            for part in parent[len(prefix):]:
+                prefix = prefix + (part,)
+                try:
+                    entry = os.stat(part, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    return None, {"kind": "missing"}
+                if stat.S_ISLNK(entry.st_mode):
+                    target = os.fsencode(os.readlink(part, dir_fd=directory))
+                    return None, {"kind": "ancestor_symlink", "sha256": hashlib.sha256(target).hexdigest()}
+                if not stat.S_ISDIR(entry.st_mode):
+                    raise GitDeliveryError("worktree_invalid", "工作树目录类型不可核验")
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                actual = self.identity(os.fstat(child))
+                if actual != self.identity(entry) or self.identities.setdefault(prefix, actual) != actual:
+                    os.close(child)
+                    raise GitDeliveryError("worktree_invalid", "工作树目录在核验期间发生变化")
+                os.close(directory)
+                directory = child
+            self.opened[parent] = os.dup(directory)
+            if len(self.opened) > 32:
+                _, oldest = self.opened.popitem(last=False)
+                os.close(oldest)
+            return self.opened[parent], None
+        finally:
+            os.close(directory)
+
+    def verify(self):
+        if self.identity(os.stat(self.worktree, follow_symlinks=False)) != self.identities[()]:
+            raise GitDeliveryError("worktree_invalid", "工作树根目录在核验期间发生变化")
+        # Walk proofs in lexical order, retaining only the current directory chain.
+        chain, fds = (), [os.dup(self.root)]
+        try:
+            for parts, expected in sorted(self.identities.items()):
+                if not parts:
+                    continue
+                common = 0
+                while common < min(len(chain), len(parts)) and chain[common] == parts[common]:
+                    common += 1
+                while len(fds) > common + 1:
+                    os.close(fds.pop())
+                chain = chain[:common]
+                for part in parts[common:]:
+                    fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1])
+                    fds.append(fd)
+                    chain += (part,)
+                    if self.identity(os.fstat(fd)) != self.identities[chain]:
+                        raise GitDeliveryError("worktree_invalid", "工作树目录在核验期间发生变化")
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+
+def execution_retry_fingerprint_version(retry):
+    version = retry.get("worktree_fingerprint_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise GitDeliveryError("worktree_invalid", "重新执行工作树指纹版本无效")
+    return version
+
+
+def execution_retry_worktree_sha256(delivery, *, detached=False, version=2):
+    """Versioned retry guard; generic worktree fingerprints retain v1 semantics."""
+    if type(version) is not int or version not in (1, 2):
+        raise GitDeliveryError("worktree_invalid", "重新执行工作树指纹版本无效")
+    if version == 1:
+        return worktree_state_sha256(delivery, detached=detached)
+
+    def verify():
+        if not delivery.get("head_sha"):
+            raise GitDeliveryError("worktree_invalid", "交付 HEAD 登记缺失")
+        if not detached:
+            verify_branch_worktree(delivery, require_clean=False, expected_head=delivery["head_sha"])
+            return
+        path = Path(delivery.get("worktree_path") or "").expanduser()
+        repo = Path(delivery.get("repository") or "").expanduser()
+        if (not delivery.get("worktree_path") or not delivery.get("repository")
+                or path.resolve() == repo.resolve() or _common_dir(path) != _common_dir(repo)
+                or Path(_value(["rev-parse", "--show-toplevel"], path)).resolve() != path.resolve()
+                or _value(["rev-parse", "--abbrev-ref", "HEAD"], path) != "HEAD"
+                or _value(["rev-parse", "HEAD"], path) != delivery["head_sha"]):
+            raise GitDeliveryError("worktree_invalid", "旧执行工作树归属或 HEAD 不符")
+
+    sample = None
+    try:
+        verify()
+        worktree = str(Path(delivery["worktree_path"]).expanduser())
+        index = _git(["ls-files", "--stage", "-z"], worktree, 10).stdout
+        indexed = {os.fsdecode(entry.split(b"\t", 1)[1]) for entry in index.split(b"\0") if entry}
+        sample = _RetryDirectorySample(worktree)
+
+        def candidates():
+            raw = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree, 10).stdout
+            protected = []
+            for change in _parse_worktree_status(raw):
+                parts = change["path"].split("/")
+                if any(part in ("", ".", "..") for part in parts):
+                    raise GitDeliveryError("worktree_invalid", "工作树候选路径无效")
+                eligible = (change["status"] == "??" and change["path"] not in indexed
+                            and len(parts) >= 6 and parts[:3] == [".pi", "kanpilot", "codex"]
+                            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", parts[3])
+                            and parts[4] in ("config", "tmp", "analyzer", "pub-cache", "gradle"))
+                directory, ancestor = sample.parent(parts)
+                if eligible and ancestor is None:
+                    try:
+                        entry = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue  # A private runtime file may disappear during sampling.
+                    if stat.S_ISREG(entry.st_mode):
+                        continue
+                    if not stat.S_ISLNK(entry.st_mode):
+                        raise GitDeliveryError("worktree_invalid", "工作树改动包含不支持的文件类型")
+                protected.append(change)
+            return protected
+
+        # Reacquire borrowed fds after classification; the bounded cache may evict them.
+        def read_candidates():
+            records = []
+            for change in candidates():
+                directory, ancestor = sample.parent(change["path"].split("/"))
+                state = ancestor or _candidate_state(worktree, change["path"], _parent_fd=directory)
+                records.append({**change, **state})
+            return sorted(records, key=lambda item: (item["path"], item["status"]))
+
+        records = read_candidates()
+        verify()
+        # Filter both sets under the same rules; private runtime additions/deletions are harmless.
+        after = sorted(candidates(), key=lambda item: (item["path"], item["status"]))
+        if ([{"path": row["path"], "status": row["status"]} for row in records] != after
+                or index != _git(["ls-files", "--stage", "-z"], worktree, 10).stdout):
+            raise GitDeliveryError("worktree_invalid", "工作树状态在核验期间发生变化")
+        sample.verify()
+        identity = {key: delivery.get(key) for key in ("repository", "worktree_path", "branch", "head_sha")}
+        encoded = json.dumps({"v": 2, "identity": identity, "detached": detached,
+                              "index_sha256": hashlib.sha256(index).hexdigest(), "changes": records},
+                             ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
+    except (OSError, GitDeliveryError) as exc:
+        raise GitDeliveryError("worktree_invalid", "工作树状态核验失败") from exc
+    finally:
+        if sample is not None:
+            sample.close()
 
 
 def source_state(worktree, *, deadline=None, heartbeat=None):

@@ -106,10 +106,34 @@ class TaskAIActionVerificationRecovery(fixtures.ConflictActionFixture):
         git(self.worktree, "update-index", "--cacheinfo", "100644," + git(self.repo, "rev-parse", self.original_base + ":tracked.txt") + ",tracked.txt")
         assert git(self.worktree, "status", "--porcelain").startswith("MM")
         retry = core.execution_retry_of(self.task())
-        assert git_delivery.worktree_state_sha256(retry["worktree"]) == retry["worktree_sha256"]
+        recovery = core.review_repair_of(self.task())["verification_recovery"]
+        # The independent merge-recovery gate keeps its original v1 + index snapshot.
+        assert git_delivery.worktree_state_sha256(retry["worktree"]) == recovery["worktree_sha256"]
+        assert git_delivery.execution_retry_worktree_sha256(
+            retry["worktree"], version=retry["worktree_fingerprint_version"]) != retry["worktree_sha256"]
         with self.assertRaises(util.KanpilotError) as caught:
             cmd_dispatch._ensure_worktree(self.task(), self.task_id, "not-started", self.conn)
         assert "源码、暂存区或合并状态已变化" in caught.exception.message
+
+    def test_special_recovery_rejects_invalid_retry_fingerprint_versions(self):
+        from kanpilot import dispatch_validate
+        self.blocked()
+        self.call("resolve", self.retry)
+        retry = core.execution_retry_of(self.task())
+        assert core.review_repair_of(self.task())["verification_recovery"]
+        service = Mock()
+        service.initialize.return_value = {"serverInfo": {"name": "kaneopilot"}}
+        for value in (None, True, "2", 3):
+            db.set_extra(self.conn, self.task(), self.now,
+                         execution_retry=dict(retry, worktree_fingerprint_version=value))
+            with self.subTest(version=value):
+                with patch.object(mcp_client.MCPClient, "from_server_file", return_value=service), \
+                        self.assertRaises(util.KanpilotError) as caught:
+                    dispatch_validate.validate_dispatch(self.conn, self.task(), self.ctx.now)
+                assert "指纹版本无效" in caught.exception.message
+                with self.assertRaises(util.KanpilotError) as caught:
+                    cmd_dispatch._ensure_worktree(self.task(), self.task_id, "not-started", self.conn)
+                assert "指纹版本无效" in caught.exception.message
 
     def test_recovery_rejects_remote_branch_and_frozen_config_changes(self):
         self.blocked()

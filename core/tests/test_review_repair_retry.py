@@ -118,7 +118,31 @@ class ReviewRepairRetryTest(direct.DirectReviewRepairTest):
 
     def test_existing_broken_retry_shape_recovers_through_same_retry_button(self):
         self.legacy_block()
+        original = db.task_extra(self.task())["execution_retry"]
+        with patch.object(git_delivery, "execution_retry_worktree_sha256",
+                          wraps=git_delivery.execution_retry_worktree_sha256) as fingerprint:
+            result = self.call("resolve", dict(task_id=self.task_id, action="retry"))
+        assert all(call.kwargs["version"] == 1 for call in fingerprint.call_args_list)
+        assert db.task_extra(self.task())["execution_retry"] == dict(original, review_repair_key=self.fix["review_key"])
+        assert core.review_repair_of(self.task())["state"] == "queued"
+        self.claim_retry(result)
+
+    def test_legacy_repair_recovery_rejects_unknown_fingerprint_versions(self):
+        self.legacy_block()
+        original = db.task_extra(self.task())["execution_retry"]
+        for value in (None, True, "2", 3):
+            db.set_extra(self.conn, self.task(), self.now,
+                         execution_retry=dict(original, worktree_fingerprint_version=value))
+            self.reject_retry(dict(task_id=self.task_id, action="retry"))
+
+    def test_explicit_v2_repair_recovery_preserves_version_and_hash(self):
+        self.legacy_block()
+        retry = db.task_extra(self.task())["execution_retry"]
+        retry["worktree_fingerprint_version"] = 2
+        retry["worktree_sha256"] = git_delivery.execution_retry_worktree_sha256(retry["worktree"])
+        db.set_extra(self.conn, self.task(), self.now, execution_retry=retry)
         result = self.call("resolve", dict(task_id=self.task_id, action="retry"))
+        assert db.task_extra(self.task())["execution_retry"] == dict(retry, review_repair_key=self.fix["review_key"])
         assert core.review_repair_of(self.task())["state"] == "queued"
         self.claim_retry(result)
 

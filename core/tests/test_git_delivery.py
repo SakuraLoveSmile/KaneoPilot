@@ -845,3 +845,161 @@ def test_adoption_preserves_ignored_files_when_upstream_tracks_same_path(repo, t
     assert caught.value.code == "branch_exists"
     assert local.read_text() == "private ignored local data"
     assert git(worktree, "rev-parse", "HEAD") == delivery["head_sha"]
+
+
+RETRY_RUN = "b6f88006-64dc-4a84-a981-91d6455e9509"
+
+
+def runtime_file(wt, name="gradle/daemon/9.3.1/daemon.log", run=RETRY_RUN):
+    path = wt / ".pi" / "kanpilot" / "codex" / run / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("runtime state\n")
+    return path
+
+
+def test_retry_v2_ignores_only_private_regular_untracked_runtime(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    original = gd.execution_retry_worktree_sha256(delivery)
+    files = [runtime_file(wt, name=f"{folder}/nested/log") for folder in
+             ("config", "tmp", "analyzer", "pub-cache", "gradle")]
+    with patch.object(gd, "_candidate_state", wraps=gd._candidate_state) as read:
+        assert gd.execution_retry_worktree_sha256(delivery) == original
+        assert read.call_count == 0  # No runtime contents are streamed.
+    legacy = gd.worktree_state_sha256(delivery)
+    files[0].write_text("background daemon appended")
+    files[1].unlink()
+    runtime_file(wt, "gradle/added.log")
+    assert gd.execution_retry_worktree_sha256(delivery) == original
+    assert gd.worktree_state_sha256(delivery) != legacy
+    assert gd.execution_retry_worktree_sha256(delivery, version=1) == gd.worktree_state_sha256(delivery)
+
+
+@pytest.mark.parametrize("name,run", [
+    ("other/log", RETRY_RUN), ("root.log", RETRY_RUN),
+    ("gradle/log", RETRY_RUN.upper()), ("gradle/log", "not-a-uuid"),
+])
+def test_retry_v2_protects_other_private_paths(repo, tmp_path, name, run):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    file = runtime_file(wt, name, run)
+    original = gd.execution_retry_worktree_sha256(delivery)
+    file.write_text("changed private material")
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+
+
+def test_retry_v2_protects_staged_tracked_business_modes_and_index(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    private = runtime_file(wt)
+    git(wt, "add", str(private))
+    original = gd.execution_retry_worktree_sha256(delivery)
+    private.write_text("changed staged runtime")
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+    git(wt, "commit", "-m", "track private fixture")
+    delivery["head_sha"] = git(wt, "rev-parse", "HEAD")
+    original = gd.execution_retry_worktree_sha256(delivery)
+    private.write_text("changed tracked runtime")
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+    build = wt / "build" / "result.bin"
+    build.parent.mkdir()
+    build.write_text("business build material")
+    original = gd.execution_retry_worktree_sha256(delivery)
+    build.chmod(0o755)
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+    tracked = wt / "tracked.txt"
+    tracked.write_text("staged one")
+    git(wt, "add", "tracked.txt")
+    tracked.write_text("working content")
+    status = git(wt, "status", "--porcelain")
+    original = gd.execution_retry_worktree_sha256(delivery)
+    tracked.write_text("staged two")
+    git(wt, "add", "tracked.txt")
+    tracked.write_text("working content")
+    assert git(wt, "status", "--porcelain") == status
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+
+
+def test_retry_v2_protects_links_without_reading_external_targets(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    file = runtime_file(wt)
+    file.unlink()
+    outside = tmp_path / "secret"
+    outside.write_text("secret one")
+    file.symlink_to(outside)
+    original = gd.execution_retry_worktree_sha256(delivery)
+    outside.write_text("secret two")
+    assert gd.execution_retry_worktree_sha256(delivery) == original
+    file.unlink()
+    file.symlink_to(tmp_path / "other")
+    assert gd.execution_retry_worktree_sha256(delivery) != original
+    # A tracked descendant behind a replaced ancestor remains protected.
+    file.unlink()
+    file.write_text("tracked")
+    git(wt, "add", str(file))
+    directory = file.parent
+    saved = directory.with_name("saved")
+    directory.rename(saved)
+    directory.symlink_to(saved, target_is_directory=True)
+    original = gd.execution_retry_worktree_sha256(delivery)
+    (saved / file.name).write_text("outside the linked ancestor")
+    assert gd.execution_retry_worktree_sha256(delivery) == original
+
+
+@pytest.mark.parametrize("mutation", ["append", "add", "delete", "replace_directory", "stage_blob"])
+def test_retry_v2_sampling_races(repo, tmp_path, mutation):
+    delivery = branch(repo, tmp_path / "worktrees")
+    wt = Path(delivery["worktree_path"])
+    file = runtime_file(wt)
+    (wt / "tracked.txt").write_text("staged original")
+    git(wt, "add", "tracked.txt")
+    (wt / "tracked.txt").write_text("working bytes")
+    original = gd.execution_retry_worktree_sha256(delivery)
+    real = gd._git
+    reads = 0
+
+    def mutate(args, *a, **kw):
+        nonlocal reads
+        if args[:1] == ["status"]:
+            reads += 1
+            if reads == 2:
+                if mutation == "append":
+                    file.write_text("background append")
+                elif mutation == "add":
+                    runtime_file(wt, "gradle/new.log")
+                elif mutation == "delete":
+                    file.unlink()
+                elif mutation == "replace_directory":
+                    old = file.parent.with_name("old")
+                    file.parent.rename(old)
+                    file.parent.mkdir()
+                    file.write_text("same runtime name")
+                else:
+                    (wt / "tracked.txt").write_text("different staged bytes")
+                    git(wt, "add", "tracked.txt")
+                    (wt / "tracked.txt").write_text("working bytes")
+        return real(args, *a, **kw)
+
+    with patch.object(gd, "_git", side_effect=mutate):
+        if mutation in ("replace_directory", "stage_blob"):
+            with pytest.raises(gd.GitDeliveryError):
+                gd.execution_retry_worktree_sha256(delivery)
+        else:
+            assert gd.execution_retry_worktree_sha256(delivery) == original
+
+
+def test_retry_v2_rejects_special_files_and_invalid_versions(repo, tmp_path):
+    delivery = branch(repo, tmp_path / "worktrees")
+    file = runtime_file(Path(delivery["worktree_path"]))
+    git(Path(delivery["worktree_path"]), "add", str(file))
+    file.unlink()
+    os.mkfifo(file)
+    with pytest.raises(gd.GitDeliveryError):
+        gd.execution_retry_worktree_sha256(delivery)
+    assert gd.execution_retry_fingerprint_version({}) == 1
+    for value in (True, False, None, "2", 0, 3, 2.0):
+        with pytest.raises(gd.GitDeliveryError):
+            gd.execution_retry_fingerprint_version({"worktree_fingerprint_version": value})
+        with pytest.raises(gd.GitDeliveryError):
+            gd.execution_retry_worktree_sha256(delivery, version=value)

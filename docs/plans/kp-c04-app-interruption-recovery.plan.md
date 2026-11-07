@@ -1,6 +1,6 @@
 # KP-C04：App 重启后的执行中断与问题收尾
 
-状态：待体验。用户于 2026-11-07 要求修复任务详情中“App 实例已关闭，停止本机观察”被显示为执行失败、旧问题在提交后才过期的问题。修复已合入 main，v0.5.1 已正式发布，适用验证及 worktree 收尾完成。
+状态：实现中。首轮中断识别修复已合入 main 并发布 v0.5.1；用户升级后反馈“计划或工作树内容已变化，请重新确认后再执行”，正在修复受管工具后台日志导致恢复被拒绝的后续问题。
 
 ## 目标与现场
 
@@ -56,7 +56,24 @@
 
 ## 剩余工作与下一步
 
-- 适用验证、正式发布和本任务收尾已完成，状态为“待体验”；用户明确确认后才改为“已验收”。本次没有数据库 schema 变更。
+- v0.5.1 的适用验证、正式发布和首轮 worktree 收尾已完成；后续恢复问题完成前整项任务保持“实现中”。本次没有数据库 schema 变更。
 - 体验入口：macOS“设置 → 高级 → 软件更新”，Android“连接 → 软件更新”，或下载公开 v0.5.1。升级后在原任务点“重新核对”，完整证据满足时更正旧中断/问题分类；如需继续，再确认“重新执行（沿用计划）”，保留原工作树并由新轮次调用模型。
 - 真实 MediaPlayer 任务未更改、未重跑；未修改已安装 App 或直接改库。安装 v0.5.1 后可经核心“重新核对”严格修正当前旧记录，证据不足仍保留原分类。
 - 本任务工作树与已合并本地分支已清理，本地证据以可恢复归档保全在主仓 `build/kp-c04/`；主工作区、其他任务、共享根目录及远端来源分支保留。
+
+## 升级后的恢复阻塞（2026-11-07）
+
+- 现场只读核验：安装版本为 0.5.1/build157，原任务已正确归类 `needs_user / monitor / execution_interrupted`，旧 round 为 failed；没有重跑原 run。计划实际 SHA 与登记相同，HEAD 与 20 个业务候选文件在两次取样间未变。唯一变化是原 run 私有 Gradle 日志 `.pi/kanpilot/codex/b6f88006-64dc-4a84-a981-91d6455e9509/gradle/daemon/9.3.1/daemon-3023.out.log`，后台 PID 3023 仍追加内容；10 秒内大小 1,026,948→1,028,014，内容 SHA 不同。证据为主仓 `build/kp-c04/post-release/live-snapshot.json`。不停止该进程、不改真实 DB/执行材料、不自动调用模型。
+- 原因：恢复准备和事务复核都把全部未忽略文件作为候选；本任务 41,325 个候选中 41,305 个属于 `.pi`，运行日志变化被当作本次确认后的成果变化。现有通用算法还服务 replan/review 等流程，本轮不全局改变其语义。
+- 后续基线 `1acbe9ad0b54f9a8a00ea658ede0001e681ccf54`，分支 `fix/20261107-kp-c04-retry-runtime-state`，工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261107-fix-kp-c04-retry-runtime-state`，合入目标 `main`。唯一业务契约更新在 protocol §5.27.12，使用显式版本的新重试指纹及窄范围运行文件排除；旧 queued 保持旧算法。
+- T5：主 agent 维护协议/本记录、独立复核实际用户路径及云端发布；既有 Sol analyst 只读核对排除边界和全部消费者；Sol worker 独占 `git_delivery.py`、`cmd_queue.py`、`cmd_dispatch.py`、`dispatch_validate.py` 及对应核心测试，贯通新旧算法选择和回归；完成后 Sol reviewer 只读独立审查。共享分支/目录，不另开 agent 工作树；只用临时 DB/Git/假服务，原任务和生产模型不作为夹具。
+- 后续验收：日志内容变化、合格运行文件增删可跨准备/事务/领取/派发；源码、计划、分支/HEAD、mode 与索引 blob 变化仍拒绝；tracked/staged 内部路径、非 UUID、其他 `.pi` 和 symlink 不豁免，no-follow 核验中祖先替换拒绝且不读外部；旧 queued/旧 direct 修复恢复保持 v1，未知版本拒绝；现有显式用户确认、新 UUID、成果保全及零自动重发断言继续通过。
+- 正式发布授权沿用；用户明确决定的版本号仅 v0.5.1，新正式版本号待具体修复和验证结果可审查后确认。必要本地检查后推送云端，不在本地编译平台代码；完成后安全收尾后续工作树。
+
+- 首次后续回归发现 3 个新用例构造/预期问题：Git 不枚举未跟踪 FIFO，故将该新增特殊文件用例改用真实 tracked 候选 FIFO；协议明确指纹沿 Git 枚举边界，不新增全目录特殊节点扫描。另两项 legacy direct 修复恢复用例漏计原流程会回填 `review_repair_key`，保留原行为并精确校正新断言。没有删/跳过用例或降低已有门禁；暂存候选特殊类型仍须拒绝。独立审查另发现特殊 verification_recovery 提前返回路径漏验新版本号，已在共用终态核验入口补齐，并保留其独立源码/索引/合并快照守卫；最终结果待重跑。
+
+- 后续最终源码由 4 个核心模块及 4 个核心测试文件组成；新指纹及版本传播、旧记录兼容、索引 blob 证据和 no-follow 目录证明已完成。目录 fd 缓存最多 32 个，取样后复验已观察目录身份；通用 v1 默认语义未变。独立 Sol reviewer 复核源码后无剩余实质问题；特殊恢复测试的缺失 MCP 夹具已按原成功路径补齐，只调整测试环境，不改生产门禁。
+- 最终本地验证使用 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -I -m pytest`：`core/tests/test_git_delivery.py -q` → **149 passed**，93.94 秒；`core/tests/test_execution_retry.py core/tests/test_codex_preflight_retry.py core/tests/test_review_repair_retry.py core/tests/test_task_ai_action_verification_recovery.py -q` → **92 passed、24 subtests passed**，114.41 秒。完整日志/JUnit 为后续 worktree `build/evidence/kp-c04/retry-fingerprint-final.*` 与 `retry-lifecycle-verified.*`；JUnit 将子用例计入 116 项，均 0 failures/errors/skips。首轮及中间失败记录保留，未跳过、删除或放宽原检查。
+- 主 agent 在同一最终组合源码运行 `tests/test_codex_dispatch.py -q` → **7 passed**，41.98 秒，真实受管 worker + 假 Codex CLI/临时 DB/Git/本地假 Kaneo，日志/JUnit 为同目录 `retry-codex-dispatch.*`。真实模型和生产 DB 写入为 0，平台代码未本地编译。
+- 主 agent 在真实原工作树只读连续计算最终 v2 指纹：日志大小 **1,136,746→1,137,812 bytes** 且 SHA 改变，新指纹两次均 `5e9ca6897bb4fc51796fadf0119f27555fcd6fa1c168f9207bcf837fd22ffd41`，计划 SHA 一致，每次约 5.6–5.7 秒。证据为主仓 `build/kp-c04/post-release/retry-state-verification.json`，其中 4 个模块 SHA 已与最终源码逐项比对。没有 resolve、任务启动、真实 DB 写入或模型调用。
+- `git diff --check`、受影响 Python AST 与最终源码快照核验通过；后续候选尚待云端 Packages 全部门禁。新正式版本号仍等待维护者明确决定（已异步提出 v0.5.2），不复用或覆盖 v0.5.1。

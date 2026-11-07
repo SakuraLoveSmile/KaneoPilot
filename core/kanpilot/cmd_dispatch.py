@@ -1317,7 +1317,9 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
         util.require(delivery.get("repository") == task["repository"],
                      "重新执行工作树仓库身份不符", "validation_failed")
         try:
-            util.require(git_delivery.worktree_state_sha256(delivery, detached=retry.get("detached") is True)
+            util.require(git_delivery.execution_retry_worktree_sha256(
+                         delivery, detached=retry.get("detached") is True,
+                         version=git_delivery.execution_retry_fingerprint_version(retry))
                          == retry.get("worktree_sha256"),
                          "重新执行确认后工作树内容已变化，请重新确认", "validation_failed")
         except git_delivery.GitDeliveryError as exc:

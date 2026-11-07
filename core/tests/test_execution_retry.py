@@ -138,6 +138,69 @@ class TestExecutionRetry(HeadlessCase):
         self.assertEqual("keep this untracked file\n", (path / "new.txt").read_text())
         self.reject()
 
+    def test_private_runtime_changes_between_preparation_transaction_claim_and_dispatch(self):
+        runtime = self.worktree / ".pi/kanpilot/codex/b6f88006-64dc-4a84-a981-91d6455e9509/gradle"
+        runtime.mkdir(parents=True)
+        log = runtime / "daemon.log"
+        log.write_text("initial log")
+        removed = runtime / "expired.log"
+        removed.write_text("temporary")
+        prepare = cmd_queue._execution_retry_materials
+
+        def append_after_preparation(*args, **kwargs):
+            prepared = prepare(*args, **kwargs)
+            self.assertEqual(prepared["worktree_fingerprint_version"], 2)
+            log.write_text("daemon appended after preparation")
+            removed.unlink()
+            (runtime / "new.log").write_text("new background log")
+            return prepared
+
+        with patch.object(cmd_queue, "_execution_retry_materials", side_effect=append_after_preparation):
+            result = cmd_queue.cmd_resolve(self.ctx, self.payload)
+        retry = core.execution_retry_of(self.task())
+        self.assertEqual(retry["worktree_fingerprint_version"], 2)
+        log.write_text("daemon appended before claim")
+        (runtime / "new.log").unlink()
+        claimed = cmd_exec.cmd_claim(self.ctx, {"stage": "dispatch", "executor": "retry-test",
+                                              "request_id": result["request"]["request_id"]})
+        self.assertTrue(claimed["claimed"], claimed)
+        log.write_text("daemon appended before dispatch")
+        path, mode = cmd_dispatch._ensure_worktree(self.task(), self.task_id, claimed["run_id"],
+                                                  self.ctx.conn, require_isolated=True)
+        self.assertEqual((path, mode), (self.worktree, "reuse"))
+        self.assertEqual((path / "tracked.txt").read_text(), "partial implementation\n")
+        (path / "tracked.txt").write_text("business material changed")
+        with self.assertRaises(util.KanpilotError):
+            cmd_dispatch._ensure_worktree(self.task(), self.task_id, claimed["run_id"], self.ctx.conn)
+
+    def test_legacy_queued_retry_retains_v1_runtime_guard(self):
+        result = cmd_queue.cmd_resolve(self.ctx, self.payload)
+        retry = core.execution_retry_of(self.task())
+        retry.pop("worktree_fingerprint_version")
+        retry["worktree_sha256"] = git_delivery.worktree_state_sha256(retry["worktree"], detached=True)
+        db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso, execution_retry=retry)
+        private = self.worktree / ".pi/kanpilot/codex/b6f88006-64dc-4a84-a981-91d6455e9509/gradle"
+        private.mkdir(parents=True)
+        (private / "daemon.log").write_text("new private runtime file")
+        claimed = cmd_exec.cmd_claim(self.ctx, {"stage": "dispatch", "executor": "retry-test",
+                                              "request_id": result["request"]["request_id"]})
+        self.assertFalse(claimed["claimed"], claimed)
+
+    def test_queued_retry_rejects_invalid_fingerprint_versions_without_rehashing(self):
+        from kanpilot import dispatch_validate
+        cmd_queue.cmd_resolve(self.ctx, self.payload)
+        retry = core.execution_retry_of(self.task())
+        for value in (None, True, "2", 3):
+            db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
+                         execution_retry=dict(retry, worktree_fingerprint_version=value))
+            with self.subTest(version=value):
+                with self.assertRaises(util.KanpilotError) as caught:
+                    dispatch_validate.validate_dispatch(self.ctx.conn, self.task(), self.ctx.now)
+                self.assertEqual(caught.exception.code, "validation_failed")
+                self.assertIn("指纹版本无效", caught.exception.message)
+                with self.assertRaises(util.KanpilotError):
+                    cmd_dispatch._ensure_worktree(self.task(), self.task_id, "not-started", self.ctx.conn)
+
     def test_cli_cas_requires_current_failed_round_and_failure_kind(self):
         self.reject({"task_id": self.task_id, "action": "resume"})
         self.assertEqual("stale_run", self.reject(dict(self.payload, expected_execution_run_id="historical-run")).code)

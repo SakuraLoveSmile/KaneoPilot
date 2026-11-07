@@ -265,7 +265,9 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         worktree = retry.get("worktree") or {}
         _require(worktree.get("repository") == task["repository"], "重新执行工作树仓库身份不符")
         try:
-            _require(git_delivery.worktree_state_sha256(worktree, detached=retry.get("detached") is True)
+            _require(git_delivery.execution_retry_worktree_sha256(
+                         worktree, detached=retry.get("detached") is True,
+                         version=git_delivery.execution_retry_fingerprint_version(retry))
                      == retry.get("worktree_sha256"), "重新执行确认后工作树内容已变化，请重新确认")
         except git_delivery.GitDeliveryError as exc:
             raise DispatchCheckFailed(exc.message) from exc

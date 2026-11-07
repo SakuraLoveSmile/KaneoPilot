@@ -584,6 +584,11 @@ def verify_execution_retry_terminal(conn, task, now=None):
     from types import SimpleNamespace
     retry = core.execution_retry_of(task)
     if retry:
+        from . import git_delivery
+        try:
+            git_delivery.execution_retry_fingerprint_version(retry)
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("validation_failed", exc.message) from exc
         current = now or util.now_dt()
         if retry.get("source_kind") == "codex_preflight":
             _row, detail = _require_codex_preflight_terminal(conn, task, retry["source_run_id"])
@@ -626,7 +631,7 @@ def _prepare_execution_retry(ctx, payload):
     return _execution_retry_materials(ctx, task, expected, preflight=preflight)
 
 
-def _execution_retry_materials(ctx, task, expected, *, preflight=False):
+def _execution_retry_materials(ctx, task, expected, *, preflight=False, fingerprint_version=2):
     """Read terminal, remote and working-tree identity before any retry write."""
     from pathlib import Path
     from . import bridge, git_delivery, headless_adapter, remote
@@ -663,7 +668,8 @@ def _execution_retry_materials(ctx, task, expected, *, preflight=False):
             delivery["head_sha"] = git_delivery._value(["rev-parse", "HEAD"], delivery["worktree_path"])
         if row["worktree_path"] != delivery.get("worktree_path"):
             raise util.KanpilotError("conflict", "旧轮次工作树与任务登记不符，不能重新执行")
-        worktree_sha = git_delivery.worktree_state_sha256(delivery, detached=not bool(branch_delivery))
+        worktree_sha = git_delivery.execution_retry_worktree_sha256(
+            delivery, detached=not bool(branch_delivery), version=fingerprint_version)
     except (OSError, git_delivery.GitDeliveryError) as exc:
         raise util.KanpilotError("conflict", "旧计划或执行工作树不可核验，请先恢复原执行材料") from exc
     if not signature or source.source_signature(task["task_id"], expected) != signature:
@@ -680,7 +686,8 @@ def _execution_retry_materials(ctx, task, expected, *, preflight=False):
                         requested_at=ctx.now_iso, source_records_dir=str(source.run_dir(task["task_id"], expected)))
     return {"snapshot": snapshot, "round_snapshot": dict(row), "source_signature": signature,
             "source": source, "worktree": delivery, "detached": not bool(branch_delivery),
-            "worktree_sha256": worktree_sha, "verification_recovery": recovery,
+            "worktree_sha256": worktree_sha, "worktree_fingerprint_version": fingerprint_version,
+            "verification_recovery": recovery,
             "source_kind": "codex_preflight" if preflight else None,
             "source_proof": detail.get("preflight_proof")}
 
@@ -715,11 +722,16 @@ def _prepare_review_repair_retry(ctx, payload):
                  and not ctx.conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
                                           (task["task_id"],)).fetchone(),
                  "旧修复重试的身份、发送状态或活动请求已变化", "conflict")
-    from . import review_repair
+    from . import git_delivery, review_repair
+    try:
+        fingerprint_version = git_delivery.execution_retry_fingerprint_version(retry)
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("conflict", exc.message) from exc
     virtual = dict(task, run_id=retry["source_run_id"])
     review_repair.verify_frozen(virtual)
     review_repair.verify_source_terminal(ctx.conn, virtual, ctx.now)
-    prepared = _execution_retry_materials(ctx, virtual, retry["source_run_id"])
+    prepared = _execution_retry_materials(ctx, virtual, retry["source_run_id"],
+                                          fingerprint_version=fingerprint_version)
     util.require(prepared["worktree"] == retry.get("worktree")
                  and prepared["detached"] == retry.get("detached")
                  and prepared["worktree_sha256"] == retry.get("worktree_sha256"),
@@ -971,7 +983,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                          "旧修复重试的任务或执行证据已变化", "conflict")
             review_repair.verify_frozen(dict(task, run_id=repair_retry["source_run_id"]))
             try:
-                util.require(git_delivery.worktree_state_sha256(repair_retry["worktree"], detached=repair_retry["detached"])
+                util.require(git_delivery.execution_retry_worktree_sha256(
+                    repair_retry["worktree"], detached=repair_retry["detached"],
+                    version=git_delivery.execution_retry_fingerprint_version(repair_retry))
                              == repair_retry["worktree_sha256"], "重新执行确认后工作树内容已变化，请重新确认", "conflict")
             except (OSError, git_delivery.GitDeliveryError) as exc:
                 raise util.KanpilotError("conflict", "旧修复工作树已不可核验") from exc
@@ -995,7 +1009,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                              "模型前失败的原派发证据已变化，请重新确认", "conflict")
             try:
                 if (util.sha256_file(Path(task["plan_path"])) != task["plan_sha256"]
-                        or git_delivery.worktree_state_sha256(execution_retry["worktree"], detached=execution_retry["detached"])
+                        or git_delivery.execution_retry_worktree_sha256(
+                            execution_retry["worktree"], detached=execution_retry["detached"],
+                            version=git_delivery.execution_retry_fingerprint_version(execution_retry))
                         != execution_retry["worktree_sha256"]):
                     raise util.KanpilotError("conflict", "计划或工作树内容已变化，请重新确认后再执行")
             except (OSError, git_delivery.GitDeliveryError) as exc:
@@ -1043,6 +1059,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     "worktree": execution_retry["worktree"],
                     "detached": execution_retry["detached"],
                     "worktree_sha256": execution_retry["worktree_sha256"],
+                    "worktree_fingerprint_version": execution_retry["worktree_fingerprint_version"],
                 }
                 if execution_retry.get("source_kind") == "codex_preflight":
                     extra["execution_retry"].update(source_kind="codex_preflight",
