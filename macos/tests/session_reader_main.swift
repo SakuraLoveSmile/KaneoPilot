@@ -378,6 +378,162 @@ struct SessionReaderFixtures {
               "new fake run exposes current permission while the old permission remains frozen")
         print("Codex preflight retry Store fixtures passed: authority, no Plus control, stale/revoked confirmation, one queue and frozen history")
     }
+    @MainActor static func liveContentFixtures(client: CoreClient) async throws {
+        let messageLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_REQUEST_LOG"]!
+        let commandLog = messageLog + ".content.commands"
+        let previousCommandLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_COMMAND_LOG"]
+        let stateURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["KANPILOT_FAKE_STATE"]!)
+        let originalState = try Data(contentsOf: stateURL)
+        setenv("KANPILOT_FAKE_COMMAND_LOG", commandLog, 1)
+        defer {
+            try? originalState.write(to: stateURL, options: .atomic)
+            if let previousCommandLog { setenv("KANPILOT_FAKE_COMMAND_LOG", previousCommandLog, 1) }
+            else { unsetenv("KANPILOT_FAKE_COMMAND_LOG") }
+        }
+        let taskID = "task-music-006", runID = "run-music-006-b2"
+        let count = Int(ProcessInfo.processInfo.environment["KANPILOT_FAKE_LONG_SESSION_COUNT"]!)!
+        let running: [String: Any] = ["backend": "pi_desktop", "round_status": "running", "control": [
+            "state": "running", "connected": true, "can_start": false]]
+        try scenario(running)
+        let store = SessionReaderStore(taskID: taskID, preferredRunID: runID)
+        defer { store.stop() }
+        await store.start(client: client)
+        await waitFor { store.controlStatus?.state == "running" && !store.controlLoading }
+        check(!store.statusOnly && store.messages.count == count && store.lastStatusCheckedAt != nil,
+              "content is the default and loads both messages and current status")
+        store.pauseFollowing()
+        store.updateDistanceFromBottom(0)
+        check(!store.following, "explicit pause survives a short list's bottom geometry notification")
+        let anchor = store.messages[10].id!
+        store.readingAnchor = anchor
+        store.search = "MODE-NEW"
+        let beforeModeChange = store.diagnostics
+        await store.setStatusOnly(true)
+        store.updateDistanceFromBottom(0)
+        let pausedRequests = try loggedRequests(messageLog).count
+        let checkedBeforePoll = store.lastStatusCheckedAt
+        await waitFor { store.lastStatusCheckedAt != checkedBeforePoll }
+        check(store.lastStatusCheckedAt != checkedBeforePoll && store.messages.count == count,
+              "state mode continues status polling and retains loaded content")
+        check(try loggedRequests(messageLog).count == pausedRequests,
+              "switching to state mode pauses all message requests")
+        check(store.diagnostics.preparedMessages == beforeModeChange.preparedMessages
+              && store.committedQuery.isEmpty && store.search == "MODE-NEW",
+              "state mode cancels pending body search without discarding its input")
+        check(store.readingAnchor == anchor && !store.following,
+              "state mode retains the user's reading position and paused follow intent")
+        let added: [String: Any] = ["id": "mode-appended", "seq": count + 1, "run_id": runID,
+                                   "type": "assistant", "revision": 1, "content": "MODE-NEW"]
+        var changed = running
+        changed["round_status"] = "failed"
+        changed["control"] = ["state": "idle", "connected": true, "can_start": false]
+        changed["append"] = [added]
+        changed["revisions"] = ["m00004": ["content": "mode revision", "revision": 2]]
+        try scenario(changed)
+        await store.setStatusOnly(false)
+        await waitFor { store.committedQuery == "MODE-NEW" && store.messageState.rows.count == 1
+            && store.controlStatus?.state == "idle" && !store.controlLoading }
+        check(store.messages.count == count + 1 && store.messages.filter { $0.id == "mode-appended" }.count == 1,
+              "returning to content catches up incrementally without duplicate rows")
+        check(store.messages.first { $0.id == "m00004" }?.revision == 2,
+              "returning to content also replaces a revised historical message")
+        check(store.committedQuery == "MODE-NEW" && store.messageState.rows.first?.message.id == "mode-appended",
+              "returning to content completes the search canceled by the mode change")
+        check(store.roundDetail?.runStatus == "failed" && store.controlStatus?.state == "idle",
+              "content mode refreshes round and Plus status alongside messages")
+        store.search = ""
+        await waitFor { store.committedQuery.isEmpty && store.messageState.rows.count == count + 1 }
+        check(!store.following && store.restoreAnchor == anchor,
+              "clearing the resumed search restores the prior reading anchor")
+        let publicationsBeforeRoundTrip = store.diagnostics.messagePublications
+        await store.setStatusOnly(true)
+        await store.setStatusOnly(false)
+        check(store.diagnostics.messagePublications == publicationsBeforeRoundTrip,
+              "a mode round trip does not republish unchanged message content")
+        changed["round_status"] = "running"
+        changed["control"] = ["state": "running", "connected": true, "can_start": false]
+        try scenario(changed)
+        await waitFor { store.roundDetail?.runStatus == "running" && store.controlStatus?.state == "running" }
+        check(store.roundDetail?.runStatus == "running" && store.controlStatus?.state == "running"
+              && !store.controlLoading,
+              "content polling silently updates round and Plus status without switching modes")
+
+        let checkedBeforeFailure = store.lastStatusCheckedAt
+        try scenario(["status_read_error": "temporary content status failure"])
+        await store.refresh()
+        check(store.messages.count == count + 1 && store.readFailure != nil
+              && store.lastStatusCheckedAt == checkedBeforeFailure,
+              "a failed content status read preserves messages and the last successful check time")
+        let recovered: [String: Any] = ["id": "mode-recovered", "seq": count + 2, "run_id": runID,
+                                       "type": "assistant", "revision": 1, "content": "mode recovery"]
+        changed["append"] = [added, recovered]
+        try scenario(changed)
+        await waitFor { store.readFailure == nil && store.messages.contains { $0.id == "mode-recovered" } }
+        check(store.messages.count == count + 2 && store.readFailure == nil,
+              "content polling recovers from a temporary status failure without clearing history")
+        store.updateHeights(visibleHeight: 200, contentHeight: 180)
+        store.updateDistanceFromBottom(0)
+        check(!store.following && store.hasNewContent,
+              "new-message layout at the bottom preserves an explicit pause and the new-content hint")
+        store.jumpToLatest()
+        store.updateDistanceFromBottom(0)
+        check(store.following && !store.hasNewContent, "returning to latest clears the explicit pause")
+        store.pauseFollowing()
+        store.userScrolled()
+        store.updateDistanceFromBottom(0)
+        check(store.following, "a real user scroll to the bottom can resume following after an explicit pause")
+        store.pauseFollowing()
+
+        let staleMessage: [String: Any] = ["id": "mode-stale", "seq": count + 3, "run_id": runID,
+                                          "type": "assistant", "revision": 1, "content": "stale mode response"]
+        var delayed = changed
+        delayed["append"] = [added, recovered, staleMessage]
+        delayed["delay_ms"] = 500
+        try scenario(delayed)
+        let beforeDelayedRead = try loggedRequests(messageLog).count
+        let inFlight = Task { await store.refresh() }
+        await waitFor { ((try? loggedRequests(messageLog).count) ?? 0) > beforeDelayedRead }
+        check(try loggedRequests(messageLog).count > beforeDelayedRead, "the old-mode message read is in flight")
+        try scenario(changed)
+        await store.setStatusOnly(true)
+        await inFlight.value
+        check(store.statusOnly && !store.messages.contains { $0.id == "mode-stale" } && !store.loading,
+              "switching to state mode rejects the delayed old-mode message response")
+        await store.setStatusOnly(false)
+        check(store.messages.count == count + 2 && !store.messages.contains { $0.id == "mode-stale" },
+              "discarded old-mode responses cannot advance the incremental cursor")
+        store.updateDistanceFromBottom(0)
+        check(!store.following, "mode changes preserve explicit pause even when the list reports the bottom")
+        await store.select(runID: "run-music-006-a1")
+        store.updateDistanceFromBottom(0)
+        check(store.following, "selecting another round starts with following enabled")
+        store.stop()
+
+        // Display mode must not remove the existing core-authorized retry or Plus guard.
+        var state = try JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as! [String: Any]
+        state["session_scenarios"] = ["auto-execution_failed/run-auto-execution-failed": [
+            "backend": "pi_desktop", "session_id": "retry-session", "control": [
+                "state": "idle", "connected": true, "session_id": "retry-session", "can_start": false]]]
+        try JSONSerialization.data(withJSONObject: state).write(to: stateURL, options: .atomic)
+        let retryStore = SessionReaderStore(taskID: "auto-execution_failed", preferredRunID: "run-auto-execution-failed")
+        defer { retryStore.stop() }
+        await retryStore.start(client: client)
+        await waitFor { retryStore.controlStatus != nil && !retryStore.controlLoading }
+        check(retryStore.canRetryExecution && retryStore.retryTask?.canRetryExecution == true,
+              "content mode retains the failed round's core-authorized retry")
+        await retryStore.setStatusOnly(true)
+        await waitFor { retryStore.controlStatus != nil && !retryStore.controlLoading }
+        check(retryStore.canRetryExecution, "switching to state mode keeps the same retry authority")
+        await retryStore.setStatusOnly(false)
+        await waitFor { retryStore.controlStatus != nil && !retryStore.controlLoading }
+        check(retryStore.canRetryExecution, "returning to content mode keeps the same retry authority")
+        let reads = try loggedRequests(commandLog).filter { $0["command"] as? String == "get-session" }
+        check(!reads.isEmpty && reads.allSatisfy {
+            ($0["payload"] as? [String: Any])?["status_only"] as? Bool == true
+        }, "both modes use lightweight status reads; only content mode requests messages")
+        print("live-content Store fixtures passed: mode changes, incremental catch-up, revisions, search, status/Plus polling, recovery, stale responses and retry authority")
+    }
+
     @MainActor static func statusOnlyFixtures(client: CoreClient) async throws {
         let messageLog = ProcessInfo.processInfo.environment["KANPILOT_FAKE_REQUEST_LOG"]!
         let commandLog = messageLog + ".commands"
@@ -815,6 +971,7 @@ struct SessionReaderFixtures {
         check(controls.controlStatus == nil, "old control response cannot appear in the new round")
         check(await controls.requestSessionStart(expected: expected) == false, "old confirmation cannot start a new round")
         controls.stop()
+        try await liveContentFixtures(client: client)
         try await statusOnlyFixtures(client: client)
         _=token;_=followToken
         print("actual Store fixtures passed: count=\(count), cold_history_seconds=\(String(format:"%.3f",cold)), debounce_observed_after_seconds=\(String(format:"%.3f",queryObserved)), initial_prepared=\(initial.preparedMessages), idle30s_work=0")
