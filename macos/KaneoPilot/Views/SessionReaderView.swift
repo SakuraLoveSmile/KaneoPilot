@@ -909,8 +909,12 @@ struct SessionBanner: View {
                 .accessibilityHidden(true)
             Text(text)
                 .font(.kpSmall)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
                 .textSelection(.enabled)
+                .help(text)
+                .contextMenu {
+                    Button("复制错误详情") { Workspace.copy(text) }
+                }
             if stale {
                 Text("可能已过期")
                     .font(.kpSmall)
