@@ -320,6 +320,8 @@ Plus 会话资格（2026-10-17）：放行前还须核验 Plus 已空闲，即 `
 ### verification_unconfirmed 恢复
 
 当前活跃 needs_user/monitor/verification_unconfirmed 经用户 reverify 且本轮全部可信验证通过时，转回 running、排队同一执行轮次的 monitor；不创建新执行轮次、不修改原计划、工作树或配置，不写人工验证 override。真实失败、不完整或身份变化保持原阻塞。
+
+KP-SV03 的“核对成果并继续”按 protocol §5.15.5 接续同一 Plus 会话的已有后续成果，保留失败及采纳审计。接续成功仅进入同一 run 的 monitor；完整验证通过后才沿原流程进入评审，缺少证据保持 needs_user/monitor/verification_unconfirmed，并提供另行确认的验证专用补报轮次。`finished`、接续完成与验证通过是不同状态。
 # 规划问题及答案保存（2026-10-09）
 
 需要补充材料的规划请求结束后，任务保留 `needs_user`，问题绑定原 request/run 与材料版本。

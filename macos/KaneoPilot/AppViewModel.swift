@@ -426,6 +426,7 @@ final class AppViewModel: ObservableObject {
     func resolve(taskID: String, action: String, note: String? = nil, expectedExecutionRunID: String? = nil, expectedPlanSHA256: String? = nil,
                  expectedReviewKey: String? = nil,
                  verificationReportSupplement: Bool = false,
+                 requireVerificationOnly: Bool? = nil,
                  onError: ((String) -> Void)? = nil) async {
         let executionRetry = (action == "resume" || action == "retry_verification") && expectedExecutionRunID != nil
         let supplement = action == "retry_verification" && executionRetry && verificationReportSupplement
@@ -439,9 +440,30 @@ final class AppViewModel: ObservableObject {
             if let expectedExecutionRunID { payload["expected_execution_run_id"] = expectedExecutionRunID }
             if let expectedPlanSHA256 { payload["expected_plan_sha256"] = expectedPlanSHA256 }
             if let expectedReviewKey { payload["expected_review_key"] = expectedReviewKey }
+            if let requireVerificationOnly { payload["verification_report_supplement"] = requireVerificationOnly }
             _ = try await self.client.run("resolve", payload: payload, as: OkResponse.self)
             return nil
         }
+    }
+
+    func continueExecution(taskID: String, runID: String, candidate: ExecutionContinuationCandidate,
+                           onError: ((String) -> Void)? = nil) async -> ExecutionContinuationResponse? {
+        var outcome: ExecutionContinuationResponse?
+        await perform("核对成果并继续", onError: onError) {
+            let response = try await self.client.run("continue-execution",
+                payload: candidate.payload(taskID: taskID, runID: runID), timeout: 120,
+                as: ExecutionContinuationResponse.self)
+            guard response.taskId == taskID, response.runId == runID,
+                  ["queued", "starting", "verification_required", "blocked"].contains(response.status) else {
+                throw CoreError.badOutput("续接结果与当前任务或轮次不匹配，请刷新后重新核验。")
+            }
+            if response.status == "blocked" {
+                throw CoreError.badOutput(response.detail)
+            }
+            outcome = response
+            return response.detail
+        }
+        return outcome
     }
 
     func currentEngineFixRevert(taskID: String) async throws -> EngineFixRevert {

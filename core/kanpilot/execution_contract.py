@@ -35,12 +35,18 @@ def _inputs(spec, initial_source_sha256, requirements_sha256):
         inputs["sandbox_writable_roots"] = spec["sandbox_writable_roots"]
     if "tool_environment" in spec:
         inputs["tool_environment"] = spec["tool_environment"]
+    if "verification_only" in spec:
+        inputs["verification_only"] = copy.deepcopy(spec["verification_only"])
     return inputs
 
 
 def freeze_spec(spec, *, requirements_sha256):
     """Called by dispatch after the isolated worktree and plan are verified."""
     initial_source = git_delivery.source_state_sha256(spec["cwd"])
+    if "verification_only" in spec:
+        util.require(initial_source == spec["verification_only"].get("source_sha256")
+                     and requirements_sha256 == spec["verification_only"].get("requirements_sha256"),
+                     "补验证的源码或需求身份已变化", "verification_identity_unconfirmed")
     contract = stage_contract.make_contract(
         "execution", task_id=spec["task_id"], request_id=spec["request_id"],
         run_id=spec["run_id"], harness_id=spec["backend"],
@@ -99,6 +105,8 @@ def validate_spec(spec, *, job=None, starting=False):
         stage_contract.validate_contract(job["stage_contract"], expected=contract)
         util.require(job.get("request_id") == contract["request_id"],
                      "执行记录的请求身份不符", "verification_identity_unconfirmed")
+        util.require(job.get("verification_only") == spec.get("verification_only"),
+                     "补验证执行记录的冻结身份不符", "verification_identity_unconfirmed")
     if starting:
         util.require(git_delivery.source_state_sha256(spec["cwd"])
                      == inputs["initial_source_sha256"],
@@ -113,6 +121,8 @@ def attach_to_job(spec, job):
         job.update(stage_contract_required=True, request_id=spec.get("request_id"))
         if "stage_contract" in spec:
             job["stage_contract"] = copy.deepcopy(spec["stage_contract"])
+    if "verification_only" in spec:
+        job["verification_only"] = copy.deepcopy(spec["verification_only"])
     return job
 
 

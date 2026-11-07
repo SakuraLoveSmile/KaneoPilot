@@ -696,7 +696,18 @@ struct TaskOverviewTabView: View {
     @State private var revertPreparationID: UUID?
     @State private var technicalExpanded = false
     @State private var reverifyError: String?
-    @State private var retryVerificationRunID: String?
+    private struct VerificationRetryConfirmation {
+        let taskID: String
+        let runID: String
+        let supplement: Bool
+        let verificationOnly: Bool?
+        let message: String
+        var label: String {
+            if verificationOnly == false { return "重新执行（沿用计划）" }
+            return supplement ? "补齐验证报告" : "让 Plus 重新执行并验证"
+        }
+    }
+    @State private var retryVerification: VerificationRetryConfirmation?
     @State private var answerFocusRequest = 0
     @State private var reviewFocusRequest = 0
     @State private var executionFocusRequest = 0
@@ -828,7 +839,13 @@ struct TaskOverviewTabView: View {
     }
 
     private var supplementsVerificationReport: Bool {
+        detail.taskAiAction?.current?.kind == "merge_conflict" || detail.verificationReportSupplement == true
+    }
+
+    private var verificationSupplementMessage: String {
         detail.taskAiAction?.current?.kind == "merge_conflict"
+            ? AutomationPresentation.verificationSupplementMessage
+            : AutomationPresentation.continuedVerificationSupplementMessage
     }
 
     private var retryVerificationLabel: String {
@@ -935,12 +952,13 @@ struct TaskOverviewTabView: View {
         case "confirm_dispatch": return "先查看并核验已发布计划，再在计划页确认安排执行。"
         case "recover_review": return "保留执行成果并恢复到待评审，恢复后自动推进保持暂停。"
         case "retry_verification":
+            if supplementsVerificationReport {
+                return "保留已有成果，核对原日志并补齐原计划验证及正式报告；确认后会调用模型并产生费用。"
+            }
             if detail.executionRound?.backend == "codex" {
                 return "沿用原计划和工作树，启动新的 Codex CLI 执行轮次，由 Codex 运行验证并返回报告与命令证据。"
             }
-            return supplementsVerificationReport
-                ? "沿用原计划、原工作树和已有冲突解决结果，让 Plus 补齐验证及正式报告；确认后会调用模型并产生费用。"
-                : "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
+            return "沿用原计划和工作树，启动新的 Plus 执行轮次，由 Plus 执行验证并返回工具证据。"
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
         case "revert_engine_fix": return AutomationPresentation.revertMessage
@@ -1091,26 +1109,27 @@ struct TaskOverviewTabView: View {
         } message: {
             Text(reverifyError ?? "")
         }
-        .confirmationDialog(supplementsVerificationReport ? "让 Plus 补齐验证报告？" : "让 Plus 重新执行并验证？", isPresented: Binding(
-            get: { retryVerificationRunID != nil },
-            set: { if !$0 { retryVerificationRunID = nil } }
+        .confirmationDialog((retryVerification?.label ?? "重新执行并验证") + "？", isPresented: Binding(
+            get: { retryVerification != nil },
+            set: { if !$0 { retryVerification = nil } }
         ), titleVisibility: .visible) {
-            Button(supplementsVerificationReport ? "补齐验证报告" : "让 Plus 重新执行并验证") {
-                guard let runID = retryVerificationRunID else { return }
-                retryVerificationRunID = nil
+            Button(retryVerification?.label ?? "重新执行并验证") {
+                guard let confirmation = retryVerification else { return }
+                retryVerification = nil
                 Task {
-                    await model.resolve(taskID: detail.taskId, action: "retry_verification",
-                                        expectedExecutionRunID: runID,
-                                        verificationReportSupplement: supplementsVerificationReport,
+                    await model.resolve(taskID: confirmation.taskID, action: "retry_verification",
+                                        expectedExecutionRunID: confirmation.runID,
+                                        verificationReportSupplement: confirmation.supplement,
+                                        requireVerificationOnly: confirmation.verificationOnly,
                                         onError: { reverifyError = $0 })
                 }
             }
-            Button("取消", role: .cancel) { retryVerificationRunID = nil }
+            Button("取消", role: .cancel) { retryVerification = nil }
         } message: {
-            Text(supplementsVerificationReport
-                 ? AutomationPresentation.verificationSupplementMessage
-                 : "沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
+            Text(retryVerification?.message ?? "")
         }
+        .onChange(of: detail.taskId) { retryVerification = nil }
+        .onChange(of: detail.runId) { retryVerification = nil }
     }
 
     private func resolutionDialogs<Content: View>(_ content: Content) -> some View {
@@ -1223,6 +1242,9 @@ struct TaskOverviewTabView: View {
         .sheet(item: $executionStatusTarget) { target in
             ExecutionStatusCheckView(target: target, onViewSession: onSwitchTab.map { callback in
                 { executionStatusTarget = nil; callback(.execution) }
+            }, onContinued: {
+                executionStatusTarget = nil
+                onRefreshDetail?()
             })
         }
         .onChange(of: detail.taskId) { executionStatusTarget = nil }
@@ -1450,6 +1472,15 @@ struct TaskOverviewTabView: View {
                         ForEach(secondaryActions, id: \.self) { action in
                             actionButton(action)
                         }
+                        if detail.verificationReportSupplement == true, actions.contains("retry_verification") {
+                            Button("重新执行（沿用计划）…") {
+                                guard let runID = detail.runId else { return }
+                                retryVerification = VerificationRetryConfirmation(taskID: detail.taskId, runID: runID,
+                                    supplement: false, verificationOnly: false,
+                                    message: AutomationPresentation.continuedImplementationRetryMessage)
+                            }
+                            .disabled(detail.runId == nil)
+                        }
                     }
                     .disabled(model.busy)
                 }
@@ -1549,9 +1580,16 @@ struct TaskOverviewTabView: View {
             Button("处理评审阻塞") { reviewFocusRequest += 1 }
                 .disabled(reviewStore == nil)
         case "retry_verification":
-            Button(retryVerificationLabel) { retryVerificationRunID = detail.runId }
+            Button(retryVerificationLabel) {
+                guard let runID = detail.runId else { return }
+                retryVerification = VerificationRetryConfirmation(taskID: detail.taskId, runID: runID,
+                    supplement: supplementsVerificationReport,
+                    verificationOnly: detail.verificationReportSupplement == true ? true : nil,
+                    message: supplementsVerificationReport ? verificationSupplementMessage
+                        : "沿用原计划和工作树，保留已有改动，会启动新的 Plus 执行轮次并由 Plus 执行验证。")
+            }
                 .disabled(model.busy || detail.runId == nil)
-                .help(supplementsVerificationReport ? AutomationPresentation.verificationSupplementMessage
+                .help(supplementsVerificationReport ? verificationSupplementMessage
                       : "沿用原计划和工作树，会启动新的执行轮次。")
         case "reverify":
             Button("重新核验验证证据") {

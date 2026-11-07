@@ -636,6 +636,8 @@ struct TaskDetail: Decodable, Identifiable {
     let reviewRecovery: ReviewRecovery?
     let reviewResolution: ReviewResolution?
     let verificationChecks: VerificationCheckOperation?
+    /// KP-SV03：核心已冻结为只补验证的恢复入口，不能按失败文案猜测。
+    let verificationReportSupplement: Bool?
     let planClarification: PlanClarification?
     let executionQuestion: ExecutionQuestion?
     var releaseVerificationQuestion: ExecutionQuestion? = nil
@@ -1834,6 +1836,7 @@ struct ExecutionStatusCheckResponse: Decodable {
     let nextStep: String
     let originalFailure: String?
     let checks: [ExecutionStatusCheckItem]
+    let continuation: ExecutionContinuationCandidate?
 
     var symbol: String {
         switch state {
@@ -1845,6 +1848,29 @@ struct ExecutionStatusCheckResponse: Decodable {
         default: return "questionmark.circle.fill"
         }
     }
+}
+
+struct ExecutionContinuationCandidate: Decodable, Equatable {
+    let sessionId: String
+    let turnId: String
+    let planSha256: String
+    let jobSha256: String
+    let detail: String
+
+    func payload(taskID: String, runID: String) -> [String: Any] {
+        ["task_id": taskID, "run_id": runID, "expected_session_id": sessionId,
+         "recovery_turn_id": turnId, "expected_plan_sha256": planSha256,
+         "expected_job_sha256": jobSha256]
+    }
+}
+
+struct ExecutionContinuationResponse: Decodable {
+    let taskId: String
+    let runId: String
+    let status: String
+    let detail: String
+    let requestId: String?
+    let deduplicated: Bool?
 }
 
 struct ExecutionStatusCheckItem: Decodable, Identifiable {

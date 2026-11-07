@@ -117,6 +117,7 @@ def _project_plus(result, ctx, payload, job, detail, session):
                 return
             _state(result, continued, control["continued_detail"] + "；原失败记录保留。",
                    _TERMINAL_NOTE + "如需继续，请按任务当前允许的恢复操作处理。")
+            return current if continued == "finished" else None
         else:
             _state(result, continued, control["continued_detail"] + "；原失败记录保留。",
                    "请在 Plus 中处理当前确认。" if continued == "waiting_permission"
@@ -135,6 +136,7 @@ def _project_plus(result, ctx, payload, job, detail, session):
     if terminal:
         _state(result, terminal, "Plus 当前空闲，原轮次的结束记录与进程退出证据一致。",
                _TERMINAL_NOTE + "如需继续，请按任务当前允许的恢复操作处理。")
+        return current if terminal == "finished" else None
     else:
         _unknown(result, "Plus 当前空闲，但原轮次的本地结束记录或进程退出证据尚不完整。")
 
@@ -152,6 +154,7 @@ def cmd_check_execution_status(ctx, payload):
               "checked_at": ctx.now_iso, "original_failure": _text(task["failure_reason"]),
               "checks": []}
     _unknown(result, "尚未取得可核验的执行状态。")
+    continuation_turn = None
     _check(result, "binding", "当前执行轮次", "confirmed", "本次核验绑定任务当前轮次。")
     view = cmd_session._get_session_status(ctx, payload, persist=False)
     session, detail = view.get("session") or {}, view.get("round_detail") or {}
@@ -186,7 +189,7 @@ def cmd_check_execution_status(ctx, payload):
             process_detail = "进程身份或存活状态无法确认。"
         _check(result, "process", process_label, process_state, process_detail)
         if job["backend"] == "pi_desktop":
-            _project_plus(result, ctx, payload, job, detail, session)
+            continuation_turn = _project_plus(result, ctx, payload, job, detail, session)
         elif job["backend"] == "codex":
             terminal = _terminal_state(job, detail)
             if job.get("status") == "running" and alive is True:
@@ -218,5 +221,16 @@ def cmd_check_execution_status(ctx, payload):
             _unknown(result, "结束证据在核验期间发生变化，请重新核验当前状态。")
     elif before:
         _unknown(result, "执行记录在核验期间变为不可读，请重新核验。")
+    if result["state"] == "finished" and continuation_turn and after:
+        from . import execution_continuation
+        try:
+            job_sha = util.sha256_file(source.run_dir(task_id, run_id) / "job.json")
+            if source.source_signature(task_id, run_id) == after:
+                continuation = execution_continuation.candidate(ctx.conn, fresh, job, continuation_turn, job_sha)
+                if continuation is not None:
+                    result["continuation"] = continuation
+                    result["next_step"] = continuation["detail"]
+        except OSError:
+            _unknown(result, "执行记录在核验期间变为不可读，请重新核验。")
     result["checked_at"] = util.now_iso()
     return result

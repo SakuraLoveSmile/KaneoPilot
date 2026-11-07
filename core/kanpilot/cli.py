@@ -298,6 +298,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "expected_review_key": (False, "str"),
             "expected_failed_review_request_id": (False, "str"),
             "expected_plan_sha256": (False, "str"),
+            "verification_report_supplement": (False, "bool"),
             # A14/A2：用户动作与引擎补救，缺省 user。
             "engine_fix": (False, "dict"),
             "actor": (False, "str"),
@@ -474,6 +475,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "check-execution-status": (
         {"task_id": (True, "str"), "run_id": (True, "str")},
         _automation_command("execution_status", "cmd_check_execution_status"),
+    ),
+    "continue-execution": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "expected_session_id": (True, "str"), "recovery_turn_id": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "expected_job_sha256": (True, "str")},
+        _automation_command("execution_continuation", "cmd_continue_execution"),
     ),
     "session-request-start": (
         {"task_id": (True, "str"), "run_id": (True, "str"), "request_id": (True, "str")},

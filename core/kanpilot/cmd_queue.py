@@ -606,6 +606,11 @@ def _prepare_execution_retry(ctx, payload):
                      "等待材料或决定的任务仅允许用户确认新轮次", "conflict")
     engine_empty = _engine_empty_retry(task, payload)
     verification_retry = payload.get("verification_retry") is True
+    if payload.get("verification_report_supplement") is True:
+        from . import execution_continuation
+        util.require(verification_retry and payload.get("actor", "user") == "user"
+                     and execution_continuation.verification_report_supplement(ctx.conn, task),
+                     "仅补验证的接续资格已变化，请刷新；不会退回完整重新执行", "conflict")
     preflight = codex_preflight_retry_candidate(ctx.conn, task)
     if verification_retry and not verification_retry_candidate(ctx.conn, task):
         raise util.KanpilotError("conflict", "当前验证身份或发送状态不明，不能重新执行；请先重新核验验证证据")
@@ -628,7 +633,12 @@ def _prepare_execution_retry(ctx, payload):
     if core.review_repair_of(task) and not core.review_repair_of(task).get("source_kind"):
         from . import review_repair
         review_repair.verify_frozen(task)
-    return _execution_retry_materials(ctx, task, expected, preflight=preflight)
+    materials = _execution_retry_materials(ctx, task, expected, preflight=preflight)
+    if verification_retry and payload.get("verification_report_supplement") is not False:
+        from . import execution_continuation
+        if execution_continuation.verification_report_supplement(ctx.conn, task):
+            materials["verification_only"] = execution_continuation.freeze_verification(task, materials, ctx.now_iso)
+    return materials
 
 
 def _execution_retry_materials(ctx, task, expected, *, preflight=False, fingerprint_version=2):
@@ -895,6 +905,12 @@ def cmd_resolve(ctx, payload: dict) -> dict:
     if action not in constants.VALID_RESOLVE_ACTIONS:
         raise util.KanpilotError("bad_request", f"invalid action {action}")
     requested_action = action
+    if "verification_report_supplement" in payload:
+        util.require(type(payload["verification_report_supplement"]) is bool
+                     and action == "retry_verification" and actor == "user",
+                     "补验证或完整重试意图必须由用户通过验证恢复明确发起", "bad_request")
+        util.require(not core.review_repair_of(db.require_task(conn, payload["task_id"])),
+                     "独立修复任务不能使用普通成果的验证恢复意图", "conflict")
     if payload.get("verification_retry") is True:
         raise util.bad_request("请使用 retry_verification 显式发起 Plus 重新执行并验证")
     if action == "retry_verification":
@@ -1019,6 +1035,11 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             if execution_retry.get("verification_recovery"):
                 from . import task_ai_action
                 task_ai_action.verify_verification_recovery(task, execution_retry["verification_recovery"])
+            if execution_retry.get("verification_only"):
+                from . import execution_continuation
+                util.require(execution_continuation.verification_report_supplement(conn, task),
+                             "补验证的接续身份已变化", "conflict")
+                execution_continuation.validate_verification(execution_retry["verification_only"], task=task, check_source=True)
 
         def need(condition: bool, message: str) -> None:
             if not condition:
@@ -1064,6 +1085,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 if execution_retry.get("source_kind") == "codex_preflight":
                     extra["execution_retry"].update(source_kind="codex_preflight",
                                                      source_proof=execution_retry["source_proof"])
+                if execution_retry.get("verification_only"):
+                    extra["execution_retry"]["verification_only"] = execution_retry["verification_only"]
                 repair = core.review_repair_of(task)
                 if repair and not repair.get("source_kind"):
                     extra["fix_request"] = dict(repair, state="queued")

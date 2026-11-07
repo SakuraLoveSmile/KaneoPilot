@@ -165,3 +165,59 @@ def test_slow_finalizer_reopens_failed_task_and_keeps_monitoring(plus_scene, mon
     assert case.task(spec['task_id'])['status'] == 'running'
     assert case.task(spec['task_id'])['failure_code'] is None
     assert case.read_job(path.parent)['status'] == 'failed', 'job terminal must not be faked as running'
+
+
+@pytest.mark.parametrize('state', ['observing', 'finalizing', 'settled'])
+@pytest.mark.parametrize('intent', ['internal_keyword', 'generic_already_reserved'])
+def test_continuation_keeps_failure_until_atomic_monitor_enqueue(plus_scene, monkeypatch, state, intent):
+    """A generic observer may own its launch before continuation records intent."""
+    from kanpilot import cli, cmd_read
+    from test_process_owner import write_owned_execution_scene
+    case, owner, spec, path, _ = plus_scene
+    monkeypatch.delenv('KANPILOT_EXECUTOR_INSTANCE_ID', raising=False)
+    job = write_owned_execution_scene(case, spec, path)
+    job.update(status='failed', detail='heartbeat_failed: previous observer', exit_code=1)
+    (path.parent/'job.json').write_text(json.dumps(job))
+    case.call('executor-instance', {'instance_id':owner, 'action':'stop'})
+    case.mark_needs_user(spec['task_id'], spec['run_id'])
+    proc = SimpleNamespace(pid=123, poll=lambda:0 if state == 'settled' else None)
+    monkeypatch.setattr(cmd_dispatch.subprocess, 'Popen', lambda *a, **k: proc)
+    monkeypatch.setattr(cmd_dispatch, '_register_started_worker', lambda *a: None)
+    monkeypatch.setattr(cmd_dispatch, '_observer_pid_alive',
+                        lambda conn, tid, rid, pid, directory, data: bool(data.get('observation_finalizing')))
+    def wait(directory, process, previous):
+        if intent == 'generic_already_reserved':
+            # The launch reservation belongs to this generic call. The user
+            # continuation accepts intent while that call is still outside
+            # its final transaction; it must not be reopened underneath it.
+            with db.connect(case.db_path) as conn, db.write_txn(conn):
+                task = db.require_task(conn, spec['task_id'])
+                assert db.task_extra(task)['observer_launch']['run_id'] == spec['run_id']
+                db.set_extra(conn, task, util.now_iso(), execution_continuation={
+                    'run_id':spec['run_id'], 'status':'starting'})
+        current = dict(job, observe_pid=123)
+        if state == 'finalizing':
+            current['observation_finalizing'] = {'turn_id':job['turn_id'], 'observed_status':'completed'}
+        elif state == 'settled':
+            current.update(status='finished', exit_code=0, ended_at=util.now_iso())
+        else:
+            current.update(status='running', exit_code=None)
+        (directory/'job.json').write_text(json.dumps(current))
+        return ('starting' if state == 'finalizing' else state), None
+    monkeypatch.setattr(cmd_dispatch, '_wait_observe_attach', wait)
+    ctx = cli.Context(case.db_path)
+    try:
+        result = cmd_dispatch.cmd_round_observe(ctx, {
+            'task_id':spec['task_id'], 'run_id':spec['run_id'], 'executor':'user'},
+            preserve_execution_failure=intent == 'internal_keyword')
+        assert result['status'] == state
+        assert result['reopened'] is False
+        task = db.require_task(ctx.conn, spec['task_id'])
+        assert task['status'] == 'needs_user'
+        assert task['failure_code'] == 'execution_failed'
+        with db.write_txn(ctx.conn):
+            tick = cmd_read.tick_inline(ctx.conn, util.now_dt())
+        assert not [row for row in tick['created'] if row['kind'] == 'monitor']
+        assert case.server.prompt_count == 0
+    finally:
+        ctx.close()

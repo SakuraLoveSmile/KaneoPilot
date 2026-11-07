@@ -571,6 +571,8 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
         if core.review_repair_of(task):
             from . import repair_prompt
             spec.update(repair_prompt.freeze(task))
+        from . import execution_continuation
+        execution_continuation.freeze_verification_spec(task, spec)
         execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
         process_owner.bind_spec(spec, ctx.db_path)
         spec_path = directory / "spec.json"
@@ -713,7 +715,8 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
         if core.review_repair_of(task):
             from . import repair_prompt
             spec.update(repair_prompt.freeze(task))
-        from . import execution_contract
+        from . import execution_contract, execution_continuation
+        execution_continuation.freeze_verification_spec(task, spec)
         execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
         spec_path = run_dir / "spec.json"
         from . import process_owner
@@ -851,7 +854,7 @@ def _observer_pid_alive(conn, task_id, run_id, pid, run_dir, job):
     return util.pid_alive(pid)
 
 
-def cmd_round_observe(ctx, payload: dict) -> dict:
+def cmd_round_observe(ctx, payload: dict, *, preserve_execution_failure=False) -> dict:
     """Reserve the observer launch atomically across App/engine/answer paths."""
     import uuid
     if payload.get("recovery_turn_id") and payload.get("executor") != "user":
@@ -872,7 +875,7 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
         db.set_extra(ctx.conn,task,ctx.now_iso,observer_launch={"run_id":run_id,"token":token,
             "expires_at":util.to_iso(util.now_dt()+datetime.timedelta(seconds=120))})
     try:
-        return _round_observe_reserved(ctx,payload)
+        return _round_observe_reserved(ctx,payload, preserve_execution_failure=preserve_execution_failure)
     finally:
         with db.write_txn(ctx.conn):
             task=db.require_task(ctx.conn,task_id)
@@ -880,7 +883,7 @@ def cmd_round_observe(ctx, payload: dict) -> dict:
                 db.set_extra(ctx.conn,task,util.now_iso(),observer_launch=None)
 
 
-def _round_observe_reserved(ctx, payload: dict) -> dict:
+def _round_observe_reserved(ctx, payload: dict, *, preserve_execution_failure=False) -> dict:
     """round-observe（protocol §5.23.7）：pi_desktop 轮次的观察者续接。
 
     观察进程退出（应用重启/崩溃/被清理）而 PI-Desktop 会话仍在运行时，重新
@@ -1105,7 +1108,14 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
             # 重开的新轮次），任务不得继续停在由此产生的执行失败上。只解除
             # 本轮的 execution_failed 阻塞；其它 needs_user 原因原样保留。
             fresh = db.require_task(conn, task_id)
-            if (fresh["status"] == "needs_user"
+            continuation = db.task_extra(fresh).get("execution_continuation") or {}
+            # An explicit continuation owns the unblock + monitor enqueue as
+            # one transaction. Also respect an intent recorded after this
+            # generic observer acquired its launch reservation.
+            continuation_pending = (continuation.get("run_id") == run_id
+                                    and continuation.get("status") == "starting")
+            if (not preserve_execution_failure and not continuation_pending
+                    and fresh["status"] == "needs_user"
                     and fresh["failure_code"] == "execution_failed"
                     and fresh["run_id"] == run_id):
                 fields = core.clear_block_fields()
@@ -1205,6 +1215,12 @@ def _execution_instruction(task, worktree_path, *, desktop, conn=None, backend="
 
 
 def _base_execution_instruction(task, worktree_path, *, desktop, conn=None):
+    if core.execution_retry_of(task).get("verification_only") is not None:
+        return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"
+                f"这是用户确认的仅补验证报告轮次，当前目录 {worktree_path} 保留已有实现。"
+                "只执行下面冻结的验证工作，核实来源记录和原 verify 命令，报告真实结构化结果。"
+                "不得重新实施原计划、修复或修改源码，不得新建或切换工作树/分支，不得提交、推送或合并。"
+                "验证失败或环境材料不足时如实报告，不顺手修代码。")
     repair = core.review_repair_of(task)
     if repair.get("source_kind") == "build_failure":
         return (f"任务标识：{task['session_marker']}。计划哈希：{task['plan_sha256']}。"

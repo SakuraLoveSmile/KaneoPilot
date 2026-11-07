@@ -1079,6 +1079,8 @@ enum AutomationPresentation {
     static let revertMessage = "恢复本轮验证待处理、退还一次自动补救、不重新执行、不改本轮工作树"
     static let replanMessage = "将从目标分支新建工作树，本轮改动不会带入"
     static let verificationSupplementMessage = "沿用原计划、原工作树和已有冲突解决结果，只补充验证及正式报告。会调用本次处理固化配置的模型并产生费用。"
+    static let continuedVerificationSupplementMessage = "保留已有实现和当前工作树，先核对原验证日志；证据不足时只运行原计划的验证并补齐正式报告。不会重新实施整份计划；需要修改代码时会停止并说明原因。会调用当前执行设置中的模型并产生费用。"
+    static let continuedImplementationRetryMessage = "沿用原计划和当前工作树，保留已有改动，启动新的执行轮次进行修复和验证。这次允许修改代码，会调用当前执行设置中的模型并产生费用。"
     static func verificationRetryLabel(supplement: Bool) -> String {
         supplement ? "补齐验证报告…" : "让 Plus 重新执行并验证"
     }
@@ -1245,11 +1247,15 @@ struct ExecutionStatusCheckTarget: Identifiable {
 struct ExecutionStatusCheckView: View {
     let target: ExecutionStatusCheckTarget
     var onViewSession: (() -> Void)?
+    var onContinued: (() -> Void)?
     @EnvironmentObject private var model: AppViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var result: ExecutionStatusCheckResponse?
     @State private var error: String?
     @State private var checking = false
+    @State private var continuing = false
+    @State private var continuationConfirmation: ExecutionContinuationCandidate?
+    @State private var continuationResult: ExecutionContinuationResponse?
     @State private var requestID = UUID()
 
     var body: some View {
@@ -1257,7 +1263,12 @@ struct ExecutionStatusCheckView: View {
             Text("执行状态核验").font(.kpTitle)
             ScrollView {
                 VStack(alignment: .leading, spacing: Spacing.l) {
-                    if checking {
+                    if continuing {
+                        HStack(spacing: Spacing.s) {
+                            ProgressView().controlSize(.small)
+                            Text("正在接续已有成果并安排证据核对…").font(.kpBody)
+                        }
+                    } else if checking {
                         HStack(spacing: Spacing.s) {
                             ProgressView().controlSize(.small)
                             Text("正在核对执行记录与当前状态…").font(.kpBody)
@@ -1268,6 +1279,12 @@ struct ExecutionStatusCheckView: View {
                         Text(error).font(.kpSmall).textSelection(.enabled)
                         Text("可重新核验，或查看执行会话中的记录与运行端状态。")
                             .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    } else if let continuationResult {
+                        Label("续接正在收尾", systemImage: "clock")
+                            .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpBlue)
+                        Text(continuationResult.detail).font(.kpBody).textSelection(.enabled)
+                        Text("稍后重新核验查看进度。接续和收尾尚不代表验证通过。")
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     } else if let result {
                         resultContent(result)
                     }
@@ -1275,9 +1292,19 @@ struct ExecutionStatusCheckView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, Spacing.s)
             }
+            if let candidate = result?.continuation, result?.state == "finished",
+               continuationResult == nil, error == nil {
+                HStack(spacing: Spacing.s) {
+                    Button("核对成果并继续") { continuationConfirmation = candidate }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(checking || continuing || model.busy)
+                    Text("验证证据通过后才进入评审。")
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                }
+            }
             HStack(spacing: Spacing.s) {
                 Button("重新核验") { Task { await check() } }
-                    .disabled(checking)
+                    .disabled(checking || continuing || model.busy)
                 if let onViewSession {
                     Button("查看执行会话") { dismiss(); onViewSession() }
                 }
@@ -1288,7 +1315,21 @@ struct ExecutionStatusCheckView: View {
         .padding(Spacing.l)
         .frame(width: 520, height: 440)
         .task(id: target.id) { await check() }
-        .onDisappear { requestID = UUID() }
+        .confirmationDialog("核对成果并继续？", isPresented: Binding(
+            get: { continuationConfirmation != nil },
+            set: { if !$0 { continuationConfirmation = nil } }
+        ), titleVisibility: .visible) {
+            if let candidate = continuationConfirmation {
+                Button("核对成果并继续") {
+                    continuationConfirmation = nil
+                    Task { await continueExecution(candidate) }
+                }
+            }
+            Button("取消", role: .cancel) { continuationConfirmation = nil }
+        } message: {
+            Text("确认同一 Plus 会话中的后续轮次属于本任务，接续已有成果并核对验证证据。保留原失败记录，不再次发送执行指令；证据不足时会提示另行补齐验证。")
+        }
+        .onDisappear { requestID = UUID(); continuationConfirmation = nil }
     }
 
     private func resultContent(_ result: ExecutionStatusCheckResponse) -> some View {
@@ -1346,12 +1387,14 @@ struct ExecutionStatusCheckView: View {
 
     @MainActor
     private func check() async {
-        guard !checking else { return }
+        guard !checking, !continuing else { return }
         let request = UUID()
         requestID = request
         checking = true
         result = nil
         error = nil
+        continuationResult = nil
+        continuationConfirmation = nil
         defer { if requestID == request { checking = false } }
         do {
             let response = try await model.client.run("check-execution-status",
@@ -1365,6 +1408,32 @@ struct ExecutionStatusCheckView: View {
         } catch {
             guard !Task.isCancelled, requestID == request else { return }
             self.error = error.coreMessage
+        }
+    }
+
+    @MainActor
+    private func continueExecution(_ candidate: ExecutionContinuationCandidate) async {
+        guard !checking, !continuing, !model.busy, result?.state == "finished",
+              result?.continuation == candidate else { return }
+        let request = UUID()
+        requestID = request
+        continuing = true
+        error = nil
+        defer { if requestID == request { continuing = false } }
+        var failure: String?
+        let response = await model.continueExecution(taskID: target.taskID, runID: target.runID,
+            candidate: candidate, onError: { failure = $0 })
+        guard !Task.isCancelled, requestID == request else { return }
+        if let failure {
+            error = failure
+            return
+        }
+        guard let response else { return }
+        if response.status == "starting" {
+            continuationResult = response
+        } else {
+            dismiss()
+            onContinued?()
         }
     }
 }

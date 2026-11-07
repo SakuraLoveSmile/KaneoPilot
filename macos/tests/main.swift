@@ -28,6 +28,15 @@ if let result = decode(ExecutionStatusCheckResponse.self, #"{"task_id":"status-t
     expect(result.checkedAt == "2026-11-07T14:00:00Z" && result.state == "unknown", "执行核验保留未知状态及检查时间")
     expect(result.originalFailure == "turn error: NETWORK_ERROR" && result.checks.first?.id == "plus", "执行核验保留原失败及独立检查依据")
     expect(result.symbol == "questionmark.circle.fill", "未知状态不显示通过标记")
+    expect(result.continuation == nil, "旧核心没有续接候选时不开放续接")
+}
+
+if let result = decode(ExecutionStatusCheckResponse.self, #"{"task_id":"status-task","run_id":"status-run","checked_at":"2026-11-08T01:00:00Z","state":"finished","label":"执行轮次已结束","summary":"后续轮次完成","next_step":"核对成果并继续","checks":[],"continuation":{"session_id":"same-session","turn_id":"continued-turn","plan_sha256":"plan-hash","job_sha256":"job-hash","detail":"同一会话后续轮次"}}"#) {
+    expect(result.continuation?.turnId == "continued-turn", "续接候选包含明确后续轮次")
+    let payload = result.continuation?.payload(taskID: result.taskId, runID: result.runId) ?? [:]
+    expect(payload["expected_session_id"] as? String == "same-session", "续接提交冻结会话")
+    expect(payload["recovery_turn_id"] as? String == "continued-turn", "续接提交冻结后续轮次")
+    expect(payload["expected_plan_sha256"] as? String == "plan-hash" && payload["expected_job_sha256"] as? String == "job-hash", "续接提交计划和运行文件指纹")
 }
 
 if let archive = decode(AutoArchiveConfigResponse.self, #"{"config":{"enabled":false,"after_days":7}}"#) {

@@ -888,6 +888,9 @@ def enqueue_kind(task: sqlite3.Row, actions: list) -> Optional[str]:
 
 def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     detail = task_summary(conn, task, now)
+    from . import execution_continuation
+    if execution_continuation.verification_report_supplement(conn, task):
+        detail["verification_report_supplement"] = True
     from . import engine_fix_revert
     detail["engine_fix_summary"] = engine_fix_revert.summary(conn, task)
     detail["engine_fix_revert"] = engine_fix_revert.candidate(conn, task)

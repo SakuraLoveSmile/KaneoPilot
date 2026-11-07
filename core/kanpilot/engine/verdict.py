@@ -213,6 +213,10 @@ def _evidence_unchanged(hashes):
 
 
 def _require_snapshot(job, source_sha256):
+    frozen = job.get("verification_only")
+    if frozen is not None and (not isinstance(frozen, dict)
+            or not frozen.get("source_sha256") or frozen["source_sha256"] != source_sha256):
+        raise util.KanpilotError("verification_identity_unconfirmed", "仅补验证的轮次修改了已有源码，不能接受验证结果")
     if (type(job.get("verification_evidence_version")) is not int
             or job["verification_evidence_version"] != 1
             or not job.get("verification_source_sha256")):

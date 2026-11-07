@@ -1170,6 +1170,41 @@ class TestRunReal(PiDesktopCase):
         spec = self.make_spec(run_dir, cwd, plan, **kw)
         return spec, run_dir
 
+    def test_verification_only_sends_frozen_report_body_without_implementation_plan(self):
+        from kanpilot import execution_continuation as continuation, execution_contract, git_delivery
+        spec, run_dir = self._base(
+            "# Plan\nORIGINAL_IMPLEMENTATION_MARKER\n```verify\npython3 -V\n```\n",
+            completion_policy="command_verification", required_verification_commands=["python3 -V"])
+        spec["cwd"] = str(self.make_repo("Feedback"))
+        spec["instruction"] = "仅补齐冻结的验证报告，不重新实施。"
+        frozen = {"task_id":spec["task_id"], "source_run_id":"original-manual-continuation",
+                  "repository":spec["repository"], "requirements_sha256":"a"*64,
+                  "plan_sha256":spec["plan_sha256"], "worktree_path":spec["cwd"],
+                  "source_sha256":git_delivery.source_state_sha256(spec["cwd"]),
+                  "source_records_dir":str(self.root/"original-records"),
+                  "commands":["python3 -V"], "requested_at":util.now_iso()}
+        frozen["identity_sha256"] = continuation._verification_identity(frozen)
+        frozen["body"] = continuation.verification_body(frozen, spec["plan_path"])
+        frozen["body_sha256"] = util.sha256_text(frozen["body"])
+        spec["verification_only"] = frozen
+        contract = execution_contract.freeze_spec(spec, requirements_sha256="a"*64)
+        canonical = self.runs_root / spec["task_id"] / spec["run_id"] / "spec.json"
+        canonical.write_text(json.dumps(spec))
+        self.server.required_verification_commands = True
+        self.server.tools = list(ALL_TOOLS) + list(constants.PI_DESKTOP_GOAL_REPORT_TOOLS)
+        self.server.turn_statuses = ["running", "completed"]
+        self.server.messages = self.default_messages()
+        self.assertEqual(self._run(spec), 0, self.read_job(run_dir))
+        self.assertEqual(self.server.prompt_count, 1)
+        actual = self.server.prompt_content
+        self.assertNotIn("ORIGINAL_IMPLEMENTATION_MARKER", actual)
+        self.assertIn("仅补齐已有成果的验证报告", actual)
+        self.assertIn("original-manual-continuation", actual)
+        self.assertIn("不修复或修改源码", actual)
+        self.assertEqual(actual, spec["instruction"] + "\n\n" + frozen["body"])
+        self.assertEqual(util.sha256_text(actual), contract["inputs"]["prompt_sha256"])
+        self.assertEqual(self.read_job(run_dir)["verification_only"], frozen)
+
     def test_old_plus_missing_execution_input_tools_blocks_before_prompt(self):
         self.server.tools.remove('pi_asks_pending')
         spec,run_dir=self._base()

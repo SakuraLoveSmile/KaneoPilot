@@ -1207,7 +1207,8 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         actual = hashlib.sha256(raw).hexdigest()
         if actual != expected_sha:
             return fail("plan_mismatch", "plan_mismatch")
-    if spec.get("review_repair") is not None or spec.get("repair_prompt"):
+    if (spec.get("review_repair") is not None or spec.get("repair_prompt")
+            or "verification_only" in spec):
         from . import repair_prompt
         try:
             plan_body = repair_prompt.execution_body(spec)

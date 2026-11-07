@@ -1102,6 +1102,8 @@ def allowed_actions(task, requests):
     # protocol §5.3（2026-10-17）：同一任务有 queued/claimed 活动请求时不再提供 enqueue。
     has_active_request = any(r.get("status") in ("queued", "claimed") for r in task_reqs)
     if status == "needs_user":
+        if task.get("verification_report_supplement") and task.get("failure_code") == "verification_unconfirmed":
+            return ["retry_verification", "reverify", "replan", "dismiss", "recheck"] if not has_active_request else ["recheck"]
         if task.get("failure_code") == "execution_input_required":
             return ["answer_execution_questions", "skip_execution_questions", "stop_execution"]
         if task.get("plan_clarification"):
@@ -1728,6 +1730,10 @@ def cmd_resolve(state, payload):
     if not task:
         return fail("任务不存在：%s" % tid, "not_found")
     requests = merged_requests(state)
+    if payload.get("verification_report_supplement") is True and (
+            action != "retry_verification" or task.get("verification_report_supplement") is not True
+            or task.get("status") != "needs_user" or task.get("stage") != "monitor"):
+        return fail("补验证的接续身份已变化，未重新实施", "conflict")
     scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
     if scenario.get("resolve_error"):
         return fail(str(scenario["resolve_error"]), "conflict")
@@ -1815,7 +1821,7 @@ def cmd_resolve(state, payload):
                     s["task_ai_action_fixture"]["scenario"] = "queued"
                 ov.update({"status": "ready", "display_status": "已排队", "stage": "dispatch",
                            "run_id": None, "session_id": None, "session_marker": None,
-                           "send_state": "not_sent", "sent": 0})
+                           "send_state": "not_sent", "sent": 0, "verification_report_supplement": False})
                 enqueue_request(s, tid, "dispatch")
             else:
                 ov.update({"status": "running", "display_status": "执行中", "stage": "monitor"})
@@ -3599,6 +3605,72 @@ def cmd_check_execution_status(state, payload):
                 **{key: value for key, value in fixture.items() if key not in ("delay_ms", "error")})
 
 
+def cmd_continue_execution(state, payload):
+    """Isolated recovery UI fixture; never read a real run or call a model."""
+    tid, run_id = payload.get("task_id"), payload.get("run_id")
+    marker = "%s/%s" % (tid, run_id)
+    fixture = (state.get("execution_continuations") or {}).get(marker) or {}
+    if fixture.get("delay_ms"):
+        time.sleep(min(float(fixture["delay_ms"]) / 1000, 20))
+    if fixture.get("error"):
+        return fail(str(fixture["error"]), "conflict")
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    if not task or task.get("run_id") != run_id or task.get("save_state") != "active":
+        return fail("当前任务或执行轮次已变化，请重新核验", "conflict")
+    previous = (state.get("execution_continuation_results") or {}).get(marker)
+    if previous:
+        if previous["payload"] != payload:
+            return fail("续接候选已变化，请重新核验", "conflict")
+        return dict(previous["result"], deduplicated=True)
+    observed = (state.get("execution_status_checks") or {}).get(marker) or {}
+    candidate = observed.get("continuation") or {}
+    expected = {"expected_session_id": candidate.get("session_id"),
+                "recovery_turn_id": candidate.get("turn_id"),
+                "expected_plan_sha256": candidate.get("plan_sha256"),
+                "expected_job_sha256": candidate.get("job_sha256")}
+    if (observed.get("state") != "finished" or not candidate
+            or any(not value or payload.get(key) != value for key, value in expected.items())
+            or any(r.get("task_id") == tid and r.get("status") in ("queued", "claimed") for r in merged_requests(state))):
+        return fail("已有成果的绑定或核验条件已变化，请重新核验", "conflict")
+    status = fixture.get("status", "queued")
+    details = {"queued": "已接续已有成果，验证证据核对已排队；通过后才进入评审。",
+               "starting": "正在收尾已有执行，稍后重新核验；尚未判定验证通过。",
+               "verification_required": "已有成果保留，缺少完整验证证据，请确认补齐验证报告。",
+               "blocked": "当前证据无法确认，未恢复推进。"}
+    result = {"task_id": tid, "run_id": run_id, "status": status,
+              "detail": fixture.get("detail", details.get(status, "无法确认续接结果")), "deduplicated": False}
+    if fixture.get("response_task_id"):
+        result["task_id"] = fixture["response_task_id"]
+        return result
+    if status == "blocked":
+        return result
+
+    def apply(s):
+        patch = s.setdefault("task_overrides", {}).setdefault(tid, {})
+        if status == "queued":
+            patch.update(status="running", stage="monitor", display_status="核对验证证据",
+                         failure_code=None, failure_reason=None, failure_stage=None,
+                         blocked_at=None, blocked_summary=None, _automation_allowed=None)
+            request = enqueue_request(s, tid, "monitor")
+            result["request_id"] = request["request_id"]
+            if fixture.get("monitor_passed"):
+                request.update(status="succeeded", finished_at=iso(utcnow()))
+                patch.update(status="in_review", stage="review", display_status="待评审",
+                             kaneo_status="in-review")
+        elif status == "verification_required":
+            patch.update(status="needs_user", stage="monitor", failure_stage="monitor",
+                         failure_code="verification_unconfirmed", failure_reason=result["detail"],
+                         blocked_summary=result["detail"], _automation_allowed=None,
+                         verification_report_supplement=True)
+        s.setdefault("execution_continuation_results", {})[marker] = {
+            "payload": dict(payload), "result": dict(result)}
+        append_event(s, "execution_continuation_requested", task_id=tid, actor="user",
+                     detail={"execution_run_id": run_id, "turn_id": candidate["turn_id"],
+                             "previous_failure": task.get("failure_reason"), "status": status})
+    mutate(state, apply)
+    return result
+
+
 def cmd_session_request_start(state, payload):
     status = cmd_session_control_status(state, payload)
     if not status["can_start"] or payload.get("request_id") != status["request_id"]:
@@ -4466,6 +4538,7 @@ COMMANDS = {
     "set-desktop-automation-schedule": lambda s, p: desktop_automation_status(s, p, "schedule"),
     "session-control-status": cmd_session_control_status,
     "check-execution-status": cmd_check_execution_status,
+    "continue-execution": cmd_continue_execution,
     "session-request-start": cmd_session_request_start,
     "get-planner-config": lambda s, p: fake_config(s, p, "planner"),
     "set-planner-config": lambda s, p: fake_config(s, p, "planner", True),

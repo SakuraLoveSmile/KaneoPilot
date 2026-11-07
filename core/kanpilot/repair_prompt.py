@@ -66,6 +66,11 @@ def freeze(task):
 
 def execution_body(spec):
     """Legacy specs retain their exact plan body; repair specs never inject it."""
+    if "verification_only" in spec:
+        from . import execution_continuation
+        util.require(not spec.get('review_repair') and not spec.get('repair_prompt'),
+                     '补验证不能混用修复指令', 'validation_failed')
+        return execution_continuation.validate_verification(spec['verification_only'], spec=spec)
     fix = spec.get('review_repair')
     if fix is not None:
         prompt = spec.get('repair_prompt') or {}

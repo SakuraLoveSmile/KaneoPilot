@@ -111,6 +111,33 @@ emit({'type':'turn.completed','usage':{}})
             self.assertIn('目录',adapter.validate_config(adapter.DEFAULT_CONFIG))
             self.assertIn('不支持',adapter.validate_config({'model':'known','reasoning_effort':'high'}))
 
+    def test_verification_only_prompt_and_job_use_frozen_existing_results(self):
+        from kanpilot import execution_continuation as continuation
+        self.plan.write_text('# Task\nORIGINAL_IMPLEMENTATION_MARKER\n```verify\npython3 -V\n```\n')
+        self.spec['plan_sha256'] = util.sha256_file(self.plan)
+        frozen = {'task_id':'t','source_run_id':'original-run','repository':str(self.repo),
+            'requirements_sha256':'a'*64,'plan_sha256':self.spec['plan_sha256'],
+            'worktree_path':str(self.repo),'source_sha256':git_delivery.source_state_sha256(self.repo),
+            'source_records_dir':str(self.root/'original-records'),
+            'commands':['python3 -V'],'requested_at':util.now_iso()}
+        frozen['identity_sha256'] = continuation._verification_identity(frozen)
+        frozen['body'] = continuation.verification_body(frozen, self.plan)
+        frozen['body_sha256'] = util.sha256_text(frozen['body'])
+        self.spec['verification_only'] = frozen
+        self.spec['instruction'] = 'Only supplement the frozen verification report.'
+        execution_contract.freeze_spec(self.spec, requirements_sha256='a'*64)
+        (self.run_dir/'spec.json').write_text(util.jdump(self.spec))
+        self.stub()
+        with self.guards():
+            self.assertEqual(worker.run_real(self.spec),0)
+        job = self.job()
+        self.assertEqual(job['verification_only'],frozen)
+        execution_contract.validate_spec(self.spec,job=job)
+        prompt = (self.run_dir/'codex-final-1.json.prompt').read_text()
+        self.assertNotIn('ORIGINAL_IMPLEMENTATION_MARKER',prompt)
+        self.assertIn('不修复或修改源码',prompt)
+        self.assertIn('python3 -V',prompt)
+
     def test_launcher_preserves_provider_permissions_and_resume(self):
         provider=mock.Mock(config_args=['model_provider="local"'])
         argv=adapter.launcher_argv(self.spec,'schema','final',provider,'thread')
