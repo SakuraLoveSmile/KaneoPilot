@@ -651,3 +651,13 @@ def test_live_distinguishes_missing_evidence_from_identity_conflict(monkeypatch,
         "engine-verdict": result})
     assert report(calls)["failure_code"] == code
     assert not any(c in ("delivery-commit", "advance-task") for c, _ in calls)
+
+
+def test_codex_app_shutdown_classification_survives_generic_failure_gate(monkeypatch, tmp_path):
+    value = dict(detail(), backend="codex", observer_alive=False, run_status="failed", exit_code=3,
+                 terminal={"outcome":"aborted","detail":"App 实例已关闭，停止本机观察"})
+    _, calls, _ = invoke(monkeypatch, tmp_path, round_value=value,
+        responses={"round-observe":{"status":"interrupted"},
+                   "reconcile-execution-question":{"status":"interrupted"}})
+    assert report(calls)["failure_code"] == "execution_interrupted"
+    assert not any(command in ("resolve","dispatch-start","delivery-commit","engine-verdict") for command, _ in calls)

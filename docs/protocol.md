@@ -1950,6 +1950,12 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
 
 `needs_input` 经已有执行问题命令与 UI 持久化。答案经核心操作回执和同问题 mailbox 传递；worker 先登记消费再显式 resume 原线程。用户提交答案授权该次继续；状态读取与 round-observe 只读，不能隐式 resume。未知投递不自动重发，崩溃保留现场并通过已有显式新轮次重试恢复。
 
+**App 关闭导致的执行中断（KP-C04）**：Codex worker 仅在确认原 App 实例为 `stopped` 时记录结构化 `termination_reason="app_closed"`；身份不符、缺失实例、登记/读取失败等错误不得按正常关闭降级。原 job 保持 `aborted`、非零退出和 CLI 停止证明。核心在既有 `round-observe`、`reconcile-execution-question` 与 monitor 链路中核对同 run/spec/job/会话/配置身份及精确进程出生与退出证据后，将当前任务记为 `needs_user / monitor / execution_interrupted`，派生 `manual_block / severity=blocked`、标签“执行已中断”。原始 job/events 不改；轮次索引以既有 `failed` 表达已结束，不能继续显示 running，也不新增公共 run_status。App 重开后的既有观察循环应及时收尾，不等待用户再次提交答案；观察只做确定性核对，不重新启动 CLI。
+
+中断时，未完成问题使用既有 `stopped` 并记录 `termination_reason="app_closed"`，保留问题、草稿、原提交和操作回执；只在同问题/同操作/同答案的持久消费证据成立时标为 answered，未确认消费不得伪造已接收或重发。真实等待超时仍为 expired，真正失败与用户主动停止保留原规则。兼容旧版本时，仅对 `aborted`、已核验结束、原 spec 所属 App stopped 且 worker 归属匹配、终止 detail 精确等于“App 实例已关闭，停止本机观察”的记录识别同类中断；不做摘要关键词匹配。新 App 登记时保留仍被当前活跃任务/run 引用的 stopped worker 身份记录，供升级后的严格核对；这不改变实例活性，原 run 被替换或任务终结后可按原规则剪枝。当前轮次已经 expired / execution_failed 的同类问题可由显式或既有观察触发的核对修正为 stopped / execution_interrupted，保留原关闭时间，追加分类更正审计并保持幂等；证据不足不改类。恢复使用既有显式 `resolve resume` 的当前 run、终态、冻结计划、原工作树与远端需求守卫，新轮次再次调用模型；不自动补救、不复活旧等待者、不批量更正历史。
+
+旧 expired 问题在上述严格核对中取得完整消费证明时，更正为 `answered / termination_reason=app_closed`，保留已接收事实及原关闭时间；当前开放问题已消费后中断也保留该标记。`execution_interruption_classified` 审计包含被纠正的原问题状态/投递和证据指纹，重复核对不重复更正；该标记不代表原执行恢复，也不允许迟到的旧 expired 回执覆盖消费事实。
+
 **已结束报告的显式分类更正（KP-C03）**：`resolve {action:"await_input",task_id,expected_execution_run_id,expected_job_sha256,note,actor?:"user"}` 只接受用户明确指出缺材料或决定的当前活跃任务。任务须为 `needs_user / monitor / execution_failed`、发送已确认、精确 Codex 轮次已结束且无活动请求/开放问题；核心核对原 job/spec/轮次/会话身份、进程出生与退出证明、所选 job 指纹，以及 failed 最终报告内每条冻结检查的整数退出码 0 和匹配的末次原生命令证据（同调用开始/结束、整数退出码 0、原报告最终源码快照）。允许原轮次修复后的重复检查；此项只核对分类依据，不替代成功 verdict 对完整验证窗口和后续工具事件的更严格要求。`note` 为 1–4096 字符的具体缺口及下一步。读证据后在事务内再核任务、轮次、请求、进程与文件指纹。成功只将当前任务原因改为 `execution_followup_required`、说明改为 note，保持 `needs_user / monitor`，派生 `manual_block / severity=blocked`，标签“待补充材料或决定”；保留旧失败详情与原证据指纹的审计，同参数重放幂等。原 job、报告、事件流和执行轮次索引不改，不伪造开放问题/等待者，不创建请求、模型调用、验证通过或成功报告。补齐后 `resume` 继续适用既有新轮次的终态、远端需求、计划/工作树核验及显式授权门禁。真正失败不自动改类，分类更正不代表验收完成。
 
 停止先持久记录，再核对受管进程出生身份与实际停止结果。取消/App 关闭须处理 CLI 子进程，不遗留可写孤儿。缺少停止证明时保留 unknown。所有新 Codex 执行无论项目引擎模式均走结构化 verdict，回执同时绑定报告/原生命令事件/spec/job/计划和当前源码；提交后恢复仍复核原证据。交付与远端副作用继续由核心命令完成。

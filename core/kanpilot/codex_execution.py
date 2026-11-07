@@ -258,6 +258,54 @@ def require_settled(job):
             _fail("Codex CLI 代次终态不完整", "conflict")
 
 
+def app_interruption(client):
+    """One verified classification rule for new and legacy App shutdowns."""
+    job, spec = client.job, client.spec
+    require_settled(job)
+    if job.get("status") != "aborted" or job["exit_code"] == 0:
+        return False
+    row = round_store.require_round(client.conn, job["task_id"], job["run_id"])
+    turns = job.get("turns") or []
+    turn_ids = [turn.get("turn_id") for turn in turns]
+    if (not job.get("session_id") or job.get("session_id") != row["session_id"]
+            or job.get("session_id") != client.task["session_id"]
+            or client.task["sent"] != 1 or client.task["send_state"] != "sent"
+            or spec.get("repository") != client.task["repository"]
+            or spec.get("plan_path") != client.task["plan_path"]
+            or job.get("pid") != row["pid"] or job.get("send_state") != "sent"
+            or not turns or any(type(value) is not str or not value for value in turn_ids)
+            or len(set(turn_ids)) != len(turn_ids) or job.get("turn_id") != turn_ids[-1]):
+        return False
+    try:
+        instance_id = process_owner.validate_instance_id(spec.get("executor_instance_id"))
+    except util.KanpilotError:
+        return False
+    if job.get("termination_reason") == "app_closed":
+        return True  # Worker confirmed stopped ownership before persisting this marker.
+    if job.get("termination_reason") is not None or job.get("detail") != "App 实例已关闭，停止本机观察":
+        return False
+    entry = (db.get_setting(client.conn, process_owner.SETTING, {}) or {}).get(instance_id) or {}
+    if entry.get("state") != "stopped":
+        return False
+    birth = job.get("worker_birth") or {}
+    return any(worker.get("task_id") == job["task_id"] and worker.get("run_id") == job["run_id"]
+               and worker.get("pid") == job["pid"]
+               and all(worker.get(key) == value for key, value in birth.items())
+               and worker.get("spec_path") == str((client.directory / "spec.json").resolve())
+               for worker in entry.get("workers", []))
+
+
+def settled_aborted(job):
+    """Map confirmed Codex cancellation to the existing failed index status."""
+    if job.get("backend") != "codex" or job.get("status") != "aborted":
+        return False
+    try:
+        require_settled(job)
+    except util.KanpilotError:
+        return False
+    return True
+
+
 def require_terminal(job):
     require_settled(job)
     if (job.get("status") != "finished" or job["exit_code"] != 0 or not job.get("turns")

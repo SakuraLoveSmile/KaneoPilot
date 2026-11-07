@@ -37,6 +37,15 @@ class StatusStyleTest {
     }
 
     @Test
+    fun appInterruptionKeepsTheCoreLabelAndWarningTone() {
+        val task = json("exception" to json("kind" to "manual_block", "label" to "执行已中断",
+            "severity" to "blocked", "failure_code" to "execution_interrupted"))
+        assertEquals(StatusStyle("执行已中断", StatusIcon.Blocked, StatusTone.Warning), taskStatusStyle(task))
+        assertEquals(StatusStyle("执行已中断", StatusIcon.Blocked, StatusTone.Warning),
+            attentionStatusStyle(json("reason_code" to "needs_user_other"), task))
+    }
+
+    @Test
     fun openManualBlockQuestionSaysWhetherTheUserCanAnswerHere() {
         val exception = json("kind" to "manual_block", "label" to "需人工处理", "severity" to "blocked")
         val answerable = json("exception" to exception, "display_status" to "需人工",

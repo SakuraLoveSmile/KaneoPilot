@@ -435,6 +435,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 |---|---|---|
 | verification_unconfirmed | monitor | 材料可信时 reverify 只读核证；身份完整时 retry_verification 沿用计划和原工作树让 Plus 新轮次执行验证；不提供人工 accept_verification 旁路；replan、mark_done、dismiss |
 | execution_failed | monitor | resume（沿用确认计划 → ready + 新 dispatch 请求）、replan、mark_done、dismiss |
+| execution_interrupted | monitor | resume（同原轮次终态、计划、工作树与远端需求守卫，用户确认新轮次）；不自动重试，证据与分类见 protocol §5.31 的 KP-C04 |
 | fix_rounds_exhausted | register-review | resume（用户授权再修一轮：fix_round+1，fix_request 置为 open，plan_wanted，开新段）、replan、mark_done、dismiss |
 | auto_budget_exceeded | register-review | resume（同上，在新预算段内进行）、replan、mark_done、dismiss |
 | verification_environment_failure | Plus 验证工具结果（protocol §5.18.6 环境签名；兼容历史本机阻塞） | failure_stage=monitor 时 resume（重新核对原 Plus 证据，不限托管 → running + monitor；原 run/plan/worktree，不派发或耗补救轮）；身份完整时 retry_verification 由用户发起新的 Plus 执行轮次、replan、mark_done、dismiss |

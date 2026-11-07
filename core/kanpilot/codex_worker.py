@@ -435,7 +435,9 @@ def run_real(spec):
             if type(job["turns"][-1].get("exit_code")) is not int:
                 job["turns"][-1]["exit_code"] = proc.returncode if proc and proc.returncode is not None else 3
         job.update(status="aborted" if isinstance(exc, (Stopped, process_owner.OwnerClosed)) else "failed", exit_code=3, ended_at=util.now_iso(), cli_terminal=True, detail=_diagnostic_text(str(exc), 8192, diagnostic_secrets), pending_input=None)
-        save(); log.emit("terminal", util.now_iso(), outcome="failed", reason=job["detail"])
+        if isinstance(exc, process_owner.OwnerClosed) and exc.reason == "app_closed":
+            job["termination_reason"] = "app_closed"
+        save(); log.emit("terminal", util.now_iso(), outcome="aborted" if job.get("termination_reason") == "app_closed" else "failed", reason=job["detail"])
         if job.get("session_id"):
             _reconcile(spec)
         return 3

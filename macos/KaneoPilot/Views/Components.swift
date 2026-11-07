@@ -227,6 +227,7 @@ enum Labels {
         case "execution_question_answered": return "执行问题已回答"
         case "execution_question_closed": return "执行问题已关闭"
         case "execution_classification_corrected": return "执行分类已更正"
+        case "execution_interruption_classified": return "执行中断状态已核对"
         case "plan_started": return "规划已排队"
         case "plan_ready": return "规划产出就绪"
         case "plan_needs_input": return "规划需要补充输入"
@@ -1105,11 +1106,13 @@ enum AutomationPresentation {
         case "remote_conflict": return "远端需求或状态已变化"
         case "execution_failed": return "执行失败"
         case "execution_followup_required": return "待补充材料或决定"
+        case "execution_interrupted": return "执行已中断"
         default: return nil
         }
     }
     static func explanation(_ code: String?) -> String? {
         switch code {
+        case "execution_interrupted": return "原执行轮次因 App 关闭而结束，已有成果与原答案保留。继续任务请确认沿用计划重新执行，新轮次会再次调用模型。"
         case "execution_followup_required": return "请先补齐所列材料、测试条件或决定。已有成果和原执行记录会保留；需要模型继续时，再确认沿用计划重新执行。"
         case "verification_unconfirmed": return "Plus 验证证据尚未完整确认。已有证据可重新核验；报告缺项时，需由 Plus 补齐验证及正式报告。请按当前可用操作继续。"
         case "fix_rounds_exhausted": return "自动修复轮数已达上限；再修一轮将开启新的预算段。"
@@ -1133,7 +1136,7 @@ enum AutomationPresentation {
         switch code {
         case "verification_environment_failure": return "重新核对原轮次证据"
         case "fix_branch_unavailable": return "重新验证本轮"
-        case "execution_failed", "execution_followup_required": return "重新执行（沿用计划）"
+        case "execution_failed", "execution_followup_required", "execution_interrupted": return "重新执行（沿用计划）"
         case "dispatch_failed" where stage == "dispatch": return "重新执行（沿用计划）"
         case "fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped": return "再修一轮"
         case "branch_exists", "delivery_base_unknown": return "重新准备分支"

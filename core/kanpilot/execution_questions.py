@@ -167,7 +167,8 @@ def view(task, now=None, conn=None):
                 q['observer_alive']=any(_observer_pid_alive(conn,task['task_id'],task['run_id'],pid,run_dir,job) for pid in (job.get('observe_pid'),row['pid']))
         except util.KanpilotError: pass
     # Internal receipts remain available for audits but not the stable UI DTO.
-    for key in ('operations','stop_operation_id','abort_operation_id','stop_requested_at','termination_reason'): q.pop(key,None)
+    for key in ('operations','stop_operation_id','abort_operation_id','stop_requested_at'): q.pop(key,None)
+    if q.get('termination_reason') != 'app_closed': q.pop('termination_reason',None)
     return q
 
 
@@ -202,7 +203,7 @@ def _match(q,p):
     return all(q.get(k)==p.get(k) for k in ('run_id','session_id','turn_id','request_id','tool_call_id'))
 
 
-def _store(conn,task,qs,now,*,before,failed=None):
+def _store(conn,task,qs,now,*,before,failed=None,failure_code="execution_failed"):
     after=[q for q in qs if q['run_id']==task['run_id'] and q['state']=='open']
     intervals=copy.deepcopy(db.task_extra(task).get('execution_input_wait_intervals') or [])
     if not before and after: intervals.append({'run_id':task['run_id'],'start':now,'end':None})
@@ -212,7 +213,7 @@ def _store(conn,task,qs,now,*,before,failed=None):
     db.set_extra(conn,task,now,execution_questions=qs,execution_input_wait_intervals=intervals)
     fresh=db.require_task(conn,task['task_id'])
     if failed:
-        core.block_task(conn,fresh,now,failed,'execution_failed','execution-input',stage='monitor')
+        core.block_task(conn,fresh,now,failed,failure_code,'execution-input',stage='monitor')
     elif after:
         if task['status']=='running' or task['status']=='needs_user' and task['failure_code'] in ('observation_blocked','execution_input_required'):
             first=sorted(after,key=lambda q:(q['opened_at'],q['request_id']))[0]
@@ -222,14 +223,14 @@ def _store(conn,task,qs,now,*,before,failed=None):
         core.transition_task(conn,fresh,'running',now,'execution-input',**core.clear_block_fields())
 
 
-def _close(conn,task,qs,q,now,state,detail=None):
+def _close(conn,task,qs,q,now,state,detail=None,*,failure_code="execution_failed",closed_at=None):
     before=bool(open_records(task))
-    q.update(state=state,closed_at=now)
+    q.update(state=state,closed_at=closed_at or now)
     if state=='answered':
         q['answered_by']='kaneopilot' if q['delivery']=='accepted' else ('unknown' if q['delivery'] in ('unknown','submitting') or any(o.get('delivery')=='unknown' for o in q.get('operations',[])) else 'plus')
     if q['delivery']=='submitting': q['delivery']='unknown'
     db.add_event(conn,now,'execution_question_answered' if state=='answered' else 'execution_question_closed',task_id=task['task_id'],actor='execution-input',detail={'request_id':q['request_id'],'run_id':q['run_id'],'state':state,'answered_by':q['answered_by'],'detail':detail})
-    _store(conn,task,qs,now,before=before,failed=(detail or 'execution_question_'+state) if state in ('expired','stopped') else None)
+    _store(conn,task,qs,now,before=before,failed=(detail or 'execution_question_'+state) if state in ('expired','stopped') else None,failure_code=failure_code)
 
 
 def cmd_report_execution_question(ctx,payload):
@@ -465,38 +466,91 @@ def _codex_stop_accepted(conn,scope,stop,session_id):
 
 
 def _reconcile_codex(ctx,task,run_id,opened):
-    from .codex_execution import require_settled
+    from .codex_execution import InputClient, app_interruption, require_settled
     try:
         client,job=_client(ctx.conn,task,run_id,read_only=True)
-        consumed={q['request_id']:_codex_consumed(ctx.conn,client,q) for q in opened}
         settled=False
         try:
             require_settled(job); settled=True
         except util.KanpilotError: pass
+        stop=db.task_extra(task).get('execution_stop') or {}
+        stopped=settled and stop.get('run_id')==run_id and _codex_stop_accepted(ctx.conn,client.scope_id,stop,job['session_id'])
+        interrupted=settled and not stopped and app_interruption(client)
+        if interrupted and (not db.task_is_active(task) or task['status'] not in ('running','needs_user')
+                or task['stage'] != 'monitor' or task['failure_code'] not in
+                (None,'execution_failed','execution_interrupted','execution_input_required','observation_blocked')):
+            return _result(ctx,task['task_id'],status='unknown')
+        candidates=opened
+        if interrupted and task['failure_code'] in ('execution_failed','execution_interrupted'):
+            candidates += [copy.deepcopy(q) for q in records(task)
+                if q['run_id']==run_id and q['session_id']==job['session_id']
+                and q['turn_id']==job['turn_id'] and q['state']=='expired']
         with db.write_txn(ctx.conn):
             fresh=db.require_task(ctx.conn,task['task_id']); current,_=_job(ctx.conn,fresh,run_id)
             if current!=job: return _result(ctx,task['task_id'],status='unknown')
+            # Task state and ownership can change while the files remain identical.
+            if interrupted and (not db.task_is_active(fresh) or fresh['status'] not in ('running','needs_user')
+                    or fresh['stage'] != 'monitor' or fresh['failure_code'] not in
+                    (None,'execution_failed','execution_interrupted','execution_input_required','observation_blocked')):
+                return _result(ctx,task['task_id'],status='unknown')
+            verified=InputClient(ctx.conn,fresh,run_id,read_only=True)
+            if interrupted and not app_interruption(verified):
+                return _result(ctx,task['task_id'],status='unknown')
             qs=copy.deepcopy(records(fresh))
             stop=db.task_extra(fresh).get('execution_stop') or {}
             stopped=settled and stop.get('run_id')==run_id and _codex_stop_accepted(ctx.conn,client.scope_id,stop,job['session_id'])
-            for expected in opened:
-                q=next((q for q in qs if _match(q,expected) and q['questions_sha256']==expected['questions_sha256'] and q['state']=='open'),None)
+            if interrupted and stopped:
+                return _result(ctx,task['task_id'],status='unknown')
+            previous=[]
+            for expected in candidates:
+                q=next((q for q in qs if _match(q,expected) and q['questions_sha256']==expected['questions_sha256'] and q['state']==expected['state']),None)
                 if not q: continue
-                if consumed[q['request_id']]:
+                original_closed_at=q.get('closed_at')
+                if interrupted:
+                    previous.append({'request_id':q['request_id'],'state':q['state'],'closed_at':q.get('closed_at'),'delivery':q['delivery']})
+                if _codex_consumed(ctx.conn,verified,q):
+                    if interrupted: q['termination_reason']='app_closed'
                     q['delivery']='accepted'
                     for operation in q['operations']:
                         if operation['operation_id']==q['submitted']['operation_id']: operation['delivery']='accepted'
-                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'answered')
+                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'answered',closed_at=original_closed_at)
                 elif settled:
-                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'stopped' if stopped else 'expired',stop.get('reason') or job.get('detail'))
+                    if interrupted:
+                        turn=next((turn for turn in job['turns'] if turn['turn_id']==q['turn_id']),None)
+                        # Absence of all consumption fields proves this ended turn
+                        # did not consume an answer. Partial/conflicting proof stays unknown.
+                        fields=('input_resolution','answer_operation_id','answer_sha256','answer_consumed_at')
+                        if q.get('submitted') and turn is not None and not any(key in turn for key in fields):
+                            q['delivery']='not_applied'
+                        elif q.get('submitted'):
+                            q['delivery']='unknown'
+                        q.update(termination_reason='app_closed',detail=job.get('detail'))
+                    _close(ctx.conn,fresh,qs,q,util.now_iso(),'stopped' if stopped or interrupted else 'expired',
+                           job.get('detail') if interrupted else stop.get('reason') or job.get('detail'),
+                           failure_code='execution_interrupted' if interrupted else 'execution_failed',closed_at=original_closed_at)
                 fresh=db.require_task(ctx.conn,task['task_id'])
+            if interrupted and (previous or fresh['status'] in ('running','needs_user')
+                    and fresh['failure_code'] in (None,'execution_failed','execution_input_required','observation_blocked')):
+                db.add_event(ctx.conn,util.now_iso(),'execution_interruption_classified',task_id=task['task_id'],actor='execution-input',detail={
+                    'run_id':run_id,'previous_failure_code':task['failure_code'],
+                    'previous_failure_reason':task['failure_reason'],'questions':previous,
+                    'job_sha256':util.sha256_file(client.directory/'job.json'),
+                    'spec_sha256':util.sha256_file(client.directory/'spec.json')})
+                if fresh['failure_code']!='execution_interrupted':
+                    core.block_task(ctx.conn,fresh,util.now_iso(),job.get('detail') or 'App 关闭，执行已中断',
+                                    'execution_interrupted','execution-input',stage='monitor')
+                    fresh=db.require_task(ctx.conn,task['task_id'])
+            if settled and job.get('status')=='aborted':
+                row=round_store.require_round(ctx.conn,task['task_id'],run_id)
+                if row['run_status']!='failed':
+                    round_store.upsert_discovered(ctx.conn,task['task_id'],run_id,util.now_iso(),backend='codex',run_status='failed')
             if stopped:
                 stop=dict(stop,status='stopped',confirmed_at=util.now_iso())
                 db.set_extra(ctx.conn,fresh,util.now_iso(),execution_stop=stop)
                 fresh=db.require_task(ctx.conn,task['task_id'])
-                if fresh['status']=='running' or fresh['status']=='needs_user' and fresh['failure_code']=='execution_input_required':
+                if not interrupted and (fresh['status']=='running' or fresh['status']=='needs_user' and fresh['failure_code']=='execution_input_required'):
                     core.block_task(ctx.conn,fresh,util.now_iso(),stop.get('reason') or 'user_stop','execution_failed','execution-input',stage='monitor')
-        return _result(ctx,task['task_id'],status='stopped' if stopped else 'observed')
+        return _result(ctx,task['task_id'],status='interrupted' if interrupted else ('stopped' if stopped else 'observed'))
     except util.KanpilotError:
         return _result(ctx,task['task_id'],status='unknown')
 

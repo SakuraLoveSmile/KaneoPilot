@@ -12,7 +12,8 @@ struct ExecutionAnswerFixtures {
     static func question(state: String = "open", delivery: String = "none", request: String = "ask-1",
                          run: String = "run-1", draft: [ExecutionAnswer] = [],
                          submitted: ExecutionQuestion.Submitted? = nil, by: String? = nil,
-                         answerable: Bool = true, source: String = "plus_asktool") -> ExecutionQuestion {
+                         answerable: Bool = true, source: String = "plus_asktool",
+                         terminationReason: String? = nil) -> ExecutionQuestion {
         ExecutionQuestion(requestId: request, runId: run, sessionId: "session", turnId: "turn",
             toolCallId: "call", source: source, questionsSha256: "sha", answerable: answerable,
             state: state, delivery: delivery, answeredBy: by, openedAt: "2026-10-14T00:00:00Z", closedAt: nil,
@@ -23,7 +24,7 @@ struct ExecutionAnswerFixtures {
                 ExecutionQuestionItem(id: "q1", title: "多选", description: nil, multiSelect: true,
                     allowCustom: true, required: false, options: [ExecutionQuestionOption(id: "o0", label: "甲", description: nil),
                         ExecutionQuestionOption(id: "o1", label: "乙", description: nil)])],
-            draft: draft, submitted: submitted, detail: nil)
+            draft: draft, submitted: submitted, detail: nil, terminationReason: terminationReason)
     }
     static func response(_ value: ExecutionQuestion?) -> ExecutionQuestionCommandResponse {
         ExecutionQuestionCommandResponse(taskId: "task", runId: value?.runId ?? "run-1", executionQuestion: value)
@@ -163,6 +164,58 @@ struct ExecutionAnswerFixtures {
         check(remote.statusText == "已在 Plus 回答" && remote.inputsLocked, "Plus source is never mislabeled local")
         let expired = store(question(state: "expired", draft: frozen))
         check(expired.inputsLocked && expired.answers == frozen && !expired.canStop, "expired retains read-only draft")
+        let submittedAnswer = ExecutionQuestion.Submitted(answers: frozen, operationId: "saved-answer", at: "now", by: "ui")
+        let interruptedQuestion = question(state: "stopped", delivery: "not_applied", draft: frozen,
+            submitted: submittedAnswer, source: "codex", terminationReason: "app_closed")
+        let interrupted = store(interruptedQuestion)
+        check(interrupted.inputsLocked && !interrupted.canRetry && !interrupted.canStop && interrupted.answers == frozen
+            && interrupted.statusText == "执行已中断，原问题与草稿保留"
+            && interrupted.interruptedAnswerNotice?.contains("答案未被执行端接收") == true,
+            "App interruption retains answers and explains the ended recipient without resend controls")
+        let corrected = store(question(state: "expired", delivery: "unknown", draft: frozen,
+            submitted: submittedAnswer, source: "codex"))
+        corrected.observe(current: interruptedQuestion, currentRunID: "run-1", readOnly: false)
+        check(corrected.question.isAppInterrupted && !corrected.unknown && corrected.answers == frozen,
+            "verified App interruption can correct an old expired classification in the same form")
+        corrected.observe(current: question(state: "expired", delivery: "unknown", source: "codex"),
+            currentRunID: "run-1", readOnly: false)
+        check(corrected.question.isAppInterrupted && corrected.answers == frozen,
+            "late expired replies cannot undo the verified interruption correction")
+        corrected.observe(current: question(state: "stopped", delivery: "unknown", draft: frozen, source: "codex"),
+            currentRunID: "run-1", readOnly: false)
+        check(corrected.question.isAppInterrupted && corrected.question.delivery == "not_applied",
+            "late stopped replies cannot erase the verified interruption marker or settled delivery")
+        let confirmedAfterExpiry = store(question(state: "expired", delivery: "unknown", draft: frozen,
+            submitted: submittedAnswer, source: "codex"))
+        confirmedAfterExpiry.observe(current: question(state: "answered", delivery: "accepted", draft: frozen,
+            submitted: submittedAnswer, by: "kaneopilot", source: "codex"), currentRunID: "run-1", readOnly: false)
+        check(confirmedAfterExpiry.question.state == "expired",
+            "ordinary late answered replies cannot bypass terminal-state authority without a correction marker")
+        confirmedAfterExpiry.observe(current: question(state: "answered", delivery: "accepted", draft: frozen,
+            submitted: submittedAnswer, by: "kaneopilot", source: "codex", terminationReason: "app_closed"),
+            currentRunID: "run-1", readOnly: false)
+        check(confirmedAfterExpiry.question.state == "answered" && confirmedAfterExpiry.answers == frozen
+            && confirmedAfterExpiry.statusText == "答案已接收，执行已中断"
+            && confirmedAfterExpiry.interruptedAnswerNotice == nil && !confirmedAfterExpiry.canRetry,
+            "a verified consumption correction keeps answered evidence while explaining the ended execution")
+        confirmedAfterExpiry.observe(current: question(state: "expired", delivery: "unknown", source: "codex"),
+            currentRunID: "run-1", readOnly: false)
+        check(confirmedAfterExpiry.question.state == "answered" && confirmedAfterExpiry.answers == frozen,
+            "late expired replies cannot discard the corrected consumption fact")
+        confirmedAfterExpiry.observe(current: question(state: "answered", delivery: "accepted", draft: frozen,
+            by: "kaneopilot", source: "codex"), currentRunID: "run-1", readOnly: false)
+        check(confirmedAfterExpiry.statusText == "答案已接收，执行已中断",
+            "late answered replies cannot erase the verified execution interruption")
+        let unknownInterruption = store(question(state: "stopped", delivery: "unknown", draft: frozen,
+            submitted: submittedAnswer, source: "codex", terminationReason: "app_closed"))
+        check(!unknownInterruption.canRetry && unknownInterruption.interruptedAnswerNotice?.contains("答案未确认送达") == true,
+            "contradictory or incomplete consumption proof remains unknown after interruption")
+        var codexResends = 0
+        let codexUnknown = store(question(delivery: "unknown", draft: frozen, submitted: submittedAnswer, source: "codex"),
+            command: { _, _ in codexResends += 1; return response(question()) })
+        await codexUnknown.submit(retry: true)
+        check(!codexUnknown.canRetry && codexResends == 0,
+            "Codex unknown mailbox cannot create a second operation rejected by the core")
         let invalid = store(question(answerable: false))
         check(invalid.inputsLocked && !invalid.canSubmit && invalid.canStop, "invalid request redirects answers to Plus but allows stop")
         let failingRead = store(question(draft: frozen), refresh: { throw CoreError.badOutput("offline") })

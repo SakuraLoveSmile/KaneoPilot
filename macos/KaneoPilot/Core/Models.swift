@@ -663,7 +663,7 @@ struct TaskDetail: Decodable, Identifiable {
     var canRetryExecution: Bool {
         guard status == "needs_user", saveState == "active", readOnly != true,
               runId?.isEmpty == false, allowedActions?.contains("resume") == true else { return false }
-        if ["execution_failed", "execution_followup_required"].contains(failureCode ?? "") { return true }
+        if ["execution_failed", "execution_followup_required", "execution_interrupted"].contains(failureCode ?? "") { return true }
         return failureCode == "dispatch_failed" && stage == "dispatch"
             && executionRound?.backend == "codex" && executionRound?.runStatus == "failed"
             && executionRound?.runId == runId
@@ -3110,8 +3110,10 @@ struct ExecutionQuestion: Decodable, Equatable {
     var verificationId: String? = nil
     var contextSha256: String? = nil
     var phase: String? = nil
+    var terminationReason: String? = nil
 
     var isReleaseVerification: Bool { verificationId != nil }
+    var isAppInterrupted: Bool { state == "stopped" && terminationReason == "app_closed" }
     var answerAction: String { isReleaseVerification ? "answer_release_verification_questions" : "answer_execution_questions" }
     var skipAction: String { isReleaseVerification ? "skip_release_verification_questions" : "skip_execution_questions" }
     var sourceDescription: String {

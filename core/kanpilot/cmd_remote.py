@@ -712,6 +712,16 @@ def cmd_recheck(ctx, payload: dict) -> dict:
             detail={"offline": offline,
                     "ok": all(item["ok"] for item in checks)},
         )
+    if all(item["ok"] for item in checks):
+        fresh = db.require_task(conn, task["task_id"])
+        if (fresh["run_id"] == task["run_id"] and fresh["status"] == "needs_user"
+                and fresh["stage"] == "monitor"
+                and fresh["failure_code"] in ("execution_failed", "execution_interrupted")):
+            from . import execution_questions, round_store
+            row = round_store.get_round(conn, fresh["task_id"], fresh["run_id"])
+            if row is not None and row["backend"] == "codex":
+                execution_questions.cmd_reconcile_execution_question(ctx,
+                    {"task_id": fresh["task_id"], "run_id": fresh["run_id"]})
     return {
         "task_id": task["task_id"], "checks": checks,
         "kaneo_status": observed_status,

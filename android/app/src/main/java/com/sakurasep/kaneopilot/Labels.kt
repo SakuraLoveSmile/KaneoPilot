@@ -122,6 +122,7 @@ object Labels {
         "execution_question_opened" -> "执行中提问"
         "execution_question_answered" -> "执行问题已回答"
         "execution_question_closed" -> "执行问题已关闭"
+        "execution_interruption_classified" -> "执行中断状态已核对"
         "plan_started" -> "规划已排队"
         "plan_ready" -> "规划产出就绪"
         "plan_needs_input" -> "规划需要补充输入"

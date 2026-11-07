@@ -912,7 +912,7 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
         )
     row = round_store.require_round(conn, task_id, run_id)
     if row["backend"] == "codex":
-        return _observe_codex(conn, task, run_id, payload)
+        return _observe_codex(ctx, task, run_id, payload)
     if row["backend"] != "pi_desktop":
         if continue_only:
             return {"status": "deferred", "pid": None, "detail": "历史后端不支持目标自动续接"}
@@ -1128,8 +1128,9 @@ def _round_observe_reserved(ctx, payload: dict) -> dict:
     }
 
 
-def _observe_codex(conn, task, run_id, payload):
+def _observe_codex(ctx, task, run_id, payload):
     """Observe durable local evidence only; exec resume always sends new input."""
+    conn = ctx.conn
     from . import codex_execution
     if payload.get("recovery_turn_id"):
         raise util.KanpilotError("validation_failed", "Codex 恢复使用新的执行轮次，不接管 Plus 后续轮次")
@@ -1143,8 +1144,10 @@ def _observe_codex(conn, task, run_id, payload):
     except util.KanpilotError:
         return {"status": "deferred", "pid": None,
                 "detail": "Codex worker 已退出，终态尚未确认；保留现场，不自动续发"}
-    return {"status": job["status"], "pid": None, "deduplicated": True,
-            "detail": "Codex 轮次已结束；本次仅观察持久记录"}
+    from .execution_questions import cmd_reconcile_execution_question
+    reconciled = cmd_reconcile_execution_question(ctx, {"task_id": task["task_id"], "run_id": run_id})
+    return {"status": "interrupted" if reconciled.get("status") == "interrupted" else job["status"],
+            "pid": None, "deduplicated": True, "detail": "Codex 轮次已结束；本次仅观察持久记录"}
 
 
 def _settled_failed_observation(ctx, task, row, job):

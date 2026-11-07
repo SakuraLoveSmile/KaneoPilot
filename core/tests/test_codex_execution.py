@@ -478,6 +478,38 @@ emit({'type':'turn.completed','usage':{}})
             if process_owner.process_birth(child) is None: break
             time.sleep(.02)
         self.assertIsNone(process_owner.process_birth(child)); self.assertEqual(job['status'],'aborted')
+        self.assertNotIn('termination_reason',job)
+
+    def test_confirmed_app_shutdown_persists_structured_reason_and_cleans_children(self):
+        self.stub('hang')
+        def check():
+            if (self.run_dir/'codex-final-1.json.child').exists():
+                raise process_owner.OwnerClosed('App 实例已关闭，停止本机观察',reason='app_closed')
+        self.owner.check.side_effect=check
+        with self.guards(): self.assertEqual(worker.run_real(self.spec),3)
+        job=self.job()
+        self.assertEqual((job['status'],job['termination_reason']),('aborted','app_closed'))
+        self.assertIsNone(process_owner.process_birth(job['codex_cli_pid']))
+        child=int((self.run_dir/'codex-final-1.json.child').read_text())
+        for _ in range(30):
+            if process_owner.process_birth(child) is None: break
+            time.sleep(.02)
+        self.assertIsNone(process_owner.process_birth(child))
+        self.assertEqual(len(job['turns']),1)
+
+    def test_owner_shutdown_reason_requires_explicit_stopped_state_even_for_signals(self):
+        owner_id='a92330aa-5b93-42cb-b46a-e4e93f73ab2a'
+        spec={**self.spec,'executor_instance_id':owner_id}
+        with mock.patch.dict(os.environ,{process_owner.INSTANCE_ENV:owner_id}):
+            owner=process_owner.WorkerOwner(spec)
+        for state in ('active','missing','stopped'):
+            with self.subTest(state=state), mock.patch('kanpilot.cli.run',return_value={'state':state}):
+                with self.assertRaises(process_owner.OwnerClosed) as raised:
+                    owner._signal(signal.SIGTERM,None)
+                self.assertEqual(raised.exception.reason,'app_closed' if state=='stopped' else None)
+        with mock.patch('kanpilot.cli.run',side_effect=util.KanpilotError('conflict','identity mismatch')):
+            with self.assertRaises(process_owner.OwnerClosed) as raised: owner.check()
+            self.assertIsNone(raised.exception.reason)
 
     def test_source_drift_after_command_cannot_be_verified(self):
         self.stub('change_after_check')

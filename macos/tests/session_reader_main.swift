@@ -303,6 +303,13 @@ struct SessionReaderFixtures {
               "waiting for materials or a decision preserves the core-authorized current-round retry")
         check(try count("resolve") == beforeResolve,
               "reading a materials block never starts or resumes a model")
+        try patchTask(["failure_code": "execution_interrupted", "stage": "monitor",
+                       "failure_stage": "monitor", "send_state": "sent"])
+        await store.refresh()
+        check(store.canRetryExecution && store.retryTask?.canRetryExecution == true,
+              "App interruption exposes the core-authorized current-round confirmation")
+        check(try count("resolve") == beforeResolve,
+              "reading an interrupted round never starts or resumes a model")
         try patchTask(["failure_code": "dispatch_failed", "stage": "dispatch",
                        "failure_stage": "submitting", "send_state": "unknown"])
         await store.refresh()

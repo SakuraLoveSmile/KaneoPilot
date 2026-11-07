@@ -312,6 +312,10 @@ def _observed_values(job: dict) -> dict:
     未知值回落 "pi"）。run_status 仅采信 job.status ∈ ROUND_RUN_STATUSES
     （否则保持已存值）。"""
     status = job.get("status")
+    if status == "aborted" and job.get("backend") == "codex":
+        from .codex_execution import settled_aborted
+        if settled_aborted(job):
+            status = "failed"
     backend = job.get("backend")
     if backend not in constants.ROUND_BACKENDS + constants.LEGACY_ROUND_BACKENDS:
         backend = "pi"

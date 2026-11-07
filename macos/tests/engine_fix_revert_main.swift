@@ -35,6 +35,12 @@ struct EngineFixRevertFixtures {
               "materials and decisions are shown as a block")
         check(AutomationPresentation.resumeLabel("execution_followup_required") == "重新执行（沿用计划）",
               "materials block retains an explicit retry label")
+        check(AutomationPresentation.title("execution_interrupted") == "执行已中断"
+            && AutomationPresentation.resumeLabel("execution_interrupted") == "重新执行（沿用计划）"
+            && AutomationPresentation.explanation("execution_interrupted")?.contains("再次调用模型") == true,
+              "App interruption explains the explicit new-round recovery")
+        let interrupted = try decoder.decode(TaskDetail.self, from: Data(#"{"task_id":"interrupted","status":"needs_user","save_state":"active","run_id":"run","failure_code":"execution_interrupted","allowed_actions":["resume"]}"#.utf8))
+        check(interrupted.canRetryExecution, "core-authorized App interruption retains the current-run retry confirmation")
         let model = AppViewModel(), client = model.client, taskID = "auto-branch_exists"
         let candidate = try await model.currentEngineFixRevert(taskID: taskID)
         check(try commands("resolve").isEmpty, "opening then cancelling confirmation never sends resolve")

@@ -201,7 +201,7 @@ def _monitor(controller):
                 controller.report("failed", note="observation_blocked")
                 return
             if (observed.get("status") in ("observing", "finished", "settled", "finalizing")
-                    or (backend == "codex" and observed.get("status") in ("failed", "aborted"))):
+                    or (backend == "codex" and observed.get("status") in ("failed", "aborted", "interrupted"))):
                 # Codex observation returns its durable failed/aborted job status.
                 # Re-read the terminal evidence before reporting execution failure.
                 detail = _get_session(controller, task).get("round_detail")
@@ -216,6 +216,10 @@ def _monitor(controller):
             # ordinary stops without an open question. This never resumes CLI.
             reconciled = controller.call("reconcile-execution-question", {
                 "task_id": task["task_id"], "run_id": task["run_id"]})
+            if reconciled.get("status") == "interrupted":
+                controller.report("needs_user", failure_code="execution_interrupted",
+                                  note="App 关闭，执行已中断；已有成果保留，请确认沿用计划重新执行")
+                return
             if reconciled.get("status") == "stopped":
                 controller.report("needs_user", failure_code="execution_failed", note="Codex 执行已停止")
                 return

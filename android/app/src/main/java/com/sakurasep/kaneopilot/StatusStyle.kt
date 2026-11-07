@@ -37,6 +37,8 @@ private fun exceptionStatusStyle(exception: JSONObject, question: JSONObject?): 
         exception.text("severity") == "failed" -> StatusStyle(label.ifBlank { "失败" }, StatusIcon.Failed, StatusTone.Danger)
         kind == "manual_block" && open && answerable -> StatusStyle("等待你回答", StatusIcon.Alert, StatusTone.Warning)
         kind == "manual_block" && open -> StatusStyle("等待你在 Plus 中回答", StatusIcon.Alert, StatusTone.Warning)
+        kind == "manual_block" && exception.text("failure_code") == "execution_interrupted" ->
+            StatusStyle(label.ifBlank { "执行已中断" }, StatusIcon.Blocked, StatusTone.Warning)
         kind == "manual_block" -> StatusStyle("需人工处理", StatusIcon.Blocked, StatusTone.Warning)
         kind == "review_blocked" -> StatusStyle("评审受阻", StatusIcon.Blocked, StatusTone.Warning)
         kind == "send_unknown" -> StatusStyle("发送不明", StatusIcon.Blocked, StatusTone.Warning)

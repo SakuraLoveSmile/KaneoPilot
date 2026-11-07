@@ -1205,7 +1205,7 @@ struct TaskOverviewTabView: View {
     @ViewBuilder
     private func executionAnswerCard(_ store: ExecutionAnswerStore) -> some View {
         ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail,
-            terminalReason: ["execution_failed", "execution_followup_required"].contains(detail.failureCode ?? "")
+            terminalReason: ["execution_failed", "execution_followup_required", "execution_interrupted"].contains(detail.failureCode ?? "")
                 ? (detail.failureReason ?? detail.blockedSummary) : nil,
             reconcileInBar: openExecutionStore != nil)
             .id("execution-answers")
@@ -1965,11 +1965,16 @@ private struct ExecutionAnswerCard: View {
             if let feedback = store.feedback {
                 Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
-            if !reconcileInBar, store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
+            if let notice = store.interruptedAnswerNotice {
+                Text(notice).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+            if !reconcileInBar, store.question.state == "open",
+               store.unknown || store.question.delivery == "submitting" || store.stopResultUnknown {
                 Button("重新核对") { run { await store.reconcile() } }
                     .font(.kpSmall).disabled(store.working || store.obsolete)
             }
-            if store.unknown {
+            if store.question.state == "open", store.question.source != "codex", store.unknown {
                 Button("使用相同答案重新提交") { confirmingRetry = true }
                     .font(.kpSmall).disabled(!store.canRetry)
             }

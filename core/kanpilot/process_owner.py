@@ -24,6 +24,10 @@ SETTING = "executor_instances"
 class OwnerClosed(BaseException):
     """Stop observing locally without inventing an execution terminal result."""
 
+    def __init__(self, message, *, reason=None):
+        super().__init__(message)
+        self.reason = reason
+
 
 class OwnerStoppedError(util.KanpilotError):
     def __init__(self):
@@ -148,6 +152,18 @@ def instance_status(conn, instance_id) -> dict:
             "owned_workers": _live_workers(entry)}
 
 
+def _has_current_run_reference(conn, entry):
+    """Keep stopped-owner evidence until its active execution is replaced."""
+    for worker in entry.get("workers", []):
+        if not isinstance(worker, dict) or not worker.get("run_id"):
+            continue
+        task = db.get_task(conn, worker.get("task_id"))
+        if (task is not None and db.task_is_active(task) and task["status"] != "done"
+                and task["run_id"] == worker.get("run_id")):
+            return True
+    return False
+
+
 def set_instance(ctx, instance_id, action) -> dict:
     instance_id = validate_instance_id(instance_id)
     with db.write_txn(ctx.conn):
@@ -158,7 +174,8 @@ def set_instance(ctx, instance_id, action) -> dict:
                 raise util.KanpilotError("conflict", "已关闭的 App 实例不能重新启动")
             # Only dead, stopped historical instances are disposable.
             instances = {key: value for key, value in instances.items()
-                         if key == instance_id or value.get("state") != "stopped" or _live_workers(value)}
+                         if key == instance_id or value.get("state") != "stopped" or _live_workers(value)
+                         or _has_current_run_reference(ctx.conn, value)}
             if not entry:
                 entry = {"state": "active", "started_at": ctx.now_iso, "workers": []}
                 # CoreClient marks direct Python launches. A spawning shim or an
@@ -288,6 +305,8 @@ class WorkerOwner:
         return self
 
     def _signal(self, signum, frame):
+        # A signal alone does not prove an App shutdown (or a valid owner).
+        self.check()
         raise OwnerClosed("App worker 观察进程已停止")
 
     def check(self):
@@ -299,7 +318,8 @@ class WorkerOwner:
             except util.KanpilotError as exc:
                 raise OwnerClosed(exc.message)
             if status.get("state") != "active":
-                raise OwnerClosed("App 实例已关闭，停止本机观察")
+                raise OwnerClosed("App 实例已关闭，停止本机观察",
+                                  reason="app_closed" if status.get("state") == "stopped" else None)
 
     def __exit__(self, exc_type, exc_value, traceback):
         for signum, handler in self.previous_handlers.items():

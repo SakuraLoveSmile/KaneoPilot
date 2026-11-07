@@ -275,6 +275,11 @@ def derive_run_status(
         return "running"
     if status in ("finished", "failed"):
         return status
+    if status == "aborted" and job.get("backend") == "codex":
+        from .codex_execution import settled_aborted
+        if (job.get("task_id") == row["task_id"] and job.get("run_id") == row["run_id"]
+                and settled_aborted(job)):
+            return "failed"
     return stored
 
 

@@ -348,6 +348,8 @@ def task_exception(
         label = _release(conn, task)["title"]
     elif kind == "parent_closeout_blocked":
         label = _CLOSEOUT_LABELS[_parent_closeout(conn, task, now)["state"]]
+    elif kind == "manual_block" and failure_code == "execution_interrupted":
+        label = "执行已中断"
     elif kind == "manual_block" and failure_code == "execution_followup_required":
         label = "待补充材料或决定"
     elif kind == "failed":

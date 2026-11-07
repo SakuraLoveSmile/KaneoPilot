@@ -2304,7 +2304,12 @@ final class ExecutionAnswerStore: ObservableObject {
     }
     var canRetry: Bool {
         unknown && !working && !obsolete && !possiblyStale && !readOnly && !stopResultUnknown
-            && !stopRequested && question.answerable && question.state == "open"
+            && !stopRequested && question.answerable && question.state == "open" && question.source != "codex"
+    }
+    var interruptedAnswerNotice: String? {
+        guard question.isAppInterrupted, question.submitted != nil else { return nil }
+        let delivery = question.delivery == "not_applied" ? "答案未被执行端接收" : "答案未确认送达"
+        return "原轮次已结束，\(delivery)。原答案已保留，可展开查看并复制。"
     }
     var canStop: Bool {
         !question.isReleaseVerification && !working && !obsolete && !possiblyStale && !readOnly
@@ -2312,9 +2317,11 @@ final class ExecutionAnswerStore: ObservableObject {
     }
     var statusText: String {
         if obsolete || possiblyStale { return "可能已过期，草稿已保留" }
+        if question.isAppInterrupted { return "执行已中断，原问题与草稿保留" }
         if question.state == "expired" { return "已过期，原问题与草稿保留" }
         if question.state == "stopped" { return "本轮已停止，原问题与草稿保留" }
         if question.state == "answered" {
+            if question.terminationReason == "app_closed" { return "答案已接收，执行已中断" }
             switch question.answeredBy {
             case "plus": return "已在 Plus 回答"
             case "kaneopilot": return "已回答，继续执行"
@@ -2408,9 +2415,13 @@ final class ExecutionAnswerStore: ObservableObject {
 
     private func apply(_ current: ExecutionQuestion) {
         guard current.identity == identity else { obsolete = true; return }
-        // A request's terminal state is immutable. Older reads or command replies
-        // cannot reopen it, including expired/stopped requests.
-        if ["answered", "expired", "stopped"].contains(question.state), current.state != question.state { return }
+        if question.terminationReason == "app_closed", current.terminationReason != "app_closed" { return }
+        // A verified App shutdown may correct an older expired classification.
+        // Older replies still cannot reopen a closed question or undo that correction.
+        let interruptionCorrection = question.state == "expired" && current.terminationReason == "app_closed"
+            && ["stopped", "answered"].contains(current.state)
+        if ["answered", "expired", "stopped"].contains(question.state),
+           current.state != question.state, !interruptionCorrection { return }
         generation += 1
         question = current
         // The send owns its exact answer snapshot until it finishes; a concurrent

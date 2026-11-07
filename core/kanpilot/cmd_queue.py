@@ -388,7 +388,7 @@ def execution_retry_candidate(conn, task, *, engine_empty=False, verification_re
             return False
     return bool((repair.get("source_kind") != "merge_conflict" or merge_retry)
                 and db.task_is_active(task) and task["status"] == "needs_user"
-                and task["stage"] == "monitor" and (task["failure_code"] in ("execution_failed", "execution_followup_required")
+                and task["stage"] == "monitor" and (task["failure_code"] in ("execution_failed", "execution_followup_required", "execution_interrupted")
                      or (engine_empty and task["failure_code"] == "verification_unconfirmed")
                      or (verification_retry and task["failure_code"] in
                          ("verification_unconfirmed", "verification_environment_failure")))
@@ -605,9 +605,9 @@ def _prepare_execution_retry(ctx, payload):
     if verification_retry and not verification_retry_candidate(ctx.conn, task):
         raise util.KanpilotError("conflict", "当前验证身份或发送状态不明，不能重新执行；请先重新核验验证证据")
     if (payload["action"] == "resume" and payload.get("expected_execution_run_id")
-            and task["failure_code"] not in ("execution_failed", "execution_followup_required") and not engine_empty and not verification_retry and not preflight):
+            and task["failure_code"] not in ("execution_failed", "execution_followup_required", "execution_interrupted") and not engine_empty and not verification_retry and not preflight):
         raise util.KanpilotError("conflict", "当前阻塞原因已变化，请刷新后重新处理")
-    if payload["action"] != "resume" or (task["failure_code"] not in ("execution_failed", "execution_followup_required") and not engine_empty and not verification_retry and not preflight):
+    if payload["action"] != "resume" or (task["failure_code"] not in ("execution_failed", "execution_followup_required", "execution_interrupted") and not engine_empty and not verification_retry and not preflight):
         return None
     expected = payload.get("expected_execution_run_id")
     if not expected:
@@ -616,6 +616,8 @@ def _prepare_execution_retry(ctx, payload):
         raise util.KanpilotError("stale_run", "所选会话已不是当前失败轮次，请刷新后重试")
     if preflight:
         util.require(payload.get("actor", "user") == "user", "模型前失败仅允许用户确认新轮次", "conflict")
+    if task["failure_code"] == "execution_interrupted":
+        util.require(payload.get("actor", "user") == "user", "执行中断仅允许用户确认新轮次", "conflict")
     if not preflight and not execution_retry_candidate(ctx.conn, task, engine_empty=engine_empty, verification_retry=verification_retry):
         raise util.KanpilotError("conflict", "当前任务不能沿用计划重新执行，请先确认旧轮次和发送状态")
     if core.review_repair_of(task) and not core.review_repair_of(task).get("source_kind"):
