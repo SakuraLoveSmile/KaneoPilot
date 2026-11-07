@@ -37,6 +37,9 @@
 - 本地专项：首次 `python3 -m pytest <文件>` 因仓库 shim 无真实 pytest、仅接受 discover 目录而未启动测试；随后按既有 unittest 入口运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=core:core/tests python3 -m unittest test_session test_session_status test_desktop_event_projection test_desktop_session -q`，95 tests / 24.228s，退出 0。夹具临时目录和 FakeKaneo，未连接真实服务。核心无改动，该结果验证复用接口的现有分页、修订、状态只读与 Desktop 记录边界；Swift 尚待云端。
 - 独立审查发现模式切回时消息列表首次挂载没有消费已有阅读锚点；主 agent 已修正 onAppear 优先恢复锚点，再按需跟随，待原生核验无新消息时的恢复。
 - 审查另指出短会话在显式暂停后，布局距底为 0 会取消暂停；已新增独立的显式暂停意图，仅「回到最新」、真实手动滚动或切换会话解除，并补行为夹具。未调整检查门禁、未删除或跳过既有测试。
+- `bd667db2567dfe33d4b7616fd56b8d06042ca278` 云端 Packages [#143](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42339337802) 全部 16 个必需 job 成功，全文可选探针与分支发布按条件跳过。独立签名 App metadata 的源码/build=143 匹配，ZIP 31,706,784 bytes，SHA256 `ef74c882229746ea3ce1ca56cedfb6689ab3ac27d947e670698e31ca6a4f0744`；严格深度签名验证通过。未本地编译、未安装覆盖正式 App。
+- #143 原生隔离核验（FakeCore、空凭据、独立目录、引擎停用）：1180×760 dark 的独立阅读器与任务详情执行页均可读消息；自动追加 32→33、上滚后追加 34 条保留上下文并出现新内容按钮、回到最新、LIVE-B 搜索唯一匹配、全文窗口、无新消息时切状态/内容恢复历史锚点通过。状态页 13.45s 期间正文请求恒为 44，状态请求 55→61，证据 `build/kp-sv01/native/1180x760-dark-content/status-mode-verified.json`。
+- 900×600 light 初始与短会话显式暂停后追加通过（仍暂停、有新内容提示），读取失败保留 2 条正文和可能过期/重试提示，恢复后 Desktop 未导出提示正确。但失败横幅后窗口被内容最小高度撑到约 900×659，不能冒充严格最小窗口通过。只读分析指向正文最小尺寸上传，已在阅读器内容区和正文 ScrollView 显式允许 minHeight=0，待新云端编译与该场景复验；不改全局窗口规则。证据均保留在主仓库 `build/kp-sv01/` 与本会话 CUA，首轮两个预览进程均已退出。
 
 ## 交付与恢复
 

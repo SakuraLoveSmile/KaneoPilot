@@ -80,7 +80,7 @@ struct SessionReaderView: View {
             }
             Group {
                 if store.statusOnly { statusContent } else { messageContent }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(GeometryReader { geometry in Color.clear.onAppear { availableWidth = geometry.size.width }.onChange(of: geometry.size.width) { _, width in availableWidth = width } })
@@ -629,6 +629,7 @@ private struct SessionMessageList: View {
                     .background(GeometryReader { geo in Color.clear.preference(key: SessionContentHeightKey.self, value: geo.size.height) })
                     .background(ScrollMetricsObserver(readerID: store.performanceReaderID, onDistance: { store.updateDistanceFromBottom($0) }, onManualScroll: { store.userScrolled() }))
                 }
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .coordinateSpace(name: "session-reader-scroll")
                 .background(GeometryReader { geo in Color.clear.preference(key: SessionScrollHeightKey.self, value: geo.size.height) })
                 .overlay(alignment: .bottom) {
