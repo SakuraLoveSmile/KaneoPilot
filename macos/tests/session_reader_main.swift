@@ -418,7 +418,7 @@ struct SessionReaderFixtures {
         store.beginLayoutChange()
         store.updateReadingViewport(viewport(0))
         check(store.readingAnchor == ids[1], "intermediate reflow geometry retains the saved anchor")
-        await pause(350)
+        await waitFor { store.readingAnchor == ids[0] }
         check(store.readingAnchor == ids[0], "settled layout adopts the latest visible geometry")
 
         store.pauseFollowing()
