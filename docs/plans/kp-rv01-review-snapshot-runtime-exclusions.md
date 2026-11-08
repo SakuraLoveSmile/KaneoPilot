@@ -1,6 +1,6 @@
 # KP-RV01：评审快照排除执行端运行簿记与构建产物
 
-- 时间：2026-11-08（台北）；状态：实现中。
+- 时间：2026-11-08（台北）；状态：待体验（测试版 `v0.5.6-test.173` 已发布；未合入 `main`、未做安装版实测）。
 - 任务标识：KP-RV01；分支 `fix/20261108-kp-rv01-review-snapshot-runtime-exclusions`；工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261108-fix-kp-rv01-review-snapshot-runtime-exclusions`；基线 `5d6d6b2`；合入目标 `main`。
 
 ## 现场
@@ -48,4 +48,13 @@
 - 相关套件：`test_review_snapshot / review_build_artifact_guard / review_resolution / review_delivery / direct_review_repair / task_branch_review / worktree_pool / engine_manual_review / review_fix_plan_binding` → 176 passed + 35 subtests（244.9s，exit 0）。
 - 全量核心：`cd core && python3 -m pytest tests -q` → 4,691 passed + 1,809 subtests、1 warning（4,122.33s，exit 0）。
 - 现场只读复核：对真实 MediaPlayer 任务工作树（`.../csim4lhdf81m1k7wib615fdv/branch`，缓存已按方案 A 移出）用本分支代码运行 `review_snapshot.freeze`，`untracked=[]`、无异常；单元回归另覆盖 1,200 个运行缓存文件存在时不触发 1,000 上限。
-- 未验证：安装版与云端构建/发布未执行（本分支只含核心代码；发布按 `docs/build-release.md` 另行授权）；旧指纹跨版本兼容性未实测，按风险节说明。
+- 云端 CI（run 42476877044，commit `8b0d948`）：identity、10 个 checks 分片（5×Python 3.11/3.13）、macos-package、android、两个 macos-fixtures、codex-platforms 全部成功；`macos-session-fulltext-probe` 按设计 skipped。
+- 未验证：安装版替换与实际使用体验、旧指纹跨版本兼容性（按风险节说明）、合入 `main` 后的组合态。
+
+## 发布（测试版通道，2026-11-08）
+
+- 分支已推送 `origin/fix/20261108-kp-rv01-review-snapshot-runtime-exclusions`。
+- `Packages` 手动 `channel=test`，run number 173，全部必需 job 成功后发布 GitHub **预发布** `v0.5.6-test.173`：annotated tag 指向 `8b0d948`，`prerelease=true`、非 draft，`latest` 仍为稳定版 `v0.5.5`。
+- 资产 4 项：`KaneoPilot-0.5.6-test.173-android.apk`、`KaneoPilot-0.5.6-test.173-macos-arm64.dmg`、`manifest.json`、`SHA256SUMS`；manifest 记录 `channel=test`、`base_version=0.5.6`、`build_number=173`、`source_sha=8b0d948`。
+- 发布入口：<https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.6-test.173>。
+- 用户 2026-11-08 将「修复完成且验证通过后发布测试版」定为固定流程，已写入 `AGENTS.md`（本分支 `8b0d948`）：后续不再逐次询问，正式版本仍由维护者定版本。
