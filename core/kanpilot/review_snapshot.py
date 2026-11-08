@@ -9,7 +9,7 @@ from pathlib import Path
 import stat
 import subprocess
 
-from . import constants, util
+from . import constants, git_delivery, util
 
 
 def _git(path, args, *, content=None, timeout=30):
@@ -30,6 +30,18 @@ def _diff(path):
     return _git(path, ["diff", "HEAD", "--binary", "--full-index", "--no-color",
                        "--no-ext-diff", "--no-textconv", "--no-renames",
                        "--src-prefix=a/", "--dst-prefix=b/"])
+
+
+def _runtime_or_build(relative):
+    """Runtime bookkeeping and build products never enter Review materials.
+
+    Mirrors the source-snapshot rule of §5.18.6/§5.27.11 and
+    ``git_delivery.source_state``: ``.pi/**`` and build artifacts are not
+    reviewed changes. A worktree that only differs by regenerable runtime
+    state therefore keeps the same frozen snapshot.
+    """
+    return (relative == ".pi" or relative.startswith(".pi/")
+            or git_delivery.is_build_artifact(relative))
 
 
 def _read_file(root, relative, remaining, *, tracked=False):
@@ -96,6 +108,7 @@ def freeze(path):
                        .decode("utf-8").split("\0") if name)
     except UnicodeDecodeError as exc:
         raise util.KanpilotError("review_blocked", "Review 新增文件路径不是 UTF-8") from exc
+    names = [name for name in names if not _runtime_or_build(name)]
     if len(names) > 1000:
         raise util.KanpilotError("review_blocked", "Review 新增文件超过材料数量边界")
     try:
@@ -118,7 +131,13 @@ def freeze(path):
 
 
 def fingerprint(snapshot):
-    values = {"head": snapshot["head"], "status": util.sha256_bytes(snapshot["status"]),
+    """Identity of the reviewed source, not Git's derived status text.
+
+    The snapshot keeps ``status`` as reviewer material, but runtime caches and
+    build products make that text change without any reviewed source change,
+    so status is not part of the frozen identity.
+    """
+    values = {"head": snapshot["head"],
               "diff": util.sha256_bytes(snapshot["diff"]),
               "tracked": [{"path": entry["path"], "kind": entry["kind"],
                            "sha256": util.sha256_bytes(entry["content"]), "executable": entry["executable"]}
@@ -147,7 +166,7 @@ def verify_root(root, snapshot, *, allow_branch=False):
             raise util.KanpilotError("review_blocked", "Review 快照与冻结 tracked 原始内容不一致：" + entry["path"])
     expected = {entry["path"] for entry in snapshot["untracked"]}
     actual = set(name for name in _git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-                 .decode("utf-8").split("\0") if name)
+                 .decode("utf-8").split("\0") if name and not _runtime_or_build(name))
     # A frozen untracked file can become ignored by a changed .gitignore.
     if actual - expected:
         raise util.KanpilotError("review_blocked", "Review 快照存在未冻结的新增文件")

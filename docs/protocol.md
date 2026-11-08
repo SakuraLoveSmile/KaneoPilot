@@ -1569,6 +1569,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 #### 5.27.13 评审与探针（A3）
 
 - 评审快照仍要求 detached HEAD 且 HEAD==冻结 head_sha；git status 中只有 git_delivery.is_build_artifact 命中的路径（包括 tracked 修改）可忽略。源文件、重命名源与目标中任一非产物变化仍阻塞。CLI 与 Plus 同守卫。
+- 快照新增文件（`ls-files --others --exclude-standard`）与有效 diff 同口径排除 `.pi/**` 与 `is_build_artifact` 命中的构建产物：执行端运行缓存（含 `.pi/kanpilot/codex/<run>/`）不是评审材料，不计入新增文件数量/字节上限，其增删不改变冻结指纹；真实新增文件的 1,000 个上限、安全 no-follow 读取与敏感材料拒绝保持不变。`verify_root` 使用同一排除口径核对快照目录。
 - doctor --live 增加 Claude CLI 可用性探针；不调用付费模型，不输出凭据。后端与模型切换仅经核心配置命令，真实库切换需对应授权。
 
 
