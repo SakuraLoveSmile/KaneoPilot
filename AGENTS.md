@@ -31,6 +31,7 @@ Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal
  - 普通项目统一使用 `live` 新引擎；历史 Legacy/Shadow/缺省配置按 protocol §5.27.7 迁移。自动处理与暂停由既有开关控制。CLI 只保留显式 `shadow + force` 的无业务推进诊断；不再运行 Legacy。当前实施记录见 docs/plans/kp-e01-live-engine.plan.md，未完成实机验收/生产切换不声称已上线。
  - 验证由固化的执行端运行，Pilot 只核对报告与证据并推进状态。Plus verdict 沿 protocol §5.27.11；Codex CLI 沿 §5.31，统一核对结构化报告、原生命令退出码和源码快照。冻结计划的每条 verify 必须有通过记录，源码快照排除 `.pi/**` 与交付构建产物；任何入口均不得在 Pilot 本地代跑 verify。旧转录证据回执仅留审计，不因历史模式降低验证门禁。
  - 外部副作用先写 `runtime_operations` 回执再执行；远端写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
+- **修复完成即发测试版（2026-11-08 用户固定流程）**：缺陷修复完成且适用验证通过后，推送任务分支并以 `channel=test` 手动触发 `Packages`，发布 `vX.Y.Z-test.<run>` GitHub 预发布（不进入 latest；客户端需开启「接收测试版」）。此后不再逐次询问是否发测试版；正式版本仍由维护者明确定版本，按 annotated `vX.Y.Z` 标签发布。发布说明写明用户可见变化、修复与恢复方式，发布标签与 run 记入任务记录。
  
  ## 布局与归属
  
@@ -49,7 +50,7 @@ Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal
  - 集成测试：`python3 -m pytest tests -q`。
  - 调度台集成演练：`python3 -m pytest tests/rehearsal -q`。
  - 编译、签名、打包与 Swift/Android 编译检查仅走云端 Packages；本地可运行无需编译的 Python 隔离检查和包核验。本会话用户约定优先于旧分支中的本地构建条款。
- - 云端构建与发布：使用 GitHub 托管 Actions 的 `Packages` 工作流；分支手动构建用 `gh workflow run packages.yml --ref <branch>`，正式 Release 按 `docs/build-release.md` 的 annotated 稳定标签流程。
+ - 云端构建与发布：使用 GitHub 托管 Actions 的 `Packages` 工作流；分支手动构建用 `gh workflow run packages.yml --ref <branch>`；测试版用 `-f channel=test -f notes='<发布说明>'`（省略 `base_version` 时自动取最新稳定版的下一 patch），以 `gh run watch <run-id> --exit-status` 等待后用 `gh release view vX.Y.Z-test.<run>` 核对预发布与资产；正式 Release 按 `docs/build-release.md` 的 annotated 稳定标签流程。
  - 自动接收：`cd core && python3 -m kanpilot.auto_intake`；只读预览加 `--dry-run`。调度每 20 秒检查，intake 每 300 秒。
  - 引擎长驻：`engine run`（DB 级单实例租约+心跳+退避重启，见 protocol §5.27）。
  - 引擎状态：`engine status`（只读，见 protocol §5.27）。
