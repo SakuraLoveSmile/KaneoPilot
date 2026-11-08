@@ -195,13 +195,15 @@ exit_code 缺失或不是整数时记为 None。
 - **幂等：** commits 中已有该 execution_run_id → 返回 `{outcome:"already_committed", sha}`。
 - **崩溃恢复：** HEAD ≠ head_sha，但 HEAD 的父提交等于 head_sha，且提交信息带有本次 run 的 `KaneoPilot-Run` trailer → 视为已提交，直接补记。其他 HEAD 漂移 → blocked，failure_code 为 `delivery_commit_failed`，note「分支被执行端或他人改动」。
 - **候选文件：** 来自 `git status --porcelain=v1 -z --untracked-files=all`，需正确处理 rename 的双路径。被 .gitignore 忽略的文件本来就不进入候选。
+- **运行材料（KP-D01）：** 新生成的安全 `.pi/goal/*.md` 沿既有规则排除。另将 `.pi/kanpilot/codex/<小写规范 UUID>/` 下未跟踪且未暂存、不属于当前 HEAD/索引的运行材料排除，包含工具配置、缓存、临时文件与原生验证证据；文件保留原位，不删除或改写。祖先通过 no-follow 核验为真实目录，叶允许普通文件、符号链接（仅排除，不读取链接目标），以及 Git 将私有依赖 checkout 整体枚举的真实目录（规范化单个尾 `/`，不递归、不进入其 Git、不改写）。已观察目录身份变化或 Git 枚举的其他特殊类型拒绝，不新增递归扫描。已跟踪、已暂存、重命名/删除、其他 `.pi` 路径或非规范 UUID 不享受此排除，仍执行原敏感/大小门禁；原 HEAD 未跟踪而新暂存的运行路径随后以 `delivery_commit_failed` 明确阻塞，提示移出暂存区，保留原索引与材料，不静默漏交，也不使正常新增提交与恢复拒绝规则矛盾。该规则只用于交付，不改变重试工作树指纹版本或证据。
+- **一致性：** 交付安全检查、实际暂存、提交后 clean 与崩溃恢复使用同一运行材料边界。只暂存已选交付路径，以 NUL 分隔的 literal pathspec 传递，支持删除/重命名及特殊文件名，避免将大型缓存先写入 Git 对象库；不将大量路径展开进 argv。无业务候选仍按 `no_changes` 拒绝。钩子或恢复提交新增运行材料不能作为正常交付接纳；并发修改普通索引时拒绝覆盖并保留成果。
 - **拦截（delivery_blocked_files）：** 候选中出现以下任一 → 不提交，列出文件名：
   - `.env` 或 `.env.*`（`.env.example` 除外）；
   - `*.pem`、`*.key`、`*.p12`、`id_rsa*`；
   - 单文件 >5MB。
 - **无改动：** 候选为空 → blocked，failure_code 为 `no_changes`。
 - **提交：**
-  - `git add -A`，然后 `git commit -F <临时消息文件>`；
+  - 对已选交付路径执行 `git add -A --pathspec-from-file=<NUL 文件> --pathspec-file-nul`，然后 `git commit -F <临时消息文件>`；
   - 照常执行钩子，超时 300 秒，`GIT_TERMINAL_PROMPT=0`；
   - 不设置提交身份，不加 --no-verify，不加 --no-gpg-sign；
   - 失败 → blocked（delivery_commit_failed），note 附 stderr 末尾 ≤2KB（先脱敏）。

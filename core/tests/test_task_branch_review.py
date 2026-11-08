@@ -123,6 +123,46 @@ class TaskBranchReview(KanpilotTestCase):
         self.assertEqual(self.git(self.worktree, "status", "--porcelain"), "")
         self.assertIn("KaneoPilot-Run: exec1", self.git(self.worktree, "log", "-1", "--format=%B"))
 
+    def test_runtime_materials_survive_verified_commit_and_review_claim(self):
+        runtime = self.worktree / ".pi/kanpilot/codex/52044e49-bee9-4d69-a746-e184061dc89f"
+        cache = runtime / "gradle/caches/gradle-api.jar"
+        cache.parent.mkdir(parents=True)
+        with cache.open("wb") as stream:
+            stream.truncate(6 * 1024 * 1024)
+        evidence = runtime / "native-acceptance/installed-before.apk"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_bytes(b"native acceptance evidence")
+        config = runtime / "config"
+        config.mkdir()
+        (config / "cache-pointer").symlink_to(self.root / "unavailable-cache")
+
+        result = self.commit()
+        self.assertEqual(result["outcome"], "committed", result)
+        self.assertEqual(self.git(self.worktree, "diff-tree", "--no-commit-id", "--name-only",
+                                  "-r", result["sha"]), "app.py")
+        self.assertEqual(cache.stat().st_size, 6 * 1024 * 1024)
+        self.assertEqual(evidence.read_bytes(), b"native acceptance evidence")
+        self.assertTrue((config / "cache-pointer").is_symlink())
+        self.assertEqual(cmd_delivery.cmd_delivery_commit(self.ctx, self.payload),
+                         {"outcome": "already_committed", "sha": result["sha"]})
+        identity = self.claim_review()
+        self.assertEqual(identity["expected_execution_run_id"], "exec1")
+        self.assertEqual(self.task()["status"], "in_review")
+
+    def test_runtime_only_cannot_pass_source_verdict_or_create_commit(self):
+        runtime = self.worktree / ".pi/kanpilot/codex/52044e49-bee9-4d69-a746-e184061dc89f/gradle"
+        runtime.mkdir(parents=True)
+        (runtime / "daemon.log").write_text("runtime output only\n")
+        verdict = self.verify_execution()
+        self.assertTrue(verdict["empty_diff"], verdict)
+        self.assertFalse(verdict["verification_ok"], verdict)
+        result = cmd_delivery.cmd_delivery_commit(self.ctx, self.payload)
+        self.assertEqual(result["failure_code"], "delivery_commit_failed")
+        self.assertEqual(self.git(self.worktree, "rev-parse", "HEAD"), self.delivery["base_sha"])
+        self.assertEqual(core.delivery_of(self.task())["commits"], [])
+        self.assertEqual(self.git(self.worktree, "diff", "--cached"), "")
+        self.assertEqual((runtime / "daemon.log").read_text(), "runtime output only\n")
+
     def test_no_changes_and_unsafe_files_cannot_be_committed(self):
         empty = self.verify_execution()
         self.assertTrue(empty["empty_diff"])

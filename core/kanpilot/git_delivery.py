@@ -576,7 +576,9 @@ def worktree_changes(worktree: str) -> list:
         path = Path(worktree) / change["path"]
         # Do not follow an untracked symlink out of this worktree.
         try:
-            size = path.lstat().st_size if path.exists() or path.is_symlink() else 0
+            size = path.lstat().st_size
+        except (FileNotFoundError, NotADirectoryError):
+            size = 0
         except OSError as exc:
             raise GitDeliveryError("delivery_commit_failed", "无法检查候选文件：" + str(exc)) from exc
         change["size"] = size
@@ -602,23 +604,94 @@ def _goal_material(worktree, change, tracked):
         return False
 
 
+def _runtime_material_path(name):
+    # Git reports an untracked embedded checkout as one opaque "path/" entry.
+    parts = (name[:-1] if name.endswith("/") else name).split("/")
+    return (len(parts) >= 5 and parts[:3] == [".pi", "kanpilot", "codex"]
+            and not any(part in ("", ".", "..") for part in parts)
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", parts[3]) is not None)
+
+
 def _effective_changes(worktree):
     changes = worktree_changes(worktree)
     tracked = {os.fsdecode(name) for name in
-               _git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".pi/goal"],
+               _git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".pi/goal", ".pi/kanpilot/codex"],
                     worktree, 10).stdout.split(b"\0") if name}
-    material = [change for change in changes if _goal_material(worktree, change, tracked)]
-    return [change for change in changes if change not in material], material
+    index = _git(["ls-files", "--stage", "-z"], worktree, 10).stdout
+    indexed = {os.fsdecode(entry.split(b"\t", 1)[1]) for entry in index.split(b"\0") if entry}
+    effective, material, sample = [], [], None
+    try:
+        for change in changes:
+            name = change["path"]
+            owned_name = name.removesuffix("/")
+            if _goal_material(worktree, change, tracked):
+                material.append(change)
+                continue
+            if (change["status"] == "??" and owned_name not in tracked and owned_name not in indexed
+                    and _runtime_material_path(name)):
+                if sample is None:
+                    sample = _RetryDirectorySample(worktree)
+                parts = (name[:-1] if name.endswith("/") else name).split("/")
+                directory, ancestor = sample.parent(parts)
+                if ancestor is not None:
+                    raise GitDeliveryError("worktree_invalid", "运行材料目录身份无法确认")
+                try:
+                    entry = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # A private runtime file can disappear while Gradle runs.
+                if name.endswith("/"):
+                    if not stat.S_ISDIR(entry.st_mode):
+                        raise GitDeliveryError("worktree_invalid", "运行材料目录类型已变化")
+                    # Prove the opaque checkout directory itself without scanning
+                    # it or opening its Git repository; verify its identity below.
+                    _, leaf_ancestor = sample.parent(parts + ["."])
+                    if leaf_ancestor is not None:
+                        raise GitDeliveryError("worktree_invalid", "运行材料目录身份无法确认")
+                elif not (stat.S_ISREG(entry.st_mode) or stat.S_ISLNK(entry.st_mode)):
+                    raise GitDeliveryError("worktree_invalid", "运行材料包含不支持的文件类型")
+                # Tool setup deliberately creates leaf links to the shared cache.
+                # Keep material untouched; never read links or embedded repos.
+                material.append(change)
+                continue
+            effective.append(change)
+        if sample is not None:
+            sample.verify()
+        if index != _git(["ls-files", "--stage", "-z"], worktree, 10).stdout:
+            raise GitDeliveryError("worktree_invalid", "交付分类期间索引已变化")
+        return effective, material
+    except OSError as exc:
+        raise GitDeliveryError("worktree_invalid", "运行材料目录核验失败") from exc
+    finally:
+        if sample is not None:
+            sample.close()
 
 
 def effective_worktree_changes(worktree: str) -> list:
-    """Delivery candidates excluding only safe newly generated goal Markdown."""
+    """Delivery candidates excluding generated goals and private runtime material."""
     return _effective_changes(worktree)[0]
+
+
+def _literal_pathspecs(paths):
+    return b"".join(os.fsencode(":(literal)" + name) + b"\0" for name in paths)
+
+
+def _stage_delivery_paths(worktree, paths, *, env=None):
+    indexed = {os.fsdecode(name) for name in
+               _git(["ls-files", "--cached", "-z"], worktree, 10, env=env).stdout.split(b"\0") if name}
+    # A staged deletion/rename is already absent from the ordinary index. Git
+    # rejects a literal path that is absent from both the index and worktree.
+    paths = [name for name in paths if name in indexed or os.path.lexists(Path(worktree) / name)]
+    if paths:
+        _git(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+             worktree, 60, env=env, input=_literal_pathspecs(paths))
 
 
 def _index_tree_without_goal_material(path):
     """Inspect recovery staging without rewriting unique user staging."""
     _, material = _effective_changes(path)
+    # Untracked runtime files and goals cannot affect the index. Only a goal
+    # explicitly staged by the execution side needs removal from this copy.
+    material = [change for change in material if change["status"] != "??"]
     if not material:
         return _value(["write-tree"], path)
     index = Path(_value(["rev-parse", "--git-path", "index"], path))
@@ -628,14 +701,15 @@ def _index_tree_without_goal_material(path):
         copied = Path(temp) / "index"
         copied.write_bytes(index.read_bytes())
         env = dict(git_env(), GIT_INDEX_FILE=str(copied))
-        _git(["reset", "-q", "--", *[":(literal)" + c["path"] for c in material]], path, 60, env=env)
+        _git(["reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"],
+             path, 60, env=env, input=_literal_pathspecs(c["path"] for c in material))
         return _git(["write-tree"], path, 60, env=env).stdout.decode().strip()
 
 
-def _require_no_new_goal_commit(path, base, head):
-    # Recovery cannot accept a goal inserted by a hook after the private tree
-    # was frozen. Inspect the commit, not mutable worktree bytes; existing goal
-    # modifications/deletions and detected renames stay ordinary changes.
+def _require_no_new_material_commit(path, base, head):
+    # Recovery cannot accept generated material inserted by a hook after the
+    # private tree was frozen. Inspect the commit, not mutable worktree bytes;
+    # existing modifications/deletions and detected renames remain changes.
     records = _git(["diff", "--name-status", "-z", "--find-renames", base, head], path, 10).stdout.split(b"\0")
     cursor = 0
     while cursor < len(records) and records[cursor]:
@@ -643,8 +717,12 @@ def _require_no_new_goal_commit(path, base, head):
         name = os.fsdecode(records[cursor + 1])
         cursor += 3 if status.startswith(("R", "C")) else 2
         relative = Path(name)
-        if (status != "A" or len(relative.parts) != 3
-                or relative.parts[:2] != (".pi", "goal") or relative.suffix != ".md"):
+        if status != "A":
+            continue
+        if _runtime_material_path(name):
+            raise GitDeliveryError("delivery_commit_failed", "未登记提交包含新运行材料，保留本地提交但不交付")
+        if (len(relative.parts) != 3 or relative.parts[:2] != (".pi", "goal")
+                or relative.suffix != ".md"):
             continue
         entry = _git(["ls-tree", "-z", head, "--", ":(literal)" + name], path, 10).stdout
         if entry.startswith((b"100644 blob ", b"100755 blob ")):
@@ -1100,7 +1178,7 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
             if merge_parent_sha and (_merge_marker(path, "MERGE_HEAD") is not None
                                      or _merge_marker(path, "ORIG_HEAD") != expected):
                 raise GitDeliveryError("delivery_commit_failed", "未登记合并提交的恢复状态不符，保留现场")
-            _require_no_new_goal_commit(path, expected, head)
+            _require_no_new_material_commit(path, expected, head)
             if verified_source_sha256:
                 if (source_state_sha256(path) != verified_source_sha256
                         or tree_source_sha256(path, head) != verified_index_sha256):
@@ -1121,10 +1199,21 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
             raise GitDeliveryError("delivery_commit_failed", "合并冲突尚未全部解决并暂存")
         if index_source_sha256(path) != verified_index_sha256:
             raise GitDeliveryError("delivery_commit_failed", "合并处理结果尚未完整暂存为已验证树，未提交")
+    classification_index = _git(["ls-files", "--stage", "-z"], path, 10).stdout
     changes, material = _effective_changes(path)
     if not changes and not merge_parent_sha:
         raise GitDeliveryError("no_changes", "执行完成后没有可提交改动")
     _require_safe_files(changes)
+    # Explicitly staged runtime additions are user-owned staging, not something
+    # the material filter may silently discard. Require the user to unstage them.
+    runtime_staged = [c for c in changes if _runtime_material_path(c["path"])
+                      and "R" not in c["status"] and "C" not in c["status"]]
+    if runtime_staged:
+        tracked_runtime = {os.fsdecode(name) for name in
+                           _git(["ls-tree", "-r", "--name-only", "-z", expected, "--", ".pi/kanpilot/codex"],
+                                path, 10).stdout.split(b"\0") if name}
+        if any(c["path"] not in tracked_runtime for c in runtime_staged):
+            raise GitDeliveryError("delivery_commit_failed", "新运行材料已暂存，请移出暂存区后重新提交；索引和材料已保留")
     # 只提交交付路径：构建产物（__pycache__/*.pyc 等）留在工作树，不进提交。
     # 提交它们会把本机二进制差异带进分支，多任务分支间内容不同即 add/add 冲突
     # （沙盒 PR #2/#3 CONFLICTING 的根因）。
@@ -1140,11 +1229,9 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
         raise GitDeliveryError("delivery_commit_failed", "分支被执行端或他人改动")
     if merge_parent_sha:
         verify_conflict_merge(delivery, merge_parent_sha)
-    # 不逐个 add 交付路径：重命名/删除的路径可能已不在索引或工作树里，逐个传给
-    # `git add --` 会报 "pathspec did not match"；也不用 `:(exclude)`——它对「被
-    # .gitignore 忽略的路径」会让 git add 返回 1（即使暂存结果是对的）。改为
-    # add -A 之后按产物 pathspec 撤销暂存：仓库有 .gitignore 时 add -A 本就不会
-    # 暂存它们，reset 是无害空操作。
+    # Feed only classified delivery paths through NUL-delimited literal pathspecs.
+    # Runtime caches must never enter Git's object database, even temporarily.
+    # The source and destination of detected renames are both in this set.
     clean_title = " ".join(str(title or "").split())[:72]
     message = (f"kaneo({task_id}): {clean_title}\n\nKaneo-Task: {task_id}\n"
                f"KaneoPilot-Run: {execution_run_id}\nFix-Round: {fix_round}\n")
@@ -1163,17 +1250,23 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
             # Read goal staging from the frozen ordinary index, not from the
             # current worktree (which may contain a newer unstaged revision).
             goal_entries = b""
-            if material and before_index is not None:
+            entries = b""
+            if before_index is not None:
                 original_index = Path(temp) / "original-index"
                 original_index.write_bytes(before_index)
                 original_env = dict(git_env(), GIT_INDEX_FILE=str(original_index))
-                goal_entries = _git(["ls-files", "--stage", "-z", "--",
-                                     *[":(literal)" + c["path"] for c in material]],
-                                    path, 60, env=original_env).stdout
+                entries = _git(["ls-files", "--stage", "-z"], path, 60, env=original_env).stdout
+            # Bind classification to the exact frozen staging entries. A new
+            # business entry is just as user-owned as a newly staged material;
+            # reject the race instead of replacing it with the private index.
+            if entries != classification_index:
+                raise GitDeliveryError("delivery_commit_failed", "交付分类后索引条目已变化；索引和材料已保留")
+            if material:
+                material_paths = {c["path"].removesuffix("/") for c in material}
+                goal_entries = b"".join(entry + b"\0" for entry in entries.split(b"\0")
+                                        if entry and os.fsdecode(entry.split(b"\t", 1)[1]) in material_paths)
             _git(["read-tree", expected], path, 60, env=env)
-            _git(["add", "-A"], path, 60, env=env)
-            _git(["reset", "-q", "--", *artifact_pathspecs(),
-                  *[":(literal)" + c["path"] for c in material]], path, 60, env=env)
+            _stage_delivery_paths(path, deliverable, env=env)
             if verified_source_sha256 and (source_state_sha256(path) != verified_source_sha256
                     or index_source_sha256(path, env=env) != verified_index_sha256):
                 raise GitDeliveryError("delivery_commit_failed", "验证源码与待提交索引不符，未提交")
@@ -1213,7 +1306,7 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
                 if owned_lock and lock.exists():
                     lock.unlink()
         else:
-            _git(["add", "-A"], path, 60)
+            _stage_delivery_paths(path, deliverable)
             _git(["reset", "-q", "--", *artifact_pathspecs()], path, 60)
             _git(["commit", "-F", str(message_path)], path, timeout)
     head = _value(["rev-parse", "HEAD"], path)
@@ -1225,6 +1318,7 @@ def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, ti
                 or task_trailers != [task_id] or _merge_marker(path, "MERGE_HEAD") is not None
                 or _merge_marker(path, "ORIG_HEAD") != expected):
             raise GitDeliveryError("delivery_commit_failed", "合并提交身份或恢复状态不符；本地提交已保留但未交付")
+    _require_no_new_material_commit(path, expected, head)
     verify_branch_worktree(delivery, require_clean=True, expected_head=head)
     return {"sha": head, "files": _committed_files(path, head, expected if merge_parent_sha else None)}
 
