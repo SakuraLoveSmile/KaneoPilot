@@ -15,6 +15,7 @@ from .runtime_client import HistoricalReadClient, RuntimeClient, stable_scope_id
 
 TOOL = 'release_target_verification'
 RESOLUTION_TOOL = 'release_verification_missing_report_resolution'
+REVALIDATION_TOOL = 'release_verification_revalidation'
 _require = release._require
 _HISTORY_CONFLICT_REASON = '历史观察写回前原尝试或下游写状态已变化'
 
@@ -1173,6 +1174,62 @@ def cmd_resolve_missing_release_verification(ctx, payload):
         value.update(state='blocked', failure_code='release_verification_report', report_missing=True,
                      report_sha256=body_sha256, report_body_sha256=body_sha256, report_payload=basis,
                      reason='Plus 执行已结束但未交付正式验证报告；已判定报告缺失，可显式重新验证')
+        _save(ctx.conn, value, ctx.now_iso)
+    return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
+
+
+def _revalidation_operation(verification_id):
+    return 'verification-revalidate:' + verification_id
+
+
+def cmd_revalidate_release_verification(ctx, payload):
+    """Re-accept a source-drift block once the finished run and tree both prove clean."""
+    task = db.require_task(ctx.conn, payload['task_id'])
+    ref = db.task_extra(task).get('release_verification_ref') or {}
+    _require(ref.get('verification_id') == payload['verification_id']
+             and ref.get('context_sha256') == payload['expected_context_sha256'],
+             'release_verification_revalidation', '当前验证引用与本次确认不符')
+    value = _load(ctx.conn, task['task_id'], payload['verification_id'])
+    _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
+             'release_verification_revalidation', '验证上下文已变化')
+    scope = _scope(task['task_id'])
+    operation = _revalidation_operation(value['verification_id'])
+    request = dict(verification_id=value['verification_id'],
+                   context_sha256=value['context']['context_sha256'])
+    existing = db.get_runtime_operation(ctx.conn, scope, operation)
+    if existing is not None:
+        _require(existing['status'] == 'accepted' and existing['request_sha256'] == _hash(request),
+                 'release_verification_revalidation', '本次复核结果未知或参数不同，不会重复执行')
+        return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
+    _require(payload.get('confirm') is True, 'release_verification_revalidation',
+             '复核必须明确确认：仅在该轮执行已结束且工作树重新与冻结目标一致时成立')
+    _require(value['state'] == 'blocked' and value.get('failure_code') == 'release_verification_source',
+             'release_verification_revalidation', '仅源码瞬时不一致导致的当前验证可复核')
+    original = util.jdump(value)
+    local_snapshot = _history_snapshot(ctx.conn, value, include_operations=False)
+    _unchanged(ctx.conn, task, value)
+    client = _client(value, read_only=True)
+    report = _completed_report(ctx.conn, client, value)
+    _require(report.get('state') == 'ready', 'release_verification_revalidation',
+             '正式验证报告尚未就绪，不能复核')
+    previous = {key: value[key] for key in ('state', 'failure_code', 'reason') if value.get(key) is not None}
+    _record_report(value, report)
+    fields = _report(ctx.conn, client, value, report=report)
+    audit = dict(request=request, previous=previous, report_sha256=report.get('report_sha256'),
+                 verdict=report.get('verdict'), execution_id=report.get('execution_id'),
+                 reason='源码瞬时不一致的阻塞在该轮结束、工作树复核与冻结目标一致后显式复核通过')
+    with db.write_txn(ctx.conn):
+        latest = _load(ctx.conn, task['task_id'], value['verification_id'])
+        _require(util.jdump(latest) == original
+                 and _history_snapshot(ctx.conn, latest, include_operations=False) == local_snapshot
+                 and (db.task_extra(db.require_task(ctx.conn, task['task_id'])).get('release_verification_ref') or {}) == ref
+                 and db.get_runtime_operation(ctx.conn, scope, operation) is None,
+                 'release_verification_revalidation', '核对期间原验证已变化，未复核')
+        operations.begin_operation(ctx.conn, scope, operation, 'core', REVALIDATION_TOOL, request, now=ctx.now_iso)
+        operations.complete_operation(ctx.conn, scope, operation, result=audit, now=ctx.now_iso)
+        value.update(fields, state='verified', revalidated_from=previous)
+        value.pop('reason', None)
+        value.pop('failure_code', None)
         _save(ctx.conn, value, ctx.now_iso)
     return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
 
