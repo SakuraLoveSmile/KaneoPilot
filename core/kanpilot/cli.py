@@ -99,6 +99,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "expected_context_sha256": (True, "str"), "expected_dispatch_request_sha256": (True, "str"),
          "confirm": (True, "bool")},
         _automation_command("release_dispatch_recovery", "cmd_recover_release_dispatch")),
+    "void-stale-release-dispatch": (
+        {"task_id": (True, "str"), "batch_id": (True, "str"),
+         "expected_context_sha256": (True, "str"), "expected_dispatch_request_sha256": (True, "str"),
+         "confirm": (True, "bool")},
+        _automation_command("release_dispatch_void", "cmd_void_stale_release_dispatch")),
     "abandon-unsent-release": (
         {"batch_id": (True, "str"), "expected_context_sha256": (True, "str")},
         _automation_command("release_delivery", "cmd_abandon_unsent_release")),
