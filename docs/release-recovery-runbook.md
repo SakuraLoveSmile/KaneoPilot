@@ -96,6 +96,24 @@ python3 core/kanpilot.py resolve-missing-release-verification --json '{
 随后用第 4 节的 `prepare-restart-release-verification` + `restart-release-verification` 新建后继尝试。
 已判定缺失的尝试不会再被自动同步改写。
 
+## 4.2 时序纪律（补验证）
+
+补验证是**一次长跑的远端会话**，本地只读/对账命令容易在不合适的时机切进去。两条硬纪律：
+
+1. **执行期间不要 sync。** 当 `state=running`，或 `agent_status.isRunning=true`、执行轮次尚未完成时，
+   不要调用 `sync-release-verification`：构建/依赖解析会让工作树上的被跟踪文件与索引短暂变化，而
+   `_source` 是**即时**校验，会把正在运行的尝试误判成 `release_verification_source` 阻塞（之后即使
+   报告 `ready/met` 也不会自动恢复）。
+   - 只在会话空闲、执行轮次完成后再 sync；引擎的自动回收本身就按这个条件推进。
+   - 提供只读对账给用户看进度时，直接读库里的 `verification:<id>` 回执状态，不要驱动 sync。
+2. **被误判后不要重跑。** 若已因上述竞态落成 `blocked/release_verification_source`，先确认：运行已结束、
+   报告 `ready/structured/completed`、工作树 `HEAD` 与 `tree/index` 指纹与冻结目标一致，再用
+   `revalidate-release-verification` 复核一次恢复 verified；重跑等于再付一轮模型费用。
+
+补充：`submit-release-verification-answers` 默认 MCP 客户端超时约 30 秒，而 Plus 应答可能超过 60 秒，
+表现为 `delivery: unknown` 但问题是仍 `open`。此时先 `reconcile-release-verification-answers` 核对；
+确认未送达后，用同一份冻结答案在**更大的客户端超时**下重试（答案必须逐字一致，不能修改）。
+
 ## 5. 发布与收尾
 
 1. verified 后再跑一次 `sync-release-batch`，让批次继续准备与派发；
