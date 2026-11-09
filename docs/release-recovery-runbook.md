@@ -80,6 +80,21 @@ python3 core/kanpilot.py sync-release-verification --json '{
 
 启动是**付费**模型轮次，必须先向用户展示模型与命令并获得确认。
 
+### 4.1 报告缺失（草稿报告永远不到位）
+
+Plus 执行轮次已结束、运行时只留草稿报告时，核心会一直停在「等待 Plus 传递正式验证报告」。
+核对运行时确认 `state=draft` 后，可显式判定一次：
+
+```bash
+python3 core/kanpilot.py resolve-missing-release-verification --json '{
+  "task_id":"<task_id>","verification_id":"<verification_id>",
+  "expected_context_sha256":"<context_sha256>","confirm":true}'
+```
+
+判定后原尝试变 `blocked/release_verification_report`（保留草稿报告 ID、状态与 hold 原因审计），
+随后用第 4 节的 `prepare-restart-release-verification` + `restart-release-verification` 新建后继尝试。
+已判定缺失的尝试不会再被自动同步改写。
+
 ## 5. 发布与收尾
 
 1. verified 后再跑一次 `sync-release-batch`，让批次继续准备与派发；
