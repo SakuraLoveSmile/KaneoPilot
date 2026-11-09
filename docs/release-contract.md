@@ -155,6 +155,7 @@ CLI：
 - `sync-release-batches {limit?}` → 有界轮询已有批次，不因历史 done 或新配置创建批次。
 - `abandon-unsent-release {batch_id,expected_context_sha256}` → `{outcome:abandoned,release}`；返回原批次 DTO，required 与操作 flags 均 false。随后刷新重新投影，保留原审计，不发送 Actions。
 - `void-stale-release-dispatch {task_id,batch_id,expected_context_sha256,expected_dispatch_request_sha256,confirm:true}` → `{outcome:voided,release}`；只作废不可复现的未知预发布调度，返回原批次 DTO（`voided=true`），不重发、不删除任何回执，成员随后可重新准备新批次。
+- 排障与恢复的固定步骤（定位、契约校验、作废、补验证、发布核对）见 `docs/release-recovery-runbook.md`。
 - 内部：`validate_policy(raw)`、`projection(conn,task)`、`completion_gate(conn,task)`、`after_merge(ctx,task,payload=None)`；after_merge 返回 outcome=disabled|waiting|published|blocked，供既有 delivery 轮询与完成流程接入。
 
 UI 沿用项目「自动处理」表单与任务详情「交付」区。配置开关下提供渠道，其他字段折叠；首次开启或切正式版明确确认。任务展示核心发布状态、版本/渠道、Actions/Release 链接与资产下载；仅保留一行看板摘要。按核心 can_start 显示「构建并发布…」，有未发送 batch 时显示「继续构建发布…」；历史 done 显示「补发版本…」。can_abandon 才显示「弃用未发送批次…」，确认时说明原批次和未发送事实；unknown 硬禁启动和弃用，仅「核对发布结果」。其他已启动状态提供「同步发布结果」。发布可核对时底栏同样推荐该动作，不再推荐只检查计划与 Kaneo 的「重新校验」；核心允许 continue_delivery 时优先推荐「继续交付」，说明将复用已有评审并走 PR、合并及已配置的构建发布。构建 failed 是失败；权限、身份或缺包 blocked/unknown 是阻塞。发布中的未完成任务保留评审/交付列，published 后仍由真实 done 驱动完成列。
