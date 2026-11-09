@@ -82,7 +82,8 @@ python3 core/kanpilot.py sync-release-verification --json '{
 
 ### 4.1 报告缺失（草稿报告永远不到位）
 
-Plus 执行轮次已结束、运行时只留草稿报告时，核心会一直停在「等待 Plus 传递正式验证报告」。
+Plus 执行轮次已结束、运行时只留草稿报告（或控制面瞬时不可用把尝试落成 `blocked/validation_failed`）时，核心会停在
+「等待 Plus 传递正式验证报告」。
 核对运行时确认 `state=draft` 后，可显式判定一次：
 
 ```bash
