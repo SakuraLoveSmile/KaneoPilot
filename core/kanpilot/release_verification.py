@@ -14,6 +14,7 @@ from .runtime_client import HistoricalReadClient, RuntimeClient, stable_scope_id
 
 
 TOOL = 'release_target_verification'
+RESOLUTION_TOOL = 'release_verification_missing_report_resolution'
 _require = release._require
 _HISTORY_CONFLICT_REASON = '历史观察写回前原尝试或下游写状态已变化'
 
@@ -1061,6 +1062,121 @@ def _host_evidence(body, commands):
             'Host 未确认原命令通过及整数退出码 0：' + command)
 
 
+def _resolution_operation(verification_id):
+    return 'verification-resolve:' + verification_id
+
+
+def _missing_report_basis(value):
+    """Restart basis for an attempt whose Plus turn ended without a formal report."""
+    _require(value.get('report_missing') is True
+        and isinstance(value.get('execution_id'), str) and value['execution_id']
+        and isinstance(value.get('report_sha256'), str) and re.fullmatch('[0-9a-f]{64}', value['report_sha256'])
+        and isinstance(value.get('report_body_sha256'), str) and re.fullmatch('[0-9a-f]{64}', value['report_body_sha256'])
+        and isinstance(value.get('report_payload'), dict),
+        'release_verification_resolution', '缺失报告尝试的身份或字节不可确认')
+    return dict(report_sha256=value['report_sha256'], report_body_sha256=value['report_body_sha256'],
+                report=dict(value['report_payload']), execution_id=value['execution_id'], missing=True)
+
+
+def _runtime_draft(client, value):
+    """Audit-only summary of the runtime report that never reached ready."""
+    try:
+        listing = client.goal_report_list(value.get('session_id'))
+    except util.KanpilotError as exc:
+        return dict(found=False, error=util.redact(str(exc)))
+    rows = [item for item in (listing.get('reports') if isinstance(listing, dict) else []) or []
+            if isinstance(item, dict)]
+    target = value.get('execution_id')
+    row = next((item for item in rows if target and item.get('executionId') == target), None)
+    if row is None:
+        turns = {value.get('execution_turn_id'), value.get('planning_turn_id')} - {None}
+        row = next((item for item in rows if item.get('turnId') in turns), None)
+    if row is None and len(rows) == 1:
+        row = rows[0]
+    if row is None:
+        return dict(found=False)
+    hold = row.get('hold') if isinstance(row.get('hold'), dict) else {}
+    reasons = [reason.get('code') for block in hold.get('blocks') or []
+               if isinstance(block, dict) for reason in block.get('reasons') or []
+               if isinstance(reason, dict)]
+    return dict(found=True, execution_id=row.get('executionId'), report_id=row.get('reportId'),
+                state=row.get('state') or hold.get('state'),
+                execution_status=row.get('executionStatus'), hold_reasons=reasons,
+                hold_state=hold.get('state'), resume_count=hold.get('resumeCount'))
+
+
+def cmd_resolve_missing_release_verification(ctx, payload):
+    """Explicit, one-use exit for an attempt whose Plus turn ended without a report."""
+    task = db.require_task(ctx.conn, payload['task_id'])
+    ref = db.task_extra(task).get('release_verification_ref') or {}
+    _require(ref.get('verification_id') == payload['verification_id']
+             and ref.get('context_sha256') == payload['expected_context_sha256'],
+             'release_verification_resolution', '当前验证引用与本次确认不符')
+    value = _load(ctx.conn, task['task_id'], payload['verification_id'])
+    _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
+             'release_verification_resolution', '验证上下文已变化')
+    scope = _scope(task['task_id'])
+    operation = _resolution_operation(value['verification_id'])
+    request = dict(verification_id=value['verification_id'],
+                   context_sha256=value['context']['context_sha256'])
+    existing = db.get_runtime_operation(ctx.conn, scope, operation)
+    if existing is not None:
+        _require(existing['status'] == 'accepted' and existing['request_sha256'] == _hash(request),
+                 'release_verification_resolution', '本次判定结果未知或参数不同，不会重复执行')
+        return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
+    _require(payload.get('confirm') is True, 'release_verification_resolution',
+             '判定报告缺失必须明确确认：旧尝试保留审计，可显式重新验证')
+    pending = (value['state'] == 'unknown'
+               and value.get('failure_code') == 'release_verification_report_pending')
+    # A transient control-plane outage can persist the attempt as blocked before
+    # the report is read; the live check below still proves no report is ready.
+    interrupted = (value['state'] == 'blocked'
+                   and value.get('failure_code') == 'validation_failed')
+    _require(pending or interrupted, 'release_verification_resolution',
+             '仅等待正式报告或控制面瞬时不可用的当前验证可判定缺失')
+    _unchanged(ctx.conn, task, value)
+    client = _client(value, read_only=True, require_input=True)
+    session_id, turn = value['session_id'], value['execution_turn_id']
+    observed = client.agent_status(session_id); inner = observed.get('status') or observed
+    _require(inner.get('isRunning') is False and inner.get('currentTurnId') in (None, turn),
+             'release_verification_resolution', '独立验证会话仍在运行或执行轮次已变化')
+    record = client.turn_get(session_id, turn, require_identity=True)
+    _require(worker._turn_identity_matches(record, session_id, turn)
+             and worker._turn_status(record) == 'completed',
+             'release_verification_resolution', '原执行轮次未完成或身份不符')
+    try:
+        report = worker._fetch_report_payload(client, session_id, value.get('execution_id'),
+                                              (value.get('proposal') or {}).get('id'), {turn})
+    except util.KanpilotError:
+        report = {}
+    _require(isinstance(report, dict) and report.get('state') != 'ready',
+             'release_verification_resolution', '正式报告已可读取，请先核对原尝试')
+    draft = _runtime_draft(client, value)
+    with db.write_txn(ctx.conn):
+        latest = _load(ctx.conn, task['task_id'], value['verification_id'])
+        _require(util.jdump(latest) == util.jdump(value)
+                 and (db.task_extra(db.require_task(ctx.conn, task['task_id'])).get('release_verification_ref') or {}) == ref
+                 and db.get_runtime_operation(ctx.conn, scope, operation) is None,
+                 'release_verification_resolution', '核对期间原尝试已变化，未判定')
+        if not value.get('execution_id') and isinstance(draft.get('execution_id'), str):
+            value['execution_id'] = draft['execution_id']
+        audit = dict(request=request, verification_id=value['verification_id'],
+                     context_sha256=value['context']['context_sha256'],
+                     session_id=value.get('session_id'), planning_turn_id=value.get('planning_turn_id'),
+                     execution_turn_id=value.get('execution_turn_id'), execution_id=value.get('execution_id'),
+                     runtime_report=draft,
+                     reason='Plus 执行已结束但只交付草稿报告，判定为报告缺失')
+        basis = dict(missing_report=audit)
+        body_sha256 = _hash(basis)
+        operations.begin_operation(ctx.conn, scope, operation, 'core', RESOLUTION_TOOL, request, now=ctx.now_iso)
+        operations.complete_operation(ctx.conn, scope, operation, result=audit, now=ctx.now_iso)
+        value.update(state='blocked', failure_code='release_verification_report', report_missing=True,
+                     report_sha256=body_sha256, report_body_sha256=body_sha256, report_payload=basis,
+                     reason='Plus 执行已结束但未交付正式验证报告；已判定报告缺失，可显式重新验证')
+        _save(ctx.conn, value, ctx.now_iso)
+    return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
+
+
 def cmd_prepare_restart_release_verification(ctx,payload):
     task=db.require_task(ctx.conn,payload['task_id'])
     ref=db.task_extra(task).get('release_verification_ref') or {}
@@ -1068,8 +1184,11 @@ def cmd_prepare_restart_release_verification(ctx,payload):
     old=_load(ctx.conn,task['task_id'],ref['verification_id'])
     _require(old['state']=='blocked' and old.get('failure_code')=='release_verification_report',
              'release_verification_restart','仅允许已完成报告未满足条件的当前独立验证显式重启')
-    client=(_historical_client(old) if old.get('approval_observation') else _client(old,read_only=True,require_input=True))
-    report=_completed_report(ctx.conn,client,old,for_restart=True)
+    if old.get('report_missing'):
+        report=_missing_report_basis(old)
+    else:
+        client=(_historical_client(old) if old.get('approval_observation') else _client(old,read_only=True,require_input=True))
+        report=_completed_report(ctx.conn,client,old,for_restart=True)
     expected=dict(expected_verification_id=old['verification_id'],
         expected_context_sha256=old['context']['context_sha256'],expected_report_sha256=report['report_sha256'])
     context=_restart_context(ctx,dict(task_id=task['task_id'],**expected),prepare_only=True)
@@ -1114,7 +1233,8 @@ def _restart_context(ctx, payload, *, prepare_only=False):
     _unchanged(ctx.conn, task, old); _source(old)
     _restart_no_unknown_writes(ctx.conn, old)
     client = (_historical_client(old) if old.get('approval_observation') else _client(old, read_only=True, require_input=True))
-    report = _completed_report(ctx.conn, client, old, for_restart=True)
+    report = (_missing_report_basis(old) if old.get('report_missing')
+              else _completed_report(ctx.conn, client, old, for_restart=True))
     _require(report['report_sha256'] == payload['expected_report_sha256'],
              'release_verification_restart', '原验证报告已变化，请重新核对')
     plans = client.plans_pending(old['session_id'])
