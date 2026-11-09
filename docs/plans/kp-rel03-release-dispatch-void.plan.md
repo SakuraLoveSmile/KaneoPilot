@@ -1,7 +1,7 @@
 # kp-rel03：作废不可复现的未知预发布调度，让任务重新进入发布
 
 - 项目 / 任务编号：personal-kaneopilot / kp-rel03
-- 状态：实现中
+- 状态：待体验
 - 创建日期（Asia/Taipei）：2026-11-09
 - 权威记录：本文件；外部任务/其他材料只链接它
 - 主仓库 / 当前工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`
@@ -43,8 +43,11 @@
 
 | 日期 | 代码版本 / 候选差异 | 环境与运行对象 | 命令或实际操作 | 结果 / 证据位置 |
 | --- | --- | --- | --- | --- |
-| 2026-11-09 | 本分支工作区 | 隔离测试 DB | `cd core && python3 -m pytest tests/test_release_dispatch_void.py -q` | 8 passed |
-| 2026-11-09 | 本分支工作区 | 隔离测试 DB | `cd core && python3 -m pytest tests -q` | 见下 |
+| 2026-11-09 | `4822783` | 隔离测试 DB | `cd core && python3 -m pytest tests/test_release_dispatch_void.py -q` | 8 passed |
+| 2026-11-09 | `4822783` | 隔离测试 DB | `cd core && python3 -m pytest tests/test_release_delivery.py tests/test_release_dispatch_void.py -q` | 44 passed, 34 subtests passed |
+| 2026-11-09 | `4822783` | 隔离测试 DB | `cd core && python3 -m pytest tests -q` | 未完成：全量套件 30+ 分钟仍在跑，已中止；改用上面的定向套件 |
+| 2026-11-09 | `4822783` | 真实调度库（只读核对后执行） | `void-stale-release-dispatch` 作废 `d7933735…` | outcome=voided：`dispatch-void:…` accepted、原 dispatch rejected、批次 abandoned、成员 `release_ref` 清除、项目 pending 清空 |
+| 2026-11-09 | `4822783` | 真实调度库（只读投影） | 作废后下一轮交付同步（13:05） | 冻结新批次被 `release_target_unverified` 挡住：main 已含 MediaPlayer 工作流改动，需补验证后发布 |
 
 ## 提交与集成
 
@@ -56,7 +59,7 @@
 
 - 体验入口和操作步骤：CLI `python3 core/kanpilot.py void-stale-release-dispatch --json '...' --db <db>`，
   参数 `task_id`、`batch_id`、`expected_context_sha256`、`expected_dispatch_request_sha256`、`confirm:true`。
-- 尚未完成 / 尚未验证：未在真实调度库执行；未推送/发布；app 不提供入口属预期。
+- 尚未完成 / 尚未验证：KaneoPilot 侧提交未推送/未合并；app 不提供入口属预期；补验证（付费 Plus）待用户确认后启动。
 - 用户确认（明确确认后才改为已验收）：待用户确认最终效果。
 - 下一步和恢复任务时首先核对的内容：执行前先跑一次只读 `sync-release-batch` 确认仍为零匹配。
 - 需要时的回退 / 数据保留方式：作废保留批次与 dispatch 回执原文，可由审计回执追溯；不重新发送。
