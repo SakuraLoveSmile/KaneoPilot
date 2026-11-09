@@ -71,6 +71,7 @@
 - 确定未发送的批次允许显式弃用：仅 `not_sent`、无 run ID 且从未存在 dispatch 回执的批次可操作。弃用保留审计和已占版本，清除仍指向它的成员引用；下一次准备可冻结新批次。已发送、unknown 或任何已有 dispatch 回执均禁止弃用。预约发送时须在同一事务重读批次和成员引用，已弃用批次不可被旧调用复活或发送。
 - 构建失败不自动重试。用户可在 Actions 重跑后点击「同步发布结果」；相同 run 的新 attempt 仍须重核全部证据。unknown 入口只对账，不重发。
 - 显式一次恢复例外：用户明确接受原请求延迟生效可能重复触发后，CLI-only `recover-release-dispatch {task_id,batch_id,expected_context_sha256,expected_dispatch_request_sha256,confirm:true}` 可恢复原预发布批次一次。重核完整原上下文、成员引用、策略/暂停、tag 与工作流；完整列表已有唯一精确 marker 时只同步，多个或任何同 marker 身份异常均拒绝发送。零匹配不等于未送达。发送前同一事务写入固定 `dispatch-recovery:<batch_id>` unknown 回执，保留原 dispatch 完整审计、冻结输入及本次 writer 身份；任意已有恢复回执都不得再发送。网络不占事务，不清空旧回执或改成 not_sent，不创建新版本。后台与普通 unknown 操作仍仅对账；恢复丢响应同样不能再次重发。同步提交复核 batch 和调度回执快照，陈旧观察不覆盖新恢复；writer 按持久回执精确归属回收。恢复通过只读观察解决时保留其来源与原未知审计，不声称 GitHub 具备 CAS 或全局恰好一次。
+- 不可复现的未知预发布调度允许显式作废一次：批次为 `unknown / sent_or_unknown`、从未认领运行、且冻结工作流的 `head_sha` 已不是该工作流 ref 的当前提交（按该 ref 派发的运行再也不可能匹配冻结身份）时，CLI-only `void-stale-release-dispatch {task_id,batch_id,expected_context_sha256,expected_dispatch_request_sha256,confirm:true}` 可在只读核对零个同 marker 运行后作废该批次。作废不重发、不删除任何回执：写入 `dispatch-void:<batch_id>` 审计回执，把原 dispatch 回执标为 rejected 并保留冻结输入，批次标记 abandoned，解除成员 `release_ref`，成员可重新准备新批次。已有恢复回执、任何同 marker 运行、ref 仍指向冻结提交、同项目其他未知调度或活跃 writer 均拒绝；作废不改写原批次证据，后续发布仍走正常准备、确认与核验门。
 - 构建 failed 可从原任务「AI 处理…」显式启动一次构建修复，按 protocol「构建失败的一次性处理」核对并冻结真实失败日志、run/attempt、旧批次和源码基线。修复使用新分支、可信验证、新评审和新 PR，保留原已合并 PR 与失败发布批次。该授权止于新修复 PR，不自动合并或再次发布；旧批次成为只读历史。再次发布必须单独预检并确认，仍受版本、批次、完整证据与项目发布策略约束。
 - 同次构建修复的新 PR 真实合并后，可显式准备并确认新批次。若原失败批次为正式版，仅在该修复的精确归属、新执行/Review/提交和合并证据全部成立时，将此一个旧 failed 批次排除出正式版 pending 冲突；保留旧证据、版本/tag，不排除其他未发布正式批次。连续失败可沿逐条可信、同项目/仓库/根任务且版本递增的修复关系识别前驱链，各轮仍须单独确认。后继正式批次可信 published 后，以其已接受回执、冻结上下文及发布证明持续识别该可信前驱链，后续任务不再被此前驱链阻挡；后续普通任务仅凭关联字段或尚未 published 的后继不足以解除占位。新版本继续按 inventory 递增，不能重发旧批次或用此例外自动发布。批量同步跳过已归档的修复来源批次，继续同步当前批次；单项历史批次仍只读。
 
@@ -153,6 +154,8 @@ CLI：
 - `sync-release-batch {batch_id}` → `{outcome,release}`；只读远端对账及本地回执写入，不启动新批次。
 - `sync-release-batches {limit?}` → 有界轮询已有批次，不因历史 done 或新配置创建批次。
 - `abandon-unsent-release {batch_id,expected_context_sha256}` → `{outcome:abandoned,release}`；返回原批次 DTO，required 与操作 flags 均 false。随后刷新重新投影，保留原审计，不发送 Actions。
+- `void-stale-release-dispatch {task_id,batch_id,expected_context_sha256,expected_dispatch_request_sha256,confirm:true}` → `{outcome:voided,release}`；只作废不可复现的未知预发布调度，返回原批次 DTO（`voided=true`），不重发、不删除任何回执，成员随后可重新准备新批次。
+- 排障与恢复的固定步骤（定位、契约校验、作废、补验证、发布核对）见 `docs/release-recovery-runbook.md`。
 - 内部：`validate_policy(raw)`、`projection(conn,task)`、`completion_gate(conn,task)`、`after_merge(ctx,task,payload=None)`；after_merge 返回 outcome=disabled|waiting|published|blocked，供既有 delivery 轮询与完成流程接入。
 
 UI 沿用项目「自动处理」表单与任务详情「交付」区。配置开关下提供渠道，其他字段折叠；首次开启或切正式版明确确认。任务展示核心发布状态、版本/渠道、Actions/Release 链接与资产下载；仅保留一行看板摘要。按核心 can_start 显示「构建并发布…」，有未发送 batch 时显示「继续构建发布…」；历史 done 显示「补发版本…」。can_abandon 才显示「弃用未发送批次…」，确认时说明原批次和未发送事实；unknown 硬禁启动和弃用，仅「核对发布结果」。其他已启动状态提供「同步发布结果」。发布可核对时底栏同样推荐该动作，不再推荐只检查计划与 Kaneo 的「重新校验」；核心允许 continue_delivery 时优先推荐「继续交付」，说明将复用已有评审并走 PR、合并及已配置的构建发布。构建 failed 是失败；权限、身份或缺包 blocked/unknown 是阻塞。发布中的未完成任务保留评审/交付列，published 后仍由真实 done 驱动完成列。
