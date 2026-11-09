@@ -1,7 +1,7 @@
 # KP-WT01 任务级工作树布局与位置设置
 
 - 任务标识：`kp-wt01`
-- 状态：实现中（S1 规格已改完，待复核后进入 S2 核心）
+- 状态：实现中（S1 规格完成并提交 35cc2fc；S2a 任务阶段树核心完成）
 - 分支：`chore/20261110-kp-wt01-task-worktree-layout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-chore-kp-wt01-task-worktree-layout/`
 - 合入目标：`main`
@@ -162,4 +162,6 @@
 | 时间 | 动作 | 结果/证据 | 状态 |
 | --- | --- | --- | --- |
 | 2026-11-10 02:0x | 停止引擎 | `kill -TERM 55255` 后进程退出，`engine status` 无 active 实例；App 偏好 `executorSchedulingEnabled=false`（否则每 5 秒重拉）；恢复时在设置页打开「启用本机引擎」 | 完成 |
-| 2026-11-10 02:1x | S1 规格 | `docs/protocol.md`：§5.18.1 执行树 `run`、§5.27.6 doctor 阶段树统计、§5.29 标题与 §5.29.1/5.29.2 路径规则、§5.29.4 投影、§5.29.5 迁移、新增 §5.29.6；`docs/state-model.md` 槽位池改任务阶段树与 schema 7；`docs/ui-spec.md` §4.9 高级页三分区加「工作树」；`tests/ui-acceptance.md` W1–W10；`macos/README.md` 走查与文件说明 | 实现中（未编译、未实现） |
+| 2026-11-10 02:10 | S1 规格 | `docs/protocol.md`：§5.18.1 执行树 `run`、§5.27.6 doctor 阶段树统计、§5.29 标题与 §5.29.1/5.29.2 路径规则、§5.29.4 投影、§5.29.5 迁移、新增 §5.29.6；`docs/state-model.md` 槽位池改任务阶段树与 schema 7；`docs/ui-spec.md` §4.9 高级页三分区加「工作树」；`tests/ui-acceptance.md` W1–W10；`macos/README.md` 走查与文件说明 | 实现中（未编译、未实现） |
+| 2026-11-10 02:20 | 任务 worktree | 分支 `chore/20261110-kp-wt01-task-worktree-layout`，worktree `20261110-chore-kp-wt01-task-worktree-layout/`；规格提交在 main（35cc2fc），实现从该提交起 | 完成 |
+| 2026-11-10 04:10 | S2a 核心阶段树 | schema 7（`task_id`/`stage` + 部分唯一索引，v6→v7 升级保留旧池行只读）；`worktree_pool` 路径改 `<root>/<task_id>/<stage>`、`plan/review` 缺失按冻结 sha 重建并写 `worktree_stage_rebuilt`、`run` 缺失拒绝重建（`worktree_missing`）、同任务同阶段串行（占用→等待）、全局 `worktree_concurrency_limit`；`task_id` 贯穿 `task_workspace`/Plus 规划/评审/`git_delivery`；续规划不继承上一轮 `pool_lease`/等待标记/claim 凭据；doctor 与 `attention-list` 只统计阶段树；`set-config` 增并发与保留字段，新增只读 `worktree-config`（`measure` 可选占用统计） | 隔离测试：一次全量 `core/tests` 运行 4700 passed / 8 failed（schema 版本断言、旧池行等待语义、通用 report 未释放、续规划继承租约），逐项修复后 `test_base` / `test_review_stage_recovery` / `test_worktree_pool` 96 passed；**未再跑第二次全量**。旧池行仍留在真实库，迁移命令尚未实现 |

@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_WORKTREE_POOL_SIZE = 4
+DEFAULT_WORKTREE_CONCURRENCY_LIMIT = 4
+DEFAULT_WORKTREE_RETENTION_DAYS = 7
 DEFAULT_WORKTREE_POOL_LEASE_SECONDS = 86400
 
 # Save states (protocol.md §5.15.1): orthogonal to task.status lifecycle.

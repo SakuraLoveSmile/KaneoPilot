@@ -471,7 +471,7 @@ def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root, co
     if conn is not None:
         from . import worktree_pool
         lease = worktree_pool.acquire(conn, repo, stage=purpose, holder_id=holder_id, sha=sha,
-                                      worktrees_root=worktrees_root)
+                                      task_id=task_id, worktrees_root=worktrees_root)
         if lease["state"] == "waiting":
             raise util.KanpilotError("worktree_pool_waiting", "仓库槽位已满")
         return lease["path"]

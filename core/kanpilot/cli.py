@@ -125,7 +125,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
          "review_key": (True, "str")},
         _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
-    "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str")}, cmd_config.cmd_set_config),
+    "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str"),
+                    "worktree_concurrency_limit": (False, "int"),
+                    "worktree_retention_days": (False, "int")}, cmd_config.cmd_set_config),
     "worktree-relocate": (
         {"source_root": (True, "str"), "destination_root": (True, "str"),
          "backup_dir": (True, "str"), "operation_id": (True, "str"),
@@ -140,6 +142,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          ("slot_id", "holder_id", "lease_token", "operation_id", "backup_dir", "reason")}
         | {"dry_run": (False, "bool"), "confirm": (False, "bool")},
         _automation_command("worktree_recovery", "cmd_worktree_slot_recover")),
+    "worktree-config": ({"measure": (False, "bool")},
+                        _automation_command("cmd_worktree", "cmd_worktree_config")),
     "worktree-audit": ({"retention_days": (False, "int")},
                        _automation_command("cmd_worktree", "cmd_worktree_audit")),
     "worktree-gc": ({"dry_run": (False, "bool"), "retention_days": (False, "int"),

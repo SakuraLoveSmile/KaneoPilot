@@ -11,7 +11,8 @@ class WorktreeHealthTests(KanpilotTestCase):
         conn = db.connect(self.db_path)
         try:
             lease = pool.acquire(conn, repo, stage='review', holder_id='health-review',
-                                 sha='HEAD', worktrees_root=self.root / 'worktrees')
+                                 sha='HEAD', task_id='task',
+                                 worktrees_root=self.root / 'worktrees')
             unknown = Path(lease['path']) / 'user-notes.txt'
             unknown.write_text('preserve this work\n')
             result = pool.release(conn, lease['slot_id'], lease['holder_id'],
@@ -32,20 +33,28 @@ class WorktreeHealthTests(KanpilotTestCase):
 
     def test_capacity_configuration_is_persisted_and_rejects_invalid_sizes(self):
         self.assertEqual(self.call('set-config', {'worktree_pool_size': 2})['worktree_pool_size'], 2)
+        self.assertEqual(self.call('set-config', {'worktree_concurrency_limit': 3})['worktree_concurrency_limit'], 3)
+        self.assertEqual(self.call('set-config', {'worktree_retention_days': 5})['worktree_retention_days'], 5)
         conn = db.connect(self.db_path)
         try:
             self.assertEqual(db.get_setting(conn, 'worktree_pool_size'), 2)
+            self.assertEqual(db.get_setting(conn, 'worktree_concurrency_limit'), 3)
+            self.assertEqual(db.get_setting(conn, 'worktree_retention_days'), 5)
         finally:
             conn.close()
         for size in (0, -1, 33, True):
             self.call_err('set-config', {'worktree_pool_size': size})
+            self.call_err('set-config', {'worktree_concurrency_limit': size})
+        for days in (0, -1, 91, True):
+            self.call_err('set-config', {'worktree_retention_days': days})
 
     def test_unconfirmed_remote_owner_is_visible_and_is_not_released(self):
         repo = self.make_repo('Unconfirmed Owner')
         conn = db.connect(self.db_path)
         try:
             lease = pool.acquire(conn, repo, stage='review', holder_id='unknown-review',
-                                 sha='HEAD', worktrees_root=self.root / 'worktrees')
+                                 sha='HEAD', task_id='task',
+                                 worktrees_root=self.root / 'worktrees')
             pool.mark_owner(conn, lease['slot_id'], lease['holder_id'], lease['lease_token'], state='unknown')
         finally:
             conn.close()
@@ -64,7 +73,8 @@ class WorktreeHealthTests(KanpilotTestCase):
         conn = db.connect(self.db_path)
         try:
             lease = pool.acquire(conn, repo, stage='plan', holder_id='interrupted-plan',
-                                 sha='HEAD', worktrees_root=self.root / 'worktrees')
+                                 sha='HEAD', task_id='task',
+                                 worktrees_root=self.root / 'worktrees')
             scope = 'worktree-slot:' + lease['slot_id']
             runtime_operations.begin_operation(conn, scope, 'lost-result', 'worktree_pool',
                                                'worktree_checkout', {})
@@ -78,3 +88,21 @@ class WorktreeHealthTests(KanpilotTestCase):
         self.assertEqual(state['slots'][0]['reason'], 'operation_unconfirmed')
         health = next(item for item in self.call('doctor')['checks'] if item['name'] == 'worktree_pool')
         self.assertFalse(health['ok'])
+
+    def test_worktree_config_reports_stage_trees_and_settings(self):
+        repo = self.make_repo('Config Tree')
+        conn = db.connect(self.db_path)
+        try:
+            pool.acquire(conn, repo, stage='plan', holder_id='cfg', sha='HEAD', task_id='task-cfg',
+                         worktrees_root=self.root / 'worktrees')
+            db.set_setting(conn, 'worktree_concurrency_limit', 3)
+            db.set_setting(conn, 'worktree_retention_days', 5)
+        finally:
+            conn.close()
+        config = self.call('worktree-config', {'measure': True})
+        self.assertEqual(config['concurrency_limit'], 3)
+        self.assertEqual(config['retention_days'], 5)
+        self.assertEqual(len(config['tasks']), 1)
+        self.assertEqual(config['tasks'][0]['task_id'], 'task-cfg')
+        self.assertIn('plan', config['tasks'][0]['stages'])
+        self.assertIsInstance(config['tasks'][0]['allocated_bytes'], int)

@@ -76,7 +76,7 @@ class ClaudePlannerTest(KanpilotTestCase):
         self.assertFalse((branch / "claude-stdin.txt").exists())
         self.assertFalse((self.repo / "claude-stdin.txt").exists())
         cwd = Path((self.root / "claude-cwd.txt").read_text())
-        self.assertEqual(cwd.name, "slot-1")
+        self.assertEqual(cwd.name, "plan")
         self.assertNotEqual(cwd, branch.resolve())
         with db.connect(self.db_path) as conn:
             slot = conn.execute("SELECT * FROM worktree_slots WHERE path=?", (str(cwd),)).fetchone()
@@ -195,7 +195,7 @@ class ClaudePlannerTest(KanpilotTestCase):
             context={"payload": {"delivery_head_sha": sha, "manifest": {"files": []}}},
             task={"repository": str(self.repo)}, run_dir=run_dir, timeout=2, heartbeat_every=1)
         worktree, mode, materials = instance._prepare_materials()
-        self.assertEqual(worktree.name, "slot-1")
+        self.assertEqual(worktree.name, "plan")
         self.assertEqual((worktree / "source.txt").read_text(), "committed baseline")
         self.assertEqual((self.repo / "source.txt").read_text(), "dirty primary checkout")
         self.assertEqual(subprocess.check_output(["git", "-C", str(worktree), "rev-parse",
@@ -264,7 +264,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
             return real_call(name, args)
         with self.fast(), mock.patch.object(self.server, "tool_call", side_effect=observe):
             self.run_round()
-        self.assertEqual(Path(self.server.created["projectPath"]).name, "slot-1")
+        self.assertEqual(Path(self.server.created["projectPath"]).name, "plan")
         self.assertEqual(observed["partial"], partial)
         self.assertEqual(observed["baseline"], "baseline source\n")
         self.assertEqual(observed["deleted_baseline"], "baseline obsolete\n")
@@ -389,5 +389,5 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         self.server.add_plan_proposal(markdown=markdown)
         with self.fast():
             self.run_round()
-        self.assertEqual(Path(self.server.created["projectPath"]).name, "slot-1")
+        self.assertEqual(Path(self.server.created["projectPath"]).name, "plan")
         self.assertEqual(self.call("get-task", {"task_id": fixture["task_id"]})["task"]["status"], "ready")

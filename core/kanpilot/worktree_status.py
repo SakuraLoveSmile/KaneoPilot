@@ -5,7 +5,8 @@ from . import db, util
 def summary(conn):
     result = {"free": 0, "leased": 0, "quarantined": 0, "unconfirmed": 0, "waiting": [], "slots": []}
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worktree_slots'").fetchone():
-        for row in conn.execute("SELECT * FROM worktree_slots ORDER BY repo_key,path"):
+        for row in conn.execute("SELECT * FROM worktree_slots WHERE task_id IS NOT NULL "
+                               "ORDER BY task_id,stage"):
             slot = dict(row)
             state = slot["state"]
             if state in result:

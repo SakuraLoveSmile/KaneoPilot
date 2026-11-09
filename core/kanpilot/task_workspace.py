@@ -268,7 +268,7 @@ def prepare_dirty_plan_snapshot(task, payload, *, worktrees_root, run_id, conn=N
                  "规划快照 HEAD 与登记不符", "worktree_invalid")
     verify_plan_workspace(task, payload)
     lease = acquire_pool(conn, task["repository"], stage="plan", run_id=run_id,
-                         request_id=request_id, sha=frozen["head"])
+                         request_id=request_id, sha=frozen["head"], task_id=task["task_id"])
     worktree_pool.register_snapshot(conn, **pool_identity(lease), snapshot=frozen)
     review_snapshot.verify_source(source, frozen)
     verify_plan_workspace(task, payload)
@@ -416,12 +416,13 @@ def pool_wait(conn, request_id, run_id, waiting):
                      request_id=request_id, detail=dict(waiting, run_id=run_id))
 
 
-def acquire_pool(conn, repository, *, stage, run_id, request_id, sha):
+def acquire_pool(conn, repository, *, stage, run_id, request_id, sha, task_id):
     from . import worktree_pool
-    lease = worktree_pool.acquire(conn, repository, stage=stage, holder_id=run_id, sha=sha)
+    lease = worktree_pool.acquire(conn, repository, stage=stage, holder_id=run_id, sha=sha,
+                                  task_id=task_id)
     if lease["state"] == "waiting":
         pool_wait(conn, request_id, run_id, lease)
-        raise util.KanpilotError("worktree_pool_waiting", "仓库槽位已满，请求保持排队")
+        raise util.KanpilotError("worktree_pool_waiting", "工作树并发上限已满，请求保持排队")
     try:
         with db.write_txn(conn):
             request = db.get_request(conn, request_id)
@@ -468,7 +469,7 @@ def _prepare_plan_pool(conn, db_path, task, payload, job, job_path):
     sha = (snapshot["head"] if snapshot else payload.get("delivery_head_sha")
            or git_delivery._value(["rev-parse", "--verify", "HEAD^{commit}"], repository))
     lease = acquire_pool(conn, repository, stage="plan", run_id=job["run_id"],
-                         request_id=job["request_id"], sha=sha)
+                         request_id=job["request_id"], sha=sha, task_id=task["task_id"])
     job.update(pool_lease=lease, pool_db_path=str(db_path), worktree_path=lease["path"])
     Path(job_path).parent.mkdir(parents=True, exist_ok=True)
     Path(job_path).write_text(util.jdump(job) + "\n", encoding="utf-8")

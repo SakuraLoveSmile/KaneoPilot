@@ -29,12 +29,23 @@ _PI_DESKTOP_THINKING_LEVELS = (
 
 def cmd_set_config(ctx, payload: dict) -> dict:
     """Update explicit local workspace/pool configuration atomically."""
-    if not payload or set(payload) - {"worktree_pool_size", "workspace_id"}:
-        raise util.bad_request("set-config 至少提供 worktree_pool_size 或 workspace_id")
+    fields = {"worktree_pool_size", "workspace_id",
+              "worktree_concurrency_limit", "worktree_retention_days"}
+    if not payload or set(payload) - fields:
+        raise util.bad_request("set-config 至少提供 workspace_id、worktree_pool_size、"
+                               "worktree_concurrency_limit 或 worktree_retention_days")
     if "worktree_pool_size" in payload:
         value = payload["worktree_pool_size"]
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
             raise util.bad_request("worktree_pool_size 必须为1–32整数")
+    if "worktree_concurrency_limit" in payload:
+        value = payload["worktree_concurrency_limit"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
+            raise util.bad_request("worktree_concurrency_limit 必须为1–32整数")
+    if "worktree_retention_days" in payload:
+        value = payload["worktree_retention_days"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 90:
+            raise util.bad_request("worktree_retention_days 必须为1–90整数")
     if "workspace_id" in payload:
         value = payload["workspace_id"]
         if not isinstance(value, str) or not value.strip() or value != value.strip():

@@ -1059,7 +1059,8 @@ class _Round:
                 conn = db.connect(self.db_path)
                 try:
                     lease = task_workspace.acquire_pool(conn, repo, stage="plan", run_id=self.run_id,
-                                                        request_id=self.request_id, sha=sha)
+                                                        request_id=self.request_id, sha=sha,
+                                                        task_id=self.task_id)
                     self.job["pool_lease"] = lease
                     self.write_job()
                     worktree = Path(lease["path"])

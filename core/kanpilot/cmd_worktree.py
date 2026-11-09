@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import constants, db, runtime_operations, util
@@ -716,6 +716,64 @@ def _retention(payload):
     if isinstance(days, bool) or not isinstance(days, int) or days < 0:
         raise util.bad_request("retention_days 必须为非负整数")
     return days
+
+
+def _tree_bytes(path):
+    """Allocated bytes for one stage tree; never follows links, never raises."""
+    total = 0
+    pending = [Path(path)]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    stat_result = entry.stat(follow_symlinks=False)
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    total += stat_result.st_blocks * 512
+        except OSError:
+            continue
+    return total
+
+
+def cmd_worktree_config(ctx, payload):
+    """Read-only stage-tree configuration and usage (protocol §5.29.6)."""
+    measure = payload.get("measure") is True
+    root = constants.worktrees_root(db.get_setting(ctx.conn, "worktrees_root") or None)
+    limit = db.get_setting(ctx.conn, "worktree_concurrency_limit",
+                           constants.DEFAULT_WORKTREE_CONCURRENCY_LIMIT)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 32:
+        limit = constants.DEFAULT_WORKTREE_CONCURRENCY_LIMIT
+    days = db.get_setting(ctx.conn, "worktree_retention_days",
+                          constants.DEFAULT_WORKTREE_RETENTION_DAYS)
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        days = constants.DEFAULT_WORKTREE_RETENTION_DAYS
+    rows = ctx.conn.execute(
+        "SELECT task_id,stage,state,path,updated_at FROM worktree_slots "
+        "WHERE task_id IS NOT NULL ORDER BY task_id,stage").fetchall()
+    tasks = {}
+    for row in rows:
+        entry = tasks.setdefault(row["task_id"], {"task_id": row["task_id"], "stages": {},
+                                                  "allocated_bytes": None, "retention_until": None})
+        entry["stages"][row["stage"]] = {"state": row["state"], "path": row["path"],
+                                        "updated_at": row["updated_at"]}
+        if measure:
+            stage_path = Path(row["path"])
+            if stage_path.is_dir():
+                entry["allocated_bytes"] = (entry["allocated_bytes"] or 0) + _tree_bytes(stage_path)
+    for task_id, entry in tasks.items():
+        task = db.get_task(ctx.conn, task_id)
+        entry["task_status"] = task["status"] if task is not None else None
+        if task is not None and task["status"] in ("done", "cancelled"):
+            try:
+                base = datetime.fromisoformat(task["updated_at"])
+                entry["retention_until"] = util.to_iso(base + timedelta(days=days))
+            except ValueError:
+                entry["retention_until"] = None
+    return {"worktrees_root": str(root), "concurrency_limit": limit, "retention_days": days,
+            "tasks": [tasks[key] for key in sorted(tasks)]}
 
 
 def cmd_worktree_audit(ctx, payload):

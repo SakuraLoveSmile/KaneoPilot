@@ -307,7 +307,10 @@ def _submit_plan_answers(ctx, payload):
             db.insert_planner_input(conn, input_id, task["task_id"], input_sha,
                                     new_manifest.get("requirements_sha256"), new_manifest.get("source_sha256"), new_manifest, now)
             next_payload = copy.deepcopy(old_payload)
-            next_payload.pop("desktop_claim", None)
+            # A continuation is a new generation: it must not inherit the
+            # previous round's lease, waiting marker or desktop claim token.
+            for carried in ("desktop_claim", "pool_lease", "worktree_pool_wait"):
+                next_payload.pop(carried, None)
             next_payload.update(input_id=input_id, planner_input_sha256=input_sha, manifest=new_manifest,
                                 confirmed_at=now, manual_authorized=True,
                                 clarification_submission={"operation_id": operation_id, "fingerprint": fingerprint,

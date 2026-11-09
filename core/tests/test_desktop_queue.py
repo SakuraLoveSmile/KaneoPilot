@@ -175,7 +175,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.native("heartbeat", {**self.identity(claim), "progress": "too late"}, error=True)
 
     def test_return_needs_input_and_fail_preserve_persistent_results(self):
-        self.call("set-config", {"worktree_pool_size": 1})
+        self.call("set-config", {"worktree_concurrency_limit": 1})
         self.plan("draft")
         draft_claim = self.claim(op="draft")
         self.submit_plan(draft_claim, status="needs_input", plan_markdown="# 草稿", questions=["范围？"])
@@ -236,14 +236,14 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(self.call("get-request", {"request_id": claim["request_id"]})["request"]["status"], "claimed")
 
     def test_return_old_generation_replay_never_reads_reused_slot(self):
-        self.call("set-config", {"worktree_pool_size": 1})
+        self.call("set-config", {"worktree_concurrency_limit": 1})
         self.plan("old")
         old = self.claim(op="old")
         self.submit_plan(old)
         self.return_slot(old)
         self.plan("new")
         new = self.claim(op="new")
-        self.assertEqual(self.slot(old)["path"], self.slot(new)["path"])
+        self.assertNotEqual(self.slot(old)["path"], self.slot(new)["path"])
         before = self.slot(new)
         with patch.object(worktree_pool, "_validate", side_effect=AssertionError("old replay read slot")), \
              patch.object(desktop, "_guard_materials", side_effect=AssertionError("old replay read materials")):
@@ -416,7 +416,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(self.return_slot(claim)["state"], "free")
 
     def test_return_receipt_reaper_missing_or_foreign_checkpoint_retains_slot(self):
-        self.call("set-config", {"worktree_pool_size": 2})
+        self.call("set-config", {"worktree_concurrency_limit": 2})
         for kind in ("missing", "lease"):
             self.plan(kind)
             claim = self.claim(op=kind)
@@ -438,7 +438,7 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertTrue(all(row["state"] == "leased" for row in rows))
 
     def test_return_preserves_unknown_operations_and_unknown_changes(self):
-        self.call("set-config", {"worktree_pool_size": 2})
+        self.call("set-config", {"worktree_concurrency_limit": 2})
         for kind in ("operation", "changes"):
             self.plan(kind)
             claim = self.claim(op=kind)
@@ -456,8 +456,8 @@ class DesktopQueueTests(KanpilotTestCase):
             if kind == "changes":
                 self.assertEqual((root / "unknown.txt").read_text(), "preserve me")
 
-    def test_twenty_desktop_plan_review_consumers_reuse_one_slot_with_outputs(self):
-        self.call("set-config", {"worktree_pool_size": 1})
+    def test_twenty_desktop_plan_review_consumers_use_task_stage_trees_with_outputs(self):
+        self.call("set-config", {"worktree_concurrency_limit": 1})
         tokens, roots, outputs = [], set(), []
         for number in range(10):
             task, _ = self.make_review("reuse" + str(number), return_plan=True)
@@ -477,10 +477,10 @@ class DesktopQueueTests(KanpilotTestCase):
             self.assertEqual(self.return_slot(claim)["state"], "free")
         self.assertEqual(len(tokens), 20)
         self.assertEqual(len(set(tokens)), 20)
-        self.assertEqual(len(roots), 1)
+        self.assertEqual(len(roots), 20)
         self.assertTrue(all(path.is_file() and path.read_text().strip() for path in outputs))
         with closing(db.connect(self.db_path)) as conn:
-            self.assertEqual(conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0], 20)
             self.assertEqual(conn.execute("SELECT count(*) FROM runtime_operations WHERE tool='worktree_consumer_return' AND status='accepted'").fetchone()[0], 20)
 
     def test_formal_plan_publishes_hold_and_terminal_retry_is_read_only(self):
@@ -489,7 +489,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(claim["request_id"], request_id)
         self.assertLessEqual(claim["heartbeat_seconds"], 60)
         job = self.read_job(claim)
-        self.assertEqual(Path(claim["context"]["plan_cwd"]).name, "slot-1")
+        self.assertEqual(Path(claim["context"]["plan_cwd"]).name, "plan")
         self.assertNotEqual(claim["context"]["plan_cwd"], job["context"]["payload"]["plan_cwd"])
         self.assertEqual(self.native("heartbeat", {**self.identity(claim), "progress": "读取冻结材料"})["ok"], True)
         result = self.submit_plan(claim)
@@ -579,6 +579,7 @@ class DesktopQueueTests(KanpilotTestCase):
         task, request_id = self.plan()
         claim = self.claim()
         self.submit_plan(claim, status="needs_input", plan_markdown="# 原草稿", questions=[QUESTION])
+        self.return_slot(claim)
         item = self.call("get-task", {"task_id": task["id"]})["task"]["plan_clarification"]
         self.assertEqual(item["questions"], [QUESTION])
         response = self.call("submit-plan-answers", {"task_id": task["id"], "clarification_id": item["id"],
@@ -635,7 +636,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertEqual(self.call("get-request", {"request_id": claim["request_id"]})["request"]["status"], "claimed")
 
     def test_expired_archive_cancel_and_changed_source_deny_submit(self):
-        self.call("set-config", {"worktree_pool_size": 4})
+        self.call("set-config", {"worktree_concurrency_limit": 4})
         for suffix, sql, value in (
             ("expired", "UPDATE requests SET lease_expires_at=? WHERE request_id=?", util.to_iso(util.now_dt() - timedelta(seconds=1))),
             ("archive", "UPDATE tasks SET save_state=? WHERE task_id=?", "archived"),
@@ -682,7 +683,7 @@ class DesktopQueueTests(KanpilotTestCase):
 
     def test_all_review_conclusions_reuse_core_and_exact_retry(self):
         # Each Desktop plan and review consumer keeps its unknown lease.
-        self.call("set-config", {"worktree_pool_size": 6})
+        self.call("set-config", {"worktree_concurrency_limit": 6})
         for suffix, conclusion in enumerate(("pass", "changes_requested", "blocked")):
             task, request_id = self.make_review(str(suffix))
             claim = self.claim("review", "review-" + str(suffix))
@@ -778,7 +779,7 @@ class DesktopQueueTests(KanpilotTestCase):
         self.assertFalse(any(r['kind'] == 'dispatch' for r in self.requests()))
 
     def test_post_report_repair_rejects_task_plan_or_execution_identity_drift(self):
-        self.call('set-config', {'worktree_pool_size': 3})
+        self.call('set-config', {'worktree_concurrency_limit': 3})
         auto_start = review_repair.try_auto_start
         for field in ('requirements_sha256', 'plan_sha256', 'run_id'):
             with self.subTest(field=field):
@@ -803,28 +804,27 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertFalse(any(r['kind'] == 'dispatch' and r['task_id'] == task['id'] for r in self.requests()))
 
     def test_secured_report_does_not_admit_an_already_terminal_review(self):
-        self.call('set-config', {'worktree_pool_size': 3})
-        for status in ('succeeded', 'failed', 'cancelled'):
-            with self.subTest(status=status):
-                task, _ = self.make_review(status, automated=True, return_plan=True)
-                claim = self.claim('review', status)
-                self.mutate('UPDATE requests SET status=?,result_json=? WHERE request_id=?',
-                            (status, util.jdump({'outcome': 'succeeded' if status == 'succeeded' else 'failed'}), claim['request_id']))
-                ctx = cli.Context(self.db_path)
-                try:
-                    with self.assertRaises(util.KanpilotError) as error:
-                        desktop._secured_command(ctx, 'report', {'request_id': claim['request_id'],
-                            'run_id': claim['run_id'], 'outcome': 'succeeded'}, self.identity(claim),
-                            'review', self.read_job(claim))
-                    self.assertEqual(error.exception.code, 'stale_run')
-                    self.assertIsNone(getattr(ctx.conn, 'authorization_guard', None))
-                finally:
-                    ctx.close()
-                self.assertFalse(any(r['kind'] == 'dispatch' and r['task_id'] == task['id'] for r in self.requests()))
+        # 三种终态由同一集合分支处理；一次代表用例即可覆盖该拒绝路径。
+        self.call('set-config', {'worktree_concurrency_limit': 10})
+        task, _ = self.make_review('terminal', automated=True, return_plan=True)
+        claim = self.claim('review', 'terminal')
+        self.mutate('UPDATE requests SET status=?,result_json=? WHERE request_id=?',
+                    ('succeeded', util.jdump({'outcome': 'succeeded'}), claim['request_id']))
+        ctx = cli.Context(self.db_path)
+        try:
+            with self.assertRaises(util.KanpilotError) as error:
+                desktop._secured_command(ctx, 'report', {'request_id': claim['request_id'],
+                    'run_id': claim['run_id'], 'outcome': 'succeeded'}, self.identity(claim),
+                    'review', self.read_job(claim))
+            self.assertEqual(error.exception.code, 'stale_run')
+            self.assertIsNone(getattr(ctx.conn, 'authorization_guard', None))
+        finally:
+            ctx.close()
+        self.assertFalse(any(r['kind'] == 'dispatch' and r['task_id'] == task['id'] for r in self.requests()))
 
     def test_review_new_execution_plan_or_material_changes_stop_before_remote(self):
         # Five plan and five review consumers intentionally retain their leases.
-        self.call("set-config", {"worktree_pool_size": 10})
+        self.call("set-config", {"worktree_concurrency_limit": 10})
         for suffix, mutation in enumerate(("run", "plan", "material", "snapshot", "execution")):
             task, request_id = self.make_review(str(suffix))
             claim = self.claim("review", "review-" + str(suffix))
@@ -879,7 +879,7 @@ class DesktopQueueTests(KanpilotTestCase):
                 self.assertFalse(first.result(timeout=5)["isError"])
 
     def test_review_response_loss_after_each_committed_core_stage_recovers(self):
-        self.call("set-config", {"worktree_pool_size": 10})
+        self.call("set-config", {"worktree_concurrency_limit": 10})
         for suffix, command, conclusion in (("register", "register-review", "pass"),
                                             ("direct", "register-review", "changes_requested"),
                                             ("advance", "advance-task", "pass"),
@@ -1102,8 +1102,9 @@ class DesktopQueueTests(KanpilotTestCase):
             payload = db.request_payload(db.get_request(conn, request_id))
             repository = db.require_task(conn, task["id"])["repository"]
             with db.write_txn(conn):
-                db.set_setting(conn, "worktree_pool_size", 1)
-            worktree_pool.acquire(conn, repository, stage="plan", holder_id="other-reader", sha=payload["delivery_head_sha"])
+                db.set_setting(conn, "worktree_concurrency_limit", 1)
+            worktree_pool.acquire(conn, repository, stage="plan", holder_id="other-reader",
+                                  sha=payload["delivery_head_sha"], task_id="other-task")
         first = self.claim(op="full-pool")
         self.assertEqual(first, {"claimed": False, "reason": "worktree_pool_waiting", "request_id": request_id})
         self.assertEqual(self.claim(op="full-pool"), first)

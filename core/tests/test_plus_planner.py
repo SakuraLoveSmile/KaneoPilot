@@ -1621,7 +1621,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
         fixture["sha"] = sha
         from kanpilot import worktree_pool
         repo_key = worktree_pool.repository_identity(fixture["repo"])["repo_key"]
-        fixture["worktree"] = self.worktrees_root.resolve() / "pool" / repo_key / "slot-1"
+        fixture["worktree"] = self.worktrees_root.resolve() / fixture["task_id"] / "plan"
         return fixture
 
     def test_full_pool_keeps_same_request_queued_without_sending(self):
@@ -1630,9 +1630,9 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):
-                db.set_setting(conn, "worktree_pool_size", 1)
+                db.set_setting(conn, "worktree_concurrency_limit", 1)
             worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id="another-reader",
-                                  sha=fixture["sha"])
+                                  sha=fixture["sha"], task_id="other-task")
         finally:
             conn.close()
         self.run_round()
@@ -1648,9 +1648,11 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
         claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": fixture["request_id"]})
         conn = db.connect(self.db_path)
         try:
-            old = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id="old-reader", sha=fixture["sha"])
+            old = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id="old-reader",
+                                        sha=fixture["sha"], task_id=fixture["task_id"])
             worktree_pool.release(conn, old["slot_id"], old["holder_id"], old["lease_token"], owner_stopped=True)
-            current = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id=claim["run_id"], sha=fixture["sha"])
+            current = worktree_pool.acquire(conn, fixture["repo"], stage="plan", holder_id=claim["run_id"],
+                                            sha=fixture["sha"], task_id=fixture["task_id"])
             self.assertEqual(old["path"], current["path"])
             self.assertNotEqual(old["lease_token"], current["lease_token"])
         finally:
@@ -1754,7 +1756,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
                         str(fixture["worktree"]), "HEAD"],
                        capture_output=True, check=True)
         self.run_round()
-        self.assert_preparation_failed(fixture, "worktree_invalid", "新槽位路径已有未登记内容")
+        self.assert_preparation_failed(fixture, "worktree_invalid", "新阶段树路径已有未登记内容")
         self.assertEqual(self.git_status(foreign), "")
 
     def test_snapshot_tracked_changes_still_block_plus_creation(self):
@@ -1764,7 +1766,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
                         str(fixture["worktree"]), fixture["sha"]], capture_output=True, check=True)
         (fixture["worktree"] / "AGENTS.md").write_text("changed source\n", encoding="utf-8")
         self.run_round()
-        self.assert_preparation_failed(fixture, "worktree_invalid", "新槽位路径已有未登记内容")
+        self.assert_preparation_failed(fixture, "worktree_invalid", "新阶段树路径已有未登记内容")
         self.assertEqual((fixture["worktree"] / "AGENTS.md").read_text(), "changed source\n")
 
     def test_released_snapshot_preserves_plus_plan_evidence_before_reuse(self):

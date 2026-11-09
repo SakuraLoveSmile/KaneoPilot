@@ -1909,7 +1909,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 **配置**：`set-config {worktree_concurrency_limit?:N, worktree_retention_days?:D}`；N 取 1–32，默认 4；D 取 1–90，默认 7。`worktrees_root` 只能经 §5.29.5 的 relocate 迁移，`set-config` 只接受与当前 canonical 根相同的值。新增只读 `worktree-config {}` → `{worktrees_root, concurrency_limit, retention_days, tasks:[{task_id, stages:{…}, allocated_bytes, retention_until}]}`，供设置页展示占用与保留状态。
 
-**并发**：全库统计 `leased` 的 `plan`+`review` 阶段树；达到 `worktree_concurrency_limit` 时新请求转 `worktree_pool_waiting`（保留可重试，claim 返回 `claimed:false`），不转业务失败。消息与 `attention-list` 的等待项沿用既有措辞。
+**并发与串行**：全库统计 `leased` 的 `plan`+`review` 阶段树；达到 `worktree_concurrency_limit` 时新请求转 `worktree_pool_waiting`（保留可重试，claim 返回 `claimed:false`），不转业务失败。同一任务同一阶段的树仍被前一持有者持有时，新代次同样等待（不新建第二棵树、不报错），直到前一持有者释放或交还；`quarantined` 的树拒绝领取，需人工解除。消息与 `attention-list` 的等待项沿用既有措辞。
 
 **保留与回收**：任务终态满 `worktree_retention_days` 后，按 §5.29.3 的归档/删除守卫把阶段树打包到 `<worktrees_root>/.archives/`，删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/` 保留。删除同样要求无活动租约、无未决操作、指纹一致。
 
@@ -1919,7 +1919,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 - 步骤：审计 `<task>/branch`、`pool/**`、`worktree_slots` 与引用计数；`git worktree move <task>/branch → <task>/run`，只更新仍指向旧路径的 active delivery 记录（不改历史请求 payload、合同、回执与历史租约）；`pool/**` 归档为 `.archives/pool-legacy-<YYYYMMDD>.tar.gz` 后删除；删除全部旧池行（含隔离行）并写事件；重建投影；逐项写回执。
 - 失败：停止并写 `unknown` 回执，不回滚已完成的 `git worktree move`（Git 已登记），人工按 `operation_id` 核对。
 
-**数据结构**：`worktree_slots` 升到 schema 7，新增 `task_id`、`stage`（`plan`/`review`/`run`），唯一索引改为 `(task_id, stage)`；`path` 仍唯一。显式 `migrate` 先备份，不隐式升级 live 库；旧池行由迁移命令删除，不预创建阶段树行。
+**数据结构**：`worktree_slots` 升到 schema 7，新增 `task_id`、`stage`（`plan`/`review`/`run`），唯一索引为 `(task_id, stage)`（仅 `task_id IS NOT NULL`）；`path` 仍唯一。为保留 schema 6 旧池行为只读，两列可空；旧行不参与分配、并发计数与 doctor 统计，由迁移命令归档后删除。显式 `migrate` 先备份，不隐式升级 live 库；不预创建阶段树行。
 
 **兼容与检查**：旧 `pool/**`、`<task>/branch` 与历史 `pool_lease` 只读；释放或恢复路径不在新布局时跳过并记事件，不修订历史。doctor 的 `worktree_pool` 检查改为按阶段树统计，detail 仍为 `free: F, leased: L, quarantined: Q, unconfirmed: U, waiting: W`（`free` 为可领取阶段树数），未通过判定仍是 `quarantined > 0` 或 `unconfirmed > 0`；Swift 端译文（ui-spec §4.15）不变。
 

@@ -61,7 +61,26 @@ def _no_links(path):
             raise util.KanpilotError("worktree_invalid", "槽位路径不可包含符号链接")
 
 
+_STAGES = ("plan", "review", "run")
+_TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _stage_path(root, task_id, stage):
+    """<worktrees_root>/<task_id>/<stage>；身份与形状在此唯一判定。"""
+    if stage not in _STAGES:
+        raise util.KanpilotError("worktree_invalid", "阶段树阶段无效")
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
+        raise util.KanpilotError("worktree_invalid", "阶段树任务标识无效")
+    root = Path(root)
+    if not root.is_absolute():
+        raise util.KanpilotError("worktree_invalid", "工作树根必须为绝对路径")
+    path = root / task_id / stage
+    _no_links(path)
+    return path
+
+
 def _pool_path(row):
+    """Legacy pool row (schema 6): read-only diagnosis, never allocated."""
     path, root = Path(row["path"]), Path(row["worktrees_root"])
     if (not path.is_absolute() or not root.is_absolute()
             or not re.fullmatch(r"slot-[1-9][0-9]*", path.name)
@@ -72,18 +91,30 @@ def _pool_path(row):
 
 
 def _validate(row, *, existing=True):
-    path = _pool_path(row)
+    if row["stage"] is None:
+        path = _pool_path(row)
+    else:
+        path = _stage_path(Path(row["worktrees_root"]), row["task_id"], row["stage"])
+        if row["path"] != str(path):
+            raise util.KanpilotError("worktree_invalid", "阶段树路径与登记不一致")
     identity = repository_identity(row["repository"])
     if any(identity[key] != row[key] for key in identity):
-        raise util.KanpilotError("worktree_invalid", "槽位仓库身份与登记不一致")
+        raise util.KanpilotError("worktree_invalid", "工作树仓库身份与登记不一致")
     if existing:
-        if (not path.is_dir() or _common(path) != Path(row["git_common_dir"])
-                or Path(_value(path, "rev-parse", "--show-toplevel")).resolve() != path
-                or _value(path, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD"):
-            raise util.KanpilotError("worktree_invalid", "槽位不是登记的独立detached工作树")
+        if not path.is_dir():
+            raise util.KanpilotError("worktree_invalid", "工作树目录不存在")
+        if (_common(path) != Path(row["git_common_dir"])
+                or Path(_value(path, "rev-parse", "--show-toplevel")).resolve() != path):
+            raise util.KanpilotError("worktree_invalid", "工作树不是登记的独立工作树")
+        branch = _value(path, "rev-parse", "--abbrev-ref", "HEAD")
+        if row["stage"] == "run":
+            if branch != constants.DELIVERY_BRANCH_PREFIX + row["task_id"]:
+                raise util.KanpilotError("worktree_invalid", "执行工作树不在任务分支上")
+        elif branch != "HEAD":
+            raise util.KanpilotError("worktree_invalid", "阶段树不是登记的独立detached工作树")
         registered = _git(row["repository"], "worktree", "list", "--porcelain", "-z")
         if os.fsencode("worktree " + str(path)) not in registered.split(b"\0"):
-            raise util.KanpilotError("worktree_invalid", "槽位不在Git登记中")
+            raise util.KanpilotError("worktree_invalid", "工作树不在Git登记中")
     return path
 
 
@@ -96,13 +127,16 @@ def projection(conn):
 
 
 def _projection(conn):
-    rows = conn.execute("SELECT * FROM worktree_slots ORDER BY repo_key,path").fetchall()
+    rows = [row for row in conn.execute(
+        "SELECT * FROM worktree_slots ORDER BY task_id,stage").fetchall()
+        if row["stage"] is not None]
     for row in rows:
-        _pool_path(row)
+        _stage_path(Path(row["worktrees_root"]), row["task_id"], row["stage"])
     roots = {row["worktrees_root"] for row in rows}
     root = next(iter(roots)) if len(roots) == 1 else str(constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None).resolve())
     payload = {"schema_version": 1, "updated_at": util.now_iso(), "worktrees_root": root,
-               "slots": [{key: row[key] for key in ("slot_id", "path", "repository", "git_common_dir", "repo_key", "state")}
+               "slots": [{key: row[key] for key in ("slot_id", "task_id", "stage", "path", "repository",
+                                                    "git_common_dir", "repo_key", "state")}
                          for row in rows]}
     target = constants.app_support() / "worktree-slots.json"
     _no_links(target)
@@ -183,40 +217,105 @@ def _lease_seconds(conn, requested=None):
     return max(limits)
 
 
-def _acquire(conn, repository, *, stage, holder_id, sha, worktrees_root=None, lease_seconds=None):
+def _concurrency_limit(conn):
+    value = db.get_setting(conn, "worktree_concurrency_limit",
+                           constants.DEFAULT_WORKTREE_CONCURRENCY_LIMIT)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
+        raise util.bad_request("worktree_concurrency_limit 必须为1–32整数")
+    return value
+
+
+def _leased_stage_count(conn):
+    return conn.execute(
+        "SELECT COUNT(*) FROM worktree_slots WHERE state='leased' AND stage IN ('plan','review')"
+    ).fetchone()[0]
+
+
+def _create_stage_tree(conn, row, *, rebuilding):
+    path = _stage_path(Path(row["worktrees_root"]), row["task_id"], row["stage"])
+
+    def create():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git(row["repository"], "worktree", "prune")
+        _git(row["repository"], "worktree", "add", "--detach", str(path), row["sha"])
+
+    _receipt(conn, row, "worktree_rebuild" if rebuilding else "worktree_add", create)
+    if rebuilding:
+        db.add_event(conn, util.now_iso(), "worktree_stage_rebuilt", task_id=row["task_id"],
+                     detail={"slot_id": row["slot_id"], "stage": row["stage"],
+                             "path": str(path), "sha": row["sha"]})
+    return path
+
+
+def _prepare_stage_tree(conn, row, *, fresh):
+    """Fresh create, missing plan/review rebuild, or clean checkout of the frozen sha."""
+    stage = row["stage"]
+    path = _stage_path(Path(row["worktrees_root"]), row["task_id"], stage)
+    if fresh:
+        if os.path.lexists(path):
+            raise util.KanpilotError("worktree_invalid", "新阶段树路径已有未登记内容")
+        _create_stage_tree(conn, row, rebuilding=False)
+        _validate(row)
+        return path
+    if not path.is_dir():
+        if stage == "run":
+            raise util.KanpilotError(
+                "worktree_missing",
+                "执行工作树缺失，拒绝重建以保护未推送提交：" + str(path))
+        _create_stage_tree(conn, row, rebuilding=True)
+        _validate(row)
+        return path
+    if _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+        raise util.KanpilotError("worktree_invalid", "空闲阶段树有未登记改动")
+    _validate(row)
+    if _value(path, "rev-parse", "HEAD") != row["sha"]:
+        _receipt(conn, row, "worktree_checkout",
+                 lambda: _git(path, "checkout", "--no-overwrite-ignore", "--detach", row["sha"]))
+    return path
+
+
+def _acquire(conn, repository, *, stage, holder_id, sha, task_id,
+             worktrees_root=None, lease_seconds=None):
     if stage not in ("plan", "review") or not isinstance(holder_id, str) or not holder_id:
-        raise util.bad_request("槽位需要plan/review阶段与持有者身份")
+        raise util.bad_request("阶段树需要 plan/review 阶段与持有者身份")
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
+        raise util.bad_request("阶段树需要合法 task_id")
     identity = repository_identity(repository)
     sha = _value(repository, "rev-parse", "--verify", str(sha) + "^{commit}")
     root = Path(worktrees_root or constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)).expanduser().absolute()
     _no_links(root)
     root = root.resolve()
+    path = _stage_path(root, task_id, stage)
     seconds, now = _lease_seconds(conn, lease_seconds), util.now_dt()
     with db.write_txn(conn):
-        same = conn.execute("SELECT * FROM worktree_slots WHERE repo_key=? AND holder_stage=? AND holder_id=? AND state='leased'",
-                            (identity["repo_key"], stage, holder_id)).fetchone()
+        same = conn.execute(
+            "SELECT * FROM worktree_slots WHERE task_id=? AND stage=? AND holder_id=? AND state='leased'",
+            (task_id, stage, holder_id)).fetchone()
         if same is not None:
             if same["sha"] != sha:
                 raise util.KanpilotError("conflict", "持有者已绑定另一冻结提交")
             # This path must not checkout or delete in-use session artifacts.
             return _result(same)
-        rows = conn.execute("SELECT * FROM worktree_slots WHERE repo_key=? ORDER BY path", (identity["repo_key"],)).fetchall()
-        row = next((r for r in rows if r["state"] == "free"), None)
+        row = conn.execute("SELECT * FROM worktree_slots WHERE task_id=? AND stage=?",
+                           (task_id, stage)).fetchone()
         fresh = row is None
+        if row is not None and row["state"] == "leased":
+            # Same task/stage runs serially: the new generation waits for the
+            # previous holder to release instead of failing or reusing its tree.
+            return {"state": "waiting", "repo_key": identity["repo_key"],
+                    "reason": "worktree_pool_full"}
+        if row is not None and row["state"] == "quarantined":
+            raise util.KanpilotError("conflict", "阶段树处于隔离状态，需先解除隔离")
+        if _leased_stage_count(conn) >= _concurrency_limit(conn):
+            return {"state": "waiting", "repo_key": identity["repo_key"],
+                    "reason": "worktree_pool_full"}
         if fresh:
-            limit = db.get_setting(conn, "worktree_pool_size", constants.DEFAULT_WORKTREE_POOL_SIZE)
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 32:
-                raise util.bad_request("worktree_pool_size 必须为1–32整数")
-            if len(rows) >= limit:
-                return {"state": "waiting", "repo_key": identity["repo_key"], "reason": "worktree_pool_full"}
-            number = 1
-            paths = {r["path"] for r in rows}
-            while str(root / "pool" / identity["repo_key"] / ("slot-" + str(number))) in paths:
-                number += 1
-            path = root / "pool" / identity["repo_key"] / ("slot-" + str(number))
             slot_id = uuid.uuid4().hex
-            conn.execute("INSERT INTO worktree_slots(slot_id,repo_key,path,repository,git_common_dir,worktrees_root,state,updated_at) VALUES (?,?,?,?,?,?,'free',?)",
-                         (slot_id, identity["repo_key"], str(path), identity["repository"], identity["git_common_dir"], str(root), util.to_iso(now)))
+            conn.execute(
+                "INSERT INTO worktree_slots(slot_id,task_id,stage,repo_key,path,repository,"
+                "git_common_dir,worktrees_root,state,updated_at) VALUES (?,?,?,?,?,?,?,?,'free',?)",
+                (slot_id, task_id, stage, identity["repo_key"], str(path), identity["repository"],
+                 identity["git_common_dir"], str(root), util.to_iso(now)))
         else:
             slot_id = row["slot_id"]
         token = uuid.uuid4().hex
@@ -224,21 +323,9 @@ def _acquire(conn, repository, *, stage, holder_id, sha, worktrees_root=None, le
                      (stage, holder_id, token, sha, util.plus_seconds(seconds, now), util.to_iso(now), util.to_iso(now), os.getpid(), slot_id))
         row = _owned(conn, slot_id, holder_id, token)
     try:
-        path = _validate(row, existing=not fresh)
-        if fresh:
-            if os.path.lexists(path):
-                raise util.KanpilotError("worktree_invalid", "新槽位路径已有未登记内容")
-            def create():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                _git(row["repository"], "worktree", "add", "--detach", str(path), sha)
-            _receipt(conn, row, "worktree_add", create)
-            _validate(row)
-        else:
-            if _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
-                raise util.KanpilotError("worktree_invalid", "空闲槽位有未登记改动")
-            _receipt(conn, row, "worktree_checkout", lambda: _git(path, "checkout", "--no-overwrite-ignore", "--detach", sha))
-        if _value(path, "rev-parse", "HEAD") != sha:
-            raise util.KanpilotError("worktree_invalid", "槽位检出提交不匹配")
+        path = _prepare_stage_tree(conn, row, fresh=fresh)
+        if _value(path, "rev-parse", "HEAD") != row["sha"]:
+            raise util.KanpilotError("worktree_invalid", "阶段树检出提交不匹配")
     except Exception as exc:
         quarantine(conn, slot_id, holder_id, token, str(exc))
         raise
@@ -246,9 +333,10 @@ def _acquire(conn, repository, *, stage, holder_id, sha, worktrees_root=None, le
     return _result(_owned(conn, slot_id, holder_id, token))
 
 
-def acquire(conn, repository, *, stage, holder_id, sha, worktrees_root=None, lease_seconds=None):
+def acquire(conn, repository, *, stage, holder_id, sha, task_id,
+            worktrees_root=None, lease_seconds=None):
     reap_expired(conn)
-    result = _acquire(conn, repository, stage=stage, holder_id=holder_id, sha=sha,
+    result = _acquire(conn, repository, stage=stage, holder_id=holder_id, sha=sha, task_id=task_id,
                       worktrees_root=worktrees_root, lease_seconds=lease_seconds)
     if result["state"] == "leased":
         try:
@@ -257,10 +345,6 @@ def acquire(conn, repository, *, stage, holder_id, sha, worktrees_root=None, lea
             quarantine(conn, result["slot_id"], holder_id, result["lease_token"], str(exc))
             raise
     return result
-
-
-# Short alias for core consumers restoring a persisted lease DTO.
-validate = validate_lease
 
 
 def heartbeat(conn, slot_id, holder_id, lease_token):

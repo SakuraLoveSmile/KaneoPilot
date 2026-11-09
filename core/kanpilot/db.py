@@ -341,6 +341,8 @@ def _upgrade_v4_to_v5(conn: sqlite3.Connection) -> None:
 WORKTREE_SLOTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS worktree_slots(
   slot_id TEXT PRIMARY KEY,
+  task_id TEXT,
+  stage TEXT CHECK(stage IN ('plan','review','run')),
   repo_key TEXT NOT NULL,
   path TEXT NOT NULL UNIQUE,
   repository TEXT NOT NULL,
@@ -353,6 +355,8 @@ CREATE TABLE IF NOT EXISTS worktree_slots(
   baseline_json TEXT, reason TEXT
 );
 CREATE INDEX IF NOT EXISTS worktree_slots_repo ON worktree_slots(repo_key,state);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_task_stage ON worktree_slots(task_id,stage)
+  WHERE task_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_key,holder_stage,holder_id)
   WHERE state='leased';
 """
@@ -366,12 +370,25 @@ def _upgrade_v5_to_v6(conn: sqlite3.Connection) -> None:
             conn.execute(statement)
 
 
+def _upgrade_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Stage trees (KP-WT01): identify rows by (task_id, stage), keep legacy pool rows read-only."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(worktree_slots)")}
+    if "task_id" not in columns:
+        conn.execute("ALTER TABLE worktree_slots ADD COLUMN task_id TEXT")
+    if "stage" not in columns:
+        conn.execute("ALTER TABLE worktree_slots ADD COLUMN stage TEXT "
+                     "CHECK(stage IN ('plan','review','run'))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_task_stage "
+                 "ON worktree_slots(task_id,stage) WHERE task_id IS NOT NULL")
+
+
 _UPGRADES = {
     (1, 2): _upgrade_v1_to_v2,
     (2, 3): _upgrade_v2_to_v3,
     (3, 4): _upgrade_v3_to_v4,
     (4, 5): _upgrade_v4_to_v5,
     (5, 6): _upgrade_v5_to_v6,
+    (6, 7): _upgrade_v6_to_v7,
 }
 
 def _upgrade_schema(conn: sqlite3.Connection, version: int) -> None:

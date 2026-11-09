@@ -60,7 +60,8 @@ def scene(tmp_path, monkeypatch):
 
 
 def add_lease(scene):
-    lease = worktree_pool.acquire(scene.conn, scene.repo, stage="plan", holder_id="leased-run", sha="HEAD")
+    lease = worktree_pool.acquire(scene.conn, scene.repo, stage="plan", holder_id="leased-run",
+                                  sha="HEAD", task_id="task")
     scene.conn.execute("UPDATE worktree_slots SET owner_pid=2147483647,owner_state='unknown',reason='owner_stop_unconfirmed' WHERE slot_id=?",
                        (lease["slot_id"],))
     lease = dict(scene.conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone())
