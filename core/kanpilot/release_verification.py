@@ -1126,17 +1126,31 @@ def cmd_resolve_missing_release_verification(ctx, payload):
         return _result(_load(ctx.conn, task['task_id'], value['verification_id']))
     _require(payload.get('confirm') is True, 'release_verification_resolution',
              '判定报告缺失必须明确确认：旧尝试保留审计，可显式重新验证')
-    _require(value['state'] == 'unknown' and value.get('failure_code') == 'release_verification_report_pending',
-             'release_verification_resolution', '仅等待正式报告且尚未交付的当前验证可判定缺失')
+    pending = (value['state'] == 'unknown'
+               and value.get('failure_code') == 'release_verification_report_pending')
+    # A transient control-plane outage can persist the attempt as blocked before
+    # the report is read; the live check below still proves no report is ready.
+    interrupted = (value['state'] == 'blocked'
+                   and value.get('failure_code') == 'validation_failed')
+    _require(pending or interrupted, 'release_verification_resolution',
+             '仅等待正式报告或控制面瞬时不可用的当前验证可判定缺失')
     _unchanged(ctx.conn, task, value)
     client = _client(value, read_only=True, require_input=True)
+    session_id, turn = value['session_id'], value['execution_turn_id']
+    observed = client.agent_status(session_id); inner = observed.get('status') or observed
+    _require(inner.get('isRunning') is False and inner.get('currentTurnId') in (None, turn),
+             'release_verification_resolution', '独立验证会话仍在运行或执行轮次已变化')
+    record = client.turn_get(session_id, turn, require_identity=True)
+    _require(worker._turn_identity_matches(record, session_id, turn)
+             and worker._turn_status(record) == 'completed',
+             'release_verification_resolution', '原执行轮次未完成或身份不符')
     try:
-        _completed_report(ctx.conn, client, value, for_restart=True)
-    except util.KanpilotError as exc:
-        _require(getattr(exc, 'code', '') == 'release_verification_report_pending',
-                 'release_verification_resolution', '原报告状态已变化，请先核对原尝试')
-    else:
-        _require(False, 'release_verification_resolution', '正式报告已可读取，请先核对原尝试')
+        report = worker._fetch_report_payload(client, session_id, value.get('execution_id'),
+                                              (value.get('proposal') or {}).get('id'), {turn})
+    except util.KanpilotError:
+        report = {}
+    _require(isinstance(report, dict) and report.get('state') != 'ready',
+             'release_verification_resolution', '正式报告已可读取，请先核对原尝试')
     draft = _runtime_draft(client, value)
     with db.write_txn(ctx.conn):
         latest = _load(ctx.conn, task['task_id'], value['verification_id'])

@@ -94,3 +94,20 @@ class MissingReportTest(TestCase):
         with self.assertRaises(util.KanpilotError) as caught:
             self.resolve(value, expected_context_sha256='0' * 64)
         self.assertEqual(caught.exception.code, 'release_verification_resolution')
+
+    def test_resolution_covers_a_control_plane_interruption(self):
+        value = self.draft_report()
+        # A transient control-plane outage persists the attempt as blocked before
+        # the report is ever read; the live read must still prove it is missing.
+        blocked = dict(value, state='blocked', failure_code='validation_failed',
+                       reason='PI-Desktop 控制面未启用（连接文件 active 不是 true）')
+        with db.write_txn(self.conn):
+            db.update_runtime_operation(self.conn, verification._scope('parent'),
+                                        verification._op(value['verification_id']), self.ctx.now_iso,
+                                        status='rejected', result_json=util.jdump(blocked))
+        result = self.resolve(blocked)
+        self.assertEqual(result['verification']['state'], 'blocked')
+        resolved = verification._load(self.conn, 'parent', value['verification_id'])
+        self.assertTrue(resolved['report_missing'])
+        self.assertEqual(resolved['failure_code'], 'release_verification_report')
+        self.assertTrue(verification.attempt_summary(self.conn, self.task())['can_restart_verification'])
