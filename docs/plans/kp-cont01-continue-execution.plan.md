@@ -1,7 +1,7 @@
 # KP-CONT01 继续执行同一 Pi 目标
 
 - 任务标识：`kp-cont01`
-- 状态：实现中
+- 状态：待体验（v0.5.6-test.203 已发布并安装）
 - 分支：`feat/20261110-kp-cont01-continue-execution`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-cont01-continue-execution/`
 - 基于：`fa678fc`（kp-ep01 测试版 v0.5.6-test.201 的代码与夹具）
@@ -80,4 +80,8 @@ continue-execution {task_id, run_id, confirm: true, operation_id?}
 | 2026-11-11 00:20 | 发送 + 同轮重开 | `request-continuation` 发送后快照 job、绑新 turn、清旧终态、任务清阻塞转 running、`round-observe` 拉起 worker；worker 轮次预算改用 `continuation_started_at` | 实现中 |
 | 2026-11-11 00:20 | 桌面入口 | 执行页新增「继续执行同一 Goal」条与二次确认；`get-task.continue_execution` 投影；FakeCore 与解码夹具 | 未编译 |
 | 2026-11-11 00:24 | 核心测试 | `test_request_continuation` 4 项通过；续接/状态/桌面队列 101 项 + 53 subtests 通过 | 通过 |
-| 2026-11-11 00:26 | 未完成 | 云端编译、测试版发布与安装、实机按钮核对 | 待办 |
+| 2026-11-11 00:26 | 推送构建 202 | 分支 `c21d110` push run 42854506499：identity/checks 1–5/android/macos-fixtures a+b/macos-package/codex-platforms 全绿 | 通过 |
+| 2026-11-11 00:57 | 测试版 203 | 手动 `channel=test`、`base_version=0.5.6` run 42857275049 全绿，发布 v0.5.6-test.203（source c21d110） | 通过 |
+| 2026-11-11 01:00 | 安装 203 | DMG sha256 与 SHA256SUMS/manifest 一致；`CFBundleShortVersionString=0.5.6-test.203`、build 203、codesign 通过；旧 201 备份 `/Applications/.KaneoPilot-backup-cont01-20261111T010001`；启动后 MCP/mobile/engine 与新运行观察者恢复 | 通过 |
+| 2026-11-11 01:02 | 实机投影核对 | 安装包核心 `get-task` 返回 `continue_execution={eligible:false, state:"none", reason:"任务不在需人工处理状态"}`；当前任务已被用户重新执行到新轮次 `cc6167fa`，running，因此入口按预期隐藏 | 通过（无阻塞轮次可点） |
+| 2026-11-11 01:02 | 未验证 | 阻塞任务的 eligible 按钮视觉与真实发送/同轮接管端到端；需等下一次 Pi 轮次阻塞后由用户点击 | 待体验 |
