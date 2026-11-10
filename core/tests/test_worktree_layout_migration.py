@@ -180,3 +180,26 @@ def test_backup_inside_root_is_refused(scene):
     make_task(scene)
     with pytest.raises(util.KanpilotError):
         plan(scene, backup_dir=str(scene.root / "backup"))
+
+def test_unrelated_pending_operation_does_not_block(scene):
+    make_task(scene)
+    scene.conn.execute(
+        "INSERT INTO runtime_operations(scope_id,operation_id,harness_id,tool,request_sha256,"
+        "status,created_at,updated_at) VALUES('release-project:p','batch','core',"
+        "'github_release_batch','hash','prepared','then','then')")
+    scene.conn.commit()
+    planned = plan(scene)
+    assert planned["status"] == "planned", planned["blockers"]
+
+
+def test_pending_worktree_operation_blocks(scene):
+    make_task(scene)
+    scene.conn.execute(
+        "INSERT INTO runtime_operations(scope_id,operation_id,harness_id,tool,request_sha256,"
+        "status,created_at,updated_at) VALUES('worktree-gc','remove','core',"
+        "'worktree_remove','hash','unknown','then','then')")
+    scene.conn.commit()
+    planned = plan(scene)
+    assert planned["status"] == "blocked"
+    assert any(item["code"] == "operation_pending" for item in planned["blockers"])
+

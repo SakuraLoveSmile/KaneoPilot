@@ -115,10 +115,12 @@ def _inventory(conn, root: Path) -> dict:
     active = conn.execute("SELECT COUNT(*) FROM requests WHERE status IN ('queued','claimed')").fetchone()[0]
     if active:
         blockers.append({"code": "request_active", "detail": f"{active} 个请求排队或执行中"})
-    pending = conn.execute("SELECT COUNT(*) FROM runtime_operations "
-                           "WHERE status IN ('prepared','unknown')").fetchone()[0]
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM runtime_operations WHERE status IN ('prepared','unknown') "
+        "AND (scope_id LIKE 'worktree%' OR scope_id LIKE 'worktree-slot:%' OR tool LIKE 'worktree%')"
+    ).fetchone()[0]
     if pending:
-        blockers.append({"code": "operation_pending", "detail": f"{pending} 个操作尚未确认"})
+        blockers.append({"code": "operation_pending", "detail": f"{pending} 个工作树相关操作尚未确认"})
     pool = root / "pool"
     legacy = [dict(row) for row in conn.execute(
         "SELECT slot_id,path,state FROM worktree_slots WHERE task_id IS NULL ORDER BY path").fetchall()]
