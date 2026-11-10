@@ -1,7 +1,7 @@
 # KP-WT01 任务级工作树布局与位置设置
 
 - 任务标识：`kp-wt01`
-- 状态：实现中（S1 规格完成并提交 35cc2fc；S2a 任务阶段树核心完成）
+- 状态：待体验（S1/S2a/S2b 已实现并提交；真机迁移完成；S2c 保留回收与 S3 设置页未做）
 - 分支：`chore/20261110-kp-wt01-task-worktree-layout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-chore-kp-wt01-task-worktree-layout/`
 - 合入目标：`main`
@@ -166,3 +166,4 @@
 | 2026-11-10 02:20 | 任务 worktree | 分支 `chore/20261110-kp-wt01-task-worktree-layout`，worktree `20261110-chore-kp-wt01-task-worktree-layout/`；规格提交在 main（35cc2fc），实现从该提交起 | 完成 |
 | 2026-11-10 04:10 | S2a 核心阶段树 | schema 7（`task_id`/`stage` + 部分唯一索引，v6→v7 升级保留旧池行只读）；`worktree_pool` 路径改 `<root>/<task_id>/<stage>`、`plan/review` 缺失按冻结 sha 重建并写 `worktree_stage_rebuilt`、`run` 缺失拒绝重建（`worktree_missing`）、同任务同阶段串行（占用→等待）、全局 `worktree_concurrency_limit`；`task_id` 贯穿 `task_workspace`/Plus 规划/评审/`git_delivery`；续规划不继承上一轮 `pool_lease`/等待标记/claim 凭据；doctor 与 `attention-list` 只统计阶段树；`set-config` 增并发与保留字段，新增只读 `worktree-config`（`measure` 可选占用统计） | 隔离测试：一次全量 `core/tests` 运行 4700 passed / 8 failed（schema 版本断言、旧池行等待语义、通用 report 未释放、续规划继承租约），逐项修复后 `test_base` / `test_review_stage_recovery` / `test_worktree_pool` 96 passed；**未再跑第二次全量**。旧池行仍留在真实库，迁移命令尚未实现 |
 | 2026-11-10 12:00 | S2b 执行树与迁移 | 执行工作树 `<task>/branch` → `<task>/run`（`git_delivery`、`task_workspace`、`review_resolution`、GC 审计兼容两种名字）；新增 `worktree-layout-migrate`：预览审计（`audit_sha256`、阻断原因）、确认后 `git worktree move`、只改仍指向旧路径的 active delivery 记录、`pool/**` 归档到 `<root>/.archives/pool-legacy-<日期>.tar.gz`、删除 schema 6 旧池行、重建投影；回执 scope `worktree-layout-migrate`，成功重放返回 `replayed`，失败写 `unknown` 并保留现场 | 隔离测试 `test_worktree_layout_migration.py` 8 项通过（预览/确认/重放/活跃请求阻断/租约阻断/审计变化/失败保留/备份位置）；改名后相关套件 `test_git_delivery`、`test_execution_stage_contract`、`test_task_ai_action`、`test_review_resolution` 等 204 项、`test_task_workspace`/`test_worktree_*`/`test_review_stage_recovery`/`test_claude_planner` 203 项通过；desktop_queue + plus_planner 135 项、cleanup/pool/status 115 项通过；未跑第二次全量 |
+| 2026-11-10 13:45 | 真机迁移（用户授权） | 引擎确认停止（`executorSchedulingEnabled=false`）；DB 备份 `backups/pre-kp-wt01-20261110.db`；`migrate` 升 schema 7（自动备份 `migration-20261110T054515Z`）；`worktree-layout-migrate` 预览 `audit_sha256 2a801d76…` 无阻断后确认执行 | 2 个任务目录 `branch`→`run`（`csim4lhdf81m1k7wib615fdv`、`wjhpqxfqxr3084vxtc19e1uo`），delivery 路径同步；`pool/**` 归档 `.archives/pool-legacy-20261110.tar.gz`（5.2 MB、385 项、sha256 f768b0f5…）后删除；5 条旧池行删除；回执 accepted。复核：两仓库 `git worktree list` 指向 `run` 且分支不变；`worktree-config` 返回 0 个阶段树、并发 4、保留 7；`doctor` 顶层 ok=true，`worktree_pool` 全 0；投影 `worktree-slots.json` slots 为空 | 完成。旧 App（schema 6 核心）此后无法读写该库，需安装含本次核心的新构建再启用引擎 |
