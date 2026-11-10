@@ -362,6 +362,9 @@ def _directories(root, slots):
     paths = set()
     if root.is_dir() and not root.is_symlink():
         for task in root.iterdir():
+            if task.name == ".archives":
+                # Layout migration archives live here; they are evidence, not GC candidates.
+                continue
             if task.name == "pool" and task.is_dir() and not task.is_symlink():
                 for repo in task.iterdir():
                     if repo.is_dir() and not repo.is_symlink():
@@ -512,7 +515,7 @@ def _audit(ctx, retention_days, own_operation=None, manual=False):
                     reasons.append("task_identity_unknown")
                 elif not task.get("repository") or _common(task["repository"]) != common:
                     reasons.append("task_repository_mismatch")
-            elif task_id and path.name == "branch":
+            elif task_id and path.name in ("branch", "run"):
                 entry.update(category="execution_branch", task_id=task_id)
                 branch_reasons, evidence = _branch_evidence(task, path, common, head, branch)
                 reasons.extend(branch_reasons)

@@ -34,7 +34,7 @@ def scene(tmp_path, monkeypatch):
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
     source = temporary / "worktrees"
-    branch = source / "task" / "branch"
+    branch = source / "task" / "run"
     branch.parent.mkdir(parents=True)
     git(repo, "worktree", "add", "-b", "task-branch", str(branch), "HEAD")
     (branch / "file.txt").write_bytes(b"staged\n")
@@ -106,7 +106,7 @@ def test_preview_is_read_only_and_dirty_material_and_index_survive(scene):
     assert not Path(scene.payload["backup_dir"]).exists()
     assert not scene.conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=?", (relocate._SCOPE,)).fetchone()
     result = apply(scene)
-    moved = scene.destination / "task" / "branch"
+    moved = scene.destination / "task" / "run"
     assert result["worktree_count"] == 1
     assert scene.source.is_symlink() and scene.source.resolve() == scene.destination
     assert relocate._value(moved, "rev-parse", "--show-toplevel") == str(moved)

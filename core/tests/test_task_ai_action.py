@@ -28,7 +28,7 @@ class ConflictActionFixture(KanpilotTestCase):
         git(self.repo, "add", "tracked.txt"); git(self.repo, "commit", "-m", "shared base")
         self.original_base = git(self.repo, "rev-parse", "HEAD")
         self.branch = "kaneo/" + self.task_id
-        self.worktree = self.root / "trees" / self.task_id / "branch"
+        self.worktree = self.root / "trees" / self.task_id / "run"
         self.worktree.parent.mkdir(parents=True)
         git(self.repo, "worktree", "add", "-b", self.branch, str(self.worktree), "HEAD")
         (self.worktree / "tracked.txt").write_text("task implementation\n")

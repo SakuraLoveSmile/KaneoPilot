@@ -1723,7 +1723,7 @@ class TestPlanSnapshotWorktree(PlusPlannerCase):
 
     def test_manual_branch_validation_keeps_specific_reason(self):
         fixture = self.snapshot_fixture()
-        branch = self.worktrees_root / fixture["task_id"] / "branch"
+        branch = self.worktrees_root / fixture["task_id"] / "run"
         branch.parent.mkdir(parents=True, exist_ok=True)
         branch_name = "kaneo/" + fixture["task_id"]
         self.assertTrue(branch.is_dir())

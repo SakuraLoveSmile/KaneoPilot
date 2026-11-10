@@ -252,7 +252,7 @@ def _owned_workspace(ctx, task, value, prepared):
     git_delivery._local_task_id(task_id)
     key = "review_repair_preparing:" + task_id
     branch = constants.DELIVERY_BRANCH_PREFIX + task_id
-    target = root / task_id / "branch"
+    target = root / task_id / "run"
     identity = {"mode": "manual", "workspace_version": 1, "branch": branch,
                 "worktree_path": str(target), "base_branch": git_delivery._value(["rev-parse", "--abbrev-ref", "HEAD"], task["repository"]),
                 "base_sha": prepared["frozen"]["head"], "head_sha": prepared["frozen"]["head"]}

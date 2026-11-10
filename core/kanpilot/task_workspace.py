@@ -84,7 +84,7 @@ def cmd_repair_review_fix_workspace(ctx, payload):
                  and delivery.get("head_sha") == delivery.get("base_sha") == expected
                  and not any(delivery.get(key) for key in
                              ("commits", "pushed_sha", "pr_url", "pr_number", "pr_state", "merged_at"))
-                 and not path.is_symlink() and path.resolve() == root / task_id / "branch",
+                 and not path.is_symlink() and path.resolve() == root / task_id / "run",
                  "修复分支不是登记的空白交付基线，未移动工作树", "worktree_invalid")
     identity = dict(repository=task["repository"], delivery=delivery, reviewed_head_sha=reviewed,
                     review_key=task["review_key"], review_source_task_id=task["review_source_task_id"])
@@ -184,7 +184,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
         if intent is None:
             git_delivery._local_task_id(task_id)
             branch = constants.DELIVERY_BRANCH_PREFIX + task_id
-            path = root.expanduser().resolve() / task_id / "branch"
+            path = root.expanduser().resolve() / task_id / "run"
             refs = git_delivery._value(["for-each-ref", "--format=%(refname)",
                                        "refs/heads/" + branch, "refs/remotes/origin/" + branch], repository)
             util.require(not refs and not os.path.lexists(path),
@@ -210,7 +210,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
         delivery = intent.get("delivery")
         util.require(isinstance(delivery, dict)
                      and delivery.get("branch") == constants.DELIVERY_BRANCH_PREFIX + task_id
-                     and delivery.get("worktree_path") == str(root.expanduser().resolve() / task_id / "branch")
+                     and delivery.get("worktree_path") == str(root.expanduser().resolve() / task_id / "run")
                      and delivery.get("base_sha") == delivery.get("head_sha")
                      and (base_sha is None or delivery.get("base_sha") == base_sha),
                      "准备中的任务工作区身份不符", "worktree_invalid")

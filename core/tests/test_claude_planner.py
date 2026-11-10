@@ -222,7 +222,7 @@ class PlusPlanningSnapshotTest(PlusPlannerCase):
         fixture = self.plus_request(repo=repo)
         task_id, request_id = fixture["task_id"], fixture["request_id"]
         sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-        branch = self.worktrees_root / task_id / "branch"
+        branch = self.worktrees_root / task_id / "run"
         self.assertTrue(branch.is_dir())  # Created by the first formal planning submission.
         partial = b"partial changes retained after failure\n"
         (branch / "partial.py").write_bytes(partial)

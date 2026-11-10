@@ -1917,6 +1917,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 - 前置：无活动引擎实例、无 `leased` 阶段树、无 `queued`/`claimed` 请求、无 `prepared`/`unknown` 操作、备份目录可写、预览指纹未变。
 - 步骤：审计 `<task>/branch`、`pool/**`、`worktree_slots` 与引用计数；`git worktree move <task>/branch → <task>/run`，只更新仍指向旧路径的 active delivery 记录（不改历史请求 payload、合同、回执与历史租约）；`pool/**` 归档为 `.archives/pool-legacy-<YYYYMMDD>.tar.gz` 后删除；删除全部旧池行（含隔离行）并写事件；重建投影；逐项写回执。
+- 预览返回 `audit_sha256` 与阻断原因；`backup_dir` 保存 `audit.json`、`tasks.json`、`worktree_slots.json` 快照；回执 scope 为 `worktree-layout-migrate`，同操作重放要求参数一致且已完成，成功重放返回 `replayed`。
 - 失败：停止并写 `unknown` 回执，不回滚已完成的 `git worktree move`（Git 已登记），人工按 `operation_id` 核对。
 
 **数据结构**：`worktree_slots` 升到 schema 7，新增 `task_id`、`stage`（`plan`/`review`/`run`），唯一索引为 `(task_id, stage)`（仅 `task_id IS NOT NULL`）；`path` 仍唯一。为保留 schema 6 旧池行为只读，两列可空；旧行不参与分配、并发计数与 doctor 统计，由迁移命令归档后删除。显式 `migrate` 先备份，不隐式升级 live 库；不预创建阶段树行。
