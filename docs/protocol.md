@@ -1162,6 +1162,15 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - **不受影响**：PI CLI 后端、已派发的 spec/job/session、Plus 用户手工重命名、原有项目路径、旧历史轮次（不批量改名）。
 - 显示名**不得**用于去重、路径生成、权限判断或完成判定；`session_marker`、`task_id`/`run_id`、`session_id`/`turn_id`、计划哈希与事件关联仍是机器身份。
 
+### 5.23.11 同一 Goal 继续执行（kp-cont01，2026-11-11）
+
+- 命令 `request-continuation {task_id, run_id, confirm, operation_id?}`：仅对当前任务的 `pi_desktop` 轮次、任务 `needs_user`、`failure_code ∈ {verification_unconfirmed, execution_failed, execution_interrupted}`、job 已收尾且有持久 terminal、session/计划/配置快照与任务一致、无 queued/claimed 请求、无 prepared/unknown 的继续操作时允许；`confirm` 必须为 true。
+- 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
+- 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
+- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
+- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
+- 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
+
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
 本节冻结 T6：把普通/修复计划生成、dispatch 控制端、monitor 控制端与 review 控制端的模型调用全部交到用户自己的 PI-Desktop-Plus 本机 MCP 控制面，KaneoPilot 继续负责确定性的队列、租约、审批与状态写入。界面度量见 ui-spec §4.10，执行端编排见 automation-contract §2。本节**不**改变 §5.22 的手动规划门、§5.23.1 的计划阅读、§5.23.3 的任务执行后端、§5.23.9 的 Goal 契约代批与 monitor/Review 状态机。

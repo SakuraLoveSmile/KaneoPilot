@@ -1052,7 +1052,7 @@ def _resume_job(job_path: Path, spec: dict):
 
 def _round_remaining_seconds(job: dict, timeout: float, spec=None) -> float:
     """续接观察的剩余预算（自 job.started_at 起算；不可解析 → 全额时限）。"""
-    started = util.parse_ts(job.get("started_at"))
+    started = util.parse_ts(job.get("continuation_started_at") or job.get("started_at"))
     now = util.parse_ts(util.now_iso())
     if started is None or now is None:
         return timeout

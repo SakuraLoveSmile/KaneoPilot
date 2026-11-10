@@ -887,6 +887,18 @@ if let first = timelineMessage("turn-throttle", "assistant", at: "2026-11-10T09:
     expect(progress.last?.title == "已修改并验证", "末条助手里程碑保留")
 }
 
+// kp-cont01：继续执行投影与响应解码。
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":true,"state":"ready","run_id":"cont-run","turn_id":null,"reason":null}}"#) {
+    expect(task.continueExecution?.eligible == true && task.continueExecution?.state == "ready", "继续执行资格解码")
+    expect(task.continueExecution?.runId == "cont-run", "继续执行绑定轮次")
+}
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"running"}"#) {
+    expect(task.continueExecution == nil, "旧核心无继续执行字段照常解码")
+}
+if let response = decode(RequestContinuationResponse.self, #"{"status":"continued","turn_id":"turn-2","session_id":"sess-1","deduplicated":false}"#) {
+    expect(response.status == "continued" && response.turnId == "turn-2", "继续执行响应解码")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

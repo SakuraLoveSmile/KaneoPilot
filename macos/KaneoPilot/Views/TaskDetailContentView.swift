@@ -452,6 +452,13 @@ struct TaskExecutionTabView: View {
         // 执行页不再内嵌阅读器，也不轮询消息正文。
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.s) {
+                if let continuation = detail?.continueExecution,
+                   continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
+                    ContinueExecutionBar(taskID: taskID,
+                                         runID: detail?.runId ?? continuation.runId,
+                                         view: continuation)
+                        .padding(.horizontal, Spacing.l)
+                }
                 ExecutionRetrospectiveView(
                     detail: detail, digest: sessionDigest,
                     isExpanded: $retrospectiveExpanded, measuredHeight: $retrospectiveHeight,

@@ -466,6 +466,25 @@ final class AppViewModel: ObservableObject {
         return outcome
     }
 
+    /// kp-cont01：向同一 Plus 会话发送继续当前 Goal 的指令（确认由界面二次确认）。
+    func requestContinuation(taskID: String, runID: String,
+                             onError: ((String) -> Void)? = nil) async -> RequestContinuationResponse? {
+        var outcome: RequestContinuationResponse?
+        await perform("继续执行", onError: onError) {
+            let response = try await self.client.run(
+                "request-continuation",
+                payload: ["task_id": taskID, "run_id": runID, "confirm": true,
+                          "operation_id": UUID().uuidString],
+                timeout: 120, as: RequestContinuationResponse.self)
+            guard ["continued", "sent"].contains(response.status) else {
+                throw CoreError.badOutput("继续执行结果与当前任务不匹配，请刷新后重试")
+            }
+            outcome = response
+            return "已继续执行，正在接管观察"
+        }
+        return outcome
+    }
+
     func currentEngineFixRevert(taskID: String) async throws -> EngineFixRevert {
         let task = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
         guard task.allowedActions?.contains("revert_engine_fix") == true, let candidate = task.engineFixRevert else {

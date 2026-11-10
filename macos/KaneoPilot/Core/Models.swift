@@ -658,6 +658,8 @@ struct TaskDetail: Decodable, Identifiable {
     let enqueueKind: String?
     /// §5.32：执行复盘投影（仅 `get-task`）；字段缺失或为 nil 时界面显示「未汇总」。
     let retrospective: TaskRetrospective?
+    /// kp-cont01：同一 Plus 会话继续当前 Goal 的只读资格投影。
+    let continueExecution: ContinueExecutionView?
 
     var id: String { taskId }
 
@@ -685,6 +687,22 @@ struct TaskDetail: Decodable, Identifiable {
 
 struct GetTaskResponse: Decodable {
     let task: TaskDetail
+}
+
+/// kp-cont01：同一 Plus 会话继续当前 Goal 的投影（`get-task.task.continue_execution`）。
+struct ContinueExecutionView: Decodable, Equatable {
+    let eligible: Bool
+    let reason: String?
+    let state: String?
+    let runId: String?
+    let turnId: String?
+}
+
+struct RequestContinuationResponse: Decodable {
+    let status: String
+    let turnId: String?
+    let sessionId: String?
+    let deduplicated: Bool?
 }
 
 /// §5.32 执行复盘投影（`get-task.task.retrospective`）。桌面只格式化核心数字，不据事件推导。

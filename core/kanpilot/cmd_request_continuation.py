@@ -14,9 +14,10 @@ import uuid
 from pathlib import Path
 
 from . import (
-    constants, db, dsh_events, headless_adapter as headless,
+    constants, core, db, dsh_events, headless_adapter as headless,
     round_store, runtime_client, runtime_operations, util,
 )
+from . import cmd_dispatch
 
 CONTINUE_FAILURES = frozenset(
     {"verification_unconfirmed", "execution_failed", "execution_interrupted"}
@@ -41,8 +42,11 @@ def continue_execution_view(conn, task) -> dict:
         return view
     request = db.task_extra(task).get(REQUEST_KEY) or {}
     if request.get("run_id") == run_id and request.get("new_turn"):
-        view.update(state="sent", turn_id=request.get("new_turn"),
-                    reason="已发送继续指令，等待同一 Plus 会话的新轮次结束")
+        observing = task["status"] == "running"
+        view.update(state="observing" if observing else "sent",
+                    turn_id=request.get("new_turn"),
+                    reason="已接管新轮次观察" if observing
+                    else "已发送继续指令，正在接管观察")
         return view
     if task["status"] != "needs_user":
         view["reason"] = "任务不在需人工处理状态"
@@ -128,8 +132,8 @@ def cmd_request_continuation(ctx, payload: dict) -> dict:
     task = db.require_task(conn, task_id)
     view = continue_execution_view(conn, task)
     if not view["eligible"]:
-        if view["state"] == "sent":
-            return {"status": "sent", "deduplicated": True,
+        if view["state"] in ("sent", "observing"):
+            return {"status": "continued", "deduplicated": True,
                     "turn_id": view.get("turn_id")}
         raise util.KanpilotError("conflict", view["reason"] or "当前不可继续执行")
     if task["run_id"] != run_id:
@@ -213,10 +217,45 @@ def cmd_request_continuation(ctx, payload: dict) -> dict:
         conn, scope, operation_id, status="accepted",
         result={"turn_id": new_turn, "session_id": session_id},
         session_id=session_id, turn_id=new_turn, now=now)
+
+    # 同轮重开：把已收尾的 job 绑定到新 turn，清掉旧终态字段，再由
+    # round-observe 拉起 worker --resume 观察新 turn；旧 terminal 由
+    # observation_resumed_at 标记 superseded。
+    previous = {key: job.get(key) for key in
+                ("status", "turn_id", "send_state", "observation_resumed_at",
+                 "started_at", "ended_at", "exit_code", "detail", "pid",
+                 "observe_pid")}
+    history = list(job.get("turn_adopted") or [])
+    history.append({"from": old_turn, "to": new_turn,
+                    "code": "manual_continue", "at": now})
+    job["continue_previous"] = previous
+    job["turn_adopted"] = history[-5:]
+    job["continuation_started_at"] = now
+    job["observation_resumed_at"] = now
+    job["status"] = "running"
+    job["turn_id"] = new_turn
+    job["send_state"] = "sent"
+    job["ended_at"] = None
+    job["exit_code"] = None
+    job["detail"] = None
+    job["pid"] = None
+    job["observe_pid"] = None
+    for key in ("observation_finalizing", "heartbeat_stopped", "resume_previous"):
+        job.pop(key, None)
+    job_path = run_dir / dsh_events.JOB_NAME
+    tmp = job_path.with_name(job_path.name + ".continue.tmp")
+    tmp.write_text(util.jdump(job), encoding="utf-8")
+    os.replace(tmp, job_path)
+
     with db.write_txn(conn):
         fresh = db.require_task(conn, task_id)
-        if fresh["run_id"] != run_id:
-            raise util.KanpilotError("conflict", "任务轮次已变化，继续指令已发送但未登记")
+        if fresh["run_id"] != run_id or fresh["status"] != "needs_user":
+            raise util.KanpilotError("conflict", "任务状态已变化，无法继续执行")
+        core.transition_task(
+            conn, fresh, "running", now, "user",
+            detail={"via": "request-continuation", "run_id": run_id,
+                    "turn_id": new_turn, "previous_turn_id": old_turn},
+            **core.clear_block_fields())
         db.set_extra(conn, fresh, now, **{REQUEST_KEY: {
             "run_id": run_id, "session_id": session_id,
             "from_turn": old_turn, "new_turn": new_turn,
@@ -225,4 +264,14 @@ def cmd_request_continuation(ctx, payload: dict) -> dict:
                      actor="user", detail={"run_id": run_id, "from_turn": old_turn,
                                            "to_turn": new_turn,
                                            "operation_id": operation_id})
-    return {"status": "sent", "turn_id": new_turn, "session_id": session_id}
+        conn.execute(
+            "UPDATE execution_rounds SET run_status='running', updated_at=? "
+            "WHERE task_id=? AND run_id=?", (now, task_id, run_id))
+
+    try:
+        observer = cmd_dispatch.cmd_round_observe(
+            ctx, {"task_id": task_id, "run_id": run_id, "executor": "user"})
+    except util.KanpilotError as exc:
+        observer = {"status": "error", "detail": exc.message}
+    return {"status": "continued", "turn_id": new_turn,
+            "session_id": session_id, "observer": observer}

@@ -1223,6 +1223,10 @@ def task_detail(task, requests):
         "plan_file": task.get("plan_path"),
         "report_file": task.get("review_report_path"),
     }
+    # kp-cont01：默认不显示继续执行入口；场景可提供 ready/sent/observing。
+    detail.setdefault("continue_execution", {
+        "eligible": False, "reason": "当前阻塞类型不支持继续执行",
+        "state": "none", "run_id": task.get("run_id"), "turn_id": None})
     return detail
 
 
@@ -4557,6 +4561,9 @@ COMMANDS = {
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
     "get-task": lambda s, p: cmd_get_task(s, p),
+    "request-continuation": lambda s, p: (
+        {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
+        if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),
     "recover-execution-goals": cmd_recover_execution_goals_fixture,
     "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
     "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),

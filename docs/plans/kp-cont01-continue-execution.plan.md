@@ -77,4 +77,7 @@ continue-execution {task_id, run_id, confirm: true, operation_id?}
 | 2026-11-11 00:05 | 设计定稿 | 用户选择「发送 + 自动接续」：不重开 job；发送后轮询 `check-execution-status`，新 turn 结束再复用现有 `continue-execution` 接续/排队核验 | 完成 |
 | 2026-11-11 00:05 | 核心发送命令 | `request-continuation`：校验/发送槽/同一 session 发送/记录 `execution_continuation_request`；不改 job/任务状态 | 实现中（待测试） |
 | 2026-11-11 00:05 | 接续扩展 | `check-execution-status` 对 finished + 已登记新 turn 产出 continuation；`execution-continuation` 接受 verification_unconfirmed + 已发送请求 | 实现中（既有 42 项续接/状态测试通过） |
-| 2026-11-11 00:05 | 未完成 | UI 按钮 + 发送后自动轮询/接续、协议/UI 规格、request-continuation 测试、FakeCore、云端构建与测试版 | 待办 |
+| 2026-11-11 00:20 | 发送 + 同轮重开 | `request-continuation` 发送后快照 job、绑新 turn、清旧终态、任务清阻塞转 running、`round-observe` 拉起 worker；worker 轮次预算改用 `continuation_started_at` | 实现中 |
+| 2026-11-11 00:20 | 桌面入口 | 执行页新增「继续执行同一 Goal」条与二次确认；`get-task.continue_execution` 投影；FakeCore 与解码夹具 | 未编译 |
+| 2026-11-11 00:24 | 核心测试 | `test_request_continuation` 4 项通过；续接/状态/桌面队列 101 项 + 53 subtests 通过 | 通过 |
+| 2026-11-11 00:26 | 未完成 | 云端编译、测试版发布与安装、实机按钮核对 | 待办 |
