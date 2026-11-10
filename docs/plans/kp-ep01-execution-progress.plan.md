@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：实现中
+- 状态：待体验（构建 196 已安装；核心投影与引擎恢复已验证，执行页卡片的实机视觉走查待用户）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -69,7 +69,13 @@
 | A6 | 老轮次/非 pi_desktop | 无进展时显示空态，不伪造进展 |
 | A7 | 复盘指标 | 轮次/会话消息/最近检查仍能显示（来自 list-sessions + get-session） |
 
-## 六、验证与记录
+## 六、未验证 / 遗留
+
+- 执行页「最新进展」卡片与「查看完整会话」浮层的 1180×760 / 900×600、浅深色实机走查。
+- 卡片 20 秒刷新与浮层关闭后停止轮询的实测。
+- 云端唯一红项是既有的 30 天 Plus 真实形状夹具时间门（与本任务无关，待另行决定重录或调整）。
+
+## 七、验证与记录
 
 （实现开始后逐条追加。）
 
@@ -80,3 +86,10 @@
 | 2026-11-10 18:00 | 核心 | worker 对助手消息写 `progress`；`dsh_events.progress_text/latest_progress` 与回退；`round_detail.progress`；monitor 的 `last_progress` 使用该文本 | `test_execution_progress` 9 项通过；`test_session*`、`test_pi_desktop_worker_verification`、`test_auto_monitor`、`test_desktop_event_projection` 合计 250+ 通过 |
 | 2026-11-10 18:05 | 隔离副本核对 | 用 `/tmp` 库副本与当前运行目录（约 1 MB events）跑 `get-session`：`round_detail.progress = {"text":"已完成并提交结构化报告。以下是逐条结论。","at":"2026-11-10T09:50:32Z"}`，耗时 0.31 秒 | 通过（只读副本） |
 | 2026-11-10 18:10 | 桌面 | 新增 `ExecutionProgressStore`（list-sessions + 完整 get-session，20 秒）、`ExecutionProgressView` 卡片与 `ExecutionSessionSheet`；执行页移除内嵌阅读器；复盘「打开会话」改为浮层 | 未编译（按约定云端编译） |
+| 2026-11-10 19:00 | 全量核心测试 | `core/tests` 全量 4733 passed、1812 subtests passed、5 failed：两处事件计数把 progress 展示事件当成转录（分页 135≠68、输入恢复 [3,1,4,4,5,5]），已改为按非 progress 事件计数并复查两个文件 19 项通过；全量耗时 1:10:23 | 5 项为预期变更，已修 |
+| 2026-11-10 19:00 | 云端构建 195（42802789566） | `macos-package`、`macos-fixtures` a/b、android、identity、codex-platforms 成功（Swift 编译通过）；checks 红于上述两处测试计数、既有 30 天 Plus 形状夹具和一次 codex 进程组 flake | 构建成功、checks 非绿 |
+| 2026-11-10 19:10 | 修复测试预期并推送 d0c5365 | 新构建 42805302270 触发 | 完成 |
+| 2026-11-10 19:20 | 云端构建 196（42805302270） | `macos-package`、`macos-fixtures` a/b、android、identity、codex-platforms 成功；`checks (1, 3.11/3.13)` 仅红于既有 30 天 Plus 形状夹具门（`plus_status_real.json`、`plus_app_getVersion_real.json` 采集于 2026-10-10）；本任务修复的两个测试文件通过，codex 进程组 flake 未复现 | 构建成功，checks 仅剩既有时间门 |
+| 2026-11-10 19:52 | 安装 196 | 用户选择立即停掉并安装：停止 App/引擎/MCP/mobile/worker；旧包备份至 `/Applications/.KaneoPilot-backup-ep01-20261110T195254`；DMG sha256 与 metadata 一致、codesign 校验通过、`CFBundleVersion=196`；启动后引擎与 `--resume` 观察者恢复，执行问答保留（总览仍显示 1 项需要你） | 完成 |
+| 2026-11-10 19:53 | 安装包核心核对 | 用安装包内置核心对两个轮次跑 `get-session`：`a97ec6d4`（finished）返回「已完成并提交结构化报告。以下是逐条结论。」，`9b26e786`（running）返回「核对已完成：…提交前有两处需要你确认。」；`at` 与消息时间一致 | 通过 |
+| 2026-11-10 19:56 | 实机界面 | 总览、引擎心跳（12 项通过）、执行问答可见；执行页卡片与「查看完整会话」浮层未做视觉走查（用户正在使用屏幕，未抢占前台） | 待体验 |
