@@ -69,6 +69,15 @@
 - 目标契约与每次待办进展不再作为动作行重复出现；轮次面板里只保留问答、文件、关键命令、验证报告、子代理/结束等动作。
 - 无 `SubmitGoal` 但有进展时使用「执行目标」回退标题；目标摘要只读，不参与完成/失败/验证判定。
 
+## 三之四、阶段四：刷新 30 天真实形状夹具并发布测试版（2026-11-10 追加）
+
+用户选择先解决 30 天 Plus 形状夹具时间门，再发布 `v0.5.6-test.N` 并更新到测试版。
+
+- 用本机真实 Plus 0.15.14 只读录制 `app/getVersion`、`agent/getStatus`、`turn/get`、`turn/get-missing`、`goalReport/list`、`plans/pending` 六件套；`goalReport/list` 与 `plans/pending` 现在需要 `sessionId` 参数。
+- 形状事实更新：`agent/getStatus` 新增 `pendingInputs`，`turn/get` 新增 `endedAt`；两者仍无终态 outcome。`_captured_at` 全部更新为 2026-11-10。
+- 三个 `reconstructed_from_core_parsers` 样本更新日期与说明；状态样本补 `pendingInputs`，规划期字段按 worker 契约保留。
+- `tests/rehearsal` 全量 74 passed / 6 skipped。
+
 ## 四、界面
 
 执行页顺序：复盘摘要（原样）→「最新进展」卡片。

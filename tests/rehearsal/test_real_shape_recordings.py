@@ -116,13 +116,19 @@ def test_scenario_real_recordings_freshness_and_shape():
 
 
 def test_scenario_real_recording_agent_status_is_not_terminal():
-    """录制事实：agent/getStatus 只给粗粒度存活信号，**不含**终态 outcome。"""
+    """录制事实：agent/getStatus 只给粗粒度存活信号，**不含**终态 outcome。
+
+    0.15.14 增加 ``pendingInputs``（计数 + requestIds）；仍无终态字段。
+    """
     data = _load("plus_agent_status_real.json")
     status = data["payload"]["result"]["status"]
-    assert set(status) == {"sessionId", "isRunning", "pendingToolConfirmations"}, (
+    assert set(status) == {"sessionId", "isRunning", "pendingToolConfirmations",
+                           "pendingInputs"}, (
         f"agent/getStatus 字段集已漂移：{sorted(status)}"
     )
     assert isinstance(status["isRunning"], bool)
+    assert isinstance(status["pendingInputs"], dict)
+    assert set(status["pendingInputs"]) == {"count", "requestIds"}, status["pendingInputs"]
     for terminal in ("outcome", "terminal", "conclusion", "verdict", "endedAt"):
         assert terminal not in status, (
             f"agent/getStatus 出现终态字段 {terminal}：终态信号来源假设需重审"
@@ -130,14 +136,18 @@ def test_scenario_real_recording_agent_status_is_not_terminal():
 
 
 def test_scenario_real_recording_turn_get_shape():
-    """录制事实：turn/get 只返回 {sessionId,turnId,status}，无 startedAt/endedAt。"""
+    """录制事实：0.15.14 的 turn/get 返回 {sessionId,turnId,status,endedAt}。
+
+    仍无 startedAt/outcome；endedAt 为可选展示字段，状态判定继续只认 status。
+    """
     data = _load("plus_turn_get_real_recording.json")
     turn = data["payload"]["result"]
-    assert set(turn) == {"sessionId", "turnId", "status"}, (
+    assert set(turn) == {"sessionId", "turnId", "status", "endedAt"}, (
         f"turn/get 字段集已漂移：{sorted(turn)}"
     )
     assert turn["status"] in ("running", "completed", "error", "aborted"), turn
-    for absent in ("startedAt", "endedAt", "errorCode", "outcome"):
+    assert isinstance(turn["endedAt"], str) and turn["endedAt"], turn
+    for absent in ("startedAt", "errorCode", "outcome"):
         assert absent not in turn, (
             f"turn/get 出现 {absent}：核心 _turn_status 口径需同步更新"
         )
@@ -177,7 +187,7 @@ def test_scenario_real_recording_goal_report_and_plan_shapes():
 
 
 def test_scenario_real_recording_app_version_matches_doctor_probe():
-    """录制事实：doctor --live 的 plus 版本探针期望值（0.15.7）。"""
+    """录制事实：doctor --live 的 plus 版本探针期望值（0.15.14）。"""
     data = _load("plus_app_getVersion_real.json")
     result = data["payload"]["result"]
     assert result["name"] == "Pi-Desktop-Plus", result

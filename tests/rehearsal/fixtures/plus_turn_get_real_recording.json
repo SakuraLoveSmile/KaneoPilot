@@ -1,16 +1,17 @@
 {
- "_captured_at": "2026-10-10",
+ "_captured_at": "2026-11-10",
  "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
- "_plus_version": "0.15.7",
+ "_plus_version": "0.15.14",
  "_redacted": true,
  "payload": {
   "operation": "turn/get",
   "result": {
+   "endedAt": "2026-11-10T14:26:01.388Z",
    "sessionId": "<redacted-uuid>",
-   "status": "running",
+   "status": "completed",
    "turnId": "<redacted-uuid>"
   }
  },
- "_note": "真实录制：MCP pi_desktop_invoke {operation:\"turn/get\", args:[{sessionId,turnId}]}，对一个 running 轮次。注意该版本只返回 {sessionId,turnId,status}，没有 startedAt/endedAt/errorCode/outcome。",
+ "_note": "真实录制：MCP pi_desktop_invoke {operation:\"turn/get\", args:[{sessionId,turnId}]}（0.15.14）。该版本返回 {sessionId,turnId,status,endedAt}，仍无 startedAt/outcome。",
  "_operation": "turn/get"
 }
