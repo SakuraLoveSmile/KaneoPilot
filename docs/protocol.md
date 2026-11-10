@@ -1911,7 +1911,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 **并发与串行**：全库统计 `leased` 的 `plan`+`review` 阶段树；达到 `worktree_concurrency_limit` 时新请求转 `worktree_pool_waiting`（保留可重试，claim 返回 `claimed:false`），不转业务失败。同一任务同一阶段的树仍被前一持有者持有时，新代次同样等待（不新建第二棵树、不报错），直到前一持有者释放或交还；`quarantined` 的树拒绝领取，需人工解除。消息与 `attention-list` 的等待项沿用既有措辞。
 
-**保留与回收**：任务终态满 `worktree_retention_days` 后，按 §5.29.3 的归档/删除守卫把阶段树打包到 `<worktrees_root>/.archives/`，删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/` 保留。删除同样要求无活动租约、无未决操作、指纹一致。
+**保留与回收**：任务终态满 `worktree_retention_days` 后，把阶段树打包到 `<worktrees_root>/.archives/<task_id>-<YYYYMMDD>.tar.gz`，再删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/<stage>/<run_id>/` 保留并可重建；删除前逐项复核工作树身份与干净状态，脏树转为隔离而不删除。命令 `worktree-retention {days?,dry_run?:true,confirm?}` 默认只预览，执行要求 `dry_run:false,confirm:true`；回执 scope `worktree-retention`，同操作重放返回 `deduplicated`。引擎在 live tick 中每小时自动执行一次，间隔由 `last_worktree_retention_at` 约束；归档失败或拦截项不中断引擎。
 
 **迁移** `worktree-layout-migrate {backup_dir, operation_id, dry_run?:true, confirm?:false, expected_audit_sha256?}`：
 

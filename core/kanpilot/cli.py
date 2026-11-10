@@ -142,6 +142,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          ("slot_id", "holder_id", "lease_token", "operation_id", "backup_dir", "reason")}
         | {"dry_run": (False, "bool"), "confirm": (False, "bool")},
         _automation_command("worktree_recovery", "cmd_worktree_slot_recover")),
+    "worktree-retention": ({"days": (False, "int"), "dry_run": (False, "bool"),
+                            "confirm": (False, "bool")},
+                           _automation_command("worktree_retention", "cmd_worktree_retention")),
     "worktree-config": ({"measure": (False, "bool")},
                         _automation_command("cmd_worktree", "cmd_worktree_config")),
     "worktree-layout-migrate": (

@@ -3477,3 +3477,64 @@ extension TaskDetail {
         return nil
     }
 }
+
+// MARK: - 工作树（KP-WT01，protocol §5.29.6）
+
+struct WorktreeStageDTO: Decodable, Equatable {
+    let state: String
+    let path: String?
+    let updatedAt: String?
+}
+
+struct WorktreeTaskDTO: Decodable, Equatable, Identifiable {
+    let taskId: String
+    let taskStatus: String?
+    let stages: [String: WorktreeStageDTO]
+    let allocatedBytes: Int64?
+    let retentionUntil: String?
+    var id: String { taskId }
+}
+
+struct WorktreeConfigDTO: Decodable, Equatable {
+    let worktreesRoot: String
+    let concurrencyLimit: Int
+    let retentionDays: Int
+    let tasks: [WorktreeTaskDTO]
+
+    var isolatedCount: Int {
+        tasks.filter { task in task.stages.values.contains { $0.state == "quarantined" } }.count
+    }
+
+    var allocatedDescription: String? {
+        let bytes = tasks.reduce(Int64(0)) { $0 + ($1.allocatedBytes ?? 0) }
+        guard bytes > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+/// `worktree-relocate` 预览（dry_run）与执行结果的必要字段。
+struct WorktreeRelocateMoveDTO: Decodable, Equatable, Identifiable {
+    let taskId: String
+    let from: String?
+    let to: String?
+    var id: String { taskId }
+}
+
+struct WorktreeRelocateBlockerDTO: Decodable, Equatable, Identifiable {
+    let code: String
+    let detail: String?
+    var id: String { code + ":" + (detail ?? "") }
+}
+
+struct WorktreeRelocatePreviewDTO: Decodable, Equatable {
+    let root: String?
+    let moves: [WorktreeRelocateMoveDTO]?
+    let legacyRows: Int?
+    let blockers: [WorktreeRelocateBlockerDTO]?
+    let auditSha256: String?
+    let status: String?
+    let dryRun: Bool?
+
+    var isReady: Bool { (blockers ?? []).isEmpty }
+    var statusText: String { isReady ? "可以迁移" : "暂不可迁移" }
+}

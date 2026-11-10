@@ -1,6 +1,7 @@
 """Bounded detached worktrees. SQLite owns leases; Git never runs in a txn."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -118,6 +119,80 @@ def _validate(row, *, existing=True):
     return path
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 256), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_meta(conn, task_id):
+    """Best-effort human-readable task summary and artifact mirror (protocol §5.29.6).
+
+    Never part of a lease decision: a failed write must not block or fail the
+    stage tree operation that triggered it.
+    """
+    try:
+        rows = conn.execute("SELECT * FROM worktree_slots WHERE task_id=? AND task_id IS NOT NULL "
+                            "ORDER BY stage", (task_id,)).fetchall()
+        if not rows:
+            return
+        root = Path(rows[0]["worktrees_root"]) / task_id
+        task = db.get_task(conn, task_id)
+        extra = db.task_extra(task) if task is not None else {}
+        delivery = extra.get("delivery") or {}
+        stages = {}
+        last_used = None
+        for row in rows:
+            stages[row["stage"]] = {"state": row["state"], "run_id": row["holder_id"],
+                                    "sha": row["sha"], "updated_at": row["updated_at"]}
+            if last_used is None or (row["updated_at"] or "") > last_used:
+                last_used = row["updated_at"]
+        meta = {
+            "task_id": task_id,
+            "title": task["title"] if task is not None else None,
+            "project": task["project_name"] if task is not None else None,
+            "repository": task["repository"] if task is not None else rows[0]["repository"],
+            "branch": delivery.get("branch"),
+            "created_at": task["created_at"] if task is not None else None,
+            "last_used_at": last_used,
+            "task_status": task["status"] if task is not None else None,
+            "stages": stages,
+            "retention_days": db.get_setting(conn, "worktree_retention_days",
+                                             constants.DEFAULT_WORKTREE_RETENTION_DAYS),
+        }
+        target = root / "meta.json"
+        _no_links(target)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text(util.jdump(meta) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+        if task is not None:
+            _mirror_artifact(root, task, "plan", task["plan_path"], stages.get("plan"))
+            _mirror_artifact(root, task, "review", task["review_report_path"], stages.get("review"))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+
+def _mirror_artifact(root, task, stage, source, record):
+    """Copy the published plan/report into artifacts/<stage>/<run_id>/ (non-authoritative)."""
+    if not record or not isinstance(source, str) or not source:
+        return
+    origin = Path(source)
+    if not origin.is_file() or origin.is_symlink():
+        return
+    run_id = record.get("run_id") or task["task_id"]
+    folder = root / "artifacts" / stage / str(run_id)
+    target = folder / ("plan.md" if stage == "plan" else "report.md")
+    _no_links(folder)
+    if target.is_file() and _sha256_file(target) == _sha256_file(origin):
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_bytes(origin.read_bytes())
+    os.replace(temporary, target)
+
+
 def projection(conn):
     """Rebuild a disposable mapping from SQLite, with atomic replacement."""
     # Serialize publication with row changes, so a slower publisher cannot
@@ -200,7 +275,10 @@ def quarantine(conn, slot_id, holder_id, lease_token, reason):
         conn.execute("UPDATE worktree_slots SET state='quarantined',reason=?,updated_at=? WHERE slot_id=?",
                      (str(reason), util.now_iso(), slot_id))
     projection(conn)
-    return _result(_owned(conn, slot_id, holder_id, lease_token))
+    row = _owned(conn, slot_id, holder_id, lease_token)
+    if row["task_id"]:
+        write_meta(conn, row["task_id"])
+    return _result(row)
 
 
 def _lease_seconds(conn, requested=None):
@@ -330,6 +408,7 @@ def _acquire(conn, repository, *, stage, holder_id, sha, task_id,
         quarantine(conn, slot_id, holder_id, token, str(exc))
         raise
     projection(conn)
+    write_meta(conn, task_id)
     return _result(_owned(conn, slot_id, holder_id, token))
 
 
@@ -567,7 +646,10 @@ def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_
         conn.execute("UPDATE worktree_slots SET state='free',reason=NULL,baseline_json=NULL,lease_expires_at=NULL,updated_at=? WHERE slot_id=? AND holder_id=? AND lease_token=? AND state='leased' AND reason='release_in_progress'",
                      (util.now_iso(), slot_id, holder_id, lease_token))
     projection(conn)
-    return _result(_owned(conn, slot_id, holder_id, lease_token))
+    row = _owned(conn, slot_id, holder_id, lease_token)
+    if row["task_id"]:
+        write_meta(conn, row["task_id"])
+    return _result(row)
 
 
 def _recover_returned(conn, row, *, release_slot):
@@ -750,7 +832,10 @@ def unquarantine(conn, slot_id, holder_id, lease_token, *, confirm=False):
         if changed != 1:
             raise util.KanpilotError("conflict", "解除隔离期间槽位身份已变化")
     projection(conn)
-    return dict(conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (slot_id,)).fetchone())
+    row = dict(conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (slot_id,)).fetchone())
+    if row.get("task_id"):
+        write_meta(conn, row["task_id"])
+    return row
 
 
 def cmd_worktree_slot_release(ctx, payload):

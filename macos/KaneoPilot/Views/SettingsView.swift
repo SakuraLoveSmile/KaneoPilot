@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// 设置的四页（KP-UI03，ui-spec §4.9）：运行端 / 项目 / 连接 / 高级，默认落在「运行端」。
 /// 角色编辑器与确认弹窗保留，规划 / 执行 / 评审改为运行端页上的摘要行加编辑面板。
@@ -280,6 +281,27 @@ struct SettingsView: View {
     @State private var reviewGeneration = 0
     @State private var executorGeneration = 0
 
+    // MARK: 工作树（KP-WT01，protocol §5.29.6）
+    @State private var worktreeRoot = ""
+    @State private var worktreeRetentionDays = 7
+    @State private var savedWorktreeRetentionDays = 7
+    @State private var worktreeRetentionCommitTask: Task<Void, Never>?
+    @State private var worktreeRetentionGeneration = 0
+    @State private var worktreeRetentionError: String?
+    @State private var worktreeConcurrency = 4
+    @State private var savedWorktreeConcurrency = 4
+    @State private var worktreeConcurrencyCommitTask: Task<Void, Never>?
+    @State private var worktreeConcurrencyGeneration = 0
+    @State private var worktreeConcurrencyError: String?
+    @State private var worktreeSeeded = false
+    @State private var showWorktreeRelocate = false
+    @State private var worktreeDestination = ""
+    @State private var worktreeRelocatePreview: WorktreeRelocatePreviewDTO?
+    @State private var worktreeRelocateError: String?
+    @State private var worktreeRelocating = false
+    @State private var worktreeBackupDir = ""
+    @State private var worktreeOperationId = ""
+
     var body: some View {
         VStack(spacing: 0) {
             Picker("设置分组", selection: $segment) {
@@ -309,6 +331,7 @@ struct SettingsView: View {
                     case .advanced:
                         SoftwareUpdateSection()
                         schedulerSection
+                        worktreeSection
                         diagnosticsDataSection
                     }
                 }
@@ -3051,6 +3074,271 @@ struct SettingsView: View {
     }
 
     // MARK: 诊断与数据（KP-UI03）：复制诊断信息、打开数据目录
+
+    // MARK: 工作树（KP-WT01）
+
+    private var worktreeSection: some View {
+        Section("工作树") {
+            LabeledContent {
+                HStack(spacing: Spacing.s) {
+                    Text(worktreeRoot.isEmpty ? "读取中…" : worktreeRoot)
+                        .font(.kpBody)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Button("更改…") { beginWorktreeRelocate() }
+                        .disabled(worktreeRelocating || worktreeRoot.isEmpty)
+                }
+            } label: {
+                SettingsRowLabel(title: "工作树位置",
+                                 detail: "规划、评审与执行都在各自的任务工作树中运行；更改位置需要先停止本机引擎。")
+            }
+            LabeledContent {
+                Stepper(value: $worktreeRetentionDays, in: 1...90) {
+                    Text("\(worktreeRetentionDays) 天").font(.kpBody).monospacedDigit()
+                }
+                .accessibilityLabel("完成后保留天数")
+                .accessibilityValue("\(worktreeRetentionDays)")
+                .onChange(of: worktreeRetentionDays) { _, value in scheduleWorktreeRetention(value) }
+            } label: {
+                SettingsRowLabel(title: "完成后保留天数",
+                                 detail: "任务结束满 N 天后归档并删除 plan、review 阶段树，保留 meta.json 与计划副本。")
+            }
+            if let error = worktreeRetentionError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            LabeledContent {
+                Stepper(value: $worktreeConcurrency, in: 1...32) {
+                    Text("\(worktreeConcurrency)").font(.kpBody).monospacedDigit()
+                }
+                .accessibilityLabel("规划与评审并发上限")
+                .accessibilityValue("\(worktreeConcurrency)")
+                .onChange(of: worktreeConcurrency) { _, value in scheduleWorktreeConcurrency(value) }
+            } label: {
+                SettingsRowLabel(title: "规划/评审并发上限",
+                                 detail: "同时占用阶段树的规划与评审上限（1–32）；超出时排队等待，不失败。")
+            }
+            if let error = worktreeConcurrencyError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let config = model.worktreeConfig {
+                Text(worktreeSummary(config))
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let error = model.worktreeConfigError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("重试读取工作树配置") {
+                    Task { await model.loadWorktreeConfig(measure: true) }
+                }
+                .font(.kpLabel)
+            }
+            Text("规划、评审与执行在各自的任务工作树中运行；任务完成满保留天数后归档并删除阶段树，保留摘要。")
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .task {
+            await model.loadWorktreeConfig(measure: true)
+        }
+        .onChange(of: model.worktreeConfig) { _, config in
+            seedWorktree(from: config)
+        }
+        .sheet(isPresented: $showWorktreeRelocate) {
+            worktreeRelocateSheet
+        }
+    }
+
+    private func worktreeSummary(_ config: WorktreeConfigDTO) -> String {
+        var parts = ["\(config.tasks.count) 个任务"]
+        if let size = config.allocatedDescription { parts.append("占用 \(size)") }
+        parts.append("隔离 \(config.isolatedCount) 项")
+        return parts.joined(separator: " · ")
+    }
+
+    private func seedWorktree(from config: WorktreeConfigDTO?) {
+        guard let config else { return }
+        worktreeRoot = config.worktreesRoot
+        savedWorktreeRetentionDays = config.retentionDays
+        savedWorktreeConcurrency = config.concurrencyLimit
+        if !worktreeSeeded {
+            worktreeRetentionDays = config.retentionDays
+            worktreeConcurrency = config.concurrencyLimit
+            worktreeSeeded = true
+        }
+    }
+
+    private func scheduleWorktreeRetention(_ value: Int) {
+        worktreeRetentionCommitTask?.cancel()
+        worktreeRetentionGeneration += 1
+        guard worktreeSeeded, value != savedWorktreeRetentionDays else { return }
+        let generation = worktreeRetentionGeneration
+        worktreeRetentionCommitTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, generation == worktreeRetentionGeneration else { return }
+            worktreeRetentionError = nil
+            do {
+                try await model.setWorktreeRetentionDays(value)
+            } catch {
+                worktreeRetentionError = error.coreMessage
+                worktreeRetentionDays = savedWorktreeRetentionDays
+            }
+        }
+    }
+
+    private func scheduleWorktreeConcurrency(_ value: Int) {
+        worktreeConcurrencyCommitTask?.cancel()
+        worktreeConcurrencyGeneration += 1
+        guard worktreeSeeded, value != savedWorktreeConcurrency else { return }
+        let generation = worktreeConcurrencyGeneration
+        worktreeConcurrencyCommitTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, generation == worktreeConcurrencyGeneration else { return }
+            worktreeConcurrencyError = nil
+            do {
+                try await model.setWorktreeConcurrencyLimit(value)
+            } catch {
+                worktreeConcurrencyError = error.coreMessage
+                worktreeConcurrency = savedWorktreeConcurrency
+            }
+        }
+    }
+
+    private func beginWorktreeRelocate() {
+        worktreeDestination = ""
+        worktreeRelocatePreview = nil
+        worktreeRelocateError = nil
+        worktreeOperationId = UUID().uuidString
+        worktreeBackupDir = defaultWorktreeBackupDir()
+        showWorktreeRelocate = true
+    }
+
+    private func defaultWorktreeBackupDir() -> String {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return support
+            .appendingPathComponent("KaneoPilot", isDirectory: true)
+            .appendingPathComponent("backups", isDirectory: true)
+            .appendingPathComponent("worktree-relocate-" + formatter.string(from: Date()), isDirectory: true)
+            .path
+    }
+
+    private var worktreeRelocateSheet: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("更改工作树位置").font(.kpSection)
+            Text("当前：\(worktreeRoot)")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            Text("迁移会移动整个工作树根目录；预览列出受影响的任务与阻断原因。迁移前必须停止本机引擎。")
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Spacing.s) {
+                TextField("新位置（绝对路径，目录不能已存在）", text: $worktreeDestination)
+                    .textFieldStyle(.roundedBorder)
+                Button("选择…") { pickWorktreeDestination() }
+            }
+            if let preview = worktreeRelocatePreview {
+                Text(preview.statusText)
+                    .font(.kpLabel)
+                    .foregroundStyle(preview.isReady ? Color.kpSecondary : Color.kpRed)
+                ForEach(preview.moves ?? []) { move in
+                    Text("• \(move.taskId)：\(move.from ?? "") → \(move.to ?? "")")
+                        .font(.kpSmall)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                ForEach(preview.blockers ?? []) { blocker in
+                    Label {
+                        Text(blocker.detail ?? blocker.code)
+                            .font(.kpLabel)
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.kpOrange)
+                    }
+                }
+            }
+            if let error = worktreeRelocateError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: Spacing.m) {
+                Button("取消") { showWorktreeRelocate = false }
+                Spacer()
+                Button(worktreeRelocating ? "处理中…" : "预览") { previewWorktreeRelocate() }
+                    .disabled(worktreeRelocating || worktreeDestination.isEmpty)
+                Button("确认迁移") { confirmWorktreeRelocate() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(worktreeRelocating
+                              || worktreeDestination.isEmpty
+                              || worktreeRelocatePreview?.isReady != true
+                              || worktreeRelocatePreview?.auditSha256 == nil)
+            }
+        }
+        .padding(Spacing.l)
+        .frame(width: 560, height: 420)
+    }
+
+    private func pickWorktreeDestination() {
+        let panel = NSSavePanel()
+        panel.title = "选择新的工作树根位置"
+        panel.prompt = "选择"
+        panel.nameFieldStringValue = "managed-worktrees"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            worktreeDestination = url.path
+        }
+    }
+
+    private func previewWorktreeRelocate() {
+        worktreeRelocateError = nil
+        worktreeRelocating = true
+        let destination = worktreeDestination
+        let backup = worktreeBackupDir
+        let operation = worktreeOperationId
+        Task {
+            defer { worktreeRelocating = false }
+            do {
+                worktreeRelocatePreview = try await model.previewWorktreeRelocate(
+                    destination: destination, backupDir: backup, operationId: operation)
+            } catch {
+                worktreeRelocateError = error.coreMessage
+                worktreeRelocatePreview = nil
+            }
+        }
+    }
+
+    private func confirmWorktreeRelocate() {
+        guard let preview = worktreeRelocatePreview, let audit = preview.auditSha256 else { return }
+        worktreeRelocateError = nil
+        worktreeRelocating = true
+        let destination = worktreeDestination
+        let backup = worktreeBackupDir
+        let operation = worktreeOperationId
+        Task {
+            defer { worktreeRelocating = false }
+            do {
+                _ = try await model.confirmWorktreeRelocate(
+                    destination: destination, backupDir: backup, operationId: operation,
+                    expectedAuditSha256: audit)
+                showWorktreeRelocate = false
+                await model.loadWorktreeConfig(measure: true)
+            } catch {
+                worktreeRelocateError = error.coreMessage
+            }
+        }
+    }
 
     private var diagnosticsDataSection: some View {
         Section {
