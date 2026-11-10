@@ -297,6 +297,8 @@ class _Collector:
         self.user_messages = {}       # physical index -> user content; recovery forbids appended instructions
         self.messages = {}            # opt-in physical transcript for strict turn recovery
         self.retain_messages = retain_messages
+        # KP-EP01：助手消息的一行进展（同一消息内容不变不重复写，修订后可再写）。
+        self.progress_texts: dict = {}
         self._last_page_start = object()
         self.unrecognized = False
         self.truncated = False
@@ -542,6 +544,7 @@ class _Collector:
             self._queue("system", ts, content=content, **source, **extra)
         elif role in ("assistant", "assistant_message"):
             self._queue("assistant_message", ts, content=content, **source, **extra)
+            self._progress(mid, content, ts, source)
         elif role in ("tool", "toolcall", "tool_call", "toolresult", "tool_result"):
             name = message.get("toolName") or message.get("name") or "tool"
             status = str(message.get("toolStatus") or message.get("status") or "").lower()
@@ -594,6 +597,18 @@ class _Collector:
             self.unrecognized = True
             self._queue("system", ts, content=content,
                         source_role=role, **source, **extra)
+
+    def _progress(self, mid: str, content: str, ts, source: dict) -> None:
+        """把助手文本的一行进展写成 `progress` 事件（KP-EP01）。
+
+        同一消息内容不变不重复写；修订后文本变化可再写。事件只供
+        `round_detail.progress` 与首页 `last_progress` 显示，不进入消息列表。
+        """
+        text = dsh_events.progress_text(content)
+        if text is None or self.progress_texts.get(mid) == text:
+            return
+        self.progress_texts[mid] = text
+        self._queue("progress", ts, text=text, at=ts, **source)
 
 
 def _heartbeat(spec: dict) -> None:

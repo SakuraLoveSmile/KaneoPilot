@@ -150,6 +150,67 @@ def _terminal_view(event: dict) -> dict:
     }
 
 
+_PROGRESS_MAX_CHARS = 160
+
+
+def progress_text(content) -> Optional[str]:
+    """助手文本 → 一行可读进展（KP-EP01，仅显示用途）。
+
+    取首个可用行：跳过空行、代码围栏、JSON 对象/数组与 HTML 片段；
+    去掉 Markdown 前缀/强调符号，折叠空白，最多 160 字符。没有可用行
+    返回 None，绝不把工具输出或原始 JSON 当进展。
+    """
+    if not isinstance(content, str):
+        return None
+    in_fence = False
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        line = line.strip("#>*-•·`").strip()
+        if not line or line.startswith(("{", "[", "<")):
+            continue
+        line = line.replace("**", "").replace("`", "")
+        line = " ".join(line.split())
+        if len(line) < 2:
+            continue
+        if len(line) > _PROGRESS_MAX_CHARS:
+            line = line[: _PROGRESS_MAX_CHARS - 1].rstrip() + "…"
+        return line
+    return None
+
+
+def latest_progress(events: list) -> Optional[dict]:
+    """最后一条可读进展 → ``{text, at}``；无 → None（KP-EP01）。
+
+    优先读执行端显式写的 ``progress`` 事件；旧日志没有该事件时，回退到最后
+    一条非空助手消息的首个可用行（同一规范化），保证历史轮次也能显示。
+    只供界面显示「最新进展」，不参与完成、失败或验证判定。
+    """
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "progress":
+            continue
+        text = event.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        at = event.get("at") or event.get("ts")
+        return {"text": text.strip(), "at": at if isinstance(at, str) else None}
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "assistant_message":
+            continue
+        text = progress_text(event.get("content"))
+        if text is None:
+            continue
+        at = event.get("ts")
+        return {"text": text, "at": at if isinstance(at, str) else None}
+    return None
+
+
 # ------------------------------------------------------------ 消息转换
 
 def _revision(*parts) -> int:
@@ -377,6 +438,8 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         "exit_code": job.get("exit_code"),
         "terminal": terminal,
         "terminal_superseded": terminal_superseded,
+        # KP-EP01：执行端最近一条可读进展（只读显示，不参与判定）。
+        "progress": latest_progress(events),
         "config": view.get("config"),
         "save_state": view.get("save_state"),
         "saved_at": view.get("saved_at"),

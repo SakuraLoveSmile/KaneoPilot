@@ -1486,6 +1486,8 @@ struct RoundDetail: Decodable {
     let turnAdopted: [TurnAdoption]?
     /// 轮次绑定的 Plus turn（核心 job.turn_id）；Plus 当前 turn 与之不同即存在后续轮次。
     let turnId: String?
+    /// KP-EP01：执行端最后一条可读进展（protocol §5.18.4）；只读显示，不参与判定。
+    let progress: SessionProgress?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
@@ -1505,6 +1507,12 @@ struct TurnAdoption: Decodable {
     let from: String?
     let to: String?
     let code: String?
+    let at: String?
+}
+
+/// KP-EP01：执行端一行进展（protocol §5.18.4，`round_detail.progress`）。
+struct SessionProgress: Decodable {
+    let text: String?
     let at: String?
 }
 

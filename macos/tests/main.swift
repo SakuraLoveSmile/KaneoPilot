@@ -765,6 +765,14 @@ if let caps = decode(ExecCapabilitiesResponse.self, #"{"ok":false,"codex":{"avai
     expect(caps.codex?.available == false, "Codex 未保存配置不冒充可用")
 }
 
+// KP-EP01：round_detail.progress 只读显示字段；缺失/null 时保持旧解码。
+if let detail = decode(RoundDetail.self, #"{"backend":"pi_desktop","run_status":"running","progress":{"text":"已修复排序","at":"2026-11-10T09:00:00Z"}}"#) {
+    expect(detail.progress?.text == "已修复排序" && detail.progress?.at == "2026-11-10T09:00:00Z", "最新进展解码文本与时间")
+}
+if let detail = decode(RoundDetail.self, #"{"backend":"pi","run_status":"running"}"#) {
+    expect(detail.progress == nil, "旧 round_detail 无进展字段照常解码")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

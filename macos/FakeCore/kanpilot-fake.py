@@ -2415,6 +2415,9 @@ def cmd_get_session(state, payload):
                                 "code": "EMPTY_MODEL_RESPONSE", "at": session.get("updated_at")}]}
     if status == "running":
         detail["terminal"] = None
+        # KP-EP01：执行页只显示最新一条进展，不读消息正文。
+        detail["progress"] = {"text": "正在核对卡片宽度与首行墨迹",
+                              "at": session.get("updated_at") or session.get("started_at")}
     detail.update(scenario.get("round_detail") or {})
     return {"session": session, "connection": connection, "round_detail": detail}
 
