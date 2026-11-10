@@ -143,3 +143,13 @@ def test_missing_directory_is_forgotten_without_archive(scene):
     assert result["results"][0]["forgotten"] is True
     assert scene.conn.execute("SELECT COUNT(*) FROM worktree_slots").fetchone()[0] == 0
     assert not (scene.root / ".archives").exists()
+
+def test_confirm_refreshes_meta_for_non_expired_task(scene):
+    make_task(scene, status="ready")
+    meta = scene.root / "task00001" / "meta.json"
+    meta.unlink()
+    retention(scene, dry_run=False, confirm=True)
+    assert meta.is_file()
+    payload = json.loads(meta.read_text(encoding="utf-8"))
+    assert payload["task_id"] == "task00001" and payload["task_status"] == "ready"
+

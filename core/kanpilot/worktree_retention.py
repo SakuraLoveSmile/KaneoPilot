@@ -148,6 +148,10 @@ def sweep(ctx, *, days=None, confirm=False):
               "dry_run": not confirm}
     if not confirm:
         return public
+    # Maintenance pass also refreshes the human-readable meta.json for every
+    # task that owns stage trees, expired or not.
+    for item in inventory["tasks"]:
+        worktree_pool.write_meta(ctx.conn, item["task_id"])
     results = []
     for item in eligible:
         operation_id = "retain:" + item["task_id"] + ":" + datetime.now().strftime("%Y%m%d")
