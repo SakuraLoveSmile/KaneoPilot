@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：待体验（构建 196 已安装；核心投影与引擎恢复已验证，执行页卡片的实机视觉走查待用户）
+- 状态：待体验（构建 198 已安装；最新进展卡片、时间线折叠器与核心投影已验证；执行页/时间线实机视觉待用户确认）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -85,6 +85,7 @@
 
 - 执行页「最新进展」卡片与「查看完整会话」浮层的 1180×760 / 900×600、浅深色实机走查。
 - 卡片 20 秒刷新与浮层关闭后停止轮询的实测。
+- 摘要时间线在真实 Music 会话上的视觉走查：轮次/关键动作/折叠/原文切换，以及 900×600 浅色与 1180×760 深色。
 - 云端唯一红项是既有的 30 天 Plus 真实形状夹具时间门（与本任务无关，待另行决定重录或调整）。
 
 ## 七、验证与记录
@@ -105,3 +106,9 @@
 | 2026-11-10 19:52 | 安装 196 | 用户选择立即停掉并安装：停止 App/引擎/MCP/mobile/worker；旧包备份至 `/Applications/.KaneoPilot-backup-ep01-20261110T195254`；DMG sha256 与 metadata 一致、codesign 校验通过、`CFBundleVersion=196`；启动后引擎与 `--resume` 观察者恢复，执行问答保留（总览仍显示 1 项需要你） | 完成 |
 | 2026-11-10 19:53 | 安装包核心核对 | 用安装包内置核心对两个轮次跑 `get-session`：`a97ec6d4`（finished）返回「已完成并提交结构化报告。以下是逐条结论。」，`9b26e786`（running）返回「核对已完成：…提交前有两处需要你确认。」；`at` 与消息时间一致 | 通过 |
 | 2026-11-10 19:56 | 实机界面 | 总览、引擎心跳（12 项通过）、执行问答可见；执行页卡片与「查看完整会话」浮层未做视觉走查（用户正在使用屏幕，未抢占前台） | 待体验 |
+| 2026-11-10 20:20 | 阶段二实现 | `SessionTimeline` 折叠器 + `SessionTimelineView`；阅读器改为「摘要 / 原文 / 状态」；`SessionMessage` 解码 turn/tool/error 元数据；夹具与规格同步 | 本地仅静态核对，按约定云端编译 |
+| 2026-11-10 20:47 | 构建 197（42816601351） | `macos-package` 成功；`macos-fixtures (b)` 编译失败于夹具原始字符串分隔符（"# 被当作结尾）；其余 fixtures 通过；checks 仅剩既有 30 天形状门 | 测试夹具问题，已修 c7aec29 |
+| 2026-11-10 21:02 | 构建 198（42819070312） | `macos-package`、`macos-fixtures` a/b、android、identity、codex-platforms 成功；新增时间线夹具通过；checks 仍仅红于既有 30 天 Plus 形状夹具门 | 构建成功 |
+| 2026-11-10 21:08 | 安装 198 | 停止 App/引擎/worker；旧包备份 `/Applications/.KaneoPilot-backup-ep01-20261110T210818`；DMG sha256 与 metadata 一致、codesign 通过、`CFBundleVersion=198`；启动后引擎与 `--resume` 观察者恢复 | 完成 |
+| 2026-11-10 21:20 | 真实消息元数据核对 | 完成轮 `a97ec6d4` 的 `session-messages`：309 条，305 条带 `turn_id`、172 条带 `tool_call_id`；`asktool` 的 `tool.input` 为问题 JSON，可被时间线解析 | 通过 |
+| 2026-11-10 21:22 | 时间线实机视觉 | 尝试点击侧栏/任务行打开会话，坐标点击抢到前台应用且用户正在使用 DSH，已停止自动化；时间线界面未截图核对 | 未验证 |
