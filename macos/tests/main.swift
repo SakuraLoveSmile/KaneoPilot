@@ -803,7 +803,7 @@ if let instruction = timelineMessage("turn-plan", "user", at: "2026-11-10T09:00:
                                      content: "# 让封面歌词更醒目\n\n正文"),
    let goal = timelineMessage("turn-plan", "tool_result", at: "2026-11-10T09:01:00Z",
                               name: "SubmitGoal",
-                              input: #"{"markdown":"# 让封面歌词更醒目\n\n## Goal\n\n把卡片占满歌曲信息区宽度"}"#,
+                              input: ##"{"markdown":"# 让封面歌词更醒目\n\n## Goal\n\n把卡片占满歌曲信息区宽度"}"##,
                               output: #"{"content":[{"text":"submitted"}],"details":{}}"#),
    let question = timelineMessage("turn-plan", "tool_result", at: "2026-11-10T09:02:00Z",
                                   name: "asktool",
