@@ -23,6 +23,6 @@ trap 'rm -rf "$BUILD"' EXIT
 [ -f "$MODELS" ] || { echo "找不到 $MODELS" >&2; exit 2; }
 
 echo "== 编译真实 Models.swift + Labels 桩 + 夹具断言 =="
-swiftc -O "$MODELS" "$HERE/LabelsStub.swift" "$HERE/main.swift" -o "$BUILD/fixture"
+swiftc -O "$MODELS" "$ROOT/macos/KaneoPilot/Views/SessionTimeline.swift" "$HERE/LabelsStub.swift" "$HERE/main.swift" -o "$BUILD/fixture"
 echo "== 运行夹具 =="
 "$BUILD/fixture"

@@ -1,6 +1,21 @@
 import AppKit
 import SwiftUI
 
+/// KP-EP01 阶段二：会话内容视图。默认摘要时间线，原文与状态仍可切换。
+enum SessionContentMode: String, CaseIterable, Hashable {
+    case summary
+    case raw
+    case status
+
+    var title: String {
+        switch self {
+        case .summary: return "摘要"
+        case .raw: return "原文"
+        case .status: return "状态"
+        }
+    }
+}
+
 // MARK: - 会话阅读器（独立视图与详情浮层内嵌同规格）
 
 struct SessionReaderView: View {
@@ -24,6 +39,7 @@ struct SessionReaderView: View {
     @State private var retryConfirmationRunID: String?
     @FocusState private var focusedControl: String?
     @State private var availableWidth: CGFloat = 900
+    @State private var contentMode: SessionContentMode = .summary
     init(taskID: String?, preferredRunID: String? = nil, showsTaskTitle: Bool = true, fallbackSessionTitle: String? = nil,
          onDigestChange: ((ExecutionSessionDigest?) -> Void)? = nil) {
         self.taskID = taskID
@@ -79,7 +95,11 @@ struct SessionReaderView: View {
                 }
             }
             Group {
-                if store.statusOnly { statusContent } else { messageContent }
+                switch contentMode {
+                case .status: statusContent
+                case .summary: summaryContent
+                case .raw: messageContent
+                }
             }.frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -217,13 +237,15 @@ struct SessionReaderView: View {
                 HStack(spacing: Spacing.s) { selectors; Spacer(minLength: 0) }
                 HStack { Spacer(minLength: 0); saveActionMenu }
             }
-            Picker("会话视图", selection: Binding(get: { store.statusOnly }, set: { value in
-                Task { await store.setStatusOnly(value) }
-            })) {
-                Text("会话内容").tag(false)
-                Text("会话状态").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 210)
-                .accessibilityLabel("会话视图")
+            Picker("会话视图", selection: $contentMode) {
+                ForEach(SessionContentMode.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 240)
+                .accessibilityLabel("会话视图：摘要、原文或状态")
+                .onChange(of: contentMode) { _, mode in
+                    Task { await store.setStatusOnly(mode == .status) }
+                }
         }
         .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
     }
@@ -363,6 +385,51 @@ struct SessionReaderView: View {
     }
 
     @ViewBuilder
+    private var summaryContent: some View {
+        if store.session == nil {
+            statusContent
+        } else {
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: Spacing.m) {
+                    Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
+                        .foregroundStyle(statusColor)
+                    Spacer(minLength: 0)
+                    Text(RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
+                        .foregroundStyle(Color.kpSecondary)
+                }.font(.kpSmall)
+                    .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+                if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
+                    codexDesktopNotice
+                } else if store.loadedCount == 0 {
+                    VStack(spacing: Spacing.m) {
+                        if store.loading { ProgressView() }
+                        Text(store.loading ? "正在读取会话内容" : "等待会话内容")
+                            .font(.kpBody)
+                        Text("内容随运行端记录更新，时间线只保留关键动作。")
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    SessionTimelineContainer(
+                        store: store,
+                        state: store.messageState,
+                        runState: store.roundDetail?.runStatus ?? store.session?.runStatus,
+                        onShowRaw: { contentMode = .raw })
+                }
+            }
+        }
+    }
+
+    private var codexDesktopNotice: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Label("此会话尚未导出对话内容", systemImage: "bubble.left.and.bubble.right")
+                .font(.kpBody)
+            Text("Codex Desktop 的原生对话请在 Desktop 中查看，可复制会话 ID 查找。")
+                .font(.kpBody).foregroundStyle(Color.kpSecondary)
+            copySessionIDButton
+        }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
     private var messageContent: some View {
         if store.session == nil {
             statusContent
@@ -377,13 +444,7 @@ struct SessionReaderView: View {
                 }.font(.kpSmall)
                     .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
                 if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
-                    VStack(alignment: .leading, spacing: Spacing.m) {
-                        Label("此会话尚未导出对话内容", systemImage: "bubble.left.and.bubble.right")
-                            .font(.kpBody)
-                        Text("Codex Desktop 的原生对话请在 Desktop 中查看，可复制会话 ID 查找。")
-                            .font(.kpBody).foregroundStyle(Color.kpSecondary)
-                        copySessionIDButton
-                    }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    codexDesktopNotice
                 } else {
                     SessionContentToolbar(store: store, state: store.messageState)
                     SessionSearchField(store: store, inputState: store.searchInputState)
@@ -488,7 +549,10 @@ struct SessionReaderView: View {
                         Text("切换到会话内容，查看本轮已导出的对话与运行记录。")
                             .font(.kpBody).foregroundStyle(Color.kpSecondary)
                         HStack(spacing: Spacing.m) {
-                            Button("查看会话内容") { Task { await store.setStatusOnly(false) } }
+                            Button("查看会话摘要") {
+                                contentMode = .summary
+                                Task { await store.setStatusOnly(false) }
+                            }
                             if isPlus { Button("打开 Pi-Desktop-Plus") { openPlus() } }
                             copySessionIDButton
                         }
@@ -519,6 +583,20 @@ struct SessionReaderView: View {
     }
 }
 
+
+/// 观察消息发布，按最新消息重建时间线；只渲染折叠后的关键动作。
+private struct SessionTimelineContainer: View {
+    let store: SessionReaderStore
+    @ObservedObject var state: SessionReaderMessageState
+    let runState: String?
+    let onShowRaw: () -> Void
+
+    var body: some View {
+        SessionTimelineView(
+            rounds: SessionTimelineBuilder.build(messages: store.messages, runState: runState),
+            onShowRaw: onShowRaw)
+    }
+}
 
 private struct SessionContentToolbar: View {
     @ObservedObject var store: SessionReaderStore

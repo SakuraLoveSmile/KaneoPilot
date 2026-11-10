@@ -1743,6 +1743,12 @@ struct SessionMessage: Decodable, Identifiable {
     let revision: Int?
     let sourceAt: String?
     let tool: SessionTool?
+    /// KP-EP01 阶段二：时间线分组与工具合并所需的来源元数据。
+    let turnId: String?
+    let toolCallId: String?
+    let isError: Bool?
+    let eventType: String?
+    let agentName: String?
 
     /// 稳定标识：id + revision（同一消息修订后替换）。
     var listID: String { "\(id ?? "?")-\(revision ?? 0)" }

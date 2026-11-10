@@ -536,10 +536,11 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 ```json
 {"id": "<源稳定 id>", "seq": 12, "run_id": "...", "type": "user|assistant|tool_call|tool_result|command_output|system",
  "content": "<完整文本>", "revision": 3, "source_at": "ISO8601",
+ "turn_id": "可选来源轮次", "tool_call_id": "可选工具身份", "is_error": false,
  "tool": {"name": "...", "input": "...", "output": "...", "exit_code": 0}}
 ```
 
-`tool` 仅 tool_call/tool_result/command_output 类型出现。读取按 `seq` 排序、按 `id`+`revision` 去重/更新，游标推进不回退。
+`tool` 仅 tool_call/tool_result/command_output 类型出现。读取按 `seq` 排序、按 `id`+`revision` 去重/更新，游标推进不回退。`turn_id`/`tool_call_id`/`is_error`/`event_type`/`agent_name` 为可选来源元数据，只供桌面时间线分组、工具配对和错误标记使用，不能作为完成、失败或验证判定依据。
 
 | 命令 | payload | 返回 |
 |---|---|---|
