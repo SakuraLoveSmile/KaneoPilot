@@ -603,6 +603,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         },
         cmd_dispatch.cmd_round_observe,
     ),
+    # kp-cont01（§5.23.11）：向同一 Plus 会话发送继续当前 Goal 的指令（不重发）。
+    "request-continuation": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "confirm": (False, "bool"), "operation_id": (False, "str")},
+        _automation_command("cmd_request_continuation", "cmd_request_continuation"),
+    ),
     # v3 T5（§5.23.10）：Goal 报告只读读取与完成判定登记。
     "get-goal-report": (
         {"task_id": (True, "str"), "run_id": (True, "str")},
