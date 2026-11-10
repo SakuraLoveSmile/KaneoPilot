@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：待体验（构建 198 已安装；最新进展卡片、时间线折叠器与核心投影已验证；执行页/时间线实机视觉待用户确认）
+- 状态：待体验（构建 199 已安装；最新进展、时间线、轮次目标/待办与夹具已验证；实机视觉待用户解锁后确认）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -96,6 +96,7 @@
 - 执行页「最新进展」卡片与「查看完整会话」浮层的 1180×760 / 900×600、浅深色实机走查。
 - 卡片 20 秒刷新与浮层关闭后停止轮询的实测。
 - 摘要时间线在真实 Music 会话上的视觉走查：轮次/关键动作/折叠/原文切换，以及 900×600 浅色与 1180×760 深色。
+- 轮次目标块（标题、状态、X/Y、进度条、清单、进展记录）的视觉走查。
 - 云端唯一红项是既有的 30 天 Plus 真实形状夹具时间门（与本任务无关，待另行决定重录或调整）。
 
 ## 七、验证与记录
@@ -122,3 +123,6 @@
 | 2026-11-10 21:08 | 安装 198 | 停止 App/引擎/worker；旧包备份 `/Applications/.KaneoPilot-backup-ep01-20261110T210818`；DMG sha256 与 metadata 一致、codesign 通过、`CFBundleVersion=198`；启动后引擎与 `--resume` 观察者恢复 | 完成 |
 | 2026-11-10 21:20 | 真实消息元数据核对 | 完成轮 `a97ec6d4` 的 `session-messages`：309 条，305 条带 `turn_id`、172 条带 `tool_call_id`；`asktool` 的 `tool.input` 为问题 JSON，可被时间线解析 | 通过 |
 | 2026-11-10 21:22 | 时间线实机视觉 | 尝试点击侧栏/任务行打开会话，坐标点击抢到前台应用且用户正在使用 DSH，已停止自动化；时间线界面未截图核对 | 未验证 |
+| 2026-11-10 21:55 | 阶段三实现 | 轮次目标摘要：`SubmitGoal` 标题向后续轮次继承，`UpdateGoalProgress` 汇总最新待办 X/Y、状态、检查点与清单；目标契约/每次进展不再单列动作行、不单独开面板；新增目标块与清单展开 | 云端编译前静态核对 |
+| 2026-11-10 22:06 | 构建 199（42828969469） | `macos-package`、`macos-fixtures` a/b、android、identity、codex-platforms 成功；时间线目标夹具通过；checks 仅红于既有 30 天 Plus 形状夹具门 | 构建成功 |
+| 2026-11-10 22:08 | 安装 199 | 屏幕锁定状态下停止 App/引擎（前台为 loginwindow）；旧包备份 `/Applications/.KaneoPilot-backup-ep01-20261110T220712`；sha256 与 metadata 一致、codesign 通过、`CFBundleVersion=199`；启动后引擎、monitor 与 `--resume` 观察者恢复 | 完成 |
