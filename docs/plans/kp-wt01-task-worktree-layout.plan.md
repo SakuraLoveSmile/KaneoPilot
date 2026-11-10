@@ -1,7 +1,7 @@
 # KP-WT01 任务级工作树布局与位置设置
 
 - 任务标识：`kp-wt01`
-- 状态：实现中（S1/S2a/S2b 已实现并提交，真机迁移完成；S2c 保留回收与 S3 设置页未做；新构建待安装核对）
+- 状态：待体验（S1–S3 已实现并提交，真机迁移与首轮规划通过，构建 194 已安装；设置页待用户实际查看，Plus 真实形状夹具时间门待处理）
 - 分支：`chore/20261110-kp-wt01-task-worktree-layout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-chore-kp-wt01-task-worktree-layout/`
 - 合入目标：`main`
@@ -171,3 +171,6 @@
 | 2026-11-10 14:59 | 真机首轮规划（新布局） | `resolve replan` 后 Music 项目自动处理接管：14:52:11 备料、14:52:13 入队、14:52:17 claim；阶段树 `<task>/plan` 以 detached `d3382cb` 创建并登记；codex builtin、`gpt-6.1-sol`/max；14:59:35 计划发布、14:59:36 释放 | 请求 succeeded，计划 sha256 `9c849ac2…`（`Plan/projects/e8mag…/…14-59-35.md`，5.1K）；任务 `ready`；阶段树 `free`、工作区干净、`.pi/plan` 与材料已清；`worktree-config` 显示 1 个 free、8.15 MB；`doctor` ok，`worktree_pool` free 1 其余 0；未自动派生 dispatch（无新请求），引擎继续运行 | 完成：新布局端到端真机验证通过 |
 | 2026-11-10 15:15 | S2c 保留期回收 | `worktree_pool` 在获得/释放/隔离/解除隔离后写 `meta.json`，并把已发布的计划/评审报告镜像到 `artifacts/<stage>/<run_id>/`；新增 `worktree-retention {days?,dry_run?,confirm?}`（预览、按任务归档 `.archives/<task>-<日期>.tar.gz`、删阶段树、留 meta/artifacts、脏树隔离、回执与重放）；引擎 live tick 每小时自动跑一次，间隔由 `last_worktree_retention_at` 约束 | 新增 7 项隔离用例（预览/确认/重放/非终态跳过/租约阻断/脏树隔离/目录缺失遗忘）；`test_worktree_retention` + pool/status/base/engine 子集 115 项、engine loop 49 项通过 | 实现中（云端编译与实机未验） |
 | 2026-11-10 15:20 | S3 设置页 | `Models.swift` 增工作树 DTO；`AppViewModel` 增配置读取、保留天数/并发提交、relocate 预览与确认；`SettingsView` 高级页新增「工作树」分区（位置+更改…、保留天数 1–90、并发 1–32、占用/隔离摘要）与迁移面板（预览/阻断原因/确认），0.6 秒防抖、失败回退 | 本机仅静态核对（花括号、类型与既有控件签名）；Swift 编译按约定只走云端，待下一次 `Packages` | 实现中 |
+| 2026-11-10 15:45 | 构建 192–194 | 192：Swift 编译失败——工作树方法误放进 `ExecutionAnswerStore`、`Section` 推断报错；修正为 AppViewModel 类内后 193 编译通过；194 增加“确认回收时补写全部 meta.json”。三次运行的 `checks (1)` 都只剩两个 Plus 真实形状夹具（录制 2026-10-10，已超 30 天） | 194：`macos-package`、`macos-fixtures a/b`、android、identity 全过；产物 `macos-arm64-local-signed-194`（sha256 adbd4f25…，source 2159acc）已安装并启动 | 构建红仅剩既有时间门，待决定重录或调整 |
+| 2026-11-10 16:11 | 安装 194 与保留回收实机 | 安装后引擎以新核心启动（PID 20762）；首个 tick 执行保留期回收：写 `last_worktree_retention_at`，为 wjhpq 补出 `meta.json`（566 B）并镜像 `artifacts/plan/7c2511cd…/plan.md`（5.2 KB）；`worktree-config` 7 天/并发 4/1 个任务；`doctor` ok，`worktree_pool` free 1 其余 0 | 保留期与设置页核心链路实机可用；设置页界面待用户查看 | 待体验 |
+| 2026-11-10 16:00 | 附带观察 | 首轮规划成功后引擎自动派发执行（run `0b4d129a`），在迁移后的 `<task>/run` 上启动；执行中提问“工作树缺少 `.dart_tool`（无 `package_config.json`），`--no-pub` 的 analyze/test 会失败”，任务回 `needs_user` 等用户回答 | 与新布局无关；`run` 树被正常复用，说明执行链路也走通；问题待用户答复 | 待体验 |
