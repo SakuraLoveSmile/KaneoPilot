@@ -191,7 +191,7 @@ class TestUpgradeV1ToV2:
         """新库直接建为 v6（含 session_reads + execution_rounds +
         planner_inputs + runtime_operations + worktree_slots），无升级备份。"""
         cli("overview", {})
-        assert _schema_version(tmp_env.db) == 6
+        assert _schema_version(tmp_env.db) == 7
         assert _table_columns(tmp_env.db, "session_reads") == SESSION_READS_COLUMNS
         assert _table_columns(tmp_env.db, "execution_rounds") == EXECUTION_ROUNDS_COLUMNS
         assert _table_columns(tmp_env.db, "planner_inputs") == PLANNER_INPUTS_COLUMNS
@@ -212,7 +212,7 @@ class TestUpgradeV1ToV2:
         mig_out = cli("migrate", {})
         assert mig_out["ok"] is True
 
-        assert _schema_version(tmp_env.db) == 6
+        assert _schema_version(tmp_env.db) == 7
         columns = _table_columns(tmp_env.db, "tasks")
         assert {"save_state", "saved_at", "auto_advance_paused"} <= columns
         assert _table_columns(tmp_env.db, "session_reads") == SESSION_READS_COLUMNS
@@ -252,12 +252,12 @@ class TestUpgradeV1ToV2:
         assert row["auto_advance_paused"] in (0, False)
 
     def test_backup_written_before_upgrade(self, cli, tmp_env):
-        """升级前逐级备份 DB（v1-to-v2、v2-to-v3、v3-to-v4、v4-to-v5、v5-to-v6，
+        """升级前逐级备份 DB（v1-to-v2 … v6-to-v7，
         state-model §1.1/§1.2/§1.3/§1.4）。"""
         _create_v1_db(tmp_env.db)
         cli("migrate", {})
         dirs = _backup_dirs(tmp_env)
-        assert len(dirs) == 5, f"应恰好五个逐级升级备份目录：{dirs}"
+        assert len(dirs) == 6, f"应恰好六个逐级升级备份目录：{dirs}"
         names = [d.name for d in dirs]
         assert all(n.startswith("schema-") for n in names), names
         assert any("v1-to-v2" in n for n in names), names
@@ -265,6 +265,7 @@ class TestUpgradeV1ToV2:
         assert any("v3-to-v4" in n for n in names), names
         assert any("v4-to-v5" in n for n in names), names
         assert any("v5-to-v6" in n for n in names), names
+        assert any("v6-to-v7" in n for n in names), names
         # v1→v2 备份内含升级前的 v1 库（版本仍为 1）
         first = next(d for d in dirs if "v1-to-v2" in d.name)
         copied = list(first.iterdir())
@@ -278,8 +279,8 @@ class TestUpgradeV1ToV2:
         cli("migrate", {})
         cli("overview", {})
         cli("list-tasks", {})
-        assert _schema_version(tmp_env.db) == 6
-        assert len(_backup_dirs(tmp_env)) == 5, "二次命令不应再新增备份"
+        assert _schema_version(tmp_env.db) == 7
+        assert len(_backup_dirs(tmp_env)) == 6, "二次命令不应再新增备份"
         rows = db_exec(tmp_env.db, "SELECT save_state FROM tasks")
         assert [r[0] for r in rows] == ["active"]
 class TestSchemaTooNew:
@@ -288,15 +289,15 @@ class TestSchemaTooNew:
         conn = sqlite3.connect(str(tmp_env.db))
         try:
             conn.executescript(V1_SCHEMA)
-            conn.execute("INSERT INTO schema_meta(version) VALUES (7)")
+            conn.execute("INSERT INTO schema_meta(version) VALUES (8)")
             conn.commit()
         finally:
             conn.close()
         out = cli("overview", {}, expect=1)
         assert out["code"] == "migration_needed"
         assert out["error"]
-        # 库未被改写（仍为过新的 7）
-        assert _schema_version(tmp_env.db) == 7
+        # 库未被改写（仍为过新的 8）
+        assert _schema_version(tmp_env.db) == 8
 
 
 # ---------------------------------------------------------------------------

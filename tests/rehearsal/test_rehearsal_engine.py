@@ -562,7 +562,7 @@ def test_scenario_migration_v5_to_v6_gc_reversible(cli, tmp_env, legacy_state):
     import hashlib
     from kanpilot import constants
 
-    assert constants.SCHEMA_VERSION == 6, "槽位池迁移后的 schema 版本应为 6"
+    assert constants.SCHEMA_VERSION == 7, "任务阶段树迁移后的 schema 版本应为 7"
 
     before = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
               for p in (legacy_state.executor_manifest,
@@ -582,7 +582,7 @@ def test_scenario_migration_v5_to_v6_gc_reversible(cli, tmp_env, legacy_state):
         version = conn.execute("SELECT version FROM schema_meta").fetchone()[0]
     finally:
         conn.close()
-    assert version == 6
+    assert version == 7
 
     tasks1 = cli("list-tasks", {})["tasks"]
     reqs1 = cli("list-requests", {})["requests"]

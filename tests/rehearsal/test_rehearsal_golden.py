@@ -522,7 +522,7 @@ def test_scenario_review_tracked_build_artifact_is_accepted(pipeline):
     slot = next(item for item in pool["slots"] if item["state"] == "quarantined")
     assert slot["holder_stage"] == "review"
     snapshot = Path(slot["path"])
-    assert snapshot.name.startswith("slot-")
+    assert snapshot.name == "review"
     assert _git(snapshot, "rev-parse", "HEAD") == head
     assert _git(snapshot, "status", "--porcelain") == "M tracked.pyc"
     assert _git(snapshot, "rev-parse", "HEAD") == head

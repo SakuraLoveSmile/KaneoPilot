@@ -62,7 +62,7 @@ class TestFieldShapes:
         assert isinstance(out["counts"]["requests"], dict)
         assert "last_tick_at" in out
         # state-model §1.1：schema v6（worktree slots）
-        assert out["schema_version"] == 6
+        assert out["schema_version"] == 7
 
     def test_list_tasks_summary_fields(self, factory, cli):
         task = factory.sync_task(title="形状检查")
