@@ -42,6 +42,38 @@ struct SessionTimelineAction: Identifiable, Equatable {
     var expandable: Bool { !bullets.isEmpty || (detail?.isEmpty == false) }
 }
 
+struct SessionGoalItem: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let status: String
+
+    var mark: String {
+        switch status {
+        case "completed": return "✓"
+        case "in_progress": return "●"
+        case "cancelled": return "–"
+        default: return "○"
+        }
+    }
+}
+
+struct SessionGoalCheckpoint: Identifiable, Equatable {
+    let id: String
+    let at: String?
+    let completed: Int
+    let total: Int
+}
+
+/// 轮次级目标摘要：目标标题、状态与最新待办完成情况（不单独占面板）。
+struct SessionGoalSummary: Equatable {
+    let title: String
+    let state: String
+    let completed: Int
+    let total: Int
+    let items: [SessionGoalItem]
+    let checkpoints: [SessionGoalCheckpoint]
+}
+
 struct SessionTimelineRound: Identifiable, Equatable {
     let id: String
     let title: String
@@ -49,6 +81,7 @@ struct SessionTimelineRound: Identifiable, Equatable {
     let endedAt: String?
     let state: String
     let actions: [SessionTimelineAction]
+    let goal: SessionGoalSummary?
 }
 
 enum SessionTimelineBuilder {
@@ -76,16 +109,25 @@ enum SessionTimelineBuilder {
             }
             buckets[key, default: []].append(message)
         }
-        return order.enumerated().map { index, key in
-            makeRound(id: key, messages: buckets[key] ?? [], index: index,
-                      total: order.count, runState: runState)
+        var rounds: [SessionTimelineRound] = []
+        var carriedGoalTitle: String?
+        for (index, key) in order.enumerated() {
+            let round = makeRound(id: key, messages: buckets[key] ?? [], index: index,
+                                  total: order.count, runState: runState,
+                                  inheritedGoalTitle: carriedGoalTitle)
+            if let title = round.goal?.title, !title.isEmpty {
+                carriedGoalTitle = title
+            }
+            rounds.append(round)
         }
+        return rounds
     }
 
     // MARK: - 轮次
 
     private static func makeRound(id: String, messages: [SessionMessage], index: Int,
-                                  total: Int, runState: String?) -> SessionTimelineRound {
+                                  total: Int, runState: String?,
+                                  inheritedGoalTitle: String?) -> SessionTimelineRound {
         let answeredCalls = Set(messages.compactMap { message -> String? in
             guard isResult(message) else { return nil }
             return message.toolCallId
@@ -96,6 +138,12 @@ enum SessionTimelineBuilder {
         var pending: SessionMessage?
         var assistantKeys = Set<String>()
         var lastAssistantDate: Date?
+        var goalTitle: String?
+        var goalItems: [SessionGoalItem] = []
+        var goalCheckpoints: [SessionGoalCheckpoint] = []
+        var goalHasProgress = false
+        var reportRejected = false
+        var reportRecorded = false
 
         func flushMinors() {
             guard !minors.isEmpty else { return }
@@ -154,6 +202,32 @@ enum SessionTimelineBuilder {
                 }
             case "tool_result", "command_output":
                 guard let action = toolAction(message) else { break }
+                if action.kind == .goal {
+                    if goalTitle == nil { goalTitle = goalHeading(message) }
+                    break
+                }
+                if action.kind == .progressList {
+                    if let update = goalUpdate(message) {
+                        goalItems = update.items
+                        goalHasProgress = true
+                        goalCheckpoints.append(SessionGoalCheckpoint(
+                            id: "goal-\(messageKey(message))",
+                            at: message.sourceAt,
+                            completed: update.completed,
+                            total: update.total))
+                    }
+                    break
+                }
+                if action.kind == .verification {
+                    let raw = message.tool?.output ?? message.content ?? ""
+                    if raw.contains("Draft validation failed") {
+                        reportRejected = true
+                        reportRecorded = false
+                    } else if raw.contains("draft recorded successfully") {
+                        reportRecorded = true
+                        reportRejected = false
+                    }
+                }
                 if action.kind == .minor {
                     minors.append(action)
                 } else {
@@ -183,9 +257,28 @@ enum SessionTimelineBuilder {
                 rawID: pending.id))
         }
 
+        let completed = goalItems.filter { $0.status == "completed" }.count
+        let goalTitleValue = goalTitle ?? ((goalHasProgress || reportRecorded || reportRejected)
+            ? (inheritedGoalTitle ?? "执行目标") : nil)
+        let goal = goalTitleValue.map { title -> SessionGoalSummary in
+            let state: String
+            if reportRejected {
+                state = "报告待修正"
+            } else if goalItems.isEmpty {
+                state = reportRecorded ? "报告已记录" : "已提交"
+            } else {
+                state = completed == goalItems.count ? "待办完成"
+                    : (completed > 0 ? "进行中" : "未开始")
+            }
+            return SessionGoalSummary(title: title, state: state,
+                                      completed: completed, total: goalItems.count,
+                                      items: goalItems, checkpoints: goalCheckpoints)
+        }
+
         let kinds = Set(actions.map(\.kind))
-        let hasExecution = kinds.contains(.progressList) || kinds.contains(.verification)
-        let hasPlanning = kinds.contains(.goal) || kinds.contains(.question)
+        let hasPlanning = goalTitle != nil || kinds.contains(.question)
+        let hasExecution = goalHasProgress || kinds.contains(.verification)
+            || kinds.contains(.command) || kinds.contains(.file)
         let kindTitle: String
         if hasExecution && hasPlanning {
             kindTitle = "规划与执行"
@@ -217,7 +310,8 @@ enum SessionTimelineBuilder {
             startedAt: started,
             endedAt: ended,
             state: state,
-            actions: actions)
+            actions: actions,
+            goal: goal)
     }
 
     // MARK: - 动作
@@ -385,6 +479,24 @@ enum SessionTimelineBuilder {
             return action(baseID, .minor, message, title: title,
                           detail: nil, status: nil, tone: .neutral, bullets: [])
         }
+    }
+
+    private static func goalHeading(_ message: SessionMessage) -> String? {
+        guard let markdown = string(object(message.tool?.input)?["markdown"]) else { return nil }
+        return firstHeading(markdown) ?? progressLine(markdown) ?? "目标契约"
+    }
+
+    private static func goalUpdate(_ message: SessionMessage) -> (items: [SessionGoalItem], completed: Int, total: Int)? {
+        let input = object(message.tool?.input)
+        let rawItems = input?["items"] as? [[String: Any]] ?? []
+        guard !rawItems.isEmpty else { return nil }
+        let items = rawItems.enumerated().map { index, raw -> SessionGoalItem in
+            SessionGoalItem(
+                id: string(raw["id"]) ?? "item-\(index)",
+                label: string(raw["label"]) ?? string(raw["id"]) ?? "待办",
+                status: (raw["status"] as? String) ?? "pending")
+        }
+        return (items: items, completed: items.filter { $0.status == "completed" }.count, total: items.count)
     }
 
     private static func systemAction(_ message: SessionMessage) -> SessionTimelineAction? {

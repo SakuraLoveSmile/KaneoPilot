@@ -9,6 +9,7 @@ struct SessionTimelineView: View {
     let onShowRaw: () -> Void
     @State private var collapsedRounds: Set<String> = []
     @State private var expandedActions: Set<String> = []
+    @State private var expandedGoals: Set<String> = []
 
     var body: some View {
         ScrollView {
@@ -63,6 +64,9 @@ struct SessionTimelineView: View {
             .accessibilityLabel("\(round.title)，\(round.state)")
             .accessibilityValue(collapsed ? "已收起" : "已展开")
             if !collapsed {
+                if let goal = round.goal {
+                    goalBlock(goal, roundID: round.id)
+                }
                 GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
                     VStack(spacing: 0) {
                         ForEach(Array(round.actions.enumerated()), id: \.element.id) { index, action in
@@ -72,6 +76,89 @@ struct SessionTimelineView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// 轮次级目标状态与待办完成情况；不单独占面板，跟在轮次标题下。
+    private func goalBlock(_ goal: SessionGoalSummary, roundID: String) -> some View {
+        let expanded = expandedGoals.contains(roundID)
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.s) {
+                Image(systemName: "target")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpBlue)
+                Text("目标").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                Text(goal.title)
+                    .font(.kpBody)
+                    .lineLimit(1)
+                    .help(goal.title)
+                Spacer(minLength: 0)
+                Text(goal.state)
+                    .font(.kpSmall)
+                    .foregroundStyle(goalColor(goal.state))
+            }
+            if goal.total > 0 {
+                HStack(spacing: Spacing.s) {
+                    ProgressView(value: Double(goal.completed), total: Double(goal.total))
+                        .progressViewStyle(.linear)
+                        .frame(width: 180)
+                    Text("\(goal.completed)/\(goal.total)")
+                        .font(.kpSmall).monospacedDigit()
+                        .foregroundStyle(Color.kpSecondary)
+                    if goal.checkpoints.count > 1 {
+                        Text("进展 " + goal.checkpoints.map { "\($0.completed)/\($0.total)" }.joined(separator: " → "))
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Button(expanded ? "收起待办" : "查看待办") {
+                        if expanded { expandedGoals.remove(roundID) } else { expandedGoals.insert(roundID) }
+                    }
+                    .font(.kpSmall)
+                    .buttonStyle(.link)
+                }
+                if expanded {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(goal.items) { item in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(item.mark)
+                                    .font(.kpSmall)
+                                    .foregroundStyle(itemColor(item.status))
+                                Text(item.label)
+                                    .font(.kpSmall)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if goal.checkpoints.count > 1 {
+                            Text("进展记录：" + goal.checkpoints.map {
+                                "\(TimeFormat.short($0.at)) \($0.completed)/\($0.total)"
+                            }.joined(separator: " · "))
+                                .font(.kpSmall)
+                                .foregroundStyle(Color.kpSecondary)
+                                .padding(.top, 2)
+                        }
+                    }
+                    .padding(.leading, 22)
+                }
+            }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func goalColor(_ state: String) -> Color {
+        switch state {
+        case "待办完成", "已完成": return .kpGreen
+        case "进行中", "报告已记录": return .kpBlue
+        case "报告待修正": return .kpOrange
+        case "失败": return .kpRed
+        default: return .kpSecondary
+        }
+    }
+
+    private func itemColor(_ status: String) -> Color {
+        switch status {
+        case "completed": return .kpGreen
+        case "in_progress": return .kpBlue
+        default: return .kpSecondary
         }
     }
 

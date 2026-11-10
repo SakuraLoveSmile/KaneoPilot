@@ -832,15 +832,34 @@ if let instruction = timelineMessage("turn-plan", "user", at: "2026-11-10T09:00:
     expect(rounds.first?.title.contains("规划") == true, "问答/契约轮识别为规划")
     expect(rounds.last?.title.contains("执行") == true, "进展/报告轮识别为执行")
     let actions = rounds.last?.actions ?? []
-    expect(actions.contains { $0.kind == .progressList && $0.title == "进展 1/2" }, "待办进展折叠为 X/Y")
-    expect(actions.contains { $0.kind == .progressList && $0.status == "第 2 次" }, "待办进展保留修订序号")
+    expect(rounds.first?.goal?.title == "让封面歌词更醒目", "目标标题进入规划轮")
+    expect(rounds.first?.goal?.state == "已提交", "规划轮目标状态")
+    expect(rounds.last?.goal?.title == "让封面歌词更醒目", "目标标题按轮次继承")
+    expect(rounds.last?.goal?.completed == 1 && rounds.last?.goal?.total == 2, "执行轮待办完成数")
+    expect(rounds.last?.goal?.state == "进行中", "执行轮目标状态")
+    expect(rounds.last?.goal?.items.first?.status == "completed", "待办项状态保留")
+    expect(rounds.last?.goal?.checkpoints.count == 1, "待办进展记录进入轮次")
+    expect(!actions.contains { $0.kind == .progressList }, "待办不再单列动作")
     expect(actions.contains { $0.kind == .file && $0.title == "修改 lyrics_view.dart" }, "文件改动折叠为路径摘要")
     expect(actions.contains { $0.kind == .command && $0.title == "flutter test --no-pub" }, "关键命令保留并去掉 cd 前缀")
     expect(actions.contains { $0.kind == .verification && $0.title.contains("1/1 通过") }, "验证报告折叠为通过数")
     expect(actions.contains { $0.kind == .terminal }, "终止事件进入时间线")
     let planning = rounds.first?.actions ?? []
-    expect(planning.contains { $0.kind == .goal && $0.title == "目标契约已提交" }, "目标契约折叠")
+    expect(!planning.contains { $0.kind == .goal }, "目标契约不单列动作")
     expect(planning.contains { $0.kind == .question && $0.status == "已答" }, "问答折叠并标记已答")
+}
+
+if let progressOne = timelineMessage("turn-goal", "tool_result", at: "2026-11-10T09:00:00Z",
+                                     name: "UpdateGoalProgress",
+                                     input: #"{"items":[{"label":"改样式","status":"in_progress"},{"label":"验证","status":"pending"}]}"#),
+   let progressTwo = timelineMessage("turn-goal", "tool_result", at: "2026-11-10T09:10:00Z",
+                                     name: "UpdateGoalProgress",
+                                     input: #"{"items":[{"label":"改样式","status":"completed"},{"label":"验证","status":"completed"}]}"#) {
+    let rounds = SessionTimelineBuilder.build(messages: [progressOne, progressTwo], runState: "finished")
+    expect(rounds.first?.goal?.state == "待办完成", "待办全部完成时目标状态更新")
+    expect(rounds.first?.goal?.completed == 2 && rounds.first?.goal?.total == 2, "目标完成数取最新待办")
+    expect(rounds.first?.goal?.checkpoints.count == 2, "多次进展记录保留检查点")
+    expect(rounds.first?.goal?.title == "执行目标", "无目标契约时使用可读回退标题")
 }
 
 if let minor1 = timelineMessage("turn-minor", "tool_result", at: "2026-11-10T09:00:00Z",
