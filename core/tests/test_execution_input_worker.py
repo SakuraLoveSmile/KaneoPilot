@@ -151,7 +151,10 @@ class ExecutionInputWorkerTests(PiDesktopCase):
         self.assertEqual(self.run_clock(spec,advance),0)
         self.assertTrue(path.read_text().startswith(before))
         observed = self.read_events(directory)
-        source = [event for event in observed if event.get('source_message_id')=='streamed']
+        # KP-EP01：progress 事件复用源消息身份，不参与修订序列断言。
+        source = [event for event in observed
+                  if event.get('source_message_id')=='streamed'
+                  and event.get('type')!='progress']
         messages = dsh_events.to_messages(observed)
         rendered = [message for message in messages if message['id']=='desktop:streamed:assistant_message']
         self.assertEqual(len(rendered),1)

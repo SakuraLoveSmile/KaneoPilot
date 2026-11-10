@@ -274,7 +274,12 @@ class TestRuntimeTranscriptPaging(_PiDesktopCase):
         )
         events, error = dsh_events.iter_events(path)
         self.assertIsNone(error)
-        self.assertEqual(len(events), 68)
+        # KP-EP01：助手消息会额外写一条 progress 展示事件；消息链仍应是一条
+        # 消息一条事件，progress 不进入 to_messages。
+        message_events = [event for event in events if event.get("type") != "progress"]
+        self.assertEqual(len(message_events), 68)
+        self.assertEqual(len(events) - len(message_events),
+                         sum(event.get("type") == "assistant_message" for event in events))
         self.assertNotIn("PRIVATE_TRANSCRIPT_PREVIEW", path.read_text())
         # Re-reading the verified tail does not duplicate transcript events.
         collector.poll()
