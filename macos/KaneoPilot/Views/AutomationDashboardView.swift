@@ -14,9 +14,12 @@ struct AutomationDashboardView: View {
     @State private var selectedID: String?
     @State private var hoveredID: String?
     @State private var healthDetailsExpanded = false
-    @FocusState private var dashboardFocused: Bool
-    @FocusState private var focusedAttentionID: String?
-    @FocusState private var focusedProjectID: String?
+    private enum FocusTarget: Hashable {
+        case dashboard
+        case attention(String)
+        case project(String)
+    }
+    @FocusState private var focusedTarget: FocusTarget?
     private static let flowNote = "已排队不等于已开始，执行端领取后才开始；开启构建发布的项目在版本发布后完成交付。"
     private var projectProgress: [DashboardProjectProgress.Project] {
         DashboardProjectProgress.projects(tasks: model.tasks, attention: model.attentionItems)
@@ -43,11 +46,12 @@ struct AutomationDashboardView: View {
         .navigationTitle("总览")
         .modifier(DashboardToolbarTitle())
         .focusable().focusEffectDisabled()
-        .focused($dashboardFocused)
+        .focused($focusedTarget, equals: .dashboard)
         .onKeyPress(.downArrow) { moveSelection(1) }
         .onKeyPress(.upArrow) { moveSelection(-1) }
         .onKeyPress(.return) {
-            guard dashboardFocused, !(NSApp.keyWindow?.firstResponder is NSTextView), let selectedID else { return .ignored }
+            guard focusedTarget == .dashboard, detailItem == nil,
+                  !(NSApp.keyWindow?.firstResponder is NSTextView), let selectedID else { return .ignored }
             open(selectedID); return .handled
         }
         .task {
@@ -57,8 +61,9 @@ struct AutomationDashboardView: View {
         .onChange(of: model.attentionTaskToOpen) { _, id in
             if let id { open(id); model.attentionTaskToOpen = nil }
         }
-        .onChange(of: focusedAttentionID) { _, id in
-            if let item = shownAttention.first(where: { $0.attentionId == id }) { selectedID = item.taskId }
+        .onChange(of: focusedTarget) { _, target in
+            if case let .attention(id) = target,
+               let item = shownAttention.first(where: { $0.attentionId == id }) { selectedID = item.taskId }
         }
         .sheet(item: $detailItem, onDismiss: {
             if let id = planningAfterDismissal {
@@ -227,7 +232,7 @@ struct AutomationDashboardView: View {
         let revealed = selectedID == item.taskId || hoveredID == item.taskId
         return Button {
             selectedID = item.taskId
-            dashboardFocused = true
+            focusedTarget = .attention(item.attentionId)
             open(item.taskId)
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
@@ -261,8 +266,11 @@ struct AutomationDashboardView: View {
         }
         .buttonStyle(.plain)
         .focusable()
-        .focused($focusedAttentionID, equals: item.attentionId)
-        .keyboardShortcut(focusedAttentionID == item.attentionId ? KeyboardShortcut(.return, modifiers: []) : nil)
+        .focused($focusedTarget, equals: .attention(item.attentionId))
+        .onKeyPress(.return) {
+            open(item.taskId)
+            return .handled
+        }
         .onHover { inside in
             if inside { hoveredID = item.taskId } else if hoveredID == item.taskId { hoveredID = nil }
         }
@@ -382,7 +390,10 @@ struct AutomationDashboardView: View {
     private func projectGroup(_ project: DashboardProjectProgress.Project) -> some View {
         let expanded = !collapsedProjectIDs.contains(project.id)
         return VStack(alignment: .leading, spacing: 0) {
-            Button { toggleProject(project.id) } label: {
+            Button {
+                focusedTarget = .project(project.id)
+                toggleProject(project.id)
+            } label: {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: Spacing.s) {
                         projectHeading(project, expanded: expanded, includesCounts: true)
@@ -403,8 +414,11 @@ struct AutomationDashboardView: View {
             }
             .buttonStyle(.plain)
             .focusable()
-            .focused($focusedProjectID, equals: project.id)
-            .keyboardShortcut(focusedProjectID == project.id ? KeyboardShortcut(.return, modifiers: []) : nil)
+            .focused($focusedTarget, equals: .project(project.id))
+            .onKeyPress(.return) {
+                toggleProject(project.id)
+                return .handled
+            }
             .accessibilityLabel("\(project.title)，\(project.tasks.count) 个任务，" + project.counts.map { "\($0.bucket.title) \($0.count)" }.joined(separator: "，"))
             .accessibilityValue(expanded ? "已展开" : "已折叠")
             .accessibilityHint(expanded ? "折叠项目任务" : "展开项目任务")
@@ -492,13 +506,18 @@ struct AutomationDashboardView: View {
     /// ↑↓ 只在显示出来的「需要你」行（最多 3 行）之间移动。
     private func moveSelection(_ step: Int) -> KeyPress.Result {
         let rows = shownAttention
-        guard dashboardFocused || focusedAttentionID != nil,
-              !(NSApp.keyWindow?.firstResponder is NSTextView), !rows.isEmpty else { return .ignored }
+        let focusedAttentionID: String?
+        switch focusedTarget {
+        case .dashboard: focusedAttentionID = nil
+        case .attention(let id): focusedAttentionID = id
+        default: return .ignored
+        }
+        guard !(NSApp.keyWindow?.firstResponder is NSTextView), !rows.isEmpty else { return .ignored }
         let old = rows.firstIndex(where: { $0.attentionId == focusedAttentionID })
             ?? rows.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : rows.count)
         let next = rows[min(max(old + step, 0), rows.count - 1)]
         selectedID = next.taskId
-        if focusedAttentionID != nil { focusedAttentionID = next.attentionId }
+        if focusedAttentionID != nil { focusedTarget = .attention(next.attentionId) }
         return .handled
     }
 }

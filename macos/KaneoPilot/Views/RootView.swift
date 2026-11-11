@@ -245,13 +245,7 @@ struct RootView: View {
                 .disabled(model.busy)
             }
             .controlSize(.small)
-            Button {
-                if environmentPresented { closeEnvironment() }
-                else {
-                    environmentEntryFocused = false
-                    environmentPresented = true
-                }
-            } label: {
+            Button(action: toggleEnvironment) {
                 Label("环境检查", systemImage: "stethoscope")
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
@@ -261,7 +255,10 @@ struct RootView: View {
             .buttonStyle(.plain)
             .focusable()
             .focused($environmentEntryFocused)
-            .keyboardShortcut(environmentEntryFocused ? KeyboardShortcut(.return, modifiers: []) : nil)
+            .onKeyPress(.return) {
+                toggleEnvironment()
+                return .handled
+            }
             .accessibilityValue(environmentPresented ? "已展开" : "已折叠")
             .accessibilityHint("查看引擎状态与诊断结果")
             .anchorPreference(key: EnvironmentEntryBounds.self, value: .bounds) { $0 }
@@ -289,6 +286,14 @@ struct RootView: View {
     private var environmentHealth: EnvironmentHealth {
         EnvironmentHealth(engineStatus: scheduler.engineStatus, engineError: scheduler.error,
                           doctor: model.doctor, doctorRunning: model.doctorRunning)
+    }
+
+    private func toggleEnvironment() {
+        if environmentPresented { closeEnvironment() }
+        else {
+            environmentEntryFocused = false
+            environmentPresented = true
+        }
     }
 
     private func closeEnvironment() {

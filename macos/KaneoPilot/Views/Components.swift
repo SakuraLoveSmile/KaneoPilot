@@ -235,7 +235,10 @@ struct EnvironmentCheckPanel: View {
                 .buttonStyle(.plain)
                 .focusable()
                 .focused($closeFocused)
-                .keyboardShortcut(closeFocused ? KeyboardShortcut(.return, modifiers: []) : .cancelAction)
+                .onKeyPress(.return) {
+                    onClose()
+                    return .handled
+                }
                 .help("关闭环境检查（Esc）")
                 .accessibilityLabel("关闭环境检查")
             }
