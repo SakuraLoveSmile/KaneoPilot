@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：待体验（2026-11-12 执行页目标进度已实现；7228bb3 云端构建 215 全绿，隔离原生界面核验通过；未合入、未发布、未更新正式安装，真实任务与用户体验尚待确认）
+- 状态：待体验（v0.5.7-test.222 已公开发布；f31f94b 云端完整门禁与发布全绿，实际测试包隔离原生核验通过；未合入 main、未替换正式安装，真实任务与用户体验尚待确认）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -180,3 +180,16 @@
 - 用户此次要求发布测试版本，未要求替换正式安装或合入 main；发布后核对Release/tag/四项资产与manifest，不自动安装到正式App。
 
 - 组合审查发现214既有P2：未确认发送为 `eligible=false/state=none/reconcile.available=true`，但父页只在 eligible/sent/observing 时创建继续执行栏，核对按钮被隐藏。本次补上父级 reconcile.available 显示条件；不改变发送/回收业务规则。原测试发布 run43069259736（候选219）在公开前取消，修复提交重新构建发布；候选版本不能当成已发布版本。
+
+- 最终候选：`f31f94b843016cf364f6ef20dc3ca02443a41c13`，基础版0.5.7，手动 test run [43070270517 / build222](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43070270517)，公开版本应为 `v0.5.7-test.222`。同提交的重复 push/preview run43070223221 已取消，发布核验只认 test run222。
+
+- 222候选包核对：macos-metadata.source_sha=`f31f94b843016cf364f6ef20dc3ca02443a41c13`，version=`0.5.7-test.222`，build=222；DMG SHA256=`09e21e2d1966877dfe106312dd96d7c3772bbc86a2456e9df49ed3fde9da244c`，codesign验证通过。首次artifact下载遇到unexpected EOF，改用GitHub artifact API下载成功且哈希一致，未忽略完整性错误。
+- 直接挂载云端222 DMG，以独立FakeCore、独立DB/支持目录和空凭据启动未修改的包（无本地编译/改签，未替换正式安装）。真实原生界面同时可见目标进度1/4和待办四态；设置 `eligible=false/state=none/reconcile.available=true` 后，原来隐藏的「核对发送结果」按钮已可见。此为隔离界面验证，不是Plus真实发送/回收验收。测试PID21290已结束，挂载disk18已正常推出；证据位于 `build/kp-ep01-goal-progress/test-222/` 的metadata与native-verification.json，以及本会话CUA截图/AX。
+
+
+### 测试版发布结果
+
+- **已发布** [v0.5.7-test.222](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.222)，非draft、prerelease=true。run43070270517/build222结论success，identity、checks1–5×Python3.11/3.13、Android、macos-fixtures a/b、macos-package、Codex native-platforms、publish全部成功；可选fulltext probe未启用跳过。
+- 读取公开Release、manifest、SHA256SUMS：四项资产齐全，资产digest与SHA256SUMS/manifest一致，下载的manifest及已核验DMG哈希与公开资产一致；annotated tag解引用与两端manifest来源均为 `f31f94b843016cf364f6ef20dc3ca02443a41c13`，version0.5.7-test.222、channel=test、base0.5.7、build222一致。
+- Android正式证书指纹 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`，由云端签名/包核验与公开manifest记录；本地未安装Android。macOS候选DMG已经由本机验证签名并隔离启动，未更新正式安装。
+- 公开核验资料位于 `build/kp-ep01-goal-progress/test-222/release/`。未合入main，保留本任务工作树与全部证据；待后续合入且验证通过后按本计划收尾。不将公开发布或隔离夹具通过标为用户验收。
