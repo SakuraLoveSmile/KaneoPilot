@@ -1,8 +1,8 @@
 """request-continuation：向同一 Pi Desktop Plus 会话发送继续当前 Goal 的指令。
 
-只发送一条新的用户消息（新 turn），**不**新建会话、不重新规划、不改 job/任务
-状态；随后由桌面轮询 ``check-execution-status``，新 turn 结束后复用现有
-``continue-execution``（接续成果 → 排队核验）链路。协议见 protocol §5.23.11。
+发送一条新的用户消息（新 turn），沿用原会话和目标；拿到新 turn 后同轮重开
+job、将任务恢复 running，并接回观察者。Goal 受阻决定通过专用宿主 resume
+接口发送，也复用本模块的接续步骤。协议见 protocol §5.23.11。
 
 发送槽由 runtime_operations 抢占；响应丢失记 unknown，绝不重发。
 """
@@ -123,7 +123,7 @@ def _client(spec: dict, task_id: str, run_id: str, *, read_only: bool):
 
 
 def cmd_request_continuation(ctx, payload: dict) -> dict:
-    """向同一 Plus 会话发送继续指令；一次发送，不重发。"""
+    """向同一 Plus 会话发送继续指令并接回观察；一次发送，不重发。"""
     if payload.get("confirm") is not True:
         raise util.KanpilotError("bad_request", "继续执行需要显式确认")
     task_id, run_id = payload["task_id"], payload["run_id"]
@@ -218,35 +218,48 @@ def cmd_request_continuation(ctx, payload: dict) -> dict:
         result={"turn_id": new_turn, "session_id": session_id},
         session_id=session_id, turn_id=new_turn, now=now)
 
-    # 同轮重开：把已收尾的 job 绑定到新 turn，清掉旧终态字段，再由
-    # round-observe 拉起 worker --resume 观察新 turn；旧 terminal 由
-    # observation_resumed_at 标记 superseded。
-    previous = {key: job.get(key) for key in
-                ("status", "turn_id", "send_state", "observation_resumed_at",
-                 "started_at", "ended_at", "exit_code", "detail", "pid",
-                 "observe_pid")}
-    history = list(job.get("turn_adopted") or [])
-    history.append({"from": old_turn, "to": new_turn,
-                    "code": "manual_continue", "at": now})
-    job["continue_previous"] = previous
-    job["turn_adopted"] = history[-5:]
-    job["continuation_started_at"] = now
-    job["observation_resumed_at"] = now
-    job["status"] = "running"
-    job["turn_id"] = new_turn
-    job["send_state"] = "sent"
-    job["ended_at"] = None
-    job["exit_code"] = None
-    job["detail"] = None
-    job["pid"] = None
-    job["observe_pid"] = None
-    for key in ("observation_finalizing", "heartbeat_stopped", "resume_previous"):
-        job.pop(key, None)
-    job_path = run_dir / dsh_events.JOB_NAME
-    tmp = job_path.with_name(job_path.name + ".continue.tmp")
-    tmp.write_text(util.jdump(job), encoding="utf-8")
-    os.replace(tmp, job_path)
+    return adopt_continuation(ctx, task_id=task_id, run_id=run_id, job=job,
+        run_dir=run_dir, session_id=session_id, old_turn=old_turn, new_turn=new_turn,
+        operation_id=operation_id)
 
+
+def adopt_continuation(ctx, *, task_id, run_id, job, run_dir, session_id, old_turn,
+                       new_turn, operation_id):
+    """Adopt a host-started continuation; never starts another model turn."""
+    conn, now = ctx.conn, ctx.now_iso
+    adoption = {"operation_id": operation_id, "task_id": task_id, "run_id": run_id,
+                "session_id": session_id, "from_turn": old_turn, "new_turn": new_turn}
+    prepared = job.get("continuation_adoption") == adoption and job.get("turn_id") == new_turn
+    if not prepared:
+        # 同轮重开：把已收尾的 job 绑定到新 turn，清掉旧终态字段，再由
+        # round-observe 拉起 worker --resume 观察新 turn；旧 terminal 由
+        # observation_resumed_at 标记 superseded。
+        previous = {key: job.get(key) for key in
+                    ("status", "turn_id", "send_state", "observation_resumed_at",
+                     "started_at", "ended_at", "exit_code", "detail", "pid",
+                     "observe_pid")}
+        history = list(job.get("turn_adopted") or [])
+        history.append({"from": old_turn, "to": new_turn,
+                        "code": "manual_continue", "at": now})
+        job["continue_previous"] = previous
+        job["turn_adopted"] = history[-5:]
+        job["continuation_started_at"] = now
+        job["observation_resumed_at"] = now
+        job["status"] = "running"
+        job["turn_id"] = new_turn
+        job["send_state"] = "sent"
+        job["ended_at"] = None
+        job["exit_code"] = None
+        job["detail"] = None
+        job["pid"] = None
+        job["observe_pid"] = None
+        for key in ("observation_finalizing", "heartbeat_stopped", "resume_previous"):
+            job.pop(key, None)
+        job["continuation_adoption"] = adoption
+        job_path = run_dir / dsh_events.JOB_NAME
+        tmp = job_path.with_name(job_path.name + ".continue.tmp")
+        tmp.write_text(util.jdump(job), encoding="utf-8")
+        os.replace(tmp, job_path)
     with db.write_txn(conn):
         fresh = db.require_task(conn, task_id)
         if fresh["run_id"] != run_id or fresh["status"] != "needs_user":

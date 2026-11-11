@@ -162,6 +162,7 @@ def continuation(task, *, allow_paused=False, allow_delivery_block=False):
             or receipt.get('task') != {key: task[key] for key in _TASK_KEYS}
             or receipt.get('branch') != {key: delivery.get(key) for key in _BRANCH_KEYS}
             or receipt.get('review_identity') != _pass(task)
+            or receipt.get('goal_acceptance_sha256') != (extra.get('goal_acceptance') or {}).get('acceptance_sha256')
             or receipt.get('evidence_identity') != _digest({key: extra.get(key) for key in
                    ('engine_verdict', 'plan_verify', 'review_history')})
             or receipt.get('id') != _digest({key: value for key, value in receipt.items() if key != 'id'})):
@@ -268,8 +269,11 @@ def continue_delivery(ctx, payload):
     from . import parent_closeout, review_resolution, verification_recovery
     hashes = {}
     try:
-        util.require(_exact_execution_coverage(ctx.conn, task, hashes),
-                     '冻结验证命令缺少逐条通过证据', 'conflict')
+        from . import goal_blocker
+        accepted = (goal_blocker.accepted_delivery_evidence(ctx.conn, task, hashes)
+                    if db.task_extra(task).get(goal_blocker.KEY) else None)
+        util.require(accepted is not None or _exact_execution_coverage(ctx.conn, task, hashes),
+                     '冻结验证命令缺少逐条通过证据，且没有当前有效的人工接受及独立评审授权', 'conflict')
         parent_closeout._report_bytes(task['review_report_path'], task['review_report_sha256'], hashes)
     except parent_closeout._Blocked as exc:
         raise util.KanpilotError('conflict', str(exc)) from exc
@@ -295,6 +299,7 @@ def continue_delivery(ctx, payload):
             branch={key: core.delivery_of(fresh).get(key) for key in _BRANCH_KEYS},
             review_identity=identity, review_request_status=review['status'],
             review_result_sha256=_digest(util.jload(review['result_json'])),
+            goal_acceptance_sha256=(extra.get('goal_acceptance') or {}).get('acceptance_sha256'),
             evidence_identity=_digest({key: extra.get(key) for key in ('engine_verdict','plan_verify','review_history')}))
             receipt['id'] = _digest(receipt)
         if fresh['status'] == 'needs_user':

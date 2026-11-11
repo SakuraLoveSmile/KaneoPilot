@@ -604,6 +604,21 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_dispatch.cmd_round_observe,
     ),
     # kp-cont01（§5.23.11）：向同一 Plus 会话发送继续当前 Goal 的指令（不重发）。
+    "get-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("goal_blocker", "cmd_get_goal_blocker"),
+    ),
+    "reconcile-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("goal_blocker", "cmd_reconcile_goal_blocker"),
+    ),
+    "resolve-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "execution_id": (True, "str"), "expected_version": (True, "int"),
+         "action": (True, "str"), "confirm": (False, "bool"),
+         "message": (False, "str"), "operation_id": (False, "str")},
+        _automation_command("goal_blocker", "cmd_resolve_goal_blocker"),
+    ),
     "request-continuation": (
         {"task_id": (True, "str"), "run_id": (True, "str"),
          "confirm": (False, "bool"), "operation_id": (False, "str")},

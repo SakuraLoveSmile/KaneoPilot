@@ -29,7 +29,7 @@ Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal
  - SQLite 是唯一状态写入源；桌面与执行端只经 `core` 的固定 JSON 命令交互，不直接改库或锁文件。
  - 「已排队」≠「已开始」：执行端领取并回报心跳才算开始。
  - 普通项目统一使用 `live` 新引擎；历史 Legacy/Shadow/缺省配置按 protocol §5.27.7 迁移。自动处理与暂停由既有开关控制。CLI 只保留显式 `shadow + force` 的无业务推进诊断；不再运行 Legacy。当前实施记录见 docs/plans/kp-e01-live-engine.plan.md，未完成实机验收/生产切换不声称已上线。
- - 验证由固化的执行端运行，Pilot 只核对报告与证据并推进状态。Plus verdict 沿 protocol §5.27.11；Codex CLI 沿 §5.31，统一核对结构化报告、原生命令退出码和源码快照。冻结计划的每条 verify 必须有通过记录，源码快照排除 `.pi/**` 与交付构建产物；任何入口均不得在 Pilot 本地代跑 verify。旧转录证据回执仅留审计，不因历史模式降低验证门禁。
+ - 验证由固化的执行端运行，Pilot 只核对报告与证据并推进状态。Plus verdict 沿 protocol §5.27.11；Codex CLI 沿 §5.31，统一核对结构化报告、原生命令退出码和源码快照。冻结计划的每条 verify 必须有通过记录，源码快照排除 `.pi/**` 与交付构建产物；任何入口均不得在 Pilot 本地代跑 verify。旧转录证据回执仅留审计，不因历史模式降低验证门禁。 受阻 Pi Goal 的显式用户接受按 protocol §5.23.12：仅作为独立评审准入授权，保持未验证和原缺项，不作为验证通过或直接完成的凭据。
  - 外部副作用先写 `runtime_operations` 回执再执行；远端写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
  
  ## 布局与归属

@@ -264,7 +264,12 @@ def _report_bytes(path, digest, hashes):
     hashes[str(p)]=actual
 
 
-def _task_evidence(conn, task, hashes):
+def _task_evidence(conn, task, hashes, *, require_review_pass=True):
+    from . import goal_blocker
+    accepted = (goal_blocker.accepted_delivery_evidence(conn, task, hashes, require_review_pass=require_review_pass)
+                if db.task_extra(task).get(goal_blocker.KEY) else None)
+    if accepted is not None:
+        return accepted
     _require(task['source_path'] and task['source_sha256'] and task['requirements_sha256'],
              'source_identity_missing','任务缺少冻结需求来源身份')
     source_file_sha=util.sha256_file(Path(task['source_path']))
@@ -336,7 +341,11 @@ def _collect_evidence(conn,parent,local,*,frozen_target=None,software_ready=Fals
         kaneo_children.append(dict(task_id=child['task_id'],project_id=child['project_id'],
             requirements_sha256=child['requirements_sha256'],status=(observed.get('task') or {}).get('status')))
     all_tasks=[parent]+local['children']
-    evidence={task['task_id']:_task_evidence(conn,task,hashes) for task in all_tasks}
+    # A repaired parent's independent verdict stays changes_requested. Its
+    # acceptance still binds the original source; the complete child reviews,
+    # merged PRs and integrated checkpoint below are mandatory before returning.
+    evidence={task['task_id']:_task_evidence(conn,task,hashes,
+              require_review_pass=task['task_id']!=parent['task_id']) for task in all_tasks}
     repo=git_delivery.origin_github_repo(parent['repository'])
     _require(repo,'github_repository_unknown','无法核对同一 GitHub 仓库的交付结果')
     branch=core.delivery_of(parent).get('base_branch')
@@ -381,13 +390,20 @@ def _collect_evidence(conn,parent,local,*,frozen_target=None,software_ready=Fals
              'target_missing_changes','目标分支尚未包含原始功能与全部修复提交')
     checkpoint=None;mapping=None;all_coverage=None
     for child in children:
-        if not child['exact_coverage'] or child['source_sha256']!=tip['source_sha256']:
+        if not (child['exact_coverage'] or child.get('user_accepted') is True) or child['source_sha256']!=tip['source_sha256']:
             continue
         if not all(github.contains(repo,head,child['head_sha']) for head in required_heads):
             continue
         commit=github.commit(repo,child['head_sha'])
-        coverage={task['task_id']:coverage_mapping(evidence[task['task_id']]['commands'],child['checks'],commit['paths'])
-                  for task in all_tasks}
+        coverage={}
+        for task in all_tasks:
+            own=evidence[task['task_id']]
+            # Authorization is local to this task; an accepted child cannot
+            # replace the parent's (or a sibling's) command evidence.
+            coverage[task['task_id']]=([dict(basis='user_accepted',
+                acceptance_sha256=own['acceptance_sha256'],verification_ok=False)]
+                if own.get('user_accepted') is True else
+                coverage_mapping(own['commands'],child['checks'],commit['paths']))
         if all(value is not None for value in coverage.values()):
             checkpoint=child;mapping=coverage[parent['task_id']];all_coverage=coverage;break
     _require(checkpoint is not None,'integrated_checkpoint_missing',
@@ -398,7 +414,8 @@ def _collect_evidence(conn,parent,local,*,frozen_target=None,software_ready=Fals
                 original_evidence=evidence[parent['task_id']],evidence_task_id=checkpoint['task_id'],
                 github_repository=repo,target_branch=branch,target_sha=tip['sha'],
                 target_source_sha256=tip['source_sha256'],coverage_mapping=mapping,all_task_coverage=all_coverage,
-                evidence_sha256=hashes,acceptance_note=ACCEPTANCE_NOTE)
+                evidence_sha256=hashes,acceptance_note=('仅确认软件交付；本次含用户接受的未验证结果，原缺项和独立评审记录保留，不代表人工已验收。'
+                    if any(row.get('user_accepted') is True for row in evidence.values()) else ACCEPTANCE_NOTE))
 
 
 def _result(conn,task_id,outcome,*,code=None,message=None):

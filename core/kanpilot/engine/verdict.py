@@ -228,6 +228,9 @@ def _require_snapshot(job, source_sha256):
 
 def receipt_evidence_current(conn, task, receipt, *, deadline=None, heartbeat=None):
     """Recheck receipt evidence on retries; historical local receipts never pass."""
+    if receipt.get("admission_source") == "user_acceptance":
+        from .. import goal_blocker
+        return goal_blocker.acceptance_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") in ("goal_report", "codex_report"):
         return _goal_receipt_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") != "plus_tool_results":
@@ -462,7 +465,7 @@ def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None)
 def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
     """A core commit changes HEAD/status, but not the verified source bytes."""
     if (receipt.get("evidence_source") not in ("goal_report", "codex_report")
-            or receipt.get("verification_ok") is not True
+            or not (receipt.get("verification_ok") is True or receipt.get("admission_source") == "user_acceptance" and receipt.get("review_authorized") is True)
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]):
         return False

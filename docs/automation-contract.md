@@ -524,3 +524,8 @@ Codex Desktop显式交还：先完成所有目录读取，经kp_desktop_submit_p
 自定义模型遵循 protocol 的单 provider 投影：以完整模型 ID 在运行时读取用户配置，只把对应连接字段及单个型号加入上述安全 settings；API key 替换为专用 child env 引用，不开放用户设置源或复制 routing。官方 1.1.74 设置解析支持 `$VAR` / `${VAR}` / `${VAR:-default}`，apiKey schema 建议环境引用；内联 settings 会写成 CLI 临时 JSON，因此不得把真实密钥放入内联参数。规划与 Review 共享同一启动准备接口，准备失败经既有失败/blocked 结算且不发模型请求。
 
 接口依据：[官方 CLI 参数](https://docs.qoder.com/cli/cli-reference.md)、[消息类型](https://docs.qoder.com/cli/sdk/references-typescript.md)、[脚本调用](https://docs.qoder.com/cli/run-in-scripts.md)、[CLI 1.1.74 发布源码](https://registry.npmjs.org/@qoder-ai/qodercli/-/qodercli-1.1.74.tgz)。这些是文档/源码契约证据，真实模型连通性须独立验证。
+
+
+## KP-GB01：用户接受当前执行结果
+
+protocol §5.23.12 新增单独的用户接受当前结果路径；不是原人工验证 override，不改变验证通过的证据要求。自动流程不得代替用户触发 accept，也不得把已受阻目标自动续跑成无限重试。明确接受后，monitor 仅使用与当前计划、源码、轮次、Pi 目标及报告绑定的有效人工接受回执继续独立评审流程；状态描述为“用户接受当前结果（未验证）”。独立 Review 必须收到原缺项、报告与接受记录，并可拒绝；交付仍需同版本独立 Review pass。没有当前回执的任务继续受严格验证门禁约束。

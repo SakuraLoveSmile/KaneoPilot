@@ -71,11 +71,13 @@ def _policy(conn,task):
 
 def _identity(task):
     extra=db.task_extra(task);delivery=core.delivery_of(task)
+    evidence={key:extra.get(key) for key in ('review_history','review_conclusion','engine_verdict','plan_verify')}
+    if extra.get('goal_acceptance'):
+        evidence['goal_acceptance']=extra['goal_acceptance']
     return dict({key:task[key] for key in _IDENTITY_KEYS},head_sha=delivery.get('head_sha'),
         delivery_sha256=util.sha256_text(util.jdump({key:delivery.get(key) for key in
             ('mode','head_sha','base_sha','base_branch','branch','pr_number','pr_url')})),
-        evidence_sha256=util.sha256_text(util.jdump({key:extra.get(key) for key in
-            ('review_history','review_conclusion','engine_verdict','plan_verify')})))
+        evidence_sha256=util.sha256_text(util.jdump(evidence)))
 
 
 def _root(conn,task):
@@ -369,7 +371,7 @@ def completion_gate(conn,task):
 
 
 def _verified_feed_checkpoint(repo,evidence,target):
-    """Build the verified tree itself when only existing channel feeds advanced."""
+    """Build the admitted source tree when only existing channel feeds advanced."""
     verified=closeout.github.commit(repo,evidence['head_sha'])
     _require(verified['sha']==evidence['head_sha'] and verified['source_sha256']==evidence['source_sha256'],
              'release_target_unverified','原发布检查点与正式验证源码不符')
@@ -400,8 +402,9 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
     _require(extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass'
         and all(review.get(key)==task[column] for key,column in (('execution_run_id','run_id'),('review_key','review_key'),
              ('report_sha256','review_report_sha256'),('report_path','review_report_path')))
-        and review.get('head_sha')==d.get('head_sha') and evidence['exact_coverage'],
-        'release_review_invalid','发布需要当前执行、最终提交及逐字验证对应的正式评审通过')
+        and review.get('head_sha')==d.get('head_sha')
+        and (evidence['exact_coverage'] or evidence.get('user_accepted') is True),
+        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过，以及逐字验证或明确人工接受的当前授权')
     closeout._report_bytes(task['review_report_path'],task['review_report_sha256'],hashes)
     repo=git_delivery.origin_github_repo(task['repository'])
     _require(repo and d.get('mode')=='pr' and type(d.get('pr_number')) is int,'release_pr_missing','发布需要同仓库已合并的 PR')

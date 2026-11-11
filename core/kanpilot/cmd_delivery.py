@@ -50,6 +50,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         else:
             from . import engine_claim_scope, round_store
             from .engine import verdict
+            from . import goal_blocker
             execution_round = round_store.get_round(conn, task["task_id"], execution_run_id)
             codex = execution_round is not None and execution_round["backend"] == "codex"
             strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) in ("live", "shadow")
@@ -60,8 +61,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 frozen = receipt.get("binding") or {}
                 actual = verdict.binding(conn, task, allow_core_commit=True)
                 if (receipt.get("evidence_source") != ("codex_report" if codex else "goal_report")
-                        or receipt.get("verification_ok") is not True
-                        or not verdict.receipt_evidence_current(conn, task, receipt)
+                        or not goal_blocker.review_admission_current(conn, task, receipt)
                         or receipt.get("execution_run_id") != execution_run_id
                         or receipt.get("plan_sha256") != task["plan_sha256"]
                         or not receipt.get("index_source_sha256")

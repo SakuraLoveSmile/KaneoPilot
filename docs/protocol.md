@@ -1171,9 +1171,22 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
 
+### 5.23.12 受阻 Goal 的显式处置（KP-GB01，2026-11-12）
+
+本节为独立评审准入新增的显式用户授权路径；不改变 §5.27.11 的验证通过定义，不复活旧 `accept_verification`、Legacy 或转录完成判定。未获得本节当前有效回执的 draft/fallback/partial/blocked 仍按既有规则拒绝完成。
+
+- `get-goal-blocker {task_id,run_id}` 只读读取当前 Pi Goal execution/hold，返回 `{task_id,run_id,state,detail?,session_id?,execution_id?,version?,title?,reasons,progress,limitations,next_steps,actions}`。`state` 为 `blocked|accepted|none|unavailable`；`progress` 为 `{id,label,status}[]`，其他正文数组为字符串数组，动作数组为 `continue|accept|reconcile`。只有经当前任务、轮次、批准目标身份核对的 blocked 状态可提供动作。普通 `get-task` 不因此增加网络访问；旧版 Pi 可从当前报告列表的可信 hold 读取原因但动作为空，并明确升级提示；缺少可核验 hold、断线、无身份或读取失败明确 unavailable，不能把历史快照当作当前可操作状态。
+- `resolve-goal-blocker {task_id,run_id,execution_id,expected_version,action,confirm:true,message?,operation_id}`：`action` 为 `continue|accept`。响应 `{task_id,run_id,status:continued|accepted,turn_id?,session_id?,deduplicated?}`。写前重新核对当前活跃任务、轮次、计划/配置、session/proposal/execution/version、持久终态和无竞争请求；不接受 UI 自报的原因或验证结果。
+- Pi 控制面为 `pi_goal_execution_get`、`pi_goal_resume`、`pi_goal_close`，输入继承 Pi `sessionId/executionId/expectedVersion`。续跑必须走 Pi Main 的 Goal resume 流程，保留原目标，传入用户补充文字；新 turn 交回既有 job/observer 观察，不能只改变 Host 状态或重发普通 prompt 冒充 resume。用户确认说明会调用模型并产生费用。
+- 两种写动作均先记录 `runtime_operations`，持久化请求身份后再发送。重复点击不得重复续跑或关闭；未知结果保留 unknown 并禁重发，明确要求只读核对。发送前持久化原请求、受阻快照和源码/索引绑定；`reconcile-goal-blocker {task_id,run_id}` 只读取 Pi 现状并补齐本地回执和观察/monitor，不重发 resume/close。只有与原决定精确匹配的目标、版本转换和 turn 链才能恢复；accept 还要求接受时源码不变，continue 则允许已获授权的新 turn 正常修改源码，不得因此拒绝接回观察。Pi 已接受而 Pilot 尚未建立当前接受回执时，GET 明确待核对接续，返回 reconcile 动作，不得宣称已进入评审。旧 version、更新的 turn、轮次/计划/源码变化拒绝过期意图；不得选择最新的无关目标作为替代。
+- `accept` 是接受当前结果并请求进入**独立评审和既有交付流程**，不是接受验证结论。Pi close 必须返回同目标 `accepted`/`user_accepted`；随后读取可信当前报告，保留原 `verdict`、`integrity`、失败/未运行项和证据。允许报告本身是 fallback，但不能将其解释成 structured 或 met。
+- 人工接受回执独立保存于当前任务执行上下文，包含用户/时间/操作身份、task/run/session/proposal/execution、计划、接受前受阻快照和接受后报告哈希、原缺项及源码绑定。统一准入校验区分 `verification_ok` 与 `review_authorized/admission_source=user_acceptance`；人工接受保持 `verification_ok=false`，只有当前有效人工回执可作为替代的评审准入凭据。报告、目标、源码、计划或轮次变化使该凭据失效；源码提交前后沿既有树/索引/提交回执校验保持同一内容，不能因核心提交的正常 HEAD 变化误判为新源码。
+- 接受后仍走 monitor、核心提交、独立 Review、交付。独立评审材料必须携带人工接受原文、原缺项与证据，要求评审独立判断；不能把用户接受写成验证通过。未通过独立评审仍阻止交付，Review/交付的轮次、计划、提交树、报告和发布门禁保留。不得直接改 done 或伪造 terminal、命令退出码、审查结果。
+
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
 本节冻结 T6：把普通/修复计划生成、dispatch 控制端、monitor 控制端与 review 控制端的模型调用全部交到用户自己的 PI-Desktop-Plus 本机 MCP 控制面，KaneoPilot 继续负责确定性的队列、租约、审批与状态写入。界面度量见 ui-spec §4.10，执行端编排见 automation-contract §2。本节**不**改变 §5.22 的手动规划门、§5.23.1 的计划阅读、§5.23.3 的任务执行后端、§5.23.9 的 Goal 契约代批与 monitor/Review 状态机。
+
 
 ### 5.24.1 角色后端与配置形状（v4）
 

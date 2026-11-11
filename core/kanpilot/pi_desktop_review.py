@@ -473,6 +473,12 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
     files.update(review_resolution.collect_evidence(conn, task, execution_run_id, materials))
     files.update(review_resolution.collect_remediation(task, materials))
     files.update(_collect_core_verification(conn, task, execution_run_id, materials))
+    acceptance = (db.task_extra(db.require_task(conn, task["task_id"])).get("goal_acceptance") or {}) if conn is not None else {}
+    if acceptance.get("execution_run_id") == execution_run_id:
+        target = materials / "user-accepted-goal.json"
+        _write_text(target, json.dumps({"notice": "用户接受现状只授权独立评审，不代表任何检查通过。请独立检查原失败、未运行项和风险；存在阻塞问题仍须拒绝交付。",
+            "acceptance": acceptance}, ensure_ascii=False, sort_keys=True, indent=2))
+        files[target.name] = str(target)
     plan_path = Path(str(task.get("plan_path") or ""))
     if plan_path.is_file():
         target = materials / "plan.md"
@@ -583,6 +589,10 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
         "review_key": task.get("review_key"),
         "materials": files,
     }
+    if acceptance.get("execution_run_id") == execution_run_id:
+        context["execution_admission"] = {"source": "user_acceptance", "verification_ok": False,
+            "acceptance_sha256": acceptance.get("acceptance_sha256"),
+            "review_instruction": "独立评审；用户接受不等于验证通过，未满足项和风险仍需评审，阻塞问题不得交付"}
     if core.requires_branch_review(task):
         context["review_branch_snapshot"] = core.branch_review_snapshot(task)
     _write_text(

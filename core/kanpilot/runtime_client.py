@@ -185,6 +185,7 @@ class RuntimeClient:
             if self.role == "execution":
                 required_runtime.update({
                     "kp_runtime_goal_report_list", "kp_runtime_goal_report_get",
+                    "kp_runtime_goal_execution_get",
                 })
                 if "pi_asks_pending" in self._required_tools:
                     required_runtime.add("kp_runtime_input_pending")
@@ -250,7 +251,7 @@ class RuntimeClient:
             if (not name.startswith("kp_runtime_") or name not in {
                     "kp_runtime_status", "kp_runtime_turn_get", "kp_runtime_messages",
                     "kp_runtime_proposals", "kp_runtime_input_pending",
-                    "kp_runtime_goal_report_list", "kp_runtime_goal_report_get"}
+                    "kp_runtime_goal_report_list", "kp_runtime_goal_report_get", "kp_runtime_goal_execution_get"}
                     or expiry is None or expiry > util.now_dt()
                     or not (exc.code in ("forbidden", "unauthorized")
                             or exc.code == "-32000" and exc.message.startswith("Unauthorized:")
@@ -456,6 +457,17 @@ class RuntimeClient:
 
     def agent_abort(self, session_id: str) -> dict:
         return self._write("kp_runtime_abort", "abort", {"session_id": session_id})
+
+    def goal_execution_get(self, session_id: str, *, execution_id=None):
+        return self._call("kp_runtime_goal_execution_get", {"session_id": session_id,
+            **({"execution_id": execution_id} if execution_id else {})})
+
+    def goal_action(self, session_id: str, *, execution_id, expected_version, action,
+                    operation_id, message=None):
+        return self._write("kp_runtime_goal_action", operation_id + ":pi", {
+            "authorization_operation_id": operation_id, "session_id": session_id,
+            "execution_id": execution_id, "expected_version": expected_version, "action": action,
+            **({"message": message} if message else {})})
 
     def goal_report_list(self, session_id: str) -> dict:
         return self._call("kp_runtime_goal_report_list", {"session_id": session_id})

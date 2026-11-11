@@ -705,6 +705,63 @@ struct RequestContinuationResponse: Decodable {
     let deduplicated: Bool?
 }
 
+/// KP-GB01：目标受阻是真实 Goal 状态，独立于报告 draft/验证结果。
+struct GoalBlockerResponse: Decodable, Equatable {
+    let taskId: String
+    let runId: String
+    var state: String
+    var detail: String?
+    let sessionId: String?
+    let executionId: String?
+    let version: Int?
+    let title: String?
+    let reasons: [String]
+    let progress: [ProgressItem]
+    let limitations: [String]
+    let nextSteps: [String]
+    var actions: [String]
+
+    struct ProgressItem: Decodable, Equatable, Identifiable {
+        let id: String
+        let label: String
+        let status: String
+
+        var statusLabel: String {
+            switch status {
+            case "completed", "done": return "已完成"
+            case "in_progress", "running": return "进行中"
+            case "blocked": return "受阻"
+            case "pending", "not_started": return "未完成"
+            case "skipped": return "未执行"
+            default: return status
+            }
+        }
+    }
+
+    var needsReconciliation: Bool { actions.contains("reconcile") }
+
+    /// 写操作始终冻结读取到的目标与版本；动作资格仍由核心重新核验。
+    var mutationIdentity: [String]? {
+        guard state == "blocked", let executionId, !executionId.isEmpty,
+              let sessionId, !sessionId.isEmpty, let version else { return nil }
+        return [taskId, runId, sessionId, executionId, String(version)]
+    }
+
+    var unverifiedItems: [String] {
+        reasons + progress.filter { !["completed", "done"].contains($0.status) }
+            .map { "\($0.label) · \($0.statusLabel)" } + limitations
+    }
+}
+
+struct GoalBlockerResolutionResponse: Decodable {
+    let taskId: String
+    let runId: String
+    let status: String
+    let turnId: String?
+    let sessionId: String?
+    let deduplicated: Bool?
+}
+
 /// §5.32 执行复盘投影（`get-task.task.retrospective`）。桌面只格式化核心数字，不据事件推导。
 /// 叶子全部可选：门控关闭或投影缺字段时只让对应区域显示「未汇总」，不能使整个任务详情解码失败。
 struct TaskRetrospective: Decodable {

@@ -51,6 +51,8 @@
 		BA5E00000000000000001174 /* SoftwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001074 /* SoftwareUpdate.swift */; };
 		BA5E00000000000000001175 /* SoftwareUpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001075 /* SoftwareUpdateManager.swift */; };
 		BA5E00000000000000001176 /* SoftwareUpdateSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E00000000000000001076 /* SoftwareUpdateSection.swift */; };
+		BA5E0000000000000000E065 /* GoalBlockerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E0000000000000000E064 /* GoalBlockerStore.swift */; };
+		BA5E0000000000000000E075 /* GoalBlockerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5E0000000000000000E074 /* GoalBlockerCard.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -101,6 +103,8 @@
 		BA5E00000000000000001074 /* SoftwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdate.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001075 /* SoftwareUpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateManager.swift; sourceTree = "<group>"; };
 		BA5E00000000000000001076 /* SoftwareUpdateSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateSection.swift; sourceTree = "<group>"; };
+		BA5E0000000000000000E064 /* GoalBlockerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalBlockerStore.swift; sourceTree = "<group>"; };
+		BA5E0000000000000000E074 /* GoalBlockerCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalBlockerCard.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -188,6 +192,8 @@
 				BA5E0000000000000000E034 /* SessionTimeline.swift */,
 				BA5E0000000000000000E044 /* SessionTimelineView.swift */,
 				BA5E0000000000000000E054 /* ContinueExecutionBar.swift */,
+				BA5E0000000000000000E074 /* GoalBlockerCard.swift */,
+				BA5E0000000000000000E064 /* GoalBlockerStore.swift */,
 				BA5E00000000000000001015 /* SavedTasksView.swift */,
 				BA5E00000000000000001030 /* PlanningView.swift */,
 				BA5E00000000000000001031 /* TaskDetailTabs.swift */,
@@ -312,6 +318,8 @@
 				BA5E0000000000000000E134 /* SessionTimeline.swift in Sources */,
 				BA5E0000000000000000E144 /* SessionTimelineView.swift in Sources */,
 				BA5E0000000000000000E154 /* ContinueExecutionBar.swift in Sources */,
+				BA5E0000000000000000E075 /* GoalBlockerCard.swift in Sources */,
+				BA5E0000000000000000E065 /* GoalBlockerStore.swift in Sources */,
 				BA5E00000000000000001115 /* SavedTasksView.swift in Sources */,
 				BA5E00000000000000001130 /* PlanningView.swift in Sources */,
 				BA5E00000000000000001131 /* TaskDetailTabs.swift in Sources */,

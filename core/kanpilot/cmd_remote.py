@@ -239,6 +239,12 @@ def _require_goal_gate(ctx, payload: dict, task, verified_receipt=None) -> None:
     if row["backend"] != "pi_desktop":
         # pi（及历史只读后端）维持 §5.18.4 原接口与三证据口径。
         return
+    if verified_receipt and (verified_receipt.get("receipt") or {}).get("admission_source") == "user_acceptance":
+        from . import goal_blocker
+        if not goal_blocker.review_admission_current(ctx.conn, task, verified_receipt["receipt"]):
+            raise util.KanpilotError("conflict", "人工接受凭据已变化，不能进入评审")
+        _require_command_monitor_claim(ctx, payload, task)
+        return
     run_dir = run_store_run_dir(ctx.conn, task["task_id"], run_id)
     job, _error = dsh_events.read_job(run_dir, task["task_id"], run_id, backend="pi_desktop")
     if isinstance(job, dict) and job.get("completion_policy") == "command_verification":
@@ -421,6 +427,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         if (engine_claim_scope.effective_mode(conn, current["project_id"]) in ("live", "shadow")
                 or core.review_repair_of(current).get("source_kind") in ("merge_conflict", "build_failure") or codex):
             from .engine import verdict
+            from . import goal_blocker
             receipt = db.task_extra(current).get("engine_verdict") or {}
             frozen = receipt.get("binding") or {}
             actual = verdict.binding(conn, current)
@@ -429,8 +436,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
             branch_review = core.requires_branch_review(current)
             comparable = dict(actual, head_sha=frozen.get("head_sha")) if branch_review else actual
             if (receipt.get("evidence_source") != ("codex_report" if codex else "goal_report")
-                    or receipt.get("verification_ok") is not True
-                    or not verdict.receipt_evidence_current(conn, current, receipt)
+                    or not goal_blocker.review_admission_current(conn, current, receipt)
                     or receipt.get("execution_run_id") != current["run_id"]
                     or receipt.get("plan_sha256") != current["plan_sha256"]
                     or comparable != frozen

@@ -3678,6 +3678,170 @@ def cmd_continue_execution(state, payload):
     return result
 
 
+# KP-GB01 isolated native preview. All transitions stay in KANPILOT_FAKE_STATE;
+# no Plus connection, real task, model, source tree or verification command is used.
+GOAL_BLOCKER_FIXTURE_TASK = "auto-verification_unconfirmed"
+
+
+def _goal_blocker_fixture_context(state, payload):
+    tid, run_id = payload.get("task_id"), payload.get("run_id")
+    if not tid or not run_id:
+        return None, None, fail("缺少 task_id/run_id", "bad_request")
+    task = next((t for t in merged_tasks(state) if t["task_id"] == tid), None)
+    if task is None:
+        return None, None, fail("隔离任务不存在", "not_found")
+    if task.get("run_id") != run_id:
+        return None, None, fail("隔离任务的当前轮次已变化", "conflict")
+    marker = "%s/%s" % (tid, run_id)
+    return task, marker, None
+
+
+def _goal_blocker_fixture_config(state, marker):
+    config = dict((state.get("goal_blocker_fixtures") or {}).get(marker) or {})
+    config.setdefault("scenario", os.environ.get("KANPILOT_FAKE_GOAL_BLOCKER_SCENARIO", "blocked"))
+    return config
+
+
+def cmd_get_goal_blocker_fixture(state, payload):
+    task, marker, error = _goal_blocker_fixture_context(state, payload)
+    if error:
+        return error
+    tid, run_id = task["task_id"], task["run_id"]
+    config = _goal_blocker_fixture_config(state, marker)
+    if config.get("read_error"):
+        return fail("隔离示例：目标状态读取失败", "remote_unavailable")
+    record = (state.get("goal_blocker_results") or {}).get(marker) or {}
+    result = {"task_id": tid, "run_id": run_id, "state": "none", "detail": None,
+              "session_id": task.get("session_id"), "execution_id": "fake-goal-" + tid,
+              "version": record.get("version", 3), "title": "封面模式歌词预览的原生验收",
+              "reasons": [], "progress": [], "limitations": [], "next_steps": [], "actions": []}
+    if tid != GOAL_BLOCKER_FIXTURE_TASK:
+        return result
+    scenario = config.get("scenario")
+    if scenario == "unavailable":
+        result.update(state="unavailable", detail="隔离示例：Pi 控制面不可用；请刷新或打开原会话核对。")
+        return result
+    result.update(
+        state="blocked",
+        detail="隔离示例：目标仍有未完成验收，等待用户选择。不会连接真实 Pi 或调用模型。",
+        reasons=["原生验收证据尚未齐备，目标保持受阻。", "需要补充可播放的空歌词输入，或明确接受当前结果。"],
+        progress=[{"id": "p1", "label": "歌词字号与对齐", "status": "completed"},
+                  {"id": "p2", "label": "同条件前后对照", "status": "completed"},
+                  {"id": "p3", "label": "可播放曲目的空歌词场景", "status": "blocked"},
+                  {"id": "p4", "label": "860 dp 播放与进度条证据", "status": "pending"},
+                  {"id": "p5", "label": "原生设备安装包来源核对", "status": "completed"},
+                  {"id": "p6", "label": "浅色与深色布局", "status": "completed"}],
+        limitations=[
+            "隔离长证据示例：现有曲目无法同时满足正常播放与返回空歌词，不能把输入缺失记为原生验证通过。",
+            "设备播放状态读数可能冻结，需要结合界面进度标签与连续操作记录交叉判断，单次静止读数不足以证明暂停。",
+            "860 dp 场景的进度条点击未触发 seek，本项记录为未生效，不能用其他视口下的成功记录替代。",
+            "加载窗口取决于当前网络与缓存条件，采样时间仅代表本轮隔离示例，不代表所有设备性能。",
+            "短句与连续切句已留存，但较长中英文单行省略号仍需符合约定输入后单独核对。",
+            "卡片边界可能受到悬浮控件覆盖，需结合左右边界及同布局对称性确定有效范围。",
+            "安装包来源与最终源码一致性尚有未执行的增强核验，不能把历史构建成功等同当前来源证明。",
+            "以上均为本地 FakeCore 罐头材料；没有访问真实设备、真实目标、用户数据库或付费服务。"],
+        next_steps=["提供一个可正常播放且返回空歌词的曲目引用。",
+                    "补齐未生效的宽屏播放与 seek 操作证据。",
+                    "或明确接受当前结果，保留缺项并进入独立评审。",
+                    "独立评审仍可提出修复要求或阻止交付，不因人工接受自动通过。"],
+        actions=[] if scenario == "legacy" else ["continue", "accept"])
+    if scenario == "legacy":
+        result["detail"] = "隔离示例：旧 Pi 可读取受阻材料，但需升级后才能在 Pilot 操作。"
+    pending = record.get("pending_action")
+    if pending or (not record.get("result") and scenario in ("unknown_accept", "unknown_continue")):
+        pending = pending or ("accept" if scenario == "unknown_accept" else "continue")
+        result.update(state="accepted" if pending == "accept" else "none", actions=["reconcile"],
+                      detail="隔离示例：Pi 已%s，但 Pilot 待核对接续；核对不会重复发送原操作。" %
+                             ("接受现状" if pending == "accept" else "继续目标"))
+    elif record.get("status") in ("accepted", "continued") or scenario == "accepted":
+        accepted = record.get("status", "accepted") == "accepted"
+        result.update(state="accepted" if accepted else "none", actions=[],
+                      detail="隔离示例：已按人工接受方式准入独立评审，仍未验证通过。" if accepted else
+                             "隔离示例：同一目标已继续执行，未创建真实轮次或调用模型。")
+    return result
+
+
+def _apply_goal_blocker_fixture_decision(state, task, marker, action, result):
+    patch = state.setdefault("task_overrides", {}).setdefault(task["task_id"], {})
+    patch.update(status="in_review" if action == "accept" else "running",
+                 stage="review" if action == "accept" else "running",
+                 display_status="待独立评审" if action == "accept" else "执行中",
+                 failure_code=None, failure_reason=None, failure_stage=None,
+                 blocked_at=None, blocked_summary=None, _automation_allowed=["recheck"],
+                 review_conclusion=None, review_summary=None, review_history=[],
+                 engine_verdict={"verification_ok": False, "review_authorized": action == "accept",
+                                 "admission_source": "user_acceptance" if action == "accept" else None})
+    if action == "continue":
+        execution = dict(task.get("execution_round") or {})
+        execution.update(run_status="running", turn_id=result["turn_id"])
+        patch["execution_round"] = execution
+    append_event(state, "goal_user_accepted" if action == "accept" else "goal_continued",
+                 task_id=task["task_id"], actor="user",
+                 detail={"fixture_only": True, "run_id": task["run_id"], "verification_ok": False})
+
+
+def cmd_resolve_goal_blocker_fixture(state, payload):
+    task, marker, error = _goal_blocker_fixture_context(state, payload)
+    if error:
+        return error
+    if task["task_id"] != GOAL_BLOCKER_FIXTURE_TASK or task.get("save_state") != "active":
+        return fail("此隔离任务没有可处理的受阻目标", "conflict")
+    action, operation = payload.get("action"), payload.get("operation_id")
+    if payload.get("confirm") is not True or action not in ("continue", "accept") or not operation:
+        return fail("隔离目标操作需要 action、operation_id 和显式确认", "bad_request")
+    prior = (state.get("goal_blocker_results") or {}).get(marker) or {}
+    if prior.get("operation_id") == operation:
+        if prior.get("payload") != payload:
+            return fail("隔离操作编号不可用于不同内容", "conflict")
+        if prior.get("pending_action"):
+            return fail("隔离示例：原操作结果待核对，不会重复发送", "remote_unavailable")
+        return dict(prior["result"], deduplicated=True)
+    current = cmd_get_goal_blocker_fixture(state, payload)
+    if (current.get("state") != "blocked" or action not in current.get("actions", [])
+            or payload.get("execution_id") != current.get("execution_id")
+            or payload.get("expected_version") != current.get("version")):
+        return fail("隔离目标身份或版本已变化，请刷新后重试", "conflict")
+    result = {"task_id": task["task_id"], "run_id": task["run_id"],
+              "session_id": task.get("session_id"), "status": "accepted" if action == "accept" else "continued",
+              "turn_id": "fake-goal-continued-turn" if action == "continue" else None, "deduplicated": False}
+    config = _goal_blocker_fixture_config(state, marker)
+    record = {"operation_id": operation, "payload": dict(payload), "result": result,
+              "version": current["version"] + 1, "status": result["status"], "resolve_sends": 1}
+    state.setdefault("goal_blocker_results", {})[marker] = record
+    if config.get("lose_resolve_response"):
+        record["pending_action"] = action
+        save_state(state)
+        return fail("隔离示例：Pi 已处理但响应丢失；请刷新后核对并接续，不会重发", "remote_unavailable")
+    _apply_goal_blocker_fixture_decision(state, task, marker, action, result)
+    save_state(state)
+    return result
+
+
+def cmd_reconcile_goal_blocker_fixture(state, payload):
+    task, marker, error = _goal_blocker_fixture_context(state, payload)
+    if error:
+        return error
+    if task["task_id"] != GOAL_BLOCKER_FIXTURE_TASK or task.get("save_state") != "active":
+        return fail("此隔离任务没有待核对决定", "conflict")
+    record = (state.get("goal_blocker_results") or {}).get(marker) or {}
+    if record.get("result") and not record.get("pending_action"):
+        return dict(record["result"], deduplicated=True)
+    current = cmd_get_goal_blocker_fixture(state, payload)
+    if "reconcile" not in current.get("actions", []):
+        return fail("此隔离目标没有已发生的待核对决定", "conflict")
+    action = record.get("pending_action") or ("accept" if current["state"] == "accepted" else "continue")
+    result = record.get("result") or {"task_id": task["task_id"], "run_id": task["run_id"],
+              "session_id": task.get("session_id"), "status": "accepted" if action == "accept" else "continued",
+              "turn_id": "fake-goal-continued-turn" if action == "continue" else None, "deduplicated": False}
+    _apply_goal_blocker_fixture_decision(state, task, marker, action, result)
+    record.update(result=result, status=result["status"], version=current["version"],
+                  reconcile_calls=record.get("reconcile_calls", 0) + 1)
+    record.pop("pending_action", None)
+    state.setdefault("goal_blocker_results", {})[marker] = record
+    save_state(state)
+    return result
+
+
 def cmd_session_request_start(state, payload):
     status = cmd_session_control_status(state, payload)
     if not status["can_start"] or payload.get("request_id") != status["request_id"]:
@@ -4561,6 +4725,9 @@ COMMANDS = {
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
     "get-task": lambda s, p: cmd_get_task(s, p),
+    "get-goal-blocker": cmd_get_goal_blocker_fixture,
+    "resolve-goal-blocker": cmd_resolve_goal_blocker_fixture,
+    "reconcile-goal-blocker": cmd_reconcile_goal_blocker_fixture,
     "request-continuation": lambda s, p: (
         {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
         if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),

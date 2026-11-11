@@ -17,6 +17,7 @@ struct TaskDetailContentView: View {
     @State private var loading = true
     @State private var error: String?
     @State private var loadGeneration = 0
+    @StateObject private var goalBlockerStore = GoalBlockerStore()
     @State private var taskPath: [String] = []
     private var currentTaskID: String { taskPath.last ?? taskID }
 
@@ -55,6 +56,7 @@ struct TaskDetailContentView: View {
         }
         .onChange(of: currentTaskID) {
             loadGeneration += 1
+            goalBlockerStore.clear()
             detail = nil
             events = []
             tab = taskPath.isEmpty ? initialTab : .overview
@@ -189,6 +191,7 @@ struct TaskDetailContentView: View {
                 TaskOverviewTabView(
                     detail: detail,
                     events: events,
+                    goalBlockerStore: goalBlockerStore,
                     onSwitchTab: { tab = $0 },
                     onPreparePlanning: onPreparePlanning,
                     onRefreshDetail: { Task { await load() } },
@@ -202,7 +205,8 @@ struct TaskDetailContentView: View {
         case .plan:
             PlanReaderView(taskID: currentTaskID, detail: detail, showsHeaderInfo: !showsHeader)
         case .execution:
-            TaskExecutionTabView(taskID: currentTaskID, detail: detail)
+            TaskExecutionTabView(taskID: currentTaskID, detail: detail, goalBlockerStore: goalBlockerStore,
+                                 onRefreshDetail: { Task { await load() } })
         case .review:
             if let detail {
                 TaskReviewTabView(detail: detail, onOpenTask: openRelatedTask,
@@ -263,6 +267,13 @@ struct TaskDetailContentView: View {
             guard generation == loadGeneration else { return }
             detail = task
             events = evs
+            await goalBlockerStore.observe(taskID: currentTaskID, runID: task.runId,
+                eligible: task.readOnly != true && task.executionRound?.backend == "pi_desktop"
+                    && ["running", "finished", "failed"].contains(task.executionRound?.runStatus ?? "")
+                    && task.status != "done" && task.currentInputQuestion?.state != "open",
+                command: { command, payload in
+                    try await model.client.run(command, payload: payload, timeout: 120)
+                })
         } catch {
             guard generation == loadGeneration else { return }
             self.error = error.coreMessage
@@ -442,6 +453,9 @@ private struct PlanAnswerCard: View {
 struct TaskExecutionTabView: View {
     let taskID: String
     let detail: TaskDetail?
+    @ObservedObject var goalBlockerStore: GoalBlockerStore
+    var onRefreshDetail: (() -> Void)? = nil
+    @EnvironmentObject private var model: AppViewModel
     @State private var retrospectiveExpanded = false
     @State private var retrospectiveHeight: CGFloat = 0
     @State private var sessionDigest: ExecutionSessionDigest?
@@ -452,7 +466,13 @@ struct TaskExecutionTabView: View {
         // 执行页不再内嵌阅读器，也不轮询消息正文。
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.s) {
-                if let continuation = detail?.continueExecution,
+                if goalBlockerStore.showsCard {
+                    GoalBlockerCard(store: goalBlockerStore, sessionID: detail?.sessionId) {
+                        onRefreshDetail?()
+                        await model.refreshAll()
+                    }
+                    .padding(.horizontal, Spacing.l)
+                } else if let continuation = detail?.continueExecution,
                    continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
                     ContinueExecutionBar(taskID: taskID,
                                          runID: detail?.runId ?? continuation.runId,
@@ -686,6 +706,7 @@ private struct ReviewEvidenceSheet: View {
 struct TaskOverviewTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
+    @ObservedObject var goalBlockerStore: GoalBlockerStore
     var onSwitchTab: ((TaskDetailTab) -> Void)? = nil
     var onPreparePlanning: ((String) -> Void)? = nil
     var onRefreshDetail: (() -> Void)? = nil
@@ -908,6 +929,12 @@ struct TaskOverviewTabView: View {
     }
 
     private var nextStepExplanation: String {
+        if goalBlockerStore.blocker?.needsReconciliation == true {
+            return "请在上方核对已发生的目标决定并接续 Pilot；不会重复发送原操作。"
+        }
+        if goalBlockerStore.showsCard, goalBlockerStore.blocker?.state != "accepted" {
+            return "请查看上方目标受阻原因，补充材料后继续，或接受现状交给独立评审。"
+        }
         if detail.readOnly == true { return "此任务为只读记录，可查看计划、会话和历史证据。" }
         if detail.sendState == "unknown" {
             if detail.canRetryExecution {
@@ -1005,6 +1032,11 @@ struct TaskOverviewTabView: View {
                             else { model.openPlanning(focusTaskID: detail.taskId) }
                         }, onRefreshDetail: onRefreshDetail)
                         .id("review-resolution")
+                } else if goalBlockerStore.showsCard {
+                    GoalBlockerCard(store: goalBlockerStore, sessionID: detail.sessionId) {
+                        onRefreshDetail?()
+                        await model.refreshAll()
+                    }
                 } else if showsBlockedBanner {
                     // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
@@ -1455,6 +1487,10 @@ struct TaskOverviewTabView: View {
                     executionSubmitControls(store)
                 } else if executionAwaitingPlus {
                     Text("等待你在 Plus 中回答").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                } else if goalBlockerStore.showsCard,
+                          goalBlockerStore.blocker?.state != "accepted" || goalBlockerStore.blocker?.needsReconciliation == true {
+                    Text(goalBlockerStore.blocker?.needsReconciliation == true ? "请在上方核对并接续目标决定" : "请在上方选择目标处理方式")
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 } else if let primaryAction {
                     actionButton(primaryAction)
                         .buttonStyle(.borderedProminent)

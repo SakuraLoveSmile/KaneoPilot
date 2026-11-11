@@ -376,6 +376,30 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "kp_runtime_goal_execution_get",
+        "description": "Read the Goal hold for a bound execution session.",
+        "domain": "runtime", "readOnlyHint": True,
+        "inputSchema": {"type": "object", "properties": {
+            "scope_id": {"type": "string"}, "session_id": {"type": "string"},
+            "execution_id": {"type": "string"}},
+            "required": ["scope_id", "session_id"], "additionalProperties": False},
+        "outputSchema": {"type": "object"},
+    },
+    {
+        "name": "kp_runtime_goal_action",
+        "description": "Apply a user-authorized Goal hold decision. Requires a core reservation.",
+        "domain": "runtime", "destructiveHint": True,
+        "inputSchema": {"type": "object", "properties": {
+            "scope_id": {"type": "string"}, "operation_id": {"type": "string"},
+            "authorization_operation_id": {"type": "string"}, "session_id": {"type": "string"},
+            "execution_id": {"type": "string"}, "expected_version": {"type": "integer"},
+            "action": {"type": "string", "enum": ["continue", "accept"]},
+            "message": {"type": "string"}},
+            "required": ["scope_id", "operation_id", "authorization_operation_id", "session_id",
+                         "execution_id", "expected_version", "action"], "additionalProperties": False},
+        "outputSchema": {"type": "object"},
+    },
+    {
         "name": "kp_runtime_goal_report_list",
         "description": "Read Goal report candidates for an execution scope's session.",
         "domain": "runtime",
@@ -974,6 +998,9 @@ def _verification_requirements_guard(conn, scope, args, *, sql_only=False):
 
 def _runtime_guard(conn, scope, tool, args):
     adapter = harnesses.runtime_adapter_for_scope(scope, args)
+    if tool == "kp_runtime_goal_action":
+        from .goal_blocker import authorize_runtime_goal_action
+        authorize_runtime_goal_action(conn, scope, args)
     if tool == "kp_runtime_proposal_resolve":
         _verification_requirements_guard(conn, scope, args)
     if tool in ("kp_runtime_input_pending", "kp_runtime_input_respond"):
@@ -1081,6 +1108,9 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
             unchanged_release_scope()
             def authorization_guard(conn):
                 _scope_valid(scope_manager, scope)
+                if tool_name == "kp_runtime_goal_action":
+                    from .goal_blocker import authorize_runtime_goal_action
+                    authorize_runtime_goal_action(conn, scope, arguments)
                 if tool_name == "kp_runtime_proposal_resolve":
                     unchanged_release_scope()
                     if release_scope_snapshot is not None:
@@ -1102,6 +1132,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
                 "kp_runtime_turn_get": lambda: adapter.call("turn_get", conn_file, session_id=arguments["session_id"], turn_id=arguments["turn_id"], require_identity=arguments.get("require_identity", False)),
                 "kp_runtime_messages": lambda: adapter.call("messages", conn_file, session_id=arguments["session_id"], before=arguments.get("before"), limit=arguments.get("limit")),
                 "kp_runtime_proposals": lambda: adapter.call("proposals", conn_file, session_id=arguments["session_id"], turn_id=arguments.get("turn_id")),
+                "kp_runtime_goal_execution_get": lambda: adapter.call("goal_execution_get", conn_file, session_id=arguments["session_id"], execution_id=arguments.get("execution_id")),
                 "kp_runtime_goal_report_list": lambda: adapter.call("goal_report_list", conn_file, session_id=arguments["session_id"]),
                 "kp_runtime_goal_report_get": lambda: adapter.call("goal_report_get", conn_file, session_id=arguments["session_id"], execution_id=arguments.get("execution_id"), report_id=arguments.get("report_id")),
             }
@@ -1121,6 +1152,7 @@ def dispatch_tool_call(db_path, scope_manager, token_type, scope, tool_name, arg
         # No SQLite transaction or service-wide lock spans a Plus callback.
         sid = arguments.get("session_id")
         writers = {
+            "kp_runtime_goal_action": lambda: adapter.call("goal_action", conn_file, session_id=sid, execution_id=arguments["execution_id"], expected_version=arguments["expected_version"], action=arguments["action"], message=arguments.get("message")),
             "kp_runtime_session_create": lambda: adapter.call("session_create", conn_file, project_path=scope.project_path, mode=arguments["mode"], runtime_config=scope.runtime_config or {}, title=arguments.get("title"), project_name=arguments.get("project_name"), interaction_mode=arguments.get("interaction_mode")),
             "kp_runtime_session_configure": lambda: adapter.call("session_configure", conn_file, session_id=sid, mode=arguments["mode"], permission_mode=arguments["permission_mode"], interaction_mode=arguments.get("interaction_mode")),
             "kp_runtime_attach_mcp": lambda: adapter.call("attach_mcp", conn_file, session_id=sid, bridge_file=str(grant)),
