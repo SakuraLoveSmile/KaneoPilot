@@ -30,8 +30,9 @@ def fix(tmp_path, tmp_env):
                                   "fix_task_id": "fix12345", "conclusion": "changes_requested"}])
     db.update_task(conn, "fix12345", NOW, plan_kind="review_fix",
                    review_source_task_id="source123", review_key="review-key")
+    # Historical recovery fixture: Git existed before delivery was registered.
     delivery = git_delivery.prepare_branch_worktree(str(repo), "fix12345", base_branch="main",
-                                                    worktrees_root=tmp_path / "trees")
+                                                    worktrees_root=tmp_path / "trees", branch="kaneo/fix12345")
     delivery["mode"] = "pr"
     core.update_delivery(conn, db.require_task(conn, "fix12345"), NOW, **delivery)
     ctx = SimpleNamespace(conn=conn, now_iso=NOW)
@@ -178,7 +179,8 @@ def test_auto_intake_passes_exact_frozen_review_head(fix, tmp_path):
          mock.patch.object(auto_intake.planner_config, "merged", return_value={"backend": "pi_desktop", "default_method": "builtin"}):
         response = auto_intake._submit(fix.conn, tmp_path / "fix.db", "fix12345",
             {"delivery_base": "main", "policy_revision": 1}, NOW, "requirements", wanted=True)
-    assert response["request_id"] == "queued-plan"
+    assert response.get("request_id") == "queued-plan", response
+    assert prepare.call_args.kwargs["branch"] == "kaneo/fix12345"
     assert prepare.call_args.kwargs["initial_head_sha"] == fix.reviewed
     assert prepare.call_args.kwargs["base_branch"] == "main"
 

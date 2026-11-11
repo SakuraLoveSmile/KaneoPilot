@@ -253,4 +253,4 @@ def test_push_still_works_with_artifacts_present(repo, tmp_path):
         assert gd.push_branch(dict(delivery, head_sha=head),
                               expected_repo="owner/repo") == {
                                   "pushed_sha": head}
-    assert git(repo, "rev-parse", "refs/heads/kaneo/task1234") == head
+    assert git(repo, "rev-parse", "refs/heads/" + delivery["branch"]) == head

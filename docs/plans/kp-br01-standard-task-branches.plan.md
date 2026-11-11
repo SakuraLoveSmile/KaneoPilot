@@ -1,6 +1,6 @@
 # KP-BR01 软件创建任务分支使用标准命名
 
-- 状态：待体验
+- 状态：实现中
 - 用户目标：后续软件创建的分支遵循标准命名，解释截图仍显示 kaneo/<task_id> 的原因。
 - 原因：git_delivery、task_workspace 等入口硬编码旧前缀，KP-WT01 明确保留该规则；不是界面缓存。
 - 范围：手动规划、自动接收、评审恢复、构建修复的分支创建及身份核验。已有任务不自动改名；不动运行库、远端分支和已有 PR。
@@ -21,4 +21,7 @@
 - 收尾：未创建临时 worktree；原有其他任务 worktree、未跟踪文件和用户数据均保留。下一步按发布授权走云端 Packages 并安装后体验；不将源码验证当作已安装生效。
 - 云端构建授权：2026-11-12 用户要求排队构建云端新版本；提交并推送本任务分支，触发 Packages 默认预览构建，不创建正式或测试 Release。
 - 云端队列：Packages #216，push 事件，源码 d66669a8edb76903d26964d6544083461244e3ed；2026-11-12 已确认 queued。运行：https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43062631673 。使用分支 push 自动触发，未重复手动派发。
-- 交付限制：构建仍在队列，尚未合并、打包完成或安装；当前安装版不会因源码修改即时改变。
+- #216 云端结果：失败。macos-package、Android、两组 macOS 夹具与 native-platforms 成功；Python 3.11/3.13 的四个用例失败：产物过滤推送断言、交付演练拒绝推送断言仍硬编码旧分支；两个评审修复自动接收用例使用“未登记的标准分支”却在模拟旧版恢复。
+- 本次修正：前两处按实际登记分支断言完整目标引用（保留 no-force、裸仓库拒绝与恢复验证）；历史恢复夹具显式创建旧名并断言传入旧名，不放宽生产收养门禁。保留独立新标准分支验证。
+- 本次本地复核：core/tests/test_delivery_artifact_filter.py、core/tests/test_review_fix_workspace.py、core/tests/test_branch_naming.py、tests/rehearsal/test_rehearsal_delivery.py 合计 92 passed、6 skipped（既有历史演练跳过项未修改），66.06s；git diff --check 通过。重新提交云端完整门禁及两端打包，待记录新 run。
+- 交付限制：尚未合并或安装；当前安装版不会因源码修改即时改变。

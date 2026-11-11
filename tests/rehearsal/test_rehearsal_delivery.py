@@ -191,12 +191,12 @@ class TestRehearsalDelivery(test_auto_pipeline.TestAutoPipeline):
         for line in pushes:
             self.assertNotIn('--force', line, line)
             self.assertNotIn('--force-with-lease', line, line)
-            self.assertIn('refs/heads/kaneo/' + TASK, line)
+            self.assertIn('refs/heads/' + value['delivery']['branch'], line)
         hook_rows = [row for row in
                      (hook_log.read_text(encoding='utf-8').splitlines()
                       if hook_log.exists() else []) if row.strip()]
         self.assertTrue(hook_rows, 'pre-receive 钩子未被调用')
-        self.assertIn('refs/heads/kaneo/' + TASK, hook_rows[0])
+        self.assertIn('refs/heads/' + value['delivery']['branch'], hook_rows[0])
 
         # 环境修复：移除远端 pre-receive 钩子（恢复接受推送）。
         self._push_hook.unlink(missing_ok=True)
