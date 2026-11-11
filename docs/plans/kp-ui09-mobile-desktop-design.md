@@ -1,7 +1,7 @@
 # KP-UI09 · 手机接手与 macOS 工作台设计
 
 - 用户目标：离开电脑后开发继续推进，需要时通过手机查看、决策与接手；电脑前管理多个项目为次要场景。新需求来自 Feedback，Pilot 承接已有任务的推进与交付。
-- 本轮 UI 范围：已确认的 macOS 局部设计进入 SwiftUI 实现；UI09 不新增 Android、调度、数据库或核心接口变化。2026-11-11 用户进一步要求“发布并构建新版本”，发布集成须保留当前已发布测试版的既有能力与 schema 7 兼容（见 T6），不从旧 schema 6 基线发包覆盖。状态：**实现中**。手机仅设计已验收。
+- 本轮 UI 范围：已确认的 macOS 局部设计进入 SwiftUI 实现；UI09 不新增 Android、调度、数据库或核心接口变化。2026-11-11 用户进一步要求“发布并构建新版本”，发布集成保留当前已发布测试版的既有能力与 schema 7 兼容（见 T6），不从旧 schema 6 基线发包覆盖。状态：**待体验**；正式 `v0.5.6 / build 212` 已公开，发布门禁、下载包核验和工作树收尾完成，尚未替用户安装或完成真实设备体验。手机仅设计已验收。
 - 手机草图：**已验收（仅设计）**。2026-11-11 用户明确“手机设计已定稿”；后续修改需有新的用户反馈。
 - macOS 设计：**已验收（仅设计）**。2026-11-11 用户回复“目前来看没啥问题 下一步把”，据此进入实现。2026-11-11 用户明确“在现有的基础上修改，不需要重构”，随后反馈“首页上主要是想关注项目进度”，并提出环境检查“可以收到左下角”。当前局部对比稿已按该位置修订并获用户确认。此前整页草图超出范围，撤回其作为后续设计依据的地位。
 
@@ -68,11 +68,11 @@
 
 ## 当前进展与剩余
 
-- T1–T4 已完成本轮实现与独立复核；T5 的 #207 包核验、四种窗口/外观及相关原生交互已完成，检查绑定代码 `89a91b0`。当前进入 T6 发布集成，整体状态仍为**实现中**；下述 #207 失败是历史结果，新组合态须重新检查，不能拼接旧包与其他分支绿灯充当本轮通过。
+- T1–T6 已完成实现、独立复核、隔离原生检查及正式发布。组合提交 `39db7d5d116955513a3c4f764ca64cf6382f2bea` 的全新预览 #211 已通过全部必需门禁，并完成两种窗口/外观的原生回归；正式标签构建 #212 全部必需门禁及 publish 成功，`v0.5.6 / build 212` 已公开为 latest，安装包核验与工作树收尾完成。整体状态为**待体验**。#207 的四组合检查仅是对应旧 SHA 的历史证据；自动附带的 main 预览 #213 有既有故障注入测试失败，不能声称所有构建全绿，详见末尾风险记录。
 - 当前实现：`RootView.swift` 用窗口根锚点 overlay 向上呈现面板，避免列裁剪与系统 popover 尾箭头；`Components.swift` 共用环境状态投影、告警与诊断明细；Dashboard 移除配置摘要与额外项目映射读取，新增可折叠项目分组；共享项目键沿用任务列表规则。
 - 独立 Sol 审查发现 Tab 到事项行后容器焦点守卫会屏蔽↑↓；已改为每事项 attentionId 显式焦点，箭头更新行焦点，事项/项目头/环境入口分别绑定获焦时的 Return；独立复核通过，未发现新的明确问题。侧栏消失时收环境面板，关闭后焦点回入口。
 - 本次本地静态核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。没有本地编译；云端 fixture 和原生候选包的代码与证据分别记录于下方。
-- 用户已对具体异步问题答复“允许，继续云端构建与界面验证”。本轮继续提交/推送本任务分支、跟进 preview Packages、下载和核验同 SHA 隔离包。尚未发布或替换正式 App；合并与发布不包含在此次授权内。
+- T5 阶段用户答复“允许，继续云端构建与界面验证”，当时仅授权预览。随后新增的“发布并构建新版本”和“正式版 v0.5.6”授权覆盖 T6 的必要集成、合入与正式发布；不替换本机正式 App，不操作生产数据或真实模型轮次。
 
 ### 首轮云端与原生检查
 
@@ -129,11 +129,39 @@
 
 ### T6 发布集成（2026-11-11）
 
-- 用户新授权：“发布并构建新版本”，随后明确选择“正式版 v0.5.6”。已核对最新正式版为 `v0.5.5`、已发布测试版为 `v0.5.6-test.203`；本机仍运行该测试版。按 annotated 稳定标签流程发布，尚未推送发布标签。
+- 用户新授权：“发布并构建新版本”，随后明确选择“正式版 v0.5.6”。发布前核对最新正式版为 `v0.5.5`、已发布测试版为 `v0.5.6-test.203`；本机仍运行该测试版。按 annotated 稳定标签流程发布，正式包结果另记于下方。
 - 必要兼容前置：UI09 最初基线 `origin/main=17a3847` 仍为 schema 6，而已发布测试版 `v0.5.6-test.203^{}`=`c21d110` 为 schema 7，包含任务级工作树、执行时间线和同一 Goal 继续入口。直接从 UI09 旧基线发新包会使当前用户数据被旧核心拒绝并回退现有功能。因此仅集成已发布的 `test.203` 固定源码，再叠加 UI09；不带入其他工作树尚未发布的新改动。
 - 原样复用已发布基线内的 `331d335`：九件样本于 2026-11-10 重录/复核，30 天新鲜度门保留；六份真实录制明确 Plus 0.15.14，三份重建样本仍标注 reconstructed。独立 worker 核对日期、来源、信封、非空 report/history、NOT_FOUND 与无终态 outcome 断言；并只读核对当前 Plus 0.15.16 的 pendingInputs/turn.endedAt 字段，没有模型调用或生产写，真实内容只在内存。此次未新增采集文件或改测试预期来绕过 #207。
 - 集成使用 `git merge --no-commit --no-ff v0.5.6-test.203`；`Models.swift` 自动合并，仅 `docs/ui-spec.md` 高级页一段冲突。主 agent 保留已发布的工作树分区及诊断路径字段，并将完整环境诊断位置改为 UI09 的侧栏入口/总览告警区。其余已发布实现保持原来源。
 - 分工：主 agent 独占冲突解决、权威记录、发布说明与集成/发布操作；原 worker 仅核对并运行隔离 Python 夹具、schema/桌面契约检查，日志 `build/kp-ui09/release/fixture-checks.log`；原 reviewer 独立只读检查 Models 自动合并、Xcode/fixture 接入、五段详情与 UI09 键盘的组合点。无人并行写同一文件，不启动真实调度或模型。
 - 独立复核未发现明确集成问题：Models 的 UI09 聚合与已发布 DTO/可选成员互不覆盖；新增五个 Swift 源已在 Xcode，原解码/时间线 fixture 与 dashboard fixture 都保留；详情五段/继续确认入口沿发布版，不存在新增全局 Return 抢键；规格同时保留高级页工作树和左下环境规则。相对 `test.203` 的最终差异仍仅 UI09 九个文件。三个测试文件继承标签已有的 EOF 空行未顺手改；相对已发布标签的差异检查通过。
 - 本地组合态检查：默认 `python3` 3.14.7 缺真实 pytest，仓库 shim 的文件发现入口退出 2，未执行用例；随后复用已安装 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11`（3.11.4、pytest 9.1.1），两份 Plus fixture 测试 `10 passed`，`tests/test_schema_v2.py` + `tests/test_desktop_contract.py` 为 `27 passed`（105.36 秒）。运行前后 core/tests 差异指纹相同，临时 DB/假 HOME/Kaneo/Pi 隔离，无生产访问。云端仍按原固定 Python/pytest 版本重新执行必需门禁，不以本地版本替代。
-- 下一步：完成组合态隔离检查与独立复核，提交/推送并跑全新 preview Packages；下载同 SHA 包复核受影响原生路径。满足门禁后按用户确定的版本执行云端发布，再核对公开 Release、manifest/哈希和安装包身份。合入 `main` 后保全证据并清理本任务工作树，其他任务现场保留。
+- 组合提交 `39db7d5` 的父提交为 `14d9b93` 与 `c21d110`；已推送任务分支，完成下述 #211 后，用同次 atomic push 将远端 `main` fast-forward 至该提交并推送 annotated `v0.5.6`。标签对象 `83df614bd5762d995531a766d92957834a360237` 直接指向该源码，注释使用本次用户可见变化与升级说明。正式 [#212](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43018540423) 已启动；同次 main push 自动产生的 #213 为不发布的预览构建。2026-11-11 本地主区也已 fast-forward 至相同源码，原有两项未跟踪文件保留。
+
+### #211 组合态门禁与原生回归
+
+- Packages [#211](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43015857126) 最终 **success**：16 个必需 jobs 全部 success，按条件无需执行的 session fulltext probe / publish 为 skipped。源码明确为 `39db7d5d116955513a3c4f764ca64cf6382f2bea`；完整结论见归档内 `artifacts/211/workflow-status.json`，dashboard 云端 fixture 日志见 `artifacts/211/fixture-reports-a/`。没有本地编译或修改门禁。
+- 下载同 run 的独立 App，核对 ZIP size `32177630`、SHA-256 `b3a493984004396045a3051d95f9506e4f357257e0538ab486db187ea4747491`、源码、build 211、plist 和独立 bundle ID；`codesign --verify --deep --strict` 通过，证据 `artifacts/211/verification.json`。
+- `ui/211/900x600-dark/`：查看三项目分组、原因换行、元信息和正常环境收起；实测无箭头面板打开→Esc→入口焦点→Return 重开→Return 关闭。Tab/Return 打开正确事项，原详情五段逐一切换；执行页保留最新进展/完整会话，阅读器摘要/原文切换后 Escape 返回。关闭详情后 Tab 到项目，Return 折叠、⌘R 后保持、Return 展开；已实际查看项目蓝色原生焦点环截图。
+- `ui/211/1180x760-light/`：查看首页与左下无箭头面板，关闭后入口焦点恢复。两 case 使用独立 FakeCore、HOME 与数据目录，均已正常 Quit；最终进程检查无本任务预览 App/FakeCore，正式 App PID `35156` 保持。截图字节为 JPEG，沿既有 `.png` 文件名保存，两窗口实际分别为 1800×1200 与 2360×1520 像素。当前组合没有重新宣称 #207 的四组合或真实设备全部通过。
+- 既有风险：独立只读分析其他任务 #210 的 fixtures-b 失败，定位到 `CoreClient` 进程输出读取存在并发窗口：readability handler 先读后追加，主路径在退出后关闭 handler 并快照时没有等待已经进入的回调。该机制是有依据的候选根因，未证明当次具体交错；同一实现的 #208 和本轮 #211 均通过。本任务没有重试掩盖、改 CoreClient 或放宽测试，正式 #212 的结论单独核对。
+
+### 证据保全与收尾位置
+
+- 2026-11-11 已将本任务全部 `build/kp-ui09/` 证据整体移动到主区 `build/recovery/kp-ui09-v0.5.6/`；下文历史记录使用的旧相对前缀均对应此新归档根。移动前后逐文件 SHA-256、大小和符号链接目标核验，共 12613 个普通文件、611834817 字节；清单见归档内 `evidence-preservation.json`。后续正式包与校验结果继续保存在该目录。
+- `ui/211/process-verification.json` 已在两 case 均退出后重新检查，原检查另存 `process-verification-before-final-check.json`。源码合入且 #211 适用检查通过后，再核对无活动 cwd 使用者、无未提交/未跟踪成果，剩余忽略文件仅为 83 项可再生成的 Python/pytest 缓存，随后已从主区用 `git worktree remove` 正常移除本任务工作树，并删除已合并本地任务分支。核对目录与分支均已不存在，远端来源分支仍指向 `39db7d5`；其他任务工作树与主区用户文件保留。证据见 `release/cleanup.json`，正式构建与下载继续在主区进行。
+
+### v0.5.6 正式发布与包核验
+
+- 正式 Packages [#212](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43018540423) 最终 `completed / success`，18 个 jobs 中 17 success（16 个构建/检查门禁加 publish）、1 skipped（非必需 fulltext probe）；没有重跑、改测试预期或放宽门禁。完整结论 `release/workflow-212-status.json`；正式包构建与内置 Python 冒烟日志保存在 `release/package-reports/`，明确核对核心源码哈希、架构、签名与运行时。
+- [正式 v0.5.6](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.6) 于 2026-11-11 12:29:53 UTC 公开，API 核对 non-draft / non-prerelease，`releases/latest` 指向本版。annotated 标签仍直接指向 `39db7d5d116955513a3c4f764ca64cf6382f2bea`；发布页恰有 Android APK、macOS arm64 DMG、`manifest.json`、`SHA256SUMS` 四项资产。回执 `release/github-release.json`、`release/latest-release.json`、`release/annotated-tag.json`。
+- 四项公开资产下载到归档 `release/assets/`；`shasum -a 256 -c SHA256SUMS` 全部通过，实际文件大小/哈希与 GitHub 资产 digest、manifest 相同，版本 `0.5.6`、build `212` 和源码 SHA 全部一致。APK：8557680 bytes，SHA-256 `b298aac4c3d018ffb2fba13e3c89aa7c3dd545eb567ba20a9ffd333fa7dbed85`；DMG：41069366 bytes，SHA-256 `f1d2f68ccbf6c1d76cda47e15d6133d7b608688ae35d8f91d1a5b2b86ce8fb66`。
+- Android 实际 `apksigner` v2 签名验证通过，包名 `com.sakurasep.kaneopilot`、versionName `0.5.6`、versionCode `212`、最低 SDK 26；证书 SHA-256 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada` 与 manifest 及既有正式签名记录一致。本机 jenv shim 已损坏，SDK 包装脚本第一次及设置 JAVA_HOME 后均仍落到该 shim，未取得验证结果；随后按已存在的 C03 验证入口，直接用 `/opt/homebrew/opt/openjdk@17/bin/java -jar .../apksigner.jar` 成功，未修改系统配置或进行编译。证据 `release/apk-signature.txt` / `release/apk-badging.txt`。
+- macOS：DMG 与内部 App 的严格签名核验通过；DMG CodeDirectory SHA256 `3ffccb703d1c7d8f7eff3ced73549b3f21754782e6dbdbfd267bfdb1d1a5adf8` 匹配 manifest。只读挂载核对 App `local.kaneopilot / 0.5.6 / 212`、最低 macOS 14、架构恰为 arm64，163 个 bundled core Python 文件与固定发布提交逐一哈希相同；完成后正常卸载卷，未启动正式包。完整回执 `release/package-verification.json`、`release/dmg-signature.txt`、`release/dmg-detach.txt`。
+- 发布与包检查完成，真实安装、实体 Android 设备、生产调度/模型轮次仍未执行；正式 `/Applications/KaneoPilot.app` 继续运行原 `0.5.6-test.203 / build 203`。用户可在 Mac「设置 → 高级 → 软件更新」检查正式版，或从上述 Release 页下载。相对 v0.5.5 包含 schema 7 与自动迁移备份，旧版不能直接读取新库；相对已装 test.203 不新增 schema 迁移。状态为**待体验**，仅设计已获用户验收。
+
+### 附带 main 预览失败与既有风险
+
+- 同次 main push 自动产生 [#213](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43018541213)，它不是正式发布来源。截至本次核对，14 个 jobs success、`checks (1, 3.11)` failure、native-platforms 仍运行、非必需 probe skipped；最终发布门禁因失败不会公开第二个版本。原始快照 `release/workflow-213-status.json`。本次没有用重跑覆盖此失败，也不把 #212 通过说成该风险已修复。
+- 失败 job `130515699975` 的核心为 `1 failed, 911 passed, 1 skipped`，集成为 `77 passed`。唯一失败 `TestDispatchPiDesktop.test_round_observe_keeps_other_blocks` 在主动 SIGKILL 观察者后，`round-observe` 解析 `job.json` 报半写入/损坏，尚未进入保留其他阻塞原因的行为断言。日志保存在 `release/213-checks-1-py311.log`；CLI 首次因转义字符拒绝输出，随后仅将原日志捕获到内存并去控制序列后保存，没有执行日志内容。
+- 与已有 `docs/plans/kp-c03-execution-input-classification.plan.md` 中正式 #142 同名用例的 P2 风险对应：worker 的 `_write_json` 直接 `Path.write_text` 截断重写，强杀可使后续记录不可读。主 agent 进一步核对 `_write_json`、`dsh_events.read_job`、`_lose_observer` 和失败用例本身的 AST，相对 v0.5.5 完全一致，回执 `release/213-failure-baseline.json`。没有保留本次损坏文件，不能断言实际被中断的具体字节；这是现有生产写法的异常终止边界，不能称纯 CI 问题，也没有在 UI09 中修复。此风险与上文 CoreClient 输出回调候选风险分别记录，不混为同一原因。
