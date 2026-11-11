@@ -60,7 +60,7 @@
 - T2：纯项目聚合与 fixture，由 Sol worker 独占 `Core/Models.swift`、`macos/tests/dashboard_status_main.swift`、`Views/TaskCompactListView.swift` 的项目键转发；复用既有项目身份规则。主 agent 独占 Root/Dashboard/Components 与规格记录；文件不交叉写。无需独立端口、数据库或服务。
 - T3：主 agent 实现左下角自动推进/环境入口、无尾箭头面板、需要你信息排版、项目分组。诊断数据与明细展示提取为现有编译源中的共享组件，避免两套健康判断；不新增核心读取或诊断循环。
 - T4：独立只读审查最终组合态；本地仅做无编译静态核验。项目强制 Swift/Android 编译仅走云端 Packages，既有 dashboard fixture 已接入该工作流，不在本地运行 swiftc/Xcode/Gradle。
-- T5：已获任务分支推送授权，跑仅产生 artifacts 的 preview Packages；核对所有 jobs、源 SHA 与包 metadata/hash，再下载独立 bundle 用 FakeCore/临时 HOME 核验 1180×760、900×600、深浅色，保留 `/Applications/KaneoPilot.app` 与真实数据。当前尚未运行云端构建或原生候选实现。
+- T5：已获任务分支推送授权，跑仅产生 artifacts 的 preview Packages；核对所有 jobs、源 SHA 与包 metadata/hash，再下载独立 bundle 用 FakeCore/临时 HOME 核验 1180×760、900×600、深浅色，保留 `/Applications/KaneoPilot.app` 与真实数据。两轮云端构建及首轮原生发现见下方，新包仍在验收。
 
 验收场景：项目展开/折叠和刷新后保持、任务去重、同名不同 ID、不完整 attention 的项目名回退、已排队不算执行中、已完成/保存任务排除、空项目进展；需要你换行与键盘入口、原详情五段；左下角运行/暂停徽标、原有禁用条件、环境入口 Return/点击展开与 Esc/关闭/再次点击收起和焦点恢复；诊断未检查不计通过、异常继续首页显式展示；窄窗口/深浅色无溢出、正文不被面板挤动。
 
@@ -68,15 +68,27 @@
 
 ## 当前进展与剩余
 
-- T1–T3 已写代码；T4 静态审查及修复复核完成；T5 实现中（首轮云端包发现焦点缺口，修复后重新构建）。整体状态仍为**实现中**，设计稿的历史浏览器验证不能证明原生候选实现通过。
+- T1–T3 已写代码；T4 静态审查及修复复核完成；T5 实现中（焦点修复的新包已构建，原生复测受 Mac 锁屏阻挡）。整体状态仍为**实现中**，设计稿和旧包的历史验证不能证明当前原生候选实现通过。
 - 当前实现：`RootView.swift` 用窗口根锚点 overlay 向上呈现面板，避免列裁剪与系统 popover 尾箭头；`Components.swift` 共用环境状态投影、告警与诊断明细；Dashboard 移除配置摘要与额外项目映射读取，新增可折叠项目分组；共享项目键沿用任务列表规则。
 - 独立 Sol 审查发现 Tab 到事项行后容器焦点守卫会屏蔽↑↓；已改为每事项 attentionId 显式焦点，箭头更新行焦点，事项/项目头/环境入口分别绑定获焦时的 Return；独立复核通过，未发现新的明确问题。侧栏消失时收环境面板，关闭后焦点回入口。
-- 本次实际核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。新增 Swift 聚合 fixture 尚未执行；没有本地编译，也没有云端/原生候选包证据。
+- 本次本地静态核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。没有本地编译；云端 fixture 和原生候选包的代码与证据分别记录于下方。
 - 用户已对具体异步问题答复“允许，继续云端构建与界面验证”。本轮继续提交/推送本任务分支、跟进 preview Packages、下载和核验同 SHA 隔离包。尚未发布或替换正式 App；合并与发布不包含在此次授权内。
 
 ### 首轮云端与原生检查
 
-- 代码 `7087b1f7361dc1968736dc843336bebca3da6012`，Packages [#204](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42996132003)。macOS package 与 Android job 已通过；其他门禁仍跟进，最终结论另补。下载 `macos-update-ui-204`，source SHA/build 204/ZIP size/SHA-256/独立 bundle ID 与深度签名均核对通过，证据 `build/kp-ui09/artifacts/204/verification.json`。
+- 代码 `7087b1f7361dc1968736dc843336bebca3da6012`，Packages [#204](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42996132003)。macOS package、Android、macOS fixtures a/b 和 Python 其余八个分片通过；Python shard 1 在 3.11/3.13 均失败。后续推送触发并发取消，codex-platforms 与 publish cancelled，工作流最终 cancelled，不能声称整条通过。下载 `macos-update-ui-204`，source SHA/build 204/ZIP size/SHA-256/独立 bundle ID 与深度签名均核对通过，证据 `build/kp-ui09/artifacts/204/verification.json`。
 - 使用 FakeCore 和独立 HOME、全部核心根目录、空凭据文件，手机服务 disabled；`/Applications/KaneoPilot.app` 生产进程保持。3 项活跃假任务、1 项 actionable；1180×760 深色已看到三项目分布、原因换行与下方元信息；项目折叠与刷新后保持、无尾箭头环境面板向上展开和滚动诊断明细均实测。截图在 `build/kp-ui09/ui/1180x760-dark/`，此轮截图仅对应 7087b1f。
 - 发现缺口：Esc 可收环境面板，但 Return 不重开。通过 Raise 确认窗口前台后仍复现；独立审查支持 focusable 目标与恢复时机问题，未把系统设置视为已证明根因。修复为四类新增键盘目标显式 `.focusable()`，打开时先清入口焦点，面板出现后下一主队列设关闭焦点；关闭时先清入口焦点、面板移除后再恢复，且过期恢复不抢新面板。未改用户系统设置。
 - 首轮隔离 App 已正常退出。后续须用含修复的新云端包复测，不以 #204 编译或截图代替新代码验证。
+
+### 第二轮构建与基线问题
+
+- 焦点修复代码 `7edce33ffe56a0287bb0f12bb8d7695f3ae717c2` 已提交并推送同一任务分支，Packages [#205](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42998111536) 已结束，最终 failure。identity、macOS package、macOS fixtures a/b、Android、codex-platforms 和 Python 其余八个分片全部通过；Python shard 1 在 3.11/3.13 失败，session fulltext probe 与 publish skipped。全部 jobs 证据 `build/kp-ui09/artifacts/205/workflow-status.json`；dashboard fixture 的云端日志已下载，明确输出 `dashboard status fixtures passed`。
+- 下载 `macos-update-ui-205`，source SHA/build 205/ZIP size/SHA-256/独立 bundle ID、plist 与深度签名核对通过，证据 `build/kp-ui09/artifacts/205/verification.json`；ZIP SHA-256 为 `21dfd6f4c1435cd3589ef19bee35bf09963efa82da618c5235943ab83aafdd91`。包核验不能代替原生界面验证。
+- #204 的两个失败均为录制样本新鲜度门：两版本各 `2 failed, 75 passed`。三份 reconstructed 样本和六份真实录制均采于 2026-10-10，2026-11-11 为 32 天，超过现有 30 天门限。主 agent 核对九个文件及两个测试在基线 `17a3847` 与当前 `7edce33` 内容完全一致，证据 `build/kp-ui09/baseline-fixture-evidence.json`；不是本次 UI 改动引入。
+- 独立只读分析确认三份重建 parser 视图与六份 Plus 0.15.7 原始录制的契约不同，当前 Plus 0.15.16 可能有新增字段。真实重采和契约核对属于独立维护工作；UI09 保留原测试与日期，不放宽新鲜度、不重写历史事实，也未连接 Plus 或创建付费轮次。
+- #205 的两个失败 job（`130447519000`、`130447519064`）日志亦已下载：均为同两个新鲜度函数失败，各 `2 failed, 75 passed`，其余检查未新增失败。日志位于 `build/kp-ui09/artifacts/205/job-*.log`。
+- #205 已用隔离 FakeCore/独立 HOME 启动；首次读取原生界面时 Mac 锁屏，工具无法继续。已请用户手动解锁；本轮没有取得 #205 原生界面或焦点修复通过证据，1180×760/900×600 × 深浅色及其交互检查仍待完成。
+- 本轮停止前，核对 PID 对应云端独立测试 App 后终止隔离进程 `19397`，确认退出；正式 `/Applications/KaneoPilot.app` 进程 `35156` 保持运行。启动与锁屏阻塞记录 `build/kp-ui09/ui/205/1180x760-dark/{launch,blocked}.json`；没有安装、重签、合并或发布。
+- 下一步：用户解锁后，沿用已核验 #205 云端包，创建新的隔离 case（保留既有启动记录），先完成打开→Esc→Return 重开及关闭后焦点回入口，再覆盖两尺寸/深浅色、事项键盘入口/五段详情、项目折叠刷新、异常和空态。若当前包仍复现焦点缺口，按新证据修复并云端重建；不得引用 #204 截图冒充修复后通过。
+- 本工作树保留：本任务成果尚未合入 `main`，且有未完成的原生验收和仅存于忽略目录的包/证据，因此不满足清理条件；未清理其他任务工作树。合并与发布仍需本次范围之外的用户授权。
