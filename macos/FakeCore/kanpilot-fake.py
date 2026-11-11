@@ -4577,6 +4577,14 @@ COMMANDS = {
     "request-continuation": lambda s, p: (
         {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
         if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),
+    "reconcile-continuation": lambda s, p: (
+        {"task_id": p.get("task_id"), "run_id": p.get("run_id"),
+         "operation_id": "fixture-operation", "classification": "not_sent",
+         "detail": "Plus 会话没有新轮次，最新转录中也没有本任务的继续指令",
+         "applied": p.get("dry_run") is not True,
+         "status": "released" if p.get("dry_run") is not True else None}
+        if p.get("confirm") is True or p.get("dry_run") is not False
+        else fail("核对结果需要显式确认才能回收发送槽", "bad_request")),
     "recover-execution-goals": cmd_recover_execution_goals_fixture,
     "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
     "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),

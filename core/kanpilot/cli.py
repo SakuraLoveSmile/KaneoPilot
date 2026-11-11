@@ -609,6 +609,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "confirm": (False, "bool"), "operation_id": (False, "str")},
         _automation_command("cmd_request_continuation", "cmd_request_continuation"),
     ),
+    # kp-cont01（§5.23.11）：核对未确认的继续发送并回收发送槽（默认只读）。
+    "reconcile-continuation": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "dry_run": (False, "bool"), "confirm": (False, "bool")},
+        _automation_command("cmd_request_continuation", "cmd_reconcile_continuation"),
+    ),
     # v3 T5（§5.23.10）：Goal 报告只读读取与完成判定登记。
     "get-goal-report": (
         {"task_id": (True, "str"), "run_id": (True, "str")},
