@@ -1,24 +1,29 @@
 import SwiftUI
 
-/// 总览首页（ui-spec §4.15，KP-UI04）：状态标题（含计数）→ 需要你 → 环境（有告警时）→ 正在推进 → 摘要。
-/// 每个自动化事实都来自核心 JSON；状态标题、工作树池译文、项目摘要、条数上限等纯逻辑在 Core/Models.swift，
+/// 总览首页（ui-spec §4.15，KP-UI09）：状态标题 → 需要你 → 环境告警 → 项目进展。
+/// 每个自动化事实都来自核心 JSON；状态标题、工作树池译文、项目聚合等纯逻辑在 Core/Models.swift，
 /// 由 macos/tests/dashboard_status_main.swift 断言。区段标题在分组面板外面，面板内行间一条 1pt 细线。
 struct AutomationDashboardView: View {
     @EnvironmentObject private var model: AppViewModel
     @ObservedObject private var engine = AppRuntime.shared.scheduler
     let onTasks: (BoardColumn?) -> Void
     let onPending: () -> Void
-    let onSettings: (SettingsSegment) -> Void
     @State private var detailItem: TaskSheetItem?
     @State private var planningAfterDismissal: String?
-    @State private var projects: [ProjectMappingItem] = []
-    @State private var projectsError: String?
+    @State private var collapsedProjectIDs: Set<String> = []
     @State private var selectedID: String?
     @State private var hoveredID: String?
     @State private var healthDetailsExpanded = false
+    @FocusState private var dashboardFocused: Bool
+    @FocusState private var focusedAttentionID: String?
+    @FocusState private var focusedProjectID: String?
     private static let flowNote = "已排队不等于已开始，执行端领取后才开始；开启构建发布的项目在版本发布后完成交付。"
-    private var progressing: [TaskSummary] {
-        model.tasks.filter { $0.phase != nil && $0.phase != "done" && !$0.needsAttention }
+    private var projectProgress: [DashboardProjectProgress.Project] {
+        DashboardProjectProgress.projects(tasks: model.tasks, attention: model.attentionItems)
+    }
+    private var health: EnvironmentHealth {
+        EnvironmentHealth(engineStatus: engine.engineStatus, engineError: engine.error,
+                          doctor: model.doctor, doctorRunning: model.doctorRunning)
     }
 
     var body: some View {
@@ -26,9 +31,8 @@ struct AutomationDashboardView: View {
             VStack(alignment: .leading, spacing: Spacing.xl) {
                 statusStrip
                 if showsAttentionSection { attentionSection }
-                if environmentIssueCount > 0 { environmentSection }
-                progressingSection
-                summarySection
+                if health.issueCount > 0 { environmentSection }
+                projectProgressSection
             }
             .padding(Spacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -39,10 +43,11 @@ struct AutomationDashboardView: View {
         .navigationTitle("总览")
         .modifier(DashboardToolbarTitle())
         .focusable().focusEffectDisabled()
+        .focused($dashboardFocused)
         .onKeyPress(.downArrow) { moveSelection(1) }
         .onKeyPress(.upArrow) { moveSelection(-1) }
         .onKeyPress(.return) {
-            guard !(NSApp.keyWindow?.firstResponder is NSTextView), let selectedID else { return .ignored }
+            guard dashboardFocused, !(NSApp.keyWindow?.firstResponder is NSTextView), let selectedID else { return .ignored }
             open(selectedID); return .handled
         }
         .task {
@@ -52,11 +57,8 @@ struct AutomationDashboardView: View {
         .onChange(of: model.attentionTaskToOpen) { _, id in
             if let id { open(id); model.attentionTaskToOpen = nil }
         }
-        .task(id: model.lastRefreshAt) {
-            do {
-                projects = try await model.client.run("get-project-mappings", as: ProjectMappingsResponse.self).items ?? []
-                projectsError = nil
-            } catch { projectsError = error.coreMessage }
+        .onChange(of: focusedAttentionID) { _, id in
+            if let item = shownAttention.first(where: { $0.attentionId == id }) { selectedID = item.taskId }
         }
         .sheet(item: $detailItem, onDismiss: {
             if let id = planningAfterDismissal {
@@ -82,12 +84,12 @@ struct AutomationDashboardView: View {
             attentionLoaded: engine.attentionLoaded,
             attentionCount: model.attentionCount,
             stalledCount: model.attentionItems.filter { $0.reasonCode == "concurrency_stalled" }.count,
-            environmentIssueCount: environmentIssueCount,
+            environmentIssueCount: health.issueCount,
             globalPaused: model.globalPaused,
             engineStatusKnown: engine.engineStatus != nil,
             doctorRunning: model.doctorRunning,
             doctorKnown: model.doctor != nil,
-            doctorPassedCount: doctorChecks.filter { $0.skipped != true && $0.ok == true }.count)
+            doctorPassedCount: health.passedCount)
     }
 
     private func headlineColor(_ tone: DashboardHeadline.Tone) -> Color {
@@ -212,7 +214,7 @@ struct AutomationDashboardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 「需要你」一行三栏加尾列（ui-spec §4.15）：16pt 图标、标题与原因两行、「项目 · 阶段 · 已等 N」；
+    /// 「需要你」：16pt 图标、标题/原因/元信息三行，尾列保持原推荐动作交互。
     /// 尾列平时是箭头，悬停或键盘选中时换成核心推荐动作文字。整行是一个按钮，打开任务详情。
     private func attentionRow(_ item: AttentionItem) -> some View {
         let action = recommendedActionTitle(item)
@@ -225,30 +227,30 @@ struct AutomationDashboardView: View {
         let revealed = selectedID == item.taskId || hoveredID == item.taskId
         return Button {
             selectedID = item.taskId
+            dashboardFocused = true
             open(item.taskId)
         } label: {
-            HStack(spacing: Spacing.m) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
                 Image(systemName: icon.name)
                     .foregroundStyle(icon.color)
                     .frame(width: Spacing.l)
                 VStack(alignment: .leading, spacing: Spacing.xs) {
                     Text(item.title ?? item.taskId)
-                        .font(.kpBody)
+                        .font(.kpBody.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     if let reason {
                         Text(reason)
                             .font(.kpLabel)
                             .foregroundStyle(.primary)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    Text(meta)
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Text(meta)
-                    .font(.kpLabel)
-                    .foregroundStyle(Color.kpSecondary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
                 attentionTail(action, revealed: revealed)
             }
             .padding(.horizontal, Spacing.l)
@@ -258,6 +260,8 @@ struct AutomationDashboardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focused($focusedAttentionID, equals: item.attentionId)
+        .keyboardShortcut(focusedAttentionID == item.attentionId ? KeyboardShortcut(.return, modifiers: []) : nil)
         .onHover { inside in
             if inside { hoveredID = item.taskId } else if hoveredID == item.taskId { hoveredID = nil }
         }
@@ -318,361 +322,159 @@ struct AutomationDashboardView: View {
 
     // MARK: - 环境（有告警时）
 
-    /// 环境告警数 E，与 `environmentAlerts` 的行数一一对应；状态标题与区段标题都用它。
-    private var environmentIssueCount: Int {
-        DashboardHeadline.environmentIssueCount(
-            engineError: engine.error != nil,
-            engineStatusKnown: engine.engineStatus != nil,
-            engineHealthy: engineHealthy,
-            doctorIssueCount: doctorIssues.count,
-            doctorNeedsAttention: doctorNeedsAttention)
-    }
-
-    private enum EnvironmentAlert: Identifiable {
-        case engineError(String)
-        case heartbeat
-        case check(DoctorCheck)
-        case diagnosis
-
-        var id: String {
-            switch self {
-            case .engineError: return "engine-error"
-            case .heartbeat: return "heartbeat"
-            case .check(let check): return "check-\(check.name)"
-            case .diagnosis: return "diagnosis"
-            }
-        }
-    }
-
-    /// 告警行，顺序：引擎读取错误、引擎心跳未确认、各未通过项、诊断结果未确认。
-    private var environmentAlerts: [EnvironmentAlert] {
-        var alerts: [EnvironmentAlert] = []
-        if let error = engine.error { alerts.append(.engineError(error)) }
-        if engine.engineStatus != nil && !engineHealthy { alerts.append(.heartbeat) }
-        alerts.append(contentsOf: doctorIssues.map { EnvironmentAlert.check($0) })
-        if doctorNeedsAttention && doctorIssues.isEmpty { alerts.append(.diagnosis) }
-        return alerts
-    }
-
-    /// 区段标题「环境 · E 项需处理」，右侧「在线诊断」；每个告警一行，最后一行折叠「详情 · 诊断 N 项」。
     private var environmentSection: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-                Text("环境 · \(environmentIssueCount) 项需处理").font(.kpSection)
+                Text("环境 · \(health.issueCount) 项需处理").font(.kpSection)
                 Spacer(minLength: Spacing.m)
-                diagnoseButton
+                EnvironmentDiagnoseButton()
             }
             GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
-                ForEach(Array(environmentAlerts.enumerated()), id: \.element.id) { index, alert in
+                ForEach(Array(health.alerts.enumerated()), id: \.element.id) { index, alert in
                     if index > 0 { ListRule() }
-                    environmentAlertRow(alert)
+                    EnvironmentAlertRow(alert: alert)
                 }
-                if hasHealthDetails {
+                if !health.checks.isEmpty {
                     ListRule()
-                    healthDetailsToggle
+                    EnvironmentDetailsToggle(count: health.checks.count, isExpanded: $healthDetailsExpanded)
                     if healthDetailsExpanded {
                         ListRule()
-                        healthDetails
+                        EnvironmentHealthDetails(checks: health.checks)
                     }
                 }
             }
         }
+    }
+
+    // MARK: - 项目进展
+
+    private var projectProgressSection: some View {
+        let projects = projectProgress
+        return VStack(alignment: .leading, spacing: Spacing.l) {
+            ListRule()
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    Text("项目进展 · \(projects.count) 个项目").font(.kpSection)
+                    Spacer(minLength: Spacing.m)
+                    Button("全部任务 ›") { onTasks(nil) }
+                        .font(.kpBody)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                }
+                GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
+                    if projects.isEmpty {
+                        panelMessage {
+                            Text("当前没有推进中或待处理的项目任务")
+                                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        }
+                    } else {
+                        ForEach(Array(projects.enumerated()), id: \.element.id) { index, project in
+                            if index > 0 { ListRule() }
+                            projectGroup(project)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func projectGroup(_ project: DashboardProjectProgress.Project) -> some View {
+        let expanded = !collapsedProjectIDs.contains(project.id)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button { toggleProject(project.id) } label: {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Spacing.s) {
+                        projectHeading(project, expanded: expanded, includesCounts: true)
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        HStack(spacing: Spacing.s) {
+                            projectHeading(project, expanded: expanded, includesCounts: false)
+                        }
+                        projectCounts(project)
+                            .padding(.leading, Spacing.xl)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.horizontal, Spacing.l)
+                .padding(.vertical, Spacing.s)
+                .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focused($focusedProjectID, equals: project.id)
+            .keyboardShortcut(focusedProjectID == project.id ? KeyboardShortcut(.return, modifiers: []) : nil)
+            .accessibilityLabel("\(project.title)，\(project.tasks.count) 个任务，" + project.counts.map { "\($0.bucket.title) \($0.count)" }.joined(separator: "，"))
+            .accessibilityValue(expanded ? "已展开" : "已折叠")
+            .accessibilityHint(expanded ? "折叠项目任务" : "展开项目任务")
+            if expanded {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    ForEach(project.tasks) { task in
+                        projectTaskRow(task)
+                    }
+                }
+                .padding(.leading, 40)
+                .padding(.trailing, Spacing.l)
+                .padding(.bottom, Spacing.m)
+            }
+        }
+    }
+
+    private func toggleProject(_ id: String) {
+        if collapsedProjectIDs.contains(id) { collapsedProjectIDs.remove(id) }
+        else { collapsedProjectIDs.insert(id) }
     }
 
     @ViewBuilder
-    private func environmentAlertRow(_ alert: EnvironmentAlert) -> some View {
-        switch alert {
-        case .engineError(let error):
-            panelMessage { errorLine(error) }
-        case .heartbeat:
-            healthAlertRow(engineHealthTitle)
-        case .check(let check):
-            healthIssueRow(check)
-        case .diagnosis:
-            healthAlertRow("诊断结果未确认，请重新检查")
-        }
-    }
-
-    /// 「在线诊断」是诊断的唯一手动入口（含 Kaneo 连通性）；区段标题行与摘要行共用。
-    private var diagnoseButton: some View {
-        Button(model.doctorRunning ? "检测中…" : "在线诊断") { Task { await model.runDoctorOnline() } }
-            .font(.kpLabel)
-            .controlSize(.small)
-            .disabled(model.doctorRunning || model.busy)
-    }
-
-    // MARK: - 正在推进
-
-    private var progressingSection: some View {
-        let all = progressing
-        return VStack(alignment: .leading, spacing: Spacing.s) {
-            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-                Text("正在推进 · \(all.count)").font(.kpSection)
-                Spacer(minLength: Spacing.m)
-                Button { onTasks(nil) } label: {
-                    Text(DashboardLimits.linkTitle("全部任务", total: all.count, limit: DashboardLimits.progressing))
-                        .font(.kpBody)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-            }
-            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
-                if all.isEmpty {
-                    panelMessage {
-                        Text("当前没有进行中任务").font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                    }
-                } else {
-                    ForEach(Array(DashboardLimits.head(all, limit: DashboardLimits.progressing).enumerated()),
-                            id: \.element.id) { index, task in
-                        if index > 0 { ListRule() }
-                        progressingRow(task)
-                    }
-                }
-            }
-        }
-    }
-
-    /// 左侧标题与项目名两行；右侧「看板列 · 条件」加行尾箭头（ui-spec §4.15）。
-    private func progressingRow(_ task: TaskSummary) -> some View {
-        Button { open(task.taskId) } label: {
-            HStack(spacing: Spacing.l) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(task.title ?? task.taskId)
-                        .font(.kpBody)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(task.projectName ?? "未提供项目")
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: Spacing.s) {
-                    Text(columnAndCondition(task))
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.right")
-                        .font(.kpBody)
-                        .foregroundStyle(Color.kpSecondary)
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
-            .frame(maxWidth: .infinity, minHeight: RowHeight.preferredTwoLine, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// 右侧「看板列 · 条件」，如「待评审 · 同步交付」；看板列取核心 board_column，条件取核心 condition，缺失写「未提供」。
-    private func columnAndCondition(_ task: TaskSummary) -> String {
-        DashboardRowText.progressState(
-            column: BoardColumn(rawValue: task.boardColumn ?? "")?.title,
-            condition: task.condition.map(PhaseStepperView.conditionTitle))
-    }
-
-    // MARK: - 摘要
-
-    /// 一块无标题的分组面板：环境行（只在没有告警时）和项目行，行高 40pt。
-    private var summarySection: some View {
-        GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
-            if environmentIssueCount == 0 {
-                summaryEnvironmentRow
-                if healthDetailsExpanded && hasHealthDetails {
-                    ListRule()
-                    healthDetails
-                }
-                ListRule()
-            }
-            summaryProjectRow
-        }
-    }
-
-    /// 图标｜标签｜引擎与诊断的现有标题｜在线诊断｜展开箭头；箭头展开与告警态同一份 `healthDetails`。
-    private var summaryEnvironmentRow: some View {
-        HStack(spacing: Spacing.m) {
-            healthIcon(summaryEnvironmentIcon, Color.kpSecondary)
-            Text("环境")
-                .font(.kpLabel)
-                .foregroundStyle(Color.kpSecondary)
-                .frame(width: 28, alignment: .leading)
-            Text("\(engineHealthTitle) · \(doctorHealthTitle)")
-                .font(.kpBody)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            diagnoseButton
-            if hasHealthDetails {
-                Button { healthDetailsExpanded.toggle() } label: {
-                    Image(systemName: healthDetailsExpanded ? "chevron.down" : "chevron.right")
-                        .font(.kpBody)
-                        .foregroundStyle(Color.kpSecondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("环境详情")
-                .accessibilityValue(healthDetailsExpanded ? "已展开" : "已折叠")
-            }
-        }
-        .padding(.horizontal, Spacing.l)
-        .frame(minHeight: RowHeight.interactive)
-    }
-
-    /// 引擎状态还没读到时用时钟，否则沿用诊断的图标（一律次要色）。
-    private var summaryEnvironmentIcon: String {
-        engine.engineStatus == nil ? "clock" : doctorHealthIcon
-    }
-
-    /// 图标｜标签｜「N 个项目 · M 个自动处理已开」｜项目设置 ›；读取失败显示核心原文。
-    private var summaryProjectRow: some View {
-        HStack(spacing: Spacing.m) {
-            healthIcon("folder", Color.kpSecondary)
-            Text("项目")
-                .font(.kpLabel)
-                .foregroundStyle(Color.kpSecondary)
-                .frame(width: 28, alignment: .leading)
-            Group {
-                if let projectsError {
-                    errorLine(projectsError)
-                } else {
-                    Text(projectSummary).font(.kpBody).lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Button { onSettings(.projects) } label: {
-                Text("项目设置 ›").font(.kpBody)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Color.accentColor)
-        }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.s)
-        .frame(minHeight: RowHeight.interactive)
-    }
-
-    private var projectSummary: String {
-        DashboardProjectSummary.text(
-            total: projects.count,
-            automationOn: projects.filter { $0.automation?.enabled == true }.count)
-    }
-
-    // MARK: - 环境详情（告警区段与摘要行共用）
-
-    /// 环境面板的图标列：固定 16pt 宽（同 `attentionRow`）。SF Symbol 的字形宽度各不相同，不定宽的话
-    /// 各行文字的左缘会随图标错开几个点。
-    private func healthIcon(_ name: String, _ color: Color) -> some View {
-        Image(systemName: name)
-            .foregroundStyle(color)
-            .frame(width: Spacing.l)
-    }
-
-    /// 单行告警（引擎心跳未确认、诊断结果未确认）：图标列加 13pt 文字，上下 12pt、左右 16pt，和未通过项同一缩进。
-    private func healthAlertRow(_ title: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-            healthIcon("exclamationmark.triangle", Color.kpOrange)
-            Text(title)
-                .font(.kpBody)
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
-    }
-
-    /// 未通过的检查：图标列加两行文字，名称 13pt，原因 12pt 次要色缩进到名称下面；左右 16pt 与其他行一致。
-    /// `worktree_pool` 的原因译成中文（格式对不上时回落核心原文）。
-    private func healthIssueRow(_ check: DoctorCheck) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-            healthIcon("exclamationmark.triangle", Color.kpOrange)
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                Text(Labels.doctorCheck(check.name))
-                    .font(.kpBody)
-                    .foregroundStyle(.primary)
-                Text(issueReason(check))
-                    .font(.kpLabel)
-                    .foregroundStyle(Color.kpSecondary)
-                    .textSelection(.enabled)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
-    }
-
-    private func issueReason(_ check: DoctorCheck) -> String {
-        if check.name == "worktree_pool", let text = WorktreePoolText.summary(check.detail) { return text }
-        return check.detail ?? "未提供检查结果，请重新诊断。"
-    }
-
-    private var hasHealthDetails: Bool { !doctorChecks.isEmpty }
-
-    private var healthDetailsTitle: String { "详情 · 诊断 \(doctorChecks.count) 项" }
-
-    private var healthDetailsToggle: some View {
-        Button { healthDetailsExpanded.toggle() } label: {
-            HStack(spacing: Spacing.s) {
-                Text(healthDetailsTitle).font(.kpBody)
-                Spacer(minLength: 0)
-                Image(systemName: healthDetailsExpanded ? "chevron.down" : "chevron.right")
-                    .font(.kpBody)
-                    .accessibilityHidden(true)
-            }
+    private func projectHeading(_ project: DashboardProjectProgress.Project, expanded: Bool, includesCounts: Bool) -> some View {
+        Image(systemName: "folder")
             .foregroundStyle(Color.kpSecondary)
-            .padding(.horizontal, Spacing.l)
-            .frame(minHeight: RowHeight.interactive)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityValue(healthDetailsExpanded ? "已展开" : "已折叠")
+            .frame(width: Spacing.l)
+            .accessibilityHidden(true)
+        Text(project.title)
+            .font(.kpBody.weight(.medium))
+            .foregroundStyle(.primary)
+            .lineLimit(includesCounts ? 1 : 2)
+            .fixedSize(horizontal: includesCounts, vertical: true)
+        Spacer(minLength: Spacing.s)
+        if includesCounts { projectCounts(project).fixedSize() }
+        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+            .font(.kpLabel)
+            .foregroundStyle(Color.kpSecondary)
+            .accessibilityHidden(true)
     }
 
-    /// 展开诊断详情：名称与结果一行，详情在下一行并可换行、可复制。
-    private var healthDetails: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            if !doctorChecks.isEmpty {
-                Text("诊断详情").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
-                ForEach(doctorChecks) { check in
-                    diagnosticRow(check)
-                }
-            }
+    private func projectCounts(_ project: DashboardProjectProgress.Project) -> some View {
+        project.counts.enumerated().reduce(Text("")) { text, pair in
+            text + Text(pair.offset == 0 ? "" : " · ").foregroundColor(Color.kpSecondary)
+                + Text("\(pair.element.bucket.title) \(pair.element.count)")
+                    .foregroundColor(pair.element.bucket == .attention ? Color.kpOrange : Color.kpSecondary)
         }
         .font(.kpLabel)
-        .textSelection(.enabled)
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 展开后的诊断逐项：与未通过项同一版式——图标列，名称与结果一行，详情缩进到名称下面。
-    private func diagnosticRow(_ check: DoctorCheck) -> some View {
-        let unresolved = check.skipped != true && check.ok != true
-        return HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-            healthIcon(diagnosticIcon(check), unresolved ? Color.kpOrange : Color.kpSecondary)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: Spacing.s) {
-                    Text(Labels.doctorCheck(check.name))
-                    Spacer(minLength: Spacing.s)
-                    Text(diagnosticResult(check))
-                }
-                Text(check.detail ?? "未提供详情")
+    private func projectTaskRow(_ task: DashboardProjectProgress.Entry) -> some View {
+        let state = DashboardRowText.progressState(
+            column: BoardColumn(rawValue: task.boardColumn ?? "")?.title,
+            condition: task.condition.map(PhaseStepperView.conditionTitle))
+        return Button { open(task.taskId) } label: {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
+                Text(task.title)
+                    .font(.kpBody)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(state)
+                    .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
-                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
             }
+            .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(unresolved ? Color.primary : Color.kpSecondary)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func diagnosticIcon(_ check: DoctorCheck) -> String {
-        if check.skipped == true { return "minus.circle" }
-        return check.ok == true ? "checkmark.circle" : "exclamationmark.triangle"
-    }
-
-    private func diagnosticResult(_ check: DoctorCheck) -> String {
-        if check.skipped == true { return "未检查" }
-        if check.ok == true { return "通过" }
-        return check.ok == false ? "未通过" : "未确认"
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(task.title)，\(state)")
+        .accessibilityHint("打开任务详情")
     }
 
     /// 错误行：文字用主色，错误由红色图标表达（ui-spec §3：彩色只作图标与徽标）。
@@ -683,41 +485,18 @@ struct AutomationDashboardView: View {
         }
     }
 
-    private var engineHealthy: Bool {
-        engine.engineStatus?.instances.contains { $0.active == true } == true
-    }
-    private var engineHealthTitle: String {
-        engine.engineStatus == nil ? "正在读取引擎状态…" : engineHealthy ? "引擎心跳正常" : "引擎心跳未确认"
-    }
-    private var doctorChecks: [DoctorCheck] { model.doctor?.checks ?? [] }
-    private var doctorIssues: [DoctorCheck] { doctorChecks.filter { $0.skipped != true && $0.ok != true } }
-    private var doctorNeedsAttention: Bool {
-        model.doctor != nil && (model.doctor?.ok != true || doctorChecks.isEmpty || !doctorIssues.isEmpty)
-    }
-    private var doctorHealthTitle: String {
-        if model.doctorRunning { return "正在诊断…" }
-        guard model.doctor != nil else { return "尚未诊断 · 点击在线诊断检查环境" }
-        if !doctorIssues.isEmpty { return "\(doctorIssues.count) 项检查需处理" }
-        if doctorNeedsAttention { return "诊断结果未确认，请重新检查" }
-        let passed = doctorChecks.filter { $0.skipped != true && $0.ok == true }.count
-        let skipped = doctorChecks.filter { $0.skipped == true }.count
-        if passed == 0 { return "\(skipped) 项未检查" }
-        return "\(passed) 项检查通过" + (skipped > 0 ? " · \(skipped) 项未检查" : "")
-    }
-    private var doctorHealthIcon: String {
-        if model.doctorRunning { return "clock" }
-        if model.doctor == nil { return "stethoscope" }
-        if doctorNeedsAttention { return "exclamationmark.triangle" }
-        return doctorChecks.contains { $0.skipped != true && $0.ok == true } ? "checkmark.circle" : "minus.circle"
-    }
     private func open(_ id: String) { detailItem = TaskSheetItem(id: id, startTab: .overview) }
 
     /// ↑↓ 只在显示出来的「需要你」行（最多 3 行）之间移动。
     private func moveSelection(_ step: Int) -> KeyPress.Result {
         let rows = shownAttention
-        guard !(NSApp.keyWindow?.firstResponder is NSTextView), !rows.isEmpty else { return .ignored }
-        let old = rows.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : rows.count)
-        selectedID = rows[min(max(old + step, 0), rows.count - 1)].taskId
+        guard dashboardFocused || focusedAttentionID != nil,
+              !(NSApp.keyWindow?.firstResponder is NSTextView), !rows.isEmpty else { return .ignored }
+        let old = rows.firstIndex(where: { $0.attentionId == focusedAttentionID })
+            ?? rows.firstIndex(where: { $0.taskId == selectedID }) ?? (step > 0 ? -1 : rows.count)
+        let next = rows[min(max(old + step, 0), rows.count - 1)]
+        selectedID = next.taskId
+        if focusedAttentionID != nil { focusedAttentionID = next.attentionId }
         return .handled
     }
 }

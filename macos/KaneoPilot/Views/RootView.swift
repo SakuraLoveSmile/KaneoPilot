@@ -7,6 +7,8 @@ struct RootView: View {
     @State private var settingsSegment: SettingsSegment = .roles
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.colorScheme) private var colorScheme
+    @State private var environmentPresented = false
+    @FocusState private var environmentEntryFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -50,6 +52,22 @@ struct RootView: View {
         }
         // 让整列背景直接延伸到标题栏，避免系统工具栏另绘的分界偏左 2pt。
         .toolbarBackground(.hidden, for: .windowToolbar)
+        .overlayPreferenceValue(EnvironmentEntryBounds.self) { anchor in
+            if environmentPresented, let anchor {
+                GeometryReader { geometry in
+                    let entry = geometry[anchor]
+                    let width = min(380, geometry.size.width - Spacing.xl * 2)
+                    let left = min(max(Spacing.m, entry.minX), geometry.size.width - width - Spacing.m)
+                    EnvironmentCheckPanel(health: environmentHealth,
+                                          detailsHeight: min(280, max(64, entry.minY - 240)),
+                                          onClose: closeEnvironment)
+                        .frame(width: width)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(height: max(0, entry.minY - Spacing.s), alignment: .bottom)
+                        .offset(x: left)
+                }
+            }
+        }
         // 由窗口根呈现：需要处理的导航详情也能打开，避免列内 presenter 被 push 页面占用。
         .sheet(isPresented: $model.planningPresented) {
             PlanningView()
@@ -102,10 +120,7 @@ struct RootView: View {
             AutomationDashboardView(onTasks: { column in
                 model.taskColumnFilter = column?.rawValue
                 section = .tasks
-            }, onPending: { section = .pending }, onSettings: { group in
-                settingsSegment = group
-                section = .settings
-            })
+            }, onPending: { section = .pending })
         case .tasks:
             TasksSectionView()
         case .sessions:
@@ -195,14 +210,16 @@ struct RootView: View {
     private var automationBlock: some View {
         let headline = scheduler.automationHeadline
         return VStack(alignment: .leading, spacing: Spacing.s) {
-            Label {
-                Text(headline.text)
-                    .font(.kpBody.weight(.semibold))
-                    .foregroundStyle(.primary)
-            } icon: {
-                Circle()
-                    .fill(headline.tone.color)
-                    .frame(width: 8, height: 8)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Spacing.s) {
+                    Text("自动推进").font(.kpBody.weight(.semibold)).fixedSize()
+                    Spacer(minLength: 0)
+                    automationBadge(headline)
+                }
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("自动推进").font(.kpBody.weight(.semibold))
+                    automationBadge(headline)
+                }
             }
             Text(automationDetail)
                 .font(.kpSmall)
@@ -228,10 +245,51 @@ struct RootView: View {
                 .disabled(model.busy)
             }
             .controlSize(.small)
+            Button {
+                if environmentPresented { closeEnvironment() }
+                else { environmentPresented = true }
+            } label: {
+                Label("环境检查", systemImage: "stethoscope")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focused($environmentEntryFocused)
+            .keyboardShortcut(environmentEntryFocused ? KeyboardShortcut(.return, modifiers: []) : nil)
+            .accessibilityValue(environmentPresented ? "已展开" : "已折叠")
+            .accessibilityHint("查看引擎状态与诊断结果")
+            .anchorPreference(key: EnvironmentEntryBounds.self, value: .bounds) { $0 }
+            .onDisappear { environmentPresented = false }
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private func automationBadge(_ headline: (text: String, tone: StatusTone)) -> some View {
+        HStack(spacing: Spacing.xs) {
+            Circle().fill(headline.tone.color).frame(width: 8, height: 8)
+            Text(headline.text).font(.kpSmall.weight(.medium))
+        }
+        .foregroundStyle(headline.tone.color)
+        .padding(.horizontal, Spacing.s)
+        .padding(.vertical, Spacing.xs)
+        .background(headline.tone.color.opacity(colorScheme == .dark ? 0.16 : 0.10), in: Capsule())
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("自动推进，\(headline.text)")
+    }
+
+    private var environmentHealth: EnvironmentHealth {
+        EnvironmentHealth(engineStatus: scheduler.engineStatus, engineError: scheduler.error,
+                          doctor: model.doctor, doctorRunning: model.doctorRunning)
+    }
+
+    private func closeEnvironment() {
+        environmentPresented = false
+        environmentEntryFocused = true
     }
 
     /// 在途数与最近刷新时间；已暂停时说明不再领取新任务。
@@ -252,4 +310,11 @@ struct RootView: View {
         f.dateFormat = "HH:mm"
         return f
     }()
+}
+
+private struct EnvironmentEntryBounds: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
 }

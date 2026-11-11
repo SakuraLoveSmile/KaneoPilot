@@ -294,9 +294,7 @@ enum ObserveScope {
 
     /// 项目标识优先用核心 ID；同名但 ID 不同的项目不会合并。
     static func projectID(for task: TaskSummary) -> String {
-        if let id = nonempty(task.projectId) { return "id:\(id)" }
-        if let name = nonempty(task.projectName) { return "name:\(name)" }
-        return "unassigned"
+        TaskProjectIdentity.key(projectId: task.projectId, projectName: task.projectName)
     }
 
     static func projects(_ tasks: [TaskSummary], chip: ObserveChip) -> [ObserveProjectSection] {

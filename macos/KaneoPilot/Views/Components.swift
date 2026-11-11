@@ -39,6 +39,243 @@ enum RowHeight {
     static let preferredTwoLine: CGFloat = 52
 }
 
+// MARK: - 环境检查（侧栏入口与总览告警共用）
+
+/// 仅投影现有诊断与心跳；两个展示位置不各自请求核心或推导另一套健康状态。
+struct EnvironmentHealth {
+    let engineStatus: EngineStatusResponse?
+    let engineError: String?
+    let doctor: DoctorResponse?
+    let doctorRunning: Bool
+
+    enum Alert: Identifiable {
+        case engineError(String)
+        case heartbeat
+        case check(DoctorCheck)
+        case diagnosis
+
+        var id: String {
+            switch self {
+            case .engineError: return "engine-error"
+            case .heartbeat: return "heartbeat"
+            case .check(let check): return "check-\(check.name)"
+            case .diagnosis: return "diagnosis"
+            }
+        }
+    }
+
+    var checks: [DoctorCheck] { doctor?.checks ?? [] }
+    var issues: [DoctorCheck] { checks.filter { $0.skipped != true && $0.ok != true } }
+    var passedCount: Int { checks.filter { $0.skipped != true && $0.ok == true }.count }
+    var needsAttention: Bool { doctor != nil && (doctor?.ok != true || checks.isEmpty || !issues.isEmpty) }
+    var engineHealthy: Bool { engineStatus?.instances.contains { $0.active == true } == true }
+    var engineTitle: String {
+        engineStatus == nil ? "正在读取引擎状态…" : engineHealthy ? "引擎心跳正常" : "引擎心跳未确认"
+    }
+    var doctorTitle: String {
+        if doctorRunning { return "正在诊断…" }
+        guard doctor != nil else { return "尚未诊断 · 点击在线诊断检查环境" }
+        if !issues.isEmpty { return "\(issues.count) 项检查需处理" }
+        if needsAttention { return "诊断结果未确认，请重新检查" }
+        let skipped = checks.filter { $0.skipped == true }.count
+        if passedCount == 0 { return "\(skipped) 项未检查" }
+        return "\(passedCount) 项检查通过" + (skipped > 0 ? " · \(skipped) 项未检查" : "")
+    }
+    var doctorIcon: String {
+        if doctorRunning { return "clock" }
+        if doctor == nil { return "stethoscope" }
+        if needsAttention { return "exclamationmark.triangle" }
+        return passedCount > 0 ? "checkmark.circle" : "minus.circle"
+    }
+    var issueCount: Int {
+        DashboardHeadline.environmentIssueCount(
+            engineError: engineError != nil, engineStatusKnown: engineStatus != nil,
+            engineHealthy: engineHealthy, doctorIssueCount: issues.count, doctorNeedsAttention: needsAttention)
+    }
+    var alerts: [Alert] {
+        var result: [Alert] = []
+        if let engineError { result.append(.engineError(engineError)) }
+        if engineStatus != nil && !engineHealthy { result.append(.heartbeat) }
+        result.append(contentsOf: issues.map { .check($0) })
+        if needsAttention && issues.isEmpty { result.append(.diagnosis) }
+        return result
+    }
+}
+
+struct EnvironmentDiagnoseButton: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        Button(model.doctorRunning ? "检测中…" : "在线诊断") { Task { await model.runDoctorOnline() } }
+            .font(.kpLabel)
+            .controlSize(.small)
+            .disabled(model.doctorRunning || model.busy)
+    }
+}
+
+struct EnvironmentAlertRow: View {
+    let alert: EnvironmentHealth.Alert
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
+                .foregroundStyle(isError ? Color.kpRed : Color.kpOrange)
+                .frame(width: Spacing.l)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(title).font(.kpBody).foregroundStyle(.primary)
+                if let detail {
+                    Text(detail).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+    }
+
+    private var isError: Bool { if case .engineError = alert { return true }; return false }
+    private var title: String {
+        switch alert {
+        case .engineError(let error): return error
+        case .heartbeat: return "引擎心跳未确认"
+        case .check(let check): return Labels.doctorCheck(check.name)
+        case .diagnosis: return "诊断结果未确认，请重新检查"
+        }
+    }
+    private var detail: String? {
+        guard case .check(let check) = alert else { return nil }
+        if check.name == "worktree_pool", let text = WorktreePoolText.summary(check.detail) { return text }
+        return check.detail ?? "未提供检查结果，请重新诊断。"
+    }
+}
+
+struct EnvironmentDetailsToggle: View {
+    let count: Int
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button { isExpanded.toggle() } label: {
+            HStack(spacing: Spacing.s) {
+                Text("详情 · 诊断 \(count) 项").font(.kpBody)
+                Spacer(minLength: 0)
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.kpBody).accessibilityHidden(true)
+            }
+            .foregroundStyle(Color.kpSecondary)
+            .padding(.horizontal, Spacing.l)
+            .frame(minHeight: RowHeight.interactive)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+    }
+}
+
+struct EnvironmentHealthDetails: View {
+    let checks: [DoctorCheck]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            Text("诊断详情").font(.kpLabel.weight(.semibold)).foregroundStyle(Color.kpSecondary)
+            ForEach(checks) { check in
+                let unresolved = check.skipped != true && check.ok != true
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                    Image(systemName: icon(check))
+                        .foregroundStyle(unresolved ? Color.kpOrange : Color.kpSecondary)
+                        .frame(width: Spacing.l)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: Spacing.s) {
+                            Text(Labels.doctorCheck(check.name))
+                            Spacer(minLength: Spacing.s)
+                            Text(result(check))
+                        }
+                        Text(check.detail ?? "未提供详情").foregroundStyle(Color.kpSecondary)
+                    }
+                }
+                .foregroundStyle(unresolved ? Color.primary : Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.kpLabel)
+        .textSelection(.enabled)
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func icon(_ check: DoctorCheck) -> String {
+        if check.skipped == true { return "minus.circle" }
+        return check.ok == true ? "checkmark.circle" : "exclamationmark.triangle"
+    }
+    private func result(_ check: DoctorCheck) -> String {
+        if check.skipped == true { return "未检查" }
+        if check.ok == true { return "通过" }
+        return check.ok == false ? "未通过" : "未确认"
+    }
+}
+
+/// 由窗口根层绘制，避开 NavigationSplitView 对列的裁剪，也不使用带尾箭头的系统 popover。
+struct EnvironmentCheckPanel: View {
+    let health: EnvironmentHealth
+    let detailsHeight: CGFloat
+    let onClose: () -> Void
+    @State private var detailsExpanded = false
+    @FocusState private var closeFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Spacing.m) {
+                Text("环境检查").font(.kpSection)
+                Spacer(minLength: Spacing.s)
+                Button(action: onClose) {
+                    Image(systemName: "xmark").font(.kpLabel)
+                        .frame(width: 24, height: 24).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .focused($closeFocused)
+                .keyboardShortcut(closeFocused ? KeyboardShortcut(.return, modifiers: []) : .cancelAction)
+                .help("关闭环境检查（Esc）")
+                .accessibilityLabel("关闭环境检查")
+            }
+            .padding(Spacing.l)
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Label(health.engineError == nil ? health.engineTitle : "引擎状态读取失败",
+                      systemImage: health.engineError == nil ? "waveform.path.ecg" : "exclamationmark.triangle")
+                Label(health.doctorTitle, systemImage: health.doctorIcon)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    if health.issueCount > 0 {
+                        Text("\(health.issueCount) 项环境告警").foregroundStyle(Color.kpOrange)
+                    }
+                    Spacer(minLength: 0)
+                    EnvironmentDiagnoseButton()
+                }
+            }
+            .font(.kpLabel)
+            .foregroundStyle(Color.kpSecondary)
+            .padding(.horizontal, Spacing.l)
+            .padding(.bottom, Spacing.m)
+            if !health.checks.isEmpty {
+                Divider()
+                EnvironmentDetailsToggle(count: health.checks.count, isExpanded: $detailsExpanded)
+                if detailsExpanded {
+                    Divider()
+                    ScrollView { EnvironmentHealthDetails(checks: health.checks) }
+                        .frame(height: detailsHeight)
+                }
+            }
+        }
+        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.group))
+        .overlay { RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator, lineWidth: 1) }
+        .clipShape(RoundedRectangle(cornerRadius: Radius.group))
+        .onAppear { closeFocused = true }
+        .onExitCommand(perform: onClose)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("环境检查面板")
+    }
+}
+
 /// 列表状态筛选共用外观；各页负责分类语义与查询范围。
 struct StatusFilterOption: Identifiable {
     let id: String

@@ -2104,19 +2104,153 @@ enum WorktreePoolText {
     }
 }
 
-/// 总览摘要面板「项目」行的文字。
-enum DashboardProjectSummary {
-    /// 「N 个项目 · M 个自动处理已开」；没有项目写「尚无项目配置」。
-    static func text(total: Int, automationOn: Int) -> String {
-        guard total > 0 else { return "尚无项目配置" }
-        return "\(total) 个项目 · \(max(0, automationOn)) 个自动处理已开"
+/// 总览与任务列表使用同一项目键；不能因名称相同而合并不同项目 ID。
+enum TaskProjectIdentity {
+    static func key(projectId: String?, projectName: String?) -> String {
+        if let id = nonempty(projectId) { return "id:\(id)" }
+        if let name = nonempty(projectName) { return "name:\(name)" }
+        return "unassigned"
+    }
+
+    fileprivate static func nonempty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+}
+
+/// 总览项目进展是已有任务与 actionable 收件箱的只读并集，不推导执行或完成状态。
+enum DashboardProjectProgress {
+    enum Bucket: Int, CaseIterable, Identifiable, Hashable {
+        case attention, queued, running, review, other
+        var id: Int { rawValue }
+        var title: String {
+            switch self {
+            case .attention: return "需处理"
+            case .queued: return "已排队"
+            case .running: return "执行中"
+            case .review: return "待评审"
+            case .other: return "其他"
+            }
+        }
+    }
+
+    struct Entry: Identifiable {
+        let taskId: String
+        let title: String
+        let boardColumn: String?
+        let condition: String?
+        let bucket: Bucket
+        var id: String { taskId }
+    }
+
+    struct Count: Identifiable {
+        let bucket: Bucket
+        let count: Int
+        var id: Bucket { bucket }
+    }
+
+    struct Project: Identifiable {
+        let id: String
+        let title: String
+        let tasks: [Entry]
+        let counts: [Count]
+    }
+
+    private struct Member {
+        let entry: Entry
+        let projectId: String?
+        let projectName: String?
+        let sourceOrder: Int
+        let attentionOrder: Int?
+    }
+
+    static func projects(tasks: [TaskSummary], attention: [AttentionItem]) -> [Project] {
+        // 保留首次观测顺序；同任务多条 actionable 请求只贡献一个任务。
+        var taskByID: [String: TaskSummary] = [:]
+        var orderedIDs: [String] = []
+        for task in tasks where taskByID[task.taskId] == nil {
+            taskByID[task.taskId] = task
+            orderedIDs.append(task.taskId)
+        }
+        var attentionByID: [String: AttentionItem] = [:]
+        var attentionOrder: [String: Int] = [:]
+        for (index, item) in attention.enumerated() where item.attentionState == "actionable" {
+            guard attentionByID[item.taskId] == nil else { continue }
+            attentionByID[item.taskId] = item
+            attentionOrder[item.taskId] = index
+            if taskByID[item.taskId] == nil { orderedIDs.append(item.taskId) }
+        }
+        // 即使仍有旧的 attention 快照，已知终态或已移出看板的任务也不能重新进入首页。
+        let excludedIDs = Set(tasks.filter(isExcluded).map(\.taskId))
+        var grouped: [String: [Member]] = [:]
+        for (sourceOrder, taskID) in orderedIDs.enumerated() {
+            guard !excludedIDs.contains(taskID) else { continue }
+            let task = taskByID[taskID]
+            let item = attentionByID[taskID] ?? task?.attention
+            let actionable = attentionByID[taskID] != nil || task?.needsAttention == true
+            guard actionable || TaskProjectIdentity.nonempty(task?.phase) != nil else { continue }
+            // 匹配到 TaskSummary 时严格沿用它的项目身份；孤立收件箱项只按名称回退，不猜 ID。
+            let projectId = TaskProjectIdentity.nonempty(task?.projectId)
+            let projectName = TaskProjectIdentity.nonempty(task == nil ? item?.projectName : task?.projectName)
+            let key = TaskProjectIdentity.key(projectId: projectId, projectName: projectName)
+            let entry = Entry(taskId: taskID,
+                              title: TaskProjectIdentity.nonempty(task?.title)
+                                ?? TaskProjectIdentity.nonempty(item?.title) ?? taskID,
+                              boardColumn: task?.boardColumn, condition: task?.condition,
+                              bucket: bucket(task, actionable: actionable))
+            grouped[key, default: []].append(Member(entry: entry, projectId: projectId, projectName: projectName,
+                                                   sourceOrder: sourceOrder, attentionOrder: attentionOrder[taskID]))
+        }
+        return grouped.map { id, members in
+            let ordered = members.sorted { lhs, rhs in
+                let lhsAttention = lhs.entry.bucket == .attention
+                let rhsAttention = rhs.entry.bucket == .attention
+                if lhsAttention != rhsAttention { return lhsAttention }
+                let lhsOrder = lhs.attentionOrder ?? Int.max
+                let rhsOrder = rhs.attentionOrder ?? Int.max
+                if lhsAttention && lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+                return lhs.sourceOrder < rhs.sourceOrder
+            }
+            let entries = ordered.map(\.entry)
+            let names = members.compactMap(\.projectName).sorted(by: namePrecedes)
+            let projectIDs = members.compactMap(\.projectId).sorted()
+            let counts = Bucket.allCases.compactMap { bucket -> Count? in
+                let count = entries.filter { $0.bucket == bucket }.count
+                return count > 0 ? Count(bucket: bucket, count: count) : nil
+            }
+            return Project(id: id, title: names.first ?? projectIDs.first ?? "未归属项目",
+                           tasks: entries, counts: counts)
+        }.sorted { lhs, rhs in
+            let lhsAttention = lhs.counts.contains { $0.bucket == .attention }
+            let rhsAttention = rhs.counts.contains { $0.bucket == .attention }
+            if lhsAttention != rhsAttention { return lhsAttention }
+            let order = lhs.title.localizedStandardCompare(rhs.title)
+            return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+        }
+    }
+
+    private static func isExcluded(_ task: TaskSummary) -> Bool {
+        task.phase == "done" || task.boardColumn == "done" || task.lifecycleColumn == "done"
+            || (task.saveState != nil && task.saveState != "active")
+    }
+
+    private static func bucket(_ task: TaskSummary?, actionable: Bool) -> Bucket {
+        if actionable { return .attention }
+        if task?.displayStatus == "已排队" { return .queued }
+        if task?.displayStatus == "执行中" { return .running }
+        if task?.boardColumn == "in_review" { return .review }
+        return .other
+    }
+
+    private static func namePrecedes(_ lhs: String, _ rhs: String) -> Bool {
+        let order = lhs.localizedStandardCompare(rhs)
+        return order == .orderedSame ? lhs < rhs : order == .orderedAscending
     }
 }
 
 /// 总览各列表的条数上限与「查看全部」链接文字。
 enum DashboardLimits {
     static let attention = 3
-    static let progressing = 5
 
     /// 多于上限时带总数：「查看全部 (12) ›」；不多于时不带：「查看全部 ›」。
     static func linkTitle(_ base: String, total: Int, limit: Int) -> String {
@@ -2130,12 +2264,12 @@ enum DashboardLimits {
 
 /// 总览行里拼出来的文字；核心没给的项统一写法。
 enum DashboardRowText {
-    /// 「需要你」行右栏：「项目 · 阶段 · 已等 N」。
+    /// 「需要你」行元信息：「项目 · 阶段 · 已等 N」。
     static func attentionMeta(project: String?, stage: String?, waited: String?) -> String {
         "\(project ?? "未提供项目") · \(stage ?? "未提供阶段") · 已等 \(waited ?? "—")"
     }
 
-    /// 「正在推进」行右栏：「看板列 · 条件」。
+    /// 项目进展任务行右栏：「看板列 · 条件」。
     static func progressState(column: String?, condition: String?) -> String {
         "\(column ?? "未提供") · \(condition ?? "未提供")"
     }

@@ -1,7 +1,7 @@
 import Foundation
 
-// KP-UI04 总览状态与摘要夹具：只测 Models.swift 里的纯逻辑（DashboardHeadline、WorktreePoolText、
-// DashboardProjectSummary、DashboardLimits、DashboardRowText）；不读文件，不依赖时间与区域设置。
+// KP-UI04 / KP-UI09 总览纯逻辑夹具：状态标题、工作树池译文、项目进展、收件箱上限与行文字。
+// 不读数据库或外部服务；项目自然排序沿产品现有 localizedStandardCompare 规则。
 // 运行入口：macos/tests/run-dashboard-status-fixtures.sh。
 
 /// 夹具只在云端运行，一次运行要尽量暴露全部问题：断言失败先记下，最后一起报告并以非 0 退出。
@@ -142,19 +142,120 @@ for (name, detail) in notTranslated {
     expect(WorktreePoolText.summary(detail) == nil, "pool: \(name) falls back to the core text")
 }
 
-// MARK: 项目摘要（P10）
+// MARK: 项目进展（KP-UI09）
 
-expect(DashboardProjectSummary.text(total: 8, automationOn: 5)
-       == "8 个项目 · 5 个自动处理已开", "projects: configured and enabled counts")
-expect(DashboardProjectSummary.text(total: 0, automationOn: 0) == "尚无项目配置", "projects: none")
-expect(DashboardProjectSummary.text(total: 2, automationOn: 0)
-       == "2 个项目 · 0 个自动处理已开", "projects: zero automation kept")
-expect(DashboardProjectSummary.text(total: 2, automationOn: -1)
-       == "2 个项目 · 0 个自动处理已开", "projects: negative automation count clamped")
+func progressTask(_ id: String, _ fields: [String: Any] = [:]) throws -> TaskSummary {
+    var object: [String: Any] = ["task_id": id, "status": "ready", "phase": "monitor",
+                                "project_id": "p", "project_name": "Project"]
+    fields.forEach { object[$0.key] = $0.value }
+    return try JSONDecoder.kaneo.decode(TaskSummary.self, from: JSONSerialization.data(withJSONObject: object))
+}
+
+func progressAttention(_ id: String, taskID: String, _ fields: [String: Any] = [:]) throws -> AttentionItem {
+    var object: [String: Any] = ["attention_id": id, "task_id": taskID, "attention_state": "actionable"]
+    fields.forEach { object[$0.key] = $0.value }
+    return try JSONDecoder.kaneo.decode(AttentionItem.self, from: JSONSerialization.data(withJSONObject: object))
+}
+
+expect(TaskProjectIdentity.key(projectId: " p ", projectName: "Name") == "id:p", "project key: trimmed ID wins")
+expect(TaskProjectIdentity.key(projectId: " ", projectName: " Name ") == "name:Name", "project key: blank ID falls back to trimmed name")
+expect(TaskProjectIdentity.key(projectId: nil, projectName: " ") == "unassigned", "project key: missing identity")
+
+// TaskSummary 与独立收件箱并集；标题、项目身份由对应任务优先，重复请求不重复计任务。
+let unionTask = try progressTask("known", ["project_id": " real ", "project_name": "Named", "title": "Summary title", "display_status": "已排队"])
+let noPhaseTask = try progressTask("no-phase", ["phase": NSNull(), "title": " "])
+let embeddedTask = try progressTask("embedded", ["phase": NSNull(),
+    "attention": ["attention_id": "embedded-item", "task_id": "embedded", "attention_state": "actionable", "title": "Embedded title"]])
+let union = DashboardProjectProgress.projects(tasks: [unionTask, unionTask, noPhaseTask, embeddedTask], attention: [
+    try progressAttention("known-item", taskID: "known", ["project_name": "Wrong project", "title": "Stale title"]),
+    try progressAttention("known-item-2", taskID: "known"),
+    try progressAttention("no-phase-item", taskID: "no-phase", ["title": "Snapshot title"]),
+    try progressAttention("historical-orphan", taskID: "historical", ["attention_state": "historical"]),
+])
+expect(union.flatMap(\.tasks).count == 3, "projects: task and request duplicates contribute only one task")
+expect(union.first { $0.id == "id:real" }?.title == "Named", "projects: matched summary owns project identity")
+expect(union.first { $0.id == "id:real" }?.tasks.first?.title == "Summary title", "projects: matched summary owns title")
+expect(union.flatMap(\.tasks).allSatisfy { $0.bucket == .attention }, "projects: snapshot and embedded actionable both count as attention, above queued")
+expect(union.first { $0.id == "id:p" }?.tasks.map(\.taskId) == ["no-phase", "embedded"], "projects: snapshot order comes before embedded-only attention")
+expect(union.flatMap(\.tasks).first { $0.taskId == "no-phase" }?.title == "Snapshot title", "projects: blank task title falls back to attention title")
+expect(union.flatMap(\.tasks).first { $0.taskId == "embedded" }?.title == "Embedded title", "projects: embedded attention title fallback")
+
+// 同名不同 ID 不合并；孤立收件箱项不能被同名有 ID 的项目吸收。
+let identities = DashboardProjectProgress.projects(tasks: [
+    try progressTask("same-b", ["project_id": "b", "project_name": "Shared"]),
+    try progressTask("same-a", ["project_id": "a", "project_name": "Shared"]),
+    try progressTask("name-only", ["project_id": " ", "project_name": " Shared "]),
+    try progressTask("unassigned", ["project_id": NSNull(), "project_name": " "]),
+], attention: [try progressAttention("orphan-item", taskID: "orphan", ["project_name": " Shared "])])
+expect(Set(identities.map(\.id)) == Set(["id:a", "id:b", "name:Shared", "unassigned"]), "projects: same name retains separate IDs and orphan name fallback")
+expect(identities.first?.id == "name:Shared", "projects: actionable project sorts before non-actionable projects")
+expect(identities.first { $0.id == "name:Shared" }?.tasks.map(\.taskId) == ["orphan", "name-only"], "projects: orphan joins only the actual name fallback group")
+let orphan = identities.flatMap(\.tasks).first { $0.taskId == "orphan" }
+expect(orphan?.title == "orphan" && orphan?.boardColumn == nil && orphan?.condition == nil, "projects: orphan missing fields stay missing, title falls back to task ID")
+expect(identities.first { $0.id == "unassigned" }?.title == "未归属项目", "projects: no project information has explicit fallback title")
+let idOnly = DashboardProjectProgress.projects(tasks: [try progressTask("id-only", ["project_id": " ID ", "project_name": " "])], attention: [])
+expect(idOnly.first?.title == "ID", "projects: absent project name falls back to trimmed ID")
+
+// 核心明确终态优先于可能过时的 attention；非活动保存状态不进入首页。
+let excludedFields: [[String: Any]] = [
+    ["phase": "done"], ["board_column": "done"], ["lifecycle_column": "done"],
+    ["save_state": "archived"], ["save_state": "trashed"], ["save_state": "purged"], ["save_state": "future-nonactive"],
+]
+let excludedTasks = try excludedFields.enumerated().map { try progressTask("excluded-\($0.offset)", $0.element) }
+let staleAttention = try excludedTasks.map { try progressAttention("stale-\($0.taskId)", taskID: $0.taskId) }
+let excluded = DashboardProjectProgress.projects(tasks: excludedTasks + [
+    try progressTask("active", ["save_state": "active"]),
+    try progressTask("no-phase-no-attention", ["phase": NSNull()]),
+    try progressTask("blank-phase", ["phase": " "]),
+    try progressTask("exception-without-phase", ["phase": NSNull(), "exception": ["kind": "manual_block", "severity": "blocked"]]),
+], attention: staleAttention)
+expect(excluded.flatMap(\.tasks).map(\.taskId) == ["active"], "projects: terminal/saved tasks cannot be revived by stale attention; no-phase exception alone does not widen scope")
+
+// 分桶互斥；看板 in_progress 不证明执行端已经开始，exception 不等于 actionable。
+let buckets = DashboardProjectProgress.projects(tasks: [
+    try progressTask("queued", ["display_status": "已排队", "board_column": "in_review"]),
+    try progressTask("running", ["display_status": "执行中", "board_column": "in_review"]),
+    try progressTask("review", ["display_status": "评审中", "board_column": "in_review"]),
+    try progressTask("column-only", ["board_column": "in_progress"]),
+    try progressTask("exception", ["exception": ["kind": "manual_block", "severity": "blocked"]]),
+    try progressTask("attention-queued", ["display_status": "已排队"]),
+    try progressTask("historical-only", ["attention": ["attention_id": "old", "task_id": "historical-only", "attention_state": "historical"]]),
+], attention: [try progressAttention("actionable", taskID: "attention-queued")])
+let bucketEntries = Dictionary(uniqueKeysWithValues: buckets.flatMap(\.tasks).map { ($0.taskId, $0.bucket) })
+expect(bucketEntries["queued"] == .queued && bucketEntries["running"] == .running && bucketEntries["review"] == .review,
+       "projects: explicit queued/running statuses precede review column")
+expect(bucketEntries["column-only"] == .other && bucketEntries["exception"] == .other && bucketEntries["historical-only"] == .other,
+       "projects: in-progress column, exception and historical attention do not invent active execution or actionable input")
+expect(bucketEntries["attention-queued"] == .attention, "projects: actionable attention wins over queued")
+expect(buckets.first?.counts.map(\.bucket) == [.attention, .queued, .running, .review, .other], "projects: nonzero bucket ordering is fixed")
+expect(buckets.first?.counts.map(\.count) == [1, 1, 1, 1, 3], "projects: bucket counts are unique tasks, not requests")
+expect(buckets.allSatisfy { $0.counts.allSatisfy { $0.count > 0 } && $0.counts.reduce(0) { $0 + $1.count } == $0.tasks.count },
+       "projects: only nonzero disjoint counts sum to displayed tasks")
+
+// 项目排序与项目内排序彼此独立；自然数字顺序、同名 ID 稳定顺序沿既有任务列表规则。
+let projectOrder = DashboardProjectProgress.projects(tasks: [
+    try progressTask("ten", ["project_id": "n10", "project_name": "Project 10"]),
+    try progressTask("same-b", ["project_id": "b", "project_name": "Project"]),
+    try progressTask("two", ["project_id": "n2", "project_name": "Project 2"]),
+    try progressTask("same-a", ["project_id": "a", "project_name": "Project"]),
+    try progressTask("urgent", ["project_id": "urgent", "project_name": "Z"]),
+], attention: [try progressAttention("urgent-item", taskID: "urgent")])
+expect(projectOrder.map(\.id) == ["id:urgent", "id:a", "id:b", "id:n2", "id:n10"], "projects: attention first, then natural name and stable project key")
+let ordered = DashboardProjectProgress.projects(tasks: [
+    try progressTask("other-first"),
+    try progressTask("embedded-first", ["attention": ["attention_id": "embedded-order", "task_id": "embedded-first", "attention_state": "actionable"]]),
+    try progressTask("snapshot-a"), try progressTask("other-last"), try progressTask("snapshot-b"),
+], attention: [try progressAttention("b-item", taskID: "snapshot-b"), try progressAttention("a-item", taskID: "snapshot-a")])
+expect(ordered.first?.tasks.map(\.taskId) == ["snapshot-b", "snapshot-a", "embedded-first", "other-first", "other-last"],
+       "projects: actionable snapshot source order, then embedded-only attention, then original task order")
+let allTasks = try (1...7).map { try progressTask("all-\($0)") }
+let untruncated = DashboardProjectProgress.projects(tasks: allTasks, attention: [])
+expect(untruncated.first?.tasks.count == 7 && untruncated.first?.counts.map(\.count) == [7], "projects: current project tasks are not truncated to the old five-row limit")
+expect(DashboardProjectProgress.projects(tasks: [], attention: []).isEmpty, "projects: no phantom configured project when there are no current tasks")
 
 // MARK: 条数上限与链接（P4）
 
-expect(DashboardLimits.attention == 3 && DashboardLimits.progressing == 5, "limits: 3 and 5")
+expect(DashboardLimits.attention == 3, "limits: attention remains 3")
 expect(DashboardLimits.linkTitle("查看全部", total: 12, limit: DashboardLimits.attention) == "查看全部 (12) ›",
        "link: more than limit carries the total")
 expect(DashboardLimits.linkTitle("查看全部", total: 4, limit: DashboardLimits.attention) == "查看全部 (4) ›",
@@ -163,10 +264,6 @@ expect(DashboardLimits.linkTitle("查看全部", total: 3, limit: DashboardLimit
        "link: at the limit has no total")
 expect(DashboardLimits.linkTitle("查看全部", total: 0, limit: DashboardLimits.attention) == "查看全部 ›",
        "link: empty has no total")
-expect(DashboardLimits.linkTitle("全部任务", total: 9, limit: DashboardLimits.progressing) == "全部任务 (9) ›",
-       "link: progressing over the limit")
-expect(DashboardLimits.linkTitle("全部任务", total: 5, limit: DashboardLimits.progressing) == "全部任务 ›",
-       "link: progressing at the limit")
 expect(DashboardLimits.head([1, 2, 3, 4, 5, 6], limit: 3) == [1, 2, 3], "head: truncates")
 expect(DashboardLimits.head([1], limit: 3) == [1], "head: shorter list unchanged")
 expect(DashboardLimits.head([Int](), limit: 3).isEmpty, "head: empty")
