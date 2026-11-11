@@ -60,7 +60,7 @@
 - T2：纯项目聚合与 fixture，由 Sol worker 独占 `Core/Models.swift`、`macos/tests/dashboard_status_main.swift`、`Views/TaskCompactListView.swift` 的项目键转发；复用既有项目身份规则。主 agent 独占 Root/Dashboard/Components 与规格记录；文件不交叉写。无需独立端口、数据库或服务。
 - T3：主 agent 实现左下角自动推进/环境入口、无尾箭头面板、需要你信息排版、项目分组。诊断数据与明细展示提取为现有编译源中的共享组件，避免两套健康判断；不新增核心读取或诊断循环。
 - T4：独立只读审查最终组合态；本地仅做无编译静态核验。项目强制 Swift/Android 编译仅走云端 Packages，既有 dashboard fixture 已接入该工作流，不在本地运行 swiftc/Xcode/Gradle。
-- T5：已获任务分支推送授权，跑仅产生 artifacts 的 preview Packages；核对所有 jobs、源 SHA 与包 metadata/hash，再下载独立 bundle 用 FakeCore/临时 HOME 核验 1180×760、900×600、深浅色，保留 `/Applications/KaneoPilot.app` 与真实数据。两轮云端构建及首轮原生发现见下方，新包仍在验收。
+- T5：已获任务分支推送授权，跑仅产生 artifacts 的 preview Packages；核对所有 jobs、源 SHA 与包 metadata/hash，再下载独立 bundle 用 FakeCore/临时 HOME 核验 1180×760、900×600、深浅色，保留 `/Applications/KaneoPilot.app` 与真实数据。最终 #207 已完成四种窗口/外观组合的原生检查；整条 CI 的既有样本新鲜度失败见下方。
 
 验收场景：项目展开/折叠和刷新后保持、任务去重、同名不同 ID、不完整 attention 的项目名回退、已排队不算执行中、已完成/保存任务排除、空项目进展；需要你换行与键盘入口、原详情五段；左下角运行/暂停徽标、原有禁用条件、环境入口 Return/点击展开与 Esc/关闭/再次点击收起和焦点恢复；诊断未检查不计通过、异常继续首页显式展示；窄窗口/深浅色无溢出、正文不被面板挤动。
 
@@ -68,7 +68,7 @@
 
 ## 当前进展与剩余
 
-- T1–T3 已写代码；T4 静态审查随必要修复复核；T5 实现中（解锁后复测发现项目 Return 抢键，修复后须重新云端构建和原生检查）。整体状态仍为**实现中**，设计稿和旧包的历史验证不能证明当前原生候选实现通过。
+- T1–T4 已完成本轮实现与独立复核；T5 的 #207 包核验、四种窗口/外观及相关原生交互已完成。整体状态仍为**实现中**：当前 UI 已有可体验预览，整条云端门禁仍因两项既有样本新鲜度测试失败；未将其改成通过或标记用户已验收。原生检查绑定代码 `89a91b0`，不沿用旧包通过记录。
 - 当前实现：`RootView.swift` 用窗口根锚点 overlay 向上呈现面板，避免列裁剪与系统 popover 尾箭头；`Components.swift` 共用环境状态投影、告警与诊断明细；Dashboard 移除配置摘要与额外项目映射读取，新增可折叠项目分组；共享项目键沿用任务列表规则。
 - 独立 Sol 审查发现 Tab 到事项行后容器焦点守卫会屏蔽↑↓；已改为每事项 attentionId 显式焦点，箭头更新行焦点，事项/项目头/环境入口分别绑定获焦时的 Return；独立复核通过，未发现新的明确问题。侧栏消失时收环境面板，关闭后焦点回入口。
 - 本次本地静态核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。没有本地编译；云端 fixture 和原生候选包的代码与证据分别记录于下方。
@@ -103,7 +103,26 @@
 
 ### #206 键盘回归与焦点可见性
 
-- Return 路由修复代码 `005e89a636970fc3846755693102074d63b5b0d1`，Packages [#206](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43005784916)。macOS package 通过；同 SHA/build 206/ZIP size/hash/plist/bundle ID/深度签名均核对通过，证据 `build/kp-ui09/artifacts/206/verification.json`，完整 workflow 最终状态后补。
+- Return 路由修复代码 `005e89a636970fc3846755693102074d63b5b0d1`，Packages [#206](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43005784916)。macOS package 通过；同 SHA/build 206/ZIP size/hash/plist/bundle ID/深度签名均核对通过，证据 `build/kp-ui09/artifacts/206/verification.json`。后续推送触发并发取消，工作流最终 cancelled，全部 jobs 结论在 `build/kp-ui09/artifacts/206/workflow-status.json`；不能声称整条 CI 通过。
 - `build/kp-ui09/ui/206/1180x760-dark/` 已实测：环境打开→Esc→入口焦点→Return 重开，关闭按钮 Return 收起；Tab 到事项→Return 打开详情→Esc→Tab 到项目头→Return 正确折叠当前项目，再 Return 展开且刷新后保持。与 #205 的错路由复现一致的路径现已通过。
 - 同一隔离 case 临时加入另两条 actionable：Shift-Tab 从项目头到最后事项，Up/Up/Down 后焦点在第二事项；Return 打开的确是该事项详情。AX 与初始 state 备份分别保存，未调用真实执行端。隔离 App 已用 Quit 正常退出。
 - 发现项目头焦点不可见：父 Dashboard 静态 `.focusEffectDisabled()` 同时屏蔽新增子控件原生环。独立只读核查 [Apple 官方说明](https://developer.apple.com/documentation/swiftui/view/focuseffectdisabled(_:)) 确认高层设置会覆盖子层；因此不是在子层重复加 false，而是父层仅在 `focusedTarget == .dashboard` 时隐藏整页大框，让事项 / 项目焦点显示原生效果。不改变字体、颜色或交互规则；该必要单行修复仍须新云端包查看实际焦点环。
+
+### #207 最终预览与原生检查
+
+- 最终实现代码 `89a91b0e8a51ef4bb0f788648f364b558ad99320` 已提交、推送任务分支。Packages [#207](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43007841949) 已结束，最终 **failure**：18 个 jobs 中 14 success、2 failure、2 skipped。identity、macOS package、macOS fixtures a/b、Android、codex-platforms 和其余八个 Python 分片通过；失败仅 `checks (1, 3.11)` / `checks (1, 3.13)`；session fulltext probe / publish skipped。完整证据 `build/kp-ui09/artifacts/207/workflow-status.json`。
+- 两个失败 job `130479793638` / `130479793652` 日志均已下载，仍为 `test_scenario_real_shape_fixture_staleness_gate` 与 `test_scenario_real_recordings_freshness_and_shape`，各 `2 failed, 75 passed`。2026-10-10 的样本在 2026-11-11 为 32 天，超过 30 天门限；九件样本及两个测试与基线完全一致的核对已绑定当前 SHA，见 `build/kp-ui09/baseline-fixture-evidence.json`。未改采集日期、历史事实或门禁，真实重采及 Plus 版本契约核对仍属独立维护事项。
+- 下载本轮 `macos-check-reports-207-fixtures-a`，`fixture-reports-a/run-dashboard-status-fixtures.log` 明确输出 `dashboard status fixtures passed`；本轮没有本地编译。该云端 fixture 覆盖项目身份、同名不同 ID、去重、attention 项目回退、状态桶、已完成/保存排除和空分组，不能代替下述原生界面证据。
+- `macos-update-ui-207` 的源 SHA、build 207、独立 bundle ID `local.kaneopilot.software-update-check`、plist、ZIP 大小 `31898238`、SHA-256 `32baf44ecfd28466474d30ff943481e1cb0b2fd17a45881ae89ba0baa44791b5` 和 `codesign --verify --deep --strict` 均核对通过，见 `build/kp-ui09/artifacts/207/verification.json`。未重签、修改 bundle 或安装到 Applications。
+- 四个隔离 case 均以该包启动，各自独立 HOME、FakeCore state/命令日志、核心目录和空凭据，手机服务 disabled。`launch.json` 源 SHA 全为 `89a91b0`；证据根为 `build/kp-ui09/ui/207/`。两尺寸截图实际分别为 2360×1520、1800×1200 像素（2×）；截图 API 返回 JPEG 字节，沿本轮既有 `.png` 文件名保存。
+
+| 原生窗口 / 外观 | 本轮观察结果与证据 |
+| --- | --- |
+| 1180×760 深色 | 项目分组、长原因换行、需要你下方元信息、正常环境不占正文均已查看。环境打开后关闭按钮获焦，Esc 回入口、Return 重开、Return 关闭、点击关闭及再次点击入口收起均通过。事项 Tab/Return 打开正确详情，原概览/计划/执行/评审/记录五段逐一选择并保存 AX。关闭详情→Tab 到项目→Return 正确折叠，刷新保持，再 Return 展开；事项和项目的蓝色原生焦点环已实际查看（`attention-focus.png` / `project-focus.png`）。加入另两条隔离 actionable 后，Shift-Tab、Up/Up/Down 到第二事项，Return 打开的确为该事项。 |
+| 1180×760 浅色 | 首页与三项目布局已查看；左下角面板向上展开、无尾箭头、正文位置不变，点击关闭后入口焦点恢复。截图 `overview.png` / `environment-open.png`。 |
+| 900×600 浅色 | 无横向溢出，左下角入口与主要区域可用。隔离暂停/恢复的橙色“已暂停”与绿色“运行中”徽标、说明正确，事项仍优先显示。诊断明细展开后面板在窗口内，滚动至末项 Kaneo 连通性“未检查”，摘要保持 6 通过 / 1 未检查；再次点击入口收起并恢复焦点。截图 `paused.png` / `environment-details.png` / `environment-details-bottom.png`。 |
+| 900×600 深色 | 首页与环境面板已查看，无横向溢出。Esc 收起后入口恢复焦点。隔离模拟心跳丢失并刷新后，首页标题显示环境告警、环境区显式出现，左下角显示红色心跳未确认，未被正常摘要折叠隐藏（`heartbeat-loss-refreshed.txt` / `heartbeat-loss.png`）。恢复心跳、清空 attention 并将夹具任务归档后，“需要你”整块隐藏、项目进展显示 0 个项目及空态（`empty.txt` / `empty.png`）。所有状态变更仅在该 case 的 `state.json` 原子替换，保留前态。 |
+
+- 四个 #207 隔离 App 均用 Quit 正常退出。收尾发现锁屏时 #205 首个 case 遗留 FakeCore PID `19840`；核对绝对命令、PPID、工作目录和该 case 的 engine marker 后，仅对该进程发送 SIGTERM，确认退出及 marker 为 stopped，见 `build/kp-ui09/ui/cleanup.json`。最终没有本任务预览 App / FakeCore 残留，正式 `/Applications/KaneoPilot.app` PID `35156` 保持；核对结果在 `ui/207/process-verification.json`。
+- 当前剩余：CI 样本维护阻塞、用户对真实候选界面的体验确认；真实调度、Plus 执行、手机设备与正式安装不属于此次隔离 UI 核验。预览包与上述截图可供体验，但不能据此称整条 CI 通过、已验收或已发布。
+- 工作树继续保留：成果未合入 `main`，且忽略目录内仍有唯一包与原生证据；尚不满足清理条件。未合并、发布 Release/prerelease、替换正式 App 或清理其他工作树。后续仅在另有相应授权并满足验证后合入，随后按保全规则收尾本任务工作树。
