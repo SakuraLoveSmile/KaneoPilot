@@ -276,7 +276,9 @@ class TestPiRoundLifecycle:
         delivery = factory.get_task(task_id)["delivery"]
         assert delivery["mode"] == "manual", delivery
         assert delivery["workspace_version"] == 1, delivery
-        assert delivery["branch"] == f"kaneo/{task_id}", delivery
+        from kanpilot import branch_naming
+        assert branch_naming.matches(delivery["branch"], task_id), delivery
+        assert delivery["branch"].startswith("feat/"), delivery
         assert delivery["base_branch"], delivery
         assert all(delivery.get(key) for key in
                    ("base_sha", "head_sha", "worktree_path")), delivery

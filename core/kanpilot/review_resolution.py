@@ -10,7 +10,7 @@ import re
 from types import SimpleNamespace
 from pathlib import Path
 
-from . import bridge, constants, core, db, git_delivery, planfile, remote, review_snapshot, round_store, util
+from . import branch_naming, bridge, constants, core, db, git_delivery, planfile, remote, review_snapshot, round_store, util
 
 
 IDENTITY = {"expected_execution_run_id": "execution_run_id",
@@ -251,7 +251,9 @@ def _owned_workspace(ctx, task, value, prepared):
     task_id = task["task_id"]
     git_delivery._local_task_id(task_id)
     key = "review_repair_preparing:" + task_id
-    branch = constants.DELIVERY_BRANCH_PREFIX + task_id
+    intent = db.get_setting(ctx.conn, key)
+    branch = ((intent.get("delivery") or {}).get("branch") if isinstance(intent, dict) else None) or branch_naming.new_branch(task_id, task, kind="fix", created_at=util.now_iso())
+    util.require(branch_naming.matches(branch, task_id), "恢复中的分支任务编号不符", "conflict")
     target = root / task_id / "run"
     identity = {"mode": "manual", "workspace_version": 1, "branch": branch,
                 "worktree_path": str(target), "base_branch": git_delivery._value(["rev-parse", "--abbrev-ref", "HEAD"], task["repository"]),
@@ -279,7 +281,7 @@ def _owned_workspace(ctx, task, value, prepared):
             git_delivery._git(["worktree", "add", str(target), branch], task["repository"], 60)
         else:
             created = git_delivery.prepare_local_branch_worktree(task["repository"], task_id, worktrees_root=root,
-                base_sha=identity["head_sha"], base_branch=identity["base_branch"])
+                base_sha=identity["head_sha"], base_branch=identity["base_branch"], branch=branch)
             util.require(created == identity, "恢复工作区登记不符", "conflict")
     git_delivery.verify_branch_worktree(dict(identity, repository=task["repository"]), require_clean=False,
                                        expected_head=identity["head_sha"])

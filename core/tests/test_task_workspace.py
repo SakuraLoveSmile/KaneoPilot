@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import KanpilotTestCase
-from kanpilot import cmd_dispatch, core, db, git_delivery, pi_desktop_planner, planner_inputs, task_workspace, util, worktree_pool, planner_runner
+from kanpilot import branch_naming, cmd_dispatch, core, db, git_delivery, pi_desktop_planner, planner_inputs, task_workspace, util, worktree_pool, planner_runner
 
 
 def git(repo, *args):
@@ -47,6 +47,8 @@ class TaskWorkspaceTest(KanpilotTestCase):
         conn, task, payload = self.stored(result)
         try:
             delivery = core.delivery_of(task)
+            self.assertTrue(branch_naming.matches(delivery["branch"], task["task_id"]))
+            self.assertTrue(delivery["branch"].startswith("feat/"))
             self.assertEqual(delivery["workspace_version"], 1)
             self.assertEqual(delivery["mode"], "manual")
             self.assertEqual(delivery["base_sha"], before[0])
@@ -108,7 +110,7 @@ class TaskWorkspaceTest(KanpilotTestCase):
         rejected = self.start()
         self.assertEqual(rejected["code"], "worktree_invalid")
         repo = self.repository()
-        git(repo, "branch", "kaneo/newlocaltask0002")
+        git(repo, "branch", branch_naming.new_branch("newlocaltask0002", {"title": "task newlocaltask0002"}))
         rejected = self.start("newlocaltask0002")
         self.assertEqual(rejected["code"], "worktree_invalid")
         conn = db.connect(self.db_path)

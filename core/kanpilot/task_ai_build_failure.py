@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from . import (constants, core, db, exec_config, gh_client, git_delivery,
+from . import (branch_naming, constants, core, db, exec_config, gh_client, git_delivery,
                release_delivery, release_github, runtime_operations, util)
 
 KIND = "build_failure"
@@ -107,7 +107,8 @@ def prepare(ctx, task):
     identity = {key: value[key] for key in ("task_id", "release_batch_id", "workflow_run_id", "workflow_attempt", "head_sha")}
     value["action_id"] = action._digest(identity)
     git_delivery._task_id(task["task_id"])
-    value["branch"] = constants.DELIVERY_BRANCH_PREFIX + task["task_id"] + "-build-" + value["action_id"][:16]
+    value["branch"] = branch_naming.new_branch(task["task_id"], task,
+        kind="fix", slug="build-" + value["action_id"][:16], created_at=ctx.now_iso)
     root = constants.worktrees_root(db.get_setting(ctx.conn, "worktrees_root"))
     value["worktree_path"] = str(root.expanduser().resolve() / task["task_id"] / ("build-" + value["action_id"][:16]))
     util.require(not os.path.lexists(value["worktree_path"])

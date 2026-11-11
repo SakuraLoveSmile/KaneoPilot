@@ -15,7 +15,7 @@ from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from . import constants, util
+from . import branch_naming, constants, util
 
 
 class GitDeliveryError(Exception):
@@ -274,7 +274,7 @@ def _task_id(task_id):
         raise GitDeliveryError("worktree_invalid", "任务标识必须为 8 至 64 位小写字母或数字")
 
 
-def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root, initial_head_sha=None) -> dict:
+def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root, initial_head_sha=None, branch=None) -> dict:
     _task_id(task_id)
     try:
         _git(["fetch", "--prune", "origin"], repo, 60)
@@ -288,7 +288,9 @@ def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root, initi
         head = _value(["rev-parse", "--verify", initial_head_sha + "^{commit}"], repo)
         if head != initial_head_sha:
             raise GitDeliveryError("worktree_invalid", "修复基线提交不精确")
-    branch = constants.DELIVERY_BRANCH_PREFIX + task_id
+    branch = branch or branch_naming.new_branch(task_id)
+    if not branch_naming.matches(branch, task_id):
+        raise GitDeliveryError("worktree_invalid", "分支与任务编号不符")
     path = Path(worktrees_root).expanduser() / task_id / "run"
     refs = set(_value(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch,
                        "refs/remotes/origin/" + branch], repo).splitlines())
@@ -336,7 +338,7 @@ def _local_task_id(task_id):
         raise GitDeliveryError("worktree_invalid", "任务标识不适合创建工作树")
 
 
-def prepare_local_branch_worktree(repo, task_id, *, worktrees_root, base_sha=None, base_branch=None) -> dict:
+def prepare_local_branch_worktree(repo, task_id, *, worktrees_root, base_sha=None, base_branch=None, branch=None) -> dict:
     """Freeze committed local HEAD without fetching or copying primary changes."""
     _local_task_id(task_id)
     try:
@@ -344,7 +346,9 @@ def prepare_local_branch_worktree(repo, task_id, *, worktrees_root, base_sha=Non
             raise GitDeliveryError("worktree_invalid", "修复基线提交标识无效")
         sha = _value(["rev-parse", "--verify", (base_sha or "HEAD") + "^{commit}"], repo)
         base = base_branch or _value(["rev-parse", "--abbrev-ref", "HEAD"], repo)
-        branch = constants.DELIVERY_BRANCH_PREFIX + task_id
+        branch = branch or branch_naming.new_branch(task_id)
+        if not branch_naming.matches(branch, task_id):
+            raise GitDeliveryError("worktree_invalid", "分支与任务编号不符")
         path = Path(worktrees_root).expanduser().resolve() / task_id / "run"
         _git(["check-ref-format", "--branch", branch], repo, 10)
         refs = _value(["for-each-ref", "--format=%(refname)",

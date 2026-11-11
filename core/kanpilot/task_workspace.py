@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from . import constants, core, db, git_delivery, util
+from . import branch_naming, constants, core, db, git_delivery, util
 
 
 def review_fix_head(conn, task, *, allow_pending=False):
@@ -80,7 +80,7 @@ def cmd_repair_review_fix_workspace(ctx, payload):
     delivery = core.delivery_of(task)
     root = constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None).expanduser().resolve()
     path = Path(delivery.get("worktree_path") or "").expanduser()
-    util.require(delivery.get("mode") == "pr" and delivery.get("branch") == constants.DELIVERY_BRANCH_PREFIX + task_id
+    util.require(delivery.get("mode") == "pr" and branch_naming.matches(delivery.get("branch"), task_id)
                  and delivery.get("head_sha") == delivery.get("base_sha") == expected
                  and not any(delivery.get(key) for key in
                              ("commits", "pushed_sha", "pr_url", "pr_number", "pr_state", "merged_at"))
@@ -144,7 +144,7 @@ def payload_fields(delivery):
     return fields
 
 
-def prepare_for_submission(conn, task_id, repository, task=None):
+def prepare_for_submission(conn, task_id, repository, task=None, *, metadata=None):
     """Outside a write transaction, prepare first-time local task registration.
 
     A historical request or execution keeps its frozen, unversioned contract.
@@ -183,7 +183,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
     try:
         if intent is None:
             git_delivery._local_task_id(task_id)
-            branch = constants.DELIVERY_BRANCH_PREFIX + task_id
+            branch = branch_naming.new_branch(task_id, task if task is not None else metadata, created_at=util.now_iso())
             path = root.expanduser().resolve() / task_id / "run"
             refs = git_delivery._value(["for-each-ref", "--format=%(refname)",
                                        "refs/heads/" + branch, "refs/remotes/origin/" + branch], repository)
@@ -209,7 +209,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
                      "准备中的任务工作区仓库不符", "worktree_invalid")
         delivery = intent.get("delivery")
         util.require(isinstance(delivery, dict)
-                     and delivery.get("branch") == constants.DELIVERY_BRANCH_PREFIX + task_id
+                     and branch_naming.matches(delivery.get("branch"), task_id)
                      and delivery.get("worktree_path") == str(root.expanduser().resolve() / task_id / "run")
                      and delivery.get("base_sha") == delivery.get("head_sha")
                      and (base_sha is None or delivery.get("base_sha") == base_sha),
@@ -220,7 +220,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
         else:
             created = git_delivery.prepare_local_branch_worktree(
                 repository, task_id, worktrees_root=root,
-                base_sha=delivery["base_sha"], base_branch=delivery["base_branch"])
+                base_sha=delivery["base_sha"], base_branch=delivery["base_branch"], branch=delivery["branch"])
             util.require(created == delivery, "创建的任务工作区与准备登记不符", "worktree_invalid")
         state = git_delivery.worktree_state_sha256(dict(delivery, repository=repository))
     except git_delivery.GitDeliveryError as exc:

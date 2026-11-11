@@ -573,6 +573,8 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
             spec.update(repair_prompt.freeze(task))
         from . import execution_continuation
         execution_continuation.freeze_verification_spec(task, spec)
+        if worktree_mode == "branch":
+            spec["delivery_branch"] = core.delivery_of(task)["branch"]
         execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
         process_owner.bind_spec(spec, ctx.db_path)
         spec_path = directory / "spec.json"
@@ -717,6 +719,8 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
             spec.update(repair_prompt.freeze(task))
         from . import execution_contract, execution_continuation
         execution_continuation.freeze_verification_spec(task, spec)
+        if worktree_mode == "branch":
+            spec["delivery_branch"] = core.delivery_of(task)["branch"]
         execution_contract.freeze_spec(spec, requirements_sha256=task["requirements_sha256"])
         spec_path = run_dir / "spec.json"
         from . import process_owner

@@ -1250,7 +1250,7 @@ def _prepare_submission(conn, item):
         repository = meta.get("repository") or (task["repository"] if task is not None else "")
         if repository and Path(repository).expanduser().resolve() == Path(mapping["repository"]).expanduser().resolve():
             prepared["task_workspace"] = task_workspace.prepare_for_submission(
-                conn, row["task_id"], repository, task)
+                conn, row["task_id"], repository, task, metadata=meta)
     return prepared
 
 

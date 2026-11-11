@@ -41,8 +41,9 @@ def repo(tmp_path):
 
 
 def branch(repo, root, task_id="task1234", base=None):
+    # Exercise frozen legacy identities; new naming is covered separately.
     return dict(gd.prepare_branch_worktree(str(repo), task_id, base_branch=base,
-                                         worktrees_root=root), repository=str(repo))
+                                         worktrees_root=root, branch="kaneo/" + task_id), repository=str(repo))
 
 
 def commit(delivery, run="run1"):

@@ -30,6 +30,8 @@ def _inputs(spec, initial_source_sha256, requirements_sha256):
         "prompt_sha256": util.sha256_text(instruction.rstrip() + "\n\n" + body),
         "repair_identity_sha256": (spec.get("repair_prompt") or {}).get("identity_sha256"),
     }
+    if "delivery_branch" in spec:
+        inputs["delivery_branch"] = spec["delivery_branch"]
     # Omission preserves historical contracts; new grants are frozen inputs.
     if "sandbox_writable_roots" in spec:
         inputs["sandbox_writable_roots"] = spec["sandbox_writable_roots"]
@@ -72,7 +74,7 @@ def _workspace(spec, contract, *, starting):
             return workspace
         git_delivery.verify_branch_worktree({
             "repository": spec["repository"], "worktree_path": spec["cwd"],
-            "branch": constants.DELIVERY_BRANCH_PREFIX + spec["task_id"],
+            "branch": spec.get("delivery_branch") or constants.DELIVERY_BRANCH_PREFIX + spec["task_id"],
         }, require_clean=False, expected_head=None)
     except (OSError, RuntimeError, git_delivery.GitDeliveryError):
         return workspace

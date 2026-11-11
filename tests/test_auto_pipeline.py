@@ -132,7 +132,7 @@ class TestAutoPipeline(PiDesktopCase):
             'if "--version" in a: print("gh fake"); sys.exit(0)\n'
             'branch=os.environ.get("PIPELINE_BRANCH")\n'
             'sha=subprocess.check_output(["git","-C",branch,"rev-parse","HEAD"]).decode().strip() if branch else ""\n'
-            'row={"number":7,"url":"https://github.com/owner/repo/pull/7","state":state["state"],"mergedAt":state["mergedAt"],"headRefOid":sha,"baseRefName":"main","headRefName":' + repr('kaneo/' + TASK) + ',"isCrossRepository":False}\n'
+            'row={"number":7,"url":"https://github.com/owner/repo/pull/7","state":state["state"],"mergedAt":state["mergedAt"],"headRefOid":sha,"baseRefName":"main","headRefName":subprocess.check_output(["git","-C",branch,"branch","--show-current"]).decode().strip(),"isCrossRepository":False}\n'
             'if a[:2]==["pr","list"]: print(json.dumps([row] if state.get("created") else []))\n'
             'elif a[:2]==["pr","create"]: state["created"]=True;p.write_text(json.dumps(state));print(row["url"])\n'
             'elif a[:2]==["pr","view"]: print(json.dumps(row))\n'

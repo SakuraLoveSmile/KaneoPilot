@@ -1802,7 +1802,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 规划与评审（Plus、Claude/Codex CLI、Codex Desktop，包括 plan-scan、干净交付快照及脏状态快照）在任务阶段树 `<worktrees_root>/<task_id>/plan` 与 `<worktrees_root>/<task_id>/review` 执行，不在真实仓库执行（§5.29.6）；执行树为 `<task_id>/run`，恢复分支及历史执行 UUID 不参与阶段树。同一任务同一阶段同时至多一个持有者。`set-config {worktree_concurrency_limit:N}` 配置全局规划/评审并发上限，默认4，取1–32整数；达到上限的请求返回等待、保留可重试，不转为业务失败；attention-list 暴露等待与隔离。旧「每仓库槽位池」`pool/<repo_key>/slot-<k>` 与 `worktree_pool_size` 只作历史读取，不再分配或决定容量。
 
-核心在 BEGIN IMMEDIATE 内登记阶段树行（`worktree_slots` 增 `task_id`、`stage`，唯一键 `(task_id, stage)`）：stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，避免并发超限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确等于 `<worktrees_root>/<task_id>/<stage>` 且 `task_id` 匹配 `[A-Za-z0-9_-]{1,64}`；实际顶层与git common dir须匹配；`plan`/`review` 须为 detached，`run` 须检出 `kaneo/<task_id>`；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`（`run` 以分支检出，同样不覆盖忽略文件），不使用force/reset/clean。
+核心在 BEGIN IMMEDIATE 内登记阶段树行（`worktree_slots` 增 `task_id`、`stage`，唯一键 `(task_id, stage)`）：stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，避免并发超限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确等于 `<worktrees_root>/<task_id>/<stage>` 且 `task_id` 匹配 `[A-Za-z0-9_-]{1,64}`；实际顶层与git common dir须匹配；`plan`/`review` 须为 detached，`run` 须检出 SQLite delivery 登记的任务分支（新分支命名见下文，兼容已登记的 `kaneo/<task_id>`）；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`（`run` 以分支检出，同样不覆盖忽略文件），不使用force/reset/clean。
 
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
 
@@ -1904,7 +1904,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
   .archives/
   <task_id>/
     meta.json
-    run/        # kaneo/<task_id>
+    run/        # SQLite delivery 登记的任务分支
     plan/       # detached 冻结 sha
     review/     # detached 快照 sha
     artifacts/  # plan/<run_id>/、review/<run_id>/，只读镜像
@@ -1962,7 +1962,7 @@ macOS 上，进程退出至僵尸态与组信号之间的竞态可能返回 EPER
 
 - plan：分流前核对完整输入 manifest，真实槽位准备后、发送前冻结实际工作树及配置；Plus、Codex、Claude 共用严格结果格式。恢复核对父轮契约、实际槽位及配置；已完成新记录缺包不能补造成功。
 - execution：新 spec/job 绑定计划、需求、源码起点、配置、指令/实际正文及完整 prompt 摘要、修复来源与原文验收命令。开始前复核，核证时再次核对真实 dispatch request。执行端运行验证；Pilot 核对报告及当前源码，既有 live/shadow/手动入口不在本地代跑 verify。
-- 历史 execution 工作目录别名（KP-UI08）：只读核证时，冻结 workspace 与 `spec.cwd` 可在严格解析为同一存在目录、并核实 Git toplevel、所属仓库 common-dir 与 `kaneo/<task_id>` 分支后兼容根目录迁移留下的符号链接。旧 spec/job/合同及指纹不改写，其他冻结字段仍逐项校验。新执行启动继续要求原 canonical workspace 和初始源码指纹一致；不同任务/仓库、缺失目录、损坏合同或 job 不一致均拒绝。
+- 历史 execution 工作目录别名（KP-UI08）：只读核证时，冻结 workspace 与 `spec.cwd` 可在严格解析为同一存在目录、并核实 Git toplevel、所属仓库 common-dir 与冻结执行 spec 的 `delivery_branch` 分支（旧 spec 缺字段时为 `kaneo/<task_id>`）后兼容根目录迁移留下的符号链接。旧 spec/job/合同及指纹不改写，其他冻结字段仍逐项校验。新执行启动继续要求原 canonical workspace 和初始源码指纹一致；不同任务/仓库、缺失目录、损坏合同或 job 不一致均拒绝。
 - review：材料冻结后、发送前建契约，结算及恢复时核对结果、正文、当前源码、请求与租约。信封不绕过既有修复权限或结论规则。
 - delivery：publish/sync 独立建契约，核心按真实远端观察构造信封，runner 核验后才推进。push/创建 PR/评论先记 `runtime_operations`；unknown 跨领取只读对账，明确未写入的拒绝按既有重试策略保留旧回执、登记新尝试。写入成功后的读取失败仍不能作为未写入证明。
 
@@ -2161,3 +2161,10 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
 - 完成回退：`status=done` 且周期内无 done 登记时，`state=finished`，`ended_at` 取限制后的 `updated_at`。
 - 只读：投影期间不产生写事务，不写 `runtime_operations`。
 - 隐私：输出不含路径、哈希与命令原文；手机 `get-task` 保留该字段，键名不触发私有键规则。
+
+
+### 软件创建任务分支的命名（KP-BR01）
+
+新建分支统一 `<type>/<YYYYMMDD>-<task_id>-<slug>`。日期取首次准备分支时的台北日期并在 Git 操作前冻结，重试、标题修改、重新规划不重新命名。保留完整任务 ID（标准名转小写），避免截断造成碰撞；不从标题中猜测另一个任务编号。类型支持 feat/fix/refactor/docs/chore/test：独立评审修复、评审成果恢复、构建修复为 fix；其他任务识别标题中的 conventional 前缀，无前缀默认 feat。slug 从标题提取小写 ASCII 字母数字并以连字符分隔，最长 48 字符；没有可用内容时用 task，不调用模型翻译或产生费用。构建修复用 build-<action_id前16位> 区分同任务的独立修复。
+
+手动准备将名称保存在既有 task_workspace_preparing intent；自动接收在核心 setting task_branch_name:<task_id> 登记仓库和分支，先登记再调用 Git；构建修复预览保持只读，候选名称纳入已有确认上下文，跨日未确认须重新准备，确认后沿既有 action/runtime_operations 冻结名称；评审恢复沿既有 review_repair_preparing intent。已登记的 delivery.branch、旧准备 intent、PR 与执行冻结材料保持原值，不自动重命名或重写。新执行 spec 将 delivery_branch 纳入阶段输入哈希；旧 spec 不新增字段。run 工作树必须严格匹配 SQLite 登记分支；历史未登记场景只兼容原精确旧名。

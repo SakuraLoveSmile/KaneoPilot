@@ -91,7 +91,7 @@ def _pool_path(row):
     return path
 
 
-def _validate(row, *, existing=True):
+def _validate(row, *, existing=True, conn=None):
     if row["stage"] is None:
         path = _pool_path(row)
     else:
@@ -109,7 +109,9 @@ def _validate(row, *, existing=True):
             raise util.KanpilotError("worktree_invalid", "工作树不是登记的独立工作树")
         branch = _value(path, "rev-parse", "--abbrev-ref", "HEAD")
         if row["stage"] == "run":
-            if branch != constants.DELIVERY_BRANCH_PREFIX + row["task_id"]:
+            task = db.get_task(conn, row["task_id"]) if conn is not None else None
+            expected_branch = ((db.task_extra(task).get("delivery") or {}).get("branch") if task is not None else None)
+            if branch != (expected_branch or constants.DELIVERY_BRANCH_PREFIX + row["task_id"]):
                 raise util.KanpilotError("worktree_invalid", "执行工作树不在任务分支上")
         elif branch != "HEAD":
             raise util.KanpilotError("worktree_invalid", "阶段树不是登记的独立detached工作树")
@@ -263,7 +265,7 @@ def validate_lease(conn, slot_id, holder_id, lease_token):
         raise util.KanpilotError("conflict", "槽位已不在租用状态")
     if row["reason"] == "release_in_progress":
         raise util.KanpilotError("conflict", "槽位正在释放")
-    path = _validate(row)
+    path = _validate(row, conn=conn)
     if _value(path, "rev-parse", "HEAD") != row["sha"]:
         raise util.KanpilotError("conflict", "槽位冻结提交已变化")
     return _result(row)
@@ -333,7 +335,7 @@ def _prepare_stage_tree(conn, row, *, fresh):
         if os.path.lexists(path):
             raise util.KanpilotError("worktree_invalid", "新阶段树路径已有未登记内容")
         _create_stage_tree(conn, row, rebuilding=False)
-        _validate(row)
+        _validate(row, conn=conn)
         return path
     if not path.is_dir():
         if stage == "run":
@@ -341,11 +343,11 @@ def _prepare_stage_tree(conn, row, *, fresh):
                 "worktree_missing",
                 "执行工作树缺失，拒绝重建以保护未推送提交：" + str(path))
         _create_stage_tree(conn, row, rebuilding=True)
-        _validate(row)
+        _validate(row, conn=conn)
         return path
     if _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
         raise util.KanpilotError("worktree_invalid", "空闲阶段树有未登记改动")
-    _validate(row)
+    _validate(row, conn=conn)
     if _value(path, "rev-parse", "HEAD") != row["sha"]:
         _receipt(conn, row, "worktree_checkout",
                  lambda: _git(path, "checkout", "--no-overwrite-ignore", "--detach", row["sha"]))
@@ -456,7 +458,7 @@ def register_snapshot(conn, slot_id, holder_id, lease_token, snapshot):
     if row["state"] != "leased" or snapshot["head"] != row["sha"]:
         raise util.KanpilotError("conflict", "冻结输入不属于当前槽位提交")
     try:
-        path = _validate(row)
+        path = _validate(row, conn=conn)
         if row["baseline_json"]:
             baseline = _load_baseline(row)
             if review_snapshot.fingerprint(baseline) != review_snapshot.fingerprint(snapshot):
@@ -612,7 +614,7 @@ def release(conn, slot_id, holder_id, lease_token, *, owner_stopped=False, only_
         conn.execute("UPDATE worktree_slots SET reason='release_in_progress',owner_state=?,updated_at=? WHERE slot_id=?",
                      ("stopped" if owner_stopped else "returned", util.now_iso(), slot_id))
     try:
-        path = _validate(row)
+        path = _validate(row, conn=conn)
         snapshot = _load_baseline(row) if row["baseline_json"] else None
         files, directories = _artifacts(path, snapshot)
         def restore():
@@ -804,7 +806,7 @@ def unquarantine(conn, slot_id, holder_id, lease_token, *, confirm=False):
         conn.execute("UPDATE worktree_slots SET reason=?,updated_at=? WHERE slot_id=?",
                      (reservation, util.now_iso(), slot_id))
     try:
-        path = _validate(row)
+        path = _validate(row, conn=conn)
         if _value(path, "rev-parse", "HEAD") != row["sha"]:
             raise util.KanpilotError("conflict", "槽位冻结提交已变化，保留隔离现场")
         returned = consumer_returned(conn, row)

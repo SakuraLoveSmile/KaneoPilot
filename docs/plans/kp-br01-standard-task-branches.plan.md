@@ -1,0 +1,23 @@
+# KP-BR01 软件创建任务分支使用标准命名
+
+- 状态：待体验
+- 用户目标：后续软件创建的分支遵循标准命名，解释截图仍显示 kaneo/<task_id> 的原因。
+- 原因：git_delivery、task_workspace 等入口硬编码旧前缀，KP-WT01 明确保留该规则；不是界面缓存。
+- 范围：手动规划、自动接收、评审恢复、构建修复的分支创建及身份核验。已有任务不自动改名；不动运行库、远端分支和已有 PR。
+- 决定与契约：唯一规则见 docs/protocol.md「软件创建任务分支的命名（KP-BR01）」。日期首次准备时冻结；已有 intent 保留原名称。
+- 分支：fix/20261112-kp-br01-standard-task-branches；工作区：主仓库（本次未创建临时 worktree）；目标 main。
+- 基线：ea02654；开始时已有未跟踪 .local/ 与 docs/plans/kp-cache01-macos-build-cache-cleanup.md，保留。
+- 并行：branch_audit 只读核查调用链；branch_tests 独占新增命名测试和历史 Git 夹具；branch_review 只读独立审查；主 agent 负责源码、规格、集成验证。
+- 验收：新任务创建标准名且主工作区不变；旧分支继续使用；准备中断恢复/标题变更/跨日重试保持名称；错误任务/仓库拒绝；执行合同冻结实际登记分支，旧合同保持字节。
+- 本次验证（基线 ea02654 + 本分支当前未提交改动）：
+  - 相关 8 文件回归：276 passed、23 subtests passed，1 项构建修复只读预览失败；原因是新增 reserve 提前写 setting，已修复。
+  - 修复后完整重跑 core/tests/test_build_failure_ai_action.py：22 passed（只读预览、确认、恢复和交付）。
+  - 最终 core/tests/test_branch_naming.py：23 passed（台北日期、类型/slug、真实 Git、新旧身份、跨日与标题变更、错仓库、升级收养及脏目录拒绝）。
+  - tests/test_auto_pipeline.py + tests/test_pi_round_contract.py：14 passed、4 subtests passed，覆盖新分支进入完整隔离执行/交付路径。
+  - 其余已通过文件：test_task_workspace.py、test_git_delivery.py、test_execution_stage_contract.py、test_worktree_layout_migration.py、test_auto_intake.py、test_review_resolution.py。
+  - compileall 与 git diff --check 通过。仅临时 Git、隔离 SQLite、假 Kaneo/GitHub/执行器，不调用真实模型、生产写入或编译。
+- 测试调整依据：旧 Git 交付夹具显式传旧名，保留历史兼容与拒绝覆盖的检查；新规划/碰撞用例改查标准名；假 GitHub 返回真实任务分支。未删除、跳过或降低门禁。
+- 独立审查：发现并修复旧自动接收创建后未登记的升级收养缺口；最终复核未发现新增实质问题。
+- 收尾：未创建临时 worktree；原有其他任务 worktree、未跟踪文件和用户数据均保留。下一步按发布授权走云端 Packages 并安装后体验；不将源码验证当作已安装生效。
+- 云端构建授权：2026-11-12 用户要求排队构建云端新版本；提交并推送本任务分支，触发 Packages 默认预览构建，不创建正式或测试 Release。
+- 交付限制：尚未合并、云端打包或安装；当前安装版不会因源码修改即时改变。

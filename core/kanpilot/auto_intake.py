@@ -8,7 +8,7 @@ import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
-from . import automation_policy, cli, constants, core, db, planner_config, planner_inputs, project_config, remote, util
+from . import branch_naming, automation_policy, cli, constants, core, db, planner_config, planner_inputs, project_config, remote, util
 
 _TRANSIENT = {"remote_unavailable", "git_transient"}
 
@@ -106,6 +106,8 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
             initial = task_workspace.review_fix_head(conn, task, allow_pending=True) if task["plan_kind"] == "review_fix" else None
             delivery = git_delivery.prepare_branch_worktree(task["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
+                       branch=branch_naming.reserve(conn, task_id, task["repository"], task,
+                           worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)),
                        initial_head_sha=initial,
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
             adopted = bool(delivery.pop("adopted", False))
@@ -127,6 +129,8 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
                        if task is not None and task["plan_kind"] == "review_fix" else None)
             delivery = git_delivery.prepare_branch_worktree(meta["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
+                       branch=branch_naming.reserve(conn, task_id, meta["repository"], task if task is not None else meta,
+                           worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)),
                        initial_head_sha=initial,
                        worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
             adopted = bool(delivery.pop("adopted", False))
