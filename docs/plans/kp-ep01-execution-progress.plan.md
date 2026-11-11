@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：实现中（2026-11-12 追加执行页目标进度；本轮代码已接入，云端编译与原生界面核验尚未运行。此前 v0.5.6-test.201 的验证为历史记录）
+- 状态：待体验（2026-11-12 执行页目标进度已实现；7228bb3 云端构建 215 全绿，隔离原生界面核验通过；未合入、未发布、未更新正式安装，真实任务与用户体验尚待确认）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -151,7 +151,7 @@
 - 数据依据：PI-Desktop `goal-progress-presentation.ts` 按快照 items 的 completed / length 计数；`GoalProgressBar.tsx` 标题来自 proposal。当前 MCP 不提供独立 goalProgress.get，采用已有采集链中成功的 SubmitGoal / UpdateGoalProgress 结果还原。完整字段/边界唯一维护于 protocol §5.18.4；UI 规则见 ui-spec §4.18。未上报清单前显示空态，不编造初始待办。
 - 分工：`pi_goal_source` 只读查证 PI-Desktop；`goal_projection` 独占 dsh_events.py 与新增隔离测试；主控负责 Swift DTO/执行页、FakeCore、解码夹具与规格/本记录；`goal_review` 只读审查组合改动。不调用付费模型或业务执行，不改真实 DB。
 - 验收：执行页出现标题/完成数/清单；四态正确，失败调用不增加完成数；目标/说明可折叠，长文本换行；刷新失败目标标过期；新目标/任务不串数据；无目标隐藏，有目标无清单明确空态；1180×760 深色与 900×600 浅色的原生界面检查。
-- 云端编译与原生视觉：尚未运行。遵守仅云端编译约定，不运行本地 Xcode/Gradle/编译预览；用户已明确授权本次提交、推送与云端构建；发布/正式安装另按具体授权范围处理。
+- 云端编译与原生视觉：构建 215 与隔离界面核验通过，详见下方记录。仅在云端编译/签名；本地只核验包并启动云端隔离预览。用户已明确授权本次提交、推送与云端构建；未合入、发布或更新正式安装。
 - 收尾：未合入 main，工作树保留作为本轮可检查交付；合入且验证通过后按项目规则清理本轮工作树，不影响旧任务现场。
 
 ### 本轮验证记录
@@ -160,3 +160,11 @@
 - 独立审查发现目标标题来源应优先宿主 proposal.title，已修正并补回归测试；无其余已确认问题。
 - `test_dsh_events_verification.py` 是 pytest 函数，unittest 发现 **0 项，未执行**；隔离解释器确认本机没有真实 pytest，未将该项记为通过，不安装依赖或降低门禁。云端使用真实 pytest。
 - Swift 解码夹具与 FakeCore 已补四态/长标题示例；未本地编译。云端与原生核验结果待后续追加。
+
+### 云端与原生核验（本轮最终结果）
+
+- 代码提交 `7228bb30ae58302e7179d3486db4686a351f2a02`，Packages [run 43061669500 / build 215](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43061669500) **success**：identity、macos-package、macos-fixtures a/b、Android、checks 1–5 × Python 3.11/3.13、Codex native-platforms 全部通过；可选 fulltext probe 未启用、跳过。
+- 下载 `macos-update-ui-215`，SHA256 与 ui-metadata.json 一致，source_sha 与上述提交一致，`codesign --verify --deep --strict` 通过。未改签、未修改 App 包，未调用本地编译。
+- 用云端独立 bundle `local.kaneopilot.software-update-check` + 本工作树 FakeCore + 独立数据目录启动。1180×760 深色实测 1/4、环形比例、四种状态、整体折叠与目标说明展开；900×600 浅色实测长目标/长待办换行、状态可见、失败保留旧目标并标过期、空清单无 0/0、无目标隐藏、恢复后正常显示。观察依据为本会话 CUA 原生截图与 AX 树；没有以 HTML/mock 页面代替原生界面。数据为隔离夹具，不声称真实任务/设备验收。
+- 本地证据位于本工作树 `build/kp-ep01-goal-progress/`：云端原包/metadata、夹具日志、隔离环境与 `ui-verification.json`；预览 PID 20635 / 23229 均已结束。未更新 `/Applications/KaneoPilot.app`，未修改真实 DB 或发起业务模型请求。
+- 工作树保留原因：本分支尚未合入 main，提交与验证产物仍需保留。下一步如获授权，合入/发布；合入且验证通过后迁出需要保留的证据，再清理本轮 worktree。此记录不授权后续外部发布。
