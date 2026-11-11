@@ -100,3 +100,10 @@
 - 新发现：关闭事项详情后 Tab 到 Music 项目头，AX 明确焦点在项目头；Return 却打开上一事项详情。证据 `project-keyboard-return-failure.txt`。独立只读复核确认事项 action 强制容器焦点、三个独立 FocusState 与窗口级无修饰 Return 快捷键可同时保留旧路由。
 - 必要修复：Dashboard 用单个 Hashable enum 表达容器 / attentionId / projectId 互斥焦点；事项、项目头、环境入口、面板关闭均使用本地 `.onKeyPress(.return)` 并返回 `.handled`，移除这四类新增控件的窗口级 Return 注册。父 Return 仅处理容器焦点且没有已开详情；↑↓ 仅在容器或事项焦点处理，项目焦点不参与事项导航。事项开详情前保留该事项焦点；环境 Esc 与先清焦点、再异步恢复入口沿用已测路径。
 - #205 的本轮隔离 App 已用 Quit 正常退出；当前修改静态差异检查通过，待独立复核及新云端包实测。未把 #205 原生通过项当作当前修复后的验收。
+
+### #206 键盘回归与焦点可见性
+
+- Return 路由修复代码 `005e89a636970fc3846755693102074d63b5b0d1`，Packages [#206](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43005784916)。macOS package 通过；同 SHA/build 206/ZIP size/hash/plist/bundle ID/深度签名均核对通过，证据 `build/kp-ui09/artifacts/206/verification.json`，完整 workflow 最终状态后补。
+- `build/kp-ui09/ui/206/1180x760-dark/` 已实测：环境打开→Esc→入口焦点→Return 重开，关闭按钮 Return 收起；Tab 到事项→Return 打开详情→Esc→Tab 到项目头→Return 正确折叠当前项目，再 Return 展开且刷新后保持。与 #205 的错路由复现一致的路径现已通过。
+- 同一隔离 case 临时加入另两条 actionable：Shift-Tab 从项目头到最后事项，Up/Up/Down 后焦点在第二事项；Return 打开的确是该事项详情。AX 与初始 state 备份分别保存，未调用真实执行端。隔离 App 已用 Quit 正常退出。
+- 发现项目头焦点不可见：父 Dashboard 静态 `.focusEffectDisabled()` 同时屏蔽新增子控件原生环。独立只读核查 [Apple 官方说明](https://developer.apple.com/documentation/swiftui/view/focuseffectdisabled(_:)) 确认高层设置会覆盖子层；因此不是在子层重复加 false，而是父层仅在 `focusedTarget == .dashboard` 时隐藏整页大框，让事项 / 项目焦点显示原生效果。不改变字体、颜色或交互规则；该必要单行修复仍须新云端包查看实际焦点环。

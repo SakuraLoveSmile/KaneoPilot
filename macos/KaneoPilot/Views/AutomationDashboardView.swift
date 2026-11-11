@@ -45,7 +45,7 @@ struct AutomationDashboardView: View {
         .background(Color.kpControl)
         .navigationTitle("总览")
         .modifier(DashboardToolbarTitle())
-        .focusable().focusEffectDisabled()
+        .focusable().focusEffectDisabled(focusedTarget == .dashboard)
         .focused($focusedTarget, equals: .dashboard)
         .onKeyPress(.downArrow) { moveSelection(1) }
         .onKeyPress(.upArrow) { moveSelection(-1) }
