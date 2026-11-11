@@ -1,6 +1,6 @@
 # KP-BR01 软件创建任务分支使用标准命名
 
-- 状态：实现中
+- 状态：待体验
 - 用户目标：后续软件创建的分支遵循标准命名，解释截图仍显示 kaneo/<task_id> 的原因。
 - 原因：git_delivery、task_workspace 等入口硬编码旧前缀，KP-WT01 明确保留该规则；不是界面缓存。
 - 范围：手动规划、自动接收、评审恢复、构建修复的分支创建及身份核验。已有任务不自动改名；不动运行库、远端分支和已有 PR。
@@ -23,5 +23,10 @@
 - 云端队列：Packages #216，push 事件，源码 d66669a8edb76903d26964d6544083461244e3ed；2026-11-12 已确认 queued。运行：https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43062631673 。使用分支 push 自动触发，未重复手动派发。
 - #216 云端结果：失败。macos-package、Android、两组 macOS 夹具与 native-platforms 成功；Python 3.11/3.13 的四个用例失败：产物过滤推送断言、交付演练拒绝推送断言仍硬编码旧分支；两个评审修复自动接收用例使用“未登记的标准分支”却在模拟旧版恢复。
 - 本次修正：前两处按实际登记分支断言完整目标引用（保留 no-force、裸仓库拒绝与恢复验证）；历史恢复夹具显式创建旧名并断言传入旧名，不放宽生产收养门禁。保留独立新标准分支验证。
-- 本次本地复核：core/tests/test_delivery_artifact_filter.py、core/tests/test_review_fix_workspace.py、core/tests/test_branch_naming.py、tests/rehearsal/test_rehearsal_delivery.py 合计 92 passed、6 skipped（既有历史演练跳过项未修改），66.06s；git diff --check 通过。重新提交云端完整门禁及两端打包，待记录新 run。
+- 本次本地复核：core/tests/test_delivery_artifact_filter.py、core/tests/test_review_fix_workspace.py、core/tests/test_branch_naming.py、tests/rehearsal/test_rehearsal_delivery.py 合计 92 passed、6 skipped（既有历史演练跳过项未修改），66.06s；git diff --check 通过。重新提交云端完整门禁及两端打包。
+- 重新构建：Packages #217，源码 9bbf4737a2e7690e2968b4a7f3db869946cdbf60；运行 https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43066910925 。已完成，整体 success。身份、Python 3.11/3.13 共10个核心/集成分片、Android、macOS DMG、两组桌面夹具、native-platforms 全部 success；非默认 session-fulltext-probe 与预览通道 publish 按工作流条件 skipped。
+- 本次独立只读复核确认：测试仍覆盖完整分支引用、no-force、拒绝后的状态与恢复、固定 reviewed SHA 和交付 base；没有放宽生产代码。
 - 交付限制：尚未合并或安装；当前安装版不会因源码修改即时改变。
+
+- #217 产物：macos-arm64-local-signed-217（DMG）、android-debug-217（APK）已上传且未过期；来源/全部 job 与产物元数据保存在 build/kp-br01/evidence/packages-217.json、packages-217-artifacts.json。
+- 收尾：本次仅修正测试夹具与断言，生产代码和原门禁强度未改；未创建临时工作树；未安装、未创建 Release。
