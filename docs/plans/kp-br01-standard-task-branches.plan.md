@@ -30,3 +30,16 @@
 
 - #217 产物：macos-arm64-local-signed-217（DMG）、android-debug-217（APK）已上传且未过期；来源/全部 job 与产物元数据保存在 build/kp-br01/evidence/packages-217.json、packages-217-artifacts.json。
 - 收尾：本次仅修正测试夹具与断言，生产代码和原门禁强度未改；未创建临时工作树；未安装、未创建 Release。
+
+## 测试版发布（2026-11-12）
+
+- 用户明确要求发布新的测试版。通道 test，基础版 0.5.7；分支 fix/20261112-kp-br01-standard-task-branches，提交 343805c64e26ac44286d25af82fa8d1d2734b99f，与 #217 源码仅有任务记录差异。
+- Packages #220：https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43069867531 ，目标 v0.5.7-test.220。已完成，全部必需 job 与 publish 成功；工作流创建注释标签和测试 Release，未手动创建测试标签或复用预览包。
+- 公开说明：本次测试重点为标准任务分支命名，覆盖手动规划/自动接收/评审修复/构建修复，保留旧任务兼容和重试已登记名称；已有分支不会自动改名。
+- 本次仅发布当前任务分支，不自动合并其他并行任务；不安装或操作运行数据。
+
+- 发布结果：v0.5.7-test.220 已于台北时间 2026-11-12 01:56:34 公开为非 draft 预发布；发布页 https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.220 。
+- 发布后只读核验：注释标签直接指向 343805c64e26ac44286d25af82fa8d1d2734b99f；manifest 版本/基础版/channel/build/source 与两端条目一致；四项公开资产齐全，安装包大小、GitHub 资产 digest、manifest 和 SHA256SUMS 一致，下载的两份清单自身哈希也匹配。未下载或安装两端完整包。
+- 证据：主仓库 build/kp-br01/evidence/packages-220.json、release-220.json、release-220-tag.json、release-0.5.7-test.220/{manifest.json,SHA256SUMS}。
+- 状态仍为待体验：用户可开启“接收测试版”后检查更新并用新建任务体验；发布成功不代表实机安装或用户验收。
+- 发布收尾隔离：等待期间主仓库被切回 main，且本地任务分支新增 72c56a0（包含其他文件）；保留该提交和主仓库现场。从已发布源码 343805c 建立临时 detached 记录树，仅提交本记录并推送本任务远端分支，不推送其他文件；临时路径为 /Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-docs-kp-br01-release-record，推送核对后清理。后续工作须先核对本地/远端任务分支差异。
