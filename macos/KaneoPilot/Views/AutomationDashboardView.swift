@@ -260,6 +260,7 @@ struct AutomationDashboardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusable()
         .focused($focusedAttentionID, equals: item.attentionId)
         .keyboardShortcut(focusedAttentionID == item.attentionId ? KeyboardShortcut(.return, modifiers: []) : nil)
         .onHover { inside in
@@ -401,6 +402,7 @@ struct AutomationDashboardView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focusable()
             .focused($focusedProjectID, equals: project.id)
             .keyboardShortcut(focusedProjectID == project.id ? KeyboardShortcut(.return, modifiers: []) : nil)
             .accessibilityLabel("\(project.title)，\(project.tasks.count) 个任务，" + project.counts.map { "\($0.bucket.title) \($0.count)" }.joined(separator: "，"))

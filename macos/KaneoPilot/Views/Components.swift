@@ -233,6 +233,7 @@ struct EnvironmentCheckPanel: View {
                         .frame(width: 24, height: 24).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .focusable()
                 .focused($closeFocused)
                 .keyboardShortcut(closeFocused ? KeyboardShortcut(.return, modifiers: []) : .cancelAction)
                 .help("关闭环境检查（Esc）")
@@ -269,7 +270,7 @@ struct EnvironmentCheckPanel: View {
         .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.group))
         .overlay { RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator, lineWidth: 1) }
         .clipShape(RoundedRectangle(cornerRadius: Radius.group))
-        .onAppear { closeFocused = true }
+        .onAppear { DispatchQueue.main.async { closeFocused = true } }
         .onExitCommand(perform: onClose)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("环境检查面板")

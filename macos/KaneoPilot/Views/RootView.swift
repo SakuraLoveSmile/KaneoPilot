@@ -247,7 +247,10 @@ struct RootView: View {
             .controlSize(.small)
             Button {
                 if environmentPresented { closeEnvironment() }
-                else { environmentPresented = true }
+                else {
+                    environmentEntryFocused = false
+                    environmentPresented = true
+                }
             } label: {
                 Label("环境检查", systemImage: "stethoscope")
                     .font(.kpLabel)
@@ -256,6 +259,7 @@ struct RootView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focusable()
             .focused($environmentEntryFocused)
             .keyboardShortcut(environmentEntryFocused ? KeyboardShortcut(.return, modifiers: []) : nil)
             .accessibilityValue(environmentPresented ? "已展开" : "已折叠")
@@ -289,7 +293,12 @@ struct RootView: View {
 
     private func closeEnvironment() {
         environmentPresented = false
-        environmentEntryFocused = true
+        environmentEntryFocused = false
+        // 面板的焦点目标先退出视图树，再把键盘交回入口。
+        DispatchQueue.main.async {
+            guard !environmentPresented else { return }
+            environmentEntryFocused = true
+        }
     }
 
     /// 在途数与最近刷新时间；已暂停时说明不再领取新任务。

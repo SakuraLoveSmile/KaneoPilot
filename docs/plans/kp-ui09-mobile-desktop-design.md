@@ -68,8 +68,15 @@
 
 ## 当前进展与剩余
 
-- T1–T3 已写代码；T4 静态审查及修复复核完成；T5 实现中（云端构建准备）。整体状态仍为**实现中**，设计稿的历史浏览器验证不能证明原生候选实现通过。
+- T1–T3 已写代码；T4 静态审查及修复复核完成；T5 实现中（首轮云端包发现焦点缺口，修复后重新构建）。整体状态仍为**实现中**，设计稿的历史浏览器验证不能证明原生候选实现通过。
 - 当前实现：`RootView.swift` 用窗口根锚点 overlay 向上呈现面板，避免列裁剪与系统 popover 尾箭头；`Components.swift` 共用环境状态投影、告警与诊断明细；Dashboard 移除配置摘要与额外项目映射读取，新增可折叠项目分组；共享项目键沿用任务列表规则。
 - 独立 Sol 审查发现 Tab 到事项行后容器焦点守卫会屏蔽↑↓；已改为每事项 attentionId 显式焦点，箭头更新行焦点，事项/项目头/环境入口分别绑定获焦时的 Return；独立复核通过，未发现新的明确问题。侧栏消失时收环境面板，关闭后焦点回入口。
 - 本次实际核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。新增 Swift 聚合 fixture 尚未执行；没有本地编译，也没有云端/原生候选包证据。
 - 用户已对具体异步问题答复“允许，继续云端构建与界面验证”。本轮继续提交/推送本任务分支、跟进 preview Packages、下载和核验同 SHA 隔离包。尚未发布或替换正式 App；合并与发布不包含在此次授权内。
+
+### 首轮云端与原生检查
+
+- 代码 `7087b1f7361dc1968736dc843336bebca3da6012`，Packages [#204](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/42996132003)。macOS package 与 Android job 已通过；其他门禁仍跟进，最终结论另补。下载 `macos-update-ui-204`，source SHA/build 204/ZIP size/SHA-256/独立 bundle ID 与深度签名均核对通过，证据 `build/kp-ui09/artifacts/204/verification.json`。
+- 使用 FakeCore 和独立 HOME、全部核心根目录、空凭据文件，手机服务 disabled；`/Applications/KaneoPilot.app` 生产进程保持。3 项活跃假任务、1 项 actionable；1180×760 深色已看到三项目分布、原因换行与下方元信息；项目折叠与刷新后保持、无尾箭头环境面板向上展开和滚动诊断明细均实测。截图在 `build/kp-ui09/ui/1180x760-dark/`，此轮截图仅对应 7087b1f。
+- 发现缺口：Esc 可收环境面板，但 Return 不重开。通过 Raise 确认窗口前台后仍复现；独立审查支持 focusable 目标与恢复时机问题，未把系统设置视为已证明根因。修复为四类新增键盘目标显式 `.focusable()`，打开时先清入口焦点，面板出现后下一主队列设关闭焦点；关闭时先清入口焦点、面板移除后再恢复，且过期恢复不抢新面板。未改用户系统设置。
+- 首轮隔离 App 已正常退出。后续须用含修复的新云端包复测，不以 #204 编译或截图代替新代码验证。
