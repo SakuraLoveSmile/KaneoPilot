@@ -72,3 +72,30 @@ Pilot 新增 `get-goal-blocker {task_id,run_id}` 与 `resolve-goal-blocker {task
 ### 云端候选准备
 
 FakeCore 补齐 blocked/accepted/unknown/legacy/unavailable 场景，主控复跑5项 Python 隔离回归通过。原生界面将使用云端独立 bundle 产物及隔离 FakeCore 数据核验，未连接真实任务。准备提交专用 Pilot 分支并触发 Packages 预览；通过后发布 0.5.7 测试版。以上早期“尚未授权”段落为历史检查点，已被末节用户发布授权取代。
+
+### 云端预览 223
+
+Pilot 源码 `2352d432aa68cebec162bd3e15620cc66c5d3529` 已提交并推送；Packages [43077804316](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43077804316) 全部必需 job 成功（macOS package、两组桌面 fixtures、Android、10个Python分片、codex-platforms）。额外 fulltext probe 按事件条件跳过。独立预览包 metadata 对应源码与 build223，zip SHA256 `f985d4cac4b161a754dbc7d03f45a1bfa1c3cf06c7743ba6d9e18f2d8874c19e`、大小、codesign --verify --deep --strict 均通过。已用独立 bundle 和全套隔离 FakeCore 环境启动，没有覆盖安装。CUA 读取被系统锁屏阻挡，已请用户解锁；未声称完成原生界面核验，测试版尚未发布。证据保存在本任务 build/kp-gb01/evidence/，非源码/生产数据。
+
+原生视觉检查的限制已明确报告：CUA 无法操作锁屏，项目无现成云端截图/AX检查入口；不把构建和界面夹具绿灯替代真实视觉/点击。按用户已授权的测试通道继续发布，公开说明中标注此未完成项，任务仍为“实现中”，解锁后的实际界面核验保留，不降云端必需门禁或标已验收。
+
+### Pilot 测试版已发布
+
+- Packages [43081688779](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43081688779)，build224，全部必需 job 成功。发布源码仍为 `2352d432aa68cebec162bd3e15620cc66c5d3529`。
+- [v0.5.7-test.224](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.224) 已公开，prerelease=true、draft=false，四项资产齐全；注释标签对象 `d892c37bf6cc9f75211396875d1f356c4748ec82` 指向上述提交。正式 latest 保持 v0.5.6。
+- 主控下载全部资产，SHA256SUMS 全部匹配；manifest 的源码、测试通道、版本、build、两个安装包大小与哈希逐项核对通过。公开说明标注无schema变更、需要Pi0.15.17、原生视觉/点击因锁屏未测。
+- 原生预览进程60294已在核对完整可执行路径后停止；未操作或安装真实应用。测试分支未合入main，工作树和证据保留供解锁后补测，不按“已合并”清理。任务状态仍实现中（原生界面核验缺口）。
+
+### Pi 候选与合入
+
+Pi 最终候选 `5f1d794aade19273eda358dee735229981eeae98`：[Release候选43081408680](https://github.com/SakuraLoveSmile/PI-Desktop/actions/runs/43081408680) 全部必需job通过；[真实Goals43081416849](https://github.com/SakuraLoveSmile/PI-Desktop/actions/runs/43081416849) 36/36通过，含真实Host/Main/AgentSidecar经authenticated MCP补充一次、CAS/确认、接受仍partial/user_accepted、实际报告文件字节SHA。旧Host迁移009因未提供legacy binary未运行，不声称通过。联调发现既有report normalizer未被调用，已接到MCP读结果并补HTTP回归（先红后绿），不改变plugin形状。
+
+[PR88](https://github.com/SakuraLoveSmile/PI-Desktop/pull/88) 全部5项检查通过后合入，merge `9574c37017a68a5dddfd4e59b149780a7bbf67cd` 与候选整树相同。正式v0.15.17经release.mjs --tag推送，正式run [43084621831](https://github.com/SakuraLoveSmile/PI-Desktop/actions/runs/43084621831) 正在收尾。本次Pi worktree/已合并本地分支已正常清理，稳定证据保存PI主仓 `.review-evidence/kp-gb01`；用户原有pnpm-lock.yaml保全哈希前后一致，未删除远端来源分支。
+
+### 最终发布核验与剩余
+
+Pi [v0.15.17](https://github.com/SakuraLoveSmile/PI-Desktop/releases/tag/v0.15.17) 已公开正式发布，latest指向它，非draft/非prerelease；正式run43084621831全部7job通过。7项资产下载后与GitHub digest/size、SHA256SUMS、release-manifest/source/run逐项一致，主控核对稳定验证记录 `PI-Desktop/.review-evidence/kp-gb01/pi-release-asset-verification.json` 与公开资产元数据一致。Pi状态待体验，未安装替换当前应用。
+
+发布目标已完成：先更新Pi0.15.17，再在Pilot设置开启接收测试版，更新0.5.7-test.224。用户到原任务概览选择补充材料继续，或接受现状进入评审；本次没有代其做选择。
+
+剩余仅锁屏阻挡的Pilot原生视觉/点击核验和用户真实任务体验：解锁后重启已核验的云端独立预览、使用FakeCore任务auto-verification_unconfirmed检查900x600/1180x760按钮、两确认窗口、接受后状态及unknown对账，再由用户体验真实任务。原生检查尚未完成，整项记录仍实现中，不标已验收。Pilot工作树保留（未合入main且尚有该核验用途）；Pi临时工作树/本地分支已清理，远端来源分支均未删除。所有已发布源码自构建后未改，最后仅补充本记录。
