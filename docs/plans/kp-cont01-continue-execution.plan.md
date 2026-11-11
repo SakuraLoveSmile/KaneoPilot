@@ -85,3 +85,8 @@ continue-execution {task_id, run_id, confirm: true, operation_id?}
 | 2026-11-11 01:00 | 安装 203 | DMG sha256 与 SHA256SUMS/manifest 一致；`CFBundleShortVersionString=0.5.6-test.203`、build 203、codesign 通过；旧 201 备份 `/Applications/.KaneoPilot-backup-cont01-20261111T010001`；启动后 MCP/mobile/engine 与新运行观察者恢复 | 通过 |
 | 2026-11-11 01:02 | 实机投影核对 | 安装包核心 `get-task` 返回 `continue_execution={eligible:false, state:"none", reason:"任务不在需人工处理状态"}`；当前任务已被用户重新执行到新轮次 `cc6167fa`，running，因此入口按预期隐藏 | 通过（无阻塞轮次可点） |
 | 2026-11-11 01:02 | 未验证 | 阻塞任务的 eligible 按钮视觉与真实发送/同轮接管端到端；需等下一次 Pi 轮次阻塞后由用户点击 | 待体验 |
+| 2026-11-11 16:32 | 实机点击暴露缺口 | 用户点「继续执行同一 Goal」后核心抛出 `remote_unavailable`，发送槽落 `unknown`（`FE819DEF…`、session/turn 为空）；Plus 侧 `messageCount=515`、`currentTurnId` 未变、`isRunning=false`，即**没有新 turn、没有产生模型费用**，但按钮被该槽永久挡住且当时无任何回收入口 | 缺口已确认 |
+| 2026-11-11 18:40 | 核对与回收命令 | 新增 `reconcile-continuation {task_id,run_id,dry_run?,confirm?}`：只读分页转录按 `turnId` 找发起消息、以固定继续指令前缀判定归属，分 `not_sent`/`delivered`/`unknown` 三类；只有 `dry_run=false,confirm=true` 才写库（`not_sent`→`rejected` 释放槽位；`delivered`→`accepted` 并按真实 turn 同轮重开）；`unknown` 不改任何状态、不重发 | 实现中 |
+| 2026-11-11 18:40 | 核心测试 | `core/tests/test_request_continuation.py` 12 项通过（含只读不改状态、批准后释放槽位、按真实 turn 接管、外来新轮次保持 unknown、运行中/转录截断保持 unknown、未确认不写）；`test_execution_status`/`test_execution_retry`/`test_engine_verdict` 合计 96 项 + 48 subtests 通过；`test_desktop_queue`/`test_engine_session_view`/`test_session` 合计 130 项 + 8 subtests 通过 | 通过 |
+| 2026-11-11 18:40 | 正式库只读核对 | 安装版核心对真实任务执行 `dry_run:true`：`classification=not_sent`、`applied=false`、库内该操作仍为 `unknown`、任务仍 `needs_user`；结论与独立核对的 Plus 状态一致（没有新轮次、最新转录无该指令） | 通过（只读，未写入） |
+| 2026-11-11 18:40 | 未验证 | 回收写入（`dry_run:false,confirm:true`）、`delivered` 分支的真实接管、界面「核对发送结果」按钮；Swift 侧未本地编译（按项目约束走云端 Packages） | 待体验 |

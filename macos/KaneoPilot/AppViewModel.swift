@@ -485,6 +485,27 @@ final class AppViewModel: ObservableObject {
         return outcome
     }
 
+    /// kp-cont01：核对未确认的继续发送。`confirm=false` 只读，不做任何写入。
+    func reconcileContinuation(taskID: String, runID: String, confirm: Bool,
+                               onError: ((String) -> Void)? = nil,
+                               onResult: ((ReconcileContinuationResponse) -> Void)? = nil) async {
+        await perform(confirm ? "回收发送槽" : "核对发送结果",
+                      onError: onError) {
+            let response = try await self.client.run(
+                "reconcile-continuation",
+                payload: ["task_id": taskID, "run_id": runID,
+                          "dry_run": !confirm, "confirm": confirm],
+                timeout: 120, as: ReconcileContinuationResponse.self)
+            onResult?(response)
+            if !confirm { return response.detail ?? "已核对发送结果" }
+            switch response.status {
+            case "released": return "已回收发送槽，可再次继续执行"
+            case "continued": return "已找到本轮次，正在接管观察"
+            default: return "发送结果仍无法确认，请在会话页核对"
+            }
+        }
+    }
+
     func currentEngineFixRevert(taskID: String) async throws -> EngineFixRevert {
         let task = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
         guard task.allowedActions?.contains("revert_engine_fix") == true, let candidate = task.engineFixRevert else {

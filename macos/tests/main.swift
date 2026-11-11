@@ -898,6 +898,18 @@ if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"running
 if let response = decode(RequestContinuationResponse.self, #"{"status":"continued","turn_id":"turn-2","session_id":"sess-1","deduplicated":false}"#) {
     expect(response.status == "continued" && response.turnId == "turn-2", "继续执行响应解码")
 }
+// 未确认发送：投影带 reconcile 且没有被 eligible 误放行，只给核对入口。
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":false,"state":"none","run_id":"cont-run","turn_id":null,"reason":"上一次继续发送结果未确认，请先核对 Plus 会话","reconcile":{"available":true,"operation_id":"op-1","created_at":"2026-11-11T08:32:58Z"}}}"#) {
+    expect(task.continueExecution?.eligible == false, "未确认发送不显示继续执行")
+    expect(task.continueExecution?.reconcile?.available == true, "未确认发送给出核对入口")
+    expect(task.continueExecution?.reconcile?.operationId == "op-1", "核对入口绑定未确认操作")
+}
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":true,"state":"ready","run_id":"cont-run","turn_id":null,"reason":null}}"#) {
+    expect(task.continueExecution?.reconcile == nil, "无未确认操作时不显示核对入口")
+}
+if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"not_sent","detail":"Plus 会话没有新轮次，最新转录中也没有本任务的继续指令","applied":false,"status":null}"#) {
+    expect(result.classification == "not_sent" && result.applied == false, "核对结果解码")
+}
 
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {

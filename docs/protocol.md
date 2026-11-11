@@ -1168,8 +1168,16 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
 - 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
 - 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
-- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
+- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。发送页被 `prepared/unknown` 继续操作挡住时，投影附 `reconcile = {available, operation_id, created_at}`，提示先核对 Plus 会话。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
+
+**核对未确认的继续发送（同节补充）。** 发送响应丢失记 `unknown` 后，不得靠重发脱困，也不得让任务停在一个无法回收的发送槽上：
+
+- `reconcile-continuation {task_id, run_id, dry_run?, confirm?}`；`dry_run` 缺省为 `true`（只读）。只处理当前任务、当前轮次、`needs_user`、且仍有唯一 `prepared/unknown` 的继续操作；其余一律 `conflict`。
+- 只读核对同一会话：读 `agent_status` 与受限分页转录（每页 20 条、最多 40 页），按 `turnId` 找该轮次的发起消息，并以固定继续指令原文前缀判定是否为本任务所发。
+- 分类三条，互斥：`not_sent`＝没有更新的轮次且最新转录中无本任务继续指令；`delivered`＝更新的轮次正是由该继续指令发起；`unknown`＝会话仍在运行同一轮次、新轮次无法归因、或转录分页被截断/超上限。
+- 写入只发生在 `dry_run=false` 且 `confirm=true`：`not_sent` 把该操作记为 `rejected`（释放发送槽，可再次发送）；`delivered` 记为 `accepted` 并按转录中的真实 turn 执行与发送成功相同的同轮重开（`turn_adopted` 追加 `reconciled_continue`），随后 `round-observe {executor:"user"}`。两种情况都写 `execution_continuation_reconciled` 事件。
+- `unknown` 不改任何状态（不回收发送槽、不改任务、不重发），返回 `status=unconfirmed` 由人工核对；核对命令不发送任何 prompt，不产生模型费用。
 
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
