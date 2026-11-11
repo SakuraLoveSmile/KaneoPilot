@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：待体验（测试版 v0.5.6-test.201 已发布并安装；最新进展、时间线、轮次目标/待办与夹具已验证；实机视觉待用户解锁后确认）
+- 状态：实现中（2026-11-12 追加执行页目标进度；本轮代码已接入，云端编译与原生界面核验尚未运行。此前 v0.5.6-test.201 的验证为历史记录）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -140,3 +140,23 @@
 | 2026-11-10 22:50 | 重录夹具 | 真实重录六件套并更新 `_captured_at=2026-11-10`；三个 reconstructed 样本更新日期/说明并补 `pendingInputs`；事实断言同步 pendingInputs/endedAt；`tests/rehearsal` 74 passed / 6 skipped | 通过 |
 | 2026-11-10 23:13 | 测试版发布 v0.5.6-test.201 | 推送 331d335 触发 run 42837615030；`channel=test`、`base_version=0.5.6` 手动 run 42837710184 全绿（identity/android/macos-fixtures a+b/macos-package/checks 1–5/codex-platforms/publish）；预发布 https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.6-test.201，source 331d335 | 完成 |
 | 2026-11-10 23:18 | 安装测试版 201 | 下载 DMG（sha256 6d3ca91a… 与 SHA256SUMS/manifest 一致）挂载校验 `CFBundleShortVersionString=0.5.6-test.201`、`CFBundleVersion=201`、codesign 通过；停止 199 并备份 `/Applications/.KaneoPilot-backup-ep01-20261110T231808`；启动后 MCP/mobile/engine 在跑，schema=7 | 完成 |
+
+
+## 八、2026-11-12 追加：执行页直接展示目标进度
+
+用户要求：把 pi-desktop 的目标进度（目标标题、完成比例、执行状态、待办清单、目标说明）接到任务详情的「执行」页，不必进入完整会话才能看到。
+
+- 当前基线：主工作区 `main` / `ea02654`；原有 `.local/` 与未跟踪 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 保留。新工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-feat-kp-ep01-goal-progress`，分支 `feat/20261112-kp-ep01-goal-progress`，合入目标仍为 `main`。旧任务 worktree 属既有现场，不复用或清理。
+- 本次明确替代 D1/D9 的显示位置限制：执行页在最新进展卡片下新增可折叠「目标进度」，完整会话内原有轮次目标保留。保留复盘、最新进展、完整会话入口、20 秒刷新与项目视觉规范；不改调度、完成门禁、Android 或 PI-Desktop。
+- 数据依据：PI-Desktop `goal-progress-presentation.ts` 按快照 items 的 completed / length 计数；`GoalProgressBar.tsx` 标题来自 proposal。当前 MCP 不提供独立 goalProgress.get，采用已有采集链中成功的 SubmitGoal / UpdateGoalProgress 结果还原。完整字段/边界唯一维护于 protocol §5.18.4；UI 规则见 ui-spec §4.18。未上报清单前显示空态，不编造初始待办。
+- 分工：`pi_goal_source` 只读查证 PI-Desktop；`goal_projection` 独占 dsh_events.py 与新增隔离测试；主控负责 Swift DTO/执行页、FakeCore、解码夹具与规格/本记录；`goal_review` 只读审查组合改动。不调用付费模型或业务执行，不改真实 DB。
+- 验收：执行页出现标题/完成数/清单；四态正确，失败调用不增加完成数；目标/说明可折叠，长文本换行；刷新失败目标标过期；新目标/任务不串数据；无目标隐藏，有目标无清单明确空态；1180×760 深色与 900×600 浅色的原生界面检查。
+- 云端编译与原生视觉：尚未运行。遵守仅云端编译约定，不运行本地 Xcode/Gradle/编译预览；用户已明确授权本次提交、推送与云端构建；发布/正式安装另按具体授权范围处理。
+- 收尾：未合入 main，工作树保留作为本轮可检查交付；合入且验证通过后按项目规则清理本轮工作树，不影响旧任务现场。
+
+### 本轮验证记录
+
+- 基于 `ea02654` 的本轮组合改动：目标/文字进展 `unittest discover -s tests -p 'test_execution*progress.py'` **25 passed**（含 Collector 真形状消息→事件→目标投影、新目标、修订、错误结果与宿主标题优先）。会话 `test_session*.py` **124 passed**；Desktop 事件投影 **4 passed**（子 agent），主控检查最终差异与 Python AST / `git diff --check` 通过。
+- 独立审查发现目标标题来源应优先宿主 proposal.title，已修正并补回归测试；无其余已确认问题。
+- `test_dsh_events_verification.py` 是 pytest 函数，unittest 发现 **0 项，未执行**；隔离解释器确认本机没有真实 pytest，未将该项记为通过，不安装依赖或降低门禁。云端使用真实 pytest。
+- Swift 解码夹具与 FakeCore 已补四态/长标题示例；未本地编译。云端与原生核验结果待后续追加。

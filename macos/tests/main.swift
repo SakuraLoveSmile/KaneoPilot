@@ -771,6 +771,13 @@ if let detail = decode(RoundDetail.self, #"{"backend":"pi_desktop","run_status":
 }
 if let detail = decode(RoundDetail.self, #"{"backend":"pi","run_status":"running"}"#) {
     expect(detail.progress == nil, "旧 round_detail 无进展字段照常解码")
+    expect(detail.goalProgress == nil, "旧轮次无目标进度时保持兼容")
+}
+if let detail = decode(RoundDetail.self, ##"{"backend":"pi_desktop","goal_progress":{"title":"补齐验收","markdown":"# 补齐验收\n\n核对双栏","items":[{"id":"a","label":"双栏实测","status":"completed"},{"id":"b","label":"六组证据","status":"failed"}],"completed":1,"total":2,"revision":3,"at":"2026-11-12T09:00:00Z"}}"##) {
+    expect(detail.goalProgress?.title == "补齐验收", "目标标题解码")
+    expect(detail.goalProgress?.completed == 1 && detail.goalProgress?.total == 2, "目标完成数解码")
+    expect(detail.goalProgress?.items.last?.statusLabel == "失败", "失败待办保留独立状态")
+    expect(detail.goalProgress?.markdown.contains("核对双栏") == true, "目标说明解码")
 }
 
 // KP-EP01 阶段二：会话时间线把结构化工具事件折叠为轮次与关键动作。

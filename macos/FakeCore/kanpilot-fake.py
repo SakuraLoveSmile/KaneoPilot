@@ -2422,6 +2422,19 @@ def cmd_get_session(state, payload):
         # KP-EP01：执行页只显示最新一条进展，不读消息正文。
         detail["progress"] = {"text": "正在核对卡片宽度与首行墨迹",
                               "at": session.get("updated_at") or session.get("started_at")}
+        if not payload.get("status_only"):
+            detail["goal_progress"] = {
+                "title": "补齐封面模式歌词预览卡片的原生验收阻塞（第 4 轮）",
+                "markdown": "# 补齐封面模式歌词预览卡片的原生验收阻塞（第 4 轮）\n\n核对双栏、底栏和六组字号缩放证据。",
+                "items": [
+                    {"id": "layout", "label": "719/720/800/860 双栏与底栏实测", "status": "completed"},
+                    {"id": "screens", "label": "360/390/430 × 1.0/1.3 六组证据", "status": "in_progress"},
+                    {"id": "evidence", "label": "更新 evidence-index 与目标记录", "status": "pending"},
+                    {"id": "verify", "label": "三条 verify 命令", "status": "failed"},
+                ],
+                "completed": 1, "total": 4, "revision": 2,
+                "at": session.get("updated_at") or session.get("started_at"),
+            }
     detail.update(scenario.get("round_detail") or {})
     return {"session": session, "connection": connection, "round_detail": detail}
 
