@@ -350,5 +350,17 @@ def test_registered_blocked_result_kept_until_explicit_new_review(factory, tmp_e
         assert conn.execute("SELECT COUNT(*) FROM requests WHERE task_id=? AND kind='review' AND status IN ('queued','claimed')", (task_id,)).fetchone()[0] == 1
     finally:
         conn.close()
+    # Real review runners release their stage tree in a finally block; this
+    # fixture reports directly, so return the blocked generation's lease here.
+    conn = db.connect(tmp_env.db)
+    try:
+        blocked_payload = db.request_payload(db.get_request(conn, claim["request_id"]))
+        lease = blocked_payload.get("pool_lease")
+        if lease:
+            from kanpilot import worktree_pool
+            worktree_pool.release(conn, lease["slot_id"], lease["holder_id"],
+                                  lease["lease_token"], owner_stopped=True)
+    finally:
+        conn.close()
     new_claim = cli.run("claim", {"stage": "review", "executor": "kaneo-review"}, tmp_env.db)
     assert new_claim["claimed"]

@@ -658,6 +658,8 @@ struct TaskDetail: Decodable, Identifiable {
     let enqueueKind: String?
     /// §5.32：执行复盘投影（仅 `get-task`）；字段缺失或为 nil 时界面显示「未汇总」。
     let retrospective: TaskRetrospective?
+    /// kp-cont01：同一 Plus 会话继续当前 Goal 的只读资格投影。
+    let continueExecution: ContinueExecutionView?
 
     var id: String { taskId }
 
@@ -685,6 +687,22 @@ struct TaskDetail: Decodable, Identifiable {
 
 struct GetTaskResponse: Decodable {
     let task: TaskDetail
+}
+
+/// kp-cont01：同一 Plus 会话继续当前 Goal 的投影（`get-task.task.continue_execution`）。
+struct ContinueExecutionView: Decodable, Equatable {
+    let eligible: Bool
+    let reason: String?
+    let state: String?
+    let runId: String?
+    let turnId: String?
+}
+
+struct RequestContinuationResponse: Decodable {
+    let status: String
+    let turnId: String?
+    let sessionId: String?
+    let deduplicated: Bool?
 }
 
 /// §5.32 执行复盘投影（`get-task.task.retrospective`）。桌面只格式化核心数字，不据事件推导。
@@ -1486,6 +1504,8 @@ struct RoundDetail: Decodable {
     let turnAdopted: [TurnAdoption]?
     /// 轮次绑定的 Plus turn（核心 job.turn_id）；Plus 当前 turn 与之不同即存在后续轮次。
     let turnId: String?
+    /// KP-EP01：执行端最后一条可读进展（protocol §5.18.4）；只读显示，不参与判定。
+    let progress: SessionProgress?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
@@ -1505,6 +1525,12 @@ struct TurnAdoption: Decodable {
     let from: String?
     let to: String?
     let code: String?
+    let at: String?
+}
+
+/// KP-EP01：执行端一行进展（protocol §5.18.4，`round_detail.progress`）。
+struct SessionProgress: Decodable {
+    let text: String?
     let at: String?
 }
 
@@ -1735,6 +1761,12 @@ struct SessionMessage: Decodable, Identifiable {
     let revision: Int?
     let sourceAt: String?
     let tool: SessionTool?
+    /// KP-EP01 阶段二：时间线分组与工具合并所需的来源元数据。
+    let turnId: String?
+    let toolCallId: String?
+    let isError: Bool?
+    let eventType: String?
+    let agentName: String?
 
     /// 稳定标识：id + revision（同一消息修订后替换）。
     var listID: String { "\(id ?? "?")-\(revision ?? 0)" }
@@ -3610,4 +3642,65 @@ extension TaskDetail {
         }
         return nil
     }
+}
+
+// MARK: - 工作树（KP-WT01，protocol §5.29.6）
+
+struct WorktreeStageDTO: Decodable, Equatable {
+    let state: String
+    let path: String?
+    let updatedAt: String?
+}
+
+struct WorktreeTaskDTO: Decodable, Equatable, Identifiable {
+    let taskId: String
+    let taskStatus: String?
+    let stages: [String: WorktreeStageDTO]
+    let allocatedBytes: Int64?
+    let retentionUntil: String?
+    var id: String { taskId }
+}
+
+struct WorktreeConfigDTO: Decodable, Equatable {
+    let worktreesRoot: String
+    let concurrencyLimit: Int
+    let retentionDays: Int
+    let tasks: [WorktreeTaskDTO]
+
+    var isolatedCount: Int {
+        tasks.filter { task in task.stages.values.contains { $0.state == "quarantined" } }.count
+    }
+
+    var allocatedDescription: String? {
+        let bytes = tasks.reduce(Int64(0)) { $0 + ($1.allocatedBytes ?? 0) }
+        guard bytes > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+/// `worktree-relocate` 预览（dry_run）与执行结果的必要字段。
+struct WorktreeRelocateMoveDTO: Decodable, Equatable, Identifiable {
+    let taskId: String
+    let from: String?
+    let to: String?
+    var id: String { taskId }
+}
+
+struct WorktreeRelocateBlockerDTO: Decodable, Equatable, Identifiable {
+    let code: String
+    let detail: String?
+    var id: String { code + ":" + (detail ?? "") }
+}
+
+struct WorktreeRelocatePreviewDTO: Decodable, Equatable {
+    let root: String?
+    let moves: [WorktreeRelocateMoveDTO]?
+    let legacyRows: Int?
+    let blockers: [WorktreeRelocateBlockerDTO]?
+    let auditSha256: String?
+    let status: String?
+    let dryRun: Bool?
+
+    var isReady: Bool { (blockers ?? []).isEmpty }
+    var statusText: String { isReady ? "可以迁移" : "暂不可迁移" }
 }

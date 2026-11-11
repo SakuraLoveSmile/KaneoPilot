@@ -1,6 +1,7 @@
 """Disposable Git/SQLite fixtures only; no installed app, services or models."""
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -38,9 +39,10 @@ def scene(tmp_path):
     environment.stop()
 
 
-def acquire(scene, holder="run-1", stage="plan", sha="HEAD"):
+def acquire(scene, holder="run-1", stage="plan", sha="HEAD", task_id="task"):
     repo, conn, root = scene
-    return pool.acquire(conn, repo, stage=stage, holder_id=holder, sha=sha, worktrees_root=root)
+    return pool.acquire(conn, repo, stage=stage, holder_id=holder, sha=sha,
+                        task_id=task_id, worktrees_root=root)
 
 
 def release(conn, lease):
@@ -223,11 +225,11 @@ def test_reaper_keeps_slot_if_stopped_checkpoint_cannot_be_preserved(scene, dama
     assert (material / "keep.txt").read_text() == "retain original"
 
 
-def test_twenty_rounds_reuse_one_slot_and_new_generation(scene):
+def test_twenty_rounds_reuse_one_stage_tree_and_new_generation(scene):
     repo, conn, root = scene
     old = None
     for number in range(20):
-        lease = acquire(scene, "run-" + str(number), "plan" if number % 2 else "review")
+        lease = acquire(scene, "run-" + str(number), "plan")
         if old:
             assert lease["path"] == old["path"]
             assert lease["lease_token"] != old["lease_token"]
@@ -235,32 +237,37 @@ def test_twenty_rounds_reuse_one_slot_and_new_generation(scene):
                 release(conn, old)
         assert release(conn, lease)["state"] == "free"
         old = lease
-    assert len(list((root / "pool").glob("*/slot-*"))) == 1
+    assert (root / "task" / "plan").is_dir()
     assert conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 1
     projection = json.loads((constants.app_support() / "worktree-slots.json").read_text())
     assert projection["slots"][0]["repository"] == str(repo)
     assert projection["slots"][0]["state"] == "free"
-    assert conn.execute("SELECT count(*) FROM runtime_operations WHERE harness_id='worktree_pool'").fetchone()[0] >= 40
+    assert projection["slots"][0]["task_id"] == "task"
+    assert projection["slots"][0]["stage"] == "plan"
+    assert conn.execute("SELECT count(*) FROM runtime_operations WHERE harness_id='worktree_pool'").fetchone()[0] >= 20
 
 
-def test_parallel_two_plans_one_review_and_full_pool_wait(scene):
+def test_parallel_three_tasks_and_concurrency_wait(scene):
     repo, conn, root = scene
-    db.set_setting(conn, "worktree_pool_size", 3)
+    db.set_setting(conn, "worktree_concurrency_limit", 3)
     path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
     def run(index):
         local = db.connect(path)
         try:
-            return pool.acquire(local, repo, stage="review" if index == 2 else "plan", holder_id=str(index), sha="HEAD", worktrees_root=root)
+            return pool.acquire(local, repo, stage="review" if index == 2 else "plan",
+                                holder_id=str(index), sha="HEAD", task_id="task-" + str(index),
+                                worktrees_root=root)
         finally:
             local.close()
     with ThreadPoolExecutor(max_workers=3) as executor:
         leases = list(executor.map(run, range(3)))
     assert len({lease["slot_id"] for lease in leases}) == 3
-    assert acquire(scene, "fourth")["state"] == "waiting"
+    assert acquire(scene, "fourth", task_id="task-9")["state"] == "waiting"
     assert conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 3
     second = root.parent / "another-checkout"
     git(repo, "worktree", "add", "--detach", str(second), "HEAD")
-    assert pool.acquire(conn, second, stage="review", holder_id="other-tree", sha="HEAD", worktrees_root=root)["state"] == "waiting"
+    assert pool.acquire(conn, second, stage="review", holder_id="other-tree", sha="HEAD",
+                        task_id="task-3", worktrees_root=root)["state"] == "waiting"
 
 
 def test_snapshot_release_preserves_head_and_restores_bytes(scene):
@@ -349,7 +356,8 @@ def test_user_symlink_root_is_rejected(scene, tmp_path):
     alias = tmp_path / "forged-root"
     alias.symlink_to(root, target_is_directory=True)
     with pytest.raises(util.KanpilotError):
-        pool.acquire(conn, repo, stage="plan", holder_id="forged", sha="HEAD", worktrees_root=alias)
+        pool.acquire(conn, repo, stage="plan", holder_id="forged", sha="HEAD",
+                     task_id="task", worktrees_root=alias)
     assert conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 0
 
 
@@ -458,12 +466,15 @@ def test_v5_migration_preserves_records_and_does_not_create_slots(scene, tmp_pat
     old.close()
     migrated = db.connect(path, allow_upgrade=True)
     try:
-        assert migrated.execute("SELECT version FROM schema_meta").fetchone()[0] == 6
+        assert migrated.execute("SELECT version FROM schema_meta").fetchone()[0] == 7
         assert db.get_setting(migrated, "user-setting") == 42
         assert migrated.execute("SELECT kind FROM events").fetchone()[0] == "keep"
         assert migrated.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 0
         assert db.get_setting(migrated, "worktree_pool_size") == 4
         assert list((constants.app_support() / "backups").glob("schema-*-v5-to-v6/*"))
+        assert list((constants.app_support() / "backups").glob("schema-*-v6-to-v7/*"))
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(worktree_slots)")}
+        assert {"task_id", "stage"} <= columns
     finally:
         migrated.close()
 
@@ -494,7 +505,8 @@ def test_unresolved_slot_git_receipt_blocks_cleanup(scene, operation_state, owne
             assert pool.reap_expired(conn)[0]["state"] == "leased"
             assert release(conn, lease)["state"] == "leased"
         assert sentinel.read_text() == "keep until operation is resolved"
-        assert acquire(scene, "next")["path"] != lease["path"]
+        assert acquire(scene, "next", task_id="other-task")["path"] != lease["path"]
+        assert acquire(scene, "retry")["state"] == "waiting"
     else:
         assert pool.reap_expired(conn)[0]["state"] == "free"
         assert not sentinel.exists()
@@ -530,3 +542,50 @@ def test_unexposed_release_reserves_only_a_not_started_owner(scene, owner_state)
         assert result["state"] == "leased"
         assert result["owner_state"] == owner_state
         assert (artifact / "keep.txt").read_text() == "reader may still use this"
+
+def test_stage_tree_path_projection_and_git_state(scene):
+    repo, conn, root = scene
+    lease = acquire(scene, "run-1", "plan", task_id="task-abc")
+    assert lease["path"] == str(root / "task-abc" / "plan")
+    row = conn.execute("SELECT * FROM worktree_slots").fetchone()
+    assert (row["task_id"], row["stage"]) == ("task-abc", "plan")
+    assert git(Path(lease["path"]), "rev-parse", "--abbrev-ref", "HEAD").strip() == b"HEAD"
+    projection = json.loads((constants.app_support() / "worktree-slots.json").read_text())
+    assert projection["slots"][0]["task_id"] == "task-abc"
+    assert projection["slots"][0]["stage"] == "plan"
+
+
+def test_missing_plan_tree_is_rebuilt_from_frozen_sha(scene):
+    repo, conn, root = scene
+    lease = acquire(scene)
+    path = Path(lease["path"])
+    assert release(conn, lease)["state"] == "free"
+    shutil.rmtree(path)
+    restored = acquire(scene, "run-2")
+    assert Path(restored["path"]).is_dir()
+    assert git(Path(restored["path"]), "rev-parse", "HEAD") == git(repo, "rev-parse", "HEAD")
+    assert conn.execute("SELECT count(*) FROM events WHERE kind='worktree_stage_rebuilt'").fetchone()[0] == 1
+
+
+def test_concurrency_limit_returns_waiting_and_stops_creating_rows(scene):
+    repo, conn, root = scene
+    db.set_setting(conn, "worktree_concurrency_limit", 2)
+    acquire(scene, "run-1", task_id="task-a")
+    acquire(scene, "run-2", task_id="task-b")
+    assert acquire(scene, "run-3", task_id="task-c")["state"] == "waiting"
+    assert conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 2
+
+
+def test_legacy_pool_rows_are_ignored_by_allocation_and_doctor(scene):
+    from kanpilot import worktree_status
+    repo, conn, root = scene
+    conn.execute(
+        "INSERT INTO worktree_slots(slot_id,repo_key,path,repository,git_common_dir,worktrees_root,"
+        "state,updated_at) VALUES('legacy-row','0123456789abcdef',?,?,?,?,'free','then')",
+        (str(root / "pool" / "0123456789abcdef" / "slot-1"), str(repo), str(repo / ".git"), str(root)))
+    assert worktree_status.summary(conn)["free"] == 0
+    lease = acquire(scene, "run-1", "plan", task_id="task-new")
+    assert lease["path"].endswith("task-new/plan")
+    assert conn.execute("SELECT count(*) FROM worktree_slots").fetchone()[0] == 2
+    assert worktree_status.summary(conn)["leased"] == 1
+

@@ -67,8 +67,8 @@ class ExecutionStageContracts(unittest.TestCase):
     def migrated_branch(self):
         old_root = self.root / "managed"
         new_root = self.root / "relocated"
-        old_path = old_root / self.spec["task_id"] / "branch"
-        new_path = new_root / self.spec["task_id"] / "branch"
+        old_path = old_root / self.spec["task_id"] / "run"
+        new_path = new_root / self.spec["task_id"] / "run"
         old_path.parent.mkdir(parents=True)
         new_path.parent.mkdir(parents=True)
         subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-b", "kaneo/task", str(old_path)],
@@ -97,7 +97,7 @@ class ExecutionStageContracts(unittest.TestCase):
     def test_moved_alias_rejects_other_task_branch_and_other_repository(self):
         old_root, _ = self.migrated_branch()
         wrong_root = self.root / "other-task"
-        wrong_path = wrong_root / self.spec["task_id"] / "branch"
+        wrong_path = wrong_root / self.spec["task_id"] / "run"
         wrong_path.parent.mkdir(parents=True)
         subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-b", "kaneo/other", str(wrong_path)],
                        check=True, capture_output=True)
@@ -107,7 +107,7 @@ class ExecutionStageContracts(unittest.TestCase):
             execution_contract.validate_spec(self.spec, job=self.job())
 
         foreign_root = self.root / "other-repository"
-        foreign_path = foreign_root / self.spec["task_id"] / "branch"
+        foreign_path = foreign_root / self.spec["task_id"] / "run"
         foreign_path.parent.mkdir(parents=True)
         subprocess.run(["git", "clone", str(self.repo), str(foreign_path)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(foreign_path), "checkout", "-b", "kaneo/task"],

@@ -255,7 +255,9 @@ def _monitor(controller):
             else:
                 _complete(controller, task, detail, expected, messages)
         else:
-            _running(controller)
+            # KP-EP01：优先用执行端最近一条进展写 last_progress，缺失才用通用文案。
+            progress = (detail.get("progress") or {}).get("text")
+            _running(controller, progress if isinstance(progress, str) and progress.strip() else "本轮仍在运行")
     except util.KanpilotError as exc:
         if exc.code in ("execution_failed", "verification_identity_unconfirmed"):
             controller.report("needs_user", failure_code=exc.code, note=exc.message)

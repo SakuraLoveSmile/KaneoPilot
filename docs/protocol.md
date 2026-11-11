@@ -536,10 +536,11 @@ kind 判定：失联（规则 3）→ `executor_lost`；`changes_requested`（�
 ```json
 {"id": "<源稳定 id>", "seq": 12, "run_id": "...", "type": "user|assistant|tool_call|tool_result|command_output|system",
  "content": "<完整文本>", "revision": 3, "source_at": "ISO8601",
+ "turn_id": "可选来源轮次", "tool_call_id": "可选工具身份", "is_error": false,
  "tool": {"name": "...", "input": "...", "output": "...", "exit_code": 0}}
 ```
 
-`tool` 仅 tool_call/tool_result/command_output 类型出现。读取按 `seq` 排序、按 `id`+`revision` 去重/更新，游标推进不回退。
+`tool` 仅 tool_call/tool_result/command_output 类型出现。读取按 `seq` 排序、按 `id`+`revision` 去重/更新，游标推进不回退。`turn_id`/`tool_call_id`/`is_error`/`event_type`/`agent_name` 为可选来源元数据，只供桌面时间线分组、工具配对和错误标记使用，不能作为完成、失败或验证判定依据。
 
 | 命令 | payload | 返回 |
 |---|---|---|
@@ -708,7 +709,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 ### 5.18.1 后端、进程与 worktree
 
 - **新 dispatch claim 按 `exec_config.backend` 固化**：缺省 `backend:"pi"`（claim context 增加 `backend` 与 `exec_config` 快照 `{provider, model, reasoning_effort, agent_preset}`）；v3 起 `backend:"pi_desktop"` 时走 §5.23.3 分支（快照 `{backend:"pi_desktop", connection_file, provider_id, model_id, thinking_level, permission_mode}`）。**历史轮次**（rounds.backend ∈ `dsh|headless` 等旧值）：DB 行保留，读取层返回 `unavailable` + detail「旧后端会话已弃用（仅 pi 可读）」，不取消、不重发。
-- 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：执行分支持续使用 `worktrees_root/<task_id>/branch`（历史非分支执行回退仍为 `<task_id>/<run_id>`）；规划与评审使用 §5.29 的仓库槽位池，自 `task.repository` 创建；会话删除不删除 worktree。
+- 每轮启动**独立 pi worker 进程**（`python3 -m kanpilot.pi_worker --spec <spec.json>`），并使用**独立 worktree**：执行分支持续使用 `worktrees_root/<task_id>/run`（2026-11-10 KP-WT01 起；此前为 `<task_id>/branch`，历史非分支执行回退仍为 `<task_id>/<run_id>`）；规划与评审使用 §5.29.6 的任务阶段树 `<task_id>/{plan,review}`，自 `task.repository` 创建；会话删除不删除 worktree。
 - worker 拉起 `pi -p --mode json --session-dir <run_dir>/pi-sessions --model <provider>/<model> --thinking <level> --system-prompt <agent.md>`（`agent.md` 为空则不传该参数），`cwd=spec.cwd`，`start_new_session`，env 透传 + `PI_HOME`（`KANPILOT_PI_HOME` 优先）。stdout 逐行消费 JSONL：OSC 序列与非 JSON 行丢弃。
 - 运行记录目录沿用 `<session_runs_root>/<task_id>/<run_id>/`（缺省 `~/Library/Application Support/KaneoPilot/runs`）：`job.json`（`backend:"pi"|"codex"|"pi_desktop"`、`session_id`/`session_title`、config 快照、pid、`status ∈ running|finished|failed`、起止时间、`exit_code`、`detail`；pi_desktop 轮次另含 §5.23.3 的 `turn_id`/`send_state`）+ `events.jsonl`。`job.json` 身份核验（task_id/run_id/backend）同 §5.15.5；身份不符 → 读取 `unavailable` + `run_status` 记 `failed`（detail=identity_mismatch），不读他目录。
 
@@ -753,10 +754,12 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 {"round_detail": {"backend":"pi","run_status":"running","worktree_path":"...",
   "pid": 123, "started_at":"ISO|null","ended_at":"ISO|null","exit_code":0|null,
   "terminal":{"outcome":"completed|failed","reason":"..."}|null,
+  "progress":{"text":"...","at":"ISO|null"}|null,
   "config":{...}}}
 ```
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
+- **最新进展（只读展示，KP-EP01）**：`round_detail.progress` 优先取最后一条有效 `progress` 事件；旧日志没有该事件时回退到最后一条非空助手消息，按同一规则取首个可用行。投影为 `{text, at}`。`text` 只取助手消息的首个非空行（去 Markdown 前缀、折叠空白、最多 160 字符，空内容/代码围栏/JSON 对象或数组不产出），`at` 取源消息时间（缺失时取事件时间）；无事件为 `null`。该字段只供界面显示「最新进展」，不参与完成、失败或验证判定，也不能据此推进状态。监控的 `last_progress` 在「仍在运行」分支优先写该文本，缺失时回退「本轮仍在运行」。
 - **历史 Goal 转录证据的审计窗口（不作为新引擎完成凭据）**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
 - **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
 - **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（结构化报告覆盖冻结计划每条 verify，绑定原生命令整数退出码 0、当前轮次与源码；缺失转 verification_unconfirmed，不能人工接受绕过）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
@@ -1004,7 +1007,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
   - `dispatch-start`：以该轮 claim 固化快照复核可用性（连接文件/token/tools/provider/model，不能改用当前全局配置）→ 意图落盘（同一轮次只允许一次真实启动，mark_intent 语义不变）→ 创建独立 worktree（同 §5.18.1）→ 重算计划哈希核验 → 拉起 `python3 -m kanpilot.pi_desktop_worker --spec <spec.json>`。worker：经连接文件 token 完成 MCP `initialize`→ `pi_session_create(projectPath=worktree, mode="goal", providerId/modelId/thinkingLevel)` → 必要时 `pi_session_configure(id, mode="goal", confirm:true, permissionMode=已保存值)` → 计划正文超出 MCP 2 MiB 请求限制 → 发送前报验证错误（不入队）→ `pi_agent_prompt(sessionId, content=任务标识+计划哈希+完整已核验计划正文)`，返回 `{turnId}` 记 `job.send_state="sent"`；**不用** `pi_project_open` 全局切换。会话固定以 Goal（契约）模式创建：宿主先协商目标契约并停在审批门，由 worker 本机代批后在同一会话开启执行轮次（`§5.23.9`）——KaneoPilot 的计划审批仍只在本机完成，Plus 侧契约只是执行形式，不把审批权交给 Plus 界面、也不向用户二次索批。
   - 首个 `session` 事件写入 events.jsonl 的条件：`pi_turn_get` 确认同一 session/turn 为 `running` 且 worker 已 `heartbeat` 回报核心；极短任务已为 `completed` 时，以同一持久 turn 记录（status=completed + endedAt）证明实际启动后再写 session 事件、heartbeat 与 confirm。**符合「已排队≠已开始」**。
   - `dispatch-confirm` evidence：`{session_marker, repository, backend:"pi_desktop", session_id, turn_id, config:{...}}`；核心核验启动意图、events.jsonl session 事件、turn_id 匹配、config 快照 → running 迁移不变（sent/send_state/monitor 请求/释放串行位）。
-- **观察与完成**：Plus `messages[].id` 为字符串身份；分页使用物理 `messageStart/messageEnd`，向前读取至 hasMoreBefore=false，不按 ID 数值比较或消息数组长度推算。页大小自适应：控制面把大页判为 `MCP_RESULT_LIMIT` 截断时按半数缩小消息数重试（下限 5），仍截断才算链不完整——长会话的大页不得把仍在跑的轮次判成失败；首轮/续接自索引 0 核验整段链后记「已核验前缀」，后续轮询只读到与新页**重叠段指纹逐一相符**即收敛（不必整段重读）；重叠段指纹不符（历史被改写）→ 安全回退为整段重读。截断/读失败按**每次轮询**派生（一次瞬时截断不作废整轮）。工具读取 toolStatus/toolArgs/toolResult/toolCompletedAt/isError，保持 toolCallId；MCP_RESULT_LIMIT、缺页、未知消息结构或最终空转录均不能完成。worker 以 `pi_agent_status` + 分页 `pi_session_get` 采集进度/记录，按消息 ID/修订去重映射到 `events.jsonl`/会话阅读器；分页不完整/截断保留证据并阻止成功判定。`job.json` 保存 `session_id`/`turn_id`/`pi_desktop_pid`/status/脱敏 config（不含 token）。**执行会话标 finished 的条件**：`pi_turn_get.status=completed` 且同轮会话记录已持久读全；任务完成仍依赖现有 monitor 验证与 Review。
+- **观察与完成**：Plus `messages[].id` 为字符串身份；分页使用物理 `messageStart/messageEnd`，向前读取至 hasMoreBefore=false，不按 ID 数值比较或消息数组长度推算。页大小自适应：控制面把大页判为 `MCP_RESULT_LIMIT` 截断时按半数缩小消息数重试（下限 5），仍截断才算链不完整——长会话的大页不得把仍在跑的轮次判成失败；首轮/续接自索引 0 核验整段链后记「已核验前缀」，后续轮询只读到与新页**重叠段指纹逐一相符**即收敛（不必整段重读）；重叠段指纹不符（历史被改写）→ 安全回退为整段重读。截断/读失败按**每次轮询**派生（一次瞬时截断不作废整轮）。工具读取 toolStatus/toolArgs/toolResult/toolCompletedAt/isError，保持 toolCallId；MCP_RESULT_LIMIT、缺页、未知消息结构或最终空转录均不能完成。worker 以 `pi_agent_status` + 分页 `pi_session_get` 采集进度/记录，按消息 ID/修订去重映射到 `events.jsonl`/会话阅读器；分页不完整/截断保留证据并阻止成功判定。采集到新的助手文本时，worker 追加 `progress` 事件（`{type:"progress", text, at, source_message_id, source_revision}`；同一消息内容不变不重复，修订后文本变化可再写）；该事件不进入 `session-messages` 的消息列表，只供 `round_detail.progress` 与首页 `last_progress` 显示，不参与完成判定。`job.json` 保存 `session_id`/`turn_id`/`pi_desktop_pid`/status/脱敏 config（不含 token）。**执行会话标 finished 的条件**：`pi_turn_get.status=completed` 且同轮会话记录已持久读全；任务完成仍依赖现有 monitor 验证与 Review。
 - **异常归因**：`pi_turn_get.status ∈ {error, aborted}` → job `failed`/`needs_user`（存 `errorCode`）。服务重启但持久 turn 已结束 → 按身份恢复读取；仍 `running`、发送响应丢失、身份不符或无法归因 → `send_state=unknown`/失联记录，**绝不自动重复 `pi_session_create` 或 `pi_agent_prompt`**；同一 `run_id` 超时/重启后不得再次发送。停止/超时先 `pi_agent_stop`，必要时 `pi_agent_abort`，并以 `pi_turn_get` 核实终态——「停止请求已接受」不等于已停止。
 - **桌面消息修订投影**：事件可携带 `source_message_id:string` 与递增正整数 `source_revision`，日志 seq 仍单调。会话消息 id 为 `desktop:<source_message_id>:<event_type>`，revision 使用源修订，seq 使用该修订的最新事件序号，以保证游标能收到旧消息更新；相同工具输入/结果按事件类型区分。历史 pi/codex 事件没有这两字段时沿用 `round:<seq>` 与内容哈希修订。
 - **T3 Plus R1 失败约束**：每次持久 turn 响应核对 sessionId/turnId。prompt 响应丢失保持 send_state=unknown，currentTurnId 仅作候选证据，不自动恢复发送。只读连接恢复最多三次且总计不超过 10 秒，重读同一连接文件；不重放任何创建/配置/发送操作。恢复后仍 running 或无法确认身份/终态转人工。stop/abort 接受不等于已停止，未取得持久终态须明确“可能仍在运行”。意图后 worktree/哈希/Popen 失败记录失败证据，只有意图的重复 start 返回 conflict，而非伪 started。
@@ -1159,6 +1162,15 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - **不受影响**：PI CLI 后端、已派发的 spec/job/session、Plus 用户手工重命名、原有项目路径、旧历史轮次（不批量改名）。
 - 显示名**不得**用于去重、路径生成、权限判断或完成判定；`session_marker`、`task_id`/`run_id`、`session_id`/`turn_id`、计划哈希与事件关联仍是机器身份。
 
+### 5.23.11 同一 Goal 继续执行（kp-cont01，2026-11-11）
+
+- 命令 `request-continuation {task_id, run_id, confirm, operation_id?}`：仅对当前任务的 `pi_desktop` 轮次、任务 `needs_user`、`failure_code ∈ {verification_unconfirmed, execution_failed, execution_interrupted}`、job 已收尾且有持久 terminal、session/计划/配置快照与任务一致、无 queued/claimed 请求、无 prepared/unknown 的继续操作时允许；`confirm` 必须为 true。
+- 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
+- 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
+- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
+- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
+- 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
+
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
 本节冻结 T6：把普通/修复计划生成、dispatch 控制端、monitor 控制端与 review 控制端的模型调用全部交到用户自己的 PI-Desktop-Plus 本机 MCP 控制面，KaneoPilot 继续负责确定性的队列、租约、审批与状态写入。界面度量见 ui-spec §4.10，执行端编排见 automation-contract §2。本节**不**改变 §5.22 的手动规划门、§5.23.1 的计划阅读、§5.23.3 的任务执行后端、§5.23.9 的 Goal 契约代批与 monitor/Review 状态机。
@@ -1278,7 +1290,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
   - 未配置键时返回空项目集合（`revision=0`），不生成维护者项目的隐式映射。工作区依次读取已保存 `project_mappings.workspace_id`、独立 `settings.workspace_id`；已有映射、revision 与嵌套自动化字段保留，不在读取时写库。
   - `get-project-mappings {refresh_remote?: bool, current_only?: bool}` 默认仅本地读取。显式刷新须取得完整、格式有效的 Kaneo 非归档项目列表，成功后仅写 `settings.project_catalog`：`{workspace_id, fetched_at, projects: {<project_id>: <name>}}`。设置页显式传 `current_only:true`，列表以同工作区最近成功目录为准，云端已删除或归档的项目不再显示，未映射的现存项目继续可配置。成功的空列表也是有效目录；刷新失败或格式无效不覆盖快照，无快照时保留原本地项目列表。不同工作区不得复用目录。`current_only` 缺省 false，保留原有保存项目与本次成功获取项目的并集，供执行端/总览读取原有效引擎模式，不受设置列表过滤影响。
   - 目录快照只决定设置列表；不删除或停用保存的映射，不改变映射 revision、自动化策略、历史任务/请求/审计或执行快照。同 ID 项目重现后恢复展示原配置。后续本地读取、解除映射后的重读及重开页面沿用快照，不使已删除项目重新出现。`remote.status` 保留 `not_requested|ok|error`，`fetched_at` 返回最近成功目录时间；刷新错误由界面明确显示。
-  - `set-config {workspace_id?: <非空字符串>, worktree_pool_size?: <1–32整数>}` 至少提供一个字段，保留旧 pool 调用与响应。新工作区通过独立 setting 保存；若与已保存映射绑定的非空工作区不同，整次请求拒绝，包括同次 pool 修改。此入口不迁移或清空现有映射。
+  - `set-config {workspace_id?, worktree_pool_size?, worktree_concurrency_limit?, worktree_retention_days?}` 至少提供一个字段，保留旧 pool 调用与响应。`worktree_pool_size`（1–32）只为历史兼容保留，不再决定容量；`worktree_concurrency_limit`（1–32）为全局规划/评审并发上限，`worktree_retention_days`（1–90）为任务终态后的阶段树保留天数（§5.29.6）。新工作区通过独立 setting 保存；若与已保存映射绑定的非空工作区不同，整次请求拒绝，包括同次 pool 修改。此入口不迁移或清空现有映射。
   - 首次安装先用 `set-config` 配置工作区，再在项目配置页获取 Kaneo 项目、选择仓库并保存。工作区为空时，项目刷新、待办查询和在线诊断在创建远端 client 前明确提示先配置。原先仅依赖硬编码默认标识且从未保存配置的安装需配置一次。
   - 路径支持空格、中文与 `~` 展开，core 自动规范化并校验绝对路径；Git 子目录自动定位至仓库根。
 - **规划与执行链快照固化**：
@@ -1443,6 +1455,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
  - `online` 缺省 false → `kaneo_ping` `skipped:true`；`--live`/`--online` 任一强制包含连通性检查。
  - 凭据检查只验证文件可读、含 baseUrl+token，**不输出 token**。
  - 新增 `engine_lease`（当前活跃实例数与健康状态）与 `attention_backlog`（attention-list 聚合计数）检查项。
+- `worktree_pool`（2026-11-10 KP-WT01 起）：按 §5.29.6 的阶段树统计，detail 为 `free: F, leased: L, quarantined: Q, unconfirmed: U, waiting: W`；`quarantined > 0` 或 `unconfirmed > 0` 时失败。历史池行与历史 `pool/**` 不计入。
  - `python_runtime` 检查项的语义同 §5.1（离线，来源仅为信息，仅 `bundled` 且无可用证书时失败）。
  - `plus` 仅核对实际依赖的连接（KP-ENV01）：当前规划、执行、评审中选用 `pi_desktop` 的角色，各自使用已保存的 `connection_file`（未填沿用既有默认路径）；仍需 Plus 的活动固化请求与执行轮次继续按自身快照核对，不因全局后端切换而隐藏。不同连接路径去重后全部检查，任一必需连接缺失、未启用、不可达或超时仍失败；终态历史轮次、仅保留的未选用 Plus 配置和已弃用 `controller_backend` 不形成依赖。没有依赖时返回 `ok:true, skipped:true`，明确「当前未使用 Plus」，即使历史连接文件存在也不探测。此规则不改变独立的 `plus_fallback_model` 模型目录核验。
  - `business_tick_fresh`：按引擎租约、state、holder birth 的共同口径判断活动实例，且仅检查 `save_state=active` 的 running/in_review 任务。存在该实例有效 live 项目的待观察任务时，`last_tick_at` 缺失、无效或 age >300 秒则失败，detail 给出时间与检查 business_tick actions/重启引擎的提示；否则通过。没有活动引擎或无需观察的 live 任务时通过并说明原因。有效模式按 §5.27.7 统一解析，仅显式 shadow+force 为诊断，不使用带 enabled/preflight 门的 intake 范围。
@@ -1783,13 +1796,13 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 返回 `{task_id,run_id,verification_id,context_sha256,release_verification_question,status?}`。目标 session/turn/tool 均由可信记录取得，不接受调用方任意替换；尝试、上下文、内容或工具身份漂移拒绝。未知送达冻结原答案，核对不重发；用户显式重试只允许相同答案和新的操作 ID。待答消失本身不证明提交成功；原生回答回执或精确原工具结果才可确认。并发同步不得覆盖已保存草稿、提交快照或送达结果，已接受的完成验证仍保持不可变。
 
-## 5.29 规划/评审槽位池与历史目录回收（schema 6）
+## 5.29 规划/评审工作树与历史目录回收（schema 7；2026-11-10 KP-WT01 起改为任务阶段树，旧 schema 6 池行迁移删除）
 
 ### 5.29.1 范围与租约
 
-规划与评审（Plus、Claude/Codex CLI、Codex Desktop，包括 plan-scan、干净交付快照及脏状态快照）在 `<worktrees_root>/pool/<repo_key>/slot-<k>` 执行，不在真实仓库执行。执行 `<task>/branch`、恢复分支及历史执行 UUID 不池化。repo_key 取规范 git common dir 的 SHA256 前16位；同一仓库多工作树共池。`set-config {worktree_pool_size:N}` 配置每仓库上限，默认4，取1–32整数；隔离槽位计入上限，缩小配置不删除已有槽位，不再增建直至数量低于上限。容量不足返回等待，保留可重试请求，不转为业务失败；attention-list 暴露等待/隔离。
+规划与评审（Plus、Claude/Codex CLI、Codex Desktop，包括 plan-scan、干净交付快照及脏状态快照）在任务阶段树 `<worktrees_root>/<task_id>/plan` 与 `<worktrees_root>/<task_id>/review` 执行，不在真实仓库执行（§5.29.6）；执行树为 `<task_id>/run`，恢复分支及历史执行 UUID 不参与阶段树。同一任务同一阶段同时至多一个持有者。`set-config {worktree_concurrency_limit:N}` 配置全局规划/评审并发上限，默认4，取1–32整数；达到上限的请求返回等待、保留可重试，不转为业务失败；attention-list 暴露等待与隔离。旧「每仓库槽位池」`pool/<repo_key>/slot-<k>` 与 `worktree_pool_size` 只作历史读取，不再分配或决定容量。
 
-核心在 BEGIN IMMEDIATE 内分配 free 槽位，登记 stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，防止并发超过上限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确属于本池，实际顶层与git common dir须匹配，且为detached；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`，不覆盖忽略文件，不使用force/reset/clean。
+核心在 BEGIN IMMEDIATE 内登记阶段树行（`worktree_slots` 增 `task_id`、`stage`，唯一键 `(task_id, stage)`）：stage、holder_id（请求run_id）、lease_token（每次租用新代次）、目标sha、心跳和到期时间；Git操作在事务外执行。创建失败也保留隔离行，避免并发超限。所有创建/检出/移除/恢复先登记 runtime_operations intent，完成后写回执。路径须精确等于 `<worktrees_root>/<task_id>/<stage>` 且 `task_id` 匹配 `[A-Za-z0-9_-]{1,64}`；实际顶层与git common dir须匹配；`plan`/`review` 须为 detached，`run` 须检出 `kaneo/<task_id>`；不跟随伪造路径或符号链接。检出前工作区必须干净；用 `git checkout --no-overwrite-ignore --detach <sha>`（`run` 以分支检出，同样不覆盖忽略文件），不使用force/reset/clean。
 
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
 
@@ -1803,7 +1816,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 ### 5.29.2 产物与脏快照
 
-规划正文、proposal、转录与 `.pi/plan/*.md` 等证据先保存到plan_root、runs或executor-sessions，重规划继续读取持久任务分支并冻结到planner_inputs，不依赖槽位旧路径。manual_branch已有交付目录规则不改变；需要隔离的脏规划仍从被冻结分支状态构造槽位。
+规划正文、proposal、转录与 `.pi/plan/*.md` 等证据先保存到plan_root、runs或executor-sessions，重规划继续读取持久任务分支并冻结到planner_inputs，不依赖阶段树旧路径。manual_branch已有交付目录规则不改变；需要隔离的脏规划仍从被冻结分支状态构造阶段树。
 
 正常干净释放只删除未跟踪的系统产物 `.kaneopilot-plan-material/` 与 `.pi/plan/*.md`；不得删除tracked文件、符号链接或目录逃逸。删除后 `git status --porcelain` 为空才置free，否则quarantined，不清未知改动。脏快照是已知输入而非未知改动：populate前后持久登记完整冻结基线（review_snapshot材料与哈希）；释放前删除上述产物后，以verify_root核对HEAD、diff、原始字节/模式、精确新增文件；完全匹配才对该冻结diff执行反向apply并仅移除冻结新增文件，恢复到原HEAD的干净树。恢复失败隔离，保留现场；不得使用reset/clean。Review仍满足HEAD=snapshot.head，快照路径不同于执行路径，源分支后续移动不影响已租槽位。
 
@@ -1815,7 +1828,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 **人工确认路径（2026-10-18 用户选定：归档后删除、每批不超过10条、删除前逐批确认）**。仅新增下列命令；不放宽上述自动守卫，不改池化逻辑，不改 Plus 仓库。
 
-1. **范围**。类别仅 `plan_snapshot`、`review_snapshot`、`plan_run`、`review_run`、`plan_state`。不纳入：`pool_slot`（由 §5.29.1–5.29.2 的池释放与隔离规则管理，本路径不提供强制丢弃）、`execution_branch`（须任务已合并，按 AGENTS.md 清理规则处理）、`execution_or_state`（UUID 执行回退，待 B9 另行定义）、未知与只报告目录。
+1. **范围**。类别仅 `plan_snapshot`、`review_snapshot`、`plan_run`、`review_run`、`plan_state`。不纳入：`pool_slot`（含 §5.29.6 的阶段树，由 §5.29.1–5.29.2/5.29.6 的释放、隔离与保留规则管理，本路径不提供强制丢弃）、`execution_branch`（须任务已合并，按 AGENTS.md 清理规则处理）、`execution_or_state`（UUID 执行回退，待 B9 另行定义）、未知与只报告目录。
 
 2. **阻塞原因**。人工确认只可覆盖下列八项，清单中单列为「覆盖项」（与代码 `_CLEANUP_OVERRIDABLE` 一致）：`dirty_worktree`（先归档，核验通过后方可丢弃）、`retention_period`（用户逐批确认覆盖保留期）、`plus_turn_terminal_unproven`（历史 Plus 轮次终态证据缺失，且进程已不存在）、`task_identity_unknown`（目录无对应任务行）、`terminal_request_evidence_missing`（快照或运行目录无关联请求行）、`run_head_evidence_missing`（运行缺少 HEAD 证据）、`persistent_job_path`（作业记录以本路径作为持久材料位置）、`job_identity_unknown`（作业身份无效，且仅在下列证明通过时）。其中 `task_identity_unknown`、`terminal_request_evidence_missing`、`run_head_evidence_missing`、`persistent_job_path` 四项的产生分支均不跳过进程、轮次终态、cwd 探测或锁检查，故可覆盖；`persistent_job_path` 所在的作业循环先执行状态与进程检查。
    - `job_identity_unknown` 的人工证明仅在人工审计模式（`_audit(..., manual=True)`）中执行。`worktree-audit` 与 `worktree-gc` 不变：仍记 `job_identity_unknown` 硬阻塞，并跳过该作业。普通路径跳过的检查，人工证明补做，且不采用 `returned` 豁免（较严）：
@@ -1865,7 +1878,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 ### 5.29.4 项目记忆登记（M4）
 
-核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为pool下精确slot路径。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在槽位；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。
+核心仅写SQLite，`<app_support>/worktree-slots.json` 是派生只读投影，以临时文件+原子替换在状态变化后重建，失败明确报告且不回滚伪造成功。格式：`{schema_version:1,updated_at,worktrees_root,slots:[{slot_id,path,repository,git_common_dir,repo_key,state}]}`。repository为该common-dir所属真实主仓库根；登记路径须为 §5.29.6 的阶段树精确路径（历史池路径只读，不再登记）。Plus另案读取此投影，验证实际Git common-dir一致后，仅解析记忆owner到真实项目，保持执行cwd与工作范围在阶段树；启动与每轮刷新一致，plan/goal禁止记忆写入。不能把真实主根作为槽位会话额外工作根注入提示词。KaneoPilot不写Plus SQLite、不改分组、不调用projects.remove。Plus实现/重装与真实模型验证另行关卡，不因生成投影声称记忆已接通。
 
 
 ### 5.29.5 离线迁移 worktree 管理根
@@ -1876,11 +1889,52 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 `paused_global` 不能阻止全部已安装核心写入口。离线迁移在持久化意图后，以同一连接的 SQLite `BEGIN IMMEDIATE` 写保留锁覆盖二次核对、目录改名、Git repair、定位文件更新、状态更新及派生投影，完成回执与原暂停值最后一并提交，排除所有其它 SQLite 写者。失败时在写保留期内补偿本次文件变化，再回滚未提交状态并记录失败；未知文件变化不覆盖。该维护命令是 Git 不在普通业务事务中运行的明确例外；正常池分配、释放与调度仍遵守 §5.29.1，不依赖新标记或外部写者未实现的文件锁。
 
-成功后 `settings.worktrees_root` 及各槽位 `path/worktrees_root` 使用新 canonical 根，旧根仅保留历史访问别名。pool 校验只能使用新根中的真实路径；别名不作为池登记或新建工作树根。既有 `tasks.extra_json`、`execution_rounds`、冻结合同、验证回执、spec、manifest、事件和历史操作结果不改写，旧路径访问经别名继续有效，delivery 与轮次身份仍一致。
+成功后 `settings.worktrees_root` 及各槽位 `path/worktrees_root` 使用新 canonical 根，旧根仅保留历史访问别名。阶段树校验只能使用新根中的真实路径（`<新根>/<task_id>/<stage>`）；别名不作为阶段树登记或新建工作树根，历史 `pool/**` 与 `<task>/branch` 只经别名只读，不重写。既有 `tasks.extra_json`、`execution_rounds`、冻结合同、验证回执、spec、manifest、事件和历史操作结果不改写，旧路径访问经别名继续有效，delivery 与轮次身份仍一致。
 
 唯一定位 DTO 迁移例外为当前 leased 代次：其 request 与唯一同身份终态 job 的 `pool_lease.path/worktrees_root` 同步新位置；job 的 `material_dir/managed_material_paths` 若位于旧根也按精确前缀同步，避免产物保全的相对路径校验失败。须保存原始字节、前后哈希和映射；其余结构化字段完全不变，尤其 slot/holder/token、状态、owner、reason、`stage_contract/stage_result` 及合同哈希。拒绝未知身份、重复作业、非终态作业或缺少必需证据，不批量替换历史租约或正文字符串。重建派生槽位投影，并核对 Git 身份、索引、内容及旧证据可读；同 operation 的成功重放只核验并返回已有结果。
 
 该维护入口不放宽 §5.29.1–5.29.3 的停止证明、归档或清理条件。任务完成后必须按 AGENTS.md 在同一任务收尾中清理符合安全条件的临时工作树；不能用迁移或别名宣称仍被引用的目录已经可删。
+
+### 5.29.6 任务级工作树布局（KP-WT01，2026-11-10）
+
+**目录规范**：
+
+```text
+<worktrees_root>/
+  .archives/
+  <task_id>/
+    meta.json
+    run/        # kaneo/<task_id>
+    plan/       # detached 冻结 sha
+    review/     # detached 快照 sha
+    artifacts/  # plan/<run_id>/、review/<run_id>/，只读镜像
+```
+
+- `meta.json` 由核心写：`task_id`、`title`、`project`、`repository`、`branch`、`created_at`、`last_used_at`、`task_status`、`stages.{run,plan,review}.{state,run_id,sha,updated_at}`、`retention_days`；App 只读。
+- `artifacts/` 是对外可读副本（计划正文、评审报告），不是证据源；删除不影响审计，事实源仍是 `plan_root`、`runs`、`executor-sessions` 与评审报告目录。
+- 目录名只用 `task_id`；标题、分支等可读信息写在 `meta.json`，路径不随分支改名变化。
+
+**阶段状态**（沿用 §5.29.1 的 free/leased/quarantined 词义）：`free` 可领取；`leased` 持有租约；`quarantined` 校验失败保留现场。目录缺失不是记录状态，而是 `free` 判定失败：
+
+- `plan`/`review` 缺失：在无活动租约、无未决 `runtime_operations`、无未归档产物的前提下，按本轮冻结输入重建（`git worktree add --detach <sha>`，需要时重新 populate 快照材料），写 `worktree_stage_rebuilt` 事件；重建不得覆盖既有产物或未确认改动。
+- `run` 缺失：一律不重建，转 `needs_user`，给出路径与最后已知 sha（可能含未推送提交）。
+
+**配置**：`set-config {worktree_concurrency_limit?:N, worktree_retention_days?:D}`；N 取 1–32，默认 4；D 取 1–90，默认 7。`worktrees_root` 只能经 §5.29.5 的 relocate 迁移，`set-config` 只接受与当前 canonical 根相同的值。新增只读 `worktree-config {}` → `{worktrees_root, concurrency_limit, retention_days, tasks:[{task_id, stages:{…}, allocated_bytes, retention_until}]}`，供设置页展示占用与保留状态。
+
+**并发与串行**：全库统计 `leased` 的 `plan`+`review` 阶段树；达到 `worktree_concurrency_limit` 时新请求转 `worktree_pool_waiting`（保留可重试，claim 返回 `claimed:false`），不转业务失败。同一任务同一阶段的树仍被前一持有者持有时，新代次同样等待（不新建第二棵树、不报错），直到前一持有者释放或交还；`quarantined` 的树拒绝领取，需人工解除。消息与 `attention-list` 的等待项沿用既有措辞。
+
+**保留与回收**：任务终态满 `worktree_retention_days` 后，把阶段树打包到 `<worktrees_root>/.archives/<task_id>-<YYYYMMDD>.tar.gz`，再删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/<stage>/<run_id>/` 保留并可重建；删除前逐项复核工作树身份与干净状态，脏树转为隔离而不删除。命令 `worktree-retention {days?,dry_run?:true,confirm?}` 默认只预览，执行要求 `dry_run:false,confirm:true`；回执 scope `worktree-retention`，同操作重放返回 `deduplicated`。引擎在 live tick 中每小时自动执行一次，间隔由 `last_worktree_retention_at` 约束；归档失败或拦截项不中断引擎。
+
+**迁移** `worktree-layout-migrate {backup_dir, operation_id, dry_run?:true, confirm?:false, expected_audit_sha256?}`：
+
+- 前置：无活动引擎实例、无 `leased` 阶段树、无 `queued`/`claimed` 请求、无与工作树相关的 `prepared`/`unknown` 操作、备份目录可写、预览指纹未变。
+- 步骤：审计 `<task>/branch`、`pool/**`、`worktree_slots` 与引用计数；`git worktree move <task>/branch → <task>/run`，只更新仍指向旧路径的 active delivery 记录（不改历史请求 payload、合同、回执与历史租约）；`pool/**` 归档为 `.archives/pool-legacy-<YYYYMMDD>.tar.gz` 后删除；删除全部旧池行（含隔离行）并写事件；重建投影；逐项写回执。
+- 预览返回 `audit_sha256` 与阻断原因；`backup_dir` 保存 `audit.json`、`tasks.json`、`worktree_slots.json` 快照；回执 scope 为 `worktree-layout-migrate`，同操作重放要求参数一致且已完成，成功重放返回 `replayed`。
+- 失败：停止并写 `unknown` 回执，不回滚已完成的 `git worktree move`（Git 已登记），人工按 `operation_id` 核对。
+
+**数据结构**：`worktree_slots` 升到 schema 7，新增 `task_id`、`stage`（`plan`/`review`/`run`），唯一索引为 `(task_id, stage)`（仅 `task_id IS NOT NULL`）；`path` 仍唯一。为保留 schema 6 旧池行为只读，两列可空；旧行不参与分配、并发计数与 doctor 统计，由迁移命令归档后删除。显式 `migrate` 先备份，不隐式升级 live 库；不预创建阶段树行。
+
+**兼容与检查**：旧 `pool/**`、`<task>/branch` 与历史 `pool_lease` 只读；释放或恢复路径不在新布局时跳过并记事件，不修订历史。doctor 的 `worktree_pool` 检查改为按阶段树统计，detail 仍为 `free: F, leased: L, quarantined: Q, unconfirmed: U, waiting: W`（`free` 为可领取阶段树数），未通过判定仍是 `quarantined > 0` 或 `unconfirmed > 0`；Swift 端译文（ui-spec §4.15）不变。
 
 ## Qoder CLI 规划与 Review（2026-10-20）
 

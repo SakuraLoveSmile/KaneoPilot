@@ -130,7 +130,7 @@ struct ExecutionRetrospectiveView: View {
                 .controlSize(.large)
                 .font(.kpLabel)
                 .disabled(digest == nil)
-                .help(digest == nil ? "尚无执行会话" : "定位到执行会话阅读器（当前轮次）")
+                .help(digest == nil ? "尚无执行会话" : "打开当前轮次的完整会话（按需读取正文）")
         }
         .padding(.horizontal, isExpanded ? 0 : Self.tileHorizontalPadding)
         .frame(minHeight: isExpanded ? 28 : 44)

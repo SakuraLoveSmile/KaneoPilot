@@ -1,34 +1,35 @@
 {
- "_captured_at": "2026-10-10",
+ "_captured_at": "2026-11-10",
  "_provenance": "real_recording_via_mcp_pi_desktop_invoke",
- "_plus_version": "0.15.7",
+ "_plus_version": "0.15.14",
  "_redacted": true,
  "payload": {
   "operation": "goalReport/list",
   "result": {
    "reports": [
     {
-     "createdAt": 1791618946935,
-     "durableSeq": 0,
+     "closure": "agent_verified",
+     "createdAt": 1794302040922,
+     "durableSeq": 303,
      "executionId": "<redacted-uuid>",
-     "executionStatus": null,
+     "executionStatus": "completed",
      "fileHash": "",
-     "filePath": "",
+     "filePath": "<redacted-path>",
      "fileSize": 0,
-     "goalTitle": "KaneoPilot 编排层重写 Phase 0–3：新引擎至沙盒 live",
-     "integrity": "fallback",
+     "goalTitle": "放大并对齐封面模式歌词预览卡片",
+     "integrity": "structured",
      "proposalId": "<redacted-uuid>",
-     "reportId": "rep-bd4ccfe707554d48be1d8df9d9a6c571",
+     "reportId": "rep-14b797a0fd4c4e7d899b6d421cccdc24",
      "sessionId": "<redacted-uuid>",
-     "status": "pending",
-     "summary": "",
+     "status": "ready",
+     "summary": "<redacted-summary>",
      "turnId": "<redacted-uuid>",
-     "updatedAt": 1791618946935,
-     "verdict": "unknown"
+     "updatedAt": 1794304238405,
+     "verdict": "met"
     }
    ]
   }
  },
- "_note": "真实录制：MCP pi_desktop_invoke {operation:\"goalReport/list\"}。goal 模式的结构化报告清单（status/verdict/summary/integrity/fileHash）。",
+ "_note": "真实录制：MCP pi_desktop_invoke {operation:\"goalReport/list\", args:[{sessionId}]}（0.15.14）。goal 模式结构化报告清单（status/verdict/integrity/goalTitle）。",
  "_operation": "goalReport/list"
 }

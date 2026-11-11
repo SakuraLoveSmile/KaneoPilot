@@ -466,6 +466,25 @@ final class AppViewModel: ObservableObject {
         return outcome
     }
 
+    /// kp-cont01：向同一 Plus 会话发送继续当前 Goal 的指令（确认由界面二次确认）。
+    func requestContinuation(taskID: String, runID: String,
+                             onError: ((String) -> Void)? = nil) async -> RequestContinuationResponse? {
+        var outcome: RequestContinuationResponse?
+        await perform("继续执行", onError: onError) {
+            let response = try await self.client.run(
+                "request-continuation",
+                payload: ["task_id": taskID, "run_id": runID, "confirm": true,
+                          "operation_id": UUID().uuidString],
+                timeout: 120, as: RequestContinuationResponse.self)
+            guard ["continued", "sent"].contains(response.status) else {
+                throw CoreError.badOutput("继续执行结果与当前任务不匹配，请刷新后重试")
+            }
+            outcome = response
+            return "已继续执行，正在接管观察"
+        }
+        return outcome
+    }
+
     func currentEngineFixRevert(taskID: String) async throws -> EngineFixRevert {
         let task = try await client.run("get-task", payload: ["task_id": taskID], as: GetTaskResponse.self).task
         guard task.allowedActions?.contains("revert_engine_fix") == true, let candidate = task.engineFixRevert else {
@@ -1691,6 +1710,69 @@ final class AppViewModel: ObservableObject {
         default: return action
         }
     }
+    // MARK: - 工作树（KP-WT01，protocol §5.29.6）
+
+    @Published var worktreeConfig: WorktreeConfigDTO?
+    @Published var worktreeConfigError: String?
+    @Published var worktreeConfigLoading = false
+
+    /// 只读配置与占用。`measure` 才统计目录大小（4 GB 级时略慢），步骤页可先不测。
+    func loadWorktreeConfig(measure: Bool = false) async {
+        guard !worktreeConfigLoading else { return }
+        worktreeConfigLoading = true
+        defer { worktreeConfigLoading = false }
+        do {
+            worktreeConfig = try await client.run("worktree-config",
+                                                  payload: ["measure": measure],
+                                                  timeout: 120,
+                                                  as: WorktreeConfigDTO.self)
+            worktreeConfigError = nil
+        } catch {
+            worktreeConfigError = error.coreMessage
+        }
+    }
+
+    func setWorktreeRetentionDays(_ days: Int) async throws {
+        _ = try await client.run("set-config", payload: ["worktree_retention_days": days])
+        await loadWorktreeConfig()
+    }
+
+    func setWorktreeConcurrencyLimit(_ limit: Int) async throws {
+        _ = try await client.run("set-config", payload: ["worktree_concurrency_limit": limit])
+        await loadWorktreeConfig()
+    }
+
+    /// 位置迁移走核心的离线 relocate：先预览拿审计指纹，再带 confirm 执行。
+    func previewWorktreeRelocate(destination: String, backupDir: String, operationId: String) async throws -> WorktreeRelocatePreviewDTO {
+        guard let source = worktreeConfig?.worktreesRoot else {
+            throw CoreError.badOutput("尚未读取工作树位置")
+        }
+        return try await client.run("worktree-relocate", payload: [
+            "source_root": source,
+            "destination_root": destination,
+            "backup_dir": backupDir,
+            "operation_id": operationId,
+            "dry_run": true,
+        ], timeout: 300, as: WorktreeRelocatePreviewDTO.self)
+    }
+
+    func confirmWorktreeRelocate(destination: String, backupDir: String, operationId: String,
+                                 expectedAuditSha256: String) async throws -> WorktreeRelocatePreviewDTO {
+        guard let source = worktreeConfig?.worktreesRoot else {
+            throw CoreError.badOutput("尚未读取工作树位置")
+        }
+        let result = try await client.run("worktree-relocate", payload: [
+            "source_root": source,
+            "destination_root": destination,
+            "backup_dir": backupDir,
+            "operation_id": operationId,
+            "dry_run": false,
+            "confirm": true,
+            "expected_audit_sha256": expectedAuditSha256,
+        ], timeout: 900, as: WorktreeRelocatePreviewDTO.self)
+        await loadWorktreeConfig(measure: true)
+        return result
+    }
 }
 
 // BEGIN PLAN ANSWER STORE
@@ -2643,6 +2725,5 @@ final class ExecutionAnswerStore: ObservableObject {
         default: return false
         }
     }
-
 }
 // END EXECUTION ANSWER STORE

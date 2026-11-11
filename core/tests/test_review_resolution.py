@@ -386,7 +386,7 @@ class ReviewResolutionTest(KanpilotTestCase):
                       {"expected_plan_sha256": "wrong"}, {"expected_report_sha256": "wrong"}):
             self.assertEqual(self.call_err("prepare-review-repair", self.payload(**extra)).code, "conflict")
             self.assertEqual(self.raw_task(), before)
-        target = self.app_support / "worktrees" / self.task_id / "branch"
+        target = self.app_support / "worktrees" / self.task_id / "run"
         target.mkdir()
         (target / "owner.txt").write_text("unknown user's files")
         self.assertEqual(self.call_err("prepare-review-repair", self.payload()).code, "conflict")

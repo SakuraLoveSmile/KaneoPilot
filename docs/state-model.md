@@ -440,17 +440,19 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  - 动作结果写入 event，桌面即时刷新。
 
 
-## 槽位池（schema 6，protocol §5.29）
+## 任务阶段树（schema 7，protocol §5.29.6）
 
-worktree_slots保存slot_id主键、repo_key、path唯一、repository、git_common_dir、state(free/leased/quarantined)、holder_stage、holder_id、lease_token、sha、lease_expires_at、heartbeat_at、updated_at及恢复所需owner_pid/baseline_json/reason等字段。5→6显式迁移先备份，保留全部已有任务/请求/轮次/回执；不隐式升级live库。
+worktree_slots按任务阶段树保存：slot_id主键、task_id、stage(plan/review/run)、repo_key、path唯一、repository、git_common_dir、state(free/leased/quarantined)、holder_stage、holder_id、lease_token、sha、lease_expires_at、heartbeat_at、updated_at及恢复所需owner_pid/baseline_json/reason等字段。路径为 `<worktrees_root>/<task_id>/<stage>`，唯一键为 (task_id, stage)。schema 6 的旧池行（task_id/stage 为 NULL）保留只读、不参与分配与统计，由 `worktree-layout-migrate` 归档后删除。schema 7 显式迁移先备份，保留全部已有任务/请求/轮次/回执；旧 `pool/<repo_key>/slot-<k>` 行由 `worktree-layout-migrate` 归档后删除，不预创建阶段树行；不隐式升级live库。
 
-状态转换：free→leased（事务分配并生成新代次）；leased→free（持有者已停止，或Desktop已有同代显式交还证明；且产物持久化、已知基线恢复、工作区干净）；任一守卫/Git/释放失败→quarantined（现场不覆盖）；quarantined→free仅经confirm核心命令及重新校验。leased过期不自动等于free。每仓库包括隔离在内最多N行，迁移不预创建；JSON登记只是该表投影。
+状态转换：free→leased（事务分配并生成新代次）；leased→free（持有者已停止，或Desktop已有同代显式交还证明；且产物持久化、已知基线恢复、工作区干净）；任一守卫/Git/释放失败→quarantined（现场不覆盖）；quarantined→free仅经confirm核心命令及重新校验。leased过期不自动等于free。`plan`/`review` 目录缺失视为 free 判定失败，可按冻结输入重建并写 `worktree_stage_rebuilt`；`run` 缺失不重建，转 needs_user。并发按全局已租用阶段树计，上限 `worktree_concurrency_limit`（默认4）；`meta.json` 与 `worktree-slots.json` 只是派生投影。
 
 ### 新增物理表
 
 ```sql
 CREATE TABLE IF NOT EXISTS worktree_slots(
   slot_id TEXT PRIMARY KEY,
+  task_id TEXT,
+  stage TEXT CHECK(stage IN ('plan','review','run')),
   repo_key TEXT NOT NULL,
   path TEXT NOT NULL UNIQUE,
   repository TEXT NOT NULL,
@@ -463,7 +465,9 @@ CREATE TABLE IF NOT EXISTS worktree_slots(
   baseline_json TEXT, reason TEXT
 );
 CREATE INDEX IF NOT EXISTS worktree_slots_repo ON worktree_slots(repo_key,state);
-CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(repo_key,holder_stage,holder_id)
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_task_stage ON worktree_slots(task_id,stage)
+  WHERE task_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_slots_holder ON worktree_slots(task_id,holder_stage,holder_id)
   WHERE state='leased';
 ```
 

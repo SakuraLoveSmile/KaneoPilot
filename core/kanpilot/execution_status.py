@@ -92,7 +92,15 @@ def _project_plus(result, ctx, payload, job, detail, session):
     continuation_fields = any(control.get(key) is not None for key in (
         "continued_state", "continued_turn_id", "continued_ended_at", "continued_detail"))
     if current != original or continuation_fields:
-        valid = (job.get("status") == "failed" and current != original
+        task = db.require_task(ctx.conn, payload["task_id"])
+        request = db.task_extra(task).get("execution_continuation_request") or {}
+        recorded = (request.get("run_id") == task["run_id"]
+                    and request.get("new_turn") == current)
+        # 手动继续（failed）与 KaneoPilot 发起的继续（finished + 已登记新 turn）
+        # 都只接受同一会话的后续 turn；finished 必须匹配已登记的继续请求。
+        origin_ok = job.get("status") == "failed" or (
+            job.get("status") == "finished" and recorded)
+        valid = (origin_ok and current != original
                  and control.get("continued_turn_id") == current
                  and continued in ("running", "waiting_permission", "finished", "failed", "aborted")
                  and bool(control.get("continued_detail"))

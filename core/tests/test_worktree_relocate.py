@@ -34,7 +34,7 @@ def scene(tmp_path, monkeypatch):
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
     source = temporary / "worktrees"
-    branch = source / "task" / "branch"
+    branch = source / "task" / "run"
     branch.parent.mkdir(parents=True)
     git(repo, "worktree", "add", "-b", "task-branch", str(branch), "HEAD")
     (branch / "file.txt").write_bytes(b"staged\n")
@@ -60,7 +60,8 @@ def scene(tmp_path, monkeypatch):
 
 
 def add_lease(scene):
-    lease = worktree_pool.acquire(scene.conn, scene.repo, stage="plan", holder_id="leased-run", sha="HEAD")
+    lease = worktree_pool.acquire(scene.conn, scene.repo, stage="plan", holder_id="leased-run",
+                                  sha="HEAD", task_id="task")
     scene.conn.execute("UPDATE worktree_slots SET owner_pid=2147483647,owner_state='unknown',reason='owner_stop_unconfirmed' WHERE slot_id=?",
                        (lease["slot_id"],))
     lease = dict(scene.conn.execute("SELECT * FROM worktree_slots WHERE slot_id=?", (lease["slot_id"],)).fetchone())
@@ -105,7 +106,7 @@ def test_preview_is_read_only_and_dirty_material_and_index_survive(scene):
     assert not Path(scene.payload["backup_dir"]).exists()
     assert not scene.conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=?", (relocate._SCOPE,)).fetchone()
     result = apply(scene)
-    moved = scene.destination / "task" / "branch"
+    moved = scene.destination / "task" / "run"
     assert result["worktree_count"] == 1
     assert scene.source.is_symlink() and scene.source.resolve() == scene.destination
     assert relocate._value(moved, "rev-parse", "--show-toplevel") == str(moved)

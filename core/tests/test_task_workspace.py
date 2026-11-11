@@ -274,7 +274,8 @@ class TaskWorkspaceTest(KanpilotTestCase):
         try:
             with mock.patch.object(worktree_pool, "acquire", taken_during_git), self.assertRaises(util.KanpilotError):
                 task_workspace.acquire_pool(conn, repo, stage="plan", run_id=claim["run_id"],
-                    request_id=result["request_id"], sha=payload["delivery_head_sha"])
+                    request_id=result["request_id"], sha=payload["delivery_head_sha"],
+                    task_id=task["task_id"])
             self.assertEqual(conn.execute("SELECT state FROM worktree_slots").fetchone()["state"], "free")
             self.assertEqual(db.get_request(conn, result["request_id"])["run_id"], "replacement-run")
         finally:
@@ -288,13 +289,15 @@ class TaskWorkspaceTest(KanpilotTestCase):
                 claim = self.call("claim", {"stage": "plan", "executor": "fixture", "request_id": result["request_id"]})
                 conn, task, payload = self.stored(result)
                 try:
-                    lease = worktree_pool.acquire(conn, repo, stage="plan", holder_id=claim["run_id"], sha=payload["delivery_head_sha"])
+                    lease = worktree_pool.acquire(conn, repo, stage="plan", holder_id=claim["run_id"],
+                                                  sha=payload["delivery_head_sha"], task_id=task["task_id"])
                     worktree_pool.mark_owner(conn, **task_workspace.pool_identity(lease), state=state)
                     with db.write_txn(conn):
                         db.update_request(conn, result["request_id"], util.now_iso(), run_id="replacement-run")
                     with self.assertRaises(util.KanpilotError):
                         task_workspace.acquire_pool(conn, repo, stage="plan", run_id=claim["run_id"],
-                            request_id=result["request_id"], sha=payload["delivery_head_sha"])
+                            request_id=result["request_id"], sha=payload["delivery_head_sha"],
+                            task_id=task["task_id"])
                     current = worktree_pool.validate_lease(conn, **task_workspace.pool_identity(lease))
                     self.assertEqual(current["state"], "leased")
                     self.assertEqual(current["owner_state"], state)
@@ -319,7 +322,8 @@ class TaskWorkspaceTest(KanpilotTestCase):
         job = {"request_id": result["request_id"], "run_id": claim["run_id"]}
         try:
             root = task_workspace.prepare_plan_pool(conn, self.db_path, task, payload, job, self.root / "job.json")
-            self.assertEqual(root.name, "slot-1")
+            self.assertEqual(root.name, "plan")
+            self.assertEqual(root.parent.name, task["task_id"])
             self.assertEqual(git(root, "rev-parse", "HEAD"), payload["delivery_head_sha"])
             self.assertEqual((root / "tracked.txt").read_text(), "committed baseline\n")
             self.assertNotEqual(git(repo, "rev-parse", "HEAD"), payload["delivery_head_sha"])
@@ -346,7 +350,8 @@ class TaskWorkspaceTest(KanpilotTestCase):
             self.assertTrue(planner_runner.run_one(self.db_path, result["request_id"]))
         seen = json.loads(observed.read_text())
         root = Path(seen["cwd"])
-        self.assertEqual(root.name, "slot-1")
+        self.assertEqual(root.name, "plan")
+        self.assertEqual(root.parent.name, task["task_id"])
         self.assertEqual(seen["argv"][seen["argv"].index("-C") + 1], str(root))
         self.assertNotEqual(root, branch.resolve())
         self.assertIn(str(root), seen["prompt"])
@@ -410,9 +415,9 @@ class TaskWorkspaceTest(KanpilotTestCase):
         repo = self.repository()
         with db.connect(self.db_path) as conn:
             with db.write_txn(conn):
-                db.set_setting(conn, "worktree_pool_size", 1)
+                db.set_setting(conn, "worktree_concurrency_limit", 1)
             worktree_pool.acquire(conn, repo, stage="plan", holder_id="occupied",
-                                  sha=git(repo, "rev-parse", "HEAD"))
+                                  sha=git(repo, "rev-parse", "HEAD"), task_id="occupied-task")
         launched = self.root / "unexpected-launch"
         stub = self.root / "never-launch-planner"
         stub.write_text("#!" + sys.executable + "\nfrom pathlib import Path\nPath(" + repr(str(launched)) + ").touch()\n")

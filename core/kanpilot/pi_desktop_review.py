@@ -403,7 +403,8 @@ def prepare_pooled_worktree(conn, db_path, job, task, execution_worktree, snapsh
         review_snapshot.verify_source(execution_worktree, snapshot)
         sha = snapshot["head"]
     lease = task_workspace.acquire_pool(conn, task["repository"], stage=STAGE,
-                                        run_id=job["run_id"], request_id=job["request_id"], sha=sha)
+                                        run_id=job["run_id"], request_id=job["request_id"], sha=sha,
+                                        task_id=task["task_id"])
     job.update(pool_lease=lease, pool_db_path=str(db_path), review_root=lease["path"], send_state="not_sent")
     if job.get("invocation_dir"):
         pi_desktop_controller.write_json(Path(job["invocation_dir"]) / "job.json", job)

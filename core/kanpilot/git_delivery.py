@@ -289,7 +289,7 @@ def prepare_branch_worktree(repo, task_id, *, base_branch, worktrees_root, initi
         if head != initial_head_sha:
             raise GitDeliveryError("worktree_invalid", "修复基线提交不精确")
     branch = constants.DELIVERY_BRANCH_PREFIX + task_id
-    path = Path(worktrees_root).expanduser() / task_id / "branch"
+    path = Path(worktrees_root).expanduser() / task_id / "run"
     refs = set(_value(["for-each-ref", "--format=%(refname)", "refs/heads/" + branch,
                        "refs/remotes/origin/" + branch], repo).splitlines())
     if "refs/remotes/origin/" + branch in refs:
@@ -345,7 +345,7 @@ def prepare_local_branch_worktree(repo, task_id, *, worktrees_root, base_sha=Non
         sha = _value(["rev-parse", "--verify", (base_sha or "HEAD") + "^{commit}"], repo)
         base = base_branch or _value(["rev-parse", "--abbrev-ref", "HEAD"], repo)
         branch = constants.DELIVERY_BRANCH_PREFIX + task_id
-        path = Path(worktrees_root).expanduser().resolve() / task_id / "branch"
+        path = Path(worktrees_root).expanduser().resolve() / task_id / "run"
         _git(["check-ref-format", "--branch", branch], repo, 10)
         refs = _value(["for-each-ref", "--format=%(refname)",
                        "refs/heads/" + branch, "refs/remotes/origin/" + branch], repo)
@@ -471,7 +471,7 @@ def prepare_snapshot_worktree(repo, task_id, *, sha, purpose, worktrees_root, co
     if conn is not None:
         from . import worktree_pool
         lease = worktree_pool.acquire(conn, repo, stage=purpose, holder_id=holder_id, sha=sha,
-                                      worktrees_root=worktrees_root)
+                                      task_id=task_id, worktrees_root=worktrees_root)
         if lease["state"] == "waiting":
             raise util.KanpilotError("worktree_pool_waiting", "仓库槽位已满")
         return lease["path"]

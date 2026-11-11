@@ -945,6 +945,8 @@ def task_detail(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             "verification_checks": _verification_checks(task),
         }
     )
+    from . import cmd_request_continuation
+    detail["continue_execution"] = cmd_request_continuation.continue_execution_view(conn, task)
     return detail
 
 

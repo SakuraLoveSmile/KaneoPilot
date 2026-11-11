@@ -1223,6 +1223,10 @@ def task_detail(task, requests):
         "plan_file": task.get("plan_path"),
         "report_file": task.get("review_report_path"),
     }
+    # kp-cont01：默认不显示继续执行入口；场景可提供 ready/sent/observing。
+    detail.setdefault("continue_execution", {
+        "eligible": False, "reason": "当前阻塞类型不支持继续执行",
+        "state": "none", "run_id": task.get("run_id"), "turn_id": None})
     return detail
 
 
@@ -2415,6 +2419,9 @@ def cmd_get_session(state, payload):
                                 "code": "EMPTY_MODEL_RESPONSE", "at": session.get("updated_at")}]}
     if status == "running":
         detail["terminal"] = None
+        # KP-EP01：执行页只显示最新一条进展，不读消息正文。
+        detail["progress"] = {"text": "正在核对卡片宽度与首行墨迹",
+                              "at": session.get("updated_at") or session.get("started_at")}
     detail.update(scenario.get("round_detail") or {})
     return {"session": session, "connection": connection, "round_detail": detail}
 
@@ -4554,6 +4561,9 @@ COMMANDS = {
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
     "get-task": lambda s, p: cmd_get_task(s, p),
+    "request-continuation": lambda s, p: (
+        {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
+        if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),
     "recover-execution-goals": cmd_recover_execution_goals_fixture,
     "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
     "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),

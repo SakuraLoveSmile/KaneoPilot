@@ -285,7 +285,7 @@ class TestPiRoundLifecycle:
         # 登记路径＝默认 worktrees_root（<app_support>/worktrees）下
         # <task>/branch（task_workspace.prepare_for_submission :59）。
         assert Path(delivery["worktree_path"]) == (
-            tmp_env.app_support / "worktrees" / task_id / "branch").resolve()
+            tmp_env.app_support / "worktrees" / task_id / "run").resolve()
         # dispatch-start 输出＝权威登记路径；真实固定分支工作树的 .git 是指向
         # 主仓 gitdir 的文件（linked worktree），不是 plain 仓库目录。
         assert flow.started["worktree_path"] == delivery["worktree_path"]

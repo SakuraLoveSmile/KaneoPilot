@@ -202,7 +202,7 @@ struct TaskDetailContentView: View {
         case .plan:
             PlanReaderView(taskID: currentTaskID, detail: detail, showsHeaderInfo: !showsHeader)
         case .execution:
-            TaskExecutionTabView(taskID: currentTaskID, detail: detail, showsTaskTitle: !showsHeader)
+            TaskExecutionTabView(taskID: currentTaskID, detail: detail)
         case .review:
             if let detail {
                 TaskReviewTabView(detail: detail, onOpenTask: openRelatedTask,
@@ -442,40 +442,42 @@ private struct PlanAnswerCard: View {
 struct TaskExecutionTabView: View {
     let taskID: String
     let detail: TaskDetail?
-    var showsTaskTitle = true
     @State private var retrospectiveExpanded = false
     @State private var retrospectiveHeight: CGFloat = 0
     @State private var sessionDigest: ExecutionSessionDigest?
-    private static let readerAnchor = "execution-session-reader"
+    @State private var showingSession = false
 
     var body: some View {
-        // §4.18：复盘摘要位于阅读器之上；展开时外层滚动，阅读器保持不少于 320pt。
-        GeometryReader { container in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ExecutionRetrospectiveView(
-                            detail: detail, digest: sessionDigest,
-                            isExpanded: $retrospectiveExpanded, measuredHeight: $retrospectiveHeight,
-                            onOpenSession: {
-                                retrospectiveExpanded = false
-                                withAnimation { proxy.scrollTo(Self.readerAnchor, anchor: .top) }
-                            })
-                        Color.clear.frame(height: 0).id(Self.readerAnchor)
-                        SessionReaderView(taskID: taskID, preferredRunID: detail?.runId, showsTaskTitle: showsTaskTitle,
-                                          fallbackSessionTitle: detail?.sessionTitle ?? detail?.executionRound?.sessionTitle,
-                                          onDigestChange: { sessionDigest = $0 })
-                            // Detail arrives asynchronously; initialize the reader for its actual preferred round.
-                            .id("\(taskID)/\(detail?.runId ?? "pending")")
-                            .frame(height: max(320, container.size.height - (retrospectiveExpanded ? 0 : retrospectiveHeight)))
-                    }
-                    .padding(.horizontal, Spacing.s)
+        // KP-EP01 / ui-spec §4.18：复盘摘要 + 最新进展；完整会话按需在浮层打开，
+        // 执行页不再内嵌阅读器，也不轮询消息正文。
+        ScrollView {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                if let continuation = detail?.continueExecution,
+                   continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
+                    ContinueExecutionBar(taskID: taskID,
+                                         runID: detail?.runId ?? continuation.runId,
+                                         view: continuation)
+                        .padding(.horizontal, Spacing.l)
                 }
-                .clipped()
+                ExecutionRetrospectiveView(
+                    detail: detail, digest: sessionDigest,
+                    isExpanded: $retrospectiveExpanded, measuredHeight: $retrospectiveHeight,
+                    onOpenSession: { showingSession = true })
+                ExecutionProgressView(
+                    taskID: taskID, runID: detail?.runId,
+                    onDigestChange: { sessionDigest = $0 },
+                    onOpenSession: { showingSession = true })
+                    // Detail arrives asynchronously; initialize the card for its actual preferred round.
+                    .id("\(taskID)/\(detail?.runId ?? "pending")")
+                    .padding(.horizontal, Spacing.l)
             }
+            .padding(.horizontal, Spacing.s)
+            .padding(.vertical, Spacing.m)
+        }
+        .sheet(isPresented: $showingSession) {
+            ExecutionSessionSheet(taskID: taskID, runID: detail?.runId)
         }
     }
-
 }
 
 // MARK: - 概览分段视图

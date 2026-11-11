@@ -22,8 +22,15 @@ def _active_request(conn, task_id):
 def _eligible(conn, task, *, pending=False):
     from . import execution_questions
     proof = db.task_extra(task).get(_PROOF) or {}
-    ordinary = (task["status"] == "needs_user" and task["stage"] == "monitor"
-                and task["failure_code"] == "execution_failed")
+    request = db.task_extra(task).get("execution_continuation_request") or {}
+    continued = (task["status"] == "needs_user"
+                 and request.get("run_id") == task["run_id"]
+                 and request.get("status") == "sent"
+                 and isinstance(request.get("new_turn"), str) and request["new_turn"])
+    ordinary = ((task["status"] == "needs_user" and task["stage"] == "monitor"
+                 and task["failure_code"] == "execution_failed")
+                or (continued and task["failure_code"] in
+                    ("verification_unconfirmed", "execution_interrupted")))
     resuming = (pending and proof.get("run_id") == task["run_id"]
                 and proof.get("plan_sha256") == task["plan_sha256"]
                 and task["status"] == "running" and task["stage"] == "monitor")
@@ -39,6 +46,11 @@ def _eligible(conn, task, *, pending=False):
 def candidate(conn, task, job, turn_id, job_sha256):
     """Local eligibility only; the status reader has separately proved finished."""
     from . import runtime_client, runtime_operations
+    request = db.task_extra(task).get("execution_continuation_request") or {}
+    if (request.get("run_id") == task["run_id"]
+            and isinstance(request.get("new_turn"), str) and request["new_turn"]
+            and request["new_turn"] != turn_id):
+        return None
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     if (not _eligible(conn, task, pending=True) or row is None
             or row["save_state"] != "active" or row["backend"] != "pi_desktop"

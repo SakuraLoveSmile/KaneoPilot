@@ -332,7 +332,7 @@ def test_worktree_state_hash_checks_head_and_rejects_special_files(repo, tmp_pat
 def test_branch_exists(repo, tmp_path, kind):
     root = tmp_path / "worktrees"
     if kind == "path":
-        (root / "task1234" / "branch").mkdir(parents=True)
+        (root / "task1234" / "run").mkdir(parents=True)
     else:
         git(repo, "branch", "kaneo/task1234")
         if kind == "remote":

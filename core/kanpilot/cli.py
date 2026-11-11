@@ -125,7 +125,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
          "review_key": (True, "str")},
         _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
-    "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str")}, cmd_config.cmd_set_config),
+    "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str"),
+                    "worktree_concurrency_limit": (False, "int"),
+                    "worktree_retention_days": (False, "int")}, cmd_config.cmd_set_config),
     "worktree-relocate": (
         {"source_root": (True, "str"), "destination_root": (True, "str"),
          "backup_dir": (True, "str"), "operation_id": (True, "str"),
@@ -140,6 +142,16 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          ("slot_id", "holder_id", "lease_token", "operation_id", "backup_dir", "reason")}
         | {"dry_run": (False, "bool"), "confirm": (False, "bool")},
         _automation_command("worktree_recovery", "cmd_worktree_slot_recover")),
+    "worktree-retention": ({"days": (False, "int"), "dry_run": (False, "bool"),
+                            "confirm": (False, "bool")},
+                           _automation_command("worktree_retention", "cmd_worktree_retention")),
+    "worktree-config": ({"measure": (False, "bool")},
+                        _automation_command("cmd_worktree", "cmd_worktree_config")),
+    "worktree-layout-migrate": (
+        {"backup_dir": (True, "str"), "operation_id": (True, "str"),
+         "dry_run": (False, "bool"), "confirm": (False, "bool"),
+         "expected_audit_sha256": (False, "str")},
+        _automation_command("cmd_worktree_layout", "cmd_worktree_layout_migrate")),
     "worktree-audit": ({"retention_days": (False, "int")},
                        _automation_command("cmd_worktree", "cmd_worktree_audit")),
     "worktree-gc": ({"dry_run": (False, "bool"), "retention_days": (False, "int"),
@@ -590,6 +602,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "recovery_turn_id": (False, "str"),
         },
         cmd_dispatch.cmd_round_observe,
+    ),
+    # kp-cont01（§5.23.11）：向同一 Plus 会话发送继续当前 Goal 的指令（不重发）。
+    "request-continuation": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "confirm": (False, "bool"), "operation_id": (False, "str")},
+        _automation_command("cmd_request_continuation", "cmd_request_continuation"),
     ),
     # v3 T5（§5.23.10）：Goal 报告只读读取与完成判定登记。
     "get-goal-report": (

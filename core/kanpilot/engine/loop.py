@@ -497,6 +497,7 @@ class Reconciler:
 
             if self.enable_tick:
                 actions.append(self.business_tick_step(conn, modes))
+                actions.append(self.retention_step(conn, now_iso))
 
             if self.enable_spawn:
                 actions.append(self.spawn_step(conn, modes))
@@ -504,6 +505,22 @@ class Reconciler:
             conn.close()
         return {"mode": self.mode, "project_modes": modes,
                 "at": now_iso, "actions": actions}
+
+    def retention_step(self, conn, now_iso) -> dict:
+        """Archive expired stage trees hourly; failures never interrupt the engine."""
+        action = {"action": "worktree_retention", "executed": False}
+        try:
+            from .. import worktree_retention
+            result = worktree_retention.auto_sweep(conn, now_iso)
+            if result.get("skipped"):
+                return dict(action, reason=result["skipped"])
+            return dict(action, executed=True,
+                        eligible=len(result.get("eligible", [])),
+                        results=len(result.get("results", [])))
+        except Exception as exc:
+            code = exc.code if isinstance(exc, util.KanpilotError) else "internal_error"
+            self.log("保留期回收失败 [%s]: %s" % (code, util.redact(str(exc))))
+            return dict(action, error=code, detail=util.redact(str(exc)))
 
     def business_tick_step(self, conn, modes) -> dict:
         """Top up live-project observations before spawning (§5.27.15).

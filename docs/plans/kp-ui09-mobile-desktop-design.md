@@ -1,7 +1,7 @@
 # KP-UI09 · 手机接手与 macOS 工作台设计
 
 - 用户目标：离开电脑后开发继续推进，需要时通过手机查看、决策与接手；电脑前管理多个项目为次要场景。新需求来自 Feedback，Pilot 承接已有任务的推进与交付。
-- 本轮范围：已确认的 macOS 局部设计进入 SwiftUI 实现；不改 Android、调度逻辑、数据库或核心接口。状态：**实现中**。手机仅设计已验收。
+- 本轮 UI 范围：已确认的 macOS 局部设计进入 SwiftUI 实现；UI09 不新增 Android、调度、数据库或核心接口变化。2026-11-11 用户进一步要求“发布并构建新版本”，发布集成须保留当前已发布测试版的既有能力与 schema 7 兼容（见 T6），不从旧 schema 6 基线发包覆盖。状态：**实现中**。手机仅设计已验收。
 - 手机草图：**已验收（仅设计）**。2026-11-11 用户明确“手机设计已定稿”；后续修改需有新的用户反馈。
 - macOS 设计：**已验收（仅设计）**。2026-11-11 用户回复“目前来看没啥问题 下一步把”，据此进入实现。2026-11-11 用户明确“在现有的基础上修改，不需要重构”，随后反馈“首页上主要是想关注项目进度”，并提出环境检查“可以收到左下角”。当前局部对比稿已按该位置修订并获用户确认。此前整页草图超出范围，撤回其作为后续设计依据的地位。
 
@@ -54,7 +54,7 @@
 ## 实施与验收（2026-11-11）
 
 - 基线：从已 fetch 的 `origin/main` `17a38476b9c6ba5fef1dc75c9261e46f38f09f29` 创建独立工作树，避免带入主区独有的 KP-WT01 规格提交 `35cc2fc`。
-- 分支：`feat/20261111-kp-ui09-macos-overview`；工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261111-feat-kp-ui09-macos-overview`；预期合入目标 `main`；用户已明确允许提交/推送本分支、运行仅产预览 artifacts 的云端构建和隔离原生界面核验。未授权合并或正式/测试版发布。
+- 分支：`feat/20261111-kp-ui09-macos-overview`；工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261111-feat-kp-ui09-macos-overview`；预期合入目标 `main`。用户先允许提交/推送、预览构建和隔离原生核验，后于 2026-11-11 明确要求“发布并构建新版本”，并选择“正式版 v0.5.6”；构建、发布及必要集成沿该新授权继续。
 - 主区既有 `.local/`、`docs/plans/kp-cache01-macos-build-cache-cleanup.md` 保留。本会话唯一 UI09 记录已核对内容后搬至本工作树，主区不留副本。
 - T1：先同步 `docs/ui-spec.md` §2/4.15/4.16 的四项局部决定、项目身份/去重/状态桶口径。
 - T2：纯项目聚合与 fixture，由 Sol worker 独占 `Core/Models.swift`、`macos/tests/dashboard_status_main.swift`、`Views/TaskCompactListView.swift` 的项目键转发；复用既有项目身份规则。主 agent 独占 Root/Dashboard/Components 与规格记录；文件不交叉写。无需独立端口、数据库或服务。
@@ -68,7 +68,7 @@
 
 ## 当前进展与剩余
 
-- T1–T4 已完成本轮实现与独立复核；T5 的 #207 包核验、四种窗口/外观及相关原生交互已完成。整体状态仍为**实现中**：当前 UI 已有可体验预览，整条云端门禁仍因两项既有样本新鲜度测试失败；未将其改成通过或标记用户已验收。原生检查绑定代码 `89a91b0`，不沿用旧包通过记录。
+- T1–T4 已完成本轮实现与独立复核；T5 的 #207 包核验、四种窗口/外观及相关原生交互已完成，检查绑定代码 `89a91b0`。当前进入 T6 发布集成，整体状态仍为**实现中**；下述 #207 失败是历史结果，新组合态须重新检查，不能拼接旧包与其他分支绿灯充当本轮通过。
 - 当前实现：`RootView.swift` 用窗口根锚点 overlay 向上呈现面板，避免列裁剪与系统 popover 尾箭头；`Components.swift` 共用环境状态投影、告警与诊断明细；Dashboard 移除配置摘要与额外项目映射读取，新增可折叠项目分组；共享项目键沿用任务列表规则。
 - 独立 Sol 审查发现 Tab 到事项行后容器焦点守卫会屏蔽↑↓；已改为每事项 attentionId 显式焦点，箭头更新行焦点，事项/项目头/环境入口分别绑定获焦时的 Return；独立复核通过，未发现新的明确问题。侧栏消失时收环境面板，关闭后焦点回入口。
 - 本次本地静态核验：最终修改阶段 `git diff --check` 与 `bash -n macos/tests/run-dashboard-status-fixtures.sh` 通过；逐项比对原暂停/刷新/诊断命令和禁用条件、告警组成、详情容器，未改核心与 Android。没有本地编译；云端 fixture 和原生候选包的代码与证据分别记录于下方。
@@ -126,3 +126,14 @@
 - 四个 #207 隔离 App 均用 Quit 正常退出。收尾发现锁屏时 #205 首个 case 遗留 FakeCore PID `19840`；核对绝对命令、PPID、工作目录和该 case 的 engine marker 后，仅对该进程发送 SIGTERM，确认退出及 marker 为 stopped，见 `build/kp-ui09/ui/cleanup.json`。最终没有本任务预览 App / FakeCore 残留，正式 `/Applications/KaneoPilot.app` PID `35156` 保持；核对结果在 `ui/207/process-verification.json`。
 - 当前剩余：CI 样本维护阻塞、用户对真实候选界面的体验确认；真实调度、Plus 执行、手机设备与正式安装不属于此次隔离 UI 核验。预览包与上述截图可供体验，但不能据此称整条 CI 通过、已验收或已发布。
 - 工作树继续保留：成果未合入 `main`，且忽略目录内仍有唯一包与原生证据；尚不满足清理条件。未合并、发布 Release/prerelease、替换正式 App 或清理其他工作树。后续仅在另有相应授权并满足验证后合入，随后按保全规则收尾本任务工作树。
+
+### T6 发布集成（2026-11-11）
+
+- 用户新授权：“发布并构建新版本”，随后明确选择“正式版 v0.5.6”。已核对最新正式版为 `v0.5.5`、已发布测试版为 `v0.5.6-test.203`；本机仍运行该测试版。按 annotated 稳定标签流程发布，尚未推送发布标签。
+- 必要兼容前置：UI09 最初基线 `origin/main=17a3847` 仍为 schema 6，而已发布测试版 `v0.5.6-test.203^{}`=`c21d110` 为 schema 7，包含任务级工作树、执行时间线和同一 Goal 继续入口。直接从 UI09 旧基线发新包会使当前用户数据被旧核心拒绝并回退现有功能。因此仅集成已发布的 `test.203` 固定源码，再叠加 UI09；不带入其他工作树尚未发布的新改动。
+- 原样复用已发布基线内的 `331d335`：九件样本于 2026-11-10 重录/复核，30 天新鲜度门保留；六份真实录制明确 Plus 0.15.14，三份重建样本仍标注 reconstructed。独立 worker 核对日期、来源、信封、非空 report/history、NOT_FOUND 与无终态 outcome 断言；并只读核对当前 Plus 0.15.16 的 pendingInputs/turn.endedAt 字段，没有模型调用或生产写，真实内容只在内存。此次未新增采集文件或改测试预期来绕过 #207。
+- 集成使用 `git merge --no-commit --no-ff v0.5.6-test.203`；`Models.swift` 自动合并，仅 `docs/ui-spec.md` 高级页一段冲突。主 agent 保留已发布的工作树分区及诊断路径字段，并将完整环境诊断位置改为 UI09 的侧栏入口/总览告警区。其余已发布实现保持原来源。
+- 分工：主 agent 独占冲突解决、权威记录、发布说明与集成/发布操作；原 worker 仅核对并运行隔离 Python 夹具、schema/桌面契约检查，日志 `build/kp-ui09/release/fixture-checks.log`；原 reviewer 独立只读检查 Models 自动合并、Xcode/fixture 接入、五段详情与 UI09 键盘的组合点。无人并行写同一文件，不启动真实调度或模型。
+- 独立复核未发现明确集成问题：Models 的 UI09 聚合与已发布 DTO/可选成员互不覆盖；新增五个 Swift 源已在 Xcode，原解码/时间线 fixture 与 dashboard fixture 都保留；详情五段/继续确认入口沿发布版，不存在新增全局 Return 抢键；规格同时保留高级页工作树和左下环境规则。相对 `test.203` 的最终差异仍仅 UI09 九个文件。三个测试文件继承标签已有的 EOF 空行未顺手改；相对已发布标签的差异检查通过。
+- 本地组合态检查：默认 `python3` 3.14.7 缺真实 pytest，仓库 shim 的文件发现入口退出 2，未执行用例；随后复用已安装 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11`（3.11.4、pytest 9.1.1），两份 Plus fixture 测试 `10 passed`，`tests/test_schema_v2.py` + `tests/test_desktop_contract.py` 为 `27 passed`（105.36 秒）。运行前后 core/tests 差异指纹相同，临时 DB/假 HOME/Kaneo/Pi 隔离，无生产访问。云端仍按原固定 Python/pytest 版本重新执行必需门禁，不以本地版本替代。
+- 下一步：完成组合态隔离检查与独立复核，提交/推送并跑全新 preview Packages；下载同 SHA 包复核受影响原生路径。满足门禁后按用户确定的版本执行云端发布，再核对公开 Release、manifest/哈希和安装包身份。合入 `main` 后保全证据并清理本任务工作树，其他任务现场保留。

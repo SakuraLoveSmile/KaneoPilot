@@ -765,6 +765,140 @@ if let caps = decode(ExecCapabilitiesResponse.self, #"{"ok":false,"codex":{"avai
     expect(caps.codex?.available == false, "Codex 未保存配置不冒充可用")
 }
 
+// KP-EP01：round_detail.progress 只读显示字段；缺失/null 时保持旧解码。
+if let detail = decode(RoundDetail.self, #"{"backend":"pi_desktop","run_status":"running","progress":{"text":"已修复排序","at":"2026-11-10T09:00:00Z"}}"#) {
+    expect(detail.progress?.text == "已修复排序" && detail.progress?.at == "2026-11-10T09:00:00Z", "最新进展解码文本与时间")
+}
+if let detail = decode(RoundDetail.self, #"{"backend":"pi","run_status":"running"}"#) {
+    expect(detail.progress == nil, "旧 round_detail 无进展字段照常解码")
+}
+
+// KP-EP01 阶段二：会话时间线把结构化工具事件折叠为轮次与关键动作。
+
+var timelineSeq = 0
+func timelineMessage(_ turn: String, _ type: String, at: String,
+                     content: String = "", name: String? = nil,
+                     input: String? = nil, output: String? = nil,
+                     exit: Int? = nil, callID: String? = nil,
+                     isError: Bool? = nil) -> SessionMessage? {
+    timelineSeq += 1
+    var dict: [String: Any] = [
+        "id": "timeline-\(timelineSeq)", "seq": timelineSeq, "type": type,
+        "content": content, "turn_id": turn, "source_at": at,
+    ]
+    if let name {
+        var tool: [String: Any] = ["name": name]
+        if let input { tool["input"] = input }
+        if let output { tool["output"] = output }
+        if let exit { tool["exit_code"] = exit }
+        dict["tool"] = tool
+    }
+    if let callID { dict["tool_call_id"] = callID }
+    if let isError { dict["is_error"] = isError }
+    guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+    return try? JSONDecoder.kaneo.decode(SessionMessage.self, from: data)
+}
+
+if let instruction = timelineMessage("turn-plan", "user", at: "2026-11-10T09:00:00Z",
+                                     content: "# 让封面歌词更醒目\n\n正文"),
+   let goal = timelineMessage("turn-plan", "tool_result", at: "2026-11-10T09:01:00Z",
+                              name: "SubmitGoal",
+                              input: ##"{"markdown":"# 让封面歌词更醒目\n\n## Goal\n\n把卡片占满歌曲信息区宽度"}"##,
+                              output: #"{"content":[{"text":"submitted"}],"details":{}}"#),
+   let question = timelineMessage("turn-plan", "tool_result", at: "2026-11-10T09:02:00Z",
+                                  name: "asktool",
+                                  input: #"{"questions":[{"question":"用哪种设备核验？"}]}"#,
+                                  output: #"{"details":{"answers":[["Mi 10"]]}}"#),
+   let progress = timelineMessage("turn-exec", "tool_result", at: "2026-11-10T09:05:00Z",
+                                  name: "UpdateGoalProgress",
+                                  input: #"{"items":[{"label":"改样式","status":"completed"},{"label":"验证","status":"pending"}]}"#,
+                                  output: #"{"details":{"revision":2}}"#),
+   let edit = timelineMessage("turn-exec", "tool_result", at: "2026-11-10T09:06:00Z",
+                              name: "Edit", input: #"{"path":"lib/lyrics_view.dart"}"#),
+   let command = timelineMessage("turn-exec", "command_output", at: "2026-11-10T09:07:00Z",
+                                 name: "Bash",
+                                 input: #"{"command":"cd /tmp/project && flutter test --no-pub"}"#,
+                                 output: "All tests passed", exit: 0),
+   let report = timelineMessage("turn-exec", "tool_result", at: "2026-11-10T09:08:00Z",
+                                name: "SubmitGoalReport",
+                                input: #"{"checks":[{"command":"flutter test","exitCode":0,"result":"passed"}]}"#,
+                                output: "Goal report draft recorded successfully."),
+   let terminal = timelineMessage("turn-exec", "system", at: "2026-11-10T09:09:00Z",
+                                  content: #"{"outcome":"completed","reason":"done"}"#) {
+    let rounds = SessionTimelineBuilder.build(
+        messages: [instruction, goal, question, progress, edit, command, report, terminal],
+        runState: "finished")
+    expect(rounds.count == 2, "时间线按 turn_id 分组")
+    expect(rounds.first?.title.contains("规划") == true, "问答/契约轮识别为规划")
+    expect(rounds.last?.title.contains("执行") == true, "进展/报告轮识别为执行")
+    let actions = rounds.last?.actions ?? []
+    expect(rounds.first?.goal?.title == "让封面歌词更醒目", "目标标题进入规划轮")
+    expect(rounds.first?.goal?.state == "已提交", "规划轮目标状态")
+    expect(rounds.last?.goal?.title == "让封面歌词更醒目", "目标标题按轮次继承")
+    expect(rounds.last?.goal?.completed == 1 && rounds.last?.goal?.total == 2, "执行轮待办完成数")
+    expect(rounds.last?.goal?.state == "进行中", "执行轮目标状态")
+    expect(rounds.last?.goal?.items.first?.status == "completed", "待办项状态保留")
+    expect(rounds.last?.goal?.checkpoints.count == 1, "待办进展记录进入轮次")
+    expect(!actions.contains { $0.kind == .progressList }, "待办不再单列动作")
+    expect(actions.contains { $0.kind == .file && $0.title == "修改 lyrics_view.dart" }, "文件改动折叠为路径摘要")
+    expect(actions.contains { $0.kind == .command && $0.title == "flutter test --no-pub" }, "关键命令保留并去掉 cd 前缀")
+    expect(actions.contains { $0.kind == .verification && $0.title.contains("1/1 通过") }, "验证报告折叠为通过数")
+    expect(actions.contains { $0.kind == .terminal }, "终止事件进入时间线")
+    let planning = rounds.first?.actions ?? []
+    expect(!planning.contains { $0.kind == .goal }, "目标契约不单列动作")
+    expect(planning.contains { $0.kind == .question && $0.status == "已答" }, "问答折叠并标记已答")
+}
+
+if let progressOne = timelineMessage("turn-goal", "tool_result", at: "2026-11-10T09:00:00Z",
+                                     name: "UpdateGoalProgress",
+                                     input: #"{"items":[{"label":"改样式","status":"in_progress"},{"label":"验证","status":"pending"}]}"#),
+   let progressTwo = timelineMessage("turn-goal", "tool_result", at: "2026-11-10T09:10:00Z",
+                                     name: "UpdateGoalProgress",
+                                     input: #"{"items":[{"label":"改样式","status":"completed"},{"label":"验证","status":"completed"}]}"#) {
+    let rounds = SessionTimelineBuilder.build(messages: [progressOne, progressTwo], runState: "finished")
+    expect(rounds.first?.goal?.state == "待办完成", "待办全部完成时目标状态更新")
+    expect(rounds.first?.goal?.completed == 2 && rounds.first?.goal?.total == 2, "目标完成数取最新待办")
+    expect(rounds.first?.goal?.checkpoints.count == 2, "多次进展记录保留检查点")
+    expect(rounds.first?.goal?.title == "执行目标", "无目标契约时使用可读回退标题")
+}
+
+if let minor1 = timelineMessage("turn-minor", "tool_result", at: "2026-11-10T09:00:00Z",
+                                name: "Read", input: #"{"path":"a.dart"}"#),
+   let minor2 = timelineMessage("turn-minor", "tool_result", at: "2026-11-10T09:01:00Z",
+                                name: "Read", input: #"{"path":"b.dart"}"#),
+   let fail = timelineMessage("turn-minor", "command_output", at: "2026-11-10T09:02:00Z",
+                              name: "Bash", input: #"{"command":"ls -la"}"#,
+                              output: "boom", exit: 2) {
+    let rounds = SessionTimelineBuilder.build(messages: [minor1, minor2, fail], runState: "running")
+    let actions = rounds.first?.actions ?? []
+    expect(actions.contains { $0.kind == .minor && $0.title == "2 个准备操作" }, "连续只读操作合并折叠")
+    expect(actions.contains { $0.kind == .command && $0.status == "退出码 2" && $0.tone == .failure }, "非零退出码升级为关键失败")
+}
+
+if let first = timelineMessage("turn-throttle", "assistant", at: "2026-11-10T09:00:00Z",
+                               content: "先核对工作树"),
+   let second = timelineMessage("turn-throttle", "assistant", at: "2026-11-10T09:01:00Z",
+                                content: "工作树正常"),
+   let third = timelineMessage("turn-throttle", "assistant", at: "2026-11-10T09:10:00Z",
+                               content: "已修改并验证") {
+    let rounds = SessionTimelineBuilder.build(messages: [first, second, third], runState: "running")
+    let progress = (rounds.first?.actions ?? []).filter { $0.kind == .progress }
+    expect(progress.count == 2, "助手文本按 3 分钟节流，保留首条与末条里程碑")
+    expect(progress.last?.title == "已修改并验证", "末条助手里程碑保留")
+}
+
+// kp-cont01：继续执行投影与响应解码。
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":true,"state":"ready","run_id":"cont-run","turn_id":null,"reason":null}}"#) {
+    expect(task.continueExecution?.eligible == true && task.continueExecution?.state == "ready", "继续执行资格解码")
+    expect(task.continueExecution?.runId == "cont-run", "继续执行绑定轮次")
+}
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"running"}"#) {
+    expect(task.continueExecution == nil, "旧核心无继续执行字段照常解码")
+}
+if let response = decode(RequestContinuationResponse.self, #"{"status":"continued","turn_id":"turn-2","session_id":"sess-1","deduplicated":false}"#) {
+    expect(response.status == "continued" && response.turnId == "turn-2", "继续执行响应解码")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

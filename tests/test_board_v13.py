@@ -96,6 +96,29 @@ def claim_request(factory, task_id, kind):
     return c
 
 
+def release_stage_tree(tmp_env, request_id):
+    """Return a settled request's stage tree.
+
+    Real review/plan runners release their tree in a finally block; this
+    fixture reports through the generic command, so free the lease here before
+    the next generation of the same task claims again.
+    """
+    from kanpilot import db as kanpilot_db, worktree_pool
+
+    conn = kanpilot_db.connect(tmp_env.db)
+    try:
+        payload = kanpilot_db.request_payload(kanpilot_db.get_request(conn, request_id))
+        lease = payload.get("pool_lease")
+        if not lease:
+            lease = (payload.get("pi_branch_review") or {}).get("pool_lease")
+        if not lease:
+            return
+        worktree_pool.release(conn, lease["slot_id"], lease["holder_id"],
+                              lease["lease_token"], owner_stopped=True)
+    finally:
+        conn.close()
+
+
 def report_needs_user(cli, claim, failure_code, note="阻塞"):
     return cli("report", {
         "request_id": claim["request_id"], "run_id": claim["run_id"],
@@ -631,6 +654,7 @@ class TestReviewFixChain:
         # 评审执行端回报本轮完成（结论已登记）
         cli("report", {"request_id": rv["request_id"], "run_id": rv["run_id"],
                        "outcome": "succeeded", "note": "结论已登记"})
+        release_stage_tree(tmp_env, rv["request_id"])
 
         # 修复完成 → 回 running（后门；等价于人把 Kaneo 卡片拖回 in-progress）
         factory.kaneo.set_status(src, "in-progress")

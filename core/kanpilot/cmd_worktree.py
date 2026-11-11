@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import constants, db, runtime_operations, util
@@ -362,6 +362,9 @@ def _directories(root, slots):
     paths = set()
     if root.is_dir() and not root.is_symlink():
         for task in root.iterdir():
+            if task.name == ".archives":
+                # Layout migration archives live here; they are evidence, not GC candidates.
+                continue
             if task.name == "pool" and task.is_dir() and not task.is_symlink():
                 for repo in task.iterdir():
                     if repo.is_dir() and not repo.is_symlink():
@@ -512,7 +515,7 @@ def _audit(ctx, retention_days, own_operation=None, manual=False):
                     reasons.append("task_identity_unknown")
                 elif not task.get("repository") or _common(task["repository"]) != common:
                     reasons.append("task_repository_mismatch")
-            elif task_id and path.name == "branch":
+            elif task_id and path.name in ("branch", "run"):
                 entry.update(category="execution_branch", task_id=task_id)
                 branch_reasons, evidence = _branch_evidence(task, path, common, head, branch)
                 reasons.extend(branch_reasons)
@@ -716,6 +719,64 @@ def _retention(payload):
     if isinstance(days, bool) or not isinstance(days, int) or days < 0:
         raise util.bad_request("retention_days 必须为非负整数")
     return days
+
+
+def _tree_bytes(path):
+    """Allocated bytes for one stage tree; never follows links, never raises."""
+    total = 0
+    pending = [Path(path)]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    stat_result = entry.stat(follow_symlinks=False)
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    total += stat_result.st_blocks * 512
+        except OSError:
+            continue
+    return total
+
+
+def cmd_worktree_config(ctx, payload):
+    """Read-only stage-tree configuration and usage (protocol §5.29.6)."""
+    measure = payload.get("measure") is True
+    root = constants.worktrees_root(db.get_setting(ctx.conn, "worktrees_root") or None)
+    limit = db.get_setting(ctx.conn, "worktree_concurrency_limit",
+                           constants.DEFAULT_WORKTREE_CONCURRENCY_LIMIT)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 32:
+        limit = constants.DEFAULT_WORKTREE_CONCURRENCY_LIMIT
+    days = db.get_setting(ctx.conn, "worktree_retention_days",
+                          constants.DEFAULT_WORKTREE_RETENTION_DAYS)
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 90:
+        days = constants.DEFAULT_WORKTREE_RETENTION_DAYS
+    rows = ctx.conn.execute(
+        "SELECT task_id,stage,state,path,updated_at FROM worktree_slots "
+        "WHERE task_id IS NOT NULL ORDER BY task_id,stage").fetchall()
+    tasks = {}
+    for row in rows:
+        entry = tasks.setdefault(row["task_id"], {"task_id": row["task_id"], "stages": {},
+                                                  "allocated_bytes": None, "retention_until": None})
+        entry["stages"][row["stage"]] = {"state": row["state"], "path": row["path"],
+                                        "updated_at": row["updated_at"]}
+        if measure:
+            stage_path = Path(row["path"])
+            if stage_path.is_dir():
+                entry["allocated_bytes"] = (entry["allocated_bytes"] or 0) + _tree_bytes(stage_path)
+    for task_id, entry in tasks.items():
+        task = db.get_task(ctx.conn, task_id)
+        entry["task_status"] = task["status"] if task is not None else None
+        if task is not None and task["status"] in ("done", "cancelled"):
+            try:
+                base = datetime.fromisoformat(task["updated_at"])
+                entry["retention_until"] = util.to_iso(base + timedelta(days=days))
+            except ValueError:
+                entry["retention_until"] = None
+    return {"worktrees_root": str(root), "concurrency_limit": limit, "retention_days": days,
+            "tasks": [tasks[key] for key in sorted(tasks)]}
 
 
 def cmd_worktree_audit(ctx, payload):
