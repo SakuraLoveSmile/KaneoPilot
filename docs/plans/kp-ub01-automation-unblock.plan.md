@@ -59,6 +59,16 @@
 - 行为核验（直接用安装包内置 core 执行）：8 项全 PASS——默认等待 3600、exec-config 合并默认、证据上限、.pi 判定、adb 被 verify 拒收且错误指向人工验收、普通命令仍通过、人工验收段解析、正文行数不含 frontmatter。
 - 运行时：engine tick 正常、mcp-serve/mobile-serve/观察 worker 复起，`kanpilot.db` 72 MB 原样保留，wjhpq/u5s2/busobt 三条任务仍在。
 - 未做：真实任务体验确认；回退方式：把备份的 0.5.7-test.240.app 移回 /Applications。
+### Review 口径实测（busobt，2026-11-13）
+
+用 `supplement-review` 带用户说明重新发起 busobt 的 Review（新 prompt 已随 0.5.7-test.247 生效）。模型输出（executor-sessions/review/b8e9477f-.../last-message.txt）显示规则按预期生效：
+
+- 结论仍是 `blocked`，但理由已不含 Windows 原生测试、人工听感、人工窗口观察；模型明确写「自动验收仍有证据缺口」「不属于人工体验」。
+- 剩余阻塞只有两条自动验证缺口：subsonic_api 的通过结果不对应冻结 lock（离线解析降级 6 个依赖）；原计划的集成测试要求经真实控件操作，实际测试直接调 `service.next()`。
+
+**但该轮被丢弃**：`cli_review.run_codex` 只要事件流出现 `error`/`turn.failed` 就置 failed，即便 Codex 已重连恢复、退出码 0、最终 JSON 完整有效。本次事件流有 "Reconnecting... waiting for network" 后仍产出有效结果，却被判「Codex Review 失败（退出码 0）」，任务保留旧报告与旧 review_blocked。
+
+待办（下一任务）：① 该 runner 应在「退出码 0 且最终结构化输出合法」时保留结果，把 error 事件降为证据；② busobt Review 需在修复后重跑。
 
 ### 装机后真实任务复测（wjhpqxfqxr3084vxtc19e1uo）
 
