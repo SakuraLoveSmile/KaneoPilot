@@ -53,7 +53,12 @@
 - 首次 `Packages` run 43239792169 在 `checks (3, 3.13)` / `checks (3, 3.11)` 的 “Integration fixture tests” 失败：`tests/test_pi_config_contract.py::test_get_exec_config_roundtrip_after_set` 仍断言旧默认 86400。该用例属本次默认值调整的预期更新，已改为 3600 并本地验证本文件 12 passed；这是本次改测试预期的唯一依据。
 - 修正后提交 `f3245b6`；`Packages` run 43241920822（workflow_dispatch，channel=preview）**全部 job 成功**：identity / checks（1–5 × py3.11/3.13）/ macos-fixtures a,b / macos-package / android / codex-platforms native-platforms。`publish` 按 preview 通道跳过（不创建 Release），这是预期行为。
 - 产物（未发布，仅 Actions 附件）：`macos-arm64-local-signed-246`（32.5 MB）、`android-debug-246`（37.0 MB）、各 check 报告与 `codex-platforms-43241920822-1`。
-- 未做：`channel=test` 预发布、装机与真实任务重跑（需要另外授权）。
+- 测试版发布：run 43245863522（channel=test，base_version=0.5.7，notes 为本次六项修复要点）全部 job 成功，publish 创建预发布 **v0.5.7-test.247**（B=247 > 已装 240）。
+- 装机：下载 `KaneoPilot-0.5.7-test.247-macos-arm64.dmg`，SHA256 与 SHA256SUMS 一致；退出 App、旧包移到 `~/Library/Application Support/KaneoPilot-install-backups/20261112-233349-0.5.7-test.240`，替换 `/Applications/KaneoPilot.app`，清除 quarantine，启动。
+- 装机验证：`CFBundleShortVersionString=0.5.7-test.247`、`CFBundleVersion=247`、ad-hoc 签名；六项修复在安装包内全部存在（constants 3600 / 证据上限 128 KiB / verify 设备命令 / 空转说明 / plan_body_lines / 人工验收解析与 Review 规则 / get-task 投影）。
+- 行为核验（直接用安装包内置 core 执行）：8 项全 PASS——默认等待 3600、exec-config 合并默认、证据上限、.pi 判定、adb 被 verify 拒收且错误指向人工验收、普通命令仍通过、人工验收段解析、正文行数不含 frontmatter。
+- 运行时：engine tick 正常、mcp-serve/mobile-serve/观察 worker 复起，`kanpilot.db` 72 MB 原样保留，wjhpq/u5s2/busobt 三条任务仍在。
+- 未做：真实任务重跑与体验确认（需要用户回到 App 操作或授权重新规划/复审）；回退方式：把备份的 0.5.7-test.240.app 移回 /Applications。
 
 
 - 体验入口：改动在源码树 `core/`；正在运行的 `/Applications/KaneoPilot.app` 仍是旧副本，需要走云端 `Packages` 构建安装后才生效。
