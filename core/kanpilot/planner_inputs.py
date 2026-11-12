@@ -1254,7 +1254,16 @@ def _prepare_submission(conn, item):
     return prepared
 
 
-def start_plans(ctx, payload: dict) -> dict:
+def _retry_snapshot(conn, task_id):
+    """Local retry identity; compare again inside the final write transaction."""
+    task = db.get_task(conn, task_id)
+    request = conn.execute("SELECT * FROM requests WHERE task_id=? AND kind='plan' "
+                           "ORDER BY created_at DESC,rowid DESC LIMIT 1", (task_id,)).fetchone()
+    return {'task': dict(task) if task is not None else None,
+            'request': dict(request) if request is not None else None}
+
+
+def start_plans(ctx, payload: dict, *, expected_retry=None) -> dict:
     """start-plans {items:[{input_id,input_sha256,expected_plan_sha256?,
     planner_method?, planner_backend?}]} → {results:[...]}。每项独立事务，
     不回滚已成功项（§5.22.2/§5.23.2/§5.24.3：planner_backend 缺省 codex，
@@ -1263,6 +1272,8 @@ def start_plans(ctx, payload: dict) -> dict:
     items = payload.get("items")
     if not isinstance(items, list) or not items:
         raise util.bad_request("start-plans 需要非空 items 列表")
+    if expected_retry is not None:
+        util.require(len(items) == 1, '自动重试只能提交原任务的一份冻结材料', 'conflict')
     results = []
     started = 0
     for item in items:
@@ -1273,6 +1284,12 @@ def start_plans(ctx, payload: dict) -> dict:
         try:
             prepared = _prepare_submission(conn, item)
             with db.write_txn(conn):
+                if expected_retry is not None:
+                    task_id = _item_task_id(conn, item)
+                    util.require(expected_retry == _retry_snapshot(conn, task_id)
+                                 and not conn.execute("SELECT 1 FROM requests WHERE task_id=? "
+                                     "AND status IN ('queued','claimed')", (task_id,)).fetchone(),
+                                 '自动重试期间任务或最新规划请求已变化，保留当前状态', 'conflict')
                 result = _submit_one(conn, now, item, prepared)
                 if result.get("error"):
                     raise _SubmissionRejected(result)

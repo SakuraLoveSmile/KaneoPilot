@@ -52,7 +52,7 @@
 5. **先处理 plan_wanted 任务（不受容量限制）**：
    - 条件：状态为 needs_plan、`plan_wanted=true`、没有活动的 plan 请求、未转人工；
    - 若还没有 `delivery.branch`，先补建分支工作树；fetch 与 resolve_base 成功后，可收养仅本地存在、origin 无同名分支、预期路径登记到该分支且目录存在、相对 base 无自有提交、包含全部未跟踪文件的工作树状态为空的遗留分支；只执行 merge --ff-only 到 base，不 force/reset/delete/覆盖未知路径；
-   - 然后准备材料并提交规划。
+   - 初次或显式新规划准备材料后提交；失败自动重试须按第9项保留原确认输入。
 6. **新候选**：
    - 来源：`fetch-todos` 的条目。
    - 条件：本地没有该任务；或本地状态为 needs_plan、从未有过 plan 请求、且没有 automation 对象。另外要求 save_state 为 active，且不是 auto_advance_paused。
@@ -72,7 +72,9 @@
       - 载荷增加 `authorized_by`、`plan_cwd`、`delivery_mode`、`delivery_head_sha`；
       - 记录事件 `automation_adopted`；本次收养以临时 adopted 标志传入，在持久化 delivery 的同一事务记录一次 branch_worktree_adopted（branch/worktree_path/base_sha），adopted 不落入 delivery。
 9. **plan_wanted 任务的材料准备**：
-   - prepare-plan-input 传任务当前的 `requirements_sha256`；
+   - 普通失败的自动重试复用同轮原冻结 `input_id`/SHA，经 `start-plans` 全量重验，保留 supplement、本地附件副本及排除项；不得重新准备空补充材料。原输入缺失、文件或需求/来源身份漂移时明确转 needs_user，不静默退回新输入。显式 replan 或新修复轮仍正常准备新材料，避免跨轮继承旧确认。重试入口及最终提交/失败写事务须绑定原任务与最新规划请求快照；出现新请求或新状态时保留新 owner 的成果，不重新准备或覆盖。
+   - 原生 Codex 已正常完成完整 ready 稿、仅发布失败时保留原稿和真实拒绝原因，转 needs_user，不再调用模型盲重跑；远端授权和正常发布门禁不因此放宽。
+   - 需要准备新材料时，prepare-plan-input 传任务当前的 `requirements_sha256`；
    - 远端需求不符 → 任务进入 needs_user（failure_code=remote_conflict，note「远端需求已变化（新增内容未经筛选）」）。
 10. **失败处理**：
     - 分支失败（branch_exists/delivery_base_unknown）→ 照常导入任务行，写入 automation（`plan_wanted=false`），然后转 needs_user 并带该 failure_code；保留已有 delivery，只有本次新建/收养成功且带 branch 才写 mode=pr，空参数/准备失败不得把 manual 改为 pr。branch_exists 分别说明已推 origin、有自有提交、工作树脏、预期路径未登记、目录缺失五类原因；delivery_base_unknown 显示 origin 不存在分支及可确定的真实默认分支，不能泄露无意义 Git 原文。
@@ -470,7 +472,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 - **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。转为人工处理不停止观察、收尾与评审；live 项目的 monitor/review 由引擎周期 tick 补给。
 - **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
 - **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
-- **plan 失败：** 自动化任务第一次失败时置 plan_wanted，让 intake 自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。
+- **plan 失败：** 自动化任务第一次普通失败时置 plan_wanted，让 intake 按原冻结输入自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。已完成稿仅发布被拒的止损与材料保全遵循上文第9项，不自动重跑模型。
 
 **新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
 

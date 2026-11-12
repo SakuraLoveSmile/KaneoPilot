@@ -7,10 +7,12 @@ import os
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import automation_policy, cli, constants, core, db, planner_config, planner_inputs, project_config, remote, util
 
 _TRANSIENT = {"remote_unavailable", "git_transient"}
+_PLANNER_RETRY_FAILURES = ('planner_failed', 'planner_timeout', 'planner_output_invalid')
 
 
 def _readonly(db_path):
@@ -62,7 +64,8 @@ def _adopt(conn, task, now, policy, *, wanted, delivery=None, adopted=False):
                          detail={key: delivery.get(key) for key in ("branch", "worktree_path", "base_branch", "base_sha", "head_sha")})
 
 
-def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delivery=None, candidate=None, adopted=False):
+def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delivery=None, candidate=None, adopted=False,
+             guard_active=False, expected_retry=None):
     manifest, source_path = None, None
     if input_id:
         row = db.get_planner_input(conn, input_id)
@@ -80,6 +83,11 @@ def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delive
                     "requirements_sha256": candidate.get("requirements_sha256"),
                     "source_sha256": candidate.get("source_sha256")}
     with db.write_txn(conn):
+        if expected_retry is not None and expected_retry != planner_inputs._retry_snapshot(conn, task_id):
+            return  # A completed new owner or explicit replan also invalidates this retry.
+        if guard_active and conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                                          (task_id,)).fetchone():
+            return  # A new owner appeared while retry evidence was being read.
         task = db.get_task(conn, task_id)
         if task is None and manifest:
             task = planner_inputs._import_task(conn, now, manifest, actor="automation", source_path=source_path)
@@ -91,17 +99,136 @@ def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delive
             core.block_task(conn, db.require_task(conn, task_id), now, message, code, "automation", stage="plan")
 
 
+def _retry_file(root, name):
+    content, reason = planner_inputs._read_worktree_material(str(root), name, constants.PLAN_INPUT_FILE_MAX_BYTES)
+    util.require(content is not None, '原规划冻结材料缺失或已变化：' + name + '（' + str(reason) + '）',
+                 'validation_failed')
+    return content
+
+
+def _check_native_retry_draft(conn, task, request, payload):
+    """Only the native Codex adapter owns this job/exit/last-message format."""
+    manifest = payload["manifest"]
+    input_id, digest = payload["input_id"], payload["planner_input_sha256"]
+    from . import headless_adapter, stage_contract
+    directory = headless_adapter.resolve_source(conn).run_dir(task['task_id'], request['run_id'])
+    job = json.loads(_retry_file(directory, 'job.json'))
+    util.require(isinstance(job, dict) and all(job.get(key) == value for key, value in {
+        'task_id': task['task_id'], 'request_id': request['request_id'], 'run_id': request['run_id'],
+        'backend': payload.get('planner_backend', 'codex'), 'status': 'failed'}.items()),
+        '原规划运行检查点身份已变化', 'conflict')
+    if type(job.get('exit_code')) is int and job['exit_code'] == 0:
+        raw = _retry_file(directory, 'events.jsonl')
+        util.require(raw.endswith(b'\n'), '原规划终态日志不完整', 'conflict')
+        events = [json.loads(line) for line in raw.splitlines()]
+        util.require(events and all(isinstance(event, dict) and event.get('seq') == index
+                     for index, event in enumerate(events, 1)), '原规划终态日志不可核验', 'conflict')
+        terminals = [event for event in events if event.get('type') == 'terminal']
+        util.require(len(terminals) == 1, '原规划缺少唯一终态', 'conflict')
+        terminal = terminals[0]
+        if terminal.get('reason') == 'publish_failed':
+            contract = stage_contract.validate_contract(job.get('stage_contract'), expected={
+                'stage': 'plan', 'task_id': task['task_id'], 'request_id': request['request_id'],
+                'run_id': request['run_id'], 'harness_id': job['backend']})
+            result = stage_contract.validate_result(job.get('stage_result'), contract)
+            text = _retry_file(directory, 'last-message.txt').decode('utf-8').strip()
+            try:
+                output = json.loads(text)
+            except ValueError:
+                # Match planner_runner.parse_output's accepted fenced/prose JSON,
+                # using the same safely opened bytes instead of reopening a path.
+                start, end = text.find('{'), text.rfind('}')
+                util.require(start >= 0 and end > start, '原规划完成稿需要人工核对', 'conflict')
+                output = json.loads(text[start:end + 1])
+            output = stage_contract.validate_plan_result(output)
+            util.require(result['outcome'] == 'succeeded' and output['status'] == 'ready'
+                         and result['payload'] == output
+                         and contract['inputs'].get('manifest') == manifest
+                         and contract['inputs'].get('input_id') == input_id
+                         and contract['inputs'].get('planner_input_sha256') == digest,
+                         '原规划发布失败，完成稿证据需要人工核对', 'conflict')
+            # Keep the failed request/job and completed draft intact. A new
+            # model invocation cannot repair a publication authorization gate.
+            raise util.KanpilotError('planner_publish_failed',
+                '规划稿已完成（exit 0），但计划发布被拒；已停止自动重跑，请核对原稿后正常重新规划。'
+                + str(job.get('detail') or task['failure_reason'] or '')[:800])
+
+
+def _retry_input(conn, task, expected):
+    """Reuse the failed attempt's entire frozen input, never prepare a thinner one."""
+    if task['failure_code'] not in _PLANNER_RETRY_FAILURES:
+        return None  # Initial intake, an explicit replan, or a new Review fix.
+    request = conn.execute("SELECT * FROM requests WHERE task_id=? AND kind='plan' "
+                           "ORDER BY created_at DESC,rowid DESC LIMIT 1", (task['task_id'],)).fetchone()
+    util.require(request is not None and request['status'] == 'failed' and request['run_id']
+                 and request['finished_at'], '原失败规划请求身份不完整，请人工重新准备材料', 'conflict')
+    payload = db.request_payload(request)
+    input_id, digest = payload.get('input_id'), payload.get('planner_input_sha256')
+    row = db.get_planner_input(conn, input_id) if input_id else None
+    manifest = payload.get('manifest') or {}
+    util.require(isinstance(manifest, dict) and isinstance(manifest.get('task'), dict),
+                 '原规划冻结输入结构已变化', 'conflict')
+    meta = manifest.get('task') or {}
+    util.require(row is not None and row['task_id'] == task['task_id']
+                 and payload.get('manual_authorized') is True and digest == row['input_sha256']
+                 and manifest == db.planner_input_manifest(row) and planner_inputs._manifest_sha(manifest) == digest
+                 and manifest.get('input_id') == input_id and meta.get('task_id') == task['task_id']
+                 and meta.get('project_id') == task['project_id'] and meta.get('repository') == task['repository']
+                 and manifest.get('requirements_sha256') == expected == task['requirements_sha256']
+                 and manifest.get('source_sha256') == task['source_sha256']
+                 and row['requirements_sha256'] == expected and row['source_sha256'] == task['source_sha256']
+                 and not manifest.get('issues'), '原规划冻结输入或任务身份已变化，请人工重新准备材料', 'conflict')
+    root = planner_inputs._inputs_root(conn) / input_id
+    try:
+        util.require(json.loads(_retry_file(root, 'manifest.json')) == manifest,
+                     '原规划材料 manifest 与冻结登记不符', 'conflict')
+        for entry in manifest.get('files') or []:
+            raw = _retry_file(root, entry['path'])
+            util.require(len(raw) == entry['size'] and util.sha256_bytes(raw) == entry['sha256'],
+                         '原规划材料内容已变化，请人工重新准备材料', 'conflict')
+        if payload.get('planner_backend', 'codex') == 'codex':
+            _check_native_retry_draft(conn, task, request, payload)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise util.KanpilotError('validation_failed', '原规划冻结材料或运行证据不可核验，请人工重新准备材料') from exc
+    try:
+        live = remote.get_task(remote.get_client(), task['task_id'])
+    except Exception as exc:
+        raise util.KanpilotError('remote_unavailable', '重试前无法核验远端规划需求') from exc
+    live_task = live.get('task') or {}
+    util.require(live_task.get('id') == task['task_id'] and live_task.get('projectId') == task['project_id']
+                 and live.get('requirements_sha256') == expected
+                 and live_task.get('status') in core.expected_remote_slugs(task),
+                 '远端任务、项目、需求或规划授权状态已变化，请人工重新准备材料', 'remote_conflict')
+    return dict(input_id=input_id, input_sha256=digest, can_start=True,
+                planner_backend=payload.get('planner_backend', 'codex'),
+                planner_method=payload.get('planner_method', 'builtin'))
+
+
 def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, candidate=None):
     from . import git_delivery, task_workspace
     task = db.get_task(conn, task_id)
+    if wanted and not (task is not None and task['status'] == 'needs_plan' and db.task_is_active(task)
+                       and core.is_automation_managed(task) and core.automation_of(task).get('plan_wanted')
+                       and not task['auto_advance_paused'] and not core.automation_of(task).get('manual_takeover')):
+        return {'task_id': task_id, 'reason': 'planning_state_changed'}
+    retrying = wanted and task is not None and task['failure_code'] in _PLANNER_RETRY_FAILURES
+    expected_retry = planner_inputs._retry_snapshot(conn, task_id) if retrying else None
+    if expected_retry is not None and expected_retry['task'] != dict(task):
+        return {'task_id': task_id, 'reason': 'planning_state_changed'}
+    if wanted and conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed')",
+                               (task_id,)).fetchone():
+        return {'task_id': task_id, 'reason': 'active_request'}
     if task and not core.automation_budget(task, policy, now)["ok"]:
-        _failure(conn, task_id, now, policy, "auto_budget_exceeded", "无人值守段成本或时长已达到上限")
+        _failure(conn, task_id, now, policy, "auto_budget_exceeded", "无人值守段成本或时长已达到上限",
+                 guard_active=wanted, expected_retry=expected_retry)
         return {"task_id": task_id, "reason": "auto_budget_exceeded"}
     prepared = None
     adopted = False
     prepared_delivery = None
     delivery = core.delivery_of(task) if task else {}
     try:
+        if wanted:
+            prepared = _retry_input(conn, task, expected)
         if wanted and not delivery.get("branch"):
             initial = task_workspace.review_fix_head(conn, task, allow_pending=True) if task["plan_kind"] == "review_fix" else None
             delivery = git_delivery.prepare_branch_worktree(task["repository"], task_id,
@@ -112,11 +239,11 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
             if delivery.get("branch"):
                 delivery["mode"] = "pr"
                 prepared_delivery = delivery
-        prepared = cli.run("prepare-plan-input", {"task_id": task_id,
-                          "expected_requirements_sha256": expected, "local_paths": [],
-                          # A14: unattended preparation must not be recorded as a
-                          # user action.
-                          "actor": "automation"}, db_path)
+        if prepared is None:
+            prepared = cli.run("prepare-plan-input", {"task_id": task_id,
+                              "expected_requirements_sha256": expected, "local_paths": [],
+                              # A14: unattended preparation is not a user action.
+                              "actor": "automation"}, db_path)
         if not prepared.get("can_start"):
             raise util.KanpilotError("validation_failed", "规划材料不完整，请人工补齐或排除附件")
         task = db.get_task(conn, task_id)
@@ -135,9 +262,16 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
                 prepared_delivery = delivery
         config = planner_config.merged(conn)
         item = {"input_id": prepared["input_id"], "input_sha256": prepared["input_sha256"],
-                "planner_backend": config["backend"], "planner_method": config["default_method"],
+                "planner_backend": prepared.get('planner_backend', config["backend"]),
+                "planner_method": prepared.get('planner_method', config["default_method"]),
                 "automation": {"authorized_by": "automation", "policy_revision": policy["policy_revision"], "delivery": delivery, "adopted": adopted}}
-        response = cli.run("start-plans", {"items": [item]}, db_path)["results"][0]
+        if retrying:
+            # Same normal submission gates, with a local identity guard in its
+            # transaction. This parameter is deliberately not a CLI field.
+            response = planner_inputs.start_plans(SimpleNamespace(conn=conn, now_iso=now),
+                {"items": [item]}, expected_retry=expected_retry)["results"][0]
+        else:
+            response = cli.run("start-plans", {"items": [item]}, db_path)["results"][0]
         if not response.get("request_id"):
             raise util.KanpilotError(response.get("code") or "validation_failed", response.get("error") or "规划提交失败")
         return {"task_id": task_id, "request_id": response["request_id"]}
@@ -148,7 +282,8 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
         if wanted and code == "conflict" and "远端需求" in message:
             code, message = "remote_conflict", "远端需求已变化（新增内容未经筛选）"
         _failure(conn, task_id, now, policy, code, message,
-                 input_id=prepared.get("input_id") if prepared else None, delivery=prepared_delivery, candidate=candidate, adopted=adopted)
+                 input_id=prepared.get("input_id") if prepared else None, delivery=prepared_delivery,
+                 candidate=candidate, adopted=adopted, guard_active=wanted, expected_retry=expected_retry)
         return {"task_id": task_id, "reason": code}
 
 

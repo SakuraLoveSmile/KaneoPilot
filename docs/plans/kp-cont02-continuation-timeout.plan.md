@@ -114,3 +114,10 @@
 
 - c89e规划模型正常exit0、完整last-message保留，但发布因远端in-progress被拒；旧review_remediation已executing，原remote_status=in-review不再被expected_remote_slugs接受，automation旧replan_remote_status仍to-do。不能直接改远端回ToDo或伪造request/job。
 - automation自动发起4ef58e46-db16-46eb-ae1e-fb9f704f87fd / d643728b-0352-408b-b4b0-40b39ae97733，已被领取。独立只读分析确认该input85c23e40-1863-420c-8d86-beb898f2491f丢失supplement且无review_remediation，不等同原已确认输入；保留当前owner，不抢占、不放宽发布门禁。原c89e完整稿已包含128/512和runtime收尾，优先修正规划产物恢复与自动重试输入保全，而非重复消耗模型。
+
+- 独立审查原c89e完整稿无P1，保留全部原验收和三条verify，但第4条verify仅ps/PID不是真实cwd/openFD扫描（P2），须修订后才能执行。因此不新增已完成产物直接登记恢复框架，保留原稿审计；本轮沿现有resolve replan→prepare/start正常路径刷新当前远端授权，自动重试缺陷仅修输入保全与完整稿发布失败止损。
+- 4ef旧自动规划正常回needs_user（reported，询问860dp范围），无queued/claimed后经核心resolve replan成功（当前in-progress已重新绑定）。新输入bac954a4-d715-48eb-9a47-8d0354d1afba / 86378301133007a016be8491c28d4c944ac2b5c042050b2eeaaea3da036cb618，can_start=true/issues=[]；保留完整supplement、原正式计划与c89e完整稿作参考，新增真实内核引用扫描要求、不扩大860dp补验为业务源码修改。正常start-plans提交25772a91-bb05-4a59-9b9c-9ab1ee1cdf58，定点detached planner PID93893。原远端门禁不修改，未抢owner或伪造规划成功。
+
+- T9预修订组合180 passed、16 subtests passed（32.96s），覆盖retry inputs/intake/planner inputs automation/automation core/planner errors。独立review另发现新owner完成后active为空时，旧retry的成功/失败路径可覆盖新状态的并发缺口；正在补事务内任务与原失败请求身份门禁，该次通过不作为修订后最终证据。
+
+- T9最终源码组合：重试入口资格/双快照及提交/失败事务守卫，原冻结输入完整复用，native完成ready稿publish_failed止损；其他后端不要求native job。两个独立复现的owner竞争窗口均修复，独立review最终无阻断；专项11 passed/19 subtests。主agent最终组合retry/intake/planner inputs automation/automation core/planner errors/v2 planning `198 passed, 22 subtests passed in 39.79s`，git diff --check通过，均隔离夹具，无真实模型/生产调用。新增内部start_plans参数，不增加CLI命令、不改远端门禁/DB schema。准备提交并发布后续测试版。
