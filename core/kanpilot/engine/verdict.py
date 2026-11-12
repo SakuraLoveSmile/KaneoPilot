@@ -115,10 +115,26 @@ def _evidence_only_changes(worktree, deadline=None, heartbeat=None) -> int:
     return sum(1 for row in rows if str(row.get("path", "")).split("/")[0] == ".pi")
 
 
-def _check_result(commands, changes, checks, evidence_changes=0):
+def _check_result(commands, changes, checks, evidence_changes=0, delivery_kind="source"):
     empty_diff = not changes
     reasons = environment_reasons(checks)
     env_failure = bool(reasons)
+    # 证据/记录收尾轮：计划在「## 交付类型」里明确声明本轮不产生源码 diff。
+    # 放行条件三条同时成立，缺一不可：声明为 evidence_only、.pi/** 确有证据改动、
+    # 冻结 verify 命令逐条真实退出 0。其余任何情况仍是空转失败。
+    evidence_only_pass = (
+        empty_diff and delivery_kind == "evidence_only" and not env_failure
+        and bool(evidence_changes) and bool(commands)
+        and len(checks) == len(commands)
+        and all(type(c["exit_code"]) is int and c["exit_code"] == 0 and not c["timed_out"]
+                for c in checks)
+    )
+    if evidence_only_pass:
+        return {"verification_ok": True, "empty_diff": True, "evidence_only": True,
+                "environment_failure": False, "environment_reasons": [],
+                "effective_changes": changes, "kind": "passed", "checks": checks,
+                "detail": "本轮声明为证据/记录收尾：.pi/** 证据材料变动 "
+                          + str(evidence_changes) + " 项，无源码交付物，冻结 verify 命令逐条退出 0"}
     if empty_diff and evidence_changes:
         # 证据/材料轮次仍判空转（不放宽门禁），但要说清是“只有 .pi/**”而不是
         # “什么都没做”，否则用户和自动重规划都拿不到可执行的下一步。
@@ -346,7 +362,8 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
         raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证证据无法确认：" + util.redact(str(exc))) from exc
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
-    result = _check_result(commands, changes, checks, evidence_changes)
+    result = _check_result(commands, changes, checks, evidence_changes,
+                           db.task_extra(task).get("plan_delivery_kind") or "source")
     if not verification.get("ok") and not result["empty_diff"]:
         # Missing/ambiguous results cannot trigger a quality repair. Only a
         # real independent nonzero exit is a verification failure.
@@ -414,7 +431,8 @@ def _evaluate_report_task(conn, task, source, *, deadline=None, heartbeat=None, 
               for row in coverage["rows"]]
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
-    result = _check_result(commands, changes, checks, evidence_changes)
+    result = _check_result(commands, changes, checks, evidence_changes,
+                           db.task_extra(task).get("plan_delivery_kind") or "source")
     if not coverage["ok"] and not result["empty_diff"]:
         # Missing or unconfirmed report records stay unconfirmed; only a real nonzero exit fails.
         real_failure = any(type(item.get("exit_code")) is int and item["exit_code"] != 0

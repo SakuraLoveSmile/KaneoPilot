@@ -54,6 +54,16 @@ def test_review_and_planner_prompts_state_manual_acceptance_never_blocks():
     assert "不作为完成前提" in planner
 
 
+def test_delivery_kind_defaults_to_source_and_parses_evidence_only():
+    assert planfile.delivery_kind("# 计划\n\n## 交付类型\n\n源码改动\n") == "source"
+    assert planfile.delivery_kind("# 计划\n\n## 交付类型\n\n证据/记录收尾\n") == "evidence_only"
+    assert planfile.delivery_kind("# 计划\n\n## 交付类型\n\n只补证据、不改源码\n") == "source"
+    # 没有该段 = 源码交付（默认），不能默认放行空 diff
+    assert planfile.delivery_kind("# 计划\n\n## 步骤\n\n改 a.dart\n") == "source"
+    # 其他章节里的相似措辞不算声明
+    assert planfile.delivery_kind("# 计划\n\n## 风险\n\n证据收尾风险\n") == "source"
+
+
 def test_body_line_count_ignores_frontmatter_and_blank_lines():
     plan = b"---\ntask_id: t\n---\n\n# title\n\nstep\n"
     assert planfile.body_line_count(plan) == 2

@@ -61,6 +61,30 @@ def manual_acceptance(plan_text: str) -> list:
     return items
 
 
+_DELIVERY_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*交付类型")
+_DELIVERY_EVIDENCE_ONLY = ("证据/记录收尾", "证据收尾", "记录收尾", "evidence_only")
+
+
+def delivery_kind(plan_text: str) -> str:
+    """计划声明的本轮交付类型：`source`（默认，必须改业务源码）或 `evidence_only`。
+
+    `## 交付类型` 段写明「证据/记录收尾」的轮次不会产生源码 diff（例如只补证据、
+    只改任务记录、只准备依赖环境），核心据此允许空 diff 通过 monitor；其余情况仍是
+    源码交付，空 diff 照旧判空转。
+    """
+    inside = False
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^#{1,6}\s", stripped):
+            inside = bool(_DELIVERY_HEADING.match(stripped))
+            continue
+        if not inside or not stripped:
+            continue
+        if any(word in stripped for word in _DELIVERY_EVIDENCE_ONLY):
+            return "evidence_only"
+    return "source"
+
+
 def body_line_count(raw: bytes) -> int:
     """计划正文的非空行数（不含 frontmatter）。
 

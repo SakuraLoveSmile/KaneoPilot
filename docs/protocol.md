@@ -775,7 +775,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。完成判定的结果来源是 Plus 结构化 Goal 报告，Pilot 不回查转录中的工具结果。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
-- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。只有 `.pi/**` 变动、没有源码交付物的轮次仍判 `empty_diff`（不放宽门禁），但 `detail` 必须写明“只有 .pi/** 证据材料变动（N 项）”、给出可执行下一步，不能用泛化的“空转”让用户和自动重规划无从下手。
+- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
+- **证据/记录收尾轮（2026-11-13）**：计划正文 `## 交付类型` 段写明「证据/记录收尾」时，本轮按声明**不产生源码 diff** 是预期行为。monitor verdict 放行空 diff 需三条同时成立：① 声明的 `plan_delivery_kind="evidence_only"`（publish-plan 由 `planfile.delivery_kind` 解析并投影到 get-task）；② 该轮 `.pi/**` 确有证据材料改动；③ 冻结 verify 命令逐条真实退出 0。缺任一条仍是空转失败。同类型轮次的 delivery-commit 返回 `outcome="unchanged"`：不创建空提交、沿用既有 head 继续评审，并记 `delivery_unchanged` 事件。Review 需核对声明与实际一致（证据落在声明位置、verify 真实通过、没有把该改代码的工作伪装成证据轮），不一致或 verify 失败仍按缺陷/验证失败处理。理由：只补证据、只准备依赖环境或只追加记录的任务在任何门禁下都无法产生源码 diff，历史上有两例因此永远无法自动完成。只有 `.pi/**` 变动、没有源码交付物的轮次仍判 `empty_diff`（不放宽门禁），但 `detail` 必须写明“只有 .pi/** 证据材料变动（N 项）”、给出可执行下一步，不能用泛化的“空转”让用户和自动重规划无从下手。
 - verify 只接受执行环境能直接运行并返回退出码的命令。设备/模拟器/录屏类命令（首词 `adb`/`avdmanager`/`emulator`/`simctl`/`scrcpy`/`screencapture`/`idevice*`，或 `xcrun simctl`、`flutter run|drive|install` 前缀）在 `parse_verify_block` 直接拒收（2026-11-12）：执行环境没有真机或屏幕，写进 verify 只会让每轮验证必然失败；这类验收写进计划正文的「人工验收」清单。
 - 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条执行，并在完成时以结构化 Goal 报告（`SubmitGoalReport`）提交 `checks`，逐条列出冻结命令、退出码与结果。报告是完成判定的唯一结果来源；助手的文字总结不能作为通过依据。
 - 核心核对 task/run/turn 身份、`plan_sha256` 与登记工作树。报告经 `read_goal_report` 读取并做身份核对（session、proposal、execution 相符；绝不按名称或标题匹配）。本轮执行 turn 与报告 turn 都必须属于已批准的 turn 链（含 `turn_adopted`）。规划、旧 turn、任意人工接续与其他 agent 的报告不能混用。报告不可用（not_found、pending、draft、failed、corrupt、truncated）为未确认。报告底线（不含 reviews，与 `verify_goal_completion` 的确定性部分同口径）要求 `ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；任一不满足（如 fallback 报告）同为未确认。

@@ -681,6 +681,8 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         ),
         # 计划里人工验收段的条目（待体验清单，不参与完成门禁）。
         "plan_manual_acceptance": db.task_extra(task).get("plan_manual_acceptance") or [],
+        # 本轮交付类型：source（默认）或 evidence_only（证据/记录收尾轮）。
+        "plan_delivery_kind": db.task_extra(task).get("plan_delivery_kind") or "source",
         # v2 §5.20.1：purged 任务只读审计详情。
         "read_only": db.task_is_purged(task),
     }

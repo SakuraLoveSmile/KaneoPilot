@@ -156,7 +156,7 @@ def _finish_complete(controller, task, detail, expected):
         if commit.get("outcome") == "blocked":
             controller.report("failed", note="blocked:" + str(commit.get("failure_code")))
             return
-        if commit.get("outcome") not in ("committed", "already_committed"):
+        if commit.get("outcome") not in ("committed", "already_committed", "unchanged"):
             raise util.KanpilotError("observation_blocked", "交付提交结果不可确认")
     _advance(controller, task, "in-review", expected)
     _record_cost(controller, task, detail)

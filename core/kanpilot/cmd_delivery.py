@@ -35,6 +35,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         baseline = core.branch_review_snapshot(task)
         git_input = dict(delivery, repository=task["repository"])
         title = task["title"]
+        evidence_only = db.task_extra(task).get("plan_delivery_kind") == "evidence_only"
         fix_round = core.automation_of(task).get("fix_round", 0)
         if repair.get("source_kind") == "build_failure":
             from . import review_repair
@@ -73,11 +74,21 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 from . import review_repair
                 review_repair.verify_frozen(task)
                 verified["merge_parent_sha"] = repair["target_base_sha"]
-            result = git_delivery.commit_worktree(
-                git_input, task_id=payload["task_id"], title=title,
-                execution_run_id=execution_run_id, fix_round=fix_round, **verified)
-        git_delivery.verify_branch_worktree(
-            git_input, require_clean=True, expected_head=result["sha"])
+            if evidence_only and not verdict.effective_changes(git_input["worktree_path"]):
+                # 证据/记录收尾轮：声明本轮不产生源码 diff，沿用既有 head 继续评审，
+                # 不创建空提交、不阻塞交付。上面的验证回执核对仍然执行，不能跳过门禁。
+                result = {"sha": delivery["head_sha"], "files": [], "unchanged": True}
+            else:
+                result = git_delivery.commit_worktree(
+                    git_input, task_id=payload["task_id"], title=title,
+                    execution_run_id=execution_run_id, fix_round=fix_round, **verified)
+        if result.get("unchanged"):
+            # 证据轮不改源码，工作树本就不干净（.pi 证据）；只核分支未被他人移动。
+            if git_delivery._value(["rev-parse", "HEAD"], git_input["worktree_path"]) != delivery["head_sha"]:
+                raise git_delivery.GitDeliveryError("delivery_commit_failed", "证据轮期间分支已变化，保留现场")
+        else:
+            git_delivery.verify_branch_worktree(
+                git_input, require_clean=True, expected_head=result["sha"])
         if repair.get("source_kind") == "build_failure":
             parents = git_delivery._value(["show", "-s", "--format=%P", result["sha"]], git_input["worktree_path"]).split()
             if parents != [repair["release_target_sha"]]:
@@ -98,6 +109,15 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                              "提交期间交付登记已变更", "conflict")
                 core.require_committed_review(fresh, execution_run_id, verify_worktree=False)
                 return {"outcome": "already_committed", "sha": commit["sha"]}
+        if failure is None and result and result.get("unchanged"):
+            util.require(core.branch_review_snapshot(fresh) == baseline,
+                         "提交期间交付登记已变更", "conflict")
+            util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
+            db.add_event(conn, now, "delivery_unchanged", task_id=payload["task_id"],
+                         request_id=payload["request_id"], actor="kaneo-monitor",
+                         detail={"execution_run_id": execution_run_id, "head_sha": result["sha"],
+                                 "reason": "plan_delivery_kind=evidence_only"})
+            return {"outcome": "unchanged", "sha": result["sha"], "files": 0}
         util.require(core.branch_review_snapshot(fresh) == baseline,
                      "提交期间交付登记已变更", "conflict")
         util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
