@@ -167,3 +167,12 @@
 
 - T11稳定签名只读核验：主Music工作区原有android/app/key.properties与keystore.jks存在，keytool仅读公钥export exit0，公开证书SHA b2bb4810ec0074fe6e2341689fde03755f5be7567d779d2cce9d9318d0fc7a8d，与历史稳定包一致；未输出/持久化密码或私钥。此事实已加入完整新supplement，但不能推定当前真机证书，固化执行端安装前仍须核对。
 - 当前自动planner3ce23仍claimed且租约有效，native child PID775仍活，owner来自旧226 bundle。正常退出App会停止所属调度/后代，当前不安全安装；需等该owner自然终态并核request/job/child/槽位，再执行用户同意的正常更新。更新确认问题已发出，尚无答复；未停止或替换App。
+
+## test.240 实际安装（用户已授权，进行中）
+
+- 用户确认“现在更新并重启”。通过App设置→高级→软件更新正常检查，test.240已下载并校验；尚未点安装，先等待当前native规划自然终态。通过侧栏暂停自动推进（原先运行中），仅阻止新领取，在途1项继续；更新核验后恢复原运行状态。
+- 已用SQLite mode=ro backup API保存一致性数据库备份到主仓库build/kp-cont02/install-240-backup/kanpilot-before-update.db，目录0700/文件0600，69,816,320B，SHA2100782ef437349153b303dfc9ebbf0ed66acc9a292c94c59941ca671eaf9ca1，immutable只读integrity_check=ok；未复制活动DB文件拼接WAL。manifest同目录保留，不输出DB/凭据内容。
+
+- 实际安装完成：旧3ce23自然needs_input终态（真实问题为真机不兼容时路线），708/775/786均已退出，无claimed请求，plan/review槽位free后，点击App“安装并重新启动”并确认。新版App PID16345于20:37:43启动；设置界面显示0.5.7-test.240（240），内置git_delivery/cmd_delivery/review_snapshot/constants逐文件与发布源码一致，新engine/MCP进程均来自新版bundle。正常更新器回执launch_requested，保留旧App于/Applications/.KaneoPilot-backup-hsesbeua/KaneoPilot.app；未手动覆盖运行中bundle。
+- 已恢复原自动推进（UI运行中），数据库27任务保留，无schema变更。回执及安装核验installation-check.json保存主仓库build/kp-cont02/install-240-backup；本次安装完成不等于Music业务验收通过。
+- 用户真机决定已直接沿submit-plan-answers选择physical_only（不重复询问AVD路线），补充已找到的稳定签名、更高build-number/数据兼容条件、安装新版根因消除及完整helper冻结要求；operation kp-cont02-t11-physical-only-signed-upgrade accepted，新request0a282bfc-5b05-4522-be58-15f687a884a8已由新版调度器正常claimed/run db4a55ab-10b2-4f20-a13a-de3a44d381e9，模型配置未改变。真机尚无安装或原生验收通过；等待新规划及后续固化执行，保留工作树。
