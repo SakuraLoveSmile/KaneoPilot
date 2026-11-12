@@ -105,3 +105,12 @@
 - 经核心prepare-plan-input把用户确认额度及runtime收尾补入同任务，输入 `ee1e9bd1-a02c-4405-bd05-e13b85d8eaf3` / `b58b672f59944783e36f34a4b56f5db5ba7c3540eb4446c713049249c1a8d0cb`，can_start=true、无issue。正常start-plans提交请求 `c89e7779-528d-4aab-abb9-d1589e129960`，脱离工具会话的定点planner --once启动（PID32846）；未原地改冻结计划，未复用错误网络轮次，未抢其他任务。
 
 - T8最终组合态：主agent使用真pytest运行native/limits/snapshot/CLI Review/Desktop queue/stage contract，`132 passed, 76 subtests passed in 476.85s`；worker独立专项42通过，共用入口95通过、8 subtests通过；reviewer无阻断项。未跳过或放宽门禁，未调用业务执行端验证。`git diff --check`通过，准备提交任务分支并走云端测试发布。
+
+- T8发布源码 `9e0428cb91cfcd3a7e60342bfac16f3eef0cab86` 已推送；云端 Packages 测试发布 run234：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43194535718>，基础版本0.5.7。同源码push预览233已核对身份并请求取消，避免重复；234进行中，尚无新Release/安装证据。
+
+- test.234已公开：<https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.234>，非draft/prerelease，全部18个job中17个success，仅显式fulltext probe skipped。完整四资产已下载至主仓库build/kp-cont02/release-234，SHA/大小/source/version/build/通道/分支/arm64一致；hdiutil verify退出0、checksum VALID。未安装App或操作现有手机。
+
+## T9 补验规划发布恢复（实现中）
+
+- c89e规划模型正常exit0、完整last-message保留，但发布因远端in-progress被拒；旧review_remediation已executing，原remote_status=in-review不再被expected_remote_slugs接受，automation旧replan_remote_status仍to-do。不能直接改远端回ToDo或伪造request/job。
+- automation自动发起4ef58e46-db16-46eb-ae1e-fb9f704f87fd / d643728b-0352-408b-b4b0-40b39ae97733，已被领取。独立只读分析确认该input85c23e40-1863-420c-8d86-beb898f2491f丢失supplement且无review_remediation，不等同原已确认输入；保留当前owner，不抢占、不放宽发布门禁。原c89e完整稿已包含128/512和runtime收尾，优先修正规划产物恢复与自动重试输入保全，而非重复消耗模型。
