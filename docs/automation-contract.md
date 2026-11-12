@@ -335,6 +335,7 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 - 复用 claude_cli 和 codex_planner 的 `launcher_argv`/`child_env`/`map_event`；Codex 使用只读沙箱，cwd 为 Review 快照。
 - 两者共用新 prompt `review_cli.md`。
 - Codex 成本记为 null（source=codex），token 数只写日志。
+- **瞬时错误与成功终态（2026-11-13）**：Codex 事件流先报 `error`/`turn.failed`、之后自行重连并发出 `turn.completed` 时，按最终结果处理——退出码 0 且 `last-message.txt` 是合法结构化结果即接受，`recovered_error_events` 记数量留证；成功终态之后才出现的错误、或从未出现成功终态，仍 fail-closed 判失败。理由：真实 Review 出现 `Reconnecting... waiting for network` 后仍产出完整 JSON 且退出码 0，却被丢弃成「Codex Review 失败（退出码 0）」。
 
 **交付任务的 Review 材料：**
 

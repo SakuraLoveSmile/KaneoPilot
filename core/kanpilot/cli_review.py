@@ -44,8 +44,14 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
     proc = None
     buffer = bytearray()
     failed = False
+    # Codex 会在网络抖动时先发 error/turn.failed，再自行重连并完成同一轮
+    # （真实案例：`Reconnecting... waiting for network` 后仍产出完整结构化结果、
+    # 退出码 0）。只有之后出现成功的 turn.completed 才以最终结果为准；没有
+    # 成功终态时仍 fail-closed，不把 error 事件当成功。
+    recovered = 0
+    completed_after_failure = False
     def consume(raw, log):
-        nonlocal failed
+        nonlocal failed, recovered, completed_after_failure
         text = util.redact(raw.decode("utf-8", errors="replace"), secrets)
         log.write(text.rstrip() + "\n")
         log.flush()
@@ -55,12 +61,17 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
             return
         if not isinstance(event, dict):
             return
-        if event.get("type") in ("turn.failed", "error"):
-            failed = True
+        kind = event.get("type")
         item = event.get("item")
-        if event.get("type") == "item.completed" and isinstance(item, dict):
-            if item.get("type") in ("error", "turn_failed") or item.get("error") is not None:
-                failed = True
+        if (kind in ("turn.failed", "error")
+                or (kind == "item.completed" and isinstance(item, dict)
+                    and (item.get("type") in ("error", "turn_failed")
+                         or item.get("error") is not None))):
+            failed = True
+            recovered += 1
+            completed_after_failure = False
+        elif kind == "turn.completed" and failed:
+            completed_after_failure = True
         if on_event:
             on_event(event)
     try:
@@ -94,7 +105,9 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
                     buffer[:] = tail
                     consume(line, log)
             result["exit_code"] = proc.wait(timeout=5)
-        if result["error"] is None and not failed and result["exit_code"] == 0:
+        result["recovered_error_events"] = recovered
+        recovered_final = completed_after_failure and result["exit_code"] == 0
+        if result["error"] is None and result["exit_code"] == 0 and (not failed or recovered_final):
             try:
                 result["structured_output"] = json.loads(Path(out_path).read_text(encoding="utf-8"))
                 result["is_error"] = False
