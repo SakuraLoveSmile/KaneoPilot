@@ -161,3 +161,9 @@
 - 通过submit-execution-answers operation kp-cont02-user-physical-device把用户设备变更送达当前执行者（accepted）；执行者当前正常running，先保全材料并仅收尾本任务AVD，再经正常replan更新设备绑定，旧计划不原地改写，不把未登录或未采集验收当通过。后继计划须保留全部原验收与128/512、完整来源及verify门，明确真机数据保全和同条件基线对照方式；现有手机不能用卸载/降级换包完成对照。
 
 - 补充只读aapt核验：round5候选versionCode1793783648，低于真机1793783652；禁止直接安装或-d。后继真机计划已准备完整supplement，要求保持业务源码3908a33，以Flutter build-number参数生成严格更高版本并核签名/身份/数据保全；不能在现有真机反复装历史基线包。未做任何真机写入。
+
+- 真机补验完整input a23d8402-98f9-49cc-8c38-cf7ebc20bbe9/188880c8272ccad8c979697171919aec0795c2eb159c38b189fdbf10da429e29已正常prepare（can_start=true/issues=[]）；resolve后现有自动规划抢先提交3ce23aee-c90d-4bb7-9b56-f09f8b62af40/run a281c98f，输入51ac8f75且supplement空。手动start-plans返回planning conflict，未启动第二owner、不覆盖冻结输入；先保留当前owner，待正常终态后核新计划是否包含用户真机要求与数据保全/签名/升级条件。
+- 独立只读根因核验：运行中的App/MCP/engine仍test.226，旧bundle缺_evidence_material和已提交成果复用；其5MiB门把本轮3个证据APK误判为交付。当前任务HEAD分类effective=[]，真实提交仅2个Dart业务文件，安全。无需删除证据、修改5MB门或再改Music源码；应先安装并重启已核验test.240。此前约定不自动安装，已向用户明确询问更新/短暂停调度，等待答复；尚未安装/停进程。
+
+- T11稳定签名只读核验：主Music工作区原有android/app/key.properties与keystore.jks存在，keytool仅读公钥export exit0，公开证书SHA b2bb4810ec0074fe6e2341689fde03755f5be7567d779d2cce9d9318d0fc7a8d，与历史稳定包一致；未输出/持久化密码或私钥。此事实已加入完整新supplement，但不能推定当前真机证书，固化执行端安装前仍须核对。
+- 当前自动planner3ce23仍claimed且租约有效，native child PID775仍活，owner来自旧226 bundle。正常退出App会停止所属调度/后代，当前不安全安装；需等该owner自然终态并核request/job/child/槽位，再执行用户同意的正常更新。更新确认问题已发出，尚无答复；未停止或替换App。
