@@ -47,6 +47,12 @@
 
 ## 交付与恢复
 
+### 云端构建记录
+
+- 分支 `fix/20261112-kp-ub01-automation-unblock`，提交 `55d36d1`。
+- 首次 `Packages` run 43239792169 在 `checks (3, 3.13)` / `checks (3, 3.11)` 的 “Integration fixture tests” 失败：`tests/test_pi_config_contract.py::test_get_exec_config_roundtrip_after_set` 仍断言旧默认 86400。该用例属本次默认值调整的预期更新，已改为 3600 并本地验证本文件 12 passed；这是本次改测试预期的唯一依据。
+
+
 - 体验入口：改动在源码树 `core/`；正在运行的 `/Applications/KaneoPilot.app` 仍是旧副本，需要走云端 `Packages` 构建安装后才生效。
 - 尚未验证：真实任务重跑（规划材料体积、verify 拒收、提问超时）需要装机后复测；本机全量测试套件未跑完（见上表）。
 - 现场证据：修复期间任务 `wjhpqxfqxr3084vxtc19e1uo` 的第 4 次规划又于 2026-11-12 21:50:42 以 `planner_timeout（1800s）` 失败，与 T1 指向的原因一致。

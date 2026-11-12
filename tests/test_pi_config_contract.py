@@ -58,7 +58,9 @@ def test_get_exec_config_roundtrip_after_set(cli):
     saved = cli("set-exec-config", payload)
     assert set(saved) == {"config"}
     assert set(saved["config"]) == CONFIG_KEYS
-    assert saved['config']['execution_question_max_wait_seconds'] == 86400
+    # 2026-11-12：默认最长等待由 86400 降到 3600（无人值守不再停摆整天），
+    # 用例断言跟随默认值；显式设置的 0/3600 回环见下一条用例。
+    assert saved['config']['execution_question_max_wait_seconds'] == 3600
     assert ISO_RE.match(saved["config"]["updated_at"])
     got = cli("get-exec-config", {})
     assert got["config"] == saved["config"]
