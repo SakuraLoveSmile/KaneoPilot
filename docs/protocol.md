@@ -918,6 +918,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - `needs_input`：保存 `questions` 与 `plan_markdown` 草稿，task→`needs_user`、`failure_code=reported`；UI 允许补充说明/附件后重新提交，不发布为可执行计划。
 - 模型退出失败/超时/空输出/不合规输出：保存证据（JSONL 日志+stderr），进入规划失败（`report failed`/`needs_user`），**不自动重试**。超时沿用 `executor_timeout_seconds`（默认 1800s）。
 - runner 心跳间隔 ≤ `min(lease_seconds/3, 60)` 秒；租约失效或所有权丢失（`stale_run`）时终止自己的子进程组，禁止发布。
+- 原生 Codex 子进程启动后、发送 prompt 前持久化真实 child PID／出生身份／独立进程组、owner 出生身份及工作目录/输出路径；检查点不能核验或落盘时，经真实进程句柄终止尚未发送的进程，不发送指令。父 runner 消失不单独证明子进程或工具已停止；中断槽位按 §5.29 显式恢复，不能把无完整输出解释为规划成功。
 - 日志展示结构化进度与 stderr；未知 JSONL 事件保留原始记录；不把进程退出码 0 单独视为成功（须 schema 校验输出）。
 
 ### 5.22.4 发布与执行分离
@@ -1822,6 +1823,8 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
 
 **人工恢复旧 Plus 租约（KP-ENV01，2026-11-04 用户明确授权）**：原 Plus 轮次记录已丢失且无法恢复时，可由运维显式调用 `worktree-slot-recover {slot_id,holder_id,lease_token,operation_id,backup_dir,reason,dry_run?:bool,confirm?:bool}`；默认只读预检，实际操作必须 `dry_run:false,confirm:true` 并记录人工授权原因。仅限同代的 `leased/unknown`、已终态的 Plus 规划/评审请求，冻结租约与可信原 job 身份、原 PID/会话/轮次必须一致，本机原进程必须已不存在，且关联操作均已确认。完整备份的清单、归档 SHA 与当前文件内容须核对，保全规划附件及持久 job 路径后才可复用既有释放；未知文件不删除，未知改动仍保留隔离。核心先登记人工恢复回执，再实施文件/租约变化，结果可按同一 operation_id 查询。回执明确为人工恢复且 Plus 终态仍未知，不改写原 job 的 `owner_stopped`，不伪造远端终态，也不进入自动回收路径。未取得该次人工确认不得调用执行模式；自动回收、隔离和 Desktop 交还门槛保持原样。
+
+**中断的原生 Codex 规划（KP-CONT02）**：同一 `worktree-slot-recover` 入口（额外可选 `native_audit_path/native_audit_sha256` 指向独立审计附件）仅为 `plan/codex` 增加有界恢复，不扩展 Review 或自动回收。请求须已 `failed/cancelled`，job 尚无终态或完整输出，task/request/run/slot/同代租约、PID、冻结 stage contract 与输入/输出 schema 必须一致，且无活动规划或未决关联操作。原 owner 必须 ESRCH；新检查点还要求 child 不存在、PID 未复用且其进程组无活进程。恢复还须核对完整原生工具账本、唯一日志会话及同轮事件身份；只允许已完成的 command_execution，经显式人工审计确认无后台服务、派生或外部异步动作，并把审计者与结论绑定到日志/确定性命令账本哈希，回执明确该审计来自 agent，不冒称用户逐条确认。其他可异步工具、未知工具/日志、截断行或未完成命令均拒绝。重复完整本机进程扫描均不得出现该 run/槽位标记或 child 进程组，且同 UID 内核 cwd/打开文件快照不得有其他进程占用槽位、Git 管理目录或运行证据；扫描不完整拒绝，无 force。这是 PID 缺失、内核快照与人工历史审计的组合依据，不声称证明所有潜在脱离后代或未来访问不存在。完整槽位、Git 索引及原 job/events/native log/schema 先独立备份并核验；核心先写恢复回执，在同轮结算锁内重复核对身份、证据、进程及源码快照，再保全附件、如实登记 `native_planner_interrupted` 并释放或保留隔离。原始材料保留，退出码保持未知、规划结果为未确认，不伪造模型完成或成功计划；之后只能经正常 prepare/start 链路重新规划。
 
 **Desktop 显式交还（2026-10-16 用户授权）**：新增 `kp_desktop_return_slot {request_id,run_id,claim_token,confirm:true}`。消费者必须先完成所有目录读取、经submit/fail持久提交正文/失败记录并等核心结算为请求终态，再调用本接口；交还以后禁止继续读取或写入槽位，包括原生会话仍存活的情形。submit成功、MCP短进程退出、租约到期都不自动视为交还。这是协作协议证明，不是原生进程退出证明，不能写 `owner_stopped=true` 冒充。
 

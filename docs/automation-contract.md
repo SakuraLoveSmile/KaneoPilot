@@ -517,6 +517,8 @@ attention-list透出question_preview；DTO、答案映射、五命令和测试�
 Codex Desktop显式交还：先完成所有目录读取，经kp_desktop_submit_plan/review或kp_desktop_fail持久提交并取得终态，再以原request/run/claim_token调用kp_desktop_return_slot(confirm=true)。交还后禁止任何槽位访问、heartbeat或新提交；仅允许不读取槽位的终态/交还幂等结果。submit本身不释放租约；消费者未交还时维持unknown并按容量等待。核心以同代SQLite accepted收据证明协作交还，owner_state=returned，不伪造owner_stopped或原生进程退出。原有未决操作、未知改动、产物先保存及整池GC守卫继续适用；历史非池目录不扩大回收资格。
 
 
+原生 Codex 规划中断恢复：仅 `plan/codex`、已 failed/cancelled 请求适用 `worktree-slot-recover`，须核对同代契约、完整备份及本机原生进程/工具已停止的证据；具体门槛以 protocol §5.22.3、§5.29 为准。父进程消失、租约到期或无最终消息均不单独构成停止/成功证明。恢复只登记中断并释放或隔离，不发布计划、不自动重试、不扩大 Plus/Review 的恢复资格。
+
 ## Qoder CLI 规划与 Review（2026-10-20）
 
 共享配置与只读边界见 protocol「Qoder CLI 规划与 Review」。规划通过既有 prepare/start/claim/publish 链路，Review 通过既有 CLI runner 与 `review_settle`，不改变 Plus 任务执行、verify 归属与远端写入口。Qoder 的最终 JSON 采用 prompt 中的 schema 约束及本地严格校验，不使用未证实存在的 `--json-schema`。CLI 进程只调用一次，日志脱敏、空闲时续租、失去身份即停止；失败、缺终态、无效 JSON 和超时不得发布计划或通过 Review。自动化预检与会话读取识别 qoder，未知费用沿用现有未知费用策略。

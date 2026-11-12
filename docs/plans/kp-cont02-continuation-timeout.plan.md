@@ -1,6 +1,6 @@
 # KP-CONT02 同一 Goal 继续执行的计时与收尾修复
 
-- 状态：待体验（Pilot 修复和 test.228）；Music 已通过正常重核并进入新独立评审，现因真实原生验收缺口受阻，尚未发布，不视为业务已验收。
+- 状态：实现中（Pilot 修复和 test.228 已发布、待体验）；Music 已通过正常重核，新的独立评审因真实原生验收缺口阻塞，现进入补验处理，尚未发布，不视为业务已验收。
 - 分支：`fix/20261112-kp-cont02-continuation-timeout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-fix-kp-cont02-continuation-timeout`
 - 基线：`2352d432aa68cebec162bd3e15620cc66c5d3529`（已安装及最新测试版 `0.5.7-test.224`）；从 main `ea02654` 快进至该版本，保留已发布的目标受阻处理能力。
@@ -20,6 +20,7 @@
 - T4（2026-11-12 用户反馈后）：预算 worker 独占 `cmd_request_continuation.py`、`verification_recovery.py` 与新增预算恢复测试，成功人工继续开启新自动预算段；为有当前 run/plan 可信原 empty-diff 回执的预算覆盖提供既有 reverify 恢复，完整重核才能排 monitor，不重发执行。
 - T5：成果 worker 独占 `engine/verdict.py`、`cmd_delivery.py`、`git_delivery.py` 与已提交成果回归，核对任务提交链、原 task/run trailer、base/head/分支/源码及当前报告后复用已有 SHA，登记当前 run 复用关系，不创建空提交。仅未跟踪普通 `.pi/evidence/**` 作为运行材料保留、不提交；链接、特殊文件、嵌套仓库及 tracked 变动仍拒绝。
 - T6：评审材料 worker 独占 `pi_desktop_review.py`、`review_snapshot.py` 与新增材料测试，在共用收集入口冻结原生证据与哈希，保持相对引用，沿用单文件 20MiB／总量 100MiB 上限；证据是待核验输入，不是 pass。主 agent 维护规格、集成和真实定点 monitor/Review/交付观察；独立 reviewer 只读检查最终组合。
+- T7（客户端中断后）：worker 独占 `planner_runner.py`、`worktree_recovery.py` 及新增原生恢复测试，补充发送前 child 身份检查点及仅 Codex plan 的显式中断恢复。主 agent 独占规格/本记录，独立 reviewer 只读审查；测试使用隔离 DB/假进程，真实现场先只读预检与完整备份，通过后仅核心命令恢复。不得以父进程消失单独证明停止，不假写模型成功，不操作其他任务或设备。
 - 数据与运行资源：测试只使用临时 DB/目录与假控制面，不访问生产 DB 或付费执行端；编译、签名与打包只在 GitHub 托管 Actions。
 
 ## 验收
@@ -49,6 +50,7 @@
 - 已公开测试预发布 <https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.228>，非 draft、prerelease，四项资产齐备。完整下载 APK、arm64 DMG、manifest、SHA256SUMS；所有 SHA256、文件大小、source SHA/version/build=228、test 通道/分支/arm64 架构均匹配，`hdiutil verify` 通过。证据与交付包保留在主工作区 `build/kp-cont02/release-228/`（含 cloud-result.json、package-check.json），不作为缓存删除。未替换已安装 App，未安装 Android 包；开启测试通道后可检查更新。
 - 阻塞后只读调查确认：旧会话可追溯 profile 构建→对齐签名→安装，现存 profile 包与 a2 的 arm64 `libapp.so` 字节相同；但构建时锁文件变更、完整源码快照缺失，仍不能证明完整固定 HEAD 的包来源。执行树无可复用音频夹具，未读取用户媒体库/凭据。现有手机后来已升级更高版本，未再次换包、降级或改数据；事故前数据完整恢复未证明。已询问可正常播放且无歌词的现有测试输入与隔离环境；后续由固化执行端从固定源码构建取证，不在 Pilot 本地代跑 verify，不擅自新增数据源或改用户 DB。
 - 用户指定无歌词样本《感谢陪伴》。它正是历史取证使用的 Hanser／一抹憨色第10首、00:49 曲目；应修正“没有样本”的表述。旧候选包 UI 停在末尾且点击不推进的事实需重新核验，不能据此认定当前歌曲资源不存在或服务端缺失；`dumpsys` 单独位置冻结不构播放失败证明。已进一步询问当前版本是否正常播放，未重复要求选择别的曲目。双栏取证使用《他守恒》，其交互缺口仍独立存在。已有 AVD 属 StudyTool，未复用其数据或启动；新隔离环境和现有账号仍待确定。
+- 用户随后确认《感谢陪伴》在当前版本正常播放。按已授权修复目标，经核心 `prepare-review-repair` 保留原成果、原计划和新阻塞报告，准备同任务补验规划；`prepare-plan-input` 补充上述用户事实、固定 `3908a33`、零业务源码/依赖改动、新建专用空白模拟器、不操作现有手机、不提取凭据/复制DB、不新增服务/改音乐库及缺认证停在登录入口等边界。材料无 issue、can_start=true。仅为本任务提交 Codex 规划 `a4d027a1-24f7-4ed0-a700-3a0e79ef9b80`，定点 `planner_runner --request-id ... --once` 运行，保留发布后确认执行门；未运行其他任务规划。
 
 ## 验证与后续
 
@@ -67,3 +69,14 @@
 - 体验入口：已安装正式/测试版开启「接收测试版」后检查更新到 `0.5.7-test.226`；本次未替换 `/Applications/KaneoPilot.app` 或安装 Android 包。没有 schema 变更。
 - 真实安装升级与该业务任务的独立评审尚未验证，不等同于本地隔离测试通过。
 - 本任务尚未合并 main；保留分支/worktree 供后续集成，未满足合并后的清理条件。
+
+## T7 原生规划中断恢复
+
+- 客户端中断后原定点 planner PID 52835 已不存在；无 last-message/plan-draft。已由核心如实 report failed，task 返回 needs_plan；原 leased/running plan 槽位仍占用，旧恢复入口只支持 Plus，不能手工清锁或伪造 owner_stopped。
+- 完整现场备份位于主工作区 `build/kp-cont02/planner-recovery/e034fea0-4999-43c3-9630-656891ee9dca/`，槽位归档 85,463,716 bytes、SHA256 `1dc114546d748b2f4df758e7163028a84207a90be5395e06dbde6e4f6d2bd0c2`；包含槽位树/Git 索引与原 job/events/codex/schema，现有备份检查匹配，未改原现场。
+- worker 只读实际预检返回 ready / native_planner_interrupted / planner_result=unconfirmed；完整日志无未完成工具，完整进程扫描无相关进程。此为恢复资格预检，不是已执行恢复、规划完成或业务验收；等待隔离回归与独立审查。
+- T7 初步组合检查（新增扫描修订前）：既有 worktree recovery/pool `122 passed in 115.26s`；planner_errors/codex_exec_config/planner_partial_preflight/task_workspace `54 passed, 21 subtests passed in 70.67s`。独立预审要求补齐脱离进程组的后台进程占用核验及原生日志会话绑定；未因此降低恢复条件，尚未执行生产恢复。
+- 独立审查与主 agent 均逐条读取了原日志的 31 项 command_execution：仅文件/源码/环境查询，无后台服务/派生进程/外部异步动作；未发现现场存在 daemon 的证据。恢复实现仍需把这份 agent 审计绑定日志与命令账本哈希，并拒绝任意已完成工具自动满足恢复条件。内核 cwd/打开文件扫描补强占用检查，但不称绝对后代证明；当前旧 ready 预检不沿用，待最终守卫后重跑。
+- T7 最终独立审查无剩余实质阻塞。主 agent 组合检查 `217 passed, 21 subtests passed in 202.42s`；最后 signed-UID 兼容修订后新增 native 文件完整重跑 `42 passed in 33.01s`。规划 provider/link-images/preflight/input/method 相关检查 `74 passed, 19 subtests passed in 35.33s`；`git diff --check` 通过。均为隔离夹具，未调用真实模型或代跑 Music verify。
+- 主 agent 最终真实核心 dry-run 返回 ready，日志/31条命令审计/备份/本机 PID 与内核占用检查通过。经 `worktree-slot-recover dry_run:false confirm:true`，operation `kp-cont02-native-recovery-e034fea0` 已 accepted，旧槽位变 free；原 job 如实 failed、exit_code=null、planner_result=unconfirmed，未产生成功计划。结果保存于原备份目录的 recovery-result.json；审计附件 SHA `71f7ba46d9333b34a8696f0720b7be4f46dd2903ac2885d09f8bc3981cc28280`。
+- 正常 `start-plans` 复用同一已确认输入，重新提交本 task 请求 `96a65dbe-3191-4070-b002-4b99063f7405`；仅定点 planner_runner --once，以脱离工具会话的独立进程启动（PID 39419），保留原配置与计划执行确认门。启动信息在主工作区 build/kp-cont02/progression/restart-plan-launch.json，尚待模型完成与计划验收，未派发业务补验。
