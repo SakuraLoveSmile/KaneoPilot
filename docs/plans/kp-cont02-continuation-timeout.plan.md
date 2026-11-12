@@ -133,3 +133,10 @@
 
 - T10与236兼容修订最终组合 `456 passed, 70 subtests passed in 114.99s`；覆盖Plus/Codex前置恢复、发布校验、verify/transport、dispatch/branch、Review首次接收、重试/intake/自动化与v2规划。独立review分别通过，未放宽原断言或门禁。新Plus proof专项21 passed/41 subtests，真实mode=ro prove再次ready且含DB路径绑定；生产尚未恢复。
 - T10新增publish/dispatch对实际Plus路由的同validator前置拒绝，模板明确命令边界；新增proof仅精确user+expectedrun的replan、同一已知长度失败，旧job/request/round不改，缺证继续拒绝。新计划须保持最多5条且每条<=4096字节；若需本轮新helper，完整源码/确定SHA冻在计划，短verify先核同一份字节再执行，不执行旧证据脚本或改扩展名绕Git豁免，不改业务源码和依赖。
+
+- T10发布源码e79e782351bf47d64215b666a82abc2ecc5b2b88已推送。Packages测试发布run238：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43205569780>，基础版0.5.7，同源码push237已核对并请求取消。236最终cancelled，两个shard1真实失败证据保留于主仓库build/kp-cont02/cloud-236，不存在test.236发布。
+- 经最终已提交核心resolve replan（expected_execution_run_id=e6747f76-86f8-4477-b6a7-7427dbb29287）proof与远端/事务重核通过，任务正常needs_plan，旧dispatch仍failed、旧job仍failed/not_sent/exit1；独立审计记录plus_preflight_replan_confirmed，不改旧记录。完整新输入2d76aff0-9dbb-42cf-b227-f3af85714bac / e598c5361eedf5ccd548642f5ec281bb655a60e41db21e9ff5347e7e8f35cbce，can_start=true/issues=[]；normal start请求f58868ec-c599-41bf-9082-15692137c75f已claimed，run42da1d89-fba8-4af4-a412-880ec0322b14，PID31646，仍gpt-6.1-sol/max。补充完整原计划/新稿/全部确认要求，并明确短verify与完整新helper哈希冻结；尚未验证或操作设备。
+
+- run238全部Python分片已结束：仅shard2/5两种Python因四个旧fixture缺verify失败，其余全部通过；日志/云端身份保存在主仓库build/kp-cont02/cloud-238，停止剩余原生任务，不存在test.238发布。失败为BuildFailure两个后继新ready任务与T6两个新Plus派发用例使用简化无verify计划，新前置门正确拒绝。修订只补这些局部合法verify，生产源码/全局helper/所有原业务断言不改；定向7 passed/2subtests，最终相关完整文件组合进行中。
+
+- run238局部fixture修订最终主agent组合：两个完整文件+发布校验/Plus proof/Review接收/retry/intake，`192 passed, 67 subtests passed in 162.61s`；独立审查通过，diffcheck通过，原全部业务断言未降低，生产源码与e79相同。无需因局部fixture再次重跑全部核心；后续云端仍执行全套必需门禁。
