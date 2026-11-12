@@ -472,12 +472,17 @@ struct TaskExecutionTabView: View {
                         await model.refreshAll()
                     }
                     .padding(.horizontal, Spacing.l)
-                } else if let continuation = detail?.continueExecution,
-                   continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
-                    ContinueExecutionBar(taskID: taskID,
-                                         runID: detail?.runId ?? continuation.runId,
-                                         view: continuation)
+                } else {
+                    // KP-GB02：只读失败只作提示，不遮挡继续执行条。
+                    GoalBlockerUnavailableNote(store: goalBlockerStore, sessionID: detail?.sessionId)
                         .padding(.horizontal, Spacing.l)
+                    if let continuation = detail?.continueExecution,
+                       continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
+                        ContinueExecutionBar(taskID: taskID,
+                                             runID: detail?.runId ?? continuation.runId,
+                                             view: continuation)
+                            .padding(.horizontal, Spacing.l)
+                    }
                 }
                 ExecutionRetrospectiveView(
                     detail: detail, digest: sessionDigest,
@@ -1041,6 +1046,8 @@ struct TaskOverviewTabView: View {
                     // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
                     blockedBanner
                 }
+                // KP-GB02：目标状态读取失败/不可用只作紧凑提示，不替换上面的失败横幅与核验入口。
+                GoalBlockerUnavailableNote(store: goalBlockerStore, sessionID: detail.sessionId)
 
                 // 开放的执行提问：下一步说明在前，随后是问答表单；阻塞证据与其余内容顺延。
                 if executionQuestionsOpen {

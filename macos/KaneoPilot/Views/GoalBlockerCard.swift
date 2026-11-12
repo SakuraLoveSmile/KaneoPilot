@@ -20,7 +20,7 @@ struct GoalBlockerCard: View {
     private var title: String {
         if needsReconciliation { return "目标决定待核对接续" }
         if accepted { return "用户接受当前结果（未验证）" }
-        return store.blocker == nil && store.loading ? "正在核对目标状态" : "目标受阻，需要你决定"
+        return "目标受阻，需要你决定"
     }
 
     var body: some View {
@@ -64,7 +64,8 @@ struct GoalBlockerCard: View {
             }
             if let snapshot = store.blocker {
                 if snapshot.state == "blocked", snapshot.actions.isEmpty {
-                    Text("当前 Pi 控制面暂不支持在 Pilot 处理此目标。请升级 Pi Desktop，或打开原会话选择下一步。")
+                    Text(snapshot.detail?.isEmpty == false ? snapshot.detail!
+                         : "当前没有可在 Pilot 执行的目标操作；可刷新目标状态，或打开原会话处理。")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
                 let unfinished = snapshot.progress.filter { !["completed", "done"].contains($0.status) }
@@ -153,6 +154,46 @@ struct GoalBlockerCard: View {
     private func lines(_ values: [String]) -> some View {
         ForEach(Array(values.enumerated()), id: \.offset) { _, line in
             Text("• \(line)").font(.kpSmall).textSelection(.enabled)
+        }
+    }
+}
+
+/// KP-GB02：目标状态读取失败/不可用时的紧凑提示。
+/// 不占用决策卡片位置，不替换失败横幅、核验执行状态入口、继续执行条与底栏主操作。
+struct GoalBlockerUnavailableNote: View {
+    @ObservedObject var store: GoalBlockerStore
+    var sessionID: String?
+
+    var body: some View {
+        Group {
+            if store.showsUnavailableNotice {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                        Label {
+                            Text("目标状态暂时无法核对")
+                                .font(.kpSmall.weight(.semibold)).foregroundStyle(Color.primary)
+                        } icon: {
+                            Image(systemName: "questionmark.circle")
+                                .foregroundStyle(Color.kpOrange)
+                        }
+                        Spacer(minLength: 0)
+                        Button("重试") { Task { await store.refresh() } }
+                            .buttonStyle(.borderless).font(.kpSmall)
+                            .disabled(store.loading || store.working)
+                        if let session = store.blocker?.sessionId ?? sessionID,
+                           let url = URL(string: "pi-desktop://session/\(session)") {
+                            Link("打开 Pi 原会话", destination: url).font(.kpSmall)
+                        }
+                    }
+                    Text(store.error ?? store.blocker?.detail
+                         ?? "无法读取当前 Pi 目标状态；任务原有阻塞与可用操作不受影响。")
+                        .font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Spacing.s)
+                .padding(.vertical, Spacing.xs)
+                .background(Color.kpOrange.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
+            }
         }
     }
 }

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import (cmd_read, core, db, dsh_events, git_delivery, round_store,
-               runtime_client, runtime_operations, util)
+from . import (cmd_read, core, db, dsh_events, git_delivery,
+               headless_adapter, round_store, runtime_client,
+               runtime_operations, util)
 
 KEY = "goal_acceptance"
 PENDING_KEY = "goal_decision_pending"
@@ -113,9 +114,58 @@ def _view(task_id, run_id, execution=None, hold=None, supported=False):
     return view
 
 
+def _goal_contract(conn, task_id, run_id):
+    """本轮是否存在可处置的 Goal 契约；返回 ``(applicable, detail)``。
+
+    §5.23.12 的 ``unavailable`` 只表示「无法核对当前目标」：缺少可核验 hold、
+    断线、无身份或读取失败。**从未建立已批准 Goal 契约**的轮次没有 hold 可核对
+    （已批准 proposal 与 execution_turn 都没有），失败属于普通执行/验证阻塞，
+    必须判 ``none`` 交给既有失败横幅与恢复入口，不能显示“目标受阻，需要你决定”。
+    codex 等非 Pi Desktop 轮次同样不适用。
+    """
+    row = round_store.get_round(conn, task_id, run_id)
+    if row is None:
+        raise util.KanpilotError(
+            "not_found", f"execution round not found: {task_id}/{run_id}"
+        )
+    if row["backend"] != "pi_desktop":
+        return False, "该轮次不是 Pi Desktop 执行，没有可处理的 Goal 目标"
+    source = headless_adapter.resolve_source(conn)
+    try:
+        run_dir = source.run_dir(task_id, run_id)
+    except headless_adapter.HeadlessError as exc:
+        raise util.KanpilotError(
+            "validation_failed", "运行记录目录不可用：" + exc.detail
+        )
+    job, error = dsh_events.read_job(
+        run_dir, task_id, run_id, backend="pi_desktop"
+    )
+    if job is None:
+        raise util.KanpilotError(
+            "validation_failed", "job.json 不可读或身份不符：" + (error or "未知原因")
+        )
+    approval = job.get("goal_approval")
+    if not isinstance(approval, dict) or approval.get("status") != "approved":
+        return False, (
+            "本轮还没有已批准的 Goal 契约，不适用目标受阻处理；"
+            "失败原因与可用操作见任务当前阻塞项"
+        )
+    if not approval.get("proposal_id") or not approval.get("execution_turn_id"):
+        return False, "本轮 Goal 契约留痕不完整，不适用目标受阻处理"
+    return True, None
+
+
 def cmd_get_goal_blocker(ctx, payload):
     base = _view(payload["task_id"], payload["run_id"])
     try:
+        task = db.require_task(ctx.conn, payload["task_id"])
+        if task["run_id"] != payload["run_id"]:
+            raise util.KanpilotError("conflict", "任务已切换执行轮次，请刷新后重试")
+        applicable, detail = _goal_contract(
+            ctx.conn, payload["task_id"], payload["run_id"]
+        )
+        if not applicable:
+            return dict(base, state="none", detail=detail)
         task, identity = _identity(ctx.conn, payload["task_id"], payload["run_id"])
         execution, hold, supported = _candidate(identity, _client(identity, read_only=True))
         view = _view(task["task_id"], task["run_id"], execution, hold, supported)

@@ -19,9 +19,17 @@ final class GoalBlockerStore: ObservableObject {
     private var generation = 0
     private var uncertainIdentity: [String]?
 
+    /// 只有真实的目标决定占用「需要你处理」首位：受阻证据、已接受（未验证）、待接续。
+    /// 读取失败/不可用不属于决定，不能用它替换失败横幅、核验入口与继续执行条。
     var showsCard: Bool {
-        blocker?.needsReconciliation == true || blocker?.state == "accepted" || (eligible && ((loading && blocker == nil) || error != nil
-            || blocker?.state == "blocked" || blocker?.state == "unavailable"))
+        if blocker?.needsReconciliation == true || blocker?.state == "accepted" { return true }
+        return eligible && blocker?.state == "blocked"
+    }
+
+    /// 目标状态读取失败或不可用时的紧凑提示；与决定卡片互斥，可随时重试。
+    var showsUnavailableNotice: Bool {
+        guard !showsCard, eligible, !loading else { return false }
+        return error != nil || blocker?.state == "unavailable"
     }
 
     var canAct: Bool {

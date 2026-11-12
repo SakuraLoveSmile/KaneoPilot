@@ -18,6 +18,10 @@ struct GoalBlockerFixtures {
         func success(task: String = "task-1", run: String = "run-1", status: String) -> [String: Any] {
             ["task_id": task, "run_id": run, "session_id": "session-1", "status": status]
         }
+        func stateOnly(_ state: String, detail: String) -> [String: Any] {
+            ["task_id": "task-1", "run_id": "run-1", "state": state, "detail": detail,
+             "reasons": [], "progress": [], "limitations": [], "next_steps": [], "actions": []]
+        }
         let store = GoalBlockerStore()
         var calls: [(String, [String: Any])] = []
         await store.observe(taskID: "task-1", runID: "run-1", eligible: true) { name, payload in
@@ -159,6 +163,25 @@ struct GoalBlockerFixtures {
         let mismatch = GoalBlockerStore()
         await mismatch.observe(taskID: "task-1", runID: "run-1", eligible: true) { _, _ in blocked(task: "other") }
         check(!mismatch.canAct && mismatch.error != nil, "mismatched response cannot authorize actions")
+
+        let unavailable = GoalBlockerStore()
+        await unavailable.observe(taskID: "task-1", runID: "run-1", eligible: true) { _, _ in
+            stateOnly("unavailable", detail: "本轮没有已批准的 Goal 契约")
+        }
+        check(!unavailable.showsCard && unavailable.showsUnavailableNotice,
+              "unavailable goal state is a retryable notice, never a blocking decision card")
+        let none = GoalBlockerStore()
+        await none.observe(taskID: "task-1", runID: "run-1", eligible: true) { _, _ in
+            stateOnly("none", detail: "本轮还没有已批准的 Goal 契约，不适用目标受阻处理")
+        }
+        check(!none.showsCard && !none.showsUnavailableNotice,
+              "a round without an approved Goal contract shows no goal UI at all")
+        let coldFailure = GoalBlockerStore()
+        await coldFailure.observe(taskID: "task-1", runID: "run-1", eligible: true) { _, _ in
+            throw CoreError.badOutput("offline")
+        }
+        check(!coldFailure.showsCard && coldFailure.showsUnavailableNotice,
+              "a cold read failure never replaces the task's blocked banner or status entry")
 
         if !failures.isEmpty {
             failures.forEach { print("FAIL \($0)") }

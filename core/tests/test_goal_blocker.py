@@ -93,6 +93,36 @@ class GoalBlockerTests(unittest.TestCase):
         report['report_sha256'] = util.sha256_text(util.jdump(report['report']))
         return report
 
+    def test_round_without_approved_goal_contract_is_not_applicable(self):
+        """失败轮没有已批准契约时按普通失败处理，不冒充目标受阻、不接触 Pi。"""
+        self.f.job.pop('goal_approval')
+        self.f.write_evidence()
+        with patch.object(gb, '_client', side_effect=AssertionError('contract gate must not contact Pi')):
+            view = gb.cmd_get_goal_blocker(self.ctx, self.payload())
+        self.assertEqual(view['state'], 'none')
+        self.assertEqual(view['actions'], [])
+        self.assertIn('不适用目标受阻处理', view['detail'])
+
+    def test_malformed_goal_contract_is_not_applicable(self):
+        self.f.job['goal_approval'].pop('proposal_id')
+        self.f.write_evidence()
+        view = gb.cmd_get_goal_blocker(self.ctx, self.payload())
+        self.assertEqual(view['state'], 'none')
+        self.assertIn('留痕不完整', view['detail'])
+
+    def test_non_pi_desktop_round_has_no_goal_blocker(self):
+        self.ctx.conn.execute("UPDATE execution_rounds SET backend='codex' WHERE task_id=?", (self.tid,))
+        with patch.object(gb, '_client', side_effect=AssertionError('non Pi round must not contact Pi')):
+            view = gb.cmd_get_goal_blocker(self.ctx, self.payload())
+        self.assertEqual(view['state'], 'none')
+        self.assertIn('不是 Pi Desktop', view['detail'])
+
+    def test_unreadable_run_record_stays_unavailable(self):
+        (self.f.directory / 'job.json').unlink()
+        view = gb.cmd_get_goal_blocker(self.ctx, self.payload())
+        self.assertEqual(view['state'], 'unavailable')
+        self.assertIn('job.json', view['detail'])
+
     def test_old_host_displays_bound_hold_and_only_non_met_criteria(self):
         self.supported = False
         view = gb.cmd_get_goal_blocker(self.ctx, self.payload())
