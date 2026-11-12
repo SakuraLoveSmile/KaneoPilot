@@ -183,8 +183,8 @@ def test_native_evidence_limits_fail_without_omission(tmp_path, monkeypatch, lim
     evidence.mkdir(parents=True)
     (evidence / "a.png").write_bytes(b"1234")
     (evidence / "b.mp4").write_bytes(b"5678")
-    monkeypatch.setattr(constants, "PLAN_INPUT_FILE_MAX_BYTES", 3 if limit == "single" else 4)
-    monkeypatch.setattr(constants, "PLAN_INPUT_TOTAL_MAX_BYTES", 6)
+    monkeypatch.setattr(constants, "NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES", 3 if limit == "single" else 4)
+    monkeypatch.setattr(constants, "NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES", 6)
     with pytest.raises(util.KanpilotError, match="大小越界"):
         review_snapshot.freeze_native_evidence(tmp_path)
 

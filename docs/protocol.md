@@ -1250,6 +1250,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 
 ### 5.24.5 Plus review 控制端（v4）
 
+原生 Review 附件与通用规划/源码快照材料独立核算。Pi/Codex 共用完整冻结、逐文件复核及最终材料哈希守卫；保留完整 APK、录像和历史证据，不以额度校验作为 Review 通过。额度、安全类型和身份绑定的唯一依据见 [automation-contract.md](automation-contract.md)「交付任务的 Review 材料」。
+
 - `executor_runner --stage review` 按 `review_config.backend` 分流；`pi` 分支沿用 §5.23.4（inherit/custom 固化 pi 参数）。
 - Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", interactionMode:"unattended", …)` + `permissionMode:"auto"`，并按 §5.24.3 核验实际硬策略及版本，未确认时不发送。指令只要求审查并输出冻结结果（新轮次使用 review_text_v1），不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。Plus 的 `INTERACTION_REQUIRED` 持久回执直接生成 `blocked` 报告，保留问题/选项，经现有 `review_blocked` 结算交回用户，不要求模型自行再整理、不登记 pass、不推进远端任务。已登记结论的确定性恢复不要求重新连接；无效拦截回执明确受阻，不伪造审查通过。
 - 内部结算结果结构冻结为 `{"conclusion":"pass|changes_requested|blocked","report_markdown":"<非空>","fix":{"title","description","priority"}|null}`；`changes_requested` 必须有 `fix`；`priority ∈ no-priority|low|medium|high|urgent`（`bridge.VALID_PRIORITIES`）。Plus 无原生 outputSchema 能力：runner 在 `completed` + 完整转录后严格解析，**不**把 MCP `structuredContent` 当模型结构化输出保证。

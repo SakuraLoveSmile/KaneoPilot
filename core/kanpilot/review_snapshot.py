@@ -33,8 +33,9 @@ def _diff(path):
                        "--src-prefix=a/", "--dst-prefix=b/"])
 
 
-def _read_file(root, relative, remaining, *, tracked=False):
+def _read_file(root, relative, remaining, *, tracked=False, file_max_bytes=None):
     """Read bytes and executable mode from the same no-follow descriptor."""
+    file_max_bytes = constants.PLAN_INPUT_FILE_MAX_BYTES if file_max_bytes is None else file_max_bytes
     parts = Path(relative).parts
     if (not parts or Path(relative).is_absolute()
             or any(part in ("..", ".git") for part in parts)):
@@ -56,19 +57,19 @@ def _read_file(root, relative, remaining, *, tracked=False):
                 after = os.stat(parts[-1], dir_fd=descriptors[-1], follow_symlinks=False)
                 if (before.st_ino, before.st_mtime_ns, before.st_mode) != (after.st_ino, after.st_mtime_ns, after.st_mode):
                     raise util.KanpilotError("review_blocked", "Review tracked 链接读取期间已变化：" + relative)
-                if len(content) > min(remaining, constants.PLAN_INPUT_FILE_MAX_BYTES):
+                if len(content) > min(remaining, file_max_bytes):
                     raise util.KanpilotError("review_blocked", "Review tracked 链接超过材料边界：" + relative)
                 return {"path": relative, "kind": "symlink", "content": content, "executable": False}
         descriptors.append(os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                                    dir_fd=descriptors[-1]))
         meta = os.fstat(descriptors[-1])
-        limit = min(remaining, constants.PLAN_INPUT_FILE_MAX_BYTES)
+        limit = min(remaining, file_max_bytes)
         if not stat.S_ISREG(meta.st_mode) or meta.st_size > limit:
             raise util.KanpilotError("review_blocked", "Review 新增文件类型或大小越界：" + relative)
         with os.fdopen(os.dup(descriptors[-1]), "rb") as handle:
-            content = handle.read(limit + 1)
+            content = handle.read(meta.st_size + 1)
         after = os.fstat(descriptors[-1])
-        if (len(content) > limit or meta.st_mtime_ns != after.st_mtime_ns
+        if (len(content) != meta.st_size or len(content) > limit or meta.st_mtime_ns != after.st_mtime_ns
                 or meta.st_size != after.st_size or meta.st_mode != after.st_mode):
             raise util.KanpilotError("review_blocked", "Review 新增文件读取期间已变化：" + relative)
         entry = {"path": relative, "content": content, "executable": bool(meta.st_mode & 0o111)}
@@ -135,24 +136,46 @@ def _native_evidence_inventory(root):
             os.close(descriptor)
 
 
+def _native_evidence_files(inventory):
+    files = [(relative, meta) for relative, meta in sorted(inventory.items()) if stat.S_ISREG(meta[2])]
+    if any(meta[3] > constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES for _, meta in files):
+        raise util.KanpilotError("review_blocked", "Review 原生证据单文件大小越界")
+    if sum(meta[3] for _, meta in files) > constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES:
+        raise util.KanpilotError("review_blocked", "Review 原生证据总大小越界")
+    return files
+
+
 def freeze_native_evidence(root):
     """Freeze untrusted screenshots, videos and indexes without executing them."""
     inventory = _native_evidence_inventory(root)
-    remaining = constants.PLAN_INPUT_TOTAL_MAX_BYTES
+    remaining = constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES
     entries = []
-    for relative, meta in sorted(inventory.items()):
-        if stat.S_ISREG(meta[2]):
-            entry = _read_file(root, relative, remaining)
-            entries.append(entry)
-            remaining -= len(entry["content"])
+    for relative, _meta in _native_evidence_files(inventory):
+        entry = _read_file(root, relative, remaining,
+                           file_max_bytes=constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES)
+        entries.append(entry)
+        remaining -= len(entry["content"])
     if _native_evidence_inventory(root) != inventory:
         raise util.KanpilotError("review_blocked", "Review 原生证据读取期间已变化")
     return entries
 
 
 def verify_native_evidence(root, entries):
-    if freeze_native_evidence(root) != entries:
+    # Recheck one file at a time instead of retaining a second full 512 MiB set.
+    inventory = _native_evidence_inventory(root)
+    files = _native_evidence_files(inventory)
+    if [relative for relative, _meta in files] != [entry["path"] for entry in entries]:
         raise util.KanpilotError("review_blocked", "Review 材料准备期间原生证据已变化")
+    remaining = constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES
+    for entry in entries:
+        current = _read_file(root, entry["path"], remaining,
+                             file_max_bytes=constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES)
+        if current != entry:
+            raise util.KanpilotError("review_blocked", "Review 材料准备期间原生证据已变化")
+        remaining -= len(current["content"])
+        del current
+    if _native_evidence_inventory(root) != inventory:
+        raise util.KanpilotError("review_blocked", "Review 原生证据复核期间已变化")
 
 
 def write_native_evidence(materials, entries, identity):

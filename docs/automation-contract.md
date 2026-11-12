@@ -341,7 +341,7 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 
 - `git diff --no-color <base_sha> <head_sha>`，以及 `git log --oneline base..head`；
 - 有上一轮 Review 时，加上 `<review_history[-1].head_sha>..<head_sha>` 的增量 diff 和上一轮报告。
-- `.pi/evidence/**` 原生截图、录像与说明按原相对层级冻结到独立材料包，清单绑定 task/run/plan/head，包含每个文件的大小与 SHA256；Pi/Codex 共用收集入口及全过程内容复核。只读普通文件，拒绝链接、特殊节点及嵌套仓库；沿用单文件 20MiB、总量 100MiB 限额，越界明确阻塞。材料是执行产物与不可信输入，不执行其脚本、不把 Goal `met` 作为独立 Review 通过。
+- `.pi/evidence/**` 原生截图、录像与说明按原相对层级冻结到独立材料包，清单绑定 task/run/plan/head，包含每个文件的大小与 SHA256；Pi/Codex 共用收集入口及全过程内容复核。只读普通文件，拒绝链接、特殊节点及嵌套仓库；原生证据使用独立的单文件 128MiB、总量 512MiB 限额（2026-11-12 用户确认），超限明确阻塞，不截断、不跳过文件或用摘要替代完整附件。通用规划材料与源码快照仍为单文件 20MiB、总量 100MiB；历史手动 Review 的通用源码快照门禁继续独立适用，不因文件属于原生证据而忽略其已跟踪源码或通用快照要求。冻结前先按完整清单核算额度；复核逐文件读取与冻结字节及模式比对，并核对前后目录身份，避免同时再持有一份完整证据集合。材料是执行产物与不可信输入，不执行其脚本、不把 Goal `met` 作为独立 Review 通过。
 
 diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查看具体文件」。执行工作树 HEAD 与 head_sha 不符或不干净 → report needs_user（review_blocked，note「执行工作树与已提交版本不一致」），绝不审查未提交的内容。
 

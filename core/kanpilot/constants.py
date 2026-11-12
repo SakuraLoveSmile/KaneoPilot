@@ -35,6 +35,9 @@ ROUND_RUN_STATUSES = ("pending", "running", "finished", "failed", "unknown")
 PLANNER_EXECUTOR_ID = "kaneo-planner"
 PLAN_INPUT_FILE_MAX_BYTES = 20 * 1024 * 1024    # 单文件 ≤20 MiB
 PLAN_INPUT_TOTAL_MAX_BYTES = 100 * 1024 * 1024  # 每任务材料合计 ≤100 MiB
+# Native Review evidence is copied whole; planning/source snapshot limits stay unchanged.
+NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES = 128 * 1024 * 1024
+NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES = 512 * 1024 * 1024
 PLAN_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PLAN_TEXT_SUFFIXES = {".txt", ".log", ".md", ".text"}
 DEFAULT_CODEX_BIN = "codex"

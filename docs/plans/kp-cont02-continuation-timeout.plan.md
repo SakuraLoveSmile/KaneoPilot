@@ -87,7 +87,7 @@
 - 新补验计划正常发布：`bfa771d5df36cd57bf2b539e3c79539be5800555eb3c51e0f1ff2c355af70035`，路径 `/Users/sakurasep/Documents/Code/Plan/projects/e8magole7hbivl8103wevkss/这里的歌词展示有点小了吧_感觉不协调_2026-11-12_16-48-23.md`。现有调度器自动确认并派发新run `62d4390e-8bbe-4599-88b2-eb5c6f1dea59` / session `2d20c98b-7e16-48d7-b0ce-19119b5c6288`；主agent未重复claim/dispatch。该轮仅做开工只读核对，随后原生turn返回 NETWORK_ERROR；核心如实 execution_failed / needs_user，不是原误超时，尚无Goal/构建/设备或业务verify通过。
 - 独立计划审查发现两个执行前置：完整新APK放入.pi/evidence（历史APK约60.83MiB）与单文件20MiB、全树100MiB边界冲突，旧157份证据已81.33MiB；不能删除旧证据/只留哈希/抽帧替代完整录像。另自定义.pi/runtime不在交付豁免范围，成功交付必须清理且无进程引用，阻塞时保留但不推进完成。其余原验收和隔离边界完整保留。暂停原样重试；先明确合规材料传递及runtime收尾，网络恢复后走正常核心路径。
 
-## T8 原生完整材料前置（待用户决定，未修改源码）
+## T8 原生完整材料前置（用户已确认，实现中）
 
 - 只读分析与独立审查确认：当前每任务100MiB不是每批100MiB，分卷不能透明绕过；旧证据、完整候选包和完整录像必须保留。不能排除APK、移动旧证据或仅传哈希来声称满足原契约。
 - 已向用户提出有界变更：仅原生Review证据单文件128MiB、总量512MiB；通用规划/源码快照材料继续20MiB/100MiB。完整文件仍经无链接读取、大小上限、双次身份/库存核对、全字节SHA、task/run/plan/head绑定、冻结/收尾哈希守卫；独立Review仍须实际读取完整材料，不能由资源校验代替pass。此为重要输入边界调整，未得到答复前不实施、不生产恢复或重派该依赖部分。
@@ -99,3 +99,9 @@
 - <https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.232> 已公开，非draft、prerelease，四项资产齐全；2026-11-12 09:03:34Z发布。没有覆写test.228或旧标签，没有数据库schema变更。
 - 完整下载APK、arm64 DMG、manifest、SHA256SUMS；所有哈希/大小/source SHA/version/build=232/channel/branch/arm64身份一致，hdiutil verify为VALID。包与cloud-result.json/package-check.json保留于主工作区build/kp-cont02/release-232/。未覆盖安装App或现有手机；体验入口为App开启接收测试版后检查更新。
 - 本任务未合并main，且T8仍待用户决定，保留本任务工作树，不满足收尾清理条件。原Music执行已停在真实NETWORK_ERROR，不在未知发送状态下盲重发；未把《感谢陪伴》用户确认当作已完成原生验收。
+- 用户在本次回复明确选择“按推荐额度修复原生证据通道”，授权原生Review单文件128MiB/总512MiB；保留generic20/100与完整安全校验。worker独占constants.py、review_snapshot.py及原生材料测试，独立reviewer只读核查共用入口/最终守卫，主agent独占规格/本记录和定点业务恢复。
+- 实现限定native显式限额，复核逐文件避免同时构造第二个512MiB集合；generic源码freeze默认不改、不全局排除.pi路径。Pi/Codex提交分支Review走共用native入口；历史manual Review仍必须独立满足其通用源码快照限制，保留兼容边界。
+- 更新既有原生超限用例的注入常量，从PLAN_INPUT改为NATIVE_REVIEW_EVIDENCE，以验证用户确认的新独立额度；未删除/跳过原拒绝场景。新增真实128/512精确边界、+1预读拒绝及generic20/100不变回归，保留链路完整性/安全测试。独立审查通过，新限额模块独立14通过；主agent组合检查进行中。
+- 经核心prepare-plan-input把用户确认额度及runtime收尾补入同任务，输入 `ee1e9bd1-a02c-4405-bd05-e13b85d8eaf3` / `b58b672f59944783e36f34a4b56f5db5ba7c3540eb4446c713049249c1a8d0cb`，can_start=true、无issue。正常start-plans提交请求 `c89e7779-528d-4aab-abb9-d1589e129960`，脱离工具会话的定点planner --once启动（PID32846）；未原地改冻结计划，未复用错误网络轮次，未抢其他任务。
+
+- T8最终组合态：主agent使用真pytest运行native/limits/snapshot/CLI Review/Desktop queue/stage contract，`132 passed, 76 subtests passed in 476.85s`；worker独立专项42通过，共用入口95通过、8 subtests通过；reviewer无阻断项。未跳过或放宽门禁，未调用业务执行端验证。`git diff --check`通过，准备提交任务分支并走云端测试发布。
