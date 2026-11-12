@@ -153,3 +153,11 @@
 - Music当前仍monitor/running，尚无候选包与原生验证成功。只读构建日志显示11:35:15Z固定源码release构建因GeneratedPluginRegistrant引用integration_test缺类失败，执行端仍排查；Pilot未本地代跑Music verify或修改业务源码。sudo两条固定扫描权限请求仍待用户答复，最小候选未写系统。任务未合并main，活跃补验与未完权限/登录保持实现中，工作树保留，不满足收尾清理。
 
 - 恢复跟进只读核验：11:41:05Z执行端重建成功（exit0，APK约93.2MB），保留stale与release-filtered生成产物来源记录；候选已安装专用AVD，未动现有手机。当前run仍1ac2ab6f，monitor/needs_user，正常执行问题a5ea275d-c0ca-496d-b566-e54c39a6a066等待用户在应用内交互登录；没有冒充登录或原生验收通过。主控已提供具体模拟器入口，请用户登录后继续；root两条固定只读lsof权限仍未获答复，不改系统配置。
+
+## T11 用户改为真机验收（实现中）
+
+- 用户明确授权仅两条固定root只读lsof；最小配置已通过macOS管理员授权安装到/private/etc/sudoers.d/kaneopilot-lyrics-lsof，root:wheel/0440，visudo完整配置检查通过。主控仅做权限可用性检查，两条精确命令均exit0、stderr0；原始输出/permission-check.json保留主仓库build/kp-cont02/readonly-lsof-permission。这不是代跑Music冻结verify，也不是runtime已清理证明。
+- 用户最新要求“请在真机中测试”，覆盖先前AVD选择。只读识别已连接Mi 10（8085d06e），现有com.sakuramusic.app版本0.3.8/versionCode1793783652，设备端APK SHA b1cb7654ddf22b8c125c49b77d1722fbf408dd8680a796a4653baa22258f8ea0，与新候选23c9eddef6ac7405e5c1eb04be47e3636f492197fd02090a1b1d986cb2b68591不同。未安装/卸载/降级/清数据，未读取DB或认证。
+- 通过submit-execution-answers operation kp-cont02-user-physical-device把用户设备变更送达当前执行者（accepted）；执行者当前正常running，先保全材料并仅收尾本任务AVD，再经正常replan更新设备绑定，旧计划不原地改写，不把未登录或未采集验收当通过。后继计划须保留全部原验收与128/512、完整来源及verify门，明确真机数据保全和同条件基线对照方式；现有手机不能用卸载/降级换包完成对照。
+
+- 补充只读aapt核验：round5候选versionCode1793783648，低于真机1793783652；禁止直接安装或-d。后继真机计划已准备完整supplement，要求保持业务源码3908a33，以Flutter build-number参数生成严格更高版本并核签名/身份/数据保全；不能在现有真机反复装历史基线包。未做任何真机写入。
