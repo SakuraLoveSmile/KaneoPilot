@@ -140,3 +140,16 @@
 - run238全部Python分片已结束：仅shard2/5两种Python因四个旧fixture缺verify失败，其余全部通过；日志/云端身份保存在主仓库build/kp-cont02/cloud-238，停止剩余原生任务，不存在test.238发布。失败为BuildFailure两个后继新ready任务与T6两个新Plus派发用例使用简化无verify计划，新前置门正确拒绝。修订只补这些局部合法verify，生产源码/全局helper/所有原业务断言不改；定向7 passed/2subtests，最终相关完整文件组合进行中。
 
 - run238局部fixture修订最终主agent组合：两个完整文件+发布校验/Plus proof/Review接收/retry/intake，`192 passed, 67 subtests passed in 162.61s`；独立审查通过，diffcheck通过，原全部业务断言未降低，生产源码与e79相同。无需因局部fixture再次重跑全部核心；后续云端仍执行全套必需门禁。
+
+- run240已核对存在：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43207916047>，source3146ee6b4e3703ab79850a91bc6122ee054d2498，workflow_dispatch测试发布。首次POST响应unexpectedEOF，但随后用单次临时HTTP1只读查询证实请求已创建，未重复POST，未改系统网络/代理。核对同源码push239后请求取消；只以240完整门禁/Release/包核验为后续发布证据。
+
+- T10新正式补验计划334b804887bd5efe905b48c0074c0e2dd610f9e577d3dfe81fdfe966bea61037（19-23-59.md）正常发布，主agent与独立review静态复核两份helper完整5750/7225字节及SHA匹配，短verify只读一次字节核验后执行；五条命令130/24/21/386/387字节，前三原文保持。正常scheduler派发run1ac2ab6f-3fa4-4729-b1f4-5e6044edbd86/sessiond8549537-929c-4de0-bc12-58af948a29be，真正进入monitor/running，没有重复claim。
+- 执行端提出三问，实证sudo -n拒绝（缺root内核扫描权限），并提前询问登录与可选额外analyst。经正常submit-execution-answers固定operation kp-cont02-t10-continue-independent-preparation已accepted：不改权限/不把失败当通过，先做独立构建/AVD/安装并到真实登录入口再请用户交互；沿用用户确认歌曲可播事实；不启用额外付费analyst，主执行者串行完整核对。权限单独向用户确认，仅两条固定只读lsof；最小sudoers候选在主仓库build/kp-cont02/readonly-lsof-permission，visudo -cf语法通过，尚未安装系统。业务验收/第4verify仍未通过。
+
+## test.240 发布证据
+
+- source3146ee6b4e3703ab79850a91bc6122ee054d2498，Packages240全部必需job与publish success（18项中17success，仅显式fulltext probe skipped）。公开Release <https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.240>，非draft/prerelease，2026-11-12 11:37:21Z发布，APK/arm64 DMG/manifest/SHA256SUMS四资产齐。
+- 完整资产已下载主仓库build/kp-cont02/release-240，全部SHA/大小/source/version/build240/channel/branch/arm64一致；hdiutil verify退出0、checksum VALID，cloud-result与package-check持久保留。未安装App或现有手机，体验入口开启测试版检查更新；无schema变更。
+- Music当前仍monitor/running，尚无候选包与原生验证成功。只读构建日志显示11:35:15Z固定源码release构建因GeneratedPluginRegistrant引用integration_test缺类失败，执行端仍排查；Pilot未本地代跑Music verify或修改业务源码。sudo两条固定扫描权限请求仍待用户答复，最小候选未写系统。任务未合并main，活跃补验与未完权限/登录保持实现中，工作树保留，不满足收尾清理。
+
+- 恢复跟进只读核验：11:41:05Z执行端重建成功（exit0，APK约93.2MB），保留stale与release-filtered生成产物来源记录；候选已安装专用AVD，未动现有手机。当前run仍1ac2ab6f，monitor/needs_user，正常执行问题a5ea275d-c0ca-496d-b566-e54c39a6a066等待用户在应用内交互登录；没有冒充登录或原生验收通过。主控已提供具体模拟器入口，请用户登录后继续；root两条固定只读lsof权限仍未获答复，不改系统配置。
