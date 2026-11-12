@@ -227,6 +227,11 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
     prepared_delivery = None
     delivery = core.delivery_of(task) if task else {}
     try:
+        if task is not None and task['plan_kind'] == 'review_fix' and not delivery.get('branch'):
+            # Independent children are first adopted through the normal To Do
+            # intake, before they have automation/plan_wanted metadata. Wait for
+            # their exact Review registration before preparing any materials.
+            task_workspace.review_fix_head(conn, task, allow_pending=True)
         if wanted:
             prepared = _retry_input(conn, task, expected)
         if wanted and not delivery.get("branch"):
