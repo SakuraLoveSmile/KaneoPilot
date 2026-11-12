@@ -267,7 +267,8 @@ def derive_run_status(
         return stored
     status = job.get("status")
     if status == "running":
-        started = util.parse_ts(job.get("started_at") or row["started_at"])
+        started = (util.parse_ts(job.get("continuation_started_at"))
+                   or util.parse_ts(job.get("started_at") or row["started_at"]))
         now_ts = util.parse_ts(util.to_iso(now))
         if started is not None and now_ts is not None:
             if now_ts.timestamp() > started.timestamp() + timeout_seconds:

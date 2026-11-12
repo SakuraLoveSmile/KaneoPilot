@@ -40,8 +40,11 @@ def continue_execution_view(conn, task) -> dict:
     if not run_id:
         view["reason"] = "该任务没有执行轮次"
         return view
+    row = round_store.get_round(conn, task["task_id"], run_id)
     request = db.task_extra(task).get(REQUEST_KEY) or {}
-    if request.get("run_id") == run_id and request.get("new_turn"):
+    if (request.get("run_id") == run_id and request.get("new_turn")
+            and (task["status"] != "needs_user" or row is None
+                 or row["run_status"] not in ("finished", "failed"))):
         observing = task["status"] == "running"
         view.update(state="observing" if observing else "sent",
                     turn_id=request.get("new_turn"),
@@ -54,7 +57,6 @@ def continue_execution_view(conn, task) -> dict:
     if task["failure_code"] not in CONTINUE_FAILURES:
         view["reason"] = "当前阻塞类型不支持继续执行"
         return view
-    row = round_store.get_round(conn, task["task_id"], run_id)
     if row is None or row["backend"] != "pi_desktop":
         view["reason"] = "当前轮次不是 Pi Desktop 执行"
         return view
@@ -90,6 +92,36 @@ def _read_job(run_dir: Path, task_id: str, run_id: str):
         raise util.KanpilotError(
             "validation_failed", "运行记录不可读：" + (error or "未知原因"))
     return job
+
+
+def authorized_observation(conn, job: dict, approved_turn: str) -> bool:
+    """Only a recorded, acknowledged continuation can inherit an approved Goal."""
+    adoption = job.get("continuation_adoption") or {}
+    task_id, run_id, session_id = (job.get(k) for k in ("task_id", "run_id", "session_id"))
+    new_turn = job.get("turn_id")
+    if (not isinstance(adoption, dict) or not approved_turn or not new_turn
+            or adoption.get("from_turn") != approved_turn
+            or adoption.get("new_turn") != new_turn or approved_turn == new_turn
+            or any(adoption.get(k) != job.get(k) for k in ("task_id", "run_id", "session_id"))):
+        return False
+    task = db.get_task(conn, task_id)
+    if task is None or task["run_id"] != run_id or task["session_id"] != session_id:
+        return False
+    request = db.task_extra(task).get(REQUEST_KEY) or {}
+    if (request.get("status") != "sent"
+            or any(request.get(k) != adoption.get(k) for k in
+                   ("operation_id", "run_id", "session_id", "from_turn", "new_turn"))):
+        return False
+    scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
+    operation = runtime_operations.get_operation(conn, scope, adoption.get("operation_id"))
+    if (operation is None or operation["status"] != "accepted"
+            or operation["session_id"] != session_id or operation["turn_id"] != new_turn):
+        return False
+    if operation["tool"] == SCOPE_TOOL and operation["harness_id"] == "kaneo-request-continuation":
+        expected = {"task_id": task_id, "run_id": run_id, "session_id": session_id,
+                    "turn_id": approved_turn}
+        return operation["request_sha256"] == runtime_operations.compute_request_sha256(expected)
+    return operation["tool"] == "resolve-goal-blocker" and operation["harness_id"] == "pi_desktop"
 
 
 def _read_spec(run_dir: Path) -> dict:

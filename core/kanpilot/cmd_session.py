@@ -606,7 +606,8 @@ def _round_run_status(conn, row, job, now, timeout) -> str:
     task=db.get_task(conn,row["task_id"])
     if task and row["run_id"]==task["run_id"]:
         from .execution_questions import wait_seconds
-        timeout += wait_seconds(task,now,run_id=row["run_id"])
+        since = util.parse_ts(job.get("continuation_started_at")) if isinstance(job, dict) else None
+        timeout += wait_seconds(task,now,run_id=row["run_id"],since=since)
     return round_store.derive_run_status(row, job, now, timeout)
 
 

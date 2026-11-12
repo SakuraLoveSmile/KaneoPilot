@@ -651,10 +651,10 @@ def _core_input_state(spec):
     except util.KanpilotError: return None
 
 
-def _input_wait_seconds(spec):
+def _input_wait_seconds(spec, since=None):
     from .execution_questions import wait_seconds
     task=_core_input_state(spec)
-    return wait_seconds(task,util.now_dt(),run_id=spec["run_id"]) if task else 0
+    return wait_seconds(task,util.now_dt(),run_id=spec["run_id"],since=since) if task else 0
 
 
 class _ExecutionInputObserver:
@@ -732,7 +732,7 @@ class _ExecutionInputObserver:
             current=eq.open_records(task)
             self.known={q["request_id"]:q for q in current}
         self.job["pending_input"]=list(self.known)
-        self.job["input_wait_seconds"]=_input_wait_seconds(self.spec)
+        self.job["input_wait_seconds"]=_input_wait_seconds(self.spec, util.parse_ts(self.job.get("continuation_started_at")))
         return bool(self.known) or bool(ids)
 
     def expired(self):
@@ -1051,12 +1051,31 @@ def _resume_job(job_path: Path, spec: dict):
 
 
 def _round_remaining_seconds(job: dict, timeout: float, spec=None) -> float:
-    """续接观察的剩余预算（自 job.started_at 起算；不可解析 → 全额时限）。"""
-    started = util.parse_ts(job.get("continuation_started_at") or job.get("started_at"))
+    """本执行段剩余预算；重新观察不会重置继续执行的起点。"""
+    continuation = util.parse_ts(job.get("continuation_started_at"))
+    started = continuation or util.parse_ts(job.get("started_at"))
     now = util.parse_ts(util.now_iso())
     if started is None or now is None:
         return timeout
-    return timeout - max(0.0, now.timestamp() - started.timestamp() - (_input_wait_seconds(spec) if spec else 0))
+    return timeout - max(0.0, now.timestamp() - started.timestamp() - (_input_wait_seconds(spec, continuation) if spec else 0))
+
+
+def _authorized_continuation(spec: dict, job: dict, approved_turn: str) -> bool:
+    """Read receipts without initializing, migrating or writing the state DB."""
+    import sqlite3
+    from . import cmd_request_continuation
+    path = spec.get("db_path")
+    if not path:
+        return False
+    try:
+        conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            return cmd_request_continuation.authorized_observation(conn, job, approved_turn)
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error, util.KanpilotError):
+        return False
 
 
 def required_verification_commands(spec: dict) -> list:
@@ -1519,7 +1538,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
         read_only_resume = resume and not authorization
         approval = job.get("goal_approval")
         if isinstance(approval, dict) and approval.get("status") == "approved":
-            approved_turn = approval.get("execution_turn_id")
+            approved_turn = approval.get("observation_turn_id") or approval.get("execution_turn_id")
             # Strictly verified read-only recovery continues the already approved
             # execution; it is not authority to approve another Goal contract.
             for adoption in job.get("turn_adopted") or []:
@@ -1527,6 +1546,13 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                         and adoption.get("recovery_authorization", {}).get("original_turn_id") == approved_turn
                         and adoption.get("recovery_authorization", {}).get("turn_id") == adoption.get("to")):
                     approved_turn = adoption["to"]
+            if (resume and approved_turn != turn_id
+                    and _authorized_continuation(spec, job, approved_turn)):
+                # Advance only the observation checkpoint, retaining the actual
+                # Goal approval turn for audit and subsequent continuations.
+                approval["observation_turn_id"] = turn_id
+                _write_json(job_path, job)
+                approved_turn = turn_id
             if not resume or approved_turn == turn_id:
                 return ("none", "", "")       # 执行轮次自身收尾，不再有审批门
             return ("deferred", "goal_resume_unconfirmed: 执行轮次与既有审批检查点不符", "")
@@ -1906,7 +1932,7 @@ def _run_real(spec: dict, resume: bool, owner) -> int:
                 stop_at=now_m-max(0,(util.now_dt()-stamp).total_seconds())
                 stop_reason=inputs.stop_info.get("termination_reason") or "user_stop"
                 stop_detail="核心已登记停止请求"
-            waited=_input_wait_seconds(spec)
+            waited=_input_wait_seconds(spec, util.parse_ts(job.get("continuation_started_at")))
             job["input_wait_seconds"]=waited
             _write_json(job_path,job)
             remaining=_round_remaining_seconds(job,timeout,spec)

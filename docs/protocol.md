@@ -1167,7 +1167,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 命令 `request-continuation {task_id, run_id, confirm, operation_id?}`：仅对当前任务的 `pi_desktop` 轮次、任务 `needs_user`、`failure_code ∈ {verification_unconfirmed, execution_failed, execution_interrupted}`、job 已收尾且有持久 terminal、session/计划/配置快照与任务一致、无 queued/claimed 请求、无 prepared/unknown 的继续操作时允许；`confirm` 必须为 true。
 - 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
 - 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
-- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
+- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 与读取层（会话、monitor、超时投影）的当前执行段预算统一从 `continuation_started_at` 起算，缺省沿用原 `started_at`；原始开始时间保留作审计。不能将继续前的空闲时间计入新执行段并立即判超时；当前执行段真正超过预算仍按原规则失败。
+- 已批准 Goal 的继续轮次只读观察：必须核对同 task/run/session 的已登记继续操作、job 接管绑定与已接受的核心操作回执，匹配来源 turn 和目标 turn 后才允许接续旧审批检查点。不能仅凭 `manual_continue` 字样或会话当前 turn 放行；无可信继续绑定仍拒绝。该接续不发送 prompt、不代批新 Goal、不放宽报告完整性、冻结 verify、源码绑定、Review 与交付门禁。
 - 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
 

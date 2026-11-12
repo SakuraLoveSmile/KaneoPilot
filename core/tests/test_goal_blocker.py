@@ -218,6 +218,45 @@ class GoalBlockerTests(unittest.TestCase):
         self.assertEqual(len(self.writes), 1)
         self.assertTrue(gb.acceptance_current(self.ctx.conn, self.task()))
 
+    def test_host_acknowledgement_before_adoption_still_recovers_local_settlement(self):
+        with patch.object(cmd_request_continuation, 'adopt_continuation', side_effect=OSError('before local adoption')):
+            with self.assertRaises(util.KanpilotError):
+                gb.cmd_resolve_goal_blocker(self.ctx, self.payload('continue'))
+        pending = db.task_extra(self.task())[gb.PENDING_KEY]
+        scope = runtime_client.stable_scope_id('execution', task_id=self.tid, run_id=self.run)
+        operation = runtime_operations.get_operation(self.ctx.conn, scope, pending['operation_id'])
+        self.assertEqual(operation['status'], 'accepted')
+        self.assertEqual(self.task()['status'], 'needs_user')
+        # Host completion may publish a new-turn summary before local adoption.
+        original_listing = self.client.goal_report_list
+        def completed_listing(sid):
+            result = original_listing(sid)
+            result['reports'][0]['turnId'] = 'new-turn'
+            return result
+        self.f.plus_state['is_running'] = False
+        self.hold['segments'][-1]['endedAt'] = 4
+        # Repeating the same user operation reconciles; it does not send again
+        # or mistake the acknowledged host result for a finished local update.
+        with patch.object(self.client, 'goal_report_list', side_effect=completed_listing):
+            result = gb.cmd_resolve_goal_blocker(self.ctx, self.payload('continue'))
+        self.assertEqual((result['status'], result['turn_id']), ('continued', 'new-turn'))
+        self.assertEqual(self.task()['status'], 'running')
+        self.assertNotIn(gb.PENDING_KEY, db.task_extra(self.task()))
+        self.assertEqual(len(self.writes), 1)
+
+    def test_continued_observation_keeps_original_goal_hold_identity(self):
+        job_path = self.f.directory / 'job.json'
+        job = util.jload(job_path.read_text())
+        job['goal_approval']['observation_turn_id'] = 'new-turn'
+        job['turn_adopted'] = [{'from': 'execution', 'to': 'new-turn', 'code': 'manual_continue'}]
+        job['turn_id'] = 'new-turn'
+        job_path.write_text(util.jdump(job))
+        identity = cmd_read.goal_round_identity(self.ctx.conn, self.tid, self.run)
+        self.assertIn('execution', identity['approved_turns'])
+        execution, hold, supported = gb._candidate(identity, self.client)
+        self.assertEqual(hold['firstTurnId'], 'execution')
+        self.assertTrue(supported)
+
     def test_lost_resume_response_reconciles_changed_source_using_host_segment(self):
         self.lose_response, self.source_on_resume = True, True
         with self.assertRaises(util.KanpilotError):

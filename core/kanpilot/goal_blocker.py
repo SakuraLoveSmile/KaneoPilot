@@ -37,12 +37,14 @@ def _client(identity, *, read_only):
     return client
 
 
-def _candidate(identity, client):
+def _candidate(identity, client, *, pending_execution_id=None):
     """Old hosts expose holds on report summaries; bind them to the approved chain."""
     listing = client.goal_report_list(identity["session_id"])
     matches = [r for r in listing.get("reports") or [] if isinstance(r, dict)
                and r.get("proposalId") == identity["proposal_id"]
-               and r.get("turnId") in identity["approved_turns"]
+               and (r.get("turnId") in identity["approved_turns"]
+                    or pending_execution_id and r.get("executionId") == pending_execution_id)
+               and r.get("sessionId", identity["session_id"]) == identity["session_id"]
                and (not identity["execution_id"] or r.get("executionId") == identity["execution_id"])]
     if len(matches) > 1:
         raise util.KanpilotError("conflict", "同一批准目标有多份执行记录，不能猜测处理对象")
@@ -322,6 +324,9 @@ def cmd_resolve_goal_blocker(ctx, payload):
         if prior["request_sha256"] != runtime_operations.compute_request_sha256(request):
             raise util.KanpilotError("conflict", "操作编号已用于不同决定")
         if prior["status"] == "accepted":
+            pending = db.task_extra(task).get(PENDING_KEY) or {}
+            if pending.get("operation_id") == op_id:
+                return cmd_reconcile_goal_blocker(ctx, payload)
             return dict(util.jload(prior["result_json"]), deduplicated=True)
         raise util.KanpilotError("goal_decision_unconfirmed", "上次目标决定结果未确认，请核对并接续；不会重复发送")
     if (not db.task_is_active(task) or task["status"] != "needs_user"
@@ -365,6 +370,10 @@ def cmd_resolve_goal_blocker(ctx, payload):
             new_turn = result.get("turnId") or result.get("turn_id")
             if not new_turn:
                 raise util.KanpilotError("conflict", "Pi 未返回继续执行的 turn 身份")
+            # Persist the host acknowledgement before the observer checks its
+            # authority to inherit the approved Goal's execution checkpoint.
+            runtime_operations.complete_operation(conn, scope, op_id, result=result,
+                session_id=identity["session_id"], turn_id=new_turn, now=ctx.now_iso)
             adopted = continuation.adopt_continuation(ctx, task_id=task["task_id"], run_id=task["run_id"],
                 job=identity["job"], run_dir=identity["run_dir"], session_id=identity["session_id"],
                 old_turn=identity["job"]["turn_id"], new_turn=new_turn, operation_id=op_id)
@@ -389,8 +398,6 @@ def cmd_reconcile_goal_blocker(ctx, payload):
     op = runtime_operations.get_operation(ctx.conn, scope, pending["operation_id"])
     if not op or op["tool"] != TOOL or op["request_sha256"] != runtime_operations.compute_request_sha256(request):
         raise util.KanpilotError("conflict", "目标决定的持久回执不匹配")
-    if op["status"] == "accepted":
-        return dict(util.jload(op["result_json"]), deduplicated=True)
     if not db.task_is_active(task):
         raise util.KanpilotError("conflict", "任务不在活跃状态，未接续")
     # A crash after local settlement needs only the final operation acknowledgement.
@@ -410,7 +417,10 @@ def cmd_reconcile_goal_blocker(ctx, payload):
         if request["action"] == "accept":
             response = _settle_acceptance(ctx, task, identity, pending, client)
         else:
-            execution, hold, supported = _candidate(identity, client)
+            # Reconciliation has an exact, previously frozen execution ID.
+            # Its report can already name the new turn before local adoption.
+            execution, hold, supported = _candidate(identity, client,
+                pending_execution_id=request["execution_id"])
             old_segments = pending["blocked_snapshot"].get("segments") or []
             segments = (hold or {}).get("segments") or []
             # Exactly one host-owned new segment proves this blocked Goal resumed once.
@@ -439,6 +449,9 @@ def cmd_reconcile_goal_blocker(ctx, payload):
                     raise util.KanpilotError("conflict", "半完成接续的持久身份已变化，未接续")
             elif hashes != pending["evidence_sha256"] or identity["job"].get("turn_id") != old_turn:
                 raise util.KanpilotError("conflict", "原执行记录已变化，未接续")
+            runtime_operations.complete_operation(ctx.conn, scope, pending["operation_id"],
+                result={"status": "continued", "turn_id": new_turn},
+                session_id=identity["session_id"], turn_id=new_turn, now=ctx.now_iso)
             adopted_result = continuation.adopt_continuation(ctx, task_id=task["task_id"], run_id=task["run_id"],
                 job=identity["job"], run_dir=identity["run_dir"], session_id=identity["session_id"],
                 old_turn=old_turn, new_turn=new_turn, operation_id=pending["operation_id"])
