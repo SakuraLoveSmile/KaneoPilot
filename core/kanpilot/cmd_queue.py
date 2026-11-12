@@ -853,9 +853,13 @@ def _accept_remote_for_resolution(ctx, payload):
     if not core.is_automation_managed(task) or not (payload["action"] == "replan" or (payload["action"] == "resume" and task["failure_code"] == "remote_conflict")):
         return None
     round_snapshot = None
+    plus_preflight = None
     if payload["action"] == "replan":
         if task["send_state"] == "unknown":
-            raise util.KanpilotError("conflict", "发送结果不明，请先处理发送恢复或明确接受重复风险")
+            if payload.get("actor", "user") != "user" or payload.get("expected_execution_run_id") != task["run_id"]:
+                raise util.KanpilotError("conflict", "发送结果不明，请先处理发送恢复或明确接受重复风险")
+            from . import plus_preflight_replan
+            plus_preflight = plus_preflight_replan.prove(ctx.conn, task, payload["expected_execution_run_id"])
         if task["sent"] or task["send_state"] == "sent":
             from . import cmd_session, round_store
             old_round = round_store.get_round(ctx.conn, task["task_id"], task["run_id"]) if task["run_id"] else None
@@ -883,11 +887,15 @@ def _accept_remote_for_resolution(ctx, payload):
     t = live.get("task") or {}
     if t.get("projectId") != task["project_id"]:
         raise util.KanpilotError("remote_conflict", "远端任务项目已变化")
+    if plus_preflight and (t.get("id") != task["task_id"] or t.get("status") != constants.IN_PROGRESS_SLUG
+                           or live.get("requirements_sha256") != task["requirements_sha256"]):
+        raise util.KanpilotError("remote_conflict", "Plus 未发送恢复要求原任务、需求不变且远端仍为 In Progress")
     if payload["action"] == "resume":
         required = {"monitor": {"in-progress", "in-review", "done"}, "delivery": {"in-review", "done"}, "review": {"in-review", "done"}}.get(stage)
         if required and t.get("status") not in required:
             raise util.KanpilotError("conflict", "请先在 Kaneo 调整到 " + "/".join(sorted(required)) + " 再继续")
-    return {"requirements_sha256": live.get("requirements_sha256"), "kaneo_status": t.get("status"), "stage": stage, "snapshot": _resolution_snapshot(task), "round_snapshot": round_snapshot}
+    return {"requirements_sha256": live.get("requirements_sha256"), "kaneo_status": t.get("status"), "stage": stage,
+            "snapshot": _resolution_snapshot(task), "round_snapshot": round_snapshot, "plus_preflight": plus_preflight}
 
 
 def cmd_resolve(ctx, payload: dict) -> dict:
@@ -1048,6 +1056,13 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         if accepted_remote:
             if task["status"] != "needs_user" or accepted_remote["snapshot"] != _resolution_snapshot(task):
                 raise util.KanpilotError("conflict", "任务处置状态已变化")
+            if accepted_remote.get("plus_preflight"):
+                from . import plus_preflight_replan
+                proof = accepted_remote["plus_preflight"]
+                if plus_preflight_replan.prove(conn, task, proof["run_id"]) != proof:
+                    raise util.KanpilotError("conflict", "Plus 未发送的执行证据已变化")
+                db.add_event(conn, now, "plus_preflight_replan_confirmed", task_id=task["task_id"], actor=actor,
+                             detail=proof)
             if accepted_remote.get("round_snapshot") is not None:
                 from . import round_store
                 old_round = round_store.get_round(conn, task["task_id"], task["run_id"])

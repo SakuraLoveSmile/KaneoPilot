@@ -1066,6 +1066,14 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         # v2 §5.22.4：发布与执行分离——计划登记后置 hold，等用户确认。
         from . import verify_evidence
         verification = verify_evidence.parse_verify_block(raw.decode("utf-8"))
+        # Planning and execution backends are independent. Read only stored
+        # routing here: resolving an inherit snapshot may contact Plus under
+        # this write lock, and the actual execution snapshot freezes at claim.
+        repair = core.review_repair_of(task)
+        execution_config = (repair["action_config"]
+                            if repair.get("source_kind") in ("merge_conflict", "build_failure")
+                            else exec_config.load(conn))
+        verify_evidence.validate_execution_requirements(verification, execution_config.get("backend") or "pi")
         extra["plan_verify"] = {"plan_sha256": plan_sha, **({"commands": verification["commands"]} if verification["ok"] else {"error": verification["error"]})}
         extra["plan_execution_hold"] = True
         fields["extra_json"] = extra

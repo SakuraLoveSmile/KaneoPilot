@@ -121,3 +121,15 @@
 - T9预修订组合180 passed、16 subtests passed（32.96s），覆盖retry inputs/intake/planner inputs automation/automation core/planner errors。独立review另发现新owner完成后active为空时，旧retry的成功/失败路径可覆盖新状态的并发缺口；正在补事务内任务与原失败请求身份门禁，该次通过不作为修订后最终证据。
 
 - T9最终源码组合：重试入口资格/双快照及提交/失败事务守卫，原冻结输入完整复用，native完成ready稿publish_failed止损；其他后端不要求native job。两个独立复现的owner竞争窗口均修复，独立review最终无阻断；专项11 passed/19 subtests。主agent最终组合retry/intake/planner inputs automation/automation core/planner errors/v2 planning `198 passed, 22 subtests passed in 39.79s`，git diff --check通过，均隔离夹具，无真实模型/生产调用。新增内部start_plans参数，不增加CLI命令、不改远端门禁/DB schema。准备提交并发布后续测试版。
+
+- T9发布源码f9b3a08b1450a7910ae28ea128fd0cd8769523ad已推送。Packages测试发布run236：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43201320187>，基础版0.5.7；已核对同源码push235并请求取消，只以236完整门禁与Release核验为新版本证据。
+
+- run236两组shard1失败（3.11/3.13）：test_review_fix_workspace中两个旧夹具把未adopt新Review子任务直接_submit(wanted=True)，生产初次实际走wanted=False；新重试资格门正确拒绝，拟按真实首次接收路径修夹具，保留全部原HEAD/等待/不block断言，补非法wantedTrue拒绝。初次review_fix需在prepare前核原Review登记，保留安全顺序。不放宽并发门禁；236不发布，保存失败日志后停止剩余无诊断必要构建。
+
+## T10 发布前验证命令契约（实现中）
+
+- 新正式补验计划正常发布1290b2060194be5722bf187b5e173808bb80e22b76c7ecba6c09632a95667cc7，18-38-24.md；scheduler自动派发e6747f76-86f8-4477-b6a7-7427dbb29287。独立审查确认内核引用P2已修及原范围完整，但未校验命令长度；执行端在首次会话建立前因单命令>4096拒绝，job failed/exit1/sessionNone、verification_requirements_invalid。没有新模型执行或设备操作。
+- 核心publish仅parse verify未按Plus Host字节限额拒绝，导致ready后才失败；拟发布前按纯DB当前执行backend及派发实际冻结backend复用原validator，规划共享prompt明确1–5条、4096/65536与去重/无NUL换行，不放宽原限额。auto_dispatch通用异常收尾将本次记unknown（实际jobnot_sent），当前needs_user/dispatch_failed；须经正规未发送证据恢复，不能改DB/直接原样retry。
+
+- T10与236兼容修订最终组合 `456 passed, 70 subtests passed in 114.99s`；覆盖Plus/Codex前置恢复、发布校验、verify/transport、dispatch/branch、Review首次接收、重试/intake/自动化与v2规划。独立review分别通过，未放宽原断言或门禁。新Plus proof专项21 passed/41 subtests，真实mode=ro prove再次ready且含DB路径绑定；生产尚未恢复。
+- T10新增publish/dispatch对实际Plus路由的同validator前置拒绝，模板明确命令边界；新增proof仅精确user+expectedrun的replan、同一已知长度失败，旧job/request/round不改，缺证继续拒绝。新计划须保持最多5条且每条<=4096字节；若需本轮新helper，完整源码/确定SHA冻在计划，短verify先核同一份字节再执行，不执行旧证据脚本或改扩展名绕Git豁免，不改业务源码和依赖。
