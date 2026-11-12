@@ -305,6 +305,11 @@ def adopt_continuation(ctx, *, task_id, run_id, job, run_dir, session_id, old_tu
             "run_id": run_id, "session_id": session_id,
             "from_turn": old_turn, "new_turn": new_turn,
             "operation_id": operation_id, "status": "sent", "sent_at": now}})
+        automation = core.automation_of(fresh)
+        if automation:
+            core.update_automation(conn, fresh, now,
+                segment_started_at=job["continuation_started_at"],
+                segment_cost_base_usd=automation.get("cost_usd", 0))
         db.add_event(conn, now, "execution_continuation_sent", task_id=task_id,
                      actor="user", detail={"run_id": run_id, "from_turn": old_turn,
                                            "to_turn": new_turn,

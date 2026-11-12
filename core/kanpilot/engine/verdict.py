@@ -47,6 +47,20 @@ def has_effective_changes(worktree, **kw) -> bool:
     return bool(effective_changes(worktree, **kw))
 
 
+def task_effective_changes(task, frozen, *, deadline=None, heartbeat=None) -> List[str]:
+    """A verification-only continuation may retain this task's committed source."""
+    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    delivery = core.delivery_of(task)
+    if changes or not core.requires_branch_review(task) or not delivery.get("commits"):
+        return changes
+    try:
+        proof = git_delivery.registered_task_changes(dict(delivery, repository=task["repository"]),
+            task_id=task["task_id"], deadline=deadline, heartbeat=heartbeat)
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", "已提交任务成果无法核验：" + exc.message) from exc
+    return proof["files"]
+
+
 def _command_not_found(code, tail: str) -> bool:
     """rc=127 or the shell's "command not found" → environment failure (阶梯 2)."""
     return code == 127 or "command not found" in tail.lower()
@@ -332,7 +346,7 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
         checks = _plus_checks(commands, verification, messages, Path(frozen["worktree_path"]).resolve())
     except (ValueError, TypeError, KeyError, StopIteration) as exc:
         raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证证据无法确认：" + util.redact(str(exc))) from exc
-    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    changes = task_effective_changes(task, frozen, deadline=deadline, heartbeat=heartbeat)
     result = _check_result(commands, changes, checks)
     if not verification.get("ok") and not result["empty_diff"]:
         # Missing/ambiguous results cannot trigger a quality repair. Only a
@@ -399,7 +413,7 @@ def _evaluate_report_task(conn, task, source, *, deadline=None, heartbeat=None, 
                "source_sha256": row.get("source_sha256", evidence["job"].get("verification_source_sha256")),
                "output_tail": util.redact(row["detail"])[-_OUTPUT_TAIL_BYTES:]}
               for row in coverage["rows"]]
-    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    changes = task_effective_changes(task, frozen, deadline=deadline, heartbeat=heartbeat)
     result = _check_result(commands, changes, checks)
     if not coverage["ok"] and not result["empty_diff"]:
         # Missing or unconfirmed report records stay unconfirmed; only a real nonzero exit fails.

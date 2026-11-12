@@ -775,7 +775,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。完成判定的结果来源是 Plus 结构化 Goal 报告，Pilot 不回查转录中的工具结果。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
-- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
+- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。补验轮可计入当前任务已由核心登记的提交成果：核对同仓库任务分支、base/head、原任务/执行 trailer 及登记提交链，并确认相对基线仍有净源码差异；任意历史提交或无净源码变化不构成果。当前报告、冻结 verify 与当前源码快照仍须全部核验。无新源码时复用原提交 SHA、为当前 run 登记复用来源，禁止制造空提交；之后仍需新的独立 Review。
 - 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条执行，并在完成时以结构化 Goal 报告（`SubmitGoalReport`）提交 `checks`，逐条列出冻结命令、退出码与结果。报告是完成判定的唯一结果来源；助手的文字总结不能作为通过依据。
 - 核心核对 task/run/turn 身份、`plan_sha256` 与登记工作树。报告经 `read_goal_report` 读取并做身份核对（session、proposal、execution 相符；绝不按名称或标题匹配）。本轮执行 turn 与报告 turn 都必须属于已批准的 turn 链（含 `turn_adopted`）。规划、旧 turn、任意人工接续与其他 agent 的报告不能混用。报告不可用（not_found、pending、draft、failed、corrupt、truncated）为未确认。报告底线（不含 reviews，与 `verify_goal_completion` 的确定性部分同口径）要求 `ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；任一不满足（如 fallback 报告）同为未确认。
 - 冻结 verify 每条命令（去除行内 `VAR=value` 环境前缀与尾部中文注释、去首尾空白后，与检查命令精确相等）必须在报告 `checks` 中对应一条 `exitCode=0` 且 `result=passed` 的记录；缺一条即未确认。真实非零退出或 `result=failed` 为质量失败。
@@ -1169,6 +1169,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
 - 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 与读取层（会话、monitor、超时投影）的当前执行段预算统一从 `continuation_started_at` 起算，缺省沿用原 `started_at`；原始开始时间保留作审计。不能将继续前的空闲时间计入新执行段并立即判超时；当前执行段真正超过预算仍按原规则失败。
 - 已批准 Goal 的继续轮次只读观察：必须核对同 task/run/session 的已登记继续操作、job 接管绑定与已接受的核心操作回执，匹配来源 turn 和目标 turn 后才允许接续旧审批检查点。不能仅凭 `manual_continue` 字样或会话当前 turn 放行；无可信继续绑定仍拒绝。该接续不发送 prompt、不代批新 Goal、不放宽报告完整性、冻结 verify、源码绑定、Review 与交付门禁。
+- 人工继续成功接管时同事务以本次 `continuation_started_at` 开启新的自动预算段，成本基线取当前已累计成本；重放、只读观察、失败/未知发送不重置。旧版误将当前报告的 empty-diff 阻塞覆盖为 monitor 预算超限时，只对同 task/run/plan/worktree 的 live Goal 回执开放现有 `reverify`：先复核原回执、当前 Git binding 及完整结构化报告和冻结命令，通过后清阻塞、开人工预算并排同 run monitor；不新派发，不替代正常 verdict/Review。
 - 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
 

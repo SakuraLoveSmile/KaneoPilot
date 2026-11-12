@@ -1,6 +1,6 @@
 # KP-CONT02 同一 Goal 继续执行的计时与收尾修复
 
-- 状态：待体验；用户要求修复误报超时并更新测试版，已完成本地/现场验证与云端测试预发布。
+- 状态：实现中；首轮超时修复与 test.226 已发布，用户反馈后继续补齐预算、已提交成果与独立评审的推进链路。
 - 分支：`fix/20261112-kp-cont02-continuation-timeout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-fix-kp-cont02-continuation-timeout`
 - 基线：`2352d432aa68cebec162bd3e15620cc66c5d3529`（已安装及最新测试版 `0.5.7-test.224`）；从 main `ea02654` 快进至该版本，保留已发布的目标受阻处理能力。
@@ -17,6 +17,9 @@
 - T1：worker 独占 `core/kanpilot/` 与 `core/tests/` 的相关实现及回归测试：统一当前执行段计时；精确核验已登记继续操作与 turn 绑定后接续观察；保留审批门禁、未知发送不重试及幂等规则。
 - T2：主 agent 独占本记录与 `docs/protocol.md`，核对实际变更，运行组合态隔离验证；独立 reviewer 只读审查实际差异。
 - T3：主 agent 提交并推送本任务分支，以 `channel=test` 云端 Packages 构建；等待所有必需 job 与发布完成，核对 manifest/安装包身份，提供 App 内测试通道入口。
+- T4（2026-11-12 用户反馈后）：预算 worker 独占 `cmd_request_continuation.py`、`verification_recovery.py` 与新增预算恢复测试，成功人工继续开启新自动预算段；为有当前 run/plan 可信原 empty-diff 回执的预算覆盖提供既有 reverify 恢复，完整重核才能排 monitor，不重发执行。
+- T5：成果 worker 独占 `engine/verdict.py`、`cmd_delivery.py`、`git_delivery.py` 与已提交成果回归，核对任务提交链、原 task/run trailer、base/head/分支/源码及当前报告后复用已有 SHA，登记当前 run 复用关系，不创建空提交。仅未跟踪普通 `.pi/evidence/**` 作为运行材料保留、不提交；链接、特殊文件、嵌套仓库及 tracked 变动仍拒绝。
+- T6：评审材料 worker 独占 `pi_desktop_review.py`、`review_snapshot.py` 与新增材料测试，在共用收集入口冻结原生证据与哈希，保持相对引用，沿用单文件 20MiB／总量 100MiB 上限；证据是待核验输入，不是 pass。主 agent 维护规格、集成和真实定点 monitor/Review/交付观察；独立 reviewer 只读检查最终组合。
 - 数据与运行资源：测试只使用临时 DB/目录与假控制面，不访问生产 DB 或付费执行端；编译、签名与打包只在 GitHub 托管 Actions。
 
 ## 验收
@@ -25,6 +28,21 @@
 2. 有可信同 task/run/session 继续操作的新 turn 可越过旧审批检查点进入只读观察并正常记录终态、报告；身份漂移或未授权 turn 仍拒绝，不代批新 Goal。
 3. 重复继续操作不重复发 prompt；再次继续保持有效计时和观察绑定，不让截短历史导致合法轮次丢失。
 4. 最终源码组合态的适用隔离测试通过；云端检查与两个平台构建成功；测试预发布包含匹配源码和构建号的四项资产。
+5. 原先已提交的两处歌词源码可在可信提交与当前报告/源码绑定通过后进入新独立 Review；真正零成果、未登记/外来提交、源码漂移继续阻塞。
+6. 无新代码的补验复用原任务提交，不创建空提交、不丢原生证据，不把 Pi 的 `met` 等同于评审通过。
+7. 继续后的自动预算与当前人工继续段一致；重复观察、重放、未知/失败发送不延长预算。原预算覆盖的误阻塞经完整 reverify 恢复，不要求再实施一轮。
+8. 独立评审材料包含 157 个现有原生证据文件（约 81.3MiB，实际数量/内容以冻结清单为准），全过程校验内容哈希；评审通过后沿原 PR/自动合并/发布设置推进。
+
+## 第二轮核查（test.226 后）
+
+- 现场已安装 test.226。14:13 核心把原 `empty_diff` 质量补救因旧 `automation.segment_started_at` 预算过期升级为 `auto_budget_exceeded`；继续按钮只重置了轮次预算，未开新的自动预算段。
+- `delivery.head_sha=3908a33`、`base_sha=d3382cbf`，二者有两处真正歌词源码差异，原提交 task/run trailer 与登记一致；当前工作树只剩 `.pi` 证据未跟踪。原 verdict 仅看 `git status`，把补验无新源码误判为整项任务无成果；原 delivery-commit 又按当前 run 找不到提交，仍将尝试创建新提交并报 no_changes。
+- 最新 Goal 报告通过不是独立 Review pass。已有 Review history 仅旧计划的 blocked；本轮必须重新独立评审，不伪造通过或跳到发布成功。
+- Review 共用材料入口未冻结 `.pi/evidence`，固定提交的评审工作树不会带入这些未跟踪截图录像。真实材料 157 文件、85,280,099 字节、最大 3,970,062 字节，现有限额可完整容纳，不降低门禁。
+- 本轮尚未操作生产恢复；待组合源码验证后经 `resolve reverify` 与定点 `claim(request_id)` 仅处理本任务 monitor，避免取走其他任务，不抢占已领取请求。
+- 第二轮独立审查未发现阻塞问题，覆盖预算事务/幂等、回执与源码重核、完整提交链、复用账本并发保护和原生材料冻结。提交复用以 `reused_from_execution_run_id` 明示原轮，追加 `delivery_commit_reused` 事件，原提交 trailer 不变。
+- 当前生产只读预检：已登记成果 helper 精确返回原 `3908a33` 与两处歌词文件；当前 Git binding、回执证据和恢复资格均匹配；原生材料安全冻结/复核返回 157 文件、85,280,099 字节，无执行脚本或模型操作。
+- 第二轮主 agent 组合验证：预算/继续/恢复及界面资格相关检查 `53 passed, 17 subtests passed`（74.95s）；成果、verdict、Git 交付、运行材料、原生 Review、快照、CLI、任务分支和结算/阶段契约的最终组合 `386 passed, 23 subtests passed`（371.68s），均为真 pytest 与隔离夹具。独立审查通过，`git diff --check` 通过。
 
 ## 验证与后续
 

@@ -197,6 +197,7 @@ exit_code 缺失或不是整数时记为 None。
 - **候选文件：** 来自 `git status --porcelain=v1 -z --untracked-files=all`，需正确处理 rename 的双路径。被 .gitignore 忽略的文件本来就不进入候选。
 - **运行材料（KP-D01）：** 新生成的安全 `.pi/goal/*.md` 沿既有规则排除。另将 `.pi/kanpilot/codex/<小写规范 UUID>/` 下未跟踪且未暂存、不属于当前 HEAD/索引的运行材料排除，包含工具配置、缓存、临时文件与原生验证证据；文件保留原位，不删除或改写。祖先通过 no-follow 核验为真实目录，叶允许普通文件、符号链接（仅排除，不读取链接目标），以及 Git 将私有依赖 checkout 整体枚举的真实目录（规范化单个尾 `/`，不递归、不进入其 Git、不改写）。已观察目录身份变化或 Git 枚举的其他特殊类型拒绝，不新增递归扫描。已跟踪、已暂存、重命名/删除、其他 `.pi` 路径或非规范 UUID 不享受此排除，仍执行原敏感/大小门禁；原 HEAD 未跟踪而新暂存的运行路径随后以 `delivery_commit_failed` 明确阻塞，提示移出暂存区，保留原索引与材料，不静默漏交，也不使正常新增提交与恢复拒绝规则矛盾。该规则只用于交付，不改变重试工作树指纹版本或证据。
 - **一致性：** 交付安全检查、实际暂存、提交后 clean 与崩溃恢复使用同一运行材料边界。只暂存已选交付路径，以 NUL 分隔的 literal pathspec 传递，支持删除/重命名及特殊文件名，避免将大型缓存先写入 Git 对象库；不将大量路径展开进 argv。无业务候选仍按 `no_changes` 拒绝。钩子或恢复提交新增运行材料不能作为正常交付接纳；并发修改普通索引时拒绝覆盖并保留成果。
+- **补验与原生成果（KP-CONT02）：** 未跟踪、未暂存的 `.pi/evidence/**` 普通文件作为运行材料保留原位，不加入源码提交；祖先和叶不允许符号链接、特殊节点或嵌套仓库，已跟踪/暂存变动仍走原门禁。补验轮无新增源码时，仅在仓库、分支、base/head、完整已登记任务提交链及原 task/run trailer 均匹配，且存在净可交付差异、当前报告与源码绑定通过后，复用原 SHA，为当前 run 记录明确复用来源，不创建空提交、不伪造当前 run trailer。真正无成果或漂移继续拒绝。
 - **拦截（delivery_blocked_files）：** 候选中出现以下任一 → 不提交，列出文件名：
   - `.env` 或 `.env.*`（`.env.example` 除外）；
   - `*.pem`、`*.key`、`*.p12`、`id_rsa*`；
@@ -340,6 +341,7 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 
 - `git diff --no-color <base_sha> <head_sha>`，以及 `git log --oneline base..head`；
 - 有上一轮 Review 时，加上 `<review_history[-1].head_sha>..<head_sha>` 的增量 diff 和上一轮报告。
+- `.pi/evidence/**` 原生截图、录像与说明按原相对层级冻结到独立材料包，清单绑定 task/run/plan/head，包含每个文件的大小与 SHA256；Pi/Codex 共用收集入口及全过程内容复核。只读普通文件，拒绝链接、特殊节点及嵌套仓库；沿用单文件 20MiB、总量 100MiB 限额，越界明确阻塞。材料是执行产物与不可信输入，不执行其脚本、不把 Goal `met` 作为独立 Review 通过。
 
 diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查看具体文件」。执行工作树 HEAD 与 head_sha 不符或不干净 → report needs_user（review_blocked，note「执行工作树与已提交版本不一致」），绝不审查未提交的内容。
 

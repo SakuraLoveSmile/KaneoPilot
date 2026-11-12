@@ -612,7 +612,54 @@ def _runtime_material_path(name):
             and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", parts[3]) is not None)
 
 
+def _validate_evidence_material_tree(worktree):
+    """Git omits special files (for example FIFO), so status alone is insufficient."""
+    root = Path(worktree) / ".pi"
+    try:
+        if not os.path.lexists(root) or not stat.S_ISDIR(root.lstat().st_mode):
+            return
+        root = root / "evidence"
+        if not os.path.lexists(root):
+            return
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            if not stat.S_ISDIR(directory.lstat().st_mode) or os.path.lexists(directory / ".git"):
+                raise GitDeliveryError("worktree_invalid", "执行证据包含链接、特殊目录或嵌套仓库")
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(Path(entry.path))
+                    elif not stat.S_ISREG(mode):
+                        raise GitDeliveryError("worktree_invalid", "执行证据必须是普通文件，材料已保留")
+    except OSError as exc:
+        raise GitDeliveryError("worktree_invalid", "执行证据目录身份无法确认") from exc
+
+
+def _evidence_material(worktree, change):
+    """Keep new native-verification evidence outside delivery without following links."""
+    parts = Path(change["path"]).parts
+    if change["status"] != "??" or len(parts) < 3 or parts[:2] != (".pi", "evidence"):
+        return False
+    if any(part in ("", ".", "..") for part in parts):
+        raise GitDeliveryError("worktree_invalid", "执行证据路径身份无法确认")
+    parent = Path(worktree)
+    try:
+        for part in parts[:-1]:
+            parent = parent / part
+            if (not stat.S_ISDIR(parent.lstat().st_mode)
+                    or os.path.lexists(parent / ".git")):
+                raise GitDeliveryError("worktree_invalid", "执行证据包含链接、特殊目录或嵌套仓库")
+        if not stat.S_ISREG((Path(worktree) / change["path"]).lstat().st_mode):
+            raise GitDeliveryError("worktree_invalid", "执行证据必须是普通文件，材料已保留")
+    except OSError as exc:
+        raise GitDeliveryError("worktree_invalid", "执行证据文件身份无法确认") from exc
+    return True
+
+
 def _effective_changes(worktree):
+    _validate_evidence_material_tree(worktree)
     changes = worktree_changes(worktree)
     tracked = {os.fsdecode(name) for name in
                _git(["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".pi/goal", ".pi/kanpilot/codex"],
@@ -625,6 +672,9 @@ def _effective_changes(worktree):
             name = change["path"]
             owned_name = name.removesuffix("/")
             if _goal_material(worktree, change, tracked):
+                material.append(change)
+                continue
+            if _evidence_material(worktree, change):
                 material.append(change)
                 continue
             if (change["status"] == "??" and owned_name not in tracked and owned_name not in indexed
@@ -1140,16 +1190,56 @@ def _require_safe_files(files):
         raise GitDeliveryError("delivery_blocked_files", "交付包含敏感文件或超过 5MB 的文件", files=blocked)
 
 
-def _committed_files(path, sha, parent=None):
+def _committed_files(path, sha, parent=None, *, deadline=None, heartbeat=None):
     raw = _git(["diff-tree", "--root", "--no-commit-id", "--raw", "--no-abbrev", "-r",
-                "--no-renames", "-z", *([parent, sha] if parent else [sha])], path, 10).stdout.split(b"\0")
+                "--no-renames", "-z", *([parent, sha] if parent else [sha])], path,
+               _budget_timeout(deadline, heartbeat=heartbeat)).stdout.split(b"\0")
     files = []
     for index in range(0, len(raw) - 1, 2):
         oid = raw[index].split()[3].decode("ascii")
-        size = 0 if not oid.strip("0") else int(_value(["cat-file", "-s", oid], path))
+        size = 0 if not oid.strip("0") else int(_value(["cat-file", "-s", oid], path,
+            _budget_timeout(deadline, heartbeat=heartbeat)))
         files.append({"path": os.fsdecode(raw[index + 1]), "size": size})
     _require_safe_files(files)
     return [x["path"] for x in files]
+
+
+def registered_task_changes(delivery, *, task_id, deadline=None, heartbeat=None):
+    """Prove this task's already registered source, never arbitrary branch history."""
+    path, head, base = (delivery.get(key) for key in ("worktree_path", "head_sha", "base_sha"))
+    commits = delivery.get("commits") or []
+    if (not isinstance(commits, list) or not commits
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40,64}", value)
+                   for value in (head, base))):
+        raise GitDeliveryError("worktree_invalid", "已提交成果缺少完整的任务登记")
+    verify_branch_worktree(delivery, require_clean=True, expected_head=head)
+
+    def value(args):
+        return _value(args, path, _budget_timeout(deadline, heartbeat=heartbeat))
+
+    value(["merge-base", "--is-ancestor", base, head])
+    history = value(["rev-list", "--first-parent", base + ".." + head]).splitlines()
+    head_run = None
+    for sha in history:
+        task_trailers = value(["show", "-s", "--format=%(trailers:key=Kaneo-Task,valueonly)", sha]).splitlines()
+        run_trailers = value(["show", "-s", "--format=%(trailers:key=KaneoPilot-Run,valueonly)", sha]).splitlines()
+        if (task_trailers != [task_id] or len(run_trailers) != 1
+                or not any(isinstance(row, dict) and row.get("sha") == sha
+                           and row.get("execution_run_id") == run_trailers[0] for row in commits)):
+            raise GitDeliveryError("worktree_invalid", "分支包含未登记或不属于本任务的提交，不能复用")
+        parents = value(["show", "-s", "--format=%P", sha]).split()
+        if len(parents) not in (1, 2):
+            raise GitDeliveryError("worktree_invalid", "任务提交的父提交身份无法确认")
+        if len(parents) == 2:
+            value(["merge-base", "--is-ancestor", parents[1], base])
+        if sha == head:
+            head_run = run_trailers[0]
+    if history and head_run is None:
+        raise GitDeliveryError("worktree_invalid", "当前任务 HEAD 缺少已登记成果")
+    files = [name for name in _committed_files(path, head, base, deadline=deadline, heartbeat=heartbeat)
+             if not name.startswith(".pi/") and not is_build_artifact(name)]
+    verify_branch_worktree(delivery, require_clean=True, expected_head=head)
+    return {"sha": head, "files": files, "source_execution_run_id": head_run}
 
 
 def commit_worktree(delivery, *, task_id, title, execution_run_id, fix_round, timeout=300,
