@@ -58,7 +58,22 @@
 - 装机验证：`CFBundleShortVersionString=0.5.7-test.247`、`CFBundleVersion=247`、ad-hoc 签名；六项修复在安装包内全部存在（constants 3600 / 证据上限 128 KiB / verify 设备命令 / 空转说明 / plan_body_lines / 人工验收解析与 Review 规则 / get-task 投影）。
 - 行为核验（直接用安装包内置 core 执行）：8 项全 PASS——默认等待 3600、exec-config 合并默认、证据上限、.pi 判定、adb 被 verify 拒收且错误指向人工验收、普通命令仍通过、人工验收段解析、正文行数不含 frontmatter。
 - 运行时：engine tick 正常、mcp-serve/mobile-serve/观察 worker 复起，`kanpilot.db` 72 MB 原样保留，wjhpq/u5s2/busobt 三条任务仍在。
-- 未做：真实任务重跑与体验确认（需要用户回到 App 操作或授权重新规划/复审）；回退方式：把备份的 0.5.7-test.240.app 移回 /Applications。
+- 未做：真实任务体验确认；回退方式：把备份的 0.5.7-test.240.app 移回 /Applications。
+
+### 装机后真实任务复测（wjhpqxfqxr3084vxtc19e1uo）
+
+2026-11-12 23:39 由用户授权 `resolve replan`（actor=user），同任务同材料重新规划：
+
+| 指标 | 修复前（21:20 那轮及 12:40 两轮） | 修复后（23:39 这轮） |
+| --- | --- | --- |
+| 规划材料 | 222 文件 / 103.7 MB | **108 文件 / 1.13 MB** |
+| 规划耗时 | 3 次 `planner_timeout`（1800s） | **4 分 27 秒**（15:39:46 claim → 15:44:13 publish） |
+| 计划正文 | 426 行 | **24 行**（文件 49 行含 frontmatter） |
+| 人工验收 | 混在正文与 verify 里 | 独立 `## 人工验收（不阻塞）` 6 条 |
+| verify | 含设备/证据脚本 | 3 条可自动执行（dart format / flutter analyze / flutter test） |
+| 发布记录 | 无篇幅指标 | `plan_body_lines=24` |
+
+自动链路照常推进：15:44:47 `confirm_plan` → 15:44:52 dispatch → 15:44:56 `pi_desktop` 执行轮次开始，任务进入 `monitor/running`。
 
 
 - 体验入口：改动在源码树 `core/`；正在运行的 `/Applications/KaneoPilot.app` 仍是旧副本，需要走云端 `Packages` 构建安装后才生效。
