@@ -1,6 +1,6 @@
 # KP-CONT02 同一 Goal 继续执行的计时与收尾修复
 
-- 状态：实现中；首轮超时修复与 test.226 已发布，用户反馈后继续补齐预算、已提交成果与独立评审的推进链路。
+- 状态：待体验（Pilot 修复和 test.228）；Music 已通过正常重核并进入新独立评审，现因真实原生验收缺口受阻，尚未发布，不视为业务已验收。
 - 分支：`fix/20261112-kp-cont02-continuation-timeout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-fix-kp-cont02-continuation-timeout`
 - 基线：`2352d432aa68cebec162bd3e15620cc66c5d3529`（已安装及最新测试版 `0.5.7-test.224`）；从 main `ea02654` 快进至该版本，保留已发布的目标受阻处理能力。
@@ -43,6 +43,12 @@
 - 第二轮独立审查未发现阻塞问题，覆盖预算事务/幂等、回执与源码重核、完整提交链、复用账本并发保护和原生材料冻结。提交复用以 `reused_from_execution_run_id` 明示原轮，追加 `delivery_commit_reused` 事件，原提交 trailer 不变。
 - 当前生产只读预检：已登记成果 helper 精确返回原 `3908a33` 与两处歌词文件；当前 Git binding、回执证据和恢复资格均匹配；原生材料安全冻结/复核返回 157 文件、85,280,099 字节，无执行脚本或模型操作。
 - 第二轮主 agent 组合验证：预算/继续/恢复及界面资格相关检查 `53 passed, 17 subtests passed`（74.95s）；成果、verdict、Git 交付、运行材料、原生 Review、快照、CLI、任务分支和结算/阶段契约的最终组合 `386 passed, 23 subtests passed`（371.68s），均为真 pytest 与隔离夹具。独立审查通过，`git diff --check` 通过。
+- 第二轮源码 `f0e1ffc64b1fc28e5e74c87193cebdeb674812e5`。经核心 `resolve reverify` 及定点 monitor `cc0ac89e-da3f-40c2-b96f-83c0075aae77`，完整 Goal/冻结 verify/源码核验通过，复用原 `3908a33`，显式追加当前 run 的提交复用登记；真实任务进入 `review / in_review`，清除了旧预算误阻塞，没有新派发执行。
+- 新独立 Codex Review 请求 `5437a28b-ea82-402d-8fec-13b73748677d`，invocation `fd1589d4-2e2d-42b9-80fe-e524518d857f`；冻结并校验 157 份原生证据，正常登记 `blocked`，真实任务变为 `review / needs_user / review_blocked`。报告 `~/Library/Application Support/KaneoPilot/reports/wjhpqxfqxr3084vxtc19e1uo/6356ba98-1c94-45d9-82f9-86780ce61f58.md`：未发现确定代码缺陷，但候选 APK 无法追溯至指定提交、可播放空歌词样本缺失、双栏播放/暂停与860宽seek尚未验证；另记录原执行换包清数据事故的恢复完整性未证明。未跳过评审、未创建 PR/合并/业务发布；现有证据不足以宣称用户任务已可发布。
+- 新测试版云端 Packages run 228：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43172845344>，来源 `f0e1ffc`，基础版 `0.5.7`；全部必需 job success，仅显式未开启的全文探针 skipped。相同源码的 push 预览 227 已主动取消，仅以完整测试发布 228 为证据。
+- 已公开测试预发布 <https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.228>，非 draft、prerelease，四项资产齐备。完整下载 APK、arm64 DMG、manifest、SHA256SUMS；所有 SHA256、文件大小、source SHA/version/build=228、test 通道/分支/arm64 架构均匹配，`hdiutil verify` 通过。证据与交付包保留在主工作区 `build/kp-cont02/release-228/`（含 cloud-result.json、package-check.json），不作为缓存删除。未替换已安装 App，未安装 Android 包；开启测试通道后可检查更新。
+- 阻塞后只读调查确认：旧会话可追溯 profile 构建→对齐签名→安装，现存 profile 包与 a2 的 arm64 `libapp.so` 字节相同；但构建时锁文件变更、完整源码快照缺失，仍不能证明完整固定 HEAD 的包来源。执行树无可复用音频夹具，未读取用户媒体库/凭据。现有手机后来已升级更高版本，未再次换包、降级或改数据；事故前数据完整恢复未证明。已询问可正常播放且无歌词的现有测试输入与隔离环境；后续由固化执行端从固定源码构建取证，不在 Pilot 本地代跑 verify，不擅自新增数据源或改用户 DB。
+- 用户指定无歌词样本《感谢陪伴》。它正是历史取证使用的 Hanser／一抹憨色第10首、00:49 曲目；应修正“没有样本”的表述。旧候选包 UI 停在末尾且点击不推进的事实需重新核验，不能据此认定当前歌曲资源不存在或服务端缺失；`dumpsys` 单独位置冻结不构播放失败证明。已进一步询问当前版本是否正常播放，未重复要求选择别的曲目。双栏取证使用《他守恒》，其交互缺口仍独立存在。已有 AVD 属 StudyTool，未复用其数据或启动；新隔离环境和现有账号仍待确定。
 
 ## 验证与后续
 
