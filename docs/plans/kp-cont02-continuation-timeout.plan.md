@@ -1,6 +1,6 @@
 # KP-CONT02 同一 Goal 继续执行的计时与收尾修复
 
-- 状态：实现中（Pilot 修复和 test.228 已发布、待体验）；Music 已通过正常重核，新的独立评审因真实原生验收缺口阻塞，现进入补验处理，尚未发布，不视为业务已验收。
+- 状态：实现中（Pilot 修复和 test.232 已发布、待体验）；Music 正常重核/独立评审后进入补验，新执行因 NETWORK_ERROR 结束；原生完整材料额度变更待用户决定，业务尚未发布，不视为已验收。
 - 分支：`fix/20261112-kp-cont02-continuation-timeout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-fix-kp-cont02-continuation-timeout`
 - 基线：`2352d432aa68cebec162bd3e15620cc66c5d3529`（已安装及最新测试版 `0.5.7-test.224`）；从 main `ea02654` 快进至该版本，保留已发布的目标受阻处理能力。
@@ -83,3 +83,19 @@
 - T7 发布源码 `8d3e290908fdc875f1709896ae36c74844d375b1` 已推送任务分支。云端 Packages 测试发布 run 230：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43183608785>，基础版本沿用 0.5.7；同源码 push 预览229已请求取消，避免重复构建。此刻未发布，不沿用 test.228 的包检查结果。新规划实际 run `6163ff5e-a41c-47af-a8a2-b46783d4a453`，已持久 native_child 检查点；后续仍须正常计划发布/执行确认/原生补验/独立Review。
 - 云端230的两组 shard3 核心检查失败：新增真实内核扫描用例在Linux遇到同UID但不可读取的 GitHub runner 进程 `/proc/1028/cwd`，源码按 fail-closed 正确拒绝。用例误把整个宿主当可控夹具，不能因此跳过用例或放宽生产扫描。后续仅隔离Linux测试的进程清单，仍读取真实临时进程cwd/FD，并增加不可检查活PID必须拒绝的回归；macOS真实全量lsof保留。230发布门禁拦截，尚无test.230发布。
 - 云端失败修正仅涉及新增测试文件：Linux枚举受控self/临时child进程，仍真实读取内核cwd/FD；mac继续全量lsof。新增受保护活PID拒绝回归，不改生产scanner、不skip或降门禁。主agent重跑 `43 passed in 31.99s`，worker独立43通过，reviewer确认边界合理、无实质问题；Linux实际结果待新云端检查。
+- 测试隔离修订源码 `7a6acc0570941e22566d28c02a22840556ed2177` 已推送；新测试发布 Packages run232：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43185538086>。旧230已确知两组核心失败，记录原失败后请求停止剩余无诊断必要的构建；同源码push预览231亦取消，避免占用资源。仅以232的完整门禁、公开Release和包检查为本次发布证据，不能沿用230的部分绿灯。
+- 新补验计划正常发布：`bfa771d5df36cd57bf2b539e3c79539be5800555eb3c51e0f1ff2c355af70035`，路径 `/Users/sakurasep/Documents/Code/Plan/projects/e8magole7hbivl8103wevkss/这里的歌词展示有点小了吧_感觉不协调_2026-11-12_16-48-23.md`。现有调度器自动确认并派发新run `62d4390e-8bbe-4599-88b2-eb5c6f1dea59` / session `2d20c98b-7e16-48d7-b0ce-19119b5c6288`；主agent未重复claim/dispatch。该轮仅做开工只读核对，随后原生turn返回 NETWORK_ERROR；核心如实 execution_failed / needs_user，不是原误超时，尚无Goal/构建/设备或业务verify通过。
+- 独立计划审查发现两个执行前置：完整新APK放入.pi/evidence（历史APK约60.83MiB）与单文件20MiB、全树100MiB边界冲突，旧157份证据已81.33MiB；不能删除旧证据/只留哈希/抽帧替代完整录像。另自定义.pi/runtime不在交付豁免范围，成功交付必须清理且无进程引用，阻塞时保留但不推进完成。其余原验收和隔离边界完整保留。暂停原样重试；先明确合规材料传递及runtime收尾，网络恢复后走正常核心路径。
+
+## T8 原生完整材料前置（待用户决定，未修改源码）
+
+- 只读分析与独立审查确认：当前每任务100MiB不是每批100MiB，分卷不能透明绕过；旧证据、完整候选包和完整录像必须保留。不能排除APK、移动旧证据或仅传哈希来声称满足原契约。
+- 已向用户提出有界变更：仅原生Review证据单文件128MiB、总量512MiB；通用规划/源码快照材料继续20MiB/100MiB。完整文件仍经无链接读取、大小上限、双次身份/库存核对、全字节SHA、task/run/plan/head绑定、冻结/收尾哈希守卫；独立Review仍须实际读取完整材料，不能由资源校验代替pass。此为重要输入边界调整，未得到答复前不实施、不生产恢复或重派该依赖部分。
+- 若获确认，改动限定共用原生证据冻结通道及相应边界测试/规格，不扩大Git豁免；补验成功交付前显式确认临时AVD/认证runtime已清理、无运行引用。新计划和verify需经正常核心路径更新，不能原地改已冻结计划。
+
+## test.232 发布证据
+
+- 源码 `7a6acc0570941e22566d28c02a22840556ed2177`；<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43185538086> 全部必需job success，仅显式未启用fulltext probe skipped，包括两组之前失败的shard3及原生平台探针均通过。
+- <https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.232> 已公开，非draft、prerelease，四项资产齐全；2026-11-12 09:03:34Z发布。没有覆写test.228或旧标签，没有数据库schema变更。
+- 完整下载APK、arm64 DMG、manifest、SHA256SUMS；所有哈希/大小/source SHA/version/build=232/channel/branch/arm64身份一致，hdiutil verify为VALID。包与cloud-result.json/package-check.json保留于主工作区build/kp-cont02/release-232/。未覆盖安装App或现有手机；体验入口为App开启接收测试版后检查更新。
+- 本任务未合并main，且T8仍待用户决定，保留本任务工作树，不满足收尾清理条件。原Music执行已停在真实NETWORK_ERROR，不在未知发送状态下盲重发；未把《感谢陪伴》用户确认当作已完成原生验收。
