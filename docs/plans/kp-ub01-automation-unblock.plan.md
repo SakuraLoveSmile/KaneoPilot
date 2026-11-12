@@ -59,6 +59,15 @@
 - 行为核验（直接用安装包内置 core 执行）：8 项全 PASS——默认等待 3600、exec-config 合并默认、证据上限、.pi 判定、adb 被 verify 拒收且错误指向人工验收、普通命令仍通过、人工验收段解析、正文行数不含 frontmatter。
 - 运行时：engine tick 正常、mcp-serve/mobile-serve/观察 worker 复起，`kanpilot.db` 72 MB 原样保留，wjhpq/u5s2/busobt 三条任务仍在。
 - 未做：真实任务体验确认；回退方式：把备份的 0.5.7-test.240.app 移回 /Applications。
+### 第二轮装机与 Review 验证（v0.5.7-test.249，2026-11-13 00:49–00:54）
+
+- 发布：run 43259491260（channel=test，base_version=0.5.7）全部 job 成功，预发布 **v0.5.7-test.249**；DMG SHA256 校验通过。
+- 装机：旧包 0.5.7-test.247 备份到 `KaneoPilot-install-backups/20261113-004958-0.5.7-test.247`，安装 249 并清除 quarantine；`cli_review.py` 内 `recovered_error_events`/`completed_after_failure` 均在。
+- 重跑 Review：`resolve action=resume`（review_blocked → in_review，请求 98e2c569）→ Review 正常登记结论，不再出现「Codex Review 失败（退出码 0）」。
+- 新报告 `reports/busobtd4z291blpp8ynswzzm/ea3e9283-....md` 的结论：未发现可确定代码缺陷；阻塞只剩一条自动验证缺口（subsonic_api 离线解析改了 6 个依赖，verify 通过不能代表冻结 lock 环境），并明确写「不能归为人工听感或设备体验」。Windows 原生、窗口观察、音频听感、真实控件切歌全部列为「待体验项（不作为本轮阻塞）」。
+- 该轮 codex 事件流无 error 事件，恢复路径由单元测试覆盖；`run_codex` 的判定修复已在 249 中生效。
+
+剩余（新任务）：executor 需要在与冻结 lock 一致的依赖环境下重跑 subsonic_api 检查并保留解析版本证据；wjhpq 的「记录/证据收尾轮无源码交付物」口径仍需产品决定。
 ### Review 口径实测（busobt，2026-11-13）
 
 用 `supplement-review` 带用户说明重新发起 busobt 的 Review（新 prompt 已随 0.5.7-test.247 生效）。模型输出（executor-sessions/review/b8e9477f-.../last-message.txt）显示规则按预期生效：
