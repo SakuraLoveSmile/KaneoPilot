@@ -665,7 +665,7 @@ settings 键 `exec_config`（JSON；v3 起允许 `backend`/`pi_desktop` 扩展�
 ```
 
 - **初始默认**（未保存时生效值）：`CloseAI / deepseek-flash / xhigh / default`。
-- 执行问答扩展 `execution_question_max_wait_seconds`（非负整数，缺省86400，0不限）；在 `set-exec-config` 顶层接收并合并保存，派发快照冻结。`pi_desktop` 五字段授权配置形状不变，旧配置/快照缺省值见 §5.28.5。
+- 执行问答扩展 `execution_question_max_wait_seconds`（非负整数，缺省3600，0不限）；在 `set-exec-config` 顶层接收并合并保存，派发快照冻结。`pi_desktop` 五字段授权配置形状不变，旧配置/快照缺省值见 §5.28.5。
 - `agent_preset` 对应 `agents_dir`（缺省 `<app_support>/agents`，`KANPILOT_AGENTS_DIR` 覆盖）下的 `<name>.md` 文件；worker 经 `pi --system-prompt <file>` 注入。
 - 凭据只查就绪态：`pi auth check --provider <p> --model <m>` 的退出码；任何命令、界面、日志、数据库**不得**输出或持久化凭据值，也不读取 `~/.pi` 之外的 pi-desktop 内部库。
 - 调度台改配置只写本库 `settings.exec_config`；不写 `~/.pi/agent/*`、不动 pi 全局配置。
@@ -775,7 +775,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。完成判定的结果来源是 Plus 结构化 Goal 报告，Pilot 不回查转录中的工具结果。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
-- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
+- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。只有 `.pi/**` 变动、没有源码交付物的轮次仍判 `empty_diff`（不放宽门禁），但 `detail` 必须写明“只有 .pi/** 证据材料变动（N 项）”、给出可执行下一步，不能用泛化的“空转”让用户和自动重规划无从下手。
+- verify 只接受执行环境能直接运行并返回退出码的命令。设备/模拟器/录屏类命令（首词 `adb`/`avdmanager`/`emulator`/`simctl`/`scrcpy`/`screencapture`/`idevice*`，或 `xcrun simctl`、`flutter run|drive|install` 前缀）在 `parse_verify_block` 直接拒收（2026-11-12）：执行环境没有真机或屏幕，写进 verify 只会让每轮验证必然失败；这类验收写进计划正文的「人工验收」清单。
 - 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条执行，并在完成时以结构化 Goal 报告（`SubmitGoalReport`）提交 `checks`，逐条列出冻结命令、退出码与结果。报告是完成判定的唯一结果来源；助手的文字总结不能作为通过依据。
 - 核心核对 task/run/turn 身份、`plan_sha256` 与登记工作树。报告经 `read_goal_report` 读取并做身份核对（session、proposal、execution 相符；绝不按名称或标题匹配）。本轮执行 turn 与报告 turn 都必须属于已批准的 turn 链（含 `turn_adopted`）。规划、旧 turn、任意人工接续与其他 agent 的报告不能混用。报告不可用（not_found、pending、draft、failed、corrupt、truncated）为未确认。报告底线（不含 reviews，与 `verify_goal_completion` 的确定性部分同口径）要求 `ready`、`integrity.kind=structured`、`execution.status=completed`、`verdict=met`；任一不满足（如 fallback 报告）同为未确认。
 - 冻结 verify 每条命令（去除行内 `VAR=value` 环境前缀与尾部中文注释、去首尾空白后，与检查命令精确相等）必须在报告 `checks` 中对应一条 `exitCode=0` 且 `result=passed` 的记录；缺一条即未确认。真实非零退出或 `result=failed` 为质量失败。
@@ -879,6 +880,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - 使用已保存项目映射与仓库路径；未映射项目仍展示但 `selectable=false` + `blocked_reason` 说明；不新增项目配置系统。
 - 每个 To Do 独立规划、独立产出；同一时间只领取一个规划任务。
 - 附件：图片 PNG/JPEG/WebP、日志 UTF-8 文本；单文件 ≤20 MiB、每任务材料合计 ≤100 MiB，超限明确报错（`validation_failed`），不静默截断。
+- 重新规划材料的 `execution_worktree` 分支单独设证据上限（2026-11-12）：`.pi/**` 是执行端私有证据与运行材料（lsof 全量输出、录像、APK、日志），单文件只内联 ≤128 KiB 的文本，超限项仍在 `changes[]` 登记 `reason=evidence_too_large`，让规划器知道有这份改动但不读正文。理由是历史任务整包 222 文件/103.7 MB 的 `.pi/**` 证据把 Codex 规划拖到 1800s 超时并反复重规划。
 - 识别任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接及 HTML 图片；未知附件结构/格式/失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
 - 下载只向 Kaneo 同源地址发凭据；跨域/重定向不携带 `Authorization`；不输出凭据或带认证参数的 URL。
 - 本地文件与已下载文件复制到应用管理的材料目录 `planner_inputs/<input_id>/`，记录 `name/source/media_type/sha256/size`；不依赖临时剪贴板路径长期存在。
@@ -915,6 +917,8 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 ```
 
 - `ready`：必须有非空 `plan_markdown` 且无未决 `questions`，满足项目计划规范；计划元数据（task_id/plan_sha256/planner_model/input 哈希等）由核心根据本轮真实输入生成，**不**信模型自报的 ID/模型名/哈希。
+- **人工验收与待体验（2026-11-12）**：真机、模拟器、真实服务、听感、视觉观察、跨平台对比这类执行环境做不了的验收，写进计划正文独立的 `## 人工验收（不阻塞）` 段（每条一行 `- 项目：怎么确认`，没有写“无”）。这些项**不进 verify**，也不作为完成前提：自动验收通过即视为执行完成，人工项登记为「待体验」交用户在体验后确认。`publish-plan` 用 `planfile.manual_acceptance` 解析该段存入 `extra.plan_manual_acceptance`，并投影到 `get-task` 视图；Review 结论按同规则判定（人工项缺失不构成 changes_requested/blocked，pass 时在报告单列待体验项）。理由：计划为了满足无法自动完成的验收而不断膨胀，Review 也因同类缺口反复判 blocked。
+- **计划篇幅契约（2026-11-12）**：`executor_prompts/planner_prompt.md` 对所有后端（codex / claude / qoder / pi_desktop）统一要求先按改动面定档——轻档（单文件或单模块、根因明确、不动公共接口/数据结构/依赖）正文 ≤60 行，只写目标、复现、改动位置、步骤与验收；重档（接口、schema、数据迁移、新依赖、跨模块、不可逆操作）正文 ≤180 行。同时禁止复述材料与历史轮次、沿用旧计划结构、罗列证据清单/目录树/SHA/字节数/配额换算、抄调度与门禁规则。理由：重新规划曾在上百行的旧计划上继续加长（同一任务 151→188→194→426 行），把规划拖到 1800s 超时。`publish-plan` 在 `plan_published` 事件里记录 `plan_body_lines`（不含 frontmatter 的非空行数）作为可观测指标；**不**因篇幅拒绝发布——重排一次要烧掉一整轮规划。
 - `needs_input`：保存 `questions` 与 `plan_markdown` 草稿，task→`needs_user`、`failure_code=reported`；UI 允许补充说明/附件后重新提交，不发布为可执行计划。
 - 模型退出失败/超时/空输出/不合规输出：保存证据（JSONL 日志+stderr），进入规划失败（`report failed`/`needs_user`），**不自动重试**。超时沿用 `executor_timeout_seconds`（默认 1800s）。
 - runner 心跳间隔 ≤ `min(lease_seconds/3, 60)` 秒；租约失效或所有权丢失（`stale_run`）时终止自己的子进程组，禁止发布。
@@ -1730,7 +1734,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 
 观察者恢复只保证观察，不负责收尾；执行轮结束后的 monitor/review 补给与收尾见 §5.27.15。
 
-- 最长等待默认86400秒（24小时）；执行配置增加非负整数 execution_question_max_wait_seconds，0为不限，派发冻结到该轮快照。旧快照缺省86400，不读当前设置覆盖旧轮次。成本预算不变。
+- 最长等待默认3600秒（1小时，2026-11-12 由 86400 下调：24h 会让无人值守流程停摆整天，历史上多轮卡在这里）；执行配置增加非负整数 execution_question_max_wait_seconds，0为不限，派发冻结到该轮快照。旧快照缺省86400，不读当前设置覆盖旧轮次。成本预算不变。
 - 核心是等待时间唯一权威。run 待答集合 `0→1` 开启等待区间，`1→0` 关闭；并发问题的等待取**区间并集**，不能将各请求重叠时长相加。开放区间计算到本次核心时间，历史区间重报/恢复不重复累计。
 - 轮次剩余预算=`时限−max(0,now−started_at−等待并集时长)`；自动化预算扣除等待区间与本段 `[segment_started_at,now]` 的交集并集。新段采用新起点，不清除历史问答。job.input_wait_seconds 仅缓存；resume 从核心重建，不使用旧缓存再加一次。
 - pending 检测先于 deadline 判断，包括 resume 第一轮与 Goal 契约轮。有开放问题不得因普通时限 stop/abort。最长等待达到后，经核心停止操作收据执行 stop；十秒后未见终态才 abort，原因 execution_question_expired，不扩大只读 client 的写权限。

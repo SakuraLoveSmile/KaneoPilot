@@ -396,6 +396,10 @@ class ExecutionQuestionsTests(KanpilotTestCase):
         from kanpilot import execution_questions as eq,pi_desktop_worker,core
         t0=util.now_dt()
         with mock.patch.object(util,'now_dt',return_value=t0):self.scene()
+        # 本用例验证“等待从核心重建并遵守配置上限”，与上限的默认值无关：
+        # 默认上限 2026-11-12 由 86400 降到 3600（见下一条用例），这里显式钉住 24h，
+        # 才能继续区分 6h 未到期与 24h 已到期。
+        self.config['execution_question_max_wait_seconds']=86400
         spec={'task_id':'t','run_id':'r','db_path':str(self.db_path),'config':self.config}
         job={**self.job,'started_at':util.to_iso(t0),'input_wait_seconds':999999}
         later=t0+datetime.timedelta(hours=6)
@@ -413,3 +417,21 @@ class ExecutionQuestionsTests(KanpilotTestCase):
             self.assertTrue(observer.expired())
         spec['config']['execution_question_max_wait_seconds']=0
         self.assertFalse(observer.expired())
+
+    def test_default_question_wait_cap_is_one_hour(self):
+        """默认最长等待 1h（2026-11-12 由 86400 下调）：24h 会让无人值守流程
+        停摆整天，超时按既有失败处理转人工。"""
+        from kanpilot import constants, exec_config, pi_desktop_worker
+        self.assertEqual(constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS, 3600)
+        merged = exec_config._merge(None)
+        self.assertEqual(merged['execution_question_max_wait_seconds'], 3600)
+        t0 = util.now_dt()
+        with mock.patch.object(util, 'now_dt', return_value=t0):
+            self.scene()
+        spec = {'task_id': 't', 'run_id': 'r', 'db_path': str(self.db_path), 'config': self.config}
+        job = {**self.job, 'started_at': util.to_iso(t0), 'input_wait_seconds': 0}
+        observer = pi_desktop_worker._ExecutionInputObserver(spec, job, mock.Mock())
+        with mock.patch.object(util, 'now_dt', return_value=t0 + datetime.timedelta(minutes=59)):
+            self.assertFalse(observer.expired())
+        with mock.patch.object(util, 'now_dt', return_value=t0 + datetime.timedelta(minutes=61)):
+            self.assertTrue(observer.expired())

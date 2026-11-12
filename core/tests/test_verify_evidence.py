@@ -107,9 +107,26 @@ def test_valid_verify_and_normalization():
     "```verify\nx\n```\n```verify\ny\n```", "```verify\nx\n",
     "```verify\n" + "x\n" * 6 + "```", "```verify\nx \\\n```", "```verify\nx << EOF\n```"] +
     ["```verify\n" + command + "\n```" for command in
-     ["git commit -m x", "git push", "git reset --hard", "git checkout x", "git switch x", "gh pr view"]])
+     ["git commit -m x", "git push", "git reset --hard", "git checkout x", "git switch x", "gh pr view"]] +
+    ["```verify\n" + command + "\n```" for command in
+     ["adb shell input tap 1 1", "avdmanager list avd", "emulator -avd kp",
+      "xcrun simctl io booted screenshot a.png", "scrcpy", "screencapture a.png",
+      "idevicescreenshot a.png", "flutter run -d macos", "flutter drive --driver=x"]])
 def test_invalid_verify(text):
     assert parse_verify_block(text)["ok"] is False
+
+
+def test_device_command_rejection_is_actionable():
+    # 设备/模拟器/录屏命令写进 verify 会让每轮验证必然失败；错误必须指向人工验收清单。
+    result = parse_verify_block("```verify\nadb devices\n```")
+    assert result["ok"] is False
+    assert "人工验收" in result["error"]
+    assert "adb" in result["error"]
+
+
+def test_host_runnable_commands_still_pass():
+    assert parse_verify_block("```verify\npython -m pytest -q\nflutter analyze --no-pub\n```") == {
+        "ok": True, "commands": ["python -m pytest -q", "flutter analyze --no-pub"]}
 
 
 def test_nested_fence_does_not_declare_verify():

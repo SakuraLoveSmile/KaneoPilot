@@ -679,6 +679,8 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "plan_execution_hold": bool(
             db.task_extra(task).get("plan_execution_hold")
         ),
+        # 计划里人工验收段的条目（待体验清单，不参与完成门禁）。
+        "plan_manual_acceptance": db.task_extra(task).get("plan_manual_acceptance") or [],
         # v2 §5.20.1：purged 任务只读审计详情。
         "read_only": db.task_is_purged(task),
     }

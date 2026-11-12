@@ -3,6 +3,7 @@ kaneo_dispatch.py check() semantics (protocol.md §4.5 items 1-3, §5.6)."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,51 @@ def load_plan(plan_path: str, expect_task_id: Optional[str] = None) -> tuple[dic
         "plan task_id invalid",
     )
     return meta, raw, path
+
+
+_MANUAL_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*人工验收")
+_MANUAL_EMPTY = {"无", "无。", "（无）", "(无)", "暂无", "不适用"}
+
+
+def manual_acceptance(plan_text: str) -> list:
+    """「人工验收（不阻塞）」段里的条目。
+
+    这类验收（真机、设备、听感、视觉、跨平台对比）执行环境做不了，只作为
+    「待体验」清单交给用户确认，**不**参与 verify、也不阻塞 Review 与完成。
+    没有该段或写明“无”时返回空列表。
+    """
+    items, inside, fenced = [], False, False
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("`" * 3):
+            if inside:
+                fenced = not fenced
+            continue
+        if re.match(r"^#{1,6}\s", stripped):
+            inside = bool(_MANUAL_HEADING.match(stripped))
+            fenced = False
+            continue
+        if not inside or fenced or not stripped:
+            continue
+        bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+        text = bullet.group(1).strip() if bullet else stripped
+        if text and text.strip("：:。 ") not in _MANUAL_EMPTY:
+            items.append(text)
+    return items
+
+
+def body_line_count(raw: bytes) -> int:
+    """计划正文的非空行数（不含 frontmatter）。
+
+    只做可观测记录：篇幅契约（轻档 ≤60、重档 ≤180）由 planner prompt 约束，
+    核心不在发布时拒绝计划——重排一次要烧掉一整轮规划。
+    """
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2]
+    return sum(1 for line in text.splitlines() if line.strip())
 
 
 def expected_model_snapshot(req_payload: dict) -> Optional[dict]:

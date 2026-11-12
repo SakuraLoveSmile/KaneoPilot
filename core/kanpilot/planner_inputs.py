@@ -347,7 +347,13 @@ def _replan_worktree_state(task):
         raise util.KanpilotError("validation_failed", exc.message) from exc
 
 
-def _read_worktree_material(worktree, relative, limit):
+def _evidence_material_path(relative) -> bool:
+    """`.pi/**` 是执行端私有证据与运行材料目录（不进交付，也不整包喂规划器）。"""
+    parts = Path(relative).parts
+    return bool(parts) and parts[0] == ".pi"
+
+
+def _read_worktree_material(worktree, relative, limit, limit_reason="total_size_limit"):
     """Open each component without following symlinks, including racing links."""
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or any(part in ("..", ".git") for part in parts):
@@ -370,13 +376,13 @@ def _read_worktree_material(worktree, relative, limit):
         if meta.st_size > constants.PLAN_INPUT_FILE_MAX_BYTES:
             return None, "file_too_large"
         if meta.st_size > limit:
-            return None, "total_size_limit"
+            return None, limit_reason
         with os.fdopen(os.dup(leaf), "rb") as handle:
             content = handle.read(min(limit, constants.PLAN_INPUT_FILE_MAX_BYTES) + 1)
         if len(content) > constants.PLAN_INPUT_FILE_MAX_BYTES:
             return None, "file_too_large"
         if len(content) > limit:
-            return None, "total_size_limit"
+            return None, limit_reason
         if Path(relative).suffix.lower() not in constants.PLAN_IMAGE_SUFFIXES:
             try:
                 content.decode("utf-8")
@@ -648,7 +654,12 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         for candidate in candidates:
             relative = candidate["path"]
             change = {"path": relative, "status": candidate["status"]}
-            content, reason = _read_worktree_material(worktree, relative, max(0, constants.PLAN_INPUT_TOTAL_MAX_BYTES - total_bytes))
+            limit = max(0, constants.PLAN_INPUT_TOTAL_MAX_BYTES - total_bytes)
+            limit_reason = "total_size_limit"
+            if _evidence_material_path(relative) and constants.PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES < limit:
+                limit = constants.PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES
+                limit_reason = "evidence_too_large"
+            content, reason = _read_worktree_material(worktree, relative, limit, limit_reason=limit_reason)
             if content is None:
                 change["reason"] = reason
             else:

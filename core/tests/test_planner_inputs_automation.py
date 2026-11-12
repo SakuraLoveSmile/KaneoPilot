@@ -487,3 +487,35 @@ class TestPreparePlanInputActor(KanpilotTestCase):
                 if r["kind"] == "plan_input_prepared"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["actor"], "user")
+
+def test_evidence_material_is_capped_but_small_text_still_inlined(tmp_path):
+    """.pi/** 证据只内联小文本：5 MB 的 lsof JSON 进不了规划材料（历史上把
+    规划拖到 1800s 超时的直接原因），但小报告仍可读，源码目录不受该上限影响。"""
+    from kanpilot import constants, planner_inputs
+    evidence = tmp_path / ".pi" / "evidence"
+    evidence.mkdir(parents=True)
+    huge = evidence / "lsof-root.json"
+    huge.write_text("x" * (constants.PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES + 10), encoding="utf-8")
+    small = evidence / "report.md"
+    small.write_text("# ok", encoding="utf-8")
+    source = tmp_path / "lib" / "main.py"
+    source.parent.mkdir()
+    source.write_text("print(1)", encoding="utf-8")
+
+    limit = constants.PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES
+    assert planner_inputs._evidence_material_path(".pi/evidence/lsof-root.json")
+    assert not planner_inputs._evidence_material_path("lib/main.py")
+
+    content, reason = planner_inputs._read_worktree_material(
+        str(tmp_path), ".pi/evidence/lsof-root.json", limit, limit_reason="evidence_too_large")
+    assert content is None
+    assert reason == "evidence_too_large"
+
+    content, reason = planner_inputs._read_worktree_material(
+        str(tmp_path), ".pi/evidence/report.md", limit, limit_reason="evidence_too_large")
+    assert reason is None and content == b"# ok"
+
+    content, reason = planner_inputs._read_worktree_material(
+        str(tmp_path), "lib/main.py", limit, limit_reason="evidence_too_large")
+    assert reason is None and content == b"print(1)"
+
