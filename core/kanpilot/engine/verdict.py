@@ -115,6 +115,14 @@ def _evidence_only_changes(worktree, deadline=None, heartbeat=None) -> int:
     return sum(1 for row in rows if str(row.get("path", "")).split("/")[0] == ".pi")
 
 
+def _plan_delivery_kind(task) -> str:
+    """计划声明的交付类型；缺字段的简化 task（测试/老回执）按默认源码交付。"""
+    try:
+        return db.task_extra(task).get("plan_delivery_kind") or "source"
+    except (KeyError, TypeError):
+        return "source"
+
+
 def _check_result(commands, changes, checks, evidence_changes=0, delivery_kind="source"):
     empty_diff = not changes
     reasons = environment_reasons(checks)
@@ -362,8 +370,7 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
         raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证证据无法确认：" + util.redact(str(exc))) from exc
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
-    result = _check_result(commands, changes, checks, evidence_changes,
-                           db.task_extra(task).get("plan_delivery_kind") or "source")
+    result = _check_result(commands, changes, checks, evidence_changes, _plan_delivery_kind(task))
     if not verification.get("ok") and not result["empty_diff"]:
         # Missing/ambiguous results cannot trigger a quality repair. Only a
         # real independent nonzero exit is a verification failure.
@@ -431,8 +438,7 @@ def _evaluate_report_task(conn, task, source, *, deadline=None, heartbeat=None, 
               for row in coverage["rows"]]
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
-    result = _check_result(commands, changes, checks, evidence_changes,
-                           db.task_extra(task).get("plan_delivery_kind") or "source")
+    result = _check_result(commands, changes, checks, evidence_changes, _plan_delivery_kind(task))
     if not coverage["ok"] and not result["empty_diff"]:
         # Missing or unconfirmed report records stay unconfirmed; only a real nonzero exit fails.
         real_failure = any(type(item.get("exit_code")) is int and item["exit_code"] != 0

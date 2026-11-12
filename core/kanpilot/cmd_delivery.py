@@ -35,7 +35,10 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         baseline = core.branch_review_snapshot(task)
         git_input = dict(delivery, repository=task["repository"])
         title = task["title"]
-        evidence_only = db.task_extra(task).get("plan_delivery_kind") == "evidence_only"
+        try:
+            evidence_only = db.task_extra(task).get("plan_delivery_kind") == "evidence_only"
+        except (KeyError, TypeError):  # 简化 task（测试/老回执）没有 extra_json
+            evidence_only = False
         fix_round = core.automation_of(task).get("fix_round", 0)
         if repair.get("source_kind") == "build_failure":
             from . import review_repair
