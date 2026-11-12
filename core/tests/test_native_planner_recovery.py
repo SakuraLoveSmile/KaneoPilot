@@ -173,18 +173,44 @@ def test_known_complete_native_diagnostics_are_allowed_but_unknown_stderr_is_not
     with pytest.raises(util.KanpilotError): recovery._native_log_clear(path, 'native-thread')
 
 
+def scan_controlled_kernel_users(roots, pids):
+    """Limit Linux process discovery to this test, keeping real kernel links."""
+    if not sys.platform.startswith('linux'):
+        return recovery._native_file_users(roots, pids)
+    real_iterdir = Path.iterdir
+    def controlled_iterdir(directory):
+        if directory == Path('/proc'):
+            return iter(Path('/proc') / str(pid) for pid in sorted(pids))
+        return real_iterdir(directory)
+    with patch.object(Path, 'iterdir', controlled_iterdir):
+        return recovery._native_file_users(roots, pids)
+
+
 def test_real_kernel_scan_ignores_own_lock_but_refuses_detached_process_cwd(tmp_path):
     root = tmp_path / 'slot'
     root.mkdir()
     with desktop_queue._serialized(root):
-        assert recovery._native_file_users([root], {os.getpid()})
+        assert scan_controlled_kernel_users([root], {os.getpid()})
         proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=root, start_new_session=True)
         try:
             with pytest.raises(util.KanpilotError):
-                recovery._native_file_users([root], {os.getpid(), proc.pid})
+                scan_controlled_kernel_users([root], {os.getpid(), proc.pid})
         finally:
             proc.terminate()
             proc.wait(timeout=5)
+
+
+def test_linux_kernel_scan_refuses_inaccessible_live_process(tmp_path):
+    # A same-user protected process must not be silently omitted from recovery.
+    # Keep kill(pid, 0) real so this PID is known to be alive on every test host.
+    pid = os.getpid()
+    with patch.object(recovery.sys, 'platform', 'linux'), \
+         patch.object(Path, 'iterdir', return_value=iter([Path('/proc') / str(pid)])), \
+         patch.object(Path, 'stat', return_value=SimpleNamespace(st_uid=os.geteuid())), \
+         patch.object(recovery.os, 'readlink', side_effect=PermissionError('isolated protected cwd')) as readlink:
+        with pytest.raises(util.KanpilotError, match='原持有进程仍存活或无法核实'):
+            recovery._native_file_users([tmp_path], {pid})
+        readlink.assert_called_once_with(Path('/proc') / str(pid) / 'cwd')
 
 
 def test_ps_failure_or_incomplete_output_refuses_scan():
@@ -282,7 +308,7 @@ def test_real_kernel_scan_refuses_detached_open_file(tmp_path):
         cwd=tmp_path, stdout=subprocess.PIPE, start_new_session=True)
     try:
         assert proc.stdout.readline() == b'ready\n'
-        with pytest.raises(util.KanpilotError): recovery._native_file_users([root], {os.getpid(), proc.pid})
+        with pytest.raises(util.KanpilotError): scan_controlled_kernel_users([root], {os.getpid(), proc.pid})
     finally:
         proc.terminate()
         proc.wait(timeout=5)
