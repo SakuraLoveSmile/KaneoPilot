@@ -68,6 +68,13 @@
 - 该轮 codex 事件流无 error 事件，恢复路径由单元测试覆盖；`run_codex` 的判定修复已在 249 中生效。
 
 剩余（新任务）：executor 需要在与冻结 lock 一致的依赖环境下重跑 subsonic_api 检查并保留解析版本证据；wjhpq 的「记录/证据收尾轮无源码交付物」口径仍需产品决定。
+### busobt 定向修复轮（2026-11-13 01:00–01:27）
+
+- 路径：`prepare-review-repair`（冻结新评审报告与原计划）→ `prepare-plan-input` 带补充说明 → `start-plans` → 计划 48 行（轻档，verify 保留原五条）→ `enqueue confirm_plan` → Plus 执行。
+- 技术目标达成：执行端核对后准备与 `packages/subsonic_api/pubspec.lock` 一致的依赖环境，`(cd packages/subsonic_api && flutter analyze --no-pub && flutter test --no-pub)` 实测退出 0（No issues found），五条冻结命令 0/0/0/0/0，逐条证据与 checks 已归档。
+- 仍被判 `verification_unconfirmed`：`执行完成后只有 .pi/** 证据材料变动（9 项），没有源码交付物`。该轮按计划明确禁止改业务源码，因此必然没有源码 diff。
+
+**结论**：阻塞已从「依赖环境」转移到「证据/记录收尾轮没有源码交付物」这一口径缺口——与 wjhpq 同一根因。需要产品决定后才能继续。
 ### Review 口径实测（busobt，2026-11-13）
 
 用 `supplement-review` 带用户说明重新发起 busobt 的 Review（新 prompt 已随 0.5.7-test.247 生效）。模型输出（executor-sessions/review/b8e9477f-.../last-message.txt）显示规则按预期生效：
