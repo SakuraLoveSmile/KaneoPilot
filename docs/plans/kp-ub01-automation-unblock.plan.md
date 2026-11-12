@@ -51,6 +51,9 @@
 
 - 分支 `fix/20261112-kp-ub01-automation-unblock`，提交 `55d36d1`。
 - 首次 `Packages` run 43239792169 在 `checks (3, 3.13)` / `checks (3, 3.11)` 的 “Integration fixture tests” 失败：`tests/test_pi_config_contract.py::test_get_exec_config_roundtrip_after_set` 仍断言旧默认 86400。该用例属本次默认值调整的预期更新，已改为 3600 并本地验证本文件 12 passed；这是本次改测试预期的唯一依据。
+- 修正后提交 `f3245b6`；`Packages` run 43241920822（workflow_dispatch，channel=preview）**全部 job 成功**：identity / checks（1–5 × py3.11/3.13）/ macos-fixtures a,b / macos-package / android / codex-platforms native-platforms。`publish` 按 preview 通道跳过（不创建 Release），这是预期行为。
+- 产物（未发布，仅 Actions 附件）：`macos-arm64-local-signed-246`（32.5 MB）、`android-debug-246`（37.0 MB）、各 check 报告与 `codex-platforms-43241920822-1`。
+- 未做：`channel=test` 预发布、装机与真实任务重跑（需要另外授权）。
 
 
 - 体验入口：改动在源码树 `core/`；正在运行的 `/Applications/KaneoPilot.app` 仍是旧副本，需要走云端 `Packages` 构建安装后才生效。
