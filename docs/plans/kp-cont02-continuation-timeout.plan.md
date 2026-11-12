@@ -1,6 +1,6 @@
 # KP-CONT02 同一 Goal 继续执行的计时与收尾修复
 
-- 状态：实现中（本地验证及现场收尾通过，待云端测试版）；用户要求修复误报超时并更新测试版。
+- 状态：待体验；用户要求修复误报超时并更新测试版，已完成本地/现场验证与云端测试预发布。
 - 分支：`fix/20261112-kp-cont02-continuation-timeout`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-fix-kp-cont02-continuation-timeout`
 - 基线：`2352d432aa68cebec162bd3e15620cc66c5d3529`（已安装及最新测试版 `0.5.7-test.224`）；从 main `ea02654` 快进至该版本，保留已发布的目标受阻处理能力。
@@ -36,6 +36,10 @@
 - 2026-11-12 14:11 台北：经本任务组合源码的既有核心 `round-observe {executor:user}` 正常接管故障 run，返回 `settled / reopened:true`。现场 job 已 `finished / exit_code:0`，原审批身份保留，新观察检查点为继续 turn，`resume_detail` 清空；没有发送模型提示、没有代跑业务 verify、没有直接改 DB/job。
 - 常驻调度器随后正常 monitor，任务从误报 `execution_failed / 超时` 改为 `verification_unconfirmed / 执行完成后没有可计入的改动（.pi/** 已排除），判定空转`。这是独立的既有有效改动门禁，未放宽；本次不宣称业务任务已验证/评审通过。`completion_policy=command_verification` 下 worker 不缓存 Goal 报告，由确定性 monitor 按既有规则读取核验。
 - 最终组合检查：`cd core && /tmp/kp-gb01-pytest/bin/python -I -m pytest tests/test_continuation_observation.py tests/test_request_continuation.py tests/test_process_owner.py tests/test_goal_blocker.py tests/test_execution_status.py tests/test_execution_continuation.py tests/test_pi_desktop_backend.py tests/test_goal_continuation.py tests/test_session_status.py tests/test_execution_input_worker.py tests/test_execution_questions.py -q`，`267 passed, 82 subtests passed in 299.68s`，退出 0；独立 reviewer 最终无阻塞问题；`git diff --check` 通过。
-- 待补云端 run 与测试版信息。
+- 发布源码：`4e80cb527d1167d8e35b69666260cc2218eff75e`；本地组合验证及真实任务接管均使用该提交包含的相同业务源码。
+- 云端 Packages：<https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43166991045>，run number 226，全部必需 job `success`；显式未开启的 `macos-session-fulltext-probe` 为 `skipped`。分支 push 自动构建 225 是相同源码的重复预览，已主动取消，实际发布仅用 226 的完整门禁结果。
+- 2026-11-12 测试预发布：<https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.226>，非 draft、prerelease，基础版本 `0.5.7`，来源分支/提交与上文一致；四项资产齐备。
+- 下载核验：Android APK、arm64 DMG 与 manifest 的 SHA256 均匹配 `SHA256SUMS`；manifest 的文件大小、每项 source SHA/version/build=226、test 通道及 arm64 架构一致；`hdiutil verify` 退出 0、DMG checksum VALID。完整包和 `cloud-result.json`、`package-check.json` 保存在主工作区 `build/kp-cont02/release-226/`，属于交付证据，不作为缓存清理。
+- 体验入口：已安装正式/测试版开启「接收测试版」后检查更新到 `0.5.7-test.226`；本次未替换 `/Applications/KaneoPilot.app` 或安装 Android 包。没有 schema 变更。
 - 真实安装升级与该业务任务的独立评审尚未验证，不等同于本地隔离测试通过。
 - 本任务尚未合并 main；保留分支/worktree 供后续集成，未满足合并后的清理条件。
