@@ -1248,7 +1248,7 @@ RESET_ENV_FAILURES = (
     'release_verification_backend', 'release_verification_config',
 )
 # 发送前就失败的尝试（例如 Plus 控制面未启动）没有远端写入，可以安全重置。
-_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执')
+_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执', '已用于不同参数')
 
 
 def _resettable(value):
@@ -1271,9 +1271,12 @@ def _discard_attempt(conn, value):
     于是又拿到上一次的会话（里面已有审批或报告），核验直接判 blocked。
     """
     task_id = value['context']['identity']['task_id']
-    scope = _scope(task_id)
+    # 两类 scope 都要清：worktree/verification 在 release-verify:<task>，
+    # 而 session_create / prompt 等运行时会话回执在 execution_releaseverify_<vid>。
+    scopes = (_scope(task_id),
+              stable_scope_id('execution', invocation_id='releaseverify_' + value['verification_id']))
     with db.write_txn(conn):
-        conn.execute("DELETE FROM runtime_operations WHERE scope_id=?", (scope,))
+        conn.execute("DELETE FROM runtime_operations WHERE scope_id IN (?,?)", scopes)
     path = Path(value.get('worktree_path') or '')
     repository = value['context'].get('repository')
     if not value.get('worktree_path') or not path.exists():
