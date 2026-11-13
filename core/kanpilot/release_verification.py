@@ -1234,6 +1234,20 @@ RESET_ENV_FAILURES = (
     'release_verification_runtime', 'release_verification_worktree_unknown',
     'release_verification_worktree_exists',
 )
+# 发送前就失败的尝试（例如 Plus 控制面未启动）没有远端写入，可以安全重置。
+_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop')
+
+
+def _resettable(value):
+    """环境类失败且没有报告：允许显式重置后重新验证。"""
+    if value.get('report_sha256'):
+        return False
+    state = value.get('state')
+    if state == 'blocked' and value.get('failure_code') in RESET_ENV_FAILURES:
+        return True
+    reason = str(value.get('reason') or '')
+    return (state == 'unknown' and not value.get('session_id')
+            and any(marker in reason for marker in _PRESEND_REASON_MARKERS))
 
 
 def _discard_attempt(conn, value):
@@ -1274,9 +1288,7 @@ def cmd_reset_release_verification(ctx, payload):
     value = _load(ctx.conn, task['task_id'], payload['verification_id'])
     _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
              'release_verification_reset', '验证上下文已变化')
-    _require(value.get('state') == 'blocked'
-             and value.get('failure_code') in RESET_ENV_FAILURES
-             and not value.get('report_sha256'),
+    _require(_resettable(value),
              'release_verification_reset', '只有环境类失败且没有报告的尝试可以重置')
     _require(payload.get('confirm') is True, 'release_verification_reset',
              '重置必须明确确认：旧尝试保留审计，核验会重新运行并可能再次失败')

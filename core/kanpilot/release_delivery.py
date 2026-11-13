@@ -1074,6 +1074,13 @@ def _auto_start_release_verification(ctx, task, view):
                 expected_context_sha256=ref['context_sha256'],confirm=True))
         except util.KanpilotError:
             return None
+    # 先记账再尝试：启动失败（例如 Plus 控制面没开）也占用重试预算，
+    # 避免交付轮每五分钟无限重试同一次核验。
+    with db.write_txn(ctx.conn):
+        fresh=db.require_task(ctx.conn,task['task_id'])
+        payload=db.task_extra(fresh)
+        payload['release_verification_auto_attempts']=attempts+1
+        db.set_extra(ctx.conn,fresh,ctx.now_iso,**payload)
     try:
         prepared=release_verification.cmd_prepare_release_verification(ctx,dict(task_id=task['task_id']))
         context=prepared.get('context_sha256')
@@ -1085,11 +1092,6 @@ def _auto_start_release_verification(ctx, task, view):
         db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_failed',task_id=task['task_id'],
                      actor='kaneo-delivery',detail={'code':exc.code,'message':exc.message})
         return None
-    with db.write_txn(ctx.conn):
-        fresh=db.require_task(ctx.conn,task['task_id'])
-        payload=db.task_extra(fresh)
-        payload['release_verification_auto_attempts']=attempts+1
-        db.set_extra(ctx.conn,fresh,ctx.now_iso,**payload)
     db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_started',task_id=task['task_id'],
                  actor='kaneo-delivery',detail={'context_sha256':context,'attempt':attempts+1})
     waiting=dict(view)
