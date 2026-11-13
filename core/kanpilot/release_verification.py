@@ -1248,7 +1248,7 @@ RESET_ENV_FAILURES = (
     'release_verification_backend', 'release_verification_config',
 )
 # 发送前就失败的尝试（例如 Plus 控制面未启动）没有远端写入，可以安全重置。
-_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执', '已用于不同参数')
+_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执', '已用于不同参数', '回执缺失')
 
 
 def _resettable(value):
@@ -1293,6 +1293,26 @@ def _discard_attempt(conn, value):
             pass
 
 
+def _load_or_derive(conn, task, payload):
+    """读取当前尝试；回执缺失时按引用推导出待清理资源。
+
+    发送前就失败的尝试可能只有 release_verification_ref 而没有回执行，
+    此时无法 _load，但重置只需要知道 scope 与工作树路径。
+    """
+    try:
+        return _load(conn, task['task_id'], payload['verification_id']), False
+    except util.KanpilotError as exc:
+        _require(exc.code == 'release_verification_missing',
+                 'release_verification_reset', '验证回执不可读')
+        stub = {'verification_id': payload['verification_id'],
+                'context': {'identity': {'task_id': task['task_id']},
+                            'repository': task['repository'],
+                            'context_sha256': payload['expected_context_sha256']},
+                'state': 'unknown', 'reason': '回执缺失（发送前失败）'}
+        stub['worktree_path'] = str(_worktree_path(conn, stub))
+        return stub, True
+
+
 def cmd_reset_release_verification(ctx, payload):
     """显式重置一次因运行环境失败的核验尝试，允许重新验证。
 
@@ -1305,9 +1325,10 @@ def cmd_reset_release_verification(ctx, payload):
     _require(ref.get('verification_id') == payload['verification_id']
              and ref.get('context_sha256') == payload['expected_context_sha256'],
              'release_verification_reset', '当前验证引用与本次确认不符')
-    value = _load(ctx.conn, task['task_id'], payload['verification_id'])
-    _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
-             'release_verification_reset', '验证上下文已变化')
+    value, synthetic = _load_or_derive(ctx.conn, task, payload)
+    if not synthetic:
+        _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
+                 'release_verification_reset', '验证上下文已变化')
     _require(_resettable(value),
              'release_verification_reset', '只有环境类失败且没有报告的尝试可以重置')
     _require(payload.get('confirm') is True, 'release_verification_reset',
@@ -1318,9 +1339,10 @@ def cmd_reset_release_verification(ctx, payload):
                  == dict(verification_id=value['verification_id'],
                          context_sha256=value['context']['context_sha256']),
                  'release_verification_reset', '当前验证引用已变化')
-        value.setdefault('resets', []).append(dict(at=ctx.now_iso, reason='environment_failure',
-                                                   failure_code=value.get('failure_code')))
-        _save(ctx.conn, value, ctx.now_iso)
+        if not synthetic:
+            value.setdefault('resets', []).append(dict(at=ctx.now_iso, reason='environment_failure',
+                                                       failure_code=value.get('failure_code')))
+            _save(ctx.conn, value, ctx.now_iso)
         extra = db.task_extra(live)
         extra.pop('release_verification_ref', None)
         db.set_extra(ctx.conn, live, ctx.now_iso, **extra)
