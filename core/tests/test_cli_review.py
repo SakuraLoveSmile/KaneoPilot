@@ -314,6 +314,41 @@ def test_review_cli_config_save_switch_snapshot_and_invalid(tmp_path, monkeypatc
         conn.close()
 
 
+def _run_codex_with_events(tmp_path, events, name):
+    output = tmp_path / "out.json"
+    script = tmp_path / name
+    script.write_text("import json\nfrom pathlib import Path\n"
+                      + f"Path({str(output)!r}).write_text({json.dumps(RESULT)!r})\n"
+                      + "".join(f"print(json.dumps({json.dumps(e)}), flush=True)\n" for e in events))
+    return cli_review.run_codex([sys.executable, str(script)], prompt="", cwd=tmp_path, env={},
+                                timeout=5, log_path=tmp_path / "raw.jsonl", out_path=output)
+
+
+def test_codex_transient_error_recovered_by_completed_turn_is_accepted(tmp_path):
+    """网络抖动先报错、随后 CLI 自行重连并成功结束：以最终结构化结果为准。
+
+    真实案例：Review 事件流出现 `Reconnecting... waiting for network` 后仍产出
+    完整 JSON 且退出码 0，却被判「Codex Review 失败（退出码 0）」而丢弃。
+    """
+    result = _run_codex_with_events(tmp_path, [
+        {"type": "system", "content": "Reconnecting... waiting for network"},
+        {"type": "error", "message": "connection failed"},
+        {"type": "turn.completed", "usage": {}},
+    ], "recover.py")
+    assert result["is_error"] is False
+    assert result["structured_output"] == RESULT
+    assert result["recovered_error_events"] == 1
+
+
+def test_codex_error_after_completed_turn_still_fails(tmp_path):
+    """成功终态之后又报错：仍 fail-closed，不能把恢复判定放宽成随便接受。"""
+    result = _run_codex_with_events(tmp_path, [
+        {"type": "turn.completed", "usage": {}},
+        {"type": "error", "message": "late failure"},
+    ], "late_error.py")
+    assert result["is_error"] is True
+    assert result["structured_output"] is None
+
 @pytest.mark.parametrize('event', [{'type': 'error', 'message': 'error'},
     {'type': 'turn.failed', 'error': {'message': 'error'}},
     {'type': 'item.completed', 'item': {'type': 'error', 'text': 'error'}}])

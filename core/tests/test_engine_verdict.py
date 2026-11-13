@@ -279,6 +279,35 @@ class TestEngineVerdictCommand(KanpilotTestCase):
             if not passed:
                 self.assertEqual(result["failure_code"], "verification_identity_unconfirmed")
 
+    def test_evidence_only_round_passes_only_with_declaration_evidence_and_green_checks(self):
+        from kanpilot.engine import verdict
+        green = [{"command": "pytest", "exit_code": 0, "timed_out": False}]
+        red = [{"command": "pytest", "exit_code": 1, "timed_out": False}]
+        # 声明 + 证据改动 + 全绿 → 放行（kind 仍记 passed，另带 evidence_only 标记）
+        ok = verdict._check_result(["pytest"], [], green, 3, "evidence_only")
+        self.assertTrue(ok["verification_ok"])
+        self.assertTrue(ok["evidence_only"])
+        self.assertIn("证据/记录收尾", ok["detail"])
+        # 没声明 → 仍是空转失败
+        self.assertFalse(verdict._check_result(["pytest"], [], green, 3, "source")["verification_ok"])
+        # 声明了但 .pi 没证据改动 → 失败
+        self.assertFalse(verdict._check_result(["pytest"], [], green, 0, "evidence_only")["verification_ok"])
+        # 声明了但 verify 没全绿 → 失败
+        self.assertFalse(verdict._check_result(["pytest"], [], red, 3, "evidence_only")["verification_ok"])
+        # 声明了但没跑 verify（命令缺失/未执行）→ 失败
+        self.assertFalse(verdict._check_result(["pytest"], [], [], 3, "evidence_only")["verification_ok"])
+
+    def test_evidence_only_round_reports_actionable_detail(self):
+        # 只看 .pi/** 变动的轮次仍判空转（不放宽门禁），但说明必须可执行。
+        from kanpilot.engine import verdict
+        outcome = verdict._check_result(["pytest"], [], [], 3)
+        self.assertFalse(outcome["verification_ok"])
+        self.assertEqual(outcome["kind"], "empty_diff")
+        self.assertIn(".pi/**", outcome["detail"])
+        self.assertIn("3 项", outcome["detail"])
+        plain = verdict._check_result(["pytest"], [], [], 0)
+        self.assertEqual(plain["detail"], "执行完成后没有可计入的改动（.pi/** 已排除），判定空转")
+
     def test_empty_diff_and_environment_diagnostics(self):
         tid, sha = self._running_task_with_repo("empty", commands=["pytest"], change=False)
         self.assertEqual(self.verdict(tid, sha)["kind"], "empty_diff")

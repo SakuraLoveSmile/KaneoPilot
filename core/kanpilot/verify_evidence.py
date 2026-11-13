@@ -92,10 +92,40 @@ def parse_verify_block(plan_text: str) -> dict:
             return {"ok": False, "error": "验证命令不允许续行或 heredoc"}
         if re.match(r"^(?:git (?:commit|push|reset|checkout|switch)(?:\s|$)|gh(?:\s|$))", command):
             return {"ok": False, "error": "验证命令不允许 Git 写操作或 gh"}
+        if _device_command(command):
+            return {"ok": False, "error": _DEVICE_COMMAND_ERROR}
         commands.append(command)
     if not 1 <= len(commands) <= 5:
         return {"ok": False, "error": "verify 块必须包含 1–5 条非空命令"}
     return {"ok": True, "commands": commands}
+
+
+# 执行环境没有真机、模拟器或屏幕：设备/录屏类命令写进 verify 只会让每轮验证
+# 必然失败（历史任务在 adb/AVD 上反复烧掉规划与执行轮次），这类验收应写进计划
+# 正文的人工验收清单，verify 只保留执行环境能直接运行并返回退出码的命令。
+_DEVICE_COMMANDS = frozenset({
+    "adb", "avdmanager", "emulator", "simctl", "scrcpy", "screencapture",
+    "ideviceinstaller", "idevicescreenshot", "idevicedebug", "idevicename",
+})
+
+_DEVICE_PATTERNS = (
+    re.compile(r"^xcrun\s+simctl(?:\s|$)"),
+    re.compile(r"^flutter\s+(?:run|drive|install)(?:\s|$)"),
+)
+
+_DEVICE_COMMAND_ERROR = (
+    "验证命令不能包含设备/模拟器/录屏操作（adb、emulator、avdmanager、xcrun simctl、"
+    "scrcpy、screencapture、flutter run/drive）：执行环境没有真机或屏幕，这类验收写进"
+    "计划正文的人工验收清单，verify 只保留执行环境能直接运行并返回退出码的命令"
+)
+
+
+def _device_command(command: str) -> bool:
+    """设备/模拟器/录屏命令（首词匹配，或 xcrun simctl、flutter run/drive 前缀）。"""
+    head = command.split(None, 1)[0] if command.split() else ""
+    if head in _DEVICE_COMMANDS:
+        return True
+    return any(pattern.match(command) for pattern in _DEVICE_PATTERNS)
 
 
 # info 为 verify 的围栏行（不论是否被解析识别为顶层块）。

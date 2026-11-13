@@ -604,6 +604,21 @@ def _goal_material(worktree, change, tracked):
         return False
 
 
+def _evidence_material(worktree, change, tracked):
+    """执行侧归档的证据材料（``.pi/evidence/**``）：不计入交付改动。
+
+    协议规定有效 diff 排除 ``.pi/**``；这里只把未跟踪的新增证据当材料，
+    已跟踪文件或已暂存改动仍按真实交付改动处理。
+    """
+    name = change["path"].removesuffix("/")
+    if change["status"] != "??" or not name.startswith(".pi/evidence/") or name in tracked:
+        return False
+    try:
+        return stat.S_ISREG((Path(worktree) / name).lstat().st_mode)
+    except OSError:
+        return False
+
+
 def _runtime_material_path(name):
     # Git reports an untracked embedded checkout as one opaque "path/" entry.
     parts = (name[:-1] if name.endswith("/") else name).split("/")
@@ -625,6 +640,9 @@ def _effective_changes(worktree):
             name = change["path"]
             owned_name = name.removesuffix("/")
             if _goal_material(worktree, change, tracked):
+                material.append(change)
+                continue
+            if _evidence_material(worktree, change, tracked):
                 material.append(change)
                 continue
             if (change["status"] == "??" and owned_name not in tracked and owned_name not in indexed

@@ -1067,6 +1067,11 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         from . import verify_evidence
         verification = verify_evidence.parse_verify_block(raw.decode("utf-8"))
         extra["plan_verify"] = {"plan_sha256": plan_sha, **({"commands": verification["commands"]} if verification["ok"] else {"error": verification["error"]})}
+        # 人工验收（真机/听感/视觉/跨平台）只作为「待体验」清单，不参与 verify、
+        # 也不阻塞 Review 与完成（2026-11-12）；Review 侧见 review prompt 同规则。
+        extra["plan_manual_acceptance"] = planfile.manual_acceptance(raw.decode("utf-8"))
+        # 本轮交付类型：证据/记录收尾轮没有源码 diff，monitor 依此放行空 diff。
+        extra["plan_delivery_kind"] = planfile.delivery_kind(raw.decode("utf-8"))
         extra["plan_execution_hold"] = True
         fields["extra_json"] = extra
         core.transition_task(
@@ -1096,6 +1101,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
             actor=request["claimed_by"] or "kaneo-planner",
             detail={"plan_path": str(path), "plan_sha256": plan_sha,
                     "plan_kind": plan_kind,
+                    "plan_body_lines": planfile.body_line_count(raw),
                     "planner_input_sha256": supplied_input_sha},
         )
         return {"ok": True, "task_status": "ready", "plan_sha256": plan_sha,

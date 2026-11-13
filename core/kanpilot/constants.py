@@ -35,6 +35,10 @@ ROUND_RUN_STATUSES = ("pending", "running", "finished", "failed", "unknown")
 PLANNER_EXECUTOR_ID = "kaneo-planner"
 PLAN_INPUT_FILE_MAX_BYTES = 20 * 1024 * 1024    # 单文件 ≤20 MiB
 PLAN_INPUT_TOTAL_MAX_BYTES = 100 * 1024 * 1024  # 每任务材料合计 ≤100 MiB
+# `.pi/**` 是执行端私有证据/运行材料（lsof 全量输出、录像、APK、日志）。整包内联
+# 会把规划材料撑到 100 MiB、把规划拖到 1800s 超时；只内联小体积文本，其余登记
+# 在 changes 里让规划器知道有这份改动但不读正文。
+PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES = 128 * 1024  # 证据材料单文件内联上限
 PLAN_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PLAN_TEXT_SUFFIXES = {".txt", ".log", ".md", ".text"}
 DEFAULT_CODEX_BIN = "codex"
@@ -91,7 +95,9 @@ PI_DESKTOP_REQUIRED_TOOLS = (
 # 完成；缺其一则派发会在审批门停滞，故启动前即失败（unsupported_tools）。
 PI_DESKTOP_GOAL_TOOLS = ("pi_plans_pending", "pi_plans_resolve")
 PI_DESKTOP_INPUT_TOOLS = ("pi_asks_pending", "pi_asks_resolve")
-EXECUTION_QUESTION_MAX_WAIT_SECONDS = 86400
+# 执行端提问的最长等待。24h 会让无人值守流程停摆整天（历史多轮就是卡在这里），
+# 默认降到 1h：超时按既有失败处理转人工，用户仍可在设置里调高。
+EXECUTION_QUESTION_MAX_WAIT_SECONDS = 3600
 PI_DESKTOP_EXEC_MODE = "goal"
 # 派发就绪（exec-capabilities / probe / worker 工具门）要求的完整工具集：
 # 基础工具 + Goal 契约审批工具，缺任一即判不可用（不做事后半残派发）。

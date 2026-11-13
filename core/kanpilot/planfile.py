@@ -3,6 +3,7 @@ kaneo_dispatch.py check() semantics (protocol.md §4.5 items 1-3, §5.6)."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,75 @@ def load_plan(plan_path: str, expect_task_id: Optional[str] = None) -> tuple[dic
         "plan task_id invalid",
     )
     return meta, raw, path
+
+
+_MANUAL_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*人工验收")
+_MANUAL_EMPTY = {"无", "无。", "（无）", "(无)", "暂无", "不适用"}
+
+
+def manual_acceptance(plan_text: str) -> list:
+    """「人工验收（不阻塞）」段里的条目。
+
+    这类验收（真机、设备、听感、视觉、跨平台对比）执行环境做不了，只作为
+    「待体验」清单交给用户确认，**不**参与 verify、也不阻塞 Review 与完成。
+    没有该段或写明“无”时返回空列表。
+    """
+    items, inside, fenced = [], False, False
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("`" * 3):
+            if inside:
+                fenced = not fenced
+            continue
+        if re.match(r"^#{1,6}\s", stripped):
+            inside = bool(_MANUAL_HEADING.match(stripped))
+            fenced = False
+            continue
+        if not inside or fenced or not stripped:
+            continue
+        bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+        text = bullet.group(1).strip() if bullet else stripped
+        if text and text.strip("：:。 ") not in _MANUAL_EMPTY:
+            items.append(text)
+    return items
+
+
+_DELIVERY_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*交付类型")
+_DELIVERY_EVIDENCE_ONLY = ("证据/记录收尾", "证据收尾", "记录收尾", "evidence_only")
+
+
+def delivery_kind(plan_text: str) -> str:
+    """计划声明的本轮交付类型：`source`（默认，必须改业务源码）或 `evidence_only`。
+
+    `## 交付类型` 段写明「证据/记录收尾」的轮次不会产生源码 diff（例如只补证据、
+    只改任务记录、只准备依赖环境），核心据此允许空 diff 通过 monitor；其余情况仍是
+    源码交付，空 diff 照旧判空转。
+    """
+    inside = False
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^#{1,6}\s", stripped):
+            inside = bool(_DELIVERY_HEADING.match(stripped))
+            continue
+        if not inside or not stripped:
+            continue
+        if any(word in stripped for word in _DELIVERY_EVIDENCE_ONLY):
+            return "evidence_only"
+    return "source"
+
+
+def body_line_count(raw: bytes) -> int:
+    """计划正文的非空行数（不含 frontmatter）。
+
+    只做可观测记录：篇幅契约（轻档 ≤60、重档 ≤180）由 planner prompt 约束，
+    核心不在发布时拒绝计划——重排一次要烧掉一整轮规划。
+    """
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2]
+    return sum(1 for line in text.splitlines() if line.strip())
 
 
 def expected_model_snapshot(req_payload: dict) -> Optional[dict]:

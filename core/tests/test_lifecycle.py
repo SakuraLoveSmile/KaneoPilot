@@ -24,7 +24,51 @@ class TestPublishPlan(KanpilotTestCase):
         events = self.call(
             "list-events", {"task_id": fixture["remote"]["id"]}
         )["events"]
-        self.assertTrue(any(e["kind"] == "plan_published" for e in events))
+        published = [e for e in events if e["kind"] == "plan_published"]
+        self.assertTrue(published)
+        # 篇幅契约的可观测指标：发布事件记录正文非空行数（不含 frontmatter）。
+        self.assertGreater(published[0]["detail"]["plan_body_lines"], 0)
+
+    def test_manual_acceptance_is_recorded_as_pending_experience(self):
+        # 人工验收只作为「待体验」清单：发布时解析登记，供 UI/查询使用，
+        # 不参与 verify、也不阻塞 Review 与完成。
+        task_id = "taskmanual0000000001"
+        fixture = self.make_ready_task(task_id=task_id, publish=False)
+        fence = chr(96) * 3
+        plan = self.write_plan(
+            "Feedback", fixture["remote"],
+            {"source_sha256": fixture["source_sha256"],
+             "requirements_sha256": fixture["requirements_sha256"]},
+            body=("# plan\n\nstep\n\n## 人工验收（不阻塞）\n\n"
+                  "- 真机播放：在手机上切歌确认音量\n- 视觉：观察播放栏\n\n"
+                  + fence + "verify\npytest\n" + fence + "\n"))
+        self.publish(
+            task_id, plan,
+            source_sha256=fixture["source_sha256"],
+            requirements_sha256=fixture["requirements_sha256"])
+        view = self.call("get-task", {"task_id": task_id})["task"]
+        self.assertEqual(view["plan_manual_acceptance"], [
+            "真机播放：在手机上切歌确认音量",
+            "视觉：观察播放栏",
+        ])
+
+    def test_delivery_kind_is_recorded_for_evidence_only_rounds(self):
+        # 证据/记录收尾轮：发布时把计划声明的交付类型登记下来，monitor 依此放行空 diff。
+        task_id = "taskevidence000000001"
+        fixture = self.make_ready_task(task_id=task_id, publish=False)
+        fence = chr(96) * 3
+        plan = self.write_plan(
+            "Feedback", fixture["remote"],
+            {"source_sha256": fixture["source_sha256"],
+             "requirements_sha256": fixture["requirements_sha256"]},
+            body=("# plan\n\n## 交付类型\n\n证据/记录收尾\n\n"
+                  "只补证据，不改源码\n\n"
+                  + fence + "verify\npytest\n" + fence + "\n"))
+        self.publish(task_id, plan,
+                     source_sha256=fixture["source_sha256"],
+                     requirements_sha256=fixture["requirements_sha256"])
+        view = self.call("get-task", {"task_id": task_id})["task"]
+        self.assertEqual(view["plan_delivery_kind"], "evidence_only")
 
     def test_publish_plan_rejects_bad_meta(self):
         remote_task = self.fake.add_task(

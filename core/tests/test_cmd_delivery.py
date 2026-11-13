@@ -205,6 +205,24 @@ class DeliveryCommit(KanpilotTestCase):
         self.assertEqual(result["failure_code"], "delivery_commit_failed")
         self.assertEqual(db.require_task(self.ctx.conn, "task1234")["status"], "needs_user")
 
+    def test_evidence_only_round_records_unchanged_instead_of_blocking(self):
+        # 计划声明「证据/记录收尾」：本轮只有 .pi 证据、没有源码 diff，仍应放行到评审，
+        # 不创建空提交，也不判 no_changes。
+        task = db.require_task(self.ctx.conn, "task1234")
+        db.set_extra(self.ctx.conn, task, self.ctx.now_iso, plan_delivery_kind="evidence_only")
+        evidence = self.wt / ".pi" / "evidence"
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / "note.md").write_text("evidence", encoding="utf-8")
+        self.live_verdict()
+        result = self.call_commit()
+        self.assertEqual(result["outcome"], "unchanged")
+        self.assertEqual(result["sha"], self.delivery["head_sha"])
+        # 登记指向既有 head 的提交记录（files=0），require_committed_review 才能放行进评审
+        delivery = core.delivery_of(db.require_task(self.ctx.conn, "task1234"))
+        self.assertEqual([c["execution_run_id"] for c in delivery["commits"]][-1], "exec1")
+        self.assertEqual(delivery["commits"][-1]["files"], 0)
+        self.assertTrue(delivery["commits"][-1]["evidence_only"])
+
     def test_secret_blocks(self):
         (self.wt / ".env").touch()
         self.live_verdict()

@@ -465,6 +465,10 @@ def expected_remote_slugs(task):
         slugs.add(remediation["remote_status"])
     if is_pr_delivery(task) and delivery_of(task).get("commits"):
         slugs.update(constants.REVIEW_SLUGS)
+        # 已有提交的任务重新规划：看板本来就停在 In Progress，发布计划不应要求用户
+        # 先把卡片拖回 To Do（历史两次「远端任务已不在 To Do」都卡在这里）。
+        if task["status"] in ("needs_plan", "planning"):
+            slugs.add(constants.IN_PROGRESS_SLUG)
     if is_user_replan(task):
         accepted = automation_of(task).get("replan_remote_status")
         if accepted == constants.IN_PROGRESS_SLUG or accepted in constants.REVIEW_SLUGS:
