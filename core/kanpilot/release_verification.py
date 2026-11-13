@@ -790,6 +790,10 @@ def _prompt(value):
         '冻结命令原文已有的 export 保留原样；不得为其他命令添加 export、PATH、cd、包装或复合命令前缀。'
         '每次 Bash 都是独立 shell，前一次 export 不会继承；宿主 PATH 已配置，若仍缺环境请如实报告受阻，'
         '不要改写冻结命令或编造成功证据。' if value.get('prompt_contract_version', 1) in (2, 3) else '')
+    cache_contract = ('\n宿主预置的依赖缓存（如 .dart_tool/package_config.json）由本机 Flutter SDK 离线解析，'
+        'SDK 钉死的包版本可能低于 pubspec.lock；这类版本漂移属预期环境事实，'
+        '不要写入验收条件、也不得据此判定本轮失败，源码与 lock 本身未被改动即可。'
+        if value.get('prompt_contract_version', 1) == 3 else '')
     evidence_contract = ('\n每条命令结果的 evidences.kind 必须为 kind="tool_result"；'
         'refId 使用工具结果提示的真实 toolCallId，不是工具名称 bash、Bash、commandShellId 或文件路径。'
         'checks.evidenceRefs 填该条 evidences.id。若 SubmitGoalReport 返回证据引用纠正错误，'
@@ -800,16 +804,13 @@ def _prompt(value):
         '只能执行验证及必要依赖解析（例如离线 flutter pub get）；宿主自行创建的 .pi/** Goal附件、'
         '项目既定的生成缓存和构建产物允许出现，不属于业务源码；保留原始 git status 输出，'
         '按 HEAD、index 和业务源码判定变化，不要添加要求 git status 全空的验收条件。'
-        '宿主预置的依赖缓存（如 .dart_tool/package_config.json）由本机 Flutter SDK 离线解析，'
-        'SDK 钉死的包版本可能低于 pubspec.lock；这类版本漂移属预期环境事实，'
-        '不要写入验收条件、也不得据此判定本轮失败，源码与 lock 本身未被改动即可。'
         '禁止模型主动编辑宿主 .pi 元数据。报告 evidenceRefs 引用本报告 evidences 内定义的证据 id；'
         '工具证据的 refId 必须填写本轮实际存在的 toolCallId，不得编造引用。'
         '禁止修改业务源码、计划、Review，'
         '禁止合并、推送或发布。源码变化即停止并报告失败。\n'
         '目标 SHA：' + context['target_sha'] + '\n上下文 SHA：' + context['context_sha256']
         + '\n上下文 SHA 是核心冻结记录指纹，不是 Git 对象，不要对它执行 git cat-file 检查。'
-        + scope + command_contract + evidence_contract + '\n验证命令（逐字）：\n' + '\n'.join(context['commands']))
+        + scope + command_contract + cache_contract + evidence_contract + '\n验证命令（逐字）：\n' + '\n'.join(context['commands']))
 
 
 def cmd_prepare_release_verification(ctx, payload):
