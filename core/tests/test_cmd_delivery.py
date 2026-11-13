@@ -217,6 +217,11 @@ class DeliveryCommit(KanpilotTestCase):
         result = self.call_commit()
         self.assertEqual(result["outcome"], "unchanged")
         self.assertEqual(result["sha"], self.delivery["head_sha"])
+        # 登记指向既有 head 的提交记录（files=0），require_committed_review 才能放行进评审
+        delivery = core.delivery_of(db.require_task(self.ctx.conn, "task1234"))
+        self.assertEqual([c["execution_run_id"] for c in delivery["commits"]][-1], "exec1")
+        self.assertEqual(delivery["commits"][-1]["files"], 0)
+        self.assertTrue(delivery["commits"][-1]["evidence_only"])
 
     def test_secret_blocks(self):
         (self.wt / ".env").touch()

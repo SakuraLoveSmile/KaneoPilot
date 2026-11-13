@@ -116,6 +116,13 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             util.require(core.branch_review_snapshot(fresh) == baseline,
                          "提交期间交付登记已变更", "conflict")
             util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
+            # 登记一条指向既有 head 的提交记录（files=0）：只有这样才能通过
+            # require_committed_review 进入分支评审；不创建任何真实提交。
+            commits = list(current.get("commits") or [])
+            commits.append({"execution_run_id": execution_run_id, "sha": result["sha"],
+                            "at": now, "files": 0, "fix_round": fix_round,
+                            "evidence_only": True})
+            core.update_delivery(conn, fresh, now, commits=commits, head_sha=result["sha"])
             db.add_event(conn, now, "delivery_unchanged", task_id=payload["task_id"],
                          request_id=payload["request_id"], actor="kaneo-monitor",
                          detail={"execution_run_id": execution_run_id, "head_sha": result["sha"],
