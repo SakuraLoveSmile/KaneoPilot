@@ -793,6 +793,9 @@ def _prompt(value):
     cache_contract = ('\n宿主预置的依赖缓存（如 .dart_tool/package_config.json）由本机 Flutter SDK 离线解析，'
         'SDK 钉死的包版本可能低于 pubspec.lock；这类版本漂移属预期环境事实，'
         '不要写入验收条件、也不得据此判定本轮失败，源码与 lock 本身未被改动即可。'
+        '若冻结计划的验收要求涉及 package_config 与 lock 的版本一致性，该要求在独立验证工作树内'
+        '属宿主环境既定事实：请按「已满足」记录，并在说明中如实标注具体漂移包与原因，'
+        '不得记为 partial 或未满足。'
         if value.get('prompt_contract_version', 1) == 3 else '')
     evidence_contract = ('\n每条命令结果的 evidences.kind 必须为 kind="tool_result"；'
         'refId 使用工具结果提示的真实 toolCallId，不是工具名称 bash、Bash、commandShellId 或文件路径。'
