@@ -211,8 +211,13 @@ def _target(conn, payload, *, allow_closed=False, full=False):
         and value['state'] not in ('verified','failed') and _owned(conn,value),
         '补验证输入授权或任务身份已变化')
     original = round_store.require_round(conn,task['task_id'],task['run_id'])
+    expected_config = util.jload(original['config_json'])
+    override = db.task_extra(task).get('release_verification_runtime_override')
+    if isinstance(override, dict) and override.get('provider_id'):
+        # provider 变更后补验证已重新绑定当前执行配置；核销时按绑定后的配置比较。
+        expected_config = dict(override)
     _require(original['backend'] == 'pi_desktop' and original['save_state'] == 'active'
-        and original['run_status'] == 'finished' and util.jload(original['config_json']) == context['runtime_config'],
+        and original['run_status'] == 'finished' and expected_config == context['runtime_config'],
         '补验证原执行轮次或配置已变化')
     policy,mapping = verification.release._policy(conn,task)
     _require(policy['enabled'] and mapping['repository'] == task['repository']
