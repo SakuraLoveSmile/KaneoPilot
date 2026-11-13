@@ -734,8 +734,13 @@ def trusted_runtime_commands(conn, scope, args, *, sql_only=False):
         external.require_policy(conn,task,linked)
     original = round_store.require_round(conn, task_id, task['run_id'])
     config = context.get('runtime_config') or {}
+    expected_config = util.jload(original['config_json'])
+    override = db.task_extra(task).get('release_verification_runtime_override')
+    if isinstance(override, dict) and override.get('provider_id'):
+        # provider 变更后补验证已重新绑定当前执行配置，冻结授权按绑定后的配置核对。
+        expected_config = dict(override)
     require(original['backend'] == 'pi_desktop' and original['save_state'] == 'active'
-            and original['run_status'] == 'finished' and util.jload(original['config_json']) == config
+            and original['run_status'] == 'finished' and expected_config == config
             and scope.runtime_config == {key: config[key] for key in constants.EXEC_PI_DESKTOP_KEYS if key in config}
             and bool(scope.connection_file) and bool(config.get('connection_file')))
     path = _worktree_path(conn,value)
