@@ -1090,6 +1090,18 @@ def _submit_one(conn, now: str, item: dict, prepared=None) -> dict:
             db.update_task(conn, task_id, now, requirements_sha256=manifest.get("requirements_sha256"),
                            source_sha256=manifest.get("source_sha256"), source_path=prepared.get("source_path"),
                            plan_kind=plan_kind)
+    elif (authorization is None and task["status"] in ("needs_plan", "planning")
+          and task["requirements_sha256"] == manifest.get("requirements_sha256")
+          and task["source_sha256"] != manifest.get("source_sha256")):
+        # 重新规划一个已经开工的任务时，远端 source 快照（任务活动/评论）会变化，
+        # 而冻结需求指纹不变。此时重定基线，否则 publish-plan 的
+        # 「source_sha256 differs from task baseline」会让重规划永远发不出去。
+        db.update_task(conn, task_id, now, requirements_sha256=manifest.get("requirements_sha256"),
+                       source_sha256=manifest.get("source_sha256"), source_path=prepared.get("source_path"),
+                       plan_kind=plan_kind)
+        db.add_event(conn, now, "source_baseline_refreshed", task_id=task_id, actor=actor,
+                     detail={"from": task["source_sha256"], "to": manifest.get("source_sha256"),
+                             "requirements_sha256": manifest.get("requirements_sha256")})
     takeover = bool(core.automation_of(task).get("manual_takeover"))
     if authorization is None and takeover:
         # A new explicit manual submission starts a new dispatchable plan.
