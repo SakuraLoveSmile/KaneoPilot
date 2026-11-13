@@ -1051,6 +1051,36 @@ def cmd_abandon_unsent_release(ctx,payload):
     return dict(outcome='abandoned',release=value)
 
 
+def _auto_start_release_verification(ctx, task, view):
+    """合并后发布目标不是本轮验证源码时，自动发起一次发布核验。
+
+    只在 blocker 恰为 release_target_unverified、且该任务还没有任何核验尝试时触发；
+    已有尝试（进行中/已通过/已失败）一律交给既有流程，不自动重启，避免重复烧轮次。
+    返回交付轮次可直接使用的结果；不满足条件返回 None，保持原有等待/阻塞语义。
+    """
+    blockers=[item.get('code') for item in view.get('blockers') or []]
+    if ('release_target_unverified' not in blockers or not view.get('can_prepare_verification')
+            or db.task_extra(task).get('release_verification_ref')):
+        return None
+    from . import release_verification
+    try:
+        prepared=release_verification.cmd_prepare_release_verification(ctx,dict(task_id=task['task_id']))
+        context=prepared.get('context_sha256')
+        if not context:
+            return None
+        release_verification.cmd_start_release_verification(
+            ctx,dict(task_id=task['task_id'],expected_context_sha256=context))
+    except util.KanpilotError as exc:
+        db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_failed',task_id=task['task_id'],
+                     actor='kaneo-delivery',detail={'code':exc.code,'message':exc.message})
+        return None
+    db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_started',task_id=task['task_id'],
+                 actor='kaneo-delivery',detail={'context_sha256':context})
+    waiting=dict(view)
+    waiting['reason']='已自动发起发布核验，等待核验结果'
+    return dict(outcome='waiting',release=waiting)
+
+
 def after_merge(ctx,task,payload=None):
     value=projection(ctx.conn,task)
     if db.task_extra(task).get('external_build_repair_ref') and _attached(ctx.conn,task) is None:
@@ -1078,6 +1108,9 @@ def after_merge(ctx,task,payload=None):
         return dict(outcome='disabled',release=value)
     prepared=cmd_prepare_task_release(ctx,dict(task_id=task['task_id']))
     if not prepared.get('context_sha256') or not prepared['release'].get('can_start'):
+        started=_auto_start_release_verification(ctx,task,prepared['release'])
+        if started is not None:
+            return started
         return dict(outcome='waiting' if prepared['release'].get('state')=='waiting_group' else 'blocked',release=prepared['release'])
     result=cmd_start_task_release(ctx,dict(task_id=task['task_id'],expected_context_sha256=prepared['context_sha256']))
     return dict(outcome='published' if result['release']['state']=='published' else
