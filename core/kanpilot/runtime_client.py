@@ -148,10 +148,7 @@ class RuntimeClient:
         server, admin_token = _read_admin_server(server_file)
         expires_at = self._expiry(self.lease_seconds)
         existing_expiry = self._existing_expiry(server_file.parent / "grants" / f"{self.scope_id}_runtime.json")
-        # 每次 connect 都续租到 now+lease；旧租期更长时保留旧值，绝不缩短。
-        # （同身份重连只延长，不撤销运行时手里的 token。）
-        current = util.parse_ts(existing_expiry) if existing_expiry else None
-        if current is not None and current > util.parse_ts(expires_at):
+        if existing_expiry:
             expires_at = existing_expiry
         payload = {
             "scope_id": self.scope_id,
