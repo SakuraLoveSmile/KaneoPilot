@@ -352,17 +352,22 @@ class ScopeManager:
                     for key, value in expected.items()
                     if key != "expires_at"
                 )
-                if same_identity and not existing.is_expired() and existing.expires_at == expires_at:
+                if same_identity:
+                    # 同身份重连只续租，绝不撤销运行时正在使用的 token：
+                    # 核验/执行轮次通常远长于单次 connect 的 lease，撤销会让
+                    # 运行时手里的旧凭据立刻失效（「scope has expired or been revoked」）。
+                    current = util.parse_ts(existing.expires_at)
+                    wanted = util.parse_ts(expires_at)
+                    if wanted is not None and (current is None or wanted > current):
+                        existing.expires_at = expires_at
+                        self._refresh_grant_expiry(scope_id, expires_at)
                     records = self.grant_records.get(scope_id, {})
                     return {
                         "scope_id": scope_id,
                         "runtime_grant_file": str(records.get("runtime_grant_file")) if records.get("runtime_grant_file") else None,
                         "task_grant_file": str(records.get("task_grant_file")) if records.get("task_grant_file") else None,
                     }
-                if same_identity and existing.is_expired():
-                    self.revoke_scope(scope_id)
-                else:
-                    raise util.KanpilotError("conflict", f"scope_id {scope_id} 已存在但授权配置不同")
+                raise util.KanpilotError("conflict", f"scope_id {scope_id} 已存在但授权配置不同")
 
         scope = Scope(
             scope_id=scope_id,
@@ -473,6 +478,24 @@ class ScopeManager:
                 except OSError:
                     pass
         return True
+
+    def _refresh_grant_expiry(self, scope_id: str, expires_at: str) -> None:
+        """同身份重连时只延长租期：改 expires_at，不换 token、不撤销。"""
+        records = self.grant_records.get(scope_id, {})
+        updates = []
+        for domain in ("runtime", "task"):
+            grant_path = records.get(f"{domain}_grant_file")
+            if grant_path is None:
+                continue
+            path = Path(grant_path)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            data["expires_at"] = expires_at
+            updates.append((path, data))
+        for path, data in updates:
+            self._write_secure_json(path, data)
 
     def renew_scope(self, scope_id: str, expires_at: str) -> dict:
         scope = self.scopes.get(scope_id)

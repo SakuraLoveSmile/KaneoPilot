@@ -56,6 +56,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "expected_verification_id": (True, "str"),
          "expected_context_sha256": (True, "str"), "expected_report_sha256": (True, "str")},
         _automation_command("release_verification", "cmd_restart_release_verification")),
+    "reset-release-verification": (
+        {"task_id": (True, "str"), "verification_id": (True, "str"),
+         "expected_context_sha256": (True, "str"), "confirm": (True, "bool")},
+        _automation_command("release_verification", "cmd_reset_release_verification")),
     "revalidate-release-verification": (
         {"task_id": (True, "str"), "verification_id": (True, "str"),
          "expected_context_sha256": (True, "str"), "confirm": (True, "bool")},

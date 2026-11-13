@@ -1054,15 +1054,26 @@ def cmd_abandon_unsent_release(ctx,payload):
 def _auto_start_release_verification(ctx, task, view):
     """合并后发布目标不是本轮验证源码时，自动发起一次发布核验。
 
-    只在 blocker 恰为 release_target_unverified、且该任务还没有任何核验尝试时触发；
-    已有尝试（进行中/已通过/已失败）一律交给既有流程，不自动重启，避免重复烧轮次。
-    返回交付轮次可直接使用的结果；不满足条件返回 None，保持原有等待/阻塞语义。
+    只在 blocker 恰为 release_target_unverified、且还可准备核验时触发。已有尝试时，
+    只有「环境类失败且没有报告」才重置并重试一次（总计最多 AUTO_ATTEMPTS 次）；
+    其余失败一律交给既有流程，不自动重启，避免重复烧轮次。
     """
     blockers=[item.get('code') for item in view.get('blockers') or []]
-    if ('release_target_unverified' not in blockers or not view.get('can_prepare_verification')
-            or db.task_extra(task).get('release_verification_ref')):
+    if ('release_target_unverified' not in blockers or not view.get('can_prepare_verification')):
         return None
+    extra=db.task_extra(task)
+    ref=extra.get('release_verification_ref') or {}
+    attempts=int(extra.get('release_verification_auto_attempts') or 0)
     from . import release_verification
+    if ref:
+        if attempts >= AUTO_ATTEMPTS:
+            return None
+        try:
+            release_verification.cmd_reset_release_verification(ctx,dict(
+                task_id=task['task_id'],verification_id=ref['verification_id'],
+                expected_context_sha256=ref['context_sha256'],confirm=True))
+        except util.KanpilotError:
+            return None
     try:
         prepared=release_verification.cmd_prepare_release_verification(ctx,dict(task_id=task['task_id']))
         context=prepared.get('context_sha256')
@@ -1074,11 +1085,19 @@ def _auto_start_release_verification(ctx, task, view):
         db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_failed',task_id=task['task_id'],
                      actor='kaneo-delivery',detail={'code':exc.code,'message':exc.message})
         return None
+    with db.write_txn(ctx.conn):
+        fresh=db.require_task(ctx.conn,task['task_id'])
+        payload=db.task_extra(fresh)
+        payload['release_verification_auto_attempts']=attempts+1
+        db.set_extra(ctx.conn,fresh,ctx.now_iso,**payload)
     db.add_event(ctx.conn,ctx.now_iso,'release_verification_auto_started',task_id=task['task_id'],
-                 actor='kaneo-delivery',detail={'context_sha256':context})
+                 actor='kaneo-delivery',detail={'context_sha256':context,'attempt':attempts+1})
     waiting=dict(view)
     waiting['reason']='已自动发起发布核验，等待核验结果'
     return dict(outcome='waiting',release=waiting)
+
+
+AUTO_ATTEMPTS = 2
 
 
 def after_merge(ctx,task,payload=None):

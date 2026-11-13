@@ -6,6 +6,8 @@ or Review evidence. Unknown writes are observed, never sent a second time.
 from pathlib import Path
 import os
 import re
+import shutil
+import subprocess
 
 from . import (constants, core, db, git_delivery,
                pi_desktop_worker as worker, release_delivery as release,
@@ -18,6 +20,7 @@ RESOLUTION_TOOL = 'release_verification_missing_report_resolution'
 REVALIDATION_TOOL = 'release_verification_revalidation'
 _require = release._require
 _HISTORY_CONFLICT_REASON = '历史观察写回前原尝试或下游写状态已变化'
+_DEPENDENCY_SETUP_TIMEOUT = 240
 
 
 def _scope(task_id):
@@ -309,6 +312,7 @@ def _worktree(conn, value, now):
     except git_delivery.GitDeliveryError:
         _git(repository, 'fetch', '--no-tags', 'origin', target)
     _git(repository, 'worktree', 'add', '--detach', str(path), target)
+    _seed_dependencies(value)
     value['source_state_sha256'] = _source(value)
     with db.write_txn(conn):
         operations.complete_operation(conn, _scope(task_id), 'worktree:' + value['verification_id'],
@@ -316,11 +320,54 @@ def _worktree(conn, value, now):
         _save(conn, value, now)
 
 
+def _restore_tracked_changes(path):
+    """pub get 若改写了被跟踪文件（lock 等），按 HEAD 还原并返回路径列表。"""
+    raw = _git(path, 'status', '--porcelain', '--untracked-files=no')
+    names = [line[3:].strip() for line in raw.splitlines() if line[3:].strip()]
+    if not names:
+        return []
+    _git(path, 'checkout', '--', *names)
+    return names
+
+
+def _seed_dependencies(value):
+    """离线预置依赖，避免核验轮次自己改被跟踪的 lock。
+
+    核验工作树是目标的干净 checkout，没有 `.dart_tool`；而冻结命令都带 `--no-pub`，
+    轮次只能自己解析依赖，`pub get` 可能改写被跟踪的 `pubspec.lock`，核心的源/索引
+    校验就会把轮次判成「工作树与冻结目标不一致」。这里由核心先跑一次
+    `pub get --offline`，若被跟踪文件有变化立即按目标提交还原并记录；找不到 flutter
+    或执行失败只记录，不改变原本的失败语义。
+    """
+    path = Path(value['worktree_path'])
+    if not (path / 'pubspec.yaml').is_file():
+        return
+    flutter = shutil.which('flutter')
+    setup = []
+    if flutter:
+        targets = [path] + sorted(p.parent for p in path.glob('packages/*')
+                                   if (p / 'pubspec.yaml').is_file())
+        for cwd in targets:
+            try:
+                proc = subprocess.run([flutter, 'pub', 'get', '--offline'], cwd=str(cwd),
+                                      capture_output=True, text=True,
+                                      timeout=_DEPENDENCY_SETUP_TIMEOUT)
+                setup.append({'cwd': str(cwd.relative_to(path)) or '.',
+                              'exit_code': proc.returncode})
+            except (OSError, subprocess.SubprocessError) as exc:
+                setup.append({'cwd': str(cwd.relative_to(path)) or '.',
+                              'error': util.redact(str(exc))[:200]})
+    restored = _restore_tracked_changes(path)
+    if setup or restored:
+        value['dependency_setup'] = {'commands': setup, 'restored_paths': restored}
+
+
 def _client(value, read_only=False, *, require_input=False):
     config = value['context']['runtime_config']
     client = RuntimeClient(role='execution', invocation_id='releaseverify_' + value['verification_id'],
         task_id=None, run_id=None, request_id=None, project_path=value['worktree_path'],
-        connection_file=config['connection_file'], runtime_config=config, read_only=read_only)
+        connection_file=config['connection_file'], runtime_config=config, read_only=read_only,
+        lease_seconds=constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)
     required = (constants.PI_DESKTOP_GOAL_REPORT_TOOLS + ('pi_agent_status', 'pi_turn_get', 'pi_plans_pending')
         if read_only else constants.PI_DESKTOP_DISPATCH_TOOLS + constants.PI_DESKTOP_GOAL_REPORT_TOOLS)
     if require_input:
@@ -1180,6 +1227,77 @@ def cmd_resolve_missing_release_verification(ctx, payload):
 
 def _revalidation_operation(verification_id):
     return 'verification-revalidate:' + verification_id
+
+
+RESET_ENV_FAILURES = (
+    'forbidden', 'release_verification_source',
+    'release_verification_runtime', 'release_verification_worktree_unknown',
+    'release_verification_worktree_exists',
+)
+
+
+def _discard_attempt(conn, value):
+    """移除一次已终止尝试的运行时记录与核心自建工作树（无未保存成果）。"""
+    task_id = value['context']['identity']['task_id']
+    scope = _scope(task_id)
+    with db.write_txn(conn):
+        conn.execute("DELETE FROM runtime_operations WHERE scope_id=? AND operation_id IN (?,?)",
+                     (scope, _op(value['verification_id']), 'worktree:' + value['verification_id']))
+    path = Path(value.get('worktree_path') or '')
+    repository = value['context'].get('repository')
+    if not value.get('worktree_path') or not path.exists():
+        return
+    try:
+        _git(repository, 'worktree', 'remove', '--force', str(path))
+    except git_delivery.GitDeliveryError:
+        pass
+    if path.exists():
+        try:
+            # 只删空目录：真正的 git 工作树已被上一步移除，残留空壳不阻塞重新验证。
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def cmd_reset_release_verification(ctx, payload):
+    """显式重置一次因运行环境失败的核验尝试，允许重新验证。
+
+    只接受 blocked、failure_code 属环境类、且没有任何报告的当前尝试：旧尝试保留
+    审计后移出运行时记录并清理核心自建工作树，随后可重新 prepare/start。
+    已通过、已有报告或非环境失败一律拒绝。
+    """
+    task = db.require_task(ctx.conn, payload['task_id'])
+    ref = db.task_extra(task).get('release_verification_ref') or {}
+    _require(ref.get('verification_id') == payload['verification_id']
+             and ref.get('context_sha256') == payload['expected_context_sha256'],
+             'release_verification_reset', '当前验证引用与本次确认不符')
+    value = _load(ctx.conn, task['task_id'], payload['verification_id'])
+    _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
+             'release_verification_reset', '验证上下文已变化')
+    _require(value.get('state') == 'blocked'
+             and value.get('failure_code') in RESET_ENV_FAILURES
+             and not value.get('report_sha256'),
+             'release_verification_reset', '只有环境类失败且没有报告的尝试可以重置')
+    _require(payload.get('confirm') is True, 'release_verification_reset',
+             '重置必须明确确认：旧尝试保留审计，核验会重新运行并可能再次失败')
+    with db.write_txn(ctx.conn):
+        live = db.require_task(ctx.conn, task['task_id'])
+        _require((db.task_extra(live).get('release_verification_ref') or {})
+                 == dict(verification_id=value['verification_id'],
+                         context_sha256=value['context']['context_sha256']),
+                 'release_verification_reset', '当前验证引用已变化')
+        value.setdefault('resets', []).append(dict(at=ctx.now_iso, reason='environment_failure',
+                                                   failure_code=value.get('failure_code')))
+        _save(ctx.conn, value, ctx.now_iso)
+        extra = db.task_extra(live)
+        extra.pop('release_verification_ref', None)
+        db.set_extra(ctx.conn, live, ctx.now_iso, **extra)
+        db.add_event(ctx.conn, ctx.now_iso, 'release_verification_reset',
+                     task_id=task['task_id'], actor='user',
+                     detail={'verification_id': value['verification_id'],
+                             'failure_code': value.get('failure_code')})
+    _discard_attempt(ctx.conn, value)
+    return {'ok': True, 'task_id': task['task_id'], 'verification_id': value['verification_id']}
 
 
 def cmd_revalidate_release_verification(ctx, payload):

@@ -267,13 +267,16 @@ def test_scope_snapshot_path_and_expired_scope_recovery(tmp_path: Path):
         mgr.register_scope(changed, server_url)
     assert mismatch.value.code == "conflict"
 
+    # 同身份重连只续租，不换 token、不撤销：运行时手里的旧凭据必须继续有效，
+    # 否则长轮次会在 core 侧任意一次 connect 后突然 forbidden。
     mgr.get_scope("scope-recovery").expires_at = util.to_iso(util.now_dt() - datetime_timedelta(seconds=1))
     recovered = dict(payload, expires_at=util.to_iso(util.now_dt() + datetime_timedelta(hours=2)))
     second = mgr.register_scope(recovered, server_url)
     second_token = json.loads(Path(second["runtime_grant_file"]).read_text(encoding="utf-8"))["token"]
-    assert first_token != second_token
-    assert mgr.authenticate(first_token) is None
-    assert mgr.authenticate(second_token) == ("runtime", "scope-recovery")
+    assert first_token == second_token
+    assert mgr.authenticate(first_token) == ("runtime", "scope-recovery")
+    assert mgr.get_scope("scope-recovery").expires_at == recovered["expires_at"]
+    assert json.loads(Path(second["runtime_grant_file"]).read_text(encoding="utf-8"))["expires_at"] == recovered["expires_at"]
 
     unsafe = dict(payload, scope_id="../escape")
     with pytest.raises(util.KanpilotError):

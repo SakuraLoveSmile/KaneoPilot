@@ -475,26 +475,38 @@ class ReleasePolicyTest(TestCase):
 
 
 class AutoStartReleaseVerification(TestCase):
-    """合并后发布目标不是本轮验证源码时，自动发起一次发布核验。"""
+    """合并后发布目标不是本轮验证源码时，自动发起发布核验（环境失败自动重试一次）。"""
 
     def _ctx(self):
         from types import SimpleNamespace
         return SimpleNamespace(conn=object(), now_iso="2026-11-13T00:00:00+00:00")
 
-    def _run(self, view, extra=None, error=None):
-        from types import SimpleNamespace
+    def _run(self, view, extra=None, error=None, reset_error=None, start_error=None):
         from kanpilot import release_delivery
-        calls = {"prepare": 0, "start": [], "events": []}
+        calls = {"reset": [], "prepare": 0, "start": [], "events": []}
+        def reset(ctx, payload):
+            if reset_error is not None:
+                raise reset_error
+            calls["reset"].append(payload)
+            return {"ok": True}
         def prepare(ctx, payload):
             calls["prepare"] += 1
             return {"context_sha256": "ctx-sha"}
         def start(ctx, payload):
-            if error is not None:
-                raise error
+            if (error or start_error) is not None:
+                raise (start_error or error)
             calls["start"].append(payload)
             return {"verification_id": "v1"}
+        from contextlib import contextmanager
+        @contextmanager
+        def noop_txn(conn):
+            yield
         with patch.object(release_delivery.db, "task_extra", lambda task: dict(extra or {})), \
              patch.object(release_delivery.db, "add_event", lambda *a, **k: calls["events"].append(k)), \
+             patch.object(release_delivery.db, "write_txn", noop_txn), \
+             patch.object(release_delivery.db, "require_task", lambda conn, tid: {"task_id": tid}), \
+             patch.object(release_delivery.db, "set_extra", lambda *a, **k: None), \
+             patch("kanpilot.release_verification.cmd_reset_release_verification", reset), \
              patch("kanpilot.release_verification.cmd_prepare_release_verification", prepare), \
              patch("kanpilot.release_verification.cmd_start_release_verification", start):
             result = release_delivery._auto_start_release_verification(
@@ -506,16 +518,36 @@ class AutoStartReleaseVerification(TestCase):
                                    "can_prepare_verification": True})
         self.assertEqual(result["outcome"], "waiting")
         self.assertIn("自动发起发布核验", result["release"]["reason"])
+        self.assertEqual(calls["reset"], [])
         self.assertEqual(calls["prepare"], 1)
         self.assertEqual(calls["start"], [{"task_id": "task-1", "expected_context_sha256": "ctx-sha"}])
         self.assertEqual(len(calls["events"]), 1)
 
-    def test_existing_attempt_or_other_blocker_is_left_to_the_flow(self):
+    def test_environment_failure_attempt_is_reset_and_retried_once(self):
+        ref = {"verification_id": "v0", "context_sha256": "old-sha"}
         result, calls = self._run({"blockers": [{"code": "release_target_unverified"}],
                                    "can_prepare_verification": True},
-                                  extra={"release_verification_ref": {"verification_id": "v0"}})
+                                  extra={"release_verification_ref": ref})
+        self.assertEqual(result["outcome"], "waiting")
+        self.assertEqual(calls["reset"], [{"task_id": "task-1", "verification_id": "v0",
+                                          "expected_context_sha256": "old-sha", "confirm": True}])
+        self.assertEqual(len(calls["start"]), 1)
+
+    def test_retry_budget_and_non_resettable_failures_are_left_to_the_flow(self):
+        ref = {"verification_id": "v0", "context_sha256": "old-sha"}
+        result, calls = self._run({"blockers": [{"code": "release_target_unverified"}],
+                                   "can_prepare_verification": True},
+                                  extra={"release_verification_ref": ref,
+                                         "release_verification_auto_attempts": 2})
         self.assertIsNone(result)
-        self.assertEqual((calls["prepare"], calls["start"]), (0, []))
+        self.assertEqual((calls["reset"], calls["start"]), ([], []))
+        from kanpilot import util
+        result, calls = self._run({"blockers": [{"code": "release_target_unverified"}],
+                                   "can_prepare_verification": True},
+                                  extra={"release_verification_ref": ref},
+                                  reset_error=util.KanpilotError("release_verification_reset", "不是环境失败"))
+        self.assertIsNone(result)
+        self.assertEqual(calls["start"], [])
         result, calls = self._run({"blockers": [{"code": "release_review_invalid"}],
                                    "can_prepare_verification": True})
         self.assertIsNone(result)
@@ -528,7 +560,7 @@ class AutoStartReleaseVerification(TestCase):
         from kanpilot import util
         result, calls = self._run({"blockers": [{"code": "release_target_unverified"}],
                                    "can_prepare_verification": True},
-                                  error=util.KanpilotError("release_verification_runtime", "Plus 不可用"))
+                                  start_error=util.KanpilotError("release_verification_runtime", "Plus 不可用"))
         self.assertIsNone(result)
         self.assertEqual(calls["start"], [])
         self.assertEqual(calls["events"][-1]["detail"]["code"], "release_verification_runtime")
