@@ -321,9 +321,17 @@ def _worktree(conn, value, now):
 
 
 def _restore_tracked_changes(path):
-    """pub get 若改写了被跟踪文件（lock 等），按 HEAD 还原并返回路径列表。"""
-    raw = _git(path, 'status', '--porcelain', '--untracked-files=no')
-    names = [line[3:].strip() for line in raw.splitlines() if line[3:].strip()]
+    """pub get 若改写了被跟踪文件（lock 等），按 HEAD 还原并返回路径列表。
+
+    用 `git diff --name-only HEAD` 取相对 HEAD 的所有被跟踪改动：
+    porcelain 输出会被命令层 strip 掉前导空格，按固定列切会切坏路径
+    （曾把 `pubspec.lock` 切成 `ubspec.lock`）。
+    """
+    names = []
+    for args in (('diff', '--name-only', 'HEAD'), ('diff', '--name-only', '--cached')):
+        raw = _git(path, *args)
+        names.extend(line.strip() for line in raw.splitlines() if line.strip())
+    names = sorted(set(names))
     if not names:
         return []
     _git(path, 'checkout', '--', *names)
@@ -1235,7 +1243,7 @@ RESET_ENV_FAILURES = (
     'release_verification_worktree_exists',
 )
 # 发送前就失败的尝试（例如 Plus 控制面未启动）没有远端写入，可以安全重置。
-_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop')
+_PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执')
 
 
 def _resettable(value):
