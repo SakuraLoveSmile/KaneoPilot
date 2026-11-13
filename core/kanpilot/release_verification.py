@@ -52,6 +52,11 @@ def _context(conn, task, frozen_target=None, *, restart=None):
              and row['run_status'] == 'finished',
              'release_verification_backend', '补验证需要当前已完成且未归档的 Plus 执行轮次')
     config = util.jload(row['config_json']) or {}
+    # provider 变更后（如原 provider 从 Pi 目录移除），允许把补验证重新绑定到
+    # 当前执行配置；override 存在时上下文按它计算，保证 prepare/sync 口径一致。
+    override = db.task_extra(task).get('release_verification_runtime_override')
+    if isinstance(override, dict) and override.get('provider_id'):
+        config = dict(override)
     _require(bool(config.get('connection_file'))
              and config.get('permission_mode') in constants.EXEC_PERMISSION_MODES,
              'release_verification_config', '原 Plus 执行配置缺少连接或权限模式')
@@ -1263,6 +1268,14 @@ def _resettable(value):
             and any(marker in reason for marker in _PRESEND_REASON_MARKERS))
 
 
+def _discard_scope_only(conn, task_id, verification_id):
+    """只有引用、没有回执时：清掉两类 scope 的回执即可。"""
+    scopes = (_scope(task_id),
+              stable_scope_id('execution', invocation_id='releaseverify_' + verification_id))
+    with db.write_txn(conn):
+        conn.execute("DELETE FROM runtime_operations WHERE scope_id IN (?,?)", scopes)
+
+
 def _discard_attempt(conn, value):
     """移除一次已终止尝试的运行时记录与核心自建工作树（无未保存成果）。
 
@@ -1311,6 +1324,43 @@ def _load_or_derive(conn, task, payload):
                 'state': 'unknown', 'reason': '回执缺失（发送前失败）'}
         stub['worktree_path'] = str(_worktree_path(conn, stub))
         return stub, True
+
+
+def cmd_rebind_release_verification(ctx, payload):
+    """把发布核验重新绑定到当前执行配置（provider 变更后使用）。
+
+    原执行轮次的 provider 可能已从 Pi 目录移除；补验证需要可用的模型配置。
+    重新绑定只改补验证的运行时配置并清掉旧尝试，不改原执行、评审与交付记录。
+    """
+    task = db.require_task(ctx.conn, payload['task_id'])
+    _require(payload.get('confirm') is True, 'release_verification_rebind',
+             '重新绑定必须明确确认：旧补验证尝试会被清理，核验将用当前执行配置重跑')
+    from . import cmd_config
+    current = (cmd_config.cmd_get_exec_config(ctx, {}).get('config') or {}).get('pi_desktop') or {}
+    _require(bool(current.get('provider_id')) and bool(current.get('connection_file')),
+             'release_verification_rebind', '当前执行配置缺少 provider 或连接文件')
+    ref = db.task_extra(task).get('release_verification_ref') or {}
+    existing = None
+    if ref.get('verification_id'):
+        try:
+            existing = _load(ctx.conn, task['task_id'], ref['verification_id'])
+        except util.KanpilotError:
+            existing = None
+    with db.write_txn(ctx.conn):
+        live = db.require_task(ctx.conn, task['task_id'])
+        extra = db.task_extra(live)
+        extra['release_verification_runtime_override'] = dict(current)
+        extra.pop('release_verification_ref', None)
+        db.set_extra(ctx.conn, live, ctx.now_iso, **extra)
+        db.add_event(ctx.conn, ctx.now_iso, 'release_verification_rebound',
+                     task_id=task['task_id'], actor='user',
+                     detail={'provider_id': current.get('provider_id'),
+                             'model_id': current.get('model_id')})
+    if existing is not None:
+        _discard_attempt(ctx.conn, existing)
+    elif ref.get('verification_id'):
+        _discard_scope_only(ctx.conn, task['task_id'], ref['verification_id'])
+    return {'ok': True, 'task_id': task['task_id'], 'runtime_config': current}
 
 
 def cmd_reset_release_verification(ctx, payload):
