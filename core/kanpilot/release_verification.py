@@ -854,7 +854,8 @@ def _start_context(ctx, task, context, *, previous_ref=None):
         session = client.session_create(value['worktree_path'], mode=constants.PI_DESKTOP_EXEC_MODE,
             provider_id=config.get('provider_id'), model_id=config.get('model_id'),
             thinking_level=config.get('thinking_level'),
-            title='发布目标补验证 ' + task['task_id'], project_name=task['project_name'])
+            title='发布目标补验证 ' + task['task_id'] + ' ' + ctx.now_iso[11:19],
+            project_name=task['project_name'])
         value['session_id'] = session['session']['id']
         with db.write_txn(ctx.conn):
             _save(ctx.conn, value, ctx.now_iso)
@@ -1259,12 +1260,16 @@ def _resettable(value):
 
 
 def _discard_attempt(conn, value):
-    """移除一次已终止尝试的运行时记录与核心自建工作树（无未保存成果）。"""
+    """移除一次已终止尝试的运行时记录与核心自建工作树（无未保存成果）。
+
+    必须清掉该 scope 下的全部操作回执：只删 verification/worktree 会留下
+    session_create / agent_prompt 等旧回执，重新开始时幂等守卫会把旧回执原样返回，
+    于是又拿到上一次的会话（里面已有审批或报告），核验直接判 blocked。
+    """
     task_id = value['context']['identity']['task_id']
     scope = _scope(task_id)
     with db.write_txn(conn):
-        conn.execute("DELETE FROM runtime_operations WHERE scope_id=? AND operation_id IN (?,?)",
-                     (scope, _op(value['verification_id']), 'worktree:' + value['verification_id']))
+        conn.execute("DELETE FROM runtime_operations WHERE scope_id=?", (scope,))
     path = Path(value.get('worktree_path') or '')
     repository = value['context'].get('repository')
     if not value.get('worktree_path') or not path.exists():
