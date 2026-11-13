@@ -1242,6 +1242,10 @@ RESET_ENV_FAILURES = (
     'forbidden', 'release_verification_source',
     'release_verification_runtime', 'release_verification_worktree_unknown',
     'release_verification_worktree_exists',
+    # 会话/提案层面的环境失败：重来一次会换成新会话，不会重复已有结论。
+    'release_verification_proposal', 'release_verification_history',
+    'release_verification_approval', 'release_verification_unsupported',
+    'release_verification_backend', 'release_verification_config',
 )
 # 发送前就失败的尝试（例如 Plus 控制面未启动）没有远端写入，可以安全重置。
 _PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执')
