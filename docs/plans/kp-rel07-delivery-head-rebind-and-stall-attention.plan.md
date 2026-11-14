@@ -2,7 +2,7 @@
 
 - 项目标识：`personal-kaneopilot`
 - 任务编号：KP-REL07（延续 KP-REL06 发布流程演练的两项已确认产品决定）
-- 状态：实现中（隔离测试已通过；尚未提交、未走云端 Packages 构建，运行中的 App 仍是旧核心）
+- 状态：待体验（已提交 334a88b/1ad513b，云端 Packages run 43598106983 成功并安装 0.0.0 build 292；等待用户确认真实链路体验）
 - 日期：2026-11-14
 - 目标与范围：把 KP-REL06 演练暴露的两个卡点固化为确定性能力：①PR 头因目标分支前进而前移后的显式重绑入口；②自动合并门长期未就绪时升级为待处理，不再无限空转。
 - 不在范围：强推/改写已推送分支、自动重绑（必须用户显式确认）、放宽评审覆盖或发布完成门、GUI 新按钮（本期 CLI-only）。
@@ -28,9 +28,10 @@
 
 - `cd core && python3 -m pytest tests/test_delivery_rebind.py tests/test_delivery_stall.py -q`：40 + 38 passed（隔离子进程实测，2026-11-14）。
 - 覆盖：干净合并重绑、重绑后按新头合并、普通子提交/三父合并/未含目标分支/错误期望头/未确认被拒；长期 UNSTABLE 升级、单次不升级、`waiting_checks` 不升级、原因变化重置、attention/ladder/resume 映射。
-- 未验证：真实 GitHub「Update branch」后的重绑（隔离测试用本地复刻合并）、云端 Packages 构建与安装、运行中 App 的实际行为。
+- 未验证：真实 GitHub「Update branch」后的重绑（隔离测试用本地复刻合并）、真实 UNSTABLE 长挂后的升级触发。
+- 构建与安装：push main（1ad513b）触发 run 43598106983，全部 job 成功；安装 artifact `macos-arm64-local-signed-292`（DMG sha256 与 macos-metadata.json 一致），版本 0.0.0 / build 292 / 源码 SHA 1ad513b，签名 ad-hoc、codesign 校验通过；App 启动后 engine 处于 active。安装前旧包备份在 `build/ci-292/KaneoPilot-previous-0.5.7-test.291.app`。
 
 ## 遗留
 
-- 本次改动与 KP-REL06 的 `release_verification._seed_dependencies` 修复都未提交；运行中 App 仍是旧核心副本。需另行授权提交、推送与云端 Packages 构建安装后才在真实链路生效。
+- 云端安装包是 0.0.0 开发包（push 构建不发布 Release），安装后 App 内自动更新检查按开发包规则停用；后续要回到测试通道需再手动安装一次 test 构建。
 - UI：重绑与停滞项目前只经 CLI/attention 列表可见，桌面入口未覆盖（未授权）。
