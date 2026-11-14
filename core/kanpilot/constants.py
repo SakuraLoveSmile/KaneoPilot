@@ -438,6 +438,8 @@ DELIVERY_EXECUTOR_ID = "kaneo-delivery"
 DELIVERY_SYNC_FAST_SECONDS = 300
 DELIVERY_SYNC_FAST_WINDOW_SECONDS = 3600
 DELIVERY_SYNC_SLOW_SECONDS = 1800
+# 合并门连续未就绪多久后升级为待处理（避免每五分钟空转十小时）。
+MERGE_STALL_SECONDS = 1800
 INTAKE_INTERVAL_SECONDS = 300
 INTAKE_MAX_ADOPT_PER_PASS = 3
 INTAKE_LABEL_LOOKUPS_PER_PASS = 20
@@ -510,6 +512,7 @@ AUTOMATION_FAILURE_STAGES = {
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",
     "no_changes": "delivery", "branch_diverged": "delivery", "gh_unavailable": "delivery", "pr_closed": "delivery",
+    "merge_checks_stalled": "delivery",
     "gh_missing": "delivery", "gh_timeout": "delivery", "gh_not_logged_in": "delivery",
 }
 AUTOMATION_FAILURE_CODES = frozenset(AUTOMATION_FAILURE_STAGES)

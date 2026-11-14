@@ -336,16 +336,19 @@ def _closed(ctx, payload, task, delivery, pr=None):
 
 def _verify_pr_identity(pr, repo, delivery, pushed_sha):
     # CLI filters are discovery only. Reuse and merge observation require the
-    # actual PR to describe this repository, branch pair and pushed commit.
+    # actual PR to describe this repository, branch pair and delivered commit.
+    # A verified head advance (base-only commits) is the only alternative to the
+    # frozen pushed commit.
     gh_client._pr(pr)
     path = urlsplit(pr["url"]).path
     expected_path = "/" + repo + "/pull/" + str(pr["number"])
+    expected_head = core.delivery_merge_head(delivery) if delivery.get("merge_head_sha") else pushed_sha
     if (path.lower() != expected_path.lower()
             or (delivery.get("pr_number") is not None and pr["number"] != delivery["pr_number"])
             or pr["isCrossRepository"]
             or pr["headRefName"] != delivery.get("branch")
             or pr["baseRefName"] != delivery.get("base_branch")
-            or not pushed_sha or pr["headRefOid"] != pushed_sha):
+            or not pushed_sha or pr["headRefOid"] != expected_head):
         raise git_delivery.GitDeliveryError("branch_diverged", "PR 身份、分支或提交与交付快照不一致")
 
 
@@ -553,8 +556,23 @@ def _sync(ctx, payload, task, delivery, contract):
             registered = util.parse_ts(db.task_extra(fresh).get("review_registered_at"))
             delay = 300 if policy or (registered and (ctx.now - registered).total_seconds() < 3600) else 1800
             next_sync = util.plus_seconds(delay, ctx.now)
+            stall, stalled = pr_auto_merge.stall(delivery, auto_merge, ctx.now, ctx.now_iso)
+            # A finished streak (merged/clean/waiting_checks) must not keep its old start.
+            display["auto_merge_stall"] = (dict(stall, escalated_at=ctx.now_iso) if stalled
+                                           else stall)
             core.update_delivery(ctx.conn, fresh, ctx.now_iso, pr_state="OPEN", last_sync_at=ctx.now_iso,
                                  next_sync_at=next_sync, publish_failures=0, **display)
+            if stalled:
+                reason = ("PR 合并门连续 " + str(stall["count"]) + " 次未就绪且已超过 "
+                          + str(constants.MERGE_STALL_SECONDS // 60) + " 分钟："
+                          + str(auto_merge.get("reason") or "")[:200]
+                          + "；修复检查或保护规则后继续")
+                core.block_task(ctx.conn, fresh, ctx.now_iso, reason, "merge_checks_stalled",
+                                "kaneo-delivery", stage="delivery")
+                db.add_event(ctx.conn, ctx.now_iso, "merge_checks_stalled", task_id=task["task_id"],
+                             actor="kaneo-delivery", detail=dict(stall))
+                return {"outcome": "blocked", "failure_code": "merge_checks_stalled",
+                        "message": reason}
     if pr["state"] == "MERGED":
         # The merge receipt is local before Actions I/O. Release commands own
         # their own intent/dispatch receipts and never hold this writer lock.

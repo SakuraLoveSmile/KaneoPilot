@@ -1666,6 +1666,8 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 
 开启发布的手动分支任务在 Review pass 后停待交付，Review 成功结算，不因尚未合并或发布误报 `review_blocked`。显式 `resolve continue_delivery` 复用当前正式 pass，经精确身份与证据核对后排队 PR 交付；历史 `release_required` 误阻塞的恢复、窄化引擎授权与重复操作规则均见发布契约，不以重新 Review 或开启项目自动化代替。
 
+PR 头因目标分支前进（GitHub「Update branch」等）而前移时，默认仍按 `branch_diverged` 停止，不用强推改写已推送分支；用户可在证明「冻结提交与目标分支的干净合并且已评审路径逐字节不变」后经 CLI-only `rebind-delivery-head` 重绑交付头，评审证据不重写，合并与发布核对改用重绑后的头。自动合并因检查或保护规则长期未就绪时，连续观测达到阈值升级为 `merge_checks_stalled` 待处理项，不无限空转。两项的核对、回执与恢复口径见发布契约「交付头因目标分支前进而重绑」「合并门长期未就绪的升级」。
+
 Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一次写入、未知结果只对账规则，见发布契约「发布说明修正」。说明修正不能替代构建、发布或更新 feed 的验收。
 
 ### 5.28.1 发现、身份与存储

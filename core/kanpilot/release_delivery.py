@@ -407,7 +407,8 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
     _require(repo and d.get('mode')=='pr' and type(d.get('pr_number')) is int,'release_pr_missing','发布需要同仓库已合并的 PR')
     pr=closeout.github.pr(repo,d['pr_number'])
     expected='https://github.com/'+repo+'/pull/'+str(d['pr_number'])
-    _require(pr.get('state')=='MERGED' and pr.get('headRefOid')==d['head_sha'] and pr.get('url')==expected
+    merge_head=core.delivery_merge_head(d)
+    _require(pr.get('state')=='MERGED' and pr.get('headRefOid')==merge_head and pr.get('url')==expected
         and d.get('pr_url')==expected and pr.get('baseRefName')==d.get('base_branch')
         and pr.get('headRefName')==d.get('branch') and pr.get('isCrossRepository') is False,
         'release_pr_mismatch','发布 PR 合并、仓库或 head/base 身份不符')
@@ -420,7 +421,7 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
     if external_target:
         _require(frozen_target in (None,external_target['target_sha']),'external_repair_changed','验证目标与已关联外部修复不符')
         frozen_target=external_target['target_sha']
-    target=frozen_target or (github.merge_commit_sha(repo,d['pr_number'],d['head_sha']) if task['status']=='done'
+    target=frozen_target or (github.merge_commit_sha(repo,d['pr_number'],merge_head) if task['status']=='done'
             else current_base)
     commit=closeout.github.commit(repo,target)
     if external_target:

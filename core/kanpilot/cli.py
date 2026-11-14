@@ -214,6 +214,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "delivery-commit": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (True, "str")}, _automation_command("cmd_delivery", "cmd_delivery_commit")),
     "delivery-publish": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_publish")),
     "delivery-sync": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_sync")),
+    # CLI-only：PR 头因目标分支前进而被更新（GitHub「Update branch」等）后显式重绑交付头。
+    "rebind-delivery-head": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_pr_head_sha": (True, "str"), "note": (False, "str|null"),
+         "confirm": (True, "bool")},
+        _automation_command("delivery_rebind", "cmd_rebind_delivery_head")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,

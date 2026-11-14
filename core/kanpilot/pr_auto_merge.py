@@ -5,7 +5,8 @@ only reconciled through the ordinary PR read, never sent again.
 """
 from pathlib import Path
 
-from . import automation_policy, core, db, gh_client, git_delivery, project_config, runtime_operations, util
+from . import (automation_policy, constants, core, db, gh_client, git_delivery,
+               project_config, runtime_operations, util)
 
 TOOL = 'github_pr_merge'
 HARNESS = 'github'
@@ -79,7 +80,8 @@ def eligibility(pr):
 def _identity(task, delivery, repo):
     return {'task_id': task['task_id'], 'run_id': task['run_id'],
             'review_key': task['review_key'], 'report_sha256': task['review_report_sha256'],
-            'head_sha': delivery['head_sha'], 'repo': repo, 'pr_number': delivery['pr_number'],
+            'head_sha': delivery['head_sha'], 'merge_head_sha': core.delivery_merge_head(delivery),
+            'repo': repo, 'pr_number': delivery['pr_number'],
             'base': delivery['base_branch'], 'head': delivery['branch']}
 
 
@@ -99,6 +101,36 @@ def _unresolved(conn, scope):
 
 def _notice(state, reason, delivery, now):
     return {'state': state, 'reason': reason, 'head_sha': delivery['head_sha'], 'updated_at': now}
+
+
+# 长期未就绪的合并门：连续观测 N 次且持续 M 秒后升级为待处理，避免每五分钟空转。
+STALL_MIN_OBSERVATIONS = 3
+
+
+def stall(delivery, notice, now_dt, now_iso):
+    """Return (evidence|None, escalate) for repeated not-ready merge observations.
+
+    Only *blocked* notices count (waiting_checks is normal progress). The streak
+    resets as soon as the reason, the head or the state changes, so a transient
+    blip never escalates.
+    """
+    if not notice or notice.get('state') != 'blocked':
+        return None, False
+    previous = (delivery or {}).get('auto_merge_stall') or {}
+    same = (previous.get('head_sha') == notice.get('head_sha')
+            and previous.get('reason') == notice.get('reason'))
+    if same and previous.get('since'):
+        since = previous['since']
+        count = int(previous.get('count') or 0) + 1
+    else:
+        since = now_iso
+        count = 1
+    value = {'head_sha': notice.get('head_sha'), 'reason': notice.get('reason'),
+             'since': since, 'count': count}
+    started = util.parse_ts(since)
+    elapsed = (now_dt - started).total_seconds() if started else 0.0
+    escalate = count >= STALL_MIN_OBSERVATIONS and elapsed >= constants.MERGE_STALL_SECONDS
+    return value, escalate
 
 
 def _not_sent(row, identity):
@@ -207,7 +239,7 @@ def reconcile(ctx, task, delivery, repo, pr, policy, boundary, verify_pr, verify
     if db.get_runtime_operation(ctx.conn, scope, op_id)['status'] != 'unknown':
         return pr, _notice('unknown', '合并回执已变化，继续只读核对 PR，不会重复提交', delivery, ctx.now_iso)
     try:
-        result = gh_client.pr_merge(repo, delivery['pr_number'], sha=delivery['head_sha'])
+        result = gh_client.pr_merge(repo, delivery['pr_number'], sha=core.delivery_merge_head(delivery))
     except gh_client.GhError as exc:
         boundary()
         if exc.kind in ('rejected', 'auth', 'not_found', 'missing'):

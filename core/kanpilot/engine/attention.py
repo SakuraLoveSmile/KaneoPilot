@@ -68,7 +68,7 @@ _REASON_TABLE = {
     # delivery_blocked (阶梯 3): commit/push/PR受阻.
     "delivery_commit_failed": DELIVERY_BLOCKED, "delivery_blocked_files": DELIVERY_BLOCKED,
     "branch_diverged": DELIVERY_BLOCKED, "no_changes": DELIVERY_BLOCKED,
-    "gh_unavailable": DELIVERY_BLOCKED,
+    "gh_unavailable": DELIVERY_BLOCKED, "merge_checks_stalled": DELIVERY_BLOCKED,
     # remote_unavailable (1→2): Kaneo unreachable / task gone remotely.
     "remote_unavailable": REMOTE_UNAVAILABLE, "remote_task_missing": REMOTE_UNAVAILABLE,
     "remote_conflict": REMOTE_UNAVAILABLE,

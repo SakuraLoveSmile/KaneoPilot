@@ -363,6 +363,12 @@ def is_pr_delivery(task) -> bool:
     return delivery_of(task).get("mode") == "pr"
 
 
+def delivery_merge_head(delivery) -> Optional[str]:
+    """PR head to merge: an explicitly re-bound advanced head, else the frozen one."""
+    value = (delivery or {}).get("merge_head_sha")
+    return value if isinstance(value, str) and value else (delivery or {}).get("head_sha")
+
+
 def requires_branch_review(task) -> bool:
     delivery = delivery_of(task)
     return delivery.get("mode") == "pr" or delivery.get("workspace_version") == 1

@@ -29,6 +29,24 @@
 - 已授权的同身份交付请求失败后，只有最新精确交付请求已结束、没有在途请求且不存在无关阻塞时，才允许显式重新核验并续排；保留原授权与外部操作回执，未知发送仍只对账。没有关联修复的任务在 PR 创建后展示「等待 PR 合并」及当前提交的实际检查/合并原因，不误称等待关联修复。
 - PR 合并后、批次冻结前的发布核对若受阻，SQL 投影从当前交付契约绑定的正式同步结果显示「发布受阻」和「上次发布核对」原因，不误称待构建发布。执行、提交、计划或评审身份变化后不复用旧原因；本次完整准备核验成功后恢复可启动状态。此展示不放宽完整源码验证门。
 
+### 交付头因目标分支前进而重绑（2026-11-14）
+
+任务分支创建较早、目标分支后来前进时，GitHub 的「Update branch」会把目标分支合入任务分支，PR 头随之前移。已评审并冻结的交付 head 仍是评审锚点，PR 头是该冻结提交与目标分支提交的干净合并。默认仍按 `branch_diverged` 停止自动交付，不静默改绑，也不得用强推改写已推送分支代替。
+
+- CLI-only `rebind-delivery-head {task_id,expected_head_sha,expected_pr_head_sha,confirm:true,note?}`。仅在任务处于交付或该类阻塞（`in_review` / `needs_user`）、未暂停、未人工接管、无在途请求且无未确认合并回执时接受；必须显式确认。
+- 只读核对 PR 仍为同仓库、同编号、同 head/base 分支、非跨仓且 OPEN；`expected_pr_head_sha` 与当前 PR 头一致。
+- 本地 Git 证明：冻结 head 是 PR 头的祖先；当前目标分支 tip 是 PR 头祖先；PR 头恰有两个父提交，其一为冻结 head，另一为当前目标分支历史中的提交；PR 头 tree 与 `git merge-tree --write-tree` 复算的干净合并 tree 完全相同；冻结交付改动路径（`base_sha..head_sha`）在 PR 头上的 blob 与冻结 head 逐路径相同。任一条不满足即拒绝，要求重新评审或重新规划。
+- 通过后只写交付登记的 `merge_head_sha` 与 `head_advance` 回执（冻结 head、PR 头、目标 tip、合并父提交、复算 tree、已核对路径），事件 `delivery_head_advanced`；解除该阻塞、恢复 `in_review` 并续排交付。`head_sha`/`pushed_sha`、评审历史与报告字节不变，不把重绑说成新的评审覆盖。
+- 自动合并回执身份、GitHub 合并的原子 `sha` 与发布核对改用 `merge_head_sha`；发布仍核对冻结评审 head 被目标分支包含。未重绑的任务行为不变。
+
+### 合并门长期未就绪的升级（2026-11-14）
+
+自动合并等待 GitHub 检查或保护规则期间，普通等待不阻塞任务；但同一 PR、同一原因长期未就绪属于异常，不得每五分钟空转。
+
+- 每次交付同步记录 `auto_merge_stall{head_sha,reason,since,count}`；仅 state 为 `blocked` 才计数，`waiting_checks`（检查仍在运行）不计。原因、head 或状态变化即重置。
+- 连续观测 ≥3 次且持续 ≥`MERGE_STALL_SECONDS`（30 分钟）时，任务进入 `needs_user`：`failure_code=merge_checks_stalled`、`failure_stage=delivery`、事件 `merge_checks_stalled`。原因写明实际 GitHub 原因，并提示修复检查或保护规则后继续。
+- 该码映射 `delivery_blocked` attention、阶梯 2（等待人工，不自动重试）；`resume` 回到 `in_review` 并续排交付。重绑交付头或用户继续交付都会重置观察窗口。升级不合并、不标记失败批次、不改变 PR，只把无限空转变成可见的待处理项。
+
 ### 合并后源码的补验证
 
 普通单任务的默认发布目标若与正式验证 head 仅有已存在的 `release/preview.json`、`release/latest.json` 普通文件内容差异，可选择原已验证 head 作为不可变构建检查点。核心须从完整 GitHub tree 核对该 head 的完整源码指纹与正式验证一致，除这两个清单的 blob 外，所有纳入源码快照的 path/mode/blob 完全相同；清单新增、删除、执行位或符号链接变化均不适用。仍须确认该检查点已被当前目标分支包含。发布目标及完整源码指纹保持原已验证 head 的真实值，不把合并后的清单变化宣称为验证通过，也不扩大 `.pi/**` 或构建产物的全局排除规则。后续仅清单更新不改变冻结检查点；发送前出现其他源码差异仍受阻。
