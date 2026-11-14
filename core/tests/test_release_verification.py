@@ -1,4 +1,7 @@
 """Release-target supplement: isolated Git/SQLite, fake Plus and GitHub only."""
+import shutil
+import subprocess
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from unittest import TestCase
@@ -611,3 +614,55 @@ class ReleaseVerificationTest(TestCase):
             verification_id=first['verification_id']), self.fixture.db_path)
         self.assertEqual(result['verification']['state'], 'verified', result)
         self.assertEqual((self.plus.created, self.plus.prompts, self.plus.approvals), (1, 1, 1))
+
+class SeedDependenciesTest(TestCase):
+    """Offline dependency seeding must run inside every package, not its parent."""
+
+    def _worktree(self, packages):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / 'pubspec.yaml').write_text('name: root', encoding='utf-8')
+        for name in packages:
+            directory = root / 'packages' / name
+            directory.mkdir(parents=True)
+            (directory / 'pubspec.yaml').write_text('name: ' + name, encoding='utf-8')
+        return root
+
+    def _seed(self, root, *, flutter='/usr/bin/flutter', failure=None):
+        calls = []
+
+        def run(argv, cwd=None, **kwargs):
+            calls.append(str(Path(cwd).relative_to(root)) or '.')
+            if failure == Path(cwd).name:
+                return subprocess.CompletedProcess(argv, 1, '', 'boom')
+            return subprocess.CompletedProcess(argv, 0, '', '')
+
+        value = {'worktree_path': str(root)}
+        with patch.object(verification.shutil, 'which', return_value=flutter), \
+             patch.object(verification.subprocess, 'run', side_effect=run), \
+             patch.object(verification, '_restore_tracked_changes', return_value=[]):
+            verification._seed_dependencies(value)
+        return calls, value
+
+    def test_each_subpackage_is_seeded_in_its_own_directory(self):
+        root = self._worktree(['subsonic_api', 'just_audio'])
+        calls, value = self._seed(root)
+        self.assertEqual(calls, ['.', 'packages/just_audio', 'packages/subsonic_api'])
+        self.assertEqual([row['cwd'] for row in value['dependency_setup']['commands']], calls)
+        self.assertEqual({row['exit_code'] for row in value['dependency_setup']['commands']}, {0})
+
+    def test_package_without_pubspec_and_missing_flutter_are_skipped(self):
+        root = self._worktree([])
+        (root / 'packages' / 'noise').mkdir(parents=True)
+        calls, value = self._seed(root)
+        self.assertEqual(calls, ['.'])
+        calls, value = self._seed(root, flutter=None)
+        self.assertEqual(calls, [])
+        self.assertNotIn('dependency_setup', value)
+
+    def test_subpackage_failure_is_recorded_without_stopping_other_packages(self):
+        root = self._worktree(['subsonic_api', 'just_audio'])
+        calls, value = self._seed(root, failure='just_audio')
+        self.assertEqual(calls, ['.', 'packages/just_audio', 'packages/subsonic_api'])
+        codes = {row['cwd']: row['exit_code'] for row in value['dependency_setup']['commands']}
+        self.assertEqual(codes, {'.': 0, 'packages/just_audio': 1, 'packages/subsonic_api': 0})

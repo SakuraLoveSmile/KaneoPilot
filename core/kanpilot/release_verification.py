@@ -358,7 +358,7 @@ def _seed_dependencies(value):
     flutter = shutil.which('flutter')
     setup = []
     if flutter:
-        targets = [path] + sorted(p.parent for p in path.glob('packages/*')
+        targets = [path] + sorted(p for p in path.glob('packages/*')
                                    if (p / 'pubspec.yaml').is_file())
         for cwd in targets:
             try:
