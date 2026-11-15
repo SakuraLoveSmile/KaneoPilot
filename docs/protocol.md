@@ -1375,7 +1375,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    | `execution_question` | `execution_input_required` | 3 | 执行中待答问题，轮次仍在运行（§5.28） |
    | `verify_unconfirmed` | `verification_unconfirmed` | 3 | Plus 验证失败或证据缺失（证据不明不自动质量补救） |
    | `review_changes_exhausted` | `review_blocked`、`review_fix_exhausted` | 3→4 | 同分支修复轮已达上限 |
-   | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged` | 3 | 提交/推送/PR 受阻 |
+   | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged`、`delivery_unknown` | 3 | 提交/推送/PR 受阻；`delivery_unknown` 为交付写结果连续未知、只读对账仍不能证明 |
    | `remote_unavailable` | `remote_unavailable`、`remote_task_missing` | 1→2 | Kaneo 不可达或任务在远端已不存在 |
    | `plus_unreachable` | `plus_unreachable`、`plus_timeout` | 2 | Plus 控制面不可达/超时 |
    | `plus_send_unknown` | `send_state_unknown` | 2 | prompt 发送结果未知，禁止自动重发 |

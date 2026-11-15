@@ -74,12 +74,55 @@ def _raise_rejected(data):
     raise gh_client.GhError(rejection.get("code") or "rejected", message)
 
 
+def _settle_pending_push(ctx, task, delivery, arguments, boundary, observe):
+    """Prove a legacy unknown push by its remote ref, without resending.
+
+    Older receipts embedded the review/plan/run identity. A re-review or an
+    evidence-only rerun must not strand a push that already happened, so one
+    uniquely matching pending push may be settled from a read-only observation.
+    """
+    scope = "delivery-git_push:" + task["task_id"]
+    rows = ctx.conn.execute("SELECT * FROM runtime_operations WHERE scope_id=? "
+                            "AND status IN ('prepared','unknown')", (scope,)).fetchall()
+    matches = []
+    for row in rows:
+        intent = _receipt_intent(row)
+        frozen = intent.get("arguments") or {}
+        if (intent.get("task_id") == task["task_id"]
+                and intent.get("head_sha") == delivery["head_sha"]
+                and all(frozen.get(key) == value for key, value in arguments.items())):
+            matches.append(row)
+    if len(matches) != 1:
+        return None
+    try:
+        observed = observe(None)
+    except (git_delivery.GitDeliveryError, gh_client.GhError, bridge.BridgeError) as exc:
+        if _uncertain(exc):
+            return None
+        raise
+    if observed is None:
+        return None
+    row = matches[0]
+    intent = _receipt_intent(row)
+    with db.write_txn(ctx.conn):
+        boundary()
+        runtime_operations.complete_operation(ctx.conn, scope, row["operation_id"],
+            result={"intent": intent, "claim": _receipt_data(row).get("claim"),
+                    "observation": observed}, now=ctx.now_iso)
+    return observed
+
+
 def _write_once(ctx, task, delivery, kind, arguments, boundary, send, observe):
     """Persist intent before sending; a lost response only permits reads."""
     intent = {"task_id": task["task_id"], "execution_run_id": task["run_id"],
               "plan_sha256": task["plan_sha256"], "head_sha": delivery["head_sha"],
               "review_key": task["review_key"], "review_report_sha256": task["review_report_sha256"],
               "arguments": arguments}
+    if kind == "git_push":
+        # The remote ref proves the push; review/plan/run identity may change
+        # (re-review, evidence-only rerun) and must not strand a lost write.
+        for key in ("execution_run_id", "plan_sha256", "review_key", "review_report_sha256"):
+            intent.pop(key, None)
     scope = "delivery-" + kind + ":" + task["task_id"]
     effect = dict(intent)
     # PR title/body are frozen arguments, not a second permission to create
@@ -91,14 +134,21 @@ def _write_once(ctx, task, delivery, kind, arguments, boundary, send, observe):
     claim = {key: contract.get(key) for key in ("request_id", "run_id")}
     util.require(all(claim.values()), "交付操作缺少当前领取身份", "validation_failed")
     boundary()
-    with db.write_txn(ctx.conn):
-        boundary()
-        op_id, intent = _select_attempt(ctx, scope, root_id, intent, claim, kind)
-        prepared = runtime_operations.begin_operation(ctx.conn, scope, op_id, "core_delivery", kind, intent,
-                                                     now=ctx.now_iso)
-        if prepared["status"] == "prepared":
-            db.update_runtime_operation(ctx.conn, scope, op_id, ctx.now_iso,
-                                        result_json=util.jdump({"intent": intent, "claim": claim}))
+    try:
+        with db.write_txn(ctx.conn):
+            boundary()
+            op_id, intent = _select_attempt(ctx, scope, root_id, intent, claim, kind)
+            prepared = runtime_operations.begin_operation(ctx.conn, scope, op_id, "core_delivery", kind, intent,
+                                                         now=ctx.now_iso)
+            if prepared["status"] == "prepared":
+                db.update_runtime_operation(ctx.conn, scope, op_id, ctx.now_iso,
+                                            result_json=util.jdump({"intent": intent, "claim": claim}))
+    except _UnknownDelivery:
+        if kind == "git_push":
+            settled = _settle_pending_push(ctx, task, delivery, arguments, boundary, observe)
+            if settled is not None:
+                return settled
+        raise
     slot = runtime_operations.reserve_downstream(ctx.conn, scope, op_id, "core_delivery", kind, intent)
     boundary()
     if ctx.conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? "
@@ -197,7 +247,20 @@ def _with_contract(ctx, payload, operation, run):
         core.require_stage_identity(ctx.conn, payload, fresh, util.now_dt(), stages=("delivery",))
         results = dict(current.get("stage_results") or {})
         results[operation] = envelope
-        core.update_delivery(ctx.conn, fresh, ctx.now_iso, stage_results=results)
+        unknown = result.get("operation_state") == "unknown"
+        streak = 0
+        updates = {"stage_results": results}
+        if unknown:
+            streak = int(current.get("unknown_delivery_streak") or 0) + 1
+            updates.update(unknown_delivery_streak=streak,
+                           next_sync_at=util.plus_seconds(60, ctx.now))
+        elif current.get("unknown_delivery_streak"):
+            updates["unknown_delivery_streak"] = 0
+        core.update_delivery(ctx.conn, fresh, ctx.now_iso, **updates)
+        if unknown and streak >= 3:
+            core.block_task(ctx.conn, db.require_task(ctx.conn, task["task_id"]), ctx.now_iso,
+                            "交付写结果连续未知，已保留回执并只读对账；请核对远端分支后继续",
+                            "delivery_unknown", "kaneo-delivery", stage="delivery")
     return dict(result, stage_contract=contract, stage_result=envelope)
 
 
