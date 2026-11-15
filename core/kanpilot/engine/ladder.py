@@ -99,6 +99,7 @@ _FAILURE_CODE_LADDER = {
     "verification_unconfirmed": LADDER_QUALITY,
     "review_blocked": LADDER_QUALITY,
     "delivery_commit_failed": LADDER_QUALITY,
+    "delivery_unknown": LADDER_QUALITY,
     "branch_diverged": LADDER_QUALITY,
     "empty_diff": LADDER_QUALITY,           # scenarios.md #5 空转→同计划重试一次
     # 阶梯 4 needs-you：其余一切（fix_rounds_exhausted / auto_budget_exceeded /

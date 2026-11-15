@@ -233,7 +233,7 @@ exit_code 缺失或不是整数时记为 None。
 4. Kaneo 评论：先用 `find_marker_comment(task, "[kaneopilot:delivery:<task_id>]")` 查找，不存在再 `post_comment`，内容为 `[kaneopilot:delivery:<task_id>] 已创建 PR：<url>`。
 5. 第三段（事务）：写入 pushed_sha、pr_number、pr_url、pr_state、kaneo_comment_at，`publish_failures` 清零，`next_sync_at` 设为 now+5 分钟；记录事件 `delivery_pushed`、`pr_opened`、`kaneo_comment_posted`。
 
-本地 Git/SSH 只读身份探测的瞬时超时或读取失败沿同一 `publish_failures` 退避：前两次返回 retry、`next_sync_at=now+5 分钟`，保留当前执行、Review、PR 与合并证据；第三次超时以 `gh_timeout`、其他读取失败以 `gh_unavailable` 转人工，文案保留具体探测原因。确定的 origin 配置错误立即阻断。此类错误始终属于 delivery，继续操作恢复 `in_review + delivery`，不得映射为 `delivery_commit_failed` 后重跑执行/验证。未知写回执仍只能只读对账，不因身份探测重试重发写操作。
+本地 Git/SSH 只读身份探测的瞬时超时或读取失败沿同一 `publish_failures` 退避：前两次返回 retry、`next_sync_at=now+5 分钟`，保留当前执行、Review、PR 与合并证据；第三次超时以 `gh_timeout`、其他读取失败以 `gh_unavailable` 转人工，文案保留具体探测原因。确定的 origin 配置错误立即阻断。此类错误始终属于 delivery，继续操作恢复 `in_review + delivery`，不得映射为 `delivery_commit_failed` 后重跑执行/验证。未知写回执仍只能只读对账，不因身份探测重试重发写操作。`git_push` 的幂等身份只含 task_id、head_sha 与 repo/branch/sha；评审 key、评审报告哈希、执行轮次和计划哈希属于审计信息，重新评审或仅证据重跑不得让已发生的推送永久不可对账。单次未知结果设置 `next_sync_at=now+60 秒` 退避；同一交付连续第 3 次未知转 `needs_user`，failure_code=`delivery_unknown`、stage=delivery，进入「交付受阻」；`resume` 回到 `in_review + delivery` 继续只读对账，不自动重跑执行/评审。
 
 自动合并前的仓库复检同样走上述交付失败分类。最后一次只读仓库复检发生在 prepared 回执之后、标记 unknown 和实际 merge 之前；若该复检明确失败，只将当前仍 prepared、同身份的回执记为 rejected + not_sent，并保留身份和原因。下轮仅这一带未发送证明的回执允许重新取得 prepared 后复检；真实 unknown、崩溃留下的 prepared 以及 GitHub 已拒绝的合并均不得据此重发。标记 unknown 后仍复核领取、策略及回执状态，GitHub 合并继续以固定 SHA 做条件写入。
 
@@ -450,6 +450,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 | delivery_blocked_files、delivery_commit_failed | delivery-commit | resume（→ running + monitor，重新走完成判定与提交）、replan、mark_done、dismiss |
 | no_changes | delivery-commit | replan、mark_done、dismiss |
 | branch_diverged、gh_unavailable、pr_closed | delivery | resume（→ in_review + delivery，next_sync_at=now）、mark_done、dismiss |
+| delivery_unknown | delivery | resume（→ in_review + delivery，重新只读对账）、replan、dismiss；不自动重跑执行/评审 |
 | remote_conflict | advance-task、intake、begin-send | resume（接受远端当前需求和状态，回到被阻塞的步骤；派发中途不可用）、replan、mark_done、dismiss |
 | planner_failed（自动重试一次后）、needs_input | plan | replan、dismiss；也可以在规划面板补充材料后手动提交 |
 | dispatch_failed | dispatch | 沿用 retry/restore/accept_duplicate/mark_sent；另有 replan、dismiss |

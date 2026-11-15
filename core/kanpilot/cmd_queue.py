@@ -358,6 +358,7 @@ _AUTO_RESUME_TARGETS = {
     "verification_environment_failure": ("running", "monitor"),
     "fix_branch_unavailable": ("running", "monitor"),
     "delivery_blocked_files": ("running", "monitor"), "delivery_commit_failed": ("running", "monitor"),
+    "delivery_unknown": ("in_review", "delivery"),
     "branch_exists": ("needs_plan", None), "delivery_base_unknown": ("needs_plan", None),
     "review_blocked": ("in_review", "review"), "review_backend_unsupported": ("in_review", "review"),
     "branch_diverged": ("in_review", "delivery"), "gh_unavailable": ("in_review", "delivery"), "pr_closed": ("in_review", "delivery"),
@@ -1147,8 +1148,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 task = clear_review_result_inline(conn, task, now)
             core.transition_task(conn, task, target, now, actor, detail={"via": "resolve " + action}, **fields)
             if kind == "delivery":
-                # A user decision restarts the merge-stall observation window.
-                core.update_delivery(conn, task, now, next_sync_at=now, auto_merge_stall=None)
+                # A user decision restarts the merge-stall observation window and
+                # any consecutive-unknown delivery counter.
+                core.update_delivery(conn, task, now, next_sync_at=now, auto_merge_stall=None,
+                                     unknown_delivery_streak=0)
             if kind:
                 new_request, _ = _new_cycle_request(conn, now, task, kind, requested_by=actor)
 
