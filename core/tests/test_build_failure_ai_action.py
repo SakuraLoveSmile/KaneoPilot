@@ -502,7 +502,7 @@ class BuildFailureActionTest(BuildFailureFixture):
         revision=release_delivery._policy(self.conn,self.task())[1]
         def persist(context,batch_id,state,run_id):
             context=deepcopy(context)
-            context["context_sha256"]=util.sha256_text(util.jdump(context))
+            context["context_sha256"]=release_delivery._context_sha256(context)
             batch=dict(context,batch_id=batch_id,state=state,dispatch_status="sent_or_unknown",workflow_run_id=run_id,
                 tag="v"+context["version"],build_number=run_id,target_sha=context["proof"]["target_sha"])
             manifest,inputs=release_delivery._inputs(batch);batch.update(task_manifest=manifest,inputs=inputs)
