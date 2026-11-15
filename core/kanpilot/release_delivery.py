@@ -20,6 +20,10 @@ DISPATCH_TOOL='github_release_dispatch'
 MANIFEST_NAME='kaneopilot-release.json'
 CHANGELOG_REPORTER_LIMIT=80
 CHANGELOG_SUMMARY_LIMIT=200
+# Frozen context hash: changelog is part of the immutable batch, but excluded
+# from the hash so predecessor chains frozen before KP-REL10 stay verifiable.
+CONTEXT_HASH_KEYS=('project_id','repository','root_task_id','members','proof','policy','policy_snapshot','workflow',
+                   'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
 _IDENTITY_KEYS=('task_id','project_id','repository','run_id','plan_sha256','requirements_sha256',
                 'review_key','review_report_path','review_report_sha256','save_state')
 
@@ -79,6 +83,10 @@ def _identity(task):
             ('mode','head_sha','base_sha','base_branch','branch','pr_number','pr_url')})),
         evidence_sha256=util.sha256_text(util.jdump({key:extra.get(key) for key in
             ('review_history','review_conclusion','engine_verdict','plan_verify')})))
+
+
+def _context_sha256(context):
+    return util.sha256_text(util.jdump({key:context[key] for key in CONTEXT_HASH_KEYS if key in context}))
 
 
 def _changelog_reporter(task):
@@ -583,8 +591,7 @@ def _stable_available(conn,project_id,policy,superseded_batch_id=None):
 
 def _trusted_stable_predecessor(conn,successor):
     """Validate one immutable successor edge; a failed edge also needs its send receipt."""
-    context_keys=('project_id','repository','root_task_id','members','proof','policy','policy_snapshot','workflow',
-                  'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
+    context_keys=CONTEXT_HASH_KEYS
     project_id=successor.get('project_id')
     old=_batch(conn,successor.get('superseded_build_batch_id'))
     row=db.get_runtime_operation(conn,_scope(project_id),'batch:'+successor['batch_id'])
@@ -674,7 +681,7 @@ def _prepare(ctx,task_id):
         changelog=_changelog_context(root))
     if superseded:
         context['superseded_build_batch_id']=superseded
-    context['context_sha256']=util.sha256_text(util.jdump(context))
+    context['context_sha256']=_context_sha256(context)
     return context
 
 
