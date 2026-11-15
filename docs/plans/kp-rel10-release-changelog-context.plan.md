@@ -3,7 +3,7 @@
 - 项目标识：`personal-kaneopilot`
 - 任务编号：KP-REL10
 - 日期：2026-11-15（Asia/Taipei）
-- 状态：待体验（已合入 `cab3130c`，build 302 已安装；真实 Music #17 数据的自动链路已核验，下一次 Music 测试版发布验证 Release/feed）
+- 状态：实现中（已合入 `cab3130c`、build 302 已安装；发现并修复 context hash 回归，待新构建安装与下一次 Music 测试版发布验证）
 - 目标：让托管项目（SakuraMusic）的测试版 Release 正文和更新 feed 自动生成 `@用户名：一句话描述解决了什么问题`，而不是旧模板「用户反馈：<任务标题>」。
 
 ## 已确认的决定
@@ -47,3 +47,9 @@
   ```
 
 - 下一次真实 Music 测试版发布需读回 Release 正文/feed 验证自动输出；在此之前状态保持待体验，不声称已验收。
+
+## 回归修复（2026-11-15）
+
+- 首次合并后的主 run 在 `tests/test_build_failure_ai_action.py` 两个用例失败（PR 检查未捕获）；本地在 77825c3 复现、在 6e686e0 不复现，确认是 `changelog` 进入 `context_sha256` 后，旧冻结稳定前驱链按原 `context_keys` 重算哈希不再匹配。
+- 修复（PR #17）：新增 `CONTEXT_HASH_KEYS` 与 `_context_sha256`；`changelog` 仍随批次冻结并进入 manifest，但不参与冻结上下文哈希，保持 KP-REL10 之前批次的稳定前驱链可验证；`_trusted_stable_predecessor` 使用同一组键，测试改用生产 helper。
+- 验证：`test_build_failure_ai_action` 22 项、`release_delivery`/`release_changelog` 43 项、`release_notes`+`delivery_stage_contract` 32 项、`delivery_pr` 36 项通过。新构建安装后需重跑主 run 的 checks 分片。
