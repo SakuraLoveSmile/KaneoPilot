@@ -117,10 +117,7 @@ def _changelog_summary(task):
         head,tail=first.split('：',1)
         if any(word in head for word in ('轻档','重档','方案')) and tail.strip():
             first=tail.strip()
-    for sep in ('。','！','？','. '):
-        if sep in first:
-            first=first.split(sep,1)[0]
-            break
+    first=re.split(r'[。！？；;]|\.\s',first,maxsplit=1)[0]
     first=first.strip(' 。；;')
     if len(first)>CHANGELOG_SUMMARY_LIMIT:
         first=first[:CHANGELOG_SUMMARY_LIMIT].rstrip()+'…'
