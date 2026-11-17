@@ -1,6 +1,6 @@
 # kp-ui10 规划面板材料文件点击预览与排版优化
 
-- 状态：实现中（云端构建与实机体验未完成）
+- 状态：待体验（云端组合态构建与测试版发布完成，实机体验待用户确认）
 - 日期：2026-11-17（台北）
 - 分支：`feat/20261117-kp-ui10-planning-material-preview`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261117-feat-kp-ui10-planning-material-preview/`
@@ -41,9 +41,10 @@
 ## 实测记录
 
 - 本地：未运行 Swift 编译（项目约束仅云端）；纯逻辑经 Python 镜像 33/33 断言预验证（含修复后的二进制尾边界）；标记块提取与断言由云端 group a 夹具执行。core 未改。
-- 云端构建：channel=test 预发布流程（2026-11-08 固定流程）。首轮 44056162179 因解码边界修复取消；二轮 44056833523 因主线整合取消；三轮 44057444305（build 316）fixtures group a/b 与全部 checks 通过（33 条新断言云端验证通过），但 macos-package 因 `Result<_,String>` 编译错误失败（PlanningView.swift:1454，String 不遵循 Error）、android 因 kotlin-stdlib:2.0.21 依赖解析 transient 失败（与本改动无关），publish 跳过未发预发布。编译错误已修复为 `PreviewRead: Sendable` 枚举（5945fe0）；四轮 44061319658 运行中，结论待记。
+- 云端构建：channel=test 预发布流程（2026-11-08 固定流程）。首轮 44056162179 因解码边界修复取消；二轮 44056833523 因主线整合取消；三轮 44057444305（build 316）fixtures group a/b 与全部 checks 通过（33 条新断言云端验证通过），但 macos-package 因 `Result<_,String>` 编译错误失败（PlanningView.swift:1454，String 不遵循 Error）、android 因 kotlin-stdlib:2.0.21 依赖解析 transient 失败（与本改动无关），publish 跳过未发预发布。编译错误已修复为 `PreviewRead: Sendable` 枚举（5945fe0）；四轮 44061319658（build 318）macos-package/android/fixtures group a/b/全部 checks/codex-platforms 通过。publish 首跑因 release_bundle.py:382 新建 tag ref 后立即 GET 的最终一致性竞态返回 None 失败（tag 已创建），重跑 publish 走「已存在 tag」校验分支成功。**预发布 v0.5.8-test.318 已发布**（prerelease、非 draft），资产：KaneoPilot-0.5.8-test.318-macos-arm64.dmg / -android.apk / manifest.json / SHA256SUMS。
 - 实机体验：未开始。
 
 ## 遗留
 
-- 构建通过后发布 `vX.Y.Z-test.<run>` 预发布并记录标签与 run；用户实机确认后才记已验收，再合入 main 并清理本任务 worktree/分支。
+- 测试版 v0.5.8-test.318 已发布（run 44061319658，commit 5945fe0）；用户开启「接收测试版」安装体验，明确确认后才记已验收，再合入 main 并按保全规则清理本任务 worktree/分支。
+- release_bundle.py:382 的 git ref 最终一致性竞态为 release 基础设施 latent 缺陷（非本任务改动），本次以重跑 publish 恢复；如需根治应另开任务给 verify_remote_tag 加 None/重试处理。
