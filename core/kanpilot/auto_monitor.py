@@ -133,13 +133,13 @@ def _complete(controller, task, detail, expected, messages):
         task_id=task["task_id"], expected_execution_run_id=task["run_id"],
         expected_plan_sha256=task["plan_sha256"], budget_seconds=budget,
         operation_id="monitor-verdict:" + controller.claim["request_id"]))
-    if result.get("verification_ok") is not True:
+    if result.get("verification_ok") is not True and result.get("review_authorized") is not True:
         code = (result.get("failure_code") or
                 ("verification_environment_failure" if result.get("environment_failure") else "verification_unconfirmed"))
         controller.report("needs_user", failure_code=code,
                           note=result.get("detail") or "执行验证证据未通过核验")
         return
-    _finish_complete(controller, task, detail, expected)
+    _finish_complete(controller, task, detail, expected, user_accepted=result.get("admission_source") == "user_acceptance")
 
 
 def _engine_mode(controller, task):
@@ -150,7 +150,7 @@ def _engine_mode(controller, task):
     return engine_claim_scope.project_mode(entry, task.get("project_id", ""))
 
 
-def _finish_complete(controller, task, detail, expected):
+def _finish_complete(controller, task, detail, expected, user_accepted=False):
     if core.requires_branch_review(task):
         commit = _commit(controller, task)
         if commit.get("outcome") == "blocked":
@@ -160,7 +160,7 @@ def _finish_complete(controller, task, detail, expected):
             raise util.KanpilotError("observation_blocked", "交付提交结果不可确认")
     _advance(controller, task, "in-review", expected)
     _record_cost(controller, task, detail)
-    controller.report("succeeded", progress="本轮执行完成且验证通过")
+    controller.report("succeeded", progress=("已按用户接受的当前结果进入独立评审（未验证）" if user_accepted else "本轮执行完成且验证通过"))
 
 
 def _running(controller, progress="本轮仍在运行"):
@@ -240,6 +240,11 @@ def _monitor(controller):
                           ("transcript_incomplete", "turn_identity_mismatch", "identity_mismatch", "截断", "超时"))
                    or (type(detail.get("exit_code")) is int and detail["exit_code"] != 0)
                    or terminal.get("truncated") is True or detail.get("truncated") is True)
+        if backend == "pi_desktop" and (task.get("extra") or {}).get("goal_acceptance"):
+            # Only the core revalidated admission can accept this exact terminal/source.
+            # Preserve original errors and verification failures in the Review materials.
+            _complete(controller, task, detail, expected, [])
+            return
         if failure:
             # Evaluate failure markers before clipping historical unbounded notes.
             suffix = "…（已截断）"

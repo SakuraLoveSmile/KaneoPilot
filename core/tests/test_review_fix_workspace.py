@@ -171,13 +171,18 @@ def test_auto_intake_passes_exact_frozen_review_head(fix, tmp_path):
     prepared = {"input_id": "test-input", "input_sha256": "hash", "can_start": True}
     def run(command, *args):
         if command == "prepare-plan-input":
+            db.insert_planner_input(fix.conn, prepared['input_id'], 'fix12345', prepared['input_sha256'],
+                'requirements', 'source', {'task': {'repository': str(fix.repo)}}, NOW)
             return prepared
         return {"results": [{"request_id": "queued-plan"}]}
+    # create-review-fix imports an unadopted child. run_once selects it via
+    # _candidate and ordinary intake; wanted=True is reserved for managed retries.
+    assert auto_intake._candidate(fix.conn, 'fix12345')
     with mock.patch.object(auto_intake.cli, "run", side_effect=run), \
          mock.patch.object(git_delivery, "prepare_branch_worktree", return_value=fix.delivery) as prepare, \
          mock.patch.object(auto_intake.planner_config, "merged", return_value={"backend": "pi_desktop", "default_method": "builtin"}):
         response = auto_intake._submit(fix.conn, tmp_path / "fix.db", "fix12345",
-            {"delivery_base": "main", "policy_revision": 1}, NOW, "requirements", wanted=True)
+            {"delivery_base": "main", "policy_revision": 1}, NOW, "requirements")
     assert response["request_id"] == "queued-plan"
     assert prepare.call_args.kwargs["initial_head_sha"] == fix.reviewed
     assert prepare.call_args.kwargs["base_branch"] == "main"
@@ -191,7 +196,7 @@ def test_intake_waits_for_review_registration_without_blocking_child(fix, tmp_pa
     with mock.patch.object(auto_intake.cli, "run") as run, \
          mock.patch.object(auto_intake, "_failure") as failure:
         result = auto_intake._submit(fix.conn, tmp_path / "fix.db", "fix12345",
-            {"delivery_base": "main", "policy_revision": 1}, NOW, "requirements", wanted=True)
+            {"delivery_base": "main", "policy_revision": 1}, NOW, "requirements")
     assert result["reason"] == "review_fix_waiting"
     run.assert_not_called()
     failure.assert_not_called()
@@ -199,6 +204,21 @@ def test_intake_waits_for_review_registration_without_blocking_child(fix, tmp_pa
     assert core.automation_of(db.require_task(fix.conn, "fix12345")) == {}
     db.set_extra(fix.conn, db.require_task(fix.conn, "source123"), NOW, review_history=frozen)
     test_auto_intake_passes_exact_frozen_review_head(fix, tmp_path)
+
+
+def test_unadopted_review_child_cannot_enter_managed_wanted_retry(fix, tmp_path):
+    before = dict(db.require_task(fix.conn, 'fix12345'))
+    with mock.patch.object(auto_intake.cli, 'run') as run, \
+         mock.patch.object(git_delivery, 'prepare_branch_worktree') as prepare, \
+         mock.patch.object(auto_intake, '_failure') as failure:
+        result = auto_intake._submit(fix.conn, tmp_path / 'fix.db', 'fix12345',
+            {'delivery_base': 'main', 'policy_revision': 1}, NOW, 'requirements', wanted=True)
+    assert result['reason'] == 'planning_state_changed'
+    assert dict(db.require_task(fix.conn, 'fix12345')) == before
+    assert fix.conn.execute('SELECT COUNT(*) FROM requests WHERE task_id=?', ('fix12345',)).fetchone()[0] == 0
+    run.assert_not_called()
+    prepare.assert_not_called()
+    failure.assert_not_called()
 
 
 def test_registered_review_without_head_is_a_real_failure(fix):

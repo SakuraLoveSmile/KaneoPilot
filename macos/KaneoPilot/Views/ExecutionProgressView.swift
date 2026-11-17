@@ -2,8 +2,8 @@ import SwiftUI
 
 /// KP-EP01：执行页「最新进展」卡片。
 ///
-/// 只显示执行端最后一条可读进展和更新时间；不在此渲染消息列表，也不读取
-/// 正文。完整会话按需在 `ExecutionSessionSheet` 中打开。
+/// 展示最近进展与目标待办的只读投影，不在此读取或渲染消息列表。
+/// 完整会话按需在 `ExecutionSessionSheet` 中打开。
 struct ExecutionProgressView: View {
     let taskID: String
     let runID: String?
@@ -12,6 +12,8 @@ struct ExecutionProgressView: View {
 
     @EnvironmentObject private var model: AppViewModel
     @StateObject private var store: ExecutionProgressStore
+    @State private var goalExpanded = true
+    @State private var descriptionExpanded = false
 
     init(taskID: String, runID: String?,
          onDigestChange: ((ExecutionSessionDigest?) -> Void)? = nil,
@@ -25,10 +27,15 @@ struct ExecutionProgressView: View {
     }
 
     var body: some View {
-        GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
-            header
-            ListRule()
-            content
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+                header
+                ListRule()
+                content
+            }
+            if let goal = store.roundDetail?.goalProgress {
+                goalPanel(goal)
+            }
         }
         .task { store.start(client: model.client) }
         .onDisappear { store.stop() }
@@ -36,6 +43,84 @@ struct ExecutionProgressView: View {
         .onChange(of: store.digest) { _, digest in onDigestChange?(digest) }
         .onChange(of: model.lastRefreshAt) { _, _ in
             Task { await store.refresh() }
+        }
+    }
+
+    private func goalPanel(_ goal: ExecutionGoalProgress) -> some View {
+        GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+            DisclosureGroup(isExpanded: $goalExpanded) {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    if goal.items.isEmpty {
+                        Text("执行端尚未上报目标清单")
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    } else {
+                        ForEach(goal.items) { item in
+                            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                                Image(systemName: item.status == "completed" ? "checkmark.circle.fill" : "circle.fill")
+                                    .font(.kpSmall)
+                                    .foregroundStyle(goalItemColor(item.status))
+                                Text(item.label)
+                                    .font(.kpBody)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                                Spacer(minLength: Spacing.s)
+                                Text(item.statusLabel)
+                                    .font(.kpSmall)
+                                    .foregroundStyle(goalItemColor(item.status))
+                                    .padding(.horizontal, Spacing.s)
+                                    .padding(.vertical, Spacing.xs)
+                                    .background(goalItemColor(item.status).opacity(0.12), in: Capsule())
+                                    .fixedSize()
+                            }
+                        }
+                    }
+                    if !goal.markdown.isEmpty {
+                        DisclosureGroup("目标说明", isExpanded: $descriptionExpanded) {
+                            Text(goal.markdown)
+                                .font(.kpBody)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .font(.kpSmall)
+                    }
+                    if store.error != nil {
+                        Label("读取失败，目标进度可能已过期", systemImage: "exclamationmark.triangle")
+                            .font(.kpSmall).foregroundStyle(Color.kpOrange)
+                    }
+                }
+                .padding(.top, Spacing.m)
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                    Text("目标进度").font(.kpSection)
+                    if goal.total > 0 {
+                        ProgressView(value: Double(goal.completed), total: Double(goal.total))
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                            .accessibilityLabel("已完成 \(goal.completed) 项，共 \(goal.total) 项")
+                        Text("\(goal.completed)/\(goal.total)")
+                            .font(.kpBody).monospacedDigit()
+                            .foregroundStyle(Color.kpGreen)
+                    }
+                    Text(goal.title)
+                        .font(.kpBody)
+                        .lineLimit(2)
+                        .help(goal.title)
+                    Spacer(minLength: 0)
+                    Text(statusLabel)
+                        .font(.kpSmall).foregroundStyle(statusColor)
+                        .fixedSize()
+                }
+            }
+            .padding(Spacing.m)
+        }
+    }
+
+    private func goalItemColor(_ status: String) -> Color {
+        switch status {
+        case "completed": return .kpGreen
+        case "in_progress": return .kpBlue
+        case "failed": return .kpRed
+        default: return .kpSecondary
         }
     }
 

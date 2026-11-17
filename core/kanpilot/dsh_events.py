@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -209,6 +210,118 @@ def latest_progress(events: list) -> Optional[dict]:
         at = event.get("ts")
         return {"text": text, "at": at if isinstance(at, str) else None}
     return None
+
+
+def _goal_object(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def latest_goal_progress(events: list, job: Optional[dict] = None) -> Optional[dict]:
+    """Project successful Goal tools for display, never for execution settlement.
+
+    The event log already belongs to one run. When the job supplies a turn,
+    accept only that turn and its recorded approval/adoption ancestors. Tool
+    revisions replace the original transcript position, not the logical order.
+    """
+    job = job if isinstance(job, dict) else {}
+    approval = _goal_object(job.get("goal_approval"))
+    current = job.get("turn_id")
+    turns = {current} if isinstance(current, str) and current else set()
+    if turns:
+        for adoption in reversed(job.get("turn_adopted") or []):
+            if isinstance(adoption, dict) and adoption.get("to") in turns:
+                previous = adoption.get("from")
+                if isinstance(previous, str) and previous:
+                    turns.add(previous)
+        if approval.get("execution_turn_id") in turns:
+            planning = approval.get("planning_turn_id")
+            if isinstance(planning, str) and planning:
+                turns.add(planning)
+
+    # Keep the first position of each source message, but its newest revision.
+    ordered = {}
+    for index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("type") != "tool_result":
+            continue
+        source = event.get("source_message_id")
+        key = ("source", source) if isinstance(source, str) and source else ("event", index)
+        previous = ordered.get(key)
+        revision = event.get("source_revision")
+        revision = revision if type(revision) is int else 0
+        if previous is None or revision >= previous[0]:
+            ordered[key] = (revision, event)
+
+    goal = None
+    for _source_revision, event in ordered.values():
+        if turns and event.get("turn_id") not in turns:
+            continue
+        if event.get("parent_tool_call_id") or event.get("is_error") is True:
+            continue
+        name = str(event.get("name") or "").lower()
+        if name not in ("submitgoal", "updategoalprogress"):
+            continue
+        arguments = _goal_object(event.get("input"))
+        output = _goal_object(event.get("output"))
+        details = _goal_object(output.get("details"))
+        if (details.get("ok") is False or output.get("isError") is True
+                or output.get("error") or details.get("error") or details.get("errorCode")):
+            continue
+        at = event.get("ts")
+        at = at if isinstance(at, str) else None
+        if name == "submitgoal":
+            proposal = _goal_object(details.get("proposal"))
+            markdown = proposal.get("markdown") or arguments.get("markdown")
+            if not isinstance(markdown, str) or not markdown.strip():
+                continue
+            text = event.get("output")
+            if not isinstance(text, str):
+                text = json.dumps(output, ensure_ascii=False)
+            if re.search(r"validation failed|failed to submit|submission failed|error:", text, re.I):
+                continue
+            heading = re.search(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", markdown, re.M)
+            title = proposal.get("title") or arguments.get("title")
+            if not isinstance(title, str) or not title.strip():
+                title = heading.group(1).strip() if heading else markdown.strip().splitlines()[0]
+            title = title.strip()
+            goal = {"title": title, "markdown": markdown, "items": [],
+                    "completed": 0, "total": 0, "revision": None, "at": at}
+            continue
+        # UpdateGoalProgress may return a normal tool result with ok=false.
+        # Its input alone is not proof that the host accepted the checklist.
+        if details.get("ok") is not True:
+            continue
+        raw_items = arguments.get("items")
+        if not isinstance(raw_items, list):
+            continue
+        items, identities = [], set()
+        for item in raw_items:
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("id"), str) or not item["id"].strip()
+                    or item["id"] in identities
+                    or not isinstance(item.get("label"), str) or not item["label"].strip()
+                    or item.get("status") not in ("pending", "in_progress", "completed", "failed")):
+                break
+            identities.add(item["id"])
+            items.append({key: item[key] for key in ("id", "label", "status")})
+        else:
+            if goal is None:
+                title = approval.get("title")
+                goal = {"title": title if isinstance(title, str) and title.strip() else "执行目标",
+                        "markdown": "", "items": [], "completed": 0,
+                        "total": 0, "revision": None, "at": None}
+            revision = details.get("revision")
+            revision = revision if type(revision) is int and revision >= 0 else None
+            if (revision is not None and goal["revision"] is not None
+                    and revision < goal["revision"]):
+                continue
+            goal.update(items=items, completed=sum(item["status"] == "completed" for item in items),
+                        total=len(items), revision=revision, at=at)
+    return goal
 
 
 # ------------------------------------------------------------ 消息转换
@@ -440,6 +553,7 @@ def round_detail(row, job: Optional[dict], events: list) -> Optional[dict]:
         "terminal_superseded": terminal_superseded,
         # KP-EP01：执行端最近一条可读进展（只读显示，不参与判定）。
         "progress": latest_progress(events),
+        "goal_progress": latest_goal_progress(events, job),
         "config": view.get("config"),
         "save_state": view.get("save_state"),
         "saved_at": view.get("saved_at"),

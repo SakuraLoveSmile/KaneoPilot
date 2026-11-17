@@ -1,9 +1,11 @@
+import json
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from helpers import KanpilotTestCase
-from kanpilot import bridge, cli, cmd_delivery_pr as commands, constants, core, db, gh_client, git_delivery, remote, util
+from kanpilot import bridge, cli, cmd_delivery_pr as commands, cmd_queue, constants, core, db, gh_client, git_delivery, remote, util
+from kanpilot.engine import attention
 from test_gh_client import pr as gh_pr
 from test_git_delivery import make_repo, branch, commit, git
 
@@ -181,6 +183,64 @@ class DeliveryPR(KanpilotTestCase):
             self.assertEqual(result["operation_state"], "unknown")
         self.assertEqual(self.publish_delivery()["outcome"], "published")
         self.assertEqual(len(self.posts), 1)
+
+    def test_push_unknown_identity_is_stable_and_backs_off(self):
+        error = git_delivery.GitDeliveryError("push_failed", "lost response")
+        with patch.object(git_delivery, "push_branch", side_effect=error):
+            result = self.publish_delivery()
+        self.assertEqual(result["outcome"], "waiting")
+        self.assertEqual(result["operation_state"], "unknown")
+        row = self.ctx.conn.execute(
+            "SELECT result_json FROM runtime_operations WHERE scope_id=? AND status='unknown'",
+            ("delivery-git_push:task1234",)).fetchone()
+        stored = json.loads(row["result_json"])["intent"]
+        for key in ("review_key", "review_report_sha256", "plan_sha256", "execution_run_id"):
+            self.assertNotIn(key, stored)
+        self.assertEqual(stored["head_sha"], self.delivery["head_sha"])
+        delivery = core.delivery_of(self.task())
+        self.assertEqual(delivery["unknown_delivery_streak"], 1)
+        self.assertGreater(util.parse_ts(delivery["next_sync_at"]), util.parse_ts(self.ctx.now_iso))
+
+    def test_legacy_unknown_push_settles_after_review_identity_changes(self):
+        git_delivery.push_branch(dict(self.delivery, repository=str(self.repo)), expected_repo="owner/repo")
+        head = self.delivery["head_sha"]
+        old_intent = {"task_id": "task1234", "execution_run_id": "exec1",
+                      "plan_sha256": self.task()["plan_sha256"], "head_sha": head,
+                      "review_key": "old-review", "review_report_sha256": "0" * 64,
+                      "arguments": {"repo": "owner/repo", "branch": self.delivery["branch"], "sha": head}}
+        with db.write_txn(self.ctx.conn):
+            self.ctx.conn.execute(
+                "INSERT INTO runtime_operations (scope_id, operation_id, harness_id, tool, request_sha256, "
+                "status, result_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                ("delivery-git_push:task1234", "a" * 64, "core_delivery", "git_push", "a" * 64,
+                 "unknown", util.jdump({"intent": old_intent, "claim": {"request_id": "old", "run_id": "old"}}),
+                 self.ctx.now_iso, self.ctx.now_iso))
+            report = constants.review_reports_root() / "task1234" / "review2.md"
+            report.write_text("Review pass 2")
+            db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, review_key="review2",
+                           review_report_path=str(report), review_report_sha256=util.sha256_file(report))
+            db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso,
+                         review_history=[{"review_key": "review2", "conclusion": "pass",
+                                          "execution_run_id": "exec1", "head_sha": head,
+                                          "report_path": str(report), "report_sha256": util.sha256_file(report),
+                                          "fix_round": 2}])
+        self.assertEqual(self.publish_delivery()["outcome"], "published")
+        row = self.ctx.conn.execute(
+            "SELECT status FROM runtime_operations WHERE scope_id=? AND operation_id=?",
+            ("delivery-git_push:task1234", "a" * 64)).fetchone()
+        self.assertEqual(row["status"], "accepted")
+
+    def test_three_unknown_delivery_writes_escalate_to_needs_user(self):
+        error = git_delivery.GitDeliveryError("push_failed", "lost response")
+        with patch.object(git_delivery, "push_branch", side_effect=error):
+            for _ in range(3):
+                self.publish_delivery()
+        task = self.task()
+        self.assertEqual(task["status"], "needs_user")
+        self.assertEqual(task["failure_code"], "delivery_unknown")
+        self.assertEqual(task["failure_stage"], "delivery")
+        self.assertEqual(attention.reason_code_for("delivery_unknown"), "delivery_blocked")
+        self.assertEqual(cmd_queue._AUTO_RESUME_TARGETS["delivery_unknown"], ("in_review", "delivery"))
 
     def test_identity_and_concurrent_changes(self):
         with self.assertRaises(util.KanpilotError) as caught:

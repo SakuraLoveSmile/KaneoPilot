@@ -128,6 +128,19 @@ def _device_command(command: str) -> bool:
     return any(pattern.match(command) for pattern in _DEVICE_PATTERNS)
 
 
+def validate_execution_requirements(verification: dict, backend: str) -> None:
+    """Check Plus's existing Host contract before publication/dispatch mutation."""
+    if backend != "pi_desktop":
+        return
+    if not verification.get("ok"):
+        raise util.KanpilotError("validation_failed", verification.get("error") or "计划 verify 命令无效")
+    from . import pi_desktop_backend
+    try:
+        pi_desktop_backend.validate_required_verification_commands(verification["commands"], "approve")
+    except util.KanpilotError as exc:
+        raise util.KanpilotError("validation_failed", "计划 verify 命令不符合 Plus 执行约束：" + exc.message) from exc
+
+
 # info 为 verify 的围栏行（不论是否被解析识别为顶层块）。
 _VERIFY_FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})verify\s*$")
 

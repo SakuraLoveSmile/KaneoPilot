@@ -546,6 +546,31 @@ def plus_goal_report_get(connection_file: str, *, session_id: str,
     return _redact_output(res, record.get("token"))
 
 
+def plus_goal_execution_get(connection_file: str, *, session_id: str, execution_id=None, timeout=10):
+    client, record = _get_client(connection_file, timeout=timeout)
+    if "pi_goal_execution_get" not in client.tools_list():
+        raise util.KanpilotError("unsupported_tools", "Pi 尚未提供目标受阻控制接口，请升级 Pi 或在 Pi 中处理")
+    result = client.call_tool("pi_goal_execution_get", {"sessionId": session_id,
+        **({"executionId": execution_id} if execution_id else {})})
+    return _redact_output(result, record.get("token"))
+
+
+def plus_goal_action(connection_file: str, *, session_id: str, execution_id: str,
+                     expected_version: int, action: str, message=None, timeout=20):
+    client, record = _get_client(connection_file, timeout=timeout)
+    tool = "pi_goal_resume" if action == "continue" else "pi_goal_close"
+    if tool not in client.tools_list():
+        raise util.KanpilotError("unsupported_tools", "Pi 尚未提供目标受阻控制接口，请升级 Pi 或在 Pi 中处理")
+    params = {"sessionId": session_id, "executionId": execution_id,
+              "expectedVersion": expected_version, "confirm": True}
+    if action == "continue":
+        if message:
+            params["message"] = message
+    else:
+        params["action"] = "accept"
+    return _redact_output(client.call_tool(tool, params), record.get("token"))
+
+
 def plus_stop(connection_file: str, *, session_id: str, timeout: int = 10) -> dict:
     client, record = _get_client(connection_file, timeout=timeout)
     res = client.call_tool("pi_agent_stop", {"sessionId": session_id})
@@ -822,6 +847,8 @@ class PlusAdapter:
         'proposals': 'plus_proposals',
         'goal_report_list': 'plus_goal_report_list',
         'goal_report_get': 'plus_goal_report_get',
+        'goal_execution_get': 'plus_goal_execution_get',
+        'goal_action': 'plus_goal_action',
         'session_create': 'plus_session_create',
         'session_configure': 'plus_session_configure',
         'attach_mcp': 'plus_attach_mcp',

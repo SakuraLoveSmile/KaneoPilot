@@ -771,6 +771,13 @@ if let detail = decode(RoundDetail.self, #"{"backend":"pi_desktop","run_status":
 }
 if let detail = decode(RoundDetail.self, #"{"backend":"pi","run_status":"running"}"#) {
     expect(detail.progress == nil, "旧 round_detail 无进展字段照常解码")
+    expect(detail.goalProgress == nil, "旧轮次无目标进度时保持兼容")
+}
+if let detail = decode(RoundDetail.self, ##"{"backend":"pi_desktop","goal_progress":{"title":"补齐验收","markdown":"# 补齐验收\n\n核对双栏","items":[{"id":"a","label":"双栏实测","status":"completed"},{"id":"b","label":"六组证据","status":"failed"}],"completed":1,"total":2,"revision":3,"at":"2026-11-12T09:00:00Z"}}"##) {
+    expect(detail.goalProgress?.title == "补齐验收", "目标标题解码")
+    expect(detail.goalProgress?.completed == 1 && detail.goalProgress?.total == 2, "目标完成数解码")
+    expect(detail.goalProgress?.items.last?.statusLabel == "失败", "失败待办保留独立状态")
+    expect(detail.goalProgress?.markdown.contains("核对双栏") == true, "目标说明解码")
 }
 
 // KP-EP01 阶段二：会话时间线把结构化工具事件折叠为轮次与关键动作。
@@ -897,6 +904,28 @@ if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"running
 }
 if let response = decode(RequestContinuationResponse.self, #"{"status":"continued","turn_id":"turn-2","session_id":"sess-1","deduplicated":false}"#) {
     expect(response.status == "continued" && response.turnId == "turn-2", "继续执行响应解码")
+}
+// 未确认发送：投影带 reconcile 且没有被 eligible 误放行，只给核对入口。
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":false,"state":"none","run_id":"cont-run","turn_id":null,"reason":"上一次继续发送结果未确认，请先核对 Plus 会话","reconcile":{"available":true,"operation_id":"op-1","created_at":"2026-11-11T08:32:58Z"}}}"#) {
+    expect(task.continueExecution?.eligible == false, "未确认发送不显示继续执行")
+    expect(task.continueExecution?.reconcile?.available == true, "未确认发送给出核对入口")
+    expect(task.continueExecution?.reconcile?.operationId == "op-1", "核对入口绑定未确认操作")
+}
+if let task = decode(TaskDetail.self, #"{"task_id":"cont-task","status":"needs_user","continue_execution":{"eligible":true,"state":"ready","run_id":"cont-run","turn_id":null,"reason":null}}"#) {
+    expect(task.continueExecution?.reconcile == nil, "无未确认操作时不显示核对入口")
+}
+if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"not_sent","detail":"Plus 会话没有新轮次，最新转录中也没有本任务的继续指令","applied":false,"status":null}"#) {
+    expect(result.classification == "not_sent" && result.applied == false, "核对结果解码")
+}
+
+for (classification, action) in [("not_sent", "回收发送槽"), ("delivered", "接管轮次观察")] {
+    if let result = decode(ReconcileContinuationResponse.self, "{\"classification\":\"\(classification)\"}") {
+        expect(result.confirmationAction == action, "明确核对结果给出对应确认动作：\(classification)")
+        expect(result.confirmationMessage?.contains("不产生模型费用") == true, "核对确认说明不重发且无模型费用")
+    }
+}
+if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"unknown"}"#) {
+    expect(result.confirmationAction == nil, "未知归因不可给出写入动作")
 }
 
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")

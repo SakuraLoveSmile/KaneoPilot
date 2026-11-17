@@ -39,6 +39,9 @@ PLAN_INPUT_TOTAL_MAX_BYTES = 100 * 1024 * 1024  # 每任务材料合计 ≤100 M
 # 会把规划材料撑到 100 MiB、把规划拖到 1800s 超时；只内联小体积文本，其余登记
 # 在 changes 里让规划器知道有这份改动但不读正文。
 PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES = 128 * 1024  # 证据材料单文件内联上限
+# Native Review evidence is copied whole; planning/source snapshot limits stay unchanged.
+NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES = 128 * 1024 * 1024
+NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES = 512 * 1024 * 1024
 PLAN_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PLAN_TEXT_SUFFIXES = {".txt", ".log", ".md", ".text"}
 DEFAULT_CODEX_BIN = "codex"
@@ -512,7 +515,7 @@ AUTOMATION_FAILURE_STAGES = {
     "fix_rounds_exhausted": "review", "auto_budget_exceeded": "review", "automation_stopped": "review",
     "review_backend_unsupported": "review", "delivery_blocked_files": "delivery", "delivery_commit_failed": "delivery",
     "no_changes": "delivery", "branch_diverged": "delivery", "gh_unavailable": "delivery", "pr_closed": "delivery",
-    "merge_checks_stalled": "delivery",
+    "merge_checks_stalled": "delivery", "delivery_unknown": "delivery",
     "gh_missing": "delivery", "gh_timeout": "delivery", "gh_not_logged_in": "delivery",
 }
 AUTOMATION_FAILURE_CODES = frozenset(AUTOMATION_FAILURE_STAGES)

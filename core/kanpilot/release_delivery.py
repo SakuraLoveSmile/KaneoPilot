@@ -6,6 +6,7 @@ read-only evidence checks and the single durably reserved workflow dispatch.
 import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import quote
 
 from . import (core, db, delivery_contract, gh_client, git_delivery, parent_closeout as closeout,
@@ -17,6 +18,12 @@ DEFAULT_POLICY=dict(enabled=False,channel='prerelease',workflow_path='.github/wo
 BATCH_TOOL='github_release_batch'
 DISPATCH_TOOL='github_release_dispatch'
 MANIFEST_NAME='kaneopilot-release.json'
+CHANGELOG_REPORTER_LIMIT=80
+CHANGELOG_SUMMARY_LIMIT=200
+# Frozen context hash: changelog is part of the immutable batch, but excluded
+# from the hash so predecessor chains frozen before KP-REL10 stay verifiable.
+CONTEXT_HASH_KEYS=('project_id','repository','root_task_id','members','proof','policy','policy_snapshot','workflow',
+                   'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
 _IDENTITY_KEYS=('task_id','project_id','repository','run_id','plan_sha256','requirements_sha256',
                 'review_key','review_report_path','review_report_sha256','save_state')
 
@@ -71,11 +78,67 @@ def _policy(conn,task):
 
 def _identity(task):
     extra=db.task_extra(task);delivery=core.delivery_of(task)
+    evidence={key:extra.get(key) for key in ('review_history','review_conclusion','engine_verdict','plan_verify')}
+    if extra.get('goal_acceptance'):
+        evidence['goal_acceptance']=extra['goal_acceptance']
     return dict({key:task[key] for key in _IDENTITY_KEYS},head_sha=delivery.get('head_sha'),
         delivery_sha256=util.sha256_text(util.jdump({key:delivery.get(key) for key in
             ('mode','head_sha','base_sha','base_branch','branch','pr_number','pr_url')})),
-        evidence_sha256=util.sha256_text(util.jdump({key:extra.get(key) for key in
-            ('review_history','review_conclusion','engine_verdict','plan_verify')})))
+        evidence_sha256=util.sha256_text(util.jdump(evidence)))
+
+
+def _context_sha256(context):
+    return util.sha256_text(util.jdump({key:context[key] for key in CONTEXT_HASH_KEYS if key in context}))
+
+
+def _changelog_reporter(task):
+    """Kaneo's visible user name for the frozen source snapshot."""
+    path=task['source_path'] if 'source_path' in task.keys() else None
+    if not path:
+        return ''
+    try:
+        source=json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError,ValueError):
+        return ''
+    item=source.get('task') if isinstance(source,dict) else None
+    if not isinstance(item,dict):
+        return ''
+    for key in ('assigneeName','assignee_name'):
+        value=item.get(key)
+        if isinstance(value,str) and value.strip():
+            return ' '.join(value.split())[:CHANGELOG_REPORTER_LIMIT]
+    return ''
+
+
+def _changelog_summary(task):
+    """One-sentence solved problem from the frozen plan's objective."""
+    path=task['plan_path'] if 'plan_path' in task.keys() else None
+    if not path:
+        return ''
+    try:
+        text=Path(path).read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    match=re.search(r'^##\s*目标\s*$(.*?)(?=^##\s|\Z)',text,re.M|re.S)
+    if not match:
+        return ''
+    first=' '.join(match.group(1).strip().split('\n\n',1)[0].split())
+    if '：' in first:
+        head,tail=first.split('：',1)
+        if any(word in head for word in ('轻档','重档','方案')) and tail.strip():
+            first=tail.strip()
+    first=re.split(r'[。！？；;]|\.\s',first,maxsplit=1)[0]
+    first=first.strip(' 。；;')
+    if len(first)>CHANGELOG_SUMMARY_LIMIT:
+        first=first[:CHANGELOG_SUMMARY_LIMIT].rstrip()+'…'
+    return first
+
+
+def _changelog_context(task):
+    reporter=_changelog_reporter(task)
+    summary=_changelog_summary(task)
+    return dict(task_id=task['task_id'],**({'reporter':reporter} if reporter else {}),
+                **({'summary':summary} if summary else {}))
 
 
 def _root(conn,task):
@@ -369,7 +432,7 @@ def completion_gate(conn,task):
 
 
 def _verified_feed_checkpoint(repo,evidence,target):
-    """Build the verified tree itself when only existing channel feeds advanced."""
+    """Build the admitted source tree when only existing channel feeds advanced."""
     verified=closeout.github.commit(repo,evidence['head_sha'])
     _require(verified['sha']==evidence['head_sha'] and verified['source_sha256']==evidence['source_sha256'],
              'release_target_unverified','原发布检查点与正式验证源码不符')
@@ -400,8 +463,9 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
     _require(extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass'
         and all(review.get(key)==task[column] for key,column in (('execution_run_id','run_id'),('review_key','review_key'),
              ('report_sha256','review_report_sha256'),('report_path','review_report_path')))
-        and review.get('head_sha')==d.get('head_sha') and evidence['exact_coverage'],
-        'release_review_invalid','发布需要当前执行、最终提交及逐字验证对应的正式评审通过')
+        and review.get('head_sha')==d.get('head_sha')
+        and (evidence['exact_coverage'] or evidence.get('user_accepted') is True),
+        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过，以及逐字验证或明确人工接受的当前授权')
     closeout._report_bytes(task['review_report_path'],task['review_report_sha256'],hashes)
     repo=git_delivery.origin_github_repo(task['repository'])
     _require(repo and d.get('mode')=='pr' and type(d.get('pr_number')) is int,'release_pr_missing','发布需要同仓库已合并的 PR')
@@ -530,8 +594,7 @@ def _stable_available(conn,project_id,policy,superseded_batch_id=None):
 
 def _trusted_stable_predecessor(conn,successor):
     """Validate one immutable successor edge; a failed edge also needs its send receipt."""
-    context_keys=('project_id','repository','root_task_id','members','proof','policy','policy_snapshot','workflow',
-                  'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
+    context_keys=CONTEXT_HASH_KEYS
     project_id=successor.get('project_id')
     old=_batch(conn,successor.get('superseded_build_batch_id'))
     row=db.get_runtime_operation(conn,_scope(project_id),'batch:'+successor['batch_id'])
@@ -617,10 +680,11 @@ def _prepare(ctx,task_id):
     version=('.'.join(str(part) for part in (*versions[-1][:2],versions[-1][2]+1)) if versions else policy['version_base'])
     context=dict(project_id=root['project_id'],repository=proof['github_repository'],root_task_id=root['task_id'],
         members=members,proof=proof,policy=policy,policy_snapshot=revision,workflow=workflow,
-        stable_versions=[list(v) for v in versions],frozen_stable_versions=stable,version=version)
+        stable_versions=[list(v) for v in versions],frozen_stable_versions=stable,version=version,
+        changelog=_changelog_context(root))
     if superseded:
         context['superseded_build_batch_id']=superseded
-    context['context_sha256']=util.sha256_text(util.jdump(context))
+    context['context_sha256']=_context_sha256(context)
     return context
 
 
@@ -700,10 +764,18 @@ def _run_matches(batch,run):
 
 
 def _inputs(batch):
+    changelog=batch.get('changelog') or {}
+    members=[]
+    for m in batch['members']:
+        item=dict(task_id=m['task_id'],execution_run_id=m['run_id'],plan_sha256=m['plan_sha256'],
+                  requirements_sha256=m['requirements_sha256'],head_sha=m['head_sha'])
+        if m['task_id']==changelog.get('task_id'):
+            for key in ('reporter','summary'):
+                if changelog.get(key):
+                    item[key]=changelog[key]
+        members.append(item)
     manifest=dict(schema=1,batch_id=batch['batch_id'],repository=batch['repository'],project_id=batch['project_id'],
-        root_task_id=batch['root_task_id'],target_sha=batch['target_sha'],
-        members=[dict(task_id=m['task_id'],execution_run_id=m['run_id'],plan_sha256=m['plan_sha256'],
-                      requirements_sha256=m['requirements_sha256'],head_sha=m['head_sha']) for m in batch['members']],
+        root_task_id=batch['root_task_id'],target_sha=batch['target_sha'],members=members,
         channel=batch['policy']['channel'],version=batch['version'],tag=batch['tag'],build_number=batch['build_number'],
         required_assets=batch['policy']['required_assets'])
     raw=util.jdump(manifest)

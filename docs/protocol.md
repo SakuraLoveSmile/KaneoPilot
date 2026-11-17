@@ -760,6 +760,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
 - **最新进展（只读展示，KP-EP01）**：`round_detail.progress` 优先取最后一条有效 `progress` 事件；旧日志没有该事件时回退到最后一条非空助手消息，按同一规则取首个可用行。投影为 `{text, at}`。`text` 只取助手消息的首个非空行（去 Markdown 前缀、折叠空白、最多 160 字符，空内容/代码围栏/JSON 对象或数组不产出），`at` 取源消息时间（缺失时取事件时间）；无事件为 `null`。该字段只供界面显示「最新进展」，不参与完成、失败或验证判定，也不能据此推进状态。监控的 `last_progress` 在「仍在运行」分支优先写该文本，缺失时回退「本轮仍在运行」。
+- **目标进度（只读展示，KP-EP01，2026-11-12）**：完整 `get-session` 的 `round_detail.goal_progress` 返回 `{title, markdown, items:[{id,label,status}], completed, total, revision, at}` 或 `null`。从当前目标成功的 `SubmitGoal` 与 `UpdateGoalProgress` 工具结果还原；进度须有输出 `details.ok=true`，不采纳调用中/失败结果；状态仅 `pending/in_progress/completed/failed`，完成数仅计 `completed`。按源消息修订消歧，新目标清空旧清单，按 job 的轮次关联限制串入。目标说明保留契约 markdown；尚无清单时 `items=[]/total=0`，不编造 `0/0` 完成比例。无目标/非目标轮次为 `null`；`status_only` 不带目标文字。复用已有采集事件，不额外访问 Plus、不新增命令或 schema；不是完成/失败/验收证据。
 - **历史 Goal 转录证据的审计窗口（不作为新引擎完成凭据）**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
 - **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
 - **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（结构化报告覆盖冻结计划每条 verify，绑定原生命令整数退出码 0、当前轮次与源码；缺失转 verification_unconfirmed，不能人工接受绕过）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
@@ -775,7 +776,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
 验证命令只由 Plus 执行。Pilot 不维护另一套 Java/SDK/设备验证环境，不在 live、shadow 或手动恢复路径执行计划中的 verify 命令。完成判定的结果来源是 Plus 结构化 Goal 报告，Pilot 不回查转录中的工具结果。Git 身份读取、源码指纹和既有交付提交保持在核心完成。
 
-- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。
+- 有效 diff 排除 `.pi/**` 与交付构建产物，必须非空；空转仍按既有质量阶梯处理。补验轮可计入当前任务已由核心登记的提交成果：核对同仓库任务分支、base/head、原任务/执行 trailer 及登记提交链，并确认相对基线仍有净源码差异；任意历史提交或无净源码变化不构成果。当前报告、冻结 verify 与当前源码快照仍须全部核验。无新源码时复用原提交 SHA、为当前 run 登记复用来源，禁止制造空提交；之后仍需新的独立 Review。
 - **证据/记录收尾轮（2026-11-13）**：计划正文 `## 交付类型` 段写明「证据/记录收尾」时，本轮按声明**不产生源码 diff** 是预期行为。monitor verdict 放行空 diff 需三条同时成立：① 声明的 `plan_delivery_kind="evidence_only"`（publish-plan 由 `planfile.delivery_kind` 解析并投影到 get-task）；② 该轮 `.pi/**` 确有证据材料改动；③ 冻结 verify 命令逐条真实退出 0。缺任一条仍是空转失败。同类型轮次的 delivery-commit 返回 `outcome="unchanged"`：不创建空提交、沿用既有 head 继续评审，并记 `delivery_unchanged` 事件。Review 需核对声明与实际一致（证据落在声明位置、verify 真实通过、没有把该改代码的工作伪装成证据轮），不一致或 verify 失败仍按缺陷/验证失败处理。理由：只补证据、只准备依赖环境或只追加记录的任务在任何门禁下都无法产生源码 diff，历史上有两例因此永远无法自动完成。只有 `.pi/**` 变动、没有源码交付物的轮次仍判 `empty_diff`（不放宽门禁），但 `detail` 必须写明“只有 .pi/** 证据材料变动（N 项）”、给出可执行下一步，不能用泛化的“空转”让用户和自动重规划无从下手。
 - verify 只接受执行环境能直接运行并返回退出码的命令。设备/模拟器/录屏类命令（首词 `adb`/`avdmanager`/`emulator`/`simctl`/`scrcpy`/`screencapture`/`idevice*`，或 `xcrun simctl`、`flutter run|drive|install` 前缀）在 `parse_verify_block` 直接拒收（2026-11-12）：执行环境没有真机或屏幕，写进 verify 只会让每轮验证必然失败；这类验收写进计划正文的「人工验收」清单。
 - 计划冻结顶层 verify 围栏的 1–5 条命令。Plus 在本任务工作树逐条执行，并在完成时以结构化 Goal 报告（`SubmitGoalReport`）提交 `checks`，逐条列出冻结命令、退出码与结果。报告是完成判定的唯一结果来源；助手的文字总结不能作为通过依据。
@@ -923,6 +924,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - `needs_input`：保存 `questions` 与 `plan_markdown` 草稿，task→`needs_user`、`failure_code=reported`；UI 允许补充说明/附件后重新提交，不发布为可执行计划。
 - 模型退出失败/超时/空输出/不合规输出：保存证据（JSONL 日志+stderr），进入规划失败（`report failed`/`needs_user`），**不自动重试**。超时沿用 `executor_timeout_seconds`（默认 1800s）。
 - runner 心跳间隔 ≤ `min(lease_seconds/3, 60)` 秒；租约失效或所有权丢失（`stale_run`）时终止自己的子进程组，禁止发布。
+- 原生 Codex 子进程启动后、发送 prompt 前持久化真实 child PID／出生身份／独立进程组、owner 出生身份及工作目录/输出路径；检查点不能核验或落盘时，经真实进程句柄终止尚未发送的进程，不发送指令。父 runner 消失不单独证明子进程或工具已停止；中断槽位按 §5.29 显式恢复，不能把无完整输出解释为规划成功。
 - 日志展示结构化进度与 stderr；未知 JSONL 事件保留原始记录；不把进程退出码 0 单独视为成功（须 schema 校验输出）。
 
 ### 5.22.4 发布与执行分离
@@ -1172,13 +1174,36 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 命令 `request-continuation {task_id, run_id, confirm, operation_id?}`：仅对当前任务的 `pi_desktop` 轮次、任务 `needs_user`、`failure_code ∈ {verification_unconfirmed, execution_failed, execution_interrupted}`、job 已收尾且有持久 terminal、session/计划/配置快照与任务一致、无 queued/claimed 请求、无 prepared/unknown 的继续操作时允许；`confirm` 必须为 true。
 - 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
 - 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
-- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
-- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
+- 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 与读取层（会话、monitor、超时投影）的当前执行段预算统一从 `continuation_started_at` 起算，缺省沿用原 `started_at`；原始开始时间保留作审计。不能将继续前的空闲时间计入新执行段并立即判超时；当前执行段真正超过预算仍按原规则失败。
+- 已批准 Goal 的继续轮次只读观察：必须核对同 task/run/session 的已登记继续操作、job 接管绑定与已接受的核心操作回执，匹配来源 turn 和目标 turn 后才允许接续旧审批检查点。不能仅凭 `manual_continue` 字样或会话当前 turn 放行；无可信继续绑定仍拒绝。该接续不发送 prompt、不代批新 Goal、不放宽报告完整性、冻结 verify、源码绑定、Review 与交付门禁。
+- 人工继续成功接管时同事务以本次 `continuation_started_at` 开启新的自动预算段，成本基线取当前已累计成本；重放、只读观察、失败/未知发送不重置。旧版误将当前报告的 empty-diff 阻塞覆盖为 monitor 预算超限时，只对同 task/run/plan/worktree 的 live Goal 回执开放现有 `reverify`：先复核原回执、当前 Git binding 及完整结构化报告和冻结命令，通过后清阻塞、开人工预算并排同 run monitor；不新派发，不替代正常 verdict/Review。
+- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。发送页被 `prepared/unknown` 继续操作挡住时，投影附 `reconcile = {available, operation**核对未确认的继续发送（同节补充）。** 发送响应丢失记 `unknown` 后，不得靠重发脱困，也不得让任务停在一个无法回收的发送槽上：
+
+- `reconcile-continuation {task_id, run_id, dry_run?, confirm?}`；`dry_run` 缺省为 `true`（只读）。只处理当前任务、当前轮次、`needs_user`、且仍有唯一 `prepared/unknown` 的继续操作；其余一律 `conflict`。
+- 只读核对同一会话：读 `agent_status` 与受限分页转录（每页 20 条、最多 40 页），按 `turnId` 找该轮次的发起消息，并以固定继续指令原文前缀判定是否为本任务所发。
+- 分类三条，互斥：`not_sent`＝没有更新的轮次且最新转录中无本任务继续指令；`delivered`＝更新的轮次正是由该继续指令发起；`unknown`＝会话仍在运行同一轮次、新轮次无法归因、或转录分页被截断/超上限。
+- 写入只发生在 `dry_run=false` 且 `confirm=true`：`not_sent` 把该操作记为 `rejected`（释放发送槽，可再次发送）；`delivered` 记为 `accepted` 并按转录中的真实 turn 执行与发送成功相同的同轮重开（`turn_adopted` 追加 `reconciled_continue`），随后 `round-observe {executor:"user"}`。两种情况都写 `execution_continuation_reconciled` 事件。
+- `unknown` 不改任何状态（不回收发送槽、不改任务、不重发），返回 `status=unconfirmed` 由人工核对；核对命令不发送任何 prompt，不产生模型费用。
+
+_id, created_at}`，提示先核对 Plus 会话。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
+
+### 5.23.12 受阻 Goal 的显式处置（KP-GB01，2026-11-12）
+
+本节为独立评审准入新增的显式用户授权路径；不改变 §5.27.11 的验证通过定义，不复活旧 `accept_verification`、Legacy 或转录完成判定。未获得本节当前有效回执的 draft/fallback/partial/blocked 仍按既有规则拒绝完成。
+
+- `get-goal-blocker {task_id,run_id}` 只读读取当前 Pi Goal execution/hold，返回 `{task_id,run_id,state,detail?,session_id?,execution_id?,version?,title?,reasons,progress,limitations,next_steps,actions}`。`state` 为 `blocked|accepted|none|unavailable`；`progress` 为 `{id,label,status}[]`，其他正文数组为字符串数组，动作数组为 `continue|accept|reconcile`。只有经当前任务、轮次、批准目标身份核对的 blocked 状态可提供动作。普通 `get-task` 不因此增加网络访问；旧版 Pi 可从当前报告列表的可信 hold 读取原因但动作为空，并明确升级提示；缺少可核验 hold、断线、无身份或读取失败明确 unavailable，不能把历史快照当作当前可操作状态。尚未建立已批准 Goal 契约（`job.goal_approval` 缺失、未批准或留痕不完整）或非 Pi Desktop 轮次返回 `none` 并说明不适用：这些轮次没有可核对的 hold，失败由任务既有失败横幅与恢复入口处理，不按 `unavailable` 表达，避免把普通执行失败呈现为“目标受阻”。
+- `resolve-goal-blocker {task_id,run_id,execution_id,expected_version,action,confirm:true,message?,operation_id}`：`action` 为 `continue|accept`。响应 `{task_id,run_id,status:continued|accepted,turn_id?,session_id?,deduplicated?}`。写前重新核对当前活跃任务、轮次、计划/配置、session/proposal/execution/version、持久终态和无竞争请求；不接受 UI 自报的原因或验证结果。
+- Pi 控制面为 `pi_goal_execution_get`、`pi_goal_resume`、`pi_goal_close`，输入继承 Pi `sessionId/executionId/expectedVersion`。续跑必须走 Pi Main 的 Goal resume 流程，保留原目标，传入用户补充文字；新 turn 交回既有 job/observer 观察，不能只改变 Host 状态或重发普通 prompt 冒充 resume。用户确认说明会调用模型并产生费用。
+- 两种写动作均先记录 `runtime_operations`，持久化请求身份后再发送。重复点击不得重复续跑或关闭；未知结果保留 unknown 并禁重发，明确要求只读核对。发送前持久化原请求、受阻快照和源码/索引绑定；`reconcile-goal-blocker {task_id,run_id}` 只读取 Pi 现状并补齐本地回执和观察/monitor，不重发 resume/close。只有与原决定精确匹配的目标、版本转换和 turn 链才能恢复；accept 还要求接受时源码不变，continue 则允许已获授权的新 turn 正常修改源码，不得因此拒绝接回观察。Pi 已接受而 Pilot 尚未建立当前接受回执时，GET 明确待核对接续，返回 reconcile 动作，不得宣称已进入评审。旧 version、更新的 turn、轮次/计划/源码变化拒绝过期意图；不得选择最新的无关目标作为替代。
+- `accept` 是接受当前结果并请求进入**独立评审和既有交付流程**，不是接受验证结论。Pi close 必须返回同目标 `accepted`/`user_accepted`；随后读取可信当前报告，保留原 `verdict`、`integrity`、失败/未运行项和证据。允许报告本身是 fallback，但不能将其解释成 structured 或 met。
+- 人工接受回执独立保存于当前任务执行上下文，包含用户/时间/操作身份、task/run/session/proposal/execution、计划、接受前受阻快照和接受后报告哈希、原缺项及源码绑定。统一准入校验区分 `verification_ok` 与 `review_authorized/admission_source=user_acceptance`；人工接受保持 `verification_ok=false`，只有当前有效人工回执可作为替代的评审准入凭据。报告、目标、源码、计划或轮次变化使该凭据失效；源码提交前后沿既有树/索引/提交回执校验保持同一内容，不能因核心提交的正常 HEAD 变化误判为新源码。
+- 接受后仍走 monitor、核心提交、独立 Review、交付。独立评审材料必须携带人工接受原文、原缺项与证据，要求评审独立判断；不能把用户接受写成验证通过。未通过独立评审仍阻止交付，Review/交付的轮次、计划、提交树、报告和发布门禁保留。不得直接改 done 或伪造 terminal、命令退出码、审查结果。
 
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 
 本节冻结 T6：把普通/修复计划生成、dispatch 控制端、monitor 控制端与 review 控制端的模型调用全部交到用户自己的 PI-Desktop-Plus 本机 MCP 控制面，KaneoPilot 继续负责确定性的队列、租约、审批与状态写入。界面度量见 ui-spec §4.10，执行端编排见 automation-contract §2。本节**不**改变 §5.22 的手动规划门、§5.23.1 的计划阅读、§5.23.3 的任务执行后端、§5.23.9 的 Goal 契约代批与 monitor/Review 状态机。
+
 
 ### 5.24.1 角色后端与配置形状（v4）
 
@@ -1238,6 +1263,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 控制端连接失效/身份不符/工具缺失 → 明确失败（`pi_desktop_controller_unavailable`），**不**自动回退 pi。
 
 ### 5.24.5 Plus review 控制端（v4）
+
+原生 Review 附件与通用规划/源码快照材料独立核算。Pi/Codex 共用完整冻结、逐文件复核及最终材料哈希守卫；保留完整 APK、录像和历史证据，不以额度校验作为 Review 通过。额度、安全类型和身份绑定的唯一依据见 [automation-contract.md](automation-contract.md)「交付任务的 Review 材料」。
 
 - `executor_runner --stage review` 按 `review_config.backend` 分流；`pi` 分支沿用 §5.23.4（inherit/custom 固化 pi 参数）。
 - Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", interactionMode:"unattended", …)` + `permissionMode:"auto"`，并按 §5.24.3 核验实际硬策略及版本，未确认时不发送。指令只要求审查并输出冻结结果（新轮次使用 review_text_v1），不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。Plus 的 `INTERACTION_REQUIRED` 持久回执直接生成 `blocked` 报告，保留问题/选项，经现有 `review_blocked` 结算交回用户，不要求模型自行再整理、不登记 pass、不推进远端任务。已登记结论的确定性恢复不要求重新连接；无效拦截回执明确受阻，不伪造审查通过。
@@ -1375,7 +1402,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
    | `execution_question` | `execution_input_required` | 3 | 执行中待答问题，轮次仍在运行（§5.28） |
    | `verify_unconfirmed` | `verification_unconfirmed` | 3 | Plus 验证失败或证据缺失（证据不明不自动质量补救） |
    | `review_changes_exhausted` | `review_blocked`、`review_fix_exhausted` | 3→4 | 同分支修复轮已达上限 |
-   | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged` | 3 | 提交/推送/PR 受阻 |
+   | `delivery_blocked` | `delivery_commit_failed`、`branch_diverged`、`delivery_unknown` | 3 | 提交/推送/PR 受阻；`delivery_unknown` 为交付写结果连续未知、只读对账仍不能证明 |
    | `remote_unavailable` | `remote_unavailable`、`remote_task_missing` | 1→2 | Kaneo 不可达或任务在远端已不存在 |
    | `plus_unreachable` | `plus_unreachable`、`plus_timeout` | 2 | Plus 控制面不可达/超时 |
    | `plus_send_unknown` | `send_state_unknown` | 2 | prompt 发送结果未知，禁止自动重发 |
@@ -1567,6 +1594,8 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲（含 §5.27.12 的已核验手动继续放行）/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
 - 不支持在已完成 Plus 会话里任意追加 turn 后直接采纳为原轮次验证；不得宣传手动补验后“同步即可通过”。需通过上条有身份守卫的新执行轮次取得新证据。
 - 新 `command_verification` 轮次从同次读取且哈希匹配的冻结计划解析 verify，保存 `spec.required_verification_commands`。首次创建会话或发送模型输入前，核对 Plus `pi_plans_resolve` 的 schema 支持 `requiredVerificationCommands: string[]`；缺能力明确阻塞升级，不降级为提示词。执行批准经 RuntimeClient → runtime MCP → Plus MCP → IPC → Host 透传该列表；runtime 以 scope 绑定的可信 spec 与计划哈希核对，调用者不得省略、替换或自定授权命令，操作回执哈希包含命令列表。
+- 规划共享模板须明确上述命令格式与字节边界。`publish-plan` 按当前存储的实际执行后端（与规划后端独立，特殊一次性修复沿 action_config）在登记 ready 前复用 Plus Host 校验；不在发布写锁内解析需要连线的继承配置。派发再按实际冻结执行配置重验，防止发布后切换后端绕过；worker 保留对冻结计划的原守卫。无效 Plus verify 在前置阶段明确拒绝，不登记可执行成功计划，不放宽命令限制。
+- Plus 验证命令长度前置失败的重新规划：仅用户显式 `resolve replan` 且给定当前 `expected_execution_run_id`，可在原 worker 已于建立 runtime/会话前因冻结命令超限失败时核验未发送 proof。必须绑定当前 task/run/request/round/spec/job/stage contract/配置/计划及原成果源码；原 job 为 failed/exit1/not_sent、无 session/turn/scope，唯一 terminal 为 verification_requirements_invalid，同原命令约束可复现长度拒绝；原 executor instance 的 PID 出生登记须证明进程已退出，无该 scope 的 runtime 操作或授权回执。前后安全文件读取及事务内 proof/状态重核通过后才按既有 replan 接受当前远端并清发送字段，追加独立审计。旧 job/request/计划终态不改，不扩展 resume/retry，其他 unknown 继续阻塞。
 - Plus 仅在 `approve` Goal 时接受此字段，并在批准事务内绑定 proposal/execution；同一批准重放必须保留原绑定。列表为 1–200 条非空原文，每条 UTF-8 最多 4096 字节、总计最多 64 KiB，无重复或 NUL/CR/LF。正式报告提交前要求每条命令恰好有一条同原文 `checks.command`；整数退出码 0 对应 passed，非 0 对应 failed，met 必须全部通过。partial/blocked 可诚实记录失败或未执行及原因。缺项/矛盾在当前模型轮次返回可修正的工具错误，不写成功草稿；未绑定的历史 Goal 保持原契约。该门校验报告完整性，不将模型填入整数视为独立执行证明。
 - 已就绪但 checks 不完整的报告明确列出缺少记录、整数退出码或状态矛盾及命令；不得显示为报告尚未就绪或真实测试失败。Pilot 继续核对报告底线、身份、源文件快照与全部冻结命令，不能人工补写报告或放宽成功门。
 
@@ -1587,6 +1616,7 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 #### 5.27.13 评审与探针（A3）
 
 - 评审快照仍要求 detached HEAD 且 HEAD==冻结 head_sha；git status 中只有 git_delivery.is_build_artifact 命中的路径（包括 tracked 修改）可忽略。源文件、重命名源与目标中任一非产物变化仍阻塞。CLI 与 Plus 同守卫。
+- 快照新增文件（`ls-files --others --exclude-standard`）与有效 diff 同口径排除 `.pi/**` 与 `is_build_artifact` 命中的构建产物：执行端运行缓存（含 `.pi/kanpilot/codex/<run>/`）不是评审材料，不计入新增文件数量/字节上限，其增删不改变冻结指纹；真实新增文件的 1,000 个上限、安全 no-follow 读取与敏感材料拒绝保持不变。`verify_root` 使用同一排除口径核对快照目录。
 - doctor --live 增加 Claude CLI 可用性探针；不调用付费模型，不输出凭据。后端与模型切换仅经核心配置命令，真实库切换需对应授权。
 
 
@@ -1814,6 +1844,8 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 租约时限至少为配置最长阶段运行时限加300秒（默认下限86400秒）。心跳不改变持有者；恢复必须匹配slot_id、holder_id与lease_token，旧代次不能释放新代次。超时不是停止证据：只有请求终态、持有进程确认已结束且Plus turn已确认终态才能自动释放；未知Plus状态保留租约并进入待处理，不在活动会话下清理。Codex Desktop原生consumer不以MCP/claim短进程退出或submit成功作为停止证明，未知时同样保留租约。槽位自身`worktree-slot:<slot_id>`、holder或session关联的runtime_operations仍为prepared/unknown时，不得自动或直接释放，也不得经解除隔离绕过；保留现场并暴露operation_unconfirmed。手动解除隔离经核心命令，要求confirm=true且重新通过同一守卫；不提供强制丢弃接口。
 
 **人工恢复旧 Plus 租约（KP-ENV01，2026-11-04 用户明确授权）**：原 Plus 轮次记录已丢失且无法恢复时，可由运维显式调用 `worktree-slot-recover {slot_id,holder_id,lease_token,operation_id,backup_dir,reason,dry_run?:bool,confirm?:bool}`；默认只读预检，实际操作必须 `dry_run:false,confirm:true` 并记录人工授权原因。仅限同代的 `leased/unknown`、已终态的 Plus 规划/评审请求，冻结租约与可信原 job 身份、原 PID/会话/轮次必须一致，本机原进程必须已不存在，且关联操作均已确认。完整备份的清单、归档 SHA 与当前文件内容须核对，保全规划附件及持久 job 路径后才可复用既有释放；未知文件不删除，未知改动仍保留隔离。核心先登记人工恢复回执，再实施文件/租约变化，结果可按同一 operation_id 查询。回执明确为人工恢复且 Plus 终态仍未知，不改写原 job 的 `owner_stopped`，不伪造远端终态，也不进入自动回收路径。未取得该次人工确认不得调用执行模式；自动回收、隔离和 Desktop 交还门槛保持原样。
+
+**中断的原生 Codex 规划（KP-CONT02）**：同一 `worktree-slot-recover` 入口（额外可选 `native_audit_path/native_audit_sha256` 指向独立审计附件）仅为 `plan/codex` 增加有界恢复，不扩展 Review 或自动回收。请求须已 `failed/cancelled`，job 尚无终态或完整输出，task/request/run/slot/同代租约、PID、冻结 stage contract 与输入/输出 schema 必须一致，且无活动规划或未决关联操作。原 owner 必须 ESRCH；新检查点还要求 child 不存在、PID 未复用且其进程组无活进程。恢复还须核对完整原生工具账本、唯一日志会话及同轮事件身份；只允许已完成的 command_execution，经显式人工审计确认无后台服务、派生或外部异步动作，并把审计者与结论绑定到日志/确定性命令账本哈希，回执明确该审计来自 agent，不冒称用户逐条确认。其他可异步工具、未知工具/日志、截断行或未完成命令均拒绝。重复完整本机进程扫描均不得出现该 run/槽位标记或 child 进程组，且同 UID 内核 cwd/打开文件快照不得有其他进程占用槽位、Git 管理目录或运行证据；扫描不完整拒绝，无 force。这是 PID 缺失、内核快照与人工历史审计的组合依据，不声称证明所有潜在脱离后代或未来访问不存在。完整槽位、Git 索引及原 job/events/native log/schema 先独立备份并核验；核心先写恢复回执，在同轮结算锁内重复核对身份、证据、进程及源码快照，再保全附件、如实登记 `native_planner_interrupted` 并释放或保留隔离。原始材料保留，退出码保持未知、规划结果为未确认，不伪造模型完成或成功计划；之后只能经正常 prepare/start 链路重新规划。
 
 **Desktop 显式交还（2026-10-16 用户授权）**：新增 `kp_desktop_return_slot {request_id,run_id,claim_token,confirm:true}`。消费者必须先完成所有目录读取、经submit/fail持久提交正文/失败记录并等核心结算为请求终态，再调用本接口；交还以后禁止继续读取或写入槽位，包括原生会话仍存活的情形。submit成功、MCP短进程退出、租约到期都不自动视为交还。这是协作协议证明，不是原生进程退出证明，不能写 `owner_stopped=true` 冒充。
 

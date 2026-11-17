@@ -47,6 +47,21 @@ def has_effective_changes(worktree, **kw) -> bool:
     return bool(effective_changes(worktree, **kw))
 
 
+def task_effective_changes(task, frozen, *, deadline=None, heartbeat=None) -> List[str]:
+    """A verification-only continuation may retain this task's committed source."""
+    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    delivery = core.delivery_of(task)
+    if (changes or _plan_delivery_kind(task) == "evidence_only"
+            or not core.requires_branch_review(task) or not delivery.get("commits")):
+        return changes
+    try:
+        proof = git_delivery.registered_task_changes(dict(delivery, repository=task["repository"]),
+            task_id=task["task_id"], deadline=deadline, heartbeat=heartbeat)
+    except git_delivery.GitDeliveryError as exc:
+        raise util.KanpilotError("verification_identity_unconfirmed", "已提交任务成果无法核验：" + exc.message) from exc
+    return proof["files"]
+
+
 def _command_not_found(code, tail: str) -> bool:
     """rc=127 or the shell's "command not found" → environment failure (阶梯 2)."""
     return code == 127 or "command not found" in tail.lower()
@@ -267,6 +282,9 @@ def _require_snapshot(job, source_sha256):
 
 def receipt_evidence_current(conn, task, receipt, *, deadline=None, heartbeat=None):
     """Recheck receipt evidence on retries; historical local receipts never pass."""
+    if receipt.get("admission_source") == "user_acceptance":
+        from .. import goal_blocker
+        return goal_blocker.acceptance_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") in ("goal_report", "codex_report"):
         return _goal_receipt_current(conn, task, receipt, deadline=deadline, heartbeat=heartbeat)
     if receipt.get("evidence_source") != "plus_tool_results":
@@ -368,7 +386,7 @@ def evaluate_task(conn, task, *, verify_env=None, timeout=None, deadline=None, h
         checks = _plus_checks(commands, verification, messages, Path(frozen["worktree_path"]).resolve())
     except (ValueError, TypeError, KeyError, StopIteration) as exc:
         raise util.KanpilotError("verification_identity_unconfirmed", "Plus 验证证据无法确认：" + util.redact(str(exc))) from exc
-    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    changes = task_effective_changes(task, frozen, deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     result = _check_result(commands, changes, checks, evidence_changes, _plan_delivery_kind(task))
     if not verification.get("ok") and not result["empty_diff"]:
@@ -436,7 +454,7 @@ def _evaluate_report_task(conn, task, source, *, deadline=None, heartbeat=None, 
                "source_sha256": row.get("source_sha256", evidence["job"].get("verification_source_sha256")),
                "output_tail": util.redact(row["detail"])[-_OUTPUT_TAIL_BYTES:]}
               for row in coverage["rows"]]
-    changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    changes = task_effective_changes(task, frozen, deadline=deadline, heartbeat=heartbeat)
     evidence_changes = 0 if changes else _evidence_only_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
     result = _check_result(commands, changes, checks, evidence_changes, _plan_delivery_kind(task))
     if not coverage["ok"] and not result["empty_diff"]:
@@ -503,7 +521,7 @@ def _goal_receipt_current(conn, task, receipt, *, deadline=None, heartbeat=None)
 def valid_committed_receipt(conn, task, receipt, *, deadline=None, heartbeat=None):
     """A core commit changes HEAD/status, but not the verified source bytes."""
     if (receipt.get("evidence_source") not in ("goal_report", "codex_report")
-            or receipt.get("verification_ok") is not True
+            or not (receipt.get("verification_ok") is True or receipt.get("admission_source") == "user_acceptance" and receipt.get("review_authorized") is True)
             or receipt.get("execution_run_id") != task["run_id"]
             or receipt.get("plan_sha256") != task["plan_sha256"]):
         return False

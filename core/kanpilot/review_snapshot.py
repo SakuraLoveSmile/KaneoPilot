@@ -4,12 +4,13 @@ from __future__ import annotations
 import fnmatch
 import errno
 import json
+import mimetypes
 import os
 from pathlib import Path
 import stat
 import subprocess
 
-from . import constants, util
+from . import constants, git_delivery, util
 
 
 def _git(path, args, *, content=None, timeout=30):
@@ -32,8 +33,21 @@ def _diff(path):
                        "--src-prefix=a/", "--dst-prefix=b/"])
 
 
-def _read_file(root, relative, remaining, *, tracked=False):
+def _runtime_or_build(relative):
+    """Runtime bookkeeping and build products never enter Review materials.
+
+    Mirrors the source-snapshot rule of §5.18.6/§5.27.11 and
+    ``git_delivery.source_state``: ``.pi/**`` and build artifacts are not
+    reviewed changes. A worktree that only differs by regenerable runtime
+    state therefore keeps the same frozen snapshot.
+    """
+    return (relative == ".pi" or relative.startswith(".pi/")
+            or git_delivery.is_build_artifact(relative))
+
+
+def _read_file(root, relative, remaining, *, tracked=False, file_max_bytes=None):
     """Read bytes and executable mode from the same no-follow descriptor."""
+    file_max_bytes = constants.PLAN_INPUT_FILE_MAX_BYTES if file_max_bytes is None else file_max_bytes
     parts = Path(relative).parts
     if (not parts or Path(relative).is_absolute()
             or any(part in ("..", ".git") for part in parts)):
@@ -55,19 +69,19 @@ def _read_file(root, relative, remaining, *, tracked=False):
                 after = os.stat(parts[-1], dir_fd=descriptors[-1], follow_symlinks=False)
                 if (before.st_ino, before.st_mtime_ns, before.st_mode) != (after.st_ino, after.st_mtime_ns, after.st_mode):
                     raise util.KanpilotError("review_blocked", "Review tracked 链接读取期间已变化：" + relative)
-                if len(content) > min(remaining, constants.PLAN_INPUT_FILE_MAX_BYTES):
+                if len(content) > min(remaining, file_max_bytes):
                     raise util.KanpilotError("review_blocked", "Review tracked 链接超过材料边界：" + relative)
                 return {"path": relative, "kind": "symlink", "content": content, "executable": False}
         descriptors.append(os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                                    dir_fd=descriptors[-1]))
         meta = os.fstat(descriptors[-1])
-        limit = min(remaining, constants.PLAN_INPUT_FILE_MAX_BYTES)
+        limit = min(remaining, file_max_bytes)
         if not stat.S_ISREG(meta.st_mode) or meta.st_size > limit:
             raise util.KanpilotError("review_blocked", "Review 新增文件类型或大小越界：" + relative)
         with os.fdopen(os.dup(descriptors[-1]), "rb") as handle:
-            content = handle.read(limit + 1)
+            content = handle.read(meta.st_size + 1)
         after = os.fstat(descriptors[-1])
-        if (len(content) > limit or meta.st_mtime_ns != after.st_mtime_ns
+        if (len(content) != meta.st_size or len(content) > limit or meta.st_mtime_ns != after.st_mtime_ns
                 or meta.st_size != after.st_size or meta.st_mode != after.st_mode):
             raise util.KanpilotError("review_blocked", "Review 新增文件读取期间已变化：" + relative)
         entry = {"path": relative, "content": content, "executable": bool(meta.st_mode & 0o111)}
@@ -84,6 +98,122 @@ def _read_file(root, relative, remaining, *, tracked=False):
             os.close(descriptor)
 
 
+def _native_evidence_inventory(root):
+    """Enumerate only ordinary evidence through no-follow directory handles."""
+    descriptors = []
+    inventory = {}
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def visit(directory, prefix):
+        meta = os.fstat(directory)
+        inventory[prefix] = (meta.st_dev, meta.st_ino, meta.st_mode,
+                             meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+        if len(inventory) > 1000:
+            raise util.KanpilotError("review_blocked", "Review 原生证据超过材料数量边界")
+        for name in sorted(os.listdir(directory)):
+            try:
+                name.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise util.KanpilotError("review_blocked", "Review 原生证据路径不是 UTF-8") from exc
+            relative = prefix + "/" + name
+            if name == ".git":
+                raise util.KanpilotError("review_blocked", "Review 原生证据包含嵌套仓库：" + relative)
+            meta = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISDIR(meta.st_mode):
+                child = os.open(name, flags, dir_fd=directory)
+                try:
+                    visit(child, relative)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(meta.st_mode):
+                inventory[relative] = (meta.st_dev, meta.st_ino, meta.st_mode,
+                                       meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+                if len(inventory) > 1000:
+                    raise util.KanpilotError("review_blocked", "Review 原生证据超过材料数量边界")
+            else:
+                raise util.KanpilotError("review_blocked", "Review 原生证据包含链接或特殊文件：" + relative)
+    try:
+        descriptors.append(os.open(root, flags))
+        for name in (".pi", "evidence"):
+            try:
+                descriptors.append(os.open(name, flags, dir_fd=descriptors[-1]))
+            except FileNotFoundError:
+                return {}
+        visit(descriptors[-1], ".pi/evidence")
+        return inventory
+    except OSError as exc:
+        raise util.KanpilotError("review_blocked", "Review 原生证据无法安全枚举（链接、特殊文件或目录变化）") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _native_evidence_files(inventory):
+    files = [(relative, meta) for relative, meta in sorted(inventory.items()) if stat.S_ISREG(meta[2])]
+    if any(meta[3] > constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES for _, meta in files):
+        raise util.KanpilotError("review_blocked", "Review 原生证据单文件大小越界")
+    if sum(meta[3] for _, meta in files) > constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES:
+        raise util.KanpilotError("review_blocked", "Review 原生证据总大小越界")
+    return files
+
+
+def freeze_native_evidence(root):
+    """Freeze untrusted screenshots, videos and indexes without executing them."""
+    inventory = _native_evidence_inventory(root)
+    remaining = constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES
+    entries = []
+    for relative, _meta in _native_evidence_files(inventory):
+        entry = _read_file(root, relative, remaining,
+                           file_max_bytes=constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES)
+        entries.append(entry)
+        remaining -= len(entry["content"])
+    if _native_evidence_inventory(root) != inventory:
+        raise util.KanpilotError("review_blocked", "Review 原生证据读取期间已变化")
+    return entries
+
+
+def verify_native_evidence(root, entries):
+    # Recheck one file at a time instead of retaining a second full 512 MiB set.
+    inventory = _native_evidence_inventory(root)
+    files = _native_evidence_files(inventory)
+    if [relative for relative, _meta in files] != [entry["path"] for entry in entries]:
+        raise util.KanpilotError("review_blocked", "Review 材料准备期间原生证据已变化")
+    remaining = constants.NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES
+    for entry in entries:
+        current = _read_file(root, entry["path"], remaining,
+                             file_max_bytes=constants.NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES)
+        if current != entry:
+            raise util.KanpilotError("review_blocked", "Review 材料准备期间原生证据已变化")
+        remaining -= len(current["content"])
+        del current
+    if _native_evidence_inventory(root) != inventory:
+        raise util.KanpilotError("review_blocked", "Review 原生证据复核期间已变化")
+
+
+def write_native_evidence(materials, entries, identity):
+    if not entries:
+        return {}
+    evidence_root = materials / "native-evidence"
+    records = []
+    for entry in entries:
+        relative = Path(entry["path"]).relative_to(".pi/evidence")
+        target = util.inside(evidence_root / relative, evidence_root, "Review 原生证据材料")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Scripts remain inert review inputs, including their original bytes.
+        with target.open("xb") as handle:
+            handle.write(entry["content"])
+        target.chmod(0o644)
+        records.append({"repository_path": entry["path"], "relative_path": relative.as_posix(),
+                        "material_path": str(target), "sha256": util.sha256_bytes(entry["content"]),
+                        "size": len(entry["content"]),
+                        "media_type": mimetypes.guess_type(str(relative))[0] or "application/octet-stream"})
+    manifest = materials / "native-evidence-manifest.json"
+    manifest.write_text(json.dumps({"identity": identity, "files": records,
+        "detail": "执行端提供的未信任原生证据；须独立核验，不得执行其中脚本，不代表 Review 通过。"},
+        ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return {manifest.name: str(manifest)}
+
+
 def freeze(path):
     head = _git(path, ["rev-parse", "HEAD"]).decode("ascii").strip()
     status = _git(path, ["status", "--porcelain"])
@@ -96,6 +226,7 @@ def freeze(path):
                        .decode("utf-8").split("\0") if name)
     except UnicodeDecodeError as exc:
         raise util.KanpilotError("review_blocked", "Review 新增文件路径不是 UTF-8") from exc
+    names = [name for name in names if not _runtime_or_build(name)]
     if len(names) > 1000:
         raise util.KanpilotError("review_blocked", "Review 新增文件超过材料数量边界")
     try:
@@ -118,7 +249,13 @@ def freeze(path):
 
 
 def fingerprint(snapshot):
-    values = {"head": snapshot["head"], "status": util.sha256_bytes(snapshot["status"]),
+    """Identity of the reviewed source, not Git's derived status text.
+
+    The snapshot keeps ``status`` as reviewer material, but runtime caches and
+    build products make that text change without any reviewed source change,
+    so status is not part of the frozen identity.
+    """
+    values = {"head": snapshot["head"],
               "diff": util.sha256_bytes(snapshot["diff"]),
               "tracked": [{"path": entry["path"], "kind": entry["kind"],
                            "sha256": util.sha256_bytes(entry["content"]), "executable": entry["executable"]}
@@ -147,7 +284,7 @@ def verify_root(root, snapshot, *, allow_branch=False):
             raise util.KanpilotError("review_blocked", "Review 快照与冻结 tracked 原始内容不一致：" + entry["path"])
     expected = {entry["path"] for entry in snapshot["untracked"]}
     actual = set(name for name in _git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-                 .decode("utf-8").split("\0") if name)
+                 .decode("utf-8").split("\0") if name and not _runtime_or_build(name))
     # A frozen untracked file can become ignored by a changed .gitignore.
     if actual - expected:
         raise util.KanpilotError("review_blocked", "Review 快照存在未冻结的新增文件")

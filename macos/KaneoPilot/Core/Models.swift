@@ -696,9 +696,112 @@ struct ContinueExecutionView: Decodable, Equatable {
     let state: String?
     let runId: String?
     let turnId: String?
+    /// 发送结果未确认时的核对入口（protocol §5.23.11）。
+    let reconcile: ContinueReconcileView?
+}
+
+/// 未确认继续发送的核对入口：只有唯一的未确认操作才允许核对。
+struct ContinueReconcileView: Decodable, Equatable {
+    let available: Bool
+    let operationId: String?
+    let createdAt: String?
 }
 
 struct RequestContinuationResponse: Decodable {
+    let status: String
+    let turnId: String?
+    let sessionId: String?
+    let deduplicated: Bool?
+}
+
+/// `reconcile-continuation` 的只读核对结果（`dry_run:true`）。
+struct ReconcileContinuationResponse: Decodable {
+    /// not_sent | delivered | unknown
+    let classification: String
+    let detail: String?
+    let turnId: String?
+    let operationId: String?
+    let status: String?
+    let applied: Bool?
+
+    var confirmationTitle: String? {
+        switch classification {
+        case "not_sent": return "回收未确认的发送槽？"
+        case "delivered": return "接管已送达的继续轮次？"
+        default: return nil
+        }
+    }
+
+    var confirmationAction: String? {
+        switch classification {
+        case "not_sent": return "回收发送槽"
+        case "delivered": return "接管轮次观察"
+        default: return nil
+        }
+    }
+
+    var confirmationMessage: String? {
+        switch classification {
+        case "not_sent":
+            return "核心已确认这条继续指令没有送达 Plus。回收后可以重新发送；本次不发送指令、不产生模型费用。"
+        case "delivered":
+            return "核心已核对这条继续指令已经送达，将按真实 turn 接回观察并继续核验。本次不重发指令、不产生模型费用。"
+        default: return nil
+        }
+    }
+}
+
+/// KP-GB01：目标受阻是真实 Goal 状态，独立于报告 draft/验证结果。
+struct GoalBlockerResponse: Decodable, Equatable {
+    let taskId: String
+    let runId: String
+    var state: String
+    var detail: String?
+    let sessionId: String?
+    let executionId: String?
+    let version: Int?
+    let title: String?
+    let reasons: [String]
+    let progress: [ProgressItem]
+    let limitations: [String]
+    let nextSteps: [String]
+    var actions: [String]
+
+    struct ProgressItem: Decodable, Equatable, Identifiable {
+        let id: String
+        let label: String
+        let status: String
+
+        var statusLabel: String {
+            switch status {
+            case "completed", "done": return "已完成"
+            case "in_progress", "running": return "进行中"
+            case "blocked": return "受阻"
+            case "pending", "not_started": return "未完成"
+            case "skipped": return "未执行"
+            default: return status
+            }
+        }
+    }
+
+    var needsReconciliation: Bool { actions.contains("reconcile") }
+
+    /// 写操作始终冻结读取到的目标与版本；动作资格仍由核心重新核验。
+    var mutationIdentity: [String]? {
+        guard state == "blocked", let executionId, !executionId.isEmpty,
+              let sessionId, !sessionId.isEmpty, let version else { return nil }
+        return [taskId, runId, sessionId, executionId, String(version)]
+    }
+
+    var unverifiedItems: [String] {
+        reasons + progress.filter { !["completed", "done"].contains($0.status) }
+            .map { "\($0.label) · \($0.statusLabel)" } + limitations
+    }
+}
+
+struct GoalBlockerResolutionResponse: Decodable {
+    let taskId: String
+    let runId: String
     let status: String
     let turnId: String?
     let sessionId: String?
@@ -1506,6 +1609,8 @@ struct RoundDetail: Decodable {
     let turnId: String?
     /// KP-EP01：执行端最后一条可读进展（protocol §5.18.4）；只读显示，不参与判定。
     let progress: SessionProgress?
+    /// KP-EP01：成功写入的目标待办快照，仅用于显示。
+    let goalProgress: ExecutionGoalProgress?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
@@ -1532,6 +1637,31 @@ struct TurnAdoption: Decodable {
 struct SessionProgress: Decodable {
     let text: String?
     let at: String?
+}
+
+struct ExecutionGoalProgress: Decodable {
+    let title: String
+    let markdown: String
+    let items: [ExecutionGoalItem]
+    let completed: Int
+    let total: Int
+    let revision: Int?
+    let at: String?
+}
+
+struct ExecutionGoalItem: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let status: String
+
+    var statusLabel: String {
+        switch status {
+        case "completed": return "已完成"
+        case "in_progress": return "执行中"
+        case "failed": return "失败"
+        default: return "待执行"
+        }
+    }
 }
 
 struct RoundTerminal: Decodable {

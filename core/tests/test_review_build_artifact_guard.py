@@ -18,6 +18,8 @@ def frozen_branch(tmp_path, monkeypatch):
     git("config", "user.email", "fixture@example.invalid")
     (repository / "app.py").write_text("baseline\n")
     (repository / "tracked.pyc").write_bytes(b"tracked artifact")
+    (repository / ".pi").mkdir()
+    (repository / ".pi/tracked.txt").write_text("tracked runtime path remains source-bound\n")
     git("add", ".")
     git("commit", "-qm", "baseline")
     head = git("rev-parse", "HEAD")
@@ -78,3 +80,19 @@ def test_git_status_failure_remains_blocked(frozen_branch, monkeypatch):
     with pytest.raises(util.KanpilotError) as caught:
         review._guard_branch_job(job, {})
     assert caught.value.code == "review_blocked"
+
+
+@pytest.mark.parametrize("change", ["untracked", "staged", "tracked"])
+def test_runtime_exception_only_applies_to_untracked_paths(frozen_branch, change):
+    root, git, job = frozen_branch
+    if change == "tracked":
+        (root / ".pi/tracked.txt").write_text("changed tracked contents\n")
+    else:
+        (root / ".pi/runtime.txt").write_text("runtime material\n")
+        if change == "staged":
+            git("add", ".pi/runtime.txt")
+    if change == "untracked":
+        review._guard_branch_job(job, {})
+    else:
+        with pytest.raises(util.KanpilotError, match="Review 提交快照已变化"):
+            review._guard_branch_job(job, {})
