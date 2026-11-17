@@ -29,7 +29,7 @@
 - `MaterialPreview`（标记块）：kind 双通道分类（mediaType 优先含 image/* 通配，扩展名回退覆盖 local 无类型）、absolutePath、sourceLabel（固定映射 + description/comment 动态 + 未知透传）、decodeText、textReadLimit=2MiB。
 - `MaterialFileRow`：整行 Button(.plain) + hover kpBlue 0.06 + 尾部「预览」固定宽占位防抖 + contextMenu 三项（Workspace.open/reveal/copy）。
 - `MaterialPreviewSheet`：.task(id:) + Task.detached 读 ≤2MiB+1（Data Sendable 回主线程解码），加载态 loading/image/text/unsupported/failed；底栏打开/Finder/复制路径/关闭(Esc)。
-- 夹具：planning_input_main.swift 追加 32 条断言（kind 10 / 路径 5 / 来源 12 / 解码 4 / 上限常量 1）。
+- 夹具：planning_input_main.swift 追加 33 条断言（kind 10 / 路径 5 / 来源 12 / 解码 5 / 上限常量 1）。
 
 ## 验收场景（实机，待执行）
 

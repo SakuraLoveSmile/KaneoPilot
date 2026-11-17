@@ -139,6 +139,8 @@ import Foundation
               "truncated multibyte boundary recovers")
         check(MaterialPreview.decodeText(partial, truncated: false) == nil,
               "untruncated invalid utf8 stays binary")
+        check(MaterialPreview.decodeText(Data([0xFF, 0x80, 0x80]), truncated: true) == nil,
+              "binary with continuation-looking tail stays binary")
         check(MaterialPreview.textReadLimit == 2 * 1024 * 1024, "text preview limit is 2 MiB")
         print("PASS planning materials: invalidation; per-task isolation; single flight; stale success/failure; new hash; core start boundary; material preview kind/path/source/text")
     }

@@ -1181,7 +1181,7 @@ enum MaterialPreview {
             end -= 1
             trimmed += 1
         }
-        if end > 0, trimmed < 4, bytes[end - 1] >= 0xC0 {
+        if end > 0, trimmed < 4, (0xC2...0xF4).contains(bytes[end - 1]) {
             end -= 1
         }
         return String(data: Data(bytes[..<end]), encoding: .utf8)
