@@ -210,3 +210,70 @@ def test_pr_snapshot_still_uses_registered_clean_commit_and_rejects_dirty_execut
     with pytest.raises(util.KanpilotError):
         pooled()
     assert (root / "tracked.txt").read_bytes() == b"committed delivery\n"
+
+
+def test_freeze_excludes_runtime_bookkeeping_and_build_products(scene):
+    from kanpilot import review_snapshot
+    _repo, execution, _root, _task = scene
+    # Codex run caches (codex_environment.py) live inside the worktree and are
+    # regenerable; they must not count as Review material or trip the 1,000 bound.
+    cache = execution / ".pi" / "kanpilot" / "codex" / "01234567-89ab-cdef-0123-456789abcdef" / "gradle"
+    cache.mkdir(parents=True)
+    for index in range(1200):
+        (cache / f"blob-{index}.cache").write_bytes(b"cache\n")
+    (execution / ".pi" / "goal").mkdir(parents=True)
+    (execution / ".pi" / "goal" / "goal.md").write_bytes(b"goal notes\n")
+    (execution / "build").mkdir()
+    (execution / "build" / "app-debug.apk").write_bytes(b"artifact\n")
+    (execution / ".DS_Store").write_bytes(b"finder\n")
+    (execution / "new_test.py").write_bytes(b"assert True\n")
+
+    frozen = review_snapshot.freeze(execution)
+
+    assert [entry["path"] for entry in frozen["untracked"]] == ["new_test.py"]
+    review_snapshot.verify_source(execution, frozen)
+
+
+def test_freeze_still_enforces_material_count_for_real_new_files(scene):
+    from kanpilot import review_snapshot
+    _repo, execution, _root, _task = scene
+    source = execution / "src"
+    source.mkdir()
+    for index in range(1001):
+        (source / f"module_{index}.py").write_bytes(b"pass\n")
+    with pytest.raises(util.KanpilotError, match="材料数量边界"):
+        review_snapshot.freeze(execution)
+
+
+def test_runtime_cache_changes_do_not_change_frozen_source(scene):
+    from kanpilot import review_snapshot
+    _repo, execution, _root, _task = scene
+    (execution / "new.py").write_bytes(b"reviewed work\n")
+    frozen = review_snapshot.freeze(execution)
+    cache = execution / ".pi" / "kanpilot" / "codex" / "fedcba98-7654-3210-fedc-ba9876543210" / "tmp"
+    cache.mkdir(parents=True)
+    (cache / "log.txt").write_bytes(b"later runtime log\n")
+    (execution / "build").mkdir()
+    (execution / "build" / "out.o").write_bytes(b"artifact\n")
+
+    review_snapshot.verify_source(execution, frozen)
+    assert review_snapshot.fingerprint(review_snapshot.freeze(execution)) == review_snapshot.fingerprint(frozen)
+
+
+def test_verify_root_ignores_runtime_and_build_files(scene, pooled):
+    from kanpilot import review_snapshot
+    _repo, execution, _root, _task = scene
+    (execution / "new.py").write_bytes(b"reviewed work\n")
+    frozen = review_snapshot.freeze(execution)
+    root = pooled(frozen)
+    cache = root / ".pi" / "kanpilot" / "codex" / "01234567-89ab-cdef-0123-456789abcdef" / "analyzer"
+    cache.mkdir(parents=True)
+    (cache / "state.bin").write_bytes(b"x")
+    (root / "build").mkdir()
+    (root / "build" / "out.o").write_bytes(b"x")
+
+    review_snapshot.verify_root(root, frozen)
+
+    (root / "extra.py").write_bytes(b"unfrozen change\n")
+    with pytest.raises(util.KanpilotError, match="未冻结的新增文件"):
+        review_snapshot.verify_root(root, frozen)
