@@ -2422,6 +2422,19 @@ def cmd_get_session(state, payload):
         # KP-EP01：执行页只显示最新一条进展，不读消息正文。
         detail["progress"] = {"text": "正在核对卡片宽度与首行墨迹",
                               "at": session.get("updated_at") or session.get("started_at")}
+        if not payload.get("status_only"):
+            detail["goal_progress"] = {
+                "title": "补齐封面模式歌词预览卡片的原生验收阻塞（第 4 轮）",
+                "markdown": "# 补齐封面模式歌词预览卡片的原生验收阻塞（第 4 轮）\n\n核对双栏、底栏和六组字号缩放证据。",
+                "items": [
+                    {"id": "layout", "label": "719/720/800/860 双栏与底栏实测", "status": "completed"},
+                    {"id": "screens", "label": "360/390/430 × 1.0/1.3 六组证据", "status": "in_progress"},
+                    {"id": "evidence", "label": "更新 evidence-index 与目标记录", "status": "pending"},
+                    {"id": "verify", "label": "三条 verify 命令", "status": "failed"},
+                ],
+                "completed": 1, "total": 4, "revision": 2,
+                "at": session.get("updated_at") or session.get("started_at"),
+            }
     detail.update(scenario.get("round_detail") or {})
     return {"session": session, "connection": connection, "round_detail": detail}
 
@@ -4564,6 +4577,14 @@ COMMANDS = {
     "request-continuation": lambda s, p: (
         {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
         if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),
+    "reconcile-continuation": lambda s, p: (
+        {"task_id": p.get("task_id"), "run_id": p.get("run_id"),
+         "operation_id": "fixture-operation", "classification": "not_sent",
+         "detail": "Plus 会话没有新轮次，最新转录中也没有本任务的继续指令",
+         "applied": p.get("dry_run") is not True,
+         "status": "released" if p.get("dry_run") is not True else None}
+        if p.get("confirm") is True or p.get("dry_run") is not False
+        else fail("核对结果需要显式确认才能回收发送槽", "bad_request")),
     "recover-execution-goals": cmd_recover_execution_goals_fixture,
     "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
     "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),

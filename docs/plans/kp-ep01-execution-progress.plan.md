@@ -1,7 +1,7 @@
 # KP-EP01 执行页改为「最新进展」
 
 - 任务标识：`kp-ep01`
-- 状态：待体验（测试版 v0.5.6-test.201 已发布并安装；最新进展、时间线、轮次目标/待办与夹具已验证；实机视觉待用户解锁后确认）
+- 状态：待体验（v0.5.7-test.222 已公开发布；f31f94b 云端完整门禁与发布全绿，实际测试包隔离原生核验通过；未合入 main、未替换正式安装，真实任务与用户体验尚待确认）
 - 分支：`feat/20261110-kp-ep01-execution-progress`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-ep01-execution-progress/`
 - 基于：`chore/20261110-kp-wt01-task-worktree-layout` 的 `0efa23a`（当前安装构建 194、真实库 schema 7）
@@ -140,3 +140,56 @@
 | 2026-11-10 22:50 | 重录夹具 | 真实重录六件套并更新 `_captured_at=2026-11-10`；三个 reconstructed 样本更新日期/说明并补 `pendingInputs`；事实断言同步 pendingInputs/endedAt；`tests/rehearsal` 74 passed / 6 skipped | 通过 |
 | 2026-11-10 23:13 | 测试版发布 v0.5.6-test.201 | 推送 331d335 触发 run 42837615030；`channel=test`、`base_version=0.5.6` 手动 run 42837710184 全绿（identity/android/macos-fixtures a+b/macos-package/checks 1–5/codex-platforms/publish）；预发布 https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.6-test.201，source 331d335 | 完成 |
 | 2026-11-10 23:18 | 安装测试版 201 | 下载 DMG（sha256 6d3ca91a… 与 SHA256SUMS/manifest 一致）挂载校验 `CFBundleShortVersionString=0.5.6-test.201`、`CFBundleVersion=201`、codesign 通过；停止 199 并备份 `/Applications/.KaneoPilot-backup-ep01-20261110T231808`；启动后 MCP/mobile/engine 在跑，schema=7 | 完成 |
+
+
+## 八、2026-11-12 追加：执行页直接展示目标进度
+
+用户要求：把 pi-desktop 的目标进度（目标标题、完成比例、执行状态、待办清单、目标说明）接到任务详情的「执行」页，不必进入完整会话才能看到。
+
+- 当前基线：主工作区 `main` / `ea02654`；原有 `.local/` 与未跟踪 `docs/plans/kp-cache01-macos-build-cache-cleanup.md` 保留。新工作树 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261112-feat-kp-ep01-goal-progress`，分支 `feat/20261112-kp-ep01-goal-progress`，合入目标仍为 `main`。旧任务 worktree 属既有现场，不复用或清理。
+- 本次明确替代 D1/D9 的显示位置限制：执行页在最新进展卡片下新增可折叠「目标进度」，完整会话内原有轮次目标保留。保留复盘、最新进展、完整会话入口、20 秒刷新与项目视觉规范；不改调度、完成门禁、Android 或 PI-Desktop。
+- 数据依据：PI-Desktop `goal-progress-presentation.ts` 按快照 items 的 completed / length 计数；`GoalProgressBar.tsx` 标题来自 proposal。当前 MCP 不提供独立 goalProgress.get，采用已有采集链中成功的 SubmitGoal / UpdateGoalProgress 结果还原。完整字段/边界唯一维护于 protocol §5.18.4；UI 规则见 ui-spec §4.18。未上报清单前显示空态，不编造初始待办。
+- 分工：`pi_goal_source` 只读查证 PI-Desktop；`goal_projection` 独占 dsh_events.py 与新增隔离测试；主控负责 Swift DTO/执行页、FakeCore、解码夹具与规格/本记录；`goal_review` 只读审查组合改动。不调用付费模型或业务执行，不改真实 DB。
+- 验收：执行页出现标题/完成数/清单；四态正确，失败调用不增加完成数；目标/说明可折叠，长文本换行；刷新失败目标标过期；新目标/任务不串数据；无目标隐藏，有目标无清单明确空态；1180×760 深色与 900×600 浅色的原生界面检查。
+- 云端编译与原生视觉：构建 215 与隔离界面核验通过，详见下方记录。仅在云端编译/签名；本地只核验包并启动云端隔离预览。用户已明确授权本次提交、推送与云端构建；未合入、发布或更新正式安装。
+- 收尾：未合入 main，工作树保留作为本轮可检查交付；合入且验证通过后按项目规则清理本轮工作树，不影响旧任务现场。
+
+### 本轮验证记录
+
+- 基于 `ea02654` 的本轮组合改动：目标/文字进展 `unittest discover -s tests -p 'test_execution*progress.py'` **25 passed**（含 Collector 真形状消息→事件→目标投影、新目标、修订、错误结果与宿主标题优先）。会话 `test_session*.py` **124 passed**；Desktop 事件投影 **4 passed**（子 agent），主控检查最终差异与 Python AST / `git diff --check` 通过。
+- 独立审查发现目标标题来源应优先宿主 proposal.title，已修正并补回归测试；无其余已确认问题。
+- `test_dsh_events_verification.py` 是 pytest 函数，unittest 发现 **0 项，未执行**；隔离解释器确认本机没有真实 pytest，未将该项记为通过，不安装依赖或降低门禁。云端使用真实 pytest。
+- Swift 解码夹具与 FakeCore 已补四态/长标题示例；未本地编译。云端与原生核验结果待后续追加。
+
+### 云端与原生核验（本轮最终结果）
+
+- 代码提交 `7228bb30ae58302e7179d3486db4686a351f2a02`，Packages [run 43061669500 / build 215](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43061669500) **success**：identity、macos-package、macos-fixtures a/b、Android、checks 1–5 × Python 3.11/3.13、Codex native-platforms 全部通过；可选 fulltext probe 未启用、跳过。
+- 下载 `macos-update-ui-215`，SHA256 与 ui-metadata.json 一致，source_sha 与上述提交一致，`codesign --verify --deep --strict` 通过。未改签、未修改 App 包，未调用本地编译。
+- 用云端独立 bundle `local.kaneopilot.software-update-check` + 本工作树 FakeCore + 独立数据目录启动。1180×760 深色实测 1/4、环形比例、四种状态、整体折叠与目标说明展开；900×600 浅色实测长目标/长待办换行、状态可见、失败保留旧目标并标过期、空清单无 0/0、无目标隐藏、恢复后正常显示。观察依据为本会话 CUA 原生截图与 AX 树；没有以 HTML/mock 页面代替原生界面。数据为隔离夹具，不声称真实任务/设备验收。
+- 本地证据位于本工作树 `build/kp-ep01-goal-progress/`：云端原包/metadata、夹具日志、隔离环境与 `ui-verification.json`；预览 PID 20635 / 23229 均已结束。未更新 `/Applications/KaneoPilot.app`，未修改真实 DB 或发起业务模型请求。
+- 工作树保留原因：本分支尚未合入 main，提交与验证产物仍需保留。下一步如获授权，合入/发布；合入且验证通过后迁出需要保留的证据，再清理本轮 worktree。此记录不授权后续外部发布。
+
+
+## 九、2026-11-12 发布新的测试版本
+
+用户追加要求发布新的测试版本。此前 run 215 为 push/preview，只生成 artifact，未发布；本次按 `channel=test` 手动发布。
+
+- 发布分支：`feat/20261112-kp-ep01-goal-progress`；基础版 `0.5.7`（当前正式版 `0.5.6`，最高测试基础版 `0.5.7`），版本为 `0.5.7-test.<run_number>`。
+- 为避免新测试版回退已发布功能，先合入 `v0.5.7-test.214`（来源 `585f296`）的继续执行发送结果核对/槽回收修复；无冲突，当前目标进度与继续执行独立保留。组合态本地目标/文字进展25项与继续执行12项通过；完整门禁由本次测试版工作流重新运行，不能沿用215替代。
+- 公开说明：执行页新增目标进度，显示目标标题、完成比例、待办四态与可折叠说明，20秒刷新；读取失败保留并标注旧数据；包含214的继续执行修复。无数据库schema变更。构建215的隔离界面已核验，本次组合态以新工作流证据为准。
+- 用户此次要求发布测试版本，未要求替换正式安装或合入 main；发布后核对Release/tag/四项资产与manifest，不自动安装到正式App。
+
+- 组合审查发现214既有P2：未确认发送为 `eligible=false/state=none/reconcile.available=true`，但父页只在 eligible/sent/observing 时创建继续执行栏，核对按钮被隐藏。本次补上父级 reconcile.available 显示条件；不改变发送/回收业务规则。原测试发布 run43069259736（候选219）在公开前取消，修复提交重新构建发布；候选版本不能当成已发布版本。
+
+- 最终候选：`f31f94b843016cf364f6ef20dc3ca02443a41c13`，基础版0.5.7，手动 test run [43070270517 / build222](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/43070270517)，公开版本应为 `v0.5.7-test.222`。同提交的重复 push/preview run43070223221 已取消，发布核验只认 test run222。
+
+- 222候选包核对：macos-metadata.source_sha=`f31f94b843016cf364f6ef20dc3ca02443a41c13`，version=`0.5.7-test.222`，build=222；DMG SHA256=`09e21e2d1966877dfe106312dd96d7c3772bbc86a2456e9df49ed3fde9da244c`，codesign验证通过。首次artifact下载遇到unexpected EOF，改用GitHub artifact API下载成功且哈希一致，未忽略完整性错误。
+- 直接挂载云端222 DMG，以独立FakeCore、独立DB/支持目录和空凭据启动未修改的包（无本地编译/改签，未替换正式安装）。真实原生界面同时可见目标进度1/4和待办四态；设置 `eligible=false/state=none/reconcile.available=true` 后，原来隐藏的「核对发送结果」按钮已可见。此为隔离界面验证，不是Plus真实发送/回收验收。测试PID21290已结束，挂载disk18已正常推出；证据位于 `build/kp-ep01-goal-progress/test-222/` 的metadata与native-verification.json，以及本会话CUA截图/AX。
+
+
+### 测试版发布结果
+
+- **已发布** [v0.5.7-test.222](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.7-test.222)，非draft、prerelease=true。run43070270517/build222结论success，identity、checks1–5×Python3.11/3.13、Android、macos-fixtures a/b、macos-package、Codex native-platforms、publish全部成功；可选fulltext probe未启用跳过。
+- 读取公开Release、manifest、SHA256SUMS：四项资产齐全，资产digest与SHA256SUMS/manifest一致，下载的manifest及已核验DMG哈希与公开资产一致；annotated tag解引用与两端manifest来源均为 `f31f94b843016cf364f6ef20dc3ca02443a41c13`，version0.5.7-test.222、channel=test、base0.5.7、build222一致。
+- Android正式证书指纹 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`，由云端签名/包核验与公开manifest记录；本地未安装Android。macOS候选DMG已经由本机验证签名并隔离启动，未更新正式安装。
+- 公开核验资料位于 `build/kp-ep01-goal-progress/test-222/release/`。未合入main，保留本任务工作树与全部证据；待后续合入且验证通过后按本计划收尾。不将公开发布或隔离夹具通过标为用户验收。

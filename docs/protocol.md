@@ -760,6 +760,7 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 
   执行证据 = `events.jsonl` 中的工具/命令输出与终止事件（经 `session-messages` 读取）。
 - **最新进展（只读展示，KP-EP01）**：`round_detail.progress` 优先取最后一条有效 `progress` 事件；旧日志没有该事件时回退到最后一条非空助手消息，按同一规则取首个可用行。投影为 `{text, at}`。`text` 只取助手消息的首个非空行（去 Markdown 前缀、折叠空白、最多 160 字符，空内容/代码围栏/JSON 对象或数组不产出），`at` 取源消息时间（缺失时取事件时间）；无事件为 `null`。该字段只供界面显示「最新进展」，不参与完成、失败或验证判定，也不能据此推进状态。监控的 `last_progress` 在「仍在运行」分支优先写该文本，缺失时回退「本轮仍在运行」。
+- **目标进度（只读展示，KP-EP01，2026-11-12）**：完整 `get-session` 的 `round_detail.goal_progress` 返回 `{title, markdown, items:[{id,label,status}], completed, total, revision, at}` 或 `null`。从当前目标成功的 `SubmitGoal` 与 `UpdateGoalProgress` 工具结果还原；进度须有输出 `details.ok=true`，不采纳调用中/失败结果；状态仅 `pending/in_progress/completed/failed`，完成数仅计 `completed`。按源消息修订消歧，新目标清空旧清单，按 job 的轮次关联限制串入。目标说明保留契约 markdown；尚无清单时 `items=[]/total=0`，不编造 `0/0` 完成比例。无目标/非目标轮次为 `null`；`status_only` 不带目标文字。复用已有采集事件，不额外访问 Plus、不新增命令或 schema；不是完成/失败/验收证据。
 - **历史 Goal 转录证据的审计窗口（不作为新引擎完成凭据）**：有 Goal 审批标记时，只认同执行 turn 的消息或可信的执行起点之后的消息；保留消息原始 turn 身份与时间缺失标记，不以采集时间冒充执行开始。缺可信边界显式返回 `whole_round` / `unscoped_goal_window`，monitor 转 `verification_unconfirmed`；没有 Goal 标记的普通轮次沿用整轮证据。live 按 §5.27.11 核对当前执行轮次的 Plus 工具证据，不在本地代跑 verify。
 - **新生成 Goal 材料的交付排除**：仅 HEAD 原本未跟踪、普通真实目录中的新 `.pi/goal/*.md` 普通文件可排除；不追随符号链接，不排除已有 tracked 文件的修改/删除或其他 `.pi` 文件。安全 Goal 材料不计作任务改动、不阻止干净检查、不进交付提交；用户已暂存的 Goal 材料保留。核心源码/索引指纹及 live 提交的 hook、恢复与索引并发核验仍按 §5.27.11。
 - **完成判定须同时具备**：(a) 主会话 `terminal` 事件 `outcome=completed`；(b) 进程结果 `job.json.status=finished` 且 `exit_code=0`；(c) 验证证据（结构化报告覆盖冻结计划每条 verify，绑定原生命令整数退出码 0、当前轮次与源码；缺失转 verification_unconfirmed，不能人工接受绕过）。三者齐 → `advance-task --target in-review` → `report succeeded`（既有流程不变，Review 仍是 Done 的前置）。
@@ -1173,8 +1174,16 @@ pi-desktop-catalog {"connection_file":"/abs/path/mcp-control.json","provider_id"
 - 确认后先以 `runtime_operations` 抢占发送槽，再向**同一 session** 发送一条固定继续指令（新 turn，产生模型费用）；响应丢失记 `unknown`，**绝不重发**。
 - 成功后同轮重开：job 快照到 `continue_previous`，`status=running`、`turn_id=新 turn`、`send_state=sent`、`observation_resumed_at`、`turn_adopted` 追加 `manual_continue`、`continuation_started_at`；清 `ended_at/exit_code/detail/pid/observe_pid` 与旧 `observation_finalizing`。任务清阻塞转 `running`，轮次 `run_status=running`；随后调用 `round-observe {executor:"user"}` 拉起 worker `--resume` 观察新 turn。
 - 旧 terminal 由 `observation_resumed_at` 标记 superseded；worker 的轮次预算从 `continuation_started_at` 起算。完成判定、Review 与交付规则不变。
-- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。
+- 只读投影 `get-task.task.continue_execution = {eligible, reason, state: ready|sent|observing|none, run_id, turn_id}`；投影不读取 MCP。发送页被 `prepared/unknown` 继续操作挡住时，投影附 `reconcile = {available, operation_id, created_at}`，提示先核对 Plus 会话。
 - 不做：不新建会话、不重新规划、不改计划/工作树/验收要求；同一终态 turn 只允许继续一次；失败仍回 `needs_user`。
+
+**核对未确认的继续发送（同节补充）。** 发送响应丢失记 `unknown` 后，不得靠重发脱困，也不得让任务停在一个无法回收的发送槽上：
+
+- `reconcile-continuation {task_id, run_id, dry_run?, confirm?}`；`dry_run` 缺省为 `true`（只读）。只处理当前任务、当前轮次、`needs_user`、且仍有唯一 `prepared/unknown` 的继续操作；其余一律 `conflict`。
+- 只读核对同一会话：读 `agent_status` 与受限分页转录（每页 20 条、最多 40 页），按 `turnId` 找该轮次的发起消息，并以固定继续指令原文前缀判定是否为本任务所发。
+- 分类三条，互斥：`not_sent`＝没有更新的轮次且最新转录中无本任务继续指令；`delivered`＝更新的轮次正是由该继续指令发起；`unknown`＝会话仍在运行同一轮次、新轮次无法归因、或转录分页被截断/超上限。
+- 写入只发生在 `dry_run=false` 且 `confirm=true`：`not_sent` 把该操作记为 `rejected`（释放发送槽，可再次发送）；`delivered` 记为 `accepted` 并按转录中的真实 turn 执行与发送成功相同的同轮重开（`turn_adopted` 追加 `reconciled_continue`），随后 `round-observe {executor:"user"}`。两种情况都写 `execution_continuation_reconciled` 事件。
+- `unknown` 不改任何状态（不回收发送槽、不改任务、不重发），返回 `status=unconfirmed` 由人工核对；核对命令不发送任何 prompt，不产生模型费用。
 
 ## 5.24 全流程 Pi-Desktop-Plus 接入（v4，T6）
 

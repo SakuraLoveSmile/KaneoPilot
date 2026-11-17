@@ -1,7 +1,7 @@
 # KP-CONT01 继续执行同一 Pi 目标
 
 - 任务标识：`kp-cont01`
-- 状态：实现中
+- 状态：待体验（v0.5.6-test.203 已发布并安装）
 - 分支：`feat/20261110-kp-cont01-continue-execution`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261110-feat-kp-cont01-continue-execution/`
 - 基于：`fa678fc`（kp-ep01 测试版 v0.5.6-test.201 的代码与夹具）
@@ -80,4 +80,19 @@ continue-execution {task_id, run_id, confirm: true, operation_id?}
 | 2026-11-11 00:20 | 发送 + 同轮重开 | `request-continuation` 发送后快照 job、绑新 turn、清旧终态、任务清阻塞转 running、`round-observe` 拉起 worker；worker 轮次预算改用 `continuation_started_at` | 实现中 |
 | 2026-11-11 00:20 | 桌面入口 | 执行页新增「继续执行同一 Goal」条与二次确认；`get-task.continue_execution` 投影；FakeCore 与解码夹具 | 未编译 |
 | 2026-11-11 00:24 | 核心测试 | `test_request_continuation` 4 项通过；续接/状态/桌面队列 101 项 + 53 subtests 通过 | 通过 |
-| 2026-11-11 00:26 | 未完成 | 云端编译、测试版发布与安装、实机按钮核对 | 待办 |
+| 2026-11-11 00:26 | 推送构建 202 | 分支 `c21d110` push run 42854506499：identity/checks 1–5/android/macos-fixtures a+b/macos-package/codex-platforms 全绿 | 通过 |
+| 2026-11-11 00:57 | 测试版 203 | 手动 `channel=test`、`base_version=0.5.6` run 42857275049 全绿，发布 v0.5.6-test.203（source c21d110） | 通过 |
+| 2026-11-11 01:00 | 安装 203 | DMG sha256 与 SHA256SUMS/manifest 一致；`CFBundleShortVersionString=0.5.6-test.203`、build 203、codesign 通过；旧 201 备份 `/Applications/.KaneoPilot-backup-cont01-20261111T010001`；启动后 MCP/mobile/engine 与新运行观察者恢复 | 通过 |
+| 2026-11-11 01:02 | 实机投影核对 | 安装包核心 `get-task` 返回 `continue_execution={eligible:false, state:"none", reason:"任务不在需人工处理状态"}`；当前任务已被用户重新执行到新轮次 `cc6167fa`，running，因此入口按预期隐藏 | 通过（无阻塞轮次可点） |
+| 2026-11-11 01:02 | 未验证 | 阻塞任务的 eligible 按钮视觉与真实发送/同轮接管端到端；需等下一次 Pi 轮次阻塞后由用户点击 | 待体验 |
+| 2026-11-11 16:32 | 实机点击暴露缺口 | 用户点「继续执行同一 Goal」后核心抛出 `remote_unavailable`，发送槽落 `unknown`（`FE819DEF…`、session/turn 为空）；Plus 侧 `messageCount=515`、`currentTurnId` 未变、`isRunning=false`，即**没有新 turn、没有产生模型费用**，但按钮被该槽永久挡住且当时无任何回收入口 | 缺口已确认 |
+| 2026-11-11 18:40 | 核对与回收命令 | 新增 `reconcile-continuation {task_id,run_id,dry_run?,confirm?}`：只读分页转录按 `turnId` 找发起消息、以固定继续指令前缀判定归属，分 `not_sent`/`delivered`/`unknown` 三类；只有 `dry_run=false,confirm=true` 才写库（`not_sent`→`rejected` 释放槽位；`delivered`→`accepted` 并按真实 turn 同轮重开）；`unknown` 不改任何状态、不重发 | 实现中 |
+| 2026-11-11 18:40 | 核心测试 | `core/tests/test_request_continuation.py` 12 项通过（含只读不改状态、批准后释放槽位、按真实 turn 接管、外来新轮次保持 unknown、运行中/转录截断保持 unknown、未确认不写）；`test_execution_status`/`test_execution_retry`/`test_engine_verdict` 合计 96 项 + 48 subtests 通过；`test_desktop_queue`/`test_engine_session_view`/`test_session` 合计 130 项 + 8 subtests 通过 | 通过 |
+| 2026-11-11 18:40 | 正式库只读核对 | 安装版核心对真实任务执行 `dry_run:true`：`classification=not_sent`、`applied=false`、库内该操作仍为 `unknown`、任务仍 `needs_user`；结论与独立核对的 Plus 状态一致（没有新轮次、最新转录无该指令） | 通过（只读，未写入） |
+| 2026-11-11 18:40 | 未验证 | 回收写入（`dry_run:false,confirm:true`）、`delivered` 分支的真实接管、界面「核对发送结果」按钮；Swift 侧未本地编译（按项目约束走云端 Packages） | 待体验 |
+| 2026-11-11 19:07 | 正式库回收发送槽 | 先做一致性备份 `~/Library/Application Support/KaneoPilot/kanpilot.db.pre-reconcile-20261111T190707`；再只读核对仍为 `not_sent`，用户确认后 `dry_run:false,confirm:true`：操作 `FE819DEF…` 落 `rejected`、写 `execution_continuation_reconciled` 事件，`get-task.continue_execution` 恢复 `{eligible:true,state:"ready"}`；任务仍 `needs_user/verification_unconfirmed`，Plus 无新轮次、无模型费用 | 通过 |
+| 2026-11-11 19:08 | 提交推送 | `df84b28` 推送分支；运行 43009381300（push）conclusion=success：identity、checks 1–5 × Python 3.11/3.13、android、macos-fixtures a/b、macos-package、codex-platforms 全绿；`publish` 与 `macos-session-fulltext-probe` 按条件 skipped。手动触发的重复 run 43009394078 已取消 | 通过 |
+| 2026-11-11 19:08 | 未验证 | 安装该构建后的界面「核对发送结果」按钮、`delivered` 分支真实接管、`not_sent` 界面端到端 | 待体验 |
+| 2026-11-11 19:45 | 测试版 210 | 手动 `channel=test`、`base_version=0.5.6`、run 43014550637（提交 `d353d7f`）。总共 4 次 attempt：attempt 1 `macos-fixtures (b)` 的 python-runtime 夹具在 `executor-instance 无输出` 报错；attempt 2 同一断言转到 owner-fixtures，而 python-runtime 三个模式（25+7+4）全通过；attempt 3 全部夹具通过、`publish` 崩于 `verify_remote_tag` 读到 `None`；attempt 4 通过。三次失败之间源码无改动（多为文档或零改动），判为云端偶发，不以失败 attempt 宣称夹具通过 | 通过（含 3 次偶发） |
+| 2026-11-11 20:45 | 发布核对 | `v0.5.6-test.210` 为 annotated 标签、指向 `d353d7f`；预发布 `prerelease=true, draft=false`，四项资产齐全：APK 8557696、DMG 46031197、manifest.json、SHA256SUMS；`shasum -a 256 -c` 三项全 OK；DMG 内 `CFBundleShortVersionString=0.5.6-test.210`、`CFBundleVersion=210`、thin arm64、`local.kaneopilot` ad-hoc 签名；安装包内核心 `cli.py` 含 `reconcile-continuation`、可执行文件含 `reconcileContinuation` | 通过 |
+| 2026-11-11 20:45 | 发布缺口（待修） | `scripts/release_bundle.py` 的 `verify_remote_tag` 在标签刚创建的回读阶段，`GET /git/ref/tags/<tag>` 返回 404/`None` 时直接 `reference["object"]` 崩溃（`TypeError: 'NoneType' object is not subscriptable`），未按「标签尚未创建」分支处理；本地未修复本轮既有发布脚本，留作独立任务 | 未开始 |

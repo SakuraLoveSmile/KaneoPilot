@@ -453,7 +453,8 @@ struct TaskExecutionTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.s) {
                 if let continuation = detail?.continueExecution,
-                   continuation.eligible || continuation.state == "sent" || continuation.state == "observing" {
+                   continuation.eligible || continuation.state == "sent" || continuation.state == "observing"
+                    || continuation.reconcile?.available == true {
                     ContinueExecutionBar(taskID: taskID,
                                          runID: detail?.runId ?? continuation.runId,
                                          view: continuation)

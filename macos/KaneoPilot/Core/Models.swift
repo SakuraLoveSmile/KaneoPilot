@@ -696,6 +696,15 @@ struct ContinueExecutionView: Decodable, Equatable {
     let state: String?
     let runId: String?
     let turnId: String?
+    /// 发送结果未确认时的核对入口（protocol §5.23.11）。
+    let reconcile: ContinueReconcileView?
+}
+
+/// 未确认继续发送的核对入口：只有唯一的未确认操作才允许核对。
+struct ContinueReconcileView: Decodable, Equatable {
+    let available: Bool
+    let operationId: String?
+    let createdAt: String?
 }
 
 struct RequestContinuationResponse: Decodable {
@@ -703,6 +712,17 @@ struct RequestContinuationResponse: Decodable {
     let turnId: String?
     let sessionId: String?
     let deduplicated: Bool?
+}
+
+/// `reconcile-continuation` 的只读核对结果（`dry_run:true`）。
+struct ReconcileContinuationResponse: Decodable {
+    /// not_sent | delivered | unknown
+    let classification: String
+    let detail: String?
+    let turnId: String?
+    let operationId: String?
+    let status: String?
+    let applied: Bool?
 }
 
 /// §5.32 执行复盘投影（`get-task.task.retrospective`）。桌面只格式化核心数字，不据事件推导。
@@ -1506,6 +1526,8 @@ struct RoundDetail: Decodable {
     let turnId: String?
     /// KP-EP01：执行端最后一条可读进展（protocol §5.18.4）；只读显示，不参与判定。
     let progress: SessionProgress?
+    /// KP-EP01：成功写入的目标待办快照，仅用于显示。
+    let goalProgress: ExecutionGoalProgress?
 
     /// v2.1 §5.22.6 失败细分：terminal.reason（中文映射）+ detail（脱敏原文）。
     /// 非失败轮次（runStatus 非 failed）→ nil。
@@ -1532,6 +1554,31 @@ struct TurnAdoption: Decodable {
 struct SessionProgress: Decodable {
     let text: String?
     let at: String?
+}
+
+struct ExecutionGoalProgress: Decodable {
+    let title: String
+    let markdown: String
+    let items: [ExecutionGoalItem]
+    let completed: Int
+    let total: Int
+    let revision: Int?
+    let at: String?
+}
+
+struct ExecutionGoalItem: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let status: String
+
+    var statusLabel: String {
+        switch status {
+        case "completed": return "已完成"
+        case "in_progress": return "执行中"
+        case "failed": return "失败"
+        default: return "待执行"
+        }
+    }
 }
 
 struct RoundTerminal: Decodable {
