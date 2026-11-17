@@ -918,6 +918,16 @@ if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"
     expect(result.classification == "not_sent" && result.applied == false, "核对结果解码")
 }
 
+for (classification, action) in [("not_sent", "回收发送槽"), ("delivered", "接管轮次观察")] {
+    if let result = decode(ReconcileContinuationResponse.self, "{\"classification\":\"\(classification)\"}") {
+        expect(result.confirmationAction == action, "明确核对结果给出对应确认动作：\(classification)")
+        expect(result.confirmationMessage?.contains("不产生模型费用") == true, "核对确认说明不重发且无模型费用")
+    }
+}
+if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"unknown"}"#) {
+    expect(result.confirmationAction == nil, "未知归因不可给出写入动作")
+}
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

@@ -101,6 +101,20 @@ class GoalBlockerFakeTests(unittest.TestCase):
         self.assertEqual((record["resolve_sends"], record["reconcile_calls"]), (1, 1))
         self.assertFalse(self.call("get-task")["task"]["engine_verdict"]["verification_ok"])
 
+    def test_delivered_continuation_requires_confirmation_and_adopts_without_resend(self):
+        self.env["KANPILOT_FAKE_CONTINUATION_CLASSIFICATION"] = "delivered"
+        result = self.call("reconcile-continuation")
+        self.assertEqual(result["classification"], "delivered")
+        self.assertFalse(result["applied"])
+        self.assertFalse(self.state.exists())
+        self.call("reconcile-continuation", {"dry_run": False}, ok=False)
+        result = self.call("reconcile-continuation", {"dry_run": False, "confirm": True})
+        self.assertEqual(result["status"], "continued")
+        self.assertTrue(result["applied"])
+        projection = self.call("get-task")["task"]["continue_execution"]
+        self.assertEqual(projection["state"], "observing")
+        self.assertEqual(projection["turn_id"], "continued-turn")
+
     def test_environment_scenarios_are_isolated_and_reconcile_once(self):
         self.env["KANPILOT_FAKE_GOAL_BLOCKER_SCENARIO"] = "unknown_continue"
         self.assertEqual(self.call("get-goal-blocker")["actions"], ["reconcile"])

@@ -1214,7 +1214,10 @@ def _guard_branch_job(job, task):
         changes = git_delivery.worktree_changes(root)
     except git_delivery.GitDeliveryError as exc:
         raise util.KanpilotError("review_blocked", "Review 提交快照不可读取") from exc
-    util.require(all(git_delivery.is_build_artifact(change["path"]) for change in changes),
+    util.require(all(git_delivery.is_build_artifact(change["path"])
+                     or (change["status"] == "??" and
+                         (change["path"] == ".pi" or change["path"].startswith(".pi/")))
+                     for change in changes),
                  "Review 提交快照已变化", "review_blocked")
 
 

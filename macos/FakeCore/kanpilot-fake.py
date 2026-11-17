@@ -3691,6 +3691,36 @@ def cmd_continue_execution(state, payload):
     return result
 
 
+def cmd_reconcile_continuation_fixture(state, payload):
+    task, marker, error = _goal_blocker_fixture_context(state, payload)
+    if error:
+        return error
+    classification = os.environ.get("KANPILOT_FAKE_CONTINUATION_CLASSIFICATION", "not_sent")
+    if classification not in ("not_sent", "delivered", "unknown"):
+        return fail("未知核对场景", "bad_request")
+    dry_run = payload.get("dry_run", True) is not False
+    if not dry_run and classification != "unknown" and payload.get("confirm") is not True:
+        return fail("核对结果需要显式确认", "bad_request")
+    result = {"task_id": task["task_id"], "run_id": task["run_id"],
+              "operation_id": "fixture-operation", "classification": classification,
+              "detail": {"not_sent": "Plus 没有新轮次，最新转录没有继续指令。",
+                         "delivered": "已核对真实 turn，继续指令已经送达。",
+                         "unknown": "无法确认新轮次来源，保留发送槽。"}[classification],
+              "applied": not dry_run and classification != "unknown"}
+    if classification == "delivered":
+        result["turn_id"] = "continued-turn"
+    if result["applied"]:
+        result["status"] = "continued" if classification == "delivered" else "released"
+        def apply(current):
+            override = current.setdefault("task_overrides", {}).setdefault(task["task_id"], {})
+            override["continue_execution"] = {
+                "eligible": classification == "not_sent", "run_id": task["run_id"],
+                "state": "observing" if classification == "delivered" else "ready",
+                "turn_id": result.get("turn_id")}
+        mutate(state, apply)
+    return result
+
+
 # KP-GB01 isolated native preview. All transitions stay in KANPILOT_FAKE_STATE;
 # no Plus connection, real task, model, source tree or verification command is used.
 GOAL_BLOCKER_FIXTURE_TASK = "auto-verification_unconfirmed"
@@ -4747,14 +4777,7 @@ COMMANDS = {
     "request-continuation": lambda s, p: (
         {"status": "continued", "turn_id": "continued-turn", "session_id": "failed-session"}
         if p.get("confirm") is True else fail("继续执行需要显式确认", "bad_request")),
-    "reconcile-continuation": lambda s, p: (
-        {"task_id": p.get("task_id"), "run_id": p.get("run_id"),
-         "operation_id": "fixture-operation", "classification": "not_sent",
-         "detail": "Plus 会话没有新轮次，最新转录中也没有本任务的继续指令",
-         "applied": p.get("dry_run") is not True,
-         "status": "released" if p.get("dry_run") is not True else None}
-        if p.get("confirm") is True or p.get("dry_run") is not False
-        else fail("核对结果需要显式确认才能回收发送槽", "bad_request")),
+    "reconcile-continuation": cmd_reconcile_continuation_fixture,
     "recover-execution-goals": cmd_recover_execution_goals_fixture,
     "save-execution-answers": lambda s, p: cmd_execution_answers(s, p, "save"),
     "submit-execution-answers": lambda s, p: cmd_execution_answers(s, p, "submit"),

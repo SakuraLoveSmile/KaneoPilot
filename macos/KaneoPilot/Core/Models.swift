@@ -723,6 +723,32 @@ struct ReconcileContinuationResponse: Decodable {
     let operationId: String?
     let status: String?
     let applied: Bool?
+
+    var confirmationTitle: String? {
+        switch classification {
+        case "not_sent": return "回收未确认的发送槽？"
+        case "delivered": return "接管已送达的继续轮次？"
+        default: return nil
+        }
+    }
+
+    var confirmationAction: String? {
+        switch classification {
+        case "not_sent": return "回收发送槽"
+        case "delivered": return "接管轮次观察"
+        default: return nil
+        }
+    }
+
+    var confirmationMessage: String? {
+        switch classification {
+        case "not_sent":
+            return "核心已确认这条继续指令没有送达 Plus。回收后可以重新发送；本次不发送指令、不产生模型费用。"
+        case "delivered":
+            return "核心已核对这条继续指令已经送达，将按真实 turn 接回观察并继续核验。本次不重发指令、不产生模型费用。"
+        default: return nil
+        }
+    }
 }
 
 /// KP-GB01：目标受阻是真实 Goal 状态，独立于报告 draft/验证结果。

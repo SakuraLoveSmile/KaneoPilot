@@ -278,6 +278,20 @@ class ReconcileContinuationTests:
         self.assertEqual(self.statuses(), ["unknown"])
         self.assertEqual(self.f.task()["status"], "needs_user")
 
+    def test_quoted_or_partial_continue_prompt_does_not_authorize_a_foreign_turn(self):
+        marker = cont.PROMPT.split("：")[0]
+        for content in ("请不要执行：" + cont.PROMPT, marker, "引用了" + marker):
+            with self.subTest(content=content):
+                self.setup_fixture(
+                    lambda before: _page([{"role": "user", "turnId": "foreign-turn",
+                                           "content": content}], start=1, more_before=True),
+                    current_turn="foreign-turn")
+                result = self.reconcile(dry_run=False, confirm=True)
+                self.assertEqual(result["classification"], "unknown")
+                self.assertFalse(result["applied"])
+                self.assertEqual(self.statuses(), ["unknown"])
+                self.assertEqual(self.f.task()["status"], "needs_user")
+
     def test_running_session_stays_unknown(self):
         self.setup_fixture(lambda before: _page([]), running=True)
         self.assertEqual(self.reconcile()["classification"], "unknown")

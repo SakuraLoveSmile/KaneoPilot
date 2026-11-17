@@ -209,7 +209,6 @@ def _plus_inner(status):
     return inner if isinstance(inner, dict) else {}
 
 
-_MARKER = PROMPT.split("：")[0]
 _SCAN_PAGE, _SCAN_PAGES = 20, 40
 
 
@@ -230,7 +229,7 @@ def _turn_opener(client, session_id, turn_id):
         for row in session.get("messages") or ():
             if (isinstance(row, dict) and row.get("role") == "user"
                     and row.get("turnId") == turn_id):
-                return True, True, _MARKER in str(row.get("content") or "")
+                return True, True, str(row.get("content") or "").startswith(PROMPT)
         first = session.get("message_start")
         if not session.get("has_more_before") or not isinstance(first, int) or first <= 0:
             return False, True, False
@@ -267,7 +266,7 @@ def _reconcile_classify(client, session_id, old_turn, inner):
         return ("unknown", None, "转录读取不完整，无法确认继续指令是否已送达")
     for row in session.get("messages") or ():
         if isinstance(row, dict) and row.get("role") == "user" \
-                and _MARKER in str(row.get("content") or ""):
+                and str(row.get("content") or "").startswith(PROMPT):
             return ("unknown", None, "尾部转录已有继续指令消息，但会话没有对应轮次")
     if session.get("has_more_after"):
         return ("unknown", None, "转录尚未读到最新分页，无法确认继续指令是否已送达")

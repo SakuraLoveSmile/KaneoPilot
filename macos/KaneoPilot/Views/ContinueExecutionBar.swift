@@ -10,6 +10,7 @@ struct ContinueExecutionBar: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var confirming = false
     @State private var confirmingReconcile = false
+    @State private var pendingReconcile: ReconcileContinuationResponse?
     @State private var working = false
     @State private var error: String?
     @State private var reconcileNote: String?
@@ -105,11 +106,11 @@ struct ContinueExecutionBar: View {
         } message: {
             Text("将在同一 Pi Desktop Plus 会话中发送一条继续指令，沿用原计划、工作树与冻结验证要求，不重新规划。会调用当前执行模型并产生费用；完成后重新提交结构化报告并继续核验。")
         }
-        .confirmationDialog("回收未确认的发送槽？", isPresented: $confirmingReconcile, titleVisibility: .visible) {
-            Button("回收发送槽") { Task { await check(confirm: true) } }
+        .confirmationDialog(pendingReconcile?.confirmationTitle ?? "核对继续发送", isPresented: $confirmingReconcile, titleVisibility: .visible) {
+            Button(pendingReconcile?.confirmationAction ?? "确认") { Task { await check(confirm: true) } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("核心已确认这条继续指令没有送达 Plus（没有新轮次，最新转录中也没有它）。回收后可以重新发送；本次操作不发送任何指令、不产生模型费用。")
+            Text(pendingReconcile?.confirmationMessage ?? "请先核对发送结果。")
         }
     }
 
@@ -127,9 +128,12 @@ struct ContinueExecutionBar: View {
         if let failure { error = failure; return }
         guard let result else { error = "核对未返回结果，请刷新后重试。"; return }
         reconcileNote = result.detail
-        // 只读核对：只有「未送达」才给出回收确认；其余分类只展示核心原文。
+        // 核对明确未送达可回收，明确已送达可接管；unknown 仅展示原文。
         // 写入路径由 perform 统一刷新列表与详情，这里不再重复刷新。
-        if !confirm, result.classification == "not_sent" { confirmingReconcile = true }
+        if !confirm {
+            pendingReconcile = result
+            confirmingReconcile = result.confirmationAction != nil
+        }
     }
 
     private func send() async {
