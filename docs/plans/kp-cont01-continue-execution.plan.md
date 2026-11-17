@@ -96,3 +96,8 @@ continue-execution {task_id, run_id, confirm: true, operation_id?}
 | 2026-11-11 19:45 | 测试版 210 | 手动 `channel=test`、`base_version=0.5.6`、run 43014550637（提交 `d353d7f`）。总共 4 次 attempt：attempt 1 `macos-fixtures (b)` 的 python-runtime 夹具在 `executor-instance 无输出` 报错；attempt 2 同一断言转到 owner-fixtures，而 python-runtime 三个模式（25+7+4）全通过；attempt 3 全部夹具通过、`publish` 崩于 `verify_remote_tag` 读到 `None`；attempt 4 通过。三次失败之间源码无改动（多为文档或零改动），判为云端偶发，不以失败 attempt 宣称夹具通过 | 通过（含 3 次偶发） |
 | 2026-11-11 20:45 | 发布核对 | `v0.5.6-test.210` 为 annotated 标签、指向 `d353d7f`；预发布 `prerelease=true, draft=false`，四项资产齐全：APK 8557696、DMG 46031197、manifest.json、SHA256SUMS；`shasum -a 256 -c` 三项全 OK；DMG 内 `CFBundleShortVersionString=0.5.6-test.210`、`CFBundleVersion=210`、thin arm64、`local.kaneopilot` ad-hoc 签名；安装包内核心 `cli.py` 含 `reconcile-continuation`、可执行文件含 `reconcileContinuation` | 通过 |
 | 2026-11-11 20:45 | 发布缺口（待修） | `scripts/release_bundle.py` 的 `verify_remote_tag` 在标签刚创建的回读阶段，`GET /git/ref/tags/<tag>` 返回 404/`None` 时直接 `reference["object"]` 崩溃（`TypeError: 'NoneType' object is not subscriptable`），未按「标签尚未创建」分支处理；本地未修复本轮既有发布脚本，留作独立任务 | 未开始 |
+
+
+## 2026-11-17 KP-WT01集成收尾
+
+用户已明确改为组合验证后合入main、发布测试版并清理工作树，替代此前仅测试版/保留树的限制。本功能已集成至源码1596796；本次验收、云端发布与保全清理证据统一见 [KP-WT01](kp-wt01-worktree-closeout.plan.md)。真实任务仍待体验，历史通过不替代本次组合态结果。

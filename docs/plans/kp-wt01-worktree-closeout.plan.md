@@ -6,7 +6,7 @@
 - 来源：RV01 bd2c7c0、EP01 2b6d55b、GB02 7ea2ab3；CONT01/CONT02/GB01 独有记录及全量文件已由清理会话保全，分支保留。
 - 集成基线：origin/main 1773a96（现有 test.307 主线），分支 chore/20261117-kp-wt01-closeout-integration。
 - 工作树：/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261117-chore-kp-wt01-closeout-integration。
-- 主工作区：用户两份未跟踪计划保留，本地主 main 落后12提交，不借集成重置主工作区。
+- 主工作区：用户两份未跟踪计划保留，本地主 main 原落后12提交；合入时仅允许快进，并核验两份用户计划字节不变。
 
 ## 任务与边界
 
@@ -33,3 +33,12 @@ T4 交付：最终组合态检查、独立审查，合入 main 后发布下一�
 - 独立审查发现并修正：delivered缺界面确认接管；短marker包含匹配导致误归因。完整PROMPT前缀归因及反向测试、两种明确确认动作已补；unknown始终只读。
 - 新组合回归发现未忽略的.pi/evidence会被提交快照守卫误拦，现仅允许??的.pi路径；tracked/staged反向测试保留。原生证据完整复制及哈希校验不变。
 - FakeCore补none与delivered场景，7项隔离检查通过。独立reviewer针对原发现修正复查无新增实质问题。最终组合测试与云端/native仍在进行；上述记录不是最终通过或用户验收。
+
+### 最终组合验证（源码 1596796）
+
+- Python3.10.10 + 真实pytest9.1.1：10文件组合142 passed + 3 subtests（157.03s）；FakeCore 7 passed（2.394s）。日志保存于清理会话的 outputs/KP-WT01验证资料。
+- Packages preview 308 / run 44052809113：macOS DMG、Swift两分片、Android与Python3.11/3.13十分片已成功，跨平台冷构建门禁成功，整体结论success。
+- 下载包独立身份与SHA/codesign已核验。FakeCore原生实测：none 1180×760深色无Goal卡，目标进度1/4四态与继续核对共存；delivered核对后显示确认接管，确认后观察新轮次；unavailable 900×600浅色紧凑提示、进度和核对入口共存；blocked 1180×760可访问两个确认窗，取消继续后接受现状显示“未验证”，state中verification_ok=false、review_authorized=true。独立数据、空凭据，无真实模型或任务写入。
+- 旧冻结源码指纹跨版本可能报告冲突；升级前完成旧评审，或按正常流程重新准备材料，不自动改写旧身份。受阻Goal功能依赖Pi v0.15.17及以上。无新增数据库schema。
+- 尚未覆盖安装正式App、真实Plus发送、真实Goal接受/续跑、Android真机；适用隔离验证与发布完成后状态为“待体验”，由用户确认后才可标已验收。
+- 清理范围仅RV01、EP01、GB02及本次KP-WT01；20261117-feat-kp-ui10-planning-material-preview是其他活跃任务，保留。最终发布与保全路径追加于本记录。

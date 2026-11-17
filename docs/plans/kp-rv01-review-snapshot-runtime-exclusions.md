@@ -58,3 +58,8 @@
 - 资产 4 项：`KaneoPilot-0.5.6-test.173-android.apk`、`KaneoPilot-0.5.6-test.173-macos-arm64.dmg`、`manifest.json`、`SHA256SUMS`；manifest 记录 `channel=test`、`base_version=0.5.6`、`build_number=173`、`source_sha=8b0d948`。
 - 发布入口：<https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.6-test.173>。
 - 用户 2026-11-08 将「修复完成且验证通过后发布测试版」定为固定流程，已写入 `AGENTS.md`（本分支 `8b0d948`）：后续不再逐次询问，正式版本仍由维护者定版本。
+
+
+## 2026-11-17 KP-WT01集成收尾
+
+用户已明确改为组合验证后合入main、发布测试版并清理工作树，替代此前仅测试版/保留树的限制。本功能已集成至源码1596796；本次验收、云端发布与保全清理证据统一见 [KP-WT01](kp-wt01-worktree-closeout.plan.md)。真实任务仍待体验，历史通过不替代本次组合态结果。

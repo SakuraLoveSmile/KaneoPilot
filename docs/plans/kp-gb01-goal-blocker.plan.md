@@ -72,3 +72,8 @@ Pilot 新增 `get-goal-blocker {task_id,run_id}` 与 `resolve-goal-blocker {task
 ### 云端候选准备
 
 FakeCore 补齐 blocked/accepted/unknown/legacy/unavailable 场景，主控复跑5项 Python 隔离回归通过。原生界面将使用云端独立 bundle 产物及隔离 FakeCore 数据核验，未连接真实任务。准备提交专用 Pilot 分支并触发 Packages 预览；通过后发布 0.5.7 测试版。以上早期“尚未授权”段落为历史检查点，已被末节用户发布授权取代。
+
+
+## 2026-11-17 KP-WT01集成收尾
+
+用户已明确改为组合验证后合入main、发布测试版并清理工作树，替代此前仅测试版/保留树的限制。本功能已集成至源码1596796；本次验收、云端发布与保全清理证据统一见 [KP-WT01](kp-wt01-worktree-closeout.plan.md)。真实任务仍待体验，历史通过不替代本次组合态结果。

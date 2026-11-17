@@ -193,3 +193,8 @@
 - 读取公开Release、manifest、SHA256SUMS：四项资产齐全，资产digest与SHA256SUMS/manifest一致，下载的manifest及已核验DMG哈希与公开资产一致；annotated tag解引用与两端manifest来源均为 `f31f94b843016cf364f6ef20dc3ca02443a41c13`，version0.5.7-test.222、channel=test、base0.5.7、build222一致。
 - Android正式证书指纹 `5062db967ce58d65df2c47895649df43464bab9a6eadf135f3a1a81ff4785ada`，由云端签名/包核验与公开manifest记录；本地未安装Android。macOS候选DMG已经由本机验证签名并隔离启动，未更新正式安装。
 - 公开核验资料位于 `build/kp-ep01-goal-progress/test-222/release/`。未合入main，保留本任务工作树与全部证据；待后续合入且验证通过后按本计划收尾。不将公开发布或隔离夹具通过标为用户验收。
+
+
+## 2026-11-17 KP-WT01集成收尾
+
+用户已明确改为组合验证后合入main、发布测试版并清理工作树，替代此前仅测试版/保留树的限制。本功能已集成至源码1596796；本次验收、云端发布与保全清理证据统一见 [KP-WT01](kp-wt01-worktree-closeout.plan.md)。真实任务仍待体验，历史通过不替代本次组合态结果。
