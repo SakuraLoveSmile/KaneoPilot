@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 
 /// v2 §4.7 规划面板（protocol §5.22 手动规划链路）：
 /// ① 选择任务 → ② 核对材料并显式开始（prepare-plan-input / start-plans）。
@@ -35,6 +36,8 @@ struct PlanningView: View {
     @State private var showMappingSheet = false
     @State private var initialFocusApplied = false
     @State private var focusedTaskAnchor: String?
+    // 材料文件预览目标（快照）；sheet 挂根节点，避免行禁用/材料失效影响已打开预览。
+    @State private var materialPreview: MaterialPreviewTarget?
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -81,6 +84,10 @@ struct PlanningView: View {
             .frame(minWidth: 600, idealWidth: 760, minHeight: 480, idealHeight: 560)
             .frame(width: minimumMappingSheetPreview ? 600 : nil,
                    height: minimumMappingSheetPreview ? 480 : nil)
+        }
+        .sheet(item: $materialPreview) { target in
+            MaterialPreviewSheet(target: target)
+                .frame(minWidth: 560, idealWidth: 720, minHeight: 420, idealHeight: 560)
         }
     }
 
@@ -541,14 +548,21 @@ struct PlanningView: View {
                             paths: pathsBinding(for: item.taskId),
                             excluded: exclusionsBinding(for: item.taskId),
                             onPrepare: { Task { await prepare(item) } },
-                            onPickFiles: { pickLocalFiles(for: item.taskId) }
+                            onPickFiles: { pickLocalFiles(for: item.taskId) },
+                            onPreview: { file in
+                                guard let abs = MaterialPreview.absolutePath(
+                                    inputDir: preparations[item.taskId]?.response?.inputDir,
+                                    relative: file.path) else { return }
+                                materialPreview = MaterialPreviewTarget(
+                                    taskId: item.taskId, file: file, absolutePath: abs)
+                            }
                         )
                         .disabled(starting)
                     }
                 }
                 Section("开始前确认") {
                     Text("点击“开始规划”后，仅提交材料就绪的 \(startableTasks.count) 项任务，并使用上方配置启动规划。其他任务保留在此，处理问题并重新准备后再开始。")
-                        .font(.kpSmall)
+                        .font(.kpLabel)
                         .foregroundStyle(Color.kpSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -917,9 +931,10 @@ private struct PrepareRow: View {
     @Binding var excluded: Set<String>
     let onPrepare: () -> Void
     let onPickFiles: () -> Void
+    let onPreview: (PlanInputFile) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
+        VStack(alignment: .leading, spacing: Spacing.m) {
             header
             if preparation.loading {
                 HStack(spacing: Spacing.s) {
@@ -957,13 +972,14 @@ private struct PrepareRow: View {
             }
             inputs
         }
-        .padding(.vertical, Spacing.s)
+        .padding(.vertical, Spacing.m)
     }
 
     private var header: some View {
         HStack(spacing: Spacing.m) {
             Text(item.title ?? item.taskId)
                 .font(.kpBody).lineLimit(1)
+                .help(item.title ?? item.taskId)
             Spacer()
             if let response = preparation.response {
                 Label {
@@ -975,9 +991,11 @@ private struct PrepareRow: View {
                         .foregroundStyle(preparation.canStart ? Color.kpGreen : Color.kpOrange)
                 }
                 .font(.kpSmall)
+                .fixedSize()
                 if let sha = response.inputSha256 {
                     Text("材料 \(String(sha.prefix(12)))…")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        .fixedSize()
                 }
             }
             Button {
@@ -986,29 +1004,30 @@ private struct PrepareRow: View {
                 Label(preparation.response == nil && !preparation.needsPreparation ? "准备" : "重新准备",
                       systemImage: "arrow.clockwise")
             }
+            .fixedSize()
             .disabled(preparation.loading)
             .help("prepare-plan-input：重新核验需求并生成材料目录")
         }
     }
 
     private func filesList(_ response: PreparePlanInputResponse) -> some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            Text("材料文件（\(response.files?.count ?? 0)）")
-                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-            ForEach(response.files ?? []) { file in
-                HStack(spacing: Spacing.s) {
-                    Image(systemName: "doc")
-                        .foregroundStyle(Color.kpSecondary)
-                    Text(file.name ?? "—")
-                        .font(.kpSmall).lineLimit(1)
-                    Text(file.source ?? "")
+        let files = response.files ?? []
+        let paths = files.map {
+            MaterialPreview.absolutePath(inputDir: response.inputDir, relative: $0.path)
+        }
+        return VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack(spacing: Spacing.s) {
+                Text("材料文件（\(files.count)）")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                Spacer()
+                if paths.contains(where: { $0 != nil }) {
+                    Text("点击文件可预览")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    if let size = file.size {
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(size),
-                                                       countStyle: .file))
-                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    }
                 }
+            }
+            ForEach(Array(files.enumerated()), id: \.offset) { index, file in
+                MaterialFileRow(file: file, absolutePath: paths[index],
+                                onPreview: { onPreview(file) })
             }
         }
     }
@@ -1048,9 +1067,9 @@ private struct PrepareRow: View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
                 Text("补充说明")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 TextField("给规划模型的补充说明（可选）", text: $supplement)
-                    .font(.kpSmall)
+                    .font(.kpBody)
                     .textFieldStyle(.roundedBorder)
             }
             HStack(spacing: Spacing.s) {
@@ -1094,5 +1113,395 @@ private struct PrepareRow: View {
                 }
             }
         }
+    }
+}
+
+// BEGIN MATERIAL PREVIEW SUPPORT
+/// 材料文件预览的纯逻辑：类型分类、路径解析、来源标签、文本解码。
+/// run-planning-input-fixtures.sh 提取本块独立编译断言，保持 Foundation-only、internal。
+enum MaterialPreview {
+    enum Kind: String { case image, text, other }
+
+    static let textReadLimit = 2 * 1024 * 1024
+
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp", "gif", "heic", "tiff", "bmp",
+    ]
+    private static let textExtensions: Set<String> = [
+        "txt", "log", "md", "text", "json", "jsonl", "csv", "tsv",
+        "yaml", "yml", "xml", "ini", "sh", "py", "swift", "js", "ts", "sql",
+    ]
+
+    /// mediaType 优先（含 image/* 通配）；local 文件无类型时按扩展名回退。
+    static func kind(mediaType: String?, name: String?) -> Kind {
+        let mime = mediaType?.lowercased() ?? ""
+        if mime.hasPrefix("image/") { return .image }
+        if mime.hasPrefix("text/") || mime == "application/json" { return .text }
+        let ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
+        if imageExtensions.contains(ext) { return .image }
+        if textExtensions.contains(ext) { return .text }
+        return .other
+    }
+
+    static func absolutePath(inputDir: String?, relative: String?) -> String? {
+        guard let inputDir, !inputDir.isEmpty, let relative, !relative.isEmpty else { return nil }
+        return URL(fileURLWithPath: inputDir).appendingPathComponent(relative).path
+    }
+
+    static func sourceLabel(_ source: String?) -> String {
+        guard let source, !source.isEmpty else { return "材料" }
+        switch source {
+        case "source_snapshot": return "源快照"
+        case "supplement": return "补充说明"
+        case "review_report": return "评审报告"
+        case "core_verification": return "核验记录"
+        case "review_remediation": return "评审修复"
+        case "attachment": return "附件"
+        case "local": return "本地文件"
+        case "execution_worktree": return "工作树变更"
+        default: break
+        }
+        let parts = source.split(separator: ":", maxSplits: 1).map(String.init)
+        if parts.count == 2, let kindLabel = parts[1] == "image" ? "图片" : parts[1] == "file" ? "文件" : nil {
+            if parts[0] == "description" { return "描述\(kindLabel)" }
+            if parts[0].hasPrefix("comment[") { return "评论\(kindLabel)" }
+        }
+        return source
+    }
+
+    /// 严格 UTF-8（不做替换解码，避免把二进制误判成文本）；
+    /// 截断边界可能切在多字节字符中间，去掉尾部续字节及其引导字节再试。
+    static func decodeText(_ data: Data, truncated: Bool) -> String? {
+        if let text = String(data: data, encoding: .utf8) { return text }
+        guard truncated, !data.isEmpty else { return nil }
+        let bytes = [UInt8](data)
+        var end = bytes.count
+        var trimmed = 0
+        while end > 0, trimmed < 4, bytes[end - 1] & 0xC0 == 0x80 {
+            end -= 1
+            trimmed += 1
+        }
+        if end > 0, trimmed < 4, bytes[end - 1] >= 0xC0 {
+            end -= 1
+        }
+        return String(data: Data(bytes[..<end]), encoding: .utf8)
+    }
+}
+// END MATERIAL PREVIEW SUPPORT
+
+/// 预览目标快照：打开后父级 invalidate/re-prepare 不影响已呈现内容。
+private struct MaterialPreviewTarget: Identifiable {
+    let id: String
+    let name: String
+    let source: String?
+    let mediaType: String?
+    let size: Int?
+    let absolutePath: String
+    let kind: MaterialPreview.Kind
+
+    init(taskId: String, file: PlanInputFile, absolutePath: String) {
+        id = "\(taskId):\(absolutePath)"
+        name = file.name ?? URL(fileURLWithPath: absolutePath).lastPathComponent
+        source = file.source
+        mediaType = file.mediaType
+        size = file.size
+        self.absolutePath = absolutePath
+        kind = MaterialPreview.kind(mediaType: file.mediaType, name: file.name)
+    }
+}
+
+private func materialFileIcon(kind: MaterialPreview.Kind, mediaType: String?,
+                              name: String?) -> (symbol: String, color: Color) {
+    let ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
+    let isJSON = mediaType?.lowercased() == "application/json" || ext == "json" || ext == "jsonl"
+    switch kind {
+    case .image: return ("photo", .kpBlue)
+    case .text: return isJSON ? ("curlybraces", .kpOrange) : ("doc.text", .kpSecondary)
+    case .other: return ("doc", .kpSecondary)
+    }
+}
+
+/// 材料文件行（§3 可点行 ≥40）：整行点击预览，右键打开/Finder/复制路径。
+private struct MaterialFileRow: View {
+    let file: PlanInputFile
+    let absolutePath: String?
+    let onPreview: () -> Void
+    @State private var isHovering = false
+
+    private var icon: (symbol: String, color: Color) {
+        materialFileIcon(kind: MaterialPreview.kind(mediaType: file.mediaType, name: file.name),
+                         mediaType: file.mediaType, name: file.name)
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: Spacing.s) {
+            Image(systemName: icon.symbol)
+                .foregroundStyle(icon.color)
+                .frame(width: 16)
+            Text(file.name ?? "—")
+                .font(.kpBody)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(MaterialPreview.sourceLabel(file.source))
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize()
+                .padding(.horizontal, Spacing.s)
+                .padding(.vertical, Spacing.xs)
+                .background(Color.kpControl, in: Capsule())
+                .help(file.source ?? "")
+            Spacer(minLength: Spacing.s)
+            if let size = file.size {
+                Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                    .font(.kpSmall.monospacedDigit())
+                    .foregroundStyle(Color.kpSecondary)
+                    .frame(width: 64, alignment: .trailing)
+            }
+            if absolutePath != nil {
+                Text("预览")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpBlue)
+                    .opacity(isHovering ? 1 : 0)
+                    .frame(width: 32, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, Spacing.s)
+        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+    }
+
+    var body: some View {
+        if let abs = absolutePath {
+            Button(action: onPreview) {
+                rowContent
+                    .background(isHovering ? Color.kpBlue.opacity(0.06) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: Radius.control))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering = $0 }
+            .contextMenu {
+                Button("用默认应用打开") { Workspace.open(abs) }
+                Button("在 Finder 中显示") { Workspace.reveal(abs) }
+                Button("复制路径") { Workspace.copy(abs) }
+            }
+            .help("点击预览材料文件")
+            .accessibilityLabel("预览材料文件 \(file.name ?? "")")
+        } else {
+            rowContent
+                .help("核心未返回材料目录，无法定位文件")
+        }
+    }
+}
+
+/// 材料文件预览 sheet：图片内嵌（ImageIO 缩略图）、UTF-8 文本内嵌（2MiB 上限）、
+/// 其他类型回退系统默认应用；只读，不修改材料。
+private struct MaterialPreviewSheet: View {
+    let target: MaterialPreviewTarget
+    @Environment(\.dismiss) private var dismiss
+
+    private enum LoadState {
+        case loading
+        case image(NSImage)
+        case text(String, truncated: Bool)
+        case unsupported
+        case failed(String)
+    }
+    @State private var state: LoadState = .loading
+
+    private var icon: (symbol: String, color: Color) {
+        materialFileIcon(kind: target.kind, mediaType: target.mediaType, name: target.name)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            footer
+        }
+        .task(id: target.id) { await load() }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack(spacing: Spacing.s) {
+                Image(systemName: icon.symbol)
+                    .foregroundStyle(icon.color)
+                Text(target.name)
+                    .font(.kpBody.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(target.name)
+                Text(MaterialPreview.sourceLabel(target.source))
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize()
+                    .padding(.horizontal, Spacing.s)
+                    .padding(.vertical, Spacing.xs)
+                    .background(Color.kpControl, in: Capsule())
+                Spacer()
+                if let size = target.size {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                        .font(.kpSmall.monospacedDigit())
+                        .foregroundStyle(Color.kpSecondary)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Label("关闭", systemImage: "xmark.circle")
+                }
+                .labelStyle(.iconOnly)
+                .help("关闭预览")
+                .accessibilityLabel("关闭预览")
+            }
+            Text(target.absolutePath)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch state {
+        case .loading:
+            LoadingView()
+        case .image(let image):
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .padding(Spacing.l)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.kpControl)
+        case .text(let text, let truncated):
+            VStack(alignment: .leading, spacing: 0) {
+                if truncated {
+                    Text("仅显示前 2 MiB，完整内容请用默认应用打开。")
+                        .font(.kpSmall)
+                        .foregroundStyle(Color.kpOrange)
+                        .padding(.horizontal, Spacing.l)
+                        .padding(.vertical, Spacing.s)
+                }
+                ScrollView {
+                    Text(text)
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(Spacing.l)
+                }
+            }
+        case .unsupported:
+            infoCard(icon: "doc", title: "该类型不支持内嵌预览",
+                     message: "可用系统默认应用打开查看。")
+        case .failed(let reason):
+            infoCard(icon: "exclamationmark.triangle", title: "无法读取材料文件",
+                     message: reason)
+        }
+    }
+
+    private func infoCard(icon: String, title: String, message: String) -> some View {
+        VStack(spacing: Spacing.m) {
+            Image(systemName: icon)
+                .font(.system(size: 22))
+                .foregroundStyle(Color.kpSecondary)
+            Text(title).font(.kpBody)
+            Text(message)
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+                .multilineTextAlignment(.center)
+            Button("用默认应用打开") { Workspace.open(target.absolutePath) }
+        }
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var footer: some View {
+        HStack(spacing: Spacing.m) {
+            Button {
+                Workspace.open(target.absolutePath)
+            } label: {
+                Label("用默认应用打开", systemImage: "arrow.up.forward.app")
+            }
+            Button {
+                Workspace.reveal(target.absolutePath)
+            } label: {
+                Label("在 Finder 中显示", systemImage: "folder")
+            }
+            Button {
+                Workspace.copy(target.absolutePath)
+            } label: {
+                Label("复制路径", systemImage: "doc.on.doc")
+            }
+            Spacer()
+            Button("关闭") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, Spacing.l)
+        .padding(.vertical, Spacing.m)
+    }
+
+    private func load() async {
+        state = .loading
+        let path = target.absolutePath
+        let kind = target.kind
+        let limit = MaterialPreview.textReadLimit
+        let result: Result<(data: Data, truncated: Bool), String> = await Task.detached(priority: .userInitiated) {
+            guard FileManager.default.fileExists(atPath: path) else {
+                return .failure("文件不存在或已被移除，可重新准备材料。")
+            }
+            guard let handle = FileHandle(forReadingAtPath: path) else {
+                return .failure("没有读取权限。")
+            }
+            defer { try? handle.close() }
+            do {
+                let data = try handle.read(upToCount: limit + 1) ?? Data()
+                let truncated = data.count > limit
+                return .success((truncated ? Data(data.prefix(limit)) : data, truncated))
+            } catch {
+                return .failure("读取失败：\(error.localizedDescription)")
+            }
+        }.value
+        if Task.isCancelled { return }
+        switch result {
+        case .failure(let message):
+            state = .failed(message)
+        case .success(let payload):
+            switch kind {
+            case .other:
+                state = .unsupported
+            case .image:
+                if let image = Self.thumbnail(payload.data) {
+                    state = .image(image)
+                } else {
+                    state = .failed("图片解码失败，可用默认应用打开。")
+                }
+            case .text:
+                if let text = MaterialPreview.decodeText(payload.data, truncated: payload.truncated) {
+                    state = .text(text, truncated: payload.truncated)
+                } else {
+                    state = .unsupported
+                }
+            }
+        }
+    }
+
+    /// ImageIO 缩略图解码，避免 20MiB 压缩图全量展开成数百 MB 位图。
+    private static func thumbnail(_ data: Data) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2400,
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cgImage,
+                       size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 }

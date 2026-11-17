@@ -271,7 +271,8 @@ Plus轮次在搜索框前增加紧凑状态行，初次进入及“检查 Plus �
 
 - 入口：「任务」区工具栏 `规划待办…`；待处理/请求详情 `prepare_plan`/`fetch_todos` 动作。窗口约 760×600（sheet 或独立 Window）。
 - **第一步 获取 To Do**：`刷新` 调 `fetch-todos`；列表行=标题、项目徽标、`local_status`（未导入/需重新规划/已有计划…）、附件计数、`selectable=false` 时灰显 + `blocked_reason`。仅 `selectable` 行可勾选进入下一步。
-- **第二步 准备材料**：对勾选任务逐条 `prepare-plan-input`（自动或点 `准备`）：展示 `files[]`（名称/大小/来源）、`issues[]`（红图标+文字）、`can_start`；提供补充说明输入框、本地文件选择（`local_paths`）、失效附件排除（`excluded_remote_ids` 勾选）。`issues` 未清零前 `can_start=false`，开始按钮禁用并写明原因。
+- **第二步 准备材料**：对勾选任务逐条 `prepare-plan-input`（自动或点 `准备`）：展示 `files[]`（名称/大小/来源，行可点击预览，见下条）、`issues[]`（红图标+文字）、`can_start`；提供补充说明输入框、本地文件选择（`local_paths`）、失效附件排除（`excluded_remote_ids` 勾选）。`issues` 未清零前 `can_start=false`，开始按钮禁用并写明原因。
+- **材料文件预览（kp-ui10）**：`files[]` 行为可点行（§3 ≥40pt），整行点击打开内嵌预览 sheet——图片经 ImageIO 缩略图适应窗口显示；UTF-8 文本等宽 12pt 可选中复制，仅读前 2MiB 并提示截断；其他类型显示信息卡并回退「用默认应用打开」。预览 sheet 挂面板根节点、持文件元数据快照，材料重新准备或失效不影响已打开预览；预览只读，不修改材料。行右键菜单：用默认应用打开 / 在 Finder 中显示 / 复制路径。来源显示友好标签（源快照/补充说明/附件/评论图片…），原始 `source` 经 help 保留，未知来源原样显示。文件绝对路径由 `input_dir` + `files[].path` 解析；旧核心未返回 `input_dir` 时该行禁用预览并说明原因。提交进行中（`starting`）行点击与右键不生效为预期。
 - **规划方式选择（T2，protocol §5.23.2）**：第二步增加明确的**两项**选择——`内置规划`（builtin）与 `Spec Planner 插件`（spec_plan）。默认预选取 `get-planner-config` 的 `default_method`（缺省 builtin）。`planner-capabilities.planner_methods.spec_plan.available=false` 时该项禁用并展示 `reason`；选择对本批次选中任务生效（每项 `start-plans` 带 `planner_method`），第三步提交前在汇总区明示所选方式。spec_plan 选项附边界说明：「该方式经 Codex 插件技能执行，可能加载本机用户配置中的其他能力（MCP/规则）；不使用隔离用户配置的只读内置链路。」普通规划/评审修复规划仍各自沿用既有模型/思考等级设置。
 - **第三步 开始规划**：`开始规划` 调 `start-plans`（已勾选且 `can_start` 项批量提交）；逐行显示结果——成功 `已排队`、幂等 `已在队列`、失败 `code`+`error` 原文。成功后核心立即唤起规划 runner；面板显示进行中轮次与最近日志摘要。
 - 已授权排队中的任务显示 `已排队等待规划`；旧未授权 plan 请求显示 `等待确认材料`（点行直接进入第二步）。

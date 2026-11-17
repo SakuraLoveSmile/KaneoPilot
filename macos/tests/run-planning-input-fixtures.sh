@@ -11,8 +11,11 @@ root, fixture = map(Path, sys.argv[1:])
 source = (root / 'macos/KaneoPilot/Views/PlanningView.swift').read_text()
 state = source.split('// BEGIN PLANNING PREPARATION STATE')[1].split('// END PLANNING PREPARATION STATE')[0]
 (fixture / 'Preparation.swift').write_text('import Foundation\n' + state)
+preview = source.split('// BEGIN MATERIAL PREVIEW SUPPORT')[1].split('// END MATERIAL PREVIEW SUPPORT')[0]
+(fixture / 'MaterialPreview.swift').write_text('import Foundation\n' + preview)
 PY
 swiftc -O "$ROOT/macos/KaneoPilot/Core/Models.swift" \
   "$ROOT/macos/tests/LabelsStub.swift" "$FIXTURE/Preparation.swift" \
+  "$FIXTURE/MaterialPreview.swift" \
   "$ROOT/macos/tests/planning_input_main.swift" -o "$FIXTURE/fixture"
 "$FIXTURE/fixture"

@@ -1,7 +1,8 @@
 import Foundation
 
-/// Compile the marked PlanPreparation type from the actual PlanningView.swift,
-/// together with Models.swift and LabelsStub.swift. No core, model, DB or network calls.
+/// Compile the marked PlanPreparation and MaterialPreview types from the actual
+/// PlanningView.swift, together with Models.swift and LabelsStub.swift.
+/// No core, model, DB or network calls.
 @main struct PlanningInputFixtures {
     static func check(_ value: Bool, _ reason: String) {
         if !value {
@@ -80,6 +81,65 @@ import Foundation
         state.finish(response: response("exclusions-updated-hash"), error: nil, revision: cleared)
         check(state.canStart && state.previousIssues.isEmpty,
               "new preparation replaces the obsolete issues")
-        print("PASS planning materials: invalidation; per-task isolation; single flight; stale success/failure; new hash; core start boundary")
+
+        // kp-ui10 材料预览纯逻辑：类型分类 / 路径解析 / 来源标签 / 文本解码。
+        check(MaterialPreview.kind(mediaType: "image/png", name: nil) == .image,
+              "image mime classifies as image")
+        check(MaterialPreview.kind(mediaType: "image/*", name: "x.bin") == .image,
+              "wildcard image mime classifies as image")
+        check(MaterialPreview.kind(mediaType: nil, name: "photo.PNG") == .image,
+              "extension fallback is case-insensitive")
+        check(MaterialPreview.kind(mediaType: "text/markdown", name: "supplement.md") == .text,
+              "markdown mime classifies as text")
+        check(MaterialPreview.kind(mediaType: "application/json", name: "source.json") == .text,
+              "json mime classifies as text")
+        check(MaterialPreview.kind(mediaType: nil, name: "notes.md") == .text,
+              "md extension classifies as text")
+        check(MaterialPreview.kind(mediaType: nil, name: "a.csv") == .text,
+              "csv extension classifies as text")
+        check(MaterialPreview.kind(mediaType: "application/zip", name: "a.zip") == .other,
+              "binary mime stays other")
+        check(MaterialPreview.kind(mediaType: nil, name: nil) == .other,
+              "unknown file stays other")
+        check(MaterialPreview.kind(mediaType: "text/plain", name: "a.png") == .text,
+              "mime takes priority over extension")
+
+        check(MaterialPreview.absolutePath(inputDir: "/tmp/in", relative: "files/a.png")
+              == "/tmp/in/files/a.png", "relative path joins input dir")
+        check(MaterialPreview.absolutePath(inputDir: "/tmp/in/", relative: "source.json")
+              == "/tmp/in/source.json", "trailing slash does not double")
+        check(MaterialPreview.absolutePath(inputDir: nil, relative: "a") == nil,
+              "missing input dir cannot locate file")
+        check(MaterialPreview.absolutePath(inputDir: "/tmp/in", relative: nil) == nil,
+              "missing relative path cannot locate file")
+        check(MaterialPreview.absolutePath(inputDir: "", relative: "") == nil,
+              "empty paths cannot locate file")
+
+        check(MaterialPreview.sourceLabel("source_snapshot") == "源快照", "snapshot label")
+        check(MaterialPreview.sourceLabel("supplement") == "补充说明", "supplement label")
+        check(MaterialPreview.sourceLabel("review_report") == "评审报告", "review report label")
+        check(MaterialPreview.sourceLabel("core_verification") == "核验记录", "verification label")
+        check(MaterialPreview.sourceLabel("review_remediation") == "评审修复", "remediation label")
+        check(MaterialPreview.sourceLabel("attachment") == "附件", "attachment label")
+        check(MaterialPreview.sourceLabel("local") == "本地文件", "local label")
+        check(MaterialPreview.sourceLabel("execution_worktree") == "工作树变更", "worktree label")
+        check(MaterialPreview.sourceLabel("description:image") == "描述图片", "description image label")
+        check(MaterialPreview.sourceLabel("comment[3]:file") == "评论文件", "comment file label")
+        check(MaterialPreview.sourceLabel("future_source") == "future_source",
+              "unknown source passes through")
+        check(MaterialPreview.sourceLabel(nil) == "材料", "nil source has generic label")
+
+        let sample = "材料预览 material preview\n"
+        check(MaterialPreview.decodeText(Data(sample.utf8), truncated: false) == sample,
+              "valid utf8 round-trips")
+        check(MaterialPreview.decodeText(Data([0xFF, 0xFE, 0x00]), truncated: false) == nil,
+              "binary is not text")
+        let partial = Data("中".utf8.prefix(2))
+        check(MaterialPreview.decodeText(partial, truncated: true) != nil,
+              "truncated multibyte boundary recovers")
+        check(MaterialPreview.decodeText(partial, truncated: false) == nil,
+              "untruncated invalid utf8 stays binary")
+        check(MaterialPreview.textReadLimit == 2 * 1024 * 1024, "text preview limit is 2 MiB")
+        print("PASS planning materials: invalidation; per-task isolation; single flight; stale success/failure; new hash; core start boundary; material preview kind/path/source/text")
     }
 }
