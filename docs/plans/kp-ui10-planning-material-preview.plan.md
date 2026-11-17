@@ -4,7 +4,7 @@
 - 日期：2026-11-17（台北）
 - 分支：`feat/20261117-kp-ui10-planning-material-preview`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261117-feat-kp-ui10-planning-material-preview/`
-- 合入目标：`main`（基点 a6e0aaa）
+- 合入目标：`main`（基点 a6e0aaa；会话期间主线经 kp-wt01 收尾推进至 5baff62，已 merge 整合为 b4c7c39——PlanningView/夹具未被主线改动，Models/planner_inputs/ui-spec 的并发变更均避开本任务依赖，自动合并无冲突；测试构建在组合态运行）
 
 ## 目标与范围
 
@@ -40,8 +40,8 @@
 
 ## 实测记录
 
-- 本地：未运行 Swift 编译（项目约束仅云端）；标记块提取与断言由云端 group a 夹具执行。core 未改。
-- 云端构建：待触发（channel=test 预发布，按 2026-11-08 固定流程）。
+- 本地：未运行 Swift 编译（项目约束仅云端）；纯逻辑经 Python 镜像 33/33 断言预验证（含修复后的二进制尾边界）；标记块提取与断言由云端 group a 夹具执行。core 未改。
+- 云端构建：channel=test 预发布流程（2026-11-08 固定流程）。首轮 44056162179 因解码边界修复取消；二轮 44056833523 因主线整合取消；三轮 44057444305 在组合态 b4c7c39 运行，结论待记。
 - 实机体验：未开始。
 
 ## 遗留
