@@ -1,6 +1,6 @@
 # KP-WT01：历史功能集成与工作树收尾
 
-- 状态：实现中。
+- 状态：待体验。
 - 用户目标：完成 RV01、EP01/CONT01、GB02/GB01/CONT02 后续核验，合入 main、发布测试版并清理工作树。
 - 本次确认：2026-11-17 用户明确选择“改为合入 main，发布测试版并清理”，替代来源计划旧的仅测试版、不合入 main 边界。没有代用户操作真实目标、安装覆盖正式 App 或发布正式稳定版的授权。
 - 来源：RV01 bd2c7c0、EP01 2b6d55b、GB02 7ea2ab3；CONT01/CONT02/GB01 独有记录及全量文件已由清理会话保全，分支保留。
@@ -54,3 +54,9 @@ T4 交付：最终组合态检查、独立审查，合入 main 后发布下一�
 - 正式SQLite仅只读检查tasks、execution_rounds、worktree_slots、requests，无四条路径引用；无lsof打开文件，四树以git worktree remove普通移除，四条已合入本地任务分支以branch -d删除，远端分支保留。主仓两份用户计划字节保持。
 - 保全位置：清理会话outputs/KaneoPilot最终四树收尾保全；执行证据KaneoPilot最终四树收尾结果.json。净可用空间采样增加124.2MiB，仅为同期观测（归档仍占空间）。恢复方式见归档README。
 - Pilot仅剩其他活跃KP-UI10工作树，不属于本次历史收尾。全局其余工作树按最新盘点保留，未触碰其他任务。发布310仍须完成全部门禁与资产核验后再将本任务置为待体验。
+
+### 测试版交付完成（2026-11-17）
+
+- v0.5.8-test.310 已公开为非draft预发布：[Release](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.8-test.310)，[Packages run44055590564](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44055590564)整体success。所有必需job（Python3.11/3.13十分片、两组Swift夹具、两端打包、跨平台冷构建与publish）成功；只有可选会话全文探针按默认skipped。
+- 注释标签直接绑定源码1596796a65b1331d5adbde94460bbd2432766a5f，已由main包含。实际下载APK、DMG、manifest和SHA256SUMS四资产，逐个哈希与manifest尺寸/source/build/channel核对通过；latest仍为v0.5.7。验证数据在清理会话outputs/KP-WT01验证资料/release-310/verification.json。
+- 本批已完成main合入、测试发布与四树保全清理；任务状态待体验。可以在客户端开启“接收测试版”获取更新。本次没有覆盖安装正式App，没有代用户操作真实目标/付费模型或Android真机；真实场景验收由用户确认。
