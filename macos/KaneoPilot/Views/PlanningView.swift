@@ -1306,6 +1306,10 @@ private struct MaterialPreviewSheet: View {
         case unsupported
         case failed(String)
     }
+    private enum PreviewRead: Sendable {
+        case success(data: Data, truncated: Bool)
+        case failure(String)
+    }
     @State private var state: LoadState = .loading
 
     private var icon: (symbol: String, color: Color) {
@@ -1451,7 +1455,7 @@ private struct MaterialPreviewSheet: View {
         let path = target.absolutePath
         let kind = target.kind
         let limit = MaterialPreview.textReadLimit
-        let result: Result<(data: Data, truncated: Bool), String> = await Task.detached(priority: .userInitiated) {
+        let result: PreviewRead = await Task.detached(priority: .userInitiated) {
             guard FileManager.default.fileExists(atPath: path) else {
                 return .failure("文件不存在或已被移除，可重新准备材料。")
             }
@@ -1462,7 +1466,7 @@ private struct MaterialPreviewSheet: View {
             do {
                 let data = try handle.read(upToCount: limit + 1) ?? Data()
                 let truncated = data.count > limit
-                return .success((truncated ? Data(data.prefix(limit)) : data, truncated))
+                return .success(data: truncated ? Data(data.prefix(limit)) : data, truncated: truncated)
             } catch {
                 return .failure("读取失败：\(error.localizedDescription)")
             }
@@ -1471,19 +1475,19 @@ private struct MaterialPreviewSheet: View {
         switch result {
         case .failure(let message):
             state = .failed(message)
-        case .success(let payload):
+        case .success(let data, let truncated):
             switch kind {
             case .other:
                 state = .unsupported
             case .image:
-                if let image = Self.thumbnail(payload.data) {
+                if let image = Self.thumbnail(data) {
                     state = .image(image)
                 } else {
                     state = .failed("图片解码失败，可用默认应用打开。")
                 }
             case .text:
-                if let text = MaterialPreview.decodeText(payload.data, truncated: payload.truncated) {
-                    state = .text(text, truncated: payload.truncated)
+                if let text = MaterialPreview.decodeText(data, truncated: truncated) {
+                    state = .text(text, truncated: truncated)
                 } else {
                     state = .unsupported
                 }
