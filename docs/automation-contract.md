@@ -52,7 +52,7 @@
 5. **先处理 plan_wanted 任务（不受容量限制）**：
    - 条件：状态为 needs_plan、`plan_wanted=true`、没有活动的 plan 请求、未转人工；
    - 若还没有 `delivery.branch`，先补建分支工作树；fetch 与 resolve_base 成功后，可收养仅本地存在、origin 无同名分支、预期路径登记到该分支且目录存在、相对 base 无自有提交、包含全部未跟踪文件的工作树状态为空的遗留分支；只执行 merge --ff-only 到 base，不 force/reset/delete/覆盖未知路径；
-   - 然后准备材料并提交规划。
+   - 初次或显式新规划准备材料后提交；失败自动重试须按第9项保留原确认输入。
 6. **新候选**：
    - 来源：`fetch-todos` 的条目。
    - 条件：本地没有该任务；或本地状态为 needs_plan、从未有过 plan 请求、且没有 automation 对象。另外要求 save_state 为 active，且不是 auto_advance_paused。
@@ -72,7 +72,9 @@
       - 载荷增加 `authorized_by`、`plan_cwd`、`delivery_mode`、`delivery_head_sha`；
       - 记录事件 `automation_adopted`；本次收养以临时 adopted 标志传入，在持久化 delivery 的同一事务记录一次 branch_worktree_adopted（branch/worktree_path/base_sha），adopted 不落入 delivery。
 9. **plan_wanted 任务的材料准备**：
-   - prepare-plan-input 传任务当前的 `requirements_sha256`；
+   - 普通失败的自动重试复用同轮原冻结 `input_id`/SHA，经 `start-plans` 全量重验，保留 supplement、本地附件副本及排除项；不得重新准备空补充材料。原输入缺失、文件或需求/来源身份漂移时明确转 needs_user，不静默退回新输入。显式 replan 或新修复轮仍正常准备新材料，避免跨轮继承旧确认。重试入口及最终提交/失败写事务须绑定原任务与最新规划请求快照；出现新请求或新状态时保留新 owner 的成果，不重新准备或覆盖。
+   - 原生 Codex 已正常完成完整 ready 稿、仅发布失败时保留原稿和真实拒绝原因，转 needs_user，不再调用模型盲重跑；远端授权和正常发布门禁不因此放宽。
+   - 需要准备新材料时，prepare-plan-input 传任务当前的 `requirements_sha256`；
    - 远端需求不符 → 任务进入 needs_user（failure_code=remote_conflict，note「远端需求已变化（新增内容未经筛选）」）。
 10. **失败处理**：
     - 分支失败（branch_exists/delivery_base_unknown）→ 照常导入任务行，写入 automation（`plan_wanted=false`），然后转 needs_user 并带该 failure_code；保留已有 delivery，只有本次新建/收养成功且带 branch 才写 mode=pr，空参数/准备失败不得把 manual 改为 pr。branch_exists 分别说明已推 origin、有自有提交、工作树脏、预期路径未登记、目录缺失五类原因；delivery_base_unknown 显示 origin 不存在分支及可确定的真实默认分支，不能泄露无意义 Git 原文。
@@ -197,6 +199,7 @@ exit_code 缺失或不是整数时记为 None。
 - **候选文件：** 来自 `git status --porcelain=v1 -z --untracked-files=all`，需正确处理 rename 的双路径。被 .gitignore 忽略的文件本来就不进入候选。
 - **运行材料（KP-D01）：** 新生成的安全 `.pi/goal/*.md` 沿既有规则排除。另将 `.pi/kanpilot/codex/<小写规范 UUID>/` 下未跟踪且未暂存、不属于当前 HEAD/索引的运行材料排除，包含工具配置、缓存、临时文件与原生验证证据；文件保留原位，不删除或改写。祖先通过 no-follow 核验为真实目录，叶允许普通文件、符号链接（仅排除，不读取链接目标），以及 Git 将私有依赖 checkout 整体枚举的真实目录（规范化单个尾 `/`，不递归、不进入其 Git、不改写）。已观察目录身份变化或 Git 枚举的其他特殊类型拒绝，不新增递归扫描。已跟踪、已暂存、重命名/删除、其他 `.pi` 路径或非规范 UUID 不享受此排除，仍执行原敏感/大小门禁；原 HEAD 未跟踪而新暂存的运行路径随后以 `delivery_commit_failed` 明确阻塞，提示移出暂存区，保留原索引与材料，不静默漏交，也不使正常新增提交与恢复拒绝规则矛盾。该规则只用于交付，不改变重试工作树指纹版本或证据。
 - **一致性：** 交付安全检查、实际暂存、提交后 clean 与崩溃恢复使用同一运行材料边界。只暂存已选交付路径，以 NUL 分隔的 literal pathspec 传递，支持删除/重命名及特殊文件名，避免将大型缓存先写入 Git 对象库；不将大量路径展开进 argv。无业务候选仍按 `no_changes` 拒绝。钩子或恢复提交新增运行材料不能作为正常交付接纳；并发修改普通索引时拒绝覆盖并保留成果。
+- **补验与原生成果（KP-CONT02）：** 未跟踪、未暂存的 `.pi/evidence/**` 普通文件作为运行材料保留原位，不加入源码提交；祖先和叶不允许符号链接、特殊节点或嵌套仓库，已跟踪/暂存变动仍走原门禁。补验轮无新增源码时，仅在仓库、分支、base/head、完整已登记任务提交链及原 task/run trailer 均匹配，且存在净可交付差异、当前报告与源码绑定通过后，复用原 SHA，为当前 run 记录明确复用来源，不创建空提交、不伪造当前 run trailer。真正无成果或漂移继续拒绝。
 - **拦截（delivery_blocked_files）：** 候选中出现以下任一 → 不提交，列出文件名：
   - `.env` 或 `.env.*`（`.env.example` 除外）；
   - `*.pem`、`*.key`、`*.p12`、`id_rsa*`；
@@ -341,6 +344,7 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 
 - `git diff --no-color <base_sha> <head_sha>`，以及 `git log --oneline base..head`；
 - 有上一轮 Review 时，加上 `<review_history[-1].head_sha>..<head_sha>` 的增量 diff 和上一轮报告。
+- `.pi/evidence/**` 原生截图、录像与说明按原相对层级冻结到独立材料包，清单绑定 task/run/plan/head，包含每个文件的大小与 SHA256；Pi/Codex 共用收集入口及全过程内容复核。只读普通文件，拒绝链接、特殊节点及嵌套仓库；原生证据使用独立的单文件 128MiB、总量 512MiB 限额（2026-11-12 用户确认），超限明确阻塞，不截断、不跳过文件或用摘要替代完整附件。通用规划材料与源码快照仍为单文件 20MiB、总量 100MiB；历史手动 Review 的通用源码快照门禁继续独立适用，不因文件属于原生证据而忽略其已跟踪源码或通用快照要求。冻结前先按完整清单核算额度；复核逐文件读取与冻结字节及模式比对，并核对前后目录身份，避免同时再持有一份完整证据集合。材料是执行产物与不可信输入，不执行其脚本、不把 Goal `met` 作为独立 Review 通过。
 
 diff 超过 400KB 时只附 `--stat`，并注明「请在只读工作树中查看具体文件」。执行工作树 HEAD 与 head_sha 不符或不干净 → report needs_user（review_blocked，note「执行工作树与已提交版本不一致」），绝不审查未提交的内容。
 
@@ -470,7 +474,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 - **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。转为人工处理不停止观察、收尾与评审；live 项目的 monitor/review 由引擎周期 tick 补给。
 - **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
 - **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
-- **plan 失败：** 自动化任务第一次失败时置 plan_wanted，让 intake 自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。
+- **plan 失败：** 自动化任务第一次普通失败时置 plan_wanted，让 intake 按原冻结输入自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。已完成稿仅发布被拒的止损与材料保全遵循上文第9项，不自动重跑模型。
 
 **新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
 
@@ -517,6 +521,8 @@ attention-list透出question_preview；DTO、答案映射、五命令和测试�
 Codex Desktop显式交还：先完成所有目录读取，经kp_desktop_submit_plan/review或kp_desktop_fail持久提交并取得终态，再以原request/run/claim_token调用kp_desktop_return_slot(confirm=true)。交还后禁止任何槽位访问、heartbeat或新提交；仅允许不读取槽位的终态/交还幂等结果。submit本身不释放租约；消费者未交还时维持unknown并按容量等待。核心以同代SQLite accepted收据证明协作交还，owner_state=returned，不伪造owner_stopped或原生进程退出。原有未决操作、未知改动、产物先保存及整池GC守卫继续适用；历史非池目录不扩大回收资格。
 
 
+原生 Codex 规划中断恢复：仅 `plan/codex`、已 failed/cancelled 请求适用 `worktree-slot-recover`，须核对同代契约、完整备份及本机原生进程/工具已停止的证据；具体门槛以 protocol §5.22.3、§5.29 为准。父进程消失、租约到期或无最终消息均不单独构成停止/成功证明。恢复只登记中断并释放或隔离，不发布计划、不自动重试、不扩大 Plus/Review 的恢复资格。
+
 ## Qoder CLI 规划与 Review（2026-10-20）
 
 共享配置与只读边界见 protocol「Qoder CLI 规划与 Review」。规划通过既有 prepare/start/claim/publish 链路，Review 通过既有 CLI runner 与 `review_settle`，不改变 Plus 任务执行、verify 归属与远端写入口。Qoder 的最终 JSON 采用 prompt 中的 schema 约束及本地严格校验，不使用未证实存在的 `--json-schema`。CLI 进程只调用一次，日志脱敏、空闲时续租、失去身份即停止；失败、缺终态、无效 JSON 和超时不得发布计划或通过 Review。自动化预检与会话读取识别 qoder，未知费用沿用现有未知费用策略。
@@ -526,3 +532,8 @@ Codex Desktop显式交还：先完成所有目录读取，经kp_desktop_submit_p
 自定义模型遵循 protocol 的单 provider 投影：以完整模型 ID 在运行时读取用户配置，只把对应连接字段及单个型号加入上述安全 settings；API key 替换为专用 child env 引用，不开放用户设置源或复制 routing。官方 1.1.74 设置解析支持 `$VAR` / `${VAR}` / `${VAR:-default}`，apiKey schema 建议环境引用；内联 settings 会写成 CLI 临时 JSON，因此不得把真实密钥放入内联参数。规划与 Review 共享同一启动准备接口，准备失败经既有失败/blocked 结算且不发模型请求。
 
 接口依据：[官方 CLI 参数](https://docs.qoder.com/cli/cli-reference.md)、[消息类型](https://docs.qoder.com/cli/sdk/references-typescript.md)、[脚本调用](https://docs.qoder.com/cli/run-in-scripts.md)、[CLI 1.1.74 发布源码](https://registry.npmjs.org/@qoder-ai/qodercli/-/qodercli-1.1.74.tgz)。这些是文档/源码契约证据，真实模型连通性须独立验证。
+
+
+## KP-GB01：用户接受当前执行结果
+
+protocol §5.23.12 新增单独的用户接受当前结果路径；不是原人工验证 override，不改变验证通过的证据要求。自动流程不得代替用户触发 accept，也不得把已受阻目标自动续跑成无限重试。明确接受后，monitor 仅使用与当前计划、源码、轮次、Pi 目标及报告绑定的有效人工接受回执继续独立评审流程；状态描述为“用户接受当前结果（未验证）”。独立 Review 必须收到原缺项、报告与接受记录，并可拒绝；交付仍需同版本独立 Review pass。没有当前回执的任务继续受严格验证门禁约束。

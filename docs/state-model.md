@@ -485,3 +485,8 @@ protocol §5.27.17 的 direct fix_request 是同任务当前修复轮，held→q
 ## 安卓控制台设备状态（2026-10-21）
 
 按 [安卓控制台契约 v1](mobile-console-contract.md)，配置、设备及一次性配对摘要保存在 settings 的 mobile.* 命名空间；写动作回执复用 runtime_operations 的 mobile:<device_id> scope。设备令牌和配对令牌只保存 SHA256，私钥材料由核心保存到 app support/mobile 的受限文件。任务表与 schema 版本保持 6；手机启动接口不能创建空数据库或自动迁移。
+
+
+## KP-GB01：人工接受执行现状与独立评审
+
+受阻 Goal 的显式处置契约以 protocol §5.23.12 为唯一规则。`accept` 不把执行证据变成通过，也不直接结束 Kaneo 任务；持久化当前有效人工接受回执后，恢复本轮 monitor，并以独立评审准入授权继续核心提交/评审/交付。`verification_ok=false` 与 `review_authorized=true` 可同时成立，界面必须保留“未验证”。原报告与未完成项始终保留，独立 Review 未通过仍阻止交付。旧版/离线/身份不符和未知写结果保留阻塞或恢复现场，不自动重发。

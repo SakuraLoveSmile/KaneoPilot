@@ -1888,8 +1888,13 @@ class T6Case(KanpilotTestCase):
                 "thinking_level": "low", "permission_mode": "ask",
             },
         })
-        self.make_ready_task(task_id=self.TASK_ID,
-                             project_name=project_name)
+        # Naming tests dispatch a new Plus round, so publish a valid verify plan.
+        fixture = self.make_ready_task(task_id=self.TASK_ID,
+                                       project_name=project_name, publish=False)
+        plan = fixture["plan_path"]
+        plan.write_text(plan.read_text() + "\n```verify\ntrue\n```\n")
+        self.publish(self.TASK_ID, plan, source_sha256=fixture["source_sha256"],
+                     requirements_sha256=fixture["requirements_sha256"])
         conn = db.connect(self.db_path)
         try:
             with db.write_txn(conn):

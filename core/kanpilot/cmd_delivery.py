@@ -54,6 +54,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         else:
             from . import engine_claim_scope, round_store
             from .engine import verdict
+            from . import goal_blocker
             execution_round = round_store.get_round(conn, task["task_id"], execution_run_id)
             codex = execution_round is not None and execution_round["backend"] == "codex"
             strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) in ("live", "shadow")
@@ -64,8 +65,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 frozen = receipt.get("binding") or {}
                 actual = verdict.binding(conn, task, allow_core_commit=True)
                 if (receipt.get("evidence_source") != ("codex_report" if codex else "goal_report")
-                        or receipt.get("verification_ok") is not True
-                        or not verdict.receipt_evidence_current(conn, task, receipt)
+                        or not goal_blocker.review_admission_current(conn, task, receipt)
                         or receipt.get("execution_run_id") != execution_run_id
                         or receipt.get("plan_sha256") != task["plan_sha256"]
                         or not receipt.get("index_source_sha256")
@@ -77,10 +77,21 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 from . import review_repair
                 review_repair.verify_frozen(task)
                 verified["merge_parent_sha"] = repair["target_base_sha"]
+            candidates = git_delivery.effective_worktree_changes(git_input["worktree_path"])
             if evidence_only and not verdict.effective_changes(git_input["worktree_path"]):
                 # 证据/记录收尾轮：声明本轮不产生源码 diff，沿用既有 head 继续评审，
                 # 不创建空提交、不阻塞交付。上面的验证回执核对仍然执行，不能跳过门禁。
                 result = {"sha": delivery["head_sha"], "files": [], "unchanged": True}
+            elif (strict and delivery.get("commits")
+                    and repair.get("source_kind") not in ("merge_conflict", "build_failure")
+                    and not any(not git_delivery.is_build_artifact(change["path"]) for change in candidates)):
+                proof = git_delivery.registered_task_changes(git_input, task_id=payload["task_id"])
+                if (not proof["files"] or not proof["source_execution_run_id"]
+                        or git_delivery.tree_source_sha256(git_input["worktree_path"], proof["sha"])
+                        != verified["verified_index_sha256"]):
+                    raise git_delivery.GitDeliveryError("delivery_commit_failed", "已登记成果与当前验证树不符，不能复用")
+                result = {"sha": proof["sha"], "files": proof["files"],
+                          "reused_from_execution_run_id": proof["source_execution_run_id"]}
             else:
                 result = git_delivery.commit_worktree(
                     git_input, task_id=payload["task_id"], title=title,
@@ -130,6 +141,9 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             return {"outcome": "unchanged", "sha": result["sha"], "files": 0}
         util.require(core.branch_review_snapshot(fresh) == baseline,
                      "提交期间交付登记已变更", "conflict")
+        if result and result.get("reused_from_execution_run_id"):
+            util.require(current.get("commits") == delivery.get("commits"),
+                         "复用期间原提交登记已变更", "conflict")
         util.require(fresh["status"] == "running", "提交期间任务状态已变更", "conflict")
         if failure:
             code = failure.code if failure.code in ("delivery_blocked_files", "no_changes") else "delivery_commit_failed"
@@ -142,11 +156,14 @@ def cmd_delivery_commit(ctx, payload) -> dict:
         commits = list(current.get("commits") or [])
         commits.append({"execution_run_id": execution_run_id, "sha": result["sha"],
                         "at": now, "files": len(result["files"]), "fix_round": fix_round})
+        if result.get("reused_from_execution_run_id"):
+            commits[-1]["reused_from_execution_run_id"] = result["reused_from_execution_run_id"]
         updates = {"commits": commits, "head_sha": result["sha"]}
         if repair.get("source_kind") == "merge_conflict":
             updates["base_sha"] = repair["target_base_sha"]
         core.update_delivery(conn, fresh, now, **updates)
-        db.add_event(conn, now, "delivery_committed", task_id=payload["task_id"],
+        db.add_event(conn, now, "delivery_commit_reused" if result.get("reused_from_execution_run_id") else "delivery_committed", task_id=payload["task_id"],
                      request_id=payload["request_id"], actor="kaneo-monitor",
                      detail=commits[-1])
-    return {"outcome": "committed", "sha": result["sha"], "files": result["files"]}
+    return {"outcome": "already_committed" if result.get("reused_from_execution_run_id") else "committed",
+            "sha": result["sha"], "files": result["files"]}

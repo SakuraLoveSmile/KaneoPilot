@@ -211,6 +211,16 @@ def cmd_engine_verdict(ctx, payload: dict) -> dict:
             cmd_exec.cmd_heartbeat(ctx, {"request_id": payload["request_id"], "run_id": payload["run_id"]})
 
     try:
+        if not codex:
+            from .. import goal_blocker
+            accepted = db.task_extra(task).get(goal_blocker.KEY) or {}
+            if goal_blocker.acceptance_current(ctx.conn, task, deadline=deadline, heartbeat=heartbeat):
+                result = dict(accepted)
+                receipt = dict(result, operation_id=operation_id, completed_at=util.now_iso(), engine_mode="live")
+                with db.write_txn(ctx.conn):
+                    current = current_task()
+                    db.set_extra(ctx.conn, current, receipt["completed_at"], **{receipt_key: receipt})
+                return dict(receipt, ok=True)
         if (prior.get("evidence_source") == ("codex_report" if codex else "goal_report")
                 and prior.get("verification_ok") is True
                 and prior.get("execution_run_id") == task["run_id"]

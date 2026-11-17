@@ -39,6 +39,9 @@ PLAN_INPUT_TOTAL_MAX_BYTES = 100 * 1024 * 1024  # 每任务材料合计 ≤100 M
 # 会把规划材料撑到 100 MiB、把规划拖到 1800s 超时；只内联小体积文本，其余登记
 # 在 changes 里让规划器知道有这份改动但不读正文。
 PLAN_INPUT_EVIDENCE_FILE_MAX_BYTES = 128 * 1024  # 证据材料单文件内联上限
+# Native Review evidence is copied whole; planning/source snapshot limits stay unchanged.
+NATIVE_REVIEW_EVIDENCE_FILE_MAX_BYTES = 128 * 1024 * 1024
+NATIVE_REVIEW_EVIDENCE_TOTAL_MAX_BYTES = 512 * 1024 * 1024
 PLAN_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PLAN_TEXT_SUFFIXES = {".txt", ".log", ".md", ".text"}
 DEFAULT_CODEX_BIN = "codex"

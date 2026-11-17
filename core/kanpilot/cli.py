@@ -147,7 +147,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "worktree-slot-recover": (
         {key: (True, "str") for key in
          ("slot_id", "holder_id", "lease_token", "operation_id", "backup_dir", "reason")}
-        | {"dry_run": (False, "bool"), "confirm": (False, "bool")},
+        | {"dry_run": (False, "bool"), "confirm": (False, "bool"),
+           "native_audit_path": (False, "str"), "native_audit_sha256": (False, "str")},
         _automation_command("worktree_recovery", "cmd_worktree_slot_recover")),
     "worktree-retention": ({"days": (False, "int"), "dry_run": (False, "bool"),
                             "confirm": (False, "bool")},
@@ -617,6 +618,21 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_dispatch.cmd_round_observe,
     ),
     # kp-cont01（§5.23.11）：向同一 Plus 会话发送继续当前 Goal 的指令（不重发）。
+    "get-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("goal_blocker", "cmd_get_goal_blocker"),
+    ),
+    "reconcile-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str")},
+        _automation_command("goal_blocker", "cmd_reconcile_goal_blocker"),
+    ),
+    "resolve-goal-blocker": (
+        {"task_id": (True, "str"), "run_id": (True, "str"),
+         "execution_id": (True, "str"), "expected_version": (True, "int"),
+         "action": (True, "str"), "confirm": (False, "bool"),
+         "message": (False, "str"), "operation_id": (False, "str")},
+        _automation_command("goal_blocker", "cmd_resolve_goal_blocker"),
+    ),
     "request-continuation": (
         {"task_id": (True, "str"), "run_id": (True, "str"),
          "confirm": (False, "bool"), "operation_id": (False, "str")},

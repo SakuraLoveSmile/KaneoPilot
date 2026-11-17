@@ -1,8 +1,8 @@
 """request-continuation：向同一 Pi Desktop Plus 会话发送继续当前 Goal 的指令。
 
-只发送一条新的用户消息（新 turn），**不**新建会话、不重新规划、不改 job/任务
-状态；随后由桌面轮询 ``check-execution-status``，新 turn 结束后复用现有
-``continue-execution``（接续成果 → 排队核验）链路。协议见 protocol §5.23.11。
+发送一条新的用户消息（新 turn），不新建会话、不重新规划；取得真实 turn 后
+同轮重开 job 并接回观察。Goal resume 与发送核对共享身份绑定及预算接续。
+协议见 protocol §5.23.11。
 
 发送槽由 runtime_operations 抢占；响应丢失记 unknown，绝不重发。
 
@@ -45,8 +45,11 @@ def continue_execution_view(conn, task) -> dict:
     if not run_id:
         view["reason"] = "该任务没有执行轮次"
         return view
+    row = round_store.get_round(conn, task["task_id"], run_id)
     request = db.task_extra(task).get(REQUEST_KEY) or {}
-    if request.get("run_id") == run_id and request.get("new_turn"):
+    if (request.get("run_id") == run_id and request.get("new_turn")
+            and (task["status"] != "needs_user" or row is None
+                 or row["run_status"] not in ("finished", "failed"))):
         observing = task["status"] == "running"
         view.update(state="observing" if observing else "sent",
                     turn_id=request.get("new_turn"),
@@ -59,7 +62,6 @@ def continue_execution_view(conn, task) -> dict:
     if task["failure_code"] not in CONTINUE_FAILURES:
         view["reason"] = "当前阻塞类型不支持继续执行"
         return view
-    row = round_store.get_round(conn, task["task_id"], run_id)
     if row is None or row["backend"] != "pi_desktop":
         view["reason"] = "当前轮次不是 Pi Desktop 执行"
         return view
@@ -106,6 +108,36 @@ def _read_job(run_dir: Path, task_id: str, run_id: str):
         raise util.KanpilotError(
             "validation_failed", "运行记录不可读：" + (error or "未知原因"))
     return job
+
+
+def authorized_observation(conn, job: dict, approved_turn: str) -> bool:
+    """Only a recorded, acknowledged continuation can inherit an approved Goal."""
+    adoption = job.get("continuation_adoption") or {}
+    task_id, run_id, session_id = (job.get(k) for k in ("task_id", "run_id", "session_id"))
+    new_turn = job.get("turn_id")
+    if (not isinstance(adoption, dict) or not approved_turn or not new_turn
+            or adoption.get("from_turn") != approved_turn
+            or adoption.get("new_turn") != new_turn or approved_turn == new_turn
+            or any(adoption.get(k) != job.get(k) for k in ("task_id", "run_id", "session_id"))):
+        return False
+    task = db.get_task(conn, task_id)
+    if task is None or task["run_id"] != run_id or task["session_id"] != session_id:
+        return False
+    request = db.task_extra(task).get(REQUEST_KEY) or {}
+    if (request.get("status") != "sent"
+            or any(request.get(k) != adoption.get(k) for k in
+                   ("operation_id", "run_id", "session_id", "from_turn", "new_turn"))):
+        return False
+    scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
+    operation = runtime_operations.get_operation(conn, scope, adoption.get("operation_id"))
+    if (operation is None or operation["status"] != "accepted"
+            or operation["session_id"] != session_id or operation["turn_id"] != new_turn):
+        return False
+    if operation["tool"] == SCOPE_TOOL and operation["harness_id"] == "kaneo-request-continuation":
+        expected = {"task_id": task_id, "run_id": run_id, "session_id": session_id,
+                    "turn_id": approved_turn}
+        return operation["request_sha256"] == runtime_operations.compute_request_sha256(expected)
+    return operation["tool"] == "resolve-goal-blocker" and operation["harness_id"] == "pi_desktop"
 
 
 def _read_spec(run_dir: Path) -> dict:
@@ -243,37 +275,50 @@ def _reconcile_classify(client, session_id, old_turn, inner):
 
 
 def _adopt(ctx, task_id, run_id, state, new_turn, operation_id, now, via):
-    """Bind the finished run to ``new_turn`` and hand observation to the worker."""
-    conn = ctx.conn
-    job, run_dir, old_turn = state["job"], state["run_dir"], state["turn_id"]
-    # 同轮重开：把已收尾的 job 绑定到新 turn，清掉旧终态字段，再由
-    # round-observe 拉起 worker --resume 观察新 turn；旧 terminal 由
-    # observation_resumed_at 标记 superseded。
-    previous = {key: job.get(key) for key in
-                ("status", "turn_id", "send_state", "observation_resumed_at",
-                 "started_at", "ended_at", "exit_code", "detail", "pid",
-                 "observe_pid")}
-    history = list(job.get("turn_adopted") or [])
-    history.append({"from": old_turn, "to": new_turn, "code": via, "at": now})
-    job["continue_previous"] = previous
-    job["turn_adopted"] = history[-5:]
-    job["continuation_started_at"] = now
-    job["observation_resumed_at"] = now
-    job["status"] = "running"
-    job["turn_id"] = new_turn
-    job["send_state"] = "sent"
-    job["ended_at"] = None
-    job["exit_code"] = None
-    job["detail"] = None
-    job["pid"] = None
-    job["observe_pid"] = None
-    for key in ("observation_finalizing", "heartbeat_stopped", "resume_previous"):
-        job.pop(key, None)
-    job_path = run_dir / dsh_events.JOB_NAME
-    tmp = job_path.with_name(job_path.name + ".continue.tmp")
-    tmp.write_text(util.jdump(job), encoding="utf-8")
-    os.replace(tmp, job_path)
+    """Use the same identity-bound adoption for sends and reconciled sends."""
+    result = adopt_continuation(ctx, task_id=task_id, run_id=run_id,
+        job=state["job"], run_dir=state["run_dir"], session_id=state["session_id"],
+        old_turn=state["turn_id"], new_turn=new_turn, operation_id=operation_id, via=via)
+    return result["observer"]
 
+
+def adopt_continuation(ctx, *, task_id, run_id, job, run_dir, session_id, old_turn,
+                       new_turn, operation_id, via="manual_continue"):
+    """Adopt a host-started continuation; never starts another model turn."""
+    conn, now = ctx.conn, ctx.now_iso
+    adoption = {"operation_id": operation_id, "task_id": task_id, "run_id": run_id,
+                "session_id": session_id, "from_turn": old_turn, "new_turn": new_turn}
+    prepared = job.get("continuation_adoption") == adoption and job.get("turn_id") == new_turn
+    if not prepared:
+        # 同轮重开：把已收尾的 job 绑定到新 turn，清掉旧终态字段，再由
+        # round-observe 拉起 worker --resume 观察新 turn；旧 terminal 由
+        # observation_resumed_at 标记 superseded。
+        previous = {key: job.get(key) for key in
+                    ("status", "turn_id", "send_state", "observation_resumed_at",
+                     "started_at", "ended_at", "exit_code", "detail", "pid",
+                     "observe_pid")}
+        history = list(job.get("turn_adopted") or [])
+        history.append({"from": old_turn, "to": new_turn,
+                        "code": via, "at": now})
+        job["continue_previous"] = previous
+        job["turn_adopted"] = history[-5:]
+        job["continuation_started_at"] = now
+        job["observation_resumed_at"] = now
+        job["status"] = "running"
+        job["turn_id"] = new_turn
+        job["send_state"] = "sent"
+        job["ended_at"] = None
+        job["exit_code"] = None
+        job["detail"] = None
+        job["pid"] = None
+        job["observe_pid"] = None
+        for key in ("observation_finalizing", "heartbeat_stopped", "resume_previous"):
+            job.pop(key, None)
+        job["continuation_adoption"] = adoption
+        job_path = run_dir / dsh_events.JOB_NAME
+        tmp = job_path.with_name(job_path.name + ".continue.tmp")
+        tmp.write_text(util.jdump(job), encoding="utf-8")
+        os.replace(tmp, job_path)
     with db.write_txn(conn):
         fresh = db.require_task(conn, task_id)
         if fresh["run_id"] != run_id or fresh["status"] != "needs_user":
@@ -284,9 +329,14 @@ def _adopt(ctx, task_id, run_id, state, new_turn, operation_id, now, via):
                     "turn_id": new_turn, "previous_turn_id": old_turn},
             **core.clear_block_fields())
         db.set_extra(conn, fresh, now, **{REQUEST_KEY: {
-            "run_id": run_id, "session_id": state["session_id"],
+            "run_id": run_id, "session_id": session_id,
             "from_turn": old_turn, "new_turn": new_turn,
             "operation_id": operation_id, "status": "sent", "sent_at": now}})
+        automation = core.automation_of(fresh)
+        if automation:
+            core.update_automation(conn, fresh, now,
+                segment_started_at=job["continuation_started_at"],
+                segment_cost_base_usd=automation.get("cost_usd", 0))
         db.add_event(conn, now, "execution_continuation_sent", task_id=task_id,
                      actor="user", detail={"run_id": run_id, "from_turn": old_turn,
                                            "to_turn": new_turn,
@@ -300,7 +350,8 @@ def _adopt(ctx, task_id, run_id, state, new_turn, operation_id, now, via):
             ctx, {"task_id": task_id, "run_id": run_id, "executor": "user"})
     except util.KanpilotError as exc:
         observer = {"status": "error", "detail": exc.message}
-    return observer
+    return {"status": "continued", "turn_id": new_turn,
+            "session_id": session_id, "observer": observer}
 
 
 def cmd_request_continuation(ctx, payload: dict) -> dict:

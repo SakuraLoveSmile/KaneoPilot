@@ -41,13 +41,41 @@ def goal_coverage_detail(coverage):
             + "。需由 Plus 在新的执行轮次补齐验证报告。")
 
 
+def _budget_recovery_candidate(task, row):
+    """Only the retained empty-diff verdict obscured by the repair budget qualifies."""
+    receipt = db.task_extra(task).get("engine_verdict") or {}
+    binding = receipt.get("binding") or {}
+    return bool(task["failure_code"] == "auto_budget_exceeded"
+                and receipt.get("engine_mode") == "live"
+                and receipt.get("kind") == "empty_diff" and receipt.get("empty_diff") is True
+                and receipt.get("verification_ok") is False
+                and receipt.get("evidence_source") == "goal_report"
+                and receipt.get("execution_run_id") == task["run_id"]
+                and receipt.get("plan_sha256") == task["plan_sha256"]
+                and binding.get("task_id") == task["task_id"]
+                and binding.get("execution_run_id") == task["run_id"]
+                and binding.get("plan_sha256") == task["plan_sha256"]
+                and row is not None and binding.get("worktree_path") == row["worktree_path"]
+                and receipt.get("execution_turn_id") and receipt.get("report_sha256")
+                and receipt.get("evidence_sha256") and receipt.get("completed_at"))
+
+
+def _require_budget_recovery_receipt(conn, task):
+    from .engine import verdict
+    receipt = db.task_extra(task).get("engine_verdict") or {}
+    if (verdict.binding(conn, task) != receipt.get("binding")
+            or not verdict.receipt_evidence_current(conn, task, receipt)):
+        _conflict("原验证回执、源码或当前执行身份已变化，不能恢复被预算覆盖的阻塞")
+
+
 def candidate(conn, task):
     """Cheap UI eligibility; the command independently requires all evidence."""
     row = round_store.get_round(conn, task["task_id"], task["run_id"])
     return bool(db.task_is_active(task) and task["status"] == "needs_user"
                 and task["stage"] == "monitor"
-                and task["failure_code"] in ("verification_unconfirmed", "verification_environment_failure",
-                                             "verification_identity_unconfirmed")
+                and (task["failure_code"] in ("verification_unconfirmed", "verification_environment_failure",
+                                              "verification_identity_unconfirmed")
+                     or _budget_recovery_candidate(task, row))
                 and task["sent"] == 1 and task["send_state"] == "sent"
                 and task["plan_path"] and task["plan_sha256"]
                 and row is not None and row["save_state"] == "active"
@@ -334,6 +362,9 @@ def recover(ctx, payload):
         if not candidate(conn, task):
             _conflict("仅当前待确认验证且没有活动请求的执行轮次可重新核验")
         snapshot = _snapshot(conn, task_id, run_id)
+    budget_recovery = task["failure_code"] == "auto_budget_exceeded"
+    if budget_recovery:
+        _require_budget_recovery_receipt(conn, task)
     evidence = read_goal_evidence(conn, task)
     hashes, coverage = evidence["hashes"], evidence["coverage"]
     if not coverage["ok"]:
@@ -344,6 +375,8 @@ def recover(ctx, payload):
     if (again["hashes"] != hashes
             or again["report"]["report_sha256"] != evidence["report"]["report_sha256"]):
         _conflict("核验期间本机执行证据、计划文件或 Goal 报告已变化")
+    if budget_recovery:
+        _require_budget_recovery_receipt(conn, db.require_task(conn, task_id))
     with db.write_txn(conn):
         current = db.require_task(conn, task_id)
         if not db.task_is_active(current):
@@ -365,6 +398,11 @@ def recover(ctx, payload):
         core.transition_task(conn, current, "running", ctx.now_iso, "user",
             detail={"via": "resolve reverify", "execution_run_id": run_id},
             **core.clear_block_fields(), resolution=resolution)
+        automation = core.automation_of(current)
+        if budget_recovery and automation:
+            core.update_automation(conn, current, ctx.now_iso,
+                segment_started_at=ctx.now_iso,
+                segment_cost_base_usd=automation.get("cost_usd", 0))
         from . import cmd_queue
         request, _ = cmd_queue._new_cycle_request(conn, ctx.now_iso, current, "monitor")
         db.add_event(conn, ctx.now_iso, "verification_reverified", task_id=task_id,

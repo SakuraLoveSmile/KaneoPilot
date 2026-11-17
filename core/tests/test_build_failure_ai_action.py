@@ -67,6 +67,14 @@ class BuildFailureActionTest(BuildFailureFixture):
     claim_action = lifecycle.TaskAIActionLifecycle.claim_action
     goal_evidence = lifecycle.TaskAIActionLifecycle.goal_evidence
 
+    def _make_ready_successor(self, task_id):
+        # These new Plus plans must pass publication before release assertions.
+        fixture = self.make_ready_task(task_id=task_id, publish=False)
+        plan = fixture["plan_path"]
+        plan.write_text(plan.read_text() + "\n```verify\ntrue\n```\n")
+        self.publish(task_id, plan, source_sha256=fixture["source_sha256"],
+                     requirements_sha256=fixture["requirements_sha256"])
+
     def prepare_merge(self):
         self.claim_action()
         self.worktree = Path(core.delivery_of(self.task())["worktree_path"])
@@ -431,7 +439,7 @@ class BuildFailureActionTest(BuildFailureFixture):
         runtime_operations.complete_operation(self.conn, scope, "batch:"+reserved["batch_id"],
             status="accepted", result=published, now=self.now)
         assert release_delivery._published_stable_predecessors(self.conn, self.task()["project_id"]) == {old["batch_id"]}
-        self.make_ready_task(task_id="anotherstable0001")
+        self._make_ready_successor("anotherstable0001")
         db.update_task(self.conn, "anotherstable0001", self.now, project_id=self.task()["project_id"], repository=str(self.repo))
         with patch.object(release_delivery, "_software_proof", return_value=proof), \
              patch.object(release_github, "workflow_snapshot", return_value=workflow), \
@@ -533,7 +541,7 @@ class BuildFailureActionTest(BuildFailureFixture):
         context_c.pop("context_sha256")
         third=persist(context_c,"published-third","published",300)
         assert release_delivery._published_stable_predecessors(self.conn,project_id)=={old["batch_id"],second["batch_id"]}
-        self.make_ready_task(task_id="laterstable0001")
+        self._make_ready_successor("laterstable0001")
         db.update_task(self.conn,"laterstable0001",self.now,project_id=project_id,repository=str(self.repo))
         with patch.object(release_delivery,"_software_proof",return_value=proof_c), \
              patch.object(release_github,"workflow_snapshot",return_value=workflow), \

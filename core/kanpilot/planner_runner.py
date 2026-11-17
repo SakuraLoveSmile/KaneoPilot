@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import cli, codex_planner, constants, db, headless_adapter, util
-from . import dsh_events, task_workspace
+from . import dsh_events, process_owner, task_workspace
 
 DEFAULT_PLANNER_TIMEOUT_SECONDS = 1800
 
@@ -746,6 +746,20 @@ def run_one(db_path: Path, request_id: Optional[str] = None) -> bool:
             _write_json(lifecycle["run_dir"] / dsh_events.JOB_NAME, job)
 
 
+def _checkpoint_native_child(proc, job, run_dir, workspace, schema_path, output_path, argv):
+    """Freeze the actual native identity before a byte of prompt reaches stdin."""
+    birth = process_owner.process_birth(proc.pid)
+    parent_birth = process_owner.process_birth(os.getpid())
+    util.require(proc.poll() is None and birth is not None and parent_birth is not None,
+                 "无法核验规划子进程身份，未发送规划指令", "validation_failed")
+    pgid = os.getpgid(proc.pid)
+    util.require(pgid == proc.pid, "规划子进程未建立独立进程组，未发送规划指令", "validation_failed")
+    job["native_child"] = dict(birth, pid=proc.pid, pgid=pgid, owner_pid=os.getpid(),
+        owner_birth=parent_birth, workspace=str(workspace), schema_path=str(schema_path),
+        output_path=str(output_path), argv_sha256=util.sha256_text(util.jdump(argv)))
+    _write_json(Path(run_dir) / dsh_events.JOB_NAME, job)
+
+
 def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> bool:
     """领取并执行一个规划轮次。返回 True=处理了一个请求（可继续领取）。"""
     claim = cli.run("claim", {
@@ -1006,6 +1020,7 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
 
     deadline = time.monotonic() + timeout
     next_heartbeat = time.monotonic() + heartbeat_every
+    proc = None
     try:
         job["send_state"] = "unknown"
         conn = db.connect(db_path)
@@ -1019,7 +1034,11 @@ def _run_one(db_path: Path, request_id: Optional[str] = None, *, lifecycle) -> b
             stderr=subprocess.STDOUT, env=env, start_new_session=True,
             bufsize=0,
         )
-    except OSError as exc:
+        _checkpoint_native_child(proc, job, run_dir, plan_cwd, schema_path, out_path, argv)
+    except (OSError, util.KanpilotError) as exc:
+        if proc is not None:
+            _terminate(proc)
+            job["owner_stopped"] = proc.poll() is not None
         job["send_state"] = "not_sent"
         finalize("failed", 1, f"launch failed: {exc}", "failed",
                  "launch_failed")

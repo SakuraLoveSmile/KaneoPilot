@@ -104,6 +104,33 @@ class RequestContinuationTests:
         self.assertEqual(caught.exception.code, "bad_request")
         self.assertEqual(len(self.calls), 0)
 
+    def test_settled_continuation_can_continue_again_with_a_new_receipt(self):
+        self.setup_fixture()
+        f = self.f
+        payload = {"task_id": f.task_id, "run_id": f.run_id, "confirm": True}
+        cont.cmd_request_continuation(f.ctx, payload)
+        job_path = f.directory / "job.json"
+        job = json.loads(job_path.read_text())
+        job.update(status="finished", exit_code=0, ended_at=f.ctx.now_iso)
+        job_path.write_text(util.jdump(job))
+        with db.write_txn(f.ctx.conn):
+            db.update_task(f.ctx.conn, f.task_id, f.ctx.now_iso, status="needs_user", failure_code="verification_unconfirmed")
+            f.ctx.conn.execute("UPDATE execution_rounds SET run_status='finished' WHERE task_id=?", (f.task_id,))
+        client = FakeClient(self.calls)
+        client.agent_status = lambda sid: {"currentTurnId": "continued-turn", "isRunning": False}
+        client.turn_get = lambda *a, **kw: {"status": "completed"}
+        def send(sid, content):
+            self.calls.append((sid, content))
+            return {"turnId": "second-continued-turn"}
+        client.agent_prompt = send
+        with patch.object(cont, "_client", return_value=client):
+            second = cont.cmd_request_continuation(f.ctx, payload)
+        self.assertEqual(second['turn_id'], 'second-continued-turn')
+        self.assertEqual(len(self.calls), 2)
+        updated = json.loads(job_path.read_text())
+        self.assertTrue(cont.authorized_observation(f.ctx.conn, updated, 'continued-turn'))
+        self.assertFalse(cont.authorized_observation(f.ctx.conn, updated, 'failed-turn'))
+
     def test_lost_response_marks_unknown_and_never_resends(self):
         self.setup_fixture()
         f = self.f
@@ -235,6 +262,8 @@ class ReconcileContinuationTests:
         job = self.job()
         self.assertEqual(job["turn_id"], "continued-turn")
         self.assertEqual(job["turn_adopted"][-1]["code"], "reconciled_continue")
+        self.assertTrue(cont.authorized_observation(self.f.ctx.conn, job, "failed-turn"))
+        self.assertFalse(cont.authorized_observation(self.f.ctx.conn, job, "foreign-turn"))
         self.assertEqual(self.f.task()["status"], "running")
 
     def test_foreign_newer_turn_stays_unknown(self):

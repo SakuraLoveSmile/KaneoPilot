@@ -213,6 +213,14 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
                        if repair and repair.get("source_kind") in ("merge_conflict", "build_failure")
                        else exec_config.snapshot_with_model_override(conn, task))
     backend = config_snapshot.get("backend") or "pi"
+    # Recheck the actual execution route in case it changed since publication.
+    # The worker repeats the same Host guard against its frozen plan bytes.
+    from . import verify_evidence
+    try:
+        verify_evidence.validate_execution_requirements(
+            verify_evidence.parse_verify_block(raw.decode("utf-8")), backend)
+    except util.KanpilotError as exc:
+        raise DispatchCheckFailed(exc.message, exc.code) from exc
     from . import harnesses
     _require(harnesses.supports_role(backend, "execution"),
              "执行端缺少受约束执行与结构化验证报告能力，请选择 Plus 或 Codex CLI", "exec_backend_not_plus")
