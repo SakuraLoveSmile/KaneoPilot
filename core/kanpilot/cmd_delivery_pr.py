@@ -629,7 +629,7 @@ def _sync(ctx, payload, task, delivery, contract):
                 reason = ("PR 合并门连续 " + str(stall["count"]) + " 次未就绪且已超过 "
                           + str(constants.MERGE_STALL_SECONDS // 60) + " 分钟："
                           + str(auto_merge.get("reason") or "")[:200]
-                          + "；修复检查或保护规则后继续")
+                          + "；已暂停自动合并，处理后点继续恢复交付")
                 core.block_task(ctx.conn, fresh, ctx.now_iso, reason, "merge_checks_stalled",
                                 "kaneo-delivery", stage="delivery")
                 db.add_event(ctx.conn, ctx.now_iso, "merge_checks_stalled", task_id=task["task_id"],

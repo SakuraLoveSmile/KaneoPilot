@@ -9,7 +9,9 @@
 
 | 现象 | 定位命令 | 说明 |
 | --- | --- | --- |
-| `GitHub 合并状态未就绪（UNSTABLE）` | `gh pr view <n> --json mergeable,mergeStateStatus,statusCheckRollup` | 合并门禁在等检查；`CLEAN` 后下一轮交付同步会自己合并 |
+| `检查未通过：<workflow>/<check>` | `gh pr view <n> --json mergeable,mergeStateStatus,statusCheckRollup` | 门禁点名了失败检查：修复或重跑该 job；`CLEAN` 后下一轮交付同步会自己合并 |
+| `检查仍在运行：<check>` | 同上 | 只是等结果，不计入长期未就绪的升级 |
+| `检查已通过，GitHub 合并状态仍未就绪（…）` | 同上，再看保护规则与评审 | 检查全绿，剩下的是保护规则、评审或目标分支；到 GitHub 处理 |
 | `PR 已变化，或当前不是同仓库、可确认的合并冲突` | 看任务详情「AI 处理…」 | 该入口只处理 `CONFLICTING`；`MERGEABLE` 时被拒是预期 |
 | `GitHub 暂未查到本批次运行` | `gh api repos/<repo>/actions/workflows/<id>/runs?event=workflow_dispatch` | 零个运行 = 调度没有落地，先查工作流是否满足发布契约 |
 | `发布目标不是本轮已验证的完整源码` | 只读投影 `release_target_unverified` | 目标分支在验证后又前进过，需要补验证 |

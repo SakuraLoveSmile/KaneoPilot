@@ -5,7 +5,8 @@ from unittest.mock import patch
 import pytest
 
 import test_delivery_pr as fixture_pr
-from kanpilot import automation_policy, core, db, gh_client, git_delivery, project_config, remote, stage_contract, util
+from kanpilot import (automation_policy, core, db, gh_client, git_delivery, pr_auto_merge,
+                     project_config, remote, stage_contract, util)
 
 
 @pytest.fixture
@@ -490,3 +491,79 @@ def test_late_refusal_cannot_overwrite_confirmed_acceptance(delivery, exception)
         assert case.sync()['outcome'] == 'waiting'
     sender.assert_called_once()
     assert receipt(case)['status'] == 'accepted'
+
+
+def merge_gate(**changes):
+    value = dict(isDraft=False, mergeable='MERGEABLE', mergeStateStatus='UNSTABLE',
+                 reviewDecision='', statusCheckRollup=[])
+    value.update(changes)
+    return value
+
+
+def check(name, conclusion='SUCCESS', workflow='app-ci', **changes):
+    value = {'__typename': 'CheckRun', 'name': name, 'workflowName': workflow,
+             'status': 'COMPLETED', 'conclusion': conclusion}
+    value.update(changes)
+    return value
+
+
+def test_pending_check_is_waiting_checks_and_names_the_check():
+    state, reason = pr_auto_merge.eligibility(merge_gate(
+        statusCheckRollup=[check('analyze-test', '', status='IN_PROGRESS')]))
+    assert state == 'waiting_checks'
+    assert reason == '检查仍在运行：app-ci/analyze-test，等待结果'
+
+
+def test_failed_check_is_blocked_and_names_the_check():
+    state, reason = pr_auto_merge.eligibility(merge_gate(
+        statusCheckRollup=[check('analyze-test', 'FAILURE')]))
+    assert state == 'blocked'
+    assert reason == '检查未通过：app-ci/analyze-test，修复或重跑后会自动合并'
+
+
+def test_failure_outranks_pending_for_the_same_poll():
+    state, reason = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=[
+        check('macos'), check('analyze-test', 'FAILURE'),
+        check('android', '', status='IN_PROGRESS')]))
+    assert state == 'blocked'
+    assert reason == '检查未通过：app-ci/analyze-test，修复或重跑后会自动合并'
+
+
+def test_push_and_pull_request_runs_dedupe_into_one_stable_reason():
+    # GitHub reports the push run and the pull_request run of one commit together.
+    rollup = [check('analyze-test', 'SUCCESS'), check('analyze-test', 'FAILURE')]
+    first = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=rollup))
+    second = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=list(reversed(rollup))))
+    assert first == second == ('blocked', '检查未通过：app-ci/analyze-test，修复或重跑后会自动合并')
+
+
+def test_many_failures_are_sorted_and_capped():
+    state, reason = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=[
+        check('windows', 'FAILURE'), check('android', 'FAILURE'), check('analyze-test', 'FAILURE')]))
+    assert state == 'blocked'
+    assert reason == '检查未通过：app-ci/analyze-test、app-ci/android 等 3 项，修复或重跑后会自动合并'
+
+
+def test_all_green_but_still_not_clean_points_at_protection():
+    state, reason = pr_auto_merge.eligibility(merge_gate(
+        mergeStateStatus='BLOCKED', statusCheckRollup=[check('analyze-test')]))
+    assert state == 'blocked'
+    assert reason == '检查已通过，GitHub 合并状态仍未就绪（BLOCKED），等待保护规则或评审放行'
+
+
+def test_review_requirement_is_named_when_checks_pass():
+    state, reason = pr_auto_merge.eligibility(merge_gate(
+        mergeStateStatus='BLOCKED', reviewDecision='REVIEW_REQUIRED',
+        statusCheckRollup=[check('analyze-test')]))
+    assert state == 'blocked'
+    assert reason == 'GitHub 评审尚未通过（REVIEW_REQUIRED），等待在 GitHub 处理'
+
+
+def test_empty_rollup_while_not_clean_admits_no_readable_checks():
+    state, reason = pr_auto_merge.eligibility(merge_gate(mergeStateStatus='UNSTABLE'))
+    assert state == 'blocked'
+    assert reason == 'GitHub 合并状态未就绪（UNSTABLE），暂无可读的检查结果，等待保护规则或重新读取'
+
+
+def test_empty_rollup_with_clean_status_is_allowed():
+    assert pr_auto_merge.eligibility(merge_gate(mergeStateStatus='CLEAN')) is None

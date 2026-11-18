@@ -44,6 +44,62 @@ def check_policy(conn, task, expected):
                  '交付已暂停或任务已转为人工处理，未提交自动合并', 'conflict')
 
 
+_PASSING_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')
+_MAX_CHECK_NAME = 120
+_MAX_CHECK_WORKFLOW = 80
+_MAX_REASON_LABELS = 2
+
+
+def _check_label(check):
+    name = gh_client.redact(check.get('name') or check.get('context') or '未命名检查')[:_MAX_CHECK_NAME]
+    workflow = gh_client.redact(check.get('workflowName') or '')[:_MAX_CHECK_WORKFLOW]
+    return workflow + '/' + name if workflow else name
+
+
+def _label_text(labels):
+    if len(labels) <= _MAX_REASON_LABELS:
+        return '、'.join(labels)
+    return '、'.join(labels[:_MAX_REASON_LABELS]) + ' 等 ' + str(len(labels)) + ' 项'
+
+
+def _classify_checks(pr):
+    """Point at the check that stops the merge instead of echoing a status code.
+
+    Pending checks are normal progress and stay 'waiting_checks': GitHub also
+    reports UNSTABLE while they run, so judging the status code first would start
+    the long-blocked streak during a normal build. A failed check is a real
+    'blocked' observation and names itself. The reason stays deterministic
+    (sorted, deduplicated, no timestamps or observation counts) because the
+    stall streak is keyed by the exact string.
+    """
+    checks = pr.get('statusCheckRollup')
+    if not isinstance(checks, list):
+        return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
+    failed, pending = [], []
+    for check in checks:
+        if not isinstance(check, dict):
+            return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
+        typename = check.get('__typename')
+        if typename == 'CheckRun':
+            if check.get('status') != 'COMPLETED':
+                pending.append(_check_label(check))
+            elif check.get('conclusion') not in _PASSING_CONCLUSIONS:
+                failed.append(_check_label(check))
+        elif typename == 'StatusContext':
+            if check.get('state') in ('PENDING', 'EXPECTED'):
+                pending.append(_check_label(check))
+            elif check.get('state') != 'SUCCESS':
+                failed.append(_check_label(check))
+        else:
+            return 'waiting_checks', 'GitHub 检查类型未知，继续观察'
+    failed, pending = sorted(set(failed)), sorted(set(pending))
+    if failed:
+        return 'blocked', '检查未通过：' + _label_text(failed) + '，修复或重跑后会自动合并'
+    if pending:
+        return 'waiting_checks', '检查仍在运行：' + _label_text(pending) + '，等待结果'
+    return None
+
+
 def eligibility(pr):
     """Explicit allow-list; missing/unknown GitHub fields always stop the write."""
     if pr.get('isDraft') is not False:
@@ -51,29 +107,18 @@ def eligibility(pr):
     if pr.get('mergeable') != 'MERGEABLE':
         return 'blocked', ('PR 存在合并冲突，需在 GitHub 处理' if pr.get('mergeable') == 'CONFLICTING'
                            else 'GitHub 尚未确认 PR 可合并，继续观察')
+    checks = _classify_checks(pr)
+    if checks:
+        return checks
+    if pr.get('reviewDecision') not in ('', 'APPROVED'):
+        decision = gh_client.redact(pr.get('reviewDecision') or '')[:60]
+        return 'blocked', ('GitHub 评审尚未通过（' + decision + '），等待在 GitHub 处理'
+                           if decision else 'GitHub 评审要求尚未满足或状态未知，等待在 GitHub 处理')
     if pr.get('mergeStateStatus') != 'CLEAN':
         status = gh_client.redact(pr.get('mergeStateStatus') or '未知')[:100]
-        return 'blocked', 'GitHub 合并状态未就绪（' + status + '），等待检查或保护规则放行'
-    if pr.get('reviewDecision') not in ('', 'APPROVED'):
-        return 'blocked', 'GitHub 评审要求尚未满足或状态未知，等待在 GitHub 处理'
-    checks = pr.get('statusCheckRollup')
-    if not isinstance(checks, list):
-        return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
-    for check in checks:
-        if not isinstance(check, dict):
-            return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
-        name = gh_client.redact(check.get('name') or check.get('context') or '检查')[:120]
-        if check.get('__typename') == 'CheckRun':
-            if check.get('status') != 'COMPLETED':
-                return 'waiting_checks', name + ' 尚未完成，继续观察'
-            if check.get('conclusion') not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
-                return 'blocked', name + ' 未通过或结论未知，等待在 GitHub 处理'
-        elif check.get('__typename') == 'StatusContext':
-            if check.get('state') != 'SUCCESS':
-                return ('waiting_checks' if check.get('state') in ('PENDING', 'EXPECTED') else 'blocked',
-                        name + ' 尚未通过，继续观察')
-        else:
-            return 'waiting_checks', 'GitHub 检查类型未知，继续观察'
+        return 'blocked', ('检查已通过，GitHub 合并状态仍未就绪（' + status + '），等待保护规则或评审放行'
+                           if pr.get('statusCheckRollup') else
+                           'GitHub 合并状态未就绪（' + status + '），暂无可读的检查结果，等待保护规则或重新读取')
     return None
 
 

@@ -107,3 +107,40 @@ def test_stall_maps_to_attention_and_is_resumable(case):
     from kanpilot.engine import ladder
     assert ladder.classify("merge_checks_stalled") == ladder.LADDER_ENVIRONMENTAL
     assert not ladder.auto_retry_allowed(ladder.LADDER_ENVIRONMENTAL)
+
+
+def _check(conclusion, status="COMPLETED", name="analyze-test"):
+    return {"__typename": "CheckRun", "name": name, "workflowName": "app-ci",
+            "status": status, "conclusion": conclusion}
+
+
+def test_pending_checks_while_unstable_do_not_escalate(case):
+    pending = pr(case, mergeStateStatus="UNSTABLE",
+                 statusCheckRollup=[_check("", status="IN_PROGRESS")])
+    start = case.ctx.now
+    with patch.object(gh_client, "pr_view", return_value=pending), \
+         patch.object(gh_client, "pr_merge", create=True):
+        for offset in (300, 900, 1900, 2500):
+            assert sync_at(case, start + timedelta(seconds=offset))["outcome"] == "waiting"
+    assert case.task()["status"] == "in_review"
+    value = core.delivery_of(case.task())
+    assert value["auto_merge_stall"] is None
+    assert value["auto_merge"]["state"] == "waiting_checks"
+    assert "analyze-test" in value["auto_merge"]["reason"]
+
+
+def test_failed_check_escalates_with_the_check_name(case):
+    failing = pr(case, mergeStateStatus="UNSTABLE",
+                 statusCheckRollup=[_check("FAILURE")])
+    start = case.ctx.now
+    with patch.object(gh_client, "pr_view", return_value=failing), \
+         patch.object(gh_client, "pr_merge", create=True):
+        for offset in (300, 900, 2500):
+            result = sync_at(case, start + timedelta(seconds=offset))
+    assert result["outcome"] == "blocked"
+    assert result["failure_code"] == "merge_checks_stalled"
+    task = case.task()
+    assert task["status"] == "needs_user"
+    assert "analyze-test" in task["blocked_summary"]
+    assert "已暂停自动合并" in task["blocked_summary"]
+    assert "修复检查或保护规则后继续" not in task["blocked_summary"]
