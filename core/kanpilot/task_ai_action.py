@@ -6,7 +6,7 @@ from . import (automation_policy, constants, core, db, exec_config, gh_client,
                git_delivery, project_config, runtime_operations, util)
 
 KIND = "merge_conflict"
-KINDS = (KIND, "build_failure")
+KINDS = (KIND, "build_failure", "check_failure")
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
                 "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
@@ -30,6 +30,9 @@ def _context(fix):
     if fix.get("source_kind") == "build_failure":
         from . import task_ai_build_failure
         fields += ("source_kind",) + task_ai_build_failure.FIELDS
+    elif fix.get("source_kind") == "check_failure":
+        from . import task_ai_check_failure
+        fields += ("source_kind",) + task_ai_check_failure.FIELDS
     value = {key: fix.get(key) for key in fields}
     if fix.get("source_kind") == "build_failure":
         delivery = dict(fix.get("source_delivery") or {})
@@ -210,10 +213,19 @@ def _public_candidate(value):
     if value.get("source_kind") == "build_failure":
         from . import task_ai_build_failure
         result.update({key: value[key] for key in task_ai_build_failure.PUBLIC})
+    elif value.get("source_kind") == "check_failure":
+        from . import task_ai_check_failure
+        result.update({key: value[key] for key in task_ai_check_failure.PUBLIC})
     return result
 
 
 def _prepare_kind(ctx, task, kind):
+    if kind == "check_failure":
+        from . import task_ai_check_failure
+        try:
+            return task_ai_check_failure.prepare(ctx, task)
+        except gh_client.GhError as exc:
+            raise util.KanpilotError("remote_unavailable", exc.message) from exc
     if kind == "build_failure":
         from . import task_ai_build_failure
         try:
@@ -278,6 +290,10 @@ def cmd_start_task_ai_action(ctx, payload):
             from . import task_ai_build_failure
             util.require(task_ai_build_failure.gate(ctx.conn, fresh) is None,
                          "准备期间失败构建状态已变化，请重新准备", "conflict")
+        if value["source_kind"] == "check_failure":
+            from . import task_ai_check_failure
+            util.require(task_ai_check_failure.gate(ctx.conn, fresh) is None,
+                         "准备期间失败检查状态已变化，请重新准备", "conflict")
         # snapshot() may resolve Plus defaults over a connection, so only compare
         # the raw persisted global setting while the writer lock is held.
         util.require(_digest(db.get_setting(ctx.conn, "exec_config")) == value["raw_config_sha256"],
@@ -403,6 +419,9 @@ def prompt_body(fix, plan_path):
     if fix.get("source_kind") == "build_failure":
         from . import task_ai_build_failure
         return task_ai_build_failure.prompt_body(fix, plan_path)
+    if fix.get("source_kind") == "check_failure":
+        from . import task_ai_check_failure
+        return task_ai_check_failure.prompt_body(fix, plan_path)
     from . import verify_evidence
     plan = _read_frozen(plan_path, fix.get("plan_sha256"))
     _read_frozen(fix.get("report_path"), fix.get("report_sha256"), report=True)
@@ -558,6 +577,15 @@ def projection(conn, task, now):
     kind = (fix.get("source_kind") or ("build_failure" if batch and batch.get("state") == "failed" else KIND))
     if kind == "build_failure" and not fix:
         reason = reason or task_ai_build_failure.gate(conn, task)
+    if kind == KIND and not fix:
+        # The merge gate already names the failing check; offer the smallest repair
+        # of exactly that check instead of the merge-conflict flow.
+        from . import task_ai_check_failure
+        notice = core.delivery_of(task).get("auto_merge") or {}
+        if (notice.get("state") == "blocked"
+                and str(notice.get("reason") or "").startswith("检查未通过：")):
+            kind = task_ai_check_failure.KIND
+            reason = reason or task_ai_check_failure.gate(conn, task)
     if not current and kind == KIND and history and history[-1].get("kind") == "build_failure":
         kind, reason = "build_failure", "本次构建修复已结束；合并与再次构建发布须另行确认"
     return {"kind": kind, "can_prepare": reason is None, "reason": reason, "current": current, "history": history}

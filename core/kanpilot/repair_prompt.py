@@ -18,6 +18,9 @@ def _identity(fix):
     if fix.get('source_kind') == 'build_failure':
         from . import task_ai_build_failure
         identity.update({key: fix.get(key) for key in task_ai_build_failure.FIELDS})
+    if fix.get('source_kind') == 'check_failure':
+        from . import task_ai_check_failure
+        identity.update({key: fix.get(key) for key in task_ai_check_failure.FIELDS})
     if fix.get('verification_recovery') is not None:
         identity['verification_recovery'] = fix['verification_recovery']
     return util.sha256_bytes(util.jdump(identity).encode('utf-8'))
@@ -35,7 +38,7 @@ def _read(path, sha):
 
 
 def _body(fix, plan_path):
-    if fix.get('source_kind') in ('merge_conflict', 'build_failure'):
+    if fix.get('source_kind') in ('merge_conflict', 'build_failure', 'check_failure'):
         from . import task_ai_action
         return task_ai_action.prompt_body(fix, plan_path)
     plan = _read(plan_path, fix.get('plan_sha256'))
