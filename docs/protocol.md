@@ -1819,6 +1819,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论、超限拒绝而不猜测或截断成假证据）。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
 - `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单与失败日志；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
 - 证据、提交、复审与交付沿既有链：结构化 Goal 报告与源码快照、单父提交、必须重新 Review；通过后推送原 PR 分支并按项目自动合并策略重新核对检查。修复失败、检查漂移或结果未知保留现场，不自动再次调用模型。
+- `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
 
 #### 外部构建修复的关联
 

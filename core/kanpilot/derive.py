@@ -846,6 +846,14 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             if not (core.is_automation_managed(task) and send_state == "unknown"):
                 actions.append("replan")
             actions.append("dismiss")
+        if status in ("in_review", "needs_user"):
+            # Cheap, storage-driven offer: the merge gate already names a failed
+            # check, so one explicit rerun of those jobs is available.
+            from . import core as core_module
+            notice = core_module.delivery_of(task).get("auto_merge") or {}
+            if (core_module.is_pr_delivery(task) and notice.get("state") == "blocked"
+                    and str(notice.get("reason") or "").startswith("检查未通过：")):
+                actions.append("rerun_checks")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
     from . import engine_fix_revert

@@ -1739,6 +1739,12 @@ struct TaskOverviewTabView: View {
                 Task { await model.resolve(taskID: detail.taskId, action: action) }
             }
             .disabled(model.busy)
+        case "rerun_checks":
+            Button("重跑失败检查") {
+                Task { await model.rerunChecks(taskID: detail.taskId) }
+            }
+            .disabled(model.busy)
+            .help("只重跑失败 Job；检查会重新排队，结果以 GitHub 为准")
         case "recheck":
             Button("重新校验") {
                 Task { await model.recheck(taskID: detail.taskId) }

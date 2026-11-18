@@ -98,6 +98,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         {"task_id": (True, "str"), "pr_number": (True, "int"),
          "expected_context_sha256": (True, "str"), "confirm": (True, "bool")},
         _automation_command("external_build_repair", "cmd_accept_external_build_repair")),
+    "rerun-checks": (
+        {"task_id": (True, "str")},
+        _automation_command("cmd_rerun_checks", "cmd_rerun_checks")),
     "start-task-release": (
         {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
         _automation_command("release_delivery", "cmd_start_task_release")),

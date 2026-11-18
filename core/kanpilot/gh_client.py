@@ -146,6 +146,13 @@ def pr_list(repo_slug, head_branch) -> list:
     return [_pr(value) for value in values]
 
 
+def run_rerun_failed(repo_slug, run_id):
+    """Rerun only the failed jobs of one exact workflow run."""
+    if type(run_id) is not int or run_id < 1:
+        raise GhError("rejected", "工作流运行编号无效")
+    return _run(["run", "rerun", str(run_id), "--repo", _repo(repo_slug), "--failed"])
+
+
 def pr_view(repo_slug, number, *, merge_checks=False, merge_commit=False) -> dict:
     fields = PR_MERGE_FIELDS if merge_checks else PR_FIELDS
     if merge_commit:

@@ -855,6 +855,14 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func rerunChecks(taskID: String) async {
+        await perform("重跑失败检查") {
+            _ = try await self.client.run("rerun-checks", payload: ["task_id": taskID],
+                                           as: OkResponse.self)
+            return "已请求重跑失败的检查，稍后自动核对结果"
+        }
+    }
+
     func setPriority(requestID: String?, taskID: String, priority: Int) async {
         await perform("调整顺序") {
             var payload: [String: Any] = ["task_id": taskID, "priority": priority]
@@ -1711,6 +1719,7 @@ final class AppViewModel: ObservableObject {
         case "mark_done": return "登记完成"
         case "dismiss": return "清除阻塞标记"
         case "recover_review": return "恢复评审阶段"
+        case "rerun_checks": return "重跑失败检查"
         case "recheck": return "重新校验"
         case "closeout_parent": return "校验并完成"
         case "continue_delivery": return "继续交付"
