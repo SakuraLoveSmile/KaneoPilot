@@ -12,6 +12,9 @@ _TASK_KEYS = ('task_id', 'project_id', 'repository', 'requirements_sha256',
 _BRANCH_KEYS = ('workspace_version', 'branch', 'worktree_path', 'base_branch', 'base_sha', 'head_sha')
 WAITING_REASON = '正式评审已通过；继续交付将复用已有报告，创建 PR 并推进合并和已配置的构建发布'
 _DELIVERY_ENVIRONMENT_CODES = ('gh_missing', 'gh_not_logged_in', 'gh_timeout', 'gh_unavailable')
+# A long-blocked merge gate has the same shape: the reviewed identity is intact
+# and only GitHub has to change, so the same user authorization may continue it.
+_DELIVERY_RETRYABLE_CODES = _DELIVERY_ENVIRONMENT_CODES + ('merge_checks_stalled',)
 
 
 def manual_release_review(task):
@@ -151,7 +154,7 @@ def continuation(task, *, allow_paused=False, allow_delivery_block=False):
     receipt = extra.get('manual_review_delivery') or {}
     retryable_block = (allow_delivery_block and task['status'] == 'needs_user'
                        and task['failure_stage'] == 'delivery'
-                       and task['failure_code'] in _DELIVERY_ENVIRONMENT_CODES)
+                       and task['failure_code'] in _DELIVERY_RETRYABLE_CODES)
     state_allowed = (task['status'] == 'in_review' and not task['failure_code']) or retryable_block
     if (not receipt or receipt.get('authorized_by') != 'user' or not receipt.get('authorized_at')
             or not state_allowed or not db.task_is_active(task)
@@ -306,7 +309,10 @@ def continue_delivery(ctx, payload):
             core.transition_task(ctx.conn, fresh, 'in_review', ctx.now_iso, 'user',
                 detail=dict(via='continue_delivery', review_key=fresh['review_key']), **core.clear_block_fields())
         fresh = db.require_task(ctx.conn, task['task_id'])
-        core.update_delivery(ctx.conn, fresh, ctx.now_iso, mode='pr', next_sync_at=ctx.now_iso)
+        # Continuing the same user-authorized delivery restarts the merge-gate
+        # observation window and the consecutive-unknown counter, like a resume.
+        core.update_delivery(ctx.conn, fresh, ctx.now_iso, mode='pr', next_sync_at=ctx.now_iso,
+                             auto_merge_stall=None, unknown_delivery_streak=0)
         db.set_extra(ctx.conn, db.require_task(ctx.conn, task['task_id']), ctx.now_iso, manual_review_delivery=receipt)
         request = enqueue(ctx.conn, db.require_task(ctx.conn, task['task_id']), ctx.now_iso, requested_by='user')
         db.add_event(ctx.conn, ctx.now_iso, 'resolved', task_id=task['task_id'], actor='user',

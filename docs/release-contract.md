@@ -46,6 +46,7 @@
 - 每次交付同步记录 `auto_merge_stall{head_sha,reason,since,count}`；仅 state 为 `blocked` 才计数，`waiting_checks`（检查仍在运行）不计。原因、head 或状态变化即重置。
 - 连续观测 ≥3 次且持续 ≥`MERGE_STALL_SECONDS`（30 分钟）时，任务进入 `needs_user`：`failure_code=merge_checks_stalled`、`failure_stage=delivery`、事件 `merge_checks_stalled`。原因写明实际 GitHub 原因，并提示修复检查或保护规则后继续。
 - 该码映射 `delivery_blocked` attention、阶梯 2（等待人工，不自动重试）；`resume` 回到 `in_review` 并续排交付。重绑交付头或用户继续交付都会重置观察窗口。升级不合并、不标记失败批次、不改变 PR，只把无限空转变成可见的待处理项。
+- 非自动化托管的手动交付任务没有 `resume`，等价入口是 `continue_delivery`：复用同一人工授权回执，复核执行轮次、评审、分支、源码与证据身份后清阻塞回到 `in_review` 并续排交付。仅 GitHub 环境失败（`gh_missing`/`gh_not_logged_in`/`gh_timeout`/`gh_unavailable`）与本码允许经此恢复，其他交付失败原因仍保留现场等待处理；两条路径同样重置观察窗口与连续未知计数。
 
 ### 合并后源码的补验证
 

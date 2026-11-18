@@ -312,6 +312,31 @@ class ReviewDeliveryTest(TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM requests WHERE kind='delivery' AND status='queued'").fetchone()[0],1)
         self.assertTrue(self.resolve()['deduplicated'])
 
+    def test_merge_gate_stall_may_continue_the_same_manual_delivery(self):
+        self.fail_delivery(environment=False)
+        core.update_delivery(self.conn, self.task(), self.ctx.now_iso,
+                            auto_merge_stall=dict(count=7, head_sha='x', reason='stale'))
+        core.block_task(self.conn, self.task(), self.ctx.now_iso,
+                        'PR 合并门连续 7 次未就绪且已超过 30 分钟',
+                        'merge_checks_stalled', 'kaneo-delivery', stage='delivery')
+        self.assertIn('continue_delivery',
+                      derive.allowed_actions(self.conn, self.task(), self.ctx.now))
+        result = self.resolve()
+        self.assertEqual(result['task_status'], 'in_review')
+        self.assertIsNone(self.task()['failure_code'])
+        self.assertIsNone(core.delivery_of(self.task()).get('auto_merge_stall'))
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM requests WHERE kind='delivery' AND status='queued'").fetchone()[0], 1)
+
+    def test_other_delivery_blocks_keep_the_task_blocked(self):
+        self.fail_delivery(environment=False)
+        core.block_task(self.conn, self.task(), self.ctx.now_iso, 'PR 已关闭',
+                        'pr_closed', 'kaneo-delivery', stage='delivery')
+        self.assertNotIn('continue_delivery',
+                         derive.allowed_actions(self.conn, self.task(), self.ctx.now))
+        with self.assertRaises(util.KanpilotError):
+            self.resolve()
+
     def test_failed_runner_without_task_block_can_requeue_but_unrelated_block_cannot(self):
         self.fail_delivery(environment=False)
         self.assertEqual(self.task()['status'],'in_review')
