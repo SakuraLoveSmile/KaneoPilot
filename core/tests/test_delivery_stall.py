@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from kanpilot import (cmd_delivery_pr as commands, constants, core, db, gh_client,
-                     project_config, util)
+                     pr_auto_merge, project_config, util)
 from kanpilot.engine import attention
 from test_delivery_pr import DeliveryPR
 
@@ -144,3 +144,63 @@ def test_failed_check_escalates_with_the_check_name(case):
     assert "analyze-test" in task["blocked_summary"]
     assert "已暂停自动合并" in task["blocked_summary"]
     assert "修复检查或保护规则后继续" not in task["blocked_summary"]
+
+
+def test_refresh_notice_names_the_blocking_check_read_only(case):
+    case.update(pr_state="OPEN")
+    reader = lambda repo, number, merge_checks=False: pr(
+        case, statusCheckRollup=[_check("FAILURE")])
+    before = case.task()
+    notice = pr_auto_merge.refresh_notice(case.ctx.conn, before, case.ctx.now_iso, reader=reader)
+    assert notice["state"] == "blocked"
+    assert "analyze-test" in notice["reason"]
+    after = case.task()
+    assert (after["status"], after["stage"]) == (before["status"], before["stage"])
+    value = core.delivery_of(after)
+    assert value["auto_merge"]["reason"] == notice["reason"]
+    assert value.get("auto_merge_stall") is None
+
+
+def test_refresh_notice_reports_a_ready_gate(case):
+    case.update(pr_state="OPEN")
+    reader = lambda repo, number, merge_checks=False: pr(
+        case, mergeStateStatus="CLEAN", statusCheckRollup=[_check("SUCCESS")])
+    notice = pr_auto_merge.refresh_notice(case.ctx.conn, case.task(), case.ctx.now_iso,
+                                          reader=reader)
+    assert notice["state"] == "waiting_checks"
+    assert "已满足" in notice["reason"]
+
+
+def test_refresh_notice_keeps_an_unconfirmed_merge_receipt(case):
+    case.update(pr_state="OPEN", auto_merge={"state": "unknown", "reason": "待确认",
+                                             "head_sha": case.delivery["head_sha"]})
+    calls = []
+    reader = lambda *a, **k: calls.append(1) or case.pr()
+    assert pr_auto_merge.refresh_notice(case.ctx.conn, case.task(), case.ctx.now_iso,
+                                        reader=reader) is None
+    assert not calls
+
+
+def test_refresh_notice_skips_a_moved_head(case):
+    case.update(pr_state="OPEN")
+    reader = lambda *a, **k: dict(case.pr(), headRefOid="f" * 40)
+    assert pr_auto_merge.refresh_notice(case.ctx.conn, case.task(), case.ctx.now_iso,
+                                        reader=reader) is None
+
+
+def test_manual_recheck_refreshes_the_gate_line(case):
+    from kanpilot import cmd_remote, remote
+    case.update(pr_state="OPEN")
+    failing = pr(case, statusCheckRollup=[_check("FAILURE")])
+    source = {"task": {"id": "task1234", "projectId": case.task()["project_id"],
+                       "status": "in-review"}}
+    with patch.object(remote, "get_client", return_value=None), \
+         patch.object(remote, "get_task", return_value=source), \
+         patch.object(gh_client, "pr_view", return_value=failing):
+        result = cmd_remote.cmd_recheck(case.ctx, {"task_id": "task1234"})
+    names = [item["name"] for item in result["checks"]]
+    assert "pr_merge_gate" in names
+    detail = next(item["detail"] for item in result["checks"]
+                  if item["name"] == "pr_merge_gate")
+    assert "analyze-test" in detail
+    assert "analyze-test" in core.delivery_of(case.task())["auto_merge"]["reason"]

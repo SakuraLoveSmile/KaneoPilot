@@ -10,8 +10,8 @@ from pathlib import Path
 
 from . import (
     bridge, cmd_exec, cmd_read, constants, core, db, derive,
-    dsh_events, headless_adapter as _headless, planfile, remote,
-    round_store, util, verify_evidence,
+    dsh_events, gh_client, git_delivery, headless_adapter as _headless, planfile,
+    pr_auto_merge, remote, round_store, util, verify_evidence,
 )
 
 
@@ -706,6 +706,17 @@ def cmd_recheck(ctx, payload: dict) -> dict:
             checks.append(
                 {"name": "remote", "ok": False, "detail": str(exc)}
             )
+
+    if not offline and actor == "user":
+        # A parked delivery never polls again, so its merge-gate line would stay
+        # frozen. Recompute it read-only so a manual recheck names the blocker.
+        try:
+            notice = pr_auto_merge.refresh_notice(conn, task, ctx.now_iso)
+            if notice:
+                checks.append({"name": "pr_merge_gate", "ok": True,
+                               "detail": notice["reason"]})
+        except (gh_client.GhError, git_delivery.GitDeliveryError) as exc:
+            checks.append({"name": "pr_merge_gate", "ok": False, "detail": str(exc)})
 
     now = ctx.now_iso
     with db.write_txn(conn):

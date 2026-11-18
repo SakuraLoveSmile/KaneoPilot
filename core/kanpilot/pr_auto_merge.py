@@ -122,6 +122,36 @@ def eligibility(pr):
     return None
 
 
+def refresh_notice(conn, task, now, *, reader=None):
+    """Read-only refresh of the merge-gate line for a parked delivery task.
+
+    A task that stopped polling keeps its last notice forever, so its line would
+    keep quoting an old status instead of the check that blocks it now. Recompute
+    the same allow-list from the current PR and write only the read-side receipt:
+    no GitHub write, no task status change, no stall reset.
+    """
+    delivery = core.delivery_of(task)
+    number = delivery.get('pr_number')
+    head = delivery.get('head_sha')
+    if (not core.is_pr_delivery(task) or delivery.get('pr_state') != 'OPEN'
+            or not isinstance(number, int) or number < 1
+            or not isinstance(head, str) or not head):
+        return None
+    if (delivery.get('auto_merge') or {}).get('state') in ('unknown', 'merging', 'merged'):
+        return None  # an unconfirmed merge receipt is never rewritten by a read
+    repo = git_delivery.require_github_origin(task['repository'])
+    pr = (reader or gh_client.pr_view)(repo, number, merge_checks=True)
+    if pr.get('headRefOid') and pr['headRefOid'] != head:
+        return None  # the reviewed head moved; the delivery head is still frozen
+    blocked = eligibility(pr)
+    state, reason = blocked if blocked else (
+        'waiting_checks', '检查与保护规则已满足，等待下一轮交付同步合并')
+    notice = _notice(state, reason, delivery, now)
+    with db.write_txn(conn):
+        core.update_delivery(conn, task, now, auto_merge=notice)
+    return notice
+
+
 def _identity(task, delivery, repo):
     return {'task_id': task['task_id'], 'run_id': task['run_id'],
             'review_key': task['review_key'], 'report_sha256': task['review_report_sha256'],
