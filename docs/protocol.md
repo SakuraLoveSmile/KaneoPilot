@@ -1820,6 +1820,15 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单与失败日志；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
 - 证据、提交、复审与交付沿既有链：结构化 Goal 报告与源码快照、单父提交、必须重新 Review；通过后推送原 PR 分支并按项目自动合并策略重新核对检查。修复失败、检查漂移或结果未知保留现场，不自动再次调用模型。
 - 与其它一次性处理一致的身份约束：`prepare` 冻结 `target_base_sha` 为本次评审依据的交付基线提交（检查修复在原分支原地提交，不合并目标分支，因此交付 `base_sha` 不移动）；dispatch 领取按冻结的`action_config` 固化执行轮次；复审通过登记交付续接回执，`继续交付`与交付阶段只对这一精确执行/评审/提交放行。该轮不进入普通 Review 修复入口，失败也不自动启动引擎补救或新模型轮次。
+
+#### 一次性处理的模型选择（2026-11-19）
+
+三类一次性处理默认沿用「通用执行配置」；另可在 `settings.exec_config.one_shot` 单独指定
+`{model_id?, thinking_level?}`，只覆盖 Plus 分支的模型与思考等级，provider、连接文件与权限模式
+仍跟随通用配置。缺省该键或空对象 = 跟随通用配置；非 Plus 后端忽略该覆盖，不因它切换后端。
+`prepare-task-ai-action` 按覆盖生成 `action_config` 并冻结进候选，确认弹窗的模型摘要即本次实际使用
+的模型；之后修改设置只影响新候选，已确认轮次继续用冻结快照。只开放模型与思考等级，不开放切换后端。
+
 - `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
 
 #### 外部构建修复的关联

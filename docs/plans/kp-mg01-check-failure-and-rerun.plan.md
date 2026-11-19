@@ -80,3 +80,22 @@
   完整本地 `pytest tests -q`（5200 项）因耗时过长中止，改以云端分片为全量结论。
 - 测试版 `v0.5.8-test.329`（预发布，assets：macos-arm64.dmg / android.apk / manifest.json / SHA256SUMS）。
 - 状态：待体验（需安装 test.329 后对真实失败检查点一次「AI 处理…」）。
+## 2026-11-19 一次性 AI 处理可单独指定模型（整组一个覆盖）
+
+需求：合并冲突 / 构建失败 / 检查失败三类一次性处理常是小改动，希望单独指定更便宜或更快的模型，
+而不影响普通任务执行；按用户确认采用「整组一个覆盖」。
+
+- `settings.exec_config.one_shot={model_id?, thinking_level?}`：只覆盖 Plus 分支的模型与思考等级，
+  provider、连接文件与权限模式仍跟随通用配置；缺省或空对象 = 跟随通用配置，非 Plus 后端忽略。
+- `exec_config.snapshot_for_action(conn)`：解析通用配置后叠加覆盖；三处 `prepare` 改用它，
+  `action_config` 照旧冻结进候选（确认弹窗的模型摘要即实际模型）。
+- `set-exec-config` 接受 `one_shot`（`_SET_FIELDS` + CLI schema + 事件 detail 只记模型身份）。
+- macOS 执行配置 Plus 分组新增「一次性 AI 处理（小修复）」：默认跟随，打开「单独指定模型」后可
+  选择模型（沿用 Plus 目录）与思考等级。
+- protocol §5.27「一次性处理的模型选择」与 ui-spec 对应段落已记录。
+
+验证：`pytest tests/test_one_shot_model.py tests/test_cmd_config.py tests/test_check_failure_action_flow.py
+tests/test_check_failure_ai_action.py tests/test_task_ai_action.py tests/test_task_ai_action_lifecycle.py
+tests/test_build_failure_ai_action.py tests/test_direct_review_repair.py -q` → 138 passed / 70 subtests；
+新增 7 项覆盖保存、清除、非 Plus 后端忽略、非法值拒绝、就绪门与候选冻结。
+未验证：真实 Plus 用覆盖模型跑一轮修复（需 test 版实机）。

@@ -128,7 +128,7 @@ def prepare(ctx, task):
                  github_repo=repo, check_runs=failing,
                  failure_logs=logs, failure_logs_sha256=_digest(logs), checks_sha256=_digest(failing))
     raw_config_sha256 = _digest(db.get_setting(ctx.conn, "exec_config"))
-    config = exec_config.snapshot(ctx.conn)
+    config = exec_config.snapshot_for_action(ctx.conn)
     util.require(config.get("backend") == "pi_desktop",
                  "检查修复需要 Plus 的结构化验证报告；请在通用执行配置中选择 Plus 后重试", "conflict")
     available, why = exec_config.check_available(ctx.conn, config_snapshot=config)

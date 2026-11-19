@@ -84,10 +84,13 @@ def _merge(stored: Optional[dict]) -> dict:
             stored.get(constants.CONTROLLER_BACKEND_KEY)
         )
         config["pi_desktop"] = _merge_pi_desktop(stored.get("pi_desktop"))
+        config[constants.ONE_SHOT_CONFIG_KEY] = _merge_one_shot(
+            stored.get(constants.ONE_SHOT_CONFIG_KEY))
     else:
         config["backend"] = "pi"
         config[constants.CONTROLLER_BACKEND_KEY] = "pi"
         config["pi_desktop"] = None
+        config[constants.ONE_SHOT_CONFIG_KEY] = None
     from . import codex_execution
     config["codex"] = dict(codex_execution.DEFAULT_CONFIG)
     if isinstance(stored, dict) and isinstance(stored.get("codex"), dict):
@@ -135,6 +138,19 @@ def merge_pi_desktop_block(block: Optional[dict]) -> Optional[dict]:
     return _merge_pi_desktop(block)
 
 
+def _merge_one_shot(block: Optional[dict]) -> Optional[dict]:
+    """一次性 AI 处理模型覆盖规范化（protocol §5.27）：只认 model_id/thinking_level
+    的非空字符串；非 dict/空块 → None（=跟随通用执行配置）。"""
+    if not isinstance(block, dict):
+        return None
+    cleaned = {}
+    for key in constants.ONE_SHOT_CONFIG_KEYS:
+        val = block.get(key)
+        if isinstance(val, str) and val:
+            cleaned[key] = val
+    return cleaned or None
+
+
 def load(conn: sqlite3.Connection) -> dict:
     """当前生效配置：四字段 + backend + pi_desktop（None=未保存），
     含 updated_at 若已保存。"""
@@ -179,6 +195,31 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
         "backend": "pi",
         **{key: config.get(key) for key in constants.EXEC_CONFIG_KEYS if key in config},
     }
+
+def snapshot_for_action(conn: sqlite3.Connection) -> dict:
+    """一次性 AI 处理轮次快照（protocol §5.27）：通用执行配置 + 可选 one_shot 覆盖。
+
+    只覆盖 Plus 分支的 model_id / thinking_level（provider 与连接保持不变）；
+    其它后端或没有覆盖时与 ``snapshot(conn)`` 完全一致。覆盖在准备时读一次，
+    随 ``action_config`` 冻结进候选，之后改设置只影响新候选。
+    """
+    config = load(conn)
+    override = config.get(constants.ONE_SHOT_CONFIG_KEY)
+    if not isinstance(override, dict) or not override:
+        return snapshot(conn)
+    if (config.get("backend") or "pi") != "pi_desktop":
+        # 覆盖只对 Plus 分支有意义；不因它静默切换后端。
+        return snapshot(conn)
+    resolved, error = resolve_runtime_config(conn, config.get("pi_desktop"))
+    if resolved is None:
+        raise util.KanpilotError(
+            "validation_failed", f"一次性处理模型覆盖解析失败：{error or '未知原因'}")
+    block = dict(resolved, model_source="custom")
+    for key in constants.ONE_SHOT_CONFIG_KEYS:
+        if override.get(key):
+            block[key] = override[key]
+    return snapshot(conn, config_override=dict(config, pi_desktop=block))
+
 
 def snapshot_with_model_override(conn: sqlite3.Connection, task) -> dict:
     """``snapshot`` + 引擎一次性模型覆盖（``engine/fallback.py``，scenarios.md #5）。
@@ -273,6 +314,36 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
         merged_block = dict(previous) if isinstance(previous, dict) else {}
         merged_block.update(block)
         merged_stored["codex"] = merged_block
+    if constants.ONE_SHOT_CONFIG_KEY in fields:
+        block = fields[constants.ONE_SHOT_CONFIG_KEY]
+        if block is None or block == {}:
+            merged_stored.pop(constants.ONE_SHOT_CONFIG_KEY, None)
+        elif not isinstance(block, dict):
+            raise util.bad_request("one_shot 必须是对象（空对象=跟随通用执行配置）")
+        else:
+            unknown = set(block) - set(constants.ONE_SHOT_CONFIG_KEYS)
+            if unknown:
+                raise util.bad_request(f"one_shot 不支持字段：{', '.join(sorted(unknown))}")
+            cleaned = {}
+            model_id = block.get("model_id")
+            if model_id is not None:
+                if not isinstance(model_id, str) or not model_id.strip():
+                    raise util.bad_request("one_shot.model_id 不能为空")
+                cleaned["model_id"] = model_id.strip()
+            level = block.get("thinking_level")
+            if level is not None:
+                if level not in PI_DESKTOP_THINKING_LEVELS:
+                    raise util.bad_request(
+                        f"one_shot.thinking_level 不支持：{level}"
+                        f"（可用：{', '.join(PI_DESKTOP_THINKING_LEVELS)}）")
+                cleaned["thinking_level"] = level
+            previous = merged_stored.get(constants.ONE_SHOT_CONFIG_KEY)
+            merged_block = dict(previous) if isinstance(previous, dict) else {}
+            merged_block.update(cleaned)
+            if merged_block:
+                merged_stored[constants.ONE_SHOT_CONFIG_KEY] = merged_block
+            else:
+                merged_stored.pop(constants.ONE_SHOT_CONFIG_KEY, None)
     merged = _merge(merged_stored)
     if "codex" in fields or backend == "codex":
         from . import codex_execution
@@ -301,6 +372,9 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     # 展示默认值不等于用户已保存 Codex；切换其他后端不创建 Codex 配置。
     if "codex" not in merged_stored:
         payload.pop("codex", None)
+    # 未设置覆盖时不写入 null，保持「没有这个键」= 跟随通用执行配置。
+    if payload.get(constants.ONE_SHOT_CONFIG_KEY) is None:
+        payload.pop(constants.ONE_SHOT_CONFIG_KEY, None)
     payload["updated_at"] = now
     db.set_setting(conn, "exec_config", payload)
     return load(conn)

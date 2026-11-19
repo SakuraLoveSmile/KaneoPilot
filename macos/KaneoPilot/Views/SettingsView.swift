@@ -193,6 +193,11 @@ struct SettingsView: View {
     @State private var pdThinkingLevel = ""
     /// permission_mode 必须用户显式保存：草稿空 = 未选择（不自动补 auto）。
     @State private var pdPermissionMode = ""
+    // §5.27：一次性 AI 处理的模型覆盖（合并冲突 / 构建失败 / 检查失败共用）。
+    @State private var pdOneShotEnabled = false
+    @State private var pdOneShotExpanded = false
+    @State private var pdOneShotModelId = ""
+    @State private var pdOneShotThinking = ""
     @State private var piDesktopCatalog: PiDesktopCatalogResponse?
     @State private var piDesktopCatalogLoading = false
     @State private var piDesktopCatalogError: String?
@@ -1317,6 +1322,59 @@ struct SettingsView: View {
             SettingsNotice(text: "首次保存前需选择权限模式", icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
         }
 
+        // §5.27：一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）可单独指定模型，
+        // 只覆盖模型与思考等级，其余字段仍跟随通用执行配置。
+        DisclosureGroup(isExpanded: $pdOneShotExpanded) {
+            Toggle("单独指定模型", isOn: $pdOneShotEnabled)
+                .font(.kpBody)
+                .accessibilityLabel("一次性 AI 处理单独指定模型")
+            if pdOneShotEnabled {
+                LabeledContent("模型") {
+                    HStack(spacing: Spacing.s) {
+                        if !catalogModels.isEmpty {
+                            Menu {
+                                ForEach(catalogModels) { model in
+                                    Button(model.name.map { "\($0)（\(model.id)）" } ?? model.id) {
+                                        pdOneShotModelId = model.id
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                            }
+                            .menuIndicator(.hidden)
+                            .help("选择一次性处理模型")
+                        }
+                        TextField("模型", text: $pdOneShotModelId)
+                            .labelsHidden()
+                            .font(.kpBody)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("一次性处理模型").help("model_id")
+                    }
+                }
+                .font(.kpBody)
+                Picker("思考等级", selection: $pdOneShotThinking) {
+                    Text("跟随当前值").tag("")
+                    if !pdOneShotThinking.isEmpty && !piDesktopThinkingOptions.contains(pdOneShotThinking) {
+                        Text("\(pdOneShotThinking)（当前值）").tag(pdOneShotThinking)
+                    }
+                    ForEach(piDesktopThinkingOptions, id: \.self) { level in
+                        Text(level).tag(level)
+                    }
+                }
+                .accessibilityLabel("一次性处理思考等级").help("thinking_level")
+                Text("三类一次性处理共用；保存后只影响新的候选，已确认的轮次继续用冻结配置。")
+                    .font(.kpLabel)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } label: {
+            SettingsDisclosureLabel(
+                "一次性 AI 处理（小修复）",
+                summary: pdOneShotEnabled
+                    ? "\(pdOneShotModelId.isEmpty ? "未选模型" : pdOneShotModelId) · \(pdOneShotThinking.isEmpty ? "当前思考等级" : pdOneShotThinking)"
+                    : "跟随通用执行配置")
+        }
+
         DisclosureGroup(isExpanded: $pdAdvancedExpanded) {
             TextField("连接文件路径（默认 ~/.pi-desktop-plus/mcp-control.json）",
                       text: $pdConnectionFile)
@@ -1588,6 +1646,10 @@ struct SettingsView: View {
         pdModelId = base.piDesktop?.modelId ?? ""
         pdThinkingLevel = base.piDesktop?.thinkingLevel ?? ""
         pdPermissionMode = base.piDesktop?.permissionMode ?? ""
+        // §5.27：一次性处理覆盖（旧核心未返回 → 跟随通用配置）。
+        pdOneShotModelId = base.oneShot?.modelId ?? ""
+        pdOneShotThinking = base.oneShot?.thinkingLevel ?? ""
+        pdOneShotEnabled = !pdOneShotModelId.isEmpty || !pdOneShotThinking.isEmpty
         execDraftSeeded = true
     }
 
@@ -1754,6 +1816,9 @@ struct SettingsView: View {
             var payload: [String: Any]
             // §5.24.1：两个选择分别提交，互不覆盖。
             payload = ["backend": selBackend]
+            // §5.27：一次性处理覆盖与后端无关，单独提交（空对象=跟随通用配置）。
+            let oneShotFields: [String: String] = pdOneShotEnabled ? oneShotDraft.fields : [:]
+            payload["one_shot"] = oneShotFields
             if selBackend == "pi_desktop" {
                 // 桌面保存只提交桌面五字段；CLI 草稿由核心保留。
                 payload["pi_desktop"] = piDesktopDraft.fields
@@ -1789,6 +1854,12 @@ struct SettingsView: View {
             execSaveError = error.coreMessage  // 草稿保留，面板不关
             return false
         }
+    }
+
+    /// §5.27：页面上的「一次性 AI 处理」模型覆盖草稿。
+    private var oneShotDraft: ExecOneShotConfig {
+        ExecOneShotConfig(modelId: emptyToNil(pdOneShotModelId.trimmingCharacters(in: .whitespacesAndNewlines)),
+                          thinkingLevel: emptyToNil(pdOneShotThinking))
     }
 
     /// 页面上的 Plus 五字段草稿（执行与 Plus 控制端共用同一已保存块）。

@@ -185,7 +185,7 @@ def _prepare(ctx, task):
     git_delivery.verify_conflict_remote(dict(delivery, repository=task["repository"]),
                                        expected_repo=repo, target_base_sha=value["target_base_sha"])
     raw_config_sha256 = _digest(db.get_setting(ctx.conn, "exec_config"))
-    config = exec_config.snapshot(ctx.conn)
+    config = exec_config.snapshot_for_action(ctx.conn)
     util.require(config.get("backend") == "pi_desktop",
                  "冲突处理需要 Plus 的结构化验证报告；请在通用执行配置中选择 Plus 后重试", "conflict")
     available, reason = exec_config.check_available(ctx.conn, config_snapshot=config)

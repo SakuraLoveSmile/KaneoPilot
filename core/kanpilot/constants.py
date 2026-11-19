@@ -253,6 +253,12 @@ REVIEW_FIX_PLANNER = {"planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh
 # 手写元组漂移。
 AI_ACTION_KINDS = ("merge_conflict", "build_failure", "check_failure")
 
+# protocol §5.27（2026-11-19）：一次性 AI 处理可单独指定模型。只覆盖 Plus 分支的
+# model_id / thinking_level，其余字段仍跟随通用执行配置；空块 = 跟随通用配置。
+# 快照在准备时读取一次并随 action_config 冻结，改设置只影响新的候选。
+ONE_SHOT_CONFIG_KEY = "one_shot"
+ONE_SHOT_CONFIG_KEYS = ("model_id", "thinking_level")
+
 REVIEW_MARKER_PREFIX = "<!-- codex-kaneo-review:"
 
 DISPATCH_INSTRUCTION = (

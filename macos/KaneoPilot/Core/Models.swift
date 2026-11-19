@@ -1236,6 +1236,23 @@ struct ExecCodexInfo: Decodable {
     let version: String?
 }
 
+/// protocol §5.27：一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）的模型覆盖。
+/// 空块或未返回 = 跟随通用执行配置；只覆盖 model_id / thinking_level。
+struct ExecOneShotConfig: Decodable, Equatable {
+    let modelId: String?
+    let thinkingLevel: String?
+
+    /// 提交用（空值不发送，避免核心收到空字符串）。
+    var fields: [String: String] {
+        var dict: [String: String] = [:]
+        if let modelId, !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dict["model_id"] = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let thinkingLevel, !thinkingLevel.isEmpty { dict["thinking_level"] = thinkingLevel }
+        return dict
+    }
+}
+
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
@@ -1249,13 +1266,16 @@ struct ExecConfig: Decodable, Equatable {
     let codex: ExecCodexConfig?
     /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
     let controllerBackend: String?
+    /// §5.27：一次性 AI 处理的模型覆盖（nil = 跟随通用执行配置）。
+    let oneShot: ExecOneShotConfig?
 
     init(provider: String? = nil, model: String? = nil,
          reasoningEffort: String? = nil, agentPreset: String? = nil,
          updatedAt: String? = nil, backend: String? = nil,
          piDesktop: ExecPiDesktopConfig? = nil,
          codex: ExecCodexConfig? = nil,
-         controllerBackend: String? = nil) {
+         controllerBackend: String? = nil,
+         oneShot: ExecOneShotConfig? = nil) {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -1265,6 +1285,7 @@ struct ExecConfig: Decodable, Equatable {
         self.piDesktop = piDesktop
         self.codex = codex
         self.controllerBackend = controllerBackend
+        self.oneShot = oneShot
     }
 
     /// 四字段字典（与核心 config_json 快照比较/提交用，键为协议 snake_case）。

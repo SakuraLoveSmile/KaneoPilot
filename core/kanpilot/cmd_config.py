@@ -20,7 +20,8 @@ from . import (
 # set-exec-config 允许的字段：契约四字段 + v3 后端扩展 + v4 控制器后端。
 _SET_FIELDS = (
     ("execution_question_max_wait_seconds",) + constants.EXEC_CONFIG_KEYS
-    + ("backend", "pi_desktop", "codex", constants.CONTROLLER_BACKEND_KEY)
+    + ("backend", "pi_desktop", "codex", constants.CONTROLLER_BACKEND_KEY,
+       constants.ONE_SHOT_CONFIG_KEY)
 )
 _PI_DESKTOP_THINKING_LEVELS = (
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
@@ -107,12 +108,18 @@ def _exec_config_event_detail(config: dict) -> dict:
                 "codex": dict(config.get("codex") or {})}
     if config.get("backend") == "pi_desktop":
         block = config.get("pi_desktop") or {}
-        return {
+        detail = {
             "backend": "pi_desktop",
             constants.CONTROLLER_BACKEND_KEY: controller,
             **{key: block.get(key)
                for key in constants.EXEC_PI_DESKTOP_KEYS},
         }
+        # §5.27：一次性处理覆盖只含模型身份，不是凭据。
+        one_shot = config.get(constants.ONE_SHOT_CONFIG_KEY)
+        if isinstance(one_shot, dict) and one_shot:
+            detail[constants.ONE_SHOT_CONFIG_KEY] = {
+                key: one_shot.get(key) for key in constants.ONE_SHOT_CONFIG_KEYS}
+        return detail
     return {
         **{key: config[key] for key in constants.EXEC_CONFIG_KEYS},
         constants.CONTROLLER_BACKEND_KEY: controller,

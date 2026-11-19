@@ -227,3 +227,16 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
         summary = derive.task_summary(self.conn, self.task(), self.ctx.now)
         assert summary["display_status"] == "AI 处理待启动"
         assert summary["review_repair"] is None
+    def test_action_freezes_the_one_shot_model_override(self):
+        config = db.get_setting(self.conn, "exec_config")
+        config["one_shot"] = {"model_id": "cheap-check-model", "thinking_level": "low"}
+        db.set_setting(self.conn, "exec_config", config)
+        candidate = self.prepare()
+        assert candidate["model_summary"] == "cheap-check-model / low"
+        self.start(candidate)
+        frozen = core.review_repair_of(self.task())["action_config"]
+        assert frozen["model_id"] == "cheap-check-model"
+        assert frozen["thinking_level"] == "low"
+        assert frozen["provider_id"] == config["pi_desktop"]["provider_id"]
+        # 通用执行配置不受影响。
+        assert exec_config.load(self.conn)["pi_desktop"]["model_id"] != "cheap-check-model"
