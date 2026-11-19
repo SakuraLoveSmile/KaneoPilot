@@ -62,6 +62,9 @@ def _base_gate(conn, task):
     if (not db.task_is_active(task) or task["status"] not in ("in_review", "needs_user")
             or task["stage"] not in ("review", "delivery") or delivery.get("mode") != "pr"
             or _extra(task).get("review_conclusion") != "pass"):
+        if _extra(task).get("review_conclusion") == "changes_requested":
+            # 本轮处理后的复审要求改动：下一步是评审修复，不是再开一次一次性处理。
+            return "本轮处理后的复审要求改动，请先完成评审修复"
         return "仅评审通过、等待 PR 交付的任务可启动处理"
     if not all(delivery.get(key) for key in ("pr_number", "branch", "worktree_path", "head_sha", "base_branch", "base_sha")):
         return "PR 或任务分支身份不完整"

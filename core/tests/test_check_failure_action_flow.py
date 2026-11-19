@@ -240,3 +240,8 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
         assert frozen["provider_id"] == config["pi_desktop"]["provider_id"]
         # 通用执行配置不受影响。
         assert exec_config.load(self.conn)["pi_desktop"]["model_id"] != "cheap-check-model"
+    def test_gate_points_at_the_review_repair_after_a_requested_change(self):
+        db.set_extra(self.conn, self.task(), self.now, review_conclusion="changes_requested")
+        view = task_ai_action.projection(self.conn, self.task(), self.ctx.now)
+        assert view["can_prepare"] is False
+        assert "复审要求改动" in view["reason"]

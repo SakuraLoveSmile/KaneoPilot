@@ -121,3 +121,19 @@ tests/test_build_failure_ai_action.py tests/test_direct_review_repair.py -q` →
 
 实测（真实 job 日志 366 KB）：摘录 6.3 KB（1.7%），含失败用例名、`PathNotFoundException` 与
 `offline_repository.dart 466:23 _save` 栈；`✅` 行 0。验证：91 passed / 64 subtests。
+## 2026-11-19 一次性处理收尾后没有下一步（复审要求改动）
+
+现象：检查修复轮次执行成功（复盘 7/7、验证 5/5），但复审结论是 `changes_requested`；概览里
+「AI 处理…」保持禁用并提示「仅评审通过、等待 PR 交付的任务可启动处理」，状态徽章显示发布批次的
+「等待关联修复」，用户看不到下一步。
+
+根因：核心其实已给出可启动的评审修复（`review_repair.state=held, can_start=true`），但入口只在
+「评审」页；概览把一次性处理区当成终点，且禁用理由与当前状态无关。
+
+- core：`_base_gate` 在 `review_conclusion=changes_requested` 时改为「本轮处理后的复审要求改动，请先完成评审修复」。
+- macOS：一次性处理区的历史末条为 `needs_followup` 且评审修复可启动时，显示改动标题与
+  「按复审意见继续修复」（复用评审修复的候选/确认流程）。
+- 文档：protocol §5.27 补一句「界面只提供用户主动确认的评审修复入口」，ui-spec 记录该区行为。
+
+实测：在生产库副本上直接调用 `start-review-repair`（用投影给出的身份）返回 ok 并排队一条 dispatch，
+说明修复入口本身可用，只是概览没有暴露。
