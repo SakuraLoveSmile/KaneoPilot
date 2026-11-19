@@ -1816,8 +1816,8 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 新增 `kind=check_failure`，仍在原任务启动，复用同一 PR 与分支，不创建二级任务、新 PR 或 plan 请求。用户确认授权一次失败日志诊断、最小代码修复、可信验证、复审与重新交付；不授权自动重试、自动合并或放宽检查。
 
 - 入口只由合并门当前观测决定：`delivery.auto_merge.state=blocked` 且原因以「检查未通过：」开头，说明本次提交确有 GitHub 失败的检查；`waiting_checks`、其他阻塞原因、已合并或关闭的 PR 不进入。同一提交已处理过一次时只显示处理记录，不再启动新的付费轮次。
-- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论、超限拒绝而不猜测或截断成假证据）。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
-- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单与失败日志；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
+- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论）。提示词只带「可点开的 run/job 链接 + 失败信号摘录」：摘录去通过行与时间戳噪声、保留失败行前后上下文、硬上限 12k 字符，超限标注截断，完整原文以链接为准；不猜测失败原因、不编造日志内容。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
+- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单（含 job 链接）与失败信号摘录；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
 - 证据、提交、复审与交付沿既有链：结构化 Goal 报告与源码快照、单父提交、必须重新 Review；通过后推送原 PR 分支并按项目自动合并策略重新核对检查。修复失败、检查漂移或结果未知保留现场，不自动再次调用模型。
 - 与其它一次性处理一致的身份约束：`prepare` 冻结 `target_base_sha` 为本次评审依据的交付基线提交（检查修复在原分支原地提交，不合并目标分支，因此交付 `base_sha` 不移动）；dispatch 领取按冻结的`action_config` 固化执行轮次；复审通过登记交付续接回执，`继续交付`与交付阶段只对这一精确执行/评审/提交放行。该轮不进入普通 Review 修复入口，失败也不自动启动引擎补救或新模型轮次。
 

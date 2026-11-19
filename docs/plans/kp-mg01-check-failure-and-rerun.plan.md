@@ -109,3 +109,15 @@ tests/test_build_failure_ai_action.py tests/test_direct_review_repair.py -q` →
 - 产物核对：挂载 333 的 dmg 跑包内核心 `set-exec-config`/`get-exec-config`，`one_shot` 正常往返。
 - 实况：此前对 `nsa031de0gqsmkcc80mni5bc` 的检查修复轮次已真实执行（冻结配置 `deepseek-v4.1-flash / max`，
   新 head `233f245`），复审给出 changes_requested 的具体并发缺陷，任务转入普通修复态——下次即可用新的一组覆盖模型。
+## 2026-11-19 检查修复提示词改为「job 链接 + 失败信号摘录」
+
+现象：会话 `629d704b` 的提示词 62 KB，其中 60 KB 是 Actions 日志**尾巴**；377 行里 325 行是 `✅`，
+真正的失败用例在第 989/2098 行（日志中部），被尾巴截断丢掉——agent 只拿到一串通过用例和收尾噪声。
+
+- `_materials` 改为失败信号摘录：识别 `##[error]`、`❌`、`Error`/`Exception`/`Expected:` 等，保留失败行
+  ±30 行上下文，去掉 `✅` 通过行；整体上限 12k 字符，超限标注截断，不改写日志内容。
+- 提示词在「失败的检查」里给出可点开的 `run/job` 链接，日志小节注明「按失败信号摘录，完整原文见链接」。
+- protocol §5.27 同步该语义（不猜测、不编造）。
+
+实测（真实 job 日志 366 KB）：摘录 6.3 KB（1.7%），含失败用例名、`PathNotFoundException` 与
+`offline_repository.dart 466:23 _save` 栈；`✅` 行 0。验证：91 passed / 64 subtests。

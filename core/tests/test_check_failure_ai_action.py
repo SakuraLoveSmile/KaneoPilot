@@ -61,29 +61,46 @@ def test_materials_refuse_a_moved_run(monkeypatch):
                           "workflow": "app-ci", "conclusion": "FAILURE"}])
 
 
-def test_materials_freeze_bounded_redacted_logs(monkeypatch):
+def test_materials_keep_failure_signals_and_drop_passing_lines(monkeypatch):
+    passing = ["2026-11-18T00:57:04.1Z ✅ test/a_test.dart: passes"] * 50
+    failed = ["2026-11-18T00:57:04.1Z ❌ test/b_test.dart: keeps the palette",
+              "2026-11-18T00:57:04.2Z Expected: 3",
+              "2026-11-18T00:57:04.3Z Actual: 4"]
+    filler = ["2026-11-18T00:57:04.4Z ✅ test/c_test.dart: passes"] * 500
+    content = "\n".join(passing + failed + filler)
     monkeypatch.setattr(kind.release_github, "run", lambda repo, run_id: {
         "head_sha": "a" * 40, "status": "completed", "run_attempt": 1, "conclusion": "failure"})
     monkeypatch.setattr(kind.release_github, "failure_logs", lambda repo, run_id, attempt: [
-        {"job_id": 2, "name": "analyze-test", "conclusion": "failure",
-         "content": "x" * (kind._MAX_LOG_CHARS + 100)}])
+        {"job_id": 2, "name": "analyze-test", "conclusion": "failure", "content": content}])
     text = kind._materials("owner/repo", "a" * 40,
-                           [{"run_id": 1, "job_id": 2, "name": "analyze-test",
+                           [{"run_id": 44211608370, "job_id": 2, "name": "analyze-test",
                              "workflow": "app-ci", "conclusion": "FAILURE"}])
+    assert "run 44211608370" in text
+    assert "❌ test/b_test.dart" in text and "Expected: 3" in text
+    assert "✅" not in text
+    assert "失败信号摘录" in text
     assert len(text) <= kind._MAX_LOG_CHARS
-    assert "run 1" in text
-    assert text.endswith("x")
+    assert len(text) < len(content) / 4, "excerpt must be much smaller than the raw log"
 
 
-def test_prompt_body_names_checks_logs_and_verify(tmp_path):
+def test_excerpt_without_any_signal_keeps_the_tail_bounded():
+    text = kind._excerpt("x" * (kind._MAX_LOG_CHARS + 100))
+    assert len(text) <= kind._MAX_LOG_CHARS + 200
+    assert "失败信号摘录" in text
+
+
+def test_prompt_body_names_checks_logs_links_and_verify(tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text("# plan\n\n```verify\npython3 -m pytest tests -q\n```\n")
     fix = {"check_runs": [{"name": "analyze-test", "workflow": "app-ci", "conclusion": "FAILURE",
-                            "run_id": 1, "job_id": 2}],
+                            "run_id": 44211608370, "job_id": 134491096466}],
+           "github_repo": "owner/repo",
            "failure_logs": "PathNotFoundException: index.json.tmp",
            "head_sha": "a" * 40, "branch": "kaneo/x", "plan_sha256": util.sha256_file(plan)}
     body = kind.prompt_body(fix, str(plan))
     assert "[app-ci] analyze-test：FAILURE" in body
+    assert "https://github.com/owner/repo/actions/runs/44211608370/job/134491096466" in body
+    assert "完整原文见上方 job 链接" in body
     assert "PathNotFoundException" in body
     assert "python3 -m pytest tests -q" in body
     assert "不要删除或跳过检查" in body
