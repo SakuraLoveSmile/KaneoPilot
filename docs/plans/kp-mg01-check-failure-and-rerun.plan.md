@@ -99,3 +99,13 @@ tests/test_check_failure_ai_action.py tests/test_task_ai_action.py tests/test_ta
 tests/test_build_failure_ai_action.py tests/test_direct_review_repair.py -q` → 138 passed / 70 subtests；
 新增 7 项覆盖保存、清除、非 Plus 后端忽略、非法值拒绝、就绪门与候选冻结。
 未验证：真实 Plus 用覆盖模型跑一轮修复（需 test 版实机）。
+### 发布（2026-11-19）
+
+- 提交 `4ecbab0`（功能）+ `c04b768`（`get-exec-config` 契约补键），分支 `fix/20261119-kp-mg01-check-failure-wiring`。
+- 首次构建（run 44465846854）在集成契约 `tests/test_pi_config_contract.py` 失败：`get-exec-config` 顶层键集
+  是全量相等断言，新增 `one_shot` 需同步契约；已补键并重跑。
+- 云端 `Packages` run [44467737376](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44467737376) 全绿，
+  发布测试版 `v0.5.8-test.333`（macos-arm64.dmg / android.apk / manifest / SHA256SUMS）。
+- 产物核对：挂载 333 的 dmg 跑包内核心 `set-exec-config`/`get-exec-config`，`one_shot` 正常往返。
+- 实况：此前对 `nsa031de0gqsmkcc80mni5bc` 的检查修复轮次已真实执行（冻结配置 `deepseek-v4.1-flash / max`，
+  新 head `233f245`），复审给出 changes_requested 的具体并发缺陷，任务转入普通修复态——下次即可用新的一组覆盖模型。
