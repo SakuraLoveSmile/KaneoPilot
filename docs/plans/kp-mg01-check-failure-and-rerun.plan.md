@@ -72,3 +72,11 @@
 - 未验证：真实 Plus 修复轮次、真实推送后检查转绿与自动合并（需 test 版实机体验）。
 
 结论：旧 test 版需更新；更新后「AI 处理…」会先核对 PR 与失败日志，再进入一次原地最小修复。
+### 发布与状态（2026-11-19）
+
+- 分支 `fix/20261119-kp-mg01-check-failure-wiring`，提交 `9f3cb7e`。
+- 云端 `Packages` run [44457490603](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44457490603) 全绿：
+  core+integration 10 个 checks 分片、`macos-package`、`macos-fixtures`、`android`、`codex-platforms` 均 success；
+  完整本地 `pytest tests -q`（5200 项）因耗时过长中止，改以云端分片为全量结论。
+- 测试版 `v0.5.8-test.329`（预发布，assets：macos-arm64.dmg / android.apk / manifest.json / SHA256SUMS）。
+- 状态：待体验（需安装 test.329 后对真实失败检查点一次「AI 处理…」）。
