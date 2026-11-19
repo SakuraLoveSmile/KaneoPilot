@@ -248,6 +248,11 @@ PLAN_META_REQUIRED_REVIEW_FIX = PLAN_META_REQUIRED + (
 STANDARD_PLANNER = {"planner_model": "gpt-6-astra", "reasoning_effort": "medium"}
 REVIEW_FIX_PLANNER = {"planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
 
+# protocol §5.27：任务内一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）共用同一
+# direct 修复链。判断「本修复是否由 AI 处理入口授权」时统一引用此集合，避免各处
+# 手写元组漂移。
+AI_ACTION_KINDS = ("merge_conflict", "build_failure", "check_failure")
+
 REVIEW_MARKER_PREFIX = "<!-- codex-kaneo-review:"
 
 DISPATCH_INSTRUCTION = (

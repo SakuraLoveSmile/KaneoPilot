@@ -1,6 +1,6 @@
 """Monitor-owned delivery commit, with all filesystem/Git IO outside transactions."""
 
-from . import core, db, git_delivery, util
+from . import constants, core, db, git_delivery, util
 
 
 def _identity(ctx, payload, *, now=None):
@@ -58,7 +58,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             execution_round = round_store.get_round(conn, task["task_id"], execution_run_id)
             codex = execution_round is not None and execution_round["backend"] == "codex"
             strict = (engine_claim_scope.effective_mode(conn, task["project_id"]) in ("live", "shadow")
-                      or repair.get("source_kind") in ("merge_conflict", "build_failure") or codex)
+                      or repair.get("source_kind") in constants.AI_ACTION_KINDS or codex)
             verified = {}
             if strict:
                 receipt = db.task_extra(task).get("engine_verdict") or {}
@@ -83,7 +83,7 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 # 不创建空提交、不阻塞交付。上面的验证回执核对仍然执行，不能跳过门禁。
                 result = {"sha": delivery["head_sha"], "files": [], "unchanged": True}
             elif (strict and delivery.get("commits")
-                    and repair.get("source_kind") not in ("merge_conflict", "build_failure")
+                    and repair.get("source_kind") not in constants.AI_ACTION_KINDS
                     and not any(not git_delivery.is_build_artifact(change["path"]) for change in candidates)):
                 proof = git_delivery.registered_task_changes(git_input, task_id=payload["task_id"])
                 if (not proof["files"] or not proof["source_execution_run_id"]

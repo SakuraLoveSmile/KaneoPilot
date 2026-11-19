@@ -632,7 +632,7 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
     # 且**不得**用于去重、路径生成、权限判断或完成判定。
     workspace_display_name = task["project_name"]
     repair = core.review_repair_of(task)
-    session_display_name = (("AI 处理 · " if repair.get("source_kind") in ("merge_conflict", "build_failure") else "Review 修复 · ")
+    session_display_name = (("AI 处理 · " if repair.get("source_kind") in constants.AI_ACTION_KINDS else "Review 修复 · ")
                             + task["title"] if repair else task["title"])
     if not workspace_display_name or not session_display_name:
         raise util.KanpilotError(

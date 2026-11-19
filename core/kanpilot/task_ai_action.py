@@ -6,7 +6,7 @@ from . import (automation_policy, constants, core, db, exec_config, gh_client,
                git_delivery, project_config, runtime_operations, util)
 
 KIND = "merge_conflict"
-KINDS = (KIND, "build_failure", "check_failure")
+KINDS = constants.AI_ACTION_KINDS
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
                 "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
@@ -208,7 +208,8 @@ def _prepare(ctx, task):
 def _public_candidate(value):
     result = dict(task_id=value["task_id"], kind=value.get("source_kind", KIND), title=value.get("title", TITLE), context_sha256=value["action_context_sha256"],
                 config_sha256=value["action_config_sha256"], pr_number=value["pr_number"], branch=value["branch"],
-                base_branch=value["base_branch"], head_sha=value["head_sha"], base_sha=value["target_base_sha"],
+                base_branch=value["base_branch"], head_sha=value["head_sha"],
+                base_sha=value.get("target_base_sha") or value.get("base_sha"),
                 model_summary=value["model_summary"])
     if value.get("source_kind") == "build_failure":
         from . import task_ai_build_failure

@@ -4,7 +4,7 @@ Listing and worker authority are SQLite-only. The resolve command reuses the
 formal Goal verifier, checks clean reviewed source and reads Kaneo before it
 atomically records permission for this one immutable delivery identity.
 """
-from . import core, db, git_delivery, project_config, util
+from . import constants, core, db, git_delivery, project_config, util
 
 _TASK_KEYS = ('task_id', 'project_id', 'repository', 'requirements_sha256',
               'run_id', 'plan_path', 'plan_sha256', 'review_key',
@@ -32,7 +32,7 @@ def _digest(value):
 def review_round_matches(task, review):
     """Old manual branch entries predate fix_round; managed rows stay strict."""
     receipt=db.task_extra(task).get('task_ai_action_delivery') or {}
-    if (receipt.get('action') or {}).get('source_kind') in ('merge_conflict','build_failure'):
+    if (receipt.get('action') or {}).get('source_kind') in constants.AI_ACTION_KINDS:
         from . import review_repair
         return review.get('fix_round')==review_repair._round_count(task)
     if core.is_automation_managed(task):

@@ -3292,6 +3292,7 @@ struct TaskAIActionView: Decodable {
 
     var actionKind: String { kind ?? current?.kind ?? "merge_conflict" }
     var isBuildFailure: Bool { actionKind == "build_failure" }
+    var isCheckFailure: Bool { actionKind == "check_failure" }
 }
 
 struct TaskAIActionEntry: Decodable, Identifiable {
@@ -3332,8 +3333,18 @@ struct TaskAIActionCandidate: Decodable {
     let workflowRunId: Int?
     let workflowAttempt: Int?
     let workflowUrl: String?
+    let checkRuns: [TaskAIActionCheckRun]?
 
     var confirmationMessage: String {
+        if kind == "check_failure" {
+            let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
+            let names = (checkRuns ?? []).compactMap { run -> String? in
+                guard let name = run.name else { return nil }
+                return run.workflow.map { "\($0)/\(name)" } ?? name
+            }
+            let checks = names.isEmpty ? "合并门点名的失败检查" : names.joined(separator: "、")
+            return "修复失败的检查\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n检查：\(checks)\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。读取失败日志，只做让这些检查通过的最小改动；不重新规划，不删除或跳过检查。验证、复审通过后更新原 PR，并沿项目合并设置继续。"
+        }
         if kind == "build_failure" {
             let run = workflowRunId.map { "构建 #\($0)" } ?? "失败构建"
             let attempt = workflowAttempt.map { " · 第 \($0) 次运行" } ?? ""
@@ -3344,6 +3355,13 @@ struct TaskAIActionCandidate: Decodable {
         let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
         return "解决 PR 合并冲突\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。不重新规划，修复后验证并重新评审；通过后更新原 PR，并沿项目合并设置继续。"
     }
+}
+
+/// 冻结失败检查的公开身份（核心 task_ai_check_failure.PUBLIC）。
+struct TaskAIActionCheckRun: Decodable {
+    let name: String?
+    let workflow: String?
+    let conclusion: String?
 }
 
 struct PrepareTaskAIActionResponse: Decodable {

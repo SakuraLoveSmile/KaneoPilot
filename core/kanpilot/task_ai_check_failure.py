@@ -120,10 +120,14 @@ def prepare(ctx, task):
                                                "requirements_sha256", "plan_sha256")},
                  source_execution_run_id=task["run_id"], review_key=task["review_key"],
                  report_path=task["review_report_path"], report_sha256=task["review_report_sha256"],
+                 # 检查修复在原分支原地提交，不做合并；target_base_sha 冻结本次评审
+                 # 所依据的目标基线，供冻结上下文、交付续接与后续核对复用同一身份。
+                 target_base_sha=delivery["base_sha"],
                  **{key: delivery[key] for key in ("branch", "worktree_path", "head_sha",
                                                    "base_branch", "base_sha", "pr_number")},
                  github_repo=repo, check_runs=failing,
                  failure_logs=logs, failure_logs_sha256=_digest(logs), checks_sha256=_digest(failing))
+    raw_config_sha256 = _digest(db.get_setting(ctx.conn, "exec_config"))
     config = exec_config.snapshot(ctx.conn)
     util.require(config.get("backend") == "pi_desktop",
                  "检查修复需要 Plus 的结构化验证报告；请在通用执行配置中选择 Plus 后重试", "conflict")
@@ -134,6 +138,10 @@ def prepare(ctx, task):
     action.verify_source_terminal(ctx.conn, task, value)
     git_delivery.verify_branch_worktree(dict(delivery, repository=task["repository"]),
                                        require_clean=True, expected_head=delivery["head_sha"])
+    # 与合并冲突处理一致：准备期间通用配置变动即作废候选，避免按旧指纹启动。
+    util.require(_digest(db.get_setting(ctx.conn, "exec_config")) == raw_config_sha256,
+                 "准备期间通用 AI 配置已变化，请重新准备", "conflict")
+    value["raw_config_sha256"] = raw_config_sha256
     value["action_context_sha256"] = action._context(value)
     value["action_id"] = _digest({"kind": KIND, "task_id": task["task_id"],
                                    "head": delivery["head_sha"],

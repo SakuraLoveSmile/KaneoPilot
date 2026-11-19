@@ -1268,7 +1268,7 @@ private struct TaskAIActionSection: View {
             }
             HStack(spacing: Spacing.s) {
                 if preparing || starting { ProgressView().controlSize(.small) }
-                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
+                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : action.isCheckFailure ? "正在核对检查…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
                     guard !preparing, !starting, candidate == nil else { return }
                     let token = UUID(), taskID = detail.taskId, kind = action.actionKind
                     preparationID = token
@@ -1288,7 +1288,9 @@ private struct TaskAIActionSection: View {
                 }
                 .disabled(!action.canPrepare || detail.readOnly == true || preparing || starting
                           || candidate != nil || model.actionInFlight != nil)
-                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复" : "使用通用执行配置处理 PR 合并冲突"))
+                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复"
+                        : action.isCheckFailure ? "读取失败检查日志并安排一次最小修复"
+                        : "使用通用执行配置处理 PR 合并冲突"))
             }
             if !action.canPrepare, action.current == nil, let reason = action.reason, !reason.isEmpty {
                 Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)

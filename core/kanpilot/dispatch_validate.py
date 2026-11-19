@@ -210,7 +210,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     #    模型覆盖（engine/fallback.py，scenarios.md #5）在此冻结进轮次；无覆盖时
     #    与 snapshot(conn) 完全一致（旧数据零迁移），设置变更仍只影响新轮次。
     config_snapshot = (repair["action_config"]
-                       if repair and repair.get("source_kind") in ("merge_conflict", "build_failure")
+                       if repair and repair.get("source_kind") in constants.AI_ACTION_KINDS
                        else exec_config.snapshot_with_model_override(conn, task))
     backend = config_snapshot.get("backend") or "pi"
     # Recheck the actual execution route in case it changed since publication.

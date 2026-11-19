@@ -78,7 +78,7 @@ def _repair_status(task):
     if task["status"] in ("needs_user", "done"):
         return None
     repair = core.review_repair_of(task)
-    if repair.get("source_kind") in ("merge_conflict", "build_failure"):
+    if repair.get("source_kind") in constants.AI_ACTION_KINDS:
         if repair.get("state") in ("needs_followup", "blocked", "failed"):
             return {"needs_followup": "需要后续处理", "blocked": "AI 处理受阻", "failed": "AI 处理失败"}[repair["state"]]
         return ("处理后待复审" if repair.get("state") == "awaiting_review"
@@ -700,7 +700,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     elif (view["parent_closeout"] and task["status"] != "done"
             and view["parent_closeout"]["state"] in _CLOSEOUT_LABELS):
         phase, condition = "delivery", "syncing"
-    elif _repair_status(task) and repair.get("source_kind") in ("merge_conflict", "build_failure"):
+    elif _repair_status(task) and repair.get("source_kind") in constants.AI_ACTION_KINDS:
         if repair_state in ("awaiting_review", "needs_followup", "blocked", "failed"):
             phase, condition = "review", "reviewing"
         elif task["status"] == "running":
