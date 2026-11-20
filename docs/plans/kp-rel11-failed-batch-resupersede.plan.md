@@ -50,7 +50,8 @@ AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的预发布：第一次构建�
 
 - 隔离测试（2026-11-20，基线 `deed56b` + 本次改动）：`cd core && python3 -m pytest tests/test_external_build_repair.py -q` → 21 passed / 19 subtests；
   发布相关子集 `tests/test_external_build_repair.py tests/test_release_delivery.py tests/test_release_verification.py tests/test_release_dispatch_recovery.py tests/test_release_dispatch_void.py tests/test_goal_accepted_delivery.py` → 125 passed / 89 subtests（5m52s）。
-  未运行：`pytest tests` 全量套件——本机当时另有 3 个全量 pytest 在跑（load ~10），留待合并前复核。
+  补充回归 `tests/test_build_failure_ai_action.py tests/test_parent_closeout.py tests/test_release_notes.py tests/test_release_github.py` → 102 passed / 28 subtests（3m22s）。
+  未完成：`pytest tests` 全量套件——本机长时间有其他 agent 的全量套件竞争（load 10~16），跑满 50 分钟未结束，终止后改跑上述定向回归；合并前仍应在空载机器上补跑一次全量。
 - 实测（同一任务真实链路，2026-11-20）：
   1. `prepare-external-build-repair{pr_number:3}` → target `a7ca271`，来源批次 `93124053…`（由上次修复目标 `638ceaf` 构建的失败批次），preservation `ancestor`；
   2. `accept-external-build-repair` → 新回执 `ae75f651…`，旧批次归档；DTO 转为「需要补验证」；
@@ -58,7 +59,8 @@ AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的预发布：第一次构建�
   4. `prepare-task-release` → `ready`（target `a7ca271`，0.16.2），`start-task-release` → 批次 `60cd5e5d…`，run [44686826921](https://github.com/SakuraLoveSmile/AsmrDownloader/actions/runs/44686826921)；
   5. 首次 quality-gate 撞既有 flake（`test/cache_complete_service_test.dart` 目录扫描顺序期望 `['123456','654321']` 实得反序），按 UI 口径重跑失败 Job 后全绿；
   6. 预发布 `v0.16.2-pilot.1795155277` 已发布：tag 指向 `a7ca271`，macOS/Windows 两个 zip + `kaneopilot-release.json`，批次 state `published`（安装包与 Release 证据已核验）。
-- 未验证项：Swift/Android 界面按钮（本次只补 core 与规格，UI 入口另记）。
+- 未验证项：Swift/Android 界面按钮（本次只补 core 与规格；任务详情沿用既有「关联已合并修复…」入口，文案未单独区分二次衔接）。
+- KaneoPilot 自身测试版：`Packages` `channel=test` → run [44688854471](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44688854471) 全部 job 成功，[v0.5.8-test.339](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.8-test.339) 已发布（apk 8.6MB / dmg 46.3MB / manifest / SHA256SUMS，prerelease）。未安装到本机，界面入口待体验。
 
 ## 遗留
 
