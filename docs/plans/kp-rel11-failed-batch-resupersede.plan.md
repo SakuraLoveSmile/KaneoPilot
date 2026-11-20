@@ -51,9 +51,17 @@ AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的预发布：第一次构建�
 - 隔离测试（2026-11-20，基线 `deed56b` + 本次改动）：`cd core && python3 -m pytest tests/test_external_build_repair.py -q` → 21 passed / 19 subtests；
   发布相关子集 `tests/test_external_build_repair.py tests/test_release_delivery.py tests/test_release_verification.py tests/test_release_dispatch_recovery.py tests/test_release_dispatch_void.py tests/test_goal_accepted_delivery.py` → 125 passed / 89 subtests（5m52s）。
   未运行：`pytest tests` 全量套件——本机当时另有 3 个全量 pytest 在跑（load ~10），留待合并前复核。
-- 实测：待用 AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的真实批次走一遍二次衔接 → 补验证 → 新批次。
+- 实测（同一任务真实链路，2026-11-20）：
+  1. `prepare-external-build-repair{pr_number:3}` → target `a7ca271`，来源批次 `93124053…`（由上次修复目标 `638ceaf` 构建的失败批次），preservation `ancestor`；
+  2. `accept-external-build-repair` → 新回执 `ae75f651…`，旧批次归档；DTO 转为「需要补验证」；
+  3. 补验证（Magpie）`verified`：`flutter pub get --offline --enforce-lockfile` + `flutter analyze` 两文件，verification `6a3ef818…`；
+  4. `prepare-task-release` → `ready`（target `a7ca271`，0.16.2），`start-task-release` → 批次 `60cd5e5d…`，run [44686826921](https://github.com/SakuraLoveSmile/AsmrDownloader/actions/runs/44686826921)；
+  5. 首次 quality-gate 撞既有 flake（`test/cache_complete_service_test.dart` 目录扫描顺序期望 `['123456','654321']` 实得反序），按 UI 口径重跑失败 Job 后全绿；
+  6. 预发布 `v0.16.2-pilot.1795155277` 已发布：tag 指向 `a7ca271`，macOS/Windows 两个 zip + `kaneopilot-release.json`，批次 state `published`（安装包与 Release 证据已核验）。
 - 未验证项：Swift/Android 界面按钮（本次只补 core 与规格，UI 入口另记）。
 
 ## 遗留
 
 - 任务详情页「关联已合并修复…」入口在二次衔接状态下仍复用同一入口，UI 文案未单独区分（不影响命令可用性）。
+- AsmrDownloader 的 `test/cache_complete_service_test.dart`「扫描下载根目录补全缓存」用例依赖目录读取顺序，属既有 flake，本次未修（改它会让 main 再次前移，冻结批次失效）。
+- AsmrDownloader 仓库遗留：两个空 draft（`451114626`、`452255558`）与一次探针标签触发的失败 run（`44672830183`，标签已删除），按保留策略未清理。
