@@ -66,6 +66,22 @@ class ReleaseVerificationProjectionTest(TestCase):
         self.assertEqual((self.case.plus.created, self.case.plus.prompts), (0, 0))
         self.assertIsNotNone(release.completion_gate(self.conn, self.task()))
 
+    def test_risk_acceptance_substitutes_for_pass_in_verification_offer(self):
+        from kanpilot import review_risk
+        extra = db.task_extra(self.task())
+        history = [dict(row) for row in extra['review_history']]
+        history[-1]['conclusion'] = 'changes_requested'
+        db.set_extra(self.conn, self.task(), self.ctx.now_iso,
+                     review_conclusion='changes_requested', review_history=history)
+        blocked = dict(blockers=[dict(code='release_target_unverified')])
+        self.assertIsNone(verification.ordinary_summary(self.conn, self.task(), blocked))
+        self.assertFalse(self.view().get('can_prepare_verification'))
+        with patch.object(review_risk, 'identity', return_value=dict(kind='risk_acceptance')):
+            self.assertEqual(verification.ordinary_summary(self.conn, self.task(), blocked),
+                             dict(can_prepare_verification=True, can_sync_verification=False,
+                                  can_restart_verification=False))
+            self.assertTrue(self.view()['can_prepare_verification'])
+
     def test_planning_unknown_and_verified_replace_old_preflight_reason(self):
         first = self.case.start()
         for state in ('planning', 'running', 'unknown'):

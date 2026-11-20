@@ -327,6 +327,21 @@ class ReleaseLifecycleTest(TestCase):
         result=self.start('fix2');self.assertEqual(result['release']['member_task_ids'],['fix2'])
         self.api.published=True;self.assertEqual(self.sync(result['release']['batch_id'])['release']['state'],'published')
 
+    def test_risk_acceptance_authorizes_release_review_gate(self):
+        from kanpilot import review_risk
+        db.update_task(self.conn,'fix2',self.ctx.now_iso,review_source_task_id=None,status='in_review')
+        db.set_extra(self.conn,self.row('fix2'),self.ctx.now_iso,review_conclusion='changes_requested')
+        blocked=self.prepare('fix2')['release']
+        self.assertEqual(blocked['state'],'blocked')
+        self.assertEqual(blocked['blockers'][0]['code'],'release_review_invalid')
+        identity=dict(kind='risk_acceptance',request_id='review-request',run_id='review-run',
+                      plan_sha256='plan',report_sha256='report',review_key='source-key-2')
+        with patch.object(review_risk,'identity',return_value=identity):
+            self.assertTrue(delivery.projection(self.conn,self.row('fix2'))['can_start'])
+            result=self.start('fix2')
+        self.assertEqual(result['release']['state'],'queued')
+        self.assertEqual(len(self.api.sent),1)
+
     def test_historical_parent_uses_saved_checkpoint_after_later_workflow_commit(self):
         self.policy['enabled']=False;self.configure();self.assertEqual(self.fixture.run_closeout()['outcome'],'completed')
         saved=db.task_extra(self.row())['parent_closeout']['target_sha']
