@@ -464,11 +464,14 @@ def create_todo(
     project_id: str,
     dedupe_key: str,
     payload: dict[str, str],
+    *,
+    marker_prefix: str = "codex-kaneo-review",
 ) -> dict[str, Any]:
     """Library form of the legacy ``create-todo`` command (same dedupe semantics)."""
     if (
         not isinstance(dedupe_key, str) or not dedupe_key.strip()
         or "-->" in dedupe_key or "<!--" in dedupe_key
+        or not marker_prefix or "-->" in marker_prefix or "<!--" in marker_prefix
     ):
         raise BridgeError("dedupe-key 必须是非空且不含注释定界符的字符串")
     project_columns = columns(client, project_id)
@@ -477,7 +480,7 @@ def create_todo(
     if todo_slug is None:
         raise BridgeError("指定项目不存在受支持的 To Do 列，拒绝新建")
 
-    marker = f"<!-- codex-kaneo-review:{dedupe_key} -->"
+    marker = f"<!-- {marker_prefix}:{dedupe_key} -->"
     matches = [
         task
         for task in project_tasks(client, project_id)
