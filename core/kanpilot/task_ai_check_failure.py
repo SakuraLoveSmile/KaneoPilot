@@ -38,7 +38,10 @@ def gate(conn, task):
     if notice.get("state") != "blocked" or not str(notice.get("reason") or "").startswith("检查未通过："):
         return "当前没有可确认的失败检查，请先重新校验"
     for item in db.task_extra(task).get("ai_action_history") or []:
-        if item.get("kind") == KIND and item.get("head_sha") == delivery.get("head_sha"):
+        # 已放弃的处理不再占用同一提交的唯一一次机会（KP-MG03 #8）。
+        from . import task_ai_discard
+        if (item.get("kind") == KIND and item.get("head_sha") == delivery.get("head_sha")
+                and item.get("state") != task_ai_discard.STATE):
             return "本次提交已安排过一次检查修复，请核对处理记录"
     return None
 
