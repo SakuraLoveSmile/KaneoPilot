@@ -61,7 +61,10 @@ def require_policy(conn, task, value):
 
 
 def _source_snapshot(batch, run_attempt=None):
-    value={key:item for key,item in batch.items() if key not in ('checked_at','next_check_at')}
+    # 归档书签（abandoned/替代指针/派生 reason）不是构建身份，重放确认时不应造成漂移。
+    value={key:item for key,item in batch.items()
+           if key not in ('checked_at','next_check_at','abandoned','abandoned_at',
+                          'superseded_by_context_sha256','reason')}
     value['run_attempt']=batch.get('run_attempt',run_attempt)
     # A successful poll fills these defaults even when the failed run is unchanged.
     value.setdefault('read_failures',0)
@@ -143,7 +146,24 @@ def _candidate(conn,task,number):
     existing=accepted(conn,task)
     _require(not db.task_extra(task).get('external_build_repair_ref') or existing is not None,
              'external_repair_changed','已有外部修复引用无法核对，不能覆盖')
-    batch=release._batch(conn,existing['candidate']['source_batch_id']) if existing else release._attached(conn,task)
+    if existing is not None and number==existing['candidate']['pr_number']:
+        # 同一修复的确认重放：回执不变，只复核来源批次仍归属本任务。
+        batch=release._batch(conn,existing['candidate']['source_batch_id'])
+        _require(batch is not None and batch['members']==[release._identity(task)]
+                 and batch['root_task_id']==task['task_id'] and batch['project_id']==task['project_id'],
+                 'external_repair_source','原外部修复来源批次已变化')
+        return existing
+    attached=release._attached(conn,task)
+    if existing is None:
+        batch=attached
+    else:
+        # 二次衔接：只有「由上次关联目标构建出的预发布批次」再次失败时才允许再关联一次。
+        _require(attached is not None and attached.get('state')=='failed'
+                 and not attached.get('abandoned')
+                 and attached.get('target_sha')==existing['candidate']['target_sha'],
+                 'external_repair_source',
+                 '再关联需要由上次关联目标构建出的失败批次；请先完成该目标的验证与发布')
+        batch=attached
     _require(batch and batch['state']=='failed' and not batch.get('abandoned')
         and batch['policy']['channel']=='prerelease' and batch['root_task_id']==task['task_id']
         and batch['project_id']==task['project_id']
@@ -152,6 +172,9 @@ def _candidate(conn,task,number):
     _require(not db.task_extra(task).get('build_failure_hold'),'external_repair_source','已有构建修复轮次，不能关联外部修复')
     repo=git_delivery.origin_github_repo(task['repository']);d=core.delivery_of(task)
     _require(repo==batch['repository'] and number!=d.get('pr_number'),'external_repair_pr','必须选择同仓库的不同修复 PR')
+    superseding=existing is not None
+    if superseding:
+        _require(number!=existing['candidate']['pr_number'],'external_repair_pr','必须选择与上次关联不同的修复 PR')
     run=release.github.run(repo,batch['workflow_run_id'])
     _require(release._run_matches(batch,run) and run['id']==batch['workflow_run_id']
         and run.get('status')=='completed' and run.get('conclusion') in ('failure','cancelled','timed_out','action_required','startup_failure')
@@ -163,6 +186,9 @@ def _candidate(conn,task,number):
         and pr.get('baseRefName')==d.get('base_branch') and pr.get('isCrossRepository') is False,
         'external_repair_pr','修复 PR 必须是同仓库、同目标分支且已合并的 PR')
     target=release.github.merge_commit_sha(repo,number,pr['headRefOid'])
+    if superseding:
+        _require(release.closeout.github.contains(repo,existing['candidate']['target_sha'],target),
+                 'external_repair_pr','新修复目标必须包含上次已关联的修复目标')
     commit=release.closeout.github.commit(repo,target)
     candidate=dict(task_id=task['task_id'],pr_number=number,pr_url=url,head_sha=pr['headRefOid'],
         base_branch=pr['baseRefName'],target_sha=target,target_source_sha256=commit['source_sha256'],
@@ -175,6 +201,10 @@ def _candidate(conn,task,number):
     value=dict(identity=release._identity(task),candidate=candidate,policy=policy,policy_snapshot=mapping,
         source_refs=source_refs,source_batch_snapshot=_source_snapshot(batch,run['run_attempt']),
         evidence_sha256=proof['evidence_sha256'])
+    if superseding:
+        value['supersedes']=dict(context_sha256=existing['context_sha256'],
+            pr_number=existing['candidate']['pr_number'],
+            target_sha=existing['candidate']['target_sha'],batch_id=batch['batch_id'])
     if existing is None:
         value['source_gate']=local_gate
     elif 'source_gate' in existing:
@@ -187,6 +217,37 @@ def cmd_prepare_external_build_repair(ctx,payload):
     task=db.require_task(ctx.conn,payload['task_id']);value=_candidate(ctx.conn,task,payload.get('pr_number'))
     return dict(task_id=task['task_id'],context_sha256=value['context_sha256'],
         candidate=dict(value['candidate'],context_sha256=value['context_sha256']))
+
+
+def _supersede(conn,task,extra,value,existing,old_refs,now):
+    """由上次关联目标构建出的失败批次，可以再被一次更新的已合并修复替代。"""
+    supersedes=value.get('supersedes')
+    _require(isinstance(supersedes,dict) and existing['context_sha256']==supersedes.get('context_sha256'),
+             'external_repair_changed','上次外部修复关联已变化，未关联新的修复')
+    batch=release._attached(conn,task)
+    _require(batch is not None and batch['batch_id']==supersedes['batch_id']
+             and batch.get('state')=='failed' and not batch.get('abandoned')
+             and batch.get('target_sha')==supersedes['target_sha'],
+             'external_repair_changed','由上次修复构建出的失败批次已变化，未关联新的修复')
+    operation='accept:'+value['context_sha256']
+    operations.begin_operation(conn,_scope(task['task_id']),operation,'core',TOOL,value,now=now)
+    operations.complete_operation(conn,_scope(task['task_id']),operation,result=value,now=now)
+    archived=dict(batch,abandoned=True,abandoned_at=now,
+        reason='已被后续外部修复替代；保留只读历史，后续须重新验证并发布',
+        superseded_by_context_sha256=value['context_sha256'])
+    release._save(conn,archived,now,status='rejected')
+    sources=list(extra.get('build_failure_sources') or [])
+    sources.append(dict(kind=TOOL,release_batch_id=batch['batch_id'],
+        source_workflow_run_id=value['candidate']['source_workflow_run_id'],
+        source_workflow_attempt=value['candidate']['source_workflow_attempt'],
+        release_ref=old_refs['release_ref'],release_verification_ref=old_refs['release_verification_ref'],
+        superseded_context_sha256=existing['context_sha256'],
+        superseded_pr_number=supersedes['pr_number'],
+        superseded_target_sha=supersedes['target_sha']))
+    extra.pop('release_ref',None);extra.pop('release_verification_ref',None)
+    extra.update(build_failure_sources=sources,
+        external_build_repair_ref=dict(context_sha256=value['context_sha256']))
+    db.update_task(conn,task['task_id'],now,extra_json=extra)
 
 
 def cmd_accept_external_build_repair(ctx,payload):
@@ -207,7 +268,9 @@ def cmd_accept_external_build_repair(ctx,payload):
         _require(source and _source_snapshot(source,value['candidate']['source_workflow_attempt'])==value['source_batch_snapshot'],
                  'external_repair_changed','原失败批次状态或冻结身份已变化')
         existing=accepted(ctx.conn,task)
-        if existing:
+        if existing and existing!=value:
+            _supersede(ctx.conn,task,extra,value,existing,old_refs,ctx.now_iso)
+        elif existing:
             _require(existing==value,'external_repair_changed','已有不同外部修复关联，不能覆盖')
         else:
             _require(value.get('source_gate')==confirmation_gate,

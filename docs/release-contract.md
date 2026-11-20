@@ -113,6 +113,7 @@
 - 新验证尝试的工作树遵循统一约定，放在 `$HOME/Documents/Code/Project/Project Worktree/<项目标识>/<验证标识>/`，隔离测试显式覆盖根目录；已持久化的旧尝试继续使用原路径，不迁移，不因环境根变化而改写。运行时授权必须核对核心已接受的工作树创建回执与精确路径。
 - 仅新目标补验证真实通过后，允许 `prepare-task-release` 冻结该目标的新预发布候选。新批次、版本/tag、单次发送及发布证据继续沿原规则。后台 `after_merge`、重启或项目自动发布设置不能代替用户的单独发布确认。新批次绑定人工接纳与独立验证证据，不能伪称原 Review 覆盖了新目标。
 - 旧批次经来源历史成为只读历史，单项/批量同步不得覆盖新流程，也不能重发旧 tag。新批次存在时继续展示和跟踪新批次，发布完成门不因旧记录归档而解除。
+- 二次衔接（2026-11-20）：由已接纳外部修复目标构建出的预发布批次同样失败时，允许对同一任务再关联一次更新的已合并修复。候选除原有核对（同仓库、同目标分支、真实 MERGED、不同于原交付 PR、原交付保留、源码指纹、策略与本地状态）外，还要求新修复 PR 不同于上次关联的 PR，且新目标包含上次关联目标（只前进不回退）；来源批次为「该失败批次」本身，其源码必须等于上次关联目标。确认事务内写入新的接纳回执并记录 `supersedes{context_sha256,pr_number,target_sha,batch_id}`，把被替代的失败批次标记为只读历史（`abandoned`）并连同旧接纳回执写入 `build_failure_sources`，随后解除 `release_ref`、`release_verification_ref`；旧回执、原 delivery、执行、正式 Review 与旧批次证据均不改写。新目标仍须独立完整补验证，再按原规则冻结新批次；不自动触发、不放开稳定通道、不调用模型。
 
 `release` DTO 增加可选 `can_link_external_repair` 和 `external_repair`。后者为 `{pr_number,pr_url,target_sha,source_batch_id,source_tag,context_sha256,can_prepare_verification,can_sync_verification,can_restart_verification?,verification?}`；verification 沿补验证 view（state、target_sha、verification_id、reason 等）。SQL 投影只读取可信持久回执，不进行远端/模型调用；预检仍重新核证。验证准备响应补充 `task_id`，已有字段不变。关联事务复核来源批次的本地状态、attempt 与冻结发布策略；后续验证和发布仍须符合已接纳的预发布策略，策略漂移明确受阻，不将此外部关联例外用于正式版。
 
