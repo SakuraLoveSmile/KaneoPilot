@@ -68,6 +68,9 @@ def cmd_create_followup_task(ctx, payload):
 
     existing = _existing(ctx.conn, source["task_id"], dedupe_key)
     if existing is not None:
+        # 已移除的同名任务不算命中：静默返回会误导调用方（同 §5.20.1）。
+        util.require(not db.task_is_purged(existing),
+                     "已有同名二级任务但已被永久移除，请更换 dedupe_key", "conflict")
         return {"ok": True, "followup_task_id": existing["task_id"], "created": False}
     scope = _scope(source["task_id"])
     owner = f"create-followup-task:{util.new_uuid()}"
@@ -78,6 +81,9 @@ def cmd_create_followup_task(ctx, payload):
         if previous is not None and previous["status"] == "accepted":
             result = util.jload(previous["result_json"]) or {}
             if result.get("task_id"):
+                row = db.get_task(ctx.conn, result["task_id"])
+                util.require(row is not None and not db.task_is_purged(row),
+                             "同名二级任务已不存在或已永久移除，请更换 dedupe_key", "conflict")
                 return {"ok": True, "followup_task_id": result["task_id"],
                         "created": False, "reused": True}
         with db.write_txn(ctx.conn):

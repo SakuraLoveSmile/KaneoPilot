@@ -116,3 +116,19 @@ class FollowupTask(KanpilotTestCase):
                     followup_task.cmd_create_followup_task(self.ctx, payload)
                 self.assertEqual(caught.exception.code, "bad_request")
         self.assertEqual(self.calls, [])
+
+    def test_removed_task_is_not_silently_reused(self):
+        with patch.object(followup_task.remote, "get_client", lambda: object()), \
+                patch.object(followup_task.remote, "create_todo", self.fake_create()):
+            followup_task.cmd_create_followup_task(self.ctx, self.payload())
+            db.update_task(self.ctx.conn, "follow01", self.ctx.now_iso, save_state="purged")
+            with self.assertRaises(util.KanpilotError) as caught:
+                followup_task.cmd_create_followup_task(self.ctx, self.payload())
+            self.assertEqual(caught.exception.code, "conflict")
+            self.assertEqual(len(self.calls), 1)
+            self.ctx.conn.execute("DELETE FROM tasks WHERE task_id='follow01'")
+            with self.assertRaises(util.KanpilotError) as caught:
+                followup_task.cmd_create_followup_task(self.ctx, self.payload())
+            self.assertEqual(caught.exception.code, "conflict")
+            self.assertIn("已不存在或已永久移除", caught.exception.message)
+            self.assertEqual(len(self.calls), 1)
