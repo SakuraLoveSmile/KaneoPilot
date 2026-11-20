@@ -850,9 +850,12 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             # Cheap, storage-driven offer: the merge gate already names a failed
             # check, so one explicit rerun of those jobs is available.
             from . import core as core_module
-            notice = core_module.delivery_of(task).get("auto_merge") or {}
+            delivery = core_module.delivery_of(task)
+            notice = delivery.get("auto_merge") or {}
+            # 通知可能来自更早的交付头；那时重跑会因 PR head 不符被拒（KP-MG03 #1）。
             if (core_module.is_pr_delivery(task) and notice.get("state") == "blocked"
-                    and str(notice.get("reason") or "").startswith("检查未通过：")):
+                    and str(notice.get("reason") or "").startswith("检查未通过：")
+                    and notice.get("head_sha") == delivery.get("head_sha")):
                 actions.append("rerun_checks")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
