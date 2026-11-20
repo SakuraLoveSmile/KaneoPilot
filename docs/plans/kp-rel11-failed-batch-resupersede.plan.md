@@ -1,0 +1,59 @@
+# KP-REL11：外部修复构建再次失败后的二次衔接
+
+- 状态：实现中
+- 项目 / 任务编号：personal-kaneopilot / kp-rel11
+- 创建日期（Asia/Taipei）：2026-11-20
+- 权威记录：本文件
+- 工作树 / 分支 / 合入目标：`20261120-feat-kp-rel11-failed-batch-resupersede` / `feat/20261120-kp-rel11-failed-batch-resupersede` → `main`（基线 `deed56b`）
+- 规格：`docs/release-contract.md`「外部修复已合并后的显式衔接」（本次先补规格再改实现）
+
+## 触发
+
+AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的预发布：第一次构建失败后按外部修复把 PR #2 关联进来，
+补验证通过、新批次 `93124053…` 在 `638ceaf` 上**再次失败**。此时三条恢复路径互相封死：
+
+1. 再关联：`external_build_repair` 要求新值与既有接纳回执完全相同，换 PR 被拒；
+2. AI 修复：要求失败批次源码等于**原交付 PR** 的合并提交，而批次源码是修复目标；
+3. 弃用批次：`abandon-unsent-release` 只接受从未发送过的批次。
+
+任务因此没有任何出口，只能绕过 Pilot 手动发布。本次补上受控的二次衔接。
+
+## 目标与范围
+
+允许对「由已接纳外部修复目标构建出的失败预发布批次」再关联一次更新的同仓库已合并修复 PR；
+确认事务内归档旧批次与旧回执，之后仍按原规则重新补验证、重新准备批次。
+
+范围：`core/kanpilot/external_build_repair.py` 的候选与确认路径、`release_delivery` 的 DTO 投影口径、规格与测试。
+排除：自动重试、放宽 AI 修复门、正式版通道、任何新增远端写或模型调用。
+
+## 已确认决定
+
+- 二次衔接只由显式命令触发（`prepare-external-build-repair` 只读 → `accept-external-build-repair` 确认），不自动发生。
+- 新修复 PR 必须：同仓库、同目标分支、真实 MERGED、不同于原交付 PR，也不同于上次关联的修复 PR。
+- 新目标必须包含上次关联目标（只前进，不回退）。
+- 被替代的失败批次在确认事务内标记 `abandoned`，并写入 `build_failure_sources`；旧接纳回执保留原样，不被改写。
+- 新目标仍须独立完整补验证后才能准备批次；稳定通道不参与本例外。
+
+## 验收场景
+
+| 场景 | 预期 |
+| --- | --- |
+| 首次关联 → 该目标构建的批次 failed → 关联更新 PR | success：新回执、旧批次 abandoned、`release_ref`/`release_verification_ref` 解除 |
+| 旧批次同步 | 拒绝（只读历史） |
+| 新目标不含旧目标 | 拒绝：`external_repair_pr` |
+| 复用上次关联的 PR | 拒绝：`external_repair_pr` |
+| 旧批次不是 failed / 已归档 | 拒绝：`external_repair_source` |
+| 同一 PR 重放确认 | 幂等：不新增回执、不改历史 |
+| 首次关联路径 | 与既有测试一致，不回归 |
+
+## 验证与记录
+
+- 隔离测试（2026-11-20，基线 `deed56b` + 本次改动）：`cd core && python3 -m pytest tests/test_external_build_repair.py -q` → 21 passed / 19 subtests；
+  发布相关子集 `tests/test_external_build_repair.py tests/test_release_delivery.py tests/test_release_verification.py tests/test_release_dispatch_recovery.py tests/test_release_dispatch_void.py tests/test_goal_accepted_delivery.py` → 125 passed / 89 subtests（5m52s）。
+  未运行：`pytest tests` 全量套件——本机当时另有 3 个全量 pytest 在跑（load ~10），留待合并前复核。
+- 实测：待用 AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的真实批次走一遍二次衔接 → 补验证 → 新批次。
+- 未验证项：Swift/Android 界面按钮（本次只补 core 与规格，UI 入口另记）。
+
+## 遗留
+
+- 任务详情页「关联已合并修复…」入口在二次衔接状态下仍复用同一入口，UI 文案未单独区分（不影响命令可用性）。
