@@ -1,6 +1,6 @@
 # KP-REL11：外部修复构建再次失败后的二次衔接
 
-- 状态：实现中
+- 状态：待体验（core 与规格已合入任务分支并发布 test.339；界面按钮与实机未验证，未合并 main）
 - 项目 / 任务编号：personal-kaneopilot / kp-rel11
 - 创建日期（Asia/Taipei）：2026-11-20
 - 权威记录：本文件
@@ -59,6 +59,7 @@ AsmrDownloader 任务 `dljelzwybu94449pjrdx8dgx` 的预发布：第一次构建�
   4. `prepare-task-release` → `ready`（target `a7ca271`，0.16.2），`start-task-release` → 批次 `60cd5e5d…`，run [44686826921](https://github.com/SakuraLoveSmile/AsmrDownloader/actions/runs/44686826921)；
   5. 首次 quality-gate 撞既有 flake（`test/cache_complete_service_test.dart` 目录扫描顺序期望 `['123456','654321']` 实得反序），按 UI 口径重跑失败 Job 后全绿；
   6. 预发布 `v0.16.2-pilot.1795155277` 已发布：tag 指向 `a7ca271`，macOS/Windows 两个 zip + `kaneopilot-release.json`，批次 state `published`（安装包与 Release 证据已核验）。
+  7. 任务 `dljelzwybu94449pjrdx8dgx` 随后 `done`（stage done、Kaneo 远端 done、last_progress「已合并并完成任务」）。
 - 未验证项：Swift/Android 界面按钮（本次只补 core 与规格；任务详情沿用既有「关联已合并修复…」入口，文案未单独区分二次衔接）。
 - KaneoPilot 自身测试版：`Packages` `channel=test` → run [44688854471](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44688854471) 全部 job 成功，[v0.5.8-test.339](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.8-test.339) 已发布（apk 8.6MB / dmg 46.3MB / manifest / SHA256SUMS，prerelease）。未安装到本机，界面入口待体验。
 
