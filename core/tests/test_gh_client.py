@@ -30,6 +30,7 @@ with open(os.environ["FAKE_GH_LOG"],"a") as h: h.write(json.dumps(entry)+"\\n")
 if os.environ.get("FAKE_GH_ERROR"):
     print(os.environ["FAKE_GH_ERROR"],file=sys.stderr);sys.exit(1)
 if args[1]=="create": print("Do not parse this human output");sys.exit(0)
+if args[1]=="rerun": sys.stdout.write(os.environ.get("FAKE_GH_RERUN_STDOUT",""));sys.exit(0)
 value=json.loads(os.environ["FAKE_GH_PR"])
 print(json.dumps([value] if args[1]=="list" else value))
 ''')
@@ -76,6 +77,24 @@ def test_env_binary_override_all_pr_commands(fake_gh, monkeypatch):
     assert all(entry["binary"] == selected for entry in entries)
     assert all(entry["argv"][entry["argv"].index("--repo") + 1] == "owner/repo" for entry in entries)
     assert entries[1]["body"] == "body\n"
+
+
+@pytest.mark.parametrize("stdout", ["", "✓ Requested rerun (failed jobs) of run 44211608370\n"],
+                         ids=["no-output", "human-line"])
+def test_rerun_failed_succeeds_on_exit_zero_without_json(fake_gh, monkeypatch, stdout):
+    # `gh run rerun` has no --json: it confirms with a human line on a terminal and
+    # prints nothing otherwise. The exit code is the acceptance signal, never parsed JSON.
+    monkeypatch.setenv("FAKE_GH_RERUN_STDOUT", stdout)
+    assert gh.run_rerun_failed("owner/repo", 44211608370) is None
+    argv = json.loads(fake_gh.read_text().splitlines()[-1])["argv"]
+    assert argv == ["run", "rerun", "44211608370", "--repo", "owner/repo", "--failed"]
+
+
+def test_rerun_failed_still_raises_on_a_failed_exit(fake_gh, monkeypatch):
+    monkeypatch.setenv("FAKE_GH_ERROR", "connection reset")
+    with pytest.raises(gh.GhError) as caught:
+        gh.run_rerun_failed("owner/repo", 44211608370)
+    assert caught.value.kind == "transient"
 
 
 @pytest.mark.parametrize("error,kind", [("authentication failed HTTP 401", "auth"),

@@ -1829,7 +1829,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 `prepare-task-ai-action` 按覆盖生成 `action_config` 并冻结进候选，确认弹窗的模型摘要即本次实际使用
 的模型；之后修改设置只影响新候选，已确认轮次继续用冻结快照。只开放模型与思考等级，不开放切换后端。
 
-- `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
+- `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；`gh` 以退出码 0 退出即视为 GitHub 已受理并记 accepted，其输出不是结构化数据（非终端下成功时可能为空），不解析；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
 
 #### 放弃一次性处理（2026-11-20）
 

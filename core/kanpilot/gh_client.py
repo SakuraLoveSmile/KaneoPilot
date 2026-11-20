@@ -150,7 +150,9 @@ def run_rerun_failed(repo_slug, run_id):
     """Rerun only the failed jobs of one exact workflow run."""
     if type(run_id) is not int or run_id < 1:
         raise GhError("rejected", "工作流运行编号无效")
-    return _run(["run", "rerun", str(run_id), "--repo", _repo(repo_slug), "--failed"])
+    # gh run rerun has no --json: it prints a human line on a terminal and nothing
+    # otherwise. A zero exit is the acceptance signal; never parse the output.
+    _run(["run", "rerun", str(run_id), "--repo", _repo(repo_slug), "--failed"], json_output=False)
 
 
 def pr_view(repo_slug, number, *, merge_checks=False, merge_commit=False) -> dict:
