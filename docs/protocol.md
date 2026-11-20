@@ -1852,6 +1852,16 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - 授权在任一身份漂移时自动失效：head、报告路径或哈希、plan、需求快照、run_id、修复轮次、出现新的 `fix_request`、evidence 摘要变化。`get-task` 投影 `review_risk`（时间、note、findings）。
 - 交付：`review_delivery` 的评审身份取「pass 或有效风险接受」；`allowed_actions` 首位出现 `continue_delivery`，仍须用户显式发起。`review_delivery`、`cmd_delivery_pr` 与发布预检（`release_delivery._single_proof`、`release_verification`）认同一风险身份；逐字验证证据仍须满足，完成门与自动合并策略不变。撤销后回到原先 blocked 的修复态。
 
+#### 另立二级任务（2026-11-20）
+
+评审报告的「遗留风险」写明的问题超出原任务范围时，不应消耗原任务剩余的修复轮。核心提供 CLI-only 的确认式入口，把这一发现另立为同项目、同仓库的普通二级任务；判断仍由人做（评审已给出阻断/遗留的分类），不额外调用模型。
+
+- `create-followup-task {source_task_id,dedupe_key,title,description?,priority?,confirm:true}`。`confirm` 必须为 true；`dedupe_key` 非空且不含注释定界符；标题 1-200 字、描述 ≤8000 字；优先级沿用 bridge 允许集合（默认 `high`）。
+- 幂等：先按 `review_source_task_id=source` 且 `extra.followup_key=dedupe_key` 查本地任务，命中直接返回 `created:false`；否则经内嵌 bridge 以 marker `<!-- kaneopilot-followup:KEY -->` 查/建远端任务（`create_todo` 增加 `marker_prefix`，原 `codex-kaneo-review` 默认不变）。remote 写先写 `runtime_operations` 回执（scope `followup-task:<source>`，operation 为 source+key 的规范哈希）；连接中断留 unknown 不自动重放，同参数重试由远端 marker 去重。
+- 新建行：`plan_kind=standard`、`stage=plan`、`status=needs_plan`、`review_source_task_id=source`、复用来源项目/名称/仓库，写来源快照到 `sources/<task>.json`，`extra.followup_key` 记录幂等键，事件 `task_created`（`via=create-followup-task`）。不复制原任务计划、验证命令或修复轮；新任务按普通任务规划、执行、评审与交付。
+- 关系沿用既有父子投影（`task_relations`、`parent_closeout`）；`external_build_repair` 明确拒绝带 `review_source_task_id` 的任务，二级任务不走该通道。
+- 回灌不在本命令内：子任务修复在目标分支合并后，来源任务分支以「冻结交付提交 + 目标分支 tip」的合并提交前进，再 `rebind-delivery-head` 重建交付请求；不能用 rebase/cherry-pick 重写冻结提交。
+
 #### 处理后评审的收敛准则（2026-11-20）
 
 一次性处理与随后的修复轮容易形成「评审加码 ↔ 修复加机制」的正反馈：评审看不到处理目标，每轮都能在并发等交错路径上「确定」新缺陷，修复方为避免被打回追加机制，新机制又带来新的交错面。本节只约束评审与修复提示，不改结论枚举与结算 schema。
