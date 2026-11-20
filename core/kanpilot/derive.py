@@ -626,7 +626,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     board_column = task_board_column(task, conn, now)
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
-    from . import core, automation_policy, review_repair, task_ai_action
+    from . import core, automation_policy, review_repair, review_risk, task_ai_action
     automation = core.automation_of(task)
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
@@ -640,6 +640,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "question_preview": question_preview(question),
         "automation": automation or None,
         "review_repair": review_repair.view(conn, task, now),
+        "review_risk": review_risk.projection(task),
         "task_ai_action": task_ai_action.projection(conn, task, now),
         "delivery": task_delivery_view(task),
         "release": _release(conn, task),

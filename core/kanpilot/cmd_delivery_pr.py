@@ -299,13 +299,15 @@ def _identity(ctx, payload):
     util.require(not core.automation_of(task).get("manual_takeover", False),
                  "任务已转为人工处理", "conflict")
     extra, delivery = db.task_extra(task), core.delivery_of(task)
-    from . import review_delivery
+    from . import review_delivery, review_risk
     if db.request_payload(db.get_request(ctx.conn, payload["request_id"])).get("manual_review_delivery_id"):
         util.require(review_delivery.allowed(ctx.conn, task, db.get_request(ctx.conn, payload["request_id"])),
                      "手动继续交付的授权、评审或请求身份已变化", "conflict")
     history = extra.get("review_history") or []
     review = history[-1] if history and isinstance(history[-1], dict) else {}
-    util.require(extra.get("review_conclusion") == "pass" and review.get("conclusion") == "pass"
+    risk_accepted = review_risk.identity(task) is not None
+    util.require(((extra.get("review_conclusion") == "pass" and review.get("conclusion") == "pass")
+                  or risk_accepted)
                  and review.get("execution_run_id") == task["run_id"]
                  and review.get("head_sha") == delivery.get("head_sha")
                  and review_delivery.review_round_matches(task, review)
