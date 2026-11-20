@@ -156,6 +156,81 @@ class ExternalBuildRepairTest(TestCase):
         self.assertIn('冻结计划',self.plus.prompt)
         self.assertEqual(release.cmd_prepare_task_release(self.ctx,dict(task_id='parent'))['release']['state'],'ready')
 
+    def _linked_target_failed_batch(self,batch_id='failed-superseded'):
+        batch=dict(batch_id=batch_id,project_id='project',repository='example/closeout',
+            root_task_id='parent',state='failed',dispatch_status='sent_or_unknown',
+            target_sha=self.target,reason='构建运行未成功；可在Actions手动重跑后同步结果',
+            members=[release._identity(self.task())],context_sha256='c'*64,
+            policy={'channel':'prerelease'},version='0.1.0',tag='v0.1.0-pilot.2',build_number=2,
+            workflow=dict(id=44,ref='main',head_sha=self.target),workflow_run_id=200)
+        runtime_operations.begin_operation(self.conn,release._scope('project'),'batch:'+batch_id,
+            'github',release.BATCH_TOOL,{})
+        release._save(self.conn,batch,self.ctx.now_iso)
+        db.set_extra(self.conn,self.task(),self.ctx.now_iso,release_ref=dict(batch_id=batch_id,required=True))
+        self.run.update(id=200,display_title='pilot-release-'+batch_id,head_sha=self.target,
+            html_url='https://github.com/example/closeout/actions/runs/200')
+        return batch
+
+    def _supersede_github(self,new_target,*,contains=True):
+        def pr_view(repo,n):
+            value=deepcopy(self.original_pr)
+            value.update(number=n,url='https://github.com/example/closeout/pull/'+str(n))
+            if n==10:value['headRefOid']=new_target
+            return value
+        self.patch(patch('kanpilot.parent_closeout_github.pr',side_effect=pr_view))
+        self.patch(patch('kanpilot.parent_closeout_github.commit',
+            return_value=dict(sha=new_target,source_sha256='f'*64,records=[])))
+        self.patch(patch('kanpilot.parent_closeout_github.contains',return_value=contains))
+        self.patch(patch.object(self.api,'merge_commit_sha',return_value=new_target))
+        self.patch(patch.object(release,'_single_proof',side_effect=lambda conn,task,**kw:dict(
+            target_sha=kw.get('frozen_target'),target_source_sha256='f'*64,
+            github_repository='example/closeout',evidence_sha256={})))
+
+    def test_linked_repair_can_be_superseded_after_its_build_failed(self):
+        original=deepcopy(db.task_extra(self.task()))
+        self.accept()
+        linked=deepcopy(repair.accepted(self.conn,self.task()))
+        batch=self._linked_target_failed_batch()
+        new_target='e'*40
+        self._supersede_github(new_target)
+        candidate=repair.cmd_prepare_external_build_repair(self.ctx,dict(task_id='parent',pr_number=10))
+        self.assertEqual(candidate['candidate']['target_sha'],new_target)
+        self.assertEqual(candidate['candidate']['source_batch_id'],batch['batch_id'])
+        repair.cmd_accept_external_build_repair(self.ctx,dict(task_id='parent',pr_number=10,
+            expected_context_sha256=candidate['context_sha256'],confirm=True))
+        extra=db.task_extra(self.task())
+        self.assertNotIn('release_ref',extra)
+        self.assertNotIn('release_verification_ref',extra)
+        self.assertEqual(extra['external_build_repair_ref'],
+            dict(context_sha256=candidate['context_sha256']))
+        archived=release._batch(self.conn,batch['batch_id'])
+        self.assertTrue(archived.get('abandoned'))
+        self.assertEqual(archived['target_sha'],self.target)
+        self.assertEqual(extra['build_failure_sources'][-1]['release_batch_id'],batch['batch_id'])
+        self.assertEqual(extra['build_failure_sources'][-1]['superseded_target_sha'],
+            linked['candidate']['target_sha'])
+        for key in ('delivery','review_history','plan_verify','engine_verdict'):
+            self.assertEqual(extra[key],original[key])
+        with self.assertRaises(util.KanpilotError):
+            release.cmd_sync_release_batch(self.ctx,dict(batch_id=batch['batch_id']))
+        repair.cmd_accept_external_build_repair(self.ctx,dict(task_id='parent',pr_number=10,
+            expected_context_sha256=candidate['context_sha256'],confirm=True))
+        self.assertEqual(db.task_extra(self.task())['external_build_repair_ref'],
+            dict(context_sha256=candidate['context_sha256']))
+        self.assertEqual(repair.summary(self.conn,self.task())['target_sha'],new_target)
+
+    def test_supersede_requires_linked_target_batch_and_forward_target(self):
+        self.accept()
+        # 还没有「由上次关联目标构建出的失败批次」时不能二次衔接
+        with self.assertRaises(util.KanpilotError):
+            repair.cmd_prepare_external_build_repair(self.ctx,dict(task_id='parent',pr_number=10))
+        self._linked_target_failed_batch()
+        # 新目标不包含上次关联目标
+        self._supersede_github('e'*40,contains=False)
+        with self.assertRaises(util.KanpilotError):
+            repair.cmd_prepare_external_build_repair(self.ctx,dict(task_id='parent',pr_number=10))
+        self.assertIn('release_ref',db.task_extra(self.task()))
+
     def test_run_drift_and_unconfirmed_accept_block(self):
         c=self.candidate(); self.run['run_attempt']=2
         with self.assertRaises(util.KanpilotError):

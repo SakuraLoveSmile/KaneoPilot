@@ -299,7 +299,9 @@ def projection(conn,task):
         value['can_link_external_repair']=bool(batch['state']=='failed' and policy['enabled'] and policy['channel']=='prerelease'
             and batch['policy']['channel']=='prerelease' and not task['review_source_task_id']
             and not conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1',(task['task_id'],)).fetchone()
-            and not hold and external_value is None and external.locally_linkable(conn,task))
+            and not hold and external.locally_linkable(conn,task)
+            # 已关联外部修复时，只有「该修复目标构建出的批次」还能再关联一次。
+            and (external_value is None or external_value.get('target_sha')==batch['target_sha']))
         if external_value:value['external_repair']=external_value
         return value
     if external_value:
