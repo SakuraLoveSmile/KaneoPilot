@@ -325,7 +325,7 @@ def projection(conn,task):
     from . import review_delivery
     if review_delivery.candidate(conn,task) is not None:
         return dict(state='waiting_group',title='待 PR 交付',
-            reason=review_delivery.WAITING_REASON,
+            reason=review_delivery.waiting_reason(task),
             required=required,channel=policy['channel'],root_task_id=task['task_id'],
             member_task_ids=[task['task_id']],assets=[],blockers=[],can_start=False,can_reconcile=False)
     pending=_pending(conn,task['project_id'])

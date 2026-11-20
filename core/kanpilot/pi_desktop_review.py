@@ -514,6 +514,8 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
         material("commits.log", ["log", "--oneline", f"{base}..{head}"])
         history = task.get("review_history") or (task.get("extra") or {}).get("review_history") or (
             db.task_extra(task).get("review_history") if "extra_json" in task else [])
+        # Reviews of discarded work (KP-MG02) describe commits that are no longer on this branch.
+        history = [entry for entry in history or [] if not (isinstance(entry, dict) and entry.get("discarded"))]
         if history:
             previous = history[-1]
             if previous.get("head_sha"):

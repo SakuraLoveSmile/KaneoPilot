@@ -9,7 +9,8 @@ KIND = "merge_conflict"
 KINDS = constants.AI_ACTION_KINDS
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
-                "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
+                "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败",
+                "discarded": "已放弃"}
 CONTEXT_FIELDS = ("task_id", "project_id", "repository", "requirements_sha256", "source_execution_run_id",
                   "review_key", "report_path", "report_sha256", "plan_sha256", "head_sha", "branch",
                   "worktree_path", "base_branch", "base_sha", "target_base_sha", "github_repo", "pr_number")
