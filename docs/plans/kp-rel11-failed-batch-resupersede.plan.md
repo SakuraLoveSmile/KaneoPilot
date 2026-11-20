@@ -1,10 +1,11 @@
 # KP-REL11：外部修复构建再次失败后的二次衔接
 
-- 状态：待体验（core 与规格已合入任务分支并发布 test.339；界面按钮与实机未验证，未合并 main）
+- 状态：待体验（core 与规格已合并 main；已发布 test.339；界面按钮与实机未验证）
 - 项目 / 任务编号：personal-kaneopilot / kp-rel11
 - 创建日期（Asia/Taipei）：2026-11-20
 - 权威记录：本文件
 - 工作树 / 分支 / 合入目标：`20261120-feat-kp-rel11-failed-batch-resupersede` / `feat/20261120-kp-rel11-failed-batch-resupersede` → `main`（基线 `deed56b`）
+- 合并：PR [#18](https://github.com/SakuraLoveSmile/KaneoPilot/pull/18) 基于 `main@effbf8c` 重建后合并，merge commit `f688111`；未把 kp-mg01 任务分支的 7 个提交带进 main
 - 规格：`docs/release-contract.md`「外部修复已合并后的显式衔接」（本次先补规格再改实现）
 
 ## 触发
