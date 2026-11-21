@@ -905,6 +905,9 @@ struct TaskOverviewTabView: View {
         if available.contains("continue_delivery") { return "continue_delivery" }
         if available.contains("sync_release") { return "sync_release" }
         if available.contains("closeout_parent") { return "closeout_parent" }
+        // KP-MG06：二级任务的人工收口是这一状态下唯一能推进动作，作为主动作露出，
+        // 不藏在「更多操作」里（否则用户根本找不到入口）。
+        if available.contains("confirm_closeout") { return "confirm_closeout" }
         if reviewPassedAwaitingDelivery {
             return available.contains("recheck") ? "recheck" : nil
         }
