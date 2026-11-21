@@ -17,8 +17,11 @@ CHECK = {"__typename": "CheckRun", "name": "analyze-test", "workflowName": "app-
 GATE_REASON = "检查未通过：app-ci/analyze-test，修复或重跑后会自动合并"
 
 
-class CheckFailureActionFlow(fixtures.ConflictActionFixture):
-    """The merge gate named one failed check; one authorized repair must run end to end."""
+class CheckFailureFixture(fixtures.ConflictActionFixture):
+    """A PR task whose merge gate named one failed check; helpers drive one authorized repair.
+
+    Fixture only (no ``test_*``), so other modules can build on it without re-running these cases.
+    """
 
     def setUp(self):
         super().setUp()
@@ -82,7 +85,9 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
 
     def goal_evidence(self, payload):
         task = self.task()
-        config = core.review_repair_of(task)["action_config"]
+        # The claimed round froze its own execution config (an action's or a plain repair's).
+        config = util.jload(self.conn.execute("SELECT config_json FROM execution_rounds WHERE task_id=? AND run_id=?",
+                                              (self.task_id, self.run)).fetchone()["config_json"])
         commands = db.task_extra(task)["plan_verify"]["commands"]
         self.conn.execute("UPDATE execution_rounds SET run_status='finished',session_id='session' "
                           "WHERE task_id=? AND run_id=?", (self.task_id, self.run))
@@ -116,7 +121,7 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
         with patch.object(verdict, "run_verify_commands",
                           side_effect=AssertionError("Pilot must not run verification")):
             result = self.call("engine-verdict", dict(payload, expected_plan_sha256=task["plan_sha256"],
-                                                      operation_id="action-verdict"))
+                                                      operation_id="action-verdict-" + self.run))
         assert result["verification_ok"] is True, result
         assert result["evidence_source"] == "goal_report"
         return result
@@ -124,8 +129,12 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
     # --- scenario helpers --------------------------------------------------
     def commit_fix(self):
         self.claim_action()
+        return self.commit_round("fixed check")
+
+    def commit_round(self, text):
+        """Finish the claimed dispatch with one committed change, through the real monitor and commit steps."""
         self.open_worktree()
-        (self.worktree / "tracked.txt").write_text("task implementation\nfixed check\n")
+        (self.worktree / "tracked.txt").write_text("task implementation\n" + text + "\n")
         git(self.worktree, "add", "tracked.txt")
         db.update_task(self.conn, self.task_id, self.now, status="running", stage="monitor",
                        sent=1, send_state="sent", session_id="session")
@@ -166,7 +175,10 @@ class CheckFailureActionFlow(fixtures.ConflictActionFixture):
                                           report_path=str(report)))
         return db.require_task(self.conn, self.task_id)
 
-    # --- tests -------------------------------------------------------------
+
+class CheckFailureActionFlow(CheckFailureFixture):
+    """The merge gate named one failed check; one authorized repair must run end to end."""
+
     def test_prepare_freezes_the_failing_check_and_offers_one_repair(self):
         before = self.conn.total_changes, dict(self.task())
         candidate = self.prepare()

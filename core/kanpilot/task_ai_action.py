@@ -3,13 +3,14 @@ from pathlib import Path
 import re
 
 from . import (automation_policy, constants, core, db, exec_config, gh_client,
-               git_delivery, project_config, runtime_operations, util)
+               git_delivery, project_config, repair_prompt, review_convergence, runtime_operations, util)
 
 KIND = "merge_conflict"
 KINDS = constants.AI_ACTION_KINDS
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
-                "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
+                "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败",
+                "discarded": "已放弃"}
 CONTEXT_FIELDS = ("task_id", "project_id", "repository", "requirements_sha256", "source_execution_run_id",
                   "review_key", "report_path", "report_sha256", "plan_sha256", "head_sha", "branch",
                   "worktree_path", "base_branch", "base_sha", "target_base_sha", "github_repo", "pr_number")
@@ -308,10 +309,12 @@ def cmd_start_task_ai_action(ctx, payload):
             automation.update(segment_started_at=ctx.now_iso, plan_wanted=False)
             extra["automation"] = automation
         value.update(state="queued", created_at=ctx.now_iso, queued_at=ctx.now_iso,
-                     authorized_by="user", authorized_at=ctx.now_iso)
+                     authorized_by="user", authorized_at=ctx.now_iso, prompt_rev=repair_prompt.PROMPT_REV)
         for key in ("review_conclusion", "review_registered_at", "registered_review_identity", "verification_override", "plan_execution_hold"):
             extra.pop(key, None)
         extra["fix_request"] = value
+        # A review's changes_requested replaces fix_request by a plain repair; the reviews after it still need the target.
+        extra["ai_action_target"] = review_convergence.target_of(value)
         if value["source_kind"] == "build_failure":
             archive = list(extra.get("build_failure_sources") or [])
             archive.append({"action_id": value["action_id"], "delivery": value["source_delivery"],
@@ -420,6 +423,12 @@ def ensure_worktree(conn, task):
 
 
 def prompt_body(fix, plan_path):
+    body = _prompt_body(fix, plan_path)
+    fence = repair_prompt.scope_fence(fix)
+    return body + "\n\n" + fence if fence else body
+
+
+def _prompt_body(fix, plan_path):
     if fix.get("source_kind") == "build_failure":
         from . import task_ai_build_failure
         return task_ai_build_failure.prompt_body(fix, plan_path)

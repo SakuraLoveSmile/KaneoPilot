@@ -48,7 +48,8 @@ from typing import Callable, Optional, Tuple
 
 from . import (
     constants, core, db, headless_adapter, pi_desktop_controller,
-    util, git_delivery, review_settle, review_snapshot, plus_interaction, task_workspace, worktree_pool,
+    util, git_delivery, review_convergence, review_settle, review_snapshot, plus_interaction, task_workspace,
+    worktree_pool,
 )
 
 from .review_settle import RESULT_SCHEMA
@@ -514,6 +515,8 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
         material("commits.log", ["log", "--oneline", f"{base}..{head}"])
         history = task.get("review_history") or (task.get("extra") or {}).get("review_history") or (
             db.task_extra(task).get("review_history") if "extra_json" in task else [])
+        # Reviews of discarded work (KP-MG02) describe commits that are no longer on this branch.
+        history = [entry for entry in history or [] if not (isinstance(entry, dict) and entry.get("discarded"))]
         if history:
             previous = history[-1]
             if previous.get("head_sha"):
@@ -523,6 +526,11 @@ def _collect_materials(*, db_path, conn, materials: Path, task: dict,
                 target = materials / "previous-review-report.md"
                 shutil.copyfile(previous_report, target)
                 files[target.name] = str(target)
+        # A review that follows an AI action or a repair round is judged against that target (KP-MG02).
+        convergence = review_convergence.context(task)
+        if convergence is not None:
+            _write_text(materials / review_convergence.MATERIAL, review_convergence.material_text(convergence))
+            files[review_convergence.MATERIAL] = str(materials / review_convergence.MATERIAL)
     else:
         snapshot = snapshot if snapshot is not None else review_snapshot.freeze(execution_worktree)
         review_snapshot.verify_source(execution_worktree, snapshot)
@@ -720,6 +728,8 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
     lines.append(
         "  - 整个答复只包含上述一份分段结果，开始和结束标记外不要添加开场白、总结或解释文字。"
     )
+    if review_convergence.MATERIAL in files:
+        lines.extend(review_convergence.RUBRIC)
     lines.append(
         "- 禁止 SubmitPlan/SubmitGoal、禁止代批任何契约；若被要求生成计划或目标契约，"
         "不要生成，直接按上面的结构给出评审结论。"

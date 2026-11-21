@@ -306,6 +306,24 @@ class TaskBranchReview(KanpilotTestCase):
         self.assertIn(self.delivery["base_sha"] + ".." + second["sha"], instruction)
         self.assertIn("不能替代完整范围", instruction)
 
+    def test_discarded_reviews_are_skipped_when_choosing_the_previous_review(self):
+        first = self.commit()
+        kept, dropped = self.reports_root / "kept.md", self.reports_root / "dropped.md"
+        kept.write_text("Review of kept work")
+        dropped.write_text("Review of discarded work")
+        db.update_task(self.ctx.conn, "task1234", self.ctx.now_iso, run_id="exec2")
+        self.payload["expected_execution_run_id"] = "exec2"
+        second = self.commit("later.py", "later change\n")
+        db.set_extra(self.ctx.conn, self.task(), self.ctx.now_iso, review_history=[
+            dict(head_sha=first["sha"], report_path=str(kept)),
+            dict(head_sha=second["sha"], report_path=str(dropped),
+                 discarded={"action_id": "action", "at": self.ctx.now_iso})])
+        materials = review.collect_materials(db_path=self.db_path, conn=self.ctx.conn,
+            materials=self.root / "materials", task=dict(self.task()),
+            execution_worktree=self.worktree, execution_run_id="exec2")
+        self.assertIn("later change", Path(materials["files"]["fix-increment.diff"]).read_text())
+        self.assertEqual(Path(materials["files"]["previous-review-report.md"]).read_text(), "Review of kept work")
+
     def test_registered_pass_is_bound_to_claimed_branch_version(self):
         self.commit()
         identity = self.claim_review()

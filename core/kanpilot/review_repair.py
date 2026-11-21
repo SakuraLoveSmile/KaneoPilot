@@ -1,7 +1,7 @@
 """Identity-bound direct Review repairs. No model invocation or remote writes."""
 from pathlib import Path
 
-from . import automation_policy, constants, core, db, git_delivery, project_config, util
+from . import automation_policy, constants, core, db, git_delivery, project_config, repair_prompt, util
 
 IDENTITY = {
     "expected_execution_run_id": "source_execution_run_id",
@@ -192,7 +192,7 @@ def start_inline(conn, task, now, value, actor):
         count = _round_count(task) + 1
         extra["review_repair_round"] = count
     value = dict(value, state="queued", fix_round=count, queued_at=now,
-                 authorized_by=actor, authorized_at=now)
+                 authorized_by=actor, authorized_at=now, prompt_rev=repair_prompt.PROMPT_REV)
     value.pop("reason", None)
     extra["fix_request"] = value
     # A new Review repair supersedes any retry of the preceding execution.

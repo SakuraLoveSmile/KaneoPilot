@@ -224,6 +224,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "expected_pr_head_sha": (True, "str"), "note": (False, "str|null"),
          "confirm": (True, "bool")},
         _automation_command("delivery_rebind", "cmd_rebind_delivery_head")),
+    # CLI-only：丢弃一次性处理从未推送的本地提交，回到已评审提交并重新评审（KP-MG02）。
+    "discard-task-ai-action": (
+        {"task_id": (True, "str"), "action_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_restore_head_sha": (True, "str"), "expected_pr_head_sha": (True, "str"),
+         "note": (False, "str|null"), "confirm": (True, "bool")},
+        _automation_command("task_ai_discard", "cmd_discard_task_ai_action")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,

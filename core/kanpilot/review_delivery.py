@@ -2,7 +2,9 @@
 
 Listing and worker authority are SQLite-only. The resolve command reuses the
 formal Goal verifier, checks clean reviewed source and reads Kaneo before it
-atomically records permission for this one immutable delivery identity.
+atomically records permission for this one immutable delivery identity. The same
+command re-authorizes the already open PR of a task whose one-shot AI action was
+discarded (KP-MG02) once its fresh Review has passed.
 """
 from . import constants, core, db, git_delivery, project_config, util
 
@@ -11,6 +13,7 @@ _TASK_KEYS = ('task_id', 'project_id', 'repository', 'requirements_sha256',
               'review_report_path', 'review_report_sha256')
 _BRANCH_KEYS = ('workspace_version', 'branch', 'worktree_path', 'base_branch', 'base_sha', 'head_sha')
 WAITING_REASON = '正式评审已通过；继续交付将复用已有报告，创建 PR 并推进合并和已配置的构建发布'
+EXISTING_PR_REASON = '已放弃 AI 处理并重新评审通过；继续交付将复用已有 PR，核对检查后推进合并和已配置的构建发布'
 _DELIVERY_ENVIRONMENT_CODES = ('gh_missing', 'gh_not_logged_in', 'gh_timeout', 'gh_unavailable')
 # A long-blocked merge gate has the same shape: the reviewed identity is intact
 # and only GitHub has to change, so the same user authorization may continue it.
@@ -18,11 +21,46 @@ _DELIVERY_RETRYABLE_CODES = _DELIVERY_ENVIRONMENT_CODES + ('merge_checks_stalled
 
 
 def manual_release_review(task):
-    """Settlement's DTO gate; release.required is derived by the core itself."""
-    return (not core.is_automation_managed(task)
-            and core.delivery_of(task).get('workspace_version') == 1
-            and core.delivery_of(task).get('mode') == 'manual'
-            and (task.get('release') or {}).get('required') is True)
+    """Settlement's DTO gate: a manual pass waits for the user instead of closing the task.
+
+    release.required is derived by the core itself. A task whose PR already exists after a
+    discarded AI action always waits: its PR cannot be closed locally before it is merged.
+    """
+    delivery = core.delivery_of(task)
+    if core.is_automation_managed(task) or delivery.get('workspace_version') != 1:
+        return False
+    return ((delivery.get('mode') == 'manual' and (task.get('release') or {}).get('required') is True)
+            or discarded_pr_delivery(task))
+
+
+def discarded_pr_delivery(task):
+    """A manual PR task whose one-shot AI action was discarded (KP-MG02) and that passed Review again.
+
+    The discard returned the branch to the reviewed head the PR already carries. The earlier delivery
+    authorization was bound to the review and evidence the discard replaced, so only a new explicit
+    continue_delivery can authorize this fresh pass. Metadata only; takes a row or a raw get-task DTO.
+    """
+    extra, delivery = db.task_extra(task), core.delivery_of(task)
+    actions = [item for item in extra.get('ai_action_history') or [] if isinstance(item, dict)]
+    discarded = actions[-1] if actions and actions[-1].get('state') == 'discarded' else {}
+    history = extra.get('review_history') or []
+    last = history[-1] if history and isinstance(history[-1], dict) else {}
+    head = delivery.get('head_sha')
+    return bool(
+        discarded and not core.is_automation_managed(task)
+        and delivery.get('workspace_version') == 1 and delivery.get('mode') == 'pr'
+        and type(delivery.get('pr_number')) is int
+        and not delivery.get('merged_at') and not delivery.get('merge_head_sha')
+        and head and head == delivery.get('pushed_sha') == discarded.get('restore_head_sha')
+        and not extra.get('task_ai_action_delivery') and not core.review_repair_of(task)
+        # The pass must come after the discard: reviews of the discarded work stay in the history, flagged.
+        and last.get('conclusion') == 'pass' and not last.get('discarded')
+        and any(isinstance(item, dict) and (item.get('discarded') or {}).get('action_id') == discarded.get('action_id')
+                for item in history[:-1]))
+
+
+def waiting_reason(task):
+    return EXISTING_PR_REASON if discarded_pr_delivery(task) else WAITING_REASON
 
 
 def _digest(value):
@@ -121,9 +159,12 @@ def candidate(conn, task):
     if task['stage'] != 'review':
         return None
     delivery = core.delivery_of(task)
-    if (delivery.get('mode') != 'manual' or delivery.get('workspace_version') != 1
-            or any(delivery.get(key) for key in ('pr_number', 'pushed_sha', 'merged_at', 'stage_contracts'))
-            or not release_delivery._policy(conn, task)[0]['enabled']
+    # The PR of a discarded action is already open: its fresh pass is authorized once, while no receipt is valid.
+    existing_pr = discarded_pr_delivery(task) and continuation(task) is None
+    first_delivery = (delivery.get('mode') == 'manual'
+                      and not any(delivery.get(key) for key in ('pr_number', 'pushed_sha', 'merged_at', 'stage_contracts'))
+                      and release_delivery._policy(conn, task)[0]['enabled'])
+    if (delivery.get('workspace_version') != 1 or not (existing_pr or first_delivery)
             or conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') LIMIT 1",
                             (task['task_id'],)).fetchone()):
         return None
@@ -144,8 +185,8 @@ def candidate(conn, task):
 def attention_fields(conn, task):
     if candidate(conn, task) is None:
         return {}
-    return dict(failure_code=None, failure_stage='delivery',
-                failure_reason=WAITING_REASON, blocked_summary=WAITING_REASON)
+    reason = waiting_reason(task)
+    return dict(failure_code=None, failure_stage='delivery', failure_reason=reason, blocked_summary=reason)
 
 
 def continuation(task, *, allow_paused=False, allow_delivery_block=False):
