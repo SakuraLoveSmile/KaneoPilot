@@ -60,6 +60,27 @@ class FollowupCloseout(KanpilotTestCase):
         value.update(overrides)
         return value
 
+    def test_advanced_branch_head_closes_out_when_target_matches(self):
+        # 收尾提交让分支头前进（真实案例：PR 里最后那个竞态修复），目标分支内容一致即可收口。
+        (self.worktree / "a.txt").write_text("two\npolish\n", encoding="utf-8")
+        git(self.worktree, "commit", "-am", "polish")
+        advanced = git(self.worktree, "rev-parse", "HEAD")
+        (self.repo / "a.txt").write_text("two\npolish\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "polish on target")
+        git(self.repo, "push", "origin", "main")
+        result = followup_closeout.cmd_confirm_followup_closeout(
+            self.ctx, self.payload(expected_head_sha=advanced, note="PR #12 已合入"))
+        self.assertEqual(result["status"], "done")
+        row = db.require_task(self.ctx.conn, self.task_id)
+        self.assertEqual(db.task_extra(row)["followup_closeout"]["head_sha"], advanced)
+
+    def test_identity_mismatch_is_refused(self):
+        with self.assertRaises(util.KanpilotError) as caught:
+            followup_closeout.cmd_confirm_followup_closeout(
+                self.ctx, self.payload(expected_head_sha="0" * 40))
+        self.assertIn("分支头", str(caught.exception))
+        self.assertEqual(db.require_task(self.ctx.conn, self.task_id)["status"], "in_review")
+
     def test_candidate_and_allowed_action(self):
         task = db.require_task(self.ctx.conn, self.task_id)
         value = followup_closeout.candidate(self.ctx.conn, task)
