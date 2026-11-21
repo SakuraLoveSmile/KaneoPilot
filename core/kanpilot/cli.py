@@ -240,6 +240,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "revoke-review-risk-acceptance": (
         {"task_id": (True, "str"), "expected_head_sha": (True, "str"), "confirm": (True, "bool")},
         _automation_command("review_risk", "cmd_revoke_review_risk_acceptance")),
+    # CLI-only：把评审发现的超范围问题另立为二级任务（KP-MG04 v1）。
+    "create-followup-task": (
+        {"source_task_id": (True, "str"), "dedupe_key": (True, "str"),
+         "title": (True, "str"), "description": (False, "str|null"),
+         "priority": (False, "str|null"), "confirm": (True, "bool")},
+        _automation_command("followup_task", "cmd_create_followup_task")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,
