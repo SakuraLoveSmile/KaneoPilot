@@ -1257,6 +1257,7 @@ private struct TaskAIActionSection: View {
     @State private var preparing = false
     @State private var preparationID: UUID?
     @State private var starting = false
+    @State private var startingRepair = false
     @State private var candidate: TaskAIActionCandidate?
     @State private var errorText: String?
     @State private var historyExpanded = false
@@ -1268,7 +1269,7 @@ private struct TaskAIActionSection: View {
             }
             HStack(spacing: Spacing.s) {
                 if preparing || starting { ProgressView().controlSize(.small) }
-                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
+                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : action.isCheckFailure ? "正在核对检查…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
                     guard !preparing, !starting, candidate == nil else { return }
                     let token = UUID(), taskID = detail.taskId, kind = action.actionKind
                     preparationID = token
@@ -1288,9 +1289,43 @@ private struct TaskAIActionSection: View {
                 }
                 .disabled(!action.canPrepare || detail.readOnly == true || preparing || starting
                           || candidate != nil || model.actionInFlight != nil)
-                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复" : "使用通用执行配置处理 PR 合并冲突"))
+                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复"
+                        : action.isCheckFailure ? "读取失败检查日志并安排一次最小修复"
+                        : "使用通用执行配置处理 PR 合并冲突"))
             }
-            if !action.canPrepare, action.current == nil, let reason = action.reason, !reason.isEmpty {
+            if let repair = followUpRepair {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Label {
+                        Text("本轮处理后复审要求改动：\(repair.title)")
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(Color.kpOrange)
+                    }
+                    .font(.kpSmall)
+                    .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: Spacing.s) {
+                        if startingRepair { ProgressView().controlSize(.small) }
+                        Button("按复审意见继续修复") {
+                            startingRepair = true
+                            Task {
+                                defer { startingRepair = false }
+                                do {
+                                    let candidate = try await model.currentReviewRepair(taskID: detail.taskId)
+                                    await model.startReviewRepair(taskID: detail.taskId, candidate: candidate)
+                                    onRefreshDetail?()
+                                } catch {
+                                    errorText = error.coreMessage
+                                }
+                            }
+                        }
+                        .disabled(startingRepair || detail.readOnly == true || model.busy)
+                        .help("按当前执行配置开启新的修复会话，产生模型费用；沿用本任务分支")
+                    }
+                }
+            }
+            if followUpRepair == nil, !action.canPrepare, action.current == nil,
+               let reason = action.reason, !reason.isEmpty {
                 Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1336,6 +1371,13 @@ private struct TaskAIActionSection: View {
             candidate = nil
             errorText = nil
         }
+    }
+
+    /// 一次性处理以「需要后续处理」收尾且复审要求改动时，下一步是评审修复。
+    private var followUpRepair: ReviewRepair? {
+        guard action.current == nil, action.history?.last?.state == "needs_followup" else { return nil }
+        guard let repair = detail.reviewRepair, repair.canStart else { return nil }
+        return repair
     }
 
     private func stateColor(_ entry: TaskAIActionEntry) -> Color {

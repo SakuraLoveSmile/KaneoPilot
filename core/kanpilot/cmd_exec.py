@@ -566,7 +566,7 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
             sent_at=None, session_id=None, session_title=None,
             **core.clear_block_fields(),
         )
-        if repair.get("source_kind") in ("merge_conflict", "build_failure"):
+        if repair.get("source_kind") in constants.AI_ACTION_KINDS:
             from . import task_ai_action
             task_ai_action.record_progress(conn, db.require_task(conn, task_id), util.to_iso(now),
                                            "running", execution_run_id=run_id)
@@ -1071,7 +1071,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         # this write lock, and the actual execution snapshot freezes at claim.
         repair = core.review_repair_of(task)
         execution_config = (repair["action_config"]
-                            if repair.get("source_kind") in ("merge_conflict", "build_failure")
+                            if repair.get("source_kind") in constants.AI_ACTION_KINDS
                             else exec_config.load(conn))
         verify_evidence.validate_execution_requirements(verification, execution_config.get("backend") or "pi")
         extra["plan_verify"] = {"plan_sha256": plan_sha, **({"commands": verification["commands"]} if verification["ok"] else {"error": verification["error"]})}
@@ -1255,7 +1255,7 @@ def cmd_register_review(ctx, payload: dict) -> dict:
             conn, db.require_task(conn, task["task_id"]), ctx.now_iso,
             **extra_entries,
         )
-        if conclusion == "pass" and action_fix.get("source_kind") in ("merge_conflict", "build_failure"):
+        if conclusion == "pass" and action_fix.get("source_kind") in constants.AI_ACTION_KINDS:
             task_ai_action.register_delivery_continuation(conn, db.require_task(conn, task["task_id"]),
                                                           ctx.now_iso, action_fix)
         db.add_event(

@@ -6,7 +6,7 @@ from . import (automation_policy, constants, core, db, exec_config, gh_client,
                git_delivery, project_config, runtime_operations, util)
 
 KIND = "merge_conflict"
-KINDS = (KIND, "build_failure", "check_failure")
+KINDS = constants.AI_ACTION_KINDS
 TITLE = "解决 PR 合并冲突"
 STATE_TITLES = {"queued": "AI 处理待启动", "running": "AI 正在处理", "awaiting_review": "处理后待复审",
                 "completed": "已完成", "needs_followup": "需要后续处理", "blocked": "受阻", "failed": "失败"}
@@ -62,6 +62,9 @@ def _base_gate(conn, task):
     if (not db.task_is_active(task) or task["status"] not in ("in_review", "needs_user")
             or task["stage"] not in ("review", "delivery") or delivery.get("mode") != "pr"
             or _extra(task).get("review_conclusion") != "pass"):
+        if _extra(task).get("review_conclusion") == "changes_requested":
+            # 本轮处理后的复审要求改动：下一步是评审修复，不是再开一次一次性处理。
+            return "本轮处理后的复审要求改动，请先完成评审修复"
         return "仅评审通过、等待 PR 交付的任务可启动处理"
     if not all(delivery.get(key) for key in ("pr_number", "branch", "worktree_path", "head_sha", "base_branch", "base_sha")):
         return "PR 或任务分支身份不完整"
@@ -185,7 +188,7 @@ def _prepare(ctx, task):
     git_delivery.verify_conflict_remote(dict(delivery, repository=task["repository"]),
                                        expected_repo=repo, target_base_sha=value["target_base_sha"])
     raw_config_sha256 = _digest(db.get_setting(ctx.conn, "exec_config"))
-    config = exec_config.snapshot(ctx.conn)
+    config = exec_config.snapshot_for_action(ctx.conn)
     util.require(config.get("backend") == "pi_desktop",
                  "冲突处理需要 Plus 的结构化验证报告；请在通用执行配置中选择 Plus 后重试", "conflict")
     available, reason = exec_config.check_available(ctx.conn, config_snapshot=config)
@@ -208,7 +211,8 @@ def _prepare(ctx, task):
 def _public_candidate(value):
     result = dict(task_id=value["task_id"], kind=value.get("source_kind", KIND), title=value.get("title", TITLE), context_sha256=value["action_context_sha256"],
                 config_sha256=value["action_config_sha256"], pr_number=value["pr_number"], branch=value["branch"],
-                base_branch=value["base_branch"], head_sha=value["head_sha"], base_sha=value["target_base_sha"],
+                base_branch=value["base_branch"], head_sha=value["head_sha"],
+                base_sha=value.get("target_base_sha") or value.get("base_sha"),
                 model_summary=value["model_summary"])
     if value.get("source_kind") == "build_failure":
         from . import task_ai_build_failure

@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from .. import cli, core, db, derive, util
+from .. import cli, constants, core, db, derive, util
 from . import decide, fallback, health, ladder, rounds, steps
 # Stages served by a spawned worker (runners.spawn). "plan" -> planner_runner.
 STAGES_WITH_WORKERS = ("dispatch", "monitor", "review", "delivery", "plan")
@@ -275,7 +275,7 @@ class Reconciler:
         """Choose a bounded new round; resolve commits accounting + enqueue atomically."""
         from . import verdict
         extra = db.task_extra(task)
-        if core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure"):
+        if core.review_repair_of(task).get("source_kind") in constants.AI_ACTION_KINDS:
             return None
         receipt = extra.get("engine_verdict")
         if (task["status"] != "needs_user" or task["failure_code"] != "verification_unconfirmed"

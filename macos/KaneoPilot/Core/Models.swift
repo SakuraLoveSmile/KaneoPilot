@@ -1236,6 +1236,23 @@ struct ExecCodexInfo: Decodable {
     let version: String?
 }
 
+/// protocol §5.27：一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）的模型覆盖。
+/// 空块或未返回 = 跟随通用执行配置；只覆盖 model_id / thinking_level。
+struct ExecOneShotConfig: Decodable, Equatable {
+    let modelId: String?
+    let thinkingLevel: String?
+
+    /// 提交用（空值不发送，避免核心收到空字符串）。
+    var fields: [String: String] {
+        var dict: [String: String] = [:]
+        if let modelId, !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dict["model_id"] = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let thinkingLevel, !thinkingLevel.isEmpty { dict["thinking_level"] = thinkingLevel }
+        return dict
+    }
+}
+
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
@@ -1249,13 +1266,16 @@ struct ExecConfig: Decodable, Equatable {
     let codex: ExecCodexConfig?
     /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
     let controllerBackend: String?
+    /// §5.27：一次性 AI 处理的模型覆盖（nil = 跟随通用执行配置）。
+    let oneShot: ExecOneShotConfig?
 
     init(provider: String? = nil, model: String? = nil,
          reasoningEffort: String? = nil, agentPreset: String? = nil,
          updatedAt: String? = nil, backend: String? = nil,
          piDesktop: ExecPiDesktopConfig? = nil,
          codex: ExecCodexConfig? = nil,
-         controllerBackend: String? = nil) {
+         controllerBackend: String? = nil,
+         oneShot: ExecOneShotConfig? = nil) {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -1265,6 +1285,7 @@ struct ExecConfig: Decodable, Equatable {
         self.piDesktop = piDesktop
         self.codex = codex
         self.controllerBackend = controllerBackend
+        self.oneShot = oneShot
     }
 
     /// 四字段字典（与核心 config_json 快照比较/提交用，键为协议 snake_case）。
@@ -3292,6 +3313,7 @@ struct TaskAIActionView: Decodable {
 
     var actionKind: String { kind ?? current?.kind ?? "merge_conflict" }
     var isBuildFailure: Bool { actionKind == "build_failure" }
+    var isCheckFailure: Bool { actionKind == "check_failure" }
 }
 
 struct TaskAIActionEntry: Decodable, Identifiable {
@@ -3332,8 +3354,18 @@ struct TaskAIActionCandidate: Decodable {
     let workflowRunId: Int?
     let workflowAttempt: Int?
     let workflowUrl: String?
+    let checkRuns: [TaskAIActionCheckRun]?
 
     var confirmationMessage: String {
+        if kind == "check_failure" {
+            let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
+            let names = (checkRuns ?? []).compactMap { run -> String? in
+                guard let name = run.name else { return nil }
+                return run.workflow.map { "\($0)/\(name)" } ?? name
+            }
+            let checks = names.isEmpty ? "合并门点名的失败检查" : names.joined(separator: "、")
+            return "修复失败的检查\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n检查：\(checks)\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。读取失败日志，只做让这些检查通过的最小改动；不重新规划，不删除或跳过检查。验证、复审通过后更新原 PR，并沿项目合并设置继续。"
+        }
         if kind == "build_failure" {
             let run = workflowRunId.map { "构建 #\($0)" } ?? "失败构建"
             let attempt = workflowAttempt.map { " · 第 \($0) 次运行" } ?? ""
@@ -3344,6 +3376,13 @@ struct TaskAIActionCandidate: Decodable {
         let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
         return "解决 PR 合并冲突\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。不重新规划，修复后验证并重新评审；通过后更新原 PR，并沿项目合并设置继续。"
     }
+}
+
+/// 冻结失败检查的公开身份（核心 task_ai_check_failure.PUBLIC）。
+struct TaskAIActionCheckRun: Decodable {
+    let name: String?
+    let workflow: String?
+    let conclusion: String?
 }
 
 struct PrepareTaskAIActionResponse: Decodable {

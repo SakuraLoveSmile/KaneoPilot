@@ -1807,7 +1807,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - candidate 沿用 task_id/kind/title/context_sha256/config_sha256/model_summary；branch/base_branch/head_sha/base_sha 为新修复身份，新 head 与 base 可同为冻结源码基线。新 PR 尚未创建，`pr_number=null`；另提供 `source_pr_number/source_pr_url/release_batch_id/release_tag/workflow_run_id/workflow_attempt/workflow_url`。冻结上下文分开保存 source_worktree_path/source_head_sha/source_delivery 与新工作树身份，旧执行终态按旧路径核验。配置使用通用执行设置的实际快照，只接受具备可信报告能力的 Plus 或 Codex CLI，不静默换模型。
 - `start-task-ai-action` 使用原候选与配置指纹、confirm=true；重新读取失败 attempt、日志及全部身份，事务内再核对任务、预算、暂停和未决操作。确认重放仅返回已有处理，不增加会话。原 delivery、release_ref 与已有 release_verification_ref 完整归档，原失败批次与补验证运行证明保留；新链移除旧补验证引用，独立核验本轮代码。新分支与独立工作树从冻结目标提交创建，先保存 runtime_operations 回执再做 Git 操作；本地尚无远端合并对象不阻塞只读预检，确认后由核心抓取冻结目标分支，抓取前后核对远端仍为该提交，不移动用户分支或覆盖已有目录/用户改动，不复活原已合并 PR。
 - 新执行只修复本次失败原因及必要关联问题，日志是待核对材料，不能扩大权限。不重新实施原计划；执行端运行全部冻结 verify 及必要专项检查，Pilot 只核对证据，不代跑验证。各引擎模式均要求结构化报告、原生命令退出码和源码快照；Plus 沿 §5.27.11，Codex CLI 沿 §5.31。验证后创建普通单父提交，必须重新 Review，不使用冲突处理的双父提交规则。
-- 复审通过后，确定性交付只为同次授权、精确新执行/评审/提交创建新的修复 PR。持久保存合并/发布确认门，即使项目开启 auto_merge_pr、后台轮询或应用重启也不得自动合并；用户之后手工合并，也不得据此自动开启新构建。再次发布走独立的发布预检与确认，不能把旧失败批次当成新批次重发。复审要求修改、验证失败、基线变化或结果未知均保留现场与历史，等待用户处理，不自动转换成普通 Review 付费修复。
+- 复审通过后，确定性交付只为同次授权、精确新执行/评审/提交创建新的修复 PR。持久保存合并/发布确认门，即使项目开启 auto_merge_pr、后台轮询或应用重启也不得自动合并；用户之后手工合并，也不得据此自动开启新构建。再次发布走独立的发布预检与确认，不能把旧失败批次当成新批次重发。复审要求修改、验证失败、基线变化或结果未知均保留现场与历史，等待用户处理，不自动转换成普通 Review 付费修复；界面只提供用户主动确认的评审修复入口。
 - 同次修复的新 PR 真实合并后，界面才允许单独准备并确认新发布；明确启动新批次后才能跟进该批次状态。正式版的 pending 守卫仅可在完整新交付证据成立时，排除该 action 精确绑定、被本次修复替代的原 failed 批次；其他未发布正式批次仍阻塞。连续失败仅沿逐条可信、同一项目/仓库/根任务且版本递增的修复前驱链解除历史占位，每个新失败批次仍须用户另行确认 AI 处理和发布。后继批次可信 published 后，核对其已接受回执、冻结上下文与发布证明，持续解除其可信前驱链的占位，允许其他任务正常准备后续正式版；后续普通任务不可凭尚未发布的后继或伪造关联解除占位。旧批次不改写、不弃用，旧版本/tag 不复用，新版本按现有历史与远端 inventory 递增并在确认中显示。
 - `get-task.task_ai_action.kind` 决定显示位置与预检类型；旧投影缺字段时界面按 merge_conflict 解释。构建修复的 current/history 沿同一状态词与会话入口；原已合并 PR 和失败构建仍可查看。旧批次在修复后作为历史证据，不允许同步操作以新任务身份改写原批次，投影 can_reconcile=false、is_historical=true；批量同步跳过所有已归档修复来源批次，继续处理当前运行批次。历史标记仅避免旧失败覆盖当前修复/复审/新 PR 状态，required=true 的发布完成门保留。无 schema migration，不改真实 Plus/Codex 数据。
 
@@ -1816,9 +1816,19 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 新增 `kind=check_failure`，仍在原任务启动，复用同一 PR 与分支，不创建二级任务、新 PR 或 plan 请求。用户确认授权一次失败日志诊断、最小代码修复、可信验证、复审与重新交付；不授权自动重试、自动合并或放宽检查。
 
 - 入口只由合并门当前观测决定：`delivery.auto_merge.state=blocked` 且原因以「检查未通过：」开头，说明本次提交确有 GitHub 失败的检查；`waiting_checks`、其他阻塞原因、已合并或关闭的 PR 不进入。同一提交已处理过一次时只显示处理记录，不再启动新的付费轮次。
-- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论、超限拒绝而不猜测或截断成假证据）。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
-- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单与失败日志；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
+- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论）。提示词只带「可点开的 run/job 链接 + 失败信号摘录」：摘录去通过行与时间戳噪声、保留失败行前后上下文、硬上限 12k 字符，超限标注截断，完整原文以链接为准；不猜测失败原因、不编造日志内容。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
+- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单（含 job 链接）与失败信号摘录；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
 - 证据、提交、复审与交付沿既有链：结构化 Goal 报告与源码快照、单父提交、必须重新 Review；通过后推送原 PR 分支并按项目自动合并策略重新核对检查。修复失败、检查漂移或结果未知保留现场，不自动再次调用模型。
+- 与其它一次性处理一致的身份约束：`prepare` 冻结 `target_base_sha` 为本次评审依据的交付基线提交（检查修复在原分支原地提交，不合并目标分支，因此交付 `base_sha` 不移动）；dispatch 领取按冻结的`action_config` 固化执行轮次；复审通过登记交付续接回执，`继续交付`与交付阶段只对这一精确执行/评审/提交放行。该轮不进入普通 Review 修复入口，失败也不自动启动引擎补救或新模型轮次。
+
+#### 一次性处理的模型选择（2026-11-19）
+
+三类一次性处理默认沿用「通用执行配置」；另可在 `settings.exec_config.one_shot` 单独指定
+`{model_id?, thinking_level?}`，只覆盖 Plus 分支的模型与思考等级，provider、连接文件与权限模式
+仍跟随通用配置。缺省该键或空对象 = 跟随通用配置；非 Plus 后端忽略该覆盖，不因它切换后端。
+`prepare-task-ai-action` 按覆盖生成 `action_config` 并冻结进候选，确认弹窗的模型摘要即本次实际使用
+的模型；之后修改设置只影响新候选，已确认轮次继续用冻结快照。只开放模型与思考等级，不开放切换后端。
+
 - `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
 
 #### 外部构建修复的关联
