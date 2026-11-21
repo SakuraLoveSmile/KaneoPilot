@@ -157,6 +157,7 @@ def attempt_summary(conn, task):
 
 def ordinary_summary(conn, task, blocked):
     """Local eligibility only; preparation still verifies the complete target."""
+    from . import review_risk
     extra = db.task_extra(task)
     delivery = core.delivery_of(task)
     history = extra.get('review_history') or []
@@ -183,7 +184,8 @@ def ordinary_summary(conn, task, blocked):
             or not all(isinstance(command, str) and command.strip() for command in commands)
             or delivery.get('mode') != 'pr' or delivery.get('pr_state') != 'MERGED'
             or type(delivery.get('pr_number')) is not int or not delivery.get('merged_at')
-            or extra.get('review_conclusion') != 'pass' or review.get('conclusion') != 'pass'
+            or (review_risk.identity(task) is None
+                and (extra.get('review_conclusion') != 'pass' or review.get('conclusion') != 'pass'))
             or not all(review.get(key) == task[column] for key, column in
                 (('execution_run_id', 'run_id'), ('review_key', 'review_key'),
                  ('report_sha256', 'review_report_sha256'), ('report_path', 'review_report_path')))

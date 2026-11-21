@@ -201,7 +201,8 @@ class DiscardTaskAIActionTest(DiscardFixture):
         # The dead end this command removes: the local head is not the PR head, so a rerun is refused.
         with pytest.raises(util.KanpilotError) as refused:
             cmd_rerun_checks.cmd_rerun_checks(self.ctx, {"task_id": self.task_id})
-        assert "PR 已变化" in refused.value.message
+        # KP-MG03 #1: the stale notice is refused before any GitHub read.
+        assert "旧提交" in refused.value.message
 
         with self.confirmed():
             result = self.discard(args)

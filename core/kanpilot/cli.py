@@ -230,6 +230,16 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "expected_restore_head_sha": (True, "str"), "expected_pr_head_sha": (True, "str"),
          "note": (False, "str|null"), "confirm": (True, "bool")},
         _automation_command("task_ai_discard", "cmd_discard_task_ai_action")),
+    # CLI-only：用户接受本轮评审的遗留风险，继续手动分支交付（KP-MG03 #4）。
+    "accept-review-risk": (
+        {"task_id": (True, "str"), "expected_review_key": (True, "str"),
+         "expected_report_sha256": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "note": (False, "str|null"),
+         "confirm": (True, "bool")},
+        _automation_command("review_risk", "cmd_accept_review_risk")),
+    "revoke-review-risk-acceptance": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"), "confirm": (True, "bool")},
+        _automation_command("review_risk", "cmd_revoke_review_risk_acceptance")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,

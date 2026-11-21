@@ -348,9 +348,11 @@ def projection(conn,task):
     related=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
     ids=sorted({root['task_id'],*(row['task_id'] for row in related)})
     def locally_ready(row):
+        from . import review_risk
         extra=db.task_extra(row);d=core.delivery_of(row)
+        authorized=extra.get('review_conclusion')=='pass' or review_risk.identity(row) is not None
         return (row['status'] in ('in_review','done') and db.task_is_active(row)
-            and extra.get('review_conclusion')=='pass' and bool(row['run_id'] and row['review_report_sha256'])
+            and authorized and bool(row['run_id'] and row['review_report_sha256'])
             and d.get('mode')=='pr' and bool(d.get('merged_at')) and not core.review_repair_of(row)
             and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (row['task_id'],)).fetchone())
@@ -462,12 +464,14 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
                              (task['task_id'],)).fetchone(),'release_request_active','当前任务仍有规划、执行或评审请求')
     hashes={};evidence=closeout._task_evidence(conn,task,hashes);extra=db.task_extra(task);d=core.delivery_of(task)
     history=extra.get('review_history') or [];review=history[-1] if history else {}
-    _require(extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass'
+    from . import review_risk
+    risk_accepted=review_risk.identity(task) is not None
+    _require(((extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass') or risk_accepted)
         and all(review.get(key)==task[column] for key,column in (('execution_run_id','run_id'),('review_key','review_key'),
              ('report_sha256','review_report_sha256'),('report_path','review_report_path')))
         and review.get('head_sha')==d.get('head_sha')
         and (evidence['exact_coverage'] or evidence.get('user_accepted') is True),
-        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过，以及逐字验证或明确人工接受的当前授权')
+        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过或明确接受遗留风险，以及逐字验证或人工接受的当前授权')
     closeout._report_bytes(task['review_report_path'],task['review_report_sha256'],hashes)
     repo=git_delivery.origin_github_repo(task['repository'])
     _require(repo and d.get('mode')=='pr' and type(d.get('pr_number')) is int,'release_pr_missing','发布需要同仓库已合并的 PR')

@@ -36,6 +36,24 @@ def test_gate_refuses_a_second_repair_of_the_same_head(case):
     assert "已安排过一次检查修复" in kind.gate(case.ctx.conn, case.task())
 
 
+def test_gate_allows_a_repair_after_the_previous_one_was_discarded(case):
+    blocked(case)
+    db.set_extra(case.ctx.conn, case.task(), case.ctx.now_iso,
+                 ai_action_history=[{"kind": kind.KIND, "head_sha": case.delivery["head_sha"],
+                                     "state": "discarded"}])
+    assert kind.gate(case.ctx.conn, case.task()) is None
+
+
+def test_gate_still_refuses_when_another_same_head_action_is_live(case):
+    blocked(case)
+    db.set_extra(case.ctx.conn, case.task(), case.ctx.now_iso,
+                 ai_action_history=[{"kind": kind.KIND, "head_sha": case.delivery["head_sha"],
+                                     "state": "discarded"},
+                                    {"kind": kind.KIND, "head_sha": case.delivery["head_sha"],
+                                     "state": "needs_followup"}])
+    assert "已安排过一次检查修复" in kind.gate(case.ctx.conn, case.task())
+
+
 def test_failing_checks_keep_run_and_job_identity():
     rollup = [
         {"__typename": "CheckRun", "name": "analyze-test", "workflowName": "app-ci",

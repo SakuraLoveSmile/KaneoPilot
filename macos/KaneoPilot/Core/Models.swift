@@ -334,6 +334,7 @@ struct TaskSummary: Decodable, Identifiable {
     let release: TaskRelease?
     let parentCloseout: ParentCloseout?
     let reviewRepair: ReviewRepair?
+    let reviewRisk: ReviewRisk?
     let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
@@ -571,6 +572,7 @@ struct TaskDetail: Decodable, Identifiable {
     let parentCloseout: ParentCloseout?
     let taskAiAction: TaskAIActionView?
     let reviewRepair: ReviewRepair?
+    let reviewRisk: ReviewRisk?
     let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
@@ -3266,6 +3268,16 @@ struct PRAutoMergeDTO: Decodable {
     let updatedAt: String?
     var needsAttention: Bool { ["blocked", "unknown"].contains(state) }
 }
+/// KP-MG03 #4：用户接受本轮评审遗留风险的只读回执。
+struct ReviewRisk: Decodable, Equatable {
+    let authorizedAt: String?
+    let note: String
+    let headSha: String?
+    let reviewKey: String?
+    let findings: [String]
+    let findingsCount: Int
+}
+
 struct ReviewRepair: Decodable, Equatable {
     let state: String
     let title: String

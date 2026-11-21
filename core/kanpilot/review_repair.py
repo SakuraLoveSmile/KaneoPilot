@@ -11,6 +11,10 @@ IDENTITY = {
 
 
 def candidate(task):
+    from . import review_risk
+    if review_risk.acceptance(task) is not None:
+        # 用户已接受本轮遗留风险：交付链接管，不再提供修复入口（KP-MG03 #4）。
+        return None
     value = core.review_repair_of(task)
     if value:
         return value

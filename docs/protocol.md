@@ -1842,6 +1842,16 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - 第⑤步复用既有 `engine-verdict`（不带请求）重新核对来源执行轮次的完整验证证据，并用 `verdict.valid_committed_receipt` 复核；结果 `verdict.state` 为 `confirmed`、`unconfirmed` 或 `failed`。评审本身不依赖该回执；它是发布证明与继续交付所需，未确认时用同一参数再次调用即可，已放弃的动作只重试这一步。再次调用不重复建引用、评审或事件；任务已离开恢复后的提交时拒绝。
 - 之后：失败检查可立即 `rerun-checks`（交付 head 又等于 PR head）。新评审通过后任务停在 `in_review`，等用户重新点「继续交付」：旧的「继续交付」授权绑定的是旧评审与证据身份，放弃后即失效。为此 `review_delivery` 增加一种候选，同时满足才成立——手动任务；`delivery.mode=pr`、PR 已存在且未合并，`head_sha==pushed_sha==` 最后一条动作（须为 `discarded`）的 `restore_head_sha`；无 `task_ai_action_delivery`、无活动修复；`review_history` 最新一条是未标记 `discarded` 的 pass，且其前有被该动作标记的评审（证明这条 pass 产生于放弃之后）——并且当前没有有效手动交付回执、没有排队或领取中的请求，此时任务显示「待 PR 交付」（说明文字为复用已有 PR），`allowed_actions` 首位是 `continue_delivery`。评审结算对这种任务不走 `advance-task done`（PR 未合并，本地不能完成），保持 `in_review` 等用户确认。`continue_delivery` 本身不变：必须由用户发起，逐条核对验证通过证据（含放弃时重新核对的 `engine_verdict`）、评审报告字节、干净工作树与 Kaneo 远端，再写入绑定新评审与证据身份的手动交付回执并为已有 PR 入队 delivery 请求；之后的 PR 核对、合并门与发布门与普通手动 PR 交付相同。放弃之后再启动新的 AI 处理会使这条候选失效（最后一条动作不再是已放弃）。选评审材料的上一轮评审时跳过带 `discarded` 标记的条目；macOS 对动作状态按字符串比较，未知值走默认色；不改 Kaneo 远端（任务远端状态仍是 in-review）。
 
+#### 接受遗留风险并交付（2026-11-20）
+
+评审坚持 `changes_requested`、修复轮用尽、但用户判断剩余问题可接受时，可用手动确认的 CLI 出口继续交付。v1 只覆盖尚未创建 PR 的手动分支交付；PR 模式的死局仍走「放弃一次性处理」。
+
+- `accept-review-risk {task_id,expected_review_key,expected_report_sha256,expected_head_sha,expected_plan_sha256,confirm:true,note?}`；`revoke-review-risk-acceptance {task_id,expected_head_sha,confirm:true}`。均为 CLI-only，不进入 `resolve`，不写 `runtime_operations`（无外发副作用），事件 `review_risk_accepted` / `review_risk_acceptance_revoked`。
+- 前置，任一不满足即拒绝且库与工作树不变：手动任务（无 automation）、未人工接管或暂停、`in_review/review`、`changes_requested`、存在 held 的 direct 修复且不属于一次性处理、无排队或领取中的请求、仓库映射有效、执行轮次已成功收尾、`delivery.mode=manual` 且无 PR/pushed/merged/stage_contracts、发布策略启用、工作树干净且 head 等于期望值、本轮评审请求已成功结算。
+- 写入 `extra.review_risk_acceptance`：用户身份与时间、note（≤500 字）、任务与分支身份快照、`review_key/report_path/report_sha256/head_sha/plan_sha256/requirements_sha256/execution_run_id/fix_round`、评审请求与结果摘要、从本轮 fix 提炼的 findings、evidence 摘要、自校验 id；同时移除本轮 `fix_request`（评审历史与报告字节不变）。同 head 重复调用幂等。
+- 授权在任一身份漂移时自动失效：head、报告路径或哈希、plan、需求快照、run_id、修复轮次、出现新的 `fix_request`、evidence 摘要变化。`get-task` 投影 `review_risk`（时间、note、findings）。
+- 交付：`review_delivery` 的评审身份取「pass 或有效风险接受」；`allowed_actions` 首位出现 `continue_delivery`，仍须用户显式发起。`review_delivery`、`cmd_delivery_pr` 与发布预检（`release_delivery._single_proof`、`release_verification`）认同一风险身份；逐字验证证据仍须满足，完成门与自动合并策略不变。撤销后回到原先 blocked 的修复态。
+
 #### 处理后评审的收敛准则（2026-11-20）
 
 一次性处理与随后的修复轮容易形成「评审加码 ↔ 修复加机制」的正反馈：评审看不到处理目标，每轮都能在并发等交错路径上「确定」新缺陷，修复方为避免被打回追加机制，新机制又带来新的交错面。本节只约束评审与修复提示，不改结论枚举与结算 schema。

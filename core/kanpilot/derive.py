@@ -626,7 +626,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     board_column = task_board_column(task, conn, now)
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
-    from . import core, automation_policy, review_repair, task_ai_action
+    from . import core, automation_policy, review_repair, review_risk, task_ai_action
     automation = core.automation_of(task)
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
@@ -640,6 +640,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "question_preview": question_preview(question),
         "automation": automation or None,
         "review_repair": review_repair.view(conn, task, now),
+        "review_risk": review_risk.projection(task),
         "task_ai_action": task_ai_action.projection(conn, task, now),
         "delivery": task_delivery_view(task),
         "release": _release(conn, task),
@@ -850,9 +851,12 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             # Cheap, storage-driven offer: the merge gate already names a failed
             # check, so one explicit rerun of those jobs is available.
             from . import core as core_module
-            notice = core_module.delivery_of(task).get("auto_merge") or {}
+            delivery = core_module.delivery_of(task)
+            notice = delivery.get("auto_merge") or {}
+            # 通知可能来自更早的交付头；那时重跑会因 PR head 不符被拒（KP-MG03 #1）。
             if (core_module.is_pr_delivery(task) and notice.get("state") == "blocked"
-                    and str(notice.get("reason") or "").startswith("检查未通过：")):
+                    and str(notice.get("reason") or "").startswith("检查未通过：")
+                    and notice.get("head_sha") == delivery.get("head_sha")):
                 actions.append("rerun_checks")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")

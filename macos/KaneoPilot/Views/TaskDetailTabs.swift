@@ -591,7 +591,8 @@ struct TaskReviewTabView: View {
     var onOpenSession: (() -> Void)? = nil
 
     private var hasReview: Bool {
-        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewReportPath != nil || detail.fixTaskId != nil
+        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewRisk != nil
+            || detail.reviewReportPath != nil || detail.fixTaskId != nil
             || detail.reviewKey != nil || detail.reviewConclusion != nil
             || detail.reviewSummary?.conclusion != nil
             || detail.reviewSummary?.reportPath != nil
@@ -625,6 +626,21 @@ struct TaskReviewTabView: View {
                         } else if let repair = detail.reviewRepair {
                             ReviewRepairSection(taskID: detail.taskId, repair: repair,
                                                 readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
+                        } else if let risk = detail.reviewRisk {
+                            TaskDetailTabSection(title: "已接受遗留风险") {
+                                VStack(alignment: .leading, spacing: Spacing.s) {
+                                    Text("用户已确认接受本轮评审的 \(risk.findingsCount) 项遗留风险，继续交付不再等待评审通过。")
+                                        .font(.kpBody)
+                                    if !risk.note.isEmpty {
+                                        Text(risk.note).font(.kpSmall)
+                                            .foregroundStyle(Color.kpSecondary)
+                                    }
+                                    if let at = risk.authorizedAt {
+                                        Text("接受于 \(TimeFormat.fullString(at))").font(.kpSmall)
+                                            .foregroundStyle(Color.kpSecondary)
+                                    }
+                                }
+                            }
                         }
                         TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
                             HStack(spacing: Spacing.m) {

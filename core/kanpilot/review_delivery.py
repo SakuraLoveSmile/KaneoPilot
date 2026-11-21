@@ -13,6 +13,7 @@ _TASK_KEYS = ('task_id', 'project_id', 'repository', 'requirements_sha256',
               'review_report_path', 'review_report_sha256')
 _BRANCH_KEYS = ('workspace_version', 'branch', 'worktree_path', 'base_branch', 'base_sha', 'head_sha')
 WAITING_REASON = '正式评审已通过；继续交付将复用已有报告，创建 PR 并推进合并和已配置的构建发布'
+RISK_ACCEPTED_REASON = '用户已接受本轮评审的遗留风险；继续交付将沿用当前评审材料，创建 PR 并推进合并和已配置的构建发布'
 EXISTING_PR_REASON = '已放弃 AI 处理并重新评审通过；继续交付将复用已有 PR，核对检查后推进合并和已配置的构建发布'
 _DELIVERY_ENVIRONMENT_CODES = ('gh_missing', 'gh_not_logged_in', 'gh_timeout', 'gh_unavailable')
 # A long-blocked merge gate has the same shape: the reviewed identity is intact
@@ -60,7 +61,11 @@ def discarded_pr_delivery(task):
 
 
 def waiting_reason(task):
-    return EXISTING_PR_REASON if discarded_pr_delivery(task) else WAITING_REASON
+    if discarded_pr_delivery(task):
+        return EXISTING_PR_REASON
+    if _risk_identity(task) is not None:
+        return RISK_ACCEPTED_REASON
+    return WAITING_REASON
 
 
 def _digest(value):
@@ -104,6 +109,16 @@ def _pass(task):
                        for c in delivery.get('commits') or [])):
         return None
     return identity
+
+
+def _risk_identity(task):
+    """A valid user risk acceptance stands in for the pass of this exact review (KP-MG03 #4)."""
+    from . import review_risk
+    return review_risk.identity(task)
+
+
+def _delivery_identity(task):
+    return _pass(task) or _risk_identity(task)
 
 
 def _review_request(conn, task, identity):
@@ -168,7 +183,7 @@ def candidate(conn, task):
             or conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') LIMIT 1",
                             (task['task_id'],)).fetchone()):
         return None
-    identity = _pass(task)
+    identity = _delivery_identity(task)
     if identity is None:
         return None
     request = _review_request(conn, task, identity)
@@ -205,7 +220,7 @@ def continuation(task, *, allow_paused=False, allow_delivery_block=False):
             or core.review_repair_of(task) or delivery.get('mode') != 'pr'
             or receipt.get('task') != {key: task[key] for key in _TASK_KEYS}
             or receipt.get('branch') != {key: delivery.get(key) for key in _BRANCH_KEYS}
-            or receipt.get('review_identity') != _pass(task)
+            or receipt.get('review_identity') != _delivery_identity(task)
             or receipt.get('goal_acceptance_sha256') != (extra.get('goal_acceptance') or {}).get('acceptance_sha256')
             or receipt.get('evidence_identity') != _digest({key: extra.get(key) for key in
                    ('engine_verdict', 'plan_verify', 'review_history')})
@@ -334,7 +349,7 @@ def continue_delivery(ctx, payload):
         fresh = db.require_task(ctx.conn, task['task_id'])
         util.require(_snapshot(ctx.conn, fresh) == snapshot and candidate(ctx.conn, fresh) == expected,
                      '核对期间任务、评审或交付身份已变化', 'conflict')
-        extra, identity = db.task_extra(fresh), _pass(fresh)
+        extra, identity = db.task_extra(fresh), _delivery_identity(fresh)
         review = _review_request(ctx.conn, fresh, identity)
         receipt = _failed_delivery(ctx.conn, fresh)
         if receipt is None:
