@@ -348,14 +348,20 @@ def projection(conn,task):
     related=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
     ids=sorted({root['task_id'],*(row['task_id'] for row in related)})
     def locally_ready(row):
-        from . import review_risk
+        from . import review_risk, followup_closeout
         extra=db.task_extra(row);d=core.delivery_of(row)
-        authorized=extra.get('review_conclusion')=='pass' or review_risk.identity(row) is not None
-        return (row['status'] in ('in_review','done') and db.task_is_active(row)
-            and authorized and bool(row['run_id'] and row['review_report_sha256'])
-            and d.get('mode')=='pr' and bool(d.get('merged_at')) and not core.review_repair_of(row)
-            and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
+        active=bool(conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (row['task_id'],)).fetchone())
+        if active or not db.task_is_active(row) or core.review_repair_of(row):
+            return False
+        # KP-MG06：人工确认收口的二级任务，其修复已由另一条 PR 落在目标分支；
+        # 它没有自己的 delivery 记录，只以 done + 收口回执作为合并与验证证据。
+        if followup_closeout.settled(row):
+            return row['status']=='done'
+        authorized=extra.get('review_conclusion')=='pass' or review_risk.identity(row) is not None
+        return (row['status'] in ('in_review','done')
+            and authorized and bool(row['run_id'] and row['review_report_sha256'])
+            and d.get('mode')=='pr' and bool(d.get('merged_at')))
     waiting=(bool(closeout._local(conn,root,software_ready=True)['blockers']) or any(not locally_ready(row) for row in related)
              if related else not locally_ready(root))
     state='waiting_group' if waiting else 'ready'

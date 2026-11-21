@@ -246,6 +246,12 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "title": (True, "str"), "description": (False, "str|null"),
          "priority": (False, "str|null"), "confirm": (True, "bool")},
         _automation_command("followup_task", "cmd_create_followup_task")),
+    # KP-MG06：二级任务的人工确认收口（只读核对目标分支内容后写回执并置 done）。
+    "confirm-followup-closeout": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "pr_number": (False, "int"), "note": (False, "str|null"),
+         "confirm": (True, "bool")},
+        _automation_command("followup_closeout", "cmd_confirm_followup_closeout")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,

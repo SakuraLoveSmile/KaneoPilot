@@ -892,6 +892,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         actions = [action for action in actions if action not in
                    ("retry", "enqueue", "recover_review", "resolve_review_blocker", "mark_done")]
         actions.insert(0, "continue_delivery")
+    # KP-MG06：二级任务已由另一条 PR 落地时，人工确认收口是唯一出口——
+    # 发布门要求本任务自己的评审通过与 PR 记录，缺一条就永远等下去。
+    from . import followup_closeout
+    if followup_closeout.candidate(conn, task, now) is not None and "confirm_closeout" not in actions:
+        actions.insert(0, "confirm_closeout")
     return actions
 
 
