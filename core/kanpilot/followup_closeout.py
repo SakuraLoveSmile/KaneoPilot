@@ -120,6 +120,8 @@ def cmd_confirm_followup_closeout(ctx, payload):
         extra = db.task_extra(fresh)
         record = dict(receipt, verified_at=ctx.now_iso, actor="user", note=note)
         extra["followup_closeout"] = record
+        # 任务已终态：收口前留着的 held 修复记录不再是意图，避免发布门把它当成进行中的修复。
+        extra.pop("fix_request", None)
         fields = core.clear_block_fields()
         fields["resolution"] = {"action": "confirm_closeout", "actor": "user", "at": ctx.now_iso,
                                 "head_sha": receipt["head_sha"], "base_branch": receipt["base_branch"],
