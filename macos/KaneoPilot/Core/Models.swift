@@ -3589,6 +3589,20 @@ struct CloseoutParentTaskResponse: Decodable {
     let parentCloseout: ParentCloseout
 }
 
+/// KP-MG06：二级任务人工确认收口的回执（只取核对身份与结果状态）。
+struct FollowupCloseoutResponse: Decodable {
+    let ok: Bool
+    let taskId: String
+    let status: String
+    let closeout: FollowupCloseoutReceipt
+}
+struct FollowupCloseoutReceipt: Decodable {
+    let headSha: String
+    let baseBranch: String
+    let baseTip: String
+    let reviewedPaths: [String]
+}
+
 // MARK: - Deterministic GitHub Actions release (§5.27.19)
 struct ProjectReleasePolicy: Decodable {
     let enabled: Bool?

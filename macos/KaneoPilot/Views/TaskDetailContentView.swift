@@ -1188,6 +1188,11 @@ struct TaskOverviewTabView: View {
                     Task {
                         if action == "cancel-request", let requestID = detail.queuedPlanRequestId {
                             await model.cancelPlan(requestID: requestID, taskID: detail.taskId)
+                        } else if action == "confirm_closeout" {
+                            await model.confirmFollowupCloseout(
+                                taskID: detail.taskId,
+                                headSHA: detail.delivery?.headSha ?? "",
+                                prNumber: detail.delivery?.prNumber)
                         } else {
                             await model.resolve(taskID: detail.taskId, action: action, expectedExecutionRunID: confirm.expectedExecutionRunID)
                         }
@@ -1606,6 +1611,10 @@ struct TaskOverviewTabView: View {
                 }
             }
             .disabled(model.busy)
+        case "confirm_closeout":
+            Button("确认收口") { confirm = .confirmCloseout }
+                .disabled(model.busy || detail.delivery?.headSha == nil)
+                .help("只读核对已评审改动的每条路径是否已在目标分支上一致；通过后把此二级任务置为完成。")
         case "closeout_parent":
             Button(model.actionInFlight == "收尾校验" ? "正在核对…" : detail.parentCloseout?.actionLabel ?? "校验并完成") {
                 guard let closeout = detail.parentCloseout else { return }

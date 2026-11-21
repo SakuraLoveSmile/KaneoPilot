@@ -1862,6 +1862,16 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - 关系沿用既有父子投影（`task_relations`、`parent_closeout`）；`external_build_repair` 明确拒绝带 `review_source_task_id` 的任务，二级任务不走该通道。
 - 回灌不在本命令内：子任务修复在目标分支合并后，来源任务分支以「冻结交付提交 + 目标分支 tip」的合并提交前进，再 `rebind-delivery-head` 重建交付请求；不能用 rebase/cherry-pick 重写冻结提交。
 
+#### 二级任务的人工确认收口（2026-11-21）
+
+二级任务可能在修复轮用尽后停在 `changes_requested`，而它的修复已由另一条 PR 落在目标分支；该任务自己的 delivery 记录永远不会出现，父任务的发布批次因此一直等「合并和验证证据」。核心提供显式的人工确认收口，但只读核对先行，绝不把「用户确认」写成评审通过。
+
+- `confirm-followup-closeout {task_id,expected_head_sha,pr_number?,note?,confirm:true}`。仅在 `review_source_task_id` 非空、任务活跃、`status∈{in_review,needs_user}`、`stage∈{review,delivery}`、`delivery.mode=pr` 且尚未合并、`extra.followup_closeout` 为空、无 queued/claimed 请求时提供；`TaskDetail.allowed_actions` 追加 `confirm_closeout`。
+- 核对（任何写之前）：工作树归属、分支与 HEAD 等于冻结交付提交、无可提交残留；`git fetch origin` 后取 `origin/<base_branch>` tip；冻结交付 `base_sha..head_sha` 的每条改动路径，在该 tip 与冻结提交上的 blob 必须完全一致（证明已评审内容已在目标分支上）。任一漂移即 `conflict`，不写任何状态。
+- `pr_number` 可选：给出时以只读 `pr_view` 核对 `state=MERGED` 且 `baseRefName` 等于目标分支，回执记录 PR 编号、地址、合并提交与合并时间；未给出时回执只记录基底 tip 与路径核验。
+- 回执写 `extra.followup_closeout = {verified_at,actor,note,head_sha,base_branch,base_tip,reviewed_paths,pr_number?,pr_url?,merge_commit?,merged_at?}`，`resolution.action=confirm_closeout`，事件 `followup_closeout_confirmed`，任务转 `done`；不写 `review_conclusion`、不伪造报告哈希，评审历史保持原样。
+- 发布门：`release_delivery` 的成员判定把「`status=done` 且回执有效」的二级任务视为合并证据已确认，父任务据此可继续准备发布批次；父任务完成仍走收尾校验，不因回执自动完成。
+
 #### 处理后评审的收敛准则（2026-11-20）
 
 一次性处理与随后的修复轮容易形成「评审加码 ↔ 修复加机制」的正反馈：评审看不到处理目标，每轮都能在并发等交错路径上「确定」新缺陷，修复方为避免被打回追加机制，新机制又带来新的交错面。本节只约束评审与修复提示，不改结论枚举与结算 schema。
