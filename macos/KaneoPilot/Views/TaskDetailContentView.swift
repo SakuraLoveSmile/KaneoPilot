@@ -1194,7 +1194,6 @@ struct TaskOverviewTabView: View {
                         } else if action == "confirm_closeout" {
                             await model.confirmFollowupCloseout(
                                 taskID: detail.taskId,
-                                headSHA: detail.delivery?.headSha ?? "",
                                 prNumber: detail.delivery?.prNumber)
                         } else {
                             await model.resolve(taskID: detail.taskId, action: action, expectedExecutionRunID: confirm.expectedExecutionRunID)

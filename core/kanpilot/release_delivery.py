@@ -352,17 +352,25 @@ def projection(conn,task):
         extra=db.task_extra(row);d=core.delivery_of(row)
         active=bool(conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (row['task_id'],)).fetchone())
-        if active or not db.task_is_active(row) or core.review_repair_of(row):
+        if active or not db.task_is_active(row):
             return False
         # KP-MG06：人工确认收口的二级任务，其修复已由另一条 PR 落在目标分支；
         # 它没有自己的 delivery 记录，只以 done + 收口回执作为合并与验证证据。
+        # 收口回执先于 repair 判定：收口前留着的 held 修复记录不构成新的意图。
         if followup_closeout.settled(row):
             return row['status']=='done'
+        if core.review_repair_of(row):
+            return False
         authorized=extra.get('review_conclusion')=='pass' or review_risk.identity(row) is not None
         return (row['status'] in ('in_review','done')
             and authorized and bool(row['run_id'] and row['review_report_sha256'])
             and d.get('mode')=='pr' and bool(d.get('merged_at')))
-    waiting=(bool(closeout._local(conn,root,software_ready=True)['blockers']) or any(not locally_ready(row) for row in related)
+    # 收尾周期的阻塞项只对「原始任务处于待修复评审」的链路成立；评审已通过的原始任务
+    # 配上二级任务（followup）时，那些 review_cycle_missing/unbound_child 只是口径不符，
+    # 不能把发布门永久钉在等待状态。成员是否具备合并与验证证据仍由 locally_ready 判定。
+    cycle = db.task_extra(root).get('review_conclusion') == 'changes_requested'
+    blockers = closeout._local(conn, root, software_ready=True)['blockers'] if cycle else []
+    waiting=(bool(blockers) or any(not locally_ready(row) for row in related)
              if related else not locally_ready(root))
     state='waiting_group' if waiting else 'ready'
     title='等待关联修复' if waiting else '待构建发布'
