@@ -74,11 +74,25 @@ class FollowupCloseout(KanpilotTestCase):
         row = db.require_task(self.ctx.conn, self.task_id)
         self.assertEqual(db.task_extra(row)["followup_closeout"]["head_sha"], advanced)
 
-    def test_identity_mismatch_is_refused(self):
+    def test_earlier_delivery_head_is_accepted_after_the_branch_advanced(self):
+        # 界面传的是交付头（收尾提交之后它就退化成祖先）；只要分支没被重写就应当放行。
+        (self.worktree / "a.txt").write_text("two\npolish\n", encoding="utf-8")
+        git(self.worktree, "commit", "-am", "polish")
+        advanced = git(self.worktree, "rev-parse", "HEAD")
+        (self.repo / "a.txt").write_text("two\npolish\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "polish on target")
+        git(self.repo, "push", "origin", "main")
+        result = followup_closeout.cmd_confirm_followup_closeout(
+            self.ctx, self.payload(expected_head_sha=self.head_sha))
+        self.assertEqual(result["status"], "done")
+        row = db.require_task(self.ctx.conn, self.task_id)
+        self.assertEqual(db.task_extra(row)["followup_closeout"]["head_sha"], advanced)
+
+    def test_foreign_commit_is_refused(self):
         with self.assertRaises(util.KanpilotError) as caught:
             followup_closeout.cmd_confirm_followup_closeout(
                 self.ctx, self.payload(expected_head_sha="0" * 40))
-        self.assertIn("分支头", str(caught.exception))
+        self.assertIn("不属于本任务分支", str(caught.exception))
         self.assertEqual(db.require_task(self.ctx.conn, self.task_id)["status"], "in_review")
 
     def test_candidate_and_allowed_action(self):

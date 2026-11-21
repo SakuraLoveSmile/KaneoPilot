@@ -729,11 +729,11 @@ final class AppViewModel: ObservableObject {
 
     /// KP-MG06：二级任务的人工确认收口。核心只读核对已评审内容是否已在目标
     /// 分支，通过后才把任务置为完成；这里只负责传身份与展示结果。
-    func confirmFollowupCloseout(taskID: String, headSHA: String, prNumber: Int? = nil, note: String? = nil) async {
+    func confirmFollowupCloseout(taskID: String, prNumber: Int? = nil, note: String? = nil) async {
         await perform("确认收口", successToast: "已确认收口，任务转为完成") {
-            var payload: [String: Any] = [
-                "task_id": taskID, "expected_head_sha": headSHA, "confirm": true
-            ]
+            // 不传交付头：收尾提交会让分支头前进，身份以核心读取的工作树 HEAD 为准，
+            // 交付头只在任务详情里展示（KP-MG06）。
+            var payload: [String: Any] = ["task_id": taskID, "confirm": true]
             if let prNumber { payload["pr_number"] = prNumber }
             if let note, !note.isEmpty { payload["note"] = note }
             let response = try await self.client.run("confirm-followup-closeout",

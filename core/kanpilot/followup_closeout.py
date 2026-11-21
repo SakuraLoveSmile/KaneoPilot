@@ -67,7 +67,14 @@ def prove(task, *, pr_number=None, expected_head=None, timeout=120):
         git_delivery._git(["fetch", "--prune", "origin"], worktree, timeout)
     except git_delivery.GitDeliveryError as exc:
         raise util.KanpilotError("conflict", "工作树或远端不满足收口条件：" + exc.message) from exc
-    util.require(expected_head in (None, head), "分支头与确认的提交不符，请刷新后重试", "conflict")
+    if expected_head:
+        # 调用方可能传入更早的交付头（收尾提交会让分支头前进）；只要它仍是本分支祖先，
+        # 身份就没有变化——分支被重写时 is-ancestor 会失败并拒绝。
+        try:
+            confirmed = git_delivery._value(["rev-parse", expected_head + "^{commit}"], worktree)
+            git_delivery._git(["merge-base", "--is-ancestor", confirmed, head], worktree, 30)
+        except git_delivery.GitDeliveryError as exc:
+            raise util.KanpilotError("conflict", "确认的提交不属于本任务分支，请刷新后重试") from exc
     try:
         base_tip = git_delivery._value(["rev-parse", "origin/" + base + "^{commit}"], worktree)
     except git_delivery.GitDeliveryError as exc:
