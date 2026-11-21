@@ -248,7 +248,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         _automation_command("followup_task", "cmd_create_followup_task")),
     # KP-MG06：二级任务的人工确认收口（只读核对目标分支内容后写回执并置 done）。
     "confirm-followup-closeout": (
-        {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+        {"task_id": (True, "str"), "expected_head_sha": (False, "str|null"),
          "pr_number": (False, "int"), "note": (False, "str|null"),
          "confirm": (True, "bool")},
         _automation_command("followup_closeout", "cmd_confirm_followup_closeout")),
