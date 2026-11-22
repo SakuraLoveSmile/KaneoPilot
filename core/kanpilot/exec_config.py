@@ -161,6 +161,23 @@ def load(conn: sqlite3.Connection) -> dict:
     return config
 
 
+def _apply_magpie_model(snapshot: dict) -> dict:
+    """Magpie 接管（§5.33）：Codex 执行的模型跟随 Magpie Agents 页。
+
+    只替换模型 id 并标注来源，思考等级与沙箱仍是 KaneoPilot 自己的选择；
+    接管未生效时原样返回。
+    """
+    from . import magpie_agent
+
+    model_id = magpie_agent.model_override()
+    if not model_id:
+        return snapshot
+    result = dict(snapshot)
+    result["model"] = model_id
+    result["model_source"] = "magpie"
+    return result
+
+
 def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -> dict:
     """轮次固化快照（§5.17.3/§5.23.3 / T7.1 / T7.3）：按当前 backend 固化所选分支，
     不含 updated_at/token。旧轮次缺 backend 按 "pi" 读。
@@ -178,8 +195,13 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
         error = codex_execution.validate_config(block)
         if error:
             raise util.KanpilotError("validation_failed", f"Codex 执行配置无效：{error}")
-        return {"backend": "codex", **block, "sandbox": block.get("sandbox", "workspace-write"),
-                "execution_question_max_wait_seconds": config.get("execution_question_max_wait_seconds", constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS)}
+        return _apply_magpie_model({
+            "backend": "codex", **block,
+            "sandbox": block.get("sandbox", "workspace-write"),
+            "execution_question_max_wait_seconds": config.get(
+                "execution_question_max_wait_seconds",
+                constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS),
+        })
     if backend == "pi_desktop":
         block = config.get("pi_desktop")
         if block is None and all(config.get(k) is not None for k in ("connection_file", "provider_id", "model_id")):

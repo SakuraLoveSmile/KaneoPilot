@@ -132,6 +132,27 @@ class MagpieAgentTest(unittest.TestCase):
             {"model": "auto", "reasoning_effort": "inherit"}, "qoder")
         self.assertEqual(qoder, {"model": "auto", "reasoning_effort": "inherit"})
 
+    def test_execution_snapshot_model_override(self):
+        from kanpilot import exec_config
+
+        self.activate({"baseURL": "http://127.0.0.1:3425/v1",
+                       "model": "auto/deepseek-v4.1-flash"})
+        snapshot = exec_config._apply_magpie_model(
+            {"backend": "codex", "model": "gpt-6.1-sol",
+             "reasoning_effort": "high", "sandbox": "workspace-write"})
+        self.assertEqual(snapshot["model"], "auto/deepseek-v4.1-flash")
+        self.assertEqual(snapshot["model_source"], "magpie")
+        self.assertEqual(snapshot["reasoning_effort"], "high")
+        self.assertEqual(snapshot["sandbox"], "workspace-write")
+
+    def test_execution_snapshot_untouched_without_takeover(self):
+        from kanpilot import exec_config
+
+        with mock.patch.dict(os.environ, {magpie_agent.ENV_PATH: str(self.path)}):
+            snapshot = exec_config._apply_magpie_model(
+                {"backend": "codex", "model": "gpt-6.1-sol"})
+        self.assertEqual(snapshot, {"backend": "codex", "model": "gpt-6.1-sol"})
+
     def test_planner_model_untouched_without_takeover(self):
         with mock.patch.dict(os.environ, {magpie_agent.ENV_PATH: str(self.path)}):
             snapshot = planner_config._apply_magpie(
