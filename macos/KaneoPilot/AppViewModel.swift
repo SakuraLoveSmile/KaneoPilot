@@ -727,6 +727,27 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// KP-MG06：补验证卡在「发送未知 / provider 已移除」时的两条恢复动作。
+    func rebindReleaseVerification(taskID: String, onError: ((String) -> Void)? = nil) async {
+        await perform("重绑验证", successToast: "已重绑到当前执行配置，可重新准备验证", onError: onError) {
+            _ = try await self.client.run("rebind-release-verification",
+                                          payload: ["task_id": taskID, "confirm": true],
+                                          timeout: 120, as: OkResponse.self)
+            return nil
+        }
+    }
+
+    func resetReleaseVerification(taskID: String, verificationID: String, contextSHA256: String,
+                                  onError: ((String) -> Void)? = nil) async {
+        await perform("重置验证", successToast: "已重置这次补验证，可重新准备", onError: onError) {
+            _ = try await self.client.run("reset-release-verification", payload: [
+                "task_id": taskID, "verification_id": verificationID,
+                "expected_context_sha256": contextSHA256, "confirm": true
+            ], timeout: 120, as: OkResponse.self)
+            return nil
+        }
+    }
+
     /// KP-MG06：二级任务的人工确认收口。核心只读核对已评审内容是否已在目标
     /// 分支，通过后才把任务置为完成；这里只负责传身份与展示结果。
     func confirmFollowupCloseout(taskID: String, prNumber: Int? = nil, note: String? = nil) async {

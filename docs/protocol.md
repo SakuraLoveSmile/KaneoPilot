@@ -1872,6 +1872,20 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - 回执写 `extra.followup_closeout = {verified_at,actor,note,head_sha(当前分支头),base_branch,base_tip,reviewed_paths,pr_number?,pr_url?,merge_commit?,merged_at?}`，`resolution.action=confirm_closeout`，事件 `followup_closeout_confirmed`，任务转 `done`；不写 `review_conclusion`、不伪造报告哈希，评审历史保持原样。
 - 发布门：`release_delivery` 的成员判定把「`status=done` 且回执有效」的二级任务视为合并证据已确认，父任务据此可继续准备发布批次；父任务完成仍走收尾校验，不因回执自动完成。
 
+#### 补验证的两条恢复动作（2026-11-22）
+
+补验证（发布前的独立完整验证）可能卡在两种环境性问题：会话已建但 prompt 从未落地（`unknown`、无执行轮次），
+或冻结执行配置里的 provider 已从 Pi 目录移除（`pi_agent_prompt` 直接失败）。核心为这两种情形暴露两个显式动作，
+均保留原执行、评审与交付记录，只清理这次补验证尝试：
+
+- `rebind_release_verification`（命令 `rebind-release-verification {task_id,confirm:true}`）：
+  当前执行配置的 provider 与尝试冻结的 provider 不同且尝试未通过时提供；写 `release_verification_runtime_override`、
+  丢弃旧尝试与回执，之后按当前配置重新 `prepare/start`。
+- `reset_release_verification`（命令 `reset-release-verification {task_id,verification_id,expected_context_sha256,confirm:true}`）：
+  在没有报告、且（环境类失败 或 `unknown` 且无执行轮次）时提供；命令仍以只读会话核对「会话里一条消息都没有」，
+  否则拒绝。重置保留审计并允许重新准备验证。
+- 两者都要求显式 `confirm`，界面用二次确认弹窗呈现；动作只由核心 `allowed_actions` 给出，界面不按状态名推断。
+
 #### 处理后评审的收敛准则（2026-11-20）
 
 一次性处理与随后的修复轮容易形成「评审加码 ↔ 修复加机制」的正反馈：评审看不到处理目标，每轮都能在并发等交错路径上「确定」新缺陷，修复方为避免被打回追加机制，新机制又带来新的交错面。本节只约束评审与修复提示，不改结论枚举与结算 schema。

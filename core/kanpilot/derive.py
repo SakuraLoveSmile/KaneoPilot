@@ -783,6 +783,12 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 actions.append('sync_release_verification')
             if verification.get('can_restart_verification'):
                 actions.append('restart_release_verification')
+            # 验证尝试卡在未知发送 / provider 已移除时，给两条恢复动作：
+            # 重置（会话里没有消息的尝试）与重绑（当前执行配置的 provider 已变）。
+            if verification.get('can_reset_verification'):
+                actions.append('reset_release_verification')
+            if verification.get('can_rebind_verification'):
+                actions.append('rebind_release_verification')
         execution=round_store.get_round(conn,task['task_id'],task['run_id']) if task['run_id'] else None
         if (status=='running' and task['sent']==1 and send_state=='sent'
                 and execution is not None and execution['backend']=='codex' and execution['save_state']=='active'):

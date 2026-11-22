@@ -4,6 +4,7 @@ This module never runs project verification locally and never replaces execution
 or Review evidence. Unknown writes are observed, never sent a second time.
 """
 from pathlib import Path
+from types import SimpleNamespace
 import os
 import re
 import shutil
@@ -132,6 +133,19 @@ def _result(value):
     return dict(verification_id=value['verification_id'], verification=_view(value))
 
 
+def _provider_changed(conn, attempt):
+    """当前执行配置的 provider 是否已经不同于这次尝试冻结的 provider。"""
+    frozen = ((attempt.get('context') or {}).get('runtime_config') or {}).get('provider_id')
+    try:
+        from . import cmd_config
+        current = (cmd_config.cmd_get_exec_config(
+            SimpleNamespace(conn=conn, now=None, now_iso=None), {}).get('config') or {})
+        live = (current.get('pi_desktop') or {}).get('provider_id')
+    except Exception:
+        return False
+    return bool(frozen and live and frozen != live)
+
+
 def attempt_summary(conn, task):
     """SQL-only presentation of the exact current core-owned attempt."""
     result = dict(can_prepare_verification=False, can_sync_verification=False,
@@ -158,6 +172,15 @@ def attempt_summary(conn, task):
             and attempt.get('session_id') and attempt.get('execution_turn_id')
             and not conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? AND status IN ('prepared','unknown') LIMIT 1",
                 (_approval_operation(attempt)[0],)).fetchone())
+        # 发送从未落地的尝试（会话已建但没有执行轮次）可以显式重置；命令侧还会只读核对会话确实没有消息。
+        result['can_reset_verification'] = bool(
+            not attempt.get('report_sha256')
+            and ((attempt['state'] == 'blocked' and attempt.get('failure_code') in RESET_ENV_FAILURES)
+                 or (attempt['state'] == 'unknown' and not attempt.get('execution_turn_id'))))
+        # 冻结的执行配置里的 provider 已被移除时，只有重绑到当前配置才能让验证继续。
+        result['can_rebind_verification'] = bool(
+            attempt['state'] in ('unknown', 'blocked', 'failed')
+            and _provider_changed(conn, attempt))
     except (util.KanpilotError, KeyError, TypeError):
         pass
     return result
