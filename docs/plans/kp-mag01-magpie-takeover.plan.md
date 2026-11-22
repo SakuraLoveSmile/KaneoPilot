@@ -5,7 +5,11 @@
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261122-feat-kp-mag01-magpie-takeover`
 - 基点：main `b0cafd0`；创建日期 2026-11-22（台北）
 - 合入目标：main（PR）
-- 状态：实现中（核心 + 桌面面板代码已落地；Swift 编译与实机体验待云端 Packages 验证）
+- 状态：待体验（核心与面板已合并到任务分支并通过云端 Packages；实机面板与规划/评审轮次待体验）
+- 分支提交：`9b1cd83`（核心）、`f8bea43`（面板）、`e9fac54`（记录）
+- 云端构建：run [44992002964](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44992002964)（channel=test，base 自动取 0.5.10）
+  → 预发布 `v0.5.10-test.389`（macOS arm64 DMG / Android APK / manifest / SHA256SUMS）；
+  `macos-package`、`checks` 5×2 分片、`macos-fixtures`、`codex-platforms` 全部通过。
 
 ## 目标与范围
 
