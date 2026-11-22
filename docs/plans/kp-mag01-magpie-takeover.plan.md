@@ -85,6 +85,12 @@
 - 手工 `magpie-agent` 命令：无文件 / 有文件两态输出符合契约（见上）。
 - 手工 `codex_provider.resolve_provider` 与 `claude_cli.child_env` 冒烟：参数与
   环境符合 §5.33.4。
+- 插件已装入 Magpie（`plugin add`），`magpie kaneopilot auto/deepseek-v4.1-flash`
+  写出 `~/Library/Application Support/KaneoPilot/agent.json`（baseURL/apiKey/model）；
+  `magpie ls` 显示 KaneoPilot 行已接管。
+- 真机链路：`codex exec --ignore-user-config` + `model_providers.magpie` 经网关
+  返回 `MAGPIE-OK`（tokens 15,554）。codex 对 `auto/deepseek-v4.1-flash` 无内置
+  元数据会打一条 fallback 警告，不影响调用。
 - 全量 `core/tests`：运行中/结果见任务记录更新。
 
 ## 未验证 / 遗留
