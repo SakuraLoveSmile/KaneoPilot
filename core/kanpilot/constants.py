@@ -120,12 +120,14 @@ PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 # 按旧语义解释（codex/pi），旧数据零迁移；切换后端不删除另一分支字段。
 PLANNER_BACKENDS = ("codex", "pi_desktop", "claude", "codex_desktop", "qoder")
 PLANNER_BACKEND = "codex"
+# kp-e02：控制端配置已退役（dispatch/monitor/delivery 是确定性流程），
+# 保存/读取/就绪态与 UI 字段都已删除。下面三个常量只剩遗留模块
+# pi_desktop_controller 的内部引用（它已不在任何调用路径上），随 T2 一并删除。
 CONTROLLER_BACKENDS = ("pi", "pi_desktop")
 CONTROLLER_BACKEND = "pi"
+CONTROLLER_BACKEND_KEY = "controller_backend"
 REVIEW_BACKENDS = ("pi", "pi_desktop", "claude", "codex", "codex_desktop", "qoder")
 REVIEW_BACKEND = "pi"
-# exec_config 里控制端后端字段名（与任务执行 backend 并存，互不覆盖）。
-CONTROLLER_BACKEND_KEY = "controller_backend"
 
 # v4 工具门（protocol §5.24.2）：控制端不建 Goal 会话，只需基础工具；
 # 计划/Review 需读并安全关闭产物检点，故要求基础 + 契约审批工具。

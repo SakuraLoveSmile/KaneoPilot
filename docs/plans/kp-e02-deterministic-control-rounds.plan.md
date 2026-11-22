@@ -4,7 +4,11 @@
 - 分支：`feat/20261122-kp-e02-deterministic-control-rounds`
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261122-feat-kp-e02-deterministic-control-rounds`
 - 基点：main `c0d9774`；创建日期 2026-11-22（台北）
-- 状态：计划（v2 修正了 v1 的错误前提，见「一」）
+- 状态：实现中（T1 已落地，T2–T4 未开始；v2 修正了 v1 的错误前提，见「一」）
+- T1 实测（2026-11-22）：`test_cmd_config` / `test_role_config` / `test_plus_controller` /
+  `test_auto_dispatch` / `test_auto_monitor` / `test_executor_prompt_contract` /
+  `test_doctor_plus` 合计 273+19 通过；退役的 controller 用例类（`ControllerBackendCommands`、
+  `ExecControllerBackend`）随功能一起删除，事件 detail 断言改为「不再含 controller_backend」。
 
 ## 一、修正：调度**已经**是确定性的
 
