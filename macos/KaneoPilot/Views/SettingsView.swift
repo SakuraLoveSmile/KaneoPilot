@@ -2096,14 +2096,13 @@ struct SettingsView: View {
                 // §5.33：规划只保留 Codex 与 Pi-Desktop-Plus；Claude / Qoder 暂不启用。
                 Picker("规划运行端", selection: $plannerBackend) {
                     Text("Codex").tag("codex")
-                    Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("规划运行端")
                 .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
                 if let legacy = plannerLegacyBackend {
-                    Text("已保存的规划运行端「\(legacy)」暂不启用；保存后将切回 Codex。")
+                    Text("已保存的规划运行端「\(legacy)」已不在支持范围；保存后将切回 Codex。")
                         .font(.kpLabel)
                         .foregroundStyle(Color.kpOrange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2593,13 +2592,12 @@ struct SettingsView: View {
                     Text("Pi CLI").tag("pi")
                     Text("Codex").tag("codex")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
-                    Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("Review 运行端")
                 .help("Review 控制端的模型来源；保存只影响新建 Review 请求")
                 if let legacy = reviewLegacyBackend {
-                    Text("已保存的 Review 运行端「\(legacy)」暂不启用；保存后将切回 Pi CLI。")
+                    Text("已保存的 Review 运行端「\(legacy)」已不在支持范围；保存后将切回 Pi CLI。")
                         .font(.kpLabel)
                         .foregroundStyle(Color.kpOrange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -4596,12 +4594,12 @@ private struct PlusRoleEditor: View {
 // MARK: - §5.33 Magpie 接管（2026-11-22）
 
 /// 运行端白名单（用户 2026-11-22 口径）：
-/// 规划只保留 Codex / Codex Desktop / Pi-Desktop-Plus；Review 只保留
-/// Pi CLI / Codex / Codex Desktop / Pi-Desktop-Plus。
-/// Claude 与 Qoder 暂不启用——面板不再列出，读到旧值时回落到默认并在面板里提示。
+/// 规划只保留 Codex / Pi-Desktop-Plus；Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus。
+/// Claude、Qoder 暂不启用，Codex Desktop 不再支持——面板都不再列出，读到旧值
+/// 时回落到默认并在面板里提示保存后切换。
 enum RoleBackends {
-    static let planner = ["codex", "codex_desktop", "pi_desktop"]
+    static let planner = ["codex", "pi_desktop"]
     static let plannerDefault = "codex"
-    static let review = ["pi", "codex", "codex_desktop", "pi_desktop"]
+    static let review = ["pi", "codex", "pi_desktop"]
     static let reviewDefault = "pi"
 }
