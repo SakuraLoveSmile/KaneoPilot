@@ -180,8 +180,10 @@ struct SettingsView: View {
     @State private var selModel = ""
     @State private var selEffort = ""
     @State private var selPreset = ""
-    // v3 §5.23.3：任务执行后端（pi|pi_desktop）与 pi_desktop 分支草稿。
-    @State private var selBackend = "pi"
+    // v3 §5.23.3：任务执行后端（codex|pi_desktop）与 pi_desktop 分支草稿。
+    // 2026-11-22：pi 执行不再支持——旧值回落 Pi-Desktop-Plus 并提示。
+    @State private var selBackend = "pi_desktop"
+    @State private var execLegacyBackend: String?
     @State private var execCodexModel = ""
     @State private var execCodexEffort = ""
     @State private var execCodexSandbox = "workspace-write"
@@ -212,7 +214,6 @@ struct SettingsView: View {
     @State private var piDesktopProbeControlText: String?
 
     private static let piDesktopThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-    private static let historicalPiExecutionIssue = "pi 不支持新引擎的结构化验证，请选择 Plus 或 Codex CLI 后再执行"
 
     // MARK: Codex 规划配置状态（§4.4 / protocol §5.22.6 + v3 §5.23.2）
     @State private var plannerLoaded = false
@@ -1074,7 +1075,6 @@ struct SettingsView: View {
                 // ① 任务执行后端（§5.23.3）：轮次执行的模型来源。
                 LabeledContent {
                     Picker("任务执行后端", selection: $selBackend) {
-                        Text("pi（仅历史配置）").tag("pi").disabled(true)
                         Text("Codex CLI").tag("codex")
                         Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                     }
@@ -1085,8 +1085,8 @@ struct SettingsView: View {
                 } label: {
                     SettingsRowLabel(title: "任务执行后端", detail: taskExecEffectiveText)
                 }
-                if selBackend == "pi" {
-                    SettingsNotice(text: Self.historicalPiExecutionIssue,
+                if let legacy = execLegacyBackend {
+                    SettingsNotice(text: "已保存的执行后端「\(legacy)」不再支持；保存后将切回 Pi-Desktop-Plus。",
                                    icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
                 }
                 if selBackend == "pi_desktop" {
@@ -1638,7 +1638,15 @@ struct SettingsView: View {
         selModel = base.model ?? ""
         selEffort = base.reasoningEffort ?? ""
         selPreset = base.agentPreset ?? ""
-        selBackend = base.effectiveBackend
+        // 2026-11-22：pi 执行不再支持——旧值回落到 Pi-Desktop-Plus 并在面板提示。
+        let savedExecBackend = base.effectiveBackend
+        if savedExecBackend == "pi" {
+            selBackend = "pi_desktop"
+            execLegacyBackend = "pi"
+        } else {
+            selBackend = savedExecBackend
+            execLegacyBackend = nil
+        }
         execCodexModel = base.codex?.model ?? execDefaults?.codex?.model ?? ""
         execCodexEffort = base.codex?.reasoningEffort ?? execDefaults?.codex?.reasoningEffort ?? ""
         execCodexSandbox = base.codex?.effectiveSandbox ?? execDefaults?.codex?.effectiveSandbox ?? "workspace-write"
@@ -1918,7 +1926,6 @@ struct SettingsView: View {
     ///   结构与权限显式选择；不受 PI CLI 顶层 ok 阻挡（T3.3）。
     /// - PI CLI：任务执行为 pi 时只保留历史配置读取，须显式改选 Plus 或 Codex CLI。
     private func execIssue(_ caps: ExecCapabilitiesResponse?) -> String? {
-        if selBackend == "pi" { return Self.historicalPiExecutionIssue }
         guard let caps else { return "执行配置能力未加载" }
         if selBackend == "codex" {
             if emptyToNil(execCodexModel) == nil { return "Codex 模型不能为空" }
