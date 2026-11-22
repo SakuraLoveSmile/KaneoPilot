@@ -35,10 +35,18 @@ def _hash(value):
     return util.sha256_text(util.jdump(value))
 
 
+def _unsettled_children(conn, task_id):
+    """已人工收口的二级任务不再算「仍在修复链上」；只有未收口的才阻止单任务验证。"""
+    from . import followup_closeout
+    for row in conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?', (task_id,)):
+        if not followup_closeout.settled(row):
+            return True
+    return False
+
+
 def _context(conn, task, frozen_target=None, *, restart=None):
-    _require(not task['review_source_task_id'] and not conn.execute(
-        'SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1',
-        (task['task_id'],)).fetchone(), 'release_verification_group', '补验证仅支持无二级修复的独立任务')
+    _require(not task['review_source_task_id'] and not _unsettled_children(conn, task['task_id']),
+             'release_verification_group', '补验证仅支持无二级修复的独立任务')
     policy, mapping = release._policy(conn, task)
     _require(policy['enabled'] and mapping['repository'] == task['repository'],
              'release_repository_changed', '发布未开启或仓库映射已变化')
@@ -170,7 +178,7 @@ def ordinary_summary(conn, task, blocked):
             or task['manual_recovery_required'] or task['review_source_task_id']
             or extra.get('external_build_repair_ref') or extra.get('build_failure_hold')
             or core.review_repair_of(task)
-            or conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1', (task['task_id'],)).fetchone()
+            or _unsettled_children(conn, task['task_id'])
             or not policy['enabled'] or mapping['repository'] != task['repository']
             or db.paused(conn, 'delivery') or db.task_auto_paused(task)
             or core.automation_of(task).get('manual_takeover')
@@ -721,7 +729,7 @@ def trusted_runtime_commands(conn, scope, args, *, sql_only=False):
             and db.task_is_active(task) and task['status'] in ('in_review', 'done')
             and release._identity(task) == identity and task['repository'] == context.get('repository')
             and not task['review_source_task_id'] and not core.review_repair_of(task)
-            and not conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1', (task_id,)).fetchone()
+            and not _unsettled_children(conn, task_id)
             and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (task_id,)).fetchone()
             and not db.paused(conn, 'delivery') and not db.task_auto_paused(task)
