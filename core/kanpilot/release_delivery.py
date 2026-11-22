@@ -343,7 +343,11 @@ def projection(conn,task):
         return dict(state='blocked',title='发布受阻',reason=str(exc),required=required,channel=policy['channel'],
             root_task_id=task['task_id'],member_task_ids=[task['task_id']],assets=[],
             blockers=[dict(code=exc.code,message=str(exc))],can_start=False,can_reconcile=False)
-    related=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
+    from . import followup_closeout
+    # 已人工收口的二级任务不再是发布组成员：它的修复已经随目标分支进入父任务的合并提交，
+    # 继续留在组里会让成员证据永远凑不齐，也让旧的阻塞观测一直挂着。
+    related=[row for row in conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],))
+             if not followup_closeout.settled(row)]
     ids=sorted({root['task_id'],*(row['task_id'] for row in related)})
     def locally_ready(row):
         from . import review_risk, followup_closeout
@@ -544,6 +548,14 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
 
 def _software_proof(conn,root):
     children=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
+    entries=[row for row in db.task_extra(root).get('review_history') or []
+             if isinstance(row,dict) and row.get('execution_run_id')==root['run_id']
+             and row.get('conclusion')=='changes_requested']
+    if children and not entries:
+        # 评审已通过、二级任务是「另立任务」（followup），不属于父任务的修复周期：
+        # 它们的内容已随目标分支进入父任务的合并提交，发布证据只用父任务自己的
+        # 交付事实，不套用修复链的 cycle 绑定与子任务复核。
+        return _single_proof(conn,root)
     if children:
         saved=db.task_extra(root).get('parent_closeout') or {}
         frozen=saved.get('target_sha') if root['status']=='done' and saved.get('state')=='completed' else None
