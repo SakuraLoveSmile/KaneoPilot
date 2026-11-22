@@ -164,6 +164,12 @@ def run_stage(stage: str, resume: bool = False) -> int:
         return cli_review.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
                                     log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume,
                                     request_id=selected_request_id, config_override=selected_review_config)
+    # kp-e02：dispatch / monitor / delivery 在上面的确定性分支就返回了，
+    # 走到这里的只可能是 review；其余情况是内部调用错误，直接报错而不是
+    # 去渲染一份已经不存在的 prompt。
+    if stage != "review":
+        print(f"stage {stage} 由确定性 worker 处理，不走 prompt 路径", file=sys.stderr)
+        return 2
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
 

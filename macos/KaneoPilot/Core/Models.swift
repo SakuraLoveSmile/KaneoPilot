@@ -1266,8 +1266,6 @@ struct ExecConfig: Decodable, Equatable {
     /// v3：pi_desktop 分支配置块（任务执行与 Plus 控制端共用）。
     let piDesktop: ExecPiDesktopConfig?
     let codex: ExecCodexConfig?
-    /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
-    let controllerBackend: String?
     /// §5.27：一次性 AI 处理的模型覆盖（nil = 跟随通用执行配置）。
     let oneShot: ExecOneShotConfig?
 
@@ -1276,7 +1274,6 @@ struct ExecConfig: Decodable, Equatable {
          updatedAt: String? = nil, backend: String? = nil,
          piDesktop: ExecPiDesktopConfig? = nil,
          codex: ExecCodexConfig? = nil,
-         controllerBackend: String? = nil,
          oneShot: ExecOneShotConfig? = nil) {
         self.provider = provider
         self.model = model
@@ -1286,7 +1283,6 @@ struct ExecConfig: Decodable, Equatable {
         self.backend = backend
         self.piDesktop = piDesktop
         self.codex = codex
-        self.controllerBackend = controllerBackend
         self.oneShot = oneShot
     }
 
@@ -1302,9 +1298,6 @@ struct ExecConfig: Decodable, Equatable {
 
     /// 生效后端（缺省 pi）。
     var effectiveBackend: String { backend ?? "pi" }
-
-    /// 生效控制端后端（缺省 pi）。
-    var effectiveControllerBackend: String { controllerBackend ?? "pi" }
 }
 
 struct GetExecConfigResponse: Decodable {
@@ -1354,8 +1347,6 @@ struct ExecCapabilitiesResponse: Decodable {
     let codex: ExecCodexInfo?
     /// v3（§5.23.3）：PI-Desktop 后端就绪态；旧核心不返回 → nil。
     let piDesktop: ExecPiDesktopInfo?
-    /// §5.24.2：dispatch/monitor 控制端就绪态（与任务执行就绪态分开）。
-    let controller: PlusBackendStatus?
     let providers: [ExecProvider]?
     let presets: [ExecPreset]?
     let checks: [DoctorCheck]?

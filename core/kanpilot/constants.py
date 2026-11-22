@@ -120,12 +120,8 @@ PI_DESKTOP_MCP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 # 按旧语义解释（codex/pi），旧数据零迁移；切换后端不删除另一分支字段。
 PLANNER_BACKENDS = ("codex", "pi_desktop", "claude", "codex_desktop", "qoder")
 PLANNER_BACKEND = "codex"
-# kp-e02：控制端配置已退役（dispatch/monitor/delivery 是确定性流程），
-# 保存/读取/就绪态与 UI 字段都已删除。下面三个常量只剩遗留模块
-# pi_desktop_controller 的内部引用（它已不在任何调用路径上），随 T2 一并删除。
-CONTROLLER_BACKENDS = ("pi", "pi_desktop")
-CONTROLLER_BACKEND = "pi"
-CONTROLLER_BACKEND_KEY = "controller_backend"
+# kp-e02：控制端配置已退役（dispatch/monitor/delivery 是确定性流程）——
+# controller_backend 的词表、缺省值、字段名与控制端会话模式常量都已删除。
 REVIEW_BACKENDS = ("pi", "pi_desktop", "claude", "codex", "codex_desktop", "qoder")
 REVIEW_BACKEND = "pi"
 
@@ -133,10 +129,9 @@ REVIEW_BACKEND = "pi"
 # 计划/Review 需读并安全关闭产物检点，故要求基础 + 契约审批工具。
 PI_DESKTOP_CONTROLLER_TOOLS = PI_DESKTOP_REQUIRED_TOOLS
 PI_DESKTOP_PLAN_TOOLS = PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS
-# 各角色的 Plus 会话模式：规划与 Review plan + auto；
-# 控制端 agent + 用户显式 permission_mode；任务执行 goal。
+# 各角色的 Plus 会话模式：规划与 Review plan + auto；任务执行 goal。
+# kp-e02：控制端会话（agent 模式）已随确定性调度退役。
 PI_DESKTOP_PLAN_MODE = "plan"
-PI_DESKTOP_CONTROLLER_MODE = "agent"
 # 规划独立于 Review 权限；新请求使用 auto，既有请求保留其固化快照。
 PI_DESKTOP_PLANNER_PERMISSION_MODE = "auto"
 # Review 新轮次使用 auto；与规划权限独立，历史快照不改写。
