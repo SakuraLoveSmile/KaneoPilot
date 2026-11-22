@@ -627,6 +627,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         },
         cmd_config.cmd_pi_desktop_catalog,
     ),
+    # §5.33（kp-mag01）：Magpie 接管状态（只读；key 只报就绪态）。
+    "magpie-agent": (
+        {"path": (False, "str")},
+        cmd_config.cmd_magpie_agent,
+    ),
     # v4（§5.24.2）：Review 环境的角色分支能力（只读，不调用模型）。
     # 惰性委派 cmd_config.cmd_review_capabilities —— 注册不再要求该属性在导入期
     # 存在（实现落地即生效；缺失时只在真正调用该命令时明确报错）。

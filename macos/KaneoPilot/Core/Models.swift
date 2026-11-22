@@ -1392,6 +1392,20 @@ struct PiDesktopResolvedDefault: Decodable, Equatable {
     let thinkingLevel: String
 }
 
+/// §5.33（kp-mag01）：Magpie 接管状态（``magpie-agent``，只读、脱敏）。
+/// 不含网关 key 值——只有 ``hasKey`` 表示子进程环境里是否有 key。
+struct MagpieAgentResponse: Decodable {
+    let active: Bool?
+    let present: Bool?
+    let path: String?
+    let source: String?
+    let baseUrl: String?
+    let model: String?
+    let hasKey: Bool?
+    let wireApi: String?
+    let reason: String?
+}
+
 struct PiDesktopCatalogResponse: Decodable {
     let connectionFile: String
     let providers: [PiDesktopCatalogProvider]

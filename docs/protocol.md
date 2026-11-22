@@ -2288,3 +2288,56 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
 - 完成回退：`status=done` 且周期内无 done 登记时，`state=finished`，`ended_at` 取限制后的 `updated_at`。
 - 只读：投影期间不产生写事务，不写 `runtime_operations`。
 - 隐私：输出不含路径、哈希与命令原文；手机 `get-task` 保留该字段，键名不触发私有键规则。
+
+## 5.33 Magpie 接管规划/评审模型入口（2026-11-22，kp-mag01）
+
+### 5.33.1 范围与边界
+
+- 接管对象只有规划端与评审端：规划端 = Codex CLI、Claude CLI、Pi-Desktop（Plus）；评审端 = Codex CLI、Pi-Desktop。执行端只保留 Pi-Desktop，其服务商由 Magpie 的 Pi-Desktop 插件维护，KaneoPilot 不注入任何 provider。
+- Qoder 与 pi 后端不在接管范围，读不到 `agent.json` 时行为与 §5.22/§5.23 完全一致。
+- KaneoPilot 不再保存 Magpie 时代之前那份服务商 base URL / key：接管生效即忽略 `~/.codex/config.toml` 的服务商段与 Claude 用户 `settings.json` 的 base/token 组合。
+
+### 5.33.2 文件契约
+
+文件：`~/Library/Application Support/KaneoPilot/agent.json`（`KANPILOT_MAGPIE_AGENT` 可覆盖，供隔离测试与自建目录）。
+
+```json
+{"baseURL": "http://127.0.0.1:3425/v1",
+ "apiKey": "<magpie 为 KaneoPilot 单发的网关 key，可缺省>",
+ "model": "opencode-go/deepseek-v4.1-flash"}
+```
+
+写入方是 Magpie 的 Agent 插件（`magpie-agent-kaneopilot`），KaneoPilot 只读。
+
+### 5.33.3 裁决（冻结）
+
+1. 文件不存在 → 未接管；`status()["reason"]` 说明「未接管：默认位置没有 agent.json」。
+2. 缺 `baseURL` 或 `model`、`baseURL` 不是本机回环地址（127.0.0.1 / localhost / ::1）、JSON 损坏 → 一律未接管，并给出原因；**不得**用半份配置发请求。
+3. `apiKey` 可缺省（回环网关默认不校验）；缺省时 `has_key=false`，子进程不带 Authorization。
+4. key 值只允许出现在子进程环境里：不进 argv、不进 `config_args`、不进 SQLite、不进日志；命令与快照只暴露 `has_key`。
+
+### 5.33.4 各端注入
+
+- **Codex CLI（规划 + 评审修复）**：接管时忽略用户 `config.toml`，以合成服务商
+  `model_provider="magpie"` + `model_providers.magpie.{name,base_url,wire_api="responses",requires_openai_auth=false}`
+  经 `-c` 传给 `codex exec`；有 key 时追加 `env_key="KANPILOT_CODEX_PROVIDER_KEY"` 并把 key 放进子进程环境。模型取 `agent.json.model`，`model_config.model_source = "magpie"`。
+- **Claude CLI（规划）**：接管时子进程设 `ANTHROPIC_BASE_URL`（`/v1` 去掉后的网关根）与 `ANTHROPIC_AUTH_TOKEN`（有 key 时），并移除同进程的 `ANTHROPIC_API_KEY`（不并存两种认证头）；模型同样取 `agent.json.model`。
+- **Pi-Desktop（规划 + 评审 + 执行）**：不读 `agent.json`。KaneoPilot 该分支应保存
+  `model_source="inherit"`，由 §5.23.3 的目录探针解析 Pi-Desktop 当前默认服务商；
+  Magpie 接管后该默认即插件服务商 `plugin:local.magpie-piplus:magpie` + 别名
+  `piplus-selected`，换模型不必改 KaneoPilot 配置。`custom` 五字段保留给显式钉住；
+  钉住的 provider 被停用时仍按既有目录校验报错（不静默换服务商）。
+
+### 5.33.5 命令
+
+`magpie-agent {path?}` → `{active, present, path, source, base_url, model, has_key, wire_api, reason}`，只读、脱敏；不含 key 与文件全文。
+
+### 5.33.6 验收
+
+- 无 `agent.json` 时，既有规划/评审测试全绿，`resolve_provider` 仍按 `config.toml` 解析。
+- 有效 `agent.json`：Codex 解析出 `provider_id=magpie`，`config_args` 含 base_url / wire_api / env_key；key 只出现在 `env`。
+- 无 key 时不产生 `env_key` 项、`env` 为空。
+- Claude 子进程环境含网关根与 token；规划模型被替换为 `agent.json.model`，且 `model_source="magpie"`。
+- 非回环地址 / 缺字段 / 坏 JSON：`active=false` 且带原因，规划链路行为不变。
+- `KANPILOT_MAGPIE_AGENT` 指向任意临时文件即可复现上述分支，测试不连网关、不调用模型。
+

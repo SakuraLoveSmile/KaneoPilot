@@ -1344,6 +1344,20 @@ final class AppViewModel: ObservableObject {
     @Published var plannerConfig: GetPlannerConfigResponse?
     /// planner-capabilities 缓存（服务商/认证/模型目录，只读展示）。
     @Published var plannerCapabilities: PlannerCapabilitiesResponse?
+    /// §5.33：Magpie 接管状态（magpie-agent，只读、脱敏）。
+    @Published var magpieAgent: MagpieAgentResponse?
+
+    /// 接管生效时规划/评审模型由 Magpie 的 Agents 页决定，本机不再配置。
+    var magpieActive: Bool { magpieAgent?.active == true }
+
+    /// 读取 Magpie 接管状态（best-effort：失败保留上次结果，不进 plannerError）。
+    func loadMagpieAgent() async {
+        if case .success(let value) = await attempt({
+            try await self.client.run("magpie-agent", as: MagpieAgentResponse.self)
+        }) {
+            magpieAgent = value
+        }
+    }
     @Published var plannerLoading = false
     @Published var plannerSaving = false
     /// 读取失败原文（保留已有内容 + 重试，ui-spec §6）。
@@ -1379,7 +1393,11 @@ final class AppViewModel: ObservableObject {
             try await self.client.run("planner-capabilities",
                                       as: PlannerCapabilitiesResponse.self)
         }
-        let (c, caps) = await (configResult, capsResult)
+        async let magpieResult = attempt {
+            try await self.client.run("magpie-agent", as: MagpieAgentResponse.self)
+        }
+        let (c, caps, magpie) = await (configResult, capsResult, magpieResult)
+        if case .success(let v) = magpie { magpieAgent = v }
         var error: String? = nil
         if case .success(let v) = c { plannerConfig = v }
         else if case .failure(let e) = c { error = e.coreMessage }

@@ -277,6 +277,11 @@ struct SettingsView: View {
     @State private var plannerClaudeEffort = "high"
     @State private var reviewClaudeModel = "sonnet"
     @State private var reviewClaudeEffort = "high"
+
+    // MARK: §5.33 Magpie 接管（2026-11-22）
+    /// 已保存但暂不启用的运行端（claude/qoder）：面板提示，保存后切回默认。
+    @State private var plannerLegacyBackend: String?
+    @State private var reviewLegacyBackend: String?
     @State private var reviewCodexModel = ""
     @State private var reviewCodexEffort = "high"
     @State private var plannerQoderModel = "auto"
@@ -2088,16 +2093,21 @@ struct SettingsView: View {
             }
             if plannerLoaded {
                 // §4.10：规划运行端（Codex / Pi-Desktop-Plus）。
+                // §5.33：规划只保留 Codex 与 Pi-Desktop-Plus；Claude / Qoder 暂不启用。
                 Picker("规划运行端", selection: $plannerBackend) {
                     Text("Codex").tag("codex")
                     Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
-                    Text("Claude").tag("claude")
-                    Text("Qoder CLI").tag("qoder")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("规划运行端")
                 .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
+                if let legacy = plannerLegacyBackend {
+                    Text("已保存的规划运行端「\(legacy)」暂不启用；保存后将切回 Codex。")
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpOrange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if plannerBackend == "codex_desktop" {
                     desktopInheritedConfig
                 } else if plannerBackend == "pi_desktop" {
@@ -2114,10 +2124,16 @@ struct SettingsView: View {
                         .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 } else {
                     plannerEnvironment(model.plannerCapabilities)
-                    plannerGroupEditor(title: "普通规划",
-                                       model: $stdModel, effort: $stdEffort)
-                    plannerGroupEditor(title: "评审修复规划",
-                                       model: $fixModel, effort: $fixEffort)
+                    if model.magpieActive {
+                        // §5.33：Codex 规划已由 Magpie 接管，本机不再配置模型。
+                        magpieTakeoverRows(role: "Codex 规划与评审修复规划",
+                                           hint: "接管生效时两组配置不再发送：模型取 Magpie Agents 页所选。")
+                    } else {
+                        plannerGroupEditor(title: "普通规划",
+                                           model: $stdModel, effort: $stdEffort)
+                        plannerGroupEditor(title: "评审修复规划",
+                                           model: $fixModel, effort: $fixEffort)
+                    }
                 }
                 plannerMethodRow
             } else if !model.plannerLoading && model.plannerError == nil {
@@ -2172,6 +2188,27 @@ struct SettingsView: View {
         case false: return "不可用：\(status.detail ?? status.reason ?? "原因未知")"
         default: return "就绪态未知"
         }
+    }
+
+    /// §5.33：Magpie 接管时的只读摘要（Codex 规划与 Codex 评审共用）。
+    /// 接管生效后 KaneoPilot 不再保存这部分的模型与凭据，只显示接管结果。
+    @ViewBuilder
+    private func magpieTakeoverRows(role: String, hint: String) -> some View {
+        let agent = model.magpieAgent
+        let detail = [agent?.model, agent?.baseUrl]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        SettingsRow("Magpie 已接管 · \(role)",
+                    detail: detail.isEmpty ? "接管状态由 magpie-agent 上报" : detail,
+                    status: Color.kpGreen)
+        SettingsFieldRow("配置来源", agent?.source ?? "Magpie Agents 页")
+        SettingsFieldRow("网关 key",
+                         agent?.hasKey == true ? "已注入子进程环境（不落盘）" : "回环网关，无需 key")
+        Text(hint)
+            .font(.kpLabel)
+            .foregroundStyle(Color.kpSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// 只读环境摘要：服务商 / CLI 版本 / 模型目录来源 / 认证状态（已登录 / 未登录）。
@@ -2369,7 +2406,16 @@ struct SettingsView: View {
         fixEffort = model.plannerEffective("review_fix")?.reasoningEffort ?? ""
         selDefaultMethod = model.plannerConfig?.effectiveDefaultMethod
             ?? "builtin"
-        plannerBackend = model.plannerConfig?.config?.effectiveBackend ?? "codex"
+        // §5.33：Claude / Qoder 暂不启用——读到旧值时回落到默认并提示。
+        let savedPlannerBackend = model.plannerConfig?.config?.effectiveBackend
+            ?? RoleBackends.plannerDefault
+        if RoleBackends.planner.contains(savedPlannerBackend) {
+            plannerBackend = savedPlannerBackend
+            plannerLegacyBackend = nil
+        } else {
+            plannerBackend = RoleBackends.plannerDefault
+            plannerLegacyBackend = savedPlannerBackend
+        }
         plannerClaudeModel = model.plannerConfig?.config?.claude?.model ?? "sonnet"
         plannerClaudeEffort = model.plannerConfig?.config?.claude?.effort ?? "high"
         plannerQoderModel = model.plannerConfig?.config?.qoder?.model ?? "auto"
@@ -2542,17 +2588,22 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
             }
             if reviewLoaded {
+                // §5.33：Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus（Claude、Qoder 暂不启用）。
                 Picker("Review 运行端", selection: $reviewBackend) {
                     Text("Pi CLI").tag("pi")
-                    Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
-                    Text("Claude").tag("claude")
                     Text("Codex").tag("codex")
-                    Text("Qoder CLI").tag("qoder")
+                    Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                     Text("Codex Desktop（MCP 主动领取）").tag("codex_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("Review 运行端")
                 .help("Review 控制端的模型来源；保存只影响新建 Review 请求")
+                if let legacy = reviewLegacyBackend {
+                    Text("已保存的 Review 运行端「\(legacy)」暂不启用；保存后将切回 Pi CLI。")
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpOrange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 // §5.24.2：review-capabilities 就绪态（与执行能力分开）。所选运行端一行
                 // （圆点加一句），其余运行端的就绪态收进同一行的折叠。
                 if reviewBackend != "codex_desktop" {
@@ -2599,9 +2650,15 @@ struct SettingsView: View {
                     cliModelEditor("Claude Review", model: $reviewClaudeModel, effort: $reviewClaudeEffort,
                                    efforts: ["low", "medium", "high", "max"])
                 } else if reviewBackend == "codex" {
-                    cliModelEditor("Codex Review", model: $reviewCodexModel, effort: $reviewCodexEffort,
-                                   efforts: plannerEffortOptions(for: reviewCodexModel),
-                                   models: model.plannerCapabilities?.models ?? [])
+                    if model.magpieActive {
+                        // §5.33：Codex Review 已由 Magpie 接管，本机不再配置模型。
+                        magpieTakeoverRows(role: "Codex Review",
+                                           hint: "接管生效时不再发送本机模型：模型取 Magpie Agents 页所选。")
+                    } else {
+                        cliModelEditor("Codex Review", model: $reviewCodexModel, effort: $reviewCodexEffort,
+                                       efforts: plannerEffortOptions(for: reviewCodexModel),
+                                       models: model.plannerCapabilities?.models ?? [])
+                    }
                 } else {
                     LabeledContent {
                         Picker("Review 配置方式", selection: $selReviewMode) {
@@ -2734,6 +2791,8 @@ struct SettingsView: View {
     /// pi → mode 与 custom 三元组；pi_desktop → 五字段（权限固定 auto）。
     private var reviewIssue: String? {
         if reviewBackend == "codex_desktop" { return nil }
+        // §5.33：Magpie 接管时 Codex Review 的模型不由本机决定。
+        if model.magpieActive && reviewBackend == "codex" { return nil }
         if reviewBackend == "qoder" { return CLIModelConfig.qoderIssue(model: reviewQoderModel, reasoningEffort: reviewQoderEffort) }
         if reviewBackend == "claude" { return emptyToNil(reviewClaudeModel) == nil ? "Claude 模型不能为空" : nil }
         if reviewBackend == "codex" { return emptyToNil(reviewCodexModel) == nil ? "Codex 模型不能为空" : nil }
@@ -2815,6 +2874,8 @@ struct SettingsView: View {
             reviewError = error.coreMessage  // 保留已有内容，不清空
         }
         Task { await model.refreshReviewCapabilities() }
+        // §5.33：Review 面板同样需要接管状态（Codex Review 只显示接管结果）。
+        Task { await model.loadMagpieAgent() }
     }
 
     /// 以已保存配置（从未保存则用默认）播种 Review 草稿；不发请求。读取成功与面板「取消」共用。
@@ -2825,7 +2886,15 @@ struct SettingsView: View {
         selReviewModel = config?.model ?? ""
         selReviewEffort = config?.reasoningEffort ?? ""
         // §5.24.1：Review 运行端与 Plus 五字段草稿（打开面板时的读取与取消才覆盖）。
-        reviewBackend = config?.effectiveBackend ?? "pi"
+        // §5.33：Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus；Claude、Qoder 暂不启用。
+        let savedReviewBackend = config?.effectiveBackend ?? RoleBackends.reviewDefault
+        if RoleBackends.review.contains(savedReviewBackend) {
+            reviewBackend = savedReviewBackend
+            reviewLegacyBackend = nil
+        } else {
+            reviewBackend = RoleBackends.reviewDefault
+            reviewLegacyBackend = savedReviewBackend
+        }
         reviewClaudeModel = config?.claude?.model ?? "sonnet"
         reviewClaudeEffort = config?.claude?.effort ?? "high"
         reviewCodexModel = config?.codex?.model ?? config?.codex?.plannerModel ?? ""
@@ -4521,4 +4590,18 @@ private struct PlusRoleEditor: View {
         }
         notice = outcome.notice
     }
+}
+
+
+// MARK: - §5.33 Magpie 接管（2026-11-22）
+
+/// 运行端白名单（用户 2026-11-22 口径）：
+/// 规划只保留 Codex / Codex Desktop / Pi-Desktop-Plus；Review 只保留
+/// Pi CLI / Codex / Codex Desktop / Pi-Desktop-Plus。
+/// Claude 与 Qoder 暂不启用——面板不再列出，读到旧值时回落到默认并在面板里提示。
+enum RoleBackends {
+    static let planner = ["codex", "codex_desktop", "pi_desktop"]
+    static let plannerDefault = "codex"
+    static let review = ["pi", "codex", "codex_desktop", "pi_desktop"]
+    static let reviewDefault = "pi"
 }
