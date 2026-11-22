@@ -7,6 +7,11 @@
 - 合入目标：main（PR）
 - 状态：待体验（核心与面板已合并到任务分支并通过云端 Packages；实机面板与规划/评审轮次待体验）
 - 分支提交：`9b1cd83`（核心）、`f8bea43`（面板）、`e9fac54`（记录）
+- PR：[#20](https://github.com/SakuraLoveSmile/KaneoPilot/pull/20)（base main，未合并）
+- 线上配置：`planner_config.pi_desktop`、`review_config.pi_desktop` 已由 `custom`（钉 StepFun UUID）
+  改为 `model_source=inherit`；`exec_config` 原就是 inherit。改为 inherit 后探针解析到
+  `plugin:local.magpie-piplus:magpie` + `piplus-selected`（thinking 沿用高）。
+  改前备份：`/tmp/kanpilot-role-settings-backup-20261122-143247.json`。
 - 云端构建：run [44992002964](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/44992002964)（channel=test，base 自动取 0.5.10）
   → 预发布 `v0.5.10-test.389`（macOS arm64 DMG / Android APK / manifest / SHA256SUMS）；
   `macos-package`、`checks` 5×2 分片、`macos-fixtures`、`codex-platforms` 全部通过。
