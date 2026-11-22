@@ -1085,13 +1085,15 @@ struct SettingsView: View {
                 } label: {
                     SettingsRowLabel(title: "任务执行后端", detail: taskExecEffectiveText)
                 }
-                if let legacy = execLegacyBackend {
-                    SettingsNotice(text: "已保存的执行后端「\(legacy)」不再支持；保存后将切回 Pi-Desktop-Plus。",
-                                   icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
-                }
+                roleLegacyNotice(execLegacyBackend, fallback: "Pi-Desktop-Plus")
                 if selBackend == "pi_desktop" {
                     piDesktopBlock(caps)
                 } else if selBackend == "codex" {
+                    if model.magpieActive {
+                        // §5.33：与规划/评审同一套口径——模型由 Magpie 决定。
+                        magpieTakeoverRows(role: "Codex CLI 执行",
+                                           hint: "模型取 Magpie Agents 页所选；思考等级与执行权限仍按本机设置。")
+                    }
                     codexExecBlock(caps)
                 } else {
                     execPickers(caps)
@@ -1121,7 +1123,10 @@ struct SettingsView: View {
     private func codexExecBlock(_ caps: ExecCapabilitiesResponse) -> some View {
         Group {
             let models = model.plannerCapabilities?.models ?? []
-            if models.isEmpty {
+            if model.magpieActive {
+                // §5.33：模型由 Magpie 决定，这里只保留思考等级与执行权限。
+                EmptyView()
+            } else if models.isEmpty {
                 TextField("Codex 模型", text: $execCodexModel)
                     .font(.kpBody).textFieldStyle(.roundedBorder)
             } else {
@@ -2102,18 +2107,13 @@ struct SettingsView: View {
                 // §4.10：规划运行端（Codex / Pi-Desktop-Plus）。
                 // §5.33：规划只保留 Codex 与 Pi-Desktop-Plus；Claude / Qoder 暂不启用。
                 Picker("规划运行端", selection: $plannerBackend) {
-                    Text("Codex").tag("codex")
+                    Text("Codex CLI").tag("codex")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("规划运行端")
                 .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
-                if let legacy = plannerLegacyBackend {
-                    Text("已保存的规划运行端「\(legacy)」已不在支持范围；保存后将切回 Codex。")
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpOrange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                roleLegacyNotice(plannerLegacyBackend, fallback: "Codex CLI")
                 if plannerBackend == "codex_desktop" {
                     desktopInheritedConfig
                 } else if plannerBackend == "pi_desktop" {
@@ -2131,15 +2131,16 @@ struct SettingsView: View {
                 } else {
                     plannerEnvironment(model.plannerCapabilities)
                     if model.magpieActive {
-                        // §5.33：Codex 规划已由 Magpie 接管，本机不再配置模型。
-                        magpieTakeoverRows(role: "Codex 规划与评审修复规划",
-                                           hint: "接管生效时两组配置不再发送：模型取 Magpie Agents 页所选。")
-                    } else {
-                        plannerGroupEditor(title: "普通规划",
-                                           model: $stdModel, effort: $stdEffort)
-                        plannerGroupEditor(title: "评审修复规划",
-                                           model: $fixModel, effort: $fixEffort)
+                        // §5.33：模型由 Magpie 决定；思考等级与默认规划方式仍是本机设置。
+                        magpieTakeoverRows(role: "Codex CLI 规划",
+                                           hint: "模型取 Magpie Agents 页所选；思考等级与默认规划方式仍按本机设置。")
                     }
+                    plannerGroupEditor(title: "普通规划",
+                                       model: $stdModel, effort: $stdEffort,
+                                       managedByMagpie: model.magpieActive)
+                    plannerGroupEditor(title: "评审修复规划",
+                                       model: $fixModel, effort: $fixEffort,
+                                       managedByMagpie: model.magpieActive)
                 }
                 plannerMethodRow
             } else if !model.plannerLoading && model.plannerError == nil {
@@ -2196,7 +2197,18 @@ struct SettingsView: View {
         }
     }
 
-    /// §5.33：Magpie 接管时的只读摘要（Codex 规划与 Codex 评审共用）。
+    /// §5.33：规划 / 执行 / 评审共用的旧运行端提示（统一措辞与颜色）。
+    @ViewBuilder
+    private func roleLegacyNotice(_ legacy: String?, fallback: String) -> some View {
+        if let legacy {
+            Text("已保存的运行端「\(legacy)」已不在支持范围；保存后将切回 \(fallback)。")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpOrange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// §5.33：Magpie 接管时的只读摘要（规划 / 执行 / 评审共用）。
     /// 接管生效后 KaneoPilot 不再保存这部分的模型与凭据，只显示接管结果。
     @ViewBuilder
     private func magpieTakeoverRows(role: String, hint: String) -> some View {
@@ -2277,7 +2289,8 @@ struct SettingsView: View {
     /// 单组草稿：模型从目录选择，保留目录外的当前值；主动选择才联动思考等级。
     private func plannerGroupEditor(title: String,
                                     model: Binding<String>,
-                                    effort: Binding<String>) -> some View {
+                                    effort: Binding<String>,
+                                    managedByMagpie: Bool = false) -> some View {
         let models = (self.model.plannerCapabilities?.models ?? [])
             .filter { !($0.id ?? "").isEmpty }
         let efforts = plannerPickerEfforts(for: model.wrappedValue,
@@ -2293,24 +2306,26 @@ struct SettingsView: View {
             })
         return LabeledContent {
             HStack(spacing: Spacing.s) {
-                Picker("模型", selection: modelSelection) {
-                    if !models.contains(where: { $0.id == model.wrappedValue }) {
-                        Text(model.wrappedValue.isEmpty ? "请选择模型" : model.wrappedValue)
-                            .tag(model.wrappedValue)
-                            .disabled(model.wrappedValue.isEmpty)
-                    }
-                    ForEach(models) { item in
-                        if let id = item.id {
-                            Text(item.name ?? id).tag(id)
+                if !managedByMagpie {
+                    Picker("模型", selection: modelSelection) {
+                        if !models.contains(where: { $0.id == model.wrappedValue }) {
+                            Text(model.wrappedValue.isEmpty ? "请选择模型" : model.wrappedValue)
+                                .tag(model.wrappedValue)
+                                .disabled(model.wrappedValue.isEmpty)
+                        }
+                        ForEach(models) { item in
+                            if let id = item.id {
+                                Text(item.name ?? id).tag(id)
+                            }
                         }
                     }
-                }
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .font(.kpBody)
                     .frame(minWidth: 150, maxWidth: 220)
                     .disabled(models.isEmpty)
                     .accessibilityLabel("\(title)模型")
+                }
                 if !efforts.isEmpty {
                     Picker("思考等级", selection: effort) {
                         ForEach(efforts, id: \.self) { value in
@@ -2337,8 +2352,10 @@ struct SettingsView: View {
             }
         } label: {
             SettingsRowLabel(title: title,
-                             detail: models.isEmpty ? "暂无模型目录，保留当前模型"
-                                : (efforts.isEmpty ? "能力未验证：思考等级按原样提交" : nil))
+                             detail: managedByMagpie
+                                ? "模型由 Magpie 接管；思考等级仍按本机设置"
+                                : (models.isEmpty ? "暂无模型目录，保留当前模型"
+                                   : (efforts.isEmpty ? "能力未验证：思考等级按原样提交" : nil)))
         }
     }
     /// v3 §5.23.2 + v4 §5.24.3：默认规划方式预选（default_method）与
@@ -2596,19 +2613,13 @@ struct SettingsView: View {
             if reviewLoaded {
                 // §5.33：Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus（Claude、Qoder 暂不启用）。
                 Picker("Review 运行端", selection: $reviewBackend) {
-                    Text("Pi CLI").tag("pi")
-                    Text("Codex").tag("codex")
+                    Text("Codex CLI").tag("codex")
                     Text("Pi-Desktop-Plus（本机 MCP）").tag("pi_desktop")
                 }
                 .pickerStyle(.menu)
                 .accessibilityLabel("Review 运行端")
                 .help("Review 控制端的模型来源；保存只影响新建 Review 请求")
-                if let legacy = reviewLegacyBackend {
-                    Text("已保存的 Review 运行端「\(legacy)」已不在支持范围；保存后将切回 Pi CLI。")
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpOrange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                roleLegacyNotice(reviewLegacyBackend, fallback: "Codex CLI")
                 // §5.24.2：review-capabilities 就绪态（与执行能力分开）。所选运行端一行
                 // （圆点加一句），其余运行端的就绪态收进同一行的折叠。
                 if reviewBackend != "codex_desktop" {
@@ -2656,14 +2667,14 @@ struct SettingsView: View {
                                    efforts: ["low", "medium", "high", "max"])
                 } else if reviewBackend == "codex" {
                     if model.magpieActive {
-                        // §5.33：Codex Review 已由 Magpie 接管，本机不再配置模型。
-                        magpieTakeoverRows(role: "Codex Review",
-                                           hint: "接管生效时不再发送本机模型：模型取 Magpie Agents 页所选。")
-                    } else {
-                        cliModelEditor("Codex Review", model: $reviewCodexModel, effort: $reviewCodexEffort,
-                                       efforts: plannerEffortOptions(for: reviewCodexModel),
-                                       models: model.plannerCapabilities?.models ?? [])
+                        // §5.33：与规划同一套口径——模型由 Magpie 决定。
+                        magpieTakeoverRows(role: "Codex CLI 评审",
+                                           hint: "模型取 Magpie Agents 页所选；思考等级仍按本机设置。")
                     }
+                    cliModelEditor("Codex Review", model: $reviewCodexModel, effort: $reviewCodexEffort,
+                                   efforts: plannerEffortOptions(for: reviewCodexModel),
+                                   models: model.plannerCapabilities?.models ?? [],
+                                   managedByMagpie: model.magpieActive)
                 } else {
                     LabeledContent {
                         Picker("Review 配置方式", selection: $selReviewMode) {
@@ -3166,16 +3177,19 @@ struct SettingsView: View {
     }
 
     private func cliModelEditor(_ title: String, model: Binding<String>, effort: Binding<String>,
-                                efforts: [String], models: [PlannerModelEntry]? = nil) -> some View {
+                                efforts: [String], models: [PlannerModelEntry]? = nil,
+                                managedByMagpie: Bool = false) -> some View {
         let choices = models?.filter { !($0.id ?? "").isEmpty }
         return LabeledContent {
             HStack(spacing: Spacing.s) {
-                TextField("模型", text: model)
-                    .labelsHidden()
-                    .font(.kpBody).textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 150, maxWidth: 220)
-                    .accessibilityLabel("\(title)模型")
-                if let choices {
+                if !managedByMagpie {
+                    TextField("模型", text: model)
+                        .labelsHidden()
+                        .font(.kpBody).textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 150, maxWidth: 220)
+                        .accessibilityLabel("\(title)模型")
+                }
+                if !managedByMagpie, let choices {
                     Menu("模型列表") {
                         ForEach(choices) { item in
                             if let id = item.id {
@@ -4601,12 +4615,12 @@ private struct PlusRoleEditor: View {
 // MARK: - §5.33 Magpie 接管（2026-11-22）
 
 /// 运行端白名单（用户 2026-11-22 口径）：
-/// 规划只保留 Codex / Pi-Desktop-Plus；Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus。
-/// Claude、Qoder 暂不启用，Codex Desktop 不再支持——面板都不再列出，读到旧值
-/// 时回落到默认并在面板里提示保存后切换。
+/// 规划 / 执行 / 评审共用同一套运行端：Codex CLI 与 Pi-Desktop-Plus。
+/// Claude、Qoder 暂不启用，Codex Desktop 与 pi 不再支持——三个面板都不再列出，
+/// 读到旧值时回落到默认并在面板里给同一条橙色提示。
 enum RoleBackends {
     static let planner = ["codex", "pi_desktop"]
     static let plannerDefault = "codex"
-    static let review = ["pi", "codex", "pi_desktop"]
-    static let reviewDefault = "pi"
+    static let review = ["codex", "pi_desktop"]
+    static let reviewDefault = "codex"
 }
