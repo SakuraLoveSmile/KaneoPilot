@@ -237,8 +237,10 @@ def _prepare_blocker(task,delivery):
     观测；没有这条回执，界面只看到一次报错，却拿不到「准备验证」这个下一步。
     """
     value=db.task_extra(task).get('release_prepare_blocked') or {}
+    # 只有「目标源码未验证」需要界面补一个下一步入口；其他失败码由投影按当前证据自行判定，
+    # 不能被上一次尝试的回执盖住（例如随后到达的评审风险接受会改变门禁）。
     if (value.get('head_sha')!=delivery.get('head_sha') or value.get('merged_at')!=delivery.get('merged_at')
-            or not value.get('code') or not value.get('message')):
+            or value.get('code')!='release_target_unverified' or not value.get('message')):
         return None
     return dict(state='blocked',title='发布受阻',reason=value['message'],
                 blockers=[dict(code=value['code'],message=value['message'])])
