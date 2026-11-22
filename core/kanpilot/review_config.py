@@ -29,7 +29,7 @@ import shutil
 from copy import deepcopy
 from typing import Optional
 
-from . import constants, db, exec_config, util, planner_config
+from . import constants, db, exec_config, magpie_agent, util, planner_config
 
 # settings.review_config 形状：{backend, mode, provider?, model?,
 # reasoning_effort?, pi_desktop?, updated_at}。inherit 时忽略三字段；custom 时
@@ -159,6 +159,23 @@ def backend_for_request(conn: sqlite3.Connection, payload: dict) -> str:
     return _backend(for_request(conn, payload).get("backend"))
 
 
+def _apply_magpie_cli(block: dict, backend: str) -> dict:
+    """Magpie 接管（§5.33）：Codex/Claude 评审模型跟随 Magpie Agents 页。
+
+    评审分支走 ``settings.review_config`` 的 codex/claude 块，与规划组的
+    ``planner_config`` 分开保存，因此这里单独替换；qoder 不在接管范围。
+    """
+    if backend not in ("codex", "claude"):
+        return block
+    model = magpie_agent.model_override()
+    if not model:
+        return block
+    result = dict(block)
+    result["model"] = model
+    result["model_source"] = "magpie"
+    return result
+
+
 def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -> dict:
     """脱敏快照（运行记录/事件 detail 用）：按生效分支输出，不含 updated_at。
 
@@ -174,7 +191,7 @@ def snapshot(conn: sqlite3.Connection, config_override: Optional[dict] = None) -
                 "reasoning_effort": "inherit"}
     if config and config.get("backend") in CLI_KEYS:
         active = config["backend"]
-        return {"backend": active, **cli_block(config, active)}
+        return {"backend": active, **_apply_magpie_cli(cli_block(config, active), active)}
     if config is not None and config.get("backend") == "pi_desktop":
         resolved, error = resolve_runtime_config(conn, config.get("pi_desktop") or {})
         if resolved is None:

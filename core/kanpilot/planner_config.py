@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from . import constants, db, exec_config, util
+from . import constants, db, exec_config, magpie_agent, util
 
 PLANNER_GROUPS = ("standard", "review_fix")
 
@@ -161,13 +161,32 @@ def model_snapshot(conn: sqlite3.Connection, group: str, *, backend="codex") -> 
         return {"planner_model": state["qoder"]["model"],
                 "reasoning_effort": state["qoder"]["reasoning_effort"]}
     if backend == "claude":
-        return {"planner_model": state["claude"]["model"],
-                "reasoning_effort": state["claude"]["effort"]}
+        return _apply_magpie({"planner_model": state["claude"]["model"],
+                              "reasoning_effort": state["claude"]["effort"]},
+                             backend)
     base = state.get(group) or state["standard"]
-    return {
+    return _apply_magpie({
         "planner_model": base["planner_model"],
         "reasoning_effort": base["reasoning_effort"],
-    }
+    }, backend)
+
+
+def _apply_magpie(model_config: dict, backend: str) -> dict:
+    """Magpie 接管（§5.33）：规划/评审模型跟随 Magpie Agents 页。
+
+    只改 codex / claude 两个规划入口（评审的 Codex 分支同样经此处）；
+    qoder / pi 不在接管范围，保持用户原设置。思考等级仍由 KaneoPilot 自己
+    选择——Magpie 的模型元数据给 reasoning_levels，越界由既有校验拦截。
+    """
+    if backend not in ("codex", "claude"):
+        return model_config
+    model = magpie_agent.model_override()
+    if not model:
+        return model_config
+    result = dict(model_config)
+    result["planner_model"] = model
+    result["model_source"] = "magpie"
+    return result
 
 
 def resolve_runtime_config(

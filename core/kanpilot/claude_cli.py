@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import constants, util
+from . import constants, magpie_agent, util
 
 READONLY_TOOLS = frozenset(("Read", "Grep", "Glob"))
 _MODEL_ENV_KEYS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -73,6 +73,14 @@ def child_env() -> dict:
             if not isinstance(value, str):
                 raise util.KanpilotError("validation_failed", f"Claude 用户全局 env.{key} 必须是字符串")
             env[key] = value
+    # §5.33：Magpie 接管时网关优先于用户 settings.json 的 base/token 组合。
+    magpie = magpie_agent.load()
+    if magpie is not None:
+        env["ANTHROPIC_BASE_URL"] = magpie_agent.anthropic_base()
+        if magpie.get("api_key"):
+            env["ANTHROPIC_AUTH_TOKEN"] = magpie["api_key"]
+            # 同一次子进程不要同时带 x-api-key 与 Bearer，二选一。
+            env.pop("ANTHROPIC_API_KEY", None)
     env.update(NO_COLOR="1", TERM="dumb")
     return env
 

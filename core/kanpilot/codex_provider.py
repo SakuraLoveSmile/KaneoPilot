@@ -45,7 +45,7 @@ try:
 except ImportError:  # pragma: no cover - 3.9/3.10 路径
     import tomli as tomllib  # noqa: E402
 
-from . import util  # noqa: E402
+from . import magpie_agent, util  # noqa: E402
 
 CONFIG_NAME = "config.toml"
 AUTH_NAME = "auth.json"
@@ -140,6 +140,59 @@ def _default_resolution(codex_home: Path,
     )
 
 
+def _magpie_resolution(agent: dict) -> ProviderResolution:
+    """Magpie 接管（§5.33）：合成 ``model_providers.magpie`` 覆写。
+
+    Magpie 网关是 OpenAI Responses 兼容的本机回环端点（``/v1/responses``），
+    用户 ``config.toml`` 完全不被读取：接管优先于任何自定义服务商。
+    apiKey 缺省时不写 env_key，codex 以无认证方式访问回环网关。
+    """
+    provider_id = "magpie"
+    api_key = agent.get("api_key")
+    env_key = PROVIDER_ENV_KEY if api_key else None
+    env = {PROVIDER_ENV_KEY: api_key} if api_key else {}
+    prefix = f"model_providers.{provider_id}"
+    config_args = [
+        f"model_provider={_toml_literal(provider_id)}",
+        f"{prefix}.name={_toml_literal('Magpie')}",
+        f"{prefix}.base_url={_toml_literal(agent['base_url'])}",
+        f"{prefix}.wire_api={_toml_literal(agent.get('wire_api') or 'responses')}",
+        f"{prefix}.requires_openai_auth=false",
+    ]
+    if env_key:
+        config_args.append(f"{prefix}.env_key={_toml_literal(env_key)}")
+    detail = (
+        "Magpie 接管：经 " + agent["base_url"] + " 调用 " + agent["model"]
+        + ("（网关 key 已注入子进程环境，不落盘）" if api_key else "（回环网关，无 key）")
+    )
+    summary = {
+        "provider_id": provider_id,
+        "name": "Magpie",
+        "base_url": agent["base_url"],
+        "wire_api": agent.get("wire_api") or "responses",
+        "requires_openai_auth": False,
+        "env_key": env_key,
+        "auth_ready": True,
+        "auth_detail": detail,
+        "model_catalog_json": None,
+        "magpie": True,
+        "magpie_model": agent["model"],
+    }
+    return ProviderResolution(
+        provider_id=provider_id,
+        name="Magpie",
+        base_url=agent["base_url"],
+        wire_api=agent.get("wire_api") or "responses",
+        requires_openai_auth=False,
+        env_key=env_key,
+        env=env,
+        config_args=config_args,
+        auth_ready=True,
+        auth_detail=detail,
+        summary=summary,
+    )
+
+
 def _resolve_auth(provider: dict, codex_home: Path):
     """凭据三态裁决 → (env_key, env, auth_ready, auth_detail)。
 
@@ -204,6 +257,9 @@ def resolve_provider(codex_home: Path) -> ProviderResolution:
     明确报错，绝不静默回落官方服务商（protocol §5.22.3）。
     """
     codex_home = Path(codex_home)
+    agent = magpie_agent.load()
+    if agent is not None:
+        return _magpie_resolution(agent)
     config_path = codex_home / CONFIG_NAME
     if not config_path.is_file():
         return _default_resolution(codex_home, None)

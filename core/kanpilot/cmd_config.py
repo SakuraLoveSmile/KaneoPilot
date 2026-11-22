@@ -136,6 +136,21 @@ def cmd_qoder_model_catalog(ctx, payload: dict) -> dict:
     return qoder_cli.model_catalog()
 
 
+def cmd_magpie_agent(ctx, payload: dict) -> dict:
+    """Magpie 接管状态（protocol §5.33，只读）。
+
+    只返回脱敏视图：是否接管、网关地址、模型 id、是否有 key；**不含** key
+    值与文件全文。路径可用 payload.path 覆盖（隔离测试）。
+    """
+    from . import magpie_agent
+
+    payload = payload or {}
+    path = payload.get("path")
+    if path is not None and (not isinstance(path, str) or not path):
+        raise util.bad_request("path 必须为非空字符串")
+    return magpie_agent.status(path or None)
+
+
 def cmd_pi_desktop_catalog(ctx, payload: dict) -> dict:
     """Read the local Pi-Desktop-Plus provider/model catalog (protocol §5.23.6).
 
