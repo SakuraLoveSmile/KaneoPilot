@@ -1278,16 +1278,31 @@ RESET_ENV_FAILURES = (
 _PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执', '已用于不同参数', '回执缺失')
 
 
-def _resettable(value):
-    """环境类失败且没有报告：允许显式重置后重新验证。"""
+def _resettable(value, *, empty_session=False):
+    """环境类失败、没有报告、或会话里根本没有消息的未知发送：允许显式重置后重新验证。"""
     if value.get('report_sha256'):
         return False
     state = value.get('state')
     if state == 'blocked' and value.get('failure_code') in RESET_ENV_FAILURES:
         return True
+    if state == 'unknown' and empty_session and not value.get('execution_turn_id'):
+        # 会话已建但一条消息都没有：prompt 从未落地，保留它只会让这次尝试永远无法推进。
+        return True
     reason = str(value.get('reason') or '')
     return (state == 'unknown' and not value.get('session_id')
             and any(marker in reason for marker in _PRESEND_REASON_MARKERS))
+
+
+def _session_is_empty(value):
+    """Read-only: 该会话是否一条消息都没有（prompt 从未送达）。"""
+    if not value.get('session_id'):
+        return False
+    try:
+        client = _client(value, read_only=True)
+        page = client.session_get(value['session_id'], message_limit=1)
+    except util.KanpilotError:
+        return False
+    return isinstance(page, dict) and not (page.get('messages') or [])
 
 
 def _discard_scope_only(conn, task_id, verification_id):
@@ -1401,8 +1416,8 @@ def cmd_reset_release_verification(ctx, payload):
     if not synthetic:
         _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
                  'release_verification_reset', '验证上下文已变化')
-    _require(_resettable(value),
-             'release_verification_reset', '只有环境类失败且没有报告的尝试可以重置')
+    _require(_resettable(value, empty_session=_session_is_empty(value)),
+             'release_verification_reset', '只有环境类失败、发送从未落地且没有报告的尝试可以重置')
     _require(payload.get('confirm') is True, 'release_verification_reset',
              '重置必须明确确认：旧尝试保留审计，核验会重新运行并可能再次失败')
     with db.write_txn(ctx.conn):
