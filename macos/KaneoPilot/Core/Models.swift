@@ -3654,6 +3654,8 @@ struct TaskRelease: Decodable {
     let canPrepareVerification: Bool?
     let canSyncVerification: Bool?
     let canRestartVerification: Bool?
+    let canRebindVerification: Bool?
+    let canResetVerification: Bool?
     let verification: ReleaseVerification?
 
     // External repair keeps its original DTO; ordinary merged tasks use the
@@ -3665,6 +3667,9 @@ struct TaskRelease: Decodable {
         if let repair = externalRepair { return repair.canRestartVerification == true }
         return canRestartVerification == true
     }
+    /// KP-MG06：验证尝试卡在「发送未知 / provider 已移除」时的两条恢复动作。
+    var allowsVerificationRebind: Bool { externalRepair == nil && canRebindVerification == true }
+    var allowsVerificationReset: Bool { externalRepair == nil && canResetVerification == true }
 
     var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
@@ -3800,12 +3805,16 @@ enum ReleaseVerificationAction: String {
     case prepare = "prepare_release_verification"
     case sync = "sync_release_verification"
     case restart = "restart_release_verification"
+    case rebind = "rebind_release_verification"
+    case reset = "reset_release_verification"
 
     var label: String {
         switch self {
         case .prepare: return "验证修复后的源码…"
         case .sync: return "核对验证结果"
         case .restart: return "重新完整验证…"
+        case .rebind: return "重绑验证到当前配置…"
+        case .reset: return "重置这次验证…"
         }
     }
 
@@ -3821,6 +3830,8 @@ enum ReleaseVerificationAction: String {
         case .prepare: return release.allowsVerificationPreparation
         case .sync: return release.allowsVerificationSync && release.currentVerification?.verificationId?.isEmpty == false
         case .restart: return release.allowsVerificationRestart
+        case .rebind: return release.allowsVerificationRebind
+        case .reset: return release.allowsVerificationReset
         }
     }
 }
@@ -3830,7 +3841,7 @@ extension TaskDetail {
 
     var releaseVerificationFooterAction: String? {
         if releaseVerificationQuestion?.state == "open" { return nil }
-        for action in [ReleaseVerificationAction.sync, .restart, .prepare] {
+        for action in [ReleaseVerificationAction.sync, .reset, .rebind, .restart, .prepare] {
             if allowedActions?.contains(action.rawValue) == true, action.isAvailable(for: self) {
                 return action.rawValue
             }

@@ -1451,6 +1451,7 @@ struct ReleaseVerificationActionButton: View {
     @State private var candidate: PrepareReleaseVerificationResponse?
     @State private var working = false
     @State private var errorText: String?
+    @State private var destructive: ReleaseVerificationAction?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -1488,6 +1489,19 @@ struct ReleaseVerificationActionButton: View {
             }.disabled(model.busy)
             Button("取消", role: .cancel) { candidate = nil }
         } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .alert(destructive == .rebind ? "重绑验证到当前执行配置？" : "重置这次补验证？",
+               isPresented: Binding(get: { destructive != nil }, set: { if !$0 { destructive = nil } })) {
+            Button(destructive == .rebind ? "重绑" : "重置", role: .destructive) {
+                let target = destructive
+                destructive = nil
+                if let target { performDestructive(target) }
+            }
+            Button("取消", role: .cancel) { destructive = nil }
+        } message: {
+            Text(destructive == .rebind
+                 ? "旧验证尝试会保留审计记录并被清理；随后用当前执行配置的 provider 重新准备并运行验证。原执行、评审与交付记录不变。"
+                 : "只在这次验证的会话里没有任何消息、没有执行轮次时可用；旧尝试保留审计，重置后需要重新准备并运行验证。")
+        }
         .onChange(of: detail.taskId) { invalidate() }
         .onChange(of: detail.runId) { invalidate() }
         .onChange(of: detail.planSha256) { invalidate() }
@@ -1504,6 +1518,10 @@ struct ReleaseVerificationActionButton: View {
 
     private func run() {
         guard action.isAvailable(for: detail) else { return }
+        if action == .reset || action == .rebind {
+            destructive = action
+            return
+        }
         let token = UUID(), taskID = detail.taskId
         requestID = token; working = true; errorText = nil
         if action == .sync {
@@ -1530,8 +1548,32 @@ struct ReleaseVerificationActionButton: View {
         }
     }
 
+    /// 重置 / 重绑：两条恢复动作都不改原执行、评审与交付，只处理这次补验证尝试。
+    private func performDestructive(_ action: ReleaseVerificationAction) {
+        let verification = detail.release?.currentVerification
+        guard let verificationID = verification?.verificationId,
+              let context = verification?.contextSha256 else {
+            errorText = "缺少当前验证的身份，请刷新后重试。"
+            return
+        }
+        let token = UUID(), taskID = detail.taskId
+        requestID = token; working = true; errorText = nil
+        Task {
+            if action == .rebind {
+                await model.rebindReleaseVerification(taskID: taskID,
+                    onError: { if requestID == token { errorText = $0 } })
+            } else {
+                await model.resetReleaseVerification(taskID: taskID, verificationID: verificationID,
+                    contextSHA256: context,
+                    onError: { if requestID == token { errorText = $0 } })
+            }
+            guard requestID == token else { return }
+            requestID = nil; working = false; onRefreshDetail?()
+        }
+    }
+
     private func invalidate() {
-        requestID = nil; candidate = nil; working = false; errorText = nil
+        requestID = nil; candidate = nil; working = false; errorText = nil; destructive = nil
     }
 }
 

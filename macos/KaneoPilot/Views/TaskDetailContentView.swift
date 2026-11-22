@@ -1600,7 +1600,8 @@ struct TaskOverviewTabView: View {
                 deliveryConfirmation = (detail.taskId, runID, reviewKey)
             }
             .disabled(model.busy || detail.runId == nil || detail.reviewKey == nil)
-        case "prepare_release_verification", "sync_release_verification", "restart_release_verification":
+        case "prepare_release_verification", "sync_release_verification", "restart_release_verification",
+             "rebind_release_verification", "reset_release_verification":
             if let verificationAction = ReleaseVerificationAction(rawValue: action) {
                 ReleaseVerificationActionButton(detail: detail, action: verificationAction, onRefreshDetail: onRefreshDetail)
             }
