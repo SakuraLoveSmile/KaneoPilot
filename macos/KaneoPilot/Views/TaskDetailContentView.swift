@@ -905,6 +905,9 @@ struct TaskOverviewTabView: View {
         if available.contains("continue_delivery") { return "continue_delivery" }
         if available.contains("sync_release") { return "sync_release" }
         if available.contains("closeout_parent") { return "closeout_parent" }
+        // KP-MG06：二级任务的人工收口是这一状态下唯一能推进动作，作为主动作露出，
+        // 不藏在「更多操作」里（否则用户根本找不到入口）。
+        if available.contains("confirm_closeout") { return "confirm_closeout" }
         if reviewPassedAwaitingDelivery {
             return available.contains("recheck") ? "recheck" : nil
         }
@@ -1188,6 +1191,10 @@ struct TaskOverviewTabView: View {
                     Task {
                         if action == "cancel-request", let requestID = detail.queuedPlanRequestId {
                             await model.cancelPlan(requestID: requestID, taskID: detail.taskId)
+                        } else if action == "confirm_closeout" {
+                            await model.confirmFollowupCloseout(
+                                taskID: detail.taskId,
+                                prNumber: detail.delivery?.prNumber)
                         } else {
                             await model.resolve(taskID: detail.taskId, action: action, expectedExecutionRunID: confirm.expectedExecutionRunID)
                         }
@@ -1593,7 +1600,8 @@ struct TaskOverviewTabView: View {
                 deliveryConfirmation = (detail.taskId, runID, reviewKey)
             }
             .disabled(model.busy || detail.runId == nil || detail.reviewKey == nil)
-        case "prepare_release_verification", "sync_release_verification", "restart_release_verification":
+        case "prepare_release_verification", "sync_release_verification", "restart_release_verification",
+             "rebind_release_verification", "reset_release_verification":
             if let verificationAction = ReleaseVerificationAction(rawValue: action) {
                 ReleaseVerificationActionButton(detail: detail, action: verificationAction, onRefreshDetail: onRefreshDetail)
             }
@@ -1606,6 +1614,10 @@ struct TaskOverviewTabView: View {
                 }
             }
             .disabled(model.busy)
+        case "confirm_closeout":
+            Button("确认收口") { confirm = .confirmCloseout }
+                .disabled(model.busy || detail.delivery?.headSha == nil)
+                .help("只读核对已评审改动的每条路径是否已在目标分支上一致；通过后把此二级任务置为完成。")
         case "closeout_parent":
             Button(model.actionInFlight == "收尾校验" ? "正在核对…" : detail.parentCloseout?.actionLabel ?? "校验并完成") {
                 guard let closeout = detail.parentCloseout else { return }

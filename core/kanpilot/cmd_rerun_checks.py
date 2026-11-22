@@ -15,6 +15,8 @@ def _failing_runs(task):
         raise util.KanpilotError("conflict", "仅已交付到开放 PR 的任务可重跑失败的检查")
     if notice.get("state") != "blocked" or not str(notice.get("reason") or "").startswith("检查未通过："):
         raise util.KanpilotError("conflict", "当前没有可确认的失败检查，请先重新校验")
+    if notice.get("head_sha") != delivery.get("head_sha"):
+        raise util.KanpilotError("conflict", "合并门检查来自旧提交，请先重新校验")
     repo = git_delivery.require_github_origin(task["repository"])
     pr = gh_client.pr_view(repo, delivery["pr_number"], merge_checks=True)
     util.require(pr.get("state") == "OPEN" and pr.get("headRefOid") == delivery.get("head_sha")

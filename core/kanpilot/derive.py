@@ -78,7 +78,7 @@ def _repair_status(task):
     if task["status"] in ("needs_user", "done"):
         return None
     repair = core.review_repair_of(task)
-    if repair.get("source_kind") in ("merge_conflict", "build_failure"):
+    if repair.get("source_kind") in constants.AI_ACTION_KINDS:
         if repair.get("state") in ("needs_followup", "blocked", "failed"):
             return {"needs_followup": "需要后续处理", "blocked": "AI 处理受阻", "failed": "AI 处理失败"}[repair["state"]]
         return ("处理后待复审" if repair.get("state") == "awaiting_review"
@@ -626,7 +626,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     board_column = task_board_column(task, conn, now)
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
-    from . import core, automation_policy, review_repair, task_ai_action
+    from . import core, automation_policy, review_repair, review_risk, task_ai_action
     automation = core.automation_of(task)
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
@@ -640,6 +640,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "question_preview": question_preview(question),
         "automation": automation or None,
         "review_repair": review_repair.view(conn, task, now),
+        "review_risk": review_risk.projection(task),
         "task_ai_action": task_ai_action.projection(conn, task, now),
         "delivery": task_delivery_view(task),
         "release": _release(conn, task),
@@ -700,7 +701,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     elif (view["parent_closeout"] and task["status"] != "done"
             and view["parent_closeout"]["state"] in _CLOSEOUT_LABELS):
         phase, condition = "delivery", "syncing"
-    elif _repair_status(task) and repair.get("source_kind") in ("merge_conflict", "build_failure"):
+    elif _repair_status(task) and repair.get("source_kind") in constants.AI_ACTION_KINDS:
         if repair_state in ("awaiting_review", "needs_followup", "blocked", "failed"):
             phase, condition = "review", "reviewing"
         elif task["status"] == "running":
@@ -782,6 +783,12 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
                 actions.append('sync_release_verification')
             if verification.get('can_restart_verification'):
                 actions.append('restart_release_verification')
+            # 验证尝试卡在未知发送 / provider 已移除时，给两条恢复动作：
+            # 重置（会话里没有消息的尝试）与重绑（当前执行配置的 provider 已变）。
+            if verification.get('can_reset_verification'):
+                actions.append('reset_release_verification')
+            if verification.get('can_rebind_verification'):
+                actions.append('rebind_release_verification')
         execution=round_store.get_round(conn,task['task_id'],task['run_id']) if task['run_id'] else None
         if (status=='running' and task['sent']==1 and send_state=='sent'
                 and execution is not None and execution['backend']=='codex' and execution['save_state']=='active'):
@@ -850,9 +857,12 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             # Cheap, storage-driven offer: the merge gate already names a failed
             # check, so one explicit rerun of those jobs is available.
             from . import core as core_module
-            notice = core_module.delivery_of(task).get("auto_merge") or {}
+            delivery = core_module.delivery_of(task)
+            notice = delivery.get("auto_merge") or {}
+            # 通知可能来自更早的交付头；那时重跑会因 PR head 不符被拒（KP-MG03 #1）。
             if (core_module.is_pr_delivery(task) and notice.get("state") == "blocked"
-                    and str(notice.get("reason") or "").startswith("检查未通过：")):
+                    and str(notice.get("reason") or "").startswith("检查未通过：")
+                    and notice.get("head_sha") == delivery.get("head_sha")):
                 actions.append("rerun_checks")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")
@@ -888,6 +898,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         actions = [action for action in actions if action not in
                    ("retry", "enqueue", "recover_review", "resolve_review_blocker", "mark_done")]
         actions.insert(0, "continue_delivery")
+    # KP-MG06：二级任务已由另一条 PR 落地时，人工确认收口是唯一出口——
+    # 发布门要求本任务自己的评审通过与 PR 记录，缺一条就永远等下去。
+    from . import followup_closeout
+    if followup_closeout.candidate(conn, task, now) is not None and "confirm_closeout" not in actions:
+        actions.insert(0, "confirm_closeout")
     return actions
 
 

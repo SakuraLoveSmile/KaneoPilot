@@ -591,7 +591,8 @@ struct TaskReviewTabView: View {
     var onOpenSession: (() -> Void)? = nil
 
     private var hasReview: Bool {
-        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewReportPath != nil || detail.fixTaskId != nil
+        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewRisk != nil
+            || detail.reviewReportPath != nil || detail.fixTaskId != nil
             || detail.reviewKey != nil || detail.reviewConclusion != nil
             || detail.reviewSummary?.conclusion != nil
             || detail.reviewSummary?.reportPath != nil
@@ -625,6 +626,21 @@ struct TaskReviewTabView: View {
                         } else if let repair = detail.reviewRepair {
                             ReviewRepairSection(taskID: detail.taskId, repair: repair,
                                                 readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
+                        } else if let risk = detail.reviewRisk {
+                            TaskDetailTabSection(title: "已接受遗留风险") {
+                                VStack(alignment: .leading, spacing: Spacing.s) {
+                                    Text("用户已确认接受本轮评审的 \(risk.findingsCount) 项遗留风险，继续交付不再等待评审通过。")
+                                        .font(.kpBody)
+                                    if !risk.note.isEmpty {
+                                        Text(risk.note).font(.kpSmall)
+                                            .foregroundStyle(Color.kpSecondary)
+                                    }
+                                    if let at = risk.authorizedAt {
+                                        Text("接受于 \(TimeFormat.fullString(at))").font(.kpSmall)
+                                            .foregroundStyle(Color.kpSecondary)
+                                    }
+                                }
+                            }
                         }
                         TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
                             HStack(spacing: Spacing.m) {
@@ -1257,6 +1273,7 @@ private struct TaskAIActionSection: View {
     @State private var preparing = false
     @State private var preparationID: UUID?
     @State private var starting = false
+    @State private var startingRepair = false
     @State private var candidate: TaskAIActionCandidate?
     @State private var errorText: String?
     @State private var historyExpanded = false
@@ -1268,7 +1285,7 @@ private struct TaskAIActionSection: View {
             }
             HStack(spacing: Spacing.s) {
                 if preparing || starting { ProgressView().controlSize(.small) }
-                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
+                Button(preparing ? (action.isBuildFailure ? "正在核对构建…" : action.isCheckFailure ? "正在核对检查…" : "正在核对 PR…") : starting ? "正在安排处理…" : "AI 处理…") {
                     guard !preparing, !starting, candidate == nil else { return }
                     let token = UUID(), taskID = detail.taskId, kind = action.actionKind
                     preparationID = token
@@ -1288,9 +1305,43 @@ private struct TaskAIActionSection: View {
                 }
                 .disabled(!action.canPrepare || detail.readOnly == true || preparing || starting
                           || candidate != nil || model.actionInFlight != nil)
-                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复" : "使用通用执行配置处理 PR 合并冲突"))
+                .help(action.reason ?? (action.isBuildFailure ? "读取失败构建日志并安排一次修复"
+                        : action.isCheckFailure ? "读取失败检查日志并安排一次最小修复"
+                        : "使用通用执行配置处理 PR 合并冲突"))
             }
-            if !action.canPrepare, action.current == nil, let reason = action.reason, !reason.isEmpty {
+            if let repair = followUpRepair {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Label {
+                        Text("本轮处理后复审要求改动：\(repair.title)")
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(Color.kpOrange)
+                    }
+                    .font(.kpSmall)
+                    .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: Spacing.s) {
+                        if startingRepair { ProgressView().controlSize(.small) }
+                        Button("按复审意见继续修复") {
+                            startingRepair = true
+                            Task {
+                                defer { startingRepair = false }
+                                do {
+                                    let candidate = try await model.currentReviewRepair(taskID: detail.taskId)
+                                    await model.startReviewRepair(taskID: detail.taskId, candidate: candidate)
+                                    onRefreshDetail?()
+                                } catch {
+                                    errorText = error.coreMessage
+                                }
+                            }
+                        }
+                        .disabled(startingRepair || detail.readOnly == true || model.busy)
+                        .help("按当前执行配置开启新的修复会话，产生模型费用；沿用本任务分支")
+                    }
+                }
+            }
+            if followUpRepair == nil, !action.canPrepare, action.current == nil,
+               let reason = action.reason, !reason.isEmpty {
                 Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1336,6 +1387,13 @@ private struct TaskAIActionSection: View {
             candidate = nil
             errorText = nil
         }
+    }
+
+    /// 一次性处理以「需要后续处理」收尾且复审要求改动时，下一步是评审修复。
+    private var followUpRepair: ReviewRepair? {
+        guard action.current == nil, action.history?.last?.state == "needs_followup" else { return nil }
+        guard let repair = detail.reviewRepair, repair.canStart else { return nil }
+        return repair
     }
 
     private func stateColor(_ entry: TaskAIActionEntry) -> Color {
@@ -1393,6 +1451,7 @@ struct ReleaseVerificationActionButton: View {
     @State private var candidate: PrepareReleaseVerificationResponse?
     @State private var working = false
     @State private var errorText: String?
+    @State private var destructive: ReleaseVerificationAction?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -1430,6 +1489,19 @@ struct ReleaseVerificationActionButton: View {
             }.disabled(model.busy)
             Button("取消", role: .cancel) { candidate = nil }
         } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .alert(destructive == .rebind ? "重绑验证到当前执行配置？" : "重置这次补验证？",
+               isPresented: Binding(get: { destructive != nil }, set: { if !$0 { destructive = nil } })) {
+            Button(destructive == .rebind ? "重绑" : "重置", role: .destructive) {
+                let target = destructive
+                destructive = nil
+                if let target { performDestructive(target) }
+            }
+            Button("取消", role: .cancel) { destructive = nil }
+        } message: {
+            Text(destructive == .rebind
+                 ? "旧验证尝试会保留审计记录并被清理；随后用当前执行配置的 provider 重新准备并运行验证。原执行、评审与交付记录不变。"
+                 : "只在这次验证的会话里没有任何消息、没有执行轮次时可用；旧尝试保留审计，重置后需要重新准备并运行验证。")
+        }
         .onChange(of: detail.taskId) { invalidate() }
         .onChange(of: detail.runId) { invalidate() }
         .onChange(of: detail.planSha256) { invalidate() }
@@ -1446,6 +1518,10 @@ struct ReleaseVerificationActionButton: View {
 
     private func run() {
         guard action.isAvailable(for: detail) else { return }
+        if action == .reset || action == .rebind {
+            destructive = action
+            return
+        }
         let token = UUID(), taskID = detail.taskId
         requestID = token; working = true; errorText = nil
         if action == .sync {
@@ -1472,8 +1548,32 @@ struct ReleaseVerificationActionButton: View {
         }
     }
 
+    /// 重置 / 重绑：两条恢复动作都不改原执行、评审与交付，只处理这次补验证尝试。
+    private func performDestructive(_ action: ReleaseVerificationAction) {
+        let verification = detail.release?.currentVerification
+        guard let verificationID = verification?.verificationId,
+              let context = verification?.contextSha256 else {
+            errorText = "缺少当前验证的身份，请刷新后重试。"
+            return
+        }
+        let token = UUID(), taskID = detail.taskId
+        requestID = token; working = true; errorText = nil
+        Task {
+            if action == .rebind {
+                await model.rebindReleaseVerification(taskID: taskID,
+                    onError: { if requestID == token { errorText = $0 } })
+            } else {
+                await model.resetReleaseVerification(taskID: taskID, verificationID: verificationID,
+                    contextSHA256: context,
+                    onError: { if requestID == token { errorText = $0 } })
+            }
+            guard requestID == token else { return }
+            requestID = nil; working = false; onRefreshDetail?()
+        }
+    }
+
     private func invalidate() {
-        requestID = nil; candidate = nil; working = false; errorText = nil
+        requestID = nil; candidate = nil; working = false; errorText = nil; destructive = nil
     }
 }
 

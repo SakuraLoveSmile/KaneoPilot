@@ -1,7 +1,7 @@
 import Foundation
 
 enum ConfirmableAction: Identifiable {
-        case restore, acceptDuplicate, markSent, markDone, releaseLost, cancelPlan
+        case restore, acceptDuplicate, markSent, markDone, releaseLost, cancelPlan, confirmCloseout
         case retryExecution(runID: String)
         case replanBranchUnavailable
 
@@ -13,6 +13,7 @@ enum ConfirmableAction: Identifiable {
             case .markDone: return "mark_done"
             case .releaseLost: return "release_lost"
             case .cancelPlan: return "cancel-request"
+            case .confirmCloseout: return "confirm_closeout"
             case .retryExecution: return "resume"
             case .replanBranchUnavailable: return "replan"
             }
@@ -25,6 +26,7 @@ enum ConfirmableAction: Identifiable {
             case .markDone: return "登记完成"
             case .releaseLost: return "释放失联请求"
             case .cancelPlan: return "终止排队计划"
+            case .confirmCloseout: return "确认收口"
             case .retryExecution: return "重新执行（沿用计划）"
             case .replanBranchUnavailable: return "重新规划"
             }
@@ -47,12 +49,14 @@ enum ConfirmableAction: Identifiable {
                 return "将从目标分支新建工作树，本轮改动不会带入"
             case .retryExecution:
                 return "沿用已确认计划和原工作树重新排队执行，保留已有改动和原执行记录。新轮次使用当前执行设置，领取后会再次调用模型。"
+            case .confirmCloseout:
+                return "只读核对已评审改动的每条路径是否已在目标分支上完全一致。核对通过才把此二级任务置为完成；不修改评审记录，也不伪造评审通过。"
             }
         }
         var destructive: Bool {
             switch self {
             case .acceptDuplicate, .markDone, .releaseLost, .cancelPlan, .replanBranchUnavailable: return true
-            case .restore, .markSent, .retryExecution: return false
+            case .restore, .markSent, .retryExecution, .confirmCloseout: return false
             }
         }
         var expectedExecutionRunID: String? {

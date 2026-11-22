@@ -425,7 +425,7 @@ def cmd_advance_task(ctx, payload: dict) -> dict:
         execution_round = round_store.get_round(conn, current["task_id"], current["run_id"])
         codex = execution_round is not None and execution_round["backend"] == "codex"
         if (engine_claim_scope.effective_mode(conn, current["project_id"]) in ("live", "shadow")
-                or core.review_repair_of(current).get("source_kind") in ("merge_conflict", "build_failure") or codex):
+                or core.review_repair_of(current).get("source_kind") in constants.AI_ACTION_KINDS or codex):
             from .engine import verdict
             from . import goal_blocker
             receipt = db.task_extra(current).get("engine_verdict") or {}

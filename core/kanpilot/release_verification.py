@@ -4,6 +4,7 @@ This module never runs project verification locally and never replaces execution
 or Review evidence. Unknown writes are observed, never sent a second time.
 """
 from pathlib import Path
+from types import SimpleNamespace
 import os
 import re
 import shutil
@@ -35,10 +36,18 @@ def _hash(value):
     return util.sha256_text(util.jdump(value))
 
 
+def _unsettled_children(conn, task_id):
+    """已人工收口的二级任务不再算「仍在修复链上」；只有未收口的才阻止单任务验证。"""
+    from . import followup_closeout
+    for row in conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?', (task_id,)):
+        if not followup_closeout.settled(row):
+            return True
+    return False
+
+
 def _context(conn, task, frozen_target=None, *, restart=None):
-    _require(not task['review_source_task_id'] and not conn.execute(
-        'SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1',
-        (task['task_id'],)).fetchone(), 'release_verification_group', '补验证仅支持无二级修复的独立任务')
+    _require(not task['review_source_task_id'] and not _unsettled_children(conn, task['task_id']),
+             'release_verification_group', '补验证仅支持无二级修复的独立任务')
     policy, mapping = release._policy(conn, task)
     _require(policy['enabled'] and mapping['repository'] == task['repository'],
              'release_repository_changed', '发布未开启或仓库映射已变化')
@@ -124,6 +133,19 @@ def _result(value):
     return dict(verification_id=value['verification_id'], verification=_view(value))
 
 
+def _provider_changed(conn, attempt):
+    """当前执行配置的 provider 是否已经不同于这次尝试冻结的 provider。"""
+    frozen = ((attempt.get('context') or {}).get('runtime_config') or {}).get('provider_id')
+    try:
+        from . import cmd_config
+        current = (cmd_config.cmd_get_exec_config(
+            SimpleNamespace(conn=conn, now=None, now_iso=None), {}).get('config') or {})
+        live = (current.get('pi_desktop') or {}).get('provider_id')
+    except Exception:
+        return False
+    return bool(frozen and live and frozen != live)
+
+
 def attempt_summary(conn, task):
     """SQL-only presentation of the exact current core-owned attempt."""
     result = dict(can_prepare_verification=False, can_sync_verification=False,
@@ -150,6 +172,15 @@ def attempt_summary(conn, task):
             and attempt.get('session_id') and attempt.get('execution_turn_id')
             and not conn.execute("SELECT 1 FROM runtime_operations WHERE scope_id=? AND status IN ('prepared','unknown') LIMIT 1",
                 (_approval_operation(attempt)[0],)).fetchone())
+        # 发送从未落地的尝试（会话已建但没有执行轮次）可以显式重置；命令侧还会只读核对会话确实没有消息。
+        result['can_reset_verification'] = bool(
+            not attempt.get('report_sha256')
+            and ((attempt['state'] == 'blocked' and attempt.get('failure_code') in RESET_ENV_FAILURES)
+                 or (attempt['state'] == 'unknown' and not attempt.get('execution_turn_id'))))
+        # 冻结的执行配置里的 provider 已被移除时，只有重绑到当前配置才能让验证继续。
+        result['can_rebind_verification'] = bool(
+            attempt['state'] in ('unknown', 'blocked', 'failed')
+            and _provider_changed(conn, attempt))
     except (util.KanpilotError, KeyError, TypeError):
         pass
     return result
@@ -157,6 +188,7 @@ def attempt_summary(conn, task):
 
 def ordinary_summary(conn, task, blocked):
     """Local eligibility only; preparation still verifies the complete target."""
+    from . import review_risk
     extra = db.task_extra(task)
     delivery = core.delivery_of(task)
     history = extra.get('review_history') or []
@@ -169,7 +201,7 @@ def ordinary_summary(conn, task, blocked):
             or task['manual_recovery_required'] or task['review_source_task_id']
             or extra.get('external_build_repair_ref') or extra.get('build_failure_hold')
             or core.review_repair_of(task)
-            or conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1', (task['task_id'],)).fetchone()
+            or _unsettled_children(conn, task['task_id'])
             or not policy['enabled'] or mapping['repository'] != task['repository']
             or db.paused(conn, 'delivery') or db.task_auto_paused(task)
             or core.automation_of(task).get('manual_takeover')
@@ -183,7 +215,8 @@ def ordinary_summary(conn, task, blocked):
             or not all(isinstance(command, str) and command.strip() for command in commands)
             or delivery.get('mode') != 'pr' or delivery.get('pr_state') != 'MERGED'
             or type(delivery.get('pr_number')) is not int or not delivery.get('merged_at')
-            or extra.get('review_conclusion') != 'pass' or review.get('conclusion') != 'pass'
+            or (review_risk.identity(task) is None
+                and (extra.get('review_conclusion') != 'pass' or review.get('conclusion') != 'pass'))
             or not all(review.get(key) == task[column] for key, column in
                 (('execution_run_id', 'run_id'), ('review_key', 'review_key'),
                  ('report_sha256', 'review_report_sha256'), ('report_path', 'review_report_path')))
@@ -719,7 +752,7 @@ def trusted_runtime_commands(conn, scope, args, *, sql_only=False):
             and db.task_is_active(task) and task['status'] in ('in_review', 'done')
             and release._identity(task) == identity and task['repository'] == context.get('repository')
             and not task['review_source_task_id'] and not core.review_repair_of(task)
-            and not conn.execute('SELECT 1 FROM tasks WHERE review_source_task_id=? LIMIT 1', (task_id,)).fetchone()
+            and not _unsettled_children(conn, task_id)
             and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (task_id,)).fetchone()
             and not db.paused(conn, 'delivery') and not db.task_auto_paused(task)
@@ -1268,16 +1301,31 @@ RESET_ENV_FAILURES = (
 _PRESEND_REASON_MARKERS = ('控制面未启用', '不是 true', 'connection_file', 'Pi-Desktop', '保留回执', '已用于不同参数', '回执缺失')
 
 
-def _resettable(value):
-    """环境类失败且没有报告：允许显式重置后重新验证。"""
+def _resettable(value, *, empty_session=False):
+    """环境类失败、没有报告、或会话里根本没有消息的未知发送：允许显式重置后重新验证。"""
     if value.get('report_sha256'):
         return False
     state = value.get('state')
     if state == 'blocked' and value.get('failure_code') in RESET_ENV_FAILURES:
         return True
+    if state == 'unknown' and empty_session and not value.get('execution_turn_id'):
+        # 会话已建但一条消息都没有：prompt 从未落地，保留它只会让这次尝试永远无法推进。
+        return True
     reason = str(value.get('reason') or '')
     return (state == 'unknown' and not value.get('session_id')
             and any(marker in reason for marker in _PRESEND_REASON_MARKERS))
+
+
+def _session_is_empty(value):
+    """Read-only: 该会话是否一条消息都没有（prompt 从未送达）。"""
+    if not value.get('session_id'):
+        return False
+    try:
+        client = _client(value, read_only=True)
+        page = client.session_get(value['session_id'], message_limit=1)
+    except util.KanpilotError:
+        return False
+    return isinstance(page, dict) and not (page.get('messages') or [])
 
 
 def _discard_scope_only(conn, task_id, verification_id):
@@ -1391,8 +1439,8 @@ def cmd_reset_release_verification(ctx, payload):
     if not synthetic:
         _require(value['context']['context_sha256'] == payload['expected_context_sha256'],
                  'release_verification_reset', '验证上下文已变化')
-    _require(_resettable(value),
-             'release_verification_reset', '只有环境类失败且没有报告的尝试可以重置')
+    _require(_resettable(value, empty_session=_session_is_empty(value)),
+             'release_verification_reset', '只有环境类失败、发送从未落地且没有报告的尝试可以重置')
     _require(payload.get('confirm') is True, 'release_verification_reset',
              '重置必须明确确认：旧尝试保留审计，核验会重新运行并可能再次失败')
     with db.write_txn(ctx.conn):

@@ -224,6 +224,34 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
          "expected_pr_head_sha": (True, "str"), "note": (False, "str|null"),
          "confirm": (True, "bool")},
         _automation_command("delivery_rebind", "cmd_rebind_delivery_head")),
+    # CLI-only：丢弃一次性处理从未推送的本地提交，回到已评审提交并重新评审（KP-MG02）。
+    "discard-task-ai-action": (
+        {"task_id": (True, "str"), "action_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_restore_head_sha": (True, "str"), "expected_pr_head_sha": (True, "str"),
+         "note": (False, "str|null"), "confirm": (True, "bool")},
+        _automation_command("task_ai_discard", "cmd_discard_task_ai_action")),
+    # CLI-only：用户接受本轮评审的遗留风险，继续手动分支交付（KP-MG03 #4）。
+    "accept-review-risk": (
+        {"task_id": (True, "str"), "expected_review_key": (True, "str"),
+         "expected_report_sha256": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_plan_sha256": (True, "str"), "note": (False, "str|null"),
+         "confirm": (True, "bool")},
+        _automation_command("review_risk", "cmd_accept_review_risk")),
+    "revoke-review-risk-acceptance": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"), "confirm": (True, "bool")},
+        _automation_command("review_risk", "cmd_revoke_review_risk_acceptance")),
+    # CLI-only：把评审发现的超范围问题另立为二级任务（KP-MG04 v1）。
+    "create-followup-task": (
+        {"source_task_id": (True, "str"), "dedupe_key": (True, "str"),
+         "title": (True, "str"), "description": (False, "str|null"),
+         "priority": (False, "str|null"), "confirm": (True, "bool")},
+        _automation_command("followup_task", "cmd_create_followup_task")),
+    # KP-MG06：二级任务的人工确认收口（只读核对目标分支内容后写回执并置 done）。
+    "confirm-followup-closeout": (
+        {"task_id": (True, "str"), "expected_head_sha": (False, "str|null"),
+         "pr_number": (False, "int"), "note": (False, "str|null"),
+         "confirm": (True, "bool")},
+        _automation_command("followup_closeout", "cmd_confirm_followup_closeout")),
     "doctor": (
         # §5.27.6：`--live` 为 `online=true` 的同义（CLI flag 合并进 payload）。
         {"online": (False, "bool"), "live": (False, "bool")}, cmd_read.cmd_doctor,
@@ -576,6 +604,8 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "backend": (False, "str"),
             "pi_desktop": (False, "dict"),
             "codex": (False, "dict"),
+            # §5.27：一次性 AI 处理的模型覆盖（空对象=跟随通用执行配置）。
+            "one_shot": (False, "dict"),
             # v4（§5.24.1）：dispatch/monitor 控制端后端（缺省 pi）。
             "controller_backend": (False, "str"),
         },

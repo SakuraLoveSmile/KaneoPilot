@@ -31,9 +31,10 @@ DEFAULTS = {
 # v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
 # 执行期提问等待上限（exec_config._merge :74 写入
 # constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS）也是 load/get 响应顶层键。
+# §5.27（2026-11-19）：一次性 AI 处理的模型覆盖 one_shot（未设置时为 null）。
 CONFIG_KEYS = set(DEFAULTS) | {
     "updated_at", "backend", "pi_desktop", "controller_backend",
-    "execution_question_max_wait_seconds",
+    "execution_question_max_wait_seconds", "one_shot",
 }
 
 # 夹具凭据占位值：只存在于 models.json 的 apiKey 字段，响应绝不透出。

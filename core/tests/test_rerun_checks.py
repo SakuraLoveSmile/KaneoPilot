@@ -43,6 +43,34 @@ def test_rerun_needs_a_named_failing_check(case):
     assert "rerun_checks" in derive.allowed_actions(case.ctx.conn, case.task(), case.ctx.now)
 
 
+def test_rerun_hidden_when_the_notice_is_from_an_old_head(case):
+    case.update(auto_merge={"state": "blocked",
+                            "reason": "检查未通过：app-ci/analyze-test，修复或重跑后会自动合并",
+                            "head_sha": "e" * 40})
+    assert "rerun_checks" not in derive.allowed_actions(case.ctx.conn, case.task(), case.ctx.now)
+    with pytest.raises(util.KanpilotError, match="旧提交"):
+        run(case)
+
+
+def test_rerun_hidden_when_the_notice_has_no_head(case):
+    case.update(auto_merge={"state": "blocked",
+                            "reason": "检查未通过：app-ci/analyze-test，修复或重跑后会自动合并"})
+    assert "rerun_checks" not in derive.allowed_actions(case.ctx.conn, case.task(), case.ctx.now)
+    with pytest.raises(util.KanpilotError, match="旧提交"):
+        run(case)
+
+
+def test_rerun_checks_the_notice_before_reading_github(case, monkeypatch):
+    case.update(auto_merge={"state": "blocked",
+                            "reason": "检查未通过：app-ci/analyze-test，修复或重跑后会自动合并",
+                            "head_sha": "e" * 40})
+    calls = []
+    monkeypatch.setattr(gh_client, "pr_view", lambda *a, **k: calls.append(a))
+    with pytest.raises(util.KanpilotError):
+        run(case)
+    assert calls == []
+
+
 def test_rerun_requires_the_pr_to_match(case, monkeypatch):
     blocked(case)
     monkeypatch.setattr(gh_client, "pr_view", lambda *a, **k: dict(failing_pr(case), headRefOid="f" * 40))

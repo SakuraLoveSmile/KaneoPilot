@@ -230,6 +230,22 @@ def _dto(batch,required=False,*,conn=None):
     return value
 
 
+def _prepare_blocker(task,delivery):
+    """The blocker of the last explicit 构建并发布 attempt, while its identity holds.
+
+    发布准备在命令里就失败了（典型：release_target_unverified），它不像同步阶段那样留下
+    观测；没有这条回执，界面只看到一次报错，却拿不到「准备验证」这个下一步。
+    """
+    value=db.task_extra(task).get('release_prepare_blocked') or {}
+    # 只有「目标源码未验证」需要界面补一个下一步入口；其他失败码由投影按当前证据自行判定，
+    # 不能被上一次尝试的回执盖住（例如随后到达的评审风险接受会改变门禁）。
+    if (value.get('head_sha')!=delivery.get('head_sha') or value.get('merged_at')!=delivery.get('merged_at')
+            or value.get('code')!='release_target_unverified' or not value.get('message')):
+        return None
+    return dict(state='blocked',title='发布受阻',reason=value['message'],
+                blockers=[dict(code=value['code'],message=value['message'])])
+
+
 def _last_preflight_blocker(task,delivery,member_ids):
     """Display an accepted observation only while its delivery identity matches."""
     try:
@@ -327,7 +343,7 @@ def projection(conn,task):
     from . import review_delivery
     if review_delivery.candidate(conn,task) is not None:
         return dict(state='waiting_group',title='待 PR 交付',
-            reason=review_delivery.WAITING_REASON,
+            reason=review_delivery.waiting_reason(task),
             required=required,channel=policy['channel'],root_task_id=task['task_id'],
             member_task_ids=[task['task_id']],assets=[],blockers=[],can_start=False,can_reconcile=False)
     pending=_pending(conn,task['project_id'])
@@ -345,16 +361,36 @@ def projection(conn,task):
         return dict(state='blocked',title='发布受阻',reason=str(exc),required=required,channel=policy['channel'],
             root_task_id=task['task_id'],member_task_ids=[task['task_id']],assets=[],
             blockers=[dict(code=exc.code,message=str(exc))],can_start=False,can_reconcile=False)
-    related=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
+    from . import followup_closeout
+    # 已人工收口的二级任务不再是发布组成员：它的修复已经随目标分支进入父任务的合并提交，
+    # 继续留在组里会让成员证据永远凑不齐，也让旧的阻塞观测一直挂着。
+    related=[row for row in conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],))
+             if not followup_closeout.settled(row)]
     ids=sorted({root['task_id'],*(row['task_id'] for row in related)})
     def locally_ready(row):
+        from . import review_risk, followup_closeout
         extra=db.task_extra(row);d=core.delivery_of(row)
-        return (row['status'] in ('in_review','done') and db.task_is_active(row)
-            and extra.get('review_conclusion')=='pass' and bool(row['run_id'] and row['review_report_sha256'])
-            and d.get('mode')=='pr' and bool(d.get('merged_at')) and not core.review_repair_of(row)
-            and not conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
+        active=bool(conn.execute("SELECT 1 FROM requests WHERE task_id=? AND status IN ('queued','claimed') AND kind!='delivery' LIMIT 1",
                                  (row['task_id'],)).fetchone())
-    waiting=(bool(closeout._local(conn,root,software_ready=True)['blockers']) or any(not locally_ready(row) for row in related)
+        if active or not db.task_is_active(row):
+            return False
+        # KP-MG06：人工确认收口的二级任务，其修复已由另一条 PR 落在目标分支；
+        # 它没有自己的 delivery 记录，只以 done + 收口回执作为合并与验证证据。
+        # 收口回执先于 repair 判定：收口前留着的 held 修复记录不构成新的意图。
+        if followup_closeout.settled(row):
+            return row['status']=='done'
+        if core.review_repair_of(row):
+            return False
+        authorized=extra.get('review_conclusion')=='pass' or review_risk.identity(row) is not None
+        return (row['status'] in ('in_review','done')
+            and authorized and bool(row['run_id'] and row['review_report_sha256'])
+            and d.get('mode')=='pr' and bool(d.get('merged_at')))
+    # 收尾周期的阻塞项只对「原始任务处于待修复评审」的链路成立；评审已通过的原始任务
+    # 配上二级任务（followup）时，那些 review_cycle_missing/unbound_child 只是口径不符，
+    # 不能把发布门永久钉在等待状态。成员是否具备合并与验证证据仍由 locally_ready 判定。
+    cycle = db.task_extra(root).get('review_conclusion') == 'changes_requested'
+    blockers = closeout._local(conn, root, software_ready=True)['blockers'] if cycle else []
+    waiting=(bool(blockers) or any(not locally_ready(row) for row in related)
              if related else not locally_ready(root))
     state='waiting_group' if waiting else 'ready'
     title='等待关联修复' if waiting else '待构建发布'
@@ -367,7 +403,7 @@ def projection(conn,task):
     value=dict(state=state,title=title,reason=reason,
         required=required,channel=policy['channel'],root_task_id=root['task_id'],member_task_ids=ids,
         assets=[],blockers=[],can_start=policy['enabled'] and not waiting,can_reconcile=False)
-    blocked=_last_preflight_blocker(root,delivery,ids) if not waiting else None
+    blocked=(_last_preflight_blocker(root,delivery,ids) or _prepare_blocker(root,delivery)) if not waiting else None
     if blocked:
         value.update(state='blocked',title='发布受阻',reason='上次发布核对：'+blocked['reason'],
                      blockers=blocked['blockers'],can_start=False)
@@ -462,12 +498,14 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
                              (task['task_id'],)).fetchone(),'release_request_active','当前任务仍有规划、执行或评审请求')
     hashes={};evidence=closeout._task_evidence(conn,task,hashes);extra=db.task_extra(task);d=core.delivery_of(task)
     history=extra.get('review_history') or [];review=history[-1] if history else {}
-    _require(extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass'
+    from . import review_risk
+    risk_accepted=review_risk.identity(task) is not None
+    _require(((extra.get('review_conclusion')=='pass' and review.get('conclusion')=='pass') or risk_accepted)
         and all(review.get(key)==task[column] for key,column in (('execution_run_id','run_id'),('review_key','review_key'),
              ('report_sha256','review_report_sha256'),('report_path','review_report_path')))
         and review.get('head_sha')==d.get('head_sha')
         and (evidence['exact_coverage'] or evidence.get('user_accepted') is True),
-        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过，以及逐字验证或明确人工接受的当前授权')
+        'release_review_invalid','发布需要当前执行和最终提交的独立评审通过或明确接受遗留风险，以及逐字验证或人工接受的当前授权')
     closeout._report_bytes(task['review_report_path'],task['review_report_sha256'],hashes)
     repo=git_delivery.origin_github_repo(task['repository'])
     _require(repo and d.get('mode')=='pr' and type(d.get('pr_number')) is int,'release_pr_missing','发布需要同仓库已合并的 PR')
@@ -528,6 +566,14 @@ def _single_proof(conn,task,*,frozen_target=None,allow_unverified_target=False,e
 
 def _software_proof(conn,root):
     children=list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=?',(root['task_id'],)))
+    entries=[row for row in db.task_extra(root).get('review_history') or []
+             if isinstance(row,dict) and row.get('execution_run_id')==root['run_id']
+             and row.get('conclusion')=='changes_requested']
+    if children and not entries:
+        # 评审已通过、二级任务是「另立任务」（followup），不属于父任务的修复周期：
+        # 它们的内容已随目标分支进入父任务的合并提交，发布证据只用父任务自己的
+        # 交付事实，不套用修复链的 cycle 绑定与子任务复核。
+        return _single_proof(conn,root)
     if children:
         saved=db.task_extra(root).get('parent_closeout') or {}
         frozen=saved.get('target_sha') if root['status']=='done' and saved.get('state')=='completed' else None
@@ -740,12 +786,24 @@ def cmd_prepare_task_release(ctx,payload):
     if attached:
         return dict(task_id=task['task_id'],context_sha256=attached['context_sha256'],release=projection(ctx.conn,task))
     try:
-        context=_prepare(ctx,task['task_id']);value=projection(ctx.conn,task)
+        context=_prepare(ctx,task['task_id'])
+        with db.write_txn(ctx.conn):
+            fresh=db.require_task(ctx.conn,task['task_id'])
+            if 'release_prepare_blocked' in (db.task_extra(fresh) or {}):
+                extra=db.task_extra(fresh);extra.pop('release_prepare_blocked',None)
+                db.update_task(ctx.conn,fresh['task_id'],ctx.now_iso,extra_json=extra)
+        value=projection(ctx.conn,task)
         if value.get('state')=='blocked' and not value.get('batch_id'):
             value.update(state='ready',title='待构建发布',reason='已核对当前交付证据，可构建并发布版本',blockers=[],can_start=True)
         value.update(context_sha256=context['context_sha256'],target_sha=context['proof']['target_sha'],version=context['version'])
         return dict(task_id=task['task_id'],context_sha256=context['context_sha256'],release=value)
     except (ReleaseBlocked,closeout._Blocked,util.KanpilotError,gh_client.GhError,git_delivery.GitDeliveryError,OSError,ValueError) as exc:
+        code=getattr(exc,'code','release_not_ready')
+        with db.write_txn(ctx.conn):
+            fresh=db.require_task(ctx.conn,task['task_id']);d=core.delivery_of(fresh)
+            db.set_extra(ctx.conn,fresh,ctx.now_iso,release_prepare_blocked=dict(
+                code=code,message=util.redact(str(exc)),head_sha=d.get('head_sha'),
+                merged_at=d.get('merged_at'),at=ctx.now_iso))
         value=projection(ctx.conn,task)
         if value is None:
             value=dict(state='blocked',title='发布受阻',required=False,channel=DEFAULT_POLICY['channel'],root_task_id=task['task_id'],

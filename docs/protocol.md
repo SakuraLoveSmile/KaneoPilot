@@ -1796,7 +1796,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - 沿用现有 Plus Goal 报告与源码快照验证底线；核心提交严格绑定父提交 `[原 head,冻结 base]`、同执行轮次及已验证树，崩溃恢复也核对双父身份。新提交必须重新 Review；已有 PR/pushed_sha 不得跳过复审。通过后正常推送原 PR 分支、重新核对远端检查并沿现有项目自动合并策略推进。失败、base/head 漂移或结果未知不自动启动新的 AI 处理。
 - 复审通过时，保存 `extra.task_ai_action_delivery` 的同次授权、当前执行/计划/需求/新 head/PR 与精确 Review 身份；清除 fix_request 后仍只允许此结果的确定性交付及检查轮询。Review report 成功创建幂等 delivery 请求，未合并时按 next_sync_at 继续核对，合并后正常同步完成；仅放行匹配该回执的请求，不扩大项目自动化范围。身份变化、人工接管或暂停后不继续。验证失败不自动新增质量修复轮，不允许人工跳过验证或从旧冲突身份重新派发；可只读重核已有证据。
 - 一次性处理完成但正式验证证据不足时，用户可显式确认 `resolve {action:"retry_verification",expected_execution_run_id}`，UI 称「补齐验证报告…」。仅当前 `merge_conflict`、可信已发送终态和空闲 Plus 可用；沿用原冻结计划及配置、工作树、已解决暂存结果，不创建 plan 请求、不重做 merge、不消耗 Review 修复次数。确认前冻结 `verification_recovery` 的 source run、原 run 记录目录、工作树源码/索引指纹与 MERGE_HEAD/ORIG_HEAD；事务内及 dispatch 前复核当前 run、execution_retry、修复身份、PR/head/base 和远端需求。漂移则保留现场并拒绝。新轮只核对原日志补证，无法确认时由 Plus 重新执行原验证；旧 run/报告保留。取消、旧 run、重复确认及自动 actor 均不得启动；普通 resume/retry/replan 不能绕过此门。新证据通过后沿原双父提交→新 Review→原 PR 链推进；再次缺证仅阻塞，不自动再调用模型。
-- `get-task.task_ai_action={can_prepare,reason,current,history}` 为核心投影；history 保留 action_id、类型、状态及中文 state_title、模型摘要、时间、执行轮次/会话、PR/head/base 与结果。状态区分 queued/running/awaiting_review/completed/needs_followup/blocked/failed；“已排队”不表示模型已启动。Review 修复轮额度不被冲突处理次数消耗；既有费用上限继续生效，用户启动开启新计时段。无数据库结构迁移，不直接改 Plus 数据。
+- `get-task.task_ai_action={can_prepare,reason,current,history}` 为核心投影；history 保留 action_id、类型、状态及中文 state_title、模型摘要、时间、执行轮次/会话、PR/head/base 与结果。状态区分 queued/running/awaiting_review/completed/needs_followup/blocked/failed/discarded；“已排队”不表示模型已启动。Review 修复轮额度不被冲突处理次数消耗；既有费用上限继续生效，用户启动开启新计时段。无数据库结构迁移，不直接改 Plus 数据。
 
 #### 构建失败的一次性处理（2026-10-22）
 
@@ -1807,7 +1807,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 - candidate 沿用 task_id/kind/title/context_sha256/config_sha256/model_summary；branch/base_branch/head_sha/base_sha 为新修复身份，新 head 与 base 可同为冻结源码基线。新 PR 尚未创建，`pr_number=null`；另提供 `source_pr_number/source_pr_url/release_batch_id/release_tag/workflow_run_id/workflow_attempt/workflow_url`。冻结上下文分开保存 source_worktree_path/source_head_sha/source_delivery 与新工作树身份，旧执行终态按旧路径核验。配置使用通用执行设置的实际快照，只接受具备可信报告能力的 Plus 或 Codex CLI，不静默换模型。
 - `start-task-ai-action` 使用原候选与配置指纹、confirm=true；重新读取失败 attempt、日志及全部身份，事务内再核对任务、预算、暂停和未决操作。确认重放仅返回已有处理，不增加会话。原 delivery、release_ref 与已有 release_verification_ref 完整归档，原失败批次与补验证运行证明保留；新链移除旧补验证引用，独立核验本轮代码。新分支与独立工作树从冻结目标提交创建，先保存 runtime_operations 回执再做 Git 操作；本地尚无远端合并对象不阻塞只读预检，确认后由核心抓取冻结目标分支，抓取前后核对远端仍为该提交，不移动用户分支或覆盖已有目录/用户改动，不复活原已合并 PR。
 - 新执行只修复本次失败原因及必要关联问题，日志是待核对材料，不能扩大权限。不重新实施原计划；执行端运行全部冻结 verify 及必要专项检查，Pilot 只核对证据，不代跑验证。各引擎模式均要求结构化报告、原生命令退出码和源码快照；Plus 沿 §5.27.11，Codex CLI 沿 §5.31。验证后创建普通单父提交，必须重新 Review，不使用冲突处理的双父提交规则。
-- 复审通过后，确定性交付只为同次授权、精确新执行/评审/提交创建新的修复 PR。持久保存合并/发布确认门，即使项目开启 auto_merge_pr、后台轮询或应用重启也不得自动合并；用户之后手工合并，也不得据此自动开启新构建。再次发布走独立的发布预检与确认，不能把旧失败批次当成新批次重发。复审要求修改、验证失败、基线变化或结果未知均保留现场与历史，等待用户处理，不自动转换成普通 Review 付费修复。
+- 复审通过后，确定性交付只为同次授权、精确新执行/评审/提交创建新的修复 PR。持久保存合并/发布确认门，即使项目开启 auto_merge_pr、后台轮询或应用重启也不得自动合并；用户之后手工合并，也不得据此自动开启新构建。再次发布走独立的发布预检与确认，不能把旧失败批次当成新批次重发。复审要求修改、验证失败、基线变化或结果未知均保留现场与历史，等待用户处理，不自动转换成普通 Review 付费修复；界面只提供用户主动确认的评审修复入口。
 - 同次修复的新 PR 真实合并后，界面才允许单独准备并确认新发布；明确启动新批次后才能跟进该批次状态。正式版的 pending 守卫仅可在完整新交付证据成立时，排除该 action 精确绑定、被本次修复替代的原 failed 批次；其他未发布正式批次仍阻塞。连续失败仅沿逐条可信、同一项目/仓库/根任务且版本递增的修复前驱链解除历史占位，每个新失败批次仍须用户另行确认 AI 处理和发布。后继批次可信 published 后，核对其已接受回执、冻结上下文与发布证明，持续解除其可信前驱链的占位，允许其他任务正常准备后续正式版；后续普通任务不可凭尚未发布的后继或伪造关联解除占位。旧批次不改写、不弃用，旧版本/tag 不复用，新版本按现有历史与远端 inventory 递增并在确认中显示。
 - `get-task.task_ai_action.kind` 决定显示位置与预检类型；旧投影缺字段时界面按 merge_conflict 解释。构建修复的 current/history 沿同一状态词与会话入口；原已合并 PR 和失败构建仍可查看。旧批次在修复后作为历史证据，不允许同步操作以新任务身份改写原批次，投影 can_reconcile=false、is_historical=true；批量同步跳过所有已归档修复来源批次，继续处理当前运行批次。历史标记仅避免旧失败覆盖当前修复/复审/新 PR 状态，required=true 的发布完成门保留。无 schema migration，不改真实 Plus/Codex 数据。
 
@@ -1816,10 +1816,88 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 新增 `kind=check_failure`，仍在原任务启动，复用同一 PR 与分支，不创建二级任务、新 PR 或 plan 请求。用户确认授权一次失败日志诊断、最小代码修复、可信验证、复审与重新交付；不授权自动重试、自动合并或放宽检查。
 
 - 入口只由合并门当前观测决定：`delivery.auto_merge.state=blocked` 且原因以「检查未通过：」开头，说明本次提交确有 GitHub 失败的检查；`waiting_checks`、其他阻塞原因、已合并或关闭的 PR 不进入。同一提交已处理过一次时只显示处理记录，不再启动新的付费轮次。
-- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论、超限拒绝而不猜测或截断成假证据）。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
-- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单与失败日志；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
+- `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论）。提示词只带「可点开的 run/job 链接 + 失败信号摘录」：摘录去通过行与时间戳噪声、保留失败行前后上下文、硬上限 12k 字符，超限标注截断，完整原文以链接为准；不猜测失败原因、不编造日志内容。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。
+- `start-task-ai-action` 沿用同一候选与配置指纹、confirm 与幂等规则；确认后重新核对失败检查与配置，只创建一条 dispatch。冻结 `fix_request.mode=direct,source_kind=check_failure`，材料为失败检查清单（含 job 链接）与失败信号摘录；执行端只做让其通过的最小改动并运行原计划全部 verify，禁止删除、跳过或放宽检查来通过。
 - 证据、提交、复审与交付沿既有链：结构化 Goal 报告与源码快照、单父提交、必须重新 Review；通过后推送原 PR 分支并按项目自动合并策略重新核对检查。修复失败、检查漂移或结果未知保留现场，不自动再次调用模型。
+- 与其它一次性处理一致的身份约束：`prepare` 冻结 `target_base_sha` 为本次评审依据的交付基线提交（检查修复在原分支原地提交，不合并目标分支，因此交付 `base_sha` 不移动）；dispatch 领取按冻结的`action_config` 固化执行轮次；复审通过登记交付续接回执，`继续交付`与交付阶段只对这一精确执行/评审/提交放行。该轮不进入普通 Review 修复入口，失败也不自动启动引擎补救或新模型轮次。
+
+#### 一次性处理的模型选择（2026-11-19）
+
+三类一次性处理默认沿用「通用执行配置」；另可在 `settings.exec_config.one_shot` 单独指定
+`{model_id?, thinking_level?}`，只覆盖 Plus 分支的模型与思考等级，provider、连接文件与权限模式
+仍跟随通用配置。缺省该键或空对象 = 跟随通用配置；非 Plus 后端忽略该覆盖，不因它切换后端。
+`prepare-task-ai-action` 按覆盖生成 `action_config` 并冻结进候选，确认弹窗的模型摘要即本次实际使用
+的模型；之后修改设置只影响新候选，已确认轮次继续用冻结快照。只开放模型与思考等级，不开放切换后端。
+
 - `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
+
+#### 放弃一次性处理（2026-11-20）
+
+一次性处理以「需要后续处理」收尾、评审修复次数又用尽时，任务会被钉在从未推送的本地提交上：评审修复入口提示「修复次数已用尽」，AI 处理要求评审结论为 pass，重跑失败检查要求交付 head 等于 PR head，登记完成被发布门拦住，没有现成出口。核心提供 CLI-only 的放弃命令，把任务退回动作前已评审并已推送的提交；丢弃的只是本机未推送的工作，不动 PR、不强推、不删除任何提交或评审报告。
+
+- `discard-task-ai-action {task_id,action_id,expected_head_sha,expected_restore_head_sha,expected_pr_head_sha,confirm:true,note?}`。首版只支持 `check_failure`，且只接受手动任务（`extra.automation` 为空）；自动处理任务的放弃另行设计，命令明确拒绝。`expected_restore_head_sha` 必须同时等于该动作冻结的 `head_sha`、交付 `pushed_sha` 与 PR 当前 head（动作提交从未到达远端）。
+- 前置，任一不满足即拒绝，库、引用、工作树均不变：动作状态为 `needs_followup`；任务活动、未暂停（含评审、交付阶段）、处于 `in_review/review`、当前评审结论不是 pass、无排队或领取中的请求、无未确认的 `pr-merge:` 回执；交付为 PR 模式且本地 head 等于 `expected_head_sha`、无 `merge_head_sha`；`delivery.commits` 中 restore 提交恰好出现一次，其后全部是被放弃的提交（最后一行是当前 head），保留的最后一行属于动作的来源执行轮次，被放弃行所属轮次都在动作启动之后创建，来源执行轮次已结束且仍在正常列表、工作树路径与交付一致；`review_history` 中恰有一条对应（来源执行轮次、restore head）的 pass，其后的评审都不是 pass 且都属于被放弃的轮次；任务工作树干净、无未完成合并，`restore..head` 是线性单父提交链且恰好等于被放弃的提交；真实 PR 仍为同仓库、OPEN、同编号与分支，`headRefOid` 等于 `expected_pr_head_sha`。
+- 顺序，回执优先、可重入：① 写 `runtime_operations` 回执（scope `task-ai-action-discard:<task_id>`，operation `discard:<action_id>`，身份为上述五个标识）并置 unknown；② 建保全引用 `refs/kaneopilot/discarded/<task_id>/<action_id 前 8 位>` 指向被丢弃的 head 并核对可解析，已存在时必须指向同一提交；③ 在任务自己的干净工作树内把分支退回 restore head（旧 head 已被保全，远端不受影响）；④ 同一事务写库并完成回执；⑤ 为来源执行轮次重新核对验证回执。任一步中断后，同参数重入按各步实际状态续做，不重复建引用、评审或事件。
+- 第④步写入：交付 `head_sha` 回到 restore head、`commits` 截到保留的行；`review_history` 里被放弃之后的评审追加 `discarded:{action_id,at}` 标记，条目与报告字节原样保留；动作条目登记 `state=discarded`（`state_title` 为「已放弃」）及 `discarded_head_sha/restore_head_sha/preserved_ref/discard_note`；移除属于被放弃链的收据（`fix_request`、`review_conclusion`、`review_registered_at`、`registered_review_identity`、`verification_override`、`plan_execution_hold`、`execution_retry`、`engine_verdict`）；修复次数回到动作启动之后第一个修复轮开始之前的值（动作之后没有修复轮则不变）；任务回到 `in_review/review`，`run_id`、会话身份回到来源执行轮次，清空 `review_report_*` 与 `review_key`；排队一次对 restore head 的新评审（`review:<task_id>`，仍走同一评审入口）；事件 `task_ai_action_discarded`。选择新评审而非复原旧评审，是为避免把 `run_id`、`review_*`、`engine_verdict`、`delivery.commits` 逐项倒回而与追加式评审历史冲突。
+- 第⑤步复用既有 `engine-verdict`（不带请求）重新核对来源执行轮次的完整验证证据，并用 `verdict.valid_committed_receipt` 复核；结果 `verdict.state` 为 `confirmed`、`unconfirmed` 或 `failed`。评审本身不依赖该回执；它是发布证明与继续交付所需，未确认时用同一参数再次调用即可，已放弃的动作只重试这一步。再次调用不重复建引用、评审或事件；任务已离开恢复后的提交时拒绝。
+- 之后：失败检查可立即 `rerun-checks`（交付 head 又等于 PR head）。新评审通过后任务停在 `in_review`，等用户重新点「继续交付」：旧的「继续交付」授权绑定的是旧评审与证据身份，放弃后即失效。为此 `review_delivery` 增加一种候选，同时满足才成立——手动任务；`delivery.mode=pr`、PR 已存在且未合并，`head_sha==pushed_sha==` 最后一条动作（须为 `discarded`）的 `restore_head_sha`；无 `task_ai_action_delivery`、无活动修复；`review_history` 最新一条是未标记 `discarded` 的 pass，且其前有被该动作标记的评审（证明这条 pass 产生于放弃之后）——并且当前没有有效手动交付回执、没有排队或领取中的请求，此时任务显示「待 PR 交付」（说明文字为复用已有 PR），`allowed_actions` 首位是 `continue_delivery`。评审结算对这种任务不走 `advance-task done`（PR 未合并，本地不能完成），保持 `in_review` 等用户确认。`continue_delivery` 本身不变：必须由用户发起，逐条核对验证通过证据（含放弃时重新核对的 `engine_verdict`）、评审报告字节、干净工作树与 Kaneo 远端，再写入绑定新评审与证据身份的手动交付回执并为已有 PR 入队 delivery 请求；之后的 PR 核对、合并门与发布门与普通手动 PR 交付相同。放弃之后再启动新的 AI 处理会使这条候选失效（最后一条动作不再是已放弃）。选评审材料的上一轮评审时跳过带 `discarded` 标记的条目；macOS 对动作状态按字符串比较，未知值走默认色；不改 Kaneo 远端（任务远端状态仍是 in-review）。
+
+#### 接受遗留风险并交付（2026-11-20）
+
+评审坚持 `changes_requested`、修复轮用尽、但用户判断剩余问题可接受时，可用手动确认的 CLI 出口继续交付。v1 只覆盖尚未创建 PR 的手动分支交付；PR 模式的死局仍走「放弃一次性处理」。
+
+- `accept-review-risk {task_id,expected_review_key,expected_report_sha256,expected_head_sha,expected_plan_sha256,confirm:true,note?}`；`revoke-review-risk-acceptance {task_id,expected_head_sha,confirm:true}`。均为 CLI-only，不进入 `resolve`，不写 `runtime_operations`（无外发副作用），事件 `review_risk_accepted` / `review_risk_acceptance_revoked`。
+- 前置，任一不满足即拒绝且库与工作树不变：手动任务（无 automation）、未人工接管或暂停、`in_review/review`、`changes_requested`、存在 held 的 direct 修复且不属于一次性处理、无排队或领取中的请求、仓库映射有效、执行轮次已成功收尾、`delivery.mode=manual` 且无 PR/pushed/merged/stage_contracts、发布策略启用、工作树干净且 head 等于期望值、本轮评审请求已成功结算。
+- 写入 `extra.review_risk_acceptance`：用户身份与时间、note（≤500 字）、任务与分支身份快照、`review_key/report_path/report_sha256/head_sha/plan_sha256/requirements_sha256/execution_run_id/fix_round`、评审请求与结果摘要、从本轮 fix 提炼的 findings、evidence 摘要、自校验 id；同时移除本轮 `fix_request`（评审历史与报告字节不变）。同 head 重复调用幂等。
+- 授权在任一身份漂移时自动失效：head、报告路径或哈希、plan、需求快照、run_id、修复轮次、出现新的 `fix_request`、evidence 摘要变化。`get-task` 投影 `review_risk`（时间、note、findings）。
+- 交付：`review_delivery` 的评审身份取「pass 或有效风险接受」；`allowed_actions` 首位出现 `continue_delivery`，仍须用户显式发起。`review_delivery`、`cmd_delivery_pr` 与发布预检（`release_delivery._single_proof`、`release_verification`）认同一风险身份；逐字验证证据仍须满足，完成门与自动合并策略不变。撤销后回到原先 blocked 的修复态。
+
+#### 另立二级任务（2026-11-20）
+
+评审报告的「遗留风险」写明的问题超出原任务范围时，不应消耗原任务剩余的修复轮。核心提供 CLI-only 的确认式入口，把这一发现另立为同项目、同仓库的普通二级任务；判断仍由人做（评审已给出阻断/遗留的分类），不额外调用模型。
+
+- `create-followup-task {source_task_id,dedupe_key,title,description?,priority?,confirm:true}`。`confirm` 必须为 true；`dedupe_key` 非空且不含注释定界符；标题 1-200 字、描述 ≤8000 字；优先级沿用 bridge 允许集合（默认 `high`）。
+- 幂等：先按 `review_source_task_id=source` 且 `extra.followup_key=dedupe_key` 查本地任务，命中直接返回 `created:false`；否则经内嵌 bridge 以 marker `<!-- kaneopilot-followup:KEY -->` 查/建远端任务（`create_todo` 增加 `marker_prefix`，原 `codex-kaneo-review` 默认不变）。remote 写先写 `runtime_operations` 回执（scope `followup-task:<source>`，operation 为 source+key 的规范哈希）；连接中断留 unknown 不自动重放，同参数重试由远端 marker 去重。
+- 新建行：`plan_kind=standard`、`stage=plan`、`status=needs_plan`、`review_source_task_id=source`、复用来源项目/名称/仓库，写来源快照到 `sources/<task>.json`，`extra.followup_key` 记录幂等键，事件 `task_created`（`via=create-followup-task`）。不复制原任务计划、验证命令或修复轮；新任务按普通任务规划、执行、评审与交付。
+- 关系沿用既有父子投影（`task_relations`、`parent_closeout`）；`external_build_repair` 明确拒绝带 `review_source_task_id` 的任务，二级任务不走该通道。
+- 回灌不在本命令内：子任务修复在目标分支合并后，来源任务分支以「冻结交付提交 + 目标分支 tip」的合并提交前进，再 `rebind-delivery-head` 重建交付请求；不能用 rebase/cherry-pick 重写冻结提交。
+
+#### 二级任务的人工确认收口（2026-11-21）
+
+二级任务可能在修复轮用尽后停在 `changes_requested`，而它的修复已由另一条 PR 落在目标分支；该任务自己的 delivery 记录永远不会出现，父任务的发布批次因此一直等「合并和验证证据」。核心提供显式的人工确认收口，但只读核对先行，绝不把「用户确认」写成评审通过。
+
+- `confirm-followup-closeout {task_id,expected_head_sha?,pr_number?,note?,confirm:true}`。仅在 `review_source_task_id` 非空、任务活跃、`status∈{in_review,needs_user}`、`stage∈{review,delivery}`、`delivery.mode=pr` 且尚未合并、`extra.followup_closeout` 为空、无 queued/claimed 请求时提供；`TaskDetail.allowed_actions` 追加 `confirm_closeout`。
+- 核对（任何写之前）：工作树归属与分支一致、无可提交残留；以**当前分支头**（工作树 `HEAD`）为准——收尾提交会让分支头前进到 PR 头，冻结交付头停在前一轮，因此不再要求 HEAD 等于冻结提交，`expected_head_sha` 只在给出时作为身份核对（必须是 HEAD 或其祖先，分支被重写即拒绝）；`git fetch origin` 后取 `origin/<base_branch>` tip；`base_sha..HEAD` 的每条改动路径，在该 tip 与 HEAD 上的 blob 必须完全一致（证明任务内容已在目标分支上）。任一漂移即 `conflict`，不写任何状态。
+- `pr_number` 可选：给出时以只读 `pr_view` 核对 `state=MERGED`、`baseRefName` 等于目标分支且 `headRefOid` 等于当前分支头，回执记录 PR 编号、地址、合并提交与合并时间；未给出时回执只记录分支头、基底 tip 与路径核验。
+- 回执写 `extra.followup_closeout = {verified_at,actor,note,head_sha(当前分支头),base_branch,base_tip,reviewed_paths,pr_number?,pr_url?,merge_commit?,merged_at?}`，`resolution.action=confirm_closeout`，事件 `followup_closeout_confirmed`，任务转 `done`；不写 `review_conclusion`、不伪造报告哈希，评审历史保持原样。
+- 发布门：`release_delivery` 的成员判定把「`status=done` 且回执有效」的二级任务视为合并证据已确认，父任务据此可继续准备发布批次；父任务完成仍走收尾校验，不因回执自动完成。
+
+#### 补验证的两条恢复动作（2026-11-22）
+
+补验证（发布前的独立完整验证）可能卡在两种环境性问题：会话已建但 prompt 从未落地（`unknown`、无执行轮次），
+或冻结执行配置里的 provider 已从 Pi 目录移除（`pi_agent_prompt` 直接失败）。核心为这两种情形暴露两个显式动作，
+均保留原执行、评审与交付记录，只清理这次补验证尝试：
+
+- `rebind_release_verification`（命令 `rebind-release-verification {task_id,confirm:true}`）：
+  当前执行配置的 provider 与尝试冻结的 provider 不同且尝试未通过时提供；写 `release_verification_runtime_override`、
+  丢弃旧尝试与回执，之后按当前配置重新 `prepare/start`。
+- `reset_release_verification`（命令 `reset-release-verification {task_id,verification_id,expected_context_sha256,confirm:true}`）：
+  在没有报告、且（环境类失败 或 `unknown` 且无执行轮次）时提供；命令仍以只读会话核对「会话里一条消息都没有」，
+  否则拒绝。重置保留审计并允许重新准备验证。
+- 两者都要求显式 `confirm`，界面用二次确认弹窗呈现；动作只由核心 `allowed_actions` 给出，界面不按状态名推断。
+
+#### 处理后评审的收敛准则（2026-11-20）
+
+一次性处理与随后的修复轮容易形成「评审加码 ↔ 修复加机制」的正反馈：评审看不到处理目标，每轮都能在并发等交错路径上「确定」新缺陷，修复方为避免被打回追加机制，新机制又带来新的交错面。本节只约束评审与修复提示，不改结论枚举与结算 schema。
+
+- 适用（`review_convergence.context`，只读判定，Plus 与 CLI 评审共用同一入口）：满足其一——① 最新一条非 `discarded` 的动作属于已支持类型（`merge_conflict/check_failure/build_failure`）、已启动执行轮次且该轮提交已在 `delivery.commits` 上（只看最新一条动作）；② 修复轮数（`automation.fix_round` 与 `review_repair_round` 取大）≥1。已放弃的动作不再适用。其余评审（含首轮评审、动作尚无提交、动作已放弃且无修复轮）的材料与指令不变：不含 `action-target.md`、准则或「遗留风险」字样，隔离测试对这三种情形逐一断言。
+- 材料：适用时评审材料多一份 `action-target.md`（经同一材料清单写入 `context.json` 并随其他材料冻结哈希）：评审基线（固定提交、`base_sha`）、动作前已评审通过的提交、修复轮序号；处理目标（类型、目标说明、失败检查名称与 job 链接、冻结目标提交、失败构建链接、最小改动要求、至多 12k 字符的失败信号摘录）；上一轮评审（跳过 `discarded` 标记的条目）的阻断项，仅用于核对修复是否覆盖，不构成新要求。日志与报告摘录声明为未信任材料。
+- 目标事实的存储：`register-review` 登记 `changes_requested` 时 `fix_request` 会被普通修复替换，动作的失败日志等事实随之丢失，所以动作启动时在同一事务写入 `extra.ai_action_target`——仅冻结事实（`action_id`、`kind`、标题与说明、`head_sha/base_sha/target_base_sha`、分支、PR、`check_runs`、发布标签与链接、至多 12k 字符失败日志），不含模型配置、路径哈希或任何令牌；不需要数据库迁移。材料只在其 `action_id` 与适用的动作一致时使用该目标；缺失时（本改动前启动的动作）材料据实注明「该处理启动时未冻结目标细节」，仅给出动作记录里已有的信息。
+- 准则：由 `review_instruction` 在材料存在时追加（置于分段结果框架之后、禁止项之前，只对本轮有效，并显式优先于通用的「已确定缺陷必须 changes_requested」）；静态提示 `review.md` 与 `review_cli.md` 各加一条仅在材料存在时生效的指针。审查范围不变，「阻断」只限三类：① 冻结目标未达成或被回退；② 相对动作前已评审提交的净回退——缺陷在动作前不存在，或被本次改动新触达或放大，且能由一个现实的单一故障或事件序列触发，报告须逐步写出触发步骤，需要两个及以上相互独立的罕见事件叠加才可达的不算；③ 破坏原计划已验收的行为，或凭据、安全问题（安全问题不受第 ② 类单故障限制）。其余——动作前就存在的缺口、多故障叠加的交错场景、可选加固——写入报告的「遗留风险」小节并给出触发条件，没有阻断项时结论为 pass。
+- `fix.description` 只列阻断项；阻断项位于上一轮新增的可选机制内时，优先给出删减或简化方案而不是补全该机制；不得要求在生产代码里增加仅供测试使用的注入点或开关。
+- 结算：「遗留风险」是报告内的独立小节（沿「人工验收与待体验」先例），不是新字段；结论枚举、结算 schema 与 `register-review` 不变，pass 且含该小节时按 pass 正常结算，`fix` 照常留空。
+- 修复提示栅栏与 `prompt_rev`：评审修复与一次性处理的提示在「修复边界」中把「必要的关联缺陷」收紧为「与所列阻断项同一根因的缺陷」，并规定不为防范所列材料（失败检查、冲突或评审报告）之外的场景新增并发、重试、恢复或状态机制（未被要求的加固如实写进执行报告而不是代码）、不为让测试可构造而在生产代码加入仅供测试使用的注入点、开关或可见性放宽、阻断项在上一轮新增的可选机制内时优先删减或简化。新文案由冻结修复里的 `prompt_rev`（当前为 2）启用：动作启动与评审修复启动时写入；冻结正文在每次发送与恢复时按冻结的修复重算并与已冻结正文比对，所以缺字段的已冻结修复（升级前排队或已在跑）逐字保持旧文案，不会因升级而「冻结正文不符」。验证补报轮（`verification_recovery`）不加栅栏。
+- 效果依赖评审者按准则归类：材料与提示的组装由隔离测试证明，评审行为的改善靠冻结报告的纸面复核与付费回放检验，不在单元测试中声称；常驻引擎运行的是已安装的内置版本，仓库里的改动要等包含它的测试版装好后才在引擎中生效。
 
 #### 外部构建修复的关联
 

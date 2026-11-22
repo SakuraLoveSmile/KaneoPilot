@@ -87,7 +87,7 @@ def prepare(ctx, task):
     logs = release_github.failure_logs(repo, run["id"], run["run_attempt"])
     util.require(_run(batch) == run, "读取日志期间构建运行或 attempt 已变化", "conflict")
     raw_config = action._digest(db.get_setting(ctx.conn, "exec_config"))
-    config = exec_config.snapshot(ctx.conn)
+    config = exec_config.snapshot_for_action(ctx.conn)
     util.require(config.get("backend") in ("pi_desktop", "codex"),
                  "构建修复需要 Plus 或 Codex 的结构化验证报告，请明确选择后重试", "conflict")
     available, reason = exec_config.check_available(ctx.conn, config_snapshot=config)

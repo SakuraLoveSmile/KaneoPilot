@@ -334,6 +334,7 @@ struct TaskSummary: Decodable, Identifiable {
     let release: TaskRelease?
     let parentCloseout: ParentCloseout?
     let reviewRepair: ReviewRepair?
+    let reviewRisk: ReviewRisk?
     let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
@@ -571,6 +572,7 @@ struct TaskDetail: Decodable, Identifiable {
     let parentCloseout: ParentCloseout?
     let taskAiAction: TaskAIActionView?
     let reviewRepair: ReviewRepair?
+    let reviewRisk: ReviewRisk?
     let taskRelations: TaskRelations?
     let phase: String?
     let condition: String?
@@ -1236,6 +1238,23 @@ struct ExecCodexInfo: Decodable {
     let version: String?
 }
 
+/// protocol §5.27：一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）的模型覆盖。
+/// 空块或未返回 = 跟随通用执行配置；只覆盖 model_id / thinking_level。
+struct ExecOneShotConfig: Decodable, Equatable {
+    let modelId: String?
+    let thinkingLevel: String?
+
+    /// 提交用（空值不发送，避免核心收到空字符串）。
+    var fields: [String: String] {
+        var dict: [String: String] = [:]
+        if let modelId, !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dict["model_id"] = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let thinkingLevel, !thinkingLevel.isEmpty { dict["thinking_level"] = thinkingLevel }
+        return dict
+    }
+}
+
 struct ExecConfig: Decodable, Equatable {
     let provider: String?
     let model: String?
@@ -1249,13 +1268,16 @@ struct ExecConfig: Decodable, Equatable {
     let codex: ExecCodexConfig?
     /// v4：派发与监控运行端（pi|pi_desktop；缺省 pi）。
     let controllerBackend: String?
+    /// §5.27：一次性 AI 处理的模型覆盖（nil = 跟随通用执行配置）。
+    let oneShot: ExecOneShotConfig?
 
     init(provider: String? = nil, model: String? = nil,
          reasoningEffort: String? = nil, agentPreset: String? = nil,
          updatedAt: String? = nil, backend: String? = nil,
          piDesktop: ExecPiDesktopConfig? = nil,
          codex: ExecCodexConfig? = nil,
-         controllerBackend: String? = nil) {
+         controllerBackend: String? = nil,
+         oneShot: ExecOneShotConfig? = nil) {
         self.provider = provider
         self.model = model
         self.reasoningEffort = reasoningEffort
@@ -1265,6 +1287,7 @@ struct ExecConfig: Decodable, Equatable {
         self.piDesktop = piDesktop
         self.codex = codex
         self.controllerBackend = controllerBackend
+        self.oneShot = oneShot
     }
 
     /// 四字段字典（与核心 config_json 快照比较/提交用，键为协议 snake_case）。
@@ -3245,6 +3268,16 @@ struct PRAutoMergeDTO: Decodable {
     let updatedAt: String?
     var needsAttention: Bool { ["blocked", "unknown"].contains(state) }
 }
+/// KP-MG03 #4：用户接受本轮评审遗留风险的只读回执。
+struct ReviewRisk: Decodable, Equatable {
+    let authorizedAt: String?
+    let note: String
+    let headSha: String?
+    let reviewKey: String?
+    let findings: [String]
+    let findingsCount: Int
+}
+
 struct ReviewRepair: Decodable, Equatable {
     let state: String
     let title: String
@@ -3292,6 +3325,7 @@ struct TaskAIActionView: Decodable {
 
     var actionKind: String { kind ?? current?.kind ?? "merge_conflict" }
     var isBuildFailure: Bool { actionKind == "build_failure" }
+    var isCheckFailure: Bool { actionKind == "check_failure" }
 }
 
 struct TaskAIActionEntry: Decodable, Identifiable {
@@ -3332,8 +3366,18 @@ struct TaskAIActionCandidate: Decodable {
     let workflowRunId: Int?
     let workflowAttempt: Int?
     let workflowUrl: String?
+    let checkRuns: [TaskAIActionCheckRun]?
 
     var confirmationMessage: String {
+        if kind == "check_failure" {
+            let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
+            let names = (checkRuns ?? []).compactMap { run -> String? in
+                guard let name = run.name else { return nil }
+                return run.workflow.map { "\($0)/\(name)" } ?? name
+            }
+            let checks = names.isEmpty ? "合并门点名的失败检查" : names.joined(separator: "、")
+            return "修复失败的检查\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n检查：\(checks)\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。读取失败日志，只做让这些检查通过的最小改动；不重新规划，不删除或跳过检查。验证、复审通过后更新原 PR，并沿项目合并设置继续。"
+        }
         if kind == "build_failure" {
             let run = workflowRunId.map { "构建 #\($0)" } ?? "失败构建"
             let attempt = workflowAttempt.map { " · 第 \($0) 次运行" } ?? ""
@@ -3344,6 +3388,13 @@ struct TaskAIActionCandidate: Decodable {
         let pr = prNumber.map { "PR #\($0)" } ?? "当前 PR"
         return "解决 PR 合并冲突\n\(pr)\n\(branch ?? "来源分支未提供") → \(baseBranch ?? "目标分支未提供")\n通用执行配置：\(modelSummary ?? "模型摘要未提供")\n\n将产生模型费用。不重新规划，修复后验证并重新评审；通过后更新原 PR，并沿项目合并设置继续。"
     }
+}
+
+/// 冻结失败检查的公开身份（核心 task_ai_check_failure.PUBLIC）。
+struct TaskAIActionCheckRun: Decodable {
+    let name: String?
+    let workflow: String?
+    let conclusion: String?
 }
 
 struct PrepareTaskAIActionResponse: Decodable {
@@ -3538,6 +3589,20 @@ struct CloseoutParentTaskResponse: Decodable {
     let parentCloseout: ParentCloseout
 }
 
+/// KP-MG06：二级任务人工确认收口的回执（只取核对身份与结果状态）。
+struct FollowupCloseoutResponse: Decodable {
+    let ok: Bool
+    let taskId: String
+    let status: String
+    let closeout: FollowupCloseoutReceipt
+}
+struct FollowupCloseoutReceipt: Decodable {
+    let headSha: String
+    let baseBranch: String
+    let baseTip: String
+    let reviewedPaths: [String]
+}
+
 // MARK: - Deterministic GitHub Actions release (§5.27.19)
 struct ProjectReleasePolicy: Decodable {
     let enabled: Bool?
@@ -3589,6 +3654,8 @@ struct TaskRelease: Decodable {
     let canPrepareVerification: Bool?
     let canSyncVerification: Bool?
     let canRestartVerification: Bool?
+    let canRebindVerification: Bool?
+    let canResetVerification: Bool?
     let verification: ReleaseVerification?
 
     // External repair keeps its original DTO; ordinary merged tasks use the
@@ -3600,6 +3667,9 @@ struct TaskRelease: Decodable {
         if let repair = externalRepair { return repair.canRestartVerification == true }
         return canRestartVerification == true
     }
+    /// KP-MG06：验证尝试卡在「发送未知 / provider 已移除」时的两条恢复动作。
+    var allowsVerificationRebind: Bool { externalRepair == nil && canRebindVerification == true }
+    var allowsVerificationReset: Bool { externalRepair == nil && canResetVerification == true }
 
     var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
@@ -3735,12 +3805,16 @@ enum ReleaseVerificationAction: String {
     case prepare = "prepare_release_verification"
     case sync = "sync_release_verification"
     case restart = "restart_release_verification"
+    case rebind = "rebind_release_verification"
+    case reset = "reset_release_verification"
 
     var label: String {
         switch self {
         case .prepare: return "验证修复后的源码…"
         case .sync: return "核对验证结果"
         case .restart: return "重新完整验证…"
+        case .rebind: return "重绑验证到当前配置…"
+        case .reset: return "重置这次验证…"
         }
     }
 
@@ -3756,6 +3830,8 @@ enum ReleaseVerificationAction: String {
         case .prepare: return release.allowsVerificationPreparation
         case .sync: return release.allowsVerificationSync && release.currentVerification?.verificationId?.isEmpty == false
         case .restart: return release.allowsVerificationRestart
+        case .rebind: return release.allowsVerificationRebind
+        case .reset: return release.allowsVerificationReset
         }
     }
 }
@@ -3765,7 +3841,7 @@ extension TaskDetail {
 
     var releaseVerificationFooterAction: String? {
         if releaseVerificationQuestion?.state == "open" { return nil }
-        for action in [ReleaseVerificationAction.sync, .restart, .prepare] {
+        for action in [ReleaseVerificationAction.sync, .reset, .rebind, .restart, .prepare] {
             if allowedActions?.contains(action.rawValue) == true, action.isAvailable(for: self) {
                 return action.rawValue
             }

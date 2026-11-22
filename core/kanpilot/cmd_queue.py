@@ -769,7 +769,7 @@ def _engine_fix_guard(ctx, payload, *, check_binding=True, prepared=None):
     if not isinstance(fix, dict) or payload.get("actor") != "automation":
         raise util.bad_request("引擎补救必须由 automation 发起")
     task = db.require_task(ctx.conn, payload["task_id"])
-    if core.review_repair_of(task).get("source_kind") in ("merge_conflict", "build_failure"):
+    if core.review_repair_of(task).get("source_kind") in constants.AI_ACTION_KINDS:
         raise util.KanpilotError("conflict", "一次性 AI 处理失败后需人工确认，不能自动启动补救轮次")
     history = db.task_extra(task).get("engine_fix_rounds") or []
     rounds = [row for row in history if not row.get("reverted_at")]
@@ -928,9 +928,9 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             raise util.bad_request("重新执行并验证必须由用户明确发起")
         payload = dict(payload, action="resume", verification_retry=True)
         action = "resume"
-    if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") in ("merge_conflict", "build_failure")
+    if (core.review_repair_of(db.require_task(conn, payload["task_id"])).get("source_kind") in constants.AI_ACTION_KINDS
             and requested_action in ("resume", "retry", "replan")):
-        raise util.KanpilotError("conflict", "一次性冲突处理不能重新实施或规划；验证受阻时请显式补齐验证报告")
+        raise util.KanpilotError("conflict", "一次性 AI 处理不能重新实施或规划；验证受阻时请显式补齐验证报告")
     if action == "await_input":
         from . import execution_followup
         return execution_followup.resolve(ctx, payload)

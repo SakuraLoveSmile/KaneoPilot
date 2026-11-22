@@ -727,6 +727,46 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// KP-MG06：补验证卡在「发送未知 / provider 已移除」时的两条恢复动作。
+    func rebindReleaseVerification(taskID: String, onError: ((String) -> Void)? = nil) async {
+        await perform("重绑验证", successToast: "已重绑到当前执行配置，可重新准备验证", onError: onError) {
+            _ = try await self.client.run("rebind-release-verification",
+                                          payload: ["task_id": taskID, "confirm": true],
+                                          timeout: 120, as: OkResponse.self)
+            return nil
+        }
+    }
+
+    func resetReleaseVerification(taskID: String, verificationID: String, contextSHA256: String,
+                                  onError: ((String) -> Void)? = nil) async {
+        await perform("重置验证", successToast: "已重置这次补验证，可重新准备", onError: onError) {
+            _ = try await self.client.run("reset-release-verification", payload: [
+                "task_id": taskID, "verification_id": verificationID,
+                "expected_context_sha256": contextSHA256, "confirm": true
+            ], timeout: 120, as: OkResponse.self)
+            return nil
+        }
+    }
+
+    /// KP-MG06：二级任务的人工确认收口。核心只读核对已评审内容是否已在目标
+    /// 分支，通过后才把任务置为完成；这里只负责传身份与展示结果。
+    func confirmFollowupCloseout(taskID: String, prNumber: Int? = nil, note: String? = nil) async {
+        await perform("确认收口", successToast: "已确认收口，任务转为完成") {
+            // 不传交付头：收尾提交会让分支头前进，身份以核心读取的工作树 HEAD 为准，
+            // 交付头只在任务详情里展示（KP-MG06）。
+            var payload: [String: Any] = ["task_id": taskID, "confirm": true]
+            if let prNumber { payload["pr_number"] = prNumber }
+            if let note, !note.isEmpty { payload["note"] = note }
+            let response = try await self.client.run("confirm-followup-closeout",
+                                                     payload: payload, timeout: 300,
+                                                     as: FollowupCloseoutResponse.self)
+            guard response.taskId == taskID, response.status == "done" else {
+                throw CoreError.badOutput("收口结果与当前任务不一致，请刷新后重新核对。")
+            }
+            return nil
+        }
+    }
+
     func startReviewRepair(taskID: String, candidate: ReviewRepair) async {
         await perform("开始修复会话", successToast: "修复会话已排队，等待执行端领取") {
             guard try await self.currentReviewRepair(taskID: taskID) == candidate else {
@@ -1722,6 +1762,7 @@ final class AppViewModel: ObservableObject {
         case "rerun_checks": return "重跑失败检查"
         case "recheck": return "重新校验"
         case "closeout_parent": return "校验并完成"
+        case "confirm_closeout": return "确认收口"
         case "continue_delivery": return "继续交付"
         case "sync_release": return "核对发布结果"
         case "archive": return "归档"
